@@ -6,6 +6,16 @@
  * has to enforce exactly, so every escalation path is pinned here: a missing
  * baseline, an unreadable increment, a too-large increment, and — the subtle
  * one — an increment that reaches into files the previous review never saw.
+ *
+ * There is also a precondition that is NOT about the code: the judge taking
+ * the round has to be the one that settled the last, or the carry-forward is
+ * taken on trust. It is pinned in its own block at the bottom; every test
+ * above it goes through `decideReviewScope` below, which supplies that fact so
+ * a CONTENT rule is what each of them actually measures.
+ *
+ * The TEXT the decision turns into is not tested here any more: it moved to
+ * lib/review-carryover.ts (its one authoritative source), and so did its
+ * tests — test/review-carryover.test.ts.
  */
 
 import { test } from "node:test";
@@ -13,11 +23,23 @@ import assert from "node:assert/strict";
 import {
   INCREMENT_MAX_FILES,
   INCREMENT_MAX_LINES,
-  decideReviewScope,
-  formatReviewScopeDirective,
+  decideReviewScope as decideReviewScopeRaw,
+  type IncrementInput,
 } from "../lib/review-scope.ts";
 
+/**
+ * The content rules, with the READER-side precondition already satisfied.
+ *
+ * Without it every case below would escalate for the same reason and none of
+ * them would measure what it names. A test that means to exercise the reader
+ * rule calls `decideReviewScopeRaw` directly.
+ */
+function decideReviewScope(input: IncrementInput) {
+  return decideReviewScopeRaw({ judgeRemembersPreviousRound: true, ...input });
+}
+
 const reviewed = ["src/a.ts", "src/b.ts"];
+
 
 test("incremental: a small increment inside already-reviewed files", () => {
   const d = decideReviewScope({
@@ -124,81 +146,6 @@ test("full: unreviewedFiles is populated even when the full path is taken for to
   assert.deepEqual(d.unreviewedFiles, ["src/new.ts"]);
 });
 
-// ---------------------------------------------------------------------------
-// Directive text — what the agent actually hands the reviewer
-// ---------------------------------------------------------------------------
-
-test("an incremental directive names the increment and still demands the full diff as context", () => {
-  const d = decideReviewScope({
-    baseTree: "T",
-    changedFiles: ["src/a.ts"],
-    changedLines: 3,
-    previouslyReviewedFiles: reviewed,
-  });
-  const text = formatReviewScopeDirective(d, ["f1", "f2"]);
-  assert.match(text, /INCREMENTAL/);
-  assert.match(text, /src\/a\.ts/);
-  assert.match(text, /FULL diff as context/);
-  assert.match(text, /re-checked one by one/);
-  assert.match(text, /"f1"; "f2"/);
-});
-
-test("a full directive says so plainly and never claims anything is pre-approved", () => {
-  const text = formatReviewScopeDirective(decideReviewScope({}), []);
-  assert.match(text, /FULL deep review/);
-  assert.doesNotMatch(text, /Already reviewed/);
-  assert.doesNotMatch(text, /re-checked one by one/);
-});
-
-test("an incremental directive carries the SETTLED conclusion of the previous round", () => {
-  // The point of an incremental round: what the last verdict settled and the
-  // increment did not touch is not re-argued at max thinking every round.
-  const d = decideReviewScope({
-    baseTree: "T",
-    changedFiles: ["src/a.ts"],
-    changedLines: 3,
-    previouslyReviewedFiles: reviewed,
-  });
-  const text = formatReviewScopeDirective(d, ["f1"], {
-    verdict: "READY",
-    at: "2026-08-17T01:00:00.000Z",
-    rounds: 2,
-  });
-  assert.match(text, /SETTLED last round/);
-  assert.match(text, /verdict READY/);
-  // A running count, worded as such: it is NOT a claim about which round
-  // produced the READY verdict (later rounds are included in the count).
-  assert.match(text, /2 round\(s\) recorded so far/);
-  assert.match(text, /2026-08-17T01:00:00\.000Z/);
-  assert.match(text, new RegExp(reviewed[0]!.replace(/[/.]/g, "\\$&")), "it must name what was covered");
-  assert.match(text, /Do not re-derive or re-litigate it/);
-  // …but the reviewer's authority is untouched: it may always reopen it.
-  assert.match(text, /reopen it/);
-  assert.match(text, /not a bar on your authority/);
-});
-
-test("no settled conclusion is claimed when none was passed, or on a FULL round", () => {
-  const incremental = formatReviewScopeDirective(
-    decideReviewScope({
-      baseTree: "T",
-      changedFiles: ["src/a.ts"],
-      changedLines: 3,
-      previouslyReviewedFiles: reviewed,
-    }),
-    [],
-  );
-  assert.doesNotMatch(incremental, /SETTLED/, "without a previous verdict nothing is settled");
-
-  // A full round re-derives everything by definition: a settled claim there
-  // would be exactly the false reassurance the escalation exists to prevent.
-  const full = formatReviewScopeDirective(decideReviewScope({}), [], {
-    verdict: "READY",
-    rounds: 9,
-  });
-  assert.match(full, /FULL deep review/);
-  assert.doesNotMatch(full, /SETTLED/);
-});
-
 test("reviewedFiles is echoed on every decision (the settled scope must be nameable)", () => {
   const inc = decideReviewScope({
     baseTree: "T",
@@ -210,52 +157,96 @@ test("reviewedFiles is echoed on every decision (the settled scope must be namea
   assert.deepEqual(decideReviewScope({}).reviewedFiles, []);
 });
 
-test("a FULL round still lists the previous findings to re-check one by one", () => {
-  // The findings block is independent of the scope branch — escalating to a
-  // full review must not drop last round's open findings on the floor.
-  const text = formatReviewScopeDirective(decideReviewScope({}), ["f1", "f2"]);
-  assert.match(text, /FULL deep review/);
-  assert.match(text, /re-checked one by one/);
-  assert.match(text, /"f1"; "f2"/);
-  assert.doesNotMatch(text, /SETTLED/, "a full round settles nothing in advance");
+test("the decision module renders no contract text of its own", async () => {
+  // Philosophy three, mechanically: the wording has ONE home. A second
+  // renderer here is exactly how the five drifted copies happened, so the
+  // module's public surface is asserted to be decision-only.
+  const mod = await import("../lib/review-scope.ts");
+  assert.deepEqual(
+    Object.keys(mod).sort(),
+    ["INCREMENT_MAX_FILES", "INCREMENT_MAX_LINES", "decideReviewScope"],
+    "review-scope.ts exports the thresholds and the decision — nothing that formats text",
+  );
 });
 
-test("reviewer audience rewords the agent-facing sentences without duplicating the block", () => {
-  // Goal criterion 1: the SAME directive now rides the reviewer's own task
-  // text. Only the sentences that address the reader change — the decision,
-  // the increment and the findings list must stay identical to the
-  // agent-facing version, or the two surfaces drift apart.
-  const d = decideReviewScope({
+/*
+ * ───────────── THE READER-SIDE PRECONDITION (t9d, 2026-09-06) ─────────────
+ *
+ * The gate rotates a judge's transcript on its own (lib/judge-rotation.ts:
+ * context threshold, round cap, a changed contract). A reviewer that starts a
+ * fresh transcript never derived last round's conclusion, so an incremental
+ * round would be asking it to carry forward something it can only take on
+ * trust. These pin that the escalation is unconditional and fail-safe — the
+ * content rules above cannot buy their way past it.
+ */
+
+test("full: the judge does not continue the transcript that settled the last round", () => {
+  const d = decideReviewScopeRaw({
+    baseTree: "T",
+    changedFiles: ["src/a.ts"],
+    changedLines: 3,
+    previouslyReviewedFiles: reviewed,
+    judgeRemembersPreviousRound: false,
+  });
+  assert.equal(d.scope, "full");
+  assert.match(d.reason, /does not continue the transcript/);
+});
+
+test("full: an ABSENT reader fact is a no — incremental is never inferred", () => {
+  // Same input as the canonical incremental case, minus the fact. A caller
+  // that forgot to wire it must not silently receive the cheaper round.
+  const d = decideReviewScopeRaw({
     baseTree: "T",
     changedFiles: ["src/a.ts"],
     changedLines: 3,
     previouslyReviewedFiles: reviewed,
   });
-  const settled = { verdict: "READY", at: "2026-08-27T00:00:00.000Z", rounds: 2 };
-  const agent = formatReviewScopeDirective(d, ["f1"], settled, "agent");
-  const reviewer = formatReviewScopeDirective(d, ["f1"], settled, "reviewer");
-  // Reviewer-facing phrasing: addressed to YOU, not about "the reviewer".
-  assert.match(reviewer, /You still have the FULL diff as context/);
-  assert.match(reviewer, /not a bar on your authority/);
-  assert.doesNotMatch(reviewer, /Hand the reviewer the FULL diff/);
-  // Agent-facing phrasing is unchanged from before.
-  assert.match(agent, /Hand the reviewer the FULL diff as context/);
-  assert.match(agent, /not a bar on your authority/);
-  // The facts are identical across audiences: decision line, increment,
-  // settled conclusion and the findings to re-check.
-  for (const fact of [
-    "INCREMENTAL",
-    "src/a.ts",
-    "SETTLED last round",
-    '"f1"',
-  ]) {
-    assert.match(agent, new RegExp(fact));
-    assert.match(reviewer, new RegExp(fact));
-  }
+  assert.equal(d.scope, "full");
+  assert.match(d.reason, /does not continue the transcript/);
 });
 
-test("reviewer audience: a full decision still says FULL deep review", () => {
-  const text = formatReviewScopeDirective(decideReviewScope({}), [], undefined, "reviewer");
-  assert.match(text, /FULL deep review/);
-  assert.doesNotMatch(text, /Hand the reviewer/);
+test("the reader precondition still reports the content facts it escalated over", () => {
+  // The decision is full, but the delta and the coverage it carries are what
+  // the carryover block renders — dropping them would make the escalation
+  // unexplainable to the reviewer that receives it.
+  const d = decideReviewScopeRaw({
+    baseTree: "T",
+    changedFiles: ["src/a.ts", "src/new.ts"],
+    changedLines: 7,
+    previouslyReviewedFiles: reviewed,
+    judgeRemembersPreviousRound: false,
+  });
+  assert.equal(d.scope, "full");
+  assert.deepEqual(d.changedFiles, ["src/a.ts", "src/new.ts"]);
+  assert.equal(d.changedLines, 7);
+  assert.deepEqual(d.reviewedFiles, reviewed);
+  assert.deepEqual(d.unreviewedFiles, ["src/new.ts"]);
 });
+
+test("a remembering judge is NOT enough on its own — content rules still bind", () => {
+  // The two preconditions are AND, not OR: continuity buys nothing when the
+  // increment reaches into a file the settled review never covered.
+  const d = decideReviewScopeRaw({
+    baseTree: "T",
+    changedFiles: ["src/a.ts", "src/new.ts"],
+    changedLines: 5,
+    previouslyReviewedFiles: reviewed,
+    judgeRemembersPreviousRound: true,
+  });
+  assert.equal(d.scope, "full");
+  assert.match(d.reason, /never covered/);
+});
+
+test("no settled tree outranks the reader fact — the reason names the real cause", () => {
+  // A session with nothing settled has nothing to carry forward either way;
+  // reporting the transcript as the cause would send the reader looking at
+  // the wrong thing.
+  const d = decideReviewScopeRaw({
+    changedFiles: ["src/a.ts"],
+    changedLines: 1,
+    judgeRemembersPreviousRound: false,
+  });
+  assert.equal(d.scope, "full");
+  assert.match(d.reason, /no previous READY review/);
+});
+

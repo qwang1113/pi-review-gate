@@ -38,7 +38,10 @@ bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 ```
 你：实现分页功能
 agent：调 set_gate_mode("loop")
-  → 用 ask_user 问你目标（一次一题，N of M）→ 用简体中文起草目标
+  → 有疑问就用 ask_user 问（一次一题，N of M；**不设数量上限**，没疑问也可以不问）
+  → propose_restatement（**必经一步**：把需求反述给你确认——改之前 → 改之后，
+     并定下本轮交付到哪一站：precommit / commit / pr。没有这份确认，下一步直接被拒、
+     不弹框）→ 用简体中文起草目标
   → propose_loop_goal（**一次调用**：门禁自己起 goal-auditor 子进程预审这份草案、
      等它退出、记录裁决；不通过就把 findings 退回来让你改，**不弹任何对话框**骚扰你）
   → 过了才弹窗让你批准（窗中会显示「goal-auditor 预审: PASS @ …」）
@@ -67,8 +70,10 @@ agent：调 set_gate_mode("loop")
   链（内容不变）都不会破坏绑定，READY + PASS 依然有效——**不要为了"重建绑定"而重跑一轮
   review**（那是纯浪费）。只有提交内容变化（新的 checkpoint / 编辑 / lint:fix 改写）才会
   让绑定失效。
-- **复审要带上一轮结论**：第 N+1 轮把上一轮的 verdict 与 findings 交给 reviewer；
-  已定论且未改动的部分只做一致性扫描，不重新论证（门禁会自动注入这段 scope）。
+- **复审要带上一轮结论**：第 N+1 轮把上一轮的 verdict、未关闭 findings 与机械算出的
+  增量交给 reviewer（门禁自动注入这段 `Review scope for this round`）。这份增量契约的
+  措辞只有一个出处 —— `lib/review-carryover.ts`，本文不复述；一句话版本是：已定论、
+  且增量既未触及也未影响的部分做一致性扫描而不重新推导，有证据随时可以重开旧结论。
 - **reviewer 审的是不可变 commit 范围，你可以边审边修**：`judge_submit` 先把改动提交成
   checkpoint（READY 前唯一的 commit 通道，要求 precommit full 通过），reviewer 审
   `baseline..HEAD`。被审历史不可变，你边读流式 findings 边修真实工作树，互不干扰。
@@ -93,6 +98,8 @@ agent：调 set_gate_mode("loop")
 |------|------|------|
 | `loop mode requires an approved loop goal BEFORE any edit/write call` | loop 模式（含未决）还没确认目标就动手编辑 | 先逐轮问清"done"的定义 → 中文起草 → `propose_loop_goal`（它自己跑 goal-auditor 预审，过了才弹对话框让你确认）；批准前 edit/write 一律被拦（`.pi/` 与 `.pi-subagents/` 门禁自有文件除外；explore/normal 模式不要求 goal） |
 | `propose_loop_goal refused — no goal-auditor pre-review has been recorded` （或 `…belongs to DIFFERENT text`） | 审计没过，或过了之后又改过字（hash 变了） | 按退回来的 findings 改草稿，**再调一次 `propose_loop_goal`** —— 它会重新跑审计（重审时自动带上一轮结论与草稿差异）。没有第二个调用要做 |
+| `propose_loop_goal 被拒 —— 还没有经用户确认的「需求反述」` | 跳过了反述这一步（2026-09-06 起是硬前置） | 先 `propose_restatement({restatement, station})`：反述里必须有「改之前 → 改之后」的对照，`station` 三选一（precommit / commit / pr）。拒绝文案里带可直接照抄的骨架 |
+| `超出本轮交付站点 …` （ship 命令被拦，但 review/precommit 都是绿的） | 这条 ship 命令走得比本轮说好的站点更远 | 站点是契约不是门禁：再跑审查也解不开。要么就停在这一站（由用户自己 commit/push），要么请用户重新 `propose_restatement` 选更远的站点并重谈 goal（编排下则是 PM 改 plan 的 `deliveryStation` 后重批）。三个站点各是什么、各放行哪些 ship 命令，定义只有一份：`lib/delivery-station.ts` |
 | `goal-auditor` 角色不可派发（拒绝文案里的 BOOTSTRAP 段） | `~/.pi/agent/agents/goal-auditor.md` 缺失 | 开一个新会话（扩展会在启动时从包内 `agents/` 幂等自愈）；仍缺失就跑 `/gate-doctor` 看诊断行给出的 `node …/scripts/install-package.mjs` |
 | `code review gate is PENDING` | 改完没 review | 走 review 循环（或 `/review`） |
 | `precommit not run` / `FAILED` | 没跑或跑挂了 | 直接 `judge_submit({role:"reviewer"})`（它自己先跑 full lane）；只想看构建结果就 `/precommit`；修失败项 |

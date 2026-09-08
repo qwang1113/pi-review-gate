@@ -17,6 +17,53 @@
  */
 
 /**
+ * THE wait discipline — one wording, two waiters (2026-09-05, user decision).
+ *
+ * WHAT IT REPLACED. The gate forbade ending a turn to be woken up and, at the
+ * same time, had no waiting tool on the agent surface. The only move left was
+ * a hand-written `sleep` loop inside one bash call — which never ends the
+ * turn, so the session never settles, so the wake-up never fires: a measured
+ * nine minutes with a finished review sitting unrecorded on disk. A rule that
+ * forbids every exit is not a rule, it is a trap.
+ *
+ * THE THREE SENTENCES, and why each one is phrased the way it is:
+ *  ① do the deterministic work you have. Its second half is deliberately SOFT
+ *    — after submitting a round there is often genuinely nothing to prepare,
+ *    and a rule that demands work anyway just teaches the agent to invent
+ *    some. The gate SUGGESTS looking ahead or drafting the closing report.
+ *  ② only then wait, and wait through the TOOL — not a sleep loop, and not by
+ *    ending the turn (the supervisor of the gate is the session itself).
+ *  ③ the tool is message-driven, so waiting is cheap: it returns on the first
+ *    thing that happened, not at the end of the round.
+ *
+ * The PROJECT MANAGER gets the same three sentences with its own tool named,
+ * plus the one thing that is only true of it: it supervises PEOPLE-facing
+ * children, so handing the watch back to the user is the failure mode its
+ * wording has always guarded against. That clause is kept verbatim in spirit.
+ */
+export function buildWaitDiscipline(tool: "judge_wait" | "orchestrator_wait"): string {
+  const messages = tool === "judge_wait"
+    ? "新 finding、judge 提问、本轮结论、pane 消失"
+    : "子会话提问、子会话完成、子会话静默、pane 消失";
+  const second = tool === "judge_wait"
+    ? `②确实没活可做了，才调 ${tool} 等 —— 不是手写 sleep 轮询，也不是结束 turn。`
+    : `②确实没活可做了，才调 ${tool} 等 —— 不是手写 sleep 轮询，更不要结束 turn 把盯梢责任丢回给用户。`;
+  return (
+    "等待纪律：①有确定性工作（代码/测试/文档/其他 repo 事务）就先做掉，尤其 goal / plan 审计期间：读代码、调查、补上下文；" +
+    "送 reviewer 前应已准备充分，送完往往没事可做——这时可以看看下一轮要什么、或先准备收尾报告（提示，不强求）。" +
+    second +
+    `③${tool} 是消息驱动的：${messages}，任一到达即返回，拿到就继续干。`
+  );
+}
+
+/** The child/loop-session wording — the one injected with a judge's replies. */
+export const WAIT_DISCIPLINE_HINT = buildWaitDiscipline("judge_wait");
+
+/** The project-manager wording — same three sentences, its own tool. */
+export const ORCHESTRATOR_WAIT_DISCIPLINE = buildWaitDiscipline("orchestrator_wait");
+
+
+/**
  * Situation → tool. Deliberately short: an agent scanning this mid-task must
  * find its row in one pass.
  */
@@ -26,12 +73,15 @@ export const TOOL_DECISION_TABLE =
   "| --- | --- |\n" +
   "| 问用户、等用户拍板 | `ask_user({questions})` — 它会问并暂停循环；别把问题写进回复就结束 |\n" +
   "| 提交本轮改动送审 | `judge_submit({role:\"reviewer\", task})` — 门禁自己跑 precommit→checkpoint→送审 |\n" +
+  "| 把需求反述给用户确认（谈 goal 之前的必经一步） | `propose_restatement({restatement, station})` — 没有它，propose_loop_goal 直接被拒且不弹框 |\n" +
   "| 提交 goal 草稿 | `propose_loop_goal({goal})` — 门禁自己跑 goal 审计，过了才弹用户批准框 |\n" +
   "| 自己决定不了的设计取舍 | `judge_submit({role:\"adviser\", task})` |\n" +
   "| 当前在 main/master/dev/develop 上要提交 | checkpoint 会被门禁直接拒（2026-09-16 起不弹确认框）；ship 提交（git commit）也会被拒 — 先切到功能分支 |\n" +
-  "| 看 judge 的状态或结论 | `judge_read({role})`；实在没别的可做才 `judge_wait({role})` |\n" +
+  "| 有 judge 在跑、还有活可做 | 先把活做掉——新消息落盘时门禁会用标准报告唤醒你（结论、证据位置、记录情况、待答问题） |\n" +
+  "| 有 judge 在跑、确实没活可做 | `judge_wait({role})` — 消息驱动：新 finding / judge 提问 / 本轮结论 / pane 消失，任一到达即返回 |\n" +
   "| 任务做完了 | `declare_done({summary})` — 门禁复检后收尾，工作留在当前分支 |\n" +
   "| 要改敏感文件 / 缩小审查范围 | `request_sensitive_edit` / `request_scope_limit` |";
+
 
 /**
  * The check that stops the "ask in prose, end the turn, get woken up" cycle.
@@ -47,13 +97,23 @@ export const END_OF_TURN_CHECK =
  *
  * The failure it prevents is silent and expensive — implementing the agent's
  * OWN reading of a request and discovering the gap at review time.
+ *
+ * Since 2026-09-06 the restatement is no longer ADVICE: `propose_restatement`
+ * is a tool, and `propose_loop_goal` / `orchestrator_plan({action:"submit"})`
+ * refuse without a confirmed one. So this block is a SUMMARY and a POINTER —
+ * the rules themselves (what the text must contain, what happens without one)
+ * live in lib/restatement.ts, and restating them here would be the second
+ * copy that drifts.
  */
 export const REQUIREMENT_PROTOCOL =
   "## 采纳需求前（澄清 → 反述 → 确认）\n" +
   "1. 先理解，别直接开干：找出范围、边界、交付方式、没说清的术语里的疑点。\n" +
-  "2. 有疑点就用 `ask_user` 一次问清（带选项和你的推荐）——不要靠猜。\n" +
-  "3. 准备采纳时先**反述**：目标、范围、交付物、非目标，让用户确认。\n" +
-  "4. 用户确认后才采纳（进 goal 协商或开始实现）；他提出修正就改完再反述一次。";
+  "2. 有疑点就用 `ask_user` 问清（带选项和你的推荐）——不要靠猜，问几轮都行。\n" +
+  "3. **反述是强制的一步，且有工具**：`propose_restatement({ restatement, station })` " +
+  "把上下文、例子、改之前 → 改之后、哪几步会变得不同交给用户确认，" +
+  "同时定下本轮交付到哪一站（precommit / commit / pr）。\n" +
+  "4. 没有已确认的反述，`propose_loop_goal` 与 `orchestrator_plan({action:\"submit\"})` " +
+  "会直接被拒、一个框都不弹（拒绝文案里有可照抄的骨架）；需求变了就再反述一次，最新一份生效。";
 
 /**
  * Explore-mode extra guidance, appended after the standing block when the

@@ -12,7 +12,9 @@ import {
   conflictingParallelPairs,
   findDependencyCycle,
   formatPlanSummary,
+  mergeTaskProgress,
   isLegalTransition,
+  isPlanHash,
   openDecisions,
   parsePlan,
   planHash,
@@ -199,6 +201,59 @@ test("a legal move returns a NEW plan and records the note", () => {
 });
 
 // ---------------------------------------------------------------------------
+// mergeTaskProgress — what a rewrite may and may not destroy (B2b, 2026-09-06)
+// ---------------------------------------------------------------------------
+
+test("mergeTaskProgress: a NOTE the rewrite supplies wins over the old one", () => {
+  // The measured defect: `write` carried a new note for an existing task and
+  // the merge pinned the OLD one back, silently. Four consecutive rounds of
+  // orchestration hit it; each project manager had to work around it.
+  const previous = applyTaskStatus(planOf(), "a", "running", { note: "旧备注", now: NOW });
+  assert.ok(previous.ok);
+  const next = planOf({
+    tasks: [
+      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"], note: "新备注" },
+      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"] },
+    ],
+  });
+
+  const merged = mergeTaskProgress(previous.ok ? previous.plan : undefined, next);
+
+  assert.equal(merged.tasks[0]!.note, "新备注", "a note the caller supplied must land");
+  assert.equal(merged.tasks[0]!.status, "running", "the STATUS is still execution's to own");
+});
+
+test("mergeTaskProgress: an OMITTED note still inherits the previous one", () => {
+  // The other half of the same rule: a rewrite that simply does not mention
+  // notes must not wipe the ones execution recorded.
+  const previous = applyTaskStatus(planOf(), "a", "running", { note: "旧备注", now: NOW });
+  assert.ok(previous.ok);
+
+  const merged = mergeTaskProgress(previous.ok ? previous.plan : undefined, planOf());
+
+  assert.equal(merged.tasks[0]!.note, "旧备注");
+  assert.equal(merged.tasks[0]!.status, "running");
+});
+
+test("mergeTaskProgress: a note grants NOTHING — hash and canonical text ignore it", () => {
+  // This is the premise the fix rests on: if a note reached the canonical
+  // text, accepting a note update would be a content change and the user's
+  // approval would have to be re-obtained. It does not.
+  const withoutNote = planOf();
+  const withNote = planOf({
+    tasks: [
+      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"], note: "随便写点什么" },
+      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"] },
+    ],
+  });
+
+  assert.equal(canonicalPlanText(withNote), canonicalPlanText(withoutNote));
+  assert.equal(planHash(withNote), planHash(withoutNote),
+    "a note must never move the hash the user's approval binds to");
+});
+
+
+// ---------------------------------------------------------------------------
 // Scheduling (constraint 6)
 // ---------------------------------------------------------------------------
 
@@ -339,6 +394,49 @@ test("changing what the user approved REVOKES the approval", () => {
   for (const [what, changed] of cases) {
     assert.notEqual(planHash(changed), planHash(base), `${what} must invalidate the approval`);
   }
+});
+
+test("the plan-hash SHAPE is one rule, owned by the function that produces it", () => {
+  // Every authorizing record read back from the sidecar (the approved hash and
+  // its lineage) is shape-checked first, and the check used to be written out
+  // again at each site. A copied authorization rule drifts, and it drifts
+  // OPEN — one site accepting an upper-case or short digest would admit a
+  // record the others refuse.
+  assert.equal(isPlanHash(planHash(planOf({}))), true);
+  for (const bad of ["", "not-a-hash", "a".repeat(63), "a".repeat(65), "A".repeat(64), " " + "a".repeat(64), 7, null, undefined, ["a".repeat(64)]]) {
+    assert.equal(isPlanHash(bad), false, `${JSON.stringify(bad)} is not a plan hash`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// the delivery station (2026-09-06)
+
+test("deliveryStation: read from the plan, and MISSING or unreadable means precommit", () => {
+  assert.equal(planOf({ deliveryStation: "pr" }).deliveryStation, "pr");
+  assert.equal(planOf({ deliveryStation: "commit" }).deliveryStation, "commit");
+  // A plan file written before the field existed still parses — as the
+  // STRICTEST station, which allows no ship command at all.
+  assert.equal(planOf().deliveryStation, "precommit");
+  for (const broken of ["merge", "", "PR!!", 7, null, {}]) {
+    assert.equal(planOf({ deliveryStation: broken }).deliveryStation, "precommit",
+      `an unreadable station (${JSON.stringify(broken)}) must not loosen anything`);
+  }
+});
+
+test("deliveryStation: it is APPROVED CONTENT — changing it changes the hash", () => {
+  // The station decides which ship commands the orchestration may reach, so
+  // it cannot be edited under a standing approval without the gate noticing.
+  assert.notEqual(planHash(planOf({ deliveryStation: "pr" })), planHash(planOf()));
+  assert.notEqual(planHash(planOf({ deliveryStation: "pr" })), planHash(planOf({ deliveryStation: "commit" })));
+  assert.equal(planHash(planOf({ deliveryStation: "precommit" })), planHash(planOf()),
+    "an explicit precommit is the same content as an absent station");
+  assert.match(canonicalPlanText(planOf({ deliveryStation: "pr" })), /"deliveryStation":"pr"/);
+});
+
+test("deliveryStation: the summary the user approves names the station", () => {
+  assert.match(formatPlanSummary(planOf({ deliveryStation: "pr" })), /本轮交付站点/);
+  assert.match(formatPlanSummary(planOf({ deliveryStation: "pr" })), /PR/);
+  assert.match(formatPlanSummary(planOf()), /precommit/);
 });
 
 test("the canonical text is order-independent for sets", () => {

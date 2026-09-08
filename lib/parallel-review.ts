@@ -4,9 +4,9 @@
  * Every review round is a single reviewer over the WHOLE change, judging an
  * IMMUTABLE COMMIT RANGE (`baseline..HEAD`, registered by the extension's
  * `prepare_review`), and its verdict is the only one the gate records
- * (`record_review` parses every fence; worst verdict wins if multiple appear).
+ * (the gate's own recorder reads its structured conclusion off the round's report).
  *
- * NO ENGINE HERE. The reviewer runs as its own non-interactive pi process
+ * NO ENGINE HERE. The reviewer runs in its own tmux pane (interactive pi, gate in judge mode)
  * (dispatched by `judge_submit`); the subagent dispatch surface was retired
  * 2026-09-06 with the pi-subagents companion. Every function in this file
  * is pure over strings, so the reviewer contract can be pinned by tests
@@ -135,11 +135,13 @@ export function extractPrecommitBaseline(
 // pi process via judge_submit; this file only decides WHAT to say
 // to the reviewer and what verdict shape to hand it as its outputSchema.
 import { buildStreamDirective } from "./review-stream.ts";
+import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 
 /**
  * Shape of a single reviewer's structured verdict. Handed to the spawned
  * reviewer as its `outputSchema` (see REVIEW_VERDICT_SCHEMA below); the
- * recorded verdict itself is parsed by the gate's own all-fence parser.
+ * recorded verdict is the same shape, taken verbatim off the round's channel
+ * report and adjudicated by lib/review-adjudicate.ts.
  */
 export interface ReviewVerdict {
   gate: "READY" | "BLOCKED" | "NEEDS_HUMAN";
@@ -147,7 +149,7 @@ export interface ReviewVerdict {
    * The directory the reviewer ACTUALLY ran in, from its own `pwd`.
    *
    * What it is, stated without embellishment (round-11 P1): a self-reported
-   * consistency check. `record_review` compares this string with the repo the
+   * consistency check. The gate's verdict recorder compares this string with the repo the
    * round was prepared for and downgrades a READY that does not match. So it
    * rejects a MISMATCHING report — a review run against the wrong repo — and
    * nothing else.
@@ -174,8 +176,9 @@ export interface ReviewVerdict {
     line: number;
     severity: "P0" | "P1" | "P2" | "Nit";
     issue: string;
+    /** Where to look, when file:line is not enough. Optional by design. */
+    evidence?: string;
   }>;
-  notes?: string;
 }
 
 /**
@@ -183,6 +186,11 @@ export interface ReviewVerdict {
  * single-review path: there is no second reviewer to carry the
  * attestation, so the reviewer itself must attest code↔docs (the gate fails
  * closed on a missing attestation — see lib/gate-state.ts).
+ *
+ * There is NO `notes` field, on purpose (2026-09-04): a reviewer's conclusion
+ * is its verdict plus its findings, its prose was never read by anything, and
+ * `judge_conclude` refuses a `notes` argument from this role outright. Not
+ * offering the field is what actually stops the prose from being written.
  */
 export const REVIEW_VERDICT_SCHEMA = {
   type: "object",
@@ -204,11 +212,11 @@ export const REVIEW_VERDICT_SCHEMA = {
           line: { type: "number" },
           severity: { type: "string", enum: ["P0", "P1", "P2", "Nit"] },
           issue: { type: "string" },
+          evidence: { type: "string" },
         },
         required: ["file", "line", "severity", "issue"],
       },
     },
-    notes: { type: "string" },
   },
   // `cwd` is REQUIRED so that a mismatching report is actually visible: an
   // optional field would simply be omitted by the models that most need the
@@ -261,7 +269,11 @@ export function buildReviewPrompt(
     files.length === 0 && range.split("..")[0] === range.split("..")[1]
       ? "You are the reviewer of this round. There is NO code change to audit (empty commit range " + `${range}` + ") this round exists to verify the EXIT GOAL is met. Check the loop goal below criterion by criterion (accept only if EVERY criterion is verifiably met), confirm the worktree is clean, and report a READY only when the task is genuinely done. A BLOCKED with findings is the correct verdict when any criterion is unmet or unverifiable."
       : scopeKind === "incremental"
-        ? "You are the reviewer of this round. Audit the INCREMENT listed below — the files that changed since the last READY review — and re-check every finding the scope block lists. Deep-audit the increment and those findings; material already settled and unchanged gets a consistency scan, not a re-derivation. You keep FULL-diff visibility and authority: reopen any settled conclusion you can contradict with evidence. Verify from the code (never guess), and report findings with file paths and line numbers."
+        // SUMMARY + POINTER, never a second copy of the contract: the scope
+        // block further down IS the contract (rendered by
+        // lib/review-carryover.ts, the one authoritative source). Restating
+        // its clauses here is how the two used to drift.
+        ? "You are the reviewer of this round, and this round is INCREMENTAL. The \"Review scope for this round\" block below states the contract you work under — deep-audit the increment it names, re-check the findings it lists, and read its clauses on what a consistency scan is and when a settled conclusion may be reopened. That block is the authority; nothing here overrides it. Verify from the code (never guess), and report findings with file paths and line numbers."
         : `You are the reviewer of this round. Audit the COMMIT RANGE ${range} below — immutable git history, and the ONLY thing this round judges. Read it with \`git show\` / \`git diff ${range}\`, verify from the code (never guess), and report findings with file paths and line numbers.`,
     `Changed files (${files.length}) in ${range}:`,
     files.map((f) => `- ${f}`).join("\n"),
@@ -329,33 +341,32 @@ export function buildReviewPrompt(
 
   lines.push(
     "",
-    "OUTPUT: fenced JSON verdict FIRST (the gate parses it; docSync is REQUIRED on the single-review path), then a prose review below the fence.",
+    "OUTPUT: call judge_conclude and stop (the gate records it; docSync is REQUIRED on the single-review path). Everything you have to say goes in that call — there is no prose section, and this role's call has no notes parameter.",
     // The prompt asks for a MEASURED `pwd`, not one copied out of this text —
     // a copied value says nothing about where the review actually happened,
     // and only a measured one makes the check below meaningful.
     //
     // BOTH branches make the same promise, because since round-9 the gate
-    // really does compare it: `record_review` checks the reported cwd against
+    // really does compare it: the verdict recorder checks the reported cwd against
     // the repo THIS ROUND WAS PREPARED FOR and downgrades a READY that reports
     // something else. (That is all it does — see the `cwd` field's doc
     // comment.) Telling the reviewer otherwise on one branch would be the same
     // class of lie this field exists to catch.
-    'Before you answer, run `pwd` and put its output in the verdict\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
+    'Before you answer, run `pwd` and pass its output as the call\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
       " The gate matches it against the repo this round was prepared for" +
       (isolation
         ? " (the shared repo root), so `cd` back there before you answer if you ended up inside your throwaway worktree."
         : "."),
     // eslint-disable-next-line max-len
-    'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "cwd": "<your real pwd>", "docSync": "UPDATED"|"NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
+    'Conclude shape: judge_conclude({verdict: "READY"|"BLOCKED"|"NEEDS_HUMAN", cwd: "<your real pwd>", docSync: "UPDATED"|"NOT_NEEDED", findings: [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "...", "evidence": "<optional — omit when file:line says it>"}]})',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",
-    // Round-17 (user ask): output discipline — the gate consumes ONLY the
-    // verdict fence and the finding stream; prose beyond a 5-line summary is
-    // wasted tokens.
-    "输出纪律:verdict fence 在最前,其后最多 5 行结论要点(每条一句);不复述任务、不复述代码、不写过程叙事;详细证据放 findings 流(evidence 字段),不要写进正文。",
+    // Round-17 (user ask), tightened 2026-09-04: the gate consumes ONLY the
+    // conclude call and the finding stream. There is no `notes` parameter for
+    // this role — passing one is refused — so the conclusion has nowhere to
+    // become prose, and prose after the call is read by nobody.
+    "输出纪律:交卷即停 —— 调完 judge_conclude 就结束本轮,不写复述、不写自评、不写过程说明;结论就是 verdict + findings(能给证据就填 evidence)。",
     "",
-    "完成(必须):输出最终 verdict 后正常退出即可——进程退出即完成,主会话以你的输出为准,",
-    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
-    "主会话会带着答案用同一 session id 重新拉起你。",
+    JUDGE_COMPLETION_DISCIPLINE,
   );
   return lines.join("\n");
 }

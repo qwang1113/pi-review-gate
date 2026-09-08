@@ -229,10 +229,12 @@ test("the judge handshake never teaches tmux wait-for (process exit is the compl
   }
 });
 
-test("the waiting discipline still teaches the process-exit check", () => {
+test("the waiting discipline teaches the channel-report completion contract", () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   for (const rel of ["AGENTS.md", join("skills", "review-loop", "SKILL.md")]) {
-    assert.match(readFileSync(join(root, rel), "utf8"), /进程退出|exit-code|session id 重新拉起/,
-      `${rel} keeps the process-exit completion contract`);
+    const text = readFileSync(join(root, rel), "utf8");
+    assert.match(text, /channel report|通道/, `${rel} teaches report-based completion`);
+    assert.match(text, /标准报告/, `${rel} names the standard-report wake`);
+    assert.doesNotMatch(text, /进程退出|exit-code/, `${rel} no longer teaches the retired process-exit check`);
   }
 });

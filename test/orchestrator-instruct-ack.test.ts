@@ -11,6 +11,14 @@
  * handshake is two-stage now: `received` proves the gate has it and queued
  * it, `injected` proves pi took it.
  *
+ * SINCE 2026-09-17 `followUp` is gone from BOTH surfaces — the tool refuses
+ * the value (it defaults to `interrupt`) and `InstructDeliveryMode` no longer
+ * lists it, because the judge lane's own `followUp` round is verified as a
+ * pane BOOT and never reaches this rule. What survives is the two-stage
+ * handshake it produced, and these tests guard what it now has to mean: a
+ * queued message is never a delivery, it is never DROPPED either, and the
+ * failure text must stop offering `followUp` as the way out of it.
+ *
  * The context reading was worse in a quieter way: the binding was never wired
  * at all, so every receipt said "宿主未提供读数" and the orchestrator had no
  * basis for deciding when to hand over — on the one axis, running long, that
@@ -38,18 +46,41 @@ async function spawnT1(world: FakeWorld): Promise<string> {
 // The rule
 // ---------------------------------------------------------------------------
 
-test("`received` is enough for followUp, and NOT enough for steer", () => {
+test("`received` is not enough for ANY mode this tool can send", () => {
   const evidence = {
     channelReported: true,
     sidecarPresent: true,
-    ack: { delivered: true, stage: "received" as const, detail: "已入队（mode=followUp）" },
+    ack: { delivered: true, stage: "received" as const, detail: "已入队（mode=interrupt）" },
   };
-  const followUp = deliveryVerdict("instruct", evidence, { instructMode: "followUp" });
-  assert.equal(followUp.ok, true, "a queued message to a busy child IS delivered");
+  // Until 2026-09-17 `followUp` settled for this stage. It is gone from the
+  // tool AND from the verdict's mode list: the judge lane still writes that
+  // mode into its own channel, but its dispatch is verified as a pane boot,
+  // so a rule for it here would have had no caller.
+  for (const instructMode of ["interrupt", "steer"] as const) {
+    const verdict = deliveryVerdict("instruct", evidence, { instructMode });
+    assert.equal(verdict.ok, false, `${instructMode} promises the CURRENT turn — queued does not satisfy that`);
+    const reason = (verdict as { reason: string }).reason;
+    assert.doesNotMatch(reason, /followUp/,
+      "and it must NOT send the caller to a mode the tool refuses — that was the fake escape hatch");
+    assert.match(reason, /没有丢|waiting-judge/, "it says what is actually true: queued, keep waiting");
+  }
+});
 
-  const steer = deliveryVerdict("instruct", evidence, { instructMode: "steer" });
-  assert.equal(steer.ok, false, "steer promises the CURRENT turn — queued does not satisfy that");
-  assert.match((steer as { reason: string }).reason, /followUp/, "and it says which mode would have been right");
+test("an unspecified mode is judged by the STRICTEST bar — the tool's own default", () => {
+  // `orchestrator_instruct` defaults to `interrupt`, so a caller that says
+  // nothing must not buy a weaker claim of delivery than one that asks.
+  const queued = {
+    channelReported: true,
+    sidecarPresent: true,
+    ack: { delivered: true, stage: "received" as const },
+  };
+  assert.equal(deliveryVerdict("instruct", queued, {}).ok, false, "queued ≠ delivered when the mode is unstated");
+  assert.equal(deliveryVerdict("instruct", queued, { instructMode: "interrupt" }).ok, false, "same as interrupt");
+  assert.equal(
+    deliveryVerdict("instruct", { ...queued, ack: { delivered: true, stage: "injected" as const } }, {}).ok,
+    true,
+    "an injection satisfies it, exactly as for interrupt",
+  );
 });
 
 test("an injection failure is still a failure, whatever the mode", () => {
@@ -57,14 +88,14 @@ test("an injection failure is still a failure, whatever the mode", () => {
     channelReported: true,
     sidecarPresent: true,
     ack: { delivered: false, stage: "injected", detail: "sendUserMessage threw" },
-  }, { instructMode: "followUp" });
+  }, { instructMode: "steer" });
   assert.equal(verdict.ok, false);
   assert.match((verdict as { reason: string }).reason, /sendUserMessage threw/, "with the child's own explanation");
 });
 
 test("no acknowledgement at all points at the health snapshot — never at a kill", () => {
   const verdict = deliveryVerdict("instruct", { channelReported: true, sidecarPresent: false }, {
-    instructMode: "followUp",
+    instructMode: "interrupt",
   });
   assert.equal(verdict.ok, false);
   const reason = (verdict as { reason: string }).reason;
@@ -77,35 +108,39 @@ test("no acknowledgement at all points at the health snapshot — never at a kil
 // Through the tool
 // ---------------------------------------------------------------------------
 
-test("followUp to a WORKING child succeeds on the receipt its gate wrote", async () => {
+test("a WORKING child that only QUEUED the message is not reported as reached", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);
   // It is mid-turn: the heartbeat drains the instruction and acknowledges
-  // receipt, but nothing is injected until the turn ends.
+  // receipt, but nothing is injected until its gate gets to it.
   world.childReports(childId, "working");
 
   // The delivery check polls, so the ack is written concurrently — which is
   // exactly how the 10-second heartbeat delivers it in production.
-
-
-
-  const reply = await Promise.all([
-    world.call("orchestrator_instruct", { childId, mode: "followUp", message: "补充授权：可以动 docs/" }),
+  const queued = await Promise.all([
+    // No mode ⇒ `interrupt`, the default since 2026-09-17. It promises the
+    // CURRENT turn, so a queued message does not satisfy it.
+    world.call("orchestrator_instruct", { childId, message: "补充授权：可以动 docs/" }),
     (async () => {
-      world.childAcks(childId, latestInstructId(world, childId), true, "已入队（mode=followUp）", "received");
+      world.childAcks(childId, latestInstructId(world, childId), true, "已入队（mode=interrupt）", "received");
     })(),
   ]).then(([r]) => r);
 
-  assert.equal(reply.isError, undefined, replyText(reply));
-  assert.equal(reply.details?.delivered, true);
-  assert.match(replyText(reply), /已确认收到并入队|跑完手上这一轮/);
+  assert.equal(queued.isError, true, replyText(queued));
+  const text = replyText(queued);
+  assert.match(text, /没有丢/, "the honest reading: it is in the child's inbox, not lost");
+  assert.doesNotMatch(text, /改用 `?followUp/, "and never a mode this tool refuses");
+
+  // The message stays in the child's inbox: a failed receipt must not drop it
+  // (that is exactly how the round-4 authorization was lost).
+  assert.equal(projectionOf(world, childId).pendingInstructs.length, 1);
 });
 
-test("a followUp that was only RECEIVED stays in the child's inbox until it is injected", async () => {
+test("an instruction that was only RECEIVED stays in the child's inbox until it is injected", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);
   await Promise.all([
-    world.call("orchestrator_instruct", { childId, mode: "followUp", message: "稍后读这条" }),
+    world.call("orchestrator_instruct", { childId, mode: "steer", message: "带着这条继续做" }),
     (async () => {
       world.childAcks(childId, latestInstructId(world, childId), true, "已入队", "received");
     })(),

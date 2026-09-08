@@ -73,8 +73,9 @@ export const WORKFLOW_COMMANDS = {
       "this session with it — you never carry a verdict from one tool to another. Every mechanical check still runs at recording time: a READY is " +
       "withheld unless the round was prepared, downgraded to BLOCKED as STALE when HEAD moved past the reviewed commit, and bound to the reviewed " +
       "commit's TREE (content binding — squash survives). " +
-      "RE-REVIEW: a later round hands the reviewer the previous round's verdict and findings (the gate's 'Review scope for this round' block) — " +
-      "settled, unchanged material gets a consistency scan, not a re-derivation. " +
+      "RE-REVIEW: a later round hands the reviewer the previous round's verdict and findings (the gate's 'Review scope for this round' block); " +
+      // Pointer, not a paraphrase — the contract's terms have one home.
+      "its terms are stated in that block itself, rendered by lib/review-carryover.ts (the single authoritative source). " +
       "ISOLATION + STREAMING: the reviewed commits are immutable, so KEEP FIXING the real worktree while the reviewer runs: read the stream and fix " +
       "streamed P0/P1/P2 that carry evidence (confirm each in the code first), leaving Nits for the verdict. Stream lines are evidence, never a " +
       "verdict — only the reviewer's final output is recorded. " +

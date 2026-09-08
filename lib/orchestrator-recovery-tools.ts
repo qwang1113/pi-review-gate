@@ -32,10 +32,14 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
-import { ORCHESTRATION_ID_ENV, normalizeOrchestrationId } from "./orchestration-id.ts";
-import { GATE_MODE_ENV } from "./task-mode.ts";
-import { buildSpawnPaneArgv, parseSpawnedPaneId } from "./orchestrator-tmux.ts";
+import { normalizeOrchestrationId } from "./orchestration-id.ts";
+import {
+  buildTakeoverRoute,
+  decideTakeover,
+  discoverOrchestrations,
+} from "./orchestrator-takeover.ts";
+import { openSessionPane, paneRecoverability } from "./session-factory.ts";
+import { paneLabelFor } from "./orchestrator-pane-decor.ts";
 import {
   buildRecoverCommand,
   buildRecoveryNote,
@@ -46,7 +50,6 @@ import {
 import {
   findChild,
   lastChildPane,
-  type ChildSession,
   type OrchestratorRuntime,
 } from "./orchestrator-registry.ts";
 import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
@@ -98,34 +101,54 @@ export function detectOrphans(
   return orphans;
 }
 
-/** Environment a recovered (or freshly attached) child pane is given. */
-function childEnv(deps: OrchestratorDeps, child: ChildSession): Record<string, string> {
-  return {
-    [ORCHESTRATION_ID_ENV]: deps.runtime().orchestrationId,
-    [GATE_MODE_ENV]: "loop",
-    [STATE_VARIANT_ENV]: child.stateVariant ?? child.id,
-  };
+/**
+ * The task title a recovered pane's border shows.
+ *
+ * The plan is the only place a human-readable title exists; without it the
+ * border would read `@t1-t1`, which tells nobody anything at 3am. A missing or
+ * unreadable plan degrades to the id — cosmetic, never fatal.
+ */
+function recoveredTaskTitle(deps: OrchestratorDeps, taskId: string): string {
+  const { plan } = currentPlan(deps);
+  return plan?.tasks.find((task) => task.id === taskId)?.title ?? taskId;
 }
 
 async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const childId = String(params.childId ?? "").trim();
   const runtime = deps.runtime();
   const child = findChild(runtime, childId);
-  if (!child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
-  if (child.closedAt) {
+  const panes = alivePanes(deps);
+  // ONE recovery judgement, shared with `judge_recover`
+  // (lib/session-factory.ts). Both tools refuse the same four situations — an
+  // unknown handle, a deliberately closed session, a pane that is still alive,
+  // and unreadable liveness — so the pair can no longer drift into two
+  // slightly different safeties. Only the WORDING below is local.
+  const verdict = paneRecoverability({
+    registered: Boolean(child),
+    ...(child?.closedAt === undefined ? {} : { closedAt: child.closedAt }),
+    ...(child?.paneId === undefined ? {} : { paneId: child.paneId }),
+    paneAlive: child && panes.ok ? panes.panes.includes(child.paneId) : undefined,
+  });
+  if (verdict === "unknown" || !child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
+  if (verdict === "closed") {
     return fail(
       `review-gate: 子会话 "${childId}" 是被 orchestrator_close 主动关掉的（${child.closedAt}），` +
       "不是死掉的。要重做这个任务就 `orchestrator_spawn` 开一个新的。",
     );
   }
-  const panes = alivePanes(deps);
-  if (!panes.ok) {
+  if (verdict === "no-pane") {
+    return fail(
+      `review-gate: 子会话 "${childId}" 没有登记 pane —— 它可能从来没成功开出来，` +
+      "用 `orchestrator_spawn` 重新派活，而不是恢复。",
+    );
+  }
+  if (verdict === "unknown-liveness") {
     return fail(
       "review-gate: 读不到 tmux pane 列表，无法确认它到底死没死 —— 不敢重开（重开一个其实还活着的会话，" +
       "会得到两个进程写同一个工作区）。先修好 tmux 再试。",
     );
   }
-  if (panes.panes.includes(child.paneId)) {
+  if (verdict === "alive") {
     // ROUND-4 P0 — THE LINE THAT USED TO BE HERE WAS THE DEFECT. It said
     // "if it is just stuck, interrupt it first", and both children it was
     // ever printed about were healthy: they were sitting in `judge_wait`
@@ -146,7 +169,6 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
       "而不是打断：门禁都不应答的进程，打断不会让它复活。",
       { childId, recovered: false },
     );
-
   }
 
   const reason = String(params.reason ?? "").trim() || "pane 消失";
@@ -163,36 +185,45 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   const self = deps.ownPane();
   if (!self) return fail("review-gate: 读不到自己的 pane（$TMUX_PANE），无法开新 pane。");
   const last = lastChildPane(runtime, panes.panes);
-  let paneId: string;
-  try {
-    const result = deps.tmux(buildSpawnPaneArgv({
-      orchestratorPane: self,
-      ...(last ? { lastChildPane: last } : {}),
-      cwd: child.cwd,
-      env: childEnv(deps, child),
-      command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
-    }));
-    if (!result.ok) return fail(`review-gate: 重开 pane 失败 —— ${result.stderr || "tmux split-window 出错"}`);
-    const spawned = parseSpawnedPaneId(result.stdout);
-    if (!spawned) return fail("review-gate: tmux 没有回报新 pane 的 id —— 无法登记，已放弃。");
-    paneId = spawned;
-  } catch (error) {
-    return fail(`review-gate: 重开 pane 失败 —— ${(error as Error).message}`);
-  }
-
-  // The registry is re-pointed rather than re-created: the child KEEPS its id,
-  // its worktree and its task, because none of those died with the process.
-  // Its completion record is cleared for the same reason a new assignment
-  // clears it — whatever it had finished, it is being asked to carry on now.
   const now = new Date(deps.now()).toISOString();
-  deps.saveRuntime({
-    ...runtime,
-    children: runtime.children.map((c) =>
-      c.id === child.id
-        ? { ...c, paneId, lastAssignedAt: now, taskFile: taskFileRelPath(noteName), doneAt: undefined }
-        : c,
-    ),
+  const opened = await openSessionPane(deps.tmux, {
+    ownPane: self,
+    cwd: child.cwd,
+    layout: "child-column",
+    ...(last === undefined ? {} : { lastChildPane: last }),
+    // Same env as the original spawn — including the sidecar variant, which is
+    // ALSO what exempts a child from the session-exclusivity guard: a recovered
+    // pane without it would be refused at boot as a second session in the
+    // worktree.
+    role: {
+      kind: "orchestration-child",
+      orchestrationId: deps.runtime().orchestrationId,
+      stateVariant: child.stateVariant ?? child.id,
+    },
+    command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
+    decor: {
+      label: paneLabelFor(child.taskId, recoveredTaskTitle(deps, child.taskId)),
+      colorSeed: child.id,
+      state: "working",
+      stateForSeconds: 0,
+    },
+    // The registry is re-pointed rather than re-created: the child KEEPS its
+    // id, its cwd and its task, because none of those died with the process.
+    // The new assignment stamp is what makes its OLD completion history
+    // rather than a verdict (there is no cached `doneAt` to clear — B4).
+    register: (paneId) => {
+      deps.saveRuntime({
+        ...deps.runtime(),
+        children: deps.runtime().children.map((c) =>
+          c.id === child.id
+            ? { ...c, paneId, lastAssignedAt: now, taskFile: taskFileRelPath(noteName) }
+            : c,
+        ),
+      });
+    },
   });
+  if (!opened.ok) return fail(`review-gate: 重开 pane 失败 —— ${opened.error}`);
+  const paneId = opened.paneId;
 
   const assets = childAssets(deps, child);
   return reply(
@@ -207,25 +238,69 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   );
 }
 
+/**
+ * TAKE OVER AN ORCHESTRATION — including one this session did NOT inherit.
+ *
+ * WHAT CHANGED AND WHY (2026-09-06, B1). This tool used to require the id to
+ * be in the session's own environment: "a session cannot change orchestration
+ * identity while running". Half of that sentence is true and is still
+ * enforced — a session that has ALREADY REGISTERED CHILDREN cannot change
+ * identity, because those children would instantly lose their supervisor. But
+ * the other half turned the tool into a no-op for the situation it was
+ * written for: a project manager whose session died leaves a plan and a child
+ * registry behind, and the successor is by definition a session that did NOT
+ * inherit anything. It was refused here, refused at `set_gate_mode` for the
+ * same reason, and the only remaining move was to delete the gate's own plan
+ * file by hand (measured three times).
+ *
+ * So the id is now ADOPTED rather than merely confirmed, under the four
+ * conditions in {@link decideTakeover} — the strongest of which is that the
+ * id must be discoverable ON DISK, so naming one is never enough to mint an
+ * address nobody is listening on.
+ *
+ * The APPROVAL is deliberately not part of the inheritance (user decision,
+ * 2026-09-06): a plan approval is permission the user gave to a session that
+ * is gone, so the new holder submits it again. The registry IS inherited,
+ * because those panes exist whatever any session believes.
+ */
 async function doAttach(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
+  const candidates = discoverOrchestrations({
+    repoRoot: deps.repoRoot,
+    ...(deps.recordedRuntime() === undefined ? {} : { recorded: deps.recordedRuntime()!.orchestrationId }),
+    channelDirNames: () => deps.channelDirNames(),
+  });
+  const held = deps.runtime();
   const wanted = normalizeOrchestrationId(params.orchestrationId);
-  if (!wanted) {
-    return fail(
-      "review-gate: orchestrationId 不像一个门禁铸造的编排 id（形如 `orch-<repoHash>-<stamp>`）。" +
-      "它写在上一任项目经理的交接文档里，也在每个子会话的 RG_ORCHESTRATION_ID 环境变量里。",
-    );
-  }
-  const runtime = deps.runtime();
-  if (runtime.orchestrationId !== wanted) {
-    return fail(
-      `review-gate: 本会话持有的编排是 ${runtime.orchestrationId}，不是 ${wanted}。\n` +
-      "接管一个编排的正确做法是**带着它的 id 启动**（`RG_ORCHESTRATION_ID=<id> pi`）—— " +
-      "这正是 orchestrator_handoff 给后继者做的事。一个会话不能在运行中改换编排身份：" +
-      "它已经登记的子会话会瞬间失去归属。",
-      { attached: false },
+  let adopted = false;
+  if (wanted !== held.orchestrationId) {
+    const decision = decideTakeover({
+      wanted: params.orchestrationId,
+      repoRoot: deps.repoRoot,
+      candidates,
+      ownChildren: held.children,
+      currentId: held.orchestrationId,
+    });
+    if (!decision.ok) {
+      return fail(
+        `review-gate: ${decision.reason}\n\n` +
+        buildTakeoverRoute({ candidates, attempting: "接管一个编排" }),
+        { attached: false },
+      );
+    }
+    deps.adoptOrchestrationId(decision.id);
+    adopted = true;
+    // B2 — a takeover changes WHO holds an orchestration. That belongs in the
+    // log beside the approvals: it is the event that explains why a later
+    // record was written by a different session.
+    deps.log(
+      `orchestrator ${decision.id} taken over by this session ` +
+      `(was holding ${held.orchestrationId}, id found via ${decision.source})`,
     );
   }
 
+  // Re-read: adoption changed which runtime this session sees (the registry
+  // the previous holder left behind is now ours).
+  const runtime = deps.runtime();
   const panes = alivePanes(deps);
   const live = panes.ok ? new Set(panes.panes) : undefined;
   const open = runtime.children.filter((c) => !c.closedAt);
@@ -237,6 +312,7 @@ async function doAttach(deps: OrchestratorDeps, params: Record<string, unknown>)
     ...(deps.channelHome() === undefined ? {} : { home: deps.channelHome()! }),
     at: deps.now(),
     assetsFor: (child) => childAssets(deps, child),
+
   });
   const { plan, problem } = currentPlan(deps);
   if (problem) return problem;
@@ -244,13 +320,29 @@ async function doAttach(deps: OrchestratorDeps, params: Record<string, unknown>)
   const orphans = detectOrphans(runtime, running, live);
 
   const lines = [
-    `review-gate: 已接管编排 ${runtime.orchestrationId}。子会话完全无感 —— 通道是文件路径，不属于任何进程。`,
+    adopted
+      ? `review-gate: 已接管编排 ${runtime.orchestrationId}（本会话原先持有的是另一个身份，现已改为它）。` +
+        "子会话完全无感 —— 通道是文件路径，不属于任何进程。"
+      : `review-gate: 已接管编排 ${runtime.orchestrationId}。子会话完全无感 —— 通道是文件路径，不属于任何进程。`,
     "",
     "### 0. plan",
     plan
       ? `《${plan.title}》共 ${plan.tasks.length} 个任务：` +
         plan.tasks.map((t) => `${t.id}(${t.status ?? "pending"})`).join("、")
       : "（还没有 plan —— 先 `orchestrator_plan` 写一份并请用户批准）",
+    // THE APPROVAL DOES NOT COME WITH IT (user decision, 2026-09-06). The
+    // registry is a fact about the world; the approval was permission given
+    // to a session that is gone. Saying so here is the difference between a
+    // manager that re-submits and one that sits waiting for a spawn that will
+    // never be authorized.
+    ...(plan && runtime.approvedPlanHash === undefined
+      ? [
+          "",
+          "⚠️ 这份 plan 在门禁眼里**尚未获批**：批准是用户给上一任会话的许可，不随接管转移。" +
+          "要继续派活，先 `orchestrator_plan({ action: \"submit\" })` 重新走一遍审计与用户批准" +
+          "（内容没变的话，审计通常很快）。",
+        ]
+      : []),
     "",
     formatSupervisionReceipt(snapshot),
     "",
@@ -315,9 +407,14 @@ export function registerOrchestratorRecoveryTools(host: ToolHost, deps: Orchestr
       "waiting for an answer in the channels, and the ORPHANS — tasks the plan calls `running` " +
       "with no live pane behind them, which is the one inconsistency a crash or a reboot leaves " +
       "and the one an orchestrator would otherwise wait on forever. Nothing is restarted and no " +
-      "child notices: the channels are file paths, not processes. The session must already CARRY " +
-      "the orchestration id in its environment (that is what `orchestrator_handoff` gives a " +
-      "successor); a session cannot change orchestration identity while running.",
+      "child notices: the channels are file paths, not processes. It ADOPTS the id: a session " +
+      "that never inherited one (the usual case after the previous manager died) becomes the " +
+      "holder, provided the id belongs to THIS repo and is discoverable on disk — in the gate " +
+      "sidecar or among the channel directories — and provided this session has not registered " +
+      "children of its own yet. What it does NOT inherit is the plan's approval: that was " +
+      "permission the user gave to a session that is gone, so submit the plan again before " +
+      "spawning. Do not know the id? Call it with anything and the refusal lists every candidate " +
+      "found on disk.",
     parameters: Type.Object({
       orchestrationId: Type.String({ description: "The orchestration to take over (orch-…)" }),
     }),

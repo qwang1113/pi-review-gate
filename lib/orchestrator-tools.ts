@@ -15,6 +15,8 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
+import { buildRestatementMissingRefusal, restatementConfirmed } from "./restatement.ts";
+import { DELIVERY_STATION_CHOICES, deliveryStationLine } from "./delivery-station.ts";
 import {
   applyTaskStatus,
   formatPlanSummary,
@@ -27,9 +29,13 @@ import {
   type TaskStatus,
 } from "./orchestrator-plan.ts";
 import {
+  beginApprovalLineage,
   decideApprovalCarry,
+  extendApprovalLineage,
   formatApprovalAmendments,
+  formatApprovalRestored,
   formatApprovalWidenings,
+  lineageAuthorizes,
   snapshotApprovedPlan,
 } from "./orchestrator-plan-approval.ts";
 
@@ -38,7 +44,7 @@ import {
   notifyAuthorization,
   orchestratorDoneProblems,
 } from "./orchestrator-gate.ts";
-import { formatChildren } from "./orchestrator-registry.ts";
+import { emptyRuntime, formatChildren } from "./orchestrator-registry.ts";
 import { formatChildHealth } from "./orchestrator-child-state.ts";
 
 import {
@@ -47,6 +53,15 @@ import {
   prepareNotification,
   recordNotify,
 } from "./orchestrator-notify.ts";
+import {
+  ARCHIVE_CONFIRM_TITLE,
+  buildArchiveConfirmMessage,
+  buildPlanArchive,
+  buildTakeoverRoute,
+  discoverOrchestrations,
+  planArchiveRelPath,
+} from "./orchestrator-takeover.ts";
+
 // Aliased to the short local names: inside a tool module `reply`/`fail` are
 // unambiguous, while the EXPORTED names stay specific enough not to collide
 // with ordinary prose elsewhere in the repo.
@@ -66,6 +81,11 @@ const PLAN_ACTIONS = {
   "set-status": "set-status",
   "add-decision": "add-decision",
   "resolve-decision": "resolve-decision",
+  // B1 (2026-09-05, user decision): "放弃旧编排、另起一轮" is an ACTION of the
+  // plan tool, not a third tool — the thing being put down IS the plan, and a
+  // separate tool would be the "two entry points for one thing" philosophy
+  // two forbids.
+  archive: "archive",
 } as const;
 
 /** The dialog the USER approves a plan in (constraint 1). */
@@ -86,7 +106,8 @@ export function buildPlanTranscriptMessage(plan: OrchestratorPlan): string {
   return (
     "任务计划全文（不可信数据）——批准前请读完：\n" +
     "───────────────────────\n" +
-    formatPlanSummary(plan) +
+    // The USER reads this block before approving, so the station speaks to them.
+    formatPlanSummary(plan, "", "user") +
     "\n───────────────────────\n" +
     "同样的内容也在 `" + PLAN_RELPATH + "`（可随时自己去看）。\n" +
     "批准的是**内容**：任务、文件边界、依赖、并行度中任何一项被**扩大**，批准即失效。\n\n" +
@@ -108,9 +129,15 @@ export function buildPlanTranscriptMessage(plan: OrchestratorPlan): string {
  */
 const BOUNDARY_SEMANTICS =
   "关于文件边界的确切含义（请读一句）：批准某个任务的边界后，该任务还可以在**同一目录内**" +
-  "新增文件（例如批了 `lib/a.ts`，它可以再拆出 `lib/b.ts`），前提是新增的路径**不与其他任务重叠**。\n" +
-  "这类细化不会再来打扰你（门禁会记进审计条目）。以下改动一律**重新**征求你的批准：" +
-  "新增任务、碰到新目录、删除依赖、把串行改成并行、提高并行上限。";
+  "新增文件（例如批了 `lib/a.ts`，它可以再拆出 `lib/b.ts`，`lib/` 下更深的子目录同理），" +
+  "前提是新增的路径**不与其他任务重叠**——" +
+  "但**已经做完（done）的任务不再占地**：它的文件可以交给后面的任务，回执会写明是谁让出来的。\n" +
+  "这类细化不会再来打扰你（门禁会记进审计条目）。" +
+  "把 plan **写回你此前批准过的内容**同样不会再问（撤回一次误操作不必重走批准），" +
+  "而你每批准一次新内容，之前那条链就作废。\n" +
+  "以下改动一律**重新**征求你的批准：" +
+  "新增任务、碰到新目录、删除依赖、把串行改成并行、提高并行上限、把交付站点往后挪" +
+  "（precommit → commit → pr，等于放开更多 ship 命令）。";
 
 
 /**
@@ -125,11 +152,18 @@ export function buildPlanConfirmMessage(plan: OrchestratorPlan): string {
   return (
     "plan 全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
     "批准后，项目经理才能按这份 plan 开子会话干活。批准的是**内容**：" +
-    "新增任务、碰到新目录、删依赖、串行改并行、提高并行上限，都会让批准失效并重新问你；" +
-    "**同一目录内、且不与其他任务重叠的文件细化不会再问**（详见上方消息）。\n" +
+    "新增任务、碰到新目录、删依赖、串行改并行、提高并行上限、**提高交付站点**，" +
+    "都会让批准失效并重新问你；" +
+    "**同一目录内、且不与其他任务重叠的文件细化不会再问**，" +
+    "**已 done 的任务不再占地**，**写回你批准过的内容**也不会再问（详见上方消息）。\n" +
 
     `标题（不可信数据）：${plan.title.slice(0, 80)}\n` +
-    `规模：${plan.tasks.length} 个任务，并行上限 ${plan.maxParallel}`
+    `规模：${plan.tasks.length} 个任务，并行上限 ${plan.maxParallel}\n` +
+    // The station is a CONSENT-critical fact: it decides how far this
+    // orchestration may go (precommit / commit / pr), and raising it later is
+    // a widening that comes back here. A dialog that omitted it would ask the
+    // user to approve an authority they were never shown.
+    deliveryStationLine(plan.deliveryStation, "user")
   );
 }
 
@@ -142,6 +176,40 @@ async function handlePlanAction(
 ): Promise<ToolReply> {
   const action = String(params.action ?? "read");
   const nowIso = new Date(deps.now()).toISOString();
+
+  // ---------------------------------------------------------------------
+  // IDENTITY GUARD (2026-09-06, B1 — MOVED HERE from `set_gate_mode`)
+  // ---------------------------------------------------------------------
+  //
+  // The rule is unchanged: a session that did not inherit an orchestration
+  // must not quietly become the holder of one that is already recorded in
+  // this repo. What changed is WHERE it is enforced. It used to refuse the
+  // MODE — you could not become a project manager at all while somebody
+  // else's plan existed — and that made the two tools which resolve the
+  // situation unreachable, because both live inside the role. The refusal
+  // has been moved onto the acts that actually need an identity:
+  //
+  //   `write` / `submit` here, and `orchestrator_spawn` (which has its own
+  //   `runtimeConflict` check, lib/orchestrator-dispatch.ts).
+  //
+  // Everything else — `read`, `archive`, and the whole of `orchestrator_attach`
+  // — stays open, which is precisely what makes the dead end resolvable from
+  // inside the role instead of with `rm`.
+  const conflict = deps.runtimeConflict?.();
+  if (conflict && (action === PLAN_ACTIONS.write || action === PLAN_ACTIONS.submit)) {
+    const candidates = discoverOrchestrations({
+      repoRoot: deps.repoRoot,
+      recorded: conflict,
+      channelDirNames: () => deps.channelDirNames(),
+    });
+    return fail(
+      `review-gate: 本仓库记录的是另一个编排（${conflict}），本会话持有的是 ` +
+      `${deps.runtime().orchestrationId}。在把这件事定下来之前，不能改写或提交 plan——` +
+      "否则会出现两个项目经理对着同一份 plan 派活。\n\n" +
+      buildTakeoverRoute({ candidates, attempting: `plan 的 ${action}` }),
+      { approved: false, identityConflict: conflict },
+    );
+  }
 
   if (action === PLAN_ACTIONS.write) {
     // strictRepo: WRITING a plan requires every task to declare `repo` (the
@@ -178,6 +246,38 @@ async function handlePlanAction(
         { approved: true },
       );
     }
+    // UNDOING A WIDENING IS NOT A NEW GRANT (round-8). This content was
+    // already authorized under the live approval — the user signed it, or a
+    // carry that granted nothing new moved onto it — so writing it back
+    // restores the approval instead of costing a goal-auditor round plus a
+    // dialog for a keystroke somebody took back. It runs BEFORE the
+    // widening analysis on purpose: the analysis compares against whatever
+    // the approval currently holds, which after a revocation is nothing at
+    // all, and it has no way to see that these exact bytes were signed.
+    if (lineageAuthorizes(runtime.approvedPlanHistory, nextHash)) {
+      const restored = formatApprovalRestored(nextHash);
+      // The SNAPSHOT and the timestamp come back with the hash. A hash alone
+      // would leave the next boundary refinement facing "the gate has no
+      // authorizing snapshot" and asking the user again — the very dialog
+      // this path exists to save.
+      deps.saveRuntime({
+        ...runtime,
+        approvedPlanHash: nextHash,
+        approvedPlanAt: nowIso,
+        approvedPlan: snapshotApprovedPlan(next, nextHash, nowIso),
+        approvedPlanHistory: extendApprovalLineage(runtime.approvedPlanHistory, nextHash),
+        approvalAmendments: [
+          ...(runtime.approvalAmendments ?? []),
+          { at: nowIso, changes: [restored] },
+        ],
+      });
+      deps.log(`orchestrator plan approval RESTORED to ${nextHash} (content was already authorized)`);
+      return reply(
+        `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) + "\n\n" +
+        formatApprovalAmendments([restored]),
+        { approved: true, amended: true, restored: true, amendments: [restored] },
+      );
+    }
     if (!runtime.approvedPlanHash) {
       return reply(
         `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) +
@@ -186,7 +286,11 @@ async function handlePlanAction(
       );
     }
     const carry = runtime.approvedPlan
-      ? decideApprovalCarry(runtime.approvedPlan, next)
+      // `previous` is the EXECUTION RECORD (the plan on disk): it decides
+      // which tasks count as finished, and therefore whose boundaries stop
+      // blocking. The statuses in `next` cannot serve — with no plan on disk
+      // they are simply whatever this call wrote.
+      ? decideApprovalCarry(runtime.approvedPlan, next, previous)
       : { carries: false, widenings: ["门禁没有已批准 plan 的授权快照（记录不可读或来自更早的版本），无法证明这次改动没有扩权"], amendments: [] };
     if (carry.carries) {
       // The approval MOVES to the new content: the hash is what every later
@@ -196,11 +300,22 @@ async function handlePlanAction(
         ...runtime,
         approvedPlanHash: nextHash,
         approvedPlan: snapshotApprovedPlan(next, nextHash, runtime.approvedPlan?.at ?? nowIso),
+        // The content the approval just moved onto joins its lineage, so
+        // taking a LATER edit back lands here rather than at the user.
+        approvedPlanHistory: extendApprovalLineage(runtime.approvedPlanHistory, nextHash),
         approvalAmendments: [
           ...(runtime.approvalAmendments ?? []),
           { at: nowIso, changes: carry.amendments },
         ],
       });
+      // B2 — carrying an approval across an edit is a decision the gate makes
+      // ON THE USER'S BEHALF. `approvalAmendments` records it in the sidecar,
+      // which the next session to open this repo wipes; the audit log is the
+      // copy that outlives it, and it names WHICH content the approval moved to.
+      deps.log(
+        `orchestrator plan approval carried to ${nextHash} (from ${runtime.approvedPlanHash}): ` +
+        carry.amendments.join(" / "),
+      );
       return reply(
         `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) + "\n\n" +
         formatApprovalAmendments(carry.amendments) +
@@ -208,11 +323,149 @@ async function handlePlanAction(
         { approved: true, amended: true, amendments: carry.amendments },
       );
     }
+    // The three approval fields go; `approvedPlanHistory` deliberately STAYS
+    // (it is what lets the next write take this widening back without a
+    // dialog, and every content in it was authorized before this edit).
     deps.saveRuntime({ ...runtime, approvedPlanHash: undefined, approvedPlanAt: undefined, approvedPlan: undefined });
+    // B2 — a REVOCATION is the other half of the same story: the plan on disk
+    // now grants more than the user agreed to, and until they are asked again
+    // nothing may spawn. Logged with the reasons, so "why did it stop being
+    // approved" survives the sidecar.
+    deps.log(
+      `orchestrator plan approval REVOKED (widening ${runtime.approvedPlanHash} -> ${nextHash}): ` +
+      carry.widenings.join(" / "),
+    );
     return reply(
       `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) + "\n\n" +
       formatApprovalWidenings(carry.widenings),
       { approved: false, widenings: carry.widenings },
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // ARCHIVE — "this orchestration is over, I am starting a new one" (B1)
+  // -------------------------------------------------------------------------
+  //
+  // The alternative that existed before this action was a project manager
+  // typing `rm .pi/orchestrator-plan.json`, because entering the role was
+  // refused while somebody else's plan was in the repo and nothing could put
+  // that plan away. Three sessions did exactly that, one of them the
+  // supervisor. So: the gate does it, it ARCHIVES rather than deletes, and it
+  // asks the user first — the plan being put away is one they approved.
+  //
+  // IT RUNS BEFORE THE PLAN HAS TO PARSE, and that placement is load-bearing.
+  // Below this point an unreadable plan file returns "the plan file does not
+  // validate" and nothing else happens. Put the archive down there and a
+  // repo with a CORRUPT plan plus another orchestration's runtime would be
+  // sealed shut again: `write` is refused by the identity guard above,
+  // `archive` would be refused by the parser, and `rm` would be the only move
+  // left — the exact dead end this whole action exists to remove. Nothing is
+  // lost by not parsing: `archivePlanFile` renames the original file beside
+  // the record, so the bytes survive even when their meaning did not.
+  if (action === PLAN_ACTIONS.archive) {
+    // WHAT IS THERE TO PUT DOWN? The plan and the registry die separately —
+    // a repo left over from the `rm` era has a registry and no plan — so
+    // either half is enough to have work to do here, and neither is a
+    // precondition for the other.
+    // ONE read of the file, not two: the second one could see a different
+    // file (the plan is an ordinary file another session may be writing), and
+    // then "is there a plan" and "what is the plan" would disagree.
+    const read = deps.readPlan();
+    const existing = read.plan;
+    const recorded = deps.recordedRuntime();
+    // An UNPARSEABLE plan file is still a plan file to be put away — that is
+    // the whole reason this action runs before the validation gate.
+    const planFilePresent = existing !== undefined || read.problems.length > 0;
+    if (!planFilePresent && !recorded) {
+      return fail(
+        "review-gate: 本仓库没有什么可归档的 —— 既没有 `.pi/orchestrator-plan.json`，" +
+        "门禁记录里也没有上一轮编排的登记表。直接 `orchestrator_plan({action:\"write\"})` " +
+        "写这一轮自己的 plan 就行。",
+        { archived: false },
+      );
+    }
+    // LIVE CHILDREN VETO. The registry on DISK is the one that matters here:
+    // it belongs to the orchestration being put down, not to this session
+    // (which may hold a different id entirely). A pane that is still alive
+    // means somebody is still working under that plan — archiving it would
+    // strand them, and the honest move is a takeover instead.
+    const panes = alivePanes(deps);
+    const openChildren = (recorded?.children ?? []).filter((child) => !child.closedAt);
+    const stillAlive = panes.ok
+      ? openChildren.filter((child) => panes.panes.includes(child.paneId))
+      : [];
+    if (stillAlive.length > 0) {
+      return fail(
+        `review-gate: 这一轮编排还有 ${stillAlive.length} 个子会话活着` +
+        `（${stillAlive.map((c) => `${c.id}@${c.paneId}`).join("、")}）—— 不归档。\n` +
+        "它们正在这份 plan 下干活，归档会把它们晾在没有主管的状态。要接手它们，用 " +
+        `\`orchestrator_attach({ orchestrationId: "${recorded?.orchestrationId ?? ""}" })\`；` +
+        "确实要放弃，先 `orchestrator_close` 掉它们再归档。",
+        { archived: false, liveChildren: stillAlive.length },
+      );
+    }
+
+    const archivePath = planArchiveRelPath(nowIso);
+    // THE USER DECIDES (2026-09-06, their answer to the design question).
+    // `confirm` resolves false when there is no UI at all, and that is the
+    // wanted direction: with nobody to ask, nothing moves.
+    const granted = await deps.confirm(
+      ARCHIVE_CONFIRM_TITLE,
+      buildArchiveConfirmMessage({
+        ...(existing ? { plan: existing } : {}),
+        archivePath,
+        liveChildren: openChildren.length,
+      }),
+    );
+    if (!granted) {
+      return fail(
+        "review-gate: 用户没有同意归档（或当前环境没有可用的对话框）——什么都没有动，plan 还在原处。\n" +
+        "另一条路仍然可用：`orchestrator_attach` 接管这份 plan 所属的编排。",
+        { archived: false },
+      );
+    }
+
+    const written = deps.archivePlan(
+      archivePath,
+      buildPlanArchive({
+        ...(existing ? { plan: existing } : {}),
+        ...(recorded ? { runtime: { orchestrationId: recorded.orchestrationId, children: recorded.children } } : {}),
+        at: nowIso,
+        by: deps.runtime().orchestrationId,
+      }),
+    );
+    if (!written.ok) {
+      return fail(
+        `review-gate: 归档写不出来（${written.error}）—— plan 原封不动留在 ${PLAN_RELPATH}。`,
+        { archived: false },
+      );
+    }
+    // THE RUNTIME GOES WITH IT. Leaving the old registry in the sidecar would
+    // leave `runtimeConflict` refusing every spawn of the NEW orchestration
+    // forever — the session would have tidied itself into a corner it cannot
+    // leave. It is not lost: the archive file above holds a copy.
+    deps.saveRuntime(emptyRuntime(deps.runtime().orchestrationId));
+    deps.log(
+      `orchestrator plan archived to ${written.path} ` +
+      `(plan hash ${existing ? planHash(existing) : "none"}, previous orchestration ${recorded?.orchestrationId ?? "none"})`,
+    );
+    // SAYS ONLY WHAT HAPPENED (reviewer P2, round 2). The two halves are
+    // archivable separately, so a reply that always claims a plan was moved
+    // and a file renamed is wrong on the registry-only path — the one a repo
+    // from the `rm` era is actually in.
+    const moved = [
+      ...(planFilePresent ? ["plan"] : []),
+      ...(recorded ? ["编排登记表"] : []),
+    ].join(" + ");
+    return reply(
+      `review-gate: 已归档 ${moved} → ${written.path}（**没有删除任何东西**` +
+      (planFilePresent ? `，原 ${PLAN_RELPATH} 已改名留在归档旁边` : "") +
+      ")。\n" +
+      (planFilePresent
+        ? `${PLAN_RELPATH} 已让出来了 —— 现在可以 \`orchestrator_plan({action:"write"})\` 写这一轮自己的 plan，`
+        : "本仓库本来就没有 plan 文件；现在门禁记录也干净了 —— `orchestrator_plan({action:\"write\"})` 写这一轮自己的 plan，") +
+      "再 `submit` 请用户批准。",
+      { archived: true, path: written.path, archivedPlan: planFilePresent, archivedRuntime: Boolean(recorded) },
     );
   }
 
@@ -221,6 +474,16 @@ async function handlePlanAction(
 
   if (action === PLAN_ACTIONS.submit) {
     if (!plan) return fail("review-gate: 还没有 plan 可提交 —— 先用 action:\"write\" 写一份。");
+
+    // THE REQUIREMENT RESTATEMENT COMES FIRST (2026-09-06, user ask) — even
+    // before the audit, because it is the earlier step in the same story: the
+    // project manager says the requirement back, the user confirms it, and
+    // only then is a plan worth auditing. Checking it after a minutes-long
+    // audit would bill the user for a plan built on an unverified reading.
+    // No dialog is rendered — same shape as a failed audit.
+    if (!restatementConfirmed(deps.restatement())) {
+      return fail(buildRestatementMissingRefusal("orchestrator_plan"), { approved: false, restated: false });
+    }
 
     // THE AUDIT RUNS INSIDE SUBMIT, and it runs FIRST (user requirement,
     // 2026-08-30). The asymmetry it closes: a loop goal could not reach the
@@ -268,9 +531,23 @@ async function handlePlanAction(
       // a narrowing edit skip the dialog instead of waking the user again.
       approvedPlan: snapshotApprovedPlan(plan, hash, nowIso),
       approvalAmendments: [],
+      // A FRESH DECISION REPLACES EVERY EARLIER ONE. The lineage restarts at
+      // this content, so a plan the user just NARROWED can never be written
+      // back to a wider version that an earlier approval had carried to.
+      approvedPlanHistory: beginApprovalLineage(hash),
     });
+    // B2 — WHO / WHEN / against WHICH content, in the log the two sibling
+    // approvals already write to. The sidecar holds the same facts but does
+    // not survive the next session opening this repo.
+    deps.log(
+      `orchestrator plan approved by the user (hash ${hash}, ${plan.tasks.length} tasks, ` +
+      `station ${plan.deliveryStation ?? "precommit"})`,
+    );
     return reply("review-gate: plan 已获用户批准，可以开始 `orchestrator_spawn`。", { approved: true });
   }
+
+
+  // (The ARCHIVE action is handled ABOVE, before the plan file has to parse.)
 
 
   if (action === PLAN_ACTIONS["set-status"]) {
@@ -364,13 +641,21 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "asks the USER to approve it if the audit passes; a failed audit comes back as findings " +
       "with no dialog shown, so fix them and submit again), \"set-status\" (move one task through " +
       "the state machine — `write` never changes a status), \"add-decision\" / \"resolve-decision\" " +
-      "(questions only the human can settle). WHAT `write` DOES TO THE APPROVAL: it keeps it for " +
+      "(questions only the human can settle), \"archive\" (a PREVIOUS orchestration's plan is in " +
+      "this repo and you are starting a new round: the gate moves it aside — plan AND child " +
+      "registry — into a timestamped file in `.pi/`, asks the user first, and NEVER deletes " +
+      "anything; it refuses while a registered child pane is still alive and points you at " +
+      "`orchestrator_attach` instead). WHAT `write` DOES TO THE APPROVAL: it keeps it for " +
       "edits that grant nothing new — a narrowed boundary, a dropped task, a new path inside the " +
       "directory of a boundary this task already had that no other task claims, an added " +
       "dependency, parallel→serial, a lower maxParallel — and records why. It REVOKES it for a " +
       "new task, a new directory, a removed dependency, serial→parallel or a higher maxParallel. " +
       "So refine boundaries freely as you learn where the work lands; only real widening costs " +
-      "the user a dialog.",
+      "the user a dialog. " +
+      "REQUIRED BEFORE `submit`: a restatement the USER confirmed (`propose_restatement`) — " +
+      "without one submit refuses outright and shows no dialog. `deliveryStation` says where the " +
+      "whole orchestration stops (" + DELIVERY_STATION_CHOICES + ", default precommit); raising " +
+      "it is a widening like any other.",
 
     parameters: Type.Object({
       action: Type.Optional(Type.Enum(PLAN_ACTIONS)),
@@ -378,6 +663,11 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
         title: Type.String({ description: "Plan title (required for write)" }),
         intent: Type.String({ description: "One-line intent (required for write)" }),
         maxParallel: Type.Optional(Type.Number({ description: "Parallelism cap (default 2)" })),
+        deliveryStation: Type.Optional(Type.String({
+          description:
+            "Where this orchestration stops: " + DELIVERY_STATION_CHOICES +
+            " (default precommit — the user commits). Ask the user; do not pick for them.",
+        })),
         tasks: Type.Array(Type.Object({
           id: Type.String({ description: "Task id, [A-Za-z0-9._-] 1-64 chars" }),
           title: Type.String({ description: "Task title" }),

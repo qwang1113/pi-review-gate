@@ -10,12 +10,13 @@ import {
   lastChildPane,
   liveChildren,
   markChildClosed,
-  markChildDone,
+  markChildAssigned,
   newChildId,
   normalizeRuntime,
   registerChild,
   runningTaskIds,
   vanishedChildren,
+  withoutPlanApproval,
   type ChildSession,
   type OrchestratorRuntime,
 } from "../lib/orchestrator-registry.ts";
@@ -69,12 +70,17 @@ test("a child the gate closed is neither alive nor 'vanished'", () => {
   assert.deepEqual(vanishedChildren(runtime, []), [], "we closed it — that is not a disappearance");
 });
 
-test("running task ids drive the scheduler, and a finished child stops counting", () => {
+test("running task ids drive the scheduler, and a LIVE PANE occupies its task (B4)", () => {
   let runtime = runtimeWith(child({ id: "a-1", taskId: "a" }), child({ id: "b-1", taskId: "b", paneId: "%3" }));
   assert.deepEqual(runningTaskIds(runtime, ["%2", "%3"]).sort(), ["a", "b"]);
-  runtime = markChildDone(runtime, "a-1", NOW);
+  // Being re-tasked changes nothing about occupancy either: the pane is what
+  // holds the repo, and same-repo tasks are serialized because they share ONE
+  // worktree. The slot frees when the pane is CLOSED.
+  runtime = markChildAssigned(runtime, "a-1", NOW);
+  assert.deepEqual(runningTaskIds(runtime, ["%2", "%3"]).sort(), ["a", "b"]);
+  runtime = markChildClosed(runtime, "a-1", NOW);
   assert.deepEqual(runningTaskIds(runtime, ["%2", "%3"]), ["b"],
-    "a child that reported done is still alive but no longer occupies its task");
+    "only a closed (or vanished) pane gives the task back");
 });
 
 test("the LAYOUT anchor is the newest live child, or nothing", () => {
@@ -181,6 +187,73 @@ test("SECURITY: a forged approval hash is refused on shape alone", () => {
   );
 });
 
+test("the approval LINEAGE survives a revocation — that is exactly when it is needed", () => {
+  // No `approvedPlanHash` here: the approval was revoked by a widening, and
+  // the lineage is what lets the next write take that widening back.
+  const cleaned = normalizeRuntime({
+    children: [],
+    approvedPlanHistory: [GOOD_HASH, "b".repeat(64)],
+  }, "orch-abc-1");
+  assert.deepEqual(cleaned?.approvedPlanHistory, [GOOD_HASH, "b".repeat(64)]);
+  assert.equal(cleaned?.approvedPlanHash, undefined, "and it is not an approval by itself");
+});
+
+test("SECURITY: one bad entry drops the WHOLE lineage — a half-trusted permission record is none", () => {
+  for (const lineage of [
+    [GOOD_HASH, "not-a-hash"],
+    [GOOD_HASH, "A".repeat(64)],
+    [GOOD_HASH, ""],
+    [GOOD_HASH, 7],
+    [GOOD_HASH, null],
+    "a".repeat(64), // not even a list
+    { 0: GOOD_HASH },
+  ]) {
+    const cleaned = normalizeRuntime({ children: [], approvedPlanHistory: lineage }, "orch-abc-1");
+    assert.equal(cleaned?.approvedPlanHistory, undefined,
+      `${JSON.stringify(lineage)} must not read as a permission record`);
+  }
+});
+
+test("SECURITY: a blob we could not fully read loses the lineage with the approval", () => {
+  const cleaned = normalizeRuntime({
+    children: "not-an-array",
+    approvedPlanHash: GOOD_HASH,
+    approvedPlanHistory: [GOOD_HASH],
+  }, "orch-abc-1");
+  assert.equal(cleaned?.approvedPlanHash, undefined);
+  assert.equal(cleaned?.approvedPlanHistory, undefined,
+    "the doubt that drops the approval drops what could restore it");
+});
+
+test("SECURITY: a new session inherits the child REGISTRY and nothing that grants power", () => {
+  // The stripping used to be spelled out at the call site in the extension,
+  // which is how a newly added authorizing field rides into a session the
+  // user never approved. It is one function now, and this is its contract.
+  const inherited = withoutPlanApproval({
+    ...runtimeWith(child()),
+    approvedPlanHash: GOOD_HASH,
+    approvedPlanAt: NOW,
+    approvedPlanHistory: [GOOD_HASH],
+    approvalAmendments: [{ at: NOW, changes: ["细化了边界"] }],
+    grants: [{ scope: "sensitive-edit", grantedAt: NOW, via: "gate-grant" }],
+    relay: { handoffPath: "docs/h.md", at: NOW },
+    ownPane: "%9",
+  });
+
+  assert.equal(inherited.approvedPlanHash, undefined);
+  assert.equal(inherited.approvedPlanAt, undefined);
+  assert.equal(inherited.approvedPlan, undefined);
+  assert.equal(inherited.approvalAmendments, undefined);
+  assert.equal(inherited.approvedPlanHistory, undefined, "…including what could restore an approval");
+  assert.ok(!("approvedPlanHistory" in inherited), "and it is gone, not present-but-undefined");
+
+  assert.deepEqual(inherited.children.map((c) => c.id), ["a-1"], "the live panes are facts about the world");
+  assert.deepEqual(inherited.grants?.map((g) => g.scope), ["sensitive-edit"], "so are the user's own grants");
+  assert.equal(inherited.relay?.handoffPath, "docs/h.md");
+  assert.equal(inherited.ownPane, "%9");
+});
+
+
 test("garbage in the notify history and the relay record is dropped, not carried", () => {
   const cleaned = normalizeRuntime({
     children: [],
@@ -200,17 +273,18 @@ test("a value that is not an object at all is refused outright", () => {
   }
 });
 
-test("the status rendering distinguishes the four states a child can be in", () => {
+test("the status rendering distinguishes the states the REGISTRY can see", () => {
   let runtime = runtimeWith(
     child({ id: "a-1", paneId: "%2" }),
     child({ id: "b-1", paneId: "%3", taskId: "b" }),
     child({ id: "c-1", paneId: "%4", taskId: "c" }),
   );
-  runtime = markChildDone(runtime, "b-1", NOW);
   runtime = markChildClosed(runtime, "c-1", NOW);
   const text = formatChildren(runtime, ["%2", "%3"]);
   assert.match(text, /a-1 \[alive\]/);
-  assert.match(text, /b-1 \[done（pane 仍在）\]/);
+  // "Finished" is NOT one of them (B4): completion lives in the child's
+  // channel, and this rendering reads the registry.
+  assert.match(text, /b-1 \[alive\]/);
   assert.match(text, /c-1 \[closed\]/);
   assert.equal(formatChildren(emptyRuntime("orch-abc-1"), []), "（还没有开过子会话）");
 

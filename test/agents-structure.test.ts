@@ -4,6 +4,8 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KNOWN_AGENTS } from "../lib/model-config.ts";
+// The incremental contract's authoritative renderer — asserted on its OUTPUT.
+import { buildReviewCarryover } from "../lib/review-carryover.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENTS = join(ROOT, "agents");
@@ -65,16 +67,22 @@ test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its ve
   assert.match(body, /^fallbackModels: claude-opus-5$/m, "same fallback chain as the other judges");
   assert.doesNotMatch(body, /tools:.*\b(edit|write|bash)\b/, "the auditor audits text; it must not be able to write");
   const src = readFileSync(join(AGENTS, "goal-auditor.md"), "utf8");
-  // Its output IS the gate record, so the two rules the parser depends on must
-  // be stated: exactly one fence, and never a quoted example fence (the parser
-  // keeps the WORST verdict across all fences).
-  assert.match(src, /exactly ONE/i, "the prompt must demand a single fence");
-  assert.match(src, /[Nn]ever quote an example verdict fence/, "a quoted BLOCKED example would poison a real PASS");
+  // Its conclude call IS the gate record, so the two rules the tool depends on must
+  // be stated: exactly one call per round, and never a fenced verdict in prose
+  // (prose is not consumed — a verdict written only in prose is no conclusion).
+  assert.match(src, /judge_conclude/, "the prompt must name the conclude tool");
+  assert.match(src, /exactly ONCE/, "the prompt must demand a single conclude call");
+  assert.match(src, /never write a fenced/, "a fenced verdict in prose would be silently unconsumed");
   assert.match(src, /Simplified Chinese/, "the goal-language rule lives in the auditor's checklist");
-  // The file must itself OBEY the rule it teaches: `parseReviewOutput` scans
-  // every fence and keeps the worst, and a system prompt is quoted back by
-  // models, so an example fence here can poison a real PASS. Zero fences — the
-  // verdict shape is shown unfenced ON PURPOSE.
+  // 2026-09-04: this role's conclude call has NO `notes` parameter, and the
+  // gate refuses one. A role file still asking for prose would make the gate
+  // contradict its own dispatch on the very first round.
+  assert.match(src, /NO `notes` parameter/, "the role file must state that notes is refused");
+  assert.doesNotMatch(src, /notes your/, "…and must not still ask for one");
+  // The file must itself avoid modelling a fence: a system prompt is quoted
+  // back by models, and the conclude call takes structured fields — an example
+  // fence here would teach exactly the shape that no longer means anything.
+  // Zero fences — the verdict shape is shown unfenced ON PURPOSE.
   const fences = (src.match(/^```/gm) ?? []).length;
   assert.equal(fences, 0, `the auditor prompt must contain NO code fences, found ${fences}`);
 });
@@ -238,17 +246,39 @@ test("REGRESSION: every re-review must carry the previous round's conclusion", (
       /goal re-(audit|review)\b[\s\S]{0,400}?objection|goal-auditor[\s\S]{0,400}?\bobjection/is,
       `${file} must require the goal-auditor's re-audit to carry its own objections`,
     );
+    // The TERMS of the incremental contract are not asserted per file any
+    // more, and deliberately so: since t6a they have ONE authoritative source
+    // and every other surface carries a summary plus a pointer. What each file
+    // must still do is either state the rule or NAME that source — a summary
+    // that does neither is a second authority in disguise.
     assert.match(
       src,
-      /consistency\s+scan/i,
-      `${file} must say settled material gets a scan, not a re-derivation`,
+      /consistency\s+scan|review-carryover\.ts/i,
+      `${file} must state the consistency-scan rule or name lib/review-carryover.ts as its source`,
     );
   }
-  // The reviewer must be told it may still reopen a settled conclusion:
-  // an economy that silently removed authority would be a gate weakening.
+  // The rule itself is pinned where it actually lives. This is the assertion
+  // that keeps the loop honest: an economy that silently removed the
+  // reviewer's authority to reopen a settled conclusion would be a gate
+  // weakening, and deleting it from the source is the only way to lose it now.
+  // Asserted on the RENDERED block, not on the module's source: the source
+  // wraps these sentences across concatenated template literals, so a source
+  // scan would be testing the line breaks rather than what a reviewer reads.
+  const contract = buildReviewCarryover({
+    kind: "incremental",
+    reason: "a small increment",
+    settled: { verdict: "READY" },
+    delta: { files: ["lib/a.ts"], lines: 4 },
+  });
+  assert.match(contract, /consistency\s+scan/i, "the contract states what settled material gets");
+  assert.match(contract, /not a re-derivation — and not a skip either/, "…and that it is not a skip");
+  assert.match(contract, /Reopening is always allowed/, "…and that a settled conclusion may be reopened");
+  assert.match(contract, /not a bar on your authority/);
+  // The reviewer's own role body must point at it, or a reviewer reading only
+  // its role body would never learn the contract exists.
   const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
-  assert.match(reviewer, /re-litigate/i);
-  assert.match(reviewer, /reopen it/i);
+  assert.match(reviewer, /review-carryover\.ts/, "reviewer.md names the contract's source");
+  assert.match(reviewer, /the authority on what this round owes/i);
 });
 
 test("AGENTS.md and SKILL.md make judge roles their own pi processes — the only review path", () => {
@@ -297,6 +327,25 @@ test("REGRESSION: the commit-isolation contract is stated where a reviewer reads
     "the output format must not invite the reviewer to fix the code it judges",
   );
 });
+
+test("the role files match the ROLE-SHAPED conclude signature (2026-09-04)", () => {
+  // `judge_conclude` has no `notes` parameter for a reviewer or a
+  // goal-auditor, and refuses one that is passed anyway. A role file that
+  // still asked for prose would make the gate contradict its own dispatch on
+  // the very first round — the exact self-collision this pin exists to catch.
+  for (const f of ["reviewer.md", "goal-auditor.md"]) {
+    const src = readFileSync(join(AGENTS, f), "utf8");
+    assert.match(src, /NO `notes` parameter/, `${f} must state that notes is refused`);
+    assert.doesNotMatch(src, /notes at most|notes your|and notes\b/i,
+      `${f} must not ask for a field the gate refuses`);
+    assert.match(src, /[Cc]onclude and stop/, `${f} must say the round ends at the call`);
+  }
+  // The adviser is the exception, and says so: its product IS the prose.
+  const adviser = readFileSync(join(AGENTS, "adviser.md"), "utf8");
+  assert.match(adviser, /advice goes in `notes`/, "the adviser keeps the prose field");
+  assert.match(adviser, /have no `notes` parameter at all/, "…and says which roles do not");
+});
+
 
 test("REGRESSION: isolation + streaming are documented in every protocol surface", () => {
   for (const file of [SKILL_MD, AGENTS_MD]) {

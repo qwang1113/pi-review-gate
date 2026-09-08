@@ -2,87 +2,108 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   judgeWorkDirFor,
-  judgeRunDirName,
-  evaluateJudgeWait,
-  hasJudgeFence,
+  isLegacyJudgeSessionDirName,
+  isCurrentJudgeSessionDirName,
+  selectStaleJudgeSessionDirs,
+  JUDGE_SESSION_DIR_TTL_MS,
+
+  awaitRoundReport,
   clampWaitTimeout,
+
   adjudicateGoalAudit,
   isBlockingSeverity,
-  decideJudgeDispatch,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
   JUDGE_WAIT_DEFAULT_TIMEOUT_MS,
-  formatJudgeWaitReply,
-  tailLines,
-  WAIT_FINDINGS_SHOWN,
-  WAIT_STDOUT_TAIL_LINES,
+
 } from "../lib/judge-lifecycle.ts";
 
-// ---- B5: the work dir is a function of role+repo, never of the round ----
 
-test("judgeWorkDirFor is stable across rounds for the same role and repo", () => {
-  const first = judgeWorkDirFor("goal-auditor", "f3eb4277");
-  const second = judgeWorkDirFor("goal-auditor", "f3eb4277");
+// ---- B5: the work dir is a function of role+repo+opener, never of the round ----
+
+test("judgeWorkDirFor is stable across rounds for the same role, repo and opener", () => {
+  const first = judgeWorkDirFor("goal-auditor", "f3eb4277", "opener-1");
+  const second = judgeWorkDirFor("goal-auditor", "f3eb4277", "opener-1");
   assert.equal(first, second);
-  assert.equal(first, ".pi/judge-sessions/goal-auditor-f3eb4277");
+  assert.match(first, /^\.pi\/judge-sessions\/goal-auditor-f3eb4277-[0-9a-f]{8}$/);
 });
 
-test("judgeWorkDirFor separates roles and repos", () => {
-  assert.notEqual(judgeWorkDirFor("reviewer", "abc"), judgeWorkDirFor("adviser", "abc"));
-  assert.notEqual(judgeWorkDirFor("reviewer", "abc"), judgeWorkDirFor("reviewer", "def"));
+test("judgeWorkDirFor separates roles, repos and openers", () => {
+  assert.notEqual(judgeWorkDirFor("reviewer", "abc", "opener"), judgeWorkDirFor("adviser", "abc", "opener"));
+  assert.notEqual(judgeWorkDirFor("reviewer", "abc", "opener"), judgeWorkDirFor("reviewer", "def", "opener"));
+  assert.notEqual(judgeWorkDirFor("reviewer", "abc", "opener-1"), judgeWorkDirFor("reviewer", "abc", "opener-2"));
 });
 
 test("judgeWorkDirFor refuses path traversal in its inputs", () => {
-  const dir = judgeWorkDirFor("../../etc", "../passwd");
+  const dir = judgeWorkDirFor("../../etc", "../passwd", "../../evil");
   assert.ok(!dir.includes(".."), dir);
-  assert.equal(dir, ".pi/judge-sessions/------etc----passwd");
 });
 
-test("judgeRunDirName varies per round and is filesystem-safe", () => {
-  const at = new Date("2026-08-29T01:44:52.970Z");
-  assert.equal(judgeRunDirName(at, "a1b2c3"), "2026-08-29T01-44-52-970Z-a1b2c3");
-  assert.notEqual(judgeRunDirName(at, "a1b2c3"), judgeRunDirName(at, "d4e5f6"));
+// ---- t1: reclaim of judge session dirs nobody owns ----
+
+test("legacy (pre-opener) dir names are recognised, new and foreign ones are not", () => {
+  assert.equal(isLegacyJudgeSessionDirName("goal-auditor-f3eb4277"), true);
+  assert.equal(isLegacyJudgeSessionDirName("reviewer-12345678"), true);
+  assert.equal(isLegacyJudgeSessionDirName("goal-auditor-f3eb4277-a1b2c3d4"), false);
+  assert.equal(isLegacyJudgeSessionDirName("archive"), false);
+  assert.equal(isLegacyJudgeSessionDirName("reviewer-abc"), false);
 });
 
-// ---- the three wait criteria ----
-
-test("an exit-code file ends the wait", () => {
+test("reclaim: a referenced dir is never selected, even when old or legacy", () => {
+  const now = 1_700_000_000_000;
+  const old = now - JUDGE_SESSION_DIR_TTL_MS - 1000;
+  const entries = [
+    { name: "reviewer-12345678", mtimeMs: old },
+    { name: "reviewer-12345678-a1b2c3d4", mtimeMs: old },
+  ];
   assert.deepEqual(
-    evaluateJudgeWait({ processAlive: true, exitCodeExists: true, stdoutTail: "" }),
-    { done: true, reason: "exit-code" },
+    selectStaleJudgeSessionDirs(entries, new Set(["reviewer-12345678", "reviewer-12345678-a1b2c3d4"]), now),
+    [],
   );
 });
 
-test("a vanished process ends the wait even without an exit code", () => {
+test("reclaim: an unreferenced legacy dir is selected immediately, TTL notwithstanding", () => {
+  const now = 1_700_000_000_000;
   assert.deepEqual(
-    evaluateJudgeWait({ processAlive: false, exitCodeExists: false, stdoutTail: "" }),
-    { done: true, reason: "process-gone" },
+    selectStaleJudgeSessionDirs([{ name: "goal-auditor-f3eb4277", mtimeMs: now }], new Set(), now),
+    ["goal-auditor-f3eb4277"],
   );
 });
 
-test("a verdict fence in stdout ends the wait before the process exits", () => {
-  const probe = { processAlive: true, exitCodeExists: false, stdoutTail: '```json\n{"gate":"READY","findings":[]}\n```' };
-  assert.deepEqual(evaluateJudgeWait(probe), { done: true, reason: "fence" });
+test("reclaim: an unreferenced new-format dir is selected only past the TTL", () => {
+  const now = 1_700_000_000_000;
+  const fresh = [{ name: "reviewer-12345678-a1b2c3d4", mtimeMs: now - 1000 }];
+  const old = [{ name: "reviewer-12345678-a1b2c3d4", mtimeMs: now - JUDGE_SESSION_DIR_TTL_MS - 1000 }];
+  assert.deepEqual(selectStaleJudgeSessionDirs(fresh, new Set(), now), []);
+  assert.deepEqual(selectStaleJudgeSessionDirs(old, new Set(), now), ["reviewer-12345678-a1b2c3d4"]);
 });
 
-test("a question fence also ends the wait", () => {
-  const probe = { processAlive: true, exitCodeExists: false, stdoutTail: '{"question":"which branch?","context":"…"}' };
-  assert.deepEqual(evaluateJudgeWait(probe), { done: true, reason: "fence" });
+test("current-format names are recognised, legacy and foreign ones are not", () => {
+  assert.equal(isCurrentJudgeSessionDirName("goal-auditor-f3eb4277-a1b2c3d4"), true);
+  assert.equal(isCurrentJudgeSessionDirName("goal-auditor-f3eb4277"), false);
+  assert.equal(isCurrentJudgeSessionDirName("archive"), false);
+  assert.equal(isCurrentJudgeSessionDirName("reviewer-abc"), false);
 });
 
-test("a running judge with no fence keeps the wait open", () => {
-  assert.deepEqual(
-    evaluateJudgeWait({ processAlive: true, exitCodeExists: false, stdoutTail: "reading lib/gate-state.ts…" }),
-    { done: false, reason: "pending" },
-  );
+test("reclaim: an unrecognised shape is NEVER selected, however old (fail-closed)", () => {
+  // Round-1 P1 (reviewer): the TTL branch accepted anything, so the kept-transcript
+  // `archive/` dir would have been rm -rf'd once past the TTL. Only current-format
+  // dirs are TTL-eligible now.
+  const now = 1_700_000_000_000;
+  const ancient = now - JUDGE_SESSION_DIR_TTL_MS - 1000;
+  const entries = [
+    { name: "archive", mtimeMs: ancient },
+    { name: "reviewer-abc", mtimeMs: ancient },
+  ];
+  assert.deepEqual(selectStaleJudgeSessionDirs(entries, new Set(), now), []);
 });
 
-test("the fence criterion reads plain stdout, not the escaped transcript form", () => {
-  // The measured bug: inside the session jsonl the fence is escaped, so the
-  // literal `"gate":"READY"` bytes never appear. Escaped text must NOT count.
-  assert.equal(hasJudgeFence('{"text":"```json\\n{\\"gate\\":\\"READY\\"}"}'), false);
-  assert.equal(hasJudgeFence('{"gate": "BLOCKED"}'), true);
-  assert.equal(hasJudgeFence(""), false);
-});
+// (Per-round run dirs are gone with the pane migration: the pane is the
+// carrier, the session id the only identity. Round-end criteria now live in
+// probeJudgeRound (lib/judge-session-tools.ts), covered there.)
+//
+// (`hasJudgeFence` is gone with the fence itself: no text is scanned for a
+// verdict anymore — a round ends when judge_conclude writes a structured
+// report into the channel. See test/review-adjudicate.test.ts.)
 
 test("clampWaitTimeout defaults and caps", () => {
   assert.equal(clampWaitTimeout(undefined), JUDGE_WAIT_DEFAULT_TIMEOUT_MS);
@@ -129,42 +150,9 @@ test("NEEDS_HUMAN never passes", () => {
   assert.equal(adjudicateGoalAudit({ verdict: "NEEDS_HUMAN", findings: [], round: 1 }).pass, false);
 });
 
-// ---- a round is delivered or refused, never silently dropped ----
-
-test("a running judge REFUSES the round — it cannot receive one mid-turn", () => {
-  const decision = decideJudgeDispatch({ aliveSameRole: true, fresh: false, hasTranscript: true });
-  assert.equal(decision.action, "refuse-busy");
-});
-
-test("fresh:true discards the incumbent and starts the round", () => {
-  const decision = decideJudgeDispatch({ aliveSameRole: true, fresh: true, hasTranscript: true });
-  assert.equal(decision.action, "kill-and-spawn");
-});
-
-test("no live process ⇒ spawn, and an existing transcript means the session continues", () => {
-  assert.deepEqual(
-    decideJudgeDispatch({ aliveSameRole: false, fresh: false, hasTranscript: true }),
-    { action: "spawn", continuesSession: true },
-  );
-  assert.deepEqual(
-    decideJudgeDispatch({ aliveSameRole: false, fresh: false, hasTranscript: false }),
-    { action: "spawn", continuesSession: false },
-  );
-});
-
-test("context reuse never depends on a live process", () => {
-  // The bug this pins: 'reused' used to mean 'a process was still running',
-  // which silently dropped the round it claimed to have accepted.
-  for (const alive of [true, false]) {
-    for (const fresh of [true, false]) {
-      assert.equal(
-        decideJudgeDispatch({ aliveSameRole: alive, fresh, hasTranscript: true }).continuesSession,
-        true,
-      );
-    }
-  }
-});
-
+// (Round deliver-or-refuse is gone with the pane migration: a living pane
+// takes every round through its channel — refuse-busy belonged to the
+// one-shot process that read its task once.)
 
 test("the round number is shown and never drops below 1", () => {
   assert.match(adjudicateGoalAudit({ verdict: "READY", findings: [], round: 0 }).message, /第 1 轮审计/);
@@ -180,62 +168,104 @@ test("severity classification covers the forms judges actually write", () => {
   assert.equal(isBlockingSeverity(""), false);
 });
 
-// ---- user decision 6.2: what judge_wait RETURNS in each branch ----
+// (The shared wait formatter is gone with the pane migration: replies are
+// built where the criteria live now. The DISCIPLINE moved on 2026-09-05 to
+// lib/agent-directives.ts, where the project-manager wording lives beside it
+// — its assertions moved with it, to test/agent-directives.test.ts.)
 
-const REPLY_BASE = {
-  role: "reviewer",
-  waitedMs: 300_000,
-  stdoutTail: "line A\nline B\n",
-  findings: [],
-} as const;
+// ---------------------------------------------------------------------------
+// awaitRoundReport — waiting for the END of a round on top of a wait that
+// returns on every MESSAGE (P0, 2026-09-05). The gate's own audit chains are a
+// single synchronous call with nobody there to act on a finding, and they read
+// "not a report" as an unfinished audit — so a message-driven return would
+// close the auditor mid-round and make any draft with findings fail forever.
 
-test("a finished round returns the conclusion AND this round's stdout tail", () => {
-  const text = formatJudgeWaitReply({
-    ...REPLY_BASE,
-    done: true,
-    reason: "exit-code",
-    conclusion: { text: '```json\n{"gate":"READY"}\n```', hasVerdict: true },
+test("awaitRoundReport keeps waiting through mid-round messages and returns the report", async () => {
+  const windows: number[] = [];
+  const replies = [
+    { details: { reason: "finding" } },
+    { details: { reason: "question" } },
+    { details: { reason: "report" } },
+    { details: { reason: "report" } }, // must never be reached
+  ];
+  let clock = 0;
+  const slept: number[] = [];
+  const got = await awaitRoundReport({
+    wait: async (timeoutMs) => { windows.push(timeoutMs); clock += 1_000; return replies.shift()!; },
+    now: () => clock,
+    sleep: async (ms) => { slept.push(ms); },
   });
-  assert.match(text, /本轮已结束（判据：exit-code）/);
-  assert.match(text, /含 verdict fence/);
-  assert.match(text, /"gate":"READY"/, "the conclusion body is returned verbatim");
-  assert.match(text, /stdout 尾部/, "…and never instead of the stdout tail");
-  assert.match(text, /line B/);
+  assert.deepEqual(got, { details: { reason: "report" } });
+  assert.equal(windows.length, 3, "one call per message, then the report ends it");
+  assert.ok(windows[1]! < windows[0]!, "the budget is shared across the calls, not restarted by each");
+  assert.equal(replies.length, 1, "it stops at the report");
+  assert.deepEqual(slept, [], "a wait that took the whole gap needs no extra pause");
 });
 
-test("a finished round with no conclusion says so instead of pretending silence is output", () => {
-  const text = formatJudgeWaitReply({ ...REPLY_BASE, done: true, reason: "process-gone" });
-  assert.match(text, /没有留下结论文本/);
-  assert.match(text, /line B/, "the stdout tail is still the evidence of what happened");
+test("awaitRoundReport cannot SPIN when the wait keeps returning instantly", async () => {
+  // Round-2 P2: the loop's other termination reason (a cursor that advances)
+  // is written by somebody else, and a judge with no registry entry skips that
+  // write. A measured 354k iterations burned the budget, each with a tmux
+  // probe and two file reads. Liveness may not depend on another module.
+  //
+  // THE FAKE CLOCK ONLY MOVES INSIDE `sleep`, which is deliberate: the pause
+  // IS what makes progress here. That also means an implementation without the
+  // pause would never reach the deadline, so this test arms its own trip wire
+  // — a mutant that deletes the gap must FAIL FAST, not hang. (Measured: a
+  // reviewer's mutation run sat for 22 minutes on the un-armed version before
+  // it was killed by hand.)
+  let clock = 0;
+  let calls = 0;
+  const slept: number[] = [];
+  await awaitRoundReport({
+    wait: async () => {
+      calls++;
+      if (calls > 100) throw new Error("awaitRoundReport spun: the minimum gap is gone");
+      return { details: { reason: "finding" } };
+    },
+
+    now: () => clock,
+    budgetMs: 10_000,
+    minGapMs: 1_000,
+    sleep: async (ms) => { slept.push(ms); clock += ms; },
+  });
+  assert.equal(calls, 11, "the instant replies are paced by the gap, not spun through");
+  assert.ok(slept.every((ms) => ms === 1_000), "each pause is the full gap the call did not take");
 });
 
-test("an unfinished round returns PROGRESS: stdout tail plus the newest findings", () => {
-  const findings = Array.from({ length: WAIT_FINDINGS_SHOWN + 3 }, (_, i) => `[P1] a.ts:${i} — issue ${i}`);
-  const text = formatJudgeWaitReply({ ...REPLY_BASE, done: false, reason: "pending", findings });
-  assert.match(text, /仍在运行（等待 300s 未命中任一判据）/);
-  assert.match(text, new RegExp(`findings 最近 ${WAIT_FINDINGS_SHOWN} 条`));
-  assert.match(text, /issue 7/, "the NEWEST findings are the ones shown");
-  assert.doesNotMatch(text, /issue 0/, "…and the oldest are dropped, not the newest");
-  assert.doesNotMatch(text, /--- 结论/, "an unfinished round has no conclusion to report");
+
+test("awaitRoundReport ends on a dead pane, an error, an abort, or the budget", async () => {
+  const dead = await awaitRoundReport({
+    wait: async () => ({ details: { reason: "pane-dead" } }),
+    now: () => 0,
+  });
+  assert.equal(dead.details?.reason, "pane-dead", "a dead pane ends the round");
+
+  const failed = await awaitRoundReport({
+    wait: async () => ({ isError: true, details: { reason: "finding" } }),
+    now: () => 0,
+  });
+  assert.equal(failed.isError, true, "a failed wait is handed back, not retried forever");
+
+  let calls = 0;
+  const aborted = await awaitRoundReport({
+    wait: async () => { calls++; return { details: { reason: "finding" } }; },
+    now: () => 0,
+    aborted: () => true,
+  });
+  assert.equal(calls, 1, "an aborted caller stops after the call in flight");
+  assert.equal(aborted.details?.reason, "finding");
+
+  // The budget is what stops an auditor that streams findings forever.
+  let clock = 0;
+  let spins = 0;
+  const expired = await awaitRoundReport({
+    wait: async () => { spins++; clock += 30_000; return { details: { reason: "finding" } }; },
+    now: () => clock,
+    budgetMs: 60_000,
+  });
+  assert.equal(spins, 2, "it spends the budget and stops");
+  assert.equal(expired.details?.reason, "finding", "…returning the last thing it saw");
 });
 
-test("an unfinished round with an empty stream still reports the two channels honestly", () => {
-  const text = formatJudgeWaitReply({ ...REPLY_BASE, done: false, reason: "pending", stdoutTail: "" });
-  assert.match(text, /stdout 尚无输出/);
-  assert.match(text, /findings 流暂无内容/);
-});
 
-test("every reply carries the wait discipline", () => {
-  for (const done of [true, false]) {
-    assert.match(formatJudgeWaitReply({ ...REPLY_BASE, done, reason: "pending" }), /等待纪律/);
-  }
-});
-
-test("tailLines keeps the LAST n lines and leaves shorter text intact", () => {
-  const long = Array.from({ length: WAIT_STDOUT_TAIL_LINES + 10 }, (_, i) => `l${i}`).join("\n");
-  const tail = tailLines(long, WAIT_STDOUT_TAIL_LINES);
-  assert.equal(tail.split("\n").length, WAIT_STDOUT_TAIL_LINES);
-  assert.match(tail, /l49$/);
-  assert.equal(tailLines("a\nb", 40), "a\nb");
-  assert.equal(tailLines("", 40), "");
-});

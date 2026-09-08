@@ -1,0 +1,558 @@
+/**
+ * Judge-side self-conclusion — the ONLY way a round ends.
+ *
+ * A judge pane used to publish its verdict as a fenced JSON block in its
+ * prose, and the gate scraped every transcript tail for it on every settle
+ * (the window-truncation P0: a fence split across the tail window never
+ * matched, so the channel report never landed and the opener waited
+ * forever). Then the judge called ONE tool with structured fields — and the
+ * gate SYNTHESISED the canonical fence from them anyway, so the opener could
+ * parse it back out. The scraper was dead; its format lived on as the only
+ * consumer of itself.
+ *
+ * Since 2026-09-04 the structured fields travel structured: `judge_conclude`
+ * writes `verdict` / `findings` / `cwd` / `docSync` straight into the channel
+ * `report` record and the opener reads them as data. No fence is built, none
+ * is parsed, and philosophy three keeps exactly one implementation.
+ *
+ * THE SIGNATURE IS ROLE-SHAPED. A `reviewer` and a `goal-auditor` conclude
+ * with verdict + findings + cwd and NOTHING ELSE — there is no `notes`
+ * parameter to write prose into, which constrains output more reliably than
+ * any instruction could, and their prose was never read by anything. An
+ * `adviser` is the opposite case: its product IS the text, it never reaches
+ * the recorder, and the opener quotes it — so it keeps `notes`.
+ *
+ * Anti-forgery is the REGISTRATION surface, not a secret: the extension
+ * registers this tool only inside a judge session (see readJudgeSideEnv) and
+ * never on the main side, so a main session cannot self-certify a verdict.
+ * The handler re-checks the env first thing (defence in depth).
+ *
+ * One round, one conclusion: the opener numbers rounds on the persisted
+ * hierarchy entry (`roundSeq`, bumped at every dispatch) and stamps it on
+ * the report (`round`, a field the channel schema already carried). A second
+ * call for the same round is refused explicitly.
+ *
+ * ZERO-INSPECTION READY IS REFUSED HERE. Registration keeps a MAIN session
+ * from self-certifying a verdict; it does nothing about a main session that
+ * ORDERS the judge to certify one (measured: an adviser complied in eight
+ * seconds). So a verdict-bearing role concluding READY must have been observed
+ * inspecting something this round — the evidence is gathered in this same
+ * process (lib/judge-inspection.ts), the refusal costs no conclusion, and a
+ * genuine misjudgement is contested through `request_arbitration`
+ * (lib/inspection-appeal.ts). `adviser` is exempt: its conclusion is prose no
+ * recorder ever reads.
+ *
+ * Shape: pure core below, `registerJudgeConcludeTool(host, deps)` at the
+ * bottom; effects through `deps` only, like every other tool family.
+ */
+import { Type } from "typebox";
+
+import type { ToolHost, ToolReply } from "./tool-host.ts";
+import {
+  appendRecord,
+  channelPathFor,
+  judgeChannelTarget,
+  newChannelId,
+  readChannel,
+  sanitizeContextPercent,
+  type ChannelIO,
+  type ChannelRecord,
+  type ReviewScopeStamp,
+} from "./orchestrator-channel.ts";
+import { DOC_SYNC_ATTESTATIONS } from "./gate-state.ts";
+import { JUDGE_STREAM_ENV, readJudgeSideEnv } from "./judge-side.ts";
+import {
+  decideInspection,
+  evidenceForRound,
+  inspectionRecord,
+  type InspectionEvidence,
+} from "./judge-inspection.ts";
+import {
+  inspectionPassAuthorizes,
+  type InspectionBlock,
+  type InspectionPass,
+} from "./inspection-appeal.ts";
+import type { ReviewFinding } from "./review-adjudicate.ts";
+
+/** Tool name — pinned by structural tests on both sides of the registration. */
+export const JUDGE_CONCLUDE_TOOL = "judge_conclude";
+
+/** Verdicts a judge may conclude with (stored verbatim on the report). */
+export const CONCLUDE_VERDICTS = ["READY", "BLOCKED", "NEEDS_HUMAN"] as const;
+export type ConcludeVerdict = (typeof CONCLUDE_VERDICTS)[number];
+
+/** One finding as the judge reports it — the shape the record carries. */
+export type ConcludeFinding = ReviewFinding;
+
+/**
+ * The ONE role whose conclusion is prose.
+ *
+ * An adviser is consulted for a judgement in words: the opener quotes it
+ * (`conclusionExcerpt`) and no recorder ever sees it. Every other role
+ * concludes in `findings`, so giving it a prose field would only invite text
+ * that nothing reads. Kept as a predicate rather than a role list because the
+ * rule is about what the output IS, not about who happens to exist today.
+ */
+export function roleAcceptsNotes(role: string): boolean {
+  return role.trim().toLowerCase() === "adviser";
+}
+
+/** The refusal a reviewer / goal-auditor gets when it still passes `notes`. */
+export const NOTES_REFUSED_REASON =
+  "本角色不接受 notes，请把结论放进 findings（每条 severity + issue，能给证据就填 evidence）";
+
+/** Validated conclude input: exactly what the channel report will carry. */
+export interface ConcludedInput {
+  verdict: ConcludeVerdict;
+  findings: ConcludeFinding[];
+  cwd: string;
+  docSync?: string | undefined;
+  /** Prose — ADVISER ONLY; absent for every other role. */
+  notes?: string | undefined;
+}
+
+function fail(text: string): ToolReply {
+  return { content: [{ type: "text", text }], details: undefined, isError: true };
+}
+
+function reply(text: string, details: Record<string, unknown>): ToolReply {
+  return { content: [{ type: "text", text }], details };
+}
+
+/**
+ * Validate raw tool params into conclude input, for THIS role. Returns the
+ * reason when the params are unusable — a validation refusal NEVER consumes
+ * the round's single conclusion (only a written report does), so a role that
+ * passed `notes` by habit simply calls again without it.
+ */
+export function validateConcludeParams(params: Record<string, unknown>, role: string):
+  | { ok: true; input: ConcludedInput }
+  | { ok: false; reason: string } {
+  const verdictRaw = typeof params.verdict === "string" ? params.verdict.trim().toUpperCase() : "";
+  if (!(CONCLUDE_VERDICTS as readonly string[]).includes(verdictRaw)) {
+    return {
+      ok: false,
+      reason: `verdict 必须是 ${CONCLUDE_VERDICTS.join(" / ")} 之一（收到 ${JSON.stringify(params.verdict) ?? "空"}）`,
+    };
+  }
+  const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+  if (!cwd) {
+    return { ok: false, reason: "cwd 缺失——先跑 `pwd`，把它的原样输出填进 cwd 再调一次" };
+  }
+  const rawFindings = params.findings === undefined ? [] : params.findings;
+  if (!Array.isArray(rawFindings)) {
+    return { ok: false, reason: "findings 必须是数组（可为空数组）" };
+  }
+  const findings: ConcludeFinding[] = [];
+  for (let i = 0; i < rawFindings.length; i++) {
+    const f = rawFindings[i] as Record<string, unknown>;
+    if (typeof f !== "object" || f === null) {
+      return { ok: false, reason: `findings[${i}] 不是对象` };
+    }
+    const severity = typeof f.severity === "string" ? f.severity.trim() : "";
+    const issue = typeof f.issue === "string" ? f.issue.trim() : "";
+    if (!severity || !issue) {
+      return { ok: false, reason: `findings[${i}] 缺 severity 或 issue（两项都必填）` };
+    }
+    const file = typeof f.file === "string" && f.file.trim() !== "" ? f.file.trim() : undefined;
+    const line = typeof f.line === "number" && Number.isFinite(f.line) ? Math.floor(f.line) : undefined;
+    // `evidence` is OPTIONAL and unvalidated (D6): for most findings the
+    // evidence IS file:line, and demanding it only manufactures filler.
+    const evidence = typeof f.evidence === "string" && f.evidence.trim() !== "" ? f.evidence.trim() : undefined;
+    findings.push({
+      severity,
+      ...(file === undefined ? {} : { file }),
+      ...(line === undefined ? {} : { line }),
+      issue,
+      ...(evidence === undefined ? {} : { evidence }),
+    });
+  }
+  let docSync: string | undefined;
+  if (params.docSync !== undefined) {
+    const normalized = typeof params.docSync === "string" ? params.docSync.trim().toUpperCase() : "";
+    if (!DOC_SYNC_ATTESTATIONS.has(normalized)) {
+      return {
+        ok: false,
+        reason: `docSync 只能是 ${[...DOC_SYNC_ATTESTATIONS].join(" / ")}（收到 ${JSON.stringify(params.docSync) ?? "空"}），不覆盖代码改动时直接省略该字段`,
+      };
+    }
+    docSync = normalized;
+  }
+  // The role-shaped half of the signature. A reviewer / goal-auditor has no
+  // `notes` parameter at all, so passing one is refused outright rather than
+  // silently dropped — a silently ignored field teaches the caller nothing.
+  if (!roleAcceptsNotes(role)) {
+    if (params.notes !== undefined) {
+      return { ok: false, reason: NOTES_REFUSED_REASON };
+    }
+    return { ok: true, input: { verdict: verdictRaw as ConcludeVerdict, findings, cwd, docSync } };
+  }
+  if (params.notes !== undefined && typeof params.notes !== "string") {
+    return { ok: false, reason: "notes 必须是纯文本" };
+  }
+  const notes = typeof params.notes === "string" ? params.notes : "";
+  return { ok: true, input: { verdict: verdictRaw as ConcludeVerdict, findings, cwd, docSync, notes } };
+}
+
+/**
+ * Highest `round` among this judge's own reports in the channel (pre-tool
+ * reports carry none and count as 0). The opener uses it to number a fresh
+ * dispatch above every previous round; the judge uses it to recognise its
+ * own concluded round. Pure over the read records.
+ */
+export function maxSelfReportRound(records: ReadonlyArray<ChannelRecord>): number {
+  let max = 0;
+  for (const r of records) {
+    if (r.kind !== "report" || r.from !== "child") continue;
+    const round = (r as { round?: unknown }).round;
+    if (typeof round === "number" && Number.isFinite(round)) max = Math.max(max, Math.floor(round));
+  }
+  return max;
+}
+
+/**
+ * The next round number: above both the persisted entry and every report
+ * already in the channel (a close→spawn keeps the old reports, so the entry
+ * alone would restart at 1 and collide with them).
+ */
+export function nextRoundSeq(entrySeq: number | undefined, records: ReadonlyArray<ChannelRecord>): number {
+  const base = typeof entrySeq === "number" && Number.isFinite(entrySeq) ? Math.floor(entrySeq) : 0;
+  return Math.max(base, maxSelfReportRound(records)) + 1;
+}
+
+/**
+ * May this round conclude? Refuse only when one of OUR reports already
+ * closes THIS round — older rounds' reports (a previous review under the
+ * same id) never block. Returns the existing report id for the message.
+ */
+export function decideConclude(
+  records: ReadonlyArray<ChannelRecord>,
+  currentRound: number,
+): { ok: true } | { ok: false; reportId: string } {
+  for (const r of records) {
+    if (r.kind !== "report" || r.from !== "child") continue;
+    const rec = r as { round?: unknown; reportId?: unknown };
+    if (typeof rec.round === "number" && rec.round === currentRound) {
+      return { ok: false, reportId: typeof rec.reportId === "string" ? rec.reportId : "?" };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * Stream line count for the report (gate-counted from RG_JUDGE_STREAM, never
+ * judge-reported). Falls back to the findings length when there is no stream.
+ */
+export function countStreamFindings(readText: (path: string) => string | undefined, streamPath: string | undefined, fallback: number): number {
+  if (!streamPath) return fallback;
+  try {
+    const raw = readText(streamPath);
+    if (raw === undefined) return fallback;
+    return raw.split("\n").filter((l) => l.trim().length > 0).length;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * HOW MUCH OF ONE FINDING'S PROSE REACHES THE PANE.
+ *
+ * A finding renders on ONE line so the round can be scanned at a glance; an
+ * issue long enough to wrap turns that list back into the prose it replaced.
+ * Nothing is lost by cutting it here — the channel record carries every
+ * finding verbatim, and this text is a second rendering for eyes only.
+ */
+export const PANE_ISSUE_MAX_CHARS = 200;
+
+/** How much of an `evidence` string may stand in as a locator. */
+const PANE_EVIDENCE_MAX_CHARS = 80;
+
+/** One line, whitespace flattened, at most `max` characters of it. */
+function clampToLine(raw: string, max: number): string {
+  const flat = raw.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+/**
+ * WHERE TO LOOK, in the best form this finding offers.
+ *
+ * `file:line` when the judge gave both, the file alone when it gave one, and
+ * `evidence` as the fallback — a finding with no file at all still told the
+ * reader where to look, and dropping that would leave the locator slot empty
+ * precisely where it is needed most. Empty string when the finding offers
+ * nothing; the caller then renders no locator rather than an empty bracket.
+ */
+function paneLocator(f: ConcludeFinding): string {
+  if (f.file !== undefined) return f.line === undefined ? f.file : `${f.file}:${f.line}`;
+  if (f.evidence !== undefined) return clampToLine(f.evidence, PANE_EVIDENCE_MAX_CHARS);
+  return "";
+}
+
+/** One finding on one line: how bad, where, and what. */
+function paneFindingLine(f: ConcludeFinding): string {
+  const severity = f.severity.trim() || "?";
+  const locator = paneLocator(f);
+  return `[${severity}]${locator === "" ? "" : ` ${locator}`} — ${clampToLine(f.issue, PANE_ISSUE_MAX_CHARS)}`;
+}
+
+/**
+ * THE ROUND'S CONCLUSION, RENDERED FOR THE HUMAN SITTING NEXT TO THE PANE.
+ *
+ * The verdict and the findings travel to the OPENER as structured data in the
+ * channel record, and that is the only path anything machine-readable uses.
+ * It left one party with no copy at all: the person watching the judge's own
+ * pane, who saw "verdict=BLOCKED, findings=3" and had to go and find the
+ * opener to learn WHICH three.
+ *
+ * So this is a TEXT-ONLY addition and deliberately nothing else. The record is
+ * built and appended untouched; this renders the same facts a second time, for
+ * eyes. Pure over its input, so the wording is unit-testable without a channel.
+ */
+export function formatConcludedForPane(input: {
+  verdict: ConcludeVerdict;
+  findings: ReadonlyArray<ConcludeFinding>;
+}): string {
+  const lines = [`verdict = ${input.verdict}`];
+  if (input.findings.length === 0) {
+    lines.push("findings：无。");
+    return lines.join("\n");
+  }
+  lines.push(`findings（${input.findings.length} 条）：`);
+  input.findings.forEach((f, i) => lines.push(`${i + 1}. ${paneFindingLine(f)}`));
+  return lines.join("\n");
+}
+
+
+/** Everything the tool needs from the outside world. */
+export interface JudgeConcludeToolDeps {
+  /** This judge pane's environment (identity comes from RG_JUDGE_*). */
+  env(): NodeJS.ProcessEnv;
+  /** Repo root (the pane's cwd) — locates the persisted hierarchy slice. */
+  repoRoot(): string;
+  /** Absolute path of one repo's hierarchy file. */
+  hierarchyPath(root: string): string;
+  /** Whole file, or undefined when absent/unreadable. */
+  readText(path: string): string | undefined;
+  /** Channel filesystem seam and its home override. */
+  channelIO(): ChannelIO;
+  channelHome(): string | undefined;
+  /** Injectable clock. */
+  now(): number;
+  /**
+   * THIS round's inspection evidence, as the gate observed it in this process
+   * (lib/judge-inspection.ts). Required, not optional: an unwired host would
+   * otherwise silently report "no evidence available" and the rule would be
+   * whatever the wiring forgot.
+   */
+  inspection(): InspectionEvidence;
+  /**
+   * THIS round's review scope — the commit range and the full/incremental
+   * decision, as the host read them back from the round's task text
+   * (`parseReviewRange` / `parseReviewScopeKind`, lib/judge-inspection.ts).
+   *
+   * Required for the same reason `inspection` is: a host that forgot to wire
+   * it would produce reports that silently carry no audit stamp, and "no
+   * stamp" is indistinguishable from "the round had no range". Returning
+   * `undefined` is the honest answer when the task text carried neither — a
+   * goal audit, for instance.
+   */
+  reviewScope(): ReviewScopeStamp | undefined;
+
+  /**
+   * HOW FULL THIS JUDGE'S CONTEXT IS, in percent, as its own host reports it.
+   *
+   * Required, like `inspection` and `reviewScope` above, and for the same
+   * reason: an unwired host would report nothing, the opener would read "no
+   * reading", and the transcript would then be bounded by the round cap alone
+   * — silently, with nothing to notice. `undefined` stays the honest answer
+   * for a host that genuinely cannot measure usage.
+   */
+  contextPercent(): number | undefined;
+
+  /** The live appeal pass, when `request_arbitration` granted one. */
+  inspectionPass(): InspectionPass | undefined;
+  /** A zero-inspection READY was refused — the appeal route needs to see it. */
+  noteInspectionRefusal(block: InspectionBlock): void;
+  /** A round ended: reset the evidence, and spend the pass when it was used. */
+  noteConcluded(usedPass: boolean): void;
+}
+
+/** Read our persisted round number, or refuse when the gate state is unreadable. */
+function readOwnRoundSeq(deps: JudgeConcludeToolDeps, judgeId: string): { ok: true; round: number } | { ok: false; reason: string } {
+  let raw: string | undefined;
+  try {
+    raw = deps.readText(deps.hierarchyPath(deps.repoRoot()));
+  } catch {
+    raw = undefined;
+  }
+  if (raw === undefined) {
+    return { ok: false, reason: "门禁登记表不可读（文件缺失或读失败）——稍后重试，不要重复交卷" };
+  }
+  try {
+    const snap = JSON.parse(raw) as { judges?: Record<string, { roundSeq?: unknown }> };
+    const entry = snap?.judges?.[judgeId];
+    if (!entry) {
+      return { ok: false, reason: `登记表里没有本 review（${judgeId}）——它可能已被关闭；不要交卷，去问 opener` };
+    }
+    const seq = entry.roundSeq;
+    return { ok: true, round: typeof seq === "number" && Number.isFinite(seq) ? Math.floor(seq) : 0 };
+  } catch {
+    return { ok: false, reason: "门禁登记表已损坏无法解析——稍后重试，不要重复交卷" };
+  }
+}
+
+async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, unknown>): Promise<ToolReply> {
+  const cfg = readJudgeSideEnv(deps.env());
+  if (!cfg) {
+    return fail("review-gate: judge_conclude 只在 review 会话里可用——主会话不能自证裁决。");
+  }
+  const validated = validateConcludeParams(params, cfg.role);
+  if (!validated.ok) {
+    return fail(`review-gate: 交卷被拒绝（参数问题，不占交卷额度）：${validated.reason}。修正后调一次。`);
+  }
+  const input = validated.input;
+  const seq = readOwnRoundSeq(deps, cfg.judgeId);
+  if (!seq.ok) {
+    return fail(`review-gate: 交卷被拒绝（门禁状态问题，不占交卷额度）：${seq.reason}`);
+  }
+  const io = deps.channelIO();
+  const home = deps.channelHome();
+  const target = judgeChannelTarget(cfg.openerId, cfg.judgeId, home);
+  let records: ChannelRecord[];
+  try {
+    records = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
+  } catch {
+    return fail("review-gate: 交卷被拒绝（通道不可读，不占交卷额度）：稍后重试，不要重复交卷。");
+  }
+  const decided = decideConclude(records, seq.round);
+  if (!decided.ok) {
+    return fail(`review-gate: 本轮已交过卷（report ${decided.reportId})——重复调用被拒绝，不计入任何轮次。停下等 opener，不要再调。`);
+  }
+  const now = deps.now();
+  // THE INSPECTION GATE. Placed after the duplicate-round check and before
+  // anything is written: a refusal here writes no report, so it costs the
+  // round nothing — the judge reads the reason, goes and looks at the code (or
+  // appeals), and calls again.
+  // NARROWED TO THIS ROUND FIRST. The observer stamps each action with the
+  // round it read from the registry; `seq.round` is the AUTHORITATIVE one for
+  // the conclusion being written. A pane that never concluded its previous
+  // round still holds that round's actions, and they are not this round's.
+  const evidence = evidenceForRound(deps.inspection(), seq.round);
+  const gate = decideInspection({
+    role: cfg.role,
+    verdict: input.verdict,
+    evidence,
+    passAuthorized: inspectionPassAuthorizes(deps.inspectionPass(), cfg.judgeId, seq.round),
+  });
+  if (!gate.ok) {
+    deps.noteInspectionRefusal({
+      judgeId: cfg.judgeId,
+      role: cfg.role,
+      round: seq.round,
+      evidence,
+      reason: gate.reason,
+      at: now,
+    });
+    return fail(`review-gate: 交卷被拒绝（本轮未观测到任何审查动作，不占交卷额度）：${gate.reason}`);
+  }
+  const streamPath = (deps.env()[JUDGE_STREAM_ENV] ?? "").trim() || undefined;
+  const findingsCount = countStreamFindings((p) => deps.readText(p), streamPath, input.findings.length);
+  const notes = (input.notes ?? "").trim();
+  const reviewScope = deps.reviewScope();
+  // Sanitized on the WRITING side too: the host's reading is a number from
+  // another subsystem, and a NaN on the wire would read back as "no reading"
+  // anyway — dropping it here keeps the record honest at the source.
+  const contextPercent = sanitizeContextPercent(deps.contextPercent());
+  const report = {
+    reportId: newChannelId("rep", now),
+    kind: "report" as const,
+    from: "child" as const,
+    at: new Date(now).toISOString(),
+    round: seq.round,
+    verdict: input.verdict,
+    findingsCount,
+    // Verbatim: the opener records exactly what was concluded here.
+    findings: input.findings,
+    cwd: input.cwd,
+    ...(input.docSync === undefined ? {} : { docSync: input.docSync }),
+    // Prose only where prose is the product (adviser); a reviewer's report
+    // carries none, so no judge text can reach the opener's context.
+    ...(notes === "" ? {} : { summary: notes }),
+    // What the gate OBSERVED this round, stamped on the round it belongs to.
+    // A NEW OPTIONAL field: an opener running an older build ignores it and
+    // consumes the report exactly as before (parseRecord is tolerant), which
+    // is the only reason a judge on a new build can report to one at all.
+    inspection: inspectionRecord(evidence, gate.usedPass),
+    // WHAT THIS ROUND REVIEWED, for the audit trail: the range and the
+    // full/incremental decision this pane read out of its own task text. Also
+    // a new OPTIONAL field, and omitted entirely when the round had neither
+    // (a goal audit) — an empty object would claim a stamp that does not
+    // exist. The opener records it beside what IT dispatched, so the two can
+    // be compared later.
+    ...(reviewScope === undefined ? {} : { scope: reviewScope }),
+    // HOW FULL THIS JUDGE'S CONTEXT IS, measured in the only process that can
+    // measure it. The opener's rotation policy (lib/judge-rotation.ts) reads
+    // it off the report and decides, before the NEXT round, whether this
+    // transcript keeps going. A third new OPTIONAL field, omitted when the
+    // host offers no reading — and "omitted" is the fail-open case there, so
+    // an old opener (or an unwired host) simply keeps reusing as before.
+    ...(contextPercent === undefined ? {} : { contextPercent }),
+
+  };
+  try {
+    appendRecord(io, target, report);
+  } catch (err) {
+    return fail(`review-gate: 交卷写入失败（不占交卷额度）：${(err as Error).message}。稍后重试。`);
+  }
+  // The round is over: its evidence must not carry into the next one, and a
+  // pass that carried this READY is spent.
+  deps.noteConcluded(gate.usedPass);
+  return reply(
+    `review-gate: 本轮结论已交卷（report ${report.reportId}，verdict=${input.verdict}，findings=${input.findings.length}）。停下等 opener，不要再调一次。\n\n`
+    // The same conclusion a second time, for the human watching THIS pane.
+    // Text only: the record above is what the opener consumes, and it was
+    // built and appended before this line ever ran.
+    + `── 本轮交卷内容（给人看的；opener 读的是通道里的结构化记录）──\n`
+    + formatConcludedForPane(input),
+    { concluded: true, reportId: report.reportId, round: seq.round, verdict: input.verdict },
+  );
+}
+
+/**
+ * Register `judge_conclude` — the caller guards it to judge sessions only.
+ *
+ * The SCHEMA is role-shaped, not just the validation: a reviewer's tool
+ * simply has no `notes` parameter to fill in.
+ */
+export function registerJudgeConcludeTool(host: ToolHost, deps: JudgeConcludeToolDeps): void {
+  const role = readJudgeSideEnv(deps.env())?.role ?? "reviewer";
+  const findingSchema = Type.Object({
+    severity: Type.String(),
+    file: Type.Optional(Type.String()),
+    line: Type.Optional(Type.Number()),
+    issue: Type.String(),
+    evidence: Type.Optional(Type.String({ description: "Where to look, when file:line is not enough (optional)" })),
+  });
+  const base = {
+    verdict: Type.Enum({ READY: "READY", BLOCKED: "BLOCKED", NEEDS_HUMAN: "NEEDS_HUMAN" }),
+    findings: Type.Optional(Type.Array(findingSchema)),
+    cwd: Type.String({ description: "What `pwd` printed in the reviewed repo (never copy it from the task)" }),
+    docSync: Type.Optional(Type.String({ description: "UPDATED | NOT_NEEDED, when the review covers code changes" })),
+  };
+  host.registerTool({
+    name: JUDGE_CONCLUDE_TOOL,
+    label: "Conclude Own Review Round",
+    description:
+      "Submit THIS review round's conclusion (one call per round; a second call is refused). " +
+      (roleAcceptsNotes(role)
+        ? "Your conclusion IS the prose: put it in `notes`. "
+        : "The conclusion is the structured fields — there is no prose field, and prose written after this call is read by nobody. ") +
+      "Only registered inside a review session — the main session never sees it.",
+    parameters: Type.Object(
+      roleAcceptsNotes(role)
+        ? { ...base, notes: Type.String({ description: "Your conclusion and its key points, as plain prose" }) }
+        : base,
+    ),
+    execute: (_id, params) => doConclude(deps, params),
+  });
+}

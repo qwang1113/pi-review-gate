@@ -1,3 +1,16 @@
+> 2026-09-04 更新：judge 运行形态已从非交互进程迁为独立 pane（层级化调用：
+> 项目经理 → 子会话 → review，跨级调用由门禁拒绝），完成信号从进程退出改为
+> 通道 report。本文其余部分的进程-era 描述（`pi -p`、exit-code、stdout 扫描）
+> 已失效，以 `docs/hierarchical-session-design.md` 与实现为准；本文件的 commit
+> 审核单元、STALE/tree 绑定等判定语义不变。
+>
+> 同日第二处更新：**verdict fence 也退役了**。judge 调 `judge_conclude` 交卷，
+> 结构化字段（verdict / findings / cwd / docSync）**直接写进 channel report**，
+> opener 当数据读——没有 fence 合成，也没有 fence 解析。原本只存在于解析器里的
+> reviewer 裁决规则搬到了 `lib/review-adjudicate.ts`（READY 携带未解决 P0/P1 →
+> BLOCKED、findings 计数、跨轮 fingerprint），语义逐条不变。下文凡说「fence」
+> 的地方一律读作「`judge_conclude` 交卷」。
+
 # 执行模型：独立 pi 进程子会话 + commit 审核（execution-model）
 
 本文记录 pi-review-gate 的 review 执行模型（2026-08-28 起）——judge
@@ -17,16 +30,19 @@
    生命周期、信号、布局、`wait-for` 无超时、多行输入被 TUI 撕碎、
    崩溃后「pane 没了但 exit-code 没写」的歧义，全部成本都在这一层。
 
-2026-08-28 起，壳子退役：judge 是 `pi -p --session-id` **非交互进程**，
-`--session-id` 按 role+repo 确定性派生，进程退出即完成，同一 id 再拉起
-即续接同一段上下文。隔离仍来自 **commit 本身**：每次送审前主会话把改动
+2026-09-04 起，进程退役：judge 是用户 window 里与主会话同窗的独立 pane
+中的**交互 pi 进程**（门禁以 judge 模式加载，只给 reporting-shell 工具集）。
+`--session-id` 按 role+repo 确定性派生；judge 调 `judge_conclude` 交卷并停下
+（不退出进程，pane 留给下一轮复用），交卷把结构化结论直接写进 channel report，
+opener 凭它记录结论；
+同一 id 重开 pane 即续接同一段上下文。隔离仍来自 **commit 本身**：每次送审前主会话把改动
 提交为 checkpoint commit，审核者审 `baseline..HEAD`（不可变历史）。
 
-## 运行形态：进程，不是 pane
+## 运行形态：pane 承载，轮是任务
 
-- judge = `pi -p --no-extensions --no-skills --exclude-tools edit,write
-  --system-prompt <SP> --model <M> --session-dir <dir> --session-id <id>
-  @<task文件>`。非交互：处理完 prompt 即退出；stdout/stderr 由扩展 tee
+- judge = 用户 window 里的独立 pane 中的**交互 pi 进程**
+  （`pi --session-id <id> @<task文件>`，门禁以 judge 模式加载：reporting-shell
+  工具集 + heartbeat 上报 + `judge_conclude` 落 report）。stdout/stderr 由扩展 tee
   到本轮 `stdout.log` / `stderr.log`。
 - **session id 是 resume 键**：`rg-<role>-<repoHash>`（确定性派生）。
   同 role + 同 repo 再 spawn 同一 id ⇒ 延续同一段对话（跨轮、跨主会话
@@ -41,35 +57,39 @@
 
 ## 生命周期与 liveness
 
-- **完成 = 进程退出**（操作系统保证）。扩展持有 ChildProcess 对象本身：
-  `child.exitCode === null` ⇔ 存活——没有 PID 复用歧义、没有 pane 探针。
-- 每轮 spawn 写 `runs/<ts>/`：`pid`（`<pid> <启动时刻>`，供跨会话接管）、
-  `exit-code`（**存在**即"已结束"的权威事实）、`stdout.log`、`stderr.log`。
-  `lib/judge-session.ts` 的读取逻辑（exit-code 优先、pid 身份三态判定）
-  保留，用于**主会话重启后**按 pid 文件接管/清扫孤儿。
-- **一轮只能交给一个空闲的 role**：同 role 进程仍在跑 ⇒ 本轮**拒绝受理**
-  （非交互 judge 只在 spawn 时读一次任务，没有中途投递的通道；假装受理
-  就会让主会话等一个从未送达的轮次）。等它退出后再提交，或 `fresh: true`
-  先 SIGTERM 旧进程。
-- **上下文复用靠 session，不靠进程**：已结束的进程先清出 registry，下一轮
-  用同一个 session id 重新 spawn —— pi 追加进同一个 jsonl，上下文原样延续。
-  「是否续接」由该 role 的 sessionDir 里是否已有 transcript 决定。
-- **孤儿接管**：主会话重启后 registry 重建，按 `.pi/judge-sessions/`
-  下的 pid/exit-code 文件判定旧进程是否还活着，活着的可继续（同 id
-  resume），死了的清理。
+- **完成 = `judge_conclude` 落 channel report**。pane 是承载体、轮是任务：verdict 为
+  BLOCKED（还有下一轮）时 pane 保留复用；终结（READY、opener 放弃、换 review 对象）
+  时门禁回收 pane，transcript 与裁决记录保留。
+- **存活由 pane 名单判定**：opener 的运行期检查一次拉取本 window 的 pane 列表
+  （`listJudgePanes`），记录在但名单里没有 ⇒ pane 死亡；名单读不出 ⇒ 按活着处理
+  （缺信息永不结束等待，fail-closed）。心跳（channel state 记录）是第二信号。
+- **一轮一 pane**：同 judge 仍有活 pane ⇒ 新一轮走复用/排队语义，由门禁在派发时
+  决定（`dispatchJudgeRound`），opener 不手选。
+- **上下文复用靠 session，不靠 pane**：同一 role + 同一 repo + 同一 lane 同一 session id，重开
+  pane 即追加进同一个 jsonl，上下文原样延续。「是否续接」由该 role 的 sessionDir
+  里是否已有 transcript 决定。
+- **复用是有界的（`lib/judge-rotation.ts`，2026-09-05）**：复用单元是一个**已批准的
+  review 对象**（编排会话取 plan hash、其余取 goal hash，都没批准时是稳定占位对象，
+  占位对象同样受闸）；释放点是对象 id 变了（惰性判定，下次派发时比对）；上限是 judge
+  自报上下文 60% 或同对象派满 8 轮，任一命中门禁自己开新 transcript（lane 代次 +1）
+  并只带压缩交接。上下文读数缺失时不因它轮转（fail-open），轮次在**派发时**计数所以
+  放弃的轮也算。旧 lane 的 pane 当场回收、目录原地保留走既有 TTL；agent 侧无感、无开关。
+- **重启接管**：opener 注册表落盘（`<repo>/.pi/judge-hierarchy.json`，按 repo 分片），
+  新会话启动与每次触达时懒合并；死 pane 的异主条目由触达者过户，活 pane 保持拒绝。
+  绝不为同一 session id 再开第二个 pi。
 
 ## 通信
 
-- **完成信号**：没有信号——进程退出即完成。扩展在 spawn 时注册
-  `child.on("exit")`，回调 `pi.sendMessage(..., { triggerTurn: true,
-  deliverAs: "steer" })` 主动唤醒主会话——不轮询。
-- **提问**：judge 把问题作为**最后一个 fenced JSON 输出**并退出
-  （`{"question": "...", "context": "..."}`）；主会话读到 question fence
-  后带着答案用**同一个 session id** 重新拉起（再 `judge_submit` 同一 role 即可），
-  上下文原样延续。没有 inbox 文件、没有 channel。
+- **完成信号**：`judge_conclude` 交卷。pane 调完就停下（不退出进程，留给下一轮
+  复用）；交卷把结构化结论写进 channel report，门禁在每次 settle 时看到新 report
+  即记录结论、用标准报告唤醒 opener——父会话不轮询、不直读 transcript。
+- **提问**：judge 调 `ask_user`（人与 opener 经通道竞态，先答先生效）；等答案时停下，
+  不自行假定、不退出 pane。问答闭环由门禁中转，父会话收到的永远是整理后的报告，
+  不是 judge 原文。
 - **流式 findings**：追加到 `.pi/review-stream/<round>.jsonl`
   （仅证据，禁止 verdict 形状的行）。
-- **子会话的问题走点对点通道**（2026-08-30）：`propose_loop_goal` 的批准框与
+- **子会话的问题走点对点通道**（2026-08-30）：`propose_loop_goal` 的批准框、
+  `propose_restatement` 的反述确认框（2026-09-06）与
   `ask_user` 的每一问都写进**本子会话专属的通道文件**
   （`~/.pi/agent/rg-channels/<orch-id>/<child-id>.jsonl`），带完整选项与正文。
   项目经理与坐在 pane 前的人**任意一方先答即生效**，另一边的框自动撤下。
@@ -80,31 +100,38 @@
   OSC 777/9/99，只有项目经理能发，且带节流）。
 
 - **主会话存活不变量**（round-18，用户硬约束）：门禁未通过前主会话**不得**
-  停止自动循环。`agent_settled` 的 `classifyChildren()`（lib/child-watch.ts）
-  托管等待：进程已退出或静默超时的子会话**立即结束等待**（注入
-  `REVIEW_GATE_CHILD_ENDED`：judge_read 读取已有输出继续 / judge_close
-  后重新派发）；仍在飞的子会话注入 `REVIEW_GATE_CHILD_HOST_WAIT`
-  （先做确定性工作；确实没别的可做时调 `judge_wait({role})`，它在门禁里
-  跑同样的三条判据并把结论带回来）。仅三类
-  情形允许停止：用户显式中止（ESC）、`ask_user` 等待用户回答、
+  停止自动循环。`agent_settled` 先跑 `settleFinishedRounds()`：有新 channel report 的
+  子会话**立即**以标准报告唤醒（结论、证据位置、记录情况、待答问题）并记入链；
+  再跑 `classifyChildren()`（lib/child-watch.ts）托管其余：pane 死亡或静默超时的
+  子会话**立即结束等待**（注入 `REVIEW_GATE_CHILD_ENDED`，按有无 report 分别处理）；
+  仍在飞的子会话注入 `REVIEW_GATE_CHILD_HOST_WAIT`（等待纪律见下）。
+  **等待纪律**（2026-09-05 起，唯一出处 `lib/agent-directives.ts` 的
+  `buildWaitDiscipline`）：①有确定性工作先做掉（提示、不强求：送完 reviewer 往往
+  没事可做，可以看看下一轮要什么或先备收尾报告）；②确实没活了才调
+  `judge_wait`——不是手写 sleep 轮询，也不是结束 turn（存活不变量仍然成立）；
+  ③`judge_wait` 消息驱动：新 finding / judge 提问 / 本轮结论 / pane 消失任一到达即返回。
+
+  仅三类情形允许停止：用户显式中止（ESC）、`ask_user` 等待用户回答、
   所有门禁与 goal 均完成。
-- **子会话终止的三条独立判据**（round-18 起，实测失败模式：子会话已输出
-  verdict 但进程未退/未退出，主会话阻塞空等）：(a) 进程 exit 事件；
-  (b) **进程已结束**（`exit-code` 文件出现，或记录的 pid 已不在——用
-  `kill -0 <pid 文件第一段>` 判定，崩溃的子会话可能来不及写 exit-code，
-  它同样算已结束）；(c) 静默超过 `STALL_MOTION_MAX_AGE_SEC`
-  （lib/loop-stall.ts，600 秒），按 `lastActivityAt` 计时——取自子会话
-  自己的写入（transcript / stderr / stdout 中最新 mtime），只有一次都没
-  写过时才回退到 `spawnedAt`。任一命中主会话自行恢复推进——子会话的
+- **一轮结束的三条独立判据**：(a) **本轮自己的** channel report 落盘
+  （`settleFinishedRounds` 以标准报告唤醒并记入链）—— 对 code review 而言「本轮自己的」
+  是有判据的（2026-09-05）：report 的 `round` 必须等于本轮 dispatch 登记的 `roundSeq`，
+  且在本仓库已有 checkpoint 时 `report.at` 必须严格晚于 `state.checkpoint.at`；不满足
+  的 report **不结束本轮**，只在唤醒文本里报成「未采纳的 report」（判据出处
+  `selectRoundReport` / `roundBindingFor`，`lib/audit-round.ts`，记录侧与探测侧共用）；
+  (b) **pane 死亡**（本 window 名单里没有记录的 pane id——名单读不
+  出按活着处理，缺信息永不结束等待）；(c) 静默超过 `STALL_MOTION_MAX_AGE_SEC`
+  （lib/loop-stall.ts，600 秒），按 `lastActivityAt` 计时——取自子会话的 channel 写入，
+  只有一次都没写过时才回退到 `spawnedAt`。任一命中主会话自行恢复推进——子会话的
   完成信号是**加速器，不是前提**。
-- **结论取数**：进程已结束时读它自己的 transcript——`sessionDir`
-  （启动时记录）下**顶层**（不递归，避开 `subagent-artifacts/`）mtime
-  最新的 `*.jsonl`，取**最后一条含 verdict fence 的 assistant 文本**。
+- **结论取数**：读该 report 的结构化字段——`verdict` / `findings[]` / `cwd` /
+  `docSync` 就是 judge 交卷时给的原值，opener 直接消费；只有 adviser 的 report
+  带 `summary`（它的产出就是正文）。transcript 是长记忆，不是信号。
 - **排查**：`tail -f <runDir>/stdout.log`（实时）、grep sessionDir 的
   jsonl（结构化输入输出）、`pi --export <jsonl> <out.html>`（完整回顾）。
 - **等待期的可见性（2026-08-29 起，默认开启）**：耗时工具通过 `execute` 的第
   4 个参数 `onUpdate` 发**进度快照**（`lib/progress-stream.ts`，节流 2s）：
-  `judge_wait`（每次探测重发 stdout 尾部 + findings 计数）、`judge_submit`
+  门禁内部等待（每次探测重发 findings 计数与状态）、`judge_submit`
   的送审链（precommit → checkpoint → prepare → spawn，逐步报）、
   `run_precommit`（runner 日志作为步骤尾部）、`declare_done`（门禁复检 →
   合并）、`request_copilot_review` / `check_copilot_review`（每次网络调用一
@@ -112,9 +139,10 @@
   道回答不同的问题。`tool_call` 钩子没有 `onUpdate`，所以 6 处 LLM 判定
   （L5 语义 / L6 标签 / ship 分类 / AI 署名）改用状态栏：超过 ~3s 才提示一
   次，结束即清除。
-- **`judge_wait` 的返回值**：本轮结束 ⇒ 结论正文 + 本轮 stdout 尾部；未结束
-  或超时 ⇒ 当前进度（stdout 尾部 + findings 流最近几条）。它与上面的流式快
-  照互不替代：快照给人看，返回值给 agent 读。
+- **标准报告的内容**：新 report 落盘 ⇒ 标准报告（结论、findings 数、流证据位置、
+  记录情况、待答问题）经 followUp 送达并记入链；无 report 的结束（pane 死亡、静默
+  超限）如实报未记录、不认结论。它与上面的流式快照互不替代：快照给人看，报告给
+  agent 干活。
 
 ## 编排层：另一种子会话（2026-08-29 引入 · 2026-08-30 通道重构）
 
@@ -122,13 +150,14 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 
 | | judge 子会话 | 编排子会话 |
 |---|---|---|
-| 形态 | `pi -p` 一次性进程，不占 pane | 交互式 pi，占用户 window 里的一个 pane |
-| 谁开的 | `judge_submit` | `orchestrator_spawn`（唯一入口） |
-| 「有事了」 | 进程退出 | **`orchestrator_wait` 的回执**（它自己去读每条通道，把结果推给你） |
-| 状态从哪来 | 进程存活 / `exit-code` 文件 | 七态结构化真值：`working` / `waiting-input` / **`waiting-judge`**（在等门禁自己派的 reviewer/precommit，附已等秒数，不叫醒项目经理）/ `idle` / `done` 由子会话自报（心跳是扩展自己的定时器，与 agent 是否活跃无关），`dead`（pane 消失）与 `stalled`（心跳超时 ⇒ 扩展真的不在了）由编排侧从外面判 |
-| 正常终态 | 输出 verdict 后退出 | `declare_done` 之后**仍然活着** |
-| 异常终态 | exit-code 文件缺失 | pane 消失（`dead`）或心跳停摆（`stalled`），用 `orchestrator_recover` 复活 |
-| 等待 | `judge_wait` | `orchestrator_wait` |
+| 形态 | 交互式 pi，占用户 window 里与主会话同窗的一个 pane | 交互式 pi，占用户 window 里的一个 pane |
+| 谁开的 | `judge_submit`（意图入口；生命周期归门禁） | `orchestrator_spawn`（唯一入口） |
+| 「有事了」 | 新 channel report 落盘（门禁以标准报告唤醒） | **`orchestrator_wait` 的回执**（它自己去读每条通道，把结果推给你） |
+| 状态从哪来 | pane 存活（window 名单）+ channel 心跳/state/report 记录 | 八态结构化真值（权威清单：`lib/orchestrator-child-state.ts` 的 `CHILD_STATES`）：`working` / `waiting-input` / **`waiting-judge`**（在等门禁自己派的 reviewer/precommit，附已等秒数，不叫醒项目经理）/ `idle` / `done` / `mode-changed`（它改了门禁模式）由子会话自报（心跳是扩展自己的定时器，与 agent 是否活跃无关），`dead`（pane 消失）与 `stalled`（心跳超时 ⇒ 扩展真的不在了）由编排侧从外面判 |
+| 正常终态 | verdict 落 channel report（pane 按终结规则回收复用） | `declare_done` 之后**仍然活着** |
+| 异常终态 | pane 消失但结论未落盘（本轮不算结束，`judge_recover` 同 id 续接） | pane 消失（`dead`）或心跳停摆（`stalled`），用 `orchestrator_recover` 复活 |
+| 等待 | `judge_wait`（消息驱动，确实没活可做时才调；没在等时新 report 落盘仍以标准报告唤醒） | `orchestrator_wait` |
+
 
 关键推论：**编排子会话干完活不会退出**，所以「等进程结束」在这里会永远挂住。
 两个等待共用 `lib/poll-wait.ts` 这一套骨架（probe / 发快照 / 判据或预算命中
@@ -208,8 +237,8 @@ spawn（无 shell）；门禁自己的执行路径也过同一份禁止清单，
   生成任务文本与 findings 流路径，注册审核目标。
 - dispatch：spawn 或续接该 role 的 session。
 
-verdict **不在返回值里**：judge 进程退出时门禁自己读它的结论并调
-`record_review`——审核目标仍是 HEAD（审核期间新增 checkpoint ⇒ STALE ⇒
+verdict **不在返回值里**：judge 把本轮结论写进 channel report（不再是进程退出）后，门禁自己读它并跑
+verdict 记录（`recordReviewVerdict`，普通函数，不是工具）——审核目标仍是 HEAD（审核期间新增 checkpoint ⇒ STALE ⇒
 BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重写历史
 不改变内容时绑定存活；`reset --soft` 实测 tree oid 不变）。主会话被唤醒时
 拿到的已经是记录后的结论。

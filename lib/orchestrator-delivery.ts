@@ -115,9 +115,12 @@ export function buildTaskDocument(opts: {
  */
 export const TASK_GOAL_DIRECTIVE =
   "本会话的退出条约是你自己的 loop goal。任务书只是 plan 的任务边界，不是你的 goal；" +
-  "plan 批准 ≠ goal 批准。开始改代码前，你必须先用 `propose_loop_goal` 协商并获批" +
-  "你自己的 goal（goal-auditor 审计 + 用户批准）。未批准 goal 前，L8 edit gate 会拦下" +
-  "所有 edit/write。";
+  "plan 批准 ≠ goal 批准。顺序是两步，不能跳：" +
+  "**先**用 `propose_restatement` 把你对需求的理解反述给用户确认" +
+  "（上下文、例子、改之前 → 改之后、哪几步会变得不同，外加本轮交付站点 " +
+  "precommit / commit / pr），**再**用 `propose_loop_goal` 协商并获批你自己的 goal" +
+  "（goal-auditor 审计 + 用户批准）。没有已确认的反述，`propose_loop_goal` 会直接被拒、" +
+  "一个框都不弹；未批准 goal 前，L8 edit gate 会拦下所有 edit/write。";
 
 /**
  * A child's pi session id — DETERMINISTIC, derived from its registry handle.
@@ -206,8 +209,17 @@ export type DeliveryVerdict =
   | { ok: true; summary: string }
   | { ok: false; reason: string };
 
-/** How the instruction asked to be delivered — it decides what proof means. */
-export type InstructDeliveryMode = "steer" | "followUp" | "interrupt";
+/**
+ * How the instruction asked to be delivered — it decides what proof means.
+ *
+ * Exactly the modes `orchestrator_instruct` accepts, and nothing else: this
+ * type exists to judge THAT tool's deliveries, and it is the only production
+ * caller. `followUp` was a third member until 2026-09-17; the channel enum
+ * still carries the value (the judge lane writes its next round with it), but
+ * that dispatch is verified as a pane BOOT, never through this function, so a
+ * rule for it here would have been a branch nothing reaches.
+ */
+export type InstructDeliveryMode = "steer" | "interrupt";
 
 /**
  * May this delivery be reported as successful?
@@ -219,18 +231,23 @@ export type InstructDeliveryMode = "steer" | "followUp" | "interrupt";
  *
  * INSTRUCT. The message is in the channel, which proves only that it was
  * WRITTEN. What the child says about it is the proof — and WHICH ack is
- * enough depends on what was promised:
+ * enough depends on what was promised — and both surviving modes promise the
+ * same thing:
  *
- *   - `followUp` promises "when you are done, read this". A busy child cannot
- *     inject it yet BY DEFINITION, so demanding an injection made the tool
- *     fail on exactly the children it was designed for, and the message it
- *     had already written was left orphaned (round-4 P1: one authorization
- *     lost that way). `received` — the child's gate saying it has the message
- *     and has queued it — is the honest bar, and it is a real one: only a
- *     live gate writes it.
- *   - `steer` and `interrupt` promise to act on the CURRENT turn. Nothing but
- *     an injection satisfies that, so `received` alone keeps the check
- *     waiting rather than claiming success.
+ *   - `interrupt` (the DEFAULT since 2026-09-17) and `steer` act on the
+ *     CURRENT turn. Nothing but an injection satisfies that, so `received`
+ *     alone keeps the check waiting rather than claiming success. An
+ *     unspecified mode is judged by this bar too — the strictest one is the
+ *     safe direction for a claim of delivery.
+ *
+ * THE TWO-STAGE ACK IS STILL THE RIGHT SHAPE, even though no mode settles for
+ * the first stage any more. `received` (the gate has the message and queued
+ * it) is what keeps a message the child has not injected yet in its inbox
+ * instead of dropping it — round-4 P1 lost one authorization exactly there —
+ * and it is what lets this refusal say "it is queued, keep waiting" instead of
+ * "it never arrived". The `followUp` rule that used to accept it went with the
+ * mode itself (2026-09-17): the judge lane still WRITES that mode, but its
+ * dispatch is verified as a pane boot, never here.
  *
  * An ack that says `delivered: false` is a FAILURE reported with the child's
  * own explanation — never a success with a caveat.
@@ -255,7 +272,10 @@ export function deliveryVerdict(
     };
   }
   const ack = evidence.ack;
-  const mode = opts.instructMode ?? "followUp";
+  // An unspecified mode is judged as `interrupt` — the tool's own default
+  // (2026-09-17) and the strictest bar, so a silent caller can never buy a
+  // weaker claim of delivery than the one it would get by asking.
+  const mode = opts.instructMode ?? "interrupt";
   if (!ack) {
     return {
       ok: false,
@@ -274,19 +294,15 @@ export function deliveryVerdict(
     };
   }
   if (stage === "received") {
-    if (mode === "followUp") {
-      return {
-        ok: true,
-        summary:
-          "子会话的门禁已确认收到并入队" +
-          `${ack.detail ? `：${ack.detail}` : ""} —— 它跑完手上这一轮就会读到`,
-      };
-    }
+    // Both surviving modes act on the CURRENT turn, so a queued message is
+    // never a delivery — there is no mode left that settles for this stage.
     return {
       ok: false,
       reason:
-        `子会话已确认收到，但 mode=${mode} 要求它在**当前这一轮**里就读到，而它还没注入。` +
-        "再等一会儿；如果它正在 `waiting-judge`，改用 `followUp` 才是对的形状。",
+        `子会话已确认收到，但 mode=${mode} 要求它在**当前这一轮**里就读到，而它还没注入。\n` +
+        "消息**没有丢**：它在子会话的收件箱里，那边的门禁一 drain 到就会注入。" +
+        "先看 `orchestrator_wait` 的健康快照 —— 显示 `waiting-judge` 就是它在等自己的 reviewer，等着即可；" +
+        "只有确认它 `stalled`（心跳真的停了）才谈恢复。不要重发同一条。",
     };
   }
   return { ok: true, summary: `子会话已确认注入${ack.detail ? `：${ack.detail}` : ""}` };

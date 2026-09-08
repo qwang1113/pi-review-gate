@@ -3,7 +3,7 @@
  * good manners.
  *
  * THE MEASURED FAILURE (round-18, reproduced twice in one session). A judge
- * child finished its audit, printed the verdict fence — and never ran
+ * child finished its audit, published its verdict — and never ran
  * `tmux wait-for -S <doneChannel>`. The main session was blocked on that signal,
  * so it waited on a child that had nothing left to do. The same hole swallows a
  * child that dies at startup, crashes mid-run, or loses its provider: no signal
@@ -14,13 +14,26 @@
  * all three:
  *
  *   (a) the done channel fired (the fast path);
- *   (b) the child's SESSION ended — its own `exit-code` file exists, or the
- *       process it recorded is no longer there (died, or its pid was recycled
- *       and now belongs to somebody else — lib/judge-session.ts). This is
- *       deliberately
- *       NOT a pane probe: the pane is a display shell that disappears with
- *       its child, and a judge that never got to write anything is exactly
- *       the case a pane could not report either;
+ *   (b) the child's SESSION is gone — the caller supplies that as `alive`. In
+ *       production today that is `judgeLive` (lib/hierarchy.ts): the child's
+ *       pane is absent from tmux's pane list, on the same tmux server that
+ *       minted the id. Exactly three things make it say "gone": a readable
+ *       pane list that does not contain the pane, an entry carrying NO pane id
+ *       at all, and an entry whose recorded tmux server differs from this one
+ *       (after a server restart that id names somebody else's pane, so it is
+ *       not this judge under any reading). An UNREADABLE pane list is none of
+ *       those and counts as ALIVE — and so does an entry whose server is
+ *       simply unknown on either side, which `paneIdComparable` treats as
+ *       comparable rather than as a mismatch.
+ *
+ *       This used to be a process probe — the child's own `exitCode`, backed
+ *       by a pid-identity check — and the header used to argue that a pane
+ *       probe would be wrong here. Both are gone: the process model was
+ *       retired with the pane model, and the pid-identity module was deleted
+ *       (2026-09-06) as a second implementation with no production caller.
+ *       What survives from that argument is the DIRECTION: a failed LOOK never
+ *       ends a wait. An empty record does, which is a different thing — there
+ *       is nothing left to look at;
  *   (c) the child has been silent past `STALL_MOTION_MAX_AGE_SEC` (a running
  *       session that stopped being evidence of motion).
  *
@@ -29,6 +42,8 @@
  */
 
 import { STALL_MOTION_MAX_AGE_SEC } from "./loop-stall.ts";
+import { WAIT_DISCIPLINE_HINT } from "./agent-directives.ts";
+
 
 export interface ChildSnapshot {
   title: string;
@@ -37,18 +52,24 @@ export interface ChildSnapshot {
   /** ISO timestamp of the spawn. */
   spawnedAt: string;
   /**
-   * Is the child's pi PROCESS still running? Decided from the live
-   * ChildProcess's exitCode (judgeProcessAlive), not from any display: an
-   * exited process is finished even if its artifacts were never written.
+   * Is the child's session still there? Supplied by the caller; in production
+   * `judgeLive` (lib/hierarchy.ts) — its pane is still listed, on the tmux
+   * server that minted the id. `true` when the list cannot be read at all,
+   * which is why "not alive" is a positive finding rather than a failed look.
+   * (It was the process's `exitCode` under the old process model; that
+   * spelling, and the `judgeProcessAlive` it named, are both gone.)
    */
   alive: boolean;
   /**
    * ISO timestamp of the child's last OBSERVED activity — in production the
-   * newest write among its transcript, `stderr.log` and stdout log
-   * (`lastActivityAt()` in lib/judge-session.ts).
+   * newest line in the child's own CHANNEL (`channelLastActivity`, the
+   * projection in extensions/review-gate.ts). It used to be the newest mtime
+   * among the child's transcript and log files; that reader was deleted with
+   * lib/judge-session.ts (2026-09-06), and the channel is the better source
+   * anyway — it is a record the child WROTE, not a file somebody touched.
    *
    * Absent ⇒ fall back to `spawnedAt`. Anything OLDER than `spawnedAt` is
-   * ignored as well: not every watched file is per-run, so a stale mtime must
+   * ignored as well: not every watched source is per-run, so a stale stamp must
    * not be mistaken for this run's activity.
    */
   lastActivityAt?: string;
@@ -137,9 +158,9 @@ export function buildChildWaitNotice(
       ...verdict.terminated.map(({ child, reason }) =>
         `- ${child.role} ${child.title}（session ${child.sessionId}）— ${
           reason === "session-ended"
-            ? "进程已退出"
+            ? "pane 已消失"
             : "静默超过上限"
-        }。用 judge_read 读取它已产出的输出（门禁在它退出时已经把裁决记好了）：没有结论就 judge_close 后重新派发。`,
+        }。若它的 report 已落盘，标准报告会送达并记入链；没有结论就修完重派（judge_recover 同 id 续接）。`,
       ),
     );
   }
@@ -150,11 +171,9 @@ export function buildChildWaitNotice(
         const label = sessionIds.get(child.sessionId);
         return `- ${child.role} ${child.title}（session ${child.sessionId}${label ? `, label ${label}` : ""}）`;
       }),
-      "等待纪律：先做完可以做的确定性工作；确认没有可做的工作后，用 bash 托管等待——" +
-        "在一次 bash 调用里同时盯三件事（进程是否已退出——`kill -0 <pid 文件第一段>`；",
-      "以及它的 session jsonl 里是否已经出现 verdict fence），任一命中就结束等待并继续。" +
-        "不要结束 turn 把唤醒责任交给子会话：它可能已经退出或永远不会发信号。",
+      WAIT_DISCIPLINE_HINT,
     );
   }
   return lines.join("\n");
 }
+

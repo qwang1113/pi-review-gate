@@ -22,6 +22,7 @@ import {
   type GateVerdict,
 } from "../lib/gate-state.ts";
 import { FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
+import { restatementHash } from "../lib/restatement.ts";
 
 const tempDirs: string[] = [];
 function makeTemp(): string {
@@ -647,28 +648,35 @@ test("plateau: same findings 3 rounds, non-decreasing → true", () => {
 
 /**
  * Round-14 P2 (reviewer-measured): plateau detection must depend on the
- * FINDINGS, not on how the reviewer formatted its output. Before
- * `parseReviewOutput` deduplicated across fences, a round whose reviewer
- * repeated its verdict fence scored double, and the next honest round looked
- * like convergence (2 → 1) — so a genuine plateau went undetected. This pins
- * the parser's contract from the consumer's side.
+ * FINDINGS, not on how the reviewer formatted its output. Back when a verdict
+ * travelled as prose fences, a round whose reviewer repeated its fence scored
+ * double, and the next honest round looked
+ * like convergence (2 → 1) — so a genuine plateau went undetected. The format
+ * is gone (a round is ONE structured `judge_conclude` call, so it cannot
+ * repeat itself), but the consumer-side contract this pins has not changed:
+ * `isPlateaued` reads fingerprints, and nothing else.
  */
-test("plateau: a repeated verdict fence must not read as convergence", () => {
+test("plateau: a repeated round of the same findings must not read as convergence", () => {
   const repeatedThenSingle = [
-    round(1, 1, ["a.ts#1#boom"]), // what a deduplicated repeated-fence round yields
+    round(1, 1, ["a.ts#1#boom"]), // one finding, reported once
     round(2, 1, ["a.ts#1#boom"]),
     round(3, 1, ["a.ts#1#boom"]),
   ];
   assert.ok(isPlateaued(repeatedThenSingle, 3), "identical rounds are a plateau");
 
-  // The pre-fix shape, kept explicit: an inflated first round makes the same
-  // three rounds look like they are shrinking.
+  // The shape that hides a plateau: a first round carrying the SAME coarse
+  // key twice makes the next two rounds look like they are shrinking. This is
+  // reachable — fingerprints are one per finding and deliberately NOT
+  // deduplicated (lib/review-adjudicate.ts), so a round with two findings that
+  // share a file, a line bucket and an issue prefix produces exactly it. What
+  // this pins is `isPlateaued`'s own contract: it reads the fingerprints it is
+  // given, and a repeated key is two entries, not one.
   const inflated = [
     round(1, 2, ["a.ts#1#boom", "a.ts#1#boom"]),
     round(2, 1, ["a.ts#1#boom"]),
     round(3, 1, ["a.ts#1#boom"]),
   ];
-  assert.ok(!isPlateaued(inflated, 3), "double counting hides the plateau — hence the dedup");
+  assert.ok(!isPlateaued(inflated, 3), "a double-counted round hides the plateau");
 });
 
 test("converging (totals decreasing) → not plateaued", () => {
@@ -1034,6 +1042,71 @@ test("loopGoal: a non-string reason fails closed to ABSENT (not approved)", () =
   }
 });
 
+test("loopGoal: a broken STATION drops the field, never the approval", () => {
+  // 2026-09-06. The station is metadata beside the approval: a reader
+  // degrades a missing one to `precommit` (the strictest), so dropping the
+  // whole record over it would revoke an approval the user really gave.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of ["ship-it", "", 3, null, {}]) {
+    writeFileSync(path, JSON.stringify({
+      ...base, loopGoal: { hash: "a".repeat(64), at: "t", station: bad },
+    }));
+    const loaded = loadSidecar(path);
+    assert.deepEqual(loaded?.loopGoal, { hash: "a".repeat(64), at: "t" }, JSON.stringify(bad));
+  }
+  // A valid station round-trips untouched.
+  writeFileSync(path, JSON.stringify({
+    ...base, loopGoal: { hash: "a".repeat(64), at: "t", station: "pr" },
+  }));
+  assert.equal(loadSidecar(path)?.loopGoal?.station, "pr");
+});
+
+// ---------------------------------------------------------------------------
+// restatement — the user-confirmed requirement understanding (L8a)
+// ---------------------------------------------------------------------------
+
+test("restatement: a well-formed record round-trips, hash and station included", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  const text = "改之前：直接谈 goal。改之后：先反述再谈 goal。举例：子会话读完代码先说回需求。";
+  const record = { text, hash: restatementHash(text), at: "2026-09-06T00:00:00.000Z", station: "commit" };
+  writeFileSync(path, JSON.stringify({ ...base, restatement: record }));
+  assert.deepEqual(loadSidecar(path)?.restatement, record);
+});
+
+test("restatement: text and hash disagreeing drops the WHOLE record (fail-closed)", () => {
+  // The one record in the sidecar whose hash is RE-COMPUTED on load: it
+  // carries the confirmed text itself, so a pair that does not verify was not
+  // written by propose_restatement — and "not confirmed" is the safe reading
+  // (it costs one dialog; the opposite would negotiate a contract against an
+  // understanding the user never saw).
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  const text = "改之前：A。改之后：B。举例：某次调用。哪几步不同：多一步确认。";
+  const good = { text, hash: restatementHash(text), at: "t", station: "precommit" };
+
+  for (const broken of [
+    { ...good, hash: "0".repeat(64) },
+    { ...good, text: text + "（事后加的一句）" },
+    { ...good, text: "" },
+    { ...good, hash: "not-a-hash" },
+    { ...good, at: 42 },
+    { ...good, station: "ship-it" },
+    { ...good, station: undefined },
+    "a string, not a record",
+    null,
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, restatement: broken }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `the sidecar itself stays valid for ${JSON.stringify(broken)}`);
+    assert.equal(loaded?.restatement, undefined, JSON.stringify(broken));
+  }
+});
+
 // ---------------------------------------------------------------------------
 // goalPrereview — the goal-auditor record propose_loop_goal checks (L8b)
 // ---------------------------------------------------------------------------
@@ -1169,3 +1242,126 @@ test("invalidateBindings: BLOCKED review / FAIL precommit are left alone (not do
   assert.equal(s.review.fingerprint, FP);
   assert.equal(s.precommit.fingerprint, FP);
 });
+
+test("shippedKinds survives a round trip, and unreadable evidence is dropped", () => {
+  // This field is EVIDENCE (the gate watched these ship kinds exit 0), read by
+  // the delivery station's arrival check. Losing it can only make an arrival
+  // block, which is the safe direction — so the loader may drop freely, but it
+  // must never invent a kind that is not in the gate's own vocabulary.
+  const dir = mkdtempSync(join(tmpdir(), "gate-shipped-"));
+  tempDirs.push(dir);
+  const path = join(dir, "state.json");
+
+  const good = emptyState("s", 10);
+  good.shippedKinds = ["push", "pr-create"];
+  writeFileSync(path, JSON.stringify(good));
+  assert.deepEqual(loadSidecar(path)?.shippedKinds, ["push", "pr-create"]);
+
+  // Unknown entries are filtered out; duplicates collapse.
+  writeFileSync(path, JSON.stringify({ ...good, shippedKinds: ["push", "push", "deploy", 7, null] }));
+  assert.deepEqual(loadSidecar(path)?.shippedKinds, ["push"]);
+
+  // Not an array at all ⇒ the field is gone, not coerced.
+  writeFileSync(path, JSON.stringify({ ...good, shippedKinds: "pr-create" }));
+  assert.equal(loadSidecar(path)?.shippedKinds, undefined);
+
+  // An older sidecar simply has none — and that must not break the load.
+  const legacy = emptyState("s", 10);
+  writeFileSync(path, JSON.stringify(legacy));
+  const loaded = loadSidecar(path);
+  assert.ok(loaded, "a sidecar written before the field existed still loads");
+  assert.equal(loaded!.shippedKinds, undefined);
+});
+
+
+// ---------------------------------------------------------------------------
+// The orchestration runtime's ID survives the file (B1, 2026-09-06)
+// ---------------------------------------------------------------------------
+
+test("loadSidecar reads the orchestration id back, and drops the blob when it is malformed", () => {
+  // WHY IT IS READ BACK NOW. It used to be blanked, on the reasoning that a
+  // forged id must not become an attention channel key. It never achieved
+  // that (the wiring immediately stamped the session's own id onto the blob),
+  // and it cost the one fact a takeover needs: WHICH orchestration this
+  // repo's registry belongs to. Adoption is what is guarded now, not reading.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  const runtime = {
+    orchestrationId: "orch-deadbeef-abc",
+    children: [{
+      id: "t1-x", taskId: "t1", paneId: "%3", cwd: "/repo", createdAt: "2026-09-06T00:00:00.000Z",
+    }],
+    notify: { sentAt: [], lastByKey: {} },
+  };
+
+  writeFileSync(path, JSON.stringify({ ...base, orchestrator: runtime }));
+  const loaded = loadSidecar(path);
+  assert.equal(loaded?.orchestrator?.orchestrationId, "orch-deadbeef-abc",
+    "the record must be able to say which orchestration it belongs to");
+  assert.equal(loaded?.orchestrator?.children.length, 1);
+
+  // A malformed id takes the WHOLE blob with it: a registry whose owner
+  // cannot be named is one nothing may act on.
+  for (const forged of ["", "not-an-id", "orch-", "../../etc", 42, null]) {
+    writeFileSync(path, JSON.stringify({ ...base, orchestrator: { ...runtime, orchestrationId: forged } }));
+    assert.equal(loadSidecar(path)?.orchestrator, undefined, `${JSON.stringify(forged)} must drop the runtime`);
+  }
+});
+
+/** Write a state to `path` and hand the path back, so a load reads as one line. */
+function writeState(path: string, state: GateState): string {
+  writeFileSync(path, JSON.stringify(state));
+  return path;
+}
+
+
+test("an orchestration blob — valid or malformed — changes NOTHING else in the sidecar", () => {
+  // B1 touched `loadSidecar`, which every mode reads, not just an
+  // orchestrator: a loop session, a judge and a plain `normal` session all
+  // load this same file. The fix must therefore be provably CONTAINED to its
+  // own key. The dangerous shape would have been rejecting the whole sidecar
+  // over a bad orchestration id — a loop session would have silently lost its
+  // READY and its precommit because a field it never reads was damaged.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = readyState();
+  base.taskMode = "loop";
+  base.rounds = [{ round: 1, verdict: "BLOCKED", at: "t", fingerprints: [] } as unknown as RoundRecord];
+
+  const withoutBlob = loadSidecar(writeState(path, base))!;
+  for (const blob of [
+    { orchestrationId: "orch-deadbeef-abc", children: [], notify: { sentAt: [], lastByKey: {} } },
+    { orchestrationId: "not-an-id", children: [], notify: { sentAt: [], lastByKey: {} } },
+    "not-even-an-object",
+    null,
+  ]) {
+    const loaded = loadSidecar(writeState(path, { ...base, orchestrator: blob } as unknown as GateState));
+    assert.ok(loaded, `a ${JSON.stringify(blob)} orchestration blob must not invalidate the sidecar`);
+    assert.deepEqual(loaded!.review, withoutBlob.review, "the review verdict is untouched");
+    assert.deepEqual(loaded!.precommit, withoutBlob.precommit, "so is precommit");
+    assert.equal(loaded!.taskMode, "loop");
+    assert.equal(loaded!.rounds.length, withoutBlob.rounds.length);
+  }
+});
+
+
+test("an approval in the sidecar still needs the whole blob to be readable", () => {
+  // Unchanged by B1, asserted here because reading the id back is new: a
+  // damaged runtime must still lose its approval rather than keep it.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  writeFileSync(path, JSON.stringify({
+    ...base,
+    orchestrator: {
+      orchestrationId: "orch-deadbeef-abc",
+      children: "not-an-array",
+      notify: { sentAt: [], lastByKey: {} },
+      approvedPlanHash: "a".repeat(64),
+    },
+  }));
+  assert.equal(loadSidecar(path)?.orchestrator?.approvedPlanHash, undefined,
+    "any doubt about the blob drops the authority in it");
+});
+

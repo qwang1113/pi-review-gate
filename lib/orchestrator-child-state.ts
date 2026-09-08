@@ -43,7 +43,7 @@ import {
   HEARTBEAT_STALE_MS,
 } from "./orchestrator-channel.ts";
 
-/** The seven states a registered child can be in. */
+/** The states a registered child can be in — enumerated in {@link CHILD_STATES}. */
 export type ChildState =
   /** Its own report says it is streaming, or it has work in flight. */
   | "working"
@@ -71,6 +71,41 @@ export type ChildState =
   /** Pane alive, but nothing has been reported for long enough to worry. */
   | "stalled";
 
+/**
+ * THE state list, at runtime — so that a doc, a receipt or a test can be
+ * checked against the union instead of against somebody's memory of it.
+ *
+ * It exists because the memory was already wrong: `mode-changed` was added
+ * long after the "seven states" wording entered `README.md`,
+ * `docs/execution-model.md` and `docs/orchestrator-supervision.md`, and every
+ * one of those still said seven on 2026-09-17 — including the comment that
+ * used to sit above this very union. Nothing could have caught it; a type
+ * union is invisible at runtime.
+ *
+ * Both directions are compile-time facts, so drift cannot survive `tsc`:
+ * `satisfies` refuses a member that is not a state, and {@link ChildStateGap}
+ * refuses a state that is missing from the array.
+ */
+export const CHILD_STATES = [
+  "working",
+  "waiting-input",
+  "waiting-judge",
+  "done",
+  "idle",
+  "mode-changed",
+  "dead",
+  "stalled",
+] as const satisfies readonly ChildState[];
+
+/**
+ * `never` when {@link CHILD_STATES} covers the union — anything else is a
+ * state the array forgot, and the assignment below stops compiling.
+ */
+type ChildStateGap = Exclude<ChildState, (typeof CHILD_STATES)[number]>;
+const _everyStateIsListed: ChildStateGap extends never ? true : never = true;
+void _everyStateIsListed;
+
+
 
 /** One measurement of one child. Every field is observed, never assumed. */
 export interface ChildObservation {
@@ -94,6 +129,33 @@ export interface ChildObservation {
   /** Silence budget before `stalled`; injectable for tests. */
   staleMs?: number;
 }
+
+
+/**
+ * How long a child must go WITHOUT forward progress before its OWN `idle`
+ * report is believed. 120 seconds, and it is THE USER'S NUMBER (2026-09-04) —
+ * pinned here like `JUDGE_ROTATION_CONTEXT_PERCENT`, not a threshold to tune
+ * away on a hunch.
+ *
+ * ── WHY A REPORT NEEDS CORROBORATION AT ALL (B3) ──
+ *
+ * The child reports `working` vs `idle` from `ctx.isIdle()`, and that reading
+ * is true BETWEEN two tool calls: a session in the middle of a read-only
+ * investigation (bash, read, bash, …) is idle at almost every heartbeat tick.
+ * Measured on 2026-09-04: a child whose transcript grew 23.7KB in 45 seconds
+ * was reported "停下了（没有 declare_done）" four polls in a row, with
+ * "最后活动 0s 前" printed on the same line. The cost was not only two
+ * needless interrupts — `idle` is newsworthy, so `orchestrator_wait` returned
+ * instantly every time and the supervisor's one waiting tool degraded into a
+ * busy poll.
+ *
+ * The corroborating fact was already in the very same record: `lastProgressAt`,
+ * which advances ONLY on a real agent event (a tool result, a turn boundary)
+ * and never on a heartbeat. It was a READING nothing consulted. Now it decides:
+ * a child that reported `idle` while it was stepping forward moments ago is
+ * `working`, and only genuine silence for this long makes the report true.
+ */
+export const IDLE_PROGRESS_GRACE_MS = 120_000;
 
 /**
  * Classify one child.
@@ -126,13 +188,7 @@ export function classifyChildState(observation: ChildObservation): ChildState {
   if (projection.openRequests.length > 0) return "waiting-input";
 
   const last = projection.lastState;
-  const assigned = observation.lastAssignedAt;
-  if (last?.state === "done") {
-    const reportedAt = Date.parse(last.at);
-    const belongsToCurrentWork =
-      assigned === undefined || !Number.isFinite(reportedAt) || reportedAt >= assigned;
-    if (belongsToCurrentWork) return "done";
-  }
+  if (completionReported(observation)) return "done";
 
   if (stalledNow(observation)) return "stalled";
 
@@ -140,7 +196,11 @@ export function classifyChildState(observation: ChildObservation): ChildState {
   // A mode switch is a one-shot event: the report carries it, and the next
   // heartbeat re-reports the child's real state. A supervisor must SEE it.
   if (last?.state === "mode-changed") return "mode-changed";
-  if (last?.state === "idle") return "idle";
+  // B3 — an `idle` REPORT is not by itself evidence that the child stopped.
+  // It is believed only when the child's own progress stamp agrees: no
+  // forward step for IDLE_PROGRESS_GRACE_MS. Anything more recent than that
+  // is a session between two tool calls, which is `working`.
+  if (last?.state === "idle") return idleReportIsBelievable(observation) ? "idle" : "working";
   // Either it reported `working`, or it has not reported at all yet and is
   // still inside its heartbeat budget (a session that is booting).
   return "working";
@@ -165,6 +225,88 @@ function stalledNow(observation: ChildObservation): boolean {
     staleMs,
   );
 }
+
+/**
+ * DID THIS CHILD SAY IT FINISHED — the completion fact, on its own.
+ *
+ * Separate from {@link classifyChildState} because the STATE answers a
+ * different question. A child whose pane is gone is `dead` and nothing else,
+ * which is right for supervision (a corpse is the headline) and wrong for the
+ * wrap-up block: "it finished, and then its pane went away" is not the same
+ * situation as "it died without ever reporting". Reading completion off the
+ * state made the receipt tell a manager that a child which HAD reported done
+ * "从未报告完成 …必要时把任务改回 pending 重开", while block 3 was showing
+ * that same child's `declare_done` record among its surviving assets — the
+ * very two-blocks-disagree shape B4 exists to remove.
+ *
+ * Bounded by `lastAssignedAt` exactly as the state is (round-1 P1): a
+ * completion older than the current assignment is history, not a verdict.
+ *
+ * AND THE BOUND READS THE START OF THE RUN, NOT THE NEWEST RECORD
+ * (2026-09-17, adviser round 8). A finished child keeps REPORTING `done`: the
+ * heartbeat rewrites its unchanged state every minute with a fresh `at`, so
+ * within a minute of being re-tasked the previous round's completion looked
+ * newer than the assignment and the bound simply evaporated — the same hole
+ * the `interrupt` mode had on the writing side, reached from the other end.
+ * `lastStateSince` is when the child ENTERED this `done` run, which is the
+ * fact the bound was always about; a genuinely new completion starts a new
+ * run and stamps a new one. No `lastStateSince` (a projection from an older
+ * build) ⇒ fall back to the record's own time rather than inventing one.
+ */
+export function completionReported(observation: ChildObservation): boolean {
+  const last = observation.projection.lastState;
+  if (last?.state !== "done") return false;
+  const reportedAt = Date.parse(observation.projection.lastStateSince ?? last.at);
+  const assigned = observation.lastAssignedAt;
+  return assigned === undefined || !Number.isFinite(reportedAt) || reportedAt >= assigned;
+}
+
+
+/**
+ * Milliseconds since the child's last FORWARD PROGRESS.
+ *
+ * `undefined` means the child never stamped one — a session that has not
+ * booted far enough to run a tool, or an extension older than the stamp.
+ * Deliberately NOT zero: "no information" and "stepped forward just now" are
+ * opposite facts, and B3's whole lesson is that guessing between them is what
+ * produced a false "停下了".
+ */
+export function progressStaleMs(observation: ChildObservation): number | undefined {
+  const at = observation.projection.lastState?.lastProgressAt;
+  const ms = at ? Date.parse(at) : Number.NaN;
+  if (!Number.isFinite(ms)) return undefined;
+  return Math.max(0, observation.at - ms);
+}
+
+/**
+ * Does the child's own `idle` report survive its progress stamp? (B3)
+ *
+ * NO STAMP ⇒ BELIEVED, on purpose. A child that never reported progress gives
+ * this function nothing to contradict the report with, and inventing a
+ * contradiction would turn a genuinely stopped child (or one running an older
+ * extension that predates the stamp) into a permanent `working` — the exact
+ * failure `idle` exists to catch (R3-5, a finished child silent for 725s).
+ * The grace period only ever downgrades a report that the child's OWN record
+ * disagrees with.
+ */
+function idleReportIsBelievable(observation: ChildObservation): boolean {
+  const stale = progressStaleMs(observation);
+  if (stale === undefined) return true;
+  return stale >= IDLE_PROGRESS_GRACE_MS;
+}
+
+/**
+ * Is this `working` child one whose own report said `idle`? (B3)
+ *
+ * The health line says so out loud rather than silently overruling the child
+ * (user decision, 2026-09-17): the raw signal "it says it stopped" stays
+ * visible to the supervisor instead of being hidden for two minutes, and a
+ * supervisor who sees it can go and look for itself.
+ */
+function isUnbelievedIdle(observation: ChildObservation, state: ChildState): boolean {
+  return state === "working" && observation.projection.lastState?.state === "idle";
+}
+
 
 /** One line of the health snapshot every `orchestrator_wait` receipt carries. */
 export interface ChildHealth {
@@ -199,6 +341,13 @@ export interface ChildHealth {
    * a hang. Purely informational: it never makes a child newsworthy.
    */
   progressStaleSeconds?: number;
+  /**
+   * This `working` child REPORTED `idle`, and the report was not believed
+   * because its progress stamp is younger than {@link IDLE_PROGRESS_GRACE_MS}
+   * (B3). Present only in that case, so the receipt can show the supervisor
+   * the raw signal it is overruling instead of hiding it.
+   */
+  selfReportedIdle?: boolean;
 }
 
 /** Build the health line for one child. */
@@ -216,11 +365,8 @@ export function childHealth(observation: ChildObservation): ChildHealth {
   // E — seconds since the child's last FORWARD PROGRESS (a tool call / turn
   // boundary the child stamped), NOT since its last heartbeat. Undefined until
   // the child has reported one.
-  const progressAt = projection.lastState?.lastProgressAt;
-  const progressMs = progressAt ? Date.parse(progressAt) : Number.NaN;
-  const progressStale = Number.isFinite(progressMs)
-    ? Math.max(0, Math.round((observation.at - progressMs) / 1000))
-    : undefined;
+  const staleMs = progressStaleMs(observation);
+  const progressStale = staleMs === undefined ? undefined : Math.round(staleMs / 1000);
   return {
     childId: observation.childId,
     state,
@@ -247,6 +393,10 @@ export function childHealth(observation: ChildObservation): ChildHealth {
     ...(state === "working" && progressStale !== undefined
       ? { progressStaleSeconds: progressStale }
       : {}),
+    // B3 — and when this `working` was reached by OVERRULING the child's own
+    // `idle` report, say so. The supervisor sees both the reading and the
+    // report it contradicts.
+    ...(isUnbelievedIdle(observation, state) ? { selfReportedIdle: true } : {}),
   };
 }
 
@@ -318,11 +468,31 @@ export function describeChildStateDetailed(health: ChildHealth): string {
   if (health.state === "waiting-input" && health.stateForSeconds !== undefined) {
     return `${base}（已等 ${health.stateForSeconds}s）`;
   }
-  if (health.state === "working" && health.progressStaleSeconds !== undefined) {
-    // A READING, not an alarm: it just names how long since the last real
-    // forward step, so 60 minutes of `working` with no checkpoint reads
-    // differently from a hang. No wake, no suggested action.
-    return `${base}（自上次推进 ${health.progressStaleSeconds}s）`;
+  if (health.state === "working") {
+    // B3 — the overruled `idle` report is named in the line itself, so the
+    // supervisor reads BOTH facts: the child said it stopped, and its own
+    // progress stamp says otherwise. Hiding the report for two minutes would
+    // trade one blind spot for another, and it would make the flip to `idle`
+    // arrive with no warning — a supervisor who sees this marker knows the
+    // state will turn if the child does not step again.
+    //
+    // KEPT SHORT ON PURPOSE (user, 2026-09-17). This is the line a manager
+    // scans every few minutes, one row per child, inside a five-block receipt:
+    // the information is preserved, the words are not. "自报停下·未满 120s"
+    // carries the report, the doubt and the deadline in ten characters.
+    const doubted = health.selfReportedIdle
+      ? `·自报停下未满 ${Math.round(IDLE_PROGRESS_GRACE_MS / 1000)}s`
+      : "";
+    if (health.progressStaleSeconds !== undefined) {
+      // A READING, not an alarm: it just names how long since the last real
+      // forward step, so 60 minutes of `working` with no checkpoint reads
+      // differently from a hang. No wake, no suggested action.
+      const progress = `自上次推进 ${health.progressStaleSeconds}s`;
+      return `${base}（${progress}${doubted}）`;
+    }
+    // No progress reading at all (a child that never stamped one). The doubt
+    // marker cannot occur without a stamp — it is what produced the doubt —
+    // so this branch is the plain `working` line.
   }
   return base;
 }

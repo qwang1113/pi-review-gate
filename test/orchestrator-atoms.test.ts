@@ -125,7 +125,6 @@ test("the task document appends the gate's goal directive after the brief (C, 20
 test("a supervision event ends the wait and NAMES the child (R-4)", () => {
   const decision = evaluateChildWait({
     events: [{ childId: "c1", state: "waiting-input", summary: "c1 在等回答：「选一个」" }],
-    done: false,
     paneAlive: true,
   });
   assert.equal(decision.done, true);
@@ -134,11 +133,11 @@ test("a supervision event ends the wait and NAMES the child (R-4)", () => {
 });
 
 test("F14: liveness that could not be measured keeps the wait alive; a real death ends it", () => {
-  const unknown = evaluateChildWait({ done: false, paneAlive: false, livenessUnknown: true });
+  const unknown = evaluateChildWait({ paneAlive: false, livenessUnknown: true });
   assert.equal(unknown.done, false, "an unreadable tmux is not a death certificate");
   assert.match(unknown.summary, /读不到 tmux/);
 
-  const gone = evaluateChildWait({ done: false, paneAlive: false });
+  const gone = evaluateChildWait({ paneAlive: false });
   assert.equal(gone.done, true);
   assert.equal(gone.reason, "pane-gone");
 });

@@ -1,0 +1,569 @@
+# 子会话完成报告 · t4b-session-factory-r2
+
+日期：2026-09-05 ｜ 分支：`docs/hierarchical-session-design` ｜ 基线 HEAD：`2c77a2e`
+
+课题：把「开一个带角色的 pi 子会话」收敛成唯一入口 `lib/session-factory.ts`，
+让 C1（judge pane 边框行不渲染）、C2（judge 标题只写一次）与「投递核实只有编排侧有」
+三个缺陷因收敛而消失。
+
+---
+
+## 〇、达成情况总表（先看这张）
+
+| 退出标准 | 结论 | 一句话证据 |
+|---|---|---|
+| 1 唯一入口，6 个开 pane 调用点全走它 | **达成** | `test/session-factory-structure.test.ts` 逐个断言窗口内 `openSessionPane(` 恰好 1 次 |
+| 2 两条 grep 判据（split-window 白名单 / builder 唯一使用者） | **达成** | `grep` 输出见 §1.2；结构测试用目录枚举自证扫描面 |
+| 3 旧实现删除、不留兼容层 | **达成** | `openJudgePane` 实现层零命中（仅注释与守卫测试自指，措辞已更正） |
+| 4 C1 / C2 消失，judge 与编排一视同仁 | **达成** | 装饰四条 argv（含 window 边框行）、`refreshSessionPaneTitle` 为唯一标题写点，各有单测与变异复验 |
+| 5 投递核实两侧一致 | **达成** | `verifyDeliveryOn` 收窄为窄依赖，judge 侧带水位线；`test/delivery-probe.test.ts` 覆盖三类调用者 |
+| 6 跨进程契约逐字不变 | **达成** | 五个 env 名与语义、`judgeChannelTarget`、豁免身份均有断言；`git diff` 不含三个线格式模块 |
+| 7 全绿 + 文档 + 交付站点 | **部分达成** | `tsc` EXIT=0、`npm test` 2369 pass / 0 fail、文档已同步、报告已写；**但终点不是「干净工作区 + 带 READY 的 HEAD」**——见下 |
+
+**唯一未完全达成的一条，如实说明**：退出标准 7 要求终点是「干净工作区 + 带 READY 的
+HEAD」。实际终点是 **HEAD = `9bf5587`（带最后一轮代码审的 READY），工作区里多了这份
+报告**。原因是报告必须落在仓库内，写它就会弄脏工作区、把门禁打回 PENDING；项目经理与
+监督者明确决定「最后一轮代码审的 READY 即终局，报告不再买一轮打磨」——`declare_done` 随后
+被 doc review gate 拦下，用户改为授权**专为这份文档**走一轮零代码改动的 review（就是本轮）。
+停止指令下达时手上还有两处**未提交的测试改动**，已按指令 `git checkout --` 还原，因此除
+这份报告外，工作区与最后一轮代码审过的那棵树逐字一致。
+
+---
+
+
+## 一、退出标准逐条自证
+
+### 1. 唯一入口存在，六个开 pane 的调用点全部改走它
+
+新增 `lib/session-factory.ts`（502 行，未触及 600 行硬拦）。六处调用点：
+
+| 调用点 | 文件 |
+|---|---|
+| judge 轮次派发 `dispatchJudgeRound` | `extensions/review-gate.ts` |
+| `judge_spawn` → `doSpawn` | `lib/judge-spawn-tools.ts` |
+| `judge_recover` → `doRecover` | `lib/judge-spawn-tools.ts` |
+| `orchestrator_spawn` → `dispatchSpawn` | `lib/orchestrator-dispatch.ts` |
+| `orchestrator_recover` → `doRecover` | `lib/orchestrator-recovery-tools.ts` |
+| `orchestrator_handoff` → `doHandoff` | `lib/orchestrator-session-tools.ts` |
+
+结构测试 `test/session-factory-structure.test.ts` 里 “all six pane-opening call
+sites go through openSessionPane” 逐个断言：每个函数窗口内 `openSessionPane(` 恰好
+出现 1 次，窗口以「下一个函数声明」为界并断言不越到同文件的另一个站点。
+
+```
+$ npx tsx --test test/session-factory-structure.test.ts
+✔ the scan itself covers both ends before its verdict means anything
+✔ (a) the split-window literal lives in exactly two files, and neither is a caller
+✔ (b) the spawn argv builders have exactly one consumer: the session factory
+✔ all six pane-opening call sites go through openSessionPane
+✔ nothing opens a pane behind the factory's back
+✔ both recover tools reach the same recovery judgement
+✔ the judge probe repaints the border from the channel projection (C2)
+ℹ pass 7  ℹ fail 0
+```
+
+### 2. 两条 grep 判据（用户 2026-09-05 认可的措辞）
+
+```
+$ grep -rn '"split-window"' lib/*.ts extensions/*.ts
+lib/orchestrator-guard.ts:60:  splitw: "split-window",
+lib/orchestrator-guard.ts:77:  "split-window",
+lib/orchestrator-guard.ts:84:  "split-window": "orchestrator_spawn（接力用 orchestrator_handoff，救活死掉的用 orchestrator_recover）",
+lib/orchestrator-tmux.ts:124:    "split-window",
+lib/orchestrator-tmux.ts:152:    "split-window",
+
+$ grep -rl "buildSpawnPaneArgv\|buildHandoffPaneArgv" lib/*.ts extensions/*.ts
+lib/orchestrator-tmux.ts
+lib/session-factory.ts
+```
+
+(a) 字面量只在两个文件：`orchestrator-tmux.ts`（构造）与 `orchestrator-guard.ts`
+（bash 守卫的**禁令别名表**，非执行点，边界外，本轮一行未改）——测试写成白名单
+`assert.deepEqual(holders, [...])`，白名单外任何文件出现即失败。
+(b) 两个 spawn argv 构造函数的使用者恰好只有 `session-factory.ts`。
+
+扫描面自证：结构测试用 `readdirSync` 枚举 `lib/` 与 `extensions/` 全部 `.ts`，并有
+一条前置测试断言「两端都被扫到」（含 `lib/` 数量 > 100、每个文件确实读到了内容）——
+这是上一轮 skill 里「窗口漏掉一半输入时它不报错、只会安静地小一点」那条经验的落实。
+
+### 3. 旧实现删除，不留兼容层
+
+```
+$ grep -rn "openJudgePane" lib extensions test
+lib/session-factory.ts:203:  // them (the retired openJudgePane wrapped it; nothing else did).
+test/session-factory-structure.test.ts:114:    .filter((f) => /\b(openJudgePane|…)/.test(f.text))
+test/session-factory-structure.test.ts:118:    "the old openJudgePane is gone and no second caller assembles a spawn argv");
+```
+
+判据措辞更正（reviewer Nit）：**实现层面零命中**，剩下的三处都不是实现——一处是
+factory 里解释「旧实现当年会包一层降级文案」的注释，两处是**钉住它被删除**的守卫测试
+自身（正则与断言文案）。守卫测试提到自己要守的名字是不可避免的自指，所以这条的机械
+判据应当读作：**除 `lib/session-factory.ts` 的注释与 `test/session-factory-structure.ts`
+的守卫外，`lib/` 与 `extensions/` 下没有任何 `openJudgePane` 的定义或调用**，这正是
+“nothing opens a pane behind the factory's back” 那条测试断言的东西。
+
+`lib/judge-pane.ts` 从 205 行收窄到 72 行，只剩两样东西：judge 的跨进程契约常量
+（`RG_JUDGE_OPENER` / `_ID` / `_ROLE`）与 pane 探活（`listJudgePanes` /
+`judgePaneAlive`）。开 pane / 关 pane / 装饰 / 判据全部搬进 factory；
+`closeJudgePane` 改名为 `closeSessionPane` 并落在 factory（关是开的对偶，谁创建谁回收）。
+没有新增任何开关、环境变量或 “advanced entry”。
+
+### 4. C1 / C2
+
+- **C1**：`decorateSessionPane` 一次下发四条 argv —— pane style、pane title，以及
+  window 级 `pane-border-status` / `pane-border-format`。单测
+  “combination 1 — a judge SPAWN…” 断言 judge 组合下这四条都出现（收敛前 judge 只有
+  前两条，边框行要等一个项目经理路过才会被打开）。
+- **C2**：`refreshSessionPaneTitle` 是全仓**唯一**写 pane 标题的函数（带节流 5s 与
+  重绘记忆），编排侧 `refreshPaneLabels` 与 judge 侧 `probeJudgeRound` 都调它。
+  judge 侧的调用点选在 `probeJudgeRound`，因为 `judge_wait` 的轮询与 settle 唤醒
+  **都**经过它——没有第三条「读了 judge 状态却不刷新边框」的路径。状态取自
+  `projection.lastState`（通道投影），一轮结束时额外刷成 `done`。
+
+### 5. 投递核实两侧一致
+
+`verifyDeliveryOn`（`lib/orchestrator-tool-kit.ts`）从 `OrchestratorDeps` 收窄为
+`DeliveryProbeDeps`（只要 `channelIO` + `sleep`），通道路径作为参数传入：
+
+- 编排侧入口 `verifyDelivery(deps, {childId,…})` —— 路径仍由 runtime 推导，两个既有
+  调用点（spawn / instruct）语义一字未变；
+- judge 侧入口 `verifyJudgeBoot(deps, {channelPath, baselineRecordCount})` ——
+  judge 的通道**跨 pane 长存**，所以「有记录」不构成新 pane 起跑的证据，必须是水位线
+  **之上**的记录。budget 也更长（30 次 × 1s，判据是它自己的心跳节拍比子会话慢）。
+
+核实失败时 **pane 与登记都保留**（不误杀一个只是起得慢的会话），回执带证据行；
+`judge_spawn` 里连 `rememberGoalAudit` / `rememberPlanAudit` 也照常执行，否则一个
+迟到才上报的 judge 交的卷将无法绑定记录。
+
+测试：`test/delivery-probe.test.ts` 六条，覆盖三类调用者（编排 spawn 保持旧语义、
+judge spawn 的水位线、instruct 的 ack 不受影响），外加「读不出通道 = 缺回执而不是抛
+异常」「attempts 是 N 次读 N-1 次睡」。`test/session-factory.test.ts` 里
+“a failed delivery check KEEPS the pane and its registration” 钉住失败语义。
+
+### 6. 跨进程契约逐字不变
+
+- 五个 env 变量名与取值语义未改：`buildSessionEnv` 是唯一拼装点，单测
+  “the env builder is the only assembly point…” 与五条组合测试逐一断言 key 集合
+  （judge spawn 五个、judge recover 三个、编排三个、successor 原样透传）。
+  `test/judge-pane.test.ts` 另有一条把三个常量的字面值钉死。
+- `judgeChannelTarget` 输入输出未动。
+- 会话独占豁免：judge 看 `RG_JUDGE_*`、编排子会话看 `RG_STATE_VARIANT`，
+  组合 3 / 4 的断言明确写了「这也是豁免依据」。编排 recover 的 env 由
+  `stateVariant: child.stateVariant ?? child.id` 给出，与收敛前的 `childEnv` 一致。
+- 改动文件清单（`git status --porcelain`）不含 `lib/judge-conclude.ts` /
+  `lib/orchestrator-channel.ts` / `lib/orchestrator-child-channel.ts`，也不含
+  `lib/orchestrator-guard.ts`。
+- 两处 recover 共用 `paneRecoverability`（六种码：unknown / closed / no-pane /
+  alive / unknown-liveness / recoverable），各自只保留自己的措辞；结构测试断言两个
+  文件都调它，单测把六种码逐一钉住。
+
+**边界例外（用户 2026-09-05 当轮批准）**：`lib/audit-round.ts` 加进边界，只改两行——
+`RunAuditRoundDeps.dispatch` 的返回类型允许 `Promise<…>`，调用处加 `await`。原因：
+judge 侧投递核实要求 `dispatchJudgeRound` 变 async，而 goal/plan 审计链经过这个同步
+类型。除这两行外该文件未动。
+
+### 7. 全绿 + 文档 + 交付站点
+
+**最终验收（2026-09-05，停止打磨后在最后一轮代码审绑定的那棵树 `9bf5587` 上重跑）**：
+
+```
+$ npx tsc --noEmit ; echo "TSC EXIT=$?"
+TSC EXIT=0
+
+$ npm test | tail
+ℹ tests 2369
+ℹ suites 5
+ℹ pass 2369
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 96854.898042
+NPM_TEST_EXIT=0
+```
+
+基线是 2330 pass / 0 fail，现在 2369 pass / 0 fail（净增 39 条：新增
+`test/session-factory.test.ts`、`test/session-factory-structure.test.ts`、
+`test/delivery-probe.test.ts` 三个文件，另在既有文件里补了 label-bar 释放、
+C2 重绘、投递核实等分支的断言；删掉的是随实现一起消失的
+`isLastDecoratedChild` 与 `paneTitleForHealth` 两条单测）。
+
+边界核查（**无越界**）：
+
+```
+$ git diff 2c77a2e..HEAD --name-only | grep -v -E "<边界清单>"
+（空：无越界）
+```
+
+改动落在：`lib/session-factory.ts`（新建）、`lib/judge-pane.ts`、
+`lib/judge-session-tools.ts`、`lib/judge-spawn-tools.ts`、
+`lib/orchestrator-dispatch.ts`、`lib/orchestrator-pane-decor.ts`、
+`lib/orchestrator-recovery-tools.ts`、`lib/orchestrator-session-tools.ts`、
+`lib/orchestrator-tool-kit.ts`、`lib/audit-round.ts`（**用户当轮批准的边界例外**，
+只两行）、`extensions/review-gate.ts`、`test/`（8 个文件）、`docs/`（3 个文件）。
+文档：`docs/module-map.md` §5 新增 `session-factory.ts` 一行、表头计数 108 → 109、
+`judge-pane.ts` 与 `orchestrator-tool-kit.ts` 两行重写，§域3 正文改口径；
+`docs/hierarchical-session-design.md` §六模块落点同步。`test/module-map.test.ts`
+（双向差集 + 计数）通过。
+
+---
+
+## 二、关键设计决定
+
+1. **factory 的顺序是固定的：spawn → register → decorate → verify。** 登记在核实
+   之前，是为了让核实失败时 pane 仍然可寻址（它可能只是慢）；装饰在核实之前，是为了
+   让人眼看到的 pane 在门禁还在等证据时就已经有身份。这个顺序写在函数文档里，不是
+   调用方的自由。
+
+2. **登记与核实以回调形式注入，而不是让 factory 认识两张注册表。** judge 写
+   `judgeHierarchy`、编排子会话写 runtime 的 children，两者结构完全不同；把它们塞进
+   factory 会让它认识两个领域模型。回调让「登记」成为 factory 序列里的**一步**（不会
+   被调用方遗忘、且顺序由 factory 决定），同时不把领域知识搬家。
+
+3. **env 由 factory 拼，命令由调用方给。** env 是跨进程契约（也是豁免依据），必须
+   一处拼装；而命令 argv 依赖各自的任务文件/模型/会话 id，把它们搬进 factory 只会
+   让它认识 `judge-process`、`orchestrator-delivery` 两套东西。judge 的两个命令构造器
+   本身是「怎么开一个 judge pane」的一部分，所以随 openJudgePane 一起搬进 factory。
+
+4. **投递核实的判据放在水位线上。** 编排子会话每次 spawn 都是新通道，水位线恒为 0，
+   语义与收敛前逐字相同；judge 通道跨 pane 长存，不加水位线就会把「上一轮的记录」当成
+   「这一轮的 pane 起来了」——那正是核实存在的意义被抵消的形态。
+
+5. **handoff 也收敛进来（用户裁决 A）。** 它是唯一「不登记、不接通道、不装饰」的组合，
+   所以 factory 把布局/登记/装饰/核实做成四个独立可选轴，而不是按 kind 分支。副产品是
+   判据 (b) 能写成「唯一使用者」而不是「唯二」。
+
+6. **judge 标题刷新点选 `probeJudgeRound` 而不是 `judge_wait`。** wait 的轮询与 settle
+   唤醒都经过它，选它等于「凡是读了 judge 状态的路径都会刷新」，不需要记得在第二个地方
+   补一次。
+
+---
+
+## 三、发现但未做 / 已知遗留（交给下一轮，本轮**不**再走 review）
+
+> 2026-09-05：项目经理下达停止指令（reviewer 已连续 **10 轮** READY，属于门禁缺陷 D11
+> 「打磨闸拦不住无限抛光」的复现，逐轮数据见 §五.1）。以下条目**均未修**，按
+> 「现象 + 严重度 + 建议修法」如实记录。前两条是停止指令下达时正在手上、已被**还原**的改动。
+
+1. **`declare_done` 级联那一处的释放行为没有行为测试**（第 10 轮 reviewer 的 P2，**未修**）。
+   现象：把级联里的 `closeOpts` 改成恒 `{}`（永不收 bar），全量 2369 条测试仍全绿；
+   只有源码结构断言会拦住它。严重度：**P2**（用户环境残留，且它是五条关闭路径里唯一
+   没有行为覆盖的一条）。建议修法：给扩展的 `declare_done` 做一个像
+   `test/helpers/fake-orchestration.ts` 那样的最小假宿主，或把级联那段判定抽成
+   `lib/` 里的纯函数再单测——后者更符合本仓「判定不留在扩展里」的口径。
+   （停止指令下达时我已写好一条**结构**断言把它钉住，按指令一并还原。）
+
+2. **`judge_spawn` 回滚路径的 `paneClosable` 过滤没被钉住**（第 10 轮 reviewer 的 Nit，**未修**）。
+   现象：删掉那一行，`test/judge-spawn-tools.test.ts` 仍 17 pass / 0 fail。
+   严重度：**Nit**（该过滤是「异 tmux server 的 pane id 不算兄弟」，删掉只会让 bar
+   多留一会儿）。建议修法：加一条回滚测试，兄弟条目带 `tmuxServer: "other-server,9"`，
+   断言 bar 仍被收起。（同样已写好、按指令还原。）
+
+3. **窗口标签栏（`pane-border-status` / `pane-border-format`）的共享语义还没理清**——
+   这是**下一轮的课题**，不是本轮的尾巴。它们是 **window 级**设置，被窗口里所有 pane
+   共享，而「谁有权开、谁有权收」在本仓现在是由五条关闭路径各自推断出来的：
+   - 本轮把「收」统一成了「我还能看见几个装饰 pane + 我是不是客人」，但「**开**」仍然
+     是每次 `decorateSessionPane` 无条件打开，没有任何一方登记「这条 bar 现在归谁」；
+   - 因此**跨会话**的场景仍靠约定而非机制：项目经理与它的子会话在同一个 window 里，
+     子会话的 judge pane 打开 bar、项目经理的 close 可能把它收走（反之亦然），谁先谁后
+     决定了那一瞬间谁的边框是空的；
+   - 真正的修法大概是给 window 级设置一个**显式的持有者/引用计数**（谁开的记一笔、
+     最后一个释放），而不是让五处各自数 pane。严重度：**P2/设计课题**。
+
+4. **两处 recover（`judge_recover` / `orchestrator_recover`）不做投递核实。**
+   goal 只要求 spawn 路径两侧一致；水位线机制已经具备，但给 recover 加核实会改变它的
+   失败语义（现在是「重开成功即返回」）。严重度：**Nit/设计取舍**。建议：与上面第 3 条
+   一起在下一轮决定。
+
+5. **`dispatchJudgeRound` 复用 pane 那条路径不核实投递。** 它往活着的 pane 的通道写一条
+   instruct，理论上可以等 `instruct-ack`，但**没有实测证据**说明 judge 侧一定会 ack，
+   贸然加会卡住每一轮 review。严重度：**Nit**。建议：先实测 judge 侧 ack 行为再决定。
+
+6. **`extensions/review-gate.ts` 仍有约 8300 行。** 本轮往里加的净代码很少（以改造为主，
+   新逻辑都落在 `lib/session-factory.ts`），但它离「新逻辑不要再堆进扩展」还差一次真正的
+   拆分。严重度：**架构债**。
+
+7. **`countDecoratedPanes` 的「读不到 pane 列表 ⇒ 全部按在场算」是有意的 fail-safe**，
+   代价是 tmux 不可读时 bar 会残留到下一次 spawn。已有测试钉住方向，但这个取舍值得在
+   第 3 条那次设计里一并复核。严重度：**Nit**。
+
+---
+
+## 二·补 · 第二轮：reviewer findings 的处置
+
+第一轮 verdict 是 READY（7 条 findings：4×P2 + 3×Nit），其中 **P2-1 是我本轮引入的
+真实回归**，因此全部处置掉之后重新绑定：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-1 | judge pane 打开了 window 级边框行却从不收起，成为用户窗口里的永久残留 | 新增 `releasesWindowLabels`（纯判定）：**最后一个**被装饰的 pane 才收起，且**编排内一律不收**（那张 bar 归项目经理，子会话收起会把兄弟 pane 的边框抹掉）。接在 `judge_close` 与 `declare_done` 的级联关闭上；三条行为测试（最后一个收 / 编排内不收 / 还有兄弟不收）+ 一条纯函数测试 |
+| P2-2 | boot 核实失败时 `judge_submit` 不登记 pendingAudits，与 `judge_spawn` 的相反取舍 | 统一成 `judge_spawn` 的口径：**pane 被保留 = 这一轮已经派出去了**，所以照常登记待审草稿，否则迟到的 report 没有 kind 可绑、整轮丢失 |
+| P2-3 | `decorWarning` 只回传裸 stderr，回执丢了「仅显示降级」的语境 | 文案回到 factory 里包一层（每个调用方都直接把它贴进回执，语境属于产出方）；测试改成断言 /降级/ 与原始 stderr 都在 |
+| P2-4 | C2 重绘不校验 pane id 是否本 tmux server 铸造，可能给陌生 pane 改标题 | `paintTitle` 先过 `paneClosable`（与 kill 路径同一条规则）；`probeJudgeRound` 的 child 投影补 `tmuxServer`，扩展 settle 侧一并补齐。新增测试：同 server 恰好重绘一次、异 server 一次不写 |
+| Nit-1 | 扩展里 `JUDGE_STREAM_ENV` 成了死 import | 删 |
+| Nit-2 | `paneTitleForHealth` 零调用者 | 删（连同其测试改用 `paneTitleFor`） |
+| Nit-3 | 退出标准 3 的字面判据与守卫测试自指冲突 | 报告里更正措辞（见上文 §1.3），实现未变 |
+
+第二轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2360 pass / 0 fail**。
+
+**变异验证（在 `$TMPDIR` 副本里做，工作区未动）**：逐个把本轮的关键行为改坏，确认
+对应测试确实变红——绕过 factory 开 pane（→ 六调用点测试红）、给 argv 构造器加第二个
+使用者（→ 判据 (b) 红）、去掉 C2 的 `paintTitle("done")`（→ C2 结构测试红）、改名
+`RG_JUDGE_ROLE`（→ 契约测试与两条组合测试红）、去掉边框行 argv（→ C1 测试红）、
+judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫（→ 陌生 pane 测试红）、
+去掉降级文案包装（→ decorWarning 测试红）。
+
+## 二·补二 · 第三轮：P2-1 的两处漏网
+
+第二轮 verdict 仍是 READY（4 条：2×P2 + 2×Nit），两条 P2 都是 P2-1 那个修法自己的漏网：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-A | `insideOrchestration` 只读 `RG_ORCHESTRATION_ID`，而**项目经理自己的 env 里没有它**（它在进程内铸 id），于是 PM 关掉自己的 plan 审计者时会提前收走 bar，把还活着的子会话边框抹掉 | 两侧都要判：子会话看 env，项目经理看 `taskMode === "orchestrator"`。两处接线（judge_close 的依赖注入、declare_done 级联）都改，并新增结构测试「BOTH sides…」钉住两个事实都被问到 |
+| P2-B | 兄弟数数的是**登记条目**而不是屏幕上的 pane：僵尸条目会让 bar 永不释放（P2-1 的另一半）；级联那边还把自己因 `!paneClosable` 跳过的条目算进了剩余数 | judge_close 改成只数「`paneClosable` 且出现在 `listJudgePanes` 里」的兄弟（**读不到 pane 列表时按仍在算**——留下 bar 只是垃圾，抹掉活着的边框是错答案）；级联改成先算出真正会被关的集合再递减。新增测试：只是登记行的兄弟不算数 |
+| Nit | `ChildHealth` 成了未使用 type import | 删 |
+| Nit | 编排侧 `decorNote` 与 factory 的降级文案嵌套重复 | 外层只补「纯展示层…」那半句，测试同时断言不再嵌套 |
+
+顺带修掉一个**测试夹具与生产漂移**：`test/judge-session-tools.test.ts` 的 `seed()` 建
+登记条目时不写 `tmuxServer`，而真实 `registerJudge` 一定连 server 一起记。三个判定
+（能不能关、能不能重绘、算不算兄弟）都要求 id 可归属，夹具漏写让它们全都表现得像
+「根本没有 pane」——这正是上一轮那条「假实现要跟着被测行为一起长」的同一根因。
+
+第三轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2361 pass / 0 fail**。
+变异复验：把兄弟计数改回数登记行 → 「只是登记行的兄弟」测试红。
+
+## 二·补三 · 第四轮：把「谁能收 bar」彻底想清楚
+
+第三轮 reviewer 又流出 2 条 P2，都在同一处，而且第二条正中我第三轮的过度纠偏：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-E | 我第三轮把「PM 也算 insideOrchestration」写死成**永不收**，于是 PM 自己开的 judge pane 打开了边框行却**没有任何路径**为它收起——从「提前收」翻到了「永远不收」 | 重新定义两个输入：`insideOrchestration` **只**表示「我是编排的子会话」（看不见项目经理的 pane，所以永不收）；项目经理**能**数自己的 pane，于是新增 `otherDecoratedPanes()`（= 活着的子会话数，非 PM 恒为 0）并计入 `remainingDecoratedPanes`。judge_close 与 declare_done 级联都改。新增两条行为测试（有子会话→不收 / 没有子会话→收）+ 结构测试改写成「两个站点都要问 child 与 manager 两个事实」 |
+| P2-F | 「读不到 pane 列表就按兄弟仍在算」这个 fail-safe 分支没有测试，可以被反向改写而全绿 | 夹具加 `paneListReadable` 开关，新增测试；变异复验：把条件反写成 `livePanes !== undefined && …` → 该测试红 |
+
+第四轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2364 pass / 0 fail**。
+变异复验：PM 不再数子会话 → 「MANAGER counts its children」红；fail-safe 反写 → 「unreadable pane list」红。
+
+**这条经验值得单独记（项目层面）**：一个「共享资源谁来收」的判定，正确形状是
+**「我还能看见几个在用它的人」**，而不是「我是不是某种角色」。我前两次都写成了角色判断
+（先是「不是编排就收」，再是「是编排就不收」），两次都错在同一个地方——角色不等于视野：
+项目经理看得见自己的子会话，编排子会话看不见项目经理的 pane。改成数「我能看见的、还在
+用它的 pane」之后，两种角色自然各归各位。
+
+## 二·补四 · 第五轮：视野判断的最后两个入口
+
+第四轮 reviewer 又给了 2 条 P2，都在同一处，且其中一条我在等结论期间已自查出并先修了：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-G | 「env 里有 orchestration id ⇒ 我是子会话」对**接力继任者与 attach 接管者**不成立——它们是项目经理，却也带着这个变量，于是又落回「永不收」 | 新增判定 `labelBarOwnedByOthers()` = 带 id **且** 自己不是 orchestrator 模式；两处站点都改走它。**没有**去改已有的 `isOrchestrationChild()`（它回答的是「我是不是被派来干活的」，驱动子会话指令与模式守卫两处无关决策，扩宽它会顺带改掉那两处）。结构测试补第 3 段钉住「不能只读 env」 |
+| P2-H | 收 bar 的 `setw` 拿**正在关闭的那个 pane** 当 window 选择器；用户手动关掉 review pane 后再 judge_close / declare_done，这条 setw 直接失败被吞掉，bar 永久残留 | `closeSessionPane` 的选项从 `hideLabels: boolean` 改成 `hideLabelsVia: string`——传的是**用来指认窗口的 pane id**，三处调用方一律传**自己的 pane**（它必然活着，因为我们正跑在里面）。类型即约束：想收 bar 就必须说清楚用谁寻址。测试断言 `-t %1` 且不含 `%7` |
+
+第五轮追加两处（一条自查、一条 reviewer 流式给出）：
+- `orchestrator_close` 我一度写成「读不到自己的 pane 就不收 bar」，这是把已修的缺陷换成
+  一个新缺陷（诊断读不到 → 永久残留）。改成 `deps.ownPane() ?? child.paneId`：能用自己的
+  就用，用不了退回旧行为，释放本身不再取决于一个诊断量。
+- reviewer 指出 `orchestrator_close` 这一处的 `hideLabelsVia` **没有任何测试钉住**（改回
+  用正在销毁的子 pane 寻址仍全绿）。已补断言：两条 `setw -u` 的目标必须是项目经理自己的
+  pane（`%0`）且不含被杀的子 pane；变异复验：改回 `child.paneId` → 该测试红。
+
+第五轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2364 pass / 0 fail**。
+
+## 二·补五 · 第六轮：第四个入口 + 把「没测试钉住」补上
+
+第五轮 reviewer 给了 1×P2 + 2×Nit：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-I | `orchestrator_close` 这一处的 `hideLabelsVia` 没有任何测试钉住（改回用被杀的子 pane 寻址仍全绿） | 既有的「close takes the window bar down before killing」测试补断言：两条 `setw -u` 必须 `-t %0`（项目经理自己的 pane）且不含子 pane id。变异复验：改回 `child.paneId` → 红 |
+| Nit-I（(a) 的答案） | 第四个入口：`judge_spawn` 在 `rememberPlanAudit` 失败回滚时 `closeSessionPane` 不收 bar，而那个 pane 刚被装饰过 | 回滚路径改走同一判定（新增 `insideOrchestration` 依赖 + 抽出共享的 `countDecoratedPanes`），新增两条测试（无兄弟→收、有兄弟→不收）。变异复验：回滚不传 `hideLabelsVia` → 红 |
+| Nit-II（(c) 的答案） | 我给 `orchestrator_close` 加的 `ownPane !== undefined` 前置改了语义且无痕 | 已在第五轮自查时改成 `deps.ownPane() ?? child.paneId`：能用自己的就用，读不到退回旧行为，释放不再取决于诊断量 |
+
+第六轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2366 pass / 0 fail**。
+
+## 二·补六 · 第七轮：五条路径、一个判定（收敛完成）
+
+第六轮 reviewer 给出 (a)(b)(c) 三问的答案，我全部落地：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-J（(c) 的答案：应当统一） | `orchestrator_close` 仍用 `isLastDecoratedChild`：数登记行、且完全看不见 judge pane——前几轮在另外三条路径修掉的两个缺陷在它里面原样保留 | 改用同一判定：`releasesWindowLabels({remainingDecoratedPanes: 还活着的子会话 pane + 本会话的 judge pane, insideOrchestration: false})`。为拿到 judge 计数，在**我边界内**的 `lib/orchestrator-session-tools.ts` 定义 `OrchestratorSessionDeps`（`OrchestratorDeps` + 可选 `decoratedJudgePanes()`），扩展接线时补上——没有去改边界外的 `lib/orchestrator-deps.ts`。`isLastDecoratedChild` 随之**删除**（哲学三），其测试改为指向新判定 |
+| Nit-J（(a) 的答案：第五条路径） | `dispatchJudgeRound` 的 `fresh:true` 预杀：正常紧接着重开会把边框行重新打开，但重开可能失败，而它已经把登记删了——此后没人能释放 | 预杀也走同一判定；重开成功时装饰会立刻把 bar 打回来，重开失败时 bar 已经收好。结构测试补断言 |
+| Nit-K（(b) 的答案） | 回滚路径的候选过滤比 `judge_close` 少一个 `paneClosable` | 已在等结论期间自查补上（两处现在完全等价） |
+
+第七轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2365 pass / 0 fail**
+（少 1 条是删掉的 `isLastDecoratedChild` 单测，其语义已由新判定的测试覆盖）。
+
+**五条关闭路径现在的口径一致**：judge_close / declare_done 级联 / judge_spawn 回滚 /
+`fresh` 预杀 / orchestrator_close，全部 = 「我还能看见几个装饰 pane（含 judge 与子会话
+两类，读不到 pane 列表时按在场算）」+「我是不是别人窗口里的客人」，寻址一律用调用者
+自己的 pane。
+
+## 二·补七 · 第八轮：给合并后的行为补覆盖
+
+第七轮 reviewer 的 P2 一针见血：我把 `orchestrator_close` 并进共享判定，却**同时删掉了
+唯一钉住它的单测**，净结果是覆盖率下降——「把它改成无条件释放、并把 judge 计数抹成 0，
+2365 条测试仍然全绿」。处置：
+
+- 假世界加 `judgePanes` 选项（本会话窗口里还有几个 review pane），新增工具级测试
+  「有 review pane 在场就不收 bar」；变异复验：判定改成无条件释放 → 红；judge 计数抹 0 → 红。
+- 「兄弟**子会话**还在就不收」这一条在**单 repo 里根本构造不出来**（调度器同 repo 串行，
+  两个活着的子 pane 不可能同时存在）。与其造假，不如把这个事实**写成测试**：断言 t1 的
+  pane 还活着时 t2 的 spawn 被拒、且没有第二个 pane 被开——覆盖缺口因此是一条被声明的
+  事实，而不是疏漏；判定本身（两类 pane 一起数）在 `test/session-factory.test.ts` 里有单测。
+- 顺带被测试抓到一个我自己引入的回归：接线时我用 `{...deps, decoratedJudgePanes}` 复制了
+  deps，而多处测试是在注册**之后**替换 `deps.channelIO` 的——复制把每个字段都冻在了注册
+  那一刻。改成给同一个 deps 对象补方法。
+
+第八轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2367 pass / 0 fail**。
+
+第九轮补齐同一表达式的另一半（reviewer：judge 那半钉住了，「活着的兄弟子会话」那半仍可
+被抹成 0 而全绿）：两个活着的子 pane 只能**跨 repo**出现（同 repo 被调度器串行），所以测试
+改用一个两仓库的 plan 真造出这个场景，再断言关掉其中一个时 bar 不收；「同 repo 造不出来」
+另立一条测试说明为什么必须跨仓库。变异复验：把子会话计数抹成 0 → 该测试红。
+第九轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2368 pass / 0 fail**。
+
+第十轮清掉最后两条 Nit：
+- `!c.closedAt` 这半个过滤此前可被删而全绿——它只在「已关闭的子会话、pane 却还在屏幕上」
+  时才起作用（kill 失败或 tmux 仍列着）。新测试直接造这个态：跨仓库开两个子会话，把其中
+  一个在登记表里标成 closed 但**不杀 pane**，再关另一个，断言 bar 被收起。变异复验：删掉
+  `!c.closedAt` → 该测试红。
+- 「同 repo 造不出第二个活着的子 pane」那条测试原本只断言 `isError === true`——那在 plan
+  没批、任务不存在时也成立。改成断言拒绝**原因**（同一 repo + 不能两个写者并存）。
+第十轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2369 pass / 0 fail**。
+
+**第四条项目级经验**：合并两条实现时，**先看被删的那一侧有哪些测试在钉它**——把实现合并
+掉而把它的测试一并删掉，是覆盖率净下降的标准形状。正确顺序是：先让新实现接住旧测试的
+断言（哪怕换个层次表达），再删旧实现。
+
+**第三条项目级经验**：这一个小改动（「收起共享 bar」）连续四轮出 P2，每轮都是同一形状——
+**我把一个「谁在用它」的问题当成了「我是谁」的问题**，然后每修一次就漏一个新入口
+（judge_close → 级联 → 回滚 → 接力继任者）。正确做法是**先把所有会关掉这类 pane 的路径
+列全**（本仓是 4 条），再让它们共用同一个判定与同一个计数函数，而不是一条一条打补丁。
+
+**第二条项目级经验**：`setw -t <pane>` 里的 pane **只是窗口的名字**，不是操作对象。凡是
+「用 X 指认 Y」的 API，指认用的那个 X 必须挑一个**你能保证还存在**的——这里正确答案永远是
+调用者自己的 pane，而最容易顺手写下的答案（正要被销毁的那个）恰好是唯一不能用的。
+
+
+---
+
+## 四、踩了什么坑
+
+### 只对这一轮成立
+
+- **`RunAuditRoundDeps.dispatch` 是同步类型，而它在边界外。** 「让 judge 派活也核实
+  投递」这条要求，最后卡在一个跟 pane 毫无关系的类型签名上。教训是：把一条同步调用链
+  改成异步，边界要按**调用链**画，不能只按「改哪些模块」画。本轮靠一次 `ask_user`
+  当场扩边界解决（只改两行）。
+
+### 项目 / 全局层面还会再遇到
+
+- **假实现要跟着被测行为一起长。** `test/judge-spawn-tools.test.ts` 的假 tmux 在
+  `split-window` 后什么也不做——收敛前无所谓，收敛后「什么也不做」= 模拟了一个**死掉的
+  pane**，于是所有 spawn 测试一起红。正确的修法不是给测试塞 `attempts: 1`，而是让假的
+  tmux 在 split 成功后**在通道里写一条 state 记录**（真 pane 就是这么干的），并且从
+  argv 里的 `-e RG_JUDGE_ID=…` 反解身份——这样这个假实现不可能与 env 契约漂移。
+  一般化：**当被测对象开始「观察副作用」时，假实现必须开始「产生副作用」，否则测试断言的
+  是一个不可能发生的世界。**
+- **结构测试的窗口要自证覆盖。** 我第一版用 `text.indexOf("\n}", at)` 取函数体，对
+  嵌套函数（`dispatchJudgeRound` 缩进两格）会一路取到外层函数末尾，窗口大到能把邻居的
+  调用算成自己的。改成「到下一个函数声明为止」+ 断言窗口内不含另一个站点的 anchor +
+  断言 `openSessionPane(` 恰好 1 次。**凡是「从一个窗口里数一个数」的测试，都要先证明
+  窗口的两端是对的**（这条已在 `skills/gate-changes-and-tests` 里，本轮又踩了一次）。
+- **通道路径不要手写字面量。** `test/delivery-probe.test.ts` 第一版把
+  `/home/test/opener-1/rg-…jsonl` 写死，与 `channelPathFor` 的真实布局不符，结果三条
+  测试在一个自己发明的空文件上断言。改成从 `channelPathFor` 求值。**测试里凡是「被测
+  代码也会推导」的路径/键，一律调同一个推导函数，不要抄一份。**
+- **改共享返回语义前先枚举调用者、按类别验收。** `verifyDelivery` 的证据判据从
+  `records.length > 0` 变成 `> baseline`，调用者有三类（编排 spawn / 编排 instruct /
+  judge spawn），三类各写了测试。这条是 skill 里已有的经验，这次照做了，没出事。
+- **打开一个 window 级选项，就欠下一次关闭。** C1 的修法是让 judge pane 也打开
+  `pane-border-status`/`format`——但那是 **window** 级的、被窗口里所有 pane 共享的东西，
+  而我只写了「打开」。reviewer 抓到的是它成了用户窗口里的永久残留。一般化：**凡是改动
+  的作用域大于自己创建的那个对象（window 选项、全局配置、共享文件），就必须同时回答
+  「谁在什么条件下撤销它」**，而且答案通常是「最后一个用它的人，且只有它的所有者」。
+- **模块级重绘记忆会让同进程的测试互相掩盖。** `refreshSessionPaneTitle` 在调用方不给
+  memory 时用模块内的 Map；两条测试都用 `%7` 时，第二条的重绘被第一条的记录判成「没变
+  过」，于是断言 0 !== 1。生产上 pane id 唯一所以没问题，但**测试要各用各的 pane id**，
+  否则你验的是缓存不是行为。
+
+---
+
+## 五、门禁自身异常
+
+### 1. 打磨闸给不出停止信号（D11 的第三次复现）—— 2026-09-05，本轮最重要的一条
+
+现象：reviewer **连续 10 轮全部 READY，无一 BLOCKED**，但每一轮都附带 P2/Nit，而我每一轮
+都据此再改一轮、再提交一轮。门禁这一侧唯一的刹车是 `judge_submit` 的「两轮 READY 后必须
+给 reason」——我每次都能写出一条**真实且成立**的 reason（因为 findings 确实是真的），于是
+闸门每次都放行。结果是：**收敛判据不存在**。第 3 轮曾有一个纯文档任务被同样的形状审了
+14 轮；这一轮是 10 轮代码审 + 1 轮文档审。最终是**项目经理人工喊停**，不是门禁。
+
+（更正说明：本节初稿写成「连续 6 轮」，是把门禁回执里的**已记录裁决数**（`round N/15`，
+到 6 为止）当成了轮数；judge 通道里实际有 10 份 report，`round` 依次 1…10、verdict 全为
+READY。reviewer 在文档审这一轮抓到了这处少报，一并更正。）
+
+时间与逐轮 findings 数（取自通道 report 的 `at` / `findingsCount`）：
+`round 1` 08:39:20 (7)、`2` 09:04:33 (4)、`3` 09:21:47 (2)、`4` 09:34:30 (2)、
+`5` 09:49:13 (3)、`6` 10:02:38 (3)、`7` 10:26:21 (2)、`8` 10:41:09 (3)、
+`9` 10:46:30 (2)、`10` 10:55:07 (2) —— 之后是项目经理的停止指令。
+
+证据路径（**均已逐条核实存在**）：
+- 权威记录是 judge 通道文件本身，10 份 report 全在里面：
+  `/Users/qwang/.pi/agent/rg-channels/rg-child-t4b-session-factory-r2-mto2toiz/rg-reviewer-f3eb4277-de9e8935.jsonl`；
+- 每份 report 的 findings 正文在同目录的 `…rep-<id>.payload.findings`（10 份，全部存在）；
+- `.pi/review-stream/` 下按轮生成的 findings 流**只有一部分留存**：
+  `review-mto687sn-review.jsonl`、`review-mto775zp-review.jsonl`、
+  `review-mto8hhn7-review.jsonl`、`review-mto902lr-review.jsonl`、
+  `review-mto9j6xz-review.jsonl`、`review-mtoa0w9g-review.jsonl` 存在；
+  初稿另外列的 `review-mto4jr80` / `review-mto5k8iq` / `review-mto9amhd` **不存在**
+  （那几轮 reviewer 没有走流式写入，findings 只进了 report 的 payload）——初稿把它们当成
+  证据是错的，已删。
+
+我这一侧的判断失误也如实记下：**我把「reviewer 还能挑出东西」当成了「还没到位」**。
+正确的判据应当是「退出标准是否已逐条达成」，而不是「findings 是否为空」——READY 的含义
+就是「可以收了」，附带的 P2/Nit 是**下一轮的输入**，不是本轮的债。这一点在
+`skills/review-loop` 或 `lib/agent-directives.ts` 的等待纪律里值得写死一句。
+
+建议修法（给门禁）：READY 连续 N 轮（N=2 已有阈值）时，把「再审一轮」从「给个 reason
+就能过」升级成**必须由人批准**；或者让 reviewer 的 READY 报告显式回答一句
+「本轮退出标准是否已全部达成」，把收敛判据从 findings 数量换成退出标准。
+
+### 2. goal 首轮被 `goal-auditor` 以两条 P1 退回（预期内，非缺陷）
+
+判据里 `"split-window"` 字面量在边界外的 `lib/orchestrator-guard.ts` 也存在、以及漏了
+任务书要求的 verifyDelivery 两侧一致。findings 落在
+`.pi/review-stream/goal-e98dd039e0a9.jsonl`，两条都属实，修正后重提通过。
+
+### 3. 报告本身会把 READY 打回 PENDING（结构性，非本轮偶发）
+
+完成报告落在仓库内（用户 2026-09-05 的决定，为的是避开「仓库外文件被判越界」那个缺陷），
+于是**写报告 = 弄脏工作区 = 把刚拿到的 READY 打回 PENDING**。实际发生的经过：项目经理与
+监督者先决定「最后一轮代码审的 READY 即终局，报告不再买一轮打磨」；`declare_done` 随即被
+`doc review gate is PENDING (need READY)` 拦下；我按指令**没有**自行补审，而是把拦截原文
+交给项目经理，用户改为授权**专为这份文档**走一轮零代码改动的 review。
+即：门禁在「文档也是交付物」这件事上没有留出「不为文档买一轮」的口子——要么补一轮，要么
+把文档移出仓库（而移出仓库正是它当初被搬进仓库要规避的那个缺陷）。
+
+---
+
+## 六、边界例外的完整交代（`lib/audit-round.ts`）
+
+**改了哪两行**（`git diff 2c77a2e..HEAD -- lib/audit-round.ts` 全文只有这两处）：
+
+1. `RunAuditRoundDeps.dispatch` 的返回类型，增加 `| Promise<…>` 这一支（同步实现仍然合法）；
+2. `runAuditRound` 里 `const dispatched = deps.dispatch({…})` 改为 `await deps.dispatch({…})`
+   （该函数本来就是 `async`）。
+
+**为什么必须改它**：退出标准 5 要求 judge 侧也做投递核实，核实是「盯着通道等第一份证据」
+的异步过程，因此 `dispatchJudgeRound` 必须变 `async`。而 goal / plan 审计链经由
+`runAuditRound` 调用同一个 dispatch，它的类型是同步的——不放宽这个类型，judge 轮次派发就
+无法 await 自己的核实。
+
+**为什么不能靠改 goal 绕开**：绕开的唯一形状是「judge 轮次派发不做核实，只有 judge_spawn
+和编排 spawn 做」，这与已获批 goal 的退出标准 5（**两侧一致**）直接冲突，等于用改契约来
+回避实现困难——而且会留下一条「同为 judge spawn，一条核实一条不核实」的分叉，正是本轮要
+消灭的形状。所以我停下来用 `ask_user` 请示，用户当场批准把该文件加入边界（选项 A）。
+
+**克制**：除这两行外该文件一字未动；`git diff` 可逐字复核。

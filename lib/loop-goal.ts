@@ -33,6 +33,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TaskMode } from "./task-mode.ts";
+import { DELIVERY_STATION_CHOICES_EN, type DeliveryStation } from "./delivery-station.ts";
+import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
+import { composeWithUntrustedData } from "./untrusted-data.ts";
 
 /** Repo-root-relative location of the goal file (gate-excluded via `.pi/`). */
 export const LOOP_GOAL_RELPATH = ".pi/loop-goal.md";
@@ -116,14 +119,26 @@ export interface LoopGoalConfirmation {
    * Never part of the hash — a reason is metadata, not goal text.
    */
   reason?: string;
+  /**
+   * WHERE THIS ROUND STOPS (2026-09-06) — precommit / commit / pr, shown to
+   * the user in the same dialog that approved the goal.
+   *
+   * Optional for one reason only: sidecars written before this field existed
+   * must keep their approval. A missing value is READ as `precommit`
+   * (lib/delivery-station.ts) — the strictest station, which allows no ship
+   * command at all — so an old record can only ever be under-privileged,
+   * never over-privileged. Like `reason` it is NOT part of the hash: the
+   * approval binds to the goal TEXT, and the station travels beside it.
+   */
+  station?: DeliveryStation;
 }
 
 /**
  * The sidecar record of "the dedicated `goal-auditor` role pre-reviewed THIS
- * exact draft" (L8b — written only by record_goal_prereview).
+ * exact draft" (L8b — written only by the gate's own `recordGoalPrereview`).
  *
- * The verdict is the EXTENSION's own reading of the auditor's JSON fence
- * (parseReviewOutput), never a boolean the agent attested: an agent-supplied
+ * The verdict is the EXTENSION's own reading of the auditor's structured
+ * conclusion, never a boolean the agent attested: an agent-supplied
  * `passed` flag would make the pre-review a self-certification, which is the
  * hole this record exists to close. Like {@link LoopGoalConfirmation} it binds
  * to CONTENT — the hash of the text that was judged — so revising the draft
@@ -136,14 +151,14 @@ export interface LoopGoalConfirmation {
 export interface GoalPrereviewRecord {
   /** sha256 of the NORMALIZED draft text the auditor judged (goalTextHash). */
   hash: string;
-  /** PASS ⇔ the extension parsed a READY verdict from the auditor's output. */
+  /** PASS ⇔ the extension read a READY verdict off the auditor's own conclusion. */
   verdict: "PASS" | "FAIL";
   /** ISO time the extension recorded this audit. */
   at: string;
-  /** Findings the auditor reported (null when the fence was unparseable). */
+  /** How many findings the auditor concluded with (an older record may carry null). */
   findingsTotal?: number | null;
   /**
-   * The findings VERBATIM (severity + issue), when the fence parsed. Persisted
+   * The findings VERBATIM (severity + issue), as the auditor concluded them. Persisted
    * so a RE-audit of a revised draft can be handed the previous audit's
    * objections (goal criterion 2: incremental re-audit) — fingerprints alone
    * can look a finding up, they cannot carry it into the next task text.
@@ -183,13 +198,11 @@ export function formatGoalPrereviewCarryover(prev: GoalPrereviewRecord): string 
           ...findings.map((f) => `  - ${f.severity}: ${f.issue}`),
         ]
       : ["- The previous audit reported no findings — confirm that still holds."]),
+    // The previous draft is AGENT-authored text, so it does NOT ride inside
+    // this gate-authored block any more (round 5): buildGoalAuditTask puts it
+    // in the untrusted data region, after the instructions.
     ...(prev.draft
-      ? [
-          "- The PREVIOUS draft (judged then):",
-          "```",
-          prev.draft,
-          "```",
-        ]
+      ? ["- The PREVIOUS draft (judged then) is in the <previous_goal_draft> data block below."]
       : []),
     "- Also tell the auditor what changed in the draft since that audit.",
   ];
@@ -229,8 +242,8 @@ export function diffDraftLines(before: string, after: string): { removed: string
 /**
  * The ready-made task text for a goal-auditor audit, built by the gate.
  *
- * Goal criterion 2 (mechanically injected re-audit): `record_goal_prereview`
- * replies with this COMPLETE task template. The carryover block (previous
+ * Goal criterion 2 (mechanically injected re-audit): the gate dispatches the
+ * auditor with this COMPLETE task template. The carryover block (previous
  * verdict + findings + previous draft) and the mechanically computed draft
  * delta ride along, so the auditor is told what changed without anyone
  * hand-writing it; the fresh-context transcript pointer is included too.
@@ -245,26 +258,17 @@ export function buildGoalAuditTask(
     sessionId?: string;
   } = {},
 ): string {
-  const lines = [
-    "You are goal-auditor. Audit the draft loop goal below as the exit contract for this session.",
+  // ORDER MATTERS (round 5, 2026-09-05). Everything the GATE wrote comes
+  // first; the draft, the previous draft and the mechanical delta — all
+  // agent-authored — follow as untrusted data blocks, because a draft that
+  // opens the task frames the audit before the auditor has read its job.
+  const instructions = [
+    "You are goal-auditor. Audit the draft loop goal in the data block below as the exit contract for this session.",
     "",
-    "You run as your own pi process (pi -p --session-id): your own session, with none of the main",
+    "You run in your own tmux pane (same deterministic session id across rounds): your own session, with none of the main",
     "repository and the transcript pointer below.",
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
-    "===== 待审计的 goal 草稿 =====",
-    draft,
-    ...(opts.prevDraft
-      ? (() => {
-          const { removed, added } = diffDraftLines(opts.prevDraft!, draft);
-          const parts: string[] = [];
-          if (removed.length) parts.push("Removed lines:", ...removed.map((l) => `  - ${l}`));
-          if (added.length) parts.push("Added lines:", ...added.map((l) => `  + ${l}`));
-          if (!parts.length) parts.push("(no line-level changes detected)");
-          return ["", "===== 与上一版草稿的机械差异 (diff vs previous draft) =====", ...parts, ""];
-        })()
-      : []),
-    "",
     "审计标准: 退出标准是否可检查(falsifiable)、是否覆盖用户核心诉求、Non-goals 是否明确、有无内部矛盾或与仓库现状冲突的表述。",
     ...(opts.sessionDir && opts.sessionId
       ? [
@@ -273,20 +277,41 @@ export function buildGoalAuditTask(
         ]
       : []),
     "",
-    "输出一个 fenced JSON verdict(放在输出最前):",
-    '```json',
-    '{"gate":"READY"|"BLOCKED","findings":[{"severity":"P0"|"P1"|"P2","issue":"..."}]}',
-    '```',
-    "READY 仅当草稿无未解决 P0/P1 异议。findings 为空表示无异议。",
-    // Round-17 (user ask): output discipline — auditor output beyond the
-    // fence + 3 lines is wasted tokens.
-    "输出纪律:只输出 fence + ≤3 行结论要点;不复述任务、不复述代码、不写过程叙事。",
+    "以 judge_conclude 交卷(verdict READY|BLOCKED,findings 每条 severity P0|P1|P2 + issue,能给证据就填 evidence):",
+    "READY 仅当草稿无未解决 P0/P1 异议。findings 为空表示无异议。本角色的签名里没有 notes 参数,传了会被拒——结论请写进 findings。",
+    // Round-17 (user ask), tightened 2026-09-04: the auditor has no prose
+    // field at all, so there is nowhere for output beyond the conclude call.
+    "输出纪律:交卷即停 —— 调完 judge_conclude 就结束本轮,不写复述、不写自评、不写过程说明。",
     "",
-    "完成(必须):输出最终 verdict 后正常退出即可——进程退出即完成,主会话以你的输出为准,",
-    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
-    "主会话会带着答案用同一 session id 重新拉起你。",
-  ];
-  return lines.join("\n");
+    JUDGE_COMPLETION_DISCIPLINE,
+  ].join("\n");
+  return composeWithUntrustedData(instructions, [
+    { tag: "goal_draft", label: "===== 待审计的 goal 草稿 =====", text: draft },
+    ...(opts.prevDraft
+      ? [
+          {
+            tag: "previous_goal_draft",
+            label: "===== 上一版草稿（上一轮审计判过的） =====",
+            text: opts.prevDraft,
+          },
+          {
+            tag: "goal_draft_delta",
+            label: "===== 与上一版草稿的机械差异 (diff vs previous draft) =====",
+            text: formatDraftDelta(opts.prevDraft, draft),
+          },
+        ]
+      : []),
+  ]);
+}
+
+/** The delta block's body: which lines the draft lost and gained. */
+function formatDraftDelta(prevDraft: string, draft: string): string {
+  const { removed, added } = diffDraftLines(prevDraft, draft);
+  const parts: string[] = [];
+  if (removed.length) parts.push("Removed lines:", ...removed.map((l) => `  - ${l}`));
+  if (added.length) parts.push("Added lines:", ...added.map((l) => `  + ${l}`));
+  if (!parts.length) parts.push("(no line-level changes detected)");
+  return parts.join("\n");
 }
 /**
  * Canonical form the hash is taken over: line endings unified and outer
@@ -473,8 +498,10 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
 
 /** Ship-block copy for loop mode without a confirmed goal (L1 only). */
 export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
-  "loop goal not confirmed by the user — interview them with `ask_user` (it asks and pauses the " +
-  "loop until they answer), draft the goal in Simplified Chinese (identifiers, paths and code " +
+  "loop goal not confirmed by the user — interview them with `ask_user` when anything is unclear " +
+  "(it asks and pauses the loop until they answer), get your understanding confirmed with " +
+  "`propose_restatement({restatement, station})` (REQUIRED first: without it the call below " +
+  "refuses and shows no dialog), draft the goal in Simplified Chinese (identifiers, paths and code " +
   "tokens stay English), then call `propose_loop_goal` — it runs the `goal-auditor` audit itself " +
   "(dispatch, adjudicate, record) and only then asks the USER to approve it " +
 
@@ -496,9 +523,13 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
  */
 export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
   "review-gate: loop mode requires an approved loop goal BEFORE any edit/write call. " +
-  "Negotiate it first: ask the user with `ask_user` (it asks them and pauses the loop until " +
-  "they answer), write the goal in Simplified Chinese (technical identifiers, paths and code " +
-  "tokens stay English), then call `propose_loop_goal` with it. That ONE call runs the " +
+  "Negotiate it first, in this order: ask the user with `ask_user` when anything is unclear (it " +
+  "asks them and pauses the loop until they answer), then say the requirement BACK to them with " +
+  "`propose_restatement({restatement, station})` — what it is, an example, BEFORE → AFTER, which " +
+  "steps change, plus where this round stops (precommit | commit | pr). That step is MECHANICAL: " +
+  "without a confirmed restatement the goal call below refuses outright and shows no dialog. " +
+  "Then write the goal in Simplified Chinese (technical identifiers, paths and code " +
+  "tokens stay English) and call `propose_loop_goal` with it. That ONE call runs the " +
   "`goal-auditor` audit itself (dispatch, adjudicate — only P0/P1 objections count — and record) " +
   "and shows the user the approval dialog only once it passes. A failed audit means: fix the objections and submit the revised " +
   "draft the same way. (If this " +
@@ -577,11 +608,16 @@ function capText(raw: string): string {
 /**
  * Step 0 directive, injected while a loop-mode session has no CONFIRMED goal.
  *
- * The instruction is to interview the user first, ONE question per turn with
- * the position labeled ("N of M") and the agent's own recommended answer
- * attached (the `grilling` shape — all-at-once only when the user asks for
- * it), and only then submit the result through `propose_loop_goal` for the
- * user's approval. The engineering skills named below are declared
+ * The order it teaches is the order the gate ENFORCES (2026-09-06): interview
+ * the user when anything is unclear — ONE question per turn with the position
+ * labeled ("N of M") and the agent's own recommended answer attached (the
+ * `grilling` shape — all-at-once only when the user asks for it) — then get
+ * the requirement RESTATED and confirmed through `propose_restatement` (which
+ * also settles the delivery station), and only then submit the drafted goal
+ * through `propose_loop_goal` for the user's approval. The restatement step is
+ * not advice: without a confirmed one the goal call refuses outright, so a
+ * recipe that omitted it would walk its reader into that refusal.
+ * The engineering skills named below are declared
  * `disable-model-invocation: true` and assume a configured issue tracker, so
  * they are OPTIONAL accelerators the USER triggers; the interview fallback is
  * always available, which keeps this directive portable to any repo.
@@ -595,19 +631,28 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "1. ASK THE USER FIRST, with `ask_user({questions})`: it runs the interview (one question at a " +
   "time, its N / M progress, your options and recommendation, 'answer in chat' and 'skip the " +
   "rest' for them) and pauses the loop until the answers come back — all of them at once. " +
-  "Facts are YOUR job (read the repo, run tools); only decisions go to the user. Sized to the " +
-  "change: a one-line bugfix is one question, not a questionnaire. Later questions that depend " +
+  "Facts are YOUR job (read the repo, run tools); only decisions go to the user. The interview " +
+  "is optional and has NO cap on the number of questions — `ask_user`'s own description carries " +
+  "that rule; what is NOT optional is the restatement in step 2. Later questions that depend " +
   "on an earlier answer are a SECOND ask_user round, not a guess.\n" +
-  "2. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
+  "2. RESTATE THE REQUIREMENT and get it confirmed, with `propose_restatement({restatement, " +
+  "station})` — MECHANICAL since 2026-09-06: without a confirmed restatement on record, step 4 " +
+  "below refuses outright and shows NO dialog. Write it in SIMPLIFIED CHINESE and cover what the " +
+  "thing is, a concrete example, what it looks like BEFORE the change and AFTER it, and which " +
+  "steps become different (the before/after contrast is required). `station` is where THIS round " +
+  "stops — " + DELIVERY_STATION_CHOICES_EN + " — ask the user rather than choosing for them. Requirement " +
+  "changed later? Restate again; the newest confirmation wins.\n" +
+  "3. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
   "tokens stay English): task title, one-line intent, 3–7 checkable exit criteria, non-goals, " +
   "ISO date.\n" +
-  "3. Submit it with `propose_loop_goal`. That ONE call runs the audit itself: it builds the " +
+  "4. Submit it with `propose_loop_goal`. That ONE call runs the audit itself: it builds the " +
   "auditor's task (with the carryover and the draft delta when this is a re-audit), dispatches " +
   "the `goal-auditor` judge, waits for it, adjudicates the verdict — only P0/P1 block, " +
   "non-blocking findings never buy another round — and records the PASS. A BLOCKED audit comes " +
   "back with the objections and NO dialog is shown: fix them and call it again.\n" +
-  "4. Once it passes, the EXTENSION shows the text to the user for " +
-  "approval and writes `" + LOOP_GOAL_RELPATH + "` itself. Writing that file yourself grants " +
+  "5. Once it passes, the EXTENSION shows the text to the user for " +
+  "approval and writes `" + LOOP_GOAL_RELPATH + "` itself (the delivery station you confirmed in " +
+  "step 2 travels with it, and is shown in that dialog). Writing that file yourself grants " +
   "nothing — an unapproved goal blocks commit/push/PR in loop mode and its body is withheld " +
   "from this prompt.\n" +
   "(Optional accelerators, only if the USER runs them: `/to-spec`, `/grilling` or `/grill-me`, " +
@@ -761,9 +806,10 @@ export function buildGoalForceNegotiateDirective(
   return (
     "## 强制协商 loop goal（门禁，2026-09-17）\n" +
     `你已 ${shown} 未获批 loop goal。` +
-    "继续只读探查或任何其他工作之前，**必须先**用 `ask_user` 采访用户澄清需求，" +
-    "把目标写成简体中文（标识符/路径/代码 token 保持英文），再过 `goal-auditor` 审计，" +
-    "最后 `propose_loop_goal` 请用户批准。goal 未获批前，除了协商 goal 本身，" +
+    "继续只读探查或任何其他工作之前，**必须先**把需求谈清楚：有疑点就用 `ask_user` 问，" +
+    "然后用 `propose_restatement` 把理解反述给用户确认（没有这一步，下面那一步会被门禁直接拒），" +
+    "再把目标写成简体中文（标识符/路径/代码 token 保持英文）交给 " +
+    "`propose_loop_goal`（它自己跑 `goal-auditor` 审计并请用户批准）。goal 未获批前，除了协商 goal 本身，" +
     "其余动作都是死循环的一部分——先协商，再干活。"
   );
 }

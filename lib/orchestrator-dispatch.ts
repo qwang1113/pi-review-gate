@@ -18,27 +18,20 @@
  */
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
-import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
-import { GATE_MODE_ENV } from "./task-mode.ts";
+import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
+
 import {
-  buildSpawnPaneArgv,
-  buildPaneStyleArgv,
-  buildPaneTitleArgv,
-  buildShowPaneLabelsArgv,
-  parseSpawnedPaneId,
-} from "./orchestrator-tmux.ts";
+  openSessionPane,
+  type SessionPaneDecor,
+} from "./session-factory.ts";
 import {
   paneColorFor,
   paneLabelFor,
-  paneStyleFor,
-  paneTitleFor,
-  PANE_BORDER_FORMAT,
-  PANE_BORDER_STATUS,
 } from "./orchestrator-pane-decor.ts";
 
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
 import { spawnAuthorization } from "./orchestrator-gate.ts";
+import { buildTakeoverRoute, discoverOrchestrations } from "./orchestrator-takeover.ts";
 import {
   findChild,
   lastChildPane,
@@ -60,7 +53,6 @@ import {
 import {
   appendRecord,
   newChannelId,
-  type ChannelInstructRecord,
 } from "./orchestrator-channel.ts";
 import {
   alivePanes,
@@ -102,51 +94,37 @@ function schedulingVerdict(
 }
 
 /**
- * Give this child's pane its colour and its label — INSIDE the spawn.
+ * What this child's border says — the strings, not the tmux calls.
  *
- * WHERE THIS RUNS IS PART OF THE REQUIREMENT, not an implementation taste
- * (user, 2026-08-30). It is not a tool, not an action, and not a second step
- * the orchestrator takes after `orchestrator_spawn` returns — not even
- * through an internal helper it would have to remember to call. It is one of
- * the atomic things a spawn already does, exactly like writing the task file,
- * manager's call sequence did not change by one character when this landed.
+ * WHERE THE DECORATION RUNS IS PART OF THE REQUIREMENT, not an implementation
+ * taste (user, 2026-08-30). It is not a tool, not an action, and not a second
+ * step the orchestrator takes after `orchestrator_spawn` returns — it is one
+ * of the atomic things a spawn already does, exactly like writing the task
+ * file. Since 2026-09-05 that atomicity is structural: the decoration happens
+ * inside `openSessionPane` (lib/session-factory.ts) for EVERY kind of pane, so
+ * this function only says what to write.
  *
- * FAILURE IS COSMETIC, ALWAYS. Every tmux result here is checked and then
- * DOWNGRADED to a note in the reply: a child that is running with a plain
- * border is a child that is running, while a spawn that failed because tmux
- * would not set a colour would be the gate breaking real work over decoration.
+ * FAILURE IS COSMETIC, ALWAYS — the factory downgrades every tmux failure here
+ * to a warning string, which becomes the note below.
  */
-function decorateChildPane(
-  deps: OrchestratorDeps,
-  opts: { paneId: string; childId: string; taskId: string; title: string },
-): { label: string; note: string } {
-  const label = paneLabelFor(opts.taskId, opts.title);
-  const failures: string[] = [];
-  const run = (argv: readonly string[]): void => {
-    try {
-      const result = deps.tmux(argv);
-      if (!result.ok) failures.push(result.stderr || argv.join(" "));
-    } catch (error) {
-      failures.push((error as Error).message);
-    }
-  };
-  run(buildPaneStyleArgv(opts.paneId, paneStyleFor(opts.childId)));
-  run(buildPaneTitleArgv(opts.paneId, paneTitleFor({ label, state: "working", stateForSeconds: 0 })));
-  for (const argv of buildShowPaneLabelsArgv(opts.paneId, PANE_BORDER_STATUS, PANE_BORDER_FORMAT)) {
-    run(argv);
-  }
-  if (failures.length === 0) {
-    return {
-      label,
-      note: `pane 已标记为 ${label}（${paneColorFor(opts.childId).name}边框，标题随状态自动刷新）。`,
-    };
-  }
+function childPaneDecor(taskId: string, title: string, childId: string): SessionPaneDecor {
   return {
-    label,
-    note:
-      `pane 装饰没能全部生效（${failures[0]}）—— 纯展示层，子会话本身不受影响，` +
-      "健康快照与通道判定照常。",
+    label: paneLabelFor(taskId, title),
+    colorSeed: childId,
+    state: "working",
+    stateForSeconds: 0,
   };
+}
+
+/** The receipt line about the border, warning included. */
+function decorNote(label: string, childId: string, warning: string | undefined): string {
+  if (!warning) {
+    return `pane 已标记为 ${label}（${paneColorFor(childId).name}边框，标题随状态自动刷新）。`;
+  }
+  // The warning already says it is display-only (the factory frames it), so
+  // this adds what is specific to a CHILD and nothing more — wrapping it again
+  // produced "装饰没能全部生效（装饰失败（仅显示降级）：…）".
+  return `${warning} —— 纯展示层，子会话本身不受影响，健康快照与通道判定照常。`;
 }
 
 
@@ -169,7 +147,11 @@ export function abandonedRunningTask(
   alivePaneIds: readonly string[],
 ): { abandoned: boolean; note?: string } {
   if (task.status !== "running") return { abandoned: false };
-  const working = liveChildren(runtime, alivePaneIds).some((c) => c.taskId === task.id && !c.doneAt);
+  // A LIVE PANE holds the task, whatever the child said about finishing (B4).
+  // "It reported done" is not "it is gone": the pane is still there, it can
+  // still be given work in that same worktree, and reclaiming the task under
+  // it would put a second child on the same repo.
+  const working = liveChildren(runtime, alivePaneIds).some((c) => c.taskId === task.id);
   if (working) return { abandoned: false };
   return {
     abandoned: true,
@@ -186,9 +168,21 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // silently adopting the stale runtime.
   const conflict = deps.runtimeConflict?.();
   if (conflict) {
-    return fail(`review-gate: 当前会话持有新编排身份（${deps.runtime().orchestrationId}），无法继续旧编排（${conflict}）。` +
-      "sidecar 里登记的是另一个 orchestration 的 runtime —— 不接管、不开 pane。" +
-      "若要接手旧编排，请用同一个 RG_ORCHESTRATION_ID 启动会话（或 relay 交接）。");
+    // The refusal now carries the WAY OUT (2026-09-06, B1). It used to end
+    // with "start a session with the same RG_ORCHESTRATION_ID", which is not
+    // something a running session can do — so the advice was unexecutable and
+    // the real-world resolution became `rm` on the plan file. The route names
+    // the candidates found on disk and the two tools that resolve it.
+    const candidates = discoverOrchestrations({
+      repoRoot: deps.repoRoot,
+      recorded: conflict,
+      channelDirNames: () => deps.channelDirNames(),
+    });
+    return fail(
+      `review-gate: 当前会话持有新编排身份（${deps.runtime().orchestrationId}），无法继续旧编排（${conflict}）。` +
+      "门禁记录里登记的是另一个 orchestration 的 runtime —— 不接管、不开 pane。\n\n" +
+      buildTakeoverRoute({ candidates, attempting: "派活（spawn）" }),
+    );
   }
   const first = currentPlan(deps);
   if (first.problem) return first.problem;
@@ -274,105 +268,99 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     return fail(`review-gate: 任务书写不出来（${written.error}）—— 一个 pane 都没开。`);
   }
 
-  const env: Record<string, string> = {
-    // The child's wake-ups are addressed to the ORCHESTRATION, so they keep
-    // arriving after a relay — the whole point of the id.
-    [ORCHESTRATION_ID_ENV]: deps.runtime().orchestrationId,
-    // It is an ordinary loop session, and it is told so explicitly rather
-    // than left to classify itself into something else.
-    [GATE_MODE_ENV]: "loop",
-    // F4 — its OWN gate sidecar, so supervisor and worker never overwrite
-    // each other's mode, Q&A record and unmet-gate list.
-    [STATE_VARIANT_ENV]: childId,
-  };
-  let paneId: string | undefined;
-  try {
-    const result = deps.tmux(buildSpawnPaneArgv({
-      orchestratorPane: self,
-      lastChildPane: lastChildPane(deps.runtime(), panes.panes),
-      cwd,
-      env,
-      // F7/F8 — the task rides in on the argv. No typing, nothing to
-      // truncate, no Enter to forget.
-      // F7/F8 — the task rides in on the argv. No typing, nothing to
-      // truncate, no Enter to forget. The reference is REPO-RELATIVE:
-      // the pane starts in `cwd` (the task's repo), and pi expands
-      // `@.pi/tasks/<file>` against that cwd — no absolute path ever
-      // reaches the child's first prompt.
-      command: buildChildCommand(taskFileRelPath(taskFileName(marker)), childId),
-    }));
-    if (!result.ok) throw new Error(result.stderr || "tmux split-window 失败");
-    paneId = parseSpawnedPaneId(result.stdout);
-  } catch (error) {
-    return fail(`review-gate: 开子会话失败 —— ${(error as Error).message}`);
-  }
-  if (!paneId) {
-    return fail("review-gate: tmux 没有回报新 pane id，无法登记这个子会话 —— 已回滚（未登记的 pane 不可寻址）。");
-  }
-
-  deps.saveRuntime(registerChild(deps.runtime(), {
-    id: childId,
-    taskId,
-    paneId,
+  const decor = childPaneDecor(taskId, task.title, childId);
+  const lastPane = lastChildPane(deps.runtime(), panes.panes);
+  let evidence: DeliveryEvidence | undefined;
+  const opened = await openSessionPane(deps.tmux, {
+    ownPane: self,
     cwd,
-    stateVariant: childId,
-    taskFile: taskFileRelPath(taskFileName(marker)),
-    createdAt: new Date(deps.now()).toISOString(),
-    // The spawn IS the first assignment: a completion record older than this
-    // belongs to whatever ran this task before (round-1 P1).
-    lastAssignedAt: new Date(deps.now()).toISOString(),
-  }));
-
-  // One of the spawn's own atomic actions (see decorateChildPane): the child
-  // gets its colour and its `@task · state` border here, not in a step the
-  // caller has to remember.
-  const decor = decorateChildPane(deps, {
-    paneId,
-    childId,
-    taskId,
-    title: task.title,
+    layout: "child-column",
+    ...(lastPane === undefined ? {} : { lastChildPane: lastPane }),
+    // The environment is assembled by the factory — one place for a contract
+    // three different processes read (orchestration id so wake-ups survive a
+    // relay, `loop` so the child does not classify itself into something else,
+    // its OWN sidecar variant so supervisor and worker never overwrite each
+    // other's state — F4).
+    role: {
+      kind: "orchestration-child",
+      orchestrationId: deps.runtime().orchestrationId,
+      stateVariant: childId,
+    },
+    // F7/F8 — the task rides in on the argv. No typing, nothing to truncate,
+    // no Enter to forget. The reference is REPO-RELATIVE: the pane starts in
+    // `cwd` (the task's repo), and pi expands `@.pi/tasks/<file>` against that
+    // cwd — no absolute path ever reaches the child's first prompt.
+    command: buildChildCommand(taskFileRelPath(taskFileName(marker)), childId),
+    decor,
+    // Registration rides INSIDE the open (an unregistered pane is
+    // unaddressable, and the delivery probe below runs right after it).
+    register: (paneId) => {
+      deps.saveRuntime(registerChild(deps.runtime(), {
+        id: childId,
+        taskId,
+        paneId,
+        cwd,
+        stateVariant: childId,
+        taskFile: taskFileRelPath(taskFileName(marker)),
+        createdAt: new Date(deps.now()).toISOString(),
+        // The spawn IS the first assignment: a completion record older than
+        // this belongs to whatever ran this task before (round-1 P1).
+        lastAssignedAt: new Date(deps.now()).toISOString(),
+      }));
+      const started = applyTaskStatus(plan!, taskId, "running", { now: new Date(deps.now()).toISOString() });
+      if (started.ok) deps.savePlan(started.plan);
+    },
+    // F8 — EARN the receipt. Nothing below claims delivery that was not seen.
+    verify: async () => {
+      const check = await verifyDelivery(deps, {
+        kind: "spawn",
+        childId,
+        cwd,
+        stateVariant: childId,
+      });
+      evidence = check.evidence;
+      return check.verdict.ok
+        ? { ok: true, detail: check.verdict.summary }
+        : { ok: false, detail: check.verdict.reason };
+    },
   });
-
-  const started = applyTaskStatus(plan!, taskId, "running", { now: new Date(deps.now()).toISOString() });
-  if (started.ok) deps.savePlan(started.plan);
-
-  // F8 — EARN the receipt. Nothing below claims delivery that was not seen.
-  const check = await verifyDelivery(deps, {
-    kind: "spawn",
-    childId,
-    cwd,
-    stateVariant: childId,
-  });
-  if (!check.verdict.ok) {
+  const evidenceLine = evidence ? describeDeliveryEvidence(evidence) : "（一条观察结果都没拿到）";
+  if (!opened.ok) {
+    if (!opened.deliveryFailed || !opened.paneId) {
+      return fail(`review-gate: 开子会话失败 —— ${opened.error}（未登记的 pane 不可寻址，已放弃本次开会话）。`);
+    }
+    const failedPane = opened.paneId;
     const current = currentPlan(deps).plan;
     if (current) {
       const back = applyTaskStatus(current, taskId, "pending", {
-        note: `spawn 未能确认子会话起跑（${describeDeliveryEvidence(check.evidence)}）`,
+        note: `spawn 未能确认子会话起跑（${evidenceLine}）`,
         now: new Date(deps.now()).toISOString(),
       });
       if (back.ok) deps.savePlan(back.plan);
     }
     return fail(
-      `review-gate: ${check.verdict.reason}\n` +
-      `观察到的证据：${describeDeliveryEvidence(check.evidence)}。\n` +
-      `pane ${paneId} 和子会话登记 ${childId} 都**保留**着（不误杀一个可能其实活着的会话），` +
+      `review-gate: ${opened.error}\n` +
+      `观察到的证据：${evidenceLine}。\n` +
+      `pane ${failedPane} 和子会话登记 ${childId} 都**保留**着（不误杀一个可能其实活着的会话），` +
       `任务 ${taskId} 已退回 pending。\n` +
       `下一步：\`orchestrator_wait({ timeoutMs: 0 })\` 看它在健康快照里是什么状态；` +
       `确认没救就 \`orchestrator_close({ childId: "${childId}" })\` 再重开。\n` +
       `任务书在：${written.path}（随 \`pi @${taskFileRelPath(taskFileName(marker))}\` 传入）`,
-      { childId, paneId, delivered: false, evidence: check.evidence },
+      { childId, paneId: failedPane, delivered: false, ...(evidence === undefined ? {} : { evidence }) },
     );
   }
+  const paneId = opened.paneId;
 
   return reply(
     `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动（共享主工作区，同一 repo 内串行）。\n` +
     `子会话工作目录（cwd）：${cwd} —— 它的 gate 绑定这个仓库，goal 也绑这里。\n` +
     `任务 ${taskId} 已置为 running，任务书已随 \`pi @${taskFileRelPath(taskFileName(marker))}\` 带进去（落盘：${written.path}）。\n` +
-    `投递已核实：${check.verdict.summary}。\n` +
-    `${decor.note}\n` +
+    `投递已核实：${opened.deliveryNote ?? "（本次没有核实项）"}。\n` +
+    `${decorNote(decor.label, childId, opened.decorWarning)}\n` +
 
-    "接下来用 `orchestrator_wait` 等它 —— 不要结束 turn 把盯梢责任丢给用户。" +
+    `${ORCHESTRATOR_WAIT_DISCIPLINE}\n` +
     "它有事找你时，wait 的回执里会直接带上完整的问题与选项，用 `orchestrator_answer` 回。",
+
 
     {
       childId,
@@ -402,8 +390,28 @@ function describeDeliveryEvidence(evidence: DeliveryEvidence): string {
   return parts.join("，");
 }
 
-/** The three delivery modes, and what each one means to the child's gate. */
-const INSTRUCT_MODES = new Set(["steer", "followUp", "interrupt"]);
+/**
+ * The two modes an ORCHESTRATOR may ask for, and what each means to the
+ * child's gate. `followUp` is deliberately not among them — see below.
+ */
+const INSTRUCT_MODES = new Set(["interrupt", "steer"]);
+
+/**
+ * Modes the channel still carries but the parameter surface REFUSES.
+ *
+ * `followUp` (retired 2026-09-17, user decision) means "read this when you
+ * finish what you are doing", and that is the wrong shape for THIS tool: a
+ * message from the supervisor is sent because the child should know NOW —
+ * a correction that arrives after the round it was meant to correct is a
+ * correction nobody applied. So the default became `interrupt` and asking
+ * for `followUp` is refused rather than silently delivered late.
+ *
+ * It stays in the channel enum and on the child's side on purpose: the judge
+ * lane dispatches its next round as a `followUp` (a round IS "read this when
+ * you are free"), and a child running an older gate build must keep being
+ * able to read one.
+ */
+const RETIRED_INSTRUCT_MODES = new Set(["followUp"]);
 
 /**
  * `orchestrator_instruct` — say something to a running child, or stop it.
@@ -416,12 +424,17 @@ const INSTRUCT_MODES = new Set(["steer", "followUp", "interrupt"]);
  * really the same question — HOW should this text reach the agent — and pi
  * answers it with one parameter. So the mode IS `deliverAs`:
  *
- *   steer      cut into the current turn (pi.sendUserMessage, deliverAs steer)
- *   followUp   let it finish, then read this (deliverAs followUp)
- *   interrupt  HIGHEST priority: stop what it is doing (ctx.abort()) and read
- *              the message immediately. Since 2026-08-31 it carries a text —
- *              a bare abort needed a second followUp to say anything; one call
- *              now means "stop and do THIS instead, now".
+ *   interrupt  THE DEFAULT, and the highest priority: stop what it is doing
+ *              (ctx.abort()) and read the message immediately. Since
+ *              2026-08-31 it carries a text — a bare abort needed a second
+ *              message to say anything; one call now means "stop and do THIS
+ *              instead, now".
+ *   steer      cut into the current turn without aborting it (deliverAs steer)
+ *
+ * There used to be a third, `followUp` ("finish first, then read this"), and
+ * it used to be the DEFAULT. It is refused here now (2026-09-17): a
+ * supervisor writes because the child should know now, so the ordinary call
+ * must not be the latest-arriving one.
  * ── WHY NOTHING IS TYPED ──
  *
  * The old path was `tmux send-keys`, and it produced four separate measured
@@ -448,14 +461,27 @@ export async function dispatchInstruct(
   if (!child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
   if (child.closedAt) return fail(`review-gate: 子会话 "${childId}" 已经关闭了。`);
 
-  const rawMode = String(params.mode ?? "followUp").trim();
-  if (!INSTRUCT_MODES.has(rawMode)) {
+  // DEFAULT = `interrupt` (2026-09-17, user decision): a supervisor speaks
+  // because the child should know NOW. The old default was `followUp`, which
+  // made the ORDINARY call the latest-arriving one — the opposite of intent.
+  const rawMode = String(params.mode ?? "interrupt").trim();
+  if (RETIRED_INSTRUCT_MODES.has(rawMode)) {
     return fail(
-      `review-gate: mode 只能是 steer / followUp / interrupt，收到的是 ${JSON.stringify(params.mode)}。\n` +
-      "（pi 的 sendUserMessage 只支持 steer 与 followUp 两种投递；nextTurn 属于另一套 API，本门禁不提供。）",
+      `review-gate: mode="${rawMode}" 已从本工具的参数面取消 —— 上级发话就是要它立刻知道，` +
+      "「等你跑完这轮再读」不是这个工具该有的形状。\n" +
+      "改用 `interrupt`（默认，不传 mode 就是它：中断当前这一轮并立即投递），" +
+      "或显式写 `mode: \"steer\"`（温和选项：切进当前这一轮，不打断它）。",
     );
   }
-  const mode = rawMode as ChannelInstructRecord["mode"];
+  if (!INSTRUCT_MODES.has(rawMode)) {
+    return fail(
+      `review-gate: mode 只能是 interrupt（默认）/ steer，收到的是 ${JSON.stringify(params.mode)}。\n` +
+      "（两者都是 pi 的 sendUserMessage 投递：interrupt 先 abort 当前 turn 再投，steer 直接切进当前 turn；" +
+      "nextTurn 属于另一套 API，本门禁不提供。）",
+    );
+  }
+  const mode = rawMode as "interrupt" | "steer";
+
   const message = String(params.message ?? "").trim();
   // 2026-08-31 (UX): `interrupt` may now carry a message. It used to be a
   // bare abort ("stop what you are doing") that needed a SECOND followUp to
@@ -484,6 +510,25 @@ export async function dispatchInstruct(
     return fail(`review-gate: 指令写不进通道 —— ${(error as Error).message}。什么都没发。`);
   }
 
+  // NEW WORK UN-FINISHES A CHILD (round-1 P1). Whatever this text is — the
+  // next task, a correction, a question — the child has now been handed
+  // something, so its previous completion stops counting: the supervisor may
+  // not call it `done` again on the strength of a record from the last round,
+  // and the orchestration exit check must see it as ALIVE again.
+  //
+  // NO MODE IS EXEMPT (2026-09-17). `interrupt` was, from the days when it was
+  // a bare `ctx.abort()` carrying no text — stopping a child is not giving it
+  // work. It has REQUIRED a message since 2026-08-31, so the one mode that
+  // means "stop and do THIS instead" was the one mode that left the previous
+  // task's completion standing (adviser, round 8).
+  //
+  // AND IT IS STAMPED AT THE WRITE, not after the receipt: the assignment is
+  // the record in the channel. A message the child's gate merely QUEUED
+  // (`received`) fails the receipt below and is still read moments later, so
+  // gating the stamp on a successful receipt would reopen the same hole
+  // through a slower door. It costs nothing on the stall side either — the
+  // record just written is itself the channel's newest activity.
+  deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
   // The sidecar path is passed in FROM THE REGISTRY (round-4 P1). It used to be
   // omitted here, so `sidecarPresent` was structurally false and the failure
   // message reported "sidecar 存在=否" about a child whose sidecar was on disk
@@ -505,22 +550,12 @@ export async function dispatchInstruct(
     );
   }
 
-  // NEW WORK UN-FINISHES A CHILD (round-1 P1). Whatever this text is — the
-  // next task, a correction, a question — the child has now been handed
-  // something, so its previous completion stops counting: the supervisor may
-  // not call it `done` again on the strength of a record from the last round,
-  // and the orchestration exit check must see it as ALIVE again.
-  if (mode !== "interrupt") {
-    deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
-  }
-
   // STOP-FIRST (2026-09-01): the child's gate dismisses an OPEN dialog when
   // the instruction lands. Tell the PM what just got cancelled — a goal box,
-  // a question, a consent — and that answering is the other tool's job.
-  // STOP-FIRST (2026-09-01): steer/interrupt dismiss an OPEN dialog;
-  // followUp does NOT (its whole meaning is "read this when you are done"),
-  // so the cancellation notice only applies to the two stopping modes.
-  const open = mode === "followUp" ? undefined : childChannelProjection(deps, childId).openRequests[0];
+  // a question, a consent — and that answering is the other tool's job. Both
+  // remaining modes stop the child (`interrupt` aborts the turn, `steer` cuts
+  // into it), so the notice applies to every delivery this tool makes.
+  const open = childChannelProjection(deps, childId).openRequests[0];
   const cancelledLine = open
     ? `\n本次打断同时取消了子会话的待答请求「${open.title}」—— 它不再等这个回答了；若你的本意是回答它，请用 orchestrator_answer。`
     : "";
@@ -528,9 +563,7 @@ export async function dispatchInstruct(
     `review-gate: 已通过通道下发给子会话 ${childId}（mode=${mode}）。${check.verdict.summary}。\n` +
     (mode === "interrupt"
       ? "它已中断当前这一轮，并立即收到这条消息（最高优先级）。"
-      : mode === "steer"
-        ? "它会在当前这一轮里就读到这条消息。"
-        : "它会在跑完手上这一轮之后读到这条消息。") +
+      : "它会在当前这一轮里就读到这条消息。") +
     cancelledLine,
     { childId, instructId, mode, delivered: true },
   );

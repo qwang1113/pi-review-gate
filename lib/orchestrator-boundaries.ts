@@ -29,6 +29,8 @@
  * Pure string module: no filesystem, no git, no process.
  */
 
+import { isSensitiveFile } from "./constants.ts";
+
 /** Why a boundary declaration was refused. */
 export interface BoundaryProblem {
   boundary: string;
@@ -151,10 +153,93 @@ export function pathWithinBoundaries(
   return boundaries.some((b) => boundaryCovers(b, normalized.value));
 }
 
-/** The paths that fall OUTSIDE the declaration (empty ⇒ the text stays in scope). */
-export function pathsOutsideBoundaries(
+/**
+ * Is this edited path OUTSIDE the repository altogether?
+ *
+ * The child's gate records an edit repo-relative when the file is inside the
+ * worktree and ABSOLUTE when it is not (extensions/review-gate.ts's
+ * `repoRelative`: anything not under the session cwd keeps its absolute
+ * form). So "absolute" IS the out-of-repo signal in `sessionEditedFiles`, and
+ * this module needs no filesystem access to read it — which is what keeps the
+ * module pure.
+ *
+ * A relative path that escapes with `..` is deliberately NOT treated as
+ * out-of-repo here: `normalizeBoundary` refuses it, so it falls through to
+ * the ordinary boundary check and is reported — fail-closed on the shape we
+ * cannot resolve without IO.
+ */
+export function isOutsideRepoPath(path: string): boolean {
+  const raw = String(path ?? "").trim();
+  return raw.startsWith("/") || /^[A-Za-z]:[\\/]/.test(raw);
+}
+
+/**
+ * Directory names that make an out-of-repo path SENSITIVE regardless of where
+ * the home directory happens to be.
+ *
+ * NAMED BY SEGMENT, NOT BY `~/` PREFIX — and that is the whole point (caught
+ * in this task's own goal audit, P1): `sessionEditedFiles` holds paths the
+ * shell already expanded (`/Users/x/.ssh/id_rsa`), so a literal `~/.ssh/`
+ * comparison could never match, and a test written against the tilde form
+ * would pass while the real path sailed through. Matching the SEGMENT also
+ * makes the rule wider than the home directory — `/tmp/backup/.ssh/id_rsa` is
+ * caught too, which is the fail-closed direction for a security floor.
+ */
+export const OUT_OF_REPO_SENSITIVE_SEGMENTS: readonly string[] = Object.freeze([
+  ".ssh",     // keys, known_hosts, config
+  ".pi",      // the agent's own configuration and gate state
+  ".aws",     // cloud credentials
+  ".gnupg",   // secret keyrings
+  ".config",  // gh/, git/, and every other tool's credentials
+  ".kube",    // cluster credentials
+  ".docker",  // registry auth
+]);
+
+/**
+ * Is this out-of-repo path one the gate still refuses to wave through?
+ *
+ * Two sources, deliberately both: the repo-wide sensitive-file patterns
+ * (.env, private keys, credentials, `.git/` internals, the gate's own state)
+ * and the directory segments above. Neither replaces the EDIT-TIME floor in
+ * lib/ship-gate-edit-guard.ts — that one blocks the write itself and is
+ * untouched. This is the supervision-time reading of the same question:
+ * "did this child write somewhere it had no business writing?"
+ */
+export function isSensitiveOutsideRepoPath(path: string): boolean {
+  const raw = String(path ?? "").trim();
+  if (raw.length === 0) return false;
+  if (isSensitiveFile(raw)) return true;
+  const segments = raw.replace(/\\/g, "/").split("/").filter(Boolean);
+  return segments.some((s) => OUT_OF_REPO_SENSITIVE_SEGMENTS.includes(s.toLowerCase()));
+}
+
+/**
+ * The edited paths that count as a boundary VIOLATION (empty ⇒ nothing to
+ * report).
+ *
+ * USER DECISION 2026-09-06 (方案 C), measured twice in round 4: a child that
+ * writes its completion report to `/tmp` was reported as "edited outside its
+ * boundary", because an absolute path can never be covered by a repo-relative
+ * declaration — `normalizeBoundary` refuses it outright. Each false positive
+ * cost a manual approval (~10 minutes across the round) for a file that is a
+ * PROCESS ARTIFACT, not a deliverable: it cannot pollute the worktree, cannot
+ * enter a checkpoint, and cannot reach a tracked file.
+ *
+ * So out-of-repo paths do not participate in the boundary comparison — with
+ * ONE exception that keeps this from being a hole: an out-of-repo path that
+ * is SENSITIVE is still a violation. Writing a report to `/tmp` and writing
+ * to `~/.ssh/id_rsa` are not the same act, and only the first one is noise.
+ *
+ * In-repo paths are judged exactly as before.
+ */
+export function editedPathsOutsideBoundaries(
   paths: readonly string[],
   boundaries: readonly NormalizedBoundary[],
 ): string[] {
-  return paths.filter((p) => !pathWithinBoundaries(p, boundaries));
+  return paths.filter((p) => {
+    const raw = String(p ?? "").trim();
+    if (raw.length === 0) return false;
+    if (isOutsideRepoPath(raw)) return isSensitiveOutsideRepoPath(raw);
+    return !pathWithinBoundaries(raw, boundaries);
+  });
 }

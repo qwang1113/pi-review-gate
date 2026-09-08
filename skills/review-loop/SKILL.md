@@ -46,10 +46,15 @@ the work starts, listing the checkable facts that mean **done**. The same file
 then drives both roles — you slice work against it, `adviser` advises
 against it, `reviewer` accepts against it.
 
-**Negotiated, not assumed**: you do NOT write this file. Grill the user
-first — unless they asked for them all at once, ask ONE question per turn,
-labeled "N of M", give your own recommended answer, wait for the reply, repeat
-until nothing is silently assumed — then call **`propose_loop_goal`** with what they
+**Negotiated, not assumed**: you do NOT write this file. Ask the user whatever
+is genuinely unclear — `ask_user` runs the interview one question at a time,
+the interview is OPTIONAL (no doubts ⇒ no questions) and there is NO cap on how
+many you ask. Then RESTATE the requirement and get it confirmed —
+**`propose_restatement({restatement, station})`**, a mechanical prerequisite
+since 2026-09-06: what the thing is, an example, BEFORE → AFTER, which steps
+change, plus where this round stops (`precommit` | `commit` | `pr`). Without a
+confirmed restatement, `propose_loop_goal` refuses outright and shows no
+dialog at all. Only then call **`propose_loop_goal`** with what they
 agreed to. The extension shows it in a confirm dialog and, on approval, writes
 the file itself and records the hash of that exact text. In loop mode an
 unapproved goal **blocks commit/push/PR** and its body is withheld from your
@@ -86,8 +91,9 @@ judge_submit({ role: "goal-auditor", task: "<the full draft>" })
 ```
 
 It builds the auditor's task (carrying the previous audit's findings and the
-draft delta on a re-audit), dispatches the dedicated `goal-auditor` as its own
-read-only pi process (see `agents/goal-auditor.md`), parses the verdict and
+draft delta on a re-audit), dispatches the dedicated `goal-auditor` in its own pane
+as a read-only review (see `agents/goal-auditor.md`), waits for its channel report,
+parses the verdict and
 records it. **Only P0/P1 block** — a READY carrying P2/Nit findings is a PASS,
 and non-blocking findings never buy another audit round. `propose_loop_goal`
 REFUSES to show the user's approval dialog unless a PASS is recorded for the
@@ -120,7 +126,7 @@ available in your pi setup) — each reads its own files and returns
 findings; you merge the results. Exploration and editing may also overlap:
 while a read-only scan surveys the code, you can concurrently edit a
 different file (the single-writer invariant still holds — only YOU write).
-(Adviser consultations run as judge child processes.)
+(Adviser consultations run in their own judge panes.)
 ### Serial writers — exactly one writer in the worktree
 
 Write-capable subagents run **serially in this worktree** when a subagent
@@ -140,6 +146,18 @@ blind to it (an approval is a dialog fact a hook can never see), and the goal
 file's mere existence proves nothing — only the recorded approval of its exact
 text does. Beyond that, the goal binds through the reviewer: an unmet criterion
 is a P1 finding, and any P0/P1 ⇒ BLOCKED.
+
+**Where the round STOPS is part of that contract.** The station you confirmed
+with the restatement travels with the goal's approval, and two gates read it:
+the ship gate lets a command through only when the station allows it
+(`precommit` allows none — the USER commits; `commit` allows the commit;
+`pr` allows the whole push → PR chain), and `declare_done` checks the round
+actually ARRIVED (a `commit` round needs a committed worktree; a `pr` round
+also needs a `gh pr create` the gate watched succeed — or a PR number the
+Copilot cycle resolved, for a PR opened elsewhere). A station block is NOT unmet
+quality: another review round cannot clear it — only the user can move the
+station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
+
 
 ## Protocol
 
@@ -184,15 +202,16 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
      gate stamps the checkpoint marker on the subject and records where it
      landed. The review unit is the immutable range `baseline..HEAD`.
    - **the range + the findings stream + the reviewer's task text**.
-   - **the dispatch** — ONE reviewer, as its own pi process, with the exit
-     watcher registered. You never pass a session id, a title or a directory.
-     The `subagent` dispatch surface was retired 2026-09-06 with the
+   - **the dispatch** — ONE reviewer in its own pane (a living pane takes every
+     new round through its channel). You never pass a session id, a title or a
+     directory. The `subagent` dispatch surface was retired 2026-09-06 with the
      pi-subagents companion — judge roles dispatch ONLY through `judge_submit`.
 
-   When the reviewer's process exits, the gate reads THIS round's output,
-   records the verdict itself and wakes you with it — you never copy a
-   verdict from one place to another. Worst-verdict semantics still apply if
-   multiple fences appear (the parser keeps the worst), and an absent
+   When the round's channel report lands, the gate records the verdict itself —
+   you never copy a
+   verdict from one place to another. The conclusion arrives STRUCTURED on the
+   report (there is no text to parse); a READY carrying an unresolved P0/P1 is
+   still downgraded to BLOCKED, and an absent
    `docSync` means the round is incomplete (fails closed).
 
    The precommit lane, the checkpoint commit, the range computation and the
@@ -221,44 +240,46 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    PASS: it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
-   **Waiting-window discipline (v4)** — 主会话是门禁的最后监督者,门禁未通过
-   前不得停止自动循环(round-18 存活不变量):
-   1. 有可实现的确定性工作(代码/测试/文档/其他 repo 事务)→ 优先做掉,不要进入等待。
-   2. 确认没有任何可做的工作后,才进入阻塞等待——在**一次 bash 调用**里同时
-      托管三条判据:
-      a. 进程是否已退出:`kill -0 <pid 文件第一段>` 或 `test -s <workDir>/exit-code`
-         (exit-code 的存在就是"已结束"的权威事实,里面还带着退出码);
-         ⚠️ 崩溃的子会话可能**根本没来得及写 exit-code**——它同样是"已结束",
-         由主会话侧按「记录的那个进程是否还在」判定(见 lib/judge-session.ts);
-      c. verdict 已产出但进程未退:子会话的 session jsonl 里已出现
-         verdict fence(实测失败模式——子会话完成但进程未退出,主会话空等);
-      任一命中即结束等待:judge_read 读取输出继续流程,或 judge_close 后
-      重新派发。
-   3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不退)。
-      `agent_settled` 会注入托管等待指令;主动托管远比被动拉起可靠。
+   **Waiting-window discipline (v5, 2026-09-05)** — 主会话是门禁的最后监督者,
+   门禁未通过前不得停止自动循环(round-18 存活不变量)。三条口径的唯一出处是
+   `lib/agent-directives.ts` 的 `buildWaitDiscipline`:
+   1. 有确定性工作(代码/测试/文档/其他 repo 事务)→ 先做掉,尤其 goal / plan
+      审计期间:读代码、调查、补上下文。送 reviewer 前应已准备充分,送完往往
+      没事可做——这时可以看看下一轮要什么、或先准备收尾报告(**提示,不强求**)。
+   2. 确实没活可做了,才调 `judge_wait({role})` 等——不是手写 sleep 轮询,也不是
+      结束 turn。
+   3. `judge_wait` 是**消息驱动**的:新 finding、judge 提问、本轮结论、pane 消失,
+      任一到达即返回,拿到就继续干。pane 消失但结论未落盘时本轮不算结束
+      (用 `judge_recover` 同 id 重开续 transcript 继续)。没在等的时候,settle
+      唤醒仍是兜底:新消息落盘时门禁用同一份标准报告叫你(结论、证据位置、
+      记录情况、待答问题)。
    因为审核范围是 immutable commit,工作区编辑不失效本轮。
+
 3. **Review** — the reviewer audits the COMMIT RANGE `baseline..HEAD` (the
    immutable checkpoint commits) with `git show`/`git diff`; it may verify by
    doing in a throwaway `$TMPDIR` copy (mutation analysis included) and must
    restore before finishing. The reviewer must NOT be fed your own
-   conclusions (fresh eyes only) and must end its output with a fenced JSON
-   verdict:
+   conclusions (fresh eyes only) and ends the round by calling
+   `judge_conclude` once:
 
-   ```json
-   {"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "cwd": "<its real pwd>", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
    ```
+   judge_conclude({verdict: "READY" | "BLOCKED" | "NEEDS_HUMAN", docSync: "UPDATED" | "NOT_NEEDED", cwd: "<its real pwd>", findings: [{file: "…", line: 1, severity: "P0|P1|P2|Nit", issue: "…", evidence: "<optional>"}]})
+   ```
+
+   Those fields go straight onto the round's channel report. This role has no
+   `notes` parameter — passing one is refused (and the refusal does not spend
+   the round's single conclusion), because the conclusion IS the verdict plus
+   the findings.
 
    Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix,
    Nit = optional. Any P0/P1 open ⇒ gate BLOCKED.
 
-   Every re-review carries the previous round's conclusion: the gate
-   embeds a 'Review scope for this round' block in the ready-made task text
-   (the prior verdict and findings, what is new since the last READY tree,
-   and the findings to re-check one by one). First round = full review;
-   later rounds = incremental: settled-and-unchanged material gets a
-   consistency scan, not a re-derivation — it never narrows what a reviewer
-   may look at, and a settled conclusion may always be reopened with
-   evidence. The reviewer is its own pi process and inherits none of this
+   Every re-review carries the previous round's conclusion: the gate embeds a
+   'Review scope for this round' block in the ready-made task text. First
+   round = full review; later rounds = incremental. The block's exact terms
+   are NOT restated here — `lib/review-carryover.ts` is their single
+   authoritative source, and the reviewer reads them in the task text itself.
+   The reviewer runs in its own pane and inherits none of this
    session's conversation; the task text names the
    main session's transcript to read ON DEMAND when the conversation
    matters, instead of inheriting it.
@@ -292,9 +313,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    without it (disable per project via `"docSync": false` in
    `.pi/review-gate.json`).
 
-4. **Record — the GATE does this, not you.** When the reviewer's process
-   exits the gate reads THIS round's raw output, parses every fence (the
-   worst verdict wins) and records the verdict, then wakes you with it. That
+4. **Record — the GATE does this, not you.** When the round's channel report
+   lands the gate reads its structured conclusion and records
+   the verdict (a READY with an open P0/P1 becomes BLOCKED). That
    same step verifies the commit target: it
    withholds a READY when the round was never prepared (no registered
    `baseline..HEAD`), downgrades a READY to BLOCKED when HEAD moved past the
@@ -335,8 +356,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    must be bound to the SAME (current) tree — the reviewed HEAD commit tree;
    if a new checkpoint landed since the READY, run the affected step again.
    It also rejects while a judge child session is still open: finish the
-   round (let the judge exit — the gate records its verdict then — or
-   `judge_close({role})`) first.
+   round (wait for the standard report — the gate records its verdict on arrival —
+   or resubmit with `fresh: true`) first.
 
    It also rejects while a Copilot cycle is still open or the loop goal is
    unapproved — those are completion requirements, not ship requirements.

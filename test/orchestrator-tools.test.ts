@@ -30,8 +30,22 @@ import {
 } from "./helpers/fake-orchestration.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
 import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
-import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
+import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
+
+/**
+ * A crosscheck that PASSES the structure check, for the tests that are about
+ * some other rule (constraint 8, the channel write, the settled request…).
+ *
+ * It is spelled out rather than generated so those tests keep exercising the
+ * real validator: if the required shape changes, they fail here rather than
+ * quietly stopping to test anything.
+ */
+const CROSSCHECK_T1 =
+  "任务 t1：文件边界——它要动的文件都落在 lib/a/ 之内，与该任务声明的 fileBoundaries 一致；" +
+  "任务目标——草稿要做的事就是 plan 里 t1 这条，没有跑偏；" +
+  "交付站点——它声明的交付站点与 plan 的 deliveryStation 一致。";
+
 
 /** The 10 tools an orchestrator gets, and nothing else. */
 const ORCHESTRATION_TOOLS = [
@@ -414,7 +428,8 @@ test("CONSTRAINT 8 / R-7: a goal approval is judged on the CHILD's own draft and
 
   // Inside the boundary → approved.
   world.sidecars.set(child.cwd, { sessionEditedFiles: ["lib/a/one.ts"] });
-  const ok = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md" });
+  const ok = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1 });
+
   assert.equal(ok.isError, undefined, replyText(ok));
 
   // Outside it → refused as a scope change.
@@ -429,7 +444,8 @@ test("CONSTRAINT 8 / R-7: a goal approval is judged on the CHILD's own draft and
     topic: "goal-approval",
   });
   world2.sidecars.set(child2.cwd, { sessionEditedFiles: ["lib/b/other.ts"] });
-  const refused = await world2.call("orchestrator_answer", { childId: c2, answer: "认可，写入 .pi/loop-goal.md" });
+  const refused = await world2.call("orchestrator_answer", { childId: c2, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1 });
+
   assert.equal(refused.isError, true, replyText(refused));
   assert.equal(world2.channelOf(c2).filter((r) => r.kind === "answer").length, 0);
 });
@@ -443,7 +459,8 @@ test("a goal-approval request with no draft attached is REFUSED rather than appr
     options: ["认可，写入 .pi/loop-goal.md", "不认可"],
     topic: "goal-approval",
   });
-  const reply = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md" });
+  const reply = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1 });
+
   assert.equal(reply.isError, true);
   assert.match(replyText(reply), /没有带上 goal 全文/);
 });
@@ -538,14 +555,14 @@ test("an instruction is written to the channel and only claimed once the child A
   readyChild(world, childId);
 
   // No acknowledgement yet ⇒ the delivery FAILS. Writing is not delivering.
-  const unacked = await world.call("orchestrator_instruct", { childId, message: "换个思路", mode: "followUp" });
+  const unacked = await world.call("orchestrator_instruct", { childId, message: "换个思路" });
   assert.equal(unacked.isError, true, replyText(unacked));
   assert.match(replyText(unacked), /一直没有回执/);
 
   // Now play the child's side: acknowledge the pending instruction.
   const pending = projectionOf(world, childId).pendingInstructs;
   assert.equal(pending.length, 1, "the instruction is on the channel even though the receipt failed");
-  world.childAcks(childId, pending[0]!.instructId, true, "pi.sendUserMessage(deliverAs:followUp)");
+  world.childAcks(childId, pending[0]!.instructId, true, "pi.sendUserMessage(deliverAs:steer)");
 
   const second = await world.call("orchestrator_instruct", { childId, message: "再来一次", mode: "steer" });
   // The second instruction has its own id and its own (missing) ack.
@@ -570,7 +587,7 @@ test("an instruction the child could NOT inject is a failure carrying the child'
   };
   (world.deps as { channelIO: () => typeof spy }).channelIO = () => spy;
 
-  const reply = await world.call("orchestrator_instruct", { childId, message: "在吗", mode: "followUp" });
+  const reply = await world.call("orchestrator_instruct", { childId, message: "在吗", mode: "steer" });
   assert.equal(reply.isError, true);
   assert.match(replyText(reply), /会话已经结束了/);
 });
@@ -582,7 +599,9 @@ test("every mode needs text (interrupt included since 2026-08-31); an unknown mo
 
   const bad = await world.call("orchestrator_instruct", { childId, mode: "nextTurn", message: "x" });
   assert.equal(bad.isError, true);
-  assert.match(replyText(bad), /steer \/ followUp \/ interrupt/);
+  assert.match(replyText(bad), /mode 只能是 interrupt（默认）\/ steer/);
+  assert.doesNotMatch(replyText(bad), /followUp/,
+    "the refusal must not offer a mode this tool itself refuses");
 
   const emptySteer = await world.call("orchestrator_instruct", { childId, mode: "steer" });
   assert.equal(emptySteer.isError, true);
@@ -612,6 +631,92 @@ test("interrupt with text delivers as the highest priority (2026-08-31)", async 
   assert.equal(pending[0]!.mode, "interrupt", "the mode is interrupt");
   assert.equal(pending[0]!.text, "停下，先处理这个", "the message rides the interrupt");
 });
+
+// ---------------------------------------------------------------------------
+// The DEFAULT is `interrupt`, and `followUp` is gone from the parameter
+// surface (2026-09-17, user decision). A supervisor writes because the child
+// should know NOW: an ordinary call that arrives after the round it meant to
+// correct is a correction nobody applied.
+// ---------------------------------------------------------------------------
+
+test("no mode at all means `interrupt` — the ordinary call is the one that arrives NOW", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  readyChild(world, childId);
+
+  await world.call("orchestrator_instruct", { childId, message: "停下，改做这个" });
+
+  const pending = projectionOf(world, childId).pendingInstructs;
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]!.mode, "interrupt", "the default written into the channel, not `followUp`");
+});
+
+test("`followUp` is refused, and the refusal names the two modes that DO work", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  readyChild(world, childId);
+
+  const refused = await world.call("orchestrator_instruct", { childId, mode: "followUp", message: "稍后读这条" });
+  assert.equal(refused.isError, true, replyText(refused));
+  assert.match(replyText(refused), /interrupt/, "it points at the default");
+  assert.match(replyText(refused), /steer/, "and at the gentle option that still exists");
+  assert.equal(projectionOf(world, childId).pendingInstructs.length, 0,
+    "a refused mode writes NOTHING into the channel — the child must not read a message the tool rejected");
+});
+
+test("every delivered instruction stamps lastAssignedAt — `interrupt` is no longer exempt", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  readyChild(world, childId);
+  const atSpawn = world.runtime().children[0]!.lastAssignedAt;
+  assert.ok(atSpawn, "the spawn IS the first assignment");
+
+  // Play the child's gate: acknowledge the injection the moment the record lands.
+  const originalIO = world.deps.channelIO();
+  const spy = {
+    ...originalIO,
+    appendLine(path: string, line: string) {
+      originalIO.appendLine(path, line);
+      const parsed = JSON.parse(line) as { kind?: string; instructId?: string };
+      if (parsed.kind === "instruct" && parsed.instructId) {
+        world.childAcks(childId, parsed.instructId, true, "已解除等待并立即投递正文", "injected");
+      }
+    },
+  };
+  (world.deps as { channelIO: () => typeof spy }).channelIO = () => spy;
+
+  world.advance(60_000);
+  const reply = await world.call("orchestrator_instruct", { childId, message: "停下，改做任务二", mode: "interrupt" });
+  assert.equal(reply.isError, undefined, replyText(reply));
+
+  const stamped = world.runtime().children[0]!.lastAssignedAt;
+  assert.notEqual(stamped, atSpawn,
+    "an interrupt carrying text IS new work: without this stamp the previous task's completion keeps counting");
+  assert.equal(Date.parse(stamped!), Date.parse(atSpawn!) + 60_000);
+});
+
+test("the stamp survives a FAILED receipt — the assignment is the record in the channel", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  readyChild(world, childId);
+  const atSpawn = world.runtime().children[0]!.lastAssignedAt;
+
+  // Nobody acknowledges: the receipt fails. But the message IS in the child's
+  // inbox and its gate will read it, so the child HAS been re-tasked — gating
+  // the stamp on the receipt would leave the last task's completion standing.
+  world.advance(60_000);
+  const reply = await world.call("orchestrator_instruct", { childId, message: "停下，改做任务二" });
+  assert.equal(reply.isError, true, replyText(reply));
+
+  assert.equal(projectionOf(world, childId).pendingInstructs.length, 1, "the message is in its inbox");
+  assert.equal(
+    Date.parse(world.runtime().children[0]!.lastAssignedAt!),
+    Date.parse(atSpawn!) + 60_000,
+    "and the assignment stamp moved with it",
+  );
+});
+
+
 
 // ---------------------------------------------------------------------------
 // close / recover / attach / handoff
@@ -667,15 +772,222 @@ test("attach hands back the plan, the children, the open questions and the ORPHA
   assert.equal(reply.details?.orphans, 1);
 });
 
-test("attach refuses an orchestration this session does not carry", async () => {
+test("attach refuses an id that is not this repo's, or not on disk, or malformed", async () => {
+  // B1 (2026-09-06): an id is ADOPTABLE now, so the refusals had to become
+  // specific — each of these three would previously have been the same
+  // "you do not carry it" answer, which said nothing about what to do.
   const world = makeFakeWorld();
-  const wrong = await world.call("orchestrator_attach", { orchestrationId: "orch-11111111-zzz" });
-  assert.equal(wrong.isError, true);
-  assert.match(replyText(wrong), /不能在运行中改换编排身份/);
+
+  // Another repo's orchestration: the id carries a repo hash, and adopting it
+  // would put this session's children on somebody else's channels.
+  const foreignRepo = await world.call("orchestrator_attach", { orchestrationId: "orch-11111111-zzz" });
+  assert.equal(foreignRepo.isError, true);
+  assert.match(replyText(foreignRepo), /不是本仓库/);
 
   const malformed = await world.call("orchestrator_attach", { orchestrationId: "not-an-id" });
   assert.equal(malformed.isError, true);
+  assert.match(replyText(malformed), /不像一个门禁铸造的编排 id/);
+
+  // Every refusal hands back the way out, never a dead end.
+  for (const reply of [foreignRepo, malformed]) {
+    assert.match(replyText(reply), /orchestrator_plan\(\{ action: "archive" \}\)/,
+      "the refusal must name the archive route");
+  }
 });
+
+// ---------------------------------------------------------------------------
+// B1 — the two ways out of "somebody else's plan is in this repo"
+// ---------------------------------------------------------------------------
+
+/** An orchestration id of the fake world's repo, minted like the gate does. */
+function idOfFakeRepo(at: number): string {
+  return newOrchestrationId("/repo", at);
+}
+
+/** The registry a dead project manager left behind in this repo. */
+function previousHolder(at = 1_700_000_000_000) {
+  const orchestrationId = idOfFakeRepo(at);
+  return {
+    orchestrationId,
+    children: [{
+      id: "t1-old",
+      taskId: "t1",
+      paneId: "%9",
+      cwd: "/repo",
+      createdAt: "2026-09-05T00:00:00.000Z",
+    }],
+    notify: { sentAt: [], lastByKey: {} },
+  };
+}
+
+test("attach ADOPTS the previous holder's orchestration, registry included", async () => {
+  // The measured situation: the manager's session died, its plan is still in
+  // the repo, its child panes may still be alive — and the new session never
+  // inherited the id, so before B1 this was unreachable and ended in `rm`.
+  const recorded = previousHolder();
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    recordedRuntime: recorded,
+    channelDirs: [recorded.orchestrationId],
+  });
+
+  const reply = await world.call("orchestrator_attach", { orchestrationId: recorded.orchestrationId });
+
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.deepEqual(world.adopted, [recorded.orchestrationId], "the id must actually be adopted");
+  assert.equal(world.runtime().orchestrationId, recorded.orchestrationId);
+  assert.equal(world.runtime().children.length, 1, "the previous holder's registry comes with it");
+  const text = replyText(reply);
+  assert.match(text, /已接管编排/);
+  assert.match(text, /尚未获批/, "the approval does NOT travel — the new holder must submit again");
+  assert.ok(world.auditLog.some((line) => line.includes("taken over")), "a change of holder is logged");
+});
+
+test("attach refuses to change identity once this session has children of its own", async () => {
+  const recorded = previousHolder();
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    approvePlan: true,
+    recordedRuntime: recorded,
+    channelDirs: [recorded.orchestrationId],
+  });
+  await spawnT1(world);
+
+  const reply = await world.call("orchestrator_attach", { orchestrationId: recorded.orchestrationId });
+
+  assert.equal(reply.isError, true);
+  assert.match(replyText(reply), /不能在运行中改换编排身份/);
+  assert.deepEqual(world.adopted, [], "nothing may be adopted while children are registered");
+});
+
+test("plan write/submit REFUSE while the repo records another orchestration, and route out", async () => {
+  const recorded = previousHolder();
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    recordedRuntime: recorded,
+    channelDirs: [recorded.orchestrationId],
+    identityConflict: recorded.orchestrationId,
+  });
+
+  for (const action of ["write", "submit"]) {
+    const reply = await world.call("orchestrator_plan", {
+      action,
+      plan: {
+        title: "我的计划",
+        intent: "另起一轮",
+        tasks: [{ id: "n1", title: "任务", repo: "/repo", fileBoundaries: ["lib/"] }],
+      },
+    });
+    assert.equal(reply.isError, true, `${action} must refuse`);
+    const text = replyText(reply);
+    assert.match(text, new RegExp(recorded.orchestrationId), "it names WHICH orchestration is in the way");
+    assert.match(text, /orchestrator_attach/, "and both ways out");
+    assert.match(text, /action: "archive"/);
+  }
+
+  // READ stays open: you must be able to look at what is in your way.
+  const read = await world.call("orchestrator_plan", { action: "read" });
+  assert.equal(read.isError, undefined, replyText(read));
+});
+
+test("archive REFUSES while a registered child pane is still alive", async () => {
+  const recorded = previousHolder();
+  const world = makeFakeWorld({ plan: twoTaskPlan(), recordedRuntime: recorded });
+  // The dead manager's child pane is still up — that is what makes archiving
+  // it the wrong move.
+  world.panes.set("%9", { id: "%9", command: ["pi"], env: {}, alive: true });
+
+  const reply = await world.call("orchestrator_plan", { action: "archive" });
+
+  assert.equal(reply.isError, true);
+  assert.match(replyText(reply), /还有 1 个子会话活着/);
+  assert.match(replyText(reply), /orchestrator_attach/, "the honest alternative is a takeover");
+  assert.ok(world.plan(), "nothing may move while somebody is working under that plan");
+});
+
+test("archive does NOTHING when the user declines (and when there is no dialog at all)", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), recordedRuntime: previousHolder() });
+  // confirmAnswers is empty ⇒ the fake dialog answers false, which is also
+  // exactly what a headless session does.
+  const reply = await world.call("orchestrator_plan", { action: "archive" });
+
+  assert.equal(reply.isError, true);
+  assert.ok(world.plan(), "the plan must still be there");
+  assert.equal(world.scratch.size, 0, "and nothing may have been written");
+});
+
+test("archive moves the plan AND the registry aside, then the repo is free for a new plan", async () => {
+  const recorded = previousHolder();
+  const world = makeFakeWorld({ plan: twoTaskPlan(), recordedRuntime: recorded });
+  world.confirmAnswers.push(true);
+
+  const reply = await world.call("orchestrator_plan", { action: "archive" });
+
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.equal(world.plan(), undefined, "the plan file is out of the way");
+  const archived = [...world.scratch.entries()].find(([path]) => path.includes("orchestrator-plan.archived-"));
+  assert.ok(archived, `an archive file must exist: ${[...world.scratch.keys()].join(", ")}`);
+  const payload = JSON.parse(archived![1]);
+  assert.equal(payload.plan.title, "测试计划", "the user's approved plan is preserved, never deleted");
+  assert.equal(payload.orchestration.orchestrationId, recorded.orchestrationId,
+    "the registry goes with it — leaving it behind would block every future spawn");
+  // THE RECORD ITSELF must stop naming the old orchestration. Leaving it
+  // behind is not cosmetic: `runtimeConflict` would then refuse every spawn
+  // of the NEW orchestration forever, i.e. the session would have "cleaned
+  // up" into a corner it cannot leave.
+  const stillRecorded = world.deps.recordedRuntime();
+  assert.notEqual(stillRecorded?.orchestrationId, recorded.orchestrationId,
+    "the sidecar must no longer record the archived orchestration");
+  assert.equal(stillRecorded?.children.length, 0, "and its registry is gone from the live record");
+  assert.ok(world.auditLog.some((line) => line.includes("plan archived")), "the archive is logged");
+});
+
+test("archive still works when the plan file does NOT parse — that is the sealed-shut case", async () => {
+  // THE DEAD END THIS PREVENTS. Every action below the plan-validation gate
+  // answers "the plan file does not validate" and does nothing else. With a
+  // corrupt plan AND another orchestration's runtime recorded, `write` is
+  // refused by the identity guard and `archive` would be refused by the
+  // parser — leaving `rm` as the only move, which is the exact situation the
+  // action exists to remove. So the archive runs BEFORE the plan must parse.
+  const recorded = previousHolder();
+  const world = makeFakeWorld({ recordedRuntime: recorded, identityConflict: recorded.orchestrationId });
+  // A plan file that exists but cannot be read as a plan.
+  world.deps.readPlan = () => ({ problems: ["plan 文件不是合法 JSON：Unexpected token"] });
+  world.confirmAnswers.push(true);
+
+  const reply = await world.call("orchestrator_plan", { action: "archive" });
+
+  assert.equal(reply.isError, undefined, replyText(reply));
+  const archived = [...world.scratch.entries()].find(([path]) => path.includes("orchestrator-plan.archived-"));
+  assert.ok(archived, "an unparseable plan must still be archivable");
+  const payload = JSON.parse(archived![1]);
+  assert.equal(payload.plan, undefined, "there is no parsed plan to record — and that is not a failure");
+  assert.equal(payload.orchestration.orchestrationId, recorded.orchestrationId,
+    "the registry is what makes it worth archiving here");
+});
+
+test("the archive reply reports what it actually moved, on both paths", async () => {
+  // Same rule as the route text (round-1 P2): a receipt may not assert
+  // something that did not happen. The registry-only path — a repo left over
+  // from the `rm` era — archives no plan and renames no file.
+  const withPlan = makeFakeWorld({ plan: twoTaskPlan(), recordedRuntime: previousHolder() });
+  withPlan.confirmAnswers.push(true);
+  const planReply = await withPlan.call("orchestrator_plan", { action: "archive" });
+  assert.equal(planReply.details?.archivedPlan, true);
+  assert.match(replyText(planReply), /已改名留在归档旁边/, "a plan file WAS renamed, so say so");
+
+  const registryOnly = makeFakeWorld({ recordedRuntime: previousHolder() });
+  registryOnly.confirmAnswers.push(true);
+  const registryReply = await registryOnly.call("orchestrator_plan", { action: "archive" });
+  assert.equal(registryReply.isError, undefined, replyText(registryReply));
+  assert.equal(registryReply.details?.archivedPlan, false);
+  assert.equal(registryReply.details?.archivedRuntime, true);
+  assert.doesNotMatch(replyText(registryReply), /已改名/, "nothing was renamed — do not claim it was");
+  assert.doesNotMatch(replyText(registryReply), /已让出来/, "there was no plan file occupying the slot");
+});
+
+
+
 
 test("closing is limited to registered panes and returns the task to pending", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });

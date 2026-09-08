@@ -152,7 +152,21 @@ function makeMockPi(cwd: string): MockPi {
   };
 }
 
-const READY_REVIEW = '```json\n{"gate":"READY","docSync":"NOT_NEEDED","findings":[]}\n```\n';
+/** A reviewer's structured conclusion, as its channel report carries it. */
+const READY_REVIEW = { verdict: "READY", docSync: "NOT_NEEDED", findings: [] };
+
+/**
+ * Reach the gate's verdict recorder — a plain function, exposed on the same
+ * kind of non-tool test seam as the internal implementations above (it takes
+ * the judge's structured conclusion; nothing registers it anywhere).
+ */
+function recordVerdict(pi: unknown): (concluded: unknown, repo: string, ctx: unknown) => Promise<string> {
+  const recorders = (pi as {
+    __reviewGateRecorders?: { recordReviewVerdict: (c: unknown, r: string, x: unknown) => Promise<string> };
+  }).__reviewGateRecorders;
+  assert.ok(recorders, "the extension must expose its recorders on the test seam");
+  return recorders!.recordReviewVerdict;
+}
 
 // ---------------------------------------------------------------------------
 
@@ -377,17 +391,15 @@ test("P-multi: record_review without `repo` is REJECTED once several repos are e
   writeFileSync(join(repoB, "a.ts"), "export const a = 21;\n");
   await toolResult({ toolName: "edit", isError: false, input: { path: join(repoB, "a.ts") }, content: [] }, ctx);
 
-  // `record_review` is an INTERNAL implementation now (the gate records a
-  // verdict itself when a reviewer exits), so it is reached through the test
-  // seam rather than the tool registry. The multi-repo rule it enforces is
-  // unchanged, and unchanged is what this asserts.
-  const recordReview = internalTool(pi, "record_review");
-  const ambiguous = await recordReview("id", { reviewer_output: READY_REVIEW }, undefined, undefined, ctx) as
-    { isError?: boolean; content: Array<{ text: string }> };
-  assert.equal(ambiguous.isError, true, "an ambiguous target must fail closed, not guess");
-  assert.match(ambiguous.content[0].text, /more than one repository/);
-  assert.match(ambiguous.content[0].text, /repoA/);
-  assert.match(ambiguous.content[0].text, /repoB/);
+  // The verdict recorder is a plain FUNCTION now (2026-09-04) — the gate calls
+  // it itself when a reviewer's round lands — so it is reached through the
+  // test seam rather than the tool registry. The multi-repo rule it enforces
+  // is unchanged, and unchanged is what this asserts: it never GUESSES a repo.
+  const recordReview = recordVerdict(pi);
+  const ambiguous = await recordReview(READY_REVIEW, "", ctx);
+  assert.match(ambiguous, /more than one repository/, "an ambiguous target must fail closed, not guess");
+  assert.match(ambiguous, /repoA/);
+  assert.match(ambiguous, /repoB/);
 
   // Nothing was recorded anywhere.
   for (const root of [repoA, repoB]) {
@@ -396,10 +408,8 @@ test("P-multi: record_review without `repo` is REJECTED once several repos are e
   }
 
   // A repo this session never edited is not a valid target either.
-  const outside = await recordReview(
-    "id", { reviewer_output: READY_REVIEW, repo: join(parent, "nope") }, undefined, undefined, ctx,
-  ) as { isError?: boolean; content: Array<{ text: string }> };
-  assert.equal(outside.isError, true);
+  const outside = await recordReview(READY_REVIEW, join(parent, "nope"), ctx);
+  assert.doesNotMatch(outside, /recorded verdict/, "an unedited repo cannot receive a verdict");
 });
 
 test("P-multi: run_precommit obeys the same explicit-repo rule as record_review", async () => {

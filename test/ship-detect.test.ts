@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { detectShipCommands, extractCommitMessages, extractPrTextFields } = await import(
+const { containsHeredoc, detectShipCommands, extractCommitMessages, extractPrTextFields, observedShipKinds } = await import(
+
+
   new URL("../lib/ship-detect.ts", import.meta.url).pathname
 );
 
@@ -325,3 +327,99 @@ test("bypass: backslash-newline continuation → commit", () => {
 test("bypass: continuation inside a quoted-splice command name", () => {
   assert.equal(firstKind('g"i\\\nt" commit'), "commit");
 });
+
+// ---------------------------------------------------------------------------
+// containsHeredoc — the EVIDENCE-side narrowing (2026-09-06, round-2 P2).
+//
+// The detector's over-matching is safe while it only BLOCKS. It stopped being
+// safe once the delivery station started reading the same detection as proof
+// that a PR was opened: a heredoc BODY line is detected as a ship command.
+
+test("a heredoc body IS detected as a ship command — the over-match this exists for", () => {
+  // Measured, not assumed: this is exactly why the evidence path may not reuse
+  // the detection unfiltered.
+  assert.equal(firstKind("cat > doc.md <<EOF\ngh pr create --title x\nEOF"), "pr-create");
+});
+
+test("containsHeredoc recognises the forms a shell actually accepts", () => {
+  for (const cmd of [
+    "cat > a.md <<EOF\nx\nEOF",
+    "cat <<-EOF\nx\nEOF",
+    "cat <<'EOF'\nx\nEOF",
+    'cat <<"END"\nx\nEND',
+    "gh pr create --body \"$(cat <<EOF\nbody\nEOF\n)\"",
+  ]) {
+    assert.equal(containsHeredoc(cmd), true, cmd);
+  }
+});
+
+test("containsHeredoc leaves ordinary commands (and redirections) alone", () => {
+  for (const cmd of [
+    "gh pr create --title x --body y",
+    "git push origin work",
+    "sort < input.txt",
+    "node script.js 2>&1",
+  ]) {
+    assert.equal(containsHeredoc(cmd), false, cmd);
+  }
+});
+
+test("containsHeredoc errs toward SEEING a heredoc — the safe direction here", () => {
+  // `<<` inside quotes is not a heredoc to a shell, and this predicate says it
+  // is. That costs a false NEGATIVE on arrival evidence (this command proves
+  // nothing), never a false pass — which is the whole reason the evidence side
+  // gets its own predicate instead of teaching the detector about quoting.
+  assert.equal(containsHeredoc("echo 'a << b'"), true);
+});
+
+
+
+// ---------------------------------------------------------------------------
+// observedShipKinds — the EVIDENCE entry point (2026-09-06, round-3 P2).
+//
+// Detection over-matches on purpose because it BLOCKS. The same over-match
+// GRANTS a pass once `declare_done` reads it as "a PR was opened", so evidence
+// gets its own narrowed entry point. Each case below is a measured detector
+// false positive, not a hypothesis.
+
+test("evidence rejects every measured over-match vector", () => {
+  const cases: Array<[string, string]> = [
+    ["heredoc body", "cat > doc.md <<EOF\ngh pr create --title x\nEOF"],
+    ["node -e string", "node -e 'console.log(1)\ngh pr create --title x'"],
+    ["python3 -c string", 'python3 -c "x=1\ngh pr create --title y"'],
+    ["a quoted echo", 'echo "gh pr create"'],
+    // WRAPPED forms (round-4 reviewer Nit, measured): `normalizedTokens`
+    // walks past sudo/env/timeout looking for a git/gh head ANYWHERE in the
+    // segment — fail-closed for blocking, fail-OPEN for evidence, and the
+    // first version of this function inherited it by re-joining the tokens.
+    ["timeout + node -e", "timeout 60 node -e 'x=1\ngh pr create --title x'"],
+    ["env + python3 -c", 'env FOO=1 python3 -c "x=1\ngh pr create --title y"'],
+    ["the documented sudo ambiguity", "sudo echo gh pr create"],
+
+  ];
+  for (const [label, cmd] of cases) {
+    assert.ok(detectShipCommands(cmd).length > 0 || label === "a quoted echo",
+      `${label}: the DETECTOR is expected to (over-)match — that is the premise`);
+    assert.deepEqual(observedShipKinds(cmd), [], `${label} must prove nothing`);
+  }
+});
+
+test("evidence still recognises the real thing, including a multi-line PR body", () => {
+  // A false negative here is only "no evidence from this command", but it must
+  // not be the NORMAL case: PR bodies are routinely multi-line.
+  assert.deepEqual(observedShipKinds('gh pr create --title x --body "line1\nline2"'), ["pr-create"]);
+  assert.deepEqual(observedShipKinds("gh pr create --title x --body y"), ["pr-create"]);
+  assert.deepEqual(observedShipKinds("git push origin work"), ["push"]);
+  // Prefixes that sit before a command WITHOUT being one are stepped over.
+  assert.deepEqual(observedShipKinds("GIT_TRACE=1 git push origin work"), ["push"]);
+  assert.deepEqual(observedShipKinds("> out.txt git push origin work"), ["push"]);
+
+  // A second command on its own line is a real command, not a quoted string.
+  assert.deepEqual(observedShipKinds("echo hi\ngh pr create --title x"), ["pr-create"]);
+  // Compound commands report each kind once.
+  assert.deepEqual(
+    observedShipKinds("git push origin work && gh pr create --title x").sort(),
+    ["pr-create", "push"],
+  );
+});
+

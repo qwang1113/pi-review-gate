@@ -1,7 +1,6 @@
 /**
  * The GOAL tool family: `propose_loop_goal` (L8 — the user approves this
- * session's exit contract) and the internal `record_goal_prereview` (L8b —
- * the goal-auditor's verdict), registered together from ONE entry point.
+ * session's exit contract), and the L8b audit recorder it runs internally.
  *
  * They live here rather than in `extensions/review-gate.ts` for the reason
  * this repository has a rule about (AGENTS.md §"架构规范"): that file is
@@ -11,21 +10,19 @@
  * (lib/review-prepare-tools.ts, lib/advisory-prepare-tools.ts), the L7 Copilot
  * pair (lib/copilot-review-tools.ts) and the user-interaction family
  * (lib/user-interaction-tools.ts). Same shape here:
- * `registerGoalTools(hosts, deps)`, with every effect the tools need arriving
+ * `registerGoalTools(host, deps)`, with every effect the tools need arriving
  * through an injected `deps` object.
  *
- * TWO HOSTS, ONE ENTRY (philosophy two + three). The family registers on two
- * different hosts and that is the whole reason `hosts` is an object rather
- * than a single argument: `propose_loop_goal` is the agent's tool and goes to
- * `hosts.agent` (pi's registry), while `record_goal_prereview` is an internal
- * implementation the gate calls itself and goes to `hosts.internal` — the
- * capture-only host, which pi never learns a name from. Naming the two
- * explicitly is what makes "an agent can never sequence the audit by hand"
- * readable at the call site instead of hidden in a wiring convention.
+ * ONE HOST, ONE ENTRY (philosophy two + three). The family registers exactly
+ * one tool, on pi's registry: `propose_loop_goal`. Its audit recorder is a
+ * plain function the gate calls itself (`recordGoalPrereview`), not a second
+ * registration — so "an agent can never sequence the audit by hand" is a fact
+ * about the tool surface rather than a convention about which host something
+ * was registered on.
  *
  * THE BOUNDARY: this module owns the APPROVAL — when the audit runs, what the
  * user is shown, who may answer, and the file write that follows a yes. It
- * owns none of the audit's rules: the fence parsing, the adjudication and the
+ * owns none of the audit's rules: the adjudication and the
  * record live in lib/goal-prereview-tools.ts, and the goal text's own
  * formatting (transcript message, dialog message, refusal, hash) is
  * lib/loop-goal.ts. What is injected is everything it cannot own — the gate
@@ -59,9 +56,20 @@ import { resolvePackageAgentsDir } from "./model-config.ts";
 import { createProgressReporter, type ProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import {
   checkGoalDraft,
-  doRecordGoalPrereview,
   type GoalPrereviewDeps,
 } from "./goal-prereview-tools.ts";
+import {
+  buildRestatementMissingRefusal,
+  restatementConfirmed,
+  restatementRequiredInMode,
+} from "./restatement.ts";
+import {
+  DELIVERY_STATION_CHOICES,
+  deliveryStationLine,
+  isDeliveryStation,
+  parseDeliveryStation,
+  type DeliveryStation,
+} from "./delivery-station.ts";
 
 /** Just enough of pi's tool context for a dialog and a transcript notice. */
 export interface GoalUiContext {
@@ -71,16 +79,6 @@ export interface GoalUiContext {
   };
 }
 
-/**
- * The two hosts this family registers on.
- *
- * `internal` is the capture-only host: an implementation registered there is
- * reachable by name for the gate's own chains and invisible to the agent.
- */
-export interface GoalToolHosts {
-  agent: ToolHost;
-  internal: ToolHost;
-}
 
 /**
  * Everything `propose_loop_goal` needs from the outside world, on top of what
@@ -131,46 +129,15 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
   writeGoalFile(path: string, text: string): void;
 }
 
-// ---------- record_goal_prereview (L8b — the goal-auditor's verdict) ----------
+// ---------- the goal audit recorder (L8b — NOT a tool) ----------
+//
+// `recordGoalPrereview` (lib/goal-prereview-tools.ts) is a plain function the
+// gate calls when the goal-auditor's round lands. It used to be registered
+// here as an `internalTool` named `record_goal_prereview` taking the auditor's
+// raw output as text — a shape that existed only because the verdict had to be
+// parsed back out of a synthesised fence. Nothing parses now, so the tool
+// wrapper is gone (2026-09-04, philosophy two and three).
 
-/**
- * INTERNAL, not registered with pi: `propose_loop_goal` runs the audit itself
- * and records the verdict through this implementation.
- */
-function registerRecordGoalPrereview(host: ToolHost, deps: GoalToolDeps): void {
-  host.registerTool({
-    name: "record_goal_prereview",
-    label: "Record Goal Pre-review",
-    description:
-      "ADVANCED / internal: the gate records a goal audit ITSELF when the auditor's process exits, " +
-      "against the draft it dispatched — the normal flow is " +
-      "`judge_submit({role:\"goal-auditor\", task:<draft>})` → propose_loop_goal. Call this directly " +
-      "only when you have an auditor output the gate could not read. " +
-      "Records the audit of a DRAFT loop goal; propose_loop_goal " +
-      "refuses to show the user's approval dialog until a PASS is recorded for the IDENTICAL text. " +
-      "The EXTENSION parses the auditor's JSON fence " +
-      "itself (PASS ⇔ a READY verdict with no unresolved P0/P1) and hashes the draft itself — there " +
-      "is no `passed` parameter you could set, and a " +
-      "hand-written verdict is not a review. A failed audit means: fix the objections and submit the " +
-      "revised text (its hash differs, so it needs its own PASS).",
-    parameters: Type.Object({
-      goal: Type.String({ description: "The FULL draft goal text that was audited (the exact text you will submit)" }),
-      auditor_output: Type.String({ description: "Complete raw output from the goal-auditor judge child" }),
-      repo: Type.Optional(Type.String({
-        description:
-          "Absolute path of the repo this goal binds to (default: the session repo) — must match the " +
-          "repo you pass to propose_loop_goal.",
-      })),
-      auditStartedAt: Type.Optional(Type.String({
-        description:
-          "ISO timestamp of when you DISPATCHED the goal-auditor (the wall-clock start of this audit). " +
-          "Goal criterion 6 records first-vs-re-audit durations, and the gate cannot see the dispatch " +
-          "— the tool only records verdicts. Omit on re-records of the same audit.",
-      })),
-    }),
-    execute: (_id, params, _signal, _onUpdate, ctx) => doRecordGoalPrereview(deps, params, ctx),
-  });
-}
 
 // ---------- propose_loop_goal (L8 — the user approves the contract) ----------
 
@@ -199,6 +166,27 @@ export async function doProposeLoopGoal(
   }
   const { goalText, root: goalRoot } = checked;
   const goalSt = deps.stateFor(goalRoot);
+
+  // L8a REQUIREMENT RESTATEMENT — fail-closed, and ahead of the audit
+  // (2026-09-06, user ask). The step it enforces is "say the requirement back
+  // and have the user confirm it BEFORE any contract is drafted", so checking
+  // it after a minutes-long audit would enforce the wrong order and bill the
+  // user for it. Like the audit below, the refusal renders NO dialog: a
+  // session that skipped the step costs one refusal text.
+  //
+  // Scope, not an escape hatch: explore/normal sessions have no contract to
+  // protect (lib/restatement.ts's restatementRequiredInMode). The mode is
+  // read from the SESSION's own repo state — a goal may bind to a second
+  // repo, but the gate mode is a property of the session, not of the repo it
+  // is writing into.
+  const sessionMode = deps.stateFor(deps.primaryRepoRoot()).taskMode;
+  if (restatementRequiredInMode(sessionMode) && !restatementConfirmed(goalSt.restatement)) {
+    return {
+      content: [{ type: "text", text: buildRestatementMissingRefusal("propose_loop_goal") }],
+      details: { approved: false, restated: false },
+      isError: true,
+    };
+  }
 
   // L8b GOAL PRE-REVIEW — fail-closed, and BEFORE any user-facing surface.
   // The user is only ever asked about a draft a dedicated auditor already
@@ -288,6 +276,19 @@ export async function doProposeLoopGoal(
   // already required a PASS bound to this text, so this reads it directly
   // rather than advertising a fallback state that cannot occur.
   const prereviewLine = "goal-auditor 预审: PASS @ " + goalSt.goalPrereview!.at;
+  // WHERE THIS ROUND STOPS (2026-09-06). Three sources, most specific first:
+  // an explicit `station` parameter, then the station the user already agreed
+  // to when they confirmed the restatement, then the strictest value. The
+  // user is SHOWN it in both surfaces — a station nobody read is a contract
+  // term nobody agreed to — and it is recorded beside the approval.
+  const station: DeliveryStation = isDeliveryStation(String(params.station ?? "").trim().toLowerCase())
+    ? parseDeliveryStation(params.station)
+    : (goalSt.restatement?.station ?? parseDeliveryStation(undefined));
+  // TWO RENDERINGS OF ONE DEFINITION: the dialog and the transcript block are
+  // read by the USER ("由你自己 commit"), the tool reply by the AGENT, which
+  // must not read itself as the committer (round-2 P2).
+  const stationLine = deliveryStationLine(station);
+  const stationLineForUser = deliveryStationLine(station, "user");
   // The goal approval is one of the two dialogs an ORCHESTRATOR may
   // answer on the user's behalf, so it goes through the channel funnel
   // below (`askEitherSide` with topic `goal-approval`) rather than
@@ -297,7 +298,8 @@ export async function doProposeLoopGoal(
   deps.showToUser(
     uiCtx,
     GOAL_CONFIRM_TITLE,
-    buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" + prereviewLine,
+    buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" +
+      stationLineForUser + "\n" + prereviewLine,
   );
   // EITHER the user or (when this session is an orchestration child) the
   // project manager may answer. The channel request carries the FULL draft
@@ -320,13 +322,23 @@ export async function doProposeLoopGoal(
         title: goalDialogTitle,
         options: [goalApproveLabel, goalRejectLabel],
         payload: goalText,
+        // The station travels as a STRUCTURED field beside the draft, for the
+        // same reason the restatement's does: a project manager approving on
+        // the user's behalf may not confirm one looser than the plan the user
+        // approved, and that comparison is made on a field, never on prose
+        // (lib/orchestrator-answer-tools.ts).
+        station,
+
       },
       uiCtx.hasUI === true,
       async (signal) => {
         const ok = await deps.confirmBounded(
           uiCtx,
           goalDialogTitle,
-          buildGoalConfirmMessage(goalText, "绑定仓库(不可信数据): " + repoLine + "\n" + prereviewLine),
+          buildGoalConfirmMessage(
+            goalText,
+            "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine,
+          ),
           "（目标全文见上方消息）",
           signal,
         );
@@ -435,7 +447,15 @@ export async function doProposeLoopGoal(
       isError: true,
     };
   }
-  goalSt.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString(), ...(reason ? { reason } : {}) };
+  goalSt.loopGoal = {
+    hash: goalTextHash(goalText),
+    at: new Date().toISOString(),
+    // Recorded from the SAME value both consent surfaces displayed, never
+    // re-derived afterwards: the station the user saw is the station the
+    // contract carries.
+    station,
+    ...(reason ? { reason } : {}),
+  };
   // This goal's negotiation is over, so its audit count ends with it: the
   // NEXT goal's first audit must announce round 1, not round N+1.
   delete goalSt.goalAuditRound;
@@ -450,25 +470,29 @@ export async function doProposeLoopGoal(
       text: `review-gate: goal approved and written to ${deps.loopGoalRelPath} (repo: ${goalRoot}). Work to it; if it has to ` +
 
         "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
-        "yourself drops the approval and blocks shipping)." +
+        "yourself drops the approval and blocks shipping).\n" +
+        stationLine +
         (reason ? `\nUser's note on approval: ${reason}` : ""),
     }],
-    details: { approved: true, reason: reason ?? null },
+    details: { approved: true, station, reason: reason ?? null },
   };
 }
 
 /**
- * The family's SINGLE registration entry point: both goal tools, each on the
- * host that may see it.
+ * The family's SINGLE registration entry point.
+ *
+ * ONE tool now: `propose_loop_goal`. The audit recorder behind it is a plain
+ * function (`recordGoalPrereview`), which the extension calls when the
+ * auditor's round lands — it is not on any tool surface.
  */
-export function registerGoalTools(hosts: GoalToolHosts, deps: GoalToolDeps): void {
-  registerRecordGoalPrereview(hosts.internal, deps);
-
-  hosts.agent.registerTool({
+export function registerGoalTools(host: ToolHost, deps: GoalToolDeps): void {
+  host.registerTool({
     name: "propose_loop_goal",
     label: "Propose Loop Goal",
     description:
       "Submit the NEGOTIATED loop goal (this session's exit contract) for the user's approval. " +
+      "REQUIRED BEFORE THIS, in loop / orchestrator mode: a restatement the user confirmed " +
+      "(`propose_restatement`) — without one this tool refuses outright and shows NO dialog. " +
       "Interview the user first — ONE question per turn, labeled \"N of M\", each with your " +
       "recommended answer (all at once only when the user asks for it) — and only " +
       "submit what they actually agreed to. Write the goal in SIMPLIFIED CHINESE (technical " +
@@ -483,13 +507,21 @@ export function registerGoalTools(hosts: GoalToolHosts, deps: GoalToolDeps): voi
       "commit/push/PR and its body is withheld from your prompt. Shape: task title, one-line " +
       "intent, 3–7 checkable exit criteria, non-goals, ISO date. `repo` selects WHICH repo the " +
       "goal binds to (default: this session's repo) — a multi-repo session approves a goal per " +
-      "repo before editing there; one repo's approval never opens another's write surface.",
+      "repo before editing there; one repo's approval never opens another's write surface. " +
+      "`station` says where THIS round stops (" + DELIVERY_STATION_CHOICES + "); omit it and the " +
+      "station the user confirmed with the restatement is carried over (nothing on record ⇒ " +
+      "precommit, the strictest). It is shown to the user in the approval dialog.",
     parameters: Type.Object({
       goal: Type.String({ description: "The full goal text (Markdown) as agreed with the user" }),
       repo: Type.Optional(Type.String({
         description:
           "Absolute path of the repo this goal binds to (default: the session repo). Required to " +
           "unlock edit/write in a SECOND repo the session works in.",
+      })),
+      station: Type.Optional(Type.String({
+        description:
+          "Where this round stops: " + DELIVERY_STATION_CHOICES + ". Default: the restatement's " +
+          "station, else precommit. Only pass it when the user agreed to a DIFFERENT station.",
       })),
     }),
     execute: (_id, params, signal, onUpdate, ctx) => doProposeLoopGoal(deps, params, ctx, onUpdate, signal),

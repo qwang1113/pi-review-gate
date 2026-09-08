@@ -22,12 +22,19 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
 import { normalizeRuntime } from "./orchestrator-registry.ts";
+import { normalizeOrchestrationId } from "./orchestration-id.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
+import { restatementHash, type RestatementRecord } from "./restatement.ts";
+import { isDeliveryStation } from "./delivery-station.ts";
+import { SHIP_COMMAND_KINDS, type ShipCommandKind } from "./constants.ts";
+
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
 import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
 
 import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
+// The round's audit stamp is the CHANNEL's stamp: one shape, one validator.
+import { sanitizeScopeStamp, type ReviewScopeStamp } from "./orchestrator-channel.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
 export type PrecommitVerdict = "PASS" | "FAIL" | "NO_CHECKS_RUN" | "NOT_RUN";
@@ -51,6 +58,45 @@ export const DOC_SYNC_ATTESTATIONS: ReadonlySet<string> = new Set<DocSyncAttesta
 export const GATE_VERDICTS: ReadonlySet<string> = new Set<GateVerdict>(["PENDING", "READY", "BLOCKED", "NEEDS_HUMAN"]);
 export const PRECOMMIT_VERDICTS: ReadonlySet<string> = new Set<PrecommitVerdict>(["PASS", "FAIL", "NO_CHECKS_RUN", "NOT_RUN"]);
 
+/**
+ * One side of a round's scope record.
+ *
+ * It IS the channel's wire stamp (`ReviewScopeStamp`), aliased rather than
+ * re-declared: the judge's half of this record arrives straight off a channel
+ * report, and a second structurally-identical type is how the two ends of one
+ * value drift apart.
+ */
+export type ScopeStampRecord = ReviewScopeStamp;
+
+/** Both sides of the audit pair — what the gate sent, what the judge reported. */
+export interface RoundScopeRecord {
+  /** Registered by the gate when it prepared and dispatched this round. */
+  dispatched?: ScopeStampRecord;
+  /** Stamped by the judge on the report that closed this round. */
+  reported?: ScopeStampRecord;
+}
+
+/**
+ * Keep only what is a recognisable scope pair; drop everything else.
+ *
+ * Each half goes through the CHANNEL's own stamp sanitizer — the same
+ * function that validates a stamp arriving on a report — so a sidecar and a
+ * channel record can never disagree about what a valid stamp is. A pair with
+ * neither half left becomes `undefined`, because an empty `scope` object
+ * would read as "this round recorded its scope" when it recorded nothing.
+ */
+export function sanitizeRoundScope(raw: unknown): RoundScopeRecord | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as { dispatched?: unknown; reported?: unknown };
+  const dispatched = sanitizeScopeStamp(value.dispatched);
+  const reported = sanitizeScopeStamp(value.reported);
+  if (dispatched === undefined && reported === undefined) return undefined;
+  return {
+    ...(dispatched === undefined ? {} : { dispatched }),
+    ...(reported === undefined ? {} : { reported }),
+  };
+}
+
 export interface RoundRecord {
   round: number;
   findingsTotal: number | null; // null = unparseable (PR #7 lesson 2: never fail-open on parse trouble)
@@ -69,6 +115,27 @@ export interface RoundRecord {
   polishFiles?: string[];
   /** Files that had P0/P1 findings this round (resets a file's streak). */
   blockingFiles?: string[];
+  /**
+   * WHICH SCOPE THIS ROUND RAN UNDER — kept so a finished round stays legible
+   * after the fact ("was it incremental, and over what range?") without the
+   * channel file having to still exist.
+   *
+   * TWO HALVES ON PURPOSE. `dispatched` is what the GATE registered when it
+   * prepared the round; `reported` is what the JUDGE stamped on its own report
+   * (lib/judge-inspection.ts reads it back out of the task text). Both trace
+   * back to the same gate-written text, so their AGREEING says nothing about
+   * how the round was read — whether it inspected anything at all is the
+   * report's own `inspection` record, and how well it read is the verdict
+   * itself. Their DISAGREEING is what this pair
+   * catches: a judge answering with another round's task text, or a pane on a
+   * different build. Nothing acts on it — this is a record, not a rule.
+   *
+   * Optional, and every part of it optional: sidecars written before this
+   * field exists stay readable, and a round whose scope was never computed
+   * (any pre-checkpoint audit) records none.
+   */
+  scope?: RoundScopeRecord;
+
 }
 
 export interface GateState {
@@ -86,9 +153,24 @@ export interface GateState {
   fingerprintVersion?: number;
   sessionId: string | null;
   /**
+   * Set when ANOTHER live session holds this worktree — the refusal text,
+   * verbatim (lib/session-exclusivity.ts decides it).
+   *
+   * IN MEMORY ONLY, and that is load-bearing rather than tidy: a refused
+   * session must not write this worktree's sidecar at all — the file belongs
+   * to the session that holds it, and persisting a refusal into it would tell
+   * the HOLDER that its own worktree is taken. `saveSidecar` strips the field
+   * as a second line of defence.
+   *
+   * It lives on the state, rather than beside it, because that is what reaches
+   * `unmetRequirements` — the one authority every ship path already shares.
+   */
+  exclusivityRefusal?: string;
+
+  /**
    * The last review_checkpoint commit (sha + wall-clock time). The review
    * unit of the new execution model: prepare_review computes baseline..HEAD
-   * against this, and record_review binds a READY to the reviewed commit's
+   * against this, and the verdict recorder binds a READY to the reviewed commit's
    * tree. Written only by review_checkpoint; absent before the first one.
    */
   checkpoint?: {
@@ -343,8 +425,8 @@ export interface GateState {
   loopGoal?: LoopGoalConfirmation;
   /**
    * L8b: the goal-auditor PRE-REVIEW of the current draft (hash + verdict +
-   * time, written only by record_goal_prereview after the EXTENSION parsed the
-   * auditor's JSON fence — never an agent-attested boolean).
+   * time, written only by the gate's own audit recorder from the auditor's
+   * structured conclusion — never an agent-attested boolean).
    *
    * Absent ⇒ the draft was never audited: propose_loop_goal refuses to show
    * the approval dialog. Like {@link loopGoal} it stays out of
@@ -354,8 +436,8 @@ export interface GateState {
   goalPrereview?: GoalPrereviewRecord;
   /**
    * The PLAN pre-audit — `goalPrereview`'s twin for the orchestration layer
-   * (round-4 §7), written only by the gate after it parsed the auditor's JSON
-   * fence inside `orchestrator_plan`'s submit.
+   * (round-4 §7), written only by the gate after it read the auditor's
+   * structured conclusion inside `orchestrator_plan`'s submit.
    *
    * Absent ⇒ this plan was never audited, and `submit` shows no dialog. It
    * binds to the plan's CANONICAL text (tasks, boundaries, dependencies,
@@ -392,6 +474,42 @@ export interface GateState {
    * starts injecting the force-negotiate directive.
    */
   turnsWithoutGoal?: number;
+  /**
+   * The user-confirmed REQUIREMENT RESTATEMENT for this repo (2026-09-06):
+   * what the session said the requirement is, plus the delivery station the
+   * user agreed this round stops at (lib/restatement.ts).
+   *
+   * Absent ⇒ nothing was restated: `propose_loop_goal` and
+   * `orchestrator_plan({action:"submit"})` refuse WITHOUT rendering a dialog.
+   * Like {@link loopGoal} it stays out of {@link unmetRequirements} — the git
+   * hooks cannot show a dialog, so a requirement they could never unblock has
+   * no business arming them. It deliberately OUTLIVES the drafts that follow
+   * it (a rejected goal does not mean the requirement changed); a fresh
+   * `propose_restatement` overwrites it.
+   */
+  restatement?: RestatementRecord;
+  /**
+   * SHIP KINDS THE GATE WATCHED SUCCEED in this repo (2026-09-06).
+   *
+   * Written on the `tool_result` of a bash call that carried a ship command
+   * and did NOT fail — so it says "the gate saw `gh pr create` exit 0 here",
+   * which is as close to "a PR exists" as a purely local check can get. It is
+   * never written from a parameter, so it cannot be attested by the agent.
+   *
+   * The delivery station's ARRIVAL check reads it (lib/delivery-station.ts):
+   * a `pr` round that never ran a successful `gh pr create` did not arrive.
+   * Deliberately NOT the Copilot record (`copilot.pr`), which was the first
+   * attempt and is wrong for this: that number is only filled in by
+   * `request_copilot_review` / `check_copilot_review`, so a repo with no `gh`,
+   * or one where `copilotReview.enabled` is false, opens a real PR and could
+   * never satisfy an arrival gate that insisted on it.
+   *
+   * Absent / unknown entries are dropped by the loader: this is evidence, and
+   * unreadable evidence is no evidence (the arrival then blocks, which is the
+   * safe direction).
+   */
+  shippedKinds?: ShipCommandKind[];
+
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of
    *  them. Ship enforcement never reads it; absence just narrows the
@@ -540,15 +658,44 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     // child sessions) and tmux pane ids (which become command targets), and
     // it lives in an ordinary repo-local file. `normalizeRuntime` validates
     // it and drops the approval on any doubt — the session then simply has to
-    // ask the user again. The orchestration ID is deliberately NOT taken from
-    // the file: the session re-derives it from its own environment, so a
-    // forged one can never become an attention channel key.
+    // ask the user again.
+    //
+    // THE ID IS READ BACK, AND THAT IS A CHANGE (2026-09-06, B1). It used to
+    // be blanked here, with the reasoning that "a forged id must never become
+    // an attention channel key". The blanking did not achieve that and cost
+    // something real:
+    //
+    //  - it did not achieve it, because the very next thing that happened was
+    //    lib/orchestrator-wiring.ts STAMPING the session's own id onto the
+    //    stored runtime — so a foreign registry was adopted under our address
+    //    anyway, and `runtimeConflict` (whose whole job is to refuse exactly
+    //    that) compared against `""` and returned a falsy "conflict" that
+    //    `dispatchSpawn` skipped;
+    //  - it cost the takeover path: with no id on the record, nothing on disk
+    //    could say WHICH orchestration this repo's plan belongs to, and a new
+    //    project manager had no way to adopt it (it had to `rm` the plan).
+    //
+    // What actually keeps a forged id from becoming an address is elsewhere
+    // and is unchanged: an id is only ADOPTED when a caller names it
+    // explicitly in `orchestrator_attach` and it survives that tool's checks.
+    // Read back here, the id is a FACT ABOUT THE RECORD ("this registry
+    // belongs to that orchestration"), which is what makes refusing it
+    // possible. A malformed one is not repaired: the whole blob goes, because
+    // a registry whose owner cannot be named is one nothing may act on.
     if (parsed.orchestrator !== undefined) {
-      // The id is passed EMPTY on purpose, so this line says what the comment
-      // above claims: nothing about the address survives the file. The session
-      // stamps its own (env-derived) id in when it loads the runtime
-      // (lib/orchestrator-wiring.ts).
-      const cleaned = normalizeRuntime(parsed.orchestrator, "");
+      // OPTIONAL CHAINING IS LOAD-BEARING HERE. `parsed.orchestrator` is
+      // whatever the file said: `null` passes the `!== undefined` test above
+      // and a plain property read on it THROWS — inside the try/catch that
+      // wraps this whole function, which returns "unreadable sidecar". The
+      // blast radius would have been every mode, not this one: a loop session
+      // whose sidecar carried `"orchestrator": null` would silently lose its
+      // READY and its precommit because of a field it never reads. The old
+      // code was safe by accident (it handed the value to `normalizeRuntime`,
+      // which type-checks first); this one has to be safe on purpose.
+      const storedId = normalizeOrchestrationId(
+        (parsed.orchestrator as { orchestrationId?: unknown } | null)?.orchestrationId,
+      );
+      const cleaned = storedId ? normalizeRuntime(parsed.orchestrator, storedId) : undefined;
       if (cleaned) parsed.orchestrator = cleaned;
       else delete parsed.orchestrator;
     }
@@ -582,6 +729,13 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
             (!Array.isArray(r.fingerprints) || !r.fingerprints.every((v) => typeof v === "string"))) {
           r.fingerprints = [];
         }
+        // The audit stamp is a RECORD, and a record nobody can trust is worse
+        // than none: anything that is not a recognisable stamp is dropped
+        // rather than kept as a half-value a reader would still print.
+        const scope = sanitizeRoundScope(r.scope);
+        if (scope === undefined) delete r.scope;
+        else r.scope = scope;
+
       }
     }
     if (parsed.lastPolishReason !== undefined) {
@@ -656,6 +810,21 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
          !parsed.sessionReposPaths.every((v) => typeof v === "string"))) {
       delete parsed.sessionReposPaths;
     }
+    // Observed ship kinds: keep only the known vocabulary, deduped. A record
+    // that is not an array at all is dropped entirely. Evidence that cannot be
+    // read is not evidence — and losing it only makes an ARRIVAL check block,
+    // which is the safe direction.
+    if (parsed.shippedKinds !== undefined) {
+      if (!Array.isArray(parsed.shippedKinds)) {
+        delete parsed.shippedKinds;
+      } else {
+        const known = parsed.shippedKinds.filter(
+          (v): v is ShipCommandKind => typeof v === "string" && (SHIP_COMMAND_KINDS as readonly string[]).includes(v),
+        );
+        parsed.shippedKinds = [...new Set(known)];
+      }
+    }
+
     // L7: a malformed Copilot cycle is repaired, never trusted verbatim and
     // never fatal — sanitizeCopilotState downgrades an unrecognized status to
     // ARMED (still to be proven) and drops a non-object entirely. Rejecting
@@ -676,6 +845,15 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
          typeof parsed.loopGoal.at !== "string" ||
          (parsed.loopGoal.reason !== undefined && typeof parsed.loopGoal.reason !== "string"))) {
       delete parsed.loopGoal;
+    }
+    // The goal's delivery station (2026-09-06) is metadata BESIDE the
+    // approval, so a broken one drops the FIELD and never the approval: the
+    // reader degrades a missing station to `precommit`, the strictest value,
+    // which is exactly what an unreadable one should mean. Dropping the whole
+    // record instead would revoke an approval the user really gave over a
+    // field that grants nothing.
+    if (parsed.loopGoal?.station !== undefined && !isDeliveryStation(parsed.loopGoal.station)) {
+      delete parsed.loopGoal.station;
     }
     // L8b: a MALFORMED pre-review record is treated as ABSENT — fail-closed
     // here means "never audited", so a truncated or shape-broken record costs
@@ -728,6 +906,27 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     if (parsed.turnsWithoutGoal !== undefined &&
       (typeof parsed.turnsWithoutGoal !== "number" || !Number.isFinite(parsed.turnsWithoutGoal) || parsed.turnsWithoutGoal < 0)) {
       delete parsed.turnsWithoutGoal;
+    }
+    // The REQUIREMENT RESTATEMENT (2026-09-06). Dropped WHOLE on any doubt,
+    // and unlike every neighbour above this one re-computes the hash: the
+    // record carries the confirmed TEXT, so `text` and `hash` disagreeing
+    // means the pair was not written by `propose_restatement` — corruption or
+    // an assembled record — and both readings are "nobody confirmed this".
+    // Fail-closed here costs one fresh confirmation dialog; fail-open would
+    // let a contract be negotiated against an understanding the user never
+    // saw. The station is validated against the three known values, and a
+    // record whose station alone is broken is dropped with it rather than
+    // silently downgraded: a confirmation the user gave for `pr` must not
+    // survive as something else.
+    if (parsed.restatement !== undefined) {
+      const rec = parsed.restatement as Partial<RestatementRecord> | null;
+      const ok = !!rec && typeof rec === "object" &&
+        typeof rec.text === "string" && rec.text.trim().length > 0 &&
+        typeof rec.hash === "string" && /^[0-9a-f]{64}$/.test(rec.hash) &&
+        typeof rec.at === "string" &&
+        isDeliveryStation(rec.station) &&
+        restatementHash(rec.text) === rec.hash;
+      if (!ok) delete parsed.restatement;
     }
     // The ask_user record is diagnostic, so a malformed one is dropped whole:
     // no enforcement path reads it, and half a record answers nothing.
@@ -804,9 +1003,15 @@ export const FINGERPRINT_MIGRATION_NOTICE =
 
 export function saveSidecar(path: string, state: GateState): void {
   state.updatedAt = new Date().toISOString();
+  // `exclusivityRefusal` is this session's own predicament, never a fact about
+  // the file: writing it would tell the session that HOLDS this worktree that
+  // its worktree is held by somebody else. The refused session is not supposed
+  // to reach this function at all (its persist is skipped upstream) — this is
+  // the second line of defence, where the bytes are actually produced.
+  const { exclusivityRefusal: _refusal, ...persisted } = state;
   // Atomic write: temp + rename, so a crashed write can't leave a truncated
   // JSON that a fail-open parser might half-read (lib/atomic-write.ts).
-  writeFileAtomic(path, JSON.stringify(state, null, 2) + "\n");
+  writeFileAtomic(path, JSON.stringify(persisted, null, 2) + "\n");
 }
 
 /**
@@ -1025,6 +1230,12 @@ export function unmetRequirements(
   },
 ): string[] {
   if (!state) return ["gate state missing (fail-closed)"];
+  // ANOTHER live session holds this worktree (lib/session-exclusivity.ts).
+  // Checked before `bypass`, and it is the ONE requirement a bypass does not
+  // clear: `/gate-bypass` is this session's authorization to ship its own
+  // work, and the work here is not this session's to authorize — the sidecar,
+  // the worktree and the review all belong to the session that holds it.
+  if (state.exclusivityRefusal) return [state.exclusivityRefusal];
   if (state.bypass.active) return [];
 
   const problems: string[] = [];

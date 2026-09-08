@@ -1,9 +1,11 @@
+import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
+
 /**
  * Adviser brief — the gate-side template for an `adviser` consultation.
  *
  * Goal criterion 3 (adviser conclusion storage + injection): the gate hands
  * the main agent a ready-made adviser task template carrying (a) the main
- * session's transcript path — the adviser is its own pi process and reads it
+ * session's transcript path — the adviser runs in its own pane and reads it
  * ON DEMAND instead of inheriting a fork of the whole conversation — and
  * (b) the artifact path where the adviser appends its own conclusion. The
  * NEXT consultation of the same goal reads that file back and injects the
@@ -134,7 +136,7 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
   const lines = [
     "You are `adviser`, consulting on the CURRENT loop goal of the main session.",
     "",
-    "CONTEXT MODEL: you run as your own pi process (pi -p --session-id) — the",
+    "CONTEXT MODEL: you run in your own tmux pane (same session id across rounds) — the",
     "main session's conversation is NOT inherited. Read it on demand instead:",
     `- session dir: ${input.sessionDir}`,
     `- session id:  ${input.sessionId} (find the file named <timestamp>_${input.sessionId}.jsonl, grep/read the parts you need)`,
@@ -183,14 +185,10 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
     "- If you cannot write the artifact, say so in your output — the gate will record no conclusion for",
     "  the next consultation, which is fail-closed, not silent.",
     "",
-    "OUTPUT: your recommendation in prose first, then the JSON line above (copy it into the artifact).",
-    // Round-17 (user ask): output discipline — conclusion + point list only,
-    // detailed argumentation goes into the artifact JSON line.
+    "OUTPUT: your recommendation in prose first, then the JSON line above (copy it into the artifact),",
+    "then conclude the round with judge_conclude (verdict NEEDS_HUMAN — you advise, you do not gate; your conclusion rides in notes).",
     "输出纪律:结论 + 要点列表(每条一句),不写过程叙事;详细论证放 artifact 的 JSON 行。",
-    "",
-    "完成(必须):输出最终结论后正常退出即可——进程退出即完成,主会话以你的输出为准,",
-    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
-    "主会话会带着答案用同一 session id 重新拉起你。",
+    JUDGE_COMPLETION_DISCIPLINE,
   );
   return lines.join("\n");
 }

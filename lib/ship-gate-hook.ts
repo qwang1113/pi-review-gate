@@ -40,7 +40,7 @@ import {
   type ToolCallBlock,
 } from "./ship-gate-edit-guard.ts";
 import { evaluateShipCommand, type ShipGateBashDeps } from "./ship-gate-bash.ts";
-
+import { judgeDeniedReason } from "./judge-side.ts";
 export type { ToolCallBlock } from "./ship-gate-edit-guard.ts";
 export type { BlockedShipRecord } from "./ship-gate-bash.ts";
 
@@ -66,6 +66,8 @@ export interface ShipGateHookDeps extends EditGuardDeps, ShipGateBashDeps {
   noteContext(ctx: unknown): void;
   /** The edit-tool names the gate guards (`edit` / `write` / `NotebookEdit`…). */
   isEditTool(toolName: string): boolean;
+  /** True when THIS session is a judge pane (reporting shell, not a worker). */
+  isJudgeSession(): boolean;
 }
 
 
@@ -82,6 +84,11 @@ export async function evaluateToolCall(
   // Keep the newest context for the orchestration tools (persist + dialogs);
   // this hook runs immediately before every tool body, including theirs.
   deps.noteContext(ctx);
+  // A judge pane is a reporting shell: outward tools (sub-reviews,
+  // orchestration, goals, done) are refused centrally, before either arm.
+  // ask_user stays available — questions race through the channel.
+  const judgeDenied = judgeDeniedReason(event.toolName);
+  if (judgeDenied && deps.isJudgeSession()) return { block: true, reason: judgeDenied };
   const input = event.input as Record<string, unknown>;
   if (deps.isEditTool(event.toolName)) {
     return evaluateEditCall(deps, input, ctx);

@@ -43,8 +43,9 @@ import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import type { ToolRepoTarget } from "./repo-resolve.ts";
 import type { GateState } from "./gate-state.ts";
-import type { ReviewScopeDecision, SettledConclusion } from "./review-scope.ts";
-import { formatReviewScopeDirective } from "./review-scope.ts";
+import type { ReviewScopeDecision } from "./review-scope.ts";
+// The contract's wording (and the SettledConclusion it carries) has ONE home.
+import { formatReviewScopeDirective, type SettledConclusion } from "./review-carryover.ts";
 import { polishReasonRequired } from "./polish-gate.ts";
 import { squashPointBaseline, branchBaseBaseline } from "./review-baseline.ts";
 import { buildReviewPrompt, extractPrecommitBaseline } from "./parallel-review.ts";
@@ -52,7 +53,7 @@ import { computeFingerprint } from "./fingerprint.ts";
 import { TASK_TEXT_MARKER } from "./constants.ts";
 
 /**
- * The range under review, as `record_review` will later consume it.
+ * The range under review, as the gate's verdict recorder will later consume it.
  *
  * A structural subset of the extension's own `ReviewTarget` on purpose: this
  * module must not become the second place that decides what a target IS.
@@ -61,6 +62,18 @@ export interface PreparedReviewTarget {
   baseline: string;
   head: string;
   tree: string;
+  /**
+   * WHAT THE GATE IS DISPATCHING, recorded at the moment it dispatches it:
+   * the round's range as the task text states it, and the full/incremental
+   * decision this round was prepared under.
+   *
+   * Registered here rather than recomputed when the verdict lands, because
+   * the decision is a function of the worktree and the worktree keeps moving
+   * while the reviewer works — recomputing it later would record a decision
+   * this round never ran under. It is the gate's half of the audit pair in
+   * `RoundRecord.scope` (lib/gate-state.ts).
+   */
+  scope?: { range?: string; kind?: "full" | "incremental" };
 }
 
 /**
@@ -116,7 +129,7 @@ export interface ReviewPrepareToolDeps {
   previousRoundFindings(st: GateState): string[];
   /** The conclusion the previous round already reached, if any. */
   settledConclusion(st: GateState): SettledConclusion | undefined;
-  /** Record the range a verdict will bind to (consumed by `record_review`). */
+  /** Record the range a verdict will bind to (consumed by the verdict recorder). */
   registerReviewTarget(root: string, target: PreparedReviewTarget): void;
   /** The git reads, so this module can be tested without a repository. */
   git: ReviewPrepareGit;
@@ -342,9 +355,12 @@ async function doPrepareReview(
     // reviewer, who judges whether the round deserves to exist.
     st.lastPolishReason,
   );
-  // Register the review target: record_review verifies HEAD is still the
-  // reviewed commit and binds a READY to the reviewed tree.
-  deps.registerReviewTarget(root, { baseline, head, tree });
+  // Register the review target: the verdict recorder verifies HEAD is still the
+  // reviewed commit and binds a READY to the reviewed tree. The scope travels
+  // with it so the recorder can write down what this round was DISPATCHED to
+  // review beside what the judge reports it reviewed (auditability, not a
+  // rule: nothing refuses a verdict over a mismatch).
+  deps.registerReviewTarget(root, { baseline, head, tree, scope: { range, kind: scopeNow.scope } });
   const lines = [
     `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
     `stream=${streamPath}`,
@@ -358,8 +374,8 @@ async function doPrepareReview(
       : []),
 
     "ADVANCED / internal：正常路径是一次 judge_submit({ role: \"reviewer\", task: <本轮改动说明> })——",
-    "它自己跑 precommit、checkpoint、本 prepare 与派发，并在 judge 进程退出时机械记录 verdict。",
-    "本工具只返回上面的审查范围与下面的任务文本；显示用 title 与 session id 都由门禁自行派生（session id 按 role+repo 确定性派生，所以同一 role 的下一轮续用同一会话）。",
+    "它自己跑 precommit、checkpoint、本 prepare 与派发，judge 在 pane 里调 judge_conclude 交卷后门禁落 channel report 并机械记录 verdict。",
+    "本工具只返回上面的审查范围与下面的任务文本；显示用 title 与 session id 都由门禁自行派生（session id 按 role+repo+opener 确定性派生，所以同一 opener 同一 role 的下一轮续用同一会话）。",
     ...(goalTruncated
       ? [
           `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${deps.loopGoalPath(root)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,
@@ -372,7 +388,8 @@ async function doPrepareReview(
     task,
     "",
     "The reviewer judges the COMMIT RANGE (immutable): you may keep fixing the worktree while it ",
-    "works. record_review re-checks that HEAD is still the reviewed commit; a new checkpoint ",
+    "works. The gate re-checks that HEAD is still the reviewed commit when it records your ",
+    "verdict; a new checkpoint ",
     "after this prepare ⇒ STALE ⇒ BLOCKED.",
   ];
   return {

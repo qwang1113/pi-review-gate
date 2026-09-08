@@ -13,6 +13,8 @@
  */
 
 import type { ShipCommandKind } from "./constants.ts";
+import { lexSegmentTokens } from "./shell-lex.ts";
+
 
 export interface ShipDetection {
   kind: ShipCommandKind;
@@ -385,6 +387,94 @@ export function detectShipCommands(command: string): ShipDetection[] {
   }
   return results;
 }
+
+/**
+ * Does this command open a HERE-DOCUMENT?
+ *
+ * FOR THE EVIDENCE PATH ONLY, and it exists because the same detection is now
+ * used in two OPPOSITE directions (round-2 reviewer P2, 2026-09-06):
+ *
+ *   - to BLOCK a ship, where over-matching is safe — a heredoc body whose
+ *     line reads `gh pr create …` is refused, and the cost is one command the
+ *     agent rephrases;
+ *   - to GRANT arrival at the `pr` station, where the SAME over-match hands
+ *     out a pass for a PR nobody opened (`cat > doc.md <<EOF` … `EOF` with
+ *     that line in the body IS detected as `pr-create` — measured, not
+ *     assumed).
+ *
+ * So the evidence recorder asks this first and records nothing when a heredoc
+ * is in play. It deliberately does NOT teach {@link detectShipCommands} about
+ * heredocs: a detector that skipped heredoc bodies would be a real ship-gate
+ * bypass, and that direction must never be relaxed. A false NEGATIVE here only
+ * means "no arrival evidence from this command" — the round proves it with a
+ * plain `gh pr create` instead.
+ */
+export function containsHeredoc(command: string): boolean {
+  return /<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*/.test(command);
+}
+
+/**
+ * Ship kinds this command PROVES it ran — the evidence entry point.
+ *
+ * ONE function for the whole "did this really ship?" question (philosophy
+ * two), because the answer needs the OPPOSITE bias from
+ * {@link detectShipCommands}:
+ *
+ *   - detection BLOCKS, so it over-matches on purpose. A `gh pr create` in a
+ *     heredoc body, in a `node -e '…'` string or behind an alias is refused,
+ *     and the cost of a false positive is one command the agent rephrases.
+ *   - evidence GRANTS (it is what tells `declare_done` a `pr` round arrived),
+ *     so every one of those false positives becomes a pass for a PR nobody
+ *     opened. Measured, all three: `cat > d.md <<EOF … EOF`,
+ *     `node -e 'console.log(1)\ngh pr create …'`, `python3 -c "…"`.
+ *
+ * Two narrowings, both fail-closed:
+ *
+ *   1. no heredoc anywhere in the command ({@link containsHeredoc});
+ *   2. the ship verb must sit at a real COMMAND HEAD — the segments come from
+ *      the quote-aware lexer, so a ship phrase inside a quoted argument is one
+ *      token of somebody else's command and never a head.
+ *
+ * A false NEGATIVE is harmless here: the round simply has no evidence from
+ * THIS command and proves the PR another way (a plain `gh pr create`, or the
+ * Copilot cycle's resolved number). The detector itself is left exactly as
+ * strict as it was — relaxing it would be a real ship-gate bypass.
+ */
+export function observedShipKinds(command: string): ShipCommandKind[] {
+  if (containsHeredoc(command)) return [];
+  const kinds = new Set<ShipCommandKind>();
+  for (const tokens of lexSegmentTokens(command)) {
+    // The HEAD of this segment, and nothing but the head. Only two things are
+    // stepped over — an env assignment and a redirection with its target —
+    // because both sit BEFORE the command without being one.
+    //
+    // NO WRAPPER FORWARD-SCAN, and that is the whole point (round-4 reviewer
+    // Nit, measured on the reviewed commit). `normalizedTokens` walks past
+    // `sudo` / `env` / `timeout` … looking for a git/gh head anywhere in the
+    // segment, which is FAIL-CLOSED when the answer is "block" and FAIL-OPEN
+    // here: `timeout 60 node -e '…gh pr create…'` and `env FOO=1 python3 -c
+    // "…"` both handed out a `pr-create` for a PR nobody opened. So the
+    // evidence path reads the lexer's own tokens (a quoted script stays ONE
+    // token) and asks the verb matchers about the head itself.
+    //
+    // The price is named and accepted: `sudo git push` proves nothing here.
+    // Re-run it unwrapped, or prove the PR the other way.
+    let i = 0;
+    while (i < tokens.length) {
+      const token = tokens[i]!;
+      if (/^\d*(>>?|<)$/.test(token)) { i += 2; continue; }      // `> out`, `2> err`
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) { i += 1; continue; } // `FOO=bar`
+      break;
+    }
+    const head = tokens.slice(i);
+    const kind = matchGit(head) ?? matchGh(head);
+    if (kind) kinds.add(kind);
+
+  }
+  return [...kinds];
+}
+
+
 
 /**
  * Extract -m/--message payloads from a git commit segment for AI-attribution

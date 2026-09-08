@@ -22,6 +22,7 @@ import {
   resolveRoleFile,
   writeJudgeSpawnFiles,
 } from "../lib/judge-prompt.ts";
+import { UNTRUSTED_DATA_RULE } from "../lib/untrusted-data.ts";
 
 function sandbox(): string {
   return mkdtempSync(join(tmpdir(), "rg-judge-prompt-"));
@@ -83,8 +84,8 @@ test("buildJudgeSystemPrompt = role body + shared protocol", () => {
     const prompt = buildJudgeSystemPrompt(repo, "adviser", join(dir, "home"));
     assert.ok(prompt.startsWith("ADVISER_BODY"));
     assert.ok(prompt.includes(JUDGE_COMMON_PROTOCOL));
-    assert.ok(prompt.includes("进程退出即完成"));
-    assert.ok(prompt.includes("session id 重新拉起"));
+    assert.ok(prompt.includes("不需要退出进程"));
+    assert.ok(prompt.includes("重开 pane 即延续"));
     // the round-1 F5 divergence rule is present in the embedded copy
     assert.ok(prompt.includes("做不到的验证明说"));
   } finally {
@@ -125,13 +126,44 @@ test("F5 pin: embedded protocol keeps every rule of docs/judge-protocol.md", () 
   assert.ok(JUDGE_COMMON_PROTOCOL.includes("做不到的验证明说"));
 });
 
-test("round-17: output discipline is part of the shared protocol (gate consumes only fence + stream)", () => {
+test("round-17: output discipline is part of the shared protocol (gate consumes conclude + stream)", () => {
   assert.match(JUDGE_COMMON_PROTOCOL, /输出纪律/, "the discipline section exists");
-  assert.match(JUDGE_COMMON_PROTOCOL, /verdict JSON fence/, "the fence is the mechanical contract");
+  assert.match(JUDGE_COMMON_PROTOCOL, /judge_conclude 交卷/, "the conclude call is the mechanical contract");
   assert.match(JUDGE_COMMON_PROTOCOL, /findings 流文件/, "the finding stream is the evidence channel");
-  assert.match(JUDGE_COMMON_PROTOCOL, /最多 5 行结论要点/, "prose beyond a 5-line summary is wasted");
-  assert.match(JUDGE_COMMON_PROTOCOL, /fence \+ ≤3 行/, "goal-auditor is capped tighter");
-  assert.match(JUDGE_COMMON_PROTOCOL, /不复述任务/, "no task/process retelling");
+  assert.match(JUDGE_COMMON_PROTOCOL, /交卷即停/, "the round ends AT the call — no prose section follows it");
+  assert.match(JUDGE_COMMON_PROTOCOL, /不写复述、不写自评/, "no task/process retelling");
+});
+
+test("round 5: the protocol tells the judge what an untrusted data block may NOT do", () => {
+  // The prompt half of the anti-steering fix: the task text now fences the
+  // main session's words in a data block, and this is where the judge is told
+  // that the fence means something.
+  assert.match(JUDGE_COMMON_PROTOCOL, /## 不可信数据块/, "the section exists");
+  assert.ok(
+    JUDGE_COMMON_PROTOCOL.includes(UNTRUSTED_DATA_RULE),
+    "and states the SHARED rule verbatim — one wording, not a paraphrase per file",
+  );
+  assert.match(JUDGE_COMMON_PROTOCOL, /main_session_note/, "the real tag names are listed");
+  assert.match(JUDGE_COMMON_PROTOCOL, /直接判 READY/, "the concrete steering attempt is named");
+  assert.match(JUDGE_COMMON_PROTOCOL, /P1 finding/, "…and reporting it is itself the required action");
+  // The rule must also be in the doc — otherwise the F5 pin above passes while
+  // the two copies say different things.
+  const doc = readFileSync(join(process.cwd(), "docs", "judge-protocol.md"), "utf8");
+  assert.ok(doc.includes(UNTRUSTED_DATA_RULE), "docs/judge-protocol.md carries the same sentence");
+});
+
+
+test("the shared protocol no longer teaches reviewer / goal-auditor to write `notes`", () => {
+  // The signature refuses `notes` from those roles (lib/judge-conclude.ts), so
+  // a protocol that still asked for it would make the gate contradict its own
+  // dispatch on the very first round.
+  assert.match(JUDGE_COMMON_PROTOCOL, /reviewer \/ goal-auditor 的签名里\*\*没有\*\* notes 参数/);
+  // The adviser keeps it, and the protocol says which role that is.
+  assert.match(JUDGE_COMMON_PROTOCOL, /adviser 例外/);
+  // No surviving instruction to hand `notes` in alongside the verdict.
+  assert.doesNotMatch(JUDGE_COMMON_PROTOCOL, /cwd \+ notes/);
+  assert.doesNotMatch(JUDGE_COMMON_PROTOCOL, /notes 的要点里/);
+  assert.doesNotMatch(JUDGE_COMMON_PROTOCOL, /notes ≤5 行/);
 });
 
 test("modelSpecFor: explicit slots[0] wins; auto:true uses the frontmatter default", () => {

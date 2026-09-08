@@ -26,17 +26,16 @@ neutraliseGateEnv();
 
 import { makeFakeWorld, replyText, twoTaskPlan } from "./helpers/fake-orchestration.ts";
 import {
-  isLastDecoratedChild,
   paneColorFor,
   paneLabelFor,
   paneStyleFor,
   paneTitleFor,
-  paneTitleForHealth,
   PANE_BORDER_FORMAT,
   PANE_BORDER_STATUS,
   PANE_PALETTE,
 } from "../lib/orchestrator-pane-decor.ts";
 import { assertSafeTmuxArgv, buildHidePaneLabelsArgv, buildShowPaneLabelsArgv } from "../lib/orchestrator-tmux.ts";
+import { parsePlan } from "../lib/orchestrator-plan.ts";
 
 test("a child's colour is a pure function of its id — same child, same colour, forever", () => {
   const first = paneColorFor("t1-mtf5kc1z");
@@ -72,7 +71,7 @@ test("the title carries the STATE and how long it has held — identity alone is
   );
 
   assert.equal(
-    paneTitleForHealth("@t1", { childId: "c", state: "done" }),
+    paneTitleFor({ label: "@t1", state: "done" }),
     "@t1 · done",
     "a state with no clock still renders",
   );
@@ -89,15 +88,10 @@ test("the window options are window-scoped and never carry -g", () => {
   }
 });
 
-test("the window bar is removed only for the LAST decorated child", () => {
-  const children = [
-    { id: "a" },
-    { id: "b", closedAt: "2026-08-30T10:00:00.000Z" },
-  ];
-  assert.equal(isLastDecoratedChild(children, "a"), true, "b is already closed, so a is the last one");
-  assert.equal(isLastDecoratedChild([{ id: "a" }, { id: "b" }], "a"), false,
-    "removing the bar while a sibling still uses it would blank a live label");
-});
+// ("the window bar is removed only for the LAST decorated child" moved with
+// its subject: `isLastDecoratedChild` is gone, and the question — how many
+// decorated panes of ANY kind can I still see — is asserted in
+// test/session-factory.test.ts and in the four close paths' own tests.)
 
 // ---------------------------------------------------------------------------
 // Inside the tools, and nowhere else
@@ -131,7 +125,11 @@ test("a tmux that refuses cosmetics does NOT fail the spawn", async () => {
 
   assert.equal(reply.isError, undefined, "a coloured border is never worth a failed session");
   assert.equal(reply.details?.delivered, true);
-  assert.match(replyText(reply), /装饰没能全部生效/, "and it says so instead of pretending");
+  // Framed ONCE: the factory says "display only", the orchestration adds what
+  // is specific to a child. Wrapping it twice read as two nested failures.
+  assert.match(replyText(reply), /装饰失败（仅显示降级）/, "and it says so instead of pretending");
+  assert.match(replyText(reply), /纯展示层，子会话本身不受影响/, "…in the child's own words");
+  assert.doesNotMatch(replyText(reply), /没能全部生效（pane 装饰失败/, "…and not nested inside itself");
   assert.equal(world.runtime().children.length, 1, "the child is registered either way");
 });
 
@@ -148,7 +146,115 @@ test("close takes the window bar down before killing the pane, and only then", a
   assert.ok(unset >= 0, "the window-level option this orchestration set must be undone");
   assert.ok(kill >= 0);
   assert.ok(unset < kill, "after kill-pane the pane id is no longer a valid setw target");
+  // AND the window is named by the ORCHESTRATOR'S OWN pane (%0), never by the
+  // child's (reviewer P2, 2026-09-05): `setw -t <pane>` uses the pane only to
+  // identify a window, and the pane being closed is exactly the id that may
+  // already be gone — a failed option write leaves the bar on for good.
+  const unsets = log.filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.equal(unsets.length, 2, "both options are restored");
+  assert.ok(unsets.every((line) => line.includes("-t %0")), "…through a pane that is provably alive");
+  assert.ok(unsets.every((line) => !line.includes(child.paneId)), "…not through the pane being killed");
 });
+
+test("close leaves the window bar up while a SIBLING CHILD is still on screen", async () => {
+  // The other half of the same expression (reviewer P2, 2026-09-05: pinning the
+  // judge half alone left this one free to be zeroed). Two live child panes
+  // only happen ACROSS repos — inside one repo the scheduler serializes them —
+  // so the plan declares two, which is also the only shape where a manager
+  // really can be closing one child while another is still labelled.
+  const plan = parsePlan({
+    title: "跨仓库计划",
+    intent: "两个仓库各一个任务，可以并行",
+    tasks: [
+      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/repo" },
+      { id: "t2", title: "任务二", fileBoundaries: ["src/"], repo: "/other/repo" },
+    ],
+  });
+  assert.ok(plan.plan, plan.problems.join("; "));
+  const world = makeFakeWorld({
+    plan: plan.plan!,
+    approvePlan: true,
+    resolvableRepos: ["/repo", "/other/repo"],
+  });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  assert.equal(second.isError, undefined, replyText(second));
+  const [first, sibling] = world.runtime().children;
+  assert.ok(sibling, "two children in two repos run at once — that is the case under test");
+
+  await world.call("orchestrator_close", { childId: first!.id });
+
+  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.deepEqual(unsets, [], "the sibling's border is still labelled: the bar stays up");
+});
+
+test("a CLOSED sibling is not a decorated pane, even if its pane outlived the close", async () => {
+  // The `!c.closedAt` half of the filter (reviewer Nit, 2026-09-05: it could
+  // be deleted and every test stayed green). It matters exactly when a closed
+  // child's pane is still on screen — a kill that failed, or a pane tmux still
+  // lists — because then liveness alone would call it a sibling and the bar
+  // would stay up forever.
+  const plan = parsePlan({
+    title: "跨仓库计划",
+    intent: "两个仓库各一个任务",
+    tasks: [
+      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/repo" },
+      { id: "t2", title: "任务二", fileBoundaries: ["src/"], repo: "/other/repo" },
+    ],
+  });
+  assert.ok(plan.plan, plan.problems.join("; "));
+  const world = makeFakeWorld({
+    plan: plan.plan!,
+    approvePlan: true,
+    resolvableRepos: ["/repo", "/other/repo"],
+  });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const [first, second] = world.runtime().children;
+
+  // t1 is CLOSED on the books while its pane stays on screen.
+  world.saveRuntime({
+    ...world.runtime(),
+    children: world.runtime().children.map((c) =>
+      c.id === first!.id ? { ...c, closedAt: new Date(world.now()).toISOString() } : c),
+  });
+
+  await world.call("orchestrator_close", { childId: second!.id });
+
+  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.equal(unsets.length, 2, "the only child this orchestration still owns is the one closing");
+});
+
+
+test("close in one repo cannot even meet a second live child — the scheduler serializes", async () => {
+  // Why the test above has to cross repos, asserted rather than assumed.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "done" });
+  const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+
+  assert.equal(second.isError, true, "the first child's pane is still alive, so t2 waits");
+  // The REASON matters, not just the refusal: "t2 was refused" would also be
+  // true if the plan were unapproved or the task unknown, and then this test
+  // would be asserting nothing about scheduling (reviewer Nit, 2026-09-05).
+  assert.match(replyText(second), /同一 repo（\/repo）/, "…refused for being the same checkout");
+  assert.match(replyText(second), /不能两个写者并存/, "…which is the serialization rule itself");
+  assert.equal(world.runtime().children.length, 1, "…and no second pane was opened");
+});
+
+test("close leaves the window bar up while a REVIEW pane is still on screen", async () => {
+  // The other kind of decorated pane. Counting only children was a measured
+  // defect: a manager closing its last child blanked its own review's border.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, judgePanes: 1 });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const child = world.runtime().children[0]!;
+
+  await world.call("orchestrator_close", { childId: child.id });
+
+  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.deepEqual(unsets, [], "the review pane still needs the border line it is labelled with");
+});
+
 
 test("the health snapshot names the same colour the border uses", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
@@ -227,6 +333,60 @@ test("the throttle memory belongs to the orchestration, not to the module", asyn
   assert.ok(
     tmuxLog(second).some((line) => line.includes("-T @t1")),
     "the second orchestration paints its own panes",
+  );
+});
+
+
+/*
+ * ── THE WINDOW LABEL BAR IS SHARED, AND TWO CROSS-SESSION CLOSES MISFIRE ──
+ *
+ * The rule itself (who opens the bar, who may take it down, what an unreadable
+ * pane list means) is argued in lib/orchestrator-pane-decor.ts's header and
+ * implemented by `releasesWindowLabels` + `countDecoratedPanes` in
+ * lib/session-factory.ts. The tests above cover it for panes a session CAN
+ * see.
+ *
+ * The one below drives the real `orchestrator_close` and asserts what it
+ * really does: with nothing left in ITS OWN registry it releases the bar. That
+ * is correct for what it can see, and it is also the misfire — a reviewer pane
+ * the CHILD opened is not in the manager's registry, so "nothing left" is
+ * measured over an incomplete set and a running review's border goes with it.
+ *
+ * WHAT THIS TEST DOES NOT DO, deliberately, so it does not claim more than it
+ * has: it cannot stage the other session's pane. The fake tmux lists exactly
+ * the panes this world opened, so a pane belonging to a session that does not
+ * exist here cannot be put on screen. The gap is therefore ARGUED here and in
+ * lib/orchestrator-pane-decor.ts's header, and only its visible half is
+ * asserted. A round that adds cross-session pane visibility changes the INPUT
+ * to this decision, so it should expect to rewrite this test rather than to
+ * see it fail. (2026-09-06: left unfixed by user decision — both misfires are
+ * display-only and the next spawn re-establishes the bar.)
+ */
+
+test("the release is measured over THIS session's registry only — which is the cross-session gap", async () => {
+  // The real close path, with nothing left that this manager can see: no
+  // sibling child, no judge of its own. It releases — and this assertion is
+  // the mirror image of "close leaves the window bar up while a REVIEW pane is
+  // still on screen" above, which is the same code with one visible pane.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const child = world.runtime().children[0]!;
+
+  await world.call("orchestrator_close", { childId: child.id });
+
+  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.ok(
+    unsets.length > 0,
+    "with an empty visible set the manager takes the window bar down",
+  );
+  // …and THAT is the misfire, because the visible set is the manager's own
+  // registry. A reviewer pane opened by the CHILD is on the same window and in
+  // none of these numbers, so it loses its border here. The fix is a
+  // cross-session pane registry; nothing in the counter itself is wrong.
+  assert.equal(
+    world.runtime().children.filter((c) => !c.closedAt).length,
+    0,
+    "the set it measured: its own children, and there are none left",
   );
 });
 

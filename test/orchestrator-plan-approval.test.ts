@@ -32,6 +32,7 @@ import {
 } from "../lib/orchestrator-plan-approval.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
 import { buildPlanConfirmMessage } from "../lib/orchestrator-tools.ts";
+import { normalizeRuntime } from "../lib/orchestrator-registry.ts";
 
 
 /** The plan shape the round-4 run actually used: one file per task. */
@@ -80,7 +81,9 @@ test("a NEW DIRECTORY always needs the user — a docs task cannot reach into li
   });
   const decision = decideApprovalCarry(approved(plan), next);
   assert.equal(decision.carries, false);
-  assert.match(decision.widenings.join("\n"), /不在任何已批准边界/);
+  // The refusal NAMES the tree the task actually holds, so the orchestrator
+  // can see at a glance what it would have to ask the user for.
+  assert.match(decision.widenings.join("\n"), /不在该任务已批准的目录树（docs）内/);
 });
 
 test("a refinement that lands on ANOTHER task's turf needs the user, same directory or not", () => {
@@ -91,7 +94,9 @@ test("a refinement that lands on ANOTHER task's turf needs the user, same direct
   });
   const decision = decideApprovalCarry(approved(plan), next);
   assert.equal(decision.carries, false);
-  assert.match(decision.widenings.join("\n"), /与其他任务已声明的/);
+  // …and it names WHO stands in the way: "go and talk to t2" is actionable,
+  // "another task" is not.
+  assert.match(decision.widenings.join("\n"), /与任务 "t2" 已声明的 lib\/gate-command-tools\.ts 相交/);
 });
 
 test("a TOP-LEVEL file grants nothing around it — otherwise one file would mean the whole repo", () => {
@@ -120,6 +125,172 @@ test("a declared DIRECTORY already covers new files under it — that is a refin
   assert.equal(amendments.some((a) => /收回了边界 lib/.test(a)), true, "and narrowing lib/ to two files is recorded");
 });
 
+test("the approved DIRECTORY TREE is what absorbs a new path — and the receipt says which branch of it", () => {
+  // ROUND-9 INVESTIGATION. The task brief guessed that a FILE boundary yields
+  // no directory, so a task holding only files could never absorb anything.
+  // Measured: `boundaryDirPrefix("lib/foo.ts") === "lib"`, and all three of
+  // these already carried. They are pinned here because the rule they
+  // describe is what the approval dialog promises the user, and nothing else
+  // in the suite covered a NESTED path or a second approved directory.
+  const { widenings, amendments } = classifyBoundaryChange({
+    taskId: "t1",
+    approvedBoundaries: ["lib/orchestrator-tools.ts", "docs/module-map.md"],
+    nextBoundaries: [
+      "lib/orchestrator-tools.ts",
+      "docs/module-map.md",
+      "lib/orchestrator-plan.ts",      // same directory as an approved file
+      "lib/nested/deep.ts",            // BELOW that directory
+      "docs/execution-model.md",       // the task's OTHER approved directory
+    ],
+    foreign: [],
+  });
+  assert.deepEqual(widenings, [], "everything inside the approved tree carries");
+  const text = amendments.join("\n");
+  assert.match(text, /在已批准的 lib\/ 内细化出 lib\/orchestrator-plan\.ts/);
+  assert.match(text, /在已批准的 lib\/ 内细化出 lib\/nested\/deep\.ts/);
+  assert.match(text, /在已批准的 docs\/ 内细化出 docs\/execution-model\.md/);
+});
+
+test("stepping OUT of the tree still asks — and the refusal names the tree it stepped out of", () => {
+  const { widenings, amendments } = classifyBoundaryChange({
+    taskId: "t1",
+    approvedBoundaries: ["lib/orchestrator-tools.ts", "docs/module-map.md"],
+    // A repo-root file has no directory anyone approved (hard stop 1), and
+    // `test/` is a directory nobody approved for this task.
+    nextBoundaries: ["lib/orchestrator-tools.ts", "docs/module-map.md", "README.md", "test/a.test.ts"],
+    foreign: [],
+  });
+  assert.equal(widenings.length, 2, widenings.join("; "));
+  assert.deepEqual(amendments, []);
+  assert.match(widenings.join("\n"), /新增边界 README\.md —— 不在该任务已批准的目录树（lib、docs）内/);
+  assert.match(widenings.join("\n"), /新增边界 test\/a\.test\.ts —— 不在该任务已批准的目录树（lib、docs）内/);
+});
+
+test("a task that is DONE stops holding ground — and the carry says that is why", () => {
+  // ROUND-8, measured: two files had to move from a FINISHED task to the one
+  // that needed them next, and the intersection check called it a power grab.
+  const { widenings, amendments } = classifyBoundaryChange({
+    taskId: "t8b",
+    approvedBoundaries: ["lib/orchestrator-wait.ts"],
+    nextBoundaries: ["lib/orchestrator-wait.ts", "lib/orchestrator-gate.ts"],
+    foreign: [{ taskId: "t8a", boundary: "lib/orchestrator-gate.ts", releasedByDone: true }],
+  });
+  assert.deepEqual(widenings, []);
+  assert.match(amendments.join("\n"), /原持有者 "t8a" 已 done，退出相交判定/);
+});
+
+test("a task that is NOT done still holds it — done is the whole difference", () => {
+  const { widenings, amendments } = classifyBoundaryChange({
+    taskId: "t8b",
+    approvedBoundaries: ["lib/orchestrator-wait.ts"],
+    nextBoundaries: ["lib/orchestrator-wait.ts", "lib/orchestrator-gate.ts"],
+    foreign: [{ taskId: "t8a", boundary: "lib/orchestrator-gate.ts", releasedByDone: false }],
+  });
+  assert.deepEqual(amendments, []);
+  assert.match(widenings.join("\n"), /与任务 "t8a" 已声明的 lib\/orchestrator-gate\.ts 相交/);
+});
+
+test("one LIVE claimant is enough to refuse, even when a finished task holds the same path", () => {
+  // Both tasks declared it; only one has finished. The refusal must win, and
+  // it must name the task that is still writing.
+  const { widenings, amendments } = classifyBoundaryChange({
+    taskId: "t8b",
+    approvedBoundaries: ["lib/orchestrator-wait.ts"],
+    nextBoundaries: ["lib/orchestrator-wait.ts", "lib/orchestrator-gate.ts"],
+    foreign: [
+      { taskId: "t8a", boundary: "lib/orchestrator-gate.ts", releasedByDone: true },
+      { taskId: "t8c", boundary: "lib/orchestrator-gate.ts", releasedByDone: false },
+    ],
+  });
+  assert.deepEqual(amendments, []);
+  assert.match(widenings.join("\n"), /与任务 "t8c" 已声明的/);
+});
+
+test("a DONE status only releases a task the user actually approved", () => {
+  // Otherwise the release could be MINTED: add a task, declare it `done` in
+  // the same edit, and its boundaries would stop guarding anything. The plan
+  // is the execution record, not a place to claim history.
+  const plan = fileGrainPlan();
+  const base = approved(plan);
+  const next: OrchestratorPlan = {
+    ...plan,
+    tasks: [
+      // t1 reaches for the file the (fake) finished task holds…
+      { ...plan.tasks[0]!, fileBoundaries: ["lib/user-interaction-tools.ts", "lib/minted.ts"] },
+      ...plan.tasks.slice(1),
+      // …and this task, which the user never saw, declares itself finished.
+      { ...plan.tasks[0]!, id: "t9", status: "done" as const, fileBoundaries: ["lib/minted.ts"] },
+    ],
+  };
+  // The execution record is handed in saying the same thing, so this is the
+  // STRONGER case: even a plan on disk that calls t9 finished releases nothing,
+  // because t9 is not in the snapshot the user signed.
+  const decision = decideApprovalCarry(base, next, next);
+  assert.equal(decision.carries, false);
+  assert.match(decision.widenings.join("\n"), /新增任务 "t9"/, "adding it is a widening in its own right");
+  assert.match(decision.widenings.join("\n"), /与任务 "t9" 已声明的 lib\/minted\.ts 相交/, "and it released nothing");
+});
+
+test("a task the plan records as done releases its ground through the whole decision", () => {
+  const plan = fileGrainPlan();
+  const base = approved(plan);
+  const next: OrchestratorPlan = {
+    ...plan,
+    tasks: plan.tasks.map((t) => {
+      // t2 finished; t1 takes over the file it used to own.
+      if (t.id === "t2") return { ...t, status: "done" as const };
+      if (t.id === "t1") {
+        return { ...t, fileBoundaries: ["lib/user-interaction-tools.ts", "lib/gate-command-tools.ts"] };
+      }
+      return t;
+    }),
+  };
+  // The EXECUTION RECORD is what retires a claim: the plan on disk (here, the
+  // one carrying t2's `done`) — never the statuses in the text being written.
+  const record: OrchestratorPlan = {
+    ...plan,
+    tasks: plan.tasks.map((t) => (t.id === "t2" ? { ...t, status: "done" as const } : t)),
+  };
+  const decision = decideApprovalCarry(base, next, record);
+  assert.equal(decision.carries, true, decision.widenings.join("; "));
+  assert.match(decision.amendments.join("\n"), /原持有者 "t2" 已 done/);
+
+  // …and with no record on disk at all, nothing is finished: a `write` cannot
+  // declare a task done and cash in the release in the same breath.
+  const noRecord = decideApprovalCarry(base, next);
+  assert.equal(noRecord.carries, false, "no execution record ⇒ no releases");
+  assert.match(noRecord.widenings.join("\n"), /与任务 "t2" 已声明的/);
+});
+
+test("a task that is finished AND DELETED keeps its ground — that question was never asked", () => {
+  // Reading `done` from the execution record could have widened the rule in a
+  // second direction nobody decided: a task gone from the plan is still IN the
+  // approved snapshot, so releasing it would hand its files away on the
+  // strength of a record the new plan no longer mentions. The user ruled on
+  // finished tasks, not on departed ones.
+  const plan = fileGrainPlan();
+  const base = approved(plan);
+  const record: OrchestratorPlan = {
+    ...plan,
+    tasks: plan.tasks.map((t) => (t.id === "t2" ? { ...t, status: "done" as const } : t)),
+  };
+  const next: OrchestratorPlan = {
+    ...plan,
+    tasks: plan.tasks
+      .filter((t) => t.id !== "t2")
+      .map((t) => (t.id === "t1"
+        ? { ...t, fileBoundaries: ["lib/user-interaction-tools.ts", "lib/gate-command-tools.ts"] }
+        : { ...t, dependsOn: [] })),
+  };
+
+  const decision = decideApprovalCarry(base, next, record);
+
+  assert.equal(decision.carries, false, "the departed task's boundary still needs the user");
+  assert.match(decision.widenings.join("\n"), /与任务 "t2" 已声明的 lib\/gate-command-tools\.ts 相交/);
+});
+
+
+
 test("every OTHER kind of widening still stops at the user", () => {
   const plan = fileGrainPlan();
   const base = approved(plan);
@@ -142,6 +313,61 @@ test("every OTHER kind of widening still stops at the user", () => {
   const movedRepo = decideApprovalCarry(base, withTask(plan, "t1", { repo: "/other-repo" }));
   assert.equal(movedRepo.carries, false, "moving a task to another repo is a NEW write surface");
   assert.match(movedRepo.widenings.join("\n"), /repo/, "the widening names the repo change");
+});
+
+test("the DELIVERY STATION is authority: raising it revokes, lowering it carries", () => {
+  // 2026-09-06. `pr` authorizes the orchestration to publish; nobody may hand
+  // it that between two dialogs. The mirror case matters just as much: a
+  // manager tightening its own contract must not have to wake the user.
+  const plan = fileGrainPlan();
+  const base = approved({ ...plan, deliveryStation: "precommit" });
+
+  const raised = decideApprovalCarry(base, { ...plan, deliveryStation: "pr" });
+  assert.equal(raised.carries, false);
+  assert.match(raised.widenings.join("\n"), /交付站点/, "the widening says what changed");
+
+  const tightened = decideApprovalCarry(
+    approved({ ...plan, deliveryStation: "pr" }), { ...plan, deliveryStation: "commit" },
+  );
+  assert.equal(tightened.carries, true);
+  assert.match(tightened.amendments.join("\n"), /交付站点/, "…and a tightening is still recorded");
+
+  const unchanged = decideApprovalCarry(base, { ...plan, deliveryStation: "precommit" });
+  assert.deepEqual(unchanged.widenings, []);
+  assert.deepEqual(unchanged.amendments, []);
+});
+
+test("a snapshot from BEFORE the station existed is read as the strictest one", () => {
+  // Old runtimes on disk have no `deliveryStation`. Reading that as "whatever
+  // the new plan says" would silently grant `pr`; reading it as `precommit`
+  // can only cost one dialog.
+  const plan = fileGrainPlan();
+  const legacy = { ...approved(plan), deliveryStation: undefined };
+  assert.equal(decideApprovalCarry(legacy, { ...plan, deliveryStation: "pr" }).carries, false);
+  assert.equal(decideApprovalCarry(legacy, { ...plan, deliveryStation: "precommit" }).carries, true);
+});
+
+test("the approved station SURVIVES the runtime round trip", () => {
+  // `normalizeApprovedPlan` rebuilds the snapshot field by field, so a field
+  // it does not know is silently dropped — which would make every later
+  // station change look like it started from `precommit`.
+  const plan = { ...fileGrainPlan(), deliveryStation: "pr" as const };
+  const runtime = normalizeRuntime({
+    orchestrationId: "orch-deadbeef-abc",
+    children: [],
+    notify: { sentAt: [], lastByKey: {} },
+    approvedPlanHash: planHash(plan),
+    approvedPlanAt: "2026-09-06T10:00:00.000Z",
+    approvedPlan: snapshotApprovedPlan(plan, planHash(plan), "2026-09-06T10:00:00.000Z"),
+  }, "orch-deadbeef-abc");
+  assert.ok(runtime, "the runtime must survive normalization for this test to mean anything");
+  assert.equal(runtime.approvedPlan?.deliveryStation, "pr");
+  // …and with it on record, dropping back to `commit` is an amendment rather
+  // than a re-approval.
+  assert.equal(
+    decideApprovalCarry(runtime.approvedPlan!, { ...plan, deliveryStation: "commit" }).carries,
+    true,
+  );
 });
 
 test("narrowing in every direction is free: fewer tasks, more dependencies, less parallelism", () => {
@@ -270,9 +496,321 @@ test("`write` PRESERVES task status and note — a rewrite is not an execution r
   assert.equal(plan.tasks.find((t) => t.id === "t3")?.status, "pending", "only a NEW task starts at pending");
 });
 
+test("`write` ACCEPTS a note update for an existing task, and the approval survives it", async () => {
+  // B2b (2026-09-06, user decision): the note is prose for a human. It is
+  // outside `canonicalPlanText`, outside the approved snapshot and outside
+  // `decideApprovalCarry`, so writing one grants nothing — and dropping it
+  // was a silent data loss the last four orchestrations all worked around.
+  // The fixture declares `repo`, because a `write` must declare it (strictRepo)
+  // — without it the rewrite would differ from the approved content in a field
+  // that DOES grant something, and the approval would be revoked for a reason
+  // that has nothing to do with the note.
+  const approved = parsePlan({
+    title: "测试计划",
+    intent: "两个互不重叠的任务",
+    tasks: [
+      { id: "t1", title: "任务一", repo: "/repo", fileBoundaries: ["lib/a/"] },
+      { id: "t2", title: "任务二", repo: "/repo", fileBoundaries: ["lib/b/"] },
+    ],
+  }, undefined, true);
+  assert.ok(approved.plan, `fixture must parse: ${approved.problems.join("; ")}`);
+  const world = makeFakeWorld({ plan: approved.plan!, approvePlan: true });
+  await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "running", note: "旧备注" });
+
+  const written = await world.call("orchestrator_plan", {
+    action: "write",
+    plan: {
+      title: "测试计划",
+      intent: "两个互不重叠的任务",
+      tasks: [
+        { id: "t1", title: "任务一", repo: "/repo", fileBoundaries: ["lib/a/"], note: "新备注" },
+        { id: "t2", title: "任务二", repo: "/repo", fileBoundaries: ["lib/b/"] },
+      ],
+    },
+  });
+
+  const plan = world.plan()!;
+  assert.equal(plan.tasks.find((t) => t.id === "t1")?.note, "新备注", "the note the caller wrote must land");
+  assert.equal(plan.tasks.find((t) => t.id === "t1")?.status, "running", "the status is still execution's");
+  assert.equal(written.details?.approved, true, "a note is not a widening — the approval must survive");
+});
+
+// ---------------------------------------------------------------------------
+// B2 (2026-09-06) — the approval and its audit leave a trail OUTSIDE the
+// sidecar. The sidecar is reset by the next session that opens this repo, so
+// a record that lives only there stops existing exactly when somebody asks
+// "who approved this, when, against which content".
+// ---------------------------------------------------------------------------
+
+test("the USER's approval is written to the audit log, bound to the content hash", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan() });
+  world.confirmAnswers.push(true);
+
+  await world.call("orchestrator_plan", { action: "submit" });
+
+  const line = world.auditLog.find((entry) => entry.includes("plan approved by the user"));
+  assert.ok(line, `the approval must be logged; log was: ${world.auditLog.join(" | ")}`);
+  assert.match(line!, new RegExp(planHash(world.plan()!)), "the log line names the approved content");
+});
+
+test("an approval CARRIED across a narrowing edit is logged with its reasons", async () => {
+  const world = makeFakeWorld({ plan: fileGrainPlan(), approvePlan: true });
+  const before = world.runtime().approvedPlanHash!;
+
+  await world.call("orchestrator_plan", {
+    action: "write",
+    plan: {
+      title: "重构计划",
+      intent: "把三个工具搬进各自的模块",
+      maxParallel: 2,
+      tasks: [
+        {
+          id: "t1",
+          title: "用户交互工具",
+          repo: "/repo",
+          fileBoundaries: ["lib/user-interaction-tools.ts", "lib/consent-request-tools.ts"],
+        },
+        { id: "t2", title: "命令层", repo: "/repo", fileBoundaries: ["lib/gate-command-tools.ts"], dependsOn: ["t1"] },
+        { id: "t3", title: "文档", repo: "/repo", fileBoundaries: ["docs/execution-model.md"], execution: "parallel" },
+      ],
+    },
+  });
+
+  const line = world.auditLog.find((entry) => entry.includes("approval carried"));
+  assert.ok(line, `a carry decides on the user's behalf and must be logged: ${world.auditLog.join(" | ")}`);
+  assert.match(line!, new RegExp(before), "the line names where the approval came FROM");
+  assert.match(line!, /consent-request-tools/, "and why it was allowed to move");
+});
+
+test("an approval REVOKED by a widening edit is logged with the widening", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+
+  await world.call("orchestrator_plan", {
+    action: "write",
+    plan: {
+      title: "测试计划",
+      intent: "两个互不重叠的任务",
+      tasks: [
+        { id: "t1", title: "任务一", repo: "/repo", fileBoundaries: ["lib/a/"] },
+        { id: "t2", title: "任务二", repo: "/repo", fileBoundaries: ["lib/b/"] },
+        { id: "t3", title: "新任务", repo: "/repo", fileBoundaries: ["scripts/"] },
+      ],
+    },
+  });
+
+  const line = world.auditLog.find((entry) => entry.includes("approval REVOKED"));
+  assert.ok(line, `a revocation must be logged: ${world.auditLog.join(" | ")}`);
+  assert.match(line!, /t3|新任务|scripts/, "the line says what widened");
+});
+
+
+// ---------------------------------------------------------------------------
+// Taking a widening BACK (round-8): the approval returns to content it had
+// ---------------------------------------------------------------------------
+
+/** `fileGrainPlan` as the tool's argument, so a write can reproduce it exactly. */
+function fileGrainParams(
+  patch: (tasks: Array<Record<string, unknown>>) => Array<Record<string, unknown>> = (t) => t,
+): Record<string, unknown> {
+  const plan = fileGrainPlan();
+  return {
+    title: plan.title,
+    intent: plan.intent,
+    maxParallel: plan.maxParallel,
+    tasks: patch(plan.tasks.map((t) => ({
+      id: t.id,
+      title: t.title,
+      repo: t.repo,
+      fileBoundaries: [...t.fileBoundaries],
+      dependsOn: [...t.dependsOn],
+      execution: t.execution,
+    }))),
+  };
+}
+
+/** Replace one task's boundaries in that argument. */
+function withBoundaries(tasks: Array<Record<string, unknown>>, id: string, fileBoundaries: string[]) {
+  return tasks.map((t) => (t.id === id ? { ...t, fileBoundaries } : t));
+}
+
+test("writing a widening BACK restores the approval — hash, snapshot and timestamp", async () => {
+  // ROUND-8, measured: a boundary was added by mistake, the gate correctly
+  // revoked, the manager wrote the plan back BYTE FOR BYTE — and still had to
+  // pay a goal-auditor round plus a dialog to get the approval it already had.
+  const world = makeFakeWorld({ plan: fileGrainPlan(), approvePlan: true });
+  const approvedHash = world.runtime().approvedPlanHash;
+
+  const widened = await world.call("orchestrator_plan", {
+    action: "write",
+    plan: fileGrainParams((tasks) =>
+      withBoundaries(tasks, "t3", ["docs/execution-model.md", "lib/orchestrator-tools.ts"])),
+  });
+  assert.equal(widened.details?.approved, false, "the widening is still refused");
+  assert.equal(world.runtime().approvedPlanHash, undefined, "and the approval is really gone");
+
+  const back = await world.call("orchestrator_plan", { action: "write", plan: fileGrainParams() });
+
+  assert.equal(back.details?.approved, true, replyText(back));
+  assert.equal(back.details?.restored, true);
+  const runtime = world.runtime();
+  assert.equal(runtime.approvedPlanHash, approvedHash, "the approval returned to the content it had");
+  assert.ok(runtime.approvedPlanAt, "with a timestamp");
+  assert.equal(runtime.approvedPlan?.tasks.length, 3, "and the authorizing snapshot, not just the hash");
+  assert.equal(world.confirmAnswers.length, 0, "no dialog was consumed");
+  assert.ok(
+    world.auditLog.some((entry) => entry.includes("approval RESTORED")),
+    `the restoration is logged: ${world.auditLog.join(" | ")}`,
+  );
+});
+
+test("after a restore the NEXT refinement still carries — the snapshot really came back", async () => {
+  // A hash-only restore would leave the following edit facing "the gate has
+  // no authorizing snapshot", which is the dialog this whole path removes.
+  const world = makeFakeWorld({ plan: fileGrainPlan(), approvePlan: true });
+  await world.call("orchestrator_plan", {
+    action: "write",
+    plan: fileGrainParams((tasks) =>
+      withBoundaries(tasks, "t3", ["docs/execution-model.md", "lib/orchestrator-tools.ts"])),
+  });
+  await world.call("orchestrator_plan", { action: "write", plan: fileGrainParams() });
+
+  const refined = await world.call("orchestrator_plan", {
+    action: "write",
+    plan: fileGrainParams((tasks) =>
+      withBoundaries(tasks, "t1", ["lib/user-interaction-tools.ts", "lib/consent-request-tools.ts"])),
+  });
+
+  assert.equal(refined.details?.approved, true, replyText(refined));
+  assert.equal(refined.details?.amended, true);
+  assert.match(replyText(refined), /consent-request-tools/);
+  assert.equal(world.confirmAnswers.length, 0, "still nobody was asked");
+});
+
+test("a NEW user approval resets the lineage — a version they narrowed away cannot come back", async () => {
+  // THE ESCALATION THIS CLOSES: approval A carries to a wider B; the user
+  // later signs a NARROWER C. Without the reset, hash(B) would still be on
+  // record and writing B back would hand the orchestration boundaries the
+  // user had just taken away.
+  const world = makeFakeWorld({ plan: fileGrainPlan(), approvePlan: true });
+  const wider = fileGrainParams((tasks) =>
+    withBoundaries(tasks, "t1", ["lib/user-interaction-tools.ts", "lib/consent-request-tools.ts"]));
+
+  const carried = await world.call("orchestrator_plan", { action: "write", plan: wider });
+  assert.equal(carried.details?.approved, true, "B was authorized at the time");
+
+  // The user is asked again about a plan where t1 holds nothing in lib/ …
+  await world.call("orchestrator_plan", {
+    action: "write",
+    plan: fileGrainParams((tasks) => withBoundaries(tasks, "t1", ["docs/t1-notes.md"])),
+  });
+  world.confirmAnswers.push(true);
+  const approvedC = await world.call("orchestrator_plan", { action: "submit" });
+  assert.equal(approvedC.details?.approved, true, replyText(approvedC));
+  assert.deepEqual(
+    world.runtime().approvedPlanHistory?.length,
+    1,
+    "their decision starts the lineage over",
+  );
+
+  // … and B, which the earlier approval had carried to, is now a widening.
+  const reWidened = await world.call("orchestrator_plan", { action: "write", plan: wider });
+
+  assert.equal(reWidened.details?.approved, false, replyText(reWidened));
+  assert.notEqual(reWidened.details?.restored, true, "restoring it would hand back what the user removed");
+  assert.equal(world.runtime().approvedPlanHash, undefined);
+});
+
+test("without a lineage on record there is nothing to restore — the user is asked", async () => {
+  // This is the state a MALFORMED lineage leaves behind: normalizeRuntime
+  // drops the whole list (lib/orchestrator-registry.ts), so a forged record
+  // buys exactly what an absent one does — a dialog.
+  const world = makeFakeWorld({ plan: fileGrainPlan(), approvePlan: true });
+  world.deps.saveRuntime({
+    ...world.runtime(),
+    approvedPlanHash: undefined,
+    approvedPlanAt: undefined,
+    approvedPlan: undefined,
+    approvedPlanHistory: undefined,
+  });
+
+  const back = await world.call("orchestrator_plan", { action: "write", plan: fileGrainParams() });
+
+  assert.notEqual(back.details?.approved, true, replyText(back));
+  assert.notEqual(back.details?.restored, true);
+  assert.match(replyText(back), /尚未获得用户批准/);
+  assert.equal(world.runtime().approvedPlanHash, undefined);
+});
+
+test("THE round-8 case end to end: a file moves off a FINISHED task without a dialog", async () => {
+  // The plan ON DISK is the execution record, and it is the only thing that
+  // can retire t2's claim — which is why this runs through the tool.
+  const base = fileGrainPlan();
+  const world = makeFakeWorld({
+    plan: { ...base, tasks: base.tasks.map((t) => (t.id === "t2" ? { ...t, status: "done" as const } : t)) },
+    approvePlan: true,
+  });
+
+  const moved = await world.call("orchestrator_plan", {
+    action: "write",
+    plan: fileGrainParams((tasks) =>
+      withBoundaries(
+        withBoundaries(tasks, "t1", ["lib/user-interaction-tools.ts", "lib/gate-command-tools.ts"]),
+        "t2",
+        ["lib/gate-command-tools.ts"],
+      )),
+  });
+
+  assert.equal(moved.details?.approved, true, replyText(moved));
+  assert.match(replyText(moved), /原持有者 "t2" 已 done/, "the receipt says WHY nobody was asked");
+  assert.equal(world.confirmAnswers.length, 0, "no dialog was consumed");
+  assert.equal(
+    world.plan()!.tasks.find((t) => t.id === "t2")?.status,
+    "done",
+    "and the rewrite did not resurrect the finished task",
+  );
+});
+
+
+
+
+
 // ---------------------------------------------------------------------------
 // The audit that now stands between a plan and the human
 // ---------------------------------------------------------------------------
+
+test("submit REFUSES before the audit when nothing was restated — no dialog, no judge", async () => {
+  // 2026-09-06: the restatement is the earlier step of the same negotiation.
+  // Checking it after the audit would bill the user minutes for a plan built
+  // on a reading nobody confirmed.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), restatement: null });
+  world.confirmAnswers.push(true); // would approve, if it were ever asked
+
+  const reply = await world.call("orchestrator_plan", { action: "submit" });
+
+  assert.equal(reply.isError, true);
+  assert.equal(reply.details?.restated, false);
+  assert.equal(world.planAudits(), 0, "the minutes-long audit never started");
+  assert.equal(world.confirmAnswers.length, 1, "and the user was never shown a dialog");
+  assert.equal(world.runtime().approvedPlanHash, undefined);
+  // The refusal has to get the NEXT session unstuck by itself.
+  assert.match(replyText(reply), /propose_restatement/);
+  assert.match(replyText(reply), /station/);
+  // The misjudgement route has to be one that exists: a tool refusal records
+  // no arbitrable block, so `request_arbitration` would be denied — or spend
+  // one of three appeals on an unrelated older block (2026-09-06).
+  assert.match(replyText(reply), /ask_user/);
+  assert.doesNotMatch(replyText(reply), /request_arbitration/);
+
+});
+
+test("submit proceeds once a confirmed restatement is on record", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan() }); // the world restates by default
+  world.confirmAnswers.push(true);
+  const reply = await world.call("orchestrator_plan", { action: "submit" });
+  assert.equal(reply.details?.approved, true, replyText(reply));
+  assert.equal(world.planAudits(), 1);
+});
+
 
 test("submit runs the audit FIRST, and a failed audit opens no dialog at all", async () => {
   const world = makeFakeWorld({
@@ -320,5 +858,32 @@ test("the approval dialog states the boundary semantics the user actually agreed
   const dialog = buildPlanConfirmMessage(world.plan()!);
   assert.match(dialog, /文件细化不会再问/, "the decision box carries the same rule, not a softer one");
   assert.match(dialog, /新增任务、碰到新目录/, "including what does invalidate the approval");
+
+  // ROUND-9 widened what an approval means TWICE more, so both are stated
+  // here as well — a rule the user meets afterwards is not one they agreed to.
+  assert.match(transcript, /已经做完（done）的任务不再占地/, "a finished task stops blocking…");
+  assert.match(transcript, /写回你此前批准过的内容/, "…and taking a widening back does not re-ask");
+  assert.match(transcript, /每批准一次新内容，之前那条链就作废/, "with the limit on that");
+  assert.match(dialog, /已 done 的任务不再占地/);
+  assert.match(dialog, /写回你批准过的内容/);
+});
+
+test("both consent surfaces state the DELIVERY STATION and that raising it re-asks", async () => {
+  // 2026-09-06 (reviewer P2): `decideApprovalCarry` treats a raised station as
+  // a widening, so the user has to have been told two things — which station
+  // they are approving, and that moving it later comes back to them. A rule
+  // the user meets afterwards is not a rule they agreed to.
+  const plan = { ...twoTaskPlan(), deliveryStation: "commit" as const };
+  const world = makeFakeWorld({ plan });
+  world.confirmAnswers.push(true);
+  await world.call("orchestrator_plan", { action: "submit" });
+
+  const transcript = world.shown.join("\n");
+  assert.match(transcript, /本轮交付站点/, "the plan the user reads names its station");
+  assert.match(transcript, /交付站点往后挪/, "…and says that moving it re-asks");
+
+  const dialog = buildPlanConfirmMessage(world.plan()!);
+  assert.match(dialog, /本轮交付站点/, "the decision box carries the station itself");
+  assert.match(dialog, /提高交付站点/, "…and lists it among the changes that revoke the approval");
 });
 

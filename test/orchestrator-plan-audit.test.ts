@@ -20,9 +20,11 @@ import {
   adjudicatePlanAudit,
   planAuditHash,
   planAuditPassed,
+  formatPlanAuditCarryover,
   type PlanAuditFinding,
 } from "../lib/orchestrator-plan-audit.ts";
 import { parsePlan, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
+import { UNTRUSTED_DATA_HEADER, UNTRUSTED_DATA_RULE } from "../lib/untrusted-data.ts";
 
 const NOW = "2026-09-17T12:00:00.000Z";
 
@@ -49,7 +51,14 @@ test("the audit task carries the 7th check: requirements clarified & goal deriva
   assert.match(task, /7\. 需求是否已澄清、goal 是否可派生/);
   // It states the PM=product-manager rule.
   assert.match(task, /项目经理同时承担产品经理角色/);
-  assert.match(task, /grillme\/ask_user 把需求反述澄清/);
+  // 2026-09-06: the restatement itself is MECHANICAL now (submit refuses
+  // without a confirmed one), so the task points at that mechanism instead of
+  // asking the auditor to police an advisory step — and it names the module
+  // that owns the rules, so this prose can never become a second copy of them.
+  assert.match(task, /propose_restatement/);
+  assert.match(task, /lib\/restatement\.ts/);
+  assert.doesNotMatch(task, /grillme\/ask_user 把需求反述澄清/,
+    "the old advisory wording must be gone, not living beside the mechanism");
 });
 
 test("the 7th check is mechanically checkable: decisions, task-book completeness, transcript", () => {
@@ -78,6 +87,41 @@ test("the 7th check names the transcript location when sessionDir/sessionId are 
   assert.match(task, /sess-123/);
 });
 
+test("round 5: the plan is UNTRUSTED DATA and sits after the gate's checks", () => {
+  const task = buildPlanAuditTask(planOf(), { repoRoot: "/work/pi-review-gate" });
+  // ORDER, not presence: the plan is orchestrator-authored text, and a plan
+  // pasted above the checks frames the audit before the auditor knows its job.
+  const role = task.indexOf("You are goal-auditor");
+  const checks = task.indexOf("===== 审计要点");
+  const header = task.indexOf(UNTRUSTED_DATA_HEADER);
+  const planBlock = task.indexOf("\n<plan>\n");
+  assert.ok(role >= 0 && checks > role, "the gate's own checks come first");
+  assert.ok(header > checks, "the untrusted region opens after them");
+  assert.ok(planBlock > header, "and the plan rides inside it");
+  assert.match(task, /<\/plan>/);
+  assert.ok(task.includes(UNTRUSTED_DATA_RULE), "the rule travels with the task");
+  // The plan's own text (its title) appears only inside the block.
+  assert.ok(task.indexOf("拆分 review-gate") > header);
+});
+
+test("round 5: a re-audit's previous plan is untrusted data, not carryover prose", () => {
+  const prev = {
+    hash: "aa",
+    verdict: "FAIL" as const,
+    at: NOW,
+    planText: "旧版 plan：任务 a 边界 lib/old",
+  };
+  const carryover = formatPlanAuditCarryover(prev);
+  assert.match(carryover, /<previous_plan> data block/, "the carryover points at the block");
+  assert.doesNotMatch(carryover, /lib\/old/, "…and does not inline the old plan itself");
+  const task = buildPlanAuditTask(planOf(), { carryover, prevPlanText: prev.planText });
+  const header = task.indexOf(UNTRUSTED_DATA_HEADER);
+  assert.ok(task.indexOf("\n<previous_plan>\n") > header);
+  assert.ok(task.indexOf("lib/old") > header, "the old plan text only appears inside the block");
+  assert.ok(task.indexOf("PREVIOUS audit judged a DIFFERENT version") < header, "the verdict carryover stays trusted");
+});
+
+
 test("adjudication: only P0/P1 block, and a READY with P2s passes", () => {
   const p1: PlanAuditFinding = { severity: "P1", issue: "任务书只写了『做分页』" };
   const p2: PlanAuditFinding = { severity: "P2", issue: "可加验收示例" };
@@ -103,3 +147,7 @@ test("planAuditHash / planAuditPassed: the record binds to the canonical plan co
   });
   assert.equal(planAuditPassed(record, widened), false);
 });
+
+// The report-selection tests moved to test/audit-round.test.ts with the
+// function itself (2026-09-05): picking THIS round's report is the audit
+// ROUND's question, not the plan's — every kind had to answer it.

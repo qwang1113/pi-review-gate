@@ -47,12 +47,12 @@ import { registerConsentRequestTools } from "./consent-request-tools.ts";
 import {
   normalizeQuestions,
   resumeFrom,
-  interpretFreeText,
   buildNoDialogNotice,
   FREE_TEXT_HINT,
   progressLabel,
   buildChoiceList,
-  interpretChoice,
+  resolveQuestion,
+
   formatAnswers,
   formatTranscriptSummary,
   needsUserReply,
@@ -60,7 +60,11 @@ import {
   MAX_QUESTIONS,
   type AskAnswer,
   type AskQuestion,
+  type InterviewStop,
 } from "./ask-user.ts";
+// The batch id is minted with the same collision-resistant helper the channel
+// uses for its own record ids — one generator, not a second convention.
+import { newChannelId } from "./orchestrator-channel.ts";
 
 /** Just enough of pi's tool context for a dialog and a transcript notice. */
 export interface UiContext {
@@ -214,74 +218,109 @@ export async function doAskUser(
   // the user already settled are not asked again.
   const answers: AskAnswer[] = resumeFrom(state.askUser, questions);
   const resumedCount = answers.length;
-  let skipRest = false;
+  /** Why the questions still unshown will never be shown. */
+  let stopped: InterviewStop | undefined;
   /** Did ANY dialog actually render? A no is what makes this headless. */
   let anyDialog = false;
-  for (const [index, q] of questions.entries()) {
-    if (index < answers.length) continue; // already settled before the interruption
-    if (skipRest) {
-      answers.push({ question: q.text, kind: "skipped" });
-      continue;
-    }
-    const title = `问题 ${progressLabel(index, questions.length)}`;
-    const choices = buildChoiceList(q);
-    let picked: string | undefined;
-    try {
-      // EITHER the user or the project manager may answer (when this
-      // session is an orchestration child). The channel request carries
-      // the question and every row VERBATIM, which is why the supervisor
-      // never had to read this screen — and never mis-parsed it.
-      picked = (await deps.askEitherSide(
-        {
-          dialogKind: choices.length ? "select" : "input",
-          topic: "ask-user",
-          title: `${title}\n${q.text}${grantNotice(q)}`,
-          options: choices,
-          ...(q.recommended ? { payload: `推荐答案：${q.recommended}` } : {}),
-        },
-        uiCtx.hasUI === true,
-        (signal) => (choices.length
-          ? uiCtx.ui!.select!(`${title}\n${q.text}${grantNotice(q)}`, choices, { signal })
-          : uiCtx.ui!.input!(`${title}\n${q.text}${grantNotice(q)}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal })),
-      )).answer;
-    } catch {
-      picked = undefined; // a broken dialog is silence, never an answer
-    }
 
-    if (picked !== undefined) anyDialog = true;
-    // Free text carries its escapes as typed sentinels; a choice list
-    // carries them as rows. Both must exist, or the escapes would only
-    // apply to half the questions.
-    const meaning = choices.length ? interpretChoice(picked, q) : interpretFreeText(picked);
-    if (meaning.kind === "skip-rest") {
-      skipRest = true;
-      answers.push({ question: q.text, kind: "skipped" });
-    } else if (meaning.kind === "answered") {
-      answers.push({ question: q.text, kind: "answered", answer: meaning.answer });
+  // ── THE WHOLE INTERVIEW GOES UP FIRST (2026-09-06) ──
+  //
+  // Every question still to ask is handed to `askEitherSide` NOW, in one
+  // synchronous burst, before any dialog is raised. Each call writes its
+  // channel request record before it awaits anything, so a project manager
+  // sees the ENTIRE interview on its very first receipt and can answer all of
+  // it at once — where a five-question interview used to reach it as five
+  // separate ask → wait → answer round trips (measured this round: t9c 5,
+  // t9e 4, t9h 3, and t9h additionally lost two questions when an instruct
+  // dismissed the one box that was up). The narrower window also shrinks that
+  // failure: one instruct now interrupts one batch, not one question of it.
+  //
+  // WHAT KEEPS THE USER'S OWN WINDOW ONE AT A TIME: the renderers are GATED.
+  // Question i's box is not raised until question i-1 has settled, so the
+  // human still sees exactly one dialog and can step in at any point.
+  // Batching changed WHO LEARNS THE QUESTIONS WHEN; it changed nothing about
+  // what the person in the pane sees, and nothing about who wins the race.
+  const firstIndex = answers.length;
+  const remaining = questions.slice(firstIndex);
+  /** One-shot gates, in question order: renderer i waits for gate i to open. */
+  const gates = remaining.map(() => {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => { open = resolve; });
+    return { opened, open };
+  });
+  gates[0]?.open();
+  // A single question is not an interview: it goes on the wire exactly as it
+  // always did, with no stamp for a reader to make sense of.
+  const batchId = remaining.length > 1 ? newChannelId("ask", Date.now()) : undefined;
+  const asks = remaining.map((q, offset) => {
+    const index = firstIndex + offset;
+    const prompt = `问题 ${progressLabel(index, questions.length)}\n${q.text}${grantNotice(q)}`;
+    const choices = buildChoiceList(q);
+    // EITHER the user or the project manager may answer (when this session is
+    // an orchestration child). The channel request carries the question and
+    // every row VERBATIM, which is why the supervisor never had to read this
+    // screen — and never mis-parsed it.
+    return deps.askEitherSide(
+      {
+        dialogKind: choices.length ? "select" : "input",
+        topic: "ask-user",
+        title: prompt,
+        options: choices,
+        ...(q.recommended ? { payload: `推荐答案：${q.recommended}` } : {}),
+        ...(batchId === undefined
+          ? {}
+          : { batch: { id: batchId, index, total: questions.length } }),
+      },
+      uiCtx.hasUI === true,
+      async (signal) => {
+        await gates[offset]!.opened;
+        // Already settled (the project manager answered it through the
+        // channel), or the interview stopped: never put a dead box on screen.
+        if (signal.aborted || stopped !== undefined) return undefined;
+        return choices.length
+          ? uiCtx.ui!.select!(prompt, choices, { signal })
+          : uiCtx.ui!.input!(`${prompt}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal });
+      },
+      // A broken dialog is silence, never an answer — and, now that these
+      // calls outlive the statement that made them, never an unhandled
+      // rejection either.
+    ).catch((): ChannelDialogOutcome => ({ answer: undefined, by: "dismissed", requestId: "" }));
+  });
+
+  for (const [offset, q] of remaining.entries()) {
+    const outcome = await asks[offset]!;
+    if (outcome.answer !== undefined) anyDialog = true;
+    const resolution = resolveQuestion(q, outcome.answer, {
+      interrupted: outcome.by === "interrupted",
+      ...(stopped === undefined ? {} : { stopped }),
+    });
+    answers.push(resolution.answer);
+    if (resolution.stop !== undefined) stopped ??= resolution.stop;
+    if (resolution.answer.kind === "answered") {
       // GRANT DOOR 1/3 (2026-09-16, reviewer P1 fix): a question carrying a
       // grantScope mints the proxy grant ONLY when the user picked the exact
       // option the agent RECOMMENDED — the recommended option's own text is
       // the authorization the user saw and chose (the notice in grantNotice
       // states it). Substring matching is gone: an unrelated "grant me a few
       // minutes" can no longer harvest the scope.
-      if (q.grantScope && isGrantableScope(q.grantScope)) {
-        const pickedExact = meaning.kind === "answered" && meaning.answer === q.recommended;
-        if (pickedExact) {
-          deps.grantProxyScope(q.grantScope, "ask-user");
-        }
+      if (q.grantScope && isGrantableScope(q.grantScope) && resolution.answer.answer === q.recommended) {
+        deps.grantProxyScope(q.grantScope, "ask-user");
       }
-    } else if (meaning.kind === "deferred-to-chat") {
-      answers.push({ question: q.text, kind: "deferred-to-chat" });
-    } else {
-      // Dismissed (ESC) or no dialog at all: NOT a request to answer in
-      // chat — the user asked for nothing, and the reply must say so.
-      answers.push({ question: q.text, kind: "unanswered" });
     }
+    // OPENING THE NEXT GATE IS ALSO HOW A CUT-SHORT INTERVIEW SETTLES ITS
+    // LEFTOVERS. Once `stopped` is set, the next renderer returns immediately,
+    // which resolves that question through the same race as any other and
+    // writes its `request-settled` record (`dismissed` for a skip; an
+    // instruct has already settled the whole batch as `interrupted`). So a
+    // question nobody will ever see stops ringing on the project manager's
+    // receipt instead of hanging there unanswerable.
+    gates[offset + 1]?.open();
     // Persisted after EVERY question: an interview that dies here resumes
     // at the next one instead of asking the user everything again.
     state.askUser = { at: new Date().toISOString(), answers: [...answers] };
     deps.persist(ctx);
   }
+
 
   state.askUser = { at: new Date().toISOString(), answers };
   const pending = needsUserReply(answers);
@@ -336,6 +375,15 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
   host.registerTool({
     name: "ask_user",
     label: "Ask The User",
+    // THE INTERVIEW RULE LIVES HERE (user decision, 2026-09-06): optional, and
+    // uncapped in the number of questions. This description is the ONE full
+    // statement of it — it is what the model reads at the moment it decides
+    // whether to ask, and it is the only place that can quote the real
+    // per-call cap. `LOOP_GOAL_MISSING_DIRECTIVE` (lib/loop-goal.ts) carries a
+    // one-line summary and points here; do not let that grow back into a
+    // second wording, which is how the old "ask fewer questions" copy survived
+    // in two places at once.
+
     description:
       "Ask the user something — the ONE entry point for every moment that needs a human: " +
       "requirement ambiguity, a product/design decision, scope trade-offs, how to handle a " +
@@ -347,7 +395,12 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
       "user. Every answer comes back at once, unanswered ones marked. Write questions that stand " +
       "on their own, with the options AND your recommendation. When later questions depend on the " +
       "answer to an earlier one (pick an architecture, then its details), call ask_user AGAIN for " +
-      "the follow-up round instead of guessing the branch.",
+      "the follow-up round instead of guessing the branch. ASK AS MANY AS THE REQUIREMENT IS " +
+      `WORTH: the interview itself is optional (no doubts ⇒ no questions), but there is no cap on ` +
+      `how many you may ask — up to ${MAX_QUESTIONS} per call and another round whenever you need ` +
+      "more. Never trim a real doubt to keep the count down; agreeing on the requirement is " +
+      "cheaper than building the wrong one.",
+
     parameters: Type.Object({
       questions: Type.Array(
         Type.Object({

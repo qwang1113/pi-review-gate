@@ -46,18 +46,28 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
+import { isDeliveryStation, type DeliveryStation } from "./delivery-station.ts";
+
 
 /** Directory (under the pi agent home) that holds every orchestration's channels. */
 export const CHANNEL_ROOT_DIRNAME = "rg-channels";
 
 /**
- * A serialized record longer than this spills its bulky field to a side file.
+ * A serialized record whose UTF-8 length exceeds this spills its bulky field
+ * to a side file.
  *
  * Deliberately well under `PIPE_BUF` (4096): the budget has to cover the
  * record's own envelope plus JSON escaping, and being wrong here means a torn
  * line, which is the one failure this whole scheme exists to prevent.
+ *
+ * MEASURED IN BYTES, and that is not a detail: `PIPE_BUF` is a byte limit,
+ * while `String.length` counts UTF-16 units. Everything a judge writes here is
+ * Simplified Chinese by directive (L4), and a CJK code point is 3 bytes — so a
+ * 1500-CHARACTER record can be 4400 bytes and tear, which is exactly the case
+ * this constant exists to prevent. (Found while adding the structured findings
+ * array, 2026-09-04; the prose `summary` path had the same latent hole.)
  */
-export const MAX_INLINE_RECORD_CHARS = 1500;
+export const MAX_INLINE_RECORD_BYTES = 1500;
 
 /**
  * No record for this long, while the pane is still alive, means `stalled` —
@@ -155,14 +165,76 @@ export interface ChannelRequestRecord extends ChannelRecordBase {
    * user's behalf is constraint 8, and the draft the boundary check judges is
    * the `payload` of THIS record — written by the child itself, so a
    * hand-copied text can neither widen nor narrow what gets approved (R-7).
+   *
+   * `restatement` (2026-09-06) is the requirement restatement a child must get
+   * confirmed BEFORE it negotiates a goal. It travels the same way, carrying
+   * the full restatement as its `payload`, so a project manager answering for
+   * the user judges the child's own words rather than a retyped summary.
    */
-  topic?: "goal-approval" | "goal-reason" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "other";
+  topic?: "goal-approval" | "goal-reason" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "other";
   title: string;
   /** The exact rows offered, in order. Empty for `input`. */
   options: string[];
   /** The full text behind the question (a goal draft, a plan) when there is one. */
   payload?: string;
   payloadRef?: ChannelPayloadRef;
+  /**
+   * WHERE THE ROUND THIS QUESTION IS ABOUT STOPS (2026-09-06) — the delivery
+   * station the child is asking to have confirmed (`restatement`), or the one
+   * recorded beside the goal it wants approved (`goal-approval`).
+   *
+   * A pure addition: an older gate ignores it, and a record without it leaves
+   * the station comparison unmade (see {@link sanitizeDeliveryStation}).
+   *
+   * WHY A FIELD AND NOT A LINE IN `payload` (user decision, 2026-09-06). A
+   * DECISION is made on this value — an orchestrator may not confirm a station
+   * looser than the plan the user approved — and the alternative on the table
+   * was "the gate appends a canonical line to the payload and parses it back".
+   * That would invent a second, TEXTUAL wire format inside a field whose
+   * content is written by the CHILD: the child could print a line of the same
+   * shape in its own restatement, and the only defences are brittle
+   * conventions like "take the last match". This channel exists because
+   * reading a fact off a rendering is how the orchestration layer used to get
+   * things wrong; `ChannelReportRecord.scope` (t6a) is the same shape for the
+   * same reason.
+   *
+   * Untrusted like every wire value: read it through
+   * {@link sanitizeDeliveryStation}, never by comparing strings.
+   */
+  station?: string;
+
+  /**
+   * WHICH BATCH OF QUESTIONS THIS ONE BELONGS TO (2026-09-06).
+   *
+   * An `ask_user` interview is 1–10 questions submitted in ONE call, and the
+   * child used to write its request record only when it was about to render
+   * that question's dialog. So a five-question interview reached the
+   * orchestrator as five separate rounds of "here is one question" → "here is
+   * one answer", each costing a full wait cycle (measured this round: t9c 5
+   * round trips, t9e 4, t9h 3 — and t9h lost two questions when an instruct
+   * dismissed the box it was still standing in front of). The whole batch is
+   * now written BEFORE the first dialog opens, so every question is on the
+   * orchestrator's first receipt and can be answered in one go.
+   *
+   * These three fields say nothing the answering side must obey — they make
+   * the grouping LEGIBLE (which interview, which position, how many in all)
+   * so a receipt can render "第 2/5 题" and a project manager knows whether
+   * more of the same interview is coming.
+   *
+   * PURE ADDITIONS, and that is the point (user constraint, 2026-09-06): the
+   * project manager holding this orchestration runs the build it started
+   * with, so a record it cannot parse would cut off its own supervision. An
+   * older reader ignores all three and still sees N ordinary open requests,
+   * each answerable one at a time exactly as before — which is the identical
+   * reasoning behind `ChannelReportRecord.inspection` and `.scope`.
+   */
+  batchId?: string;
+  /** 0-based position of this question inside its batch. */
+  batchIndex?: number;
+  /** How many questions the batch holds in all. */
+  batchTotal?: number;
+
+
 }
 
 /** Child → orchestrator: that request is over, and this is who ended it. */
@@ -234,13 +306,134 @@ export interface ChannelInstructAckRecord extends ChannelRecordBase {
 }
 
 
+/** One finding on a report, exactly as the judge concluded it. */
+export interface ReportFinding {
+  severity: string;
+  file?: string;
+  line?: number;
+  issue: string;
+  evidence?: string;
+}
+
+/**
+ * The scope a round ran under, as a WIRE value.
+ *
+ * Spelled out here rather than imported from the review modules on purpose:
+ * this is the channel's own schema, and a record read off disk may have been
+ * written by a different build. Both halves are optional and both are
+ * validated on read (`reportConclusion`) — an unrecognised `kind` is dropped,
+ * never carried through as if it meant something.
+ */
+export interface ReviewScopeStamp {
+  /** The round's commit range, e.g. `abc123def456..789abc012def`. */
+  range?: string;
+  /** How much of the change the round was told to deep-read. */
+  kind?: "full" | "incremental";
+}
+
+
+
+/**
+ * Judge → opener: this round is over, here is the conclusion.
+ *
+ * The THIRD item of the listener triple (state, findings count, verdict):
+ * the judge side writes THIS so the opener learns the round is over through
+ * its own `wait` receipt instead of polling a transcript. A child session
+ * reports its judges upward the same way — one `report` per finished round,
+ * never the raw stdout (bulky summaries spill exactly like request payloads).
+ *
+ * THE CONCLUSION TRAVELS STRUCTURED (2026-09-04). `verdict`, `findings`, `cwd`
+ * and `docSync` are the judge's own `judge_conclude` arguments, carried
+ * verbatim. Before that the gate serialised them into a ```json fence and the
+ * opener parsed them back out — one implementation writing a format for
+ * another implementation to undo, with the judge's prose riding along. The
+ * fence is gone; `summary` is now ONLY an adviser's prose, the one role whose
+ * product IS the text.
+ */
+export interface ChannelReportRecord extends ChannelRecordBase {
+  kind: "report";
+  from: "child";
+  reportId: string;
+  /** Which round of this judge this report closes. */
+  round?: number;
+  /** The recorded verdict, e.g. READY or BLOCKED. */
+  verdict: string;
+  /** Findings the round published (stream line count), not their content. */
+  findingsCount?: number;
+  /**
+   * The round's findings, exactly as the judge concluded them. The opener
+   * consumes these directly — there is no text to parse. Spilled to
+   * `findingsRef` when the line would otherwise exceed the inline budget: a
+   * findings array is unbounded by design (no cap, no truncation), and an
+   * over-long line is the one failure this whole record format exists to
+   * prevent.
+   */
+  findings?: ReportFinding[];
+  findingsRef?: ChannelPayloadRef;
+  /** The judge's own `pwd`, verbatim (the opener checks it against the repo). */
+  cwd?: string;
+  /** Code↔doc attestation, when the round covered code changes. */
+  docSync?: string;
+  /**
+   * An ADVISER's prose conclusion — the only role whose output is the text
+   * itself. Spilled to `summaryRef` when oversized. A reviewer or goal-auditor
+   * report carries no prose at all: its conclusion is `verdict` + `findings`.
+   */
+  summary?: string;
+  summaryRef?: ChannelPayloadRef;
+  /**
+   * What the JUDGE-SIDE gate observed the round actually inspect
+   * (lib/judge-inspection.ts) — action count, kinds, and whether anything
+   * touched the reviewed range. ADDED as an optional field on purpose: this
+   * extension loads from source with no build step, so a running opener holds
+   * the build it started with while the panes it opens hold the newest one. A
+   * new field an old reader ignores keeps that pair compatible; changing what
+   * an existing field MEANS would not.
+   */
+  inspection?: { actions: number; kinds: string[]; rangeSeen?: boolean; appeal?: string };
+  /**
+   * HOW FULL THE JUDGE'S OWN CONTEXT WAS when it concluded this round, in
+   * percent — the reading only the judge's own process can take.
+   *
+   * The gate's rotation policy (lib/judge-rotation.ts) needs it, and the
+   * opener cannot measure it: this is the one channel it can travel on. It is
+   * read at the CONCLUSION, so the decision it feeds is one round stale by
+   * construction — the alternative (asking a judge mid-round) does not exist.
+   * Optional for the same reason `inspection` is: a report written by an older
+   * build simply carries none, and "no reading" is the fail-open case
+   * (rotation then rests on the round cap alone), never a rotation.
+   */
+  contextPercent?: number;
+  /**
+   * WHICH SCOPE THIS ROUND RAN UNDER, in the judge's own words: the commit
+   * range and the full/incremental decision, both read back from the round's
+   * task text (lib/judge-inspection.ts).
+   *
+   * It is a SELF-REPORT, and only that. It makes a finished round legible
+   * after the fact — which range, which depth — and the gate keeps it beside
+   * what it registered when it dispatched the round (`RoundRecord.scope`,
+   * lib/gate-state.ts). Since both halves come from the same gate-written
+   * text, agreement proves nothing about how the round was read; a
+   * DISAGREEMENT is the informative case (a task text from another round, a
+   * pane on another build). Nothing acts on either: it is recorded so a human
+   * can look. Whether the round inspected anything at all is a different
+   * record — `inspection`, above.
+   *
+   * A NEW OPTIONAL field, for the same reason `inspection` is one: an opener
+   * running an older build ignores it and consumes the report exactly as
+   * before, which is what keeps an old opener and a new judge pane compatible.
+   */
+  scope?: ReviewScopeStamp;
+
+}
 export type ChannelRecord =
   | ChannelStateRecord
   | ChannelRequestRecord
   | ChannelSettledRecord
   | ChannelAnswerRecord
   | ChannelInstructRecord
-  | ChannelInstructAckRecord;
+  | ChannelInstructAckRecord
+  | ChannelReportRecord;
 
 /**
  * Every filesystem touch the channel makes, as one injectable seam.
@@ -336,6 +529,18 @@ export interface ChannelTarget {
 }
 
 /**
+ * A judge channel target: `<opener-id>/<judge-id>.jsonl` under the same root.
+ *
+ * Deliberately the SAME file shape as an orchestration channel (not a
+ * second channel module): the opener may be a session id rather than an
+ * orchestration id, but the record/spill/cursor primitives do not care —
+ * planes differ by key naming only.
+ */
+export function judgeChannelTarget(openerId: string, judgeId: string, home?: string): ChannelTarget {
+  return { orchestrationId: openerId, childId: judgeId, ...(home === undefined ? {} : { home }) };
+}
+
+/**
  * Append one record, spilling an oversized payload first.
  *
  * Returns the record as it was actually written (with `payloadRef` in place
@@ -350,9 +555,14 @@ export function appendRecord(io: ChannelIO, target: ChannelTarget, record: Chann
   return stored;
 }
 
-/** Move `payload` / `text` into a side file when the line would be too long. */
+/** The UTF-8 size of a record once serialized — what `PIPE_BUF` actually bounds. */
+function recordBytes(record: ChannelRecord): number {
+  return Buffer.byteLength(JSON.stringify(record), "utf8");
+}
+
+/** Move `payload` / `text` / `findings` into a side file when the line would be too long. */
 function spillIfLarge(io: ChannelIO, target: ChannelTarget, record: ChannelRecord): ChannelRecord {
-  if (JSON.stringify(record).length <= MAX_INLINE_RECORD_CHARS) return record;
+  if (recordBytes(record) <= MAX_INLINE_RECORD_BYTES) return record;
   if (record.kind === "request" && record.payload !== undefined) {
     const path = payloadPathFor(target.orchestrationId, target.childId, record.requestId, target.home);
     io.writeText(path, record.payload);
@@ -364,6 +574,41 @@ function spillIfLarge(io: ChannelIO, target: ChannelTarget, record: ChannelRecor
     io.writeText(path, record.text);
     const { text, ...rest } = record;
     return { ...rest, textRef: { path, chars: text.length } };
+  }
+  if (record.kind === "report") {
+    // A report carries TWO bulky things and either alone can blow the budget:
+    // an adviser's prose (`summary`) and — since the conclusion travels
+    // structured — the `findings` array. Spill both, biggest first, and stop
+    // as soon as the line fits: a round with one huge finding must not also
+    // lose its prose to a side file, and a round with twenty ordinary
+    // findings must not stay inline just because it has no prose.
+    let out: ChannelRecord = record;
+    const path = payloadPathFor(target.orchestrationId, target.childId, record.reportId, target.home);
+    const findingsSize = record.findings === undefined ? 0 : Buffer.byteLength(JSON.stringify(record.findings), "utf8");
+    const summarySize = record.summary === undefined ? 0 : Buffer.byteLength(record.summary, "utf8");
+    const spillFindings = () => {
+      const r = out as ChannelReportRecord;
+      // An empty array is not what blew the budget — moving it out would cost
+      // a side file and save two characters.
+      if (r.findings === undefined || r.findings.length === 0) return;
+      const text = JSON.stringify(r.findings);
+      io.writeText(`${path}.findings`, text);
+      const { findings, ...rest } = r;
+      out = { ...rest, findingsRef: { path: `${path}.findings`, chars: text.length } };
+    };
+    const spillSummary = () => {
+      const r = out as ChannelReportRecord;
+      if (r.summary === undefined) return;
+      io.writeText(path, r.summary);
+      const { summary, ...rest } = r;
+      out = { ...rest, summaryRef: { path, chars: summary.length } };
+    };
+    const [first, second] = findingsSize >= summarySize
+      ? [spillFindings, spillSummary]
+      : [spillSummary, spillFindings];
+    first();
+    if (recordBytes(out) > MAX_INLINE_RECORD_BYTES) second();
+    return out;
   }
   // Nothing bulky to move (a huge dialog title, say). Truncation would lose
   // the very content the orchestrator needs, and an over-long line only risks
@@ -385,6 +630,152 @@ export function requestPayload(io: ChannelIO, record: ChannelRequestRecord): str
 /** The full instruction text, whether it was inlined or spilled. */
 export function instructText(io: ChannelIO, record: ChannelInstructRecord): string | undefined {
   return record.text ?? resolvePayload(io, record.textRef);
+}
+
+/** The full report summary, whether it was inlined or spilled. */
+export function reportText(io: ChannelIO, record: ChannelReportRecord): string | undefined {
+  return record.summary ?? resolvePayload(io, record.summaryRef);
+}
+
+/** What a judge concluded, as DATA — the opener never parses a report's text. */
+export interface ReportConclusion {
+  verdict: string;
+  findings: ReportFinding[];
+  cwd?: string;
+  docSync?: string;
+  /**
+   * The range and full/incremental flag the round reported for itself.
+   * Present only when the report carried a usable one — see
+   * {@link sanitizeScopeStamp}.
+   */
+  scope?: ReviewScopeStamp;
+  /**
+   * The judge's own context reading at the conclusion, in percent. Present
+   * only when the report carried a usable one — see {@link sanitizeContextPercent}.
+   */
+  contextPercent?: number;
+}
+
+/**
+ * Keep a report's scope stamp only where it says something.
+ *
+ * A record read off disk is untrusted input: it may come from another build,
+ * a truncated write or a hand-edited file. A non-string range and an
+ * unrecognised kind are DROPPED rather than passed on, and a stamp left with
+ * nothing in it becomes `undefined` — an empty object on the conclusion would
+ * read to every consumer as "the judge reported a scope" when it did not.
+ */
+export function sanitizeScopeStamp(raw: unknown): ReviewScopeStamp | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as { range?: unknown; kind?: unknown };
+  const range = typeof value.range === "string" && value.range.trim() ? value.range.trim() : undefined;
+  const kind = value.kind === "full" || value.kind === "incremental" ? value.kind : undefined;
+  if (range === undefined && kind === undefined) return undefined;
+  return { ...(range === undefined ? {} : { range }), ...(kind === undefined ? {} : { kind }) };
+}
+
+/**
+ * Keep a report's context reading only when it is a usable percentage.
+ *
+ * Same untrusted-input rule as {@link sanitizeScopeStamp}, and the fail
+ * direction matters here: an unusable reading must become `undefined` ("no
+ * reading", which never rotates) rather than a number that could cross the
+ * rotation threshold by accident. Out-of-range values are clamped instead of
+ * dropped — a host reporting 140% is reporting "full", not "unknown".
+ */
+export function sanitizeContextPercent(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
+  return Math.min(100, Math.max(0, raw));
+}
+
+/**
+ * Keep a request's delivery station only when it is one of the three.
+ *
+ * Same untrusted-input rule as {@link sanitizeScopeStamp}: the value was
+ * written by the CHILD, so an unknown, mistyped or hand-edited one is DROPPED
+ * rather than passed on. It deliberately does NOT go through
+ * `parseDeliveryStation`, whose job is the opposite — that one DEGRADES an
+ * unreadable value to the strictest station so a contract that forgot to say
+ * where it stops still blocks. Here there is no contract to protect: an
+ * unreadable station is "the child said nothing", and inventing `precommit`
+ * for it would show a project manager a station nobody asked for.
+ *
+ * The station VOCABULARY is still the one place that owns it
+ * (`isDeliveryStation`, lib/delivery-station.ts) — this adds a rule about
+ * missing data, never a second definition of what a station is.
+ *
+ * Dropping is also the safe direction for the only decision that reads it: no
+ * station ⇒ no widening comparison ⇒ the proxy answer still has to carry a
+ * crosscheck, and the ordinary approval rules apply unchanged.
+ */
+export function sanitizeDeliveryStation(raw: unknown): DeliveryStation | undefined {
+  if (typeof raw !== "string") return undefined;
+  const normalized = raw.trim().toLowerCase();
+  return isDeliveryStation(normalized) ? normalized : undefined;
+}
+
+
+/** One question's place in its interview, as a consumer gets to see it. */
+export interface RequestBatchStamp {
+  id: string;
+  index: number;
+  total: number;
+}
+
+/**
+ * Keep a request's batch stamp only when all three halves agree.
+ *
+ * Same untrusted-input rule as {@link sanitizeScopeStamp}, applied to a value
+ * whose only job is to be READ: the stamp exists so a receipt can say "第 2/5
+ * 题", and a half-parsed one ("第 undefined/0 题") is worse than none at all.
+ * So a missing id, a non-integer position, a total below one or a position
+ * outside its total all drop the whole stamp — the request is still a
+ * perfectly ordinary open question, which is exactly how an older reader sees
+ * every one of them.
+ */
+export function sanitizeBatchStamp(id: unknown, index: unknown, total: unknown): RequestBatchStamp | undefined {
+  if (typeof id !== "string" || id.trim() === "") return undefined;
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return undefined;
+  if (typeof total !== "number" || !Number.isInteger(total) || total < 1) return undefined;
+  if (index >= total) return undefined;
+  return { id: id.trim(), index, total };
+}
+
+
+/**
+ * Read one report's structured conclusion, resolving a spilled findings array.
+ *
+ * Three fields are normalized. `findings`: a report written before the field
+ * existed, one whose findings are not an array, or one whose spill file is
+ * unreadable all read as NO findings rather than throwing — the verdict still
+ * travels, and the recorder fails closed on an unrecognisable one. A spill
+ * that cannot be read is the same case: the round is recorded with the
+ * verdict it reported and no findings, never with a stale set from elsewhere.
+ * `scope` goes through {@link sanitizeScopeStamp} for the same reason: a
+ * stamp is auditing evidence, and evidence that cannot be recognised is
+ * absent, not approximated. `contextPercent` is the same rule once more
+ * ({@link sanitizeContextPercent}): an unusable reading is no reading, which
+ * is the fail-open input the rotation policy expects.
+ */
+export function reportConclusion(io: ChannelIO, record: ChannelReportRecord): ReportConclusion {
+  let raw: unknown = record.findings;
+  if (raw === undefined && record.findingsRef) {
+    const text = resolvePayload(io, record.findingsRef);
+    if (text !== undefined) {
+      try { raw = JSON.parse(text); } catch { raw = undefined; }
+    }
+  }
+  const findings = Array.isArray(raw) ? raw.filter((f): f is ReportFinding => !!f && typeof f === "object") : [];
+  const scope = sanitizeScopeStamp(record.scope);
+  const contextPercent = sanitizeContextPercent(record.contextPercent);
+  return {
+    verdict: record.verdict,
+    findings,
+    ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
+    ...(record.docSync === undefined ? {} : { docSync: record.docSync }),
+    ...(scope === undefined ? {} : { scope }),
+    ...(contextPercent === undefined ? {} : { contextPercent }),
+  };
 }
 
 /** What a read produced: the records, and the lines that could not be parsed. */
@@ -432,6 +823,7 @@ function parseRecord(line: string): ChannelRecord | undefined {
       case "answer":
       case "instruct":
       case "instruct-ack":
+      case "report":
         return value as ChannelRecord;
       default:
         return undefined;
@@ -468,6 +860,8 @@ export interface ChannelProjection {
   pendingInstructs: ChannelInstructRecord[];
   /** ISO time of the newest record of any kind. */
   lastActivityAt?: string;
+  /** Newest round report, when any round has closed. */
+  lastReport?: ChannelReportRecord;
 }
 
 /**
@@ -499,6 +893,7 @@ export function projectChannel(records: readonly ChannelRecord[]): ChannelProjec
   const pendingAnswers: ChannelAnswerRecord[] = [];
   const pendingInstructs: ChannelInstructRecord[] = [];
   let lastActivityAt: string | undefined;
+  let lastReport: ChannelReportRecord | undefined;
   for (const record of records) {
     if (!lastActivityAt || record.at > lastActivityAt) lastActivityAt = record.at;
     switch (record.kind) {
@@ -518,6 +913,9 @@ export function projectChannel(records: readonly ChannelRecord[]): ChannelProjec
       case "instruct":
         if (!injected.has(record.instructId)) pendingInstructs.push(record);
         break;
+      case "report":
+        lastReport = record;
+        break;
       default:
         break;
     }
@@ -530,6 +928,7 @@ export function projectChannel(records: readonly ChannelRecord[]): ChannelProjec
     pendingAnswers,
     pendingInstructs,
     lastActivityAt,
+    ...(lastReport === undefined ? {} : { lastReport }),
   };
 
 }

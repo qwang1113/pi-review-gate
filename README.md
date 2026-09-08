@@ -17,18 +17,18 @@ accepted Node 20).
 
 Pi has no `Stop` event to prevent the model from quitting — but it has something better: `tool_call` blocking. Instead of intercepting "the model wants to stop", we intercept "the model wants to ship". Combined with `agent_settled` auto-continuation, the model fixes → re-reviews → re-runs precommit until every gate is green, and *cannot* commit around it.
 
-Each session runs in one of **four gate modes** (strictness order `normal < explore < loop < orchestrator`), decided via the `set_gate_mode` tool — and the agent's own pick **is** the classification: no external classifier model is consulted for the mode. What makes that safe is not a second opinion but the rule engine's asymmetry (`lib/task-mode.ts`) — the agent can classify itself **into** the gate but never **out of** it. A first `loop` (or `orchestrator`) always applies, a first `explore` applies while this session is still clean, and all of them record `source: "auto"` so the git hooks stay fully enforced; a first `normal` (the gate switching off entirely) always pops the user's confirmation dialog. Outside `/tmp` that is the whole story; in `/tmp`, `scratchFirstMode` still cannot apply an enforced mode (only an explicit `explore` stays, otherwise `normal`). While the mode is undecided the gate behaves exactly like `loop` (fail-closed) and the per-turn system prompt instructs the agent to call `set_gate_mode` as its first action; “the agent never decides” therefore costs nothing.
+Each session runs in one of **four gate modes** (strictness order `normal < explore < loop < orchestrator`), decided via the `set_gate_mode` tool — and the agent's own pick **is** the classification: no external classifier model is consulted for the mode. What makes that safe is not a second opinion but the rule engine's asymmetry (`lib/task-mode.ts`) — the agent can classify itself **into** the gate but never **out of** it. A first `loop` (or `orchestrator`) always applies, a first `explore` applies while this session is still clean, and all of them record `source: "auto"` so the git hooks stay fully enforced; a first `normal` (the gate switching off entirely) always pops the user's confirmation dialog. That is the whole story everywhere; in a Temp dir (`/tmp`) the gate additionally nudges trivial work toward `normal` — never forced. While the mode is undecided the gate behaves exactly like `loop` (fail-closed) and the per-turn system prompt instructs the agent to call `set_gate_mode` as its first action; “the agent never decides” therefore costs nothing.
 
-**Only `/tmp` scratch sessions are path-exempt, and they never enter `loop` via the agent.** A session **started in `/tmp`** (macOS `/private/tmp` is the same dir through a symlink) is classified `explore` (investigation) or `normal` (local pi-config work / chores) on the first `set_gate_mode` call (`lib/pi-self.ts` + `scratchFirstMode`). Path detection is deterministic: the session cwd is chosen by the user — which is exactly why this is the one place a consent-free `normal` is allowed, since nothing the agent (or an injected prompt) asserts can reach it. A `loop` pick, or a missing one, becomes `normal`. A later agent `set_gate_mode loop` is rejected; only the user can force loop (`/gate-mode loop`). **Nothing else is path-exempt** — a session started in `~/.pi` or in this repository runs the full loop. Editing `~/.pi` *from* a `/tmp` session is the intended scratch case and stays out of loop.
+**Only non-git directories are path-exempt, and they never enter enforced modes via the agent.** A session **started outside any git repository** has nothing to review/checkpoint/ship, so the first classification applies `normal` automatically (consent-free, driven by the deterministic session cwd). A `loop`/`orchestrator` pick is clamped to `normal`; a later agent upgrade is rejected; only the user can force an enforced mode (`/gate-mode loop`). **Temp dirs (`/tmp`) are NOT exempt** — the gate only nudges trivial work toward `normal` there; delivery work runs the same modes as anywhere else.
 
-**A session started OUTSIDE any git repository is not path-exempt — it has nothing to gate.** There is no repo to review, checkpoint or ship, so the extension short-circuits entirely (2026-09-02, user decision): it forces `normal`, calls no git at all (the old behavior called git anyway and leaked `fatal: not a git repository` to the terminal), shows `非 git 目录` in the status strip, and refuses `checkpoint` / `judge_submit` / `run_precommit` / `record_review` with the reason; `set_gate_mode loop|orchestrator` is clamped to `normal` exactly like the `/tmp` rule. The output-language directive (L4) stays — it is orthogonal to the gate.
+**A session started OUTSIDE any git repository has nothing to gate.** There is no repo to review, checkpoint or ship, so the extension short-circuits entirely (2026-09-02, user decision): it forces `normal`, calls no git at all (the old behavior called git anyway and leaked `fatal: not a git repository` to the terminal), shows `非 git 目录` in the status strip, and refuses `checkpoint` / `judge_submit` / `run_precommit` and the verdict recorder with the reason; `set_gate_mode loop|orchestrator` is clamped to `normal`. The output-language directive (L4) stays — it is orthogonal to the gate.
 
 - **`orchestrator`** — the **project-manager** role: everything `loop` enforces, plus the orchestration constraints. This session plans the work and supervises child sessions instead of doing it: it may not write code at all (only its plan under `.pi/` and `docs/orchestrator-*.md` handoff documents), it needs a plan the **user approved** before it may spawn anything, and `declare_done` additionally requires an empty task queue, no live children and no user decision it never reported. It requires tmux — its children are panes of the user's own window. See [The orchestrator role](#the-orchestrator-role-a-project-manager-inside-the-gate).
 - **`loop`** — the full enforced workflow: review READY + precommit PASS gate every ship, auto-continuation drives the fix→review loop.
 - **`explore`** — investigation/troubleshooting. Its one essential difference from loop: **the agent may end the task on its own judgment** — `declare_done` is always accepted (gate status is reported as advisory) and auto-continuation is off. Edits and `bash` stay **available** — the injected system prompt merely instructs the agent to prefer read-only work — because troubleshooting routinely needs diagnostic commands. Ship commands (`git commit/push`, `gh pr create/edit`) remain **fully gated by L1**: explore never weakens the in-session ship gate, so a misclassification only relaxes auto-continuation — the safe direction.
-- **`normal`** — for non-development, non-research tasks: the extension steps aside as if it were not installed. No workflow prompt injection, no ship blocking, no auto-continuation, no L6 edit-time check, no LLM guard calls. Two things deliberately survive: the **output-language directive (L4)** — it is standing user policy, orthogonal to the gate — and the **sensitive-file guard** (`.env`/keys), a security floor — lifted only per file, per user dialog, via `request_sensitive_edit` (available in every mode). Because normal fully opens the in-session gate, **every interactive path into it requires the user's explicit consent** (a confirm dialog or `/gate-mode normal`) — including the agent's own first classification. Exactly two entries are consent-free, and neither is anything the agent asserts (source stays `"auto"` so the git hooks remain fully enforced): (1) a **`/tmp` scratch session**, where `scratchFirstMode` applies `explore` or `normal` automatically from the deterministic session cwd (a `loop` pick or a missing one becomes `normal`); (2) a **print/JSON (no UI) session**, which `session_start` switches to `normal` because the enforced modes cannot render their dialogs.
+- **`normal`** — for non-development, non-research tasks: the extension steps aside as if it were not installed. No workflow prompt injection, no ship blocking, no auto-continuation, no L6 edit-time check, no LLM guard calls. Two things deliberately survive: the **output-language directive (L4)** — it is standing user policy, orthogonal to the gate — and the **sensitive-file guard** (`.env`/keys), a security floor — lifted only per file, per user dialog, via `request_sensitive_edit` (available in every mode). Because normal fully opens the in-session gate, **every interactive path into it requires the user's explicit consent** (a confirm dialog or `/gate-mode normal`) — including the agent's own first classification. Exactly two entries are consent-free, and neither is anything the agent asserts (source stays `"auto"` so the git hooks remain fully enforced): (1) a **non-git directory**, whose first classification applies `normal` automatically from the deterministic session cwd (enforced picks are clamped); (2) a **print/JSON (no UI) session**, which `session_start` switches to `normal` because the enforced modes cannot render their dialogs.
 
-**Mode switching is asymmetric by design.** *Upgrades* (toward `loop`) apply immediately — tightening never needs consent — except in a `/tmp` session, where the agent cannot enter `loop` at all (first classification is remapped; later upgrades reject; only `/gate-mode` can force it). Agent-applied upgrades record `taskModeSource: "auto"`. *Downgrades* (toward `normal`) pop a confirmation dialog that the **extension** renders with fixed consequence copy; the agent's stated reason is shown as clearly-labeled untrusted data, and the tool deliberately has **no “confirmed” parameter**, so consent can never be claimed by the caller. A **declined** dialog locks agent-initiated downgrades for the rest of the session (anti-grinding); only `/gate-mode` or `/gate-reset` clears the lock. The **first** classification is consent-free only below `loop` in the gate-neutral direction: an `explore` pick applies automatically on an interactive session in which **this session has made no edits yet** — pre-existing worktree/branch changes from before the session do NOT block it (they arm the ship gate, but the mode records `source: "auto"` so the git hooks stay fully enforced); once the session itself edits, slipping into explore is a real downgrade and asks the user. A first `normal` is **never** consent-free for the agent (in `/tmp`, `scratchFirstMode` maps loop / missing picks to `normal` on the deterministic cwd signal instead). Print/JSON mode (no UI) cannot render those dialogs, so the session can **only** run `normal` (`evaluateModeChange` refuses every other mode; `session_start` switches headless sessions to `normal`).
+**Mode switching is asymmetric by design.** *Upgrades* (toward `loop`) apply immediately — tightening never needs consent — except in a non-git directory, where the agent cannot enter enforced modes at all (first classification is remapped; later upgrades reject; only `/gate-mode` can force them). Agent-applied upgrades record `taskModeSource: "auto"`. *Downgrades* (toward `normal`) pop a confirmation dialog that the **extension** renders with fixed consequence copy; the agent's stated reason is shown as clearly-labeled untrusted data, and the tool deliberately has **no “confirmed” parameter**, so consent can never be claimed by the caller. A **declined** dialog locks agent-initiated downgrades for the rest of the session (anti-grinding); only `/gate-mode` or `/gate-reset` clears the lock. The **first** classification is consent-free only below `loop` in the gate-neutral direction: an `explore` pick applies automatically on an interactive session in which **this session has made no edits yet** — pre-existing worktree/branch changes from before the session do NOT block it (they arm the ship gate, but the mode records `source: "auto"` so the git hooks stay fully enforced); once the session itself edits, slipping into explore is a real downgrade and asks the user. A first `normal` is **never** consent-free for the agent. Print/JSON mode (no UI) cannot render those dialogs, so the session can **only** run `normal` (`evaluateModeChange` refuses every other mode; `session_start` switches headless sessions to `normal`).
 
 For the *git hooks* (defense-in-depth outside Pi), the sidecar records *who* chose the mode (`taskModeSource`): pre-commit/pre-push treat explore/normal as advisory **only when the user chose it explicitly** (`"user"` — a confirmed dialog or `/gate-mode`) — this protects the user's own manual commits during such a session, while an agent-set mode keeps the hooks fully enforced (`"auto"`). You can override the mode anytime with `/gate-mode loop|explore|normal`.
 
@@ -40,11 +40,11 @@ The design rule behind every tool below is one line from the user who asked for 
 
 | Tool | What the orchestrator asks for |
 |---|---|
-| `orchestrator_plan` | Read/replace the plan, submit it (the gate **audits** it with a judge process first and only then asks the **user** to approve), move a task through its state machine, record and resolve decisions only the human can settle. A rewrite that grants nothing new — a narrowed boundary, a file refined inside a directory the task already had, an added dependency — keeps the approval and records why; real widening still asks. |
+| `orchestrator_plan` | Read/replace the plan, submit it (the gate **audits** it with a judge process first and only then asks the **user** to approve), move a task through its state machine, record and resolve decisions only the human can settle, and **archive** a previous orchestration's plan when a new round starts (the user is asked first, nothing is deleted, and it refuses while a registered child pane is still alive). A rewrite that grants nothing new — a narrowed boundary, a file refined inside a directory the task already had, an added dependency — keeps the approval and records why; real widening still asks. |
 | `orchestrator_spawn` | “Open a child session for task X.” The gate picks the split direction, injects the orchestration id, starts it in `loop` mode in the repo its task declares (same-repo children are serialized; only different repos run in parallel — the isolated worktree is gone since 2026-09-07), and registers the pane. |
 | `orchestrator_wait` | The orchestrator's **one** information channel — call it every round. Blocking or, with `timeoutMs: 0`, an instant snapshot; the reply is the same either way (see below). |
-| `orchestrator_answer` | Answer the question a child is holding. The question, every option and the full payload are already in the wait receipt — the child wrote them there, so nothing was read off a screen. Approving a child's loop goal happens here too, boundary-checked against the draft the CHILD wrote. |
-| `orchestrator_instruct` | Say something to a child (`steer` / `followUp`) or stop it (`interrupt`). Nothing is typed at a terminal: the text goes through the child's channel and its own gate injects it with `pi.sendUserMessage`. |
+| `orchestrator_answer` | Answer the question a child is holding. The question, every option and the full payload are already in the wait receipt — the child wrote them there, so nothing was read off a screen. Approving a child's loop goal — or confirming its requirement restatement — happens here too, and is never a rubber stamp: it requires a `crosscheck` (the task id plus one judgement each on file boundary / task goal / delivery station), it is boundary-checked against the draft the CHILD wrote, and a station looser than the approved plan's is refused. |
+| `orchestrator_instruct` | Say something to a child. `mode` IS the delivery, and it **defaults to `interrupt`** (2026-09-17, user decision: a supervisor writes because the child should know NOW) — it aborts the turn in flight and carries its own text, so one call says "stop, do this instead". The one alternative is `steer` (cut into the current turn without aborting it). `followUp` is **refused at this parameter surface** — a correction that arrives after the round it was meant to correct is a correction nobody applied; it remains a channel delivery mode, and the judge's next-round dispatch still uses it. Nothing is typed at a terminal: the text goes through the child's channel and its own gate injects it with `pi.sendUserMessage`. |
 | `orchestrator_notify` | The **only** channel to the human who is not watching the terminal. |
 | `orchestrator_recover` | Bring a child back after its pane vanished — same `--session-id`, so its transcript continues rather than starting over. |
 | `orchestrator_attach` | Take over a running orchestration: plan, children, unanswered questions, and the orphan tasks a crash left behind. |
@@ -58,7 +58,7 @@ The design rule behind every tool below is one line from the user who asked for 
 
 **Waiting is a tool, not a loop — and its receipt is the interface.** `orchestrator_wait` reuses the generic skeleton (`lib/poll-wait.ts`) with its own criteria, and they are not a judge's: an orchestration child is interactive, so it does **not** exit when it finishes — waiting for a process to end would hang forever. The end states are reports. Because it is the one call an orchestrator makes every round, **everything it needs is pushed into the reply** rather than left for it to go and fetch: (1) the health of every child, (2) the questions waiting for it — full text, every option, structured, because the child wrote them into its channel, (3) dead or silent children with the assets that survived them (branch, checkpoint, review verdict) and the action that recovers each, (4) the orchestrator's **own** context usage with the handover call the gate computed for it, and (5) what still blocks `declare_done`. Making an agent remember to check something is not a plan; it is a defect waiting for a busy round.
 
-**Supervision reads a channel, never a screen.** Each child has one file of its own (`~/.pi/agent/rg-channels/<orchestration>/<child>.jsonl`), so isolation is a property of the medium rather than a recipient filter every reader has to remember. The child's own gate reports there — from an **independent timer**, not from agent events, because `judge_wait`, a full precommit and any long tool call all happen inside one turn, and a heartbeat that rode on `agent_settled` / `turn_end` went silent for minutes while the process was perfectly healthy. A known long block is reported as its own state, `waiting-judge` ("waiting for reviewer, 220s in"), which wakes nobody; `dead` is pane existence and `stalled` is a missing heartbeat, which now means what it says. A dialog is raised with an `AbortSignal` and answerable by **either** the human in the pane or the orchestrator through the channel — whoever answers first wins and the other side's box is withdrawn. There is no timeout anywhere in that path: the box staying up *is* the fallback if the orchestrator dies, and a timeout would turn "nobody is watching right now" into a permanent wrong answer.
+**Supervision reads a channel, never a screen.** Each child has one file of its own (`~/.pi/agent/rg-channels/<orchestration>/<child>.jsonl`), so isolation is a property of the medium rather than a recipient filter every reader has to remember. The child's own gate reports there — from an **independent timer**, not from agent events, because an internal wait, a full precommit and any long tool call all happen inside one turn, and a heartbeat that rode on `agent_settled` / `turn_end` went silent for minutes while the process was perfectly healthy. A known long block is reported as its own state, `waiting-judge` ("waiting for reviewer, 220s in"), which wakes nobody; `dead` is pane existence and `stalled` is a missing heartbeat, which now means what it says. A dialog is raised with an `AbortSignal` and answerable by **either** the human in the pane or the orchestrator through the channel — whoever answers first wins and the other side's box is withdrawn. There is no timeout anywhere in that path: the box staying up *is* the fallback if the orchestrator dies, and a timeout would turn "nobody is watching right now" into a permanent wrong answer.
 
 
 **tmux is never typed.** All of it is argv built by `lib/orchestrator-tmux.ts` and executed without a shell; the layout rules (orchestrator alone in the left column, children stacked in the right one) live there once. A bash-layer backstop catches a session that goes around the tools: `kill-session`, `kill-server`, `kill-window`, `new-session`, `new-window`, a global option write and `kill-pane -a` are refused in every gated mode — they destroy or escape the one window the orchestration was agreed in — while `split-window`, `send-keys` and `kill-pane` are redirected to the tool that does the same thing properly. The gate holds **itself** to the same list: its own executor re-validates every argv, so “the gate is exempt from the guard” can never mean “the gate may do the forbidden thing”.
@@ -75,7 +75,7 @@ A fast, cheap model (`deepseek/deepseek-v4-flash`, configurable via `llmGuards.m
 
 | Guard | Deterministic base | What the LLM layer adds |
 |---|---|---|
-| Gate-mode classification (session start) | the rule engine (`lib/task-mode.ts`) alone | **nothing — deliberately.** The mode is the agent's own `set_gate_mode` pick; the engine's tighten-only asymmetry bounds it (a first `normal` still needs the user's dialog, `source: "auto"` keeps the git hooks enforced). In `/tmp`, the agent cannot enter `loop`: `scratchFirstMode` keeps only an explicit `explore` and otherwise applies `normal`. |
+| Gate-mode classification (session start) | the rule engine (`lib/task-mode.ts`) alone | **nothing — deliberately.** The mode is the agent's own `set_gate_mode` pick; the engine's tighten-only asymmetry bounds it (a first `normal` still needs the user's dialog, `source: "auto"` keeps the git hooks enforced). Temp dirs are not clamped: a `/tmp` session with trivial work is only nudged toward `normal`. |
 | AI attribution (`llmGuards.aiAttribution`) | `COMMIT_MSG_FORBIDDEN` regexes | Paraphrases: “pair-programmed with an assistant”, “drafted by a language model” |
 | English check L5/L6 (`llmGuards.englishCheck`) | Unicode non-Latin-script detection | The romanization blind spot: pure-Latin pinyin/romaji commit messages, PR text, and test labels |
 | Ship detect (`llmGuards.shipDetect`) | ~static shell parser (`lib/ship-detect.ts`) | Suspicious git/gh commands with dynamic constructs (base64-piped shells, inline-defined aliases) the static parser cannot resolve — a positive answer *adds* a detection; “none” changes nothing |
@@ -92,6 +92,10 @@ L1  Ship gate (HARD)      tool_call → block git commit/push, gh pr create/edit
                           reviewed HEAD commit tree (content binding);
                           publishing (push, gh pr, declare_done) additionally
                           requires a precommit run whose tests were NOT narrowed
+                          and every ship command must additionally be INSIDE
+                          this round's delivery station (precommit | commit |
+                          pr): a green gate is not permission to travel further
+                          than the user agreed (rules: lib/delivery-station.ts)
 L2  Auto-continuation     agent_settled → if gates unmet, inject
                           [REVIEW_GATE_RESUME] follow-up (recursion-guarded,
                           max 10 rounds, plateau detection; a user ESC abort
@@ -130,6 +134,14 @@ L7  Copilot review loop   after a PR is created/updated → request GitHub
                           extension itself. COMPLETION-only: it gates
                           declare_done and keeps the loop running, and never
                           the ship gate (fixing a finding needs a commit)
+L8a Requirement           loop / orchestrator mode → before any contract is
+    restatement           negotiated, the requirement must be said BACK to the
+                          user and confirmed (`propose_restatement`), together
+                          with where this round stops (precommit | commit | pr).
+                          Without a confirmed restatement `propose_loop_goal`
+                          and `orchestrator_plan({action:"submit"})` refuse
+                          outright and render NO dialog
+                          (rules: lib/restatement.ts)
 L8  Loop-goal approval    loop mode → the exit contract must be NEGOTIATED with
                           the user and approved in an extension dialog
                           (`propose_loop_goal`). L8b: that dialog is not even
@@ -142,7 +154,9 @@ L8  Loop-goal approval    loop mode → the exit contract must be NEGOTIATED wit
                           commit/push/PR at L1, blocks edit/write tool calls at
                           the tool_call layer (per repo — each repo checks its
                           own goal; undecided mode gates edits too, and the
-                          goal body is withheld from the prompt)
+                          goal body is withheld from the prompt). The approval
+                          also carries the round's DELIVERY STATION, which L1
+                          then enforces and `declare_done` checks arrival at
 ```
 
 **Arbiter (circular-block escape).** Layered on top of L1: when the ship gate
@@ -487,7 +501,7 @@ source layer.
 | # | PR #7 finding | How pi-review-gate handles it |
 |---|---------------|-------------------------------|
 | 1 | `test/**/*.test.js` under `/bin/sh` doesn't recurse — 538 tests silently skipped | precommit runner emits a loud `[glob-trap]` warning for `node --test **` scripts; our own `npm test` uses `$(find ...)`; a meta-test reproduces npm's `/bin/sh` expansion and asserts full coverage |
-| 2 | First-fence-only verdict parsing (fail-open) | `parseReviewOutput` scans **all** JSON fences; **worst verdict wins** (BLOCKED > NEEDS_HUMAN > READY); READY with P0/P1 findings downgraded to BLOCKED |
+| 2 | First-fence-only verdict parsing (fail-open) | There is no verdict text to parse: a judge concludes through `judge_conclude` and its structured `verdict`/`findings` travel on the channel report. `adjudicateReviewConclusion` (`lib/review-adjudicate.ts`) applies the one rule that survived the parser — READY carrying an unresolved P0/P1 is downgraded to BLOCKED |
 | 3 | All-steps-skipped precommit showed PASS | Three distinct verdicts: `✅ PASS` / `❌ FAIL` / `⚠️ NO CHECKS RUN`. NO_CHECKS_RUN blocks the ship gate — configure real checks or explicitly `/gate-bypass` |
 | 4 | NotebookEdit / `.ipynb` bypassed every gate | `ipynb` is in the single CODE_EXTENSIONS list; `coalesceToolPath` reads `path`/`file_path`/`notebook_path`/every spelling; NotebookEdit is in the edit-tool set |
 | 5 | Extension lists drifted between hook sites | Exactly ONE `CODE_EXTENSIONS` list in `lib/constants.ts`; a structural test fails if any other file declares its own list |
@@ -703,7 +717,7 @@ Three content sources sit outside a plain tree hash and are handled explicitly:
 The fingerprint **excludes gate-owned paths** (`.pi/`, `.pi-subagents/` — via
 repo-root-anchored git pathspecs, mirrored in the CJS hook script with a digest
 parity test): the gate itself rewrites `.pi/review-gate-state.json` on every
-persist, so including it would let `record_review` immediately invalidate its
+persist, so including it would let a recorded verdict immediately invalidate its
 own READY binding in any repo that does not gitignore `.pi`. Reviews judge
 project code, never Pi's state dirs. (Recommended anyway: add
 `.pi/review-gate-state.json`
@@ -938,14 +952,20 @@ The loop protocol (also available as the `review-loop` skill):
 ```
 work directly on the current branch (no work-branch dance; protected branches
 main/master/dev/develop refuse checkpoints outright — work on a feature branch)
-ask_user(...) → propose_loop_goal(...)   # negotiate the exit contract (the gate audits it)
+ask_user(...) (optional — no cap on questions, ask whenever anything is unclear)
+  → propose_restatement({restatement, station})  # REQUIRED: say the requirement back +
+                                                 # where this round stops; without a confirmed
+                                                 # one the next call refuses and shows no dialog
+  → propose_loop_goal(...)                 # negotiate the exit contract (the gate audits it)
 edit code (batch related edits — the loop is billed per ROUND, not per line)
   → judge_submit({role:"reviewer", task})   # ONE call: the gate runs precommit →
                                             # checkpoint → baseline..HEAD → dispatch
   → the judge's process EXIT wakes this session; the gate already recorded the verdict
   → BLOCKED? fix the findings, then judge_submit again
   → READY?  call declare_done                             # re-validated server-side; work stays on the branch
-  → ship    (git commit now passes the gate)
+  → ship    (only as far as the station allows: `precommit` stops here and the
+             USER commits; `commit` lets git commit through; `pr` lets the
+             whole push → PR chain through)
 ```
 
 **One reviewer per round, whatever the diff size.** There is no tiering:
@@ -965,16 +985,27 @@ wasted round — an earlier design ran both concurrently to save wall time
 and was abandoned for exactly that reason. Design record:
 `docs/execution-model.md`.
 
-The reviewer should end with a fenced JSON verdict:
+The reviewer ends the round by calling `judge_conclude` once, with structured
+fields:
 
-```json
-{"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN",
- "cwd": "<the judge child's own pwd — checked against the reviewed repo>",
- "docSync": "UPDATED" | "NOT_NEEDED",
- "findings": [{"file": "src/x.ts", "line": 42, "severity": "P1", "issue": "..."}]}
+```
+judge_conclude({
+  verdict: "READY" | "BLOCKED" | "NEEDS_HUMAN",
+  cwd: "<the judge child's own pwd — checked against the reviewed repo>",
+  docSync: "UPDATED" | "NOT_NEEDED",
+  findings: [{file: "src/x.ts", line: 42, severity: "P1", issue: "…", evidence: "<optional>"}],
+})
 ```
 
-Review verdicts require **JSON fences**. Precommit verdicts are NOT parsed from
+Those fields are written straight into the round's channel `report` record and
+the opener consumes them as data — no fence is synthesised and none is parsed.
+The signature is role-shaped: a `reviewer` and a `goal-auditor` have **no**
+`notes` parameter (passing one is refused, and the refusal does not spend the
+round's single conclusion), because their conclusion IS the verdict plus the
+findings. An `adviser` keeps `notes` — its product is the prose, and the opener
+quotes it back.
+
+Precommit verdicts are a different gate and are NOT parsed from
 bash output at all: the gate spawns the trusted runner itself
 and records the result from a verified nonce receipt, so a `## Overall: ✅ PASS`
 sentinel printed by any other command can never grant a PASS.
@@ -999,6 +1030,21 @@ one fact:
   answer, all at once only when the user asks for it — until nothing is left
   silently assumed. Facts are the agent's job (read the repo, run the tools);
   only decisions go to the user.
+  The interview itself is OPTIONAL (no doubts ⇒ no questions) and UNCAPPED —
+  the number of questions is not the thing to economize on.
+- **Then RESTATE the requirement — mechanically (since 2026-09-06).**
+  `propose_restatement({restatement, station})` says the requirement back to
+  the user (what it is, an example, BEFORE → AFTER, which steps change) and
+  fixes where this round stops — one of the three delivery stations
+  (`precommit` | `commit` | `pr`), each DEFINED once in
+  `lib/delivery-station.ts` and rendered from there into every tool
+  description and dialog. Without a confirmed restatement on record,
+  `propose_loop_goal` and
+  `orchestrator_plan({action:"submit"})` refuse outright and render **no
+  dialog at all**. The rules — what counts as a restatement, what a missing
+  station degrades to, which ship commands each station allows — live in
+  `lib/restatement.ts` and `lib/delivery-station.ts` and are not restated here.
+
 - **Then the goal-auditor — mechanically (since 2026-08-25).** It is ONE call:
   `propose_loop_goal` dispatches that audit itself (and
   `judge_submit({role:"goal-auditor", task:<the full draft>})` is the same
@@ -1006,13 +1052,12 @@ one fact:
   gate builds the auditor task (with the previous audit's carryover + the draft
   delta on a re-audit), dispatches the judge as its own pi process, and records
   the verdict when it exits.
-  The **extension** parses the auditor's JSON fence
-  itself (PASS ⇔ a `READY` verdict, which verdict-parse already withholds from
-  a fence carrying unresolved P0/P1, and a salvaged fence can never be READY)
+  The **extension** reads the auditor's own structured conclusion off its
+  channel report (PASS ⇔ a `READY` verdict with no unresolved P0/P1 finding)
   and hashes the audited text itself — there is no `passed` parameter, so the
-  agent cannot ATTEST the outcome (it can only carry the auditor's output, the
-  same trust boundary as `record_review`: a hand-written `auditor_output` is
-  not defended against, see the limits list below). A FAIL means: fix the
+  agent cannot ATTEST the outcome, and there is no recorder tool it could call
+  with a hand-written verdict either: the recorder is a plain function the gate
+  invokes when the round lands. A FAIL means: fix the
   objections and re-audit; the revised text needs its own PASS. The goal text
   is written in **Simplified Chinese** (identifiers, paths and code tokens stay
   English); the auditor blocks a draft that is not.
@@ -1279,10 +1324,10 @@ gated **per repo**:
   approved **for repo B** — `propose_loop_goal`'s `repo` parameter binds a
   goal to a specific repo (default: the session repo); approving only repo
   A's goal leaves B's edit/write calls blocked.
-- **Explicit target repo**: the judge tools (`judge_submit` / `judge_read` /
-  `judge_wait` / `judge_close`) take a `repo` argument, and it is **mandatory
+- **Explicit target repo**: the judge tools (`judge_submit` / `judge_spawn` /
+  `judge_answer` / `judge_recover`) take a `repo` argument, and it is **mandatory
   once the session has edited more than one repo** — they refuse to guess, and
-  so do the internal steps a round runs (`record_review` / `run_precommit`).
+  so do the steps a round runs (the verdict recorder / `run_precommit`).
   Run the loop once per repo, naming it.
   Historically they wrote to whichever repo was edited LAST, and only an edit
   could move that target: a session whose last edit was in repo B could never
@@ -1386,12 +1431,15 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 > **This table lists only what a model can actually call.**
 > Ten entries left this table on 2026-08-30 (philosophy three: never run two
 > implementations of the same thing). `run_precommit`, `review_checkpoint`,
-> `prepare_review`, `prepare_adviser`, `prepare_goal_audit`, `record_review` and
-> `record_goal_prereview` are **still the implementations** the gate runs —
+> `prepare_review`, `prepare_adviser` and `prepare_goal_audit` are **still the
+> implementations** the gate runs —
 > `judge_submit` and `propose_loop_goal` call them internally, so every
 > mechanical check lives in exactly one place — but they are registered into
 > the extension's own `internalHost` instead of into pi, and a model cannot
-> see the names. What they do is still exactly how the gate works, so their
+> see the names. `record_review` and `record_goal_prereview` went further on
+> 2026-09-04: they are not registered anywhere at all, on any host, and are
+> plain functions the gate calls when a round's report lands.
+> What all of them do is still exactly how the gate works, so their
 > descriptions were not deleted: they moved to
 > [Internal implementations](#internal-implementations--not-registered),
 > below the table. Anything in them that reads like an instruction to the
@@ -1403,12 +1451,14 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 |------|---------|
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal`/`orchestrator` + a reason). The agent's pick IS the classification — no classifier model reviews it. On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) `loop`, `orchestrator` and `explore` apply directly with source `auto`, while `normal` still pops the confirm dialog. Everything delegates to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. `orchestrator` additionally has two environment preconditions checked before the engine runs: no `$TMUX` (its children ARE panes) and "this session is itself somebody's orchestration child" (it would take over the channel of the orchestration supervising it) are both refused. |
 | `ask_user` | The ONE way to reach the user — requirement ambiguity, a product/design decision, scope trade-offs, the loop-goal interview. Calling it **pauses** the loop until the answers come back, which is why a question written into the reply and an ended turn is not an alternative: that costs a whole iteration and may not even read as a question. The extension runs the interview itself (one question at a time with its `N / M` progress, choices when the call supplied options, free text otherwise, plus "answer in chat" and "skip the rest"), and every answer returns at once with the unanswered ones marked. It replaced `pause_for_question`, which was deleted on 2026-08-29: that tool only *paused* and carried exactly one question, leaving the agent to restate it in the reply — two ways to reach the user, one of which delivered nothing. Asking permission to continue routine loop work is still prohibited. |
-| `judge_submit` | The ONE entry point for a judge round (`reviewer` / `adviser` / `goal-auditor`). The call passes WHO and WHAT; the gate owns everything procedural — session id, working directory, spawn vs. resume vs. kill, the completion listener — so no session id, title or directory is ever passed in. For `reviewer` it runs the whole chain itself: the FULL precommit, the checkpoint commit (it stamps the checkpoint marker), the `baseline..HEAD` computation and the finding-stream file, then the dispatch; any step that fails sends the round back with the reason instead of leaving it half-submitted. The judge child is a fresh non-interactive pi process (`pi -p --session-id`, deterministic per role+repo, no review-gate extension loaded, `--exclude-tools edit,write`); the `subagent` dispatch surface was retired 2026-09-06 with the pi-subagents companion, so `judge_submit` is the only way a judge role can run. It returns as soon as the round is SUBMITTED, not when the judge is done: the child's process EXIT wakes this session, and the gate reads that round's output and records the verdict itself. A role whose process is still RUNNING refuses the round (nothing is silently dropped) unless `fresh: true` kills it first. POLISH GATE: after two consecutive READYs, or the same file polished for three rounds, a reviewer round without a `reason` is refused, and the reason travels into the reviewer's task text. |
-| `judge_read` | Snapshot of a judge role — never a wait: its session state (running / finished + exit code), the tail of its stdout log, the conclusion parsed from its transcript (the last assistant text carrying a verdict fence), and its stderr tail. The process may already be gone; the transcript and the logs are not. |
-| `judge_wait` | Block until a role's current round is over, then return what it produced. This is the FALLBACK, not the normal path — `judge_submit` already wakes the session on completion, so it is for when there is genuinely nothing else to do. Three independent criteria end the wait: the process exited, its exit-code file landed, or a verdict/question fence is already in that round's stdout. On timeout it returns the current state instead of failing, so the decision stays with the agent. |
-| `judge_close` | Terminate a judge role's pi PROCESS (SIGTERM) and drop it from the registry. Not a memory wipe: the transcript stays on disk, so the next dispatch of that role resumes the same conversation. Idempotent — an already-finished child still closes successfully. `declare_done` requires an open judge child to be closed out (its verdict is recorded on exit, or by this tool). |
-| `orchestrator_plan` / `orchestrator_spawn` / `orchestrator_wait` / `orchestrator_answer` / `orchestrator_instruct` / `orchestrator_notify` / `orchestrator_recover` / `orchestrator_attach` / `orchestrator_handoff` / `orchestrator_close` | The orchestration layer, available only in `orchestrator` mode — see [The orchestrator role](#the-orchestrator-role-a-project-manager-inside-the-gate). The decisions live in `lib/orchestrator-*.ts` (plan state machine, the plan pre-audit, whether an edit widened anything, file-boundary algebra, the supervision channel and its seven states, pane decoration, tmux argv construction, the bash backstop, the 14 constraints, the handoff protocol); the extension only wires them up. |
-| `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept the work **stays on the branch it was done on** (2026-09-07: the gate no longer merges anything — merging/rebasing/pushing is the user's own git workflow). It also clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
+| `judge_submit` | The ONE entry point for a judge round (`reviewer` / `adviser` / `goal-auditor`). The call passes WHO and WHAT; the gate owns everything procedural — session id, working directory, pane open vs. channel-queued vs. fresh kill, the channel verdict — so no session id, title or directory is ever passed in. For `reviewer` it runs the whole chain itself: the FULL precommit, the checkpoint commit (it stamps the checkpoint marker), the `baseline..HEAD` computation and the finding-stream file, then the dispatch; any step that fails sends the round back with the reason instead of leaving it half-submitted. Each review runs in its OWN tmux pane (interactive pi, deterministic session id per role+repo, review-gate loaded in judge mode, `--exclude-tools edit,write`); the `subagent` dispatch surface was retired 2026-09-06 with the pi-subagents companion, so `judge_submit` is the only way a checkpoint round can run. It returns as soon as the round is SUBMITTED, not when the judge is done: the round ends when its channel report lands, and the opener records the verdict from the report's exact bytes. A living pane takes every new round through its channel (nothing is silently dropped); `fresh: true` kills the pane first. POLISH GATE: after two consecutive READYs, or the same file polished for three rounds, a reviewer round without a `reason` is refused, and the reason travels into the reviewer's task text. |
+| `judge_wait` | Wait for YOUR OWN judge's next MESSAGE and return it — MESSAGE-DRIVEN, not a poll-until-finished: a newly streamed finding, a question the judge asked, the round's channel report (the gate records it) or a dead pane each return immediately, carrying the content itself (finding bodies, the question with its options, the verdict and record note) so nothing has to be read out of a stream or transcript file. Per-judge cursors make each message arrive once: the consumed report id and finding count live on the judge's registry entry, and the announced question ids are shared with the settle path. Only the opener may wait. It is the FALLBACK, not the reflex — do the deterministic work you have first (`lib/agent-directives.ts`'s `buildWaitDiscipline` is the one wording of that rule, and the gate's settle wake-up remains the backstop when you are not waiting). It came BACK to the agent surface on 2026-09-05: with the gate forbidding "end the turn to be woken" and no waiting tool available, the only move left was a hand-written `sleep` loop, which never settles — a measured nine minutes with a finished review sitting unrecorded. |
+| ~~`judge_read`~~ / `judge_close` | `judge_read` is REMOVED (2026-09-05) — a zero-caller path: not on the agent surface and called by no gate chain, so its only remaining effect was to give injected texts a tool name nobody could reach. `judge_close` stays on the gate's internal host for its own audit chains (they close the auditor they opened); `declare_done` cascade-closes the rest. |
+
+| `judge_spawn` / `judge_answer` / `judge_recover` | Pane-judge lifecycle, opener-owned: open a goal/plan review in its own pane (the gate builds the audit task and registers the draft/hash, so the report is recordable; goal and plan serialize on one judge id), answer your own review's open question, re-open a dead pane under the same session id. Any other session's call on them is refused fail-closed. |
+| `orchestrator_plan` / `orchestrator_spawn` / `orchestrator_wait` / `orchestrator_answer` / `orchestrator_instruct` / `orchestrator_notify` / `orchestrator_recover` / `orchestrator_attach` / `orchestrator_handoff` / `orchestrator_close` | The orchestration layer, available only in `orchestrator` mode — see [The orchestrator role](#the-orchestrator-role-a-project-manager-inside-the-gate). The decisions live in `lib/orchestrator-*.ts` (plan state machine, the plan pre-audit, whether an edit widened anything, file-boundary algebra, the supervision channel and its child states — `CHILD_STATES` in `lib/orchestrator-child-state.ts` is the list, and nothing else keeps a copy of it — pane decoration, tmux argv construction, the bash backstop, the 14 constraints, the handoff protocol); the extension only wires them up. |
+| `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7), an unapproved loop goal (L8), and — in loop mode — ARRIVAL at the round's delivery station (`commit` needs a committed worktree; `pr` additionally needs evidence that a PR was opened — a `gh pr create` the gate itself watched succeed, or a PR number the Copilot cycle resolved; `precommit` adds nothing). On accept the work **stays on the branch it was done on** (2026-09-07: the gate no longer merges anything — merging/rebasing/pushing is the user's own git workflow). It also clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
+| `propose_restatement` | Say the requirement BACK to the user and get it confirmed — the mandatory step before `propose_loop_goal` (loop) or `orchestrator_plan({action:"submit"})` (orchestrator), both of which refuse and render **no dialog** without a confirmed restatement on record (L8a). The text is Simplified Chinese and must carry a BEFORE → AFTER contrast; `station` fixes where this round stops (`precommit` \| `commit` \| `pr`) and is what L1 and `declare_done` later enforce. An orchestrator may confirm it on the user's behalf — with a `crosscheck`, and never at a station looser than the approved plan's. Rules: `lib/restatement.ts` + `lib/delivery-station.ts`. |
 | `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first with `ask_user` (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it), and draft it in Simplified Chinese. **REQUIRED FIRST (L8b):** the draft must pass an audit by the dedicated `goal-auditor` role — and **this one call runs that audit itself**: it builds the auditor's task (carrying the previous verdict, its findings and the computed draft delta when this is a re-audit), dispatches the judge, waits for it, adjudicates the verdict (**only P0/P1 block**, so a READY carrying P2/Nit findings is a PASS and never buys another round) and records the PASS bound to the sha256 of the audited text. A failed audit comes back with the objections and renders **NO dialog at all** — fix them and call this again, which makes this a minutes-long call. Only on a PASS does the **extension** show the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 AND blocks edit/write tool calls until approved (each repo checks its own goal; the `repo` parameter binds the goal to a specific repo — required to unlock edit/write in a second repo, `gitRootOfDir(repo)` decides which one); the confirm dialog no longer asks for an optional reason (a rejection still asks for the reason, carried back for renegotiation). An unapproved goal's body is withheld from the prompt. |
 | `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. It also decides **availability from evidence** (a Copilot review on this PR or in the repo's last 20 PRs ⇒ CONFIRMED; owner in `copilotReview.owners` ⇒ ASSUMED; neither ⇒ UNKNOWN, and a silent Copilot is then released instead of waited for). The request itself is never vetoed by a read-back — those cannot see a dropped request. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. There is **no round cap**; the only budget is the 20-minute wait for a review that never arrives. |
 | `check_copilot_review` | Verify what Copilot's review left open (L7). The extension runs the GraphQL query itself and classifies each thread: resolved ⇒ handled, answered by you ⇒ handled, Copilot spoke last ⇒ still yours (listed with thread IDs and the exact `resolveReviewThread` / reply mutations) — regardless of which commit the review was submitted against, so a push cannot bury a finding. Returns AWAITING / OPEN / SATISFIED — an outcome the agent cannot report for itself. A cycle released with findings still open lists them for you to report to the user. |
@@ -1418,24 +1468,35 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 
 ### Internal implementations — not registered
 
-These four are **not tools**: they are registered into the extension's own
+These three are **not tools**: they are registered into the extension's own
 `internalHost`, so no model can see or call them. `judge_submit` runs
 `run_precommit`, `review_checkpoint` and `prepare_review` as steps of its
-submission chain, and calls `record_review` itself from the judge child's
-process-exit callback; `propose_loop_goal` dispatches the goal audit and
-records it through `record_goal_prereview` the same way. That is how every
+submission chain. That is how every
 mechanical check ends up living in exactly one place. Their
 descriptions are kept because they are still exactly how the gate behaves — but
 read them as the gate's internal steps, not as things to sequence by hand.
 (`review_checkpoint`, `prepare_adviser` and `prepare_goal_audit` moved the same
 way; `review_spawn`, `review_watch` and `review_send` were deleted outright.)
 
+The two RECORDERS went one step further (2026-09-04): `record_review` and
+`record_goal_prereview` are gone from every surface, internal included, and are
+plain functions the gate calls when a round's report lands
+(`recordReviewVerdict` in the extension, `recordGoalPrereview` in
+`lib/goal-prereview-tools.ts`). Their tool shape existed only to carry raw text
+that had to be parsed back into a verdict; the conclusion arrives structured
+now, so there is nothing left for a caller to pass. What they DO is unchanged
+and described under [the review loop](#the-review-loop) and the loop-goal
+section above: the commit-target integrity check (a READY is withheld when the
+round was never prepared, downgraded to BLOCKED as STALE when HEAD moved past
+the reviewed commit, and bound to the reviewed commit's TREE), the `cwd`
+consistency check, the round history for plateau/oscillation detection, and the
+L8b PASS record bound to the audited draft's hash.
+
 | Internal step | What it does |
 |---------------|--------------|
-| `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). It verifies the COMMIT TARGET mechanically (2026-08-27 model): a READY is withheld when the round was never prepared (no registered `baseline..HEAD` target), downgraded to BLOCKED as STALE when HEAD moved past the reviewed commit (a new checkpoint landed after prepare), and bound to the reviewed commit's TREE (content binding — a later squash of the checkpoint chain preserves it). A READY must also carry the judge's own `pwd` (a required field of the verdict schema), which the gate compares with the repo the round was prepared for — this catches a verdict produced against the wrong repo or carried over from another review; it does not measure the pane, so it is not proof against a fabricated value. Mechanical, so the agent cannot forget it. |
-| `prepare_review` | ADVANCED / internal — `judge_submit({role:"reviewer"})` runs this itself as step 3 of the chain. Registers the COMMIT target for the single reviewer of this round: requires the checkpoint from `review_checkpoint` (the only commit allowed before a READY), computes the immutable range `baseline..HEAD`, writes the append-only finding-stream file and returns the ready-made task text. In a copy of its own the reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. A READY recorded after HEAD moved (a new checkpoint during the review) does NOT bind: `record_review` compares HEAD with the registered reviewed commit and downgrades to BLOCKED (STALE), so an approval can never cover commits no reviewer saw. A READY must also carry the judge's own `pwd`, which `record_review` compares with the reviewed repo (see its row above). Round-18 POLISH GATE: when the last two recorded rounds both verdict READY, or the same file has carried P2/Nit findings in three consecutive rounds, the tool REFUSES a `reason`-less call; the supplied reason is persisted (`lastPolishReason`) and injected into the next reviewer's task text, so a "polish" round is visible to the independent judge. |
+| `prepare_review` | ADVANCED / internal — `judge_submit({role:"reviewer"})` runs this itself as step 3 of the chain. Registers the COMMIT target for the single reviewer of this round: requires the checkpoint from `review_checkpoint` (the only commit allowed before a READY), computes the immutable range `baseline..HEAD`, writes the append-only finding-stream file and returns the ready-made task text. In a copy of its own the reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. A READY recorded after HEAD moved (a new checkpoint during the review) does NOT bind: the verdict recorder compares HEAD with the registered reviewed commit and downgrades to BLOCKED (STALE), so an approval can never cover commits no reviewer saw. A READY must also carry the judge's own `pwd`, which the recorder compares with the reviewed repo. Round-18 POLISH GATE: when the last two recorded rounds both verdict READY, or the same file has carried P2/Nit findings in three consecutive rounds, the tool REFUSES a `reason`-less call; the supplied reason is persisted (`lastPolishReason`) and injected into the next reviewer's task text, so a "polish" round is visible to the independent judge. |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. The full output is never inlined into the reply — a failing suite can emit megabytes — but the run is **no longer silent while it happens**: the runner writes a **plan preamble** (every step and the exact command, plus the ones it is skipping and why) BEFORE the first check starts, then streams the running step's stdout/stderr as it arrives, and the extension **tails that log and forwards it through the tool's `onUpdate`**, so a multi-minute precommit shows live progress instead of nothing. Liveness is a *read* of the log, never a second write channel: the runner's stdio stays a file descriptor (a pipe would deadlock the detached runner at its 64KB buffer), and the tail's final flush on stop is what makes an aborted or timed-out run's log complete. The ordered `▶ … ◀` blocks still read in declaration order — only the step the log is currently at streams, so nothing is printed twice. Receipt and cache tails are bounded in BYTES as well as lines (one un-newlined 64 MiB line is still one line, and a receipt over 1 MiB is refused — which would turn a passing run into ERROR). The **test** step additionally gets `<rootDir>/.pi/` excluded so a run never executes the disposable test copies under `.pi/review-snapshots/`. That rewrite is deliberately narrow, because the jest CLI flag OVERRIDES the config value: it happens only for a single simple `jest` command that uses **default config discovery**, and the repo's own `testPathIgnorePatterns` (read from `jest --showConfig`) are merged in rather than replaced. A command that selects its own config (`--config`, `--rootDir`, `--projects`, `--selectProjects`, …), a compound or non-jest script, or a `--showConfig` that cannot be read are all left **verbatim**, with the reason recorded in the log — reproducing jest's own CLI parsing well enough to query the right config is not something the gate should be guessing at, and a wrong guess would silently drop the exclusions the project actually relies on. |
-| `record_goal_prereview` | Record the dedicated `goal-auditor` role's audit of a DRAFT goal (L8b). Pass the draft text plus the auditor's FULL raw output: the **extension** parses the JSON fence itself (PASS ⇔ a `READY` verdict — verdict-parse already downgrades a READY carrying unresolved P0/P1, and a salvaged fence is never READY) and computes the text hash itself, so there is no `passed`/`hash` parameter an agent could set. No parseable fence ⇒ `isError` and **nothing** is written (fail-closed). BLOCKED/NEEDS_HUMAN ⇒ a FAIL record. Latest-only by design, and repo-resolved exactly like `propose_loop_goal` (`gitRootOfDir`, never `resolveToolRepo` — a goal is audited before the first edit lands). |
+
 
 ### Arbiter (a narrow, fail-closed gate exception)
 
@@ -1593,16 +1654,17 @@ including a content hash, by editing the checker too):
   payloads, so file-based messages skip the in-session attribution/L5 checks.
   The commit-msg git hook (L3) still scans the FINAL message file and remains
   the deterministic backstop for attribution.
-- Fabricating the reviewer output fed to `record_review` — or the
-  `auditor_output` fed to `record_goal_prereview` — the reviewer and the
-  goal-auditor are judge processes whose output necessarily transits the main
-  agent, so both verdicts rest on the cooperative assumption (the main agent
-  can equally write the sidecar directly). What the extension DOES guarantee is
-  that no agent-attested boolean is accepted: it parses the verdict fence and
-  computes the text hash itself, so a forgery has to counterfeit a whole
-  reviewer output rather than flip a flag. Making it unforgeable would require
-  the extension to spawn the judge itself and verify a receipt, like
-  `run_precommit` (future hardening), not a runtime source check.
+- Forging a judge's channel `report` record on disk — the reviewer and the
+  goal-auditor are separate pi processes and their conclusions reach the gate
+  through the channel file, which the main agent's own process can write (it
+  can equally write the sidecar directly), so both verdicts rest on the
+  cooperative assumption. What the extension DOES guarantee is that no
+  agent-attested boolean is accepted, and that there is no TOOL to attest one
+  through: `judge_conclude` is registered only inside a judge session, and the
+  two recorders are plain functions the gate calls when a round's report lands
+  — the agent has no call it could make with a hand-written verdict. Making it
+  unforgeable would require the extension to verify a receipt from the judge
+  process, like `run_precommit` (future hardening), not a runtime source check.
 - **Git's content-transformation pipeline as a hidden fingerprint input.** The
   digest asks *git* what the worktree contains, so anything that reconfigures
   git's answer — `core.excludesFile`, `.gitattributes` filters/eol with the
@@ -1795,7 +1857,7 @@ it is missing — see the fail-closed inventory.)
 
 ```bash
 npm install     # devDependencies: typescript + the Pi extension API types
-npm test        # 990+ tests, node:test native TS (no build step)
+npm test        # 2689 tests as of 2026-09-17, node:test native TS (no build step)
 npm run typecheck  # tsc --noEmit
 ```
 
@@ -1890,11 +1952,17 @@ heuristic — `sed -i`, an external editor, or a background process all change
 the worktree with no event to observe. The only memo is
 `advisoryChangeToken()`: a filesystem probe (porcelain status + size/mtime of
 every changed path) that gates a *prompt-rendering* recompute. Every
-enforcement path — ship blocks, `declare_done`, `record_review`, arbitration,
+enforcement path — ship blocks, `declare_done`, the verdict recorder, arbitration,
 and the git hooks — recomputes the real fingerprint unconditionally, so a
 stale memo can only produce a stale prompt, never a stale gate decision.
 
-Layout:
+Layout — an EXCERPT, not the inventory. `lib/` has well over a hundred modules
+and this list names the ones a newcomer meets first; the complete table, with
+one line per module, is §5 of [`docs/module-map.md`](docs/module-map.md), and
+it is the one that cannot go stale (`test/module-map.test.ts` diffs it against
+`lib/` in both directions). Read the map before deciding where new code goes —
+§7 of the same file additionally records which pieces of doctrine are copied
+onto several surfaces and which test pins each copy.
 
 ```
 extensions/review-gate.ts     Pi extension (L1 + L2 + L4, tools, commands)
@@ -1913,29 +1981,36 @@ lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count/testSco
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)
 lib/fingerprint.ts            worktree fingerprint (content-addressed git tree hash; staging-invariant) + tree increments for incremental review
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
-lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
+lib/review-scope.ts           incremental-review scoping + escalation thresholds (pure decision; renders no text)
+lib/review-carryover.ts       THE incremental review contract's one authoritative source: previous verdict → open findings → mechanical delta → consistency-scan and reopen clauses (pure)
 lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running judge child, notice text (pure)
 lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
-lib/judge-process.ts          judge-child lifecycle: `pi -p --session-id` spawn (argv, no shell), stdout/stderr tee, liveness from the child's own exitCode
-lib/judge-lifecycle.ts        judge round decisions (pure): work dir per role+repo, dispatch vs. refuse-busy, the three end-of-round criteria, judge_wait's reply, goal-audit adjudication
+lib/judge-process.ts          judge identity (deterministic session id across panes/rounds/restarts) and per-session scratch dir helper
+lib/judge-lifecycle.ts        judge round decisions (pure): work dir per role+repo, dispatch vs. refuse-busy, the three end-of-round criteria, the internal wait's reply, goal-audit adjudication
 lib/poll-wait.ts              the wait skeleton with its criteria injected (pure loop: probe → publish → stop on a criterion, the budget or an abort)
 lib/progress-stream.ts        live tool progress: pure frame rendering + a throttled reporter over `onUpdate`, and the slow-call notice for the LLM guards
 lib/text-appeal.ts            A-class text appeals (pure): content digest, quota + re-roll brakes, the single-use pass, the arbiter brief
 lib/git-rewrite.ts            message-only rewrites (pure): tree-equality test, `--amend` recognition, the branch a rebase will land on
+lib/delivery-station.ts       THE delivery station: the three values DEFINED once (precommit/commit/pr), which ship commands each allows, the block text and its way out, and arrival
+lib/restatement.ts            the requirement restatement the gate demands before any contract — what counts as one, the refusal skeleton, the consent surfaces
+lib/loop-goal.ts              the loop goal (L8): the exit contract, its approval binding, and the per-turn directives that teach the negotiation
+lib/orchestrator-child-state.ts   CHILD_STATES + the classification of what a supervised child is doing (pure; the states come from the child's own reports)
+lib/judge-pane.ts             the judge in its own tmux pane: argv, the deterministic session id, pane lifecycle and scratch reclamation
 lib/judge-prompt.ts            judge role resolution (repo → package → ~/.pi/agent/agents), model spec, launcher files
 lib/parallel-review.ts        single-review contract: reviewer prompt + verdict schema (pure, no engine)
 lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
 lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)
 lib/blocked-marker.ts         .blocked marker ownership (record failure, reclaim only our own/orphans)
-lib/verdict-parse.ts          all-fence worst-wins verdict parser
+lib/precommit-parse.ts        precommit `## Overall:` sentinel parser (worst wins; FAIL terminal)
+lib/review-adjudicate.ts      reviewer adjudication over the judge's STRUCTURED conclusion: READY+open P0/P1 → BLOCKED, findings count, coarse cross-round fingerprints
 scripts/precommit-runner.mjs  PASS/FAIL/NO_CHECKS_RUN runner; fast/full lanes, per-step cache, nonce receipt, streamed step output
 scripts/precommit-plan.mjs    pure lane planning: related-test derivation + per-step cache scope
 scripts/precommit-cache.mjs   per-step result cache keyed on git trees
 scripts/install-git-hooks.sh  chained installer for L3
 hooks/pre-commit|pre-push|commit-msg
 skills/review-loop/SKILL.md   the loop protocol as a Pi skill
-test/                         990+ tests incl. PR #7 regression suite
+test/                         2689 tests as of 2026-09-17, incl. the PR #7 regression suite
 ```
 
 ## License

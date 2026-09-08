@@ -287,7 +287,7 @@ export function registerAdvisoryPrepareTools(host: ToolHost, deps: AdvisoryPrepa
       "ADVANCED / internal: `judge_submit({role:\"adviser\", task:<your question>})` calls this itself " +
       "and dispatches the adviser — call it directly only to read the brief without consulting anyone. " +
       "Builds the brief for an `adviser` consultation on the CURRENT loop goal: (a) the main " +
-      "session's transcript location for ON-DEMAND reading (as its own pi process the adviser does " +
+      "session's transcript location for ON-DEMAND reading (running in its own pane the adviser does " +
       "not inherit this conversation), " +
       "(b) the artifact path where the adviser appends its conclusion, and (c) when a previous " +
       "consultation of this goal exists, that conclusion plus the files changed since, so the adviser " +

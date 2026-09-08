@@ -38,6 +38,12 @@ import {
   normalizeBoundaries,
   type NormalizedBoundary,
 } from "./orchestrator-boundaries.ts";
+import {
+  deliveryStationLine,
+  parseDeliveryStation,
+  type DeliveryStation,
+  type StationAudience,
+} from "./delivery-station.ts";
 
 /** Repo-root-relative location of the plan (gate-excluded via `.pi/`). */
 export const PLAN_RELPATH = ".pi/orchestrator-plan.json";
@@ -105,6 +111,19 @@ export interface OrchestratorPlan {
   tasks: PlanTask[];
   decisions: PlanDecision[];
   maxParallel: number;
+  /**
+   * WHERE THIS ORCHESTRATION STOPS (2026-09-06) — one of the three stations
+   * DEFINED in lib/delivery-station.ts (`describeDeliveryStation` /
+   * `describeDeliveryStationEn`). This comment deliberately does not repeat
+   * what each one means: that sentence has ONE home.
+   *
+   * Always present after {@link parsePlan}: a plan file written before the
+   * field existed, or carrying an unreadable value, is READ as `precommit`
+   * (lib/delivery-station.ts) — the strictest station, allowing no ship
+   * command at all. Part of {@link canonicalPlanText}, so raising it is a
+   * change the user is asked about again.
+   */
+  deliveryStation: DeliveryStation;
   updatedAt: string;
 }
 
@@ -281,6 +300,11 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
     tasks,
     decisions,
     maxParallel: clampMaxParallel(obj.maxParallel),
+    // Absent / misspelled ⇒ `precommit`, exactly like `clampMaxParallel`
+    // clamps rather than refuses: a plan is rejected over things a human has
+    // to fix (a missing boundary, a dependency cycle), never over a field
+    // whose safe reading is the strictest one.
+    deliveryStation: parseDeliveryStation(obj.deliveryStation),
     updatedAt: asString(obj.updatedAt) || now,
   };
   return { ok: problems.length === 0, plan: problems.length === 0 ? plan : undefined, problems };
@@ -353,9 +377,16 @@ export function isLegalTransition(from: TaskStatus, to: TaskStatus): boolean {
  * parallelism are what the USER approved (they are in `canonicalPlanText`);
  * a status is what EXECUTION produced (it is deliberately excluded from it).
  * Rewriting the approved content therefore has no business destroying the
- * record of what already ran — so status and note are taken from the task
- * with the same id, and only a genuinely NEW task starts at `pending`. A task
- * that disappeared from the plan takes its status with it.
+ * record of what already ran — so the STATUS is taken from the task with the
+ * same id, and only a genuinely NEW task starts at `pending`. A task that
+ * disappeared from the plan takes its status with it.
+ *
+ * The NOTE is different and used to be lumped in with the status, which is the
+ * defect: a note is prose for a human, it is excluded from `canonicalPlanText`
+ * and from the approval snapshot exactly as a status is, but unlike a status
+ * nothing else can write it during a rewrite. Pinning it to the old value made
+ * every note update a `write` carried disappear without a word. So a note the
+ * caller SUPPLIES wins, and only an omitted one inherits the previous value.
  *
  * `applyTaskStatus` stays the only way a status CHANGES; this is the only way
  * one SURVIVES. Never mutates either input.
@@ -374,7 +405,15 @@ export function mergeTaskProgress(
       return {
         ...task,
         status: kept.status,
-        ...(kept.note === undefined ? {} : { note: kept.note }),
+        // The NOTE is the caller's to rewrite (2026-09-06, user decision).
+        // Keeping the old one unconditionally silently dropped every note
+        // update a `write` carried — measured in four consecutive rounds, and
+        // the reason this very task id ends in `-v2`. A note grants nothing:
+        // it is absent from `canonicalPlanText`, from the approved snapshot
+        // and from `decideApprovalCarry`, so accepting it cannot widen what
+        // the user approved. An omitted note still inherits the old one, so a
+        // rewrite that simply does not mention notes does not wipe them.
+        ...(task.note === undefined && kept.note !== undefined ? { note: kept.note } : {}),
       };
     }),
   };
@@ -573,6 +612,9 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
     title: plan.title,
     intent: plan.intent,
     maxParallel: plan.maxParallel,
+    // The delivery station IS approved content: `pr` grants the orchestration
+    // the authority to publish, which nobody may hand it silently.
+    deliveryStation: plan.deliveryStation,
     tasks: plan.tasks.map((t) => ({
       id: t.id,
       title: t.title,
@@ -589,12 +631,34 @@ export function planHash(plan: OrchestratorPlan): string {
   return createHash("sha256").update(canonicalPlanText(plan), "utf8").digest("hex");
 }
 
+/**
+ * Does this value have the shape {@link planHash} produces?
+ *
+ * The PRODUCER owns the shape. Every record that carries authority — the
+ * approved hash, its lineage — is read back from an untrusted sidecar and has
+ * to be shape-checked first, and the check was being written out again at
+ * each of those sites. A rule copied per caller drifts, and an authorization
+ * rule that drifts drifts open: one site relaxing to a 63-char or
+ * upper-case digest would admit a record the others refuse.
+ */
+export function isPlanHash(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
 /** One-screen rendering for the approval dialog and the takeover report. */
-export function formatPlanSummary(plan: OrchestratorPlan, repoRoot = ""): string {
+export function formatPlanSummary(
+  plan: OrchestratorPlan,
+  repoRoot = "",
+  audience: StationAudience = "agent",
+): string {
   const lines: string[] = [
     `${plan.title}`,
     `目标：${plan.intent}`,
     `并行上限：${plan.maxParallel}`,
+    // Most of this summary's readers are AGENTS (tool replies, the audit
+    // brief); the one that is not — the approval transcript — asks for the
+    // user's own person explicitly (round-2 P2).
+    deliveryStationLine(plan.deliveryStation, audience),
     "",
   ];
   for (const t of plan.tasks) {

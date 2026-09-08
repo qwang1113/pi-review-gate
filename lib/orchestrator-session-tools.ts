@@ -22,16 +22,32 @@
  */
 
 import { Type } from "typebox";
-import { pollUntil } from "./poll-wait.ts";
+import { pollUntil, type PollWaitResult } from "./poll-wait.ts";
+import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
+
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
+
+/**
+ * The orchestration deps plus ONE thing lib/orchestrator-deps.ts has no reason
+ * to know about: how many JUDGE panes this session has decorated.
+ *
+ * It exists for a single decision — may this close take the window's shared
+ * label bar down (`releasesWindowLabels`)? A project manager's window holds
+ * both kinds of decorated pane, and counting only one kind is how the release
+ * went wrong twice: it blanked a running review's border, or it left the bar
+ * switched on forever. OPTIONAL, so a deps object that predates this (a test
+ * fixture, another caller) simply reports no judge panes.
+ */
+export interface OrchestratorSessionDeps extends OrchestratorDeps {
+  decoratedJudgePanes?(): number;
+}
 import {
-  buildKillPaneArgv,
-  buildHandoffPaneArgv,
-  buildHidePaneLabelsArgv,
-  parseSpawnedPaneId,
-} from "./orchestrator-tmux.ts";
-import { isLastDecoratedChild } from "./orchestrator-pane-decor.ts";
+  closeSessionPane,
+  countDecoratedPanes,
+  openSessionPane,
+  releasesWindowLabels,
+} from "./session-factory.ts";
 
 import { spawnAuthorization } from "./orchestrator-gate.ts";
 import {
@@ -56,6 +72,7 @@ import {
 } from "./orchestrator-wait.ts";
 import {
   decideSupervisionEvents,
+  reportedDoneIds,
   superviseChildren,
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
@@ -73,6 +90,21 @@ import {
   requireOrchestratorMode,
 } from "./orchestrator-tool-kit.ts";
 
+
+/**
+ * The `timeoutMs: 0` snapshot, expressed as the waiting skeleton's own result:
+ * a wait that did not wait. Nothing is invented — `done` is the SAME criterion
+ * the blocking path polls on, so the two branches cannot drift apart.
+ */
+function snapshotResult(observation: ChildWaitObservation): PollWaitResult<ChildWaitObservation> {
+  return {
+    observation,
+    done: evaluateChildWait(observation).done,
+    aborted: false,
+    stalledInProbe: false,
+    waitedMs: 0,
+  };
+}
 
 
 /**
@@ -137,10 +169,15 @@ async function doWait(
   }
 
   let snapshot: SupervisionSnapshot | undefined;
+  // The pane reading THIS receipt is built from. Block 5 used to take its own,
+  // a second `list-panes` at a different instant than the probe's, so the two
+  // halves of one receipt could describe two different moments (B4).
+  let panesRead: { panes: string[]; ok: boolean } | undefined;
 
   const probe = (): ChildWaitObservation => {
     const runtime = deps.runtime();
     const panes = alivePanes(deps);
+    panesRead = panes;
     const open = runtime.children.filter((c) => !c.closedAt);
     snapshot = superviseChildren({
       orchestrationId: runtime.orchestrationId,
@@ -164,29 +201,30 @@ async function doWait(
     // A wait scoped to ONE child reports only that child's events; its
     // siblings' stay in the memory as un-reported and ring on the next call.
     const events = childId ? decided.events.filter((e) => e.childId === childId) : decided.events;
-    if (events.length > 0) return { events, done: false, paneAlive: true };
+    if (events.length > 0) return { events, paneAlive: true };
 
     // F14 — an unreadable pane list is UNKNOWN liveness, never a death.
-    if (!panes.ok) return { done: false, paneAlive: false, livenessUnknown: true };
+    if (!panes.ok) return { paneAlive: false, livenessUnknown: true };
 
     if (!childId) {
       const live = open.filter((c) => panes.panes.includes(c.paneId));
       return {
-        done: live.some((c) => c.doneAt),
         paneAlive: live.length > 0,
         note: `${live.length} 个子会话在跑`,
       };
     }
     const child = findChild(runtime, childId)!;
     return {
-      done: Boolean(child.doneAt),
       paneAlive: !child.closedAt && panes.panes.includes(child.paneId),
       note: `子会话 ${child.id} 仍在 pane ${child.paneId}`,
     };
   };
 
-  const waited = budgetMs === 0
-    ? { observation: probe(), waitedMs: 0, aborted: false, stalledInProbe: false }
+  // Typed as the skeleton's own result on BOTH branches: the snapshot path is
+  // "a wait that did not wait", not a different shape — so every field the
+  // reply reads (`abortReason` included) exists on it too.
+  const waited: PollWaitResult<ChildWaitObservation> = budgetMs === 0
+    ? snapshotResult(probe())
     : await pollUntil({
         probe,
         isDone: (observation) => evaluateChildWait(observation).done,
@@ -201,7 +239,7 @@ async function doWait(
     snapshot: snapshot ?? emptySnapshot(),
     decision,
     ...(deps.contextPercent() === undefined ? {} : { contextPercent: deps.contextPercent()! }),
-    exitBlockers: exitBlockers(deps),
+    exitBlockers: exitBlockers(deps, snapshot, panesRead),
     ...(inheritanceBrief(deps) === undefined ? {} : { inheritance: inheritanceBrief(deps)! }),
     waitedMs: waited.waitedMs,
   });
@@ -220,10 +258,40 @@ async function doWait(
   // as a spent budget; neither is an error, and neither leaves the caller
   // without a next step.
   if (waited.aborted) {
+    const waitedSeconds = Math.round(waited.waitedMs / 1000);
+    // TWO interrupts, and the difference matters to whoever reads this. ESC is
+    // the host cancelling the call. A user message is somebody TALKING TO YOU
+    // — but WHEN it lands depends on how it was sent, and the receipt must not
+    // paper over that: a `steer` (plain Enter, the default) cuts into this very
+    // turn, so simply carrying on with the work reads it; a `followUp`
+    // (Alt+Enter) is delivered only once the turn ENDS, and a manager that
+    // dives straight back into a 900s wait shuts that one out a second time —
+    // the original defect wearing a different hat (round-2 P2).
+    //
+    // AND IT MUST NOT CONTRADICT THE STANDING DISCIPLINE (round-3 P2). The
+    // wait discipline forbids ENDING THE TURN AS A WAY OF WAITING — handing
+    // the watch back to the user and hoping to be woken. Letting a message
+    // that is ALREADY QUEUED through is the opposite of that: nobody is being
+    // asked to watch anything, the turn boundary is a doorway rather than a
+    // parking spot, and the manager resumes immediately. The receipt says so
+    // in as many words, because the two would otherwise read as opposites at
+    // the very same decision point.
+    if (waited.abortReason === "user-input") {
+      return reply(
+        `review-gate: 等待被外部消息打断（已等 ${waitedSeconds}s）—— ` +
+        "有人正在跟本会话说话，消息已经在宿主队列里。回车发的 steer 会切进你当前这一轮：" +
+        "照常继续干活就会读到它。Alt+Enter 发的 followUp 要等这一轮 turn 结束才送达 —— " +
+        "只有这一种情况别再一头扎回长阻塞，先把手上这一轮收掉让它进来。" +
+        "（这不违反等待纪律②：那条禁的是「用结束 turn 代替等待、把盯梢责任丢回用户」；" +
+        "这里消息已经在队列里，turn 边界只是它进来的门，你随即继续盯。）" +
+        "子会话还在跑，没有任何东西被取消。\n\n" + receipt.text,
+        { ...details, done: false, reason: "aborted", abortedBy: "user-input" },
+      );
+    }
     return reply(
-      `review-gate: 等待被中断（已等 ${Math.round(waited.waitedMs / 1000)}s）—— ` +
+      `review-gate: 等待被中断（已等 ${waitedSeconds}s）—— ` +
       "子会话还在跑，没有任何东西被取消。\n\n" + receipt.text,
-      { ...details, done: false, reason: "aborted" },
+      { ...details, done: false, reason: "aborted", abortedBy: "signal" },
     );
   }
   if (!decision.done && budgetMs > 0) {
@@ -231,8 +299,8 @@ async function doWait(
       ? "（注意：预算用完时探针一次都没返回 —— tmux 很可能卡住了，先自己看一眼 pane）"
       : "";
     return reply(
-      `review-gate: 本次预算用完。${stalled}有确定性的活就先做掉，没有就再调一次 ` +
-      "`orchestrator_wait` —— 但不要结束 turn 把盯梢责任丢给用户。\n\n" + receipt.text,
+      `review-gate: 本次预算用完。${stalled}\n${ORCHESTRATOR_WAIT_DISCIPLINE}\n\n` + receipt.text,
+
       details,
     );
   }
@@ -254,14 +322,29 @@ function emptySnapshot(): SupervisionSnapshot {
  * question it only thinks to ask once it already believes it is finished.
  * Pushing it into the call that happens every round means it is answered
  * before that belief forms.
+ *
+ * IT READS THE SAME SNAPSHOT BLOCK 1 DOES (B4). Completion is a channel fact,
+ * and this block used to answer it from a registry field nothing wrote — so
+ * one receipt could report a child as finished at the top and as "still
+ * alive, go wait for it" at the bottom, and the manager had to arbitrate
+ * between its own gate's two answers. The snapshot (and the pane reading it
+ * was built from) is passed in for the same reason: two readings taken at two
+ * instants are two different moments in one receipt.
  */
-function exitBlockers(deps: OrchestratorDeps): string[] {
+function exitBlockers(
+  deps: OrchestratorDeps,
+  snapshot: SupervisionSnapshot | undefined,
+  panesRead: { panes: string[]; ok: boolean } | undefined,
+): string[] {
   const { plan } = currentPlan(deps);
-  const panes = alivePanes(deps);
+  const panes = panesRead ?? alivePanes(deps);
+  const reportedDone = snapshot ? reportedDoneIds(snapshot) : [];
   return orchestratorDoneProblems({
     ...(plan ? { plan } : {}),
     runtime: deps.runtime(),
     alivePaneIds: panes.panes,
+    ...(reportedDone.length > 0 ? { reportedDone } : {}),
+    ...(panes.ok ? {} : { livenessUnknown: true }),
   });
 }
 
@@ -273,7 +356,7 @@ function inheritanceBrief(deps: OrchestratorDeps): string | undefined {
 
 
 
-async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
+async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const runtime = deps.runtime();
   const childId = String(params.childId ?? "").trim();
   const predecessorPane = String(params.predecessorPane ?? "").trim();
@@ -283,12 +366,8 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   if (predecessorPane) {
     const auth = predecessorCloseAuthorization(predecessorPane, deps.env());
     if (!auth.ok) return fail("review-gate: " + auth.reason);
-    try {
-      const result = deps.tmux(buildKillPaneArgv(predecessorPane));
-      if (!result.ok) return fail(`review-gate: 关闭前任 pane 失败 —— ${result.stderr}`);
-    } catch (error) {
-      return fail(`review-gate: 关闭前任 pane 失败 —— ${(error as Error).message}`);
-    }
+    const killed = closeSessionPane(deps.tmux, predecessorPane);
+    if (!killed.ok) return fail(`review-gate: 关闭前任 pane 失败 —— ${killed.error}`);
     return reply(
       `review-gate: 前任项目经理 pane ${predecessorPane} 已关闭，接力完成 —— 你现在是这个 orchestration 的持有者。`,
       { closed: predecessorPane },
@@ -298,25 +377,43 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   const closable = closableChild(runtime, childId);
   if (!closable.ok) return fail("review-gate: " + closable.reason);
   const child = closable.child;
-  // The window-level label bar is taken down BEFORE the pane dies, because
-  // after `kill-pane` this pane id is no longer a valid `setw` target — and it
-  // is taken down only for the LAST decorated child, since the option is
-  // shared by every pane in the window (the orchestrator's own included).
-  // Leaving it set forever would be litter in the user's window; removing it
-  // while a sibling is still labelled would blank a border that is still in
-  // use. Purely cosmetic either way, so every failure here is swallowed.
-  if (isLastDecoratedChild(runtime.children, child.id)) {
-    for (const argv of buildHidePaneLabelsArgv(child.paneId)) {
-      try { deps.tmux(argv); } catch { /* cosmetic */ }
-    }
-  }
-  try {
-    const result = deps.tmux(buildKillPaneArgv(child.paneId));
-    if (!result.ok && !/can't find pane|no such pane/i.test(result.stderr)) {
-      return fail(`review-gate: 关闭 pane 失败 —— ${result.stderr}`);
-    }
-  } catch (error) {
-    return fail(`review-gate: 关闭 pane 失败 —— ${(error as Error).message}`);
+  // THE SAME JUDGEMENT THE OTHER THREE CLOSE PATHS MAKE (reviewer P2,
+  // 2026-09-05 — "the answer to (c) is: unify them"). This one used to have
+  // its own rule (`isLastDecoratedChild`), and it carried both defects the
+  // others had already shed:
+  //
+  //  - it counted registry ROWS, so a child whose pane the user closed by hand
+  //    kept the bar up forever;
+  //  - it could not see JUDGE panes at all, so closing the last child while a
+  //    review was open blanked the review's border.
+  //
+  // Both are now one question — how many decorated panes can I still see —
+  // asked with the shared counter. `insideOrchestration` is false by
+  // construction: only a project manager reaches this tool (the mode guard),
+  // and a manager is never a guest in its own window.
+  //
+  // Addressed through the ORCHESTRATOR'S OWN pane when it can read it, else
+  // the child's: `setw -t <pane>` only names a window, and the pane being
+  // closed is the id that may already be gone — but the release itself must
+  // not become conditional on a diagnostic.
+  const panes = alivePanes(deps);
+  const releasesLabels = releasesWindowLabels({
+    remainingDecoratedPanes:
+      countDecoratedPanes(
+        runtime.children
+          .filter((c) => c.id !== child.id && !c.closedAt)
+          .map((c) => c.paneId),
+        panes.ok ? panes.panes : undefined,
+      )
+      + (deps.decoratedJudgePanes?.() ?? 0),
+    insideOrchestration: false,
+  });
+  const labelsVia = deps.ownPane() ?? child.paneId;
+  const killed = closeSessionPane(deps.tmux, child.paneId, {
+    ...(releasesLabels ? { hideLabelsVia: labelsVia } : {}),
+  });
+  if (!killed.ok && !/can't find pane|no such pane/i.test(killed.error)) {
+    return fail(`review-gate: 关闭 pane 失败 —— ${killed.error}`);
   }
 
   deps.saveRuntime(markChildClosed(deps.runtime(), child.id, new Date(deps.now()).toISOString()));
@@ -360,11 +457,20 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
     );
   }
 
-  let paneId: string | undefined;
-  try {
-    const result = deps.tmux(buildHandoffPaneArgv({
-      orchestratorPane: self!,
-      cwd: deps.repoRoot,
+  // The successor is opened by the SAME factory as every other pi session —
+  // it just lands BESIDE the opener instead of in the child column (tmux then
+  // expands it into the left column when the old pane is closed), keeps no
+  // registry row and takes no border: it is not a child, it is the next holder
+  // of this orchestration.
+  const opened = await openSessionPane(deps.tmux, {
+    ownPane: self!,
+    cwd: deps.repoRoot,
+    layout: "beside-opener",
+    // A plain interactive pi: the successor reads the handoff document its
+    // environment points at, so it needs no argv message of its own.
+    command: ["pi"],
+    role: {
+      kind: "successor",
       env: {
         ...successorEnv({
           orchestrationId: runtime.orchestrationId,
@@ -374,13 +480,13 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
         }),
         [GATE_MODE_ENV]: "orchestrator",
       },
-    }));
-    if (!result.ok) throw new Error(result.stderr || "tmux split-window 失败");
-    paneId = parseSpawnedPaneId(result.stdout);
-  } catch (error) {
-    return fail(`review-gate: 开接任会话失败 —— ${(error as Error).message}`);
+    },
+  });
+  if (!opened.ok) {
+    return fail(`review-gate: 开接任会话失败 —— ${opened.error}（接力中止，你仍然是持有者）。`);
   }
-  if (!paneId) return fail("review-gate: tmux 没有回报接任会话的 pane id —— 接力中止，你仍然是持有者。");
+  const paneId = opened.paneId;
+
 
   deps.saveRuntime({
     ...deps.runtime(),
@@ -403,7 +509,7 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
  * `orchestrator_recover` + `orchestrator_attach`) — registered from here so
  * there is ONE place that answers "which orchestration tools exist".
  */
-export function registerOrchestratorSessionTools(host: ToolHost, deps: OrchestratorDeps): void {
+export function registerOrchestratorSessionTools(host: ToolHost, deps: OrchestratorSessionDeps): void {
   const guarded = (
     run: (params: Record<string, unknown>, signal: { readonly aborted: boolean } | undefined) => Promise<ToolReply>,
   ) => async (
@@ -441,11 +547,13 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     name: "orchestrator_instruct",
     label: "Instruct A Child Session",
     description:
-      "Say something to a running child session, or stop it. `mode` IS pi's own delivery: " +
-      "`steer` cuts into the turn it is in the middle of, `followUp` waits until it finishes and " +
-      "is read next, `interrupt` is the HIGHEST priority — it aborts the current turn and the " +
-      "message is read immediately (since 2026-08-31 an interrupt carries its text in the same " +
-      "call; a bare abort needed a second followUp to say anything). Nothing is typed at " +
+      "Say something to a running child session, or stop it. `mode` IS pi's own delivery, and it " +
+      "DEFAULTS to `interrupt` — a supervisor writes because the child should know NOW, so the " +
+      "ordinary call aborts the turn it is in the middle of and the message is read immediately " +
+      "(an interrupt carries its text in this same call). The one alternative is `steer`: it cuts " +
+      "into the current turn WITHOUT aborting it, for a nudge the child should carry on with. " +
+      "`followUp` (\"finish first, then read this\") is REFUSED here — a correction that arrives " +
+      "after the round it was meant to correct is a correction nobody applied. Nothing is typed at " +
       "a terminal: the text is written to the child's channel and the child's OWN gate injects it " +
       "with `pi.sendUserMessage`, so it cannot be truncated, cannot be split by a newline, and " +
       "cannot be misread by an open dialog as a menu selection (all four were measured). The " +
@@ -454,7 +562,7 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     parameters: Type.Object({
       childId: Type.String(),
       mode: Type.Optional(Type.String({
-        description: "\"steer\" | \"followUp\" (default) | \"interrupt\"",
+        description: "\"interrupt\" (default) | \"steer\". \"followUp\" is refused.",
       })),
       message: Type.Optional(Type.String({ description: "The text to deliver. Required for every mode (interrupt included) — say what the child should do instead." })),
     }),

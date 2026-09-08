@@ -13,31 +13,27 @@
  * (lib/user-interaction-tools.ts). Same shape here.
  *
  * THE BOUNDARY between this module and lib/goal-tools.ts: this one owns the
- * AUDIT — reading the auditor's fence, adjudicating it, and writing the record
- * a later approval binds to. lib/goal-tools.ts owns the APPROVAL — running the
- * audit when no PASS is on record, then the user's dialog and the file write.
+ * AUDIT — reading the auditor's structured conclusion, adjudicating it, and
+ * writing the record a later approval binds to. lib/goal-tools.ts owns the
+ * APPROVAL — running the audit when no PASS is on record, then the user's
+ * dialog and the file write.
  * The split is also what keeps both files clear of the 600-line hard block on
- * new source files. Registration of BOTH tools happens in lib/goal-tools.ts
- * (philosophy two: one entry point for the family), which is why this module
- * exports a handler rather than a registrar — it registers nothing itself.
+ * new source files. `propose_loop_goal` — the family's ONE registered tool —
+ * is registered in lib/goal-tools.ts (philosophy two: one entry point for the
+ * family), which is why this module exports handlers rather than a registrar.
  *
  * WHAT IS AND IS NOT INJECTED. The pure pieces are imported directly
  * (lib/loop-goal.ts for the normalization, the hash and the carryover,
- * lib/verdict-parse.ts for the fence, lib/judge-lifecycle.ts for the
- * adjudication, lib/repo-resolve.ts for the git root): they are already
+ * lib/review-adjudicate.ts for the conclusion's verdict and findings,
+ * lib/judge-lifecycle.ts for the adjudication, lib/repo-resolve.ts for the git
+ * root): they are already
  * testable on their own. What IS injected is everything the handler cannot
  * own — the repo roots, gate state, its persistence and the log channel — so
  * every branch here can be exercised with a fake.
- *
- * BEHAVIOR IS FROZEN: this was moved verbatim out of the extension. Tool
- * names, schemas, reply texts, `details` fields and error branches are the
- * ones the agent-facing contract already documents; changing any of them is a
- * separate, deliberate change.
  */
 
 import { resolve as pathResolve } from "node:path";
 
-import type { ToolReply } from "./tool-host.ts";
 import type { GateState } from "./gate-state.ts";
 import {
   LOOP_GOAL_MAX_WRITE_CHARS,
@@ -46,7 +42,8 @@ import {
   normalizeGoalText,
   type GoalPrereviewRecord,
 } from "./loop-goal.ts";
-import { parseReviewOutput, parseFenceFindings } from "./verdict-parse.ts";
+import { normalizeConcludedVerdict, severityFindingsFrom } from "./review-adjudicate.ts";
+import type { ReportConclusion } from "./orchestrator-channel.ts";
 import { adjudicateGoalAudit } from "./judge-lifecycle.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 
@@ -76,8 +73,6 @@ export interface GoalPrereviewDeps {
   log(message: string): void;
 }
 
-/** Which of the two goal tools a shared check is speaking for. */
-export type GoalToolName = "record_goal_prereview" | "propose_loop_goal";
 
 /** A submitted draft that passed the shared checks, or the refusal text. */
 export type GoalDraftCheck =
@@ -85,9 +80,13 @@ export type GoalDraftCheck =
   | { ok: false; text: string };
 
 /**
- * The three things BOTH goal tools demand of a submission, in one pure
- * decision: a non-empty draft, a draft under the write cap, and a repo the
- * goal can actually bind to.
+ * The three things a goal submission must satisfy, in one pure decision: a
+ * non-empty draft, a draft under the write cap, and a repo the goal can
+ * actually bind to.
+ *
+ * ONE caller shape, deliberately: `propose_loop_goal` is the only goal tool
+ * there is, and the audit recorder behind it (`recordGoalPrereview`) runs the
+ * same three checks on the same draft, so both speak with its voice.
  *
  * The repo resolution is deliberately NOT `resolveToolRepo`: that helper
  * requires a repo the session already EDITED, but a goal (and therefore its
@@ -99,7 +98,7 @@ export type GoalDraftCheck =
  * `gitRootOfDir`.
  */
 export function checkGoalDraft(input: {
-  tool: GoalToolName;
+  tool: "propose_loop_goal";
   rawGoal: unknown;
   rawRepo: unknown;
   cwd: string;
@@ -116,12 +115,8 @@ export function checkGoalDraft(input: {
   if (goalText.length > LOOP_GOAL_MAX_WRITE_CHARS) {
     return {
       ok: false,
-      text: input.tool === "record_goal_prereview"
-        ? `review-gate: record_goal_prereview rejected — the goal is ${goalText.length} chars, over the ` +
-          `${LOOP_GOAL_MAX_WRITE_CHARS} limit propose_loop_goal enforces. Shorten it BEFORE auditing: an ` +
-          "exit contract is 3–7 checkable criteria, not a design doc."
-        : `review-gate: propose_loop_goal rejected — the goal is ${goalText.length} chars, over the ` +
-          `${LOOP_GOAL_MAX_WRITE_CHARS} limit. An exit contract is 3–7 checkable criteria, not a design doc.`,
+      text: `review-gate: propose_loop_goal rejected — the goal is ${goalText.length} chars, over the ` +
+        `${LOOP_GOAL_MAX_WRITE_CHARS} limit. An exit contract is 3–7 checkable criteria, not a design doc.`,
     };
   }
   // Per-repo binding: the goal belongs to the repo the WRITES land in.
@@ -141,9 +136,7 @@ export function checkGoalDraft(input: {
     return {
       ok: false,
       text: `review-gate: repo "${rawRepo}" (resolved ${abs}) is not inside a readable git repository — ` +
-        (input.tool === "record_goal_prereview"
-          ? "a goal pre-review can only bind to a real repo."
-          : "a loop goal can only bind to a real repo."),
+        "a loop goal can only bind to a real repo.",
     };
   }
   return { ok: true, goalText, root };
@@ -185,58 +178,63 @@ export function buildGoalRecordReply(input: {
       : "");
 }
 
+/** What one goal audit round hands the recorder. */
+export interface GoalPrereviewInput {
+  /** The FULL draft that was audited — the record binds to its hash. */
+  goal: unknown;
+  /** The auditor's own structured conclusion, off its channel report. */
+  conclusion: ReportConclusion;
+  /** Repo the goal binds to (default: the session repo). */
+  repo?: unknown;
+  /** ISO timestamp of the dispatch, for the audit's wall-clock duration. */
+  auditStartedAt?: unknown;
+}
+
 /**
- * `record_goal_prereview` — the gate's own recording of a goal audit.
+ * Record ONE goal audit.
  *
- * INTERNAL (registered on the internal host in lib/goal-tools.ts):
- * `propose_loop_goal` runs the audit itself and records the verdict through
- * this implementation.
+ * NOT A TOOL, on any surface (2026-09-04, user decision D4 extended to this
+ * recorder by the user). It used to be an `internalTool` taking
+ * `auditor_output: string`, and that shape existed for one reason only: the
+ * verdict had to be parsed back out of a fence the gate had itself
+ * synthesised. The conclusion is structured now, so the wrapper carried
+ * nothing but a second way to sequence the step by hand (philosophy two,
+ * philosophy three). `propose_loop_goal` runs the audit and the gate calls
+ * this directly when the round's report lands.
+ *
+ * Returns the text the caller shows; a refusal records NOTHING (fail-closed).
  */
-export async function doRecordGoalPrereview(
+export async function recordGoalPrereview(
   deps: GoalPrereviewDeps,
-  params: Record<string, unknown>,
+  params: GoalPrereviewInput,
   ctx: unknown,
-): Promise<ToolReply> {
+): Promise<string> {
   const checked = checkGoalDraft({
-    tool: "record_goal_prereview",
+    tool: "propose_loop_goal",
     rawGoal: params.goal,
     rawRepo: params.repo,
     cwd: deps.cwd(),
     primaryRepoRoot: deps.primaryRepoRoot(),
   });
   if (!checked.ok) {
-    return {
-      content: [{ type: "text", text: checked.text }],
-      details: { recorded: false },
-      isError: true,
-    };
+    return checked.text;
   }
   const { goalText, root: goalRoot } = checked;
   const goalSt = deps.stateFor(goalRoot);
 
-  // The EXTENSION reads the verdict; the agent only carries the output.
-  // parseReviewOutput already encodes the two rules that matter here: a
-  // READY carrying unresolved P0/P1 is contradictory and becomes BLOCKED,
-  // and a fence we could not fully parse can never come back READY.
-  const auditorOutput = typeof params.auditor_output === "string" ? params.auditor_output : "";
-  const parsed = parseReviewOutput(auditorOutput);
-  if (!parsed) {
-    return {
-      content: [{
-        type: "text",
-        text: "review-gate: no recognizable verdict in the goal-auditor's output — NOTHING was recorded " +
-          "(fail-closed). The auditor must end its reply with exactly ONE fenced JSON verdict, e.g.\n" +
-          `\`\`\`json\n{"gate":"READY"|"BLOCKED","findings":[{"severity":"P1","issue":"…"}]}\n\`\`\`\n` +
-          "Common causes: the reply was pure prose with no fence, it was truncated before the fence, " +
-          "or an unescaped straight quote inside a string broke the JSON. Re-run the audit — do not " +
-          "hand-write the verdict.",
-      }],
-      details: { recorded: false },
-      isError: true,
-    };
+  // The auditor concluded through judge_conclude, so its verdict and findings
+  // arrive as DATA. An unrecognisable verdict records nothing — a round that
+  // never concluded must never leave a PASS behind.
+  const verdict = normalizeConcludedVerdict(params.conclusion.verdict);
+  if (!verdict) {
+    return "review-gate: no recognizable verdict in the goal-auditor's round — NOTHING was recorded " +
+      "(fail-closed). The auditor must conclude through judge_conclude (verdict READY|BLOCKED plus " +
+      "findings); prose alone records nothing. " +
+      "Common causes: the round ended without a conclude call, or it was truncated before the call. " +
+      "Re-run the audit — do not hand-write the verdict.";
   }
   const newHash = goalTextHash(goalText);
-  const findings = parseFenceFindings(auditorOutput);
+  const findings = severityFindingsFrom(params.conclusion.findings);
   // ONE adjudication for the record, the reply and the gate (B2): a READY
   // without P0/P1 is a PASS no matter how many P2/Nit findings ride along.
   // The audit ROUND counts audits of the GOAL being negotiated now — the
@@ -245,7 +243,7 @@ export async function doRecordGoalPrereview(
   // every goal this repo ever had.
   goalSt.goalAuditRound = (goalSt.goalAuditRound ?? 0) + 1;
   const adjudication = adjudicateGoalAudit({
-    verdict: parsed.verdict,
+    verdict,
     findings,
     round: goalSt.goalAuditRound,
   });
@@ -262,7 +260,7 @@ export async function doRecordGoalPrereview(
     hash: newHash,
     verdict: passed ? "PASS" : "FAIL",
     at: new Date().toISOString(),
-    findingsTotal: parsed.findingsTotal,
+    findingsTotal: params.conclusion.findings.length,
     ...(findings.length ? { findings } : {}),
     draft: normalizeGoalText(goalText),
     ...(durationMs !== undefined ? { durationMs } : {}),
@@ -282,7 +280,7 @@ export async function doRecordGoalPrereview(
   goalSt.goalPrereview = record;
 
   deps.persist(ctx, goalRoot);
-  deps.log(`goal pre-review recorded for ${goalRoot}: ${record.verdict} (${goalText.length} chars, findings: ${parsed.findingsTotal ?? "unparseable"})`);
+  deps.log(`goal pre-review recorded for ${goalRoot}: ${record.verdict} (${goalText.length} chars, findings: ${params.conclusion.findings.length})`);
   // Wall-clock since the previous audit — the incremental-economy datum
   // (goal criterion 6, (a)): re-audits of a revised draft should be
   // measurably cheaper than first audits. Diagnostic only.
@@ -290,19 +288,13 @@ export async function doRecordGoalPrereview(
   const auditGapMin = Number.isFinite(prevAt)
     ? Math.round((Date.now() - prevAt) / 60000)
     : null;
-  return {
-    content: [{
-      type: "text",
-      text: buildGoalRecordReply({
-        message: adjudication.message,
-        passed,
-        hash: record.hash,
-        verdict: parsed.verdict,
-        durationMs,
-        auditGapMin,
-        reaudit: !!carryover,
-      }),
-    }],
-    details: { recorded: true, verdict: record.verdict, findingsTotal: parsed.findingsTotal ?? null, reaudit: !!carryover, auditGapMin, durationMs: durationMs ?? null },
-  };
+  return buildGoalRecordReply({
+    message: adjudication.message,
+    passed,
+    hash: record.hash,
+    verdict,
+    durationMs,
+    auditGapMin,
+    reaudit: !!carryover,
+  });
 }

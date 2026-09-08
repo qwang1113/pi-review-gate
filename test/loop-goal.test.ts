@@ -23,6 +23,7 @@ import {
   readLoopGoal,
   loopGoalEditGate,
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
+  LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
   goalPrereviewPassed,
   buildGoalPrereviewRefusal,
   formatGoalPrereviewCarryover,
@@ -32,6 +33,7 @@ import {
   buildGoalForceNegotiateDirective,
   goalNegotiationOverdue,
 } from "../lib/loop-goal.ts";
+import { UNTRUSTED_DATA_HEADER, UNTRUSTED_DATA_RULE } from "../lib/untrusted-data.ts";
 
 function repoWithGoal(content?: string, mtimeMs?: number): string {
   const root = mkdtempSync(join(tmpdir(), "loop-goal-"));
@@ -136,6 +138,33 @@ test("no goal ⇒ the Step 0 directive: grill the user, then propose_loop_goal",
   assert.match(text, /recommendation/);
   assert.doesNotMatch(text, /ONE question per turn/,
     "the gate runs the interview now — the agent does not pace it");
+  // USER REQUIREMENT (2026-09-06): the interview is OPTIONAL but UNCAPPED.
+  // This directive used to say "a one-line bugfix is one question, not a
+  // questionnaire" — read as "keep it short", which is the opposite of the
+  // rule: ask whatever the requirement is worth, and ask nothing when there
+  // is no doubt. It is the only place in the repo that carried that copy, so
+  // nothing else would notice if it came back.
+  assert.match(text, /NO cap/,
+    "the agent must be told the number of questions is not the thing to economize on");
+  assert.doesNotMatch(text, /questionnaire|one question, not/i,
+    "no wording that reads as 'ask fewer questions' may return");
+  // ONE authority, one summary (user decision, 2026-09-06): the full rule
+  // lives in `ask_user`'s own description — the only place that can quote the
+  // real per-call cap — and this directive points at it. Two full statements
+  // of the same rule is how the old copy managed to survive in two places.
+  assert.match(text, /`ask_user`'s own description/,
+    "the Step-0 copy must POINT at the rule, not restate it");
+  // "Summary, not second statement" is checked by what it must NOT carry: the
+  // mechanical details belong to the tool description, which is the only place
+  // that can quote the real per-call cap. (A length check here would measure
+  // the whole directive — steps 2-5 included — and prove nothing.)
+  assert.doesNotMatch(text, /per call/i,
+    "the per-call cap is the tool description's to state, not this one's");
+  assert.doesNotMatch(text, /Never trim a real doubt/i,
+    "…and so is the rest of the full wording");
+
+
+
   assert.match(text, /propose_loop_goal/);
   assert.match(text, /Writing that file yourself grants nothing/);
   // The engineering skills stay user-invoked accelerators, never a dependency.
@@ -226,6 +255,27 @@ test("the directive is honest about WHAT the goal gates (ship, not the hooks)", 
   // …while the Step-0 directive must state the real consequence of skipping
   // the negotiation (L1 ship block), so the agent is not surprised by it.
   assert.match(LOOP_GOAL_MISSING_DIRECTIVE, /blocks commit\/push\/PR/);
+});
+
+test("the Step-0 recipe teaches the RESTATEMENT FIRST — a session following it must not get refused", () => {
+  // 2026-09-06 (reviewer P1). This directive is injected every turn while a
+  // loop session has no approved goal, so it IS the order the next session
+  // follows. When `propose_loop_goal` started refusing without a confirmed
+  // restatement, a recipe that still said "ask → draft → propose" walked its
+  // reader straight into that refusal — the same failure the task book called
+  // out for TASK_GOAL_DIRECTIVE, in a second copy.
+  assert.match(LOOP_GOAL_MISSING_DIRECTIVE, /propose_restatement/);
+  const restate = LOOP_GOAL_MISSING_DIRECTIVE.indexOf("propose_restatement");
+  const propose = LOOP_GOAL_MISSING_DIRECTIVE.indexOf("Submit it with `propose_loop_goal`");
+  assert.ok(restate > 0 && propose > restate, "the restatement step must come BEFORE the goal submission");
+  assert.match(LOOP_GOAL_MISSING_DIRECTIVE, /precommit/, "…and the station it also settles");
+  // Both BLOCK texts are read at the same moment by an agent that skipped the
+  // step, so they carry the same order.
+  for (const block of [LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK]) {
+    assert.match(block, /propose_restatement/);
+    assert.ok(block.indexOf("propose_restatement") < block.indexOf("propose_loop_goal"),
+      "the block text must name the earlier step first");
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -452,10 +502,11 @@ test("formatGoalPrereviewCarryover carries the previous audit's findings verbati
   assert.match(block, /what changed in the draft since that audit/);
 });
 
-test("formatGoalPrereviewCarryover: zero findings still carry the verdict; the old draft rides along", () => {
+test("formatGoalPrereviewCarryover: zero findings still carry the verdict; the old draft is POINTED AT, not inlined", () => {
   // A prior PASS/FAIL with no parsed findings is still a conclusion — the
-  // re-audit must not re-derive it from zero. The judged draft text rides
-  // along so the re-audit can diff against the actual old text.
+  // re-audit must not re-derive it from zero. The old DRAFT itself is
+  // agent-authored, so since round 5 it no longer rides inside this
+  // gate-authored block: the carryover names the data block that carries it.
   const block = formatGoalPrereviewCarryover({
     hash: "aa",
     verdict: "PASS",
@@ -465,8 +516,9 @@ test("formatGoalPrereviewCarryover: zero findings still carry the verdict; the o
   assert.ok(block, "a verdict is carried even with zero findings");
   assert.match(block, /Previous verdict: PASS \(0 finding\(s\)/);
   assert.match(block, /reported no findings — confirm that still holds/);
-  assert.match(block, /# 目标/);
-  assert.match(block, /退出标准: 一条/);
+  assert.match(block, /<previous_goal_draft> data block/);
+  assert.doesNotMatch(block, /# 目标/, "the old draft text is not inlined into trusted instructions");
+  assert.doesNotMatch(block, /退出标准: 一条/);
 });
 
 test("buildGoalAuditTask: the gate builds the complete auditor task, carryover + transcript ride along", () => {
@@ -480,17 +532,23 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
   assert.match(task, /===== 待审计的 goal 草稿 =====/);
   assert.match(task, /# 目标/);
   assert.match(task, /sess-9/);
-  assert.match(task, /\{"gate":"READY"\|"BLOCKED"/);
-  // The completion contract is embedded: exit = done, question = resume.
-  assert.match(task, /进程退出即完成/);
-  assert.match(task, /同一 session id 重新拉起/);
-  assert.doesNotMatch(task, /tmux|wait-for|channel|inbox/);
+  assert.match(task, /以 judge_conclude 交卷/);
+  // The completion contract is embedded: conclude-and-stop, questions via ask_user.
+  assert.match(task, /调 judge_conclude 交卷并停下/);
+  assert.match(task, /ask_user/);
+  assert.doesNotMatch(task, /wait-for|inbox/); // no wait plumbing in the task
+  assert.match(task, /own tmux pane/, "the pane running model is stated");
   // First audit (no carryover, no session): plain template, no stale claims.
   const first = buildGoalAuditTask("# 目标");
   assert.doesNotMatch(first, /carryover/i);
   assert.doesNotMatch(first, /sess-/);
-  // Round-17: output discipline is part of the task text.
-  assert.match(task, /输出纪律:只输出 fence \+ ≤3 行结论要点/, "the discipline is pinned in the task");
+  // Round-17, tightened 2026-09-04: output discipline is part of the task text.
+  assert.match(task, /输出纪律:交卷即停/, "the discipline is pinned in the task");
+  assert.doesNotMatch(task, /fenced JSON verdict/, "no fence may come back");
+  // The auditor's signature refuses `notes`, so the task it is dispatched with
+  // must not ask for one — that self-collision was the failure mode.
+  assert.doesNotMatch(task, /notes 写/, "the task must not teach a refused field");
+  assert.match(task, /没有 notes 参数/, "it says so out loud instead");
 });
 
 test("buildGoalAuditTask: the draft delta is computed mechanically and injected (round-4 P1)", () => {
@@ -507,6 +565,53 @@ test("buildGoalAuditTask: the draft delta is computed mechanically and injected 
   const first = buildGoalAuditTask(next);
   assert.doesNotMatch(first, /机械差异/);
 });
+
+test("round 5: the draft is UNTRUSTED DATA and sits after the gate's instructions", () => {
+  const task = buildGoalAuditTask("# 目标\n\n标准一。", {
+    sessionDir: "/home/u/.pi/agent/sessions/--repo--",
+    sessionId: "sess-9",
+  });
+  // ORDER, not mere presence: a draft that opens the task frames the audit
+  // before the auditor has read what its job is (that is how an adviser was
+  // steered into an 8-second READY).
+  const role = task.indexOf("You are goal-auditor");
+  const criteria = task.indexOf("审计标准:");
+  const header = task.indexOf(UNTRUSTED_DATA_HEADER);
+  const draftBlock = task.indexOf("<goal_draft>");
+  assert.ok(role >= 0 && criteria > role, "the gate's own instructions come first");
+  assert.ok(header > criteria, "the untrusted region opens after them");
+  assert.ok(draftBlock > header, "and the draft rides inside it");
+  assert.match(task, /<\/goal_draft>/);
+  // The rule travels with the task, not only in the judge's system prompt.
+  assert.ok(task.includes(UNTRUSTED_DATA_RULE));
+});
+
+test("round 5: the re-audit's previous draft and mechanical delta are untrusted too", () => {
+  const prev = "# 目标\n\n## 退出标准\n1. 旧标准。";
+  const next = "# 目标\n\n## 退出标准\n1. 新标准。";
+  const task = buildGoalAuditTask(next, {
+    carryover: formatGoalPrereviewCarryover({
+      hash: "aa",
+      verdict: "FAIL",
+      at: "2026-08-27T00:00:00.000Z",
+      draft: prev,
+    })!,
+    prevDraft: prev,
+  });
+  const header = task.indexOf(UNTRUSTED_DATA_HEADER);
+  // Match the OPENING of each block (`\n<tag>\n`) — the carryover legitimately
+  // mentions the tag by name above, and a bare indexOf would find that instead.
+  assert.ok(task.indexOf("\n<previous_goal_draft>\n") > header, "the old draft is data, not instructions");
+  assert.ok(task.indexOf("\n<goal_draft_delta>\n") > header, "so is the mechanically computed delta");
+  // The carryover itself (gate-authored: verdict + findings) stays trusted,
+  // and EVERY occurrence of the old draft's text (the block itself, and the
+  // delta's "Removed lines") sits inside the untrusted region — not one of
+  // them leaks back above the instructions.
+  assert.ok(task.indexOf("PREVIOUS audit judged a DIFFERENT draft") < header);
+  assert.ok(task.indexOf("1. 旧标准。") > header, "first occurrence is inside the untrusted region");
+  assert.ok(task.lastIndexOf("1. 旧标准。") > header, "and so is the last one");
+});
+
 
 // ---------------------------------------------------------------------------
 // R-10 — one goal file per SESSION, not per worktree
@@ -578,6 +683,9 @@ test("buildGoalForceNegotiateDirective: names the count, the threshold and the O
   assert.match(below, /30\/60/);
   assert.match(below, /ask_user/);
   assert.match(below, /propose_loop_goal/);
+  // 2026-09-06: the directive has to name the step that comes FIRST, or a
+  // session following it lands straight in the restatement refusal.
+  assert.match(below, /propose_restatement/);
   const overdue = buildGoalForceNegotiateDirective(60);
   assert.match(overdue, /已达 60 轮（阈值 60）/);
   assert.match(overdue, /先协商，再干活/);

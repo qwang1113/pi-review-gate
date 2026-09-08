@@ -44,8 +44,9 @@
 
 import { createHash } from "node:crypto";
 import { canonicalPlanText, formatPlanSummary, type OrchestratorPlan } from "./orchestrator-plan.ts";
-
-/** One objection, exactly as the auditor's JSON fence reported it. */
+import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
+import { composeWithUntrustedData } from "./untrusted-data.ts";
+/** One objection, exactly as the auditor concluded it. */
 export interface PlanAuditFinding {
   severity: string;
   issue: string;
@@ -126,7 +127,12 @@ export function formatPlanAuditCarryover(prev: PlanAuditRecord): string {
           ...findings.map((f) => `  - ${f.severity}: ${f.issue}`),
         ]
       : ["- The previous audit reported no findings — confirm that still holds."]),
-    ...(prev.planText ? ["- The PREVIOUS plan (judged then):", "```", prev.planText, "```"] : []),
+    // The previous plan is ORCHESTRATOR-authored text: buildPlanAuditTask puts
+    // it in the untrusted data region after the instructions (round 5), so it
+    // no longer rides inside this gate-authored block.
+    ...(prev.planText
+      ? ["- The PREVIOUS plan (judged then) is in the <previous_plan> data block below."]
+      : []),
   ].join("\n");
 }
 
@@ -140,21 +146,28 @@ export function formatPlanAuditCarryover(prev: PlanAuditRecord): string {
  */
 export function buildPlanAuditTask(
   plan: OrchestratorPlan,
-  opts: { carryover?: string; sessionDir?: string; sessionId?: string; repoRoot?: string } = {},
+  opts: {
+    carryover?: string;
+    /** The plan the previous audit judged — rides as an untrusted block. */
+    prevPlanText?: string;
+    sessionDir?: string;
+    sessionId?: string;
+    repoRoot?: string;
+  } = {},
 ): string {
-  return [
+  // ORDER MATTERS (round 5, 2026-09-05): the gate's own instructions first,
+  // the orchestrator-authored plan text after them as untrusted data — a plan
+  // pasted above the checks frames the audit before the auditor knows its job.
+  const instructions = [
     "You are goal-auditor, this round auditing an ORCHESTRATION PLAN (not a loop goal).",
     "",
-    "The plan below is about to be shown to a HUMAN for approval. It decides what each child",
+    "The plan in the data block below is about to be shown to a HUMAN for approval. It decides what each child",
     "session may touch, in what order, and how many run at once — so a mistake here puts two",
-    "writers in one file, or turns a serial chain into a race. You run as your own pi process",
+    "writers in one file, or turns a serial chain into a race. You run in your own pane",
     "with read-only tools: CHECK THE PLAN AGAINST THE REPOSITORY, do not judge the prose.",
     ...(opts.repoRoot ? ["", `Repository: ${opts.repoRoot}`] : []),
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
-    "===== 待审计的 plan =====",
-    formatPlanSummary(plan),
-    "",
     "===== 审计要点（逐条回答，用仓库里的事实说话） =====",
     "1. 任务拆分是否完整：plan 的 intent 有没有哪一部分不属于任何任务？有没有任务其实是两件事？",
     "2. 文件边界是否覆盖真实落点：按仓库现状，每个任务真正要改的文件是否都在它的 fileBoundaries 内？",
@@ -169,7 +182,8 @@ export function buildPlanAuditTask(
     "6. 每个任务是否可独立验收：一个子会话拿到它，能不能自己判断做完没做完？",
     "7. 需求是否已澄清、goal 是否可派生（PM=产品经理，2026-09-17）：",
     "   项目经理同时承担产品经理角色——plan 提交前必须把涉及的项目代码过一遍，",
-    "   用 grillme/ask_user 把需求反述澄清，摸清每个子会话的 goal 才能起 plan。",
+    "   需求反述本身已由门禁固化（`propose_restatement`，规则见 lib/restatement.ts）：submit 走到你这里，",
+    "   说明用户已经确认过一份反述。你要查的是**反述之后**的落地质量——摸清每个子会话的 goal 才能起 plan。",
     "   逐任务核对以下可查证事实，不要凭印象打分：",
     "   (a) plan.decisions：有没有登记了却从未解决（缺 resolvedAt）的需求决策？",
     "       有——需求未澄清，P1。",
@@ -187,15 +201,24 @@ export function buildPlanAuditTask(
           "",
         ]
       : []),
-    "输出一个 fenced JSON verdict(放在输出最前):",
-    "```json",
-    '{"gate":"READY"|"BLOCKED","findings":[{"severity":"P0"|"P1"|"P2","issue":"..."}]}',
-    "```",
-    "READY 仅当 plan 无未解决 P0/P1 异议。findings 为空表示无异议。",
-    "输出纪律:只输出 fence + ≤3 行结论要点;不复述 plan、不复述代码、不写过程叙事。",
+    "以 judge_conclude 交卷(verdict READY|BLOCKED,findings 每条 severity P0|P1|P2 + issue,能给证据就填 evidence):",
+    "READY 仅当 plan 无未解决 P0/P1 异议。findings 为空表示无异议。本角色的签名里没有 notes 参数,传了会被拒——结论请写进 findings。",
+    "输出纪律:交卷即停 —— 调完 judge_conclude 就结束本轮,不写复述、不写自评、不写过程说明。",
     "",
-    "完成(必须):输出最终 verdict 后正常退出即可——进程退出即完成,主会话以你的输出为准。",
+    JUDGE_COMPLETION_DISCIPLINE,
   ].join("\n");
+  return composeWithUntrustedData(instructions, [
+    { tag: "plan", label: "===== 待审计的 plan =====", text: formatPlanSummary(plan) },
+    ...(opts.prevPlanText
+      ? [
+          {
+            tag: "previous_plan",
+            label: "===== 上一版 plan（上一轮审计判过的） =====",
+            text: opts.prevPlanText,
+          },
+        ]
+      : []),
+  ]);
 }
 
 /**
@@ -220,3 +243,14 @@ export function formatPlanAuditRefusal(record: PlanAuditRecord | undefined): str
     "改任务状态不会让它失效，改一个边界就要重审。",
   ].join("\n");
 }
+
+/*
+ * "WHICH REPORT CLOSES THIS ROUND" USED TO LIVE HERE.
+ *
+ * It moved to `selectRoundReport` in lib/audit-round.ts (2026-09-05) with the
+ * rest of the audit round, because the question is not the plan's: the goal
+ * audit, the plan audit and the code review all had to answer it, and having
+ * the answer live in the plan module is how the extension ended up with two
+ * entry points into it. This module is back to what it is good at — building
+ * the plan auditor's task and judging a plan record.
+ */

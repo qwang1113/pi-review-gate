@@ -8,24 +8,37 @@
 ## 执行模型
 
 - **主会话**：带门禁的 pi 会话，负责全部写操作与流程协调。
-- **子会话**：独立的**非交互 pi 进程**（`pi -p --session-id`，不带
-  review-gate 门禁），承载所有 Judge 角色（goal-auditor / reviewer /
-  adviser）。同一工作区、同一分支；cwd 为仓库根目录。session id 按
-  role+repo 确定性派生，所以同一角色跨轮复用同一段上下文；进程退出即完成，
-  门禁读它本轮的输出并记录结论。没有 tmux、没有 pane、没有信号通道。
+- **子会话**：用户 window 里与主会话同窗的独立 pane 中的**交互 pi 进程**
+  （门禁以 judge 模式加载：reporting-shell 工具集 + heartbeat 上报 +
+  `judge_conclude` 落 report），承载所有 Judge 角色（goal-auditor / reviewer /
+  adviser）。同一工作区、
+  同一分支；cwd 为仓库根目录。session id 按 role+repo 确定性派生，所以同一角色
+  跨轮复用同一段上下文；judge 调 `judge_conclude` 交卷并停下（不退出进程），
+  结构化结论直接进 channel report，opener 凭它记录结论。
 - **只读探查**：并行的只读代码/文档探查并行安全（读者不写工作树，
   不会失效审查绑定）。L1/L2 执行层（recon / fixer）及其 subagent 派发已随
   pi-subagents companion 退役（2026-09-06）。
 - **门禁**：`git commit` / `git push` / `gh pr` 在 READY + precommit 通过前
-  一律硬拦；`review_checkpoint` 是送审前唯一的提交通道。
+  一律硬拦；通过之后还要看**本轮交付站点**允不允许这条命令（`lib/delivery-station.ts`）。
+  `judge_submit` 内部的 checkpoint 是送审前唯一的提交通道。
 
-## 阶段 0：目标起草
 
-用户提出任务 → 主会话调研（查代码/文档，可并行只读探查）→ 起草目标文本
-（任务标题、意图、3–7 条可检查的验收标准、非目标、ISO 日期），简体中文
+## 阶段 0：需求反述 → 目标起草
+
+用户提出任务 → 主会话调研（查代码/文档，可并行只读探查）→ 有疑问就 `ask_user`
+问清（**不设数量上限**，没疑问也可以不问）→ **把需求反述给用户确认**
+（`propose_restatement({restatement, station})`：这件事是什么、举个例子、
+改之前 → 改之后、哪几步会变得不同，并定下**本轮交付站点** precommit / commit / pr）
+→ 起草目标文本（任务标题、意图、3–7 条可检查的验收标准、非目标、ISO 日期），简体中文
 （标识符/路径/代码 token 保持英文）。
 
-## 阶段 1：目标审核（judge 子进程 · goal-auditor）
+反述是**机械前置**：没有用户确认过的反述，`propose_loop_goal` 与
+`orchestrator_plan({action:"submit"})` 直接被拒且不弹框。交付站点随 goal 的批准
+生效，之后 ship 门禁按它放行、`declare_done` 按它判到站。规则细节的唯一出处是
+`lib/restatement.ts` 与 `lib/delivery-station.ts`，本文不复述。
+
+
+## 阶段 1：目标审核（judge pane · goal-auditor）
 
 1. 目标文本送审 → goal-auditor 子会话按 `docs/judge-protocol.md` 审核。
 2. 审核期间主会话继续做确定性工作（必做的修改/查询/调研），不空等。
@@ -55,29 +68,56 @@
 ## 阶段 4：收尾
 
 1. READY 时检查工作区：还有未提交修改就停下确认内容，必要时问用户。
-2. Squash checkpoint 链成干净历史（READY 后 commit 放行）。
-3. `git push` / `gh pr create`（READY + precommit 均绑定最终 commit）。
+2. **走到本轮交付站点为止，不多走一步**：`precommit` 站到此为止，由用户自己
+   commit；`commit` 站可以 squash checkpoint 链成干净历史并提交；`pr` 站才继续
+   `git push` / `gh pr create`（READY + precommit 均绑定最终 commit）。超站的
+   命令会被 ship 门禁拦下，`declare_done` 也会检查有没有真的到站。
+
 
 ## 贯穿机制
 
-- **状态同步（主动唤醒，非轮询）**：**进程退出即完成**——扩展在 spawn 时注册
-  `child.on("exit")`，回调里读本轮 stdout、记录 verdict，再用
-  `pi.sendMessage({customType:"review-gate", ...}, { triggerTurn: true, deliverAs: "steer" })`
-  唤醒主会话；不需要轮询，也没有信号通道。session_shutdown 时取消全部监听。
-  **完成信号只是加速器**：子会话退出/崩溃由它自己的落盘物判定（`exit-code`
-  存在，或记录的进程已不在——死了、或 pid 被复用给了别人；见
-  `lib/judge-session.ts`）。子会话有疑问时把问题作为最后一个 fenced JSON
-  输出并退出，主会话再 `judge_submit` 同一角色带着答案续接。
+- **状态同步（标准报告唤醒，非轮询）**：judge 调 `judge_conclude` 交卷并停下（不退出
+  进程，pane 留给下一轮复用）；交卷把结构化结论写进 channel report，门禁在每次
+  settle 时看到新 report 即记录 verdict，再用标准报告唤醒主会话。父会话不手写轮询、
+  不直读 transcript——确实没活可做时调 `judge_wait`（消息驱动：新 finding / judge 提问 /
+  本轮结论 / pane 消失任一到达即返回，返回的是同一份标准报告）。
+  pane 消失但 verdict 未落盘时本轮不算结束，opener 以同一 session id
+
+  重开 pane 续接（`judge_recover`）。judge 有疑问时调 `ask_user`（人与 opener 经通道
+  竞态，先答先生效），等答案时停下、不退出 pane。
 - **消息送达（argv + 文件）**：任务文本落盘（`.pi/judge-sessions/<role-repo>/sessions/task-<ts>.md`），
-  以 `@file` 形式进 argv——非交互进程没有 TUI，也就没有多行被拆碎的问题。
-- **清理（时机是关键）**：judge 子会话的生命周期 = 整个任务周期，**不在任务中途关闭**——目标可能因
+  以 `@file` 形式进 argv 做首条消息——pane 内是交互进程，但任务文本不走键盘，也就没有多行被拆碎的问题。
+- **清理（时机是关键）**：judge pane 的生命周期归门禁，**不在任务中途关闭**——目标可能因
   新需求而修订（goal-auditor 要复审）、代码可能被打回（reviewer 要复审），它们的上下文就是复审
-  时的记忆。只在以下时机关闭：任务收尾（READY 记录后 / declare_done 前，`judge_close`）、
-  显式重建（换角色 / 换视角）、或子会话崩溃。declare_done 检查残留会话并提示；崩溃遗留的
-  进程可手动 kill，新会话启动时清理孤儿。
+  时的记忆。只在以下时机回收：verdict 终结（READY 落盘）、opener 放弃本轮（`fresh: true` 重派）、
+  换 review 对象、或 `declare_done` 联关（已记录的 verdict 保留，未落盘的轮次放弃）。崩溃遗留的
+  pane 由门禁按 pane 名单 + 注册表回收，无需手动 kill。
 - **公正与收敛**：每轮送审的提示词只带本轮范围；客观中立、一类问题列全
   的要求在子会话**系统提示词**中一次性注入（见 judge-protocol.md），主会话
   发现走偏时在下一轮 `judge_submit` 的任务文本里直接纠正。
+- **一个 worktree 一个门禁会话（2026-09-05 起，用户可见行为变更）**：同一个
+  checkout 里第二个「占用主 sidecar」的会话**不再只是收到一句警告，而是被拒绝**
+  ——edit/write、ship、门禁自己的 checkpoint 提交与 goal 落盘全部拦下，提示里
+  指名占用者（session / pid / host / 最后心跳）并给出两条出路（`git worktree add`
+  的实际命令，或关掉那个会话）。判活靠新的心跳文件 `.pi/session-presence.json`
+  （随 `.pi/` 一起被 gitignore，不进版本库）：**只看心跳新鲜度**，`pid`/`host` 仅
+  作诊断；文件缺失、内容损坏、时钟异常一律**放行**（这里的 fail-safe 方向与门禁
+  其他处相反——被决定的是「要不要拒绝你自己的 checkout」）。占用者关闭后**无需
+  手工删文件、也无需重开会话**：约一分钟内定时复检自动解除并接管。
+  - **谁不受影响**：judge pane 与编排子会话——它们本来就与 opener 同处一个
+    worktree，且不写主 sidecar（judge 不写门禁状态、子会话写自己的
+    `RG_STATE_VARIANT` 分片），因此天然豁免。`normal` 模式也不发拒绝（该模式的
+    定义就是门禁整体关闭）：worktree **空闲**时它照常写心跳，好让会 enforce 的
+    会话看见它；worktree **已被占用**时它既不拒绝、也不写心跳——凭据属于占用者，
+    覆盖它等于把保护抢走（而且退出时还会被自己当成「我的」删掉）。
+  - **同时消失的**：旧的「another Pi session … last wrote this repo's gate state
+    at …」四小时警告已删除——同一个问题只留一套存活判定（哲学三）。
+- **judge 不再写主仓库门禁状态（2026-09-05，用户可见）**：`.pi/review-gate-state.json`
+  的 `sessionId` / `taskMode` 不会再被 `rg-reviewer-…` 之类的 judge 会话覆盖，
+  已记录的 verdict 也不会被它写回 PENDING。judge 跳过写入时只在自己的会话记录里
+  留一条审计条目，不在被审仓库里落任何文件。**注意**：judge pane 跨轮复用同一个
+  进程，加载的是开 pane 那一刻的磁盘代码，所以升级后**已经开着的** judge 仍是旧
+  行为，新代码要等下一个新开的 pane 才生效。
 - **配置保留**：`.pi/review-gate.json`（项目层）→ `~/.pi/review-gate.json`
   （全局层）→ 内置默认的三层配置原样保留：precommit 的
   lint/typecheck/build/test 配置、agents 的模型槽位（auto / slots /

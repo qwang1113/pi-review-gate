@@ -46,6 +46,14 @@ import { hasAmendFlag, isMessageOnlyRewrite } from "./git-rewrite.ts";
 import { changedFiles, computeFingerprint, type Fingerprint } from "./fingerprint.ts";
 import { isProtectedBranch } from "./workspace-branch.ts";
 import { unmetRequirements, type GateState } from "./gate-state.ts";
+import {
+  deliveryStationRank,
+  shipKindAllowedAtStation,
+  STATION_SHIP_NEXT_STEPS,
+  stationShipProblem,
+  type DeliveryStation,
+} from "./delivery-station.ts";
+
 import { LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK } from "./loop-goal.ts";
 import {
   parseArbitrableAction,
@@ -62,6 +70,8 @@ import {
   type LlmClassifier,
 } from "./llm-classify.ts";
 import { withSlowNotice, type SlowNoticeSink } from "./progress-stream.ts";
+import { lexSegmentTokens } from "./shell-lex.ts";
+
 import type { ProjectConfig } from "./project-config.ts";
 import type { TaskMode } from "./task-mode.ts";
 import type { AppealKind } from "./text-appeal.ts";
@@ -77,6 +87,18 @@ export interface BlockedShipRecord {
   problems: string[];
   blockReason: string;
   at: number;
+  /**
+   * Was any part of this block a DELIVERY STATION refusal?
+   *
+   * The arbiter rules on whether a QUALITY block is circular; it was never
+   * asked how far a round may travel, and no token it could issue would be
+   * consulted here (the station check runs above the token path). Without
+   * this flag `request_arbitration` would accept the appeal, spend one of the
+   * session's three, possibly rule AGENT_WINS — and the command would stay
+   * blocked with no explanation (round-1 reviewer P2, 2026-09-06).
+   */
+  stationBlocked?: boolean;
+
 }
 
 /**
@@ -124,6 +146,19 @@ export interface ShipGateBashDeps {
   unreviewedTreesSince(root: string, review: GateState["review"]): string[] | undefined;
   /** Has the USER approved this session's loop goal (primary repo)? */
   loopGoalConfirmed(): boolean;
+  /**
+   * WHERE THIS ROUND STOPS, for one repo — or `undefined` when no delivery
+   * contract applies to this session at all.
+   *
+   * `undefined` is not "precommit". The two are different facts and the gate
+   * must not confuse them: a loop session's contract is its approved goal and
+   * an orchestration's is its approved plan, but an EXPLORE session has no
+   * contract of any kind, and reading its missing station as the strictest one
+   * would invent a ship block it never had (the user ruled on exactly this,
+   * 2026-09-06: explore and normal keep their current behaviour).
+   */
+  deliveryStation(root: string): DeliveryStation | undefined;
+
   /** "your READY is on another repo" — the cross-repo hint for a block. */
   crossRepoVerdictHint(blockedRoots: string[]): string;
   /** The flash classifier the three LLM guards run on. */
@@ -137,6 +172,15 @@ export interface ShipGateBashDeps {
   refuseText(kind: AppealKind, text: string, message: string, ctx: unknown): string | undefined;
   /** Append one line to the gate's lesson log. */
   appendLesson(text: string): void;
+  /**
+   * Say something to the agent WITHOUT refusing the command.
+   *
+   * The hook itself can only block or stay silent, so a hint needs its own
+   * seam. The extension delivers it as a follow-up message and de-duplicates
+   * it; a test replaces it with a push into an array.
+   */
+  hint(message: string): void;
+
   /** The standing single-use arbiter bypass token, if one was issued. */
   bypassToken(): BypassToken | null;
   /** Replace it (used to mark it consumed on attempt). */
@@ -162,29 +206,111 @@ export function describeShips(_command: string, ships: Array<{ kind: string }>):
 }
 
 /**
+ * A `sleep` long enough to be a WAIT rather than a pause. 30s is the smallest
+ * gap that cannot be anything else: a settle delay is a second or two.
+ */
+const POLLING_SLEEP_SECONDS = 30;
+
+/** File shapes a hand-rolled waiter reads: a channel file or a findings stream. */
+const WAIT_EVIDENCE = /rg-channels|review-stream|\.pi\/judge-sessions|RG_JUDGE_STREAM/;
+
+/**
+ * Is this command a hand-written wait for a judge — a long `sleep` next to a
+ * read of the gate's own channel or findings stream?
+ *
+ * WHY THE GATE SAYS SOMETHING (2026-09-05, user decision D6). This exact
+ * command shape cost a measured nine minutes: `sleep 280` inside one bash call
+ * while grepping the channel file. The turn never ends inside a bash call, so
+ * the session never settles, so the wake-up that was supposed to deliver the
+ * finished review never fires — the agent was waiting for something that could
+ * only arrive after it stopped waiting. `judge_wait` is the same wait done
+ * right, and it returns on the first message.
+ *
+ * It is a HINT, never a block, and that is deliberate: this is the opposite
+ * of an appeal route. An agent with a diagnostic reason to sleep and read a
+ * channel keeps doing exactly that; it just gets told there is a tool.
+ *
+ * Pure and exported, so the shape is unit-testable without a shell.
+ *
+ * `sleep` takes a suffix on both GNU and BSD (`5m`, `1h`), so the argument is
+ * read as a duration rather than as a bare number — `sleep 5m` is the same
+ * wait as `sleep 300`, and reading it as NaN would let the loudest case
+ * through.
+ */
+export function detectHandRolledWaitPolling(command: string): { reason: string } | undefined {
+  if (!WAIT_EVIDENCE.test(command)) return undefined;
+  let longSleep = false;
+  for (const tokens of lexSegmentTokens(command)) {
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i] !== "sleep") continue;
+      if (sleepSeconds(tokens[i + 1]) >= POLLING_SLEEP_SECONDS) longSleep = true;
+    }
+  }
+  if (!longSleep) return undefined;
+  return {
+    reason:
+      `review-gate 提示（不拦截）：这条命令看起来是手写的等待轮询（sleep ≥ ${POLLING_SLEEP_SECONDS}s + 读通道/findings 流）。` +
+      "在一次 bash 里等，turn 不会结束，门禁的唤醒也就不会发生 —— 实测这样丢过九分钟。" +
+      "改用 `judge_wait({role})`：新 finding、judge 提问、本轮结论、pane 消失，任一到达即返回，正文直接带回来。",
+  };
+}
+
+/** `sleep` accepts a suffix (`30`, `5m`, `1h`); anything else is not a duration. */
+function sleepSeconds(token: string | undefined): number {
+  const matched = /^(\d+(?:\.\d+)?)([smhd])?$/.exec(token ?? "");
+  if (!matched) return Number.NaN;
+  const unit = matched[2];
+  const multiplier = unit === "m" ? 60 : unit === "h" ? 3_600 : unit === "d" ? 86_400 : 1;
+  return Number(matched[1]) * multiplier;
+}
+
+
+
+/**
  * The refusal text a blocked ship carries, as a pure decision.
  *
  * O13: ONE next-step line. The problems already say what is unmet; the
  * arbitration sentence is added only where it can apply at all (a lone
  * `gh pr edit`), because a ship gate is a FACT — satisfy it, do not argue
  * with it.
+ *
+ * TWO KINDS OF BLOCK, TWO NEXT STEPS (2026-09-06). Unmet quality is cleared
+ * by working (review → precommit → done); a DELIVERY STATION is not — it is
+ * the contract for how far this round travels, and only the user can move it.
+ * Telling a station-blocked session to "run the review loop" would be a loop
+ * with no exit, so a station block replaces that line with
+ * {@link STATION_SHIP_NEXT_STEPS} and never offers the arbitration route (the
+ * arbiter hears a lone `gh pr edit` only, so it is a dead end that also costs
+ * one of three appeals).
  */
 export function buildShipBlockReason(input: {
   command: string;
   ships: Array<{ kind: string }>;
   problems: string[];
   crossRepoHint: string;
+  /** Ship commands refused because they travel past this round's station. */
+  stationProblems?: string[];
 }): { recorded: string; shown: string } {
+  const stationProblems = input.stationProblems ?? [];
+  const allProblems = [...input.problems, ...stationProblems];
+  const stationOnly = stationProblems.length > 0 && input.problems.length === 0;
   const recorded =
-    `review-gate: ${describeShips(input.command, input.ships)} blocked — quality gates unmet:\n` +
-    input.problems.map((p) => `  - ${p}`).join("\n") +
+    `review-gate: ${describeShips(input.command, input.ships)} blocked — ` +
+    (stationOnly ? "beyond this round's delivery station:\n" : "quality gates unmet:\n") +
+    allProblems.map((p) => `  - ${p}`).join("\n") +
     (input.ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "") +
     input.crossRepoHint;
-  const shown = recorded + "\n" + (input.ships.length === 1 && input.ships[0].kind === "pr-edit"
-    ? "跑完审查循环清掉门禁；若这条拦截确实是循环死结（唯一的修法就是这条 gh pr edit），可 request_arbitration。"
-    : "跑完审查循环清掉门禁（judge_submit → declare_done）。");
-  return { recorded, shown };
+  const nextStep = stationProblems.length > 0
+    ? STATION_SHIP_NEXT_STEPS +
+      (input.problems.length > 0
+        ? "\n上面那些质量门禁项则照常用审查循环清掉（judge_submit → declare_done）。"
+        : "")
+    : (input.ships.length === 1 && input.ships[0].kind === "pr-edit"
+      ? "跑完审查循环清掉门禁；若这条拦截确实是循环死结（唯一的修法就是这条 gh pr edit），可 request_arbitration。"
+      : "跑完审查循环清掉门禁（judge_submit → declare_done）。");
+  return { recorded, shown: recorded + "\n" + nextStep };
 }
+
 
 /**
  * The bash arm of the L1 `tool_call` hook — the ship gate.
@@ -211,8 +337,8 @@ export async function evaluateShipCommand(
   // hang. Same status-bar sink as the L6 label check.
   const shipNotice = deps.notice(ctx);
 
-  // Normal mode (user-confirmed, or the consent-free /tmp scratchFirstMode
-  // first classification which maps loop / missing picks to normal):
+  // Normal mode (user-confirmed, or the consent-free non-git first
+  // classification to normal):
   // the ship gate,
   // commit-message checks, and LLM ship classification are all off. This is
   // the mode's defining behavior; explore below never gets this branch.
@@ -229,6 +355,15 @@ export async function evaluateShipCommand(
     orchestratorMode: deps.taskMode() === "orchestrator",
   });
   if (tmuxHit) return { block: true, reason: tmuxHit.reason };
+
+  // The hand-rolled WAIT (D6): a hint, not a block, and it sits here — after
+  // the tmux backstop, before every early return below — so a session that has
+  // bypassed the ship gate, or is running a plain non-ship command, still
+  // hears it. Saying nothing was the previous design, and it is what let a
+  // session lock itself out of its own wake-up for nine minutes.
+  const polling = detectHandRolledWaitPolling(command);
+  if (polling) deps.hint(polling.reason);
+
 
   // /gate-bypass (user-authorized, reason logged in state): the L1 ship gate
   // steps aside for the rest of the session. The git hooks mirror it via
@@ -513,7 +648,56 @@ export async function evaluateShipCommand(
     problems.push(multiRepo ? `[${deps.repoLabel(primaryRepoRoot)}] ${LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK}` : LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
   }
 
-  if (problems.length === 0) return undefined;
+  // THE DELIVERY STATION (2026-09-06) — the LAST check, and deliberately a
+  // separate list from `problems`.
+  //
+  // It answers a different question from everything above: those ask "is this
+  // work good enough to ship?", this asks "does this round travel that far at
+  // all?". Running it last, on its own list, is what keeps the two apart in
+  // the refusal text — a session that reads "review is PENDING" and a session
+  // that reads "your round stops at precommit" have to do completely
+  // different things next, and one message that blurred them would send both
+  // to the wrong one.
+  //
+  // It NEVER relaxes anything: `problems` is already complete at this point
+  // and is carried into the block untouched, so a station that allows a
+  // command is not an authorization to run it (the quality gates still say
+  // no on their own terms).
+  //
+  // A MESSAGE-ONLY REWRITE is exempt, for the same reason the content gates
+  // exempt it: it publishes the tree it replaces, so it travels no further
+  // than the commit that already exists. Blocking it would leave a bad commit
+  // message unfixable at `precommit`, which is the deadlock lib/git-rewrite.ts
+  // exists to prevent.
+  const stationProblems: string[] = [];
+  if (!messageOnlyRewrite) {
+    // The STRICTEST station among the repos this command ships from: a
+    // compound command that reaches two repos must satisfy both contracts,
+    // and a repo with no contract (explore, or a repo this session never
+    // negotiated a goal for) contributes nothing rather than the default.
+    let station: DeliveryStation | undefined;
+    for (const root of checkRoots) {
+      const here = deps.deliveryStation(root);
+      if (here === undefined) continue;
+      if (station === undefined || deliveryStationRank(here) < deliveryStationRank(station)) {
+        station = here;
+      }
+    }
+    if (station !== undefined) {
+      const seen = new Set<ShipCommandKind>();
+      // `ships` is ShipDetection[], whose `kind` IS the gate's vocabulary —
+      // no cast, so a future widening of that union fails here instead of
+      // being silently accepted by the station table.
+      for (const { kind } of ships) {
+        if (seen.has(kind) || shipKindAllowedAtStation(station, kind)) continue;
+        seen.add(kind);
+        stationProblems.push(stationShipProblem(station, kind));
+
+      }
+    }
+  }
+
+  if (problems.length === 0 && stationProblems.length === 0) return undefined;
 
   // Single-use arbiter bypass token (lib/arbitration.ts). Only a lone,
   // in-scope `gh pr edit` (title/body) can EVER match — the token is bound to
@@ -522,7 +706,13 @@ export async function evaluateShipCommand(
   // commit/push/pr-create (those are not arbitrable, so no token is ever
   // issued for them) and never touches the code review loop.
   const token = deps.bypassToken();
-  if (ships.length === 1 && ships[0].kind === "pr-edit" && token && !primaryFp.unavailable) {
+  // A STATION block is never token-bypassable: the arbiter rules on whether
+  // a QUALITY block is circular, and it was never asked whether this round
+  // may travel further than the user agreed (no token is ever issued for
+  // that question). So a token is only consulted when nothing here is a
+  // station refusal.
+  if (stationProblems.length === 0 && ships.length === 1 && ships[0].kind === "pr-edit" && token && !primaryFp.unavailable) {
+
     const parsed = parseArbitrableAction(command);
     if (parsed.ok) {
       const bindings = await deps.computeTokenBindings(parsed.action, primaryFp.digest);
@@ -546,9 +736,18 @@ export async function evaluateShipCommand(
     command,
     ships,
     problems,
+    stationProblems,
     crossRepoHint: deps.crossRepoVerdictHint(blockedUnreviewed),
   });
-  deps.setLastBlockedShip({ command, problems, blockReason: recorded, at: Date.now() });
+  deps.setLastBlockedShip({
+    command,
+    problems: [...problems, ...stationProblems],
+    blockReason: recorded,
+    at: Date.now(),
+    ...(stationProblems.length > 0 ? { stationBlocked: true } : {}),
+
+  });
+
 
   return { block: true, reason: shown };
 }

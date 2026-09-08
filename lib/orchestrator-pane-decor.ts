@@ -39,11 +39,73 @@
  * mistake the 2026-08-30 rewrite removed. If the title is stale or missing,
  * every judgement is unchanged.
  *
+ * ── THE LABEL BAR IS A WINDOW-LEVEL SHARED RESOURCE (2026-09-06) ──
+ *
+ * `PANE_BORDER_STATUS` / `PANE_BORDER_FORMAT` below are not pane options.
+ * tmux applies them per WINDOW, and one window routinely holds a project
+ * manager, several child sessions, several judge panes, and the user's own
+ * shell — belonging to DIFFERENT sessions, none of which can see the others'
+ * registries. Everything else in this file is per-pane and private; these two
+ * are the shared surface, so their ownership is stated here rather than left
+ * to be reconstructed from the code that writes them.
+ *
+ * WHO TURNS IT ON: every DECORATED pane open, and it does not check first.
+ * `openSessionPane` (lib/session-factory.ts) calls `decorateSessionPane` when
+ * — and only when — that open asked for decoration (`spec.decor`), which is
+ * how a pane that wants no border, such as the relay successor, takes none.
+ * For the opens that DO decorate, the two window options are set again every
+ * time; re-opening an already-open bar is a no-op, and paying for it on each
+ * spawn is what makes the ON state independent of who arrived first.
+ *
+ * WHO TURNS IT OFF: the LAST decorated pane a session can see, and never a
+ * guest. `releasesWindowLabels` + `countDecoratedPanes` (both in
+ * lib/session-factory.ts) answer that one question for all five close paths
+ * (judge_close, judge_spawn's rollback, a `fresh` round's pre-kill,
+ * declare_done's cascade, orchestrator_close). Three properties of that answer
+ * are load-bearing:
+ *
+ *   1. It is turned off with `setw -u`, which RESTORES the user's own
+ *      configuration rather than imposing a default we invented.
+ *   2. Missing information keeps the bar UP: an unreadable pane list counts
+ *      every candidate as still present. A stale bar costs one line that the
+ *      next spawn re-establishes; a wrongly removed one blanks a border
+ *      somebody is reading.
+ *   3. The window is addressed through the caller's OWN live pane whenever it
+ *      has one — `setw -t <pane>` only names a window, and the id being closed
+ *      may already be gone. Where a caller might not have one it falls back to
+ *      the pane being closed (`deps.ownPane() ?? child.paneId` in
+ *      orchestrator_close): a best-effort address beats making the release
+ *      itself conditional on a diagnostic.
+ *
+ * WHAT THIS COSTS THE BYSTANDERS, and it is accepted: a window option applies
+ * to panes the gate never opened, so the user's own shell pane in that window
+ * grows a border showing its own `#{pane_title}` for as long as any gate pane
+ * lives. It is restored by whoever releases the bar. If the user closes every
+ * gate pane BY HAND, no close path runs and the bar survives until the window
+ * does.
+ *
+ * TWO KNOWN CROSS-SESSION MISFIRES, measured 2026-09-06 and deliberately NOT
+ * fixed in that round (user decision): both are display-only, and the next
+ * spawn re-establishes the bar.
+ *
+ *   (a) A manager running `orchestrator_close` counts its own children and its
+ *       own judges — it cannot see a reviewer pane the CHILD opened, because
+ *       that pane lives in the child's registry. Closing the last child while
+ *       that review is still running takes the bar down under it.
+ *   (b) An ordinary loop session opened by hand in a manager's window carries
+ *       no `RG_ORCHESTRATION_ID`, so it is not a "guest" by the test above.
+ *       Closing its own last judge pane releases the bar under the manager's
+ *       children.
+ *
+ * Both have ONE root cause — a session can only see panes in its own registry
+ * — so the honest fix is a cross-session pane registry, not a special case in
+ * the counter. Anyone reaching for that fix should start there.
+ *
  * Pure module: strings in, strings out. The argv lives in
  * lib/orchestrator-tmux.ts and the execution in the dispatch/lifecycle tools.
  */
 
-import type { ChildHealth, ChildState } from "./orchestrator-child-state.ts";
+import type { ChildState } from "./orchestrator-child-state.ts";
 
 /** One entry of the palette: what tmux is told, and what a human is told. */
 export interface PaneColor {
@@ -157,14 +219,12 @@ export function paneTitleFor(opts: {
 }
 
 
-/** The title for a child whose health has just been measured. */
-export function paneTitleForHealth(label: string, health: ChildHealth): string {
-  return paneTitleFor({
-    label,
-    state: health.state,
-    ...(health.stateForSeconds === undefined ? {} : { stateForSeconds: health.stateForSeconds }),
-  });
-}
+// (`paneTitleForHealth` is GONE, 2026-09-05. It rendered a title from a health
+// reading, which is now `refreshSessionPaneTitle`'s job in
+// lib/session-factory.ts — the ONE place a pane title is written, shared by the
+// orchestration probe and the judge probe. Leaving a second renderer behind is
+// how two spellings of the same border drift apart.)
+
 
 /**
  * `pane-border-format`, in tmux's own syntax.
@@ -178,22 +238,14 @@ export const PANE_BORDER_FORMAT = "#{pane_title}";
 /** Where the label bar goes. `top` keeps it out of the status line. */
 export const PANE_BORDER_STATUS = "top";
 
-/**
- * Is this the LAST decorated child in the window?
- *
- * The window-level options (`pane-border-status`, `pane-border-format`) are
- * shared by every pane in the window, including the orchestrator's own and
- * any pane the user opened themselves. So they are unset only when the last
- * child this orchestration decorated is going away — undoing them while a
- * sibling is still running would blank the labels of panes that still need
- * them, and leaving them forever would be litter in the user's window.
- */
-export function isLastDecoratedChild(
-  children: readonly { id: string; closedAt?: string }[],
-  closingChildId: string,
-): boolean {
-  return children.every((child) => child.id === closingChildId || Boolean(child.closedAt));
-}
+// (`isLastDecoratedChild` is GONE, 2026-09-05. It answered "is this the last
+// decorated CHILD" — one kind of pane, counted from registry rows — and both
+// halves of that were wrong once the same window also held decorated JUDGE
+// panes: a row whose pane the user had closed kept the label bar up forever,
+// and a manager closing its last child blanked a running review's border. The
+// question is now asked once, for every kind of pane, by
+// `releasesWindowLabels` + `countDecoratedPanes` in lib/session-factory.ts.)
+
 
 /** One line for the receipt, so a colour on screen matches a row in the text. */
 export function formatPaneLegend(entries: readonly { childId: string; label: string }[]): string {

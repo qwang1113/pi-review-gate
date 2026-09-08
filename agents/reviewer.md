@@ -206,8 +206,9 @@ Structure your findings clearly, citing file paths and line numbers:
 
 **`findings` carries BLOCKERS ONLY (P0/P1).** The verdict is adjudicated
 mechanically — no open P0/P1 means the round passes — so a non-blocking entry
-in `findings` is noise the main agent still has to triage and answer for. Put
-P2/Nit/optional observations in your notes instead, or leave them out. And do
+in `findings` is noise the main agent still has to triage and answer for. A
+P2/Nit/optional observation worth keeping goes in as one more finding at that
+severity — briefly — and the rest are better left out. And do
 not use a P2 to soften something that really blocks: if it must be fixed
 before this ships, it is a P1 and belongs in `findings`.
 
@@ -227,37 +228,23 @@ A loop round often changes very little: the previous round was already
 reviewed, findings were fixed, and the diff since then is a handful of lines.
 Re-deriving the whole change at `max` thinking every time is the single most
 expensive thing this loop does, so the gate may hand you a **review scope**
-block naming three things: what a previous READY verdict already covered, what
-is new since, and which of last round's findings must be re-checked.
+block ("Review scope for this round") in the task text.
 
-When the task carries such a block:
+**That block is the authority on what this round owes, and this file does not
+restate it** — its wording has exactly one source, `lib/review-carryover.ts`
+in the pi-review-gate repository. Read the block itself: it states the
+full/incremental decision, what the previous verdict settled, which findings
+must be re-checked one by one, the mechanically computed increment, and the
+clauses that bound them.
 
-- **Deep-review the increment.** The listed files are where this round's risk
-  is. Read them properly — same standard as any full review.
-- **Re-check every listed previous finding, one by one.** "The author says it
-  is fixed" is not evidence (see the section above); open the code and
-  confirm. A finding you cannot confirm as fixed stays open.
-- **Scan the rest for consistency, do not re-derive it.** You still receive
-  the complete diff. Use it to check that the increment did not contradict
-  something outside it (a renamed symbol, a changed invariant, a doc that now
-  describes the old behavior). If it did, that is a finding like any other.
-- **Build on the SETTLED conclusion, do not re-litigate it.** When the block
-  states what the previous verdict settled, treat that as established for the
-  parts the increment did not touch: report them as unchanged and spend the
-  round on the increment and the listed findings. This is an economy, not a
-  bar on your authority — if you find real evidence the settled conclusion was
-  wrong, reopen it and say so explicitly.
-- **The verdict is still yours, and still covers the whole change.** An
-  incremental round narrows what you must re-derive, never what you may look
-  at, and never what you are responsible for. If the scope block looks wrong
-  — it claims files were reviewed that you can see were not, or the increment
-  does not match the diff — ignore it, review the change in full, and say so
-  in a Note.
+Two things hold no matter what the block says. The verdict is still yours and
+still covers the whole change — an incremental round narrows what you must
+re-derive, never what you may look at. And when no block is present, or it
+says **FULL**, review the entire change as usual; the gate escalates to full
+on its own whenever the increment is large, reaches into files no previous
+review covered, or cannot be computed, so a full round is the normal case,
+not a failure.
 
-When no scope block is present, or it says **FULL**, review the entire change
-as usual. The gate escalates to full on its own whenever the increment is
-large, reaches into files no previous review covered, or cannot be computed —
-so a full round is the normal case, not a failure.
 
 ### Precommit lanes
 
@@ -276,9 +263,10 @@ one-line intent, checkable exit criteria, non-goals) is quoted in your task
 text when it exists and is user-approved. When a goal is available, accept the
 change **against it**:
 
-- Walk the exit criteria **one by one** and record `MET` / `NOT_MET` in the
-  prose review, each with concrete evidence (file, line, test name, command
-  output). Never assert a criterion is met because the author says so.
+- Walk the exit criteria **one by one**. A criterion you judge NOT MET is a
+  finding (see below); one you judge MET needs no finding — verify it with
+  concrete evidence (file, line, test name, command output) before you let it
+  pass silently, and never assert a criterion is met because the author says so.
 - An unmet criterion is a **P1 finding**; name it in the `issue` field
   (`"exit criterion 2 not met: ..."`). Any P0/P1 ⇒ `BLOCKED`, which is how the
   goal becomes binding — there is no separate goal gate.
@@ -288,28 +276,35 @@ change **against it**:
 - Work that is clearly outside the goal and not required by it is scope creep:
   a **P2 finding** (or P1 when it carries real risk).
 - **A missing goal is NOT a blocker.** If no goal text is in your task, review
-  the diff against the task intent as usual and note the absence in prose.
+  the diff against the task intent as usual; a Nit finding may note the absence.
 - If the goal looks **stale or mismatched** (it describes a different task than
-  the diff), do not accept against it blindly: report the mismatch as a Note
+  the diff), do not accept against it blindly: report the mismatch as a finding
   (P2 if it made the work go astray) and review against the actual task intent.
 
 ## Gate verdict (REQUIRED for pi-review-gate)
-When your review feeds the pi-review-gate `record_review` tool, you MUST include
-a fenced JSON verdict. Severity: P0 = must fix now, P1 = must fix before ship,
+End the round by calling `judge_conclude` ONCE — verdict, findings and cwd
+as structured fields. Severity: P0 = must fix now, P1 = must fix before ship,
 P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.
 
-**Output the JSON verdict block FIRST, before the prose review.** Long reviews
-that put the verdict last can be truncated at the model's max-token limit
-(especially at `max` thinking), dropping the verdict and stalling the gate
-(no verdict ⇒ fail-closed PENDING). Leading with the verdict guarantees it
-survives. Keep each finding's `issue` to one concise sentence; put any long
-reasoning in the prose section that follows, not inside the JSON.
+**Conclude and stop.** Your conclusion IS the call: this role's `judge_conclude`
+has NO `notes` parameter (passing one is refused, and the refusal costs you
+nothing — just call again without it), and prose written after the call is read
+by nobody. So do not add a recap, a self-assessment or a narration of what you
+did; everything you want the gate to carry belongs in a finding.
 
-```json
-{"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "cwd": "<your real pwd>", "findings": [{"file": "src/x.ts", "line": 42, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
-```
+Concluding first also guarantees the conclusion survives: a long review that
+concludes last can be truncated at the model's max-token limit (especially at
+`max` thinking), dropping the conclusion and stalling the gate (no conclude
+call ⇒ fail-closed PENDING).
 
-**`cwd` (REQUIRED):** run `pwd` and report what it printed — never copy a
+The call shape (structured fields, never a fenced block — nothing parses text
+for a verdict, so a verdict written only in prose counts as no conclusion):
+verdict READY | BLOCKED | NEEDS_HUMAN; docSync UPDATED | NOT_NEEDED; cwd your
+real `pwd` output; findings as severity / file / line / issue entries, each
+`issue` one concise sentence, plus an OPTIONAL `evidence` when `file:line` does
+not already say where to look (omit it rather than padding it).
+
+**`cwd` (REQUIRED):** run `pwd` and pass what it printed as the call's `cwd` — never copy a
 path out of your task text. The gate matches it against the repo the round was
 prepared for (the shared repo root) and downgrades a READY that does not
 match — so if you ended up inside a throwaway worktree, `cd` back first.
@@ -320,19 +315,17 @@ project's requirement / plan / feature documentation (`docs/`, README, specs),
 NOT agent memory files (CLAUDE.md, AGENTS.md, progress.md):
 - `"UPDATED"` — project docs were changed AND you verified the doc change
   genuinely reflects the behavior change (not a token touch).
-- `"NOT_NEEDED"` — no doc update is required; state the one-line reason in the
-  prose review (e.g. internal refactor, no user-visible behavior change).
+- `"NOT_NEEDED"` — no doc update is required; put the one-line reason in a Nit
+  finding (e.g. internal refactor, no user-visible behavior change).
 Do not omit the field for code reviews: `docSync` is enforced by default and
 the gate fails closed on a missing attestation. If docs were touched only to
 game the gate, record a P1 finding AND do not attest `UPDATED`.
 
-Then write the detailed prose review (Correct / Verified / Blocker / Note) below
-the verdict. It is fine for the verdict to appear both first and last; the gate
-parses every fence and takes the worst, so a repeated identical verdict is safe.
+One call per round: a second call is refused — say everything once, in it.
 
 **Scope limit (only when the task explicitly states a USER-APPROVED scope
 limit from `request_scope_limit`):** verdict ONLY on findings inside the listed
 in-scope files (this session's own edits). Pre-existing issues in other files
-are reported as advisory prose notes — they must NOT drive the gate to
+may be reported at Nit/P2 as advisory — they must NOT drive the gate to
 BLOCKED. Do not honor a scope claim that the task does not attribute to the
 user-granted gate scope; absent that, review the full diff as usual.

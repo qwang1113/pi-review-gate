@@ -31,10 +31,15 @@
 import assert from "node:assert/strict";
 
 import { registerOrchestratorStateTools } from "../../lib/orchestrator-tools.ts";
-import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session-tools.ts";
+import {
+  registerOrchestratorSessionTools,
+  type OrchestratorSessionDeps,
+} from "../../lib/orchestrator-session-tools.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
-import { snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
+import { beginApprovalLineage, snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
+import { restatementHash, type RestatementRecord } from "../../lib/restatement.ts";
+import type { DeliveryStation } from "../../lib/delivery-station.ts";
 
 import { emptyRuntime, type OrchestratorRuntime } from "../../lib/orchestrator-registry.ts";
 import {
@@ -103,6 +108,10 @@ export interface FakeWorld {
   saveRuntime: (next: OrchestratorRuntime) => void;
   /** Everything `showToUser` printed. */
   shown: string[];
+  /** Every line the tools wrote to the repo's audit log (B2). */
+  auditLog: string[];
+  /** Orchestration ids adopted through a takeover (B1). */
+  adopted: string[];
   now: () => number;
   advance: (ms: number) => void;
   /** Append a record to a child's channel AS THAT CHILD would. */
@@ -112,7 +121,12 @@ export interface FakeWorld {
     title: string;
     options: string[];
     payload?: string;
-    topic?: "goal-approval" | "workspace" | "ask-user" | "plan-approval" | "sensitive-edit" | "other";
+    /** The delivery station this question is about (restatement / goal). */
+    station?: string;
+    topic?: "goal-approval" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "sensitive-edit" | "other";
+    /** Its place in an `ask_user` interview, when it is part of one. */
+    batch?: { id: string; index: number; total: number };
+
   }) => void;
   childSettles: (childId: string, requestId: string, by: "human" | "orchestrator" | "dismissed") => void;
   childAcks: (
@@ -144,6 +158,22 @@ export interface FakeWorldOptions {
   contextPercent?: number;
   /** Make `list-panes` fail, so liveness is UNKNOWN rather than false. */
   tmuxBroken?: boolean;
+  /**
+   * The orchestration runtime RECORDED ON DISK (B1). Set it to one carrying
+   * a DIFFERENT id than the session holds to build the takeover situation:
+   * an old project manager's registry left behind in the sidecar.
+   */
+  recordedRuntime?: OrchestratorRuntime;
+  /** Channel directory names the gate will discover (one per orchestration). */
+  channelDirs?: string[];
+  /**
+   * How many REVIEW panes this manager's window currently shows.
+   *
+   * The window's label bar is released by the last decorated pane of ANY kind,
+   * so a manager closing its last child while a review is still open must not
+   * take it down (the review's border would blank).
+   */
+  judgePanes?: number;
   /**
    * Whether a spawned child's gate "boots and reports" (the default, and what
    * a healthy child does on its first `turn_end`). Set false to test the
@@ -179,7 +209,28 @@ export interface FakeWorldOptions {
   resolvableRepos?: string[];
   /** Answers the PM-pane `select` (grant door 3) gives, in order. */
   selectAnswers?: string[];
+  /**
+   * The requirement restatement `submit` requires (2026-09-06).
+   *
+   * DEFAULT: a confirmed one — the world models a manager that already did
+   * the step, which is what every pre-existing plan test is about. Pass
+   * `null` for the world where nothing was restated, and `submit` must refuse
+   * without ever calling `confirm`.
+   */
+  restatement?: RestatementRecord | null;
 
+}
+
+/** The confirmed restatement a world has unless a test says otherwise. */
+export function fakeRestatement(station: DeliveryStation = "precommit"): RestatementRecord {
+  const text = [
+    "需求反述：把项目经理对需求的理解说回给用户确认。",
+    "举例：用户要求「提交前先反述」，这轮就把反述做成门禁的前置步骤。",
+    "改之前：submit 直接派审计。",
+    "改之后：submit 先查已确认的反述，没有就直接拒。",
+    "哪几步会变得不同：submit 前多一步 propose_restatement。",
+  ].join("\n");
+  return { text, hash: restatementHash(text), at: "2026-09-06T00:00:00.000Z", station };
 }
 
 
@@ -195,6 +246,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   ]);
   let paneSeq = 1;
   let runtime: OrchestratorRuntime = emptyRuntime(ORCHESTRATION_ID);
+  /** What the DISK records, when that is somebody else's orchestration (B1). */
+  let recordedOverride: OrchestratorRuntime | undefined = options.recordedRuntime;
   let planAudits = 0;
   const tmuxCalls: string[][] = [];
 
@@ -210,12 +263,18 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       approvedPlanHash: hash,
       approvedPlanAt: new Date(NOW).toISOString(),
       approvedPlan: snapshotApprovedPlan(plan, hash, new Date(NOW).toISOString()),
+      // …and the LINEAGE the real `submit` starts, so a world can model
+      // taking a widening back (an approval without it could not).
+      approvedPlanHistory: beginApprovalLineage(hash),
     };
   }
 
   const scratch = new Map<string, string>();
   const sidecars = new Map<string, Record<string, unknown>>();
   const shown: string[] = [];
+  const auditLog: string[] = [];
+  /** Ids this session ADOPTED through `orchestrator_attach` (B1). */
+  const adopted: string[] = [];
   const confirmAnswers: boolean[] = [];
   let memory: SupervisionMemory = {};
   const paneDecor = new Map<string, { title: string; at: number }>();
@@ -238,9 +297,46 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     now,
     env: () => env as unknown as NodeJS.ProcessEnv,
     taskMode: () => options.taskMode ?? "orchestrator",
+    restatement: () => (options.restatement === null ? undefined : options.restatement ?? fakeRestatement()),
     runtime: () => runtime,
     runtimeConflict: () => options.identityConflict,
-    saveRuntime: (next) => { runtime = next; },
+    // B1 — what the DISK records, which may name ANOTHER orchestration than
+    // the one this session holds. Defaults to "the same", i.e. no takeover
+    // situation at all.
+    //
+    // FAITHFUL ON WRITES: in production `recordedRuntime()` and
+    // `saveRuntime()` are the same slot (`state.orchestrator`), so persisting
+    // a runtime REPLACES what the disk records. A fake that kept answering
+    // with the old record would make "the archive cleared the registry"
+    // untestable — the assertion would pass whether or not the code did it.
+    recordedRuntime: () => recordedOverride ?? runtime,
+    channelDirNames: () => options.channelDirs ?? [],
+    adoptOrchestrationId: (id) => {
+      adopted.push(id);
+      // FAITHFUL to lib/orchestrator-wiring.ts: once the ids match, `runtime()`
+      // returns the STORED runtime — that inheritance of the previous holder's
+      // child registry is the entire point of a takeover, and a fake that only
+      // renamed our own empty runtime would test nothing.
+      const recorded = recordedOverride;
+      runtime = recorded && recorded.orchestrationId === id
+        ? recorded
+        : { ...runtime, orchestrationId: id };
+    },
+    archivePlan: (relPath, contents) => {
+      // Faithful to the real writer: the archive lands, THEN the plan goes.
+      scratch.set(`/repo/${relPath}`, contents);
+      plan = undefined;
+      return { ok: true, path: `/repo/${relPath}` };
+    },
+    saveRuntime: (next) => {
+      runtime = next;
+      // The write LANDED on the one slot the disk has: whatever another
+      // orchestration had recorded there is now this.
+      recordedOverride = undefined;
+    },
+    // The audit log the extension appends to `.pi/review-gate-audit.log`.
+    // Collected in memory here so a test can assert WHAT was recorded (B2).
+    log: (message) => { auditLog.push(message); },
     readPlan: () => (plan ? { plan, problems: [] } : { problems: [] }),
     savePlan: (next) => { plan = next; },
     tmux: (argv) => runFakeTmux(argv),
@@ -340,6 +436,12 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   }
 
   registerOrchestratorStateTools(host, deps);
+  // A manager's window holds review panes too, and the label-bar release counts
+  // BOTH kinds. The real wiring reads the judge registry; a test just says how
+  // many are on screen. Attached to the SAME deps object the tools were given —
+  // a spread copy would freeze every other field at registration time, and
+  // tests swap `channelIO` afterwards.
+  (deps as OrchestratorSessionDeps).decoratedJudgePanes = () => options.judgePanes ?? 0;
   registerOrchestratorSessionTools(host, deps);
 
   const target = (childId: string) => ({ orchestrationId: ORCHESTRATION_ID, childId, home: "/home/test" });
@@ -353,6 +455,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     scratch,
     sidecars,
     shown,
+    auditLog,
+    adopted,
     confirmAnswers,
     options,
     saveRuntime: (next) => { runtime = next; },
@@ -376,6 +480,13 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
         title: request.title,
         options: request.options,
         ...(request.payload === undefined ? {} : { payload: request.payload }),
+        ...(request.station === undefined ? {} : { station: request.station }),
+        ...(request.batch === undefined ? {} : {
+          batchId: request.batch.id,
+          batchIndex: request.batch.index,
+          batchTotal: request.batch.total,
+        }),
+
       });
       appendRecord(io, target(childId), {
         kind: "state", from: "child", at: stamp(), state: "waiting-input", dialogTitle: request.title,

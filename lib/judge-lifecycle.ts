@@ -18,6 +18,7 @@
  * clock, no process. The extension supplies the observations.
  */
 
+import { laneSuffix, shortOpenerHash, type JudgeLane } from "./judge-process.ts";
 /** Root of the gate's judge session tree, relative to the repo. */
 export const JUDGE_SESSIONS_RELDIR = ".pi/judge-sessions";
 
@@ -28,20 +29,36 @@ export const JUDGE_WAIT_MAX_TIMEOUT_MS = 10 * 60 * 1000;
 export const JUDGE_WAIT_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
- * The work dir of one judge role in one repo — STABLE across rounds (B5).
+ * The work dir of one judge role in one repo in one OPENER session — STABLE across rounds of the same opener (B5).
  *
- * Same role + same repo ⇒ same dir ⇒ pi appends to the same transcript when
- * the next round spawns with the same session id. The round's own artifacts
- * (task file, stdout, pid) live under `runs/<ts>/`, which is where the
- * per-round variation belongs; a title never enters the path.
+ * Same role + same repo + same opener ⇒ same dir ⇒ pi appends to the same transcript when
+ * the next round spawns with the same session id. A different opener gets a different dir,
+ * so its transcript starts fresh and never reads a previous session's files. The round's own
+ * artifacts (task file, stdout, pid) live under `runs/<ts>/`, which is where the per-round
+ * variation belongs; a title never enters the path.
  */
-export function judgeWorkDirFor(role: string, repoHash: string): string {
-  return `${JUDGE_SESSIONS_RELDIR}/${safePathPart(role)}-${safePathPart(repoHash)}`;
+export function judgeWorkDirFor(role: string, repoHash: string, openerId: string, lane?: JudgeLane): string {
+  return `${JUDGE_SESSIONS_RELDIR}/${judgeWorkDirBasename(role, repoHash, openerId, lane)}`;
 }
 
-/** Directory name for ONE round under `<workDir>/runs/`. */
-export function judgeRunDirName(at: Date, rand: string): string {
-  return `${at.toISOString().replace(/[:.]/g, "-")}-${safePathPart(rand)}`;
+/**
+ * Basename of the opener-scoped work dir (the reclaim registry compares basenames).
+ *
+ * The optional LANE is rendered by the same `laneSuffix` the session id uses,
+ * so a judge's dir and its transcript id always name the same lane. Omitting
+ * it reproduces the pre-lane basename byte for byte.
+ */
+export function judgeWorkDirBasename(role: string, repoHash: string, openerId: string, lane?: JudgeLane): string {
+  return `${safePathPart(role)}-${safePathPart(repoHash)}-${shortOpenerHash(openerId)}${laneSuffix(lane)}`;
+}
+
+/**
+ * Basename of the PRE-OPENER work dir. RECLAIM GUARD ONLY — never derive a
+ * live path from it. It exists so the sweep can protect a possibly-live legacy
+ * peer (an old-code session still running) from immediate reclaim.
+ */
+export function legacyJudgeWorkDirBasename(role: string, repoHash: string): string {
+  return `${safePathPart(role)}-${safePathPart(repoHash)}`;
 }
 
 /**
@@ -52,96 +69,95 @@ function safePathPart(raw: string): string {
   return raw.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "judge";
 }
 
-/** What the gate knows about a role before it dispatches a round to it. */
-export interface JudgeDispatchSituation {
-  /** Is a process of this role still running in this repo? */
-  aliveSameRole: boolean;
-  /** Did the caller ask to discard the incumbent? */
-  fresh: boolean;
-  /** Does the role's session dir already hold a transcript? */
-  hasTranscript: boolean;
-}
+/** Judge session dirs with no known owner older than this are reclaimed. */
+export const JUDGE_SESSION_DIR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-export interface JudgeDispatchDecision {
-  /**
-   * `refuse-busy`  the role is mid-round and CANNOT be handed this one;
-   * `kill-and-spawn`  discard the incumbent, then start the round;
-   * `spawn`  start the round (continuing the session when one exists).
-   */
-  action: "refuse-busy" | "kill-and-spawn" | "spawn";
-  /** Will this round continue an existing conversation? */
-  continuesSession: boolean;
+/**
+ * The CURRENT dir shape, in one place: `<role>-<repoHash>-<openerHash>`,
+ * optionally followed by a LANE (`-<objectHash>-g<generation>`).
+ *
+ * The lane tail had to be recognised here the moment rotation started minting
+ * it: an unrecognised shape is "not ours", and a rotated-away dir that is not
+ * ours would never be reclaimed — "archived in place" would quietly mean
+ * "kept forever". Both hashes are 8 hex by construction (`shortRepoHash`,
+ * `shortOpenerHash`, `shortObjectId`), so the shape stays fail-closed: only
+ * these two forms are ever eligible for deletion.
+ */
+const CURRENT_JUDGE_DIR_RE = /-([0-9a-f]{8})-([0-9a-f]{8})(?:-([0-9a-f]{8})-g(\d+))?$/;
+
+/**
+ * Is this a PRE-OPENER dir (`<role>-<repoHash>` with no opener segment)?
+ *
+ * New dirs end with TWO trailing `-<8hex>` segments (repo hash + opener hash),
+ * plus an optional lane tail; legacy dirs end with exactly ONE. Anything else
+ * (e.g. `archive`) is not ours and never qualifies — deletion fail-closed:
+ * only recognised shapes are reclaimed.
+ */
+export function isLegacyJudgeSessionDirName(name: string): boolean {
+  const base = name.split("/").pop() ?? name;
+  if (CURRENT_JUDGE_DIR_RE.test(base)) return false;
+  return /-([0-9a-f]{8})$/.test(base);
 }
 
 /**
- * Decide what dispatching a round to a role means right now.
+ * Is this a CURRENT (opener-scoped) dir — `<role>-<repoHash>-<openerHash>`,
+ * with or without a rotation lane (`-<objectHash>-g<n>`)?
  *
- * THE RULE THIS ENCODES (round-1 P1): a round is either DELIVERED or REFUSED —
- * never silently dropped. A non-interactive judge reads its task once, at
- * spawn, so a running one cannot receive anything; answering "submitted"
- * there left the agent waiting on a round that was never handed over, and the
- * previous round's exit then looked like this round's completion.
- *
- * Reuse of CONTEXT is a separate question and does not depend on a live
- * process: it comes from the transcript the session id re-opens.
+ * Only these shapes are eligible for TTL reclaim. Anything else that is not
+ * legacy (e.g. `archive/`) is not ours and is NEVER reclaimed — deletion
+ * fail-closed. A rotated-away lane is reclaimed exactly like any other dir
+ * with no live owner: left in place, swept after the TTL.
  */
-export function decideJudgeDispatch(situation: JudgeDispatchSituation): JudgeDispatchDecision {
-  const continuesSession = situation.hasTranscript;
-  if (situation.aliveSameRole) {
-    return situation.fresh
-      ? { action: "kill-and-spawn", continuesSession }
-      : { action: "refuse-busy", continuesSession };
+export function isCurrentJudgeSessionDirName(name: string): boolean {
+  const base = name.split("/").pop() ?? name;
+  return CURRENT_JUDGE_DIR_RE.test(base);
+}
+
+/** One entry of the `.pi/judge-sessions/` listing for the reclaim decision. */
+export interface JudgeSessionDirEntry {
+  /** Basename of the dir (not the full path). */
+  name: string;
+  /** Directory mtime, ms since epoch; non-finite means "age unknown". */
+  mtimeMs: number;
+}
+
+/**
+ * Which judge session dirs to reclaim. Pure so the policy is unit-testable:
+ *
+ *  - a dir the registry still references (any format, possibly a live peer's)
+ *    is never reclaimed;
+ *  - a legacy (pre-opener) dir nobody references is reclaimed IMMEDIATELY —
+ *    a new opener must never read its transcript, so keeping it only risks
+ *    cross-session pollution;
+ *  - any other CURRENT-FORMAT unreferenced dir is reclaimed once older than the TTL;
+ *    anything of unrecognised shape is never reclaimed (fail-closed).
+ */
+export function selectStaleJudgeSessionDirs(
+  entries: ReadonlyArray<JudgeSessionDirEntry>,
+  knownNames: ReadonlySet<string>,
+  nowMs: number,
+): string[] {
+  const out: string[] = [];
+  for (const entry of entries) {
+    if (knownNames.has(entry.name)) continue;
+    if (isLegacyJudgeSessionDirName(entry.name)) {
+      out.push(entry.name);
+      continue;
+    }
+    if (
+      isCurrentJudgeSessionDirName(entry.name) &&
+      Number.isFinite(entry.mtimeMs) &&
+      nowMs - entry.mtimeMs > JUDGE_SESSION_DIR_TTL_MS
+    ) {
+      out.push(entry.name);
+    }
   }
-  return { action: "spawn", continuesSession };
+  return out;
 }
 
 
-/** What the extension can observe about a running judge round. */
-export interface JudgeWaitProbe {
-  /** Does the recorded process still exist? */
-  processAlive: boolean;
-  /** Has the round written its `exit-code` file? */
-  exitCodeExists: boolean;
-  /** Tail of the round's `stdout.log` (plain text — the fence is NOT escaped here). */
-  stdoutTail: string;
-}
 
-export type JudgeWaitReason =
-  /** The `exit-code` file landed: the session finished and said how. */
-  | "exit-code"
-  /** The process is gone without an exit-code (crash) — still finished. */
-  | "process-gone"
-  /** A verdict or question fence is already in stdout, before the exit. */
-  | "fence"
-  /** None of the three criteria hit yet. */
-  | "pending";
 
-export interface JudgeWaitOutcome {
-  done: boolean;
-  reason: JudgeWaitReason;
-}
-
-/**
- * The three independent "this round is over" criteria, in one decision.
- *
- * Any single hit ends the wait. The fence criterion is what makes waiting
- * cheap: a judge that already printed its verdict is done for our purposes
- * even if its process takes another minute to tear down. It reads STDOUT, not
- * the transcript jsonl — inside the jsonl the fence is JSON-escaped, which is
- * why the old grep criterion never fired.
- */
-export function evaluateJudgeWait(probe: JudgeWaitProbe): JudgeWaitOutcome {
-  if (probe.exitCodeExists) return { done: true, reason: "exit-code" };
-  if (!probe.processAlive) return { done: true, reason: "process-gone" };
-  if (hasJudgeFence(probe.stdoutTail)) return { done: true, reason: "fence" };
-  return { done: false, reason: "pending" };
-}
-
-/** A verdict fence (`"gate": "READY"`) or a question fence, in plain text. */
-export function hasJudgeFence(text: string): boolean {
-  if (!text) return false;
-  return /"gate"\s*:\s*"(READY|BLOCKED|NEEDS_HUMAN)"/.test(text) || /"question"\s*:\s*"/.test(text);
-}
 
 /** Clamp a caller-supplied wait window into the tool's allowed range. */
 export function clampWaitTimeout(requestedMs: number | undefined): number {
@@ -151,79 +167,85 @@ export function clampWaitTimeout(requestedMs: number | undefined): number {
   return Math.min(Math.floor(requestedMs), JUDGE_WAIT_MAX_TIMEOUT_MS);
 }
 
-/**
- * Mechanical wait discipline, returned by `judge_wait` itself (goal criterion
- * 6): blocking is the LAST resort, not the reflex.
- */
-export const WAIT_DISCIPLINE_HINT =
-  "等待纪律：还有确定性工作（代码/测试/文档/其他 repo 事务）就先做掉，别在这里空等——" +
-  "judge 完成会自动唤醒本会话，judge_wait 只用于「确实没有别的可做」时阻塞取结论。";
-
-/** Trailing stdout lines a `judge_wait` reply carries, in either branch. */
-export const WAIT_STDOUT_TAIL_LINES = 40;
-/** Newest streamed findings a `judge_wait` progress reply carries. */
-export const WAIT_FINDINGS_SHOWN = 5;
-
-/** The last `n` lines of `text` (empty stays empty). */
-export function tailLines(text: string, n: number): string {
-  if (!text) return "";
-  const lines = text.replace(/\s+$/, "").split("\n");
-  return lines.length <= n ? lines.join("\n") : lines.slice(-n).join("\n");
+/** The part of a wait's reply this decision reads — reason, and whether it failed. */
+export interface RoundWaitReply {
+  isError?: boolean | undefined;
+  details?: { reason?: unknown } | undefined;
 }
 
-/** Everything `judge_wait` knows when its window closes. */
-export interface JudgeWaitReport {
-  role: string;
-  done: boolean;
-  reason: JudgeWaitReason;
-  /** How long this call actually blocked, in ms. */
-  waitedMs: number;
-  /** Tail of THIS round's stdout log (raw — the caller does not trim it). */
-  stdoutTail: string;
-  /** The judge's own conclusion, read once the round is over. */
-  conclusion?: { text?: string; hasVerdict: boolean };
-  /** The newest findings the judge streamed, one summary line each. */
-  findings: readonly string[];
-}
+/** Reasons that mean the ROUND is over — everything else is a mid-round message. */
+const ROUND_ENDING_REASONS = new Set(["report", "pane-dead"]);
 
 /**
- * What `judge_wait` RETURNS (user decision 6.2) — the final tool result, which
- * is a different channel from the live `onUpdate` progress: the progress
- * snapshots are for the human watching the call, this text is what the agent
- * reads afterwards, so neither replaces the other.
+ * Minimum spacing between two calls of the wait — the anti-spin floor.
  *
- *  - round over  ⇒ the conclusion PLUS the stdout tail (the conclusion alone
- *    hides a judge that died mid-sentence, or answered outside a fence);
- *  - still running / timed out ⇒ the CURRENT progress: the same stdout tail
- *    plus the newest streamed findings, so a caller that gave up waiting still
- *    leaves with what the judge has produced so far — not just "not done yet".
+ * The waiting tool normally blocks for minutes, so this costs nothing in the
+ * healthy case; it exists for the case where it returns instantly, forever.
  */
-export function formatJudgeWaitReply(report: JudgeWaitReport): string {
-  const tail = tailLines(report.stdoutTail, WAIT_STDOUT_TAIL_LINES);
-  const parts: string[] = [
-    report.done
-      ? `review-gate: ${report.role} 本轮已结束（判据：${report.reason}）。`
-      : `review-gate: ${report.role} 仍在运行（等待 ${Math.round(report.waitedMs / 1000)}s 未命中任一判据）。`,
-  ];
-  if (report.done) {
-    parts.push(
-      report.conclusion?.text
-        ? `--- 结论（${report.conclusion.hasVerdict ? "含 verdict fence" : "无 fence，可能只是收尾语"}）---\n${report.conclusion.text}`
-        : "--- 该会话没有留下结论文本 ---",
-    );
+export const ROUND_WAIT_MIN_GAP_MS = 1_000;
+
+
+/**
+ * Wait for a round to END, on top of a wait that returns on every MESSAGE.
+ *
+ * WHY BOTH EXIST (P0, 2026-09-05). `judge_wait` is message-driven, which is
+ * right for an agent: a streamed finding or a question is exactly what an
+ * opener wants the moment it happens. The gate's OWN audit chains are the
+ * opposite case — one synchronous call inside `propose_loop_goal` /
+ * `orchestrator_plan`, with nobody there to act on a finding, and both treat
+ * "anything but a report" as an unfinished audit. Every auditor streams its
+ * findings before it concludes, so a message-driven return would have closed
+ * the auditor mid-round and made any draft with findings fail closed forever.
+ *
+ * So this keeps calling the SAME wait (哲学三: never a second waiting loop)
+ * until the round really ends. It terminates for three independent reasons:
+ * the wait's own cursors mean a given message ends at most one call, the whole
+ * sequence shares ONE budget, and — because the first of those belongs to
+ * SOMEBODY ELSE — a call that returned instantly is followed by a minimum gap.
+ * That last one is not theoretical: if the cursor write is skipped (a judge
+ * with no registry entry), the same mid-round message ends every call, and a
+ * measured 354k spins burned the budget with a tmux probe and two file reads
+ * each (round-2 P2). Liveness must not depend on another module's write.
+ */
+export async function awaitRoundReport(input: {
+  /** One call of the waiting tool, given the window it may block for. */
+  wait: (timeoutMs: number) => Promise<RoundWaitReply>;
+  now: () => number;
+  /** Total budget across all calls (default: the tool's own hard cap). */
+  budgetMs?: number;
+  /** The caller's ESC. */
+  aborted?: () => boolean;
+  /** Injectable pause, so a test drives the anti-spin gap without waiting. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Minimum spacing between two calls (default 1s). */
+  minGapMs?: number;
+}): Promise<RoundWaitReply> {
+  const deadline = input.now() + (input.budgetMs ?? JUDGE_WAIT_MAX_TIMEOUT_MS);
+  const minGapMs = input.minGapMs ?? ROUND_WAIT_MIN_GAP_MS;
+  const sleep = input.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (;;) {
+    const startedAt = input.now();
+    const remaining = deadline - startedAt;
+    const reply = await input.wait(Math.max(1_000, remaining));
+    const reason = reply.details?.reason;
+    if (reply.isError === true) return reply;
+    if (typeof reason === "string" && ROUND_ENDING_REASONS.has(reason)) return reply;
+    if (input.aborted?.() === true || input.now() >= deadline) return reply;
+    const elapsed = input.now() - startedAt;
+    if (elapsed < minGapMs) await sleep(minGapMs - elapsed);
   }
-  parts.push(tail
-    ? `--- stdout 尾部（最后 ${WAIT_STDOUT_TAIL_LINES} 行）---\n${tail}`
-    : "--- stdout 尚无输出 ---");
-  if (!report.done) {
-    const shown = report.findings.slice(-WAIT_FINDINGS_SHOWN);
-    parts.push(shown.length
-      ? `--- findings 最近 ${shown.length} 条 ---\n${shown.join("\n")}`
-      : "--- findings 流暂无内容 ---");
-  }
-  parts.push(WAIT_DISCIPLINE_HINT);
-  return parts.join("\n");
 }
+
+
+
+// (THE wait discipline moved to lib/agent-directives.ts, 2026-09-05: the
+// project-manager side needs the SAME three sentences with its own waiting
+// tool named, and two copies of a wording is how two of them start drifting.
+// `buildWaitDiscipline("judge_wait")` is what used to live here.)
+
+
+
+
 
 /** One finding as a judge wrote it. */
 export interface SeverityFinding {

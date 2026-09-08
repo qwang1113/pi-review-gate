@@ -46,13 +46,19 @@ import {
   projectChannel,
   readChannel,
   requestPayload,
+  sanitizeDeliveryStation,
+  sanitizeBatchStamp,
+
   type ChannelIO,
   type ChannelProjection,
   type ChannelRequestRecord,
 } from "./orchestrator-channel.ts";
+import type { DeliveryStation } from "./delivery-station.ts";
+
 import {
   childHealth,
   classifyChildState,
+  completionReported,
   describeChildState,
   describeChildStateDetailed,
   isNewsworthy,
@@ -89,6 +95,33 @@ export interface PendingRequest {
   options: string[];
   /** The full text behind the question, when the child attached one. */
   payload?: string;
+  /**
+   * The delivery station the question is about, ALREADY SANITIZED
+   * (`sanitizeDeliveryStation`): one of the three, or absent.
+   *
+   * Absent covers three different facts on purpose — a dialog with no station,
+   * a record written before the field existed, and a value the child wrote
+   * that is not a station at all. All three mean the same thing to every
+   * consumer ("nothing was said"), and none of them may reach one as a raw
+   * string: the value is written by the CHILD, and the untrusted-input rule
+   * this channel is built on is that it gets normalized at the boundary, not
+   * at each reader (see `ChannelReportRecord.scope`).
+   */
+  station?: DeliveryStation;
+
+  /**
+   * WHICH INTERVIEW THIS QUESTION CAME FROM, when it came from one.
+   *
+   * A child's `ask_user` submits 1–10 questions in a single call and now puts
+   * ALL of them on the wire before it renders the first dialog, so the
+   * receipt can say "第 2/5 题" and the manager can answer the five in one
+   * `orchestrator_answer` instead of five. Present only when the child
+   * stamped it — a single question carries none, and so does a record from a
+   * build that predates the stamp.
+   */
+  batch?: { id: string; index: number; total: number };
+
+
   askedAt: string;
 }
 
@@ -98,6 +131,15 @@ export interface ChildSupervision {
   state: ChildState;
   health: ChildHealth;
   projection: ChannelProjection;
+  /**
+   * Its channel says it FINISHED (bounded by the current assignment).
+   *
+   * Not the same as `state === "done"`, and the difference is the point: a
+   * child that reported done and then lost its pane is `dead` — the state a
+   * supervisor must see first — but it is still a child that finished, and
+   * the wrap-up block has to say so instead of "从未报告完成".
+   */
+  reportedDone: boolean;
   assets?: ChildAssets;
 }
 
@@ -164,6 +206,7 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
       state,
       health: childHealth(observation),
       projection,
+      reportedDone: completionReported(observation),
     };
     if (state === "dead" || state === "stalled") {
       const assets = input.assetsFor?.(child);
@@ -173,6 +216,12 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
 
     for (const open of projection.openRequests) {
       const payload = safePayload(input.io, open);
+      const station = sanitizeDeliveryStation(open.station);
+      // Same boundary, same rule: the three batch scalars are the child's
+      // words, so they become a stamp only when they make sense together.
+      const batch = sanitizeBatchStamp(open.batchId, open.batchIndex, open.batchTotal);
+
+
       requests.push({
         childId: child.id,
         requestId: open.requestId,
@@ -181,6 +230,12 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
         title: open.title,
         options: open.options,
         ...(payload === undefined ? {} : { payload }),
+        // Sanitized HERE, at the wire→consumer boundary: a station the child
+        // wrote that is not one of the three is dropped, so no reader has to
+        // remember that this field is untrusted.
+        ...(station === undefined ? {} : { station }),
+        ...(batch === undefined ? {} : { batch }),
+
         askedAt: open.at,
       });
     }
@@ -195,6 +250,22 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
     malformed,
   };
 }
+
+/**
+ * The children whose channel says they FINISHED — the ONE derivation of that
+ * fact, used by every consumer of a snapshot (B4).
+ *
+ * It exists as a function rather than as three call sites doing
+ * `.filter((c) => c.state === "done")` because those three sites are exactly
+ * how B4 happened in the first place: the same question answered separately
+ * in separate places drifts, and one of them was already wrong (a child that
+ * finished and then lost its pane is `dead`, so a state filter silently
+ * dropped it).
+ */
+export function reportedDoneIds(snapshot: SupervisionSnapshot): string[] {
+  return snapshot.children.filter((c) => c.reportedDone).map((c) => c.child.id);
+}
+
 
 function safePayload(io: ChannelIO, record: ChannelRequestRecord): string | undefined {
   try {
@@ -318,7 +389,11 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
   } else {
     for (const request of snapshot.requests) {
       sections.push(
-        `- **${request.childId}** · requestId=\`${request.requestId}\` · ${request.dialogKind} · ${request.askedAt}`,
+        `- **${request.childId}** · requestId=\`${request.requestId}\` · ${request.dialogKind} · ${request.askedAt}` +
+          // The interview marker rides on the SAME line as the id, so the
+          // manager sees "this is one of five" exactly where it decides what
+          // to answer — and sees nothing extra for an ordinary lone question.
+          (request.batch ? ` · 采访 \`${request.batch.id}\` 第 ${request.batch.index + 1}/${request.batch.total} 题` : ""),
         `  问题：${request.title}`,
         ...(request.options.length > 0
           ? request.options.map((option, index) => `    ${index + 1}. ${option}`)
@@ -330,7 +405,12 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
       "",
       "回答用 `orchestrator_answer({childId, requestId, answer})` —— answer 传选项原文或序号；" +
       "它写进通道后子会话那边的框会自动撤下。",
+      ...(snapshot.requests.some((r) => r.batch)
+        ? ["同一「采访」的多题是一次 `ask_user` 提交的整批，**一次调用答完**：" +
+           "`orchestrator_answer({childId, answers:[{requestId, answer}, …]})`（每条独立裁决）。"]
+        : []),
     );
+
   }
 
   sections.push("", "### 3. 死亡与恢复");

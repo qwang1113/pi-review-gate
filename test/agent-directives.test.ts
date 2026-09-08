@@ -3,8 +3,69 @@ import assert from "node:assert/strict";
 
 import {
   buildAgentDirectives,
+  buildWaitDiscipline,
+
   EXPLORE_MODE_NOTE,
+  ORCHESTRATOR_WAIT_DISCIPLINE,
+  WAIT_DISCIPLINE_HINT,
 } from "../lib/agent-directives.ts";
+
+// ---------------------------------------------------------------------------
+// The WAIT DISCIPLINE (2026-09-05). One wording, two waiters: the loop session
+// waits on its judge, the project manager on its children. What it replaced
+// was a self-contradiction — "never end the turn to be woken" with no waiting
+// tool on the agent surface — which cost a measured nine minutes inside a bash
+// sleep while a finished review sat unrecorded.
+// ---------------------------------------------------------------------------
+
+test("the discipline is the three sentences, and names a tool that EXISTS", () => {
+  assert.match(WAIT_DISCIPLINE_HINT, /等待纪律/);
+  // ① do the deterministic work you have — including the soft half the user
+  // insisted on: after a submission there is often nothing left, and the gate
+  // SUGGESTS rather than demands.
+  assert.match(WAIT_DISCIPLINE_HINT, /有确定性工作/);
+  assert.match(WAIT_DISCIPLINE_HINT, /下一轮要什么|收尾报告/);
+  assert.match(WAIT_DISCIPLINE_HINT, /不强求/);
+  // ② wait through the tool — not a sleep loop, and not by ending the turn.
+  assert.match(WAIT_DISCIPLINE_HINT, /judge_wait/);
+  assert.match(WAIT_DISCIPLINE_HINT, /sleep/);
+  assert.match(WAIT_DISCIPLINE_HINT, /也不是结束 turn/);
+  // ③ message-driven: the first message returns.
+  assert.match(WAIT_DISCIPLINE_HINT, /消息驱动/);
+  assert.match(WAIT_DISCIPLINE_HINT, /任一到达即返回/);
+  // The self-contradiction that caused the lock is gone.
+  assert.doesNotMatch(WAIT_DISCIPLINE_HINT, /禁止.*结束 turn|没有轮询工具/);
+});
+
+test("the project manager gets the SAME three sentences, its own tool, and its own clause", () => {
+  // C2 (user correction): the orchestrator wording is not the child's wording.
+  // "Do not hand the watch back to the user" is the failure mode this role has
+  // actually shown, and it must survive the unification verbatim in meaning.
+  assert.match(ORCHESTRATOR_WAIT_DISCIPLINE, /有确定性工作/);
+  assert.match(ORCHESTRATOR_WAIT_DISCIPLINE, /不强求/);
+  assert.match(ORCHESTRATOR_WAIT_DISCIPLINE, /orchestrator_wait/);
+  assert.doesNotMatch(ORCHESTRATOR_WAIT_DISCIPLINE, /judge_wait/, "the PM has no judge of its own to wait for");
+  assert.match(ORCHESTRATOR_WAIT_DISCIPLINE, /盯梢责任丢回给用户/, "the supervision clause is preserved");
+  assert.match(ORCHESTRATOR_WAIT_DISCIPLINE, /消息驱动/);
+  assert.match(ORCHESTRATOR_WAIT_DISCIPLINE, /子会话提问/);
+});
+
+test("both renderings come from ONE builder — no second copy of the wording", () => {
+  assert.equal(WAIT_DISCIPLINE_HINT, buildWaitDiscipline("judge_wait"));
+  assert.equal(ORCHESTRATOR_WAIT_DISCIPLINE, buildWaitDiscipline("orchestrator_wait"));
+  // The invariant part is literally identical across the two renderings.
+  const shared = "①有确定性工作（代码/测试/文档/其他 repo 事务）就先做掉";
+  assert.ok(WAIT_DISCIPLINE_HINT.includes(shared) && ORCHESTRATOR_WAIT_DISCIPLINE.includes(shared));
+});
+
+test("the decision table sends an agent with NOTHING to do to judge_wait", () => {
+  const text = buildAgentDirectives();
+  assert.match(text, /确实没活可做 \| `judge_wait\(\{role\}\)`/, "the row names the tool it must call");
+  assert.match(text, /还有活可做 \| 先把活做掉/, "…and the row before it keeps work ahead of waiting");
+});
+
+
+
 
 // ---------------------------------------------------------------------------
 // buildAgentDirectives — the standing situation→tool block (2026-08-31: mode

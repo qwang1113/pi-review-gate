@@ -28,7 +28,12 @@
  */
 
 import { emptyNotifyHistory, type NotifyHistory } from "./orchestrator-notify.ts";
-import type { ApprovedPlanSnapshot } from "./orchestrator-plan-approval.ts";
+import {
+  MAX_APPROVAL_LINEAGE,
+  type ApprovedPlanSnapshot,
+} from "./orchestrator-plan-approval.ts";
+import { isPlanHash } from "./orchestrator-plan.ts";
+import { isDeliveryStation } from "./delivery-station.ts";
 import { isPaneId } from "./orchestrator-tmux.ts";
 
 
@@ -61,23 +66,40 @@ export interface ChildSession {
   /**
    * ISO time this child was last GIVEN something to do.
    *
-   * Set at spawn and again by every `orchestrator_send` that reaches it. It
-   * exists because a completion is only evidence about the work it finished:
+   * Set at spawn, and again by EVERY `orchestrator_instruct` written into the
+   * child's channel — no mode is exempt since 2026-09-17 (`interrupt`, the one
+   * that literally means "stop and do THIS instead", used to be), and it does
+   * not wait for the receipt: a message the child's gate merely queued fails
+   * the receipt and is still read moments later. It exists
+   * because a completion is only evidence about the work it finished:
    * `declare_done` leaves a record in the child's sidecar that nothing ever
    * clears, so a child re-tasked after finishing would be reported `done`
    * again the moment its screen settled — including when it had simply got
    * STUCK on the new work (round-1 P1). A completion older than this stamp is
-   * history, not a verdict.
+   * history, not a verdict — and "older" is measured from when the child
+   * ENTERED that `done` run, because its heartbeat re-reports the same state
+   * with a fresh timestamp every minute (lib/orchestrator-child-state.ts).
    */
   lastAssignedAt?: string;
-  /**
-   * ISO time the child reported its task finished.
+  /*
+   * THERE IS DELIBERATELY NO `doneAt` HERE ANY MORE (B4, 2026-09-17).
    *
-   * Cleared when it is assigned new work: "this session finished something
-   * once" must never keep an ACTIVE child out of the exit check (round-1 P1 —
-   * an orchestration could `declare_done` while a child was still working).
+   * There was one, and it was a CACHE of a fact that lives in the child's
+   * channel ("I finished"). Its writer was the old screen-scraping probe;
+   * when the probe was deleted (b6492c5) the writer went with it and the
+   * field plus its five readers stayed. From then on it was permanently
+   * undefined, and the receipt said two different things about the same
+   * child in the same breath: block 1 read the channel and printed
+   * "已完成", block 5 read this field and printed "还有 1 个子会话活着".
+   *
+   * Re-adding the writer would re-bury the same mine: a cache of a
+   * completion has to be invalidated on EVERY path that gives the child new
+   * work — including an `interrupt` carrying text, which only started
+   * stamping `lastAssignedAt` on 2026-09-17. Completion is read from the
+   * channel,
+   * once, by lib/orchestrator-supervisor.ts — and everything that needs it
+   * takes it from that ONE snapshot.
    */
-  doneAt?: string;
   /** ISO time the gate closed its pane. */
   closedAt?: string;
 }
@@ -117,6 +139,19 @@ export interface OrchestratorRuntime {
    * long orchestration cannot grow the sidecar without limit.
    */
   approvalAmendments?: Array<{ at: string; changes: string[] }>;
+  /**
+   * Every plan content THIS approval has legitimately bound to, oldest first
+   * (lib/orchestrator-plan-approval.ts owns the rule).
+   *
+   * It is what lets an orchestrator UNDO a widening: writing the plan back to
+   * a content the user already signed restores the approval instead of
+   * costing a whole re-submit. It carries the same authority as
+   * `approvedPlanHash` and is therefore validated as hard — and it survives a
+   * REVOCATION on purpose, because the revoked state is exactly when it has
+   * work to do.
+   */
+  approvedPlanHistory?: string[];
+
 
 
   /**
@@ -163,6 +198,33 @@ export function addGrant(
   const grants = (runtime.grants ?? []).filter((g) => g.scope !== grant.scope);
   return { ...runtime, grants: [...grants, grant] };
 }
+
+/**
+ * The runtime a DIFFERENT session may inherit: the facts about the world,
+ * with every trace of the user's permission removed.
+ *
+ * A new session (a relay successor, or a takeover through
+ * `orchestrator_attach`) keeps the child REGISTRY — those panes are alive
+ * whatever any process believes — but never the approval: that was permission
+ * the user gave to a session that is gone, and re-obtaining it costs one
+ * dialog. The extension used to spell the stripping out inline, which is
+ * exactly the shape that goes stale: `approvedPlanHistory` would have ridden
+ * into the new session untouched and let it write the plan back to a content
+ * the PREVIOUS session was authorized for. One function, one place to add the
+ * next authorizing field, and a test that can drive it directly.
+ */
+export function withoutPlanApproval(runtime: OrchestratorRuntime): OrchestratorRuntime {
+  const {
+    approvedPlanHash: _hash,
+    approvedPlanAt: _at,
+    approvedPlan: _snapshot,
+    approvalAmendments: _amendments,
+    approvedPlanHistory: _lineage,
+    ...carried
+  } = runtime;
+  return carried;
+}
+
 
 export function emptyRuntime(orchestrationId: string): OrchestratorRuntime {
   return {
@@ -222,12 +284,21 @@ export function vanishedChildren(
   return runtime.children.filter((c) => !c.closedAt && !alivePaneIds.includes(c.paneId));
 }
 
-/** Plan task ids with a live child — the input to scheduling. */
+/**
+ * Plan task ids with a live child — the input to scheduling.
+ *
+ * A PANE IS THE UNIT OF OCCUPANCY, not a completion report (B4). Same-repo
+ * tasks are serialized because they share ONE worktree, and a child whose
+ * pane is still open can still be given new work in it — so "it said it
+ * finished" is not a reason to hand its repo to somebody else. The task's
+ * slot frees when its pane is closed, which is a thing the orchestrator does
+ * deliberately.
+ */
 export function runningTaskIds(
   runtime: OrchestratorRuntime,
   alivePaneIds: readonly string[],
 ): string[] {
-  return [...new Set(liveChildren(runtime, alivePaneIds).filter((c) => !c.doneAt).map((c) => c.taskId))];
+  return [...new Set(liveChildren(runtime, alivePaneIds).map((c) => c.taskId))];
 }
 
 /**
@@ -255,49 +326,27 @@ function patchChild(
   };
 }
 
-/** Record that a child reported its task complete (it may still be alive). */
-export function markChildDone(
-  runtime: OrchestratorRuntime,
-  id: string,
-  at: string = new Date().toISOString(),
-): OrchestratorRuntime {
-  return patchChild(runtime, id, { doneAt: at });
-}
-
 /**
- * Record that a child was GIVEN new work, which un-finishes it.
+ * Record that a child was GIVEN new work.
  *
- * Both halves matter and they are the same defect (round-1 P1). A completion
- * is written once — into the child's sidecar by `declare_done`, and into this
- * registry by the probe — and nothing ever invalidated either:
+ * WHAT THE STAMP IS FOR (round-1 P1). A completion is written once — into the
+ * child's sidecar by `declare_done` — and nothing ever clears it, so a child
+ * re-tasked after finishing would report `done` again the moment it settled,
+ * INCLUDING when it had simply got stuck on the new work: the one state that
+ * produces no alarm would swallow the one situation a supervisor must hear
+ * about. `classifyChildState` therefore only believes a completion NEWER than
+ * this stamp.
  *
- *  - the probe would call a re-tasked child `done` again as soon as its
- *    screen settled, which is indistinguishable from it having got STUCK on
- *    the new work: the one state that produces no alarm would swallow the one
- *    situation a supervisor must hear about;
- *  - `doneAt` filters the child out of the orchestration exit check, so the
- *    orchestration could `declare_done` while that child was still working.
- *
- * Stamping the assignment and dropping `doneAt` fixes both: from here on the
- * child counts as ACTIVE again, and only a completion NEWER than this stamp
- * is evidence about the new work.
+ * It no longer clears a `doneAt` field, because there is none (B4): the
+ * completion is not cached in this registry at all, so there is nothing here
+ * that could go stale behind an assignment.
  */
 export function markChildAssigned(
   runtime: OrchestratorRuntime,
   id: string,
   at: string = new Date().toISOString(),
 ): OrchestratorRuntime {
-  return {
-    ...runtime,
-    children: runtime.children.map((c) => {
-      if (c.id !== id) return c;
-      // `doneAt` is DELETED rather than set to undefined: the runtime is
-      // compared and persisted as plain JSON, and an undefined key would
-      // survive a round-trip as a key that was never there.
-      const { doneAt: _finished, ...rest } = c;
-      return { ...rest, lastAssignedAt: at };
-    }),
-  };
+  return patchChild(runtime, id, { lastAssignedAt: at });
 }
 
 /** Record that the gate closed a child's pane. */
@@ -375,7 +424,6 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     // Conditional spreads, not `field: str(...)`: writing an explicit
     // `undefined` would add a KEY that the original object never had, so a
     // sanitized runtime would no longer deep-equal the one the gate wrote.
-    const doneAt = str(c.doneAt);
     const lastAssignedAt = str(c.lastAssignedAt);
     const closedAt = str(c.closedAt);
     // The variant only ever names a FILE inside `.pi/`, so it is sanitized on
@@ -390,7 +438,9 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
       ...(stateVariant ? { stateVariant } : {}),
       ...(taskFile ? { taskFile } : {}),
       ...(lastAssignedAt ? { lastAssignedAt } : {}),
-      ...(doneAt ? { doneAt } : {}),
+      // A `doneAt` in an OLD sidecar is dropped here rather than carried: the
+      // field is gone (B4), and re-admitting it would put a value nothing
+      // writes and nothing reads back into the runtime.
       ...(closedAt ? { closedAt } : {}),
     });
   }
@@ -407,7 +457,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   }
 
   const hash = str(obj.approvedPlanHash);
-  const approvalIntact = !dropped && typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
+  const approvalIntact = !dropped && isPlanHash(hash);
 
   const rawRelay = obj.relay as Record<string, unknown> | undefined;
   const relayHandoff = rawRelay ? str(rawRelay.handoffPath) : undefined;
@@ -422,6 +472,13 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   // fail-closed direction simply costs one dialog.
   const approvedPlan = approvalIntact ? normalizeApprovedPlan(obj.approvedPlan, hash) : undefined;
   const approvalAmendments = normalizeAmendments(obj.approvalAmendments);
+  // THE LINEAGE IS NOT GATED ON `approvalIntact`, and that is deliberate: its
+  // whole job is to restore an approval that was REVOKED, so requiring a live
+  // `approvedPlanHash` beside it would delete it exactly when it is needed.
+  // The `dropped` doubt still kills it — a blob we could not fully read is
+  // not the one the gate wrote, so nothing authorizing in it is trusted.
+  const approvedPlanHistory = dropped ? [] : normalizeApprovalLineage(obj.approvedPlanHistory);
+
   const successorPane = isPaneId(rawRelay?.successorPane) ? rawRelay.successorPane : undefined;
   return {
     orchestrationId,
@@ -432,6 +489,8 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     ...(approvedPlanAt ? { approvedPlanAt } : {}),
     ...(approvedPlan ? { approvedPlan } : {}),
     ...(approvalAmendments.length > 0 ? { approvalAmendments } : {}),
+    ...(approvedPlanHistory.length > 0 ? { approvedPlanHistory } : {}),
+
 
     ...(relayHandoff && relayAt
       ? {
@@ -470,6 +529,14 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     : undefined;
   if (!at || maxParallel === undefined || !Array.isArray(obj.tasks)) return undefined;
 
+  // The approved DELIVERY STATION (2026-09-06). Authorizing, like `repo` on a
+  // task: it decides which ship commands the orchestration may reach, so it
+  // has to survive the round trip or `decideApprovalCarry` would read a plan
+  // approved at `pr` as one approved at the default and misjudge a later
+  // change. Unreadable ⇒ left undefined, which the carry check reads as the
+  // STRICTEST station — the fail-closed direction (it can only cost a dialog).
+  const deliveryStation = isDeliveryStation(obj.deliveryStation) ? obj.deliveryStation : undefined;
+
   const tasks: ApprovedPlanSnapshot["tasks"] = [];
   for (const entry of obj.tasks) {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return undefined;
@@ -492,7 +559,7 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     const repo = typeof task.repo === "string" && task.repo.length > 0 ? task.repo : undefined;
     tasks.push({ id, fileBoundaries, dependsOn, execution, ...(repo ? { repo } : {}) });
   }
-  return { hash: snapshotHash, at, maxParallel, tasks };
+  return { hash: snapshotHash, at, maxParallel, tasks, ...(deliveryStation ? { deliveryStation } : {}) };
 }
 
 /** How many amendment entries are kept — enough to explain, bounded on purpose. */
@@ -515,6 +582,28 @@ function normalizeAmendments(raw: unknown): Array<{ at: string; changes: string[
   return entries.slice(-MAX_APPROVAL_AMENDMENTS);
 }
 
+/**
+ * Validate the approval lineage read back from the sidecar.
+ *
+ * Authorizing input, so it is read the way the hash beside it is: ANY entry
+ * that is not a plan hash means this list is not the one the gate wrote, and
+ * the WHOLE list goes — a half-trusted permission record is worse than none.
+ * Losing it only ever costs a re-submit, which is the direction that asks the
+ * user. What this cannot do is recognize a well-formed forgery; the defence
+ * against that is the same one `approvedPlanHash` relies on — the sidecar is
+ * a file the gate refuses to let an agent edit, and that refusal is not
+ * grantable.
+ */
+function normalizeApprovalLineage(raw: unknown): string[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return [];
+  for (const entry of raw) {
+    if (!isPlanHash(entry)) return [];
+  }
+  return (raw as string[]).slice(-MAX_APPROVAL_LINEAGE);
+}
+
+
 
 /** One-screen rendering for `orchestrator_attach`'s takeover report. */
 export function formatChildren(
@@ -527,7 +616,10 @@ export function formatChildren(
       const state = c.closedAt
         ? "closed"
         : alivePaneIds.includes(c.paneId)
-          ? (c.doneAt ? "done（pane 仍在）" : "alive")
+          // Registered + pane present = alive. Whether it has FINISHED is a
+          // channel fact, not a registry one (B4), and this rendering is
+          // about the registry.
+          ? "alive"
           : "pane 已消失（异常退出或被用户关掉）";
       return `- ${c.id} [${state}] task=${c.taskId} pane=${c.paneId}` +
         ` 开始于 ${c.createdAt}`;

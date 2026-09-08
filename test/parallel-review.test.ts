@@ -49,14 +49,21 @@ test("the completion contract is embedded at the end of the reviewer task", () =
     undefined,
   );
   assert.match(prompt, /完成/);
-  assert.match(prompt, /进程退出即完成/);
-  assert.match(prompt, /question fence/);
-  assert.match(prompt, /同一 session id 重新拉起/);
-  // The instruction is at the END (after the OUTPUT/verdict contract).
-  assert.ok(prompt.indexOf("进程退出即完成") > prompt.indexOf("Verdict shape"));
-  assert.doesNotMatch(prompt, /tmux|wait-for|inbox|channel/);
-  // Round-17: output discipline is part of the task text.
-  assert.match(prompt, /输出纪律:verdict fence 在最前,其后最多 5 行结论要点/, "the discipline is pinned in the task");
+  assert.match(prompt, /调 judge_conclude 交卷并停下/);
+  assert.match(prompt, /不需要退出进程/);
+  assert.match(prompt, /ask_user/);
+  assert.doesNotMatch(prompt, /进程退出即完成|同一 session id 重新拉起/);
+  assert.doesNotMatch(prompt, /fenced JSON verdict FIRST/, "no fence may come back");
+  // The instruction is at the END (after the OUTPUT/conclude contract).
+  assert.ok(prompt.indexOf("调 judge_conclude 交卷并停下") > prompt.indexOf("Conclude shape"));
+  assert.doesNotMatch(prompt, /tmux|wait-for|inbox/); // "channel report" is the sanctioned completion path
+  // Round-17, tightened 2026-09-04: output discipline is part of the task text.
+  assert.match(prompt, /输出纪律:交卷即停/, "the discipline is pinned in the task");
+  // The dispatch must not teach a field the signature refuses (the gate would
+  // otherwise contradict itself on the reviewer's very first conclude call).
+  assert.doesNotMatch(prompt, /notes:/, "no notes field may be taught to a reviewer");
+  assert.match(prompt, /没有 notes 参数|no notes parameter/, "and the task says so out loud");
+  assert.match(prompt, /"evidence"/, "the optional evidence field is offered");
 });
 
 test("buildReviewPrompt: an empty range audits the EXIT GOAL, not a diff", () => {
@@ -74,7 +81,7 @@ test("buildReviewPrompt: an empty range audits the EXIT GOAL, not a diff", () =>
   assert.match(prompt, /report a READY only when the task is genuinely done/);
   assert.match(prompt, /criterion 1: widget is one line/);
   assert.doesNotMatch(prompt, /Audit the COMMIT RANGE/);
-  assert.doesNotMatch(prompt, /Audit the INCREMENT/);
+  assert.doesNotMatch(prompt, /this round is INCREMENTAL/);
 });
 
 test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no isolation is READ-ONLY", () => {
@@ -166,7 +173,7 @@ test("the verdict must carry the reviewer's REAL cwd (a check the gate runs)", (
   // prompt has to demand a measured one.
   assert.match(prompt, /run `pwd`/);
   assert.match(prompt, /do NOT copy the path out of this task text/i);
-  assert.match(prompt, /"cwd": "<your real pwd>"/);
+  assert.match(prompt, /cwd: "<your real pwd>"/);
   assert.match(prompt, /matches it against the repo this round was prepared for/);
   assert.doesNotMatch(prompt, /against the pane/,
     "the check does not measure the pane — claiming it does is the over-claim this field punishes");
@@ -254,10 +261,16 @@ test("opening instruction is scope-aware: incremental rounds audit the INCREMENT
   const scope =
     "Review scope for this round:\n- INCREMENTAL. small increment.\n- SETTLED last round — verdict READY.";
   const incremental = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, scope, "incremental");
-  assert.match(incremental, /Audit the INCREMENT/);
+  // The opening line says WHICH kind of round this is and hands the terms to
+  // the scope block — it no longer restates them (t6a: the contract has one
+  // authoritative source, lib/review-carryover.ts, and a paraphrase here is
+  // how the copies drifted).
+  assert.match(incremental, /this round is INCREMENTAL/);
   assert.doesNotMatch(incremental, /Audit the WHOLE change/);
-  assert.match(incremental, /consistency scan, not a re-derivation/);
-  assert.match(incremental, /reopen any settled conclusion you can contradict with evidence/);
+  assert.match(incremental, /block below states the contract you work under/);
+  assert.match(incremental, /That block is the authority/);
+  // The terms themselves arrive with the block, verbatim.
+  assert.match(incremental, /Review scope for this round:/);
   // The changed-files list stays the full visible set — the increment narrows
   // FOCUS, never authority (non-goal: reviewer scope is guidance, not a fence).
   assert.match(incremental, /src\/a\.ts/);
@@ -270,7 +283,7 @@ test("opening instruction is scope-aware: incremental rounds audit the INCREMENT
     "Review scope for this round:\n- FULL deep review. no previous READY review to build on — full deep review.";
   const full = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, fullDirective, "full");
   assert.match(full, /Audit the COMMIT RANGE baseline\.\.HEAD below/);
-  assert.doesNotMatch(full, /Audit the INCREMENT/);
+  assert.doesNotMatch(full, /this round is INCREMENTAL/);
 
   // Absent scopeKind (older callers) still opens with the commit-range wording.
   const legacy = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, fullDirective);

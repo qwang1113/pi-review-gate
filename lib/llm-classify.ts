@@ -22,6 +22,7 @@
 
 import { execFile } from "node:child_process";
 import type { ShipCommandKind } from "./constants.ts";
+import { asUntrustedData } from "./untrusted-data.ts";
 
 /** Fixed default model (user requirement): DeepSeek V4 Flash via the user's own deepseek provider. */
 export const DEFAULT_LLM_GUARD_MODEL = "deepseek/deepseek-v4-flash";
@@ -105,12 +106,13 @@ function hasProseWord(joined: string): boolean {
   return /\p{L}{2,}/u.test(joined);
 }
 
-/** Wrap untrusted text as data. The tag content is length-capped and the
- * closing tag inside the payload is broken so it cannot terminate the block. */
-function asData(text: string): string {
-  const capped = text.length > MAX_INPUT_CHARS ? text.slice(0, MAX_INPUT_CHARS) : text;
-  return "<data>\n" + capped.replaceAll("</data>", "<\\/data>") + "\n</data>";
-}
+/* Untrusted text is wrapped by lib/untrusted-data.ts (`asUntrustedData`) —
+ * this file used to carry its own copy of that wrapper. Truncation is VISIBLE
+ * now (`…[truncated]` inside the block): the classifier used to receive a
+ * silently halved input, with no way to tell that it was judging half of one.
+ * The mark changes no verdict — the classifiers only judge language and AI
+ * attribution — so it is a strictly more honest prompt. */
+
 
 const SYSTEM_PROMPT =
   "You are a strict JSON classifier inside a code-review security gate. " +
@@ -202,7 +204,7 @@ export async function classifyAiAttribution(
     'by AI", "with help from an assistant"? Mentions of AI as the SUBJECT of the ' +
     'change (e.g. "add AI feature flag") are NOT attribution.\n' +
     'Reply ONLY: {"attribution":"yes"} or {"attribution":"no"}\n' +
-    asData(joined);
+    asUntrustedData("data", joined, MAX_INPUT_CHARS);
   const v = parseClassifierJson(await ask(c, q), "attribution", ["yes", "no"] as const);
   return v === undefined ? undefined : v === "yes";
 }
@@ -225,7 +227,7 @@ export async function classifyNonEnglish(
     "as English. Romanized non-English prose (Chinese pinyin, Japanese romaji, " +
     "transliterated Russian, etc.) counts as NOT English.\n" +
     'Reply ONLY: {"english":"yes"} or {"english":"no"}\n' +
-    asData(joined);
+    asUntrustedData("data", joined, MAX_INPUT_CHARS);
   const v = parseClassifierJson(await ask(c, q), "english", ["yes", "no"] as const);
   return v === undefined ? undefined : v === "no";
 }
@@ -263,7 +265,7 @@ export async function classifyShipCommand(
     'would perform, or "none" if it performs none of them.\n' +
     'Reply ONLY: {"ship":"commit"} or {"ship":"push"} or {"ship":"pr-create"} ' +
     'or {"ship":"pr-edit"} or {"ship":"none"}\n' +
-    asData(command);
+    asUntrustedData("data", command, MAX_INPUT_CHARS);
   return parseClassifierJson(
     await ask(c, q),
     "ship",

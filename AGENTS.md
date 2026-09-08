@@ -36,13 +36,15 @@ default, make it safe by default rather than adding a switch.
 
 ### Single-review loop (the only execution path, agent-initiated)
 
-**Judge roles run as their own pi processes** — the review is the only parallel
-loop, and each round runs in its OWN non-interactive pi process (`pi -p`
-with a deterministic `--session-id`), spawned by the extension itself
-(`judge_submit`). The judge child loads NO review-gate extension and runs with
-It runs with
+**Judge roles run in their own panes** — the review is the only parallel
+loop, and each review runs in its OWN tmux pane (interactive pi with a
+deterministic `--session-id`), opened by whoever owns it (hierarchy:
+project manager → child session → review; plan review opened by the project
+manager itself). The judge pane loads the review-gate extension in judge mode
+(a reporting shell: heartbeat, dialog race, verdict report — never an
+enforcer). It runs with
 `--exclude-tools edit,write`; its session id is DETERMINISTIC per role+repo,
-so re-spawning with the same `--session-id` continues the same session — its
+so re-opening with the same `--session-id` continues the same session — its
 context is reused across rounds until a READY lands. Each review round is ONE
 reviewer over the WHOLE change:
 
@@ -58,42 +60,59 @@ reviewer over the WHOLE change:
   The reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
   starts at the last REVIEWED commit, so a chain of checkpoints since the
   last READY is all covered (round-9 P1); there is no second reviewer of
-  any kind. When the judge's process exits, the gate reads THIS round's
-  output, records the verdict itself and wakes you with it — you never carry
+  kind. When the round's channel report lands, the opener records the verdict
+  itself (the gate's settle path records it and wakes you with the standard report; audit chains do the same) — you never carry
   a verdict from one tool to another. The recording keeps every mechanical
   check: HEAD must still be the reviewed commit (a new checkpoint after
   prepare ⇒ STALE ⇒ BLOCKED), and a READY binds to the reviewed commit's TREE
   (content binding — squash preserves it); the ship gates additionally refuse
   content-changing commits after the reviewed one (unreviewed content can
-  never ship). `run_precommit` / `review_checkpoint` / `prepare_review` /
-  `record_review` are **not tools** (2026-08-30, 哲学三): the gate still runs
+  never ship). `run_precommit` / `review_checkpoint` / `prepare_review`
+  are **not tools** (2026-08-30, 哲学三): the gate still runs
   every one of those steps inside `judge_submit`, but none of them is
-  registered, so there is no second path to sequence by hand.
+  registered, so there is no second path to sequence by hand. The two
+  RECORDERS went further (2026-09-04, 用户决定 D4): `record_review` and
+  `record_goal_prereview` are no longer registered on any host at all, not even
+  the internal one, and what remains are plain gate-side functions invoked when
+  a round's channel report lands. Their tool shape existed only to carry text
+  that had to be parsed back into a verdict; the conclusion arrives structured
+  now, so there was nothing left for a caller to pass.
   `review_diff` / `review_sandbox` were **evaluated and formally NOT built**
-  (2026-08-31, 哲学三): the judge runs `--no-extensions` so there is nowhere to
-  register them without a judge-side extension entry, and that would re-open the
-  recursion surface `--no-extensions` exists to close. The reviewer's own `git
+  (2026-08-31, 哲学三): the reviewer's own `git
   diff` / `git show` are simple read-only commands (not the multi-step ship/tmux
   flows 哲学一 targets), and its sandbox verification is an inherently
   reviewer-owned judgement call, not a mechanical sequence the gate can own
   without becoming the reviewer. The reviewer's throwaway worktrees are the
   gate's to CLEAN, though, not to build: `judge_submit` points the judge's
-  `$TMPDIR` at a per-session dir and reclaims any worktree under it when the
-  judge exits (谁创建谁回收).
+  `$TMPDIR` at a per-session dir and reclaims any worktree under it when the pane
+  is closed or cascade-closed (谁创建谁回收).
 
 - **No decompose, no module loop, no wave daily.** The module-planning
   machinery and its wave tools were removed 2026-08-26. Large tasks are
   still sliced by YOU into sequential rounds of the same single review
   loop; there is no module table, no plan state, no planner.
 
-Detail: `docs/execution-model.md` + `docs/judge-protocol.md`; runtime
-contract: `lib/judge-process.ts` + `lib/judge-prompt.ts`.
+Detail: `docs/execution-model.md` + `docs/judge-protocol.md` +
+`docs/hierarchical-session-design.md`; runtime
+contract: `lib/judge-pane.ts` + `lib/hierarchy.ts` + `lib/judge-prompt.ts`.
 
 The review loop is AGENT-DRIVEN: you start it yourself once edits
 are complete (one `judge_submit`) — the slash commands are only optional
-explicit triggers, never the expected entry. The user is asked at two points
-only: `ask_user` (the ONE way to reach them — it runs the interview and
-pauses the loop) and the loop-goal approval dialog.
+explicit triggers, never the expected entry. The user is asked at three points
+only: `ask_user` (the ONE way to reach them — it runs the interview, which is
+optional and uncapped, and pauses the loop), the RESTATEMENT confirmation and
+the loop-goal approval dialog.
+
+**需求反述与交付站点（2026-09-06，机械前置）.** 谈契约之前先把需求反述给用户
+确认：`propose_restatement({restatement, station})`。没有一份用户确认过的反述，
+`propose_loop_goal` 与 `orchestrator_plan({action:"submit"})` **直接被拒且不弹
+任何对话框**。同一次确认里定下**本轮交付站点** —— `precommit`（门禁跑通，用户
+自己 commit）/ `commit`（提交完成，用户自己 push）/ `pr`（做到 PR 开出来）——
+它随 goal 的批准落进 sidecar，之后由 L1 ship 门禁按站点放行、由 `declare_done`
+判「到站」。规则细节只有两处权威出处，本文不复述：`lib/restatement.ts`（什么算
+反述、缺了怎么拒）与 `lib/delivery-station.ts`（站点解析、缺省、放行表、到站
+判定）。
+
 
 Where work lands is yours again (2026-09-07, user decision): the workspace
 settlement layer (`setup_workspace`, the mandatory work branch, declare_done's
@@ -281,13 +300,17 @@ changed (the gate persists every audit's verdict, findings verbatim and the
 judged draft, and builds the re-audit task with that carryover plus the
 mechanically computed draft delta); round N+1 of a code review gets the
 previous verdict and findings the same way (the 'Review scope for this round'
-block in the reviewer's task text). Settled-and-unchanged material gets a
-consistency scan, not a
-re-derivation — it never narrows what a reviewer may look at, and a settled
-conclusion may always be reopened with evidence. This is the INCREMENTAL
-review contract: first round full, later rounds focused on the increment.
+block in the reviewer's task text). That block IS the incremental review
+contract — first round full, later rounds focused on the increment — and its
+terms are NOT restated here or anywhere else: `lib/review-carryover.ts` is
+their single authoritative source, and every other surface (this file, the
+skill, the `/review` prompt, the reviewer role body, the judge protocol) may
+carry a summary and a pointer only. Two consequences worth knowing without
+reading it: the contract never narrows what a reviewer may look at, and a
+settled conclusion may always be reopened with evidence.
 (b2) **Fresh context, read on demand — MECHANICALLY.** The three review
-roles (reviewer, adviser, goal-auditor) each run as their OWN pi process (`pi -p --session-id`) — they never
+roles (reviewer, adviser, goal-auditor) each run in their OWN pane (interactive
+pi with `--session-id`) — they never
 transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
 to grep on demand. `judge_submit({role:"adviser"})` builds that brief itself:
 transcript pointer + a conclusion artifact the adviser appends to, plus —
@@ -301,20 +324,26 @@ copy a reviewer SHOULD verify by doing — mutation analysis included — and
 must restore before finishing. Because the reviewed range is immutable,
 **you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
 that carry evidence (confirm each in the code first), leave Nits for the
-verdict. WAITING-WINDOW DISCIPLINE: (1) 有可实现的确定性工作(代码/测试/
-文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后再调
-`judge_wait({role})`——门禁在里面跑三条判据(进程退出 / exit-code 落盘 /
-本轮 stdout 里出现明文 fence,任一命中即返回)并把已读结论带回来,不需要你
-手写 bash;(3) **禁止**用结束 turn 把唤醒责任交给子会话——子会话可能报错/
-崩溃/永远不退,而主会话是门禁的最后监督者,门禁未通过前不得停止自动循环
-(存活不变量)。
-The verdict arrives through the process EXIT: the gate reads THIS round's
-output, records it and wakes this session with the result. The reviewer may ask
-questions by outputting a question fence and exiting — answer by submitting the
-same role again (`judge_submit` resumes the session, context intact).
-(d) **The judge child runs as its own pi process — MECHANICALLY ENFORCED.**
-`judge_submit` runs the judge as `pi -p --session-id <id>` (non-interactive,
-no tmux). The `subagent` dispatch surface was retired 2026-09-06 with the
+verdict. WAITING-WINDOW DISCIPLINE（2026-09-05 起的口径，`lib/agent-directives.ts`
+的 `buildWaitDiscipline` 是唯一出处）：
+(1) 有确定性工作(代码/测试/文档/其他 repo 事务)→ 先做掉，尤其 goal / plan
+审计期间：读代码、调查、补上下文；送 reviewer 前应已准备充分，送完往往没事可做——
+这时可以看看下一轮要什么、或先准备收尾报告（**提示，不强求**）;
+(2) 确实没活可做了，才调 `judge_wait({role})` 等——不是手写 sleep 轮询，也不是
+结束 turn（主会话是门禁的最后监督者，门禁未通过前不得停止自动循环，存活不变量）;
+(3) `judge_wait` 是**消息驱动**的：新 finding、judge 提问、本轮结论、pane 消失，
+任一到达即返回，拿到就继续干——它不是「等它跑完」的轮询。没在等的时候，
+settle 唤醒仍是兜底：新消息落盘时门禁会用同一份标准报告叫你
+（结论、证据位置、记录情况、待答问题）。
+
+The round ends when its channel report lands: the opener records the verdict
+from the report's exact bytes (the gate's settle path records it and wakes you with the standard report). The reviewer may ask
+questions through the channel (human in the pane and opener race, first answer
+wins) — answer with judge_answer, or resubmit the same role
+(`judge_submit` resumes the session, context intact).
+(d) **The judge child runs in its own pane — MECHANICALLY ENFORCED.**
+`judge_submit` opens the judge in a tmux pane (interactive pi, same deterministic
+session id, no second dispatch surface). The `subagent` dispatch surface was retired
 pi-subagents companion — a judge role can only be dispatched through
 `judge_submit`, so there is no second path to sequence by hand (the
 workflow-sandbox block that used to guard `subagent` calls died with it: the
@@ -323,14 +352,15 @@ single reviewer is one `judge_submit` call per round; you never pass a session
 id, a title or a directory — the gate derives all three from role+repo.
 **One session per role, continued across rounds**: the session id is
 deterministic per role+repo, so the next round re-opens the SAME transcript
-(that is how a judge's context carries over until a READY). A role whose
-process is still RUNNING refuses the new round rather than dropping it
-(a non-interactive judge reads its task once, at spawn); `fresh: true` kills
-it first. The recording withholds a READY unless the round was PREPARED (a
+(that is how a judge's context carries over until a READY). A living pane takes
+every new round through its channel (a pane judge reads each round via its
+drain); `fresh: true` kills the pane first. The recording withholds a READY
+unless the round was PREPARED (a
 registered `baseline..HEAD` target) and the verdict carries the child's `cwd`
 (measured with `pwd`, a required field of the verdict schema). While a judge
-child is open, `declare_done` requires closing it out (its verdict is
-recorded on exit, or `judge_close({role})`).
+pane is open, `declare_done` cascade-closes it (a recorded verdict stays
+recorded; an unrecorded round is abandoned — abandon explicitly by resubmitting with
+`fresh: true`).
 
 ### 项目经理（orchestrator）模式 —— 编排层，2026-08-29 新增
 
@@ -353,14 +383,16 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   **文件路径、不属于任何进程** —— 项目经理换人时打开同一批路径即可，子会话
   完全无感。旧的全局广播队列已删除。
 - **状态取真值**：子会话侧门禁用 `ctx.isIdle()` / `ctx.getContextUsage()` 上报
-  working / waiting-input / **waiting-judge** / idle / done；`dead` 由 pane 消失
-  判定，`stalled` 由心跳超时判定。`working` 还带一个**进展维度**（第五轮 E）：
+  working / waiting-input / **waiting-judge** / idle / done / mode-changed；`dead` 由 pane
+  消失判定，`stalled` 由心跳超时判定（这八个状态的权威清单是
+  `lib/orchestrator-child-state.ts` 的 `CHILD_STATES`，本文不再另立一份）。
+  `working` 还带一个**进展维度**（第五轮 E）：
   健康快照给出「自上次推进（工具调用 / turn 边界，不含心跳）以来的时长」，让长时间
   无进展的 `working` 与卡死可被区分 —— 它只是回执里的一个**读数**，不改变
   `isNewsworthy`、不叫醒项目经理。`screenLooksBusy`、屏幕解析与按键模拟全部删除，
   tmux 在编排层只剩三件事：**判 pane 存活**、**开关 pane**、**给 pane 上色与标题**
   （纯展示，`select-pane -P/-T` + window 级 `setw pane-border-*`，一律不带 `-g`）。
-- **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：`judge_wait`、
+- **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：门禁内部等待、
   full precommit、任何长命令都发生在**同一个 turn 内部**，agent 既不 settle 也不
   结束 turn，挂在 `agent_settled` / `turn_end` 上的心跳因此必然超时 —— 一个正在等
   自己 reviewer 的健康子会话被报成「失联」，而回执建议的 `interrupt` / `close`
@@ -379,11 +411,28 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   会话里被**直接拒绝**（它没有通道侧可答自己的框，曾把 PM 卡死 2 小时），
   改走 `orchestrator_answer`。三个授权入口：ask_user 带 `grantScope` 的提问、
   `/gate-grant sensitive-edit` 命令、首次代答的三选框。
+- **一次 `ask_user` 的多题整批上送、整批回答**（2026-09-06）：子会话在弹出第一个
+  框之前，就把本次采访的全部问题一次性写成 N 条 request 记录（新增可选字段
+  `batchId` / `batchIndex` / `batchTotal`，只增不改，旧上级照旧当 N 条普通待答
+  请求处理），因此它们同在项目经理的**第一份**回执里；`orchestrator_answer` 的
+  可选 `answers` 数组一次答完整批，**裁决仍只有一份实现**（单问与批量共用同一
+  条校验链，批量不是绕过 crosscheck / 约束 8 的后门），每条独立成败、写进通道的
+  不回滚。子会话那边**仍逐个弹框**，先答者生效这条不变；采访被「跳过后续」或被
+  instruct 打断时，没展示的题就地销账（分别记 `dismissed` / `interrupted`），
+  不会在回执里挂成永远没人答的请求。同理，`judge_answer` 在有多个待答问题时也
+  必须指明 `requestId`（judge pane 与子会话走同一条通道）。
 - **投递走 `pi.sendUserMessage`**：`orchestrator_instruct({mode})` 把文本写进
-  通道，子会话自己的门禁用 pi 的 API 注入。`mode` 即优先级：`interrupt`（最高，
-  2026-08-31 起可带正文 —— 中断当前 turn 并立即投递，一次调用表达「停下、做
-  这个」；旧版是空 abort，还要第二次 followUp 才说得了话）、`steer`（当前轮切
-  入）、`followUp`（等本轮跑完）。`send-keys` 投递路径已删除。
+  通道，子会话自己的门禁用 pi 的 API 注入。`mode` 即优先级，**缺省是 `interrupt`**
+  （2026-09-17 用户决定：上级发话就是要它立刻知道）——中断当前 turn 并带正文立即
+  投递，一次调用表达「停下、做这个」。唯一的另一个选项是 `steer`（切进当前这一轮、
+  不 abort，给「带着这条继续做」用）。`followUp`（等本轮跑完）**已从参数面取消**，
+  传了直接被拒；它作为通道枚举值仍在，因为 judge 次轮派发用的就是它。
+  `send-keys` 投递路径已删除。
+- **派活戳无模式豁免**（2026-09-17）：每一条**写进通道**的 instruct 都更新
+  `lastAssignedAt`（不等回执 —— 只 `received` 的消息回执会失败，但子会话稍后照样
+  读到，它确实被重新派了活），而「它完成了没有」读的是子会话那段 `done` 状态的**起点**
+  （`lastStateSince`）而不是最新一条心跳记录 —— 否则心跳每分钟重报一次 `done`
+  就能让上一轮的完成记录永远显得比新派的活还新。
 - **`orchestrator_wait` 是项目经理的唯一信息入口**：它必然被调，所以凡是项目
   经理需要知道的都从回执里**推给它** —— 五块：健康快照、待答请求（结构化，
   含全部选项与正文）、死亡/僵死与可执行恢复动作、它自己的上下文用量与带时机
@@ -406,6 +455,19 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    它，所以裁决记完门禁**自己把它收掉**（谁派谁负责，第五轮 O-6）——`declare_done`
    不再被一个它从未被告知的 judge child 拦住。`propose_loop_goal` 内部的 goal 审计者
    同理，也是门禁自收。
+
+   提交 plan 之前还要有一份用户确认过的**需求反述**（`propose_restatement`），
+   否则 submit 同样直接被拒、不弹框；同一次确认里定下的交付站点就是 plan 的
+   `deliveryStation`（提高它属于扩权，要重批）。
+
+1b. **项目经理代批不是橡皮图章**（2026-09-06，用户要求）：代用户批准子会话的
+   goal、或代确认它的需求反述，都必须给 `orchestrator_answer` 带上 `crosscheck`
+   —— 写出该 plan 任务 id，并对「文件边界 / 任务目标 / 交付站点」三项各给一句
+   判断；缺任一项即退回，并把 plan 里那个任务与子会话提交的正文**并排**贴回。
+   拒绝不需要对照（说不永远是自由的）。子会话请求确认的站点若**宽于**已批准
+   plan 的 `deliveryStation`，代答一律被拒 —— 放宽站点只有用户能决定。判定与
+   词表在 `lib/orchestrator-answer-tools.ts`（`PROXY_CROSSCHECK_TOKENS`）。
+
 
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
    只被多注入「有项目经理在管这轮任务」一句 + 任务书末尾门禁追加的

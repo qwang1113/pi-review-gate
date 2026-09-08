@@ -151,6 +151,51 @@ test("CONSTRAINT 8: a real landing outside the boundary still refuses, and says 
   assert.match(outside.reason!, /sessionEditedFiles/, "and names the fact it judged, so rewording is not a way through");
 });
 
+test("CONSTRAINT 8: a completion report written OUTSIDE the repo is not a breach (2026-09-06 方案 C)", () => {
+  // The measured false positive: a child writes its round report to /tmp — a
+  // process artifact that cannot pollute the worktree, enter a checkpoint or
+  // reach a tracked file — and the proxy approval was refused, twice in one
+  // round, each time costing a manual approval.
+  const task: PlanTask = {
+    id: "t9c", title: "t9c", fileBoundaries: ["lib/orchestrator", "test"],
+    dependsOn: [], execution: "serial", status: "running",
+  };
+  assert.deepEqual(
+    proxyApprovalProblems(["lib/orchestrator/plan.ts", "/tmp/rg-task-report.md"], task),
+    { ok: true, outside: [] },
+  );
+});
+
+test("CONSTRAINT 8 SAFETY EDGE: an out-of-repo SENSITIVE landing still refuses", () => {
+  // The exemption above is for noise, not for secrets. These are the paths as
+  // the sidecar really holds them — already expanded, no literal `~`.
+  const task: PlanTask = {
+    id: "t9c", title: "t9c", fileBoundaries: ["lib/orchestrator", "test"],
+    dependsOn: [], execution: "serial", status: "running",
+  };
+  for (const p of [
+    "/Users/someone/.ssh/id_rsa",
+    "/Users/someone/.pi/review-gate.json",
+    "/Users/someone/.aws/credentials",
+    "/tmp/staging/.env",
+  ]) {
+    const refused = proxyApprovalProblems(["lib/orchestrator/plan.ts", p], task);
+    assert.equal(refused.ok, false, p);
+    assert.deepEqual(refused.outside, [p], p);
+  }
+});
+
+test("the refusal copy states both halves of the rule, so a manager reading it knows which is which", () => {
+  const task: PlanTask = {
+    id: "t9c", title: "t9c", fileBoundaries: ["lib/orchestrator"],
+    dependsOn: [], execution: "serial", status: "running",
+  };
+  const refused = proxyApprovalProblems(["/Users/someone/.ssh/config"], task);
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason!, /仓库外/, "it explains what out-of-repo means for this check");
+  assert.match(refused.reason!, /敏感/, "and that sensitive out-of-repo paths are the exception");
+});
+
 // ---------------------------------------------------------------------------
 // CONSTRAINTS 9 and 14 — who may do what
 // ---------------------------------------------------------------------------
@@ -197,6 +242,73 @@ test("CONSTRAINT 4: a live child blocks the exit", () => {
   const problems = orchestratorDoneProblems(doneFacts({ runtime, alivePaneIds: ["%2"] }));
   assert.ok(problems.some((p) => /约束 4/.test(p)));
   assert.ok(problems.some((p) => /a-1@%2/.test(p)));
+});
+
+test("B4: a child that REPORTED DONE is named as such — and still blocks the exit", () => {
+  // The measured contradiction (2026-09-04): block 1 of the receipt said
+  // "t8a：已完成" while this block said "还有 1 个子会话活着：t8a". Both were
+  // computed correctly; they were computed from DIFFERENT readings. The
+  // completion is a channel fact and is passed in now, so there is one answer.
+  const runtime = registerChild(emptyRuntime("orch-abc-1"), {
+    id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW,
+  });
+  const facts = doneFacts({
+    plan: planOf({ tasks: [{ id: "a", title: "a", fileBoundaries: ["lib/a"], status: "running" }] }),
+    runtime,
+    alivePaneIds: ["%2"],
+    reportedDone: ["a-1"],
+  });
+  const problems = orchestratorDoneProblems(facts);
+
+  assert.ok(problems.some((p) => /已报完成、pane 还开着/.test(p)),
+    "the finished child is still an exit blocker (user decision) — but it is named for what it is");
+  assert.ok(!problems.some((p) => /还有 \d+ 个子会话活着/.test(p)),
+    "and never as 'alive, go wait for it' in the same receipt that called it finished");
+  assert.ok(problems.some((p) => /set-status/.test(p) && /orchestrator_close/.test(p)),
+    "the manager is told the two moves that close it out");
+  assert.ok(problems.some((p) => /门禁不替你标 done/.test(p)),
+    "the gate never marks the task done itself — the manager's re-verification is the contract");
+  assert.ok(problems.some((p) => /a\(running，孩子已报完成/.test(p)),
+    "the plan line carries the same fact, so the two lines cannot disagree");
+
+  // WITHOUT the reading (nobody asked the channels), nothing is claimed about
+  // completion — the child is simply a live child.
+  const unread = orchestratorDoneProblems({ ...facts, reportedDone: undefined });
+  assert.ok(unread.some((p) => /还有 1 个子会话活着/.test(p)));
+  assert.ok(!unread.some((p) => /已报完成/.test(p)));
+});
+
+test("B4: a child that reported done and then VANISHED is not called 'never reported'", () => {
+  // REACHABLE, and that took a second fix: completion used to be derived from
+  // the STATE, and a child whose pane is gone is `dead` before any report is
+  // looked at — so this case silently fell out of `reportedDone`. It comes
+  // from `completionReported` now (the channel fact, not the state), and
+  // test/orchestrator-wait-receipt.test.ts drives the same case end to end.
+  const runtime = registerChild(emptyRuntime("orch-abc-1"), {
+    id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW,
+  });
+  const problems = orchestratorDoneProblems(doneFacts({
+    runtime, alivePaneIds: [], reportedDone: ["a-1"],
+  }));
+  assert.ok(!problems.some((p) => /从未报告完成/.test(p)),
+    "it DID report — the notice is for children that died silently");
+});
+
+test("F14: unreadable liveness claims no death, and keeps every open child counted", () => {
+  // The extension used to pass `[]` when `list-panes` failed, and an empty
+  // pane list here means "every registered pane is gone": one tmux hiccup told
+  // the manager that all of its children had died.
+  const runtime = registerChild(emptyRuntime("orch-abc-1"), {
+    id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW,
+  });
+  const problems = orchestratorDoneProblems(doneFacts({
+    runtime, alivePaneIds: [], livenessUnknown: true,
+  }));
+  assert.ok(!problems.some((p) => /pane 已经消失/.test(p)), "unknown is not dead (F14)");
+  assert.ok(problems.some((p) => /存活状态未知/.test(p) && /F14/.test(p)),
+    "and the manager is told its liveness column is missing");
+  assert.ok(problems.some((p) => /还有 1 个子会话活着/.test(p)),
+    "the conservative direction is to block the exit, never to invent a corpse");
 });
 
 test("a child whose pane VANISHED without reporting done is surfaced too", () => {

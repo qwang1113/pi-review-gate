@@ -22,7 +22,12 @@ import {
   projectChannel,
   readChannel,
   requestPayload,
-  MAX_INLINE_RECORD_CHARS,
+  sanitizeDeliveryStation,
+  sanitizeBatchStamp,
+
+  MAX_INLINE_RECORD_BYTES,
+  judgeChannelTarget,
+  reportText,
   HEARTBEAT_STALE_MS,
   type ChannelIO,
   type ChannelRecord,
@@ -41,6 +46,8 @@ import {
   type SupervisionMemory,
 } from "../lib/orchestrator-supervisor.ts";
 import type { ChildSession } from "../lib/orchestrator-registry.ts";
+import { parseDeliveryStation } from "../lib/delivery-station.ts";
+
 
 const T0 = 1_700_000_000_000;
 const ORCH = "orch-deadbeef-abc";
@@ -128,7 +135,10 @@ test("a bulky payload SPILLS to a side file so the JSONL line can never be torn"
   });
   assert.equal((stored as { payload?: string }).payload, undefined, "the bulky field left the line");
   const line = io.files.get(channelPathFor(ORCH, "c1", HOME))!;
-  assert.ok(line.length <= MAX_INLINE_RECORD_CHARS + 200, `the appended line stayed small: ${line.length}`);
+  // BYTES, not characters: PIPE_BUF is a byte limit and this project's own
+  // payloads are Simplified Chinese (3 bytes per code point).
+  const bytes = Buffer.byteLength(line, "utf8");
+  assert.ok(bytes <= MAX_INLINE_RECORD_BYTES + 200, `the appended line stayed small: ${bytes} bytes`);
 
   const read = readChannel(io, channelPathFor(ORCH, "c1", HOME));
   const record = read.records[0] as Extract<ChannelRecord, { kind: "request" }>;
@@ -471,4 +481,127 @@ test("a render that NEVER resolves cannot hang a settled question (P1 pin)", asy
   const settled = readChannel(io, channelPathFor(ORCH, "c1", HOME)).records
     .find((r) => r.kind === "request-settled");
   assert.ok(settled, "the settle record is written without waiting for the render");
+});
+
+// ---------------------------------------------------------------------------
+// Judge reports: the third listener item rides the same medium
+// ---------------------------------------------------------------------------
+
+test("a judge channel is the same file shape under an opener id", () => {
+  const target = judgeChannelTarget("session-child-1", "rg-reviewer-abc123", HOME);
+  const path = channelPathFor(target.orchestrationId, target.childId, target.home);
+  assert.ok(path.includes("session-child-1"), "the opener names the directory");
+  assert.ok(path.endsWith("rg-reviewer-abc123.jsonl"), "the judge names the file");
+  assert.doesNotMatch(path, /\\.\\./);
+});
+
+test("a round report round-trips and the projection keeps the newest", () => {
+  const io = memoryIO(() => T0);
+  const target = judgeChannelTarget("session-child-1", "rg-reviewer-abc123", HOME);
+  const path = channelPathFor(target.orchestrationId, target.childId, target.home);
+  appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(T0).toISOString(),
+    reportId: "rep-1", round: 1, verdict: "BLOCKED", findingsCount: 2, summary: "两处 P1",
+  });
+  appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(T0 + 1).toISOString(),
+    reportId: "rep-2", round: 2, verdict: "READY", findingsCount: 0, summary: "修齐",
+  });
+  const read = readChannel(io, path);
+  assert.equal(read.records.length, 2);
+  const projection = projectChannel(read.records);
+  assert.equal(projection.lastReport?.verdict, "READY");
+  assert.equal(projection.lastReport?.round, 2);
+  assert.equal(reportText(io, projection.lastReport!), "修齐");
+  assert.equal(projection.openRequests.length, 0, "a report settles nothing and disturbs nothing");
+});
+
+test("an oversized report summary SPILLS like any other bulky payload", () => {
+  const io = memoryIO(() => T0);
+  const target = judgeChannelTarget("session-child-1", "rg-reviewer-abc123", HOME);
+  const huge = "结论".repeat(2000);
+  const stored = appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(T0).toISOString(),
+    reportId: "rep-9", round: 3, verdict: "BLOCKED", summary: huge,
+  });
+  assert.equal((stored as { summary?: string }).summary, undefined, "the bulky field left the line");
+  const path = channelPathFor(target.orchestrationId, target.childId, target.home);
+  const line = io.files.get(path)!;
+  const bytes = Buffer.byteLength(line, "utf8");
+  assert.ok(bytes <= MAX_INLINE_RECORD_BYTES + 300, `the appended line stayed small: ${bytes} bytes`);
+  const read = readChannel(io, path);
+  assert.equal(reportText(io, read.records[0] as Extract<ChannelRecord, { kind: "report" }>), huge);
+});
+
+test("the spill budget is measured in BYTES — a CJK payload cannot slip through on char count", () => {
+  // PIPE_BUF is a byte limit; `String.length` counts UTF-16 units. Everything
+  // a judge writes into this channel is Simplified Chinese by directive (L4),
+  // and a CJK code point is 3 bytes — so a record comfortably under 1500
+  // CHARACTERS can be 4400 bytes and tear on a concurrent append. Measured on
+  // characters, this payload stayed inline; measured on bytes it spills.
+  const io = memoryIO(() => T0);
+  const target = judgeChannelTarget("opener-1", "judge-1", HOME);
+  const cjk = "结论：这一处的边界判断会读到未定义值，必须显式处理。".repeat(30); // ~810 chars, ~2400 bytes
+  assert.ok(cjk.length < 1500, "the fixture must be UNDER the old character budget");
+  assert.ok(Buffer.byteLength(cjk, "utf8") > 1500, "…and OVER the byte budget, or it proves nothing");
+  const stored = appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(T0).toISOString(),
+    reportId: "rep-cjk", round: 1, verdict: "NEEDS_HUMAN", summary: cjk,
+  });
+  assert.equal((stored as { summary?: string }).summary, undefined, "it must spill on the byte budget");
+  const path = channelPathFor(target.orchestrationId, target.childId, target.home);
+  assert.ok(Buffer.byteLength(io.files.get(path)!, "utf8") < 4096, "and the line stays inside PIPE_BUF");
+  const read = readChannel(io, path);
+  assert.equal(reportText(io, read.records[0] as Extract<ChannelRecord, { kind: "report" }>), cjk);
+});
+
+test("a channel with no report has no lastReport", () => {
+  const projection = projectChannel([
+    { kind: "state", from: "child", at: new Date(T0).toISOString(), state: "working" },
+  ]);
+  assert.equal(projection.lastReport, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeDeliveryStation — the untrusted-input rule for the request's station
+// (2026-09-06). Same shape and same reason as `sanitizeScopeStamp`: the value
+// is written by the CHILD, so it is normalized at the boundary and no reader
+// has to remember it came off a wire.
+
+test("a station the child wrote is kept only when it is one of the three", () => {
+  assert.equal(sanitizeDeliveryStation("precommit"), "precommit");
+  assert.equal(sanitizeDeliveryStation("commit"), "commit");
+  assert.equal(sanitizeDeliveryStation("pr"), "pr");
+  // Surrounding whitespace and case are tolerated — same reading as the rest
+  // of the gate gives a station.
+  assert.equal(sanitizeDeliveryStation("  PR "), "pr");
+});
+
+test("anything else is DROPPED, never degraded into a station nobody asked for", () => {
+  for (const raw of ["", "  ", "deploy", "PRECOMMIT!", "commit; pr", 3, null, undefined, {}, ["pr"]]) {
+    assert.equal(sanitizeDeliveryStation(raw), undefined, JSON.stringify(raw));
+  }
+  // The contrast that matters: `parseDeliveryStation` DEGRADES an unreadable
+  // value to the strictest station (a contract that forgot to say where it
+  // stops must still block), while this one drops it — here there is no
+  // contract to protect, and inventing `precommit` would show a project
+  // manager a station the child never asked for.
+  assert.equal(parseDeliveryStation("deploy"), "precommit");
+  assert.equal(sanitizeDeliveryStation("deploy"), undefined);
+});
+
+
+test("a batch stamp survives only when all three halves make sense together", () => {
+  assert.deepEqual(sanitizeBatchStamp("b1", 0, 3), { id: "b1", index: 0, total: 3 });
+  assert.deepEqual(sanitizeBatchStamp("  b1  ", 2, 3), { id: "b1", index: 2, total: 3 });
+  // Each of these would render as a nonsense position ("第 8/2 题",
+  // "第 undefined/3 题"), which is worse than showing no stamp at all — the
+  // request is still a perfectly ordinary open question either way.
+  for (const [id, index, total] of [
+    ["", 0, 3], ["  ", 0, 3], [7, 0, 3], [undefined, 0, 3],
+    ["b1", -1, 3], ["b1", 1.5, 3], ["b1", "0", 3], ["b1", undefined, 3],
+    ["b1", 0, 0], ["b1", 0, "3"], ["b1", 0, undefined], ["b1", 2, 2], ["b1", 8, 2],
+  ] as Array<[unknown, unknown, unknown]>) {
+    assert.equal(sanitizeBatchStamp(id, index, total), undefined, JSON.stringify([id, index, total]));
+  }
 });

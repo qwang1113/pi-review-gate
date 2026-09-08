@@ -34,6 +34,8 @@
  * the existing tool taxonomy instead of inventing a new one.
  */
 
+import type { TaskMode } from "./task-mode.ts";
+
 /** Consecutive read-only calls with no production before the guard fires. */
 export const READONLY_STALL_LIMIT = 30;
 
@@ -107,3 +109,35 @@ export const READONLY_STALL_NUDGE =
   "如果这是在库源码（如 node_modules/）里钻探，先停下来确认方向：" +
   "写一个最小实现或一条测试验证你的假设（若本任务允许改动），或换一个搜索角度，" +
   "而不是继续追读源码。门禁没有拦截你，但继续只读调用不会让任务前进。";
+
+/**
+ * WHICH MODES HEAR THE NUDGE — the decision, kept in this module.
+ *
+ * The counter is mode-blind (reading is reading), but whether the copy above
+ * is TRUE of a session is not. Two modes are silent:
+ *
+ *  - `normal`: the extension steps aside completely — no nudges at all, like
+ *    the edit-discipline ones.
+ *  - `orchestrator`: the PROJECT MANAGER, whose whole job is read-only
+ *    verification plus orchestration — by constraint 2 it may not write code
+ *    at all. "Write a minimal implementation or a test" is therefore not a
+ *    steer it could ever follow: the nudge was a FALSE POSITIVE every single
+ *    time it fired (reported in six consecutive handoffs, 03 through 08, and
+ *    measured again mid-round while a manager read through a child's
+ *    delivery). A guard that is wrong by construction for a role must be
+ *    silent for that role — rewriting the copy into an orchestration steer
+ *    was considered and rejected (2026-09-17, user decision A): a manager
+ *    that reads thirty files while verifying a child is doing exactly the
+ *    right thing, so any threshold on reading alone would just mint a new
+ *    false positive.
+ *
+ * loop and explore keep the mode-neutral copy unchanged.
+ *
+ * Returns the text to append, or undefined when this mode hears nothing —
+ * the caller appends what it gets back rather than deciding for itself, so
+ * there is ONE place that knows who is exempt.
+ */
+export function readonlyStallNudgeFor(mode: TaskMode | undefined): string | undefined {
+  if (mode === "normal" || mode === "orchestrator") return undefined;
+  return READONLY_STALL_NUDGE;
+}

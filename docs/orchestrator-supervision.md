@@ -51,7 +51,7 @@
 | `request` | 子 → 编排 | 我弹了一个框：标题、**全部选项（原文、按序）**、正文 payload、topic |
 | `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / orchestrator / dismissed / **interrupted**（instruct 打断时解除的框，不是拒绝） |
 | `answer` | 编排 → 子 | 这个请求的答案 |
-| `instruct` | 编排 → 子 | 跟你说句话（steer / followUp）或打断你（interrupt） |
+| `instruct` | 编排 → 子 | 打断你并立即投递（`interrupt`，缺省）或切进你当前这一轮（`steer`）；`followUp` 只剩 judge 通道在用 |
 | `instruct-ack` | 子 → 编排 | 我注入了（或没能注入，附原因） |
 
 两个方向共用一个文件，每条记录自报 `from`。分成两个文件只会让要同步的路径翻倍：
@@ -61,21 +61,27 @@
 
 两个进程并发追加同一个文件。POSIX 的 `O_APPEND` 只在 `PIPE_BUF`（4 KiB）以下保证
 原子性，而真正重要的 payload —— 一份 loop goal 草稿、一份任务书 —— 恰恰会超过它。
-所以超过 `MAX_INLINE_RECORD_CHARS`（1500）的记录会把大字段**溢出到旁边的文件**，
-JSONL 那一行只留一个引用。读取方经同一个 IO seam 解引用，所以测试里也不碰真磁盘。
+所以超过 `MAX_INLINE_RECORD_BYTES`（1500 **字节**）的记录会把大字段**溢出到旁边的
+文件**，JSONL 那一行只留一个引用。预算按字节算不是细节：`PIPE_BUF` 是字节上限，而
+`String.length` 数的是 UTF-16 单元——通道里写的几乎都是简体中文（每码点 3 字节），
+按字符算会让一条 1500 字符的记录悄悄涨到 4400 字节并被撕开。读取方经同一个 IO seam
+解引用，所以测试里也不碰真磁盘。
 
 ---
 
-## 二、状态：七态，全部来自真值
+## 二、状态：八态，全部来自真值
 
-`lib/orchestrator-child-state.ts`（判定）+ `lib/orchestrator-child-channel.ts`（子会话侧上报）
+`lib/orchestrator-child-state.ts`（判定，其中 `CHILD_STATES` 是这份清单的唯一权威）
++ `lib/orchestrator-child-channel.ts`（子会话侧上报）
 
 | 状态 | 判据 | 谁测的 |
 | --- | --- | --- |
-| `working` | 子会话自报（`ctx.isIdle() === false`，或有 pending 消息） | 它自己 |
+| `working` | 子会话自报（`ctx.isIdle() === false`，或有 pending 消息）**或**自报 `idle` 但 `IDLE_PROGRESS_GRACE_MS`（120s）内有推进 | 它自己（见 §2.4） |
 | `waiting-input` | 通道里有**未销账的 request** | 它自己 |
-| `idle` | 自报停下了，且没有完成记录 | 它自己 |
+| `waiting-judge` | 它在等门禁**自己派出去**的活（reviewer / 全量 precommit），附已等秒数与在等谁 | 它自己（见 §2.3） |
+| `idle` | 自报停下了、没有完成记录，**且已 120s 没有推进** | 它自己 + 进展戳 |
 | `done` | 自报停下了，且它的门禁写下了 `declare_done` 的完成记录 | 它自己 |
+| `mode-changed` | 它换了门禁模式（loop→explore/normal/orchestrator）——项目经理必须知道 | 它自己 |
 | `dead` | pane 不在 `list-panes` 的输出里 | 编排层（从外面） |
 | `stalled` | pane 还在，但通道心跳超过 `HEARTBEAT_STALE_MS`（180s） | 编排层（推断） |
 
@@ -92,10 +98,15 @@ JSONL 那一行只留一个引用。读取方经同一个 IO seam 解引用，�
    文件里的一条记录，不是关于像素的推断。
 3. **`done`**，且受 `lastAssignedAt` 约束：比当前这次派活更早的完成记录属于**上一次**
    任务（round-1 P1）。少了这条，一个做完又被重新派活、然后卡住的子会话会一直被报成
-   「已完成」—— 而卡住恰恰是监督者唯一必须听到的事。
+   「已完成」—— 而卡住恰恰是监督者唯一必须听到的事。约束的两端在 2026-09-17 一起补齐：
+   **写的一端**，每一条**写进通道**的 `orchestrator_instruct` 都打派活戳（`interrupt` 曾是
+   唯一的豁免，而它恰恰是「停下、改做这个」；戳记也不等回执 —— 只拿到 `received` 的消息
+   回执会失败，可子会话稍后照样读到它）；**读的一端**，比的是子会话进入这段 `done`
+   的**起点**（`projection.lastStateSince`）而不是最新那条记录 —— 子会话完成后心跳每分钟
+   会用新时间戳重报一次 `done`，拿最新一条去比，等于派活后一分钟内约束自动作废。
 4. **沉默（`stalled`）排在任何正面自报之前**：比心跳预算更旧的报告不再是关于当下的证据。
 5. **`waiting-judge`**：它在等门禁**自己派出去**的活（reviewer / precommit）。
-6. `idle` / `working`。
+6. `idle` / `working` —— 而这两者之间还要过一道**进展**关（§2.4）。
 
 `paneAlive === undefined`（tmux 读不出来）**永远不判死**（F14）：读不到是信息缺失，
 而误判死亡与漏判死亡一样会终结监督。
@@ -130,6 +141,32 @@ JSONL 那一行只留一个引用。读取方经同一个 IO seam 解引用，�
   它现在给的是「去看健康快照」而不是「先打断它」。
 
 上报里还带上 `ctx.getContextUsage()` 的读数，所以项目经理不必去问「你还剩多少上下文」。
+
+### 2.4 自报 `idle` 要过进展关：`IDLE_PROGRESS_GRACE_MS`（B3）
+
+子会话上报 `working` / `idle` 的依据是 `ctx.isIdle()`，而这个读数**在两次工具调用
+之间为真**：一个正在连续调 bash / read 做只读调查的会话，几乎每一跳心跳都是 idle。
+2026-09-04 实测：一个 45 秒里 transcript 涨了 23.7KB 的子会话，被连续四次报成
+「**停下了（没有 declare_done）**」，而同一行里写着「最后活动 0s 前」。代价有两份：
+项目经理据此两次多余打断；`idle` 又算 newsworthy，于是**每次 `orchestrator_wait`
+都立即返回**，它唯一的等待工具退化成忙轮询。
+
+推翻这条误报的事实**本来就在同一条记录里**：`lastProgressAt` —— 只有真实 agent 事件
+（工具返回、turn 边界）才推进，心跳不推进。它过去只是回执上的一个读数。现在它参与判定：
+
+- 自报 `idle` + 进展在 **120 秒**（`IDLE_PROGRESS_GRACE_MS`，**用户拍板的数字**）以内
+  ⇒ 判 `working`，健康行写成「在干活（自上次推进 3s**·自报停下未满 120s**）」
+  —— 被推翻的那条自报**显式留在行里**，不替它藏 120 秒（用户决定，2026-09-17）。它还是
+  一个**预告**：项目经理看到这个标记就知道，孩子若不再推进，这一行过会儿会翻成「停下了」，
+  于是可以决定继续等还是准备介入。标注**刻意压到最短**（同一次用户决定）：这一行是每隔
+  几分钟就要扫一遍的东西、一个孩子一行、外面还套着五块回执，信息保留、字数压缩；
+- 满 120 秒没有推进 ⇒ 它的 `idle` 成立，照旧报「停下了（没有 declare_done）」；
+- **没有进展戳**（还没跑过工具的新会话、或旧版扩展）⇒ **采信自报**。没有信息就不要
+  凭空造出一个矛盾 —— 否则一个真的停下的子会话会永远显示 `working`，那正是 R3-5。
+
+顺序上它排在 `dead` / `waiting-input` / `done` / `stalled` **之后**：进展戳只能把
+「自报停下」降级成「还在干活」，不能把一具尸体说活。
+
 
 
 ---
@@ -166,11 +203,17 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 
 `orchestrator_instruct({ childId, mode, message })`
 
-`mode` 就是 pi 自己的 `deliverAs`：
+`mode` 就是 pi 自己的 `deliverAs`，**缺省 `interrupt`**（2026-09-17 用户决定）：
 
-- `steer` —— 切进它当前这一轮；同时解除它挂着的框（by:`interrupted`）再投递；
-- `followUp` —— 等它跑完手上这轮再读，**不**解除任何框；
-- `interrupt` —— 最高优先级：`ctx.abort()` 停掉当前轮 + 解除挂着的框 + 带正文立即投递。
+- `interrupt` —— 默认，最高优先级：`ctx.abort()` 停掉当前轮 + 解除挂着的框 + 带正文立即投递；
+- `steer` —— 切进它当前这一轮（不 abort）；同时解除它挂着的框（by:`interrupted`）再投递；
+- ~~`followUp`~~ —— **已从参数面取消**，传了直接被拒，拒绝文案指回 `interrupt` / `steer`。
+
+取消它的理由是这个工具的语义：上级发话是因为子会话**现在**就该知道，一条在它要纠正的
+那一轮之后才到的纠正，等于没人执行的纠正。默认值若是「最晚到」的那一种，那么最常见的
+一次调用恰恰最没用。`followUp` 作为**通道枚举值**仍然存在，因为 judge 次轮派发用的就是
+它（一轮任务确实是「你忙完再读」），子会话侧的读取/注入路径也照旧 —— 取消的只是项目
+经理的参数面。
 
 文本写进通道，由**子会话自己的门禁**用 pi 的 API 注入。**被替换掉的是什么**：
 `tmux send-keys`，它产出过四条独立缺陷 —— 任务书被截断（F7）、没有 Enter 提交（F8）、
@@ -182,11 +225,19 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 **回执依然要挣**，但它分两级（2026-08-30）：子会话的 `instruct-ack` 带 `stage` ——
 `received`（门禁拿到并入队了）与 `injected`（pi 真的收下了）。
 
-- **`followUp` 认 `received`**。它的定义就是「等你跑完这轮再读」，一个正忙的子会话
-  按定义**不可能**立刻注入。原来要求注入，于是这个 mode 恰恰在它为之设计的场景里
-  必然失败 —— 而消息其实已经写进通道了，就此沉底丢失（第四轮实测丢了一条补充授权，
-  只能改用 `orchestrator_answer` 的选项文本绕过去）。
-- **`steer` / `interrupt` 仍要求 `injected`**：它们承诺的是「当前这一轮」，排队不算。
+- **`steer` / `interrupt` 要求 `injected`**：它们承诺的是「当前这一轮」，排队不算。
+  未指明 mode 的判定也按这条最严的走 —— 少写一个参数买不到更松的「已送达」。
+  只拿到 `received` 时文案说的是**继续等**（消息在它的收件箱里没丢、先看是不是
+  `waiting-judge`、别重发），而不是「改用 followUp」—— 指回一个工具自己拒收的模式，
+  是取消 followUp 那一轮必须一起堵上的假出路。
+- **两级回执本身仍然必要**，虽然 2026-09-17 之后**没有任何 mode 满足于 `received`**：
+  它是「消息在它收件箱里、还没注入」这个事实的唯一记录 —— 投影靠它把消息留住（见下），
+  文案靠它说「继续等」而不是「它从没收到」。曾经认 `received` 的是 `followUp`：它的定义
+  就是「等你跑完这轮再读」，一个正忙的会话按定义**不可能**立刻注入，原来要求注入，于是
+  这个 mode 恰恰在它为之设计的场景里必然失败，而消息其实已经写进通道了，就此沉底丢失
+  （第四轮实测丢了一条补充授权）。这条规则随 mode 一起从判定里删掉了：judge 通道虽然
+  仍写 `followUp`，但它那次派发是按 **pane 是否起来**验证的，从不经过这个判定函数 ——
+  留着就是一条没有调用方的分支。
 
 投影里也只有 `injected` 才把指令移出子会话的收件箱 —— 只 `received` 的消息必须留着，
 否则恢复时就会丢掉它。没有任何回执 ⇒ 调用失败，且文案第一句是「先看它是不是
@@ -207,10 +258,18 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 
 1. **全部子会话的健康快照** —— `{childId, state, 最后活动时间, 已静默多少秒, 当前框标题, 上下文用量}`；
 2. **待答请求** —— 谁在问什么、**全部选项按序原文**、正文 payload、`requestId`；
+   子会话一次 `ask_user` 提交的多题是**一整批一起到**的（2026-09-06）：它在弹出
+   第一个框之前就把全部问题写进通道，所以它们在**同一份回执**里，每条标着
+   「采访 `<batchId>` 第 i/N 题」。答法也是一次：
+   `orchestrator_answer({childId, answers:[{requestId, answer}, …]})` —— 每条
+   独立裁决（某条被拒不挡其余条，已写进通道的不回滚），逐条 `requestId` 地答也
+   照旧可用。子会话那边**仍然一次只弹一个框**，人随时可以介入，先答者生效；
+   用户中途选「跳过后续」或你下发 instruct 打断，剩下那些没展示的题会被就地
+   销账，不会挂在这里反复响铃。
 3. **死亡与恢复** —— `dead` / `stalled` 的子会话、**未丢失的资产**（分支 / checkpoint /
    review 裁决 / 完成记录）、以及可直接执行的动作（`orchestrator_recover` 或 `orchestrator_close`）；
 4. **你自己的上下文用量与接力时机**（见 §5.1）；
-5. **还差什么才能 `declare_done`**。
+5. **还差什么才能 `declare_done`**（见 §5.3 —— 它与第 1 块读同一份 snapshot）。
 
 `timeoutMs: 0` 就是原来的 `orchestrator_status`。**被替换掉的是什么**：两个回答同一个
 问题的工具，agent 每轮都要选一个 —— 那正是哲学二说的设计失败。现在阻塞与否是一个参数，
@@ -246,6 +305,101 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 事件记忆（`SupervisionMemory`）由**调用方持有**并在 `orchestrator_wait` 与后台定时器
 之间共享，所以两者不会重复叫同一件事；它绝不是模块级变量，这样测试可以直接构造它。
 
+### 5.3 收尾块与健康快照读同一份真值（B4）
+
+`lib/orchestrator-gate.ts` 的 `orchestratorDoneProblems` + `lib/orchestrator-session-tools.ts` 的 `exitBlockers`
+
+2026-09-04 实测，**同一份回执**里：第 1 块「t8a：**已完成**」，第 5 块「plan 还有 4 个
+任务未完成：t8a(**running**)」+「还有 **1 个子会话活着**：t8a@%238」。两块都没算错 ——
+它们算的是**两份不同的读数**：第 1 块读通道（子会话自己写的完成记录），第 5 块读
+registry 的 `doneAt` 字段。而 `doneAt` 的写点在旧 probe 被删时一起消失了（b6492c5），
+字段和它的 5 个读者留了下来，从此**恒为 undefined**。项目经理只能自己在两块之间仲裁，
+再手工 `set-status` + `orchestrator_close` 收尾。
+
+修法不是把写点补回去（那等于重埋同一颗雷：完成缓存必须在每一条重新派活路径上失效，
+而当时 `orchestrator_instruct({mode:"interrupt"})` 带正文派新活时并不打派活戳 —— 那个
+豁免已于 2026-09-17 取消，见 §2.1 第 3 条），而是
+**删掉那份缓存**：`ChildSession.doneAt`、`markChildDone` 与 `orchestrator_wait` 里那条
+读它的 `child-done` 判据全部移除（那条判据本身还是个忙轮询：标志永不清除，只要有一个
+孩子报过完成，之后每次 wait 都会立刻返回）。完成只有一处真值 —— **通道**，由
+`superviseChildren` 读一次，健康快照与收尾块都吃这一份。
+
+「完成」这个事实由 `completionReported()` 单独回答，**不是**从状态里读的（`state === "done"`）。
+两者的差别正好是一种真实情形：一个报完成之后 pane 才消失的子会话，状态是 `dead`（尸体
+必须是监督者第一眼看到的东西），但它**确实做完了**。按状态读会把它从「已完成」里漏掉，
+于是收尾块会对着一个交了活的子会话说「从未报告完成…必要时把任务改回 pending 重开」，
+而第 3 块同时正把它的 `declare_done` 记录列为幸存资产 —— 又一次两块打架。取用入口也只有
+一个：`reportedDoneIds(snapshot)`。
+
+
+于是收尾块现在这么说（用户拍板，2026-09-17）：
+
+- 「有 N 个子会话**已报完成、pane 还开着**：… —— 待你复验后用
+  `orchestrator_plan({action:"set-status", …})` 收尾，再 `orchestrator_close` 关掉它」；
+- 对应的 plan 行也写成 `t8a(running，孩子已报完成，待你复验后 set-status)`；
+- **门禁不替项目经理把任务标成 done** —— 独立复验是契约要求的动作，自动标 done 会把它架空；
+- 已报完成但 pane 还开着的子会话**仍然阻塞** `declare_done`（与修复前的实际行为一致，
+  变的只是它不再自相矛盾）。
+
+同一处还修了 F14 的第三扇门：注入提示词的收尾块过去在 `list-panes` 读失败时把存活
+pane 列表传成 `[]` —— 空列表在这里的含义是「每一个登记过的 pane 都消失了」，于是一次
+tmux 抖动就会告诉项目经理它的孩子全死了。现在读不到就是**未知**：不宣称任何死亡，把所有
+未关闭的子会话按「都还活着」计入（保守方向是**挡住**收尾，绝不是凭空造一具尸体），
+并在块里明说存活状态未知。
+
+### 5.4 等待可以被人打断：外部消息就是第二个中断源（B5）
+
+`lib/poll-wait.ts` 的 `notifyUserInput()` + `extensions/review-gate.ts` 里**已有的**
+`pi.on("input")`
+
+**事故形状（2026-09-04 第一轮端到端实测）**：项目经理调
+`orchestrator_wait({timeoutMs: 900000})` 盯子会话，用户往它的 pane 里敲了一条消息 ——
+消息进了宿主的 steer 队列，**排了 14 分钟不生效**：ESC 只切编辑器模式，只有 `Ctrl+C`
+落地。这 15 分钟里项目经理对用户完全不可达。对照组刺眼：
+`orchestrator_instruct(interrupt)` 对**子会话**秒到且有回执，项目经理自己却没有对应的门。
+
+**实测（2026-09-06，`/tmp/b5-probe`：真实 pi TUI + expect 驱动 + 一个阻塞 90s 的探针
+工具 + 从外部敲入的消息）**：
+
+```
+TOOL start seconds=90
+INPUT source=interactive behavior=steer waitLive=true …   ← 阻塞进行到 23.0s
+TOOL end reason=input-abort elapsedMs=23041               ← 170ms 后返回
+```
+
+所以宿主**确实**在工具阻塞期间派发 `input` 事件（`prompt()` 在检查 `isStreaming`
+之前就调 `emitInput`），扩展里那个已经存在的 `pi.on("input")` 处理器就是全部所需的
+扳机。**没有新工具、没有新通道、更没有「谁都能广播」的入口** —— 能拉动它的只有坐在
+这个会话键盘前的人。
+
+规则三条：
+
+- **谁能拉**：`event.source !== "extension"`。门禁自己注入的
+  `[REVIEW_GATE_RESUME]`、项目经理 `orchestrator_instruct` 的 `steer` 投递、以及 judge
+  通道那条 `followUp` 次轮派发都**不算** —— `steer` 的语义是「带着这条继续做」，而
+  `interrupt` 在宿主层本来
+  就会 abort 当前 turn。否则一条例行注入就能腰斩一轮 review。
+- **打断谁**：本进程里**每一个正在阻塞的 `pollUntil`**。它是等待骨架的第二个中断源
+  （第一个是 `signal`，即 ESC），所以 `judge_wait` 与 `orchestrator_wait` 一起受益 ——
+  子会话在 `judge_wait` 里被用户叫一声同样会提前返回（走它今天 ESC 中断走的那条
+  `pending` 分支：`done: false`、附已等秒数，不会被误报成有结论）。
+- **多快**：中断参与 probe 与 sleep 的 `Promise.race`，**毫秒级**，不是「下一个
+  poll 间隙」。计数器是**基线**不是标志位：进入等待时读一次，因此等待**开始之前**
+  到达的消息永远不会打断它，也没有任何东西需要「记得复位」。
+
+回执因此分两种中断说话（`abortReason` / `details.abortedBy`）：ESC 是宿主取消了这次
+调用；外部消息是**有人正在跟本会话说话**。后者的回执不含糊其辞地说「马上就到」——
+**什么时候到取决于它是怎么发的**：回车发的 `steer` 切进当前这一轮（照常继续干活就会
+读到），Alt+Enter 发的 `followUp` 要等这一轮 turn **结束**才送达。只有后一种情况回执
+才说「别再一头扎回长阻塞，先把手上这一轮收掉让它进来」—— 否则项目经理会掉进同一个坑
+的第二跳：被消息叫醒、转身又进 900s 阻塞，那条 followUp 仍在队列里等 turn 边界。
+
+这句话与常驻的等待纪律②（「不是手写 sleep 轮询，**更不要结束 turn 把盯梢责任丢回给
+用户**」，`lib/agent-directives.ts`）落在**同一个决策点**上，所以回执把两者的关系
+写明，而不是留给项目经理自己调和：纪律②禁的是**用结束 turn 代替等待** —— 撒手不管、
+指望被用户叫醒；而这里消息**已经在队列里**，turn 边界只是它进来的门，进来之后立刻
+继续盯。两者要的是同一件事：盯梢责任一秒钟都不回到用户身上。
+
 ---
 
 ## 六、死亡与接管：三类，同一套机制
@@ -265,12 +419,44 @@ plan 里的任务**保持 running**（它本来就没有停止成立）。
 
 ### 6.2 项目经理死了
 
-子会话不受影响 —— 框一直弹着，人随时能答（§3 的天然回退）。新会话**带着同一个
-`RG_ORCHESTRATION_ID` 启动**，然后 `orchestrator_attach({ orchestrationId })` 接管现场：
+子会话不受影响 —— 框一直弹着，人随时能答（§3 的天然回退）。新会话直接
+`set_gate_mode("orchestrator")`，再 `orchestrator_attach({ orchestrationId })` 接管现场：
 plan、每个 child 的状态与资产、通道里未答的请求、孤儿检测结果，一次交还。
 
-注意 `attach` **拒绝**在运行中改换编排身份：一个会话已经登记的子会话会瞬间失去归属。
-正确的接管方式是带着那个 id 启动，而这正是 `orchestrator_handoff` 给后继者做的事。
+**id 不用你记**（2026-09-06，B1）：门禁自己去盘上找本仓库的候选编排 —— 先看门禁
+sidecar 里记的那个，再看 `~/.pi/agent/rg-channels/` 下的通道目录名（编排 id 自带
+repo 哈希，所以「哪些编排属于本仓库」是 id 自己回答的问题）。随便调一次 attach，
+拒绝文案里就列着全部候选与可照抄的命令。
+
+`attach` 会**采用**（adopt）那个 id，四个条件缺一不可：形状合法、属于本仓库、**盘上
+能找到**（凭空编一个 id 会被拒 —— 那条通道上没有任何子会话在听）、且本会话还没有以
+自己的身份登记过子会话（这最后一条是旧拒绝里唯一正确的那半：已登记的子会话会瞬间
+失去归属）。
+
+**批准不随接管转移**（用户 2026-09-06 拍板）：登记表是关于世界的事实，批准是用户
+给上一任**会话**的许可。接管后 plan 在门禁眼里未获批，必须重新 `submit`（重跑审计 +
+用户批准框）；回执会明说这一点。
+
+**进入模式不再被旧 plan 挡住**：身份判定挂在真正需要身份的动作上 ——
+`orchestrator_plan` 的 `write` / `submit` 与 `orchestrator_spawn`；`read` 与 `archive`
+始终开放。旧版把这道判定放在 `set_gate_mode`，结果是「解开死锁的两个工具都在死锁
+里面」，唯一可执行的建议变成手删门禁自己的 plan 文件（实测发生三次，监督者自己也
+删过）。
+
+### 6.2b 不接管、另起一轮：归档
+
+`orchestrator_plan({ action: "archive" })`。门禁把 plan **连同编排登记表**写进
+`.pi/orchestrator-plan.archived-<时间戳>.json`，并把原 plan 文件改名到它旁边的
+`.raw.json`（**绝不 rm**：结构化归档对合法 plan 是忠实的，对解析不了的 plan 是有损的，
+而那恰恰是原始字节最值钱的时候）。三道闸：
+
+- 盘上登记的子会话 pane **还活着** ⇒ 拒绝，并指向接管（它们正在这份 plan 下干活）；
+- 动手前**弹确认框**给用户（用户 2026-09-06 拍板）；没有 UI 时按拒绝处理，什么都不动；
+- 登记表**随之清空**（副本已在归档文件里）—— 留着它，新编排的每一次 spawn 都会被
+  `runtimeConflict` 永远拒绝，等于「清理」进了一个出不来的角落。
+
+plan 与登记表**各自可能单独存在**（`rm` 时代留下的仓库就只剩登记表），所以任一半在
+都能归档。
 
 ### 6.3 tmux server 挂了 / 机器重启
 
@@ -299,19 +485,65 @@ plan，把每一处差异归入两类之一：
 | 判为**不扩权**（批准迁移到新内容，记一条审计条目，不弹框） | 判为**扩权**（批准失效，重新征求用户） |
 | --- | --- |
 | 边界收窄、任务被删 | 新增任务 |
-| 新增路径落在该任务**已批准边界的目录前缀内**，且不与其他任务边界相交 | 碰到新目录前缀 |
+| 新增路径落在该任务**已批准的目录树内**，且不与**仍在进行**的其他任务边界相交 | 跨出该任务的已批准目录树 |
 | 增加依赖（更串行） | 删除依赖 |
 | `parallel` → `serial` | `serial` → `parallel` |
 | 降低 `maxParallel` | 提高 `maxParallel` |
+| 收紧 `deliveryStation` | 提高 `deliveryStation`（放开更多 ship 命令） |
+| 写回**此前已获授权**的内容（见下「撤回一次扩权」） | 任务改到另一个 `repo`（新写面） |
 
 三条硬止损：**无斜杠的边界不产生前缀**（`README.md` 或顶层 `lib` —— 归一化后无法
-区分顶层文件与顶层目录，猜错就等于把一个文件放大成整个仓库）；新增路径**不得与任何
-其他任务**（快照里的和新 plan 里的）相交；**只有已存在的任务**能走细化，新任务没有
-可比对的已批准边界。读不到授权快照时一律判扩权 —— fail-closed 的代价只是多弹一次框。
+区分顶层文件与顶层目录，猜错就等于把一个文件放大成整个仓库；这只是说它当不了
+「宿主目录」，边界本身照旧按字面覆盖 —— 顶层目录仍覆盖其下一切，顶层文件只覆盖
+自己）；
+新增路径**不得与其他任务**（快照里的和新 plan 里的）相交 —— **例外见下一段**；
+**只有已存在的任务**能走细化，新任务没有可比对的已批准边界。读不到授权快照时一律
+判扩权 —— fail-closed 的代价只是多弹一次框。
 
-这条规则**放宽了「批准」的含义**，所以它写在用户批准的那份文本里（`orchestrator_plan`
-的 transcript 消息），不是事后才让人发现的规则。每次迁移都记进
-`runtime.approvalAmendments`，用户随时能查「为什么这次没问我」。
+「目录树」就是每条已批准边界的父目录（`lib/a.ts` ⇒ `lib`，其下任意深度都算树内）。
+**目录型边界**（`test`）本来就直接覆盖其下的一切，新增 `test/x.test.ts` 连「细化」
+这一步都用不上；只有**顶层文件**（`README.md`）例外 —— 它只覆盖自己，因为归一化后
+分不清顶层文件与顶层目录，猜错就等于放大成整个仓库。它是 `approvedTree()`
+一个函数说了算，回执文案与判定共用它，所以拒绝时能直接把该任务的目录树列给项目
+经理看。
+
+**已 `done` 的任务退出相交判定**（2026-09-06，用户决定）。相交判定存在的理由是
+「两个**活着的**写者不能共用一个文件」；任务做完之后它不再写任何东西，边界却仍在
+挡后面的任务 —— 第八轮实测：把两个文件从一个**已 done** 的任务移给需要它们的任务，
+被判成抢地盘，白弹一次框。现在 done 任务的边界不参与相交，回执写明是谁让出来的。
+「哪些任务算 done」只取自**磁盘上那份 plan**（`decideApprovalCarry` 的
+`executionRecord` 参数），而不是正在被写入的文本：磁盘上没有 plan 可比对时
+`mergeTaskProgress` 会把调用方的 tasks 原样返回，读 `next` 就等于允许一次 `write`
+「自称做完并当场兑现豁免」。**没有执行记录就没有任何释放**。释放共有**三个**条件，
+缺一不可：磁盘执行记录里该任务为 `done`；它存在于**已批准快照**里（所以新任务自带
+`status: "done"` 释放不了任何东西）；**且它仍在正在写入的这份 plan 里** —— 一个
+已做完**又被删掉**的任务照旧守住地盘，「离场的任务要不要交出文件」是另一个问题，
+用户没有被问过。同一路径若还被一个**仍在进行**的任务声明，照样拒绝，并指名那个任务。
+
+这条规则**不试图管辖「项目经理谎称做完」**，说清楚比假装防住重要：`set-status`
+不要求任何证据，plan 文件又在 `.pi/` 下（编排写入拦截对它豁免），状态也不进
+`canonicalPlanText`，所以一个项目经理确实可以把任务标成 done。让这件事可接受的是
+**爆炸半径**：释放只允许接收任务吸收**已经落在它自己已批准目录树内**的路径，用户
+批准的文件并集因此不变 —— 任何 done（真的或声称的）都带不进一个新目录或一个新任务。
+
+**撤回一次扩权不必重走批准**（2026-09-06）。第八轮实测：项目经理给某任务加了
+`README.md`，门禁正确判扩权、作废批准，它随即把 plan **原样写回** —— 与已批准
+内容逐字节相同，批准却回不来，必须重走一次完整 submit（审计 + 用户批准框）。
+现在 runtime 里存一条**批准世系** `approvedPlanHistory`：这份批准合法绑定过的
+全部内容 hash（用户批准的那个 + 每次平移后的）。写回其中任一内容即把
+`approvedPlanHash`、**授权快照与时间戳一并**恢复（只恢复 hash 的话，下一次细化会
+撞上「没有授权快照」分支，等于把上面那条规则又废掉），并记一条审计条目。
+它的安全边有三条：**用户每次新的显式批准会重置世系**（新决定覆盖旧决定，堵死
+「先平移变宽 → 用户后来收窄 → 再写回宽版本」）；世系从 sidecar 读回时按
+`approvedPlanHash` 的同等强度校验，**一条不合形状就整份丢弃**；换了新会话时它跟
+批准一起被 `withoutPlanApproval()` 剥离（登记表与 grants 留下，许可一样不留）。
+它的信任边界与 `approvedPlanHash` **完全相同、防线同一** —— 都在门禁不可授权编辑
+的 sidecar 里；形状校验只做 fail-closed，不假装能识破一个格式合法的伪造项。
+
+这几条规则**放宽了「批准」的含义**，所以它们写在用户批准的那份文本里
+（`orchestrator_plan` 的 transcript 消息与确认框），不是事后才让人发现的规则。
+每次迁移都记进 `runtime.approvalAmendments`，用户随时能查「为什么这次没问我」。
+
 
 ## 六乙、plan 也要先过审计
 
@@ -322,7 +554,8 @@ plan，把每一处差异归入两类之一：
 定高会烧资源，且这些都不是读文本能看出来的，得对着仓库查。
 
 `submit` 内部吞掉整条链（与 `propose_loop_goal` 同一形状）：建审计任务 → 派
-`goal-auditor`（**不新增角色**：审的都是「动手前的契约」）→ 等它退出 → 解析 fence →
+`goal-auditor`（**不新增角色**：审的都是「动手前的契约」）→ 等**本轮**的 channel report 落盘
+（不是等进程退出，也不是拿通道里最新那条就算数——见下文「一轮裁决只属于那一轮」）→ 读它的结构化结论 →
 裁决（**只 P0/P1 阻塞**）→ 记录。**审计不过就把 findings 退回给项目经理，一个框都不弹**；
 过了才渲染批准框。裁决绑定 canonical plan 文本的 sha256，所以改任务状态不会让它失效，
 改一个边界就要重审；重审时门禁自动把上一轮的结论与 findings 带给审计者。
@@ -335,13 +568,126 @@ plan，把每一处差异归入两类之一：
 `plan.decisions` 有无未解决（缺 `resolvedAt`）的需求决策、任务书是否达到『子会话拿到
 就能独立协商 goal』的完整度（只写『做分页』没有交互/边界/验收标准就是 P1）、以及读
 PM 的 transcript 里 ask_user/grillme 的 Q&A 段验证澄清结论真的落进了 plan。
-项目经理同时承担产品经理角色：**plan 提交前必须把涉及的项目代码过一遍，用
-grillme/ask_user 把需求反述澄清，摸清每个子会话的 goal 才能起 plan**，禁止在需求未
-澄清前开工。
+项目经理同时承担产品经理角色：**plan 提交前必须把涉及的项目代码过一遍，摸清每个子
+会话的 goal 才能起 plan**，禁止在需求未澄清前开工。
+
+**需求反述已经是门禁固化的前置步骤（2026-09-06）**，不再靠这段劝导：`submit` 在派审计
+之前先查「有没有一份用户确认过的反述」（`propose_restatement` 写进 gate-state 的
+`restatement` 记录），没有就**直接退拒绝文案、一个框都不弹**，与审计不过同一形态。
+反述要写的内容、接受哪些「改之前 → 改之后」写法、拒绝文案里那份可照抄的骨架，
+唯一出处是 `lib/restatement.ts`——这里不复述。同一次确认里还定下**本轮交付站点**
+（`precommit` / `commit` / `pr`），它同时是 plan 的 `deliveryStation` 字段（缺省 `precommit`，
+进 canonical 文本因此进批准 hash）。
+
+**代批不是橡皮图章（2026-09-06，用户要求）**：代用户批准子会话的 goal、或代确认它的
+需求反述，`orchestrator_answer` 必须带 `crosscheck` —— 写出该 plan 任务 id，并对
+「文件边界 / 任务目标 / 交付站点」三项各给一句判断（词表与判定在
+`lib/orchestrator-answer-tools.ts`，接受的写法逐条列在 `PROXY_CROSSCHECK_TOKENS`）。
+缺任一项即退回，并把 plan 里那个任务与子会话提交的正文**并排**贴回，附可照抄的骨架；
+门禁在这里不提供申诉出路（它不是 ship block，`request_arbitration` 受理不了），但**有一条真出路**并写在
+退回文案里：认为门禁误判就让**用户本人在他自己那个框里批**——这条约束只加在「代答」上，用户不受限；
+拿不准就 `ask_user` 请他拍板（2026-09-06 用户裁定：不给走不通的申诉指引，但必须给走得通的出路）。
+拒绝不需要对照。子会话请求确认的站点若**宽于**已批准 plan 的 `deliveryStation`，
+代答一律被拒——放宽站点是用户的决定；用户本人在自己框里批不受此约束。
+
+**站点在两层的含义不同，别把执行层的拦截搬到编排层**（2026-09-06 用户裁定）：在编排层，
+plan 的 `deliveryStation` 是**授权面**——它划定子会话能被授予到哪一站，`orchestrator_answer`
+据此拒绝宽于它的代答；真正的**拦截**发生在执行层，由每个子会话自己的 ship 门禁在它那个仓库里
+兑现。因此项目经理的 `declare_done` **不判到站**：PM 名下确实有一个仓库（`sessionRepos` 一直
+含主仓库），但那是**编排仓库**——约束 2 下它只能往那里写 plan 与交接文档，那个工作区干不干净
+与「编排有没有走到站」无关（几条没提交的 plan 笔记会被读成「没到站」）；而 PR 证据写在
+**ship 真正发生的那个仓库**、也就是子会话仓库的 sidecar 里，`declare_done` 走的是 PM 自己的
+仓库集合，永远看不到它——真去判，一个 `deliveryStation: "pr"` 的编排会被一条永远
+满足不了的条件卡死，回执还会一本正经叫它「去开个 PR」，正是第四轮心跳事故那种「照门禁说的做
+反而出事」。理由与反证写在 `orchestrationDoneProblems()` 的 docblock 里（并有结构测试钉住，
+防止下一轮当成漏项补齐）；PM 的退出契约仍然是 plan 本身：任务全 done、无活着的子会话、
+未决策全部通知过。
 
 **loop 侧配套（2026-09-17）**：loop 模式下累计 60 轮未获批 loop goal（`turnsWithoutGoal`
 持久化计数，重启延续），门禁在每轮注入强提示要求先协商 goal 再干活（只注入提示、
 不硬拦工具——用户决策），goal 获批后计数清零。
+
+**一轮裁决只属于那一轮（2026-09-04，实测 P0）**：审计等待结束后，门禁**不再**无条件把
+channel 里最新那条 report 当成本轮结果。`selectRoundReport`（`lib/audit-round.ts` 的纯函数，
+2026-09-05 从 `orchestrator-plan-audit.ts` 搬来并改名）拿三件真值做判定 —— `judge_wait` 的
+`details.done/reason`、本次 dispatch 登记的 `roundSeq`、以及等待**开始前**的 `lastReportId`
+游标；只有「等到了 report」且「report 的 `round` 等于本轮」且「不是已消费过的那条」三者
+同时成立才解析裁决。任何一项不成立都是**审计未完成**：`state.planAudit` 一个字都不写，
+退回「什么都没有记录，直接再 `submit` 一次重跑」。
+
+goal 审计不是「走同一个纯函数」而已 —— **它和 plan 审计现在是同一段代码**（2026-09-05）：
+`runAuditRound(spec)` 一份实现，两条链只差一份 spec（措辞、pane 标题前缀、记录绑定）。
+code review 的结论段也归到同一个 `settleAuditRound`，所以「哪份 report 收本轮、什么时候
+推游标、谁来记录」在整个门禁里只有一处答案。
+
+**代码审查的裁决不得滞后内容一轮（2026-09-05，一晚实测 4 次的 P0）**：review 的 report 绑定
+原来只认游标，于是出现了这条时间线 —— reviewer 交卷写进通道的 report **积压不送达**（agent
+在一个长 turn 里改代码，既没 settle 也没再 `judge_wait`），下一次 `judge_submit` 提交了新
+checkpoint 后，settle 立刻把**上一轮**那份旧 report 当成本轮裁决记下并绑到新 commit 上：一份
+「指出 P2 还在」的裁决，去放行了「声称修好那条 P2」的代码。四次误绑的共同特征只有一句 ——
+**report 的生成时间早于本轮 checkpoint**。
+
+现在 review 的绑定是 `round-and-content`，两条判据**同时**成立才记录，任一不成立都 fail-closed
+（用户决策：round 对不上时**不许**退回时间戳）：
+
+1. `report.round` 等于本轮 dispatch 登记的 `roundSeq`（judge 交卷时从登记表读同一个数，
+   judge 侧代码一行没改）；
+2. `report.at` **严格晚于** `state.checkpoint.at`（本轮内容诞生的时刻）。
+
+三条 fail-closed 边界：report 没有 round、登记表没有 `roundSeq`、**在 checkpoint 确实存在的前提下**
+report 没有可解析的 `at` —— 一律不记录。goal / plan / adviser 三种轮次**不受影响**
+（`roundBindingFor` 只给 review 塞 content 时间戳），否则一个还没 checkpoint 过的新会话的第一次
+goal 审计就会永远等不到结论。
+
+**唯一的例外，而且它不是放水（2026-09-05，reviewer 的 P1 + 用户当场裁决）**：**门禁状态里一条
+checkpoint 记录都没有**时不拒绝（注意是门禁状态、不是 git 历史 —— 记录在会话自己的 sidecar 里，
+换 session 即从空开始）。那正是 `prepare_review` 明确支持的「audit the exit goal」轮 ——
+空范围（HEAD..HEAD）、要求工作区干净、reviewer 判的是任务是否完成而不是 diff；这种轮次里**没有
+被冻结的内容**可供裁决滞后。对它 fail-closed 换不来安全，只换来**不可收敛**：记录侧永远不记、
+探测侧（本轮改动后）永远不收口、READY 永远拿不到。此时 round 绑定与游标照常强制，上一轮遗留的
+report 仍然被拒。
+
+**而且这条例外会自报家门（2026-09-05，项目经理的约束）**：走这条路记下的裁决，返回给 agent 的
+文本里必带一行「本轮绑定说明：**门禁状态里**还没有可比的 checkpoint 记录（新会话 + 干净 worktree
+的第一轮就是这种情况，与 git 历史里有多少 checkpoint 提交无关），这是 exit-goal 空范围轮 ——
+内容时间判据**不适用**，本轮裁决只由 round 与 cursor 绑定」。措辞刻意说的是**门禁状态**而不是
+「本仓库」：checkpoint 记录存在会话自己的 sidecar 里、每换一个 session 就从空开始，所以一个 git
+历史里有几十个 checkpoint 提交的仓库照样会走到这条分支（reviewer 的 Nit，2026-09-05）。
+它由 `REVIEW_ROUND_SPEC.degradedContentBinding` 提供措辞、由引擎在**与跳过判据完全相同的条件**下
+挂上，并且作为**独立字段** `bindingNote` 一路传到 `buildStandardReport`（那里的「记录」行只打印
+首行，把说明塞进记录正文等于记了但没人看见）。理由是项目经理的原话：要反对的从来不是降级，
+是**看不见的**降级 —— 一个没人看得见的例外，三轮之后就会被当成规律。单测两侧都钉住：
+正常轮**不得**出现这行，降级轮**必须**出现。
+
+**判据只有一处，等待侧与记录侧共用**：`probeJudgeRound`（`judge_wait` 与 settle 扫描的探测）
+以前自己比一句「最新 report ≠ 游标」，那正是「wait 打出『本轮已有 channel report：结论 READY』
+而记录侧随后拒绝它」的来源。现在它调同一个 `selectRoundReport`：不属于本轮的 report **不算本轮
+结束**（继续等），并原样报成一行「未采纳的 report：<id>（round/时间）—— <原因>；没有记为本轮
+裁决」。既不静默丢弃，也不冒充结论。
+
+已知的**退化情形**（不是缺陷，是事实）：worktree 干净时 `review_checkpoint` 不提交也不刷新
+`checkpoint.at`，所以「零改动重新绑定」的那一轮里时间戳判据退化，此时挡住旧 report 的是 round
+与游标。两条判据都挡不住的理论情形只有一种：reviewer 拖到下一轮 checkpoint 之后才交卷 ——
+它交卷时会重读最新的 `roundSeq`，两条判据都会认为它属于新的一轮。
+
+
+**「已被 wait 记下」不是过期（2026-09-05，adviser 发现的 P0）**：同步审计链的等待走的就是
+`judge_wait`，而它自己也经引擎记录并**消费游标**。所以链回来时本轮 report 往往已经记完了 ——
+把这种情况当成过期，代价是每一次 goal/plan 审计都失败。而改这条链的会话跑的是启动时加载的
+旧扩展、自己测不出来，只能靠 `test/audit-round.test.ts` 的单测钉住。
+
+**怎么判断「已经记完了」：看记录留下的那对写入，不要再问一次 settle（2026-09-05，reviewer
+发现的第二个 P0）**。第一版判据是「二次 settle 返回 `already-consumed`」，它在生产里走不到 ——
+记录成功会先 `forgetPending`，而 pending 正是 `specForRound` 挑 kind 的依据，所以二次 settle
+返回的是 `unknown`，和「压根没派过审计」长得一模一样。现在的判据是 `roundClosedDuringWait`：
+**pending 已被消费**且**游标已从等待前的位置前进** —— 这两件事只有 `settleAuditRound` 记录
+成功时才会同时发生。两个条件缺一，就由本链自己 settle，仍然 fail-closed。
+
+配套的游标规则同样重要：`dispatchJudgeRound` 复用 pane 时**保留** `lastReportId`（重派不
+等于把旧 report 变新），`fresh:true` 开新 pane 时把游标**播种**到 channel 当前最新那条
+report（新 review 对象不该被上一个对象的结论终结）。原来的行为是把游标清空 —— 于是每次
+重派的等待都被上一轮的 report 瞬间命中，`BLOCKED` 过一次的 plan/goal 永远拿不到新裁决，
+编排层就此出工死锁。
 
 ## 六乙、任务书的最后一句话是门禁的
 
@@ -349,9 +695,14 @@ grillme/ask_user 把需求反述澄清，摸清每个子会话的 goal 才能起
 **硬指示**（`TASK_GOAL_DIRECTIVE`，2026-09-01）：
 
 > 本会话的退出条约是你自己的 loop goal。任务书只是 plan 的任务边界，不是你的 goal；
-> plan 批准 ≠ goal 批准。开始改代码前，你必须先用 `propose_loop_goal` 协商并获批
-> 你自己的 goal（goal-auditor 审计 + 用户批准）。未批准 goal 前，L8 edit gate 会拦下
-> 所有 edit/write。
+> plan 批准 ≠ goal 批准。顺序是两步，不能跳：**先**用 `propose_restatement` 把你对需求的
+> 理解反述给用户确认（上下文、例子、改之前 → 改之后、哪几步会变得不同，外加本轮交付站点
+> precommit / commit / pr），**再**用 `propose_loop_goal` 协商并获批你自己的 goal
+> （goal-auditor 审计 + 用户批准）。没有已确认的反述，`propose_loop_goal` 会直接被拒、
+> 一个框都不弹；未批准 goal 前，L8 edit gate 会拦下所有 edit/write。
+
+（这段引文与 `lib/orchestrator-delivery.ts` 的 `TASK_GOAL_DIRECTIVE` 是同一份文本的摘录，
+改那个常量时同轮改这里——两处说法不一致时，以常量为准。）
 
 **为什么是门禁追加而不是项目经理写**：2026-09-01 onchain 事故里，项目经理在
 brief 里写了一句「目标文本见 .pi/loop-goal.md（已批准）。开始工作。」，子会话——一个
@@ -414,12 +765,13 @@ pane 标题 —— 那就是回到读屏幕了。
 | --- | --- | --- |
 | `lib/orchestrator-channel.ts` | 通道路径、记录 schema、追加/读取/游标、spill、投影、心跳判定 | IO 经注入的 seam |
 | `lib/orchestrator-child-channel.ts` | 子会话侧：上报、两方竞态提问、读取与确认指令 | IO/对话框/计时器全注入 |
-| `lib/orchestrator-child-state.ts` | 七态判定（含 `waiting-judge`）、健康行、退避常量 | 纯函数 |
+| `lib/orchestrator-child-state.ts` | 状态判定与 `CHILD_STATES` 清单（八态，含 `waiting-judge` / `mode-changed`）、健康行、退避常量 | 纯函数 |
 | `lib/orchestrator-supervisor.ts` | 编排侧：读所有通道、判定、决定什么算新闻、渲染回执 1–3 块 | 纯（IO 经 seam） |
 | `lib/orchestrator-handoff-advice.ts` | 上下文用量 → 接力时机 | 纯函数 |
 | `lib/orchestrator-wait.ts` | 等待判据、预算、回执装配（含第 4、5 块） | 纯函数 |
-| `lib/orchestrator-answer-tools.ts` | `orchestrator_answer`（含约束 8 的代批边界） | 判定可单测 |
+| `lib/orchestrator-answer-tools.ts` | `orchestrator_answer`（含约束 8 的代批边界、代批必填的 `crosscheck` 对照与其词表、站点不得宽于 plan 的判定） | 判定可单测 |
 | `lib/orchestrator-recovery-tools.ts` | `orchestrator_recover` / `orchestrator_attach`、孤儿检测 | 孤儿判定是纯函数 |
+| `lib/orchestrator-takeover.ts` | 盘上候选编排 id 的发现、接管采用判定、接管/归档路由文案、归档载荷与确认框文案（§6.2 / §6.2b） | 纯函数 + 注入式读盘 |
 | `lib/orchestrator-tmux.ts` | 仅剩的 tmux 构造：开/关/列 pane + pane 装饰（不带 `-g`） | 纯函数 |
 
 协议级测试（不依赖真实 tmux、不依赖 pi 进程、不碰磁盘）：

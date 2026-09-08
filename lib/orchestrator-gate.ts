@@ -29,7 +29,7 @@
  * Pure module: no IO, no git, no tmux.
  */
 
-import { pathsOutsideBoundaries } from "./orchestrator-boundaries.ts";
+import { editedPathsOutsideBoundaries } from "./orchestrator-boundaries.ts";
 import {
   openDecisions,
   planHash,
@@ -182,13 +182,23 @@ export interface ProxyGoalVerdict {
  * every round rather than once at approval time — which is a STRONGER
  * guarantee than the old text scan, not a weaker one: it cannot be talked
  * around by rewording, and it does not stop watching after the approval.
+ *
+ * WHAT DOES NOT COUNT (2026-09-06 user decision 方案 C, wired 2026-09-17):
+ * a landing OUTSIDE the repository is a process artifact, not a deliverable —
+ * a completion report in `/tmp` cannot pollute the worktree, cannot enter a
+ * checkpoint and cannot reach a tracked file. It used to be reported as a
+ * violation for a purely mechanical reason (an absolute path can never be
+ * covered by a repo-relative declaration), and each false positive bought a
+ * manual approval. Out-of-repo SENSITIVE paths remain violations, so the
+ * exemption is for noise and not for secrets — see
+ * {@link editedPathsOutsideBoundaries}.
  */
 export function proxyApprovalProblems(
   editedFiles: readonly string[],
   task: PlanTask,
 ): ProxyGoalVerdict {
   const edited = editedFiles.map((f) => String(f ?? "").trim()).filter(Boolean);
-  const outside = pathsOutsideBoundaries(edited, task.fileBoundaries);
+  const outside = editedPathsOutsideBoundaries(edited, task.fileBoundaries);
   if (outside.length === 0) return { ok: true, outside: [] };
   return {
     ok: false,
@@ -198,7 +208,8 @@ export function proxyApprovalProblems(
       `${outside.slice(0, 8).join(", ")}${outside.length > 8 ? " 等" : ""}。任务边界是 ${task.fileBoundaries.join(", ")}。` +
       "这是范围变更，不是技术取舍：用 `orchestrator_notify` 通知用户，由他决定是扩边界还是让子会话回滚这些改动。" +
       "（判定依据是它 sidecar 里的实际落点 sessionEditedFiles，不是 goal 正文里出现过哪些路径 —— " +
-      "改写 goal 文本不会让这条通过。）",
+      "改写 goal 文本不会让这条通过。仓库外的流程产物如 /tmp 下的报告不算越界；" +
+      "仓库外的敏感路径如 ~/.ssh、~/.pi 下的文件仍然算。）",
   };
 }
 
@@ -228,6 +239,31 @@ export interface OrchestratorDoneFacts {
   runtime: OrchestratorRuntime;
   /** Pane ids that exist RIGHT NOW (observed, never assumed). */
   alivePaneIds: readonly string[];
+  /**
+   * Ids of the children whose CHANNEL says they finished — read from the very
+   * same supervision snapshot block 1 of the receipt is rendered from (B4).
+   *
+   * IT IS PASSED IN, and that is the whole fix. This block used to answer
+   * "who is finished" from a registry field nothing had written since the old
+   * probe was deleted, so one receipt could say "t8a：已完成" in block 1 and
+   * "还有 1 个子会话活着：t8a" in block 5 — measured, and the manager had to
+   * arbitrate between its own gate's two answers. There is one answer now
+   * because there is one reading.
+   *
+   * Absent means "nobody asked the channels", not "nobody finished".
+   */
+  reportedDone?: readonly string[];
+  /**
+   * tmux could not be read at all: `alivePaneIds` is UNKNOWN, not empty.
+   *
+   * F14, entered through a third door. The caller in the extension passed an
+   * empty array on a failed `list-panes`, and an empty array here means every
+   * registered child VANISHED — so a momentary tmux hiccup told the manager
+   * that all of its children had died. Unknown liveness claims no death and
+   * keeps every open child counted as alive: the conservative direction is to
+   * block the exit, never to invent a corpse.
+   */
+  livenessUnknown?: boolean;
 }
 
 /**
@@ -240,6 +276,13 @@ export interface OrchestratorDoneFacts {
  */
 export function orchestratorDoneProblems(facts: OrchestratorDoneFacts): string[] {
   const problems: string[] = [];
+  // THE ONE READING every block below shares (B4). Completion is a channel
+  // fact about a CHILD; the task it belongs to is looked up in the registry,
+  // so the plan line and the child line can never disagree about who finished.
+  const reportedDone = new Set(facts.reportedDone ?? []);
+  const finishedTaskIds = new Set(
+    facts.runtime.children.filter((c) => reportedDone.has(c.id)).map((c) => c.taskId),
+  );
 
   // Constraint 3 — the plan is the definition of "finished".
   if (!facts.plan) {
@@ -247,32 +290,65 @@ export function orchestratorDoneProblems(facts: OrchestratorDoneFacts): string[]
   } else {
     const open = unfinishedTasks(facts.plan);
     if (open.length > 0) {
+      // A task whose child ALREADY reported done is named as such, in the same
+      // words the health snapshot uses. The gate deliberately does NOT flip it
+      // to `done` itself (user decision, 2026-09-17): the manager's own
+      // re-verification is the contract, and auto-closing the task would hollow
+      // it out. So it says what is true and what is left to do.
       problems.push(
         `plan 还有 ${open.length} 个任务未完成：` +
-        open.map((t) => `${t.id}(${t.status})`).join(", ") +
+        open.map((t) => `${t.id}(${t.status}${finishedTaskIds.has(t.id) ? "，孩子已报完成，待你复验后 set-status" : ""})`).join(", ") +
         " —— 编排层的完成判据是整体任务，不是单个会话的 goal（约束 3）",
       );
     }
   }
 
   // Constraint 4 — a live child may still be working, or waiting on a dialog.
-  const live = liveChildren(facts.runtime, facts.alivePaneIds).filter((c) => !c.doneAt);
-  if (live.length > 0) {
+  //
+  // "Live" is about its PANE, and a child that reported done keeps blocking
+  // the exit exactly as before (user decision, 2026-09-17): the only thing
+  // that changed is that the receipt no longer contradicts itself about which
+  // of the two it is.
+  const live = facts.livenessUnknown
+    ? facts.runtime.children.filter((c) => !c.closedAt)
+    : liveChildren(facts.runtime, facts.alivePaneIds);
+  const stillWorking = live.filter((c) => !reportedDone.has(c.id));
+  const finished = live.filter((c) => reportedDone.has(c.id));
+  if (stillWorking.length > 0) {
     problems.push(
-      `还有 ${live.length} 个子会话活着：` +
-      live.map((c) => `${c.id}@${c.paneId}`).join(", ") +
+      `还有 ${stillWorking.length} 个子会话活着：` +
+      stillWorking.map((c) => `${c.id}@${c.paneId}`).join(", ") +
       " —— 先等它们结束（orchestrator_wait）或关掉（orchestrator_close），再退出（约束 4）",
     );
   }
-  // Not a blocker, but the orchestrator must be told: a pane that vanished on
-  // its own means a child died, and its task is almost certainly not done.
-  const vanished = vanishedChildren(facts.runtime, facts.alivePaneIds).filter((c) => !c.doneAt);
-  if (vanished.length > 0) {
+  if (finished.length > 0) {
     problems.push(
-      `有 ${vanished.length} 个子会话的 pane 已经消失但从未报告完成：` +
-      vanished.map((c) => `${c.id}(task=${c.taskId})`).join(", ") +
-      " —— 确认它们的任务状态，必要时把任务改回 pending 重开",
+      `有 ${finished.length} 个子会话已报完成、pane 还开着：` +
+      finished.map((c) => `${c.id}@${c.paneId}(task=${c.taskId})`).join(", ") +
+      " —— 孩子已报完成，待你复验后用 `orchestrator_plan({ action: \"set-status\", taskId, status: \"done\" })` 收尾，" +
+      "再 `orchestrator_close` 关掉它（门禁不替你标 done：独立复验是你的动作，不是它的）（约束 4）",
     );
+  }
+  if (facts.livenessUnknown) {
+    // Said out loud rather than silently assumed: the manager is reading a
+    // snapshot whose liveness column is missing, and it should know that
+    // before it decides anything about a child.
+    problems.push(
+      "读不到 tmux 的 pane 列表，子会话存活状态未知 —— 已按「都还活着」保守处理（F14：读不到不等于死了）。" +
+      "先确认 tmux 还在，再判断谁能收尾",
+    );
+  } else {
+    // Not a blocker, but the orchestrator must be told: a pane that vanished on
+    // its own means a child died, and its task is almost certainly not done.
+    const vanished = vanishedChildren(facts.runtime, facts.alivePaneIds)
+      .filter((c) => !reportedDone.has(c.id));
+    if (vanished.length > 0) {
+      problems.push(
+        `有 ${vanished.length} 个子会话的 pane 已经消失但从未报告完成：` +
+        vanished.map((c) => `${c.id}(task=${c.taskId})`).join(", ") +
+        " —— 确认它们的任务状态，必要时把任务改回 pending 重开",
+      );
+    }
   }
 
   // Constraint 11 — a question the user was never told about would vanish.
@@ -315,7 +391,12 @@ export function formatOrchestrationStatus(facts: OrchestratorDoneFacts): string 
     plan
       ? `任务 ${plan.tasks.filter((t) => t.status === "done").length}/${plan.tasks.length} 完成`
       : "尚无 plan",
-    `活着的子会话 ${live.filter((c) => !c.doneAt).length}`,
+    // Same reading as the exit check: a live pane is a live child, and the
+    // ones that reported done are counted separately rather than subtracted.
+    `活着的子会话 ${live.filter((c) => !(facts.reportedDone ?? []).includes(c.id)).length}` +
+      (live.some((c) => (facts.reportedDone ?? []).includes(c.id))
+        ? `（另有 ${live.filter((c) => (facts.reportedDone ?? []).includes(c.id)).length} 个已报完成、pane 未关）`
+        : ""),
     plan ? `待决策 ${openDecisions(plan).length}` : "",
   ].filter(Boolean);
   return parts.join(" · ");
