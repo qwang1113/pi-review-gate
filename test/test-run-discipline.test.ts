@@ -60,6 +60,14 @@ test("typecheck runs are recognised, targeted compiles are not", () => {
   assert.equal(looksLikeTypecheck("ls"), false);
 });
 
+test("$(find …) alone is NOT flagged — only a node --test $(find …) tree run (P2)", () => {
+  assert.equal(looksLikeFullSuiteRun("git log -- $(find test -name '*.ts')"), false,
+    "a read-only command substitution must not read as a full-suite run");
+  assert.equal(looksLikeFullSuiteRun("rg foo $(find lib -name '*.ts')"), false);
+  assert.equal(looksLikeFullSuiteRun("node --test $(find test -name '*.test.ts')"), true,
+    "the actual full-tree run still is");
+});
+
 test("looksLikeFullLaneRun is the union", () => {
   assert.equal(looksLikeFullLaneRun("npm test"), true);
   assert.equal(looksLikeFullLaneRun("npx tsc --noEmit"), true);

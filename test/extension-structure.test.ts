@@ -1421,7 +1421,8 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   const resultBody = SRC.slice(resultAt, resultEnd);
   assert.match(resultBody, /EDIT_FAILURE_NUDGE/);
   assert.match(resultBody, /editFailurePending = true/);
-  // 3. tool_result bash: same-turn write-looking command gets the nudge once.
+  // 3. tool_result bash: a write-looking command while the window is armed
+  //    (cross-turn since 2026-09-08) gets the nudge once.
   assert.match(resultBody, /BASH_WRITE_NUDGE/);
   assert.match(resultBody, /editFailurePending = false/);
   // Both nudge sites are skipped in normal mode (the step-aside must not
