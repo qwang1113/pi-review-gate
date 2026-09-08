@@ -575,3 +575,58 @@ export function strippedSessionEnvKeys(env) {
 export function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
+
+/**
+ * Load-adaptive node --test concurrency (2026-09-08, goal ③).
+ *
+ * WHY: several pi sessions running full precommits at once each spawn the
+ * test suite at full file-parallelism; the suites are process/IO-bound, so the
+ * peak process count (and with it the CPU fan) is what doubles, not the useful
+ * work. When the 1-minute load average is high, halving the per-run worker
+ * pool lets concurrent runs share the machine instead of oversubscribing it.
+ * The threshold is a fraction of the core count; an idle machine (the common
+ * case) is untouched, byte for byte.
+ *
+ * Returns the concurrency to use, or null when the load does not justify
+ * throttling.
+ */
+export function testConcurrencyForLoad(load1, cores, { factor = 0.7 } = {}) {
+  if (!Number.isFinite(load1) || !Number.isFinite(cores) || cores < 1) return null;
+  if (load1 < cores * factor) return null; // machine has headroom — no injection
+  return Math.max(1, Math.floor(cores / 2));
+}
+
+/**
+ * Inject --test-concurrency=N into a test step command when the load calls
+ * for it; otherwise return the command VERBATIM (the command is a cache key,
+ * so an idle run must not gain a single character).
+ *
+ * Shapes covered:
+ *   - a direct `node --test …` command (the fast lane's own construction) —
+ *     the flag is inserted right after `--test`;
+ *   - an npm-style `npm test` / `npm run test` script — ONLY when the caller
+ *     attests (`opts.npmOk`) that the script's body really runs node --test:
+ *     NPM appends everything after `--` to the script's command line, so a
+ *     non-node script would receive the flag as an argument of its own
+ *     command (measured: a `cat …` body broke). node accepts the flag after
+ *     the positional files.
+ * Any other shape is returned untouched: missing a throttle is harmless,
+ * mangling a command is not.
+ */
+export function throttleNodeTestCommand(command, load1, cores, { factor = 0.7, npmOk = false } = {}) {
+  const n = testConcurrencyForLoad(load1, cores, { factor });
+  if (n === null || typeof command !== "string") return command;
+  const flag = `--test-concurrency=${n}`;
+  if (/node --test(?![\w-])/.test(command)) {
+    // Inject only when `--test` is the LAST flag: a command that already
+    // carries its own flags (a user's --test-concurrency, say) is left alone
+    // rather than gaining a conflicting duplicate.
+    const after = command.slice(command.indexOf("node --test") + "node --test".length).trimStart();
+    if (after.startsWith("-")) return command;
+    return command.replace(/node --test(?![\w-])/, `node --test ${flag}`);
+  }
+  if (npmOk && /^(?:npm|bun|pnpm)(?: run)? test\b/.test(command)) {
+    return `${command} -- ${flag}`;
+  }
+  return command;
+}

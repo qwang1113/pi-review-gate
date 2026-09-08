@@ -12,7 +12,7 @@ import { spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ROOT, COMMIT_MSG, emptyHome, makeDir, makeGitRepo, writeState, runPreCommit, readyState, cleanupTempDirs } from "./helpers/hook-fixtures.ts";
+import { ROOT, INSTALL_HOOKS, COMMIT_MSG, emptyHome, makeDir, makeGitRepo, writeState, runPreCommit, readyState, cleanupTempDirs } from "./helpers/hook-fixtures.ts";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
 
 // Process-wide hermetic git (the shared fixtures neutralise too, but the
@@ -618,8 +618,6 @@ test("bypass env allows AI attribution through commit-msg", () => {
 // ---------------------------------------------------------------------------
 // install-git-hooks.sh: chained-original preservation across re-installs
 // ---------------------------------------------------------------------------
-
-const INSTALL_HOOKS = join(ROOT, "scripts", "install-git-hooks.sh");
 
 test("P1: re-install preserves a chained original hook (incl. a path with spaces)", () => {
   // Repo whose .git dir lives under a path containing a space — the old

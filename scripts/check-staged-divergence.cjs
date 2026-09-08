@@ -510,130 +510,165 @@ function divergentPaths(cwd) {
 // process for both decisions and the worktree is materialized once. Without
 // the flag the behaviour is unchanged, which keeps an older hook working
 // against a newer checker.
-const EMIT_FINGERPRINT = process.argv.includes("--emit-fingerprint");
+/**
+ * HookExit — thrown instead of process.exit() when runMain runs IN-PROCESS
+ * (required by scripts/pre-commit-check.cjs, 2026-09-08). The divergence
+ * chain is deliberately exit-driven; intercepting lets the caller read the
+ * verdict (and the fingerprint stdout) without killing the whole hook
+ * process. CLI runs keep native exit semantics.
+ */
+class HookExit extends Error {
+  constructor(code) {
+    super(`hook exit ${code}`);
+    this.code = code;
+  }
+}
+
+// Module-level on purpose: commitIndexPath() (above) reads it, and runMain
+// fills it once per invocation for every later reader to share.
+const COMMIT_INDEX = { repo: "", path: "" };
 
 /**
- * Exit, first printing the fingerprint when the hook asked for it.
- *
- * The digest REUSES the tree materialized for the divergence comparison
- * (worktreeTree caches per repo path), so one hook invocation runs the
- * shadow-index pass — and therefore any repository `clean` filter — exactly
- * once. Emitting an UNAVAILABLE result rather than nothing keeps the hook's
- * contract total: it always gets parseable JSON and fails closed on
- * `unavailable`.
+ * CLI entry — wrapped (2026-09-08) so the git hook runs every check in ONE
+ * node process. `argv` is the full process argv ([node, script, cwd, …]); the
+ * behaviour is byte-identical to running this file as a script, and the
+ * standalone CLI path (`require.main`) is unchanged.
  */
-function finish(code) {
-  if (EMIT_FINGERPRINT) {
-    // May run BEFORE the toplevel is resolved (the non-repo / bare-repo
-    // skips), so fall back to the requested path rather than touching `cwd`
-    // in its temporal dead zone. compute() fails closed on its own for a
-    // directory it cannot fingerprint.
-    const target = repoTop || argCwd;
-    let result;
-    try {
-      // Hand over the MEMOIZED resolver, not one tree: the fingerprint
-      // recurses into submodules, and each of those must reuse whatever the
-      // divergence comparison already materialized for that same repository.
-      result = sharedCompute(target, repoTop ? { treeOidForCwd: worktreeTree } : undefined);
-    } catch {
-      result = sharedCompute(target); // materialize independently rather than guess
+function runMain(argv = process.argv, interceptExit = false) {
+  const EMIT_FINGERPRINT = argv.includes("--emit-fingerprint");
+  const realExit = process.exit;
+  if (interceptExit) process.exit = (code) => { throw new HookExit(code === undefined ? 0 : code); };
+  try {
+    /**
+     * Exit, first printing the fingerprint when the hook asked for it.
+     *
+     * The digest REUSES the tree materialized for the divergence comparison
+     * (worktreeTree caches per repo path), so one hook invocation runs the
+     * shadow-index pass — and therefore any repository `clean` filter — exactly
+     * once. Emitting an UNAVAILABLE result rather than nothing keeps the hook's
+     * contract total: it always gets parseable JSON and fails closed on
+     * `unavailable`.
+     */
+    function finish(code) {
+      if (EMIT_FINGERPRINT) {
+        // May run BEFORE the toplevel is resolved (the non-repo / bare-repo
+        // skips), so fall back to the requested path rather than touching `cwd`
+        // in its temporal dead zone. compute() fails closed on its own for a
+        // directory it cannot fingerprint.
+        const target = repoTop || argCwd;
+        let result;
+        try {
+          // Hand over the MEMOIZED resolver, not one tree: the fingerprint
+          // recurses into submodules, and each of those must reuse whatever the
+          // divergence comparison already materialized for that same repository.
+          result = sharedCompute(target, repoTop ? { treeOidForCwd: worktreeTree } : undefined);
+        } catch {
+          result = sharedCompute(target); // materialize independently rather than guess
+        }
+        console.log(JSON.stringify(result));
+      }
+      process.exit(code);
     }
-    console.log(JSON.stringify(result));
+
+    /** Repository toplevel once resolved; "" until then (see finish()). */
+    let repoTop = "";
+
+    const positional = argv.slice(2).filter((a) => !a.startsWith("--"));
+    const argCwd = positional[0] || process.cwd();
+
+    // "Not a git repository" is not a check FAILURE — there is simply nothing to
+    // check, and no commit can ship from here either. Anything else that goes
+    // wrong is a real failure and must fail closed. (This is the one narrow
+    // exception; an earlier version swallowed ALL git errors, which a bad
+    // `status.showUntrackedFiles` config turned into a reproducible fail-open.)
+    const inside = gitProbe(argCwd, ["rev-parse", "--is-inside-work-tree"]);
+    if (!inside.ok) {
+      // git could not answer. Decide the ONE narrow skip STRUCTURALLY, never from
+      // the wording of an error message:
+      //
+      //   - Matching stderr against "not a git repository" is wrong in both
+      //     directions. git emits that same phrase for a BROKEN worktree — a
+      //     `.git` gitfile whose target gitdir is gone prints
+      //     "fatal: not a git repository: /missing/path" — which would be treated
+      //     as "nothing to check" (fail-open) even though a commit could still be
+      //     attempted there. And under a localized git the phrase does not match
+      //     at all, so an ordinary non-repo directory would be blocked instead.
+      //
+      // So: only a path that exists AND carries no git metadata anywhere up the
+      // tree is a verified "outside any repository". Everything else — a missing
+      // path, a `.git` we can see but git cannot use, a bare-repo-shaped directory
+      // — is an inspection FAILURE and fails closed.
+      if (existsSync(argCwd) && !hasGitMetadata(argCwd)) finish(0);
+      console.error("[review-gate] staged-divergence check could not inspect the repository:");
+      console.error(inside.stderr.trim() || "[review-gate] (git produced no diagnostics)");
+      console.error("[review-gate] Failing closed — cannot verify that the staged content matches the reviewed worktree.");
+      process.exit(1);
+    }
+    // A bare repo answers "false": no worktree exists, so there is no
+    // staged-vs-reviewed-worktree comparison to make and nothing can be committed
+    // from here. That is a genuine, verified skip.
+    if (inside.out !== "true") finish(0);
+
+    // Run EVERYTHING from the repository toplevel.
+    //
+    // Several git commands used below are implicitly cwd-scoped, and each one of
+    // them was a silent fail-open when this script was pointed at a subdirectory:
+    // `ls-tree` limits its listing to the cwd prefix (empty listing ⇒ "no
+    // divergence" ⇒ exit 0), `ls-files` returns cwd-relative paths, and the
+    // `update-index` calls built from them then failed outright. Normalizing once,
+    // here, removes the whole class instead of relying on every future call site
+    // remembering a --full-tree / --full-name flag (they are kept as well, as
+    // defence in depth). Failure to resolve the toplevel is fatal: it means git
+    // could not answer a question it just answered, so fail closed.
+    const cwd = gitOrNull(argCwd, ["rev-parse", "--show-toplevel"]);
+    if (cwd === null) {
+      console.error("[review-gate] cannot resolve repository toplevel — failing closed.");
+      process.exit(1);
+    }
+    repoTop = cwd;
+
+    // argv[3] is the index git told the HOOK this commit will publish (the hook
+    // forwards "${GIT_INDEX_FILE-}"). Empty/absent ⇒ the plain index. Resolved and
+    // ownership-checked once, here, so every later reader shares one verified
+    // value. An invalid path fails closed rather than silently falling back.
+    try {
+      COMMIT_INDEX.path = commitIndexPath(cwd, positional[1] || "");
+      COMMIT_INDEX.repo = resolve(cwd);
+    } catch (err) {
+      console.error(`[review-gate] staged-divergence check failed: ${err && err.message ? err.message : err}`);
+      console.error("[review-gate] Failing closed — cannot verify that the staged content matches the reviewed worktree.");
+      process.exit(1);
+    }
+
+    let paths;
+    try {
+      paths = divergentPaths(cwd);
+    } catch (err) {
+      // Fail CLOSED. An installed safety check that cannot do its job must not
+      // report success.
+      console.error(`[review-gate] staged-divergence check failed: ${err && err.message ? err.message : err}`);
+      console.error("[review-gate] Failing closed — cannot verify that the staged content matches the reviewed worktree.");
+      process.exit(1);
+    }
+
+    if (paths.length > 0) {
+      console.error("[review-gate] commit blocked: these paths are staged with content that differs from the reviewed worktree:");
+      for (const p of paths) console.error(`  - ${p}`);
+      console.error("[review-gate] The commit would ship the STAGED version, not the version the gate reviewed.");
+      console.error("[review-gate] Fix by making the index match the reviewed worktree:");
+      console.error("[review-gate]   git add -- <path>              # stage the reviewed content (keeps the review valid)");
+      console.error("[review-gate]   git restore --staged -- <path> # unstage, keep the reviewed worktree");
+      console.error("[review-gate]   git restore -- <path>          # DISCARDS the reviewed worktree copy;");
+      console.error("[review-gate]                                  # the fingerprint then changes, so re-run review + precommit");
+      process.exit(1);
+    }
+    finish(0);
+  } finally {
+    if (interceptExit) process.exit = realExit;
   }
-  process.exit(code);
 }
 
-/** Repository toplevel once resolved; "" until then (see finish()). */
-let repoTop = "";
-
-const positional = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-const argCwd = positional[0] || process.cwd();
-
-// "Not a git repository" is not a check FAILURE — there is simply nothing to
-// check, and no commit can ship from here either. Anything else that goes
-// wrong is a real failure and must fail closed. (This is the one narrow
-// exception; an earlier version swallowed ALL git errors, which a bad
-// `status.showUntrackedFiles` config turned into a reproducible fail-open.)
-const inside = gitProbe(argCwd, ["rev-parse", "--is-inside-work-tree"]);
-if (!inside.ok) {
-  // git could not answer. Decide the ONE narrow skip STRUCTURALLY, never from
-  // the wording of an error message:
-  //
-  //   - Matching stderr against "not a git repository" is wrong in both
-  //     directions. git emits that same phrase for a BROKEN worktree — a
-  //     `.git` gitfile whose target gitdir is gone prints
-  //     "fatal: not a git repository: /missing/path" — which would be treated
-  //     as "nothing to check" (fail-open) even though a commit could still be
-  //     attempted there. And under a localized git the phrase does not match
-  //     at all, so an ordinary non-repo directory would be blocked instead.
-  //
-  // So: only a path that exists AND carries no git metadata anywhere up the
-  // tree is a verified "outside any repository". Everything else — a missing
-  // path, a `.git` we can see but git cannot use, a bare-repo-shaped directory
-  // — is an inspection FAILURE and fails closed.
-  if (existsSync(argCwd) && !hasGitMetadata(argCwd)) finish(0);
-  console.error("[review-gate] staged-divergence check could not inspect the repository:");
-  console.error(inside.stderr.trim() || "[review-gate] (git produced no diagnostics)");
-  console.error("[review-gate] Failing closed — cannot verify that the staged content matches the reviewed worktree.");
-  process.exit(1);
-}
-// A bare repo answers "false": no worktree exists, so there is no
-// staged-vs-reviewed-worktree comparison to make and nothing can be committed
-// from here. That is a genuine, verified skip.
-if (inside.out !== "true") finish(0);
-
-// Run EVERYTHING from the repository toplevel.
-//
-// Several git commands used below are implicitly cwd-scoped, and each one of
-// them was a silent fail-open when this script was pointed at a subdirectory:
-// `ls-tree` limits its listing to the cwd prefix (empty listing ⇒ "no
-// divergence" ⇒ exit 0), `ls-files` returns cwd-relative paths, and the
-// `update-index` calls built from them then failed outright. Normalizing once,
-// here, removes the whole class instead of relying on every future call site
-// remembering a --full-tree / --full-name flag (they are kept as well, as
-// defence in depth). Failure to resolve the toplevel is fatal: it means git
-// could not answer a question it just answered, so fail closed.
-const cwd = gitOrNull(argCwd, ["rev-parse", "--show-toplevel"]);
-if (cwd === null) {
-  console.error("[review-gate] cannot resolve repository toplevel — failing closed.");
-  process.exit(1);
-}
-repoTop = cwd;
-
-// argv[3] is the index git told the HOOK this commit will publish (the hook
-// forwards "${GIT_INDEX_FILE-}"). Empty/absent ⇒ the plain index. Resolved and
-// ownership-checked once, here, so every later reader shares one verified
-// value. An invalid path fails closed rather than silently falling back.
-const COMMIT_INDEX = { repo: "", path: "" };
-try {
-  COMMIT_INDEX.path = commitIndexPath(cwd, positional[1] || "");
-  COMMIT_INDEX.repo = resolve(cwd);
-} catch (err) {
-  console.error(`[review-gate] staged-divergence check failed: ${err && err.message ? err.message : err}`);
-  console.error("[review-gate] Failing closed — cannot verify that the staged content matches the reviewed worktree.");
-  process.exit(1);
-}
-
-let paths;
-try {
-  paths = divergentPaths(cwd);
-} catch (err) {
-  // Fail CLOSED. An installed safety check that cannot do its job must not
-  // report success.
-  console.error(`[review-gate] staged-divergence check failed: ${err && err.message ? err.message : err}`);
-  console.error("[review-gate] Failing closed — cannot verify that the staged content matches the reviewed worktree.");
-  process.exit(1);
-}
-
-if (paths.length > 0) {
-  console.error("[review-gate] commit blocked: these paths are staged with content that differs from the reviewed worktree:");
-  for (const p of paths) console.error(`  - ${p}`);
-  console.error("[review-gate] The commit would ship the STAGED version, not the version the gate reviewed.");
-  console.error("[review-gate] Fix by making the index match the reviewed worktree:");
-  console.error("[review-gate]   git add -- <path>              # stage the reviewed content (keeps the review valid)");
-  console.error("[review-gate]   git restore --staged -- <path> # unstage, keep the reviewed worktree");
-  console.error("[review-gate]   git restore -- <path>          # DISCARDS the reviewed worktree copy;");
-  console.error("[review-gate]                                  # the fingerprint then changes, so re-run review + precommit");
-  process.exit(1);
-}
-finish(0);
+// Run as a script (the pre-commit hook path) — or required in-process by
+// scripts/pre-commit-check.cjs (2026-09-08: one node startup per commit).
+if (require.main === module) runMain();
+module.exports = { runMain, HookExit };

@@ -4,7 +4,6 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { createRequire } from "node:module";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
 
 // These stat-cache race regressions each carry a long timing loop and were
@@ -15,7 +14,6 @@ import { neutraliseHostGitConfig } from "./helpers/git.ts";
 
 neutraliseHostGitConfig();
 
-const requireCjs = createRequire(import.meta.url);
 const {
   computeFingerprint,
 } = await import(
@@ -69,6 +67,19 @@ after(() => { for (const d of tempDirs) rmSync(d, { recursive: true, force: true
  * `--renormalize` re-reads content unconditionally, which makes the backdate a
  * deliberate redundant second line of defence.
  */
+
+// NOTE ON A REJECTED TEST (kept as a warning, not as code).
+//
+// An attempt to replace the probabilistic loop below with a "deterministic"
+// version — rewrite the file with same-size content, then restore the cached
+// atime/mtime so the stat cache would consider it clean — does NOT work and
+// was removed after an independent review challenged it. Measured on macOS/
+// APFS: even with `core.checkStat=minimal` and `core.trustctime=false`, a
+// plain `git add` with NO safeguards still sees such an edit, because ctime
+// (which user space cannot forge) and sub-second mtime precision both move.
+// The test therefore passed with every safeguard removed — it asserted
+// nothing. Any future "deterministic race test" must first be shown to FAIL
+// against a mutated implementation.
 
 // P0 RACE REGRESSION (git "racily clean").
 // The shadow index is seeded from the real index for speed. copyFileSync

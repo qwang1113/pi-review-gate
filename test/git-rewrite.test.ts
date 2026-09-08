@@ -70,14 +70,16 @@ test("a rebase started from a raw sha names no branch", () => {
 // ---- the same rule at the hook layer --------------------------------------
 
 test("the pre-commit hook applies the same no-content exemption", () => {
-  const hook = readFileSync(join(ROOT, "hooks", "pre-commit"), "utf8");
-  assert.match(hook, /rev-parse", "HEAD\^\{tree\}"/, "the hook reads the replaced tree");
-  assert.match(hook, /headTree === currentFp && !staged\) process\.exit\(0\)/,
+  // The verdict chain lives in scripts/pre-commit-check.cjs since the
+  // single-process refactor (2026-09-08); hooks/pre-commit is a thin shell.
+  const checker = readFileSync(join(ROOT, "scripts", "pre-commit-check.cjs"), "utf8");
+  assert.match(checker, /rev-parse", "HEAD\^\{tree\}"/, "the hook reads the replaced tree");
+  assert.match(checker, /headTree && headTree === currentFp && !staged\) process\.exit\(0\)/,
     "an identical tree AND an empty index skip the content gates");
-  assert.match(hook, /"diff", "--cached", "--quiet", "HEAD"/,
+  assert.match(checker, /"diff", "--cached", "--quiet", "HEAD"/,
     "the index — what the commit publishes — is measured too");
-  const exemptionAt = hook.indexOf("headTree === currentFp");
-  const gatesAt = hook.indexOf("if (state.hasCodeChange) {");
+  const exemptionAt = checker.indexOf("headTree === currentFp");
+  const gatesAt = checker.indexOf("if (state.hasCodeChange) {");
   assert.ok(exemptionAt > 0 && gatesAt > exemptionAt,
     "the exemption must be decided BEFORE the content gates run");
 });

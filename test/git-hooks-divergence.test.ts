@@ -462,7 +462,7 @@ function installHookTree(omit: string[]): string {
   mkdirSync(join(root, "scripts"), { recursive: true });
   writeFileSync(join(root, "hooks", "pre-commit"), readFileSync(PRE_COMMIT, "utf8"));
   chmodSync(join(root, "hooks", "pre-commit"), 0o755);
-  for (const script of ["compute-fingerprint.cjs", "scan-test-labels.cjs", "check-staged-divergence.cjs"]) {
+  for (const script of ["pre-commit-check.cjs", "compute-fingerprint.cjs", "scan-test-labels.cjs", "check-staged-divergence.cjs"]) {
     if (omit.includes(script)) continue;
     writeFileSync(join(root, "scripts", script), readFileSync(join(ROOT, "scripts", script), "utf8"));
   }

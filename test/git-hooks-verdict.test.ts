@@ -189,12 +189,12 @@ test("a BLOCKED run exits nonzero BEFORE emitting a fingerprint", () => {
   assert.equal(res.stdout.trim(), "", "no fingerprint may be emitted once the commit is blocked");
 });
 
-test("the hook asks the checker for the fingerprint, with a fallback for mixed installs", () => {
-  const hook = readFileSync(PRE_COMMIT, "utf8");
-  assert.match(hook, /FP_JSON=\$\(node "\$DIVERGENCE_SCRIPT"[^\n]*--emit-fingerprint\)/,
-    "the hook must get both answers from one process");
-  assert.match(hook, /if \[\[ -z "\$FP_JSON" \]\]; then/,
-    "an older checker that prints nothing must not brick the commit");
+test("the checker asks the divergence run for the fingerprint, with a fallback for mixed installs", () => {
+  const checker = readFileSync(join(ROOT, "scripts", "pre-commit-check.cjs"), "utf8");
+  assert.match(checker, /--emit-fingerprint/,
+    "the checker must get divergence AND fingerprint from one in-process run");
+  assert.match(checker, /MIXED install/,
+    "an older checker that prints nothing must not brick the commit (fallback path)");
 });
 
 test("a sparse-checkout (skip-worktree) repo can now be fingerprinted at all", () => {

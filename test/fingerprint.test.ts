@@ -107,18 +107,9 @@ test("committing already-reviewed content does NOT change the fingerprint", () =
   assert.notEqual(beforeCommit.head, afterCommit.head, "HEAD did move (digest just must not depend on it)");
 });
 
-// NOTE ON A REJECTED TEST (kept as a warning, not as code).
-//
-// An attempt to replace the probabilistic loop below with a "deterministic"
-// version — rewrite the file with same-size content, then restore the cached
-// atime/mtime so the stat cache would consider it clean — does NOT work and
-// was removed after an independent review challenged it. Measured on macOS/
-// APFS: even with `core.checkStat=minimal` and `core.trustctime=false`, a
-// plain `git add` with NO safeguards still sees such an edit, because ctime
-// (which user space cannot forge) and sub-second mtime precision both move.
-// The test therefore passed with every safeguard removed — it asserted
-// nothing. Any future "deterministic race test" must first be shown to FAIL
-// against a mutated implementation.
+// NOTE ON A REJECTED TEST (kept as a warning, not as code) — moved with the
+// race loops to test/fingerprint-race.test.ts, which is where the loops it
+// warns about now live.
 
 // SUBMODULES (found by independent review): a parent tree stores only each
 // submodule's committed gitlink, so edits INSIDE a checked-out submodule leave

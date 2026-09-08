@@ -172,10 +172,15 @@ test("without the forwarded index those safe commits WOULD be blocked (guards th
     "if this ever passes, the forwarded-index argument has stopped being load-bearing");
 });
 
-test("the shipped pre-commit hook forwards GIT_INDEX_FILE to the divergence checker", () => {
+test("the shipped hook runs the whole chain in ONE node process (pre-commit-check.cjs)", () => {
   const hook = readFileSync(PRE_COMMIT, "utf8");
-  assert.match(hook, /node "\$DIVERGENCE_SCRIPT"[^\n]*"\$\{GIT_INDEX_FILE-\}"/,
-    "the hook must pass git's commit index explicitly (never via the environment)");
+  assert.match(hook, /node "\$CHECK_SCRIPT" "\$STATE_FILE"/,
+    "the shell must exec the single checker process with the sidecar path");
+  // The GIT_INDEX_FILE forwarding (commit -a / commit -- <path> semantics)
+  // lives in the checker now — assert it reaches the divergence argv there.
+  const checker = readFileSync(join(ROOT, "scripts", "pre-commit-check.cjs"), "utf8");
+  assert.match(checker, /GIT_INDEX_FILE.*--emit-fingerprint/s,
+    "the checker must forward git's commit index to the divergence run");
 });
 
 test("an index file OUTSIDE the repository is refused (ambient redirection stays impossible)", () => {

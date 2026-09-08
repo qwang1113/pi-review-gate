@@ -555,13 +555,17 @@ function scanFile(path, src) {
 }
 
 // ---- staged I/O --------------------------------------------------------------
-function gitShowStaged(path) {
+// The repo is threaded as a parameter (2026-09-08) so scripts/pre-commit-check.cjs
+// can run the scan in-process against the repository the HOOK was invoked in,
+// not the one this file was launched from. The CLI default (argv[2] or cwd) is
+// unchanged.
+function gitShowStaged(path, repo) {
   return execFileSync("git", ["show", `:0:${path}`], {
-    cwd: REPO, encoding: "utf8", timeout: 10_000,
+    cwd: repo, encoding: "utf8", timeout: 10_000,
     maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"],
   });
 }
-function stagedTestFiles() {
+function stagedTestFiles(repo) {
   // `-z` gives NUL-separated, UNQUOTED paths (default output C-quotes non-ASCII
   // paths like `中文.test.ts`, which would then fail isTestFile()); belt-and-
   // braces `core.quotepath=false` too. `--diff-filter=ACMRT` includes RENAMES so
@@ -572,7 +576,7 @@ function stagedTestFiles() {
   const out = execFileSync(
     "git",
     ["-c", "core.quotepath=false", "diff", "--cached", "--name-only", "--diff-filter=ACMRT", "-z"],
-    { cwd: REPO, encoding: "utf8", timeout: 10_000, maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: repo, encoding: "utf8", timeout: 10_000, maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
   );
   // Split on NUL and drop only the trailing empty field. Do NOT trim: a path
   // may legitimately start/end with whitespace, and altering it would break the
@@ -580,10 +584,15 @@ function stagedTestFiles() {
   return out.split("\0").filter(Boolean).filter(isTestFile);
 }
 
-function main() {
+/** Hook-facing entry. `repo` defaults to the CLI's (argv[2] or cwd); the
+ *  in-process caller (scripts/pre-commit-check.cjs) passes the repository the
+ *  hook runs in. Exit semantics are the CLI's: 0 = clean or nothing staged,
+ *  1 = non-English label(s) found. process.exit is used on purpose — the
+ *  in-process caller installs an exit interceptor around the call. */
+function main(repo = REPO) {
   let files;
   try {
-    files = stagedTestFiles();
+    files = stagedTestFiles(repo);
   } catch {
     // Cannot enumerate staged files (not a git repo / git broken). This is an
     // ADDITIVE content gate; overall git health is owned by the main fingerprint
@@ -597,7 +606,7 @@ function main() {
   for (const f of files) {
     let src;
     try {
-      src = gitShowStaged(f);
+      src = gitShowStaged(f, repo);
     } catch {
       console.error(`[review-gate] cannot read staged content of ${f} — failing closed.`);
       process.exit(1);
@@ -619,8 +628,8 @@ function main() {
   process.exit(1);
 }
 
-// Run as a script (the pre-commit hook path); requiring as a module only
-// exposes the analysis functions — zero behavior change for the hook.
+// Run as a script (the pre-commit hook path); requiring as a module exposes
+// the analysis functions AND the entry — zero behavior change for the hook.
 if (require.main === module) main();
 
-module.exports = { scanFile, analyzeFile, isTestFile, isNonEnglishText, testImportAliases };
+module.exports = { scanFile, analyzeFile, isTestFile, isNonEnglishText, testImportAliases, main };
