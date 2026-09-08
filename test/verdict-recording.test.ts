@@ -108,10 +108,10 @@ function makeMockPi(cwd: string) {
     commands,
     ctx: {
       hasUI: true,
-      // `confirm` answers yes: the ONE dialog this fixture opens is the
+      // `select` picks the first row: the ONE dialog this fixture opens is the
       // user-authorized `/gate-bypass`, standing in for a precommit lane the
       // fixture repo has no checks to run.
-      ui: { notify: () => {}, setStatus: () => {}, confirm: async () => true },
+      ui: { notify: () => {}, setStatus: () => {}, select: async (_t: string, options: string[]) => options[0] },
       sessionManager: { getEntries: () => [], getSessionId: () => "rec-session-1" },
       isIdle: () => false,
       get cwd() { return cwd; },

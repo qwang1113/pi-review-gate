@@ -341,8 +341,17 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     savePlan: (next) => { plan = next; },
     tmux: (argv) => runFakeTmux(argv),
     ownPane: () => env.TMUX_PANE,
-    confirm: async () => confirmAnswers.shift() ?? false,
-    select: async () => options.selectAnswers?.shift() ?? undefined,
+    // ONE dialog stub for the whole template (2026-09-08): every approval and
+    // consent dialog is an askChoice now, so a test says which ROW it wants.
+    // `confirmAnswers` keeps its old meaning (true ⇒ the first option); the
+    // sensitive-edit grant door is recognized by its own row text and consumes
+    // `selectAnswers` as before.
+    askChoice: async (spec) => {
+      if (spec.options.some((option) => option.includes("允许并记住"))) {
+        return options.selectAnswers?.shift();
+      }
+      return (confirmAnswers.shift() ?? false) ? spec.options[0] : undefined;
+    },
     showToUser: (title, text) => { shown.push(`${title}\n${text}`); },
     writeTaskFile: (name, content, repoRoot) => {
       const path = `${repoRoot ?? "/repo"}/.pi/tasks/${name}`;

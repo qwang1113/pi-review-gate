@@ -44,6 +44,7 @@ import {
 } from "./delivery-station.ts";
 
 import { appendRecord } from "./orchestrator-channel.ts";
+import { looksLikeDeclineRow, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import { addGrant, findChild, hasGrant, type ChildSession } from "./orchestrator-registry.ts";
 import { proxyApprovalProblems } from "./orchestrator-gate.ts";
 import { superviseChildren, type PendingRequest } from "./orchestrator-supervisor.ts";
@@ -66,6 +67,12 @@ export function resolveAnswer(
   if (request.options.length === 0) return { ok: true, answer: text };
   const exact = request.options.find((option) => option === text);
   if (exact !== undefined) return { ok: true, answer: exact };
+  // THE TEMPLATE'S DECLINE ROW (2026-09-08): the user (or the PM) picks
+  // `✎ 不选，我说明原因` and the reason follows the row after a colon. That
+  // whole line is a legitimate answer — the reason is the point — so it is
+  // accepted verbatim rather than rejected as an unknown option.
+  const decline = request.options.find(looksLikeDeclineRow);
+  if (decline !== undefined && text.startsWith(decline)) return { ok: true, answer: text };
   if (/^\d+$/.test(text)) {
     const index = Number(text) - 1;
     const picked = request.options[index];
@@ -236,7 +243,9 @@ export function checkProxyCrosscheck(raw: unknown, taskId: string): CrosscheckVe
  * neither approve row contains any of these.
  */
 export function isDecliningProxyAnswer(answer: string): boolean {
-  return /拒绝|不批准|不认可|取消|退回|偏差|no|reject|deny/i.test(answer);
+  // `不选` is the template's decline row (2026-09-08): picking it IS a
+  // rejection, whatever the reason text after it happens to say.
+  return /拒绝|不批准|不认可|不选|取消|退回|偏差|no|reject|deny/i.test(answer);
 }
 
 /** The two topics a project manager may only answer WITH a comparison. */
@@ -474,7 +483,7 @@ async function answerOneRequest(
   // blocked answer. Declining (refusing the edit) needs no grant: it
   // changes nothing about the worktree.
   if (request.topic === "sensitive-edit") {
-    const declining = /拒绝|取消|no|reject|deny/i.test(resolved.answer)
+    const declining = /拒绝|取消|不选|no|reject|deny/i.test(resolved.answer)
       && !/同意|允许|授权|yes|allow|grant/i.test(resolved.answer);
     if (!declining && !hasGrant(deps.runtime(), "sensitive-edit")) {
       // GRANT DOOR 3/3: the user decides in the PM's own pane.
@@ -482,13 +491,15 @@ async function answerOneRequest(
         `子会话 ${childId} 请求敏感编辑，项目经理想代答：`,
         `${request.title}\n\n项目经理的答案：${resolved.answer}`,
       );
-      const picked = await deps.select(
-        "授予项目经理『敏感编辑代答权』？",
-        ["允许并记住（本 orchestration 内都代答）", "仅允许这一次", "拒绝"],
-      );
-      if (picked === "允许并记住（本 orchestration 内都代答）") {
+      const grantSpec: ChoiceSpec = {
+        title: "授予项目经理『敏感编辑代答权』？",
+        options: ["允许并记住（本 orchestration 内都代答）", "仅允许这一次", "拒绝"],
+        recommended: "拒绝",
+      };
+      const picked = parseChoice(await deps.askChoice(grantSpec), grantSpec);
+      if (picked.kind === "chose" && picked.option === grantSpec.options[0]) {
         deps.saveRuntime(addGrant(deps.runtime(), { scope: "sensitive-edit", grantedAt: new Date(deps.now()).toISOString(), via: "first-answer" }));
-      } else if (picked === "仅允许这一次") {
+      } else if (picked.kind === "chose" && picked.option === "仅允许这一次") {
         // fall through — this answer passes once, no grant recorded
       } else {
         return {

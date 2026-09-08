@@ -151,7 +151,7 @@ export const GATE_ANOMALY_PROTOCOL =
 export const REQUIREMENT_PROTOCOL =
   "## 采纳需求前（澄清 → 反述 → 确认）\n" +
   "1. 先理解，别直接开干：找出范围、边界、交付方式、没说清的术语里的疑点。\n" +
-  "2. 有疑点就用 `ask_user` 问清（带选项和你的推荐）——不要靠猜，问几轮都行。\n" +
+  "2. 有疑点就用 `ask_user` 问清 —— 每题必须 2–4 个选项 + 一个 recommended（门禁会自动追加「✎ 不选，我说明原因」那一行）；不要靠猜，问几轮都行。\n" +
   "3. **反述是强制的一步，且有工具**：`propose_restatement({ restatement, station })` " +
   "把上下文、例子、改之前 → 改之后、哪几步会变得不同交给用户确认，" +
   "同时定下本轮交付到哪一站（precommit / commit / pr）。\n" +

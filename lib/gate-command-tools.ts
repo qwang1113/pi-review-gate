@@ -47,6 +47,7 @@ import { formatPrecommitSummary, lastPrecommitTiming } from "./gate-timings.ts";
 import { isEnforcedMode, normalizeTaskMode, type TaskMode } from "./task-mode.ts";
 import { ORCHESTRATOR_NEEDS_TMUX } from "./orchestrator-directives.ts";
 import { GRANTABLE_SCOPES } from "./ask-user.ts";
+import { parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ProjectConfig } from "./project-config.ts";
 import {
   WORKFLOW_COMMANDS,
@@ -134,8 +135,8 @@ export interface GateCommandDeps extends GateDiagnosisDeps {
   /** Mint a proxy grant for `scope` — /gate-grant's door (2026-09-16). */
   grantProxyScope(scope: string, via: "ask-user" | "gate-grant" | "first-answer"): void;
   loopGoalPresent(): boolean;
-  /** `ui.confirm` with the dialog-height budget applied (never bypassed). */
-  confirmBounded(uiCtx: unknown, title: string, message: string): Promise<boolean>;
+  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  askChoice(uiCtx: unknown, spec: ChoiceSpec, opts?: { body?: string; pointer?: string; signal?: AbortSignal }): Promise<string | undefined>;
   /** Arm or disarm auto-continuation. */
   setLoopArmed(armed: boolean): void;
   /** Record a task-mode decision (source "user" — an explicit human choice). */
@@ -298,13 +299,24 @@ function registerGateBypass(host: CommandHost, deps: GateCommandDeps): void {
     handler: async (args, ctx) => {
       const reason = (args ?? "").trim();
       if (!reason) { ctx.ui.notify("Usage: /gate-bypass <reason>", "error"); return; }
-      const ok = ctx.hasUI
-        ? await deps.confirmBounded(
-            ctx,
-            "Bypass review gate?",
-            `Reason: ${reason}\nDisables ship blocking until /gate-reset.`,
-          )
-        : true;
+      // Same template as every other dialog (2026-09-08). Without a UI these
+      // two USER-typed commands stay as they were: they take effect directly
+      // (they are the human's own escape hatch, not an agent request).
+      const spec: ChoiceSpec = {
+        title: "Bypass review gate?",
+        options: ["确认 bypass", "取消"],
+        recommended: "取消",
+      };
+      let ok = false;
+      if (ctx.hasUI) {
+        const pick = parseChoice(
+          await deps.askChoice(ctx, spec, { body: `Reason: ${reason}\nDisables ship blocking until /gate-reset.` }),
+          spec,
+        );
+        ok = pick.kind === "chose" && pick.option === "确认 bypass";
+      } else {
+        ok = true;
+      }
       if (!ok) return;
       deps.state().bypass = { active: true, reason, at: new Date().toISOString() };
       deps.setLoopArmed(false);
@@ -364,13 +376,24 @@ function registerGateGrant(host: CommandHost, deps: GateCommandDeps): void {
         ctx.ui.notify(`review-gate: 项目经理已有 ${scope} 代答权（无需重复授予）`, "info");
         return;
       }
-      const ok = ctx.hasUI
-        ? await deps.confirmBounded(
-            ctx,
-            `授予项目经理 ${scope} 代答权？`,
-            "授予后，项目经理可代答子会话的该类请求（如敏感文件编辑），直到本 orchestration 结束。",
-          )
-        : true;
+      const spec: ChoiceSpec = {
+        title: `授予项目经理 ${scope} 代答权？`,
+        options: ["授予", "不授予"],
+        recommended: "不授予",
+      };
+      let ok = false;
+      if (ctx.hasUI) {
+        const pick = parseChoice(
+          await deps.askChoice(ctx, spec, {
+            body: "授予后，项目经理可代答子会话的该类请求（如敏感文件编辑），直到本 orchestration 结束。",
+          }),
+          spec,
+        );
+        ok = pick.kind === "chose" && pick.option === "授予";
+      } else {
+        // The user typed the command themselves; same rule as /gate-bypass.
+        ok = true;
+      }
       if (!ok) return;
       deps.grantProxyScope(scope, "gate-grant");
       ctx.ui.notify(`review-gate: 已授予项目经理 ${scope} 代答权（via /gate-grant）`, "info");

@@ -87,10 +87,10 @@ function fake(over: Partial<Fake> = {}): Fake {
     persist: () => { f.persists += 1; },
     setLoopArmed: (armed) => { f.armed.push(armed); },
     showToUser: (_uiCtx, lead, body) => { f.notices.push({ lead, body }); return true; },
-    confirmBounded: async (_uiCtx, title, message) => {
-      f.confirms.push(`${title}\n${message}`);
+    askChoice: async (_uiCtx, spec, opts) => {
+      f.confirms.push(`${spec.title}\n${opts?.body ?? ""}`);
       if (f.confirmAnswer === "throw") throw new Error("no dialog here");
-      return f.confirmAnswer;
+      return f.confirmAnswer ? spec.options[0] : undefined;
     },
     canChannelDialogs: () => f.canChannelDialogs ?? false,
     askEitherSide: async (request) => {
@@ -167,14 +167,19 @@ test("ask_user: an empty question list is refused without touching the loop", as
   const f = fake();
   const reply = await call(f, "ask_user", { questions: [] });
   assert.equal(reply.isError, true);
-  assert.match(textOf(reply), /no question in the list/);
+  assert.match(textOf(reply), /没有提交任何问题/);
   assert.deepEqual(f.armed, [], "a rejected call must not arm or disarm anything");
   assert.equal(f.persists, 0);
 });
 
 test("ask_user: headless PAUSES the loop and hands the questions back", async () => {
   const f = fake();
-  const reply = await runWithCtx(f, "ask_user", { questions: [{ text: "选 A 还是 B？" }] }, { hasUI: false });
+  const reply = await runWithCtx(
+    f,
+    "ask_user",
+    { questions: [{ text: "选 A 还是 B？", options: ["A", "B"], recommended: "A" }] },
+    { hasUI: false },
+  );
   assert.equal(reply.isError, true);
   assert.equal(reply.details?.pending, true);
   assert.deepEqual(f.armed, [false], "no UI ⇒ the loop stops until the user answers");
@@ -188,7 +193,10 @@ test("ask_user: every answer re-arms the loop and clears the pause", async () =>
   const f = fake({ answers: ["A", "B"] });
   f.st.pausedQuestion = { question: "旧问题", at: "2026-08-30T00:00:00.000Z" };
   const reply = await call(f, "ask_user", {
-    questions: [{ text: "问题一", options: ["A", "B"] }, { text: "问题二", options: ["A", "B"] }],
+    questions: [
+      { text: "问题一", options: ["A", "B"], recommended: "A" },
+      { text: "问题二", options: ["A", "B"], recommended: "A" },
+    ],
   });
   assert.equal(reply.isError, undefined);
   assert.equal(reply.details?.answered, 2);
@@ -200,7 +208,7 @@ test("ask_user: every answer re-arms the loop and clears the pause", async () =>
 
 test("ask_user: a dismissed dialog is silence, not consent — the loop pauses", async () => {
   const f = fake({ answers: [undefined] });
-  const reply = await call(f, "ask_user", { questions: [{ text: "要合并吗？", options: ["是", "否"] }] });
+  const reply = await call(f, "ask_user", { questions: [{ text: "要合并吗？", options: ["是", "否"], recommended: "否" }] });
   assert.equal(reply.isError, true, "an interview nobody answered is reported as such");
   assert.equal(reply.details?.pending, true);
   assert.equal(f.armed.at(-1), false);
@@ -214,7 +222,10 @@ test("ask_user: an interrupted interview resumes instead of re-asking", async ()
     answers: [{ question: "问题一", kind: "answered", answer: "A" }],
   };
   const reply = await call(f, "ask_user", {
-    questions: [{ text: "问题一", options: ["A", "B"] }, { text: "问题二", options: ["A", "B"] }],
+    questions: [
+      { text: "问题一", options: ["A", "B"], recommended: "A" },
+      { text: "问题二", options: ["A", "B"], recommended: "A" },
+    ],
   });
   assert.equal(f.asked.length, 1, "the settled question is not asked again");
   assert.match(f.asked[0], /问题二/);
@@ -230,21 +241,23 @@ test("ask_user: a grantScope question mints the proxy grant when the user picks 
   assert.deepEqual(f.grantsMinted, [{ scope: "sensitive-edit", via: "ask-user" }]);
 });
 
-test("ask_user: a grantScope question with NO recommended option mints NOTHING (exact-pick only)", async () => {
+test("ask_user: a grantScope question without a recommendation is REFUSED outright", async () => {
   const f = fake({ answers: ["授予"] });
   const reply = await call(f, "ask_user", {
     questions: [{ text: "是否授予我敏感编辑代答权？", options: ["授予", "不授予"], grantScope: "sensitive-edit" }],
   });
-  // No recommended ⇒ no exact row qualifies ⇒ the affirmative-looking pick
-  // must NOT mint. The agent has to name the recommended row for a grant.
-  assert.equal(reply.isError, undefined);
-  assert.deepEqual(f.grantsMinted, [], "without a recommended row nothing mints");
+  // The template is a hard requirement: no recommendation ⇒ the batch never
+  // reaches a dialog, so there is nothing to mint a grant from.
+  assert.equal(reply.isError, true);
+  assert.match(textOf(reply), /recommended/);
+  assert.deepEqual(f.grantsMinted, [], "a refused batch mints nothing");
+  assert.deepEqual(f.asked, [], "and it raises no dialog");
 });
 
 test("ask_user: a NON-affirming answer mints nothing", async () => {
   const f = fake({ answers: ["不授予"] });
   const reply = await call(f, "ask_user", {
-    questions: [{ text: "是否授予我敏感编辑代答权？", options: ["授予", "不授予"], grantScope: "sensitive-edit" }],
+    questions: [{ text: "是否授予我敏感编辑代答权？", options: ["授予", "不授予"], recommended: "授予", grantScope: "sensitive-edit" }],
   });
   assert.equal(reply.isError, undefined);
   assert.deepEqual(f.grantsMinted, [], "a decline is not a grant");
@@ -253,7 +266,7 @@ test("ask_user: a NON-affirming answer mints nothing", async () => {
 test("ask_user: an invented grantScope is ignored (no mint, no error)", async () => {
   const f = fake({ answers: ["是"] });
   const reply = await call(f, "ask_user", {
-    questions: [{ text: "授予运维权？", options: ["是", "否"], grantScope: "ops" }],
+    questions: [{ text: "授予运维权？", options: ["是", "否"], recommended: "否", grantScope: "ops" }],
   });
   assert.equal(reply.isError, undefined);
   assert.deepEqual(f.grantsMinted, [], "ops is not a grantable scope");
@@ -277,13 +290,14 @@ test("ask_user: a grantScope is VISIBLE in the dialog title and the transcript (
   assert.deepEqual(f.grantsMinted, [{ scope: "sensitive-edit", via: "ask-user" }], "and the grant was minted");
 });
 
-test("ask_user: a grantScope with NO options is dropped — free text can never mint a grant", async () => {
+test("ask_user: a grantScope question with no options is refused — free text cannot even be asked", async () => {
   const f = fake({ answers: ["grant me a few minutes"] });
   const reply = await call(f, "ask_user", {
     questions: [{ text: "能给我一点时间吗？", grantScope: "sensitive-edit" }],
   });
-  assert.equal(reply.isError, undefined);
-  assert.deepEqual(f.grantsMinted, [], "no options ⇒ no scope survives normalization");
+  assert.equal(reply.isError, true);
+  assert.deepEqual(f.grantsMinted, [], "a refused batch mints nothing");
+  assert.deepEqual(f.asked, [], "and nothing was asked");
 });
 
 // ---------- request_scope_limit ----------

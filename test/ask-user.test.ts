@@ -1,8 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  normalizeQuestions,
-  interpretFreeText,
+  validateQuestions,
   resumeFrom,
   buildNoDialogNotice,
   progressLabel,
@@ -13,44 +12,107 @@ import {
   formatTranscriptSummary,
   needsUserReply,
   SKIP_REST_CHOICE,
-  ANSWER_IN_CHAT_CHOICE,
   MAX_QUESTIONS,
   MAX_QUESTION_CHARS,
-  MAX_OPTIONS,
   type AskAnswer,
+  type AskQuestion,
 } from "../lib/ask-user.ts";
+import { DECLINE_ROW, MAX_CHOICE_OPTIONS } from "../lib/choice-dialog.ts";
 
-// ---- question hygiene: a malformed list shrinks, it never explodes ----
+/** A question that follows the template — the shape every test starts from. */
+function q(text: string, options: string[] = ["A", "B"], recommended = options[0] ?? ""): AskQuestion {
+  return { text, options, recommended };
+}
 
-test("plain strings and objects are both accepted", () => {
-  const qs = normalizeQuestions(["范围？", { text: "分支？", options: ["A", "B"], recommended: "A" }]);
-  assert.equal(qs.length, 2);
-  assert.equal(qs[0].text, "范围？");
-  assert.deepEqual(qs[1].options, ["A", "B"]);
-  assert.equal(qs[1].recommended, "A");
+// ---- the template is a HARD requirement (user decision, 2026-09-08) ----
+
+test("a batch that follows the template is accepted as written", () => {
+  const result = validateQuestions([
+    { text: "范围？", options: ["A", "B"], recommended: "A" },
+    { text: "分支？", options: ["X", "Y", "Z"], recommended: "Y" },
+  ]);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.questions.length, 2);
+  assert.deepEqual(result.questions[0]?.options, ["A", "B"]);
+  assert.equal(result.questions[1]?.recommended, "Y");
+  assert.equal(result.dropped, 0);
+  assert.equal(result.trimmedOptions, 0);
 });
 
-test("empty, blank and non-question entries are dropped", () => {
-  assert.deepEqual(normalizeQuestions([]), []);
-  assert.deepEqual(normalizeQuestions(["", "   ", null, 42, {}]), []);
-  assert.deepEqual(normalizeQuestions("not a list"), []);
-  assert.deepEqual(normalizeQuestions(undefined), []);
+test("a question with fewer than two options rejects the WHOLE batch", () => {
+  const result = validateQuestions([
+    { text: "好的问题？", options: ["A", "B"], recommended: "A" },
+    { text: "坏问题？", options: ["只有一个"], recommended: "只有一个" },
+  ]);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.error, /第 2 个问题/);
+  assert.match(result.error, /2–4 个选项/);
 });
 
-test("counts and lengths are capped", () => {
-  const many = normalizeQuestions(Array.from({ length: 50 }, (_, i) => `q${i}`));
-  assert.equal(many.length, MAX_QUESTIONS);
-  const long = normalizeQuestions([{ text: "x".repeat(MAX_QUESTION_CHARS + 500) }]);
-  assert.equal(long[0].text.length, MAX_QUESTION_CHARS);
-  const opts = normalizeQuestions([{ text: "q", options: Array.from({ length: 20 }, (_, i) => `o${i}`) }]);
-  assert.equal(opts[0].options?.length, MAX_OPTIONS);
+test("a question without a recommendation rejects the whole batch", () => {
+  const result = validateQuestions([{ text: "q", options: ["A", "B"] }]);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.error, /recommended/);
 });
 
-test("blank options disappear rather than becoming empty dialog rows", () => {
-  const qs = normalizeQuestions([{ text: "q", options: ["", "  ", "A"] }]);
-  assert.deepEqual(qs[0].options, ["A"]);
-  const none = normalizeQuestions([{ text: "q", options: ["", "  "] }]);
-  assert.equal(none[0].options, undefined);
+test("a recommendation that is not one of the options rejects the whole batch", () => {
+  const result = validateQuestions([{ text: "q", options: ["A", "B"], recommended: "C" }]);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.error, /不在选项里/);
+});
+
+test("duplicate options reject the whole batch — a row must be unambiguous", () => {
+  const result = validateQuestions([{ text: "q", options: ["A", "A"], recommended: "A" }]);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.error, /重复选项/);
+});
+
+test("a question with no readable text rejects the batch", () => {
+  const result = validateQuestions([{ text: "   " }]);
+  assert.equal(result.ok, false);
+});
+
+test("an empty batch is refused with an actionable message", () => {
+  for (const raw of [[], undefined, "not a list", null]) {
+    const result = validateQuestions(raw);
+    assert.equal(result.ok, false);
+    if (result.ok) continue;
+    assert.match(result.error, /没有提交任何问题/);
+  }
+});
+
+test("sizes are CAPPED rather than refused, and the reply says what was cut", () => {
+  const many = validateQuestions(Array.from({ length: 50 }, (_, i) =>
+    ({ text: `q${i}`, options: ["A", "B"], recommended: "A" })));
+  assert.equal(many.ok, true);
+  if (!many.ok) return;
+  assert.equal(many.questions.length, MAX_QUESTIONS);
+  assert.equal(many.dropped, 50 - MAX_QUESTIONS);
+
+  const wide = validateQuestions([{
+    text: "q",
+    options: Array.from({ length: 20 }, (_, i) => `o${i}`),
+    recommended: "o0",
+  }]);
+  assert.equal(wide.ok, true);
+  if (!wide.ok) return;
+  assert.equal(wide.questions[0]?.options.length, MAX_CHOICE_OPTIONS);
+  assert.equal(wide.trimmedOptions, 1);
+
+  const long = validateQuestions([{ text: "x".repeat(MAX_QUESTION_CHARS + 500), options: ["A", "B"], recommended: "A" }]);
+  assert.equal(long.ok, true);
+  if (!long.ok) return;
+  assert.equal(long.questions[0]?.text.length, MAX_QUESTION_CHARS);
+});
+
+test("blank options disappear — and a question left with one of them is refused", () => {
+  const result = validateQuestions([{ text: "q", options: ["", "  ", "A"], recommended: "A" }]);
+  assert.equal(result.ok, false, "one real option is not a question");
 });
 
 // ---- what the dialog shows ----
@@ -60,32 +122,43 @@ test("progress is 1-based", () => {
   assert.equal(progressLabel(2, 3), "3 / 3");
 });
 
-test("a choice list marks the recommendation and always offers both escapes", () => {
-  const choices = buildChoiceList({ text: "q", options: ["A", "B"], recommended: "B" });
-  assert.deepEqual(choices, ["A", "B（推荐）", ANSWER_IN_CHAT_CHOICE, SKIP_REST_CHOICE]);
-});
-
-test("a question without options gets no choice list (it is free text)", () => {
-  assert.deepEqual(buildChoiceList({ text: "q" }), []);
+test("the row list is the template plus the interview's own escape", () => {
+  const rows = buildChoiceList(q("q", ["A", "B"], "B"));
+  assert.deepEqual(rows, ["A", "B（推荐）", DECLINE_ROW, SKIP_REST_CHOICE]);
 });
 
 // ---- what a picked line MEANS ----
 
 test("picking an option returns the option the agent wrote, without the marker", () => {
-  const q = { text: "q", options: ["A", "B"], recommended: "B" };
-  assert.deepEqual(interpretChoice("B（推荐）", q), { kind: "answered", answer: "B" });
-  assert.deepEqual(interpretChoice("A", q), { kind: "answered", answer: "A" });
+  const question = q("q", ["A", "B"], "B");
+  assert.deepEqual(interpretChoice("B（推荐）", question), { kind: "answered", answer: "B" });
+  assert.deepEqual(interpretChoice("A", question), { kind: "answered", answer: "A" });
 });
 
-test("the two escapes are recognized", () => {
-  const q = { text: "q", options: ["A"] };
-  assert.deepEqual(interpretChoice(SKIP_REST_CHOICE, q), { kind: "skip-rest" });
-  assert.deepEqual(interpretChoice(ANSWER_IN_CHAT_CHOICE, q), { kind: "deferred-to-chat" });
+test("the interview's escape row is recognized", () => {
+  assert.deepEqual(interpretChoice(SKIP_REST_CHOICE, q("q")), { kind: "skip-rest" });
+});
+
+test("the decline row carries the reason as the answer", () => {
+  const question = q("q", ["A", "B"], "A");
+  assert.deepEqual(
+    interpretChoice(`${DECLINE_ROW}：两个都不合适，我要第三种`, question),
+    { kind: "answered", answer: "不选，原因：两个都不合适，我要第三种" },
+  );
+  // An empty box is still an answer: "none of these, no reason given".
+  assert.deepEqual(interpretChoice(DECLINE_ROW, question),
+    { kind: "answered", answer: "不选（未说明原因）" });
+});
+
+test("the typed escapes work from the decline row's reason box", () => {
+  const question = q("q");
+  assert.deepEqual(interpretChoice(`${DECLINE_ROW}：!skip`, question), { kind: "skip-rest" });
+  assert.deepEqual(interpretChoice(`${DECLINE_ROW}：!CHAT`, question), { kind: "deferred-to-chat" });
 });
 
 test("a dismissed dialog is neither an answer nor a skip", () => {
   // Treating ESC as consent is how a gate invents approvals.
-  assert.deepEqual(interpretChoice(undefined, { text: "q", options: ["A"] }), { kind: "dismissed" });
+  assert.deepEqual(interpretChoice(undefined, q("q")), { kind: "dismissed" });
 });
 
 // ---- what comes back ----
@@ -152,23 +225,9 @@ test("the loop waits whenever anything went unanswered", () => {
   assert.equal(needsUserReply([]), false);
 });
 
-// ---- free text carries the same escapes as a choice list ----
-
-test("typed escapes mean what the choice rows mean", () => {
-  assert.deepEqual(interpretFreeText("!skip"), { kind: "skip-rest" });
-  assert.deepEqual(interpretFreeText("  !CHAT "), { kind: "deferred-to-chat" });
-  assert.deepEqual(interpretFreeText("用 A 方案"), { kind: "answered", answer: "用 A 方案" });
-});
-
-test("empty text and a dismissed input are silence, not an answer", () => {
-  assert.deepEqual(interpretFreeText(""), { kind: "dismissed" });
-  assert.deepEqual(interpretFreeText("   "), { kind: "dismissed" });
-  assert.deepEqual(interpretFreeText(undefined), { kind: "dismissed" });
-});
-
 // ---- an interrupted interview resumes instead of restarting ----
 
-const QS = [{ text: "范围？" }, { text: "分支？" }, { text: "交付？" }];
+const QS = [q("范围？"), q("分支？"), q("交付？")];
 
 test("settled answers carry over; the first unsettled question is where it resumes", () => {
   const stored = {
@@ -207,12 +266,11 @@ test("a skip is settled too — it does not re-ask", () => {
 // ---- an environment with no dialogs must say so ----
 
 test("the no-dialog notice hands the questions back to the agent, in full", () => {
-  const notice = buildNoDialogNotice([{ text: "范围？", options: ["A", "B"], recommended: "A" }]);
+  const notice = buildNoDialogNotice([q("范围？", ["A", "B"], "A")]);
   assert.match(notice, /没能展示给用户/);
   assert.match(notice, /写进你的回复/);
   assert.match(notice, /范围？/);
-  assert.match(notice, /选项：A \/ B/);
-  assert.match(notice, /推荐：A/);
+  assert.match(notice, /选项：A（推荐） \/ B \/ ✎ 不选，我说明原因 \/ ⏭ 跳过后续问题/);
 });
 
 test("an unanswered question reads as unanswered, never as 'ask me in chat'", () => {
@@ -229,7 +287,7 @@ test("an unanswered question keeps the loop waiting", () => {
 
 // ---------- what one settled question MEANS (the batch rule) ----------
 
-const PICK = { text: "选一个", options: ["A", "B"], recommended: "A" };
+const PICK = q("选一个", ["A", "B"], "A");
 
 test("an answer the race delivered is honoured, whatever stopped the rest", () => {
   // The one case batching created: the project manager answered this question
@@ -265,12 +323,6 @@ test("a question can STOP the interview, and says which way", () => {
   assert.equal(interrupted.answer.kind, "unanswered");
   // An ordinary answer stops nothing.
   assert.equal(resolveQuestion(PICK, "A").stop, undefined);
-  assert.equal(resolveQuestion(PICK, ANSWER_IN_CHAT_CHOICE).answer.kind, "deferred-to-chat");
-});
-
-test("a free-text question keeps its typed escapes", () => {
-  const free = { text: "说说看" };
-  assert.equal(resolveQuestion(free, "!skip").stop, "skip-rest");
-  assert.equal(resolveQuestion(free, "!chat").answer.kind, "deferred-to-chat");
-  assert.equal(resolveQuestion(free, "  就这样  ").answer.answer, "就这样");
+  assert.equal(resolveQuestion(PICK, `${DECLINE_ROW}：!chat`).answer.kind, "deferred-to-chat");
+  assert.equal(resolveQuestion(PICK, `${DECLINE_ROW}：!skip`).stop, "skip-rest");
 });

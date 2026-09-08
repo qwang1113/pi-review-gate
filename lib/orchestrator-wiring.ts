@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync 
 
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
+import type { ChoiceSpec } from "./choice-dialog.ts";
 import { sideEffectsEnabled } from "./side-effects.ts";
 import { channelRoot, nodeChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
@@ -330,9 +331,8 @@ export interface OrchestratorHostBindings {
   adoptOrchestrationId(id: string): void;
   /** The orchestration id this session holds (inherited or freshly minted). */
   orchestrationId(): string;
-  confirm(title: string, message: string, pointer?: string): Promise<boolean>;
-  /** A multi-option dialog in the orchestrator's own pane (grant door 3). */
-  select?(title: string, options: readonly string[]): Promise<string | undefined>;
+  /** The gate's one question template, rendered in this pane (see OrchestratorDeps). */
+  askChoice(spec: ChoiceSpec, opts?: { body?: string; pointer?: string; signal?: AbortSignal }): Promise<string | undefined>;
   /** Print text into the user's transcript (the plan's full text, O-1). */
   showToUser(title: string, text: string): void;
   sessionTranscriptPath(): string | undefined;
@@ -448,8 +448,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
       const pane = env().TMUX_PANE?.trim();
       return pane && pane.length > 0 ? pane : undefined;
     },
-    confirm: host.confirm,
-    select: host.select ?? (() => Promise.resolve(undefined)),
+    askChoice: host.askChoice,
     showToUser: host.showToUser,
     writeTaskFile: (name, content, repoRoot) => writeTaskFile(repoRoot ?? host.repoRoot, name, content),
     childGateState: (childCwd, variant) => readChildGateState(childCwd, variant),

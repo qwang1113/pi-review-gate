@@ -141,10 +141,11 @@ function makeMockPi(cwd: string) {
       ui: {
         notify: () => {},
         setStatus: () => {},
-        // propose_loop_goal approval dialog: accept by default; a test can
-        // override `ui.confirm` on the returned object to simulate a refusal.
-        confirm: async () => true,
-        // The reject path asks for a reason; the confirm path no longer does.
+        // The gate's ONE dialog template (2026-09-08): every approval renders
+        // through `ui.select`, so accepting by default means picking the first
+        // row — the recommended one. A test overrides `ui.select` to refuse.
+        select: async (_title: string, options: string[]) => options[0],
+        // The template's reason box, used only when the decline row is picked.
         input: async () => undefined,
       },
       sessionManager: { getEntries: () => entries, getSessionId: () => "loop-goal-session" },
@@ -369,8 +370,8 @@ test("L8a: in LOOP mode a goal is REFUSED until the user confirmed a restatement
   await recordPrereview(pi, ctx, GOAL_TEXT); // the audit is NOT what is missing
 
   let dialogs = 0;
-  const uiCtx = ctx as { ui: { confirm: (t: string, m: string) => Promise<boolean> } };
-  uiCtx.ui.confirm = async () => { dialogs++; return true; };
+  const uiCtx = ctx as { ui: { select: (t: string, o: string[]) => Promise<string | undefined> } };
+  uiCtx.ui.select = async (_t, options) => { dialogs++; return options[0]; };
 
   const refused = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT }, undefined, undefined, ctx);
   assert.equal((refused as { isError?: boolean }).isError, true);
@@ -410,7 +411,7 @@ test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS —
   const shown: string[] = [];
   const uiCtx = ctx as {
     ui: {
-      confirm: (t: string, m: string) => Promise<boolean>;
+      select: (t: string, o: string[]) => Promise<string | undefined>;
       // NOTE the signature: notify takes (message, type) — capturing the SECOND
       // argument here would silently record the severity and leave the
       // transcript surface untested.
@@ -419,7 +420,7 @@ test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS —
   };
   const notify = uiCtx.ui.notify?.bind(uiCtx.ui);
   uiCtx.ui.notify = (message: string, type?: string) => { shown.push(String(message)); return notify?.(message, type); };
-  uiCtx.ui.confirm = async (_t, m) => { dialogs++; shown.push(String(m)); return true; };
+  uiCtx.ui.select = async (title, options) => { dialogs++; shown.push(String(title)); return options[0]; };
 
   const noAudit = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT }, undefined, undefined, ctx);
   assert.equal((noAudit as { isError?: boolean }).isError, true, "an unaudited goal must be refused");
@@ -759,7 +760,7 @@ test("L8: gate-owned writes stay exempt even without a goal (no self-deadlock)",
     "the same session must still block ordinary edits (test is not vacuous)");
 });
 
-test("L8: the confirm path no longer asks for a reason (reject still does)", async () => {
+test("L8: the confirm path no longer asks for a reason (the decline row does)", async () => {
   const repo = makeRepo();
   const pi = makeMockPi(repo);
   reviewGate(pi as never);
@@ -770,15 +771,18 @@ test("L8: the confirm path no longer asks for a reason (reject still does)", asy
   (ctx as { ui: { input?: (t: string, p: string) => Promise<string | undefined> } }).ui.input =
     async () => { inputs += 1; return "n/a"; };
 
-  // Confirm path: the input box must NOT be shown.
+  // Confirm path: the reason box must NOT be shown — the user picked an
+  // option, not the template's decline row.
   await approveGoal(pi, ctx, GOAL_TEXT);
   assert.equal(inputs, 0, "confirming a goal must not prompt for a reason");
   const sidecar = readSidecar(repo);
   assert.equal((sidecar.loopGoal as { reason?: string } | undefined)?.reason, undefined,
     "an approval carries no reason");
 
-  // Reject path: the input box must still be shown and the reason recorded.
-  (ctx as { ui: { confirm: (t: string, m: string) => Promise<boolean> } }).ui.confirm = async () => false;
+  // Reject path: the decline row opens the reason box, and the reason travels
+  // back with the rejection (2026-09-08 — same dialog, no second box).
+  (ctx as { ui: { select: (t: string, o: string[]) => Promise<string | undefined> } }).ui.select =
+    async (_t, options) => options[options.length - 1];
   // The revised text is a DIFFERENT draft, so it needs its own audit before
   // the dialog can be reached at all (L8b binds to content).
   await recordPrereview(pi, ctx, GOAL_TEXT + "\n(revised)");
@@ -929,9 +933,9 @@ test("L8: propose_loop_goal refuses a NON-repo repo param and shows the binding 
 
   // The consent dialog must name the binding repo (repo-scoped approval).
   let dialogText = "";
-  (ctx as { ui: { confirm: (t: string, m: string) => Promise<boolean> } }).ui.confirm = async (_t, m) => {
-    dialogText = m;
-    return true;
+  (ctx as { ui: { select: (t: string, o: string[]) => Promise<string | undefined> } }).ui.select = async (title, options) => {
+    dialogText = title;
+    return options[0];
   };
   const repoB = makeRepo();
   await recordPrereview(pi, ctx, GOAL_TEXT, repoB);

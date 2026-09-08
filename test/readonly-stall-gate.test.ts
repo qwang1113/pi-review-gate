@@ -80,7 +80,9 @@ function makeMockPi(cwd: string) {
     tools, handlers, entries,
     ctx: {
       hasUI: true,
-      ui: { notify: () => {}, setStatus: () => {}, confirm: async () => true, input: async () => undefined },
+      // The gate's one dialog template (2026-09-08): a dialog is a select, and
+      // picking the first row means "accept the recommended option".
+      ui: { notify: () => {}, setStatus: () => {}, select: async (_t: string, options: string[]) => options[0], input: async () => undefined },
       sessionManager: { getEntries: () => entries, getSessionId: () => "rs-session" },
       isIdle: () => false,
       get cwd() { return cwd; },

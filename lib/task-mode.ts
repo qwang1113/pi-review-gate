@@ -167,7 +167,7 @@ export type ModeChangeDecision =
   | { action: "noop" }
   /** Apply immediately with the given source (no user interaction). */
   | { action: "apply"; source: TaskModeSource }
-  /** The EXTENSION must obtain user consent (ctx.ui.confirm); consent applies
+  /** The EXTENSION must obtain user consent (a dialog); consent applies
    *  the mode with source "user", refusal locks agent downgrades. */
   | { action: "confirm" }
   /** Not permitted; the reason is surfaced to the agent verbatim. */

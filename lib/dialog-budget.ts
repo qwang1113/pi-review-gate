@@ -1,11 +1,12 @@
 /**
- * Rendered-line budget for extension confirmation dialogs.
+ * Rendered-line budget for extension dialogs.
  *
- * WHY THIS EXISTS. `pi.ui.confirm(title, message)` looks like a modal, but the
- * host renders it as `title + "\n" + message` inside ONE unclipped, unscrollable
- * `Text` component placed in the editor container at the bottom of the screen
- * (`showExtensionConfirm` -> `ExtensionSelectorComponent`). Nothing truncates it.
- * So the dialog's height is whatever the extension passes in.
+ * WHY THIS EXISTS. A pi dialog looks like a modal, but the host renders it as
+ * `title + "\n" + message` (ui.confirm) or just the title (ui.select) inside
+ * ONE unclipped, unscrollable `Text` component placed in the editor container
+ * at the bottom of the screen (`showExtensionConfirm` ->
+ * `ExtensionSelectorComponent`). Nothing truncates it. So the dialog's height
+ * is whatever the extension passes in — plus the option rows it draws.
  *
  * That matters because of how pi-tui's differential renderer works. While a tool
  * awaits the dialog the agent is still mid-turn, so the working spinner keeps
@@ -149,7 +150,7 @@ export function renderedRowCount(text: string, columns: number = DIALOG_ASSUMED_
 }
 
 export interface FitDialogResult {
-  /** The message text to hand to `ui.confirm`, guaranteed within budget. */
+  /** The body text handed to the dialog renderer, guaranteed within budget. */
   message: string;
   /** True when content had to be dropped. */
   truncated: boolean;

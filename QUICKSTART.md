@@ -38,7 +38,8 @@ bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 ```
 你：实现分页功能
 agent：调 set_gate_mode("loop")
-  → 有疑问就用 ask_user 问（一次一题，N of M；**不设数量上限**，没疑问也可以不问）
+  → 有疑问就用 ask_user 问（一次一题，N of M；每题 2–4 个选项 + 一个推荐，
+     门禁自己追加「✎ 不选，我说明原因」那一行；**不设数量上限**，没疑问也可以不问）
   → propose_restatement（**必经一步**：把需求反述给你确认——改之前 → 改之后，
      并定下本轮交付到哪一站：precommit / commit / pr。没有这份确认，下一步直接被拒、
      不弹框）→ 用简体中文起草目标

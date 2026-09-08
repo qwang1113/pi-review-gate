@@ -43,14 +43,15 @@ import type { ToolHost, ToolReply } from "./tool-host.ts";
 import type { GateState } from "./gate-state.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import type { SensitiveGrant } from "./sensitive-grant.ts";
+import type { ChoiceSpec } from "./choice-dialog.ts";
 import { registerConsentRequestTools } from "./consent-request-tools.ts";
 import {
-  normalizeQuestions,
+  validateQuestions,
   resumeFrom,
   buildNoDialogNotice,
-  FREE_TEXT_HINT,
   progressLabel,
   buildChoiceList,
+  choiceSpecOf,
   resolveQuestion,
 
   formatAnswers,
@@ -58,10 +59,12 @@ import {
   needsUserReply,
   isGrantableScope,
   MAX_QUESTIONS,
+  SKIP_REST_CHOICE,
   type AskAnswer,
   type AskQuestion,
   type InterviewStop,
 } from "./ask-user.ts";
+import { MAX_CHOICE_OPTIONS, renderChoice } from "./choice-dialog.ts";
 // The batch id is minted with the same collision-resistant helper the channel
 // uses for its own record ids — one generator, not a second convention.
 import { newChannelId } from "./orchestrator-channel.ts";
@@ -91,8 +94,12 @@ export interface UserInteractionToolDeps {
   setLoopArmed(armed: boolean): void;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** `ui.confirm` with the dialog-height budget applied (never bypassed). */
-  confirmBounded(uiCtx: unknown, title: string, message: string, pointer?: string, signal?: AbortSignal): Promise<boolean>;
+  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  askChoice(
+    uiCtx: unknown,
+    spec: ChoiceSpec,
+    opts?: { body?: string; pointer?: string; signal?: AbortSignal },
+  ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
    * answers first wins, and the other side's box comes off the screen.
@@ -146,7 +153,7 @@ export interface UserInteractionToolDeps {
  */
 export type ConsentToolDeps = Pick<
   UserInteractionToolDeps,
-  | "state" | "persist" | "showToUser" | "confirmBounded" | "cwd"
+  | "state" | "persist" | "showToUser" | "askChoice" | "cwd"
   | "sessionEditedPaths" | "commitsAheadOfBase" | "scopeLimitDeclined"
   | "declineScopeLimit" | "sensitiveGrants" | "storeSensitiveGrants"
   | "sensitiveDeclinedPaths" | "log" | "askEitherSide" | "canChannelDialogs"
@@ -174,17 +181,25 @@ export async function doAskUser(
   ctx: unknown,
 ): Promise<ToolReply> {
   const state = deps.state();
-  const questions = normalizeQuestions(params.questions);
-  // Over the cap the extra questions are DROPPED — say so, or the agent
-  // waits for answers to questions nobody was ever asked.
-  const droppedQuestions = Math.max(0, (Array.isArray(params.questions) ? params.questions.length : 0) - questions.length);
-  if (!questions.length) {
+  // THE TEMPLATE IS A HARD REQUIREMENT (user decision, 2026-09-08): a batch
+  // that does not follow it is refused OUTRIGHT — no dialog is shown, and
+  // the error names the offending question. Tolerating a malformed one is
+  // how a yes/no-shaped or option-less question reached the user in the
+  // first place.
+  const checked = validateQuestions(params.questions);
+  if (!checked.ok) {
     return {
-      content: [{ type: "text", text: "review-gate: ask_user rejected — no question in the list. Write the actual question (options + your recommendation) and call again." }],
+      content: [{
+        type: "text",
+        text: `review-gate: ask_user rejected — ${checked.error}。` +
+          `每题必须是 ${MAX_CHOICE_OPTIONS} 个以内的选项（至少 2 个）+ 一个 recommended，` +
+          "改完重新调用；这一次一个对话框都没有弹出。",
+      }],
       details: { asked: 0, answered: 0, pending: false },
       isError: true,
     };
   }
+  const { questions, dropped: droppedQuestions, trimmedOptions } = checked;
   const uiCtx = ctx as UiContext;
   // NO UI AT ALL (print / json / headless RPC): pi hands extensions a
   // no-op UI whose dialogs resolve to undefined and whose notify does
@@ -210,8 +225,7 @@ export async function doAskUser(
   // the dialogs close.
   deps.showToUser(uiCtx, "───── AI 有问题要问你 ─────", questions.map((q, i) =>
     `${progressLabel(i, questions.length)} ${q.text}${grantNotice(q)}` +
-    (q.options?.length ? `\n   选项：${q.options.join(" / ")}` : "") +
-    (q.recommended ? `\n   推荐：${q.recommended}` : "")).join("\n"));
+    `\n   选项：${buildChoiceList(q).join(" / ")}`).join("\n"));
 
   // An interview interrupted earlier (crash, restart, or the agent
   // re-submitting the same list) resumes where it stopped: the questions
@@ -262,11 +276,13 @@ export async function doAskUser(
     // screen — and never mis-parsed it.
     return deps.askEitherSide(
       {
-        dialogKind: choices.length ? "select" : "input",
+        // Every question is a choice question now (2026-09-08): the template
+        // rejects a batch without options before a dialog is ever built.
+        dialogKind: "select",
         topic: "ask-user",
         title: prompt,
         options: choices,
-        ...(q.recommended ? { payload: `推荐答案：${q.recommended}` } : {}),
+        payload: `推荐答案：${q.recommended}`,
         ...(batchId === undefined
           ? {}
           : { batch: { id: batchId, index, total: questions.length } }),
@@ -277,9 +293,14 @@ export async function doAskUser(
         // Already settled (the project manager answered it through the
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped !== undefined) return undefined;
-        return choices.length
-          ? uiCtx.ui!.select!(prompt, choices, { signal })
-          : uiCtx.ui!.input!(`${prompt}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal });
+        // ONE renderer for every dialog in the gate, plus the interview's
+        // own escape row — which is not part of the template because only an
+        // interview has later questions to skip.
+        return renderChoice(
+          uiCtx.ui,
+          { ...choiceSpecOf(q), title: prompt },
+          { signal, extraRows: [SKIP_REST_CHOICE] },
+        );
       },
       // A broken dialog is silence, never an answer — and, now that these
       // calls outlive the statement that made them, never an unhandled
@@ -357,6 +378,7 @@ export async function doAskUser(
       text: `review-gate: ask_user 采访完成（${formatTranscriptSummary(answers)}）。\n${formatAnswers(answers)}\n` +
         (resumedCount ? `（前 ${resumedCount} 题沿用了上次中断前的回答，没有重复问用户。）\n` : "") +
         (droppedQuestions ? `（提交了 ${questions.length + droppedQuestions} 个问题，只问了前 ${MAX_QUESTIONS} 个；其余请下一轮再问。）\n` : "") +
+        (trimmedOptions ? `（有 ${trimmedOptions} 个问题的选项超过 ${MAX_CHOICE_OPTIONS} 个，已截断到前 ${MAX_CHOICE_OPTIONS} 个。）\n` : "") +
         (pending
           ? "有问题没得到回答 — 循环已暂停，等用户的下一条消息；不要替他决定。"
           : "全部已答 — 按答案继续。"),
@@ -390,12 +412,17 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
       "conflict, the goal interview. CALLING IT PAUSES: the loop stops until the user has " +
       "answered, so ask instead of guessing, and never write a question into your reply and end " +
       "the turn (that costs a whole iteration and the user may not even read it as a question). " +
-      "The gate runs the interview: one question at a time with its N / M progress, choices when " +
-      "you give options, free text otherwise, plus 'answer in chat' and 'skip the rest' for the " +
-      "user. Every answer comes back at once, unanswered ones marked. Write questions that stand " +
-      "on their own, with the options AND your recommendation. When later questions depend on the " +
-      "answer to an earlier one (pick an architecture, then its details), call ask_user AGAIN for " +
-      "the follow-up round instead of guessing the branch. ASK AS MANY AS THE REQUIREMENT IS " +
+      "EVERY QUESTION FOLLOWS THE GATE'S ONE TEMPLATE: 2–4 options, exactly one of them named " +
+      "in `recommended` (the dialog marks it （推荐）), and the gate appends its own row " +
+      "「✎ 不选，我说明原因」 which opens a text box — so the user can always answer with a " +
+      "reason instead of picking anything. A question with fewer than 2 options, no " +
+      "`recommended`, or a recommendation that is not one of the options REJECTS THE WHOLE " +
+      "BATCH with no dialog shown — rewrite it and call again. There is no free-text question " +
+      "any more. The gate runs the interview: one question at a time with its N / M progress, " +
+      "plus 「⏭ 跳过后续问题」. Every answer comes back at once, unanswered ones marked. Write " +
+      "questions that stand on their own. When later questions depend on the answer to an " +
+      "earlier one (pick an architecture, then its details), call ask_user AGAIN for the " +
+      "follow-up round instead of guessing the branch. ASK AS MANY AS THE REQUIREMENT IS " +
       `WORTH: the interview itself is optional (no doubts ⇒ no questions), but there is no cap on ` +
       `how many you may ask — up to ${MAX_QUESTIONS} per call and another round whenever you need ` +
       "more. Never trim a real doubt to keep the count down; agreeing on the requirement is " +
@@ -405,12 +432,12 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
       questions: Type.Array(
         Type.Object({
           text: Type.String({ description: "The complete question, with the context the user needs to decide" }),
-          options: Type.Optional(Type.Array(Type.String(), {
-            description: "The choices, when this is a pick rather than free text",
-          })),
-          recommended: Type.Optional(Type.String({
-            description: "Your own recommendation (one of `options` when you give options)",
-          })),
+          options: Type.Array(Type.String(), {
+            description: `The choices: ${MAX_CHOICE_OPTIONS} at most, 2 at least, each one short enough to read in a dialog row`,
+          }),
+          recommended: Type.String({
+            description: "Your own recommendation — MUST be exactly one of `options` (the gate rejects the batch otherwise)",
+          }),
         }),
         { description: `1-${MAX_QUESTIONS} questions, asked in order` },
       ),

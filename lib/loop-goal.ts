@@ -441,7 +441,7 @@ export const GOAL_CONFIRM_MAX_CHARS = 2000;
 /**
  * Full-text message shown in the TRANSCRIPT before the approval dialog opens.
  *
- * WHY NOT IN THE DIALOG. `ui.confirm` renders its text as one unclipped block
+ * WHY NOT IN THE DIALOG. A dialog renders its text as one unclipped block
  * pinned to the bottom of the screen; a goal-sized block makes the dialog
  * taller than the terminal, which pushes the animating spinner row out of the
  * viewport and turns every spinner frame into a full-screen clear (see

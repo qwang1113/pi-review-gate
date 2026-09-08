@@ -43,6 +43,7 @@ import { join as pathJoin } from "node:path";
 import { Type } from "typebox";
 
 import type { ToolHost, ToolReply } from "./tool-host.ts";
+import { REVISE_ROW, choiceRows, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import {
   GOAL_CONFIRM_TITLE,
@@ -102,14 +103,12 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
   }): Promise<{ ok: true } | { ok: false; text: string }>;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** `ui.confirm` with the dialog-height budget applied (never bypassed). */
-  confirmBounded(
+  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  askChoice(
     uiCtx: unknown,
-    title: string,
-    message: string,
-    pointer?: string,
-    signal?: AbortSignal,
-  ): Promise<boolean>;
+    spec: ChoiceSpec,
+    opts?: { body?: string; pointer?: string; signal?: AbortSignal },
+  ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
    * answers first wins, and the other side's box comes off the screen.
@@ -292,7 +291,7 @@ export async function doProposeLoopGoal(
   // The goal approval is one of the two dialogs an ORCHESTRATOR may
   // answer on the user's behalf, so it goes through the channel funnel
   // below (`askEitherSide` with topic `goal-approval`) rather than
-  // straight to `ui.confirm`: the request it writes carries the whole
+  // straight to the pane dialog: the request it writes carries the whole
   // draft, which is the text constraint 8 is judged on.
 
   deps.showToUser(
@@ -309,18 +308,28 @@ export async function doProposeLoopGoal(
   const goalDialogTitle = GOAL_CONFIRM_TITLE;
   const goalApproveLabel = "认可，写入 .pi/loop-goal.md";
   const goalRejectLabel = "不认可，退回重谈";
+  // The gate's ONE dialog template (2026-09-08). The decline row replaces the
+  // separate "拒绝原因" box this tool used to raise afterwards: the reason now
+  // arrives with the rejection, from the human or the orchestrator, in one
+  // round trip.
+  const spec: ChoiceSpec = {
+    title: goalDialogTitle,
+    options: [goalApproveLabel, goalRejectLabel],
+    recommended: goalApproveLabel,
+    declineRow: REVISE_ROW,
+  };
   let approved = false;
-  /** The orchestrator's decline reason, when the PM answered with one. */
-  let channelReason: string | undefined;
+  /** The decline reason, whichever side typed it (human box or channel). */
+  let declineReason: string | undefined;
   /** True when an instruct interrupt dismissed the approval box: not a rejection. */
   let approvalInterrupted = false;
   try {
     const outcome = await deps.askEitherSide(
       {
-        dialogKind: "confirm",
+        dialogKind: "select",
         topic: "goal-approval",
         title: goalDialogTitle,
-        options: [goalApproveLabel, goalRejectLabel],
+        options: choiceRows(spec),
         payload: goalText,
         // The station travels as a STRUCTURED field beside the draft, for the
         // same reason the restatement's does: a project manager approving on
@@ -331,75 +340,32 @@ export async function doProposeLoopGoal(
 
       },
       uiCtx.hasUI === true,
-      async (signal) => {
-        const ok = await deps.confirmBounded(
-          uiCtx,
-          goalDialogTitle,
-          buildGoalConfirmMessage(
-            goalText,
-            "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine,
-          ),
-          "（目标全文见上方消息）",
-          signal,
-        );
-        return ok ? goalApproveLabel : goalRejectLabel;
-      },
+      async (signal) => deps.askChoice(uiCtx, spec, {
+        body: buildGoalConfirmMessage(
+          goalText,
+          "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine,
+        ),
+        pointer: "（目标全文见上方消息）",
+        signal,
+      }),
     );
-    approved = outcome.answer === goalApproveLabel;
-    // The ORCHESTRATOR's decline reason (if it answered with one) becomes
-    // the rejection reason — the child renegotiates against it instead of
-    // waiting on the (PM-invisible) local input box.
-    channelReason = outcome.reason;
+    const pick = parseChoice(outcome.answer, spec);
+    approved = pick.kind === "chose" && pick.option === goalApproveLabel;
+    // The USER's own typed reason wins over the orchestrator's: the goal is
+    // theirs to judge, and the box they typed into is the one they saw.
+    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : outcome.reason;
     approvalInterrupted = outcome.by === "interrupted";
   } catch {
     approved = false;
   }
 
-  // The decision may carry a REASON — but only on REJECTION: the user
-  // rejects with the objection so the agent renegotiates against the real
-  // problem instead of re-asking. The CONFIRM path no longer asks for a
-  // reason (the approval is the whole signal; a per-approval input box was
-  // friction with nothing to act on). Reason input is best-effort — a
-  // headless/no-input environment simply yields no reason.
-  let reason: string | undefined;
-  if (!approved) {
-    // The PM's decline reason (via channel) wins — the child renegotiates
-    // against the REAL objection. Without one, the reason is asked THROUGH
-    // the channel too (topic goal-reason), so a PM that rejected the goal
-    // can supply it — and an instruct interrupt can dismiss the box instead
-    // of leaving the child wedged on a PM-invisible local input (measured).
-    if (channelReason) {
-      reason = channelReason;
-    } else {
-      try {
-        const outcome = await deps.askEitherSide(
-          {
-            dialogKind: "input",
-            topic: "goal-reason",
-            title: "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
-            options: [],
-            payload: undefined,
-          },
-          uiCtx.hasUI === true,
-          async (signal) =>
-            (await uiCtx.ui?.input?.(
-              "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
-              "必填:哪里不合适",
-              // P1 FIX (2026-09-17): the signal MUST reach pi's dialog, or an
-              // instruct interrupt cannot dismiss the box and the child stays
-              // wedged on it forever (the measured deadlock's true culprit).
-              signal ? { signal } : undefined,
-            )) ?? undefined,
-        );
-        // An INTERRUPTED reason box means nobody answered: stay undefined.
-        reason = outcome.by === "interrupted" || outcome.by === "dismissed"
-          ? undefined
-          : (outcome.answer ?? "").trim() || undefined;
-      } catch {
-        reason = undefined;
-      }
-    }
-  }
+  // The decision may carry a REASON — but only on REJECTION: the user rejects
+  // with the objection so the agent renegotiates against the real problem
+  // instead of re-asking. Since 2026-09-08 that reason is typed into the SAME
+  // dialog (the template's decline row), so there is no second box to raise
+  // and no PM-invisible input for an instruct to wedge on (measured deadlock,
+  // 2026-09-17).
+  const reason: string | undefined = approved ? undefined : declineReason;
   if (!approved) {
     // An INTERRUPTED approval is not a rejection: the PM stopped the goal
     // dialog to say something else, so the child should re-submit when it
@@ -454,7 +420,6 @@ export async function doProposeLoopGoal(
     // re-derived afterwards: the station the user saw is the station the
     // contract carries.
     station,
-    ...(reason ? { reason } : {}),
   };
   // This goal's negotiation is over, so its audit count ends with it: the
   // NEXT goal's first audit must announce round 1, not round N+1.
@@ -463,7 +428,7 @@ export async function doProposeLoopGoal(
   // confirmed, so un-goaled turns stop counting from here.
   delete goalSt.turnsWithoutGoal;
   deps.persist(ctx, goalRoot);
-  deps.log(`loop goal approved by the user for ${goalRoot} (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
+  deps.log(`loop goal approved by the user for ${goalRoot} (${goalText.length} chars)`);
   return {
     content: [{
       type: "text",
@@ -471,10 +436,9 @@ export async function doProposeLoopGoal(
 
         "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
         "yourself drops the approval and blocks shipping).\n" +
-        stationLine +
-        (reason ? `\nUser's note on approval: ${reason}` : ""),
+        stationLine,
     }],
-    details: { approved: true, station, reason: reason ?? null },
+    details: { approved: true, station },
   };
 }
 
