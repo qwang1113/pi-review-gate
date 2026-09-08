@@ -308,6 +308,8 @@ import {
   registerJudgeSessionTools,
   registerJudgeWaitTool,
   probeJudgeRound,
+  doWait,
+  doClose,
   type JudgeSessionToolDeps,
 } from "../lib/judge-session-tools.ts";
 
@@ -858,6 +860,48 @@ export default function reviewGate(pi: ExtensionAPI) {
         onUpdate,
         signal,
       ),
+      now: () => Date.now(),
+      aborted: () => signal?.aborted === true,
+    }) as ReturnType<typeof callTool>;
+
+  }
+
+  /**
+   * THE GATE'S OWN WAIT (2026-09-08) — same round-end rule as
+   * `awaitAuditReport` above (one synchronous audit chain, nobody there to act
+   * on a finding, so "anything but a report" is unfinished), but the single
+   * `wait` step addresses the auditor by JUDGE ID through `doWait`
+   * directly instead of `callTool("judge_wait", { repo })`. The tool path
+   * re-runs `addressJudge`'s "has this session edited that repo" check, which
+   * refuses a legitimate self-audit of an unedited repo (measured: five
+   * consecutive "等待未命中本轮 report" on a cross-repo goal audit). The
+   * opener check still runs inside `doWait`; only the repo-addressing is
+   * bypassed, and the judgeId comes from this session's own registry
+   * (`judgeChildByRole`), never from an agent-supplied parameter.
+   */
+  async function selfAuditWait(
+    root: string,
+    ctx: unknown,
+    onUpdate: ToolUpdate | undefined,
+    signal: AbortSignal | undefined,
+  ) {
+    return awaitRoundReport({
+      wait: (timeoutMs) => {
+        const judgeId = judgeChildByRole(root, "goal-auditor")?.judgeId;
+        if (judgeId === undefined) {
+          return Promise.resolve({
+            content: [{ type: "text", text: "review-gate: no judge on record — submit a round first (judge_submit)." }],
+            details: { done: false, reason: undefined, role: undefined, hasVerdict: false },
+            isError: true,
+          });
+        }
+        return doWait(
+          selfSessionDeps(),
+          { sessionId: judgeId, timeoutMs },
+          signal === undefined ? undefined : { aborted: signal.aborted },
+          onUpdate,
+        );
+      },
       now: () => Date.now(),
       aborted: () => signal?.aborted === true,
     }) as ReturnType<typeof callTool>;
@@ -6060,7 +6104,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       // audit. Wait motion is forwarded into the chain's own progress, else a
       // minutes-long audit shows no motion at all.
       awaitRoundEnd: async (root) => {
-        const waited = await awaitAuditReport(root, waitCtx, forwardWaitUpdates(progress), signal);
+        // THE GATE WAITS ON ITSELF (2026-09-08): this chain dispatched the
+        // auditor itself and holds its judgeId, so it waits through `doWait`
+        // DIRECTLY — routing through `callTool("judge_wait", { repo: root })`
+        // would re-run `addressJudge`'s "has this session edited that repo"
+        // check and refuse a legitimate self-audit of an unedited repo
+        // (measured: five consecutive "等待未命中本轮 report"). The opener
+        // check still runs inside `doWait`; only the repo-addressing is
+        // bypassed. Waiting semantics are untouched: same round-end rule via
+        // `awaitRoundReport` — see `selfAuditWait`.
+        const waited = await selfAuditWait(root, waitCtx, forwardWaitUpdates(progress), signal);
         const details = (waited.details ?? {}) as { done?: unknown; reason?: unknown };
         if (!waited.isError && details.done === true && details.reason === "report") {
           return { ok: true, detail: "" };
@@ -6077,13 +6130,22 @@ export default function reviewGate(pi: ExtensionAPI) {
       // row it would be found by no longer exists. `hadPane` is read HERE,
       // before the close, because it is the only moment it is still knowable.
       closeJudge: async (root, role) => {
+        // SAME BYPASS AS THE WAIT (2026-09-08): the gate reclaims the auditor
+        // it opened itself — `callTool("judge_close", { repo: root })` would
+        // refuse on an unedited repo and leak the pane (measured: five
+        // "judge pane 回收失败…is not one of the repositories" in the audit
+        // log). `doClose` by judgeId keeps the opener check, skips only the
+        // repo-addressing.
         const hadPane = judgeChildByRole(root, role)?.paneId !== undefined;
-        const closed = await callTool("judge_close", { role, repo: root }, waitCtx);
+        const judgeId = judgeChildByRole(root, role)?.judgeId;
+        const closed = judgeId === undefined
+          ? { isError: false, content: [{ type: "text", text: "no judge on record — nothing to close." }], details: { closed: true, terminated: false } }
+          : await doClose(selfSessionDeps(), { role, sessionId: judgeId });
         return {
-          ok: closed.isError !== true && closed.details?.closed === true,
+          ok: closed.isError !== true && (closed.details as { closed?: unknown } | undefined)?.closed === true,
           hadPane,
-          terminated: closed.details?.terminated === true,
-          note: toolText(closed).split("\n")[0]?.trim() || undefined,
+          terminated: (closed.details as { terminated?: unknown } | undefined)?.terminated === true,
+          note: toolText(closed as { content: { type: string; text: string }[] }).split("\n")[0]?.trim() || undefined,
         };
       },
       auditPassed: (root, pending) => {
@@ -6392,6 +6454,21 @@ export default function reviewGate(pi: ExtensionAPI) {
   // those chains and once for the AGENT, which needs a way to wait for its
   // judge's next message that is not a hand-written sleep loop (2026-09-05,
   // user decision D1).
+  /**
+   * THE GATE'S OWN DEPS HANDLE (2026-09-08) — `judgeSessionDeps` is the object
+   * the agent-facing `judge_wait` / `judge_close` registrations close over;
+   * the gate's self-audit chains (`selfAuditWait`, `auditRunDeps.closeJudge`)
+   * call the SAME `doWait` / `doClose` implementations through this accessor
+   * instead of `callTool`, so the repo-addressing check inside `addressJudge`
+   * is bypassed for the gate's own auditor only. One object, not a copy: any
+   * drift between "what the agent's wait checks" and "what the gate's wait
+   * checks" would be a second implementation (哲学三). Agent-facing tools keep
+   * the full check — they still go through `addressJudge` with `repo`.
+   */
+  function selfSessionDeps(): JudgeSessionToolDeps {
+    return judgeSessionDeps;
+  }
+
   const judgeSessionDeps: JudgeSessionToolDeps = {
 
     resolveRepo: (requested) => {
@@ -6402,6 +6479,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     callerId: () => callerIdentity(),
     hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy; },
     saveHierarchy: (next) => setHierarchy(next),
+    findChildById: (judgeId) => {
+      const c = ownJudges().find((e) => e.judgeId === judgeId);
+      if (!c) return undefined;
+      return {
+        judgeId: c.judgeId,
+        role: c.role,
+        repoRoot: c.repoRoot,
+        openerId: c.openerId,
+        ...(c.paneId === undefined ? {} : { paneId: c.paneId }),
+        ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
+        sessionDir: c.sessionDir,
+        ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
+      };
+    },
     findChild: (root, role, judgeId) => {
       const c = findJudgeChild(root, role, judgeId);
       if (!c) return undefined;

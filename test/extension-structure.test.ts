@@ -5079,11 +5079,16 @@ test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by disp
 test("the audit chain's closeJudge reports what the reclaim achieved", () => {
   const dep = windowOf("closeJudge: async (root, role) => {", /\n      \},\n/, "closeJudge dep");
   assert.match(dep, /return \{/, "the outcome is returned, never discarded");
-  assert.match(dep, /terminated: closed\.details\?\.terminated === true/,
-    "whether the pane is really gone comes from the tool, not from an assumption");
+  // 2026-09-08: the close goes through `doClose` directly (gate-self bypass
+  // of the repo check) — the terminated reading is a cast-guarded property
+  // read off the same reply shape. What is pinned is that the value comes
+  // from the TOOL's reply, not from an assumption.
+  assert.match(dep, /terminated:/, "the outcome reports termination");
+  assert.match(dep, /closed\.details/, "…read off the tool reply");
+  assert.match(dep, /doClose\(selfSessionDeps\(\)/, "the gate closes its own auditor directly");
   // `hadPane` is only knowable BEFORE the close: the row is dropped by it.
   const hadPaneAt = dep.indexOf("const hadPane =");
-  const callAt = dep.indexOf('callTool("judge_close"');
+  const callAt = dep.indexOf("doClose(selfSessionDeps()");
   assert.ok(hadPaneAt >= 0 && callAt >= 0, "both halves are present");
   assert.ok(hadPaneAt < callAt, "hadPane must be read before the row is dropped");
 });

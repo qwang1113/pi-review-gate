@@ -17,8 +17,9 @@ const HOOK_INSTALLER = join(ROOT, "scripts", "install-git-hooks.sh");
 // The pinned companion platform: every entry must also appear in
 // COMPANION_PACKAGES in scripts/install-package.mjs (the manifest test
 // cross-checks the two lists).
+// 2026-09-08: pi-hashline-edit-pro uninstalled — the companion platform is
+// down to three (editor integration, MCP tooling, notifications).
 const COMPANION_EXPECTED = [
-  "pi-hashline-edit-pro",
   "pi-mcp-adapter",
   "pi-notify",
   "pi-vim",
@@ -70,7 +71,7 @@ test("package.json is a publishable pi package (manifest, peers, postinstall)", 
   // COMPANION_PACKAGES exactly, else a companion never gets registered.
   const installer = readFileSync(join(ROOT, "scripts", "install-package.mjs"), "utf8");
   const companions = [...installer.matchAll(/"npm:([^"]+)"/g)].map((m) => m[1]!.replace(/^@.*?\//, "")).sort();
-  assert.ok(companions.length >= 4, `expected ≥4 companions, found ${companions.length}`);
+  assert.ok(companions.length >= 3, `expected ≥3 companions, found ${companions.length}`);
   for (const dep of Object.keys(deps)) {
     if (dep.startsWith("@quintinshaw/") || dep.startsWith("@earendil-works/")) continue; // non-companion
     const bare = dep.replace(/^@.*?\//, "");
@@ -605,7 +606,6 @@ test("postinstall registers missing companion packages via pi install", () => {
   const expectedMissing = [
     "npm:pi-mcp-adapter",
     "npm:pi-notify",
-    "npm:pi-hashline-edit-pro",
   ];
   assert.deepEqual(installs, expectedMissing.map((s) => `install ${s}`));
 });
@@ -619,7 +619,6 @@ test("postinstall registers several missing companions (partial home)", () => {
   const expectedMissing = [
     "npm:pi-notify",
     "npm:pi-vim",
-    "npm:pi-hashline-edit-pro",
   ];
   assert.deepEqual(installs, expectedMissing.map((s) => `install ${s}`));
 });
@@ -631,7 +630,6 @@ test("postinstall skips companions already present in settings.json", () => {
     "npm:pi-mcp-adapter",
     "npm:pi-notify",
     "npm:pi-vim",
-    "npm:pi-hashline-edit-pro",
   ];
   const { status, stderr, installs } = runInstallerWithFakePi(home, all);
   assert.equal(status, 0, `installer failed: ${stderr}`);
@@ -653,7 +651,7 @@ test("postinstall registers ALL companions when settings.json has none", () => {
   // Every npm: spec in COMPANION_PACKAGES must be registered, in order.
   const installerSrc = readFileSync(INSTALLER, "utf8");
   const specs = [...installerSrc.matchAll(/"npm:[^"]+"/g)].map((m) => m[0].slice(1, -1));
-  assert.ok(specs.length >= 4, `expected ≥4 companions, got ${specs.length}`);
+  assert.ok(specs.length >= 3, `expected ≥3 companions, got ${specs.length}`);
   assert.deepEqual(installs, specs.map((s) => `install ${s}`));
 });
 

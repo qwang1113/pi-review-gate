@@ -10,6 +10,8 @@ import assert from "node:assert/strict";
 import {
   registerJudgeSessionTools,
   registerJudgeWaitTool,
+  doWait,
+  doClose,
   probeJudgeRound,
   probeJudgeWait,
   recentStreamFindings,
@@ -137,6 +139,10 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     findChild: (root, role, judgeId) => {
       state.calls.push(`findChild(${root},${role ?? "-"},${judgeId ?? "-"})`);
       if (role) return state.children.find((c) => c.role === role);
+      return state.children.find((c) => c.judgeId === judgeId);
+    },
+    findChildById: (judgeId) => {
+      state.calls.push(`findChildById(${judgeId})`);
       return state.children.find((c) => c.judgeId === judgeId);
     },
     channelIO: () => io,
@@ -876,4 +882,35 @@ test("stream findings still arrive newest-last, malformed lines dropped", () => 
   assert.deepEqual(recentStreamFindings(f.deps, "/nope"), []);
   f.files.set("/logs/stream.jsonl", "not json\n" + JSON.stringify({ severity: "P2", issue: "naming" }));
   assert.deepEqual(recentStreamFindings(f.deps, "/logs/stream.jsonl"), ["[P2] naming"]);
+});
+
+test("REGRESSION (2026-09-08): the gate's self-audit bypasses the repo check — agent tools keep it", async () => {
+  // Measured: five consecutive "等待未命中本轮 report" on a cross-repo goal
+  // audit — the chain's judge_wait/judge_close went through addressJudge's
+  // "has this session edited that repo" check and were refused, while the
+  // auditor's READY sat in the channel. The gate's own chains now call
+  // doWait/doClose directly by judgeId; agent-facing tools keep the check.
+  const f = fake();
+  f.repo = { ok: false, error: "review-gate: repo X is not one of the repositories this session has edited" };
+  const c = seed(f);
+  writeReport(f, c, "READY");
+
+  // Agent path: repo check refuses first — the report is never even looked at.
+  const viaTool = await call(f, "judge_wait", { role: "reviewer" });
+  assert.equal(viaTool.isError, true);
+  assert.match(textOf(viaTool), /not one of the repositories/);
+
+  // Gate path: same deps, same child, addressed by judgeId — the report ends it.
+  // (doWait reports success with isError UNSET — only fail() sets isError:true.)
+  const direct = await doWait(f.deps, { sessionId: c.judgeId }, undefined, undefined);
+  assert.notEqual(direct.isError, true, `gate self-wait must bypass the repo check: ${textOf(direct)}`);
+  assert.equal(direct.details?.done, true);
+  assert.equal(direct.details?.reason, "report");
+
+  // Close path, same split: tool refuses, direct close succeeds.
+  const closeTool = await call(f, "judge_close", { role: "reviewer" });
+  assert.equal(closeTool.isError, true);
+  const closeDirect = await doClose(f.deps, { sessionId: c.judgeId });
+  assert.notEqual(closeDirect.isError, true, `gate self-close must bypass the repo check: ${textOf(closeDirect)}`);
+  assert.equal(closeDirect.details?.closed, true);
 });
