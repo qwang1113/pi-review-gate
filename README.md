@@ -1923,12 +1923,14 @@ second line of defence.
 | `run_precommit --mode full` (this repo) | ~30 s | Suite is process-spawn bound: ~2万 fork/exec per full run; the race regressions are 4 parallel files (~8s each). Wall sits at the machine's spawn throughput (concurrency 13/24 both ~30s) — a spawn-cut would need test-infrastructure work |
 | **A review round (any diff size)** | **~3 min reviewer, precommit first** | ONE reviewer, one commit range, no engine — precommit runs BEFORE the review (see the loop protocol); see `docs/execution-model.md` |
 
-**Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
-ran six consecutive times on this repo (typecheck concurrent with `npm test`,
-which contains the two timing regressions) — all six PASS; wall clock
-138–157 s, on par with the serial baseline (`npm test` ~137 s + typecheck
-~2 s). The parallel win lands on multi-step repos; see
-~2 s). The parallel win lands on multi-step repos.
+**Parallel-stability verification (2026-08-10, historical)**: when the suite
+was dominated by the two single-file timing loops, `run_precommit --mode
+full` ran six consecutive times on this repo (typecheck concurrent with `npm
+test`) — all six PASS; wall clock 138–157 s, on par with the serial baseline
+(`npm test` ~137 s + typecheck ~2 s). The parallel win lands on multi-step
+repos. The suite has since been restructured (2026-09-08: race loop split into
+four parallel groups, hook/fingerprint files re-split) — the current full-run
+wall is the ~30 s in the table above.
 The practical consequence: batching edits into fewer, larger review rounds
 saves far more wall time than any micro-optimization here, because the loop is
 billed per round.
