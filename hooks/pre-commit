@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# pi-review-gate defense-in-depth: verify gate sidecar before commit.
-# Validates review/precommit verdicts against current worktree fingerprint.
+# pi-review-gate pre-commit hook — THIN SHELL since 2026-09-08 (goal ②).
+#
+# The full verdict chain — sidecar shape/bypass, docSync, the L6 test-label
+# scan, the staged-divergence check with its fingerprint, and the final
+# verdict comparison — runs in ONE node process (scripts/pre-commit-check.cjs)
+# exec'd at the bottom. It used to cold-start node four times per commit.
+# This shell keeps only what the node process cannot own: environment
+# sanitisation, the fail-closed layout guards, and exit-code mapping.
+#
 # Bypass: REVIEW_GATE_BYPASS=1 git commit ...
 set -euo pipefail
 
@@ -21,7 +28,6 @@ else
   STATE_FILE=".pi/review-gate-state.json"
 fi
 
-
 # .blocked marker (extension write failure) → fail closed even without JSON.
 if [[ -f "${STATE_FILE}.blocked" ]]; then
   echo "[review-gate] gate sidecar write failure detected (.blocked marker) — failing closed." >&2
@@ -34,11 +40,7 @@ fi
 # the REAL repo's .git, so a commit/push from it would ship the real repo.
 # Fail closed instead of treating the missing sidecar as "extension not
 # active in this repo" — the sidecar absence is BY DESIGN here, not a sign
-# the gate is off. (REVIEW_GATE_BYPASS=1 above stays the human escape hatch.)
-# Both layouts are covered by one pattern: the repo-local
-# .pi/review-snapshots/rg-review-snap-* path and the tmpdir fallback
-# (<tmp>/rg-review-snap-*/<instance>) both contain an `rg-review-snap-` path
-# segment — mirroring isReviewSnapshotPath in lib/review-snapshot.ts.
+# the gate is off.
 case "$(pwd)" in
   */rg-review-snap-*)
     echo "[review-gate] refusing to commit/push from inside a review snapshot worktree (shares the real .git)." >&2
@@ -52,410 +54,32 @@ esac
 
 command -v node >/dev/null 2>&1 || {
   echo "[review-gate] node not found; cannot verify gate — failing closed." >&2
+  echo "[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ..." >&2
   exit 1
 }
 
-# Validate the complete sidecar shape BEFORE honoring bypass or an advisory
-# mode. This keeps every escape path fail-closed for corrupt, unknown-schema,
-# or forged states. Exit 10 means a valid bypass; 11 means a valid USER-chosen
-# explore/normal advisory state (an agent/auto-classified mode never
-# downgrades the hook).
-set +e
-node - "$STATE_FILE" <<'NODE'
-const { readFileSync } = require("node:fs");
-let state;
-try { state = JSON.parse(readFileSync(process.argv[2], "utf8")); } catch {
-  console.error("[review-gate] gate state unreadable — failing closed.");
-  process.exit(1);
-}
-const GATE_VERDICTS = new Set(["PENDING", "READY", "BLOCKED", "NEEDS_HUMAN"]);
-const PRECOMMIT_VERDICTS = new Set(["PASS", "FAIL", "NO_CHECKS_RUN", "NOT_RUN"]);
-if (state.schema !== 1) {
-  console.error("[review-gate] unknown gate schema — failing closed.");
-  process.exit(1);
-}
-const nullableString = (v) => v === null || typeof v === "string";
-const validRound = (r) => r && Number.isInteger(r.round) && r.round > 0 &&
-  (r.findingsTotal === null || (Number.isInteger(r.findingsTotal) && r.findingsTotal >= 0)) &&
-  Array.isArray(r.fingerprints) && r.fingerprints.every((v) => typeof v === "string") &&
-  typeof r.at === "string";
-if (!nullableString(state.sessionId) ||
-    typeof state.hasCodeChange !== "boolean" || typeof state.hasDocChange !== "boolean" ||
-    !state.review || !GATE_VERDICTS.has(state.review.verdict) ||
-    !nullableString(state.review.fingerprint) || !nullableString(state.review.at) ||
-    (state.review.docSync !== undefined && state.review.docSync !== "UPDATED" && state.review.docSync !== "NOT_NEEDED") ||
-    !state.precommit || !PRECOMMIT_VERDICTS.has(state.precommit.verdict) ||
-    !nullableString(state.precommit.fingerprint) || !nullableString(state.precommit.at) ||
-    // Optional lane metadata (fast/full split). A present field must be
-    // well-formed — a forged shape means a tampered sidecar, which fails
-    // closed like everything else. Absence is fine and is itself fail-closed:
-    // a missing testScope cannot claim a full run, so a push stays blocked.
-    (state.precommit.mode !== undefined &&
-      state.precommit.mode !== "fast" && state.precommit.mode !== "full") ||
-    (state.precommit.testScope !== undefined &&
-      state.precommit.testScope !== "related" && state.precommit.testScope !== "full" &&
-      state.precommit.testScope !== "skipped") ||
-    !Array.isArray(state.rounds) || !state.rounds.every(validRound) ||
-    !Number.isInteger(state.maxRounds) || state.maxRounds < 3 || state.maxRounds > 50 ||
-    !state.bypass || typeof state.bypass.active !== "boolean" ||
-    !nullableString(state.bypass.reason) || !nullableString(state.bypass.at) ||
-    (state.taskMode !== undefined && state.taskMode !== "loop" && state.taskMode !== "explore" && state.taskMode !== "normal") ||
-    (state.taskModeSource !== undefined && state.taskModeSource !== "auto" && state.taskModeSource !== "user") ||
-    (state.strategicResetFired !== undefined && typeof state.strategicResetFired !== "boolean") ||
-    // Optional agent-requested pause (pause_for_question). It never affects
-    // the ship decision, but a present field must be well-formed — a forged
-    // shape means a tampered sidecar, which fails closed like everything else.
-    (state.pausedQuestion !== undefined &&
-      !(state.pausedQuestion && typeof state.pausedQuestion === "object" &&
-        typeof state.pausedQuestion.question === "string" &&
-        typeof state.pausedQuestion.at === "string")) ||
-    // Optional user-granted scope limit (request_scope_limit). It only ever
-    // narrows what ARMS the gate (already reflected in hasCodeChange/
-    // hasDocChange in this same sidecar); a present field must still be
-    // well-formed — a forged shape means a tampered sidecar, which fails
-    // closed like everything else.
-    (state.scopeLimit !== undefined &&
-      !(state.scopeLimit && typeof state.scopeLimit === "object" &&
-        Array.isArray(state.scopeLimit.preexistingFiles) &&
-        state.scopeLimit.preexistingFiles.every((v) => typeof v === "string") &&
-        Array.isArray(state.scopeLimit.sessionFiles) &&
-        state.scopeLimit.sessionFiles.every((v) => typeof v === "string") &&
-        typeof state.scopeLimit.at === "string")) ||
-    // Optional session-edit attribution (scope hints). Never part of the ship
-    // decision, but a present field must be well-formed — forged shapes fail
-    // closed like everything else.
-    (state.sessionEditedFiles !== undefined &&
-      !(Array.isArray(state.sessionEditedFiles) &&
-        state.sessionEditedFiles.every((v) => typeof v === "string"))) ||
-    // Absent = a sidecar written before fingerprint versioning; any present
-    // value must be a real version number (a forged non-integer must not slip
-    // through and later compare "equal" to the running algorithm).
-    (state.fingerprintVersion !== undefined && !Number.isInteger(state.fingerprintVersion)) ||
-    // Optional review_checkpoint record: present must be well-formed (sha is
-    // a 40-hex git object id, at an ISO timestamp) — it becomes trust-bearing
-    // when prepare_review computes baseline..HEAD from it (round-5 Nit).
-    (state.checkpoint !== undefined &&
-      !(typeof state.checkpoint === "object" && state.checkpoint !== null &&
-        typeof state.checkpoint.sha === "string" && /^[0-9a-f]{40}$/.test(state.checkpoint.sha) &&
-        typeof state.checkpoint.at === "string")) ||
-    typeof state.updatedAt !== "string") {
-  console.error("[review-gate] gate state shape/verdict invalid — failing closed.");
-  process.exit(1);
-}
-if (state.bypass.active) process.exit(10);
-// SECURITY: only a USER-chosen explore/normal (confirmed dialog or /gate-mode)
-// makes the hook advisory. An agent/auto classification must never weaken the
-// commit gate.
-if ((state.taskMode === "explore" || state.taskMode === "normal") &&
-    state.taskModeSource === "user") process.exit(11);
-process.exit(0);
-NODE
-STATE_MODE=$?
-set -e
-[[ "$STATE_MODE" == "10" || "$STATE_MODE" == "11" ]] && exit 0
-[[ "$STATE_MODE" == "0" ]] || exit 1
-
-# Resolve helper scripts relative to the hook location.
+# The whole verdict chain, in ONE node process. Resolve the checker by
+# absolute path (node resolves relative requires against its own cwd, which is
+# the repo, not the hook dir).
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FP_SCRIPT="${HOOK_DIR}/../scripts/compute-fingerprint.cjs"
-# The node block requires it by path; make it absolute (node resolves
-# relative requires against its own cwd, which is the repo, not the hook).
-FP_SCRIPT="$(cd "$(dirname "$FP_SCRIPT")" && pwd)/$(basename "$FP_SCRIPT")"
-LABEL_SCRIPT="${HOOK_DIR}/../scripts/scan-test-labels.cjs"
+CHECK_SCRIPT="${HOOK_DIR}/../scripts/pre-commit-check.cjs"
+CHECK_SCRIPT="$(cd "$(dirname "$CHECK_SCRIPT")" && pwd)/$(basename "$CHECK_SCRIPT")"
 
-# Test-label English gate (L6). Missing script → warn+skip (NOT fail-closed):
-# an older install without this newer script must still be able to commit
-# (mirrors the B2 lesson — a new sub-gate must not brick existing installs).
-# Present script: a non-zero exit (violation OR internal error) blocks.
-if [[ -f "$LABEL_SCRIPT" ]]; then
-  node "$LABEL_SCRIPT" "$(pwd)" || {
-    echo "[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ..." >&2
-    exit 1
-  }
-else
-  echo "[review-gate] test-label scanner not installed (skipping L6) — reinstall hooks to enable." >&2
-fi
-
-# Staged/worktree divergence gate (see scripts/check-staged-divergence.cjs for
-# the full rationale and the exact safe/unsafe state table). The fingerprint is
-# staging-invariant by design, so it cannot notice that `git commit` would ship
-# an INDEX that differs from the reviewed worktree; this check closes that gap.
-#
-# A NUL-safe Node helper does the comparison rather than a shell pipeline: an
-# earlier `comm` of two newline-delimited `git diff` lists missed the
-# staged-delete + worktree-recreate case entirely (`git diff` does not list
-# untracked files) and relied on git's path quoting.
-#
-# Missing script → FAIL CLOSED (deliberately unlike the L6 scanner above).
-#
-# L6 is a style gate: skipping it on an older install costs a lint check. This
-# checker is different — it is the ONLY guard for a core safety property. The
-# fingerprint is intentionally staging-invariant, so it cannot see that the
-# INDEX holds content A while the reviewed worktree holds B; skipping this
-# check therefore re-opens exactly the fail-open the checker was written to
-# close (review binds B, fingerprint matches B, commit publishes A). "Older
-# install compatibility" is not a valid reason to fail open on a safety
-# invariant, and the install scripts ship this file alongside the hook, so a
-# hook that cannot find it is a broken/partial install — which must be fixed,
-# not silently tolerated.
-DIVERGENCE_SCRIPT="${HOOK_DIR}/../scripts/check-staged-divergence.cjs"
-# The second argument is git's own GIT_INDEX_FILE: for `git commit -a` and
-# `git commit -- <path>` git stages into a TEMPORARY index and points the hook
-# at it, so the plain .git/index is NOT what the commit publishes. Passing it
-# explicitly (rather than letting the script read the environment) keeps an
-# ambient variable from redirecting the check while still comparing the index
-# this commit will really write. Empty when git did not set it.
-#
-# `--emit-fingerprint` makes this ONE process answer both questions. The
-# checker has to materialize the worktree tree anyway; computing the
-# fingerprint from that same tree halves the git work AND removes a subtler
-# problem: a repository-configured `clean` filter is an arbitrary program, so
-# two separate materializations of an UNCHANGED worktree could legitimately
-# disagree, leaving the divergence verdict and the fingerprint describing
-# different content.
-if [[ -f "$DIVERGENCE_SCRIPT" ]]; then
-  FP_JSON=$(node "$DIVERGENCE_SCRIPT" "$(pwd)" "${GIT_INDEX_FILE-}" --emit-fingerprint) || {
-    echo "[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ..." >&2
-    exit 1
-  }
-else
-  echo "[review-gate] staged-divergence checker MISSING (${DIVERGENCE_SCRIPT}) — failing closed." >&2
-  echo "[review-gate] This check guards staged-vs-reviewed content; reinstall the hooks to restore it." >&2
+# Missing checker → FAIL CLOSED (a broken/partial install must be fixed, not
+# silently tolerated — same policy the divergence checker itself keeps).
+if [[ ! -f "$CHECK_SCRIPT" ]]; then
+  echo "[review-gate] pre-commit checker MISSING (${CHECK_SCRIPT}) — failing closed." >&2
+  echo "[review-gate] Reinstall the hooks to restore it." >&2
   echo "[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ..." >&2
   exit 1
 fi
 
-# Fallback for a MIXED install (new hook, older checker that does not know
-# --emit-fingerprint and therefore printed nothing): compute the fingerprint
-# separately rather than bricking the commit. Correctness is unaffected — only
-# the single-materialization property is lost.
-if [[ -z "$FP_JSON" ]]; then
-  FP_JSON=$(node "$FP_SCRIPT" "$(pwd)") || {
-    echo "[review-gate] cannot compute worktree fingerprint — failing closed." >&2
-    exit 1
-  }
-fi
+CHECK_CODE=0
+node "$CHECK_SCRIPT" "$STATE_FILE" || CHECK_CODE=$?
 
-node - "$STATE_FILE" "$FP_JSON" "$FP_SCRIPT" <<'NODE'
-const { readFileSync } = require("node:fs");
-const { worktreeTreeOid: worktreeTreeOidOf } = require(process.argv[4]);
-
-const statePath = process.argv[2];
-const fpJson = process.argv[3];
-
-let state;
-try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch {
-  console.error("[review-gate] gate state unreadable — failing closed.");
-  process.exit(1);
-}
-
-// Per-project docSync knob (defense-in-depth mirror of unmetRequirements).
-// Default ON; only an explicit `"docSync": false` in a valid config disables.
-// The user-global config (~/.pi/review-gate.json) is the FALLBACK — the
-// project config wins when it states the field, exactly like the extension's
-// field-by-field merge. Missing/corrupt config ⇒ default (enforced) —
-// fail-safe, never fail-open.
-function readDocSyncFlag(path) {
-  try {
-    const cfg = JSON.parse(readFileSync(path, "utf8"));
-    if (cfg && typeof cfg === "object" && typeof cfg.docSync === "boolean") return cfg.docSync;
-  } catch { /* missing/corrupt — fall through */ }
-  return undefined;
-}
-const projectDocSync = readDocSyncFlag(".pi/review-gate.json");
-const globalDocSync = readDocSyncFlag(
-  require("node:os").homedir() + "/.pi/review-gate.json"
-);
-const docSyncEnforced =
-  projectDocSync !== undefined ? projectDocSync
-  : globalDocSync !== undefined ? globalDocSync
-  : true;
-
-// Lane requirement. pre-push re-execs this hook with REVIEW_GATE_REQUIRE_FULL=1
-// because publishing needs a precommit run whose tests were not narrowed; a
-// plain commit is satisfied by the fast lane. Only the exact string "1" turns
-// it on, so an unrelated ambient value cannot silently relax OR tighten it.
-const requireFullTests = process.env.REVIEW_GATE_REQUIRE_FULL === "1";
-
-if (state.schema !== 1) {
-  console.error("[review-gate] unknown gate schema — failing closed.");
-  process.exit(1);
-}
-
-// P0/P1: reject malformed schema=1 payloads, AND unknown/forged verdict enums.
-// A payload with precommit.verdict:"READY" (not a real precommit verdict) must
-// be rejected here so it can't slip past the if-else chain below and fail-open.
-const GATE_VERDICTS = new Set(["PENDING", "READY", "BLOCKED", "NEEDS_HUMAN"]);
-const PRECOMMIT_VERDICTS = new Set(["PASS", "FAIL", "NO_CHECKS_RUN", "NOT_RUN"]);
-if (typeof state.hasCodeChange !== "boolean" || typeof state.hasDocChange !== "boolean" ||
-    !state.review || !GATE_VERDICTS.has(state.review.verdict) ||
-    !state.precommit || !PRECOMMIT_VERDICTS.has(state.precommit.verdict) ||
-    !Array.isArray(state.rounds) ||
-    !state.bypass || typeof state.bypass.active !== "boolean") {
-  console.error("[review-gate] gate state shape/verdict invalid — failing closed.");
-  process.exit(1);
-}
-
-if (state.bypass && state.bypass.active) process.exit(0);
-if (!state.hasCodeChange && !state.hasDocChange) process.exit(0);
-
-// Round-8 P1: bindings are COMMIT TREES now (review.fingerprint and
-// precommit.fingerprint hold git tree OIDs, not worktree digests). The
-// comparison target is the WORKTREE TREE — the exact content this commit
-// would publish (== the reviewed checkpoint tree at ship time).
-let currentFp;
-let runningVersion;
-try {
-  const fp = JSON.parse(fpJson);
-  if (fp.unavailable) throw new Error("fingerprint unavailable");
-  runningVersion = fp.version;
-  currentFp = worktreeTreeOidOf(process.cwd());
-} catch {
-  console.error("[review-gate] cannot compute the worktree tree — failing closed.");
-  process.exit(1);
-}
-
-// MESSAGE-ONLY REWRITE (mirror of lib/git-rewrite.ts isMessageOnlyRewrite).
-// `git commit --amend` and a `git rebase -i` reword produce a commit whose
-// TREE is identical to the one it replaces: no content enters the branch, so
-// the content gates below have nothing to judge. Refusing it is what made a
-// non-English commit message unfixable — both repair paths ran through this
-// hook, and the only remaining exit was a human running /gate-bypass. The
-// message itself is still checked (commit-msg hook, L5).
-//
-// THREE CONDITIONS, all of which must hold:
-//  1. COMMIT ONLY. A PUSH publishes the whole history, including commits this
-//     exemption never looked at, so pre-push (which re-execs this hook with
-//     REVIEW_GATE_REQUIRE_FULL=1) must NOT be exempt.
-//  2. The WORKTREE tree equals HEAD's.
-//  3. The INDEX — which is what the commit actually publishes — holds no
-//     staged change either. The staged-divergence checker above already
-//     refuses a divergent index, but this exemption does not lean on that:
-//     measuring both is one cheap git call and removes the dependency
-//     (mirrors isMessageOnlyRewrite in lib/git-rewrite.ts, which requires the
-//     same two facts at the tool layer).
-if (!requireFullTests) {
-  try {
-    const { execFileSync } = require("node:child_process");
-    const headTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
-    let staged = true;
-    try {
-      // Honors GIT_INDEX_FILE, so `git commit -a`'s temporary index is the
-      // one measured. Exit 1 = differences; any other failure stays "staged".
-      execFileSync("git", ["diff", "--cached", "--quiet", "HEAD"], { stdio: "ignore" });
-      staged = false;
-    } catch { staged = true; }
-    if (headTree && headTree === currentFp && !staged) process.exit(0);
-  } catch { /* no HEAD (root commit) — the gates below apply as usual */ }
-}
-
-
-// FINGERPRINT ALGORITHM MIGRATION.
-//
-// A digest is only meaningful under the algorithm that produced it. Because a
-// Pi extension is a RESIDENT process that loads its modules once, right after
-// an upgrade the extension still writes bindings from the OLD algorithm while
-// this hook already runs the NEW one — so the hook rejected the very commit
-// the gate had just approved, reporting "code was modified after the last
-// READY review" even though the worktree was byte-identical. Detect that
-// explicitly and say what to do, instead of blaming the code. Still
-// fail-closed: an unverifiable binding never ships.
-const bindingVersion = state.fingerprintVersion;
-if ((state.hasCodeChange || state.hasDocChange) &&
-    Number.isInteger(runningVersion) && bindingVersion !== runningVersion) {
-  const boundTo = bindingVersion === undefined ? "an unversioned (pre-migration)" : `a v${bindingVersion}`;
-  console.error(
-    `[review-gate] fingerprint algorithm mismatch: the gate state carries ${boundTo} binding, ` +
-    `this hook computes v${runningVersion}. The code was NOT modified — the binding simply cannot ` +
-    "be verified under the current algorithm.");
-  console.error("[review-gate] To clear it: (1) restart Pi (or /reload) so the extension picks up the " +
-    "new algorithm, (2) run the precommit runner again, (3) get a fresh READY review.");
-  console.error("[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ...");
-  process.exit(1);
-}
-
-const problems = [];
-
-if (state.hasCodeChange) {
-  if (state.review.verdict !== "READY") {
-    problems.push(`review is ${state.review.verdict}`);
-  } else if (!state.review.fingerprint) {
-    problems.push("review PASS has no fingerprint binding — cannot verify");
-  } else if (state.review.fingerprint !== currentFp) {
-    problems.push("code was modified after the last READY review (fingerprint mismatch)");
-  } else if (docSyncEnforced &&
-             state.review.docSync !== "UPDATED" && state.review.docSync !== "NOT_NEEDED") {
-    // docSync knob: the READY review must carry a code↔doc attestation.
-    problems.push("docSync enforced: READY review lacks a code↔doc attestation (UPDATED | NOT_NEEDED)");
-  }
-  // Round-9 P1 / round-10 P1: the unreviewed-commit check is a STANDALONE if,
-  // NOT an else-if on the fingerprint chain — chaining it keyed on the mere
-  // presence of review.commitSha swallowed the docSync branch behind it
-  // (record_review always sets commitSha on READY, so docSync was unreachable
-  // at the hook layer). It runs only when the review passed every check
-  // above, expressed directly as problems.length === 0 — a length guard, not
-  // a match on error-message wording: rephrasing a message or inserting a
-  // new problem type above cannot silently re-gate (or fail to gate) this
-  // branch.
-  if (state.review.verdict === "READY" && state.review.commitSha && state.review.fingerprint &&
-      problems.length === 0) {
-    // Commits since the reviewed commit whose tree differs from the reviewed
-    // tree are content no reviewer saw — HEAD's tree matching alone cannot
-    // see a change-and-revert or a never-re-reviewed checkpoint.
-    let unreviewed = 0;
-    try {
-      const { execFileSync } = require("node:child_process");
-      const out = execFileSync("git", ["rev-list", "--format=%T", `${state.review.commitSha}..HEAD`], { encoding: "utf8" });
-      unreviewed = out.split("\n").filter((l) => l && !l.startsWith("commit ") && l.trim() !== state.review.fingerprint).length;
-    } catch {
-      // Reviewed commit squashed/rebase away — the HEAD-tree match above is
-      // the content proof; a rebase that changed content already failed the
-      // fingerprint check. Skipping keeps a content-identical squash alive.
-      unreviewed = 0;
-    }
-    if (unreviewed > 0) {
-      problems.push(`unreviewed commits since the last READY review (${unreviewed} commit(s) with content no reviewer saw) — checkpoint the new work and run the next review round before shipping`);
-    }
-  }
-
-  // Fail-closed: only an explicit PASS bound to the current fingerprint passes.
-  if (state.precommit.verdict === "PASS") {
-    if (!state.precommit.fingerprint) {
-      problems.push("precommit PASS has no fingerprint binding — cannot verify");
-    } else if (state.precommit.fingerprint !== currentFp) {
-      problems.push("code was modified after the last precommit PASS (fingerprint mismatch)");
-    } else if (requireFullTests && state.precommit.testScope !== "full") {
-      // Lane split, mirroring lib/constants.ts requiresFullPrecommit and the
-      // extension's L1 check: a commit accepts the fast lane, a PUSH does not.
-      // An absent testScope predates the split and cannot claim a full run.
-      const covered = state.precommit.testScope || "unknown (sidecar predates the fast/full split)";
-      problems.push(
-        `push requires a FULL precommit run (tests covered: ${covered}) — ` +
-        'the fast lane only runs the tests related to the changed files; re-run with mode "full"');
-    }
-  } else if (state.precommit.verdict === "NOT_RUN") {
-    problems.push("precommit not run");
-  } else if (state.precommit.verdict === "FAIL") {
-    problems.push("precommit FAILED");
-  } else if (state.precommit.verdict === "NO_CHECKS_RUN") {
-    problems.push("precommit ran zero checks (not a pass)");
-  } else {
-    problems.push(`precommit verdict unrecognized (${String(state.precommit.verdict)})`);
-  }
-} else if (state.hasDocChange) {
-  if (state.review.verdict !== "READY") {
-    problems.push(`doc review is ${state.review.verdict}`);
-  } else if (!state.review.fingerprint) {
-    problems.push("doc review PASS has no fingerprint binding");
-  } else if (state.review.fingerprint !== currentFp) {
-    problems.push("docs were modified after the last READY review (fingerprint mismatch)");
-  }
-}
-
-if (problems.length) {
-  console.error("[review-gate] commit blocked:");
-  for (const p of problems) console.error(`  - ${p}`);
-  console.error("[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ...");
-  process.exit(1);
-}
-NODE
+# 10 = valid state bypass; 11 = valid USER-chosen advisory mode — both mean
+# the commit is allowed; anything else passes the checker's verdict through.
+case "$CHECK_CODE" in
+  10|11) exit 0 ;;
+esac
+exit "$CHECK_CODE"

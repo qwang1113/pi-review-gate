@@ -41,6 +41,7 @@
 
 import { execSync, execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync } from "node:fs";
+import { loadavg, availableParallelism } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { StringDecoder } from "node:string_decoder";
@@ -56,6 +57,7 @@ import {
   parseTestScript,
   planFastTests,
   runTestsByPathCommand,
+  throttleNodeTestCommand,
   shellQuote,
   splitTokens,
   stepEnv,
@@ -245,6 +247,35 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 
 function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
   const started = Date.now();
+  // Load-adaptive test concurrency (2026-09-08): when several sessions run
+  // full precommits at once, each node --test worker pool oversubscribes the
+  // machine. Throttling happens HERE, on the executed string, so the cache
+  // key (the unthrottled command) and the plan preamble stay stable — an idle
+  // run is byte-identical to before, a busy one just runs fewer workers.
+  let execCommand = command;
+  let throttleNote = "";
+  if (name === "test") {
+    try {
+      const [load1] = loadavg();
+      const cores = availableParallelism?.() ?? 4;
+      // npm-style `npm run test` may only be throttled when the script body
+      // really runs node --test — a non-node body would receive the flag as
+      // an argument of its own command (measured: a `cat` body broke). node
+      // IGNORES --test-concurrency after positional files, so the throttled
+      // npm shape is expanded to its body with the flag placed before the
+      // files (npm lifecycle scripts do not run on that path).
+      const testBody = typeof pkg?.scripts?.test === "string" ? pkg.scripts.test : null;
+      const testBodyIsNodeTest = typeof testBody === "string" && /^\s*node --test/.test(testBody);
+      execCommand = throttleNodeTestCommand(command, load1, cores, {
+        npmOk: testBodyIsNodeTest,
+        npmBody: testBody,
+      });
+      if (execCommand !== command) {
+        throttleNote = ` [system load ${load1.toFixed(1)} on ${cores} cores — test concurrency throttled]`;
+        console.error(`[precommit] ${throttleNote.trim()}`);
+      }
+    } catch { /* throttling must never break a run */ }
+  }
   return new Promise((resolve) => {
     // CPU priority: when checks actually run in parallel, `test` gets the
     // highest priority and every OTHER parallel step yields via `nice -n 10`.
@@ -253,7 +284,7 @@ function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
     // pacing intact. `nice` is POSIX and bash is already a hard requirement.
     // A step that runs alone (the lint:fix first stage, a single ecosystem
     // fallback) has no competitor and is never niced.
-    const cmd = yieldCpu ? `nice -n 10 ${command}` : command;
+    const cmd = yieldCpu ? `nice -n 10 ${execCommand}` : execCommand;
     const child = spawn("bash", ["-c", cmd], {
       cwd,
       // R-15 — a step is NOT this session. Stripping the gate's own session
