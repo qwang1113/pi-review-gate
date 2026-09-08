@@ -103,6 +103,27 @@ export const END_OF_TURN_CHECK =
   "结束本轮前自检：有没有「本该调工具却写成了文字」的事？" +
   "想问用户 → `ask_user`；改完了 → `judge_submit({role:\"reviewer\"})`；" +
   "拿不定主意 → `judge_submit({role:\"adviser\"})`。有就先调，别把工具的活写成一段话。";
+/**
+ * GATE-ANOMALY PROTOCOL (2026-09-08, user decision) — what an agent does when
+ * the gate itself looks broken. Measured failure: a replace-tool schema/gate
+ * conflict sent the session into self-diagnosis (reading the gate's own
+ * source), workaround edits (python heredocs) and blind retries — dozens of
+ * tool calls that never fixed the tool. The gate cannot police its own bugs;
+ * the human is the escalation path, so this protocol is injected into the
+ * standing block and the rule is: STOP and REPORT, never explore or route
+ * around. `request_arbitration` (a block wrongly refused) and `/gate-doctor`
+ * (diagnostics) remain the sanctioned channels and are unaffected.
+ */
+export const GATE_ANOMALY_PROTOCOL =
+  "## 发现门禁异常时（禁止自主探索，直接报告）\n" +
+  "如果工具/门禁表现异常——同一调用反复被拒但错误看不出是自己造成的、拒绝文案自相矛盾、" +
+  "工具参数 schema 与门禁要求冲突（如带 path 被拒、不带也被拒）——\n" +
+  "1. **禁止**：自主诊断门禁（深读 review-gate 扩展/lib 源码找原因）、绕路（python/sed 改文件、换非正规通道）、反复盲试。\n" +
+  "2. **直接报告**：停下，用 `ask_user` 把问题交给用户——现象、出问题的调用原文、门禁返回原文、" +
+  "你判断为什么是门禁问题而不是你的错（给出复现步骤）。等用户裁决，不自行继续。\n" +
+  "3. 正轨不受影响：`request_arbitration` 只用于「某个 block 是误判」的正式申诉；`/gate-doctor` 是给用户跑的诊断命令。";
+
+
 
 /**
  * Adopting a requirement (user ask, O12): understand, ask, restate, confirm.
@@ -144,6 +165,7 @@ export const EXPLORE_MODE_NOTE =
 /** The whole standing block, in the order an agent reads it. */
 export function buildAgentDirectives(mode?: "loop" | "explore"): string {
   return (`${TOOL_DECISION_TABLE}\n\n${MINIMALISM_REMINDER}\n\n${REQUIREMENT_PROTOCOL}\n\n${END_OF_TURN_CHECK}` +
+    `\n\n${GATE_ANOMALY_PROTOCOL}` +
     (mode === "explore" ? `\n\n${EXPLORE_MODE_NOTE}` : ""));
 }
 

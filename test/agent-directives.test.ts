@@ -5,6 +5,7 @@ import {
   buildAgentDirectives,
   buildWaitDiscipline,
   MINIMALISM_REMINDER,
+  GATE_ANOMALY_PROTOCOL,
 
   EXPLORE_MODE_NOTE,
   ORCHESTRATOR_WAIT_DISCIPLINE,
@@ -118,4 +119,14 @@ test("the standing block carries the minimalism reminder (cite, never quote)", (
   for (const rule of ["YAGNI", "复用优先", "能删就删", "新依赖须论证"]) {
     assert.ok(!MINIMALISM_REMINDER.includes(rule), `the four checks must not be quoted here (found: ${rule})`);
   }
+});
+
+test("the standing block carries the gate-anomaly protocol (report, never explore)", () => {
+  const text = buildAgentDirectives();
+  assert.ok(text.includes(GATE_ANOMALY_PROTOCOL), "the protocol renders in the standing block");
+  assert.ok(GATE_ANOMALY_PROTOCOL.includes("ask_user"), "reporting goes through ask_user");
+  assert.match(GATE_ANOMALY_PROTOCOL, /禁止.*自主诊断/, "self-diagnosis of the gate is prohibited");
+  assert.match(GATE_ANOMALY_PROTOCOL, /python\/sed 改文件|绕路/, "workarounds are prohibited");
+  assert.match(GATE_ANOMALY_PROTOCOL, /request_arbitration/, "the sanctioned appeal stays");
+  assert.match(GATE_ANOMALY_PROTOCOL, /gate-doctor/, "diagnostics stay with the user's command");
 });

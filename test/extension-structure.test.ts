@@ -1027,8 +1027,11 @@ test("gate mode is decided by the agent itself in set_gate_mode — no LLM class
   const inputBody = windowOf('pi.on("input"', "\n  });", "first-input capture handler");
   assert.doesNotMatch(inputBody, /classify|evaluateModeChange|setTaskMode/,
     "the input handler must cache only — decisions stay in set_gate_mode");
-  assert.match(inputBody, /editFailurePending = false/,
-    "new user input must close the edit-failure nudge window");
+  // 2026-09-08: the nudge window NO LONGER closes on new user input — it
+  // closes on a successful edit or after one nudge (see lib/edit-discipline.ts).
+  // The input handler must not carry the old clearing semantics.
+  assert.doesNotMatch(inputBody, /editFailurePending = false/,
+    "new user input must NOT close the edit-failure nudge window");
   assert.match(SRC, /name:\s*["']set_gate_mode["']/);
   // USER REQUIREMENT: "no changes" means THIS session's own edits
   // (sessionEdited), NOT pre-existing worktree/branch changes — a new session

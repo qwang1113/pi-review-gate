@@ -445,6 +445,7 @@ import {
   EDIT_FAILURE_NUDGE,
   looksLikeBashFileWrite,
 } from "../lib/edit-discipline.ts";
+import { FULL_LANE_NUDGE, looksLikeFullLaneRun } from "../lib/test-run-discipline.ts";
 import { projectEditedContent } from "../lib/edit-projection.ts";
 import {
   evaluateReadonlyStall,
@@ -4572,6 +4573,20 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
 
+      // Test-run discipline nudge (prompt-only, non-blocking): a manual full
+      // `npm test` / `tsc --noEmit` in the MAIN session is pure waste — the
+      // submission chain runs the full lane itself, input-cached. Judge panes
+      // are exempt: a reviewer verifies the reviewed commit in its throwaway
+      // worktree and that full run IS the job. Skipped in normal mode.
+      if (state.taskMode !== "normal"
+        && readJudgeSideEnv(process.env) === undefined
+        && cmd && looksLikeFullLaneRun(cmd)) {
+        return {
+          content: [...(event.content ?? []), { type: "text", text: FULL_LANE_NUDGE }],
+          isError: event.isError === true,
+        };
+      }
+
       // Read-only drill stall guard (lib/readonly-stall.ts): bash is the
       // drill workhorse (grep/sed through node_modules/), so count it like
       // the read family. Deliberately at the END of the bash branch — after
@@ -7708,8 +7723,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
 
   pi.on("input", (event, ctx) => {
-    // A fresh user message resets the edit-failure nudge window.
-    editFailurePending = false;
+    // 2026-09-08: the edit-failure nudge window NO LONGER closes on a fresh
+    // user message — a session whose edit tool is broken (schema/gate
+    // conflict) would otherwise cross turns and silently fall into bash file
+    // edits with no reminder. It closes on a successful edit or after one
+    // nudge has been issued; see edit-discipline.ts.
     // A real user message resumes an ESC-abort pause: the user is speaking
     // again, so auto-continuation may re-arm from this turn on ("extension"
     // is how the gate injects its own follow-ups — those never count).
@@ -8896,11 +8914,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // required on every turn, so it is injected before any early return.
     let systemPrompt = event.systemPrompt + "\n\n" + LANGUAGE_DIRECTIVE;
 
-    // New turn: the edit-failure nudge window from the PREVIOUS turn is stale
-    // (a same-turn workaround is what we care about). Reset BEFORE the
-    // normal-mode early return so the window can never leak across turns in
-    // any mode.
-    editFailurePending = false;
 
     // STARTUP HARD CHECK (user requirement 2026-08-30): every role must have
     // a resolvable model chain in the agents config layer — no silent

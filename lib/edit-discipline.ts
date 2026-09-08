@@ -12,16 +12,24 @@
  * Two append sites:
  *  - edit/write tool FAILURE → append EDIT_FAILURE_NUDGE to that result.
  *  - a bash command that looks like a direct file write, while an edit failure
- *    is still pending IN THE SAME TURN → append BASH_WRITE_NUDGE to that
- *    result. The pending flag is cleared at turn start (before_agent_start),
- *    on a new user input, on any successful edit, and after one nudge, so
- *    ordinary bash usage never pays for a nudge.
+ *    is pending → append BASH_WRITE_NUDGE to that result.
+ *
+ * WINDOW SEMANTICS (2026-09-08, widened). The pending flag used to close at
+ * turn start and on every new user input, which left a systematic hole: an
+ * edit tool that fails for a PERSISTENT reason (schema/gate conflict) crosses
+ * turns, and the next turn's bash file edits sailed through with no reminder —
+ * measured over a whole round of python-heredoc edits after a replace-tool
+ * conflict. The flag now closes on exactly two events: a successful edit, or
+ * one nudge having been issued. So a session whose edit tool is broken keeps
+ * hearing the reminder on every bash file-write until it lands a real edit
+ * (the fix), and ordinary bash never pays because the window only opens on an
+ * edit failure in the first place.
  */
 
 /** bash commands that directly WRITE or MODIFY file contents (bypassing the
  *  edit/write tools). Broad on purpose: nudges are cheap and non-blocking, and
- *  the call sites gate them behind a same-turn edit-failure window, so false
- *  positives only occur right after a failed edit. */
+ *  the call sites gate them behind the edit-failure window, so false positives
+ *  only occur while an edit failure is on record. */
 const WRITE_PATTERNS: readonly RegExp[] = Object.freeze([
   /\b(sed|perl|ruby)\s+-i\b/,                        // in-place edits
   /\b(python3?|node|ruby)\s+-?\s*<</,               // heredoc script (conservative)
