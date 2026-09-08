@@ -373,13 +373,33 @@ export interface PanePlacement {
  */
 export function planPanePlacement(columns: readonly (readonly WindowPane[])[]): PanePlacement {
   if (columns.length === 0) {
-    throw new UnsafeTmuxCommand("planPanePlacement 需要一个非空的窗口布局");
+    throw new Error("planPanePlacement 需要一个非空的窗口布局");
   }
-  const column = columns.length >= 3 ? columns[2]! : columns[columns.length - 1]!;
-  return {
-    direction: columns.length >= 3 ? "-v" : "-h",
-    target: column[column.length - 1]!.id,
-  };
+  if (columns.length >= 3) {
+    const third = columns[2]!;
+    return { direction: "-v", target: third[third.length - 1]!.id };
+  }
+  // OPENING A NEW COLUMN NEEDS A PANE THAT SITS ALONE IN ITS COLUMN.
+  //
+  // tmux flattens a split into the target's PARENT container when the direction
+  // matches, and nests a new container when it does not. A pane inside a
+  // multi-pane column therefore gets a half-width neighbour inside its own
+  // column instead of a new column — measured on the lab server: splitting the
+  // rightmost column's LAST pane of a two-column window produced
+  // `{c1, c2[…{half, half}]}` and the three-column invariant became a lie.
+  // This is not hypothetical: close the second column of a three-column window
+  // and the third column's panes ARE the second column. A lone pane's parent
+  // IS the root container, so the split lands there. Rightmost such column, so
+  // the new column appears at the right edge.
+  //
+  // A window where EVERY column holds several panes has no such pane. The gate
+  // never builds one (only the third column ever shares its height), so the
+  // fallback keeps the previous behaviour: accept the nest rather than refuse
+  // to open the pane.
+  const alone = [...columns].reverse().find((column) => column.length === 1);
+  if (alone) return { direction: "-h", target: alone[0]!.id };
+  const last = columns[columns.length - 1]!;
+  return { direction: "-h", target: last[last.length - 1]!.id };
 }
 
 /**

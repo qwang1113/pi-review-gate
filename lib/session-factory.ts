@@ -311,7 +311,12 @@ export function closeSessionPane(
     return { ok: false, error: (error as Error).message };
   }
   const survivor = before?.columns.flat().find((pane) => pane.id !== paneId);
-  if (survivor) evenOutWindow(run, survivor.id);
+  // The column the closed pane lived in is the one whose heights changed; name
+  // it by a survivor so the equaliser spreads THAT column and nothing else.
+  const focus = before?.columns
+    .find((column) => column.some((pane) => pane.id === paneId))
+    ?.find((pane) => pane.id !== paneId)?.id;
+  if (survivor) evenOutWindow(run, survivor.id, focus);
   return { ok: true };
 }
 
@@ -456,28 +461,41 @@ function placementFor(run: PaneRunner, ownPane: string): PanePlacement {
  * 2026-09-08). Two axes, both via `select-layout -E` on a pane whose parent
  * container is the thing to spread:
  *
- *  - every column holding more than one pane gets its HEIGHTS spread evenly
- *    (the third column, and only ever the third one, in a window the gate
- *    built);
+ *  - the column that CHANGED gets its heights spread evenly. `focus` names a
+ *    pane in it (the new pane, or a survivor of the column a pane was closed
+ *    from). Spreading EVERY multi-pane column would also undo a manual resize
+ *    on a column this round never touched (reviewer P2);
  *  - a window that is exactly three columns wide gets its COLUMNS spread
- *    evenly too.
+ *    evenly — but only off a pane that sits ALONE in its column, because a
+ *    pane inside a shared column would spread that column's heights instead
+ *    (reviewer P2).
  *
  * More than three columns is deliberately left alone: the user's call was that
- * the rule stops NEW wide windows, it does not merge the ones already open. A
- * zoomed pane is left alone for the same kind of reason — the user is reading
- * it. Best-effort throughout: a cosmetic layout must never fail the spawn or
- * the close it follows.
+ * the rule stops NEW wide windows, it does not merge the ones already open.
+ *
+ * A zoomed window is skipped — the user is reading it. MEASURED (2026-09-08,
+ * lab server): `split-window`, `kill-pane` AND `select-layout -E` each unzoom
+ * the window, so on both paths that call this the probe never sees a zoomed
+ * window in today's tmux. The guard stays because the user asked for it and
+ * because it is what stops the equaliser from fighting a zoom if tmux ever
+ * stops clearing it — it is defensive, and its unit test pins the BRANCH, not
+ * a state a live server reaches.
+ *
+ * Best-effort throughout: a cosmetic layout must never fail the spawn or the
+ * close it follows.
  */
-function evenOutWindow(run: PaneRunner, via: string): void {
+function evenOutWindow(run: PaneRunner, via: string, focus?: string): void {
   const layout = probeWindowLayout(run, via);
   if (!layout || layout.zoomed) return;
   const even = (target: string): void => {
     try { run(buildEvenLayoutArgv(target)); } catch { /* cosmetic */ }
   };
-  for (const column of layout.columns) {
-    if (column.length > 1) even(column[0]!.id);
-  }
-  if (layout.columns.length === 3) even(layout.columns[0]![0]!.id);
+  const changed = focus
+    ? layout.columns.find((column) => column.some((pane) => pane.id === focus))
+    : undefined;
+  if (changed && changed.length > 1) even(changed[0]!.id);
+  const alone = layout.columns.find((column) => column.length === 1);
+  if (layout.columns.length === 3 && alone) even(alone[0]!.id);
 }
 
 /**
@@ -528,7 +546,7 @@ export async function openSessionPane(
   // belongs beside the opener so the successor inherits the left column when
   // the predecessor closes. Equalising here would only make the momentary
   // fourth column prettier.
-  if (spec.layout !== "beside-opener") evenOutWindow(run, paneId);
+  if (spec.layout !== "beside-opener") evenOutWindow(run, paneId, paneId);
   if (spec.verify) {
     const proof = await spec.verify(paneId);
     if (!proof.ok) {

@@ -75,7 +75,22 @@ test("THE LAYOUT: fewer than three columns opens a new one, three stacks in the 
     { direction: "-v", target: "%3" },
     "a window that is ALREADY too wide is not merged: the new pane still lands in the third column",
   );
-  assert.throws(() => planPanePlacement([]), UnsafeTmuxCommand, "an empty layout is a bug, not a layout");
+  // The measured trap (reviewer P1, 2026-09-08): close the second column of a
+  // three-column window and the third column's panes ARE the second column.
+  // Splitting that column's last pane NESTS a half-width pane inside it —
+  // three columns become a lie. A lone pane's parent is the root container, so
+  // the new column must be opened off one.
+  assert.deepEqual(
+    planPanePlacement([panes("%1"), panes("%2", "%3", "%4")]),
+    { direction: "-h", target: "%1" },
+    "the rightmost column holds three panes ⇒ open the new column off the column that sits alone",
+  );
+  assert.deepEqual(
+    planPanePlacement([panes("%1", "%2"), panes("%3", "%4")]),
+    { direction: "-h", target: "%4" },
+    "no column sits alone ⇒ fall back to the rightmost column's last pane (the nest is accepted; the pane still opens)",
+  );
+  assert.throws(() => planPanePlacement([]), /非空/, "an empty layout is a bug, not a layout");
 });
 
 test("the window's geometry is grouped by pane_left, never guessed", () => {

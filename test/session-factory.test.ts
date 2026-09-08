@@ -202,6 +202,28 @@ test("the three-column rule reads the WINDOW, never the opener's own child list"
     ["select-layout -E -t %1"], "the window is three columns wide now ⇒ spread the widths once");
 });
 
+test("widths are spread off a pane that sits ALONE, never one inside a shared column", async () => {
+  // A pane inside a multi-pane column spreads THAT COLUMN's heights, not the
+  // window's widths (reviewer P2). The width pass therefore has to pick a lone
+  // pane — and it must not touch a column this round never changed.
+  const seen: string[][] = [];
+  await openSessionPane(windowRunner(
+    ["%1 0 0 0", "%2 0 30 0", "%3 100 0 0", "%5 200 0 0"].join("\n"),
+    ["%1 0 0 0", "%2 0 30 0", "%3 100 0 0", "%5 200 0 0", "%9 200 60 0"].join("\n"),
+    seen,
+  ), {
+    ownPane: "%1",
+    cwd: "/repo",
+    layout: "child-column",
+    role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
+    command: ["pi"],
+  });
+  assert.deepEqual(seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" ")), [
+    "select-layout -E -t %5",
+    "select-layout -E -t %3",
+  ], "the changed column first, then the widths off the lone pane in column 2");
+});
+
 test("an unreadable window falls back to splitting the opener — the pane must open", async () => {
   const seen: string[][] = [];
   await openSessionPane(happyRunner(seen), {
@@ -218,6 +240,11 @@ test("an unreadable window falls back to splitting the opener — the pane must 
 });
 
 test("a zoomed window is left alone — the user is reading it", async () => {
+  // DEFENSIVE BRANCH, and this test pins the BRANCH, not a state a live server
+  // reaches: measured on the lab server, `split-window`, `kill-pane` and
+  // `select-layout -E` each unzoom the window, so the probe feeding this can
+  // only see `zoomed` if tmux changes that behaviour. The user asked for the
+  // guard, so it stays — asserted here so it cannot rot.
   const seen: string[][] = [];
   await openSessionPane(windowRunner(
     ["%1 0 0 1", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0"].join("\n"),

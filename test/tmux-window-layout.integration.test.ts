@@ -112,6 +112,25 @@ test("six sessions stay three columns, third column evenly shared", { skip: SKIP
     const afterById = new Map(geometry().map((p) => [p.id, p]));
     const afterHeights = after.columns[2]!.map((pane) => afterById.get(pane.id)!.height);
     assert.ok(spread(afterHeights) <= 1, `the remaining panes re-even, got ${afterHeights.join("/")}`);
+
+    // NOW THE TRAP (reviewer P1, 2026-09-08). Close the SECOND column and the
+    // third column's panes BECOME the second one. Opening the next session off
+    // that column's last pane nests a half-width pane inside it — so the rule
+    // has to pick a pane that sits alone, and the new column must really
+    // appear. This is the one path a pure unit test cannot prove.
+    assert.equal(closeSessionPane(runner, after.columns[1]![0]!.id).ok, true);
+    const two = parseWindowLayout(tmux(buildWindowLayoutArgv(own)));
+    assert.equal(two.columns.length, 2, "closing the second column leaves two");
+    assert.ok(two.columns[1]!.length > 1, "and the surviving column holds several panes");
+
+    await openLabSession(own, 6);
+    const three = parseWindowLayout(tmux(buildWindowLayoutArgv(own)));
+    assert.equal(three.columns.length, 3, "the next session opens a REAL third column, not a nest");
+    assert.deepEqual(
+      three.columns.map((column) => column.length),
+      [1, 1, two.columns[1]!.length],
+      "one pane each in the first two columns, the rest still sharing the third",
+    );
   } finally {
     try { tmux(["kill-server"]); } catch { /* already gone */ }
   }
