@@ -1,16 +1,21 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
+import { makeRepo, cleanupRaceDirs } from "./helpers/fingerprint-race.ts";
 
 // These stat-cache race regressions each carry a long timing loop and were
 // split out of test/fingerprint.test.ts (2026-09-08) so the loops run in
 // their own file while node --test parallelizes the remaining fingerprint
-// suites. The loops themselves are NOT parallelizable and NOT reducible —
-// see the note below.
+// suites.
+//
+// SPLIT INTO PARALLEL GROUPS (2026-09-08, same day): the 300-round racily-clean
+// loop is now 4 groups × 75 rounds, each in its OWN repo, spread over
+// fingerprint-race.test.ts (group 1) + fingerprint-race-2/3/4.test.ts. The
+// tracked-but-gitignored loop lives in fingerprint-race-gitignore.test.ts.
+// See the note below for why the split is a STRENGTHENING, not a reduction.
 
 neutraliseHostGitConfig();
 
@@ -20,52 +25,49 @@ const {
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "fingerprint.ts")
 );
 
-const tempDirs: string[] = [];
-function makeRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "rg-fp-"));
-  tempDirs.push(dir);
-  execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
-  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"], {
-    cwd: dir, stdio: "ignore",
-  });
-  return dir;
-}
-after(() => { for (const d of tempDirs) rmSync(d, { recursive: true, force: true }); });
+after(cleanupRaceDirs);
 
 /**
- * WHY THE RACE LOOPS BELOW ARE NOT TUNABLE (a rejected optimization).
+ * WHY THE RACE LOOPS ARE SHAPED THE WAY THEY ARE (history + 2026-09-08
+ * decision).
  *
- * These two loops dominate the suite — the 300-round one alone is ~73s of a
- * ~100s `npm test`, paid on every review round — so an env-scaled
- * `RG_RACE_ITERS` (25 for a commit-time fast path) was implemented, with a
- * measured justification: against a mutated implementation (shadow-index
+ * Historical: an env-scaled `RG_RACE_ITERS` (25 for a commit-time fast path)
+ * was implemented and REMOVED. Against a mutated implementation (shadow-index
  * backdate AND `--renormalize` both removed) the loop missed the edit in
- * 83/100 rounds, which would put the escape probability at 25 rounds around
- * 0.17^25.
+ * 83/100 rounds; but an independent reviewer reproduced that experiment and
+ * at 25 rounds the mutated implementation PASSED 3 of 5 runs. The rounds are
+ * not independent trials — they share one repository, and the window depends
+ * on filesystem timestamp granularity, machine load and pacing — so a
+ * per-round rate measured once cannot be exponentiated into a guarantee. The
+ * knob was removed: a safety loop whose strength cannot be stated honestly
+ * should not be reducible by an environment variable.
  *
- * An independent reviewer reproduced that experiment on the same machine and
- * got a materially different result: at 25 rounds the mutated implementation
- * PASSED 3 of 5 runs. The rounds are not independent trials — they share one
- * repository, and the window depends on filesystem timestamp granularity,
- * machine load and pacing — so a per-round rate measured once cannot be
- * exponentiated into a guarantee. The knob was therefore REMOVED rather than
- * kept with a weaker claim: a safety loop whose strength cannot be stated
- * honestly should not be reducible by an environment variable.
+ * The sound route was to make each ROUND cheaper, not to run fewer of them,
+ * and to prove the new construction still fails reliably against the mutated
+ * implementation before adopting it. Adopted first: one `git add` + one
+ * fingerprint per round instead of add + commit + two fingerprints
+ * (62s -> 29s, mutation-verified). The 300 rounds stayed in ONE repo.
  *
- * If these loops must get cheaper, the sound route is to make each ROUND
- * cheaper rather than to run fewer of them, and to prove the new
- * construction still fails reliably against the mutated implementation
- * before adopting it. Adopted 2026-09-08: the 300-round loop now pays one
- * `git add` + one fingerprint per round instead of add + commit + two
- * fingerprints, with the bare-rewrite window preserved — mutation-verified
- * (see the racily-clean test below) before the change landed.
+ * 2026-09-08 SECOND MEASUREMENT (why one-repo-300 gave way to 4×75): 12 runs
+ * against the mutated implementation showed the single-repo loop misses the
+ * window ENTIRELY in 2 of 12 runs (17%) — the window is a repo/timing-level
+ * event whose arrival is not guaranteed within any round budget, so the late
+ * rounds of a windowless run are pure waiting. Splitting the 300 rounds over
+ * FOUR independent repos samples four windows instead of waiting for one:
+ * full-suite-form mutation runs (node --test, ~70 files concurrent, ×3) were
+ * caught by EVERY group in every run (~iteration 16-30), versus 10/12 for the
+ * single-repo shape — and the groups run in parallel (~8s vs 29s). Guards
+ * intact, all groups pass all rounds (7/7). Same 300 rounds, same per-round
+ * semantics; only the window sampling changed (1 repo -> 4), which is a
+ * strengthening of what the loop asserts, not a reduction of it.
  *
  * Coverage note, so the next reader does not over-trust these loops: they only
  * fail when BOTH safeguards are gone. Removing just `--renormalize` is caught
  * deterministically by "an edit to a file with an ancient preserved mtime is
  * not invisible"; removing just the backdate is caught by NEITHER, because
  * `--renormalize` re-reads content unconditionally, which makes the backdate a
- * deliberate redundant second line of defence.
+ * deliberate redundant second line of defence. The 4×75 groups are the ONLY
+ * probabilistic guard for a backdate regression.
  */
 
 // NOTE ON A REJECTED TEST (kept as a warning, not as code).
@@ -81,7 +83,7 @@ after(() => { for (const d of tempDirs) rmSync(d, { recursive: true, force: true
 // nothing. Any future "deterministic race test" must first be shown to FAIL
 // against a mutated implementation.
 
-// P0 RACE REGRESSION (git "racily clean").
+// P0 RACE REGRESSION (git "racily clean") — GROUP 1 OF 4 (75 rounds).
 // The shadow index is seeded from the real index for speed. copyFileSync
 // stamps the copy with a NEW mtime, which suppressed git's racily-clean
 // re-hash: an edit landing in the same mtime granularity bucket as the index,
@@ -91,39 +93,23 @@ after(() => { for (const d of tempDirs) rmSync(d, { recursive: true, force: true
 // constructible one: an attempt to force it deterministically (restore the
 // cached stat after a same-size rewrite) provably asserts nothing, because
 // ctime and sub-second mtime still move and git re-hashes on its own — see the
-// rejected-test note above. Keep the full 300 rounds: a single measurement of
-// the per-round detection rate (83/100 with both safeguards removed) does NOT
-// license running fewer of them — an independent re-run of that same
-// experiment let a mutated implementation pass 3 of 5 times at 25 rounds,
-// because the rounds share one repository and depend on filesystem timestamp
-// granularity, load and pacing rather than being independent trials.
-// (Historically: 25/1500 fail-opens before the original fix, 0/1500 after.)
+// rejected-test note above. (Historically: 25/1500 fail-opens before the
+// original fix, 0/1500 after.)
 //
 // Shape matters: same-size content (`// v1` -> `// v2`) written IMMEDIATELY
-// after the commit is what lands in the racy window.
+// after staging is what lands in the racy window.
 //
-// ROUND-COST OPTIMIZATION (2026-09-08, mutation-verified before adopting —
-// the prove-before-adopt the rejected-test note above demands). Each round
-// used to pay one `git commit` + TWO fingerprints (before/after pair). The
-// commit turned out to be incidental: the racy window is opened by `git add`
-// recording the content's stat, not by HEAD moving (the fingerprint never
-// reads HEAD), and the before-fingerprint merely re-baselined a stat that the
-// previous round's add had already recorded. The new round is: bare rewrite
-// (lands in the window the previous add opened) -> fingerprint (must see the
-// rewrite) -> add (re-baselines for the next round) — one add + one
-// fingerprint per round. Mutation evidence on this machine (14 cores, load
-// ~3): with both safeguards removed, the old loop failed within 25s and the
-// new loop fails at iteration ~93 of 300 (8s) — the rewrite is still
-// detected, so the loop still asserts something. With safeguards intact both
-// loops pass all 300 rounds. Same repo, same window, same 300 rounds — only
-// the per-round cost dropped (~62s -> ~29s measured, same load).
-test("a same-size edit in the racy window is never invisible to the fingerprint (racily-clean)", () => {
-  // ONE repo, reused: the race lives in the (index mtime vs file mtime)
-  // relationship, which is re-established by every add, so repeated
-  // edit+stage cycles in a single repo probe the same window far more
-  // cheaply than building 300 repos. Mutation-verified to still catch the
-  // bug (reintroducing it fails this test well before the loop ends).
-  const ITERATIONS = 300;
+// ROUND-COST OPTIMIZATION (2026-09-08, mutation-verified before adopting):
+// the racy window is opened by `git add` recording the content's stat, not by
+// HEAD moving; the round is bare rewrite -> fingerprint (must see it) -> add
+// (re-baselines for the next round) — one add + one fingerprint, no commit.
+// See the file-top note for the 4×75 group split and its mutation evidence.
+test("a same-size edit in the racy window is never invisible to the fingerprint (racily-clean, group 1/4)", () => {
+  // ONE repo per GROUP, reused within the group: the race lives in the (index
+  // mtime vs file mtime) relationship, re-established by every add; repeated
+  // edit+stage cycles in a single repo probe the window cheaply. Four groups
+  // in parallel each probe their own repo = four window samples.
+  const ITERATIONS = 75;
   const dir = makeRepo();
   // Seed the stat baseline: content v0 staged, then the digest that a
   // size/mtime-trusting cache would wrongly reuse after a bare rewrite.
@@ -230,48 +216,4 @@ test("an edit to a file with an ancient preserved mtime is not invisible", () =>
     "a same-size edit to a file with a preserved ancient mtime was invisible to the fingerprint — " +
       "the index build must re-read content (--renormalize), not trust the stat cache",
   );
-});
-
-// P0 REGRESSION (found by independent review, then root-caused):
-// a file that matches .gitignore but is nonetheless TRACKED (`git add -f`)
-// is real, shippable content — `git commit -a` will commit changes to it.
-// Two distinct bugs made such edits invisible to the digest:
-//   1. `git add` refuses to stage an ignored path, so an EMPTY shadow index
-//      drops the file from the tree entirely; only a SEEDED index keeps it.
-//   2. an over-eager mtime-verification fallback deleted the seeded index on
-//      ~57% of runs (utimesSync loses sub-ms precision), silently producing
-//      case 1.
-// Net effect was a ~50% fail-open on shippable content.
-test("edits to a TRACKED but gitignored file still change the fingerprint", () => {
-  const ITERATIONS = 25; // was ~50% fail-open; any regression shows up fast
-  for (let i = 0; i < ITERATIONS; i++) {
-    const dir = makeRepo();
-    // Neutralize any ambient global ignore file on the developer's machine.
-    execFileSync("git", ["config", "core.excludesFile", "/dev/null"], { cwd: dir, stdio: "ignore" });
-    writeFileSync(join(dir, ".gitignore"), "*.gen.ts\n");
-    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
-    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "ignore rule"], {
-      cwd: dir, stdio: "ignore",
-    });
-    // Force-add + commit => genuinely tracked, therefore shippable.
-    writeFileSync(join(dir, "gen.gen.ts"), "export const v = 1;\n");
-    execFileSync("git", ["add", "-f", "gen.gen.ts"], { cwd: dir, stdio: "ignore" });
-    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "track generated"], {
-      cwd: dir, stdio: "ignore",
-    });
-
-    const before = computeFingerprint(dir);
-    writeFileSync(join(dir, "gen.gen.ts"), "export const v = 9;\n");
-    const after = computeFingerprint(dir);
-
-    assert.equal(before.unavailable, false, `iteration ${i}: fingerprint unexpectedly unavailable`);
-    assert.equal(after.unavailable, false, `iteration ${i}: fingerprint unexpectedly unavailable`);
-    assert.notEqual(
-      after.digest,
-      before.digest,
-      `iteration ${i}: an edit to a tracked-but-gitignored file was invisible to the fingerprint — ` +
-        "this is shippable content (`git commit -a` commits it), so it must invalidate a READY binding",
-    );
-    rmSync(dir, { recursive: true, force: true });
-  }
 });

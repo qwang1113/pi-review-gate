@@ -78,6 +78,29 @@ export function runPreCommit(dir: string, env: Record<string, string> = {}) {
  *  make every fixture take the migration path instead of the gate logic. */
 export const FP_VERSION = 2;
 
+export function runPrePush(dir: string, env: Record<string, string> = {}) {
+  return spawnSync("bash", [join(ROOT, "hooks", "pre-push")], {
+    cwd: dir, encoding: "utf8", env: { ...process.env, HOME: emptyHome, ...env },
+  });
+}
+
+/** Repo whose sidecar has READY+PASS bound to the REAL current fingerprint. */
+export function repoWithMatchingGates(extraReview: object = {}, extraConfig?: object, extraPrecommit: object = {}): string {
+  const dir = makeGitRepo();
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "lib.ts"), "// change\n");
+  execFileSync("git", ["add", "src/lib.ts"], { cwd: dir, stdio: "ignore" });
+  const fp = JSON.parse(execFileSync("node", [join(ROOT, "scripts", "compute-fingerprint.cjs"), dir], { encoding: "utf8" })).digest;
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  if (extraConfig) writeFileSync(join(dir, ".pi", "review-gate.json"), JSON.stringify(extraConfig));
+  writeFileSync(join(dir, ".pi", "review-gate-state.json"), JSON.stringify({
+    ...readyState(dir),
+    review: { verdict: "READY", fingerprint: fp, at: "t", ...extraReview },
+    precommit: { verdict: "PASS", fingerprint: fp, at: "t", ...extraPrecommit },
+  }));
+  return dir;
+}
+
 // Round-8 P1: bindings are COMMIT TREES — the fixture must carry the repo's
 // actual HEAD tree OID or every "gates met" case reads as mismatched.
 export interface ReadyFixture {
