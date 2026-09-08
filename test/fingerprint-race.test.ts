@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
-import { makeRepo, cleanupRaceDirs } from "./helpers/fingerprint-race.ts";
+import { makeRepo, cleanupRaceDirs, assertRacyCleanWindow } from "./helpers/fingerprint-race.ts";
 
 // These stat-cache race regressions each carry a long timing loop and were
 // split out of test/fingerprint.test.ts (2026-09-08) so the loops run in
@@ -105,42 +105,11 @@ after(cleanupRaceDirs);
 // (re-baselines for the next round) — one add + one fingerprint, no commit.
 // See the file-top note for the 4×75 group split and its mutation evidence.
 test("a same-size edit in the racy window is never invisible to the fingerprint (racily-clean, group 1/4)", () => {
-  // ONE repo per GROUP, reused within the group: the race lives in the (index
-  // mtime vs file mtime) relationship, re-established by every add; repeated
-  // edit+stage cycles in a single repo probe the window cheaply. Four groups
-  // in parallel each probe their own repo = four window samples.
-  const ITERATIONS = 75;
-  const dir = makeRepo();
-  // Seed the stat baseline: content v0 staged, then the digest that a
-  // size/mtime-trusting cache would wrongly reuse after a bare rewrite.
-  writeFileSync(join(dir, "file.ts"), "// v0a");
-  execFileSync("git", ["add", "file.ts"], { cwd: dir, stdio: "ignore" });
-  const seed = computeFingerprint(dir);
-  assert.equal(seed.unavailable, false, "seed fingerprint unavailable");
-  let previous = seed.digest;
-  for (let i = 1; i < ITERATIONS; i++) {
-    // Alternate between two SAME-SIZE contents so each write is a real change
-    // that a size/mtime-trusting stat cache would miss. Written immediately
-    // after the previous round's add -> lands in the racy window where the
-    // index mtime and the file mtime share a bucket (no commit needed: the
-    // add below already recorded this round's content for the NEXT rewrite).
-    const content = i % 2 === 0 ? `// v${i % 10}a` : `// v${i % 10}b`;
-    writeFileSync(join(dir, "file.ts"), content);
-    const fp = computeFingerprint(dir);
-    // Assert availability FIRST and separately. Two "__UNAVAILABLE__" results
-    // compare equal, so folding this into the notEqual below would report a
-    // spurious fail-closed as a fail-open and send the next reader chasing the
-    // wrong bug (it did exactly that once).
-    assert.equal(fp.unavailable, false, `iteration ${i}: fingerprint unavailable`);
-    assert.notEqual(
-      fp.digest,
-      previous,
-      `iteration ${i}: a real edit was invisible to the fingerprint (racily-clean fail-open) — ` +
-        "the shadow index mtime must be backdated",
-    );
-    previous = fp.digest;
-    execFileSync("git", ["add", "file.ts"], { cwd: dir, stdio: "ignore" });
-  }
+  // The loop body lives ONCE in test/helpers/fingerprint-race.ts
+  // (assertRacyCleanWindow) so a future edit to this P0 safety loop cannot
+  // silently leave stale copies in the other three group files. Each group
+  // creates its OWN repo = one independent window sample.
+  assertRacyCleanWindow(computeFingerprint, 75, "group 1/4");
 });
 
 // P0 CLOCK-SKEW REGRESSION (found by independent review).
