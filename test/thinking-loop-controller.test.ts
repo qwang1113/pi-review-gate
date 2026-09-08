@@ -15,6 +15,18 @@ function loopText(chars: number): string {
   return LOOP_SAMPLE.repeat(Math.ceil(chars / LOOP_SAMPLE.length)).slice(0, chars);
 }
 
+/** Long, healthy, never-repeating thinking — must never be cut. */
+function healthyThinking(chars: number): string {
+  const out: string[] = [];
+  let length = 0;
+  for (let i = 0; length < chars; i++) {
+    const line = `第${i}步：检查 ${i}.ts 里 ${i * 17} 行的条件分支，确认它与上游第 ${i * 3} 个调用的契约一致。`;
+    out.push(line);
+    length += line.length;
+  }
+  return out.join("").slice(0, chars);
+}
+
 function harness() {
   const injected: string[] = [];
   const notified: string[] = [];
@@ -51,7 +63,7 @@ test("a trip aborts, injects one notice for the model, and notifies the human", 
   assert.equal(h.aborts, 1);
   assert.deepEqual(h.injected, [THINKING_LOOP_INJECTION]);
   assert.deepEqual(h.notified, [THINKING_LOOP_NOTICE]);
-  assert.deepEqual(h.controller.state(), { truncating: true, recoveries: 1, tripped: true });
+  assert.deepEqual(h.controller.state(), { recoveries: 1, tripped: true });
 });
 
 test("auto-recovery stops at the cap but aborting and notifying continue", () => {
@@ -65,7 +77,6 @@ test("auto-recovery stops at the cap but aborting and notifying continue", () =>
   assert.equal(h.notified.at(-1), THINKING_LOOP_CAP_NOTICE);
   assert.equal(h.aborts, THINKING_LOOP_MAX_RECOVERIES + 1, "still aborts");
   assert.deepEqual(h.controller.state(), {
-    truncating: true,
     recoveries: THINKING_LOOP_MAX_RECOVERIES,
     tripped: true,
   });
@@ -96,26 +107,36 @@ test("a turn that ends without producing anything does not reset the counter", (
   assert.equal(h.controller.state().recoveries, 1);
 });
 
-test("truncateDisplay cuts only the tripped turn's thinking", () => {
+test("truncateDisplay is CONTENT-addressed, not session-addressed", () => {
+  // Reviewer P1, round 1: a session-level "truncating now" flag cut every
+  // thinking block while set and stopped cutting the tripped one as soon as
+  // the next turn cleared it. The transformer is handed a string, never a
+  // message id, so the ONLY correct owner of the decision is the content.
   const h = harness();
   const loop = loopText(50_000);
-  // Before any trip: untouched, whatever the message type.
-  assert.equal(h.controller.truncateDisplay(loop, "assistant-thinking"), loop);
-  spin(h);
+  const healthy = healthyThinking(50_000);
+
+  // Before any trip, the loop block is ALREADY cut — it is a loop on its face.
   const cut = h.controller.truncateDisplay(loop, "assistant-thinking");
   assert.ok(cut.startsWith(THINKING_TRUNCATION_MARKER));
   assert.ok(cut.length < loop.length);
-  // Assistant text and user messages are never rewritten.
+  // A healthy long block is never touched, tripped session or not.
+  assert.equal(h.controller.truncateDisplay(healthy, "assistant-thinking"), healthy);
+  // Non-thinking messages are never rewritten.
   assert.equal(h.controller.truncateDisplay(loop, "assistant"), loop);
   assert.equal(h.controller.truncateDisplay(loop, "user"), loop);
+
+  // After a trip AND after the next turn starts, the loop block stays cut —
+  // re-rendering it (resize, restored session) must not re-flood the terminal.
+  spin(h);
+  h.controller.startTurn();
+  assert.ok(h.controller.truncateDisplay(loop, "assistant-thinking").startsWith(THINKING_TRUNCATION_MARKER));
 });
 
-test("startTurn clears the display cut but keeps the recovery history", () => {
+test("startTurn keeps the recovery history", () => {
   const h = harness();
   spin(h);
-  assert.equal(h.controller.state().truncating, true);
   h.controller.startTurn();
-  assert.equal(h.controller.state().truncating, false);
   assert.equal(h.controller.state().recoveries, 1);
   assert.equal(h.controller.state().tripped, true);
 });

@@ -509,8 +509,8 @@ fail-closed）。`model-diagnose.ts`
 | `dialog-budget.ts` | 对话框的渲染行数预算——宿主不截断，长度必须自己管；选项行同样计入（`askChoice` 按 `choiceRows` 的实际行数收紧正文额度） |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |
 | `test-run-discipline.ts` | 识别全量测试/typecheck 命令（无参 `npm test` / `tsc --noEmit` / `node --test` 全树），追加「送审时门禁自动 full precommit」提醒；纯判定 + 文案，judge 豁免在接线处 |
-| `thinking-loop-guard.ts` | 思考空转（pure-thinking spinning）的**判定**：按 thinking/text/toolcall 三类增量折叠当前 assistant 消息，三条件齐备才判空转（零文本零工具调用 + thinking 过门槛 + 尾部窗口某个 n-gram 重复超阈值）；另导出 `truncateThinkingForDisplay`（显示截断，**字符与行数双上限**，无换行的循环样本也压得住）。纯逻辑、无 I/O，来源 deepseek-ai/deepseek-harness#5976 |
-| `thinking-loop-controller.ts` | 空转熔断的**状态机与动作**：命中后置显示截断标记、注入「停止空转、立即行动」、`abort()`、通知用户；同一会话连续自动续跑有上限（超过只中止与通知），有产出的回合重置计数。副作用（abort / notify / inject）全部注入，所以事件序列可单测；扩展只接线 |
+| `thinking-loop-guard.ts` | 思考空转（pure-thinking spinning）的**判定**：按 thinking/text/toolcall 三类增量折叠当前 assistant 消息，三条件齐备才判空转（零文本零工具调用 + thinking 过门槛 + 尾部 800 字符窗口里出现一整段**连续重复**：至少 2 个不同的 24 字符 n-gram 各重复 ≥12 次、且连续重复区 ≥300 字符）。24 字符与「连续区」两个判据都是实测逼出来的：8 字符 n-gram 会把模板式的正常思考（「步：检查 」每项重复一次）判成循环，而仅看重复次数又挡不住「一条长分隔线」。另导出 `truncateThinkingForDisplay`（显示截断，**字符与行数双上限**，无换行的循环样本也压得住）。纯逻辑、无 I/O，来源 deepseek-ai/deepseek-harness#5976 |
+| `thinking-loop-controller.ts` | 空转熔断的**状态机与动作**：命中后注入「停止空转、立即行动」、`abort()`、通知用户；同一会话连续自动续跑有上限（超过只中止与通知），有产出的回合重置计数。显示截断**不属会话状态**——transformer 只拿得到 markdown 与 messageType、拿不到消息身份，所以截断由内容自己判定（`isThinkingLoopContent` + 字符串缓存）；会话级标志会两头错：截断期间误截所有 thinking，下一轮又把被熔断的那条放回来（reviewer P1，第 1 轮）。副作用（abort / notify / inject）全部注入，所以事件序列可单测；扩展只接线 |
 | `edit-projection.ts` | 从 edit/write 入参投影出改后完整文件内容，供标签检查看到上下文 |
 | `edit-repo-scope.ts` | 一次编辑落在**哪个仓库**（`primary` / `other-repo` / `outside`）的唯一判定：git 有答案就听 git（调用方必须先爬到最近存在的祖先再问 git，跨仓库分支原样保留），没有答案时用 `fingerprint.ts` 的 `realFile` / `realDir` 解析两侧再按 `root + "/"` 边界判包含；解析后仍在仓库外的，再问一次「它到底属于哪个仓库」——「没有仓库」才跳过，「另一个仓库」照旧武装那个仓库。任何解析不出的情况一律回落 `primary`（fail-closed）。它存在的原因是仓库外的写入（子会话写进 `/tmp` 的完成报告）曾经作废 review 绑定，把已到手的 READY 打回 PENDING |
 | `file-size-gate.ts` | 新建源码文件 600 行硬拦、存量超阈值只提醒的纯判定 |

@@ -16,14 +16,22 @@
  *   1. the turn has produced ZERO text and ZERO tool-call content so far;
  *   2. its thinking has grown past `minThinkingChars`;
  *   3. the tail window is LOW ENTROPY: at least `minDistinctNgrams` DISTINCT
- *      n-grams each repeat `minRepeats` times. Real reasoning repeats an
- *      8-character phrase twelve times inside 800 characters essentially never;
- *      the upstream sample ("好。执行。好。（输出）好。好。") does it constantly.
- *      The distinct-count half is what keeps a single repeated RUN out of the
- *      verdict: one long `--------` rule repeats the same 8-gram dozens of
- *      times while the rest of the window is ordinary prose, and that is a
- *      drawing, not a loop. A real loop repeats a whole cycle, so MANY
- *      different n-grams cross the threshold at once.
+ *      n-grams each repeat `minRepeats` times AND the longest run of
+ *      consecutive positions whose n-gram repeats covers `minRepeatRun`
+ *      characters. The n-gram is 24 characters — a whole clause — and the RUN
+ *      is what separates a loop from ordinary template-shaped reasoning:
+ *      a session working through similar items repeats a fixed phrase
+ *      ("种可能：如果缓存键包含时间戳", "步：检查 ") over and over, but each
+ *      repeat is broken by the part that differs, so no long CONSECUTIVE
+ *      stretch repeats. A real loop repeats an entire cycle, so the whole
+ *      window is one unbroken repeat (measured: the upstream sample trips with
+ *      a run of ~777 characters, a healthy template-shaped trace peaks at 24,
+ *      and an 8-character n-gram version tripped that healthy trace at 1204
+ *      characters).
+ *
+ *      The distinct-count half keeps a single repeated RUN out of the verdict:
+ *      one long `--------` rule repeats the same n-gram hundreds of times over
+ *      a long consecutive stretch, but that is a drawing, not a loop.
  *
  * PURE, NO I/O. This module owns only the decision (and the display cut that
  * keeps the loop from flooding the terminal); the caller owns the stream
@@ -45,17 +53,26 @@ export interface ThinkingLoopConfig {
   minRepeats: number;
   /** How many DISTINCT high-frequency n-grams the window needs (a single run is not a loop). */
   minDistinctNgrams: number;
+  /** Characters of UNBROKEN repeat the window needs (scattered repeats are just prose). */
+  minRepeatRun: number;
 }
 
 export const THINKING_LOOP_DEFAULTS: ThinkingLoopConfig = Object.freeze({
   minThinkingChars: 1200,
   windowChars: 800,
-  ngramChars: 8,
+  // 24, not 8: see the header — short n-grams fire on ordinary template-shaped
+  // reasoning ("步：检查 " repeating once per file). A clause-length window only
+  // repeats when the whole clause does.
+  ngramChars: 24,
   minRepeats: 12,
   // 2, not 3: a two-character cycle ("好。好。好。") yields exactly two distinct
-  // 8-grams, and that is the fastest-spinning shape there is. One is the floor
+  // n-grams, and that is the fastest-spinning shape there is. One is the floor
   // that still excludes a drawn run — see `repeatedNgrams`.
   minDistinctNgrams: 2,
+  // 300 of the 800-character window must repeat UNBROKEN. Healthy
+  // template-shaped reasoning peaks at roughly one clause (~24) before the
+  // part that differs breaks the run; the upstream loop sample runs to ~777.
+  minRepeatRun: 300,
 });
 
 /**
@@ -72,6 +89,8 @@ export interface ThinkingLoopVerdict {
   repeats: number;
   /** How many distinct n-grams crossed `minRepeats`. */
   distinct: number;
+  /** Characters of unbroken repeat the window showed. */
+  run: number;
 }
 
 export interface ThinkingLoopSnapshot {
@@ -99,27 +118,32 @@ export interface NgramRepeatStats {
   max: number;
   /** How many DISTINCT n-grams repeat at least `minRepeats` times. */
   distinct: number;
+  /** Longest run of consecutive positions whose n-gram clears `minRepeats`. */
+  longestRun: number;
 }
 
 /**
  * Repeat statistics of `text`'s n-grams.
  *
- * `max` alone cannot tell a loop from a drawing: one long `--------` rule
- * repeats a single 8-gram dozens of times. `distinct` is the discriminator —
- * a loop repeats a whole CYCLE, so many different n-grams cross the threshold
- * together, while a run or a single duplicated phrase contributes one.
+ * `max` alone cannot tell a loop from a drawing, and `distinct` alone cannot
+ * tell a loop from template-shaped reasoning. `longestRun` is the
+ * discriminator: a loop repeats a whole CYCLE, so its repeats are CONSECUTIVE
+ * across the entire window, while ordinary reasoning that keeps reusing a
+ * phrase is interrupted by the part that differs every time.
  *
- * Both are 0 for text shorter than one n-gram.
+ * All three are 0 for text shorter than one n-gram.
  */
 export function repeatedNgrams(
   text: string,
   ngramChars: number,
   minRepeats: number,
 ): NgramRepeatStats {
-  if (ngramChars <= 0 || text.length < ngramChars) return { max: 0, distinct: 0 };
+  if (ngramChars <= 0 || text.length < ngramChars) return { max: 0, distinct: 0, longestRun: 0 };
   const counts = new Map<string, number>();
+  const grams: string[] = [];
   for (let i = 0; i + ngramChars <= text.length; i++) {
     const gram = text.slice(i, i + ngramChars);
+    grams.push(gram);
     counts.set(gram, (counts.get(gram) ?? 0) + 1);
   }
   let max = 0;
@@ -128,7 +152,48 @@ export function repeatedNgrams(
     if (count > max) max = count;
     if (count >= minRepeats) distinct += 1;
   }
-  return { max, distinct };
+  let longestRun = 0;
+  let run = 0;
+  for (const gram of grams) {
+    if ((counts.get(gram) ?? 0) >= minRepeats) {
+      run += 1;
+      if (run > longestRun) longestRun = run;
+    } else {
+      run = 0;
+    }
+  }
+  return { max, distinct, longestRun };
+}
+
+/** The ONE definition of "this window is a low-entropy loop". */
+export function isLowEntropyRepeat(stats: NgramRepeatStats, config: ThinkingLoopConfig): boolean {
+  return (
+    stats.max >= config.minRepeats &&
+    stats.distinct >= config.minDistinctNgrams &&
+    stats.longestRun >= config.minRepeatRun
+  );
+}
+
+/**
+ * Is this WHOLE thinking block a low-entropy loop?
+ *
+ * The display cut needs this instead of "the session tripped": Pi's markdown
+ * transformer is handed a markdown string and a message TYPE — never a message
+ * identity — so a session-level flag cannot say which block to cut. It cut every
+ * thinking block while set and stopped cutting the very block that tripped once
+ * the next turn cleared it. Judging the content itself has neither problem: the
+ * loop block is cut whenever it is rendered, every other block never is.
+ *
+ * Only the tail window is judged (same window the detector uses), and the
+ * floor applies: a short block is never a loop.
+ */
+export function isThinkingLoopContent(
+  text: string,
+  config: Partial<ThinkingLoopConfig> = {},
+): boolean {
+  const cfg: ThinkingLoopConfig = { ...THINKING_LOOP_DEFAULTS, ...config };
+  if (text.length < cfg.minThinkingChars) return false;
+  return isLowEntropyRepeat(repeatedNgrams(text.slice(-cfg.windowChars), cfg.ngramChars, cfg.minRepeats), cfg);
 }
 
 export function createThinkingLoopDetector(
@@ -164,9 +229,9 @@ export function createThinkingLoopDetector(
       if (sinceCheck < THINKING_LOOP_CHECK_INTERVAL) return undefined;
       sinceCheck = 0;
       const stats = repeatedNgrams(tail, cfg.ngramChars, cfg.minRepeats);
-      if (stats.max < cfg.minRepeats || stats.distinct < cfg.minDistinctNgrams) return undefined;
+      if (!isLowEntropyRepeat(stats, cfg)) return undefined;
       tripped = true;
-      return { thinkingChars, repeats: stats.max, distinct: stats.distinct };
+      return { thinkingChars, repeats: stats.max, distinct: stats.distinct, run: stats.longestRun };
     },
     reset() {
       thinkingChars = 0;
@@ -217,6 +282,9 @@ export function truncateThinkingForDisplay(
   const maxLines = Math.max(1, Math.floor(limits.maxLines));
   if (markdown.length <= maxChars && markdown.split("\n").length <= maxLines) return markdown;
   const marker = THINKING_TRUNCATION_MARKER;
+  // A single-line budget cannot hold the marker AND a body line; the marker
+  // alone is the only thing that fits, so that is what a one-line budget gets.
+  if (maxLines <= 1) return marker.slice(0, maxChars);
   // The marker and its newline are part of the budget. A budget too small to
   // hold them can only show the marker itself (clipped).
   const bodyBudget = maxChars - marker.length - 1;

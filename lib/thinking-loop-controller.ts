@@ -9,17 +9,21 @@
  * stays a registration line rather than the home of a new state machine.
  *
  * THE ACTIONS, in order:
- *   1. mark the turn's thinking for display truncation (it stays cut until the
- *      next turn starts — the finalized message is rendered once more after the
- *      stream ends, and re-rendering the whole loop would defeat the point);
- *   2. `inject()` a "stop spinning, act now" message for the model, then
+ *   1. `inject()` a "stop spinning, act now" message for the model, then
  *      `abort()` the run. The ORDER is the host's business and this controller
  *      only reports both effects: Pi drains a steering message from INSIDE a
  *      running agent loop, and abort is what stops that loop, so the extension
  *      defers the actual send until the session is idle again. The upstream
  *      guard's soft `steer` alone could never arrive — the turn it would
  *      steer never finishes;
- *   3. `notify()` the human.
+ *   2. `notify()` the human.
+ *
+ * The display cut is NOT one of those actions and carries no session state:
+ * `truncateDisplay` judges the content it is handed (`isThinkingLoopContent`),
+ * because Pi's markdown transformer never says WHICH message it is rendering.
+ * A session-level "we are truncating now" flag got both directions wrong — it
+ * cut every thinking block while set, and stopped cutting the very block that
+ * tripped as soon as the next turn cleared it (reviewer P1, round 1).
  *
  * WHY A RECOVERY CAP. abort → inject → the model spins again → abort … is a
  * perfectly stable loop of its own. After `maxRecoveries` consecutive
@@ -32,6 +36,7 @@
 import {
   THINKING_DISPLAY_LIMITS,
   createThinkingLoopDetector,
+  isThinkingLoopContent,
   truncateThinkingForDisplay,
   type StreamDeltaKind,
   type ThinkingDisplayLimits,
@@ -56,8 +61,6 @@ export interface ThinkingLoopControllerOptions {
 }
 
 export interface ThinkingLoopControllerState {
-  /** This turn's thinking display is cut. */
-  truncating: boolean;
   /** Auto-recoveries since the last productive turn. */
   recoveries: number;
   /** The guard has tripped at least once in this session. */
@@ -65,13 +68,16 @@ export interface ThinkingLoopControllerState {
 }
 
 export interface ThinkingLoopController {
-  /** An assistant message started: fresh turn, display no longer cut. */
+  /** An assistant message started: fresh turn. */
   startTurn(): void;
   /** One stream delta. */
   observe(kind: StreamDeltaKind, delta: string): void;
   /** The assistant message ended. */
   endTurn(): void;
-  /** `pi.registerMarkdownTransformer` hook. */
+  /**
+   * `pi.registerMarkdownTransformer` hook. Display-only, content-addressed:
+   * only a block that IS a loop is cut, whatever turn it belongs to.
+   */
   truncateDisplay(markdown: string, messageType: string): string;
   state(): ThinkingLoopControllerState;
 }
@@ -101,20 +107,23 @@ export function createThinkingLoopController(
   const detector = createThinkingLoopDetector(options.detector);
   const maxRecoveries = Math.max(0, Math.floor(options.maxRecoveries ?? THINKING_LOOP_MAX_RECOVERIES));
   const limits = options.limits ?? THINKING_DISPLAY_LIMITS;
-  let truncating = false;
+  const config = options.detector;
   let recoveries = 0;
   let tripped = false;
+  // The transformer runs on every streamed update AND on re-render (resize,
+  // restored sessions), so the same string is judged repeatedly; the cache
+  // makes a repeat O(1) instead of another n-gram sweep.
+  let judgedInput: string | undefined;
+  let judgedOutput = "";
 
   return {
     startTurn() {
       detector.reset();
-      truncating = false;
     },
     observe(kind, delta) {
       const verdict = detector.observe(kind, delta);
       if (!verdict) return;
       tripped = true;
-      truncating = true;
       if (recoveries < maxRecoveries) {
         recoveries += 1;
         effects.inject(THINKING_LOOP_INJECTION);
@@ -134,11 +143,16 @@ export function createThinkingLoopController(
       }
     },
     truncateDisplay(markdown, messageType) {
-      if (messageType !== "assistant-thinking" || !truncating) return markdown;
-      return truncateThinkingForDisplay(markdown, limits);
+      if (messageType !== "assistant-thinking") return markdown;
+      if (markdown === judgedInput) return judgedOutput;
+      judgedInput = markdown;
+      judgedOutput = isThinkingLoopContent(markdown, config)
+        ? truncateThinkingForDisplay(markdown, limits)
+        : markdown;
+      return judgedOutput;
     },
     state() {
-      return { truncating, recoveries, tripped };
+      return { recoveries, tripped };
     },
   };
 }

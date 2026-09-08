@@ -20,7 +20,7 @@ function loopText(chars: number): string {
   return LOOP_SAMPLE.repeat(Math.ceil(chars / LOOP_SAMPLE.length)).slice(0, chars);
 }
 
-/** Deterministic pseudo-random CJK text: no 8-gram repeats meaningfully. */
+/** Deterministic pseudo-random CJK text: no n-gram repeats meaningfully. */
 function variedText(chars: number): string {
   const alphabet =
     "的一是不了人我在有他这为之大来以个中上们到说国和地也子时道出而要于就下得可你年生自会那后能对着事其里所去行过家十用发天如然作方成者多日都三小军二无同么经法当起与好看学进种将还分此心前面又定见只主没公从";
@@ -31,6 +31,26 @@ function variedText(chars: number): string {
     out.push(alphabet[seed % alphabet.length]!);
   }
   return out.join("");
+}
+
+/**
+ * HEALTHY but template-shaped reasoning — the shape that made an 8-character
+ * n-gram detector fire on a perfectly good trace: the same clause recurs once
+ * per item, broken every time by the item's own numbers.
+ */
+function templateReasoning(items: number): string {
+  return Array.from(
+    { length: items },
+    (_, i) => `第${i}步：检查 ${i}.ts 里 ${i * 17} 行的条件分支，确认它与上游第 ${i * 3} 个调用的契约一致。`,
+  ).join("");
+}
+
+/** Prose that reuses a long fixed clause once per sentence. */
+function repeatedClauseProse(items: number): string {
+  return Array.from(
+    { length: items },
+    (_, i) => `我在想第${i}种可能：如果缓存键包含时间戳，那么过期策略会与 ${i * 13} 号请求的顺序假设冲突，需要重新核对。`,
+  ).join("");
 }
 
 /** Feed text as small deltas, the way Pi streams it. */
@@ -52,40 +72,52 @@ test("the detection thresholds are pinned", () => {
   // silent retune cannot change the behaviour without this test failing.
   assert.equal(THINKING_LOOP_DEFAULTS.minThinkingChars, 1200);
   assert.equal(THINKING_LOOP_DEFAULTS.windowChars, 800);
-  assert.equal(THINKING_LOOP_DEFAULTS.ngramChars, 8);
+  assert.equal(THINKING_LOOP_DEFAULTS.ngramChars, 24);
   assert.equal(THINKING_LOOP_DEFAULTS.minRepeats, 12);
   assert.equal(THINKING_LOOP_DEFAULTS.minDistinctNgrams, 2);
+  assert.equal(THINKING_LOOP_DEFAULTS.minRepeatRun, 300);
 });
 
 // ---------------------------------------------------------------------------
 // repeatedNgrams — the low-entropy test itself
 
-test("repeatedNgrams reports the top count and how many n-grams clear the bar", () => {
-  assert.deepEqual(repeatedNgrams("", 8, 2), { max: 0, distinct: 0 }, "empty text");
-  assert.deepEqual(repeatedNgrams("abc", 8, 2), { max: 0, distinct: 0 }, "shorter than one n-gram");
-  assert.deepEqual(repeatedNgrams("abcdefghijklmnop", 8, 2), { max: 1, distinct: 0 },
-    "distinct 8-grams never repeat");
-  assert.deepEqual(repeatedNgrams("aaaaaaaaa", 8, 2), { max: 2, distinct: 1 },
-    "a single run is ONE high-frequency n-gram, not a loop");
+test("repeatedNgrams reports the top count, the distinct count and the longest run", () => {
+  assert.deepEqual(repeatedNgrams("", 24, 2), { max: 0, distinct: 0, longestRun: 0 }, "empty text");
+  assert.deepEqual(repeatedNgrams("abc", 24, 2), { max: 0, distinct: 0, longestRun: 0 },
+    "shorter than one n-gram");
+  assert.deepEqual(repeatedNgrams("abcdefghijklmnopqrstuvwx", 24, 2), { max: 1, distinct: 0, longestRun: 0 },
+    "exactly one n-gram repeats once");
+  assert.deepEqual(repeatedNgrams("a".repeat(30), 24, 2), { max: 7, distinct: 1, longestRun: 7 },
+    "a single run is ONE high-frequency n-gram over a long run — not a loop");
 });
 
-test("the upstream loop sample clears both halves of the threshold", () => {
-  const stats = repeatedNgrams(loopText(800), 8, THINKING_LOOP_DEFAULTS.minRepeats);
+test("the upstream loop sample clears every half of the threshold", () => {
+  const stats = repeatedNgrams(loopText(800), THINKING_LOOP_DEFAULTS.ngramChars, THINKING_LOOP_DEFAULTS.minRepeats);
   assert.ok(stats.max >= THINKING_LOOP_DEFAULTS.minRepeats, `max=${stats.max}`);
   assert.ok(stats.distinct >= THINKING_LOOP_DEFAULTS.minDistinctNgrams, `distinct=${stats.distinct}`);
+  assert.ok(stats.longestRun >= THINKING_LOOP_DEFAULTS.minRepeatRun, `longestRun=${stats.longestRun}`);
+});
+
+test("template-shaped healthy reasoning repeats SCATTERED, never in one long run", () => {
+  const stats = repeatedNgrams(
+    templateReasoning(40).slice(0, 800),
+    THINKING_LOOP_DEFAULTS.ngramChars,
+    THINKING_LOOP_DEFAULTS.minRepeats,
+  );
+  assert.ok(stats.longestRun < THINKING_LOOP_DEFAULTS.minRepeatRun, `longestRun=${stats.longestRun}`);
 });
 
 test("a long separator run is NOT a loop: one repeated n-gram, ordinary prose around it", () => {
   // The exact false positive the distinct-count half exists for: a rule drawn
-  // inside otherwise-varied thinking repeats `--------` dozens of times.
+  // inside otherwise-varied thinking repeats `-` over a long consecutive run.
   const text = `${"-".repeat(600)}${variedText(200)}`;
-  const stats = repeatedNgrams(text, 8, THINKING_LOOP_DEFAULTS.minRepeats);
+  const stats = repeatedNgrams(text, THINKING_LOOP_DEFAULTS.ngramChars, THINKING_LOOP_DEFAULTS.minRepeats);
   assert.ok(stats.max >= THINKING_LOOP_DEFAULTS.minRepeats, `max=${stats.max}`);
   assert.ok(stats.distinct < THINKING_LOOP_DEFAULTS.minDistinctNgrams, `distinct=${stats.distinct}`);
 });
 
 test("varied prose stays far below the repeat threshold", () => {
-  const stats = repeatedNgrams(variedText(800), 8, THINKING_LOOP_DEFAULTS.minRepeats);
+  const stats = repeatedNgrams(variedText(800), THINKING_LOOP_DEFAULTS.ngramChars, THINKING_LOOP_DEFAULTS.minRepeats);
   assert.ok(stats.max < THINKING_LOOP_DEFAULTS.minRepeats, `max=${stats.max}`);
   assert.equal(stats.distinct, 0);
 });
@@ -111,6 +143,24 @@ test("a separator rule inside otherwise-varied thinking never trips", () => {
   const detector = createThinkingLoopDetector();
   const hits = stream(detector, `${"-".repeat(2000)}${variedText(4000)}`);
   assert.deepEqual(hits, [], "a repeated RUN is not a repeated CYCLE");
+});
+
+test("template-shaped but healthy reasoning never trips", () => {
+  const detector = createThinkingLoopDetector();
+  const hits = stream(detector, templateReasoning(400));
+  assert.deepEqual(hits, [], "a recurring clause is not a loop while each repeat is broken by its item");
+});
+
+test("prose that reuses one long clause never trips", () => {
+  const detector = createThinkingLoopDetector();
+  const hits = stream(detector, repeatedClauseProse(200));
+  assert.deepEqual(hits, []);
+});
+
+test("an English word-salad loop trips just like the Chinese one", () => {
+  const detector = createThinkingLoopDetector();
+  const hits = stream(detector, "Let me check. Wait. Actually. Let me check. Hmm. ".repeat(200));
+  assert.equal(hits.length, 1);
 });
 
 test("varied long thinking never trips", () => {
@@ -201,6 +251,13 @@ test("both limits hold at once, marker included", () => {
 test("a budget too small for the marker still yields a bounded string", () => {
   const out = truncateThinkingForDisplay(loopText(5000), { maxChars: 5, maxLines: 3 });
   assert.ok(out.length <= 5, `length=${out.length}`);
+});
+
+test("a single-line budget yields exactly one line", () => {
+  // Reviewer P1, round 1: marker + body was two lines under a one-line budget.
+  const out = truncateThinkingForDisplay("x".repeat(200), { maxChars: 100, maxLines: 1 });
+  assert.equal(out.split("\n").length, 1);
+  assert.ok(out.length <= 100, `length=${out.length}`);
 });
 
 test("the default limits are the exported constants", () => {
