@@ -593,7 +593,10 @@ export function shellQuote(s) {
 export function testConcurrencyForLoad(load1, cores, { factor = 0.7 } = {}) {
   if (!Number.isFinite(load1) || !Number.isFinite(cores) || cores < 1) return null;
   if (load1 < cores * factor) return null; // machine has headroom — no injection
-  return Math.max(1, Math.floor(cores / 2));
+  // Contracted floor is 2 (goal ③); a single core cannot host two workers
+  // usefully, so it is left unthrottled instead of being told to run 2.
+  if (cores < 2) return null;
+  return Math.max(2, Math.floor(cores / 2));
 }
 
 /**
@@ -605,15 +608,22 @@ export function testConcurrencyForLoad(load1, cores, { factor = 0.7 } = {}) {
  *   - a direct `node --test …` command (the fast lane's own construction) —
  *     the flag is inserted right after `--test`;
  *   - an npm-style `npm test` / `npm run test` script — ONLY when the caller
- *     attests (`opts.npmOk`) that the script's body really runs node --test:
- *     NPM appends everything after `--` to the script's command line, so a
- *     non-node script would receive the flag as an argument of its own
- *     command (measured: a `cat …` body broke). node accepts the flag after
- *     the positional files.
+ *     attests (`opts.npmOk`) that the script's body really runs node --test.
+ *     node SILENTLY IGNORES --test-concurrency after positional files
+ *     (measured: a 3×800ms suite ran concurrently with the flag appended),
+ *     so the npm shape is throttled by EXPANDING the script body into the
+ *     command and inserting the flag right after `--test` (the caller passes
+ *     `opts.npmBody` = the package.json body). NPM lifecycle scripts
+ *     (pretest/posttest) do not run on the throttled path — the throttle
+ *     only engages under load.
  * Any other shape is returned untouched: missing a throttle is harmless,
  * mangling a command is not.
+ * @param {string} command
+ * @param {number} load1
+ * @param {number} cores
+ * @param {{ factor?: number, npmOk?: boolean, npmBody?: string | null }} [opts]
  */
-export function throttleNodeTestCommand(command, load1, cores, { factor = 0.7, npmOk = false } = {}) {
+export function throttleNodeTestCommand(command, load1, cores, { factor = 0.7, npmOk = false, npmBody } = {}) {
   const n = testConcurrencyForLoad(load1, cores, { factor });
   if (n === null || typeof command !== "string") return command;
   const flag = `--test-concurrency=${n}`;
@@ -625,8 +635,10 @@ export function throttleNodeTestCommand(command, load1, cores, { factor = 0.7, n
     if (after.startsWith("-")) return command;
     return command.replace(/node --test(?![\w-])/, `node --test ${flag}`);
   }
-  if (npmOk && /^(?:npm|bun|pnpm)(?: run)? test\b/.test(command)) {
-    return `${command} -- ${flag}`;
+  if (npmOk && /^(?:npm|bun|pnpm)(?: run)? test\b/.test(command) && typeof npmBody === "string") {
+    // Expand `npm run test` into its body so the flag precedes the files.
+    const expanded = throttleNodeTestCommand(npmBody, load1, cores, { factor });
+    if (expanded !== npmBody) return `${expanded} # npm run test (expanded by the load throttle)`;
   }
   return command;
 }

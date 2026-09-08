@@ -260,10 +260,16 @@ function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
       const cores = availableParallelism?.() ?? 4;
       // npm-style `npm run test` may only be throttled when the script body
       // really runs node --test — a non-node body would receive the flag as
-      // an argument of its own command (measured: a `cat` body broke).
-      const testBodyIsNodeTest =
-        typeof pkg?.scripts?.test === "string" && /^\s*node --test/.test(pkg.scripts.test);
-      execCommand = throttleNodeTestCommand(command, load1, cores, { npmOk: testBodyIsNodeTest });
+      // an argument of its own command (measured: a `cat` body broke). node
+      // IGNORES --test-concurrency after positional files, so the throttled
+      // npm shape is expanded to its body with the flag placed before the
+      // files (npm lifecycle scripts do not run on that path).
+      const testBody = typeof pkg?.scripts?.test === "string" ? pkg.scripts.test : null;
+      const testBodyIsNodeTest = typeof testBody === "string" && /^\s*node --test/.test(testBody);
+      execCommand = throttleNodeTestCommand(command, load1, cores, {
+        npmOk: testBodyIsNodeTest,
+        npmBody: testBody,
+      });
       if (execCommand !== command) {
         throttleNote = ` [system load ${load1.toFixed(1)} on ${cores} cores — test concurrency throttled]`;
         console.error(`[precommit] ${throttleNote.trim()}`);

@@ -469,6 +469,16 @@ function installHookTree(omit: string[]): string {
   return join(root, "hooks", "pre-commit");
 }
 
+test("MISSING pre-commit checker module → commit fails CLOSED", () => {
+  const dir = makeGitRepo();
+  writeState(dir, readyState(dir), /*withChangedFile=*/ true);
+  const hook = installHookTree(["pre-commit-check.cjs"]);
+  const res = spawnSync("bash", [hook], { cwd: dir, encoding: "utf8" });
+  assert.notEqual(res.status, 0, "a partial install without the checker must block");
+  assert.match(res.stderr, /pre-commit checker MISSING/);
+  assert.match(res.stderr, /failing closed/);
+});
+
 test("MISSING staged-divergence checker → commit fails CLOSED", () => {
   const dir = makeGitRepo();
   writeState(dir, readyState(dir), /*withChangedFile=*/ true);

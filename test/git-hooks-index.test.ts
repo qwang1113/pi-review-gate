@@ -177,9 +177,10 @@ test("the shipped hook runs the whole chain in ONE node process (pre-commit-chec
   assert.match(hook, /node "\$CHECK_SCRIPT" "\$STATE_FILE"/,
     "the shell must exec the single checker process with the sidecar path");
   // The GIT_INDEX_FILE forwarding (commit -a / commit -- <path> semantics)
-  // lives in the checker now — assert it reaches the divergence argv there.
+  // lives in the checker now — assert the actual argv construction, not a
+  // comment or a far-apart coincidence.
   const checker = readFileSync(join(ROOT, "scripts", "pre-commit-check.cjs"), "utf8");
-  assert.match(checker, /GIT_INDEX_FILE.*--emit-fingerprint/s,
+  assert.match(checker, /env\.GIT_INDEX_FILE \|\| "", "--emit-fingerprint"\]/, 
     "the checker must forward git's commit index to the divergence run");
 });
 

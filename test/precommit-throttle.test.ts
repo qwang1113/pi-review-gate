@@ -31,11 +31,13 @@ test("idle load leaves every command shape verbatim", () => {
 
 // --- loaded state: injection with the right value and position ---
 
-test("loaded load halves the worker pool (floor, minimum 1)", () => {
+test("loaded load halves the worker pool (floor 2, never below)", () => {
   assert.equal(testConcurrencyForLoad(20, 14), 7);   // 14 cores → 7
   assert.equal(testConcurrencyForLoad(20, 4), 2);    // 4 cores → 2
-  assert.equal(testConcurrencyForLoad(20, 2), 1);    // 2 cores → 1
-  assert.equal(testConcurrencyForLoad(20, 1), 1);    // 1 core → 1, never 0
+  assert.equal(testConcurrencyForLoad(20, 2), 2);    // 2 cores → 2 (contracted floor)
+  assert.equal(testConcurrencyForLoad(20, 3), 2);    // 3 cores → 2
+  assert.equal(testConcurrencyForLoad(20, 1), null,  // 1 core: no useful throttle
+    "a single core cannot host two workers — left unthrottled");
 });
 
 test("a direct node --test command gets the flag right after --test", () => {
@@ -46,20 +48,22 @@ test("a direct node --test command gets the flag right after --test", () => {
   );
 });
 
-test("an npm-style script gets the flag via npm's `--` passthrough — only when the body runs node --test", () => {
-  // npmOk attests the script body is node --test (the runner checks the
-  // package.json body); without it the npm shape must NOT be mangled — a
-  // `cat …` body would receive the flag as an argument of its own command.
-  assert.equal(throttleNodeTestCommand(`npm run test`, 20, 14), `npm run test`,
-    "no npmOk → npm scripts stay verbatim (their body may not be node --test)");
+test("an npm-style script is throttled by EXPANDING its node --test body (trailing flags are ignored by node)", () => {
+  // node silently ignores --test-concurrency AFTER positional files
+  // (measured: a 3×800ms suite stayed concurrent with the flag appended), so
+  // the npm shape must become the body with the flag BEFORE the files.
+  const body = `node --test $(find test -name '*.test.ts')`;
   assert.equal(
-    throttleNodeTestCommand(`npm run test`, 20, 14, { npmOk: true }),
-    `npm run test -- --test-concurrency=7`,
+    throttleNodeTestCommand(`npm run test`, 20, 14, { npmOk: true, npmBody: body }),
+    `node --test --test-concurrency=7 $(find test -name '*.test.ts') # npm run test (expanded by the load throttle)`,
+    "the throttled npm run becomes its body with the flag inserted after --test"
   );
-  assert.equal(
-    throttleNodeTestCommand(`npm test`, 20, 14, { npmOk: true }),
-    `npm test -- --test-concurrency=7`,
-  );
+  // Without npmOk (non-node body) the npm shape stays verbatim.
+  assert.equal(throttleNodeTestCommand(`npm run test`, 20, 14), `npm run test`);
+  // With npmOk but no body to expand, nothing changes either.
+  assert.equal(throttleNodeTestCommand(`npm run test`, 20, 14, { npmOk: true }), `npm run test`);
+  // Idle load: the npm shape never expands (byte-identical, cache-key rule).
+  assert.equal(throttleNodeTestCommand(`npm run test`, 1, 14, { npmOk: true, npmBody: body }), `npm run test`);
 });
 
 test("an already-throttled-looking flag is not double-injected", () => {
