@@ -33,7 +33,7 @@ function tmux(args: readonly string[]): string {
   return execFileSync("tmux", ["-L", SOCKET, ...args], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-  });
+  }).trim();
 }
 
 function tmuxInstalled(): boolean {
@@ -131,6 +131,33 @@ test("six sessions stay three columns, third column evenly shared", { skip: SKIP
       [1, 1, two.columns[1]!.length],
       "one pane each in the first two columns, the rest still sharing the third",
     );
+  } finally {
+    try { tmux(["kill-server"]); } catch { /* already gone */ }
+  }
+});
+
+test("with no lone column at all, -f still opens a real column", { skip: SKIP }, async () => {
+  // The fallback branch, measured for real. A shape the gate never builds —
+  // two columns holding two panes each — has no lone pane to split beside, and
+  // a plain split would NEST a half-width pane inside a column. `-f` spans the
+  // window height instead, so a third column really appears (at the right
+  // edge; it ignores the target's position, which is why the normal path does
+  // not use it).
+  try {
+    try { tmux(["kill-server"]); } catch { /* no server yet */ }
+    tmux(["new-session", "-d", "-x", "200", "-y", "50", "-s", "lab", "sleep", "600"]);
+    const own = tmux(["list-panes", "-F", "#{pane_id}"]).split("\n")[0]!;
+    const second = tmux(["split-window", "-h", "-t", own, "-P", "-F", "#{pane_id}", "sleep", "600"]);
+    tmux(["split-window", "-v", "-t", own, "-P", "-F", "#{pane_id}", "sleep", "600"]);
+    tmux(["split-window", "-v", "-t", second, "-P", "-F", "#{pane_id}", "sleep", "600"]);
+
+    const before = parseWindowLayout(tmux(buildWindowLayoutArgv(own)));
+    assert.deepEqual(before.columns.map((column) => column.length), [2, 2], "the shape under test");
+
+    await openLabSession(own, 7);
+
+    const after = parseWindowLayout(tmux(buildWindowLayoutArgv(own)));
+    assert.equal(after.columns.length, 3, "-f opens a real column when there is no lone pane to split beside");
   } finally {
     try { tmux(["kill-server"]); } catch { /* already gone */ }
   }

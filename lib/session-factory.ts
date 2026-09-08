@@ -452,9 +452,10 @@ function probeWindowLayout(run: PaneRunner, via: string): WindowLayout | undefin
  */
 function placementFor(run: PaneRunner, ownPane: string): PanePlacement {
   const layout = probeWindowLayout(run, ownPane);
-  // `full` even in the fallback: the intent is "open a column", and -f is what
-  // guarantees the new pane spans the height wherever the opener sits.
-  if (!layout) return { direction: "-h", target: ownPane, full: true };
+  // Unreadable window ⇒ the plainest split off the opener (goal exit criterion
+  // 1). No `-f`: with no geometry to reason about, the least surprising thing
+  // is to split the pane we are actually running in.
+  if (!layout) return { direction: "-h", target: ownPane };
   return planPanePlacement(layout.columns);
 }
 

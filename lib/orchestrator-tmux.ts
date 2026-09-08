@@ -34,8 +34,9 @@
  *    three-column window and the third column's panes ARE the second one. If
  *    NO column sits alone (a shape the gate never builds), the split carries
  *    `-f`, which spans the window height and opens a real column at the right
- *    edge. Both sequences are regression tests in
- *    test/tmux-window-layout.integration.test.ts;
+ *    edge. Both are regression tests in
+ *    test/tmux-window-layout.integration.test.ts, and both branches are also
+ *    pinned by the unit test;
  *  - three or more → `split-window -v` off the third column's last pane;
  *  - a handoff (giving the orchestration to a successor) → `split-window -h`
  *    off the orchestrator's own pane, so the successor lands beside it and

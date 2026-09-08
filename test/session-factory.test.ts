@@ -234,8 +234,8 @@ test("an unreadable window falls back to splitting the opener — the pane must 
     command: ["pi"],
   });
   const spawn = seen.find((argv) => argv[0] === "split-window")!;
-  assert.deepEqual(spawn.slice(0, 5), ["split-window", "-h", "-f", "-t", "%1"],
-    "no geometry ⇒ open a column off the opener (-f keeps it full height); a layout we cannot read is not a reason to fail the spawn");
+  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%1"],
+    "no geometry ⇒ split the opener itself; a layout we cannot read is not a reason to fail the spawn");
   assert.equal(seen.filter((argv) => argv[0] === "select-layout").length, 0, "and nothing is equalised");
 });
 
@@ -273,8 +273,7 @@ test("combination 4 — an orchestration RECOVER: same env, split off the opener
   });
   const spawn = seen.find((argv) => argv[0] === "split-window")!;
   assert.equal(envOf(spawn).RG_STATE_VARIANT, "t1-xyz", "a recovered child keeps its exemption");
-  assert.deepEqual(spawn.slice(0, 5), ["split-window", "-h", "-f", "-t", "%1"],
-    "no column yet ⇒ open a column off the opener, full height");
+  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%1"], "no column yet ⇒ split the opener");
 });
 
 test("combination 5 — a relay SUCCESSOR: beside the opener, its own env, no border", async () => {
