@@ -191,7 +191,7 @@ test("a BLOCKED run exits nonzero BEFORE emitting a fingerprint", () => {
 
 test("the checker asks the divergence run for the fingerprint, with a fallback for mixed installs", () => {
   const checker = readFileSync(join(ROOT, "scripts", "pre-commit-check.cjs"), "utf8");
-  assert.match(checker, /typeof divergence\.runMain === "function"/,
+  assert.match(checker, /typeof divergence\?\.runMain === "function"/,
     "the checker must run the divergence + fingerprint chain in-process");
   assert.match(checker, /spawnSync\(process\.execPath, argv/,
     "an OLDER checker (predating runMain) must be spawned, not required — " +

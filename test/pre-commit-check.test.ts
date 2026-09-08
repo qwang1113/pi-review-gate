@@ -92,15 +92,23 @@ test("a staged non-English test label blocks the chain (L6 in-process)", () => {
 
 test("REVIEW_GATE_REQUIRE_FULL=1 with a fast-lane PASS → exit 1 (push gate)", () => {
   const dir = makeGitRepo();
+  // Fingerprints must REALLY match so the lane branch is the ONLY thing that
+  // can block — null fingerprints would trip the earlier 'no fingerprint
+  // binding' problems and fail the test for the wrong reason.
+  const base = readyState(dir) as Record<string, unknown>;
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "lib.ts"), "// x\n");
+  execFileSync("git", ["add", "src/lib.ts"], { cwd: dir, stdio: "ignore" });
+  const bound = readyState(dir) as Record<string, unknown>;
+  const tree = (bound.review as Record<string, unknown>).fingerprint as string;
   writeState(dir, {
-    ...readyState(dir),
-    review: { verdict: "READY", fingerprint: null, at: "t", docSync: "NOT_NEEDED" },
-    precommit: { verdict: "PASS", fingerprint: null, at: "t", mode: "fast", testScope: "related" },
-  }, /*withChangedFile=*/ true);
-  // Without the env the fast lane commits fine (exit 0 via message-only or
-  // verdict path is not what we assert here)…
-  // With the env a push demands a full-lane PASS. readyState's own tree
-  // binding means the verdict chain runs; only the lane requirement can trip.
+    ...base,
+    review: { verdict: "READY", fingerprint: tree, at: "t", docSync: "NOT_NEEDED" },
+    precommit: { verdict: "PASS", fingerprint: tree, at: "t", mode: "fast", testScope: "related" },
+  });
   const code = check(dir, { REVIEW_GATE_REQUIRE_FULL: "1" });
   assert.equal(code, 1);
+  // Sanity: the same state without the push requirement passes (the lane gate
+  // is what the env adds).
+  assert.equal(check(dir), 0);
 });

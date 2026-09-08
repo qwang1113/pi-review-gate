@@ -45,7 +45,14 @@ function requireOrNull(path) {
   try {
     return require(path);
   } catch (err) {
-    if (err && err.code === "MODULE_NOT_FOUND" && String(err.message).includes(path)) return null;
+    if (err && err.code === "MODULE_NOT_FOUND") {
+      // Only a missing module NAMED IN THE FIRST LINE counts as "not
+      // installed". A missing TRANSITIVE dep lists the required script in
+      // its 'Require stack:' trailer, so matching the whole message would
+      // silently skip an installed-but-broken script.
+      const firstLine = String(err.message).split("\n")[0];
+      if (firstLine.includes(path)) return null;
+    }
     throw err; // a REAL failure (syntax, a missing transitive dep) stays fatal
   }
 }
@@ -183,23 +190,32 @@ function runCheck(statePath, repo, env = process.env) {
   //    `FP_JSON=$(node "$DIVERGENCE_SCRIPT" … --emit-fingerprint)` with a
   //    separate compute fallback). The checker's stdout fingerprint is
   //    captured here — the hook's own stdout stays empty, as before.
-  //    Missing script → FAIL CLOSED (the one guard for a core safety
-  //    property).
   // -------------------------------------------------------------------------
-  const divergence = requireOrNull(divergenceScript);
-  if (!divergence) {
+  if (!existsSync(divergenceScript)) {
+    // Missing script → FAIL CLOSED (the one guard for a core safety
+    // property).
     console.error(`[review-gate] staged-divergence checker MISSING (${divergenceScript}) — failing closed.`);
     console.error("[review-gate] This check guards staged-vs-reviewed content; reinstall the hooks to restore it.");
     console.error("[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ...");
     process.exit(1);
   }
+  // Probe the FILE SHAPE before requiring: a checker that predates the
+  // require.main guard would execute its whole CLI at require time (with
+  // argv[2] = the sidecar path) and exit the hook process. The shipped
+  // checker is this package's own file, so the marker is stable. Older files
+  // are spawned below, exactly like the pre-refactor hook ran them.
+  let divergenceModern = false;
+  try {
+    divergenceModern = readFileSync(divergenceScript, "utf8").includes("function runMain");
+  } catch { /* unreadable → treated as older; the spawn below fails closed */ }
+  const divergence = divergenceModern ? requireOrNull(divergenceScript) : null;
 
   let fpJson = "";
   {
     const argv = [process.execPath, divergenceScript, repoRoot, env.GIT_INDEX_FILE || "", "--emit-fingerprint"];
     let code;
     let stdout = "";
-    if (typeof divergence.runMain === "function") {
+    if (typeof divergence?.runMain === "function") {
       // New checker: run in-process (one node startup per commit). Its
       // fingerprint stdout is captured — the hook's own stdout stays empty.
       const captured = [];
@@ -221,8 +237,9 @@ function runCheck(statePath, repo, env = process.env) {
       // sidecar path), so it cannot run in-process. Spawn it like the
       // pre-refactor hook did — the check still runs, and its stdout stays
       // empty (older checkers do not know --emit-fingerprint), which is
-      // exactly the mixed-install fallback condition below.
-      const spawned = spawnSync(process.execPath, argv, { cwd: repoRoot, encoding: "utf8" });
+      // exactly the mixed-install fallback condition below. argv.slice(1):
+      // spawnSync takes the executable separately from its arguments.
+      const spawned = spawnSync(process.execPath, argv.slice(1), { cwd: repoRoot, encoding: "utf8" });
       code = spawned.status ?? 1;
       stdout = spawned.stdout ?? "";
     }
