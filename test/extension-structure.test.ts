@@ -2345,7 +2345,7 @@ test("every gate dialog is answerable by EITHER the human or the project manager
   assert.match(funnel, /if \(!binding\) \{/, "a session with no orchestration falls back to rendering the dialog");
 
   // The goal approval is the one dialog constraint 8 applies to, so its
-  // request must carry the DRAFT — that is the text the boundary check reads.
+  // request must carry the DRAFT — that is the text the crosscheck reads.
   const goalBody = toolBodyOf("propose_loop_goal");
   assert.match(goalBody, /topic: "goal-approval"/);
   assert.match(goalBody, /payload: goalText/,

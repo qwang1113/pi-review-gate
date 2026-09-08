@@ -105,6 +105,22 @@ test("every OTHER kind of widening still stops at the user", () => {
   assert.match(movedRepo.widenings.join("\n"), /repo/, "the widening names the repo change");
 });
 
+test("moving a task to a repo the PLAN already contains is still a widening", () => {
+  // The repo decides which checkout a child writes in, and the user approved
+  // THIS task in THIS repo. A sibling already sitting in `/other-repo` does
+  // not turn the move into a refinement: the child would be handed a write
+  // surface nobody approved for it (goal criterion 2).
+  const plan = withTask(fileGrainPlan(), "t3", { repo: "/other-repo" });
+  const base = approved(plan);
+
+  const moved = decideApprovalCarry(base, withTask(plan, "t1", { repo: "/other-repo" }));
+  assert.equal(moved.carries, false, "the target repo already being in the plan grants nothing");
+  assert.match(moved.widenings.join("\n"), /repo 从 \/repo 改为 \/other-repo/);
+
+  // …while the very same content, unchanged, still carries.
+  assert.equal(decideApprovalCarry(base, plan).carries, true);
+});
+
 test("the DELIVERY STATION is authority: raising it revokes, lowering it carries", () => {
   // 2026-09-06. `pr` authorizes the orchestration to publish; nobody may hand
   // it that between two dialogs. The mirror case matters just as much: a

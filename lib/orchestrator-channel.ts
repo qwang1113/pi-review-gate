@@ -162,7 +162,7 @@ export interface ChannelRequestRecord extends ChannelRecordBase {
    * orchestrator side never has to recognize a question by its wording.
    *
    * `goal-approval` is the one that carries a rule: answering it on the
-   * user's behalf is constraint 8, and the draft the boundary check judges is
+   * user's behalf is constraint 8, and the draft the crosscheck judges is the
    * the `payload` of THIS record — written by the child itself, so a
    * hand-copied text can neither widen nor narrow what gets approved (R-7).
    *

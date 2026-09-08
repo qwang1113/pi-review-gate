@@ -459,7 +459,8 @@ async function answerOneRequest(
   }
 
 
-  // CONSTRAINT 8 — a goal approval is bounded by the task's declared files.
+  // CONSTRAINT 8 — a goal approval is refused if the child has written to a
+  // sensitive path outside its repo.
   if (request.topic === "goal-approval") {
     const guard = goalApprovalGuard(deps, child.taskId, childId, request, resolved.answer);
     if (guard) return { ok: false, requestId: request.requestId, refusal: guard };
