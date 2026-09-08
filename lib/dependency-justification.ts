@@ -1,7 +1,9 @@
 /**
  * DEPENDENCY JUSTIFICATION — the mechanical half of the minimalism doctrine
  * (2026-09-08, user decision), next to the other mechanical rule
- * (`lib/file-size-gate.ts`).
+ * (`lib/file-size-gate.ts`). The doctrine's substantive text lives ONLY in
+ * `docs/coding-standards.md` §5 — this module implements its
+ * "新依赖须论证" half mechanically, never restating the other three checks.
  *
  * THE ASYMMETRY IS THE DESIGN (same shape as the file-size gate). Whether a
  * new dependency is WORTH it needs judgement — that stays with the judges
@@ -18,7 +20,9 @@
  * `devDependencies` do not count: a test/build-only addition is not shipped
  * code, and the reviewer judges its necessity. Removed entries do not count.
  * Version bumps of an existing key do not count. A repo with no package.json
- * change at all passes trivially.
+ * change at all passes trivially. A base manifest that cannot be PARSED
+ * yields no facts (never "everything is new"); only an ABSENT base (no
+ * manifest at HEAD) treats every worktree key as new.
  *
  * WHAT COUNTS AS A JUSTIFICATION. The agent's round note (`note`, the same
  * text the checkpoint message is built from) OR the checkpoint message itself
@@ -40,28 +44,35 @@
 
 /** Words that mark a mention as a justification, not a bare name-drop. */
 const JUSTIFICATION_MARKERS: readonly string[] = Object.freeze([
-  // English why-words.
+  // English why-words — each names a reason or a rejected alternative, never
+  // a bare topic word ("why"/"missing" alone match changelogs, not reasons).
   "because",
-  "why",
   "instead of",
   "rather than",
   "cannot",
   "can't",
   "no existing",
-  "missing",
-  // Chinese why-words (this project's working language).
+  "nothing existing",
+  "no built-in",
+  // Chinese why-words — each is a causal or contrastive PHRASE. Bare topic
+  // words （现有/已有/没有/缺少/不能/原因/由于/论证） match almost any Chinese
+  // round note that names a dep, which made the "refuse" path dead in
+  // practice (reviewer P2, 2026-09-08): a bare mention plus background prose
+  // is not a justification.
   "因为",
-  "由于",
-  "原因",
-  "现有",
-  "已有",
-  "无法",
-  "不能",
-  "缺少",
-  "没有",
-  "代替",
-  "取代",
-  "论证",
+  "无法做到",
+  "无法覆盖",
+  "做不到",
+  "覆盖不了",
+  "没有现成的",
+  "现有.*做不到",
+  "现有.*无法",
+  "已有.*做不到",
+  "不能覆盖",
+  "代替不了",
+  "取代不了",
+  "不得不引入",
+  "只能引入",
 ]);
 
 /** What the caller measured: one dependency key added by this round. */
@@ -70,14 +81,16 @@ export interface NewDependencyFact {
   name: string;
 }
 
-/** What the caller passes: the text that may carry the justification. */
+/**
+ * What the caller passes: the texts that may carry the justification.
+ *
+ * The NOTE (the agent's own words, verbatim) is authoritative — L5 drops
+ * non-Latin letters from the message, so a Chinese justification survives
+ * only in the note (`submitForReview` plumbs it as `note: input.note`). The
+ * message rides second (a direct checkpoint call with no note justifies in
+ * English there). Both are searched together.
+ */
 export interface JustificationText {
-  /**
-   * The justification source text — built by `justificationSourceText` in
-   * `lib/checkpoint-message.ts` (note first, message second). Kept as two
-   * fields so the shape stays self-describing at the call site; both are
-   * searched together.
-   */
   note: string;
   message: string;
 }
@@ -114,7 +127,9 @@ export function dependencyJustificationVerdict(
       );
       continue;
     }
-    const justified = JUSTIFICATION_MARKERS.some((m) => haystack.includes(m.toLowerCase()));
+    const justified = JUSTIFICATION_MARKERS.some((m) =>
+      m.includes(".*") ? new RegExp(m).test(haystack) : haystack.includes(m.toLowerCase()),
+    );
     if (!justified) {
       blocking.push(
         `新增依赖 ${dep.name} 只有点名、无线索说明原因：在送审说明或提交说明里加一句为什么（because/因为/现有…无法…等）`,
@@ -157,7 +172,14 @@ export function newDependencyNames(worktreeText: string | undefined, baseText: s
   if (worktreeText === undefined) return [];
   const worktree = dependencyKeysOf(worktreeText);
   if (worktree === undefined) return [];
-  const base = baseText === undefined ? [] : (dependencyKeysOf(baseText) ?? []);
+  // A base that cannot be READ is not an empty base: treating it as one
+  // would judge every worktree key as new (reviewer P2, 2026-09-08) — the
+  // opposite of this module's "no facts ⇒ never a block" contract. Only an
+  // ABSENT base (no manifest at HEAD: a new repo / new manifest) means
+  // "everything is new".
+  if (baseText === undefined) return [...worktree];
+  const base = dependencyKeysOf(baseText);
+  if (base === undefined) return [];
   const baseSet = new Set(base);
   return worktree.filter((k) => !baseSet.has(k));
 }

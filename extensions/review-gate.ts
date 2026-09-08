@@ -295,7 +295,6 @@ import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-rel
 import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
-import { justificationSourceText } from "../lib/checkpoint-message.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
 // (A round's conclusion is the channel report. The transcript READ died with
@@ -4833,11 +4832,14 @@ export default function reviewGate(pi: ExtensionAPI) {
         // Only a NEW dependency without a written justification blocks — worth
         // stays with the judges (reviewer P1, goal/plan audit P0/P1).
         const depGate = (() => {
-          if (!paths.some((p) => p === "package.json" || p.endsWith("/package.json"))) return { blocking: [] as string[] };
+          // Root manifest only: a nested package.json (sub-package / fixture)
+          // must be compared against ITS OWN base, not the root's — comparing
+          // across paths judges every sub-package key as new (reviewer P2,
+          // 2026-09-08). Nested manifests stay the reviewer's judgement call.
+          if (!paths.some((p) => p === "package.json")) return { blocking: [] as string[] };
           let worktreeText: string | undefined;
           try {
-            const manifestPath = paths.find((p) => p === "package.json" || p.endsWith("/package.json"))!;
-            worktreeText = readFileSync(pathResolve(root, manifestPath), "utf8");
+            worktreeText = readFileSync(pathResolve(root, "package.json"), "utf8");
           } catch {
             return { blocking: [] as string[] }; // unreadable ⇒ no facts, never a block
           }
@@ -4856,7 +4858,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // both, exactly as the goal's acceptance criterion 6 requires.
           return dependencyJustificationVerdict(
             added.map((name) => ({ name })),
-            { note: justificationSourceText(typeof params.note === "string" ? params.note : "", message), message: "" },
+            { note: typeof params.note === "string" ? params.note : "", message },
           );
         })();
         if (depGate.blocking.length > 0) {

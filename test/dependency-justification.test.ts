@@ -52,10 +52,27 @@ test("new dep WITH justification passes (worth stays with the reviewer)", () => 
 
 test("new dep with a Chinese justification passes", () => {
   const v = dependencyJustificationVerdict([{ name: "uuid" }], {
-    note: "新增 uuid，因为现有代码里没有可用的唯一 id 生成",
+    note: "新增 uuid，因为现有手段做不到唯一 id 生成",
     message: "feat(checkpoint-id): use uuid",
   });
   assert.deepEqual(v.blocking, []);
+});
+
+test("a bare Chinese mention with background prose is REFUSED (markers must be causal phrases)", () => {
+  // Reviewer P2 (2026-09-08): bare topic words （现有/没有/缺少/不能…)...
+  const v = dependencyJustificationVerdict([{ name: "uuid" }], {
+    note: "现有代码里没有 uuid，缺少唯一 id，引入 uuid 供后续使用",
+    message: "feat(checkpoint-id): use uuid",
+  });
+  assert.equal(v.blocking.length, 1, "background prose without a causal phrase must not pass");
+});
+
+test("an unparseable BASE yields no facts (never 'everything is new')", () => {
+  const worktree = JSON.stringify({ dependencies: { a: "1.0.0", lodash: "4.17.21" } });
+  assert.deepEqual(newDependencyNames(worktree, "not json"), [],
+    "a corrupt base manifest must not judge every key as new");
+  assert.deepEqual(newDependencyNames(worktree, undefined), ["a", "lodash"],
+    "only an ABSENT base (no manifest at HEAD) treats every key as new");
 });
 
 test("new dep with NO mention at all is refused, and the refusal names the way out", () => {
@@ -108,7 +125,7 @@ test("unreadable manifests yield no facts, never a block", () => {
 
 test("a scoped dep is justified by naming either half", () => {
   const v = dependencyJustificationVerdict([{ name: "@uuid/v7" }], {
-    note: "use uuid because 现有代码无法生成唯一 id",
+    note: "use uuid because 现有手段做不到唯一 id 生成",
     message: "feat(checkpoint-id): use uuid",
   });
   assert.deepEqual(v.blocking, []);

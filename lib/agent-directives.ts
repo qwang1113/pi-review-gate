@@ -84,10 +84,6 @@ export const TOOL_DECISION_TABLE =
 
 
 /**
- * The check that stops the "ask in prose, end the turn, get woken up" cycle.
- * It is phrased as a question the agent answers, not as a rule it obeys.
- */
-/**
  * MINIMALISM REMINDER — the write-time half of the doctrine (2026-09-08, user
  * decision): a nudge, never a block. The rules live in
  * `docs/coding-standards.md` §5 (their only substantive copy — this block
@@ -99,6 +95,10 @@ export const MINIMALISM_REMINDER =
   "动手前先想复用（仓库已有 / 标准库 / 平台原生 / 已装依赖），能删先删再写，" +
   "新增依赖必须在送审说明里论证为什么现有手段做不到。";
 
+/**
+ * The check that stops the "ask in prose, end the turn, get woken up" cycle.
+ * It is phrased as a question the agent answers, not as a rule it obeys.
+ */
 export const END_OF_TURN_CHECK =
   "结束本轮前自检：有没有「本该调工具却写成了文字」的事？" +
   "想问用户 → `ask_user`；改完了 → `judge_submit({role:\"reviewer\"})`；" +

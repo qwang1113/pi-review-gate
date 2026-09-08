@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { injectCheckpointScope, buildCheckpointMessage, justificationSourceText } from "../lib/checkpoint-message.ts";
+import { injectCheckpointScope, buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 
 test("injectCheckpointScope — a subject WITH a scope keeps it, prefixed", () => {
   assert.equal(
@@ -78,16 +78,11 @@ test("buildCheckpointMessage — an English subject with a Chinese body drops on
   assert.equal(msg, "fix(checkpoint-gate): guard the merge");
 });
 
-test("justificationSourceText — the note survives L5 (Chinese justification is not dropped)", () => {
-  // L5 drops a Chinese note from the MESSAGE; the gate must read the NOTE.
+test("L5 drops a Chinese justification from the message — the dep gate reads the NOTE, not the message", () => {
+  // The contract (dependency-justification.ts): note first (agent's own
+  // words, verbatim), message second (may carry an English restatement).
   const note = "新增 uuid，因为现有代码里没有可用的唯一 id 生成";
   const message = buildCheckpointMessage(note);
   assert.ok(!message.includes("因为"), "L5 drops the Chinese justification from the message");
-  const text = justificationSourceText(note, message);
-  assert.ok(text.includes("因为"), "…but the gate still reads it from the note");
-});
-
-test("justificationSourceText — message-only fallback for direct checkpoint calls", () => {
-  const text = justificationSourceText("", "feat(deps): add uuid because no existing helper covers it");
-  assert.ok(text.includes("because"), "no note ⇒ the message still justifies");
+  assert.ok(note.includes("因为"), "…so the gate must be fed the note (wired: note: input.note plumbs it)");
 });

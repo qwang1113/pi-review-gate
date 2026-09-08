@@ -69,12 +69,14 @@ the CONTRACT ITSELF, before any work starts.
    - name no landing place at all for a substantial amount of new code — a
      goal that does not say WHERE the code goes will land it wherever the
      first edit happens to be.
+
 8. **Is the goal minimal?** The rules live in `docs/coding-standards.md` §5
   (their only substantive copy — do not re-derive them here). Work the user
   never asked for ("顺手" refactors, speculative switches, extra criteria
   padding the contract) is a **P1**: the cheapest over-engineering to kill is
   the kind that never enters the contract. A goal that genuinely needs several
   criteria is fine — minimal means necessary, not few.
+
    The fix you ask for is concrete: name the module split you expect, or ask
    the draft to say where the new code lands and how big it may get. Do NOT
    demand a refactor of pre-existing sprawl the goal did not touch — that is
