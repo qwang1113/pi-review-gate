@@ -4263,14 +4263,21 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   // The done/reason judgement itself is wired ONCE, in the run deps.
   const doneChecks = [...SRC.matchAll(/details\.reason === "report"/g)];
   assert.equal(doneChecks.length, 1, "one place decides that a wait ended on a report");
-  // …and the waiter they share must keep calling the ONE tool until the round
-  // really ends. `judge_wait` is message-driven for the agent (2026-09-05), so
-  // a single call can return on a streamed finding — which every auditor emits
-  // before it concludes. Adjudicating that as "no report" closed the auditor
-  // mid-round and made any draft with findings fail closed forever (P0).
-  const waiter = SRC.slice(SRC.indexOf("async function awaitAuditReport("), SRC.indexOf("/** The text a tool result carries"));
+  // …and the waiter they share must keep calling until the round really ends.
+  // `judge_wait` is message-driven for the agent (2026-09-05), so a single call
+  // can return on a streamed finding — which every auditor emits before it
+  // concludes. Adjudicating that as "no report" closed the auditor mid-round
+  // and made any draft with findings fail closed forever (P0).
+  // 2026-09-08: the gate's own chains wait through `selfAuditWait`, which keeps
+  // the shared `awaitRoundReport` decision but addresses the auditor by judgeId
+  // via `doWait` (the tool path would refuse an unedited repo — measured five
+  // consecutive "等待未命中本轮 report"). The agent-facing `judge_wait` tool
+  // keeps the full repo check.
+  const waiter = SRC.slice(SRC.indexOf("async function selfAuditWait("), SRC.indexOf("/** The text a tool result carries"));
   assert.match(waiter, /awaitRoundReport\(\{/, "the chains wait through the shared decision, not a hand-rolled loop");
-  assert.match(waiter, /callTool\(\s*\n?\s*"judge_wait"/, "…which re-calls the ONE waiting tool");
+  assert.match(waiter, /doWait\(/, "…through the shared wait implementation, addressed by judgeId");
+  assert.match(waiter, /gateSelf: true/, "…with the gate-self marker (agents cannot set it)");
+  assert.doesNotMatch(waiter, /callTool\(\s*\n?\s*"judge_wait"/, "the gate chain must not re-enter the repo-checked tool path");
   assert.doesNotMatch(waiter, /for \(;;\)|while \(/, "no second waiting loop may come back here");
   // The decision itself (what ends a round, and the ONE shared budget) is
   // pinned in test/judge-lifecycle.test.ts, where it can be driven directly.

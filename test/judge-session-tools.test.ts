@@ -899,10 +899,16 @@ test("REGRESSION (2026-09-08): the gate's self-audit bypasses the repo check —
   const viaTool = await call(f, "judge_wait", { role: "reviewer" });
   assert.equal(viaTool.isError, true);
   assert.match(textOf(viaTool), /not one of the repositories/);
+  // P1-2: parameter shape alone must NOT bypass — an agent passing sessionId
+  // with no repo still takes the edited-repo check without the marker.
+  const shapeOnly = await doWait(f.deps, { sessionId: c.judgeId }, undefined, undefined);
+  assert.equal(shapeOnly.isError, true, "parameter shape alone must not bypass the repo check");
+  assert.match(textOf(shapeOnly), /not one of the repositories/);
 
-  // Gate path: same deps, same child, addressed by judgeId — the report ends it.
-  // (doWait reports success with isError UNSET — only fail() sets isError:true.)
-  const direct = await doWait(f.deps, { sessionId: c.judgeId }, undefined, undefined);
+  // Gate path: same deps, same child, addressed by judgeId + gateSelf marker —
+  // the report ends it. (doWait reports success with isError UNSET — only
+  // fail() sets isError:true.)
+  const direct = await doWait(f.deps, { sessionId: c.judgeId, gateSelf: true }, undefined, undefined);
   assert.notEqual(direct.isError, true, `gate self-wait must bypass the repo check: ${textOf(direct)}`);
   assert.equal(direct.details?.done, true);
   assert.equal(direct.details?.reason, "report");
@@ -910,7 +916,7 @@ test("REGRESSION (2026-09-08): the gate's self-audit bypasses the repo check —
   // Close path, same split: tool refuses, direct close succeeds.
   const closeTool = await call(f, "judge_close", { role: "reviewer" });
   assert.equal(closeTool.isError, true);
-  const closeDirect = await doClose(f.deps, { sessionId: c.judgeId });
+  const closeDirect = await doClose(f.deps, { sessionId: c.judgeId, gateSelf: true });
   assert.notEqual(closeDirect.isError, true, `gate self-close must bypass the repo check: ${textOf(closeDirect)}`);
   assert.equal(closeDirect.details?.closed, true);
 });

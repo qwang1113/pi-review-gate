@@ -846,37 +846,16 @@ export default function reviewGate(pi: ExtensionAPI) {
    * next, and the total budget is the tool's own hard cap, spent across the
    * calls rather than by each of them.
    */
-  async function awaitAuditReport(
-    root: string,
-    ctx: unknown,
-    onUpdate: ToolUpdate | undefined,
-    signal: AbortSignal | undefined,
-  ) {
-    return awaitRoundReport({
-      wait: (timeoutMs) => callTool(
-        "judge_wait",
-        { role: "goal-auditor", repo: root, timeoutMs },
-        ctx,
-        onUpdate,
-        signal,
-      ),
-      now: () => Date.now(),
-      aborted: () => signal?.aborted === true,
-    }) as ReturnType<typeof callTool>;
-
-  }
-
   /**
-   * THE GATE'S OWN WAIT (2026-09-08) — same round-end rule as
-   * `awaitAuditReport` above (one synchronous audit chain, nobody there to act
-   * on a finding, so "anything but a report" is unfinished), but the single
-   * `wait` step addresses the auditor by JUDGE ID through `doWait`
-   * directly instead of `callTool("judge_wait", { repo })`. The tool path
-   * re-runs `addressJudge`'s "has this session edited that repo" check, which
-   * refuses a legitimate self-audit of an unedited repo (measured: five
-   * consecutive "等待未命中本轮 report" on a cross-repo goal audit). The
-   * opener check still runs inside `doWait`; only the repo-addressing is
-   * bypassed, and the judgeId comes from this session's own registry
+   * THE GATE'S OWN WAIT (2026-09-08) — the round-end rule is `awaitRoundReport`'s:
+   * one synchronous audit chain, nobody there to act on a finding, so "anything
+   * but a report" is unfinished. The single `wait` step addresses the auditor by
+   * JUDGE ID through `doWait` directly instead of `callTool("judge_wait",
+   * { repo })`: the tool path re-runs `addressJudge`'s "has this session edited
+   * that repo" check, which refuses a legitimate self-audit of an unedited repo
+   * (measured: five consecutive "等待未命中本轮 report" on a cross-repo goal
+   * audit). The opener check still runs inside `doWait`; only the repo-addressing
+   * is bypassed, and the judgeId comes from this session's own registry
    * (`judgeChildByRole`), never from an agent-supplied parameter.
    */
   async function selfAuditWait(
@@ -895,10 +874,13 @@ export default function reviewGate(pi: ExtensionAPI) {
             isError: true,
           });
         }
+        // Pass the LIVE signal through, never a frozen snapshot: `pollUntil`
+        // reads `aborted` on every tick, and a `{ aborted: signal.aborted }`
+        // copy taken at dispatch time would never observe a user ESC.
         return doWait(
           selfSessionDeps(),
-          { sessionId: judgeId, timeoutMs },
-          signal === undefined ? undefined : { aborted: signal.aborted },
+          { sessionId: judgeId, timeoutMs, gateSelf: true },
+          signal,
           onUpdate,
         );
       },
@@ -6140,7 +6122,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         const judgeId = judgeChildByRole(root, role)?.judgeId;
         const closed = judgeId === undefined
           ? { isError: false, content: [{ type: "text", text: "no judge on record — nothing to close." }], details: { closed: true, terminated: false } }
-          : await doClose(selfSessionDeps(), { role, sessionId: judgeId });
+          : await doClose(selfSessionDeps(), { role, sessionId: judgeId, gateSelf: true });
         return {
           ok: closed.isError !== true && (closed.details as { closed?: unknown } | undefined)?.closed === true,
           hadPane,

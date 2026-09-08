@@ -21,10 +21,11 @@
  * "has this session edited that repo" gate — the chain already holds the
  * judgeId from its own dispatch, and re-resolving the repo would refuse a
  * legitimate self-audit of a repo the session has not edited yet (measured:
- * five consecutive "等待未命中本轮 report"). The opener check (`checkOpener`)
- * still runs inside both functions; only the repo-addressing step is skipped
- * by passing `repo` as undefined AND a pre-resolved judgeId — agent-facing
- * `judge_wait` / `judge_close` keep the full check.
+ * five consecutive "等待未命中本轮 report"). The bypass is keyed on an explicit
+ * `gateSelf: true` marker in `params` (not a tool parameter — tools never
+ * receive it, so no agent can set it); the opener check (`checkOpener`) still
+ * runs inside both functions for both paths. Agent-facing `judge_wait` /
+ * `judge_close` always take the full check.
 
  *
  * Shape (unchanged): `registerJudgeSessionTools(host, deps)`, effects
@@ -139,13 +140,10 @@ export interface JudgeSessionToolDeps {
   /**
    * Locate a pane judge by ID ALONE, across all repos (2026-09-08).
    *
-   * The gate's self-audit chains hold the judgeId from their own dispatch and
-   * must not re-resolve the repo — re-resolution refuses a legitimate
-   * self-audit of a repo this session has not edited yet (measured: five
-   * consecutive "等待未命中本轮 report"). Agent-facing tools never reach this:
-   * they always pass `repo` explicitly or by default, so they always take the
-   * `addressJudge` repo-check branch below. The opener check still runs in
-   * `doWait` / `doClose` for both paths.
+   * Reached only through the `gateSelf: true` marker (see `addressJudge`):
+   * the gate's self-audit chains hold the judgeId from their own dispatch and
+   * must not re-resolve the repo. The opener check still runs in `doWait` /
+   * `doClose` for both paths.
    */
   findChildById?(judgeId: string): JudgeChildRecord | undefined;
   /** Channel filesystem seam and its home override. */
@@ -293,10 +291,15 @@ function addressJudge(
   if (!role && !judgeId) {
     return { ok: false, text: `review-gate: ${toolName} needs a role (reviewer / adviser / goal-auditor).` };
   }
-  // Gate-self path (2026-09-08): no `repo` param + a judge id — the caller
-  // addressed the judge directly, so there is no repo to resolve and no
-  // edited-repo check to run. The opener check still runs downstream.
-  if (typeof params.repo !== "string" && judgeId && deps.findChildById) {
+  // Gate-self path (2026-09-08): ONLY when the caller passes the explicit
+  // `gateSelf: true` marker — i.e. the gate's own audit chains (`selfAuditWait`
+  // / `auditRunDeps.closeJudge` in extensions/review-gate.ts), which hold the
+  // judgeId from their own dispatch. It is keyed on the CALLER, never on the
+  // parameter shape: an agent calling `judge_wait({sessionId})` with no `repo`
+  // must still take the edited-repo check below (goal criterion 4 pins this).
+  // The marker is not a tool parameter — tools never receive it — so no agent
+  // can set it. The opener check still runs downstream for both paths.
+  if (params.gateSelf === true && judgeId && deps.findChildById) {
     const direct = deps.findChildById(judgeId);
     if (direct) return { ok: true, root: direct.repoRoot, role: role ?? direct.role, judgeId };
     // Unknown id: fall through to the normal path (which refuses fail-closed
