@@ -5,7 +5,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, chmodSync, symlinkSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { ROOT, PRE_COMMIT, makeDir, makeGitRepo, writeState, runPreCommit, readyState, cleanupTempDirs } from "./helpers/hook-fixtures.ts";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
@@ -506,6 +506,29 @@ test("MISSING L6 label scanner still only warns (style gate keeps warn-and-skip)
   const hook = installHookTree(["scan-test-labels.cjs"]);
   const res = spawnSync("bash", [hook], { cwd: dir, encoding: "utf8" });
   assert.equal(res.status, 0, "a missing style scanner must never brick an older install");
+});
+
+test("MIXED install: a LEGACY divergence checker (CLI-on-load) is spawned, not required", () => {
+  // A pre-refactor checker has no require.main guard: requiring it would run
+  // its whole CLI with argv[2] = the sidecar path. The single-process checker
+  // must detect the legacy shape and SPAWN it (like the old bash hook did),
+  // so an upgrade in progress never bricks commits.
+  const dir = makeGitRepo();
+  writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false });
+  const hook = installHookTree([]); // full tree: check + fingerprint + labels + divergence
+  // Replace the divergence checker with a LEGACY-shaped one: no require.main
+  // guard, CLI-on-load, stdout-silent (pre --emit-fingerprint), exits 0
+  // because the repo is clean.
+  const hooksDir = dirname(hook);
+  const scriptsDir = join(hooksDir, "..", "scripts");
+  writeFileSync(join(scriptsDir, "check-staged-divergence.cjs"),
+    "#!/usr/bin/env node\n" +
+    "// legacy checker (2026-09-08 fixture): executes on load, no exports\n" +
+    "process.exit(0);\n");
+  const res = spawnSync("bash", [hook], { cwd: dir, encoding: "utf8" });
+  assert.equal(res.status, 0,
+    `a legacy divergence checker must be spawned, not required: ${res.stderr}`);
+  assert.doesNotMatch(res.stderr, /MISSING/, "the legacy file exists — no fail-closed branch");
 });
 
 // The checker takes a cwd argument, and several git commands it uses are

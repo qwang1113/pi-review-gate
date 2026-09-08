@@ -201,12 +201,15 @@ function runCheck(statePath, repo, env = process.env) {
   }
   // Probe the FILE SHAPE before requiring: a checker that predates the
   // require.main guard would execute its whole CLI at require time (with
-  // argv[2] = the sidecar path) and exit the hook process. The shipped
-  // checker is this package's own file, so the marker is stable. Older files
-  // are spawned below, exactly like the pre-refactor hook ran them.
+  // argv[2] = the sidecar path) and exit the hook process. The marker is the
+  // guard itself — `require.main === module` — so renaming runMain to a const
+  // or an arrow function cannot silently flip the split; only removing the
+  // guard (i.e. making the file CLI-on-load again) does. Older files are
+  // spawned below, exactly like the pre-refactor hook ran them.
   let divergenceModern = false;
   try {
-    divergenceModern = readFileSync(divergenceScript, "utf8").includes("function runMain");
+    const src = readFileSync(divergenceScript, "utf8");
+    divergenceModern = src.includes("require.main === module") && src.includes("function runMain");
   } catch { /* unreadable → treated as older; the spawn below fails closed */ }
   const divergence = divergenceModern ? requireOrNull(divergenceScript) : null;
 
