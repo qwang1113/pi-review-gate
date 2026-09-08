@@ -8178,6 +8178,8 @@ export default function reviewGate(pi: ExtensionAPI) {
           return deny("review-gate: arbiter deferred to a HUMAN but no interactive UI is available → GATE_WINS (fail-closed). Escalate to the user out-of-band.");
         }
         let choice: string | undefined;
+        /** The human's own words when they picked the template's decline row. */
+        let humanNote: string | undefined;
         try {
           // The arbiter's question goes through the SAME template as every
           // other dialog (2026-09-08): the recommended row is the gate's own
@@ -8199,11 +8201,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           );
           choice = pick.kind === "chose" ? pick.option : undefined;
           // The decline row is "none of these, and here is why": the human is
-          // not choosing an action, so the gate keeps its fail-closed default
-          // — but their reason is worth recording for the next round.
-          if (pick.kind === "declined" && pick.reason) {
-            appendLesson(`arbitration #${appealsUsed()} human note: ${pick.reason}`);
-          }
+          // NOT choosing an action, so the gate keeps its fail-closed default
+          // — but their objection is the half the agent can act on, so it is
+          // carried back to the caller instead of only into the audit log.
+          humanNote = pick.kind === "declined" ? pick.reason : undefined;
         } catch { choice = undefined; }
         if (choice === "Allow this exact `gh pr edit` once") {
           const bindings = await computeTokenBindings(parsed.action, fp.digest);
@@ -8221,6 +8222,16 @@ export default function reviewGate(pi: ExtensionAPI) {
           arbitrationPaused = true; // P1: the revival timer must respect this
           appendLesson(`arbitration #${appealsUsed()} HUMAN→pause`);
           return { content: [{ type: "text", text: "review-gate: gate PAUSED by the human — auto-continuation disarmed. No bypass issued. Wait for further instructions." }], details: { decision: "HUMAN", human: "pause" } };
+        }
+        // The decline row is not one of the three rulings, and saying "the
+        // human ruled GATE_WINS" would put words in their mouth (reviewer P1).
+        if (humanNote !== undefined) {
+          appendLesson(`arbitration #${appealsUsed()} human note: ${humanNote}`);
+          return deny(
+            "review-gate: the human did not pick an arbitration option — they picked 「✎ 不选，我说明原因」." +
+            (humanNote ? ` 用户的意见：${humanNote}` : "") +
+            " The gate's default therefore stands (no bypass issued): comply with the gate, or bring this objection into a new appeal.",
+          );
         }
         appendLesson(`arbitration #${appealsUsed()} HUMAN→gate-wins`);
         return deny("review-gate: human ruled GATE_WINS — comply with the gate.");

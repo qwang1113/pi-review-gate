@@ -1668,6 +1668,11 @@ test("request_arbitration is registered and is a NARROW, fail-closed capability"
   // refused BEFORE any spawn — no hard-coded default model.
   assert.match(SRC, /if \(!resolveArbiterModel\(\)\)/, "an unconfigured arbiter fails closed");
   assert.match(SRC, /仲裁者未配置模型链/, "the refusal names the missing config");
+  // The template's decline row is NOT one of the three rulings (reviewer P1):
+  // the human's own objection is carried back to the caller instead of being
+  // reported as "human ruled GATE_WINS".
+  assert.match(SRC, /if \(humanNote !== undefined\) \{[\s\S]{0,400}?用户的意见：\$\{humanNote\}/,
+    "a typed objection must reach the agent, not just the audit log");
 });
 
 test("arbiter bypass token is in-memory ONLY, never persisted to the sidecar", () => {
