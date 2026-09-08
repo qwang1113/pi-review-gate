@@ -89,7 +89,7 @@ export function deliveryStationRank(station: DeliveryStation): number {
  * `precommit` to `pr` hands the orchestration the authority to publish, which
  * is the class of edit that must go back to the user. Lowering it takes
  * authority away and needs no dialog — the same asymmetry the plan-approval
- * module already applies to boundaries and parallelism.
+ * module already applies to repos and parallelism.
  */
 export function isStationWidening(previous: DeliveryStation, next: DeliveryStation): boolean {
   return deliveryStationRank(next) > deliveryStationRank(previous);

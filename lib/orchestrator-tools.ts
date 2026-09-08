@@ -110,33 +110,33 @@ export function buildPlanTranscriptMessage(plan: OrchestratorPlan): string {
     formatPlanSummary(plan, "", "user") +
     "\n───────────────────────\n" +
     "同样的内容也在 `" + PLAN_RELPATH + "`（可随时自己去看）。\n" +
-    "批准的是**内容**：任务、文件边界、依赖、并行度中任何一项被**扩大**，批准即失效。\n\n" +
-    BOUNDARY_SEMANTICS
+    "批准的是**内容**：任务、每个任务的 repo、依赖、并行度中任何一项被**扩大**，批准即失效。\n\n" +
+    APPROVAL_SEMANTICS
   );
 }
 
 /**
- * WHAT AN APPROVED BOUNDARY ACTUALLY COVERS — stated to the user, in the
- * dialog, before they agree to it.
+ * WHAT AN APPROVAL COVERS — stated to the user, in the dialog, before they
+ * agree to it.
  *
- * This paragraph is the honest half of the round-4 P0 fix. Letting a task
- * refine `lib/x.ts` into `lib/x.ts` + `lib/y.ts` without a new dialog is what
- * makes unattended orchestration possible — an orchestrator cannot know at
- * planning time that a module will have to become two files. But it does
- * widen what "approved" means, and a rule the user discovers AFTERWARDS is
- * not a rule they agreed to. So it is written where they are deciding, in the
- * text the approval binds to.
+ * This paragraph is the honest half of the round-4 P0 fix. The dialogs that
+ * round popped three times were all caused by a plan edit that had to reach
+ * the user only because the plan declared FILE BOUNDARIES; those are gone
+ * (2026-09-17, user decision), so the edit that caused them cannot exist. What
+ * remains is the shorter list of edits that still widen what "approved"
+ * means — and a rule the user discovers AFTERWARDS is not a rule they agreed
+ * to, so it is written where they are deciding, in the text the approval
+ * binds to.
  */
-const BOUNDARY_SEMANTICS =
-  "关于文件边界的确切含义（请读一句）：批准某个任务的边界后，该任务还可以在**同一目录内**" +
-  "新增文件（例如批了 `lib/a.ts`，它可以再拆出 `lib/b.ts`，`lib/` 下更深的子目录同理），" +
-  "前提是新增的路径**不与其他任务重叠**——" +
-  "但**已经做完（done）的任务不再占地**：它的文件可以交给后面的任务，回执会写明是谁让出来的。\n" +
-  "这类细化不会再来打扰你（门禁会记进审计条目）。" +
+const APPROVAL_SEMANTICS =
+  "关于批准的确切含义（请读一句）：批准的是**内容** —— 任务清单、每个任务的 repo、" +
+  "依赖关系、并行度、交付站点。\n" +
+  "子会话在它自己的 repo 里改哪些文件**不需要再报备**，也不会再来打扰你" +
+  "（文件边界已于 2026-09-17 从 plan 中移除：同一 repo 的任务本来就不会同时跑）。\n" +
   "把 plan **写回你此前批准过的内容**同样不会再问（撤回一次误操作不必重走批准），" +
   "而你每批准一次新内容，之前那条链就作废。\n" +
   "以下改动一律**重新**征求你的批准：" +
-  "新增任务、碰到新目录、删除依赖、把串行改成并行、提高并行上限、把交付站点往后挪" +
+  "新增任务、把任务换到另一个 repo、删除依赖、把串行改成并行、提高并行上限、把交付站点往后挪" +
   "（precommit → commit → pr，等于放开更多 ship 命令）。";
 
 
@@ -152,10 +152,10 @@ export function buildPlanConfirmMessage(plan: OrchestratorPlan): string {
   return (
     "plan 全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
     "批准后，项目经理才能按这份 plan 开子会话干活。批准的是**内容**：" +
-    "新增任务、碰到新目录、删依赖、串行改并行、提高并行上限、**提高交付站点**，" +
+    "新增任务、把任务换到另一个 repo、删依赖、串行改并行、提高并行上限、**提高交付站点**，" +
     "都会让批准失效并重新问你；" +
-    "**同一目录内、且不与其他任务重叠的文件细化不会再问**，" +
-    "**已 done 的任务不再占地**，**写回你批准过的内容**也不会再问（详见上方消息）。\n" +
+    "**子会话在自己 repo 内改哪些文件不再报备**，" +
+    "**写回你批准过的内容**也不会再问（详见上方消息）。\n" +
 
     `标题（不可信数据）：${plan.title.slice(0, 80)}\n` +
     `规模：${plan.tasks.length} 个任务，并行上限 ${plan.maxParallel}\n` +
@@ -257,9 +257,9 @@ async function handlePlanAction(
     if (lineageAuthorizes(runtime.approvedPlanHistory, nextHash)) {
       const restored = formatApprovalRestored(nextHash);
       // The SNAPSHOT and the timestamp come back with the hash. A hash alone
-      // would leave the next boundary refinement facing "the gate has no
-      // authorizing snapshot" and asking the user again — the very dialog
-      // this path exists to save.
+      // would leave the next plan edit facing "the gate has no authorizing
+      // snapshot" and asking the user again — the very dialog this path
+      // exists to save.
       deps.saveRuntime({
         ...runtime,
         approvedPlanHash: nextHash,
@@ -286,11 +286,7 @@ async function handlePlanAction(
       );
     }
     const carry = runtime.approvedPlan
-      // `previous` is the EXECUTION RECORD (the plan on disk): it decides
-      // which tasks count as finished, and therefore whose boundaries stop
-      // blocking. The statuses in `next` cannot serve — with no plan on disk
-      // they are simply whatever this call wrote.
-      ? decideApprovalCarry(runtime.approvedPlan, next, previous)
+      ? decideApprovalCarry(runtime.approvedPlan, next)
       : { carries: false, widenings: ["门禁没有已批准 plan 的授权快照（记录不可读或来自更早的版本），无法证明这次改动没有扩权"], amendments: [] };
     if (carry.carries) {
       // The approval MOVES to the new content: the hash is what every later
@@ -502,7 +498,7 @@ async function handlePlanAction(
     }
 
     // O-1 — the FULL plan goes to the transcript first, and the dialog then
-    // points at it. A plan approval binds to CONTENT (tasks, boundaries,
+    // points at it. A plan approval binds to CONTENT (tasks, repos,
     // dependencies, parallelism), and the dialog body is capped at a couple
     // of dozen rendered rows: the measured result was a user being asked to
     // sign a six-task plan whose last four tasks had been cut off, with
@@ -616,7 +612,7 @@ async function handlePlanAction(
   if (!plan) {
     return reply(
       "review-gate: 还没有 plan。用 `orchestrator_plan({ action: \"write\", plan: {...} })` 写一份 —— " +
-      "每个任务都必须声明 fileBoundaries（文件边界），并行调度与代批 goal 都靠它。",
+      "每个任务都必须声明 repo（该任务工作的仓库绝对路径），子会话的 cwd 与串行调度都靠它。",
       { present: false },
     );
   }
@@ -636,7 +632,7 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
     description:
       "Read or change the orchestration PLAN — the task list that is this orchestration's exit " +
       "contract, and the only thing that authorizes spawning a child session. Actions: " +
-      "\"read\" (default), \"write\" (replace the plan; every task MUST declare fileBoundaries), " +
+      "\"read\" (default), \"write\" (replace the plan; every task MUST declare repo), " +
       "\"submit\" (the gate AUDITS the plan with a judge process first — minutes-long — and only " +
       "asks the USER to approve it if the audit passes; a failed audit comes back as findings " +
       "with no dialog shown, so fix them and submit again), \"set-status\" (move one task through " +
@@ -646,11 +642,11 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "registry — into a timestamped file in `.pi/`, asks the user first, and NEVER deletes " +
       "anything; it refuses while a registered child pane is still alive and points you at " +
       "`orchestrator_attach` instead). WHAT `write` DOES TO THE APPROVAL: it keeps it for " +
-      "edits that grant nothing new — a narrowed boundary, a dropped task, a new path inside the " +
-      "directory of a boundary this task already had that no other task claims, an added " +
-      "dependency, parallel→serial, a lower maxParallel — and records why. It REVOKES it for a " +
-      "new task, a new directory, a removed dependency, serial→parallel or a higher maxParallel. " +
-      "So refine boundaries freely as you learn where the work lands; only real widening costs " +
+      "edits that grant nothing new — a dropped task, an added dependency, " +
+      "parallel→serial, a lower maxParallel, a lowered deliveryStation — and records why. " +
+      "It REVOKES it for a new task, a change of a task's repo, a removed dependency, " +
+      "serial→parallel, a higher maxParallel or a raised deliveryStation. " +
+      "So refine the task list freely as you learn where the work lands; only real widening costs " +
       "the user a dialog. " +
       "REQUIRED BEFORE `submit`: a restatement the USER confirmed (`propose_restatement`) — " +
       "without one submit refuses outright and shows no dialog. `deliveryStation` says where the " +
@@ -671,7 +667,6 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
         tasks: Type.Array(Type.Object({
           id: Type.String({ description: "Task id, [A-Za-z0-9._-] 1-64 chars" }),
           title: Type.String({ description: "Task title" }),
-          fileBoundaries: Type.Array(Type.String({ description: "Paths this task may touch" })),
           repo: Type.String({ description: "ABSOLUTE path of the repo this task works in (the child's cwd) — REQUIRED since 2026-09-02; a missing repo silently lands the child in the orchestrator's own repo" }),
           dependsOn: Type.Optional(Type.Array(Type.String())),
           execution: Type.Optional(Type.Union([Type.Literal("serial"), Type.Literal("parallel")])),
@@ -686,7 +681,7 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       }, {
         description:
           "For action=\"write\": { title, intent, maxParallel?, tasks: [{ id, title, " +
-          "fileBoundaries: [\"lib/\", ...], dependsOn?: [], execution?: \"serial\"|\"parallel\" }] }. " +
+          "repo: \"/abs/path/to/repo\", dependsOn?: [], execution?: \"serial\"|\"parallel\" }] }. " +
           "Do NOT send `status`: existing tasks keep the status execution gave them (use " +
           "\"set-status\"), and only a genuinely new task starts at `pending`. " +
           "Pass the plan as a plain OBJECT — never a JSON string or a nested wrapper.",

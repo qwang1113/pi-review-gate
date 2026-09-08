@@ -129,8 +129,8 @@ test("an approved plan's task REPO survives the sidecar round trip", () => {
       at: NOW,
       maxParallel: 2,
       tasks: [
-        { id: "t1", fileBoundaries: ["lib/a/"], dependsOn: [], execution: "serial", repo: "/other/repo" },
-        { id: "t2", fileBoundaries: ["lib/b/"], dependsOn: [], execution: "serial" },
+        { id: "t1", dependsOn: [], execution: "serial", repo: "/other/repo" },
+        { id: "t2", dependsOn: [], execution: "serial" },
       ],
     },
   };

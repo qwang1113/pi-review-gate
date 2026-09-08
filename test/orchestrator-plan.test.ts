@@ -31,8 +31,8 @@ function planOf(overrides: Record<string, unknown> = {}): OrchestratorPlan {
     title: "拆分 review-gate",
     intent: "把 8659 行的扩展拆成模块",
     tasks: [
-      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"] },
-      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"] },
+      { id: "a", title: "抽 plan 模块" },
+      { id: "b", title: "抽 tmux 模块" },
     ],
     ...overrides,
   }, NOW);
@@ -45,21 +45,28 @@ test("the plan file lives inside the gate-owned scope", () => {
     "writing the plan must never change the worktree fingerprint or arm the doc gate");
 });
 
-test("CONSTRAINT 5: a task with no declared file boundary is refused", () => {
+test("a plan file carrying a REMOVED task field loads, and the field is dropped", () => {
+  // The file-boundary field was deleted from PlanTask on 2026-09-17 (user
+  // decision). Old plan files on disk still carry it, and refusing them would
+  // strand an orchestration mid-flight for a field nothing reads any more.
+  // Driven with a placeholder key so the rule under test is "unknown task
+  // fields are ignored", not "this one name is special-cased".
   const parsed = parsePlan({
     title: "t", intent: "i",
-    tasks: [{ id: "a", title: "no boundary" }],
+    tasks: [{ id: "a", title: "legacy", legacyFileScope: ["lib/a.ts"] }],
   }, NOW);
-  assert.equal(parsed.ok, false);
-  assert.ok(parsed.problems.some((p) => /fileBoundaries/.test(p)),
-    "the message must name the missing field — parallel scheduling and proxy approval both depend on it");
-  assert.equal(parsed.plan, undefined, "a plan with problems is not a plan");
+  assert.equal(parsed.ok, true, parsed.problems.join("; "));
+  assert.deepEqual(
+    Object.keys(parsed.plan!.tasks[0]!).sort(),
+    ["dependsOn", "execution", "id", "note", "status", "title"],
+    "the unknown field is dropped, not carried",
+  );
 });
 
 test("CONSTRAINT 6 (write path): a task with no declared repo is refused when strictRepo", () => {
   const parsed = parsePlan({
     title: "t", intent: "i",
-    tasks: [{ id: "a", title: "server-service-dashboard: BFF proxy", fileBoundaries: ["src"] }],
+    tasks: [{ id: "a", title: "server-service-dashboard: BFF proxy" }],
   }, NOW, true);
   assert.equal(parsed.ok, false);
   assert.ok(parsed.problems.some((p) => /repo/.test(p)),
@@ -70,7 +77,7 @@ test("CONSTRAINT 6 (write path): a task with no declared repo is refused when st
 test("CONSTRAINT 6 (write path): a task WITH a repo passes strictRepo", () => {
   const parsed = parsePlan({
     title: "t", intent: "i",
-    tasks: [{ id: "a", title: "BFF proxy", repo: "/work/server-service-dashboard", fileBoundaries: ["src"] }],
+    tasks: [{ id: "a", title: "BFF proxy", repo: "/work/server-service-dashboard" }],
   }, NOW, true);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.plan?.tasks[0].repo, "/work/server-service-dashboard");
@@ -79,7 +86,7 @@ test("CONSTRAINT 6 (write path): a task WITH a repo passes strictRepo", () => {
 test("CONSTRAINT 6 (write path): a RELATIVE repo is refused — it would resolve to the PM's own repo", () => {
   const parsed = parsePlan({
     title: "t", intent: "i",
-    tasks: [{ id: "a", title: "BFF proxy", repo: "lib", fileBoundaries: ["src"] }],
+    tasks: [{ id: "a", title: "BFF proxy", repo: "lib" }],
   }, NOW, true);
   assert.equal(parsed.ok, false);
   assert.ok(parsed.problems.some((p) => /绝对路径/.test(p)),
@@ -89,7 +96,7 @@ test("CONSTRAINT 6 (write path): a RELATIVE repo is refused — it would resolve
 test("READ path stays lenient: a legacy plan without repo still loads (strictRepo defaults false)", () => {
   const parsed = parsePlan({
     title: "t", intent: "i",
-    tasks: [{ id: "a", title: "legacy", fileBoundaries: ["src"] }],
+    tasks: [{ id: "a", title: "legacy" }],
   }, NOW);
   assert.equal(parsed.ok, true, "an old plan without repo must keep loading");
   assert.equal(parsed.plan?.tasks[0].repo, undefined);
@@ -98,9 +105,9 @@ test("READ path stays lenient: a legacy plan without repo still loads (strictRep
 test("validation reports EVERY problem, not just the first", () => {
   const parsed = parsePlan({
     tasks: [
-      { id: "a", title: "", fileBoundaries: ["/abs"] },
-      { id: "a", title: "dup", fileBoundaries: ["lib"] },
-      { id: "!bad", title: "x", fileBoundaries: ["lib"] },
+      { id: "a", title: "" },
+      { id: "a", title: "dup" },
+      { id: "!bad", title: "x" },
     ],
   }, NOW);
   assert.equal(parsed.ok, false);
@@ -113,22 +120,22 @@ test("validation reports EVERY problem, not just the first", () => {
 test("a dependency that does not exist, or that loops, is refused", () => {
   const missing = parsePlan({
     title: "t", intent: "i",
-    tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], dependsOn: ["ghost"] }],
+    tasks: [{ id: "a", title: "a", dependsOn: ["ghost"] }],
   }, NOW);
   assert.ok(missing.problems.some((p) => /不存在/.test(p)));
 
   const cyclic = parsePlan({
     title: "t", intent: "i",
     tasks: [
-      { id: "a", title: "a", fileBoundaries: ["lib/a"], dependsOn: ["b"] },
-      { id: "b", title: "b", fileBoundaries: ["lib/b"], dependsOn: ["a"] },
+      { id: "a", title: "a", dependsOn: ["b"] },
+      { id: "b", title: "b", dependsOn: ["a"] },
     ],
   }, NOW);
   assert.ok(cyclic.problems.some((p) => /成环/.test(p)),
     "an unrunnable plan would make the exit condition permanently unsatisfiable");
   assert.ok(findDependencyCycle(cyclic.plan?.tasks ?? [
-    { id: "a", title: "a", fileBoundaries: ["lib/a"], dependsOn: ["b"], execution: "serial", status: "pending" },
-    { id: "b", title: "b", fileBoundaries: ["lib/b"], dependsOn: ["a"], execution: "serial", status: "pending" },
+    { id: "a", title: "a", dependsOn: ["b"], execution: "serial", status: "pending" },
+    { id: "b", title: "b", dependsOn: ["a"], execution: "serial", status: "pending" },
   ]));
 });
 
@@ -143,7 +150,7 @@ test("parallelism is clamped to what the layout and the cost model support", () 
 
 test("a plan larger than the cap is refused", () => {
   const tasks = Array.from({ length: PLAN_MAX_TASKS + 1 }, (_, i) => ({
-    id: `t${i}`, title: `t${i}`, fileBoundaries: [`lib/t${i}`],
+    id: `t${i}`, title: `t${i}`,
   }));
   const parsed = parsePlan({ title: "t", intent: "i", tasks }, NOW);
   assert.ok(parsed.problems.some((p) => new RegExp(String(PLAN_MAX_TASKS)).test(p)));
@@ -177,8 +184,8 @@ test("applyTaskStatus refuses the illegal move and explains WHY", () => {
 test("applyTaskStatus refuses to start a task whose prerequisites are unfinished", () => {
   const plan = planOf({
     tasks: [
-      { id: "a", title: "a", fileBoundaries: ["lib/a"] },
-      { id: "b", title: "b", fileBoundaries: ["lib/b"], dependsOn: ["a"] },
+      { id: "a", title: "a" },
+      { id: "b", title: "b", dependsOn: ["a"] },
     ],
   });
   const refused = applyTaskStatus(plan, "b", "running", { now: NOW });
@@ -212,8 +219,8 @@ test("mergeTaskProgress: a NOTE the rewrite supplies wins over the old one", () 
   assert.ok(previous.ok);
   const next = planOf({
     tasks: [
-      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"], note: "新备注" },
-      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"] },
+      { id: "a", title: "抽 plan 模块", note: "新备注" },
+      { id: "b", title: "抽 tmux 模块" },
     ],
   });
 
@@ -242,8 +249,8 @@ test("mergeTaskProgress: a note grants NOTHING — hash and canonical text ignor
   const withoutNote = planOf();
   const withNote = planOf({
     tasks: [
-      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"], note: "随便写点什么" },
-      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"] },
+      { id: "a", title: "抽 plan 模块", note: "随便写点什么" },
+      { id: "b", title: "抽 tmux 模块" },
     ],
   });
 
@@ -259,12 +266,12 @@ test("mergeTaskProgress: a note grants NOTHING — hash and canonical text ignor
 
 test("CONSTRAINT 6: same-repo tasks are DEFERRED, never co-scheduled (2026-09-07)", () => {
   // The isolation worktree is gone, so two children may never share one
-  // checkout: same-repo tasks serialize whatever their boundaries say.
+  // checkout: same-repo tasks serialize.
   const plan = planOf({
     maxParallel: 2,
     tasks: [
-      { id: "a", title: "a", fileBoundaries: ["lib"] },
-      { id: "b", title: "b", fileBoundaries: ["docs"] }, // disjoint, but SAME repo
+      { id: "a", title: "a" },
+      { id: "b", title: "b" }, // SAME repo
     ],
   });
   const { start, deferred } = scheduleNextTasks(plan, [], "/repo");
@@ -276,8 +283,8 @@ test("CONSTRAINT 6: same-repo tasks are DEFERRED, never co-scheduled (2026-09-07
 
 test("cross-repo tasks DO run in parallel (2026-09-07)", () => {
   const plan = planOf({ maxParallel: 2, tasks: [
-    { id: "a", title: "a", fileBoundaries: ["lib"], repo: "/repo-a" },
-    { id: "b", title: "b", fileBoundaries: ["lib"], repo: "/repo-b" },
+    { id: "a", title: "a", repo: "/repo-a" },
+    { id: "b", title: "b", repo: "/repo-b" },
   ] });
   const { start, deferred } = scheduleNextTasks(plan, [], "/repo-a");
   assert.deepEqual(start.map((s) => s.task.id), ["a", "b"], "different checkouts may run side by side");
@@ -287,8 +294,8 @@ test("cross-repo tasks DO run in parallel (2026-09-07)", () => {
 
 test("an undeclared repo means the orchestration's own repo", () => {
   const plan = planOf({ maxParallel: 2, tasks: [
-    { id: "a", title: "a", fileBoundaries: ["lib"] },
-    { id: "b", title: "b", fileBoundaries: ["lib"], repo: "/repo-b" },
+    { id: "a", title: "a" },
+    { id: "b", title: "b", repo: "/repo-b" },
   ] });
   const { start, deferred } = scheduleNextTasks(plan, [], "/repo-a");
   assert.deepEqual(start.map((s) => s.task.id), ["a", "b"], "a defaults to the primary repo, which differs from b");
@@ -299,8 +306,8 @@ test("a task in the SAME repo as something ALREADY RUNNING waits for it", () => 
   const plan = planOf({
     maxParallel: 2,
     tasks: [
-      { id: "a", title: "a", fileBoundaries: ["lib"], status: "running" },
-      { id: "b", title: "b", fileBoundaries: ["lib/x.ts"] },
+      { id: "a", title: "a", status: "running" },
+      { id: "b", title: "b" },
     ],
   });
   const { start, deferred } = scheduleNextTasks(plan, ["a"], "/repo");
@@ -310,14 +317,14 @@ test("a task in the SAME repo as something ALREADY RUNNING waits for it", () => 
 
 test("the parallel cap and unmet dependencies both hold tasks back", () => {
   const full = planOf({ maxParallel: 1, tasks: [
-    { id: "a", title: "a", fileBoundaries: ["lib/a"], status: "running" },
-    { id: "b", title: "b", fileBoundaries: ["lib/b"] },
+    { id: "a", title: "a", status: "running" },
+    { id: "b", title: "b" },
   ] });
   assert.deepEqual(scheduleNextTasks(full, ["a"], "/repo"), { start: [], deferred: [] },
     "no free slot ⇒ nothing starts");
   const chained = planOf({ tasks: [
-    { id: "a", title: "a", fileBoundaries: ["lib/a"] },
-    { id: "b", title: "b", fileBoundaries: ["lib/b"], dependsOn: ["a"] },
+    { id: "a", title: "a" },
+    { id: "b", title: "b", dependsOn: ["a"] },
   ] });
   assert.deepEqual(scheduleNextTasks(chained, [], "/repo").start.map((s) => s.task.id), ["a"],
     "b is not a candidate at all until a is done");
@@ -325,9 +332,9 @@ test("the parallel cap and unmet dependencies both hold tasks back", () => {
 
 test("same-repo parallel pairs are reported at approval time (2026-09-07)", () => {
   const plan = planOf({ tasks: [
-    { id: "a", title: "a", fileBoundaries: ["lib"], execution: "parallel" },
-    { id: "b", title: "b", fileBoundaries: ["lib/x"], execution: "parallel" },
-    { id: "c", title: "c", fileBoundaries: ["docs"], execution: "parallel", repo: "/repo-b" },
+    { id: "a", title: "a", execution: "parallel" },
+    { id: "b", title: "b", execution: "parallel" },
+    { id: "c", title: "c", execution: "parallel", repo: "/repo-b" },
   ] });
   assert.deepEqual(conflictingParallelPairs(plan, "/repo"), [{ a: "a", b: "b" }],
     "same repo ⇒ parallel is downgraded; a different repo keeps its parallel");
@@ -341,8 +348,8 @@ test("same-repo parallel pairs are reported at approval time (2026-09-07)", () =
 
 test("CONSTRAINT 3: anything not done keeps the orchestration open", () => {
   const plan = planOf({ tasks: [
-    { id: "a", title: "a", fileBoundaries: ["lib/a"], status: "done" },
-    { id: "b", title: "b", fileBoundaries: ["lib/b"], status: "blocked" },
+    { id: "a", title: "a", status: "done" },
+    { id: "b", title: "b", status: "blocked" },
   ] });
   assert.deepEqual(unfinishedTasks(plan).map((t) => t.id), ["b"],
     "blocked counts as unfinished — it is not an exit state");
@@ -380,13 +387,13 @@ test("changing what the user approved REVOKES the approval", () => {
   const base = planOf();
   const cases: Array<[string, OrchestratorPlan]> = [
     ["a new task", planOf({ tasks: [
-      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"] },
-      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"] },
-      { id: "c", title: "偷偷加的", fileBoundaries: ["extensions"] },
+      { id: "a", title: "抽 plan 模块" },
+      { id: "b", title: "抽 tmux 模块" },
+      { id: "c", title: "偷偷加的" },
     ] })],
-    ["a widened boundary", planOf({ tasks: [
-      { id: "a", title: "抽 plan 模块", fileBoundaries: ["."] },
-      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"] },
+    ["a task moved to another repo", planOf({ tasks: [
+      { id: "a", title: "抽 plan 模块", repo: "/other-repo" },
+      { id: "b", title: "抽 tmux 模块" },
     ] })],
     ["more parallelism", planOf({ maxParallel: 4 })],
     ["a different intent", planOf({ intent: "别的目标" })],
@@ -440,16 +447,15 @@ test("deliveryStation: the summary the user approves names the station", () => {
 });
 
 test("the canonical text is order-independent for sets", () => {
-  const a = planOf({ tasks: [{ id: "a", title: "t", fileBoundaries: ["lib", "docs"], dependsOn: [] }] });
-  const b = planOf({ tasks: [{ id: "a", title: "t", fileBoundaries: ["docs", "lib"], dependsOn: [] }] });
+  const a = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["x", "y"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });
+  const b = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["y", "x"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });
   assert.equal(canonicalPlanText(a), canonicalPlanText(b),
-    "re-ordering a boundary list is not a change the user needs to re-approve");
+    "re-ordering a dependency list is not a change the user needs to re-approve");
 });
 
-test("the summary is readable and names every task with its boundary", () => {
+test("the summary is readable and names every task with its repo", () => {
   const summary = formatPlanSummary(planOf());
   assert.match(summary, /拆分 review-gate/);
   assert.match(summary, /\[pending\] a \(serial\)/);
-  assert.match(summary, /边界：lib\/plan/);
   assert.match(summary, /并行上限：2/);
 });

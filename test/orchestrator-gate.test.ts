@@ -11,7 +11,7 @@ import {
   spawnAuthorization,
   type OrchestratorDoneFacts,
 } from "../lib/orchestrator-gate.ts";
-import { parsePlan, planHash, type OrchestratorPlan, type PlanTask } from "../lib/orchestrator-plan.ts";
+import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
 import { emptyRuntime, registerChild, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 
 const NOW = "2026-08-29T12:00:00.000Z";
@@ -19,7 +19,7 @@ const NOW = "2026-08-29T12:00:00.000Z";
 function planOf(overrides: Record<string, unknown> = {}): OrchestratorPlan {
   const parsed = parsePlan({
     title: "t", intent: "i",
-    tasks: [{ id: "a", title: "a", fileBoundaries: ["lib/orchestrator"] }],
+    tasks: [{ id: "a", title: "a" }],
     ...overrides,
   }, NOW);
   assert.ok(parsed.ok, parsed.problems.join("; "));
@@ -32,7 +32,7 @@ function approved(plan: OrchestratorPlan): OrchestratorRuntime {
 
 function doneFacts(overrides: Partial<OrchestratorDoneFacts> = {}): OrchestratorDoneFacts {
   return {
-    plan: planOf({ tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], status: "done" }] }),
+    plan: planOf({ tasks: [{ id: "a", title: "a", status: "done" }] }),
     runtime: emptyRuntime("orch-abc-1"),
     alivePaneIds: [],
     ...overrides,
@@ -59,7 +59,7 @@ test("CONSTRAINT 1: no plan, or an unapproved one, means no spawning", () => {
 test("CONSTRAINT 1: editing the plan after approval revokes it", () => {
   const plan = planOf();
   const runtime = approved(plan);
-  const widened = planOf({ tasks: [{ id: "a", title: "a", fileBoundaries: ["."] }] });
+  const widened = planOf({ tasks: [{ id: "a", title: "a renamed" }] });
   const result = spawnAuthorization(runtime, widened);
   assert.equal(result.ok, false, "otherwise 'approved' would mean 'was approved once, for something else'");
   if (!result.ok) assert.match(result.reason, /获批之后被改过/);
@@ -106,7 +106,7 @@ test("CONSTRAINT 2: the relay's own handoff path is writable while the relay sta
 
 
 // ---------------------------------------------------------------------------
-// CONSTRAINT 8 — a proxied goal stays inside the task
+// CONSTRAINT 8 — a proxied goal touches no out-of-repo secret
 // ---------------------------------------------------------------------------
 
 test("R3-1: constraint 8 is judged on EDITED FILES, so prose about paths cannot refuse a goal", () => {
@@ -114,86 +114,58 @@ test("R3-1: constraint 8 is judged on EDITED FILES, so prose about paths cannot 
   // 条对照 `lib/orchestrator-probe.ts`" and whose non-goals promised not to
   // touch a line of code was refused for "leaving its boundary". Two proxy
   // approvals in the third run had to bypass the mechanical check.
-  const task: PlanTask = {
-    id: "t3", title: "supervision doc", fileBoundaries: ["docs"],
-    dependsOn: [], execution: "parallel", status: "running",
-  };
   // It has only edited a doc — every path its GOAL quotes is irrelevant now.
   assert.deepEqual(
-    proxyApprovalProblems(["docs/orchestrator-supervision.md"], task),
+    proxyApprovalProblems(["docs/orchestrator-supervision.md"]),
     { ok: true, outside: [] },
   );
 });
 
-test("R3-1: nothing edited yet ⇒ nothing outside the boundary (goal approval happens at step 0)", () => {
-  const task: PlanTask = {
-    id: "a", title: "a", fileBoundaries: ["lib/orchestrator"],
-    dependsOn: [], execution: "serial", status: "running",
-  };
-  assert.deepEqual(proxyApprovalProblems([], task), { ok: true, outside: [] },
+test("R3-1: nothing edited yet ⇒ nothing to report (goal approval happens at step 0)", () => {
+  assert.deepEqual(proxyApprovalProblems([]), { ok: true, outside: [] },
     "a child that has written nothing cannot have breached anything — the probe keeps watching");
 });
 
-test("CONSTRAINT 8: a real landing outside the boundary still refuses, and says whose call it is", () => {
-  const task: PlanTask = {
-    id: "a", title: "a", fileBoundaries: ["lib/orchestrator", "test"],
-    dependsOn: [], execution: "serial", status: "running",
-  };
+test("CONSTRAINT 8: an in-repo landing is never a breach — the plan declares no file boundaries", () => {
+  // Same-repo tasks are serialized, so no two writers collide, and the plan
+  // stopped declaring which files a task may touch (2026-09-17 user decision).
   assert.deepEqual(
-    proxyApprovalProblems(["lib/orchestrator/plan.ts", "test/plan.test.ts"], task),
+    proxyApprovalProblems(["lib/orchestrator/plan.ts", "test/plan.test.ts", "extensions/review-gate.ts"]),
     { ok: true, outside: [] },
   );
-  const outside = proxyApprovalProblems(["extensions/review-gate.ts"], task);
-  assert.equal(outside.ok, false);
-  assert.deepEqual(outside.outside, ["extensions/review-gate.ts"]);
-  assert.match(outside.reason!, /范围变更/, "scope is the human's call, not a technical trade-off");
-  assert.match(outside.reason!, /orchestrator_notify/, "and the refusal says what to do instead");
-  assert.match(outside.reason!, /sessionEditedFiles/, "and names the fact it judged, so rewording is not a way through");
 });
 
-test("CONSTRAINT 8: a completion report written OUTSIDE the repo is not a breach (2026-09-06 方案 C)", () => {
+test("CONSTRAINT 8: a completion report written OUTSIDE the repo is not a breach (2026-09-06 decision C)", () => {
   // The measured false positive: a child writes its round report to /tmp — a
   // process artifact that cannot pollute the worktree, enter a checkpoint or
   // reach a tracked file — and the proxy approval was refused, twice in one
   // round, each time costing a manual approval.
-  const task: PlanTask = {
-    id: "t9c", title: "t9c", fileBoundaries: ["lib/orchestrator", "test"],
-    dependsOn: [], execution: "serial", status: "running",
-  };
   assert.deepEqual(
-    proxyApprovalProblems(["lib/orchestrator/plan.ts", "/tmp/rg-task-report.md"], task),
+    proxyApprovalProblems(["lib/orchestrator/plan.ts", "/tmp/rg-task-report.md"]),
     { ok: true, outside: [] },
   );
 });
 
-test("CONSTRAINT 8 SAFETY EDGE: an out-of-repo SENSITIVE landing still refuses", () => {
+test("CONSTRAINT 8 SAFETY EDGE: an out-of-repo SENSITIVE landing refuses, and says whose call it is", () => {
   // The exemption above is for noise, not for secrets. These are the paths as
   // the sidecar really holds them — already expanded, no literal `~`.
-  const task: PlanTask = {
-    id: "t9c", title: "t9c", fileBoundaries: ["lib/orchestrator", "test"],
-    dependsOn: [], execution: "serial", status: "running",
-  };
   for (const p of [
     "/Users/someone/.ssh/id_rsa",
     "/Users/someone/.pi/review-gate.json",
     "/Users/someone/.aws/credentials",
     "/tmp/staging/.env",
   ]) {
-    const refused = proxyApprovalProblems(["lib/orchestrator/plan.ts", p], task);
+    const refused = proxyApprovalProblems(["lib/orchestrator/plan.ts", p]);
     assert.equal(refused.ok, false, p);
     assert.deepEqual(refused.outside, [p], p);
   }
-});
-
-test("the refusal copy states both halves of the rule, so a manager reading it knows which is which", () => {
-  const task: PlanTask = {
-    id: "t9c", title: "t9c", fileBoundaries: ["lib/orchestrator"],
-    dependsOn: [], execution: "serial", status: "running",
-  };
-  const refused = proxyApprovalProblems(["/Users/someone/.ssh/config"], task);
-  assert.equal(refused.ok, false);
-  assert.match(refused.reason!, /仓库外/, "it explains what out-of-repo means for this check");
-  assert.match(refused.reason!, /敏感/, "and that sensitive out-of-repo paths are the exception");
+  const outside = proxyApprovalProblems(["/Users/someone/.ssh/config"]);
+  assert.equal(outside.ok, false);
+  assert.match(outside.reason!, /安全底线/, "the human's call, not a technical trade-off");
+  assert.match(outside.reason!, /orchestrator_notify/, "and the refusal says what to do instead");
+  assert.match(outside.reason!, /sessionEditedFiles/, "and names the fact it judged, so rewording is not a way through");
+  assert.match(outside.reason!, /仓库外/, "it explains what out-of-repo means for this check");
+  assert.match(outside.reason!, /敏感/, "and that sensitive out-of-repo paths are the exception");
 });
 
 // ---------------------------------------------------------------------------
@@ -221,8 +193,8 @@ test("a finished orchestration has nothing left to report", () => {
 test("CONSTRAINT 3: an unfinished plan task blocks the exit", () => {
   const problems = orchestratorDoneProblems(doneFacts({
     plan: planOf({ tasks: [
-      { id: "a", title: "a", fileBoundaries: ["lib/a"], status: "done" },
-      { id: "b", title: "b", fileBoundaries: ["lib/b"], status: "pending" },
+      { id: "a", title: "a", status: "done" },
+      { id: "b", title: "b", status: "pending" },
     ] }),
   }));
   assert.equal(problems.length, 1);
@@ -253,7 +225,7 @@ test("B4: a child that REPORTED DONE is named as such — and still blocks the e
     id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW,
   });
   const facts = doneFacts({
-    plan: planOf({ tasks: [{ id: "a", title: "a", fileBoundaries: ["lib/a"], status: "running" }] }),
+    plan: planOf({ tasks: [{ id: "a", title: "a", status: "running" }] }),
     runtime,
     alivePaneIds: ["%2"],
     reportedDone: ["a-1"],
@@ -323,7 +295,7 @@ test("a child whose pane VANISHED without reporting done is surfaced too", () =>
 test("CONSTRAINT 11: a decision the user was never told about blocks the exit", () => {
   const problems = orchestratorDoneProblems(doneFacts({
     plan: planOf({
-      tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], status: "done" }],
+      tasks: [{ id: "a", title: "a", status: "done" }],
       decisions: [{ id: "d1", question: "丢弃工作区？" }],
     }),
   }));
@@ -336,7 +308,7 @@ test("CONSTRAINT 11: a decision the user was never told about blocks the exit", 
   // human reviewing the run mis-read.
   const notified = orchestratorDoneProblems(doneFacts({
     plan: planOf({
-      tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], status: "done" }],
+      tasks: [{ id: "a", title: "a", status: "done" }],
       decisions: [{ id: "d1", question: "丢弃工作区？", notifiedAt: NOW }],
     }),
   }));
@@ -346,7 +318,7 @@ test("CONSTRAINT 11: a decision the user was never told about blocks the exit", 
 
   const resolved = orchestratorDoneProblems(doneFacts({
     plan: planOf({
-      tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], status: "done" }],
+      tasks: [{ id: "a", title: "a", status: "done" }],
       decisions: [{ id: "d1", question: "丢弃工作区？", notifiedAt: NOW, resolvedAt: NOW, answer: "C" }],
     }),
   }));
@@ -356,16 +328,16 @@ test("CONSTRAINT 11: a decision the user was never told about blocks the exit", 
 test("R-29: a decision declares what the plan must become, and the blocker repeats it", () => {
   const problems = orchestratorDoneProblems(doneFacts({
     plan: planOf({
-      tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], status: "done" }],
+      tasks: [{ id: "a", title: "a", status: "done" }],
       decisions: [{
         id: "d1",
-        question: "要不要扩边界到 scripts/？",
+        question: "要不要扩到 scripts/？",
         notifiedAt: NOW,
-        planEffect: "若答 B，任务 a 的边界要加 scripts/",
+        planEffect: "若答 B，任务 a 要新增一个脚本任务",
       }],
     }),
   }));
-  assert.match(problems.join("\n"), /任务 a 的边界要加 scripts\//);
+  assert.match(problems.join("\n"), /任务 a 要新增一个脚本任务/);
 });
 
 

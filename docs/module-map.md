@@ -313,12 +313,12 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 三个（`orchestrator-probe.ts` / `orchestrator-pane-read.ts` /
 `orchestrator-keys.ts` —— 它们的全部工作就是让**终端**可读），新增了四个：
 
-- **纯决策**：`orchestrator-gate.ts`（11 条硬约束；约束 7/10/14 已退役）、
-  `orchestrator-boundaries.ts`（文件边界代数——同 repo 任务互斥、跨 repo 可并行的判据）、
+- **纯决策**：`orchestrator-gate.ts`（10 条硬约束；约束 5/7/10/14 已退役）、
+  `out-of-repo-paths.ts`（**仓库外 + 敏感路径**的越界判定；2026-09-17 随文件边界一起
+  从 `orchestrator-boundaries.ts` 里留下）、
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
-  `orchestrator-plan-approval.ts`（**这次改动扩权了吗**——已批准目录树内的边界
-  细化、已 done 任务让出的地盘、写回此前已获授权内容（批准世系）都不重新惊动
-  用户，扩权一律重批）、
+  `orchestrator-plan-approval.ts`（**这次改动扩权了吗**——删任务、加依赖、降并行度、
+  写回此前已获授权内容（批准世系）都不重新惊动用户，扩权一律重批）、
   `orchestrator-plan-audit.ts`（plan 的前置审计：任务模板、裁决绑定 canonical
   文本、只 P0/P1 阻塞）、
   `orchestrator-pane-decor.ts`（子会话的颜色/标签/边框标题——纯展示层，只出不进）、
@@ -347,7 +347,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 - **工具与接线**：`orchestrator-tools.ts`（plan / notify）、
   `orchestrator-session-tools.ts`（spawn / instruct / wait / close / handoff 的
   注册，并转注册下面两个模块，所以「有哪些编排工具」只有一个地方回答）、
-  `orchestrator-answer-tools.ts`（answer，含约束 8 的代批边界）、
+  `orchestrator-answer-tools.ts`（answer，含约束 8 的仓库外敏感路径检查）、
   `orchestrator-recovery-tools.ts`（recover / attach、孤儿检测）、
   `orchestrator-dispatch.ts`（spawn / instruct 的实现）、`orchestrator-tool-kit.ts`
   （每个工具的共用前置：模式、pane 实况、plan 可用性、子会话资产）、
@@ -356,7 +356,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 
 
 > **落点**：新的编排**规则** → `orchestrator-gate.ts` 或
-> `orchestrator-boundaries.ts`（能被单测点名的那种）；新的**能力**（读、按
+> `orchestrator-plan.ts` / `orchestrator-plan-approval.ts`（能被单测点名的那种）；新的**能力**（读、按
 > 键、投递之类的原子动作）→ 单独一个 `lib/orchestrator-<能力>.ts` + 在对应
 > 的 `*-tools.ts` 里注册。tmux 命令**只**在 `orchestrator-tmux.ts` 里拼。
 
@@ -541,20 +541,20 @@ fail-closed）。`model-diagnose.ts`
 | `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |
 | `readonly-stall.ts` | 只读钻探止损（2026-09-18）：工具调用层计数器，连续 30 次成功的只读调用（read 家族 + bash）无 edit 落地时注入 NUDGE（只提示不拦截）。补 loop-stall 的 turn 边界盲区与进展维度「任何调用都算推进」的盲区；状态纯内存，不落盘。**谁听得见由 `readonlyStallNudgeFor(mode)` 决定**（2026-09-17）：`normal` 与 `orchestrator` 静默 —— 项目经理按约束 2 根本不写代码，这条提醒对它恒为误报；计数本身仍与模式无关 |
 | `orchestration-id.ts` | 编排 id：编排的稳定地址（不是 session id），接力换人后子会话无感 |
-| `orchestrator-boundaries.ts` | 文件边界代数：两个任务能否并行的唯一判据；以及**已改文件的越界判定** `editedPathsOutsideBoundaries`（2026-09-17，用户方案 C）—— 仓库外路径（sidecar 里表现为绝对路径）是流程产物，不参与越界判定，但仓库外的**敏感**路径仍判违规（复用 `isSensitiveFile` + `OUT_OF_REPO_SENSITIVE_SEGMENTS` 按目录段匹配，与家目录展开无关）。它不替代 `ship-gate-edit-guard.ts` 的编辑期敏感文件防线 |
+| `out-of-repo-paths.ts` | 仓库外路径判定：`isOutsideRepoPath`（sidecar 里表现为绝对路径就是仓库外）+ **敏感路径**判定（复用 `isSensitiveFile` + `OUT_OF_REPO_SENSITIVE_SEGMENTS` 按目录段匹配，与家目录展开无关）+ `sensitiveOutOfRepoEdits`（代批时真正算违规的那一批）。仓库内的写入**不参与判定**：同一 repo 的任务本来就被串行调度，文件边界已于 2026-09-17 从 plan 中移除（原 `orchestrator-boundaries.ts` 的边界代数一并删除）。它不替代 `ship-gate-edit-guard.ts` 的编辑期敏感文件防线 |
 | `orchestrator-channel.ts` | 点对点通道：路径、记录 schema、追加/读取/行游标、大 payload 溢出到旁文件、投影（还欠着什么）、心跳超时判定；以及**不可信输入的边界净化**——`sanitizeScopeStamp` / `sanitizeContextPercent` / `sanitizeDeliveryStation`（未知取值一律丢弃，绝不降级成某个真值；站点词表仍只由 `lib/delivery-station.ts` 定义） |
 | `orchestrator-child-channel.ts` | 子会话侧：状态上报、「人与项目经理任意一方先答即生效」的竞态提问、读取与确认编排下发的指令 |
 | `orchestrator-child-state.ts` | 子会话状态（working / waiting-input / **waiting-judge** / idle / done / dead / stalled + mode-changed）与再唤醒退避；`waiting-judge` 是「在等门禁自己派出去的 reviewer/precommit」，不叫醒项目经理；`mode-changed` 是模式切换事件，叫醒项目经理。也让 `stalled` 回到只表示「扩展不在了」。判据全部是结构化真值，不看屏幕 |
 | `orchestrator-pane-decor.ts` | 可视化区分的**字符串**：按 id 派色（纯函数，同一会话永远同色）、`@task-slug · state 220s` 的边框标题模板、window 级选项的取值。**纯展示层**：只写不读，任何判定都不看它。何时收起 window 标签栏（`releasesWindowLabels` / `countDecoratedPanes`）与真正写标题（`refreshSessionPaneTitle`）都在 `session-factory.ts`，2026-09-05 起五条关闭路径共用同一判定。**window 标签栏是跨会话共享资源，它的所有权语义（谁开、谁释放、缺信息一律保留、window 有自己的 pane 就用自己的、否则回退被关的那个，外加两个已实测未修的跨会话误清场景）写在本模块文件头**（2026-09-06）。可观测的那半钉在 `test/orchestrator-pane-decor.test.ts` 末尾一条驱动 `orchestrator_close` 的测试上；跨会话那半**测不到**（fake tmux 只列它自己开过的 pane），只有文字论证 —— 后续引入跨会话 pane 登记面时应当**重写**那条测试，而不是等它失败 |
-| `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：已批准**目录树**内的边界细化、收窄、加依赖、降并行度⇒批准迁移并记审计；新任务/新目录/删依赖/串行改并行/提并行度/换 repo/提高交付站点⇒重新批准。两条 2026-09-06 的放宽：**已 `done` 的任务退出相交判定**（它不再有活着的写者，回执写明原持有者），以及**批准世系** `approvedPlanHistory`（用户批准起、每次平移追加的内容 hash 链）——写回其中任一内容即把批准平移回来，撤回一次误操作不必重走 submit；用户每次新的显式批准**重置**世系，因此被收窄掉的旧版本回不来 |
+| `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：删任务、加依赖、并行改串行、降并行度、收紧交付站点⇒批准迁移并记审计；新任务/删依赖/串行改并行/提并行度/换 repo/提高交付站点⇒重新批准。**文件边界自 2026-09-17 起不是 plan 的一部分**（用户决定：同 repo 串行，边界防不住冲突），“已批准目录树内的细化 / done 任务让出地盘”两条规则随边界一起删除。一条 2026-09-06 的放宽保留：**批准世系** `approvedPlanHistory`（用户批准起、每次平移追加的内容 hash 链）——写回其中任一内容即把批准平移回来，撤回一次误操作不必重走 submit；用户每次新的显式批准**重置**世系，因此被收窄掉的旧版本回不来 |
 | `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案。**「哪份 report 收本轮」已于 2026-09-05 搬去 `audit-round.ts`** —— 那是审计**回合**的问题，不是 plan 的，三种 kind 都要回答它 |
 | `orchestrator-handoff-advice.ts` | 上下文用量 + 待答请求数 ⇒ 接力时机（软/硬阈值，没读数就明说没读数） |
-| `orchestrator-answer-tools.ts` | 工具 `orchestrator_answer`：把答案写进通道（选项原文/序号/唯一子串，含糊即拒），代批 goal 时按约束 8 比对任务边界；代批 goal / 代确认反述还必须带 `crosscheck` 对照（任务 id + 文件边界/任务目标/交付站点三判断，词表 `PROXY_CROSSCHECK_TOKENS`，缺项退回并把 plan 任务与子会话正文并排贴回），且请求携带的站点不得宽于已批准 plan 的 `deliveryStation`。可选的 `answers` 数组一次答完子会话一整批 `ask_user` 提问：**裁决只有一份实现**（单问与批量都走 `answerOneRequest`），每条独立成败、写进通道的不回滚 |
+| `orchestrator-answer-tools.ts` | 工具 `orchestrator_answer`：把答案写进通道（选项原文/序号/唯一子串，含糊即拒），代批 goal 时按约束 8 检查子会话实际落点是否在**仓库外的敏感位置**；代批 goal / 代确认反述还必须带 `crosscheck` 对照（任务 id + 任务目标/交付站点两判断，词表 `PROXY_CROSSCHECK_TOKENS`，缺项退回并把 plan 任务与子会话正文并排贴回），且请求携带的站点不得宽于已批准 plan 的 `deliveryStation`。可选的 `answers` 数组一次答完子会话一整批 `ask_user` 提问：**裁决只有一份实现**（单问与批量都走 `answerOneRequest`），每条独立成败、写进通道的不回滚 |
 | `orchestrator-delivery.ts` | 投递：任务文件 + `pi --session-id @file` 启动、恢复用的 argv 与说明，以及「什么才算送达」的判据（通道记录 / 子会话回执）。任务书在 brief 之后追加 `TASK_GOAL_DIRECTIVE`（门禁硬指示：plan 批准 ≠ goal 批准，必须先协商自己的 loop goal） |
 | `orchestrator-deps.ts` | 编排工具需要的依赖集合；host 类型本身住在 `tool-host.ts`，这里只 re-export |
 | `orchestrator-directives.ts` | 编排两侧的指令：项目经理拿全套契约，子会话只拿一句话 |
 | `orchestrator-dispatch.ts` | dispatch 半边：`orchestrator_spawn` / `orchestrator_instruct`；spawn 时按任务声明的 `repo` 解析子会话 cwd（`resolveTaskRepo`，fail-closed——解析不了就拒绝，绝不回退到项目经理自己的 repo） |
-| `orchestrator-gate.ts` | 编排的 11 条硬约束（约束 7/10/14 于 2026-09-07 退役），写成纯决策以便逐条单测 |
+| `orchestrator-gate.ts` | 编排的 10 条硬约束（约束 7/10/14 于 2026-09-07、约束 5 于 2026-09-17 退役），写成纯决策以便逐条单测 |
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
 | `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash。`planHash` 的**产出方**，因此「什么算一个 plan hash」也归它：`isPlanHash` 是那条形状规则的唯一实现，凡从 sidecar 读回授权记录的地方都用它（复制出去的授权校验只会朝放宽的方向漂移） |

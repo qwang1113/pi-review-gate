@@ -240,7 +240,7 @@ test("F10: what a child has EDITED is readable from its sidecar — constraint 8
 test("F5: decision ids are minted by the gate and never collide with what is on disk", () => {
   const parsed = parsePlan({
     title: "t", intent: "i",
-    tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"] }],
+    tasks: [{ id: "a", title: "a" }],
     decisions: [{ id: "d1", question: "q" }, { id: "d7", question: "q" }],
   });
   assert.ok(parsed.ok, parsed.problems.join("; "));

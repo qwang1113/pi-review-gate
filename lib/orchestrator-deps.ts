@@ -170,7 +170,7 @@ export interface OrchestratorDeps {
   /**
    * Print something to the user's transcript BEFORE a dialog asks about it.
    *
-   * The plan approval binds to CONTENT (tasks, boundaries, dependencies,
+   * The plan approval binds to CONTENT (tasks, repos, dependencies,
    * parallelism), and a dialog box cannot hold a six-task plan — O-1 measured
    * a user being asked to sign a truncated one. The loop goal solved this
    * years-equivalent ago by printing the full text first and pointing the

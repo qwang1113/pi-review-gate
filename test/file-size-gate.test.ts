@@ -88,7 +88,7 @@ test("this round's own modules would pass the rule they introduce", () => {
   // Self-consistency: a rule the repository breaks on the very commit that
   // adds it is a rule nobody will respect.
   const facts = [
-    "lib/orchestration-id.ts", "lib/orchestrator-boundaries.ts", "lib/orchestrator-plan.ts",
+    "lib/orchestration-id.ts", "lib/out-of-repo-paths.ts", "lib/orchestrator-plan.ts",
     "lib/orchestrator-tmux.ts", "lib/orchestrator-guard.ts", "lib/orchestrator-notify.ts",
     "lib/orchestrator-registry.ts", "lib/orchestrator-gate.ts", "lib/orchestrator-relay.ts",
     "lib/orchestrator-wait.ts", "lib/orchestrator-tools.ts", "lib/orchestrator-session-tools.ts",

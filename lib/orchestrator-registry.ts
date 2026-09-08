@@ -125,7 +125,7 @@ export interface OrchestratorRuntime {
    * WEAKER than the one that was approved", and that second question is the
    * one that decides whether a human has to be woken up for an edit that
    * granted nothing. lib/orchestrator-plan-approval.ts compares against this
-   * snapshot; without it, every boundary refinement is indistinguishable from
+   * snapshot; without it, every harmless edit is indistinguishable from
    * a power grab and costs an approval dialog.
    */
   approvedPlan?: ApprovedPlanSnapshot;
@@ -494,7 +494,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
  * Validate the approved-plan snapshot read back from the sidecar.
  *
  * It is untrusted input with real authority: a forged snapshot could make a
- * boundary the user never saw look "already approved", which is precisely the
+ * task repo the user never saw look "already approved", which is precisely the
  * power grab the approval exists to prevent. So every field is checked, the
  * whole thing is dropped on any doubt, and it must belong to the SAME
  * approval as the hash beside it — otherwise it is a leftover from an older
@@ -531,9 +531,7 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     const execution = task.execution === "serial" || task.execution === "parallel"
       ? task.execution
       : undefined;
-    if (!id || !execution || !Array.isArray(task.fileBoundaries)) return undefined;
-    const fileBoundaries = task.fileBoundaries.filter((b): b is string => typeof b === "string" && b.length > 0);
-    if (fileBoundaries.length !== task.fileBoundaries.length) return undefined;
+    if (!id || !execution) return undefined;
     const dependsOn = Array.isArray(task.dependsOn)
       ? task.dependsOn.filter((d): d is string => typeof d === "string" && d.length > 0)
       : [];
@@ -543,7 +541,7 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     // with a repo as one approved without, and the carryover check would
     // misjudge a later repo change as a widening (fail-closed, but wrong).
     const repo = typeof task.repo === "string" && task.repo.length > 0 ? task.repo : undefined;
-    tasks.push({ id, fileBoundaries, dependsOn, execution, ...(repo ? { repo } : {}) });
+    tasks.push({ id, dependsOn, execution, ...(repo ? { repo } : {}) });
   }
   return { hash: snapshotHash, at, maxParallel, tasks, ...(deliveryStation ? { deliveryStation } : {}) };
 }

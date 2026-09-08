@@ -240,7 +240,7 @@ test("a sibling directory that merely SHARES the repo's path prefix is outside",
 
 test("a SENSITIVE outside path is still recorded — visible to a supervisor, but not arming", async () => {
   // The one exception to skipping outside-repo edits: `sessionEditedFiles` is
-  // what lib/orchestrator-boundaries.ts reads to decide whether a child wrote
+  // what lib/out-of-repo-paths.ts reads to decide whether a child wrote
   // somewhere it had no business writing, and its out-of-repo exemption keeps
   // SENSITIVE paths as violations. Writing a report to /tmp and writing to
   // `~/.ssh/config` are not the same act — only the first one is noise.

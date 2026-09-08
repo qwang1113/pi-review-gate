@@ -440,9 +440,9 @@ export interface GateState {
    * structured conclusion inside `orchestrator_plan`'s submit.
    *
    * Absent ⇒ this plan was never audited, and `submit` shows no dialog. It
-   * binds to the plan's CANONICAL text (tasks, boundaries, dependencies,
+   * binds to the plan's CANONICAL text (tasks, repos, dependencies,
    * parallelism), so executing the plan — which rewrites statuses constantly
-   * — never invalidates it, while widening a boundary always does.
+   * — never invalidates it, while moving a task to another repo always does.
    */
   planAudit?: PlanAuditRecord;
 
