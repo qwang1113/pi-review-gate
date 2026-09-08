@@ -5379,3 +5379,17 @@ test("the judge's context reading travels report → registry → next dispatch"
     "it lands on the entry the lane lookup reads");
 });
 
+test("test-run discipline nudge: wired into the bash branch, judge panes exempt", () => {
+  // 2026-09-08 (goal criterion 2): a manual full-suite/typecheck in the MAIN
+  // session gets the nudge; a judge pane's full run is its job and stays
+  // silent. Both halves must be structurally pinned.
+  assert.match(SRC, /looksLikeFullLaneRun\(cmd\)/, "the bash branch consults the recogniser");
+  assert.match(SRC, /text: FULL_LANE_NUDGE/, "…and appends the nudge when it hits");
+  // Judge exemption sits in the same condition — readJudgeSideEnv(process.env)
+  // === undefined means "main session, not a judge pane".
+  const bashSite = SRC.slice(SRC.indexOf("Test-run discipline nudge"), SRC.indexOf("Test-run discipline nudge") + 700);
+  assert.match(bashSite, /readJudgeSideEnv\(process\.env\) === undefined/,
+    "judge panes must not hear the full-lane nudge");
+  assert.match(bashSite, /state\.taskMode !== "normal"/,
+    "normal mode stays silent too");
+});

@@ -44,8 +44,11 @@ const PM_TYPECHECK = /(?:^|\s)(npm|yarn|pnpm)(?:\s+run)?\s+typecheck(?:\s|$)/;
 /** `node --test` alone or with flags — but not when a file follows. */
 const NODE_TEST = /(?:^|\s)node\s+--test(?:\s|$)/;
 
-/** A find-expanded whole tree (`node --test $(find test …)`) — this repo's own full run. */
-const FIND_EXPANDED = /\$\(find\b/;
+/** A find-expanded whole tree (`node --test $(find test …)`) — this repo's
+ * own full run. Requires BOTH halves in the same segment: `$(find …)` alone
+ * is a read-only command substitution and must never be flagged (reviewer P2,
+ * 2026-09-08). */
+const FIND_EXPANDED = /node\s+--test[^;&|\n]*\$\(find\b/;
 
 /** True when the command runs the FULL test suite (no target file). */
 export function looksLikeFullSuiteRun(command: string): boolean {

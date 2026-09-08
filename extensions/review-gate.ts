@@ -4179,8 +4179,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (event.isError) {
         // Edit-discipline nudge (prompt-only, non-blocking): a failed edit is
         // the classic trigger for the "shell edits the file instead"
-        // workaround. Append guidance to THIS result and arm the same-turn
-        // bash window; the failure semantics stay untouched (isError true).
+        // workaround. Append guidance to THIS result and arm the bash window;
+        // it closes only on a successful edit or after one nudge (2026-09-08,
+        // cross-turn persistence — a persistently broken edit tool must not
+        // slip into silent bash edits next turn). Failure semantics stay
+        // untouched (isError true).
         // Skipped in normal mode: the step-aside must not add
         // extension text to results.
         if (state.taskMode === "normal") return;
