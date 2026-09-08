@@ -157,7 +157,7 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
     persist: () => {},
     setLoopArmed: (armed) => { h.armed.push(armed); },
     showToUser: () => true,
-    confirmBounded: async () => true,
+    askChoice: async () => undefined,
     canChannelDialogs: () => true,
     // THE REAL FUNNEL: the same call the extension makes, with the same
     // interrupt source an instruct fires.
@@ -215,7 +215,7 @@ test("all three questions are on the channel before the FIRST dialog renders", a
 
 test("a lone question carries NO batch stamp — an interview of one is just a question", async () => {
   const h = harness(() => "A");
-  await h.run([{ text: "只有一个问题", options: ["A", "B"] }]);
+  await h.run([{ text: "只有一个问题", options: ["A", "B"], recommended: "A" }]);
   const [only] = requestsOn(h.io);
   assert.equal(requestsOn(h.io).length, 1);
   assert.equal(only!.batchId, undefined);

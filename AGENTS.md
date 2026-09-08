@@ -103,6 +103,16 @@ only: `ask_user` (the ONE way to reach them — it runs the interview, which is
 optional and uncapped, and pauses the loop), the RESTATEMENT confirmation and
 the loop-goal approval dialog.
 
+**提问只有一种形状（2026-09-08，用户决定）.** 门禁向用户提问的每一个对话框
+都是同一个模板：**2–4 个选项 + 一个「（推荐）」标记 + 一行「✎ 不选，我说明
+原因」**；选中追加行会弹出输入框，输入的原因随答案回传（人类侧、通道侧同一
+条规则）。`ask_user`、门禁自己每一处是/否框（goal 批准、plan 批准、plan 归档、
+需求反述确认、`request_sensitive_edit`、`request_scope_limit`、`set_gate_mode`
+降级确认、`/gate-bypass`、`/gate-grant`）与两处手写 `ui.select` 全部走它，
+`ui.confirm` 在门禁里已无调用点。agent 提交的问题缺选项（<2）或缺推荐 ⇒
+**整批被拒、一个框都不弹**；选项超 4 个只截断并告知。规则唯一出处：
+`lib/choice-dialog.ts`。
+
 **需求反述与交付站点（2026-09-06，机械前置）.** 谈契约之前先把需求反述给用户
 确认：`propose_restatement({restatement, station})`。没有一份用户确认过的反述，
 `propose_loop_goal` 与 `orchestrator_plan({action:"submit"})` **直接被拒且不弹

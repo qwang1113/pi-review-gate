@@ -17,6 +17,7 @@
 
 import type { OrchestratorPlan } from "./orchestrator-plan.ts";
 import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
+import type { ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 
@@ -149,23 +150,22 @@ export interface OrchestratorDeps {
   ownPane(): string | undefined;
 
   /**
-   * Ask the USER; the extension renders the dialog, the tool never claims consent.
+   * Render the gate's ONE question template (lib/choice-dialog.ts) in the
+   * ORCHESTRATOR's own pane, and return the line the user picked.
    *
-   * `pointer` is passed straight to the dialog fitter: when the body has to be
-   * truncated it tells the user WHERE the untruncated text is. A caller may
-   * only pass one after it has actually shown that text (see
+   * ONE entry for every dialog the project manager raises — the plan
+   * approval, the archive confirmation, and the first-answer grant door used
+   * to be a boolean confirm plus a bare select (2026-09-08). They are the
+   * same question shape now: 2–4 options, one marked （推荐）, and the
+   * `✎ 不选，我说明原因` row whose text box is the reason a rejection carries.
+   *
+   * `body` is the long half and goes through the dialog fitter; `pointer`
+   * tells the user WHERE the untruncated text is, and a caller may only pass
+   * one after it has actually shown that text (see
    * {@link OrchestratorDeps.showToUser}) — promising a message nobody printed
    * is the bug O-1 filed against the plan dialog.
    */
-  confirm(title: string, message: string, pointer?: string): Promise<boolean>;
-
-  /**
-   * A multi-option dialog in the ORCHESTRATOR's own pane (2026-09-16, the
-   * first-answer grant door). Only the user can answer it — it renders in
-   * the PM's pane precisely because the PM asked to proxy something it has
-   * no grant for, and only the human may hand that grant out.
-   */
-  select(title: string, options: readonly string[]): Promise<string | undefined>;
+  askChoice(spec: ChoiceSpec, opts?: { body?: string; pointer?: string; signal?: AbortSignal }): Promise<string | undefined>;
 
   /**
    * Print something to the user's transcript BEFORE a dialog asks about it.

@@ -37,6 +37,7 @@ import { Type } from "typebox";
 
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import { isCodeFile, isDocFile, isSensitiveFile } from "./constants.ts";
+import { choiceRows, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import { changedFiles } from "./fingerprint.ts";
 import {
   SENSITIVE_GRANT_TTL_MS,
@@ -135,10 +136,18 @@ export async function doRequestScopeLimit(
   // human, so a consent request can never deadlock the child on a dialog its
   // supervisor cannot even see (measured deadlock, 2026-08-31). A standalone
   // session renders the plain confirm as before.
-  const CONFIRM_OPTIONS = ["同意缩小审查范围", "拒绝（保持完整门禁）"];
+  const GRANT_LABEL = "同意缩小审查范围";
+  const spec: ChoiceSpec = {
+    title: "review-gate: AI 请求把审查范围缩小到本会话的修改——是否同意？",
+    options: [GRANT_LABEL, "拒绝（保持完整门禁）"],
+    // The SAFE option is the recommendation: granting narrows the gate, and
+    // the gate never nudges the user into weakening it.
+    recommended: "拒绝（保持完整门禁）",
+  };
   let ok = false;
   let dialogFailed = false;
-  const consentTitle = "review-gate: AI 请求把审查范围缩小到本会话的修改——是否同意？";
+  /** The user's own typed reason for refusing, when they gave one. */
+  let declineReason: string | undefined;
   const consentBody =
     "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
     `既有变更 ${preexisting.length} 个` +
@@ -151,14 +160,21 @@ export async function doRequestScopeLimit(
       {
         dialogKind: "select",
         topic: "scope-limit",
-        title: `${consentTitle}\n${consentBody}`,
-        options: CONFIRM_OPTIONS,
+        // The channel record carries the SAME text the human sees — the
+        // consequences (what granting covers, what refusing locks) are the
+        // half a project manager answering on the user's behalf must read.
+        title: `${spec.title}\n${consentBody}`,
+        options: choiceRows(spec),
         ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
       },
       uiCtx.hasUI === true,
-      (signal) => deps.confirmBounded(uiCtx, consentTitle, consentBody, "（清单与理由见上方消息）", signal).then((yes) => (yes ? CONFIRM_OPTIONS[0] : undefined)),
+      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, pointer: "（清单与理由见上方消息）", signal }),
     );
-    ok = outcome.answer !== undefined && outcome.answer === CONFIRM_OPTIONS[0];
+    const pick = parseChoice(outcome.answer, spec);
+    ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
+    // A refusal typed into the template's reason box is an objection the agent
+    // can act on — dropping it would make the user repeat themselves.
+    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
   } catch { dialogFailed = true; }
 
   // A dialog that could not be shown is NOT a decline: fail closed for
@@ -174,7 +190,8 @@ export async function doRequestScopeLimit(
     deps.declineScopeLimit();
     return deny(
       "review-gate: DECLINED the scope limit (by the user or the project manager) — the FULL gate applies (pre-existing " +
-      "changes included). Scope requests are now locked for this session; continue the loop and cover everything.",
+      "changes included). Scope requests are now locked for this session; continue the loop and cover everything." +
+      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
     );
   }
 
@@ -309,10 +326,18 @@ export async function doRequestSensitiveEdit(
   // Same channel treatment as request_scope_limit (2026-08-31): an
   // orchestration child's consent dialog must be answerable by its project
   // manager, or it deadlocks the child on a dialog the supervisor cannot see.
-  const CONFIRM_OPTIONS = ["同意一次性修改", "拒绝（保持拦截）"];
+  const GRANT_LABEL = "同意一次性修改";
+  const spec: ChoiceSpec = {
+    title: "review-gate: AI 请求一次性修改敏感文件——完整信息如下。",
+    options: [GRANT_LABEL, "拒绝（保持拦截）"],
+    // Refusing is the recommendation: the file holds secrets, and the gate
+    // does not recommend handing them to a model.
+    recommended: "拒绝（保持拦截）",
+  };
   let ok = false;
   let dialogFailed = false;
-  const consentTitle = "review-gate: AI 请求一次性修改敏感文件——完整信息如下。";
+  /** The user's own typed reason for refusing, when they gave one. */
+  let declineReason: string | undefined;
   const consentBody =
     `文件（完整路径）: ${absPath}\n` +
     `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}\n` +
@@ -326,14 +351,19 @@ export async function doRequestSensitiveEdit(
       {
         dialogKind: "select",
         topic: "sensitive-edit",
-        title: `${consentTitle}\n${consentBody}`,
-        options: CONFIRM_OPTIONS,
+        // The channel record carries the SAME text the human sees — a project
+        // manager answering on the user's behalf cannot authorize a path it
+        // was never shown.
+        title: `${spec.title}\n${consentBody}`,
+        options: choiceRows(spec),
         ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
       },
       uiCtx.hasUI === true,
-      (signal) => deps.confirmBounded(uiCtx, consentTitle, consentBody, "（完整路径与理由见上方消息）", signal).then((yes) => (yes ? CONFIRM_OPTIONS[0] : undefined)),
+      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, pointer: "（完整路径与理由见上方消息）", signal }),
     );
-    ok = outcome.answer !== undefined && outcome.answer === CONFIRM_OPTIONS[0];
+    const pick = parseChoice(outcome.answer, spec);
+    ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
+    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
   } catch { dialogFailed = true; }
 
   // A dialog that could not be shown is NOT a decline: fail closed for THIS
@@ -349,7 +379,8 @@ export async function doRequestSensitiveEdit(
     deps.sensitiveDeclinedPaths.add(absPath);
     return deny(
       `review-gate: DECLINED editing "${raw}" (by the user or the project manager). This path is now locked for the session — ` +
-      "do not ask again. Describe the change you wanted and let the user apply it.",
+      "do not ask again. Describe the change you wanted and let the user apply it." +
+      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
     );
   }
 

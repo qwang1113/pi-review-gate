@@ -188,7 +188,14 @@ function fake(over: Partial<RecordFake> = {}): RecordFake {
       return f.audit;
     },
     showToUser: () => { f.surfaces.push("showToUser"); return true; },
-    confirmBounded: async () => { f.surfaces.push("confirm"); return f.approve; },
+    askChoice: async (_uiCtx, spec) => {
+      f.surfaces.push("confirm");
+      if (f.approve) return spec.options[0];
+      // The decline row is where a rejection's reason comes from now — the
+      // separate "拒绝原因" box is gone (2026-09-08).
+      const decline = spec.declineRow ?? "✎ 不选，我说明原因";
+      return f.rejectReason ? `${decline}：${f.rejectReason}` : undefined;
+    },
     askEitherSide: async (_request, _hasUI, render) => {
       const answer = await render(new AbortController().signal);
       return { answer, by: answer === undefined ? "dismissed" : "human", requestId: "r1", ...(f.rejectReason ? { reason: f.rejectReason } : {}) };
@@ -495,10 +502,10 @@ test("L8a: the station the user SEES is the station recorded (both surfaces carr
   const shown: string[] = [];
   f.deps.showToUser = (_ctx, _lead, body) => { f.surfaces.push("showToUser"); shown.push(body); return true; };
   const dialogs: string[] = [];
-  f.deps.confirmBounded = async (_ctx, _title, message) => {
+  f.deps.askChoice = async (_ctx, spec, opts) => {
     f.surfaces.push("confirm");
-    dialogs.push(message);
-    return true;
+    dialogs.push(opts?.body ?? "");
+    return spec.options[0];
   };
   await recordGoalPrereview(f.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
   await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);

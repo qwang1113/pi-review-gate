@@ -12,25 +12,35 @@
  * user cut the interview short, and handing every answer back at once — so
  * the agent only ever writes the questions.
  *
- * Everything here is pure: question hygiene, the choice list a dialog shows,
- * what a chosen line MEANS, and how the finished interview reads. The
+ * Everything here is pure: question hygiene, what a chosen line MEANS, and
+ * how the finished interview reads. The SHAPE of a question — the rows, the
+ * recommendation marker, the `✎ 不选，我说明原因` row — is not owned here any
+ * more: it is the gate's one question template (lib/choice-dialog.ts), which
+ * every dialog in the gate now shares (user decision, 2026-09-08). The
  * extension owns the dialogs and the persistence.
  */
+
+import {
+  MAX_CHOICE_OPTION_CHARS,
+  MAX_CHOICE_OPTIONS,
+  choiceRows,
+  parseChoice,
+  validateChoice,
+  type ChoiceSpec,
+} from "./choice-dialog.ts";
 
 /** Hard caps: an interview is a decision point, not a survey. */
 export const MAX_QUESTIONS = 10;
 export const MAX_QUESTION_CHARS = 1200;
-export const MAX_OPTION_CHARS = 120;
-export const MAX_OPTIONS = 8;
 
-/** One question as the agent wrote it. */
+/** One question as the agent wrote it — always a choice question. */
 export interface AskQuestion {
   /** The question itself, including context the user needs to decide. */
   text: string;
-  /** Choices, when the decision is a pick rather than free text. */
-  options?: string[];
-  /** The agent's own recommendation — the user should never have to guess it. */
-  recommended?: string;
+  /** 2–4 choices. There is no free-text question any more (2026-09-08). */
+  options: string[];
+  /** The agent's own recommendation — must equal one of `options`. */
+  recommended: string;
   /**
    * ORCHESTRATOR ONLY (2026-09-16): when the project manager asks the user
    * for a proxy authority, this names the scope (e.g. `sensitive-edit`).
@@ -75,65 +85,99 @@ export interface AskAnswer {
   answer?: string;
 }
 
-/** The escape hatches every question offers (user ask). */
+/**
+ * The interview's own escape, kept as an explicit ROW because it stops the
+ * whole interview rather than answering one question. "Answer in chat" is
+ * not a row any more: it is one of the typed escapes below, offered inside
+ * the template's reason box.
+ */
 export const SKIP_REST_CHOICE = "⏭ 跳过后续问题";
-export const ANSWER_IN_CHAT_CHOICE = "💬 我想在聊天里详细回答";
 
-/** Typed into a free-text question, these mean the same as the choices above. */
+/** Typed into the template's reason box, these mean the escapes above. */
 export const SKIP_REST_INPUT = "!skip";
 export const ANSWER_IN_CHAT_INPUT = "!chat";
 
-/** The hint a free-text dialog shows, so its escapes are discoverable. */
-export const FREE_TEXT_HINT = `直接输入答案；${ANSWER_IN_CHAT_INPUT}=改在聊天里答，${SKIP_REST_INPUT}=跳过后续`;
-
 /**
- * Clean up what the agent submitted: drop empties, cap sizes and counts.
- * Never throws — a malformed list becomes a shorter valid one, because
- * refusing the whole interview would send the agent back to guessing.
+ * Clean up what the agent submitted, and REFUSE the whole batch when it does
+ * not follow the template (user decision, 2026-09-08).
+ *
+ * It used to be tolerant — empties dropped, a missing recommendation
+ * tolerated, a question with no options silently degraded to a free-text box
+ * — on the theory that refusing would send the agent back to guessing. The
+ * user chose the opposite, and the dialogs show why: a question the agent did
+ * not think through arrives as a dialog the user cannot answer with one
+ * keystroke. A rejected batch costs one rewrite; a bad dialog costs the
+ * user's attention every single time.
+ *
+ * Sizes are still capped rather than refused (more questions than
+ * MAX_QUESTIONS, an over-long option, more options than the template allows)
+ * — those are mechanical, and the reply says what was cut.
  */
-export function normalizeQuestions(raw: unknown): AskQuestion[] {
-  if (!Array.isArray(raw)) return [];
-  const out: AskQuestion[] = [];
-  for (const item of raw) {
-    const q = normalizeOne(item);
-    if (q) out.push(q);
-    if (out.length >= MAX_QUESTIONS) break;
+export type QuestionsResult =
+  | { ok: true; questions: AskQuestion[]; dropped: number; trimmedOptions: number }
+  | { ok: false; error: string };
+
+export function validateQuestions(raw: unknown): QuestionsResult {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return {
+      ok: false,
+      error: "没有提交任何问题 —— 每题要写完整文本、2–4 个选项和一个 recommended（推荐值须与其中一个选项完全相同）。",
+    };
   }
-  return out;
+  const questions: AskQuestion[] = [];
+  let trimmedOptions = 0;
+  for (const [index, item] of raw.entries()) {
+    const where = `第 ${index + 1} 个问题`;
+    const normalized = normalizeOne(item);
+    if (!normalized) return { ok: false, error: `${where}没有可读的 text —— 每题都要有完整的问题文本。` };
+    const bad = validateChoice(normalized.question.options, normalized.question.recommended, where);
+    if (bad) return { ok: false, error: bad };
+    if (normalized.trimmed) trimmedOptions += 1;
+    questions.push(normalized.question);
+    if (questions.length >= MAX_QUESTIONS) break;
+  }
+  return { ok: true, questions, dropped: Math.max(0, raw.length - questions.length), trimmedOptions };
 }
 
-function normalizeOne(item: unknown): AskQuestion | undefined {
+interface NormalizedQuestion {
+  question: AskQuestion;
+  /** The option list had to be cut to MAX_CHOICE_OPTIONS. */
+  trimmed: boolean;
+}
+
+function normalizeOne(item: unknown): NormalizedQuestion | undefined {
   const text = typeof item === "string"
     ? item
     : typeof (item as { text?: unknown })?.text === "string"
       ? (item as { text: string }).text
       : "";
-  const trimmed = text.trim().slice(0, MAX_QUESTION_CHARS);
-  if (!trimmed) return undefined;
+  const trimmedText = text.trim().slice(0, MAX_QUESTION_CHARS);
+  if (!trimmedText) return undefined;
   const rawOptions = (item as { options?: unknown })?.options;
-  const options = Array.isArray(rawOptions)
+  const all = Array.isArray(rawOptions)
     ? rawOptions
       .filter((o): o is string => typeof o === "string" && o.trim() !== "")
-      .map((o) => o.trim().slice(0, MAX_OPTION_CHARS))
-      .slice(0, MAX_OPTIONS)
-    : undefined;
+      .map((o) => o.trim().slice(0, MAX_CHOICE_OPTION_CHARS))
+    : [];
+  const options = all.slice(0, MAX_CHOICE_OPTIONS);
   const rawRecommended = (item as { recommended?: unknown })?.recommended;
   const recommended = typeof rawRecommended === "string" && rawRecommended.trim() !== ""
-    ? rawRecommended.trim().slice(0, MAX_OPTION_CHARS)
-    : undefined;
+    ? rawRecommended.trim().slice(0, MAX_CHOICE_OPTION_CHARS)
+    : "";
   const rawGrant = (item as { grantScope?: unknown })?.grantScope;
   const grantScope = typeof rawGrant === "string" && rawGrant.trim() !== ""
-    ? rawGrant.trim().slice(0, MAX_OPTION_CHARS)
+    ? rawGrant.trim().slice(0, MAX_CHOICE_OPTION_CHARS)
     : undefined;
-  // A grantScope question MUST be a choice list (2026-09-16 reviewer P1):
-  // free text would let a substring match harvest the grant from an
-  // unrelated answer. No options ⇒ the scope is dropped, never silently kept.
-  const grantable = grantScope && isGrantableScope(grantScope) && options && options.length > 0;
+  // A grantScope question is ALWAYS a choice question (every question is),
+  // and the scope is recognized from a fixed list — an agent cannot invent one.
   return {
-    text: trimmed,
-    ...(options && options.length ? { options } : {}),
-    ...(recommended ? { recommended } : {}),
-    ...(grantable ? { grantScope } : {}),
+    question: {
+      text: trimmedText,
+      options,
+      recommended,
+      ...(grantScope && isGrantableScope(grantScope) ? { grantScope } : {}),
+    },
+    trimmed: all.length > options.length,
   };
 }
 
@@ -142,15 +186,21 @@ export function progressLabel(index: number, total: number): string {
   return `${index + 1} / ${total}`;
 }
 
+/** The question as the gate's one template sees it. */
+export function choiceSpecOf(q: AskQuestion): ChoiceSpec {
+  return { title: q.text, options: q.options, recommended: q.recommended };
+}
+
 /**
- * The lines a choice dialog shows for one question: the agent's options
- * (recommendation marked) plus the two escapes. A question with no options is
- * a free-text one and gets no choice list.
+ * The rows one question shows: the options (recommendation marked), the
+ * template's `✎ 不选，我说明原因` row, then the interview's own escape.
+ *
+ * The decline row is where "none of these" lives in EVERY gate dialog;
+ * `⏭ 跳过后续问题` is interview-only, because only an interview has later
+ * questions to skip.
  */
 export function buildChoiceList(q: AskQuestion): string[] {
-  if (!q.options?.length) return [];
-  const marked = q.options.map((o) => (o === q.recommended ? `${o}（推荐）` : o));
-  return [...marked, ANSWER_IN_CHAT_CHOICE, SKIP_REST_CHOICE];
+  return [...choiceRows(choiceSpecOf(q)), SKIP_REST_CHOICE];
 }
 
 export type ChoiceMeaning =
@@ -165,26 +215,23 @@ export type ChoiceMeaning =
  * and treating a dismissal as consent is how a gate invents approvals.
  */
 export function interpretChoice(picked: string | undefined, q: AskQuestion): ChoiceMeaning {
-  if (picked === undefined) return { kind: "dismissed" };
-  if (picked === SKIP_REST_CHOICE) return { kind: "skip-rest" };
-  if (picked === ANSWER_IN_CHAT_CHOICE) return { kind: "deferred-to-chat" };
-  // Strip the recommendation marker so the agent gets the option it wrote.
-  const original = q.options?.find((o) => picked === o || picked === `${o}（推荐）`);
-  return { kind: "answered", answer: original ?? picked };
-}
-
-/**
- * What free text MEANS. A free-text dialog has no choice list, so its escapes
- * are typed (`!chat`, `!skip`) — without them, criterion 5's two exits would
- * exist for choice questions only.
- */
-export function interpretFreeText(typed: string | undefined): ChoiceMeaning {
-  if (typed === undefined) return { kind: "dismissed" };
-  const trimmed = typed.trim();
-  if (trimmed === "") return { kind: "dismissed" };
-  if (trimmed.toLowerCase() === SKIP_REST_INPUT) return { kind: "skip-rest" };
-  if (trimmed.toLowerCase() === ANSWER_IN_CHAT_INPUT) return { kind: "deferred-to-chat" };
-  return { kind: "answered", answer: trimmed };
+  const parsed = parseChoice(picked, choiceSpecOf(q));
+  if (parsed.kind === "dismissed") return { kind: "dismissed" };
+  if (parsed.kind === "chose") {
+    if (parsed.option === SKIP_REST_CHOICE) return { kind: "skip-rest" };
+    return { kind: "answered", answer: parsed.option };
+  }
+  // The decline row: the user picked none of the options. What they typed is
+  // either one of the interview's typed escapes or the reason itself — and an
+  // empty box is still an answer ("none of these, no reason given"), never a
+  // silent dismissal.
+  const typed = parsed.reason.trim().toLowerCase();
+  if (typed === SKIP_REST_INPUT) return { kind: "skip-rest" };
+  if (typed === ANSWER_IN_CHAT_INPUT) return { kind: "deferred-to-chat" };
+  return {
+    kind: "answered",
+    answer: parsed.reason ? `不选，原因：${parsed.reason}` : "不选（未说明原因）",
+  };
 }
 
 
@@ -244,7 +291,7 @@ export function resolveQuestion(
   } = {},
 ): QuestionResolution {
   if (picked !== undefined) {
-    const meaning = q.options?.length ? interpretChoice(picked, q) : interpretFreeText(picked);
+    const meaning = interpretChoice(picked, q);
     if (meaning.kind === "skip-rest") {
       return { answer: { question: q.text, kind: "skipped" }, stop: "skip-rest" };
     }
@@ -385,8 +432,6 @@ export function buildNoDialogNotice(questions: AskQuestion[]): string {
   return "review-gate: 这个环境没有可用的对话框（headless / RPC），问题一个都没能展示给用户。\n" +
     "把下面的问题原样写进你的回复，然后结束本轮，等用户回答：\n" +
     questions.map((q, i) =>
-      `${progressLabel(i, questions.length)} ${q.text}` +
-      (q.options?.length ? `\n   选项：${q.options.join(" / ")}` : "") +
-      (q.recommended ? `\n   推荐：${q.recommended}` : "")).join("\n");
+      `${progressLabel(i, questions.length)} ${q.text}\n   选项：${buildChoiceList(q).join(" / ")}`).join("\n");
 }
 

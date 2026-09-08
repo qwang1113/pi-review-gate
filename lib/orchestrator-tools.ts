@@ -16,6 +16,7 @@
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
 import { buildRestatementMissingRefusal, restatementConfirmed } from "./restatement.ts";
+import { REVISE_ROW, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import { DELIVERY_STATION_CHOICES, deliveryStationLine } from "./delivery-station.ts";
 import {
   applyTaskStatus,
@@ -90,6 +91,9 @@ const PLAN_ACTIONS = {
 
 /** The dialog the USER approves a plan in (constraint 1). */
 export const PLAN_CONFIRM_TITLE = "review-gate: 批准项目经理的任务计划（plan）？";
+
+/** The row that approves it — one spelling, used by the dialog and the parse. */
+export const PLAN_APPROVE_LABEL = "批准这份 plan";
 
 /** Told to the user when the dialog body had to be cut (O-1). */
 export const PLAN_DIALOG_POINTER = "（plan 全文见上方消息，请先读完再决定）";
@@ -403,20 +407,31 @@ async function handlePlanAction(
 
     const archivePath = planArchiveRelPath(nowIso);
     // THE USER DECIDES (2026-09-06, their answer to the design question).
-    // `confirm` resolves false when there is no UI at all, and that is the
-    // wanted direction: with nobody to ask, nothing moves.
-    const granted = await deps.confirm(
-      ARCHIVE_CONFIRM_TITLE,
-      buildArchiveConfirmMessage({
-        ...(existing ? { plan: existing } : {}),
-        archivePath,
-        liveChildren: openChildren.length,
+    // The gate's one dialog template (2026-09-08) makes that literal: no UI
+    // means no row is picked, which reads as "not archived", and the decline
+    // row lets the user say WHY they are keeping it.
+    const archiveSpec: ChoiceSpec = {
+      title: ARCHIVE_CONFIRM_TITLE,
+      options: ["归档", "不归档"],
+      recommended: "不归档",
+    };
+    const archivePick = parseChoice(
+      await deps.askChoice(archiveSpec, {
+        body: buildArchiveConfirmMessage({
+          ...(existing ? { plan: existing } : {}),
+          archivePath,
+          liveChildren: openChildren.length,
+        }),
       }),
+      archiveSpec,
     );
-    if (!granted) {
+    if (!(archivePick.kind === "chose" && archivePick.option === "归档")) {
       return fail(
-        "review-gate: 用户没有同意归档（或当前环境没有可用的对话框）——什么都没有动，plan 还在原处。\n" +
-        "另一条路仍然可用：`orchestrator_attach` 接管这份 plan 所属的编排。",
+        "review-gate: 用户没有同意归档（或当前环境没有可用的对话框）——什么都没有动，plan 还在原处。" +
+        (archivePick.kind === "declined" && archivePick.reason
+          ? `\n他的意见：${archivePick.reason}`
+          : "") +
+        "\n另一条路仍然可用：`orchestrator_attach` 接管这份 plan 所属的编排。",
         { archived: false },
       );
     }
@@ -505,16 +520,28 @@ async function handlePlanAction(
     // nothing telling them where to read the rest. The loop goal has done it
     // this way from the start (buildGoalTranscriptMessage → dialog + pointer).
     deps.showToUser(PLAN_CONFIRM_TITLE, buildPlanTranscriptMessage(plan));
-    const granted = await deps.confirm(
-      PLAN_CONFIRM_TITLE,
-      buildPlanConfirmMessage(plan),
-      PLAN_DIALOG_POINTER,
+    const planSpec: ChoiceSpec = {
+      title: PLAN_CONFIRM_TITLE,
+      options: [PLAN_APPROVE_LABEL, "不批准，退回重写"],
+      recommended: PLAN_APPROVE_LABEL,
+      declineRow: REVISE_ROW,
+    };
+    const planPick = parseChoice(
+      await deps.askChoice(planSpec, {
+        body: buildPlanConfirmMessage(plan),
+        pointer: PLAN_DIALOG_POINTER,
+      }),
+      planSpec,
     );
+    const granted = planPick.kind === "chose" && planPick.option === PLAN_APPROVE_LABEL;
 
     if (!granted) {
       return fail(
-        "review-gate: 用户没有批准这份 plan。按他的意见改完再提交一次" +
-        "（他的答复可能在聊天里，也可能要你用 `ask_user` 追问）。",
+        "review-gate: 用户没有批准这份 plan。" +
+        (planPick.kind === "declined" && planPick.reason
+          ? `他的意见：${planPick.reason}。`
+          : "") +
+        "按他的意见改完再提交一次（他的答复可能在聊天里，也可能要你用 `ask_user` 追问）。",
         { approved: false },
       );
     }

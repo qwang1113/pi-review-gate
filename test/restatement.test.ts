@@ -37,6 +37,7 @@ import {
   type RestatementStateSlice,
   type RestatementToolDeps,
 } from "../lib/restatement.ts";
+import { REVISE_ROW } from "../lib/choice-dialog.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 
 const ROOT = "/repo";
@@ -196,7 +197,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     persist: (_ctx, root) => { f.persisted.push(root); },
     log: () => {},
     showToUser: () => { f.surfaces.push("showToUser"); return true; },
-    confirmBounded: async () => { f.surfaces.push("confirm"); return f.confirm; },
+    askChoice: async (_uiCtx, spec) => { f.surfaces.push("confirm"); return f.confirm ? spec.options[0] : undefined; },
     askEitherSide: async (_request, _hasUI, render) => {
       if (f.outcome) return { ...f.outcome, requestId: "r1" };
       const answer = await render(new AbortController().signal);
@@ -275,7 +276,7 @@ test("propose: the PM sees the child's OWN words — the full text travels as th
   await doProposeRestatement(f.deps, { restatement: GOOD, station: "pr" }, UI);
   assert.equal(seen?.topic, "restatement");
   assert.equal(seen?.payload, GOOD, "a retyped summary must never be what gets confirmed");
-  assert.deepEqual(seen?.options, [RESTATEMENT_APPROVE_LABEL, RESTATEMENT_REJECT_LABEL]);
+  assert.deepEqual(seen?.options, [`${RESTATEMENT_APPROVE_LABEL}（推荐）`, RESTATEMENT_REJECT_LABEL, REVISE_ROW]);
   assert.equal(f.st.restatement?.station, "pr");
 });
 

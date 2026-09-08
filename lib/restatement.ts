@@ -63,6 +63,7 @@ import {
   parseDeliveryStation,
   type DeliveryStation,
 } from "./delivery-station.ts";
+import { REVISE_ROW, choiceRows, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import type { TaskMode } from "./task-mode.ts";
@@ -400,14 +401,12 @@ export interface RestatementToolDeps {
   log(message: string): void;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** `ui.confirm` with the dialog-height budget applied. */
-  confirmBounded(
+  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  askChoice(
     uiCtx: unknown,
-    title: string,
-    message: string,
-    pointer?: string,
-    signal?: AbortSignal,
-  ): Promise<boolean>;
+    spec: ChoiceSpec,
+    opts?: { body?: string; pointer?: string; signal?: AbortSignal },
+  ): Promise<string | undefined>;
   /** Raise a dialog EITHER the human or the orchestrator may answer. */
   askEitherSide(
     request: Omit<ChannelDialogRequest, "hasUI">,
@@ -469,13 +468,22 @@ export async function doProposeRestatement(
   let confirmed = false;
   let reason: string | undefined;
   let interrupted = false;
+  // ONE template for every dialog (2026-09-08): the user can approve, reject,
+  // or pick the decline row and say WHY — and that reason is the one the agent
+  // renegotiates against, so it no longer has to guess or ask again.
+  const spec: ChoiceSpec = {
+    title: RESTATEMENT_CONFIRM_TITLE,
+    options: [RESTATEMENT_APPROVE_LABEL, RESTATEMENT_REJECT_LABEL],
+    recommended: RESTATEMENT_APPROVE_LABEL,
+    declineRow: REVISE_ROW,
+  };
   try {
     const outcome = await deps.askEitherSide(
       {
-        dialogKind: "confirm",
+        dialogKind: "select",
         topic: "restatement",
         title: RESTATEMENT_CONFIRM_TITLE,
-        options: [RESTATEMENT_APPROVE_LABEL, RESTATEMENT_REJECT_LABEL],
+        options: choiceRows(spec),
         // The FULL text travels in the payload: an orchestrator answering on
         // the user's behalf must judge the same words the human would see,
         // never a summary the child retyped.
@@ -494,19 +502,17 @@ export async function doProposeRestatement(
 
       },
       uiCtx.hasUI === true,
-      async (renderSignal) => {
-        const ok = await deps.confirmBounded(
-          uiCtx,
-          RESTATEMENT_CONFIRM_TITLE,
-          buildRestatementConfirmMessage(station),
-          "（反述全文见上方消息）",
-          renderSignal,
-        );
-        return ok ? RESTATEMENT_APPROVE_LABEL : RESTATEMENT_REJECT_LABEL;
-      },
+      async (renderSignal) => deps.askChoice(uiCtx, spec, {
+        body: buildRestatementConfirmMessage(station),
+        pointer: "（反述全文见上方消息）",
+        signal: renderSignal,
+      }),
     );
-    confirmed = outcome.answer === RESTATEMENT_APPROVE_LABEL;
-    reason = outcome.reason;
+    const pick = parseChoice(outcome.answer, spec);
+    confirmed = pick.kind === "chose" && pick.option === RESTATEMENT_APPROVE_LABEL;
+    // The user's OWN typed reason wins over the orchestrator's: the
+    // restatement is theirs to judge.
+    reason = pick.kind === "declined" && pick.reason ? pick.reason : outcome.reason;
     interrupted = outcome.by === "interrupted";
   } catch {
     confirmed = false;

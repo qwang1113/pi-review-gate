@@ -486,7 +486,14 @@ import {
 } from "../lib/delivery-station.ts";
 
 
-import { fitDialogMessage } from "../lib/dialog-budget.ts";
+import { DIALOG_ASSUMED_COLUMNS, DIALOG_BODY_MAX_LINES, fitDialogMessage } from "../lib/dialog-budget.ts";
+import {
+  choiceRows,
+  parseChoice,
+  renderChoice,
+  type ChoiceSpec,
+  type ChoiceUi,
+} from "../lib/choice-dialog.ts";
 // The model-chain diagnosis and the /gate-doctor checks are reached only
 // through lib/gate-diagnosis-commands.ts now — this file wires that module,
 // it no longer runs either diagnosis itself.
@@ -2183,12 +2190,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     log: (message) => { log(message); },
     orchestrationId: currentOrchestrationId,
     adoptOrchestrationId,
-    confirm: (title, message, pointer) => confirmBounded(latestCtx ?? {}, title, message, pointer),
-    select: (title, options) => {
-      const ctx = latestCtx as { ui?: { select?: (t: string, o: string[]) => Promise<string | undefined> } } | undefined;
-      if (!ctx?.ui?.select) return Promise.resolve(undefined);
-      return ctx.ui.select(title, [...options]);
-    },
+    askChoice: (spec, opts) => askChoice(latestCtx ?? {}, spec, opts),
     // O-1 — the plan's full text goes into the TRANSCRIPT before the dialog
     // asks about it, exactly like the loop goal. A plan approval binds to
     // content, so a truncated dialog body was asking the user to sign
@@ -3447,13 +3449,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   //
   // Two rules, both learned the hard way (see lib/dialog-budget.ts):
   //
-  //  1. LONG TEXT GOES TO THE TRANSCRIPT. `ui.confirm` renders its text as one
+  //  1. LONG TEXT GOES TO THE TRANSCRIPT. `ui.select` renders its title as one
   //     unclipped block at the bottom of the screen; anything tall enough to
   //     push the animating spinner row out of the viewport turns every spinner
   //     frame into a full-screen clear (measured: 29 of 30 frames). The
   //     transcript scrolls, the dialog does not.
-  //  2. A DIALOG ONLY CARRIES THE DECISION. Every ui.confirm in this file goes
-  //     through confirmBounded, which enforces the row budget.
+  //  2. A DIALOG ONLY CARRIES THE DECISION. Every dialog in this file goes
+  //     through askChoice, which renders the gate's one question template
+  //     (lib/choice-dialog.ts) under the row budget.
 
   /** Hard cap on one transcript notice, so nothing can flood the screen. */
   const USER_NOTICE_MAX_CHARS = 4000;
@@ -3495,25 +3498,39 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * `ui.confirm` with the dialog-height budget applied. Never let a caller pass
-   * unbounded text straight to the host: that is the flicker bug.
+   * THE one dialog renderer (user decision, 2026-09-08): the gate's question
+   * template with the row budget applied. Every dialog in this file — and
+   * every dialog in the tool modules that inject this function — comes
+   * through here, so exactly one shape ever reaches the screen: 2–4 options
+   * (the recommended one marked), the `✎ 不选，我说明原因` row, and a text
+   * box when that row is picked. A yes/no box is not a thing any more.
+   *
+   * `body` is the long half (counts, consequences) and is fitted against the
+   * rows this spec will actually draw: a five-row dialog spends rows the old
+   * two-row confirm never did, and the budget is the flicker bug's fix. The
+   * `pointer` names where the full text lives when something had to be cut.
    *
    * `signal` is what lets an ORCHESTRATOR's answer take the box off the
    * user's screen: pi dismisses the dialog when it aborts, and the resolved
    * `undefined` is then read as "somebody else settled this", not as a
    * refusal (lib/orchestrator-child-channel.ts owns that distinction).
    */
-  async function confirmBounded(
-    uiCtx: { ui?: { confirm?: (title: string, message: string, opts?: { signal?: AbortSignal }) => Promise<boolean> } },
-    title: string,
-    message: string,
-    pointer?: string,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    const fitted = pointer === undefined
-      ? fitDialogMessage(title, message)
-      : fitDialogMessage(title, message, pointer);
-    return (await uiCtx.ui?.confirm?.(title, fitted.message, signal ? { signal } : undefined)) === true;
+  async function askChoice(
+    uiCtx: { ui?: ChoiceUi },
+    spec: ChoiceSpec,
+    opts: { body?: string; pointer?: string; signal?: AbortSignal } = {},
+  ): Promise<string | undefined> {
+    const rows = choiceRows(spec);
+    // Two option rows is what the budget was measured with; every extra row
+    // this dialog draws comes out of the body's allowance.
+    const budget = Math.max(2, DIALOG_BODY_MAX_LINES - Math.max(0, rows.length - 2));
+    const fitted = opts.body === undefined
+      ? undefined
+      : fitDialogMessage(spec.title, opts.body, opts.pointer ?? "（内容过长，已截断）", DIALOG_ASSUMED_COLUMNS, budget).message;
+    return renderChoice(uiCtx.ui, spec, {
+      ...(fitted === undefined ? {} : { body: fitted }),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    });
   }
 
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
@@ -7601,8 +7618,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     ...goalPrereviewDeps,
     runGoalAudit: (input) => runGoalAudit(input),
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
-    confirmBounded: (uiCtx, title, message, pointer, signal) =>
-      confirmBounded(uiCtx as ExtensionContext, title, message, pointer, signal),
+    askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
     loopGoalPath: (root) => loopGoalPathIn(root),
     loopGoalRelPath: loopGoalRelPath(SESSION_STATE_VARIANT),
@@ -7640,8 +7656,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
     log: (message) => log(message),
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
-    confirmBounded: (uiCtx, title, message, pointer, signal) =>
-      confirmBounded(uiCtx as ExtensionContext, title, message, pointer, signal),
+    askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
   });
 
@@ -7699,15 +7714,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   // session_start and clears `pausedQuestion` from several other handlers, so
   // a captured reference would leave the tools writing into a dead copy of
   // the very state the gate reads. The dialogs stay here too (showToUser /
-  // confirmBounded / askEitherSide are this file's helpers, and the last is
+  // askChoice / askEitherSide are this file's helpers, and the last is
   // what lets an orchestrator answer the same box the human can).
   registerUserInteractionTools(pi, {
     state: () => state,
     persist: (ctx) => persist(ctx as unknown as ExtensionContext),
     setLoopArmed: (armed) => { loopArmed = armed; },
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as Parameters<typeof showToUser>[0], lead, body),
-    confirmBounded: (uiCtx, title, message, pointer, signal) =>
-      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message, pointer, signal),
+    askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
     canChannelDialogs: () => childBinding() !== undefined,
     grantProxyScope: (scope, via) => {
@@ -7954,15 +7968,32 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (decision.action === "confirm") {
         // USER CONSENT — rendered by the extension with fixed consequence copy;
         // the agent's reason is displayed as clearly-labeled untrusted data.
-        // The dialog must describe what "yes" actually grants: the decision was
-        // computed on `effective`, so the copy is built from it — never from `requested`.
+        // The dialog must describe what the choice actually grants: the
+        // decision was computed on `effective`, so the copy is built from it —
+        // never from `requested`.
+        const confirmLabel = `确认降级到 ${effective}`;
+        const keepLabel = `保持当前模式（${state.taskMode ?? "undecided"}）`;
+        const spec: ChoiceSpec = {
+          title: MODE_CONFIRM_TITLE,
+          options: [confirmLabel, keepLabel],
+          // The SAFE option is the recommendation: a downgrade turns the
+          // enforced workflow off, so the gate never nudges the user into it.
+          recommended: keepLabel,
+        };
         let ok = false;
+        /** The user's own typed reason for keeping the mode, when they gave one. */
+        let declineReason: string | undefined;
         try {
-          ok = await confirmBounded(
-            ctx as unknown as ExtensionContext,
-            MODE_CONFIRM_TITLE,
-            buildModeConfirmMessage(effective, params.reason),
+          const pick = parseChoice(
+            await askChoice(
+              ctx as unknown as ExtensionContext,
+              spec,
+              { body: buildModeConfirmMessage(effective, params.reason) },
+            ),
+            spec,
           );
+          ok = pick.kind === "chose" && pick.option === confirmLabel;
+          declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
         } catch { ok = false; }
         if (ok) {
           setTaskMode(effective, "user", ctx as unknown as ExtensionContext);
@@ -7984,7 +8015,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           content: [{
             type: "text",
             text:
-              "review-gate: the user DECLINED the downgrade. Agent-initiated downgrades are now " +
+              "review-gate: the user DECLINED the downgrade." +
+              (declineReason ? ` 用户的意见：${declineReason}` : "") +
+              " Agent-initiated downgrades are now " +
               "locked for this session — continue under the current mode and do not ask again; " +
               "only the user can change the mode (/gate-mode).",
           }],
@@ -8145,11 +8178,33 @@ export default function reviewGate(pi: ExtensionAPI) {
           return deny("review-gate: arbiter deferred to a HUMAN but no interactive UI is available → GATE_WINS (fail-closed). Escalate to the user out-of-band.");
         }
         let choice: string | undefined;
+        /** The human's own words when they picked the template's decline row. */
+        let humanNote: string | undefined;
         try {
-          choice = await ctx.ui.select(
-            `review-gate: arbiter is unsure — you decide.\nBlock: ${lastBlockedShip.blockReason.split("\n")[0]}\nArbiter: ${verdict?.reason ?? ""}`,
-            ["Gate wins — require correction", "Allow this exact `gh pr edit` once", "Pause gate and wait"],
+          // The arbiter's question goes through the SAME template as every
+          // other dialog (2026-09-08): the recommended row is the gate's own
+          // answer, and the decline row lets the human explain why neither
+          // extreme fits — which is exactly the third choice the arbiter
+          // asked for.
+          const spec: ChoiceSpec = {
+            title: `review-gate: arbiter is unsure — you decide.\nBlock: ${lastBlockedShip.blockReason.split("\n")[0]}\nArbiter: ${verdict?.reason ?? ""}`,
+            options: [
+              "Gate wins — require correction",
+              "Allow this exact `gh pr edit` once",
+              "Pause gate and wait",
+            ],
+            recommended: "Gate wins — require correction",
+          };
+          const pick = parseChoice(
+            await askChoice(ctx as unknown as { ui?: ChoiceUi }, spec),
+            spec,
           );
+          choice = pick.kind === "chose" ? pick.option : undefined;
+          // The decline row is "none of these, and here is why": the human is
+          // NOT choosing an action, so the gate keeps its fail-closed default
+          // — but their objection is the half the agent can act on, so it is
+          // carried back to the caller instead of only into the audit log.
+          humanNote = pick.kind === "declined" ? pick.reason : undefined;
         } catch { choice = undefined; }
         if (choice === "Allow this exact `gh pr edit` once") {
           const bindings = await computeTokenBindings(parsed.action, fp.digest);
@@ -8167,6 +8222,16 @@ export default function reviewGate(pi: ExtensionAPI) {
           arbitrationPaused = true; // P1: the revival timer must respect this
           appendLesson(`arbitration #${appealsUsed()} HUMAN→pause`);
           return { content: [{ type: "text", text: "review-gate: gate PAUSED by the human — auto-continuation disarmed. No bypass issued. Wait for further instructions." }], details: { decision: "HUMAN", human: "pause" } };
+        }
+        // The decline row is not one of the three rulings, and saying "the
+        // human ruled GATE_WINS" would put words in their mouth (reviewer P1).
+        if (humanNote !== undefined) {
+          appendLesson(`arbitration #${appealsUsed()} human note: ${humanNote}`);
+          return deny(
+            "review-gate: the human did not pick an arbitration option — they picked 「✎ 不选，我说明原因」." +
+            (humanNote ? ` 用户的意见：${humanNote}` : "") +
+            " The gate's default therefore stands (no bypass issued): comply with the gate, or bring this objection into a new appeal.",
+          );
         }
         appendLesson(`arbitration #${appealsUsed()} HUMAN→gate-wins`);
         return deny("review-gate: human ruled GATE_WINS — comply with the gate.");
@@ -8900,8 +8965,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!state.orchestrator) return;
       persistOrchestration(addGrant(state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
     },
-    confirmBounded: (uiCtx, title, message) =>
-      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message),
+    askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     setLoopArmed: (armed) => { loopArmed = armed; },
     setTaskMode: (mode, source, ctx) => setTaskMode(mode, source, ctx as ExtensionContext),
     // Only a USER action may lift the lock — /gate-mode and /gate-reset are

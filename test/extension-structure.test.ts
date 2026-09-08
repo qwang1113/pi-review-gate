@@ -764,10 +764,11 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the ONE prompt every surface renders interpolates the notice");
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
-  assert.match(ASK_USER_SRC, /uiCtx\.ui!\.select!\(prompt, choices/,
-    "the pane dialog renders that prompt");
-  assert.match(ASK_USER_SRC, /uiCtx\.ui!\.input!\(`\$\{prompt\}\\n\$\{FREE_TEXT_HINT\}`/,
-    "the free-text dialog renders it too");
+  assert.match(ASK_USER_SRC, /return renderChoice\(\s*uiCtx\.ui,/, "the pane dialog renders the template");
+  assert.match(ASK_USER_SRC, /extraRows: \[SKIP_REST_CHOICE\]/,
+    "the interview's own escape rides along as an extra row");
+  assert.doesNotMatch(ASK_USER_SRC, /uiCtx\.ui!\.input!/,
+    "no free-text dialog any more — the template's reason box is the only text box");
   assert.match(ASK_USER_SRC, /\$\{q\.text\}\$\{grantNotice\(q\)\}` \+/,
     "the transcript interpolates the notice");
   assert.match(ASK_USER_SRC, /明确授予项目经理/,
@@ -778,10 +779,8 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the old substring predicate must not come back");
 
   const askSrc = readFileSync(join(ROOT, "lib", "ask-user.ts"), "utf8");
-  assert.match(askSrc, /grantable = grantScope && isGrantableScope\(grantScope\) && options && options\.length > 0/,
-    "a grantScope without options is dropped at the schema");
-  assert.match(askSrc, /\.\.\.\(grantable \? \{ grantScope \} : \{\}\)/,
-    "…and the scope only survives when the question is a real choice list");
+  assert.match(askSrc, /isGrantableScope\(grantScope\) \? \{ grantScope \} : \{\}/,
+    "only a recognized scope survives normalization — an agent cannot invent one");
 });
 
 test("ask_user: the QUESTIONS reach the user, and silence is never an answer", () => {
@@ -794,8 +793,9 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
     "the questions themselves are shown, not just filed");
   // The interview: one dialog per question, with its N / M progress.
   assert.match(toolBody, /progressLabel\(index, questions\.length\)/);
-  assert.match(toolBody, /uiCtx\.ui!\.select!\(/, "options ⇒ a choice dialog");
-  assert.match(toolBody, /uiCtx\.ui!\.input!\(/, "no options ⇒ free text");
+  assert.match(toolBody, /renderChoice\(/, "the pane dialog renders the gate's one template");
+  assert.doesNotMatch(toolBody, /uiCtx\.ui!\.input!/,
+    "no free-text dialog: the template's reason box is the only text box");
   // Both go through the channel funnel, so an orchestration child's project
   // manager can answer the same question the human can (2026-08-30) — and
   // whichever of them answers first takes the box off the other's screen.
@@ -868,22 +868,26 @@ test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an
     "the pause path must never enqueue a follow-up message");
 });
 
-test("FLICKER: every confirm dialog goes through the row budget", () => {
-  // An oversized ui.confirm makes the dialog taller than the terminal, which
-  // pushes the animating spinner row out of the viewport and turns EVERY
-  // spinner frame into a full-screen clear (measured: 29 of 30 frames).
-  // confirmBounded applies lib/dialog-budget.ts; nothing may bypass it.
-  const helperAt = SRC.indexOf("async function confirmBounded");
-  assert.match(windowOf("async function confirmBounded", "\n  }", "confirmBounded"), /fitDialogMessage\(/,
-    "confirmBounded must apply the budget");
+test("FLICKER: every dialog goes through the row budget", () => {
+  // An oversized dialog makes it taller than the terminal, which pushes the
+  // animating spinner row out of the viewport and turns EVERY spinner frame
+  // into a full-screen clear (measured: 29 of 30 frames). askChoice renders
+  // the gate's ONE template and applies lib/dialog-budget.ts; nothing may
+  // bypass it, and no ui.confirm exists any more (2026-09-08).
+  const helperAt = SRC.indexOf("async function askChoice");
+  assert.match(windowOf("async function askChoice", "\n  }", "askChoice"), /fitDialogMessage\(/,
+    "askChoice must apply the budget");
 
-  // The ONLY places `.confirm(` may appear are the helper's own call and its
-  // parameter type; every other dialog must call confirmBounded instead.
-  const callSites = [...SRC.matchAll(/\.confirm\?\.\(|\.confirm\(/g)].map((m) => m.index ?? 0);
-  const helperEnd = SRC.indexOf("\n  }", helperAt);
-  const strays = callSites.filter((i) => i < helperAt || i > helperEnd);
-  assert.deepEqual(strays, [],
-    `every ui.confirm must go through confirmBounded (stray call sites at ${strays.join(", ")})`);
+  // ui.confirm is GONE: the template renders a select, so a stray confirm
+  // would be a second dialog shape nobody reviewed.
+  const confirms = [...SRC.matchAll(/\.confirm\?\.\(|\.confirm\(/g)].map((m) => m.index ?? 0);
+  assert.deepEqual(confirms, [], `no ui.confirm may remain (found at ${confirms.join(", ")})`);
+
+  // ui.select exists in exactly ONE place: the template's own renderer.
+  const selects = [...SRC.matchAll(/\.select\?\.\(|\.select\(/g)].map((m) => m.index ?? 0);
+  assert.deepEqual(selects, [],
+    `the extension must render dialogs through askChoice only (stray ui.select at ${selects.join(", ")})`);
+  assert.ok(helperAt > 0, "the one renderer must exist");
 });
 
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
@@ -967,7 +971,7 @@ test("request_scope_limit: extension-driven user consent, no 'confirmed' paramet
   const body = toolBodyOf("request_scope_limit");
   // Consent is obtained by the EXTENSION (dialog) — the tool schema exposes
   // only a reason; there is no parameter the model could set to claim consent.
-  assert.match(body, /deps\.confirmBounded\(/);
+  assert.match(body, /deps\.askChoice\(/);
   assert.match(body, /parameters: Type\.Object\(\{\s*reason: Type\.String/);
   assert.doesNotMatch(body, /confirmed/);
   // No UI ⇒ fail-closed deny; a declined dialog locks further requests — but
@@ -1064,8 +1068,8 @@ test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' par
     "set_gate_mode parameters must be exactly {mode, reason}");
   // Consent comes from ctx.ui.confirm rendered by the EXTENSION, with the
   // fixed-copy dialog builder; only that branch may mint source "user".
-  assert.match(region, /confirmBounded\(\s*ctx as unknown as ExtensionContext,\s*MODE_CONFIRM_TITLE,\s*buildModeConfirmMessage\(/);
-  const confirmAt = region.indexOf("confirmBounded");
+  assert.match(region, /await askChoice\(\s*ctx as unknown as ExtensionContext,\s*spec,\s*\{ body: buildModeConfirmMessage\(/);
+  const confirmAt = region.indexOf("askChoice(");
   const userMint = region.indexOf('setTaskMode(effective, "user"');
   assert.ok(userMint > confirmAt, 'source "user" may only be set after the confirm dialog');
   // A declined dialog locks agent-initiated downgrades (anti-grinding).
@@ -1664,6 +1668,11 @@ test("request_arbitration is registered and is a NARROW, fail-closed capability"
   // refused BEFORE any spawn — no hard-coded default model.
   assert.match(SRC, /if \(!resolveArbiterModel\(\)\)/, "an unconfigured arbiter fails closed");
   assert.match(SRC, /仲裁者未配置模型链/, "the refusal names the missing config");
+  // The template's decline row is NOT one of the three rulings (reviewer P1):
+  // the human's own objection is carried back to the caller instead of being
+  // reported as "human ruled GATE_WINS".
+  assert.match(SRC, /if \(humanNote !== undefined\) \{[\s\S]{0,400}?用户的意见：\$\{humanNote\}/,
+    "a typed objection must reach the agent, not just the audit log");
 });
 
 test("arbiter bypass token is in-memory ONLY, never persisted to the sidecar", () => {
@@ -2035,7 +2044,7 @@ test("sensitive-file guard wired into tool_call", () => {
 test("request_sensitive_edit: the user decides in an extension dialog, not the agent", () => {
   const body = toolBodyOf("request_sensitive_edit");
 
-  assert.match(body, /deps\.confirmBounded\(/, "the extension must render the confirm dialog itself");
+  assert.match(body, /deps\.askChoice\(/, "the extension must render the dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
     "no agent-supplied 'confirmed' parameter — that would be self-approval");
   assert.match(body, /if \(!uiCtx\.hasUI\)/, "no UI must fail closed instead of granting");
@@ -2045,7 +2054,7 @@ test("request_sensitive_edit: the user decides in an extension dialog, not the a
 test("SECURITY: request_sensitive_edit refuses .git internals before showing any dialog", () => {
   const body = toolBodyOf("request_sensitive_edit");
   const integrityAt = body.indexOf("isGateIntegrityPath");
-  const confirmAt = body.indexOf("confirmBounded");
+  const confirmAt = body.indexOf("askChoice");
   assert.ok(integrityAt > 0 && confirmAt > 0, "both must exist");
   assert.ok(integrityAt < confirmAt,
     "a user must never be asked to authorize a write to .git/hooks — that would disarm L3");
@@ -3193,7 +3202,7 @@ test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surfac
   // Order is the whole point: a check placed after showToUser/confirmBounded
   // would still parade an unaudited draft in front of the user.
   const show = body.indexOf("showToUser(");
-  const confirm = body.indexOf("confirmBounded(");
+  const confirm = body.indexOf("askChoice(");
   // The write is an injected seam now (the module owns WHEN, the extension
   // owns the syscall) — the wiring is asserted with the other deps below.
   const write = body.indexOf("writeGoalFile(goalPath");
@@ -3226,7 +3235,7 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   // the window is both, so an assertion can never be satisfied by a
   // neighbouring tool's code (round P2: the old flat window overshot into it).
   const body = toolBodyOf("propose_loop_goal");
-  assert.match(body, /confirmBounded\(/,
+  assert.match(body, /askChoice\(/,
     "the extension must render the approval dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
     "no agent-supplied 'confirmed' parameter — that would be self-approval");
@@ -3250,20 +3259,18 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
     "the goal must be length-bounded");
 });
 
-test("propose_loop_goal: confirm/reject may carry a user REASON (input after the dialog)", () => {
-  // The user can answer "确认 + 原因" / "拒绝 + 原因" — a reason input follows
-  // the Yes/No dialog. A rejection reason must be handed back to the agent so
-  // it renegotiates against the real objection; an approval reason is
-  // persisted with the confirmation and echoed to the agent.
-  // Registration + handler, from the module that owns them now
-  // (lib/goal-tools.ts) — never a flat window that could overshoot into a
-  // neighbouring tool's code (round P2).
+test("propose_loop_goal: a rejection may carry a user REASON — typed into the same dialog", () => {
+  // Since 2026-09-08 the reason is NOT a second input box: the template's
+  // decline row ("✎ 我要改，我说明原因") opens a text box inside the SAME
+  // dialog, and that text is the objection the agent renegotiates against.
   const body = toolBodyOf("propose_loop_goal");
-  assert.match(body, /uiCtx\.ui\?\..*input/, "a reason input must follow the confirm dialog");
+  assert.match(body, /declineRow: REVISE_ROW/, "the approval dialog offers the revise row");
+  assert.match(body, /parseChoice\(outcome\.answer, spec\)/, "the answer is read through the one parser");
+  assert.match(body, /pick\.kind === "declined" && pick\.reason/, "the typed reason becomes the rejection reason");
   assert.match(body, /did NOT approve this goal\."/, "rejection path must exist");
   assert.match(body, /Reason: \$\{reason\}/, "rejection reason must reach the agent");
-  assert.match(body, /\.\.\.\(reason \? \{ reason \} : \{\}\)/, "approval reason must be persisted");
-  assert.match(body, /User's note on approval/, "approval reason must be echoed to the agent");
+  assert.doesNotMatch(body, /dialogKind: "input"/, "no second box for the reason any more");
+  assert.doesNotMatch(body, /User's note on approval/, "an approval carries no separate note");
 });
 
 // ---------------------------------------------------------------------------

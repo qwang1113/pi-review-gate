@@ -42,8 +42,10 @@ import {
   PROXY_CROSSCHECK_TOKENS,
   checkProxyCrosscheck,
   isDecliningProxyAnswer,
+  resolveAnswer,
 } from "../lib/orchestrator-answer-tools.ts";
 import { ORCHESTRATOR_DIRECTIVE } from "../lib/orchestrator-directives.ts";
+import { DECLINE_ROW, REVISE_ROW } from "../lib/choice-dialog.ts";
 
 import type { FakeWorld } from "./helpers/fake-orchestration.ts";
 
@@ -145,6 +147,35 @@ test("a decline is recognised in BOTH dialogs' reject rows, and no approve row l
   assert.equal(isDecliningProxyAnswer(RESTATE_REJECT), true);
   assert.equal(isDecliningProxyAnswer(GOAL_APPROVE), false);
   assert.equal(isDecliningProxyAnswer(RESTATE_APPROVE), false);
+  // The template's decline row (2026-09-08) is a rejection whatever reason
+  // the user typed after it — including one that reads like consent. BOTH
+  // wordings count: 不选 and the approval dialogs' 我要改.
+  assert.equal(isDecliningProxyAnswer(DECLINE_ROW), true);
+  assert.equal(isDecliningProxyAnswer(REVISE_ROW), true);
+  assert.equal(isDecliningProxyAnswer(`${DECLINE_ROW}：我同意，但还是不选`), true);
+  assert.equal(isDecliningProxyAnswer(`${REVISE_ROW}：站点写错了`), true);
+});
+
+test("the template's decline row is a valid channel answer, reason included", () => {
+  // A project manager types the row it saw, plus the reason after a colon.
+  // Refusing that as "not one of the options" would leave the PM unable to
+  // reject-with-a-reason, which is the whole point of the row.
+  const request = {
+    requestId: "r1",
+    title: "选一个",
+    options: ["A（推荐）", "B", DECLINE_ROW],
+  } as unknown as Parameters<typeof resolveAnswer>[0];
+
+  const withReason = resolveAnswer(request, `${DECLINE_ROW}：两个都不合适`);
+  assert.equal(withReason.ok, true);
+  if (withReason.ok) assert.equal(withReason.answer, `${DECLINE_ROW}：两个都不合适`);
+
+  const bare = resolveAnswer(request, DECLINE_ROW);
+  assert.equal(bare.ok, true, "the bare row is the same answer without a reason");
+
+  // …and free text that is NOT the decline row is still refused: the channel
+  // never guesses which option a stray line meant.
+  assert.equal(resolveAnswer(request, "随便写点什么").ok, false);
 });
 
 // ---------------------------------------------------------------------------
