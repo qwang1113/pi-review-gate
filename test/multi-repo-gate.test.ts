@@ -131,6 +131,7 @@ function makeMockPi(cwd: string): MockPi {
     appendEntry: (type: string, data: unknown) => entries.push({ customType: type, data }),
     sendMessage: () => {},
     sendUserMessage: () => {},
+    registerMarkdownTransformer: () => {},
     registerCommand: (name: string, def: unknown) => commands.set(name, def),
   };
   return {

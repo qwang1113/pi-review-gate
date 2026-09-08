@@ -99,6 +99,7 @@ function makeMockPi(cwd: string) {
     appendEntry: () => {},
     sendMessage: () => {},
     sendUserMessage: () => {},
+    registerMarkdownTransformer: () => {},
     registerCommand: (name: string, def: { handler: (args: unknown, ctx: unknown) => unknown }) => commands.set(name, def),
   };
   return {
