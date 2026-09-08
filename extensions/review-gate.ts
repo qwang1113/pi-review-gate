@@ -984,11 +984,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   // In-memory only: a fresh session starts fresh anyway.
   let sessionEdited = false;
   // Edit-discipline nudge window (prompt-only, never blocking): set when an
-  // edit/write tool call FAILS, cleared at turn start, on new user input, on a
-  // successful edit, and after one nudge. While set, a bash result that looks
-  // like a direct file write gets BASH_WRITE_NUDGE appended (lib/edit-
-  // discipline.ts). This targets the recurring "edit failed → shell edits the
-  // file" workaround without policing ordinary bash usage.
+  // edit/write tool call FAILS; cleared ONLY on a successful edit or after one
+  // nudge has been issued (2026-09-08 — it used to close at turn start / on
+  // new user input, which let a persistently broken edit tool cross turns and
+  // fall into bash file edits with no reminder). While set, a bash result
+  // that looks like a direct file write gets BASH_WRITE_NUDGE appended
+  // (lib/edit-discipline.ts). This targets the recurring "edit failed → shell
+  // edits the file" workaround without policing ordinary bash usage.
   let editFailurePending = false;
   // Read-only drill stall guard (lib/readonly-stall.ts): counts consecutive
   // successful read-only tool calls (read family + bash) with no edit landing

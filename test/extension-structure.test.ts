@@ -1405,8 +1405,16 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   const normalAt = promptBody.indexOf('state.taskMode === "normal"');
   const disciplineAt = promptBody.indexOf("EDIT_DISCIPLINE_DIRECTIVE");
   assert.ok(disciplineAt > normalAt, "discipline directive must be injected after the normal-mode return");
-  assert.ok(normalAt > promptBody.indexOf("editFailurePending = false"),
-    "the nudge window must reset BEFORE the normal-mode early return (no cross-turn leak)");
+  // 2026-09-08: the window no longer resets at turn boundaries (a broken edit
+  // tool must not cross turns into silent bash edits), so the declaration
+  // comment and the two clear sites must both state the NEW semantics —
+  // clearing lives ONLY at a successful edit and after a nudge.
+  const decl = SRC.slice(SRC.indexOf("let editFailurePending = false;") - 600, SRC.indexOf("let editFailurePending = false;"));
+  assert.match(decl, /cleared ONLY on a successful edit|cleared only on a successful edit/,
+    "the declaration comment must state the new close-on-edit/nudge semantics");
+  const beforeAgent = SRC.slice(promptAt, promptAt + 4000);
+  assert.doesNotMatch(beforeAgent, /editFailurePending = false/,
+    "before_agent_start must NOT clear the window any more");
   // 2. tool_result: a FAILED edit arms the window and appends the nudge.
   const resultAt = SRC.indexOf('pi.on("tool_result"');
   const resultEnd = SRC.indexOf('pi.on("session_start"', resultAt);
