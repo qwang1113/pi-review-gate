@@ -531,7 +531,8 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     label: "Spawn Child Session",
     description:
       "Open an interactive CHILD SESSION for one plan task, in a pane of THIS window. The gate " +
-      "picks the split direction (right column, stacked downward), injects the orchestration id " +
+      "picks the pane from the WINDOW's own layout (three columns: the first two hold one session " +
+      "each, the third shares its height), injects the orchestration id " +
       "so the child's wake-ups survive a relay, starts it in loop mode in the repo its task " +
       "declares (same-repo children are serialized by the gate; only different repos run " +
       "in parallel), and registers the pane — a pane nobody " +

@@ -774,7 +774,7 @@ pane 标题 —— 那就是回到读屏幕了。
 | `lib/orchestrator-answer-tools.ts` | `orchestrator_answer`（含约束 8 的代批边界、代批必填的 `crosscheck` 对照与其词表、站点不得宽于 plan 的判定） | 判定可单测 |
 | `lib/orchestrator-recovery-tools.ts` | `orchestrator_recover` / `orchestrator_attach`、孤儿检测 | 孤儿判定是纯函数 |
 | `lib/orchestrator-takeover.ts` | 盘上候选编排 id 的发现、接管采用判定、接管/归档路由文案、归档载荷与确认框文案（§6.2 / §6.2b） | 纯函数 + 注入式读盘 |
-| `lib/orchestrator-tmux.ts` | 仅剩的 tmux 构造：开/关/列 pane + pane 装饰（不带 `-g`） | 纯函数 |
+| `lib/orchestrator-tmux.ts` | 仅剩的 tmux 构造：开/关/列 pane + 读窗口几何 + `select-layout -E` 等分 + pane 装饰（不带 `-g`）；三列布局的落点与等分判定在这里 | 纯函数 |
 
 协议级测试（不依赖真实 tmux、不依赖 pi 进程、不碰磁盘）：
 `test/orchestrator-channel.test.ts`、`test/orchestrator-child-state.test.ts`、

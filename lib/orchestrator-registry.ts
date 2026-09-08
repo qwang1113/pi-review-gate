@@ -301,20 +301,6 @@ export function runningTaskIds(
   return [...new Set(liveChildren(runtime, alivePaneIds).map((c) => c.taskId))];
 }
 
-/**
- * The pane a new child should be stacked under (layout: the right column
- * grows downward). The most recently created LIVE child, or undefined when
- * the right column does not exist yet — in which case the caller splits off
- * the orchestrator's own pane instead.
- */
-export function lastChildPane(
-  runtime: OrchestratorRuntime,
-  alivePaneIds: readonly string[],
-): string | undefined {
-  const live = liveChildren(runtime, alivePaneIds);
-  return live.length > 0 ? live[live.length - 1]!.paneId : undefined;
-}
-
 function patchChild(
   runtime: OrchestratorRuntime,
   id: string,

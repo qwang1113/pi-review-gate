@@ -248,7 +248,7 @@ commit message）与 `scripts/scan-test-labels.cjs`（L6 的测试标签扫描�
 judge（reviewer / adviser / goal-auditor）是**独立 pane 里的交互 pi**，归 opener
 所有（项目经理 → 子会话 → review，plan review 由项目经理自开；跨级调用一律
 fail-closed）：`session-factory.ts` 开 pane（**全仓唯一入口**：split → 登记 → 装饰 →
-投递核实，与编排子会话同一条路径；argv 全部复用 `orchestrator-tmux.ts`，颜色标题复用
+等分 → 投递核实，与编排子会话同一条路径；argv 全部复用 `orchestrator-tmux.ts`，颜色标题复用
 `orchestrator-pane-decor.ts`），`judge-pane.ts` 只剩探活与 `RG_JUDGE_*` 契约常量，
 `hierarchy.ts` 是 opener
 注册表与唯一的跨级裁判（纯函数，条目带 opener 派发的轮次号 `roundSeq`）——它是
@@ -338,7 +338,8 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   指令）、`orchestrator-supervisor.ts`（编排侧：读所有通道、判定、决定什么算
   新闻、渲染回执的前三块）。
 - **与真实机器打交道**：`orchestrator-tmux.ts`（tmux 命令的唯一构造处，现在
-  只剩开 pane / 关 pane / 列 pane —— 没有 `send-keys`，没有 `capture-pane`）、
+  只剩开 pane / 关 pane / 列 pane / 读窗口几何 / 等分某一层 —— 没有 `send-keys`，
+  没有 `capture-pane`；三列布局的落点与等分判定也在这里）、
   `orchestrator-wiring.ts`（跑 tmux、读写 plan、持有通道 IO 与
   监督记忆）、`orchestrator-delivery.ts`（投递并**校验真的送达**才报成功，证据
   是通道记录与子会话回执）、`orchestrator-notify.ts`（桌面通知，唯一入口 +
@@ -563,7 +564,7 @@ fail-closed）。`model-diagnose.ts`
 | `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close / handoff）并注册全部八个编排会话工具——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，answer 与 recover/attach 在各自的 `*-tools.ts` |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块 |
 | `orchestrator-takeover.ts` | 「仓库里有别人的 plan」时的两个意图：**接管**（从盘上发现本仓库的候选 orchestration id —— sidecar 记录优先、`rg-channels/` 目录名兜底，再判定这个 id 能否被本会话采用）与**归档**（归档文件名、归档载荷、确认框文案）。两条拒绝路径（`orchestrator_plan` 的 write/submit、`orchestrator_spawn`）与两个入口（`orchestrator_attach`、`orchestrator_plan action:archive`）共用同一份判定；纯函数 + 注入式读盘 |
-| `orchestrator-tmux.ts` | 仅剩的 tmux 命令构造：开 pane / 关 pane / 列 pane，加上 pane 装饰（`select-pane -P/-T` 与 window 级 `setw pane-border-*`，一律不带 `-g`，且都会过 `assertSafeTmuxArgv`）—— 没有 send-keys，也没有 capture-pane |
+| `orchestrator-tmux.ts` | 仅剩的 tmux 命令构造：开 pane / 关 pane / 列 pane，加上 pane 装饰（`select-pane -P/-T` 与 window 级 `setw pane-border-*`，一律不带 `-g`，且都会过 `assertSafeTmuxArgv`）—— 没有 send-keys，也没有 capture-pane。**窗口布局也在这里**（2026-09-08）：`buildWindowLayoutArgv` / `parseWindowLayout` 把窗口的真实几何（按 `pane_left` 分列）读回来，`planPanePlacement` 定落点（<3 列开新列，≥3 列堆进第三列），`buildEvenLayoutArgv` 是 `select-layout -E`（等分目标所在的那一层：第三列的 pane 分高度，第一列的 pane 分列宽） |
 | `orchestrator-tool-kit.ts` | 编排工具的共用前置：模式校验、pane 实况、plan 可用性；以及**投递核实**（`verifyDeliveryOn` 按通道路径盯到第一份证据为止，`verifyDelivery` 是编排侧入口、`verifyJudgeBoot` 是 judge 侧入口——judge 的通道跨 pane 长存，所以它带一条 `baselineRecordCount` 水位线）；边框标题的刷新调度在这里，真正写标题的是 `session-factory.ts` |
 | `orchestrator-tools.ts` | plan / notify 两个不碰 tmux 的工具 |
 | `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据），以及那份五块回执的装配 |
@@ -588,7 +589,7 @@ fail-closed）。`model-diagnose.ts`
 | `session-revival.ts` | 存活不变量（2026-08-30）：会话在退出契约未满足时停下，门禁就周期性唤醒它。纯判定：看不见续跑预算与 loop-stall 断路器（它们管注入路径，管不了「停下」），但尊重人的叫停（ESC / ask_user / bypass / 仲裁 pause）与 handoff 交接 |
 | `session-dir.ts` | pi 的 session-dir 编码约定，fresh-context 角色据此找到主会话 transcript |
 | `session-exclusivity.ts` | 一个 worktree 只允许一个「占用主 sidecar」的会话：心跳存在文件（`.pi/session-presence.json`）判活，第二个占用者 fail-closed 拒绝——拦 edit/write、拦 ship、连门禁自己的 checkpoint 提交与 goal 文件写入一并拦（`normal` 模式除外：那个模式的定义就是门禁整体关闭，所以不发拒绝；它只在 worktree 空闲时写心跳，已被占用时既不拒绝也不写——凭据属于占用者）。judge 与编排子会话因为不写主 sidecar 而天然豁免。裁决输入只有**心跳新鲜度**（60s 窗，`PRESENCE_FRESH_MS`），`pid`/`host` 仅作诊断（这一点与 `blocked-marker.ts` 相同，**但两者的失败方向相反**）；一切未知（文件缺失/损坏/时钟异常/未来时间戳）一律 fail-**open** 放行——**只有一个正面事实（刚写的心跳）才能拒绝**，占用者消失后自动复检解除。**它与 `blocked-marker.ts`、`judge-pane.ts` 的判活为什么不可收敛**：见本文件头与 `test/liveness-criteria.test.ts`（2026-09-06 复核） |
-| `session-factory.ts` | **开一个带角色的 pi 会话的唯一入口**（2026-09-05）：一次 `openSessionPane` 走完 split → 登记 → 装饰 → 投递核实，六个开 pane 的调用点（judge 轮次派发 / `judge_spawn` / `judge_recover` / `orchestrator_spawn` / `orchestrator_recover` / `orchestrator_handoff`）全部经它；env 只在 `buildSessionEnv` 一处拼（`RG_JUDGE_*` 与 `RG_ORCHESTRATION_ID`/`RG_GATE_MODE`/`RG_STATE_VARIANT` 都是跨进程契约，也是 session 独占豁免的依据）；装饰含 window 级边框行（judge pane 曾因此看不到边框 = C1），标题刷新 `refreshSessionPaneTitle` 是**唯一**写标题处、带节流与重绘记忆（judge 侧曾无人刷新 = C2）；`paneRecoverability` 是两处 recover 共用的同一判定。它是 `orchestrator-tmux.ts` 开 pane argv 的**唯一**使用者 |
+| `session-factory.ts` | **开一个带角色的 pi 会话的唯一入口**（2026-09-05）：一次 `openSessionPane` 走完 split → 登记 → 装饰 → 等分 → 投递核实，六个开 pane 的调用点（judge 轮次派发 / `judge_spawn` / `judge_recover` / `orchestrator_spawn` / `orchestrator_recover` / `orchestrator_handoff`）全部经它；**落点由窗口自己的几何决定**（`placementFor` 探测 → `planPanePlacement` 决策），关 pane 同理（`closeSessionPane` kill 前探测、kill 后重新等分）—— 三列规则因此在门禁内部完成，agent 不碰窗口；env 只在 `buildSessionEnv` 一处拼（`RG_JUDGE_*` 与 `RG_ORCHESTRATION_ID`/`RG_GATE_MODE`/`RG_STATE_VARIANT` 都是跨进程契约，也是 session 独占豁免的依据）；装饰含 window 级边框行（judge pane 曾因此看不到边框 = C1），标题刷新 `refreshSessionPaneTitle` 是**唯一**写标题处、带节流与重绘记忆（judge 侧曾无人刷新 = C2）；`paneRecoverability` 是两处 recover 共用的同一判定。它是 `orchestrator-tmux.ts` 开 pane argv 的**唯一**使用者 |
 | `side-effects.ts` | 唯一一处「本进程能不能碰外部世界」的判定（测试 / CI / 无 TTY / 显式关闭一律不能），通知与编排共用 |
 | `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |
 | `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit）；另有 `observedShipKinds`——**证据侧唯一入口**：同一份检测既用来拦（过匹配安全）又被交付站点用来放行（过匹配就是白给一张 PR 通行证），所以证据只认「不含 heredoc（`containsHeredoc`）+ ship 动词就在该段命令头」的命令：读引号感知词法器的 token（引号里的脚本整体是一个 token），只跨过环境变量赋值与重定向，**不做 `normalizedTokens` 的 wrapper 前扫**（`sudo`/`env`/`timeout` 前扫对「拦」是 fail-closed、对「放行」却是 fail-open，实测 `timeout 60 node -e '…'` 会白给一张 pr-create）；代价是 `sudo git push` 不算证据，重跑一次不带 wrapper 即可。检测器本身**绝不**放松（那才是真绕过） |

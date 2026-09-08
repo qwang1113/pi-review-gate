@@ -209,9 +209,10 @@ orchestration id、交接文档路径，以及**老会话 transcript 路径** �
 不一致，也是项目经理唯一会永远等下去的东西，所以由门禁主动报出来而不是等它自己发现。
 子会话对这一切完全无感：通道是文件路径、不属于任何进程，换人只是换了个打开它们的人。
 
-**tmux 只剩显示器的活**：`lib/orchestrator-tmux.ts` 里现在只有三个构造器 ——
-`list-panes`（判 pane 存活，`dead` 的唯一来源）、`split-window`（开 pane）、
-`kill-pane`（关 pane）。`send-keys` 与 `capture-pane` 的构造器已整体删除，理由是它们
+**tmux 只剩显示器的活**：`lib/orchestrator-tmux.ts` 里现在只有几个构造器 ——
+`list-panes`（判 pane 存活，`dead` 的唯一来源；另有带几何的一支给三列规则读窗口）、
+`split-window`（开 pane）、`kill-pane`（关 pane）、`select-layout -E`（把目标 pane 所在的那一层
+空间等分 —— 三列布局靠它，2026-09-08）。`send-keys` 与 `capture-pane` 的构造器已整体删除，理由是它们
 各自代表一类必然出错的做法：键盘投递会被截断、会漏 Enter、消息里的换行会被开着的
 对话框当成「提交当前高亮项」（等于替子会话答了一个它没打算选的选项）；而屏幕是给人
 看的渲染结果、不是 API —— 它会折行、会滚动、会把状态栏渲染得像菜单，历史输出还一直

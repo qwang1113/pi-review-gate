@@ -52,6 +52,7 @@
  */
 
 import {
+  buildEvenLayoutArgv,
   buildHandoffPaneArgv,
   buildKillPaneArgv,
   buildHidePaneLabelsArgv,
@@ -59,7 +60,12 @@ import {
   buildPaneTitleArgv,
   buildShowPaneLabelsArgv,
   buildSpawnPaneArgv,
+  buildWindowLayoutArgv,
   parseSpawnedPaneId,
+  parseWindowLayout,
+  planPanePlacement,
+  type PanePlacement,
+  type WindowLayout,
 } from "./orchestrator-tmux.ts";
 import {
   paneStyleFor,
@@ -292,15 +298,21 @@ export function closeSessionPane(
       try { run(argv); } catch { /* cosmetic */ }
     }
   }
+  // Probe the window BEFORE the kill: afterwards this id is gone and there is
+  // nothing left to address the window with — the same reason `hideLabelsVia`
+  // takes the caller's own pane instead of the one being closed.
+  const before = probeWindowLayout(run, paneId);
   try {
     const result = run(buildKillPaneArgv(paneId));
     if (!result.ok) {
       return { ok: false, error: result.stderr || "tmux kill-pane 失败" };
     }
-    return { ok: true };
   } catch (error) {
     return { ok: false, error: (error as Error).message };
   }
+  const survivor = before?.columns.flat().find((pane) => pane.id !== paneId);
+  if (survivor) evenOutWindow(run, survivor.id);
+  return { ok: true };
 }
 
 /**
@@ -363,7 +375,11 @@ export function releasesWindowLabels(input: {
 
 /** Where the new pane goes. */
 export type SessionPaneLayout =
-  /** The child column: first child splits the opener, later ones stack under. */
+  /**
+   * The window decides (three-column rule, 2026-09-08): the first two columns
+   * hold one pane each, the third shares its height — see
+   * `planPanePlacement` in lib/orchestrator-tmux.ts.
+   */
   | "child-column"
   /** Beside the opener (a relay successor, which inherits the left column). */
   | "beside-opener";
@@ -380,8 +396,6 @@ export interface SessionPaneSpec {
   ownPane: string;
   cwd: string;
   layout: SessionPaneLayout;
-  /** Stack under this one instead of splitting the opener (child column). */
-  lastChildPane?: string;
   role: SessionPaneRole;
   /** The full argv the pane runs (an interactive pi, built by the caller). */
   command: readonly string[];
@@ -408,8 +422,67 @@ export type SessionPaneOutcome =
     };
 
 /**
+ * Read the geometry of the window a pane lives in. `undefined` = unreadable,
+ * and unreadable is missing INFORMATION, never a licence to guess (the same
+ * direction `judge-pane.ts` takes about liveness).
+ */
+function probeWindowLayout(run: PaneRunner, via: string): WindowLayout | undefined {
+  try {
+    const result = run(buildWindowLayoutArgv(via));
+    if (!result.ok) return undefined;
+    const layout = parseWindowLayout(result.stdout);
+    return layout.columns.length > 0 ? layout : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * WHERE THE NEXT PANE GOES (three-column rule, 2026-09-08).
+ *
+ * The window's own geometry decides, not the opener's child list — every
+ * session keeps a child list of its own, which is exactly how one window ended
+ * up with five columns. An unreadable window falls back to splitting the
+ * opener: OPENING THE PANE MUST SUCCEED, the layout is best-effort.
+ */
+function placementFor(run: PaneRunner, ownPane: string): PanePlacement {
+  const layout = probeWindowLayout(run, ownPane);
+  if (!layout) return { direction: "-h", target: ownPane };
+  return planPanePlacement(layout.columns);
+}
+
+/**
+ * Equalise the window after a pane JOINED or LEFT it (user requirement
+ * 2026-09-08). Two axes, both via `select-layout -E` on a pane whose parent
+ * container is the thing to spread:
+ *
+ *  - every column holding more than one pane gets its HEIGHTS spread evenly
+ *    (the third column, and only ever the third one, in a window the gate
+ *    built);
+ *  - a window that is exactly three columns wide gets its COLUMNS spread
+ *    evenly too.
+ *
+ * More than three columns is deliberately left alone: the user's call was that
+ * the rule stops NEW wide windows, it does not merge the ones already open. A
+ * zoomed pane is left alone for the same kind of reason — the user is reading
+ * it. Best-effort throughout: a cosmetic layout must never fail the spawn or
+ * the close it follows.
+ */
+function evenOutWindow(run: PaneRunner, via: string): void {
+  const layout = probeWindowLayout(run, via);
+  if (!layout || layout.zoomed) return;
+  const even = (target: string): void => {
+    try { run(buildEvenLayoutArgv(target)); } catch { /* cosmetic */ }
+  };
+  for (const column of layout.columns) {
+    if (column.length > 1) even(column[0]!.id);
+  }
+  if (layout.columns.length === 3) even(layout.columns[0]![0]!.id);
+}
+
+/**
  * Open one pane, in the fixed order every caller now shares:
- * spawn → register → decorate → verify.
+ * spawn → register → decorate → even → verify.
  *
  * The order is the point. Registering before verification is what keeps a
  * pane addressable when its delivery check fails (the pane may well be alive
@@ -434,8 +507,7 @@ export async function openSessionPane(
           command: spec.command,
         })
       : buildSpawnPaneArgv({
-          orchestratorPane: spec.ownPane,
-          ...(spec.lastChildPane === undefined ? {} : { lastChildPane: spec.lastChildPane }),
+          placement: placementFor(run, spec.ownPane),
           cwd: spec.cwd,
           env,
           command: spec.command,
@@ -452,6 +524,11 @@ export async function openSessionPane(
   }
   spec.register?.(paneId);
   const decorWarning = spec.decor ? decorateSessionPane(run, paneId, spec.decor) : undefined;
+  // A handoff pane is the one layout the three-column rule does not govern: it
+  // belongs beside the opener so the successor inherits the left column when
+  // the predecessor closes. Equalising here would only make the momentary
+  // fourth column prettier.
+  if (spec.layout !== "beside-opener") evenOutWindow(run, paneId);
   if (spec.verify) {
     const proof = await spec.verify(paneId);
     if (!proof.ok) {
