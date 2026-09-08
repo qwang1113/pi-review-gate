@@ -7,7 +7,6 @@ import {
   findChild,
   findChildByPane,
   formatChildren,
-  lastChildPane,
   liveChildren,
   markChildClosed,
   markChildAssigned,
@@ -81,14 +80,6 @@ test("running task ids drive the scheduler, and a LIVE PANE occupies its task (B
   runtime = markChildClosed(runtime, "a-1", NOW);
   assert.deepEqual(runningTaskIds(runtime, ["%2", "%3"]), ["b"],
     "only a closed (or vanished) pane gives the task back");
-});
-
-test("the LAYOUT anchor is the newest live child, or nothing", () => {
-  const runtime = runtimeWith(child({ id: "a-1", paneId: "%2" }), child({ id: "b-1", paneId: "%3" }));
-  assert.equal(lastChildPane(runtime, ["%2", "%3"]), "%3", "new children stack under the last one");
-  assert.equal(lastChildPane(runtime, ["%2"]), "%2", "a dead pane is not an anchor");
-  assert.equal(lastChildPane(runtime, []), undefined,
-    "no right column ⇒ the caller splits the orchestrator's own pane instead");
 });
 
 test("only a REGISTERED, open child is closable — the user's panes are unaddressable", () => {

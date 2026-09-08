@@ -49,7 +49,6 @@ import {
 } from "./orchestrator-delivery.ts";
 import {
   findChild,
-  lastChildPane,
   type OrchestratorRuntime,
 } from "./orchestrator-registry.ts";
 import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
@@ -184,13 +183,11 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
 
   const self = deps.ownPane();
   if (!self) return fail("review-gate: 读不到自己的 pane（$TMUX_PANE），无法开新 pane。");
-  const last = lastChildPane(runtime, panes.panes);
   const now = new Date(deps.now()).toISOString();
   const opened = await openSessionPane(deps.tmux, {
     ownPane: self,
     cwd: child.cwd,
     layout: "child-column",
-    ...(last === undefined ? {} : { lastChildPane: last }),
     // Same env as the original spawn — including the sidecar variant, which is
     // ALSO what exempts a child from the session-exclusivity guard: a recovered
     // pane without it would be refused at boot as a second session in the

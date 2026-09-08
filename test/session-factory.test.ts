@@ -37,6 +37,25 @@ function happyRunner(seen: string[][] = []): PaneRunner {
   };
 }
 
+/**
+ * Fake tmux whose window CHANGES SHAPE when the split lands: `list-panes`
+ * answers `before` until a split has happened, then `after`. The strings are
+ * the real `#{pane_id} #{pane_left} #{pane_top} #{window_zoomed_flag}` format,
+ * so the geometry the rule reads is the geometry tmux prints.
+ */
+function windowRunner(before: string, after: string, seen: string[][] = []): PaneRunner {
+  let split = false;
+  return (argv) => {
+    seen.push([...argv]);
+    if (argv[0] === "list-panes") return { ok: true, stdout: split ? after : before, stderr: "" };
+    if (argv[0] === "split-window") {
+      split = true;
+      return { ok: true, stdout: "%9\n", stderr: "" };
+    }
+    return { ok: true, stdout: "", stderr: "" };
+  };
+}
+
 /** `-e K=V` pairs back out of a spawn argv, as a map. */
 function envOf(argv: readonly string[]): Record<string, string> {
   const env: Record<string, string> = {};
@@ -126,13 +145,18 @@ test("combination 2 — a judge RECOVER: same three keys, resume argv, no task f
   assert.ok(!spawn.some((a) => a.startsWith("@")), "no argv message: nothing to re-deliver");
 });
 
-test("combination 3 — an orchestration SPAWN: orchestration env, stacked under the last child", async () => {
+test("combination 3 — an orchestration SPAWN: orchestration env, stacked in the third column", async () => {
   const seen: string[][] = [];
-  const outcome = await openSessionPane(happyRunner(seen), {
+  // Three columns already: the new child belongs under the third one's last
+  // pane, whatever this opener's own child list says.
+  const outcome = await openSessionPane(windowRunner(
+    ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0"].join("\n"),
+    ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0", "%9 200 60 0"].join("\n"),
+    seen,
+  ), {
     ownPane: "%1",
     cwd: "/repo",
     layout: "child-column",
-    lastChildPane: "%5",
     role: { kind: "orchestration-child", orchestrationId: "orch-abc-1", stateVariant: "t1-xyz" },
     command: ["pi", "@.pi/tasks/t1.md"],
     decor: { label: "@t1-thing", colorSeed: "t1-xyz", state: "working", stateForSeconds: 0 },
@@ -145,7 +169,96 @@ test("combination 3 — an orchestration SPAWN: orchestration env, stacked under
     RG_GATE_MODE: "loop",
     RG_STATE_VARIANT: "t1-xyz",
   }, "the child's own sidecar variant is ALSO its exclusivity-guard exemption");
-  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-v", "-t", "%5"], "later children stack under the last one");
+  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-v", "-t", "%6"],
+    "three columns ⇒ stack under the third column's last pane");
+  assert.deepEqual(seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" ")), [
+    "select-layout -E -t %5",
+    "select-layout -E -t %1",
+  ], "then spread the third column's heights, then the columns' widths");
+});
+
+test("the three-column rule reads the WINDOW, never the opener's own child list", async () => {
+  // The measured defect (2026-09-08): every session keeps its own child list,
+  // so a judge opened by a child — or a second orchestration in the same
+  // window — each saw "no children yet" and opened a NEW column. The user's
+  // window had five. Here the opener has no children at all, and the window
+  // already has two columns: the next pane must open the third one.
+  const seen: string[][] = [];
+  await openSessionPane(windowRunner(
+    ["%1 0 0 0", "%2 100 0 0"].join("\n"),
+    ["%1 0 0 0", "%2 100 0 0", "%9 200 0 0"].join("\n"),
+    seen,
+  ), {
+    ownPane: "%1",
+    cwd: "/repo",
+    layout: "child-column",
+    role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
+    command: ["pi"],
+  });
+  const spawn = seen.find((argv) => argv[0] === "split-window")!;
+  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%2"],
+    "two columns ⇒ open the third beside the rightmost column's lone pane");
+  assert.deepEqual(seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" ")),
+    ["select-layout -E -t %1"], "the window is three columns wide now ⇒ spread the widths once");
+});
+
+test("widths are spread off a pane that sits ALONE, never one inside a shared column", async () => {
+  // A pane inside a multi-pane column spreads THAT COLUMN's heights, not the
+  // window's widths (reviewer P2). The width pass therefore has to pick a lone
+  // pane — and it must not touch a column this round never changed.
+  const seen: string[][] = [];
+  await openSessionPane(windowRunner(
+    ["%1 0 0 0", "%2 0 30 0", "%3 100 0 0", "%5 200 0 0"].join("\n"),
+    ["%1 0 0 0", "%2 0 30 0", "%3 100 0 0", "%5 200 0 0", "%9 200 60 0"].join("\n"),
+    seen,
+  ), {
+    ownPane: "%1",
+    cwd: "/repo",
+    layout: "child-column",
+    role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
+    command: ["pi"],
+  });
+  assert.deepEqual(seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" ")), [
+    "select-layout -E -t %5",
+    "select-layout -E -t %3",
+  ], "the changed column first, then the widths off the lone pane in column 2");
+});
+
+test("an unreadable window falls back to splitting the opener — the pane must open", async () => {
+  const seen: string[][] = [];
+  await openSessionPane(happyRunner(seen), {
+    ownPane: "%1",
+    cwd: "/repo",
+    layout: "child-column",
+    role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
+    command: ["pi"],
+  });
+  const spawn = seen.find((argv) => argv[0] === "split-window")!;
+  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%1"],
+    "no geometry ⇒ split the opener itself; a layout we cannot read is not a reason to fail the spawn");
+  assert.equal(seen.filter((argv) => argv[0] === "select-layout").length, 0, "and nothing is equalised");
+});
+
+test("a zoomed window is left alone — the user is reading it", async () => {
+  // DEFENSIVE BRANCH, and this test pins the BRANCH, not a state a live server
+  // reaches: measured on the lab server, `split-window`, `kill-pane` and
+  // `select-layout -E` each unzoom the window, so the probe feeding this can
+  // only see `zoomed` if tmux changes that behaviour. The user asked for the
+  // guard, so it stays — asserted here so it cannot rot.
+  const seen: string[][] = [];
+  await openSessionPane(windowRunner(
+    ["%1 0 0 1", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0"].join("\n"),
+    ["%1 0 0 1", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0", "%9 200 60 0"].join("\n"),
+    seen,
+  ), {
+    ownPane: "%1",
+    cwd: "/repo",
+    layout: "child-column",
+    role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
+    command: ["pi"],
+  });
+  assert.equal(seen.filter((argv) => argv[0] === "select-layout").length, 0,
+    "equalising a zoomed window would fight what the user is looking at");
 });
 
 test("combination 4 — an orchestration RECOVER: same env, split off the opener when no column exists", async () => {
@@ -316,7 +429,9 @@ test("judge labels are stable and sanitized", () => {
 test("close kills exactly one pane, and takes the label bar down only when asked", () => {
   const seen: string[][] = [];
   assert.equal(closeSessionPane(happyRunner(seen), "%7").ok, true);
-  assert.deepEqual(seen, [["kill-pane", "-t", "%7"]]);
+  assert.deepEqual(seen.map((argv) => argv[0]), ["list-panes", "kill-pane"],
+    "the window is probed while the pane still exists, then the pane dies");
+  assert.deepEqual(seen[1], ["kill-pane", "-t", "%7"]);
 
   const withLabels: string[][] = [];
   // Addressed through the CALLER'S pane (%1), never the dying one (%7): `setw`
@@ -325,10 +440,41 @@ test("close kills exactly one pane, and takes the label bar down only when asked
   // border line switched on in the user's window for good.
   closeSessionPane(happyRunner(withLabels), "%7", { hideLabelsVia: "%1" });
   const flat = withLabels.map((a) => a.join(" "));
-  assert.equal(flat.length, 3, "two option resets, then the kill");
+  assert.equal(flat.length, 4, "two option resets, the probe, then the kill");
   assert.ok(flat[0]!.includes("-u") && flat[0]!.includes("pane-border-status"));
   assert.ok(flat[0]!.includes("-t %1") && !flat[0]!.includes("%7"), "the window is named by a pane we know is alive");
-  assert.equal(flat[2], "kill-pane -t %7", "the options come down BEFORE the pane dies");
+  assert.equal(flat[3], "kill-pane -t %7", "the options come down BEFORE the pane dies");
+});
+
+test("closing a pane equalises what is left of its column", () => {
+  const closeWith = (before: string, after: string): string[] => {
+    const seen: string[][] = [];
+    let killed = false;
+    const run: PaneRunner = (argv) => {
+      seen.push([...argv]);
+      if (argv[0] === "kill-pane") { killed = true; return { ok: true, stdout: "", stderr: "" }; }
+      if (argv[0] === "list-panes") return { ok: true, stdout: killed ? after : before, stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    };
+    assert.equal(closeSessionPane(run, "%6").ok, true);
+    return seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" "));
+  };
+  // The third column survives with two panes ⇒ its heights AND the widths.
+  assert.deepEqual(
+    closeWith(
+      ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0"].join("\n"),
+      ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%8 200 30 0"].join("\n"),
+    ),
+    ["select-layout -E -t %5", "select-layout -E -t %1"],
+  );
+  // Down to one pane in that column ⇒ there is no height left to share.
+  assert.deepEqual(
+    closeWith(
+      ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0"].join("\n"),
+      ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0"].join("\n"),
+    ),
+    ["select-layout -E -t %1"],
+  );
 });
 
 test("who may take the window's label bar down: the last pane, and never a guest", () => {

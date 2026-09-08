@@ -34,7 +34,6 @@ import { spawnAuthorization } from "./orchestrator-gate.ts";
 import { buildTakeoverRoute, discoverOrchestrations } from "./orchestrator-takeover.ts";
 import {
   findChild,
-  lastChildPane,
   liveChildren,
   markChildAssigned,
   newChildId,
@@ -269,13 +268,11 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   }
 
   const decor = childPaneDecor(taskId, task.title, childId);
-  const lastPane = lastChildPane(deps.runtime(), panes.panes);
   let evidence: DeliveryEvidence | undefined;
   const opened = await openSessionPane(deps.tmux, {
     ownPane: self,
     cwd,
     layout: "child-column",
-    ...(lastPane === undefined ? {} : { lastChildPane: lastPane }),
     // The environment is assembled by the factory — one place for a contract
     // three different processes read (orchestration id so wake-ups survive a
     // relay, `loop` so the child does not classify itself into something else,

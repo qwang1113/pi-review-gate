@@ -17,19 +17,40 @@
  * (lib/orchestrator-guard.ts), so "the gate is exempt from the guard" can
  * never mean "the gate may do the forbidden thing".
  *
- * THE LAYOUT (measured against the user's own window):
+ * THE LAYOUT (user requirement, 2026-09-08: 一个 window 最多 3 列，前两列固定
+ * 独占一列，第三个会话之后共享第三列、高度等分):
  *
  *     window
- *     ├─ left column    the orchestrator, alone
- *     └─ right column   child sessions, stacked vertically
+ *     ├─ column 1   one pane, full height   (the opener / project manager)
+ *     ├─ column 2   one pane, full height   (the first session opened)
+ *     └─ column 3   EVERY remaining pane, height shared evenly
  *
- *  - first child, no right column yet → `split-window -h` off the ORCHESTRATOR
- *    pane, which creates the right column;
- *  - every later child → `split-window -v` off the LAST child pane, which
- *    stacks it under the others instead of splitting the orchestrator again;
+ *  - fewer than three columns → `split-window -h` beside a pane that sits
+ *    ALONE in its column (the rightmost such column): a lone pane's parent IS
+ *    the window root, so the split flattens into a real sibling column and
+ *    lands where the third one belongs, keeping the SHARED column rightmost.
+ *    Splitting a pane inside a multi-pane column NESTS a half-width pane there
+ *    instead — measured, and reachable: close the middle column of a
+ *    three-column window and the third column's panes ARE the second one. If
+ *    NO column sits alone (a shape the gate never builds), the split carries
+ *    `-f`, which spans the window height and opens a real column at the right
+ *    edge. Both are regression tests in
+ *    test/tmux-window-layout.integration.test.ts, and both branches are also
+ *    pinned by the unit test;
+ *  - three or more → `split-window -v` off the third column's last pane;
  *  - a handoff (giving the orchestration to a successor) → `split-window -h`
  *    off the orchestrator's own pane, so the successor lands beside it and
- *    inherits the left column when the old pane is closed.
+ *    inherits the left column when the old pane is closed. That is the ONE
+ *    deliberate exception: it holds a fourth column for as long as both panes
+ *    are alive.
+ *
+ * WHICH COLUMN IS "THE THIRD" IS A FACT ABOUT THE WINDOW, NOT ABOUT A REGISTRY
+ * (2026-09-08). The old rule asked the opener's own child list, and every
+ * session keeps its own — so a judge pane opened by a child, or a second
+ * orchestration in the same window, each saw "no children yet" and opened a
+ * NEW column. The user's own window had five. The rule now reads the window's
+ * real geometry ({@link buildWindowLayoutArgv}) and decides in
+ * {@link planPanePlacement}; equalising the result is {@link buildEvenLayoutArgv}.
  *
  * Pure module: builds and validates argv. It never spawns anything.
  */
@@ -85,10 +106,8 @@ export function assertSafeTmuxArgv(argv: readonly string[]): readonly string[] {
 }
 
 export interface SpawnPaneOptions {
-  /** The orchestrator's OWN pane — the left column. */
-  orchestratorPane: string;
-  /** The last child pane, when a right column already exists. */
-  lastChildPane?: string;
+  /** Where the new pane goes — the answer {@link planPanePlacement} gives. */
+  placement: PanePlacement;
   /** Working directory for the new pane (a repo root or a worktree). */
   cwd: string;
   /** Environment injected into the pane (orchestration id, gate mode…). */
@@ -113,18 +132,16 @@ function envArgs(env: Readonly<Record<string, string>> | undefined): string[] {
  * diffing) is exactly the improvisation this module removes.
  */
 export function buildSpawnPaneArgv(opts: SpawnPaneOptions): readonly string[] {
-  const self = requirePane(opts.orchestratorPane, "orchestratorPane");
   const command = opts.command ?? ["pi"];
-  // First child ⇒ create the right column off the orchestrator (horizontal).
-  // Later children ⇒ stack under the last child (vertical).
-  const [direction, target] = opts.lastChildPane
-    ? ["-v", requirePane(opts.lastChildPane, "lastChildPane")]
-    : ["-h", self];
   return assertSafeTmuxArgv([
     "split-window",
-    direction,
+    opts.placement.direction,
+    // `-f` spans the whole window's other axis instead of splitting the
+    // target — the one flag that turns a split into a NEW COLUMN wherever the
+    // target happens to sit (see the header).
+    ...(opts.placement.full ? ["-f"] : []),
     "-t",
-    target,
+    requirePane(opts.placement.target, "placement.target"),
     "-c",
     opts.cwd,
     ...envArgs(opts.env),
@@ -256,7 +273,11 @@ export function buildHidePaneLabelsArgv(pane: string): readonly (readonly string
 }
 
 
-/** List the pane ids of the window a pane belongs to (liveness probing). */
+/**
+ * List the pane IDS of the window a pane belongs to — "who is there", for
+ * liveness probing. {@link buildWindowLayoutArgv} asks the other question
+ * ("who is WHERE"), which is what the three-column rule reads.
+ */
 export function buildListPanesArgv(pane: string): readonly string[] {
   return assertSafeTmuxArgv([
     "list-panes",
@@ -278,4 +299,131 @@ export function parsePaneIds(stdout: string): string[] {
 /** The single pane id a `-P` spawn printed, or undefined when tmux said nothing. */
 export function parseSpawnedPaneId(stdout: string): string | undefined {
   return parsePaneIds(stdout)[0];
+}
+
+// ---------------------------------------------------------------------------
+// The window's own geometry (three-column rule, 2026-09-08)
+// ---------------------------------------------------------------------------
+
+/** One pane as tmux reports its place in the window. */
+export interface WindowPane {
+  id: string;
+  /** Column membership: panes sharing `left` are in the same column. */
+  left: number;
+  /** Order within the column. */
+  top: number;
+}
+
+/** The window as it actually looks right now. */
+export interface WindowLayout {
+  /** Left→right; panes within a column top→bottom. Never empty once parsed. */
+  columns: WindowPane[][];
+  /** One pane is zoomed — equalising would fight what the user is reading. */
+  zoomed: boolean;
+}
+
+/** Probe the geometry of the window a pane lives in. */
+export function buildWindowLayoutArgv(pane: string): readonly string[] {
+  return assertSafeTmuxArgv([
+    "list-panes",
+    "-t",
+    requirePane(pane, "pane"),
+    "-F",
+    "#{pane_id} #{pane_left} #{pane_top} #{window_zoomed_flag}",
+  ]);
+}
+
+/**
+ * Group what tmux printed into columns.
+ *
+ * PANES SHARING A `left` ARE ONE COLUMN — that is the whole grouping rule, and
+ * it is measured rather than inferred from split history: after three
+ * horizontal splits and two vertical ones the window reports
+ * `{p1, p2, p3[child, child, child]}`, and only `left` tells the two levels
+ * apart. A line that does not parse is skipped — a format this build does not
+ * understand must not invent a layout.
+ */
+export function parseWindowLayout(stdout: string): WindowLayout {
+  const panes: WindowPane[] = [];
+  let zoomed = false;
+  for (const raw of String(stdout ?? "").split(/\r?\n/)) {
+    const [id, rawLeft, rawTop, flag] = raw.trim().split(/\s+/);
+    const left = Number(rawLeft);
+    const top = Number(rawTop);
+    if (!isPaneId(id) || !Number.isInteger(left) || !Number.isInteger(top)) continue;
+    panes.push({ id, left, top });
+    if (flag === "1") zoomed = true;
+  }
+  panes.sort((a, b) => a.left - b.left || a.top - b.top);
+  const columns: WindowPane[][] = [];
+  let currentLeft: number | undefined;
+  for (const pane of panes) {
+    if (currentLeft === undefined || pane.left !== currentLeft) {
+      columns.push([]);
+      currentLeft = pane.left;
+    }
+    columns[columns.length - 1]!.push(pane);
+  }
+  return { columns, zoomed };
+}
+
+/** Where a new pane goes, in tmux's own vocabulary. */
+export interface PanePlacement {
+  /** `-h` opens a column, `-v` stacks inside one. */
+  direction: "-h" | "-v";
+  /** The pane tmux splits — or, with `full`, the pane the new column lands beside. */
+  target: string;
+  /**
+   * Pass `-f`: the new pane spans the whole window's other axis instead of
+   * splitting the target. Only meaningful with `-h`, where it is what makes
+   * the split a real column.
+   */
+  full?: boolean;
+}
+
+/**
+ * THE RULE, in one function: fewer than three columns ⇒ open a new one;
+ * otherwise ⇒ stack under the third column's last pane.
+ *
+ * Requires a non-empty layout — the caller probed a live pane, so the window
+ * holds at least that pane.
+ */
+export function planPanePlacement(columns: readonly (readonly WindowPane[])[]): PanePlacement {
+  if (columns.length === 0) {
+    throw new Error("planPanePlacement 需要一个非空的窗口布局");
+  }
+  if (columns.length >= 3) {
+    const third = columns[2]!;
+    return { direction: "-v", target: third[third.length - 1]!.id };
+  }
+  // OPENING A NEW COLUMN, and the lone pane is what decides where it goes.
+  //
+  // A plain `-h` split is FLATTENED into the target's parent container when
+  // the direction matches, and NESTS a half-width pane inside it when it does
+  // not — measured: splitting the last pane of a two-column window whose right
+  // column held three panes produced `{c1, c2[…{half, half}]}` and the
+  // three-column rule became a lie. A lone pane's parent IS the window root,
+  // so splitting beside it lands exactly where the third column belongs, with
+  // the shared column staying rightmost.
+  const alone = [...columns].reverse().find((column) => column.length === 1);
+  if (alone) return { direction: "-h", target: alone[0]!.id };
+  // No column sits alone — a shape the gate never builds. A plain split would
+  // nest, so `-f` is the only way to get a real column here; it lands at the
+  // right edge (measured: `-f` ignores the target's position entirely), which
+  // is where the shared column ends up anyway.
+  const rightmost = columns[columns.length - 1]!;
+  return { direction: "-h", target: rightmost[rightmost.length - 1]!.id, full: true };
+}
+
+/**
+ * Equalise the space a pane shares with its SIBLINGS (`select-layout -E`).
+ *
+ * tmux spreads the target pane's PARENT container evenly, so the target picks
+ * the axis: a third-column pane equalises that column's heights, a
+ * first-column pane equalises the columns' widths. Both were measured on a
+ * scratch tmux server (16/16/16 heights, 66/66/66 widths) before this was
+ * wired in — the whole rule rests on that behaviour.
+ */
+export function buildEvenLayoutArgv(pane: string): readonly string[] {
+  return assertSafeTmuxArgv(["select-layout", "-E", "-t", requirePane(pane, "pane")]);
 }
