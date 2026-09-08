@@ -138,12 +138,6 @@ export function parseChoice(picked: string | undefined, spec: ChoiceSpec): Choic
   return { kind: "chose", option: original ?? picked };
 }
 
-/** Does this answer line carry a decline reason? Used by the channel side. */
-export function isDeclineLine(line: string, spec: ChoiceSpec): boolean {
-  const decline = declineRowOf(spec);
-  return line === decline || line.startsWith(decline);
-}
-
 /** Does this row look like a template decline row (`✎ …`)? */
 export function looksLikeDeclineRow(row: string): boolean {
   return row.startsWith("✎");
@@ -196,10 +190,3 @@ export async function renderChoice(
   return trimmed ? `${declineRowOf(spec)}：${trimmed}` : declineRowOf(spec);
 }
 
-/**
- * The lines a headless environment must carry itself: the same question with
- * the same rows, as plain text. Used where no dialog can be rendered.
- */
-export function formatChoice(spec: ChoiceSpec): string {
-  return `${spec.title}\n${choiceRows(spec).map((row) => `  - ${row}`).join("\n")}`;
-}

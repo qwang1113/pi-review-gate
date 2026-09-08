@@ -356,6 +356,22 @@ test("request_scope_limit: the consent dialog goes through the channel with a sc
   assert.equal(reply.details?.granted, true);
   assert.equal(f.asked.length, 1, "the consent dialog is raised exactly once, through askEitherSide");
   assert.match(f.asked[0], /审查范围缩小/);
+  assert.match(f.asked[0], /拒绝后：AI 本会话内不能再次请求缩小范围/,
+    "the channel record carries the CONSEQUENCES too — a PM answering for the user must read them");
+});
+
+test("request_scope_limit: a refusal typed into the template's reason box reaches the agent", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-scope-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  git(dir, ["init", "-q"]);
+  writeFileSync(join(dir, "old.ts"), "export const a = 1;\n");
+  const f = fake({ cwd: dir, answers: ["✎ 不选，我说明原因：这些也是本次会话的活"] });
+
+  const reply = await call(f, "request_scope_limit", { reason: "既有改动" });
+  assert.equal(reply.isError, true);
+  assert.match(textOf(reply), /这些也是本次会话的活/,
+    "the user's objection must reach the agent — dropping it makes them repeat themselves");
+  assert.equal(f.scopeDeclined, true, "a typed refusal is still a decline");
 });
 
 test("request_scope_limit: a dialog that could not be SHOWN is not a decline", async (t) => {
@@ -413,11 +429,22 @@ test("request_sensitive_edit: a declined path is locked for the session", async 
   assert.equal(first.isError, true);
   assert.match(textOf(first), /DECLINED editing/);
   assert.equal(f.asked.length, 1);
+  assert.match(f.asked[0], /同意后：只授权这一个路径/,
+    "the channel record carries the consequences — and the path it authorizes");
 
   const second = await call(f, "request_sensitive_edit", { path: ".env", reason: "再试一次" });
   assert.equal(second.isError, true);
   assert.match(textOf(second), /already DECLINED/);
   assert.equal(f.asked.length, 1, "a locked path must never raise a second dialog");
+});
+
+test("request_sensitive_edit: the refusal reason reaches the agent", async () => {
+  const f = fake({ cwd: "/repo", answers: ["✎ 不选，我说明原因：这个文件我自己改"] });
+  const reply = await call(f, "request_sensitive_edit", { path: ".env", reason: "加一个变量" });
+  assert.equal(reply.isError, true);
+  assert.match(textOf(reply), /这个文件我自己改/,
+    "the user's own reason is the actionable half of a refusal");
+  assert.ok(f.declined.has("/repo/.env"), "…and the path is still locked");
 });
 
 test("request_sensitive_edit: an unshowable dialog fails closed WITHOUT locking the path", async () => {

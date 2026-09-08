@@ -6,8 +6,6 @@ import {
   MAX_CHOICE_OPTIONS,
   REVISE_ROW,
   choiceRows,
-  formatChoice,
-  isDeclineLine,
   looksLikeDeclineRow,
   optionRow,
   parseChoice,
@@ -40,14 +38,6 @@ test("a caller may rename the decline row — the approval wording", () => {
 test("only the recommended option carries the marker", () => {
   assert.equal(optionRow("A", "A"), "A（推荐）");
   assert.equal(optionRow("A", "B"), "A");
-});
-
-test("headless text carries the same rows as the dialog", () => {
-  const text = formatChoice(spec());
-  assert.match(text, /选一个？/);
-  assert.match(text, /- A（推荐）/);
-  assert.match(text, /- B/);
-  assert.match(text, new RegExp(`- ${DECLINE_ROW}`));
 });
 
 // ---- validation ----
@@ -95,12 +85,6 @@ test("nothing picked is a dismissal", () => {
 
 test("an unknown line is returned verbatim — the caller decides what it means", () => {
   assert.deepEqual(parseChoice("自由文本", spec()), { kind: "chose", option: "自由文本" });
-});
-
-test("isDeclineLine recognizes both halves of the row", () => {
-  assert.equal(isDeclineLine(DECLINE_ROW, spec()), true);
-  assert.equal(isDeclineLine(`${DECLINE_ROW}：x`, spec()), true);
-  assert.equal(isDeclineLine("A", spec()), false);
 });
 
 // ---- rendering ----

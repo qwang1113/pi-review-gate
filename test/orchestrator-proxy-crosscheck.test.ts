@@ -45,7 +45,7 @@ import {
   resolveAnswer,
 } from "../lib/orchestrator-answer-tools.ts";
 import { ORCHESTRATOR_DIRECTIVE } from "../lib/orchestrator-directives.ts";
-import { DECLINE_ROW } from "../lib/choice-dialog.ts";
+import { DECLINE_ROW, REVISE_ROW } from "../lib/choice-dialog.ts";
 
 import type { FakeWorld } from "./helpers/fake-orchestration.ts";
 
@@ -148,9 +148,12 @@ test("a decline is recognised in BOTH dialogs' reject rows, and no approve row l
   assert.equal(isDecliningProxyAnswer(GOAL_APPROVE), false);
   assert.equal(isDecliningProxyAnswer(RESTATE_APPROVE), false);
   // The template's decline row (2026-09-08) is a rejection whatever reason
-  // the user typed after it — including one that reads like consent.
+  // the user typed after it — including one that reads like consent. BOTH
+  // wordings count: 不选 and the approval dialogs' 我要改.
   assert.equal(isDecliningProxyAnswer(DECLINE_ROW), true);
+  assert.equal(isDecliningProxyAnswer(REVISE_ROW), true);
   assert.equal(isDecliningProxyAnswer(`${DECLINE_ROW}：我同意，但还是不选`), true);
+  assert.equal(isDecliningProxyAnswer(`${REVISE_ROW}：站点写错了`), true);
 });
 
 test("the template's decline row is a valid channel answer, reason included", () => {

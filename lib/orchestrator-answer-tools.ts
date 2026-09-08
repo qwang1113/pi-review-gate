@@ -243,8 +243,11 @@ export function checkProxyCrosscheck(raw: unknown, taskId: string): CrosscheckVe
  * neither approve row contains any of these.
  */
 export function isDecliningProxyAnswer(answer: string): boolean {
-  // `不选` is the template's decline row (2026-09-08): picking it IS a
-  // rejection, whatever the reason text after it happens to say.
+  // ANY `✎ …` row is the template's "none of these" (2026-09-08): picking it
+  // IS a rejection — whether it reads 不选 or 我要改, and whatever reason the
+  // user typed after it. Missing this made a REVISE row demand a crosscheck as
+  // if it were an approval (reviewer P1).
+  if (looksLikeDeclineRow(answer)) return true;
   return /拒绝|不批准|不认可|不选|取消|退回|偏差|no|reject|deny/i.test(answer);
 }
 
@@ -483,8 +486,12 @@ async function answerOneRequest(
   // blocked answer. Declining (refusing the edit) needs no grant: it
   // changes nothing about the worktree.
   if (request.topic === "sensitive-edit") {
-    const declining = /拒绝|取消|不选|no|reject|deny/i.test(resolved.answer)
-      && !/同意|允许|授权|yes|allow|grant/i.test(resolved.answer);
+    // A `✎ …` row is a refusal REGARDLESS of its reason text (which may well
+    // contain 授权/允许): the row itself is the answer, and reading it as a
+    // request to grant would be the worst possible misread (reviewer P1).
+    const declining = looksLikeDeclineRow(resolved.answer)
+      || (/拒绝|取消|不选|no|reject|deny/i.test(resolved.answer)
+        && !/同意|允许|授权|yes|allow|grant/i.test(resolved.answer));
     if (!declining && !hasGrant(deps.runtime(), "sensitive-edit")) {
       // GRANT DOOR 3/3: the user decides in the PM's own pane.
       deps.showToUser(
@@ -506,7 +513,9 @@ async function answerOneRequest(
           ok: false,
           requestId: request.requestId,
           refusal: fail(
-            `review-gate: 用户拒绝授予敏感编辑代答权 —— 子会话 ${childId} 的请求未代答。` +
+            `review-gate: 用户拒绝授予敏感编辑代答权` +
+            (picked.kind === "declined" && picked.reason ? `（原因：${picked.reason}）` : "") +
+            ` —— 子会话 ${childId} 的请求未代答。` +
             "（用户可之后用 /gate-grant sensitive-edit 或 ask_user 授予。）",
             { childId, answered: false, needGrant: "sensitive-edit" },
           ),

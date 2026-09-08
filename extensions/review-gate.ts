@@ -7981,6 +7981,8 @@ export default function reviewGate(pi: ExtensionAPI) {
           recommended: keepLabel,
         };
         let ok = false;
+        /** The user's own typed reason for keeping the mode, when they gave one. */
+        let declineReason: string | undefined;
         try {
           const pick = parseChoice(
             await askChoice(
@@ -7991,6 +7993,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             spec,
           );
           ok = pick.kind === "chose" && pick.option === confirmLabel;
+          declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
         } catch { ok = false; }
         if (ok) {
           setTaskMode(effective, "user", ctx as unknown as ExtensionContext);
@@ -8012,7 +8015,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           content: [{
             type: "text",
             text:
-              "review-gate: the user DECLINED the downgrade. Agent-initiated downgrades are now " +
+              "review-gate: the user DECLINED the downgrade." +
+              (declineReason ? ` 用户的意见：${declineReason}` : "") +
+              " Agent-initiated downgrades are now " +
               "locked for this session — continue under the current mode and do not ask again; " +
               "only the user can change the mode (/gate-mode).",
           }],
@@ -8193,6 +8198,12 @@ export default function reviewGate(pi: ExtensionAPI) {
             spec,
           );
           choice = pick.kind === "chose" ? pick.option : undefined;
+          // The decline row is "none of these, and here is why": the human is
+          // not choosing an action, so the gate keeps its fail-closed default
+          // — but their reason is worth recording for the next round.
+          if (pick.kind === "declined" && pick.reason) {
+            appendLesson(`arbitration #${appealsUsed()} human note: ${pick.reason}`);
+          }
         } catch { choice = undefined; }
         if (choice === "Allow this exact `gh pr edit` once") {
           const bindings = await computeTokenBindings(parsed.action, fp.digest);

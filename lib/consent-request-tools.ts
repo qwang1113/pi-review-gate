@@ -146,6 +146,8 @@ export async function doRequestScopeLimit(
   };
   let ok = false;
   let dialogFailed = false;
+  /** The user's own typed reason for refusing, when they gave one. */
+  let declineReason: string | undefined;
   const consentBody =
     "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
     `既有变更 ${preexisting.length} 个` +
@@ -158,7 +160,10 @@ export async function doRequestScopeLimit(
       {
         dialogKind: "select",
         topic: "scope-limit",
-        title: spec.title,
+        // The channel record carries the SAME text the human sees — the
+        // consequences (what granting covers, what refusing locks) are the
+        // half a project manager answering on the user's behalf must read.
+        title: `${spec.title}\n${consentBody}`,
         options: choiceRows(spec),
         ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
       },
@@ -167,6 +172,9 @@ export async function doRequestScopeLimit(
     );
     const pick = parseChoice(outcome.answer, spec);
     ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
+    // A refusal typed into the template's reason box is an objection the agent
+    // can act on — dropping it would make the user repeat themselves.
+    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
   } catch { dialogFailed = true; }
 
   // A dialog that could not be shown is NOT a decline: fail closed for
@@ -182,7 +190,8 @@ export async function doRequestScopeLimit(
     deps.declineScopeLimit();
     return deny(
       "review-gate: DECLINED the scope limit (by the user or the project manager) — the FULL gate applies (pre-existing " +
-      "changes included). Scope requests are now locked for this session; continue the loop and cover everything.",
+      "changes included). Scope requests are now locked for this session; continue the loop and cover everything." +
+      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
     );
   }
 
@@ -327,6 +336,8 @@ export async function doRequestSensitiveEdit(
   };
   let ok = false;
   let dialogFailed = false;
+  /** The user's own typed reason for refusing, when they gave one. */
+  let declineReason: string | undefined;
   const consentBody =
     `文件（完整路径）: ${absPath}\n` +
     `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}\n` +
@@ -340,7 +351,10 @@ export async function doRequestSensitiveEdit(
       {
         dialogKind: "select",
         topic: "sensitive-edit",
-        title: spec.title,
+        // The channel record carries the SAME text the human sees — a project
+        // manager answering on the user's behalf cannot authorize a path it
+        // was never shown.
+        title: `${spec.title}\n${consentBody}`,
         options: choiceRows(spec),
         ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
       },
@@ -349,6 +363,7 @@ export async function doRequestSensitiveEdit(
     );
     const pick = parseChoice(outcome.answer, spec);
     ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
+    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
   } catch { dialogFailed = true; }
 
   // A dialog that could not be shown is NOT a decline: fail closed for THIS
@@ -364,7 +379,8 @@ export async function doRequestSensitiveEdit(
     deps.sensitiveDeclinedPaths.add(absPath);
     return deny(
       `review-gate: DECLINED editing "${raw}" (by the user or the project manager). This path is now locked for the session — ` +
-      "do not ask again. Describe the change you wanted and let the user apply it.",
+      "do not ask again. Describe the change you wanted and let the user apply it." +
+      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
     );
   }
 
