@@ -517,13 +517,18 @@ test("MIXED install: a LEGACY divergence checker (CLI-on-load) is spawned, not r
   writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false });
   const hook = installHookTree([]); // full tree: check + fingerprint + labels + divergence
   // Replace the divergence checker with a LEGACY-shaped one: no require.main
-  // guard, CLI-on-load, stdout-silent (pre --emit-fingerprint), exits 0
-  // because the repo is clean.
+  // guard, CLI-on-load, stdout-silent (pre --emit-fingerprint). The fixture
+  // DISCRIMINATES the two call paths so the test can actually fail: spawned
+  // by the checker, argv[2] is the repo path (exit 0 — clean); REQUIRED from
+  // it, argv[2] is the sidecar path (exit 1 — the pre-refactor brick). A
+  // require-vs-spawn mixup therefore blocks the commit instead of passing.
   const hooksDir = dirname(hook);
   const scriptsDir = join(hooksDir, "..", "scripts");
   writeFileSync(join(scriptsDir, "check-staged-divergence.cjs"),
     "#!/usr/bin/env node\n" +
-    "// legacy checker (2026-09-08 fixture): executes on load, no exports\n" +
+    "// legacy checker fixture (2026-09-08): executes on load, no exports\n" +
+    "const argv2 = process.argv[2] || '';\n" +
+    "if (argv2.includes('review-gate-state.json')) process.exit(1);\n" +
     "process.exit(0);\n");
   const res = spawnSync("bash", [hook], { cwd: dir, encoding: "utf8" });
   assert.equal(res.status, 0,
