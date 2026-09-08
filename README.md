@@ -1874,35 +1874,36 @@ the pi package keeps `lib/` at the package root next to `extensions/`. rootDirs
 makes tsc resolve the same specifiers the runtime does, with no build step or
 symlink.
 
-### Why the suite is slow, and two rejected ways to speed it up
+### Why the suite is slow, and how the race regressions are shaped
 
-Two fingerprint regressions are reproduced by TIMING, not by construction, so
-they loop (300 and 25 rounds). The 300-round loop alone is ~73s of a ~100s
-`npm test`, and the review loop pays it on every round. Both attempts to cut
-that cost were tried and withdrawn — they are documented here so they are not
-re-attempted naively:
+Two fingerprint regressions are reproduced by TIMING, not by construction. Two
+attempts to make them cheaper were tried and withdrawn — documented below so
+they are not re-attempted naively — and two sound optimizations were then
+adopted (2026-09-08, each mutation-verified before landing):
 
-1. **An env knob (`RG_RACE_ITERS=25`) for a commit-time fast path.** Justified
-   by a measurement — a mutated implementation (shadow-index backdate **and**
-   `--renormalize` removed) missed the edit in 83/100 rounds — which would put
-   the escape probability at 25 rounds near 0.17^25. An independent reviewer
-   re-ran the same experiment and the mutated implementation **passed 3 of 5
-   runs** at 25 rounds. The rounds are not independent trials (one shared
-   repository; the window depends on filesystem timestamp granularity, load and
-   pacing), so a per-round rate cannot be exponentiated into a guarantee. The
-   knob was removed rather than kept with a vaguer claim.
-2. **A "deterministic" replacement** — restore the cached stat after a
-   same-size rewrite so the stat cache would consider the file clean. It does
-   not fool git: ctime cannot be forged from user space and sub-second mtime
-   still moves, even with `core.checkStat=minimal` and `core.trustctime=false`.
-   The test passed against a fully mutated implementation, i.e. it asserted
-   nothing. `test/fingerprint.test.ts` keeps a note so the next reader does not
-   rebuild it.
-
-The sound route, if these loops must get cheaper, is to make each ROUND cheaper
-rather than run fewer of them (dropping the per-round commit measured
-112ms/round vs 219ms/round) — and to prove the new construction still fails
-reliably against the mutated implementation before adopting it.
+1. **Round-cost cut (adopted):** the racily-clean loop used to pay a real
+   `git commit` plus TWO fingerprints per round; the window is opened by `git
+   add` recording the stat, so the commit was incidental. Rounds are now
+   rewrite → fingerprint → add (62s → 29s for 300 rounds, same load).
+2. **Window sampling across repos (adopted):** the loop ran 300 rounds in ONE
+   repo — but the window (index/file mtime in the same bucket) is a
+   repo/timing-level event that a run may never see (2 of 12 mutation runs
+   had no window at all). The 300 rounds now run as **4 parallel groups × 75
+   rounds, each in its own repo** (`test/fingerprint-race*.test.ts`), sampling
+   four windows instead of waiting for one: mutation runs in the full-suite
+   form were caught by every group in every run, and the groups run in
+   parallel (~8s vs 29s). Same 300 rounds, same per-round semantics.
+3. **A rejected env knob (`RG_RACE_ITERS=25`).** Justified by a measurement —
+   a mutated implementation (shadow-index backdate **and** `--renormalize`
+   removed) missed the edit in 83/100 rounds. An independent reviewer re-ran
+   the experiment and the mutated implementation **passed 3 of 5 runs** at 25
+   rounds: the rounds share pacing and are not independent trials, so a
+   per-round rate cannot be exponentiated into a guarantee. The knob was
+   removed rather than kept with a vaguer claim.
+4. **A rejected "deterministic" replacement** — restore the cached stat after
+   a same-size rewrite. It does not fool git: ctime cannot be forged from user
+   space and sub-second mtime still moves. The test passed against a fully
+   mutated implementation, i.e. it asserted nothing.
 
 Coverage boundary, stated explicitly: these loops fail only when **both**
 safeguards are gone. Removing just `--renormalize` is caught deterministically
@@ -1919,7 +1920,7 @@ second line of defence.
 | Edit-time L6 label check | ~45 ms + one ~2 s model call | The model call is memoized per label set |
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
-| `run_precommit --mode full` (this repo) | ~100 s | Dominated by the two timing loops in the suite; typecheck runs CONCURRENTLY with `npm test` — the timing loops themselves are not reducible |
+| `run_precommit --mode full` (this repo) | ~30 s | Suite is process-spawn bound: ~2万 fork/exec per full run; the race regressions are 4 parallel files (~8s each). Wall sits at the machine's spawn throughput (concurrency 13/24 both ~30s) — a spawn-cut would need test-infrastructure work |
 | **A review round (any diff size)** | **~3 min reviewer, precommit first** | ONE reviewer, one commit range, no engine — precommit runs BEFORE the review (see the loop protocol); see `docs/execution-model.md` |
 
 **Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`

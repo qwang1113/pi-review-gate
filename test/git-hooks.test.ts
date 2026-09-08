@@ -1,8 +1,11 @@
 // pre-commit main gate tests (sidecar shape / verdict / mode / bypass /
 // session-field semantics). This file used to hold the whole 1900-line hook
 // suite; it was split (2026-09-08) so the hook suites run as several files in
-// parallel under node --test: git-hooks-lanes.test.ts (docSync + lanes + L6),
-// git-hooks-divergence.test.ts (staged-vs-worktree divergence + submodule),
+// parallel under node --test: git-hooks-lanes.test.ts (fast/full lanes),
+// git-hooks-docsync.test.ts (docSync knob), git-hooks-l6.test.ts (test-label
+// gate), git-hooks-divergence.test.ts (staged-vs-worktree divergence),
+// git-hooks-submodule.test.ts (gitlink/submodule regressions),
+// git-hooks-partial-install.test.ts (missing/mixed installs),
 // git-hooks-index.test.ts (checker entry + committed index),
 // git-hooks-verdict.test.ts (migration/materialization/unreviewed/message-only)
 // and git-hooks-msg-install.test.ts (commit-msg + installer). Shared hermetic

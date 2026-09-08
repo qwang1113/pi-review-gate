@@ -54,7 +54,7 @@ export function assertRacyCleanWindow(computeFingerprint: FingerprintFn, rounds:
     throw new Error(`${label}: seed fingerprint unavailable`);
   }
   let previous = seed.digest;
-  for (let i = 1; i < rounds; i++) {
+  for (let i = 1; i <= rounds; i++) {
     // Alternate between two SAME-SIZE contents so each write is a real change
     // that a size/mtime-trusting stat cache would miss. Written immediately
     // after the previous round's add -> lands in the racy window where the
