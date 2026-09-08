@@ -56,8 +56,8 @@ const runner: PaneRunner = (argv) => {
   }
 };
 
-/** Open one more session the way the gate does, and return nothing but truth. */
-async function openLabSession(ownPane: string, n: number): Promise<void> {
+/** Open one more session the way the gate does; returns the pane it created. */
+async function openLabSession(ownPane: string, n: number): Promise<string> {
   const outcome = await openSessionPane(runner, {
     ownPane,
     cwd: "/tmp",
@@ -65,7 +65,8 @@ async function openLabSession(ownPane: string, n: number): Promise<void> {
     role: { kind: "judge", openerId: "lab", judgeId: `lab-${n}`, role: "reviewer" },
     command: ["sleep", "600"],
   });
-  assert.equal(outcome.ok, true, `session ${n} opened`);
+  if (!outcome.ok) throw new Error(`session ${n} failed to open: ${outcome.error}`);
+  return outcome.paneId;
 }
 
 /** `pane_id width height`, straight from tmux. */
@@ -154,10 +155,28 @@ test("with no lone column at all, -f still opens a real column", { skip: SKIP },
     const before = parseWindowLayout(tmux(buildWindowLayoutArgv(own)));
     assert.deepEqual(before.columns.map((column) => column.length), [2, 2], "the shape under test");
 
-    await openLabSession(own, 7);
+    const opened = await openLabSession(own, 7);
 
     const after = parseWindowLayout(tmux(buildWindowLayoutArgv(own)));
-    assert.equal(after.columns.length, 3, "-f opens a real column when there is no lone pane to split beside");
+    const byId = new Map(geometry().map((p) => [p.id, p]));
+    // `columns.length === 3` alone does NOT catch the regression this test
+    // exists for: a nested split also yields three `pane_left` groups. Measured
+    // on the lab server, BOTH shapes report [2,2,1] — with `-f` the new pane
+    // spans the window (h50), without it the split carves a half-height pane
+    // (h24) out of the column it landed in. The HEIGHT assertion is the one
+    // that fails if `-f` is ever dropped; the shape assertion keeps the column
+    // counts from degrading unnoticed.
+    assert.deepEqual(
+      after.columns.map((column) => column.length),
+      [2, 2, 1],
+      "three columns, the new one holding only the pane that just opened",
+    );
+    const windowHeight = Number(tmux(["display-message", "-p", "-t", own, "#{window_height}"]));
+    assert.equal(
+      byId.get(opened)!.height,
+      windowHeight,
+      "-f makes the new pane span the window height — without it this is a half-height nest",
+    );
   } finally {
     try { tmux(["kill-server"]); } catch { /* already gone */ }
   }
