@@ -15,6 +15,7 @@ import {
   childHealth,
   classifyChildState,
   describeChildState,
+  describeChildStateDetailed,
   formatChildHealth,
   isNewsworthy,
   nextRewakeDelayMs,
@@ -276,6 +277,24 @@ test("E — the progress reading is for `working` and `idle`, never done/waiting
     { kind: "state", from: "child", at: iso(), state: "done", lastProgressAt: iso(-60_000) },
   ]));
   assert.equal(done.progressStaleSeconds, undefined);
+});
+
+test("an `idle` row reads its own forward-progress time, never the heartbeat time (2026-09-09)", () => {
+  // The receipt line a manager actually reads: the child says it stopped,
+  // its heartbeat was 11s ago (meaningless — it ticks on a timer) — but its
+  // last FORWARD step was an hour ago. The line must say the latter.
+  const health = childHealth(observe([
+    { kind: "state", from: "child", at: iso(), state: "idle", lastProgressAt: iso(-3_600_000) },
+  ]));
+  assert.equal(health.quietForSeconds, 0, "the heartbeat is fresh — that is exactly why it proves nothing");
+  assert.match(describeChildStateDetailed(health), /停下了（没有 declare_done）（自上次推进 3600s）/);
+  const rendered = formatChildHealth([health]);
+  assert.match(rendered, /自上次推进 3600s/, "the row carries the reading that separates turn-just-ended from truly-stopped");
+  assert.doesNotMatch(rendered, /已静默/, "the heartbeat time is dropped from a row that has the reading");
+  // A booting child with NO reading at all keeps the old fallback line.
+  const noStamp = { childId: "c1", state: "idle", quietForSeconds: 5 } as const;
+  assert.match(describeChildStateDetailed(noStamp), /^停下了（没有 declare_done）$/);
+  assert.match(formatChildHealth([noStamp]), /已静默 5s/, "without a reading the quiet time is the only number left");
 });
 
 
