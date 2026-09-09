@@ -229,6 +229,13 @@ import {
 import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
 import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
+import { childSessionId } from "../lib/orchestrator-delivery.ts";
+import {
+  foldBackgroundWaits,
+  hasBackgroundWaits,
+  NO_BACKGROUND_WAITS,
+  type BackgroundWaits,
+} from "../lib/background-wait.ts";
 // The delivery probe a judge spawn shares with an orchestration spawn: same
 // polling, same evidence, same verdict — only the channel path differs.
 import { channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-kit.ts";
@@ -1572,6 +1579,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     const orchestrationId = supervisionTarget();
     const childId = process.env[STATE_VARIANT_ENV]?.trim();
     if (orchestrationId && childId) {
+      // Only the pane the gate itself opened may call itself this child. A
+      // process the child SPAWNED — a background subagent — inherits these
+      // two env vars verbatim, so the env alone cannot name the owner: the
+      // pi session id can. The gate opens the child pane with the
+      // deterministic `--session-id rg-child-<childId>` (childSessionId),
+      // while a subagent runs under a pi-generated random uuid. Without the
+      // check the subagent's gate bound to its parent's channel and its idle
+      // heartbeats overwrote the parent's own reports — the measured source
+      // of the false "停下了（没有 declare_done）" (2026-09-09).
+      if (state.sessionId !== undefined && state.sessionId !== childSessionId(childId)) {
+        return undefined;
+      }
       return {
         io: channelIO,
         target: { orchestrationId, childId },
@@ -1732,9 +1751,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     const streaming = ctx.isIdle?.() === false || ctx.hasPendingMessages?.() === true;
     const percent = contextPercentOf(ctx as unknown as { getContextUsage?: () => unknown });
     const judging = activeJudgeWait();
+    // Waiting on a background agent the child itself spawned is work, not a
+    // stop (lib/background-wait.ts): without it, a child whose turn ended
+    // while its subagent ran reported `idle` and the orchestrator read
+    // "停下了（没有 declare_done）" for a wait it started itself.
+    const waitingOnBackground = hasBackgroundWaits(backgroundWaits);
     const reported: ChildReportedState = opts.state ?? (judging
       ? "waiting-judge"
-      : streaming
+      : streaming || waitingOnBackground
         ? "working"
         : state.completion?.at
           ? "done"
@@ -1796,6 +1820,25 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** Stamp forward progress. Called from the agent-event handlers, not the heartbeat. */
   function noteChildProgress(): void {
     if (childBinding()) lastChildProgressAt = Date.now();
+  }
+  /**
+   * Background agents this session spawned that have not reported a terminal
+   * state yet (lib/background-wait.ts owns the start/end contract). While
+   * non-empty the child reports `working` even when its own turn has ended —
+   * waiting on its own subagent is work, not a stop.
+   */
+  let backgroundWaits: BackgroundWaits = NO_BACKGROUND_WAITS;
+  /** Feed one tool result into the background-wait fold (see the module). */
+  function observeBackgroundToolResult(event: {
+    toolName: string;
+    isError: boolean;
+    content: readonly { type?: string; text?: string }[];
+  }): void {
+    const text = event.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
+    backgroundWaits = foldBackgroundWaits(backgroundWaits, {
+      kind: "tool_result",
+      tool: { toolName: event.toolName, isError: event.isError === true, text },
+    });
   }
   /**
    * Instructions this session has already acknowledged as RECEIVED.
@@ -4171,6 +4214,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   pi.on("tool_result", async (event, ctx) => {
     // E — a completed tool call is forward progress for the child health reading.
     noteChildProgress();
+    // Background-agent wait tracking: a launch starts a wait, a terminal
+    // report ends one (lib/background-wait.ts). Runs before every return
+    // below, like the progress note above it.
+    observeBackgroundToolResult(event);
     // 0. JUDGE SIDE: the round's mechanical inspection evidence. Folded FIRST,
     // before any of the branches below can return, because every one of them
     // returns early and a miss here would read as "this judge inspected
@@ -8957,6 +9004,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (event.message.role !== "assistant") return;
     thinkingLoopCtx = ctx;
     thinkingLoop.endTurn();
+  });
+
+  // Background-agent wait tracking, message side: a `subagent-notification`
+  // custom message is pi-subagents' terminal signal for one or more agents
+  // (details.id, plus details.others for a group) — see lib/background-wait.ts.
+  pi.on("message_end", (event) => {
+    const custom = event.message as { customType?: string; details?: unknown };
+    if (custom.customType !== "subagent-notification") return;
+    backgroundWaits = foldBackgroundWaits(backgroundWaits, {
+      kind: "message",
+      message: { customType: custom.customType, details: custom.details },
+    });
   });
 
   pi.registerMarkdownTransformer((markdown, context) =>

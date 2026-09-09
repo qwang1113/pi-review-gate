@@ -256,19 +256,26 @@ test("E — a `working` child carries a progress reading, and it never wakes any
   assert.match(rendered, /自上次推进 3600s/);
 });
 
-test("E — the progress reading is ONLY for `working` (not idle/done/waiting)", () => {
-  // An idle child with a stale progress stamp shows no reading — the number
-  // only disambiguates the one state that looks like a hang.
+test("E — the progress reading is for `working` and `idle`, never done/waiting", () => {
+  // An idle child carries the reading (2026-09-09): it is the only number
+  // that separates "its turn just ended" from "it stopped long ago" — the
+  // heartbeat time cannot, it refreshes whether or not the child stepped.
   const idle = childHealth(observe([
     { kind: "state", from: "child", at: iso(), state: "idle", lastProgressAt: iso(-3_600_000) },
   ]));
   assert.equal(idle.state, "idle");
-  assert.equal(idle.progressStaleSeconds, undefined);
+  assert.equal(idle.progressStaleSeconds, 3600);
   // A `working` child that never reported progress yet (booting) has no reading.
   const booting = childHealth(observe([
     { kind: "state", from: "child", at: iso(), state: "working" },
   ]));
   assert.equal(booting.progressStaleSeconds, undefined);
+  // done / waiting states still carry no reading — their own clock already
+  // says what a supervisor needs (stateForSeconds).
+  const done = childHealth(observe([
+    { kind: "state", from: "child", at: iso(), state: "done", lastProgressAt: iso(-60_000) },
+  ]));
+  assert.equal(done.progressStaleSeconds, undefined);
 });
 
 

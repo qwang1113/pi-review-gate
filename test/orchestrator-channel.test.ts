@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import {
   appendRecord,
   channelDir,
+  channelOwnerId,
   channelPathFor,
   isStalled,
   projectChannel,
@@ -170,6 +171,41 @@ test("silence while the pane lives is a stall; silence with no pane, or no pane 
   assert.equal(isStalled(projection, true, T0), true);
   assert.equal(isStalled(projection, false, T0), false, "a dead child is dead, not stalled");
   assert.equal(isStalled(projection, undefined, T0), false, "an unreadable pane list claims nothing");
+});
+
+test("state records from a FOREIGN session are ignored — the owner alone decides", () => {
+  const owner = "rg-child-c1";
+  const records: ChannelRecord[] = [
+    { kind: "state", from: "child", at: "t1", state: "working", sessionId: owner },
+    { kind: "state", from: "child", at: "t2", state: "idle", sessionId: "01a0-foreign-1" },
+    { kind: "state", from: "child", at: "t3", state: "idle", sessionId: "01a0-foreign-2" },
+    { kind: "state", from: "child", at: "t4", state: "working", sessionId: owner },
+  ];
+  const projection = projectChannel(records);
+  assert.equal(channelOwnerId(records), owner);
+  assert.equal(projection.lastState?.state, "working",
+    "the owner's newest report wins, not a foreign idle heartbeat");
+  assert.equal(projection.lastActivityAt, "t4", "foreign heartbeats do not refresh activity either");
+});
+
+test("with no named owner every record is kept — the pre-filter behaviour", () => {
+  const records: ChannelRecord[] = [
+    { kind: "state", from: "child", at: "t1", state: "working" },
+    { kind: "state", from: "child", at: "t2", state: "idle" },
+  ];
+  assert.equal(channelOwnerId(records), undefined);
+  const projection = projectChannel(records);
+  assert.equal(projection.lastState?.state, "idle", "legacy records without ids keep folding as before");
+});
+
+test("the OWNER is the first state record that names a session — a foreign record cannot claim the channel", () => {
+  const owner = "rg-child-c1";
+  const records: ChannelRecord[] = [
+    { kind: "state", from: "child", at: "t1", state: "working", sessionId: owner },
+    { kind: "request", from: "child", at: "t2", requestId: "r1", dialogKind: "confirm", title: "q", options: ["A"] },
+    { kind: "state", from: "child", at: "t3", state: "idle", sessionId: "01a0-foreign-1" },
+  ];
+  assert.equal(channelOwnerId(records), owner, "non-state records are skipped when hunting the owner");
 });
 
 // ---------------------------------------------------------------------------

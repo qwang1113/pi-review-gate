@@ -43,6 +43,24 @@
 文件里追加。旧设计寻址的是一个 session，所以换人就等于悄悄退掉了那个铃铛（实测：
 一整夜 0 条送达）。
 
+### 1.1b 通道有主人：外来的 `state` 不算数（2026-09-09）
+
+子会话用 `Agent` 工具派出的 subagent **继承** `RG_ORCHESTRATION_ID` + `RG_STATE_VARIANT`，
+它加载的门禁扩展因此会把自己也当成这个子会话，往**同一个通道文件**追加自己的心跳。
+实测：363 个通道文件里 12 个混入 2–5 个不同 session 的 `state` 记录，subagent 干完活后
+每 40 秒一条 `idle` 覆盖真子会话的 `working`，项目经理的回执因此把正在干活的孩子报成
+「停下了（没有 declare_done）」（一个 PM 会话累计收到 115 次）。
+
+两道闸，都在读写两侧：
+
+- **读侧**（`projectChannel`，2026-09-09）：投影只采纳**通道主人**的 `state` 记录 ——
+  主人 = 第一条带 session id 的 `state` 记录的作者；没带 session id 的记录无法归属，
+  照收（主人自己早期的心跳、旧版扩展的写入）。外来 session 的记录被忽略，`lastActivityAt`
+  也不再被它们刷新。所以已经污染的通道**无需清理**：重读时脏记录自动不算数。
+- **写侧**（子会话的 `childBinding`，2026-09-09）：光有 env 不再足以自称子会话 ——
+  门禁开子会话 pane 时用确定性的 `--session-id rg-child-<childId>`，而 subagent 跑在 pi
+  现生成的随机 uuid 下；两者不一致就不绑定：不写通道、不读指令。
+
 ### 1.2 记录种类
 
 | kind | 方向 | 说明 |
@@ -76,10 +94,10 @@
 
 | 状态 | 判据 | 谁测的 |
 | --- | --- | --- |
-| `working` | 子会话自报（`ctx.isIdle() === false`，或有 pending 消息）**或**自报 `idle` 但 `IDLE_PROGRESS_GRACE_MS`（120s）内有推进 | 它自己（见 §2.4） |
+| `working` | 子会话自报（`ctx.isIdle() === false`，或有 pending 消息）、自报 `idle` 但 `IDLE_PROGRESS_GRACE_MS`（120s）内有推进，**或有未返回的后台 subagent**（§2.5） | 它自己（见 §2.4 / §2.5） |
 | `waiting-input` | 通道里有**未销账的 request** | 它自己 |
 | `waiting-judge` | 它在等门禁**自己派出去**的活（reviewer / 全量 precommit），附已等秒数与在等谁 | 它自己（见 §2.3） |
-| `idle` | 自报停下了、没有完成记录，**且已 120s 没有推进** | 它自己 + 进展戳 |
+| `idle` | 自报停下了、没有完成记录、**没有未返回的后台 subagent**，**且已 120s 没有推进** | 它自己 + 进展戳 |
 | `done` | 自报停下了，且它的门禁写下了 `declare_done` 的完成记录 | 它自己 |
 | `mode-changed` | 它换了门禁模式（loop→explore/normal/orchestrator）——项目经理必须知道 | 它自己 |
 | `dead` | pane 不在 `list-panes` 的输出里 | 编排层（从外面） |
@@ -166,6 +184,29 @@
 
 顺序上它排在 `dead` / `waiting-input` / `done` / `stalled` **之后**：进展戳只能把
 「自报停下」降级成「还在干活」，不能把一具尸体说活。
+
+### 2.5 等自己派出去的后台 subagent：也算 `working`（2026-09-09）
+
+子会话用 `Agent` 工具派**后台** subagent 时（`run_in_background` 缺省即后台），工具
+立刻返回「Agent started in background」—— 它自己的 turn 可能就此结束，`ctx.isIdle()`
+随之变真，120 秒后就会被报成「停下了」。可它明明在等一件自己发起的事，和
+`waiting-judge` 是同一个形状：一个健康的等待不该叫醒项目经理。
+
+判据在 `lib/background-wait.ts`（纯模块，事件进、按 agent id 的待完成集合出）：
+
+- **开始**：某个工具结果含 pi-subagents 的启动措辞（`started in background … Agent ID:
+  <id>`）且不是错误结果 —— 启动失败不记；
+- **结束**：**只有该 agent 自己的终态信号**移除它 —— `subagent-notification` 自定义
+  消息的 `details.id`（成组通知的 `details.others[]` 一起算），或 `get_subagent_result`
+  返回了不含 `Status: running` 的结果（`running` 是非终态轮询）。**没有超时、没有
+  「新一轮开始就清空」**：一个没报终态的后台 agent 就一直是等待 —— 宁可多报
+  `working`，不可把健康的等待报成停下（后者会让项目经理打断一轮还在跑的活）。
+
+期间子会话上报 `working`，健康行显示「在干活（自上次推进 Ns）」。
+
+**`idle` 行的读数也顺带修了**：它过去印的是**心跳时间**（「最后活动 11s 前」—— 心跳
+每 40 秒一次，与「停下了」并排是自相矛盾），现在印「自上次推进 Ns」—— 一个刚结束
+turn 的孩子（几十秒）和一个真停了 25 分钟的孩子（上千秒）一眼可分。
 
 
 

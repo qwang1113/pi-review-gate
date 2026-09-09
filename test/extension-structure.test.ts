@@ -2254,7 +2254,10 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // neither, every reporting function below is a silent no-op.
   const bindingAt = SRC.indexOf("function childBinding(");
   assert.ok(bindingAt > 0, "the child side needs a binding to its own channel");
-  const binding = SRC.slice(bindingAt, bindingAt + 1400);
+  // Wide enough for the whole function: the ownership check (2026-09-09) and
+  // its why-comment sit between the orchestration branch and the judge
+  // fallback, so a tight window would miss the fallback it must also assert.
+  const binding = SRC.slice(bindingAt, bindingAt + 2600);
   assert.match(binding, /supervisionTarget\(\)/,
     "addressed to the ORCHESTRATION, so a handoff never retires the channel");
   assert.match(binding, /STATE_VARIANT_ENV/, "and to this session's own child id");
