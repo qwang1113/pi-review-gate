@@ -180,6 +180,7 @@ import {
 import {
   acknowledgeInstruct,
   askThroughChannel,
+  decideReportedChildState,
   pendingInstructions,
   reportState,
   type ChannelDialogOutcome,
@@ -229,7 +230,7 @@ import {
 import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
 import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
-import { childSessionId } from "../lib/orchestrator-delivery.ts";
+import { isOwnedChildPane } from "../lib/orchestrator-delivery.ts";
 import {
   foldBackgroundWaits,
   hasBackgroundWaits,
@@ -1580,15 +1581,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     const childId = process.env[STATE_VARIANT_ENV]?.trim();
     if (orchestrationId && childId) {
       // Only the pane the gate itself opened may call itself this child. A
-      // process the child SPAWNED — a background subagent — inherits these
-      // two env vars verbatim, so the env alone cannot name the owner: the
-      // pi session id can. The gate opens the child pane with the
-      // deterministic `--session-id rg-child-<childId>` (childSessionId),
-      // while a subagent runs under a pi-generated random uuid. Without the
-      // check the subagent's gate bound to its parent's channel and its idle
-      // heartbeats overwrote the parent's own reports — the measured source
-      // of the false "停下了（没有 declare_done）" (2026-09-09).
-      if (state.sessionId !== undefined && state.sessionId !== childSessionId(childId)) {
+      // background subagent inherits the env vars but runs under a random pi
+      // session id, not the deterministic rg-child-<childId> — the check is
+      // in lib/orchestrator-delivery.ts (isOwnedChildPane) and it is what
+      // keeps the subagent's gate from binding its parent's channel and
+      // overwriting the parent's reports with idle heartbeats (2026-09-09).
+      if (!isOwnedChildPane(childId, state.sessionId)) {
         return undefined;
       }
       return {
@@ -1756,13 +1754,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     // while its subagent ran reported `idle` and the orchestrator read
     // "停下了（没有 declare_done）" for a wait it started itself.
     const waitingOnBackground = hasBackgroundWaits(backgroundWaits);
-    const reported: ChildReportedState = opts.state ?? (judging
-      ? "waiting-judge"
-      : streaming || waitingOnBackground
-        ? "working"
-        : state.completion?.at
-          ? "done"
-          : "idle");
+    const reported = decideReportedChildState({
+      forced: opts.state,
+      judging: judging !== undefined,
+      streaming,
+      waitingOnBackground,
+      completedAt: state.completion?.at,
+    });
     const now = Date.now();
     const changed = reported !== lastReportedChildState;
     if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
@@ -1833,11 +1831,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     toolName: string;
     isError: boolean;
     content: readonly { type?: string; text?: string }[];
+    input?: Record<string, unknown>;
   }): void {
     const text = event.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
+    // pi-subagents' `run_in_background` defaults to true; only an explicit
+    // false is a foreground call, whose result can never start a wait.
+    const raw = event.input?.run_in_background;
+    const runInBackground = raw === true ? true : raw === false ? false : undefined;
     backgroundWaits = foldBackgroundWaits(backgroundWaits, {
       kind: "tool_result",
-      tool: { toolName: event.toolName, isError: event.isError === true, text },
+      tool: { toolName: event.toolName, isError: event.isError === true, text, runInBackground },
     });
   }
   /**

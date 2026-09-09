@@ -195,12 +195,16 @@
 判据在 `lib/background-wait.ts`（纯模块，事件进、按 agent id 的待完成集合出）：
 
 - **开始**：某个工具结果含 pi-subagents 的启动措辞（`started in background … Agent ID:
-  <id>`）且不是错误结果 —— 启动失败不记；
+  <id>`）、不是错误结果、且该调用是**后台**的（`run_in_background` 非显式 `false` ——
+  前台 Agent 的结果即使引用了启动措辞也不算）；启动失败不记；
 - **结束**：**只有该 agent 自己的终态信号**移除它 —— `subagent-notification` 自定义
   消息的 `details.id`（成组通知的 `details.others[]` 一起算），或 `get_subagent_result`
-  返回了不含 `Status: running` 的结果（`running` 是非终态轮询）。**没有超时、没有
-  「新一轮开始就清空」**：一个没报终态的后台 agent 就一直是等待 —— 宁可多报
-  `working`，不可把健康的等待报成停下（后者会让项目经理打断一轮还在跑的活）。
+  的**状态行**（`Agent: <id>` 下一行 `Type: … | Status: …`）落在终态集
+  （`completed` / `steered` / `aborted` / `stopped` / `error`；`running` / `queued`
+  是非终态轮询，状态行匹配不到也保持等待 —— 状态行锚定而非全文扫描，因为结果正文
+  可能引用任意字样）。**没有超时、没有「新一轮开始就清空」**：一个没报终态的后台
+  agent 就一直是等待 —— 宁可多报 `working`，不可把健康的等待报成停下（后者会让
+  项目经理打断一轮还在跑的活）。
 
 期间子会话上报 `working`，健康行显示「在干活（自上次推进 Ns）」。
 

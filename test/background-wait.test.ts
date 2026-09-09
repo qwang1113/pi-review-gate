@@ -24,16 +24,17 @@ import {
 } from "../lib/background-wait.ts";
 
 /** pi-subagents' own launch wording, as observed in real transcripts. */
-function launch(toolName = "Agent", isError = false): BackgroundWaitToolResult {
+function launch(toolName = "Agent", isError = false, runInBackground: boolean | undefined = true): BackgroundWaitToolResult {
   return {
     toolName,
     isError,
+    runInBackground,
     text: "Agent started in background. Agent ID: 852ca04f-f5fc-496 Type: flash Description: Gemini 审查 banner 交互 Output file: /tmp/x",
   };
 }
 
-function result(toolName: string, text: string, isError = false): BackgroundWaitToolResult {
-  return { toolName, isError, text };
+function result(toolName: string, text: string, isError = false, runInBackground: boolean | undefined = undefined): BackgroundWaitToolResult {
+  return { toolName, isError, runInBackground, text };
 }
 
 /** A terminal get_subagent_result report, as pi-subagents formats it. */
@@ -91,8 +92,47 @@ test("(b2) a non-terminal poll ('Status: running') does NOT end the wait", () =>
     tool: result("get_subagent_result", "Agent: 852ca04f-f5fc-496\nType: flash | Status: running | Tool uses: 3\nAgent is still running. Use wait: true or check back later."),
   });
   assert.equal(hasBackgroundWaits(waits), true, "a running poll is not a terminal signal");
+  // A queued agent is not terminal either — it has not started.
+  waits = foldBackgroundWaits(waits, {
+    kind: "tool_result",
+    tool: result("get_subagent_result", "Agent: 852ca04f-f5fc-496\nType: flash | Status: queued | Tool uses: 0"),
+  });
+  assert.equal(hasBackgroundWaits(waits), true, "queued is not a terminal status");
   waits = foldBackgroundWaits(waits, { kind: "tool_result", tool: completed("852ca04f-f5fc-496", "error") });
   assert.equal(hasBackgroundWaits(waits), false, "an error terminal report still ends the wait");
+});
+
+test("(b3) a completed report whose BODY quotes 'Status: running' still ends the wait", () => {
+  // The report's own body (the agent's final output) may quote anything — a
+  // full-text scan would read this completed agent as still running and hang
+  // the wait forever. Only the status LINE decides.
+  let waits = NO_BACKGROUND_WAITS;
+  waits = foldBackgroundWaits(waits, { kind: "tool_result", tool: launch() });
+  waits = foldBackgroundWaits(waits, {
+    kind: "tool_result",
+    tool: result(
+      "get_subagent_result",
+      "Agent: 852ca04f-f5fc-496\nType: flash | Status: completed | Tool uses: 5\nDescription: x\n\nI grepped the logs and Status: running never appeared. All good.",
+    ),
+  });
+  assert.equal(hasBackgroundWaits(waits), false, "the status LINE says completed — the body's mention of running is noise");
+});
+
+test("(b4) a FOREGROUND agent whose text echoes the launch wording starts no wait", () => {
+  // run_in_background: false ⇒ the result is the agent's own inline reply,
+  // which may legitimately quote the launch wording back at the caller.
+  const waits = foldBackgroundWaits(NO_BACKGROUND_WAITS, {
+    kind: "tool_result",
+    tool: launch("Agent", false, false),
+  });
+  assert.equal(hasBackgroundWaits(waits), false, "only a background call can start a wait");
+  // The default (run_in_background not passed at all) IS background.
+  let background = NO_BACKGROUND_WAITS;
+  background = foldBackgroundWaits(background, {
+    kind: "tool_result",
+    tool: launch("Agent", false, undefined),
+  });
+  assert.equal(hasBackgroundWaits(background), true, "pi-subagents defaults to background");
 });
 
 test("(c) one of several agents finishing removes only it — across turns", () => {

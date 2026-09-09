@@ -30,10 +30,11 @@
  *
  *   - a `subagent-notification` message whose `details` carry the id (group
  *     notifications list the other finished agents in `details.others`);
- *   - a `get_subagent_result` result whose text names the agent and is NOT a
- *     "still running" report (pi-subagents prints `Status: running` for the
- *     non-terminal poll and `Status: completed | error | …` for a terminal
- *     one — matched as "has the agent's line and no `Status: running`").
+ *   - a `get_subagent_result` result whose TWO HEADER LINES name the agent
+ *     and a TERMINAL status (pi-subagents prints `Agent: <id>\nType: … |
+ *     Status: <status> | …`; the status is matched on that line against the
+ *     terminal union — completed / steered / aborted / stopped / error —
+ *     never by scanning the whole text, whose body may quote anything).
  *
  * There is deliberately NO timeout and NO "a new turn started, clear
  * everything" fallback: both clear waits without a completion signal, and a
@@ -55,6 +56,13 @@ export interface BackgroundWaitToolResult {
   isError: boolean;
   /** The result's text content. */
   text: string;
+  /**
+   * Whether the call asked for the background surface (`run_in_background`).
+   * `undefined` is pi-subagents' default — background. Only an EXPLICIT
+   * `false` is a foreground call, whose result can never start a wait no
+   * matter what its text says.
+   */
+  runInBackground: boolean | undefined;
 }
 
 /** One custom message, as delivered by pi's message_start/end. */
@@ -77,14 +85,37 @@ export const NO_BACKGROUND_WAITS: BackgroundWaits = [];
 
 /** pi-subagents' launch wording: `Agent started in background. Agent ID: <id>`. */
 const LAUNCH_RE = /started in background[^]*?Agent ID:\s*([A-Za-z0-9._-]+)/i;
-/** pi-subagents names the agent in every status report: `Agent: <id>` on its own line. */
-const NAMED_AGENT_RE = /Agent:\s*([A-Za-z0-9._-]+)/;
-/** A non-terminal poll prints `Status: running`; a terminal one prints completed/error/…. */
-const STILL_RUNNING_RE = /Status:\s*running\b/i;
+/**
+ * pi-subagents' terminal report is TWO fixed lines:
+ *
+ *   Agent: <id>
+ *   Type: <displayName> | Status: <status> | …
+ *
+ * Anchoring on the status LINE (not the whole text) matters: the report's
+ * body — the agent's own final output — follows those lines and may quote
+ * anything, "Status: running" included. A full-text scan would read such a
+ * completed report as still running and leave the wait hanging forever.
+ */
+const STATUS_LINE_RE = /Agent:\s*([A-Za-z0-9._-]+)\s*\n\s*Type:[^\n]*?\|\s*Status:\s*([a-z]+)/i;
+/**
+ * Terminal statuses of one agent run — the union from pi-subagents' own
+ * AgentRecord (`src/types.ts`), split by what ends the run: `completed` /
+ * `steered` are the two ways a run wraps up on its own (the latter after a
+ * steer hit the soft turn limit), `aborted` / `stopped` / `error` are the
+ * three ways it ends otherwise. Everything else in the union (`queued`,
+ * `running`) is NOT terminal, and a status outside the union (a newer
+ * pi-subagents) is not terminal either — a wait with no recognised terminal
+ * signal stays a wait, the safe direction.
+ */
+const TERMINAL_STATUSES = new Set(["completed", "steered", "aborted", "stopped", "error"]);
 
 /** True when the tool result launched a background agent — the wait's start. */
 function launchedBy(result: BackgroundWaitToolResult): string | undefined {
   if (result.isError) return undefined;
+  // A FOREGROUND call cannot start a wait even if its text echoes the launch
+  // wording (the agent could have quoted it): only a background call gets the
+  // "started in background" result surface.
+  if (result.runInBackground === false) return undefined;
   const match = LAUNCH_RE.exec(result.text);
   if (!match) return undefined;
   // The wording is pi-subagents' own; only its tools speak it. Keeping the
@@ -97,9 +128,12 @@ function launchedBy(result: BackgroundWaitToolResult): string | undefined {
 /** The agents a `get_subagent_result` result reports as TERMINAL. */
 function terminalFromResult(result: BackgroundWaitToolResult): readonly string[] {
   if (result.isError || result.toolName !== "get_subagent_result") return [];
-  if (STILL_RUNNING_RE.test(result.text)) return [];
-  const match = NAMED_AGENT_RE.exec(result.text);
-  return match ? [match[1]!.trim()] : [];
+  const match = STATUS_LINE_RE.exec(result.text);
+  if (!match) return [];
+  // A status line with a non-terminal status (running / queued / unknown) is
+  // a poll, not a terminal report: the wait goes on.
+  if (!TERMINAL_STATUSES.has(match[2]!.toLowerCase())) return [];
+  return [match[1]!.trim()];
 }
 
 /** The agent ids a `subagent-notification` message reports as terminal. */

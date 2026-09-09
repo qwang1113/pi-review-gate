@@ -26,6 +26,7 @@ import {
   childSessionId,
   deliveryVerdict,
   emptyDeliveryEvidence,
+  isOwnedChildPane,
 } from "../lib/orchestrator-delivery.ts";
 import {
   clampChildWaitTimeout,
@@ -71,6 +72,20 @@ test("F8: a spawn is believed on a CHANNEL RECORD, never on having opened a pane
   assert.equal(deliveryVerdict("spawn", { ...nothing, channelReported: true }).ok, true);
   assert.equal(deliveryVerdict("spawn", { ...nothing, sidecarPresent: true }).ok, true,
     "a sidecar on disk is the weaker but still real fallback");
+});
+
+test("the gate-opened pane owns the child — a process that inherited the env does not (2026-09-09)", () => {
+  // The pane the gate opened runs under the deterministic id.
+  assert.equal(isOwnedChildPane("a-1", "rg-child-a-1"), true);
+  assert.equal(isOwnedChildPane("a-1", "rg-child-a-1"), true, "an exact match is the owner");
+  // A background subagent inherited RG_ORCHESTRATION_ID / RG_STATE_VARIANT but
+  // runs under a pi-generated random uuid — NOT the owner.
+  assert.equal(isOwnedChildPane("a-1", "01a083e9-e09f-711d-8621-26393993e2c4"), false,
+    "a random uuid is a foreign process, whatever the env says");
+  assert.equal(isOwnedChildPane("a-1", "rg-child-a-2"), false, "a sibling's id is foreign too");
+  // Session id not learned yet: keep the pre-check behaviour (env alone decides).
+  assert.equal(isOwnedChildPane("a-1", undefined), true);
+  assert.equal(isOwnedChildPane("a-1", null), true);
 });
 
 test("F8: an instruction is believed on the child's ACKNOWLEDGEMENT, and a failed one is a failure", () => {
