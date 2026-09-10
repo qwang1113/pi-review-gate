@@ -178,6 +178,16 @@ export interface FakeWorldOptions {
    */
   splitWindowFails?: boolean;
   /**
+   * Make `split-window` THROW instead of returning `ok: false`.
+   *
+   * The injected tmux seam permits both, and the difference is not cosmetic:
+   * phase one of a retirement has already released the worktree claim by the
+   * time the pane is opened, so an escaping exception would leave a
+   * half-retired predecessor nobody notices. The relay has to undo it on both
+   * paths.
+   */
+  splitWindowThrows?: boolean;
+  /**
    * The orchestration runtime RECORDED ON DISK (B1). Set it to one carrying
    * a DIFFERENT id than the session holds to build the takeover situation:
    * an old project manager's registry left behind in the sidecar.
@@ -439,6 +449,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       return { ok: true, stdout: live.join("\n"), stderr: "" };
     }
     if (sub === "split-window") {
+      if (options.splitWindowThrows) throw new Error("fake tmux: split-window blew up");
       if (options.splitWindowFails) return { ok: false, stdout: "", stderr: "fake tmux: cannot create pane" };
       const id = `%${paneSeq++}`;
       const cwdAt = argv.indexOf("-c");

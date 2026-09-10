@@ -48,7 +48,7 @@ import type { ReviewScopeDecision } from "./review-scope.ts";
 import { formatReviewScopeDirective, type SettledConclusion } from "./review-carryover.ts";
 import { polishReasonRequired } from "./polish-gate.ts";
 import { squashPointBaseline, branchBaseBaseline } from "./review-baseline.ts";
-import { buildReviewPrompt, extractPrecommitBaseline, formatChangeIndex, type ChangeIndexRow } from "./parallel-review.ts";
+import { buildReviewPrompt, changeRowsLargestFirst, extractPrecommitBaseline, formatChangeIndex, type ChangeIndexRow } from "./parallel-review.ts";
 import { computeFingerprint } from "./fingerprint.ts";
 import { TASK_TEXT_MARKER } from "./constants.ts";
 
@@ -325,7 +325,9 @@ async function doPrepareReview(
     // The name-only read stays as the fallback — a range whose numstat cannot
     // be read (an unreadable object, a git that refuses) still gets a round.
     try {
-      const rows = deps.git.numstatInRange(root, baseline, head);
+      // Same order the index renders in, so the round's `files` list and the
+      // batch plan cannot disagree about it.
+      const rows = changeRowsLargestFirst(deps.git.numstatInRange(root, baseline, head));
       files = rows.map((r) => r.file);
       changeIndex = formatChangeIndex(rows, range);
     } catch {

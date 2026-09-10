@@ -300,6 +300,37 @@ export function planChangeBatches(
 }
 
 /**
+ * Sort rows LARGEST FIRST.
+ *
+ * Not decoration: the heading says "largest first", the batch plan is built on
+ * that order (a big file must not share a command with small ones), and the
+ * row cap must drop the SMALLEST files rather than whatever git happened to
+ * print last (git's own order is path order). Round-2 P1: the order was
+ * CLAIMED in three places — this file, the judge protocol, and a test pinning
+ * that wording — while nothing sorted anything.
+ */
+export function changeRowsLargestFirst(rows: readonly ChangeIndexRow[]): ChangeIndexRow[] {
+  return [...rows].sort((a, b) => (b.added + b.deleted) - (a.added + a.deleted));
+}
+
+/**
+ * One path, safe to paste into a shell command.
+ *
+ * SINGLE QUOTES ALWAYS, not "when it looks dangerous": a path may contain a
+ * space, a `>`, a `$`, a backtick or a newline, and a reviewer pasting a
+ * pre-built command must not find out the hard way. A `>` in a path was not
+ * hypothetical — `git diff --numstat` renders a rename as `old => new` unless
+ * rename detection is off, and that string reached this plan until round 2
+ * caught it. (The rename itself is fixed at the source: the probe now passes
+ * `--no-renames`, so a rename reads as a delete plus an add. The quoting stays
+ * because it is the general case, and the next path shape should not need
+ * another review to be safe.)
+ */
+export function shellQuotePath(path: string): string {
+  return `'${path.replace(/'/g, "'\\''")}'`;
+}
+
+/**
  * The change index block injected into the reviewer's task text.
  *
  * It answers two questions the old task text left open — WHAT moved, and HOW
@@ -313,13 +344,14 @@ export function planChangeBatches(
  */
 export function formatChangeIndex(rows: readonly ChangeIndexRow[], commitRange: string): string {
   if (rows.length === 0) return "";
-  const shown = rows.slice(0, CHANGE_INDEX_MAX_ROWS);
-  const hidden = rows.length - shown.length;
-  const added = rows.reduce((n, r) => n + r.added, 0);
-  const deleted = rows.reduce((n, r) => n + r.deleted, 0);
+  const ordered = changeRowsLargestFirst(rows);
+  const shown = ordered.slice(0, CHANGE_INDEX_MAX_ROWS);
+  const hidden = ordered.length - shown.length;
+  const added = ordered.reduce((n, r) => n + r.added, 0);
+  const deleted = ordered.reduce((n, r) => n + r.deleted, 0);
 
   const lines = [
-    `CHANGE INDEX — ${rows.length} file(s), +${added}/−${deleted} in ${commitRange} (largest first):`,
+    `CHANGE INDEX — ${ordered.length} file(s), +${added}/−${deleted} in ${commitRange} (largest first):`,
     ...shown.map((r) => `- +${r.added}/−${r.deleted}  ${r.file}`),
   ];
   if (hidden > 0) {
@@ -332,7 +364,7 @@ export function formatChangeIndex(rows: readonly ChangeIndexRow[], commitRange: 
     "READ IT IN BATCHES — the tool calls of ONE message run IN PARALLEL, so several reads in one message cost",
     "one model turn instead of one per file. These batches are pre-split (largest files first); issue the ones",
     "you need in a single message, and skip what the change cannot affect:",
-    ...batches.map((b, i) => `${i + 1}. git diff ${commitRange} -- ${b.map((r) => r.file).join(" ")}`),
+    ...batches.map((b, i) => `${i + 1}. git diff ${commitRange} -- ${b.map((r) => shellQuotePath(r.file)).join(" ")}`),
   );
   if (hidden > 0) {
     lines.push(

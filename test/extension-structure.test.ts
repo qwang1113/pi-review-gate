@@ -5675,3 +5675,33 @@ test("the successor's heirship is read from its own environment, and the guard h
   assert.match(EXCLUSIVITY_SRC, /if \(heir && holder\.sessionId === heir\) return \{ ok: true \}/,
     "the decision itself lives in lib/session-exclusivity.ts, unit-tested there");
 });
+
+// ---------------------------------------------------------------------------
+// THE CHANGE INDEX'S GIT READS (round-2 P1, both of them reproduced against
+// real git before they were fixed).
+//
+//   git diff --numstat  T1 T2  →  `2  0  dir_a.txt => dir_b.txt`
+//   git diff --numstat --no-renames T1 T2 → `0 3 dir_a.txt` + `5 0 dir_b.txt`
+//
+// Rename detection is ON by default, so the first form is what a RENAMED FILE
+// produces — and that string was rendered into a command the reviewer is told
+// to paste into a shell, where `>` TRUNCATES A FILE. Non-ASCII paths went the
+// other way: without core.quotePath=false git prints a C-escaped byte string
+// (`"\344\270\255"`) that no shell would resolve back to the file.
+// ---------------------------------------------------------------------------
+
+test("both change-index git reads are rename-safe and shell-safe", () => {
+  for (const probe of ["numstatInRange", "changedFilesInRange"]) {
+    const at = SRC.indexOf(`${probe}: (root, baseline, head) =>`);
+    assert.ok(at > 0, `${probe} is implemented in the extension`);
+    const body = SRC.slice(at, at + 700);
+    assert.match(body, /--no-renames/,
+      `${probe} must not hand the reviewer a rename's \`old => new\` pseudo-path`);
+    assert.match(body, /core\.quotePath=false/,
+      `${probe} must emit the path bytes git will accept back, not a C-escaped string`);
+  }
+  // …and the two must AGREE about which files moved: name-only reports a
+  // rename as the NEW path alone unless it is told the same thing, while
+  // numstat --no-renames reports both halves. The loop above is what enforces
+  // that, since both probes now carry both flags.
+});

@@ -13,6 +13,8 @@ import {
   extractPrecommitBaseline,
   planChangeBatches,
   formatChangeIndex,
+  changeRowsLargestFirst,
+  shellQuotePath,
   CHANGE_INDEX_MAX_ROWS,
   type ChangeIndexRow,
 } from "../lib/parallel-review.ts";
@@ -445,6 +447,50 @@ test("planChangeBatches: no rows means no batches", () => {
   assert.deepEqual(planChangeBatches([]), []);
 });
 
+test("changeRowsLargestFirst: the index really IS largest-first (round-2 P1)", () => {
+  // The heading, the judge protocol and a test all CLAIMED this ordering while
+  // nothing sorted anything: git's numstat order is path order, so batches
+  // mixed a 600-line file with 3-line ones and the 40-row cut dropped
+  // arbitrary files instead of the smallest.
+  const ordered = changeRowsLargestFirst(rows(["a.ts", 3, 0], ["b.ts", 600, 40], ["c.ts", 1, 1]));
+  assert.deepEqual(ordered.map((r) => r.file), ["b.ts", "a.ts", "c.ts"]);
+  // Added + deleted, not one of them: a file that only removes 500 lines is
+  // as big a read as one that only adds them.
+  assert.deepEqual(
+    changeRowsLargestFirst(rows(["adds.ts", 500, 0], ["deletes.ts", 0, 500])).map((r) => r.file).sort(),
+    ["adds.ts", "deletes.ts"],
+  );
+  assert.deepEqual(changeRowsLargestFirst([]), [], "and an empty index stays empty");
+});
+
+test("formatChangeIndex sorts what it is given, so the plan cannot depend on git's order", () => {
+  const text = formatChangeIndex(rows(["tiny.ts", 1, 0], ["huge.ts", 900, 100], ["mid.ts", 40, 0]), "a..b");
+  const hugeAt = text.indexOf("huge.ts");
+  const midAt = text.indexOf("mid.ts");
+  const tinyAt = text.indexOf("tiny.ts");
+  assert.ok(hugeAt > 0 && hugeAt < midAt && midAt < tinyAt, "the listing is largest-first");
+  assert.match(text, /1\. git diff a\.\.b -- 'huge\.ts'/, "and so is the first batch");
+});
+
+test("shellQuotePath: a path is QUOTED because one of them was a shell redirect (round-2 P1)", () => {
+  // `git diff --numstat` renders a rename as `old => new` unless rename
+  // detection is off — and that string was pasted into this plan and handed to
+  // a reviewer as a runnable command, where `>` TRUNCATES A FILE. The rename
+  // itself is fixed at the source (the probe passes --no-renames); the quoting
+  // is the general defence, because a space or a `$` needs no rename at all.
+  assert.equal(shellQuotePath("lib/a.ts"), "'lib/a.ts'", "even a boring path is quoted — no 'looks dangerous' heuristic");
+  assert.equal(shellQuotePath("dir_a.txt => dir_b.txt"), "'dir_a.txt => dir_b.txt'",
+    "the exact string that walked through the door");
+  assert.equal(shellQuotePath("my file.ts"), "'my file.ts'");
+  assert.equal(shellQuotePath("it's.ts"), "'it'\\''s.ts'", "an embedded quote is escaped, not dropped");
+  assert.equal(shellQuotePath("$HOME/x.sh"), "'$HOME/x.sh'", "no expansion");
+  assert.match(
+    formatChangeIndex(rows(["weird name.ts", 5, 0]), "a..b"),
+    /git diff a\.\.b -- 'weird name\.ts'/,
+    "and the rendered command is paste-safe",
+  );
+});
+
 test("formatChangeIndex: what moved, and the batches that read it in one message", () => {
   const text = formatChangeIndex(
     rows(["extensions/review-gate.ts", 120, 8], ["lib/a.ts", 5, 0]),
@@ -452,8 +498,8 @@ test("formatChangeIndex: what moved, and the batches that read it in one message
   );
   assert.match(text, /CHANGE INDEX — 2 file\(s\), \+125\/−8 in abc123\.\.def456/, "one line of totals");
   assert.match(text, /- \+120\/−8  extensions\/review-gate\.ts/, "largest first, with its sizes");
-  assert.match(text, /1\. git diff abc123\.\.def456 -- extensions\/review-gate\.ts lib\/a\.ts/,
-    "the batch is a command, not advice — the gate does the grouping (philosophy one)");
+  assert.match(text, /1\. git diff abc123\.\.def456 -- 'extensions\/review-gate\.ts' 'lib\/a\.ts'/,
+    "the batch is a command, not advice — QUOTED (a path may contain a space or a `>`) and largest-first");
   assert.match(text, /IN PARALLEL/, "and says WHY one message is the right shape");
 });
 

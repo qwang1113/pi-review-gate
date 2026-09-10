@@ -40,6 +40,7 @@
 import {
   isStalled,
   type ChannelProjection,
+  type ChannelStateRecord,
   HEARTBEAT_STALE_MS,
 } from "./orchestrator-channel.ts";
 
@@ -133,11 +134,17 @@ export interface ChildObservation {
 
 /**
  * How long a child must go WITHOUT forward progress before its OWN `idle`
- * report is believed. 120 seconds, and it is THE USER'S NUMBER (2026-09-04) —
- * pinned here like `JUDGE_ROTATION_CONTEXT_PERCENT`, not a threshold to tune
- * away on a hunch.
+ * report is believed — the FALLBACK rule, not the first one any more.
  *
- * ── WHY A REPORT NEEDS CORROBORATION AT ALL (B3) ──
+ * ── WHAT CHANGED (2026-09-10, user decision) ──
+ *
+ * A child that reports `settledSince` — its last turn ENDED and nothing has
+ * run since — is believed AT ONCE; see `hasSettledEvidence`. This constant now
+ * governs only the children that cannot say that: an older build, or a session
+ * that has not settled since it started. Keeping it is what makes the new
+ * evidence an improvement rather than a requirement.
+ *
+ * ── WHY A REPORT EVER NEEDED CORROBORATION (B3) ──
  *
  * The child reports `working` vs `idle` from `ctx.isIdle()`, and that reading
  * is true BETWEEN two tool calls: a session in the middle of a read-only
@@ -149,11 +156,11 @@ export interface ChildObservation {
  * instantly every time and the supervisor's one waiting tool degraded into a
  * busy poll.
  *
- * The corroborating fact was already in the very same record: `lastProgressAt`,
- * which advances ONLY on a real agent event (a tool result, a turn boundary)
- * and never on a heartbeat. It was a READING nothing consulted. Now it decides:
- * a child that reported `idle` while it was stepping forward moments ago is
- * `working`, and only genuine silence for this long makes the report true.
+ * 120 seconds remains THE USER'S NUMBER from that day for the fallback path —
+ * pinned here like `JUDGE_ROTATION_CONTEXT_PERCENT`, not a threshold to tune
+ * away on a hunch. The corroborating facts it compares against are the same
+ * ones it always used: `lastProgressAt` (advances only on a real agent event,
+ * never on a heartbeat) and the session's own `settledSince` when present.
  */
 export const IDLE_PROGRESS_GRACE_MS = 120_000;
 
@@ -290,9 +297,36 @@ export function progressStaleMs(observation: ChildObservation): number | undefin
  * disagrees with.
  */
 function idleReportIsBelievable(observation: ChildObservation): boolean {
+  // THE STRUCTURAL EVIDENCE FIRST (2026-09-10, user decision): the child said
+  // its last turn ENDED and nothing has run since. That is not a timing
+  // argument — a child in the middle of bash → read → bash is not settled, and
+  // the tool call that follows clears the stamp — so a supervisor may act on
+  // it at once and learn the child stopped the moment it did, instead of two
+  // minutes later.
+  if (hasSettledEvidence(observation.projection.lastState)) return true;
+  // No such evidence (an older child build, a session that has not settled
+  // since it started): the confirmed-silence rule stands as the FALLBACK.
   const stale = progressStaleMs(observation);
   if (stale === undefined) return true;
   return stale >= IDLE_PROGRESS_GRACE_MS;
+}
+
+/**
+ * Did the child PROVE it stopped?
+ *
+ * `settledSince` is written only while the child's last turn has ENDED and
+ * nothing has run since (lib/orchestrator-channel.ts), so its presence is a
+ * statement about structure, not about elapsed time. A child that cannot
+ * report it leaves it absent — which is why the 120s rule below stays: the
+ * structural evidence is PREFERRED, never required.
+ *
+ * A malformed stamp is treated as absent: this decides whether to believe a
+ * child that says it stopped, and guessing "yes" from garbage is the one
+ * direction that can make a supervisor miss a stopped child.
+ */
+function hasSettledEvidence(record: ChannelStateRecord | undefined): boolean {
+  const at = record?.settledSince;
+  return typeof at === "string" && Number.isFinite(Date.parse(at));
 }
 
 /**
@@ -437,10 +471,35 @@ export function nextRewakeDelayMs(alreadyReported: number): number {
   return REWAKE_BACKOFF_MS[index]!;
 }
 
-/** A completion rings at most twice, then stays quiet. */
-export const DONE_REPORT_LIMIT = 2;
-/** Gap between those two completion reminders. */
+/**
+ * A completion reminder's FIRST gap, and the ceiling it widens to.
+ *
+ * WHY THERE IS NO LONGER A REPORT LIMIT (2026-09-10). A completion used to
+ * ring at most twice and then go permanently quiet. The state is terminal for
+ * the CHILD, which is what the limit was argued from — but it is not terminal
+ * for the SUPERVISOR, who still owes it a verification, a task status and a
+ * `close`. And the two rings were shared memory: a receipt that consumed one
+ * (a background tick, or a `wait({childId})` filtered to another child) left
+ * exactly one more chance, after which the only trace was the health block —
+ * measured as a manager waiting out its full 300s budget beside a child it
+ * had already been told was finished.
+ *
+ * So it rings as long as it is true, WIDENING instead of repeating: 60s, then
+ * 2×, 4×, … capped at ten minutes. A busy supervisor is interrupted at a
+ * rate it can live with; a forgotten completion cannot go silent for good.
+ * It stops on its own the moment the state changes — closing the child (or
+ * the pane dying) is what ends it, which is exactly the act the reminder asks
+ * for.
+ */
 export const DONE_REWAKE_MS = 60_000;
+/** The widest a completion reminder may become. */
+export const DONE_REWAKE_MAX_MS = 10 * 60_000;
+
+/** Gap before the next reminder about a completion already reported N times. */
+export function nextDoneRewakeDelayMs(alreadyReported: number): number {
+  const step = Math.max(0, alreadyReported - 1);
+  return Math.min(DONE_REWAKE_MAX_MS, DONE_REWAKE_MS * 2 ** step);
+}
 
 /** Human-readable name of a state, for the receipt. */
 export function describeChildState(state: ChildState): string {

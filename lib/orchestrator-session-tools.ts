@@ -482,27 +482,43 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
   // expands it into the left column when the old pane is closed), keeps no
   // registry row and takes no border: it is not a child, it is the next holder
   // of this orchestration.
-  const opened = await openSessionPane(deps.tmux, {
-    ownPane: self!,
-    cwd: deps.repoRoot,
-    layout: "beside-opener",
-    // A plain interactive pi: the successor reads the handoff document its
-    // environment points at, so it needs no argv message of its own.
-    command: ["pi"],
-    role: {
-      kind: "successor",
-      env: {
-        ...successorEnv({
-          orchestrationId: runtime.orchestrationId,
-          predecessorPane: self!,
-          handoffPath,
-          predecessorTranscript: deps.sessionTranscriptPath(),
-          ...(predecessorSessionId ? { predecessorSessionId } : {}),
-        }),
-        [GATE_MODE_ENV]: "orchestrator",
+  //
+  // THE OPEN IS WRAPPED, and it is not decoration: phase one has ALREADY
+  // released this session's worktree claim, so an exception escaping
+  // `openSessionPane` (a tmux runner that throws rather than returning
+  // `ok:false`, which the injected seam permits) would leave the claim
+  // released, the relay record unwritten and the session otherwise untouched —
+  // a half-retired predecessor nobody would notice. Every exit from this block
+  // either commits the relay record or undoes phase one.
+  let opened: Awaited<ReturnType<typeof openSessionPane>>;
+  try {
+    opened = await openSessionPane(deps.tmux, {
+      ownPane: self!,
+      cwd: deps.repoRoot,
+      layout: "beside-opener",
+      // A plain interactive pi: the successor reads the handoff document its
+      // environment points at, so it needs no argv message of its own.
+      command: ["pi"],
+      role: {
+        kind: "successor",
+        env: {
+          ...successorEnv({
+            orchestrationId: runtime.orchestrationId,
+            predecessorPane: self!,
+            handoffPath,
+            predecessorTranscript: deps.sessionTranscriptPath(),
+            ...(predecessorSessionId ? { predecessorSessionId } : {}),
+          }),
+          [GATE_MODE_ENV]: "orchestrator",
+        },
       },
-    },
-  });
+    });
+  } catch (error) {
+    retirement?.rolledBack();
+    return fail(
+      `review-gate: 开接任会话时出错 —— ${(error as Error).message}（接力中止，你仍然是持有者）。`,
+    );
+  }
   if (!opened.ok) {
     // Undo phase one: the orchestration still has exactly one holder, and it
     // is this session. Phase two never ran, so nothing else needs undoing.

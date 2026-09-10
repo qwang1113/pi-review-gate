@@ -49,6 +49,7 @@
 import {
   existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
   mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync, writeSync,
+  watch as watchFile, type FSWatcher,
 } from "node:fs";
 import { tmpdir, homedir, hostname } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
@@ -180,6 +181,7 @@ import {
 import {
   acknowledgeInstruct,
   askThroughChannel,
+  bindingPath,
   decideReportedChildState,
   pendingInstructions,
   reportState,
@@ -1781,6 +1783,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
     lastReportedChildState = reported;
     lastChildReportAt = now;
+    const settledSince = lastSettledAt !== undefined && toolCallsSinceSettle === 0 ? lastSettledAt : undefined;
     reportState(
       binding,
       reported,
@@ -1792,6 +1795,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         // a `working` child re-reported on a timer keeps its last real-progress
         // time. It only advances on a genuine agent event (see noteChildProgress).
         ...(lastChildProgressAt === undefined ? {} : { lastProgressAt: new Date(lastChildProgressAt).toISOString() }),
+        // …and the STRUCTURAL half: present only while the child's last turn
+        // has ENDED and nothing has run since (user decision, 2026-09-10).
+        // A supervisor may act on `idle` the moment it sees this, without
+        // waiting out the confirmation window.
+        ...(settledSince === undefined ? {} : { settledSince }),
       },
     );
   }
@@ -1801,6 +1809,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** How stale an unchanged state report may get before it is rewritten. */
   const CHILD_STATE_REFRESH_MS = 60_000;
   let childHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * The fast path for incoming instructions: a watch on this child's OWN
+   * channel file (see {@link watchOwnChannel}).
+   */
+  let childChannelWatcher: FSWatcher | undefined;
   /** True while a drain is mid-flight — the re-entrancy guard. */
   let drainingInstructions = false;
   /**
@@ -1831,9 +1844,35 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   let lastChildProgressAt: number | undefined;
   /** Stamp forward progress. Called from the agent-event handlers, not the heartbeat. */
-  function noteChildProgress(): void {
-    if (childBinding()) lastChildProgressAt = Date.now();
+  function noteChildProgress(kind: "tool" | "settled" = "tool"): void {
+    if (!childBinding()) return;
+    lastChildProgressAt = Date.now();
+    if (kind === "settled") {
+      lastSettledAt = new Date(lastChildProgressAt).toISOString();
+      toolCallsSinceSettle = 0;
+      return;
+    }
+    // A tool result (or a turn boundary that may still be followed by more
+    // work) means the child is AT WORK: whatever settle we were holding is no
+    // longer its current state, and the stamp is dropped.
+    toolCallsSinceSettle += 1;
+    lastSettledAt = undefined;
   }
+
+  /**
+   * THE CHILD'S OWN "I STOPPED" EVIDENCE (2026-09-10, user decision).
+   *
+   * `agent_settled` is the one event that says a turn is OVER rather than
+   * paused — pi will not continue on its own — and anything that runs after it
+   * (a tool result, the next turn's boundary) is work RESUMED, which clears
+   * the stamp. The pair is what the supervisor reads as `settledSince`, and it
+   * is why `idle` no longer has to be confirmed by a 120s silence window:
+   * "settled with nothing run since" cannot be true in the middle of a
+   * bash → read → bash investigation, which is exactly the measurement that
+   * window was introduced for (2026-09-04).
+   */
+  let lastSettledAt: string | undefined;
+  let toolCallsSinceSettle = 0;
   /**
    * Background agents this session spawned that have not reported a terminal
    * state yet (lib/background-wait.ts owns the start/end contract). While
@@ -1899,12 +1938,59 @@ export default function reviewGate(pi: ExtensionAPI) {
         reportChildState(live);
       } catch { /* a heartbeat must never break the session it reports on */ }
       void drainChildInstructions(live).catch(() => { /* best effort */ });
+      // Self-heal: the channel file may not have existed when this session
+      // started, and a watcher that could not be installed then can be now.
+      watchOwnChannel(live);
     }, CHILD_HEARTBEAT_MS);
+    watchOwnChannel(ctx);
+  }
+
+  /**
+   * DRAIN ON WRITE, NOT ON THE NEXT TICK (2026-09-10).
+   *
+   * MEASURED (this repo's own channels): an `orchestrator_instruct` reached
+   * its child in p50 4.79s / p90 9.11s, because the ONLY thing that read a
+   * child's channel was the 10s heartbeat — a message written just after a
+   * tick waited almost a whole interval. That latency sits on the one path
+   * the orchestrator uses to talk to its children, and it is pure waiting:
+   * the orchestrator has already written the file by the time this fires.
+   *
+   * THE TICK STAYS, and not out of tradition: a watcher may fail to install
+   * (no channel file yet), may miss (a file REPLACED rather than appended to
+   * leaves the watch on a dead inode), and is not available everywhere. The
+   * 10s tick is what makes every one of those harmless, and the re-entrancy
+   * guard in `drainChildInstructions` what makes a watcher firing beside it
+   * safe. The watcher is the fast path, never the only path.
+   */
+  function watchOwnChannel(ctx: ExtensionContext): void {
+    if (childChannelWatcher) return;
+    const binding = childBinding();
+    if (!binding) return;
+    let path: string;
+    try { path = bindingPath(binding); } catch { return; }
+    try {
+      const watcher = watchFile(path, () => {
+        void drainChildInstructions(latestCtx ?? ctx).catch(() => { /* best effort */ });
+      });
+      // A watcher must never be the reason the process stays alive, and a
+      // watcher that errors is dropped so the next tick reinstalls it.
+      watcher.unref?.();
+      watcher.on("error", () => { stopChildChannelWatcher(); });
+      childChannelWatcher = watcher;
+    } catch { /* no file yet, or no watch support ⇒ the tick still covers it */ }
+  }
+
+  function stopChildChannelWatcher(): void {
+    if (childChannelWatcher) {
+      try { childChannelWatcher.close(); } catch { /* already gone */ }
+    }
+    childChannelWatcher = undefined;
   }
 
   function stopChildHeartbeat(): void {
     if (childHeartbeatTimer) clearInterval(childHeartbeatTimer);
     childHeartbeatTimer = undefined;
+    stopChildChannelWatcher();
   }
 
   // ---------- ONE gate session per worktree (lib/session-exclusivity.ts) ----------
@@ -4483,7 +4569,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, ctx) => {
     // E — a completed tool call is forward progress for the child health reading.
-    noteChildProgress();
+    noteChildProgress("tool");
     // Background-agent wait tracking: a launch starts a wait, a terminal
     // report ends one (lib/background-wait.ts). Runs before every return
     // below, like the progress note above it.
@@ -7218,16 +7304,43 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
       },
       revParse: (root, rev) => execFileSync("git", ["rev-parse", rev], { cwd: root, encoding: "utf8" }).trim(),
+      // The FALLBACK read, and it carries the same two flags as the numstat
+      // probe so the two can never disagree about which files moved: without
+      // `--no-renames` name-only reports a rename as the NEW path alone (the
+      // numstat path reports both halves of it), and without
+      // `core.quotePath=false` a non-ASCII path comes back as an escaped C
+      // string no shell would resolve.
       changedFilesInRange: (root, baseline, head) =>
-        execFileSync("git", ["diff", "--name-only", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
-          .trim().split("\n").filter(Boolean),
+        execFileSync(
+          "git",
+          ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", `${baseline}..${head}`],
+          { cwd: root, encoding: "utf8" },
+        ).trim().split("\n").filter(Boolean),
       // The reviewer's read plan is built from this (lib/parallel-review.ts's
       // formatChangeIndex): one call gives both the file list and the sizes.
-      // Binary files report `-` for both counts — git's way of saying "no
-      // line counts", which reads as 0 here so a binary file still appears in
-      // the index (a missing row would drop it from the plan entirely).
+      //
+      // TWO FLAGS THAT ARE SECURITY, NOT TASTE (round-2 P1):
+      //
+      //  - `--no-renames`. Rename detection is ON by default, and numstat then
+      //    prints a renamed file as the pseudo-path `old => new` — which the
+      //    reviewer is told to paste into a shell, where `>` is a REDIRECT.
+      //    With detection off the rename reads as a delete plus an add: two
+      //    real paths, and the information is not lost.
+      //  - `core.quotePath=false`, so a non-ASCII path is emitted as the bytes
+      //    git will accept back rather than as an escaped C string (`"\303\251"`)
+      //    that no shell would resolve. Paths are still quoted at the point
+      //    the command is rendered (formatChangeIndex's shellQuotePath),
+      //    because spaces and metacharacters remain possible.
+      //
+      // Binary files report `-` for both counts — git's way of saying "no line
+      // counts", which reads as 0 here so a binary file still appears in the
+      // index (a missing row would drop it from the plan entirely).
       numstatInRange: (root, baseline, head) =>
-        execFileSync("git", ["diff", "--numstat", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
+        execFileSync(
+          "git",
+          ["-c", "core.quotePath=false", "diff", "--numstat", "--no-renames", `${baseline}..${head}`],
+          { cwd: root, encoding: "utf8" },
+        )
           .trim().split("\n").filter(Boolean)
           .map((line) => {
             const [added, deleted, ...rest] = line.split("\t");
@@ -8741,7 +8854,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // explore mode still has a supervisor waiting to hear from it — silence
     // is exactly the failure this replaced (a finished child classified
     // `working` for 725 seconds, R3-5).
-    noteChildProgress(); // E — a settled turn is forward progress.
+    noteChildProgress("settled"); // E — a settled turn is forward progress, and the child's own proof that it stopped.
     reportChildState(ctx);
     await drainChildInstructions(ctx);
     // Judge panes conclude through judge_conclude (their own round-ending tool) —

@@ -273,7 +273,11 @@ test("the happy path registers the reviewed range and reports it", async () => {
   assert.equal(reply.details?.head, "hhhhhhhhhhhh");
   assert.equal(reply.details?.range, "pppppppppppp..hhhhhhhhhhhh");
   assert.equal(reply.details?.fileCount, 2);
-  assert.deepEqual(reply.details?.files, ["lib/a.ts", "lib/b.ts"]);
+  // LARGEST FIRST — the same order the change index renders in and the batch
+  // plan is built from (the fake's sizes are a.ts +10/−0, b.ts +11/−1). A
+  // `files` list in a different order than the plan built from it would be two
+  // answers to one question.
+  assert.deepEqual(reply.details?.files, ["lib/b.ts", "lib/a.ts"]);
   // The target a READY later binds to carries the TREE, not just the commits —
   // plus the scope this round was DISPATCHED under, which is the gate's half
   // of the audit pair the verdict recorder writes down (t6a). It is registered
@@ -324,8 +328,8 @@ test("the reviewer's task text carries the CHANGE INDEX, batches and all", async
   const task = textOf(reply);
   assert.match(task, /CHANGE INDEX — 2 file\(s\), \+21\/−1 in/,
     "what moved, with sizes, in one place");
-  assert.match(task, /git diff \S+ -- lib\/a\.ts lib\/b\.ts/,
-    "and the batch command is pre-built — the reviewer pastes it instead of finding out file by file (measured: 92.5% of reviewer messages carried ONE tool call)");
+  assert.match(task, /git diff \S+ -- 'lib\/b\.ts' 'lib\/a\.ts'/,
+    "the batch is a command, not advice — QUOTED, and largest-first (b.ts has more lines than a.ts)");
   assert.match(task, /IN PARALLEL/, "the parallel-read rule travels with the plan");
   assert.doesNotMatch(task, /Changed files \(2\)/, "the bare list is a second, poorer copy of the same fact");
   cleanup(f);

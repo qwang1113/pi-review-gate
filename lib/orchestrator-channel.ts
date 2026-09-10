@@ -149,6 +149,25 @@ export interface ChannelStateRecord extends ChannelRecordBase {
    * READING for the receipt, never a wake reason.
    */
   lastProgressAt?: string;
+  /**
+   * ISO time this child's LAST TURN ENDED, present ONLY while nothing has run
+   * since — a tool call clears it (2026-09-10, user decision).
+   *
+   * WHY THIS EXISTS. `idle` used to be believed only after
+   * `IDLE_PROGRESS_GRACE_MS` (120s) of confirmed silence, because
+   * `ctx.isIdle()` is ALSO true between two tool calls: a child stepping
+   * bash → read → bash reports `idle` at almost every tick, and the measured
+   * cost was four "停下了" reports in a row on a child whose transcript was
+   * growing. 120s was the confirmation that separated the two cases.
+   *
+   * This field separates them STRUCTURALLY instead. "The agent settled and has
+   * run nothing since" cannot be true in the middle of an investigation — the
+   * tool call that would follow clears the stamp — so a supervisor may act on
+   * it at once. A child that cannot report it (an older build, a session that
+   * has not settled yet) leaves it absent and keeps the 120s rule as the
+   * fallback: the structural evidence is preferred, never required.
+   */
+  settledSince?: string;
 
   /**
    * A MODEL OF THIS PANE FAILED (2026-09-10).

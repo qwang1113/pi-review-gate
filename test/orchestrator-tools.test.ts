@@ -1107,6 +1107,18 @@ test("handoff: a relay that cannot start its successor ROLLS BACK — nobody is 
     "phase two never ran, so there is exactly one thing to undo — and no dead timers to re-arm");
 });
 
+test("handoff: a tmux that THROWS is the same as one that refuses — phase one is undone", async () => {
+  // The injected tmux seam permits both shapes. Phase one has already released
+  // the worktree claim when the pane is opened, so an exception escaping here
+  // would leave a half-retired predecessor that nobody notices — the relay has
+  // to undo it on BOTH paths, not only the `ok: false` one.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, splitWindowThrows: true });
+  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
+  assert.equal(reply.isError, true, "the failure is reported, not thrown out of the tool");
+  assert.match(replyText(reply), /仍然是持有者/);
+  assert.deepEqual(world.handoffEvents, ["release", "rolledBack"]);
+});
+
 test("handoff: a REFUSED relay never retires the session at all", async () => {
   // The preconditions are checked BEFORE the retirement. The old shape fired
   // it from the tool's execute wrapper, so a relay refused for a missing
