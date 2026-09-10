@@ -252,6 +252,14 @@ export interface FakeWorldOptions {
    */
   isolateChild?: boolean;
   /**
+   * Make `settleWorktree` report a FAILED reclamation (`reclaimed: false`).
+   *
+   * The branch it opens is the one that decides whether the worktree record
+   * survives — "forget it only when the checkout is really gone" — and with the
+   * fake hardcoding `reclaimed: true` nothing could reach it (round-10 P1).
+   */
+  settleReclaimed?: boolean;
+  /**
    * Isolate the child but wire NO settlement capability — the fail-closed
    * shape (round-9 P2).
    *
@@ -464,7 +472,12 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
           // sequence itself is lib/orchestrator-worktree.ts's (unit-tested).
           settleWorktree: (input: { childId: string; settlement: string }) => {
             settlements.push({ childId: input.childId, settlement: input.settlement });
-            return { ok: true, text: `fake: settled ${input.settlement}`, reclaimed: true };
+            const reclaimed = options.settleReclaimed !== false;
+            return {
+              ok: true,
+              reclaimed,
+              text: reclaimed ? `fake: settled ${input.settlement}` : `fake: settled ${input.settlement}，但没能回收`,
+            };
           },
         }
       : {}),

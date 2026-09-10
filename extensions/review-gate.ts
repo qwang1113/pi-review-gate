@@ -2435,6 +2435,15 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
         if (sub === "worktree" || sub === "branch") {
+          // IDEMPOTENT, so a retry can CONVERGE (round-10 P2). The first
+          // discard may remove one half and fail the other; on the second
+          // call the half that succeeded reports "not there" — which is the
+          // state the manager asked for, not a failure. Without these two
+          // allowances the record would stay forever, `reclaimed` would never
+          // become true, and the receipt would keep describing a checkout
+          // that no longer exists.
+          if (/not a working tree|No such file or directory/i.test(result.output)) continue;
+          if (/branch .* not found|not found\./i.test(result.output)) continue;
           reclamation.push(result.output.trim().slice(0, 200));
           continue;
         }
@@ -2446,14 +2455,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       //
       // Only `discard` can produce one at all: a merge has no reclamation step
       // (the checkout is its own way back from `merge --abort`).
-      // ONLY A DISCARD RUNS RECLAMATION AT ALL (round-9 P1, twice wrong): a
-      // merge has no removal step — the checkout is its own way back from
-      // `merge --abort` — so the note belongs in the discard branch, and the
-      // merge branch has none.
-      const leftover =
-        reclamation.length > 0
-          ? `\n（⚠️ 回收有报错，checkout 或分支可能还在：${reclamation.join(" / ")}）`
-          : "";
+      // `leftover` IS GONE (round-10 P1): it existed to print the reclamation
+      // failure on a path that could produce one, and the discard branch below
+      // already prints exactly that — so every failed discard emitted the same
+      // git output twice. The branch that can produce a failure is the branch
+      // that reports it.
       return {
         ok: true,
         // The RECLAMATION outcome rides back with the settlement, because the
@@ -2461,16 +2467,18 @@ export default function reviewGate(pi: ExtensionAPI) {
         // a record whose directory still exists strands it — and a retry is
         // exactly what a failed removal should leave open (round-9 P2).
         reclaimed: reclamation.length === 0,
-        text: (settlement === "merge"
+        text: settlement === "merge"
           ? `已把 ${childId} 的改动合并到当前分支（**已暂存、未提交** —— 看过再 commit）。\n` +
             `它的 worktree 与分支 \`${childWorktreeBranch(childId)}\` **先保留**：这次合并还只是 staged，` +
             `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
             `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 回收它们 —— ` +
             `那个调用对已关闭的子会话**同样有效**（它只结算 checkout，不再开门）。`
-          : (reclamation.length > 0
+          : reclamation.length > 0
             ? `⚠️ ${childId} 的 worktree **没能回收**（工作区或分支还留着）：${reclamation.join(" / ")}\n` +
-              `路径 ${childWorktreePath(repoRoot, childId)}，分支 \`${childWorktreeBranch(childId)}\`。`
-            : `已回收 ${childId} 的 worktree 与分支（丢弃）。`) + leftover),
+              `路径 ${childWorktreePath(repoRoot, childId)}，分支 \`${childWorktreeBranch(childId)}\`。\n` +
+              `再调一次 \`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 会重试——` +
+              `已经删掉的那一半会被当作已完成，不会重复报错。`
+            : `已回收 ${childId} 的 worktree 与分支（丢弃）。`,
       };
     },
     knownRepoRoots: () => knownRepoRoots(),

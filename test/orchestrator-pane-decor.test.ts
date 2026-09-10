@@ -312,6 +312,30 @@ test("a checkout nobody can settle keeps the child OPEN — close is refused, no
     "…and the child is still OPEN, so the close can be retried once the capability exists");
 });
 
+test("a FAILED reclamation keeps the record, so the discard can be retried", async () => {
+  // Round-10 P1: this is the branch the whole `reclaimed` field exists for,
+  // and it had no coverage (the fake hardcoded `reclaimed: true`). A discard
+  // that removed nothing must NOT forget the checkout — otherwise the retry
+  // the receipt offers is impossible and the directory is stranded, invisible
+  // even to the orphan list (which reports unfinished children only).
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(), approvePlan: true, isolateChild: true, settleReclaimed: false,
+  });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const child = world.runtime().children[1]!;
+
+  const failed = await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
+  assert.equal(failed.isError, undefined, replyText(failed));
+  assert.match(replyText(failed), /没能回收/, "the settlement's own account reaches the receipt");
+  assert.ok(world.runtime().children[1]!.worktree,
+    "the record SURVIVES a failed removal, or no later call could reach the checkout again");
+
+  // …and the retry reaches the settlement again.
+  await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
+  assert.equal(world.settlements.length, 2, "the second discard really ran");
+});
+
 test("a CLOSED child's checkout can still be settled — the advice the merge receipt gives is not a dead end", async () => {
   // Round-7 P1: the merge receipt says "reclaim it later with close({worktree})",
   // and `closableChild` rejects anything with a `closedAt` — which every child
