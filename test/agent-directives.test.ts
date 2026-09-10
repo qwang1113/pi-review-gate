@@ -6,11 +6,13 @@ import {
   buildWaitDiscipline,
   MINIMALISM_REMINDER,
   GATE_ANOMALY_PROTOCOL,
+  BATCH_READ_DISCIPLINE,
 
   EXPLORE_MODE_NOTE,
   ORCHESTRATOR_WAIT_DISCIPLINE,
   WAIT_DISCIPLINE_HINT,
 } from "../lib/agent-directives.ts";
+import { JUDGE_COMMON_PROTOCOL } from "../lib/judge-prompt.ts";
 
 // ---------------------------------------------------------------------------
 // The WAIT DISCIPLINE (2026-09-05). One wording, two waiters: the loop session
@@ -143,4 +145,45 @@ test("the standing block carries the two-layer gate-anomaly protocol (2026-09-08
   assert.match(retryLayer, /直接继续/, "…it says continue");
   assert.match(GATE_ANOMALY_PROTOCOL, /request_arbitration/, "the sanctioned appeal stays");
   assert.match(GATE_ANOMALY_PROTOCOL, /gate-doctor/, "diagnostics stay with the user's command");
+});
+
+// ---------------------------------------------------------------------------
+// READING IN PARALLEL (2026-09-10). MEASURED across every reviewer session in
+// this repo: 92.5% of assistant messages carried exactly ONE tool call (mean
+// 1.08), each round took 17-59 model round-trips at 11-13s, and tool execution
+// was 6% of the round — the time went to the number of MESSAGES, not to the
+// reads. The main session is no better (85.3%, mean 1.16).
+//
+// One rule, two audiences — the agent block and the judge protocol. This pin
+// is what keeps the two copies from becoming two different rules.
+// ---------------------------------------------------------------------------
+
+test("the batch-read rule is ONE wording, in the agent block and the judge protocol alike", () => {
+  const shared = "**一条 assistant 消息里的多个工具调用是并行执行的**";
+  assert.ok(BATCH_READ_DISCIPLINE.includes(shared), "the agent block states the rule");
+  assert.ok(JUDGE_COMMON_PROTOCOL.includes(shared), "the judge protocol states the same sentence");
+  for (const copy of [BATCH_READ_DISCIPLINE, JUDGE_COMMON_PROTOCOL]) {
+    assert.match(copy, /92\.5%/, "the measurement travels with the rule — it is the reason to obey it");
+    assert.match(copy, /17–59/, "…including how many round-trips a round actually took");
+  }
+  assert.match(BATCH_READ_DISCIPLINE, /一个工具调用就是一个完整来回/,
+    "and WHY a single read costs one: one tool call is one full round-trip");
+});
+
+test("the agent block carries the batch-read rule into every session", () => {
+  for (const mode of ["loop", "explore"] as const) {
+    assert.ok(buildAgentDirectives(mode).includes(BATCH_READ_DISCIPLINE), `sent in ${mode} mode`);
+  }
+  assert.ok(buildAgentDirectives().includes(BATCH_READ_DISCIPLINE), "and with no mode at all");
+});
+
+test("the judge protocol points at the index the gate pre-builds", () => {
+  // The rule alone would still leave the reviewer deciding what to read. The
+  // gate ships a pre-split batch plan by the same name (lib/parallel-review.ts
+  // formatChangeIndex), and the protocol must name it — otherwise the two
+  // halves of the same fix would not meet.
+  assert.match(JUDGE_COMMON_PROTOCOL, /CHANGE INDEX/,
+    "the protocol names the block the task text carries");
+  assert.match(JUDGE_COMMON_PROTOCOL, /最大的文件优先/,
+    "…and the property that makes it usable (largest first)");
 });

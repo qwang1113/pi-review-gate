@@ -40,7 +40,7 @@ import { orchestrationIdFromEnv } from "./orchestration-id.ts";
 
 import { parsePlan, PLAN_RELPATH, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
-import type { OrchestratorDeps, PlanRead, TmuxRunResult } from "./orchestrator-deps.ts";
+import type { HandoffRetirement, OrchestratorDeps, PlanRead, TmuxRunResult } from "./orchestrator-deps.ts";
 import type { TaskMode } from "./task-mode.ts";
 import type { RestatementRecord } from "./restatement.ts";
 
@@ -368,10 +368,11 @@ export interface OrchestratorHostBindings {
   onToolCall?(name: string): void;
   /**
    * RETIRE this session as the orchestration's holder, called by
-   * `orchestrator_handoff` BEFORE the successor pane opens; returns a rollback
-   * for the case where the successor could not be started.
+   * `orchestrator_handoff` BEFORE the successor pane opens; phase one releases
+   * the worktree claim, phase two (after the relay record is persisted) goes
+   * silent — see {@link HandoffRetirement}.
    */
-  onHandoff?(): (() => void) | undefined;
+  onHandoff?(): HandoffRetirement | undefined;
 }
 
 /**

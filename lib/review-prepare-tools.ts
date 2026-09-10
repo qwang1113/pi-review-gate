@@ -48,7 +48,7 @@ import type { ReviewScopeDecision } from "./review-scope.ts";
 import { formatReviewScopeDirective, type SettledConclusion } from "./review-carryover.ts";
 import { polishReasonRequired } from "./polish-gate.ts";
 import { squashPointBaseline, branchBaseBaseline } from "./review-baseline.ts";
-import { buildReviewPrompt, extractPrecommitBaseline } from "./parallel-review.ts";
+import { buildReviewPrompt, extractPrecommitBaseline, formatChangeIndex, type ChangeIndexRow } from "./parallel-review.ts";
 import { computeFingerprint } from "./fingerprint.ts";
 import { TASK_TEXT_MARKER } from "./constants.ts";
 
@@ -96,6 +96,15 @@ export interface ReviewPrepareGit {
   revParse(root: string, rev: string): string;
   /** `git diff --name-only <baseline>..<head>`. THROWS when it cannot run. */
   changedFilesInRange(root: string, baseline: string, head: string): string[];
+  /**
+   * `git diff --numstat <baseline>..<head>` — what moved, per file.
+   * THROWS when it cannot run (the caller falls back to the name list).
+   *
+   * Preferred over `changedFilesInRange` because it answers BOTH questions in
+   * one call: the file list, and the sizes the reviewer's read plan is built
+   * from (lib/parallel-review.ts's `formatChangeIndex`).
+   */
+  numstatInRange(root: string, baseline: string, head: string): ChangeIndexRow[];
   /** Is the worktree CLEAN (no staged/unstaged/untracked changes)? The
    *  empty-range exit-goal round REQUIRES it — a READY must never bless
    *  content no reviewer saw (round-2 P2). */
@@ -310,10 +319,20 @@ async function doPrepareReview(
   }
   const range = `${(emptyRange ? head : baseline).slice(0, 12)}..${head.slice(0, 12)}`;
   let files: string[] = [];
+  let changeIndex: string | undefined;
   if (!emptyRange) {
+    // ONE git call answers both questions: which files moved, and how much.
+    // The name-only read stays as the fallback — a range whose numstat cannot
+    // be read (an unreadable object, a git that refuses) still gets a round.
     try {
-      files = deps.git.changedFilesInRange(root, baseline, head);
-    } catch { /* empty file list is still a valid round */ }
+      const rows = deps.git.numstatInRange(root, baseline, head);
+      files = rows.map((r) => r.file);
+      changeIndex = formatChangeIndex(rows, range);
+    } catch {
+      try {
+        files = deps.git.changedFilesInRange(root, baseline, head);
+      } catch { /* empty file list is still a valid round */ }
+    }
   }
   const runId = `review-${Date.now().toString(36)}`;
   const streamPath = pathJoin(root, ".pi", "review-stream", `${runId}-review.jsonl`);
@@ -354,6 +373,7 @@ async function doPrepareReview(
     // Round-18 polish gate: the reason for THIS round travels to the
     // reviewer, who judges whether the round deserves to exist.
     st.lastPolishReason,
+    changeIndex,
   );
   // Register the review target: the verdict recorder verifies HEAD is still the
   // reviewed commit and binds a READY to the reviewed tree. The scope travels

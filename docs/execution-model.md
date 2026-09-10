@@ -226,20 +226,28 @@ orchestration id、交接文档路径、**老会话 transcript 路径**，以及
 ≥90% 则是首要动作）。工具名从上一版的 `orchestrator_relay` 改成 `orchestrator_handoff`，
 因为它交出去的是这份编排本身，不是一个 pane。
 
-**退休是四件事，不是一句「进入 idle」**（2026-09-10 实测修复，两个缺陷源于同一根因）：
-（1）停掉两个推进定时器（supervision / revival）；
-（2）**释放 worktree 占用**（`.pi/session-presence.json`）—— 新会话在**同一个 worktree**
-里启门禁，占用不释放它就会被自己前任的心跳拒绝（实测报错「这个 worktree 已被另一个
-会话占用，本会话不启动门禁」，点名刚交棒的会话，新会话的 pi 随即退出）；
-（3）**任何唤醒路径都不再叫它** —— `orchestratorSettled`（`agent_settled` 路径）、
-supervision 定时器、revival 三条都守 `handedOffOrchestration`。少了这条，`agent_settled`
-会在交棒**两秒后**把前任叫回 `orchestrator_wait`，一个编排两个项目经理；
-（4）**不再写共享 sidecar**（`persist()` 的退休守卫）—— 两个会话写一份 sidecar 正是
-占用判定要防的事，而继任者是被**故意**放进来的，所以停下来的是前任。
+**退休分两个阶段，不是一个标记**（2026-09-10 实测修复 + 同轮 review 的两条 P2）：
 
-这四件事发生在**开新 pane 之前**，顺序即正确性：退休晚于 pane 打开就是和新会话的启动
-赛跑。接力若因前置条件不满足或开 pane 失败而中止，退休**可回滚**（前任重新占用、
-唤醒恢复）—— 没交出去的编排不能留下一个已退休的前任。
+- **阶段一（开新 pane 之前）——释放 worktree 占用**（`.pi/session-presence.json`）。
+  新会话在**同一个 worktree** 里启门禁，占用不释放它就会被自己前任的心跳拒绝
+  （实测报错「这个 worktree 已被另一个会话占用，本会话不启动门禁」，点名刚交棒的
+  会话，新会话的 pi 随即退出）。必须在新 pane 打开**之前**——晚一步就是和新会话的
+  启动赛跑。
+- **阶段二（新会话的 relay 记录落盘之后）——静默**：设退休标记、停两个推进定时器
+  （supervision / revival），从此任何唤醒路径都不再叫它（`orchestratorSettled` 的
+  `agent_settled` 路径、supervision 定时器、revival 三条都守这个标记），并且
+  `persist()` 对它直接返回（**不再写共享 sidecar**——两个会话写一份 sidecar 正是
+  占用判定要防的事，而继任者是被**故意**放进来的，所以停下来的是前任）。
+
+**阶段的界线不是风格，是两条实测缺陷**：（a）`saveRuntime` 写的 relay 记录要走
+`persist()`，而 `persist()` 对已退休会话拒绝写入——先静默会让继任者自己的登记行
+只存在于内存里，重启即丢；（b）回滚一个尚未开始的静默没有任何东西要撤——单阶段
+把“停定时器”和“释放占用”绑在一起，导致交棒失败时定时器已停而回滚无法重新 arm
+（回滚需要 ctx），前任就变成了“静默且无人接替”。两阶段之后，**回滚只有一件事要
+做**：把占用拿回来。
+
+接力若因前置条件不满足或开 pane 失败而中止，阶段一被回滚（前任重新占用），阶段二
+根本未执行——没交出去的编排不能留下一个已退休的前任。
 
 新会话一侧另有一道保险：它带着**前任的 session id** 启动，worktree 占用判定认这条
 继任关系（`lib/session-exclusivity.ts` 的 `successorOf`，判定排在**心跳新鲜度之前**），
@@ -277,7 +285,10 @@ spawn（无 shell）；门禁自己的执行路径也过同一份禁止清单，
   直接落在**当前分支**（不再有工作分支）；在 main/master/dev/develop 上
   checkpoint 直接拒绝（2026-09-16 起不再弹确认框，与 ship 拒绝一致）。
 - `prepare_review`：计算 `baseline..HEAD`（自上次审核基线以来的 commit），
-  生成任务文本与 findings 流路径，注册审核目标。
+  生成任务文本与 findings 流路径，注册审核目标。任务文本里的**CHANGE INDEX**
+  （2026-09-10）来自一次 `git diff --numstat`：逐文件改动量 + 门禁预先分好的
+  读取批次（大文件单独成批）——实测 reviewer 的 92.5% 往返只发 1 个工具调用、
+  单轮 17–59 次往返 × 每次 11–13s，而工具执行只占 6%，代价在**消息条数**。
 - dispatch：spawn 或续接该 role 的 session。
 
 verdict **不在返回值里**：judge 把本轮结论写进 channel report（不再是进程退出）后，门禁自己读它并跑

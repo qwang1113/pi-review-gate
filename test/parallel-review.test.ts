@@ -11,6 +11,10 @@ import {
   buildReviewPrompt,
   formatPrecommitBaseline,
   extractPrecommitBaseline,
+  planChangeBatches,
+  formatChangeIndex,
+  CHANGE_INDEX_MAX_ROWS,
+  type ChangeIndexRow,
 } from "../lib/parallel-review.ts";
 
 test("buildReviewPrompt names the changed files and sets the COMMIT contract", () => {
@@ -395,4 +399,95 @@ test("extractPrecommitBaseline: behavioral safety — fingerprint match, stale-e
   const degraded = extractPrecommitBaseline(pass, "fp1", "{broken");
   assert.ok(degraded);
   assert.match(degraded, /PRE-COMMIT BASELINE/);
+});
+
+// ---------------------------------------------------------------------------
+// THE CHANGE INDEX (2026-09-10)
+//
+// MEASURED: 92.5% of a reviewer's messages carried exactly ONE tool call, and
+// tool execution was 6% of a 226-285s round — the round was spent finding out
+// what moved, one file per model turn. The index answers "what moved" and
+// pre-splits the reads into batches that can be issued in ONE message.
+// ---------------------------------------------------------------------------
+
+const rows = (...sizes: Array<[string, number, number]>): ChangeIndexRow[] =>
+  sizes.map(([file, added, deleted]) => ({ file, added, deleted }));
+
+test("planChangeBatches: large files get their own batch, and none is dropped", () => {
+  const plan = planChangeBatches(rows(
+    ["big.ts", 600, 40],
+    ["small-a.ts", 3, 1],
+    ["small-b.ts", 4, 0],
+    ["small-c.ts", 2, 2],
+  ));
+  assert.deepEqual(plan[0]!.map((r) => r.file), ["big.ts"],
+    "a file past the line budget must not share a command with the small ones — the reviewer would read them to find it");
+  assert.deepEqual(plan[1]!.map((r) => r.file), ["small-a.ts", "small-b.ts", "small-c.ts"]);
+  assert.equal(plan.flat().length, 4, "every file lands in exactly one batch");
+});
+
+test("planChangeBatches: a single oversized file still gets a batch of its own", () => {
+  const plan = planChangeBatches(rows(["huge.ts", 5_000, 0]), { maxLines: 100 });
+  assert.deepEqual(plan.map((b) => b.map((r) => r.file)), [["huge.ts"]],
+    "a batch that is empty always takes the file — otherwise it would vanish from the plan entirely");
+});
+
+test("planChangeBatches: the file count is a second, independent cap", () => {
+  const plan = planChangeBatches(
+    rows(["a.ts", 1, 0], ["b.ts", 1, 0], ["c.ts", 1, 0], ["d.ts", 1, 0], ["e.ts", 1, 0]),
+    { maxLines: 10_000, maxFiles: 2 },
+  );
+  assert.deepEqual(plan.map((b) => b.length), [2, 2, 1],
+    "a hundred one-line files must not become one unreadable command");
+});
+
+test("planChangeBatches: no rows means no batches", () => {
+  assert.deepEqual(planChangeBatches([]), []);
+});
+
+test("formatChangeIndex: what moved, and the batches that read it in one message", () => {
+  const text = formatChangeIndex(
+    rows(["extensions/review-gate.ts", 120, 8], ["lib/a.ts", 5, 0]),
+    "abc123..def456",
+  );
+  assert.match(text, /CHANGE INDEX — 2 file\(s\), \+125\/−8 in abc123\.\.def456/, "one line of totals");
+  assert.match(text, /- \+120\/−8  extensions\/review-gate\.ts/, "largest first, with its sizes");
+  assert.match(text, /1\. git diff abc123\.\.def456 -- extensions\/review-gate\.ts lib\/a\.ts/,
+    "the batch is a command, not advice — the gate does the grouping (philosophy one)");
+  assert.match(text, /IN PARALLEL/, "and says WHY one message is the right shape");
+});
+
+test("formatChangeIndex: the tail is summarised, never silently dropped", () => {
+  const many = rows(...Array.from({ length: CHANGE_INDEX_MAX_ROWS + 3 }, (_, i) => [`f${i}.ts`, 1, 0] as [string, number, number]));
+  const text = formatChangeIndex(many, "a..b");
+  assert.match(text, /- … and 3 more file\(s\)/, "a bound must SAY it bounded something");
+  assert.match(text, /git diff --name-only a\.\.b \| tail -n \+/,
+    "…and the unlisted files get a command that still reaches them");
+});
+
+test("formatChangeIndex: an unchanged range renders nothing at all", () => {
+  assert.equal(formatChangeIndex([], "a..b"), "",
+    "an empty index must not become an empty section in the task text");
+});
+
+test("buildReviewPrompt: the index replaces the bare list, and its absence keeps the fallback", () => {
+  const indexed = buildReviewPrompt(
+    "review",
+    ["lib/a.ts"],
+    undefined,
+    undefined,
+    { streamPath: "/s.jsonl", commitRange: "a..b" },
+    undefined,
+    "full",
+    undefined,
+    undefined,
+    undefined,
+    "CHANGE INDEX — 1 file(s), +5/−0 in a..b:\n- +5/−0  lib/a.ts",
+  );
+  assert.match(indexed, /CHANGE INDEX/);
+  assert.doesNotMatch(indexed, /Changed files \(1\)/,
+    "two descriptions of the same fact is one too many");
+
+  const plain = buildReviewPrompt("review", ["lib/a.ts"], undefined, undefined, { streamPath: "/s.jsonl", commitRange: "a..b" });
+  assert.match(plain, /Changed files \(1\) in a\.\.b:/, "no index ⇒ the cheap fallback still names the files");
 });

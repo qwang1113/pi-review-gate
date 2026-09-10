@@ -2293,7 +2293,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // and none for the manager is that the manager never edits; here it
     // re-arms itself by managing.
     onToolCall: () => { armLoop(); },
-    // RETIRE (goal 7, reworked 2026-09-10 after the rebate handoff failure).
+    // RETIRE (goal 7, reworked 2026-09-10 after the rebate handoff failure and
+    // its review round 1).
     //
     // A handoff is a VOLUNTARY exit, so every wake-up path has to go quiet —
     // but going quiet is not enough on its own. The successor arms its gate in
@@ -2302,23 +2303,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     // "这个 worktree 已被另一个会话占用", naming the session that had just
     // handed the orchestration over, and its pi then exited.
     //
-    // So retiring means three things, in this order:
-    //   1. stop the two timers that push the plan forward — it is no longer
-    //      this session's plan;
-    //   2. RELEASE the worktree claim, so the successor is not refused;
-    //   3. mark the session retired, so `orchestratorSettled` — which is not a
-    //      timer and fires on its own at `agent_settled` — leaves it alone.
-    //
-    // The returned rollback is for a relay that never started its successor:
-    // the orchestration must keep exactly one holder.
+    // TWO PHASES, and the split is what makes each half safe:
+    //   1. release the worktree claim — BEFORE the successor's pane opens, or
+    //      its boot races a heartbeat we have not stopped yet;
+    //   2. go silent (the retirement flag plus the two wake-up timers) — AFTER
+    //      the relay record is persisted. `persist()` refuses to write for a
+    //      retired session, so marking earlier would make the successor's own
+    //      registry row memory-only; and a rollback of a silence it never
+    //      entered has nothing to undo.
     onHandoff: () => {
-      handedOffOrchestration = true;
-      stopSupervisionTimer();
-      stopRevivalTimer();
       releaseWorktree();
-      return () => {
-        handedOffOrchestration = false;
-        if (claimsMainSidecar(process.env)) holdWorktree();
+      return {
+        committed: () => {
+          handedOffOrchestration = true;
+          stopSupervisionTimer();
+          stopRevivalTimer();
+        },
+        rolledBack: () => {
+          if (claimsMainSidecar(process.env)) holdWorktree();
+        },
       };
     },
   });
@@ -7218,6 +7221,23 @@ export default function reviewGate(pi: ExtensionAPI) {
       changedFilesInRange: (root, baseline, head) =>
         execFileSync("git", ["diff", "--name-only", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
           .trim().split("\n").filter(Boolean),
+      // The reviewer's read plan is built from this (lib/parallel-review.ts's
+      // formatChangeIndex): one call gives both the file list and the sizes.
+      // Binary files report `-` for both counts — git's way of saying "no
+      // line counts", which reads as 0 here so a binary file still appears in
+      // the index (a missing row would drop it from the plan entirely).
+      numstatInRange: (root, baseline, head) =>
+        execFileSync("git", ["diff", "--numstat", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
+          .trim().split("\n").filter(Boolean)
+          .map((line) => {
+            const [added, deleted, ...rest] = line.split("\t");
+            return {
+              file: rest.join("\t"),
+              added: added === "-" ? 0 : Number(added) || 0,
+              deleted: deleted === "-" ? 0 : Number(deleted) || 0,
+            };
+          })
+          .filter((row) => row.file !== ""),
       worktreeClean: (root) =>
         execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }).trim() === "",
     },

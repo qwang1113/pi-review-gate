@@ -465,11 +465,14 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
   // refusing itself with "这个 worktree 已被另一个会话占用", naming the very
   // session that had just handed the orchestration over.
   //
-  // A handoff that never happens must change NOTHING: `rollback` is called
-  // when the pane could not be opened, so a failed relay leaves the
-  // predecessor as the holder instead of a retired session with nobody
-  // behind it.
-  const rollback = deps.onHandoff?.();
+  // This is phase ONE (release the claim). Phase TWO (go silent) is owed
+  // AFTER the relay record is persisted, and the reason is in
+  // HandoffRetirement: `persist()` refuses to write for a retired session, so
+  // marking earlier would make the successor's own registry row memory-only.
+  //
+  // A handoff that never happens must change NOTHING: `rolledBack` is called
+  // when the pane could not be opened, and phase two never ran.
+  const retirement = deps.onHandoff?.();
   // The successor's proof of heirship (lib/session-exclusivity.ts): named, it
   // may take this worktree's claim over from the session it replaces.
   const predecessorSessionId = deps.ownSessionId?.();
@@ -501,18 +504,23 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
     },
   });
   if (!opened.ok) {
-    // Undo the retirement: the orchestration still has exactly one holder,
-    // and it is this session.
-    rollback?.();
+    // Undo phase one: the orchestration still has exactly one holder, and it
+    // is this session. Phase two never ran, so nothing else needs undoing.
+    retirement?.rolledBack();
     return fail(`review-gate: 开接任会话失败 —— ${opened.error}（接力中止，你仍然是持有者）。`);
   }
   const paneId = opened.paneId;
 
 
+  // The relay record FIRST, then the silence: `saveRuntime` goes through
+  // `persist()`, which refuses to write for a retired session. Persisting
+  // afterwards would leave the successor's own registry row — who took over,
+  // from whom — memory-only.
   deps.saveRuntime({
     ...deps.runtime(),
     relay: { handoffPath, successorPane: paneId, at: new Date(deps.now()).toISOString() },
   });
+  retirement?.committed();
   return reply(
     `review-gate: 接任的项目经理已在 pane ${paneId} 启动，继承同一个 orchestration id ` +
     `(${runtime.orchestrationId})，子会话的通知会自动流向它，无需重启任何子会话。\n` +

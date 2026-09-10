@@ -54,6 +54,7 @@ import {
 import type { SupervisionMemory } from "../../lib/orchestrator-supervisor.ts";
 import type { TaskMode } from "../../lib/task-mode.ts";
 import { STATE_VARIANT_ENV } from "../../lib/gate-state.ts";
+import { PREDECESSOR_PANE_ENV } from "../../lib/orchestrator-relay.ts";
 
 /** Fixed clock so ids and timestamps are reproducible. */
 export const NOW = 1_700_000_000_000;
@@ -145,6 +146,17 @@ export interface FakeWorld {
   planAudits: () => number;
   /** Every tmux argv the gate ran, in order — the decoration lives in here. */
   tmuxCalls: string[][];
+  /**
+   * What a relay caused, in the order it happened: `release` (phase one of
+   * the retirement), `pane-opened` (the successor's boot), `committed` (phase
+   * two — this session going silent) or `rolledBack`.
+   *
+   * THE ORDER IS THE FIX, and it is invisible to a source grep: releasing
+   * after the pane opens races the successor's boot, and going silent before
+   * the relay record is persisted loses that record (persist() refuses to
+   * write for a retired session).
+   */
+  handoffEvents: string[];
 
 }
 
@@ -158,6 +170,13 @@ export interface FakeWorldOptions {
   contextPercent?: number;
   /** Make `list-panes` fail, so liveness is UNKNOWN rather than false. */
   tmuxBroken?: boolean;
+  /**
+   * Make the successor's `split-window` fail, so the relay cannot start one.
+   * The property it pins: a handoff that never happened must ROLL BACK — the
+   * predecessor stays the holder instead of going silent with nobody behind
+   * it (and, before the two-phase split, with its wake-up timers dead).
+   */
+  splitWindowFails?: boolean;
   /**
    * The orchestration runtime RECORDED ON DISK (B1). Set it to one carrying
    * a DIFFERENT id than the session holds to build the takeover situation:
@@ -250,6 +269,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   let recordedOverride: OrchestratorRuntime | undefined = options.recordedRuntime;
   let planAudits = 0;
   const tmuxCalls: string[][] = [];
+  const handoffEvents: string[] = [];
 
 
   let plan: OrchestratorPlan | undefined = options.plan;
@@ -386,6 +406,19 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     emitNotification: () => true,
     fileChars: () => 500,
     sessionTranscriptPath: () => "/tmp/transcript.jsonl",
+    // The predecessor's OWN id, which the successor carries as its proof of
+    // heirship (lib/session-exclusivity.ts).
+    ownSessionId: () => "session-under-test",
+    // RETIREMENT, in two observable phases. The fake records the order rather
+    // than asserting it: `release` has to precede the pane, `committed` has to
+    // follow the persisted relay record.
+    onHandoff: () => {
+      handoffEvents.push("release");
+      return {
+        committed: () => { handoffEvents.push("committed"); },
+        rolledBack: () => { handoffEvents.push("rolledBack"); },
+      };
+    },
   };
 
   function runFakeTmux(argv: readonly string[]): { ok: boolean; stdout: string; stderr: string } {
@@ -406,6 +439,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       return { ok: true, stdout: live.join("\n"), stderr: "" };
     }
     if (sub === "split-window") {
+      if (options.splitWindowFails) return { ok: false, stdout: "", stderr: "fake tmux: cannot create pane" };
       const id = `%${paneSeq++}`;
       const cwdAt = argv.indexOf("-c");
       const paneEnv: Record<string, string> = {};
@@ -433,6 +467,10 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
           sessionId: `rg-child-${spawnedChildId}`,
         });
       }
+      // A RELAY pane is not a child: it carries the predecessor's pane id
+      // instead of a state variant. Recorded as the boot line in the handoff
+      // event stream, so a test can pin "release came first".
+      if (paneEnv[PREDECESSOR_PANE_ENV] !== undefined) handoffEvents.push("pane-opened");
       return { ok: true, stdout: `${id}\n`, stderr: "" };
     }
     if (sub === "kill-pane") {
@@ -521,6 +559,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     },
     planAudits: () => planAudits,
     tmuxCalls,
+    handoffEvents,
 
 
   };

@@ -356,15 +356,41 @@ export interface OrchestratorDeps {
    * RETIRE this session as the orchestration's holder, called by
    * `orchestrator_handoff` BEFORE the successor pane opens (2026-09-10).
    *
-   * Order matters and it is the whole point of the callback's placement: the
-   * successor arms its gate in this SAME worktree, and the exclusivity guard
-   * refuses it while this session's heartbeat is fresh. Releasing first is
-   * what lets the successor start at all.
+   * Phase one is the RELEASE, and it has to be first: the successor arms its
+   * gate in this SAME worktree, and the exclusivity guard refuses it while
+   * this session's heartbeat is fresh. Phase two is the SILENCE, and it has to
+   * come after the successor's registry row is persisted —
+   * {@link HandoffRetirement} is where that order (and the two defects that
+   * pinned it) is written down.
    *
-   * Returns a ROLLBACK for the case where the successor could not be started:
-   * a handoff that never happened must not leave the predecessor retired
-   * (silent timers, released claim) with nobody holding the orchestration.
-   * `undefined` means there was nothing to roll back.
+   * `undefined` means this session has nothing to retire.
    */
-  onHandoff?(): (() => void) | undefined;
+  onHandoff?(): HandoffRetirement | undefined;
+}
+
+/**
+ * The two follow-ups a RETIREMENT owes its caller.
+ *
+ * WHY IT IS TWO PHASES AND NOT ONE FLAG (2026-09-10, review round 1 — two P2s
+ * that were one root cause). Stopping everything at once broke two things:
+ *
+ *  - the relay record is written AFTER the successor's pane opens, and it goes
+ *    through `persist()` — which refuses to write for a retired session (two
+ *    sessions, one sidecar). Marking retirement first made the successor's own
+ *    registry row memory-only, lost on any restart;
+ *  - stopping the two wake-up timers is not something a rollback can undo by
+ *    itself (it needs a context), so a relay that never started its successor
+ *    left the session with no supervision and no revival clock — silent, and
+ *    still the holder.
+ *
+ * So the OUTSIDE resource (the worktree claim) is released up front — that is
+ * the half the successor's boot races — and the INWARD silence happens only
+ * once the record is safely on disk. A rollback then has exactly one thing to
+ * undo, because the other two never happened.
+ */
+export interface HandoffRetirement {
+  /** The successor is up AND its relay record is persisted: go silent now. */
+  committed(): void;
+  /** The successor never started: take the worktree back and carry on. */
+  rolledBack(): void;
 }

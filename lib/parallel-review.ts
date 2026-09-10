@@ -225,8 +225,127 @@ export const REVIEW_VERDICT_SCHEMA = {
   required: ["gate", "cwd", "docSync", "findings"],
 } as const;
 
+// ---------------------------------------------------------------------------
+// THE CHANGE INDEX
+//
+// WHY THIS EXISTS (2026-09-10). A round's reviewer was handed a commit range
+// and a bare list of file names, then left to find out what happened in them
+// one `git show` at a time. MEASURED over every reviewer session in this repo:
+// 92.5% of its assistant messages carried exactly ONE tool call (mean 1.08),
+// each round took 17-59 model round-trips at 11-13s, and tool execution was
+// 6% of the round — the rest was the model waiting on itself, once per file.
+// pi runs the tool calls of ONE assistant message IN PARALLEL, so the cure is
+// not a smaller diff: it is telling the reviewer what moved and handing it a
+// batch plan it can fire off in a single message.
+//
+// IT DOES NOT REPLACE READING HISTORY. The reviewer still runs
+// `git diff <range>` against real commits — this is an INDEX and a read plan,
+// never a copy of the diff. (That distinction is load-bearing: a per-reviewer
+// diff copy used to exist and was deleted, because a copy can drift from the
+// range it claims to describe.)
+// ---------------------------------------------------------------------------
+
+/** One row of `git diff --numstat`: what moved in one file. */
+export interface ChangeIndexRow {
+  file: string;
+  /** Added lines. Binary files report 0 (git's `-`). */
+  added: number;
+  /** Deleted lines. Binary files report 0 (git's `-`). */
+  deleted: number;
+}
+
+/** Rows listed individually before the rest are summarised. */
+export const CHANGE_INDEX_MAX_ROWS = 40;
+/** Changed lines a batch may carry before the next file starts a new one. */
+export const CHANGE_INDEX_BATCH_LINES = 400;
+/** Files a batch may carry, whatever their size. */
+export const CHANGE_INDEX_BATCH_FILES = 4;
+
 /**
- * Build the review prompt handed to the ONE reviewer.
+ * Group the changed files into read batches — a pure greedy bin packing.
+ *
+ * BIG FILES COME FIRST AND GET THEIR OWN BATCH, which is the point: a
+ * 600-line file and a 3-line one do not belong in one `git diff`, because the
+ * reviewer then has to read the small one to find the large one. Batches are
+ * capped by BOTH a line budget and a file count, so neither a few huge files
+ * nor a hundred tiny ones can produce an unusable command.
+ *
+ * Order is preserved inside a batch (the caller's order, which is largest
+ * first), so a batch reads top-down like the change itself.
+ */
+export function planChangeBatches(
+  rows: readonly ChangeIndexRow[],
+  limits: { maxLines?: number; maxFiles?: number } = {},
+): ChangeIndexRow[][] {
+  const maxLines = limits.maxLines ?? CHANGE_INDEX_BATCH_LINES;
+  const maxFiles = limits.maxFiles ?? CHANGE_INDEX_BATCH_FILES;
+  const batches: ChangeIndexRow[][] = [];
+  let current: ChangeIndexRow[] = [];
+  let lines = 0;
+  for (const row of rows) {
+    const cost = Math.max(1, row.added + row.deleted);
+    // An empty batch always takes the file: a single file larger than the
+    // budget must still be read, and refusing to start a batch for it would
+    // drop it from the plan entirely.
+    if (current.length > 0 && (lines + cost > maxLines || current.length >= maxFiles)) {
+      batches.push(current);
+      current = [];
+      lines = 0;
+    }
+    current.push(row);
+    lines += cost;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+/**
+ * The change index block injected into the reviewer's task text.
+ *
+ * It answers two questions the old task text left open — WHAT moved, and HOW
+ * to read it without spending a model round-trip per file — and it answers
+ * them with commands, not advice: the batches are ready to paste, and the
+ * batching is already done by the gate (philosophy one: the agent expresses
+ * intent, the gate performs the act).
+ *
+ * PURE over its inputs, so the wording and the batching are both testable
+ * without a repository.
+ */
+export function formatChangeIndex(rows: readonly ChangeIndexRow[], commitRange: string): string {
+  if (rows.length === 0) return "";
+  const shown = rows.slice(0, CHANGE_INDEX_MAX_ROWS);
+  const hidden = rows.length - shown.length;
+  const added = rows.reduce((n, r) => n + r.added, 0);
+  const deleted = rows.reduce((n, r) => n + r.deleted, 0);
+
+  const lines = [
+    `CHANGE INDEX — ${rows.length} file(s), +${added}/−${deleted} in ${commitRange} (largest first):`,
+    ...shown.map((r) => `- +${r.added}/−${r.deleted}  ${r.file}`),
+  ];
+  if (hidden > 0) {
+    lines.push(`- … and ${hidden} more file(s) not listed here (run \`git diff --stat ${commitRange}\` for the rest).`);
+  }
+
+  const batches = planChangeBatches(shown);
+  lines.push(
+    "",
+    "READ IT IN BATCHES — the tool calls of ONE message run IN PARALLEL, so several reads in one message cost",
+    "one model turn instead of one per file. These batches are pre-split (largest files first); issue the ones",
+    "you need in a single message, and skip what the change cannot affect:",
+    ...batches.map((b, i) => `${i + 1}. git diff ${commitRange} -- ${b.map((r) => r.file).join(" ")}`),
+  );
+  if (hidden > 0) {
+    lines.push(
+      `${batches.length + 1}. git diff ${commitRange} -- $(git diff --name-only ${commitRange} | tail -n +${
+        CHANGE_INDEX_MAX_ROWS + 1
+      })`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The base review prompt handed to the ONE reviewer.
  *
  * `isolation` is the SAFETY-CRITICAL argument. It says the reviewer runs as
  * its own judge child, so it may check the reviewed range out into a THROWAWAY
@@ -260,6 +379,13 @@ export function buildReviewPrompt(
    * reviewer can judge whether this round should exist at all.
    */
   polishReason?: { reason: string; at: string; round: number } | undefined,
+  /**
+   * THE CHANGE INDEX (see {@link formatChangeIndex}) — what moved, and the
+   * pre-split batch plan that reads it in one message instead of one
+   * round-trip per file. Absent ⇒ the bare file list is rendered instead
+   * (the cheap fallback: an older caller, a test fixture, an empty range).
+   */
+  changeIndex?: string,
 ): string {
   const streamPath = isolation?.streamPath;
   const range = isolation?.commitRange ?? "baseline..HEAD";
@@ -275,8 +401,18 @@ export function buildReviewPrompt(
         // its clauses here is how the two used to drift.
         ? "You are the reviewer of this round, and this round is INCREMENTAL. The \"Review scope for this round\" block below states the contract you work under — deep-audit the increment it names, re-check the findings it lists, and read its clauses on what a consistency scan is and when a settled conclusion may be reopened. That block is the authority; nothing here overrides it. Verify from the code (never guess), and report findings with file paths and line numbers."
         : `You are the reviewer of this round. Audit the COMMIT RANGE ${range} below — immutable git history, and the ONLY thing this round judges. Read it with \`git show\` / \`git diff ${range}\`, verify from the code (never guess), and report findings with file paths and line numbers.`,
-    `Changed files (${files.length}) in ${range}:`,
-    files.map((f) => `- ${f}`).join("\n"),
+    // THE CHANGE INDEX replaces the bare name list whenever prepare computed
+    // one: it carries every changed file WITH its line counts and a pre-split
+    // batch plan, so the plain list would be a second, poorer copy of the same
+    // fact. MEASURED (2026-09-10): without it the reviewer found out what
+    // happened one `git show` per message — 92.5% of its messages carried a
+    // single tool call, and tool execution was 6% of a 226-285s round.
+    ...(changeIndex && changeIndex.trim()
+      ? [changeIndex.trim()]
+      : [
+          `Changed files (${files.length}) in ${range}:`,
+          files.map((f) => `- ${f}`).join("\n"),
+        ]),
     "",
     "Review for: correctness, edge cases, test coverage quality, doc sync for the behavior you see, unintended side effects, and impossibility claims (TODO/FIXME/skipped tests).",
     // Commit isolation (2026-08-27 execution model): the change under review

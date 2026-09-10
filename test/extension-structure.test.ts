@@ -5588,46 +5588,56 @@ test("thinking-loop guard: the extension forwards the assistant stream, the stat
 //      while the revival path already had one.
 // The two are one root cause: retiring a session was a flag, and a flag does
 // not stop a timer, release a worktree, or survive `agent_settled`.
+//
+// WHAT IS PINNED HERE AND WHAT IS NOT. The relay's own behaviour — the order
+// of release / boot / silence, the rollback, the heirship claim travelling in
+// the successor's environment — is exercised END TO END by the fake world in
+// test/orchestrator-tools.test.ts, against the real tool. What stays here is
+// the half a tool-level test cannot see: the extension's wake-up paths, which
+// are event-driven and have no seam to fake.
 // ---------------------------------------------------------------------------
 
-test("a handoff retires the predecessor BEFORE the successor opens, and undoes it if the successor never starts", () => {
-  // ORDER IS THE FIX. The successor arms its gate in this same worktree, so a
-  // release that happens after the pane opens races its boot and loses.
-  const retireAt = SESSION_TOOLS_SRC.indexOf("const rollback = deps.onHandoff?.()");
-  const openAt = SESSION_TOOLS_SRC.indexOf("await openSessionPane(");
-  assert.ok(retireAt > 0, "doHandoff retires through the injected callback");
-  assert.ok(openAt > 0, "doHandoff opens the successor through the session factory");
-  assert.ok(retireAt < openAt, "the predecessor must release BEFORE the successor's pane opens");
+test("retiring is TWO phases, and the split is what makes each half safe", () => {
+  const start = SRC.indexOf("RETIRE (goal 7");
+  assert.ok(start > 0, "the retirement block is present");
+  const site = SRC.slice(start, start + 2400);
+  // Phase one, and it must come first: the successor's boot races a heartbeat
+  // we have not stopped yet.
+  assert.match(site, /releaseWorktree\(\)/, "phase one releases the worktree claim");
+  assert.ok(site.indexOf("releaseWorktree()") < site.indexOf("committed:"),
+    "release comes BEFORE the silence — the successor arms its gate in this same worktree");
+  // Phase two: the flag and the two timers, together, and only behind the
+  // commit callback (see the next test for why they cannot be earlier).
+  const committed = site.slice(site.indexOf("committed:"), site.indexOf("rolledBack:"));
+  assert.match(committed, /handedOffOrchestration = true/, "phase two silences the session");
+  assert.match(committed, /stopSupervisionTimer\(\)/, "the supervision timer goes quiet");
+  assert.match(committed, /stopRevivalTimer\(\)/, "the revival timer goes quiet");
+  // And a rollback therefore has exactly ONE thing to undo.
+  const rolled = site.slice(site.indexOf("rolledBack:"));
+  assert.match(rolled, /if \(claimsMainSidecar\(process\.env\)\) holdWorktree\(\)/,
+    "the rollback re-takes the claim — and only a session that claims one may write a heartbeat");
+  assert.doesNotMatch(rolled, /stopSupervisionTimer|stopRevivalTimer|handedOffOrchestration = false/,
+    "phase two never ran on this path, so there is nothing else to undo (the old single-phase rollback could not re-arm a stopped timer)");
+});
 
-  // A relay that never started a successor leaves exactly one holder.
-  const failed = SESSION_TOOLS_SRC.indexOf("if (!opened.ok)");
-  assert.ok(failed > 0);
-  assert.match(
-    SESSION_TOOLS_SRC.slice(failed, failed + 400),
-    /rollback\?\.\(\)/,
-    "a failed relay restores the predecessor as the holder",
-  );
-
-  // The retirement must NOT fire from the tool's execute wrapper: that marked
-  // the session retired before `relayPreconditions` had even looked at the
-  // handoff, so a refused relay stranded the orchestration with nobody on it.
+test("the relay record is persisted BEFORE the session goes silent", () => {
+  // MEASURED (review round 1, P2): `saveRuntime` goes through `persist()`,
+  // which refuses to write for a retired session — two sessions, one sidecar.
+  // Marking retirement first made the successor's own registry row memory-only.
+  // The behaviour is pinned end to end in test/orchestrator-tools.test.ts;
+  // this is the one-line invariant that makes it possible.
+  const saveAt = SESSION_TOOLS_SRC.indexOf("deps.saveRuntime({");
+  const commitAt = SESSION_TOOLS_SRC.indexOf("retirement?.committed()");
+  assert.ok(saveAt > 0 && commitAt > 0, "doHandoff persists the relay then commits the retirement");
+  assert.ok(saveAt < commitAt, "the record must be on disk before the writer is switched off");
+  // …and the retirement itself must not fire before the preconditions: the old
+  // shape ran it from the execute wrapper, so a relay refused for a missing
+  // approval or a short handoff document left a silent predecessor behind.
   assert.match(
     SESSION_TOOLS_SRC,
     /execute: guarded\(\(params\) => doHandoff\(deps, params\)\)/,
     "retiring before the preconditions are checked strands the orchestration",
   );
-});
-
-test("retiring means silent timers AND a released worktree — or the successor is refused", () => {
-  const start = SRC.indexOf("RETIRE (goal 7");
-  assert.ok(start > 0, "the retirement block is present");
-  const site = SRC.slice(start, start + 1600);
-  assert.match(site, /handedOffOrchestration = true/, "the wake-up guard is set");
-  assert.match(site, /stopSupervisionTimer\(\)/, "the supervision timer goes quiet");
-  assert.match(site, /stopRevivalTimer\(\)/, "the revival timer goes quiet");
-  assert.match(site, /releaseWorktree\(\)/, "the worktree claim is released, so the successor is not refused");
-  assert.match(site, /if \(claimsMainSidecar\(process\.env\)\) holdWorktree\(\)/,
-    "the rollback re-takes the claim — and only a session that claims one may write a heartbeat");
 });
 
 test("every wake-up path respects a retired session", () => {
@@ -5645,13 +5655,23 @@ test("every wake-up path respects a retired session", () => {
   assert.match(SRC.slice(supStart, supStart + 2000),
     /if \(handedOffOrchestration\) \{ stopSupervisionTimer\(\); return; \}/,
     "an already-armed supervision tick stops itself instead of waking the retired session");
+
+  // The sidecar writer too: two sessions writing one sidecar is what the
+  // exclusivity guard exists to prevent, and the successor is admitted into
+  // this worktree ON PURPOSE — so the predecessor stops writing.
+  const persistAt = SRC.indexOf("function persist(ctx?: ExtensionContext)");
+  assert.ok(persistAt > 0);
+  assert.match(SRC.slice(persistAt, persistAt + 2500), /if \(handedOffOrchestration\) return;/,
+    "a retired session stops writing the sidecar the successor now owns");
 });
 
-test("the successor names the session it replaces, and the guard honours the heirship", () => {
+test("the successor's heirship is read from its own environment, and the guard honours it", () => {
   assert.match(SRC, /process\.env\[PREDECESSOR_SESSION_ENV\]/,
     "the takeover claim is read from the successor's own environment");
   assert.match(SRC, /\.\.\.\(successorOf \? \{ successorOf \} : \{\}\)/,
     "and handed to the decision as the heirship relation");
+  assert.match(SRC, /ownSessionId: \(\) => state\.sessionId \?\? undefined/,
+    "the predecessor's OWN id is what travels (state.sessionId is string|null, the contract is string|undefined)");
   assert.match(EXCLUSIVITY_SRC, /if \(heir && holder\.sessionId === heir\) return \{ ok: true \}/,
-    "the decision itself lives in lib/session-exclusivity.ts");
+    "the decision itself lives in lib/session-exclusivity.ts, unit-tested there");
 });
