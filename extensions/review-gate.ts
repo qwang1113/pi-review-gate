@@ -2440,14 +2440,20 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         return { ok: false, text: `worktree 结算失败（git ${sub ?? "?"}）：${result.output.trim().slice(0, 600)}` };
       }
+      // PRINTED ON BOTH PATHS (round-6 P1): the discard branch used to drop
+      // this note entirely, so a failed reclamation was invisible AND the child
+      // was already closed — its worktree could never be settled again.
       const leftover = reclamation.length > 0
-        ? `\n（合并已完成，但 checkout 回收有报错，请人工看一眼：${reclamation.join(" / ")}）`
+        ? `\n（⚠️ 回收有报错，checkout 或分支可能还在：${reclamation.join(" / ")}）`
         : "";
       return {
         ok: true,
-        text: settlement === "merge"
-          ? `已把 ${childId} 的改动合并到当前分支（**已暂存、未提交** —— 看过再 commit）。worktree 与其分支已回收。` + leftover
-          : `已回收 ${childId} 的 worktree 与分支（丢弃）。`,
+        text: (settlement === "merge"
+          ? `已把 ${childId} 的改动合并到当前分支（**已暂存、未提交** —— 看过再 commit）。\n` +
+            `它的 worktree 与分支 \`${childWorktreeBranch(childId)}\` **先保留**：这次合并还只是 staged，` +
+            `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
+            `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 回收它们。`
+          : `已回收 ${childId} 的 worktree 与分支（丢弃）。`) + leftover,
       };
     },
     knownRepoRoots: () => knownRepoRoots(),

@@ -73,9 +73,13 @@ test("merge covers ALL the leftovers, then merges without committing — and the
   // was impossible. This form can be aborted, and the result is still STAGED.
   assert.deepEqual([...plan.steps[2]!], ["-C", REPO, "merge", "--no-commit", "--no-ff", childWorktreeBranch(CHILD)]);
   assert.ok(!plan.steps[2]!.includes("--squash"), "a squash cannot be rolled back");
-  // AND the reclamation, which the receipt claimed while nothing did it.
-  assert.deepEqual(plan.steps.slice(3).map((a) => [...a]), removeWorktreeArgv(REPO, CHILD).map((a) => [...a]));
-  // Decided BEFORE the merge runs, not discovered in it.
+  // AND the reclamation is NOT here (round-6 P2): this merge is `--no-commit`,
+  // so at this point the child's work is STAGED and nothing else — deleting
+  // its checkout and branch would leave a `merge --abort` with no way back to
+  // it except the reflog. `discard` reclaims them once the merge is committed.
+  assert.equal(plan.steps.length, 3, "commit-leftovers, merge — and NOT the reclamation");
+  assert.ok(!plan.steps.some((s) => s[2] === "worktree"),
+    "a staged merge must not delete the only other copy of the work");
   assert.deepEqual([...(plan.onConflict ?? [])].map((a) => [...a]), [[...abortMergeArgv(REPO)]]);
 });
 

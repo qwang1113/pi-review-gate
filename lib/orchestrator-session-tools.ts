@@ -614,9 +614,10 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
       "picks the pane from the WINDOW's own layout (three columns: the first two hold one session " +
       "each, the third shares its height), injects the orchestration id " +
       "so the child's wake-ups survive a relay, starts it in loop mode in the repo its task " +
-      "declares (same-repo children are serialized by the gate; only different repos run " +
-      "in parallel), and registers the pane — a pane nobody " +
-      "registered cannot be addressed later. Requires a plan the USER approved.",
+      "declares. A second child in the SAME repo gets its OWN `git worktree` on its own branch " +
+      "(2026-09-10) so same-repo tasks run in parallel; if that checkout cannot be created the " +
+      "spawn is REFUSED rather than putting two writers in one checkout. Then it registers the " +
+      "pane — a pane nobody registered cannot be addressed later. Requires a plan the USER approved.",
     parameters: Type.Object({
       taskId: Type.String({ description: "Plan task id this child will work on" }),
       task: Type.Optional(Type.String({ description: "Opening message sent to the child right away" })),
@@ -702,9 +703,11 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
           "What happens to a child's ISOLATED CHECKOUT, when it had one (it gets one whenever " +
           "another child was already working in the same repo). `keep` (default) leaves it and says " +
           "so — the work in it is often the only copy. `merge` commits whatever the child left " +
-          "uncommitted and squash-merges its branch into YOUR checkout, staged and uncommitted; a " +
-          "conflict aborts and leaves your checkout exactly as it was, with the child's work still " +
-          "in its own worktree. `discard` removes the checkout and its branch.",
+          "uncommitted and merges its branch into YOUR checkout, STAGED and uncommitted (use `git " +
+          "merge --abort` to undo it); the child's worktree and branch are then LEFT IN PLACE, " +
+          "because a staged merge is not a committed one — reclaim them with `discard` once you have " +
+          "committed. A conflict aborts and leaves your checkout exactly as it was, with the child's " +
+          "work still in its own worktree. `discard` removes the checkout and its branch.",
       })),
     }),
     execute: guarded((params) => doClose(deps, params)),

@@ -92,8 +92,11 @@ export function createWorktreeArgv(repoRoot: string, childId: string): WorktreeA
  *  - `keep`    — leave it, and say so in the receipt. The default, because the
  *                work in it is often the only copy and a default that deletes
  *                is a default that eventually deletes something wanted.
- *  - `merge`   — commit whatever the child left uncommitted, then squash it
- *                into the manager's checkout as ONE commit.
+ *  - `merge`   — commit the child's leftovers, then merge its branch into the
+ *                manager's checkout UNCOMMITTED (staged, so the manager sees
+ *                exactly what arrived; `--no-commit --no-ff` is what makes the
+ *                conflict rollback possible at all). The child's checkout is
+ *                NOT reclaimed here — see `removeWorktreeArgv`.
  *  - `discard` — remove the checkout and its branch.
  */
 export const WORKTREE_SETTLEMENTS = Object.freeze(["keep", "merge", "discard"] as const);
@@ -104,8 +107,8 @@ export type WorktreeSettlement = (typeof WORKTREE_SETTLEMENTS)[number];
  *
  * A child at delivery station `precommit` is explicitly allowed to leave its
  * work uncommitted — the station says the GATE's checks pass and the human
- * commits. So the manager cannot assume a clean branch, and a squash-merge of
- * an uncommitted worktree merges nothing at all.
+ * commits. So the manager cannot assume a clean branch, and a merge of an
+ * uncommitted worktree would bring nothing at all.
  *
  * `add -A` THEN `commit`, never `commit -am` (round-5 P1): `-a` stages only
  * MODIFIED and DELETED TRACKED files, so every file the child CREATED would
@@ -147,7 +150,7 @@ export function mergeWorktreeArgv(repoRoot: string, childId: string): WorktreeAr
   return ["-C", repoRoot, "merge", "--no-commit", "--no-ff", childWorktreeBranch(childId)];
 }
 
-/** Abort a conflicted squash-merge, leaving the manager's checkout as it was. */
+/** Abort a conflicted merge, leaving the manager's checkout as it was. */
 export function abortMergeArgv(repoRoot: string): WorktreeArgv {
   return ["-C", repoRoot, "merge", "--abort"];
 }
@@ -158,13 +161,19 @@ export function looksLikeMergeConflict(output: string): boolean {
 }
 
 /**
- * THE RECLAMATION, and it is two commands because git keeps two things.
+ * The RECLAMATION, and it is two commands because git keeps two things.
  *
  * `--force` on the remove: the child may have left untracked build output, and
  * a worktree that refuses to be removed is a worktree nobody ever reclaims.
- * The branch is deleted separately and WITHOUT `-D`'s safety being needed —
- * by the time this runs the work has been merged or the manager said discard,
- * and either way the decision was explicit.
+ * The branch is deleted separately because it outlives the directory.
+ *
+ * NOT RUN AS PART OF A MERGE (round-6 P2). The merge this module plans is
+ * `--no-commit`, so at the moment it returns the child's work is STAGED and
+ * nothing else — delete its checkout and branch there and a `merge --abort` or
+ * a `reset` leaves that work reachable only through the reflog, which is
+ * exactly what "the work in it is often the only copy" forbids. A merge
+ * settles the CONTENT; the checkout is reclaimed by an explicit `discard`
+ * once the merge is committed.
  */
 export function removeWorktreeArgv(repoRoot: string, childId: string): WorktreeArgv[] {
   return [
@@ -203,10 +212,6 @@ export function planSettlement(
         steps: [
           ...commitLeftoversArgv(worktreePath, taskId),
           mergeWorktreeArgv(repoRoot, childId),
-          // AND THE RECLAMATION, which round-5 P1 caught missing: the receipt
-          // claimed the worktree and its branch were reclaimed while nothing
-          // removed them, so every merge left two of them behind.
-          ...removeWorktreeArgv(repoRoot, childId),
         ],
         // Back to exactly what the manager had. The CHILD's work is untouched
         // (its worktree and branch are still there), so a conflict costs a
