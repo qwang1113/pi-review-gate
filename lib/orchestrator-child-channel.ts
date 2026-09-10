@@ -63,6 +63,34 @@ import type { DeliveryStation } from "./delivery-station.ts";
 /** How often the channel is re-read while a question is outstanding. */
 export const ANSWER_POLL_MS = 750;
 
+/**
+ * What this child reports on one heartbeat/turn — pure, so it is testable.
+ *
+ * Order is load-bearing: a forced state (a dialog open ⇒ waiting-input, an
+ * instruct ⇒ …) wins; then a gate-started wait (`waiting-judge`); then the
+ * "alive" readings — streaming, or waiting on a background subagent the
+ * child itself spawned (2026-09-09, lib/background-wait.ts — waiting on its
+ * own subagent is work, not a stop); then a recorded completion; and only
+ * then `idle`.
+ */
+export function decideReportedChildState(args: {
+  /** A caller-chosen state beats every reading (a dialog just opened…). */
+  forced?: ChildReportedState;
+  /** Blocked on a judge round / full precommit the gate itself started. */
+  judging: boolean;
+  /** `ctx.isIdle() === false`, or pending messages. */
+  streaming: boolean;
+  /** At least one background Agent is still waiting on its terminal signal. */
+  waitingOnBackground: boolean;
+  /** When the child's own gate recorded a `declare_done`. */
+  completedAt?: string;
+}): ChildReportedState {
+  if (args.forced !== undefined) return args.forced;
+  if (args.judging) return "waiting-judge";
+  if (args.streaming || args.waitingOnBackground) return "working";
+  return args.completedAt ? "done" : "idle";
+}
+
 /** Everything the child side needs to talk on its channel. */
 export interface ChildChannelBinding {
   io: ChannelIO;

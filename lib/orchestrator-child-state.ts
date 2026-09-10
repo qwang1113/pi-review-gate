@@ -335,10 +335,12 @@ export interface ChildHealth {
   /** What it is blocked on while `waiting-judge` (`reviewer`, `precommit`…). */
   waitingFor?: string;
   /**
-   * Seconds since the last FORWARD PROGRESS, for a `working` child only (E).
-   * The distinguishing reading between "turning the crank" (small) and "wedged
-   * in place" (growing) — a `working` child is otherwise indistinguishable from
-   * a hang. Purely informational: it never makes a child newsworthy.
+   * Seconds since the last FORWARD PROGRESS, for a `working` or `idle` child
+   * (E, widened to `idle` 2026-09-09). For `working` it separates "turning
+   * the crank" (small) from "wedged in place" (growing); for `idle` it is
+   * the only number that separates "its turn just ended" from "it stopped
+   * long ago" (the heartbeat time cannot — it refreshes whether or not the
+   * child stepped). Purely informational: it never makes a child newsworthy.
    */
   progressStaleSeconds?: number;
   /**
@@ -387,10 +389,14 @@ export function childHealth(observation: ChildObservation): ChildHealth {
     ...(state === "waiting-judge" && projection.lastState?.waitingFor !== undefined
       ? { waitingFor: projection.lastState.waitingFor }
       : {}),
-    // E — the progress reading, only for a `working` child (the one state that
-    // otherwise cannot be told apart from a hang). It is a READING, never a
-    // wake reason: isNewsworthy is untouched.
-    ...(state === "working" && progressStale !== undefined
+    // E — the progress reading, for a `working` child (separating "turning
+    // the crank" from a wedge) AND now for an `idle` one (2026-09-09: the
+    // only number that tells a turn that just ended from a child that truly
+    // stopped — the idle line used to show the HEARTBEAT time, which is
+    // meaningless next to "停下了": the heartbeat runs whether or not the
+    // child stepped). A READING, never a wake reason: isNewsworthy is
+    // untouched.
+    ...((state === "working" || state === "idle") && progressStale !== undefined
       ? { progressStaleSeconds: progressStale }
       : {}),
     // B3 — and when this `working` was reached by OVERRULING the child's own
@@ -468,6 +474,15 @@ export function describeChildStateDetailed(health: ChildHealth): string {
   if (health.state === "waiting-input" && health.stateForSeconds !== undefined) {
     return `${base}（已等 ${health.stateForSeconds}s）`;
   }
+  if (health.state === "idle" && health.progressStaleSeconds !== undefined) {
+    // 2026-09-09: an `idle` line must carry the forward-progress reading.
+    // Without it the line shows the HEARTBEAT time — "最后活动 11s 前" next
+    // to "停下了", a contradiction, because the heartbeat runs every ~40s
+    // whether or not the child stepped. The reading separates "its turn just
+    // ended" from "it stopped 25 minutes ago", which is the whole question
+    // a supervisor has to answer before nudging.
+    return `${base}（自上次推进 ${health.progressStaleSeconds}s）`;
+  }
   if (health.state === "working") {
     // B3 — the overruled `idle` report is named in the line itself, so the
     // supervisor reads BOTH facts: the child said it stopped, and its own
@@ -502,7 +517,11 @@ export function formatChildHealth(list: readonly ChildHealth[]): string {
   if (list.length === 0) return "（本编排目前没有存活的子会话）";
   return list
     .map((h) => {
-      const quiet = h.quietForSeconds === undefined ? "" : `，已静默 ${h.quietForSeconds}s`;
+      // Same rule as the supervisor receipt (2026-09-09): a line that carries
+      // the forward-progress reading does not also print the heartbeat time.
+      const quiet = h.progressStaleSeconds !== undefined || h.quietForSeconds === undefined
+        ? ""
+        : `，已静默 ${h.quietForSeconds}s`;
       const dialog = h.dialogTitle ? `，框：${h.dialogTitle}` : "";
       const ctx = h.contextPercent === undefined ? "" : `，上下文 ${h.contextPercent}%`;
       return `- ${h.childId}：${describeChildStateDetailed(h)}${quiet}${dialog}${ctx}`;

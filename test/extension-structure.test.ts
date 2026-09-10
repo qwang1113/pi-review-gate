@@ -17,6 +17,8 @@ const GATE_MODES_SRC = readFileSync(join(ROOT, "lib", "gate-modes.ts"), "utf8");
 const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
 /** The audit-round engine: one round, four kinds, one cursor write. */
 const AUDIT_ROUND_SRC = readFileSync(join(ROOT, "lib", "audit-round.ts"), "utf8");
+/** The child side of the channel — where the state derivation lives (2026-09-09). */
+const CHILD_CHANNEL_SRC = readFileSync(join(ROOT, "lib", "orchestrator-child-channel.ts"), "utf8");
 /** The ship authority every ship path shares, and the sidecar writer. */
 const GATE_STATE_SRC = readFileSync(join(ROOT, "lib", "gate-state.ts"), "utf8");
 const JUDGE_SESSION_TOOLS = new Set(["judge_close", "judge_wait"]);
@@ -2254,7 +2256,10 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // neither, every reporting function below is a silent no-op.
   const bindingAt = SRC.indexOf("function childBinding(");
   assert.ok(bindingAt > 0, "the child side needs a binding to its own channel");
-  const binding = SRC.slice(bindingAt, bindingAt + 1400);
+  // Wide enough for the whole function: the ownership check (2026-09-09) and
+  // its why-comment sit between the orchestration branch and the judge
+  // fallback, so a tight window would miss the fallback it must also assert.
+  const binding = SRC.slice(bindingAt, bindingAt + 2600);
   assert.match(binding, /supervisionTarget\(\)/,
     "addressed to the ORCHESTRATION, so a handoff never retires the channel");
   assert.match(binding, /STATE_VARIANT_ENV/, "and to this session's own child id");
@@ -2265,18 +2270,32 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // The report itself is pi's own truth, never a screen.
   const reportAt = SRC.indexOf("function reportChildState(");
   assert.ok(reportAt > 0, "the child reports its own state");
-  const report = SRC.slice(reportAt, reportAt + 1200);
+  const report = SRC.slice(reportAt, reportAt + 1600);
   assert.match(report, /ctx\.isIdle\?\.\(\) === false/, "streaming is asked, not inferred");
+  // 2026-09-09: the derivation itself moved to lib/orchestrator-child-channel.ts
+  // (decideReportedChildState — pure, behaviour-tested); the wiring here feeds
+  // it the four facts. The branch assertions that used to read this window now
+  // read that function's source below, so the rules cannot quietly disappear.
+  assert.match(report, /decideReportedChildState\(/, "the pure derivation is called, not re-derived");
   assert.match(report, /state\.completion\?\.at/,
     "R3-5: a finished child is `done`, and one that merely stopped is `idle`");
-  assert.match(report, /\? "done"/);
-  assert.match(report, /: "idle"/);
+  assert.match(report, /hasBackgroundWaits\(backgroundWaits\)/,
+    "waiting on its own background agent feeds the derivation");
   // Round-4 P0 — a judge round of its own is neither `working` nor `idle`.
   assert.match(report, /activeJudgeWait\(\)/,
     "a judge THIS session dispatched is a fact the gate holds, never something to infer from silence");
-  assert.match(report, /"waiting-judge"/,
-    "and it is reported as its own state, so a healthy review round is never read as a hang");
   assert.doesNotMatch(report, /capture-pane|screenLooksBusy/, "no screen is consulted, in any state");
+  // The branch rules, where they live now — order is load-bearing (forced >
+  // waiting-judge > working [streaming OR background wait] > done > idle).
+  const decideAt = CHILD_CHANNEL_SRC.indexOf("export function decideReportedChildState(");
+  assert.ok(decideAt > 0, "the pure derivation lives in lib/orchestrator-child-channel.ts");
+  const decide = CHILD_CHANNEL_SRC.slice(decideAt, decideAt + 900);
+  assert.match(decide, /"waiting-judge"/,
+    "a healthy review round is reported as its own state, never read as a hang");
+  assert.match(decide, /streaming \|\| args\.waitingOnBackground/,
+    "streaming OR waiting-on-background is working");
+  assert.match(decide, /\? "done"/);
+  assert.match(decide, /: "idle"/);
 
   // Round-4 P0 — THE HEARTBEAT IS A TIMER, not an agent event. This is the
   // whole fix: `agent_settled` / `turn_end` do not fire during a judge_wait,

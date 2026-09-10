@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import {
   appendRecord,
   channelDir,
+  channelOwnerId,
   channelPathFor,
   isStalled,
   projectChannel,
@@ -35,6 +36,7 @@ import {
 import {
   acknowledgeInstruct,
   askThroughChannel,
+  decideReportedChildState,
   pendingInstructions,
   reportState,
   type ChildChannelBinding,
@@ -170,6 +172,74 @@ test("silence while the pane lives is a stall; silence with no pane, or no pane 
   assert.equal(isStalled(projection, true, T0), true);
   assert.equal(isStalled(projection, false, T0), false, "a dead child is dead, not stalled");
   assert.equal(isStalled(projection, undefined, T0), false, "an unreadable pane list claims nothing");
+});
+
+test("state records from a FOREIGN session are ignored — the owner alone decides", () => {
+  const owner = "rg-child-c1";
+  const records: ChannelRecord[] = [
+    { kind: "state", from: "child", at: "t1", state: "working", sessionId: owner },
+    { kind: "state", from: "child", at: "t2", state: "idle", sessionId: "01a0-foreign-1" },
+    { kind: "state", from: "child", at: "t3", state: "idle", sessionId: "01a0-foreign-2" },
+    { kind: "state", from: "child", at: "t4", state: "working", sessionId: owner },
+  ];
+  const projection = projectChannel(records);
+  assert.equal(channelOwnerId(records), owner);
+  assert.equal(projection.lastState?.state, "working",
+    "the owner's newest report wins, not a foreign idle heartbeat");
+  assert.equal(projection.lastActivityAt, "t4", "foreign heartbeats do not refresh activity either");
+});
+
+test("with no named owner every record is kept — the pre-filter behaviour", () => {
+  const records: ChannelRecord[] = [
+    { kind: "state", from: "child", at: "t1", state: "working" },
+    { kind: "state", from: "child", at: "t2", state: "idle" },
+  ];
+  assert.equal(channelOwnerId(records), undefined);
+  const projection = projectChannel(records);
+  assert.equal(projection.lastState?.state, "idle", "legacy records without ids keep folding as before");
+});
+
+test("the OWNER is the first state record that names a session — a foreign record cannot claim the channel", () => {
+  const owner = "rg-child-c1";
+  const records: ChannelRecord[] = [
+    { kind: "state", from: "child", at: "t1", state: "working", sessionId: owner },
+    { kind: "request", from: "child", at: "t2", requestId: "r1", dialogKind: "confirm", title: "q", options: ["A"] },
+    { kind: "state", from: "child", at: "t3", state: "idle", sessionId: "01a0-foreign-1" },
+  ];
+  assert.equal(channelOwnerId(records), owner, "non-state records are skipped when hunting the owner");
+});
+
+test("a foreign idle AFTER the owner's last report cannot flip the projection (the filter actually bites)", () => {
+  // The order that used to defeat the assertion: the OWNER writes last, so a
+  // projection that ignored the filter entirely still returns "working". Here
+  // the FOREIGN idle is the newest state record — without the filter the
+  // projection would read idle and the manager would see "停下了".
+  const owner = "rg-child-c1";
+  const records: ChannelRecord[] = [
+    { kind: "state", from: "child", at: "t1", state: "working", sessionId: owner },
+    { kind: "state", from: "child", at: "t2", state: "idle", sessionId: "01a0-foreign-1", lastProgressAt: "t0" },
+  ];
+  const projection = projectChannel(records);
+  assert.equal(projection.lastState?.state, "working", "the owner's working outlives the foreign idle");
+  assert.equal(projection.lastState?.sessionId, owner);
+  // And the foreign record does not keep the channel looking freshly active.
+  assert.equal(projection.lastActivityAt, "t1");
+});
+
+test("what a child reports on a heartbeat: a background wait is working, not idle (2026-09-09)", () => {
+  assert.equal(decideReportedChildState({ judging: false, streaming: true, waitingOnBackground: false }), "working");
+  // The measured false report: turn ended (not streaming), no completion —
+  // but a background agent the child spawned is still out.
+  assert.equal(decideReportedChildState({ judging: false, streaming: false, waitingOnBackground: true }), "working",
+    "waiting on its own subagent is work, not a stop");
+  assert.equal(decideReportedChildState({ judging: false, streaming: false, waitingOnBackground: false }), "idle");
+  assert.equal(decideReportedChildState({ judging: true, streaming: false, waitingOnBackground: true }), "waiting-judge",
+    "a gate-started wait outranks a background one");
+  assert.equal(decideReportedChildState({ judging: false, streaming: true, waitingOnBackground: true, completedAt: "t9" }), "working",
+    "streaming outranks a recorded completion — done is for a settled child");
+  assert.equal(decideReportedChildState({ judging: false, streaming: false, waitingOnBackground: false, completedAt: "t9" }), "done");
+  assert.equal(decideReportedChildState({ judging: false, streaming: true, waitingOnBackground: true, forced: "waiting-input" }), "waiting-input",
+    "a forced state (an open dialog) beats every reading");
 });
 
 // ---------------------------------------------------------------------------

@@ -473,13 +473,22 @@ function formatHealthLines(health: readonly ChildHealth[]): string {
   if (health.length === 0) return "（本编排目前没有存活的子会话）";
   return health
     .map((h) => {
-      const quiet = h.quietForSeconds === undefined ? "未上报过" : `${h.quietForSeconds}s 前`;
+      const described = describeChildStateDetailed(h);
+      // The heartbeat time is dropped when the line already carries a forward-
+      // progress reading (working / idle rows, 2026-09-09): the heartbeat
+      // refreshes every ~40s no matter what, so "最后活动 11s 前" next to
+      // "停下了" was a contradiction, not information.
+      const quiet = h.progressStaleSeconds !== undefined
+        ? ""
+        : h.quietForSeconds === undefined
+          ? "，最后活动 未上报过"
+          : `，最后活动 ${h.quietForSeconds}s 前`;
       const dialog = h.dialogTitle ? `，框：${h.dialogTitle}` : "";
       const ctx = h.contextPercent === undefined ? "" : `，上下文 ${h.contextPercent}%`;
       // The colour is the same pure function the pane border uses, so the row
       // a supervisor reads and the rectangle a human sees are the same child.
       const color = paneColorFor(h.childId).name;
-      return `- [${color}] ${h.childId}：${describeChildStateDetailed(h)}，最后活动 ${quiet}${dialog}${ctx}`;
+      return `- [${color}] ${h.childId}：${described}${quiet}${dialog}${ctx}`;
     })
     .join("\n");
 }

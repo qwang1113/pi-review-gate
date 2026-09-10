@@ -872,8 +872,55 @@ export interface ChannelProjection {
  * child crashed between the two) must stay pending, or a recovery would drop
  * it. The settle record is the child saying "this is over", and it is the
  * only thing that closes a request.
+ *
+ * STATE RECORDS ARE FILTERED TO THE CHANNEL'S OWNER first (2026-09-09). A
+ * channel file is one child's conversation with its orchestrator, but a
+ * process the child spawned — a background subagent via the Agent tool —
+ * INHERITS the orchestration env vars, so its own gate binds to the same
+ * channel and appends its own state heartbeats. The first state record that
+ * carries a session id names the channel's owner; every other session's
+ * records are foreign and ignored. Without the filter a finished subagent's
+ * idle heartbeat overwrote the owner's working report and the project
+ * manager read "停下了（没有 declare_done）" for a child that was streaming
+ * (measured: 12 of 363 channels polluted; one PM session received the false
+ * report 115 times).
  */
 export function projectChannel(records: readonly ChannelRecord[]): ChannelProjection {
+  const owner = channelOwnerId(records);
+  const own = owner === undefined
+    // No state record ever named an owner (an older build, or a channel that
+    // only ever saw requests) ⇒ nothing to filter: every record is treated
+    // as the owner's, exactly as before the filter existed.
+    ? records
+    // The owner's own records, records that never named a session (the
+    // owner's own early heartbeats, written before its sidecar carried the
+    // session id), and every non-state record (requests, answers,
+    // instructs… never carry a session id) — but never a record from a
+    // DIFFERENT named session (the pollution this filter exists to drop:
+    // a spawned subagent inherits the env vars, binds the same channel and
+    // appends its own idle heartbeats over the owner's reports).
+    : records.filter((r) => r.kind !== "state" || r.sessionId === undefined || r.sessionId === owner);
+  return projectOwnedRecords(own);
+}
+
+/**
+ * THE CHANNEL'S OWNER — the session id of the first state record that has
+ * one. `undefined` when no state record ever named a session.
+ *
+ * "First" is safe by construction: a child writes its first state report
+ * when it boots, and a subagent is spawned BY that child later, so the
+ * owner's record always precedes any foreign one.
+ */
+export function channelOwnerId(records: readonly ChannelRecord[]): string | undefined {
+  for (const record of records) {
+    if (record.kind === "state" && record.sessionId !== undefined && record.sessionId !== "") {
+      return record.sessionId;
+    }
+  }
+  return undefined;
+}
+
+function projectOwnedRecords(records: readonly ChannelRecord[]): ChannelProjection {
   const settled = new Set<string>();
   const injected = new Set<string>();
   for (const record of records) {

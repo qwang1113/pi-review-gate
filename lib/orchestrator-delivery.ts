@@ -139,6 +139,25 @@ export function childSessionId(childId: string): string {
 }
 
 /**
+ * Is THIS process the pane the gate opened for `childId`? (2026-09-09)
+ *
+ * A child SPAWNS processes — background subagents — that INHERIT the
+ * orchestration env vars verbatim, so the env alone cannot name the owner:
+ * the pi session id can. The gate opens the child pane with the deterministic
+ * {@link childSessionId} (`--session-id rg-child-<childId>`); a subagent runs
+ * under a pi-generated random uuid. Without this check the subagent's gate
+ * bound to its parent's channel and its idle heartbeats overwrote the
+ * parent's own reports (measured: 12 of 363 channels polluted).
+ *
+ * `sessionId` unknown (the extension has not learned its own id yet) keeps
+ * the pre-check behaviour: the env alone decides.
+ */
+export function isOwnedChildPane(childId: string, sessionId: string | null | undefined): boolean {
+  if (sessionId === null || sessionId === undefined) return true;
+  return sessionId === childSessionId(childId);
+}
+
+/**
  * The argv a child pane runs: pi with the task file as its first message.
  *
  * `taskRef` is the `@file` reference as it should appear in the argv — a

@@ -180,6 +180,7 @@ import {
 import {
   acknowledgeInstruct,
   askThroughChannel,
+  decideReportedChildState,
   pendingInstructions,
   reportState,
   type ChannelDialogOutcome,
@@ -229,6 +230,13 @@ import {
 import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
 import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
+import { isOwnedChildPane } from "../lib/orchestrator-delivery.ts";
+import {
+  foldBackgroundWaits,
+  hasBackgroundWaits,
+  NO_BACKGROUND_WAITS,
+  type BackgroundWaits,
+} from "../lib/background-wait.ts";
 // The delivery probe a judge spawn shares with an orchestration spawn: same
 // polling, same evidence, same verdict — only the channel path differs.
 import { channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-kit.ts";
@@ -1572,6 +1580,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     const orchestrationId = supervisionTarget();
     const childId = process.env[STATE_VARIANT_ENV]?.trim();
     if (orchestrationId && childId) {
+      // Only the pane the gate itself opened may call itself this child. A
+      // background subagent inherits the env vars but runs under a random pi
+      // session id, not the deterministic rg-child-<childId> — the check is
+      // in lib/orchestrator-delivery.ts (isOwnedChildPane) and it is what
+      // keeps the subagent's gate from binding its parent's channel and
+      // overwriting the parent's reports with idle heartbeats (2026-09-09).
+      if (!isOwnedChildPane(childId, state.sessionId)) {
+        return undefined;
+      }
       return {
         io: channelIO,
         target: { orchestrationId, childId },
@@ -1732,13 +1749,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     const streaming = ctx.isIdle?.() === false || ctx.hasPendingMessages?.() === true;
     const percent = contextPercentOf(ctx as unknown as { getContextUsage?: () => unknown });
     const judging = activeJudgeWait();
-    const reported: ChildReportedState = opts.state ?? (judging
-      ? "waiting-judge"
-      : streaming
-        ? "working"
-        : state.completion?.at
-          ? "done"
-          : "idle");
+    // Waiting on a background agent the child itself spawned is work, not a
+    // stop (lib/background-wait.ts): without it, a child whose turn ended
+    // while its subagent ran reported `idle` and the orchestrator read
+    // "停下了（没有 declare_done）" for a wait it started itself.
+    const waitingOnBackground = hasBackgroundWaits(backgroundWaits);
+    const reported = decideReportedChildState({
+      forced: opts.state,
+      judging: judging !== undefined,
+      streaming,
+      waitingOnBackground,
+      completedAt: state.completion?.at,
+    });
     const now = Date.now();
     const changed = reported !== lastReportedChildState;
     if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
@@ -1796,6 +1818,30 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** Stamp forward progress. Called from the agent-event handlers, not the heartbeat. */
   function noteChildProgress(): void {
     if (childBinding()) lastChildProgressAt = Date.now();
+  }
+  /**
+   * Background agents this session spawned that have not reported a terminal
+   * state yet (lib/background-wait.ts owns the start/end contract). While
+   * non-empty the child reports `working` even when its own turn has ended —
+   * waiting on its own subagent is work, not a stop.
+   */
+  let backgroundWaits: BackgroundWaits = NO_BACKGROUND_WAITS;
+  /** Feed one tool result into the background-wait fold (see the module). */
+  function observeBackgroundToolResult(event: {
+    toolName: string;
+    isError: boolean;
+    content: readonly { type?: string; text?: string }[];
+    input?: Record<string, unknown>;
+  }): void {
+    const text = event.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
+    // pi-subagents' `run_in_background` defaults to true; only an explicit
+    // false is a foreground call, whose result can never start a wait.
+    const raw = event.input?.run_in_background;
+    const runInBackground = raw === true ? true : raw === false ? false : undefined;
+    backgroundWaits = foldBackgroundWaits(backgroundWaits, {
+      kind: "tool_result",
+      tool: { toolName: event.toolName, isError: event.isError === true, text, runInBackground },
+    });
   }
   /**
    * Instructions this session has already acknowledged as RECEIVED.
@@ -4171,6 +4217,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   pi.on("tool_result", async (event, ctx) => {
     // E — a completed tool call is forward progress for the child health reading.
     noteChildProgress();
+    // Background-agent wait tracking: a launch starts a wait, a terminal
+    // report ends one (lib/background-wait.ts). Runs before every return
+    // below, like the progress note above it.
+    observeBackgroundToolResult(event);
     // 0. JUDGE SIDE: the round's mechanical inspection evidence. Folded FIRST,
     // before any of the branches below can return, because every one of them
     // returns early and a miss here would read as "this judge inspected
@@ -8957,6 +9007,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (event.message.role !== "assistant") return;
     thinkingLoopCtx = ctx;
     thinkingLoop.endTurn();
+  });
+
+  // Background-agent wait tracking, message side: a `subagent-notification`
+  // custom message is pi-subagents' terminal signal for one or more agents
+  // (details.id, plus details.others for a group) — see lib/background-wait.ts.
+  pi.on("message_end", (event) => {
+    const custom = event.message as { customType?: string; details?: unknown };
+    if (custom.customType !== "subagent-notification") return;
+    backgroundWaits = foldBackgroundWaits(backgroundWaits, {
+      kind: "message",
+      message: { customType: custom.customType, details: custom.details },
+    });
   });
 
   pi.registerMarkdownTransformer((markdown, context) =>
