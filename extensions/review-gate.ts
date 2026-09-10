@@ -49,7 +49,7 @@
 import {
   existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
   mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync, writeSync,
-  watch as watchFile, type FSWatcher,
+  watch as fsWatch, type FSWatcher,
 } from "node:fs";
 import { tmpdir, homedir, hostname } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
@@ -430,6 +430,7 @@ import {
   adjudicateReviewConclusion,
   fileFindingsFrom,
   normalizeConcludedVerdict,
+  readyLacksVerification,
   type ReviewFinding,
 } from "../lib/review-adjudicate.ts";
 import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
@@ -1969,7 +1970,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     let path: string;
     try { path = bindingPath(binding); } catch { return; }
     try {
-      const watcher = watchFile(path, () => {
+      const watcher = fsWatch(path, () => {
         void drainChildInstructions(latestCtx ?? ctx).catch(() => { /* best effort */ });
       });
       // A watcher must never be the reason the process stays alive, and a
@@ -5166,8 +5167,19 @@ export default function reviewGate(pi: ExtensionAPI) {
       // which is why each of them stamps `precommitBypassed` and why the
       // receipt below says so out loud rather than only the first time.
       const precommitBypassed = st.bypass.active;
+      // B1 (2026-09-10): a checkpoint MAY land while its verification is IN
+      // FLIGHT — that is the whole point of running the long lane beside the
+      // chain instead of in front of it. The receipt is the live promise, not
+      // a file: a restarted session has none, and a checkpoint with no live
+      // verification is refused exactly as before (fail-closed). A FAIL that
+      // arrives afterwards withdraws the round's READY (see
+      // `recordReviewVerdict`) and wakes the agent with the reason.
+      const verifyingNow =
+        !precommitBypassed &&
+        inFlightPrecommit?.root === root &&
+        st.precommit.verdict === "NOT_RUN";
 
-      if (!precommitBypassed && st.precommit.verdict !== "PASS") {
+      if (!precommitBypassed && !verifyingNow && st.precommit.verdict !== "PASS") {
         return {
           content: [{
             type: "text",
@@ -5183,7 +5195,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Round-4 P2: dev-flow requires the FULL suite (lint + typecheck +
       // build + test) before a checkpoint and 送审 — a fast-lane PASS would
       // otherwise let a round go to review with the suite never run.
-      if (!precommitBypassed && st.precommit.testScope !== "full") {
+      if (!precommitBypassed && !verifyingNow && st.precommit.testScope !== "full") {
         return {
           content: [{
             type: "text",
@@ -5393,6 +5405,97 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the mechanical checks (precommit receipt, English message, checkpoint
    * marker, baseline..HEAD) all still run exactly once, where they live.
    */
+  /**
+   * THE IN-FLIGHT FULL PRECOMMIT (B1, 2026-09-10).
+   *
+   * The chain used to be strictly serial: 33s of full precommit, THEN freeze,
+   * THEN dispatch — and the agent was blocked for every one of those 33s,
+   * because `judge_submit` does not return until the reviewer is dispatched.
+   * The precommit does not have to come first: the reviewer judges an
+   * IMMUTABLE COMMIT RANGE, so the only thing that must precede the dispatch
+   * is the checkpoint. The long pole starts first and the chain runs beside
+   * it.
+   *
+   * WHAT THE CHECKPOINT GATE ACCEPTS WHILE THIS IS SET: content being verified
+   * RIGHT NOW, by this session, in this repo. The receipt is the PROMISE, not
+   * a file — a restart loses it, and a checkpoint with no live verification is
+   * refused exactly as before (fail-closed).
+   *
+   * WHAT IS NOT WEAKENED: the ship side is untouched. A precommit PASS covers
+   * the TREE it ran on, a READY covers the tree of the commit it judged, and a
+   * round whose content moved while its precommit ran fails to ship on the
+   * REVIEW side — which is exactly where that mismatch is visible.
+   */
+  let inFlightPrecommit: { root: string; settled: Promise<void> } | undefined;
+
+  /**
+   * Start the full lane in the BACKGROUND and return immediately.
+   *
+   * ONE PER REPO: a second round submitted while the first is still verifying
+   * would run two full suites side by side, fighting for the same cores and
+   * the same cache file. The second round JOINS the first — that promise is
+   * the same "this repo is being verified right now" receipt either way.
+   */
+  function startPrecommitBeside(root: string, ctx: unknown): Promise<void> {
+    const running = inFlightPrecommit;
+    if (running && running.root === root) return running.settled;
+    // THIS ROUND'S VERIFICATION HAS NO VERDICT YET, and saying so is what makes
+    // the checkpoint gate's test exact. `inFlightPrecommit` is cleared in a
+    // microtask after the promise settles, so for an instant a FINISHED — and
+    // possibly FAILED — lane still looks in-flight. Resetting the record first
+    // means the gate reads the VERDICT, which the runner writes the moment it
+    // has one: once there is a verdict, the content is no longer pending.
+    //
+    // (A previous round's PASS is discarded by this reset. That is the
+    // fail-closed direction: the only thing it can cost is a re-run.)
+    stateForRepo(root).precommit = {
+      verdict: "NOT_RUN",
+      fingerprint: null,
+      at: new Date().toISOString(),
+      mode: "full",
+    };
+    const settled = (async () => {
+      let verdict = "no verdict";
+      let detail = "";
+      try {
+        const pre = await callTool("run_precommit", { mode: "full", repo: root }, ctx);
+        verdict = String(pre.details?.verdict ?? "no verdict");
+        detail = toolText(pre);
+      } catch (error) {
+        detail = (error as Error).message;
+      }
+      if (verdict !== "PASS") reportAsyncPrecommit(verdict, detail);
+    })();
+    inFlightPrecommit = { root, settled };
+    void settled.finally(() => {
+      if (inFlightPrecommit?.settled === settled) inFlightPrecommit = undefined;
+    });
+    return settled;
+  }
+
+  /**
+   * TELL THE AGENT (B1). The round was dispatched before this verdict existed,
+   * so nothing else will: a silent FAIL would leave a round that looks
+   * dispatched and verified sitting inside a gate that will not ship it. The
+   * channel is a followUp turn — not a UI toast, which scrolls away.
+   */
+  function reportAsyncPrecommit(verdict: string, detail: string): void {
+    const message =
+      `review-gate: 本轮的后台 full precommit **没过**（${verdict}）—— 这轮的内容没通过验证，` +
+      "本轮不会产生可 ship 的 READY。\n" +
+      "修好后重新 `judge_submit({role:\"reviewer\"})`；无需手动再跑 precommit。\n" +
+      "如果它是因为**与本次改动无关的环境问题**失败的，那是用户的决定：让用户 `/gate-bypass <理由>`。\n\n" +
+      detail.slice(0, 4000);
+    try {
+      pi.sendMessage(
+        { customType: "review-gate", content: message, display: true },
+        { triggerTurn: true, deliverAs: "followUp" },
+      );
+    } catch {
+      try { latestCtx?.ui.notify(message.slice(0, 400), "error"); } catch { /* headless */ }
+    }
+  }
+
   async function submitForReview(input: {
     root: string;
     note: string;
@@ -5416,28 +5519,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       input.progress?.step("precommit (被 /gate-bypass 覆盖，跳过)");
       input.progress?.done("BYPASSED");
     } else {
-    input.progress?.step("precommit (full)");
-
-    const pre = await callTool(
-      "run_precommit",
-      { mode: "full", repo: input.root },
-      input.ctx,
-      // The runner's live log is this step's tail: the 92s (median) precommit
-      // is where the chain spends most of its time, so it is where the human
-      // needs to see something moving.
-      input.progress ? (partial) => input.progress?.tail(partial.content.map((c) => c.text).join("\n")) : undefined,
-    );
-    if (pre.details?.verdict !== "PASS") {
-      input.progress?.fail(String(pre.details?.verdict ?? "no verdict"));
-      return {
-        ok: false,
-        text: "review-gate: 本轮未送审 — precommit 没过。\n" + toolText(pre) +
-          "\n修好后重新 judge_submit({role:\"reviewer\"})；无需手动再跑 precommit。" +
-          "\n如果它是因为**与本次改动无关的环境问题**失败的（例如注入的环境变量污染了测试子进程），" +
-          "那是用户的决定：让用户 `/gate-bypass <理由>` —— bypass 会连这条前置一起覆盖，并全程留痕。",
-      };
-    }
-    input.progress?.done("PASS");
+      // START IT, DO NOT AWAIT IT (B1). The freeze and the dispatch below are
+      // quick, and the reviewer does not need this verdict to start judging an
+      // immutable range — so the 33s lane runs BESIDE the chain instead of in
+      // front of it, and the agent gets its turn back. A FAIL arrives as its
+      // own follow-up message (`reportAsyncPrecommit`) and withholds the
+      // round's READY; it can no longer be reported by returning early.
+      input.progress?.step("precommit (full，与审查并行)");
+      void startPrecommitBeside(input.root, input.ctx);
     }
 
     // 2. Freeze it. The reviewed unit is a commit, and the message says so —
@@ -7459,6 +7548,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     //    squash preserves it). Tighten-only — this can withhold a READY,
     //    never grant one.
     let staleTarget = false;
+    // THE VERIFICATION BINDING (B1, 2026-09-10). The checkpoint gate accepts
+    // content whose full lane is STILL RUNNING (that is what makes the lane run
+    // beside the chain instead of in front of it), so this is the place that
+    // refuses a READY on content which never passed it. Without it a round
+    // dispatched beside a failing suite would record a verdict nothing can
+    // ship, and it would LOOK verified while it was not. Tighten-only, exactly
+    // like the stale check above — and it reads the sidecar, so a session that
+    // restarted mid-round is judged by what was actually written down.
+    let unverified = false;
     if (parsed.verdict === "READY") {
       const target_ = reviewTargets.get(targetRoot);
       if (!target_) {
@@ -7469,7 +7567,14 @@ export default function reviewGate(pi: ExtensionAPI) {
           staleTarget = headNow !== target_.head;
         } catch { staleTarget = true; }
       }
-      if (staleTarget) parsed.verdict = "BLOCKED";
+      if (
+        !staleTarget &&
+        readyLacksVerification({ precommitVerdict: st.precommit.verdict, bypassActive: st.bypass.active })
+      ) {
+        unverified = true;
+        parsed.verdict = "BLOCKED";
+      }
+      if (staleTarget || unverified) parsed.verdict = "BLOCKED";
     }
     // THE cwd CHECK (round-9 P1, reviewer-reproduced). The schema and the
     // task text have always demanded a real `pwd` and said the gate checks
@@ -7633,6 +7738,14 @@ export default function reviewGate(pi: ExtensionAPI) {
           "in place and is recorded as BLOCKED. This is the expected outcome of fixing while the " +
           "review runs: those fixes are already in, so the next round is short. Re-review the " +
           "current head with ONE call: judge_submit({role:\"reviewer\", task:<what you changed>})."
+        : "") +
+      (unverified
+        ? "\nUNVERIFIED: the READY lands on content that has no full-lane precommit PASS — the round " +
+          "was dispatched while its verification was still running (that is how the lane runs beside the " +
+          "review instead of blocking it), and that verification did not pass. The verdict is recorded " +
+          "as BLOCKED: nothing here is shippable. Fix what precommit reported and submit the round again; " +
+          "if it failed for an environment reason unrelated to this change, that is the user's call — " +
+          "`/gate-bypass <reason>` covers it and leaves a trace."
         : "") +
       (cwdMismatch
         ? `\nCWD CHECK FAILED: ${cwdMismatch}. The conclusion requires the judge's own \`pwd\`, ` +
@@ -8848,31 +8961,49 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- L2: auto-continuation ----------
 
   pi.on("agent_settled", async (_event, ctx) => {
-    // SUPERVISION, first thing and unconditionally: report what this session
-    // is doing and apply whatever the orchestrator has sent. It runs before
-    // every early return below because a child that is paused, bypassed or in
-    // explore mode still has a supervisor waiting to hear from it — silence
-    // is exactly the failure this replaced (a finished child classified
-    // `working` for 725 seconds, R3-5).
-    noteChildProgress("settled"); // E — a settled turn is forward progress, and the child's own proof that it stopped.
+    // A SETTLE IS NOT A STOP UNTIL THE GATE IS DONE WITH IT (round-3 P1).
+    //
+    // MEASURED failure: the "I stopped" proof used to be published right here,
+    // at the top — and this handler may inject the NEXT TURN ITSELF, a few
+    // lines below. A loop child that was about to be resumed therefore
+    // published a structurally-proven `idle` first, and (since the proof is
+    // believed instantly, that being the whole point of it) a supervisor could
+    // act on a stop that never happened.
+    //
+    // So the proof is published by the EXITS THAT MEAN IT: the early returns
+    // that decide NOT to continue, and the end of the handler. Every exit that
+    // hands the session more work either says nothing (it never set the stamp)
+    // or withdraws the stamp it already had.
+    // The CLEAR direction comes first: nothing below may inherit a previous
+    // settle's stamp, and this report therefore carries none.
+    noteChildProgress("tool");
     reportChildState(ctx);
+    const confirmStop = (): void => {
+      noteChildProgress("settled");
+      reportChildState(ctx, undefined, { force: true });
+    };
     await drainChildInstructions(ctx);
     // Judge panes conclude through judge_conclude (their own round-ending tool) —
     // there is no settle-time verdict scraping, so nothing to do here.
     // Finished rounds wake in every mode except normal (gate fully off): explore
     // is advisory on enforcement, not deaf — its reports still land and record.
-    if (state.taskMode !== "normal" && (await settleFinishedRounds(ctx))) return;
+    if (state.taskMode !== "normal" && !handedOffOrchestration && (await settleFinishedRounds(ctx))) {
+      // …and this exit may have handed the session a round's report, so it is
+      // NOT a stop: nothing is published here (see `confirmStop`).
+      return;
+    }
     // Explore and normal never auto-continue — that is their defining
     // difference from loop. This check MUST stay before the loopArmed check:
     // explore/normal-mode edits set loopArmed = true in tool_result, and only
     // this early return keeps the continuation loop off.
-    if (state.taskMode === "explore" || state.taskMode === "normal") return;
+    if (state.taskMode === "explore" || state.taskMode === "normal") { confirmStop(); return; }
     // Paused for a user question (ask_user): defense-in-depth —
     // loopArmed is in-memory and resets on restart, but the persisted pause
     // must keep auto-continuation off until the user actually replies.
-    if (state.pausedQuestion) return;
-    if (!loopArmed) return;
-    if (state.bypass.active) return;
+    if (state.pausedQuestion) { confirmStop(); return; }
+    if (!loopArmed) { confirmStop(); return; }
+    if (state.bypass.active) { confirmStop(); return; }
+    // NOT a stop: the agent is still working, so no proof is published here.
     if (!ctx.isIdle()) return;
 
     // R-3 — AN ORCHESTRATOR IS NOT IN THE LOOP, and the loop's nudge is not

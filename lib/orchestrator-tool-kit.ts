@@ -240,8 +240,19 @@ export const DELIVERY_VERIFY_INTERVAL_MS = 1000;
  * still made its caller wait the full interval, and the caller is the project
  * manager, blocked in a tool call while it waits. The probe is a file read —
  * cheap enough to ask often — so the early attempts sit close together and
- * the gap grows to the old interval and stays there. The total budget is
- * unchanged; only the near misses get cheaper.
+ * the gap grows to the old interval and stays there. WHAT THAT COSTS: the
+ * probe window shrinks from 14.0s (15 attempts × 1s) to 11.5s (0.1 + 0.2 +
+ * 0.4 + 0.8, then 1s × 10) — see DELIVERY_VERIFY_FIRST_MS for why the tail is
+ * the right thing to spend. What is unchanged is the budget that DECIDES:
+ * the first probe is still immediate and no probe ever waits longer than the
+ * old interval.
+ *
+ * WHAT IT COSTS: the probe window shrinks from 14.0s (15 attempts × 1s) to
+ * 11.5s (0.1+0.2+0.4+0.8, then 1s × 10) — the last attempts are simply gone,
+ * because a pane that has not proven itself in eleven seconds is not one that
+ * a thirteenth would have caught. The budget that matters is unchanged: the
+ * FIRST probe still happens immediately, and the ceiling is still the old
+ * interval, so no probe waits longer than it used to.
  */
 export const DELIVERY_VERIFY_FIRST_MS = 100;
 

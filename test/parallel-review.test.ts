@@ -16,6 +16,7 @@ import {
   changeRowsLargestFirst,
   shellQuotePath,
   CHANGE_INDEX_MAX_ROWS,
+  CHANGE_INDEX_TAIL_MAX,
   type ChangeIndexRow,
 } from "../lib/parallel-review.ts";
 
@@ -503,12 +504,37 @@ test("formatChangeIndex: what moved, and the batches that read it in one message
   assert.match(text, /IN PARALLEL/, "and says WHY one message is the right shape");
 });
 
-test("formatChangeIndex: the tail is summarised, never silently dropped", () => {
-  const many = rows(...Array.from({ length: CHANGE_INDEX_MAX_ROWS + 3 }, (_, i) => [`f${i}.ts`, 1, 0] as [string, number, number]));
+test("formatChangeIndex: the tail NAMES its files — a positional slice would cover the wrong ones (round-3 P1)", () => {
+  // The rows above are the 40 LARGEST; a `tail -n +41` slice walks PATH
+  // order. Reproduced with 42 ascending sizes: the listed rows were the 41
+  // biggest and the slice yielded the two ALREADY LISTED, so the smallest
+  // files were never covered while the command looked like coverage.
+  const many = rows(
+    ...Array.from({ length: CHANGE_INDEX_MAX_ROWS + 3 }, (_, i) =>
+      [`f${String(i).padStart(2, "0")}.ts`, 100 - i, 0] as [string, number, number]),
+  );
   const text = formatChangeIndex(many, "a..b");
-  assert.match(text, /- … and 3 more file\(s\)/, "a bound must SAY it bounded something");
-  assert.match(text, /git diff --name-only a\.\.b \| tail -n \+/,
-    "…and the unlisted files get a command that still reaches them");
+  assert.match(text, /- … and 3 smaller file\(s\) not listed above\./,
+    "a bound must SAY it bounded something");
+  assert.doesNotMatch(text, /tail -n \+/, "no positional slice — it cannot describe WHICH files it skipped");
+  // The three genuinely unlisted (smallest) files are named, and quoted.
+  for (const f of ["f40.ts", "f41.ts", "f42.ts"]) {
+    assert.ok(text.includes(`'${f}'`), `${f} is one of the files nothing else covers, so it must be named`);
+  }
+  assert.doesNotMatch(text, /'f00\.ts'.*\n.*'f40\.ts'/, "the tail batch is its own line, not a re-listing");
+});
+
+test("formatChangeIndex: a tail too long to name says so instead of inventing a command", () => {
+  const huge = rows(
+    ...Array.from({ length: CHANGE_INDEX_MAX_ROWS + CHANGE_INDEX_TAIL_MAX + 5 }, (_, i) =>
+      [`g${String(i).padStart(3, "0")}.ts`, 1, 0] as [string, number, number]),
+  );
+  const text = formatChangeIndex(huge, "a..b");
+  assert.match(text, /smaller file\(s\) have no batch here/,
+    "the plan states the limit rather than pretending to cover them");
+  assert.match(text, /git diff --stat a\.\.b/,
+    "and points at the one command that DOES enumerate everything");
+  assert.doesNotMatch(text, /tail -n \+/, "still no lying command");
 });
 
 test("formatChangeIndex: an unchanged range renders nothing at all", () => {

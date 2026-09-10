@@ -234,9 +234,10 @@ orchestration id、交接文档路径、**老会话 transcript 路径**，以及
   会话，新会话的 pi 随即退出）。必须在新 pane 打开**之前**——晚一步就是和新会话的
   启动赛跑。
 - **阶段二（新会话的 relay 记录落盘之后）——静默**：设退休标记、停两个推进定时器
-  （supervision / revival），从此任何唤醒路径都不再叫它（`orchestratorSettled` 的
-  `agent_settled` 路径、supervision 定时器、revival 三条都守这个标记），并且
-  `persist()` 对它直接返回（**不再写共享 sidecar**——两个会话写一份 sidecar 正是
+  （supervision / revival），从此**四条唤醒路径**都不再叫它：`orchestratorSettled` 的
+  `agent_settled` 路径、supervision 定时器、revival、以及 `settleFinishedRounds`
+  （一份已完成报告唤醒的是 opener，而开了自己 judge 的退休项目经理就是 opener）。
+  并且 `persist()` 对它直接返回（**不再写共享 sidecar**——两个会话写一份 sidecar 正是
   占用判定要防的事，而继任者是被**故意**放进来的，所以停下来的是前任）。
 
 **阶段的界线不是风格，是两条实测缺陷**：（a）`saveRuntime` 写的 relay 记录要走
@@ -274,11 +275,28 @@ spawn（无 shell）；门禁自己的执行路径也过同一份禁止清单，
 ## 审核单元
 
 送审是**一次调用**：`judge_submit({role:"reviewer", task:<本轮改动说明>})`。
-门禁在这一次调用里依次跑完下面四步，任一步失败就带原因打回（不留半提交
-状态）。这四步的实现**还在**，但 2026-08-30 起**不再注册成工具**（哲学三）：
+门禁在这一次调用里跑完下面四步，任一步失败就带原因打回（不留半提交状态）。
+这四步的实现**还在**，但 2026-08-30 起**不再注册成工具**（哲学三）：
 门禁在内部调用它们，agent 看不到这些名字，因此没有第二条路可选。
 
-- `run_precommit`（full lane）：不过就打回。
+**顺序不是 1-2-3-4 了（2026-09-10）**：full precommit 从“卡在链条最前面”
+改成**与链条并行**（`startPrecommitBeside`）。理由：reviewer 判的是**不可变的
+commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而 precommit
+中位数 33s（旧数据 92s）全是 agent 被阻塞的时间。现在链条是：
+**启动 full lane（不 await）→ checkpoint → prepare → dispatch（立即返回）**。
+
+这带来两个必须机械成立的事：
+
+- **checkpoint 门槛接受“正在验证中”**：凭据是**本进程里那个活的 promise**，不是
+  文件。重启过的会话没有它，于是回到旧规则——没有 PASS 就不收（fail-closed）。
+  同一 repo 同时只跑一个 full lane；后续轮次**汇入**已经在跑的那个，而不是并跑两套。
+- **裁决记录承担验证绑定**（`lib/review-adjudicate.ts` 的 `readyLacksVerification`）：
+  READY 落在一个没有 full-lane PASS 的内容上时**降级为 BLOCKED**，否则会出现
+  “看着已验证、实际不可 ship”的裁决。只收紧、不放宽；`/gate-bypass` 是用户
+  授权，仍然优先。FAIL 不再能靠“提前 return”告知，所以它作为自己的一条 followUp
+  消息送给 agent。
+
+- `run_precommit`（full lane，与链条并行启动）：FAIL 时本轮不产生可 ship 的 READY。
 - `review_checkpoint`：`git add -A && git commit`（英文 message 校验，
   commit 标题由门禁打上 checkpoint 标记）→ 记录 commit sha。只绕过 READY，
   不绕过 precommit；普通 `git commit` 在 READY 前仍被拦。2026-09-07 起

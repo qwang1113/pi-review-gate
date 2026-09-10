@@ -827,9 +827,10 @@ test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits
   // explore would silently regain forced continuation.
   const start = SRC.indexOf(LOOP_SETTLED);
   assert.ok(start >= 0, "agent_settled handler must exist");
-  // Wide enough to cover the judge-verdict hook at the handler top: the
-  // pinned property is the ORDER of the two checks, not the distance.
-  const body = SRC.slice(start, start + 1800);
+  // Wide enough to cover the child-state hooks and the continuation
+  // withdrawals at the handler top: the pinned property is the ORDER of the
+  // two checks, not the distance.
+  const body = SRC.slice(start, start + 2800);
   const exploreAt = body.indexOf('state.taskMode === "explore"');
   const loopArmedAt = body.indexOf("!loopArmed");
   assert.ok(exploreAt >= 0 && loopArmedAt >= 0, "both checks must exist");
@@ -1025,7 +1026,8 @@ test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in 
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   assert.ok(injectAt > start, "agent_settled must contain the RESUME injection");
   const beforeInject = SRC.slice(start, injectAt);
-  assert.match(beforeInject, /if \(state\.pausedQuestion\) return;/);
+  assert.match(beforeInject, /if \(state\.pausedQuestion\) \{ confirmStop\(\); return; \}|if \(state\.pausedQuestion\) return;/,
+    "a pause for the user still precedes the continuation injection");
 });
 
 test("RESUME text: the unmet-gates branch points a waiting agent at ask_user", () => {
@@ -1513,11 +1515,12 @@ test("normal mode: prompt-transparent except the language directive; loop resume
   assert.ok(directiveAt > normalAt, "the undecided directive must not be injected in normal mode");
   // agent_settled and session_compact both skip normal (no auto-continuation,
   // no loop-resume nudge).
-  for (const [anchor, window, from] of [['pi.on("agent_settled"', 1500, SRC.indexOf(LOOP_SETTLED)], ['pi.on("session_compact"', 1000, 0]] as const) {
+  for (const [anchor, window, from] of [['pi.on("agent_settled"', 2800, SRC.indexOf(LOOP_SETTLED)], ['pi.on("session_compact"', 1000, 0]] as const) {
     const at = from === 0 ? SRC.indexOf(anchor) : from;
     assert.ok(at >= 0, anchor);
-    // agent_settled's window covers the judge-verdict hook at its top; the
-    // pinned property is that normal is SKIPPED, not the distance.
+    // agent_settled's window covers the child-state hooks and the
+    // continuation withdrawals at its top; the pinned property is that normal
+    // is SKIPPED, not the distance.
     assert.match(SRC.slice(at, at + window), /taskMode === "explore" \|\| state\.taskMode === "normal"/, anchor);
   }
 });
@@ -3593,7 +3596,7 @@ test("SECURITY: the Copilot requirement never touches the SHIP gate (it would de
   assert.doesNotMatch(doneBody, /name: "request_arbitration"/, "…and it stopped at the end of that body");
   assert.match(doneBody, /copilotProblemsFor\(/);
   const settledStart = SRC.indexOf(LOOP_SETTLED);
-  assert.match(SRC.slice(settledStart, settledStart + 5200), /copilotProblemsFor\(/); // +1200 for the settle-wake and judge-pane blocks
+  assert.match(SRC.slice(settledStart, settledStart + 6400), /copilotProblemsFor\(/); // +1200 for the settle-wake and judge-pane blocks, +1200 for the stop-proof block at the handler's top
 });
 
 test("a FAILED ship arms nothing; a successful PR ship arms the repo it ran in", () => {
@@ -4538,10 +4541,15 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
 test("judge_submit runs the whole submission chain, and cannot dead-end on it", () => {
   const body = windowOf("async function submitForReview(", "\n  /**", "submitForReview");
   // Each step is the TOOL's own execute — one implementation, one set of
-  // mechanical checks.
-  assert.match(body, /callTool\(\s*"run_precommit",\s*\{ mode: "full"/);
+  // mechanical checks. Since B1 (2026-09-10) the precommit runs BESIDE the
+  // chain instead of in front of it, so it is started through
+  // `startPrecommitBeside` (which calls the same tool, unawaited) — the
+  // serial `await callTool("run_precommit"...)` is what 33s of agent-blocking
+  // looked like, and the assertion for its absence lives in the B1 block
+  // below.
+  assert.match(body, /startPrecommitBeside\(input\.root, input\.ctx\)/);
   // …and each step reports itself, so a stalled round shows WHERE it stalled.
-  for (const step of [/step\("precommit \(full\)"\)/, /step\("checkpoint 提交"\)/, /step\("prepare/]) {
+  for (const step of [/step\("precommit \(full/, /step\("checkpoint 提交"\)/, /step\("prepare/]) {
     assert.match(body, step, "every chain step publishes progress");
   }
   // 2026-09-08: the round NOTE travels to the checkpoint alongside the message —
@@ -5656,6 +5664,17 @@ test("every wake-up path respects a retired session", () => {
     /if \(handedOffOrchestration\) \{ stopSupervisionTimer\(\); return; \}/,
     "an already-armed supervision tick stops itself instead of waking the retired session");
 
+  // …and the FOURTH path, which the doc block above it used to over-claim
+  // (round-1 P2): a finished round's report wakes the OPENER, and a retired
+  // project manager that opened its own judge is an opener. The anchor is the
+  // L2 settle handler, not `orchestratorSettled` — the two are different
+  // functions and only one of them calls `settleFinishedRounds`.
+  const settleStart = SRC.indexOf(LOOP_SETTLED);
+  assert.ok(settleStart > 0);
+  assert.match(SRC.slice(settleStart, settleStart + 3400),
+    /if \(state\.taskMode !== "normal" && !handedOffOrchestration && \(await settleFinishedRounds\(ctx\)\)\)/,
+    "settleFinishedRounds must not wake a retired session either");
+
   // The sidecar writer too: two sessions writing one sidecar is what the
   // exclusivity guard exists to prevent, and the successor is admitted into
   // this worktree ON PURPOSE — so the predecessor stops writing.
@@ -5704,4 +5723,116 @@ test("both change-index git reads are rename-safe and shell-safe", () => {
   // rename as the NEW path alone unless it is told the same thing, while
   // numstat --no-renames reports both halves. The loop above is what enforces
   // that, since both probes now carry both flags.
+});
+
+// ---------------------------------------------------------------------------
+// B1 — THE FULL LANE RUNS BESIDE THE CHAIN (2026-09-10).
+//
+// The chain used to be strictly serial: 33s of full precommit, THEN freeze,
+// THEN dispatch — and the agent was blocked for every one of those seconds.
+// The precommit does not have to come first: the reviewer judges an IMMUTABLE
+// COMMIT RANGE, so only the checkpoint must precede the dispatch.
+//
+// Three lines make that safe, and no tool-level test can see any of them:
+// the lane is started WITHOUT being awaited, the checkpoint gate accepts a
+// LIVE verification (and only a live one — a restarted session has no
+// promise, and is refused exactly as before), and the verdict recorder
+// refuses a READY that never passed. `readyLacksVerification`
+// (lib/review-adjudicate.ts) is the rule, unit-tested there.
+// ---------------------------------------------------------------------------
+
+test("the full lane is started WITHOUT being awaited, and the checkpoint accepts a live verification", () => {
+  const submitAt = SRC.indexOf("async function submitForReview(");
+  assert.ok(submitAt > 0, "the chain is here");
+  const submit = SRC.slice(submitAt, submitAt + 4000);
+  assert.match(submit, /void startPrecommitBeside\(input\.root, input\.ctx\)/,
+    "the long lane starts and the chain runs beside it — awaiting here is exactly the 33s the agent used to lose");
+  assert.doesNotMatch(submit, /await callTool\(\s*"run_precommit"/,
+    "the serial shape is GONE, not merely bypassed (philosophy three)");
+
+  const gateAt = SRC.indexOf("const precommitBypassed = st.bypass.active;");
+  assert.ok(gateAt > 0, "the checkpoint gate is here");
+  const gate = SRC.slice(gateAt, gateAt + 3000);
+  assert.match(
+    gate,
+    /const verifyingNow =[\s\S]{0,120}?inFlightPrecommit\?\.root === root[\s\S]{0,80}?st\.precommit\.verdict === "NOT_RUN"/,
+    "the receipt for a pending checkpoint is the LIVE promise in THIS process AND a verdict that has not landed yet — the promise is cleared in a microtask, so the verdict is what makes the test exact",
+  );
+  assert.match(gate, /if \(!precommitBypassed && !verifyingNow && st\.precommit\.verdict !== "PASS"\)/,
+    "no live verification ⇒ the old rule, unchanged (fail-closed)");
+  assert.match(gate, /if \(!precommitBypassed && !verifyingNow && st\.precommit\.testScope !== "full"\)/,
+    "…and the lane requirement with it");
+});
+
+test("a FAIL that arrives after dispatch is reported, and it withholds the READY", () => {
+  assert.match(SRC, /function reportAsyncPrecommit\(/,
+    "the failure has a channel of its own — the round was dispatched before this verdict existed, so returning early is no longer available");
+  assert.match(SRC, /if \(verdict !== "PASS"\) reportAsyncPrecommit\(/,
+    "and every non-PASS verdict goes through it, including a thrown runner");
+  assert.match(
+    SRC,
+    /readyLacksVerification\(\{ precommitVerdict: st\.precommit\.verdict, bypassActive: st\.bypass\.active \}\)/,
+    "the verdict recorder refuses a READY on content that never passed the full lane",
+  );
+  assert.match(SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
+});
+
+test("ONE full lane per repo: a second round joins the running one instead of starting a rival", () => {
+  // Two full suites side by side fight for the same cores and the same cache
+  // file, and the second round's checkpoint would be verified by whichever
+  // finished last. The joining is what makes "this repo is being verified" a
+  // single fact — which is the same fact the checkpoint gate reads.
+  const startAt = SRC.indexOf("function startPrecommitBeside(");
+  assert.ok(startAt > 0);
+  const body = SRC.slice(startAt, startAt + 1600);
+  assert.match(body, /if \(running && running\.root === root\) return running\.settled;/,
+    "a round submitted while the lane runs waits on THAT promise");
+  assert.match(body, /if \(inFlightPrecommit\?\.settled === settled\) inFlightPrecommit = undefined;/,
+    "and the slot is cleared by the promise that owns it, not by whoever finishes last");
+});
+
+// ---------------------------------------------------------------------------
+// A SETTLE IS NOT A STOP UNTIL THE GATE IS DONE WITH IT (round-3 P1).
+//
+// MEASURED: `settledSince` was published at the TOP of `agent_settled` — and
+// that very handler may inject the NEXT TURN itself. A loop child about to be
+// resumed therefore announced a structurally-proven stop first, and the
+// supervisor (which believes that proof instantly, that being its whole point)
+// could act on a stop that never happened.
+// ---------------------------------------------------------------------------
+
+test("a settle publishes its stop proof only at the exits that MEAN it", () => {
+  const start = SRC.indexOf(LOOP_SETTLED);
+  assert.ok(start > 0, "the L2 settle handler is the anchor, not the first agent_settled registration");
+  const body = SRC.slice(start, start + 3400);
+  const confirmAt = body.indexOf("const confirmStop");
+  assert.ok(confirmAt > 0, "the proof has one issuing site, named");
+  assert.match(body.slice(confirmAt, confirmAt + 200), /noteChildProgress\("settled"\)/);
+
+  // The TOP clears the stamp and never sets it: nothing below may inherit a
+  // previous settle's proof, and nothing here claims a stop before the handler
+  // has decided whether to continue.
+  const top = body.slice(0, confirmAt);
+  assert.doesNotMatch(top, /noteChildProgress\("settled"\)/, "no proof is published before the decision");
+  assert.match(top, /noteChildProgress\("tool"\)/, "the top CLEARS it instead");
+
+  // Every exit that decides NOT to continue publishes the proof…
+  for (const exit of [
+    /if \(state\.taskMode === "explore" \|\| state\.taskMode === "normal"\) \{ confirmStop\(\); return; \}/,
+    /if \(state\.pausedQuestion\) \{ confirmStop\(\); return; \}/,
+    /if \(!loopArmed\) \{ confirmStop\(\); return; \}/,
+    /if \(state\.bypass\.active\) \{ confirmStop\(\); return; \}/,
+  ]) {
+    assert.match(body, exit, "a settle that continues nothing says so");
+  }
+
+  // …and the exits that HAND OVER more work do not. `settleFinishedRounds`
+  // can wake this session with a finished round's report, and the two
+  // `sendUserMessage` injections below it hand it a next turn outright.
+  assert.match(body, /NOT a stop: nothing is published here/,
+    "the round-report exit is explicitly not a stop");
+  assert.equal((body.match(/confirmStop\(\)/g) ?? []).length, 4,
+    "exactly four exits publish it — a fifth exit would need its own decision, not a default");
+  // …and the agent that is still working is not a stop either.
+  assert.match(body, /\/\/ NOT a stop: the agent is still working, so no proof is published here\.[\s\S]{0,40}?if \(!ctx\.isIdle\(\)\) return;/);
 });

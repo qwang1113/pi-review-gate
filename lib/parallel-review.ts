@@ -256,6 +256,13 @@ export interface ChangeIndexRow {
 
 /** Rows listed individually before the rest are summarised. */
 export const CHANGE_INDEX_MAX_ROWS = 40;
+/**
+ * Unlisted files that still get a batch of their own, by NAME.
+ *
+ * Past this the plan stops pretending it can hand over a command: see
+ * {@link formatChangeIndex}'s tail branch.
+ */
+export const CHANGE_INDEX_TAIL_MAX = 20;
 /** Changed lines a batch may carry before the next file starts a new one. */
 export const CHANGE_INDEX_BATCH_LINES = 400;
 /** Files a batch may carry, whatever their size. */
@@ -346,7 +353,7 @@ export function formatChangeIndex(rows: readonly ChangeIndexRow[], commitRange: 
   if (rows.length === 0) return "";
   const ordered = changeRowsLargestFirst(rows);
   const shown = ordered.slice(0, CHANGE_INDEX_MAX_ROWS);
-  const hidden = ordered.length - shown.length;
+  const rest = ordered.slice(CHANGE_INDEX_MAX_ROWS);
   const added = ordered.reduce((n, r) => n + r.added, 0);
   const deleted = ordered.reduce((n, r) => n + r.deleted, 0);
 
@@ -354,8 +361,8 @@ export function formatChangeIndex(rows: readonly ChangeIndexRow[], commitRange: 
     `CHANGE INDEX — ${ordered.length} file(s), +${added}/−${deleted} in ${commitRange} (largest first):`,
     ...shown.map((r) => `- +${r.added}/−${r.deleted}  ${r.file}`),
   ];
-  if (hidden > 0) {
-    lines.push(`- … and ${hidden} more file(s) not listed here (run \`git diff --stat ${commitRange}\` for the rest).`);
+  if (rest.length > 0) {
+    lines.push(`- … and ${rest.length} smaller file(s) not listed above.`);
   }
 
   const batches = planChangeBatches(shown);
@@ -366,11 +373,22 @@ export function formatChangeIndex(rows: readonly ChangeIndexRow[], commitRange: 
     "you need in a single message, and skip what the change cannot affect:",
     ...batches.map((b, i) => `${i + 1}. git diff ${commitRange} -- ${b.map((r) => shellQuotePath(r.file)).join(" ")}`),
   );
-  if (hidden > 0) {
+  // THE TAIL, AND IT MUST NAME ITS FILES (round-3 P1). A positional slice
+  // (`git diff --name-only | tail -n +41`) walks PATH order while the rows
+  // above are the 40 LARGEST — so it re-read the files already listed and
+  // never reached the ones that were not. Reproduced with 42 ascending sizes:
+  // the listed rows were f41…f02 and the slice yielded f40 and f41.
+  //
+  // So either the leftovers are named (and quoted, like every other path) or
+  // the plan says outright that it does not cover them. A command that looks
+  // like coverage without being it is worse than no command.
+  if (rest.length > 0 && rest.length <= CHANGE_INDEX_TAIL_MAX) {
     lines.push(
-      `${batches.length + 1}. git diff ${commitRange} -- $(git diff --name-only ${commitRange} | tail -n +${
-        CHANGE_INDEX_MAX_ROWS + 1
-      })`,
+      `${batches.length + 1}. git diff ${commitRange} -- ${rest.map((r) => shellQuotePath(r.file)).join(" ")}`,
+    );
+  } else if (rest.length > 0) {
+    lines.push(
+      `(${rest.length} smaller file(s) have no batch here — \`git diff --stat ${commitRange}\` lists them.)`,
     );
   }
   return lines.join("\n");

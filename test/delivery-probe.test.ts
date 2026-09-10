@@ -23,6 +23,7 @@ import {
   verifyJudgeBoot,
   channelRecordCount,
   deliveryVerifyDelayMs,
+  DELIVERY_VERIFY_ATTEMPTS,
   JUDGE_BOOT_ATTEMPTS,
   DELIVERY_VERIFY_INTERVAL_MS,
 } from "../lib/orchestrator-tool-kit.ts";
@@ -201,7 +202,14 @@ test("the backoff doubles from 100ms and plateaus at the old interval", () => {
   assert.equal(deliveryVerifyDelayMs(1), 100);
   assert.equal(deliveryVerifyDelayMs(2), 200);
   assert.equal(deliveryVerifyDelayMs(4), 800);
-  assert.equal(deliveryVerifyDelayMs(5), DELIVERY_VERIFY_INTERVAL_MS, "capped, so the total budget is unchanged");
+  assert.equal(deliveryVerifyDelayMs(5), DELIVERY_VERIFY_INTERVAL_MS, "capped at the old interval — no probe ever waits LONGER than it used to");
   assert.equal(deliveryVerifyDelayMs(99), DELIVERY_VERIFY_INTERVAL_MS);
   assert.equal(deliveryVerifyDelayMs(-3), 0, "a nonsensical attempt is not a long sleep");
+  // The window DOES shrink — 11.5s against 14.0s — and the comment says so
+  // rather than claiming a budget it no longer spends. Pinned so the two
+  // cannot drift back apart.
+  const window = Array.from({ length: DELIVERY_VERIFY_ATTEMPTS - 1 }, (_, i) => deliveryVerifyDelayMs(i + 1))
+    .reduce((a, b) => a + b, 0);
+  assert.ok(window < DELIVERY_VERIFY_ATTEMPTS * 1000, `the window is shorter now (${window}ms)`);
+  assert.ok(window > 10_000, "…and still long enough for a pane that is booting");
 });
