@@ -182,15 +182,30 @@ function resolveJudgeId(
   return { ok: true, judgeId: judgeSessionIdFor(role, shortRepoHash(repo.root), opener), root: repo.root };
 }
 
-/** First round number for a spawned review — above entry and channel history (see birthSeq). */
-function nextSpawnRoundSeq(deps: JudgeSpawnToolDeps, opener: string, judgeId: string): number {
+/**
+ * What a SPAWNED review's first round starts from: its round number (above the
+ * entry and the channel's history, see birthSeq) and the model-event cursor.
+ *
+ * The cursor matters because the channel is append-only ACROSS spawns: an
+ * entry that started at zero would hand this round the PREVIOUS spawn's
+ * events, and a stale `exhausted` one ends the very first probe of every later
+ * goal/plan audit (`awaitRoundReport` counts `model-exhausted` as round-
+ * ending, so the audit could never reach a verdict). Fail toward SKIPPING: an
+ * event that was already in the channel when the round started is never
+ * treated as news (the opener's absorb is what acts on them, and a skipped
+ * one costs a cooldown — a replayed `exhausted` costs the whole audit).
+ */
+function spawnBirthFacts(deps: JudgeSpawnToolDeps, opener: string, judgeId: string): { seq: number; modelEventCount: number } {
   let records: ChannelRecord[] = [];
   try {
     const io = deps.channelIO();
     const target = judgeChannelTarget(opener, judgeId, deps.channelHome());
     records = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
   } catch { /* the entry alone still numbers above */ }
-  return nextRoundSeq(deps.hierarchy()[judgeId]?.roundSeq, records);
+  return {
+    seq: nextRoundSeq(deps.hierarchy()[judgeId]?.roundSeq, records),
+    modelEventCount: projectChannel(records).modelEvents.length,
+  };
 }
 
 async function doSpawn(
@@ -258,8 +273,21 @@ async function doSpawn(
   const judgeId = judgeSessionIdFor(role, shortRepoHash(root), caller, laneInfo.lane);
   // Number this review's first round above every report already in the channel:
   // a close→spawn keeps the old reports, and restarting at 1 would collide with them
-  // (the judge refuses a round its channel already closed).
-  const birthSeq = nextSpawnRoundSeq(deps, caller, judgeId);
+  // (the judge refuses a round its channel already closed). The same call
+  // reports the channel's model-event watermark, so the entry registered below
+  // never mistakes a PREVIOUS spawn's failures for this round's news.
+  const birth = spawnBirthFacts(deps, caller, judgeId);
+  const birthSeq = birth.seq;
+  /**
+   * The model-event cursor this birth starts at.
+   *
+   * NOT just the watermark: `launchConfig` above runs the opener's absorb,
+   * which may have advanced the ENTRY's cursor past it (an event that arrived
+   * between this read and that absorb). Take whichever is higher — an event the
+   * opener already acted on must never be handed over as new, and a replayed
+   * `exhausted` would end this audit's first probe.
+   */
+  const birthModelEventCount = Math.max(birth.modelEventCount, deps.hierarchy()[judgeId]?.lastModelEventCount ?? 0);
   // The two checks that can refuse outright — no tmux, no resolvable model
   // chain — run BEFORE the id is claimed. They used to sit after it and undo
   // it, and the claim in between was the only reason `rollback` had to exist
@@ -286,6 +314,7 @@ async function doSpawn(
     // The slot the launch resolver picked — the receipt's answer to "which
     // model ran this round".
     modelSpec: launch.model,
+    lastModelEventCount: birthModelEventCount,
     ...(streamPath === undefined ? {} : { streamPath }),
     // The lane this birth belongs to, so the next dispatch can decide from the
     // registry alone whether the transcript keeps going.
@@ -347,6 +376,7 @@ async function doSpawn(
         sessionDir: launch.sessionDir,
         paneId,
         modelSpec: launch.model,
+        lastModelEventCount: birthModelEventCount,
         ...(deps.tmuxServer() === undefined ? {} : { tmuxServer: deps.tmuxServer()! }),
         ...(streamPath === undefined ? {} : { streamPath }),
         // The SAME lane the id and the dirs above were rendered from — this

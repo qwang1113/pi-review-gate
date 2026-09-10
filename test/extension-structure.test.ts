@@ -764,23 +764,44 @@ test("MODEL EVENTS: the cursor never moves past an event the opener did not act 
   const deps = windowOf("const judgeSessionDeps: JudgeSessionToolDeps = {", "\n  };", "judgeSessionDeps");
   assert.match(deps, /absorbModelEvents: \(root, judgeId\) => absorbJudgeModelEvents\(root, judgeId\)/,
     "the wait's absorber is wired to the one implementation");
-  assert.equal((SRC.match(/absorbModelEvents\(\?/g) ?? []).length, 0, "no second policy");
+  // ONE implementation, whichever trigger calls it (the wait, the settle
+  // sweep, the dispatch). NOTE: the assertion must be able to FAIL — an
+  // earlier version matched a literal that never appears and passed for any
+  // implementation at all (P2, reviewer round 2).
+  assert.equal((SRC.match(/function absorbJudgeModelEvents\(/g) ?? []).length, 1,
+    "exactly one absorber implementation");
+  assert.notEqual(SRC.indexOf("function absorbJudgeModelEvents("), -1, "…and it is really there");
 
   // The other half of the same defect: a re-dispatch REPLACES the registry
   // entry, so the cursor must be carried (reuse) or seeded from the channel
   // watermark (fresh open) — the channel is append-only, and a replay of an
   // old `exhausted` event would end a healthy round on its first probe.
-  const reuse = SRC.slice(SRC.indexOf("const keptCursor = existing.lastReportId;"), SRC.indexOf("const keptCursor = existing.lastReportId;") + 1400);
-  assert.match(reuse, /lastModelEventCount: existing\.lastModelEventCount/, "reuse carries the cursor");
+  const reuse = SRC.slice(SRC.indexOf("const keptCursor = existing.lastReportId;"), SRC.indexOf("const keptCursor = existing.lastReportId;") + 3000);
+  assert.match(reuse, /const live = judgeHierarchy\[judgeId\] \?\? existing;/,
+    "the reuse registration reads the entry AGAIN — `existing` predates this dispatch's absorb");
+  assert.match(reuse, /lastModelEventCount: live\.lastModelEventCount/, "reuse carries the live cursor");
   const fresh = SRC.slice(SRC.indexOf("let freshCursor: string | undefined;"), SRC.indexOf("let freshCursor: string | undefined;") + 900);
   assert.match(fresh, /freshModelEventCount = freshProjection\.modelEvents\.length/,
     "a fresh open seeds it at the channel watermark (the same rule as the report cursor)");
   assert.match(SRC, /lastModelEventCount: freshModelEventCount/, "…and the registration carries it");
+  // The OTHER dispatch surface (judge_spawn: goal/plan audits) has its own
+  // registration and needs the same watermark — a stale `exhausted` event there
+  // ends the first probe of every later audit (P1, reviewer round 2).
+  const spawnSrc = readFileSync(join(ROOT, "lib", "judge-spawn-tools.ts"), "utf8");
+  assert.match(spawnSrc, /modelEventCount: projectChannel\(records\)\.modelEvents\.length/,
+    "the spawn birth facts include the channel's model-event watermark");
+  assert.equal((spawnSrc.match(/lastModelEventCount: birthModelEventCount/g) ?? []).length, 2,
+    "both spawn registrations (pre-open and inside the open) carry it");
   // Absorbing at dispatch is what covers the round that ends WITHOUT a report
   // (an exhausted chain) — before the entry it reads the cursor from is gone.
   const dispatchAt = SRC.indexOf("const existing = judgeHierarchy[judgeId];");
   assert.match(SRC.slice(dispatchAt, dispatchAt + 400), /absorbJudgeModelEvents\(root, judgeId\)/,
     "the dispatch absorbs before it rewrites the entry");
+  // …and WITHOUT an entry there is nothing to absorb against: "read the whole
+  // channel" would re-record a historical failure with a fresh timestamp on
+  // every dispatch — a cooldown that can never expire.
+  const absorb = windowOf("function absorbJudgeModelEvents(", "\n  }", "absorbJudgeModelEvents");
+  assert.match(absorb, /if \(!entry\) return;/, "no cursor, no absorb — never replay history");
 });
 
 test("INCREMENTAL: the settled conclusion of the previous round is handed to the reviewer", () => {

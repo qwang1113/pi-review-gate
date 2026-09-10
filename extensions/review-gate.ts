@@ -2888,14 +2888,20 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function absorbJudgeModelEvents(root: string, judgeId: string): void {
     const entry = judgeHierarchy[judgeId];
+    // NO ENTRY, NO ABSORB (reviewer round 1, 2026-09-10). Without a registry
+    // row there is no cursor, and "read the whole channel" would re-record a
+    // HISTORICAL failure with a fresh timestamp every time this runs — a
+    // cooldown that can never expire. The channel outlives its entries (a close
+    // removes the row, the records stay), so the cursor is the only thing that
+    // says what has already been acted on; the dispatch seeds it at the
+    // channel watermark when it registers a fresh entry.
+    if (!entry) return;
     let events: readonly ModelEvent[];
     try {
-      const openerId = entry?.openerId ?? callerIdentity();
-      if (!openerId) return;
-      const target = judgeChannelTarget(openerId, judgeId);
+      const target = judgeChannelTarget(entry.openerId, judgeId);
       events = projectChannel(readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records).modelEvents;
     } catch { return; }
-    const fresh = events.slice(entry?.lastModelEventCount ?? 0);
+    const fresh = events.slice(entry.lastModelEventCount ?? 0);
     if (fresh.length === 0) return;
     for (const event of fresh) {
       recordJudgeModelFailure(root, event.spec, event.error);
@@ -2903,9 +2909,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // failure on record would bench a healthy model for the rest of the TTL.
       if (event.to) clearJudgeModelFailure(root, event.to);
     }
-    if (entry) {
-      setHierarchy({ ...judgeHierarchy, [judgeId]: { ...entry, lastModelEventCount: events.length } });
-    }
+    setHierarchy({ ...judgeHierarchy, [judgeId]: { ...entry, lastModelEventCount: events.length } });
     const lines = fresh.map((event) => {
       const why = event.error ? `（${event.error}）` : "";
       return event.exhausted
@@ -5823,19 +5827,26 @@ export default function reviewGate(pi: ExtensionAPI) {
       const keptFindings = existing.streamPath === opts.streamPath
         ? existing.lastFindingCount
         : undefined;
+      // `existing` was captured BEFORE this dispatch's absorb (which runs above,
+      // on entry) — so its cursors can be one step behind the table. Reading the
+      // entry again here is what keeps the absorb's cursor advance from being
+      // rolled back by this registration (P1, reviewer round 2): a rolled-back
+      // cursor hands the SAME events to the next round, and re-recording them
+      // with `Date.now()` makes the cooldown永不过期.
+      const live = judgeHierarchy[judgeId] ?? existing;
       const reg = registerJudge(judgeHierarchy, {
         judgeId, openerId: opener, role, repoRoot: root, title, sessionDir,
         paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
         ...(tmuxServer === undefined ? {} : { tmuxServer }),
         // The pane's model does not change because a new round was queued into
         // it — the entry keeps saying what the RUNNING pane was launched on.
-        ...(existing.modelSpec === undefined ? {} : { modelSpec: existing.modelSpec }),
+        ...(live.modelSpec === undefined ? {} : { modelSpec: live.modelSpec }),
         // The MODEL-EVENT cursor survives for the same reason the report cursor
         // does: the channel is append-only across rounds, so a reset cursor
         // would hand this round the PREVIOUS round's events — and a stale
         // `exhausted` one would end a perfectly healthy round on its first
         // probe (the audit chains end with it too).
-        ...(existing.lastModelEventCount === undefined ? {} : { lastModelEventCount: existing.lastModelEventCount }),
+        ...(live.lastModelEventCount === undefined ? {} : { lastModelEventCount: live.lastModelEventCount }),
         ...(keptCursor === undefined ? {} : { lastReportId: keptCursor }),
         ...(keptFindings === undefined ? {} : { lastFindingCount: keptFindings }),
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
