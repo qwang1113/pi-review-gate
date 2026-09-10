@@ -2403,17 +2403,27 @@ export default function reviewGate(pi: ExtensionAPI) {
         try {
           return { ok: true, output: execFileSync("git", [...argv], { cwd: repoRoot, encoding: "utf8" }).trim() };
         } catch (error) {
-          const stderr = (error as { stderr?: Buffer | string }).stderr;
-          return { ok: false, output: String(stderr ?? (error as Error).message) };
+          // BOTH STREAMS (round-5 P1): git writes the merge-conflict text and
+          // "nothing to commit" to STDOUT and exits non-zero. Reading only
+          // stderr meant neither of those two matches could ever fire — the
+          // planned abort never ran, and a child who left nothing uncommitted
+          // was reported as a failure.
+          const e = error as { stdout?: Buffer | string; stderr?: Buffer | string };
+          const out = [e.stdout, e.stderr].map((v) => (v === undefined ? "" : String(v))).join("");
+          return { ok: false, output: out.trim() || (error as Error).message };
         }
       };
+      // Reclamation after a SUCCESSFUL merge is reported, never fatal: the
+      // work is already in the manager's checkout, and failing the whole
+      // settlement over an unclean worktree directory would be lying about
+      // where the work is.
+      const reclamation: string[] = [];
       for (const step of plan.steps) {
         const result = run(step);
         if (result.ok) continue;
-        // The child left nothing to commit (a clean worktree): not a failure,
-        // and `--squash` then merges the commits it already had.
-        if (step.includes("commit") && /nothing to commit|no changes added/i.test(result.output)) continue;
-        if (settlement === "merge" && looksLikeMergeConflict(result.output)) {
+        const sub = step[2];
+        if (sub === "commit" && /nothing to commit|no changes added/i.test(result.output)) continue;
+        if (settlement === "merge" && sub === "merge" && looksLikeMergeConflict(result.output)) {
           for (const undo of plan.onConflict ?? []) run(undo);
           return {
             ok: false,
@@ -2424,12 +2434,19 @@ export default function reviewGate(pi: ExtensionAPI) {
               result.output.trim().split("\n").slice(0, 12).join("\n"),
           };
         }
-        return { ok: false, text: `worktree 结算失败（git ${step[step.length - 1]}）：${result.output.trim().slice(0, 600)}` };
+        if (sub === "worktree" || sub === "branch") {
+          reclamation.push(result.output.trim().slice(0, 200));
+          continue;
+        }
+        return { ok: false, text: `worktree 结算失败（git ${sub ?? "?"}）：${result.output.trim().slice(0, 600)}` };
       }
+      const leftover = reclamation.length > 0
+        ? `\n（合并已完成，但 checkout 回收有报错，请人工看一眼：${reclamation.join(" / ")}）`
+        : "";
       return {
         ok: true,
         text: settlement === "merge"
-          ? `已把 ${childId} 的改动 squash 合并到当前分支（**已暂存、未提交**）—— 看过之后照常 commit。worktree 与其分支已回收。`
+          ? `已把 ${childId} 的改动合并到当前分支（**已暂存、未提交** —— 看过再 commit）。worktree 与其分支已回收。` + leftover
           : `已回收 ${childId} 的 worktree 与分支（丢弃）。`,
       };
     },

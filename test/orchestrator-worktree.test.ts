@@ -61,14 +61,20 @@ test("keep touches nothing, and says where the work is", () => {
   assert.equal(WORKTREE_SETTLEMENTS.includes("keep"), true);
 });
 
-test("merge commits the leftovers, then squashes — and the conflict path is planned UP FRONT", () => {
+test("merge covers ALL the leftovers, then merges without committing — and the conflict path is planned UP FRONT", () => {
   const plan = planSettlement("merge", REPO, CHILD, "t13");
-  assert.equal(plan.steps.length, 2);
-  // A child at station `precommit` is ALLOWED to leave its work uncommitted —
-  // the station means the gate's checks pass and the human commits — so a
-  // squash-merge of an uncommitted worktree would merge nothing at all.
-  assert.deepEqual([...plan.steps[0]!], ["-C", childWorktreePath(REPO, CHILD), "commit", "-am", "chore(child): t13 的产出"]);
-  assert.deepEqual([...plan.steps[1]!], ["-C", REPO, "merge", "--squash", "--no-commit", childWorktreeBranch(CHILD)]);
+  // `add -A` THEN `commit`, never `commit -am` (round-5 P1): `-a` stages only
+  // MODIFIED/DELETED tracked files, so every file the child CREATED would have
+  // been left behind while the receipt said its changes were merged.
+  assert.deepEqual([...plan.steps[0]!], ["-C", childWorktreePath(REPO, CHILD), "add", "-A"]);
+  assert.deepEqual([...plan.steps[1]!], ["-C", childWorktreePath(REPO, CHILD), "commit", "-m", "chore(child): t13 的产出"]);
+  // `--no-commit --no-ff`, NOT `--squash` (round-5 P1): a squash never writes
+  // MERGE_HEAD, so `git merge --abort` cannot undo one — the promised rollback
+  // was impossible. This form can be aborted, and the result is still STAGED.
+  assert.deepEqual([...plan.steps[2]!], ["-C", REPO, "merge", "--no-commit", "--no-ff", childWorktreeBranch(CHILD)]);
+  assert.ok(!plan.steps[2]!.includes("--squash"), "a squash cannot be rolled back");
+  // AND the reclamation, which the receipt claimed while nothing did it.
+  assert.deepEqual(plan.steps.slice(3).map((a) => [...a]), removeWorktreeArgv(REPO, CHILD).map((a) => [...a]));
   // Decided BEFORE the merge runs, not discovered in it.
   assert.deepEqual([...(plan.onConflict ?? [])].map((a) => [...a]), [[...abortMergeArgv(REPO)]]);
 });
@@ -82,8 +88,12 @@ test("discard removes BOTH the checkout and the branch — git keeps two things"
   assert.equal(plan.onConflict, undefined, "there is nothing to roll back on a discard");
 });
 
-test("conflicts are recognised, refusals are not", () => {
+test("conflicts are recognised in BOTH streams — git writes them to stdout", () => {
+  // Round-5 P1: the executor read only stderr, so neither of these could ever
+  // fire — the planned abort never ran. `git merge` writes its conflict report
+  // to STDOUT and exits non-zero; the same is true of "nothing to commit".
   assert.equal(looksLikeMergeConflict("CONFLICT (content): Merge conflict in a.ts\nAutomatic merge failed; fix conflicts"), true);
+  assert.equal(looksLikeMergeConflict("Auto-merging a.ts\nCONFLICT (content): Merge conflict in a.ts"), true);
   assert.equal(looksLikeMergeConflict("fatal: not a git repository"), false,
     "a refusal is reported as itself — swallowing it as `conflict` would send the manager chasing the wrong thing");
 });

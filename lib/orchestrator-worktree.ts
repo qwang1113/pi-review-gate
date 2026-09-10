@@ -107,25 +107,44 @@ export type WorktreeSettlement = (typeof WORKTREE_SETTLEMENTS)[number];
  * commits. So the manager cannot assume a clean branch, and a squash-merge of
  * an uncommitted worktree merges nothing at all.
  *
+ * `add -A` THEN `commit`, never `commit -am` (round-5 P1): `-a` stages only
+ * MODIFIED and DELETED TRACKED files, so every file the child CREATED would
+ * have been left behind — silently, while the receipt told the manager its
+ * changes had been merged. A child adding a component and its test is the
+ * ordinary case, not the edge one.
+ *
+ * Two argv, not one: the caller runs steps in order and stops on the first
+ * failure, which is exactly the semantics needed here.
+ *
  * The message is generated, not asked for: the manager settles the checkout,
  * it does not author the child's history, and the subject names the child so
  * `git log` on the result still says where the work came from.
  */
-export function commitLeftoversArgv(worktreePath: string, taskId: string): WorktreeArgv {
-  return ["-C", worktreePath, "commit", "-am", `chore(child): ${taskId} 的产出`];
+export function commitLeftoversArgv(worktreePath: string, taskId: string): WorktreeArgv[] {
+  return [
+    ["-C", worktreePath, "add", "-A"],
+    ["-C", worktreePath, "commit", "-m", `chore(child): ${taskId} 的产出`],
+  ];
 }
 
 /**
- * Squash the child's branch into the manager's checkout.
+ * Merge the child's branch into the manager's checkout, uncommitted.
  *
- * `--squash` (not a merge commit): the orchestration's history is its own, and
- * one round of a child's work is one change — not a second line of descent the
- * manager would have to keep linear forever. `--no-commit` leaves the result
- * STAGED, which is what makes the next step decidable: the manager (or the
- * next `judge_submit`) sees exactly what arrived.
+ * `--no-commit --no-ff`, NOT `--squash` (round-5 P1). A squash merge never
+ * writes `MERGE_HEAD`, so `git merge --abort` cannot undo one — which made the
+ * promised rollback impossible: a conflict would have left the manager's
+ * checkout in a half-merged state with no safe way back. `--no-commit` keeps
+ * the same property that mattered (the result is STAGED, so the manager or the
+ * next `judge_submit` sees exactly what arrived before committing it), and the
+ * merge commit that `--no-ff` would record only exists if the manager commits
+ * it.
+ *
+ * The trade is deliberate: history gains a merge commit where a squash would
+ * have had one line, and in exchange a conflict costs one command that
+ * actually works.
  */
 export function mergeWorktreeArgv(repoRoot: string, childId: string): WorktreeArgv {
-  return ["-C", repoRoot, "merge", "--squash", "--no-commit", childWorktreeBranch(childId)];
+  return ["-C", repoRoot, "merge", "--no-commit", "--no-ff", childWorktreeBranch(childId)];
 }
 
 /** Abort a conflicted squash-merge, leaving the manager's checkout as it was. */
@@ -182,12 +201,17 @@ export function planSettlement(
     case "merge":
       return {
         steps: [
-          commitLeftoversArgv(worktreePath, taskId),
+          ...commitLeftoversArgv(worktreePath, taskId),
           mergeWorktreeArgv(repoRoot, childId),
+          // AND THE RECLAMATION, which round-5 P1 caught missing: the receipt
+          // claimed the worktree and its branch were reclaimed while nothing
+          // removed them, so every merge left two of them behind.
+          ...removeWorktreeArgv(repoRoot, childId),
         ],
         // Back to exactly what the manager had. The CHILD's work is untouched
         // (its worktree and branch are still there), so a conflict costs a
-        // human decision, not the work.
+        // human decision, not the work. `--no-commit --no-ff` is what makes
+        // this possible at all — see mergeWorktreeArgv.
         onConflict: [abortMergeArgv(repoRoot)],
       };
     case "discard":
