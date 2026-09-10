@@ -16,6 +16,7 @@ import {
   childWorktreePath,
   createWorktreeArgv,
   findOrphanWorktrees,
+  looksLikeAlreadyGone,
   looksLikeMergeConflict,
   mergeWorktreeArgv,
   planSettlement,
@@ -90,6 +91,26 @@ test("discard removes BOTH the checkout and the branch — git keeps two things"
   assert.ok(plan.steps[0]!.includes("--force"),
     "a child may leave untracked build output, and a worktree that refuses to be removed is never reclaimed");
   assert.equal(plan.onConflict, undefined, "there is nothing to roll back on a discard");
+});
+
+test("'already gone' is recognised NARROWLY — the direction that loses work is the other one", () => {
+  // Reclamation is two steps, and a first attempt can succeed at one and fail
+  // at the other: on the retry the successful half reports "not there", and
+  // reading that as failure would make the pair impossible to converge.
+  // (round-11 P1 moved this out of the extension closure — where nothing could
+  // test it — and P2 narrowed it: a generic failure read as success strands a
+  // checkout that still exists, which is the one direction that loses work.)
+  assert.equal(looksLikeAlreadyGone("fatal: '/r/r-rg-c1' is not a working tree"), true);
+  assert.equal(looksLikeAlreadyGone("error: branch 'rg-child-c1' not found."), true);
+  for (const real of [
+    "error: cannot remove '/r/r-rg-c1': Directory not empty",
+    "fatal: Unable to create '/r/.git/index.lock': Permission denied",
+    "fatal: not a git repository (or any of the parent directories): .git",
+    "error: remote branch not found.",              // not OUR branch's phrasing
+    "fatal: could not resolve HEAD",
+  ]) {
+    assert.equal(looksLikeAlreadyGone(real), false, `this is a real failure: ${real}`);
+  }
 });
 
 test("conflicts are recognised in BOTH streams — git writes them to stdout", () => {

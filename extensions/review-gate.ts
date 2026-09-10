@@ -302,7 +302,15 @@ import {
 import { notifyUserInput } from "../lib/poll-wait.ts";
 
 import { formatInheritanceBrief, PREDECESSOR_SESSION_ENV, readInheritance } from "../lib/orchestrator-relay.ts";
-import { childWorktreeBranch, childWorktreePath, createWorktreeArgv, looksLikeMergeConflict, planSettlement, repoRootOfWorktree } from "../lib/orchestrator-worktree.ts";
+import {
+  childWorktreeBranch,
+  childWorktreePath,
+  createWorktreeArgv,
+  looksLikeAlreadyGone,
+  looksLikeMergeConflict,
+  planSettlement,
+  repoRootOfWorktree,
+} from "../lib/orchestrator-worktree.ts";
 import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
@@ -2435,31 +2443,20 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
         if (sub === "worktree" || sub === "branch") {
-          // IDEMPOTENT, so a retry can CONVERGE (round-10 P2). The first
-          // discard may remove one half and fail the other; on the second
-          // call the half that succeeded reports "not there" — which is the
-          // state the manager asked for, not a failure. Without these two
-          // allowances the record would stay forever, `reclaimed` would never
-          // become true, and the receipt would keep describing a checkout
-          // that no longer exists.
-          if (/not a working tree|No such file or directory/i.test(result.output)) continue;
-          if (/branch .* not found|not found\./i.test(result.output)) continue;
+          // IDEMPOTENT, so a retry can CONVERGE (round-10 P2). The decision is
+          // `looksLikeAlreadyGone` in lib/orchestrator-worktree.ts — pure, and
+          // unit-tested there, because "is this failure actually success" is
+          // exactly the kind of rule that must not be inlined into a closure.
+          if (looksLikeAlreadyGone(result.output)) continue;
           reclamation.push(result.output.trim().slice(0, 200));
           continue;
         }
         return { ok: false, text: `worktree 结算失败（git ${sub ?? "?"}）：${result.output.trim().slice(0, 600)}` };
       }
-      // PRINTED ON BOTH PATHS (round-6 P1): the discard branch used to drop
-      // this note entirely, so a failed reclamation was invisible AND the child
-      // was already closed — its worktree could never be settled again.
-      //
-      // Only `discard` can produce one at all: a merge has no reclamation step
-      // (the checkout is its own way back from `merge --abort`).
-      // `leftover` IS GONE (round-10 P1): it existed to print the reclamation
-      // failure on a path that could produce one, and the discard branch below
-      // already prints exactly that — so every failed discard emitted the same
-      // git output twice. The branch that can produce a failure is the branch
-      // that reports it.
+      // ONLY A DISCARD RUNS RECLAMATION, so only a discard can report a failed
+      // one — the note that used to sit here belonged to a variable this round
+      // deleted. A merge has no removal step at all: the checkout is its own
+      // way back from `merge --abort`.
       return {
         ok: true,
         // The RECLAMATION outcome rides back with the settlement, because the

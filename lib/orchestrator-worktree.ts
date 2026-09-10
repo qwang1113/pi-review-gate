@@ -161,6 +161,31 @@ export function looksLikeMergeConflict(output: string): boolean {
 }
 
 /**
+ * Is this git output the thing we were trying to remove ALREADY BEING GONE?
+ *
+ * WHY IT HAS TO BE ITS OWN PREDICATE (round-11 P1). Reclamation is two steps —
+ * remove the checkout, delete the branch — and a first attempt can succeed at
+ * one and fail at the other. On the retry the successful half reports "not
+ * there", and treating that as a failure would make the pair impossible to
+ * converge: `reclamation` would stay non-empty forever, `reclaimed` would
+ * never become true, and the record would never be cleared. So "already gone"
+ * has to read as "the state you asked for holds".
+ *
+ * AND IT HAS TO BE NARROW (round-11 P2). Reading a generic failure as success
+ * strands a checkout that still exists — the one direction that loses work —
+ * so this matches git's own two exact phrasings and nothing else. A permission
+ * error, a directory in use, an unreadable repo: all of those stay failures,
+ * and the manager gets a receipt that says so.
+ *
+ * Pure, and beside `looksLikeMergeConflict` for the same reason: the decision
+ * belongs where a unit test can reach it, not inside the closure that shells
+ * out to git.
+ */
+export function looksLikeAlreadyGone(output: string): boolean {
+  return /is not a working tree/i.test(output) || /error: branch '[^']+' not found/i.test(output);
+}
+
+/**
  * The RECLAMATION, and it is two commands because git keeps two things.
  *
  * `--force` on the remove: the child may have left untracked build output, and
