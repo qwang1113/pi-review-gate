@@ -252,6 +252,16 @@ export interface FakeWorldOptions {
    */
   isolateChild?: boolean;
   /**
+   * Isolate the child but wire NO settlement capability — the fail-closed
+   * shape (round-9 P2).
+   *
+   * A real session can have the one and not the other (a partially wired
+   * host), and the rule it protects is: a checkout nobody can settle must not
+   * be created by a close that will then walk away from it. Without this
+   * option the fake always supplies both, so that branch was unreachable.
+   */
+  isolateWithoutSettle?: boolean;
+  /**
    * Repos a task's `repo` declaration may resolve to (default: none, so a
    * declared repo is refused — the fake's equivalent of "not a git root").
    */
@@ -438,19 +448,23 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     emitNotification: () => true,
     fileChars: () => 500,
     sessionTranscriptPath: () => "/tmp/transcript.jsonl",
-    ...(options.isolateChild
+    ...(options.isolateChild || options.isolateWithoutSettle
       ? {
           createWorktree: (repoRoot: string, childId: string) => ({
             ok: true as const,
             path: `${repoRoot}-rg-${childId}`,
             branch: `rg-child-${childId}`,
           }),
+        }
+      : {}),
+    ...(options.isolateChild
+      ? {
           // The settlement ACTION, recorded rather than executed: what the
           // tool owes the manager is the DECISION it passes down, and the git
           // sequence itself is lib/orchestrator-worktree.ts's (unit-tested).
           settleWorktree: (input: { childId: string; settlement: string }) => {
             settlements.push({ childId: input.childId, settlement: input.settlement });
-            return { ok: true, text: `fake: settled ${input.settlement}` };
+            return { ok: true, text: `fake: settled ${input.settlement}`, reclaimed: true };
           },
         }
       : {}),

@@ -293,6 +293,25 @@ test("close settles the checkout the manager asked about, and refuses a value it
   assert.ok(world.runtime().children[1]!.worktree, "a staged merge must not delete the only other copy of the work");
 });
 
+test("a checkout nobody can settle keeps the child OPEN — close is refused, not walked away from", async () => {
+  // The fail-closed half (round-9 P2, which the previous round claimed a static
+  // assertion covered — it did not). A session can have the isolation wired and
+  // the settlement not; closing anyway would leave a checkout that no later
+  // call can settle and that the orphan list cannot even reach (it reports
+  // unfinished children only).
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, isolateWithoutSettle: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const child = world.runtime().children[1]!;
+  assert.ok(child.worktree, "it really did get a checkout — that is what makes this a refusal worth testing");
+
+  const reply = await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
+  assert.equal(reply.isError, true, "closing would strand the checkout");
+  assert.match(replyText(reply), /没有接上 git 能力/);
+  assert.equal(world.runtime().children[1]!.closedAt, undefined,
+    "…and the child is still OPEN, so the close can be retried once the capability exists");
+});
+
 test("a CLOSED child's checkout can still be settled — the advice the merge receipt gives is not a dead end", async () => {
   // Round-7 P1: the merge receipt says "reclaim it later with close({worktree})",
   // and `closableChild` rejects anything with a `closedAt` — which every child

@@ -2446,22 +2446,31 @@ export default function reviewGate(pi: ExtensionAPI) {
       //
       // Only `discard` can produce one at all: a merge has no reclamation step
       // (the checkout is its own way back from `merge --abort`).
+      // ONLY A DISCARD RUNS RECLAMATION AT ALL (round-9 P1, twice wrong): a
+      // merge has no removal step — the checkout is its own way back from
+      // `merge --abort` — so the note belongs in the discard branch, and the
+      // merge branch has none.
       const leftover =
-        settlement !== "merge" && reclamation.length > 0
+        reclamation.length > 0
           ? `\n（⚠️ 回收有报错，checkout 或分支可能还在：${reclamation.join(" / ")}）`
           : "";
       return {
         ok: true,
+        // The RECLAMATION outcome rides back with the settlement, because the
+        // caller has to know whether the checkout is actually GONE: forgetting
+        // a record whose directory still exists strands it — and a retry is
+        // exactly what a failed removal should leave open (round-9 P2).
+        reclaimed: reclamation.length === 0,
         text: (settlement === "merge"
           ? `已把 ${childId} 的改动合并到当前分支（**已暂存、未提交** —— 看过再 commit）。\n` +
             `它的 worktree 与分支 \`${childWorktreeBranch(childId)}\` **先保留**：这次合并还只是 staged，` +
             `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
             `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 回收它们 —— ` +
             `那个调用对已关闭的子会话**同样有效**（它只结算 checkout，不再开门）。`
-            : reclamation.length > 0
-            ? `⚠️ ${childId} 的 worktree **没能回收**（工作区或分支还留着，请人工看一眼）：${reclamation.join(" / ")}\n` +
+          : (reclamation.length > 0
+            ? `⚠️ ${childId} 的 worktree **没能回收**（工作区或分支还留着）：${reclamation.join(" / ")}\n` +
               `路径 ${childWorktreePath(repoRoot, childId)}，分支 \`${childWorktreeBranch(childId)}\`。`
-            : `已回收 ${childId} 的 worktree 与分支（丢弃）。`) + (settlement === "merge" ? leftover : ""),
+            : `已回收 ${childId} 的 worktree 与分支（丢弃）。`) + leftover),
       };
     },
     knownRepoRoots: () => knownRepoRoots(),

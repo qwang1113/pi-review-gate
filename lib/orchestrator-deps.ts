@@ -339,7 +339,16 @@ export interface OrchestratorDeps {
     repoRoot: string;
     worktreePath: string;
     settlement: "keep" | "merge" | "discard";
-  }): { ok: boolean; text: string };
+  }): {
+    ok: boolean;
+    text: string;
+    /**
+     * `false` ⇒ something was NOT removed; the caller must keep the record so
+     * a later call can retry. Absent means "assume it is gone" for a
+     * settlement that removes nothing.
+     */
+    reclaimed?: boolean;
+  };
 
   /**
    * This session's OWN pi session id (2026-09-10, relay takeover).

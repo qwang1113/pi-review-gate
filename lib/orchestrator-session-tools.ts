@@ -448,11 +448,14 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
     if (!settled.ok) return fail("review-gate: " + settled.text);
     settlementNote = "\n" + settled.text;
     // …and it is FORGOTTEN only when the checkout is actually GONE (round-8
-    // Nit). `keep` leaves it by definition and `merge` leaves it on purpose,
-    // so clearing the record there would STRAND it: no later close could see
-    // a worktree to settle, and the orphan list only reports unfinished
-    // children. `discard` is the one settlement that removes both halves.
-    if (rawSettlement === "discard") deps.saveRuntime(forgetWorktree(deps.runtime(), child.id));
+    // Nit, tightened in round 9). `keep` leaves it by definition and `merge`
+    // leaves it on purpose, so clearing the record there would STRAND it: no
+    // later close could see a worktree to settle. And a discard whose removal
+    // FAILED (`reclaimed: false` — the directory is still there) must keep the
+    // record too, or the retry this failure deserves becomes impossible.
+    if (rawSettlement === "discard" && settled.reclaimed !== false) {
+      deps.saveRuntime(forgetWorktree(deps.runtime(), child.id));
+    }
   }
   if (settlementOnly) {
     // Nothing else is owed: the pane is already gone and the registry already

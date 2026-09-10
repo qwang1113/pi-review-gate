@@ -347,7 +347,7 @@ export interface OrchestratorHostBindings {
     repoRoot: string;
     worktreePath: string;
     settlement: "keep" | "merge" | "discard";
-  }): { ok: boolean; text: string };
+  }): { ok: boolean; text: string; reclaimed?: boolean };
   /** This session's OWN pi session id, handed to a successor as its takeover proof. */
   ownSessionId?(): string | undefined;
   /** This orchestrator's OWN context usage, as a percentage (receipt block 4). */
