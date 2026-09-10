@@ -233,6 +233,20 @@ export interface JudgeSessionToolDeps {
   cancelWaitTimer(): void;
   /** Forget the goal draft a closed audit was judging. */
   dropPendingAudit(root: string): void;
+  /**
+   * ACT ON the model failures this judge reported (2026-09-10).
+   *
+   * The pane is the only witness of its own provider errors and the opener is
+   * the only side allowed to write repo state, so the two are different
+   * processes: this hook is where the opener turns the channel's `modelEvent`
+   * records into a cooldown, a warning and whatever else it owes the user.
+   *
+   * It MUST run before the wait advances its `lastModelEventCount` cursor —
+   * a cursor that moves past an unread event drops it forever (the pane will
+   * not report it again), which is exactly what makes the cooldown silent.
+   * Optional so a test fixture can drive the wait without a gate state.
+   */
+  absorbModelEvents?(root: string, judgeId: string): void;
 }
 
 // ---------- shared parameter schemas ----------
@@ -539,11 +553,19 @@ export function probeJudgeWait(
   const newModelEvents = allModelEvents.slice(cursors.modelEventCount);
   const seenModelEventCount = allModelEvents.length;
   /** An empty list stays off the observation: a wake-up says what happened. */
-  const withEvents = (obs: PaneJudgeWaitObservation): PaneJudgeWaitObservation => ({
-    ...(newModelEvents.length > 0 ? { ...obs, modelEvents: newModelEvents } : obs),
-    seenFindingCount,
-    seenModelEventCount,
-  });
+  const withEvents = (obs: PaneJudgeWaitObservation): PaneJudgeWaitObservation => {
+    // The partial observation may carry the CHANNEL'S WHOLE list (the probe
+    // that produced it reads the channel, not this caller's cursor). Drop it
+    // and re-attach only what is new — otherwise a receipt reprints rotations
+    // that were acted on several wake-ups ago (P2, reviewer 2026-09-10).
+    const { modelEvents: _inherited, ...rest } = obs;
+    return {
+      ...rest,
+      ...(newModelEvents.length > 0 ? { modelEvents: newModelEvents } : {}),
+      seenFindingCount,
+      seenModelEventCount,
+    };
+  };
   if (round.done) return withEvents(round);
   if (newModelEvents.some((event) => event.exhausted === true)) {
     return withEvents({ ...round, done: true, reason: "model-exhausted" });
@@ -778,8 +800,12 @@ export async function doWait(
     rememberCursors(deps, child.judgeId, { lastFindingCount: observation.seenFindingCount });
   }
   // Same rule for the model events: whatever this reply shows has been acted
-  // on, so the next wait must not re-announce it.
+  // on, so the next wait must not re-announce it. "Acted on" is the OPENER's
+  // job (cool the slot down, warn) and it happens HERE — before the cursor
+  // moves, never after: an event the cursor skipped is one the pane will never
+  // report again, and the cooldown would silently never be written.
   if (observation.seenModelEventCount !== undefined) {
+    deps.absorbModelEvents?.(child.repoRoot, child.judgeId);
     rememberCursors(deps, child.judgeId, { lastModelEventCount: observation.seenModelEventCount });
   }
   const base = {

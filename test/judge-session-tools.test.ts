@@ -862,7 +862,8 @@ test("the wait probe: this round's conclusion outranks findings that arrived wit
   assert.equal(obs.seenFindingCount, 2, "the findings are still counted — the cursor must advance past them");
 });
 
-test("judge_wait: a leftover report keeps the round open and is named in the reply", async () => {  const f = fake();
+test("judge_wait: a leftover report keeps the round open and is named in the reply", async () => {
+  const f = fake();
   const c = seed(f);
   writeReport(f, c, "READY", "rep-stale", { at: new Date(1_700_000_000_000 - 120_000).toISOString() });
   const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
@@ -902,6 +903,12 @@ test("the wait probe: a rotation is news, an EXHAUSTED chain ends the round", ()
   assert.equal(dead.reason, "model-exhausted");
   assert.equal(dead.modelEvents?.length, 2, "every event since the cursor travels with the wake-up");
   assert.equal(dead.seenModelEventCount, 2, "…and the cursor can advance past them");
+  // Already consumed events are NOT reprinted (P2, reviewer 2026-09-10): the
+  // partial observation carries the channel's whole list, so the wait must
+  // re-attach only what is new instead of inheriting it.
+  const nothingNew = probeJudgeWait(f.deps, c, { ...cursors, modelEventCount: 2 });
+  assert.equal(nothingNew.modelEvents, undefined, "an event behind the cursor is not news");
+  assert.equal(nothingNew.seenModelEventCount, 2);
 });
 
 test("judge_wait: the round's model fallback rides the receipt, and the cursor advances", async () => {
@@ -923,6 +930,32 @@ test("judge_wait: the round's model fallback rides the receipt, and the cursor a
   assert.match(text, /模型 fallback（1 次）：/);
   assert.match(text, /onekey\/gpt-6-astra:xhigh 失败（503 auth_unavailable） → 已切到 anthropic\/claude-opus-5:max。/);
   assert.equal(f.table.current[c.judgeId]?.lastModelEventCount, 1, "the cursor advanced past the event it showed");
+});
+
+test("judge_wait: the opener ACTS on a model event before the cursor moves past it", async () => {
+  // P1 (reviewer, 2026-09-10): the wait used to advance `lastModelEventCount`
+  // unconditionally while the side effect (cooldown + warning) ran later — in
+  // the settle path after the cursor had already moved, or NEVER on a timeout.
+  // The event was then unreadable forever, because the pane never repeats it.
+  const f = fake();
+  const c = seed(f);
+  const cursorWhenAbsorbed: Array<number | undefined> = [];
+  f.deps.absorbModelEvents = (_root, judgeId) => {
+    cursorWhenAbsorbed.push(f.table.current[judgeId]?.lastModelEventCount);
+  };
+  appendRecord(channelWriter(f), channelOf(c), {
+    kind: "state",
+    from: "child",
+    at: new Date(1_700_000_000_000).toISOString(),
+    state: "working",
+    modelEvent: { spec: "onekey/gpt-6-astra:xhigh", error: "503", to: "anthropic/claude-opus-5:max" },
+  });
+  writeReport(f, c, "READY", "rep-10");
+  const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
+  assert.deepEqual(cursorWhenAbsorbed, [undefined],
+    "the absorber must run while the event still counts as unseen");
+  assert.equal(f.table.current[c.judgeId]?.lastModelEventCount, 1, "only then does the wait advance");
+  assert.match(textOf(reply), /模型 fallback（1 次）：/);
 });
 
 test("stream findings still arrive newest-last, malformed lines dropped", () => {

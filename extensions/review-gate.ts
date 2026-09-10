@@ -2933,10 +2933,6 @@ export default function reviewGate(pi: ExtensionAPI) {
    *      down (lib/model-health.ts), instead of always taking `slots[0]`.
    */
   function resolveJudgeLaunch(root: string, role: string, workDir: string, title: string, judgeId: string): JudgeLaunch {
-    // What the pane said about its own model LAST round belongs to THIS
-    // decision — an exhausted chain never settles, so nothing else would ever
-    // read it.
-    absorbJudgeModelEvents(root, judgeId);
     const cfg = freshProjectConfig(root);
     // Rendering writes files; it is idempotent and guarded by the config key,
     // so the dispatch-time call is a no-op until the config actually changes.
@@ -5769,6 +5765,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The lookup IS that derivation: the registry is keyed by judge id, so
     // "same role, same session id in this repo" needs no scan of a second table.
     const existing = judgeHierarchy[judgeId];
+    // FIRST, before the entry below is replaced: what the pane said about its
+    // own model belongs to THIS decision (an exhausted chain never settles, so
+    // a dispatch is the only reader such events ever get), and the cursor they
+    // must be read against lives on the entry that is about to be rewritten.
+    absorbJudgeModelEvents(root, judgeId);
 
     // THE LANE BOOKKEEPING every registration below writes, so the next
     // dispatch can make the same decision from the registry alone.
@@ -5829,6 +5830,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         // The pane's model does not change because a new round was queued into
         // it — the entry keeps saying what the RUNNING pane was launched on.
         ...(existing.modelSpec === undefined ? {} : { modelSpec: existing.modelSpec }),
+        // The MODEL-EVENT cursor survives for the same reason the report cursor
+        // does: the channel is append-only across rounds, so a reset cursor
+        // would hand this round the PREVIOUS round's events — and a stale
+        // `exhausted` one would end a perfectly healthy round on its first
+        // probe (the audit chains end with it too).
+        ...(existing.lastModelEventCount === undefined ? {} : { lastModelEventCount: existing.lastModelEventCount }),
         ...(keptCursor === undefined ? {} : { lastReportId: keptCursor }),
         ...(keptFindings === undefined ? {} : { lastFindingCount: keptFindings }),
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
@@ -5886,9 +5893,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       const freshTarget = judgeChannelTarget(opener, judgeId);
       const judgeChannelPath = channelPathFor(freshTarget.orchestrationId, freshTarget.childId, freshTarget.home);
       let freshCursor: string | undefined;
+      let freshModelEventCount: number | undefined;
       try {
-        freshCursor = projectChannel(readChannel(channelIO, judgeChannelPath).records).lastReport?.reportId;
-      } catch { freshCursor = undefined; }
+        const freshProjection = projectChannel(readChannel(channelIO, judgeChannelPath).records);
+        freshCursor = freshProjection.lastReport?.reportId;
+        // The SAME watermark rule for the model events: the channel is
+        // append-only, so a fresh entry that started at zero would replay every
+        // old failure — including an `exhausted` event that would end this
+        // round's very first probe.
+        freshModelEventCount = freshProjection.modelEvents.length;
+      } catch { freshCursor = undefined; freshModelEventCount = undefined; }
       // A judge's channel OUTLIVES its panes, so only a record ABOVE this
       // watermark proves that the pane opened below actually came up.
       const baselineRecords = channelRecordCount(channelIO, judgeChannelPath);
@@ -5925,6 +5939,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             paneId, roundSeq: nextJudgeRound(opener, judgeId),
             ...(tmuxServer === undefined ? {} : { tmuxServer }),
             ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
+            ...(freshModelEventCount === undefined ? {} : { lastModelEventCount: freshModelEventCount }),
             // Which model this pane was launched on — the round's receipt says
             // who actually ran it (the pane may rotate later; that reports
             // itself through the channel).
@@ -6810,7 +6825,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // so a report cannot be recorded twice (one cursor, written in one place).
     settleRound: async (judgeId, root) => {
       // Before the verdict is read: whatever the pane reported about its own
-      // model is a fact about this round (lib/judge-model-rotation.ts).
+      // model is a fact about this round (lib/judge-model-rotation.ts). The
+      // wait path reaches it through `absorbModelEvents` before moving its
+      // cursor; this covers the settle SWEEP, which no wait drives.
       absorbJudgeModelEvents(root, judgeId);
       const settled = await settleAuditRound(auditRoundDeps(undefined), { judgeId, root });
       switch (settled.status) {
@@ -6834,6 +6851,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
     dropPendingAudit: (root) => dropAudits(root),
     cancelWaitTimer: () => cancelChildWaitTimer(),
+    // The wait's side of the model events: the opener acts on them BEFORE its
+    // cursor moves past them, so nothing the pane reported is ever dropped.
+    absorbModelEvents: (root, judgeId) => absorbJudgeModelEvents(root, judgeId),
   };
   registerJudgeSessionTools(internalHost, judgeSessionDeps);
   // The SAME implementation on the agent surface — one waiting tool, two
@@ -7008,6 +7028,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       // judge_submit's chain in dispatchJudgeRound): re-read the config, pick
       // the first slot that is not cooling down.
       const judgeId = judgeSessionIdFor(role, shortRepoHash(root), opener, lane);
+      // Same reason as `dispatchJudgeRound`: the events this pane reported last
+      // round must be acted on (and their cursor advanced) before
+      // `registerJudge` replaces the entry that carries the cursor.
+      absorbJudgeModelEvents(root, judgeId);
       const launch = resolveJudgeLaunch(root, role, workDir, role, judgeId);
       if (!launch.ok) {
         return { ok: false, error: launch.error };

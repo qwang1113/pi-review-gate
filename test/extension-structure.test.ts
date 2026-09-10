@@ -757,6 +757,32 @@ test("MODEL FALLBACK: only a judge pane installs the pane-side rotation", () => 
     "and REPORTS it — the opener cannot see provider errors itself");
 });
 
+test("MODEL EVENTS: the cursor never moves past an event the opener did not act on", () => {
+  // P1 (reviewer, 2026-09-10): the wait advanced the cursor while the side
+  // effect ran later (or never), so the cooldown was silently never written.
+  // The absorber is now the wait's own dep, called BEFORE the cursor write.
+  const deps = windowOf("const judgeSessionDeps: JudgeSessionToolDeps = {", "\n  };", "judgeSessionDeps");
+  assert.match(deps, /absorbModelEvents: \(root, judgeId\) => absorbJudgeModelEvents\(root, judgeId\)/,
+    "the wait's absorber is wired to the one implementation");
+  assert.equal((SRC.match(/absorbModelEvents\(\?/g) ?? []).length, 0, "no second policy");
+
+  // The other half of the same defect: a re-dispatch REPLACES the registry
+  // entry, so the cursor must be carried (reuse) or seeded from the channel
+  // watermark (fresh open) — the channel is append-only, and a replay of an
+  // old `exhausted` event would end a healthy round on its first probe.
+  const reuse = SRC.slice(SRC.indexOf("const keptCursor = existing.lastReportId;"), SRC.indexOf("const keptCursor = existing.lastReportId;") + 1400);
+  assert.match(reuse, /lastModelEventCount: existing\.lastModelEventCount/, "reuse carries the cursor");
+  const fresh = SRC.slice(SRC.indexOf("let freshCursor: string | undefined;"), SRC.indexOf("let freshCursor: string | undefined;") + 900);
+  assert.match(fresh, /freshModelEventCount = freshProjection\.modelEvents\.length/,
+    "a fresh open seeds it at the channel watermark (the same rule as the report cursor)");
+  assert.match(SRC, /lastModelEventCount: freshModelEventCount/, "…and the registration carries it");
+  // Absorbing at dispatch is what covers the round that ends WITHOUT a report
+  // (an exhausted chain) — before the entry it reads the cursor from is gone.
+  const dispatchAt = SRC.indexOf("const existing = judgeHierarchy[judgeId];");
+  assert.match(SRC.slice(dispatchAt, dispatchAt + 400), /absorbJudgeModelEvents\(root, judgeId\)/,
+    "the dispatch absorbs before it rewrites the entry");
+});
+
 test("INCREMENTAL: the settled conclusion of the previous round is handed to the reviewer", () => {
   // A re-review that starts from zero pays full price for questions already
   // answered. The gate must state what the last READY verdict settled.
