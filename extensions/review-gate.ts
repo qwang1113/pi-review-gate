@@ -299,7 +299,7 @@ import {
 // long block (orchestrator_wait / judge_wait) instead of being queued behind it.
 import { notifyUserInput } from "../lib/poll-wait.ts";
 
-import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
+import { formatInheritanceBrief, PREDECESSOR_SESSION_ENV, readInheritance } from "../lib/orchestrator-relay.ts";
 import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
@@ -1965,10 +1965,18 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the edit gate reads it. Allowed ⇒ this session takes the claim.
    */
   function applySessionExclusivity(ctx?: ExtensionContext): void {
+    // The HEIR of the current holder takes over (2026-09-10): a successor
+    // started by `orchestrator_handoff` runs in this same worktree ON PURPOSE
+    // — that is how one orchestration keeps reaching its children — so
+    // refusing it would kill the very handoff it exists to complete. It says
+    // so by naming the session it replaces, which it carries in its own
+    // environment.
+    const successorOf = (process.env[PREDECESSOR_SESSION_ENV] ?? "").trim() || undefined;
     const verdict = checkSessionExclusivity({
       env: process.env,
       sessionId: state.sessionId,
       existing: readPresence(cwd),
+      ...(successorOf ? { successorOf } : {}),
       repoRoot: cwd,
       now: Date.now(),
     });
@@ -2276,6 +2284,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         return state.sessionId ? `${dir}/${state.sessionId}.jsonl` : undefined;
       } catch { return undefined; }
     },
+    // Handed to a successor as its takeover proof (lib/orchestrator-relay.ts).
+    ownSessionId: () => state.sessionId ?? undefined,
     knownRepoRoots: () => knownRepoRoots(),
     // Symmetric re-arm (goal 5): the project manager's work is its
     // orchestration tools — the loop session's work is its edits. The
@@ -2283,10 +2293,34 @@ export default function reviewGate(pi: ExtensionAPI) {
     // and none for the manager is that the manager never edits; here it
     // re-arms itself by managing.
     onToolCall: () => { armLoop(); },
-    // Goal 7 — a handoff is a VOLUNTARY exit. The successor inherits the
-    // orchestration; waking the retired session would put two project
-    // managers on one orchestration.
-    onHandoff: () => { handedOffOrchestration = true; },
+    // RETIRE (goal 7, reworked 2026-09-10 after the rebate handoff failure).
+    //
+    // A handoff is a VOLUNTARY exit, so every wake-up path has to go quiet —
+    // but going quiet is not enough on its own. The successor arms its gate in
+    // THIS worktree, and the exclusivity guard refuses a second claimant while
+    // our heartbeat is still fresh. MEASURED: the successor was refused with
+    // "这个 worktree 已被另一个会话占用", naming the session that had just
+    // handed the orchestration over, and its pi then exited.
+    //
+    // So retiring means three things, in this order:
+    //   1. stop the two timers that push the plan forward — it is no longer
+    //      this session's plan;
+    //   2. RELEASE the worktree claim, so the successor is not refused;
+    //   3. mark the session retired, so `orchestratorSettled` — which is not a
+    //      timer and fires on its own at `agent_settled` — leaves it alone.
+    //
+    // The returned rollback is for a relay that never started its successor:
+    // the orchestration must keep exactly one holder.
+    onHandoff: () => {
+      handedOffOrchestration = true;
+      stopSupervisionTimer();
+      stopRevivalTimer();
+      releaseWorktree();
+      return () => {
+        handedOffOrchestration = false;
+        if (claimsMainSidecar(process.env)) holdWorktree();
+      };
+    },
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
   // A manager's window holds BOTH kinds of decorated pane. The session tools
@@ -2581,6 +2615,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     supervisionTimer = setInterval(() => {
       try {
         if (state.taskMode !== "orchestrator") { stopSupervisionTimer(); return; }
+        // RETIRED: this session handed the orchestration to a successor.
+        // Supervision exists to push the plan forward, and pushing it is now
+        // somebody else's job — a wake-up here would put two project managers
+        // on one orchestration (the exact defect the revival path already
+        // guards against at lib/session-revival.ts).
+        if (handedOffOrchestration) { stopSupervisionTimer(); return; }
         if (!ctx.isIdle?.()) return;
         const news = drainSupervisionNews();
         if (news.length === 0) return;
@@ -2636,6 +2676,19 @@ export default function reviewGate(pi: ExtensionAPI) {
    * will never have.
    */
   function orchestratorSettled(ctx: ExtensionContext): void {
+    // RETIRED: this session handed its orchestration to a successor.
+    //
+    // MEASURED (2026-09-10, rebate): without this guard the predecessor was
+    // revived TWO SECONDS after a successful `orchestrator_handoff` —
+    // `agent_settled` fired as its turn ended, `sessionExitProblems()` still
+    // reported the plan's unfinished tasks, and `[ORCHESTRATION_RESUME]` put
+    // it back into `orchestrator_wait` beside the successor it had just
+    // started. Both timers are left unarmed for the same reason: the plan is
+    // no longer this session's to push.
+    //
+    // This is the same judgement `decideRevival` already makes on its own
+    // path (`handedOff: handedOffOrchestration`); this path simply lacked it.
+    if (handedOffOrchestration) return;
     startSupervisionTimer(ctx);
     startRevivalTimer(ctx);
     // USER REQUIREMENT (shared with the loop path): the user aborted this
@@ -3281,6 +3334,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     // point of refusing is that these two must not overwrite each other. (The
     // refusal itself is memory-only; saveSidecar strips it as well.)
     if (state.exclusivityRefusal) return;
+    // Nor does a RETIRED orchestrator: it handed the orchestration to a
+    // successor, and the successor now owns this sidecar. The successor is
+    // admitted into this SAME worktree on purpose (one orchestration id, no
+    // child restarted), which is exactly the "two sessions, one sidecar"
+    // situation the exclusivity guard exists to prevent — so the predecessor
+    // is the one that has to stop writing. Without this, a wake-up that
+    // slipped past the retirement guards would rewrite the plan and child
+    // registry the successor is working from.
+    if (handedOffOrchestration) return;
     // P-multi: persist the session's repo set so a same-session resume (or
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);

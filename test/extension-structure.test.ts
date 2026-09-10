@@ -50,6 +50,8 @@ const JUDGE_SESSION_TOOLS = new Set(["judge_close", "judge_wait"]);
  * module, the two advisory task builders in the other.
  */
 const REVIEW_PREPARE_SRC = readFileSync(join(ROOT, "lib", "review-prepare-tools.ts"), "utf8");
+const SESSION_TOOLS_SRC = readFileSync(join(ROOT, "lib", "orchestrator-session-tools.ts"), "utf8");
+const EXCLUSIVITY_SRC = readFileSync(join(ROOT, "lib", "session-exclusivity.ts"), "utf8");
 const REVIEW_PREPARE_TOOLS = new Set(["prepare_review"]);
 const ADVISORY_PREPARE_SRC = readFileSync(join(ROOT, "lib", "advisory-prepare-tools.ts"), "utf8");
 const ADVISORY_PREPARE_TOOLS = new Set(["prepare_adviser", "prepare_goal_audit"]);
@@ -5571,4 +5573,85 @@ test("thinking-loop guard: the extension forwards the assistant stream, the stat
     "the display cut rides the markdown transformer",
   );
   assert.doesNotMatch(SRC, /recoveries/, "the recovery counter belongs to the controller, not the extension");
+});
+
+// ---------------------------------------------------------------------------
+// A HANDOFF MUST ACTUALLY HAND OVER (2026-09-10, rebate).
+//
+// MEASURED failure, two defects that compounded:
+//   1. `orchestrator_handoff` reported success, and the successor's gate then
+//      refused itself IN THE SAME WORKTREE ("这个 worktree 已被另一个会话占用",
+//      naming the predecessor it had just been started to replace); its pi
+//      exited, leaving the pane on a bare shell.
+//   2. The PREDECESSOR was woken back into `orchestrator_wait` TWO SECONDS
+//      after the handoff, because `orchestratorSettled` had no retired guard
+//      while the revival path already had one.
+// The two are one root cause: retiring a session was a flag, and a flag does
+// not stop a timer, release a worktree, or survive `agent_settled`.
+// ---------------------------------------------------------------------------
+
+test("a handoff retires the predecessor BEFORE the successor opens, and undoes it if the successor never starts", () => {
+  // ORDER IS THE FIX. The successor arms its gate in this same worktree, so a
+  // release that happens after the pane opens races its boot and loses.
+  const retireAt = SESSION_TOOLS_SRC.indexOf("const rollback = deps.onHandoff?.()");
+  const openAt = SESSION_TOOLS_SRC.indexOf("await openSessionPane(");
+  assert.ok(retireAt > 0, "doHandoff retires through the injected callback");
+  assert.ok(openAt > 0, "doHandoff opens the successor through the session factory");
+  assert.ok(retireAt < openAt, "the predecessor must release BEFORE the successor's pane opens");
+
+  // A relay that never started a successor leaves exactly one holder.
+  const failed = SESSION_TOOLS_SRC.indexOf("if (!opened.ok)");
+  assert.ok(failed > 0);
+  assert.match(
+    SESSION_TOOLS_SRC.slice(failed, failed + 400),
+    /rollback\?\.\(\)/,
+    "a failed relay restores the predecessor as the holder",
+  );
+
+  // The retirement must NOT fire from the tool's execute wrapper: that marked
+  // the session retired before `relayPreconditions` had even looked at the
+  // handoff, so a refused relay stranded the orchestration with nobody on it.
+  assert.match(
+    SESSION_TOOLS_SRC,
+    /execute: guarded\(\(params\) => doHandoff\(deps, params\)\)/,
+    "retiring before the preconditions are checked strands the orchestration",
+  );
+});
+
+test("retiring means silent timers AND a released worktree — or the successor is refused", () => {
+  const start = SRC.indexOf("RETIRE (goal 7");
+  assert.ok(start > 0, "the retirement block is present");
+  const site = SRC.slice(start, start + 1600);
+  assert.match(site, /handedOffOrchestration = true/, "the wake-up guard is set");
+  assert.match(site, /stopSupervisionTimer\(\)/, "the supervision timer goes quiet");
+  assert.match(site, /stopRevivalTimer\(\)/, "the revival timer goes quiet");
+  assert.match(site, /releaseWorktree\(\)/, "the worktree claim is released, so the successor is not refused");
+  assert.match(site, /if \(claimsMainSidecar\(process\.env\)\) holdWorktree\(\)/,
+    "the rollback re-takes the claim — and only a session that claims one may write a heartbeat");
+});
+
+test("every wake-up path respects a retired session", () => {
+  const start = SRC.indexOf("function orchestratorSettled(");
+  assert.ok(start > 0);
+  const settled = SRC.slice(start, start + 2000);
+  const guardAt = settled.indexOf("if (handedOffOrchestration) return;");
+  const armAt = settled.indexOf("startSupervisionTimer(ctx)");
+  assert.ok(guardAt > 0,
+    "agent_settled must not revive a session that handed its orchestration over — this is the defect that put two project managers on one plan");
+  assert.ok(armAt > 0 && guardAt < armAt, "the guard runs BEFORE the timers are re-armed");
+
+  const supStart = SRC.indexOf("function startSupervisionTimer(");
+  assert.ok(supStart > 0);
+  assert.match(SRC.slice(supStart, supStart + 2000),
+    /if \(handedOffOrchestration\) \{ stopSupervisionTimer\(\); return; \}/,
+    "an already-armed supervision tick stops itself instead of waking the retired session");
+});
+
+test("the successor names the session it replaces, and the guard honours the heirship", () => {
+  assert.match(SRC, /process\.env\[PREDECESSOR_SESSION_ENV\]/,
+    "the takeover claim is read from the successor's own environment");
+  assert.match(SRC, /\.\.\.\(successorOf \? \{ successorOf \} : \{\}\)/,
+    "and handed to the decision as the heirship relation");
+  assert.match(EXCLUSIVITY_SRC, /if \(heir && holder\.sessionId === heir\) return \{ ok: true \}/,
+    "the decision itself lives in lib/session-exclusivity.ts");
 });

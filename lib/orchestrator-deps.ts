@@ -307,6 +307,16 @@ export interface OrchestratorDeps {
   sessionTranscriptPath(): string | undefined;
 
   /**
+   * This session's OWN pi session id (2026-09-10, relay takeover).
+   *
+   * Handed to the successor as its proof of heirship: the worktree-exclusivity
+   * guard refuses a second gate session in the same checkout, and the one
+   * thing that lets the successor take the claim over is being able to name
+   * the session it replaces (lib/session-exclusivity.ts).
+   */
+  ownSessionId?(): string | undefined;
+
+  /**
    * Every repo this session is accountable for, primary first (2026-09-07:
    * cross-repo parallelism needs the scheduler to know which repos exist).
    */
@@ -343,9 +353,18 @@ export interface OrchestratorDeps {
   onToolCall?(name: string): void;
 
   /**
-   * Fired when THIS session handed its orchestration to a successor
-   * (`orchestrator_handoff`). The extension sets its `handedOff` flag so
-   * the revival timer leaves the (voluntarily) retired session alone.
+   * RETIRE this session as the orchestration's holder, called by
+   * `orchestrator_handoff` BEFORE the successor pane opens (2026-09-10).
+   *
+   * Order matters and it is the whole point of the callback's placement: the
+   * successor arms its gate in this SAME worktree, and the exclusivity guard
+   * refuses it while this session's heartbeat is fresh. Releasing first is
+   * what lets the successor start at all.
+   *
+   * Returns a ROLLBACK for the case where the successor could not be started:
+   * a handoff that never happened must not leave the predecessor retired
+   * (silent timers, released claim) with nobody holding the orchestration.
+   * `undefined` means there was nothing to roll back.
    */
-  onHandoff?(): void;
+  onHandoff?(): (() => void) | undefined;
 }

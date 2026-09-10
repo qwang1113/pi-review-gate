@@ -154,3 +154,65 @@ test("only the holder clears its own record on the way out", () => {
   assert.equal(presenceIsOurs(undefined, "session-mine"), false);
   assert.equal(presenceIsOurs(mine, null), false);
 });
+
+// ---------------------------------------------------------------------------
+// THE HEIR TAKES OVER — a successor must not be refused by the session it
+// replaces. MEASURED (2026-09-10, rebate): `orchestrator_handoff` opens its
+// successor in the SAME worktree on purpose (that is how one orchestration
+// keeps reaching its children), and the guard refused it with a message
+// naming the very session that had just handed over. The successor's pi then
+// exited — the handoff reported success and left nobody holding the plan.
+// ---------------------------------------------------------------------------
+
+/** The heir of `session-incumbent`, in an ordinary (claiming) session. */
+function heir(existing: PresenceRecord | undefined, successorOf: string | undefined) {
+  return checkSessionExclusivity({
+    env: PLAIN,
+    sessionId: "session-successor",
+    existing,
+    ...(successorOf === undefined ? {} : { successorOf }),
+    repoRoot: REPO,
+    now: NOW,
+  });
+}
+
+test("a successor takes the claim over from the session it replaces", () => {
+  const v = heir(holder(1_000), "session-incumbent");
+  assert.equal(v.ok, true,
+    "the heartbeat is fresh and the answer is still yes: being the named heir IS the takeover — winning a race against a file deletion is not");
+});
+
+test("a fresh heartbeat is still the reason to refuse when the heir is not named", () => {
+  assert.equal(heir(holder(1_000), undefined).ok, false,
+    "no takeover claim ⇒ the ordinary rule stands, or every second session would walk in");
+});
+
+test("naming somebody ELSE as the predecessor is not a takeover", () => {
+  const v = heir(holder(1_000), "session-somebody-else");
+  assert.equal(v.ok, false,
+    "the claim is the HEIRSHIP relation, not the presence of the variable — a stale or forged id must not open an occupied checkout");
+});
+
+test("an empty or blank predecessor id is treated as absent", () => {
+  assert.equal(heir(holder(1_000), "").ok, false);
+  assert.equal(heir(holder(1_000), "   ").ok, false);
+});
+
+test("a lapsed holder is taken over with or without an heirship claim", () => {
+  assert.equal(heir(holder(PRESENCE_FRESH_MS + 1), undefined).ok, true,
+    "the ordinary lapse path is unchanged");
+  assert.equal(heir(holder(PRESENCE_FRESH_MS + 1), "session-incumbent").ok, true);
+});
+
+test("an heirship claim does not exempt a session that claims no sidecar", () => {
+  // A judge or a child never claims the main sidecar, so the guard returns
+  // before it looks at any holder — the new field must not have moved that
+  // precedence.
+  assert.equal(
+    checkSessionExclusivity({
+      env: JUDGE, sessionId: "session-judge", existing: holder(1_000),
+      successorOf: "session-incumbent", repoRoot: REPO, now: NOW,
+    }).ok,
+    true,
+  );
+});

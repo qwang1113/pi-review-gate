@@ -331,7 +331,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   `orchestrator-handoff-advice.ts`（上下文用量 + 待答请求数 ⇒ 接力时机）、
   `orchestrator-wait.ts`（「有事发生」是什么，以及那份五块回执怎么装）、
   `orchestrator-registry.ts`（编排只能操作门禁替它创建的东西）、
-  `orchestrator-relay.ts`（自我接力：只有后继者能关掉前任）、
+  `orchestrator-relay.ts`（自我接力：只有后继者能关掉前任；后继者的环境带上前任 pane / 交接文档 / 前任 transcript / **前任 session id**——最后一项是它接管 worktree 占用的继任凭据）、
   `orchestration-id.ts`（编排的稳定地址，接力换人后子会话无感）。
 - **通道（两侧，IO 经注入的 seam）**：`orchestrator-channel.ts`（路径、记录
   schema、追加/读取/游标、大 payload 溢出、投影、心跳）、
@@ -600,7 +600,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `sensitive-grant.ts` | 敏感文件的一次性用户授权：限定路径、限时、用后即焚 |
 | `session-revival.ts` | 存活不变量（2026-08-30）：会话在退出契约未满足时停下，门禁就周期性唤醒它。纯判定：看不见续跑预算与 loop-stall 断路器（它们管注入路径，管不了「停下」），但尊重人的叫停（ESC / ask_user / bypass / 仲裁 pause）与 handoff 交接 |
 | `session-dir.ts` | pi 的 session-dir 编码约定，fresh-context 角色据此找到主会话 transcript |
-| `session-exclusivity.ts` | 一个 worktree 只允许一个「占用主 sidecar」的会话：心跳存在文件（`.pi/session-presence.json`）判活，第二个占用者 fail-closed 拒绝——拦 edit/write、拦 ship、连门禁自己的 checkpoint 提交与 goal 文件写入一并拦（`normal` 模式除外：那个模式的定义就是门禁整体关闭，所以不发拒绝；它只在 worktree 空闲时写心跳，已被占用时既不拒绝也不写——凭据属于占用者）。judge 与编排子会话因为不写主 sidecar 而天然豁免。裁决输入只有**心跳新鲜度**（60s 窗，`PRESENCE_FRESH_MS`），`pid`/`host` 仅作诊断（这一点与 `blocked-marker.ts` 相同，**但两者的失败方向相反**）；一切未知（文件缺失/损坏/时钟异常/未来时间戳）一律 fail-**open** 放行——**只有一个正面事实（刚写的心跳）才能拒绝**，占用者消失后自动复检解除。**它与 `blocked-marker.ts`、`judge-pane.ts` 的判活为什么不可收敛**：见本文件头与 `test/liveness-criteria.test.ts`（2026-09-06 复核） |
+| `session-exclusivity.ts` | 一个 worktree 只允许一个「占用主 sidecar」的会话：心跳存在文件（`.pi/session-presence.json`）判活，第二个占用者 fail-closed 拒绝——拦 edit/write、拦 ship、连门禁自己的 checkpoint 提交与 goal 文件写入一并拦（`normal` 模式除外：那个模式的定义就是门禁整体关闭，所以不发拒绝；它只在 worktree 空闲时写心跳，已被占用时既不拒绝也不写——凭据属于占用者）。judge 与编排子会话因为不写主 sidecar 而天然豁免。裁决输入只有**心跳新鲜度**（60s 窗，`PRESENCE_FRESH_MS`），`pid`/`host` 仅作诊断（这一点与 `blocked-marker.ts` 相同，**但两者的失败方向相反**）；一切未知（文件缺失/损坏/时钟异常/未来时间戳）一律 fail-**open** 放行——**只有一个正面事实（刚写的心跳）才能拒绝**，占用者消失后自动复检解除。2026-09-10 新增第二条放行：**继任关系** —— `orchestrator_handoff` 起的后继者带着前任的 session id（`RG_ORCHESTRATOR_PREDECESSOR_SESSION`），占用者 id 等于它即放行；该判定排在**新鲜度之前**，因为「前任还没来得及释放」正是它要覆盖的场景（实测：后继者被自己前任的心跳拒之门外，报「这个 worktree 已被另一个会话占用」后 pi 随即退出）。**它与 `blocked-marker.ts`、`judge-pane.ts` 的判活为什么不可收敛**：见本文件头与 `test/liveness-criteria.test.ts`（2026-09-06 复核） |
 | `session-factory.ts` | **开一个带角色的 pi 会话的唯一入口**（2026-09-05）：一次 `openSessionPane` 走完 split → 登记 → 装饰 → 等分 → 投递核实，六个开 pane 的调用点（judge 轮次派发 / `judge_spawn` / `judge_recover` / `orchestrator_spawn` / `orchestrator_recover` / `orchestrator_handoff`）全部经它；**落点由窗口自己的几何决定**（`placementFor` 探测 → `planPanePlacement` 决策），关 pane 同理（`closeSessionPane` kill 前探测、kill 后重新等分）—— 三列规则因此在门禁内部完成，agent 不碰窗口；env 只在 `buildSessionEnv` 一处拼（`RG_JUDGE_*` 与 `RG_ORCHESTRATION_ID`/`RG_GATE_MODE`/`RG_STATE_VARIANT` 都是跨进程契约，也是 session 独占豁免的依据）；装饰含 window 级边框行（judge pane 曾因此看不到边框 = C1），标题刷新 `refreshSessionPaneTitle` 是**唯一**写标题处、带节流与重绘记忆（judge 侧曾无人刷新 = C2）；`paneRecoverability` 是两处 recover 共用的同一判定。它是 `orchestrator-tmux.ts` 开 pane argv 的**唯一**使用者 |
 | `side-effects.ts` | 唯一一处「本进程能不能碰外部世界」的判定（测试 / CI / 无 TTY / 显式关闭一律不能），通知与编排共用 |
 | `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |

@@ -336,6 +336,8 @@ export interface OrchestratorHostBindings {
   /** Print text into the user's transcript (the plan's full text, O-1). */
   showToUser(title: string, text: string): void;
   sessionTranscriptPath(): string | undefined;
+  /** This session's OWN pi session id, handed to a successor as its takeover proof. */
+  ownSessionId?(): string | undefined;
   /** This orchestrator's OWN context usage, as a percentage (receipt block 4). */
   contextPercent?(): number | undefined;
   /** Run + record the plan pre-audit (the extension owns the judge process). */
@@ -364,8 +366,12 @@ export interface OrchestratorHostBindings {
    * re-arm). The extension re-arms `loopArmed` here.
    */
   onToolCall?(name: string): void;
-  /** Fired when THIS session handed its orchestration to a successor. */
-  onHandoff?(): void;
+  /**
+   * RETIRE this session as the orchestration's holder, called by
+   * `orchestrator_handoff` BEFORE the successor pane opens; returns a rollback
+   * for the case where the successor could not be started.
+   */
+  onHandoff?(): (() => void) | undefined;
 }
 
 /**
@@ -497,6 +503,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
 
     onToolCall: host.onToolCall,
     onHandoff: host.onHandoff,
+    ownSessionId: host.ownSessionId,
     emitNotification: (sequence) => emitNotification(sequence, env()),
     fileChars: (relPath) => fileCharsIn(host.repoRoot, relPath),
     sessionTranscriptPath: host.sessionTranscriptPath,

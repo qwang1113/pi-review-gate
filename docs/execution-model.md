@@ -218,13 +218,32 @@ agent 每轮都要先挑一个。这三个工具连同它们依赖的抓屏与�
 
 **接力的不断档保证**：老会话写交接文档 + plan 落盘 →
 `orchestrator_handoff({handoffPath})` 把**这份编排**交给一个新会话（它继承同一个
-orchestration id、交接文档路径，以及**老会话 transcript 路径** —— 交接文档是自述，
-原始记录才是查问题时要的）→ 老会话进入 idle → **由新会话**调
+orchestration id、交接文档路径、**老会话 transcript 路径**，以及**老会话的 session id**
+—— 交接文档是自述，原始记录才是查问题时要的）→ 老会话**退休** → **由新会话**调
 `orchestrator_close({predecessorPane})` 关掉老会话。只有接任者能关前任（前任自己没有
 那个环境变量），这天然证明新会话已经起来并接手成功。接力的**时机**也不靠项目经理
 自觉：wait 回执第四块按上下文用量直接给判断（≥80% 且手上没有待答请求就是好时机，
 ≥90% 则是首要动作）。工具名从上一版的 `orchestrator_relay` 改成 `orchestrator_handoff`，
 因为它交出去的是这份编排本身，不是一个 pane。
+
+**退休是四件事，不是一句「进入 idle」**（2026-09-10 实测修复，两个缺陷源于同一根因）：
+（1）停掉两个推进定时器（supervision / revival）；
+（2）**释放 worktree 占用**（`.pi/session-presence.json`）—— 新会话在**同一个 worktree**
+里启门禁，占用不释放它就会被自己前任的心跳拒绝（实测报错「这个 worktree 已被另一个
+会话占用，本会话不启动门禁」，点名刚交棒的会话，新会话的 pi 随即退出）；
+（3）**任何唤醒路径都不再叫它** —— `orchestratorSettled`（`agent_settled` 路径）、
+supervision 定时器、revival 三条都守 `handedOffOrchestration`。少了这条，`agent_settled`
+会在交棒**两秒后**把前任叫回 `orchestrator_wait`，一个编排两个项目经理；
+（4）**不再写共享 sidecar**（`persist()` 的退休守卫）—— 两个会话写一份 sidecar 正是
+占用判定要防的事，而继任者是被**故意**放进来的，所以停下来的是前任。
+
+这四件事发生在**开新 pane 之前**，顺序即正确性：退休晚于 pane 打开就是和新会话的启动
+赛跑。接力若因前置条件不满足或开 pane 失败而中止，退休**可回滚**（前任重新占用、
+唤醒恢复）—— 没交出去的编排不能留下一个已退休的前任。
+
+新会话一侧另有一道保险：它带着**前任的 session id** 启动，worktree 占用判定认这条
+继任关系（`lib/session-exclusivity.ts` 的 `successorOf`，判定排在**心跳新鲜度之前**），
+所以即使前任没来得及释放，接手依然成立。
 
 接手现场的另一半是 `orchestrator_attach({orchestrationId})`：后继者带着同一个 id 启动
 之后，一次拿回 plan 与任务状态、每个子会话的状态与资产、通道里还没人答的请求，以及

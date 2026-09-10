@@ -457,6 +457,23 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
     );
   }
 
+  // RETIRE THE PREDECESSOR FIRST, and the ORDER is the fix (2026-09-10,
+  // rebate handoff failure). The successor arms its gate in this SAME
+  // worktree, and the exclusivity guard refuses a second claimant while the
+  // holder's heartbeat is fresh (lib/session-exclusivity.ts). Retiring after
+  // the pane opens would race the successor's boot and lose: it was measured
+  // refusing itself with "这个 worktree 已被另一个会话占用", naming the very
+  // session that had just handed the orchestration over.
+  //
+  // A handoff that never happens must change NOTHING: `rollback` is called
+  // when the pane could not be opened, so a failed relay leaves the
+  // predecessor as the holder instead of a retired session with nobody
+  // behind it.
+  const rollback = deps.onHandoff?.();
+  // The successor's proof of heirship (lib/session-exclusivity.ts): named, it
+  // may take this worktree's claim over from the session it replaces.
+  const predecessorSessionId = deps.ownSessionId?.();
+
   // The successor is opened by the SAME factory as every other pi session —
   // it just lands BESIDE the opener instead of in the child column (tmux then
   // expands it into the left column when the old pane is closed), keeps no
@@ -477,12 +494,16 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
           predecessorPane: self!,
           handoffPath,
           predecessorTranscript: deps.sessionTranscriptPath(),
+          ...(predecessorSessionId ? { predecessorSessionId } : {}),
         }),
         [GATE_MODE_ENV]: "orchestrator",
       },
     },
   });
   if (!opened.ok) {
+    // Undo the retirement: the orchestration still has exactly one holder,
+    // and it is this session.
+    rollback?.();
     return fail(`review-gate: 开接任会话失败 —— ${opened.error}（接力中止，你仍然是持有者）。`);
   }
   const paneId = opened.paneId;
@@ -632,13 +653,7 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     parameters: Type.Object({
       handoffPath: Type.String({ description: "Repo-relative path, e.g. docs/orchestrator-handoff.md" }),
     }),
-    execute: guarded((params) => {
-      // Voluntary exit (goal 7): the revival timer must leave this
-      // session alone after it hands over — it is DONE by choice, and
-      // waking it would put two project managers on one orchestration.
-      deps.onHandoff?.();
-      return doHandoff(deps, params);
-    }),
+    execute: guarded((params) => doHandoff(deps, params)),
   });
 
 }

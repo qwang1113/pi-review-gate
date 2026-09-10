@@ -5,6 +5,7 @@ import {
   HANDOFF_PATH_ENV,
   MIN_HANDOFF_CHARS,
   PREDECESSOR_PANE_ENV,
+  PREDECESSOR_SESSION_ENV,
   PREDECESSOR_TRANSCRIPT_ENV,
   formatInheritanceBrief,
   predecessorCloseAuthorization,
@@ -88,6 +89,30 @@ test("the successor inherits the ADDRESS, the handoff and the raw record", () =>
   });
   assert.ok(!(PREDECESSOR_TRANSCRIPT_ENV in withoutTranscript),
     "an unknown transcript is omitted rather than passed as an empty pointer");
+});
+
+test("the successor carries the id of the session it replaces — its takeover proof", () => {
+  // MEASURED (2026-09-10, rebate): a successor arms its gate in the SAME
+  // worktree as the session it replaces (that is how one orchestration keeps
+  // reaching its children), and the exclusivity guard refuses a second
+  // claimant while the holder's heartbeat is fresh — it refused the successor
+  // with a message naming the session that had just handed over, and the
+  // successor's pi then exited. This variable is how the successor says "I am
+  // that session's heir" and takes the claim over (lib/session-exclusivity.ts),
+  // which is why it travels even though the predecessor also releases.
+  const env = successorEnv({
+    orchestrationId: "orch-abc-1",
+    predecessorPane: "%1",
+    handoffPath: "docs/h.md",
+    predecessorSessionId: "01a08908-a531-7764-876a-9fa512fdfd28",
+  });
+  assert.equal(env[PREDECESSOR_SESSION_ENV], "01a08908-a531-7764-876a-9fa512fdfd28");
+
+  const withoutId = successorEnv({
+    orchestrationId: "orch-abc-1", predecessorPane: "%1", handoffPath: "docs/h.md",
+  });
+  assert.ok(!(PREDECESSOR_SESSION_ENV in withoutId),
+    "an unknown predecessor id is omitted rather than passed as an empty claim");
 });
 
 test("inheritance is read back, and blanks are treated as absent", () => {
