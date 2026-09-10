@@ -40,6 +40,7 @@ import {
 } from "./orchestrator-takeover.ts";
 import { openSessionPane, paneRecoverability } from "./session-factory.ts";
 import { paneLabelFor } from "./orchestrator-pane-decor.ts";
+import { findOrphanWorktrees } from "./orchestrator-worktree.ts";
 import {
   buildRecoverCommand,
   buildRecoveryNote,
@@ -356,6 +357,28 @@ async function doAttach(deps: OrchestratorDeps, params: Record<string, unknown>)
         (orphan.childId
           ? `恢复：\`orchestrator_recover({childId:"${orphan.childId}"})\`（续同一 transcript）。`
           : `恢复：\`orchestrator_spawn({taskId:"${orphan.taskId}"})\` 重新派活。`),
+      );
+    }
+  }
+  // ### 5 — THE CHECKOUTS NOBODY SETTLED (2026-09-10). A crash or a restart is
+  // the one thing that leaves a worktree with no live child and no decision on
+  // record, and an orphan nobody is told about is an orphan nobody reclaims.
+  // It is REPORTED, never reaped: the work in it may be the only copy.
+  const orphanWorktrees = findOrphanWorktrees(
+    runtime.children,
+    panes.ok ? panes.panes : undefined,
+  );
+  lines.push("", "### 5. 未结算的隔离 worktree");
+  if (!panes.ok) {
+    lines.push("（pane 列表读不到，本次不做判定 —— 读不到不等于没人用）");
+  } else if (orphanWorktrees.length === 0) {
+    lines.push("（没有遗留的隔离 checkout）");
+  } else {
+    for (const w of orphanWorktrees) {
+      lines.push(
+        `- ${w.childId}（任务 ${w.taskId}）：${w.path}，分支 \`${w.branch}\`。` +
+        "里面可能是唯一的副本，所以门禁不会自行回收 —— 看过之后用 " +
+        `\`orchestrator_close({childId:"${w.childId}", worktree:"merge"|"discard"})\` 决定它的去向。`,
       );
     }
   }

@@ -253,6 +253,31 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   }
   const childId = newChildId(taskId, deps.now());
   const marker = buildDeliveryMarker(taskId, deps.now());
+  // ONE CHECKOUT PER WRITER (2026-09-10, user decision). A second child in the
+  // same repo gets its OWN `git worktree` on its own branch, which is what
+  // lets `scheduleNextTasks` stop serializing same-repo tasks. The check is on
+  // the RESOLVED root, so a plan naming the same repo twice by different
+  // spellings cannot slip two writers into one checkout.
+  //
+  // FAIL-CLOSED: if the worktree cannot be made, this spawn is refused. Running
+  // the child anyway would put two writers in one checkout — the exact damage
+  // the isolation exists to prevent — and "we could not isolate you" is a
+  // reason to wait, never a reason to share.
+  const sibling = deps.runtime().children.find((c) => !c.closedAt && c.cwd === cwd);
+  let worktree: { path: string; branch: string } | undefined;
+  if (sibling) {
+    const isolated = deps.createWorktree?.(cwd, childId);
+    if (!isolated || !isolated.ok) {
+      return fail(
+        `review-gate: 任务 "${taskId}" 不能启动 —— 它和 "${sibling.taskId}" 在同一个 repo（${cwd}），` +
+        `而门禁无法为它开出隔离的 worktree：${isolated ? isolated.reason : "这个会话没有接上 git 能力"}。\n` +
+        "同一个 checkout 里两个写者会互相覆盖，所以这里拒绝启动而不是共用工作区。" +
+        "修好 git（或先 close 掉那个 child）之后再 spawn。",
+      );
+    }
+    worktree = { path: isolated.path, branch: isolated.branch };
+    cwd = isolated.path;
+  }
   // CROSS-REPO FIX (2026-09-17, measured): the task file MUST land in the
   // TASK's repo (the child resolves `@.pi/tasks/<file>` against ITS cwd,
   // which is `cwd` above). Writing it into the ORCHESTRATOR's repo made a
@@ -297,6 +322,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
         taskId,
         paneId,
         cwd,
+        ...(worktree ? { worktree } : {}),
         stateVariant: childId,
         taskFile: taskFileRelPath(taskFileName(marker)),
         createdAt: new Date(deps.now()).toISOString(),

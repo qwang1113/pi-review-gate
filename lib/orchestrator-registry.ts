@@ -45,8 +45,19 @@ export interface ChildSession {
   taskId: string;
   /** tmux pane it runs in (the only pane the gate may kill for it). */
   paneId: string;
-  /** Working directory it was started in (the repo root). */
+  /** Working directory it was started in (the repo root, or an isolated worktree). */
   cwd: string;
+  /**
+   * The ISOLATED CHECKOUT this child runs in, when it got one (2026-09-10).
+   *
+   * Present only when another child was already working in the same repo: two
+   * writers in one checkout overwrite each other, so the second one gets its
+   * own `git worktree`, on its own branch, sharing the object store. `cwd`
+   * above is then that worktree's path — this field is what lets the manager
+   * find the branch to merge or discard when the child is done
+   * (lib/orchestrator-worktree.ts owns every derivation).
+   */
+  worktree?: { path: string; branch: string };
   /**
    * The sidecar variant this child was started with (`RG_STATE_VARIANT`, F4).
    *
@@ -418,11 +429,19 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     // handed to a path join.
     const stateVariant = str(c.stateVariant)?.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 64);
     const taskFile = str(c.taskFile);
+    // The isolated checkout, sanitized like everything else that becomes a
+    // PATH: the sidecar is untrusted input, and this one is handed to git.
+    // Both halves must be present — a path without its branch cannot be
+    // settled, and a branch without its path cannot be removed.
+    const worktreePath = str((c.worktree as Record<string, unknown> | undefined)?.path);
+    const worktreeBranch = str((c.worktree as Record<string, unknown> | undefined)?.branch);
+    const worktree = worktreePath && worktreeBranch ? { path: worktreePath, branch: worktreeBranch } : undefined;
     children.push({
       id, taskId, cwd, createdAt,
       paneId: c.paneId,
       ...(stateVariant ? { stateVariant } : {}),
       ...(taskFile ? { taskFile } : {}),
+      ...(worktree ? { worktree } : {}),
       ...(lastAssignedAt ? { lastAssignedAt } : {}),
       // A `doneAt` in an OLD sidecar is dropped here rather than carried: the
       // field is gone (B4), and re-admitting it would put a value nothing

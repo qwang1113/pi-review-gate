@@ -302,6 +302,7 @@ import {
 import { notifyUserInput } from "../lib/poll-wait.ts";
 
 import { formatInheritanceBrief, PREDECESSOR_SESSION_ENV, readInheritance } from "../lib/orchestrator-relay.ts";
+import { childWorktreeBranch, childWorktreePath, createWorktreeArgv, looksLikeMergeConflict, planSettlement, repoRootOfWorktree } from "../lib/orchestrator-worktree.ts";
 import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
@@ -2373,6 +2374,65 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
     // Handed to a successor as its takeover proof (lib/orchestrator-relay.ts).
     ownSessionId: () => state.sessionId ?? undefined,
+    // ONE CHECKOUT PER WRITER (2026-09-10): the second child in a repo gets
+    // its own worktree, which is what lets same-repo tasks run side by side
+    // (lib/orchestrator-worktree.ts owns every derivation).
+    createWorktree: (repoRoot, childId) => {
+      const path = childWorktreePath(repoRoot, childId);
+      const branch = childWorktreeBranch(childId);
+      try {
+        execFileSync("git", [...createWorktreeArgv(repoRoot, childId)], { cwd: repoRoot, encoding: "utf8" });
+      } catch (error) {
+        const detail = (error as { stderr?: Buffer | string }).stderr;
+        return {
+          ok: false as const,
+          reason: String(detail ?? (error as Error).message).trim().split("\n").slice(-3).join(" "),
+        };
+      }
+      return { ok: true as const, path, branch };
+    },
+    // SETTLE IT (2026-09-10): the manager names the fate of a finished child's
+    // checkout; the git sequence is lib/orchestrator-worktree.ts's, so the
+    // conflict path is decided there rather than discovered here.
+    settleWorktree: ({ childId, taskId, repoRoot, settlement }) => {
+      const plan = planSettlement(settlement, repoRoot, childId, taskId);
+      if (plan.steps.length === 0) {
+        return { ok: true, text: `worktree 保留在 ${childWorktreePath(repoRoot, childId)}（分支 ${childWorktreeBranch(childId)}）—— 没有动它` };
+      }
+      const run = (argv: readonly string[]): { ok: boolean; output: string } => {
+        try {
+          return { ok: true, output: execFileSync("git", [...argv], { cwd: repoRoot, encoding: "utf8" }).trim() };
+        } catch (error) {
+          const stderr = (error as { stderr?: Buffer | string }).stderr;
+          return { ok: false, output: String(stderr ?? (error as Error).message) };
+        }
+      };
+      for (const step of plan.steps) {
+        const result = run(step);
+        if (result.ok) continue;
+        // The child left nothing to commit (a clean worktree): not a failure,
+        // and `--squash` then merges the commits it already had.
+        if (step.includes("commit") && /nothing to commit|no changes added/i.test(result.output)) continue;
+        if (settlement === "merge" && looksLikeMergeConflict(result.output)) {
+          for (const undo of plan.onConflict ?? []) run(undo);
+          return {
+            ok: false,
+            text:
+              `合并 ${childId} 的 worktree 时**冲突** —— 已中止，你的工作区回到合并前的样子。\n` +
+              `它的分支 \`${childWorktreeBranch(childId)}\` 仍在 ${childWorktreePath(repoRoot, childId)}，一行都没丢。` +
+              `需要人工解决：在那边 \`git rebase ${repoRoot}\`（或你习惯的方式）后再 \`orchestrator_close\` 一次。\n\n` +
+              result.output.trim().split("\n").slice(0, 12).join("\n"),
+          };
+        }
+        return { ok: false, text: `worktree 结算失败（git ${step[step.length - 1]}）：${result.output.trim().slice(0, 600)}` };
+      }
+      return {
+        ok: true,
+        text: settlement === "merge"
+          ? `已把 ${childId} 的改动 squash 合并到当前分支（**已暂存、未提交**）—— 看过之后照常 commit。worktree 与其分支已回收。`
+          : `已回收 ${childId} 的 worktree 与分支（丢弃）。`,
+      };
+    },
     knownRepoRoots: () => knownRepoRoots(),
     // Symmetric re-arm (goal 5): the project manager's work is its
     // orchestration tools — the loop session's work is its edits. The
@@ -5429,6 +5489,30 @@ export default function reviewGate(pi: ExtensionAPI) {
   let inFlightPrecommit: { root: string; settled: Promise<void> } | undefined;
 
   /**
+   * ONE LANE AT A TIME, AND IT MUST BE THIS ROUND'S (round-4 P2).
+   *
+   * The first version JOINED a running lane: same repo, so "this repo is being
+   * verified" — which is true and also not enough. The running lane is
+   * verifying an EARLIER content, and a PASS it writes when it finishes would
+   * satisfy `readyLacksVerification` for a round whose checkpoint holds
+   * something else. The ship gate's fingerprint match is still the real
+   * backstop there, but this layer's own claim — "a READY without a full-lane
+   * PASS is withheld" — would be false in exactly that sequence.
+   *
+   * So a round that finds a lane already running WAITS for it to finish and
+   * then starts its own. The wait is bounded by one lane (and it only happens
+   * when the agent submitted twice inside a single run of it); what it buys is
+   * that the verdict on record always belongs to the content under review.
+   */
+  async function waitForQuietLane(root: string): Promise<void> {
+    while (inFlightPrecommit?.root === root) {
+      const running = inFlightPrecommit;
+      await running.settled;
+      if (inFlightPrecommit === running) return;
+    }
+  }
+
+  /**
    * Start the full lane in the BACKGROUND and return immediately.
    *
    * ONE PER REPO: a second round submitted while the first is still verifying
@@ -5437,8 +5521,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the same "this repo is being verified right now" receipt either way.
    */
   function startPrecommitBeside(root: string, ctx: unknown): Promise<void> {
-    const running = inFlightPrecommit;
-    if (running && running.root === root) return running.settled;
+    // No joining: the caller waits for a quiet lane first (see
+    // `waitForQuietLane`), so this is always THIS round's verification.
+    //
     // THIS ROUND'S VERIFICATION HAS NO VERDICT YET, and saying so is what makes
     // the checkpoint gate's test exact. `inFlightPrecommit` is cleared in a
     // microtask after the promise settles, so for an instant a FINISHED — and
@@ -5525,7 +5610,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       // front of it, and the agent gets its turn back. A FAIL arrives as its
       // own follow-up message (`reportAsyncPrecommit`) and withholds the
       // round's READY; it can no longer be reported by returning early.
+      //
+      // …EXCEPT when an older lane is still running: then this round waits for
+      // it (round-4 P2 — a joined lane would verify the WRONG content).
       input.progress?.step("precommit (full，与审查并行)");
+      await waitForQuietLane(input.root);
       void startPrecommitBeside(input.root, input.ctx);
     }
 
@@ -9071,7 +9160,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       completion.length === 1 &&
       completion[0] === LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK;
 
-    if (problems.length === 0 && completion.length === 0) return;
+    // THE ORDINARY STOP, and round-4 P1 caught it missing: every gate is
+    // satisfied, so this handler will nudge nobody again. An orchestration
+    // child in loop mode reaches THIS exit on nearly every normal stop — the
+    // four exits that used to publish the proof are the rare ones (explore,
+    // a pause, a disarmed loop, a bypass).
+    if (problems.length === 0 && completion.length === 0) { confirmStop(); return; }
     // Budgets are checked per source: gate problems against maxRounds,
     // completion-only continuations against their own cap.
 
@@ -9088,6 +9182,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         );
       } catch { /* headless */ }
       updateWidget(ctx);
+      confirmStop();
       return;
     }
 
@@ -9176,8 +9271,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // may already be dead or silent even when the continuation cap is reached;
     // the main session must still inspect its output and recover instead of
     // returning to idle before the independent termination判据 run.
-    if (problems.length > 0 && continuationsInjected >= state.maxRounds) return;
-    if (problems.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP) return;
+    if (problems.length > 0 && continuationsInjected >= state.maxRounds) { confirmStop(); return; }
+    if (problems.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP) { confirmStop(); return; }
 
     // L2 circuit breaker: an unmet gate justifies another turn only while
     // something is still MOVING. When the fingerprint, both verdicts, the round
@@ -9222,6 +9317,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         try { ctx.ui.notify(buildStallNotice(stall.repeats), "warning"); } catch { /* headless */ }
       }
       updateWidget(ctx);
+      confirmStop();
       return;
     }
     stallNoticeShown = false;

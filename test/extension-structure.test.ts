@@ -5777,16 +5777,25 @@ test("a FAIL that arrives after dispatch is reported, and it withholds the READY
   assert.match(SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
 });
 
-test("ONE full lane per repo: a second round joins the running one instead of starting a rival", () => {
+test("ONE full lane per repo: a second round waits for a quiet lane, and NEVER joins one", () => {
   // Two full suites side by side fight for the same cores and the same cache
-  // file, and the second round's checkpoint would be verified by whichever
-  // finished last. The joining is what makes "this repo is being verified" a
-  // single fact — which is the same fact the checkpoint gate reads.
-  const startAt = SRC.indexOf("function startPrecommitBeside(");
-  assert.ok(startAt > 0);
-  const body = SRC.slice(startAt, startAt + 1600);
-  assert.match(body, /if \(running && running\.root === root\) return running\.settled;/,
-    "a round submitted while the lane runs waits on THAT promise");
+  // file. The first version JOINED the running lane — same repo, so "this repo
+  // is being verified" — which is true and not enough (round-4 P2): the
+  // running lane verifies an EARLIER content, and its PASS would then satisfy
+  // the verification binding for a round whose checkpoint holds something
+  // else.
+  const startAt = SRC.indexOf("async function waitForQuietLane(");
+  assert.ok(startAt > 0, "the waiting is its own named act");
+  const submitAt = SRC.indexOf("async function submitForReview(");
+  const submit = SRC.slice(submitAt, submitAt + 4000);
+  const waitAt = submit.indexOf("await waitForQuietLane(input.root)");
+  const startLaneAt = submit.indexOf("void startPrecommitBeside(input.root, input.ctx)");
+  assert.ok(waitAt > 0 && startLaneAt > waitAt,
+    "the round waits for the older lane to finish BEFORE starting its own");
+  const besideAt = SRC.indexOf("function startPrecommitBeside(");
+  const body = SRC.slice(besideAt, besideAt + 1600);
+  assert.doesNotMatch(body, /return running\.settled;/,
+    "no joining: a PASS written by someone else's lane is not this round's proof");
   assert.match(body, /if \(inFlightPrecommit\?\.settled === settled\) inFlightPrecommit = undefined;/,
     "and the slot is cleared by the promise that owns it, not by whoever finishes last");
 });
@@ -5804,7 +5813,9 @@ test("ONE full lane per repo: a second round joins the running one instead of st
 test("a settle publishes its stop proof only at the exits that MEAN it", () => {
   const start = SRC.indexOf(LOOP_SETTLED);
   assert.ok(start > 0, "the L2 settle handler is the anchor, not the first agent_settled registration");
-  const body = SRC.slice(start, start + 3400);
+  // The whole handler: it is long, and the stops it must publish are spread
+  // from its top (the empty-problems exit) to its bottom (the stall breaker).
+  const body = SRC.slice(start, SRC.indexOf("// ---------- persistence", start));
   const confirmAt = body.indexOf("const confirmStop");
   assert.ok(confirmAt > 0, "the proof has one issuing site, named");
   assert.match(body.slice(confirmAt, confirmAt + 200), /noteChildProgress\("settled"\)/);
@@ -5831,8 +5842,8 @@ test("a settle publishes its stop proof only at the exits that MEAN it", () => {
   // `sendUserMessage` injections below it hand it a next turn outright.
   assert.match(body, /NOT a stop: nothing is published here/,
     "the round-report exit is explicitly not a stop");
-  assert.equal((body.match(/confirmStop\(\)/g) ?? []).length, 4,
-    "exactly four exits publish it — a fifth exit would need its own decision, not a default");
+  assert.equal((body.match(/confirmStop\(\)/g) ?? []).length, 9,
+    "NINE exits publish it — the four 'cannot continue' ones, the ordinary all-gates-satisfied stop, ESC, both exhausted budgets, and the stall breaker. Round-4 P1: the first version wired only the RARE four, so an ordinary child stop (an orchestration child in loop mode reaches the empty-problems exit on nearly every normal stop) fell back to the 120s constant — exactly what this criterion exists to remove");
   // …and the agent that is still working is not a stop either.
   assert.match(body, /\/\/ NOT a stop: the agent is still working, so no proof is published here\.[\s\S]{0,40}?if \(!ctx\.isIdle\(\)\) return;/);
 });

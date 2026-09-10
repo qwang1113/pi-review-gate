@@ -493,47 +493,26 @@ export function scheduleNextTasks(
 
   const start: ScheduleDecision[] = [];
   const deferred: DeferredTask[] = [];
-  // Everything a new pick must stay clear of: what is already running plus
-  // what this batch has just picked. Two children may NEVER share one
-  // checkout (2026-09-07): the isolation worktree is gone, so parallelism
-  // exists only ACROSS repos — same-repo tasks are serialized by the repo
-  // key, whatever the plan says about execution.
+  // SAME-REPO TASKS RUN IN PARALLEL NOW, each in its own checkout
+  // (2026-09-10, user decision). The old rule serialized them by repo key
+  // because two writers in ONE checkout overwrite each other — true, and the
+  // cure was already in the toolbox: `git worktree add` gives the second
+  // writer its own directory on its own branch, sharing the object store
+  // (lib/orchestrator-worktree.ts). The coordinator assigns that checkout at
+  // spawn; this function only decides WHAT may start.
+  //
+  // `deferred` therefore comes back empty and the field stays for the callers
+  // that render it: a plan whose tasks all depend on unfinished work has an
+  // EMPTY `start` (those tasks never become candidates), and that is the shape
+  // a caller must still be able to describe.
   const occupied: PlanTask[] = [...running];
-  const sameRepo = (a: PlanTask, b: PlanTask) => (a.repo ?? repoRoot) === (b.repo ?? repoRoot);
   for (const task of candidates) {
     if (start.length >= slots) break;
-    const clash = occupied.find((other) => sameRepo(task, other));
-    if (clash) {
-      deferred.push({
-        task,
-        blockedBy: clash.id,
-        reason: `与 "${clash.id}" 在同一 repo（${task.repo ?? repoRoot}），同一 checkout 不能两个写者并存：等它结束后再开`,
-      });
-      continue;
-    }
     // It runs in parallel exactly when something else is in flight beside it.
     start.push({ task, execution: occupied.length > 0 ? "parallel" : "serial" });
     occupied.push(task);
   }
   return { start, deferred };
-}
-
-/**
- * The pairs the plan asked to run in parallel but which may NOT (constraint 6).
- * Reported at approval time so the user sees the downgrade before it happens.
- */
-export function conflictingParallelPairs(plan: OrchestratorPlan, repoRoot: string): Array<{ a: string; b: string }> {
-  const parallel = plan.tasks.filter((t) => t.execution === "parallel");
-  const pairs: Array<{ a: string; b: string }> = [];
-  const sameRepo = (a: PlanTask, b: PlanTask) => (a.repo ?? repoRoot) === (b.repo ?? repoRoot);
-  for (let i = 0; i < parallel.length; i++) {
-    for (let j = i + 1; j < parallel.length; j++) {
-      const a = parallel[i]!;
-      const b = parallel[j]!;
-      if (sameRepo(a, b)) pairs.push({ a: a.id, b: b.id });
-    }
-  }
-  return pairs;
 }
 
 /** CONSTRAINT 3 — anything not `done` keeps the orchestration open. */
@@ -652,10 +631,14 @@ export function formatPlanSummary(
       (t.repo ? `\n    repo：${t.repo}` : ""),
     );
   }
-  const conflicts = conflictingParallelPairs(plan, repoRoot);
-  if (conflicts.length) {
-    lines.push("", "并行降级（同一 repo 不能并行，将改为串行）：" + conflicts.map((c) => `${c.a}↔${c.b}`).join("、"));
-  }
+  // NO "parallel downgrade" LINE ANY MORE (2026-09-10). It reported that two
+  // tasks in one repo could not run at once — which stopped being true when
+  // the second one started getting its own checkout
+  // (lib/orchestrator-worktree.ts). A warning about a downgrade that no longer
+  // happens is worse than no warning: it teaches the user to expect a slowdown
+  // they will not get, and it hides the real question (whether two tasks are
+  // about to touch the same files, which the worktrees make survivable but not
+  // free).
   const open = openDecisions(plan);
   if (open.length) {
     lines.push("", "待用户决策：" + open.map((d) => `${d.id}（${d.notifiedAt ? "已通知" : "未通知"}）`).join("、"));

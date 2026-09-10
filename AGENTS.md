@@ -494,7 +494,12 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    （plan 任务**必须**声明 `repo` 字段——子会话 cwd 就落在那里；2026-09-01 实测
    漏写导致子会话被开在项目经理仓库、goal 绑错、编辑被 L8 拦的死锁，写 plan 时
    强制），同一 repo 的任务由门禁
-   串行调度，只有不同 repo 的任务可以并行。
+   **各自开一个隔离 checkout**（`git worktree`，分支 `rg-child-<childId>`，由
+   `orchestrator_spawn` 在发现同 repo 已有在跑的 child 时自动创建；建不出来就
+   **拒绝启动**，不会让两个写者共用一个工作区），不同 repo 的任务本来就并行；
+   完工后由 `orchestrator_close({ worktree:"keep"|"merge"|"discard" })` 决定那个
+   checkout 的去向（默认 `keep`，因为里面的成果常常是唯一副本），孤儿 checkout
+   在 `orchestrator_attach` 的回执里列出、**不自行回收**。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
    本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的

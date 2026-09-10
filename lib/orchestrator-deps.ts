@@ -307,6 +307,41 @@ export interface OrchestratorDeps {
   sessionTranscriptPath(): string | undefined;
 
   /**
+   * Give a child its own checkout of `repoRoot` (2026-09-10).
+   *
+   * Two writers in one checkout overwrite each other, and the answer used to
+   * be "never run two at once". `git worktree add -b <branch> <path> HEAD`
+   * gives the second writer its own directory on its own branch, sharing the
+   * object store — so same-repo tasks run side by side and the splice happens
+   * at settlement time, once, with a human-decided merge.
+   *
+   * ABSENT means this session has no git capability wired: the spawner then
+   * REFUSES the second child rather than sharing a checkout (lib/orchestrator-
+   * dispatch.ts is the only caller, and it fails closed).
+   */
+  createWorktree?(repoRoot: string, childId: string):
+    | { ok: true; path: string; branch: string }
+    | { ok: false; reason: string };
+
+  /**
+   * Settle a finished child's isolated checkout (2026-09-10).
+   *
+   * The project manager says WHAT (keep / merge / discard) and never runs git
+   * itself (philosophy one). The merge half is the one that can genuinely
+   * fail: a squash-merge of a branch that touched the same lines CONFLICTS,
+   * and the answer is to abort, leave the manager's checkout exactly as it
+   * was, and report — the child's work is still in its own worktree, so a
+   * conflict costs a decision, never the work.
+   */
+  settleWorktree?(input: {
+    childId: string;
+    taskId: string;
+    repoRoot: string;
+    worktreePath: string;
+    settlement: "keep" | "merge" | "discard";
+  }): { ok: boolean; text: string };
+
+  /**
    * This session's OWN pi session id (2026-09-10, relay takeover).
    *
    * Handed to the successor as its proof of heirship: the worktree-exclusivity

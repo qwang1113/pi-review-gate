@@ -336,6 +336,18 @@ export interface OrchestratorHostBindings {
   /** Print text into the user's transcript (the plan's full text, O-1). */
   showToUser(title: string, text: string): void;
   sessionTranscriptPath(): string | undefined;
+  /** Give a child its own checkout of a repo (see OrchestratorDeps). */
+  createWorktree?(repoRoot: string, childId: string):
+    | { ok: true; path: string; branch: string }
+    | { ok: false; reason: string };
+  /** Settle a finished child's isolated checkout (see OrchestratorDeps). */
+  settleWorktree?(input: {
+    childId: string;
+    taskId: string;
+    repoRoot: string;
+    worktreePath: string;
+    settlement: "keep" | "merge" | "discard";
+  }): { ok: boolean; text: string };
   /** This session's OWN pi session id, handed to a successor as its takeover proof. */
   ownSessionId?(): string | undefined;
   /** This orchestrator's OWN context usage, as a percentage (receipt block 4). */
@@ -505,6 +517,8 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     onToolCall: host.onToolCall,
     onHandoff: host.onHandoff,
     ownSessionId: host.ownSessionId,
+    createWorktree: host.createWorktree,
+    settleWorktree: host.settleWorktree,
     emitNotification: (sequence) => emitNotification(sequence, env()),
     fileChars: (relPath) => fileCharsIn(host.repoRoot, relPath),
     sessionTranscriptPath: host.sessionTranscriptPath,

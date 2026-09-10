@@ -232,6 +232,17 @@ export interface FakeWorldOptions {
    */
   tmuxDecorFails?: boolean;
   /**
+   * Give this session the ability to isolate a second child in one repo
+   * (2026-09-10).
+   *
+   * ABSENT is the more interesting case and the default: a real session can
+   * lack it (an unwired host), and the spawner must then REFUSE the second
+   * child rather than put two writers in one checkout. Set it and the fake
+   * hands out `/repo-rg-<childId>` with a matching branch, exactly as
+   * lib/orchestrator-worktree.ts derives them.
+   */
+  isolateChild?: boolean;
+  /**
    * Repos a task's `repo` declaration may resolve to (default: none, so a
    * declared repo is refused — the fake's equivalent of "not a git root").
    */
@@ -416,6 +427,15 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     emitNotification: () => true,
     fileChars: () => 500,
     sessionTranscriptPath: () => "/tmp/transcript.jsonl",
+    ...(options.isolateChild
+      ? {
+          createWorktree: (repoRoot: string, childId: string) => ({
+            ok: true as const,
+            path: `${repoRoot}-rg-${childId}`,
+            branch: `rg-child-${childId}`,
+          }),
+        }
+      : {}),
     // The predecessor's OWN id, which the successor carries as its proof of
     // heirship (lib/session-exclusivity.ts).
     ownSessionId: () => "session-under-test",

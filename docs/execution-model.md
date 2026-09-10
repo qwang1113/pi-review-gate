@@ -289,7 +289,12 @@ commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而
 
 - **checkpoint 门槛接受“正在验证中”**：凭据是**本进程里那个活的 promise**，不是
   文件。重启过的会话没有它，于是回到旧规则——没有 PASS 就不收（fail-closed）。
-  同一 repo 同时只跑一个 full lane；后续轮次**汇入**已经在跑的那个，而不是并跑两套。
+  同一 repo 同时只跑一条 lane；**后续轮次等它安静下来再启动自己那条，绝不 join**——
+  join 意味着用一个更早内容的 PASS 背书本轮的 checkpoint（裁决记录只看 verdict）。
+- **时间上确实重叠了**：lane 在跑的同时 checkpoint 会执行 `git add -A`。本 repo 的
+  lane 只跑 typecheck 与测试，不往工作区写东西；但一个 `precommit.build` 会写产物的
+  repo 里，未进 `.gitignore` 的构建输出可能被扫进这次 checkpoint。把那条 lane 的产物
+  留在工作区外（或写进 ignore）是仓自己的事，这里只把重叠写明白。
 - **裁决记录承担验证绑定**（`lib/review-adjudicate.ts` 的 `readyLacksVerification`）：
   READY 落在一个没有 full-lane PASS 的内容上时**降级为 BLOCKED**，否则会出现
   “看着已验证、实际不可 ship”的裁决。只收紧、不放宽；`/gate-bypass` 是用户

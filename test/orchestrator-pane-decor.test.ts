@@ -226,20 +226,39 @@ test("a CLOSED sibling is not a decorated pane, even if its pane outlived the cl
 });
 
 
-test("close in one repo cannot even meet a second live child — the scheduler serializes", async () => {
-  // Why the test above has to cross repos, asserted rather than assumed.
+test("a second child in one repo is REFUSED when the gate cannot isolate it", async () => {
+  // CHANGED 2026-09-10: same-repo tasks are no longer serialized — the second
+  // one gets its own `git worktree` (lib/orchestrator-worktree.ts). What this
+  // test now pins is the FAIL-CLOSED half: this fake world wires no
+  // `createWorktree`, so the spawn must be refused rather than putting two
+  // writers in one checkout. "We could not isolate you" is a reason to wait,
+  // never a reason to share.
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "done" });
   const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
 
-  assert.equal(second.isError, true, "the first child's pane is still alive, so t2 waits");
+  assert.equal(second.isError, true, "no isolation available ⇒ no second writer in this checkout");
   // The REASON matters, not just the refusal: "t2 was refused" would also be
   // true if the plan were unapproved or the task unknown, and then this test
   // would be asserting nothing about scheduling (reviewer Nit, 2026-09-05).
-  assert.match(replyText(second), /同一 repo（\/repo）/, "…refused for being the same checkout");
-  assert.match(replyText(second), /不能两个写者并存/, "…which is the serialization rule itself");
+  assert.match(replyText(second), /同一个 repo（\/repo）/, "…refused because it would share a checkout");
+  assert.match(replyText(second), /无法为它开出隔离的 worktree/, "…and the gate says which capability is missing");
   assert.equal(world.runtime().children.length, 1, "…and no second pane was opened");
+});
+
+test("…and it RUNS BESIDE the first one when the gate CAN isolate it", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, isolateChild: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "done" });
+  const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+
+  assert.equal(second.isError, undefined, replyText(second));
+  const children = world.runtime().children;
+  assert.equal(children.length, 2, "both children are live at once — that is the whole point");
+  assert.ok(children[1]!.worktree, "and the second one records the checkout it got");
+  assert.notEqual(children[1]!.cwd, "/repo", "its cwd is the ISOLATED path, not the shared checkout");
+  assert.equal(children[1]!.cwd, children[1]!.worktree!.path);
 });
 
 test("close leaves the window bar up while a REVIEW pane is still on screen", async () => {

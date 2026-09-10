@@ -51,6 +51,11 @@ import {
 
 import { spawnAuthorization } from "./orchestrator-gate.ts";
 import {
+  WORKTREE_SETTLEMENTS,
+  repoRootOfWorktree,
+  type WorktreeSettlement,
+} from "./orchestrator-worktree.ts";
+import {
   closableChild,
   findChild,
   markChildClosed,
@@ -377,6 +382,36 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
   const closable = closableChild(runtime, childId);
   if (!closable.ok) return fail("review-gate: " + closable.reason);
   const child = closable.child;
+  // THE WORKTREE'S FATE IS THE MANAGER'S CALL, AND IT IS MADE HERE (2026-09-10).
+  // A child that ran in its own checkout leaves that checkout behind, and a
+  // manager who has to hand-write the merge is a manager the gate failed
+  // (philosophy one). `keep` is the DEFAULT because the work in a worktree is
+  // often the only copy, and a default that deletes is a default that
+  // eventually deletes something wanted.
+  const rawSettlement = String(params.worktree ?? "keep").trim();
+  let settlementNote = "";
+  if (child.worktree) {
+    if (!(WORKTREE_SETTLEMENTS as readonly string[]).includes(rawSettlement)) {
+      return fail(`review-gate: worktree 参数不认识："${rawSettlement}"（可选 ${WORKTREE_SETTLEMENTS.join(" / ")}）。`);
+    }
+    const worktreeRepo = repoRootOfWorktree(child.worktree.path, child.id);
+    if (!worktreeRepo) {
+      return fail(
+        `review-gate: 推不出这个 worktree 属于哪个 repo（${child.worktree.path}）—— 门禁不动它，避免把某人的成果合进错的 checkout。` +
+        "请人工处理后再 close。",
+      );
+    }
+    const settled = deps.settleWorktree?.({
+      childId: child.id,
+      taskId: child.taskId,
+      repoRoot: worktreeRepo,
+      worktreePath: child.worktree.path,
+      settlement: rawSettlement as WorktreeSettlement,
+    });
+    if (!settled) return fail("review-gate: 这个会话没有接上 git 能力，无法结算它的 worktree —— 门禁拒绝在没看清现状时关掉它。");
+    if (!settled.ok) return fail("review-gate: " + settled.text);
+    settlementNote = "\n" + settled.text;
+  }
   // THE SAME JUDGEMENT THE OTHER THREE CLOSE PATHS MAKE (reviewer P2,
   // 2026-09-05 — "the answer to (c) is: unify them"). This one used to have
   // its own rule (`isLastDecoratedChild`), and it carried both defects the
@@ -430,7 +465,7 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
     ? "。别忘了把它的任务状态置为 done 或 pending（`orchestrator_plan`）。"
     : `。任务 ${child.taskId} 当前是 ${closedTask.status}，无需再动。`;
   return reply(
-    `review-gate: 子会话 ${child.id}（pane ${child.paneId}）已关闭` + statusNudge,
+    `review-gate: 子会话 ${child.id}（pane ${child.paneId}）已关闭` + statusNudge + settlementNote,
     { childId: child.id },
   );
 
@@ -657,6 +692,19 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
       childId: Type.Optional(Type.String()),
       predecessorPane: Type.Optional(Type.String({
         description: "Relay only: the pane of the orchestrator you replaced",
+      })),
+      worktree: Type.Optional(Type.Enum({
+        keep: "keep",
+        merge: "merge",
+        discard: "discard",
+      }, {
+        description:
+          "What happens to a child's ISOLATED CHECKOUT, when it had one (it gets one whenever " +
+          "another child was already working in the same repo). `keep` (default) leaves it and says " +
+          "so — the work in it is often the only copy. `merge` commits whatever the child left " +
+          "uncommitted and squash-merges its branch into YOUR checkout, staged and uncommitted; a " +
+          "conflict aborts and leaves your checkout exactly as it was, with the child's work still " +
+          "in its own worktree. `discard` removes the checkout and its branch.",
       })),
     }),
     execute: guarded((params) => doClose(deps, params)),
