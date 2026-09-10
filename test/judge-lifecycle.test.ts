@@ -241,6 +241,15 @@ test("awaitRoundReport ends on a dead pane, an error, an abort, or the budget", 
   });
   assert.equal(dead.details?.reason, "pane-dead", "a dead pane ends the round");
 
+  // An exhausted model chain is the SECOND way a round ends without a verdict
+  // (2026-09-10): the pane cannot produce one, so the audit chain must stop
+  // here instead of re-waiting on a round that will never finish.
+  const exhausted = await awaitRoundReport({
+    wait: async () => ({ details: { reason: "model-exhausted" } }),
+    now: () => 0,
+  });
+  assert.equal(exhausted.details?.reason, "model-exhausted", "an exhausted chain ends the round too");
+
   const failed = await awaitRoundReport({
     wait: async () => ({ isError: true, details: { reason: "finding" } }),
     now: () => 0,

@@ -131,6 +131,6 @@ agent：调 set_gate_mode("loop")
 ## 7. 成本须知
 
 - review 用顶级推理模型（每轮一个 reviewer，审整个 diff），**按轮计费**——批量编辑再触发；
-- 模型由 `~/.pi/review-gate.json` 的 `agents` 段配置（fallback 链只含已配置的 provider）；
+- 模型由 `~/.pi/review-gate.json` 的 `agents` 段配置（fallback 链只含已配置的 provider，且**真的会被用**：派发跳过 10 分钟内失败过的槽，pane 在模型挂掉时自己往下走；改配置下次派发即生效）；
 - review 不跑 pdw 引擎，也不走子代理派发：judge 角色由 `judge_submit` 起成独立 pi 进程（不带门禁扩展）跑，**每轮一个 reviewer 一个 commit 范围**，不分片、不双审；subagent 派发面已随 pi-subagents companion 退役（2026-09-06）；
 - decompose / wave daily 已移除（2026-08-26）：大的任务切成同一单审循环的连续轮次，无模块表、无波次调度、无 plan 状态。

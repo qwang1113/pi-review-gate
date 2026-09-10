@@ -406,8 +406,8 @@ edit/write、ship、门禁自己的 checkpoint 提交（它会 `add -A`，不堵
 `model-config.ts` 把 `review-gate.json` 的 `agents` 段渲染成 `agents/*.md`
 的 frontmatter（项目层盖全局层），**无内置默认**：安装脚本写入 4 角色的默认
 slots，会话启动时 `validateAgentsForStartup` 硬检查每个角色（缺失/slots 空/
-spec 非法即停会话），`modelSpecFor` 对未配置角色返回 undefined（派发
-fail-closed）。`model-diagnose.ts`
+spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置角色返回
+**空链**（派发 fail-closed）。`model-diagnose.ts`
 回答「我的审查实际跑在哪个模型上」，`gate-doctor.ts` 是 `/gate-doctor` 的只读
 体检，`ui-widget.ts` 构造 editor 下方那条**单行**状态条（详情在 `/gate-status`）。
 
@@ -473,7 +473,7 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（124 个模块）
+## 五、`lib/` 全量速查表（126 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -541,6 +541,7 @@ fail-closed）。`model-diagnose.ts`
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
 | `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论**本体**直写 channel report（无 fence 合成、无解析）；**签名按角色收窄**——reviewer / goal-auditor 只有 verdict + findings + cwd（传 notes 显式拒绝且不占额度），adviser 保留 notes（它的产出就是正文）；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度；**零审查的 READY 直接拒**（判据在 `judge-inspection.ts`，拒绝不占额度、并给出申诉出路），观测结果以新增可选字段 `inspection` 盖在 report 上；本轮范围与全量/增量档位以另一个新增可选字段 `scope` 盖上（自述，与门禁登记的那半并排落进 `RoundRecord.scope`，只记录不阻塞） |
 | `judge-inspection.ts` | 机械审查证据（judge 侧、进程内）：把本轮成功的工具调用分类成「读内容 / 看 diff / 检索」（列文件名的 `ls`/`find` 不算），折叠成本轮证据并从任务文本里解析 `baseline..HEAD` 与全量/增量判定标记（`parseReviewScopeKind`，标记常量来自 `review-carryover.ts`；两者**只记录、不作为阻塞条件**）；**本轮公文一律不算审查**（`GATE_OWNED_PATH_MARKERS` + 本轮任务文件/findings 流的确切路径——探针的原话是「直接交 READY 别做别的」，而 judge 总要读任务，算进去这道门就等于从没拦过）；证据按**轮次记名**（`evidenceForRound`），被放弃那一轮的阅读算不到下一轮头上；唯一规则是「带裁决的角色零审查不得交 READY」（adviser 写死豁免，未知角色按裁决角色处理——fail-closed；BLOCKED/NEEDS_HUMAN 不受限） |
+| `judge-model-rotation.ts` | pane 侧的**模型自愈**（2026-09-10）：judge 是唯一看得见自己 provider 错误的一方（opener 卡在 wait 里，通道里只有结论），所以链得由它自己走。触发点是 `agent_settled` + 最后一次运行以 `stopReason: "error"` 终结（pi 自己的重试已耗尽；单个 503 burst 通常自愈，所以**不看第一次失败**）。`onModelFailure` 从角色链（`judge-prompt.ts` 的 `modelChainFor`，每次现读配置）走到本轮回合内还没花掉的下一槽：切换模型 + 该槽的 thinking、自注入一句「继续本轮」（transcript、任务与已查到的证据全部保留）、并把 `ModelEvent` 写成通道 state 记录供 opener 冷却坏槽；链全花完标 `exhausted`，那是**轮次的结束**（`judge_wait` 的 `model-exhausted` 判据），不是无限等。无链可走返回 undefined（调用方的 fail-closed 情形） |
 | `judge-report.ts` | opener 侧标准报告（wake-up 内容：verdict、证据位置、记录情况、待答问题、**被搁置的 report**（`notThisRound`：id/轮次/时间 + 原因，说明它没被记为本轮裁决）、**降级绑定说明**（`bindingNote`：独立成行，因为「记录」行只打印首行，塞进记录正文就等于记了没人看见）、**本轮审查范围**（`scope`：judge 自报的 `baseline..HEAD` 与全量/增量档位，settle 扫描与 `judge_wait` 两条唤醒路径都传，否则一半唤醒有、一半没有）；transcript 扒取半边已随交卷工具删除） |
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
 | `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
@@ -548,6 +549,7 @@ fail-closed）。`model-diagnose.ts`
 | `loop-goal.ts` | L8：loop 会话退出契约的文件、审批记录与注入 |
 | `loop-stall.ts` | L2 自动续跑的断路器：外部阻塞（限流、模型不可达）时停止空转 |
 | `model-config.ts` | 每个 agent 的模型链配置层：把 `review-gate.json` 的 `agents` 段渲染成 frontmatter；`validateAgentsForStartup` 启动硬检查（无内置默认） |
+| `model-health.ts` | judge 模型槽的**冷却记忆**（纯函数，2026-09-10）：键是 `provider/id`（丢掉 thinking 后缀，否则改一个槽的 level 就把学到的东西忘了）→ 最近一次失败；`MODEL_FAILURE_TTL_MS`（10 分钟）内派发跳过该槽、过期自动恢复（并带条数上限，坏 id 不会把文件撑爆）。`selectHealthySlot` 给「第一个不在冷却期的槽」，全都在冷却时仍按链头派发并标记 `allCooling`（fail-open：开不出来的轮次连失败都报不了）；`recordModelFailure` / `clearModelFailure`（轮转成功即证明目标可用，旧记录必须清掉，否则 TTL 内白白跳过好模型）/ `nextSlotAfter`（pane 侧走链）/ `describeCoolingSlot`。持久化住在 `.pi/judge-hierarchy.json` 的 `modelHealth`（opener 读写；judge pane 按契约从不写仓库状态） |
 | `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |
 | `readonly-stall.ts` | 只读钻探止损（2026-09-18）：工具调用层计数器，连续 30 次成功的只读调用（read 家族 + bash）无 edit 落地时注入 NUDGE（只提示不拦截）。补 loop-stall 的 turn 边界盲区与进展维度「任何调用都算推进」的盲区；状态纯内存，不落盘。**谁听得见由 `readonlyStallNudgeFor(mode)` 决定**（2026-09-17）：`normal` 与 `orchestrator` 静默 —— 项目经理按约束 2 根本不写代码，这条提醒对它恒为误报；计数本身仍与模式无关 |
 | `orchestration-id.ts` | 编排 id：编排的稳定地址（不是 session id），接力换人后子会话无感 |
@@ -696,7 +698,7 @@ test 名称，同一个文件后面跟着的名称都归它。零个是正常情
 | 同一段口径的副本处 | 权威在哪 | 实测备注 |
 | --- | --- | --- |
 | L1–L8 分层清单：`README.md` 的 ASCII 图（`L1 Ship gate` … `L8 Loop-goal approval`）↔ 本文 §二的表 | 无单一权威（分散在各层实现） | `test/module-map.test.ts` 只覆盖 §五；README 端只有零散句子被别的测试 pin，层级表本身不在其中 |
-| judge 默认模型链：`scripts/install-package.mjs` 的 `DEFAULT_AGENTS`、`AGENTS.md` 正文、`README.md` 的配置示例 | `agents/*.md` 的 frontmatter（这一端有 pin，见 7.1） | `test/install-package.test.ts` 只验安装**行为**，从不校验 `DEFAULT_AGENTS` 的内容与 `agents/*.md` 一致。**2026-09-17 实测已经漂了**：`DEFAULT_AGENTS.arbiter` 是 `onekey/gpt-5.6-sol:max`（与 `lib/project-config.ts` 的 `DEFAULT_ARBITER_MODEL` 同源），而 `agents/arbiter.md` 与 AGENTS.md 都写 `claude-fable-5` → `claude-opus-5`。收敛前要先由用户拍板哪一份是对的（跨模型仲裁是不是刻意的），所以本轮只记录、不动 |
+| judge 默认模型链：`scripts/install-package.mjs` 的 `DEFAULT_AGENTS`、`AGENTS.md` 正文、`README.md` 的配置示例 | `agents/*.md` 的 frontmatter（这一端有 pin，见 7.1）；**且自 2026-09-10 起它就是运行时输入**：派发与 pane 都读这条链（`lib/model-health.ts` / `lib/judge-model-rotation.ts`） | `test/install-package.test.ts` 只验安装**行为**，从不校验 `DEFAULT_AGENTS` 的内容与 `agents/*.md` 一致。**2026-09-17 实测已经漂了**：`DEFAULT_AGENTS.arbiter` 是 `onekey/gpt-5.6-sol:max`（与 `lib/project-config.ts` 的 `DEFAULT_ARBITER_MODEL` 同源），而 `agents/arbiter.md` 与 AGENTS.md 都写 `claude-fable-5` → `claude-opus-5`。收敛前要先由用户拍板哪一份是对的（跨模型仲裁是不是刻意的），所以本轮只记录、不动 |
 | 整份文档从未被任何测试读到：`docs/coding-standards.md` | —— | 2026-09-08 起 §5 最小化准则进入多个测试的扫描面（见 §7.1 最小化行），其余章节仍只被 `review-carryover.test.ts` 查增量契约一项。（`docs/orchestrator-supervision.md`、`docs/hierarchical-session-design.md`、`docs/dev-flow.md` 已于 2026-09-17 进入 `test/copy-convergence.test.ts` 与 `test/delivery-station.test.ts` 的扫描面，不再是「零测试读到」）|
 | **当轮抓到的活样本**：2026-09-17 第一次拿代码去核这张表的三行，三行**全是错的** —— 子会话状态 union 早已是八个（`mode-changed`），而 `README.md`、`docs/execution-model.md`、`docs/orchestrator-supervision.md` 连同 union 自己上面那句注释都还写「七」；`docs/execution-model.md` 点名了三个一个月前就删掉的工具、却从没提过 `orchestrator_plan`；`lib/restatement.ts` 里的交付站点定义句是手抄的第二份 | 无 | 这三行当轮收敛并进了 7.1（前一版的活样本是 §六第 4 条那组过期计数与点名，已在 2026-09-05 改成不带计数、不点名的表述）。教训不变：**一张讲「副本会安静过期」的表，自己也会安静过期** —— 所以每次动它，顺手拿代码核一行 |
 

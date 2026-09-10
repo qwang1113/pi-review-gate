@@ -83,6 +83,7 @@ import {
   type RoundBinding,
 } from "./audit-round.ts";
 import { buildStandardReport, type OpenQuestionBrief } from "./judge-report.ts";
+import type { ModelEvent } from "./model-health.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import { pollUntil } from "./poll-wait.ts";
 import { parseStream } from "./review-stream.ts";
@@ -117,6 +118,8 @@ export interface JudgeChildRecord {
   sessionDir: string;
   /** This round's findings stream, when the role has one. */
   streamPath?: string;
+  /** The model this judge was launched on (lib/model-health.ts picked the slot). */
+  modelSpec?: string;
 }
 
 /** Repo resolution, as `resolveToolRepoTarget` already reports it. */
@@ -330,7 +333,7 @@ function checkOpener(
 
 export interface PaneJudgeWaitObservation {
   done: boolean;
-  reason: "report" | "pane-dead" | "question" | "finding" | "pending";
+  reason: "report" | "pane-dead" | "question" | "finding" | "model-exhausted" | "pending";
   reportId?: string;
   verdict?: string;
   findingsCount?: number;
@@ -352,6 +355,14 @@ export interface PaneJudgeWaitObservation {
    * why, so "still waiting" is a checkable statement rather than a guess.
    */
   notThisRound?: { reportId: string; round?: number; at?: string; detail: string };
+  /**
+   * Model failures the pane reported (lib/judge-model-rotation.ts), newest
+   * last. `exhausted` on one of them is what ENDS the round as failed — a
+   * rotation on its own is news, not a conclusion.
+   */
+  modelEvents?: ModelEvent[];
+  /** Total model events visible in the channel — the cursor value to store next. */
+  seenModelEventCount?: number;
 }
 
 /**
@@ -370,6 +381,8 @@ export interface JudgeWaitCursors {
   findingCount: number;
   /** Question ids already announced — by a wait OR by the settle path. */
   announcedQuestions: ReadonlySet<string>;
+  /** How many model-failure events the opener has already acted on. */
+  modelEventCount: number;
 }
 
 /**
@@ -431,6 +444,11 @@ export function probeJudgeRound(
     options: q.options,
     requestId: q.requestId,
   }));
+  // Model failures the pane reported, when it reported any. Present on EVERY
+  // outcome that carries them: a round that ends after a rotation should say
+  // which model died, and a round that ends WITHOUT the pane ever concluding
+  // (exhausted chain) is exactly the case where the events are the whole story.
+  const withModelEvents = projection.modelEvents.length > 0 ? { modelEvents: projection.modelEvents } : {};
   // ONE criterion, shared with the recorder (lib/audit-round.ts). This used to
   // be its own comparison — "newest report, different id from the cursor" —
   // and that is precisely how a round ended here on a report the recorder then
@@ -449,6 +467,7 @@ export function probeJudgeRound(
       verdict: report.verdict,
       ...(report.findingsCount === undefined ? {} : { findingsCount: report.findingsCount }),
       openQuestions,
+      ...withModelEvents,
     };
   }
   // A report is sitting there and it is NOT this round's: keep waiting, and
@@ -475,8 +494,9 @@ export function probeJudgeRound(
         };
   const ownPane = deps.ownPane();
   const paneAlive = child.paneId && ownPane ? judgePaneAlive(deps.tmux, ownPane, child.paneId) : undefined;
+  const withEvents = withModelEvents;
   if (paneAlive === false) {
-    return { done: true, reason: "pane-dead", openQuestions, ...(notThisRound === undefined ? {} : { notThisRound }) };
+    return { done: true, reason: "pane-dead", openQuestions, ...withEvents, ...(notThisRound === undefined ? {} : { notThisRound }) };
   }
   const state = projection.lastState?.state ?? "unknown";
   const since = projection.lastStateSince ?? projection.lastActivityAt ?? "—";
@@ -486,6 +506,7 @@ export function probeJudgeRound(
     reason: "pending",
     stateLine: `${state}（自 ${since}）`,
     openQuestions,
+    ...withEvents,
     ...(notThisRound === undefined ? {} : { notThisRound }),
   };
 }
@@ -503,27 +524,43 @@ export function probeJudgeRound(
  */
 export function probeJudgeWait(
   deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer" | "readText" | "roundBinding">,
-  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath" | "role" | "repoRoot" | "tmuxServer">,
+  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath" | "role" | "repoRoot" | "tmuxServer" | "modelSpec">,
   cursors: JudgeWaitCursors,
 ): PaneJudgeWaitObservation {
   const round = probeJudgeRound(deps, child, cursors.reportId, deps.roundBinding(child));
   const findings = recentStreamFindings(deps, child.streamPath);
   const seenFindingCount = findings.length;
-  if (round.done) return { ...round, seenFindingCount };
+  // MODEL FAILURES ARE NOT A CONCLUSION (criterion 3 vs criterion 4): a
+  // rotation is news the opener acts on (cool the slot down, warn the user)
+  // and the round keeps running, but an EXHAUSTED chain means the round can
+  // never produce a verdict — ending the wait there is what turns "hung for
+  // hours" into "failed with a reason".
+  const allModelEvents = round.modelEvents ?? [];
+  const newModelEvents = allModelEvents.slice(cursors.modelEventCount);
+  const seenModelEventCount = allModelEvents.length;
+  /** An empty list stays off the observation: a wake-up says what happened. */
+  const withEvents = (obs: PaneJudgeWaitObservation): PaneJudgeWaitObservation => ({
+    ...(newModelEvents.length > 0 ? { ...obs, modelEvents: newModelEvents } : obs),
+    seenFindingCount,
+    seenModelEventCount,
+  });
+  if (round.done) return withEvents(round);
+  if (newModelEvents.some((event) => event.exhausted === true)) {
+    return withEvents({ ...round, done: true, reason: "model-exhausted" });
+  }
   const newQuestions = (round.openQuestions ?? []).filter((q) => !cursors.announcedQuestions.has(q.requestId));
   if (newQuestions.length > 0) {
-    return { ...round, done: true, reason: "question", newQuestions, seenFindingCount };
+    return withEvents({ ...round, done: true, reason: "question", newQuestions });
   }
   if (seenFindingCount > cursors.findingCount) {
-    return {
+    return withEvents({
       ...round,
       done: true,
       reason: "finding",
       newFindings: findings.slice(cursors.findingCount),
-      seenFindingCount,
-    };
+    });
   }
-  return { ...round, seenFindingCount };
+  return withEvents({ ...round, done: false, reason: "pending" });
 }
 
 
@@ -707,6 +744,7 @@ export async function doWait(
     reportId: entryAtStart?.lastReportId,
     findingCount: entryAtStart?.lastFindingCount ?? 0,
     announcedQuestions: deps.announcedQuestions(),
+    modelEventCount: entryAtStart?.lastModelEventCount ?? 0,
   };
   // The LOOP is generic (lib/poll-wait.ts); only these criteria are this
   // tool's own, and they are MESSAGE-DRIVEN (2026-09-05): a new channel
@@ -739,10 +777,18 @@ export async function doWait(
   if (observation.seenFindingCount !== undefined) {
     rememberCursors(deps, child.judgeId, { lastFindingCount: observation.seenFindingCount });
   }
+  // Same rule for the model events: whatever this reply shows has been acted
+  // on, so the next wait must not re-announce it.
+  if (observation.seenModelEventCount !== undefined) {
+    rememberCursors(deps, child.judgeId, { lastModelEventCount: observation.seenModelEventCount });
+  }
   const base = {
     role: child.role,
     judgeId: child.judgeId,
     ...(child.streamPath === undefined ? {} : { streamPath: child.streamPath }),
+    // WHICH MODEL RAN — the launch slot, plus every rotation the pane reported
+    // (the events below). One without the other is half the story.
+    ...(child.modelSpec === undefined ? {} : { modelSpec: child.modelSpec }),
     // Rides along on EVERY outcome that is not this round's report: whichever
     // wake-up the opener gets, it learns that a leftover report was set aside
     // and why. (The `report` outcome can never carry one — the probe only ends
@@ -753,6 +799,21 @@ export async function doWait(
     return reply(
       buildStandardReport({ ...base, reason: "pane-dead", waitedSeconds }),
       { done: true, reason: "pane-dead", role: child.role, hasVerdict: false },
+    );
+  }
+  // THE CHAIN IS OUT OF MODELS (criterion 4): the round cannot produce a
+  // verdict, so it ENDS here as a failure with a reason — the alternative was
+  // the measured behaviour, a round that hung for hours while the opener sat
+  // inside a call it could not leave.
+  if (observation.done && observation.reason === "model-exhausted") {
+    return reply(
+      buildStandardReport({
+        ...base,
+        reason: "model-exhausted",
+        ...(observation.modelEvents === undefined ? {} : { modelEvents: observation.modelEvents }),
+        waitedSeconds,
+      }),
+      { done: true, reason: "model-exhausted", role: child.role, hasVerdict: false },
     );
   }
   if (observation.done && observation.reason === "report" && observation.reportId) {
@@ -777,6 +838,11 @@ export async function doWait(
         // What the round says it reviewed — the same line the settle sweep
         // prints, so which path woke the opener never changes what it learns.
         ...(settled.scope === undefined ? {} : { scope: settled.scope }),
+        // What the round's model went through, on EVERY report: a verdict
+        // reached after two rotations deserves to say so.
+        ...(observation.modelEvents === undefined || observation.modelEvents.length === 0
+          ? {}
+          : { modelEvents: observation.modelEvents }),
         waitedSeconds,
       }),
       { done: true, reason: "report", role: child.role, hasVerdict: settled.hasVerdict },
@@ -817,7 +883,7 @@ export async function doWait(
 function rememberCursors(
   deps: Pick<JudgeSessionToolDeps, "hierarchy" | "saveHierarchy">,
   judgeId: string,
-  patch: { lastReportId?: string; lastFindingCount?: number },
+  patch: { lastReportId?: string; lastFindingCount?: number; lastModelEventCount?: number },
 ): void {
   const next = deps.hierarchy();
   const entry = next[judgeId];

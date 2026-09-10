@@ -816,7 +816,7 @@ test("the round probe: the previous round's RECORDED report is not announced as 
 test("the wait probe: the round's criteria first, then question, then finding", () => {
   const f = fake();
   const c = seed(f, { streamPath: "/logs/stream.jsonl" });
-  const cursors = { reportId: undefined, findingCount: 0, announcedQuestions: new Set<string>() };
+  const cursors = { reportId: undefined, findingCount: 0, announcedQuestions: new Set<string>(), modelEventCount: 0 };
   assert.equal(probeJudgeWait(f.deps, c, cursors).done, false, "silence is not a message");
 
   f.files.set("/logs/stream.jsonl", JSON.stringify({ severity: "P2", issue: "naming" }));
@@ -850,7 +850,7 @@ test("the wait probe: the round's criteria first, then question, then finding", 
 test("the wait probe: this round's conclusion outranks findings that arrived with it", () => {
   const f = fake();
   const c = seed(f, { streamPath: "/logs/stream.jsonl" });
-  const cursors = { reportId: undefined, findingCount: 0, announcedQuestions: new Set<string>() };
+  const cursors = { reportId: undefined, findingCount: 0, announcedQuestions: new Set<string>(), modelEventCount: 0 };
   f.files.set(
     "/logs/stream.jsonl",
     JSON.stringify({ severity: "P2", issue: "naming" }) + "\n" + JSON.stringify({ severity: "P2", issue: "wording" }),
@@ -862,8 +862,7 @@ test("the wait probe: this round's conclusion outranks findings that arrived wit
   assert.equal(obs.seenFindingCount, 2, "the findings are still counted — the cursor must advance past them");
 });
 
-test("judge_wait: a leftover report keeps the round open and is named in the reply", async () => {
-  const f = fake();
+test("judge_wait: a leftover report keeps the round open and is named in the reply", async () => {  const f = fake();
   const c = seed(f);
   writeReport(f, c, "READY", "rep-stale", { at: new Date(1_700_000_000_000 - 120_000).toISOString() });
   const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
@@ -876,6 +875,56 @@ test("judge_wait: a leftover report keeps the round open and is named in the rep
 });
 
 
+test("the wait probe: a rotation is news, an EXHAUSTED chain ends the round", () => {
+  const f = fake();
+  const c = seed(f);
+  const cursors = { reportId: undefined, findingCount: 0, announcedQuestions: new Set<string>(), modelEventCount: 0 };
+  const noteModel = (modelEvent: { spec: string; error?: string; to?: string; exhausted?: boolean }): void => {
+    appendRecord(channelWriter(f), channelOf(c), {
+      kind: "state",
+      from: "child",
+      at: new Date(1_700_000_000_000).toISOString(),
+      state: "working",
+      modelEvent,
+    });
+  };
+  // A successful rotation: the round is still running, so the wait must NOT end
+  // (the opener would otherwise treat a slow model as a finished round).
+  noteModel({ spec: "onekey/gpt-6-astra:xhigh", error: "503 auth_unavailable", to: "anthropic/claude-opus-5:max" });
+  const rotated = probeJudgeWait(f.deps, c, cursors);
+  assert.equal(rotated.done, false, "a rotation is not a conclusion");
+  assert.equal(rotated.modelEvents?.length, 1);
+  assert.equal(rotated.seenModelEventCount, 1);
+  // The chain ran out: nothing the pane can do will produce a verdict.
+  noteModel({ spec: "anthropic/claude-opus-5:max", error: "503", exhausted: true });
+  const dead = probeJudgeWait(f.deps, c, cursors);
+  assert.equal(dead.done, true, "an exhausted chain ends the round instead of hanging");
+  assert.equal(dead.reason, "model-exhausted");
+  assert.equal(dead.modelEvents?.length, 2, "every event since the cursor travels with the wake-up");
+  assert.equal(dead.seenModelEventCount, 2, "…and the cursor can advance past them");
+});
+
+test("judge_wait: the round's model fallback rides the receipt, and the cursor advances", async () => {
+  const f = fake();
+  const c = seed(f);
+  // The pane reported its model dying mid-round (lib/judge-model-rotation.ts) —
+  // then it concluded. Both facts must reach the opener, and the event must
+  // not be announced a second time by the next wait.
+  appendRecord(channelWriter(f), channelOf(c), {
+    kind: "state",
+    from: "child",
+    at: new Date(1_700_000_000_000).toISOString(),
+    state: "working",
+    modelEvent: { spec: "onekey/gpt-6-astra:xhigh", error: "503 auth_unavailable", to: "anthropic/claude-opus-5:max" },
+  });
+  writeReport(f, c, "READY", "rep-9");
+  const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
+  const text = textOf(reply);
+  assert.match(text, /模型 fallback（1 次）：/);
+  assert.match(text, /onekey\/gpt-6-astra:xhigh 失败（503 auth_unavailable） → 已切到 anthropic\/claude-opus-5:max。/);
+  assert.equal(f.table.current[c.judgeId]?.lastModelEventCount, 1, "the cursor advanced past the event it showed");
+});
+
 test("stream findings still arrive newest-last, malformed lines dropped", () => {
   const f = fake();
   assert.deepEqual(recentStreamFindings(f.deps, undefined), []);
@@ -883,7 +932,6 @@ test("stream findings still arrive newest-last, malformed lines dropped", () => 
   f.files.set("/logs/stream.jsonl", "not json\n" + JSON.stringify({ severity: "P2", issue: "naming" }));
   assert.deepEqual(recentStreamFindings(f.deps, "/logs/stream.jsonl"), ["[P2] naming"]);
 });
-
 test("REGRESSION (2026-09-08): the gate's self-audit bypasses the repo check — agent tools keep it", async () => {
   // Measured: five consecutive "等待未命中本轮 report" on a cross-repo goal
   // audit — the chain's judge_wait/judge_close went through addressJudge's

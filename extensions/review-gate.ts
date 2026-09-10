@@ -369,6 +369,7 @@ import {
 } from "../lib/ship-gate-hook.ts";
 import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
+  modelChainFor,
   writeJudgeSpawnFiles,
   JUDGE_ROLES,
 } from "../lib/judge-prompt.ts";
@@ -524,13 +525,27 @@ import {
   applyAgentConfigLayer,
   loadRegistry,
   KNOWN_AGENTS,
+  KNOWN_THINKING_LEVELS,
   projectAgentIdentity,
   frontmatterBlock,
+  parseModelSpec,
   resolvePackageAgentsDir,
   ensureAgentFilesPresent,
   validateAgentsForStartup,
 } from "../lib/model-config.ts";
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
+import {
+  clearModelFailure,
+  describeCoolingSlot,
+  modelKeyOf,
+  pruneModelHealth,
+  recordModelFailure,
+  selectHealthySlot,
+  type ModelEvent,
+  type ModelHealth,
+  type SlotChoice,
+} from "../lib/model-health.ts";
+import { createModelRotation } from "../lib/judge-model-rotation.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
 // The model allowlist is consulted by the diagnosis module, not here.
 // The baseline resolution moved with prepare_review (lib/review-prepare-tools.ts).
@@ -2669,6 +2684,15 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   let judgeHierarchy: HierarchyTable = emptyHierarchy();
   /**
+   * WHICH MODEL SLOTS ARE BAD, per repo (lib/model-health.ts).
+   *
+   * Read at every dispatch (the chain head is skipped while it cools down),
+   * written when a judge pane reports that its model failed. Persisted in the
+   * repo's hierarchy snapshot — the same file that already records which
+   * judges exist, and the one file EVERY opener in the repo shares.
+   */
+  const modelHealthByRoot = new Map<string, ModelHealth>();
+  /**
    * Who THIS session is for opener checks: the orchestration id when this
    * session manages one, else its own session id. Unknown ⇒ fail-closed.
    */
@@ -2779,7 +2803,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function persistJudgeHierarchy(): void {
     try {
-      const slices = new Map<string, { judges: Record<string, JudgeEntry>; audit?: PendingAudit }>();
+      const slices = new Map<string, { judges: Record<string, JudgeEntry>; audit?: PendingAudit; modelHealth?: ModelHealth }>();
       const slice = (root: string) => {
         let s = slices.get(root);
         if (!s) { s = { judges: {} }; slices.set(root, s); }
@@ -2787,11 +2811,18 @@ export default function reviewGate(pi: ExtensionAPI) {
       };
       for (const [id, e] of Object.entries(judgeHierarchy)) slice(e.repoRoot).judges[id] = e;
       for (const [root, v] of pendingAudits) slice(root).audit = v;
+      // Pruned on the way out, so a dead model id can never be immortal in a file.
+      const now = Date.now();
+      for (const [root, health] of modelHealthByRoot) {
+        const live = pruneModelHealth(health, now);
+        if (Object.keys(live).length === 0) modelHealthByRoot.delete(root);
+        else slice(root).modelHealth = live;
+      }
       for (const root of hierarchyFileRoots) slice(root);
       for (const [root, s] of slices) {
         hierarchyFileRoots.add(root);
         const file = pathJoin(root, ".pi", HIERARCHY_FILENAME);
-        const empty = Object.keys(s.judges).length === 0 && !s.audit;
+        const empty = Object.keys(s.judges).length === 0 && !s.audit && !s.modelHealth;
         if (empty) { try { rmSync(file, { force: true }); } catch { /* best effort */ } continue; }
         try { mkdirSync(pathJoin(root, ".pi"), { recursive: true }); } catch { /* best effort */ }
         writeFileSync(file, JSON.stringify({ version: 1, ...s }), "utf8");
@@ -2815,6 +2846,126 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!judgeHierarchy[id]) judgeHierarchy[id] = e;
     }
     if (!pendingAudits.has(root) && snap.audit) pendingAudits.set(root, snap.audit);
+    // Model health is the one thing that must SURVIVE this session: the next
+    // dispatch (by this opener or the next session) skips a slot that just
+    // failed, which is what makes an in-round rotation stick.
+    if (!modelHealthByRoot.has(root) && snap.modelHealth) modelHealthByRoot.set(root, snap.modelHealth);
+  }
+
+  /** The live (pruned) model health of one repo. */
+  function judgeModelHealth(root: string): ModelHealth {
+    return pruneModelHealth(modelHealthByRoot.get(root) ?? {}, Date.now());
+  }
+
+  /**
+   * Remember that one model slot failed in this repo, and persist it.
+   *
+   * Called when a judge pane reports its own model failure and when the
+   * opener's wait ends a round with an exhausted chain — the two facts that
+   * decide which slot the NEXT round starts on.
+   */
+  function recordJudgeModelFailure(root: string, spec: string, error?: string): void {
+    modelHealthByRoot.set(root, recordModelFailure(modelHealthByRoot.get(root) ?? {}, spec, Date.now(), error));
+    persistJudgeHierarchy();
+  }
+
+  /** One model proved itself again (a rotation moved onto it and it ran). */
+  function clearJudgeModelFailure(root: string, spec: string): void {
+    const next = clearModelFailure(modelHealthByRoot.get(root) ?? {}, spec, Date.now());
+    if (Object.keys(next).length === 0) modelHealthByRoot.delete(root);
+    else modelHealthByRoot.set(root, next);
+    persistJudgeHierarchy();
+  }
+
+  /**
+   * Read what a pane said about its own models and act on it.
+   *
+   * The pane cannot write repo state (judge panes report, they do not
+   * enforce), so the opener is the one that turns its channel records into a
+   * cooldown, a warning and a cursor advance. Called at settle (a round ended)
+   * and at dispatch (a round ended badly and nobody settled it — an exhausted
+   * chain never produces a report).
+   */
+  function absorbJudgeModelEvents(root: string, judgeId: string): void {
+    const entry = judgeHierarchy[judgeId];
+    let events: readonly ModelEvent[];
+    try {
+      const openerId = entry?.openerId ?? callerIdentity();
+      if (!openerId) return;
+      const target = judgeChannelTarget(openerId, judgeId);
+      events = projectChannel(readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records).modelEvents;
+    } catch { return; }
+    const fresh = events.slice(entry?.lastModelEventCount ?? 0);
+    if (fresh.length === 0) return;
+    for (const event of fresh) {
+      recordJudgeModelFailure(root, event.spec, event.error);
+      // A successful switch is proof the destination works; keeping an older
+      // failure on record would bench a healthy model for the rest of the TTL.
+      if (event.to) clearJudgeModelFailure(root, event.to);
+    }
+    if (entry) {
+      setHierarchy({ ...judgeHierarchy, [judgeId]: { ...entry, lastModelEventCount: events.length } });
+    }
+    const lines = fresh.map((event) => {
+      const why = event.error ? `（${event.error}）` : "";
+      return event.exhausted
+        ? `${modelKeyOf(event.spec)} 失败${why}，链上已无可用槽`
+        : `${modelKeyOf(event.spec)} 失败${why} → 切到 ${event.to ? modelKeyOf(event.to) : "?"}`;
+    });
+    try { latestCtx?.ui.notify(`review-gate: judge 模型 fallback —— ${lines.join("；")}`, "warning"); } catch { /* headless */ }
+  }
+
+  /** What one judge round launches on: the chain, the pick, and why. */
+  type JudgeLaunch =
+    | { ok: true; sysPromptPath: string; spec: string; chain: string[]; choice: SlotChoice }
+    | { ok: false; error: string };
+
+  /**
+   * Resolve what THIS round launches on — read fresh, picked by health.
+   *
+   * THREE THINGS HAPPEN HERE, and they are one function because a dispatch
+   * that did only two of them is exactly the defect this fixes (2026-09-10):
+   *   1. the agents config is re-READ from disk (a session that started before
+   *      the user's edit used to keep launching the old chain for hours);
+   *   2. the model layers are re-rendered when the config changed, so the
+   *      `.pi/agents/*.md` chain on disk matches the model actually launched;
+   *   3. the slot is picked from the WHOLE chain, skipping the ones cooling
+   *      down (lib/model-health.ts), instead of always taking `slots[0]`.
+   */
+  function resolveJudgeLaunch(root: string, role: string, workDir: string, title: string, judgeId: string): JudgeLaunch {
+    // What the pane said about its own model LAST round belongs to THIS
+    // decision — an exhausted chain never settles, so nothing else would ever
+    // read it.
+    absorbJudgeModelEvents(root, judgeId);
+    const cfg = freshProjectConfig(root);
+    // Rendering writes files; it is idempotent and guarded by the config key,
+    // so the dispatch-time call is a no-op until the config actually changes.
+    if (latestCtx) ensureModelLayersRendered(latestCtx, cfg, root);
+    const { map: agents } = effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject);
+    const files = writeJudgeSpawnFiles({ repoRoot: root, role, agents, workDir, title });
+    if (files.chain.length === 0) {
+      // NO BUILT-IN DEFAULT (user requirement 2026-08-30): a role with no
+      // resolvable chain cannot be dispatched. Fail closed with the reason.
+      return { ok: false, error: `角色 ${role} 没有可派发的模型链（agents 配置缺失或不可解析）——请修复 ~/.pi/review-gate.json 后重试` };
+    }
+    const choice = selectHealthySlot(files.chain, judgeModelHealth(root), Date.now());
+    if (!choice) return { ok: false, error: `角色 ${role} 的模型链为空（不可达）` };
+    announceSlotSkip(role, choice);
+    return { ok: true, sysPromptPath: files.sysPromptPath, spec: choice.spec, chain: files.chain, choice };
+  }
+
+  /**
+   * Say which slots the pick stepped over — a silent skip is the same
+   * blindness as never skipping at all.
+   */
+  function announceSlotSkip(role: string, choice: SlotChoice): void {
+    if (choice.skipped.length === 0) return;
+    const now = Date.now();
+    const skipped = choice.skipped.map((s) => describeCoolingSlot(s, now)).join("、");
+    const head = choice.allCooling
+      ? `review-gate: ${role} 的全部模型槽都在冷却期（${skipped}）——本轮仍按链头 ${modelKeyOf(choice.spec)} 派发，失败会立刻上报。`
+      : `review-gate: ${role} 跳过冷却中的模型槽 ${skipped} → 本轮用 ${modelKeyOf(choice.spec)}。`;
+    try { latestCtx?.ui.notify(head, "warning"); } catch { /* headless */ }
   }
 
   /**
@@ -3250,6 +3401,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   let lastAgentsWidget = "";
 
   let lastLayerNotifyText = "";
+  /**
+   * The agents-layer key of the config the model layers were last rendered
+   * from (null = nothing rendered yet this session). `ensureModelLayersRendered`
+   * is called at session start AND before every judge dispatch, and the
+   * renderer writes unconditionally — this is what keeps the dispatch-time
+   * call a no-op until the config actually changes on disk.
+   */
+  let lastRenderedAgentsKey: string | null = null;
   /** Disk registry merged with the SESSION's runtime registry. The runtime
    *  view is authoritative (built-in anthropic catalogs never reach
    *  models-store.json): validating a
@@ -3290,6 +3449,41 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * The agents-layer key of one config snapshot, for the change guard below.
+   *
+   * Whatever the JSON is, the RENDERED files depend on exactly these values:
+   * the two agents sections and the two corrupt flags (a corrupt layer keeps
+   * the last render instead of sweeping it).
+   */
+  function agentsLayerKey(cfg: ProjectConfig): string {
+    return JSON.stringify([cfg.agentsGlobal ?? null, cfg.agentsProject ?? null, cfg.agentsGlobalCorrupt ?? false, cfg.agentsProjectCorrupt ?? false]);
+  }
+
+  /**
+   * The agents layer AS IT IS ON DISK RIGHT NOW (the dispatch-time read).
+   *
+   * WHY THIS EXISTS (2026-09-10, measured in rebate): `projectConfig` is
+   * loaded ONCE per session start, and the judge dispatch read its model chain
+   * from that in-memory snapshot. A user who edited `~/.pi/review-gate.json`
+   * mid-session kept getting the OLD chain launched — while the judge pane's
+   * own session start re-rendered `.pi/agents/*.md` from the NEW one, so the
+   * file on disk and the model actually running contradicted each other.
+   *
+   * A corrupt layer keeps the snapshot's value (corrupt ≠ absent: treating it
+   * as "unconfigured" would sweep a valid chain back to the built-in default).
+   */
+  function freshProjectConfig(root: string): ProjectConfig {
+    const fresh = loadProjectConfig(root);
+    return {
+      ...fresh,
+      agentsGlobal: fresh.agentsGlobalCorrupt ? projectConfig.agentsGlobal : fresh.agentsGlobal,
+      agentsProject: fresh.agentsProjectCorrupt ? projectConfig.agentsProject : fresh.agentsProject,
+      agentsGlobalCorrupt: fresh.agentsGlobalCorrupt ?? projectConfig.agentsGlobalCorrupt,
+      agentsProjectCorrupt: fresh.agentsProjectCorrupt ?? projectConfig.agentsProjectCorrupt,
+    };
+  }
+
+  /**
    * Re-apply BOTH model-config layers once per session start: global
    * (~/.pi/agent/agents) AND the current repo's project layer
    * (<primaryRepoRoot>/.pi/agents, which outranks global).
@@ -3307,7 +3501,15 @@ export default function reviewGate(pi: ExtensionAPI) {
    * fail-soft (a render failure never blocks a session); a corrupt layer keeps
    * the last good render instead of sweeping it.
    */
-  function ensureModelLayersRendered(ctx: ExtensionContext): void {
+  function ensureModelLayersRendered(ctx: ExtensionContext, cfg: ProjectConfig = projectConfig, root: string = primaryRepoRoot): void {
+    // CHANGE GUARD (2026-09-10): the renderer writes unconditionally, so the
+    // dispatch-time call below must not re-write four agent files per judge
+    // round. The same config renders the same files — one key is enough.
+    // `null` means "nothing rendered yet this session", so the first call
+    // (session start) always renders.
+    const cfgKey = agentsLayerKey(cfg);
+    if (lastRenderedAgentsKey === cfgKey) return;
+    lastRenderedAgentsKey = cfgKey;
     const problems: string[] = [];
     try {
       const packageRoot = pathDirname(fileURLToPath(import.meta.url));
@@ -3336,12 +3538,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       // treating it as "no agents section" would sweep every generated chain
       // back to the upstream default and clobber the last valid render
       // (corrupt ≠ absent for the renderer).
-      if (projectConfig.agentsGlobalCorrupt) {
+      if (cfg.agentsGlobalCorrupt) {
         problems.push("global: ~/.pi/review-gate.json is corrupt or its agents section is invalid — keeping the last rendered model chains (fail-safe)");
       } else {
-        const { map, diagnostics } = effectiveAgentsConfig(projectConfig.agentsGlobal ?? undefined, undefined);
+        const { map, diagnostics } = effectiveAgentsConfig(cfg.agentsGlobal ?? undefined, undefined);
         problems.push(...diagnostics);
-        problems.push(...projectConfig.agentsDiagnostics.filter((d) => d.startsWith("global:")));
+        problems.push(...cfg.agentsDiagnostics.filter((d) => d.startsWith("global:")));
         const res = applyAgentConfigLayer({
           agents: map,
           targetDir: globalAgentsDir,
@@ -3354,17 +3556,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       // Project layer of the CURRENT repo (project outranks global) — same
       // fail-safe: a corrupt project file keeps the last project render.
-      if (projectConfig.agentsProjectCorrupt) {
+      if (cfg.agentsProjectCorrupt) {
         problems.push("project: .pi/review-gate.json is corrupt or its agents section is invalid — keeping the last rendered model chains (fail-safe)");
       } else {
-        const { map, diagnostics } = effectiveAgentsConfig(undefined, projectConfig.agentsProject ?? undefined);
+        const { map, diagnostics } = effectiveAgentsConfig(undefined, cfg.agentsProject ?? undefined);
         problems.push(...diagnostics);
-        problems.push(...projectConfig.agentsDiagnostics.filter((d) => d.startsWith("project:")));
+        problems.push(...cfg.agentsDiagnostics.filter((d) => d.startsWith("project:")));
         // (The cross-layer reviewer-readonly guard retired 2026-08-27 with
         // the follow rule: the readonly dispatch path no longer exists.)
         const res = applyAgentConfigLayer({
           agents: map,
-          targetDir: pathJoin(primaryRepoRoot, ".pi", "agents"),
+          targetDir: pathJoin(root, ".pi", "agents"),
           // Project-layer base is the BUILT-IN default (package agents dir),
           // NEVER the already-rendered global layer — a global auto:false slot
           // render must not leak into a project auto:true shadow (round-7 P1).
@@ -5624,6 +5826,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         judgeId, openerId: opener, role, repoRoot: root, title, sessionDir,
         paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
         ...(tmuxServer === undefined ? {} : { tmuxServer }),
+        // The pane's model does not change because a new round was queued into
+        // it — the entry keeps saying what the RUNNING pane was launched on.
+        ...(existing.modelSpec === undefined ? {} : { modelSpec: existing.modelSpec }),
         ...(keptCursor === undefined ? {} : { lastReportId: keptCursor }),
         ...(keptFindings === undefined ? {} : { lastFindingCount: keptFindings }),
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
@@ -5662,21 +5867,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       return { ok: false, reused: continuesSession, sessionId, sessionDir, error: "当前会话不在 tmux 里，开不出 review pane——在 tmux 中重开本会话后重试；门禁不会退回旧的进程壳子。" };
     }
     try {
-      const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-      const files = writeJudgeSpawnFiles({ repoRoot: root, role, agents, workDir, title });
-      if (!files.model) {
-        // NO BUILT-IN DEFAULT (user requirement 2026-08-30): a role with no
-        // resolvable chain cannot be dispatched. Fail closed with the reason
-        // (the startup hard check surfaces it too, but a runtime config
-        // change after start must not silently spawn a default model).
-        return {
-          ok: false,
-          reused: continuesSession,
-          sessionId,
-          sessionDir,
-          error: `角色 ${role} 没有可派发的模型链（agents 配置缺失或不可解析）——请修复 ~/.pi/review-gate.json 后重试`,
-        };
+      const launch = resolveJudgeLaunch(root, role, workDir, title, judgeId);
+      if (!launch.ok) {
+        return { ok: false, reused: continuesSession, sessionId, sessionDir, error: launch.error };
       }
+      const files = { sysPromptPath: launch.sysPromptPath, model: launch.spec };
       // "Reused" is a fact about the SESSION, not about the pane: the
       // transcript decided it above, before this round could add to it.
       mkdirSync(sessionDir, { recursive: true });
@@ -5730,6 +5925,10 @@ export default function reviewGate(pi: ExtensionAPI) {
             paneId, roundSeq: nextJudgeRound(opener, judgeId),
             ...(tmuxServer === undefined ? {} : { tmuxServer }),
             ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
+            // Which model this pane was launched on — the round's receipt says
+            // who actually ran it (the pane may rotate later; that reports
+            // itself through the channel).
+            modelSpec: launch.spec,
             // Same rule as the reuse path: a re-run over the SAME stream file keeps
             // its finding cursor, so nothing already shown is shown again.
             ...(judgeHierarchy[judgeId]?.streamPath === opts.streamPath
@@ -5846,6 +6045,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       const entry = judgeHierarchy[sessionId];
       if (!entry?.role) return undefined;
       const childRoot = entry.repoRoot || primaryRepoRoot;
+      // The pane's own model report is a fact about the round that is ending
+      // here: cool the bad slot down, warn, advance the cursor. This sweep (a
+      // session that was NOT blocked in a wait) is a second settle entry point
+      // and must read it the same way the wait does — the absorb is idempotent.
+      absorbJudgeModelEvents(childRoot, sessionId);
       const settled = await settleAuditRound(auditRoundDeps(ctx), { judgeId: sessionId, root: childRoot });
       switch (settled.status) {
         case "recorded":
@@ -5927,6 +6131,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           notices.push(buildStandardReport({
             role: entry.role,
             judgeId,
+            ...(entry.modelSpec === undefined ? {} : { modelSpec: entry.modelSpec }),
             openQuestions: [{ title: q.title, options: q.options, requestId: q.requestId }],
             ...(obs.notThisRound === undefined ? {} : { notThisRound: obs.notThisRound }),
           }));
@@ -5939,6 +6144,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       notices.push(buildStandardReport({
         role: entry.role,
         judgeId,
+        ...(entry.modelSpec === undefined ? {} : { modelSpec: entry.modelSpec }),
         verdict: obs.verdict,
         findingsCount: obs.findingsCount,
         conclusionExcerpt: entry.role === "adviser" ? conclusion.text : undefined,
@@ -6542,6 +6748,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
         sessionDir: c.sessionDir,
         ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
+        // Which model this pane was launched on: the receipt's answer to "who
+        // actually ran this round" (a rotation mid-round reports itself).
+        ...(c.modelSpec === undefined ? {} : { modelSpec: c.modelSpec }),
       };
     },
     findChild: (root, role, judgeId) => {
@@ -6558,6 +6767,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
         sessionDir: c.sessionDir,
         ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
+        ...(c.modelSpec === undefined ? {} : { modelSpec: c.modelSpec }),
       };
     },
     channelIO: () => channelIO,
@@ -6599,6 +6809,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The wait closes its round through the SAME engine the settle path uses,
     // so a report cannot be recorded twice (one cursor, written in one place).
     settleRound: async (judgeId, root) => {
+      // Before the verdict is read: whatever the pane reported about its own
+      // model is a fact about this round (lib/judge-model-rotation.ts).
+      absorbJudgeModelEvents(root, judgeId);
       const settled = await settleAuditRound(auditRoundDeps(undefined), { judgeId, root });
       switch (settled.status) {
         case "recorded":
@@ -6627,6 +6840,94 @@ export default function reviewGate(pi: ExtensionAPI) {
   // hosts. A second registration is not a second implementation: both
   // executes close over `judgeSessionDeps`.
   registerJudgeWaitTool(pi, judgeSessionDeps);
+
+  /**
+   * THE PANE'S OWN MODEL SELF-HEAL (2026-09-10).
+   *
+   * The judge side is the ONLY party that sees this session's provider errors:
+   * the opener is parked in a wait, and the channel carries verdicts, not
+   * stack traces. So the pane watches its own runs and, when one ends with
+   * `stopReason: "error"` AND pi has nothing left to retry (`agent_settled`),
+   * it walks the role's chain (lib/judge-model-rotation.ts): switch model,
+   * nudge itself to carry on, and REPORT the event so the opener can cool the
+   * failed slot down.
+   *
+   * Why `agent_settled` and not the first failed request: a burst of 503s that
+   * recovers 30 seconds later is the normal shape of a busy provider
+   * (measured), and rotating on it would move every round to the backup for no
+   * reason. The terminal condition is "pi gave up", which is exactly what
+   * `agent_settled` with a failed last message means.
+   */
+  function installJudgeModelRotation(role: string): void {
+    /** The last run's terminal error, cleared by any run that ended cleanly. */
+    let lastRunError: string | undefined;
+    const rotation = createModelRotation({
+      chain: () => {
+        const cfg = freshProjectConfig(cwd);
+        const { map } = effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject);
+        return modelChainFor(map, role, cwd);
+      },
+      currentSpec: () => {
+        const model = latestCtx?.model as { provider?: string; id?: string } | undefined;
+        return model?.provider && model.id ? `${model.provider}/${model.id}` : undefined;
+      },
+      switchTo: async (spec) => {
+        const parsed = parseModelSpec(spec);
+        if (!parsed.provider || !parsed.id || !latestCtx) return false;
+        try {
+          const model = latestCtx.modelRegistry.find(parsed.provider, parsed.id);
+          if (!model) return false;
+          if (!(await pi.setModel(model))) return false;
+          // The slot's own level, applied AFTER the switch (setModel resets it
+          // to the new model's default). A level the model cannot take is not
+          // a reason to abandon a working model — pi clamps it, and an unknown
+          // suffix is dropped here rather than passed on as a lie.
+          if (parsed.thinking && KNOWN_THINKING_LEVELS.has(parsed.thinking)) {
+            pi.setThinkingLevel(parsed.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
+          }
+          return true;
+        } catch { return false; }
+      },
+      nudge: (text) => {
+        try {
+          // The same idiom the thinking-loop notice uses: idle ⇒ a plain user
+          // message (this IS the next turn); anything still streaming ⇒ steer,
+          // so the notice rides that run instead of being rejected.
+          if (latestCtx?.isIdle()) pi.sendUserMessage(text);
+          else pi.sendUserMessage(text, { deliverAs: "steer" });
+        } catch { /* the report still went out */ }
+      },
+      report: (event) => {
+        const binding = childBinding();
+        // The state tells the truth about what happens NEXT: a rotation means
+        // the round goes on (working), an exhausted chain means it stopped.
+        if (binding) reportState(binding, event.exhausted ? "idle" : "working", { modelEvent: event });
+      },
+      notify: (text, level) => {
+        try { latestCtx?.ui.notify(text, level); } catch { /* headless */ }
+      },
+    });
+    pi.on("agent_end", (event) => {
+      const messages = (event as { messages?: Array<{ role?: string; stopReason?: string; errorMessage?: string }> }).messages ?? [];
+      let error: string | undefined;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i]!;
+        if (message.role !== "assistant") continue;
+        error = message.stopReason === "error" ? (message.errorMessage ?? "model error") : undefined;
+        break;
+      }
+      lastRunError = error;
+    });
+    pi.on("agent_settled", async () => {
+      const error = lastRunError;
+      lastRunError = undefined;
+      if (error === undefined) return;
+      const event = await rotation.onModelFailure(error);
+      // A rotation that FAILED to switch (no auth, unknown id) is still a fact
+      // the opener must not be blind to — the attempt list is in the event.
+      if (event) log(`model fallback: ${event.spec} failed (${event.error ?? "error"}) → ${event.to ?? "chain exhausted"}`);
+    });
+  }
 
   // judge_conclude is the ONLY tool that exists on one side only: a judge
   // concludes its own round through it, and the main session must never see
@@ -6670,6 +6971,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         if (usedPass) inspectionPass = undefined;
       },
     });
+    // The pane watches its OWN model: the opener cannot (it is parked in a
+    // wait) and no other surface sees this process's provider errors.
+    installJudgeModelRotation(readJudgeSideEnv(process.env)!.role);
   }
   registerJudgeSpawnTools(pi, {
     callerId: () => callerIdentity(),
@@ -6699,15 +7003,18 @@ export default function reviewGate(pi: ExtensionAPI) {
       };
     },
     launchConfig: (root, role, opener, lane) => {
-      const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
       const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener, lane));
-      const files = writeJudgeSpawnFiles({ repoRoot: root, role, agents, workDir, title: role });
-      if (!files.model) {
-        return { ok: false, error: `角色 ${role} 没有可派发的模型链——请修复 ~/.pi/review-gate.json 后重试` };
+      // ONE launch resolver for both dispatch surfaces (judge_spawn here,
+      // judge_submit's chain in dispatchJudgeRound): re-read the config, pick
+      // the first slot that is not cooling down.
+      const judgeId = judgeSessionIdFor(role, shortRepoHash(root), opener, lane);
+      const launch = resolveJudgeLaunch(root, role, workDir, role, judgeId);
+      if (!launch.ok) {
+        return { ok: false, error: launch.error };
       }
       const sessionDir = pathJoin(workDir, "sessions");
       try { mkdirSync(sessionDir, { recursive: true }); } catch { /* best effort */ }
-      return { ok: true, model: files.model, sysPromptPath: files.sysPromptPath, sessionDir };
+      return { ok: true, model: launch.spec, sysPromptPath: launch.sysPromptPath, sessionDir };
     },
     buildGoalAuditTask: async (draft, root, ctx) => {
       // The third caller of the ONE assembler (the other two are the audit

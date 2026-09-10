@@ -47,6 +47,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { isDeliveryStation, type DeliveryStation } from "./delivery-station.ts";
+import type { ModelEvent } from "./model-health.ts";
 
 
 /** Directory (under the pi agent home) that holds every orchestration's channels. */
@@ -148,6 +149,22 @@ export interface ChannelStateRecord extends ChannelRecordBase {
    * READING for the receipt, never a wake reason.
    */
   lastProgressAt?: string;
+
+  /**
+   * A MODEL OF THIS PANE FAILED (2026-09-10).
+   *
+   * Written by the judge side when its own provider keeps failing
+   * (lib/judge-model-rotation.ts) — the one fact the opener cannot observe
+   * for itself, because it is blocked in a wait and the provider error lands
+   * in the pane's own pi process. `to` names the slot the pane moved to;
+   * `exhausted` means nothing is left, which ENDS the round as a failure
+   * rather than letting it hang forever.
+   *
+   * Rides on a `state` record deliberately: heartbeats already flow through
+   * every reader, and an opener running an older build ignores the extra key
+   * instead of failing to parse the record.
+   */
+  modelEvent?: ModelEvent;
 
 }
 
@@ -862,6 +879,14 @@ export interface ChannelProjection {
   lastActivityAt?: string;
   /** Newest round report, when any round has closed. */
   lastReport?: ChannelReportRecord;
+  /**
+   * Every model failure this channel ever saw, oldest first — the pane's own
+   * account of why a round was slow (lib/judge-model-rotation.ts).
+   *
+   * Kept as a LIST, not a last-value: the opener records one cooled-down slot
+   * per event, and two failures in one round are two different broken models.
+   */
+  modelEvents: ModelEvent[];
 }
 
 /**
@@ -941,6 +966,7 @@ function projectOwnedRecords(records: readonly ChannelRecord[]): ChannelProjecti
   const pendingInstructs: ChannelInstructRecord[] = [];
   let lastActivityAt: string | undefined;
   let lastReport: ChannelReportRecord | undefined;
+  const modelEvents: ModelEvent[] = [];
   for (const record of records) {
     if (!lastActivityAt || record.at > lastActivityAt) lastActivityAt = record.at;
     switch (record.kind) {
@@ -950,6 +976,7 @@ function projectOwnedRecords(records: readonly ChannelRecord[]): ChannelProjecti
         // reset every tick and every wait would look freshly started.
         if (!lastState || lastState.state !== record.state) lastStateSince = record.at;
         lastState = record;
+        if (record.modelEvent) modelEvents.push(record.modelEvent);
         break;
       case "request":
         if (!settled.has(record.requestId)) openRequests.push(record);
@@ -976,6 +1003,7 @@ function projectOwnedRecords(records: readonly ChannelRecord[]): ChannelProjecti
     pendingInstructs,
     lastActivityAt,
     ...(lastReport === undefined ? {} : { lastReport }),
+    modelEvents,
   };
 
 }

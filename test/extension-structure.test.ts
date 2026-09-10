@@ -7,6 +7,18 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
 /**
+ * THE LOOP'S `agent_settled` HANDLER — the anchor every window in this file
+ * scans from.
+ *
+ * NOT the bare event literal. The extension registers MORE THAN ONE handler
+ * for `agent_settled`: a judge pane has its own (the model-fallback wiring,
+ * 2026-09-10, registered EARLIER in the file) and the thinking-loop notice has
+ * a third. `indexOf('pi.on("agent_settled"')` therefore stopped meaning "the
+ * loop's handler" the moment that landed — this signature is the loop's alone
+ * (async, with the ctx parameter), and every window below is about the loop.
+ */
+const LOOP_SETTLED = 'pi.on("agent_settled", async (_event, ctx) => {';
+/**
  * The judge tools that observe/end a session moved to lib/ (they are wired
  * from the extension, not written in it). Their structural rules did not
  * move with them — they are asserted here, against the module that now owns
@@ -170,6 +182,19 @@ function windowIn(src: string, start: string, end: string | RegExp, label: strin
 
 function windowOf(start: string, end: string | RegExp, label: string, from = 0): string {
   return windowIn(SRC, start, end, label, from);
+}
+
+/**
+ * `windowOf`, anchored on the LOOP's `agent_settled` handler.
+ *
+ * There is MORE THAN ONE handler for that event in the extension — a judge
+ * pane has its own with the model-fallback wiring (2026-09-10) and it is
+ * registered EARLIER in the file — so a bare
+ * `windowOf('pi.on("agent_settled"', …)` started landing on the judge's handler
+ * and every assertion below it was reading the wrong body.
+ */
+function loopSettledWindow(end: string | RegExp, label = "agent_settled"): string {
+  return windowOf('pi.on("agent_settled"', end, label, SRC.indexOf(LOOP_SETTLED));
 }
 
 /**
@@ -505,7 +530,7 @@ test("L2 STALL BREAKER: no-progress circuit breaker precedes every continuation 
   // REGRESSION: when the judge provider ran out of quota, seven consecutive
   // continuations fired ("4/10 … 10/10") while nothing could change, burning
   // the whole budget on an external blocker the agent could not fix.
-  const start = SRC.indexOf('pi.on("agent_settled"');
+  const start = SRC.indexOf(LOOP_SETTLED);
   assert.ok(start >= 0, "agent_settled handler must exist");
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   const breakerAt = SRC.indexOf("evaluateStall(", start);
@@ -527,7 +552,7 @@ test("L2 STALL BREAKER: a running judge child counts as motion (never orphan a l
   // Without this, the breaker trips on the loop's OWN review: while an async
   // reviewer runs, the fingerprint, both verdicts, the round count and the
   // unmet list are all necessarily unchanged.
-  const start = SRC.indexOf('pi.on("agent_settled"');
+  const start = SRC.indexOf(LOOP_SETTLED);
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   const call = SRC.slice(breakerAt, injectAt);
@@ -549,7 +574,7 @@ test("L2 STALL BREAKER: an overdue goal negotiation counts as motion (never swal
   // would never fire in the scenario it was built for. An overdue negotiation
   // must therefore be treated as in-motion, the same exemption a running
   // reviewer gets.
-  const start = SRC.indexOf('pi.on("agent_settled"');
+  const start = SRC.indexOf(LOOP_SETTLED);
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   const call = SRC.slice(breakerAt, injectAt);
@@ -579,14 +604,17 @@ test("corrupt config layer keeps the last render — BOTH layers, fail-safe (rou
   // falling through to applyAgentConfigLayer is exactly the clobber.
   assert.match(
     layers,
-    /if \(projectConfig\.agentsGlobalCorrupt\) \{[\s\S]{0,400}?\} else \{[\s\S]{0,900}?applyAgentConfigLayer\(/,
+    /if \((\w+)\.agentsGlobalCorrupt\) \{[\s\S]{0,400}?\} else \{[\s\S]{0,900}?applyAgentConfigLayer\(/,
     "a corrupt GLOBAL layer must skip its render, not fall through to applyAgentConfigLayer",
   );
   assert.match(
     layers,
     // The project branch carries the cross-layer reviewer-readonly guard
-    // between the `else` and its render call, hence the wider window.
-    /if \(projectConfig\.agentsProjectCorrupt\) \{[\s\S]{0,400}?\} else \{[\s\S]{0,5000}?applyAgentConfigLayer\(/,
+    // between the `else` and its render call, hence the wider window. The flag
+    // is read off the CONFIG OBJECT the function renders from (a parameter
+    // since 2026-09-10 — the dispatch re-renders from a fresh read), so the
+    // guard names that object rather than the session snapshot.
+    /if \((\w+)\.agentsProjectCorrupt\) \{[\s\S]{0,400}?\} else \{[\s\S]{0,5000}?applyAgentConfigLayer\(/,
     "a corrupt PROJECT layer must skip its render, not fall through to applyAgentConfigLayer",
   );
   // The user must SEE the fail-safe (both messages feed the bounded notify).
@@ -631,10 +659,12 @@ test("GLOBAL LAYER: the extension re-applies model config (both layers) at sessi
   const fnEnd = SRC.indexOf("\n  function ", at + 1);
   assert.ok(fnEnd > at, "the next function declaration must bound the window");
   const fn = SRC.slice(at, fnEnd);
-  assert.match(fn, /effectiveAgentsConfig\(projectConfig\.agentsGlobal \?\? undefined, undefined\)/);
-  assert.match(fn, /effectiveAgentsConfig\(undefined, projectConfig\.agentsProject \?\? undefined\)/);
+  assert.match(fn, /effectiveAgentsConfig\(cfg\.agentsGlobal \?\? undefined, undefined\)/);
+  assert.match(fn, /effectiveAgentsConfig\(undefined, cfg\.agentsProject \?\? undefined\)/);
   assert.match(fn, /applyAgentConfigLayer\(/);
-  assert.match(fn, /pathJoin\(primaryRepoRoot, "\.pi", "agents"\)/);
+  // The project layer is rendered for the ROOT the config was read for (a
+  // parameter since 2026-09-10), not unconditionally for the primary repo.
+  assert.match(fn, /pathJoin\(root, "\.pi", "agents"\)/);
   // BOOTSTRAP SELF-HEAL: a role the gate REQUIRES (goal-auditor gates every
   // goal approval) must be restored when it is missing, or the session
   // deadlocks with no exit but switching the gate off. The source dir is
@@ -681,6 +711,52 @@ test("GLOBAL LAYER: the extension re-applies model config (both layers) at sessi
   );
 });
 
+test("MODEL LAUNCH: every judge dispatch re-reads the config and picks a slot that is not cooling down", () => {
+  // 2026-09-10 (measured in rebate): `projectConfig` is a SESSION-START
+  // snapshot, so a user who edited ~/.pi/review-gate.json mid-session kept
+  // getting the OLD chain launched for hours — while the judge pane's own
+  // session start re-rendered `.pi/agents/*.md` from the new one, leaving the
+  // file on disk and the running model contradicting each other.
+  const fresh = windowOf("function freshProjectConfig(", "\n  }", "freshProjectConfig");
+  assert.match(fresh, /loadProjectConfig\(root\)/, "the agents layer is re-read from disk");
+  // CORRUPT ≠ ABSENT: a corrupt layer keeps the snapshot's value, or the
+  // renderer would sweep a valid chain back to the built-in default.
+  assert.match(fresh, /agentsGlobalCorrupt \? projectConfig\.agentsGlobal : fresh\.agentsGlobal/);
+  assert.match(fresh, /agentsProjectCorrupt \? projectConfig\.agentsProject : fresh\.agentsProject/);
+
+  const launch = windowOf("function resolveJudgeLaunch(", "\n  }", "resolveJudgeLaunch");
+  assert.match(launch, /freshProjectConfig\(root\)/, "the launch reads THAT, never the snapshot");
+  assert.doesNotMatch(launch, /projectConfig\.agentsGlobal/, "no stale read on the launch path");
+  assert.match(launch, /ensureModelLayersRendered\(latestCtx, cfg, root\)/,
+    "and the rendered `.pi/agents/*.md` chain follows the config that launches");
+  assert.match(launch, /selectHealthySlot\(files\.chain, judgeModelHealth\(root\)/,
+    "the slot is picked from the WHOLE chain by health, not `slots[0]`");
+  assert.match(launch, /files\.chain\.length === 0/, "an unresolvable chain still fails closed");
+  // ONE resolver for both dispatch surfaces — a second one is the drift this
+  // whole change exists to end.
+  assert.equal((SRC.match(/resolveJudgeLaunch\(/g) ?? []).length, 3, "definition + judge_submit's chain + judge_spawn's launchConfig");
+  assert.match(SRC, /const launch = resolveJudgeLaunch\(root, role, workDir, title, judgeId\)/);
+  assert.match(SRC, /const launch = resolveJudgeLaunch\(root, role, workDir, role, judgeId\)/);
+});
+
+test("MODEL FALLBACK: only a judge pane installs the pane-side rotation", () => {
+  // The pane is the only party that sees its own provider errors, and a
+  // reporting shell must not grow an enforcing surface: the handler is
+  // registered inside the judge-side branch, nowhere else.
+  const call = SRC.indexOf("installJudgeModelRotation(readJudgeSideEnv(process.env)!.role)");
+  assert.ok(call > 0, "the judge side installs it");
+  const judgeBlock = SRC.lastIndexOf("if (readJudgeSideEnv(process.env)) {", call);
+  assert.ok(judgeBlock > 0 && judgeBlock < call, "…and it is inside the judge-side block");
+  assert.ok(SRC.indexOf("registerJudgeSpawnTools(pi,") > call, "which ends after it");
+  const install = windowOf("function installJudgeModelRotation(", "\n  }", "installJudgeModelRotation");
+  assert.match(install, /pi\.on\("agent_end"/, "the run's terminal error is read from agent_end");
+  assert.match(install, /pi\.on\("agent_settled"/, "and acted on once pi has nothing left to retry");
+  assert.match(install, /createModelRotation\(/, "the policy lives in lib/judge-model-rotation.ts");
+  assert.match(install, /pi\.setModel\(/, "the pane switches its own model");
+  assert.match(install, /reportState\(binding, event\.exhausted \? "idle" : "working", \{ modelEvent: event \}\)/,
+    "and REPORTS it — the opener cannot see provider errors itself");
+});
+
 test("INCREMENTAL: the settled conclusion of the previous round is handed to the reviewer", () => {
   // A re-review that starts from zero pays full price for questions already
   // answered. The gate must state what the last READY verdict settled.
@@ -700,7 +776,7 @@ test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits
   // Explore-mode edits set loopArmed = true in tool_result; only the explore
   // early-return keeps auto-continuation off. If someone reorders the checks,
   // explore would silently regain forced continuation.
-  const start = SRC.indexOf('pi.on("agent_settled"');
+  const start = SRC.indexOf(LOOP_SETTLED);
   assert.ok(start >= 0, "agent_settled handler must exist");
   // Wide enough to cover the judge-verdict hook at the handler top: the
   // pinned property is the ORDER of the two checks, not the distance.
@@ -895,7 +971,7 @@ test("FLICKER: every dialog goes through the row budget", () => {
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
   // A stale ordering would let the auto-continuation steamroll the agent's
   // question with a [REVIEW_GATE_RESUME] follow-up instead of waiting.
-  const start = SRC.indexOf('pi.on("agent_settled"');
+  const start = SRC.indexOf(LOOP_SETTLED);
   assert.ok(start >= 0, "agent_settled handler must exist");
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   assert.ok(injectAt > start, "agent_settled must contain the RESUME injection");
@@ -909,7 +985,7 @@ test("RESUME text: the unmet-gates branch points a waiting agent at ask_user", (
   // pauses, or the follow-up just steers it back into working blind (live
   // regression: agent asked "决策 3 of 3" in prose, RESUME said only
   // "Continue: fix → re-review …").
-  const start = SRC.indexOf('pi.on("agent_settled"');
+  const start = SRC.indexOf(LOOP_SETTLED);
   const end = SRC.indexOf("// ---------- lifecycle ----------", start);
   const body = SRC.slice(start, end);
   assert.match(body, /problems\.length > 0[\s\S]{0,800}?ask_user/s,
@@ -958,7 +1034,7 @@ test("ESC abort (Operation aborted) pauses auto-continuation until the next real
   assert.match(SRC, /pi\.on\(["']agent_end["']/);
   assert.match(SRC, /stopReason === "aborted"/);
   // agent_settled checks the abort flag BEFORE injecting the continuation…
-  const start = SRC.indexOf('pi.on("agent_settled"');
+  const start = SRC.indexOf(LOOP_SETTLED);
   assert.ok(start >= 0, "agent_settled handler must exist");
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   assert.ok(injectAt > start, "agent_settled must contain the RESUME injection");
@@ -1388,8 +1464,8 @@ test("normal mode: prompt-transparent except the language directive; loop resume
   assert.ok(directiveAt > normalAt, "the undecided directive must not be injected in normal mode");
   // agent_settled and session_compact both skip normal (no auto-continuation,
   // no loop-resume nudge).
-  for (const [anchor, window] of [['pi.on("agent_settled"', 1500], ['pi.on("session_compact"', 1000]] as const) {
-    const at = SRC.indexOf(anchor);
+  for (const [anchor, window, from] of [['pi.on("agent_settled"', 1500, SRC.indexOf(LOOP_SETTLED)], ['pi.on("session_compact"', 1000, 0]] as const) {
+    const at = from === 0 ? SRC.indexOf(anchor) : from;
     assert.ok(at >= 0, anchor);
     // agent_settled's window covers the judge-verdict hook at its top; the
     // pinned property is that normal is SKIPPED, not the distance.
@@ -2314,7 +2390,7 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
 
 
   // It is called from pi's OWN events, unconditionally and first.
-  const settled = windowOf('pi.on("agent_settled"', "\n  });", "agent_settled");
+  const settled = loopSettledWindow("\n  });");
   assert.match(settled, /reportChildState\(ctx\)/);
   assert.match(settled, /drainChildInstructions\(ctx\)/, "and the orchestrator's messages are applied there");
   const turnEnd = windowOf('pi.on("turn_end"', "\n  });", "turn_end");
@@ -2439,7 +2515,7 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
 });
 
 test("round-18: agent_settled HOSTS the judge-child wait — never returns to idle on a child in flight", () => {
-  const settledAt = SRC.indexOf('pi.on("agent_settled"');
+  const settledAt = SRC.indexOf(LOOP_SETTLED);
   assert.ok(settledAt > 0);
   const settled = SRC.slice(settledAt, settledAt + 16000);
   const injectAt = settled.indexOf("pi.sendUserMessage(");
@@ -3467,7 +3543,7 @@ test("SECURITY: the Copilot requirement never touches the SHIP gate (it would de
   assert.match(doneBody, /summary: Type\.String/, "window sanity: this really is declare_done's body");
   assert.doesNotMatch(doneBody, /name: "request_arbitration"/, "…and it stopped at the end of that body");
   assert.match(doneBody, /copilotProblemsFor\(/);
-  const settledStart = SRC.indexOf('pi.on("agent_settled"');
+  const settledStart = SRC.indexOf(LOOP_SETTLED);
   assert.match(SRC.slice(settledStart, settledStart + 5200), /copilotProblemsFor\(/); // +1200 for the settle-wake and judge-pane blocks
 });
 
@@ -3491,7 +3567,7 @@ test("waiting for Copilot spends its OWN continuation budget, not the review loo
   // `+ 11000` had to be re-tuned by every edit inside the settle path, and it
   // fails for a reason that has nothing to do with this rule (the same trap
   // the declare_done window fell into, 2026-09-05).
-  const body = windowOf('pi.on("agent_settled"', /\n  pi\.on\(/, "agent_settled handler");
+  const body = loopSettledWindow(/\n  pi\.on\(/, "agent_settled handler");
   assert.match(body, /unmetRequirements\(/, "window sanity: the settle body really is in this window");
   assert.doesNotMatch(body, /pi\.on\("session_start"/, "…and it stopped at the next handler");
   assert.match(body, /problems\.length > 0 && continuationsInjected >= state\.maxRounds/);
@@ -4637,7 +4713,7 @@ test("R-3: an orchestrator never receives the LOOP's continuation — its criter
   // second run, quoting unmet gates read from the SUPERVISOR's own sidecar —
   // a review and a precommit it will never have. The nudge could never be
   // satisfied, so it would have kept firing to the end of the session.
-  const settled = windowOf('pi.on("agent_settled"', "// L7/L8 — completion-only requirements", "agent_settled");
+  const settled = loopSettledWindow("// L7/L8 — completion-only requirements");
   assert.match(settled, /if \(state\.taskMode === "orchestrator"\) \{\s*\n\s*orchestratorSettled\(ctx\);\s*\n\s*return;/,
     "it branches BEFORE the loop's own unmet-requirement computation");
   const own = windowOf("function orchestratorSettled(", "\n  }", "orchestratorSettled");
@@ -4654,7 +4730,7 @@ test("round-7 P1: a judge pane never receives the LOOP's continuation either", (
   // 8s after its first, and the gate recorded a DRAFT verdict from the first
   // report. A reporting shell has no gates of its own — and since the conclude
   // tool, no settle-time scraping either.
-  const settled = windowOf('pi.on("agent_settled"', "// L7/L8 — completion-only requirements", "agent_settled");
+  const settled = loopSettledWindow("// L7/L8 — completion-only requirements");
   assert.match(settled, /if \(readJudgeSideEnv\(process\.env\)\) return;/,
     "a judge pane returns before the RESUME injection");
   assert.doesNotMatch(settled, /maybeWriteVerdictReport/,

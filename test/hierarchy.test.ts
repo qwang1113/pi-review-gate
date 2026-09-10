@@ -178,9 +178,32 @@ test("a persisted snapshot round-trips through parse", () => {
     version: 1,
     judges: { "rg-reviewer-abc123": entry({ paneId: "%7", lastReportId: "rep-1" }) },
     audit: { kind: "goal", draft: "目标", startedAt: "2026-09-04T00:00:00.000Z" },
+    modelHealth: { "onekey/gpt-6-astra": { at: 1_700_000_000_000, error: "503 auth_unavailable" } },
   };
   const parsed = parseHierarchySnapshot(JSON.stringify(snap));
   assert.deepEqual(parsed, snap);
+});
+
+test("model health travels with the judge registry, and malformed rows are dropped", () => {
+  // The cooldown is what makes an in-round rotation STICK: the next dispatch
+  // must skip the slot that just died (lib/model-health.ts).
+  const parsed = parseHierarchySnapshot(JSON.stringify({
+    version: 1,
+    judges: {},
+    modelHealth: {
+      "onekey/gpt-6-astra": { at: 1, error: "503" },
+      "a/b": { at: 2 },
+      "bad/missing-at": { error: "503" },
+      "bad/not-an-object": "503",
+    },
+  }));
+  assert.deepEqual(parsed?.modelHealth, {
+    "onekey/gpt-6-astra": { at: 1, error: "503" },
+    "a/b": { at: 2 },
+  });
+  // No live row ⇒ the field is absent, never an empty map beside `judges`.
+  const empty = parseHierarchySnapshot(JSON.stringify({ version: 1, judges: {}, modelHealth: { "x/y": {} } }));
+  assert.equal(empty?.modelHealth, undefined);
 });
 
 test("a corrupt snapshot is dropped, never trusted", () => {

@@ -283,6 +283,9 @@ async function doSpawn(
     repoRoot: root, roundSeq: birthSeq,
     title: role,
     sessionDir: launch.sessionDir,
+    // The slot the launch resolver picked — the receipt's answer to "which
+    // model ran this round".
+    modelSpec: launch.model,
     ...(streamPath === undefined ? {} : { streamPath }),
     // The lane this birth belongs to, so the next dispatch can decide from the
     // registry alone whether the transcript keeps going.
@@ -343,6 +346,7 @@ async function doSpawn(
         title: role,
         sessionDir: launch.sessionDir,
         paneId,
+        modelSpec: launch.model,
         ...(deps.tmuxServer() === undefined ? {} : { tmuxServer: deps.tmuxServer()! }),
         ...(streamPath === undefined ? {} : { streamPath }),
         // The SAME lane the id and the dirs above were rendered from — this

@@ -258,7 +258,7 @@ absent, and merges in ONLY the roles missing from an existing file (never
 overwrites a user's own pins). At session start the gate HARD-CHECKS every
 role (reviewer/adviser/arbiter/goal-auditor): a missing entry, an
 empty slot list, or an unresolvable spec STOPS the session with the reason
-(`validateAgentsForStartup`). `modelSpecFor` returns undefined for an
+(`validateAgentsForStartup`). The launch resolver returns an EMPTY chain for an
 unconfigured role and the dispatch fails closed instead of spawning a default.
 
 - `agents.<name>.auto` — `false` uses `slots: [spec, ...]` (`slots[0]` =
@@ -287,10 +287,14 @@ unconfigured role and the dispatch fails closed instead of spawning a default.
 
 **Review protocol (single-review).** The review that ends
 a round is ONE reviewer — by design. There is no second reviewer, no split
-plan. The fallback chain inside the pinned reviewer agent definition exists
-only because the package must resolve wherever a judge-eligible family
-exists; it is NOT a runtime selector and does NOT change the one-reviewer
-rule. A single reviewer is the norm, and no Note is required about it.
+plan. The fallback chain in a judge role's slots IS a runtime selector since
+2026-09-10, and it changes nothing about the one-reviewer rule: the dispatch
+launches the first slot that is not cooling down (`lib/model-health.ts`, 10
+minute TTL, persisted in `.pi/judge-hierarchy.json`), and a pane whose own
+provider fails for a whole run switches to the next slot itself, says so in
+the channel, and carries on — an exhausted chain ENDS the round as a failure
+(`judge_wait` reason `model-exhausted`) instead of hanging. A single reviewer
+is the norm, and no Note is required about it.
 (a) **Goal pre-review — MECHANICALLY ENFORCED.** The draft goal must pass an
 audit by the dedicated `goal-auditor` role before the user is ever asked to
 approve it, and the gate runs that audit itself: `judge_submit({role:

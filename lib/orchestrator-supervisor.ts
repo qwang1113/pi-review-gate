@@ -187,7 +187,7 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
       malformed += read.malformed;
       projection = projectChannel(read.records);
     } catch {
-      projection = { openRequests: [], pendingAnswers: [], pendingInstructs: [] };
+      projection = { openRequests: [], pendingAnswers: [], pendingInstructs: [], modelEvents: [] };
     }
     const paneAlive = input.livePanes === undefined ? undefined : input.livePanes.has(child.paneId);
     const observation = {

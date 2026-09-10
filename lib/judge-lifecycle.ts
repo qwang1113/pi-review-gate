@@ -174,7 +174,7 @@ export interface RoundWaitReply {
 }
 
 /** Reasons that mean the ROUND is over — everything else is a mid-round message. */
-const ROUND_ENDING_REASONS = new Set(["report", "pane-dead"]);
+const ROUND_ENDING_REASONS = new Set(["report", "pane-dead", "model-exhausted"]);
 
 /**
  * Minimum spacing between two calls of the wait — the anti-spin floor.

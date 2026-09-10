@@ -52,8 +52,31 @@ opener 凭它记录结论；
 - **值直接进 argv**（spawn 数组），没有 shell，没有插值面——配置提供的
   model spec / 路径不可能变成 shell 语法。
 - 角色正文从三层解析：repo `agents/` → 包内置 `agents/` →
-  `~/.pi/agent/agents/`。模型：`auto:false` 取 `slots[0]`；`auto:true`
-  取角色 frontmatter 默认。子会话是单模型进程，fallback 链是 subagent 概念。
+  `~/.pi/agent/agents/`。模型：`auto:false` 取 `slots` 整条链；`auto:true`
+  取角色 frontmatter 的 `model:` + `fallbackModels:`。链不是装饰：派发取
+  「第一个不在冷却期内的槽」（`lib/model-health.ts`），跑起来之后模型
+  provider 挂了就由 pane 自己往链上走（`lib/judge-model-rotation.ts`）——
+  详见下方「模型失败与 fallback」。
+
+## 模型失败与 fallback（2026-09-10）
+
+背景（rebate 实测）：`agents.<role>.slots` 写了一条链，派发却只取 `slots[0]`；
+`fallbackModels:` 渲染进了 agent frontmatter，却**没有任何运行时消费者**
+（pi 本体与 pi-subagents 都不认这个 key，judge pane 只收 `--system-prompt`）。
+一个 provider 连续 503 之后，轮次能挂好几个小时，而 opener 卡在工具调用里
+（无回执、无超时），只能由人去 pane 里手动换模型。现在链的两半都真了：
+
+- **派发侧**（`lib/model-health.ts`）：取**第一个不在冷却期内的槽**；
+  冷却记录以 `provider/id` 为键，写进 `.pi/judge-hierarchy.json` 的 `modelHealth`，
+  10 分钟后自愈。全在冷却时仍按链头派发（fail-open）并在会话里警告。
+- **pane 侧**（`lib/judge-model-rotation.ts`）：本轮以模型错误终结（pi 自己
+  的重试已耗尽）时，pane 自己切到链上的下一个槽（模型 + 该槽 thinking），
+  自注入一句「继续本轮」——transcript、任务与已查到的证据全部保留——并把
+  `ModelEvent` 写进通道。链走完时标 `exhausted`：`judge_wait` 以
+  `model-exhausted` **结束本轮**（没有结论、写清原因），而不是无限等。
+- **配置即时生效**：派发前重读 `.pi/review-gate.json` 与 `~/.pi/review-gate.json`
+  的 agents 段，内容变了就重渲染 `.pi/agents/*.md`——磁盘上的链与实际启动的
+  模型不再互相矛盾（重开会话也不再是必须的）。
 
 ## 生命周期与 liveness
 

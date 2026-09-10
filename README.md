@@ -392,7 +392,10 @@ can override any of them per agent:
 
 `thinking` is a single value, not a fallback list; `max` is the highest valid
 pi level (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — pi clamps
-models that lack a level down automatically). Proactively consulting the
+models that lack a level down automatically). The priority list is a real
+fallback chain, not documentation: a role whose first model answers 503 for a
+whole run moves to the next one on its own, and the judge's receipt says which
+model actually ran. Proactively consulting the
 adviser early is cheaper
 than a failed review later, so the extension's per-turn reminder and the
 `review-loop` skill both nudge for it.
@@ -440,13 +443,20 @@ built-in frontmatter default), with an **`auto` switch** per agent:
   SHADOWS a lower layer's slot render — flipping a slot off always lands the
   built-in default, never a leftover lower-priority render. Unconfigured
   agents are cleaned up instead (any stale generated copy is deleted).
-- **`auto: false`** — `slots[0]` becomes the main model, `slots[1..]` the
-  fallback chain. With the reviewer's switch OFF the first usable slot
-  (authenticated + allowed + judge-eligible) is the reviewer's model —
-  your order is the priority. An `auto: false` entry
-  with an EMPTY slot list is never a silent no-review state: it renders the
-  built-in default chain (shadowing any lower layer's slots), with a
+- **`auto: false`** — `slots[0]` is the head, `slots[1..]` the fallback
+  chain, and since 2026-09-10 the chain is **actually consumed at runtime**:
+  the dispatch launches the first slot that is not cooling down
+  (`lib/model-health.ts`; a failed `provider/id` is benched for 10 minutes,
+  then retried), and a judge pane whose provider fails for a whole run
+  switches to the next slot itself, keeps its transcript and says so in the
+  channel (`lib/judge-model-rotation.ts`). If every slot fails, the round
+  **ends as a failure** (`judge_wait` reason `model-exhausted`) — with no
+  verdict and a stated reason — instead of waiting forever. An `auto: false`
+  entry with an EMPTY slot list is never a silent no-review state: it renders
+  the built-in default chain (shadowing any lower layer's slots), with a
   diagnostic at render time so the deployed default is never a surprise.
+  Editing `review-gate.json` mid-session is picked up at the next dispatch:
+  the agents layer is re-read (and re-rendered) before every judge launch.
 - **Per-model thinking levels.** Every slot may carry its own `:thinking`
   suffix (`claude-fable-5:max`, `onekey/gpt-5.6-sol:high`); the renderer keeps
   the suffix on each candidate so the agent runtime applies the requested
