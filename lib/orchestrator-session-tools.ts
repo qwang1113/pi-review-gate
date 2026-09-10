@@ -27,6 +27,7 @@ import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
 
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
+import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
 
 /**
  * The orchestration deps plus ONE thing lib/orchestrator-deps.ts has no reason
@@ -361,6 +362,28 @@ function inheritanceBrief(deps: OrchestratorDeps): string | undefined {
 
 
 
+/**
+ * Forget a worktree that has been dealt with.
+ *
+ * A REPEAT of the same settlement must not re-run it: the second `discard`
+ * would remove a checkout that is already gone and report the failure as
+ * 「没能回收」（round-7 Nit）—— for work that was cleaned up correctly the first
+ * time. Clearing the record is what makes the settlement idempotent.
+ *
+ * The field is REMOVED, not set to `undefined`: the registry sanitizes its
+ * children and deep-equality matters there.
+ */
+function forgetWorktree(runtime: OrchestratorRuntime, childId: string): OrchestratorRuntime {
+  return {
+    ...runtime,
+    children: runtime.children.map((c) => {
+      if (c.id !== childId) return c;
+      const { worktree: _settled, ...rest } = c;
+      return rest as typeof c;
+    }),
+  };
+}
+
 async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const runtime = deps.runtime();
   const childId = String(params.childId ?? "").trim();
@@ -424,6 +447,12 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
     if (!settled) return fail("review-gate: 这个会话没有接上 git 能力，无法结算它的 worktree —— 门禁拒绝在没看清现状时关掉它。");
     if (!settled.ok) return fail("review-gate: " + settled.text);
     settlementNote = "\n" + settled.text;
+    // …and it is FORGOTTEN only when the checkout is actually GONE (round-8
+    // Nit). `keep` leaves it by definition and `merge` leaves it on purpose,
+    // so clearing the record there would STRAND it: no later close could see
+    // a worktree to settle, and the orphan list only reports unfinished
+    // children. `discard` is the one settlement that removes both halves.
+    if (rawSettlement === "discard") deps.saveRuntime(forgetWorktree(deps.runtime(), child.id));
   }
   if (settlementOnly) {
     // Nothing else is owed: the pane is already gone and the registry already

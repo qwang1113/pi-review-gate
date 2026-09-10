@@ -259,6 +259,61 @@ test("…and it RUNS BESIDE the first one when the gate CAN isolate it", async (
   assert.ok(children[1]!.worktree, "and the second one records the checkout it got");
   assert.notEqual(children[1]!.cwd, "/repo", "its cwd is the ISOLATED path, not the shared checkout");
   assert.equal(children[1]!.cwd, children[1]!.worktree!.path);
+  // The spawn reply says WHICH checkout it got — a manager reading "sharing the
+  // main worktree" while the pane works in an isolated one would reason about
+  // the wrong tree.
+  assert.match(replyText(second), /独立 checkout/);
+});
+
+// ---------------------------------------------------------------------------
+// THE SETTLEMENT ACTION (round-8 P1). Only the pure plan was covered; the
+// DECISION — which settlement a manager asked for, and which calls must be
+// REFUSED — had none, so a broken wiring would have shipped unnoticed.
+// ---------------------------------------------------------------------------
+
+test("close settles the checkout the manager asked about, and refuses a value it does not know", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, isolateChild: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const child = world.runtime().children[1]!;
+  assert.ok(child.worktree, "t2 got an isolated checkout");
+
+  // An unknown value is refused BEFORE anything is touched — the parameter is
+  // a decision, and guessing at it would discard somebody's work.
+  const bogus = await world.call("orchestrator_close", { childId: child.id, worktree: "nuke" });
+  assert.equal(bogus.isError, true);
+  assert.match(replyText(bogus), /worktree 参数不认识/);
+  assert.deepEqual(world.settlements, [], "…and nothing was settled");
+
+  const merged = await world.call("orchestrator_close", { childId: child.id, worktree: "merge" });
+  assert.equal(merged.isError, undefined, replyText(merged));
+  assert.deepEqual(world.settlements, [{ childId: child.id, settlement: "merge" }]);
+  // A MERGE KEEPS the checkout (round-6 P2): the merge is only staged, so the
+  // worktree and its branch are the manager's way back from `merge --abort`.
+  assert.ok(world.runtime().children[1]!.worktree, "a staged merge must not delete the only other copy of the work");
+});
+
+test("a CLOSED child's checkout can still be settled — the advice the merge receipt gives is not a dead end", async () => {
+  // Round-7 P1: the merge receipt says "reclaim it later with close({worktree})",
+  // and `closableChild` rejects anything with a `closedAt` — which every child
+  // that has been through a close has. That made the advice unexecutable.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, isolateChild: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const child = world.runtime().children[1]!;
+  assert.equal((await world.call("orchestrator_close", { childId: child.id })).isError, undefined,
+    "close it first — the default `keep` leaves the checkout");
+  assert.ok(world.runtime().children[1]!.closedAt, "…and it is on record as closed");
+
+  const late = await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
+  assert.equal(late.isError, undefined, replyText(late));
+  assert.match(replyText(late), /早已关闭/, "the reply says what this call actually did");
+  assert.deepEqual(world.settlements, [
+    { childId: child.id, settlement: "keep" },
+    { childId: child.id, settlement: "discard" },
+  ], "the first close kept the checkout (the default), the late one discarded it");
+  assert.equal(world.runtime().children[1]!.worktree, undefined,
+    "…and only a settlement that REMOVED the checkout is forgotten");
 });
 
 test("close leaves the window bar up while a REVIEW pane is still on screen", async () => {

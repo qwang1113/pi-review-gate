@@ -147,6 +147,15 @@ export interface FakeWorld {
   /** Every tmux argv the gate ran, in order — the decoration lives in here. */
   tmuxCalls: string[][];
   /**
+   * What each `orchestrator_close({worktree})` asked for, in order.
+   *
+   * The DECISION is the tool's whole contribution: it names `keep` / `merge` /
+   * `discard` and hands the git work down. Recording it here is what makes the
+   * settlement action — and the branches that refuse to take one — testable at
+   * all (round-8 P1: the rule had no behavioural coverage).
+   */
+  settlements: Array<{ childId: string; settlement: string }>;
+  /**
    * What a relay caused, in the order it happened: `release` (phase one of
    * the retirement), `pane-opened` (the successor's boot), `committed` (phase
    * two — this session going silent) or `rolledBack`.
@@ -291,6 +300,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   let planAudits = 0;
   const tmuxCalls: string[][] = [];
   const handoffEvents: string[] = [];
+  /** Worktree settlements this session ran, in order. */
+  const settlements: Array<{ childId: string; settlement: string }> = [];
 
 
   let plan: OrchestratorPlan | undefined = options.plan;
@@ -434,6 +445,13 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
             path: `${repoRoot}-rg-${childId}`,
             branch: `rg-child-${childId}`,
           }),
+          // The settlement ACTION, recorded rather than executed: what the
+          // tool owes the manager is the DECISION it passes down, and the git
+          // sequence itself is lib/orchestrator-worktree.ts's (unit-tested).
+          settleWorktree: (input: { childId: string; settlement: string }) => {
+            settlements.push({ childId: input.childId, settlement: input.settlement });
+            return { ok: true, text: `fake: settled ${input.settlement}` };
+          },
         }
       : {}),
     // The predecessor's OWN id, which the successor carries as its proof of
@@ -591,6 +609,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     planAudits: () => planAudits,
     tmuxCalls,
     handoffEvents,
+    settlements,
 
 
   };

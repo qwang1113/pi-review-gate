@@ -2443,9 +2443,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // PRINTED ON BOTH PATHS (round-6 P1): the discard branch used to drop
       // this note entirely, so a failed reclamation was invisible AND the child
       // was already closed — its worktree could never be settled again.
-      const leftover = reclamation.length > 0
-        ? `\n（⚠️ 回收有报错，checkout 或分支可能还在：${reclamation.join(" / ")}）`
-        : "";
+      //
+      // Only `discard` can produce one at all: a merge has no reclamation step
+      // (the checkout is its own way back from `merge --abort`).
+      const leftover =
+        settlement !== "merge" && reclamation.length > 0
+          ? `\n（⚠️ 回收有报错，checkout 或分支可能还在：${reclamation.join(" / ")}）`
+          : "";
       return {
         ok: true,
         text: (settlement === "merge"
@@ -2454,9 +2458,9 @@ export default function reviewGate(pi: ExtensionAPI) {
             `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
             `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 回收它们 —— ` +
             `那个调用对已关闭的子会话**同样有效**（它只结算 checkout，不再开门）。`
-          : reclamation.length > 0
-            ? `⚠️ ${childId} 的 worktree **没能回收**（子会话已关闭，这是最后的时机）：${reclamation.join(" / ")}\n` +
-              `请人工看一眼 ${childWorktreePath(repoRoot, childId)} 与分支 \`${childWorktreeBranch(childId)}\`。`
+            : reclamation.length > 0
+            ? `⚠️ ${childId} 的 worktree **没能回收**（工作区或分支还留着，请人工看一眼）：${reclamation.join(" / ")}\n` +
+              `路径 ${childWorktreePath(repoRoot, childId)}，分支 \`${childWorktreeBranch(childId)}\`。`
             : `已回收 ${childId} 的 worktree 与分支（丢弃）。`) + (settlement === "merge" ? leftover : ""),
       };
     },
