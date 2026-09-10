@@ -2452,8 +2452,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           ? `已把 ${childId} 的改动合并到当前分支（**已暂存、未提交** —— 看过再 commit）。\n` +
             `它的 worktree 与分支 \`${childWorktreeBranch(childId)}\` **先保留**：这次合并还只是 staged，` +
             `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
-            `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 回收它们。`
-          : `已回收 ${childId} 的 worktree 与分支（丢弃）。`) + leftover,
+            `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 回收它们 —— ` +
+            `那个调用对已关闭的子会话**同样有效**（它只结算 checkout，不再开门）。`
+          : reclamation.length > 0
+            ? `⚠️ ${childId} 的 worktree **没能回收**（子会话已关闭，这是最后的时机）：${reclamation.join(" / ")}\n` +
+              `请人工看一眼 ${childWorktreePath(repoRoot, childId)} 与分支 \`${childWorktreeBranch(childId)}\`。`
+            : `已回收 ${childId} 的 worktree 与分支（丢弃）。`) + (settlement === "merge" ? leftover : ""),
       };
     },
     knownRepoRoots: () => knownRepoRoots(),

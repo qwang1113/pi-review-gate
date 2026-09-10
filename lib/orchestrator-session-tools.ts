@@ -380,8 +380,21 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
   }
 
   const closable = closableChild(runtime, childId);
-  if (!closable.ok) return fail("review-gate: " + closable.reason);
-  const child = closable.child;
+  // A CLOSED CHILD CAN STILL OWE A CHECKOUT (round-7 P1). A merge is staged,
+  // not committed, so it deliberately leaves the worktree in place and the
+  // receipt tells the manager to reclaim it afterwards — and refusing that
+  // call is what made the advice a dead end: `closableChild` rejects anything
+  // with a `closedAt`, which every child that went through this function has.
+  //
+  // So a settlement-only call is allowed for a child that is ALREADY closed:
+  // nothing is killed (there is no pane), nothing is registered, and the
+  // worktree decision is the one thing that was still owed.
+  const known = runtime.children.find((c) => c.id === childId);
+  const settlementOnly =
+    !closable.ok && known !== undefined && known.closedAt !== undefined &&
+    known.worktree !== undefined && params.worktree !== undefined;
+  if (!closable.ok && !settlementOnly) return fail("review-gate: " + closable.reason);
+  const child = closable.ok ? closable.child : known!;
   // THE WORKTREE'S FATE IS THE MANAGER'S CALL, AND IT IS MADE HERE (2026-09-10).
   // A child that ran in its own checkout leaves that checkout behind, and a
   // manager who has to hand-write the merge is a manager the gate failed
@@ -411,6 +424,11 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
     if (!settled) return fail("review-gate: 这个会话没有接上 git 能力，无法结算它的 worktree —— 门禁拒绝在没看清现状时关掉它。");
     if (!settled.ok) return fail("review-gate: " + settled.text);
     settlementNote = "\n" + settled.text;
+  }
+  if (settlementOnly) {
+    // Nothing else is owed: the pane is already gone and the registry already
+    // says so. The caller gets the settlement and no close narrative.
+    return reply(`review-gate: 子会话 ${child.id} 早已关闭 —— 本次只结算它的 worktree。` + settlementNote, { childId: child.id });
   }
   // THE SAME JUDGEMENT THE OTHER THREE CLOSE PATHS MAKE (reviewer P2,
   // 2026-09-05 — "the answer to (c) is: unify them"). This one used to have
