@@ -278,16 +278,6 @@ async function doSpawn(
   // never mistakes a PREVIOUS spawn's failures for this round's news.
   const birth = spawnBirthFacts(deps, caller, judgeId);
   const birthSeq = birth.seq;
-  /**
-   * The model-event cursor this birth starts at.
-   *
-   * NOT just the watermark: `launchConfig` above runs the opener's absorb,
-   * which may have advanced the ENTRY's cursor past it (an event that arrived
-   * between this read and that absorb). Take whichever is higher — an event the
-   * opener already acted on must never be handed over as new, and a replayed
-   * `exhausted` would end this audit's first probe.
-   */
-  const birthModelEventCount = Math.max(birth.modelEventCount, deps.hierarchy()[judgeId]?.lastModelEventCount ?? 0);
   // The two checks that can refuse outright — no tmux, no resolvable model
   // chain — run BEFORE the id is claimed. They used to sit after it and undo
   // it, and the claim in between was the only reason `rollback` had to exist
@@ -300,6 +290,18 @@ async function doSpawn(
   if (!launch.ok) {
     return fail(`review-gate: ${launch.error}`);
   }
+  /**
+   * The model-event cursor this birth starts at.
+   *
+   * NOT just the watermark: `launchConfig` above ran the opener's absorb,
+   * which may have advanced the ENTRY's cursor past the watermark (events that
+   * arrived between the read and that absorb). Take whichever is higher — an
+   * event the opener already acted on must never be handed over as new, and a
+   * replayed `exhausted` would end this audit's first probe. The bias is
+   * deliberate: skipping one unabsorbed event costs a cooldown, replaying one
+   * costs the whole audit.
+   */
+  const birthModelEventCount = Math.max(birth.modelEventCount, deps.hierarchy()[judgeId]?.lastModelEventCount ?? 0);
   // A COMPLETE entry from the first write: this registration used to omit
   // `sessionDir`, and the extension's own dispatch kept that fact in its
   // separate Map instead — which is precisely why `judge_wait` could not find
