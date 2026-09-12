@@ -9529,13 +9529,21 @@ export default function reviewGate(pi: ExtensionAPI) {
     // develop with nobody having asked anything. Say so up front — the
     // checkpoint (and ship) refusal is the hard half, this notice is the
     // soft half.
+    //
+    // SAY WHAT THE REFUSAL IS (2026-09-12). This notice used to promise a
+    // confirmation dialog before committing on a protected branch. There is no
+    // such dialog any more — a protected-branch checkpoint is refused outright
+    // (and a shell `git commit` cannot ask, so it fails closed too). The
+    // notice is the only thing the user reads before hitting that wall, so it
+    // must not describe a door that is not there.
     const startBranch = currentBranch(primaryRepoRoot);
     if (startBranch && isProtectedBranch(startBranch) && ctx.hasUI) {
       showToUser(
         ctx as unknown as ExtensionContext,
-        "───── 当前在受保护分支 ─────",
+        "───────── 当前在受保护分支 ─────────",
         `本会话在 ${startBranch} 上开始。checkpoint 会直接提交到当前分支；` +
-        `在受保护分支上提交前门禁会弹框确认。若这不是你的意图，先切换分支。`,
+        "在受保护分支上 checkpoint 与 `git commit` 都会被**直接拒绝**（不弹确认框）。" +
+        "若这不是你的意图，先切换分支。",
       );
     }
     // USER REQUIREMENT — a session that cannot show a dialog runs in normal

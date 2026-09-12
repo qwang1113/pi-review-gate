@@ -62,7 +62,8 @@ agent：调 set_gate_mode("loop")
 
 - **在当前分支上直接工作**：`setup_workspace` 已退役（2026-09-07），不再有工作分支与
   自动合并。会话开始时工作区有未提交改动**不拦编辑**；checkpoint 直接落在当前分支。
-  唯一保留的护栏：在 main/master/dev/develop 上，会话开始会提示、checkpoint 前会弹确认框。
+  唯一保留的护栏：在 main/master/dev/develop 上，会话开始会提示，checkpoint 与
+  `git commit` 会被**直接拒绝**（不弹确认框）。
 - **precommit 与 review 并行**：lane 在链条最前启动（checkpoint 之前），但门禁**不再等它**
   ——reviewer 判的是不可变 commit range，两者可以同时跑。代价是审核可能花在最终没过 lane 的
   树上，换来的是每轮省下整条 lane 的等待；lane 判 FAIL 时会拒绝给这一轮 READY，并以一条
