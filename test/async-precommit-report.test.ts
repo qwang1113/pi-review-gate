@@ -22,18 +22,23 @@ test("the content on disk unchanged: the notice stays loud and names the round",
   assert.ok(text.includes(DETAIL)); // the run's own output travels verbatim
 });
 
-test("the content moved: downgraded — no current-round verdict, no re-verify instruction", () => {
+test("the content moved: downgraded — no current-round verdict, but still actionable", () => {
   const text = buildAsyncPrecommitReport({
     round: 19, verified: TREE_A, current: TREE_B, verdict: "FAIL", detail: DETAIL,
   });
   assert.match(text, /第 19 轮/);
-  assert.match(text, /它验证的是\*\*那一轮\*\*的内容（d6d29d5a16e1）/);
-  assert.match(text, /工作区已经是 704dcd01e4d3/);
-  assert.match(text, /不是当前这一轮的结论/);
-  // The two claims that turned a stale notice into a contradiction are gone.
-  assert.doesNotMatch(text, /本轮不会产生可 ship 的 READY/);
+  assert.match(text, /那次验证的是 \*\*第 19 轮启动时\*\*那份内容（d6d29d5a16e1）/);
+  assert.match(text, /投递这一刻工作区是（704dcd01e4d3），两者不同/);
+  // The claim that turned a stale notice into a contradiction is gone…
   assert.doesNotMatch(text, /重新 `judge_submit/);
-  // …and the evidence is still there (downgraded, never suppressed).
+  assert.doesNotMatch(text, /这份内容（d6d29d5a16e1）没通过验证/);
+  // …but a difference has TWO causes the tree cannot tell apart, so the
+  // finding is never waved away as "old, ignore it" either.
+  assert.match(text, /别把它当成与己无关/);
+  assert.match(text, /你在这条 lane 跑的时候改的/);
+  assert.match(text, /lane 自己的 lint:fix 改写的/);
+  assert.doesNotMatch(text, /白做工|不必为这条/);
+  // The evidence is still there (downgraded, never suppressed).
   assert.ok(text.includes(DETAIL));
   assert.match(text, /precommit-last\.log 每次运行都覆盖/);
 });

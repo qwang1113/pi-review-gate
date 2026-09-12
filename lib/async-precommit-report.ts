@@ -38,6 +38,15 @@
  * lane whose own content identity could not be read stays loud, which is the
  * fail-closed direction (a false alarm costs a re-run; a missed one costs a
  * verdict).
+ *
+ * AND WHY THE DIFFERENCE IS REPORTED, NOT BLAMED. A difference has TWO causes
+ * and the tree cannot tell them apart: the agent edited while the lane ran, or
+ * the lane itself rewrote files (`scripts/precommit-runner.mjs` runs a repo's
+ * `lint:fix` FIRST precisely because it edits — the OneKeyHQ notification repo
+ * is one of those). Naming only the first would be a lie in the second, so the
+ * downgraded notice states the two ids and names both causes. What it still
+ * fixes is the thing that actually misled: a round label on a verdict that does
+ * not describe the current tree.
  */
 
 /** How much of the runner's own output travels with the notice. */
@@ -98,14 +107,17 @@ export function buildAsyncPrecommitReport(input: AsyncPrecommitReport): string {
   const stale = asyncPrecommitReportIsStale(input);
 
   // The DOWNGRADED form. It keeps every fact the loud one carried — the round,
-  // the content, the run's own output — and drops the two claims that made a
-  // superseded notice dangerous: that this is the current round's verdict, and
-  // that the way forward is to re-run this verification.
+  // the content, the run's own output — and stops the notice from speaking for
+  // the current tree. It does NOT tell the agent to drop it: a difference has
+  // two causes and the tree cannot tell an agent's edit from the lane's own
+  // `lint:fix` rewrite, so the finding stays actionable in both readings.
   const staleLead = [
-    `review-gate: ${label}的后台 full precommit **没过**（${input.verdict}）—— 但它验证的是**那一轮**的内容（${verified}），`,
-    `投递这一刻工作区已经是 ${shortTree(input.current)}，所以这条不描述现在这棵树，也不是当前这一轮的结论：`,
-    "你正在改的那份内容，照常由它自己那一轮的 full precommit 判 —— 为这条去重跑测试或取证是白做工。",
-    "（下面是那次运行的原始输出；.pi/precommit-last.log 每次运行都覆盖，现在指向的很可能是别的运行。）",
+    `review-gate: ${label}的后台 full precommit **没过**（${input.verdict}）—— 那次验证的是 **${label}启动时**那份内容（${verified}），`,
+    `投递这一刻工作区是（${shortTree(input.current)}），两者不同。`,
+    `${label}不会产生可 ship 的 READY 已是既成事实，你手上的内容会由它自己那一轮的 full precommit 重新判。`,
+    "但**别把它当成与己无关**：两份不同可能是你在这条 lane 跑的时候改的，也可能是 lane 自己的 lint:fix 改写的 ——" +
+      "下面那段原始输出说明这次检查报了什么，值得看一眼它在你现在这份内容上还在不在。",
+    "（它指的 .pi/precommit-last.log 每次运行都覆盖，直接点进去可能是别的运行。）",
   ].join("\n");
 
   // The last line of the loud form states WHY it is loud. When a fingerprint
