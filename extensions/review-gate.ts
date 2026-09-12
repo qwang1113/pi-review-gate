@@ -49,6 +49,7 @@
 import {
   existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
   mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync, writeSync,
+  watch as fsWatch, type FSWatcher,
 } from "node:fs";
 import { tmpdir, homedir, hostname } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
@@ -180,6 +181,7 @@ import {
 import {
   acknowledgeInstruct,
   askThroughChannel,
+  bindingPath,
   decideReportedChildState,
   pendingInstructions,
   reportState,
@@ -299,7 +301,16 @@ import {
 // long block (orchestrator_wait / judge_wait) instead of being queued behind it.
 import { notifyUserInput } from "../lib/poll-wait.ts";
 
-import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
+import { formatInheritanceBrief, PREDECESSOR_SESSION_ENV, readInheritance } from "../lib/orchestrator-relay.ts";
+import {
+  childWorktreeBranch,
+  childWorktreePath,
+  createWorktreeArgv,
+  looksLikeAlreadyGone,
+  looksLikeMergeConflict,
+  planSettlement,
+  repoRootOfWorktree,
+} from "../lib/orchestrator-worktree.ts";
 import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
@@ -369,6 +380,7 @@ import {
 } from "../lib/ship-gate-hook.ts";
 import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
+  modelChainFor,
   writeJudgeSpawnFiles,
   JUDGE_ROLES,
 } from "../lib/judge-prompt.ts";
@@ -427,6 +439,7 @@ import {
   adjudicateReviewConclusion,
   fileFindingsFrom,
   normalizeConcludedVerdict,
+  readyLacksVerification,
   type ReviewFinding,
 } from "../lib/review-adjudicate.ts";
 import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
@@ -524,13 +537,27 @@ import {
   applyAgentConfigLayer,
   loadRegistry,
   KNOWN_AGENTS,
+  KNOWN_THINKING_LEVELS,
   projectAgentIdentity,
   frontmatterBlock,
+  parseModelSpec,
   resolvePackageAgentsDir,
   ensureAgentFilesPresent,
   validateAgentsForStartup,
 } from "../lib/model-config.ts";
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
+import {
+  clearModelFailure,
+  describeCoolingSlot,
+  modelKeyOf,
+  pruneModelHealth,
+  recordModelFailure,
+  selectHealthySlot,
+  type ModelEvent,
+  type ModelHealth,
+  type SlotChoice,
+} from "../lib/model-health.ts";
+import { createModelRotation } from "../lib/judge-model-rotation.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
 // The model allowlist is consulted by the diagnosis module, not here.
 // The baseline resolution moved with prepare_review (lib/review-prepare-tools.ts).
@@ -1766,6 +1793,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
     lastReportedChildState = reported;
     lastChildReportAt = now;
+    const settledSince = lastSettledAt !== undefined && toolCallsSinceSettle === 0 ? lastSettledAt : undefined;
     reportState(
       binding,
       reported,
@@ -1777,6 +1805,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         // a `working` child re-reported on a timer keeps its last real-progress
         // time. It only advances on a genuine agent event (see noteChildProgress).
         ...(lastChildProgressAt === undefined ? {} : { lastProgressAt: new Date(lastChildProgressAt).toISOString() }),
+        // …and the STRUCTURAL half: present only while the child's last turn
+        // has ENDED and nothing has run since (user decision, 2026-09-10).
+        // A supervisor may act on `idle` the moment it sees this, without
+        // waiting out the confirmation window.
+        ...(settledSince === undefined ? {} : { settledSince }),
       },
     );
   }
@@ -1786,6 +1819,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** How stale an unchanged state report may get before it is rewritten. */
   const CHILD_STATE_REFRESH_MS = 60_000;
   let childHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * The fast path for incoming instructions: a watch on this child's OWN
+   * channel file (see {@link watchOwnChannel}).
+   */
+  let childChannelWatcher: FSWatcher | undefined;
   /** True while a drain is mid-flight — the re-entrancy guard. */
   let drainingInstructions = false;
   /**
@@ -1816,9 +1854,35 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   let lastChildProgressAt: number | undefined;
   /** Stamp forward progress. Called from the agent-event handlers, not the heartbeat. */
-  function noteChildProgress(): void {
-    if (childBinding()) lastChildProgressAt = Date.now();
+  function noteChildProgress(kind: "tool" | "settled" = "tool"): void {
+    if (!childBinding()) return;
+    lastChildProgressAt = Date.now();
+    if (kind === "settled") {
+      lastSettledAt = new Date(lastChildProgressAt).toISOString();
+      toolCallsSinceSettle = 0;
+      return;
+    }
+    // A tool result (or a turn boundary that may still be followed by more
+    // work) means the child is AT WORK: whatever settle we were holding is no
+    // longer its current state, and the stamp is dropped.
+    toolCallsSinceSettle += 1;
+    lastSettledAt = undefined;
   }
+
+  /**
+   * THE CHILD'S OWN "I STOPPED" EVIDENCE (2026-09-10, user decision).
+   *
+   * `agent_settled` is the one event that says a turn is OVER rather than
+   * paused — pi will not continue on its own — and anything that runs after it
+   * (a tool result, the next turn's boundary) is work RESUMED, which clears
+   * the stamp. The pair is what the supervisor reads as `settledSince`, and it
+   * is why `idle` no longer has to be confirmed by a 120s silence window:
+   * "settled with nothing run since" cannot be true in the middle of a
+   * bash → read → bash investigation, which is exactly the measurement that
+   * window was introduced for (2026-09-04).
+   */
+  let lastSettledAt: string | undefined;
+  let toolCallsSinceSettle = 0;
   /**
    * Background agents this session spawned that have not reported a terminal
    * state yet (lib/background-wait.ts owns the start/end contract). While
@@ -1884,12 +1948,59 @@ export default function reviewGate(pi: ExtensionAPI) {
         reportChildState(live);
       } catch { /* a heartbeat must never break the session it reports on */ }
       void drainChildInstructions(live).catch(() => { /* best effort */ });
+      // Self-heal: the channel file may not have existed when this session
+      // started, and a watcher that could not be installed then can be now.
+      watchOwnChannel(live);
     }, CHILD_HEARTBEAT_MS);
+    watchOwnChannel(ctx);
+  }
+
+  /**
+   * DRAIN ON WRITE, NOT ON THE NEXT TICK (2026-09-10).
+   *
+   * MEASURED (this repo's own channels): an `orchestrator_instruct` reached
+   * its child in p50 4.79s / p90 9.11s, because the ONLY thing that read a
+   * child's channel was the 10s heartbeat — a message written just after a
+   * tick waited almost a whole interval. That latency sits on the one path
+   * the orchestrator uses to talk to its children, and it is pure waiting:
+   * the orchestrator has already written the file by the time this fires.
+   *
+   * THE TICK STAYS, and not out of tradition: a watcher may fail to install
+   * (no channel file yet), may miss (a file REPLACED rather than appended to
+   * leaves the watch on a dead inode), and is not available everywhere. The
+   * 10s tick is what makes every one of those harmless, and the re-entrancy
+   * guard in `drainChildInstructions` what makes a watcher firing beside it
+   * safe. The watcher is the fast path, never the only path.
+   */
+  function watchOwnChannel(ctx: ExtensionContext): void {
+    if (childChannelWatcher) return;
+    const binding = childBinding();
+    if (!binding) return;
+    let path: string;
+    try { path = bindingPath(binding); } catch { return; }
+    try {
+      const watcher = fsWatch(path, () => {
+        void drainChildInstructions(latestCtx ?? ctx).catch(() => { /* best effort */ });
+      });
+      // A watcher must never be the reason the process stays alive, and a
+      // watcher that errors is dropped so the next tick reinstalls it.
+      watcher.unref?.();
+      watcher.on("error", () => { stopChildChannelWatcher(); });
+      childChannelWatcher = watcher;
+    } catch { /* no file yet, or no watch support ⇒ the tick still covers it */ }
+  }
+
+  function stopChildChannelWatcher(): void {
+    if (childChannelWatcher) {
+      try { childChannelWatcher.close(); } catch { /* already gone */ }
+    }
+    childChannelWatcher = undefined;
   }
 
   function stopChildHeartbeat(): void {
     if (childHeartbeatTimer) clearInterval(childHeartbeatTimer);
     childHeartbeatTimer = undefined;
+    stopChildChannelWatcher();
   }
 
   // ---------- ONE gate session per worktree (lib/session-exclusivity.ts) ----------
@@ -1950,10 +2061,18 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the edit gate reads it. Allowed ⇒ this session takes the claim.
    */
   function applySessionExclusivity(ctx?: ExtensionContext): void {
+    // The HEIR of the current holder takes over (2026-09-10): a successor
+    // started by `orchestrator_handoff` runs in this same worktree ON PURPOSE
+    // — that is how one orchestration keeps reaching its children — so
+    // refusing it would kill the very handoff it exists to complete. It says
+    // so by naming the session it replaces, which it carries in its own
+    // environment.
+    const successorOf = (process.env[PREDECESSOR_SESSION_ENV] ?? "").trim() || undefined;
     const verdict = checkSessionExclusivity({
       env: process.env,
       sessionId: state.sessionId,
       existing: readPresence(cwd),
+      ...(successorOf ? { successorOf } : {}),
       repoRoot: cwd,
       now: Date.now(),
     });
@@ -2261,6 +2380,104 @@ export default function reviewGate(pi: ExtensionAPI) {
         return state.sessionId ? `${dir}/${state.sessionId}.jsonl` : undefined;
       } catch { return undefined; }
     },
+    // Handed to a successor as its takeover proof (lib/orchestrator-relay.ts).
+    ownSessionId: () => state.sessionId ?? undefined,
+    // ONE CHECKOUT PER WRITER (2026-09-10): the second child in a repo gets
+    // its own worktree, which is what lets same-repo tasks run side by side
+    // (lib/orchestrator-worktree.ts owns every derivation).
+    createWorktree: (repoRoot, childId) => {
+      const path = childWorktreePath(repoRoot, childId);
+      const branch = childWorktreeBranch(childId);
+      try {
+        execFileSync("git", [...createWorktreeArgv(repoRoot, childId)], { cwd: repoRoot, encoding: "utf8" });
+      } catch (error) {
+        const detail = (error as { stderr?: Buffer | string }).stderr;
+        return {
+          ok: false as const,
+          reason: String(detail ?? (error as Error).message).trim().split("\n").slice(-3).join(" "),
+        };
+      }
+      return { ok: true as const, path, branch };
+    },
+    // SETTLE IT (2026-09-10): the manager names the fate of a finished child's
+    // checkout; the git sequence is lib/orchestrator-worktree.ts's, so the
+    // conflict path is decided there rather than discovered here.
+    settleWorktree: ({ childId, taskId, repoRoot, settlement }) => {
+      const plan = planSettlement(settlement, repoRoot, childId, taskId);
+      if (plan.steps.length === 0) {
+        return { ok: true, text: `worktree 保留在 ${childWorktreePath(repoRoot, childId)}（分支 ${childWorktreeBranch(childId)}）—— 没有动它` };
+      }
+      const run = (argv: readonly string[]): { ok: boolean; output: string } => {
+        try {
+          return { ok: true, output: execFileSync("git", [...argv], { cwd: repoRoot, encoding: "utf8" }).trim() };
+        } catch (error) {
+          // BOTH STREAMS (round-5 P1): git writes the merge-conflict text and
+          // "nothing to commit" to STDOUT and exits non-zero. Reading only
+          // stderr meant neither of those two matches could ever fire — the
+          // planned abort never ran, and a child who left nothing uncommitted
+          // was reported as a failure.
+          const e = error as { stdout?: Buffer | string; stderr?: Buffer | string };
+          const out = [e.stdout, e.stderr].map((v) => (v === undefined ? "" : String(v))).join("");
+          return { ok: false, output: out.trim() || (error as Error).message };
+        }
+      };
+      // Reclamation after a SUCCESSFUL merge is reported, never fatal: the
+      // work is already in the manager's checkout, and failing the whole
+      // settlement over an unclean worktree directory would be lying about
+      // where the work is.
+      const reclamation: string[] = [];
+      for (const step of plan.steps) {
+        const result = run(step);
+        if (result.ok) continue;
+        const sub = step[2];
+        if (sub === "commit" && /nothing to commit|no changes added/i.test(result.output)) continue;
+        if (settlement === "merge" && sub === "merge" && looksLikeMergeConflict(result.output)) {
+          for (const undo of plan.onConflict ?? []) run(undo);
+          return {
+            ok: false,
+            text:
+              `合并 ${childId} 的 worktree 时**冲突** —— 已中止，你的工作区回到合并前的样子。\n` +
+              `它的分支 \`${childWorktreeBranch(childId)}\` 仍在 ${childWorktreePath(repoRoot, childId)}，一行都没丢。` +
+              `需要人工解决：在那边 \`git rebase ${repoRoot}\`（或你习惯的方式）后再 \`orchestrator_close\` 一次。\n\n` +
+              result.output.trim().split("\n").slice(0, 12).join("\n"),
+          };
+        }
+        if (sub === "worktree" || sub === "branch") {
+          // IDEMPOTENT, so a retry can CONVERGE (round-10 P2). The decision is
+          // `looksLikeAlreadyGone` in lib/orchestrator-worktree.ts — pure, and
+          // unit-tested there, because "is this failure actually success" is
+          // exactly the kind of rule that must not be inlined into a closure.
+          if (looksLikeAlreadyGone(result.output)) continue;
+          reclamation.push(result.output.trim().slice(0, 200));
+          continue;
+        }
+        return { ok: false, text: `worktree 结算失败（git ${sub ?? "?"}）：${result.output.trim().slice(0, 600)}` };
+      }
+      // ONLY A DISCARD RUNS RECLAMATION, so only a discard can report a failed
+      // one — the note that used to sit here belonged to a variable this round
+      // deleted. A merge has no removal step at all: the checkout is its own
+      // way back from `merge --abort`.
+      return {
+        ok: true,
+        // The RECLAMATION outcome rides back with the settlement, because the
+        // caller has to know whether the checkout is actually GONE: forgetting
+        // a record whose directory still exists strands it — and a retry is
+        // exactly what a failed removal should leave open (round-9 P2).
+        reclaimed: reclamation.length === 0,
+        text: settlement === "merge"
+          ? `已把 ${childId} 的改动合并到当前分支（**已暂存、未提交** —— 看过再 commit）。\n` +
+            `它的 worktree 与分支 \`${childWorktreeBranch(childId)}\` **先保留**：这次合并还只是 staged，` +
+            `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
+            `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 回收它们 —— ` +
+            `那个调用对已关闭的子会话**同样有效**（它只结算 checkout，不再开门）。`
+          : reclamation.length > 0
+            ? `⚠️ ${childId} 的 worktree **没能回收**（工作区或分支还留着）：${reclamation.join(" / ")}\n` +
+              `路径 ${childWorktreePath(repoRoot, childId)}，分支 \`${childWorktreeBranch(childId)}\`。\n` +
+              `再调一次 \`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 会重试——` +
+              `已经删掉的那一半会被当作已完成，不会重复报错。`
+            : `已回收 ${childId} 的 worktree 与分支（丢弃）。`,
+      };
+    },
     knownRepoRoots: () => knownRepoRoots(),
     // Symmetric re-arm (goal 5): the project manager's work is its
     // orchestration tools — the loop session's work is its edits. The
@@ -2268,10 +2485,37 @@ export default function reviewGate(pi: ExtensionAPI) {
     // and none for the manager is that the manager never edits; here it
     // re-arms itself by managing.
     onToolCall: () => { armLoop(); },
-    // Goal 7 — a handoff is a VOLUNTARY exit. The successor inherits the
-    // orchestration; waking the retired session would put two project
-    // managers on one orchestration.
-    onHandoff: () => { handedOffOrchestration = true; },
+    // RETIRE (goal 7, reworked 2026-09-10 after the rebate handoff failure and
+    // its review round 1).
+    //
+    // A handoff is a VOLUNTARY exit, so every wake-up path has to go quiet —
+    // but going quiet is not enough on its own. The successor arms its gate in
+    // THIS worktree, and the exclusivity guard refuses a second claimant while
+    // our heartbeat is still fresh. MEASURED: the successor was refused with
+    // "这个 worktree 已被另一个会话占用", naming the session that had just
+    // handed the orchestration over, and its pi then exited.
+    //
+    // TWO PHASES, and the split is what makes each half safe:
+    //   1. release the worktree claim — BEFORE the successor's pane opens, or
+    //      its boot races a heartbeat we have not stopped yet;
+    //   2. go silent (the retirement flag plus the two wake-up timers) — AFTER
+    //      the relay record is persisted. `persist()` refuses to write for a
+    //      retired session, so marking earlier would make the successor's own
+    //      registry row memory-only; and a rollback of a silence it never
+    //      entered has nothing to undo.
+    onHandoff: () => {
+      releaseWorktree();
+      return {
+        committed: () => {
+          handedOffOrchestration = true;
+          stopSupervisionTimer();
+          stopRevivalTimer();
+        },
+        rolledBack: () => {
+          if (claimsMainSidecar(process.env)) holdWorktree();
+        },
+      };
+    },
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
   // A manager's window holds BOTH kinds of decorated pane. The session tools
@@ -2566,6 +2810,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     supervisionTimer = setInterval(() => {
       try {
         if (state.taskMode !== "orchestrator") { stopSupervisionTimer(); return; }
+        // RETIRED: this session handed the orchestration to a successor.
+        // Supervision exists to push the plan forward, and pushing it is now
+        // somebody else's job — a wake-up here would put two project managers
+        // on one orchestration (the exact defect the revival path already
+        // guards against at lib/session-revival.ts).
+        if (handedOffOrchestration) { stopSupervisionTimer(); return; }
         if (!ctx.isIdle?.()) return;
         const news = drainSupervisionNews();
         if (news.length === 0) return;
@@ -2621,6 +2871,19 @@ export default function reviewGate(pi: ExtensionAPI) {
    * will never have.
    */
   function orchestratorSettled(ctx: ExtensionContext): void {
+    // RETIRED: this session handed its orchestration to a successor.
+    //
+    // MEASURED (2026-09-10, rebate): without this guard the predecessor was
+    // revived TWO SECONDS after a successful `orchestrator_handoff` —
+    // `agent_settled` fired as its turn ended, `sessionExitProblems()` still
+    // reported the plan's unfinished tasks, and `[ORCHESTRATION_RESUME]` put
+    // it back into `orchestrator_wait` beside the successor it had just
+    // started. Both timers are left unarmed for the same reason: the plan is
+    // no longer this session's to push.
+    //
+    // This is the same judgement `decideRevival` already makes on its own
+    // path (`handedOff: handedOffOrchestration`); this path simply lacked it.
+    if (handedOffOrchestration) return;
     startSupervisionTimer(ctx);
     startRevivalTimer(ctx);
     // USER REQUIREMENT (shared with the loop path): the user aborted this
@@ -2668,6 +2931,15 @@ export default function reviewGate(pi: ExtensionAPI) {
    * decoration, it is the Map's old scope made mechanical.
    */
   let judgeHierarchy: HierarchyTable = emptyHierarchy();
+  /**
+   * WHICH MODEL SLOTS ARE BAD, per repo (lib/model-health.ts).
+   *
+   * Read at every dispatch (the chain head is skipped while it cools down),
+   * written when a judge pane reports that its model failed. Persisted in the
+   * repo's hierarchy snapshot — the same file that already records which
+   * judges exist, and the one file EVERY opener in the repo shares.
+   */
+  const modelHealthByRoot = new Map<string, ModelHealth>();
   /**
    * Who THIS session is for opener checks: the orchestration id when this
    * session manages one, else its own session id. Unknown ⇒ fail-closed.
@@ -2779,7 +3051,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function persistJudgeHierarchy(): void {
     try {
-      const slices = new Map<string, { judges: Record<string, JudgeEntry>; audit?: PendingAudit }>();
+      const slices = new Map<string, { judges: Record<string, JudgeEntry>; audit?: PendingAudit; modelHealth?: ModelHealth }>();
       const slice = (root: string) => {
         let s = slices.get(root);
         if (!s) { s = { judges: {} }; slices.set(root, s); }
@@ -2787,11 +3059,18 @@ export default function reviewGate(pi: ExtensionAPI) {
       };
       for (const [id, e] of Object.entries(judgeHierarchy)) slice(e.repoRoot).judges[id] = e;
       for (const [root, v] of pendingAudits) slice(root).audit = v;
+      // Pruned on the way out, so a dead model id can never be immortal in a file.
+      const now = Date.now();
+      for (const [root, health] of modelHealthByRoot) {
+        const live = pruneModelHealth(health, now);
+        if (Object.keys(live).length === 0) modelHealthByRoot.delete(root);
+        else slice(root).modelHealth = live;
+      }
       for (const root of hierarchyFileRoots) slice(root);
       for (const [root, s] of slices) {
         hierarchyFileRoots.add(root);
         const file = pathJoin(root, ".pi", HIERARCHY_FILENAME);
-        const empty = Object.keys(s.judges).length === 0 && !s.audit;
+        const empty = Object.keys(s.judges).length === 0 && !s.audit && !s.modelHealth;
         if (empty) { try { rmSync(file, { force: true }); } catch { /* best effort */ } continue; }
         try { mkdirSync(pathJoin(root, ".pi"), { recursive: true }); } catch { /* best effort */ }
         writeFileSync(file, JSON.stringify({ version: 1, ...s }), "utf8");
@@ -2815,6 +3094,126 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!judgeHierarchy[id]) judgeHierarchy[id] = e;
     }
     if (!pendingAudits.has(root) && snap.audit) pendingAudits.set(root, snap.audit);
+    // Model health is the one thing that must SURVIVE this session: the next
+    // dispatch (by this opener or the next session) skips a slot that just
+    // failed, which is what makes an in-round rotation stick.
+    if (!modelHealthByRoot.has(root) && snap.modelHealth) modelHealthByRoot.set(root, snap.modelHealth);
+  }
+
+  /** The live (pruned) model health of one repo. */
+  function judgeModelHealth(root: string): ModelHealth {
+    return pruneModelHealth(modelHealthByRoot.get(root) ?? {}, Date.now());
+  }
+
+  /**
+   * Remember that one model slot failed in this repo, and persist it.
+   *
+   * Called when a judge pane reports its own model failure and when the
+   * opener's wait ends a round with an exhausted chain — the two facts that
+   * decide which slot the NEXT round starts on.
+   */
+  function recordJudgeModelFailure(root: string, spec: string, error?: string): void {
+    modelHealthByRoot.set(root, recordModelFailure(modelHealthByRoot.get(root) ?? {}, spec, Date.now(), error));
+    persistJudgeHierarchy();
+  }
+
+  /** One model proved itself again (a rotation moved onto it and it ran). */
+  function clearJudgeModelFailure(root: string, spec: string): void {
+    const next = clearModelFailure(modelHealthByRoot.get(root) ?? {}, spec, Date.now());
+    if (Object.keys(next).length === 0) modelHealthByRoot.delete(root);
+    else modelHealthByRoot.set(root, next);
+    persistJudgeHierarchy();
+  }
+
+  /**
+   * Read what a pane said about its own models and act on it.
+   *
+   * The pane cannot write repo state (judge panes report, they do not
+   * enforce), so the opener is the one that turns its channel records into a
+   * cooldown, a warning and a cursor advance. Called at settle (a round ended)
+   * and at dispatch (a round ended badly and nobody settled it — an exhausted
+   * chain never produces a report).
+   */
+  function absorbJudgeModelEvents(root: string, judgeId: string): void {
+    const entry = judgeHierarchy[judgeId];
+    // NO ENTRY, NO ABSORB (reviewer round 1, 2026-09-10). Without a registry
+    // row there is no cursor, and "read the whole channel" would re-record a
+    // HISTORICAL failure with a fresh timestamp every time this runs — a
+    // cooldown that can never expire. The channel outlives its entries (a close
+    // removes the row, the records stay), so the cursor is the only thing that
+    // says what has already been acted on; the dispatch seeds it at the
+    // channel watermark when it registers a fresh entry.
+    if (!entry) return;
+    let events: readonly ModelEvent[];
+    try {
+      const target = judgeChannelTarget(entry.openerId, judgeId);
+      events = projectChannel(readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records).modelEvents;
+    } catch { return; }
+    const fresh = events.slice(entry.lastModelEventCount ?? 0);
+    if (fresh.length === 0) return;
+    for (const event of fresh) {
+      recordJudgeModelFailure(root, event.spec, event.error);
+      // A successful switch is proof the destination works; keeping an older
+      // failure on record would bench a healthy model for the rest of the TTL.
+      if (event.to) clearJudgeModelFailure(root, event.to);
+    }
+    setHierarchy({ ...judgeHierarchy, [judgeId]: { ...entry, lastModelEventCount: events.length } });
+    const lines = fresh.map((event) => {
+      const why = event.error ? `（${event.error}）` : "";
+      return event.exhausted
+        ? `${modelKeyOf(event.spec)} 失败${why}，链上已无可用槽`
+        : `${modelKeyOf(event.spec)} 失败${why} → 切到 ${event.to ? modelKeyOf(event.to) : "?"}`;
+    });
+    try { latestCtx?.ui.notify(`review-gate: judge 模型 fallback —— ${lines.join("；")}`, "warning"); } catch { /* headless */ }
+  }
+
+  /** What one judge round launches on: the chain, the pick, and why. */
+  type JudgeLaunch =
+    | { ok: true; sysPromptPath: string; spec: string; chain: string[]; choice: SlotChoice }
+    | { ok: false; error: string };
+
+  /**
+   * Resolve what THIS round launches on — read fresh, picked by health.
+   *
+   * THREE THINGS HAPPEN HERE, and they are one function because a dispatch
+   * that did only two of them is exactly the defect this fixes (2026-09-10):
+   *   1. the agents config is re-READ from disk (a session that started before
+   *      the user's edit used to keep launching the old chain for hours);
+   *   2. the model layers are re-rendered when the config changed, so the
+   *      `.pi/agents/*.md` chain on disk matches the model actually launched;
+   *   3. the slot is picked from the WHOLE chain, skipping the ones cooling
+   *      down (lib/model-health.ts), instead of always taking `slots[0]`.
+   */
+  function resolveJudgeLaunch(root: string, role: string, workDir: string, title: string, judgeId: string): JudgeLaunch {
+    const cfg = freshProjectConfig(root);
+    // Rendering writes files; it is idempotent and guarded by the config key,
+    // so the dispatch-time call is a no-op until the config actually changes.
+    if (latestCtx) ensureModelLayersRendered(latestCtx, cfg, root);
+    const { map: agents } = effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject);
+    const files = writeJudgeSpawnFiles({ repoRoot: root, role, agents, workDir, title });
+    if (files.chain.length === 0) {
+      // NO BUILT-IN DEFAULT (user requirement 2026-08-30): a role with no
+      // resolvable chain cannot be dispatched. Fail closed with the reason.
+      return { ok: false, error: `角色 ${role} 没有可派发的模型链（agents 配置缺失或不可解析）——请修复 ~/.pi/review-gate.json 后重试` };
+    }
+    const choice = selectHealthySlot(files.chain, judgeModelHealth(root), Date.now());
+    if (!choice) return { ok: false, error: `角色 ${role} 的模型链为空（不可达）` };
+    announceSlotSkip(role, choice);
+    return { ok: true, sysPromptPath: files.sysPromptPath, spec: choice.spec, chain: files.chain, choice };
+  }
+
+  /**
+   * Say which slots the pick stepped over — a silent skip is the same
+   * blindness as never skipping at all.
+   */
+  function announceSlotSkip(role: string, choice: SlotChoice): void {
+    if (choice.skipped.length === 0) return;
+    const now = Date.now();
+    const skipped = choice.skipped.map((s) => describeCoolingSlot(s, now)).join("、");
+    const head = choice.allCooling
+      ? `review-gate: ${role} 的全部模型槽都在冷却期（${skipped}）——本轮仍按链头 ${modelKeyOf(choice.spec)} 派发，失败会立刻上报。`
+      : `review-gate: ${role} 跳过冷却中的模型槽 ${skipped} → 本轮用 ${modelKeyOf(choice.spec)}。`;
+    try { latestCtx?.ui.notify(head, "warning"); } catch { /* headless */ }
   }
 
   /**
@@ -3130,6 +3529,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     // point of refusing is that these two must not overwrite each other. (The
     // refusal itself is memory-only; saveSidecar strips it as well.)
     if (state.exclusivityRefusal) return;
+    // Nor does a RETIRED orchestrator: it handed the orchestration to a
+    // successor, and the successor now owns this sidecar. The successor is
+    // admitted into this SAME worktree on purpose (one orchestration id, no
+    // child restarted), which is exactly the "two sessions, one sidecar"
+    // situation the exclusivity guard exists to prevent — so the predecessor
+    // is the one that has to stop writing. Without this, a wake-up that
+    // slipped past the retirement guards would rewrite the plan and child
+    // registry the successor is working from.
+    if (handedOffOrchestration) return;
     // P-multi: persist the session's repo set so a same-session resume (or
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
@@ -3250,6 +3658,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   let lastAgentsWidget = "";
 
   let lastLayerNotifyText = "";
+  /**
+   * The agents-layer key of the config the model layers were last rendered
+   * from (null = nothing rendered yet this session). `ensureModelLayersRendered`
+   * is called at session start AND before every judge dispatch, and the
+   * renderer writes unconditionally — this is what keeps the dispatch-time
+   * call a no-op until the config actually changes on disk.
+   */
+  let lastRenderedAgentsKey: string | null = null;
   /** Disk registry merged with the SESSION's runtime registry. The runtime
    *  view is authoritative (built-in anthropic catalogs never reach
    *  models-store.json): validating a
@@ -3290,6 +3706,41 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * The agents-layer key of one config snapshot, for the change guard below.
+   *
+   * Whatever the JSON is, the RENDERED files depend on exactly these values:
+   * the two agents sections and the two corrupt flags (a corrupt layer keeps
+   * the last render instead of sweeping it).
+   */
+  function agentsLayerKey(cfg: ProjectConfig): string {
+    return JSON.stringify([cfg.agentsGlobal ?? null, cfg.agentsProject ?? null, cfg.agentsGlobalCorrupt ?? false, cfg.agentsProjectCorrupt ?? false]);
+  }
+
+  /**
+   * The agents layer AS IT IS ON DISK RIGHT NOW (the dispatch-time read).
+   *
+   * WHY THIS EXISTS (2026-09-10, measured in rebate): `projectConfig` is
+   * loaded ONCE per session start, and the judge dispatch read its model chain
+   * from that in-memory snapshot. A user who edited `~/.pi/review-gate.json`
+   * mid-session kept getting the OLD chain launched — while the judge pane's
+   * own session start re-rendered `.pi/agents/*.md` from the NEW one, so the
+   * file on disk and the model actually running contradicted each other.
+   *
+   * A corrupt layer keeps the snapshot's value (corrupt ≠ absent: treating it
+   * as "unconfigured" would sweep a valid chain back to the built-in default).
+   */
+  function freshProjectConfig(root: string): ProjectConfig {
+    const fresh = loadProjectConfig(root);
+    return {
+      ...fresh,
+      agentsGlobal: fresh.agentsGlobalCorrupt ? projectConfig.agentsGlobal : fresh.agentsGlobal,
+      agentsProject: fresh.agentsProjectCorrupt ? projectConfig.agentsProject : fresh.agentsProject,
+      agentsGlobalCorrupt: fresh.agentsGlobalCorrupt ?? projectConfig.agentsGlobalCorrupt,
+      agentsProjectCorrupt: fresh.agentsProjectCorrupt ?? projectConfig.agentsProjectCorrupt,
+    };
+  }
+
+  /**
    * Re-apply BOTH model-config layers once per session start: global
    * (~/.pi/agent/agents) AND the current repo's project layer
    * (<primaryRepoRoot>/.pi/agents, which outranks global).
@@ -3307,7 +3758,15 @@ export default function reviewGate(pi: ExtensionAPI) {
    * fail-soft (a render failure never blocks a session); a corrupt layer keeps
    * the last good render instead of sweeping it.
    */
-  function ensureModelLayersRendered(ctx: ExtensionContext): void {
+  function ensureModelLayersRendered(ctx: ExtensionContext, cfg: ProjectConfig = projectConfig, root: string = primaryRepoRoot): void {
+    // CHANGE GUARD (2026-09-10): the renderer writes unconditionally, so the
+    // dispatch-time call below must not re-write four agent files per judge
+    // round. The same config renders the same files — one key is enough.
+    // `null` means "nothing rendered yet this session", so the first call
+    // (session start) always renders.
+    const cfgKey = agentsLayerKey(cfg);
+    if (lastRenderedAgentsKey === cfgKey) return;
+    lastRenderedAgentsKey = cfgKey;
     const problems: string[] = [];
     try {
       const packageRoot = pathDirname(fileURLToPath(import.meta.url));
@@ -3336,12 +3795,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       // treating it as "no agents section" would sweep every generated chain
       // back to the upstream default and clobber the last valid render
       // (corrupt ≠ absent for the renderer).
-      if (projectConfig.agentsGlobalCorrupt) {
+      if (cfg.agentsGlobalCorrupt) {
         problems.push("global: ~/.pi/review-gate.json is corrupt or its agents section is invalid — keeping the last rendered model chains (fail-safe)");
       } else {
-        const { map, diagnostics } = effectiveAgentsConfig(projectConfig.agentsGlobal ?? undefined, undefined);
+        const { map, diagnostics } = effectiveAgentsConfig(cfg.agentsGlobal ?? undefined, undefined);
         problems.push(...diagnostics);
-        problems.push(...projectConfig.agentsDiagnostics.filter((d) => d.startsWith("global:")));
+        problems.push(...cfg.agentsDiagnostics.filter((d) => d.startsWith("global:")));
         const res = applyAgentConfigLayer({
           agents: map,
           targetDir: globalAgentsDir,
@@ -3354,17 +3813,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       // Project layer of the CURRENT repo (project outranks global) — same
       // fail-safe: a corrupt project file keeps the last project render.
-      if (projectConfig.agentsProjectCorrupt) {
+      if (cfg.agentsProjectCorrupt) {
         problems.push("project: .pi/review-gate.json is corrupt or its agents section is invalid — keeping the last rendered model chains (fail-safe)");
       } else {
-        const { map, diagnostics } = effectiveAgentsConfig(undefined, projectConfig.agentsProject ?? undefined);
+        const { map, diagnostics } = effectiveAgentsConfig(undefined, cfg.agentsProject ?? undefined);
         problems.push(...diagnostics);
-        problems.push(...projectConfig.agentsDiagnostics.filter((d) => d.startsWith("project:")));
+        problems.push(...cfg.agentsDiagnostics.filter((d) => d.startsWith("project:")));
         // (The cross-layer reviewer-readonly guard retired 2026-08-27 with
         // the follow rule: the readonly dispatch path no longer exists.)
         const res = applyAgentConfigLayer({
           agents: map,
-          targetDir: pathJoin(primaryRepoRoot, ".pi", "agents"),
+          targetDir: pathJoin(root, ".pi", "agents"),
           // Project-layer base is the BUILT-IN default (package agents dir),
           // NEVER the already-rendered global layer — a global auto:false slot
           // render must not leak into a project auto:true shadow (round-7 P1).
@@ -4216,7 +4675,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, ctx) => {
     // E — a completed tool call is forward progress for the child health reading.
-    noteChildProgress();
+    noteChildProgress("tool");
     // Background-agent wait tracking: a launch starts a wait, a terminal
     // report ends one (lib/background-wait.ts). Runs before every return
     // below, like the progress note above it.
@@ -4813,8 +5272,19 @@ export default function reviewGate(pi: ExtensionAPI) {
       // which is why each of them stamps `precommitBypassed` and why the
       // receipt below says so out loud rather than only the first time.
       const precommitBypassed = st.bypass.active;
+      // B1 (2026-09-10): a checkpoint MAY land while its verification is IN
+      // FLIGHT — that is the whole point of running the long lane beside the
+      // chain instead of in front of it. The receipt is the live promise, not
+      // a file: a restarted session has none, and a checkpoint with no live
+      // verification is refused exactly as before (fail-closed). A FAIL that
+      // arrives afterwards withdraws the round's READY (see
+      // `recordReviewVerdict`) and wakes the agent with the reason.
+      const verifyingNow =
+        !precommitBypassed &&
+        inFlightPrecommit?.root === root &&
+        st.precommit.verdict === "NOT_RUN";
 
-      if (!precommitBypassed && st.precommit.verdict !== "PASS") {
+      if (!precommitBypassed && !verifyingNow && st.precommit.verdict !== "PASS") {
         return {
           content: [{
             type: "text",
@@ -4830,7 +5300,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Round-4 P2: dev-flow requires the FULL suite (lint + typecheck +
       // build + test) before a checkpoint and 送审 — a fast-lane PASS would
       // otherwise let a round go to review with the suite never run.
-      if (!precommitBypassed && st.precommit.testScope !== "full") {
+      if (!precommitBypassed && !verifyingNow && st.precommit.testScope !== "full") {
         return {
           content: [{
             type: "text",
@@ -5040,6 +5510,122 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the mechanical checks (precommit receipt, English message, checkpoint
    * marker, baseline..HEAD) all still run exactly once, where they live.
    */
+  /**
+   * THE IN-FLIGHT FULL PRECOMMIT (B1, 2026-09-10).
+   *
+   * The chain used to be strictly serial: 33s of full precommit, THEN freeze,
+   * THEN dispatch — and the agent was blocked for every one of those 33s,
+   * because `judge_submit` does not return until the reviewer is dispatched.
+   * The precommit does not have to come first: the reviewer judges an
+   * IMMUTABLE COMMIT RANGE, so the only thing that must precede the dispatch
+   * is the checkpoint. The long pole starts first and the chain runs beside
+   * it.
+   *
+   * WHAT THE CHECKPOINT GATE ACCEPTS WHILE THIS IS SET: content being verified
+   * RIGHT NOW, by this session, in this repo. The receipt is the PROMISE, not
+   * a file — a restart loses it, and a checkpoint with no live verification is
+   * refused exactly as before (fail-closed).
+   *
+   * WHAT IS NOT WEAKENED: the ship side is untouched. A precommit PASS covers
+   * the TREE it ran on, a READY covers the tree of the commit it judged, and a
+   * round whose content moved while its precommit ran fails to ship on the
+   * REVIEW side — which is exactly where that mismatch is visible.
+   */
+  let inFlightPrecommit: { root: string; settled: Promise<void> } | undefined;
+
+  /**
+   * ONE LANE AT A TIME, AND IT MUST BE THIS ROUND'S (round-4 P2).
+   *
+   * The first version JOINED a running lane: same repo, so "this repo is being
+   * verified" — which is true and also not enough. The running lane is
+   * verifying an EARLIER content, and a PASS it writes when it finishes would
+   * satisfy `readyLacksVerification` for a round whose checkpoint holds
+   * something else. The ship gate's fingerprint match is still the real
+   * backstop there, but this layer's own claim — "a READY without a full-lane
+   * PASS is withheld" — would be false in exactly that sequence.
+   *
+   * So a round that finds a lane already running WAITS for it to finish and
+   * then starts its own. The wait is bounded by one lane (and it only happens
+   * when the agent submitted twice inside a single run of it); what it buys is
+   * that the verdict on record always belongs to the content under review.
+   */
+  async function waitForQuietLane(root: string): Promise<void> {
+    while (inFlightPrecommit?.root === root) {
+      const running = inFlightPrecommit;
+      await running.settled;
+      if (inFlightPrecommit === running) return;
+    }
+  }
+
+  /**
+   * Start the full lane in the BACKGROUND and return immediately.
+   *
+   * ONE PER REPO: a second round submitted while the first is still verifying
+   * would run two full suites side by side, fighting for the same cores and
+   * the same cache file. The second round JOINS the first — that promise is
+   * the same "this repo is being verified right now" receipt either way.
+   */
+  function startPrecommitBeside(root: string, ctx: unknown): Promise<void> {
+    // No joining: the caller waits for a quiet lane first (see
+    // `waitForQuietLane`), so this is always THIS round's verification.
+    //
+    // THIS ROUND'S VERIFICATION HAS NO VERDICT YET, and saying so is what makes
+    // the checkpoint gate's test exact. `inFlightPrecommit` is cleared in a
+    // microtask after the promise settles, so for an instant a FINISHED — and
+    // possibly FAILED — lane still looks in-flight. Resetting the record first
+    // means the gate reads the VERDICT, which the runner writes the moment it
+    // has one: once there is a verdict, the content is no longer pending.
+    //
+    // (A previous round's PASS is discarded by this reset. That is the
+    // fail-closed direction: the only thing it can cost is a re-run.)
+    stateForRepo(root).precommit = {
+      verdict: "NOT_RUN",
+      fingerprint: null,
+      at: new Date().toISOString(),
+      mode: "full",
+    };
+    const settled = (async () => {
+      let verdict = "no verdict";
+      let detail = "";
+      try {
+        const pre = await callTool("run_precommit", { mode: "full", repo: root }, ctx);
+        verdict = String(pre.details?.verdict ?? "no verdict");
+        detail = toolText(pre);
+      } catch (error) {
+        detail = (error as Error).message;
+      }
+      if (verdict !== "PASS") reportAsyncPrecommit(verdict, detail);
+    })();
+    inFlightPrecommit = { root, settled };
+    void settled.finally(() => {
+      if (inFlightPrecommit?.settled === settled) inFlightPrecommit = undefined;
+    });
+    return settled;
+  }
+
+  /**
+   * TELL THE AGENT (B1). The round was dispatched before this verdict existed,
+   * so nothing else will: a silent FAIL would leave a round that looks
+   * dispatched and verified sitting inside a gate that will not ship it. The
+   * channel is a followUp turn — not a UI toast, which scrolls away.
+   */
+  function reportAsyncPrecommit(verdict: string, detail: string): void {
+    const message =
+      `review-gate: 本轮的后台 full precommit **没过**（${verdict}）—— 这轮的内容没通过验证，` +
+      "本轮不会产生可 ship 的 READY。\n" +
+      "修好后重新 `judge_submit({role:\"reviewer\"})`；无需手动再跑 precommit。\n" +
+      "如果它是因为**与本次改动无关的环境问题**失败的，那是用户的决定：让用户 `/gate-bypass <理由>`。\n\n" +
+      detail.slice(0, 4000);
+    try {
+      pi.sendMessage(
+        { customType: "review-gate", content: message, display: true },
+        { triggerTurn: true, deliverAs: "followUp" },
+      );
+    } catch {
+      try { latestCtx?.ui.notify(message.slice(0, 400), "error"); } catch { /* headless */ }
+    }
+  }
+
   async function submitForReview(input: {
     root: string;
     note: string;
@@ -5063,28 +5649,18 @@ export default function reviewGate(pi: ExtensionAPI) {
       input.progress?.step("precommit (被 /gate-bypass 覆盖，跳过)");
       input.progress?.done("BYPASSED");
     } else {
-    input.progress?.step("precommit (full)");
-
-    const pre = await callTool(
-      "run_precommit",
-      { mode: "full", repo: input.root },
-      input.ctx,
-      // The runner's live log is this step's tail: the 92s (median) precommit
-      // is where the chain spends most of its time, so it is where the human
-      // needs to see something moving.
-      input.progress ? (partial) => input.progress?.tail(partial.content.map((c) => c.text).join("\n")) : undefined,
-    );
-    if (pre.details?.verdict !== "PASS") {
-      input.progress?.fail(String(pre.details?.verdict ?? "no verdict"));
-      return {
-        ok: false,
-        text: "review-gate: 本轮未送审 — precommit 没过。\n" + toolText(pre) +
-          "\n修好后重新 judge_submit({role:\"reviewer\"})；无需手动再跑 precommit。" +
-          "\n如果它是因为**与本次改动无关的环境问题**失败的（例如注入的环境变量污染了测试子进程），" +
-          "那是用户的决定：让用户 `/gate-bypass <理由>` —— bypass 会连这条前置一起覆盖，并全程留痕。",
-      };
-    }
-    input.progress?.done("PASS");
+      // START IT, DO NOT AWAIT IT (B1). The freeze and the dispatch below are
+      // quick, and the reviewer does not need this verdict to start judging an
+      // immutable range — so the 33s lane runs BESIDE the chain instead of in
+      // front of it, and the agent gets its turn back. A FAIL arrives as its
+      // own follow-up message (`reportAsyncPrecommit`) and withholds the
+      // round's READY; it can no longer be reported by returning early.
+      //
+      // …EXCEPT when an older lane is still running: then this round waits for
+      // it (round-4 P2 — a joined lane would verify the WRONG content).
+      input.progress?.step("precommit (full，与审查并行)");
+      await waitForQuietLane(input.root);
+      void startPrecommitBeside(input.root, input.ctx);
     }
 
     // 2. Freeze it. The reviewed unit is a commit, and the message says so —
@@ -5567,6 +6143,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The lookup IS that derivation: the registry is keyed by judge id, so
     // "same role, same session id in this repo" needs no scan of a second table.
     const existing = judgeHierarchy[judgeId];
+    // FIRST, before the entry below is replaced: what the pane said about its
+    // own model belongs to THIS decision (an exhausted chain never settles, so
+    // a dispatch is the only reader such events ever get), and the cursor they
+    // must be read against lives on the entry that is about to be rewritten.
+    absorbJudgeModelEvents(root, judgeId);
 
     // THE LANE BOOKKEEPING every registration below writes, so the next
     // dispatch can make the same decision from the registry alone.
@@ -5620,10 +6201,26 @@ export default function reviewGate(pi: ExtensionAPI) {
       const keptFindings = existing.streamPath === opts.streamPath
         ? existing.lastFindingCount
         : undefined;
+      // `existing` was captured BEFORE this dispatch's absorb (which runs above,
+      // on entry) — so its cursors can be one step behind the table. Reading the
+      // entry again here is what keeps the absorb's cursor advance from being
+      // rolled back by this registration (P1, reviewer round 2): a rolled-back
+      // cursor hands the SAME events to the next round, and re-recording them
+      // with `Date.now()` makes the cooldown永不过期.
+      const live = judgeHierarchy[judgeId] ?? existing;
       const reg = registerJudge(judgeHierarchy, {
         judgeId, openerId: opener, role, repoRoot: root, title, sessionDir,
         paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
         ...(tmuxServer === undefined ? {} : { tmuxServer }),
+        // The pane's model does not change because a new round was queued into
+        // it — the entry keeps saying what the RUNNING pane was launched on.
+        ...(live.modelSpec === undefined ? {} : { modelSpec: live.modelSpec }),
+        // The MODEL-EVENT cursor survives for the same reason the report cursor
+        // does: the channel is append-only across rounds, so a reset cursor
+        // would hand this round the PREVIOUS round's events — and a stale
+        // `exhausted` one would end a perfectly healthy round on its first
+        // probe (the audit chains end with it too).
+        ...(live.lastModelEventCount === undefined ? {} : { lastModelEventCount: live.lastModelEventCount }),
         ...(keptCursor === undefined ? {} : { lastReportId: keptCursor }),
         ...(keptFindings === undefined ? {} : { lastFindingCount: keptFindings }),
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
@@ -5662,21 +6259,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       return { ok: false, reused: continuesSession, sessionId, sessionDir, error: "当前会话不在 tmux 里，开不出 review pane——在 tmux 中重开本会话后重试；门禁不会退回旧的进程壳子。" };
     }
     try {
-      const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-      const files = writeJudgeSpawnFiles({ repoRoot: root, role, agents, workDir, title });
-      if (!files.model) {
-        // NO BUILT-IN DEFAULT (user requirement 2026-08-30): a role with no
-        // resolvable chain cannot be dispatched. Fail closed with the reason
-        // (the startup hard check surfaces it too, but a runtime config
-        // change after start must not silently spawn a default model).
-        return {
-          ok: false,
-          reused: continuesSession,
-          sessionId,
-          sessionDir,
-          error: `角色 ${role} 没有可派发的模型链（agents 配置缺失或不可解析）——请修复 ~/.pi/review-gate.json 后重试`,
-        };
+      const launch = resolveJudgeLaunch(root, role, workDir, title, judgeId);
+      if (!launch.ok) {
+        return { ok: false, reused: continuesSession, sessionId, sessionDir, error: launch.error };
       }
+      const files = { sysPromptPath: launch.sysPromptPath, model: launch.spec };
       // "Reused" is a fact about the SESSION, not about the pane: the
       // transcript decided it above, before this round could add to it.
       mkdirSync(sessionDir, { recursive: true });
@@ -5691,9 +6278,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       const freshTarget = judgeChannelTarget(opener, judgeId);
       const judgeChannelPath = channelPathFor(freshTarget.orchestrationId, freshTarget.childId, freshTarget.home);
       let freshCursor: string | undefined;
+      let freshModelEventCount: number | undefined;
       try {
-        freshCursor = projectChannel(readChannel(channelIO, judgeChannelPath).records).lastReport?.reportId;
-      } catch { freshCursor = undefined; }
+        const freshProjection = projectChannel(readChannel(channelIO, judgeChannelPath).records);
+        freshCursor = freshProjection.lastReport?.reportId;
+        // The SAME watermark rule for the model events: the channel is
+        // append-only, so a fresh entry that started at zero would replay every
+        // old failure — including an `exhausted` event that would end this
+        // round's very first probe.
+        freshModelEventCount = freshProjection.modelEvents.length;
+      } catch { freshCursor = undefined; freshModelEventCount = undefined; }
       // A judge's channel OUTLIVES its panes, so only a record ABOVE this
       // watermark proves that the pane opened below actually came up.
       const baselineRecords = channelRecordCount(channelIO, judgeChannelPath);
@@ -5730,6 +6324,11 @@ export default function reviewGate(pi: ExtensionAPI) {
             paneId, roundSeq: nextJudgeRound(opener, judgeId),
             ...(tmuxServer === undefined ? {} : { tmuxServer }),
             ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
+            ...(freshModelEventCount === undefined ? {} : { lastModelEventCount: freshModelEventCount }),
+            // Which model this pane was launched on — the round's receipt says
+            // who actually ran it (the pane may rotate later; that reports
+            // itself through the channel).
+            modelSpec: launch.spec,
             // Same rule as the reuse path: a re-run over the SAME stream file keeps
             // its finding cursor, so nothing already shown is shown again.
             ...(judgeHierarchy[judgeId]?.streamPath === opts.streamPath
@@ -5846,6 +6445,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       const entry = judgeHierarchy[sessionId];
       if (!entry?.role) return undefined;
       const childRoot = entry.repoRoot || primaryRepoRoot;
+      // The pane's own model report is a fact about the round that is ending
+      // here: cool the bad slot down, warn, advance the cursor. This sweep (a
+      // session that was NOT blocked in a wait) is a second settle entry point
+      // and must read it the same way the wait does — the absorb is idempotent.
+      absorbJudgeModelEvents(childRoot, sessionId);
       const settled = await settleAuditRound(auditRoundDeps(ctx), { judgeId: sessionId, root: childRoot });
       switch (settled.status) {
         case "recorded":
@@ -5927,6 +6531,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           notices.push(buildStandardReport({
             role: entry.role,
             judgeId,
+            ...(entry.modelSpec === undefined ? {} : { modelSpec: entry.modelSpec }),
             openQuestions: [{ title: q.title, options: q.options, requestId: q.requestId }],
             ...(obs.notThisRound === undefined ? {} : { notThisRound: obs.notThisRound }),
           }));
@@ -5939,6 +6544,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       notices.push(buildStandardReport({
         role: entry.role,
         judgeId,
+        ...(entry.modelSpec === undefined ? {} : { modelSpec: entry.modelSpec }),
         verdict: obs.verdict,
         findingsCount: obs.findingsCount,
         conclusionExcerpt: entry.role === "adviser" ? conclusion.text : undefined,
@@ -6542,6 +7148,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
         sessionDir: c.sessionDir,
         ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
+        // Which model this pane was launched on: the receipt's answer to "who
+        // actually ran this round" (a rotation mid-round reports itself).
+        ...(c.modelSpec === undefined ? {} : { modelSpec: c.modelSpec }),
       };
     },
     findChild: (root, role, judgeId) => {
@@ -6558,6 +7167,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
         sessionDir: c.sessionDir,
         ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
+        ...(c.modelSpec === undefined ? {} : { modelSpec: c.modelSpec }),
       };
     },
     channelIO: () => channelIO,
@@ -6599,6 +7209,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The wait closes its round through the SAME engine the settle path uses,
     // so a report cannot be recorded twice (one cursor, written in one place).
     settleRound: async (judgeId, root) => {
+      // Before the verdict is read: whatever the pane reported about its own
+      // model is a fact about this round (lib/judge-model-rotation.ts). The
+      // wait path reaches it through `absorbModelEvents` before moving its
+      // cursor; this covers the settle SWEEP, which no wait drives.
+      absorbJudgeModelEvents(root, judgeId);
       const settled = await settleAuditRound(auditRoundDeps(undefined), { judgeId, root });
       switch (settled.status) {
         case "recorded":
@@ -6621,12 +7236,103 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
     dropPendingAudit: (root) => dropAudits(root),
     cancelWaitTimer: () => cancelChildWaitTimer(),
+    // The wait's side of the model events: the opener acts on them BEFORE its
+    // cursor moves past them, so nothing the pane reported is ever dropped.
+    absorbModelEvents: (root, judgeId) => absorbJudgeModelEvents(root, judgeId),
   };
   registerJudgeSessionTools(internalHost, judgeSessionDeps);
   // The SAME implementation on the agent surface — one waiting tool, two
   // hosts. A second registration is not a second implementation: both
   // executes close over `judgeSessionDeps`.
   registerJudgeWaitTool(pi, judgeSessionDeps);
+
+  /**
+   * THE PANE'S OWN MODEL SELF-HEAL (2026-09-10).
+   *
+   * The judge side is the ONLY party that sees this session's provider errors:
+   * the opener is parked in a wait, and the channel carries verdicts, not
+   * stack traces. So the pane watches its own runs and, when one ends with
+   * `stopReason: "error"` AND pi has nothing left to retry (`agent_settled`),
+   * it walks the role's chain (lib/judge-model-rotation.ts): switch model,
+   * nudge itself to carry on, and REPORT the event so the opener can cool the
+   * failed slot down.
+   *
+   * Why `agent_settled` and not the first failed request: a burst of 503s that
+   * recovers 30 seconds later is the normal shape of a busy provider
+   * (measured), and rotating on it would move every round to the backup for no
+   * reason. The terminal condition is "pi gave up", which is exactly what
+   * `agent_settled` with a failed last message means.
+   */
+  function installJudgeModelRotation(role: string): void {
+    /** The last run's terminal error, cleared by any run that ended cleanly. */
+    let lastRunError: string | undefined;
+    const rotation = createModelRotation({
+      chain: () => {
+        const cfg = freshProjectConfig(cwd);
+        const { map } = effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject);
+        return modelChainFor(map, role, cwd);
+      },
+      currentSpec: () => {
+        const model = latestCtx?.model as { provider?: string; id?: string } | undefined;
+        return model?.provider && model.id ? `${model.provider}/${model.id}` : undefined;
+      },
+      switchTo: async (spec) => {
+        const parsed = parseModelSpec(spec);
+        if (!parsed.provider || !parsed.id || !latestCtx) return false;
+        try {
+          const model = latestCtx.modelRegistry.find(parsed.provider, parsed.id);
+          if (!model) return false;
+          if (!(await pi.setModel(model))) return false;
+          // The slot's own level, applied AFTER the switch (setModel resets it
+          // to the new model's default). A level the model cannot take is not
+          // a reason to abandon a working model — pi clamps it, and an unknown
+          // suffix is dropped here rather than passed on as a lie.
+          if (parsed.thinking && KNOWN_THINKING_LEVELS.has(parsed.thinking)) {
+            pi.setThinkingLevel(parsed.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
+          }
+          return true;
+        } catch { return false; }
+      },
+      nudge: (text) => {
+        try {
+          // The same idiom the thinking-loop notice uses: idle ⇒ a plain user
+          // message (this IS the next turn); anything still streaming ⇒ steer,
+          // so the notice rides that run instead of being rejected.
+          if (latestCtx?.isIdle()) pi.sendUserMessage(text);
+          else pi.sendUserMessage(text, { deliverAs: "steer" });
+        } catch { /* the report still went out */ }
+      },
+      report: (event) => {
+        const binding = childBinding();
+        // The state tells the truth about what happens NEXT: a rotation means
+        // the round goes on (working), an exhausted chain means it stopped.
+        if (binding) reportState(binding, event.exhausted ? "idle" : "working", { modelEvent: event });
+      },
+      notify: (text, level) => {
+        try { latestCtx?.ui.notify(text, level); } catch { /* headless */ }
+      },
+    });
+    pi.on("agent_end", (event) => {
+      const messages = (event as { messages?: Array<{ role?: string; stopReason?: string; errorMessage?: string }> }).messages ?? [];
+      let error: string | undefined;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i]!;
+        if (message.role !== "assistant") continue;
+        error = message.stopReason === "error" ? (message.errorMessage ?? "model error") : undefined;
+        break;
+      }
+      lastRunError = error;
+    });
+    pi.on("agent_settled", async () => {
+      const error = lastRunError;
+      lastRunError = undefined;
+      if (error === undefined) return;
+      const event = await rotation.onModelFailure(error);
+      // A rotation that FAILED to switch (no auth, unknown id) is still a fact
+      // the opener must not be blind to — the attempt list is in the event.
+      if (event) log(`model fallback: ${event.spec} failed (${event.error ?? "error"}) → ${event.to ?? "chain exhausted"}`);
+    });
+  }
 
   // judge_conclude is the ONLY tool that exists on one side only: a judge
   // concludes its own round through it, and the main session must never see
@@ -6670,6 +7376,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         if (usedPass) inspectionPass = undefined;
       },
     });
+    // The pane watches its OWN model: the opener cannot (it is parked in a
+    // wait) and no other surface sees this process's provider errors.
+    installJudgeModelRotation(readJudgeSideEnv(process.env)!.role);
   }
   registerJudgeSpawnTools(pi, {
     callerId: () => callerIdentity(),
@@ -6699,15 +7408,22 @@ export default function reviewGate(pi: ExtensionAPI) {
       };
     },
     launchConfig: (root, role, opener, lane) => {
-      const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
       const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener, lane));
-      const files = writeJudgeSpawnFiles({ repoRoot: root, role, agents, workDir, title: role });
-      if (!files.model) {
-        return { ok: false, error: `角色 ${role} 没有可派发的模型链——请修复 ~/.pi/review-gate.json 后重试` };
+      // ONE launch resolver for both dispatch surfaces (judge_spawn here,
+      // judge_submit's chain in dispatchJudgeRound): re-read the config, pick
+      // the first slot that is not cooling down.
+      const judgeId = judgeSessionIdFor(role, shortRepoHash(root), opener, lane);
+      // Same reason as `dispatchJudgeRound`: the events this pane reported last
+      // round must be acted on (and their cursor advanced) before
+      // `registerJudge` replaces the entry that carries the cursor.
+      absorbJudgeModelEvents(root, judgeId);
+      const launch = resolveJudgeLaunch(root, role, workDir, role, judgeId);
+      if (!launch.ok) {
+        return { ok: false, error: launch.error };
       }
       const sessionDir = pathJoin(workDir, "sessions");
       try { mkdirSync(sessionDir, { recursive: true }); } catch { /* best effort */ }
-      return { ok: true, model: files.model, sysPromptPath: files.sysPromptPath, sessionDir };
+      return { ok: true, model: launch.spec, sysPromptPath: launch.sysPromptPath, sessionDir };
     },
     buildGoalAuditTask: async (draft, root, ctx) => {
       // The third caller of the ONE assembler (the other two are the audit
@@ -6811,9 +7527,53 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
       },
       revParse: (root, rev) => execFileSync("git", ["rev-parse", rev], { cwd: root, encoding: "utf8" }).trim(),
+      // The FALLBACK read, and it carries the same two flags as the numstat
+      // probe so the two can never disagree about which files moved: without
+      // `--no-renames` name-only reports a rename as the NEW path alone (the
+      // numstat path reports both halves of it), and without
+      // `core.quotePath=false` a non-ASCII path comes back as an escaped C
+      // string no shell would resolve.
       changedFilesInRange: (root, baseline, head) =>
-        execFileSync("git", ["diff", "--name-only", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
-          .trim().split("\n").filter(Boolean),
+        execFileSync(
+          "git",
+          ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", `${baseline}..${head}`],
+          { cwd: root, encoding: "utf8" },
+        ).trim().split("\n").filter(Boolean),
+      // The reviewer's read plan is built from this (lib/parallel-review.ts's
+      // formatChangeIndex): one call gives both the file list and the sizes.
+      //
+      // TWO FLAGS THAT ARE SECURITY, NOT TASTE (round-2 P1):
+      //
+      //  - `--no-renames`. Rename detection is ON by default, and numstat then
+      //    prints a renamed file as the pseudo-path `old => new` — which the
+      //    reviewer is told to paste into a shell, where `>` is a REDIRECT.
+      //    With detection off the rename reads as a delete plus an add: two
+      //    real paths, and the information is not lost.
+      //  - `core.quotePath=false`, so a non-ASCII path is emitted as the bytes
+      //    git will accept back rather than as an escaped C string (`"\303\251"`)
+      //    that no shell would resolve. Paths are still quoted at the point
+      //    the command is rendered (formatChangeIndex's shellQuotePath),
+      //    because spaces and metacharacters remain possible.
+      //
+      // Binary files report `-` for both counts — git's way of saying "no line
+      // counts", which reads as 0 here so a binary file still appears in the
+      // index (a missing row would drop it from the plan entirely).
+      numstatInRange: (root, baseline, head) =>
+        execFileSync(
+          "git",
+          ["-c", "core.quotePath=false", "diff", "--numstat", "--no-renames", `${baseline}..${head}`],
+          { cwd: root, encoding: "utf8" },
+        )
+          .trim().split("\n").filter(Boolean)
+          .map((line) => {
+            const [added, deleted, ...rest] = line.split("\t");
+            return {
+              file: rest.join("\t"),
+              added: added === "-" ? 0 : Number(added) || 0,
+              deleted: deleted === "-" ? 0 : Number(deleted) || 0,
+            };
+          })
+          .filter((row) => row.file !== ""),
       worktreeClean: (root) =>
         execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }).trim() === "",
     },
@@ -6922,6 +7682,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     //    squash preserves it). Tighten-only — this can withhold a READY,
     //    never grant one.
     let staleTarget = false;
+    // THE VERIFICATION BINDING (B1, 2026-09-10). The checkpoint gate accepts
+    // content whose full lane is STILL RUNNING (that is what makes the lane run
+    // beside the chain instead of in front of it), so this is the place that
+    // refuses a READY on content which never passed it. Without it a round
+    // dispatched beside a failing suite would record a verdict nothing can
+    // ship, and it would LOOK verified while it was not. Tighten-only, exactly
+    // like the stale check above — and it reads the sidecar, so a session that
+    // restarted mid-round is judged by what was actually written down.
+    let unverified = false;
     if (parsed.verdict === "READY") {
       const target_ = reviewTargets.get(targetRoot);
       if (!target_) {
@@ -6932,7 +7701,14 @@ export default function reviewGate(pi: ExtensionAPI) {
           staleTarget = headNow !== target_.head;
         } catch { staleTarget = true; }
       }
-      if (staleTarget) parsed.verdict = "BLOCKED";
+      if (
+        !staleTarget &&
+        readyLacksVerification({ precommitVerdict: st.precommit.verdict, bypassActive: st.bypass.active })
+      ) {
+        unverified = true;
+        parsed.verdict = "BLOCKED";
+      }
+      if (staleTarget || unverified) parsed.verdict = "BLOCKED";
     }
     // THE cwd CHECK (round-9 P1, reviewer-reproduced). The schema and the
     // task text have always demanded a real `pwd` and said the gate checks
@@ -7096,6 +7872,14 @@ export default function reviewGate(pi: ExtensionAPI) {
           "in place and is recorded as BLOCKED. This is the expected outcome of fixing while the " +
           "review runs: those fixes are already in, so the next round is short. Re-review the " +
           "current head with ONE call: judge_submit({role:\"reviewer\", task:<what you changed>})."
+        : "") +
+      (unverified
+        ? "\nUNVERIFIED: the READY lands on content that has no full-lane precommit PASS — the round " +
+          "was dispatched while its verification was still running (that is how the lane runs beside the " +
+          "review instead of blocking it), and that verification did not pass. The verdict is recorded " +
+          "as BLOCKED: nothing here is shippable. Fix what precommit reported and submit the round again; " +
+          "if it failed for an environment reason unrelated to this change, that is the user's call — " +
+          "`/gate-bypass <reason>` covers it and leaves a trace."
         : "") +
       (cwdMismatch
         ? `\nCWD CHECK FAILED: ${cwdMismatch}. The conclusion requires the judge's own \`pwd\`, ` +
@@ -8311,31 +9095,49 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- L2: auto-continuation ----------
 
   pi.on("agent_settled", async (_event, ctx) => {
-    // SUPERVISION, first thing and unconditionally: report what this session
-    // is doing and apply whatever the orchestrator has sent. It runs before
-    // every early return below because a child that is paused, bypassed or in
-    // explore mode still has a supervisor waiting to hear from it — silence
-    // is exactly the failure this replaced (a finished child classified
-    // `working` for 725 seconds, R3-5).
-    noteChildProgress(); // E — a settled turn is forward progress.
+    // A SETTLE IS NOT A STOP UNTIL THE GATE IS DONE WITH IT (round-3 P1).
+    //
+    // MEASURED failure: the "I stopped" proof used to be published right here,
+    // at the top — and this handler may inject the NEXT TURN ITSELF, a few
+    // lines below. A loop child that was about to be resumed therefore
+    // published a structurally-proven `idle` first, and (since the proof is
+    // believed instantly, that being the whole point of it) a supervisor could
+    // act on a stop that never happened.
+    //
+    // So the proof is published by the EXITS THAT MEAN IT: the early returns
+    // that decide NOT to continue, and the end of the handler. Every exit that
+    // hands the session more work either says nothing (it never set the stamp)
+    // or withdraws the stamp it already had.
+    // The CLEAR direction comes first: nothing below may inherit a previous
+    // settle's stamp, and this report therefore carries none.
+    noteChildProgress("tool");
     reportChildState(ctx);
+    const confirmStop = (): void => {
+      noteChildProgress("settled");
+      reportChildState(ctx, undefined, { force: true });
+    };
     await drainChildInstructions(ctx);
     // Judge panes conclude through judge_conclude (their own round-ending tool) —
     // there is no settle-time verdict scraping, so nothing to do here.
     // Finished rounds wake in every mode except normal (gate fully off): explore
     // is advisory on enforcement, not deaf — its reports still land and record.
-    if (state.taskMode !== "normal" && (await settleFinishedRounds(ctx))) return;
+    if (state.taskMode !== "normal" && !handedOffOrchestration && (await settleFinishedRounds(ctx))) {
+      // …and this exit may have handed the session a round's report, so it is
+      // NOT a stop: nothing is published here (see `confirmStop`).
+      return;
+    }
     // Explore and normal never auto-continue — that is their defining
     // difference from loop. This check MUST stay before the loopArmed check:
     // explore/normal-mode edits set loopArmed = true in tool_result, and only
     // this early return keeps the continuation loop off.
-    if (state.taskMode === "explore" || state.taskMode === "normal") return;
+    if (state.taskMode === "explore" || state.taskMode === "normal") { confirmStop(); return; }
     // Paused for a user question (ask_user): defense-in-depth —
     // loopArmed is in-memory and resets on restart, but the persisted pause
     // must keep auto-continuation off until the user actually replies.
-    if (state.pausedQuestion) return;
-    if (!loopArmed) return;
-    if (state.bypass.active) return;
+    if (state.pausedQuestion) { confirmStop(); return; }
+    if (!loopArmed) { confirmStop(); return; }
+    if (state.bypass.active) { confirmStop(); return; }
+    // NOT a stop: the agent is still working, so no proof is published here.
     if (!ctx.isIdle()) return;
 
     // R-3 — AN ORCHESTRATOR IS NOT IN THE LOOP, and the loop's nudge is not
@@ -8403,7 +9205,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       completion.length === 1 &&
       completion[0] === LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK;
 
-    if (problems.length === 0 && completion.length === 0) return;
+    // THE ORDINARY STOP, and round-4 P1 caught it missing: every gate is
+    // satisfied, so this handler will nudge nobody again. An orchestration
+    // child in loop mode reaches THIS exit on nearly every normal stop — the
+    // four exits that used to publish the proof are the rare ones (explore,
+    // a pause, a disarmed loop, a bypass).
+    if (problems.length === 0 && completion.length === 0) { confirmStop(); return; }
     // Budgets are checked per source: gate problems against maxRounds,
     // completion-only continuations against their own cap.
 
@@ -8420,6 +9227,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         );
       } catch { /* headless */ }
       updateWidget(ctx);
+      confirmStop();
       return;
     }
 
@@ -8508,8 +9316,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // may already be dead or silent even when the continuation cap is reached;
     // the main session must still inspect its output and recover instead of
     // returning to idle before the independent termination判据 run.
-    if (problems.length > 0 && continuationsInjected >= state.maxRounds) return;
-    if (problems.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP) return;
+    if (problems.length > 0 && continuationsInjected >= state.maxRounds) { confirmStop(); return; }
+    if (problems.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP) { confirmStop(); return; }
 
     // L2 circuit breaker: an unmet gate justifies another turn only while
     // something is still MOVING. When the fingerprint, both verdicts, the round
@@ -8554,6 +9362,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         try { ctx.ui.notify(buildStallNotice(stall.repeats), "warning"); } catch { /* headless */ }
       }
       updateWidget(ctx);
+      confirmStop();
       return;
     }
     stallNoticeShown = false;

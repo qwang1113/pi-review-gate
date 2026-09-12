@@ -54,6 +54,7 @@ import {
 import type { SupervisionMemory } from "../../lib/orchestrator-supervisor.ts";
 import type { TaskMode } from "../../lib/task-mode.ts";
 import { STATE_VARIANT_ENV } from "../../lib/gate-state.ts";
+import { PREDECESSOR_PANE_ENV } from "../../lib/orchestrator-relay.ts";
 
 /** Fixed clock so ids and timestamps are reproducible. */
 export const NOW = 1_700_000_000_000;
@@ -145,6 +146,26 @@ export interface FakeWorld {
   planAudits: () => number;
   /** Every tmux argv the gate ran, in order — the decoration lives in here. */
   tmuxCalls: string[][];
+  /**
+   * What each `orchestrator_close({worktree})` asked for, in order.
+   *
+   * The DECISION is the tool's whole contribution: it names `keep` / `merge` /
+   * `discard` and hands the git work down. Recording it here is what makes the
+   * settlement action — and the branches that refuse to take one — testable at
+   * all (round-8 P1: the rule had no behavioural coverage).
+   */
+  settlements: Array<{ childId: string; settlement: string }>;
+  /**
+   * What a relay caused, in the order it happened: `release` (phase one of
+   * the retirement), `pane-opened` (the successor's boot), `committed` (phase
+   * two — this session going silent) or `rolledBack`.
+   *
+   * THE ORDER IS THE FIX, and it is invisible to a source grep: releasing
+   * after the pane opens races the successor's boot, and going silent before
+   * the relay record is persisted loses that record (persist() refuses to
+   * write for a retired session).
+   */
+  handoffEvents: string[];
 
 }
 
@@ -158,6 +179,23 @@ export interface FakeWorldOptions {
   contextPercent?: number;
   /** Make `list-panes` fail, so liveness is UNKNOWN rather than false. */
   tmuxBroken?: boolean;
+  /**
+   * Make the successor's `split-window` fail, so the relay cannot start one.
+   * The property it pins: a handoff that never happened must ROLL BACK — the
+   * predecessor stays the holder instead of going silent with nobody behind
+   * it (and, before the two-phase split, with its wake-up timers dead).
+   */
+  splitWindowFails?: boolean;
+  /**
+   * Make `split-window` THROW instead of returning `ok: false`.
+   *
+   * The injected tmux seam permits both, and the difference is not cosmetic:
+   * phase one of a retirement has already released the worktree claim by the
+   * time the pane is opened, so an escaping exception would leave a
+   * half-retired predecessor nobody notices. The relay has to undo it on both
+   * paths.
+   */
+  splitWindowThrows?: boolean;
   /**
    * The orchestration runtime RECORDED ON DISK (B1). Set it to one carrying
    * a DIFFERENT id than the session holds to build the takeover situation:
@@ -202,6 +240,35 @@ export interface FakeWorldOptions {
    * pretty one.
    */
   tmuxDecorFails?: boolean;
+  /**
+   * Give this session the ability to isolate a second child in one repo
+   * (2026-09-10).
+   *
+   * ABSENT is the more interesting case and the default: a real session can
+   * lack it (an unwired host), and the spawner must then REFUSE the second
+   * child rather than put two writers in one checkout. Set it and the fake
+   * hands out `/repo-rg-<childId>` with a matching branch, exactly as
+   * lib/orchestrator-worktree.ts derives them.
+   */
+  isolateChild?: boolean;
+  /**
+   * Make `settleWorktree` report a FAILED reclamation (`reclaimed: false`).
+   *
+   * The branch it opens is the one that decides whether the worktree record
+   * survives — "forget it only when the checkout is really gone" — and with the
+   * fake hardcoding `reclaimed: true` nothing could reach it (round-10 P1).
+   */
+  settleReclaimed?: boolean;
+  /**
+   * Isolate the child but wire NO settlement capability — the fail-closed
+   * shape (round-9 P2).
+   *
+   * A real session can have the one and not the other (a partially wired
+   * host), and the rule it protects is: a checkout nobody can settle must not
+   * be created by a close that will then walk away from it. Without this
+   * option the fake always supplies both, so that branch was unreachable.
+   */
+  isolateWithoutSettle?: boolean;
   /**
    * Repos a task's `repo` declaration may resolve to (default: none, so a
    * declared repo is refused — the fake's equivalent of "not a git root").
@@ -250,6 +317,9 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   let recordedOverride: OrchestratorRuntime | undefined = options.recordedRuntime;
   let planAudits = 0;
   const tmuxCalls: string[][] = [];
+  const handoffEvents: string[] = [];
+  /** Worktree settlements this session ran, in order. */
+  const settlements: Array<{ childId: string; settlement: string }> = [];
 
 
   let plan: OrchestratorPlan | undefined = options.plan;
@@ -386,6 +456,44 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     emitNotification: () => true,
     fileChars: () => 500,
     sessionTranscriptPath: () => "/tmp/transcript.jsonl",
+    ...(options.isolateChild || options.isolateWithoutSettle
+      ? {
+          createWorktree: (repoRoot: string, childId: string) => ({
+            ok: true as const,
+            path: `${repoRoot}-rg-${childId}`,
+            branch: `rg-child-${childId}`,
+          }),
+        }
+      : {}),
+    ...(options.isolateChild
+      ? {
+          // The settlement ACTION, recorded rather than executed: what the
+          // tool owes the manager is the DECISION it passes down, and the git
+          // sequence itself is lib/orchestrator-worktree.ts's (unit-tested).
+          settleWorktree: (input: { childId: string; settlement: string }) => {
+            settlements.push({ childId: input.childId, settlement: input.settlement });
+            const reclaimed = options.settleReclaimed !== false;
+            return {
+              ok: true,
+              reclaimed,
+              text: reclaimed ? `fake: settled ${input.settlement}` : `fake: settled ${input.settlement}，但没能回收`,
+            };
+          },
+        }
+      : {}),
+    // The predecessor's OWN id, which the successor carries as its proof of
+    // heirship (lib/session-exclusivity.ts).
+    ownSessionId: () => "session-under-test",
+    // RETIREMENT, in two observable phases. The fake records the order rather
+    // than asserting it: `release` has to precede the pane, `committed` has to
+    // follow the persisted relay record.
+    onHandoff: () => {
+      handoffEvents.push("release");
+      return {
+        committed: () => { handoffEvents.push("committed"); },
+        rolledBack: () => { handoffEvents.push("rolledBack"); },
+      };
+    },
   };
 
   function runFakeTmux(argv: readonly string[]): { ok: boolean; stdout: string; stderr: string } {
@@ -406,6 +514,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       return { ok: true, stdout: live.join("\n"), stderr: "" };
     }
     if (sub === "split-window") {
+      if (options.splitWindowThrows) throw new Error("fake tmux: split-window blew up");
+      if (options.splitWindowFails) return { ok: false, stdout: "", stderr: "fake tmux: cannot create pane" };
       const id = `%${paneSeq++}`;
       const cwdAt = argv.indexOf("-c");
       const paneEnv: Record<string, string> = {};
@@ -433,6 +543,10 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
           sessionId: `rg-child-${spawnedChildId}`,
         });
       }
+      // A RELAY pane is not a child: it carries the predecessor's pane id
+      // instead of a state variant. Recorded as the boot line in the handoff
+      // event stream, so a test can pin "release came first".
+      if (paneEnv[PREDECESSOR_PANE_ENV] !== undefined) handoffEvents.push("pane-opened");
       return { ok: true, stdout: `${id}\n`, stderr: "" };
     }
     if (sub === "kill-pane") {
@@ -521,6 +635,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     },
     planAudits: () => planAudits,
     tmuxCalls,
+    handoffEvents,
+    settlements,
 
 
   };

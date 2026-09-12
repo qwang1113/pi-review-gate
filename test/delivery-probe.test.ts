@@ -22,7 +22,10 @@ import {
   verifyDeliveryOn,
   verifyJudgeBoot,
   channelRecordCount,
+  deliveryVerifyDelayMs,
+  DELIVERY_VERIFY_ATTEMPTS,
   JUDGE_BOOT_ATTEMPTS,
+  DELIVERY_VERIFY_INTERVAL_MS,
 } from "../lib/orchestrator-tool-kit.ts";
 import {
   appendRecord,
@@ -159,4 +162,54 @@ test("an unreadable channel is a missing receipt, never a thrown error", async (
   );
   assert.equal(check.verdict.ok, false);
   assert.equal(check.evidence.channelReported, false);
+});
+
+// ---------------------------------------------------------------------------
+// THE PROBE CADENCE (2026-09-10). A flat 1s interval quantises EVERY
+// successful delivery to a whole second, and the caller is the project
+// manager, blocked inside a tool call while it waits. The probe is a file
+// read: cheap enough to ask often at first, and the gap can grow to the old
+// interval and stay there.
+// ---------------------------------------------------------------------------
+
+test("delivery probes BACK OFF — a pane that proves itself in 80ms does not cost a whole second", async () => {
+  const delays: number[] = [];
+  const { io } = memoryIO();
+  const check = await verifyDeliveryOn(
+    { channelIO: () => io, sleep: async (ms) => { delays.push(ms); } },
+    { kind: "spawn", channelPath: PATH, attempts: 5 },
+  );
+  assert.equal(check.verdict.ok, false, "nothing ever reported");
+  assert.deepEqual(delays, [100, 200, 400, 800],
+    "doubling from 100ms: the first five probes cost 1.5s in total, not 5s");
+});
+
+test("an EXPLICIT interval keeps the old flat cadence", async () => {
+  // A caller that names a rhythm (a test, a future caller with its own clock)
+  // is stating the rhythm it wants. A backoff it did not ask for would spend
+  // its budget in different places.
+  const delays: number[] = [];
+  const { io } = memoryIO();
+  await verifyDeliveryOn(
+    { channelIO: () => io, sleep: async (ms) => { delays.push(ms); } },
+    { kind: "spawn", channelPath: PATH, attempts: 4, intervalMs: 250 },
+  );
+  assert.deepEqual(delays, [250, 250, 250]);
+});
+
+test("the backoff doubles from 100ms and plateaus at the old interval", () => {
+  assert.equal(deliveryVerifyDelayMs(0), 0, "the first probe is immediate");
+  assert.equal(deliveryVerifyDelayMs(1), 100);
+  assert.equal(deliveryVerifyDelayMs(2), 200);
+  assert.equal(deliveryVerifyDelayMs(4), 800);
+  assert.equal(deliveryVerifyDelayMs(5), DELIVERY_VERIFY_INTERVAL_MS, "capped at the old interval — no probe ever waits LONGER than it used to");
+  assert.equal(deliveryVerifyDelayMs(99), DELIVERY_VERIFY_INTERVAL_MS);
+  assert.equal(deliveryVerifyDelayMs(-3), 0, "a nonsensical attempt is not a long sleep");
+  // The window DOES shrink — 11.5s against 14.0s — and the comment says so
+  // rather than claiming a budget it no longer spends. Pinned so the two
+  // cannot drift back apart.
+  const window = Array.from({ length: DELIVERY_VERIFY_ATTEMPTS - 1 }, (_, i) => deliveryVerifyDelayMs(i + 1))
+    .reduce((a, b) => a + b, 0);
+  assert.ok(window < DELIVERY_VERIFY_ATTEMPTS * 1000, `the window is shorter now (${window}ms)`);
+  assert.ok(window > 10_000, "…and still long enough for a pane that is booting");
 });

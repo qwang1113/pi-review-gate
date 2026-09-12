@@ -19,6 +19,7 @@
 
 import { WAIT_DISCIPLINE_HINT } from "./agent-directives.ts";
 import type { ReviewScopeStamp } from "./orchestrator-channel.ts";
+import type { ModelEvent } from "./model-health.ts";
 
 
 
@@ -31,7 +32,7 @@ import type { ReviewScopeStamp } from "./orchestrator-channel.ts";
  * new. Each is a DIFFERENT next step, so none of them may render as "a round
  * ended".
  */
-export type StandardReportReason = "report" | "finding" | "question" | "pane-dead" | "pending";
+export type StandardReportReason = "report" | "finding" | "question" | "pane-dead" | "model-exhausted" | "pending";
 
 /** First line per reason — the opener reads this one and knows what happened. */
 const HEADLINE: Record<StandardReportReason, string> = {
@@ -39,6 +40,7 @@ const HEADLINE: Record<StandardReportReason, string> = {
   finding: "本轮流出新 findings：",
   question: "本轮有新提问等你回答：",
   "pane-dead": "pane 消失且 verdict 未落盘 —— 本轮不算结束：",
+  "model-exhausted": "链上模型全部失败，本轮无法继续 —— 没有结论：",
   pending: "本轮仍在运行，这段时间没有新消息：",
 };
 
@@ -100,6 +102,21 @@ export interface StandardReportInput {
    * judge on a build that predates the stamp.
    */
   scope?: ReviewScopeStamp | undefined;
+  /**
+   * The model this round was LAUNCHED on, as the dispatch picked it.
+   *
+   * Printed with any rotation above: together they answer "which model
+   * actually ran this round", which is the first question a reader asks of a
+   * verdict reached after two 503s.
+   */
+  modelSpec?: string | undefined;
+  /**
+   * Model failures the pane reported this round (lib/judge-model-rotation.ts):
+   * which slot died, why, and where it went. Printed as its own line because
+   * "the round took 40 minutes" and "the round spent 40 minutes on a dead
+   * provider" are different facts about the same verdict.
+   */
+  modelEvents?: ReadonlyArray<ModelEvent> | undefined;
 
 }
 
@@ -170,6 +187,21 @@ export function buildStandardReport(input: StandardReportInput): string {
   if (input.stateLine !== undefined && input.stateLine.trim().length > 0) {
     lines.push(`- 当前状态：${input.stateLine.trim()}`);
   }
+  const modelEvents = input.modelEvents ?? [];
+  if (input.modelSpec !== undefined && input.modelSpec.trim().length > 0) {
+    lines.push(`- 本轮模型：${input.modelSpec.trim()}（派发时选的槽）`);
+  }
+  if (modelEvents.length > 0) {
+    lines.push(`- 模型 fallback（${modelEvents.length} 次）：`);
+    for (const event of modelEvents) {
+      const why = event.error ? `（${event.error}）` : "";
+      lines.push(
+        event.exhausted
+          ? `  ${event.spec} 失败${why} —— 链上已无可用槽，本轮到此为止。`
+          : `  ${event.spec} 失败${why} → 已切到 ${event.to ?? "?"}。`,
+      );
+    }
+  }
   if (input.waitedSeconds !== undefined) lines.push(`- 已阻塞等待：${input.waitedSeconds}s`);
   if (input.streamPath !== undefined) lines.push(`- 流证据：${input.streamPath}`);
   const questions = input.openQuestions ?? [];
@@ -194,6 +226,8 @@ function nextStep(input: StandardReportInput, reason: StandardReportReason): str
       return ["下一步：先在代码里确认这些 findings，能修就就地修（审查范围是 immutable commit，工作区编辑不失效本轮）；确实没别的活了再调 judge_wait 继续等。"];
     case "pane-dead":
       return ["下一步：judge_recover 同 id 重开、续 transcript 继续本轮。"];
+    case "model-exhausted":
+      return ["下一步：本轮**没有**任何结论（不是被审对象的问题）。先修模型可达性（~/.pi/review-gate.json 的 agents 链 / provider 认证），再重新派发本轮；冷却期只是个缓冲，不是修复。"];
     case "pending":
       return [WAIT_DISCIPLINE_HINT];
     default:

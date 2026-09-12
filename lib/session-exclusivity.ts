@@ -137,6 +137,19 @@ export interface ExclusivityInput {
   sessionId: string | null | undefined;
   /** The presence record on disk, or undefined when absent/unreadable. */
   existing: PresenceRecord | undefined;
+  /**
+   * The session this one was STARTED TO REPLACE, when it is the successor of
+   * an `orchestrator_handoff` (lib/orchestrator-relay.ts).
+   *
+   * A successor runs in the SAME worktree as the session it replaces — that is
+   * the whole design (children keep addressing one orchestration id) — so the
+   * ordinary "somebody else holds this worktree" answer would refuse it and
+   * the handoff would end with a dead successor. The predecessor releases its
+   * claim before the pane opens, but a release is a filesystem fact a crash
+   * can skip; naming the predecessor is what makes the takeover true by
+   * construction rather than by winning a race.
+   */
+  successorOf?: string | undefined;
   /** Absolute repo root, for the escape hatch the refusal prints. */
   repoRoot: string;
   now: number;
@@ -160,6 +173,12 @@ export function checkSessionExclusivity(input: ExclusivityInput): ExclusivityVer
   // Our own record, from this session or a same-id restart: taking over our
   // own claim is what a resume IS.
   if (self && holder.sessionId === self) return { ok: true };
+  // The HEIR of this holder takes it over — that is what a handoff IS, and it
+  // must hold even while the predecessor's heartbeat is still fresh (a
+  // predecessor that is mid-handoff is exactly the live case), which is why
+  // this sits BEFORE the freshness test.
+  const heir = (input.successorOf ?? "").trim();
+  if (heir && holder.sessionId === heir) return { ok: true };
   if (!isFresh(holder.at, input.now)) return { ok: true };
   return { ok: false, holder, reason: refusalText(holder, input.repoRoot) };
 }

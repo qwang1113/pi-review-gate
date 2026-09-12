@@ -11,6 +11,13 @@ import {
   buildReviewPrompt,
   formatPrecommitBaseline,
   extractPrecommitBaseline,
+  planChangeBatches,
+  formatChangeIndex,
+  changeRowsLargestFirst,
+  shellQuotePath,
+  CHANGE_INDEX_MAX_ROWS,
+  CHANGE_INDEX_TAIL_MAX,
+  type ChangeIndexRow,
 } from "../lib/parallel-review.ts";
 
 test("buildReviewPrompt names the changed files and sets the COMMIT contract", () => {
@@ -395,4 +402,164 @@ test("extractPrecommitBaseline: behavioral safety — fingerprint match, stale-e
   const degraded = extractPrecommitBaseline(pass, "fp1", "{broken");
   assert.ok(degraded);
   assert.match(degraded, /PRE-COMMIT BASELINE/);
+});
+
+// ---------------------------------------------------------------------------
+// THE CHANGE INDEX (2026-09-10)
+//
+// MEASURED: 92.5% of a reviewer's messages carried exactly ONE tool call, and
+// tool execution was 6% of a 226-285s round — the round was spent finding out
+// what moved, one file per model turn. The index answers "what moved" and
+// pre-splits the reads into batches that can be issued in ONE message.
+// ---------------------------------------------------------------------------
+
+const rows = (...sizes: Array<[string, number, number]>): ChangeIndexRow[] =>
+  sizes.map(([file, added, deleted]) => ({ file, added, deleted }));
+
+test("planChangeBatches: large files get their own batch, and none is dropped", () => {
+  const plan = planChangeBatches(rows(
+    ["big.ts", 600, 40],
+    ["small-a.ts", 3, 1],
+    ["small-b.ts", 4, 0],
+    ["small-c.ts", 2, 2],
+  ));
+  assert.deepEqual(plan[0]!.map((r) => r.file), ["big.ts"],
+    "a file past the line budget must not share a command with the small ones — the reviewer would read them to find it");
+  assert.deepEqual(plan[1]!.map((r) => r.file), ["small-a.ts", "small-b.ts", "small-c.ts"]);
+  assert.equal(plan.flat().length, 4, "every file lands in exactly one batch");
+});
+
+test("planChangeBatches: a single oversized file still gets a batch of its own", () => {
+  const plan = planChangeBatches(rows(["huge.ts", 5_000, 0]), { maxLines: 100 });
+  assert.deepEqual(plan.map((b) => b.map((r) => r.file)), [["huge.ts"]],
+    "a batch that is empty always takes the file — otherwise it would vanish from the plan entirely");
+});
+
+test("planChangeBatches: the file count is a second, independent cap", () => {
+  const plan = planChangeBatches(
+    rows(["a.ts", 1, 0], ["b.ts", 1, 0], ["c.ts", 1, 0], ["d.ts", 1, 0], ["e.ts", 1, 0]),
+    { maxLines: 10_000, maxFiles: 2 },
+  );
+  assert.deepEqual(plan.map((b) => b.length), [2, 2, 1],
+    "a hundred one-line files must not become one unreadable command");
+});
+
+test("planChangeBatches: no rows means no batches", () => {
+  assert.deepEqual(planChangeBatches([]), []);
+});
+
+test("changeRowsLargestFirst: the index really IS largest-first (round-2 P1)", () => {
+  // The heading, the judge protocol and a test all CLAIMED this ordering while
+  // nothing sorted anything: git's numstat order is path order, so batches
+  // mixed a 600-line file with 3-line ones and the 40-row cut dropped
+  // arbitrary files instead of the smallest.
+  const ordered = changeRowsLargestFirst(rows(["a.ts", 3, 0], ["b.ts", 600, 40], ["c.ts", 1, 1]));
+  assert.deepEqual(ordered.map((r) => r.file), ["b.ts", "a.ts", "c.ts"]);
+  // Added + deleted, not one of them: a file that only removes 500 lines is
+  // as big a read as one that only adds them.
+  assert.deepEqual(
+    changeRowsLargestFirst(rows(["adds.ts", 500, 0], ["deletes.ts", 0, 500])).map((r) => r.file).sort(),
+    ["adds.ts", "deletes.ts"],
+  );
+  assert.deepEqual(changeRowsLargestFirst([]), [], "and an empty index stays empty");
+});
+
+test("formatChangeIndex sorts what it is given, so the plan cannot depend on git's order", () => {
+  const text = formatChangeIndex(rows(["tiny.ts", 1, 0], ["huge.ts", 900, 100], ["mid.ts", 40, 0]), "a..b");
+  const hugeAt = text.indexOf("huge.ts");
+  const midAt = text.indexOf("mid.ts");
+  const tinyAt = text.indexOf("tiny.ts");
+  assert.ok(hugeAt > 0 && hugeAt < midAt && midAt < tinyAt, "the listing is largest-first");
+  assert.match(text, /1\. git diff a\.\.b -- 'huge\.ts'/, "and so is the first batch");
+});
+
+test("shellQuotePath: a path is QUOTED because one of them was a shell redirect (round-2 P1)", () => {
+  // `git diff --numstat` renders a rename as `old => new` unless rename
+  // detection is off — and that string was pasted into this plan and handed to
+  // a reviewer as a runnable command, where `>` TRUNCATES A FILE. The rename
+  // itself is fixed at the source (the probe passes --no-renames); the quoting
+  // is the general defence, because a space or a `$` needs no rename at all.
+  assert.equal(shellQuotePath("lib/a.ts"), "'lib/a.ts'", "even a boring path is quoted — no 'looks dangerous' heuristic");
+  assert.equal(shellQuotePath("dir_a.txt => dir_b.txt"), "'dir_a.txt => dir_b.txt'",
+    "the exact string that walked through the door");
+  assert.equal(shellQuotePath("my file.ts"), "'my file.ts'");
+  assert.equal(shellQuotePath("it's.ts"), "'it'\\''s.ts'", "an embedded quote is escaped, not dropped");
+  assert.equal(shellQuotePath("$HOME/x.sh"), "'$HOME/x.sh'", "no expansion");
+  assert.match(
+    formatChangeIndex(rows(["weird name.ts", 5, 0]), "a..b"),
+    /git diff a\.\.b -- 'weird name\.ts'/,
+    "and the rendered command is paste-safe",
+  );
+});
+
+test("formatChangeIndex: what moved, and the batches that read it in one message", () => {
+  const text = formatChangeIndex(
+    rows(["extensions/review-gate.ts", 120, 8], ["lib/a.ts", 5, 0]),
+    "abc123..def456",
+  );
+  assert.match(text, /CHANGE INDEX — 2 file\(s\), \+125\/−8 in abc123\.\.def456/, "one line of totals");
+  assert.match(text, /- \+120\/−8  extensions\/review-gate\.ts/, "largest first, with its sizes");
+  assert.match(text, /1\. git diff abc123\.\.def456 -- 'extensions\/review-gate\.ts' 'lib\/a\.ts'/,
+    "the batch is a command, not advice — QUOTED (a path may contain a space or a `>`) and largest-first");
+  assert.match(text, /IN PARALLEL/, "and says WHY one message is the right shape");
+});
+
+test("formatChangeIndex: the tail NAMES its files — a positional slice would cover the wrong ones (round-3 P1)", () => {
+  // The rows above are the 40 LARGEST; a `tail -n +41` slice walks PATH
+  // order. Reproduced with 42 ascending sizes: the listed rows were the 41
+  // biggest and the slice yielded the two ALREADY LISTED, so the smallest
+  // files were never covered while the command looked like coverage.
+  const many = rows(
+    ...Array.from({ length: CHANGE_INDEX_MAX_ROWS + 3 }, (_, i) =>
+      [`f${String(i).padStart(2, "0")}.ts`, 100 - i, 0] as [string, number, number]),
+  );
+  const text = formatChangeIndex(many, "a..b");
+  assert.match(text, /- … and 3 smaller file\(s\) not listed above\./,
+    "a bound must SAY it bounded something");
+  assert.doesNotMatch(text, /tail -n \+/, "no positional slice — it cannot describe WHICH files it skipped");
+  // The three genuinely unlisted (smallest) files are named, and quoted.
+  for (const f of ["f40.ts", "f41.ts", "f42.ts"]) {
+    assert.ok(text.includes(`'${f}'`), `${f} is one of the files nothing else covers, so it must be named`);
+  }
+  assert.doesNotMatch(text, /'f00\.ts'.*\n.*'f40\.ts'/, "the tail batch is its own line, not a re-listing");
+});
+
+test("formatChangeIndex: a tail too long to name says so instead of inventing a command", () => {
+  const huge = rows(
+    ...Array.from({ length: CHANGE_INDEX_MAX_ROWS + CHANGE_INDEX_TAIL_MAX + 5 }, (_, i) =>
+      [`g${String(i).padStart(3, "0")}.ts`, 1, 0] as [string, number, number]),
+  );
+  const text = formatChangeIndex(huge, "a..b");
+  assert.match(text, /smaller file\(s\) have no batch here/,
+    "the plan states the limit rather than pretending to cover them");
+  assert.match(text, /git diff --stat a\.\.b/,
+    "and points at the one command that DOES enumerate everything");
+  assert.doesNotMatch(text, /tail -n \+/, "still no lying command");
+});
+
+test("formatChangeIndex: an unchanged range renders nothing at all", () => {
+  assert.equal(formatChangeIndex([], "a..b"), "",
+    "an empty index must not become an empty section in the task text");
+});
+
+test("buildReviewPrompt: the index replaces the bare list, and its absence keeps the fallback", () => {
+  const indexed = buildReviewPrompt(
+    "review",
+    ["lib/a.ts"],
+    undefined,
+    undefined,
+    { streamPath: "/s.jsonl", commitRange: "a..b" },
+    undefined,
+    "full",
+    undefined,
+    undefined,
+    undefined,
+    "CHANGE INDEX — 1 file(s), +5/−0 in a..b:\n- +5/−0  lib/a.ts",
+  );
+  assert.match(indexed, /CHANGE INDEX/);
+  assert.doesNotMatch(indexed, /Changed files \(1\)/,
+    "two descriptions of the same fact is one too many");
+
+  const plain = buildReviewPrompt("review", ["lib/a.ts"], undefined, undefined, { streamPath: "/s.jsonl", commitRange: "a..b" });
+  assert.match(plain, /Changed files \(1\) in a\.\.b:/, "no index ⇒ the cheap fallback still names the files");
 });

@@ -103,6 +103,30 @@ export function findingFingerprint(finding: ReviewFinding): string | undefined {
  * Adjudicate one reviewer round. Tighten-only: this can withhold a READY, it
  * can never grant one.
  */
+/**
+ * Does a READY still owe a full-lane verification? (B1, 2026-09-10)
+ *
+ * `judge_submit` starts the full precommit BESIDE the chain instead of in
+ * front of it — the reviewer judges an immutable commit range, so only the
+ * checkpoint has to precede the dispatch, and the agent gets back the 33s it
+ * used to spend blocked. That means a checkpoint can land while its content is
+ * still being verified, and this is the place that refuses a READY on content
+ * which never passed it: without it, a round dispatched beside a failing suite
+ * would record a verdict nothing can ship — while LOOKING verified.
+ *
+ * TIGHTEN-ONLY, like the stale-target and cwd checks beside it: this can
+ * withhold a READY, never grant one. `/gate-bypass` is the user's own
+ * authorization and outranks it, exactly as it does the checkpoint gate.
+ *
+ * PURE, so the rule is pinned without building a session.
+ */
+export function readyLacksVerification(args: {
+  precommitVerdict: string;
+  bypassActive: boolean;
+}): boolean {
+  return !args.bypassActive && args.precommitVerdict !== "PASS";
+}
+
 export function adjudicateReviewConclusion(input: StructuredConclusion): AdjudicatedReview {
   const findings = input.findings ?? [];
   // Rule 1 — a READY that ships with an open P0/P1 contradicts itself.

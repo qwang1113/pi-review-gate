@@ -122,6 +122,49 @@ test("buildStandardReport: a question carries its options, a dead pane its recov
   assert.match(pending, /judge_wait/, "…which names a tool that exists");
 });
 
+test("buildStandardReport: an exhausted model chain is a FAILED round, with the chain in it", () => {
+  // Criterion 4 of the 2026-09-10 fix: the alternative behaviour was measured
+  // — a round that hung for hours while the opener sat inside one call.
+  const text = buildStandardReport({
+    role: "goal-auditor",
+    judgeId: "j8",
+    reason: "model-exhausted",
+    modelEvents: [
+      { spec: "anthropic/claude-opus-5:max", error: "503 auth_unavailable", to: "onekey/gpt-6-astra:xhigh" },
+      { spec: "onekey/gpt-6-astra:xhigh", error: "502 status code (no body)", exhausted: true },
+    ],
+    waitedSeconds: 1800,
+  });
+  assert.match(text, /链上模型全部失败，本轮无法继续/);
+  assert.match(text, /模型 fallback（2 次）：/);
+  assert.match(text, /anthropic\/claude-opus-5:max 失败（503 auth_unavailable） → 已切到 onekey\/gpt-6-astra:xhigh。/);
+  assert.match(text, /onekey\/gpt-6-astra:xhigh 失败（502 status code \(no body\)） —— 链上已无可用槽，本轮到此为止。/);
+  assert.match(text, /本轮\*\*没有\*\*任何结论/, "the next step must not read as a judgement about the work");
+});
+
+test("buildStandardReport: a rotation that SUCCEEDED is printed on the round's report too", () => {
+  const text = buildStandardReport({
+    role: "reviewer",
+    judgeId: "j9",
+    verdict: "READY",
+    findingsCount: 0,
+    modelEvents: [{ spec: "onekey/gpt-6-astra:xhigh", error: "503", to: "anthropic/claude-opus-5:max" }],
+  });
+  assert.match(text, /结论：READY/);
+  assert.match(text, /模型 fallback（1 次）：/, "a verdict reached after a rotation says which model died");
+  assert.match(text, /→ 已切到 anthropic\/claude-opus-5:max。/);
+  assert.doesNotMatch(text, /没有\*\*任何结论/, "a recorded verdict keeps its own next step");
+  const withModel = buildStandardReport({
+    role: "reviewer",
+    judgeId: "j10",
+    verdict: "READY",
+    modelSpec: "onekey/gpt-6-astra:xhigh",
+  });
+  // WHICH MODEL RAN: the launch slot is printed too — an event list alone does
+  // not say where the round STARTED, and a round with no failure has only this.
+  assert.match(withModel, /- 本轮模型：onekey\/gpt-6-astra:xhigh（派发时选的槽）/);
+});
+
 test("buildStandardReport: a finished round outranks its reason for the NEXT STEP", async () => {
   // A report can arrive with findings in the same wake-up. Once the round has
   // ended, "go confirm these findings" is the wrong instruction — the verdict

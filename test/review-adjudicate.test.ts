@@ -6,6 +6,7 @@ import {
   fileFindingsFrom,
   findingFingerprint,
   normalizeConcludedVerdict,
+  readyLacksVerification,
   severityFindingsFrom,
   type ReviewFinding,
 } from "../lib/review-adjudicate.ts";
@@ -161,4 +162,26 @@ test("severityFindingsFrom keeps the objections verbatim, defaulting a missing s
     { severity: "P1", issue: "阻塞项" },
     { severity: "P2", issue: "无严重度" },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// THE VERIFICATION BINDING (B1, 2026-09-10). `judge_submit` starts the full
+// precommit BESIDE the chain rather than in front of it — the reviewer judges
+// an immutable commit range, so only the checkpoint has to precede the
+// dispatch, and the agent gets back the 33s it used to spend blocked. The
+// checkpoint gate therefore accepts content whose lane is still running, and
+// THIS is what refuses a READY on content that never passed it.
+// ---------------------------------------------------------------------------
+
+test("a READY without a full-lane PASS is withheld — and a bypass is the user's call, not the rule's", () => {
+  assert.equal(readyLacksVerification({ precommitVerdict: "PASS", bypassActive: false }), false,
+    "the ordinary path: verified, so nothing is withheld");
+  for (const verdict of ["NOT_RUN", "FAIL", "PENDING", ""]) {
+    assert.equal(readyLacksVerification({ precommitVerdict: verdict, bypassActive: false }), true,
+      `"${verdict}" is not a PASS — nothing on that content is shippable, and a recorded READY would look verified while it is not`);
+  }
+  // /gate-bypass is the user's own authorization and outranks this rule,
+  // exactly as it outranks the checkpoint gate it is standing in for.
+  assert.equal(readyLacksVerification({ precommitVerdict: "NOT_RUN", bypassActive: true }), false,
+    "a bypassed session records its verdict like any other — and the bypass is recorded ON the verdict");
 });

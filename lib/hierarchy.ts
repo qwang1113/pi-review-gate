@@ -19,6 +19,7 @@
  */
 
 import type { PendingAudit } from "./audit-round-specs.ts";
+import type { ModelHealth } from "./model-health.ts";
 
  /** One judge pane the gate knows about. */
 export interface JudgeEntry {
@@ -58,6 +59,8 @@ export interface JudgeEntry {
   streamPath?: string;
   /** Newest report the opener already recorded — the wait's consumed cursor. */
   lastReportId?: string;
+  /** How many model-failure events this opener has already acted on. */
+  lastModelEventCount?: number;
   /**
    * How many streamed findings the opener has already been shown — the
    * message-driven wait's OTHER cursor. Without it the finding that ended one
@@ -99,6 +102,15 @@ export interface JudgeEntry {
   roundsInObject?: number;
   /** The judge's own context reading (percent) at the end of its last round. */
   contextPercent?: number;
+  /**
+   * The model spec this judge was LAUNCHED on (the slot the dispatch picked).
+   *
+   * Recorded because "which model actually ran this round" is asked at settle
+   * time, when the dispatch's local variable is long gone — and because a
+   * rotation mid-round (lib/judge-model-rotation.ts) reports itself against
+   * this starting point. Informational: never part of the opener check.
+   */
+  modelSpec?: string;
 }
 
 /** Opener registry: judge id → entry. */
@@ -308,6 +320,15 @@ export interface HierarchySnapshot {
   version: 1;
   judges: Record<string, JudgeEntry>;
   audit?: PendingAudit;
+  /**
+   * Which model slots are cooling down in this repo (lib/model-health.ts).
+   *
+   * It travels with the judge registry because it is the SAME audience: a
+   * dispatch needs it to skip a slot that just failed, whoever opened the
+   * judge that found out — and the registry file is the one thing every
+   * opener in a repo already reads and writes.
+   */
+  modelHealth?: ModelHealth;
 }
 
 /**
@@ -335,6 +356,19 @@ function isJudgeEntry(value: unknown): value is JudgeEntry {
   );
 }
 
+/** Parse the persisted model-health map, dropping anything malformed. */
+function parseModelHealth(raw: unknown): ModelHealth | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const out: ModelHealth = {};
+  for (const [spec, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== "object" || value === null) continue;
+    const v = value as Record<string, unknown>;
+    if (typeof v.at !== "number" || !Number.isFinite(v.at)) continue;
+    out[spec] = { at: v.at, ...(typeof v.error === "string" ? { error: v.error } : {}) };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /**
  * Parse a persisted snapshot, fail-closed: anything malformed (wrong
  * version, wrong shapes, unparseable JSON) yields undefined and the caller
@@ -351,6 +385,8 @@ export function parseHierarchySnapshot(raw: unknown): HierarchySnapshot | undefi
       if (isJudgeEntry(entry) && entry.judgeId === id) judges[id] = entry;
     }
     const out: HierarchySnapshot = { version: 1, judges };
+    const health = parseModelHealth(value.modelHealth);
+    if (health) out.modelHealth = health;
     const audit = value.audit as Record<string, unknown> | undefined;
     if (audit && typeof audit.startedAt === "string") {
       if (audit.kind === "goal" && typeof audit.draft === "string") {

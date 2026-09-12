@@ -20,7 +20,8 @@ import {
   isNewsworthy,
   nextRewakeDelayMs,
   REWAKE_BACKOFF_MS,
-  DONE_REPORT_LIMIT,
+  DONE_REWAKE_MAX_MS,
+  nextDoneRewakeDelayMs,
   IDLE_PROGRESS_GRACE_MS,
   type ChildObservation,
 } from "../lib/orchestrator-child-state.ts";
@@ -185,6 +186,44 @@ test("B3 — an `idle` report with NO progress stamp is believed (R3-5 stays cau
   assert.equal(childHealth(observe([stateRecord("idle")])).selfReportedIdle, undefined);
 });
 
+test("B3 — the child's OWN settled proof replaces the 120s window (2026-09-10, user decision)", () => {
+  // `settledSince` is written only while the child's last turn has ENDED and
+  // nothing has run since. That is a statement about STRUCTURE, not about
+  // elapsed time — a child in the middle of bash → read → bash is not settled,
+  // because the tool call that follows clears the stamp — so it is believed at
+  // once and the supervisor learns the stop the moment it happens. The record
+  // below is the SAME one the previous test calls `working`; only the proof
+  // differs.
+  const proven = observe([{
+    kind: "state", from: "child", at: iso(), state: "idle",
+    lastProgressAt: iso(-3_000), settledSince: iso(-3_000),
+  }]);
+  assert.equal(classifyChildState(proven), "idle",
+    "3 seconds of silence is enough WHEN the child says it settled — the 120s rule exists only because a bare `idle` cannot be told from a gap between tool calls");
+  assert.equal(childHealth(proven).selfReportedIdle, undefined, "and it is not an overruled report");
+
+  // The proof is PREFERRED, never required: no stamp means the fallback rule,
+  // unchanged — which is what keeps an older child build working.
+  const unproven = observe([{
+    kind: "state", from: "child", at: iso(), state: "idle", lastProgressAt: iso(-3_000),
+  }]);
+  assert.equal(classifyChildState(unproven), "working", "no proof ⇒ no shortcut");
+
+  // A garbled stamp is ABSENT, not credible: believing a broken value is the
+  // one direction that can make a supervisor miss a stopped child.
+  for (const junk of ["not a date", "", "   ", "2026-13-45T99:99:99Z"]) {
+    const garbled = observe([{
+      kind: "state", from: "child", at: iso(), state: "idle",
+      lastProgressAt: iso(-3_000), settledSince: junk,
+    }]);
+    assert.equal(classifyChildState(garbled), "working", `"${junk}" is not a settled proof`);
+  }
+
+  // And the 120s fallback still applies to a child that never settled: the
+  // number is the user's, and this change did not move it.
+  assert.equal(IDLE_PROGRESS_GRACE_MS, 120_000);
+});
+
 test("B3 — the grace period never overrules a state that outranks `idle`", () => {
   const fresh = (state: "done" | "idle") => ({
     kind: "state" as const, from: "child" as const, at: iso(), state, lastProgressAt: iso(-1_000),
@@ -311,10 +350,23 @@ test("the rendered snapshot names the state in words, and says so when there is 
   }
 });
 
-test("an unanswered thing rings again on a backoff, and a completion goes quiet", () => {
+test("an unanswered thing rings again on a backoff, and a completion WIDENS instead of going quiet", () => {
   assert.deepEqual([...REWAKE_BACKOFF_MS], [10_000, 30_000, 60_000]);
   assert.equal(nextRewakeDelayMs(0), 10_000);
   assert.equal(nextRewakeDelayMs(2), 60_000);
   assert.equal(nextRewakeDelayMs(99), 60_000, "the backoff plateaus rather than growing forever");
-  assert.equal(DONE_REPORT_LIMIT, 2, "a terminal state must not drown the states that still need action");
+  // A completion used to stop after two rings, on the argument that it is a
+  // terminal state. It is terminal for the CHILD — not for the SUPERVISOR,
+  // who still owes it a verification, a status and a close. MEASURED: a
+  // receipt that consumed one of the two rings left exactly one more chance,
+  // after which a manager sat out its whole 300s budget beside a child it had
+  // already been told was finished. So it rings as long as it is TRUE, on a
+  // widening gap, and stops when the state stops being `done` (closing the
+  // child is precisely the act the reminder asks for).
+  assert.equal(nextDoneRewakeDelayMs(1), 60_000, "the first reminder keeps the old cadence");
+  assert.equal(nextDoneRewakeDelayMs(2), 120_000);
+  assert.equal(nextDoneRewakeDelayMs(3), 240_000);
+  assert.equal(nextDoneRewakeDelayMs(9), DONE_REWAKE_MAX_MS, "capped, so a busy manager is not drowned");
+  assert.equal(nextDoneRewakeDelayMs(99), DONE_REWAKE_MAX_MS, "and it stays capped");
+  assert.ok(DONE_REWAKE_MAX_MS <= 10 * 60_000, "the ceiling is minutes, not seconds");
 });

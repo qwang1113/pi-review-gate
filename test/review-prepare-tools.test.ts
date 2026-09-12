@@ -10,6 +10,7 @@ import {
   type PreparedReviewTarget,
   type ReviewPrepareToolDeps,
 } from "../lib/review-prepare-tools.ts";
+import type { ChangeIndexRow } from "../lib/parallel-review.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import { emptyState, type GateState, type RoundRecord } from "../lib/gate-state.ts";
 import { decideReviewScope } from "../lib/review-scope.ts";
@@ -34,6 +35,8 @@ interface Fake {
   revs: Record<string, string>;
   ancestors: Set<string>;
   changed: string[];
+  /** Overrides the numstat rows the change index is built from. */
+  numstat?: ChangeIndexRow[];
   clean: boolean;
   goal: { confirmed: boolean; text: string; truncated: boolean };
   repo: { ok: boolean; error: string };
@@ -91,6 +94,11 @@ function fake(overrides: Partial<Fake> = {}): Fake {
         return v;
       },
       changedFilesInRange: () => state.changed,
+      // Same files as `changed`, with sizes so the change index has something
+      // to batch. Tests that want the index path exercise it directly; tests
+      // that want the FALLBACK throw from here.
+      numstatInRange: () =>
+        (state.numstat ?? state.changed.map((file, i) => ({ file, added: 10 + i, deleted: i }))),
       worktreeClean: () => state.clean,
     },
     readText: (p) => state.files[p],
@@ -265,7 +273,11 @@ test("the happy path registers the reviewed range and reports it", async () => {
   assert.equal(reply.details?.head, "hhhhhhhhhhhh");
   assert.equal(reply.details?.range, "pppppppppppp..hhhhhhhhhhhh");
   assert.equal(reply.details?.fileCount, 2);
-  assert.deepEqual(reply.details?.files, ["lib/a.ts", "lib/b.ts"]);
+  // LARGEST FIRST — the same order the change index renders in and the batch
+  // plan is built from (the fake's sizes are a.ts +10/−0, b.ts +11/−1). A
+  // `files` list in a different order than the plan built from it would be two
+  // answers to one question.
+  assert.deepEqual(reply.details?.files, ["lib/b.ts", "lib/a.ts"]);
   // The target a READY later binds to carries the TREE, not just the commits —
   // plus the scope this round was DISPATCHED under, which is the gate's half
   // of the audit pair the verdict recorder writes down (t6a). It is registered
@@ -288,11 +300,38 @@ test("the happy path registers the reviewed range and reports it", async () => {
 
 test("a git failure listing the range is not fatal — an empty file list is still a round", async () => {
   const f = fake();
+  f.deps.git.numstatInRange = () => { throw new Error("bad range"); };
   f.deps.git.changedFilesInRange = () => { throw new Error("bad range"); };
   const reply = await call(f);
   assert.notEqual(reply.isError, true);
   assert.equal(reply.details?.fileCount, 0);
   assert.deepEqual(reply.details?.files, []);
+  cleanup(f);
+});
+
+test("numstat is preferred; a failed numstat still leaves the plain file list", async () => {
+  const f = fake();
+  f.deps.git.numstatInRange = () => { throw new Error("bad range"); };
+  const reply = await call(f);
+  assert.notEqual(reply.isError, true);
+  assert.deepEqual(reply.details?.files, ["lib/a.ts", "lib/b.ts"],
+    "the name-only read stands in when the sizes cannot be read");
+  const task = textOf(reply);
+  assert.match(task, /Changed files \(2\)/, "…and the task text falls back to the bare list");
+  assert.doesNotMatch(task, /CHANGE INDEX/);
+  cleanup(f);
+});
+
+test("the reviewer's task text carries the CHANGE INDEX, batches and all", async () => {
+  const f = fake();
+  const reply = await call(f);
+  const task = textOf(reply);
+  assert.match(task, /CHANGE INDEX — 2 file\(s\), \+21\/−1 in/,
+    "what moved, with sizes, in one place");
+  assert.match(task, /git diff \S+ -- 'lib\/b\.ts' 'lib\/a\.ts'/,
+    "the batch is a command, not advice — QUOTED, and largest-first (b.ts has more lines than a.ts)");
+  assert.match(task, /IN PARALLEL/, "the parallel-read rule travels with the plan");
+  assert.doesNotMatch(task, /Changed files \(2\)/, "the bare list is a second, poorer copy of the same fact");
   cleanup(f);
 });
 

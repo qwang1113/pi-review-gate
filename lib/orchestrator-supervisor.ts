@@ -63,8 +63,8 @@ import {
   describeChildStateDetailed,
   isNewsworthy,
   nextRewakeDelayMs,
-  DONE_REPORT_LIMIT,
   DONE_REWAKE_MS,
+  nextDoneRewakeDelayMs,
   type ChildHealth,
   type ChildState,
 } from "./orchestrator-child-state.ts";
@@ -187,7 +187,7 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
       malformed += read.malformed;
       projection = projectChannel(read.records);
     } catch {
-      projection = { openRequests: [], pendingAnswers: [], pendingInstructs: [] };
+      projection = { openRequests: [], pendingAnswers: [], pendingInstructs: [], modelEvents: [] };
     }
     const paneAlive = input.livePanes === undefined ? undefined : input.livePanes.has(child.paneId);
     const observation = {
@@ -311,9 +311,10 @@ export interface SupervisionEventDecision {
  *     supervisor — a transition nobody is told about is invisible);
  *  2. an unchanged newsworthy state re-rings on the backoff, so an unanswered
  *     question is not asked once and then forgotten;
- *  3. a completion rings at most {@link DONE_REPORT_LIMIT} times and then
- *     stays quiet — it is a terminal state, and repeating it forever would
- *     drown the states that still need action.
+ *  3. a completion rings for as long as it is true, on a WIDENING gap
+ *     (60s, 2×, 4×, … capped at ten minutes) rather than a fixed number of
+ *     times — see `nextDoneRewakeDelayMs` for the measured reason a two-ring
+ *     cap lost a completion entirely.
  */
 export function decideSupervisionEvents(
   snapshot: SupervisionSnapshot,
@@ -343,11 +344,9 @@ export function decideSupervisionEvents(
     const dueAt = changed
       ? at
       : (previous?.reportedAt ?? 0) +
-        (state === "done" ? DONE_REWAKE_MS : nextRewakeDelayMs(reports - 1));
+        (state === "done" ? nextDoneRewakeDelayMs(reports) : nextRewakeDelayMs(reports - 1));
 
-    const capped = state === "done" && reports >= DONE_REPORT_LIMIT;
-
-    if (!capped && at >= dueAt) {
+    if (at >= dueAt) {
       const request = snapshot.requests.find((r) => r.childId === id);
       events.push({
         childId: id,

@@ -258,7 +258,7 @@ absent, and merges in ONLY the roles missing from an existing file (never
 overwrites a user's own pins). At session start the gate HARD-CHECKS every
 role (reviewer/adviser/arbiter/goal-auditor): a missing entry, an
 empty slot list, or an unresolvable spec STOPS the session with the reason
-(`validateAgentsForStartup`). `modelSpecFor` returns undefined for an
+(`validateAgentsForStartup`). The launch resolver returns an EMPTY chain for an
 unconfigured role and the dispatch fails closed instead of spawning a default.
 
 - `agents.<name>.auto` — `false` uses `slots: [spec, ...]` (`slots[0]` =
@@ -287,10 +287,14 @@ unconfigured role and the dispatch fails closed instead of spawning a default.
 
 **Review protocol (single-review).** The review that ends
 a round is ONE reviewer — by design. There is no second reviewer, no split
-plan. The fallback chain inside the pinned reviewer agent definition exists
-only because the package must resolve wherever a judge-eligible family
-exists; it is NOT a runtime selector and does NOT change the one-reviewer
-rule. A single reviewer is the norm, and no Note is required about it.
+plan. The fallback chain in a judge role's slots IS a runtime selector since
+2026-09-10, and it changes nothing about the one-reviewer rule: the dispatch
+launches the first slot that is not cooling down (`lib/model-health.ts`, 10
+minute TTL, persisted in `.pi/judge-hierarchy.json`), and a pane whose own
+provider fails for a whole run switches to the next slot itself, says so in
+the channel, and carries on — an exhausted chain ENDS the round as a failure
+(`judge_wait` reason `model-exhausted`) instead of hanging. A single reviewer
+is the norm, and no Note is required about it.
 (a) **Goal pre-review — MECHANICALLY ENFORCED.** The draft goal must pass an
 audit by the dedicated `goal-auditor` role before the user is ever asked to
 approve it, and the gate runs that audit itself: `judge_submit({role:
@@ -490,9 +494,20 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    （plan 任务**必须**声明 `repo` 字段——子会话 cwd 就落在那里；2026-09-01 实测
    漏写导致子会话被开在项目经理仓库、goal 绑错、编辑被 L8 拦的死锁，写 plan 时
    强制），同一 repo 的任务由门禁
-   串行调度，只有不同 repo 的任务可以并行。
+   **各自开一个隔离 checkout**（`git worktree`，分支 `rg-child-<childId>`，由
+   `orchestrator_spawn` 在发现同 repo 已有在跑的 child 时自动创建；建不出来就
+   **拒绝启动**，不会让两个写者共用一个工作区），不同 repo 的任务本来就并行；
+   完工后由 `orchestrator_close({ worktree:"keep"|"merge"|"discard" })` 决定那个
+   checkout 的去向（默认 `keep`，因为里面的成果常常是唯一副本），孤儿 checkout
+   在 `orchestrator_attach` 的回执里列出、**不自行回收**。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
-   换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。
+   换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
+   本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的
+   心跳挡在门外），relay 记录落盘**之后**才静默（停两个推进定时器 + 设退休标记；
+   先静默会让 relay 记录被 `persist()` 的退休守卫拦住，只存在内存里）。交不成则回滚
+   占用，编排始终只有一个持有者；继任者带着**前任的 session id** 接管 worktree 占用，
+   所以前任没来得及释放也接得上。权威出处只有一处：`docs/execution-model.md`
+   的「接力的不断档保证」。
 
 系统通知（OSC 777/9/99）**只有项目经理能发**，且带节流 —— 单一入口 + 只推给
 用户本人，与 `lib/attention.ts` 禁止的「任何会话都能广播」是相反的形态。

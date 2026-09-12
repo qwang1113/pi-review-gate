@@ -122,9 +122,11 @@
   （全局层）→ 内置默认的三层配置原样保留：precommit 的
   lint/typecheck/build/test 配置、agents 的模型槽位（auto / slots /
   继承语义）不变，只是消费方式从渲染 agent frontmatter 变为子会话的
-  `--model` / `--thinking` / `--system-prompt`。子会话是单模型进程：
-  `auto:false` 取 `slots[0]`（链头），`auto:true` 取角色定义自身的
-  frontmatter 默认；fallback 链只用于渲染层（`--model` 直传只取链头）。
+  `--model` / `--thinking` / `--system-prompt`。模型链**是运行时**的：
+  `auto:false` 取 `slots` 整条链、`auto:true` 取角色 frontmatter 的
+  `model:` + `fallbackModels:`，派发取「第一个不在冷却期内的槽」，pane 在其中
+  一个 provider 挂掉时自己往下一个槽走（`lib/model-health.ts` +
+  `lib/judge-model-rotation.ts`，2026-09-10）。
 
 ## 审核单元：commit 而非工作区
 

@@ -52,8 +52,31 @@ opener 凭它记录结论；
 - **值直接进 argv**（spawn 数组），没有 shell，没有插值面——配置提供的
   model spec / 路径不可能变成 shell 语法。
 - 角色正文从三层解析：repo `agents/` → 包内置 `agents/` →
-  `~/.pi/agent/agents/`。模型：`auto:false` 取 `slots[0]`；`auto:true`
-  取角色 frontmatter 默认。子会话是单模型进程，fallback 链是 subagent 概念。
+  `~/.pi/agent/agents/`。模型：`auto:false` 取 `slots` 整条链；`auto:true`
+  取角色 frontmatter 的 `model:` + `fallbackModels:`。链不是装饰：派发取
+  「第一个不在冷却期内的槽」（`lib/model-health.ts`），跑起来之后模型
+  provider 挂了就由 pane 自己往链上走（`lib/judge-model-rotation.ts`）——
+  详见下方「模型失败与 fallback」。
+
+## 模型失败与 fallback（2026-09-10）
+
+背景（rebate 实测）：`agents.<role>.slots` 写了一条链，派发却只取 `slots[0]`；
+`fallbackModels:` 渲染进了 agent frontmatter，却**没有任何运行时消费者**
+（pi 本体与 pi-subagents 都不认这个 key，judge pane 只收 `--system-prompt`）。
+一个 provider 连续 503 之后，轮次能挂好几个小时，而 opener 卡在工具调用里
+（无回执、无超时），只能由人去 pane 里手动换模型。现在链的两半都真了：
+
+- **派发侧**（`lib/model-health.ts`）：取**第一个不在冷却期内的槽**；
+  冷却记录以 `provider/id` 为键，写进 `.pi/judge-hierarchy.json` 的 `modelHealth`，
+  10 分钟后自愈。全在冷却时仍按链头派发（fail-open）并在会话里警告。
+- **pane 侧**（`lib/judge-model-rotation.ts`）：本轮以模型错误终结（pi 自己
+  的重试已耗尽）时，pane 自己切到链上的下一个槽（模型 + 该槽 thinking），
+  自注入一句「继续本轮」——transcript、任务与已查到的证据全部保留——并把
+  `ModelEvent` 写进通道。链走完时标 `exhausted`：`judge_wait` 以
+  `model-exhausted` **结束本轮**（没有结论、写清原因），而不是无限等。
+- **配置即时生效**：派发前重读 `.pi/review-gate.json` 与 `~/.pi/review-gate.json`
+  的 agents 段，内容变了就重渲染 `.pi/agents/*.md`——磁盘上的链与实际启动的
+  模型不再互相矛盾（重开会话也不再是必须的）。
 
 ## 生命周期与 liveness
 
@@ -195,13 +218,41 @@ agent 每轮都要先挑一个。这三个工具连同它们依赖的抓屏与�
 
 **接力的不断档保证**：老会话写交接文档 + plan 落盘 →
 `orchestrator_handoff({handoffPath})` 把**这份编排**交给一个新会话（它继承同一个
-orchestration id、交接文档路径，以及**老会话 transcript 路径** —— 交接文档是自述，
-原始记录才是查问题时要的）→ 老会话进入 idle → **由新会话**调
+orchestration id、交接文档路径、**老会话 transcript 路径**，以及**老会话的 session id**
+—— 交接文档是自述，原始记录才是查问题时要的）→ 老会话**退休** → **由新会话**调
 `orchestrator_close({predecessorPane})` 关掉老会话。只有接任者能关前任（前任自己没有
 那个环境变量），这天然证明新会话已经起来并接手成功。接力的**时机**也不靠项目经理
 自觉：wait 回执第四块按上下文用量直接给判断（≥80% 且手上没有待答请求就是好时机，
 ≥90% 则是首要动作）。工具名从上一版的 `orchestrator_relay` 改成 `orchestrator_handoff`，
 因为它交出去的是这份编排本身，不是一个 pane。
+
+**退休分两个阶段，不是一个标记**（2026-09-10 实测修复 + 同轮 review 的两条 P2）：
+
+- **阶段一（开新 pane 之前）——释放 worktree 占用**（`.pi/session-presence.json`）。
+  新会话在**同一个 worktree** 里启门禁，占用不释放它就会被自己前任的心跳拒绝
+  （实测报错「这个 worktree 已被另一个会话占用，本会话不启动门禁」，点名刚交棒的
+  会话，新会话的 pi 随即退出）。必须在新 pane 打开**之前**——晚一步就是和新会话的
+  启动赛跑。
+- **阶段二（新会话的 relay 记录落盘之后）——静默**：设退休标记、停两个推进定时器
+  （supervision / revival），从此**四条唤醒路径**都不再叫它：`orchestratorSettled` 的
+  `agent_settled` 路径、supervision 定时器、revival、以及 `settleFinishedRounds`
+  （一份已完成报告唤醒的是 opener，而开了自己 judge 的退休项目经理就是 opener）。
+  并且 `persist()` 对它直接返回（**不再写共享 sidecar**——两个会话写一份 sidecar 正是
+  占用判定要防的事，而继任者是被**故意**放进来的，所以停下来的是前任）。
+
+**阶段的界线不是风格，是两条实测缺陷**：（a）`saveRuntime` 写的 relay 记录要走
+`persist()`，而 `persist()` 对已退休会话拒绝写入——先静默会让继任者自己的登记行
+只存在于内存里，重启即丢；（b）回滚一个尚未开始的静默没有任何东西要撤——单阶段
+把“停定时器”和“释放占用”绑在一起，导致交棒失败时定时器已停而回滚无法重新 arm
+（回滚需要 ctx），前任就变成了“静默且无人接替”。两阶段之后，**回滚只有一件事要
+做**：把占用拿回来。
+
+接力若因前置条件不满足或开 pane 失败而中止，阶段一被回滚（前任重新占用），阶段二
+根本未执行——没交出去的编排不能留下一个已退休的前任。
+
+新会话一侧另有一道保险：它带着**前任的 session id** 启动，worktree 占用判定认这条
+继任关系（`lib/session-exclusivity.ts` 的 `successorOf`，判定排在**心跳新鲜度之前**），
+所以即使前任没来得及释放，接手依然成立。
 
 接手现场的另一半是 `orchestrator_attach({orchestrationId})`：后继者带着同一个 id 启动
 之后，一次拿回 plan 与任务状态、每个子会话的状态与资产、通道里还没人答的请求，以及
@@ -224,18 +275,43 @@ spawn（无 shell）；门禁自己的执行路径也过同一份禁止清单，
 ## 审核单元
 
 送审是**一次调用**：`judge_submit({role:"reviewer", task:<本轮改动说明>})`。
-门禁在这一次调用里依次跑完下面四步，任一步失败就带原因打回（不留半提交
-状态）。这四步的实现**还在**，但 2026-08-30 起**不再注册成工具**（哲学三）：
+门禁在这一次调用里跑完下面四步，任一步失败就带原因打回（不留半提交状态）。
+这四步的实现**还在**，但 2026-08-30 起**不再注册成工具**（哲学三）：
 门禁在内部调用它们，agent 看不到这些名字，因此没有第二条路可选。
 
-- `run_precommit`（full lane）：不过就打回。
+**顺序不是 1-2-3-4 了（2026-09-10）**：full precommit 从“卡在链条最前面”
+改成**与链条并行**（`startPrecommitBeside`）。理由：reviewer 判的是**不可变的
+commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而 precommit
+中位数 33s（旧数据 92s）全是 agent 被阻塞的时间。现在链条是：
+**启动 full lane（不 await）→ checkpoint → prepare → dispatch（立即返回）**。
+
+这带来两个必须机械成立的事：
+
+- **checkpoint 门槛接受“正在验证中”**：凭据是**本进程里那个活的 promise**，不是
+  文件。重启过的会话没有它，于是回到旧规则——没有 PASS 就不收（fail-closed）。
+  同一 repo 同时只跑一条 lane；**后续轮次等它安静下来再启动自己那条，绝不 join**——
+  join 意味着用一个更早内容的 PASS 背书本轮的 checkpoint（裁决记录只看 verdict）。
+- **时间上确实重叠了**：lane 在跑的同时 checkpoint 会执行 `git add -A`。本 repo 的
+  lane 只跑 typecheck 与测试，不往工作区写东西；但一个 `precommit.build` 会写产物的
+  repo 里，未进 `.gitignore` 的构建输出可能被扫进这次 checkpoint。把那条 lane 的产物
+  留在工作区外（或写进 ignore）是仓自己的事，这里只把重叠写明白。
+- **裁决记录承担验证绑定**（`lib/review-adjudicate.ts` 的 `readyLacksVerification`）：
+  READY 落在一个没有 full-lane PASS 的内容上时**降级为 BLOCKED**，否则会出现
+  “看着已验证、实际不可 ship”的裁决。只收紧、不放宽；`/gate-bypass` 是用户
+  授权，仍然优先。FAIL 不再能靠“提前 return”告知，所以它作为自己的一条 followUp
+  消息送给 agent。
+
+- `run_precommit`（full lane，与链条并行启动）：FAIL 时本轮不产生可 ship 的 READY。
 - `review_checkpoint`：`git add -A && git commit`（英文 message 校验，
   commit 标题由门禁打上 checkpoint 标记）→ 记录 commit sha。只绕过 READY，
   不绕过 precommit；普通 `git commit` 在 READY 前仍被拦。2026-09-07 起
   直接落在**当前分支**（不再有工作分支）；在 main/master/dev/develop 上
   checkpoint 直接拒绝（2026-09-16 起不再弹确认框，与 ship 拒绝一致）。
 - `prepare_review`：计算 `baseline..HEAD`（自上次审核基线以来的 commit），
-  生成任务文本与 findings 流路径，注册审核目标。
+  生成任务文本与 findings 流路径，注册审核目标。任务文本里的**CHANGE INDEX**
+  （2026-09-10）来自一次 `git diff --numstat`：逐文件改动量 + 门禁预先分好的
+  读取批次（大文件单独成批）——实测 reviewer 的 92.5% 往返只发 1 个工具调用、
+  单轮 17–59 次往返 × 每次 11–13s，而工具执行只占 6%，代价在**消息条数**。
 - dispatch：spawn 或续接该 role 的 session。
 
 verdict **不在返回值里**：judge 把本轮结论写进 channel report（不再是进程退出）后，门禁自己读它并跑

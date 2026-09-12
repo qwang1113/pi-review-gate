@@ -33,6 +33,22 @@ export const PREDECESSOR_PANE_ENV = "RG_ORCHESTRATOR_PREDECESSOR_PANE";
 export const HANDOFF_PATH_ENV = "RG_ORCHESTRATOR_HANDOFF";
 /** Path of the predecessor's transcript — the raw record, for digging. */
 export const PREDECESSOR_TRANSCRIPT_ENV = "RG_ORCHESTRATOR_PREDECESSOR_TRANSCRIPT";
+/**
+ * Session id of the orchestrator being replaced.
+ *
+ * WHY IT IS ITS OWN VARIABLE (2026-09-10, rebate handoff failure). The
+ * successor starts in the SAME worktree as its predecessor, and the
+ * worktree-exclusivity guard refuses a second gate session while the holder's
+ * heartbeat is fresh (lib/session-exclusivity.ts). The predecessor releases
+ * the claim before the pane opens, but that release is a filesystem fact and
+ * cannot be the ONLY thing standing between a handoff and a dead successor: a
+ * predecessor that is killed mid-handoff, or one whose release lost a race,
+ * would leave the successor refused with an error telling it to close the
+ * session it was started to replace. Carrying the predecessor's id lets the
+ * successor say "I am that session's heir" and take the claim over as the
+ * handoff it is.
+ */
+export const PREDECESSOR_SESSION_ENV = "RG_ORCHESTRATOR_PREDECESSOR_SESSION";
 
 /** A handoff document shorter than this is not a handoff. */
 export const MIN_HANDOFF_CHARS = 200;
@@ -92,6 +108,8 @@ export function successorEnv(opts: {
   predecessorPane: string;
   handoffPath: string;
   predecessorTranscript?: string;
+  /** Session id of the session being replaced — the successor's takeover proof. */
+  predecessorSessionId?: string;
 }): Record<string, string> {
   const env: Record<string, string> = {
     [ORCHESTRATION_ID_ENV]: opts.orchestrationId,
@@ -99,6 +117,7 @@ export function successorEnv(opts: {
     [HANDOFF_PATH_ENV]: opts.handoffPath,
   };
   if (opts.predecessorTranscript) env[PREDECESSOR_TRANSCRIPT_ENV] = opts.predecessorTranscript;
+  if (opts.predecessorSessionId) env[PREDECESSOR_SESSION_ENV] = opts.predecessorSessionId;
   return env;
 }
 

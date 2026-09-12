@@ -9,7 +9,6 @@ import {
   applyTaskStatus,
   canonicalPlanText,
   clampMaxParallel,
-  conflictingParallelPairs,
   findDependencyCycle,
   formatPlanSummary,
   mergeTaskProgress,
@@ -264,9 +263,11 @@ test("mergeTaskProgress: a note grants NOTHING — hash and canonical text ignor
 // Scheduling (constraint 6)
 // ---------------------------------------------------------------------------
 
-test("CONSTRAINT 6: same-repo tasks are DEFERRED, never co-scheduled (2026-09-07)", () => {
-  // The isolation worktree is gone, so two children may never share one
-  // checkout: same-repo tasks serialize.
+test("CONSTRAINT 6: same-repo tasks run SIDE BY SIDE, each in its own checkout (2026-09-10)", () => {
+  // It used to say "never co-scheduled": one checkout, one writer. The
+  // isolation is back (lib/orchestrator-worktree.ts) and the rule is now about
+  // CHECKOUTS rather than repos — the coordinator gives the second writer its
+  // own, so this function has nothing left to serialize.
   const plan = planOf({
     maxParallel: 2,
     tasks: [
@@ -275,10 +276,12 @@ test("CONSTRAINT 6: same-repo tasks are DEFERRED, never co-scheduled (2026-09-07
     ],
   });
   const { start, deferred } = scheduleNextTasks(plan, [], "/repo");
-  assert.deepEqual(start.map((s) => s.task.id), ["a"], "only one child per repo starts");
-  assert.deepEqual(deferred.map((d) => d.task.id), ["b"]);
-  assert.equal(deferred[0]!.blockedBy, "a");
-  assert.match(deferred[0]!.reason, /同一 repo/, "the deferral says why, so the user can be told");
+  // CHANGED 2026-09-10: same-repo tasks run side by side, each in its own
+  // `git worktree` (lib/orchestrator-worktree.ts). The coordinator assigns
+  // the second checkout at spawn; what this function decides is only WHAT may
+  // start at all.
+  assert.deepEqual(start.map((s) => s.task.id), ["a", "b"], "both start — the second gets its own checkout");
+  assert.deepEqual(deferred, [], "nothing is deferred for sharing a repo any more");
 });
 
 test("cross-repo tasks DO run in parallel (2026-09-07)", () => {
@@ -302,7 +305,7 @@ test("an undeclared repo means the orchestration's own repo", () => {
 });
 
 
-test("a task in the SAME repo as something ALREADY RUNNING waits for it", () => {
+test("a task in the SAME repo as something ALREADY RUNNING starts too — in its own checkout", () => {
   const plan = planOf({
     maxParallel: 2,
     tasks: [
@@ -311,8 +314,10 @@ test("a task in the SAME repo as something ALREADY RUNNING waits for it", () => 
     ],
   });
   const { start, deferred } = scheduleNextTasks(plan, ["a"], "/repo");
-  assert.deepEqual(start, []);
-  assert.deepEqual(deferred.map((d) => d.blockedBy), ["a"]);
+  assert.deepEqual(start.map((s) => s.task.id), ["b"],
+    "the running task no longer blocks the second one; isolation at spawn is what makes that safe");
+  assert.equal(start[0]!.execution, "parallel", "and it is honest about running beside something");
+  assert.deepEqual(deferred, []);
 });
 
 test("the parallel cap and unmet dependencies both hold tasks back", () => {
@@ -330,16 +335,19 @@ test("the parallel cap and unmet dependencies both hold tasks back", () => {
     "b is not a candidate at all until a is done");
 });
 
-test("same-repo parallel pairs are reported at approval time (2026-09-07)", () => {
-  const plan = planOf({ tasks: [
+test("same-repo parallel pairs are NO LONGER a downgrade — each gets its own checkout (2026-09-10)", () => {
+  // The 2026-09-07 rule serialized them; the 2026-09-10 rule gives the second
+  // writer a `git worktree` (lib/orchestrator-worktree.ts), so there is
+  // nothing to downgrade and nothing to warn the user about.
+  const plan = planOf({ maxParallel: 3, tasks: [
     { id: "a", title: "a", execution: "parallel" },
     { id: "b", title: "b", execution: "parallel" },
     { id: "c", title: "c", execution: "parallel", repo: "/repo-b" },
   ] });
-  assert.deepEqual(conflictingParallelPairs(plan, "/repo"), [{ a: "a", b: "b" }],
-    "same repo ⇒ parallel is downgraded; a different repo keeps its parallel");
-  assert.match(formatPlanSummary(plan), /并行降级/,
-    "the user sees the downgrade in the approval dialog, before it happens");
+  assert.doesNotMatch(formatPlanSummary(plan), /并行降级/,
+    "the approval dialog must not promise a slowdown that no longer happens");
+  assert.deepEqual(scheduleNextTasks(plan, [], "/repo").start.map((s) => s.task.id), ["a", "b", "c"],
+    "all three start: two repos, and two isolated checkouts in the first one");
 });
 
 // ---------------------------------------------------------------------------

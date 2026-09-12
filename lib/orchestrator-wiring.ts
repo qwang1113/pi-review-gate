@@ -40,7 +40,7 @@ import { orchestrationIdFromEnv } from "./orchestration-id.ts";
 
 import { parsePlan, PLAN_RELPATH, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
-import type { OrchestratorDeps, PlanRead, TmuxRunResult } from "./orchestrator-deps.ts";
+import type { HandoffRetirement, OrchestratorDeps, PlanRead, TmuxRunResult } from "./orchestrator-deps.ts";
 import type { TaskMode } from "./task-mode.ts";
 import type { RestatementRecord } from "./restatement.ts";
 
@@ -336,6 +336,20 @@ export interface OrchestratorHostBindings {
   /** Print text into the user's transcript (the plan's full text, O-1). */
   showToUser(title: string, text: string): void;
   sessionTranscriptPath(): string | undefined;
+  /** Give a child its own checkout of a repo (see OrchestratorDeps). */
+  createWorktree?(repoRoot: string, childId: string):
+    | { ok: true; path: string; branch: string }
+    | { ok: false; reason: string };
+  /** Settle a finished child's isolated checkout (see OrchestratorDeps). */
+  settleWorktree?(input: {
+    childId: string;
+    taskId: string;
+    repoRoot: string;
+    worktreePath: string;
+    settlement: "keep" | "merge" | "discard";
+  }): { ok: boolean; text: string; reclaimed?: boolean };
+  /** This session's OWN pi session id, handed to a successor as its takeover proof. */
+  ownSessionId?(): string | undefined;
   /** This orchestrator's OWN context usage, as a percentage (receipt block 4). */
   contextPercent?(): number | undefined;
   /** Run + record the plan pre-audit (the extension owns the judge process). */
@@ -364,8 +378,13 @@ export interface OrchestratorHostBindings {
    * re-arm). The extension re-arms `loopArmed` here.
    */
   onToolCall?(name: string): void;
-  /** Fired when THIS session handed its orchestration to a successor. */
-  onHandoff?(): void;
+  /**
+   * RETIRE this session as the orchestration's holder, called by
+   * `orchestrator_handoff` BEFORE the successor pane opens; phase one releases
+   * the worktree claim, phase two (after the relay record is persisted) goes
+   * silent — see {@link HandoffRetirement}.
+   */
+  onHandoff?(): HandoffRetirement | undefined;
 }
 
 /**
@@ -497,6 +516,9 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
 
     onToolCall: host.onToolCall,
     onHandoff: host.onHandoff,
+    ownSessionId: host.ownSessionId,
+    createWorktree: host.createWorktree,
+    settleWorktree: host.settleWorktree,
     emitNotification: (sequence) => emitNotification(sequence, env()),
     fileChars: (relPath) => fileCharsIn(host.repoRoot, relPath),
     sessionTranscriptPath: host.sessionTranscriptPath,

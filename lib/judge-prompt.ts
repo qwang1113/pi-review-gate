@@ -33,9 +33,11 @@
  *  - F12/F13: model selection honors the config semantics (auto:false ⇒
  *    slots[0]; auto:true ⇒ the role's own frontmatter default) instead of a
  *    duplicated literal;
- *  - F14: only slots[0] can reach a child — a child is one pi process with
- *    one model; the fallback chain is a subagent-launch concept and is
- *    documented as such in docs/dev-flow.md.
+ *  - F14 (retired 2026-09-10): "only slots[0] can reach a child" WAS true and
+ *    is no longer: a judge pane now runs the first slot that is not cooling
+ *    down and walks the rest of the chain when its model answers with an
+ *    error (lib/model-health.ts + lib/judge-model-rotation.ts). The chain is
+ *    no longer decoration.
  */
 
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -43,7 +45,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { AgentsConfigMap } from "./model-config.ts";
-import { extractFrontmatterChain, resolvePackageAgentsDir } from "./model-config.ts";
+import { extractFrontmatterChain, resolvePackageAgentsDir, splitThinkingSuffix } from "./model-config.ts";
 import { UNTRUSTED_DATA_RULE } from "./untrusted-data.ts";
 /**
  * The shared judge protocol — THE embedded copy (see F5 above; test
@@ -62,6 +64,11 @@ export const JUDGE_COMMON_PROTOCOL = `## 运行形态（独立 pane）
 - **你手上的任务书与交接，就是这一轮的全部上下文**：任务文本里给出的上轮裁决、
   未关闭 findings 与本轮增量是权威依据，凭印象补出来的「上次我说过 / 上次查过」不是。
   需要的事实现在就去读代码、git 与文件——读到什么算什么，不确定就明说不确定。
+
+## 读代码：一条消息里并行读，不要一条消息读一个
+- **一条 assistant 消息里的多个工具调用是并行执行的**：要读多个文件、搜多个模式、看多处 diff 时，把它们放进**同一条消息**，不要一条消息只发一个。一个工具调用就是一个完整来回（等模型 + 等工具）。
+- 先拿清单再读：任务书里的 CHANGE INDEX 是门禁预先分好的读取批次（最大的文件优先），直接从它开始，一条消息发出你需要的那几批；没给索引时先用 git diff --stat / --numstat 拿总览。
+- 实测（本 repo 全部 reviewer session）：92.5% 的往返只发 1 个工具调用，单轮 17–59 次往返 × 每次 11–13s，而工具执行只占这一轮的 6% —— 少一个往返就是少十几秒。
 
 ## 客观与公正
 - 独立判断：不顺着主会话的叙述走，也不顺着自己上一轮的结论走。
@@ -210,35 +217,50 @@ export function buildJudgeSystemPrompt(repoRoot: string, role: string, home?: st
 }
 
 /**
- * Model spec for a role, honoring the config semantics exactly:
- *  - auto:false (explicit slots) ⇒ slots[0] — the chain head;
- *  - auto:true or unconfigured ⇒ the role's OWN frontmatter `model:` (with a
- *    `:thinking` suffix from the frontmatter when present) — the built-in
- *    default, single-sourced from the agent file (round-1 F13: no duplicated
- *    literal).
- * Returns undefined when NOTHING resolves — there is NO hard-coded fallback
- * (user requirement 2026-08-30); the caller fails closed.
+ * The FULL chain for a role, honoring the config semantics exactly:
+ *  - auto:false (explicit slots) ⇒ every slot, in order — `slots[0]` is the
+ *    head and the rest are the fallback chain the runtime now consumes
+ *    (lib/model-health.ts picks the first one that is not cooling down;
+ *    lib/judge-model-rotation.ts walks forward when one fails mid-round);
+ *  - auto:true or unconfigured ⇒ the role's own frontmatter `model:` plus its
+ *    `fallbackModels:` line (the built-in default chain, single-sourced from
+ *    the agent file — round-1 F13: no duplicated literal).
+ * Returns `[]` when NOTHING resolves — there is NO hard-coded fallback (user
+ * requirement 2026-08-30); the caller fails closed on an empty chain.
+ *
+ * ONE parser, ONE place: this is the only function that knows how a role's
+ * chain is derived.
  */
-export function modelSpecFor(agents: AgentsConfigMap, role: string, repoRoot: string, home?: string): string | undefined {
+export function modelChainFor(agents: AgentsConfigMap, role: string, repoRoot: string, home?: string): string[] {
   const entry = agents[role];
-  if (entry && !entry.auto && entry.slots.length > 0) return entry.slots[0]!;
+  if (entry && !entry.auto && entry.slots.length > 0) return [...entry.slots];
   const roleFile = resolveRoleFile(repoRoot, role, home);
-  if (roleFile) {
-    try {
-      const chain = extractFrontmatterChain(readFileSync(roleFile, "utf8"));
-      if (chain?.model) {
-        // Frontmatter models are bare ids ("claude-fable-5"); pi --model
-        // resolves bare ids only when unique, so pin the package's own
-        // provider family when none is written.
-        const base = chain.model.includes("/") ? chain.model : `anthropic/${chain.model}`;
-        return `${base}:${defaultThinking(roleFile)}`;
-      }
-    } catch { /* fall through */ }
-  }
+  if (!roleFile) return [];
+  try {
+    const chain = extractFrontmatterChain(readFileSync(roleFile, "utf8"));
+    if (!chain?.model) return [];
+    const fallback = defaultThinking(roleFile);
+    // Frontmatter models are bare ids ("claude-fable-5"); pi --model resolves
+    // bare ids only when unique, so pin the package's own provider family when
+    // none is written. A spec that already carries its own level keeps it —
+    // the level is per-model (a rendered chain writes `:xhigh` on one slot and
+    // `:max` on the next), and appending the default again would render
+    // `…:max:max`, which resolves to nothing.
+    return [chain.model, ...chain.fallback].map((spec) => pinModelSpec(spec, fallback));
+  } catch { /* fall through */ }
   // NO BUILT-IN DEFAULT (user requirement 2026-08-30). A role without a
   // resolvable chain is a configuration error — the caller fails closed
   // (the startup hard check is what surfaces it to the user).
-  return undefined;
+  return [];
+}
+
+/** `bare-id` → `anthropic/bare-id:<level>`; a spec with its own level is kept. */
+function pinModelSpec(spec: string, fallbackThinking: string): string {
+  const trimmed = spec.trim();
+  if (!trimmed) return trimmed;
+  const { base, thinking } = splitThinkingSuffix(trimmed);
+  const pinned = base.includes("/") ? base : `anthropic/${base}`;
+  return `${pinned}:${thinking ?? fallbackThinking}`;
 }
 
 function defaultThinking(roleFile: string): string {
@@ -277,8 +299,17 @@ export interface JudgeSpawnInput {
 export interface JudgeSpawnFiles {
   /** Absolute path of the written system-prompt file. */
   sysPromptPath: string;
-  /** The effective model spec for the role (modelSpecFor); undefined = unconfigured. */
-  model: string | undefined;
+  /**
+   * The role's model chain (modelChainFor) — head first. EMPTY means the role
+   * has no resolvable chain at all: the caller fails closed, and this module
+   * never invents a default.
+   *
+   * The CHAIN is returned rather than one spec because the dispatch picks the
+   * slot (the first one not cooling down) and the pane needs the rest to
+   * rotate through. Handing out only the head is what made `slots[1..]`
+   * decorative (F14, retired 2026-09-10).
+   */
+  chain: string[];
 }
 
 /**
@@ -294,7 +325,7 @@ export function writeJudgeSpawnFiles(input: JudgeSpawnInput): JudgeSpawnFiles {
   writeFileSync(sysPromptPath, buildJudgeSystemPrompt(repoRoot, role), "utf8");
   return {
     sysPromptPath,
-    model: modelSpecFor(agents, role, repoRoot),
+    chain: modelChainFor(agents, role, repoRoot),
   };
 }
 

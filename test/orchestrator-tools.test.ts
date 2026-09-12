@@ -31,6 +31,7 @@ import {
 import { parsePlan } from "../lib/orchestrator-plan.ts";
 import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
 import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
+import { PREDECESSOR_PANE_ENV, PREDECESSOR_SESSION_ENV } from "../lib/orchestrator-relay.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 
 /**
@@ -1058,4 +1059,74 @@ test("spawn proceeds normally when the identity matches or is inherited", async 
   assert.equal(reply.isError, undefined, replyText(reply));
   const pane = [...world.panes.values()].find((p) => p.env[GATE_MODE_ENV] === "loop");
   assert.ok(pane, "the child pane opened as a loop session");
+});
+
+// ---------------------------------------------------------------------------
+// THE HANDOFF (2026-09-10, rebate — the failure that started this).
+//
+// A relay reported success and then failed twice at once: the successor's gate
+// refused itself IN THE SAME WORKTREE ("这个 worktree 已被另一个会话占用",
+// naming the session that had just handed over) and its pi exited, while the
+// predecessor was woken back into `orchestrator_wait` TWO SECONDS later.
+//
+// These are behavioural pins: the two properties that matter are an ORDER
+// (release before the boot, silence after the persisted record) and a
+// ROLLBACK, neither of which a source grep can hold.
+// ---------------------------------------------------------------------------
+
+test("handoff: the predecessor releases BEFORE the successor boots, and goes silent only AFTER the relay record" , async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
+  assert.equal(reply.isError, undefined, replyText(reply));
+  // ORDER IS THE FIX. `release` before the boot: the successor arms its gate
+  // in this same worktree, and a heartbeat still being refreshed here is
+  // exactly what refused it in the field. `committed` after the boot: the
+  // relay record goes through persist(), which refuses to write for a retired
+  // session — silencing first would leave the successor's registry row
+  // memory-only.
+  assert.deepEqual(world.handoffEvents, ["release", "pane-opened", "committed"]);
+  assert.ok(world.runtime().relay?.successorPane, "and the relay record really is on the runtime the disk sees");
+});
+
+test("handoff: the successor is told which session it replaces — its proof of heirship", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
+  const successor = [...world.panes.values()].find((p) => p.env[PREDECESSOR_PANE_ENV] !== undefined);
+  assert.ok(successor, "the successor pane was opened");
+  // The exclusivity guard admits a second session into an occupied checkout
+  // only when it can name the session it replaces (lib/session-exclusivity.ts).
+  assert.equal(successor!.env[PREDECESSOR_SESSION_ENV], "session-under-test");
+});
+
+test("handoff: a relay that cannot start its successor ROLLS BACK — nobody is left silent", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, splitWindowFails: true });
+  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
+  assert.equal(reply.isError, true, "a relay that started nothing must say so");
+  assert.match(replyText(reply), /仍然是持有者/);
+  assert.deepEqual(world.handoffEvents, ["release", "rolledBack"],
+    "phase two never ran, so there is exactly one thing to undo — and no dead timers to re-arm");
+});
+
+test("handoff: a tmux that THROWS is the same as one that refuses — phase one is undone", async () => {
+  // The injected tmux seam permits both shapes. Phase one has already released
+  // the worktree claim when the pane is opened, so an exception escaping here
+  // would leave a half-retired predecessor that nobody notices — the relay has
+  // to undo it on BOTH paths, not only the `ok: false` one.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, splitWindowThrows: true });
+  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
+  assert.equal(reply.isError, true, "the failure is reported, not thrown out of the tool");
+  assert.match(replyText(reply), /仍然是持有者/);
+  assert.deepEqual(world.handoffEvents, ["release", "rolledBack"]);
+});
+
+test("handoff: a REFUSED relay never retires the session at all", async () => {
+  // The preconditions are checked BEFORE the retirement. The old shape fired
+  // it from the tool's execute wrapper, so a relay refused for a missing
+  // approval or a too-short handoff document left the orchestration with a
+  // silent predecessor and no successor.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: false });
+  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
+  assert.equal(reply.isError, true, "an unapproved plan must refuse the relay");
+  assert.deepEqual(world.handoffEvents, [], "nothing was retired for a handoff that never happened");
+  assert.equal([...world.panes.values()].length, 1, "and no successor pane was opened");
 });

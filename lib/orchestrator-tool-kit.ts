@@ -230,7 +230,46 @@ export function childGateFacts(deps: OrchestratorDeps, child: ChildSession): Chi
 
 /** How long a delivery check keeps looking for evidence, and how often. */
 export const DELIVERY_VERIFY_ATTEMPTS = 15;
+/** The CEILING between probes — also the flat interval when one is forced. */
 export const DELIVERY_VERIFY_INTERVAL_MS = 1000;
+/**
+ * The gap before the FIRST retry (2026-09-10).
+ *
+ * WHY A BACKOFF AND NOT A FLAT INTERVAL. A flat 1s interval quantises EVERY
+ * successful delivery to a whole second: a pane that proves itself in 80ms
+ * still made its caller wait the full interval, and the caller is the project
+ * manager, blocked in a tool call while it waits. The probe is a file read —
+ * cheap enough to ask often — so the early attempts sit close together and
+ * the gap grows to the old interval and stays there. WHAT THAT COSTS: the
+ * probe window shrinks from 14.0s (15 attempts × 1s) to 11.5s (0.1 + 0.2 +
+ * 0.4 + 0.8, then 1s × 10) — see DELIVERY_VERIFY_FIRST_MS for why the tail is
+ * the right thing to spend. What is unchanged is the budget that DECIDES:
+ * the first probe is still immediate and no probe ever waits longer than the
+ * old interval.
+ *
+ * WHAT IT COSTS: the probe window shrinks from 14.0s (15 attempts × 1s) to
+ * 11.5s (0.1+0.2+0.4+0.8, then 1s × 10) — the last attempts are simply gone,
+ * because a pane that has not proven itself in eleven seconds is not one that
+ * a thirteenth would have caught. The budget that matters is unchanged: the
+ * FIRST probe still happens immediately, and the ceiling is still the old
+ * interval, so no probe waits longer than it used to.
+ */
+export const DELIVERY_VERIFY_FIRST_MS = 100;
+
+/**
+ * The delay before retry number `attempt` (1-based; attempt 0 is immediate).
+ * Doubling from {@link DELIVERY_VERIFY_FIRST_MS}, capped at `maxMs`.
+ * Pure, so the shape is pinned without spending real seconds.
+ */
+export function deliveryVerifyDelayMs(
+  attempt: number,
+  firstMs = DELIVERY_VERIFY_FIRST_MS,
+  maxMs = DELIVERY_VERIFY_INTERVAL_MS,
+): number {
+  if (attempt <= 0) return 0;
+  const grow = firstMs * 2 ** (attempt - 1);
+  return Math.max(0, Math.min(maxMs, Math.floor(grow)));
+}
 
 export interface DeliveryCheck {
   verdict: DeliveryVerdict;
@@ -298,12 +337,17 @@ export async function verifyDeliveryOn(
 ): Promise<DeliveryCheck> {
   const attempts = Math.max(1, opts.attempts ?? DELIVERY_VERIFY_ATTEMPTS);
   const interval = Math.max(0, opts.intervalMs ?? DELIVERY_VERIFY_INTERVAL_MS);
+  // An EXPLICIT interval keeps the old flat cadence: a caller that names one
+  // (tests, a future caller with its own rhythm) is stating the rhythm it
+  // wants, and a backoff it did not ask for would silently spend its budget
+  // in different places. The backoff is the default, not a new policy.
+  const backoff = opts.intervalMs === undefined;
   const verdictOpts = opts.instructMode === undefined ? {} : { instructMode: opts.instructMode };
   let evidence = emptyDeliveryEvidence();
   let verdict: DeliveryVerdict = deliveryVerdict(opts.kind, evidence, verdictOpts);
 
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (attempt > 0) await deps.sleep(interval);
+    if (attempt > 0) await deps.sleep(backoff ? deliveryVerifyDelayMs(attempt, Math.min(DELIVERY_VERIFY_FIRST_MS, interval), interval) : interval);
     evidence = readDeliveryEvidence(deps, opts);
     verdict = deliveryVerdict(opts.kind, evidence, verdictOpts);
     if (verdict.ok) break;

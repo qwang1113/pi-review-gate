@@ -226,20 +226,137 @@ test("a CLOSED sibling is not a decorated pane, even if its pane outlived the cl
 });
 
 
-test("close in one repo cannot even meet a second live child — the scheduler serializes", async () => {
-  // Why the test above has to cross repos, asserted rather than assumed.
+test("a second child in one repo is REFUSED when the gate cannot isolate it", async () => {
+  // CHANGED 2026-09-10: same-repo tasks are no longer serialized — the second
+  // one gets its own `git worktree` (lib/orchestrator-worktree.ts). What this
+  // test now pins is the FAIL-CLOSED half: this fake world wires no
+  // `createWorktree`, so the spawn must be refused rather than putting two
+  // writers in one checkout. "We could not isolate you" is a reason to wait,
+  // never a reason to share.
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "done" });
   const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
 
-  assert.equal(second.isError, true, "the first child's pane is still alive, so t2 waits");
+  assert.equal(second.isError, true, "no isolation available ⇒ no second writer in this checkout");
   // The REASON matters, not just the refusal: "t2 was refused" would also be
   // true if the plan were unapproved or the task unknown, and then this test
   // would be asserting nothing about scheduling (reviewer Nit, 2026-09-05).
-  assert.match(replyText(second), /同一 repo（\/repo）/, "…refused for being the same checkout");
-  assert.match(replyText(second), /不能两个写者并存/, "…which is the serialization rule itself");
+  assert.match(replyText(second), /同一个 repo（\/repo）/, "…refused because it would share a checkout");
+  assert.match(replyText(second), /无法为它开出隔离的 worktree/, "…and the gate says which capability is missing");
   assert.equal(world.runtime().children.length, 1, "…and no second pane was opened");
+});
+
+test("…and it RUNS BESIDE the first one when the gate CAN isolate it", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, isolateChild: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "done" });
+  const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+
+  assert.equal(second.isError, undefined, replyText(second));
+  const children = world.runtime().children;
+  assert.equal(children.length, 2, "both children are live at once — that is the whole point");
+  assert.ok(children[1]!.worktree, "and the second one records the checkout it got");
+  assert.notEqual(children[1]!.cwd, "/repo", "its cwd is the ISOLATED path, not the shared checkout");
+  assert.equal(children[1]!.cwd, children[1]!.worktree!.path);
+  // The spawn reply says WHICH checkout it got — a manager reading "sharing the
+  // main worktree" while the pane works in an isolated one would reason about
+  // the wrong tree.
+  assert.match(replyText(second), /独立 checkout/);
+});
+
+// ---------------------------------------------------------------------------
+// THE SETTLEMENT ACTION (round-8 P1). Only the pure plan was covered; the
+// DECISION — which settlement a manager asked for, and which calls must be
+// REFUSED — had none, so a broken wiring would have shipped unnoticed.
+// ---------------------------------------------------------------------------
+
+test("close settles the checkout the manager asked about, and refuses a value it does not know", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, isolateChild: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const child = world.runtime().children[1]!;
+  assert.ok(child.worktree, "t2 got an isolated checkout");
+
+  // An unknown value is refused BEFORE anything is touched — the parameter is
+  // a decision, and guessing at it would discard somebody's work.
+  const bogus = await world.call("orchestrator_close", { childId: child.id, worktree: "nuke" });
+  assert.equal(bogus.isError, true);
+  assert.match(replyText(bogus), /worktree 参数不认识/);
+  assert.deepEqual(world.settlements, [], "…and nothing was settled");
+
+  const merged = await world.call("orchestrator_close", { childId: child.id, worktree: "merge" });
+  assert.equal(merged.isError, undefined, replyText(merged));
+  assert.deepEqual(world.settlements, [{ childId: child.id, settlement: "merge" }]);
+  // A MERGE KEEPS the checkout (round-6 P2): the merge is only staged, so the
+  // worktree and its branch are the manager's way back from `merge --abort`.
+  assert.ok(world.runtime().children[1]!.worktree, "a staged merge must not delete the only other copy of the work");
+});
+
+test("a checkout nobody can settle keeps the child OPEN — close is refused, not walked away from", async () => {
+  // The fail-closed half (round-9 P2, which the previous round claimed a static
+  // assertion covered — it did not). A session can have the isolation wired and
+  // the settlement not; closing anyway would leave a checkout that no later
+  // call can settle and that the orphan list cannot even reach (it reports
+  // unfinished children only).
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, isolateWithoutSettle: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const child = world.runtime().children[1]!;
+  assert.ok(child.worktree, "it really did get a checkout — that is what makes this a refusal worth testing");
+
+  const reply = await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
+  assert.equal(reply.isError, true, "closing would strand the checkout");
+  assert.match(replyText(reply), /没有接上 git 能力/);
+  assert.equal(world.runtime().children[1]!.closedAt, undefined,
+    "…and the child is still OPEN, so the close can be retried once the capability exists");
+});
+
+test("a FAILED reclamation keeps the record, so the discard can be retried", async () => {
+  // Round-10 P1: this is the branch the whole `reclaimed` field exists for,
+  // and it had no coverage (the fake hardcoded `reclaimed: true`). A discard
+  // that removed nothing must NOT forget the checkout — otherwise the retry
+  // the receipt offers is impossible and the directory is stranded, invisible
+  // even to the orphan list (which reports unfinished children only).
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(), approvePlan: true, isolateChild: true, settleReclaimed: false,
+  });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const child = world.runtime().children[1]!;
+
+  const failed = await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
+  assert.equal(failed.isError, undefined, replyText(failed));
+  assert.match(replyText(failed), /没能回收/, "the settlement's own account reaches the receipt");
+  assert.ok(world.runtime().children[1]!.worktree,
+    "the record SURVIVES a failed removal, or no later call could reach the checkout again");
+
+  // …and the retry reaches the settlement again.
+  await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
+  assert.equal(world.settlements.length, 2, "the second discard really ran");
+});
+
+test("a CLOSED child's checkout can still be settled — the advice the merge receipt gives is not a dead end", async () => {
+  // Round-7 P1: the merge receipt says "reclaim it later with close({worktree})",
+  // and `closableChild` rejects anything with a `closedAt` — which every child
+  // that has been through a close has. That made the advice unexecutable.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, isolateChild: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const child = world.runtime().children[1]!;
+  assert.equal((await world.call("orchestrator_close", { childId: child.id })).isError, undefined,
+    "close it first — the default `keep` leaves the checkout");
+  assert.ok(world.runtime().children[1]!.closedAt, "…and it is on record as closed");
+
+  const late = await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
+  assert.equal(late.isError, undefined, replyText(late));
+  assert.match(replyText(late), /早已关闭/, "the reply says what this call actually did");
+  assert.deepEqual(world.settlements, [
+    { childId: child.id, settlement: "keep" },
+    { childId: child.id, settlement: "discard" },
+  ], "the first close kept the checkout (the default), the late one discarded it");
+  assert.equal(world.runtime().children[1]!.worktree, undefined,
+    "…and only a settlement that REMOVED the checkout is forgotten");
 });
 
 test("close leaves the window bar up while a REVIEW pane is still on screen", async () => {

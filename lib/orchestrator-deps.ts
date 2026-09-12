@@ -307,6 +307,60 @@ export interface OrchestratorDeps {
   sessionTranscriptPath(): string | undefined;
 
   /**
+   * Give a child its own checkout of `repoRoot` (2026-09-10).
+   *
+   * Two writers in one checkout overwrite each other, and the answer used to
+   * be "never run two at once". `git worktree add -b <branch> <path> HEAD`
+   * gives the second writer its own directory on its own branch, sharing the
+   * object store — so same-repo tasks run side by side and the splice happens
+   * at settlement time, once, with a human-decided merge.
+   *
+   * ABSENT means this session has no git capability wired: the spawner then
+   * REFUSES the second child rather than sharing a checkout (lib/orchestrator-
+   * dispatch.ts is the only caller, and it fails closed).
+   */
+  createWorktree?(repoRoot: string, childId: string):
+    | { ok: true; path: string; branch: string }
+    | { ok: false; reason: string };
+
+  /**
+   * Settle a finished child's isolated checkout (2026-09-10).
+   *
+   * The project manager says WHAT (keep / merge / discard) and never runs git
+   * itself (philosophy one). The merge half is the one that can genuinely
+   * fail: a squash-merge of a branch that touched the same lines CONFLICTS,
+   * and the answer is to abort, leave the manager's checkout exactly as it
+   * was, and report — the child's work is still in its own worktree, so a
+   * conflict costs a decision, never the work.
+   */
+  settleWorktree?(input: {
+    childId: string;
+    taskId: string;
+    repoRoot: string;
+    worktreePath: string;
+    settlement: "keep" | "merge" | "discard";
+  }): {
+    ok: boolean;
+    text: string;
+    /**
+     * `false` ⇒ something was NOT removed; the caller must keep the record so
+     * a later call can retry. Absent means "assume it is gone" for a
+     * settlement that removes nothing.
+     */
+    reclaimed?: boolean;
+  };
+
+  /**
+   * This session's OWN pi session id (2026-09-10, relay takeover).
+   *
+   * Handed to the successor as its proof of heirship: the worktree-exclusivity
+   * guard refuses a second gate session in the same checkout, and the one
+   * thing that lets the successor take the claim over is being able to name
+   * the session it replaces (lib/session-exclusivity.ts).
+   */
+  ownSessionId?(): string | undefined;
+
+  /**
    * Every repo this session is accountable for, primary first (2026-09-07:
    * cross-repo parallelism needs the scheduler to know which repos exist).
    */
@@ -343,9 +397,44 @@ export interface OrchestratorDeps {
   onToolCall?(name: string): void;
 
   /**
-   * Fired when THIS session handed its orchestration to a successor
-   * (`orchestrator_handoff`). The extension sets its `handedOff` flag so
-   * the revival timer leaves the (voluntarily) retired session alone.
+   * RETIRE this session as the orchestration's holder, called by
+   * `orchestrator_handoff` BEFORE the successor pane opens (2026-09-10).
+   *
+   * Phase one is the RELEASE, and it has to be first: the successor arms its
+   * gate in this SAME worktree, and the exclusivity guard refuses it while
+   * this session's heartbeat is fresh. Phase two is the SILENCE, and it has to
+   * come after the successor's registry row is persisted —
+   * {@link HandoffRetirement} is where that order (and the two defects that
+   * pinned it) is written down.
+   *
+   * `undefined` means this session has nothing to retire.
    */
-  onHandoff?(): void;
+  onHandoff?(): HandoffRetirement | undefined;
+}
+
+/**
+ * The two follow-ups a RETIREMENT owes its caller.
+ *
+ * WHY IT IS TWO PHASES AND NOT ONE FLAG (2026-09-10, review round 1 — two P2s
+ * that were one root cause). Stopping everything at once broke two things:
+ *
+ *  - the relay record is written AFTER the successor's pane opens, and it goes
+ *    through `persist()` — which refuses to write for a retired session (two
+ *    sessions, one sidecar). Marking retirement first made the successor's own
+ *    registry row memory-only, lost on any restart;
+ *  - stopping the two wake-up timers is not something a rollback can undo by
+ *    itself (it needs a context), so a relay that never started its successor
+ *    left the session with no supervision and no revival clock — silent, and
+ *    still the holder.
+ *
+ * So the OUTSIDE resource (the worktree claim) is released up front — that is
+ * the half the successor's boot races — and the INWARD silence happens only
+ * once the record is safely on disk. A rollback then has exactly one thing to
+ * undo, because the other two never happened.
+ */
+export interface HandoffRetirement {
+  /** The successor is up AND its relay record is persisted: go silent now. */
+  committed(): void;
+  /** The successor never started: take the worktree back and carry on. */
+  rolledBack(): void;
 }

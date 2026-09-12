@@ -331,7 +331,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   `orchestrator-handoff-advice.ts`（上下文用量 + 待答请求数 ⇒ 接力时机）、
   `orchestrator-wait.ts`（「有事发生」是什么，以及那份五块回执怎么装）、
   `orchestrator-registry.ts`（编排只能操作门禁替它创建的东西）、
-  `orchestrator-relay.ts`（自我接力：只有后继者能关掉前任）、
+  `orchestrator-relay.ts`（自我接力：只有后继者能关掉前任；后继者的环境带上前任 pane / 交接文档 / 前任 transcript / **前任 session id**——最后一项是它接管 worktree 占用的继任凭据）、
   `orchestration-id.ts`（编排的稳定地址，接力换人后子会话无感）。
 - **通道（两侧，IO 经注入的 seam）**：`orchestrator-channel.ts`（路径、记录
   schema、追加/读取/游标、大 payload 溢出、投影、心跳）、
@@ -406,8 +406,8 @@ edit/write、ship、门禁自己的 checkpoint 提交（它会 `add -A`，不堵
 `model-config.ts` 把 `review-gate.json` 的 `agents` 段渲染成 `agents/*.md`
 的 frontmatter（项目层盖全局层），**无内置默认**：安装脚本写入 4 角色的默认
 slots，会话启动时 `validateAgentsForStartup` 硬检查每个角色（缺失/slots 空/
-spec 非法即停会话），`modelSpecFor` 对未配置角色返回 undefined（派发
-fail-closed）。`model-diagnose.ts`
+spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置角色返回
+**空链**（派发 fail-closed）。`model-diagnose.ts`
 回答「我的审查实际跑在哪个模型上」，`gate-doctor.ts` 是 `/gate-doctor` 的只读
 体检，`ui-widget.ts` 构造 editor 下方那条**单行**状态条（详情在 `/gate-status`）。
 
@@ -473,7 +473,7 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（124 个模块）
+## 五、`lib/` 全量速查表（127 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -541,6 +541,7 @@ fail-closed）。`model-diagnose.ts`
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
 | `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论**本体**直写 channel report（无 fence 合成、无解析）；**签名按角色收窄**——reviewer / goal-auditor 只有 verdict + findings + cwd（传 notes 显式拒绝且不占额度），adviser 保留 notes（它的产出就是正文）；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度；**零审查的 READY 直接拒**（判据在 `judge-inspection.ts`，拒绝不占额度、并给出申诉出路），观测结果以新增可选字段 `inspection` 盖在 report 上；本轮范围与全量/增量档位以另一个新增可选字段 `scope` 盖上（自述，与门禁登记的那半并排落进 `RoundRecord.scope`，只记录不阻塞） |
 | `judge-inspection.ts` | 机械审查证据（judge 侧、进程内）：把本轮成功的工具调用分类成「读内容 / 看 diff / 检索」（列文件名的 `ls`/`find` 不算），折叠成本轮证据并从任务文本里解析 `baseline..HEAD` 与全量/增量判定标记（`parseReviewScopeKind`，标记常量来自 `review-carryover.ts`；两者**只记录、不作为阻塞条件**）；**本轮公文一律不算审查**（`GATE_OWNED_PATH_MARKERS` + 本轮任务文件/findings 流的确切路径——探针的原话是「直接交 READY 别做别的」，而 judge 总要读任务，算进去这道门就等于从没拦过）；证据按**轮次记名**（`evidenceForRound`），被放弃那一轮的阅读算不到下一轮头上；唯一规则是「带裁决的角色零审查不得交 READY」（adviser 写死豁免，未知角色按裁决角色处理——fail-closed；BLOCKED/NEEDS_HUMAN 不受限） |
+| `judge-model-rotation.ts` | pane 侧的**模型自愈**（2026-09-10）：judge 是唯一看得见自己 provider 错误的一方（opener 卡在 wait 里，通道里只有结论），所以链得由它自己走。触发点是 `agent_settled` + 最后一次运行以 `stopReason: "error"` 终结（pi 自己的重试已耗尽；单个 503 burst 通常自愈，所以**不看第一次失败**）。`onModelFailure` 从角色链（`judge-prompt.ts` 的 `modelChainFor`，每次现读配置）走到本轮回合内还没花掉的下一槽：切换模型 + 该槽的 thinking、自注入一句「继续本轮」（transcript、任务与已查到的证据全部保留）、并把 `ModelEvent` 写成通道 state 记录供 opener 冷却坏槽；链全花完标 `exhausted`，那是**轮次的结束**（`judge_wait` 的 `model-exhausted` 判据），不是无限等。无链可走返回 undefined（调用方的 fail-closed 情形） |
 | `judge-report.ts` | opener 侧标准报告（wake-up 内容：verdict、证据位置、记录情况、待答问题、**被搁置的 report**（`notThisRound`：id/轮次/时间 + 原因，说明它没被记为本轮裁决）、**降级绑定说明**（`bindingNote`：独立成行，因为「记录」行只打印首行，塞进记录正文就等于记了没人看见）、**本轮审查范围**（`scope`：judge 自报的 `baseline..HEAD` 与全量/增量档位，settle 扫描与 `judge_wait` 两条唤醒路径都传，否则一半唤醒有、一半没有）；transcript 扒取半边已随交卷工具删除） |
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
 | `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
@@ -548,13 +549,14 @@ fail-closed）。`model-diagnose.ts`
 | `loop-goal.ts` | L8：loop 会话退出契约的文件、审批记录与注入 |
 | `loop-stall.ts` | L2 自动续跑的断路器：外部阻塞（限流、模型不可达）时停止空转 |
 | `model-config.ts` | 每个 agent 的模型链配置层：把 `review-gate.json` 的 `agents` 段渲染成 frontmatter；`validateAgentsForStartup` 启动硬检查（无内置默认） |
+| `model-health.ts` | judge 模型槽的**冷却记忆**（纯函数，2026-09-10）：键是 `provider/id`（丢掉 thinking 后缀，否则改一个槽的 level 就把学到的东西忘了）→ 最近一次失败；`MODEL_FAILURE_TTL_MS`（10 分钟）内派发跳过该槽、过期自动恢复（并带条数上限，坏 id 不会把文件撑爆）。`selectHealthySlot` 给「第一个不在冷却期的槽」，全都在冷却时仍按链头派发并标记 `allCooling`（fail-open：开不出来的轮次连失败都报不了）；`recordModelFailure` / `clearModelFailure`（轮转成功即证明目标可用，旧记录必须清掉，否则 TTL 内白白跳过好模型）/ `nextSlotAfter`（pane 侧走链）/ `describeCoolingSlot`。持久化住在 `.pi/judge-hierarchy.json` 的 `modelHealth`（opener 读写；judge pane 按契约从不写仓库状态） |
 | `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |
 | `readonly-stall.ts` | 只读钻探止损（2026-09-18）：工具调用层计数器，连续 30 次成功的只读调用（read 家族 + bash）无 edit 落地时注入 NUDGE（只提示不拦截）。补 loop-stall 的 turn 边界盲区与进展维度「任何调用都算推进」的盲区；状态纯内存，不落盘。**谁听得见由 `readonlyStallNudgeFor(mode)` 决定**（2026-09-17）：`normal` 与 `orchestrator` 静默 —— 项目经理按约束 2 根本不写代码，这条提醒对它恒为误报；计数本身仍与模式无关 |
 | `orchestration-id.ts` | 编排 id：编排的稳定地址（不是 session id），接力换人后子会话无感 |
 | `out-of-repo-paths.ts` | 仓库外路径判定：`isOutsideRepoPath`（sidecar 里表现为绝对路径就是仓库外）+ **敏感路径**判定（复用 `isSensitiveFile` + `OUT_OF_REPO_SENSITIVE_SEGMENTS` 按目录段匹配，与家目录展开无关）+ `sensitiveOutOfRepoEdits`（代批时真正算违规的那一批）。仓库内的写入**不参与判定**：同一 repo 的任务本来就被串行调度，文件边界已于 2026-09-17 从 plan 中移除（原 `orchestrator-boundaries.ts` 的边界代数一并删除）。它不替代 `ship-gate-edit-guard.ts` 的编辑期敏感文件防线 |
 | `orchestrator-channel.ts` | 点对点通道：路径、记录 schema、追加/读取/行游标、大 payload 溢出到旁文件、投影（还欠着什么；2026-09-09 起**只认通道主人的 `state` 记录**——主人 = 第一条带 session id 的 state 记录的作者，无 id 的记录照收、别的 session 的记录忽略，已污染的通道重读即净）、心跳超时判定；以及**不可信输入的边界净化**——`sanitizeScopeStamp` / `sanitizeContextPercent` / `sanitizeDeliveryStation`（未知取值一律丢弃，绝不降级成某个真值；站点词表仍只由 `lib/delivery-station.ts` 定义） |
 | `orchestrator-child-channel.ts` | 子会话侧：状态上报、「人与项目经理任意一方先答即生效」的竞态提问、读取与确认编排下发的指令 |
-| `orchestrator-child-state.ts` | 子会话状态（working / waiting-input / **waiting-judge** / idle / done / dead / stalled + mode-changed）与再唤醒退避；`waiting-judge` 是「在等门禁自己派出去的 reviewer/precommit」，不叫醒项目经理；`mode-changed` 是模式切换事件，叫醒项目经理。也让 `stalled` 回到只表示「扩展不在了」。判据全部是结构化真值，不看屏幕。**2026-09-09**：working / idle 行都带「自上次推进 Xs」（idle 行不再印心跳时间）；child 侧 `childBinding` 校验本进程 session id 必须是门禁指定的确定性 id —— 继承 env 的 subagent 不再绑定父通道 |
+| `orchestrator-child-state.ts` | 子会话状态（working / waiting-input / **waiting-judge** / idle / done / dead / stalled + mode-changed）与再唤醒退避；`waiting-judge` 是「在等门禁自己派出去的 reviewer/precommit」，不叫醒项目经理；`mode-changed` 是模式切换事件，叫醒项目经理。也让 `stalled` 回到只表示「扩展不在了」。判据全部是结构化真值，不看屏幕。**2026-09-09**：working / idle 行都带「自上次推进 Xs」（idle 行不再印心跳时间）；child 侧 `childBinding` 校验本进程 session id 必须是门禁指定的确定性 id —— 继承 env 的 subagent 不再绑定父通道。**2026-09-10**（用户决定）：`idle` 有**结构化证据**就不等 120s —— child 在 `agent_settled` 上写 `settledSince`、此后任何工具调用清掉它（`lib/orchestrator-channel.ts`），「已 settled 且此后无工具调用」是关于结构的陈述，不是时间窗；`IDLE_PROGRESS_GRACE_MS`（120s，用户 2026-09-04 的数字，未改）降为**兼容兜底**（旧版 child / 从未 settle 的会话 / 畸形戳）。同轮：`done` 不再「响两次就永久安静」—— 改为随真持续时间**递减频率**重报（60s→2×→…→封顶 10 分钟），因为终态是对 **child** 而言的，而**项目经理**还欠它一次复验、一个任务状态和一次 `close`（实测两次的共享记忆被消费掉后，PM 在已完成的 child 旁空等满 300s 预算） |
 | `orchestrator-pane-decor.ts` | 可视化区分的**字符串**：按 id 派色（纯函数，同一会话永远同色）、`@task-slug · state 220s` 的边框标题模板、window 级选项的取值。**纯展示层**：只写不读，任何判定都不看它。何时收起 window 标签栏（`releasesWindowLabels` / `countDecoratedPanes`）与真正写标题（`refreshSessionPaneTitle`）都在 `session-factory.ts`，2026-09-05 起五条关闭路径共用同一判定。**window 标签栏是跨会话共享资源，它的所有权语义（谁开、谁释放、缺信息一律保留、window 有自己的 pane 就用自己的、否则回退被关的那个，外加两个已实测未修的跨会话误清场景）写在本模块文件头**（2026-09-06）。可观测的那半钉在 `test/orchestrator-pane-decor.test.ts` 末尾一条驱动 `orchestrator_close` 的测试上；跨会话那半**测不到**（fake tmux 只列它自己开过的 pane），只有文字论证 —— 后续引入跨会话 pane 登记面时应当**重写**那条测试，而不是等它失败 |
 | `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：删任务、加依赖、并行改串行、降并行度、收紧交付站点⇒批准迁移并记审计；新任务/删依赖/串行改并行/提并行度/换 repo/提高交付站点⇒重新批准。**文件边界自 2026-09-17 起不是 plan 的一部分**（用户决定：同 repo 串行，边界防不住冲突），“已批准目录树内的细化 / done 任务让出地盘”两条规则随边界一起删除。一条 2026-09-06 的放宽保留：**批准世系** `approvedPlanHistory`（用户批准起、每次平移追加的内容 hash 链）——写回其中任一内容即把批准平移回来，撤回一次误操作不必重走 submit；用户每次新的显式批准**重置**世系，因此被收窄掉的旧版本回不来 |
 | `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案。**「哪份 report 收本轮」已于 2026-09-05 搬去 `audit-round.ts`** —— 那是审计**回合**的问题，不是 plan 的，三种 kind 都要回答它 |
@@ -569,17 +571,18 @@ fail-closed）。`model-diagnose.ts`
 | `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash。`planHash` 的**产出方**，因此「什么算一个 plan hash」也归它：`isPlanHash` 是那条形状规则的唯一实现，凡从 sidecar 读回授权记录的地方都用它（复制出去的授权校验只会朝放宽的方向漂移） |
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
-| `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西。也是 sidecar 里那份 runtime 的**唯一净化处**：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；`withoutPlanApproval` 是「换了个新会话能继承什么」的唯一出处（登记表与 grants 留下，许可全部剥离）——写在调用点上的字段清单迟早漏掉新字段 |
+| `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西。也是 sidecar 里那份 runtime 的**唯一净化处**：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；`withoutPlanApproval` 是「换了个新会话能继承什么」的唯一出处（登记表与 grants 留下，许可全部剥离）——写在调用点上的字段清单迟早漏掉新字段。child 记录上的 `worktree`（路径 + 分支）也是在这里净化的：它会被交给 git，所以与其它路径同等强度 |
+| `orchestrator-worktree.ts` | **一个写者一个 checkout**（2026-09-10，用户决定）：纯逻辑模块——路径/分支的**派生与反推**（`childWorktreePath` / `repoRootOfWorktree`，后者反推不出来就**拒绝**而不是猜）、创建 argv（`-b <branch> <path> HEAD`，钉在 HEAD 上而不是分支名）、三种结算（`keep` / `merge`（先 `add -A` + `commit` 提交遗留改动，再 `--no-commit --no-ff` 合入并 staged；**merge 不回收 checkout**——它只是 staged，删了它一次 `merge --abort` 就只剩 reflog，回收交给之后的 `discard`）/ `discard`）的**完整计划**（`planSettlement`，冲突路径在跑之前就定好）、以及未结算 checkout 的识别（`findOrphanWorktrees`：pane 列表读不到就**不下断言**）。git 调用在 `extensions/review-gate.ts` 侧执行 |
 | `orchestrator-relay.ts` | 自我接力：只有后继者能关掉前任 |
 | `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close / handoff）并注册全部八个编排会话工具——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，answer 与 recover/attach 在各自的 `*-tools.ts` |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块 |
 | `orchestrator-takeover.ts` | 「仓库里有别人的 plan」时的两个意图：**接管**（从盘上发现本仓库的候选 orchestration id —— sidecar 记录优先、`rg-channels/` 目录名兜底，再判定这个 id 能否被本会话采用）与**归档**（归档文件名、归档载荷、确认框文案）。两条拒绝路径（`orchestrator_plan` 的 write/submit、`orchestrator_spawn`）与两个入口（`orchestrator_attach`、`orchestrator_plan action:archive`）共用同一份判定；纯函数 + 注入式读盘 |
 | `orchestrator-tmux.ts` | 仅剩的 tmux 命令构造：开 pane / 关 pane / 列 pane，加上 pane 装饰（`select-pane -P/-T` 与 window 级 `setw pane-border-*`，一律不带 `-g`，且都会过 `assertSafeTmuxArgv`）—— 没有 send-keys，也没有 capture-pane。**窗口布局也在这里**（2026-09-08）：`buildWindowLayoutArgv` / `parseWindowLayout` 把窗口的真实几何（按 `pane_left` 分列）读回来，`planPanePlacement` 定落点（<3 列时从**独占一列**的 pane 开新列 —— 只有它的父容器是窗口根，否则 tmux 会在列内嵌套；≥3 列时堆进第三列），`buildEvenLayoutArgv` 是 `select-layout -E`（等分目标所在的那一层：第三列的 pane 分高度，第一列的 pane 分列宽） |
-| `orchestrator-tool-kit.ts` | 编排工具的共用前置：模式校验、pane 实况、plan 可用性；以及**投递核实**（`verifyDeliveryOn` 按通道路径盯到第一份证据为止，`verifyDelivery` 是编排侧入口、`verifyJudgeBoot` 是 judge 侧入口——judge 的通道跨 pane 长存，所以它带一条 `baselineRecordCount` 水位线）；边框标题的刷新调度在这里，真正写标题的是 `session-factory.ts` |
+| `orchestrator-tool-kit.ts` | 编排工具的共用前置：模式校验、pane 实况、plan 可用性；以及**投递核实**（`verifyDeliveryOn` 按通道路径盯到第一份证据为止，`verifyDelivery` 是编排侧入口、`verifyJudgeBoot` 是 judge 侧入口——judge 的通道跨 pane 长存，所以它带一条 `baselineRecordCount` 水位线）；探测节奏默认是**退避**（`deliveryVerifyDelayMs`，从 100ms 倍增到 1s 封顶：固定 1s 会把每一次成功的投递都量化成整秒，而等的人是被阻塞在工具调用里的项目经理），显式传 `intervalMs` 的调用方保持旧的等间隔节奏。边框标题的刷新调度在这里，真正写标题的是 `session-factory.ts` |
 | `orchestrator-tools.ts` | plan / notify 两个不碰 tmux 的工具 |
 | `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据），以及那份五块回执的装配 |
 | `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、持有本编排唯一的通道 IO 与监督记忆；`resolveTaskRepo` 默认实现用 git 的 `--show-toplevel` 把任务声明的 repo 解析成仓库根（子目录/符号链接路径都归一） |
-| `parallel-review.ts` | 审查契约：一轮一个 reviewer、判不可变的 `baseline..HEAD`，以及交给它的任务文本 |
+| `parallel-review.ts` | 审查契约：一轮一个 reviewer、判不可变的 `baseline..HEAD`，以及交给它的任务文本。2026-09-10 起任务文本里还带 **CHANGE INDEX**（`formatChangeIndex`）：逐文件 numstat + 门禁预先分好的读取批次（`planChangeBatches` 贪心装箱，大文件单独成批）—— 实测 reviewer 的 92.5% 往返只发 1 个工具调用、单轮 17–59 次往返，而工具执行只占那一轮的 6%，代价在**消息条数**不在读多少 |
 | `polish-gate.ts` | 连续 READY 或同一文件反复打磨时，再审必须给出理由 |
 | `poll-wait.ts` | 通用等待骨架（探测、发布、按判据或预算停），判据由调用方注入 |
 | `precommit-parse.ts` | precommit 输出解析：只认 `## Overall:` sentinel（FAIL > NO_CHECKS_RUN > PASS，FAIL 终结）。review 侧没有文本可解析——judge 交卷即结构化 |
@@ -591,14 +594,14 @@ fail-closed）。`model-diagnose.ts`
 | `restatement.ts` | L8a 需求反述：记录（正文 + hash + 时间 + 站点，落 gate-state 而非工作区）、内容最小校验（长度 + 必须有「改之前 → 改之后」对照，接受的写法在导出的 `RESTATEMENT_CONTRAST_TOKENS` 数组里）、两处拒绝文案（含可照抄骨架，以及**真走得通的**误判出路：`ask_user` 交给用户 / `/gate-mode` 换模式——**不指向 `request_arbitration`**，工具拒绝不产生可申诉记录，去申诉只会被回绝或误裁到别的拦截并白烧配额）、确认框文案，以及工具 `propose_restatement` 的唯一注册入口 |
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
 | `review-adjudicate.ts` | reviewer 裁决（纯）：在 judge 交上来的结构化结论上判 READY 携带未解决 P0/P1 → BLOCKED、findings 计数、跨轮 coarse fingerprint；另有 verdict 规范化与两个投影（per-file 给 polish gate、severity+issue 给 goal/plan 审计） |
-| `review-prepare-tools.ts` | **内部实现**（不注册给 pi）：算不可变的 `baseline..HEAD`、polish gate、findings 流，并登记裁决要绑定的 review target；由 `judge_submit` 调用 |
+| `review-prepare-tools.ts` | **内部实现**（不注册给 pi）：算不可变的 `baseline..HEAD`、polish gate、findings 流，并登记裁决要绑定的 review target；由 `judge_submit` 调用。**一次 `git diff --numstat` 同时回答「哪些文件动了」与「动了多少」**（失败才回落到 `--name-only`），结果渲染成 reviewer 任务文本里的 CHANGE INDEX（`parallel-review.ts`） |
 | `review-carryover.ts` | **增量审查契约的唯一权威出处**：把「上轮裁决 → 未关闭 findings → 机械算出的 delta → 一致性扫描与可重开条款」渲染成任务书里的 `Review scope for this round` 块；构建器收显式入参（裁决/findings/delta/全量-增量决策），没有 `ReviewScopeDecision` 也能调；两行判定标记同时是 judge 侧读回全量/增量的线格式 |
 | `review-scope.ts` | 增量审查定档（只决策、不出文案）：**两类前置** —— 关于增量的（多大就升级成整轮深审、是否触及未审过的文件），以及关于**读者**的（2026-09-06）：只有 transcript 确实续用的 judge 才配拿增量任务书，判定由 `judge-rotation.ts` 的 `judgeRemembersPreviousRound` 给，本模块只消费。缺任何一项即 `full`，增量从不靠推断 |
 | `review-stream.ts` | findings 流：reviewer 边审边发，主会话边修 |
 | `sensitive-grant.ts` | 敏感文件的一次性用户授权：限定路径、限时、用后即焚 |
 | `session-revival.ts` | 存活不变量（2026-08-30）：会话在退出契约未满足时停下，门禁就周期性唤醒它。纯判定：看不见续跑预算与 loop-stall 断路器（它们管注入路径，管不了「停下」），但尊重人的叫停（ESC / ask_user / bypass / 仲裁 pause）与 handoff 交接 |
 | `session-dir.ts` | pi 的 session-dir 编码约定，fresh-context 角色据此找到主会话 transcript |
-| `session-exclusivity.ts` | 一个 worktree 只允许一个「占用主 sidecar」的会话：心跳存在文件（`.pi/session-presence.json`）判活，第二个占用者 fail-closed 拒绝——拦 edit/write、拦 ship、连门禁自己的 checkpoint 提交与 goal 文件写入一并拦（`normal` 模式除外：那个模式的定义就是门禁整体关闭，所以不发拒绝；它只在 worktree 空闲时写心跳，已被占用时既不拒绝也不写——凭据属于占用者）。judge 与编排子会话因为不写主 sidecar 而天然豁免。裁决输入只有**心跳新鲜度**（60s 窗，`PRESENCE_FRESH_MS`），`pid`/`host` 仅作诊断（这一点与 `blocked-marker.ts` 相同，**但两者的失败方向相反**）；一切未知（文件缺失/损坏/时钟异常/未来时间戳）一律 fail-**open** 放行——**只有一个正面事实（刚写的心跳）才能拒绝**，占用者消失后自动复检解除。**它与 `blocked-marker.ts`、`judge-pane.ts` 的判活为什么不可收敛**：见本文件头与 `test/liveness-criteria.test.ts`（2026-09-06 复核） |
+| `session-exclusivity.ts` | 一个 worktree 只允许一个「占用主 sidecar」的会话：心跳存在文件（`.pi/session-presence.json`）判活，第二个占用者 fail-closed 拒绝——拦 edit/write、拦 ship、连门禁自己的 checkpoint 提交与 goal 文件写入一并拦（`normal` 模式除外：那个模式的定义就是门禁整体关闭，所以不发拒绝；它只在 worktree 空闲时写心跳，已被占用时既不拒绝也不写——凭据属于占用者）。judge 与编排子会话因为不写主 sidecar 而天然豁免。裁决输入只有**心跳新鲜度**（60s 窗，`PRESENCE_FRESH_MS`），`pid`/`host` 仅作诊断（这一点与 `blocked-marker.ts` 相同，**但两者的失败方向相反**）；一切未知（文件缺失/损坏/时钟异常/未来时间戳）一律 fail-**open** 放行——**只有一个正面事实（刚写的心跳）才能拒绝**，占用者消失后自动复检解除。2026-09-10 新增第二条放行：**继任关系** —— `orchestrator_handoff` 起的后继者带着前任的 session id（`RG_ORCHESTRATOR_PREDECESSOR_SESSION`），占用者 id 等于它即放行；该判定排在**新鲜度之前**，因为「前任还没来得及释放」正是它要覆盖的场景（实测：后继者被自己前任的心跳拒之门外，报「这个 worktree 已被另一个会话占用」后 pi 随即退出）。**它与 `blocked-marker.ts`、`judge-pane.ts` 的判活为什么不可收敛**：见本文件头与 `test/liveness-criteria.test.ts`（2026-09-06 复核） |
 | `session-factory.ts` | **开一个带角色的 pi 会话的唯一入口**（2026-09-05）：一次 `openSessionPane` 走完 split → 登记 → 装饰 → 等分 → 投递核实，六个开 pane 的调用点（judge 轮次派发 / `judge_spawn` / `judge_recover` / `orchestrator_spawn` / `orchestrator_recover` / `orchestrator_handoff`）全部经它；**落点由窗口自己的几何决定**（`placementFor` 探测 → `planPanePlacement` 决策），关 pane 同理（`closeSessionPane` kill 前探测、kill 后重新等分）—— 三列规则因此在门禁内部完成，agent 不碰窗口；env 只在 `buildSessionEnv` 一处拼（`RG_JUDGE_*` 与 `RG_ORCHESTRATION_ID`/`RG_GATE_MODE`/`RG_STATE_VARIANT` 都是跨进程契约，也是 session 独占豁免的依据）；装饰含 window 级边框行（judge pane 曾因此看不到边框 = C1），标题刷新 `refreshSessionPaneTitle` 是**唯一**写标题处、带节流与重绘记忆（judge 侧曾无人刷新 = C2）；`paneRecoverability` 是两处 recover 共用的同一判定。它是 `orchestrator-tmux.ts` 开 pane argv 的**唯一**使用者 |
 | `side-effects.ts` | 唯一一处「本进程能不能碰外部世界」的判定（测试 / CI / 无 TTY / 显式关闭一律不能），通知与编排共用 |
 | `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |
@@ -696,7 +699,7 @@ test 名称，同一个文件后面跟着的名称都归它。零个是正常情
 | 同一段口径的副本处 | 权威在哪 | 实测备注 |
 | --- | --- | --- |
 | L1–L8 分层清单：`README.md` 的 ASCII 图（`L1 Ship gate` … `L8 Loop-goal approval`）↔ 本文 §二的表 | 无单一权威（分散在各层实现） | `test/module-map.test.ts` 只覆盖 §五；README 端只有零散句子被别的测试 pin，层级表本身不在其中 |
-| judge 默认模型链：`scripts/install-package.mjs` 的 `DEFAULT_AGENTS`、`AGENTS.md` 正文、`README.md` 的配置示例 | `agents/*.md` 的 frontmatter（这一端有 pin，见 7.1） | `test/install-package.test.ts` 只验安装**行为**，从不校验 `DEFAULT_AGENTS` 的内容与 `agents/*.md` 一致。**2026-09-17 实测已经漂了**：`DEFAULT_AGENTS.arbiter` 是 `onekey/gpt-5.6-sol:max`（与 `lib/project-config.ts` 的 `DEFAULT_ARBITER_MODEL` 同源），而 `agents/arbiter.md` 与 AGENTS.md 都写 `claude-fable-5` → `claude-opus-5`。收敛前要先由用户拍板哪一份是对的（跨模型仲裁是不是刻意的），所以本轮只记录、不动 |
+| judge 默认模型链：`scripts/install-package.mjs` 的 `DEFAULT_AGENTS`、`AGENTS.md` 正文、`README.md` 的配置示例 | `agents/*.md` 的 frontmatter（这一端有 pin，见 7.1）；**且自 2026-09-10 起它就是运行时输入**：派发与 pane 都读这条链（`lib/model-health.ts` / `lib/judge-model-rotation.ts`） | `test/install-package.test.ts` 只验安装**行为**，从不校验 `DEFAULT_AGENTS` 的内容与 `agents/*.md` 一致。**2026-09-17 实测已经漂了**：`DEFAULT_AGENTS.arbiter` 是 `onekey/gpt-5.6-sol:max`（与 `lib/project-config.ts` 的 `DEFAULT_ARBITER_MODEL` 同源），而 `agents/arbiter.md` 与 AGENTS.md 都写 `claude-fable-5` → `claude-opus-5`。收敛前要先由用户拍板哪一份是对的（跨模型仲裁是不是刻意的），所以本轮只记录、不动 |
 | 整份文档从未被任何测试读到：`docs/coding-standards.md` | —— | 2026-09-08 起 §5 最小化准则进入多个测试的扫描面（见 §7.1 最小化行），其余章节仍只被 `review-carryover.test.ts` 查增量契约一项。（`docs/orchestrator-supervision.md`、`docs/hierarchical-session-design.md`、`docs/dev-flow.md` 已于 2026-09-17 进入 `test/copy-convergence.test.ts` 与 `test/delivery-station.test.ts` 的扫描面，不再是「零测试读到」）|
 | **当轮抓到的活样本**：2026-09-17 第一次拿代码去核这张表的三行，三行**全是错的** —— 子会话状态 union 早已是八个（`mode-changed`），而 `README.md`、`docs/execution-model.md`、`docs/orchestrator-supervision.md` 连同 union 自己上面那句注释都还写「七」；`docs/execution-model.md` 点名了三个一个月前就删掉的工具、却从没提过 `orchestrator_plan`；`lib/restatement.ts` 里的交付站点定义句是手抄的第二份 | 无 | 这三行当轮收敛并进了 7.1（前一版的活样本是 §六第 4 条那组过期计数与点名，已在 2026-09-05 改成不带计数、不点名的表述）。教训不变：**一张讲「副本会安静过期」的表，自己也会安静过期** —— 所以每次动它，顺手拿代码核一行 |
 

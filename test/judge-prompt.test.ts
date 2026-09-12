@@ -18,7 +18,7 @@ import {
   JUDGE_ROLES,
   agentRoleBody,
   buildJudgeSystemPrompt,
-  modelSpecFor,
+  modelChainFor,
   resolveRoleFile,
   writeJudgeSpawnFiles,
 } from "../lib/judge-prompt.ts";
@@ -28,9 +28,10 @@ function sandbox(): string {
   return mkdtempSync(join(tmpdir(), "rg-judge-prompt-"));
 }
 
-function writeRole(dir: string, role: string, body: string, model = "claude-fable-5"): string {
+function writeRole(dir: string, role: string, body: string, model = "claude-fable-5", fallbackModels?: string): string {
   const path = join(dir, `${role}.md`);
-  writeFileSync(path, `---\nname: ${role}\nmodel: ${model}\nthinking: max\n---\n${body}`, "utf8");
+  const fallback = fallbackModels === undefined ? "" : `fallbackModels: ${fallbackModels}\n`;
+  writeFileSync(path, `---\nname: ${role}\nmodel: ${model}\n${fallback}thinking: max\n---\n${body}`, "utf8");
   return path;
 }
 
@@ -166,7 +167,7 @@ test("the shared protocol no longer teaches reviewer / goal-auditor to write `no
   assert.doesNotMatch(JUDGE_COMMON_PROTOCOL, /notes ≤5 行/);
 });
 
-test("modelSpecFor: explicit slots[0] wins; auto:true uses the frontmatter default", () => {
+test("modelChainFor: the WHOLE chain, from the config slots or the frontmatter", () => {
   const dir = sandbox();
   try {
     const repo = join(dir, "repo");
@@ -177,15 +178,35 @@ test("modelSpecFor: explicit slots[0] wins; auto:true uses the frontmatter defau
       adviser: { auto: true, slots: [], source: "default" as const },
       "goal-auditor": { auto: true, slots: [], source: "default" as const },
     };
-    assert.equal(modelSpecFor(map, "reviewer", repo, join(dir, "home")), "onekey/glm-5.3:max");
-    // auto:true → frontmatter model + thinking; a provider-qualified model passes through
-    assert.equal(modelSpecFor(map, "goal-auditor", repo, join(dir, "home")), "onekey/glm-5.3:max");
-    // a BARE frontmatter id gets the package provider pinned (round-2 P2: this
-    // branch had no real coverage — the duplicate assertion stood in for it)
+    // auto:false ⇒ every slot, in the order the user wrote them. This is what
+    // the dispatch picks from and what the pane rotates through — returning
+    // only the head is the defect the chain fix removed (2026-09-10).
+    assert.deepEqual(modelChainFor(map, "reviewer", repo, join(dir, "home")), [
+      "onekey/glm-5.3:max",
+      "anthropic/claude-opus-5:max",
+    ]);
+    // auto:true ⇒ frontmatter model + its fallbackModels line; a
+    // provider-qualified model passes through and keeps its own level.
+    assert.deepEqual(modelChainFor(map, "goal-auditor", repo, join(dir, "home")), ["onekey/glm-5.3:max"]);
+    // A BARE frontmatter id gets the package provider pinned (round-2 P2: this
+    // branch had no real coverage — the duplicate assertion stood in for it),
+    // and its fallbacks are pinned the same way.
     const bare = join(dir, "repo2");
     mkdirSync(join(bare, "agents"), { recursive: true });
-    writeRole(join(bare, "agents"), "goal-auditor", "BODY", "claude-fable-5");
-    assert.equal(modelSpecFor(map, "goal-auditor", bare, join(dir, "home")), "anthropic/claude-fable-5:max");
+    writeRole(join(bare, "agents"), "goal-auditor", "BODY", "claude-fable-5", "claude-opus-5, onekey/gpt-6-astra:xhigh");
+    assert.deepEqual(modelChainFor(map, "goal-auditor", bare, join(dir, "home")), [
+      "anthropic/claude-fable-5:max",
+      "anthropic/claude-opus-5:max",
+      // A slot that names its OWN level keeps it: appending the role default
+      // again would render `…:xhigh:max`, which resolves to no model at all.
+      "onekey/gpt-6-astra:xhigh",
+    ]);
+    // Nothing resolvable ⇒ an EMPTY chain, never a manufactured default.
+    const empty = join(dir, "repo3");
+    mkdirSync(join(empty, "agents"), { recursive: true });
+    writeFileSync(join(empty, "agents", "goal-auditor.md"), "---\nname: goal-auditor\n---\nBODY", "utf8");
+    assert.deepEqual(modelChainFor(map, "goal-auditor", empty, join(dir, "home")), []);
+    assert.deepEqual(modelChainFor(map, "nobody", empty, join(dir, "home")), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -211,8 +232,9 @@ test("writeJudgeSpawnFiles: writes the system prompt and resolves the model", ()
     });
     assert.ok(existsSync(files.sysPromptPath));
     assert.ok(readFileSync(files.sysPromptPath, "utf8").includes("AUDIT_BODY"));
-    // auto:false ⇒ slots[0] — the model the child actually runs with.
-    assert.equal(files.model, "anthropic/claude-opus-5:max");
+    // auto:false ⇒ the WHOLE slot list, head first: the dispatch picks a slot
+    // from it and the pane rotates through the rest (2026-09-10).
+    assert.deepEqual(files.chain, ["anthropic/claude-opus-5:max"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

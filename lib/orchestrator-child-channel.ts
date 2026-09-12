@@ -58,6 +58,7 @@ import {
 
 } from "./orchestrator-channel.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
+import type { ModelEvent } from "./model-health.ts";
 
 
 /** How often the channel is re-read while a question is outstanding. */
@@ -118,7 +119,7 @@ function stamp(io: ChannelIO): string {
 export function reportState(
   binding: ChildChannelBinding,
   state: ChildReportedState,
-  extra: { contextPercent?: number; dialogTitle?: string; note?: string; waitingFor?: string; lastProgressAt?: string } = {},
+  extra: { contextPercent?: number; dialogTitle?: string; note?: string; waitingFor?: string; lastProgressAt?: string; settledSince?: string; modelEvent?: ModelEvent } = {},
 ): void {
   try {
     appendRecord(binding.io, binding.target, {

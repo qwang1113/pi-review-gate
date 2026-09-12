@@ -159,6 +159,33 @@ export const REQUIREMENT_PROTOCOL =
   "会直接被拒、一个框都不弹（拒绝文案里有可照抄的骨架）；需求变了就再反述一次，最新一份生效。";
 
 /**
+ * READING IN PARALLEL — the one rule that costs a model round-trip per read.
+ *
+ * MEASURED (2026-09-10, this repo): 92.5% of a reviewer's assistant messages
+ * carried exactly ONE tool call (mean 1.08) over every reviewer session on
+ * disk, and tool execution was 6% of a 226-285s round — the rest was the model
+ * waiting on itself, once per file. The main session is no better (85.3% single
+ * calls, mean 1.16, ~356 minutes of model time across one week of sessions).
+ *
+ * pi runs the tool calls of ONE assistant message IN PARALLEL, so the cost is
+ * not the reads — it is the number of MESSAGES they are spread across. This is
+ * the same conclusion the gate acts on from the other side: a reviewer's task
+ * text now ships a pre-split batch plan (lib/parallel-review.ts's
+ * formatChangeIndex) so the reads are already grouped before the agent starts.
+ *
+ * The rule is stated identically in the judge protocol (lib/judge-prompt.ts,
+ * JUDGE_COMMON_PROTOCOL) — test/agent-directives.test.ts pins the shared
+ * sentence so the two cannot drift.
+ */
+export const BATCH_READ_DISCIPLINE =
+  "## 读代码：一条消息里并行读，不要一条消息读一个\n" +
+  "- **一条 assistant 消息里的多个工具调用是并行执行的**：要读多个文件、搜多个模式、看多处 diff 时，" +
+  "把它们放进**同一条消息**，不要一条消息只发一个。一个工具调用就是一个完整来回（等模型 + 等工具）。\n" +
+  "- 先拿清单再读：`git diff --stat` / `--numstat` 之类的总览先到手，按清单分批读。\n" +
+  "- 实测（本 repo 全部 reviewer session）：92.5% 的往返只发 1 个工具调用，单轮 17–59 次往返 × 每次 11–13s，" +
+  "而工具执行只占这一轮的 6% —— 少一个往返就是少十几秒。";
+
+/**
  * Explore-mode extra guidance, appended after the standing block when the
  * session is in explore mode (investigation). One reminder the decision table
  * does not carry: a task that turns into delivery work must first be
@@ -174,7 +201,7 @@ export const EXPLORE_MODE_NOTE =
 
 /** The whole standing block, in the order an agent reads it. */
 export function buildAgentDirectives(mode?: "loop" | "explore"): string {
-  return (`${TOOL_DECISION_TABLE}\n\n${MINIMALISM_REMINDER}\n\n${REQUIREMENT_PROTOCOL}\n\n${END_OF_TURN_CHECK}` +
+  return (`${TOOL_DECISION_TABLE}\n\n${MINIMALISM_REMINDER}\n\n${REQUIREMENT_PROTOCOL}\n\n${BATCH_READ_DISCIPLINE}\n\n${END_OF_TURN_CHECK}` +
     `\n\n${GATE_ANOMALY_PROTOCOL}` +
     (mode === "explore" ? `\n\n${EXPLORE_MODE_NOTE}` : ""));
 }
