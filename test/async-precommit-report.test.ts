@@ -31,6 +31,7 @@ test("the content moved: downgraded — no current-round verdict, but still acti
   assert.match(text, /投递这一刻工作区是（704dcd01e4d3），两者不同/);
   // The claim that turned a stale notice into a contradiction is gone…
   assert.doesNotMatch(text, /重新 `judge_submit/);
+  assert.doesNotMatch(text, /本轮不会产生可 ship 的 READY/);
   assert.doesNotMatch(text, /这份内容（d6d29d5a16e1）没通过验证/);
   // …but a difference has TWO causes the tree cannot tell apart, so the
   // finding is never waved away as "old, ignore it" either.
@@ -38,6 +39,15 @@ test("the content moved: downgraded — no current-round verdict, but still acti
   assert.match(text, /你在这条 lane 跑的时候改的/);
   assert.match(text, /lane 自己的 lint:fix 改写的/);
   assert.doesNotMatch(text, /白做工|不必为这条/);
+  // …and the same holds when the caller cannot name the round at all: round 0
+  // renders the label "本轮", so a sentence that used the label here would BE
+  // the forbidden current-round claim (round-2 P2).
+  const unnamed = buildAsyncPrecommitReport({
+    round: 0, verified: TREE_A, current: TREE_B, verdict: "FAIL", detail: DETAIL,
+  });
+  assert.match(unnamed, /那次验证所属的那一轮不会产生可 ship 的 READY/);
+  assert.doesNotMatch(unnamed, /本轮不会产生可 ship 的 READY/);
+
   // The evidence is still there (downgraded, never suppressed).
   assert.ok(text.includes(DETAIL));
   assert.match(text, /precommit-last\.log 每次运行都覆盖/);

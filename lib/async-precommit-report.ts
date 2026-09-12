@@ -114,7 +114,9 @@ export function buildAsyncPrecommitReport(input: AsyncPrecommitReport): string {
   const staleLead = [
     `review-gate: ${label}的后台 full precommit **没过**（${input.verdict}）—— 那次验证的是 **${label}启动时**那份内容（${verified}），`,
     `投递这一刻工作区是（${shortTree(input.current)}），两者不同。`,
-    `${label}不会产生可 ship 的 READY 已是既成事实，你手上的内容会由它自己那一轮的 full precommit 重新判。`,
+    // "那一轮", never the label: with round 0 the label reads 本轮, and the exact
+    // sentence this form exists to avoid is "本轮不会产生可 ship 的 READY".
+    "那次验证所属的那一轮不会产生可 ship 的 READY 已是既成事实，你手上的内容会由它自己那一轮的 full precommit 重新判。",
     "但**别把它当成与己无关**：两份不同可能是你在这条 lane 跑的时候改的，也可能是 lane 自己的 lint:fix 改写的 ——" +
       "下面那段原始输出说明这次检查报了什么，值得看一眼它在你现在这份内容上还在不在。",
     "（它指的 .pi/precommit-last.log 每次运行都覆盖，直接点进去可能是别的运行。）",
