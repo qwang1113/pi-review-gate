@@ -298,8 +298,17 @@ commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而
 - **裁决记录承担验证绑定**（`lib/review-adjudicate.ts` 的 `readyLacksVerification`）：
   READY 落在一个没有 full-lane PASS 的内容上时**降级为 BLOCKED**，否则会出现
   “看着已验证、实际不可 ship”的裁决。只收紧、不放宽；`/gate-bypass` 是用户
-  授权，仍然优先。FAIL 不再能靠“提前 return”告知，所以它作为自己的一条 followUp
-  消息送给 agent。
+  授权，仍然优先。FAIL 不再能靠“提前 return”告知，所以它作为自己的一条消息
+  送给 agent —— **走 `steer`，不是 `followUp`**（2026-09-12）：pi 只在 agent
+  不再有工具调用时才 drain followUp，而本门禁的存活不变量恰好禁止它在门禁未过时
+  停下，于是通知排在同一个 turn 后面不出来。实测：三条 FAIL 通知（03:01 / 03:15 /
+  03:23 的三次 lane）在 agent 唯一那次 2.5 小时 turn 结束时才陆续投递，延迟
+  2h13m / 2h05m / 2h00m，落地时门禁自己的记录已经是 PASS + READY，agent 把它读成
+  “门禁自相矛盾”，花十分钟取证并多跑两轮审查。因为消息可能在 agent 已经改过之后
+  才被读到，措辞与“这还描述不描述当前这棵树”的判定在
+  `lib/async-precommit-report.ts`：带**第几轮**与**所验证内容的指纹**；当 lane 启动时
+  那份内容已经不是工作区里那份时**降级**（明说这是旧轮次、不是当前这一轮的结论，
+  也不给“重新送审”的指令），但**绝不静默丢弃**——两侧指纹任一侧读不出时保持强告警。
 
 - `run_precommit`（full lane，与链条并行启动）：FAIL 时本轮不产生可 ship 的 READY。
 - `review_checkpoint`：`git add -A && git commit`（英文 message 校验，

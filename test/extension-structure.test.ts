@@ -5767,7 +5767,7 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
 test("a FAIL that arrives after dispatch is reported, and it withholds the READY", () => {
   assert.match(SRC, /function reportAsyncPrecommit\(/,
     "the failure has a channel of its own — the round was dispatched before this verdict existed, so returning early is no longer available");
-  assert.match(SRC, /if \(verdict !== "PASS"\) reportAsyncPrecommit\(/,
+  assert.match(SRC, /if \(verdict !== "PASS"\) \{\s*reportAsyncPrecommit\(\{/,
     "and every non-PASS verdict goes through it, including a thrown runner");
   assert.match(
     SRC,
@@ -5775,6 +5775,38 @@ test("a FAIL that arrives after dispatch is reported, and it withholds the READY
     "the verdict recorder refuses a READY on content that never passed the full lane",
   );
   assert.match(SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
+});
+
+test("the async FAIL notice never waits for the agent to stop, and names what it verified", () => {
+  // MEASURED 2026-09-12 (notification session): `followUp` is drained only when
+  // the agent has no more tool calls, and this gate's own loop invariant forbids
+  // stopping while a gate is unmet — so three notices queued behind ONE 2.5-hour
+  // turn and were delivered at 05:14/05:21/05:24 for failures from 03:01/03:15/
+  // 03:23, when the gate's own records already said PASS + READY. The agent read
+  // that as the gate contradicting itself and spent ten minutes on forensics.
+  const reportAt = SRC.indexOf("function reportAsyncPrecommit(");
+  assert.ok(reportAt > 0, "the reporter is here");
+  const report = SRC.slice(reportAt, reportAt + 1400);
+  assert.match(report, /deliverAs: "steer"/,
+    "steer lands at the next tool-batch boundary — a time-sensitive verdict cannot ride the stop-driven queue");
+  assert.doesNotMatch(report, /deliverAs: "followUp"/,
+    "the follow-up queue is exactly the channel that delayed this notice by hours");
+  assert.match(report, /buildAsyncPrecommitReport\(input\)/,
+    "the wording lives in lib/ (philosophy one) — the extension only delivers it");
+
+  // Identity is read BEFORE the runner starts: the outcome's own fingerprint is
+  // recomputed after it (lint:fix may have edited files), i.e. by then it can
+  // already be the NEXT round's content.
+  const besideAt = SRC.indexOf("function startPrecommitBeside(");
+  const beside = SRC.slice(besideAt, besideAt + 2600);
+  const verifiedAt = beside.indexOf("const verified = worktreeTree(root)");
+  const runAt = beside.indexOf('callTool("run_precommit"');
+  assert.ok(verifiedAt > 0 && runAt > verifiedAt,
+    "the verified content is captured before the lane runs, not read off its outcome");
+  assert.match(beside, /const round = stateForRepo\(root\)\.rounds\.length \+ 1/,
+    "and the notice names the round it belongs to, so a late one can be matched");
+  assert.match(beside, /current: worktreeTree\(root\) \?\? ""/,
+    "the delivery-time content is measured too — that comparison is what downgrades a superseded notice");
 });
 
 test("ONE full lane per repo: a second round waits for a quiet lane, and NEVER joins one", () => {
@@ -5793,7 +5825,10 @@ test("ONE full lane per repo: a second round waits for a quiet lane, and NEVER j
   assert.ok(waitAt > 0 && startLaneAt > waitAt,
     "the round waits for the older lane to finish BEFORE starting its own");
   const besideAt = SRC.indexOf("function startPrecommitBeside(");
-  const body = SRC.slice(besideAt, besideAt + 1600);
+  // The lane's whole body, bounded by the next declaration instead of a magic
+  // character count: every rule below is about THIS function, and a window that
+  // has to grow with the comments would fail for the wrong reason.
+  const body = SRC.slice(besideAt, SRC.indexOf("function reportAsyncPrecommit(", besideAt));
   assert.doesNotMatch(body, /return running\.settled;/,
     "no joining: a PASS written by someone else's lane is not this round's proof");
   assert.match(body, /if \(inFlightPrecommit\?\.settled === settled\) inFlightPrecommit = undefined;/,

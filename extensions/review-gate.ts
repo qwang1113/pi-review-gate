@@ -394,6 +394,9 @@ import {
 } from "../lib/precommit-receipt.ts";
 import { appendTiming } from "../lib/gate-timings.ts";
 import { tailLogFile } from "../lib/precommit-tail.ts";
+// The background lane's failure notice: wording + the "is this still the
+// content under the agent's hands" rule, both pure and unit-tested there.
+import { buildAsyncPrecommitReport, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
 import {
   decideReviewScope,
   type ReviewScopeDecision,
@@ -5584,9 +5587,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       at: new Date().toISOString(),
       mode: "full",
     };
+    // WHAT THIS LANE IS VERIFYING, READ BEFORE IT STARTS. Read here and not off
+    // the run's own outcome, because the outcome's fingerprint is recomputed
+    // AFTER the runner (lint:fix may have edited files) — i.e. it can already be
+    // the NEXT round's content. This one is the frozen content this lane was
+    // launched against, and it is what the notice names.
+    const round = stateForRepo(root).rounds.length + 1;
     const settled = (async () => {
       let verdict = "no verdict";
       let detail = "";
+      const verified = worktreeTree(root) ?? "";
       try {
         const pre = await callTool("run_precommit", { mode: "full", repo: root }, ctx);
         verdict = String(pre.details?.verdict ?? "no verdict");
@@ -5594,7 +5604,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch (error) {
         detail = (error as Error).message;
       }
-      if (verdict !== "PASS") reportAsyncPrecommit(verdict, detail);
+      if (verdict !== "PASS") {
+        reportAsyncPrecommit({
+          round,
+          verified,
+          current: worktreeTree(root) ?? "",
+          verdict,
+          detail,
+        });
+      }
     })();
     inFlightPrecommit = { root, settled };
     void settled.finally(() => {
@@ -5606,20 +5624,30 @@ export default function reviewGate(pi: ExtensionAPI) {
   /**
    * TELL THE AGENT (B1). The round was dispatched before this verdict existed,
    * so nothing else will: a silent FAIL would leave a round that looks
-   * dispatched and verified sitting inside a gate that will not ship it. The
-   * channel is a followUp turn — not a UI toast, which scrolls away.
+   * dispatched and verified sitting inside a gate that will not ship it.
+   *
+   * `steer`, NOT `followUp` (2026-09-12). pi drains a follow-up message only
+   * when the agent has no more tool calls — and this gate's own standing rule
+   * forbids the agent to stop while a gate is unmet, so a follow-up here is
+   * drained hours later, or never. Measured: three of these sat in the queue
+   * behind a single 2.5-hour turn and were delivered at 05:14/05:21/05:24 for
+   * failures from 03:01/03:15/03:23, long after the gate's own records said
+   * PASS + READY, so the agent read them as the gate contradicting itself.
+   * `steer` delivers at the next tool-batch boundary — the agent cannot be busy
+   * for long without a tool call, and this message is the thing it must know
+   * before its next one. The bound is therefore ONE TOOL CALL rather than the
+   * whole turn (a long `judge_wait` is the worst case, minutes; before this it
+   * was hours, or the end of the session).
+   *
+   * The wording rules (round identity, and downgrading when the content under
+   * review has moved on) live in lib/async-precommit-report.ts.
    */
-  function reportAsyncPrecommit(verdict: string, detail: string): void {
-    const message =
-      `review-gate: 本轮的后台 full precommit **没过**（${verdict}）—— 这轮的内容没通过验证，` +
-      "本轮不会产生可 ship 的 READY。\n" +
-      "修好后重新 `judge_submit({role:\"reviewer\"})`；无需手动再跑 precommit。\n" +
-      "如果它是因为**与本次改动无关的环境问题**失败的，那是用户的决定：让用户 `/gate-bypass <理由>`。\n\n" +
-      detail.slice(0, 4000);
+  function reportAsyncPrecommit(input: AsyncPrecommitReport): void {
+    const message = buildAsyncPrecommitReport(input);
     try {
       pi.sendMessage(
         { customType: "review-gate", content: message, display: true },
-        { triggerTurn: true, deliverAs: "followUp" },
+        { triggerTurn: true, deliverAs: "steer" },
       );
     } catch {
       try { latestCtx?.ui.notify(message.slice(0, 400), "error"); } catch { /* headless */ }
