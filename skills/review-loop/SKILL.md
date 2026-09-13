@@ -197,7 +197,15 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
      manually run the full suite or typecheck first**: the lane runs
      lint/typecheck/build/the complete suite in one shot, and its input cache
      reuses an unchanged set in seconds. Use targeted tests for files you are
-     actively editing.
+     actively editing. The lane is started to run BESIDE the chain — the
+     reviewer judges an immutable commit range, so only the checkpoint has to
+     precede the dispatch — so a FAIL does NOT come back inside this call: it
+     arrives as its own steered message that names its round and the content
+     it verified, and it withholds that round's READY. When the content id in
+     that message no longer matches the worktree (you kept editing while the
+     suite ran, or the lane's own `lint:fix` rewrote files), the notice is
+     about an earlier round's snapshot — the evidence it carries is still
+     worth reading against what you hold now.
    - **the checkpoint commit** — the only commit allowed before a READY; the
      gate stamps the checkpoint marker on the subject and records where it
      landed. The review unit is the immutable range `baseline..HEAD`.

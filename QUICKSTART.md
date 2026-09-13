@@ -48,9 +48,11 @@ agent：调 set_gate_mode("loop")
   → 过了才弹窗让你批准（窗中会显示「goal-auditor 预审: PASS @ …」）
   → 改代码
   → judge_submit({role:"reviewer", task:<本轮改动说明>})
-     **这一次调用**里门禁依次跑完：full precommit → checkpoint 提交（READY 前唯一
-     的 commit 通道）→ 算不可变审核范围 baseline..HEAD + 开 findings 流 → 派 reviewer。
-     任一步失败就带原因打回，不留半提交状态。
+     **这一次调用**里门禁依次跑完：启动 full precommit（**与链条并行**，不在这一条里等
+     它）→ checkpoint 提交（READY 前唯一的 commit 通道）→ 算不可变审核范围
+     baseline..HEAD + 开 findings 流 → 派 reviewer。
+     除 precommit 外的任一步失败就带原因打回，不留半提交状态；precommit 判 FAIL 会
+     作为一条单独的 steer 消息回来，写明第几轮、验证的是哪份内容。
      同时：agent 边读流式 findings 边修（不用等审完）
   → judge 进程退出时门禁自己读结论、机械校验（未 prepare ⇒ 不授予；HEAD 已移动 ⇒
      STALE ⇒ BLOCKED）、记录裁决并唤醒 agent
@@ -60,9 +62,12 @@ agent：调 set_gate_mode("loop")
 
 - **在当前分支上直接工作**：`setup_workspace` 已退役（2026-09-07），不再有工作分支与
   自动合并。会话开始时工作区有未提交改动**不拦编辑**；checkpoint 直接落在当前分支。
-  唯一保留的护栏：在 main/master/dev/develop 上，会话开始会提示、checkpoint 前会弹确认框。
-- **precommit 在 review 之前**：这个顺序由门禁保证，不需要谁记着 —— 便宜的检查先跑，
-  贵的审核只花在绿树上。
+  唯一保留的护栏：在 main/master/dev/develop 上，会话开始会提示，checkpoint 与
+  `git commit` 会被**直接拒绝**（不弹确认框）。
+- **precommit 与 review 并行**：lane 在链条最前启动（checkpoint 之前），但门禁**不再等它**
+  ——reviewer 判的是不可变 commit range，两者可以同时跑。代价是审核可能花在最终没过 lane 的
+  树上，换来的是每轮省下整条 lane 的等待；lane 判 FAIL 时会拒绝给这一轮 READY，并以一条
+  steer 消息告诉你。
 - 每轮按 ROUND 计费：**把相关改动批量做完再触发一轮**，比十个小轮省十倍。
 - 只想知道「能不能构建」而不开一轮审查：用 `/precommit`（full）或 `/precommit-fast`
   —— 这两条命令由**门禁自己执行**并直接打印裁决，不消耗 agent 的一轮。

@@ -53,6 +53,14 @@ reviewer over the WHOLE change:
   precommit, the checkpoint commit (it stamps the checkpoint marker), the
   `baseline..HEAD` computation, the dispatch — and any step that fails sends
   the round back with the reason instead of leaving it half-submitted. The
+  full precommit is the exception, because it is started to run BESIDE the
+  chain instead of in front of it: when it fails it arrives as its own
+  `steer` message, never `followUp` — that queue is drained only when you
+  stop, and the loop invariant above forbids stopping, so a follow-up here
+  lands hours late and reads as a verdict on a round that is long over
+  (`lib/async-precommit-report.ts`). The message names its round and the
+  content it verified; a lane whose content has already been replaced reports
+  itself as that OLD round, not as the current one. The
   full precommit ALREADY ran typecheck + build + the complete suite on that
   exact content — **never manually re-run the full suite or `tsc`** before
   submitting (the runner caches by input: unchanged content reuses the
