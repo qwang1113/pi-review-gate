@@ -7,11 +7,13 @@ import {
   MINIMALISM_REMINDER,
   GATE_ANOMALY_PROTOCOL,
   BATCH_READ_DISCIPLINE,
+  REQUIREMENT_PROTOCOL,
 
   EXPLORE_MODE_NOTE,
   ORCHESTRATOR_WAIT_DISCIPLINE,
   WAIT_DISCIPLINE_HINT,
 } from "../lib/agent-directives.ts";
+import { ORCHESTRATOR_DIRECTIVE } from "../lib/orchestrator-directives.ts";
 import { JUDGE_COMMON_PROTOCOL } from "../lib/judge-prompt.ts";
 
 // ---------------------------------------------------------------------------
@@ -157,6 +159,42 @@ test("the standing block carries the two-layer gate-anomaly protocol (2026-09-08
 // One rule, two audiences — the agent block and the judge protocol. This pin
 // is what keeps the two copies from becoming two different rules.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// INTERRUPTED NEGOTIATION (user requirement, 2026-09-14)
+//
+// "打断" is semantic, not ESC: the user does not pick an option and says
+// something else instead. Deliberately a PROMPT rule, not a mechanical block
+// (the user's own words: 不用做得特别死) — what the gate owes the agent is the
+// rule, and what it owes the user is that the three dialogs no longer report
+// "he did not answer" as "he rejected it".
+// ---------------------------------------------------------------------------
+
+test("the requirement protocol says: interrupted negotiation ⇒ ask first, then continue", () => {
+  assert.match(REQUIREMENT_PROTOCOL, /插话/);
+  assert.match(REQUIREMENT_PROTOCOL, /先问一句/);
+  assert.match(REQUIREMENT_PROTOCOL, /ask_user/);
+  assert.match(REQUIREMENT_PROTOCOL, /没有了/);
+  // All THREE stages share the one rule (restatement / goal / plan).
+  assert.match(REQUIREMENT_PROTOCOL, /反述/);
+  assert.match(REQUIREMENT_PROTOCOL, /goal/);
+  assert.match(REQUIREMENT_PROTOCOL, /plan/);
+  // …and the failure it prevents is stated: don't re-open the box immediately.
+  assert.match(REQUIREMENT_PROTOCOL, /不要一答完就自动重新弹一次协商框|不要.*自动重新.*框/);
+});
+
+test("the project manager carries the SAME rule for the plan dialog", () => {
+  assert.match(ORCHESTRATOR_DIRECTIVE, /plan 协商被用户插话/);
+  assert.match(ORCHESTRATOR_DIRECTIVE, /先问一句/);
+  assert.match(ORCHESTRATOR_DIRECTIVE, /ask_user/);
+  assert.match(ORCHESTRATOR_DIRECTIVE, /没有了/);
+});
+
+test("the standing block carries the interrupted-negotiation rule into every session", () => {
+  const block = buildAgentDirectives();
+  assert.match(block, /插话/);
+  assert.match(block, /先问一句/);
+});
 
 test("the batch-read rule is ONE wording, in the agent block and the judge protocol alike", () => {
   const shared = "**一条 assistant 消息里的多个工具调用是并行执行的**";

@@ -892,7 +892,16 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the ONE prompt every surface renders interpolates the notice");
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
-  assert.match(ASK_USER_SRC, /return renderChoice\(\s*uiCtx\.ui,/, "the pane dialog renders the template");
+  assert.match(ASK_USER_SRC, /return deps\.askChoice\(\s*uiCtx,/,
+    "the pane dialog renders the template through the ONE budgeted renderer");
+  // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14): a title is
+  // charged to the row budget but never cut by it, so a long question in the
+  // title was an unbounded dialog — the one render path that could still
+  // flicker.
+  assert.match(ASK_USER_SRC, /title: `问题 \$\{progressLabel\(index, questions\.length\)\}`/,
+    "the dialog title is the short progress label");
+  assert.match(ASK_USER_SRC, /body: `\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
+    "the question text itself rides in the budgeted body");
   assert.match(ASK_USER_SRC, /extraRows: \[SKIP_REST_CHOICE\]/,
     "the interview's own escape rides along as an extra row");
   assert.doesNotMatch(ASK_USER_SRC, /uiCtx\.ui!\.input!/,
@@ -921,7 +930,7 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
     "the questions themselves are shown, not just filed");
   // The interview: one dialog per question, with its N / M progress.
   assert.match(toolBody, /progressLabel\(index, questions\.length\)/);
-  assert.match(toolBody, /renderChoice\(/, "the pane dialog renders the gate's one template");
+  assert.match(toolBody, /deps\.askChoice\(/, "the pane dialog renders the gate's one template");
   assert.doesNotMatch(toolBody, /uiCtx\.ui!\.input!/,
     "no free-text dialog: the template's reason box is the only text box");
   // Both go through the channel funnel, so an orchestration child's project
@@ -986,8 +995,17 @@ test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an
   // PAUSE the loop, and it shows the user nothing until the turn ends anyway.
   // ui.notify appends to the chat container and requests a render right away.
   const body = windowOf("function showToUser", "\n  }", "showToUser");
-  assert.match(body, /notify\(`\$\{lead\}\\n\$\{clipped\}`, "warning"\)/,
+  assert.match(body, /notify\(`\$\{lead\}\\n\$\{body\}`, "warning"\)/,
     "the full text must go through ui.notify");
+  // NO CHARACTER CAP (user decision, 2026-09-14). What this used to cut — at
+  // 4000 characters — was the restatement / goal / plan the user is being
+  // asked to APPROVE: exactly the text they have to read. The flicker it was
+  // guarding against does not apply to the transcript (appending 400 rows
+  // triggers no full clears; test/tui-flicker.test.ts measures it), and the
+  // dialog is the only constrained surface.
+  assert.doesNotMatch(body, /slice\(0,/,
+    "no character cap may come back: the transcript scrolls");
+  assert.doesNotMatch(body, /已截断/);
   assert.match(body, /return false/, "no UI must be reported honestly, not swallowed");
   assert.doesNotMatch(body, /sendMessage/, "sendMessage is queued, not rendered");
   // Nothing in the extension may deliver user-facing text via the follow-up
@@ -1003,8 +1021,18 @@ test("FLICKER: every dialog goes through the row budget", () => {
   // the gate's ONE template and applies lib/dialog-budget.ts; nothing may
   // bypass it, and no ui.confirm exists any more (2026-09-08).
   const helperAt = SRC.indexOf("async function askChoice");
-  assert.match(windowOf("async function askChoice", "\n  }", "askChoice"), /fitDialogMessage\(/,
+  const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
+  assert.match(askChoiceBody, /fitDialogMessage\(/,
     "askChoice must apply the budget");
+  // …AGAINST THE REAL TERMINAL (2026-09-14). The budget used to be pinned to
+  // a 24-row window, so a 20-row one cleared the screen 19 times in 20 frames.
+  // The terminal's own row count is what pi reads too (see terminalRows()).
+  assert.match(askChoiceBody, /dialogTextMaxLines\(rows\.length, terminalRows\(\)\)/,
+    "the budget must follow the terminal we are actually on");
+  // …AND THE TITLE IS BOUNDED TOO: `ask_user` puts the question there, and an
+  // unbounded title sizes the dialog no matter how short the body is.
+  assert.match(askChoiceBody, /fitDialogTitle\(/,
+    "a long title must not be able to size the dialog");
 
   // ui.confirm is GONE: the template renders a select, so a stray confirm
   // would be a second dialog shape nobody reviewed.
@@ -1016,6 +1044,13 @@ test("FLICKER: every dialog goes through the row budget", () => {
   assert.deepEqual(selects, [],
     `the extension must render dialogs through askChoice only (stray ui.select at ${selects.join(", ")})`);
   assert.ok(helperAt > 0, "the one renderer must exist");
+  // NO render path may bypass it — `ask_user` used to call renderChoice
+  // directly, which is how a long question kept sizing its own dialog. The
+  // extension has exactly ONE renderChoice call site, and it is this helper.
+  const directRenders = [...SRC.matchAll(/renderChoice\(/g)].length;
+  assert.equal(directRenders, 1,
+    `askChoice must be the only renderChoice call site (found ${directRenders})`);
+  assert.match(askChoiceBody, /renderChoice\(/, "…and it is the one inside askChoice");
 });
 
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
@@ -4957,7 +4992,13 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   const start = windowOf("function startSupervisionTimer(", "\n  }", "startSupervisionTimer");
   assert.match(start, /SUPERVISION_INTERVAL_MS/, "the cadence is a named constant, not a literal at the call site");
   assert.match(start, /state\.taskMode !== "orchestrator"/, "it exists only for the supervising role");
-  assert.match(start, /ctx\.isIdle\?\.\(\)/, "a wake-up mid-turn would be noise");
+  // BUSY OR IDLE, EVERY CHILD EVENT GOES THROUGH (user decision, 2026-09-14).
+  // The idle requirement WAS the reported bug: a manager that was working
+  // never heard about a child asking a question, so the child waited for an
+  // `orchestrator_wait` that might come much later.
+  assert.doesNotMatch(start, /isIdle/, "no idle pre-condition may come back");
+  assert.match(start, /deliverAs: "steer"/,
+    "…and the delivery cuts into the next turn WITHOUT aborting work in flight");
   assert.match(start, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");
   // What it reads is the CHANNELS — no pane is captured anywhere in the loop.
   const drain = windowOf("function drainSupervisionNews(", "\n  }", "drainSupervisionNews");

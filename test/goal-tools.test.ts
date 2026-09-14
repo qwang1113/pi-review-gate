@@ -359,6 +359,22 @@ test("propose: the user's rejection carries their reason back, and nothing is wr
   assert.equal(f.st.loopGoal, undefined, "a rejected goal is not recorded as approved");
 });
 
+test("propose: an ANSWERED-NOTHING box is not a rejection — ask before submitting again", async () => {
+  // User report (2026-09-14): closing the box without choosing usually means
+  // the user had something else to say — not that the goal is wrong. Reporting
+  // it as "did NOT approve" answers a rejection that never happened.
+  const f = fake({ approve: false, rejectReason: undefined });
+  await recordGoalPrereview(f.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+  const out = await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.equal(out.details?.approved, false);
+  assert.equal(out.details?.dismissed, true);
+  assert.match(out.content[0]!.text, /没有作答/);
+  assert.match(out.content[0]!.text, /ask_user/);
+  assert.doesNotMatch(out.content[0]!.text, /did NOT approve/);
+  assert.deepEqual(f.written, [], "an unanswered dialog writes no goal file");
+  assert.equal(f.st.loopGoal, undefined);
+});
+
 test("propose: the ORCHESTRATOR's decline reason (channel) is used as the rejection reason", async () => {
   // The PM answered the goal dialog through the channel with a reason; the
   // child's local input box is NOT consulted (the PM cannot see it).

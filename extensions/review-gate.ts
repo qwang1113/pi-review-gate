@@ -532,7 +532,13 @@ import {
 } from "../lib/delivery-station.ts";
 
 
-import { DIALOG_ASSUMED_COLUMNS, DIALOG_BODY_MAX_LINES, fitDialogMessage } from "../lib/dialog-budget.ts";
+import {
+  DIALOG_ASSUMED_COLUMNS,
+  DIALOG_ASSUMED_ROWS,
+  dialogTextMaxLines,
+  fitDialogMessage,
+  fitDialogTitle,
+} from "../lib/dialog-budget.ts";
 import {
   choiceRows,
   parseChoice,
@@ -3193,11 +3199,25 @@ export default function reviewGate(pi: ExtensionAPI) {
    * Arm the background supervisor (default-on in orchestrator mode, 10s).
    *
    * It only WAKES the session when there is something a supervisor has to act
-   * on, and only while the session is idle — a wake-up delivered mid-turn
-   * would just be noise, and `orchestrator_wait` reads the same channels
-   * itself.
+   * on. It used to demand an IDLE project manager as well — "a wake-up
+   * delivered mid-turn would just be noise" — and that assumption was the bug
+   * the user reported (2026-09-14): a manager that is busy (writing a plan,
+   * running an audit, reading a child's delivery) simply never heard about a
+   * child that had asked a question, so the child waited until the manager
+   * happened to call `orchestrator_wait`. A child blocked on a question is
+   * time the whole orchestration loses, and the manager's own pending work is
+   * not more urgent than that — so EVERY child event goes through now, busy or
+   * idle alike.
+   *
+   * THE DELIVERY IS A `steer`, deliberately: pi delivers it after the current
+   * batch of tool calls finishes and before the next LLM call, so the manager
+   * reads it on its very next turn WITHOUT the gate aborting work in flight
+   * (user decision: an aborted minute-long plan audit is a worse trade than a
+   * turn of latency). Dedup is unchanged — the event memory is shared with
+   * `orchestrator_wait`, so neither re-rings what the other already reported,
+   * and the 10s→30s→60s backoff still bounds the repeats.
    */
-  function startSupervisionTimer(ctx: ExtensionContext): void {
+  function startSupervisionTimer(_ctx: ExtensionContext): void {
     if (supervisionTimer || state.taskMode !== "orchestrator") return;
     supervisionTimer = setInterval(() => {
       try {
@@ -3208,7 +3228,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         // on one orchestration (the exact defect the revival path already
         // guards against at lib/session-revival.ts).
         if (handedOffSession) { stopSupervisionTimer(); return; }
-        if (!ctx.isIdle?.()) return;
+        // NO idle requirement (2026-09-14): busy is exactly when a child's
+        // question has to reach the manager. `steer` does not abort the tool
+        // calls already running, so the interruption costs a turn at most.
         const news = drainSupervisionNews();
         if (news.length === 0) return;
         pi.sendMessage({
@@ -3217,7 +3239,8 @@ export default function reviewGate(pi: ExtensionAPI) {
             "[ORCHESTRATION] 子会话需要你：\n" +
             news.map((n) => `- ${n}`).join("\n") +
             "\n调 `orchestrator_wait({ timeoutMs: 0 })` 拿完整回执（问题正文与选项都在里面），" +
-            "再用 `orchestrator_answer` 回；别让它就这么等着。",
+            "再用 `orchestrator_answer` 回；别让它就这么等着。" +
+            "\n（这条会打断你手上的事：子会话在等回答，优先级高于你正在做的其他事。）",
           display: true,
         }, { triggerTurn: true, deliverAs: "steer" });
       } catch { /* supervision is a convenience, never a gate */ }
@@ -4387,7 +4410,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   //     (lib/choice-dialog.ts) under the row budget.
 
   /** Hard cap on one transcript notice, so nothing can flood the screen. */
-  const USER_NOTICE_MAX_CHARS = 4000;
 
   // (The sensitive-path dialog cap moved to lib/consent-request-tools.ts with
   // the tool that echoes the path — SENSITIVE_PATH_DIALOG_MAX_CHARS.)
@@ -4404,6 +4426,16 @@ export default function reviewGate(pi: ExtensionAPI) {
    * to the chat container and requests a render, so the user sees it before
    * the confirm dialog that follows.
    *
+   * NO CHARACTER CAP (user decision, 2026-09-14). This used to cut every notice
+   * at 4000 characters with a `…（已截断）` tail — including the restatement,
+   * goal and plan the user is being asked to APPROVE, i.e. exactly the text
+   * they have to read. The cap was there for a geometry fear that does not
+   * apply to the transcript: the chat container scrolls, and appending 400
+   * rows in one shot triggers 0 full clears on the real renderer (measured,
+   * see lib/dialog-budget.ts's docblock). The dialog is the constrained
+   * surface, and it already keeps only the decision — the full text belongs
+   * here, whole.
+   *
    * Returns false when there is no UI to render into (headless): callers must
    * report that honestly instead of claiming the user saw something.
    */
@@ -4412,17 +4444,27 @@ export default function reviewGate(pi: ExtensionAPI) {
     lead: string,
     body: string,
   ): boolean {
-    const clipped = body.length > USER_NOTICE_MAX_CHARS
-      ? body.slice(0, USER_NOTICE_MAX_CHARS) + "\n…（已截断）"
-      : body;
     try {
       const notify = uiCtx.ui?.notify;
       if (!notify) return false;
-      notify(`${lead}\n${clipped}`, "warning");
+      notify(`${lead}\n${body}`, "warning");
       return true;
     } catch {
       return false; // headless / no UI
     }
+  }
+
+  /**
+   * The terminal's REAL row count, read from the same source pi itself reads
+   * (`ProcessTerminal.rows`: `process.stdout.rows`, then `$LINES`, then 24).
+   *
+   * Read per dialog and never cached: resizing the window has to change the
+   * budget, and a headless / non-TTY run falls back to the conservative
+   * constant instead of budgeting for a screen that is not there.
+   */
+  function terminalRows(): number {
+    const rows = Number(process.stdout?.rows) || Number(process.env.LINES) || 0;
+    return Number.isFinite(rows) && rows > 0 ? rows : DIALOG_ASSUMED_ROWS;
   }
 
   /**
@@ -4438,6 +4480,14 @@ export default function reviewGate(pi: ExtensionAPI) {
    * two-row confirm never did, and the budget is the flicker bug's fix. The
    * `pointer` names where the full text lives when something had to be cut.
    *
+   * BOTH HALVES ARE BOUNDED, against the REAL terminal (2026-09-14). The body
+   * was budgeted against a hard-coded 24 rows, which is a real flicker on a
+   * 20-row window (measured: 19 full clears in 20 frames), and the TITLE was
+   * never bounded at all — so a long `ask_user` question, which rides in the
+   * title, could push the spinner out of the viewport exactly like an
+   * oversized body. The title is cut at the same budget and points at the
+   * transcript copy printed before the box.
+   *
    * `signal` is what lets an ORCHESTRATOR's answer take the box off the
    * user's screen: pi dismisses the dialog when it aborts, and the resolved
    * `undefined` is then read as "somebody else settled this", not as a
@@ -4449,14 +4499,19 @@ export default function reviewGate(pi: ExtensionAPI) {
     opts: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] } = {},
   ): Promise<string | undefined> {
     const rows = [...choiceRows(spec), ...(opts.extraRows ?? [])];
+    const pointer = opts.pointer ?? "（内容过长，已截断）";
     // Two option rows is what the budget was measured with; every extra row
     // this dialog draws — an interview's escape row included — comes out of
-    // the body's allowance.
-    const budget = Math.max(2, DIALOG_BODY_MAX_LINES - Math.max(0, rows.length - 2));
+    // the title + body allowance, on the terminal we are actually on.
+    const budget = dialogTextMaxLines(rows.length, terminalRows());
+    // The title gets the budget first (it is the question), minus two rows so
+    // the body is never cut down to nothing by a long title alone.
+    const titleFit = fitDialogTitle(spec.title, Math.max(1, budget - 2), pointer, DIALOG_ASSUMED_COLUMNS);
+    const titled: ChoiceSpec = titleFit.truncated ? { ...spec, title: titleFit.message } : spec;
     const fitted = opts.body === undefined
       ? undefined
-      : fitDialogMessage(spec.title, opts.body, opts.pointer ?? "（内容过长，已截断）", DIALOG_ASSUMED_COLUMNS, budget).message;
-    return renderChoice(uiCtx.ui, spec, {
+      : fitDialogMessage(titled.title, opts.body, pointer, DIALOG_ASSUMED_COLUMNS, budget).message;
+    return renderChoice(uiCtx.ui, titled, {
       ...(fitted === undefined ? {} : { body: fitted }),
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),

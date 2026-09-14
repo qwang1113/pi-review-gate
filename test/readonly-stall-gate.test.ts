@@ -11,6 +11,10 @@ import { fileURLToPath } from "node:url";
 import { hermeticGitEnv } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 import { loadSidecar } from "../lib/gate-state.ts";
+// The threshold itself is pinned in test/readonly-stall.test.ts; these tests
+// drive the REAL extension, so they read the constant instead of hard-coding a
+// count that a retune would silently turn into "no nudge at all".
+import { READONLY_STALL_LIMIT } from "../lib/readonly-stall.ts";
 
 // Boots the REAL extension (same harness as loop-goal-gate.test.ts /
 // multi-repo-gate.test.ts) and feeds it `tool_result` events, so the
@@ -118,10 +122,12 @@ test("read drill fires the nudge at the limit and only once per crossing", async
   reviewGate(pi as never);
   await pi.handlers.get("session_start")!({}, pi.ctx);
 
-  // 35 reads → exactly one nudge (at the 30th), never again before a reset.
+  // Limit + a few reads → exactly one nudge (at the limit), never again
+  // before a reset.
   const results: unknown[] = [];
-  for (let i = 0; i < 35; i++) results.push(await readResult(pi));
-  assert.equal(countNudges(results), 1, "35 consecutive reads must nudge exactly once");
+  for (let i = 0; i < READONLY_STALL_LIMIT + 5; i++) results.push(await readResult(pi));
+  assert.equal(countNudges(results), 1,
+    `${READONLY_STALL_LIMIT + 5} consecutive reads must nudge exactly once`);
 });
 
 test("an edit resets the counter: a productive session is never nudged", async () => {
@@ -135,9 +141,10 @@ test("an edit resets the counter: a productive session is never nudged", async (
   await pi.handlers.get("session_start")!({}, pi.ctx);
 
   const results: unknown[] = [];
-  // 12 cycles of 4 reads + 1 edit = 48 reads, 12 edits → far past 30 reads,
-  // but never 30 CONSECUTIVE reads.
-  for (let cycle = 0; cycle < 12; cycle++) {
+  // 4 reads + 1 edit per cycle, enough cycles to pass the limit several times
+  // over — but never the limit CONSECUTIVELY.
+  const cycles = Math.ceil(READONLY_STALL_LIMIT / 4) + 3;
+  for (let cycle = 0; cycle < cycles; cycle++) {
     for (let i = 0; i < 4; i++) results.push(await readResult(pi));
     results.push(await editResult(pi));
   }
@@ -150,17 +157,18 @@ test("bash drills count too, and an edit between drills re-arms", async () => {
   reviewGate(pi as never);
   await pi.handlers.get("session_start")!({}, pi.ctx);
 
-  // 30 bash calls → nudge; edit resets; 30 more bash calls → nudge again.
+  // limit bash calls → nudge; edit resets; limit more → nudge again.
   const results: unknown[] = [];
   const bashResult = async () => {
     const h = pi.handlers.get("tool_result")!;
     return h({ toolName: "bash", isError: false, input: { command: "grep x src" }, content: [{ type: "text", text: "out" }] }, pi.ctx);
   };
-  for (let i = 0; i < 30; i++) results.push(await bashResult());
-  assert.equal(countNudges(results), 1, "30 bash calls must nudge once");
+  for (let i = 0; i < READONLY_STALL_LIMIT; i++) results.push(await bashResult());
+  assert.equal(countNudges(results), 1, `${READONLY_STALL_LIMIT} bash calls must nudge once`);
   results.push(await editResult(pi));
-  for (let i = 0; i < 30; i++) results.push(await bashResult());
-  assert.equal(countNudges(results), 2, "after an edit reset, another 30 bash calls nudge again");
+  for (let i = 0; i < READONLY_STALL_LIMIT; i++) results.push(await bashResult());
+  assert.equal(countNudges(results), 2,
+    `after an edit reset, another ${READONLY_STALL_LIMIT} bash calls nudge again`);
 });
 
 test("normal mode never nudges (the step-aside must not add extension text)", async () => {

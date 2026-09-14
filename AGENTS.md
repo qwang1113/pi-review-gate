@@ -131,6 +131,15 @@ the loop-goal approval dialog.
 反述、缺了怎么拒）与 `lib/delivery-station.ts`（站点解析、缺省、放行表、到站
 判定）。
 
+**协商被用户插话时的口径（2026-09-14，用户决定）.** 「打断」是语义上的插话，不是按
+ESC：用户在反述 / 协商 goal / 协商 plan 的框里**没有作答**，而是在框外提了别的问题或
+补充。这时先把他说的处理掉，再用 `ask_user` 问一句「还有别的要补充或要问的吗？没有
+了我就继续」，得到「没有了」才继续协商 —— 写进提示词（`lib/agent-directives.ts` 的
+`REQUIREMENT_PROTOCOL` + `lib/orchestrator-directives.ts`），**不做机械硬拦**；三处工具
+在「用户没有作答」时返回的文案同样指向这一步，不再读成「用户否决」。同轮：三份协商
+正文在对话区**不截断**（正文永不进对话框），对话框高度按真实终端行数受控 —— 细节见
+`docs/execution-model.md` 的「通信」节。
+
 
 Where work lands is yours again (2026-09-07, user decision): the workspace
 settlement layer (`setup_workspace`, the mandatory work branch, declare_done's

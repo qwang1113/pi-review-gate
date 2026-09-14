@@ -122,6 +122,23 @@ opener 凭它记录结论；
   不发任何桌面通知**：给人发通知是编排层独有的另一条通道（`orchestrator_notify`，
   OSC 777/9/99，只有项目经理能发，且带节流）。
 
+- **协商被用户插话时的口径**（2026-09-14，用户要求）：需求反述、协商 goal、协商 plan
+  这三个环节里，用户常见的动作不是点选项，而是**在框外说别的事**（语义打断 —— 不是
+  按 ESC）。这时 agent 必须先把他说的处理掉，再用 `ask_user` 问一句「还有别的要补充
+  或要问的吗？没有了我就继续」，得到「没有了」才继续协商。规则写进
+  `lib/agent-directives.ts` 的 `REQUIREMENT_PROTOCOL` 与 `lib/orchestrator-directives.ts`
+  的项目经理指令，是**提示词层**的约定（用户明确「不用做得特别死」）—— 门禁不做硬拦，
+  也不为此新增状态。三处工具在「用户没有作答」（关框 / 被消息打断）时返回的文案同样
+  指向这一步，**不再**把它读成「用户否决」。
+- **协商正文只走对话区，且不截断**（2026-09-14，用户要求）：三份全文（反述 / goal /
+  plan）由 `showToUser` 完整打印，**没有任何字符数上限** —— 对话区可滚动，实测一次
+  追加 400 行触发 0 次清屏（`test/tui-flicker.test.ts` 用真实 `TuiMainScreen` 验证）。
+  被行数预算约束的只有**对话框**，而它只承载决策文案（正文永不进框）。对话框的行预算
+  按**真实终端行数**算（`lib/dialog-budget.ts` 的 `dialogTextMaxLines`，来源与 pi 一致：
+  `process.stdout.rows` → `$LINES` → 24），标题也在同一份预算内裁剪 —— 小窗口不再因
+  「预算按 24 行写死」而整屏闪烁。终端级的替代路径是 pi 的 `--tui-mode fullscreen`
+  （`TuiAltScreen`：pi 自己拥有屏幕与滚动）；Claude Code 的 `CLAUDE_CODE_NO_FLICKER`
+  只是它渲染切换的遗留 env，对应的是它的 fullscreen 渲染器。
 - **主会话存活不变量**（round-18，用户硬约束）：门禁未通过前主会话**不得**
   停止自动循环。`agent_settled` 先跑 `settleFinishedRounds()`：有新 channel report 的
   子会话**立即**以标准报告唤醒（结论、证据位置、记录情况、待答问题）并记入链；

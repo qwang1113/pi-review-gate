@@ -64,7 +64,7 @@ import {
   type AskQuestion,
   type InterviewStop,
 } from "./ask-user.ts";
-import { MAX_CHOICE_OPTIONS, renderChoice } from "./choice-dialog.ts";
+import { MAX_CHOICE_OPTIONS } from "./choice-dialog.ts";
 // The batch id is minted with the same collision-resistant helper the channel
 // uses for its own record ids — one generator, not a second convention.
 import { newChannelId } from "./orchestrator-channel.ts";
@@ -98,7 +98,7 @@ export interface UserInteractionToolDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; pointer?: string; signal?: AbortSignal },
+    opts?: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] },
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -293,13 +293,27 @@ export async function doAskUser(
         // Already settled (the project manager answered it through the
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped !== undefined) return undefined;
-        // ONE renderer for every dialog in the gate, plus the interview's
-        // own escape row — which is not part of the template because only an
-        // interview has later questions to skip.
-        return renderChoice(
-          uiCtx.ui,
-          { ...choiceSpecOf(q), title: prompt },
-          { signal, extraRows: [SKIP_REST_CHOICE] },
+        // ONE renderer for every dialog in the gate — the extension's
+        // `askChoice`, so this box is budgeted like every other one — plus the
+        // interview's own escape row, which is not part of the template
+        // because only an interview has later questions to skip.
+        //
+        // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). A title
+        // is charged to the budget but never cut by it (it is the question
+        // being asked), so a 1200-character question in the title made the box
+        // as tall as it liked and pushed the spinner out of the viewport —
+        // the flicker again, from the one render path that had bypassed the
+        // budget entirely. The full question is in the transcript above
+        // (printed before the first box), and the body's cut points at it.
+        return deps.askChoice(
+          uiCtx,
+          { ...choiceSpecOf(q), title: `问题 ${progressLabel(index, questions.length)}` },
+          {
+            body: `${q.text}${grantNotice(q)}`,
+            pointer: "（完整问题见上方消息）",
+            signal,
+            extraRows: [SKIP_REST_CHOICE],
+          },
         );
       },
       // A broken dialog is silence, never an answer — and, now that these

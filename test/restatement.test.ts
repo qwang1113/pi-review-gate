@@ -241,13 +241,31 @@ test("propose: an unreadable station is recorded as the strictest one, not refus
   assert.match(out.content[0]!.text, /precommit/, "the reply says which station was actually recorded");
 });
 
-test("propose: the user's NO records nothing and points at the next attempt", async () => {
+test("propose: a NO is a rejection — the understanding itself is wrong", async () => {
+  const f = fake({ outcome: { answer: RESTATEMENT_REJECT_LABEL, by: "human" } });
+  const out = await doProposeRestatement(f.deps, { restatement: GOOD, station: "precommit" }, UI);
+  assert.equal(out.details?.confirmed, false);
+  assert.equal(out.details?.dismissed, undefined);
+  assert.match(out.content[0]!.text, /不认可这份反述/);
+  assert.equal(f.st.restatement, undefined);
+  assert.deepEqual(f.persisted, []);
+});
+
+test("propose: an ANSWERED-NOTHING box is not a rejection — ask before restating again", async () => {
+  // User report (2026-09-14): the box usually closes unanswered because the
+  // user had something else to say first, not because the restatement was
+  // wrong — and answering that with "the user does not agree" sends the agent
+  // off to rewrite a text nobody objected to.
   const f = fake({ confirm: false });
   const out = await doProposeRestatement(f.deps, { restatement: GOOD, station: "precommit" }, UI);
   assert.equal(out.details?.confirmed, false);
+  assert.equal(out.details?.dismissed, true);
+  assert.match(out.content[0]!.text, /没有作答/);
+  assert.match(out.content[0]!.text, /ask_user/);
+  assert.match(out.content[0]!.text, /propose_restatement/);
+  assert.doesNotMatch(out.content[0]!.text, /不认可/);
   assert.equal(f.st.restatement, undefined);
   assert.deepEqual(f.persisted, []);
-  assert.match(out.content[0]!.text, /propose_restatement/);
 });
 
 test("propose: the ORCHESTRATOR's decline reason comes back as the objection", async () => {

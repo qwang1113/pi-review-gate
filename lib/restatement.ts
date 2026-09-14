@@ -468,6 +468,8 @@ export async function doProposeRestatement(
   let confirmed = false;
   let reason: string | undefined;
   let interrupted = false;
+  /** The box closed with no answer at all — see the branch below. */
+  let dismissed = false;
   // ONE template for every dialog (2026-09-08): the user can approve, reject,
   // or pick the decline row and say WHY — and that reason is the one the agent
   // renegotiates against, so it no longer has to guess or ask again.
@@ -514,8 +516,12 @@ export async function doProposeRestatement(
     // restatement is theirs to judge.
     reason = pick.kind === "declined" && pick.reason ? pick.reason : outcome.reason;
     interrupted = outcome.by === "interrupted";
+    dismissed = pick.kind === "dismissed";
   } catch {
     confirmed = false;
+    // No box was rendered at all — that is the same fact as a box nobody
+    // answered, and it must not be reported as an objection.
+    dismissed = true;
   }
 
   if (!confirmed) {
@@ -527,6 +533,26 @@ export async function doProposeRestatement(
             "处理完它的消息后重新调用 propose_restatement 即可 —— 这不是被否掉。",
         }],
         details: { confirmed: false, interrupted: true },
+      };
+    }
+    // A DISMISSED box is not a rejection (user report, 2026-09-14). The box
+    // closes with no answer when the user backs out of it — most often because
+    // they had something else to say first. Reporting that as "the user does
+    // not agree" sends the agent off to rewrite a restatement nobody
+    // objected to; the next box then gets interrupted the same way, and the
+    // round burns on a disagreement that never happened. The move is: handle
+    // what they said, then ASK whether there is more before restating.
+    if (dismissed) {
+      return {
+        content: [{
+          type: "text",
+          text: "review-gate: 用户没有作答这份反述（确认框被关掉，或他在框外说了别的事）—— " +
+            "**这不是被否掉**，他很可能还有话要说。\n" +
+            "下一步：先把他刚说的事处理掉，然后用 `ask_user` 问一句「关于这份需求，还有别的要补充或要问的吗？" +
+            "没有了我就重新反述」，得到「没有了」之后才重新调用 propose_restatement。\n" +
+            "（在此之前 propose_loop_goal / orchestrator_plan submit 仍会被拒。）",
+        }],
+        details: { confirmed: false, dismissed: true },
       };
     }
     return {

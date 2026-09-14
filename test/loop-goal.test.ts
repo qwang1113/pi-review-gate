@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { DIALOG_BODY_MAX_LINES, fitDialogMessage } from "../lib/dialog-budget.ts";
 import { MODE_CONFIRM_TITLE, buildModeConfirmMessage } from "../lib/task-mode.ts";
 import {
-  GOAL_CONFIRM_MAX_CHARS,
   GOAL_CONFIRM_TITLE,
   buildGoalTranscriptMessage,
   LOOP_GOAL_MAX_CHARS,
@@ -305,12 +304,17 @@ test("a TRUNCATED goal cannot be verified from the prompt copy alone (fail-close
   assert.equal(isLoopGoalConfirmed(truncated, confirmation, long), true);
 });
 
-test("the transcript message shows the goal as untrusted, capped data", () => {
-  const msg = buildGoalTranscriptMessage("x".repeat(GOAL_CONFIRM_MAX_CHARS + 400));
+test("the transcript message carries the WHOLE goal — no character cap", () => {
+  // User decision (2026-09-14): this text is what the user is being asked to
+  // APPROVE, and the transcript is not the constrained surface — the dialog is,
+  // and it never carries this text. The old 2000-character cut hid exactly the
+  // part under review.
+  const goal = "x".repeat(6000);
+  const msg = buildGoalTranscriptMessage(goal);
   assert.match(msg, new RegExp(LOOP_GOAL_RELPATH.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(msg, /不可信数据/);
-  assert.ok(msg.length < GOAL_CONFIRM_MAX_CHARS + 800, "the echo must stay bounded");
-  assert.match(msg, /已截断/);
+  assert.ok(msg.includes(goal), "the full goal text must reach the transcript, uncut");
+  assert.doesNotMatch(msg, /已截断/);
   // The fixed copy must state what approval buys — the user is the one who
   // needs to understand the consequence.
   assert.match(msg, /commit\/push\/PR/);

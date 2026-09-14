@@ -124,6 +124,23 @@ test("writing a plan does NOT approve it; the user's dialog does", async () => {
   assert.ok(world.runtime().approvedPlanHash, "the user's yes is what approves it");
 });
 
+test("an ANSWERED-NOTHING plan dialog is not a rejection — ask before submitting again", async () => {
+  // User report (2026-09-14), same rule as propose_restatement / propose_loop_goal:
+  // closing the box without choosing means the user did not answer — usually
+  // because they were saying something else — and calling that "not approved"
+  // sends the PM off to rewrite a plan nobody objected to.
+  const world = makeFakeWorld();
+  const plan = { ...twoTaskPlan(), tasks: twoTaskPlan().tasks.map((t) => ({ ...t, repo: "/repo" })) };
+  await world.call("orchestrator_plan", { action: "write", plan });
+  world.confirmAnswers.push(false);
+  const submitted = await world.call("orchestrator_plan", { action: "submit" });
+  assert.equal(submitted.isError, true);
+  assert.match(replyText(submitted), /没有作答/);
+  assert.match(replyText(submitted), /ask_user/);
+  assert.doesNotMatch(replyText(submitted), /没有批准/);
+  assert.equal(world.runtime().approvedPlanHash, undefined, "an unanswered dialog approves nothing");
+});
+
 test("WRITE path REFUSES a task with no repo — the strict flag is pinned at the call site", async () => {
   // The parsePlan unit tests pin the rule itself, but THIS pins the ACTION:
   // if someone drops the `true` at the write call site, the deadlock (child

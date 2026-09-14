@@ -33,11 +33,30 @@
  * does not belong in a dialog at all — it goes to the transcript, which
  * scrolls, and the dialog keeps only what the decision needs.
  *
- * THE BUDGET. The extension cannot query the terminal size (the extension UI
- * API exposes no columns/rows), so the budget is a conservative constant sized
- * for a small terminal:
+ * WHAT THE TRANSCRIPT CAN TAKE (measured 2026-09-14, same harness): appending
+ * 100 rows per frame — or 400 rows in one shot — to the transcript produces
+ * 0 full clears. Growth happens BELOW `prevViewportTop` (the viewport tracks
+ * the bottom), so `firstChanged < prevViewportTop` never fires. That is why
+ * this module has no character cap to offer for the transcript, and why the
+ * gate prints full restatements / goals / plans there instead of in a box.
  *
- *     24 rows assumed
+ * THE TERMINAL-LEVEL ALTERNATIVE (user question, 2026-09-14 — Claude Code's
+ * `CLAUDE_CODE_NO_FLICKER`): an application that OWNS the screen never hits
+ * this branch at all. pi ships that renderer as `TuiAltScreen`, selected by
+ * `--tui-mode fullscreen` / the `tuiMode` setting (alternate screen, painted
+ * and scrolled by pi itself); Claude Code's equivalent is its fullscreen
+ * renderer, and `CLAUDE_CODE_NO_FLICKER` is a leftover env of its renderer
+ * switch, dropped on relaunch. It is not a pi setting, it is experimental,
+ * and this module exists so the DEFAULT (regular) renderer does not flicker
+ * either.
+ *
+ * THE BUDGET. The extension UI API exposes no columns/rows, but the terminal
+ * itself does — and pi reads exactly the same source (`process.stdout.rows`,
+ * then `$LINES`, then 24). {@link dialogTextMaxLines} takes the row count as
+ * an argument so the geometry stays pure; the extension passes the real one.
+ * The arithmetic for a 24-row terminal:
+ *
+ *     24 rows
  *   -  8 rows of ExtensionSelectorComponent chrome (2 borders, 3 spacers,
  *        2 options, 1 key hint)
  *   -  2 rows for the footer / status line
@@ -45,6 +64,10 @@
  *   = 12 rows for `title + message` together
  *
  * Anything longer is cut with a pointer to where the full text lives.
+ * A SMALLER TERMINAL USED TO LOSE THIS (measured 2026-09-14): the budget was
+ * pinned to 24 rows, so on a 20-row terminal a 20-row dialog cleared the
+ * screen 19 times in 20 frames — the same wipe the budget was written to
+ * prevent, just at a size the constant did not know about.
  *
  * PURITY. No IO, no clock, no host objects: these are string functions. The
  * extension owns the dialogs; this module owns the geometry.
@@ -62,11 +85,33 @@ export const DIALOG_FOOTER_ROWS = 2;
 export const DIALOG_SLACK_ROWS = 2;
 
 /**
- * Max rendered rows for `title + "\n" + message` combined.
+ * Max rendered rows for `title + "\n" + message` combined, on a terminal of
+ * `terminalRows` rows that draws `optionRows` rows of options.
+ *
+ * `terminalRows` defaults to {@link DIALOG_ASSUMED_ROWS} so the pure callers
+ * (and the tests) keep the old conservative constant; the extension passes the
+ * terminal's real row count, which is what lets a large terminal show more
+ * text and a small one stop flickering.
+ */
+export function dialogTextMaxLines(
+  optionRows: number,
+  terminalRows: number = DIALOG_ASSUMED_ROWS,
+): number {
+  return Math.max(
+    2,
+    Math.floor(terminalRows) - DIALOG_CHROME_ROWS - DIALOG_FOOTER_ROWS - DIALOG_SLACK_ROWS -
+      Math.max(0, optionRows - 2),
+  );
+}
+
+/**
+ * Max rendered rows for `title + "\n" + message` on the assumed terminal.
  * Keep this in sync with the arithmetic in the module docblock.
  */
-export const DIALOG_BODY_MAX_LINES =
-  DIALOG_ASSUMED_ROWS - DIALOG_CHROME_ROWS - DIALOG_FOOTER_ROWS - DIALOG_SLACK_ROWS;
+export const DIALOG_BODY_MAX_LINES = dialogTextMaxLines(2);
+
+/** Where a cut title sends the reader; the full text is always already printed. */
+export const TITLE_TRUNCATION_POINTER = "…（标题过长，全文见上方消息）";
 
 /**
  * Display width of one code point in terminal cells.
@@ -198,6 +243,36 @@ function clampToRows(text: string, maxRows: number, columns: number): { text: st
   }
   if (kept.length < lines.length) truncated = true;
   return { text: kept.join("\n"), truncated };
+}
+
+/**
+ * Fit a dialog TITLE into `maxRows` rendered rows.
+ *
+ * WHY TITLES ARE BOUNDED TOO (2026-09-14). {@link fitDialogMessage} deliberately
+ * never cuts the title — the title is the question being asked — but charging
+ * it to the budget does not shrink it. An agent-written title therefore
+ * reached the screen at whatever height it liked, and `ask_user` puts the
+ * question text there (`问题 2/3\n<text>`): a long question is a tall dialog,
+ * and on a 20-row terminal a 20-row dialog clears the screen 19 times in 20
+ * frames (measured). The cut keeps the HEAD — what the user is answering — and
+ * points at the transcript, where the full text was printed before the box.
+ *
+ * The returned `message` is the fitted title; the shape is shared with
+ * {@link fitDialogMessage} so a caller can hand both to the same budget check.
+ */
+export function fitDialogTitle(
+  title: string,
+  maxRows: number,
+  pointer: string = TITLE_TRUNCATION_POINTER,
+  columns: number = DIALOG_ASSUMED_COLUMNS,
+): FitDialogResult {
+  if (maxRows <= 0) return { message: "", truncated: title.length > 0, rows: 0 };
+  const rows = renderedRowCount(title, columns);
+  if (rows <= maxRows) return { message: title, truncated: false, rows };
+  const pointerRows = wrappedRowCount(pointer, columns);
+  const clamped = clampToRows(title, Math.max(0, maxRows - pointerRows), columns);
+  const withPointer = clamped.text.length > 0 ? `${clamped.text}\n${pointer}` : pointer;
+  return { message: withPointer, truncated: true, rows: renderedRowCount(withPointer, columns) };
 }
 
 /**

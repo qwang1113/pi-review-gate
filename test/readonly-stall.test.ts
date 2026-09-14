@@ -7,11 +7,16 @@ import {
   readonlyStallNudgeFor,
 } from "../lib/readonly-stall.ts";
 
-test("the threshold constant is the user's chosen 30 consecutive reads", () => {
+test("the threshold constant is the user's chosen 100 consecutive reads", () => {
   // Pinned literally (sibling precedent: test/loop-goal.test.ts pins the
   // 60-turn threshold the same way) so a silent retune cannot change the
   // behaviour without this test failing.
-  assert.equal(READONLY_STALL_LIMIT, 30);
+  //
+  // 30 → 100 on 2026-09-14 (user decision): a session tracing one behaviour
+  // through a dependency's source passes 30 reads routinely, so the nudge was
+  // firing while the investigation was still productive. It is a nudge, not a
+  // block — arriving late costs nothing.
+  assert.equal(READONLY_STALL_LIMIT, 100);
 });
 
 // ---------------------------------------------------------------------------
