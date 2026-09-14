@@ -13,11 +13,15 @@ import assert from "node:assert/strict";
 
 import {
   handoffDocPath,
+  handoffExtraEnvFor,
   registerContextStatusTool,
   runSessionHandoff,
   successorOpeningMessage,
   type SessionHandoffDeps,
 } from "../lib/session-handoff-tools.ts";
+import { STATE_VARIANT_ENV } from "../lib/gate-state.ts";
+import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
+import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 import { HANDOFF_FILL_PLACEHOLDER } from "../lib/session-handoff.ts";
 
 function fakeDeps(overrides: Partial<SessionHandoffDeps> = {}): {
@@ -174,7 +178,31 @@ test("context_status hands the session its OWN reading — the number and the ve
   assert.equal(blindOut.details?.handoffDue, false);
 });
 
-test("a judge hands over through the opener, and opens no pane of its own", async () => {  const { deps, events } = fakeDeps({
+test("handoffExtraEnvFor: the successor keeps the mode, the address and its own variant", () => {
+  // These three lines were edited in three consecutive rounds with no test of
+  // any kind — one round shipping a claimed-but-absent change that only the
+  // diff caught (reviewer P2, 2026-09-14). They are pure and they are here now.
+  assert.equal(handoffExtraEnvFor({ kind: "loop", taskMode: "loop" })[GATE_MODE_ENV], "loop");
+  assert.equal(handoffExtraEnvFor({ kind: "loop", taskMode: "explore" })[GATE_MODE_ENV], "explore",
+    "an explore session's successor does not become a delivery session");
+  assert.equal(handoffExtraEnvFor({ kind: "child", taskMode: "normal" })[GATE_MODE_ENV], "normal");
+  assert.equal(handoffExtraEnvFor({ kind: "orchestrator", taskMode: "loop" })[GATE_MODE_ENV], "orchestrator",
+    "a project manager hands its role over, whatever else it was classified as");
+  assert.equal(handoffExtraEnvFor({ kind: "loop" })[GATE_MODE_ENV], "loop", "an unset mode falls back to loop");
+
+  assert.equal(
+    handoffExtraEnvFor({ kind: "orchestrator", orchestrationId: "orch-abc-1" })[ORCHESTRATION_ID_ENV],
+    "orch-abc-1",
+    "the address the caller resolved travels verbatim",
+  );
+  assert.ok(!(ORCHESTRATION_ID_ENV in handoffExtraEnvFor({ kind: "loop", orchestrationId: "   " })),
+    "an absent address is omitted, never passed as blank");
+
+  assert.equal(handoffExtraEnvFor({ kind: "child", stateVariant: "child-3" })[STATE_VARIANT_ENV], "child-3");
+  assert.ok(!(STATE_VARIANT_ENV in handoffExtraEnvFor({ kind: "loop" })));
+});
+
+test("a judge delegates the pane work through `requestSuccession`, and opens nothing itself", async () => {  const { deps, events } = fakeDeps({
     kind: () => "judge",
     requestSuccession: (docPath, pendingFill) => {
       events.push(`request:${pendingFill}`);

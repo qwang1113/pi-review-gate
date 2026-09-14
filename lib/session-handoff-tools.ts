@@ -42,6 +42,9 @@
 
 import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
+import { STATE_VARIANT_ENV } from "./gate-state.ts";
+import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
+import { GATE_MODE_ENV } from "./task-mode.ts";
 import {
   buildHandoffDoc,
   formatContextStatus,
@@ -256,6 +259,49 @@ function reply(text: string, details?: Record<string, unknown>): ToolReply {
 
 function fail(text: string, details?: Record<string, unknown>): ToolReply {
   return { content: [{ type: "text", text }], details, isError: true };
+}
+
+/**
+ * WHAT THE SUCCESSOR'S ENVIRONMENT ADDS — mode, orchestration address, gate
+ * sidecar variant.
+ *
+ * PURE, AND IT LIVES HERE ON PURPOSE. The reviewer spent three consecutive
+ * rounds on these same three lines in the extension (2026-09-14), one of which
+ * reported success without changing the file: logic that keeps being wrong is
+ * logic that needs a unit test, and logic inside the extension cannot have
+ * one.
+ *
+ * THE ORCHESTRATION ID IS PASSED IN, never read here. The caller passes the id
+ * the session actually HOLDS — `deps.runtime().orchestrationId`, the one rule
+ * that answers "mine" only when the stored runtime agrees
+ * (lib/orchestrator-wiring.ts, B1). Reading `state.orchestrator.orchestrationId`
+ * directly was a second, contradicting copy of that rule: it would hand the
+ * successor an address from a runtime this session never adopted.
+ */
+export function handoffExtraEnvFor(input: {
+  kind: HandoffSessionKind;
+  /** This session's mode — a successor keeps it (see the comment below). */
+  taskMode?: string;
+  /** The orchestration THIS session holds; omitted when it holds none. */
+  orchestrationId?: string;
+  /** This session's gate sidecar variant, when it has its own. */
+  stateVariant?: string;
+}): Record<string, string> {
+  // THE SUCCESSOR KEEPS THE PREDECESSOR'S MODE (2026-09-14, measured). The
+  // first version hardcoded "loop" for everything that was not an orchestrator,
+  // so an `explore` session handed its work to a successor that reclassified
+  // itself as a delivery session — a mode change nobody asked for, decided by
+  // the plumbing. A child is a loop session by construction
+  // (lib/session-factory.ts), so the two agree there either way.
+  const mode = input.kind === "orchestrator"
+    ? "orchestrator"
+    : input.taskMode === "explore" || input.taskMode === "normal" ? input.taskMode : "loop";
+  const env: Record<string, string> = { [GATE_MODE_ENV]: mode };
+  const variant = (input.stateVariant ?? "").trim();
+  if (variant) env[STATE_VARIANT_ENV] = variant;
+  const orchestration = (input.orchestrationId ?? "").trim();
+  if (orchestration) env[ORCHESTRATION_ID_ENV] = orchestration;
+  return env;
 }
 
 /**

@@ -272,6 +272,7 @@ import {
 import {
   ensureHandoffDoc,
   handoffDocPath,
+  handoffExtraEnvFor,
   registerContextStatusTool,
   registerSessionHandoffTool,
   successorOpeningMessage,
@@ -2652,31 +2653,21 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** Everything the successor needs on top of lib/session-inheritance.ts's record. */
   function handoffExtraEnv(kind: HandoffSessionKind): Record<string, string> {
-    // THE SUCCESSOR KEEPS THE PREDECESSOR'S MODE (2026-09-14, measured). The
-    // first version hardcoded "loop" for everything that was not an
-    // orchestrator, so an `explore` session handed its work to a successor
-    // that reclassified itself as a delivery session — a mode change nobody
-    // asked for, decided by the plumbing. A child is always a loop session by
-    // construction (lib/session-factory.ts), so the two agree there.
-    const mode = kind === "orchestrator"
-      ? "orchestrator"
-      : state.taskMode === "explore" || state.taskMode === "normal" ? state.taskMode : "loop";
-    const env: Record<string, string> = { [GATE_MODE_ENV]: mode };
-    const variant = (process.env[STATE_VARIANT_ENV] ?? "").trim();
-    if (variant) env[STATE_VARIANT_ENV] = variant;
-    // WHERE THE ID COMES FROM DEPENDS ON WHO IS HANDING OVER, and the RUNTIME
-    // comes before the environment (reviewer P2, 2026-09-14): a resumed
-    // orchestrator restored its id into `state.orchestrator`, while
-    // `orchestrationIdValue` is only seeded from the environment at startup —
-    // so asking `currentOrchestrationId()` alone would MINT a fresh id and hand
-    // the successor an address its own children never heard of. A child does
-    // not own an orchestration; it addresses one, and that address arrived in
-    // ITS environment.
-    const orchestration = kind === "orchestrator"
-      ? (state.orchestrator?.orchestrationId ?? currentOrchestrationId())
-      : (process.env[ORCHESTRATION_ID_ENV] ?? "").trim();
-    if (orchestration) env[ORCHESTRATION_ID_ENV] = orchestration;
-    return env;
+    return handoffExtraEnvFor({
+      kind,
+      ...(state.taskMode === undefined ? {} : { taskMode: state.taskMode }),
+      // THE ID THIS SESSION ACTUALLY HOLDS, through the ONE rule that decides
+      // it: `deps.runtime()` returns an empty runtime when the stored record
+      // belongs to a different orchestration (lib/orchestrator-wiring.ts, B1),
+      // so its id is "mine" by construction. A child holds none — it addresses
+      // one, and that address arrived in ITS environment.
+      ...(kind === "orchestrator"
+        ? { orchestrationId: orchestratorDeps.runtime().orchestrationId }
+        : { orchestrationId: (process.env[ORCHESTRATION_ID_ENV] ?? "").trim() }),
+      ...(process.env[STATE_VARIANT_ENV]?.trim()
+        ? { stateVariant: process.env[STATE_VARIANT_ENV]!.trim() }
+        : {}),
+    });
   }
 
   const handoffDeps: SessionHandoffDeps = {
