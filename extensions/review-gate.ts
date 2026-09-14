@@ -2664,13 +2664,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     const env: Record<string, string> = { [GATE_MODE_ENV]: mode };
     const variant = (process.env[STATE_VARIANT_ENV] ?? "").trim();
     if (variant) env[STATE_VARIANT_ENV] = variant;
-    // WHERE THE ID COMES FROM DEPENDS ON WHO IS HANDING OVER. A project manager
-    // OWNS its orchestration, so reading (and, on the first read, minting) it
-    // here is exactly right — it is the thing being handed over. A child does
-    // not own one; it addresses one, and that address arrived in ITS
-    // environment.
+    // WHERE THE ID COMES FROM DEPENDS ON WHO IS HANDING OVER, and the RUNTIME
+    // comes before the environment (reviewer P2, 2026-09-14): a resumed
+    // orchestrator restored its id into `state.orchestrator`, while
+    // `orchestrationIdValue` is only seeded from the environment at startup —
+    // so asking `currentOrchestrationId()` alone would MINT a fresh id and hand
+    // the successor an address its own children never heard of. A child does
+    // not own an orchestration; it addresses one, and that address arrived in
+    // ITS environment.
     const orchestration = kind === "orchestrator"
-      ? currentOrchestrationId()
+      ? (state.orchestrator?.orchestrationId ?? currentOrchestrationId())
       : (process.env[ORCHESTRATION_ID_ENV] ?? "").trim();
     if (orchestration) env[ORCHESTRATION_ID_ENV] = orchestration;
     return env;
