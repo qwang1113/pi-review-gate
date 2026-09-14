@@ -123,6 +123,22 @@ test("a request that never landed wakes as soon as the grace window closes", () 
   assert.match(tick.kind === "wake" ? tick.message : "", /重发一次/);
 });
 
+test("the not-landed wake quotes the LAST request's age, not the cycle's", () => {
+  // The verdict's 90-second window is about the request GitHub just failed to
+  // take. After a re-send the cycle is older than that request, and quoting
+  // the cycle's total would misdescribe the very window being reported.
+  const first = "2026-08-07T09:00:00.000Z";
+  const resent = "2026-08-07T09:10:00.000Z";
+  const tick = decideWatchTick({
+    state: cycle({ requestedAt: resent, firstRequestedAt: first }),
+    probe: probe({ queued: false }),
+    now: Date.parse(resent) + COPILOT_LANDING_GRACE_MS + 20_000,
+  });
+  assert.equal(tick.kind === "wake" && tick.reason, "not-landed");
+  assert.match(tick.kind === "wake" ? tick.message : "", /请求发出后 110 秒/,
+    "110s since the re-send — not the 620s the cycle has been open");
+});
+
 test("a queued request that never produces a review ends at the budget, not before", () => {
   const stillWaiting = decideWatchTick({
     state: cycle(),

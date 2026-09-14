@@ -297,12 +297,15 @@ export function decideWatchTick(args: {
     now: args.now,
   });
   if (verdict.state === "not-landed") {
+    // The sentence names the LAST request's age, not the cycle's: the verdict's
+    // 90-second window is about the request GitHub just failed to take, and
+    // after a re-send the cycle's total would read as a lie about THIS one.
     return {
       kind: "wake",
       reason: "not-landed",
       waitedMs,
       message:
-        `[REVIEW_GATE_COPILOT] PR #${state.pr} 的审查请求发出后 ${seconds(waitedMs ?? 0)} 仍未在 GitHub 上排队` +
+        `[REVIEW_GATE_COPILOT] PR #${state.pr} 的审查请求发出后 ${seconds(verdict.waitedMs ?? 0)} 仍未在 GitHub 上排队` +
         "（pending reviewer 与 copilot_work_started 都没有）——请求没有被接住。调 copilot_review：它会重发一次，" +
         "再不行就按不可用释放并要求你如实告诉用户。",
     };
