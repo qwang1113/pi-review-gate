@@ -31,10 +31,13 @@
  *     counts as proof), which is why nothing in the successor's brief asks it
  *     to close anything.
  *
- * A JUDGE hands over through the opener (see `requestSuccession`): a judge pane
- * owns no registry and the opener owns every pane it opened, so the judge
- * writes the document and asks; the opener does the pane work. That asymmetry
- * is the same one the whole judge side already has.
+ * A JUDGE hands ITSELF over — a pane beside its own, opened by the JUDGE
+ * (see `requestSuccession`; the extension's `judgeSuccessionRequest` is the
+ * implementation). The round is the judge's to finish, and waiting for the
+ * opener's next dispatch would mean finishing a round that has already run
+ * out of room: it opens the next generation, points it at the document it just
+ * wrote, and updates the registry so the opener's next sweep reads the NEW
+ * channel rather than a session that no longer exists.
  */
 
 import { Type } from "typebox";
@@ -81,7 +84,15 @@ export interface SessionHandoffDeps {
    * `committed` — the record has to be on disk before the writer goes quiet.
    */
   recordHandoff?(paneId: string, docPath: string): void;
-  /** Judge side: ask the opener to open the next generation. */
+  /**
+   * Judge side: open the next generation BESIDE this pane and register it.
+   *
+   * Named for the INTENT (a successive session takes over this round), not for
+   * a mechanism, because which mechanism is the judge's own business — the
+   * extension implements it, and it is the judge (not the opener) that opens
+   * the pane: an exhausted round cannot wait for somebody else's next
+   * dispatch. Async: opening a pane is.
+   */
   requestSuccession?(
     docPath: string,
     pendingFill: boolean,
@@ -205,7 +216,13 @@ export async function runSessionHandoff(deps: SessionHandoffDeps): Promise<ToolR
         handoffDoc: docPath,
         predecessorSessionId: sessionId,
         ...(deps.transcriptPath() ? { predecessorTranscript: deps.transcriptPath() } : {}),
-        ...(deps.extraEnv?.() ?? {}),
+        // `extra`, NOT spread at the top level. `successorEnv` reads a FIXED set
+        // of names, so spreading them here dropped every one of them in
+        // silence: the mode, the orchestration id and the state variant all
+        // vanished, and a child or project manager came up as a plain loop
+        // session. Caught by the reviewer against eba8516 (2026-09-14, P1),
+        // and pinned by a test that reads the env the pane was opened with.
+        extra: deps.extraEnv?.() ?? {},
       }),
       command: ["pi", "--session-id", successorId, successorOpeningMessage(docPath, kind)],
       cwd: deps.repoRoot(),

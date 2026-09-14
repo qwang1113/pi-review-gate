@@ -2664,7 +2664,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     const env: Record<string, string> = { [GATE_MODE_ENV]: mode };
     const variant = (process.env[STATE_VARIANT_ENV] ?? "").trim();
     if (variant) env[STATE_VARIANT_ENV] = variant;
-    const orchestration = (process.env[ORCHESTRATION_ID_ENV] ?? "").trim();
+    // WHERE THE ID COMES FROM DEPENDS ON WHO IS HANDING OVER. A project manager
+    // OWNS its orchestration, so reading (and, on the first read, minting) it
+    // here is exactly right — it is the thing being handed over. A child does
+    // not own one; it addresses one, and that address arrived in ITS
+    // environment.
+    const orchestration = kind === "orchestrator"
+      ? currentOrchestrationId()
+      : (process.env[ORCHESTRATION_ID_ENV] ?? "").trim();
     if (orchestration) env[ORCHESTRATION_ID_ENV] = orchestration;
     return env;
   }
@@ -2874,9 +2881,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     const readPath = event.toolName === "read"
       ? String((event.input as { path?: unknown } | undefined)?.path ?? "").trim()
       : "";
+    // RESOLVE IT BEFORE COMPARING (reviewer P2, 2026-09-14): pi's read tool
+    // accepts a relative path, and `handoffDocPath` always renders an absolute
+    // one — so a successor that read the document as `.pi/handoff/x.md` would
+    // never prove its takeover and the predecessor pane would sit there
+    // forever. A path that cannot be resolved is simply not a match.
+    const resolvedRead = readPath.length === 0 ? "" : pathResolve(cwd, readPath);
     const accepted = handoffAccepted({
       readHandoffDoc: event.isError !== true && inherited.handoffDoc !== undefined &&
-        readPath === inherited.handoffDoc,
+        resolvedRead === inherited.handoffDoc,
       firstToolSucceeded: event.isError !== true,
     });
     if (!accepted) return;
@@ -10389,7 +10402,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     // orchestrator branch below, so a loop session's successor — the ordinary
     // case — got its first message but never the brief that says what to read
     // and who closes the predecessor.
-    const inheritedBrief = formatInheritanceBrief(readInheritance(), currentOrchestrationId());
+    // THE ID IS READ HERE, NEVER MINTED (reviewer P2, 2026-09-14): this used to
+    // call `currentOrchestrationId()`, which MINTS an id on first read — so
+    // every session that owns no orchestration was stamped with one on every
+    // turn, and the brief then promised a successor that "children will reach
+    // you here". A session that HAS an orchestration carries its id in the
+    // environment (that is how its children address it); one that does not has
+    // nothing to inherit, and saying nothing is the honest answer.
+    const inheritedBrief = formatInheritanceBrief(readInheritance(), orchestrationIdFromEnv());
     if (inheritedBrief) systemPrompt += "\n\n" + inheritedBrief;
 
     // THE HANDOFF REMINDER — injected at the very top, before every early return

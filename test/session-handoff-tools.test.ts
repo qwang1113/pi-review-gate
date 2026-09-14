@@ -67,17 +67,28 @@ test("a handover writes the document, opens the successor, then goes silent — 
   assert.match(receipt.content[0]!.text, /补充段还是占位/, "the receipt says the agent's half is still missing");
 });
 
-test("the successor's FIRST MESSAGE points at the document — the bug this replaces", async () => {
+test("the successor's FIRST MESSAGE points at the document, and its ENV carries the mode", async () => {
   const { deps } = fakeDeps();
   let command: readonly string[] = [];
+  let env: Readonly<Record<string, string>> = {};
   await runSessionHandoff({
     ...deps,
-    openSuccessor: async (spec) => { command = spec.command; return { ok: true, paneId: "%9" }; },
+    extraEnv: () => ({ RG_GATE_MODE: "loop", RG_ORCHESTRATION_ID: "orch-1", RG_STATE_VARIANT: "child-2" }),
+    openSuccessor: async (spec) => { command = spec.command; env = spec.env; return { ok: true, paneId: "%9" }; },
   });
   assert.equal(command[0], "pi");
   assert.equal(command[1], "--session-id");
   assert.match(command[3]!, /你是接任者/);
   assert.match(command[3]!, /\.pi\/handoff\/session-1\.md/, "read this first, by path");
+  // THE ENV IS PART OF THE CONTRACT, and this is the assertion whose absence let
+  // a real bug through: `extraEnv` was spread at the TOP level of the
+  // `successorEnv` call, so every one of these keys was dropped and the
+  // successor reclassified itself as a plain loop session (reviewer P1,
+  // 2026-09-14). A test that only reads the argv cannot see that happen.
+  assert.equal(env.RG_GATE_MODE, "loop", "the successor keeps the predecessor's mode");
+  assert.equal(env.RG_ORCHESTRATION_ID, "orch-1", "and the orchestration it belongs to");
+  assert.equal(env.RG_STATE_VARIANT, "child-2", "and its own gate sidecar variant");
+  assert.equal(env.RG_HANDOFF_PREDECESSOR_PANE, "%5", "alongside everything the handover itself carries");
   assert.match(successorOpeningMessage("/repo/.pi/handoff/x.md", "orchestrator"), /orchestrator_attach/);
   assert.doesNotMatch(successorOpeningMessage("/repo/.pi/handoff/x.md", "loop"), /orchestrator_attach/);
 });

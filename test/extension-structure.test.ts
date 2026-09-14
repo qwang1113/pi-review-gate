@@ -4695,7 +4695,7 @@ test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets o
   // no mode branch or early return can drop it.
   assert.doesNotMatch(block, /formatInheritanceBrief/, "the brief is no longer orchestrator-only");
   const beforeStartAt = SRC.indexOf('pi.on("before_agent_start"');
-  const briefAt = SRC.indexOf('formatInheritanceBrief(readInheritance(), currentOrchestrationId())', beforeStartAt);
+  const briefAt = SRC.indexOf('formatInheritanceBrief(readInheritance(), orchestrationIdFromEnv())', beforeStartAt);
   const orchAt = SRC.indexOf('if (state.taskMode === "orchestrator") {', beforeStartAt);
   assert.ok(briefAt > 0 && briefAt < orchAt,
     "every successor is briefed before any mode branch, and the brief really is rendered there");
