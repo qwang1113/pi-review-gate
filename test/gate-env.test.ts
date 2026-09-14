@@ -6,7 +6,7 @@ import { STATE_VARIANT_ENV } from "../lib/gate-state.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { PARENT_SESSION_ENV } from "../lib/orchestration-id.ts";
-import { PREDECESSOR_PANE_ENV, HANDOFF_PATH_ENV, PREDECESSOR_TRANSCRIPT_ENV } from "../lib/orchestrator-relay.ts";
+import { PREDECESSOR_PANE_ENV, HANDOFF_DOC_ENV, PREDECESSOR_TRANSCRIPT_ENV } from "../lib/session-inheritance.ts";
 
 /**
  * The helper the hook and extension suites rely on to stay hermetic. Its one
@@ -20,7 +20,7 @@ test("every environment variable the gate sets is covered by the swept prefixes"
   // that a prefix sweep would miss.
   for (const name of [
     STATE_VARIANT_ENV, GATE_MODE_ENV, ORCHESTRATION_ID_ENV, PARENT_SESSION_ENV,
-    PREDECESSOR_PANE_ENV, HANDOFF_PATH_ENV, PREDECESSOR_TRANSCRIPT_ENV,
+    PREDECESSOR_PANE_ENV, HANDOFF_DOC_ENV, PREDECESSOR_TRANSCRIPT_ENV,
   ]) {
     assert.ok(
       GATE_ENV_PREFIXES.some((prefix) => name.startsWith(prefix)),

@@ -138,7 +138,7 @@ test("FAIL-OPEN: an unreadable context does NOT rotate — only the round cap bo
 test("the `none` object is a real object: both caps apply to the pre-approval rounds", () => {
   const byContext = decideJudgeRotation({
     objectId: NO_JUDGE_OBJECT,
-    previous: { objectId: NO_JUDGE_OBJECT, generation: 0, roundsInObject: 1, contextPercent: 61 },
+    previous: { objectId: NO_JUDGE_OBJECT, generation: 0, roundsInObject: 1, contextPercent: 71 },
   });
   assert.equal(byContext.rotated, true);
   assert.equal(byContext.reason, "context");

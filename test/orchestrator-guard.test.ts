@@ -22,10 +22,11 @@ test("every ALWAYS-FORBIDDEN subcommand is refused, in both modes", () => {
   for (const sub of ALWAYS_FORBIDDEN) {
     for (const mode of [ORCH, LOOP]) {
       const hit = detectForbiddenTmux(`tmux ${sub}`, mode);
-      assert.ok(hit, `tmux ${sub} must be refused (orchestratorMode=${mode.orchestratorMode})`);
+      assert.ok(hit, `tmux ${sub} must be flagged (orchestratorMode=${mode.orchestratorMode})`);
       assert.equal(hit.subcommand, sub);
       assert.equal(hit.tier, "forbidden");
-      assert.match(hit.reason, /禁止/);
+      assert.match(hit.reason, /不建议/);
+      assert.match(hit.reason, /只是提示/, "the message says it will not block — it is a hint now (user decision 2026-09-14)");
     }
   }
 });

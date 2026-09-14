@@ -200,6 +200,9 @@ import {
   type JudgeRotationDecision,
 } from "../lib/judge-rotation.ts";
 import {
+  JUDGE_ID_ENV,
+  JUDGE_OPENER_ENV,
+  JUDGE_ROLE_ENV,
   judgePaneAlive,
   listJudgePanes,
   type JudgePaneRunner,
@@ -257,7 +260,24 @@ import {
 } from "../lib/orchestrator-directives.ts";
 import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
 import { formatPlanSummary, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
-import { contextPercentFromUsage } from "../lib/orchestrator-handoff-advice.ts";
+import {
+  contextPercentFromUsage,
+  handoffAccepted,
+  handoffDocFilled,
+  handoffDue,
+  handoffReminder,
+  HANDOFF_PERCENT,
+  type HandoffSessionKind,
+} from "../lib/session-handoff.ts";
+import {
+  ensureHandoffDoc,
+  handoffDocPath,
+  handoffExtraEnvFor,
+  registerContextStatusTool,
+  registerSessionHandoffTool,
+  successorOpeningMessage,
+  type SessionHandoffDeps,
+} from "../lib/session-handoff-tools.ts";
 
 import {
   buildPlanAuditTask,
@@ -301,7 +321,7 @@ import {
 // long block (orchestrator_wait / judge_wait) instead of being queued behind it.
 import { notifyUserInput } from "../lib/poll-wait.ts";
 
-import { formatInheritanceBrief, PREDECESSOR_SESSION_ENV, readInheritance } from "../lib/orchestrator-relay.ts";
+import { formatInheritanceBrief, handoffGeneration, PREDECESSOR_SESSION_ENV, readInheritance, successorEnv, successorSessionId } from "../lib/session-inheritance.ts";
 import {
   childWorktreeBranch,
   childWorktreePath,
@@ -1735,6 +1755,16 @@ export default function reviewGate(pi: ExtensionAPI) {
   const announcedTerminated = new Set<string>();
   /** Hints (never refusals) the gate has already delivered — said once each. */
   const deliveredHints = new Set<string>();
+  /**
+   * Hints earned by the tool call now in flight — appended to ITS result.
+   *
+   * The next `tool_result` consumes whatever is here; a hint whose call never
+   * produces one (a refusal elsewhere in the chain) is dropped with it. No
+   * call id is kept: a hint is advice about the command shape, not a fact
+   * about that one call, so a parallel batch mis-attributing one costs
+   * nothing.
+   */
+  const pendingHints: string[] = [];
 
 
   // NOTE: there is deliberately NO settle-time verdict scraping here anymore. A round
@@ -2501,24 +2531,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     // TWO PHASES, and the split is what makes each half safe:
     //   1. release the worktree claim — BEFORE the successor's pane opens, or
     //      its boot races a heartbeat we have not stopped yet;
-    //   2. go silent (the retirement flag plus the two wake-up timers) — AFTER
-    //      the relay record is persisted. `persist()` refuses to write for a
+    //   2. go silent (the retirement flag plus the wake-up timers) — AFTER
+    //      the successor's pane is up. `persist()` refuses to write for a
     //      retired session, so marking earlier would make the successor's own
     //      registry row memory-only; and a rollback of a silence it never
     //      entered has nothing to undo.
-    onHandoff: () => {
-      releaseWorktree();
-      return {
-        committed: () => {
-          handedOffOrchestration = true;
-          stopSupervisionTimer();
-          stopRevivalTimer();
-        },
-        rolledBack: () => {
-          if (claimsMainSidecar(process.env)) holdWorktree();
-        },
-      };
-    },
+    //
+    // Shared with every other kind of session (`session_handoff`,
+    // lib/session-handoff-tools.ts) — see `handoffRetirement` below.
+    onHandoff: () => handoffRetirement(),
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
   // A manager's window holds BOTH kinds of decorated pane. The session tools
@@ -2531,6 +2552,352 @@ export default function reviewGate(pi: ExtensionAPI) {
   const sessionDeps: OrchestratorSessionDeps = orchestratorDeps;
   sessionDeps.decoratedJudgePanes = () => decoratedJudgePaneCount();
   registerOrchestratorSessionTools(pi, sessionDeps);
+
+  // ---------- THE ONE HANDOVER (lib/session-handoff-tools.ts) ----------
+  //
+  // WHY THIS IS NOT INSIDE registerOrchestratorSessionTools (2026-09-14,
+  // philosophy three): handing over is EVERY kind of session's move. A plain
+  // loop session, an orchestration child and a judge pane all run out of room
+  // exactly like a project manager, so the tool is registered ONCE here and
+  // the mechanical half lives in lib/session-handoff-tools.ts. The retired
+  // `orchestrator_handoff` was the half that did not work: it opened a bare
+  // `pi` with NO first message, so the successor never learned there was a
+  // document to read — and the predecessor waited forever for a close nobody
+  // owed it.
+  //
+  // WHAT THE AGENT STILL OWNS (user decision, same day): the INTENT. Reaching
+  // the threshold produces a reminder plus the document skeleton; nothing is
+  // opened until `session_handoff()` is called, because only the session
+  // itself knows the work is at a stopping point.
+
+  /** Which of the four kinds of session is running here. */
+  function handoffKind(): HandoffSessionKind {
+    if (readJudgeSideEnv(process.env)) return "judge";
+    if (state.taskMode === "orchestrator") return "orchestrator";
+    if ((process.env[STATE_VARIANT_ENV] ?? "").trim()) return "child";
+    return "loop";
+  }
+
+  /** This session's transcript — the raw record a successor may dig through. */
+  function ownTranscriptPath(): string | undefined {
+    try {
+      const dir = sessionDirForCwd(cwd);
+      return state.sessionId ? `${dir}/${state.sessionId}.jsonl` : undefined;
+    } catch { return undefined; }
+  }
+
+  /**
+   * The retirement EVERY handover owes — phase one out here, phase two in
+   * `committed` (lib/orchestrator-deps.ts's HandoffRetirement spells out why
+   * the two cannot be one flag). Shared by the orchestrator deps and the
+   * handoff tool, so the two cannot drift.
+   */
+  function handoffRetirement(): { committed(): void; rolledBack(): void } {
+    releaseWorktree();
+    return {
+      committed: () => {
+        handedOffSession = true;
+        stopSupervisionTimer();
+        stopRevivalTimer();
+        stopChildHeartbeat();
+      },
+      rolledBack: () => {
+        if (claimsMainSidecar(process.env)) holdWorktree();
+      },
+    };
+  }
+
+  /**
+   * The MECHANICAL half of the handoff document.
+   *
+   * Every line is a fact the gate observed — the contract in force, the work
+   * still open — so a successor can trust the frame even when the agent's own
+   * paragraph is thin. The agent's half is the only testimony in the file and
+   * lib/session-handoff.ts marks it as such.
+   */
+  function handoffDocFacts(): { contract?: string; outstanding?: string[] } {
+    const kind = handoffKind();
+    const outstanding: string[] = [];
+    let contract: string | undefined;
+    if (kind === "orchestrator") {
+      const { plan } = readPlanFile(cwd);
+      if (plan) {
+        contract =
+          `编排 plan：${plan.title}\n` +
+          plan.tasks.map((t) => `- ${t.id} [${t.status}] ${t.title}`).join("\n");
+      }
+      for (const child of state.orchestrator?.children ?? []) {
+        outstanding.push(
+          `子会话 ${child.id}（任务 ${child.taskId}，pane ${child.paneId}）：` +
+          (child.closedAt ? "已关闭" : "运行中"),
+        );
+      }
+    } else if (kind === "judge") {
+      const task = judgeTaskText();
+      if (task) contract = `本轮审查任务：\n${task}`;
+    } else {
+      const goal = readSessionLoopGoal(primaryRepoRoot);
+      if (goal.present) contract = `loop goal：\n${goal.text}`;
+    }
+    try {
+      const files = changedFiles(cwd) ?? [];
+      if (files.length > 0) {
+        outstanding.push(
+          `未提交改动 ${files.length} 个文件：${files.slice(0, 12).join("、")}${files.length > 12 ? " …" : ""}`,
+        );
+      }
+    } catch { /* a repo the gate cannot read says nothing rather than lying */ }
+    return { ...(contract ? { contract } : {}), outstanding };
+  }
+
+  /** Everything the successor needs on top of lib/session-inheritance.ts's record. */
+  function handoffExtraEnv(kind: HandoffSessionKind): Record<string, string> {
+    return handoffExtraEnvFor({
+      kind,
+      ...(state.taskMode === undefined ? {} : { taskMode: state.taskMode }),
+      // THE ID THIS SESSION ACTUALLY HOLDS, through the ONE rule that decides
+      // it: `deps.runtime()` returns an empty runtime when the stored record
+      // belongs to a different orchestration (lib/orchestrator-wiring.ts, B1),
+      // so its id is "mine" by construction. A child holds none — it addresses
+      // one, and that address arrived in ITS environment, blank or not.
+      ...(kind === "orchestrator"
+        ? { orchestrationId: orchestratorDeps.runtime().orchestrationId }
+        : { orchestrationId: process.env[ORCHESTRATION_ID_ENV] }),
+      // Blank handling is the FUNCTION's job (`handoffExtraEnvFor` trims and
+      // omits), pinned by its test — re-doing it here was the second copy the
+      // reviewer flagged as a Nit.
+      stateVariant: process.env[STATE_VARIANT_ENV],
+    });
+  }
+
+  const handoffDeps: SessionHandoffDeps = {
+    kind: handoffKind,
+    sessionId: () => state.sessionId ?? undefined,
+    ownPane: () => (process.env.TMUX_PANE ?? "").trim() || undefined,
+    repoRoot: () => cwd,
+    transcriptPath: ownTranscriptPath,
+    docPath: (sessionId) => handoffDocPath(cwd, sessionId),
+    docFacts: handoffDocFacts,
+    writeText: (path, text) => {
+      mkdirSync(pathJoin(path, ".."), { recursive: true });
+      writeFileSync(path, text, "utf8");
+    },
+    readText: (path) => {
+      try { return existsSync(path) ? readFileSync(path, "utf8") : undefined; } catch { return undefined; }
+    },
+    openSuccessor: async (spec) => {
+      const ownPane = (process.env.TMUX_PANE ?? "").trim();
+      if (!ownPane) return { ok: false, error: "本会话不在 tmux pane 里" };
+      const opened = await openSessionPane(runTmux, {
+        ownPane,
+        cwd,
+        layout: "beside-opener",
+        command: [...spec.command],
+        role: { kind: "successor", env: spec.env },
+      });
+      return opened.ok ? { ok: true, paneId: opened.paneId } : { ok: false, error: opened.error };
+    },
+    retire: handoffRetirement,
+    // An orchestration records who took over, on the runtime it persists: the
+    // successor's own row goes through `persist()`, which refuses to write for
+    // a retired session — so this runs BEFORE `committed`.
+    recordHandoff: (paneId, docPath) => {
+      if (handoffKind() !== "orchestrator") return;
+      try {
+        orchestratorDeps.saveRuntime({
+          ...orchestratorDeps.runtime(),
+          relay: { handoffPath: docPath, successorPane: paneId, at: new Date().toISOString() },
+        });
+      } catch { /* the handover must not fail because a diagnostic row could not be written */ }
+    },
+    ...(readJudgeSideEnv(process.env) ? { requestSuccession: judgeSuccessionRequest } : {}),
+    extraEnv: () => handoffExtraEnv(handoffKind()),
+    now: () => Date.now(),
+  };
+  /**
+   * Re-read the persisted judge table, MERGING IN IDS THIS SESSION HAS NEVER
+   * SEEN — the one thing a judge's handover changes under its opener's feet.
+   *
+   * A judge that runs out of room opens the next generation ITSELF (it owns no
+   * registry, but the table is a file in the repo it is already reviewing), and
+   * the new session's channel is keyed by the NEW id: without this merge the
+   * opener would keep reading the retired session's channel and never see the
+   * round's conclusion. Known ids are never overwritten — this session's own
+   * rows are newer for every judge IT opened.
+   */
+  function reloadJudgeHierarchy(root: string): void {
+    try {
+      const snap = parseHierarchySnapshot(readFileSync(pathJoin(root, ".pi", HIERARCHY_FILENAME), "utf8"));
+      if (!snap) return;
+      for (const [id, e] of Object.entries(snap.judges)) {
+        if (!judgeHierarchy[id]) judgeHierarchy[id] = e;
+      }
+      hierarchyFileRoots.add(root);
+    } catch { /* unreadable ⇒ keep what we have */ }
+  }
+
+  /**
+   * THE JUDGE'S HANDOVER — a judge that ran out of room opens the next
+   * generation itself, because the round is ITS to finish.
+   *
+   * WHY THE JUDGE AND NOT THE OPENER. A reviewer's rotation between rounds is
+   * the opener's decision (lib/judge-rotation.ts) and stays that way. But a
+   * judge that hits the threshold IN THE MIDDLE of a round cannot wait for the
+   * next dispatch: the round it is holding is the one that would blow up. It
+   * opens the successor beside itself, points it at the handoff document it
+   * just wrote, and the new session's first tool call proves the takeover —
+   * at which point the gate closes THIS pane, exactly as it does for every
+   * other kind of session.
+   *
+   * The new id is derived from this one, so the chain is readable, and the
+   * table is updated ON DISK so the opener's next sweep finds the new channel.
+   */
+  async function judgeSuccessionRequest(
+    docPath: string,
+  ): Promise<{ ok: true; detail: string } | { ok: false; reason: string }> {
+    const side = readJudgeSideEnv(process.env);
+    if (!side) return { ok: false, reason: "本会话不是 judge" };
+    const ownPane = (process.env.TMUX_PANE ?? "").trim();
+    if (!ownPane) return { ok: false, reason: "judge pane 不在 tmux 里，无法开新一代会话" };
+    // THE TABLE HAS TO BE LOADED FIRST (2026-09-14, measured in the lab): a
+    // judge process does not touch the registry on the way up, so without this
+    // `judgeHierarchy` is empty, `entry` is undefined, and the handover leaves
+    // the opener pointing at a session that no longer exists. The load is
+    // idempotent, so the ordinary (already-loaded) path costs a Set lookup.
+    ensureHierarchyLoaded(cwd);
+    const entry = judgeHierarchy[side.judgeId];
+    const successorId = successorSessionId(side.judgeId, handoffGeneration(side.judgeId) + 1);
+    const opened = await openSessionPane(runTmux, {
+      ownPane,
+      cwd,
+      layout: "beside-opener",
+      command: ["pi", "--session-id", successorId, successorOpeningMessage(docPath, "judge")],
+      role: {
+        kind: "successor",
+        env: successorEnv({
+          kind: "judge",
+          predecessorPane: ownPane,
+          handoffDoc: docPath,
+          ...(state.sessionId ? { predecessorSessionId: state.sessionId } : {}),
+          extra: {
+            [JUDGE_OPENER_ENV]: side.openerId,
+            [JUDGE_ID_ENV]: successorId,
+            [JUDGE_ROLE_ENV]: side.role,
+            ...(entry?.streamPath ? { [JUDGE_STREAM_ENV]: entry.streamPath } : {}),
+          },
+        }),
+      },
+    });
+    if (!opened.ok) return { ok: false, reason: opened.error };
+    if (entry) {
+      const next: HierarchyTable = { ...judgeHierarchy };
+      delete next[side.judgeId];
+      next[successorId] = { ...entry, judgeId: successorId, paneId: opened.paneId };
+      setHierarchy(next);
+      try { persistJudgeHierarchy(); } catch { /* the opener still sees the new channel after a reload */ }
+    }
+    return {
+      ok: true,
+      detail:
+        `新一代 judge 会话已在 pane ${opened.paneId} 启动（${successorId}），` +
+        "它会接着这一轮审查；门禁会在它读到交接文档后关掉本 pane。",
+    };
+  }
+
+  registerSessionHandoffTool(pi, handoffDeps);
+
+  // `context_status()` — the same measurement, handed to the session that owns
+  // it (user requirement, 2026-09-14). It is registered beside the handoff tool
+  // because they answer halves of one question: how full am I, and what to do
+  // about it. Judges get it too: a judge out of context is what handovers are
+  // for, and it is the one session nobody can re-ask later.
+  registerContextStatusTool(pi, {
+    usage: () => {
+      try { return latestCtx?.getContextUsage?.(); } catch { return undefined; }
+    },
+    docPath: () => (state.sessionId ? handoffDocPath(cwd, state.sessionId) : undefined),
+  });
+
+  /**
+   * THE REMINDER — the whole of what the gate does by itself.
+   *
+   * It is computed from the session's OWN reading, taken through the same
+   * `contextPercentOf` wrapper every other usage read uses, and it renders the
+   * document skeleton on the way (the agent has to have somewhere to write its
+   * paragraph BEFORE it decides to call the tool). Nothing is opened, nothing
+   * is closed and nothing is blocked here: reaching the threshold produces a
+   * sentence and a file, and the agent decides when the work is at a stopping
+   * point (user decision, 2026-09-14).
+   *
+   * A missing reading produces NOTHING. A reminder that fires whenever the host
+   * cannot report usage is one its reader learns to ignore.
+   */
+  function handoffReminderBlock(): string {
+    if (handedOffSession || !state.sessionId) return "";
+    let due: { due: boolean; percent?: number };
+    try {
+      due = handoffDue(latestCtx?.getContextUsage?.());
+    } catch { return ""; }
+    if (!due.due || due.percent === undefined) return "";
+    const docPath = handoffDocPath(cwd, state.sessionId);
+    let pendingFill = true;
+    try {
+      pendingFill = ensureHandoffDoc(handoffDeps, state.sessionId, docPath).pendingFill;
+    } catch { return ""; }
+    return "\n\n" + handoffReminder({
+      kind: handoffKind(),
+      percent: due.percent,
+      docPath,
+      pendingFill,
+    });
+  }
+
+  /**
+   * THE SUCCESSOR SIDE — the gate closes the predecessor.
+   *
+   * The asymmetry the protocol is built on used to be "only the successor may
+   * close the predecessor" (constraint 12), and the successor was TOLD to do
+   * it by hand. MEASURED: a successor that never learned it owed a close left
+   * two live sessions behind, so the act moved to the gate — and the proof
+   * moved with it (lib/session-handoff.ts's `handoffAccepted`), and the proof
+   * is the user's own two-part test: the successor READ the handoff document
+   * AND a tool call succeeded. Running the `read` IS that tool call in the
+   * ordinary path.
+   *
+   * Done exactly once per session: a second tool_result must not race a second
+   * kill against the first.
+   */
+  let successionClosed = false;
+  pi.on("tool_result", (event) => {
+    if (successionClosed || !state.sessionId) return;
+    const inherited = readInheritance();
+    if (!inherited.predecessorPane) return;
+    const readPath = event.toolName === "read"
+      ? String((event.input as { path?: unknown } | undefined)?.path ?? "").trim()
+      : "";
+    // RESOLVE IT BEFORE COMPARING (reviewer P2, 2026-09-14): pi's read tool
+    // accepts a relative path, and `handoffDocPath` always renders an absolute
+    // one — so a successor that read the document as `.pi/handoff/x.md` would
+    // never prove its takeover and the predecessor pane would sit there
+    // forever. A path that cannot be resolved is simply not a match.
+    const resolvedRead = readPath.length === 0 ? "" : pathResolve(cwd, readPath);
+    const accepted = handoffAccepted({
+      readHandoffDoc: event.isError !== true && inherited.handoffDoc !== undefined &&
+        resolvedRead === inherited.handoffDoc,
+      firstToolSucceeded: event.isError !== true,
+    });
+    if (!accepted) return;
+    successionClosed = true;
+    const closed = closeSessionPane(runTmux, inherited.predecessorPane);
+    try {
+      latestCtx?.ui?.notify(
+        closed.ok
+          ? `review-gate: 接手成功，前任 pane ${inherited.predecessorPane} 已关闭。`
+          : `review-gate: 接手成功，但关闭前任 pane ${inherited.predecessorPane} 失败 —— ${closed.error}`,
+        closed.ok ? "info" : "warning",
+      );
+    } catch { /* headless */ }
+  });
 
   /**
    * Constraints 3, 4 and 11 — the orchestration's own exit contract.
@@ -2614,8 +2981,16 @@ export default function reviewGate(pi: ExtensionAPI) {
   let revivalTimer: ReturnType<typeof setInterval> | undefined;
   /** When this session last injected a revival (ms epoch). */
   let lastRevivalAt: number | undefined;
-  /** A session that handed its orchestration over must not be revived. */
-  let handedOffOrchestration = false;
+  /**
+   * A session that HANDED OFF must not be revived, supervised or reported on
+   * again — its successor owns all of that now.
+   *
+   * Named for the act, not for the role: since 2026-09-14 every kind of
+   * session can hand over (lib/session-handoff-tools.ts), and the old
+   * `handedOffOrchestration` name was the reason three of the four guards
+   * below were written as if a loop session could never retire.
+   */
+  let handedOffSession = false;
   let supervisionTimer: ReturnType<typeof setInterval> | undefined;
   let orchestratorContinuations = 0;
   /** The supervisor's own last health read, for the continuation message. */
@@ -2782,7 +3157,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             bypassed: state.bypass.active,
             arbitrationPaused,
           },
-          handedOff: handedOffOrchestration,
+          handedOff: handedOffSession,
           lastRevivalAt,
           now: Date.now(),
           intervalMs: REVIVAL_INTERVAL_MS,
@@ -2818,7 +3193,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // somebody else's job — a wake-up here would put two project managers
         // on one orchestration (the exact defect the revival path already
         // guards against at lib/session-revival.ts).
-        if (handedOffOrchestration) { stopSupervisionTimer(); return; }
+        if (handedOffSession) { stopSupervisionTimer(); return; }
         if (!ctx.isIdle?.()) return;
         const news = drainSupervisionNews();
         if (news.length === 0) return;
@@ -2885,8 +3260,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // no longer this session's to push.
     //
     // This is the same judgement `decideRevival` already makes on its own
-    // path (`handedOff: handedOffOrchestration`); this path simply lacked it.
-    if (handedOffOrchestration) return;
+    // path (`handedOff: handedOffSession`); this path simply lacked it.
+    if (handedOffSession) return;
     startSupervisionTimer(ctx);
     startRevivalTimer(ctx);
     // USER REQUIREMENT (shared with the loop path): the user aborted this
@@ -2970,9 +3345,33 @@ export default function reviewGate(pi: ExtensionAPI) {
    * Unknown identity yields NOTHING (fail-closed): an unidentifiable session
    * owns no judge, and must not act on one.
    */
+  /**
+   * EVERY identity whose judges this session is responsible for.
+   *
+   * Normally one — the orchestration id, or its own session id. A SUCCESSOR
+   * adds the identity it replaces (2026-09-14, measured on the loop path): a
+   * judge's channel is keyed by `<openerId>/<judgeId>`, so a handover that
+   * changes the opener's session id would otherwise strand every judge the
+   * predecessor had already dispatched — the round's verdict would land in a
+   * channel nobody reads, and the successor would wait forever on a review
+   * that had already concluded.
+   *
+   * Uncertain identity still yields NOTHING (fail-closed): an unidentifiable
+   * session owns no judge, and must not act on one.
+   */
+  function callerIdentities(): string[] {
+    const ids: string[] = [];
+    const own = callerIdentity();
+    if (own) ids.push(own);
+    const inherited = readInheritance().predecessorSession;
+    if (inherited && !ids.includes(inherited)) ids.push(inherited);
+    return ids;
+  }
+
   function ownJudges(): JudgeEntry[] {
-    const caller = callerIdentity();
-    return caller ? listByOpener(judgeHierarchy, caller) : [];
+    const mine: JudgeEntry[] = [];
+    for (const id of callerIdentities()) mine.push(...listByOpener(judgeHierarchy, id));
+    return mine;
   }
 
   /** The judge panes this window currently has, or undefined when unreadable. */
@@ -3540,7 +3939,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // is the one that has to stop writing. Without this, a wake-up that
     // slipped past the retirement guards would rewrite the plan and child
     // registry the successor is working from.
-    if (handedOffOrchestration) return;
+    if (handedOffSession) return;
     // P-multi: persist the session's repo set so a same-session resume (or
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
@@ -4202,14 +4601,18 @@ export default function reviewGate(pi: ExtensionAPI) {
   // one injected object, so every branch of L1 is testable without a session.
   const shipGateHookDeps: ShipGateHookDeps = {
     noteContext: (c) => { latestCtx = c as ExtensionContext; },
-    // A HINT, not a refusal: the hook can only block or stay silent, so this
-    // is how the gate says "there is a tool for that" without taking the
-    // command away. Deduplicated per session — the same advice on every
-    // iteration of a loop would be noise, and noise is ignored.
+    // A HINT, not a refusal — and it rides THE CALL'S OWN RESULT (user decision,
+    // 2026-09-14). The hook can only block or stay silent, so this is how the
+    // gate says "there is a tool for that" without taking the command away; the
+    // sentence is collected here and appended to the bash result by
+    // `hintRideAlong` below. A separate follow-up message was measured wrong:
+    // it arrives after the fact and reads as an interruption from nowhere.
+    // Deduplicated per session — the same advice on every iteration of a loop
+    // would be noise, and noise is ignored.
     hint: (message) => {
       if (deliveredHints.has(message)) return;
       deliveredHints.add(message);
-      try { pi.sendUserMessage(message, { deliverAs: "followUp" }); } catch { /* session gone */ }
+      pendingHints.push(message);
     },
 
     isEditTool: (toolName) => EDIT_TOOL_NAMES.has(toolName),
@@ -4257,6 +4660,22 @@ export default function reviewGate(pi: ExtensionAPI) {
   };
 
   pi.on("tool_call", (event, ctx) => evaluateToolCall(shipGateHookDeps, event, ctx));
+
+  /**
+   * THE HINTS RIDE THE RESULT (user decision, 2026-09-14).
+   *
+   * `tool_result` handlers chain like middleware, so this patch is what the
+   * REST of the pipeline (and the model) sees as that tool's output: the
+   * advice appears under the very command it is about, in one message. The
+   * handler touches nothing else — every other field keeps its current value.
+   */
+  pi.on("tool_result", (event) => {
+    if (pendingHints.length === 0) return;
+    const text = pendingHints.splice(0).join("\n\n");
+    try {
+      return { content: [...event.content, { type: "text" as const, text: "\n\n" + text }] };
+    } catch { /* an unreadable result shape: drop the hint, never the result */ }
+  });
 
   // Compute the current binding material for a parsed arbitrable action: hash
   // each --body-file's (path + content) so replacing the file after issue
@@ -6516,8 +6935,14 @@ export default function reviewGate(pi: ExtensionAPI) {
    * with the watchdog below (no second waiter). Returns true when it woke.
    */
   async function settleFinishedRounds(ctx: ExtensionContext): Promise<boolean> {
-    const mine = callerIdentity();
-    if (!mine) return false;
+    // A judge may have handed its round to a successor since the last sweep:
+    // the new session has a new id, hence a new channel, and this merge is what
+    // makes the opener look there.
+    reloadJudgeHierarchy(primaryRepoRoot);
+    // A handover does not orphan the predecessor's judges: this session is
+    // responsible for its own identity AND the one it replaced.
+    const mine = new Set(callerIdentities());
+    if (mine.size === 0) return false;
     const ownPane = process.env.TMUX_PANE?.trim() || undefined;
     const deps = {
       channelIO: () => channelIO,
@@ -6529,7 +6954,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     };
     const notices: string[] = [];
     for (const [judgeId, entry] of Object.entries(judgeHierarchy)) {
-      if (entry.openerId !== mine) continue;
+      if (!mine.has(entry.openerId)) continue;
       const target = judgeChannelTarget(entry.openerId, judgeId);
       const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
       const projection = projectChannel(read.records);
@@ -7162,6 +7587,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       return resolved;
     },
     callerId: () => callerIdentity(),
+    // …and the identity a successor REPLACED, so a handover does not orphan the
+    // reviewers its predecessor had already dispatched (2026-09-14).
+    callerIds: () => callerIdentities(),
     hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy; },
     saveHierarchy: (next) => setHierarchy(next),
     findChildById: (judgeId) => {
@@ -9149,7 +9577,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // there is no settle-time verdict scraping, so nothing to do here.
     // Finished rounds wake in every mode except normal (gate fully off): explore
     // is advisory on enforcement, not deaf — its reports still land and record.
-    if (state.taskMode !== "normal" && !handedOffOrchestration && (await settleFinishedRounds(ctx))) {
+    if (state.taskMode !== "normal" && !handedOffSession && (await settleFinishedRounds(ctx))) {
       // …and this exit may have handed the session a round's report, so it is
       // NOT a stop: nothing is published here (see `confirmStop`).
       return;
@@ -9963,6 +10391,28 @@ export default function reviewGate(pi: ExtensionAPI) {
     // required on every turn, so it is injected before any early return.
     let systemPrompt = event.systemPrompt + "\n\n" + LANGUAGE_DIRECTIVE;
 
+    // A SUCCESSOR'S BRIEF — for EVERY kind of session, not just the project
+    // manager (2026-09-14, measured). It used to be injected inside the
+    // orchestrator branch below, so a loop session's successor — the ordinary
+    // case — got its first message but never the brief that says what to read
+    // and who closes the predecessor.
+    // THE ID IS READ HERE, NEVER MINTED (reviewer P2, 2026-09-14): this used to
+    // call `currentOrchestrationId()`, which MINTS an id on first read — so
+    // every session that owns no orchestration was stamped with one on every
+    // turn, and the brief then promised a successor that "children will reach
+    // you here". A session that HAS an orchestration carries its id in the
+    // environment (that is how its children address it); one that does not has
+    // nothing to inherit, and saying nothing is the honest answer.
+    const inheritedBrief = formatInheritanceBrief(readInheritance(), orchestrationIdFromEnv());
+    if (inheritedBrief) systemPrompt += "\n\n" + inheritedBrief;
+
+    // THE HANDOFF REMINDER — injected at the very top, before every early return
+    // below (a configured-correctly session that is out of context must hear it
+    // in EVERY mode, judge panes included). It renders nothing at all until the
+    // session's own reading passes 70% of its window; see
+    // `handoffReminderBlock` for how the skeleton file rides along.
+    systemPrompt += handoffReminderBlock();
+
 
     // STARTUP HARD CHECK (user requirement 2026-08-30): every role must have
     // a resolvable model chain in the agents config layer — no silent
@@ -10072,8 +10522,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // optimize for the plan instead of for its own task.
     if (state.taskMode === "orchestrator") {
       systemPrompt += "\n\n" + ORCHESTRATOR_DIRECTIVE;
-      const inherited = formatInheritanceBrief(readInheritance(), currentOrchestrationId());
-      if (inherited) systemPrompt += "\n\n" + inherited;
       // F13 — an orchestrator RETURNS HERE, and that is the whole fix.
       //
       // Falling through used to append the loop block, which tells the

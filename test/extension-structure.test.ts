@@ -51,6 +51,7 @@ const JUDGE_SESSION_TOOLS = new Set(["judge_close", "judge_wait"]);
  */
 const REVIEW_PREPARE_SRC = readFileSync(join(ROOT, "lib", "review-prepare-tools.ts"), "utf8");
 const SESSION_TOOLS_SRC = readFileSync(join(ROOT, "lib", "orchestrator-session-tools.ts"), "utf8");
+const HANDOFF_TOOLS_SRC = readFileSync(join(ROOT, "lib", "session-handoff-tools.ts"), "utf8");
 const EXCLUSIVITY_SRC = readFileSync(join(ROOT, "lib", "session-exclusivity.ts"), "utf8");
 const REVIEW_PREPARE_TOOLS = new Set(["prepare_review"]);
 const ADVISORY_PREPARE_SRC = readFileSync(join(ROOT, "lib", "advisory-prepare-tools.ts"), "utf8");
@@ -470,8 +471,8 @@ test("edits under gate-owned dirs do NOT arm the gate (writing a loop goal must 
   // The fingerprint already excludes .pi/; edit tracking must skip the same
   // scope, or writing .pi/loop-goal.md sets hasDocChange and demotes
   // READY→PENDING over a file no reviewer can even see.
-  const toolResultAt = SRC.indexOf('pi.on("tool_result"');
-  assert.ok(toolResultAt > 0, "tool_result handler must exist");
+  const toolResultAt = SRC.indexOf('pi.on("tool_result", async (event, ctx)');
+  assert.ok(toolResultAt > 0, "the edit-tracking tool_result handler must exist");
   const skipAt = SRC.indexOf("isGateOwnedPath(absEditPath", toolResultAt);
   assert.ok(skipAt > 0, "edit tracking must skip gate-owned paths");
   const armAt = SRC.indexOf("hasDocChange = true", toolResultAt);
@@ -1454,7 +1455,7 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
     // just above the tier selection was inside it. Anchoring at the call
     // would have quietly narrowed that.
     "// tmux BACKSTOP (task book §4.3)",
-    "if (tmuxHit) return { block: true, reason: tmuxHit.reason };",
+    "if (tmuxHit) deps.hint(tmuxHit.reason);",
     "tmux backstop tier",
   );
   assert.match(guardSite, /detectForbiddenTmux\(/,
@@ -4688,7 +4689,16 @@ test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets o
   );
 
   assert.match(block, /ORCHESTRATOR_DIRECTIVE/);
-  assert.match(block, /formatInheritanceBrief/, "a relay successor is told what it inherited");
+  // THE SUCCESSOR BRIEF MOVED OUT OF THIS BRANCH (2026-09-14, measured): it
+  // belongs to EVERY kind of session — a loop session's successor is the
+  // ordinary case — and it is injected at the top of `before_agent_start` so
+  // no mode branch or early return can drop it.
+  assert.doesNotMatch(block, /formatInheritanceBrief/, "the brief is no longer orchestrator-only");
+  const beforeStartAt = SRC.indexOf('pi.on("before_agent_start"');
+  const briefAt = SRC.indexOf('formatInheritanceBrief(readInheritance(), orchestrationIdFromEnv())', beforeStartAt);
+  const orchAt = SRC.indexOf('if (state.taskMode === "orchestrator") {', beforeStartAt);
+  assert.ok(briefAt > 0 && briefAt < orchAt,
+    "every successor is briefed before any mode branch, and the brief really is rendered there");
   // F13 — the orchestrator branch RETURNS. Falling through appended the loop
   // block ("negotiate a loop goal → judge_submit reviewer → declare_done"),
   // which contradicts constraint 2 clause by clause and quoted the CHILD's
@@ -5186,7 +5196,8 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
   // readers at all.
   assert.match(SRC, /function ownJudges\(\): JudgeEntry\[\]/, "the opener scope has one definition");
   assert.match(SRC, /function ownLiveJudges\(\): JudgeEntry\[\]/, "the liveness scope has one definition");
-  assert.match(SRC, /listByOpener\(judgeHierarchy, caller\)/, "the filter is lib/hierarchy.ts's, not a re-implementation");
+  assert.match(SRC, /listByOpener\(judgeHierarchy, id\)/,
+    "the filter is lib/hierarchy.ts's, not a re-implementation");
 
   // "Is a judge RUNNING?" — must additionally exclude entries whose pane died
   // with a previous process, or a restarted session waits forever on a pane
@@ -5606,53 +5617,53 @@ test("thinking-loop guard: the extension forwards the assistant stream, the stat
 // ---------------------------------------------------------------------------
 
 test("retiring is TWO phases, and the split is what makes each half safe", () => {
-  const start = SRC.indexOf("RETIRE (goal 7");
-  assert.ok(start > 0, "the retirement block is present");
-  const site = SRC.slice(start, start + 2400);
+  const start = SRC.indexOf("function handoffRetirement(");
+  assert.ok(start > 0, "the retirement function is present");
+  const site = SRC.slice(start, start + 1400);
   // Phase one, and it must come first: the successor's boot races a heartbeat
   // we have not stopped yet.
   assert.match(site, /releaseWorktree\(\)/, "phase one releases the worktree claim");
   assert.ok(site.indexOf("releaseWorktree()") < site.indexOf("committed:"),
     "release comes BEFORE the silence — the successor arms its gate in this same worktree");
-  // Phase two: the flag and the two timers, together, and only behind the
+  // Phase two: the flag and the timers, together, and only behind the
   // commit callback (see the next test for why they cannot be earlier).
   const committed = site.slice(site.indexOf("committed:"), site.indexOf("rolledBack:"));
-  assert.match(committed, /handedOffOrchestration = true/, "phase two silences the session");
+  assert.match(committed, /handedOffSession = true/, "phase two silences the session");
   assert.match(committed, /stopSupervisionTimer\(\)/, "the supervision timer goes quiet");
   assert.match(committed, /stopRevivalTimer\(\)/, "the revival timer goes quiet");
+  assert.match(committed, /stopChildHeartbeat\(\)/, "and the child heartbeat a loop session may own");
   // And a rollback therefore has exactly ONE thing to undo.
   const rolled = site.slice(site.indexOf("rolledBack:"));
   assert.match(rolled, /if \(claimsMainSidecar\(process\.env\)\) holdWorktree\(\)/,
     "the rollback re-takes the claim — and only a session that claims one may write a heartbeat");
-  assert.doesNotMatch(rolled, /stopSupervisionTimer|stopRevivalTimer|handedOffOrchestration = false/,
+  assert.doesNotMatch(rolled, /stopSupervisionTimer|handedOffSession = false/,
     "phase two never ran on this path, so there is nothing else to undo (the old single-phase rollback could not re-arm a stopped timer)");
 });
 
-test("the relay record is persisted BEFORE the session goes silent", () => {
-  // MEASURED (review round 1, P2): `saveRuntime` goes through `persist()`,
-  // which refuses to write for a retired session — two sessions, one sidecar.
-  // Marking retirement first made the successor's own registry row memory-only.
-  // The behaviour is pinned end to end in test/orchestrator-tools.test.ts;
-  // this is the one-line invariant that makes it possible.
-  const saveAt = SESSION_TOOLS_SRC.indexOf("deps.saveRuntime({");
-  const commitAt = SESSION_TOOLS_SRC.indexOf("retirement?.committed()");
-  assert.ok(saveAt > 0 && commitAt > 0, "doHandoff persists the relay then commits the retirement");
+test("the handover is recorded BEFORE the session goes silent", () => {
+  // MEASURED (review round 1, P2): whatever a session persists goes through
+  // `persist()`, which refuses to write for a retired session — two sessions,
+  // one sidecar. Marking retirement first made the successor's own relay row
+  // memory-only. The behaviour is pinned end to end in
+  // test/session-handoff-tools.test.ts; this is the one-line invariant that
+  // makes it possible.
+  const saveAt = HANDOFF_TOOLS_SRC.indexOf("deps.recordHandoff?.(");
+  const commitAt = HANDOFF_TOOLS_SRC.indexOf("retirement?.committed()");
+  assert.ok(saveAt > 0 && commitAt > 0, "runSessionHandoff records the handover then commits the retirement");
   assert.ok(saveAt < commitAt, "the record must be on disk before the writer is switched off");
-  // …and the retirement itself must not fire before the preconditions: the old
-  // shape ran it from the execute wrapper, so a relay refused for a missing
-  // approval or a short handoff document left a silent predecessor behind.
-  assert.match(
-    SESSION_TOOLS_SRC,
-    /execute: guarded\(\(params\) => doHandoff\(deps, params\)\)/,
-    "retiring before the preconditions are checked strands the orchestration",
-  );
+  // …and the document itself is written before the pane opens, so the
+  // successor's first message points at something that exists.
+  const docAt = HANDOFF_TOOLS_SRC.indexOf("ensureHandoffDoc(deps, sessionId, docPath)");
+  const openAt = HANDOFF_TOOLS_SRC.indexOf("await deps.openSuccessor(");
+  assert.ok(docAt > 0 && openAt > 0 && docAt < openAt,
+    "the document the successor is told to read must exist by the time its pane opens");
 });
 
 test("every wake-up path respects a retired session", () => {
   const start = SRC.indexOf("function orchestratorSettled(");
   assert.ok(start > 0);
   const settled = SRC.slice(start, start + 2000);
-  const guardAt = settled.indexOf("if (handedOffOrchestration) return;");
+  const guardAt = settled.indexOf("if (handedOffSession) return;");
   const armAt = settled.indexOf("startSupervisionTimer(ctx)");
   assert.ok(guardAt > 0,
     "agent_settled must not revive a session that handed its orchestration over — this is the defect that put two project managers on one plan");
@@ -5661,7 +5672,7 @@ test("every wake-up path respects a retired session", () => {
   const supStart = SRC.indexOf("function startSupervisionTimer(");
   assert.ok(supStart > 0);
   assert.match(SRC.slice(supStart, supStart + 2000),
-    /if \(handedOffOrchestration\) \{ stopSupervisionTimer\(\); return; \}/,
+    /if \(handedOffSession\) \{ stopSupervisionTimer\(\); return; \}/,
     "an already-armed supervision tick stops itself instead of waking the retired session");
 
   // …and the FOURTH path, which the doc block above it used to over-claim
@@ -5672,7 +5683,7 @@ test("every wake-up path respects a retired session", () => {
   const settleStart = SRC.indexOf(LOOP_SETTLED);
   assert.ok(settleStart > 0);
   assert.match(SRC.slice(settleStart, settleStart + 3400),
-    /if \(state\.taskMode !== "normal" && !handedOffOrchestration && \(await settleFinishedRounds\(ctx\)\)\)/,
+    /if \(state\.taskMode !== "normal" && !handedOffSession && \(await settleFinishedRounds\(ctx\)\)\)/,
     "settleFinishedRounds must not wake a retired session either");
 
   // The sidecar writer too: two sessions writing one sidecar is what the
@@ -5680,7 +5691,7 @@ test("every wake-up path respects a retired session", () => {
   // this worktree ON PURPOSE — so the predecessor stops writing.
   const persistAt = SRC.indexOf("function persist(ctx?: ExtensionContext)");
   assert.ok(persistAt > 0);
-  assert.match(SRC.slice(persistAt, persistAt + 2500), /if \(handedOffOrchestration\) return;/,
+  assert.match(SRC.slice(persistAt, persistAt + 2500), /if \(handedOffSession\) return;/,
     "a retired session stops writing the sidecar the successor now owns");
 });
 

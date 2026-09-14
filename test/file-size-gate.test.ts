@@ -90,7 +90,7 @@ test("this round's own modules would pass the rule they introduce", () => {
   const facts = [
     "lib/orchestration-id.ts", "lib/out-of-repo-paths.ts", "lib/orchestrator-plan.ts",
     "lib/orchestrator-tmux.ts", "lib/orchestrator-guard.ts", "lib/orchestrator-notify.ts",
-    "lib/orchestrator-registry.ts", "lib/orchestrator-gate.ts", "lib/orchestrator-relay.ts",
+    "lib/orchestrator-registry.ts", "lib/orchestrator-gate.ts", "lib/session-inheritance.ts",
     "lib/orchestrator-wait.ts", "lib/orchestrator-tools.ts", "lib/orchestrator-session-tools.ts",
     "lib/orchestrator-wiring.ts", "lib/orchestrator-deps.ts", "lib/orchestrator-tool-kit.ts",
     "lib/orchestrator-directives.ts", "lib/file-size-gate.ts",

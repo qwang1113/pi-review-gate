@@ -31,7 +31,6 @@ import {
 import { parsePlan } from "../lib/orchestrator-plan.ts";
 import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
 import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
-import { PREDECESSOR_PANE_ENV, PREDECESSOR_SESSION_ENV } from "../lib/orchestrator-relay.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 
 /**
@@ -47,7 +46,13 @@ const CROSSCHECK_T1 =
   "交付站点——它声明的交付站点与 plan 的 deliveryStation 一致，没有往后挪。";
 
 
-/** The 10 tools an orchestrator gets, and nothing else. */
+/**
+ * The 9 tools an orchestration session gets, and nothing else.
+ *
+ * `session_handoff` is deliberately NOT on this list: it belongs to every
+ * kind of session, not to the project manager (lib/session-handoff-tools.ts),
+ * and listing it here would claim the orchestration layer owns it.
+ */
 const ORCHESTRATION_TOOLS = [
   "orchestrator_plan",
   "orchestrator_notify",
@@ -58,7 +63,6 @@ const ORCHESTRATION_TOOLS = [
   "orchestrator_close",
   "orchestrator_recover",
   "orchestrator_attach",
-  "orchestrator_handoff",
 ];
 
 /** Spawn t1 and return its registry handle. */
@@ -297,32 +301,39 @@ test("the handoff advice is COMPUTED and pushed, and it knows about pending ques
   const withRoom = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, contextPercent: 50 });
   const c1 = await spawnT1(withRoom);
   readyChild(withRoom, c1);
-  assert.equal((await withRoom.call("orchestrator_wait", { timeoutMs: 0 })).details?.handoffUrgency, "none");
+  assert.equal((await withRoom.call("orchestrator_wait", { timeoutMs: 0 })).details?.handoffDue, false);
 
-  const nearlyFull = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, contextPercent: 84 });
+  const nearlyFull = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, contextPercent: 72 });
   const c2 = await spawnT1(nearlyFull);
   readyChild(nearlyFull, c2);
   const clean = await nearlyFull.call("orchestrator_wait", { timeoutMs: 0 });
-  assert.equal(clean.details?.handoffUrgency, "soon");
-  assert.match(replyText(clean), /现在是接力的好时机/);
+  assert.equal(clean.details?.handoffDue, true);
+  assert.match(replyText(clean), /写进门禁准备好的交接文档/);
+  assert.match(replyText(clean), /session_handoff\(\)/, "the one tool is named, not a concept");
 
   nearlyFull.childAsks(c2, { requestId: "r", title: "问题", options: ["A", "B"] });
   const busy = await nearlyFull.call("orchestrator_wait", { timeoutMs: 0 });
-  assert.match(replyText(busy), /先处理完这 1 个待答请求再接力/);
+  assert.match(replyText(busy), /先把这 1 个待答请求回掉/);
 });
 
-test("F/round-5: over the HARD context threshold, the wait receipt makes handoff the FIRST action", async () => {
-  // Round 5 never drove the orchestrator's own context past ~13%, so the hard
-  // threshold path had no live evidence. Construct it directly: a supervisor
-  // that is nearly full must be told to hand over BEFORE it takes another task.
+test("one threshold for every kind of session — 69% is quiet, 70% is the handover lane", async () => {
+  // The receipt used to carry a soft/hard pair (80/90) that only the
+  // orchestrator obeyed, while a judge rotated at 60 — three numbers for one
+  // decision. lib/session-handoff.ts owns the single 70% now, and this pins
+  // that the receipt speaks it.
+  const below = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, contextPercent: 69 });
+  const c1 = await spawnT1(below);
+  readyChild(below, c1);
+  assert.equal((await below.call("orchestrator_wait", { timeoutMs: 0 })).details?.handoffDue, false,
+    "69% is below the threshold — there is no second lane to fall into");
+
   const full = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, contextPercent: 95 });
   const c = await spawnT1(full);
   readyChild(full, c);
   const reply = await full.call("orchestrator_wait", { timeoutMs: 0 });
-  assert.equal(reply.details?.handoffUrgency, "now", "≥90% is the urgent lane");
-  const text = replyText(reply);
-  assert.match(text, /首要动作/, "handing over is the primary action, not a suggestion");
-  assert.match(text, /余量已不足以再带一轮任务/, "and it says WHY: no room to carry another task");
+  assert.equal(reply.details?.handoffDue, true);
+  assert.match(replyText(reply), /接力是现在的动作/);
+  assert.match(replyText(reply), /阈值 70%/, "the receipt states the number the policy uses");
 });
 
 
@@ -1002,25 +1013,12 @@ test("closing is limited to registered panes and returns the task to pending", a
   assert.ok(world.runtime().children[0]!.closedAt, "the registry records the close");
 });
 
-test("CONSTRAINT 12: only a successor may close a predecessor pane", async () => {
-  const world = makeFakeWorld();
-  const reply = await world.call("orchestrator_close", { predecessorPane: "%9" });
-  assert.equal(reply.isError, true, "a session that is not a successor may not close anybody");
-});
-
-test("handoff refuses without a handoff document, and opens the successor when it has one", async () => {
-  const bare = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
-  const refused = await bare.call("orchestrator_handoff", {});
-  assert.equal(refused.isError, true);
-
-  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
-  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
-  assert.equal(reply.isError, undefined, replyText(reply));
-  const successor = [...world.panes.values()].find((p) => p.env[GATE_MODE_ENV] === "orchestrator");
-  assert.ok(successor, "the successor pane is opened by the gate");
-  assert.equal(successor!.env[ORCHESTRATION_ID_ENV], world.runtime().orchestrationId,
-    "the successor INHERITS the orchestration id, so no child has to be restarted");
-});
+// THE HANDOVER TESTS THAT USED TO LIVE HERE went with the tool they tested
+// (`orchestrator_handoff`, retired 2026-09-14): handing over is every
+// session's move now, exercised through `session_handoff`
+// (test/session-handoff-tools.test.ts — skeleton, successor first message,
+// release → open → silence ordering, rollback), while the orchestrator's own
+// wiring is pinned at its registration site.
 
 // ---------------------------------------------------------------------------
 // notify (unchanged; the only channel that reaches a human who is elsewhere)
@@ -1062,71 +1060,12 @@ test("spawn proceeds normally when the identity matches or is inherited", async 
 });
 
 // ---------------------------------------------------------------------------
-// THE HANDOFF (2026-09-10, rebate — the failure that started this).
+// THE HANDOFF'S BEHAVIOURAL PINS moved with the tool (2026-09-14).
 //
-// A relay reported success and then failed twice at once: the successor's gate
-// refused itself IN THE SAME WORKTREE ("这个 worktree 已被另一个会话占用",
-// naming the session that had just handed over) and its pi exited, while the
-// predecessor was woken back into `orchestrator_wait` TWO SECONDS later.
-//
-// These are behavioural pins: the two properties that matter are an ORDER
-// (release before the boot, silence after the persisted record) and a
-// ROLLBACK, neither of which a source grep can hold.
+// What they held — a release BEFORE the successor's boot, a silence only
+// AFTER the record is persisted, and a rollback on both the refusing and the
+// throwing tmux path — is now pinned in test/session-handoff-tools.test.ts,
+// where the retirement seam is injected directly instead of through a tool
+// that no longer exists.
 // ---------------------------------------------------------------------------
 
-test("handoff: the predecessor releases BEFORE the successor boots, and goes silent only AFTER the relay record" , async () => {
-  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
-  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
-  assert.equal(reply.isError, undefined, replyText(reply));
-  // ORDER IS THE FIX. `release` before the boot: the successor arms its gate
-  // in this same worktree, and a heartbeat still being refreshed here is
-  // exactly what refused it in the field. `committed` after the boot: the
-  // relay record goes through persist(), which refuses to write for a retired
-  // session — silencing first would leave the successor's registry row
-  // memory-only.
-  assert.deepEqual(world.handoffEvents, ["release", "pane-opened", "committed"]);
-  assert.ok(world.runtime().relay?.successorPane, "and the relay record really is on the runtime the disk sees");
-});
-
-test("handoff: the successor is told which session it replaces — its proof of heirship", async () => {
-  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
-  await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
-  const successor = [...world.panes.values()].find((p) => p.env[PREDECESSOR_PANE_ENV] !== undefined);
-  assert.ok(successor, "the successor pane was opened");
-  // The exclusivity guard admits a second session into an occupied checkout
-  // only when it can name the session it replaces (lib/session-exclusivity.ts).
-  assert.equal(successor!.env[PREDECESSOR_SESSION_ENV], "session-under-test");
-});
-
-test("handoff: a relay that cannot start its successor ROLLS BACK — nobody is left silent", async () => {
-  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, splitWindowFails: true });
-  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
-  assert.equal(reply.isError, true, "a relay that started nothing must say so");
-  assert.match(replyText(reply), /仍然是持有者/);
-  assert.deepEqual(world.handoffEvents, ["release", "rolledBack"],
-    "phase two never ran, so there is exactly one thing to undo — and no dead timers to re-arm");
-});
-
-test("handoff: a tmux that THROWS is the same as one that refuses — phase one is undone", async () => {
-  // The injected tmux seam permits both shapes. Phase one has already released
-  // the worktree claim when the pane is opened, so an exception escaping here
-  // would leave a half-retired predecessor that nobody notices — the relay has
-  // to undo it on BOTH paths, not only the `ok: false` one.
-  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, splitWindowThrows: true });
-  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
-  assert.equal(reply.isError, true, "the failure is reported, not thrown out of the tool");
-  assert.match(replyText(reply), /仍然是持有者/);
-  assert.deepEqual(world.handoffEvents, ["release", "rolledBack"]);
-});
-
-test("handoff: a REFUSED relay never retires the session at all", async () => {
-  // The preconditions are checked BEFORE the retirement. The old shape fired
-  // it from the tool's execute wrapper, so a relay refused for a missing
-  // approval or a too-short handoff document left the orchestration with a
-  // silent predecessor and no successor.
-  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: false });
-  const reply = await world.call("orchestrator_handoff", { handoffPath: "docs/orchestrator-handoff.md" });
-  assert.equal(reply.isError, true, "an unapproved plan must refuse the relay");
-  assert.deepEqual(world.handoffEvents, [], "nothing was retired for a handoff that never happened");
-  assert.equal([...world.panes.values()].length, 1, "and no successor pane was opened");
-});

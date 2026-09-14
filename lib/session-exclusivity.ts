@@ -139,7 +139,7 @@ export interface ExclusivityInput {
   existing: PresenceRecord | undefined;
   /**
    * The session this one was STARTED TO REPLACE, when it is the successor of
-   * an `orchestrator_handoff` (lib/orchestrator-relay.ts).
+   * a `session_handoff` (lib/session-inheritance.ts).
    *
    * A successor runs in the SAME worktree as the session it replaces — that is
    * the whole design (children keep addressing one orchestration id) — so the

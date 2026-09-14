@@ -226,10 +226,16 @@ test("normal mode steps aside before the tmux backstop and before ship detection
   assert.equal(await evaluateToolCall(r.deps, bashCall("git commit -m 'x'"), {}), undefined);
 });
 
-test("the tmux backstop sits ABOVE /gate-bypass — a bypass is not a licence to destroy tmux", async () => {
+test("the tmux backstop is ABOVE /gate-bypass and merely ADVISES — user decision 2026-09-14", async () => {
+  // It used to block, bypass or no bypass. The user's call on 2026-09-14: the
+  // gate says what it knows and lets the command run — a session told not to
+  // type tmux must still be able to RUN one, which is what the end-to-end
+  // verification of the handover path needs.
   const bypassed = makeDeps({ bypassActive: () => true });
   const out = await evaluateToolCall(bypassed.deps, bashCall("tmux kill-server"), {});
-  assert.equal(out?.block, true, "a bypassed session still may not kill the user's tmux server");
+  assert.equal(out, undefined, "nothing is blocked any more");
+  assert.ok(bypassed.calls.some((c) => c.startsWith("hint:")),
+    "but the session is still told what it is about to do");
 });
 
 test("/gate-bypass disarms the SHIP gate, and does so before any ship detection", async () => {

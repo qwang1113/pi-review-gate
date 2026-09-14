@@ -25,13 +25,18 @@ bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 | `orchestrator` | loop **加上**编排约束：本会话只统筹、不写代码，先要你批准一份 plan 才能开子会话；`declare_done` 还要求任务队列清空、没有活着的子会话 | 一轮上下文做不完的大需求 |
 
 `orchestrator`（项目经理）模式需要 tmux —— 它的子会话就是你那个 window 里的 pane。
-它自己不拼 tmux 命令，全部走十个工具：`orchestrator_plan`（写/提交 plan，提交时门禁
+它自己不拼 tmux 命令，全部走九个工具：`orchestrator_plan`（写/提交 plan，提交时门禁
 先派 `goal-auditor` 审一轮）、`orchestrator_spawn`（按 plan 任务开子会话）、
 `orchestrator_wait`（它唯一的信息入口，`timeoutMs: 0` 即快照）、`orchestrator_answer`
 （代答子会话弹出的问题）、`orchestrator_instruct`（给子会话发话/打断）、
 `orchestrator_close`（关掉某个 pane）、`orchestrator_recover`（pane 死了原地复活）、
-`orchestrator_attach`（换人接手一次读回全局）、`orchestrator_handoff`（上下文快满时接力）、
+`orchestrator_attach`（换人接手一次读回全局）、
 `orchestrator_notify`（**只有它**能发系统通知，且有节流）。
+
+交接不在这九个里，因为它不是编排专属的：**每一类会话**（loop 主会话 / 编排子会话 /
+项目经理 / judge）上下文达到窗口 70% 时都会收到门禁提醒，自己调同一个
+`session_handoff()`——门禁会把交接文档骨架写好、开新 pane、给继任者第一条消息，
+并在确认接手后关掉老会话。
 
 ## 3. 一个典型 loop 会话长什么样
 
