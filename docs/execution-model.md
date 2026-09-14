@@ -135,8 +135,10 @@ opener 凭它记录结论；
   追加 400 行触发 0 次清屏（`test/tui-flicker.test.ts` 用真实 `TuiMainScreen` 验证）。
   被行数预算约束的只有**对话框**，而它只承载决策文案（正文永不进框）。对话框的行预算
   按**真实终端行数**算（`lib/dialog-budget.ts` 的 `dialogTextMaxLines`，来源与 pi 一致：
-  `process.stdout.rows` → `$LINES` → 24），标题也在同一份预算内裁剪 —— 小窗口不再因
-  「预算按 24 行写死」而整屏闪烁。终端级的替代路径是 pi 的 `--tui-mode fullscreen`
+  `process.stdout.rows` → `$LINES` → 24），**折行宽度同样按真实列数**
+  （`process.stdout.columns` → `$COLUMNS` → 80 —— 行数决定闪不闪，列数决定一个逻辑行折
+  成几行，对宽窗口按 80 列假设排版就会裁掉本来放得下的正文），标题也在同一份预算内
+  裁剪 —— 小窗口不再因「预算按 24 行写死」而整屏闪烁。终端级的替代路径是 pi 的 `--tui-mode fullscreen`
   （`TuiAltScreen`：pi 自己拥有屏幕与滚动）；Claude Code 的 `CLAUDE_CODE_NO_FLICKER`
   只是它渲染切换的遗留 env，对应的是它的 fullscreen 渲染器。
 - **主会话存活不变量**（round-18，用户硬约束）：门禁未通过前主会话**不得**

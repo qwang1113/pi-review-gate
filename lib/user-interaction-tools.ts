@@ -182,7 +182,30 @@ export type ConsentToolDeps = Pick<
  */
 function questionHeadline(q: AskQuestion): string {
   const first = q.text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
-  return first.length > 60 ? `${first.slice(0, 60)}…` : first;
+  // Cut by CODE POINTS, not UTF-16 units: `slice` splits a surrogate pair in
+  // half and prints a replacement character (reviewer Nit, 2026-09-14).
+  const points = [...first];
+  return points.length > HEADLINE_MAX_CHARS ? `${points.slice(0, HEADLINE_MAX_CHARS).join("")}…` : first;
+}
+
+/** How much of the question's first line the title carries. */
+const HEADLINE_MAX_CHARS = 60;
+
+/**
+ * The box title for one question — the ONE place its order is decided.
+ *
+ * ORDER IS LOAD-BEARING (reviewer P2, 2026-09-14). `fitDialogTitle` cuts from
+ * the TAIL, so a ⚠️ authorization notice appended AFTER the progress label is
+ * the first thing a small window loses — on a 20-row terminal with four
+ * options the title budget is three rows, and the notice announcing that
+ * 「推荐」 grants a proxy authority would be gone while picking that row still
+ * minted the grant. Head-first makes "the notice is visible wherever the box
+ * is shown at all" true by construction.
+ */
+function questionDialogTitle(q: AskQuestion, index: number, total: number): string {
+  const notice = grantNotice(q).trim();
+  const label = `问题 ${progressLabel(index, total)}：${questionHeadline(q)}`;
+  return notice ? `${notice}\n${label}` : label;
 }
 
 function grantNotice(q: AskQuestion): string {
@@ -336,7 +359,7 @@ export async function doAskUser(
           uiCtx,
           {
             ...choiceSpecOf(q),
-            title: `问题 ${progressLabel(index, questions.length)}：${questionHeadline(q)}${grantNotice(q)}`,
+            title: questionDialogTitle(q, index, questions.length),
           },
           {
             body: q.text,

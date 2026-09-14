@@ -901,12 +901,15 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   // The title carries the progress label, the question's own headline (so the
   // REASON box, which renders the title alone, says what is being answered)
   // and the grant notice — all three charged to the title budget rather than
-  // sitting in the tail-cut body.
-  assert.match(
-    ASK_USER_SRC,
-    /title: `问题 \$\{progressLabel\(index, questions\.length\)\}：\$\{questionHeadline\(q\)\}\$\{grantNotice\(q\)\}`/,
-    "the dialog title carries the progress label, the headline AND the grant notice",
-  );
+  // sitting in the tail-cut body. The ORDER inside that title is its own rule
+  // (questionDialogTitle): `fitDialogTitle` cuts from the tail too, so the ⚠️
+  // notice must come FIRST or a small window drops it while the recommended
+  // row still mints the grant.
+  assert.match(ASK_USER_SRC, /title: questionDialogTitle\(q, index, questions\.length\)/,
+    "the dialog title is built by the ONE title rule");
+  assert.match(ASK_USER_SRC,
+    /function questionDialogTitle\(q: AskQuestion, index: number, total: number\): string \{\s*const notice = grantNotice\(q\)\.trim\(\);/,
+    "…and that rule puts the grant notice first, where the tail cut cannot reach it");
   assert.match(ASK_USER_SRC, /body: q\.text,/,
     "the question text itself rides in the budgeted body");
   // WHY THE NOTICE IS NOT IN THE BODY (reviewer P1, 2026-09-14): the body is
