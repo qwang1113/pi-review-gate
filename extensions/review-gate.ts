@@ -5090,12 +5090,12 @@ export default function reviewGate(pi: ExtensionAPI) {
   /**
    * Is this tick STILL the watcher of record for the cycle it started on?
    *
-   * A tick awaits a network probe, and the state can move inside those seconds:
-   * a re-request bumps `rounds` (a new cycle key), a release ends the cycle,
-   * a push re-arms it. Acting on the snapshot taken before the await would
-   * announce an OLD cycle — and, worse, `stopCopilotWatch` would clear the
-   * timer a newer cycle had just armed, leaving that cycle unwatched until the
-   * next persist.
+   * A tick awaits two network calls (the slug, then the probe), and the state
+   * can move inside those seconds: a re-request bumps `rounds` (a new cycle
+   * key), a release ends the cycle, a push re-arms it. Acting on the snapshot
+   * taken before the await would announce an OLD cycle — and, worse,
+   * `stopCopilotWatch` would clear the timer a newer cycle had just armed,
+   * leaving that cycle unwatched until the next persist.
    */
   function tickStillOwns(root: string, entry: CopilotWatchHandle): boolean {
     return copilotWatches.get(root) === entry && copilotWatchKey(root) === entry.key;
@@ -5136,7 +5136,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         scheduleCopilotTick(root, COPILOT_WATCH_SLOWEST_MS);
         return;
       }
-      if (!tickStillOwns(root, entry)) return; // a newer cycle's timer stands
+      // No ownership re-check AFTER the delivery: `decideWatchTick` and
+      // `deliverCopilotWake` are both synchronous, so nothing can move between
+      // the check above and this stop (the only await in the tick is the
+      // probe, and that window is already guarded).
       stopCopilotWatch(root);
       copilotWoken.add(entry.key);
       log(`copilot watcher woke the session for PR #${cycle.pr}: ${tick.reason}`);

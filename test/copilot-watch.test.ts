@@ -136,7 +136,7 @@ test("the not-landed wake quotes the LAST request's age, not the cycle's", () =>
   });
   assert.equal(tick.kind === "wake" && tick.reason, "not-landed");
   assert.match(tick.kind === "wake" ? tick.message : "", /请求发出后 110 秒/,
-    "110s since the re-send — not the 620s the cycle has been open");
+    "110s since the re-send — not the 710s the cycle has been open (600s of it before the re-send)");
 });
 
 test("a queued request that never produces a review ends at the budget, not before", () => {

@@ -4227,14 +4227,16 @@ test("the Copilot requirement stops nagging ONLY where a watcher owns the wait",
   // The cadence, the verdict and the wording all come from the pure module —
   // the extension owns the timer and the delivery, nothing else.
   assert.match(SRC, /decideWatchTick\(\{ state: cycle, probe, now: Date\.now\(\) \}\)/);
-  // A tick awaits a probe, and the cycle can move inside those seconds (a
-  // re-request bumps `rounds`, a release ends it, a push re-arms it), so the
-  // ownership re-check has to exist on BOTH sides of the await — before it, to
-  // skip a tick nobody is waiting for, and after it, so a wake cannot describe
-  // an old cycle nor a `stopCopilotWatch` clear the timer a newer one armed.
+  // A tick awaits two network calls (the slug, then the probe), and the cycle
+  // can move inside those seconds (a re-request bumps `rounds`, a release ends
+  // it, a push re-arms it), so the ownership check exists on BOTH sides of the
+  // awaits — before them, to skip a tick nobody is waiting for, and after
+  // them, so a wake cannot describe an old cycle nor a `stopCopilotWatch`
+  // clear the timer a newer one armed. There is deliberately NO third check
+  // after the wake: everything from the last probe to the stop is synchronous.
   assert.match(SRC, /function tickStillOwns\(root: string, entry: CopilotWatchHandle\)/);
-  assert.equal(SRC.split("tickStillOwns(root, entry)").length - 1, 3,
-    "the pre-probe guard, the post-probe guard and the pre-stop guard");
+  assert.equal(SRC.split("tickStillOwns(root, entry)").length - 1, 2,
+    "one guard before the awaits and one after — and no unreachable third");
   // ONE wake per cycle: a delivered wake leaves the state AWAITING until the
   // agent answers it, so every persist in between would re-arm the same cycle
   // and steer the same message in again. The memo is what stops that — and it
