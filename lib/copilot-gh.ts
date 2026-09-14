@@ -35,18 +35,25 @@ import { spawn, type ChildProcess } from "node:child_process";
 import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_HISTORY_QUERY,
+  COPILOT_PROBE_QUERY,
   COPILOT_REVIEWER_LOGIN,
   COPILOT_THREADS_QUERY,
   decideCopilotSupport,
   decidePrView,
   isUnknownJsonFieldError,
+  lastPageFromLink,
   PR_VIEW_JSON_FIELDS,
   parseCopilotHistoryProbe,
   parseCopilotPayload,
+  parseCopilotProbe,
+  parseCopilotTimeline,
   parseNameWithOwner,
   slugFromPrUrl,
+  splitHttpResponse,
   type CopilotPayload,
+  type CopilotProbe,
   type CopilotSupport,
+  type CopilotTimeline,
   type PrSummary,
 } from "./copilot-review.ts";
 
@@ -169,6 +176,68 @@ export async function fetchCopilotPayload(
   ], dir, { signal });
   if (!res.ok) return undefined;
   return parseCopilotPayload(res.stdout);
+}
+
+/**
+ * The LIGHT read: has Copilot's answer landed, and is the request still
+ * pending? One small GraphQL query — see `COPILOT_PROBE_QUERY` for why the
+ * background poll must not use the full threads query.
+ */
+export async function fetchCopilotProbe(
+  dir: string,
+  slug: string,
+  prNumber: number,
+  signal?: AbortSignal,
+): Promise<CopilotProbe | undefined> {
+  const [owner, name] = slug.split("/");
+  if (!owner || !name) return undefined;
+  const res = await runGh([
+    "gh", "api", "graphql",
+    "-F", `owner=${owner}`,
+    "-F", `name=${name}`,
+    "-F", `number=${prNumber}`,
+    "-f", `query=${COPILOT_PROBE_QUERY}`,
+  ], dir, { signal, timeoutMs: 20000 });
+  if (!res.ok) return undefined;
+  return parseCopilotProbe(res.stdout);
+}
+
+/** How many events one timeline page holds when we go back for the tail. */
+export const COPILOT_TIMELINE_PAGE = 30;
+
+/**
+ * Read the PR's Copilot timeline events (`copilot_work_started`,
+ * `copilot_work_finished_failure`, and the request itself).
+ *
+ * Two round trips on purpose, and the cheap one first: the events endpoint is
+ * ASCENDING, so the events this gate cares about are on its LAST page, and
+ * `?per_page=1` reports how many events exist (`Link: rel="last"` counts
+ * pages for the requested `per_page`, so with 1 it IS the count). The second
+ * call then fetches only that tail — the alternative, `--paginate`, drags
+ * every `committed`/`commented` event of a busy PR across the wire (measured
+ * 373 KB for one page of PR #592) only to look at the last two.
+ *
+ * Returns undefined when either call fails or the payload is unreadable; the
+ * caller must treat that as "no evidence", never as "nothing happened".
+ */
+export async function fetchCopilotTimeline(
+  dir: string,
+  slug: string,
+  prNumber: number,
+  signal?: AbortSignal,
+): Promise<CopilotTimeline | undefined> {
+  const [owner, name] = slug.split("/");
+  if (!owner || !name) return undefined;
+  const base = `repos/${owner}/${name}/issues/${prNumber}/events`;
+  const probe = await runGh(["gh", "api", "--include", `${base}?per_page=1`], dir, { signal, timeoutMs: 20000 });
+  if (!probe.ok) return undefined;
+  const total = lastPageFromLink(splitHttpResponse(probe.stdout).headers.get("link"));
+  const page = total === null ? 1 : Math.max(1, Math.ceil(total / COPILOT_TIMELINE_PAGE));
+  const res = await runGh([
+    "gh", "api", `${base}?per_page=${COPILOT_TIMELINE_PAGE}&page=${page}`,
+  ], dir, { signal, timeoutMs: 20000 });
+  if (!res.ok) return undefined;
+  return parseCopilotTimeline(res.stdout);
 }
 
 /**

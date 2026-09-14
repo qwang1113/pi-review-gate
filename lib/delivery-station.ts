@@ -327,7 +327,7 @@ export interface StationArrivalFacts {
    * was opened outside this session (in the browser, or by an earlier one).
    *
    * It cannot be the only evidence: that number is filled in by
-   * `request_copilot_review` / `check_copilot_review` alone, so a repo with no
+   * `copilot_review` alone, so a repo with no
    * `gh` — or one where `copilotReview.enabled` is false — opens a real PR and
    * would never be able to satisfy an arrival gate that insisted on it
    * (round-1 reviewer P1, 2026-09-06).
@@ -362,7 +362,7 @@ export function stationArrivalProblems(
       "本轮交付站点是 pr，但门禁没有看到 PR 被开出来 —— 它认的是**它自己观察到的事实**：" +
       "一条成功跑完的 `gh pr create`（推分支还不算），或者 Copilot 周期已经解析出的 PR 号。\n" +
       "  - 还没开 PR：`git push` 之后跑 `gh pr create`，再收尾。\n" +
-      "  - PR 是在别处开的（网页、上一轮会话）：跑一次 `request_copilot_review` 让门禁解析并记下 PR 号；" +
+      "  - PR 是在别处开的（网页、上一轮会话）：跑一次 `copilot_review` 让门禁解析并记下 PR 号；" +
       "项目关掉了 `copilotReview` 时这条走不通，那就重跑一次 `gh pr create`（已存在会直接告诉你），" +
       "或者让用户把本轮站点改回 `commit`。",
     );

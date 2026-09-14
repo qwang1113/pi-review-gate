@@ -157,8 +157,8 @@ opener 凭它记录结论；
   门禁内部等待（每次探测重发 findings 计数与状态）、`judge_submit`
   的送审链（precommit → checkpoint → prepare → spawn，逐步报）、
   `run_precommit`（runner 日志作为步骤尾部）、`declare_done`（门禁复检 →
-  合并）、`request_copilot_review` / `check_copilot_review`（每次网络调用一
-  步）。进度只进 partialResult，**不进** agent 拿到的 tool result——两条通
+  合并）、`copilot_review`（每次网络调用一
+  步；等待本身不在这里——它归后台监视器）。进度只进 partialResult，**不进** agent 拿到的 tool result——两条通
   道回答不同的问题。`tool_call` 钩子没有 `onUpdate`，所以 6 处 LLM 判定
   （L5 语义 / L6 标签 / ship 分类 / AI 署名）改用状态栏：超过 ~3s 才提示一
   次，结束即清除。

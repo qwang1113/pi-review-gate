@@ -64,7 +64,7 @@ const ADVISORY_PREPARE_TOOLS = new Set(["prepare_adviser", "prepare_goal_audit"]
  * rule about what a TOOL does against the module that owns the tool.
  */
 const COPILOT_TOOLS_SRC = readFileSync(join(ROOT, "lib", "copilot-review-tools.ts"), "utf8");
-const COPILOT_TOOLS = new Set(["request_copilot_review", "check_copilot_review"]);
+const COPILOT_TOOLS = new Set(["copilot_review"]);
 const COPILOT_GH_SRC = readFileSync(join(ROOT, "lib", "copilot-gh.ts"), "utf8");
 /**
  * The USER-INTERACTION family moved the same way, split by responsibility:
@@ -223,8 +223,7 @@ const LIB_TOOL_HANDLERS: Record<string, string> = {
   prepare_review: "async function doPrepareReview(",
   prepare_adviser: "async function doPrepareAdviser(",
   prepare_goal_audit: "async function doPrepareGoalAudit(",
-  request_copilot_review: "async function doRequestCopilotReview(",
-  check_copilot_review: "async function doCheckCopilotReview(",
+  copilot_review: "async function doCopilotReview(",
   ask_user: "export async function doAskUser(",
   request_scope_limit: "export async function doRequestScopeLimit(",
   request_sensitive_edit: "export async function doRequestSensitiveEdit(",
@@ -1380,7 +1379,7 @@ test("loop directives: all-gates-green block names the completion steps", () => 
   assert.match(SRC.slice(greenAt - 80, greenAt), /state\.taskMode === "loop"/,
     "the 收尾 line is gated on loop mode");
   assert.match(greenLine, /declare_done/, "green branch names declare_done as the next step");
-  assert.match(greenLine, /request_copilot_review/, "green branch names the Copilot cycle");
+  assert.match(greenLine, /copilot_review/, "green branch names the Copilot cycle");
 });
 test("explore workflow: advisory completion, no edit/bash blocking, ship gate intact", () => {
   // declare_done is self-accepted in explore.
@@ -1655,7 +1654,7 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
 
 test("the ship-kind evidence is recorded on SUCCESS, and never behind the Copilot switch", () => {
   // Round-1 reviewer P1: the first version read `state.copilot.pr`, which is
-  // only ever filled in by request_copilot_review / check_copilot_review — so
+  // only ever filled in by copilot_review — so
   // a repo with no `gh`, or one with copilotReview disabled, could open a real
   // PR and never satisfy the `pr` station. The evidence therefore has its own
   // recording site, above the Copilot block and independent of its switch.
@@ -3221,7 +3220,7 @@ test("STREAMING: every long-running gate tool publishes progress on its own onUp
   // median, a full precommit 92s. Each of these used to be a silent call.
   for (const tool of [
     "judge_wait", "judge_submit", "run_precommit", "declare_done",
-    "request_copilot_review", "check_copilot_review",
+    "copilot_review",
   ]) {
     const body = toolBodyOf(tool);
     assert.match(body, /createProgressReporter\(\{/, `${tool} must open a progress reporter`);
@@ -3543,7 +3542,7 @@ test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", (
 // L7 — the post-PR Copilot review loop
 
 test("the Copilot tools are TRUSTED: the extension runs gh, the agent cannot report the outcome", () => {
-  for (const name of ["request_copilot_review", "check_copilot_review"]) {
+  for (const name of ["copilot_review"]) {
     // The tools moved to lib/copilot-review-tools.ts; the rule follows the
     // code (registration + handler, via sourceOf/LIB_TOOL_HANDLERS).
     const body = toolBodyOf(name);
@@ -4008,21 +4007,29 @@ test("availability is judged by evidence, never by surfaces that cannot see a dr
     }
   }
 
-  const at = COPILOT_TOOLS_SRC.indexOf("const requested = await deps.gh.requestCopilotReviewer(");
-  assert.ok(at > 0, "the request path must exist");
-  const before = COPILOT_TOOLS_SRC.slice(Math.max(0, at - 900), at);
-  assert.match(before, /deps\.gh\.resolveCopilotSupport\(dir, slug, st\.copilot\?\.supportConfirmed === true, \{ signal \}\)/,
-    "availability must be resolved BEFORE a round is spent");
+  const supportAt = COPILOT_TOOLS_SRC.indexOf(
+    "deps.gh.resolveCopilotSupport(dir, slug, st.copilot?.supportConfirmed === true, { signal })");
+  const recordAt = COPILOT_TOOLS_SRC.indexOf("recordCopilotRequest(st.copilot, {");
+  assert.ok(supportAt > 0, "availability must be resolved before the request");
+  const requestCallAt = COPILOT_TOOLS_SRC.indexOf("return await doRequestPhase({");
+  assert.ok(requestCallAt > 0, "the tool must call the request phase");
+  assert.ok(requestCallAt > supportAt, "availability must be resolved BEFORE a round is spent");
 
-  // The request itself is never vetoed by a read-back any more: whatever the
+  // The request itself is never vetoed by a read-back: whatever the
   // availability verdict, the round is recorded and the wait length is what
-  // changes.
-  const recordAbs = COPILOT_TOOLS_SRC.indexOf("recordCopilotRequest(st.copilot,", at);
-  assert.ok(recordAbs > at, "the request must still be recorded");
-  const body = COPILOT_TOOLS_SRC.slice(at, recordAbs);
-  assert.doesNotMatch(body, /releaseCopilotReview\(st\.copilot, "UNSUPPORTED",[\s\S]{0,200}land/,
-    "a request that 'did not land' must no longer release the requirement");
-  assert.match(COPILOT_TOOLS_SRC.slice(recordAbs, recordAbs + 400), /supportConfirmed: support\.confirmed/,
+  // changes. What a MISSING queue flag buys is one more attempt (2026-09-14:
+  // the user's decision) — and only after that does the gate release.
+  const phaseAt = COPILOT_TOOLS_SRC.indexOf("async function doRequestPhase(");
+  const phaseEnd = COPILOT_TOOLS_SRC.indexOf("\nasync function doCopilotReview(", phaseAt);
+  assert.ok(phaseAt > 0 && phaseEnd > phaseAt, "the request phase must be its own function");
+  const phase = COPILOT_TOOLS_SRC.slice(phaseAt, phaseEnd);
+  const firstRequest = phase.indexOf("const requested = await deps.gh.requestCopilotReviewer(");
+  const retryRequest = phase.indexOf("const again = await deps.gh.requestCopilotReviewer(");
+  const notLandedRelease = phase.indexOf('verdict.state === "not-landed"');
+  assert.ok(firstRequest > 0, "the request path must exist");
+  assert.ok(retryRequest > firstRequest, "a request GitHub never queued is re-sent once");
+  assert.ok(notLandedRelease > retryRequest, "and released only after that retry also fails");
+  assert.match(COPILOT_TOOLS_SRC.slice(recordAt, recordAt + 400), /supportConfirmed: support\.confirmed/,
     "confirmed evidence must be remembered in the sidecar");
 });
 
@@ -4069,28 +4076,34 @@ test("a released Copilot cycle still has to report what it left unhandled", () =
     "the unhandled-thread reporter must exist");
   assert.ok(COPILOT_TOOLS_SRC.indexOf("export function copilotAbandonedText(") > 0,
     "the payload-less paths need their own reporter (they have only the count)");
-  const checkBody = toolBodyOf("check_copilot_review");
+  const checkBody = toolBodyOf("copilot_review");
   assert.match(checkBody, /copilotUnhandledText\(analysis\.actionable\)/,
-    "the released branch of check_copilot_review must list them");
+    "the released branch of copilot_review must list them");
 
   // The paths that ACTUALLY release with findings open are the fail-safe ones:
-  // no PR, no slug, unreadable payload, a refused request, a spent budget.
-  // Each of them released in total silence before, even with a sidecar that
-  // still recorded open threads. Every `releaseCopilotReview` call in the two
-  // tools must be accompanied by the abandoned-findings notice. The module
-  // holds nothing BUT those two tools, so it is the whole window now (it used
-  // to be sliced out of the extension, from one tool name to the next).
+  // no PR, no slug, unreadable payload, a refused request, a spent retry, an
+  // expired budget. Each of them released in total silence before, even with a
+  // sidecar that still recorded open threads. They now all funnel through
+  // `releaseReply`, which is the ONE place the abandoned-findings notice is
+  // attached — so a new release path cannot be added without it, which is what
+  // the old per-call count was approximating.
   const toolsBody = COPILOT_TOOLS_SRC;
-  const releases = toolsBody.split("releaseCopilotReview(st.copilot,").length - 1;
-  const notices = toolsBody.split("copilotAbandonedText(st.copilot)").length - 1;
-  assert.ok(releases >= 5, `expected the fail-safe release paths to still exist (got ${releases})`);
-  assert.equal(notices, releases,
-    "every terminal release in the tools must report the findings it abandons");
+  const funnelAt = toolsBody.indexOf("function releaseReply(");
+  assert.ok(funnelAt > 0, "the release funnel must exist");
+  assert.ok(toolsBody.indexOf("const abandoned = copilotAbandonedText(args.st.copilot)", funnelAt) > funnelAt,
+    "the funnel attaches the unhandled-findings duty");
+  assert.equal((toolsBody.match(/releaseCopilotReview\(/g) ?? []).length, 1,
+    "exactly one place releases the requirement — the funnel");
+  assert.ok(toolsBody.indexOf("releaseCopilotReview(", funnelAt) > funnelAt,
+    "and the funnel is that place");
+  assert.ok(toolsBody.split("return releaseReply({").length - 1 >= 4,
+    "the fail-safe release paths must still exist (no PR, no slug, unreadable payload, a refused " +
+    "request, a spent retry, an expired budget)");
 
   // …and each of them must leave an audit trail: this whole diagnosis had to
   // be reconstructed from GitHub's API because the sidecar transitions were
   // never logged.
-  assert.ok((toolsBody.match(/log\(`copilot /g) ?? []).length >= releases,
+  assert.ok((toolsBody.match(/log\(`copilot /g) ?? []).length >= 2,
     "each Copilot state transition must be written to the audit log");
 });
 
@@ -4178,12 +4191,46 @@ test("REGRESSION (P0b): the no-tests-warning is wired into the tool result and /
     "the gate-status warning must be keyed on the skipped scope");
 });
 
-test("check_copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {
+test("the Copilot requirement stops nagging ONLY where a watcher owns the wait", () => {
+  // The background watcher turns "wait for Copilot" from a poll the agent has
+  // to run into a wake it receives. The wiring that matters is small and easy
+  // to lose in a refactor, so it is pinned here:
+  //
+  //  1. the filter is passed by the two NUDGE sites (the L2 continuation and
+  //     the revival timer), never by declare_done — a review that has not
+  //     landed is still an unfinished task, and a session that could be talked
+  //     into "done" while waiting is the whole bug this feature fixes;
+  //  2. the watcher is armed from EVERY persist, so no state write can leave an
+  //     AWAITING cycle unwatched;
+  //  3. it has a lifecycle: session_start re-arms it from the restored sidecar,
+  //     session_shutdown stops it, and a tick re-checks the mode and the cycle.
+  const nudged = SRC.split("copilotProblemsFor(st, { nudge: true, root })").length - 1;
+  assert.equal(nudged, 2, "the continuation and the revival timer are the two nudge sites");
+  const doneBody = toolBodyOf("declare_done");
+  assert.match(doneBody, /copilotProblemsFor\(st\)/,
+    "declare_done reads the UNFILTERED list — a wait is not a completion");
+  assert.doesNotMatch(doneBody, /watchedAwait|nudge: true/,
+    "and it must never learn about the watcher's exception");
+
+  assert.match(SRC, /function syncCopilotWatch\(/, "the arming helper must exist");
+  assert.equal(SRC.split("a watcher never fails a persist").length - 1, 2,
+    "every persist arms it (both the primary repo and a second repo's sidecar)");
+  assert.match(SRC, /syncAllCopilotWatches\(\);/, "session_start re-arms from the restored state");
+  assert.match(SRC, /stopAllCopilotWatches\(\);/, "session_shutdown stops the timers it owns");
+  assert.match(SRC, /watchRunsInMode\(state\.taskMode\)/, "a tick re-checks the mode");
+  assert.match(SRC, /if \(latestCtx\?\.isIdle\(\)\) pi\.sendUserMessage\(line\);/,
+    "and the wake uses the idle/steer idiom");
+  // The cadence, the verdict and the wording all come from the pure module —
+  // the extension owns the timer and the delivery, nothing else.
+  assert.match(SRC, /decideWatchTick\(\{ state: cycle, probe, now: Date\.now\(\) \}\)/);
+});
+
+test("copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {
   // The loop this closes: request released the cycle as EXHAUSTED, the next
   // check re-derived it as ARMED, and declare_done was blocked again.
   // The window is the tool's own registration plus its handler, read from the
   // module that owns them (lib/copilot-review-tools.ts) — no character count.
-  const body = toolBodyOf("check_copilot_review");
+  const body = toolBodyOf("copilot_review");
   const guardAt = body.indexOf("!isCopilotOutstanding(settled)");
   assert.ok(guardAt > 0, "a released cycle must short-circuit the whole check");
   for (const laterWork of ["resolveOpenPr(", "fetchCopilotPayload(", "evaluateCopilot("]) {
