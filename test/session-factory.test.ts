@@ -27,6 +27,7 @@ import {
   type PaneRunner,
   type PaneTitleMemory,
 } from "../lib/session-factory.ts";
+import { judgeScratchDir } from "../lib/judge-process.ts";
 
 /** Fake tmux: a split prints %7, everything succeeds. */
 function happyRunner(seen: string[][] = []): PaneRunner {
@@ -112,7 +113,9 @@ test("combination 1 — a judge SPAWN: judge env, own colour, border line, verif
     RG_JUDGE_ROLE: "reviewer",
     RG_JUDGE_TASK: "/repo/.pi/judge-sessions/task-1.md",
     RG_JUDGE_STREAM: "/repo/.pi/review-stream/r.jsonl",
-  }, "exactly the five judge variables — the judge side reads these by name");
+    // Plus the scratch root the reaper reads back (test/judge-scratch.test.ts).
+    TMPDIR: judgeScratchDir("rg-reviewer-abc123"),
+  }, "exactly the judge variables — the judge side reads these by name");
 
   const flat = seen.map((a) => a.join(" "));
   assert.ok(flat.some((s) => s.includes("select-pane") && s.includes("-P")), "a border colour is set");
@@ -140,6 +143,7 @@ test("combination 2 — a judge RECOVER: same three keys, resume argv, no task f
     RG_JUDGE_OPENER: "session-child-1",
     RG_JUDGE_ID: "rg-reviewer-abc123",
     RG_JUDGE_ROLE: "reviewer",
+    TMPDIR: judgeScratchDir("rg-reviewer-abc123"),
   }, "no task and no stream on a recover — the transcript already holds the round");
   assert.ok(spawn.includes("--session-id"), "the transcript continues by id");
   assert.ok(!spawn.some((a) => a.startsWith("@")), "no argv message: nothing to re-deliver");
@@ -517,6 +521,10 @@ test("one recovery judgement: refuse unknown, closed, pane-less, alive and unrea
 test("the env builder is the only assembly point, and it omits what it was not given", () => {
   assert.deepEqual(buildSessionEnv({ kind: "judge", openerId: "o", judgeId: "j", role: "adviser" }), {
     RG_JUDGE_OPENER: "o", RG_JUDGE_ID: "j", RG_JUDGE_ROLE: "adviser",
+    // The one key that is not about addressing the judge: where its throwaway
+    // worktrees must go, so the gate can reclaim them (see the test in
+    // test/judge-scratch.test.ts for why the two sides must agree).
+    TMPDIR: judgeScratchDir("j"),
   });
   assert.deepEqual(buildSessionEnv({ kind: "orchestration-child", orchestrationId: "orch-1", stateVariant: "t2" }), {
     RG_ORCHESTRATION_ID: "orch-1", RG_GATE_MODE: "loop", RG_STATE_VARIANT: "t2",

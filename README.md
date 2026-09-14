@@ -881,6 +881,13 @@ bash <package-root>/scripts/install-git-hooks.sh   # inside the repo
 npx pi-review-gate-install-hooks
 ```
 
+The installer only runs from a repository's **main worktree**. `.git/hooks` is
+shared by every linked worktree, so installing from one — a review round's
+throwaway worktree, an orchestration child, a temporary snapshot — would point
+the whole repository's hooks at a directory that disappears with it, and every
+later commit would fail until someone reinstalled from the real checkout. The
+installer refuses (naming the main worktree) instead of doing that.
+
 ### Legacy global installer (deprecated)
 
 `scripts/install-global.sh` was retired when the repo became a pi package;

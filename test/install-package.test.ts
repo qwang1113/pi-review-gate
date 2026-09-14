@@ -528,6 +528,30 @@ test("a LINKED worktree never installs, whatever it is called — the third inci
   execFileSync("git", ["worktree", "remove", "--force", scratch], { cwd: repo, stdio: "ignore" });
 });
 
+test("a BARE repository's worktrees are not locked out of installing (reviewer P2)", () => {
+  // `git clone --bare` + `git worktree add` is a normal layout, and there the
+  // first `worktree list` entry IS the bare repo — it is nobody's toplevel, so
+  // a guard that insists on "the main worktree" refuses every worktree the
+  // repository has. A bare repo has no main working tree to install from,
+  // which is exactly why the guard has to step aside for it.
+  const home = makeHome();
+  const src = mkdtempSync(join(tmpdir(), "rg-pkg-baresrc-"));
+  tempDirs.push(src);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: src, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"], { cwd: src, stdio: "ignore" });
+  const bare = mkdtempSync(join(tmpdir(), "rg-pkg-bare-"));
+  tempDirs.push(bare);
+  const bareRepo = join(bare, "repo.git");
+  execFileSync("git", ["clone", "-q", "--bare", src, bareRepo], { stdio: "ignore" });
+  const wt = join(bare, "wt");
+  execFileSync("git", ["worktree", "add", "-q", "--detach", wt, "HEAD"], { cwd: bareRepo, stdio: "ignore" });
+
+  const res = spawnSync("bash", [HOOK_INSTALLER], { cwd: wt, encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(res.status, 0, `a bare repo's worktree must still install: ${res.stderr}`);
+  assert.ok(existsSync(join(bareRepo, "hooks", "pre-commit")),
+    "the hooks land in the bare repo's shared hooks dir");
+});
+
 test("R-28: the installer refuses an ORCHESTRATION worktree — the incident that broke a whole repo", () => {
   // What happened on 2026-08-30: a child session installed the hooks from
   // inside its gate-created worktree under $TMPDIR/rg-orchestration/…, which

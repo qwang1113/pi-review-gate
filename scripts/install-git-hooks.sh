@@ -48,7 +48,13 @@ esac
 # git dir, so the rule is topological, not about names or locations: the hooks
 # belong to the MAIN worktree, and anything else is refused.
 MAIN_WORKTREE="$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)"
-if [ -n "$MAIN_WORKTREE" ]; then
+# …but a BARE main entry is not a working tree at all (`git clone --bare` +
+# `git worktree add` is a normal layout): there is no main working tree to
+# install from, so insisting on one would lock every worktree out of a
+# repository that has no other place to install from. The first entry's own
+# block carries the `bare` marker (§ the `--porcelain` format).
+MAIN_BARE="$(git worktree list --porcelain 2>/dev/null | sed -n '1,/^$/p' | grep -c '^bare$' || true)"
+if [ -n "$MAIN_WORKTREE" ] && [ "${MAIN_BARE:-0}" = "0" ]; then
   MAIN_REAL="$(cd "$MAIN_WORKTREE" 2>/dev/null && pwd -P || printf '%s' "$MAIN_WORKTREE")"
   ROOT_REAL="$(cd "$REPO_ROOT" && pwd -P)"
   if [ "$MAIN_REAL" != "$ROOT_REAL" ]; then

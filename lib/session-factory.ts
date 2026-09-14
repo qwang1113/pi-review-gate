@@ -75,6 +75,9 @@ import {
 } from "./orchestrator-pane-decor.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import { JUDGE_ID_ENV, JUDGE_OPENER_ENV, JUDGE_ROLE_ENV } from "./judge-pane.ts";
+// The scratch root a judge pane is given, and the one its worktrees are
+// reclaimed from: ONE derivation, so the two sides cannot drift apart.
+import { judgeScratchDir } from "./judge-process.ts";
 import { JUDGE_STREAM_ENV, JUDGE_TASK_ENV } from "./judge-side.ts";
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
@@ -136,6 +139,18 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
       [JUDGE_ROLE_ENV]: role.role,
       ...(role.taskPath === undefined ? {} : { [JUDGE_TASK_ENV]: role.taskPath }),
       ...(role.streamPath === undefined ? {} : { [JUDGE_STREAM_ENV]: role.streamPath }),
+      // THE SCRATCH ROOT, set on the WRITE side (2026-09-14). A reviewer
+      // verifies by doing — it checks the reviewed commit out into a throwaway
+      // worktree under `$TMPDIR` — and `reapReviewScratch` reclaims exactly the
+      // worktrees under `judgeScratchDir(judgeId)` when the pane goes. That
+      // reclaim was written but never armed: nothing set this key, so judges
+      // built their worktrees in the SYSTEM tmp root instead (a reviewer's
+      // `git worktree add $TMPDIR/rgrev-<sha> HEAD`), where the reaper never
+      // looks — the worktrees piled up unreclaimed, and one of them broke the
+      // repository's shared git hooks for every later commit when it was
+      // deleted with the round. The two sides must name the same directory;
+      // test/judge-scratch.test.ts pins exactly that.
+      TMPDIR: judgeScratchDir(role.judgeId),
     };
   }
   if (role.kind === "orchestration-child") {

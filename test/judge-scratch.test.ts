@@ -17,6 +17,7 @@ import {
   reviewScratchWorktrees,
   REVIEW_SCRATCH_DIRNAME,
 } from "../lib/judge-process.ts";
+import { buildSessionEnv } from "../lib/session-factory.ts";
 
 test("the scratch dir is per session, under the OS tmpdir", () => {
   const a = judgeScratchDir("rg-reviewer-abc123");
@@ -24,6 +25,27 @@ test("the scratch dir is per session, under the OS tmpdir", () => {
   assert.ok(a.startsWith(tmpdir()), "lives under the OS tmpdir");
   assert.match(a, new RegExp(`${REVIEW_SCRATCH_DIRNAME}/rg-reviewer-abc123$`));
   assert.notEqual(a, b, "two judge sessions never share a scratch — no cross-lane deletion");
+});
+
+test("the judge pane's TMPDIR IS the directory the reaper looks in (2026-09-14)", () => {
+  // The reclaim was written but never ARMED: `reapReviewScratch` walked
+  // `judgeScratchDir(judgeId)`, while nothing ever set that env key on the
+  // judge — so reviewers built their throwaway worktrees in the SYSTEM tmp
+  // root, the reaper found none of them, and one round's worktree broke the
+  // repository's shared git hooks for every later commit when it vanished.
+  // A missing write side is invisible unless the two sides are compared, so
+  // this compares them.
+  const judgeId = "rg-reviewer-f3eb4277-b6ae531c-99b425b3-g0";
+  const env = buildSessionEnv({ kind: "judge", openerId: "o", judgeId, role: "reviewer" });
+  const scratch = judgeScratchDir(judgeId);
+  assert.equal(env.TMPDIR, scratch, "the judge must build its worktrees where the gate reclaims them");
+  assert.ok(scratch.startsWith(tmpdir()), "and that place is under the OS tmpdir");
+  // The worktrees a reviewer leaves there stay reclaimable BECAUSE the env and
+  // the reaper agree — this is the pair, not one side of it.
+  assert.deepEqual(
+    reviewScratchWorktrees(`worktree /repo\n\nworktree ${scratch}/rgrev-abc\ndetached\n`, env.TMPDIR),
+    [`${scratch}/rgrev-abc`],
+  );
 });
 
 test("reviewScratchWorktrees selects ONLY the worktrees under this session's scratch", () => {
