@@ -191,7 +191,7 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 | **L4** 输出语言 | 每轮无条件注入简体中文指令 | 扩展 `before_agent_start` | `lib/constants.ts` 的 `LANGUAGE_DIRECTIVE` |
 | **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | `lib/ship-gate-bash.ts`（ship 命令上的 commit message / PR 文案）+ 扩展的 checkpoint 路径 + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
 | **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/pre-commit-check.cjs` → 进程内 `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
-| **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账 | `lib/copilot-review-tools.ts`（工具 `request_copilot_review` / `check_copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线 | `lib/copilot-review.ts` |
+| **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账；第 4 轮起每条问题先经用户逐条审批 | `lib/copilot-review-tools.ts`（工具 `request_copilot_review` / `check_copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线（弹框经 `askFinding` 注入） | `lib/copilot-review.ts`、`lib/copilot-triage.ts` |
 | **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | `lib/goal-tools.ts`（工具 `propose_loop_goal`，内部自跑 goal 审计）+ `lib/goal-prereview-tools.ts`（普通函数 `recordGoalPrereview`：裁决落成记录，不注册成工具），扩展只接线 | `lib/loop-goal.ts` |
 
 > **落点指引**：加一条新的**判定规则**（什么该拦、什么该放）→ 落在
@@ -219,7 +219,9 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 `copilot-review.ts`（L7，PR 之后的 Copilot 审查闭环）与 `loop-goal.ts`（L8，
 用户批准的退出契约）——两者的**判定**在这里，工具体分别在
 `copilot-review-tools.ts` 与 `goal-tools.ts` / `goal-prereview-tools.ts`，
-接线见 §2 的层表。
+接线见 §2 的层表。`copilot-triage.ts` 是 L7 里用户那半边的**纯规则**：轮次阈
+值（`rounds ≥ 4` 才问）、线程键（thread + 最后一条评论）、决策汇总与 sidecar
+校验；工具体只负责把问题弹出去、把答案写回状态。
 
 > **落点**：新的拦截规则 → 新建一个 `lib/<rule>.ts` 纯模块（facts in,
 > decision out）+ 同名单测；只有接线改扩展。新的**放行**口子要格外小心：
@@ -474,7 +476,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（129 个模块）
+## 五、`lib/` 全量速查表（130 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -507,7 +509,8 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `consent-request-tools.ts` | 工具 `request_scope_limit` / `request_sensitive_edit`：两个「请用户放宽门禁」的同意口子，对话与门禁状态经注入的 deps；由 `user-interaction-tools.ts` 转注册 |
 | `copilot-gh.ts` | L7 的 gh 访问层：`gh` 以 argv 异步 spawn（超时 + abort），PR / 线程 payload / 可用性探测都在这里 |
 | `copilot-review-tools.ts` | 工具 `request_copilot_review` / `check_copilot_review`：L7 状态机的两个驱动端，gh 访问经注入的 seam |
-| `copilot-review.ts` | L7：PR 之后的 Copilot 审查闭环（请求、等待、逐 thread 消账） |
+| `copilot-review.ts` | L7：PR 之后的 Copilot 审查闭环（请求、等待、逐 thread 消账）；`CopilotReviewState.triage` 带用户自己的裁决，每个转移都带着它走 |
+| `copilot-triage.ts` | L7 用户那半边的纯规则：轮次阈值（`COPILOT_TRIAGE_ASK_FROM_ROUND = 4` 起每条问题先问用户）、线程键（thread id + 最后一条评论 id）、「哪些还没表态」、四组裁决汇总、`triage` 块的 sanitize；无 IO/无时钟 |
 | `delivery-station.ts` | 交付站点（`precommit` / `commit` / `pr`）：类型、解析与缺省（缺失或非法一律读成 `precommit`）、严格度排序、「某站点放行哪些 `ShipCommandKind`」的纯判定与超站拦截文案（`stationShipProblem` / `STATION_SHIP_NEXT_STEPS`，只给用户能走的两条路、不给申诉假出路），以及 `declare_done` 的「到站」判定（`stationArrivalProblems`：`commit` 要工作区干净，`pr` 还要门禁**亲眼看到**成功的 `gh pr create`（`GateState.shippedKinds`）或 Copilot 周期已解析出的 PR 号）；无 fs、无时钟，goal 侧、plan 侧与 ship 门禁共用同一份枚举 |
 | `dialog-budget.ts` | 对话框的渲染行数预算——宿主不截断，长度必须自己管；选项行同样计入（`askChoice` 按 `choiceRows` 的实际行数收紧正文额度） |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |

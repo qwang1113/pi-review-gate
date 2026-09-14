@@ -4426,11 +4426,12 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function askChoice(
     uiCtx: { ui?: ChoiceUi },
     spec: ChoiceSpec,
-    opts: { body?: string; pointer?: string; signal?: AbortSignal } = {},
+    opts: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] } = {},
   ): Promise<string | undefined> {
-    const rows = choiceRows(spec);
+    const rows = [...choiceRows(spec), ...(opts.extraRows ?? [])];
     // Two option rows is what the budget was measured with; every extra row
-    // this dialog draws comes out of the body's allowance.
+    // this dialog draws — an interview's escape row included — comes out of
+    // the body's allowance.
     const budget = Math.max(2, DIALOG_BODY_MAX_LINES - Math.max(0, rows.length - 2));
     const fitted = opts.body === undefined
       ? undefined
@@ -4438,6 +4439,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     return renderChoice(uiCtx.ui, spec, {
       ...(fitted === undefined ? {} : { body: fitted }),
       ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
     });
   }
 
@@ -8986,6 +8988,29 @@ export default function reviewGate(pi: ExtensionAPI) {
       // carries no configuration of its own.
       resolveCopilotSupport: (dir, slug, supportConfirmed, opts) =>
         resolveCopilotSupport(dir, slug, supportConfirmed, projectConfig.copilotReview.owners, opts),
+    },
+    // The ONE dialog the triage needs, rendered through THIS file's helpers so
+    // a Copilot finding's question is the same shape as every other gate
+    // question — and, in an orchestration, the same race (the human and the
+    // project manager can both answer; whoever gets there first wins).
+    askFinding: async (uiCtx, spec, opts) => {
+      const ui = uiCtx as { hasUI?: boolean; ui?: ChoiceUi };
+      const outcome = await askEitherSide(
+        {
+          dialogKind: "select",
+          topic: "other",
+          title: opts.body ? `${spec.title}\n${opts.body}` : spec.title,
+          options: [...choiceRows(spec), ...(opts.extraRows ?? [])],
+          payload: `推荐答案：${spec.recommended}`,
+        },
+        ui.hasUI === true,
+        (signal) => askChoice(ui, spec, {
+          ...(opts.body === undefined ? {} : { body: opts.body }),
+          ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
+          signal,
+        }),
+      );
+      return outcome.answer;
     },
     delay: (ms) => new Promise((r) => setTimeout(r, ms)),
   });
