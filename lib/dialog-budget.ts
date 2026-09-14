@@ -63,7 +63,11 @@
  *   -  2 rows of slack (spinner row, prompt line)
  *   = 12 rows for `title + message` together
  *
- * Anything longer is cut with a pointer to where the full text lives.
+ * Anything longer is cut with a pointer to where the full text lives — with
+ * ONE exception, in {@link fitDialogTitle}: when the budget cannot hold even
+ * the pointer, the head of the title is kept instead, because a reader who
+ * sees the start of the question can still scroll up to the transcript while
+ * one who sees only「标题过长」has lost what the box was asking.
  * A SMALLER TERMINAL USED TO LOSE THIS (measured 2026-09-14): the budget was
  * pinned to 24 rows, so on a 20-row terminal a 20-row dialog cleared the
  * screen 19 times in 20 frames — the same wipe the budget was written to
