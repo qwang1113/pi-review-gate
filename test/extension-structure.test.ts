@@ -5196,7 +5196,8 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
   // readers at all.
   assert.match(SRC, /function ownJudges\(\): JudgeEntry\[\]/, "the opener scope has one definition");
   assert.match(SRC, /function ownLiveJudges\(\): JudgeEntry\[\]/, "the liveness scope has one definition");
-  assert.match(SRC, /listByOpener\(judgeHierarchy, caller\)/, "the filter is lib/hierarchy.ts's, not a re-implementation");
+  assert.match(SRC, /listByOpener\(judgeHierarchy, id\)/,
+    "the filter is lib/hierarchy.ts's, not a re-implementation");
 
   // "Is a judge RUNNING?" — must additionally exclude entries whose pane died
   // with a previous process, or a restarted session waits forever on a pane

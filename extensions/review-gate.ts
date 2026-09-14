@@ -2758,6 +2758,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!side) return { ok: false, reason: "本会话不是 judge" };
     const ownPane = (process.env.TMUX_PANE ?? "").trim();
     if (!ownPane) return { ok: false, reason: "judge pane 不在 tmux 里，无法开新一代会话" };
+    // THE TABLE HAS TO BE LOADED FIRST (2026-09-14, measured in the lab): a
+    // judge process does not touch the registry on the way up, so without this
+    // `judgeHierarchy` is empty, `entry` is undefined, and the handover leaves
+    // the opener pointing at a session that no longer exists. The load is
+    // idempotent, so the ordinary (already-loaded) path costs a Set lookup.
+    ensureHierarchyLoaded(cwd);
     const entry = judgeHierarchy[side.judgeId];
     const successorId = successorSessionId(side.judgeId, handoffGeneration(side.judgeId) + 1);
     const opened = await openSessionPane(runTmux, {
