@@ -116,7 +116,7 @@ test("spawn decorates the pane ITSELF — no second call, no extra tool", async 
 
   // Philosophy two: nothing new is addressable.
   assert.equal(world.tools.has("orchestrator_decorate"), false);
-  assert.equal([...world.tools.keys()].filter((n) => n.startsWith("orchestrator_")).length, 10);
+  assert.equal([...world.tools.keys()].filter((n) => n.startsWith("orchestrator_")).length, 9);
 });
 
 test("a tmux that refuses cosmetics does NOT fail the spawn", async () => {

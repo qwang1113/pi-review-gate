@@ -73,7 +73,7 @@ import {
   toolReply as reply,
   requireOrchestratorMode,
 } from "./orchestrator-tool-kit.ts";
-import { formatInheritanceBrief, readInheritance } from "./orchestrator-relay.ts";
+import { formatInheritanceBrief, readInheritance } from "./session-inheritance.ts";
 
 const PLAN_ACTIONS = {
   read: "read",

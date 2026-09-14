@@ -77,8 +77,10 @@ export const JUDGE_DENIED_TOOLS: ReadonlySet<string> = new Set([
   "judge_submit", "judge_spawn", "judge_answer", "judge_recover", "judge_close", "judge_wait",
 
   "orchestrator_spawn", "orchestrator_instruct", "orchestrator_wait", "orchestrator_close",
-  "orchestrator_handoff", "orchestrator_plan", "orchestrator_notify", "orchestrator_answer",
+  "orchestrator_plan", "orchestrator_notify", "orchestrator_answer",
   "orchestrator_recover", "orchestrator_attach",
+  // `session_handoff` is deliberately ABSENT: handing over is how a judge
+  // FINISHES with a transcript that ran out of room, not a supervision act.
   // `propose_restatement` sits with `propose_loop_goal` for the same reason:
   // a reporting shell does not negotiate the requirement it was asked to
   // judge — it reviews a change against a contract somebody else agreed.

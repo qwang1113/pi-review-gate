@@ -32,6 +32,7 @@
  */
 
 import type { JudgeLane } from "./judge-process.ts";
+import { HANDOFF_PERCENT } from "./session-handoff.ts";
 import {
   buildReviewCarryover,
   SCOPE_BLOCK_HEADING,
@@ -42,11 +43,13 @@ import {
 /**
  * Context percentage at or above which the gate rotates the transcript.
  *
- * 60 is the USER's number (2026-09-05), not a tuning guess: it leaves a judge
- * enough room to finish the round it is asked to do next. Named, not inlined,
- * so a later reader cannot mistake it for a magic constant to adjust by feel.
+ * It IS the unified handover threshold now (2026-09-14, user decision): the
+ * judge's own 60 was a third number for a decision that has one answer, and
+ * "which percentage is my session on" is exactly the thing nobody looks up in
+ * time. Reading it from lib/session-handoff.ts rather than restating the value
+ * keeps the two from drifting.
  */
-export const JUDGE_ROTATION_CONTEXT_PERCENT = 60;
+export const JUDGE_ROTATION_CONTEXT_PERCENT = HANDOFF_PERCENT;
 
 /**
  * Rounds under ONE object after which the gate rotates regardless of context.

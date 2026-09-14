@@ -23,7 +23,6 @@
  *   9 notification single entry+throttle. {@link notifyAuthorization} + notify.ts
  *  10 (retired 2026-09-07: work-branch landing is gone)
  *  11 unreported decisions block exit ... {@link orchestratorDoneProblems}
- *  12 relay preconditions ............... lib/orchestrator-relay.ts
  *  13 children come from the tool ....... lib/orchestrator-guard.ts + registry
  *  14 (retired 2026-09-07: humanOnlyDecision was dead code — the consent
  *      model lets the project manager answer sensitive-edit dialogs too)

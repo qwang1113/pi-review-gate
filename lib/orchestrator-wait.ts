@@ -46,7 +46,7 @@
  * Pure module: observations in, a decision and a string out.
  */
 
-import { handoffAdvice, type HandoffAdvice } from "./orchestrator-handoff-advice.ts";
+import { handoffDue, HANDOFF_PERCENT } from "./session-handoff.ts";
 import {
   formatSupervisionReceipt,
   type SupervisionEvent,
@@ -162,6 +162,22 @@ export interface WaitReceiptInput {
 
 }
 
+/**
+ * Block 4, structurally — whether this session is past the handover
+ * threshold, plus the sentence that says so.
+ *
+ * The threshold itself is NOT decided here: lib/session-handoff.ts owns 70%
+ * for every kind of session, and this module only renders its answer. It used
+ * to own a soft/hard pair of its own (80/90), which meant an orchestrator and
+ * a judge were handed over at different points for no reason anyone could
+ * state.
+ */
+export interface HandoffAdvice {
+  due: boolean;
+  percent?: number;
+  line: string;
+}
+
 /** The receipt, plus the advice block so a caller can act on it structurally. */
 export interface WaitReceipt {
   text: string;
@@ -177,10 +193,20 @@ export interface WaitReceipt {
  * to check your context" is a rule an agent forgets exactly when it matters.
  */
 export function buildWaitReceipt(input: WaitReceiptInput): WaitReceipt {
-  const advice = handoffAdvice({
-    ...(input.contextPercent === undefined ? {} : { percent: input.contextPercent }),
-    openRequests: input.snapshot.requests.length,
-  });
+  const due = handoffDue(input.contextPercent === undefined ? undefined : { percent: input.contextPercent });
+  const openRequests = input.snapshot.requests.length;
+  const advice: HandoffAdvice = {
+    due: due.due,
+    ...(due.percent === undefined ? {} : { percent: due.percent }),
+    line: due.percent === undefined
+      ? "上下文用量：宿主未提供读数（无法判断接力时机）。"
+      : due.due
+        ? `上下文已用 ${due.percent}%（阈值 ${HANDOFF_PERCENT}%）：**接力是现在的动作** —— ` +
+          (openRequests > 0
+            ? `先把这 ${openRequests} 个待答请求回掉，再把补充段写进门禁准备好的交接文档并调 \`session_handoff()\`。`
+            : "把补充段写进门禁准备好的交接文档，再调 `session_handoff()`。")
+        : `上下文已用 ${due.percent}%，余量充足。`,
+  };
   const lead = input.decision.done
     ? `**${input.decision.summary}**`
     : `（等了 ${Math.round(input.waitedMs / 1000)}s，没有新事件）${input.decision.summary}`;

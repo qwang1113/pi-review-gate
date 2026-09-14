@@ -176,8 +176,13 @@ export interface ShipGateBashDeps {
    * Say something to the agent WITHOUT refusing the command.
    *
    * The hook itself can only block or stay silent, so a hint needs its own
-   * seam. The extension delivers it as a follow-up message and de-duplicates
-   * it; a test replaces it with a push into an array.
+   * seam. WHERE IT LANDS MATTERS, and it is the CALLER's result (user
+   * decision, 2026-09-14): the extension appends it to the tool result the
+   * very call that earned it returns, so the advice sits beside the command it
+   * is about. Delivering it as a separate follow-up message was measured
+   * wrong — it arrives after the fact, out of context, and reads as an
+   * interruption from nowhere. De-duplicated per session; a test replaces this
+   * seam with a push into an array.
    */
   hint(message: string): void;
 
@@ -351,10 +356,19 @@ export async function evaluateShipCommand(
   // orchestration tools replace are redirected only in orchestrator mode,
   // where a tool exists to do the same thing correctly. The gate's own tmux
   // calls never pass through here — they are argv, not bash.
+  // ── THE TMUX BACKSTOP IS A HINT, NOT A BLOCK (user decision, 2026-09-14) ──
+  //
+  // It blocks nothing. The user's call: the gate says what it knows (which tool
+  // does this correctly, which subcommand can damage their window) and then
+  // lets the command run — a session told not to type tmux must still be able
+  // to RUN one, and the end-to-end verification of the handover path needs
+  // exactly that. The detection itself is unchanged (lib/orchestrator-guard.ts)
+  // and still distinguishes the destructive subcommands from the three the
+  // orchestration tools replace, so the hint stays specific.
   const tmuxHit = detectForbiddenTmux(command, {
     orchestratorMode: deps.taskMode() === "orchestrator",
   });
-  if (tmuxHit) return { block: true, reason: tmuxHit.reason };
+  if (tmuxHit) deps.hint(tmuxHit.reason);
 
   // The hand-rolled WAIT (D6): a hint, not a block, and it sits here — after
   // the tmux backstop, before every early return below — so a session that has

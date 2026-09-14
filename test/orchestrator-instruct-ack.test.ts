@@ -33,7 +33,7 @@ neutraliseGateEnv();
 
 import { makeFakeWorld, projectionOf, replyText, twoTaskPlan, type FakeWorld } from "./helpers/fake-orchestration.ts";
 import { deliveryVerdict } from "../lib/orchestrator-delivery.ts";
-import { contextPercentFromUsage, handoffAdvice } from "../lib/orchestrator-handoff-advice.ts";
+import { contextPercentFromUsage } from "../lib/session-handoff.ts";
 
 
 async function spawnT1(world: FakeWorld): Promise<string> {
@@ -178,7 +178,7 @@ test("the wait receipt carries a REAL context reading when the host provides one
   const text = replyText(reply);
   assert.match(text, /上下文已用 83%/, "the number is in the receipt, not left for the agent to look up");
   assert.match(text, /接力/, "with the timing call attached to it");
-  assert.equal(reply.details?.handoffUrgency, "soon");
+  assert.equal(reply.details?.handoffDue, true, "83% is past the one threshold now, not the old soft lane");
 });
 
 test("and stays honest when there is genuinely no reading", async () => {
@@ -186,15 +186,7 @@ test("and stays honest when there is genuinely no reading", async () => {
   await spawnT1(world);
   const reply = await world.call("orchestrator_wait", { timeoutMs: 0 });
   assert.match(replyText(reply), /宿主未提供读数/, "a missing measurement is never reported as room to spare");
-  assert.equal(reply.details?.handoffUrgency, "none");
-});
-
-test("the four bands are a function of BOTH numbers — questions come before a handover", () => {
-  assert.equal(handoffAdvice({ percent: 40, openRequests: 0 }).urgency, "none");
-  assert.equal(handoffAdvice({ percent: 85, openRequests: 0 }).urgency, "soon");
-  assert.match(handoffAdvice({ percent: 85, openRequests: 2 }).line, /先处理完这 2 个待答请求/);
-  assert.equal(handoffAdvice({ percent: 95, openRequests: 0 }).urgency, "now");
-  assert.match(handoffAdvice({ percent: 95, openRequests: 1 }).line, /先把这 1 个待答请求回掉/);
+  assert.equal(reply.details?.handoffDue, false, "no reading, no reminder");
 });
 
 test("the usage reading understands pi's ACTUAL shape — and the fallback really fires", () => {

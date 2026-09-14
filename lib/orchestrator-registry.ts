@@ -179,7 +179,7 @@ export interface OrchestratorRuntime {
    */
   grants?: OrchestrationGrant[];
 
-  /** A relay in progress — see lib/orchestrator-relay.ts. */
+  /** A handover in progress — see lib/session-inheritance.ts. */
   relay?: {
     handoffPath: string;
     successorPane?: string;

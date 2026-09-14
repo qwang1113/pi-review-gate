@@ -25,7 +25,6 @@ import { Type } from "typebox";
 import { pollUntil, type PollWaitResult } from "./poll-wait.ts";
 import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
 
-import { GATE_MODE_ENV } from "./task-mode.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
 import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
 
@@ -46,11 +45,9 @@ export interface OrchestratorSessionDeps extends OrchestratorDeps {
 import {
   closeSessionPane,
   countDecoratedPanes,
-  openSessionPane,
   releasesWindowLabels,
 } from "./session-factory.ts";
 
-import { spawnAuthorization } from "./orchestrator-gate.ts";
 import {
   WORKTREE_SETTLEMENTS,
   repoRootOfWorktree,
@@ -63,11 +60,8 @@ import {
 } from "./orchestrator-registry.ts";
 import {
   formatInheritanceBrief,
-  predecessorCloseAuthorization,
   readInheritance,
-  relayPreconditions,
-  successorEnv,
-} from "./orchestrator-relay.ts";
+} from "./session-inheritance.ts";
 import { orchestratorDoneProblems } from "./orchestrator-gate.ts";
 import {
   buildWaitReceipt,
@@ -253,7 +247,7 @@ async function doWait(
     reason: decision.reason,
     waitedMs: waited.waitedMs,
     done: decision.done,
-    handoffUrgency: receipt.advice.urgency,
+    handoffDue: receipt.advice.due,
     openRequests: (snapshot?.requests ?? []).length,
     health: snapshot?.health ?? [],
     ...(decision.childId ? { childId: decision.childId } : {}),
@@ -387,20 +381,6 @@ function forgetWorktree(runtime: OrchestratorRuntime, childId: string): Orchestr
 async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const runtime = deps.runtime();
   const childId = String(params.childId ?? "").trim();
-  const predecessorPane = String(params.predecessorPane ?? "").trim();
-
-  // CONSTRAINT 12 — the relay's closing move. Only a SUCCESSOR may close the
-  // orchestrator it replaced, and its own environment is what says so.
-  if (predecessorPane) {
-    const auth = predecessorCloseAuthorization(predecessorPane, deps.env());
-    if (!auth.ok) return fail("review-gate: " + auth.reason);
-    const killed = closeSessionPane(deps.tmux, predecessorPane);
-    if (!killed.ok) return fail(`review-gate: 关闭前任 pane 失败 —— ${killed.error}`);
-    return reply(
-      `review-gate: 前任项目经理 pane ${predecessorPane} 已关闭，接力完成 —— 你现在是这个 orchestration 的持有者。`,
-      { closed: predecessorPane },
-    );
-  }
 
   const closable = closableChild(runtime, childId);
   // A CLOSED CHILD CAN STILL OWE A CHECKOUT (round-7 P1). A merge is staged,
@@ -521,123 +501,20 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
 
 }
 
-async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
-  const runtime = deps.runtime();
-  const { plan } = currentPlan(deps);
-  const handoffPath = String(params.handoffPath ?? "").trim();
-  const self = deps.ownPane();
-  const panes = alivePanes(deps);
-
-  const problems = relayPreconditions({
-    planApproved: Boolean(plan && runtime.approvedPlanHash && spawnAuthorization(runtime, plan).ok),
-    handoffPath: handoffPath || undefined,
-    handoffChars: handoffPath ? deps.fileChars(handoffPath) : undefined,
-    ownPane: self,
-    liveChildCount: panes.panes.length,
-  });
-  if (problems.length) {
-    return fail(
-      "review-gate: 还不能接力：\n" + problems.map((p) => `  - ${p}`).join("\n"),
-      { problems },
-    );
-  }
-
-  // RETIRE THE PREDECESSOR FIRST, and the ORDER is the fix (2026-09-10,
-  // rebate handoff failure). The successor arms its gate in this SAME
-  // worktree, and the exclusivity guard refuses a second claimant while the
-  // holder's heartbeat is fresh (lib/session-exclusivity.ts). Retiring after
-  // the pane opens would race the successor's boot and lose: it was measured
-  // refusing itself with "这个 worktree 已被另一个会话占用", naming the very
-  // session that had just handed the orchestration over.
-  //
-  // This is phase ONE (release the claim). Phase TWO (go silent) is owed
-  // AFTER the relay record is persisted, and the reason is in
-  // HandoffRetirement: `persist()` refuses to write for a retired session, so
-  // marking earlier would make the successor's own registry row memory-only.
-  //
-  // A handoff that never happens must change NOTHING: `rolledBack` is called
-  // when the pane could not be opened, and phase two never ran.
-  const retirement = deps.onHandoff?.();
-  // The successor's proof of heirship (lib/session-exclusivity.ts): named, it
-  // may take this worktree's claim over from the session it replaces.
-  const predecessorSessionId = deps.ownSessionId?.();
-
-  // The successor is opened by the SAME factory as every other pi session —
-  // it just lands BESIDE the opener instead of in the child column (tmux then
-  // expands it into the left column when the old pane is closed), keeps no
-  // registry row and takes no border: it is not a child, it is the next holder
-  // of this orchestration.
-  //
-  // THE OPEN IS WRAPPED, and it is not decoration: phase one has ALREADY
-  // released this session's worktree claim, so an exception escaping
-  // `openSessionPane` (a tmux runner that throws rather than returning
-  // `ok:false`, which the injected seam permits) would leave the claim
-  // released, the relay record unwritten and the session otherwise untouched —
-  // a half-retired predecessor nobody would notice. Every exit from this block
-  // either commits the relay record or undoes phase one.
-  let opened: Awaited<ReturnType<typeof openSessionPane>>;
-  try {
-    opened = await openSessionPane(deps.tmux, {
-      ownPane: self!,
-      cwd: deps.repoRoot,
-      layout: "beside-opener",
-      // A plain interactive pi: the successor reads the handoff document its
-      // environment points at, so it needs no argv message of its own.
-      command: ["pi"],
-      role: {
-        kind: "successor",
-        env: {
-          ...successorEnv({
-            orchestrationId: runtime.orchestrationId,
-            predecessorPane: self!,
-            handoffPath,
-            predecessorTranscript: deps.sessionTranscriptPath(),
-            ...(predecessorSessionId ? { predecessorSessionId } : {}),
-          }),
-          [GATE_MODE_ENV]: "orchestrator",
-        },
-      },
-    });
-  } catch (error) {
-    retirement?.rolledBack();
-    return fail(
-      `review-gate: 开接任会话时出错 —— ${(error as Error).message}（接力中止，你仍然是持有者）。`,
-    );
-  }
-  if (!opened.ok) {
-    // Undo phase one: the orchestration still has exactly one holder, and it
-    // is this session. Phase two never ran, so nothing else needs undoing.
-    retirement?.rolledBack();
-    return fail(`review-gate: 开接任会话失败 —— ${opened.error}（接力中止，你仍然是持有者）。`);
-  }
-  const paneId = opened.paneId;
-
-
-  // The relay record FIRST, then the silence: `saveRuntime` goes through
-  // `persist()`, which refuses to write for a retired session. Persisting
-  // afterwards would leave the successor's own registry row — who took over,
-  // from whom — memory-only.
-  deps.saveRuntime({
-    ...deps.runtime(),
-    relay: { handoffPath, successorPane: paneId, at: new Date(deps.now()).toISOString() },
-  });
-  retirement?.committed();
-  return reply(
-    `review-gate: 接任的项目经理已在 pane ${paneId} 启动，继承同一个 orchestration id ` +
-    `(${runtime.orchestrationId})，子会话的通知会自动流向它，无需重启任何子会话。\n` +
-    "**接下来你进入 idle：不要再动手**。等它读完交接文档确认接手后，由**它**来关掉你这个 pane" +
-    "（只有新会话能关老会话 —— 这天然证明接手成功，中间不断档）。",
-    { successorPane: paneId, handoffPath },
-  );
-}
-
 /**
- * Register the eight orchestration session tools.
+ * Register the orchestration session tools.
  *
- * Six live in this file (spawn / instruct / wait / close / handoff) and two
- * are delegated to their own modules (`orchestrator_answer`,
+ * Five live in this file (spawn / instruct / wait / close) and two are
+ * delegated to their own modules (`orchestrator_answer`,
  * `orchestrator_recover` + `orchestrator_attach`) — registered from here so
  * there is ONE place that answers "which orchestration tools exist".
+ *
+ * `orchestrator_handoff` USED to live here and is GONE (2026-09-14,
+ * philosophy three): handing over is every session's move, not the project
+ * manager's, so it is registered once for all four kinds of session as
+ * `session_handoff` (lib/session-handoff-tools.ts). Two entry points for one
+ * act is exactly what philosophy two forbids — and the old one was the
+ * failing half of it.
  */
 export function registerOrchestratorSessionTools(host: ToolHost, deps: OrchestratorSessionDeps): void {
   const guarded = (
@@ -735,15 +612,12 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     name: "orchestrator_close",
     label: "Close A Child Session",
     description:
-      "Close a pane this orchestration owns: a registered child (`childId`), or — only when you " +
-      "are the SUCCESSOR of a relay — the predecessor orchestrator (`predecessorPane`). Nothing " +
-      "else is addressable: the user's own panes and other orchestrations' panes are refused. " +
+      "Close a registered child's pane (`childId`). Nothing else is addressable: the user's own " +
+      "panes and other orchestrations' panes are refused, and a handover's predecessor pane is " +
+      "closed by the GATE (`session_handoff`), never by a session. " +
       "A child's pane is killed; its transcript and gate state survive on disk.",
     parameters: Type.Object({
       childId: Type.Optional(Type.String()),
-      predecessorPane: Type.Optional(Type.String({
-        description: "Relay only: the pane of the orchestrator you replaced",
-      })),
       worktree: Type.Optional(Type.Enum({
         keep: "keep",
         merge: "merge",
@@ -761,24 +635,6 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
       })),
     }),
     execute: guarded((params) => doClose(deps, params)),
-  });
-
-  host.registerTool({
-    name: "orchestrator_handoff",
-    label: "Hand Over To A Successor",
-    description:
-      "Hand this orchestration to a fresh orchestrator session when your context is running out — " +
-      "`orchestrator_wait` tells you when that is, in block 4 of every receipt. Requires an " +
-      "approved plan on disk and a handoff document you already wrote. The successor inherits the " +
-      "SAME orchestration id, so every child keeps reaching whoever holds the orchestration with " +
-      "nothing restarted and nothing re-stamped; it also gets the handoff path and a pointer to " +
-      "your transcript — the raw record, because a handoff document is a self-report. After this " +
-      "you go idle; the SUCCESSOR closes your pane (only a successor can, which is what proves " +
-      "the takeover worked).",
-    parameters: Type.Object({
-      handoffPath: Type.String({ description: "Repo-relative path, e.g. docs/orchestrator-handoff.md" }),
-    }),
-    execute: guarded((params) => doHandoff(deps, params)),
   });
 
 }

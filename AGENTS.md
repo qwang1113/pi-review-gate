@@ -393,9 +393,12 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 设计铁律只有一句（用户原话）：**能提供工具的，就不要让会话自己组装。** 项目经理
 只表达意图，门禁负责实现 —— 它不手写 tmux 命令、不写等待脚本、不自己拼通知。
-工具集（10 个）：`orchestrator_plan` / `_spawn` / `_wait` / `_answer` /
-`_instruct` / `_close` / `_recover` / `_attach` / `_handoff` / `_notify`
+工具集（9 个）：`orchestrator_plan` / `_spawn` / `_wait` / `_answer` /
+`_instruct` / `_close` / `_recover` / `_attach` / `_notify`
 （判定逻辑在 `lib/orchestrator-*.ts`，`extensions/review-gate.ts` 只接线）。
+交接**不是**编排专属的第十个工具：**每一类会话**（loop 主会话、编排子会话、
+项目经理、judge）共用同一个 `session_handoff()`（`lib/session-handoff-tools.ts`）
+—— 阈值、骨架文档、开 pane 与接手判定都是门禁的，见「单次审查循环」一节。
 
 **2026-08-30 通道重构：tmux 退回显示器。** 前三轮端到端验证的 40+ 条缺陷里约
 三分之二源于同一个根因 —— 拿 tmux 屏幕当 API。已全部换成 pi 官方结构化通道：

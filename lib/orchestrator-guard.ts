@@ -1,34 +1,41 @@
 /**
- * The tmux BACKSTOP — bash-layer refusal of hand-written tmux commands.
+ * The tmux BACKSTOP — a bash-layer HINT about hand-written tmux commands.
  *
  * THIS IS NOT THE MAIN PATH (task book §4.3). The main path is the tool set:
  * an orchestrator expresses intent (`orchestrator_spawn` / `orchestrator_send`
  * / `orchestrator_close`) and the gate builds the command
- * (lib/orchestrator-tmux.ts). This module only catches the case where a
- * session goes around the tools and types tmux itself — which is where the
- * measured damage lives, because the blast radius of an improvised tmux
- * command is the USER'S working environment, not a wrong answer.
+ * (lib/orchestrator-tmux.ts). This module catches the case where a session
+ * goes around the tools and types tmux itself — which is where the measured
+ * damage lives, because the blast radius of an improvised tmux command is the
+ * USER'S working environment, not a wrong answer.
  *
- * TWO TIERS, and the difference matters:
+ * IT HINTS, IT DOES NOT BLOCK (user decision, 2026-09-14). It used to be a
+ * hard refusal, and that refusal had to go: a session told not to type tmux
+ * must still be able to RUN one, and the end-to-end verification of the
+ * handover path needs to open panes from bash. The user's call was "hint, do
+ * not block" — so the detection below is unchanged and the decision is
+ * reported to the session as advice.
  *
- *  1. ALWAYS FORBIDDEN — `kill-session`, `kill-server`, `kill-window`,
+ * TWO TIERS, and the difference still matters — it is the STRENGTH OF THE
+ * HINT:
+ *
+ *  1. ALWAYS WARNED — `kill-session`, `kill-server`, `kill-window`,
  *     `new-session`, `new-window`, a global option write (`set -g`), and
  *     `kill-pane -a` (which sweeps every OTHER pane in the window, the user's
  *     included). None of these has a legitimate use from inside an agent
  *     session: they either destroy something the user owns or create surface
  *     outside the one window the orchestration was agreed in. No tool
- *     replaces them, so the refusal is final.
+ *     replaces them, so the warning is the strongest one the gate has.
  *  2. TOOL-REPLACED — `split-window`, `send-keys`, `kill-pane`. These are
- *     exactly what the orchestration tools do, so refusing them in
- *     ORCHESTRATOR mode is not a prohibition but a redirect: the message
- *     names the tool to call instead. Outside orchestrator mode they are left
- *     alone; an ordinary session running tmux for its own reasons is not this
- *     module's business.
+ *     exactly what the orchestration tools do, so in ORCHESTRATOR mode the
+ *     hint is not a prohibition but a redirect: the message names the tool to
+ *     call instead. Outside orchestrator mode they are left alone; an
+ *     ordinary session running tmux for its own reasons is not this module's
+ *     business.
  *
  * QUOTED TEXT IS DATA. Detection runs over the shell lexer's UNQUOTED tokens
  * (lib/shell-lex.ts), so `echo "tmux kill-server"` and a quoted payload inside
- * a legitimate command are not commands and are not flagged. Fail-closed on
- * the structure, not on the prose.
+ * a legitimate command are not commands and are not flagged.
  *
  * Pure module: string in, decision out. It never executes anything.
  */
@@ -81,7 +88,7 @@ export const TOOL_REPLACED: readonly string[] = Object.freeze([
 
 /** Which tool to call instead of typing the command. */
 const TOOL_FOR: Readonly<Record<string, string>> = Object.freeze({
-  "split-window": "orchestrator_spawn（接力用 orchestrator_handoff，救活死掉的用 orchestrator_recover）",
+  "split-window": "orchestrator_spawn（接力用 session_handoff，救活死掉的用 orchestrator_recover）",
   // Typing at a child is gone entirely: a MESSAGE goes through
   // `orchestrator_instruct` and an ANSWER through `orchestrator_answer`, both
   // via the child's channel. Naming only one of them here would send the
@@ -268,8 +275,8 @@ function hiddenHit(subcommand: string, segment: string): TmuxGuardHit {
     reason:
       `review-gate: 禁止 \`tmux ${subcommand}\` —— 它会破坏或越出用户的 tmux 环境。` +
       "这条命令把它藏在了包装命令、嵌套 shell 或 shell 语法（子 shell / 命令替换）里，" +
-      "门禁按 fail-closed 处理：宁可误伤一次（改写即可），也不能放过一次搞挂用户 window 的调用。" +
-      "需要开子会话用 `orchestrator_spawn`，接力用 `orchestrator_handoff`，救活死掉的用 `orchestrator_recover`。",
+      "门禁把它当作那条命令来警告（只是提示，不拦）。" +
+      "需要开子会话用 `orchestrator_spawn`，接力用 `session_handoff`，救活死掉的用 `orchestrator_recover`。",
   };
 }
 
@@ -313,9 +320,10 @@ export function detectForbiddenTmux(
         tier: "forbidden",
         segment: rendered,
         reason:
-          `review-gate: 禁止 \`tmux ${subcommand}\` —— 它会破坏或越出用户的 tmux 环境` +
+          `review-gate: 不建议 \`tmux ${subcommand}\` —— 它会破坏或越出用户的 tmux 环境` +
           "（编排只允许在用户与你约定的那一个 window 内 split）。" +
-          "需要开子会话用 `orchestrator_spawn`，接力用 `orchestrator_handoff`，救活死掉的用 `orchestrator_recover`。",
+          "需要开子会话用 `orchestrator_spawn`，接力用 `session_handoff`，救活死掉的用 `orchestrator_recover`。" +
+          "这条只是提示：命令会照常执行。",
       };
     }
 
@@ -325,8 +333,8 @@ export function detectForbiddenTmux(
         tier: "forbidden",
         segment: rendered,
         reason:
-          `review-gate: 禁止 \`tmux ${subcommand} -g\` —— 那是用户的全局 tmux 配置，` +
-          "任何会话都不得改写。",
+          `review-gate: 不建议 \`tmux ${subcommand} -g\` —— 那是用户的全局 tmux 配置，` +
+          "任何会话都不得改写（只是提示，不拦）。",
       };
     }
 
@@ -339,8 +347,8 @@ export function detectForbiddenTmux(
         tier: "forbidden",
         segment: rendered,
         reason:
-          "review-gate: 禁止 `tmux kill-pane -a` —— 它会清掉 window 里其他所有 pane（包括用户自己的）。" +
-          "要关自己开的子会话，用 `orchestrator_close`（只能关它登记过的 pane）。",
+          "review-gate: 不建议 `tmux kill-pane -a` —— 它会清掉 window 里其他所有 pane（包括用户自己的）。" +
+          "要关自己开的子会话，用 `orchestrator_close`（只能关它登记过的 pane）。这条只是提示，不拦。",
       };
     }
 
@@ -351,7 +359,8 @@ export function detectForbiddenTmux(
         segment: rendered,
         reason:
           `review-gate: 项目经理不手写 tmux —— \`${subcommand}\` 请改用 ${TOOL_FOR[subcommand]}。` +
-          "门禁会构造命令、登记 pane 归属并做安全检查；现编的 tmux 命令出错的代价是搞挂用户的工作环境。",
+          "门禁会构造命令、登记 pane 归属并做安全检查；现编的 tmux 命令出错的代价是搞挂用户的工作环境。" +
+          "这条只是提示：命令会照常执行。",
       };
     }
   }

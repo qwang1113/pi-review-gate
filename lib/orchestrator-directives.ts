@@ -47,7 +47,7 @@ export const ORCHESTRATOR_DIRECTIVE =
   "| 它死了（pane 没了），要救回来 | `orchestrator_recover({ childId })` |\n" +
   "| 接手一个别人留下的编排 | `orchestrator_attach({ orchestrationId })` |\n" +
   "| 给用户本人发系统通知 | `orchestrator_notify` |\n" +
-  "| 上下文快满了，交接给下一任 | `orchestrator_handoff({ handoffPath })` |\n" +
+  "| 上下文快满了，交接给下一任 | `session_handoff()`（门禁会把交接文档骨架写好） |\n" +
   "| 关掉某个自己开的子会话 | `orchestrator_close` |\n" +
   "\n" +
   "**`orchestrator_wait` 的回执就是你的全部信息来源**，五块：子会话健康快照、" +

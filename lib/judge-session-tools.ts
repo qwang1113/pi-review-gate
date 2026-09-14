@@ -136,6 +136,19 @@ export interface JudgeSessionToolDeps {
   resolveRepo(requested: string | undefined): JudgeRepoTarget;
   /** Who is calling — the opener check runs on this, never on a parameter. */
   callerId(): string | undefined;
+  /**
+   * EVERY identity whose judges this session may act on, when that is more
+   * than one.
+   *
+   * A HANDOVER'S SUCCESSOR owns two (2026-09-14, measured on the loop path):
+   * its own identity, and the session it replaced. A judge's channel is keyed
+   * by `<openerId>/<judgeId>`, so without this a successor would be refused on
+   * `judge_wait`/`judge_close` for the very reviewer its predecessor had
+   * dispatched — the round's verdict would land in a channel nobody reads and
+   * the successor would wait forever. Omitted ⇒ just `callerId()`, which is
+   * every ordinary session.
+   */
+  callerIds?(): string[];
   /** Opener registry (extension-owned) and its persistence. */
   hierarchy(): HierarchyTable;
   saveHierarchy(next: HierarchyTable): void;
@@ -334,13 +347,24 @@ function checkOpener(
   deps: JudgeSessionToolDeps,
   judgeId: string,
 ): { ok: true } | { ok: false; text: string } {
-  const caller = deps.callerId();
-  if (!caller) {
+  // EVERY identity this session may act under, in order of preference: its
+  // own first, then the one it replaced (a handover's successor — see the dep).
+  const callers: string[] = [];
+  const own = deps.callerId();
+  if (own) callers.push(own);
+  for (const other of deps.callerIds?.() ?? []) {
+    if (other && !callers.includes(other)) callers.push(other);
+  }
+  if (callers.length === 0) {
     return { ok: false, text: "review-gate: 无法确认调用者身份——身份不明时不能操作任何 review。" };
   }
-  const allowed = checkCaller(deps.hierarchy(), judgeId, caller);
-  if (!allowed.ok) return { ok: false, text: `review-gate: ${allowed.reason}` };
-  return { ok: true };
+  let lastReason = "";
+  for (const caller of callers) {
+    const allowed = checkCaller(deps.hierarchy(), judgeId, caller);
+    if (allowed.ok) return { ok: true };
+    lastReason = allowed.reason;
+  }
+  return { ok: false, text: `review-gate: ${lastReason}` };
 }
 
 // ---------- the wait criteria (this module's own) ----------
