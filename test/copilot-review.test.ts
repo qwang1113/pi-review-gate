@@ -56,6 +56,7 @@ function thread(over: Partial<CopilotPayload["threads"][number]> = {}) {
     createdAt: NOW_ISO,
     excerpt: "consider handling the null case",
     body: "consider handling the null case",
+    latestBody: "consider handling the null case",
     lastCommentId: "C1",
     ...over,
   };

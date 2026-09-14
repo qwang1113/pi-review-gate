@@ -9006,12 +9006,14 @@ export default function reviewGate(pi: ExtensionAPI) {
         ui.hasUI === true,
         (signal) => askChoice(ui, spec, {
           ...(opts.body === undefined ? {} : { body: opts.body }),
+          ...(opts.pointer === undefined ? {} : { pointer: opts.pointer }),
           ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
           signal,
         }),
       );
       return outcome.answer;
     },
+    showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
     delay: (ms) => new Promise((r) => setTimeout(r, ms)),
   });
 

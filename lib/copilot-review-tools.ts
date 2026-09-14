@@ -55,6 +55,7 @@ import { type ChoiceSpec } from "./choice-dialog.ts";
 import { SKIP_REST_CHOICE } from "./ask-user.ts";
 import {
   COPILOT_TRIAGE_ASK_FROM_ROUND,
+  FINDING_DIALOG_POINTER,
   findingBody,
   findingChoiceSpec,
   findingKey,
@@ -158,8 +159,18 @@ export interface CopilotReviewToolDeps {
   askFinding(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; extraRows?: string[] },
+    opts: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] },
   ): Promise<string | undefined>;
+  /**
+   * Put text in front of the user, in the transcript, right now.
+   *
+   * The dialogs are geometric (lib/dialog-budget.ts): a long Copilot comment
+   * does not fit in one, so the finding's FULL text goes here, before the box
+   * — otherwise the user is asked to approve a truncated finding and has
+   * nowhere to read the rest. Returns false when there is no UI to render
+   * into.
+   */
+  showToUser(uiCtx: unknown, lead: string, body: string): boolean;
 }
 
 /**
@@ -205,8 +216,16 @@ async function askFindings(
   for (const [index, thread] of plan.ask.entries()) {
     if (stopped || signal?.aborted) break;
     const spec = findingChoiceSpec(thread, index, plan.ask.length);
+    const body = findingBody(thread);
+    // THE TRANSCRIPT COPY GOES UP BEFORE THE BOX. The dialog's body is fitted
+    // to the row budget and the tail of a long comment does not fit; the
+    // pointer that dialog carries (FINDING_DIALOG_POINTER) names this notice,
+    // so it has to exist — an approval screen that hides part of the finding
+    // is how the user approves something they never read.
+    deps.showToUser(ctx, `───── ${spec.title} ─────`, body);
     const picked = await deps.askFinding(ctx, spec, {
-      body: findingBody(thread),
+      body,
+      pointer: FINDING_DIALOG_POINTER,
       extraRows: [SKIP_REST_CHOICE],
       ...(signal ? { signal } : {}),
     });

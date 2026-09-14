@@ -20,6 +20,7 @@ import {
 import {
   COPILOT_TRIAGE_MAX_QUESTIONS,
   DECLINE_CHOICE,
+  FINDING_DIALOG_POINTER,
   FIX_CHOICE,
   IRRELEVANT_CHOICE,
   recordDecision,
@@ -60,9 +61,11 @@ interface Fake {
   requested: { ok: boolean; stdout: string; stderr: string };
   support: { support: "CONFIRMED" | "UNKNOWN"; confirmed: boolean };
   /** Every triage dialog the tool raised, in order. */
-  asked: { spec: ChoiceSpec; body?: string; extraRows?: string[] }[];
+  asked: { spec: ChoiceSpec; body?: string; pointer?: string; extraRows?: string[] }[];
   /** What the user picks, one entry per dialog; a missing entry is ESC. */
   answers: (string | undefined)[];
+  /** The transcript notices the triage wrote, one per asked finding. */
+  notices: { lead: string; body: string }[];
 }
 
 function thread(over: Partial<CopilotThread> = {}): CopilotThread {
@@ -77,6 +80,7 @@ function thread(over: Partial<CopilotThread> = {}): CopilotThread {
     createdAt: "2026-08-29T10:00:00.000Z",
     excerpt: "this argv is not escaped",
     body: "this argv is not escaped",
+    latestBody: "this argv is not escaped",
     lastCommentId: "C1",
     ...over,
   };
@@ -102,6 +106,7 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     support: { support: "CONFIRMED", confirmed: true },
     asked: [],
     answers: [],
+    notices: [],
     ...overrides,
   };
   const record = (name: string, args: unknown[]) => { state.calls.push({ name, args }); };
@@ -116,9 +121,11 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     delay: (ms) => { state.delays.push(ms); return Promise.resolve(); },
     askFinding: async (_ctx, spec, opts) => {
       state.asked.push({ spec, ...(opts.body === undefined ? {} : { body: opts.body }),
+        ...(opts.pointer === undefined ? {} : { pointer: opts.pointer }),
         ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }) });
       return state.answers.shift();
     },
+    showToUser: (_ctx, lead, body) => { state.notices.push({ lead, body }); return true; },
     gh: {
       resolveOpenPr: async (...args) => { record("resolveOpenPr", args); return state.openPr; },
       resolveRepoSlug: async (...args) => { record("resolveRepoSlug", args); return state.slug; },
@@ -409,6 +416,13 @@ test("check: round 4 asks about each finding, one dialog each, and groups the an
   assert.equal(f.asked[0]?.spec.recommended, FIX_CHOICE);
   assert.deepEqual(f.asked[0]?.extraRows, [SKIP_REST_CHOICE], "an interview still has an escape row");
   assert.match(f.asked[0]?.body ?? "", /this argv is not escaped/, "the dialog carries the comment");
+  assert.equal(f.asked[0]?.pointer, FINDING_DIALOG_POINTER, "and says where the rest of it is");
+  // The full text goes to the transcript BEFORE the box: the dialog's body is
+  // clipped by the row budget, so this copy is what makes the pointer true —
+  // and what keeps a long finding from being approved unseen.
+  assert.equal(f.notices.length, 2);
+  assert.equal(f.notices[0]?.lead, "───── Copilot 评审问题 1 / 2：lib/copilot-gh.ts:12 ─────");
+  assert.match(f.notices[0]?.body ?? "", /this argv is not escaped/);
 
   // Only the approved finding is the agent's to change.
   assert.match(text, /✅ 修复（1 条）—— 只许改这些：/);
@@ -464,6 +478,7 @@ test("check: an unanswered finding is NOT approval — no record, no fix, report
   f.answers = [undefined, FIX_CHOICE]; // ESC on the first
   const reply = await call(f, "check_copilot_review");
   const text = textOf(reply);
+  assert.equal(f.notices.length, 2, "both findings were shown, even the one nobody answered");
   assert.match(textOf(reply), /⏸ 未获批准（1 条）—— 这些代码不许改，只如实告诉他：/);
   assert.match(textOf(reply), /- T1 lib\/copilot-gh\.ts:12 —— 他没表态 —— 不许改、不许代他回复。/);
   assert.match(text, /✅ 修复（1 条）/);

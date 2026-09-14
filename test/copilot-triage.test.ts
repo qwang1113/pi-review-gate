@@ -45,6 +45,7 @@ function thread(over: Partial<CopilotThread> = {}): CopilotThread {
     createdAt: AT,
     excerpt: "the short form",
     body: "the short form",
+    latestBody: "the short form",
     lastCommentId: "C1",
     ...over,
   };
@@ -162,6 +163,14 @@ test("everything that is NOT one of the three answers is unanswered — never a 
 test("the interview escape row stops the questions", () => {
   const spec = findingChoiceSpec(thread(), 0, 3);
   assert.deepEqual(triagePickFrom(SKIP_REST_CHOICE, spec), { kind: "skip-rest" });
+  // …and so does the typed twin its own hint advertises: a box that names an
+  // escape and then does something else with it is worse than no hint at all.
+  assert.match(spec.reasonPlaceholder ?? "", /!skip/);
+  assert.deepEqual(triagePickFrom(`${DECLINE_ROW}：!skip`, spec), { kind: "skip-rest" });
+  // `!chat` is not advertised for a finding (there is no interview to defer)
+  // but it must not turn into a decision either.
+  assert.deepEqual(triagePickFrom(`${DECLINE_ROW}：!chat`, spec),
+    { kind: "unanswered", reason: "（他想改在聊天里说）" });
 });
 
 // ---------- the question itself ----------
@@ -176,7 +185,21 @@ test("the question shows the progress, the location and the FULL comment", () =>
   assert.match(body, /a much longer explanation than the excerpt/);
   assert.match(body, /已移动/, "an outdated thread says so — the user is deciding on stale evidence otherwise");
   // A payload with no body at all still says something useful.
-  assert.match(findingBody(thread({ body: "" })), /the short form/);
+  assert.match(findingBody(thread({ body: "", latestBody: "" })), /the short form/);
+});
+
+test("a re-asked finding shows the NEW comment, not the one already answered", () => {
+  const body = findingBody(thread({
+    body: "the original complaint",
+    latestBody: "still not fixed, second look",
+  }));
+  assert.match(body, /最新的一条评论/);
+  assert.ok(body.indexOf("still not fixed") < body.indexOf("the original complaint"),
+    "the comment that re-opened the question comes first");
+  // One comment: the latest IS the first, so it is shown once, in the plain form.
+  const single = findingBody(thread());
+  assert.match(single, /Copilot 的评论：\nthe short form/);
+  assert.doesNotMatch(single, /最新的一条评论/);
 });
 
 // ---------- sidecar validation ----------

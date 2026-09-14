@@ -27,10 +27,10 @@
 
 import type { CopilotThread } from "./copilot-review.ts";
 import { parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
-// The interview's own escape row, imported rather than re-spelled: "skip the
-// rest" is one convention in this gate, and a second constant would be a
-// second thing to keep in sync.
-import { SKIP_REST_CHOICE } from "./ask-user.ts";
+// The interview's own escape row and its typed twin, imported rather than
+// re-spelled: "skip the rest" is one convention in this gate, and a second
+// constant would be a second thing to keep in sync.
+import { ANSWER_IN_CHAT_INPUT, SKIP_REST_CHOICE, SKIP_REST_INPUT } from "./ask-user.ts";
 
 /**
  * From this round on, every finding needs the user's approval before it may be
@@ -198,35 +198,64 @@ export function summarizeTriage(
 }
 
 /**
- * The question for ONE finding: the gate's one template, nothing else.
+ * What the ✎ box offers for a FINDING.
  *
- * The recommendation is `fix` because that is what a Copilot finding normally
- * asks for — the user's other two answers are one keystroke away, and the
- * template's own `✎ 不选，我说明原因` row is always there.
+ * The template's default hint advertises `!chat`, which means nothing here
+ * (there is no interview to defer to the chat) — so this hint advertises only
+ * what is honoured, and `triagePickFrom` honours both escapes it names.
  */
+export const FINDING_REASON_PLACEHOLDER =
+  "直接写你的理由（留空＝只说「不选」）；!skip＝跳过后续问题";
+
+/**
+ * What the dialog says where a long comment was cut.
+ *
+ * The full text is put in the transcript just before the box opens
+ * (`askFindings`), which is what makes this pointer TRUE: without that copy
+ * the user would be approving a finding they cannot read (round-1 reviewer
+ * P1).
+ */
+export const FINDING_DIALOG_POINTER = "（已截断 —— 完整评论见上面 transcript 里的那条）";
+
 export function findingChoiceSpec(thread: CopilotThread, index: number, total: number): ChoiceSpec {
   const where = `${thread.path ?? "(no file)"}${thread.line ? ":" + thread.line : ""}`;
   return {
     title: `Copilot 评审问题 ${index + 1} / ${total}：${where}`,
     options: [FIX_CHOICE, DECLINE_CHOICE, IRRELEVANT_CHOICE],
     recommended: FIX_CHOICE,
+    reasonPlaceholder: FINDING_REASON_PLACEHOLDER,
   };
 }
 
 /**
- * The long half of the dialog: which code, and what Copilot actually said.
+ * The long half of the dialog (and the transcript copy): which code, and what
+ * Copilot actually said.
  *
- * The full comment (not the agent's short excerpt) because the user is being
- * asked to DECIDE, and 200 collapsed characters are not always enough to know
- * whether the finding applies. The dialog budget trims it and points at the
- * transcript; `thread.id` is in the agent's list for the full text on GitHub.
+ * The full comment, not the agent's 200-character excerpt, because the user is
+ * being asked to DECIDE. When the thread's LATEST comment differs from its
+ * first one, the latest is what is shown first: that comment is the reason the
+ * question is being asked again at all (a decision is keyed to the comment it
+ * was made about), so showing the old text would ask the user to approve
+ * something they have already read.
  */
 export function findingBody(thread: CopilotThread): string {
   const lines = [
     `文件：${thread.path ?? "(no file)"}${thread.line ? ":" + thread.line : ""}`,
   ];
   if (thread.isOutdated) lines.push("（GitHub 标记这段代码已移动，问题可能已经不存在）");
-  lines.push("", "Copilot 的评论：", thread.body || thread.excerpt);
+  const first = (thread.body || thread.excerpt).trim();
+  const latest = thread.latestBody.trim();
+  if (latest && latest !== first) {
+    lines.push(
+      "",
+      "Copilot 最新的一条评论（这次重新确认的就是它）：",
+      latest,
+      "",
+      `（这条 thread 最早那条评论是：「${first}」）`,
+    );
+  } else {
+    lines.push("", "Copilot 的评论：", first);
+  }
   return lines.join("\n");
 }
 
@@ -244,6 +273,10 @@ export function triagePickFrom(picked: string | undefined, spec: ChoiceSpec): Co
   if (parsed.kind === "declined") {
     // The `✎ 不选，我说明原因` row: they picked none of the three. What they
     // typed is carried to the agent verbatim, but it is NOT a decision.
+    const typed = parsed.reason.trim().toLowerCase();
+    // …unless it is one of the escapes the box's own hint advertises.
+    if (typed === SKIP_REST_INPUT) return { kind: "skip-rest" };
+    if (typed === ANSWER_IN_CHAT_INPUT) return { kind: "unanswered", reason: "（他想改在聊天里说）" };
     return parsed.reason ? { kind: "unanswered", reason: parsed.reason } : { kind: "unanswered" };
   }
   if (parsed.option === SKIP_REST_CHOICE) return { kind: "skip-rest" };

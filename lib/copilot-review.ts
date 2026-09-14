@@ -557,21 +557,25 @@ export const COPILOT_THREADS_QUERY = `query($owner:String!,$name:String!,$number
       reviewThreads(first:100){nodes{
         id isResolved isOutdated path line
         firstComment: comments(first:1){nodes{author{login} createdAt body}}
-        lastComment: comments(last:1){nodes{id author{login} createdAt}}
+        lastComment: comments(last:1){nodes{id author{login} createdAt body}}
       }}
     }
   }
 }`;
 
 /**
- * How much of a comment the dialog carries. Sized for the dialog budget
- * (lib/dialog-budget.ts, ~12 rows) rather than for the comment: anything
- * longer is trimmed there with a pointer to the transcript.
+ * How much of a comment is carried at all — a payload bound, not a dialog
+ * bound. The DIALOG shows what its row budget fits (lib/dialog-budget.ts) and
+ * says it was cut; the full text the user reads is the transcript copy
+ * `askFindings` writes before the box opens. Bigger than the dialog on
+ * purpose: a cap smaller than the transcript copy would throw away the text
+ * the pointer promises.
  */
 export const COPILOT_THREAD_BODY_CHARS = 1200;
 
 export interface CopilotThread {
-  id: string;  isResolved: boolean;
+  id: string;
+  isResolved: boolean;
   isOutdated: boolean;
   path: string | null;
   line: number | null;
@@ -590,6 +594,14 @@ export interface CopilotThread {
    * approve the finding, and 200 characters are not always enough to decide.
    */
   body: string;
+  /**
+   * The LATEST comment's text (same treatment as {@link body}). Equal to
+   * `body` while the thread has one comment; different once Copilot speaks
+   * again — and Copilot speaking again is exactly what re-opens the question
+   * (see {@link lastCommentId}), so the user must be shown THIS text, not the
+   * one they already answered.
+   */
+  latestBody: string;
   /**
    * Id of the LAST comment. The triage key needs it: a decision is about a
    * piece of text, so Copilot commenting again on the same thread has to read
@@ -657,6 +669,8 @@ export function parseCopilotPayload(raw: string): CopilotPayload | undefined {
       const last = firstNode(rec.lastComment);
       const raw = typeof first?.body === "string" ? first.body : "";
       const body = raw.replace(/\s+/g, " ").trim();
+      const rawLast = typeof last?.body === "string" ? last.body : "";
+      const latestBody = rawLast.replace(/\s+/g, " ").trim().slice(0, COPILOT_THREAD_BODY_CHARS);
       return [{
         id: rec.id,
         isResolved: rec.isResolved === true,
@@ -668,6 +682,7 @@ export function parseCopilotPayload(raw: string): CopilotPayload | undefined {
         createdAt: typeof first?.createdAt === "string" ? first.createdAt : null,
         excerpt: body.slice(0, 200),
         body: body.slice(0, COPILOT_THREAD_BODY_CHARS),
+        latestBody: latestBody || body.slice(0, COPILOT_THREAD_BODY_CHARS),
         lastCommentId: typeof last?.id === "string" && last.id.length > 0 ? last.id : null,
       }];
     })
