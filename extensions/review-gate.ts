@@ -6018,12 +6018,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     const settled = (async () => {
       let verdict = "no verdict";
       let detail = "";
-      let testScope: string | undefined;
       const verified = worktreeTree(root) ?? "";
       try {
         const pre = await callTool("run_precommit", { mode: "full", repo: root }, ctx);
         verdict = String(pre.details?.verdict ?? "no verdict");
-        testScope = typeof pre.details?.testScope === "string" ? pre.details.testScope : undefined;
         detail = toolText(pre);
       } catch (error) {
         detail = (error as Error).message;
@@ -6036,12 +6034,21 @@ export default function reviewGate(pi: ExtensionAPI) {
       // belong to the next round's content, which would record a tree no lane
       // ever ran on. The rule itself is `nextFullPassTree` (pure, in
       // lib/gate-state.ts); only the effect lives here.
+      //
+      // WHAT THE LANE COVERED COMES FROM THE GATE'S OWN RECORD, not from the
+      // tool's reply. The reply's `details` never carried `testScope` (only
+      // verdict/checksRun/repo/logPath/failedSteps), so an earlier version of
+      // this call read `undefined`, never matched the PASS branch, and never
+      // wrote anything — silently, with every test green (reviewer P1,
+      // 2026-09-14). `st.precommit.testScope` is written by that same run and
+      // is read by the SHIP gate, so it cannot go missing unnoticed the way a
+      // field only this caller read could.
       const laneState = stateForRepo(root);
       const coveredTree = nextFullPassTree({
         current: laneState.precommit.lastFullPassTree,
         verdict,
         mode: "full",
-        testScope: testScope as TestScope | undefined,
+        testScope: laneState.precommit.testScope,
         startedTree: verified,
       });
       if (coveredTree !== laneState.precommit.lastFullPassTree) {
@@ -8592,14 +8599,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         details: {
           verdict: outcome.verdict, checksRun: outcome.checksRun, checksFailed: outcome.checksFailed,
           repo: repoLabel(targetRoot), logPath: outcome.logPath, failedSteps: outcome.failedSteps,
-          // WHAT THE LANE COVERED is part of the reply, not only of the
-          // recorded binding: the caller that decides whether this run may be
-          // cited later as "this content was verified" (`startPrecommitBeside`
-          // → `nextFullPassTree`) reads it HERE. It used to live only in
-          // `st.precommit.testScope` and in the human-readable text, so that
-          // caller read `undefined`, never matched its PASS branch, and the
-          // whole record was silently never written (reviewer P1, 2026-09-14).
-          testScope: outcome.testScope,
         },
         isError: outcome.verdict !== "PASS",
       };
