@@ -54,7 +54,7 @@
  * the PR page; REST `requested_reviewers` never shows it remember) is proof the
  * request WAS queued, and the timeline's `copilot_work_started` follows within
  * 63 seconds (median 35s over 51 requests). So a request that still shows
- * neither of those after {@link COPILOT_LANDING_GRACE_MS} was dropped, and one
+ * neither of those after the grace window was dropped, and one
  * that shows them is worth waiting for — which is exactly what
  * `lib/copilot-watch.ts`'s `decideCopilotWait` answers. The failure event
  * (`copilot_work_finished_failure`, observed at ~20.1 minutes) is the third
@@ -139,22 +139,10 @@ const RELEASED: ReadonlySet<CopilotStatus> = new Set<CopilotStatus>([
  * This is still the ONLY time budget, and it is still the one that cannot
  * drop feedback. What keeps a repo where nothing ever happens from spending
  * it is no longer the clock but the EVIDENCE (`lib/copilot-watch.ts`): a
- * request that never shows up as queued is given only
- * {@link COPILOT_LANDING_GRACE_MS}, and a failed run ends the wait outright.
+ * request that never shows up as queued is given only that module's grace
+ * window, and a failed run ends the wait outright.
  */
 export const COPILOT_AWAIT_TIMEOUT_MS = 30 * 60 * 1000;
-
-/**
- * How long a request may go with NO evidence that GitHub took it before the
- * gate acts on that absence.
- *
- * Sized against the measured landing time, not against a feeling: across 51
- * requests the `review_requested` timeline event appeared within 63 seconds
- * (median 35s). When the pending-reviewer flag has not appeared by 90 seconds,
- * what the gate is waiting for was not queued — which is the case the old
- * fixed budget turned into a 20-minute wait.
- */
-export const COPILOT_LANDING_GRACE_MS = 90 * 1000;
 
 /**
  * Tolerance when comparing OUR local timestamps against GitHub's. Only used

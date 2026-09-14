@@ -11,7 +11,6 @@ import assert from "node:assert/strict";
 import {
   COPILOT_AWAIT_TIMEOUT_MS,
   COPILOT_HISTORY_PR_COUNT,
-  COPILOT_LANDING_GRACE_MS,
   COPILOT_REVIEWER_LOGIN,
   COPILOT_THREADS_QUERY,
   analyzeCopilot,
@@ -40,8 +39,13 @@ import {
   type CopilotPayload,
   type CopilotReviewState,
 } from "../lib/copilot-review.ts";
-// The wait's verdict lives with the watcher — one module owns the wait.
-import { copilotWaitNote, decideCopilotWait } from "../lib/copilot-watch.ts";
+// The wait's verdict and its grace window live with the watcher — one module
+// owns the wait.
+import {
+  COPILOT_LANDING_GRACE_MS,
+  copilotWaitNote,
+  decideCopilotWait,
+} from "../lib/copilot-watch.ts";
 import { recordDecision } from "../lib/copilot-triage.ts";
 
 const NOW_ISO = "2026-08-07T10:00:00.000Z";

@@ -1198,13 +1198,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  marker is reclaimed strictly against its OWN path — one repo's successful
    *  write says nothing about another repo's failed one. */
   function persistRepo(ctx: ExtensionContext, root: string) {
-    if (root === primaryRepoRoot) {
-      persist(ctx);
-      // The L7 watcher follows the state that was just written (a no-op when
-      // this repo has no outstanding Copilot cycle).
-      try { syncCopilotWatch(root); } catch { /* a watcher never fails a persist */ }
-      return;
-    }
+    // The primary repo goes through persist() — which arms the L7 watcher for
+    // it (as it does for every other persist).
+    if (root === primaryRepoRoot) { persist(ctx); return; }
     // The SECOND repo's sidecar is gate state too — a judge is barred from it
     // for exactly the same reason, and this path does not go through persist().
     if (noteGateStatePersistSkip(ctx)) return;
@@ -3974,6 +3970,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Store continuation count alongside state so it survives restarts.
       pi.appendEntry(ENTRY_TYPE, { state, continuationsInjected });
     } catch { /* older Pi without appendEntry */ }
+    // The L7 watcher follows the state that was just written — armed HERE, at
+    // the funnel every persist goes through, rather than at the tool that
+    // happens to write a Copilot cycle today (a no-op whenever this repo has
+    // no outstanding one). Arming it at the write sites is the kind of list
+    // that goes stale silently.
+    try { syncCopilotWatch(primaryRepoRoot); } catch { /* a watcher never fails a persist */ }
     if (ctx) updateWidget(ctx);
   }
 
@@ -5005,6 +5007,23 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
   const copilotWatches = new Map<string, CopilotWatchHandle>();
 
+  /**
+   * Cycle keys that were already WOKEN for — at most one wake per cycle, and
+   * the reason it has to be remembered rather than derived.
+   *
+   * A delivered wake does not change the state: the cycle is still AWAITING
+   * until the agent answers it with a `copilot_review` call, and every persist
+   * in between (another tool's write, a mode switch, the checkpoint) re-arms
+   * the watcher for that very key. Without this memo the SAME "the review has
+   * landed" message would steer into the session again ≥20s later, and again —
+   * a wake is a user message, so repeating it costs the agent a turn each time.
+   *
+   * Losing the wake is not losing the requirement: with no live watcher the
+   * continuation («has not come back yet — call copilot_review») is back, and
+   * the budget still ends the cycle.
+   */
+  const copilotWoken = new Set<string>();
+
   function watchStateFor(root: string): GateState {
     return root === primaryRepoRoot ? state : stateForRepo(root);
   }
@@ -5031,6 +5050,9 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   function stopAllCopilotWatches(): void {
     for (const root of [...copilotWatches.keys()]) stopCopilotWatch(root);
+    // The memo dies with the session's timers: a resumed session re-reads the
+    // sidecar and may have to announce the same cycle again.
+    copilotWoken.clear();
   }
 
   /**
@@ -5041,7 +5063,8 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function syncCopilotWatch(root: string): void {
     const key = copilotWatchKey(root);
-    if (key === undefined) {
+    if (key === undefined || copilotWoken.has(key)) {
+      // Nothing to watch, or something already announced this very cycle.
       stopCopilotWatch(root);
       return;
     }
@@ -5097,6 +5120,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         return;
       }
       stopCopilotWatch(root);
+      copilotWoken.add(entry.key);
       log(`copilot watcher woke the session for PR #${cycle.pr}: ${tick.reason}`);
     } catch {
       // A failed tick is not news. The next one retries, and a timer callback

@@ -365,7 +365,8 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
    touch the code and do not reply on their behalf, report it instead.
    SATISFIED / UNSUPPORTED / EXHAUSTED ⇒ done (a repo
    with no sign of Copilot releases itself at once instead of waiting; a
-   Copilot that never answers within 20 minutes escalates to the user).
+   request GitHub never queued is re-sent once and then released; a queued
+   Copilot that never answers within 30 minutes escalates to the user).
    Pushing your fixes re-arms the cycle — that is the loop, and it has **no
    round cap**: keep going until every finding is handled.
 

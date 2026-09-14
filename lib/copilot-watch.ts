@@ -41,11 +41,23 @@ import {
   analyzeCopilot,
   COPILOT_AWAIT_TIMEOUT_MS,
   COPILOT_CLOCK_SKEW_MS,
-  COPILOT_LANDING_GRACE_MS,
   type CopilotProbe,
   type CopilotReviewState,
   type CopilotWaitState,
 } from "./copilot-review.ts";
+
+/**
+ * How long a request may go with NO evidence that GitHub took it before the
+ * gate acts on that absence.
+ *
+ * Sized against the measured landing time, not against a feeling: across 51
+ * requests the `review_requested` timeline event appeared within 63 seconds
+ * (median 35s). When the pending-reviewer flag has not appeared by 90 seconds,
+ * what the gate is waiting for was not queued — which is the case the old
+ * fixed budget turned into a 20-minute wait, and the case this window exists
+ * to end in 90 seconds instead.
+ */
+export const COPILOT_LANDING_GRACE_MS = 90 * 1000;
 
 /**
  * What GitHub says about the REQUEST itself — the two states the PR page
@@ -242,13 +254,21 @@ export function decideWatchTick(args: {
   now: number;
 }): CopilotWatchTick {
   const { state, probe } = args;
-  const requestedAt = state.requestedAt ?? state.armedAt;
-  const waitedMs = waitedSince(requestedAt, args.now);
+  // TWO anchors, because they answer two different questions.
+  //
+  // "Did a review land for THIS request?" is anchored on the last request
+  // (`requestedAt`): a review older than that one is the previous round's
+  // answer. "How long has this cycle been waiting, and is the budget spent?"
+  // is anchored on the FIRST request — the same anchor `evaluateCopilot` and
+  // the tool's diagnosis use, so a re-request (after a request GitHub never
+  // queued) cannot make the watcher's timeout wake up a round late.
+  const landingAnchor = state.requestedAt ?? state.armedAt;
+  const waitedMs = waitedSince(state.firstRequestedAt ?? state.requestedAt ?? state.armedAt, args.now);
   if (state.status !== "AWAITING") {
     return { kind: "wait", state: "unknown", waitedMs, intervalMs: COPILOT_WATCH_INTERVAL_MS };
   }
   if (probe) {
-    const analysis = analyzeCopilot(probe.payload, { anchorAt: requestedAt });
+    const analysis = analyzeCopilot(probe.payload, { anchorAt: landingAnchor });
     if (analysis.reviewed) {
       return {
         kind: "wake",
@@ -271,7 +291,9 @@ export function decideWatchTick(args: {
   }
   const verdict = decideCopilotWait({
     evidence: probe === undefined ? undefined : queueEvidenceFrom(state, probe),
-    requestedAt,
+    // The verdict's grace window is about THE LAST request — "did GitHub take
+    // the one we just sent?" — while the budget above is the cycle's.
+    requestedAt: state.requestedAt ?? state.armedAt,
     now: args.now,
   });
   if (verdict.state === "not-landed") {

@@ -4213,8 +4213,12 @@ test("the Copilot requirement stops nagging ONLY where a watcher owns the wait",
     "and it must never learn about the watcher's exception");
 
   assert.match(SRC, /function syncCopilotWatch\(/, "the arming helper must exist");
+  assert.ok(SRC.includes("syncCopilotWatch(primaryRepoRoot)"),
+    "persist() arms the primary repo's watcher — every bare persist(ctx) goes through it");
+  assert.match(SRC, /if \(root === primaryRepoRoot\) \{ persist\(ctx\); return; \}/,
+    "and persistRepo delegates the primary repo to it instead of syncing twice");
   assert.equal(SRC.split("a watcher never fails a persist").length - 1, 2,
-    "every persist arms it (both the primary repo and a second repo's sidecar)");
+    "the primary funnel and a second repo's own sidecar write are the two arming sites");
   assert.match(SRC, /syncAllCopilotWatches\(\);/, "session_start re-arms from the restored state");
   assert.match(SRC, /stopAllCopilotWatches\(\);/, "session_shutdown stops the timers it owns");
   assert.match(SRC, /watchRunsInMode\(state\.taskMode\)/, "a tick re-checks the mode");
@@ -4223,6 +4227,15 @@ test("the Copilot requirement stops nagging ONLY where a watcher owns the wait",
   // The cadence, the verdict and the wording all come from the pure module —
   // the extension owns the timer and the delivery, nothing else.
   assert.match(SRC, /decideWatchTick\(\{ state: cycle, probe, now: Date\.now\(\) \}\)/);
+  // ONE wake per cycle: a delivered wake leaves the state AWAITING until the
+  // agent answers it, so every persist in between would re-arm the same cycle
+  // and steer the same message in again. The memo is what stops that — and it
+  // may only be set where the wake was actually DELIVERED.
+  assert.match(SRC, /const copilotWoken = new Set<string>\(\)/);
+  assert.equal(SRC.split("copilotWoken.add(entry.key)").length - 1, 1,
+    "exactly one place remembers a delivered wake");
+  assert.match(SRC, /copilotWoken\.has\(key\)/, "and arming consults it before arming again");
+  assert.match(SRC, /copilotWoken\.clear\(\)/, "a resumed session may announce the cycle again");
 });
 
 test("copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {

@@ -11,6 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  COPILOT_LANDING_GRACE_MS,
   COPILOT_WATCH_INTERVAL_MS,
   COPILOT_WATCH_SLOW_MS,
   COPILOT_WATCH_SLOWEST_MS,
@@ -23,7 +24,6 @@ import {
 import {
   armCopilotReview,
   COPILOT_AWAIT_TIMEOUT_MS,
-  COPILOT_LANDING_GRACE_MS,
   type CopilotProbe,
   type CopilotReviewState,
 } from "../lib/copilot-review.ts";
@@ -170,4 +170,24 @@ test("the start time of an OLDER run does not describe this cycle, but a remembe
     now: NOW + 60_000,
   });
   assert.equal(fresh.kind === "wait" && fresh.state, "working");
+});
+
+test("the budget runs on the cycle's FIRST request, not on the last re-send", () => {
+  // A request GitHub never queued is re-sent once: `requestedAt` moves, the
+  // budget's anchor does not. Anchoring the timeout on the last re-send would
+  // let a re-request buy the cycle a fresh window — and would make this wake
+  // fire a whole request later than the budget the tool actually enforces.
+  const first = "2026-08-07T09:00:00.000Z";
+  const resent = "2026-08-07T09:20:00.000Z";
+  const state = cycle({ requestedAt: resent, firstRequestedAt: first });
+  const spent = decideWatchTick({
+    state,
+    probe: probe(),
+    now: Date.parse(first) + COPILOT_AWAIT_TIMEOUT_MS,
+  });
+  assert.equal(spent.kind === "wake" && spent.reason, "timeout");
+  assert.equal(spent.kind === "wake" && spent.waitedMs, COPILOT_AWAIT_TIMEOUT_MS);
+  // The re-send itself is recent, so there is no news about it either.
+  const fresh = decideWatchTick({ state, probe: probe(), now: Date.parse(resent) + 1 });
+  assert.equal(fresh.kind, "wait");
 });

@@ -75,7 +75,6 @@ import {
   analyzeCopilot,
   armCopilotReview,
   COPILOT_AWAIT_TIMEOUT_MS,
-  COPILOT_LANDING_GRACE_MS,
   evaluateCopilot,
   isCopilotOutstanding,
   recordCopilotRequest,
@@ -90,9 +89,11 @@ import {
   type CopilotWaitState,
   type PrSummary,
 } from "./copilot-review.ts";
-// The WAIT's policy — the verdict an outstanding request gets, and the words
-// that describe it — belongs to the module that owns the wait.
+// The WAIT's policy — the verdict an outstanding request gets, its grace
+// window, and the words that describe it — belongs to the module that owns the
+// wait.
 import {
+  COPILOT_LANDING_GRACE_MS,
   decideCopilotWait,
   type CopilotQueueEvidence,
   type CopilotWaitVerdict,
@@ -475,27 +476,6 @@ async function confirmQueued(args: {
     ? undefined
     : await deps.gh.fetchCopilotTimeline(dir, slug, prNumber, signal);
   return { queued: readable ? false : null, timeline, startedAt: timeline?.workStartedAt ?? null };
-}
-
-/**
- * The verdict a confirmation window just produced, WITHOUT clock arithmetic:
- * the window itself IS `COPILOT_LANDING_GRACE_MS`.
- *
- * `not-landed` requires POSITIVE evidence — a probe that answered and showed
- * no pending Copilot review, with no run started or failed. A probe that could
- * not be read is `unknown`, which waits instead of releasing: dropping Copilot
- * findings because our own query failed is the one direction this must never
- * fail in.
- */
-function verdictFromConfirmation(confirmed: {
-  queued: boolean | null;
-  timeline: CopilotTimeline | undefined;
-}): CopilotWaitState {
-  const failed = confirmed.timeline?.workFailedAt;
-  const started = confirmed.timeline?.workStartedAt;
-  if (failed && (!started || failed >= started)) return "failed";
-  if (confirmed.queued === true || started) return started ? "working" : "queued";
-  return confirmed.queued === false ? "not-landed" : "unknown";
 }
 
 /**
@@ -1067,6 +1047,3 @@ export function registerCopilotReviewTools(host: ToolHost, deps: CopilotReviewTo
       doCopilotReview(deps, params, signal as AbortSignal | undefined, onUpdate, ctx),
   });
 }
-
-/** Re-exported for tests and callers that report the wait window. */
-export { COPILOT_LANDING_GRACE_MS };
