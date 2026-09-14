@@ -306,7 +306,14 @@ commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而
 - **裁决记录承担验证绑定**（`lib/review-adjudicate.ts` 的 `readyLacksVerification`）：
   READY 落在一个没有 full-lane PASS 的内容上时**降级为 BLOCKED**，否则会出现
   “看着已验证、实际不可 ship”的裁决。只收紧、不放宽；`/gate-bypass` 是用户
-  授权，仍然优先。FAIL 不再能靠“提前 return”告知，所以它作为自己的一条消息
+  授权，仍然优先。**判据自 2026-09-14 起有两路**：活字段 `precommit.verdict`
+  是 PASS，**或者**被审 commit 的 tree 等于 `precommit.lastFullPassTree`（一条
+  历史事实：某棵 tree 曾经跑过全量 lane）。第二路存在的理由：`verdict` 是**活
+  绑定**，本会话自己的编辑会（正确地）把它降级成 NOT_RUN，而“边审查边改”是
+  被鼓励的正常工作方式 —— 只看活字段会把真实通过的轮次记成 BLOCKED，还会让
+  agent 去修一个从未失败的 precommit。树 OID 就是内容身份，所以这条事实不过期；
+  写入侧只认**lane 启动前**抓下的那棵树（`nextFullPassTree`，纯函数），同一棵树
+  的 FAIL 会撤销它。FAIL 不再能靠“提前 return”告知，所以它作为自己的一条消息
   送给 agent —— **走 `steer`，不是 `followUp`**（2026-09-12）：pi 只在 agent
   不再有工具调用时才 drain followUp，而本门禁的存活不变量恰好禁止它在门禁未过时
   停下，于是通知排在同一个 turn 后面不出来。实测：三条 FAIL 通知（03:01 / 03:15 /

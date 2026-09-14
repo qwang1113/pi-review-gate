@@ -903,7 +903,10 @@ workflow engine, no subagent dispatch.**
 The agent makes ONE call — `judge_submit({role:"reviewer", task})` — and the
 gate does the rest: the full precommit (started to run BESIDE the chain, so a
 FAIL comes back as its own steered message that names its round and the content
-it verified, and withholds that round's READY), the checkpoint commit (the only
+it verified, and withholds that round's READY — the recording accepts the live
+PASS **or** the round's own tree being one a full lane passed, so the documented
+"keep editing while the review runs" workflow cannot turn a genuine READY into
+BLOCKED), the checkpoint commit (the only
 commit allowed before a READY), the `baseline..HEAD` computation, and the
 dispatch.
 The review unit is that immutable COMMIT RANGE. The judge child is a fresh pi

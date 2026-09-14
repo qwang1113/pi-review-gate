@@ -456,6 +456,7 @@ import {
   type RoundScopeRecord,
   type ScopeStampRecord,
   invalidateBindings,
+  nextFullPassTree,
 } from "../lib/gate-state.ts";
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
 import {
@@ -6017,13 +6018,36 @@ export default function reviewGate(pi: ExtensionAPI) {
     const settled = (async () => {
       let verdict = "no verdict";
       let detail = "";
+      let testScope: string | undefined;
       const verified = worktreeTree(root) ?? "";
       try {
         const pre = await callTool("run_precommit", { mode: "full", repo: root }, ctx);
         verdict = String(pre.details?.verdict ?? "no verdict");
+        testScope = typeof pre.details?.testScope === "string" ? pre.details.testScope : undefined;
         detail = toolText(pre);
       } catch (error) {
         detail = (error as Error).message;
+      }
+      // THE PASS-COVERAGE RECORD (2026-09-14). `st.precommit` is a LIVE binding
+      // that the session's own next edit invalidates on purpose — so the tree
+      // THIS lane verified is written down separately, and `verified` is the
+      // tree captured BEFORE the run: the runner's own fingerprint is
+      // recomputed after it (lint:fix may have edited files) and can already
+      // belong to the next round's content, which would record a tree no lane
+      // ever ran on. The rule itself is `nextFullPassTree` (pure, in
+      // lib/gate-state.ts); only the effect lives here.
+      const laneState = stateForRepo(root);
+      const coveredTree = nextFullPassTree({
+        current: laneState.precommit.lastFullPassTree,
+        verdict,
+        mode: "full",
+        testScope: testScope as TestScope | undefined,
+        startedTree: verified,
+      });
+      if (coveredTree !== laneState.precommit.lastFullPassTree) {
+        if (coveredTree === undefined) delete laneState.precommit.lastFullPassTree;
+        else laneState.precommit.lastFullPassTree = coveredTree;
+        persistRepo(ctx as unknown as ExtensionContext, root);
       }
       if (verdict !== "PASS") {
         reportAsyncPrecommit({
@@ -8161,7 +8185,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       if (
         !staleTarget &&
-        readyLacksVerification({ precommitVerdict: st.precommit.verdict, bypassActive: st.bypass.active })
+        readyLacksVerification({
+          precommitVerdict: st.precommit.verdict,
+          // The round's own tree, registered by prepare against the checkpoint
+          // it dispatched, and the tree a full lane passed if one is on
+          // record: either answers "this content was verified" without
+          // depending on the live binding the next round's edits reset.
+          lastFullPassTree: st.precommit.lastFullPassTree,
+          reviewedTree: reviewTargets.get(targetRoot)?.tree,
+          bypassActive: st.bypass.active,
+        })
       ) {
         unverified = true;
         parsed.verdict = "BLOCKED";
@@ -8465,6 +8498,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           at: new Date().toISOString(),
           mode,
           testScope: outcome.testScope,
+          // CARRIED, never decided here: the pass-coverage record is written
+          // (and revoked) by `nextFullPassTree` at the lane's own completion,
+          // which is the only place that knows the tree the lane STARTED on.
+          ...(st.precommit.lastFullPassTree ? { lastFullPassTree: st.precommit.lastFullPassTree } : {}),
         };
       } else {
         // P0 fix: "ERROR" is a runner-protocol outcome, NOT a GateState
@@ -8481,6 +8518,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           at: new Date().toISOString(),
           mode,
           testScope: outcome.testScope,
+          // Same carry-forward as the PASS branch above; the lane's completion
+          // is what decides whether it survives (a FAIL of the same tree
+          // revokes it, anything else leaves it alone).
+          ...(st.precommit.lastFullPassTree ? { lastFullPassTree: st.precommit.lastFullPassTree } : {}),
         };
       }
       persistRepo(ctx as unknown as ExtensionContext, targetRoot);

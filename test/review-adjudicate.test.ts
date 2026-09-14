@@ -185,3 +185,44 @@ test("a READY without a full-lane PASS is withheld — and a bypass is the user'
   assert.equal(readyLacksVerification({ precommitVerdict: "NOT_RUN", bypassActive: true }), false,
     "a bypassed session records its verdict like any other — and the bypass is recorded ON the verdict");
 });
+
+test("the round's OWN tree counts as evidence, because the live binding is designed to be reset", () => {
+  // 2026-09-14. `invalidateBindings` turns PASS into NOT_RUN the moment the
+  // session edits something — correct for the live binding, wrong as an answer
+  // to "was THIS round's content verified?": the round judged an immutable
+  // commit, and the agent editing while it runs is the documented workflow.
+  // `precommit.lastFullPassTree` (a tree a full lane passed) plus the prepared
+  // review target's tree answer that question without touching the live field.
+  const tree = "a".repeat(40);
+  const other = "b".repeat(40);
+  assert.equal(
+    readyLacksVerification({ precommitVerdict: "NOT_RUN", lastFullPassTree: tree, reviewedTree: tree, bypassActive: false }),
+    false,
+    "the reviewed content really did pass a full lane",
+  );
+  assert.equal(
+    readyLacksVerification({ precommitVerdict: "NOT_RUN", lastFullPassTree: other, reviewedTree: tree, bypassActive: false }),
+    true,
+    "a PASS for a DIFFERENT tree proves nothing about this one",
+  );
+  // Unknown on either side ⇒ fail-closed: the live verdict decides.
+  for (const args of [
+    { lastFullPassTree: undefined, reviewedTree: tree },
+    { lastFullPassTree: tree, reviewedTree: undefined },
+    { lastFullPassTree: "", reviewedTree: tree },
+    { lastFullPassTree: tree, reviewedTree: "" },
+  ]) {
+    assert.equal(
+      readyLacksVerification({ precommitVerdict: "NOT_RUN", bypassActive: false, ...args }),
+      true,
+      `an unknown tree is not evidence: ${JSON.stringify(args)}`,
+    );
+  }
+  // The live PASS still wins on its own, with no tree involved.
+  assert.equal(
+    readyLacksVerification({ precommitVerdict: "PASS", lastFullPassTree: undefined, reviewedTree: undefined, bypassActive: false }),
+    false,
+  );
+  // And an old caller (neither field) behaves exactly as before.
+  assert.equal(readyLacksVerification({ precommitVerdict: "NOT_RUN", bypassActive: false }), true);
+});

@@ -293,6 +293,33 @@ export interface GateState {
      * predates the guarantee, so it cannot be read as providing it.
      */
     testScope?: TestScope;
+    /**
+     * The tree of the last FULL-lane PASS — a HISTORICAL FACT, not a binding
+     * (2026-09-14).
+     *
+     * WHY IT EXISTS. `fingerprint` is a live binding: the session's own edit
+     * downgrades `verdict` and clears it (`invalidateBindings`), because the
+     * PASS no longer describes what is on disk. That is correct — but the
+     * round being RECORDED is about an immutable commit, and recording its
+     * READY used to consult that live field, so an agent doing the documented
+     * thing (keep editing while the review runs) turned a genuine READY into
+     * BLOCKED/UNVERIFIED, with a message telling it to fix a precommit that
+     * never failed. This field survives the edit, because the content that
+     * passed is still that content: a git tree OID is a content identity, so
+     * "the tree under review equals a tree a full lane passed" is a fact that
+     * does not expire.
+     *
+     * WHAT MAY WRITE IT (lib/gate-state.ts `nextFullPassTree`, the only
+     * rule): a full lane's PASS, citing the tree captured BEFORE that lane
+     * started — never the runner's post-run recomputation, which the code
+     * already documents as possibly belonging to the next round's content.
+     * A FAIL of that SAME tree revokes it: the claim is about the content, and
+     * the content has now been disproven.
+     *
+     * Absent ⇒ never recorded (old sidecars included): the READY check then
+     * falls back to the live verdict, exactly as it did before.
+     */
+    lastFullPassTree?: string;
   };
   rounds: RoundRecord[];
   /**
@@ -552,6 +579,40 @@ export function invalidateBindings(st: GateState): void {
     st.precommit.verdict = "NOT_RUN";
     st.precommit.fingerprint = null;
   }
+  // NOT cleared here, deliberately: `precommit.lastFullPassTree` is not a
+  // binding but a fact about a tree that DID pass — the edit that invalidates
+  // the binding cannot un-pass it. See the field's own comment.
+}
+
+/**
+ * The one rule that maintains `precommit.lastFullPassTree`.
+ *
+ * PURE and total, so the four cases are a table in a test rather than four
+ * branches spread over a 9000-line file. `startedTree` is the tree captured
+ * BEFORE the lane ran — the caller has it (it captures it for the async
+ * report) and must not substitute the runner's post-run fingerprint, which is
+ * recomputed after `lint:fix` may have edited files and can already describe
+ * the NEXT round's content.
+ *
+ *  - a FULL lane PASSED on `startedTree` ⇒ record it;
+ *  - a FAIL on the SAME tree ⇒ revoke (the content was disproven);
+ *  - anything else (fast lane, a narrowed test scope, no tree, a FAIL of some
+ *    other tree, ERROR) ⇒ the previous value stands.
+ */
+export function nextFullPassTree(args: {
+  /** The value already on the state. */
+  current: string | undefined;
+  verdict: string;
+  mode: PrecommitMode | undefined;
+  testScope: TestScope | undefined;
+  /** Tree captured before the lane started; "" when it could not be read. */
+  startedTree: string;
+}): string | undefined {
+  if (!args.startedTree) return args.current;
+  if (args.mode !== "full") return args.current;
+  if (args.verdict === "PASS" && args.testScope === "full") return args.startedTree;
+  if (args.verdict === "FAIL" && args.current === args.startedTree) return undefined;
+  return args.current;
 }
 
 
@@ -638,6 +699,16 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     if (parsed.precommit.testScope !== undefined &&
         !(TEST_SCOPES as readonly string[]).includes(parsed.precommit.testScope as string)) {
       delete parsed.precommit.testScope;
+    }
+    // The recorded pass-coverage tree: a CONTENT IDENTITY, and the only thing
+    // that lets a READY be recorded after the live binding was invalidated by
+    // the next round's own edits. Anything that is not a real object id is
+    // dropped — dropping means the check falls back to the live verdict, which
+    // is the direction that cannot wave an unverified round through.
+    if (parsed.precommit.lastFullPassTree !== undefined &&
+        !(typeof parsed.precommit.lastFullPassTree === "string" &&
+          /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(parsed.precommit.lastFullPassTree))) {
+      delete parsed.precommit.lastFullPassTree;
     }
     // Incremental-review baseline. `treeOid` is handed to `git diff` as an
     // ARGUMENT, so an unvalidated string from a tampered (or simply

@@ -525,7 +525,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `gate-command-tools.ts` | 命令层的**唯一注册入口**：工作流命令的注册包装、`/precommit` lane，以及 `/gate-status` / `/gate-bypass` / `/gate-mode` / `/gate-reset` / `/gate-lesson` 五个命令正文；命令 host 的 seam（`CommandHost` / `CommandContext`）也在这里；自己转注册 `gate-diagnosis-commands.ts` |
 | `gate-diagnosis-commands.ts` | 两个只读诊断命令面：`/gate-status` 内嵌的模型链读数（`modelDiagnosisLines`）与 `/gate-doctor` 正文；只做环境探测，不写状态、不喂裁决；由 `gate-command-tools.ts` 转注册 |
 | `gate-doctor.ts` | `/gate-doctor` 的只读体检：模型链、provider 允许名单、precommit runner、git 钩子、命令注册表 |
-| `gate-state.ts` | 门禁状态机与 sidecar 读写、未满足项计算、并发绑定合并；也存放门禁**自己观察到**的事实，如 `shippedKinds`（跑成功过的 ship 命令种类，供交付站点的到站判定用；loader 只保留已知词表、去重，读不出来就当没有） |
+| `gate-state.ts` | 门禁状态机与 sidecar 读写、未满足项计算、并发绑定合并；也存放门禁**自己观察到**的事实，如 `shippedKinds`（跑成功过的 ship 命令种类，供交付站点的到站判定用；loader 只保留已知词表、去重，读不出来就当没有）与 `precommit.lastFullPassTree`（一棵**真的**跑过全量 lane 的 tree；纯规则 `nextFullPassTree` 只在 lane 启动前那棵树 + full/full PASS 时写入、同一棵树的 FAIL 撤销，编辑降级不碰它——它是内容身份，不是活绑定） |
 | `gate-timings.ts` | `.pi/gate-timings.jsonl` 可观测日志，每个门禁事件一行 |
 | `git-memory.ts` | 上下文压缩后重新注入过滤、截断过的 git 状态快照 |
 | `git-rewrite.ts` | 识别「只改 message」的历史重写，解开 L5 与门禁互锁的死结 |
