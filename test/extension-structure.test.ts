@@ -5806,6 +5806,19 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   // The rule itself is pure and lives in one place.
   assert.match(SRC, /^\s*invalidateBindings,\n\s*nextFullPassTree,\n\} from "\.\.\/lib\/gate-state\.ts";/m,
     "one imported rule, not a second copy of the branches here");
+  // AND THE THIRD INPUT: testScope has to be IN the reply the caller reads.
+  // It was not (reviewer P1, 2026-09-14): the tool's `details` carried
+  // verdict/checksRun/… and no testScope, so `pre.details?.testScope` was
+  // always undefined, `nextFullPassTree` never matched its PASS branch, and
+  // the record was never written — while every test above stayed green,
+  // because they all exercised the rule and none exercised this dataflow.
+  assert.match(lane, /testScope = typeof pre\.details\?\.testScope === "string" \? pre\.details\.testScope : undefined/,
+    "the caller takes testScope from the reply");
+  const replyAt = SRC.indexOf("name: \"run_precommit\"");
+  assert.ok(replyAt > 0, "the tool that produces that reply is here");
+  const reply = SRC.slice(replyAt, replyAt + 20000);
+  assert.match(reply, /details: \{[\s\S]{0,1500}?testScope: outcome\.testScope,[\s\S]{0,40}?\},/,
+    "and the reply actually carries it — the two halves are pinned together, because a rename on either side silently disarms the record");
 });
 
 test("the async FAIL notice never waits for the agent to stop, and names what it verified", () => {

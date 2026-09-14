@@ -8592,6 +8592,14 @@ export default function reviewGate(pi: ExtensionAPI) {
         details: {
           verdict: outcome.verdict, checksRun: outcome.checksRun, checksFailed: outcome.checksFailed,
           repo: repoLabel(targetRoot), logPath: outcome.logPath, failedSteps: outcome.failedSteps,
+          // WHAT THE LANE COVERED is part of the reply, not only of the
+          // recorded binding: the caller that decides whether this run may be
+          // cited later as "this content was verified" (`startPrecommitBeside`
+          // → `nextFullPassTree`) reads it HERE. It used to live only in
+          // `st.precommit.testScope` and in the human-readable text, so that
+          // caller read `undefined`, never matched its PASS branch, and the
+          // whole record was silently never written (reviewer P1, 2026-09-14).
+          testScope: outcome.testScope,
         },
         isError: outcome.verdict !== "PASS",
       };
