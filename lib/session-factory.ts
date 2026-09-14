@@ -82,6 +82,7 @@ import { JUDGE_STREAM_ENV, JUDGE_TASK_ENV } from "./judge-side.ts";
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
+import { mkdirSync } from "node:fs";
 
 /** One tmux invocation through the injected runner. */
 export interface PaneRunResult {
@@ -533,6 +534,20 @@ export async function openSessionPane(
   spec: SessionPaneSpec,
 ): Promise<SessionPaneOutcome> {
   const env = buildSessionEnv(spec.role);
+  // THE SCRATCH ROOT HAS TO EXIST BEFORE THE PANE USES IT (reviewer P1,
+  // 2026-09-14). `TMPDIR` is the judge's throwaway-worktree root, and anything
+  // that allocates a temporary directory through it (`mktemp -d`, mkdtemp)
+  // fails with ENOENT when the directory is not there — including a reviewer
+  // making its own scratch space. Creating it here covers every way a judge
+  // pane is opened (spawn, rotation, recover), and it is the same directory
+  // `reapReviewScratch` removes when the pane goes: whoever creates it clears
+  // it. Only roles whose env carries a TMPDIR are touched, and a failure is
+  // not worth refusing the pane over — a judge with an unusable scratch dir
+  // can still review (it just cannot build throwaway worktrees under it).
+  const scratch = env.TMPDIR;
+  if (scratch) {
+    try { mkdirSync(scratch, { recursive: true }); } catch { /* best effort */ }
+  }
   let spawned: PaneRunResult;
   try {
     spawned = run(spec.layout === "beside-opener"

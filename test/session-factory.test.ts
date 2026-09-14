@@ -10,6 +10,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, rmSync } from "node:fs";
 
 import {
   buildJudgePaneCommand,
@@ -533,6 +534,34 @@ test("the env builder is the only assembly point, and it omits what it was not g
   const built = buildSessionEnv({ kind: "successor", env: relay });
   assert.deepEqual(built, relay);
   assert.notEqual(built, relay, "a copy: the caller's object is never handed to tmux by reference");
+});
+
+test("opening a judge pane CREATES the scratch TMPDIR it hands the judge (reviewer P1)", async () => {
+  // The env key is only useful if the directory exists: `mktemp -d` under a
+  // missing `$TMPDIR` is ENOENT, so a judge told to build a throwaway worktree
+  // under it was handed a path nothing had made. The gate that will reclaim it
+  // (`reapReviewScratch`) only ever removed it, and removal of something that
+  // was never created is how the write side went missing unnoticed.
+  const judgeId = "rg-reviewer-mkdir-abc";
+  const scratch = judgeScratchDir(judgeId);
+  rmSync(scratch, { recursive: true, force: true });
+  assert.equal(existsSync(scratch), false, "the test starts from nothing");
+  try {
+    const outcome = await openSessionPane(happyRunner(), {
+      ownPane: "%1",
+      cwd: "/repo",
+      layout: "child-column",
+      role: { kind: "judge", openerId: "session-child-1", judgeId, role: "reviewer" },
+      command: JUDGE_COMMAND,
+    });
+    assert.equal(outcome.ok, true);
+    assert.ok(existsSync(scratch), "the pane's TMPDIR exists by the time the pane does");
+    // …and a non-judge pane has no TMPDIR to create.
+    const child = buildSessionEnv({ kind: "orchestration-child", orchestrationId: "orch-1", stateVariant: "t2" });
+    assert.equal(child.TMPDIR, undefined);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });
 
 test("the judge argv carries the read-only contract and the resume keys", () => {
