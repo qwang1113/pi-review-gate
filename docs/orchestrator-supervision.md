@@ -812,7 +812,7 @@ pane 标题 —— 那就是回到读屏幕了。
 | `lib/orchestrator-child-channel.ts` | 子会话侧：上报、两方竞态提问、读取与确认指令 | IO/对话框/计时器全注入 |
 | `lib/orchestrator-child-state.ts` | 状态判定与 `CHILD_STATES` 清单（八态，含 `waiting-judge` / `mode-changed`）、健康行、退避常量 | 纯函数 |
 | `lib/orchestrator-supervisor.ts` | 编排侧：读所有通道、判定、决定什么算新闻、渲染回执 1–3 块 | 纯（IO 经 seam） |
-| `lib/orchestrator-handoff-advice.ts` | 上下文用量 → 接力时机 | 纯函数 |
+| `lib/session-handoff.ts` | 上下文用量 → 是否到交接阈值（`HANDOFF_PERCENT = 70`，四类会话共用）、骨架文档、接手判据 | 纯函数 |
 | `lib/orchestrator-wait.ts` | 等待判据、预算、回执装配（含第 4、5 块） | 纯函数 |
 | `lib/orchestrator-answer-tools.ts` | `orchestrator_answer`（含约束 8 的仓库外敏感路径检查、代批必填的 `crosscheck` 对照与其词表、站点不得宽于 plan 的判定） | 判定可单测 |
 | `lib/orchestrator-recovery-tools.ts` | `orchestrator_recover` / `orchestrator_attach`、孤儿检测 | 孤儿判定是纯函数 |
@@ -821,4 +821,5 @@ pane 标题 —— 那就是回到读屏幕了。
 
 协议级测试（不依赖真实 tmux、不依赖 pi 进程、不碰磁盘）：
 `test/orchestrator-channel.test.ts`、`test/orchestrator-child-state.test.ts`、
-`test/orchestrator-handoff-advice.test.ts`、`test/orchestrator-tools.test.ts`。
+`test/session-handoff.test.ts`、`test/session-inheritance.test.ts`、
+`test/orchestrator-tools.test.ts`。

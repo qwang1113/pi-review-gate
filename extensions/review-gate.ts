@@ -2865,10 +2865,10 @@ export default function reviewGate(pi: ExtensionAPI) {
    * close the predecessor" (constraint 12), and the successor was TOLD to do
    * it by hand. MEASURED: a successor that never learned it owed a close left
    * two live sessions behind, so the act moved to the gate — and the proof
-   * moved with it (lib/session-handoff.ts's `handoffAccepted`): either the
-   * successor read the handoff document, or it ran any tool successfully.
-   * Both prove a live successor with a working gate, which is all the close
-   * ever needed to know.
+   * moved with it (lib/session-handoff.ts's `handoffAccepted`), and the proof
+   * is the user's own two-part test: the successor READ the handoff document
+   * AND a tool call succeeded. Running the `read` IS that tool call in the
+   * ordinary path.
    *
    * Done exactly once per session: a second tool_result must not race a second
    * kill against the first.
