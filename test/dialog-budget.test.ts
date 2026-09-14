@@ -116,3 +116,16 @@ test("a title that fits is passed through untouched", () => {
   assert.equal(fitted.message, "问题 1/3");
   assert.equal(fitted.truncated, false);
 });
+
+test("a budget too small for the pointer keeps the CONTENT, not the pointer", () => {
+  // `ask_user` puts the grant authorization notice at the HEAD of its title
+  // because the tail is what gets cut, so a box so short that only the pointer
+  // would fit must not swallow it — that would put the invisible-consent hole
+  // back (reviewer Nit, 2026-09-14).
+  const notice = "⚠️ 回答此题即表示：你明确授予项目经理代答权";
+  const fitted = fitDialogTitle(`${notice}\n问题 1/1：这是一道很长的题目`, 1, "…（标题过长，全文见上方消息）");
+  assert.equal(fitted.truncated, true);
+  assert.match(fitted.message, /明确授予项目经理/, "the head is what survives");
+  assert.equal(fitted.rows, 1);
+  assert.ok(!fitted.message.includes("标题过长"), "the pointer yields to the content it would have replaced");
+});

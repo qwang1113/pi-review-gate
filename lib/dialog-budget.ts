@@ -270,6 +270,17 @@ export function fitDialogTitle(
   const rows = renderedRowCount(title, columns);
   if (rows <= maxRows) return { message: title, truncated: false, rows };
   const pointerRows = wrappedRowCount(pointer, columns);
+  // A BUDGET TOO SMALL FOR ITS OWN POINTER KEEPS THE CONTENT (reviewer Nit,
+  // 2026-09-14). `ask_user` puts the ⚠️ authorization notice at the HEAD of
+  // the title precisely because the tail is what gets cut; swapping the whole
+  // title for the pointer would drop it again, in exactly the degenerate
+  // window this exists for (a terminal so short that only one row is left).
+  // A reader who sees the start of the question can still scroll up; one who
+  // sees only「标题过长」has lost what the box was asking.
+  if (maxRows <= pointerRows) {
+    const content = clampToRows(title, maxRows, columns);
+    return { message: content.text, truncated: true, rows: renderedRowCount(content.text, columns) };
+  }
   const clamped = clampToRows(title, Math.max(0, maxRows - pointerRows), columns);
   const withPointer = clamped.text.length > 0 ? `${clamped.text}\n${pointer}` : pointer;
   return { message: withPointer, truncated: true, rows: renderedRowCount(withPointer, columns) };

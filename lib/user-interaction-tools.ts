@@ -162,23 +162,15 @@ export type ConsentToolDeps = Pick<
 // ---------- ask_user ----------
 
 /**
- * The user-visible authorization notice a grantScope question carries.
- *
- * 2026-09-16 (reviewer P1): a grantScope invisible to the user let an agent
- * harvest the sensitive-edit proxy grant from an answer to an UNRELATED
- * question (substring match fired on "grant me a few minutes"). The scope
- * must be stated in the dialog and the transcript, so consent is explicit.
- */
-/**
  * The question's own first line, short enough to sit in a box title.
  *
  * WHY THE TITLE NEEDS IT (reviewer Nit, 2026-09-14): the question text lives in
  * the budgeted BODY, and the reason box the template raises for
  * `✎ 不选，我说明原因` renders `spec.title` ALONE — the box the user types
  * their objection into would have said only 「问题 1/3」. One line of the
- * question is charged to the same title budget and is never the thing that
- * gets cut (the title is cut only when it overflows, and a two-line notice
- * plus one headline does not).
+ * question is charged to the same title budget as everything else — and when
+ * that budget runs out the title is cut from the TAIL, which is why the ⚠️
+ * notice sits AHEAD of it (see questionDialogTitle).
  */
 function questionHeadline(q: AskQuestion): string {
   const first = q.text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
@@ -208,6 +200,16 @@ function questionDialogTitle(q: AskQuestion, index: number, total: number): stri
   return notice ? `${notice}\n${label}` : label;
 }
 
+/**
+ * The user-visible authorization notice a grantScope question carries.
+ *
+ * 2026-09-16 (reviewer P1): a grantScope invisible to the user let an agent
+ * harvest the sensitive-edit proxy grant from an answer to an UNRELATED
+ * question (substring match fired on "grant me a few minutes"). The scope
+ * must be stated in the dialog and the transcript, so consent is explicit —
+ * and in the DIALOG it has to be stated where a tail cut cannot reach it
+ * (2026-09-14), which is what questionDialogTitle arranges.
+ */
 function grantNotice(q: AskQuestion): string {
   if (!q.grantScope || !isGrantableScope(q.grantScope)) return "";
   return `\n\n⚠️ 回答此题即表示：你**明确授予项目经理「${q.grantScope}」代答权**（本 orchestration 内有效）。若不打算授权，请选拒绝/否。`;
