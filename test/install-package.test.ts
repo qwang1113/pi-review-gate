@@ -493,6 +493,65 @@ test("install-git-hooks.sh itself refuses BOTH snapshot layouts (shell-level gua
   assert.match(resTmp.stderr, /refusing to install hooks from a review snapshot/);
 });
 
+test("a LINKED worktree never installs, whatever it is called — the third incident of this class", () => {
+  // 2026-09-14: a review round's throwaway worktree is named by whoever creates
+  // it (`git worktree add $TMPDIR/rgrev-<sha> HEAD`), so no path-shape guard can
+  // cover it. Installing there repointed the real `.git/hooks` at a directory
+  // that vanished with the round, and every later commit in the repository
+  // failed with "No such file or directory" until someone reinstalled from the
+  // real checkout.
+  const home = makeHome();
+  const repo = mkdtempSync(join(tmpdir(), "rg-pkg-linked-"));
+  tempDirs.push(repo);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"], { cwd: repo, stdio: "ignore" });
+
+  const scratchBase = mkdtempSync(join(tmpdir(), "rg-pkg-scratch-"));
+  tempDirs.push(scratchBase);
+  // A name with no gate-known prefix at all — exactly what a judge picks.
+  const scratch = join(scratchBase, "rgrev-deadbeef");
+  execFileSync("git", ["worktree", "add", "-q", "--detach", scratch, "main"], { cwd: repo, stdio: "ignore" });
+
+  const refused = spawnSync("bash", [HOOK_INSTALLER], {
+    cwd: scratch,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home },
+  });
+  assert.equal(refused.status, 1, "a linked worktree must not install the shared hooks");
+  assert.match(refused.stderr, /refusing to install hooks from a LINKED worktree/);
+  assert.ok(!existsSync(join(repo, ".git", "hooks", "pre-commit")), "hooks must not land in the shared .git");
+
+  // …and the MAIN worktree still installs, so the refusal cannot lock anyone out.
+  const ok = spawnSync("bash", [HOOK_INSTALLER], { cwd: repo, encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(ok.status, 0, `the main worktree must still install: ${ok.stderr}`);
+  assert.ok(existsSync(join(repo, ".git", "hooks", "pre-commit")));
+  execFileSync("git", ["worktree", "remove", "--force", scratch], { cwd: repo, stdio: "ignore" });
+});
+
+test("a BARE repository's worktrees are not locked out of installing (reviewer P2)", () => {
+  // `git clone --bare` + `git worktree add` is a normal layout, and there the
+  // first `worktree list` entry IS the bare repo — it is nobody's toplevel, so
+  // a guard that insists on "the main worktree" refuses every worktree the
+  // repository has. A bare repo has no main working tree to install from,
+  // which is exactly why the guard has to step aside for it.
+  const home = makeHome();
+  const src = mkdtempSync(join(tmpdir(), "rg-pkg-baresrc-"));
+  tempDirs.push(src);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: src, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"], { cwd: src, stdio: "ignore" });
+  const bare = mkdtempSync(join(tmpdir(), "rg-pkg-bare-"));
+  tempDirs.push(bare);
+  const bareRepo = join(bare, "repo.git");
+  execFileSync("git", ["clone", "-q", "--bare", src, bareRepo], { stdio: "ignore" });
+  const wt = join(bare, "wt");
+  execFileSync("git", ["worktree", "add", "-q", "--detach", wt, "HEAD"], { cwd: bareRepo, stdio: "ignore" });
+
+  const res = spawnSync("bash", [HOOK_INSTALLER], { cwd: wt, encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(res.status, 0, `a bare repo's worktree must still install: ${res.stderr}`);
+  assert.ok(existsSync(join(bareRepo, "hooks", "pre-commit")),
+    "the hooks land in the bare repo's shared hooks dir");
+});
+
 test("R-28: the installer refuses an ORCHESTRATION worktree — the incident that broke a whole repo", () => {
   // What happened on 2026-08-30: a child session installed the hooks from
   // inside its gate-created worktree under $TMPDIR/rg-orchestration/…, which

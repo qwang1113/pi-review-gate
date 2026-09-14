@@ -456,6 +456,7 @@ import {
   type RoundScopeRecord,
   type ScopeStampRecord,
   invalidateBindings,
+  nextFullPassTree,
 } from "../lib/gate-state.ts";
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
 import {
@@ -4426,11 +4427,12 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function askChoice(
     uiCtx: { ui?: ChoiceUi },
     spec: ChoiceSpec,
-    opts: { body?: string; pointer?: string; signal?: AbortSignal } = {},
+    opts: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] } = {},
   ): Promise<string | undefined> {
-    const rows = choiceRows(spec);
+    const rows = [...choiceRows(spec), ...(opts.extraRows ?? [])];
     // Two option rows is what the budget was measured with; every extra row
-    // this dialog draws comes out of the body's allowance.
+    // this dialog draws — an interview's escape row included — comes out of
+    // the body's allowance.
     const budget = Math.max(2, DIALOG_BODY_MAX_LINES - Math.max(0, rows.length - 2));
     const fitted = opts.body === undefined
       ? undefined
@@ -4438,6 +4440,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     return renderChoice(uiCtx.ui, spec, {
       ...(fitted === undefined ? {} : { body: fitted }),
       ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
     });
   }
 
@@ -6022,6 +6025,36 @@ export default function reviewGate(pi: ExtensionAPI) {
         detail = toolText(pre);
       } catch (error) {
         detail = (error as Error).message;
+      }
+      // THE PASS-COVERAGE RECORD (2026-09-14). `st.precommit` is a LIVE binding
+      // that the session's own next edit invalidates on purpose — so the tree
+      // THIS lane verified is written down separately, and `verified` is the
+      // tree captured BEFORE the run: the runner's own fingerprint is
+      // recomputed after it (lint:fix may have edited files) and can already
+      // belong to the next round's content, which would record a tree no lane
+      // ever ran on. The rule itself is `nextFullPassTree` (pure, in
+      // lib/gate-state.ts); only the effect lives here.
+      //
+      // WHAT THE LANE COVERED COMES FROM THE GATE'S OWN RECORD, not from the
+      // tool's reply. The reply's `details` never carried `testScope` (only
+      // verdict/checksRun/repo/logPath/failedSteps), so an earlier version of
+      // this call read `undefined`, never matched the PASS branch, and never
+      // wrote anything — silently, with every test green (reviewer P1,
+      // 2026-09-14). `st.precommit.testScope` is written by that same run and
+      // is read by the SHIP gate, so it cannot go missing unnoticed the way a
+      // field only this caller read could.
+      const laneState = stateForRepo(root);
+      const coveredTree = nextFullPassTree({
+        current: laneState.precommit.lastFullPassTree,
+        verdict,
+        mode: "full",
+        testScope: laneState.precommit.testScope,
+        startedTree: verified,
+      });
+      if (coveredTree !== laneState.precommit.lastFullPassTree) {
+        if (coveredTree === undefined) delete laneState.precommit.lastFullPassTree;
+        else laneState.precommit.lastFullPassTree = coveredTree;
+        persistRepo(ctx as unknown as ExtensionContext, root);
       }
       if (verdict !== "PASS") {
         reportAsyncPrecommit({
@@ -8159,7 +8192,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       if (
         !staleTarget &&
-        readyLacksVerification({ precommitVerdict: st.precommit.verdict, bypassActive: st.bypass.active })
+        readyLacksVerification({
+          precommitVerdict: st.precommit.verdict,
+          // The round's own tree, registered by prepare against the checkpoint
+          // it dispatched, and the tree a full lane passed if one is on
+          // record: either answers "this content was verified" without
+          // depending on the live binding the next round's edits reset.
+          lastFullPassTree: st.precommit.lastFullPassTree,
+          reviewedTree: reviewTargets.get(targetRoot)?.tree,
+          bypassActive: st.bypass.active,
+        })
       ) {
         unverified = true;
         parsed.verdict = "BLOCKED";
@@ -8463,6 +8505,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           at: new Date().toISOString(),
           mode,
           testScope: outcome.testScope,
+          // CARRIED, never decided here: the pass-coverage record is written
+          // (and revoked) by `nextFullPassTree` at the lane's own completion,
+          // which is the only place that knows the tree the lane STARTED on.
+          ...(st.precommit.lastFullPassTree ? { lastFullPassTree: st.precommit.lastFullPassTree } : {}),
         };
       } else {
         // P0 fix: "ERROR" is a runner-protocol outcome, NOT a GateState
@@ -8479,6 +8525,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           at: new Date().toISOString(),
           mode,
           testScope: outcome.testScope,
+          // Same carry-forward as the PASS branch above; the lane's completion
+          // is what decides whether it survives (a FAIL of the same tree
+          // revokes it, anything else leaves it alone).
+          ...(st.precommit.lastFullPassTree ? { lastFullPassTree: st.precommit.lastFullPassTree } : {}),
         };
       }
       persistRepo(ctx as unknown as ExtensionContext, targetRoot);
@@ -8987,6 +9037,31 @@ export default function reviewGate(pi: ExtensionAPI) {
       resolveCopilotSupport: (dir, slug, supportConfirmed, opts) =>
         resolveCopilotSupport(dir, slug, supportConfirmed, projectConfig.copilotReview.owners, opts),
     },
+    // The ONE dialog the triage needs, rendered through THIS file's helpers so
+    // a Copilot finding's question is the same shape as every other gate
+    // question — and, in an orchestration, the same race (the human and the
+    // project manager can both answer; whoever gets there first wins).
+    askFinding: async (uiCtx, spec, opts) => {
+      const ui = uiCtx as { hasUI?: boolean; ui?: ChoiceUi };
+      const outcome = await askEitherSide(
+        {
+          dialogKind: "select",
+          topic: "other",
+          title: opts.body ? `${spec.title}\n${opts.body}` : spec.title,
+          options: [...choiceRows(spec), ...(opts.extraRows ?? [])],
+          payload: `推荐答案：${spec.recommended}`,
+        },
+        ui.hasUI === true,
+        (signal) => askChoice(ui, spec, {
+          ...(opts.body === undefined ? {} : { body: opts.body }),
+          ...(opts.pointer === undefined ? {} : { pointer: opts.pointer }),
+          ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
+          signal,
+        }),
+      );
+      return outcome.answer;
+    },
+    showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
     delay: (ms) => new Promise((r) => setTimeout(r, ms)),
   });
 

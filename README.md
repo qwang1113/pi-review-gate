@@ -881,6 +881,13 @@ bash <package-root>/scripts/install-git-hooks.sh   # inside the repo
 npx pi-review-gate-install-hooks
 ```
 
+The installer only runs from a repository's **main worktree**. `.git/hooks` is
+shared by every linked worktree, so installing from one — a review round's
+throwaway worktree, an orchestration child, a temporary snapshot — would point
+the whole repository's hooks at a directory that disappears with it, and every
+later commit would fail until someone reinstalled from the real checkout. The
+installer refuses (naming the main worktree) instead of doing that.
+
 ### Legacy global installer (deprecated)
 
 `scripts/install-global.sh` was retired when the repo became a pi package;
@@ -896,7 +903,10 @@ workflow engine, no subagent dispatch.**
 The agent makes ONE call — `judge_submit({role:"reviewer", task})` — and the
 gate does the rest: the full precommit (started to run BESIDE the chain, so a
 FAIL comes back as its own steered message that names its round and the content
-it verified, and withholds that round's READY), the checkpoint commit (the only
+it verified, and withholds that round's READY — the recording accepts the live
+PASS **or** the round's own tree being one a full lane passed, so the documented
+"keep editing while the review runs" workflow cannot turn a genuine READY into
+BLOCKED), the checkpoint commit (the only
 commit allowed before a READY), the `baseline..HEAD` computation, and the
 dispatch.
 The review unit is that immutable COMMIT RANGE. The judge child is a fresh pi
@@ -1162,6 +1172,20 @@ fixed — before the task counts as done.
   (argv, no shell, timeout, abortable) and interprets the payload with the pure
   rules in `lib/copilot-review.ts`. The agent drives the loop but can never
   report its own review outcome.
+- **From round 4 on, the USER triages the findings.** The first rounds are
+  cheap agreement; by round 4 the conversation has history, and the agent was
+  still deciding alone what to fix. So `check_copilot_review` puts every
+  actionable finding to the user first — one dialog per finding, the file and
+  line plus Copilot's actual comment, and `修复` (recommended) / `不修，回复
+  说明为什么` / `与我无关，直接 resolve 不提`, plus the gate's usual
+  `✎ 不选，我说明原因` row and the interview's escape row. The reply comes
+  back grouped by that decision, and **only the `修复` group is the agent's to
+  change**: a finding nobody answered is *not* approval — the code is left
+  alone and the finding is reported and asked again. Rules live in
+  `lib/copilot-triage.ts` (threshold, the thread+last-comment key that makes a
+  new Copilot comment a new question, and the grouping); the dialogs are
+  rendered by the extension, so a project manager can answer them for a child
+  session exactly like every other gate question.
 - **"Copilot reviewed this" is anchored on the commit**, not on a clock: a
   Copilot review submitted against the PR's current head proves it saw this
   code. Timestamps are only a fallback (with a skew tolerance), and if the
@@ -1475,7 +1499,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | `propose_restatement` | Say the requirement BACK to the user and get it confirmed — the mandatory step before `propose_loop_goal` (loop) or `orchestrator_plan({action:"submit"})` (orchestrator), both of which refuse and render **no dialog** without a confirmed restatement on record (L8a). The text is Simplified Chinese and must carry a BEFORE → AFTER contrast; `station` fixes where this round stops (`precommit` \| `commit` \| `pr`) and is what L1 and `declare_done` later enforce. An orchestrator may confirm it on the user's behalf — with a `crosscheck`, and never at a station looser than the approved plan's. Rules: `lib/restatement.ts` + `lib/delivery-station.ts`. |
 | `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first with `ask_user` (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it), and draft it in Simplified Chinese. **REQUIRED FIRST (L8b):** the draft must pass an audit by the dedicated `goal-auditor` role — and **this one call runs that audit itself**: it builds the auditor's task (carrying the previous verdict, its findings and the computed draft delta when this is a re-audit), dispatches the judge, waits for it, adjudicates the verdict (**only P0/P1 block**, so a READY carrying P2/Nit findings is a PASS and never buys another round) and records the PASS bound to the sha256 of the audited text. A failed audit comes back with the objections and renders **NO dialog at all** — fix them and call this again, which makes this a minutes-long call. Only on a PASS does the **extension** show the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 AND blocks edit/write tool calls until approved (each repo checks its own goal; the `repo` parameter binds the goal to a specific repo — required to unlock edit/write in a second repo, `gitRootOfDir(repo)` decides which one); the confirm dialog no longer asks for an optional reason (a rejection's reason is typed into the same dialog's `✎ 我要改，我说明原因` row since 2026-09-08, and carried back for renegotiation). An unapproved goal's body is withheld from the prompt. |
 | `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. It also decides **availability from evidence** (a Copilot review on this PR or in the repo's last 20 PRs ⇒ CONFIRMED; owner in `copilotReview.owners` ⇒ ASSUMED; neither ⇒ UNKNOWN, and a silent Copilot is then released instead of waited for). The request itself is never vetoed by a read-back — those cannot see a dropped request. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. There is **no round cap**; the only budget is the 20-minute wait for a review that never arrives. |
-| `check_copilot_review` | Verify what Copilot's review left open (L7). The extension runs the GraphQL query itself and classifies each thread: resolved ⇒ handled, answered by you ⇒ handled, Copilot spoke last ⇒ still yours (listed with thread IDs and the exact `resolveReviewThread` / reply mutations) — regardless of which commit the review was submitted against, so a push cannot bury a finding. Returns AWAITING / OPEN / SATISFIED — an outcome the agent cannot report for itself. A cycle released with findings still open lists them for you to report to the user. |
+| `check_copilot_review` | Verify what Copilot's review left open (L7). The extension runs the GraphQL query itself and classifies each thread: resolved ⇒ handled, answered by you ⇒ handled, Copilot spoke last ⇒ still yours (listed with thread IDs and the exact `resolveReviewThread` / reply mutations) — regardless of which commit the review was submitted against, so a push cannot bury a finding. Returns AWAITING / OPEN / SATISFIED — an outcome the agent cannot report for itself. **From Copilot round 4 on it also asks the user about every open finding, one dialog each, and answers with the threads grouped by what they decided (`lib/copilot-triage.ts`)** — only the `修复` group may be changed; a finding nobody answered is left alone. A cycle released with findings still open lists them for you to report to the user. |
 | `request_arbitration` | Contest a ship block the agent believes is **circular** (the only remedy is an action the block forbids). Narrow + fail-closed — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception). |
 | `request_scope_limit` | Agent-requested **gate fence narrowing** for the "pre-existing changes" complaint: the gate arms on dirty files / branch commits that pre-date the session (P0-2), so it can demand review coverage of work the session never did. Instead of silently complying (or bypassing), the agent calls this tool and the **extension renders a user confirm dialog** (fixed consequence copy; the agent's reason labeled untrusted; **no `confirmed` parameter** the model could set). Granted → the non-session changed files are snapshotted as `scopeLimit.preexistingFiles` in the sidecar and stop arming the gate at **every** re-arm site (session_start P0-2, bash stash/checkout re-arm, turn_end reconciliation); a file the session later edits is **reclaimed** out of the snapshot by the edit handler — the grant never covers the session's own work — and branch-commit arming is suspended for as long as the grant stands (a new commit under a standing grant is either the exempted pre-existing work being shipped — exactly what the user consented to — or a user/bypass action; the session's own NEW edits re-arm the gate before any further agent commit). With no session edits the ship gate disarms entirely; with session edits the review scope narrows to `sessionFiles` (the per-turn prompt instructs the reviewer: out-of-scope findings are advisory). Session edit attribution is persisted (`sessionEditedFiles`), so a process restart cannot re-label the session's own edits as pre-existing. A dialog that cannot be shown fails closed WITHOUT counting as a decline. Verdicts/bindings are untouched — narrowing the fence never fabricates a READY/PASS, and the session's OWN edits stay fully gated. Declined → scope requests lock for the session (anti-grinding, mirrors the mode-downgrade lock). Malformed persisted shapes fail closed to ABSENT = full-scope gate (extension loader + git hook both validate). |
 | `request_sensitive_edit` | Agent-requested **one-shot authorization** to edit ONE sensitive file (`.env`, private keys, credentials) that the guard blocks by default. Same consent shape as the tools above: the **extension** renders the confirm dialog (fixed consequence copy, agent reason labeled untrusted, **no `confirmed` parameter**). A grant is **path-exact** (normalized absolute path), **single-use** (burned by the first edit that *succeeds* — a failed edit stays retryable), **10-minute TTL**, and **in-memory only** (never written to the sidecar, so a crash/resume/second session starts fail-closed). `.git/` internals are refused **before** any dialog — they are the gate's own L3 enforcement, not the user's secrets. A **declined** path is locked for the session (per-path anti-grinding, unlike the session-wide `request_scope_limit` lock); a dialog that could not be *shown* is not a decline. `/gate-reset` revokes outstanding grants and lifts the decline locks. |
@@ -1988,6 +2012,8 @@ lib/constants.ts              THE code-ext list, sensitive patterns, msg regexes
 lib/sensitive-grant.ts        one-shot user authorization for a sensitive-file edit (path-exact, TTL, in-memory)
 lib/copilot-review.ts         L7 post-PR Copilot review cycle: bot identity, payload parsing, thread
                               classification, state machine (pure; no IO, no clock, never throws)
+lib/copilot-triage.ts         L7's user half (pure): the round threshold that starts asking, the
+                              thread+last-comment key, the four decision groups, triage sanitize
 agents/adviser.md             consulting judge child, pinned model @ max (proactively consulted)
 agents/reviewer.md            gatekeeper reviewer override, pinned model @ max
 agents/goal-auditor.md        dedicated loop-GOAL pre-reviewer (read-only tools), pinned model @ max

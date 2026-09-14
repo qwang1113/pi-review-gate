@@ -12,6 +12,7 @@ import {
   loadSidecar,
   migrateFingerprintVersion,
   invalidateBindings,
+  nextFullPassTree,
   FINGERPRINT_MIGRATION_NOTICE,
   saveSidecar,
   shouldStrategicReset,
@@ -143,6 +144,37 @@ test("lastReadyReview round-trips a well-formed baseline", () => {
   s.lastReadyReview = { treeOid: "a".repeat(40), files: ["src/a.ts"], at: "t" };
   saveSidecar(path, s);
   assert.deepEqual(loadSidecar(path)?.lastReadyReview, { treeOid: "a".repeat(40), files: ["src/a.ts"], at: "t" });
+});
+
+test("the pass-coverage tree round-trips, and anything that is not an object id is DROPPED", () => {
+  // The field decides whether a READY may be recorded without a live PASS, so
+  // a garbled one must not survive: dropping it puts the check back on the
+  // live verdict, which is the direction that cannot wave an unverified round
+  // through. It is also the SAME judgement `lastReadyReview.treeOid` gets —
+  // both are content identities read back out of a repo-local file.
+  const path = sidecarPath(makeTemp());
+  const good = readyState();
+  good.precommit.lastFullPassTree = "b".repeat(40);
+  saveSidecar(path, good);
+  assert.equal(loadSidecar(path)?.precommit.lastFullPassTree, "b".repeat(40));
+
+  const kept = loadSidecar((() => {
+    const p = sidecarPath(makeTemp());
+    const s = readyState();
+    saveSidecar(p, s);
+    return p;
+  })());
+  assert.equal(kept?.precommit.lastFullPassTree, undefined, "absent stays absent — old sidecars included");
+
+  for (const bad of ["--output=/tmp/pwned", "HEAD", "a".repeat(39), "A".repeat(40), 42, null, {}]) {
+    const p = sidecarPath(makeTemp());
+    const s = readyState();
+    saveSidecar(p, s);
+    const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+    (raw.precommit as Record<string, unknown>).lastFullPassTree = bad;
+    writeFileSync(p, JSON.stringify(raw));
+    assert.equal(loadSidecar(p)?.precommit.lastFullPassTree, undefined, `dropped: ${JSON.stringify(bad)}`);
+  }
 });
 
 test("a malformed lastReadyReview is DROPPED (treeOid reaches a git argv)", () => {
@@ -1241,6 +1273,65 @@ test("invalidateBindings: BLOCKED review / FAIL precommit are left alone (not do
   assert.equal(s.precommit.verdict, "FAIL", "FAIL is not a pass to downgrade");
   assert.equal(s.review.fingerprint, FP);
   assert.equal(s.precommit.fingerprint, FP);
+});
+
+test("invalidateBindings keeps the pass-COVERAGE record: an edit cannot un-pass a tree", () => {
+  // 2026-09-14. The live binding MUST clear (the PASS no longer describes what
+  // is on disk) — but `lastFullPassTree` is a fact about a tree that really
+  // did pass, and the round being RECORDED is about an immutable commit. The
+  // two are different questions, so the same edit answers them differently.
+  const s = readyState();
+  s.precommit.lastFullPassTree = FP;
+  invalidateBindings(s);
+  assert.equal(s.precommit.fingerprint, null, "the live binding still clears");
+  assert.equal(s.precommit.lastFullPassTree, FP, "the historical fact survives");
+});
+
+// ---------------------------------------------------------------------------
+// nextFullPassTree — the ONE rule that maintains the coverage record
+// ---------------------------------------------------------------------------
+
+test("a full-lane PASS records the tree the lane STARTED on", () => {
+  const started = "b".repeat(40);
+  assert.equal(
+    nextFullPassTree({ current: undefined, verdict: "PASS", mode: "full", testScope: "full", startedTree: started }),
+    started,
+  );
+  // …and a later full PASS replaces an older tree.
+  assert.equal(
+    nextFullPassTree({ current: "a".repeat(40), verdict: "PASS", mode: "full", testScope: "full", startedTree: started }),
+    started,
+  );
+});
+
+test("a FAIL of that SAME tree revokes the record; a FAIL of another tree does not", () => {
+  const recorded = "a".repeat(40);
+  assert.equal(
+    nextFullPassTree({ current: recorded, verdict: "FAIL", mode: "full", testScope: "full", startedTree: recorded }),
+    undefined,
+    "the claim is about the content, and this content has now been disproven",
+  );
+  assert.equal(
+    nextFullPassTree({ current: recorded, verdict: "FAIL", mode: "full", testScope: "full", startedTree: "b".repeat(40) }),
+    recorded,
+    "a different tree failing says nothing about the one that passed",
+  );
+});
+
+test("nothing else may write or clear the record", () => {
+  const recorded = "a".repeat(40);
+  const base = { current: recorded, startedTree: "c".repeat(40) };
+  // A fast lane is not evidence a full suite ever ran.
+  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", mode: "fast", testScope: "full" }), recorded);
+  // …nor is a full lane whose tests were narrowed.
+  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", mode: "full", testScope: "related" }), recorded);
+  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", mode: "full", testScope: undefined }), recorded);
+  // ERROR / NO_CHECKS_RUN are not verdicts about the content.
+  assert.equal(nextFullPassTree({ ...base, verdict: "ERROR", mode: "full", testScope: "full" }), recorded);
+  assert.equal(nextFullPassTree({ ...base, verdict: "NO_CHECKS_RUN", mode: "full", testScope: "full" }), recorded);
+  // A tree nobody could read cannot become a record (and cannot revoke one).
+  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", mode: "full", testScope: "full", startedTree: "" }), recorded);
+  assert.equal(nextFullPassTree({ current: undefined, verdict: "PASS", mode: "full", testScope: "full", startedTree: "" }), undefined);
 });
 
 test("shippedKinds survives a round trip, and unreadable evidence is dropped", () => {

@@ -5782,10 +5782,43 @@ test("a FAIL that arrives after dispatch is reported, and it withholds the READY
     "and every non-PASS verdict goes through it, including a thrown runner");
   assert.match(
     SRC,
-    /readyLacksVerification\(\{ precommitVerdict: st\.precommit\.verdict, bypassActive: st\.bypass\.active \}\)/,
-    "the verdict recorder refuses a READY on content that never passed the full lane",
+    /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,400}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,40}?bypassActive: st\.bypass\.active,\s*\}\)/,
+    "the verdict recorder refuses a READY on content that never passed the full lane — and answers it from the round's OWN tree, not from the live binding the next edit resets",
   );
   assert.match(SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
+});
+
+test("the pass-coverage record cites the tree the lane STARTED on, never the post-run one", () => {
+  // Reviewer/auditor finding (2026-09-14): the runner's fingerprint is
+  // recomputed AFTER it finished (lint:fix may have edited files) and the code
+  // says so itself — writing THAT into a record that never expires would mark a
+  // tree no lane ever ran on as verified. The tree captured before the run is
+  // the one the lane actually judged.
+  const laneAt = SRC.indexOf("function startPrecommitBeside(");
+  assert.ok(laneAt > 0, "the lane starter is here");
+  const lane = SRC.slice(laneAt, laneAt + 4000);
+  assert.match(lane, /const verified = worktreeTree\(root\) \?\? ""/,
+    "the pre-run tree is captured before the run (it is also what the FAIL notice names)");
+  assert.match(lane, /nextFullPassTree\(\{[\s\S]{0,200}?startedTree: verified,/,
+    "and it — not the runner's post-run fingerprint — is what the coverage record cites");
+  assert.doesNotMatch(lane, /lastFullPassTree\s*=\s*outcome\.fingerprint/,
+    "the post-run fingerprint must never become the record");
+  // The rule itself is pure and lives in one place.
+  assert.match(SRC, /^\s*invalidateBindings,\n\s*nextFullPassTree,\n\} from "\.\.\/lib\/gate-state\.ts";/m,
+    "one imported rule, not a second copy of the branches here");
+  // AND THE THIRD INPUT: what the lane COVERED has to reach the rule.
+  // The first attempt read it off the tool's reply (`pre.details?.testScope`)
+  // — a field that reply never carried (reviewer P1, 2026-09-14), so the rule
+  // never matched, the record was never written, and every test above stayed
+  // green because they all exercised the rule and none exercised this
+  // dataflow. It now reads the GATE'S OWN record: `run_precommit` writes
+  // `st.precommit.testScope` (the ship gate reads the same field, so it cannot
+  // vanish unnoticed) and `test/extension-structure.test.ts`'s precommit
+  // section pins that write.
+  assert.match(lane, /testScope: laneState\.precommit\.testScope,/,
+    "the caller takes what the lane covered from the gate's own record");
+  assert.doesNotMatch(lane, /pre\.details\?\.testScope/,
+    "and NOT from a reply field nothing else reads — that is exactly how the record went silently unwritten");
 });
 
 test("the async FAIL notice never waits for the agent to stop, and names what it verified", () => {
@@ -5809,7 +5842,7 @@ test("the async FAIL notice never waits for the agent to stop, and names what it
   // recomputed after it (lint:fix may have edited files), i.e. by then it can
   // already be the NEXT round's content.
   const besideAt = SRC.indexOf("function startPrecommitBeside(");
-  const beside = SRC.slice(besideAt, besideAt + 2600);
+  const beside = SRC.slice(besideAt, besideAt + 4200);
   const verifiedAt = beside.indexOf("const verified = worktreeTree(root)");
   const runAt = beside.indexOf('callTool("run_precommit"');
   assert.ok(verifiedAt > 0 && runAt > verifiedAt,

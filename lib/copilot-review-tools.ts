@@ -33,6 +33,13 @@
  * Tool names, schemas, reply texts, `details` fields, log lines and error
  * branches are the ones the agent-facing contract already documents; changing
  * any of them is a separate, deliberate change.
+ *
+ * ONE such change has landed since (2026-09-14, user decision): from Copilot
+ * round {@link COPILOT_TRIAGE_ASK_FROM_ROUND} on, `check_copilot_review`
+ * puts every actionable finding to the USER before the agent is told what to
+ * do with it, and answers with the decisions grouped. Rounds 1–3 — and every
+ * other branch in this file — keep the frozen wording. The rules live in
+ * lib/copilot-triage.ts; the interview itself is `askFindings` below.
  */
 
 import { Type } from "typebox";
@@ -42,6 +49,24 @@ import type { ToolRepoTarget } from "./repo-resolve.ts";
 import type { GateState } from "./gate-state.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import { ghError, type GhResult } from "./copilot-gh.ts";
+import { type ChoiceSpec } from "./choice-dialog.ts";
+// The interview's escape row, imported rather than re-spelled: "skip the rest"
+// is one convention in this gate, and ask-user.ts owns the constant.
+import { SKIP_REST_CHOICE } from "./ask-user.ts";
+import {
+  COPILOT_TRIAGE_ASK_FROM_ROUND,
+  FINDING_DIALOG_POINTER,
+  findingBody,
+  findingChoiceSpec,
+  findingKey,
+  recordDecision,
+  summarizeTriage,
+  triageAskPlan,
+  triageAsksUser,
+  triagePickFrom,
+  type CopilotTriageGroups,
+  type CopilotTriageState,
+} from "./copilot-triage.ts";
 import {
   analyzeCopilot,
   armCopilotReview,
@@ -120,6 +145,181 @@ export interface CopilotReviewToolDeps {
   gh: CopilotGhAccess;
   /** The poll's wait between attempts (injected so tests do not sleep). */
   delay(ms: number): Promise<void>;
+  /**
+   * Put ONE Copilot finding to the user — or to an orchestrator supervising
+   * this session, whoever answers first (the same race every other gate dialog
+   * runs; the extension owns it, this module only asks).
+   *
+   * Returns the row that was picked, or `undefined` when nobody answered
+   * (ESC, a dismissed box, an interrupting instruct, no UI at all). This
+   * module never guesses what a missing answer means: `undefined` is "the user
+   * did not decide", which is the ONE reading that cannot change code nobody
+   * approved.
+   */
+  askFinding(
+    uiCtx: unknown,
+    spec: ChoiceSpec,
+    opts: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] },
+  ): Promise<string | undefined>;
+  /**
+   * Put text in front of the user, in the transcript, right now.
+   *
+   * The dialogs are geometric (lib/dialog-budget.ts): a long Copilot comment
+   * does not fit in one, so the finding's FULL text goes here, before the box
+   * — otherwise the user is asked to approve a truncated finding and has
+   * nowhere to read the rest. Returns false when there is no UI to render
+   * into.
+   */
+  showToUser(uiCtx: unknown, lead: string, body: string): boolean;
+}
+
+/**
+ * The two gh commands a thread needs. Kept as constants so the pre-round-4
+ * text and the triaged text teach the SAME commands — one wording, not two.
+ */
+const RESOLVE_THREAD_CMD =
+  "gh api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t})" +
+  "{thread{isResolved}}}' -F t=<threadId>";
+const REPLY_THREAD_CMD =
+  "gh api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply" +
+  "(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}' -F t=<threadId> -F b='<why>'";
+
+/**
+ * Put every finding that still owes the user a question in front of them, and
+ * fold the answers into the triage state.
+ *
+ * ONE DIALOG AT A TIME, in the order the findings came back, with the escape
+ * row an interview has. The `ask_user` interview hands its whole batch to the
+ * channel up front so a project manager can answer everything at once
+ * (lib/user-interaction-tools.ts); this loop deliberately does NOT — a Copilot
+ * round is a handful of questions, and a second batching convention is a
+ * second thing to keep right. ponytail: sequential; batch the channel
+ * requests here if a supervised child with 10 findings ever shows the cost.
+ *
+ * A STOP (the escape row, or an abort) does not undo anything: the answers
+ * already given are kept and persisted with the rest of the state, and the
+ * findings that were never asked are simply still unanswered — which asks
+ * them again on the next check instead of inventing a decision.
+ */
+async function askFindings(
+  deps: CopilotReviewToolDeps,
+  ctx: unknown,
+  signal: AbortSignal | undefined,
+  findings: readonly CopilotThread[],
+  current: CopilotTriageState | undefined,
+): Promise<{ triage: CopilotTriageState | undefined; notes: Map<string, string>; deferred: number; asked: number }> {
+  const plan = triageAskPlan(findings, current);
+  /** What the user said when they picked NONE of the three answers. */
+  const notes = new Map<string, string>();
+  let triage = current;
+  let stopped = false;
+  for (const [index, thread] of plan.ask.entries()) {
+    if (stopped || signal?.aborted) break;
+    const spec = findingChoiceSpec(thread, index, plan.ask.length);
+    const body = findingBody(thread);
+    // THE TRANSCRIPT COPY GOES UP BEFORE THE BOX. The dialog's body is fitted
+    // to the row budget and the tail of a long comment does not fit; the
+    // pointer that dialog carries (FINDING_DIALOG_POINTER) names this notice,
+    // so it has to exist — an approval screen that hides part of the finding
+    // is how the user approves something they never read.
+    deps.showToUser(ctx, `───── ${spec.title} ─────`, body);
+    const picked = await deps.askFinding(ctx, spec, {
+      body,
+      pointer: FINDING_DIALOG_POINTER,
+      extraRows: [SKIP_REST_CHOICE],
+      ...(signal ? { signal } : {}),
+    });
+    const outcome = triagePickFrom(picked, spec);
+    if (outcome.kind === "skip-rest") {
+      stopped = true;
+      continue;
+    }
+    if (outcome.kind === "unanswered") {
+      if (outcome.reason) notes.set(findingKey(thread), outcome.reason);
+      continue;
+    }
+    triage = recordDecision(triage, thread, outcome.decision, new Date().toISOString(), outcome.reason);
+  }
+  return { triage, notes, deferred: plan.deferred, asked: plan.ask.length };
+}
+
+/** Where one finding is, as one line an agent can act on. */
+function findingLine(thread: CopilotThread): string {
+  return `${thread.id} ${thread.path ?? "(no file)"}${thread.line ? ":" + thread.line : ""}` +
+    `${thread.isOutdated ? " [outdated — the code moved; if that already fixed it, resolve the thread]" : ""}`;
+}
+
+/**
+ * The triaged alternative to the round-3-and-earlier text.
+ *
+ * Same opening line as before (the counts are useful either way), then the
+ * user's decisions GROUPED, because "what may I change?" is the only question
+ * this text has to answer. The commands appear only for the groups the agent
+ * actually has to run, so the permission boundary is stated once per bucket
+ * instead of buried in a shared paragraph.
+ */
+function triageText(args: {
+  pr: number;
+  rounds: number;
+  groups: CopilotTriageGroups;
+  notes: Map<string, string>;
+  deferred: number;
+  resolved: number;
+  answered: number;
+}): string {
+  const { groups } = args;
+  const plural = (n: number) => `${n} 条`;
+  const out: string[] = [];
+  out.push(
+    `review-gate: PR #${args.pr} — ${groups.fix.length + groups.decline.length + groups.irrelevant.length + groups.unanswered.length} ` +
+    `Copilot thread(s) waiting on you (${args.resolved} resolved, ${args.answered} answered). ` +
+    `第 ${args.rounds} 轮（从第 ${COPILOT_TRIAGE_ASK_FROM_ROUND} 轮起）的每一条问题都要先经用户审批 —— 下面就是他的决定，只做他批过的事：`,
+  );
+  out.push(`  ✅ 修复（${plural(groups.fix.length)}）—— 只许改这些：`);
+  for (const e of groups.fix) out.push(`    - ${findingLine(e.thread)} — ${e.thread.excerpt}`);
+  out.push(
+    `  🚫 不修，回复说明（${plural(groups.decline.length)}）—— 在 thread 里回一句说明，再 resolve：`,
+  );
+  for (const e of groups.decline) {
+    out.push(
+      `    - ${findingLine(e.thread)} — ` +
+      (e.record?.reason
+        ? `用户给的理由：「${e.record.reason}」`
+        : "用户没给理由 —— 你写一句简短说明（不要声称他说过他没说过的话）"),
+    );
+  }
+  out.push(`  ➖ 与我无关，直接 resolve（${plural(groups.irrelevant.length)}）—— resolve 掉，不要在 thread 里回复：`);
+  for (const e of groups.irrelevant) out.push(`    - ${findingLine(e.thread)}`);
+  out.push(`  ⏸ 未获批准（${plural(groups.unanswered.length)}）—— 这些代码不许改，只如实告诉他：`);
+  for (const e of groups.unanswered) {
+    const note = args.notes.get(findingKey(e.thread));
+    out.push(
+      `    - ${findingLine(e.thread)} —— ` +
+      (note
+        // The ✎ row: they picked none of the three and said why. That is NOT
+        // consent to change code — but their own words already say what to do
+        // with the thread, so the agent is told to use them, and to ask when
+        // they do not answer the question at all.
+        ? `用户没选任何选项，原话：「${note}」—— 这句话如果是「不修」的理由，就照它回复并 resolve；如果他要的是别的，用 ask_user 问清再动。`
+        : "他没表态 —— 不许改、不许代他回复。"),
+    );
+  }
+  if (groups.fix.length > 0) {
+    out.push(
+      `修完（或本来就已修好）的：resolve 掉 —— ${RESOLVE_THREAD_CMD}`,
+    );
+  }
+  if (groups.decline.length > 0) {
+    out.push(`回复：${REPLY_THREAD_CMD}；回完再 resolve（上面那条命令）。`);
+  }
+  if (groups.irrelevant.length > 0) {
+    out.push(`「与我无关」的那几条：只 resolve —— ${RESOLVE_THREAD_CMD}`);
+  }
+  if (args.deferred > 0) {
+    out.push(`（还有 ${args.deferred} 条没来得及问用户，下一次 check_copilot_review 会接着问。）`);
+  }
+  out.push("Then call check_copilot_review again.");
+  return out.join("\n");
 }
 
 /**
@@ -440,35 +640,60 @@ async function doCheckCopilotReview(
     };
   }
 
+  const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
+  // ---- the user's per-finding approval (round COPILOT_TRIAGE_ASK_FROM_ROUND on) ----
+  //
+  // Asked BEFORE the state is written, so the answers and the cycle land in
+  // the sidecar together: a crash between the dialog and the write would
+  // otherwise lose an approval the user already gave, and re-asking is the
+  // cheap error here, losing it is not. Runs only when there IS something to
+  // decide — an AWAITING or SATISFIED round never raises a box.
+  const triageRun = triageAsksUser(next.rounds) && analysis.actionable.length > 0
+    ? await askFindings(deps, ctx, signal, analysis.actionable, next.triage)
+    : undefined;
+  if (triageRun?.triage && triageRun.triage !== next.triage) {
+    next = { ...next, triage: triageRun.triage };
+  }
+
   st.copilot = next;
   deps.persist(ctx, root);
   if (isCopilotOutstanding(next)) deps.armLoop();
   deps.log(`copilot check for PR #${pr.number}: ${next.status} (availability ${support}` +
-    `${next.note ? `, ${next.note}` : ""})`);
+    `${next.note ? `, ${next.note}` : ""})` +
+    `${triageRun ? `, triage asked ${triageRun.asked}` : ""}`);
 
-  const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
   const lines = analysis.actionable.slice(0, 20).map((t) =>
     `  - ${t.id} ${t.path ?? "(no file)"}${t.line ? ":" + t.line : ""}` +
     `${t.isOutdated ? " [outdated — the code moved; if that fixed it, resolve the thread]" : ""}\n      ${t.excerpt}`);
-  const text = next.status === "OPEN"
-    ? `review-gate: PR #${pr.number} — ${analysis.actionable.length} Copilot thread(s) waiting on you ` +
-      `(${analysis.resolved} resolved, ${analysis.answered} answered):\n${lines.join("\n")}\n` +
-      "For each: fix it and resolve the thread, or reply in the thread with the reason it will " +
-      "not be fixed. Resolve: gh api graphql -f query='mutation($t:ID!){resolveReviewThread" +
-      "(input:{threadId:$t}){thread{isResolved}}}' -F t=<threadId>. Reply: " +
-      "gh api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply" +
-      "(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}' -F t=<threadId> -F b='<why>'. " +
-      "Then call check_copilot_review again."
-    : next.status === "AWAITING"
-      ? `review-gate: Copilot has not posted its review of PR #${pr.number} yet. Do something useful and ` +
-        "call check_copilot_review again in a minute."
-      // Released with a readable payload. `evaluateCopilot` puts
-      // actionable threads ahead of every release, so this list is
-      // normally empty — it is kept as the belt to the sidecar-count
-      // braces used by the fail-safe paths above, and it costs one call
-      // on data that is already in hand.
-      : `review-gate: Copilot review of PR #${pr.number} — ${next.note ?? next.status}.` +
-        copilotUnhandledText(analysis.actionable);
+  // The triaged round gets the by-decision text instead of the free-for-all
+  // one: what the agent may touch is the whole point of having asked.
+  const groups = triageRun ? summarizeTriage(analysis.actionable, next.triage) : undefined;
+  const text = groups && triageRun
+    ? triageText({
+      pr: pr.number,
+      rounds: next.rounds,
+      groups,
+      notes: triageRun.notes,
+      deferred: triageRun.deferred,
+      resolved: analysis.resolved,
+      answered: analysis.answered,
+    })
+    : next.status === "OPEN"
+      ? `review-gate: PR #${pr.number} — ${analysis.actionable.length} Copilot thread(s) waiting on you ` +
+        `(${analysis.resolved} resolved, ${analysis.answered} answered):\n${lines.join("\n")}\n` +
+        "For each: fix it and resolve the thread, or reply in the thread with the reason it will " +
+        `not be fixed. Resolve: ${RESOLVE_THREAD_CMD}. Reply: ${REPLY_THREAD_CMD}. ` +
+        "Then call check_copilot_review again."
+      : next.status === "AWAITING"
+        ? `review-gate: Copilot has not posted its review of PR #${pr.number} yet. Do something useful and ` +
+          "call check_copilot_review again in a minute."
+        // Released with a readable payload. `evaluateCopilot` puts
+        // actionable threads ahead of every release, so this list is
+        // normally empty — it is kept as the belt to the sidecar-count
+        // braces used by the fail-safe paths above, and it costs one call
+        // on data that is already in hand.
+        : `review-gate: Copilot review of PR #${pr.number} — ${next.note ?? next.status}.` +
+          copilotUnhandledText(analysis.actionable);
   return {
     content: [{ type: "text", text }],
     details: {
@@ -478,6 +703,17 @@ async function doCheckCopilotReview(
       resolved: analysis.resolved,
       answered: analysis.answered,
       support,
+      ...(groups === undefined || triageRun === undefined
+        ? {}
+        : {
+          triage: {
+            fix: groups.fix.length,
+            decline: groups.decline.length,
+            irrelevant: groups.irrelevant.length,
+            unanswered: groups.unanswered.length,
+            deferred: triageRun.deferred,
+          },
+        }),
     },
   };
 }
@@ -508,7 +744,11 @@ export function registerCopilotReviewTools(host: ToolHost, deps: CopilotReviewTo
       "reviews and review threads itself — you cannot report this outcome yourself. A thread " +
       "counts as handled when it is resolved OR when the last comment in it is yours (the " +
       "explanation of why it will not be fixed). Returns AWAITING (Copilot has not answered yet), " +
-      "OPEN (threads still waiting on you, listed with their IDs) or SATISFIED.",
+      `OPEN (threads still waiting on you, listed with their IDs) or SATISFIED. FROM ROUND ${COPILOT_TRIAGE_ASK_FROM_ROUND} ON the gate also asks the USER about every ` +
+      "open finding, one dialog at a time, before you may touch it: the reply groups the threads " +
+      "by their decision (fix / won't-fix-with-a-reply / not-related-resolve-it / not-answered), " +
+      "and only the first group is yours to change. A finding nobody answered is NOT approval — " +
+      "leave it alone and report it.",
     parameters: Type.Object({
       repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
     }),

@@ -35,6 +35,7 @@ import {
   type CopilotPayload,
   type CopilotReviewState,
 } from "../lib/copilot-review.ts";
+import { recordDecision } from "../lib/copilot-triage.ts";
 
 const NOW_ISO = "2026-08-07T10:00:00.000Z";
 const NOW = Date.parse(NOW_ISO);
@@ -54,6 +55,9 @@ function thread(over: Partial<CopilotPayload["threads"][number]> = {}) {
     lastAuthor: "copilot-pull-request-reviewer",
     createdAt: NOW_ISO,
     excerpt: "consider handling the null case",
+    body: "consider handling the null case",
+    latestBody: "consider handling the null case",
+    lastCommentId: "C1",
     ...over,
   };
 }
@@ -604,6 +608,86 @@ test("a sanitized SATISFIED payload keeps blocking nothing (round-trip stays hon
   });
   assert.equal(clean?.status, "SATISFIED");
   assert.equal(isCopilotOutstanding(clean), false);
+});
+
+// ---------------------------------------------------------------------------
+// The user's own triage travels with the cycle
+// ---------------------------------------------------------------------------
+
+/** A finding the user has already answered. */
+function triaged() {
+  return recordDecision(undefined, thread({ id: "T1" }), "decline", NOW_ISO, "out of scope");
+}
+
+test("a re-armed or re-requested cycle keeps the answers the user already gave", () => {
+  // The answers are about FINDINGS, not about a round: losing them on the next
+  // push would put the same question in front of the user again, and a cycle
+  // that forgot a "fix" would send the agent back to a finding nobody
+  // approved.
+  const state: CopilotReviewState = {
+    ...armCopilotReview(undefined, NOW_ISO), pr: 42, rounds: 4, triage: triaged(),
+  };
+  assert.equal(armCopilotReview(state, NOW_ISO).triage?.records.length, 1);
+  assert.equal(
+    recordCopilotRequest(state, { pr: 42, head: "sha", nowIso: NOW_ISO }).triage?.records[0]?.decision,
+    "decline",
+  );
+  for (const released of [
+    releaseCopilotReview(state, "SATISFIED", "done", NOW_ISO),
+    releaseCopilotReview(state, "UNSUPPORTED", "no gh", NOW_ISO),
+    releaseCopilotReview(state, "EXHAUSTED", "no answer", NOW_ISO),
+  ]) {
+    assert.equal(released.triage?.records.length, 1, `${released.status} must not drop the triage`);
+  }
+  // …and an observation-driven transition keeps it too (the spread is the
+  // default path, and this is what pins it).
+  const moved = evaluateCopilot(state, analyzeCopilot(payload({ threads: [thread({ id: "T1" })] }), { anchorAt: NOW_ISO }), {
+    nowIso: NOW_ISO, now: NOW, support: "CONFIRMED",
+  });
+  assert.equal(moved.triage?.records[0]?.decision, "decline");
+});
+
+test("the triage survives the sidecar round-trip, and garbage in it is dropped whole", () => {
+  const state: CopilotReviewState = {
+    ...armCopilotReview(undefined, NOW_ISO), pr: 42, rounds: 4, triage: triaged(),
+  };
+  const back = sanitizeCopilotState(JSON.parse(JSON.stringify(state)));
+  assert.deepEqual(back?.triage, state.triage);
+  // A garbled block loses the decisions (asked again), never invents one.
+  const garbled = sanitizeCopilotState({ ...state, triage: { records: [{ threadId: "T1", decision: "fixish" }] } });
+  assert.equal(garbled?.triage, undefined);
+  assert.equal(garbled?.rounds, 4, "the cycle itself is untouched by a bad triage block");
+});
+
+test("the copy GitHub hands back is what the user is shown, and it names the last comment", () => {
+  const parsed = parseCopilotPayload(JSON.stringify({
+    data: { repository: { pullRequest: {
+      headRefOid: "sha",
+      reviews: { nodes: [] },
+      reviewThreads: { nodes: [{
+        id: "PRRT_1", isResolved: false, isOutdated: true, path: "lib/x.ts", line: 3,
+        firstComment: { nodes: [{ author: { login: "copilot" }, createdAt: NOW_ISO, body: "line one\n\nline   two" }] },
+        lastComment: { nodes: [{ id: "C9", author: { login: "copilot" }, createdAt: NOW_ISO }] },
+      }] },
+    } } },
+  }));
+  assert.equal(parsed?.threads[0]?.body, "line one line two", "whitespace is collapsed for the dialog");
+  assert.equal(parsed?.threads[0]?.excerpt, "line one line two");
+  assert.equal(parsed?.threads[0]?.lastCommentId, "C9", "the triage key needs the last comment's id");
+  // A payload without one (or with an empty one) keys on the thread alone
+  // instead of throwing the decision away.
+  const bare = parseCopilotPayload(JSON.stringify({
+    data: { repository: { pullRequest: {
+      headRefOid: "sha", reviews: { nodes: [] },
+      reviewThreads: { nodes: [{
+        id: "PRRT_1", isResolved: false, isOutdated: false, path: null, line: null,
+        firstComment: { nodes: [] }, lastComment: { nodes: [{ id: "", author: { login: "copilot" } }] },
+      }] },
+    } } },
+  }));
+  assert.equal(bare?.threads[0]?.lastCommentId, null);
+  assert.equal(bare?.threads[0]?.body, "");
+  assert.equal(bare?.threads[0]?.path, null);
 });
 
 // ---------------------------------------------------------------------------

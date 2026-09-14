@@ -65,7 +65,16 @@
  * `declare_done`. A new PR-affecting ship re-arms from any of them (see
  * {@link armCopilotReview}) — that is what makes the loop a loop, and what
  * closes the "push first, open the PR afterwards" ordering hole.
+ *
+ * THE USER'S OWN TRIAGE rides along. From round 4 on, every actionable finding
+ * is put to the user first (lib/copilot-triage.ts) and the answers are stored
+ * on this state. They are about a piece of TEXT, not about a round, so they
+ * survive every transition below — a finding already answered is never asked
+ * about twice, and Copilot speaking again on the same thread produces a new
+ * key and therefore a new question.
  */
+import { sanitizeCopilotTriage, type CopilotTriageState } from "./copilot-triage.ts";
+
 export type CopilotStatus =
   | "ARMED"
   | "AWAITING"
@@ -152,6 +161,12 @@ export interface CopilotReviewState {
    * evidence, and must stay re-evaluable when the policy changes.
    */
   supportConfirmed?: boolean;
+  /**
+   * L7 triage (from round {@link COPILOT_TRIAGE_ASK_FROM_ROUND} on): the
+   * user's per-finding answers, keyed by thread + last comment. Absent until
+   * the first finding is put to them.
+   */
+  triage?: CopilotTriageState;
 }
 
 /** How sure are we that Copilot code review works on this repository? */
@@ -199,6 +214,10 @@ export function armCopilotReview(
     // Availability evidence survives re-arming: it is a fact about the
     // repository, not about this cycle.
     ...(prev?.supportConfirmed ? { supportConfirmed: true } : {}),
+    // So does the triage: those answers are about findings, not about this
+    // round, and re-asking a question the user already answered is exactly
+    // the behaviour this feature exists to avoid.
+    ...(prev?.triage ? { triage: prev.triage } : {}),
     at: nowIso,
     note: "PR created or updated — a Copilot review round is due",
   };
@@ -226,6 +245,7 @@ export function recordCopilotRequest(
     ...(args.head ? { head: args.head } : {}),
     rounds: (prev?.rounds ?? 0) + 1,
     ...(args.supportConfirmed || prev?.supportConfirmed ? { supportConfirmed: true } : {}),
+    ...(prev?.triage ? { triage: prev.triage } : {}),
     at: args.nowIso,
     note: args.note ?? "Copilot review requested",
   };
@@ -261,6 +281,7 @@ export function releaseCopilotReview(
     ...(boundHead ? { head: boundHead } : {}),
     rounds: prev?.rounds ?? 0,
     ...(prev?.supportConfirmed ? { supportConfirmed: true } : {}),
+    ...(prev?.triage ? { triage: prev.triage } : {}),
     ...(typeof unhandled === "number" ? { openThreads: unhandled } : {}),
     at: nowIso,
     note,
@@ -536,11 +557,21 @@ export const COPILOT_THREADS_QUERY = `query($owner:String!,$name:String!,$number
       reviewThreads(first:100){nodes{
         id isResolved isOutdated path line
         firstComment: comments(first:1){nodes{author{login} createdAt body}}
-        lastComment: comments(last:1){nodes{author{login} createdAt}}
+        lastComment: comments(last:1){nodes{id author{login} createdAt body}}
       }}
     }
   }
 }`;
+
+/**
+ * How much of a comment is carried at all — a payload bound, not a dialog
+ * bound. The DIALOG shows what its row budget fits (lib/dialog-budget.ts) and
+ * says it was cut; the full text the user reads is the transcript copy
+ * `askFindings` writes before the box opens. Bigger than the dialog on
+ * purpose: a cap smaller than the transcript copy would throw away the text
+ * the pointer promises.
+ */
+export const COPILOT_THREAD_BODY_CHARS = 1200;
 
 export interface CopilotThread {
   id: string;
@@ -556,6 +587,27 @@ export interface CopilotThread {
   createdAt: string | null;
   /** Short excerpt of the first comment, so the agent can act on the list. */
   excerpt: string;
+  /**
+   * The first comment in full (whitespace collapsed, capped at
+   * {@link COPILOT_THREAD_BODY_CHARS}). `excerpt` is the one-line form for the
+   * agent's list; this is what the USER is shown when they are asked to
+   * approve the finding, and 200 characters are not always enough to decide.
+   */
+  body: string;
+  /**
+   * The LATEST comment's text (same treatment as {@link body}). Equal to
+   * `body` while the thread has one comment; different once Copilot speaks
+   * again — and Copilot speaking again is exactly what re-opens the question
+   * (see {@link lastCommentId}), so the user must be shown THIS text, not the
+   * one they already answered.
+   */
+  latestBody: string;
+  /**
+   * Id of the LAST comment. The triage key needs it: a decision is about a
+   * piece of text, so Copilot commenting again on the same thread has to read
+   * as a NEW finding (lib/copilot-triage.ts).
+   */
+  lastCommentId: string | null;
 }
 
 export interface CopilotReviewSummary {
@@ -615,7 +667,10 @@ export function parseCopilotPayload(raw: string): CopilotPayload | undefined {
       if (!rec || typeof rec.id !== "string") return [];
       const first = firstNode(rec.firstComment);
       const last = firstNode(rec.lastComment);
-      const body = typeof first?.body === "string" ? first.body : "";
+      const raw = typeof first?.body === "string" ? first.body : "";
+      const body = raw.replace(/\s+/g, " ").trim();
+      const rawLast = typeof last?.body === "string" ? last.body : "";
+      const latestBody = rawLast.replace(/\s+/g, " ").trim().slice(0, COPILOT_THREAD_BODY_CHARS);
       return [{
         id: rec.id,
         isResolved: rec.isResolved === true,
@@ -625,7 +680,10 @@ export function parseCopilotPayload(raw: string): CopilotPayload | undefined {
         author: first ? login({ author: first.author }) : null,
         lastAuthor: last ? login({ author: last.author }) : null,
         createdAt: typeof first?.createdAt === "string" ? first.createdAt : null,
-        excerpt: body.replace(/\s+/g, " ").trim().slice(0, 200),
+        excerpt: body.slice(0, 200),
+        body: body.slice(0, COPILOT_THREAD_BODY_CHARS),
+        latestBody: latestBody || body.slice(0, COPILOT_THREAD_BODY_CHARS),
+        lastCommentId: typeof last?.id === "string" && last.id.length > 0 ? last.id : null,
       }];
     })
     : [];
@@ -896,5 +954,11 @@ export function sanitizeCopilotState(raw: unknown): CopilotReviewState | undefin
   // evidence that was never gathered. Claiming CONFIRMED costs waiting time,
   // never correctness, but the field should still mean what it says.
   if (obj.supportConfirmed === true) out.supportConfirmed = true;
+  // Dropped whole when nothing in it is readable: an empty triage block means
+  // "no finding was decided yet", which asks the user again — the safe
+  // direction. The OTHER direction (keeping a garbled record) would fix code
+  // nobody approved.
+  const triage = sanitizeCopilotTriage(obj.triage);
+  if (triage) out.triage = triage;
   return out;
 }

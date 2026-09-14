@@ -347,7 +347,14 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
    runs `gh` itself — you cannot report this outcome). AWAITING ⇒ do something
    useful and check again. OPEN ⇒ for each listed thread either fix it and
    `resolveReviewThread`, or reply in the thread with the reason it will not be
-   fixed; then check again. SATISFIED / UNSUPPORTED / EXHAUSTED ⇒ done (a repo
+   fixed; then check again. **From Copilot round 4 on, the gate first puts
+   every open finding to the USER, one dialog each**, and `check_copilot_review`
+   answers with the threads grouped by what they decided: only the 「修复」
+   group is yours to change; 「不修，回复说明」 means reply (with their own words
+   when they gave any) and resolve; 「与我无关，直接 resolve」 means resolve
+   without a reply. A finding the user never answered is NOT approval — do not
+   touch the code and do not reply on their behalf, report it instead.
+   SATISFIED / UNSUPPORTED / EXHAUSTED ⇒ done (a repo
    with no sign of Copilot releases itself at once instead of waiting; a
    Copilot that never answers within 20 minutes escalates to the user).
    Pushing your fixes re-arms the cycle — that is the loop, and it has **no

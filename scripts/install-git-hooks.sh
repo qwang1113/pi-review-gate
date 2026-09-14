@@ -38,6 +38,35 @@ case "$REPO_ROOT" in
     ;;
 esac
 
+# A LINKED WORKTREE NEVER INSTALLS (third incident of this class, 2026-09-14).
+# The two path checks above only cover layouts WE name. A review round's
+# throwaway worktree is named by whoever creates it — a judge running
+# `git worktree add $TMPDIR/rgrev-<sha> HEAD` is enough — and installing there
+# repointed the real repository's hooks at a directory that vanished with the
+# round, so every later commit failed with "No such file or directory" until
+# someone reinstalled from the real checkout. `.git/hooks` lives in the COMMON
+# git dir, so the rule is topological, not about names or locations: the hooks
+# belong to the MAIN worktree, and anything else is refused.
+MAIN_WORKTREE="$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)"
+# …but a BARE main entry is not a working tree at all (`git clone --bare` +
+# `git worktree add` is a normal layout): there is no main working tree to
+# install from, so insisting on one would lock every worktree out of a
+# repository that has no other place to install from. The first entry's own
+# block carries the `bare` marker (§ the `--porcelain` format).
+MAIN_BARE="$(git worktree list --porcelain 2>/dev/null | sed -n '1,/^$/p' | grep -c '^bare$' || true)"
+if [ -n "$MAIN_WORKTREE" ] && [ "${MAIN_BARE:-0}" = "0" ]; then
+  MAIN_REAL="$(cd "$MAIN_WORKTREE" 2>/dev/null && pwd -P || printf '%s' "$MAIN_WORKTREE")"
+  ROOT_REAL="$(cd "$REPO_ROOT" && pwd -P)"
+  if [ "$MAIN_REAL" != "$ROOT_REAL" ]; then
+    echo "refusing to install hooks from a LINKED worktree ($REPO_ROOT):" >&2
+    echo "  .git/hooks is shared with the main worktree ($MAIN_REAL), so installing" >&2
+    echo "  here points the whole repository at a directory that disappears with this" >&2
+    echo "  one — every later commit then fails with 'No such file or directory'." >&2
+    echo "  Run it from the main worktree instead." >&2
+    exit 1
+  fi
+fi
+
 
 # Resolve THIS script through any symlinks first: npm/npx expose the package
 # bin as a node_modules/.bin/* symlink, so dirname "$0" would land in .bin and

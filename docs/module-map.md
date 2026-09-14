@@ -191,7 +191,7 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 | **L4** 输出语言 | 每轮无条件注入简体中文指令 | 扩展 `before_agent_start` | `lib/constants.ts` 的 `LANGUAGE_DIRECTIVE` |
 | **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | `lib/ship-gate-bash.ts`（ship 命令上的 commit message / PR 文案）+ 扩展的 checkpoint 路径 + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
 | **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/pre-commit-check.cjs` → 进程内 `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
-| **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账 | `lib/copilot-review-tools.ts`（工具 `request_copilot_review` / `check_copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线 | `lib/copilot-review.ts` |
+| **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账；第 4 轮起每条问题先经用户逐条审批 | `lib/copilot-review-tools.ts`（工具 `request_copilot_review` / `check_copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线（弹框经 `askFinding` 注入） | `lib/copilot-review.ts`、`lib/copilot-triage.ts` |
 | **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | `lib/goal-tools.ts`（工具 `propose_loop_goal`，内部自跑 goal 审计）+ `lib/goal-prereview-tools.ts`（普通函数 `recordGoalPrereview`：裁决落成记录，不注册成工具），扩展只接线 | `lib/loop-goal.ts` |
 
 > **落点指引**：加一条新的**判定规则**（什么该拦、什么该放）→ 落在
@@ -219,7 +219,9 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 `copilot-review.ts`（L7，PR 之后的 Copilot 审查闭环）与 `loop-goal.ts`（L8，
 用户批准的退出契约）——两者的**判定**在这里，工具体分别在
 `copilot-review-tools.ts` 与 `goal-tools.ts` / `goal-prereview-tools.ts`，
-接线见 §2 的层表。
+接线见 §2 的层表。`copilot-triage.ts` 是 L7 里用户那半边的**纯规则**：轮次阈
+值（`rounds ≥ 4` 才问）、线程键（thread + 最后一条评论）、决策汇总与 sidecar
+校验；工具体只负责把问题弹出去、把答案写回状态。
 
 > **落点**：新的拦截规则 → 新建一个 `lib/<rule>.ts` 纯模块（facts in,
 > decision out）+ 同名单测；只有接线改扩展。新的**放行**口子要格外小心：
@@ -474,7 +476,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（129 个模块）
+## 五、`lib/` 全量速查表（130 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -507,7 +509,8 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `consent-request-tools.ts` | 工具 `request_scope_limit` / `request_sensitive_edit`：两个「请用户放宽门禁」的同意口子，对话与门禁状态经注入的 deps；由 `user-interaction-tools.ts` 转注册 |
 | `copilot-gh.ts` | L7 的 gh 访问层：`gh` 以 argv 异步 spawn（超时 + abort），PR / 线程 payload / 可用性探测都在这里 |
 | `copilot-review-tools.ts` | 工具 `request_copilot_review` / `check_copilot_review`：L7 状态机的两个驱动端，gh 访问经注入的 seam |
-| `copilot-review.ts` | L7：PR 之后的 Copilot 审查闭环（请求、等待、逐 thread 消账） |
+| `copilot-review.ts` | L7：PR 之后的 Copilot 审查闭环（请求、等待、逐 thread 消账）；`CopilotReviewState.triage` 带用户自己的裁决，每个转移都带着它走 |
+| `copilot-triage.ts` | L7 用户那半边的纯规则：轮次阈值（`COPILOT_TRIAGE_ASK_FROM_ROUND = 4` 起每条问题先问用户）、线程键（thread id + 最后一条评论 id）、「哪些还没表态」、四组裁决汇总、`triage` 块的 sanitize；无 IO/无时钟 |
 | `delivery-station.ts` | 交付站点（`precommit` / `commit` / `pr`）：类型、解析与缺省（缺失或非法一律读成 `precommit`）、严格度排序、「某站点放行哪些 `ShipCommandKind`」的纯判定与超站拦截文案（`stationShipProblem` / `STATION_SHIP_NEXT_STEPS`，只给用户能走的两条路、不给申诉假出路），以及 `declare_done` 的「到站」判定（`stationArrivalProblems`：`commit` 要工作区干净，`pr` 还要门禁**亲眼看到**成功的 `gh pr create`（`GateState.shippedKinds`）或 Copilot 周期已解析出的 PR 号）；无 fs、无时钟，goal 侧、plan 侧与 ship 门禁共用同一份枚举 |
 | `dialog-budget.ts` | 对话框的渲染行数预算——宿主不截断，长度必须自己管；选项行同样计入（`askChoice` 按 `choiceRows` 的实际行数收紧正文额度） |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |
@@ -522,7 +525,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `gate-command-tools.ts` | 命令层的**唯一注册入口**：工作流命令的注册包装、`/precommit` lane，以及 `/gate-status` / `/gate-bypass` / `/gate-mode` / `/gate-reset` / `/gate-lesson` 五个命令正文；命令 host 的 seam（`CommandHost` / `CommandContext`）也在这里；自己转注册 `gate-diagnosis-commands.ts` |
 | `gate-diagnosis-commands.ts` | 两个只读诊断命令面：`/gate-status` 内嵌的模型链读数（`modelDiagnosisLines`）与 `/gate-doctor` 正文；只做环境探测，不写状态、不喂裁决；由 `gate-command-tools.ts` 转注册 |
 | `gate-doctor.ts` | `/gate-doctor` 的只读体检：模型链、provider 允许名单、precommit runner、git 钩子、命令注册表 |
-| `gate-state.ts` | 门禁状态机与 sidecar 读写、未满足项计算、并发绑定合并；也存放门禁**自己观察到**的事实，如 `shippedKinds`（跑成功过的 ship 命令种类，供交付站点的到站判定用；loader 只保留已知词表、去重，读不出来就当没有） |
+| `gate-state.ts` | 门禁状态机与 sidecar 读写、未满足项计算、并发绑定合并；也存放门禁**自己观察到**的事实，如 `shippedKinds`（跑成功过的 ship 命令种类，供交付站点的到站判定用；loader 只保留已知词表、去重，读不出来就当没有）与 `precommit.lastFullPassTree`（一棵**真的**跑过全量 lane 的 tree；纯规则 `nextFullPassTree` 只在 lane 启动前那棵树 + full/full PASS 时写入、同一棵树的 FAIL 撤销，编辑降级不碰它——它是内容身份，不是活绑定） |
 | `gate-timings.ts` | `.pi/gate-timings.jsonl` 可观测日志，每个门禁事件一行 |
 | `git-memory.ts` | 上下文压缩后重新注入过滤、截断过的 git 状态快照 |
 | `git-rewrite.ts` | 识别「只改 message」的历史重写，解开 L5 与门禁互锁的死结 |
@@ -534,7 +537,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 
 | `judge-pane.ts` | judge 的跨进程契约常量（`RG_JUDGE_OPENER` / `_ID` / `_ROLE`，judge 侧据此认自己、并据此拿到 session 独占豁免）与 pane 探活（列不出来只算缺信息，绝不判死）；开/关/装饰 pane 已于 2026-09-05 全部搬进 `session-factory.ts` |
-| `judge-process.ts` | judge 身份（opener + **lane** 限定的确定性会话 id：同 opener 同 lane 跨 pane/轮/重启复用，换 opener 或换 lane 全新；`JudgeLane`、`shortObjectId` 与 `laneSuffix` 都在这里——会话 id 与工作目录共用同一个后缀渲染器，两者不可能落在不同 lane，不传 lane 则逐字节还原轮转前的形状）与 scratch 目录 helper；并把 judge 的 `$TMPDIR` 指向**每会话专属**的 scratch 目录（`judgeScratchDir`，以 session id 为键、随新 id 自动迁移）——reviewer 的临时 review worktree 落在那里，门禁按 `reviewScratchWorktrees` 在 pane 回收后精确回收 |
+| `judge-process.ts` | judge 身份（opener + **lane** 限定的确定性会话 id：同 opener 同 lane 跨 pane/轮/重启复用，换 opener 或换 lane 全新；`JudgeLane`、`shortObjectId` 与 `laneSuffix` 都在这里——会话 id 与工作目录共用同一个后缀渲染器，两者不可能落在不同 lane，不传 lane 则逐字节还原轮转前的形状）与 scratch 目录 helper（`judgeScratchDir`，以 session id 为键）——reviewer 的临时 review worktree 据 `$TMPDIR` 落在那里，门禁按 `reviewScratchWorktrees` 在 pane 回收后精确回收。**写入侧在 `session-factory.ts` 的 `buildSessionEnv`**：2026-09-14 前那里没有这个 key，于是 judge 实际把 worktree 建在系统 tmp 根目录、回收永远扫不到（两边必须指向同一个目录，`test/judge-scratch.test.ts` 就钉这一对） |
 | `judge-prompt.ts` | judge 会话的系统提示装配：角色定义 + 共同协议 |
 | `judge-pane-policy.ts` | **judge pane 何时回收的两套政策**（纯查表，2026-09-06 用户口径「保持两套、不统一」）：门禁自派的审计员寿命 = 开它的那一次调用（`runAuditRound` 的 `finally` 是它**唯一**的执行点）；agent 自派的 review pane 留到 `declare_done`。第二套**没有分支可执行** —— 它由工具拓扑保证（`judge_close` 只在 internalHost，agent 调不到；`declare_done` 的级联关按 opener 无条件扫），所以 declare_done 侧只用测试固定「对来源盲」，绝不加一个只是「问一下再照做」的装饰性调用点。`reclaimAuditLine` 决定一次回收该不该留下日志：做到了政策承诺的就沉默，**失败或没能确认 pane 已关**才出一行（`judge_close` 连 kill 失败也会清掉登记行，回执一丢那个 pane 就再也找不到了）。给 `JudgeEntry` 加 `dispatchedBy` 的方案已在模块头写明为何被否 |
 | `judge-rotation.ts` | judge transcript 复用的**单元 / 释放点 / 上限**（纯函数，2026-09-05 用户口径）：复用单元 = 一个**已批准**的 review 对象（编排会话取 plan hash、其余取 goal hash，都没有则稳定占位 `none`——`none` 同样受两条闸约束，不是无界桶）；释放点 = 对象 id 变了（惰性判定，下次派发时比对，不改 goal/plan 的写入路径）；上限 = judge 自报上下文 ≥ `JUDGE_ROTATION_CONTEXT_PERCENT`（= 统一的 `HANDOFF_PERCENT`，70——它自己那个 60 已于 2026-09-14 删除）或同对象派发满 `JUDGE_ROTATION_MAX_ROUNDS`（8）轮——**轮次在派发时计数**，所以放弃/重开的轮也算，读数缺失则 fail-open（只靠轮次兜底）。`decideJudgeRotation` 给出 lane（`{objectId, generation}`，由 `judge-process.ts` 的 `laneSuffix` 渲染进 session id 与工作目录）与写回注册表的簿记；`rotationHandoffTask` 组装轮转后首轮的压缩交接——交接正文一律由 `review-carryover.ts` 的 `buildReviewCarryover` 渲染，本模块不写第二份。`judgeRemembersPreviousRound`（2026-09-06）把「本轮 judge 还记不记得上一轮」这件**只有这里知道**的事导出给 `review-scope.ts`：`reuse` **且** 该 lane 的 transcript 确实存在才算记得；`first` 也算不记得（登记表没有的 lane，它的历史门禁担保不了），任何未知一律 `false` |

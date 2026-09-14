@@ -118,13 +118,37 @@ export function findingFingerprint(finding: ReviewFinding): string | undefined {
  * withhold a READY, never grant one. `/gate-bypass` is the user's own
  * authorization and outranks it, exactly as it does the checkpoint gate.
  *
+ * THE TREE, NOT JUST THE VERDICT (2026-09-14). The verdict alone is a LIVE
+ * binding, and the session's own edits invalidate it on purpose
+ * (`invalidateBindings`: PASS → NOT_RUN) — so an agent doing the documented
+ * thing (keep editing while the review runs) turned a genuine READY into
+ * BLOCKED/UNVERIFIED, with a message telling it to fix a precommit that had
+ * never failed. The question this function is really asking is "does THIS
+ * round's content have a full-lane PASS", and that is answerable without the
+ * live binding: `GateState.precommit.lastFullPassTree` keeps the tree a full
+ * lane passed (a git tree OID is a content identity, so it does not expire),
+ * and the round's own tree was registered at prepare time. Either source
+ * answers yes ⇒ verified. Both unknown ⇒ the live verdict decides, exactly as
+ * before.
+ *
  * PURE, so the rule is pinned without building a session.
  */
 export function readyLacksVerification(args: {
   precommitVerdict: string;
+  /** `precommit.lastFullPassTree` — the tree a full lane passed, if one is on record. */
+  lastFullPassTree?: string | undefined;
+  /** The tree this round judged (the prepared review target's tree). */
+  reviewedTree?: string | undefined;
   bypassActive: boolean;
 }): boolean {
-  return !args.bypassActive && args.precommitVerdict !== "PASS";
+  if (args.bypassActive) return false;
+  if (args.precommitVerdict === "PASS") return false;
+  const recorded = args.lastFullPassTree;
+  const reviewed = args.reviewedTree;
+  // Both sides must be known: an unknown tree proves nothing, and the
+  // direction is fail-closed (withhold).
+  return !(recorded !== undefined && recorded !== "" && reviewed !== undefined && reviewed !== "" &&
+    recorded === reviewed);
 }
 
 export function adjudicateReviewConclusion(input: StructuredConclusion): AdjudicatedReview {

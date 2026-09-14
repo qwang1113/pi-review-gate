@@ -10,6 +10,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, rmSync } from "node:fs";
 
 import {
   buildJudgePaneCommand,
@@ -27,6 +28,7 @@ import {
   type PaneRunner,
   type PaneTitleMemory,
 } from "../lib/session-factory.ts";
+import { judgeScratchDir } from "../lib/judge-process.ts";
 
 /** Fake tmux: a split prints %7, everything succeeds. */
 function happyRunner(seen: string[][] = []): PaneRunner {
@@ -112,7 +114,9 @@ test("combination 1 — a judge SPAWN: judge env, own colour, border line, verif
     RG_JUDGE_ROLE: "reviewer",
     RG_JUDGE_TASK: "/repo/.pi/judge-sessions/task-1.md",
     RG_JUDGE_STREAM: "/repo/.pi/review-stream/r.jsonl",
-  }, "exactly the five judge variables — the judge side reads these by name");
+    // Plus the scratch root the reaper reads back (test/judge-scratch.test.ts).
+    TMPDIR: judgeScratchDir("rg-reviewer-abc123"),
+  }, "exactly the judge variables — the judge side reads these by name");
 
   const flat = seen.map((a) => a.join(" "));
   assert.ok(flat.some((s) => s.includes("select-pane") && s.includes("-P")), "a border colour is set");
@@ -140,6 +144,7 @@ test("combination 2 — a judge RECOVER: same three keys, resume argv, no task f
     RG_JUDGE_OPENER: "session-child-1",
     RG_JUDGE_ID: "rg-reviewer-abc123",
     RG_JUDGE_ROLE: "reviewer",
+    TMPDIR: judgeScratchDir("rg-reviewer-abc123"),
   }, "no task and no stream on a recover — the transcript already holds the round");
   assert.ok(spawn.includes("--session-id"), "the transcript continues by id");
   assert.ok(!spawn.some((a) => a.startsWith("@")), "no argv message: nothing to re-deliver");
@@ -517,6 +522,10 @@ test("one recovery judgement: refuse unknown, closed, pane-less, alive and unrea
 test("the env builder is the only assembly point, and it omits what it was not given", () => {
   assert.deepEqual(buildSessionEnv({ kind: "judge", openerId: "o", judgeId: "j", role: "adviser" }), {
     RG_JUDGE_OPENER: "o", RG_JUDGE_ID: "j", RG_JUDGE_ROLE: "adviser",
+    // The one key that is not about addressing the judge: where its throwaway
+    // worktrees must go, so the gate can reclaim them (see the test in
+    // test/judge-scratch.test.ts for why the two sides must agree).
+    TMPDIR: judgeScratchDir("j"),
   });
   assert.deepEqual(buildSessionEnv({ kind: "orchestration-child", orchestrationId: "orch-1", stateVariant: "t2" }), {
     RG_ORCHESTRATION_ID: "orch-1", RG_GATE_MODE: "loop", RG_STATE_VARIANT: "t2",
@@ -525,6 +534,34 @@ test("the env builder is the only assembly point, and it omits what it was not g
   const built = buildSessionEnv({ kind: "successor", env: relay });
   assert.deepEqual(built, relay);
   assert.notEqual(built, relay, "a copy: the caller's object is never handed to tmux by reference");
+});
+
+test("opening a judge pane CREATES the scratch TMPDIR it hands the judge (reviewer P1)", async () => {
+  // The env key is only useful if the directory exists: `mktemp -d` under a
+  // missing `$TMPDIR` is ENOENT, so a judge told to build a throwaway worktree
+  // under it was handed a path nothing had made. The gate that will reclaim it
+  // (`reapReviewScratch`) only ever removed it, and removal of something that
+  // was never created is how the write side went missing unnoticed.
+  const judgeId = "rg-reviewer-mkdir-abc";
+  const scratch = judgeScratchDir(judgeId);
+  rmSync(scratch, { recursive: true, force: true });
+  assert.equal(existsSync(scratch), false, "the test starts from nothing");
+  try {
+    const outcome = await openSessionPane(happyRunner(), {
+      ownPane: "%1",
+      cwd: "/repo",
+      layout: "child-column",
+      role: { kind: "judge", openerId: "session-child-1", judgeId, role: "reviewer" },
+      command: JUDGE_COMMAND,
+    });
+    assert.equal(outcome.ok, true);
+    assert.ok(existsSync(scratch), "the pane's TMPDIR exists by the time the pane does");
+    // …and a non-judge pane has no TMPDIR to create.
+    const child = buildSessionEnv({ kind: "orchestration-child", orchestrationId: "orch-1", stateVariant: "t2" });
+    assert.equal(child.TMPDIR, undefined);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });
 
 test("the judge argv carries the read-only contract and the resume keys", () => {
