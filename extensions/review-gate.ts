@@ -473,7 +473,6 @@ import {
   isEnforcedMode,
   requestedModeFromEnv,
   GATE_MODE_DECISION_DIRECTIVE,
-  GATE_MODE_ENV,
   MODE_CONFIRM_TITLE,
   type TaskMode,
   type TaskModeSource,
@@ -2660,13 +2659,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       // it: `deps.runtime()` returns an empty runtime when the stored record
       // belongs to a different orchestration (lib/orchestrator-wiring.ts, B1),
       // so its id is "mine" by construction. A child holds none — it addresses
-      // one, and that address arrived in ITS environment.
+      // one, and that address arrived in ITS environment, blank or not.
       ...(kind === "orchestrator"
         ? { orchestrationId: orchestratorDeps.runtime().orchestrationId }
-        : { orchestrationId: (process.env[ORCHESTRATION_ID_ENV] ?? "").trim() }),
-      ...(process.env[STATE_VARIANT_ENV]?.trim()
-        ? { stateVariant: process.env[STATE_VARIANT_ENV]!.trim() }
-        : {}),
+        : { orchestrationId: process.env[ORCHESTRATION_ID_ENV] }),
+      // Blank handling is the FUNCTION's job (`handoffExtraEnvFor` trims and
+      // omits), pinned by its test — re-doing it here was the second copy the
+      // reviewer flagged as a Nit.
+      stateVariant: process.env[STATE_VARIANT_ENV],
     });
   }
 
