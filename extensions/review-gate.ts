@@ -3217,7 +3217,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * `orchestrator_wait`, so neither re-rings what the other already reported,
    * and the 10s→30s→60s backoff still bounds the repeats.
    */
-  function startSupervisionTimer(_ctx: ExtensionContext): void {
+  function startSupervisionTimer(): void {
     if (supervisionTimer || state.taskMode !== "orchestrator") return;
     supervisionTimer = setInterval(() => {
       try {
@@ -3299,7 +3299,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // This is the same judgement `decideRevival` already makes on its own
     // path (`handedOff: handedOffSession`); this path simply lacked it.
     if (handedOffSession) return;
-    startSupervisionTimer(ctx);
+    startSupervisionTimer();
     startRevivalTimer(ctx);
     // USER REQUIREMENT (shared with the loop path): the user aborted this
     // run with ESC — do not override an explicit human stop. The user's
@@ -4409,10 +4409,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   //     through askChoice, which renders the gate's one question template
   //     (lib/choice-dialog.ts) under the row budget.
 
-  /** Hard cap on one transcript notice, so nothing can flood the screen. */
-
-  // (The sensitive-path dialog cap moved to lib/consent-request-tools.ts with
-  // the tool that echoes the path — SENSITIVE_PATH_DIALOG_MAX_CHARS.)
+  // (There is deliberately NO cap on a transcript notice any more — see
+  // showToUser below. The sensitive-path DIALOG cap moved to
+  // lib/consent-request-tools.ts with the tool that echoes the path —
+  // SENSITIVE_PATH_DIALOG_MAX_CHARS.)
 
   /**
    * Put text in front of the USER, in the transcript, RIGHT NOW.
@@ -4468,6 +4468,18 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * The terminal's real column count, same source again (pi's
+   * `ProcessTerminal.columns`). Row counts are what prevent the flicker, but
+   * WIDTH decides how many rows a line wraps to: budgeting a 200-column
+   * window at the 80-column assumption cuts text that would have fit, which
+   * is the truncation the user asked us to stop doing.
+   */
+  function terminalColumns(): number {
+    const columns = Number(process.stdout?.columns) || Number(process.env.COLUMNS) || 0;
+    return Number.isFinite(columns) && columns > 0 ? columns : DIALOG_ASSUMED_COLUMNS;
+  }
+
+  /**
    * THE one dialog renderer (user decision, 2026-09-08): the gate's question
    * template with the row budget applied. Every dialog in this file — and
    * every dialog in the tool modules that inject this function — comes
@@ -4504,13 +4516,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     // this dialog draws — an interview's escape row included — comes out of
     // the title + body allowance, on the terminal we are actually on.
     const budget = dialogTextMaxLines(rows.length, terminalRows());
+    const columns = terminalColumns();
     // The title gets the budget first (it is the question), minus two rows so
     // the body is never cut down to nothing by a long title alone.
-    const titleFit = fitDialogTitle(spec.title, Math.max(1, budget - 2), pointer, DIALOG_ASSUMED_COLUMNS);
+    const titleFit = fitDialogTitle(spec.title, Math.max(1, budget - 2), pointer, columns);
     const titled: ChoiceSpec = titleFit.truncated ? { ...spec, title: titleFit.message } : spec;
     const fitted = opts.body === undefined
       ? undefined
-      : fitDialogMessage(titled.title, opts.body, pointer, DIALOG_ASSUMED_COLUMNS, budget).message;
+      : fitDialogMessage(titled.title, opts.body, pointer, columns, budget).message;
     return renderChoice(uiCtx.ui, titled, {
       ...(fitted === undefined ? {} : { body: fitted }),
       ...(opts.signal ? { signal: opts.signal } : {}),

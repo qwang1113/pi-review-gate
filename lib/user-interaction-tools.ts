@@ -169,6 +169,22 @@ export type ConsentToolDeps = Pick<
  * question (substring match fired on "grant me a few minutes"). The scope
  * must be stated in the dialog and the transcript, so consent is explicit.
  */
+/**
+ * The question's own first line, short enough to sit in a box title.
+ *
+ * WHY THE TITLE NEEDS IT (reviewer Nit, 2026-09-14): the question text lives in
+ * the budgeted BODY, and the reason box the template raises for
+ * `✎ 不选，我说明原因` renders `spec.title` ALONE — the box the user types
+ * their objection into would have said only 「问题 1/3」. One line of the
+ * question is charged to the same title budget and is never the thing that
+ * gets cut (the title is cut only when it overflows, and a two-line notice
+ * plus one headline does not).
+ */
+function questionHeadline(q: AskQuestion): string {
+  const first = q.text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
+  return first.length > 60 ? `${first.slice(0, 60)}…` : first;
+}
+
 function grantNotice(q: AskQuestion): string {
   if (!q.grantScope || !isGrantableScope(q.grantScope)) return "";
   return `\n\n⚠️ 回答此题即表示：你**明确授予项目经理「${q.grantScope}」代答权**（本 orchestration 内有效）。若不打算授权，请选拒绝/否。`;
@@ -305,11 +321,25 @@ export async function doAskUser(
         // the flicker again, from the one render path that had bypassed the
         // budget entirely. The full question is in the transcript above
         // (printed before the first box), and the body's cut points at it.
+        //
+        // THE GRANT NOTICE STAYS OUT OF THE BODY (reviewer P1, 2026-09-14).
+        // The body is cut from its TAIL, so appending the ⚠️ authorization
+        // notice after the question let a long question eat it — while
+        // picking the recommended row still minted the proxy grant. That is
+        // exactly the invisible-authorization hole the notice was added to
+        // close (2026-09-16 P1), so the notice rides in the TITLE: it is
+        // charged to the budget like everything else, but a two-line notice
+        // never overflows the title's share, and what a long body loses is
+        // only the tail of the question (whose full text is in the
+        // transcript).
         return deps.askChoice(
           uiCtx,
-          { ...choiceSpecOf(q), title: `问题 ${progressLabel(index, questions.length)}` },
           {
-            body: `${q.text}${grantNotice(q)}`,
+            ...choiceSpecOf(q),
+            title: `问题 ${progressLabel(index, questions.length)}：${questionHeadline(q)}${grantNotice(q)}`,
+          },
+          {
+            body: q.text,
             pointer: "（完整问题见上方消息）",
             signal,
             extraRows: [SKIP_REST_CHOICE],

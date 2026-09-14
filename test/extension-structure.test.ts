@@ -898,10 +898,24 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   // charged to the row budget but never cut by it, so a long question in the
   // title was an unbounded dialog — the one render path that could still
   // flicker.
-  assert.match(ASK_USER_SRC, /title: `问题 \$\{progressLabel\(index, questions\.length\)\}`/,
-    "the dialog title is the short progress label");
-  assert.match(ASK_USER_SRC, /body: `\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
+  // The title carries the progress label, the question's own headline (so the
+  // REASON box, which renders the title alone, says what is being answered)
+  // and the grant notice — all three charged to the title budget rather than
+  // sitting in the tail-cut body.
+  assert.match(
+    ASK_USER_SRC,
+    /title: `问题 \$\{progressLabel\(index, questions\.length\)\}：\$\{questionHeadline\(q\)\}\$\{grantNotice\(q\)\}`/,
+    "the dialog title carries the progress label, the headline AND the grant notice",
+  );
+  assert.match(ASK_USER_SRC, /body: q\.text,/,
     "the question text itself rides in the budgeted body");
+  // WHY THE NOTICE IS NOT IN THE BODY (reviewer P1, 2026-09-14): the body is
+  // cut from its TAIL, so appending ⚠️ after a long question let the question
+  // eat the authorization notice — while picking the recommended row still
+  // minted the proxy grant. The title is only cut when IT overflows, and a
+  // two-line notice never does.
+  assert.doesNotMatch(ASK_USER_SRC, /body: `\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
+    "the grant notice must never sit in the tail-cut body");
   assert.match(ASK_USER_SRC, /extraRows: \[SKIP_REST_CHOICE\]/,
     "the interview's own escape rides along as an extra row");
   assert.doesNotMatch(ASK_USER_SRC, /uiCtx\.ui!\.input!/,
@@ -1029,6 +1043,13 @@ test("FLICKER: every dialog goes through the row budget", () => {
   // The terminal's own row count is what pi reads too (see terminalRows()).
   assert.match(askChoiceBody, /dialogTextMaxLines\(rows\.length, terminalRows\(\)\)/,
     "the budget must follow the terminal we are actually on");
+  // WIDTH matters too: the row count prevents the flicker, but budgeting a
+  // 200-column window at the 80-column assumption cuts text that would have
+  // fit — the truncation this round exists to stop.
+  assert.match(askChoiceBody, /const columns = terminalColumns\(\);/,
+    "the wrap width comes from the terminal, not from a constant");
+  assert.match(SRC, /function terminalColumns\(\): number \{[\s\S]{0,200}process\.stdout\?\.columns/,
+    "…read from the same source pi reads");
   // …AND THE TITLE IS BOUNDED TOO: `ask_user` puts the question there, and an
   // unbounded title sizes the dialog no matter how short the body is.
   assert.match(askChoiceBody, /fitDialogTitle\(/,
@@ -4891,7 +4912,7 @@ test("R-3: an orchestrator never receives the LOOP's continuation — its criter
   const own = windowOf("function orchestratorSettled(", "\n  }", "orchestratorSettled");
   assert.match(own, /buildOrchestratorResume\(/, "and it has a continuation of its own");
   assert.match(own, /sessionExitProblems\(\)/, "built from the UNIFIED exit criterion");
-  assert.match(own, /startSupervisionTimer\(ctx\)/, "which also arms the background supervisor");
+  assert.match(own, /startSupervisionTimer\(\)/, "which also arms the background supervisor");
   assert.doesNotMatch(own, /unmetRequirements|LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/,
     "and never from the loop's gates");
 });
@@ -5775,7 +5796,7 @@ test("every wake-up path respects a retired session", () => {
   assert.ok(start > 0);
   const settled = SRC.slice(start, start + 2000);
   const guardAt = settled.indexOf("if (handedOffSession) return;");
-  const armAt = settled.indexOf("startSupervisionTimer(ctx)");
+  const armAt = settled.indexOf("startSupervisionTimer()");
   assert.ok(guardAt > 0,
     "agent_settled must not revive a session that handed its orchestration over — this is the defect that put two project managers on one plan");
   assert.ok(armAt > 0 && guardAt < armAt, "the guard runs BEFORE the timers are re-armed");
