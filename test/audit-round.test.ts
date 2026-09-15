@@ -26,6 +26,7 @@ import {
   ADVICE_ROUND_SPEC,
   GOAL_AUDIT_SPEC,
   PLAN_AUDIT_SPEC,
+  QUALITY_ROUND_SPEC,
   REVIEW_ROUND_SPEC,
   specForRound,
   type PendingAudit,
@@ -498,6 +499,10 @@ test("specForRound: the role decides, except for the two that share one judge", 
   assert.equal(specForRound("adviser"), ADVICE_ROUND_SPEC);
   assert.equal(specForRound("goal-auditor", "goal"), GOAL_AUDIT_SPEC);
   assert.equal(specForRound("goal-auditor", "plan"), PLAN_AUDIT_SPEC);
+  // The quality round is its own kind on the SAME engine (2026-09-18): its own
+  // role, the review's binding, and no dependence on a pending audit.
+  assert.equal(specForRound("quality-auditor"), QUALITY_ROUND_SPEC);
+  assert.equal(QUALITY_ROUND_SPEC.binding, "round-and-content");
   // No pending audit ⇒ nothing this round could be recorded against. The kind
   // is never guessed from the role alone.
   assert.equal(specForRound("goal-auditor"), undefined);
@@ -517,6 +522,8 @@ interface FakeState {
   auditLog: string[];
   goalDrafts: string[];
   reviewRounds: number;
+  /** Quality rounds recorded through the engine (2026-09-18). */
+  qualityRounds: number;
   /** undefined = "could not record right now" (no usable tool context). */
   recordResult: string | undefined;
   /**
@@ -537,6 +544,7 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     auditLog: [],
     goalDrafts: [],
     reviewRounds: 0,
+    qualityRounds: 0,
     recordResult: "recorded",
     checkpointAt: CHECKPOINT_AT,
     ...over,
@@ -568,6 +576,10 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
       state.reviewRounds += 1;
       return state.recordResult;
     },
+    recordQuality: async () => {
+      state.qualityRounds += 1;
+      return state.recordResult;
+    },
   };
   return { state, deps };
 }
@@ -593,6 +605,43 @@ test("settle/review: the round is recorded and its cursor consumed exactly once"
   // Silence, not a fail-closed notice: it IS recorded, just not by this call.
   assert.equal(second.status === "miss" && second.text, undefined);
   assert.equal(state.reviewRounds, 1, "one report, one record");
+});
+
+test("settle/quality: the quality round is recorded through the same engine, once", async () => {
+  const { state, deps } = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "quality-auditor", roundSeq: 2, lastReportId: "rep-round-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
+  });
+  const first = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(first.status, "recorded");
+  assert.equal(first.status === "recorded" && first.kind, "quality");
+  assert.equal(state.qualityRounds, 1);
+  // The quality round registers no pending entry — forgetting one here would
+  // be bookkeeping for a contract this round never signed.
+  assert.deepEqual(state.forgotten, []);
+  assert.equal(state.reviewRounds, 0, "a quality round is not a review round");
+  assert.deepEqual(state.cursors, ["rep-2"]);
+
+  state.entry = { ...state.entry!, lastReportId: "rep-2" };
+  const second = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(second.status, "miss");
+  assert.equal(second.status === "miss" && second.reason, "already-consumed");
+  assert.equal(state.qualityRounds, 1, "one report, one record");
+});
+
+test("settle/quality: a report older than this round's checkpoint is refused (content binding)", async () => {
+  // The stale-report P0 the review binding was built for applies verbatim to
+  // the quality round: its READY is what UNLOCKS the functional reviewer, so a
+  // leftover report recorded here would release a reviewer onto content no
+  // quality judge ever read.
+  const { state, deps } = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "quality-auditor", roundSeq: 2, lastReportId: "rep-round-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "READY", at: "2026-09-05T10:00:00.000Z" })],
+  });
+  const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(settled.status, "miss");
+  assert.equal(state.qualityRounds, 0);
+  assert.deepEqual(state.cursors, []);
 });
 
 // THE P0 AT THE RECORDING LEVEL (2026-09-05). The selector tests above pin the

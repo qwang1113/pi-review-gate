@@ -232,6 +232,10 @@ async function applyGlobalModelConfig() {
   const cfgPath = join(homedir(), ".pi", "review-gate.json");
   const DEFAULT_AGENTS = {
     reviewer: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
+    // The quality judge is its own SLOT at the reviewer's tier (2026-09-18,
+    // user decision): same chain by default, configured separately, so it can
+    // be moved to a cheaper model without touching the functional gate.
+    "quality-auditor": { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
     adviser: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
     arbiter: { auto: false, slots: ["onekey/gpt-5.6-sol:max"] },
     "goal-auditor": { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },

@@ -288,6 +288,10 @@ test("the happy path registers the reviewed range and reports it", async () => {
     head: "hhhhhhhhhhhh",
     tree: "tttttttttttt",
     scope: { range: "pppppppppppp..hhhhhhhhhhhh", kind: "full" },
+    // The changed files ride the target: the quality precondition is decided
+    // at DISPATCH time and must not re-run `git diff` to learn what this round
+    // touched (2026-09-18).
+    files: ["lib/b.ts", "lib/a.ts"],
   }]);
   // The findings stream is a real, created directory — an adviser or reviewer
   // appends to it while the round runs.

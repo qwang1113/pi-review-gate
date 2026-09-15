@@ -14,7 +14,7 @@
 # 执行模型：独立 pi 进程子会话 + commit 审核（execution-model）
 
 本文记录 pi-review-gate 的 review 执行模型（2026-08-28 起）——judge
-角色（reviewer / adviser / goal-auditor）以**非交互 pi 进程**
+角色（reviewer / quality-auditor / adviser / goal-auditor）以**非交互 pi 进程**
 （`pi -p --session-id <id>`）运行，审核单元为 "checkpoint commit"。
 它是实现与审核的参照；流程约定见 `docs/dev-flow.md`，Judge 角色契约见
 `docs/judge-protocol.md`，代码规范见 `docs/coding-standards.md`。
@@ -174,7 +174,8 @@ opener 凭它记录结论；
 - **等待期的可见性（2026-08-29 起，默认开启）**：耗时工具通过 `execute` 的第
   4 个参数 `onUpdate` 发**进度快照**（`lib/progress-stream.ts`，节流 2s）：
   门禁内部等待（每次探测重发 findings 计数与状态）、`judge_submit`
-  的送审链（precommit → checkpoint → prepare → spawn，逐步报）、
+  的送审链（precommit → checkpoint → prepare → 质量轮 / 直接 spawn，逐步报；
+  质量轮 READY 后由门禁自动派 reviewer，这一步也在链里）、
   `run_precommit`（runner 日志作为步骤尾部）、`declare_done`（门禁复检 →
   合并）、`copilot_review`（每次网络调用一
   步；等待本身不在这里——它归后台监视器）。进度只进 partialResult，**不进** agent 拿到的 tool result——两条通

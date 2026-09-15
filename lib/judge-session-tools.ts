@@ -266,7 +266,16 @@ export interface JudgeSessionToolDeps {
 // One definition per parameter, shared by the tools: a role enum that
 // drifts between two of them is exactly the kind of silent inconsistency this
 // move is supposed to make impossible.
-const ROLE_PARAM = Type.Optional(Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }));
+// `quality-auditor` IS addressable here on purpose: the agent never ASKS for
+// that round (judge_submit's role enum deliberately omits it — the chain
+// dispatches it), but the round can ask the agent a question, and waiting on
+// or answering a judge you cannot name would be a dead end.
+const ROLE_PARAM = Type.Optional(Type.Enum({
+  reviewer: "reviewer",
+  "quality-auditor": "quality-auditor",
+  adviser: "adviser",
+  "goal-auditor": "goal-auditor",
+}));
 const SESSION_ID_PARAM = Type.Optional(Type.String({ description: "Judge id (its session id); prefer role" }));
 const REPO_PARAM = Type.Optional(Type.String({
   description: "Absolute repo path (required once the session edited several repos)",
@@ -321,7 +330,7 @@ function addressJudge(
   const role = params.role ? String(params.role) : undefined;
   const judgeId = params.sessionId ? String(params.sessionId) : undefined;
   if (!role && !judgeId) {
-    return { ok: false, text: `review-gate: ${toolName} needs a role (reviewer / adviser / goal-auditor).` };
+    return { ok: false, text: `review-gate: ${toolName} needs a role (reviewer / quality-auditor / adviser / goal-auditor).` };
   }
   // Gate-self path (2026-09-08): ONLY when the direct caller passes
   // `gateSelf === true` as a FUNCTION ARGUMENT — i.e. the gate's own audit

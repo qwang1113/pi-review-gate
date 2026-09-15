@@ -211,7 +211,12 @@ export function resolveGateMode(input: {
   kind?: JudgeKind | undefined;
 }): GateMode {
   const role = (input.judgeRole ?? "").trim().toLowerCase();
-  if (role === "reviewer" || role === "adviser" || role === "arbiter") return "review";
+  // The quality judge runs under the SAME reporting shell as the reviewer:
+  // same read-only discipline, same findings stream, same judge_conclude. It
+  // differs in what it judges (its own role body says so), not in how it
+  // reports — a fourth shell would be a second implementation of the same
+  // contract.
+  if (role === "reviewer" || role === "quality-auditor" || role === "adviser" || role === "arbiter") return "review";
   if (role === "goal-auditor") return input.kind === "plan" ? "plan" : "goal";
   if (role !== "") return "loop";
   return input.taskMode ?? "undecided";

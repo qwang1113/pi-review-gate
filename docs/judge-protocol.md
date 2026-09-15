@@ -1,8 +1,10 @@
 # Judge 角色统一协议（judge-protocol）
 
-goal-auditor（目标审核者）、reviewer（代码审核者）、adviser（建议者）三个
-角色共享同一条执行契约，只是任务不同。本协议作为**系统提示词**在子会话
+goal-auditor（目标审核者）、reviewer（代码审核者）、quality-auditor（代码质量审核者）、
+adviser（建议者）四个角色共享同一条执行契约，只是任务不同。本协议作为**系统提示词**在子会话
 启动时一次性注入，不随每轮任务重复；主会话只在发现走偏时直接 send 纠正。
+
+（`arbiter` 是第五个 judge 角色，走独立的仲裁入口，不在这四个的回合链里。）
 
 ## 运行形态
 
@@ -97,10 +99,11 @@ schema 和上面那条「交卷即停」就已经知道该怎么交卷。）
 | 角色 | 参数 | 为什么 |
 | --- | --- | --- |
 | `reviewer` | `verdict` + `findings[]` + `cwd`（+ `docSync`） | 结论是裁决与发现；没有写散文的地方，比任何提示词都管用 |
+| `quality-auditor` | `verdict` + `findings[]` + `cwd` | 同上 |
 | `goal-auditor` | `verdict` + `findings[]` + `cwd` | 同上 |
 | `adviser` | 上述 + `notes` | 它的产出**就是**正文，opener 会引用（`conclusionExcerpt`） |
 
-reviewer / goal-auditor 传 `notes` 会被**显式拒绝**（提示「本角色不接受 notes，
+reviewer / quality-auditor / goal-auditor 传 `notes` 会被**显式拒绝**（提示「本角色不接受 notes，
 请把结论放进 findings」），且该拒绝**不占本轮交卷额度**——立刻不带 notes 再调
 一次即可。
 

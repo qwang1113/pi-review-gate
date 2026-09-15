@@ -211,9 +211,25 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
    - **the checkpoint commit** — the only commit allowed before a READY; the
      gate stamps the checkpoint marker on the subject and records where it
      landed. The review unit is the immutable range `baseline..HEAD`.
-   - **the range + the findings stream + the reviewer's task text**.
-   - **the dispatch** — ONE reviewer in its own pane (a living pane takes every
-     new round through its channel). You never pass a session id, a title or a
+   - **the range + the findings stream + the task text**.
+   - **the QUALITY round** (2026-09-18) — when the round carries code, the
+     chain dispatches `quality-auditor` FIRST, on the same commit range: it
+     judges the code itself (philosophy, architecture, correctness,
+     performance — then simplicity, readability, maintainability) against
+     `docs/code-quality-rules.md`, a language-neutral checklist whose
+     cross-repository clauses make the whole repo its reference. P0/P1 blocks.
+     A finding whose fix needs PRE-EXISTING code changed goes to the USER
+     through `ask_user` (the judge asks it; do not widen the round yourself).
+     The judge can ask YOU a question too — `judge_wait`/`judge_answer`
+     address it by role.
+   - **the dispatch** — ONE judge in its own pane (a living pane takes every
+     new round through its channel). Once the quality round passes, the gate
+     dispatches the reviewer **automatically**: do NOT call `judge_submit` a
+     second time for the same round, and do not try to name `quality-auditor`
+     (it is not in the role enum — the gate routes to it). A quality BLOCKED
+     means the reviewer never runs, the standard report wakes you, and the
+     full lane still verifying that content is ABORTED.
+     You never pass a session id, a title or a
      directory. The `subagent` dispatch surface was retired 2026-09-06 with the
      pi-subagents companion — judge roles dispatch ONLY through `judge_submit`.
 
@@ -414,7 +430,7 @@ Design record: `docs/execution-model.md` + `docs/judge-protocol.md`. The
 L1/L2 execution tiers (`recon` / `fixer`) were retired with the pi-subagents
 companion (their dispatch mechanism); the gate ships the judging tier only:
 
-- **Judgment** (reviewer / adviser / arbiter / goal-auditor, `max` thinking) — the only
+- **Judgment** (reviewer / quality-auditor / adviser / arbiter / goal-auditor, `max` thinking) — the only
   tier whose verdicts may be recorded. Never delegate the verdict to a
   cheaper model.
 - No split review of any kind: one reviewer, one commit range, one verdict.

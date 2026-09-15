@@ -145,6 +145,7 @@ export const JUDGE_COMMON_PROTOCOL = `## 运行形态（独立 pane）
 /** Judge roles that run as independent pi processes (not subagents). */
 export const JUDGE_ROLES: readonly string[] = Object.freeze([
   "reviewer",
+  "quality-auditor",
   "adviser",
   "goal-auditor",
 ]);

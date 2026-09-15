@@ -37,30 +37,17 @@ Inspect the actual diff or changed files. Verify:
   (whitespace, an unrelated appended line) is a **P1 finding**.
 - No unintended side effects or regressions.
 - The change is minimal and readable.
-- **Minimalism — judge necessity, not just correctness** (the rules live in `docs/coding-standards.md` §5, which is their only substantive copy — do not re-derive them here; the severity map travels with that section). Deletable code left in place, a new dependency with no written justification, or a re-implementation of something the repo / stdlib / platform / an installed dep already covers is a **P1**; other minimalism observations are P2. Verify before asserting: read the helper you claim covers it, name the lines that could go, quote the missing justification.
-- **Architecture, abstraction, modularity, naming — a first-class part of
-  reviewing a DIFF, not just of reviewing a whole codebase.** Judge where the
-  change LANDED, not only whether it works:
-  - Does the new code sit in a module whose responsibility can be stated in
-    one sentence, or was it added to whatever file was already open? Piling a
-    new concern into an already-large file because it is "just +100 lines" is
-    how a 600-line file becomes an 8000-line one — each step defensible, the
-    result indefensible. When a change adds a NEW responsibility to a file
-    that already has several, that is a **P1**.
-  - Is the seam right? A helper that needs five parameters from its caller's
-    private state usually belongs on the other side of the boundary; logic
-    that cannot be tested without spinning up the host is usually logic that
-    should have been a pure function.
-  - Do the names say what the thing IS? A module, function or type whose name
-    does not predict its contents costs every future reader a read-through.
-  - Is it duplicated? A third copy of the same rule (especially a rule the
-    gate ENFORCES) is a **P1**: the copies will diverge, and the divergence
-    will be a security hole rather than a typo.
-  Severity: an outright architectural regression (new responsibility in an
-  overloaded file, an enforcement rule copy-pasted, an untestable seam) is a
-  **P1**. A missed opportunity to factor something out is a P2. Say which
-  module you would have expected the code in — a finding the author cannot
-  act on is not a finding.
+- **Code quality itself is NOT this round's question** (2026-09-18). A
+  separate `quality-auditor` judge runs BEFORE you, on the SAME commit range,
+  and owns the whole code-quality checklist — `docs/code-quality-rules.md`
+  (philosophy, architecture, abstraction, seams, naming, duplication,
+  complexity, performance, and the minimalism rules of
+  `docs/coding-standards.md` §5, whose substance stays in that section). It
+  concluded READY on this exact content before you were dispatched at all.
+  Do not re-audit what it already judged: two judges billing the same finding
+  is noise, and a second verdict on the same question makes neither one
+  decisive. Re-raise one of its points ONLY when it actually CAUSES a
+  functional error, and say which point you are reopening and why.
 - Ship text language (L5, reviewer-enforced): commit messages and PR
   title/description for this change must be English — **any non-Latin letter
   is a P1 finding** (one rule, 2026-08-29: the old "majority of the letters"
