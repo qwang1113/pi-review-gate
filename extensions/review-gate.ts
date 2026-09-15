@@ -6476,8 +6476,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // survive — leaves NO PASS standing for content it never finished.
       if (controller.signal.aborted) {
         const st = stateForRepo(root);
+        // REPLACED WHOLESALE, which is what revokes the coverage record: the
+        // fresh object simply has no `lastFullPassTree`, `testScope` or PASS
+        // fingerprint. (An earlier version also ran `delete
+        // st.precommit.lastFullPassTree` right after this — dead code against
+        // the object it had just built, and it made the revocation look like
+        // the delete's doing. reviewer Nit, 2026-09-15.)
         st.precommit = { verdict: "NOT_RUN", fingerprint: null, at: new Date().toISOString(), mode: "full" };
-        delete st.precommit.lastFullPassTree;
         persistRepo(ctx as unknown as ExtensionContext, root);
         log(`precommit lane for ${root} aborted — nothing recorded for the content it was verifying`);
         return;
@@ -7544,7 +7549,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * audits. This function only translates the outcome into the shape the two
    * callers here already speak.
    */
-  async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean; bindingNote?: string; scope?: ScopeStampRecord } | undefined> {
+  async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean; bindingNote?: string; handOffNote?: string; scope?: ScopeStampRecord } | undefined> {
     try {
       const entry = judgeHierarchy[sessionId];
       if (!entry?.role) return undefined;
@@ -7560,10 +7565,14 @@ export default function reviewGate(pi: ExtensionAPI) {
           // A quality round OWNS the functional round that is waiting on it:
           // releasing it (or killing it) is part of the record landing, not a
           // follow-up the agent has to remember (philosophy one).
-          const handOff = await handOffQualityIfAny(settled.kind, childRoot);
+          const handOffNote = await handOffQualityIfAny(settled.kind, childRoot);
           return {
-            text: [settled.text, handOff].filter((t): t is string => typeof t === "string" && t !== "").join("\n") || undefined,
+            text: settled.text,
             recorded: true,
+            // Its OWN field, not a second line of `text`: the standard report
+            // prints the recorded note first-line-only, so a hand-off appended
+            // there would never be read (reviewer P1, 2026-09-15).
+            ...(handOffNote === undefined ? {} : { handOffNote }),
             // Travels separately: the wake-up prints the record's first line
             // only, and a weaker binding nobody reads about is a silent one.
             ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
@@ -7666,6 +7675,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         streamPath: entry.streamPath,
         recordedNote: conclusion.recorded ? conclusion.text : undefined,
         bindingNote: conclusion.bindingNote,
+        // The hand-off reported on ITS own line: folded into the recorded note
+        // it would be invisible (that line prints first-line-only), and the
+        // agent would wait for a reviewer the gate failed to start.
+        handOffNote: conclusion.handOffNote,
         scope: conclusion.scope,
         unrecorded: !conclusion.recorded && entry.role !== "adviser" ? true : undefined,
         openQuestions: freshQuestions.map((q) => ({ title: q.title, options: q.options, requestId: q.requestId })),
@@ -8381,9 +8394,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           // a hand-off wired into the sweep alone would never run, leaving the
           // held functional round stranded forever while the reply told the
           // agent not to re-submit.
-          const handOff = await handOffQualityIfAny(settled.kind, root);
+          const handOffNote = await handOffQualityIfAny(settled.kind, root);
           return {
-            text: [settled.text, handOff].filter((t): t is string => typeof t === "string" && t !== "").join("\n") || undefined,
+            text: settled.text,
+            // Its own field, so `judge_wait`'s wake-up prints it too (the
+            // recorded note is first-line-only).
+            ...(handOffNote === undefined ? {} : { handOffNote }),
             verdict: settled.verdict,
             hasVerdict: settled.hasVerdict,
             ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),

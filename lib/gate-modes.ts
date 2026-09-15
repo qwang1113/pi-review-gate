@@ -17,7 +17,7 @@
  * three internal reporting-shell modes. plan/goal are the two task templates
  * of the goal-auditor role: they share the reporting-shell tool policy and
  * completion discipline and differ only in framing. review covers the
- * reviewer/adviser/arbiter roles, whose role-specific bodies stay in
+ * reviewer/quality-auditor/adviser/arbiter roles, whose role-specific bodies stay in
  * agents/<role>.md — this entry owns only the shared shell discipline.
  */
 

@@ -6189,9 +6189,15 @@ test("2026-09-15: the quality round runs FIRST — routing, hand-off, preconditi
   // `already-consumed`. Wired into the sweep alone, a quality round closed by
   // a wait stranded its held functional round forever.
   assert.match(SRC, /async function handOffQualityIfAny\(kind: string \| undefined, root: string\)/, "one hand-off decision exists");
-  assert.match(SRC, /const handOff = await handOffQualityIfAny\(settled\.kind, childRoot\);/, "the settle sweep hands off");
-  assert.match(SRC, /const handOff = await handOffQualityIfAny\(settled\.kind, root\);/, "judge_wait's settleRound does too");
+  assert.match(SRC, /const handOffNote = await handOffQualityIfAny\(settled\.kind, childRoot\);/, "the settle sweep hands off");
+  assert.match(SRC, /const handOffNote = await handOffQualityIfAny\(settled\.kind, root\);/, "judge_wait's settleRound does too");
   assert.doesNotMatch(SRC, /settled\.kind === "quality" \? await handOffAfterQuality/, "no second copy of the kind test");
+  // …and it travels as its OWN field: the standard report prints the recorded
+  // note first-line-only, so a hand-off appended to that text is invisible to
+  // the one reader it exists for (reviewer P1, 2026-09-15).
+  assert.equal((SRC.match(/handOffNote/g) ?? []).length >= 4, true, "the hand-off note travels as a field on both paths");
+  assert.doesNotMatch(SRC, /text: \[settled\.text, handOff\]/, "never folded into the recorded note");
+  assert.match(SRC, /handOffNote: conclusion\.handOffNote,/, "the settle sweep prints it");
 
   // ── 4. THE LANE ABORT: a stopped lane is not a result ───────────────────
   const laneAt = SRC.indexOf("function startPrecommitBeside(");
@@ -6201,7 +6207,16 @@ test("2026-09-15: the quality round runs FIRST — routing, hand-off, preconditi
   assert.match(lane, /new AbortController\(\)/, "the lane owns a kill switch");
   assert.match(lane, /undefined, controller\.signal\)/, "…and hands it to the runner (AbortSignal reaches the process)");
   assert.match(lane, /if \(controller\.signal\.aborted\) \{/, "an aborted lane is recognized before anything is recorded");
-  assert.match(lane, /delete st\.precommit\.lastFullPassTree;/, "the coverage record is revoked — nothing may ship on it");
+  // The REVOCATION is the wholesale replacement: the fresh object carries no
+  // `lastFullPassTree` / `testScope` / PASS fingerprint. A separate `delete`
+  // after it was dead code against the object just built (reviewer Nit,
+  // 2026-09-15), so this asserts the SHAPE that actually does the work.
+  assert.match(
+    lane.slice(lane.indexOf("if (controller.signal.aborted) {")),
+    /st\.precommit = \{ verdict: "NOT_RUN", fingerprint: null,[^}]*\};/,
+    "nothing may ship on the aborted lane's content",
+  );
+  assert.doesNotMatch(lane, /delete st\.precommit\.lastFullPassTree;/, "no dead delete behind the replacement");
   // It returns BEFORE the failure notice: a FAIL nobody ran would be blamed on
   // a change that was never verified (the user's rule: a quality failure ends
   // precommit, it does not turn it into a failure).

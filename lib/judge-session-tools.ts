@@ -232,6 +232,15 @@ export interface JudgeSessionToolDeps {
     /** The round ran under a weaker binding — surfaced, never buried. */
     bindingNote?: string;
     /**
+     * What the gate did because the round ended (the quality round's hand-off:
+     * a released reviewer, a dropped round, a stopped precommit lane).
+     *
+     * Its own field, and its own line in the report: the recorded note is
+     * shown first-line-only, so a sentence appended to its tail is invisible
+     * (reviewer P1, 2026-09-15).
+     */
+    handOffNote?: string;
+    /**
      * The scope the round stamped on its own report (range + full/incremental).
      *
      * Carried here for the same reason `bindingNote` is: BOTH wake-up paths
@@ -894,6 +903,10 @@ export async function doWait(
         // Its own line: the recorded note is printed first-line-only, so a
         // weaker binding announced INSIDE that note would never be read.
         ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
+        // The hand-off's own line — the recorded note above prints
+        // first-line-only, so "I dispatched the reviewer" / "that dispatch
+        // failed, re-submit" has to travel where the wake-up actually looks.
+        ...(settled.handOffNote === undefined ? {} : { handOffNote: settled.handOffNote }),
         // What the round says it reviewed — the same line the settle sweep
         // prints, so which path woke the opener never changes what it learns.
         ...(settled.scope === undefined ? {} : { scope: settled.scope }),
