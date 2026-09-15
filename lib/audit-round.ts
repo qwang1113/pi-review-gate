@@ -238,10 +238,10 @@ export function selectRoundReport(
   // (reviewer P1, 2026-09-05; user decision the same day). No `checkpoint`
   // record in the gate's STATE — which is the session's own sidecar, empty at
   // the start of every session, whatever git history holds — is the round
-  // `prepare_review` calls the "audit the
-  // exit goal" round: nothing is frozen, the range is empty (HEAD..HEAD) and
-  // the reviewer judges whether the task is DONE. There is no content for the
-  // verdict to lag behind — and refusing it does not fail closed in any useful
+  // `prepare_review` treats as having no content STAMP: there is no
+  // `checkpoint.at` for a verdict to lag behind, whatever range that round
+  // resolved (since 2026-09-15 it may be a real branch-base..HEAD delivery).
+  // Refusing it does not fail closed in any useful
   // sense, it makes that round UNCLOSABLE: the recorder never records, the
   // probe never ends the round, and a READY can never be reached. The round
   // binding and the cursor still apply, so a leftover report from an earlier
@@ -369,9 +369,10 @@ export interface SettleAuditRoundDeps {
    * the checkpoint is when that content came into existence. Only the review
    * binding reads it (`roundBindingFor`), so a goal or plan audit dispatched
    * before any checkpoint exists is unaffected. `undefined` (no checkpoint on
-   * record) is the "audit the exit goal" round — nothing is frozen, so there is
-   * no content for a verdict to lag behind and the round binding carries it
-   * alone. Refusing that round instead would make it unclosable, not safe
+   * record) means no content STAMP: there is no moment for a verdict to lag
+   * behind, so the round binding carries it alone. The round's RANGE is a
+   * separate question — `prepare_review` may resolve a branch base for it
+   * (2026-09-15). Refusing that round instead would make it unclosable, not safe
    * (reviewer P1 + user decision, 2026-09-05).
    */
   checkpointAt(root: string): string | undefined;
@@ -550,8 +551,9 @@ export async function settleAuditRound(
   // A DEGRADED BINDING ANNOUNCES ITSELF, in the same text that carries the
   // verdict it let through (project manager, 2026-09-05).
   //
-  // The exception below the content check is legitimate — a repo with no
-  // checkpoint has no content for a verdict to lag behind — but an exception
+  // The exception below the content check is legitimate — a session with no
+  // checkpoint record has no content TIMESTAMP for a verdict to lag behind
+  // (its range may still be a real one, see `prepare_review`) — but an exception
   // only the code knows about is how "this round was bound by round and cursor
   // alone" quietly becomes what everyone assumes every round is. The condition
   // here is EXACTLY the one `selectRoundReport` skipped on, so the sentence

@@ -381,6 +381,7 @@ import { awaitRoundReport } from "../lib/judge-lifecycle.ts";
 // existed only to carry text that had to be parsed back into a verdict, and a
 // conclusion arrives structured now.
 import { registerReviewPrepareTools } from "../lib/review-prepare-tools.ts";
+import { squashPointBaseline, branchBaseBaseline } from "../lib/review-baseline.ts";
 import { registerAdvisoryPrepareTools } from "../lib/advisory-prepare-tools.ts";
 
 // The L7 Copilot tools moved the same way: this file wires them, the module
@@ -8770,6 +8771,14 @@ export default function reviewGate(pi: ExtensionAPI) {
             };
           })
           .filter((row) => row.file !== ""),
+      // The two history probes the baseline resolution consults: where a
+      // rewritten chain still holds the reviewed content, and where the branch
+      // itself starts. Both are decisions OF the prepare module, so both go
+      // through this seam (lib/review-prepare-tools.ts's `ReviewPrepareGit`)
+      // instead of being called behind its back.
+      branchBaseBaseline: (root) => branchBaseBaseline(root),
+      squashPointBaseline: (root, reviewedTree, startSha) =>
+        squashPointBaseline(root, reviewedTree, startSha),
       worktreeClean: (root) =>
         execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }).trim() === "",
     },

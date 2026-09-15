@@ -696,16 +696,19 @@ goal 审计就会永远等不到结论。
 
 **唯一的例外，而且它不是放水（2026-09-05，reviewer 的 P1 + 用户当场裁决）**：**门禁状态里一条
 checkpoint 记录都没有**时不拒绝（注意是门禁状态、不是 git 历史 —— 记录在会话自己的 sidecar 里，
-换 session 即从空开始）。那正是 `prepare_review` 明确支持的「audit the exit goal」轮 ——
-空范围（HEAD..HEAD）、要求工作区干净、reviewer 判的是任务是否完成而不是 diff；这种轮次里**没有
-被冻结的内容**可供裁决滞后。对它 fail-closed 换不来安全，只换来**不可收敛**：记录侧永远不记、
-探测侧（本轮改动后）永远不收口、READY 永远拿不到。此时 round 绑定与游标照常强制，上一轮遗留的
-report 仍然被拒。
+换 session 即从空开始）。退化的原因与「有没有内容」无关（2026-09-15）：缺的是 `checkpoint.at`
+这个**可比较的时间戳**。范围则由分支自己决定：无 checkpoint 记录时 `prepare_review` 取分支基点，
+于是这一轮可能是 `HEAD..HEAD`（分支就停在基点上 —— 那就是它明确支持的「audit the exit goal」轮：
+要求工作区干净、reviewer 判任务是否完成而不是 diff），也可能是基点..HEAD 这份**真实交付**。
+两种情况下都**没有内容诞生的时刻**可供比较，内容判据因此不适用；对它 fail-closed 换不来安全，
+只换来**不可收敛**：记录侧永远不记、探测侧（本轮改动后）永远不收口、READY 永远拿不到。
+此时 round 绑定与游标照常强制，上一轮遗留的 report 仍然被拒。
 
 **而且这条例外会自报家门（2026-09-05，项目经理的约束）**：走这条路记下的裁决，返回给 agent 的
 文本里必带一行「本轮绑定说明：**门禁状态里**还没有可比的 checkpoint 记录（新会话 + 干净 worktree
-的第一轮就是这种情况，与 git 历史里有多少 checkpoint 提交无关），这是 exit-goal 空范围轮 ——
-内容时间判据**不适用**，本轮裁决只由 round 与 cursor 绑定」。措辞刻意说的是**门禁状态**而不是
+的第一轮就是这种情况，与 git 历史里有多少 checkpoint 提交无关）—— 本轮没有**内容诞生的时刻**可比
+（范围可能是空的 HEAD..HEAD，也可能是分支基点..HEAD 的真实交付），所以内容时间判据**不适用**，
+本轮裁决只由 round 与 cursor 绑定」。措辞刻意说的是**门禁状态**而不是
 「本仓库」：checkpoint 记录存在会话自己的 sidecar 里、每换一个 session 就从空开始，所以一个 git
 历史里有几十个 checkpoint 提交的仓库照样会走到这条分支（reviewer 的 Nit，2026-09-05）。
 它由 `REVIEW_ROUND_SPEC.degradedContentBinding` 提供措辞、由引擎在**与跳过判据完全相同的条件**下

@@ -37,6 +37,14 @@
  * FAIL-SAFE. Any missing input (no previous READY tree, unreadable git, an
  * unparseable diffstat) yields `full`. Incremental is never the default and is
  * never inferred — it is granted only when every precondition is present.
+ *
+ * WHAT A MISSING INPUT MEANS (2026-09-15). Every one of those inputs is a
+ * RECORD — what this session has written down about the last READY round, not
+ * a fact about the branch. A round whose record is absent is therefore not a
+ * round with nothing to build on; it is a round whose reader cannot be told to
+ * build on anything, which is why it escalates. The two `reason` strings below
+ * are the reviewer's only sight of that distinction, so they say what the
+ * session has on record and never what is true of the code.
  */
 
 /** Files in the increment beyond which the round is deep-reviewed in full. */
@@ -66,7 +74,12 @@ export interface ReviewScopeDecision {
 
 
 export interface IncrementInput {
-  /** Tree OID the last READY review was bound to, if any. */
+  /**
+   * Tree OID the last READY review was bound to, as THIS session has it on
+   * record. Absent ⇒ the session holds no settled tree: a sibling session's
+   * READY (or a state file that was rotated away) leaves nothing here, and the
+   * round escalates — never read as "there was no previous review".
+   */
   baseTree?: string;
   /** Files + line counts between that tree and the current worktree. */
   changedFiles?: string[];
@@ -112,7 +125,7 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
   };
 
   if (!input.baseTree) {
-    return full("no previous READY review to build on — full deep review");
+    return full("this session holds no settled review tree to build on — full deep review");
   }
   // THE READER-SIDE PRECONDITION, checked before any content rule: the rest
   // of this function asks whether the INCREMENT is small enough to stand on a
@@ -122,8 +135,9 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
   // routine event, not an edge case.
   if (input.judgeRemembersPreviousRound !== true) {
     return full(
-      "the judge taking this round does not continue the transcript that settled the last one, " +
-      "so it never derived that conclusion and cannot carry it forward — full deep review",
+      "it cannot be confirmed that this round's judge continues the transcript that settled the last one, " +
+      "so it cannot be assumed to have derived that conclusion and must not carry it forward on trust — " +
+      "full deep review",
     );
   }
 

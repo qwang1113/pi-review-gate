@@ -64,8 +64,13 @@ test("the completion contract is embedded at the end of the reviewer task", () =
   // The instruction is at the END (after the OUTPUT/conclude contract).
   assert.ok(prompt.indexOf("调 judge_conclude 交卷并停下") > prompt.indexOf("Conclude shape"));
   assert.doesNotMatch(prompt, /tmux|wait-for|inbox/); // "channel report" is the sanctioned completion path
-  // Round-17, tightened 2026-09-04: output discipline is part of the task text.
-  assert.match(prompt, /输出纪律:交卷即停/, "the discipline is pinned in the task");
+  // Round-17, tightened 2026-09-04; DEDUPLICATED 2026-09-15: the discipline
+  // reaches this task ONCE, through JUDGE_COMPLETION_DISCIPLINE. A second copy
+  // used to sit two lines above it — the same sentence, in the other language,
+  // inside an otherwise English task text, and two copies are two things to
+  // keep true.
+  assert.match(prompt, /\*\*交卷即停\*\*/, "the discipline is pinned in the task");
+  assert.equal(prompt.split("交卷即停").length - 1, 1, "stated exactly once — a second copy is how it drifts");
   // The dispatch must not teach a field the signature refuses (the gate would
   // otherwise contradict itself on the reviewer's very first conclude call).
   assert.doesNotMatch(prompt, /notes:/, "no notes field may be taught to a reviewer");
@@ -81,8 +86,13 @@ test("buildReviewPrompt: an empty range audits the EXIT GOAL, not a diff", () =>
     undefined,
     { streamPath: "/repo/.pi/review-stream/r-review.jsonl", commitRange: "abc123..abc123" },
   );
-  assert.match(prompt, /NO code change to audit/);
-  assert.match(prompt, /EXIT GOAL is met/);
+  // The gate states the FACT it has (no new commits) and points at the goal —
+  // it must not upgrade a missing record into a claim about the code itself
+  // (a session that never checkpointed still has whatever its branch holds).
+  assert.doesNotMatch(prompt, /NO code change to audit/);
+  assert.match(prompt, /NO new commits are under review/);
+  assert.match(prompt, /nothing has been committed since the baseline it is measured from/);
+  assert.match(prompt, /What this round judges is the EXIT GOAL/);
   assert.match(prompt, /criterion by criterion/);
   assert.match(prompt, /confirm the worktree is clean/);
   assert.match(prompt, /report a READY only when the task is genuinely done/);

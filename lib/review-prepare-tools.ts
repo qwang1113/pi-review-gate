@@ -48,7 +48,6 @@ import type { ReviewScopeDecision } from "./review-scope.ts";
 import { formatReviewScopeDirective, type SettledConclusion } from "./review-carryover.ts";
 import { polishReasonRequired } from "./polish-gate.ts";
 import { buildQualityAuditTask, QUALITY_RULES_RELPATH } from "./quality-round.ts";
-import { squashPointBaseline, branchBaseBaseline } from "./review-baseline.ts";
 import { buildReviewPrompt, changeRowsLargestFirst, extractPrecommitBaseline, formatChangeIndex, type ChangeIndexRow } from "./parallel-review.ts";
 import { computeFingerprint } from "./fingerprint.ts";
 import { TASK_TEXT_MARKER } from "./constants.ts";
@@ -98,8 +97,13 @@ export interface PreparedReviewTarget {
  * building a real repository with a rewritten history. Behind this seam each
  * of those branches is three lines of fake.
  *
- * `squashPointBaseline` / `branchBaseBaseline` are NOT here: they run git
- * themselves and are already pinned by test/review-baseline.test.ts.
+ * THE TWO HISTORY PROBES ARE IN THE SEAM TOO (2026-09-15). `squashPointBaseline`
+ * and `branchBaseBaseline` do run git themselves, and each is pinned on its own
+ * by test/review-baseline.test.ts — but the BRANCHES that consult them ("chain
+ * rewritten", "no checkpoint on record") are decisions of THIS module, and a
+ * decision that can only be exercised against a real repository is a decision
+ * nobody pins. Every call site in this file goes through the seam; the
+ * standalone tests keep pinning the probes themselves.
  */
 export interface ReviewPrepareGit {
   /** Is `maybeAncestor` already contained in `branch`? Never throws. */
@@ -117,6 +121,20 @@ export interface ReviewPrepareGit {
    * from (lib/parallel-review.ts's `formatChangeIndex`).
    */
   numstatInRange(root: string, baseline: string, head: string): ChangeIndexRow[];
+  /**
+   * The commit every commit of this branch sits on top of — `git merge-base
+   * <default branch> HEAD` (lib/review-baseline.ts). Undefined when the repo
+   * names no default branch at all (no remote, no main/master): there is then
+   * no base to compare against, and the caller keeps its empty range.
+   */
+  branchBaseBaseline(root: string): string | undefined;
+  /**
+   * The SQUASH POINT — the newest commit in `startSha`'s parent chain whose
+   * tree equals `reviewedTree`, i.e. where a rewritten chain still holds the
+   * content a READY was bound to (lib/review-baseline.ts). Undefined on a
+   * clean miss, which sends the caller to the branch base.
+   */
+  squashPointBaseline(root: string, reviewedTree: string, startSha: string): string | undefined;
   /** Is the worktree CLEAN (no staged/unstaged/untracked changes)? The
    *  empty-range exit-goal round REQUIRES it — a READY must never bless
    *  content no reviewer saw (round-2 P2). */
@@ -212,11 +230,12 @@ async function doPrepareReview(
   const root = target.root;
   const reason = typeof params.reason === "string" ? params.reason : undefined;
   const st = deps.stateFor(root);
-  // No checkpoint on record is allowed — the "audit the exit goal" round:
-  // nothing is frozen to diff, so prepare resolves an empty range (HEAD..HEAD)
-  // and the reviewer judges loop-goal / task completion instead of a diff.
-  // A real code round still goes through judge_submit, which commits a
-  // checkpoint before this tool runs; baseline falls back to HEAD below.
+  // No checkpoint on record is allowed, and it does NOT by itself mean an
+  // empty range: since 2026-09-15 the baseline falls back to the branch base
+  // (see below), so a session that never checkpointed still reviews what its
+  // branch carries. Only a range that is genuinely empty makes this the
+  // loop-goal / task-completion round. A real code round goes through
+  // judge_submit, which commits a checkpoint before this tool runs.
   // Round-18 polish gate (user ask, B-tier): when the gate is
   // demonstrably met (or a file keeps being polished), the next round
   // must carry an explicit reason. Refuse WITHOUT rendering anything
@@ -267,9 +286,9 @@ async function doPrepareReview(
       // a clean miss falls back to the branch base, then the checkpoint
       // baseline below.
       baseline = st.checkpoint?.prevSha && st.review.fingerprint
-        ? squashPointBaseline(root, st.review.fingerprint, st.checkpoint!.prevSha)
+        ? deps.git.squashPointBaseline(root, st.review.fingerprint, st.checkpoint!.prevSha)
         : undefined;
-      if (!baseline) baseline = branchBaseBaseline(root);
+      if (!baseline) baseline = deps.git.branchBaseBaseline(root);
     }
   }
   if (!baseline) {
@@ -288,10 +307,21 @@ async function doPrepareReview(
           }
         })();
     } else {
-      // No checkpoint on record — the "audit the exit goal" round: nothing
-      // is frozen to diff, so the range is empty (HEAD..HEAD) and the
-      // reviewer judges the loop goal / task completion instead of a diff.
-      baseline = undefined; // resolved below as HEAD when emptyRange
+      // NO CHECKPOINT IS NOT "NO CONTENT" (2026-09-15). This was a hard empty
+      // range, justified as "nothing is frozen to diff" — but a checkpoint is
+      // THIS SESSION's freeze, and a session that never checkpointed still has
+      // whatever its branch carries: content committed by someone else, or by
+      // the agent's own `git commit`. Reading the absence of a record as "there
+      // is no code to audit" made the reviewer's task text assert a fact the
+      // gate had never checked (measured: a 18-file, +2260/-79 delivery was
+      // announced as "There is NO code change to audit").
+      //
+      // So ask git instead: the branch base covers every commit of this branch,
+      // whenever it was made. Undefined (a repo that names no default branch)
+      // keeps the old empty range, and a branch sitting exactly on its base
+      // still renders as head..head below — the genuinely unknown case now
+      // degrades to the old behaviour instead of to a claim.
+      baseline = deps.git.branchBaseBaseline(root);
     }
   }
   let head = "";
@@ -306,9 +336,10 @@ async function doPrepareReview(
       isError: true,
     };
   }
-  // No checkpoint on record: nothing is frozen to diff, so the round is the
-  // "audit the exit goal" kind — HEAD..HEAD (empty), reviewer judges the loop
-  // goal / task completion instead of a diff.
+  // Nothing resolved a baseline: no checkpoint record AND no branch base to
+  // compare against (or the branch sits exactly on its base). Only now is the
+  // round the empty-range "audit the exit goal" kind — HEAD..HEAD, the
+  // reviewer judges the loop goal / task completion instead of a diff.
   if (baseline === undefined) baseline = head;
   // Empty range (head === baseline): nothing new to diff. This is NOT a
   // refusal anymore — it is the "audit the exit goal" round: the reviewer

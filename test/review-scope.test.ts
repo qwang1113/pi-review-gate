@@ -53,10 +53,13 @@ test("incremental: a small increment inside already-reviewed files", () => {
   assert.match(d.reason, /1 file/);
 });
 
-test("full: no previous READY review to build on", () => {
+test("full: this session holds no settled tree to build on", () => {
   const d = decideReviewScope({ changedFiles: ["src/a.ts"], changedLines: 1 });
   assert.equal(d.scope, "full");
-  assert.match(d.reason, /no previous READY review/);
+  // The reason names the RECORD that is missing, not a fact about the branch:
+  // a sibling session's READY, or a rotated state file, reaches this branch
+  // with a perfectly reviewable change in hand.
+  assert.match(d.reason, /this session holds no settled review tree/);
 });
 
 test("full: the increment could not be computed (git unreadable)", () => {
@@ -180,7 +183,7 @@ test("the decision module renders no contract text of its own", async () => {
  * content rules above cannot buy their way past it.
  */
 
-test("full: the judge does not continue the transcript that settled the last round", () => {
+test("full: transcript continuity cannot be confirmed for this round's judge", () => {
   const d = decideReviewScopeRaw({
     baseTree: "T",
     changedFiles: ["src/a.ts"],
@@ -189,7 +192,10 @@ test("full: the judge does not continue the transcript that settled the last rou
     judgeRemembersPreviousRound: false,
   });
   assert.equal(d.scope, "full");
-  assert.match(d.reason, /does not continue the transcript/);
+  // "cannot be confirmed" is the claim: the verdict is fail-closed, but what
+  // the gate actually knows is that its recorder holds no entry for this lane
+  // — not that the transcript was rotated.
+  assert.match(d.reason, /cannot be confirmed that this round's judge continues the transcript/);
 });
 
 test("full: an ABSENT reader fact is a no — incremental is never inferred", () => {
@@ -202,7 +208,7 @@ test("full: an ABSENT reader fact is a no — incremental is never inferred", ()
     previouslyReviewedFiles: reviewed,
   });
   assert.equal(d.scope, "full");
-  assert.match(d.reason, /does not continue the transcript/);
+  assert.match(d.reason, /cannot be confirmed that this round's judge continues the transcript/);
 });
 
 test("the reader precondition still reports the content facts it escalated over", () => {
@@ -247,6 +253,6 @@ test("no settled tree outranks the reader fact — the reason names the real cau
     judgeRemembersPreviousRound: false,
   });
   assert.equal(d.scope, "full");
-  assert.match(d.reason, /no previous READY review/);
+  assert.match(d.reason, /this session holds no settled review tree/);
 });
 
