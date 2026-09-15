@@ -346,10 +346,13 @@ commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而
   - lane 落 PASS 且 tree 相同 ⇒ `parkedReadyFate` 返回 `replay`，门禁把结论
     **重新交给同一个记录器**（`recordReviewVerdict`，不是第二份实现）并 steer
     唤醒 agent；
-  - lane 落非 PASS ⇒ `clear`，挂起被清，走失败通道说明是**验证没过**而不是
-    findings；
-  - PASS 但内容不是那一棵、或新一轮 prepare 已替换 target（`registerReviewTarget`
-    会顺手清挂起）⇒ `none`，挂起不误用。
+  - **其余一切 ⇒ `clear`**，挂起被清。三条路径一个原因：lane 已经落地，
+    不会再有人回来处理这份结论 —— lane 落非 PASS（这轮内容没过全量，走失败
+    通道说清是**验证**而不是 findings）；PASS 但覆盖的不是那一棵（会话在 lane
+    期间编辑了，那一轮判的树已经不存在）；PASS 但当前 review target 的 tree
+    已换（新一轮 prepare 替换了它）。`none` 于是只剩「本来就没挂起」一种情况：
+    留下任何一条没人接管的挂起记录，都会把那一轮挂到下一次 prepare，
+    而回执早就叫过 agent 别重跑（round-2 P2）。
 
   这条修的是一个实测的时序竞争（本 repo PR #62 第 4 轮：3 行 diff 的增量轮
   reviewer 16 秒交卷 READY，全量 lane 34 秒后才 PASS，差 7 秒）：旧行为把那

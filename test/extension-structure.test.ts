@@ -5953,6 +5953,13 @@ test("a parked READY is replayed by the lane that lands on its tree, and retired
   // and `classifyReadyWithholding` answers `unverified-idle` (a REFUSAL).
   assert.match(SRC, /laneStillRunning: inFlightPrecommit\?\.root === targetRoot/);
   assert.match(SRC, /const fate = parkedReadyFate\(\{/);
+  // …AND THE LANE'S LANDING IS WHAT DECIDES IT: whatever it answers, a parked
+  // record is never left behind (round-2 P2 — nothing would ever come back for
+  // it). `none` means "nothing was parked", so a deletion under it is correct.
+  const fateAt = SRC.indexOf("const fate = parkedReadyFate({");
+  const afterFate = SRC.slice(fateAt, fateAt + 1400);
+  assert.match(afterFate, /if \(fate !== "none"\) \{\s*const parked = laneState\.pendingReady!;\s*delete laneState\.pendingReady;/,
+    "a landed lane retires whatever it did not replay");
   const replayAt = SRC.indexOf('if (fate === "replay") {');
   assert.ok(replayAt > 0, "the replay branch is here");
   const replay = SRC.slice(replayAt, replayAt + 1800);

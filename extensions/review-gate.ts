@@ -6460,10 +6460,15 @@ export default function reviewGate(pi: ExtensionAPI) {
           // re-submit. Silent when the lane FAILED — the failure channel speaks
           // for that content — but an abandoned hold is worth a line in the
           // audit trail, since the only other evidence is a missing verdict.
+          // Two causes, two sentences: when the gate moved on to another round
+          // `coveredTree` IS the parked tree, and the "passed X, not the parked
+          // Y" wording would print the same id twice (round-2 Nit).
           log(
-            `parked READY for ${root} dropped: the lane passed ` +
-            `${coveredTree === undefined || coveredTree === "" ? "an unreadable tree" : coveredTree}, ` +
-            `which is not the parked ${parked.tree}`,
+            coveredTree === parked.tree
+              ? `parked READY for ${root} dropped: the gate moved on to another round (${parked.tree})`
+              : `parked READY for ${root} dropped: the lane passed ` +
+                `${coveredTree === undefined || coveredTree === "" ? "an unreadable tree" : coveredTree}, ` +
+                `which is not the parked ${parked.tree}`,
           );
         }
         if (fate === "replay") {
@@ -8749,7 +8754,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           "这一轮的内容**没有任何问题**：只是全量 precommit 还没跑完（B1 让它与审查并行跑，" +
           "所以 reviewer 可以先交卷）。门禁把结论**原样扣下**了，`review` 仍是 PENDING ——\n" +
           "  - lane 落 PASS 且 tree 相同 ⇒ 门禁**自动补记 READY** 并唤醒你，可以继续收尾；\n" +
-          "  - lane 落 FAIL ⇒ 挂起被清掉，并按失败通道告诉你原因。\n" +
+          "  - lane 落 FAIL ⇒ 挂起被清掉，并按失败通道告诉你原因；\n" +
+          "  - lane 落 PASS 但覆盖的不是这一棵（你在 lane 跑期间改了文件）⇒ 挂起**作废**：" +
+          "那一轮判的内容已经不存在了，回执不再适用于你手上这份，按常规重新送审即可。\n" +
           "**不要重跑审查**：重送的同一份内容不会更快拿到结果，只会白烧一轮。";
       }
     }
