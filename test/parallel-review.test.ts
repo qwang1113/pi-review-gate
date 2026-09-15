@@ -297,7 +297,7 @@ test("opening instruction is scope-aware: incremental rounds audit the INCREMENT
   // there is no READY baseline. Keying on the directive being non-empty made
   // every production round open with the INCREMENT wording.
   const fullDirective =
-    "Review scope for this round:\n- FULL deep review. no previous READY review to build on — full deep review.";
+    "Review scope for this round:\n- FULL deep review. this session holds no settled review tree to build on — full deep review.";
   const full = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, fullDirective, "full");
   assert.match(full, /Audit the COMMIT RANGE baseline\.\.HEAD below/);
   assert.doesNotMatch(full, /this round is INCREMENTAL/);
