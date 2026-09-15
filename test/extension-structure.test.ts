@@ -64,7 +64,7 @@ const ADVISORY_PREPARE_TOOLS = new Set(["prepare_adviser", "prepare_goal_audit"]
  * rule about what a TOOL does against the module that owns the tool.
  */
 const COPILOT_TOOLS_SRC = readFileSync(join(ROOT, "lib", "copilot-review-tools.ts"), "utf8");
-const COPILOT_TOOLS = new Set(["request_copilot_review", "check_copilot_review"]);
+const COPILOT_TOOLS = new Set(["copilot_review"]);
 const COPILOT_GH_SRC = readFileSync(join(ROOT, "lib", "copilot-gh.ts"), "utf8");
 /**
  * The USER-INTERACTION family moved the same way, split by responsibility:
@@ -223,8 +223,7 @@ const LIB_TOOL_HANDLERS: Record<string, string> = {
   prepare_review: "async function doPrepareReview(",
   prepare_adviser: "async function doPrepareAdviser(",
   prepare_goal_audit: "async function doPrepareGoalAudit(",
-  request_copilot_review: "async function doRequestCopilotReview(",
-  check_copilot_review: "async function doCheckCopilotReview(",
+  copilot_review: "async function doCopilotReview(",
   ask_user: "export async function doAskUser(",
   request_scope_limit: "export async function doRequestScopeLimit(",
   request_sensitive_edit: "export async function doRequestSensitiveEdit(",
@@ -893,7 +892,33 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the ONE prompt every surface renders interpolates the notice");
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
-  assert.match(ASK_USER_SRC, /return renderChoice\(\s*uiCtx\.ui,/, "the pane dialog renders the template");
+  assert.match(ASK_USER_SRC, /return deps\.askChoice\(\s*uiCtx,/,
+    "the pane dialog renders the template through the ONE budgeted renderer");
+  // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14): a title is
+  // charged to the row budget but never cut by it, so a long question in the
+  // title was an unbounded dialog — the one render path that could still
+  // flicker.
+  // The title carries the progress label, the question's own headline (so the
+  // REASON box, which renders the title alone, says what is being answered)
+  // and the grant notice — all three charged to the title budget rather than
+  // sitting in the tail-cut body. The ORDER inside that title is its own rule
+  // (questionDialogTitle): `fitDialogTitle` cuts from the tail too, so the ⚠️
+  // notice must come FIRST or a small window drops it while the recommended
+  // row still mints the grant.
+  assert.match(ASK_USER_SRC, /title: questionDialogTitle\(q, index, questions\.length\)/,
+    "the dialog title is built by the ONE title rule");
+  assert.match(ASK_USER_SRC,
+    /function questionDialogTitle\(q: AskQuestion, index: number, total: number\): string \{\s*const notice = grantNotice\(q\)\.trim\(\);/,
+    "…and that rule puts the grant notice first, where the tail cut cannot reach it");
+  assert.match(ASK_USER_SRC, /body: q\.text,/,
+    "the question text itself rides in the budgeted body");
+  // WHY THE NOTICE IS NOT IN THE BODY (reviewer P1, 2026-09-14): the body is
+  // cut from its TAIL, so appending ⚠️ after a long question let the question
+  // eat the authorization notice — while picking the recommended row still
+  // minted the proxy grant. The title is only cut when IT overflows, and a
+  // two-line notice never does.
+  assert.doesNotMatch(ASK_USER_SRC, /body: `\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
+    "the grant notice must never sit in the tail-cut body");
   assert.match(ASK_USER_SRC, /extraRows: \[SKIP_REST_CHOICE\]/,
     "the interview's own escape rides along as an extra row");
   assert.doesNotMatch(ASK_USER_SRC, /uiCtx\.ui!\.input!/,
@@ -922,7 +947,7 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
     "the questions themselves are shown, not just filed");
   // The interview: one dialog per question, with its N / M progress.
   assert.match(toolBody, /progressLabel\(index, questions\.length\)/);
-  assert.match(toolBody, /renderChoice\(/, "the pane dialog renders the gate's one template");
+  assert.match(toolBody, /deps\.askChoice\(/, "the pane dialog renders the gate's one template");
   assert.doesNotMatch(toolBody, /uiCtx\.ui!\.input!/,
     "no free-text dialog: the template's reason box is the only text box");
   // Both go through the channel funnel, so an orchestration child's project
@@ -987,8 +1012,17 @@ test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an
   // PAUSE the loop, and it shows the user nothing until the turn ends anyway.
   // ui.notify appends to the chat container and requests a render right away.
   const body = windowOf("function showToUser", "\n  }", "showToUser");
-  assert.match(body, /notify\(`\$\{lead\}\\n\$\{clipped\}`, "warning"\)/,
+  assert.match(body, /notify\(`\$\{lead\}\\n\$\{body\}`, "warning"\)/,
     "the full text must go through ui.notify");
+  // NO CHARACTER CAP (user decision, 2026-09-14). What this used to cut — at
+  // 4000 characters — was the restatement / goal / plan the user is being
+  // asked to APPROVE: exactly the text they have to read. The flicker it was
+  // guarding against does not apply to the transcript (appending 400 rows
+  // triggers no full clears; test/tui-flicker.test.ts measures it), and the
+  // dialog is the only constrained surface.
+  assert.doesNotMatch(body, /slice\(0,/,
+    "no character cap may come back: the transcript scrolls");
+  assert.doesNotMatch(body, /已截断/);
   assert.match(body, /return false/, "no UI must be reported honestly, not swallowed");
   assert.doesNotMatch(body, /sendMessage/, "sendMessage is queued, not rendered");
   // Nothing in the extension may deliver user-facing text via the follow-up
@@ -1004,8 +1038,25 @@ test("FLICKER: every dialog goes through the row budget", () => {
   // the gate's ONE template and applies lib/dialog-budget.ts; nothing may
   // bypass it, and no ui.confirm exists any more (2026-09-08).
   const helperAt = SRC.indexOf("async function askChoice");
-  assert.match(windowOf("async function askChoice", "\n  }", "askChoice"), /fitDialogMessage\(/,
+  const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
+  assert.match(askChoiceBody, /fitDialogMessage\(/,
     "askChoice must apply the budget");
+  // …AGAINST THE REAL TERMINAL (2026-09-14). The budget used to be pinned to
+  // a 24-row window, so a 20-row one cleared the screen 19 times in 20 frames.
+  // The terminal's own row count is what pi reads too (see terminalRows()).
+  assert.match(askChoiceBody, /dialogTextMaxLines\(rows\.length, terminalRows\(\)\)/,
+    "the budget must follow the terminal we are actually on");
+  // WIDTH matters too: the row count prevents the flicker, but budgeting a
+  // 200-column window at the 80-column assumption cuts text that would have
+  // fit — the truncation this round exists to stop.
+  assert.match(askChoiceBody, /const columns = terminalColumns\(\);/,
+    "the wrap width comes from the terminal, not from a constant");
+  assert.match(SRC, /function terminalColumns\(\): number \{[\s\S]{0,200}process\.stdout\?\.columns/,
+    "…read from the same source pi reads");
+  // …AND THE TITLE IS BOUNDED TOO: `ask_user` puts the question there, and an
+  // unbounded title sizes the dialog no matter how short the body is.
+  assert.match(askChoiceBody, /fitDialogTitle\(/,
+    "a long title must not be able to size the dialog");
 
   // ui.confirm is GONE: the template renders a select, so a stray confirm
   // would be a second dialog shape nobody reviewed.
@@ -1017,6 +1068,13 @@ test("FLICKER: every dialog goes through the row budget", () => {
   assert.deepEqual(selects, [],
     `the extension must render dialogs through askChoice only (stray ui.select at ${selects.join(", ")})`);
   assert.ok(helperAt > 0, "the one renderer must exist");
+  // NO render path may bypass it — `ask_user` used to call renderChoice
+  // directly, which is how a long question kept sizing its own dialog. The
+  // extension has exactly ONE renderChoice call site, and it is this helper.
+  const directRenders = [...SRC.matchAll(/renderChoice\(/g)].length;
+  assert.equal(directRenders, 1,
+    `askChoice must be the only renderChoice call site (found ${directRenders})`);
+  assert.match(askChoiceBody, /renderChoice\(/, "…and it is the one inside askChoice");
 });
 
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
@@ -1380,7 +1438,7 @@ test("loop directives: all-gates-green block names the completion steps", () => 
   assert.match(SRC.slice(greenAt - 80, greenAt), /state\.taskMode === "loop"/,
     "the 收尾 line is gated on loop mode");
   assert.match(greenLine, /declare_done/, "green branch names declare_done as the next step");
-  assert.match(greenLine, /request_copilot_review/, "green branch names the Copilot cycle");
+  assert.match(greenLine, /copilot_review/, "green branch names the Copilot cycle");
 });
 test("explore workflow: advisory completion, no edit/bash blocking, ship gate intact", () => {
   // declare_done is self-accepted in explore.
@@ -1655,7 +1713,7 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
 
 test("the ship-kind evidence is recorded on SUCCESS, and never behind the Copilot switch", () => {
   // Round-1 reviewer P1: the first version read `state.copilot.pr`, which is
-  // only ever filled in by request_copilot_review / check_copilot_review — so
+  // only ever filled in by copilot_review — so
   // a repo with no `gh`, or one with copilotReview disabled, could open a real
   // PR and never satisfy the `pr` station. The evidence therefore has its own
   // recording site, above the Copilot block and independent of its switch.
@@ -3221,7 +3279,7 @@ test("STREAMING: every long-running gate tool publishes progress on its own onUp
   // median, a full precommit 92s. Each of these used to be a silent call.
   for (const tool of [
     "judge_wait", "judge_submit", "run_precommit", "declare_done",
-    "request_copilot_review", "check_copilot_review",
+    "copilot_review",
   ]) {
     const body = toolBodyOf(tool);
     assert.match(body, /createProgressReporter\(\{/, `${tool} must open a progress reporter`);
@@ -3543,7 +3601,7 @@ test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", (
 // L7 — the post-PR Copilot review loop
 
 test("the Copilot tools are TRUSTED: the extension runs gh, the agent cannot report the outcome", () => {
-  for (const name of ["request_copilot_review", "check_copilot_review"]) {
+  for (const name of ["copilot_review"]) {
     // The tools moved to lib/copilot-review-tools.ts; the rule follows the
     // code (registration + handler, via sourceOf/LIB_TOOL_HANDLERS).
     const body = toolBodyOf(name);
@@ -4008,21 +4066,29 @@ test("availability is judged by evidence, never by surfaces that cannot see a dr
     }
   }
 
-  const at = COPILOT_TOOLS_SRC.indexOf("const requested = await deps.gh.requestCopilotReviewer(");
-  assert.ok(at > 0, "the request path must exist");
-  const before = COPILOT_TOOLS_SRC.slice(Math.max(0, at - 900), at);
-  assert.match(before, /deps\.gh\.resolveCopilotSupport\(dir, slug, st\.copilot\?\.supportConfirmed === true, \{ signal \}\)/,
-    "availability must be resolved BEFORE a round is spent");
+  const supportAt = COPILOT_TOOLS_SRC.indexOf(
+    "deps.gh.resolveCopilotSupport(dir, slug, st.copilot?.supportConfirmed === true, { signal })");
+  const recordAt = COPILOT_TOOLS_SRC.indexOf("recordCopilotRequest(st.copilot, {");
+  assert.ok(supportAt > 0, "availability must be resolved before the request");
+  const requestCallAt = COPILOT_TOOLS_SRC.indexOf("return await doRequestPhase({");
+  assert.ok(requestCallAt > 0, "the tool must call the request phase");
+  assert.ok(requestCallAt > supportAt, "availability must be resolved BEFORE a round is spent");
 
-  // The request itself is never vetoed by a read-back any more: whatever the
+  // The request itself is never vetoed by a read-back: whatever the
   // availability verdict, the round is recorded and the wait length is what
-  // changes.
-  const recordAbs = COPILOT_TOOLS_SRC.indexOf("recordCopilotRequest(st.copilot,", at);
-  assert.ok(recordAbs > at, "the request must still be recorded");
-  const body = COPILOT_TOOLS_SRC.slice(at, recordAbs);
-  assert.doesNotMatch(body, /releaseCopilotReview\(st\.copilot, "UNSUPPORTED",[\s\S]{0,200}land/,
-    "a request that 'did not land' must no longer release the requirement");
-  assert.match(COPILOT_TOOLS_SRC.slice(recordAbs, recordAbs + 400), /supportConfirmed: support\.confirmed/,
+  // changes. What a MISSING queue flag buys is one more attempt (2026-09-14:
+  // the user's decision) — and only after that does the gate release.
+  const phaseAt = COPILOT_TOOLS_SRC.indexOf("async function doRequestPhase(");
+  const phaseEnd = COPILOT_TOOLS_SRC.indexOf("\nasync function doCopilotReview(", phaseAt);
+  assert.ok(phaseAt > 0 && phaseEnd > phaseAt, "the request phase must be its own function");
+  const phase = COPILOT_TOOLS_SRC.slice(phaseAt, phaseEnd);
+  const firstRequest = phase.indexOf("const requested = await deps.gh.requestCopilotReviewer(");
+  const retryRequest = phase.indexOf("const again = await deps.gh.requestCopilotReviewer(");
+  const notLandedRelease = phase.indexOf('verdict.state === "not-landed"');
+  assert.ok(firstRequest > 0, "the request path must exist");
+  assert.ok(retryRequest > firstRequest, "a request GitHub never queued is re-sent once");
+  assert.ok(notLandedRelease > retryRequest, "and released only after that retry also fails");
+  assert.match(COPILOT_TOOLS_SRC.slice(recordAt, recordAt + 400), /supportConfirmed: support\.confirmed/,
     "confirmed evidence must be remembered in the sidecar");
 });
 
@@ -4069,28 +4135,34 @@ test("a released Copilot cycle still has to report what it left unhandled", () =
     "the unhandled-thread reporter must exist");
   assert.ok(COPILOT_TOOLS_SRC.indexOf("export function copilotAbandonedText(") > 0,
     "the payload-less paths need their own reporter (they have only the count)");
-  const checkBody = toolBodyOf("check_copilot_review");
+  const checkBody = toolBodyOf("copilot_review");
   assert.match(checkBody, /copilotUnhandledText\(analysis\.actionable\)/,
-    "the released branch of check_copilot_review must list them");
+    "the released branch of copilot_review must list them");
 
   // The paths that ACTUALLY release with findings open are the fail-safe ones:
-  // no PR, no slug, unreadable payload, a refused request, a spent budget.
-  // Each of them released in total silence before, even with a sidecar that
-  // still recorded open threads. Every `releaseCopilotReview` call in the two
-  // tools must be accompanied by the abandoned-findings notice. The module
-  // holds nothing BUT those two tools, so it is the whole window now (it used
-  // to be sliced out of the extension, from one tool name to the next).
+  // no PR, no slug, unreadable payload, a refused request, a spent retry, an
+  // expired budget. Each of them released in total silence before, even with a
+  // sidecar that still recorded open threads. They now all funnel through
+  // `releaseReply`, which is the ONE place the abandoned-findings notice is
+  // attached — so a new release path cannot be added without it, which is what
+  // the old per-call count was approximating.
   const toolsBody = COPILOT_TOOLS_SRC;
-  const releases = toolsBody.split("releaseCopilotReview(st.copilot,").length - 1;
-  const notices = toolsBody.split("copilotAbandonedText(st.copilot)").length - 1;
-  assert.ok(releases >= 5, `expected the fail-safe release paths to still exist (got ${releases})`);
-  assert.equal(notices, releases,
-    "every terminal release in the tools must report the findings it abandons");
+  const funnelAt = toolsBody.indexOf("function releaseReply(");
+  assert.ok(funnelAt > 0, "the release funnel must exist");
+  assert.ok(toolsBody.indexOf("const abandoned = copilotAbandonedText(args.st.copilot)", funnelAt) > funnelAt,
+    "the funnel attaches the unhandled-findings duty");
+  assert.equal((toolsBody.match(/releaseCopilotReview\(/g) ?? []).length, 1,
+    "exactly one place releases the requirement — the funnel");
+  assert.ok(toolsBody.indexOf("releaseCopilotReview(", funnelAt) > funnelAt,
+    "and the funnel is that place");
+  assert.ok(toolsBody.split("return releaseReply({").length - 1 >= 4,
+    "the fail-safe release paths must still exist (no PR, no slug, unreadable payload, a refused " +
+    "request, a spent retry, an expired budget)");
 
   // …and each of them must leave an audit trail: this whole diagnosis had to
   // be reconstructed from GitHub's API because the sidecar transitions were
   // never logged.
-  assert.ok((toolsBody.match(/log\(`copilot /g) ?? []).length >= releases,
+  assert.ok((toolsBody.match(/log\(`copilot /g) ?? []).length >= 2,
     "each Copilot state transition must be written to the audit log");
 });
 
@@ -4178,12 +4250,69 @@ test("REGRESSION (P0b): the no-tests-warning is wired into the tool result and /
     "the gate-status warning must be keyed on the skipped scope");
 });
 
-test("check_copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {
+test("the Copilot requirement stops nagging ONLY where a watcher owns the wait", () => {
+  // The background watcher turns "wait for Copilot" from a poll the agent has
+  // to run into a wake it receives. The wiring that matters is small and easy
+  // to lose in a refactor, so it is pinned here:
+  //
+  //  1. the filter is passed by the two NUDGE sites (the L2 continuation and
+  //     the revival timer), never by declare_done — a review that has not
+  //     landed is still an unfinished task, and a session that could be talked
+  //     into "done" while waiting is the whole bug this feature fixes;
+  //  2. the watcher is armed from EVERY persist, so no state write can leave an
+  //     AWAITING cycle unwatched;
+  //  3. it has a lifecycle: session_start re-arms it from the restored sidecar,
+  //     session_shutdown stops it, and a tick re-checks the mode and the cycle.
+  const nudged = SRC.split("copilotProblemsFor(st, { nudge: true, root })").length - 1;
+  assert.equal(nudged, 2, "the continuation and the revival timer are the two nudge sites");
+  const doneBody = toolBodyOf("declare_done");
+  assert.match(doneBody, /copilotProblemsFor\(st\)/,
+    "declare_done reads the UNFILTERED list — a wait is not a completion");
+  assert.doesNotMatch(doneBody, /watchedAwait|nudge: true/,
+    "and it must never learn about the watcher's exception");
+
+  assert.match(SRC, /function syncCopilotWatch\(/, "the arming helper must exist");
+  assert.ok(SRC.includes("syncCopilotWatch(primaryRepoRoot)"),
+    "persist() arms the primary repo's watcher — every bare persist(ctx) goes through it");
+  assert.match(SRC, /if \(root === primaryRepoRoot\) \{ persist\(ctx\); return; \}/,
+    "and persistRepo delegates the primary repo to it instead of syncing twice");
+  assert.equal(SRC.split("a watcher never fails a persist").length - 1, 2,
+    "the primary funnel and a second repo's own sidecar write are the two arming sites");
+  assert.match(SRC, /syncAllCopilotWatches\(\);/, "session_start re-arms from the restored state");
+  assert.match(SRC, /stopAllCopilotWatches\(\);/, "session_shutdown stops the timers it owns");
+  assert.match(SRC, /watchRunsInMode\(state\.taskMode\)/, "a tick re-checks the mode");
+  assert.match(SRC, /if \(latestCtx\?\.isIdle\(\)\) pi\.sendUserMessage\(line\);/,
+    "and the wake uses the idle/steer idiom");
+  // The cadence, the verdict and the wording all come from the pure module —
+  // the extension owns the timer and the delivery, nothing else.
+  assert.match(SRC, /decideWatchTick\(\{ state: cycle, probe, now: Date\.now\(\) \}\)/);
+  // A tick awaits two network calls (the slug, then the probe), and the cycle
+  // can move inside those seconds (a re-request bumps `rounds`, a release ends
+  // it, a push re-arms it), so the ownership check exists on BOTH sides of the
+  // awaits — before them, to skip a tick nobody is waiting for, and after
+  // them, so a wake cannot describe an old cycle nor a `stopCopilotWatch`
+  // clear the timer a newer one armed. There is deliberately NO third check
+  // after the wake: everything from the last probe to the stop is synchronous.
+  assert.match(SRC, /function tickStillOwns\(root: string, entry: CopilotWatchHandle\)/);
+  assert.equal(SRC.split("tickStillOwns(root, entry)").length - 1, 2,
+    "one guard before the awaits and one after — and no unreachable third");
+  // ONE wake per cycle: a delivered wake leaves the state AWAITING until the
+  // agent answers it, so every persist in between would re-arm the same cycle
+  // and steer the same message in again. The memo is what stops that — and it
+  // may only be set where the wake was actually DELIVERED.
+  assert.match(SRC, /const copilotWoken = new Set<string>\(\)/);
+  assert.equal(SRC.split("copilotWoken.add(entry.key)").length - 1, 1,
+    "exactly one place remembers a delivered wake");
+  assert.match(SRC, /copilotWoken\.has\(key\)/, "and arming consults it before arming again");
+  assert.match(SRC, /copilotWoken\.clear\(\)/, "a resumed session may announce the cycle again");
+});
+
+test("copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {
   // The loop this closes: request released the cycle as EXHAUSTED, the next
   // check re-derived it as ARMED, and declare_done was blocked again.
   // The window is the tool's own registration plus its handler, read from the
   // module that owns them (lib/copilot-review-tools.ts) — no character count.
-  const body = toolBodyOf("check_copilot_review");
+  const body = toolBodyOf("copilot_review");
   const guardAt = body.indexOf("!isCopilotOutstanding(settled)");
   assert.ok(guardAt > 0, "a released cycle must short-circuit the whole check");
   for (const laterWork of ["resolveOpenPr(", "fetchCopilotPayload(", "evaluateCopilot("]) {
@@ -4786,7 +4915,7 @@ test("R-3: an orchestrator never receives the LOOP's continuation — its criter
   const own = windowOf("function orchestratorSettled(", "\n  }", "orchestratorSettled");
   assert.match(own, /buildOrchestratorResume\(/, "and it has a continuation of its own");
   assert.match(own, /sessionExitProblems\(\)/, "built from the UNIFIED exit criterion");
-  assert.match(own, /startSupervisionTimer\(ctx\)/, "which also arms the background supervisor");
+  assert.match(own, /startSupervisionTimer\(\)/, "which also arms the background supervisor");
   assert.doesNotMatch(own, /unmetRequirements|LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/,
     "and never from the loop's gates");
 });
@@ -4887,7 +5016,13 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   const start = windowOf("function startSupervisionTimer(", "\n  }", "startSupervisionTimer");
   assert.match(start, /SUPERVISION_INTERVAL_MS/, "the cadence is a named constant, not a literal at the call site");
   assert.match(start, /state\.taskMode !== "orchestrator"/, "it exists only for the supervising role");
-  assert.match(start, /ctx\.isIdle\?\.\(\)/, "a wake-up mid-turn would be noise");
+  // BUSY OR IDLE, EVERY CHILD EVENT GOES THROUGH (user decision, 2026-09-14).
+  // The idle requirement WAS the reported bug: a manager that was working
+  // never heard about a child asking a question, so the child waited for an
+  // `orchestrator_wait` that might come much later.
+  assert.doesNotMatch(start, /isIdle/, "no idle pre-condition may come back");
+  assert.match(start, /deliverAs: "steer"/,
+    "…and the delivery cuts into the next turn WITHOUT aborting work in flight");
   assert.match(start, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");
   // What it reads is the CHANNELS — no pane is captured anywhere in the loop.
   const drain = windowOf("function drainSupervisionNews(", "\n  }", "drainSupervisionNews");
@@ -5664,7 +5799,7 @@ test("every wake-up path respects a retired session", () => {
   assert.ok(start > 0);
   const settled = SRC.slice(start, start + 2000);
   const guardAt = settled.indexOf("if (handedOffSession) return;");
-  const armAt = settled.indexOf("startSupervisionTimer(ctx)");
+  const armAt = settled.indexOf("startSupervisionTimer()");
   assert.ok(guardAt > 0,
     "agent_settled must not revive a session that handed its orchestration over — this is the defect that put two project managers on one plan");
   assert.ok(armAt > 0 && guardAt < armAt, "the guard runs BEFORE the timers are re-armed");

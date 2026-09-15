@@ -27,7 +27,12 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 
-import { DIALOG_BODY_MAX_LINES, DIALOG_CHROME_ROWS, DIALOG_FOOTER_ROWS } from "../lib/dialog-budget.ts";
+import {
+  DIALOG_BODY_MAX_LINES,
+  DIALOG_CHROME_ROWS,
+  DIALOG_FOOTER_ROWS,
+  dialogTextMaxLines,
+} from "../lib/dialog-budget.ts";
 
 const TUI_RELATIVE = join("@earendil-works", "pi-tui", "dist", "tui-main-screen.js");
 
@@ -86,6 +91,9 @@ interface Scenario {
   transcriptLines: number;
   dialogRows: number;
   frames: number;
+  /** Rows appended to the transcript each frame — a long gate notice, or the
+   * full restatement / goal / plan the gate prints before a dialog. */
+  appendPerFrame?: number;
 }
 
 /** Render `frames` spinner animation frames and count full-screen clears. */
@@ -110,8 +118,13 @@ async function countFullClears(TuiMainScreen: new (t: unknown, c: boolean, d: st
 
   tui.doRender(); // first paint
   term.writes.length = 0;
+  let transcriptRows = s.transcriptLines;
   for (let f = 0; f < s.frames; f++) {
     spinner.lines = [`${SPINNER[f % SPINNER.length]} working`];
+    if (s.appendPerFrame) {
+      transcriptRows += s.appendPerFrame;
+      transcript.lines = Array.from({ length: transcriptRows }, (_, i) => `transcript ${i}`);
+    }
     tui.doRender();
   }
   return term.writes.join("").split("\x1b[2J").length - 1;
@@ -151,6 +164,46 @@ test("FLICKER: the pre-fix dialog height reproduces the wipe (regression is real
   assert.ok(clears >= 20,
     `an oversized dialog must still reproduce the wipe (got ${clears}/30 — if this dropped to 0, ` +
     "pi-tui changed and the budget's justification should be re-measured)");
+});
+
+test("FLICKER: a long transcript notice never wipes the screen (so it needs no cap)", async (t) => {
+  if (!tuiPath) {
+    t.skip("pi-tui not resolvable (it ships with the globally installed pi, not with this repo)");
+    return;
+  }
+  const { TuiMainScreen } = await import(tuiPath);
+  // WHY THIS TEST EXISTS (2026-09-14): the gate used to cut every transcript
+  // notice at 4000 characters, and the reason was flicker. The reason does not
+  // survive contact with the renderer: transcript growth happens BELOW the
+  // viewport top, so `firstChanged < prevViewportTop` never fires. This is the
+  // measurement that lets the full restatement / goal / plan be printed whole.
+  const clears = await countFullClears(TuiMainScreen, {
+    rows: 24, transcriptLines: 30, dialogRows: 0, frames: 20, appendPerFrame: 100,
+  });
+  assert.equal(clears, 0, "appending text to the transcript must never clear the screen");
+});
+
+test("FLICKER: the budget follows the REAL terminal — a 20-row window stays safe", async (t) => {
+  if (!tuiPath) {
+    t.skip("pi-tui not resolvable (it ships with the globally installed pi, not with this repo)");
+    return;
+  }
+  const { TuiMainScreen } = await import(tuiPath);
+  // The constant was sized for a 24-row terminal, so on a 20-row one a
+  // "budgeted" dialog was still tall enough to wipe the screen. These two
+  // numbers are that bug and its fix, on the same window.
+  const optionRows = 3; // 2 options + the decline row
+  const budgeted = DIALOG_CHROME_ROWS + (optionRows - 2) + dialogTextMaxLines(optionRows, 20);
+  const safe = await countFullClears(TuiMainScreen, {
+    rows: 20, transcriptLines: 30, dialogRows: budgeted, frames: 10,
+  });
+  assert.equal(safe, 0, "a dialog budgeted for the real terminal must keep a 20-row window stable");
+  const old = await countFullClears(TuiMainScreen, {
+    rows: 20, transcriptLines: 30, dialogRows: DIALOG_CHROME_ROWS + DIALOG_BODY_MAX_LINES, frames: 10,
+  });
+  assert.ok(old > 0,
+    "the 24-row constant must still reproduce the wipe on a 20-row terminal (if this is 0, " +
+    "pi-tui changed and the real-terminal budget's justification should be re-measured)");
 });
 
 test("FLICKER: the threshold is geometric — it flips when the dialog reaches terminal height", async (t) => {

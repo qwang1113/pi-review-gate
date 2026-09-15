@@ -343,12 +343,21 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
 
 6. **Copilot review (once a PR exists)** — a successful `gh pr create`,
    `gh pr edit` or `git push` opens a Copilot review cycle for that repo. Call
-   **`request_copilot_review`**, then **`check_copilot_review`** (the extension
-   runs `gh` itself — you cannot report this outcome). AWAITING ⇒ do something
-   useful and check again. OPEN ⇒ for each listed thread either fix it and
-   `resolveReviewThread`, or reply in the thread with the reason it will not be
-   fixed; then check again. **From Copilot round 4 on, the gate first puts
-   every open finding to the USER, one dialog each**, and `check_copilot_review`
+   **`copilot_review`** — ONE tool for the whole cycle; the gate decides which
+   half is due (the extension runs `gh` itself — you cannot report this
+   outcome). It asks GitHub for the review and confirms it was queued, or it
+   reports what an outstanding request is doing:
+   - `queued` / `working` ⇒ **do nothing and do NOT poll.** The gate watches the
+     PR in the background and wakes you when the review lands (measured: median
+     ~16 minutes, p90 ~19, worst ~23). Do other work, or end the turn.
+   - `failed` / `never landed` ⇒ the gate has already re-sent the request, or
+     released the requirement with the reason. Read the reply; there is nothing
+     to poll for either way.
+   - `OPEN` (findings) ⇒ for each listed thread either fix it and
+     `resolveReviewThread`, or reply in the thread with the reason it will not
+     be fixed; then call `copilot_review` again.
+   **From Copilot round 4 on, the gate first puts
+   every open finding to the USER, one dialog each**, and `copilot_review`
    answers with the threads grouped by what they decided: only the 「修复」
    group is yours to change; 「不修，回复说明」 means reply (with their own words
    when they gave any) and resolve; 「与我无关，直接 resolve」 means resolve
@@ -356,7 +365,8 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
    touch the code and do not reply on their behalf, report it instead.
    SATISFIED / UNSUPPORTED / EXHAUSTED ⇒ done (a repo
    with no sign of Copilot releases itself at once instead of waiting; a
-   Copilot that never answers within 20 minutes escalates to the user).
+   request GitHub never queued is re-sent once and then released; a queued
+   Copilot that never answers within 30 minutes escalates to the user).
    Pushing your fixes re-arms the cycle — that is the loop, and it has **no
    round cap**: keep going until every finding is handled.
 

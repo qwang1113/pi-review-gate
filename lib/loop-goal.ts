@@ -432,13 +432,6 @@ export function buildGoalPrereviewRefusal(ctx: GoalPrereviewRefusalContext): str
 export const GOAL_CONFIRM_TITLE = "review-gate: AI 提交了本次任务的目标（退出条约）——是否认可？";
 
 /**
- * Max characters of the goal echoed into the transcript before the dialog.
- * The transcript scrolls, so this is about not spamming the session, not about
- * geometry — the dialog itself is bounded by lib/dialog-budget.ts.
- */
-export const GOAL_CONFIRM_MAX_CHARS = 2000;
-
-/**
  * Full-text message shown in the TRANSCRIPT before the approval dialog opens.
  *
  * WHY NOT IN THE DIALOG. A dialog renders its text as one unclipped block
@@ -448,15 +441,22 @@ export const GOAL_CONFIRM_MAX_CHARS = 2000;
  * lib/dialog-budget.ts for the measurements). The transcript, unlike the
  * dialog, scrolls — so the reviewable text goes there and the dialog keeps
  * only the decision.
+ *
+ * AND IT IS THE WHOLE GOAL (user decision, 2026-09-14). This used to echo only
+ * the first 2000 characters with an `…（已截断）` tail — cutting exactly the
+ * text the user is being asked to approve, on a surface that is not
+ * constrained at all: measured on the real renderer, appending 400 rows to the
+ * transcript triggers 0 full clears, so length here costs nothing but scroll.
+ * The dialog's row budget is the only geometry that matters, and the dialog
+ * never carries the goal text anyway.
+ *
+ * A goal can still be too long, but that is refused, not silently shortened:
+ * `LOOP_GOAL_MAX_WRITE_CHARS` bounds what the extension will write at all.
  */
 export function buildGoalTranscriptMessage(goalText: string): string {
-  const normalized = normalizeGoalText(goalText);
-  const shown = normalized.length > GOAL_CONFIRM_MAX_CHARS
-    ? normalized.slice(0, GOAL_CONFIRM_MAX_CHARS) + "\n…（已截断，完整内容将写入 " + LOOP_GOAL_RELPATH + "）"
-    : normalized;
   return (
     "───── AI 提交的目标（不可信数据） ─────\n" +
-    shown +
+    normalizeGoalText(goalText) +
     "\n───────────────────────\n" +
     "认可后，以上内容将由扩展写入 `" + LOOP_GOAL_RELPATH + "`，作为本会话的退出条约：" +
     "reviewer 会逐条验收它，loop 模式下未经认可的目标会拦住 commit/push/PR。"

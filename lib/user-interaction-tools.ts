@@ -64,7 +64,7 @@ import {
   type AskQuestion,
   type InterviewStop,
 } from "./ask-user.ts";
-import { MAX_CHOICE_OPTIONS, renderChoice } from "./choice-dialog.ts";
+import { MAX_CHOICE_OPTIONS } from "./choice-dialog.ts";
 // The batch id is minted with the same collision-resistant helper the channel
 // uses for its own record ids — one generator, not a second convention.
 import { newChannelId } from "./orchestrator-channel.ts";
@@ -98,7 +98,7 @@ export interface UserInteractionToolDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; pointer?: string; signal?: AbortSignal },
+    opts?: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] },
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -162,12 +162,53 @@ export type ConsentToolDeps = Pick<
 // ---------- ask_user ----------
 
 /**
+ * The question's own first line, short enough to sit in a box title.
+ *
+ * WHY THE TITLE NEEDS IT (reviewer Nit, 2026-09-14): the question text lives in
+ * the budgeted BODY, and the reason box the template raises for
+ * `✎ 不选，我说明原因` renders `spec.title` ALONE — the box the user types
+ * their objection into would have said only 「问题 1/3」. One line of the
+ * question is charged to the same title budget as everything else — and when
+ * that budget runs out the title is cut from the TAIL, which is why the ⚠️
+ * notice sits AHEAD of it (see questionDialogTitle).
+ */
+function questionHeadline(q: AskQuestion): string {
+  const first = q.text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
+  // Cut by CODE POINTS, not UTF-16 units: `slice` splits a surrogate pair in
+  // half and prints a replacement character (reviewer Nit, 2026-09-14).
+  const points = [...first];
+  return points.length > HEADLINE_MAX_CHARS ? `${points.slice(0, HEADLINE_MAX_CHARS).join("")}…` : first;
+}
+
+/** How much of the question's first line the title carries. */
+const HEADLINE_MAX_CHARS = 60;
+
+/**
+ * The box title for one question — the ONE place its order is decided.
+ *
+ * ORDER IS LOAD-BEARING (reviewer P2, 2026-09-14). `fitDialogTitle` cuts from
+ * the TAIL, so a ⚠️ authorization notice appended AFTER the progress label is
+ * the first thing a small window loses — on a 20-row terminal with four
+ * options the title budget is three rows, and the notice announcing that
+ * 「推荐」 grants a proxy authority would be gone while picking that row still
+ * minted the grant. Head-first makes "the notice is visible wherever the box
+ * is shown at all" true by construction.
+ */
+function questionDialogTitle(q: AskQuestion, index: number, total: number): string {
+  const notice = grantNotice(q).trim();
+  const label = `问题 ${progressLabel(index, total)}：${questionHeadline(q)}`;
+  return notice ? `${notice}\n${label}` : label;
+}
+
+/**
  * The user-visible authorization notice a grantScope question carries.
  *
  * 2026-09-16 (reviewer P1): a grantScope invisible to the user let an agent
  * harvest the sensitive-edit proxy grant from an answer to an UNRELATED
  * question (substring match fired on "grant me a few minutes"). The scope
- * must be stated in the dialog and the transcript, so consent is explicit.
+ * must be stated in the dialog and the transcript, so consent is explicit —
+ * and in the DIALOG it has to be stated where a tail cut cannot reach it
+ * (2026-09-14), which is what questionDialogTitle arranges.
  */
 function grantNotice(q: AskQuestion): string {
   if (!q.grantScope || !isGrantableScope(q.grantScope)) return "";
@@ -293,13 +334,41 @@ export async function doAskUser(
         // Already settled (the project manager answered it through the
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped !== undefined) return undefined;
-        // ONE renderer for every dialog in the gate, plus the interview's
-        // own escape row — which is not part of the template because only an
-        // interview has later questions to skip.
-        return renderChoice(
-          uiCtx.ui,
-          { ...choiceSpecOf(q), title: prompt },
-          { signal, extraRows: [SKIP_REST_CHOICE] },
+        // ONE renderer for every dialog in the gate — the extension's
+        // `askChoice`, so this box is budgeted like every other one — plus the
+        // interview's own escape row, which is not part of the template
+        // because only an interview has later questions to skip.
+        //
+        // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). A title
+        // is charged to the budget but never cut by it (it is the question
+        // being asked), so a 1200-character question in the title made the box
+        // as tall as it liked and pushed the spinner out of the viewport —
+        // the flicker again, from the one render path that had bypassed the
+        // budget entirely. The full question is in the transcript above
+        // (printed before the first box), and the body's cut points at it.
+        //
+        // THE GRANT NOTICE STAYS OUT OF THE BODY (reviewer P1, 2026-09-14).
+        // The body is cut from its TAIL, so appending the ⚠️ authorization
+        // notice after the question let a long question eat it — while
+        // picking the recommended row still minted the proxy grant. That is
+        // exactly the invisible-authorization hole the notice was added to
+        // close (2026-09-16 P1), so the notice rides in the TITLE: it is
+        // charged to the budget like everything else, but a two-line notice
+        // never overflows the title's share, and what a long body loses is
+        // only the tail of the question (whose full text is in the
+        // transcript).
+        return deps.askChoice(
+          uiCtx,
+          {
+            ...choiceSpecOf(q),
+            title: questionDialogTitle(q, index, questions.length),
+          },
+          {
+            body: q.text,
+            pointer: "（完整问题见上方消息）",
+            signal,
+            extraRows: [SKIP_REST_CHOICE],
+          },
         );
       },
       // A broken dialog is silence, never an answer — and, now that these

@@ -20,9 +20,12 @@ import {
   isCopilotAuthor,
   isCopilotOutstanding,
   isUnknownJsonFieldError,
+  lastPageFromLink,
   PR_VIEW_JSON_FIELDS,
   parseCopilotHistoryProbe as historyProbe,
   parseCopilotPayload,
+  parseCopilotProbe,
+  parseCopilotTimeline,
   decideCopilotSupport,
   decidePrView,
   isCopilotOwnerAllowed,
@@ -32,9 +35,17 @@ import {
   releaseCopilotReview,
   sanitizeCopilotState,
   slugFromPrUrl,
+  splitHttpResponse,
   type CopilotPayload,
   type CopilotReviewState,
 } from "../lib/copilot-review.ts";
+// The wait's verdict and its grace window live with the watcher — one module
+// owns the wait.
+import {
+  COPILOT_LANDING_GRACE_MS,
+  copilotWaitNote,
+  decideCopilotWait,
+} from "../lib/copilot-watch.ts";
 import { recordDecision } from "../lib/copilot-triage.ts";
 
 const NOW_ISO = "2026-08-07T10:00:00.000Z";
@@ -482,8 +493,8 @@ test("there is NO round cap: a long review conversation is not a reason to stop"
 // Terminal statuses are DECISIONS, not snapshots.
 
 test("a released cycle is never resurrected by the next check", () => {
-  // Observed for real: request_copilot_review released the cycle as EXHAUSTED,
-  // the very next check_copilot_review re-classified it as ARMED, and
+  // Observed for real: `copilot_review` released the cycle as EXHAUSTED,
+  // the very next call re-classified it as ARMED, and
   // declare_done was blocked by a requirement the gate had already let go.
   for (const status of ["EXHAUSTED", "UNSUPPORTED"] as const) {
     const released = armed({ status, rounds: 3, note: "released earlier" });
@@ -565,8 +576,8 @@ test("requesting a review spends a round and stamps time + head authoritatively"
 });
 
 test("the problem lines name the next concrete action for each open status", () => {
-  assert.match(copilotProblems(armed({ status: "ARMED" }))[0], /request_copilot_review/);
-  assert.match(copilotProblems(armed({ status: "AWAITING" }))[0], /check_copilot_review/);
+  assert.match(copilotProblems(armed({ status: "ARMED" }))[0], /call copilot_review/);
+  assert.match(copilotProblems(armed({ status: "AWAITING" }))[0], /call copilot_review/);
   const open = copilotProblems(armed({ status: "OPEN", openThreads: 3 }))[0];
   assert.match(open, /3 Copilot review thread/);
   assert.match(open, /resolve them, or reply/);
@@ -574,6 +585,18 @@ test("the problem lines name the next concrete action for each open status", () 
     assert.deepEqual(copilotProblems(armed({ status })), []);
   }
   assert.deepEqual(copilotProblems(undefined), []);
+});
+
+test("a WAITED-if-watched cycle stops nagging the continuation, but still blocks declare_done", () => {
+  // The background watcher owns the wait: repeating "it has not come back yet"
+  // every revival tick is the blind polling this gate just stopped doing.
+  assert.deepEqual(copilotProblems(armed(), { watchedAwait: true }), []);
+  assert.equal(copilotProblems(armed()).length, 1,
+    "without a watcher the line is still there — a wait nobody watches must be visible");
+  // Every OTHER unfinished status keeps its line whatever the flag says: the
+  // flag is about a wait in flight, not about being finished.
+  assert.match(copilotProblems(armed({ status: "ARMED" }), { watchedAwait: true })[0], /call copilot_review/);
+  assert.match(copilotProblems(armed({ status: "OPEN", openThreads: 1 }), { watchedAwait: true })[0], /still need work/);
 });
 
 test("releasing keeps the audit trail (why, when, against which head)", () => {
@@ -770,7 +793,7 @@ test("availability: evidence outranks policy, policy outranks silence", () => {
 // The wait budget belongs to the CYCLE, not to the latest request.
 
 test("re-requesting cannot buy more waiting time (the budget anchors on the first request)", () => {
-  // The failure this prevents, observed for real: three request_copilot_review
+  // The failure this prevents, observed for real: three copilot_review
   // calls in a row each refreshed `requestedAt`, so the 20-minute safety valve
   // kept being pushed out and the task sat in AWAITING indefinitely.
   const first = "2026-08-07T10:00:00.000Z";
@@ -820,4 +843,206 @@ test("a sidecar written before the anchor existed still ages out on its last req
   });
   assert.equal(modern?.firstRequestedAt, "2026-08-07T09:00:00.000Z");
   assert.equal(sanitizeCopilotState({ status: "AWAITING", firstRequestedAt: 42 })?.firstRequestedAt, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// The wait verdict — what an unanswered request is actually doing
+//
+// This is the rule that replaced "wait 20 minutes and see": measured on
+// server-service-dashboard PR #592, the answer takes a median of 15.8 minutes,
+// four runs FAILED at ~20.1 minutes, and a request GitHub never queued used to
+// cost the full budget before anyone found out.
+
+test("a queued request with no start event is 'queued', with one it is 'working'", () => {
+  const queued = decideCopilotWait({
+    evidence: { queued: true, workStartedAt: null, workFailedAt: null },
+    requestedAt: NOW_ISO,
+    now: NOW,
+  });
+  assert.equal(queued.state, "queued");
+  assert.match(queued.note, /request is queued on the PR/);
+  assert.equal(queued.waitedMs, 0);
+
+  const working = decideCopilotWait({
+    evidence: { queued: true, workStartedAt: "2026-08-07T10:00:30.000Z", workFailedAt: null },
+    requestedAt: NOW_ISO,
+    now: NOW + 60_000,
+  });
+  assert.equal(working.state, "working");
+  assert.match(working.note, /Copilot is working on the review/);
+  assert.equal(working.waitedMs, 60_000);
+});
+
+test("a failure after the request is 'failed' — no review is coming from that run", () => {
+  const v = decideCopilotWait({
+    evidence: { queued: true, workStartedAt: NOW_ISO, workFailedAt: NOW_ISO },
+    requestedAt: NOW_ISO,
+    now: NOW,
+  });
+  assert.equal(v.state, "failed");
+  assert.match(v.note, /copilot_work_finished_failure/);
+});
+
+test("a STALE failure (older than the request) does not relabel a live request", () => {
+  // The timeline probe reads the tail of the events list, which reaches back
+  // past the last push. A failure from an older run must not make the gate
+  // report "its run failed" about a request that is queued right now.
+  const stale = "2026-08-07T09:00:00.000Z";
+  const v = decideCopilotWait({
+    evidence: { queued: true, workStartedAt: stale, workFailedAt: stale },
+    requestedAt: NOW_ISO,
+    now: NOW + 30_000,
+  });
+  assert.equal(v.state, "queued", "the stale start is not evidence of a current run either");
+});
+
+test("a request that never appeared is 'not-landed' — but only after the grace window", () => {
+  const tooEarly = decideCopilotWait({
+    evidence: { queued: false, workStartedAt: null, workFailedAt: null },
+    requestedAt: NOW_ISO,
+    now: NOW + 5_000,
+  });
+  assert.equal(tooEarly.state, "unknown", "a request does not appear instantly");
+  assert.match(tooEarly.note, /too early to tell/);
+
+  const dropped = decideCopilotWait({
+    evidence: { queued: false, workStartedAt: null, workFailedAt: null },
+    requestedAt: NOW_ISO,
+    now: NOW + COPILOT_LANDING_GRACE_MS + 1,
+  });
+  assert.equal(dropped.state, "not-landed");
+  assert.match(dropped.note, /never listed Copilot as a pending reviewer/);
+});
+
+test("an UNREADABLE probe is 'unknown', never 'not-landed'", () => {
+  // The two directions are not symmetric: a false "not landed" re-requests (a
+  // wasted call), a false "landed" — or releasing a request that was in fact
+  // queued — drops findings nobody ever read.
+  for (const evidence of [undefined, { queued: null }]) {
+    const v = decideCopilotWait({ evidence, requestedAt: NOW_ISO, now: NOW + COPILOT_LANDING_GRACE_MS * 4 });
+    assert.equal(v.state, "unknown", JSON.stringify(evidence));
+    assert.match(v.note, /could not be read/);
+  }
+});
+
+test("every wait state has a note, and the note is the one the tool prints", () => {
+  for (const state of ["working", "queued", "failed", "not-landed", "unknown"] as const) {
+    const note = copilotWaitNote(state, { queued: true, workStartedAt: NOW_ISO, workFailedAt: NOW_ISO }, 60_000);
+    assert.ok(note.length > 20, state);
+  }
+});
+
+test("recovering from a breakage spends the cycle's one retry and says how it broke", () => {
+  const first = recordCopilotRequest(undefined, {
+    pr: 7, head: "abc", nowIso: NOW_ISO,
+  });
+  assert.equal(first.breakageRetried, undefined);
+  const retried = recordCopilotRequest(first, {
+    pr: 7, head: "abc", nowIso: "2026-08-07T10:20:00.000Z", afterBreakage: "failed",
+  });
+  assert.equal(retried.breakageRetried, true, "the retry is spent for the rest of the cycle");
+  assert.equal(retried.firstRequestedAt, "2026-08-07T10:20:00.000Z",
+    "a run that BROKE earns a fresh window — the old one was spent on Copilot's failure");
+  assert.equal(retried.rounds, 2);
+
+  // A request that never landed consumed nothing to recover, so the retry does
+  // NOT reset the clock — otherwise a repo that never queues anything could be
+  // kept waiting indefinitely by re-requesting.
+  const dropped = recordCopilotRequest(first, {
+    pr: 7, head: "abc", nowIso: "2026-08-07T10:20:00.000Z", afterBreakage: "not-landed",
+  });
+  assert.equal(dropped.firstRequestedAt, NOW_ISO);
+  assert.equal(dropped.breakageRetried, true);
+});
+
+test("the queue evidence and the retry flag survive a sidecar round trip, and garbage does not", () => {
+  const state = recordCopilotRequest(undefined, {
+    pr: 7, head: "abc", nowIso: NOW_ISO, afterBreakage: "failed",
+    queue: { state: "working", at: NOW_ISO, startedAt: NOW_ISO },
+  });
+  const back = sanitizeCopilotState(JSON.parse(JSON.stringify(state)));
+  assert.deepEqual(back?.queue, { state: "working", at: NOW_ISO, startedAt: NOW_ISO });
+  assert.equal(back?.breakageRetried, true);
+  // A garbled observation is dropped whole (a missing one waits instead of
+  // acting); an unknown state word is not promoted into a real one.
+  assert.equal(sanitizeCopilotState({ status: "AWAITING", queue: { state: "WAT", at: NOW_ISO } })?.queue, undefined);
+  assert.equal(sanitizeCopilotState({ status: "AWAITING", queue: { state: "working" } })?.queue, undefined);
+  assert.equal(sanitizeCopilotState({ status: "AWAITING", breakageRetried: "yes" })?.breakageRetried, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// The light probe and the timeline parser
+
+test("the light probe reads the head, the pending-reviewer flag and the reviews", () => {
+  const probe = parseCopilotProbe(JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          headRefOid: "headsha",
+          reviewRequests: {
+            totalCount: 1,
+            nodes: [{ requestedReviewer: { __typename: "Bot", login: "copilot-pull-request-reviewer" } }],
+          },
+          reviews: {
+            nodes: [{ author: { login: "Copilot" }, submittedAt: NOW_ISO, state: "COMMENTED", commit: { oid: "headsha" } }],
+          },
+        },
+      },
+    },
+  }));
+  assert.equal(probe?.head, "headsha");
+  assert.equal(probe?.queued, true);
+  assert.equal(probe?.payload.reviews.length, 1);
+  assert.deepEqual(probe?.payload.threads, [], "the light query deliberately reads no threads");
+  // A human reviewer is not a Copilot request; the flag says so honestly.
+  const human = parseCopilotProbe(JSON.stringify({
+    data: { repository: { pullRequest: {
+      headRefOid: "headsha",
+      reviewRequests: { totalCount: 1, nodes: [{ requestedReviewer: { __typename: "User", login: "alice" } }] },
+      reviews: { nodes: [] },
+    } } },
+  }));
+  assert.equal(human?.queued, false);
+  // Unparseable / no pull request ⇒ undefined (the caller must not guess).
+  assert.equal(parseCopilotProbe("nope"), undefined);
+  assert.equal(parseCopilotProbe(JSON.stringify({ data: { repository: {} } })), undefined);
+  assert.equal(parseCopilotProbe(JSON.stringify({
+    data: { repository: { pullRequest: { headRefOid: "h", reviews: { nodes: [] } } } },
+  }))?.queued, null, "a missing reviewRequests block is 'could not read', not 'no'");
+});
+
+test("the timeline parser keeps Copilot's own events and ignores everything else", () => {
+  const timeline = parseCopilotTimeline(JSON.stringify([
+    { event: "committed", created_at: NOW_ISO },
+    { event: "review_requested", created_at: NOW_ISO, requested_reviewer: { login: "alice" } },
+    { event: "review_requested", created_at: "2026-08-07T10:01:00.000Z", requested_reviewer: { login: "Copilot" } },
+    { event: "copilot_work_started", created_at: "2026-08-07T10:01:30.000Z" },
+    { event: "copilot_work_finished_failure", created_at: "2026-08-07T10:21:30.000Z" },
+  ]));
+  assert.deepEqual(timeline, {
+    requestedAt: "2026-08-07T10:01:00.000Z",
+    workStartedAt: "2026-08-07T10:01:30.000Z",
+    workFailedAt: "2026-08-07T10:21:30.000Z",
+  });
+  assert.deepEqual(parseCopilotTimeline(JSON.stringify([{ event: "committed" }])), {
+    requestedAt: null, workStartedAt: null, workFailedAt: null,
+  }, "events without a time are not evidence");
+  assert.equal(parseCopilotTimeline("{}"), undefined, "an unreadable payload is not an empty timeline");
+});
+
+test("the Link header names the last page, and `-i` output splits into headers + body", () => {
+  const header = '<https://api.github.com/repositories/1/issues/2/events?per_page=30&page=1>; rel="next", ' +
+    '<https://api.github.com/repositories/1/issues/2/events?per_page=30&page=14>; rel="last"';
+  assert.equal(lastPageFromLink(header), 14);
+  assert.equal(lastPageFromLink(undefined), null);
+  assert.equal(lastPageFromLink('<x>; rel="next"'), null);
+
+  const raw = "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\nLink: " + header + "\r\n\r\n" + '[{"a":1}]';
+  const split = splitHttpResponse(raw);
+  assert.equal(split.headers.get("link"), header);
+  assert.equal(split.body, '[{"a":1}]');
+  // A body with a blank line in it must survive: only a STATUS LINE makes a
+  // header block, so plain `gh api` output passes through untouched.
+  const plain = '{"a":"line1\\n\\nline2"}';
+  assert.deepEqual(splitHttpResponse(plain), { headers: new Map(), body: plain });
 });

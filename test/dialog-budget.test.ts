@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import {
   DIALOG_ASSUMED_COLUMNS,
   DIALOG_BODY_MAX_LINES,
+  dialogTextMaxLines,
   displayWidth,
   fitDialogMessage,
+  fitDialogTitle,
   renderedRowCount,
   wrappedRowCount,
 } from "../lib/dialog-budget.ts";
@@ -81,4 +83,49 @@ test("a pathological title never makes the dialog taller", () => {
   const fitted = fitDialogMessage("标".repeat(2000), "正文");
   assert.equal(fitted.message, "", "nothing sane is left to show");
   assert.equal(fitted.truncated, true);
+});
+
+test("the budget follows the REAL terminal: a short window gets fewer rows, a tall one more", () => {
+  // The budget used to be pinned to a 24-row terminal, so on a 20-row window a
+  // "budgeted" dialog was still tall enough to wipe the screen (measured: 19
+  // full clears in 20 frames, 2026-09-14). Geometry has to know the geometry.
+  assert.equal(dialogTextMaxLines(2, 24), DIALOG_BODY_MAX_LINES, "24 rows is what the constant describes");
+  assert.ok(dialogTextMaxLines(2, 40) > DIALOG_BODY_MAX_LINES, "a tall terminal may show more");
+  assert.ok(dialogTextMaxLines(2, 20) < DIALOG_BODY_MAX_LINES, "a short terminal must ask for less");
+  // Extra option rows still come out of the same allowance.
+  assert.ok(dialogTextMaxLines(4, 24) < dialogTextMaxLines(2, 24));
+  // Never zero or negative: a dialog that must exist still gets its rows.
+  assert.equal(dialogTextMaxLines(2, 6), 2);
+});
+
+test("a title longer than its rows is cut, and points at the full text", () => {
+  // `ask_user` puts the question in the TITLE, and `fitDialogMessage` never
+  // cuts a title — so an unbounded title is an unbounded dialog even with an
+  // empty body. That was the last render path that could push the spinner out
+  // of the viewport.
+  const title = Array.from({ length: 40 }, (_, i) => `问题行 ${i}`).join("\n");
+  const fitted = fitDialogTitle(title, 6, "（完整问题见上方消息）");
+  assert.equal(fitted.truncated, true);
+  assert.ok(fitted.rows <= 6, `the title must fit its rows (was ${fitted.rows})`);
+  assert.match(fitted.message, /完整问题见上方消息/);
+  assert.match(fitted.message, /问题行 0/, "the head is what the user is answering");
+});
+
+test("a title that fits is passed through untouched", () => {
+  const fitted = fitDialogTitle("问题 1/3", 6);
+  assert.equal(fitted.message, "问题 1/3");
+  assert.equal(fitted.truncated, false);
+});
+
+test("a budget too small for the pointer keeps the CONTENT, not the pointer", () => {
+  // `ask_user` puts the grant authorization notice at the HEAD of its title
+  // because the tail is what gets cut, so a box so short that only the pointer
+  // would fit must not swallow it — that would put the invisible-consent hole
+  // back (reviewer Nit, 2026-09-14).
+  const notice = "⚠️ 回答此题即表示：你明确授予项目经理代答权";
+  const fitted = fitDialogTitle(`${notice}\n问题 1/1：这是一道很长的题目`, 1, "…（标题过长，全文见上方消息）");
+  assert.equal(fitted.truncated, true);
+  assert.match(fitted.message, /明确授予项目经理/, "the head is what survives");
+  assert.equal(fitted.rows, 1);
+  assert.ok(!fitted.message.includes("标题过长"), "the pointer yields to the content it would have replaced");
 });

@@ -371,6 +371,16 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 事件记忆（`SupervisionMemory`）由**调用方持有**并在 `orchestrator_wait` 与后台定时器
 之间共享，所以两者不会重复叫同一件事；它绝不是模块级变量，这样测试可以直接构造它。
 
+**投递不再以「项目经理空闲」为前提**（2026-09-14，用户要求）。后台定时器
+（`startSupervisionTimer`，10s）原先第一句就是 `if (!ctx.isIdle?.()) return;`，理由
+是「忙时叫醒只是噪音」。当时的代价记在另一头：项目经理正在写 plan、跑审计或读子会话
+交付时，**完全听不到子会话在等回答** —— 那个孩子只能干等到下一次 `orchestrator_wait`，
+而它可能就是被卡住的那一环。现在每一类子会话事件在忙时也投递，唯一的变化是投递
+方式：`pi.sendMessage(..., { triggerTurn: true, deliverAs: "steer" })`。pi 在**当前这
+批工具调用跑完、下一次 LLM 调用之前**送达，所以打断的是「下一个回合」，**不 abort**
+正在跑的工具（用户决定：中断一次分钟级的 plan 审计，比晚一个回合更贵）。去重与退避
+都不变：事件记忆仍与 `orchestrator_wait` 共享，10s→30s→60s 仍约束重复。
+
 ### 5.3 收尾块与健康快照读同一份真值（B4）
 
 `lib/orchestrator-gate.ts` 的 `orchestratorDoneProblems` + `lib/orchestrator-session-tools.ts` 的 `exitBlockers`

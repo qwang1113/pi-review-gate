@@ -27,12 +27,12 @@
  * touched files.
  *
  * HOW "IS COPILOT AVAILABLE HERE?" IS DECIDED. GitHub exposes NO capability
- * API for Copilot code review, and — measured, not assumed — every request
+ * API for Copilot code review, and — measured, not assumed — the REQUEST
  * surface reports success even where the request is silently dropped:
  * `gh pr edit --add-reviewer @copilot` exits 0 and REST
  * `POST .../requested_reviewers` answers 200 on a repository that then shows
  * `reviewRequests.totalCount == 0`, no `ReviewRequestedEvent` in the timeline,
- * and no review at all. So neither the exit code nor a `reviewRequests`
+ * and no review at all. So neither the exit code nor a bare `reviewRequests`
  * read-back can decide this. Only POSITIVE evidence counts, in this order:
  *
  *   CONFIRMED  a Copilot review or Copilot thread exists on THIS PR, or the
@@ -45,6 +45,21 @@
  * The cost of the heuristic is bounded and self-healing: one real Copilot
  * review anywhere in the repo's recent PRs flips it to CONFIRMED forever.
  *
+ * WHAT THE REQUEST READ-BACK *IS* GOOD FOR (2026-09-14, measured on
+ * server-service-dashboard PR #592). The paragraph above killed the read-back
+ * as a VETO and it stays dead — an empty `reviewRequests` right after the call
+ * proves nothing, because GitHub has not registered it yet. Read against the
+ * CLOCK it becomes the opposite kind of evidence, and read positively:
+ * `reviewRequests` listing `copilot-pull-request-reviewer` (the pending dot on
+ * the PR page; REST `requested_reviewers` never shows it remember) is proof the
+ * request WAS queued, and the timeline's `copilot_work_started` follows within
+ * 63 seconds (median 35s over 51 requests). So a request that still shows
+ * neither of those after the grace window was dropped, and one
+ * that shows them is worth waiting for — which is exactly what
+ * `lib/copilot-watch.ts`'s `decideCopilotWait` answers. The failure event
+ * (`copilot_work_finished_failure`, observed at ~20.1 minutes) is the third
+ * state, and the one no amount of waiting can recover from.
+ *
  * PURITY. No IO, no clock, no throwing: payloads arrive as strings, `now` is
  * injected, and every function returns a new value. The extension owns `gh`,
  * the timers and the storage; this module owns the rules.
@@ -54,7 +69,9 @@
  * Lifecycle of one Copilot requirement.
  *
  *   ARMED       a PR-affecting ship was observed; no review requested yet
- *   AWAITING    a review was requested; Copilot has not answered yet
+ *   AWAITING    a review was requested; Copilot has not answered yet. WHICH
+ *               kind of not-answered is kept in `queue` — queued, working,
+ *               failed or never landed (lib/copilot-watch.ts)
  *   OPEN        Copilot answered and left threads that still need work
  *   SATISFIED   every Copilot thread is resolved or answered
  *   UNSUPPORTED no PR / no gh / repo or account cannot do Copilot review
@@ -108,14 +125,24 @@ const RELEASED: ReadonlySet<CopilotStatus> = new Set<CopilotStatus>([
  */
 
 /**
- * How long a requested review may stay unanswered before the requirement is
- * released as EXHAUSTED. Copilot normally answers within a minute; a repo
- * where the feature is silently unavailable would otherwise wait forever.
+ * How long a QUEUED review may stay unanswered before the requirement is
+ * released as EXHAUSTED.
  *
- * This is the ONLY remaining budget, and it is deliberately the one that
- * cannot drop feedback: it fires exactly when there is no feedback to drop.
+ * MEASURED, not guessed (server-service-dashboard PR #592, 50 paired rounds,
+ * 2026-09-14): request → review has a median of 15.8 minutes, a p90 of 19.4
+ * and a maximum of 23.4. Copilot's own run also fails at ~20.1 minutes
+ * ({@link CopilotQueueEvidence.workFailedAt}, 4 occurrences in the same
+ * sample). The previous 20-minute budget sat exactly on that p90, so a tenth
+ * of the rounds released the requirement seconds before the review it was
+ * waiting for arrived — and could not tell a broken run from silence.
+ *
+ * This is still the ONLY time budget, and it is still the one that cannot
+ * drop feedback. What keeps a repo where nothing ever happens from spending
+ * it is no longer the clock but the EVIDENCE (`lib/copilot-watch.ts`): a
+ * request that never shows up as queued is given only that module's grace
+ * window, and a failed run ends the wait outright.
  */
-export const COPILOT_AWAIT_TIMEOUT_MS = 20 * 60 * 1000;
+export const COPILOT_AWAIT_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * Tolerance when comparing OUR local timestamps against GitHub's. Only used
@@ -152,6 +179,19 @@ export interface CopilotReviewState {
   note?: string;
   /** Threads still needing work at the last check (status OPEN). */
   openThreads?: number;
+  /**
+   * The LAST thing the queue probe said about this cycle's request, and when.
+   * Persisted for two readers: `/gate-status` ("is it queued or is Copilot
+   * working on it?") and the tool reply's elapsed-time line. Never a verdict
+   * on its own — it is one observation, and the next probe overwrites it.
+   */
+  queue?: CopilotQueueObservation;
+  /**
+   * The cycle's ONE recovery re-request has been spent — after a run that
+   * FAILED, or a request GitHub never queued. A second breakage in the same
+   * cycle releases the requirement instead of asking a third time.
+   */
+  breakageRetried?: boolean;
   /**
    * Sticky memory of a CONFIRMED availability probe (a real Copilot review was
    * seen on this PR or in the repo's recent PRs). Cached because the evidence
@@ -232,6 +272,21 @@ export function recordCopilotRequest(
     nowIso: string;
     note?: string;
     supportConfirmed?: boolean;
+    /**
+     * What the request-time confirmation probe saw. Recorded with the
+     * request so a later reader (`/gate-status`, the next tool call) does not
+     * have to re-ask GitHub whether the request was ever queued.
+     */
+    queue?: CopilotQueueObservation;
+    /**
+     * This request RECOVERS from a breakage — a run that failed, or a request
+     * GitHub never queued — and spends the cycle's one retry. A broken run
+     * also gets a FRESH wait budget: the first one was spent on Copilot's own
+     * failure, and charging the retry for it would cut it off mid-review
+     * (measured median 15.8 minutes). A request that never landed consumed
+     * nothing to recover, so it does not reset the clock.
+     */
+    afterBreakage?: "failed" | "not-landed";
   },
 ): CopilotReviewState {
   return {
@@ -241,11 +296,15 @@ export function recordCopilotRequest(
     requestedAt: args.nowIso,
     // Anchor the wait budget on the first request of this cycle. Older
     // sidecars have no `firstRequestedAt`; their `requestedAt` is that anchor.
-    firstRequestedAt: prev?.firstRequestedAt ?? prev?.requestedAt ?? args.nowIso,
+    firstRequestedAt: args.afterBreakage === "failed"
+      ? args.nowIso
+      : (prev?.firstRequestedAt ?? prev?.requestedAt ?? args.nowIso),
     ...(args.head ? { head: args.head } : {}),
     rounds: (prev?.rounds ?? 0) + 1,
     ...(args.supportConfirmed || prev?.supportConfirmed ? { supportConfirmed: true } : {}),
     ...(prev?.triage ? { triage: prev.triage } : {}),
+    ...(args.queue ? { queue: args.queue } : {}),
+    ...(args.afterBreakage || prev?.breakageRetried ? { breakageRetried: true } : {}),
     at: args.nowIso,
     note: args.note ?? "Copilot review requested",
   };
@@ -288,6 +347,30 @@ export function releaseCopilotReview(
   };
 }
 
+/**
+ * What an unanswered request is actually doing, in one word. The VERDICT that
+ * produces it, and the evidence it is drawn from, live in lib/copilot-watch.ts
+ * — this module owns the cycle, that one owns the wait.
+ */
+export type CopilotWaitState = "working" | "queued" | "failed" | "not-landed" | "unknown";
+
+/**
+ * The same words, as a set — the validator needs to reject a garbled
+ * persisted value.
+ */
+const COPILOT_WAIT_STATES: ReadonlySet<string> = new Set<CopilotWaitState>([
+  "working", "queued", "failed", "not-landed", "unknown",
+]);
+
+/** One persisted observation of the queue probe. */
+export interface CopilotQueueObservation {
+  state: CopilotWaitState;
+  /** ISO time of the observation. */
+  at: string;
+  /** ISO time Copilot's run started, when the timeline showed one. */
+  startedAt?: string;
+}
+
 /** Does this state still hold `declare_done` back? */
 export function isCopilotOutstanding(state: CopilotReviewState | undefined): boolean {
   if (!state) return false;
@@ -297,20 +380,34 @@ export function isCopilotOutstanding(state: CopilotReviewState | undefined): boo
 /**
  * The unmet-requirement lines for `declare_done` / the L2 continuation.
  * Empty when nothing is outstanding. Never used by the ship gate.
+ *
+ * `opts.watchedAwait` drops the AWAITING line: the background watcher owns
+ * that wait and WILL wake the session when the review lands, so repeating
+ * "it has not come back yet" every revival tick is the blind polling this
+ * gate just stopped doing. It is deliberately opt-in per call site —
+ * `declare_done` never passes it, because a review that has not landed is
+ * still an unfinished task.
  */
-export function copilotProblems(state: CopilotReviewState | undefined): string[] {
+export function copilotProblems(
+  state: CopilotReviewState | undefined,
+  opts: { watchedAwait?: boolean } = {},
+): string[] {
   if (!isCopilotOutstanding(state) || !state) return [];
   const pr = state.pr === null ? "the PR" : `PR #${state.pr}`;
   switch (state.status) {
     case "ARMED":
-      return [`Copilot code review not requested for ${pr} — call request_copilot_review`];
+      return [`Copilot code review not requested for ${pr} — call copilot_review`];
     case "AWAITING":
-      return [`Copilot code review of ${pr} has not come back yet — call check_copilot_review`];
+      if (opts.watchedAwait) return [];
+      return [
+        `Copilot code review of ${pr} has not come back yet — call copilot_review ` +
+        "(the gate is watching the PR in the background; it cannot be waited out by polling)",
+      ];
     case "OPEN":
       return [
         `${state.openThreads ?? 0} Copilot review thread(s) on ${pr} still need work — fix and ` +
         "resolve them, or reply in the thread with the reason it will not be fixed, then call " +
-        "check_copilot_review",
+        "copilot_review",
       ];
     default:
       return [];
@@ -321,6 +418,164 @@ export function copilotProblems(state: CopilotReviewState | undefined): string[]
 // Payload parsing (tolerant: a shape we do not recognize is "no data", never
 // an exception and never an optimistic default).
 // ---------------------------------------------------------------------------
+
+/**
+ * The LIGHT query: everything a background poll needs to notice that Copilot's
+ * answer arrived, and nothing else.
+ *
+ * Deliberately NOT {@link COPILOT_THREADS_QUERY}: that one carries up to 100
+ * threads with their comment bodies (measured: 125 KB, ~2s on a 10k-line PR),
+ * which is the right price for the one call that has to READ the findings and
+ * the wrong price for a poll that runs every ~25 seconds for fifteen minutes.
+ * This one measured ~1 KB: the head, whether a review request is still pending
+ * (the PR page's dot), and the last few reviews.
+ */
+export const COPILOT_PROBE_QUERY = `query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      headRefOid
+      reviewRequests(first:10){totalCount nodes{requestedReviewer{__typename ... on Bot{login} ... on User{login} ... on Team{name} ... on Mannequin{login}}}}
+      reviews(last:5){nodes{author{login} submittedAt state commit{oid}}}
+    }
+  }
+}`;
+
+/** What {@link COPILOT_PROBE_QUERY} answers. */
+export interface CopilotProbe {
+  /** The PR head at probe time (null when the payload did not carry one). */
+  head: string | null;
+  /**
+   * Copilot is listed as a PENDING reviewer — the dot on the PR page.
+   * `null` when the field was missing/unreadable, which is NOT "no".
+   */
+  queued: boolean | null;
+  /** Reviews the probe read — enough for `analyzeCopilot` to see a landing. */
+  payload: CopilotPayload;
+}
+
+/**
+ * Parse {@link COPILOT_PROBE_QUERY}. Returns undefined when the response
+ * carries no recognizable pull request (the caller must act on "no evidence",
+ * never on a guess).
+ *
+ * The returned `payload.threads` is always empty on purpose: this query does
+ * not read threads. `analyzeCopilot` only needs the REVIEWS to answer "did
+ * Copilot answer this cycle" — the only question the poll asks — and `reviewed`
+ * is deliberately independent of the thread list (see its doc).
+ */
+export function parseCopilotProbe(raw: string): CopilotProbe | undefined {
+  const root = asRecord(parseJson(raw));
+  const pr = asRecord(asRecord(asRecord(root?.data)?.repository)?.pullRequest);
+  if (!pr) return undefined;
+  const reviewNodes = asRecord(pr.reviews)?.nodes;
+  const reviews: CopilotReviewSummary[] = Array.isArray(reviewNodes)
+    ? reviewNodes.flatMap((node) => {
+      const rec = asRecord(node);
+      if (!rec) return [];
+      const commit = asRecord(rec.commit)?.oid;
+      return [{
+        author: login(rec),
+        submittedAt: typeof rec.submittedAt === "string" ? rec.submittedAt : null,
+        commit: typeof commit === "string" ? commit : null,
+        state: typeof rec.state === "string" ? rec.state : null,
+      }];
+    })
+    : [];
+  const requestNodes = asRecord(pr.reviewRequests)?.nodes;
+  const queued = Array.isArray(requestNodes)
+    ? requestNodes.some((node) => isCopilotAuthor(directLogin(asRecord(node)?.requestedReviewer)))
+    : null;
+  const head = typeof pr.headRefOid === "string" ? pr.headRefOid : null;
+  return { head, queued, payload: { head, reviews, threads: [] } };
+}
+
+/**
+ * The Copilot events of one PR's REST timeline (`/issues/:n/events`), reduced
+ * to the three facts the wait runs on. All optional: an absent event is
+ * absent, and the caller must not read it as "did not happen".
+ *
+ * The event names are GitHub's own, and they are REST-only — the GraphQL
+ * `PullRequestTimelineItemsItemType` enum has no Copilot member (checked
+ * against the live schema, 2026-09-14), which is why this probe is a REST
+ * call and why it is NOT part of the ~25s poll: it costs two round trips and
+ * is only needed where the cheap query cannot tell the failure modes apart.
+ */
+export interface CopilotTimeline {
+  /** Latest request for the Copilot reviewer. */
+  requestedAt: string | null;
+  /** Latest `copilot_work_started` — Copilot's run is underway. */
+  workStartedAt: string | null;
+  /** Latest `copilot_work_finished_failure` — the run broke, no review came. */
+  workFailedAt: string | null;
+}
+
+/**
+ * Parse `/repos/:owner/:repo/issues/:n/events`. `undefined` when the payload
+ * is not an event list at all (unreadable), never a zeroed-out timeline.
+ *
+ * Only Copilot's own events count: a `review_requested` for someone else, and
+ * `referenced`/`committed` noise, are not evidence about this requirement.
+ * The endpoint is ascending, so the LAST event of each kind wins.
+ */
+export function parseCopilotTimeline(raw: string): CopilotTimeline | undefined {
+  const parsed = parseJson(raw);
+  if (!Array.isArray(parsed)) return undefined;
+  const out: CopilotTimeline = { requestedAt: null, workStartedAt: null, workFailedAt: null };
+  for (const item of parsed) {
+    const rec = asRecord(item);
+    const at = typeof rec?.created_at === "string" ? rec.created_at : null;
+    if (!at) continue;
+    switch (rec?.event) {
+      case "review_requested":
+        if (isCopilotAuthor(directLogin(rec.requested_reviewer))) out.requestedAt = at;
+        break;
+      case "copilot_work_started":
+        out.workStartedAt = at;
+        break;
+      case "copilot_work_finished_failure":
+        out.workFailedAt = at;
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Split a `gh api --include` response into its headers and body.
+ *
+ * The header block is the part before the first blank line; gh writes CRLF
+ * line endings, but a body containing "\n\n" must not be mistaken for the
+ * boundary, so the CRLF form is preferred when it exists at all. Returns the
+ * body alone when there is no header block at all (plain `gh api` output).
+ */
+export function splitHttpResponse(raw: string): { headers: Map<string, string>; body: string } {
+  const crlf = raw.indexOf("\r\n\r\n");
+  const boundary = crlf >= 0 ? crlf : raw.indexOf("\n\n");
+  const headerLen = crlf >= 0 ? 4 : 2;
+  const headers = new Map<string, string>();
+  const head = boundary < 0 ? raw : raw.slice(0, boundary);
+  // A body-only payload (no status line) is passed through untouched.
+  if (boundary < 0 || !/^HTTP\//.test(head)) return { headers, body: raw };
+  for (const line of head.split(/\r?\n/).slice(1)) {
+    const colon = line.indexOf(":");
+    if (colon <= 0) continue;
+    headers.set(line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim());
+  }
+  return { headers, body: raw.slice(boundary + headerLen) };
+}
+
+/**
+ * The page number of a paginated response's LAST page, from its `Link` header.
+ * `null` when there is no such header (a single-page answer).
+ */
+export function lastPageFromLink(link: string | undefined): number | null {
+  if (typeof link !== "string") return null;
+  const m = /[?&]page=(\d+)[^>]*>;\s*rel="last"/.exec(link);
+  const page = m ? Number.parseInt(m[1], 10) : NaN;
+  return Number.isFinite(page) && page > 0 ? page : null;
+}
 
 export interface PrSummary {
   number: number;
@@ -630,6 +885,17 @@ function login(node: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+/**
+ * A login carried DIRECTLY on the node (REST's `requested_reviewer`) rather
+ * than nested under `author` (GraphQL's review/reviewer shapes). Two shapes,
+ * two readers — using the wrong one silently answers "nobody", which is how a
+ * queued Copilot request reads as "not queued".
+ */
+function directLogin(node: unknown): string | null {
+  const value = asRecord(node)?.login;
+  return typeof value === "string" ? value : null;
+}
+
 function firstNode(container: unknown): Record<string, unknown> | undefined {
   const nodes = asRecord(container)?.nodes;
   if (!Array.isArray(nodes)) return undefined;
@@ -788,7 +1054,7 @@ export function analyzeCopilot(
  * repo cannot do this at all) are never re-opened by *observation*: this
  * function will not move them, whatever the payload says. Re-opening is an
  * explicit act — a new PR-affecting ship calling {@link armCopilotReview}, or
- * the agent deliberately calling `request_copilot_review` again. Observed for
+ * the agent deliberately calling `copilot_review` again. Observed for
  * real: a released cycle was re-classified as ARMED by
  * the very next check, and `declare_done` was blocked by a requirement that
  * had already been let go.
@@ -897,8 +1163,8 @@ export function evaluateCopilot(
       status: state.requestedAt ? "AWAITING" : "ARMED",
       at: opts.nowIso,
       note: state.requestedAt
-        ? "Copilot has not posted its review yet — wait and check again"
-        : "no Copilot review found for this PR yet — request one",
+        ? "Copilot has not posted its review yet — the gate watches the PR and wakes this session when it lands"
+        : "no Copilot review of this PR yet — call copilot_review to request one",
       openThreads: 0,
     };
   }
@@ -954,6 +1220,23 @@ export function sanitizeCopilotState(raw: unknown): CopilotReviewState | undefin
   // evidence that was never gathered. Claiming CONFIRMED costs waiting time,
   // never correctness, but the field should still mean what it says.
   if (obj.supportConfirmed === true) out.supportConfirmed = true;
+  // The queue observation is re-derivable (it is one probe), so a garbled one
+  // is dropped rather than repaired: the wait's verdict reads a missing
+  // observation as "unknown", which waits instead of acting.
+  const queue = asRecord(obj.queue);
+  const queueState = queue?.state;
+  if (
+    typeof queueState === "string" &&
+    (COPILOT_WAIT_STATES as ReadonlySet<string>).has(queueState) &&
+    typeof queue?.at === "string"
+  ) {
+    out.queue = {
+      state: queueState as CopilotWaitState,
+      at: queue.at,
+      ...(typeof queue.startedAt === "string" ? { startedAt: queue.startedAt } : {}),
+    };
+  }
+  if (obj.breakageRetried === true) out.breakageRetried = true;
   // Dropped whole when nothing in it is readable: an empty triage block means
   // "no finding was decided yet", which asks the user again — the safe
   // direction. The OTHER direction (keeping a garbled record) would fix code

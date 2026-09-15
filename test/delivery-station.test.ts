@@ -240,10 +240,10 @@ test("arrival: `pr` owes a committed worktree AND evidence that a PR was opened"
   assert.match(noPr[0]!, /没有看到 PR 被开出来/);
   // The refusal must name ways out that all actually work: the first version
   // claimed the gate records a PR number on any PR-class ship (false), and the
-  // second pointed at `request_copilot_review` without saying that a project
+  // second pointed at `copilot_review` without saying that a project
   // with copilotReview disabled has to do something else (round-2 Nit).
   assert.match(noPr[0]!, /gh pr create/);
-  assert.match(noPr[0]!, /request_copilot_review/);
+  assert.match(noPr[0]!, /copilot_review/);
   assert.match(noPr[0]!, /copilotReview/, "…and what to do when that switch is off");
   assert.match(noPr[0]!, /推分支还不算/, "a push is not a PR — say so, it is the likely confusion");
 

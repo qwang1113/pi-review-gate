@@ -36,8 +36,21 @@
 
 import type { TaskMode } from "./task-mode.ts";
 
-/** Consecutive read-only calls with no production before the guard fires. */
-export const READONLY_STALL_LIMIT = 30;
+/**
+ * Consecutive read-only calls with no production before the guard fires.
+ *
+ * RAISED 30 → 100 (user decision, 2026-09-14). Thirty is nothing when the
+ * work IS reading: a session tracing one behaviour through a few modules, or
+ * walking a dependency's source to answer a question the docs do not, passes
+ * 30 tool calls routinely and legitimately. The nudge then arrives while the
+ * investigation is still productive, which is the one moment it is pure
+ * noise. A hundred calls is the first count that means "still no plan", and
+ * since this is a NUDGE and never a block, arriving late costs nothing — the
+ * guard only ever had to fire before the agent spends an hour drilling.
+ *
+ * The copy reads the constant, so the number the user sees stays true.
+ */
+export const READONLY_STALL_LIMIT = 100;
 
 export interface ReadonlyStallState {
   /** Consecutive read-only calls observed since the last production. */

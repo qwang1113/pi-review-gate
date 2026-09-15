@@ -85,7 +85,7 @@ test("opening the appeal route opened EXACTLY one name", () => {
     "orchestrator_spawn", "orchestrator_instruct", "orchestrator_wait", "orchestrator_close",
     "orchestrator_plan", "orchestrator_notify", "orchestrator_answer",
     "orchestrator_recover", "orchestrator_attach",
-    "propose_loop_goal", "request_copilot_review", "check_copilot_review",
+    "propose_loop_goal", "copilot_review",
     "request_scope_limit", "request_sensitive_edit", "set_gate_mode", "declare_done",
     "request_arbitration",
   ]);

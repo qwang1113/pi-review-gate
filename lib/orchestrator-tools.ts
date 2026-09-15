@@ -535,6 +535,22 @@ async function handlePlanAction(
     );
     const granted = planPick.kind === "chose" && planPick.option === PLAN_APPROVE_LABEL;
 
+    // A DISMISSED box is not a rejection (user report, 2026-09-14) — same
+    // reading as propose_restatement and propose_loop_goal: closing the dialog
+    // without choosing means the user did not answer, usually because they were
+    // saying something else. Reported as "not approved" it reads as an
+    // objection, and the answer to an objection is to rewrite the plan into
+    // another box.
+    if (planPick.kind === "dismissed") {
+      return fail(
+        "review-gate: 用户没有作答这份 plan（确认框被关掉，或他在框外说了别的事）—— " +
+        "**这不是被否掉**，他很可能还有话要说。\n" +
+        "下一步：先把他刚说的事处理掉，然后用 `ask_user` 问一句「关于这份 plan，还有别的要改或要问的吗？" +
+        "没有了我就重新提交」，得到「没有了」之后才重新 submit。",
+        { approved: false, dismissed: true },
+      );
+    }
+
     if (!granted) {
       return fail(
         "review-gate: 用户没有批准这份 plan。" +

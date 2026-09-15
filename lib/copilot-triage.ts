@@ -45,7 +45,7 @@ export const COPILOT_TRIAGE_ASK_FROM_ROUND = 4;
  *
  * Sibling of `ask_user`'s own per-call cap, for the same reason: an interview
  * is a conversation, not a wall. Findings past the cap are reported as
- * "not asked yet" and picked up by the next `check_copilot_review` — the tool
+ * "not asked yet" and picked up by the next `copilot_review` — the tool
  * tells the agent to call it again, so they are never silently dropped.
  */
 export const COPILOT_TRIAGE_MAX_QUESTIONS = 10;

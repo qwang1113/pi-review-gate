@@ -323,6 +323,8 @@ export async function doProposeLoopGoal(
   let declineReason: string | undefined;
   /** True when an instruct interrupt dismissed the approval box: not a rejection. */
   let approvalInterrupted = false;
+  /** The box closed with no answer at all — not a rejection either. */
+  let approvalDismissed = false;
   try {
     const outcome = await deps.askEitherSide(
       {
@@ -355,8 +357,10 @@ export async function doProposeLoopGoal(
     // theirs to judge, and the box they typed into is the one they saw.
     declineReason = pick.kind === "declined" && pick.reason ? pick.reason : outcome.reason;
     approvalInterrupted = outcome.by === "interrupted";
+    approvalDismissed = pick.kind === "dismissed";
   } catch {
     approved = false;
+    approvalDismissed = true;
   }
 
   // The decision may carry a REASON — but only on REJECTION: the user rejects
@@ -378,6 +382,25 @@ export async function doProposeLoopGoal(
             "重新提交协商后的目标即可；不是被拒绝。",
         }],
         details: { approved: false, interrupted: true },
+      };
+    }
+    // THE BOX WAS DISMISSED, NOT REJECTED (user report, 2026-09-14). Closing
+    // the dialog without choosing means the user did not answer — usually
+    // because they were saying something else. This used to fall through to
+    // "the user did NOT approve this goal", which reads as an objection to a
+    // goal nobody objected to, and the agent answers it by re-submitting the
+    // same text into another box. Same wording as propose_restatement and the
+    // plan submit: handle what they said, ASK, then submit.
+    if (approvalDismissed) {
+      return {
+        content: [{
+          type: "text",
+          text: "review-gate: 用户没有作答这次目标协商（确认框被关掉，或他在框外说了别的事）—— " +
+            "**这不是被否掉**，他很可能还有话要说。\n" +
+            "下一步：先把他刚说的事处理掉，然后用 `ask_user` 问一句「关于这个目标，还有别的要补充或要改的吗？" +
+            "没有了我就重新提交」，得到「没有了」之后才重新调用 propose_loop_goal。",
+        }],
+        details: { approved: false, dismissed: true },
       };
     }
     return {

@@ -157,7 +157,19 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
     persist: () => {},
     setLoopArmed: (armed) => { h.armed.push(armed); },
     showToUser: () => true,
-    askChoice: async () => undefined,
+    // WHAT THE EXTENSION'S askChoice DOES, minus the geometry: it hands
+    // `title + body` to renderChoice -> ui.select. The harness drives that
+    // same select path, so the tests keep addressing a question by ITS TEXT
+    // (the interview now puts the question in the BODY and only `问题 N/M` in
+    // the title — a title is charged to the row budget but never cut by it).
+    // The row budget itself is tested in test/dialog-budget.test.ts and
+    // test/tui-flicker.test.ts; the batching and race invariants are the
+    // subject here.
+    askChoice: async (_uiCtx, spec, opts) => {
+      if (opts?.signal === undefined) return undefined;
+      const shown = opts.body ? `${spec.title}\n${opts.body}` : spec.title;
+      return render(shown, opts.signal);
+    },
     canChannelDialogs: () => true,
     // THE REAL FUNNEL: the same call the extension makes, with the same
     // interrupt source an instruct fires.

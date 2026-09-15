@@ -527,7 +527,7 @@ export interface GateState {
    * a `pr` round that never ran a successful `gh pr create` did not arrive.
    * Deliberately NOT the Copilot record (`copilot.pr`), which was the first
    * attempt and is wrong for this: that number is only filled in by
-   * `request_copilot_review` / `check_copilot_review`, so a repo with no `gh`,
+   * `copilot_review`, so a repo with no `gh`,
    * or one where `copilotReview.enabled` is false, opens a real PR and could
    * never satisfy an arrival gate that insisted on it.
    *
