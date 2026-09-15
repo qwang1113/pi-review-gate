@@ -321,7 +321,14 @@ test("every tool takes the same role / sessionId / repo parameters", () => {
       `${tool} shares the addressing parameters`,
     );
     const role = properties.role as { enum?: unknown[] };
-    assert.deepEqual(role.enum, ["reviewer", "adviser", "goal-auditor"], `${tool} accepts the three judge roles`);
+    // `quality-auditor` is addressable (a round that asks a question must be
+    // answerable) even though the agent never REQUESTS that round — the chain
+    // routes to it, and judge_submit's own enum deliberately omits it.
+    assert.deepEqual(
+      role.enum,
+      ["reviewer", "quality-auditor", "adviser", "goal-auditor"],
+      `${tool} accepts the judge roles an agent can address`,
+    );
   }
 });
 

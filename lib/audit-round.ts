@@ -402,6 +402,14 @@ export interface SettleAuditRoundDeps {
     concluded: ReportConclusion;
   }): Promise<string | undefined>;
   recordReview(input: { root: string; concluded: ReportConclusion }): Promise<string | undefined>;
+  /**
+   * Write down the QUALITY round's verdict (2026-09-15). Separate from
+   * `recordReview` for the same reason the two rounds are separate: what is
+   * recorded differs (a quality standing the reviewer's dispatch is gated on,
+   * with no ship binding and no round-history entry) — while WHICH report
+   * closes the round stays one implementation, here.
+   */
+  recordQuality(input: { root: string; concluded: ReportConclusion }): Promise<string | undefined>;
 }
 
 /** What one closing round did. `text`, where present, is for the agent. */
@@ -527,6 +535,8 @@ export async function settleAuditRound(
   let text: string | undefined;
   if (spec.kind === "review") {
     text = await deps.recordReview({ root: input.root, concluded });
+  } else if (spec.kind === "quality") {
+    text = await deps.recordQuality({ root: input.root, concluded });
   } else if (spec.kind === "goal" && pending?.kind === "goal") {
     text = await deps.recordGoal({ root: input.root, pending, concluded });
   } else if (spec.kind === "plan" && pending?.kind === "plan") {
@@ -556,7 +566,11 @@ export async function settleAuditRound(
   // The audit is on record now, so what it was judging can be forgotten. This
   // is deliberately AFTER the write (the old code dropped it before, which
   // lost the binding if the write failed).
-  if (spec.kind !== "review") deps.forgetPending(input.root);
+  // Only the kinds that HAVE a pending entry forget it here: a review and a
+  // quality round never register one (calling this would be a no-op today, and
+  // a call whose meaning is "it happens to be safe" is how a later change to
+  // `forgetPending` turns two rounds into one that silently drops state).
+  if (spec.kind === "goal" || spec.kind === "plan") deps.forgetPending(input.root);
   deps.advanceCursor(entry.judgeId, report.reportId);
   return {
     status: "recorded",

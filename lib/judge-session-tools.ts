@@ -232,6 +232,15 @@ export interface JudgeSessionToolDeps {
     /** The round ran under a weaker binding — surfaced, never buried. */
     bindingNote?: string;
     /**
+     * What the gate did because the round ended (the quality round's hand-off:
+     * a released reviewer, a dropped round, a stopped precommit lane).
+     *
+     * Its own field, and its own line in the report: the recorded note is
+     * shown first-line-only, so a sentence appended to its tail is invisible
+     * (reviewer P1, 2026-09-15).
+     */
+    handOffNote?: string;
+    /**
      * The scope the round stamped on its own report (range + full/incremental).
      *
      * Carried here for the same reason `bindingNote` is: BOTH wake-up paths
@@ -266,7 +275,16 @@ export interface JudgeSessionToolDeps {
 // One definition per parameter, shared by the tools: a role enum that
 // drifts between two of them is exactly the kind of silent inconsistency this
 // move is supposed to make impossible.
-const ROLE_PARAM = Type.Optional(Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }));
+// `quality-auditor` IS addressable here on purpose: the agent never ASKS for
+// that round (judge_submit's role enum deliberately omits it — the chain
+// dispatches it), but the round can ask the agent a question, and waiting on
+// or answering a judge you cannot name would be a dead end.
+const ROLE_PARAM = Type.Optional(Type.Enum({
+  reviewer: "reviewer",
+  "quality-auditor": "quality-auditor",
+  adviser: "adviser",
+  "goal-auditor": "goal-auditor",
+}));
 const SESSION_ID_PARAM = Type.Optional(Type.String({ description: "Judge id (its session id); prefer role" }));
 const REPO_PARAM = Type.Optional(Type.String({
   description: "Absolute repo path (required once the session edited several repos)",
@@ -321,7 +339,7 @@ function addressJudge(
   const role = params.role ? String(params.role) : undefined;
   const judgeId = params.sessionId ? String(params.sessionId) : undefined;
   if (!role && !judgeId) {
-    return { ok: false, text: `review-gate: ${toolName} needs a role (reviewer / adviser / goal-auditor).` };
+    return { ok: false, text: `review-gate: ${toolName} needs a role (reviewer / quality-auditor / adviser / goal-auditor).` };
   }
   // Gate-self path (2026-09-08): ONLY when the direct caller passes
   // `gateSelf === true` as a FUNCTION ARGUMENT — i.e. the gate's own audit
@@ -885,6 +903,10 @@ export async function doWait(
         // Its own line: the recorded note is printed first-line-only, so a
         // weaker binding announced INSIDE that note would never be read.
         ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
+        // The hand-off's own line — the recorded note above prints
+        // first-line-only, so "I dispatched the reviewer" / "that dispatch
+        // failed, re-submit" has to travel where the wake-up actually looks.
+        ...(settled.handOffNote === undefined ? {} : { handOffNote: settled.handOffNote }),
         // What the round says it reviewed — the same line the settle sweep
         // prints, so which path woke the opener never changes what it learns.
         ...(settled.scope === undefined ? {} : { scope: settled.scope }),

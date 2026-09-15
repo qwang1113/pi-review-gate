@@ -189,3 +189,30 @@ test("buildStandardReport: many findings are capped, and the cap is stated rathe
   assert.ok(!text.includes("[P2] f0\n"), "…and the oldest are dropped, not silently truncated mid-list");
 });
 
+
+test("buildStandardReport: the hand-off is its OWN line, never a second line of the record", async () => {
+  // Measured failure (reviewer P1, 2026-09-15): the quality round's hand-off
+  // was appended to `recordedNote`, which this builder prints FIRST-LINE-ONLY.
+  // The opener therefore read "the gate will dispatch the reviewer, do not
+  // re-submit" and never read the next line saying that dispatch had FAILED —
+  // so it waited for a reviewer that was never started.
+  const text = buildStandardReport({
+    role: "quality-auditor",
+    judgeId: "j1",
+    verdict: "READY",
+    recordedNote: "review-gate: 质量轮记录 READY for /repo（findings: 0）",
+    handOffNote: "质量轮 READY ⇒ 门禁已自动派 reviewer 审功能（judge r-1）。**不要**再为这一轮调 judge_submit。",
+  });
+  assert.match(text, /记录：review-gate: 质量轮记录 READY/);
+  assert.match(text, /- 下一步：质量轮 READY ⇒ 门禁已自动派 reviewer/, "the hand-off gets its own printed line");
+  // First-line-only is the rule it has to survive: the note's first line is
+  // what prints, so anything the agent MUST read cannot live below it.
+  const stored = buildStandardReport({
+    role: "quality-auditor",
+    judgeId: "j1",
+    verdict: "READY",
+    recordedNote: "第一行\n第二行（永远读不到）",
+  });
+  assert.match(stored, /记录：第一行/);
+  assert.doesNotMatch(stored, /第二行/, "the builder really is first-line-only");
+});

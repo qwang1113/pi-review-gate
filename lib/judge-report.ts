@@ -72,6 +72,22 @@ export interface StandardReportInput {
    * prints is indistinguishable from one that was never announced.
    */
   bindingNote?: string | undefined;
+  /**
+   * WHAT THE GATE DID NEXT BECAUSE THIS ROUND ENDED — its own line.
+   *
+   * Today only the quality round has one: a READY releases the functional
+   * round it was holding (the gate dispatches the reviewer itself), and a
+   * non-READY drops that round and stops the verification running beside it.
+   *
+   * It is printed as its own line for the same measured reason `bindingNote`
+   * is: the recorded note is shown FIRST-LINE-ONLY, so a sentence appended to
+   * its tail reaches nobody. Measured consequence of getting that wrong
+   * (reviewer P1, 2026-09-15): the opener read "the gate will dispatch the
+   * reviewer, do not re-submit" and never read the next line saying the
+   * dispatch had FAILED and it should re-submit — so it waited for a reviewer
+   * that was never started.
+   */
+  handOffNote?: string | undefined;
   openQuestions?: ReadonlyArray<OpenQuestionBrief> | undefined;
   /** Why this wake-up happened (default `report` — the settle path's case). */
   reason?: StandardReportReason | undefined;
@@ -159,6 +175,10 @@ export function buildStandardReport(input: StandardReportInput): string {
   // recorded under a weaker binding than usual. Both facts or neither.
   if (input.bindingNote !== undefined && input.bindingNote.trim().length > 0) {
     lines.push(`- 绑定说明：${input.bindingNote.trim()}`);
+  }
+  // What the round's ending DID — directly under the record it belongs to.
+  if (input.handOffNote !== undefined && input.handOffNote.trim().length > 0) {
+    lines.push(`- 下一步：${input.handOffNote.trim()}`);
   }
   if (input.conclusionExcerpt !== undefined && input.conclusionExcerpt.trim().length > 0) {
     const excerpt = input.conclusionExcerpt.trim().slice(0, STANDARD_REPORT_EXCERPT_CHARS);

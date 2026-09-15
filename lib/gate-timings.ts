@@ -72,7 +72,26 @@ export interface ReviewTiming {
 }
 
 
-export type GateTiming = PrecommitTiming | ReviewTiming;
+/**
+ * ONE QUALITY ROUND (2026-09-15) — its own kind rather than a `review`
+ * record, because the two rounds answer different questions and a trend line
+ * that mixes them cannot say which one got slower. Same "upper bound since
+ * the previous gate event" caveat as a review round: the judge is its own
+ * process in its own pane.
+ */
+export interface QualityTiming {
+  kind: "quality";
+  at: string;
+  repo: string;
+  verdict: string;
+  /** How long the round took, from the previous gate event. UPPER BOUND. */
+  approxMs: number;
+  approximate: true;
+  /** Findings the round carried (0 on a clean pass). */
+  findingsTotal: number;
+}
+
+export type GateTiming = PrecommitTiming | ReviewTiming | QualityTiming;
 function timingsPath(repoRoot: string): string {
   return join(repoRoot, TIMINGS_RELPATH);
 }
@@ -126,7 +145,9 @@ export function readTimings(repoRoot: string, limit = TIMINGS_MAX_RECORDS): Gate
     if (line.trim() === "") continue;
     try {
       const parsed = JSON.parse(line);
-      if (parsed && (parsed.kind === "precommit" || parsed.kind === "review")) out.push(parsed as GateTiming);
+      if (parsed && (parsed.kind === "precommit" || parsed.kind === "review" || parsed.kind === "quality")) {
+        out.push(parsed as GateTiming);
+      }
     } catch {
       /* torn or hand-edited line */
     }

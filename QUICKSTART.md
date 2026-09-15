@@ -55,9 +55,14 @@ agent：调 set_gate_mode("loop")
   → judge_submit({role:"reviewer", task:<本轮改动说明>})
      **这一次调用**里门禁依次跑完：启动 full precommit（**与链条并行**，不在这一条里等
      它）→ checkpoint 提交（READY 前唯一的 commit 通道）→ 算不可变审核范围
-     baseline..HEAD + 开 findings 流 → 派 reviewer。
+     baseline..HEAD + 开 findings 流 → 派 **quality-auditor**（有代码改动时；
+     它按 `docs/code-quality-rules.md` 审代码本身，语言无关）→ 判 READY 后门禁
+     **自动**派 reviewer（你不需要再调一次；判 BLOCKED 时 reviewer 不会跑，
+     标准报告唤醒你，并且还在跑的全量 precommit 会被终止）。
      除 precommit 外的任一步失败就带原因打回，不留半提交状态；precommit 判 FAIL 会
      作为一条单独的 steer 消息回来，写明第几轮、验证的是哪份内容。
+     质量轮发现「要动既有代码才能改好」的问题时，会直接弹框问你范围（纳入本轮 /
+     只改本轮 / 记为范围外）——范围只有你能定。
      同时：agent 边读流式 findings 边修（不用等审完）
   → judge 进程退出时门禁自己读结论、机械校验（未 prepare ⇒ 不授予；HEAD 已移动 ⇒
      STALE ⇒ BLOCKED）、记录裁决并唤醒 agent
@@ -121,7 +126,7 @@ agent：调 set_gate_mode("loop")
 | 模型 429 / 额度耗尽，循环空转 | provider 限流，注入再多也没用 | 熔断器会在连续无进展后停止注入并提示；`/model` 切到其它 provider（如 anthropic），你的下一条消息即恢复循环 |
 | agents 副本与仓库不同步（正文过时） | `~/.pi/agent/agents/*.md` 落后于本仓库 | 重跑 `node scripts/install-package.mjs`（幂等）；用 `/gate-doctor` 检出 |
 | `STALE`（裁决被记成 BLOCKED） | prepare 之后又有新 checkpoint 提交，reviewer 审的是更旧的 commit | 把新改动并入，再 `judge_submit` 跑一轮；旧 findings 仍然有效 |
-| `orchestrator 模式需要 tmux` | 想进项目经理模式，但 `$TMUX` 为空 —— 它的子会话就是你那个 window 里的 pane | 在一个 tmux window 里启动会话再 `/gate-mode orchestrator`。**judge 不受影响**：reviewer / adviser / goal-auditor 是 `pi -p --session-id` 非交互进程，不用 tmux |
+| `orchestrator 模式需要 tmux` | 想进项目经理模式，但 `$TMUX` 为空 —— 它的子会话就是你那个 window 里的 pane | 在一个 tmux window 里启动会话再 `/gate-mode orchestrator`。**judge 不受影响**：reviewer / quality-auditor / adviser / goal-auditor 是 `pi -p --session-id` 非交互进程，不用 tmux |
 | `~/.pi/review-snapshots/<repo-key>/` 里堆了 `rg-review-snap-*` | 旧版本遗留的孤儿快照（新模型不再创建快照） | 手动清理：`git worktree prune` + `rm -rf ~/.pi/review-snapshots/<repo-key>/rg-review-snap-*` |
 | `git commit` 报 `.git/hooks/pre-commit: No such file or directory` | 有人在旧快照里跑了安装脚本：快照是 linked worktree，**`.git/hooks` 与真仓库共享** | 在**真工作树**重跑 `bash scripts/install-git-hooks.sh` |
 | 想完全绕过 | — | 你执行 `/gate-bypass <reason>`（会话内）或会话外用 `REVIEW_GATE_BYPASS=1`（仅 hooks 层）；注意 `/gate-bypass` 只解除 L1 ship gate，**解除不了 L8 的 edit/write 硬拦**——未确认 goal 前编辑仍被拦 |

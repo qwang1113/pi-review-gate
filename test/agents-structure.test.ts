@@ -40,8 +40,8 @@ test("agents/*.md exactly matches KNOWN_AGENTS (config/render see every agent)",
   assert.ok(files.length >= 4, `expected all 4 agents, found ${files.length}`);
 });
 
-test("L3 judges (reviewer/adviser/arbiter/goal-auditor) think at max — the verdict tier never degrades", () => {
-  for (const f of ["reviewer.md", "adviser.md", "arbiter.md", "goal-auditor.md"]) {
+test("L3 judges (reviewer/quality-auditor/adviser/arbiter/goal-auditor) think at max — the verdict tier never degrades", () => {
+  for (const f of ["reviewer.md", "quality-auditor.md", "adviser.md", "arbiter.md", "goal-auditor.md"]) {
     assert.match(frontmatter(f), /^thinking: max$/m, `${f}: L3 must think at max`);
   }
 });
@@ -51,7 +51,7 @@ test("incremental-review roles run context: fresh — nothing forks the main ses
   // conversation: their task text carries the goal, the scope, and the
   // transcript location to read ON DEMAND. A regression to fork would
   // silently re-add the token/time cost the incremental contract removes.
-  for (const f of ["reviewer.md", "adviser.md", "goal-auditor.md"]) {
+  for (const f of ["reviewer.md", "quality-auditor.md", "adviser.md", "goal-auditor.md"]) {
     assert.match(frontmatter(f), /^defaultContext: fresh$/m, `${f}: must default to fresh context`);
   }
   // The judging roles that stay fork-based do so deliberately (arbiter needs
@@ -92,7 +92,7 @@ test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its ve
 test("L3 judge roles pin the exact strong-tier chain (model + fallbacks + max thinking)", () => {
   const STRONG_FALLBACK =
     /^fallbackModels: claude-opus-5$/m;
-  for (const f of ["reviewer.md", "adviser.md", "arbiter.md"]) {
+  for (const f of ["reviewer.md", "quality-auditor.md", "adviser.md", "arbiter.md"]) {
     const body = frontmatter(f);
     assert.match(body, /^model: claude-fable-5$/m, `${f}: L3 primary must be claude-fable-5`);
     assert.match(body, /^thinking: max$/m, `${f}: L3 must think at max`);
@@ -333,7 +333,7 @@ test("the role files match the ROLE-SHAPED conclude signature (2026-09-04)", () 
   // goal-auditor, and refuses one that is passed anyway. A role file that
   // still asked for prose would make the gate contradict its own dispatch on
   // the very first round — the exact self-collision this pin exists to catch.
-  for (const f of ["reviewer.md", "goal-auditor.md"]) {
+  for (const f of ["reviewer.md", "quality-auditor.md", "goal-auditor.md"]) {
     const src = readFileSync(join(AGENTS, f), "utf8");
     assert.match(src, /NO `notes` parameter/, `${f} must state that notes is refused`);
     assert.doesNotMatch(src, /notes at most|notes your|and notes\b/i,
@@ -372,6 +372,7 @@ test("every judge role is told that findings carry BLOCKERS ONLY", () => {
   // so, or one surface teaching the old habit is enough to keep it.
   const surfaces = [
     join(AGENTS, "reviewer.md"),
+    join(AGENTS, "quality-auditor.md"),
     join(AGENTS, "goal-auditor.md"),
     join(AGENTS, "adviser.md"),
     join(ROOT, "docs", "judge-protocol.md"),
@@ -392,18 +393,25 @@ test("every judge role is told that findings carry BLOCKERS ONLY", () => {
   }
 });
 
-test("reviewer and goal-auditor cite the minimalism section (§5) with their severity maps", () => {
-  // The rules live in docs/coding-standards.md §5 — the role files carry a
-  // pointer plus their own severity map, never a second copy of the checks.
-  const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
-  assert.ok(reviewer.includes("docs/coding-standards.md"), "reviewer.md cites the standards");
-  assert.match(reviewer, /Minimalism/, "reviewer.md names the check");
-  assert.match(reviewer, /new dependency with no written justification.*P1/i, "unjustified deps are P1");
+test("minimalism keeps ONE substantive home (§5), and the code-quality round defers to it", () => {
+  // The rules live in docs/coding-standards.md §5 — every other surface
+  // carries a pointer, never a second copy of the checks. Since 2026-09-15 the
+  // DIFF-level minimalism judgement belongs to the quality round, so the
+  // pointer that used to be in reviewer.md moved with it.
+  const rules = readFileSync(join(ROOT, "docs", "code-quality-rules.md"), "utf8");
+  assert.ok(rules.includes("docs/coding-standards.md"), "the quality checklist cites the standards");
+  assert.match(rules, /§5/, "…and names the minimalism section it does not copy");
+  const quality = readFileSync(join(AGENTS, "quality-auditor.md"), "utf8");
+  assert.match(quality, /code-quality-rules\.md/, "the quality judge reads the checklist");
   const auditor = readFileSync(join(AGENTS, "goal-auditor.md"), "utf8");
   assert.ok(auditor.includes("docs/coding-standards.md"), "goal-auditor.md cites the standards");
   assert.match(auditor, /Is the goal minimal/, "goal-auditor.md carries the minimalism check");
   assert.match(auditor, /the eight/, "the severity paragraph counts all eight checks");
-  for (const [file, src] of [["reviewer.md", reviewer], ["goal-auditor.md", auditor]]) {
+  // The reviewer DEFERS to the quality round instead of re-auditing it.
+  const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
+  assert.match(reviewer, /quality-auditor/, "reviewer.md names the round that owns code quality");
+  assert.match(reviewer, /docs\/code-quality-rules\.md/, "…and points at its checklist");
+  for (const [file, src] of [["reviewer.md", reviewer], ["goal-auditor.md", auditor], ["quality-auditor.md", quality]]) {
     for (const rule of ["复用优先", "能删就删", "新依赖须论证"]) {
       assert.ok(!src.includes(rule), `${file} must not quote the four checks (found: ${rule})`);
     }

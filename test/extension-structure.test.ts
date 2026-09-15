@@ -2659,12 +2659,21 @@ test("judge_submit is the agent's single judge entry and hides every process det
   // both ends.
   const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
   // The agent says WHO and WHAT. Anything procedural is the gate's business.
-  assert.match(body, /role: Type\.Enum\(\{ reviewer/, "the role is the addressing key");
+  assert.match(body, /role: Type\.Enum\(SUBMITTABLE_JUDGE_ROLES\)/, "the role is the addressing key");
   assert.match(body, /task: Type\.String\(/, "the task text is the other input");
   assert.doesNotMatch(body, /sessionId: Type\./, "the agent never passes a session id");
   assert.doesNotMatch(body, /title: Type\./, "the agent never passes a title");
-  assert.match(body, /const title = `\$\{role\}-/, "the gate derives the display title itself");
-  assert.match(body, /dispatchJudgeRound\(\{ root, role, title, task/, "dispatch is delegated to the one spawn owner");
+  // The title is derived from the role ACTUALLY dispatched, which the chain
+  // decides (`reviewer` for a docs-only round or a standing quality pass,
+  // `quality-auditor` otherwise) — the agent still passes no title at all.
+  assert.match(body, /const title = `\$\{dispatchRole\}-/, "the gate derives the display title itself");
+  assert.match(body, /dispatchJudgeRound\(\{ root, role: dispatchRole, title, task/, "dispatch is delegated to the one spawn owner");
+  // The quality round is NOT a role the agent may name: it is routed to. The
+  // enum and the second validation come from ONE constant, or they disagree
+  // about what "unknown role" means (reviewer P2, 2026-09-15).
+  assert.match(body, /Object\.hasOwn\(SUBMITTABLE_JUDGE_ROLES, role\)/, "the validation uses the same list as the enum");
+  assert.doesNotMatch(body, /JUDGE_ROLES\.includes\(role/, "JUDGE_ROLES is not the agent-facing list");
+  assert.doesNotMatch(body, /quality-auditor: "quality-auditor"/, "judge_submit's role enum does not expose the quality judge");
 });
 
 test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane reuse, fresh-kill", () => {
@@ -2732,10 +2741,13 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // One role enum, shared by both tools (a third spelling of it is how
 
   // two of them would silently start accepting different roles).
+  // Four roles: the judge roles an AGENT may address. `arbiter` runs outside
+  // this surface, and `quality-auditor` is here even though the agent never
+  // REQUESTS that round — a round that can ask a question must be answerable.
   assert.match(
     JUDGE_TOOLS_SRC,
-    /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(\{ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" \}\)\)/,
-    "the shared role parameter is the three judge roles",
+    /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(\{\s*reviewer: "reviewer",\s*"quality-auditor": "quality-auditor",\s*adviser: "adviser",\s*"goal-auditor": "goal-auditor",\s*\}\)\)/,
+    "the shared role parameter is the judge roles an agent can address",
   );
   for (const tool of ["judge_close", "judge_wait"]) {
 
@@ -4418,8 +4430,16 @@ test("P2: prepare_review registers the commit target (baseline/head/tree) for re
   // recomputed when the verdict lands (by then the worktree has moved).
   assert.match(
     REVIEW_PREPARE_SRC,
-    /deps\.registerReviewTarget\(root, \{ baseline, head, tree, scope: \{ range, kind: scopeNow\.scope \} \}, ctx\)/,
+    /deps\.registerReviewTarget\(root, \{ baseline, head, tree, scope: \{ range, kind: scopeNow\.scope \}, files \}, ctx\)/,
     "the ctx travels with it (2026-09-15): registering a target also RETIRES the previous round's parked READY, and that is a write to the sidecar",
+  );
+  // The changed FILES ride the same registration: the quality precondition is
+  // decided at dispatch time and must not re-run `git diff` to learn what this
+  // round touched.
+  assert.match(
+    REVIEW_PREPARE_SRC,
+    /files\?: readonly string\[\];/,
+    "the review target carries the changed files",
   );
   assert.match(
     REVIEW_PREPARE_WIRING(),
@@ -5990,7 +6010,9 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   // the one the lane actually judged.
   const laneAt = SRC.indexOf("function startPrecommitBeside(");
   assert.ok(laneAt > 0, "the lane starter is here");
-  const lane = SRC.slice(laneAt, laneAt + 4000);
+  // The window covers the whole lane (it grew with the abort path below, and a
+  // truncated window does not fail — it silently stops covering the tail).
+  const lane = SRC.slice(laneAt, laneAt + 8000);
   assert.match(lane, /const verified = worktreeTree\(root\) \?\? ""/,
     "the pre-run tree is captured before the run (it is also what the FAIL notice names)");
   assert.match(lane, /nextFullPassTree\(\{[\s\S]{0,200}?startedTree: verified,/,
@@ -6124,4 +6146,83 @@ test("a settle publishes its stop proof only at the exits that MEAN it", () => {
     "NINE exits publish it — the four 'cannot continue' ones, the ordinary all-gates-satisfied stop, ESC, both exhausted budgets, and the stall breaker. Round-4 P1: the first version wired only the RARE four, so an ordinary child stop (an orchestration child in loop mode reaches the empty-problems exit on nearly every normal stop) fell back to the 120s constant — exactly what this criterion exists to remove");
   // …and the agent that is still working is not a stop either.
   assert.match(body, /\/\/ NOT a stop: the agent is still working, so no proof is published here\.[\s\S]{0,40}?if \(!ctx\.isIdle\(\)\) return;/);
+});
+
+test("2026-09-15: the quality round runs FIRST — routing, hand-off, precondition, lane abort", () => {
+  // ── 1. ROUTING: inside the ONE submission chain, after prepare ──────────
+  const submitAt = SRC.indexOf("async function submitForReview(");
+  assert.ok(submitAt > 0, "the submission chain exists");
+  const submit = SRC.slice(submitAt, SRC.indexOf("\n  async function ", submitAt + 10));
+  // The file list comes off prepare's own numstat (carried on the review
+  // target) — never a second `git diff` at dispatch time.
+  assert.match(submit, /Array\.isArray\(prepared\.details\?\.files\)/, "the chain takes the changed files from prepare");
+  assert.match(submit, /qualityRoundSkip\(changedFiles\)/, "…asks whether this round carries code at all");
+  assert.match(submit, /qualityStandingFor\(\{/, "…and whether a pass already stands for this head");
+  assert.match(submit, /role: QUALITY_ROLE/, "a code round routes to the QUALITY judge, not the reviewer");
+  assert.match(submit, /pendingReviewAfterQuality\.set\(input\.root, \{/, "and the functional round is HELD, never dropped");
+  assert.match(submit, /skippedQualityRecord\(\{/, "a code-free round records the skip, never silently");
+  assert.match(submit, /if \(skip\.skip\) \{/, "the skip branch is the pure rule's own answer, not a re-derived one");
+  assert.doesNotMatch(submit, /isSourceFile\(/, "the file classification is NOT re-implemented in the extension");
+
+  // ── 2. THE PRECONDITION: the reviewer cannot be dispatched around it ────
+  const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
+  assert.ok(dispatchAt > 0, "the one dispatch owner exists");
+  const dispatch = SRC.slice(dispatchAt, dispatchAt + 3000);
+  assert.match(
+    dispatch,
+    /if \(role === "reviewer"\) \{[\s\S]{0,900}?qualityStandingFor\(/,
+    "dispatch itself refuses a reviewer without a quality standing for this head",
+  );
+  assert.match(dispatch, /没有登记在案的审查范围/, "…and refuses one with no registered target at all");
+
+  // ── 3. THE HAND-OFF: the settle path, not the agent ─────────────────────
+  const handAt = SRC.indexOf("async function handOffAfterQuality(");
+  assert.ok(handAt > 0, "the hand-off exists");
+  const hand = SRC.slice(handAt, SRC.indexOf("\n  async function ", handAt + 10));
+  assert.match(hand, /qualityFollowUp\(\{ verdict, held: held !== undefined \}\)/, "the decision comes from the pure rule, not from branches here");
+  assert.match(hand, /abortPrecommitLane\(root,/, "a blocking verdict stops the lane verifying that content");
+  assert.match(hand, /role: "reviewer"/, "a pass dispatches the functional round it was holding");
+  assert.match(hand, /pendingReviewAfterQuality\.delete\(root\)/, "…and releases the hold exactly once");
+  // BOTH record paths hand off, through ONE decision (reviewer P1,
+  // 2026-09-15): a round is recorded by whichever path sees it first — the
+  // settle sweep or `judge_wait` — and the other only ever reads
+  // `already-consumed`. Wired into the sweep alone, a quality round closed by
+  // a wait stranded its held functional round forever.
+  assert.match(SRC, /async function handOffQualityIfAny\(kind: string \| undefined, root: string\)/, "one hand-off decision exists");
+  assert.match(SRC, /const handOffNote = await handOffQualityIfAny\(settled\.kind, childRoot\);/, "the settle sweep hands off");
+  assert.match(SRC, /const handOffNote = await handOffQualityIfAny\(settled\.kind, root\);/, "judge_wait's settleRound does too");
+  assert.doesNotMatch(SRC, /settled\.kind === "quality" \? await handOffAfterQuality/, "no second copy of the kind test");
+  // …and it travels as its OWN field: the standard report prints the recorded
+  // note first-line-only, so a hand-off appended to that text is invisible to
+  // the one reader it exists for (reviewer P1, 2026-09-15).
+  assert.equal((SRC.match(/handOffNote/g) ?? []).length >= 4, true, "the hand-off note travels as a field on both paths");
+  assert.doesNotMatch(SRC, /text: \[settled\.text, handOff\]/, "never folded into the recorded note");
+  assert.match(SRC, /handOffNote: conclusion\.handOffNote,/, "the settle sweep prints it");
+
+  // ── 4. THE LANE ABORT: a stopped lane is not a result ───────────────────
+  const laneAt = SRC.indexOf("function startPrecommitBeside(");
+  // Wide enough to reach the failure notice at the END of the lane — a
+  // truncated window does not fail, it silently stops covering the tail.
+  const lane = SRC.slice(laneAt, laneAt + 12000);
+  assert.match(lane, /new AbortController\(\)/, "the lane owns a kill switch");
+  assert.match(lane, /undefined, controller\.signal\)/, "…and hands it to the runner (AbortSignal reaches the process)");
+  assert.match(lane, /if \(controller\.signal\.aborted\) \{/, "an aborted lane is recognized before anything is recorded");
+  // The REVOCATION is the wholesale replacement: the fresh object carries no
+  // `lastFullPassTree` / `testScope` / PASS fingerprint. A separate `delete`
+  // after it was dead code against the object just built (reviewer Nit,
+  // 2026-09-15), so this asserts the SHAPE that actually does the work.
+  assert.match(
+    lane.slice(lane.indexOf("if (controller.signal.aborted) {")),
+    /st\.precommit = \{ verdict: "NOT_RUN", fingerprint: null,[^}]*\};/,
+    "nothing may ship on the aborted lane's content",
+  );
+  assert.doesNotMatch(lane, /delete st\.precommit\.lastFullPassTree;/, "no dead delete behind the replacement");
+  // It returns BEFORE the failure notice: a FAIL nobody ran would be blamed on
+  // a change that was never verified (the user's rule: a quality failure ends
+  // precommit, it does not turn it into a failure).
+  const abortedAt = lane.indexOf("if (controller.signal.aborted) {");
+  const noticeAt = lane.indexOf("reportAsyncPrecommit({");
+  assert.ok(abortedAt > 0, "the abort branch is inside the lane");
+  assert.ok(noticeAt > abortedAt, "the abort branch precedes the failure notice");
+  assert.match(lane.slice(abortedAt, noticeAt), /return;/, "…and returns, so no FAIL is reported");
 });

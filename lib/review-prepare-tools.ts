@@ -47,6 +47,7 @@ import type { ReviewScopeDecision } from "./review-scope.ts";
 // The contract's wording (and the SettledConclusion it carries) has ONE home.
 import { formatReviewScopeDirective, type SettledConclusion } from "./review-carryover.ts";
 import { polishReasonRequired } from "./polish-gate.ts";
+import { buildQualityAuditTask, QUALITY_RULES_RELPATH } from "./quality-round.ts";
 import { squashPointBaseline, branchBaseBaseline } from "./review-baseline.ts";
 import { buildReviewPrompt, changeRowsLargestFirst, extractPrecommitBaseline, formatChangeIndex, type ChangeIndexRow } from "./parallel-review.ts";
 import { computeFingerprint } from "./fingerprint.ts";
@@ -74,6 +75,17 @@ export interface PreparedReviewTarget {
    * `RoundRecord.scope` (lib/gate-state.ts).
    */
   scope?: { range?: string; kind?: "full" | "incremental" };
+  /**
+   * The files this round changed, straight off the same `numstat` the change
+   * index was built from.
+   *
+   * They ride the target because the QUALITY PRECONDITION is evaluated at
+   * DISPATCH time (`lib/quality-round.ts`): "does this round carry code?" is
+   * what decides whether a quality round is required, and re-running
+   * `git diff` to answer it would be a second read of the same range — one
+   * that can disagree with the range the round was prepared under.
+   */
+  files?: readonly string[];
 }
 
 /**
@@ -354,6 +366,8 @@ async function doPrepareReview(
   // NOTE: no display title is computed here — judge_submit derives the
   // display title itself, and the session id deterministically from
   // role+repo (that is what makes a role's next round resume its session).
+  const qualityStreamPath = pathJoin(root, ".pi", "review-stream", `${runId}-quality.jsonl`);
+  try { mkdirSync(pathJoin(qualityStreamPath, ".."), { recursive: true }); } catch { /* stream is optional */ }
   const scopeNow = deps.reviewScope(root, st);
   // Round-18 polish gate: persist a supplied reason BEFORE building the
   // task, so the reviewer of THIS round sees the reason that authorized it.
@@ -390,7 +404,22 @@ async function doPrepareReview(
   // with it so the recorder can write down what this round was DISPATCHED to
   // review beside what the judge reports it reviewed (auditability, not a
   // rule: nothing refuses a verdict over a mismatch).
-  deps.registerReviewTarget(root, { baseline, head, tree, scope: { range, kind: scopeNow.scope } }, ctx);
+  deps.registerReviewTarget(root, { baseline, head, tree, scope: { range, kind: scopeNow.scope }, files }, ctx);
+  // THE QUALITY ROUND'S BRIEF — built HERE, in the same pass, because every
+  // value it needs (the range, the file list, the pre-computed change index,
+  // the transcript pointer) is already in hand. Rebuilding it in the caller
+  // would mean a second `numstat` for the same round (round-4 P2: one range,
+  // read once). The task is NOT dispatched here — the chain decides whether a
+  // quality round runs at all (a docs-only round skips it), and that decision
+  // belongs to the one routing rule in lib/quality-round.ts.
+  const qualityTask = buildQualityAuditTask({
+    range,
+    files,
+    streamPath: qualityStreamPath,
+    ...(changeIndex === undefined ? {} : { changeIndex }),
+    rulesPath: pathJoin(root, QUALITY_RULES_RELPATH),
+    session: { dir: deps.sessionDir(ctx), id: st.sessionId ?? "unknown" },
+  });
   const lines = [
     `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
     `stream=${streamPath}`,
@@ -432,6 +461,11 @@ async function doPrepareReview(
       fileCount: files.length,
       stream: streamPath,
       files,
+      // The quality round's half of the same round: its task text and its own
+      // findings stream. `judge_submit` picks whichever of the two its routing
+      // rule selected; nothing else reads these.
+      qualityTask,
+      qualityStream: qualityStreamPath,
     },
   };
 }

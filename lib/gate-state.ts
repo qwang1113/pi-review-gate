@@ -30,6 +30,7 @@ import { isDeliveryStation } from "./delivery-station.ts";
 import { SHIP_COMMAND_KINDS, type ShipCommandKind } from "./constants.ts";
 
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
+import type { QualityRecord } from "./quality-round.ts";
 import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
 
 import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
@@ -308,6 +309,21 @@ export interface GateState {
      */
     docSync?: DocSyncAttestation;
   };
+  /**
+   * THE QUALITY ROUND's standing verdict (2026-09-15, user requirement).
+   *
+   * The quality judge runs BETWEEN `prepare` and the functional reviewer, and
+   * `lib/quality-round.ts`'s `qualityStandingFor` is the ONE reader that
+   * decides whether the reviewer may be dispatched: a READY bound to the
+   * current HEAD, or a recorded SKIP (nothing but docs/data changed) —
+   * everything else, including an absent record, fails closed.
+   *
+   * Absent is NORMAL, not an error: the whole point is that a session which
+   * never ran a quality round cannot reach the reviewer. Nothing but a
+   * finished quality round writes it, and `invalidateBindings` clears a READY
+   * the moment the session edits — the content it judged is gone.
+   */
+  quality?: QualityRecord;
   /**
    * The READY the gate is holding until its verification lands (2026-09-15).
    *
@@ -665,6 +681,19 @@ export function invalidateBindings(st: GateState): void {
     st.precommit.verdict = "NOT_RUN";
     st.precommit.fingerprint = null;
   }
+  // THE QUALITY STANDING IS DELIBERATELY NOT CLEARED HERE (2026-09-15).
+  //
+  // It looks like a binding on the worktree, and it is not: `commitSha` binds
+  // it to a COMMIT, and an edit does not move HEAD. Keeping it is what lets the
+  // hand-off work — the agent is told to keep editing while a judge runs, so an
+  // edit arriving between the quality READY and the reviewer's dispatch (the
+  // dispatch happens on the settle path, microseconds later) would otherwise
+  // erase the pass that dispatch is gated on.
+  //
+  // What expires it is the CHECKPOINT: the next submission commits the new
+  // worktree, HEAD moves, and `lib/quality-round.ts`'s `qualityStandingFor`
+  // finds the standing bound to a different head and refuses. That is the
+  // fail-closed direction — a stale pass can never unlock a reviewer.
   // NOT cleared here, deliberately: `precommit.lastFullPassTree` is not a
   // binding but a fact about a tree that DID pass — the edit that invalidates
   // the binding cannot un-pass it. See the field's own comment.

@@ -48,6 +48,30 @@ so re-opening with the same `--session-id` continues the same session — its
 context is reused across rounds until a READY lands. Each review round is ONE
 reviewer over the WHOLE change:
 
+- **A code-quality round runs FIRST (2026-09-15, user requirement).** The same
+  chain dispatches `quality-auditor` on the same `baseline..HEAD` range before
+  the functional reviewer exists: it judges the CODE ITSELF (philosophy,
+  architecture, correctness, performance — then simplicity, readability,
+  maintainability) against `docs/code-quality-rules.md`, a language-neutral
+  checklist whose cross-repository clauses make the WHOLE repo its reference
+  (a duplicate that already exists elsewhere, an abstraction two modules could
+  share, a function the round touches that is already messy).
+  P0/P1 BLOCKS; P2 is recorded only. A finding whose fix needs PRE-EXISTING
+  code changed is a question for the USER — the judge puts it through
+  `ask_user` (fold it in / only this round's own lines / out of scope) and
+  never widens the round itself.
+  A READY unlocks the functional round, which the gate then dispatches
+  **automatically** — the agent never calls `judge_submit` twice for one round,
+  and `quality-auditor` is NOT a role it can name. A BLOCKED does three
+  things: no reviewer, the standard report wakes the agent, and the full
+  precommit lane still verifying that content is ABORTED (its verdict would
+  describe a tree about to change) — verification is started beside the chain,
+  so the quality round never waits on it and its failure never interrupts the
+  round. Two rounds skip the quality judge legitimately, and the skip is
+  RECORDED and self-reported: a round with no code at all (docs/data only,
+  or the empty exit-goal round), and a re-submission whose HEAD already
+  carries a quality READY.
+
 - **Review → ONE call**: `judge_submit({role:"reviewer", task:<what you
   changed this round>})`. The gate runs the whole chain itself — full
   precommit, the checkpoint commit (it stamps the checkpoint marker), the
@@ -251,13 +275,14 @@ Every sub-agent role is pinned to a real, available model id (see
 frontmatter in `agents/*.md` is the single source of truth and
 `lib/model-config.ts` renders/validates the chains:
 
-- **Strong tier — judging** (`reviewer`, `adviser`, `arbiter`,
-  `goal-auditor`): `claude-fable-5` primary, fallback chain
+- **Strong tier — judging** (`reviewer`, `quality-auditor`, `adviser`,
+  `arbiter`, `goal-auditor`): `claude-fable-5` primary, fallback chain
   `claude-opus-5`, `thinking: max`.
   `goal-auditor` is the dedicated pre-reviewer of the loop GOAL (read-only
-  tools) whose verdict the gate records mechanically.
+  tools) whose verdict the gate records mechanically; `quality-auditor` is the
+  pre-reviewer of the CODE that runs before the functional reviewer (2026-09-15).
   The L1/L2 execution tiers (`recon` / `fixer`) were retired — the gate
-  ships the four judging roles only.
+  ships the five judging roles only.
 
 > **Why the chains are short.** every fallback in the
 > (a provider that is not configured) fails the whole agent launch. The
@@ -270,10 +295,10 @@ frontmatter in `agents/*.md` is the single source of truth and
 **Model configuration layer (per-agent slots, NO built-in defaults).**
 Every role's model chain comes from the `agents` section of `review-gate.json` —
 there is no silent built-in fallback. `scripts/install-package.mjs` writes a
-default 4-role `agents` section to `~/.pi/review-gate.json` when the file is
+default 5-role `agents` section to `~/.pi/review-gate.json` when the file is
 absent, and merges in ONLY the roles missing from an existing file (never
 overwrites a user's own pins). At session start the gate HARD-CHECKS every
-role (reviewer/adviser/arbiter/goal-auditor): a missing entry, an
+role (reviewer/quality-auditor/adviser/arbiter/goal-auditor): a missing entry, an
 empty slot list, or an unresolvable spec STOPS the session with the reason
 (`validateAgentsForStartup`). The launch resolver returns an EMPTY chain for an
 unconfigured role and the dispatch fails closed instead of spawning a default.
@@ -339,8 +364,8 @@ skill, the `/review` prompt, the reviewer role body, the judge protocol) may
 carry a summary and a pointer only. Two consequences worth knowing without
 reading it: the contract never narrows what a reviewer may look at, and a
 settled conclusion may always be reopened with evidence.
-(b2) **Fresh context, read on demand — MECHANICALLY.** The three review
-roles (reviewer, adviser, goal-auditor) each run in their OWN pane (interactive
+(b2) **Fresh context, read on demand — MECHANICALLY.** The four review
+roles (reviewer, quality-auditor, adviser, goal-auditor) each run in their OWN pane (interactive
 pi with `--session-id`) — they never
 transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
 to grep on demand. `judge_submit({role:"adviser"})` builds that brief itself:
