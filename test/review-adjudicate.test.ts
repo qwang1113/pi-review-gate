@@ -327,4 +327,10 @@ test("parkedReadyFate: replay needs all three ids, clear needs a failed lane, th
     parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: undefined }),
     "clear",
   );
+  // A WORKTREE EDIT IS NOT AN INPUT, deliberately: it moves none of these three
+  // trees (the parked round's is the committed one, the lane's was captured
+  // before it started), so there is nothing for a caller to pass in. The fix to
+  // `docs/execution-model.md` and the skill (round-3 P2) was exactly this
+  // confusion — the first wording told agents not to edit during a review,
+  // which is the opposite of what this gate wants.
 });
