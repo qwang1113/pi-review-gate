@@ -2659,7 +2659,7 @@ test("judge_submit is the agent's single judge entry and hides every process det
   // both ends.
   const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
   // The agent says WHO and WHAT. Anything procedural is the gate's business.
-  assert.match(body, /role: Type\.Enum\(\{ reviewer/, "the role is the addressing key");
+  assert.match(body, /role: Type\.Enum\(SUBMITTABLE_JUDGE_ROLES\)/, "the role is the addressing key");
   assert.match(body, /task: Type\.String\(/, "the task text is the other input");
   assert.doesNotMatch(body, /sessionId: Type\./, "the agent never passes a session id");
   assert.doesNotMatch(body, /title: Type\./, "the agent never passes a title");
@@ -2668,7 +2668,11 @@ test("judge_submit is the agent's single judge entry and hides every process det
   // `quality-auditor` otherwise) — the agent still passes no title at all.
   assert.match(body, /const title = `\$\{dispatchRole\}-/, "the gate derives the display title itself");
   assert.match(body, /dispatchJudgeRound\(\{ root, role: dispatchRole, title, task/, "dispatch is delegated to the one spawn owner");
-  // The quality round is NOT a role the agent may name: it is routed to.
+  // The quality round is NOT a role the agent may name: it is routed to. The
+  // enum and the second validation come from ONE constant, or they disagree
+  // about what "unknown role" means (reviewer P2, 2026-09-15).
+  assert.match(body, /Object\.hasOwn\(SUBMITTABLE_JUDGE_ROLES, role\)/, "the validation uses the same list as the enum");
+  assert.doesNotMatch(body, /JUDGE_ROLES\.includes\(role/, "JUDGE_ROLES is not the agent-facing list");
   assert.doesNotMatch(body, /quality-auditor: "quality-auditor"/, "judge_submit's role enum does not expose the quality judge");
 });
 
@@ -6144,7 +6148,7 @@ test("a settle publishes its stop proof only at the exits that MEAN it", () => {
   assert.match(body, /\/\/ NOT a stop: the agent is still working, so no proof is published here\.[\s\S]{0,40}?if \(!ctx\.isIdle\(\)\) return;/);
 });
 
-test("2026-09-18: the quality round runs FIRST — routing, hand-off, precondition, lane abort", () => {
+test("2026-09-15: the quality round runs FIRST — routing, hand-off, precondition, lane abort", () => {
   // ── 1. ROUTING: inside the ONE submission chain, after prepare ──────────
   const submitAt = SRC.indexOf("async function submitForReview(");
   assert.ok(submitAt > 0, "the submission chain exists");
@@ -6179,11 +6183,15 @@ test("2026-09-18: the quality round runs FIRST — routing, hand-off, preconditi
   assert.match(hand, /abortPrecommitLane\(root,/, "a blocking verdict stops the lane verifying that content");
   assert.match(hand, /role: "reviewer"/, "a pass dispatches the functional round it was holding");
   assert.match(hand, /pendingReviewAfterQuality\.delete\(root\)/, "…and releases the hold exactly once");
-  assert.match(
-    SRC,
-    /settled\.kind === "quality" \? await handOffAfterQuality\(childRoot\)/,
-    "the RECORDER performs the hand-off — the agent never sequences it",
-  );
+  // BOTH record paths hand off, through ONE decision (reviewer P1,
+  // 2026-09-15): a round is recorded by whichever path sees it first — the
+  // settle sweep or `judge_wait` — and the other only ever reads
+  // `already-consumed`. Wired into the sweep alone, a quality round closed by
+  // a wait stranded its held functional round forever.
+  assert.match(SRC, /async function handOffQualityIfAny\(kind: string \| undefined, root: string\)/, "one hand-off decision exists");
+  assert.match(SRC, /const handOff = await handOffQualityIfAny\(settled\.kind, childRoot\);/, "the settle sweep hands off");
+  assert.match(SRC, /const handOff = await handOffQualityIfAny\(settled\.kind, root\);/, "judge_wait's settleRound does too");
+  assert.doesNotMatch(SRC, /settled\.kind === "quality" \? await handOffAfterQuality/, "no second copy of the kind test");
 
   // ── 4. THE LANE ABORT: a stopped lane is not a result ───────────────────
   const laneAt = SRC.indexOf("function startPrecommitBeside(");

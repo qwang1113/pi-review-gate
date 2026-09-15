@@ -71,7 +71,7 @@ test("qualityStandingFor: a code-free round is permitted WITHOUT a quality recor
 });
 
 test("skippedQualityRecord: a skip is a READY bound to the head, marked as a skip", () => {
-  const rec = skippedQualityRecord({ head: "e".repeat(40), tree: "f".repeat(40), reason: "本轮只改动了非代码文件", at: "2026-09-18T00:00:00.000Z" });
+  const rec = skippedQualityRecord({ head: "e".repeat(40), tree: "f".repeat(40), reason: "本轮只改动了非代码文件", at: "2026-09-15T00:00:00.000Z" });
   assert.equal(rec.verdict, "READY");
   assert.equal(rec.skipped, true);
   assert.equal(rec.commitSha, "e".repeat(40));

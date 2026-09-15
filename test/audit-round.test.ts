@@ -499,7 +499,7 @@ test("specForRound: the role decides, except for the two that share one judge", 
   assert.equal(specForRound("adviser"), ADVICE_ROUND_SPEC);
   assert.equal(specForRound("goal-auditor", "goal"), GOAL_AUDIT_SPEC);
   assert.equal(specForRound("goal-auditor", "plan"), PLAN_AUDIT_SPEC);
-  // The quality round is its own kind on the SAME engine (2026-09-18): its own
+  // The quality round is its own kind on the SAME engine (2026-09-15): its own
   // role, the review's binding, and no dependence on a pending audit.
   assert.equal(specForRound("quality-auditor"), QUALITY_ROUND_SPEC);
   assert.equal(QUALITY_ROUND_SPEC.binding, "round-and-content");
@@ -522,7 +522,7 @@ interface FakeState {
   auditLog: string[];
   goalDrafts: string[];
   reviewRounds: number;
-  /** Quality rounds recorded through the engine (2026-09-18). */
+  /** Quality rounds recorded through the engine (2026-09-15). */
   qualityRounds: number;
   /** undefined = "could not record right now" (no usable tool context). */
   recordResult: string | undefined;

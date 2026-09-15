@@ -403,7 +403,7 @@ export interface SettleAuditRoundDeps {
   }): Promise<string | undefined>;
   recordReview(input: { root: string; concluded: ReportConclusion }): Promise<string | undefined>;
   /**
-   * Write down the QUALITY round's verdict (2026-09-18). Separate from
+   * Write down the QUALITY round's verdict (2026-09-15). Separate from
    * `recordReview` for the same reason the two rounds are separate: what is
    * recorded differs (a quality standing the reviewer's dispatch is gated on,
    * with no ship binding and no round-history entry) — while WHICH report

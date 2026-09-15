@@ -73,7 +73,7 @@ export interface ReviewTiming {
 
 
 /**
- * ONE QUALITY ROUND (2026-09-18) — its own kind rather than a `review`
+ * ONE QUALITY ROUND (2026-09-15) — its own kind rather than a `review`
  * record, because the two rounds answer different questions and a trend line
  * that mixes them cannot say which one got slower. Same "upper bound since
  * the previous gate event" caveat as a review round: the judge is its own

@@ -150,6 +150,24 @@ export const JUDGE_ROLES: readonly string[] = Object.freeze([
   "goal-auditor",
 ]);
 
+/**
+ * The roles an AGENT may name through `judge_submit` — a deliberate SUBSET of
+ * `JUDGE_ROLES`.
+ *
+ * `quality-auditor` is a real judge child (own pane, own session id,
+ * `judge_conclude`) but the agent never ASKS for that round: the chain routes
+ * to it. Letting it be named by hand would dispatch a quality round with no
+ * `prepare` brief — and its verdict would then bind to whatever review target
+ * happened to be registered, i.e. it would judge nothing and unlock the
+ * reviewer anyway (reviewer P2, 2026-09-15).
+ *
+ * ONE constant drives both the tool's parameter enum and its second
+ * validation, so the schema and the check cannot disagree about who may be
+ * named.
+ */
+export const SUBMITTABLE_JUDGE_ROLES: Readonly<Record<"reviewer" | "adviser" | "goal-auditor", string>> =
+  Object.freeze({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" });
+
 /** The package's own agents/ directory (the built-in role definitions). */
 export function packageAgentsDir(): string | undefined {
   // Reuses the model-config resolver: it probes the package root AND the

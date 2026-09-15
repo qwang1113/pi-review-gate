@@ -212,7 +212,7 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
      gate stamps the checkpoint marker on the subject and records where it
      landed. The review unit is the immutable range `baseline..HEAD`.
    - **the range + the findings stream + the task text**.
-   - **the QUALITY round** (2026-09-18) — when the round carries code, the
+   - **the QUALITY round** (2026-09-15) — when the round carries code, the
      chain dispatches `quality-auditor` FIRST, on the same commit range: it
      judges the code itself (philosophy, architecture, correctness,
      performance — then simplicity, readability, maintainability) against

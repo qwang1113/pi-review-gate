@@ -413,6 +413,7 @@ import {
   modelChainFor,
   writeJudgeSpawnFiles,
   JUDGE_ROLES,
+  SUBMITTABLE_JUDGE_ROLES,
 } from "../lib/judge-prompt.ts";
 import {
   failedStepNames,
@@ -3879,7 +3880,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   const reviewTargets = new Map<string, ReviewTarget>();
 
   /**
-   * THE FUNCTIONAL ROUND A QUALITY ROUND IS HOLDING (2026-09-18).
+   * THE FUNCTIONAL ROUND A QUALITY ROUND IS HOLDING (2026-09-15).
    *
    * When `judge_submit`'s chain routes a round to the quality judge, the
    * reviewer's brief is built and then WAITS here: it is dispatched verbatim —
@@ -6376,7 +6377,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   let inFlightPrecommit: { root: string; settled: Promise<void>; abort: (why: string) => void } | undefined;
 
   /**
-   * STOP A LANE WHOSE CONTENT IS ABOUT TO CHANGE (2026-09-18, user requirement).
+   * STOP A LANE WHOSE CONTENT IS ABOUT TO CHANGE (2026-09-15, user requirement).
    *
    * The full lane runs BESIDE the review on purpose, and that is right while
    * the round still stands. When the QUALITY round blocks, it no longer does:
@@ -6468,7 +6469,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch (error) {
         detail = (error as Error).message;
       }
-      // AN ABORTED LANE IS NOT A RESULT (user requirement, 2026-09-18: "质量
+      // AN ABORTED LANE IS NOT A RESULT (user requirement, 2026-09-15: "质量
       // 审核失败，precommit 应该结束掉"). The content is about to change, so
       // this run's remaining minutes were spent on a tree nobody will ship:
       // it reports nothing, revokes nothing, and — the one fact that has to
@@ -6729,7 +6730,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     const reviewerTask = withNote(taskText);
     const reviewerStream = typeof prepared.details?.stream === "string" ? prepared.details.stream : undefined;
 
-    // ---------- THE ROUTING RULE (2026-09-18) ----------
+    // ---------- THE ROUTING RULE (2026-09-15) ----------
     //
     // One rule, applied ONCE per round, in one direction:
     //  - a round that carries no code (a docs/data-only round, or the empty
@@ -7182,7 +7183,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   }): Promise<JudgeDispatch> {
     const { root, role } = opts;
     dropDeadForeignJudges();
-    // THE QUALITY PRECONDITION (2026-09-18). The quality judge runs BEFORE the
+    // THE QUALITY PRECONDITION (2026-09-15). The quality judge runs BEFORE the
     // functional one, and this is the mechanical fact that makes the order
     // unbypassable rather than a convention: no registered target, or no
     // quality standing bound to its head, and the reviewer is NOT dispatched.
@@ -7559,7 +7560,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // A quality round OWNS the functional round that is waiting on it:
           // releasing it (or killing it) is part of the record landing, not a
           // follow-up the agent has to remember (philosophy one).
-          const handOff = settled.kind === "quality" ? await handOffAfterQuality(childRoot) : undefined;
+          const handOff = await handOffQualityIfAny(settled.kind, childRoot);
           return {
             text: [settled.text, handOff].filter((t): t is string => typeof t === "string" && t !== "").join("\n") || undefined,
             recorded: true,
@@ -8015,7 +8016,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       "through its channel (nothing is silently dropped): wait for it, or pass " +
       "fresh:true to kill the pane and start over.",
     parameters: Type.Object({
-      role: Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }),
+      // The SUBMITTABLE subset of the judge roles — `quality-auditor` is
+      // routed to by the chain, never named by the agent (lib/judge-prompt.ts).
+      role: Type.Enum(SUBMITTABLE_JUDGE_ROLES),
       task: Type.String({
         description:
           "reviewer: what you changed this round, in your words (the gate wraps it in the review " +
@@ -8060,7 +8063,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       const role = String(params.role ?? "");
-      if (!JUDGE_ROLES.includes(role as (typeof JUDGE_ROLES)[number])) {
+      // The SAME constant the parameter enum is built from: a second list here
+      // is how the schema and this check drifted apart (reviewer P2,
+      // 2026-09-15 — `JUDGE_ROLES` had grown to include `quality-auditor`, so
+      // a hand-named quality round passed this check while the schema refused
+      // it, and the two disagreed about what "unknown role" means).
+      if (!Object.hasOwn(SUBMITTABLE_JUDGE_ROLES, role)) {
         return {
           content: [{ type: "text", text: `review-gate: judge_submit rejected — unknown role "${role}".` }],
           details: { submitted: false },
@@ -8116,7 +8124,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         reviewTask = chain.taskText;
         streamPath = chain.streamPath;
-        // THE CHAIN DECIDES WHICH ROUND RUNS (2026-09-18). The agent asked for
+        // THE CHAIN DECIDES WHICH ROUND RUNS (2026-09-15). The agent asked for
         // "a review"; whether that means the quality judge, the functional
         // judge, or both in sequence is the gate's routing rule — and it is
         // deliberately NOT a role the agent can name.
@@ -8366,9 +8374,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       absorbJudgeModelEvents(root, judgeId);
       const settled = await settleAuditRound(auditRoundDeps(undefined), { judgeId, root });
       switch (settled.status) {
-        case "recorded":
+        case "recorded": {
+          // THE SAME HAND-OFF THE SWEEP DOES (reviewer P1, 2026-09-15). This
+          // path can win the cursor (a `judge_wait` that sees the report
+          // first), and the sweep then only ever sees `already-consumed` — so
+          // a hand-off wired into the sweep alone would never run, leaving the
+          // held functional round stranded forever while the reply told the
+          // agent not to re-submit.
+          const handOff = await handOffQualityIfAny(settled.kind, root);
           return {
-            text: settled.text,
+            text: [settled.text, handOff].filter((t): t is string => typeof t === "string" && t !== "").join("\n") || undefined,
             verdict: settled.verdict,
             hasVerdict: settled.hasVerdict,
             ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
@@ -8376,6 +8391,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             // same thing the settle sweep would have said about this round.
             ...(settled.scope === undefined ? {} : { scope: settled.scope }),
           };
+        }
         case "advice":
           return { advice: settled.text, hasVerdict: false };
         case "unrecorded":
@@ -8775,7 +8791,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- recording a reviewer verdict (a plain function) ----------
 
   /**
-   * Record ONE QUALITY round's verdict (2026-09-18, user requirement).
+   * Record ONE QUALITY round's verdict (2026-09-15, user requirement).
    *
    * A SIBLING OF `recordReviewVerdict`, not a smaller copy of it: the quality
    * round records a STANDING that gates the functional round's dispatch
@@ -8871,7 +8887,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * THE HAND-OFF (2026-09-18): a finished quality round either releases the
+   * THE HAND-OFF (2026-09-15): a finished quality round either releases the
    * functional round it was holding, or kills it.
    *
    * The verdict it acts on is the RECORDED one (`st.quality.verdict`), not the
@@ -8890,6 +8906,21 @@ export default function reviewGate(pi: ExtensionAPI) {
    * (a pane died, a dispatch failed), where the router already saw the standing
    * pass and went straight to the reviewer.
    */
+  /**
+   * THE ONE PLACE THAT DECIDES WHETHER A RECORDED ROUND OWES A HAND-OFF.
+   *
+   * Two paths record a round — the settle sweep (`recordJudgeConclusion`) and
+   * `judge_wait`'s `settleRound` — and exactly ONE of them wins the cursor:
+   * the other then reads `already-consumed` and never runs this again. So the
+   * hand-off has to hang off BOTH, which is what this wrapper makes a single
+   * decision instead of two copies of `kind === "quality"` (reviewer P1,
+   * 2026-09-15: wired into the sweep alone, a quality round closed by a wait
+   * stranded its held functional round forever).
+   */
+  async function handOffQualityIfAny(kind: string | undefined, root: string): Promise<string | undefined> {
+    return kind === "quality" ? handOffAfterQuality(root) : undefined;
+  }
+
   async function handOffAfterQuality(root: string): Promise<string | undefined> {
     const verdict = stateForRepo(root).quality?.verdict;
     const held = pendingReviewAfterQuality.get(root);

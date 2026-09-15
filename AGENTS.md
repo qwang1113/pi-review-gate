@@ -48,7 +48,7 @@ so re-opening with the same `--session-id` continues the same session — its
 context is reused across rounds until a READY lands. Each review round is ONE
 reviewer over the WHOLE change:
 
-- **A code-quality round runs FIRST (2026-09-18, user requirement).** The same
+- **A code-quality round runs FIRST (2026-09-15, user requirement).** The same
   chain dispatches `quality-auditor` on the same `baseline..HEAD` range before
   the functional reviewer exists: it judges the CODE ITSELF (philosophy,
   architecture, correctness, performance — then simplicity, readability,
@@ -280,7 +280,7 @@ frontmatter in `agents/*.md` is the single source of truth and
   `claude-opus-5`, `thinking: max`.
   `goal-auditor` is the dedicated pre-reviewer of the loop GOAL (read-only
   tools) whose verdict the gate records mechanically; `quality-auditor` is the
-  pre-reviewer of the CODE that runs before the functional reviewer (2026-09-18).
+  pre-reviewer of the CODE that runs before the functional reviewer (2026-09-15).
   The L1/L2 execution tiers (`recon` / `fixer`) were retired — the gate
   ships the five judging roles only.
 

@@ -1,6 +1,6 @@
 /**
  * THE QUALITY ROUND — a code-quality review that runs BEFORE the functional
- * one (2026-09-18, user requirement).
+ * one (2026-09-15, user requirement).
  *
  * WHAT IT IS. Every submission already walks a chain inside `judge_submit`:
  * precommit → checkpoint → prepare → dispatch. This module owns the NEW step

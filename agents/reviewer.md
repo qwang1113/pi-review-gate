@@ -37,7 +37,7 @@ Inspect the actual diff or changed files. Verify:
   (whitespace, an unrelated appended line) is a **P1 finding**.
 - No unintended side effects or regressions.
 - The change is minimal and readable.
-- **Code quality itself is NOT this round's question** (2026-09-18). A
+- **Code quality itself is NOT this round's question** (2026-09-15). A
   separate `quality-auditor` judge runs BEFORE you, on the SAME commit range,
   and owns the whole code-quality checklist — `docs/code-quality-rules.md`
   (philosophy, architecture, abstraction, seams, naming, duplication,

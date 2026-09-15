@@ -310,7 +310,7 @@ export interface GateState {
     docSync?: DocSyncAttestation;
   };
   /**
-   * THE QUALITY ROUND's standing verdict (2026-09-18, user requirement).
+   * THE QUALITY ROUND's standing verdict (2026-09-15, user requirement).
    *
    * The quality judge runs BETWEEN `prepare` and the functional reviewer, and
    * `lib/quality-round.ts`'s `qualityStandingFor` is the ONE reader that
@@ -681,7 +681,7 @@ export function invalidateBindings(st: GateState): void {
     st.precommit.verdict = "NOT_RUN";
     st.precommit.fingerprint = null;
   }
-  // THE QUALITY STANDING IS DELIBERATELY NOT CLEARED HERE (2026-09-18).
+  // THE QUALITY STANDING IS DELIBERATELY NOT CLEARED HERE (2026-09-15).
   //
   // It looks like a binding on the worktree, and it is not: `commitSha` binds
   // it to a COMMIT, and an edit does not move HEAD. Keeping it is what lets the

@@ -395,7 +395,7 @@ test("every judge role is told that findings carry BLOCKERS ONLY", () => {
 
 test("minimalism keeps ONE substantive home (§5), and the code-quality round defers to it", () => {
   // The rules live in docs/coding-standards.md §5 — every other surface
-  // carries a pointer, never a second copy of the checks. Since 2026-09-18 the
+  // carries a pointer, never a second copy of the checks. Since 2026-09-15 the
   // DIFF-level minimalism judgement belongs to the quality round, so the
   // pointer that used to be in reviewer.md moved with it.
   const rules = readFileSync(join(ROOT, "docs", "code-quality-rules.md"), "utf8");
