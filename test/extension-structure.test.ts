@@ -5952,6 +5952,11 @@ test("a parked READY is replayed by the lane that lands on its tree, and retired
   // the reply told the agent not to re-submit — the caller passes that fact in
   // and `classifyReadyWithholding` answers `unverified-idle` (a REFUSAL).
   assert.match(SRC, /laneStillRunning: inFlightPrecommit\?\.root === targetRoot/);
+  // …and the refusal tells the agent WHICH way it went, because the two cases
+  // need opposite advice (round-8): a running lane will replay this very
+  // conclusion, an absent one never will.
+  assert.match(SRC, /withholding === "unverified-idle"/,
+    "the UNVERIFIED reply distinguishes 'a lane is still running' from 'nothing is coming'");
   assert.match(SRC, /const fate = parkedReadyFate\(\{/);
   // …AND THE LANE'S LANDING IS WHAT DECIDES IT: whatever it answers, a parked
   // record is never left behind (round-2 P2 — nothing would ever come back for
