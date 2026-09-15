@@ -5957,7 +5957,10 @@ test("a parked READY is replayed by the lane that lands on its tree, and retired
   // record is never left behind (round-2 P2 — nothing would ever come back for
   // it). `none` means "nothing was parked", so a deletion under it is correct.
   const fateAt = SRC.indexOf("const fate = parkedReadyFate({");
-  const afterFate = SRC.slice(fateAt, fateAt + 1400);
+  // Bounded by the branch that follows, not by a character count: a window that
+  // has to grow with the comments fails for the wrong reason (the same lesson
+  // the async-notice test above was just fixed with).
+  const afterFate = SRC.slice(fateAt, SRC.indexOf('if (fate === "replay") {', fateAt));
   assert.match(afterFate, /if \(fate !== "none"\) \{\s*const parked = laneState\.pendingReady!;\s*delete laneState\.pendingReady;/,
     "a landed lane retires whatever it did not replay");
   const replayAt = SRC.indexOf('if (fate === "replay") {');
