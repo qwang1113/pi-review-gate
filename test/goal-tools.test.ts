@@ -562,6 +562,27 @@ test("without a ceiling nothing changes — a standalone loop session negotiates
   assert.equal(f.st.loopGoal?.station, "pr");
 });
 
+test("a request STRICTER than the ceiling is not reported as a narrowing (round-1 P1)", async () => {
+  // The notice fired whenever the CEILING differed from the REQUEST, so a
+  // session whose restatement said `precommit` under a `commit` ceiling was
+  // told its station had been narrowed — a false statement about the user's
+  // own contract, printed in the box they were approving it in.
+  const f = fake();
+  f.st.taskMode = "loop";
+  f.st.restatement = confirmedRestatement("precommit");
+  f.deps.stationCap = () => "commit";
+  const shown: string[] = [];
+  f.deps.showToUser = (_ctx, _lead, body) => { shown.push(body); return true; };
+  const dialogs: string[] = [];
+  f.deps.askChoice = async (_ctx, spec, opts) => { dialogs.push(opts?.body ?? ""); return spec.options[0]; };
+  await recordGoalPrereview(f.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+  await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.equal(f.st.loopGoal?.station, "precommit", "asking for LESS than the ceiling always stands");
+  for (const surface of [shown[0] ?? "", dialogs[0] ?? ""]) {
+    assert.doesNotMatch(surface, /上界/, "nothing was narrowed, so nothing may claim it was");
+  }
+});
+
 
 test("registration: the family registers propose_loop_goal and NOTHING else", () => {
   const f = fake();

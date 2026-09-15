@@ -305,7 +305,14 @@ export async function doProposeLoopGoal(
   // the gate lying to the person it is asking.
   const stationCap = deps.stationCap?.();
   const station: DeliveryStation = capStationAt(requestedStation, stationCap);
-  const capNote = stationCap !== undefined && stationCap !== requestedStation
+  // CLAMPED, NOT MERELY CAPPED (round-1 P1, 2026-09-15). The notice used to
+  // fire whenever `stationCap !== requestedStation` — including the case where
+  // the request was STRICTER than the ceiling (a restatement at `precommit`
+  // under a `commit` cap), where nothing was narrowed at all. That told the
+  // user a fact that was not true about their own contract. `station` is the
+  // post-clamp value, so it differs from the request exactly when the gate
+  // actually moved it.
+  const capNote = stationCap !== undefined && station !== requestedStation
     ? `⚠️ 交付站点上界 ${stationCap}（不是 ${requestedStation}）：本编排的 plan 收窄了该 repo —— ` +
       "同一 repo 的一个需求只出一个 PR，子会话提交完就停，由项目经理本地合并、用户验证后再开一个 PR。" +
       "要分多个 PR，需要在 plan 里声明 allowMultiplePrs 并重新批准。"
@@ -315,7 +322,7 @@ export async function doProposeLoopGoal(
   // "declare allowMultiplePrs" — the one fact the reader can act on — and that
   // is precisely what got cut. The transcript block above carries the full
   // sentence; the box carries the decision.
-  const capNoteShort = stationCap !== undefined && stationCap !== requestedStation
+  const capNoteShort = stationCap !== undefined && station !== requestedStation
     ? `⚠️ 要分多个 PR 就在 plan 里写 allowMultiplePrs；否则本 repo 站点上界 ${stationCap}（非 ${requestedStation}）`
     : undefined;
   // TWO RENDERINGS OF ONE DEFINITION: the dialog and the transcript block are

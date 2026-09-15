@@ -699,13 +699,18 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "edits that grant nothing new — a dropped task, an added dependency, " +
       "parallel→serial, a lower maxParallel, a lowered deliveryStation — and records why. " +
       "It REVOKES it for a new task, a change of a task's repo, a removed dependency, " +
-      "serial→parallel, a higher maxParallel or a raised deliveryStation. " +
+      "serial→parallel, a higher maxParallel, a raised deliveryStation, or a repo ADDED to " +
+      "`allowMultiplePrs`. " +
       "So refine the task list freely as you learn where the work lands; only real widening costs " +
       "the user a dialog. " +
       "REQUIRED BEFORE `submit`: a restatement the USER confirmed (`propose_restatement`) — " +
       "without one submit refuses outright and shows no dialog. `deliveryStation` says where the " +
       "whole orchestration stops (" + DELIVERY_STATION_CHOICES + ", default precommit); raising " +
-      "it is a widening like any other.",
+      "it is a widening like any other. " +
+      "ONE REQUIREMENT, ONE PR PER REPO: when one repo holds more than one task, that repo's " +
+      "children stop at `commit` — the manager merges them locally and ONE PR comes out of the " +
+      "combined result. `allowMultiplePrs` names the repos the USER allowed to split; it is the " +
+      "ONLY way out of that rule, so never fill it in on your own initiative.",
 
     parameters: Type.Object({
       action: Type.Optional(Type.Enum(PLAN_ACTIONS)),
@@ -732,10 +737,19 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
           question: Type.String(),
           planEffect: Type.Optional(Type.String()),
         }))),
+        allowMultiplePrs: Type.Optional(Type.Array(Type.String({
+          description:
+            "ABSOLUTE repo paths the USER allowed to open more than one PR. Absent (the default) " +
+            "IS the rule: a repo holding two or more tasks stops at `commit`, so ONE PR comes out " +
+            "of the local merge. Adding a repo here is a widening — the approval is revoked and " +
+            "the user is asked again; removing one only narrows. Never add one on your own.",
+        }))),
       }, {
         description:
           "For action=\"write\": { title, intent, maxParallel?, tasks: [{ id, title, " +
-          "repo: \"/abs/path/to/repo\", dependsOn?: [], execution?: \"serial\"|\"parallel\" }] }. " +
+          "repo: \"/abs/path/to/repo\", dependsOn?: [], execution?: \"serial\"|\"parallel\" }], " +
+          "allowMultiplePrs?: [\"/abs/repo\"] (only repos the USER agreed may split into " +
+          "several PRs) }. " +
           "Do NOT send `status`: existing tasks keep the status execution gave them (use " +
           "\"set-status\"), and only a genuinely new task starts at `pending`. " +
           "Pass the plan as a plain OBJECT — never a JSON string or a nested wrapper.",

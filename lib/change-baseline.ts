@@ -42,6 +42,8 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 
 /** A git object name: sha1 (40) or sha256 (64), lower-case hex. */
 const OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -71,12 +73,28 @@ export function changeBaseRefsFromMergeHeads(mergeHeads: string | undefined): st
 export function readChangeBaseRefs(root: string): string[] {
   let mergeHeads: string | undefined;
   try {
-    mergeHeads = execFileSync("git", ["rev-parse", "MERGE_HEAD"], { cwd: root, encoding: "utf8" }) as string;
+    // THE FILE, NOT `git rev-parse MERGE_HEAD` (round-1 P1, 2026-09-15). The
+    // pseudo-ref resolves to the FIRST parent only: measured on an octopus
+    // merge, the reader came back with HEAD plus one side, so every file the
+    // OTHER side brought in still looked newly created — the same deadlock
+    // this module removes, just harder to hit, and unreproducible from the
+    // pure half (which handles a list correctly and so hid the bug).
+    //
+    // `--git-path` is what makes the read correct inside a linked worktree:
+    // the merge state is per-worktree, so the file does NOT live beside the
+    // common `.git` we would otherwise guess. A relative answer is resolved
+    // against `root`, which is what it is relative to.
+    const path = execFileSync("git", ["rev-parse", "--git-path", "MERGE_HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim();
+    if (path.length === 0) return changeBaseRefsFromMergeHeads(undefined);
+    mergeHeads = readFileSync(isAbsolute(path) ? path : join(root, path), "utf8");
   } catch {
-    // Not merging (or git cannot answer): HEAD alone, the pre-existing
-    // behaviour. An unreadable answer must not invent extra bases — a base
-    // that does not exist would make every file look NEW, which is the bug
-    // this module exists to fix.
+    // Not merging (or git cannot answer, or the file is gone between the two
+    // calls): HEAD alone, the pre-existing behaviour. An unreadable answer
+    // must not invent extra bases — a base that does not exist would make
+    // every file look NEW, which is the bug this module exists to fix.
     mergeHeads = undefined;
   }
   return changeBaseRefsFromMergeHeads(mergeHeads);

@@ -45,6 +45,7 @@ import type { ToolHost, ToolReply } from "./tool-host.ts";
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
+import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
 import {
   buildHandoffDoc,
   formatContextStatus,
@@ -277,6 +278,13 @@ function fail(text: string, details?: Record<string, unknown>): ToolReply {
  * (lib/orchestrator-wiring.ts, B1). Reading `state.orchestrator.orchestrationId`
  * directly was a second, contradicting copy of that rule: it would hand the
  * successor an address from a runtime this session never adopted.
+ *
+ * THE STATION CEILING IS PASSED IN FOR THE SAME REASON (2026-09-15). It lives
+ * in the pane's environment, and a relay is a new process: a child whose plan
+ * narrowed its repo to `commit` would come back with no upper bound and could
+ * negotiate a goal at `pr`, opening exactly the second PR the user forbade
+ * (lib/repo-pr-policy.ts). A judge or a standalone session passes none and
+ * keeps its old behaviour.
  */
 export function handoffExtraEnvFor(input: {
   kind: HandoffSessionKind;
@@ -286,6 +294,8 @@ export function handoffExtraEnvFor(input: {
   orchestrationId?: string;
   /** This session's gate sidecar variant, when it has its own. */
   stateVariant?: string;
+  /** This session's delivery-station ceiling, when it has one. */
+  stationCap?: string;
 }): Record<string, string> {
   // THE SUCCESSOR KEEPS THE PREDECESSOR'S MODE (2026-09-14, measured). The
   // first version hardcoded "loop" for everything that was not an orchestrator,
@@ -301,6 +311,8 @@ export function handoffExtraEnvFor(input: {
   if (variant) env[STATE_VARIANT_ENV] = variant;
   const orchestration = (input.orchestrationId ?? "").trim();
   if (orchestration) env[ORCHESTRATION_ID_ENV] = orchestration;
+  const stationCap = (input.stationCap ?? "").trim();
+  if (stationCap) env[STATION_CAP_ENV] = stationCap;
   return env;
 }
 

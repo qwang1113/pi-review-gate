@@ -549,7 +549,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    `allowMultiplePrs`（repo 绝对路径列表）是**唯一的放行入口**，把它加进 plan 属于
    扩权、必须重新问用户，而移除只是收紧。站点上界随 spawn 走环境变量
    `RG_STATION_CAP` 注入子会话（那是提示词写不进去的通道），子会话 goal 协商的站点
-   展示与记录都不超过它。规则只有一处实现：`lib/repo-pr-policy.ts`。
+   展示与记录都不超过它；**`orchestrator_recover` 重开 pane 与 `session_handoff`
+   接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。规则只有一处
+   实现：`lib/repo-pr-policy.ts`。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
    本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的

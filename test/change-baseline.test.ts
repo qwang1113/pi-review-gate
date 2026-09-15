@@ -94,6 +94,42 @@ test("mid-merge, a file the OTHER side brought in is not new — and a genuinely
   }
 });
 
+test("an OCTOPUS merge contributes EVERY parent, not just the first", () => {
+  // The rule is written over a LIST because a merge can have more than one
+  // extra parent. If the reader only ever saw the first one, the second side's
+  // files would keep counting as this session's creations — the same deadlock
+  // this module exists to remove, just harder to hit.
+  const root = mkdtempSync(join(tmpdir(), "rg-baseline-octopus-"));
+  try {
+    const git = (...args: string[]): string =>
+      execFileSync("git", ["-C", root, ...args], { encoding: "utf8", env: hermeticGitEnv() });
+    const identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
+    git("init", "-q");
+    writeFileSync(join(root, "base.ts"), "base\n");
+    git("add", "-A");
+    git(...identity, "commit", "-q", "-m", "base");
+    for (const name of ["side-a", "side-b"]) {
+      git("checkout", "-q", "-b", name);
+      writeFileSync(join(root, `${name}.ts`), `${name}\n`);
+      git("add", "-A");
+      git(...identity, "commit", "-q", "-m", name);
+      git("checkout", "-q", "-");
+    }
+    writeFileSync(join(root, "ours.ts"), "ours\n");
+    git("add", "-A");
+    git(...identity, "commit", "-q", "-m", "ours");
+    git(...identity, "merge", "--no-commit", "--no-ff", "side-a", "side-b");
+
+    const bases = readChangeBaseRefs(root);
+    assert.equal(bases.length, 3, "HEAD plus BOTH merge parents");
+    for (const name of ["side-a.ts", "side-b.ts"]) {
+      assert.equal(isNewInWorktree(root, name, bases), false, `${name} came from another side of the octopus`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("no merge in progress ⇒ exactly HEAD, the pre-existing behaviour", () => {
   const root = mkdtempSync(join(tmpdir(), "rg-baseline-single-"));
   try {

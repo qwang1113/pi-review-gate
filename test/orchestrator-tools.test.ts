@@ -33,6 +33,7 @@ import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
 import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
+import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
 
 /**
  * A crosscheck that PASSES the structure check, for the tests that are about
@@ -238,6 +239,28 @@ test("a task declaring an unresolvable repo is REFUSED, never silently falling b
   assert.match(replyText(reply), /repo 无法使用/);
   assert.equal(world.panes.size, 1, "no pane may be opened for an unresolvable repo");
   assert.equal(world.plan()!.tasks.find((t) => t.id === "t1")!.status, "pending", "the task stays pending");
+});
+
+test("the ONLY way out of the one-PR rule is ON THE TOOL SURFACE (round-1 P1)", () => {
+  // Three surfaces tell the reader to "put the repo into allowMultiplePrs and
+  // re-approve" — the plan approval dialog, the child's task book and its goal
+  // dialog — and the gate narrows to `commit` by DEFAULT. A field the planner
+  // cannot send is not a way out of anything, and the first version of this
+  // rule shipped exactly that: the field existed in the plan parser and in the
+  // approval algebra, and nowhere an agent could reach it.
+  const world = makeFakeWorld();
+  const specs = new Map<string, { description: string; parameters: { properties?: Record<string, unknown> } }>();
+  registerOrchestratorStateTools(
+    { registerTool: (definition) => { specs.set(definition.name, definition as never); } },
+    world.deps,
+  );
+  const plan = specs.get("orchestrator_plan")!;
+  const planProps = plan.parameters.properties?.['plan'] as { properties?: Record<string, unknown> } | undefined;
+  assert.ok(planProps?.properties?.['allowMultiplePrs'],
+    "the plan object must accept allowMultiplePrs — otherwise the refusal points at a surface that does not exist");
+  assert.match(plan.description, /allowMultiplePrs/,
+    "and the tool that writes plans must SAY so: it is the only reader of that description");
+  assert.match(plan.description, /ONE PR/, "the rule itself is stated where plans are written");
 });
 
 test("a task WITHOUT a repo declaration still spawns in the orchestrator's own repo", async () => {
@@ -882,6 +905,35 @@ test("recover refuses while the pane is ALIVE, and re-opens the same session id 
   );
   assert.equal(world.plan()!.tasks.find((t) => t.id === "t1")!.status, "running",
     "the task never stopped being true");
+});
+
+test("a recovered child is handed its station ceiling again (2026-09-15)", async () => {
+  // The ceiling lives in the CHILD'S ENVIRONMENT, and a recovered pane is a
+  // new process — the variable died with the old one. A child that comes back
+  // unbounded could negotiate its goal at `pr` and open exactly the second PR
+  // the plan's narrowing forbade.
+  const parsed = parsePlan({
+    title: "同 repo 两任务",
+    intent: "验证恢复后的站点上界",
+    deliveryStation: "pr",
+    tasks: [
+      { id: "t1", title: "A", repo: "/repo" },
+      { id: "t2", title: "B", repo: "/repo", execution: "parallel" },
+    ],
+  });
+  assert.ok(parsed.plan, parsed.problems.join("; "));
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true, resolvableRepos: ["/repo"] });
+  const childId = await spawnT1(world);
+  const before = world.runtime().children[0]!;
+  assert.equal(world.panes.get(before.paneId)!.env[STATION_CAP_ENV], "commit");
+
+  world.panes.get(before.paneId)!.alive = false;
+  const recovered = await world.call("orchestrator_recover", { childId, reason: "机器睡眠" });
+  assert.equal(recovered.isError, undefined, replyText(recovered));
+  const after = world.runtime().children[0]!;
+  assert.notEqual(after.paneId, before.paneId);
+  assert.equal(world.panes.get(after.paneId)!.env[STATION_CAP_ENV], "commit",
+    "a restart must not widen what the child was allowed to ship");
 });
 
 test("attach hands back the plan, the children, the open questions and the ORPHANS", async () => {

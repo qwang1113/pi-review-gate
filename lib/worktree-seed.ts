@@ -217,12 +217,11 @@ export function seedWorktree(mainRoot: string, worktreeRoot: string): string[] {
       lines.push(`⚠ ${action.path} 没能带过去（${(error as Error).message}）—— 子会话可以自己补或向项目经理求助`);
     }
   }
-  for (const skip of plan.skipped) {
-    // Skips are reported at debug level only: a project without `.env` or with
-    // a committed node_modules is ordinary, and printing seven "skipped" lines
-    // into every spawn receipt would teach the reader to skip the receipt.
-    void skip;
-  }
+  // Skips are NOT printed here: a project without `.env` or with a committed
+  // `node_modules` is ordinary, and a handful of "skipped" lines in every
+  // spawn receipt would teach the reader to skip the receipt. They are still
+  // RETURNED by planWorktreeSeed — the receipt can grow a section the day a
+  // skip becomes surprising (and the tests assert on the reasons).
   return lines;
 }
 

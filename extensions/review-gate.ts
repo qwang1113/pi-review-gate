@@ -2536,10 +2536,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         return { ok: false, text: `worktree 结算失败（git ${sub ?? "?"}）：${result.output.trim().slice(0, 600)}` };
       }
-      // ONLY A DISCARD RUNS RECLAMATION, so only a discard can report a failed
-      // one — the note that used to sit here belonged to a variable this round
-      // deleted. A merge has no removal step at all: the checkout is its own
-      // way back from `merge --abort`.
+      // BOTH SETTLEMENTS THAT REMOVE SOMETHING RUN RECLAMATION — `discard`
+      // (checkout + branch) and `merge` (checkout only, 2026-09-15) — so both
+      // can report a failed one. `keep` plans no steps at all and returns
+      // above. A merge that CONFLICTED never got here: the sequence stopped at
+      // the merge step, and its abort leaves the child's checkout exactly
+      // where the human now needs it.
       return {
         ok: true,
         // The RECLAMATION outcome rides back with the settlement, because the
@@ -2720,6 +2722,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       // omits), pinned by its test — re-doing it here was the second copy the
       // reviewer flagged as a Nit.
       stateVariant: process.env[STATE_VARIANT_ENV],
+      // THE STATION CEILING RIDES THE RELAY TOO (2026-09-15). A successor is a
+      // new process, so a ceiling that lived only in the predecessor's
+      // environment would evaporate: a child whose plan narrowed its repo to
+      // `commit` would come back able to negotiate `pr`. Organic for a
+      // standalone session (the variable is absent ⇒ the field is omitted).
+      stationCap: process.env[STATION_CAP_ENV],
     });
   }
 
@@ -9284,6 +9292,27 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   /**
+   * HOW FAR THIS SESSION MAY SHIP (2026-09-15) — the ONE reader of
+   * `RG_STATION_CAP`, shared by the goal dialog and the restatement dialog.
+   *
+   * The variable is written by the DISPATCHER (lib/orchestrator-dispatch.ts)
+   * and by nothing else, which is the whole point: it lives in an environment
+   * the session's own prompt cannot reach, so a child cannot talk itself out
+   * of the ceiling its task was dispatched with.
+   *
+   * An ABSENT variable is `undefined` — NO ceiling — and never
+   * `precommit`: a standalone loop session has no plan above it, and reading
+   * absence as the strictest station would silently freeze every ordinary
+   * session at "the gate's checks pass, the user commits". The two statements
+   * are not the same one, so `parseDeliveryStation` (whose default IS the
+   * strictest station) is only reached when the variable is really there.
+   */
+  const stationCapFromEnv = (): DeliveryStation | undefined => {
+    const raw = process.env[STATION_CAP_ENV];
+    return raw === undefined || raw.trim() === "" ? undefined : parseDeliveryStation(raw);
+  };
+
+  /**
    * The GOAL family — `propose_loop_goal` (L8: the user approves this
    * session's exit contract) and the audit recorder behind it (L8b: the
    * goal-auditor's verdict becomes a record) — lives in
@@ -9322,10 +9351,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // is `undefined` (no ceiling), never `precommit`: those are different
     // statements and collapsing them would silently freeze every standalone
     // session at the strictest station.
-    stationCap: () => {
-      const raw = process.env[STATION_CAP_ENV];
-      return raw === undefined || raw.trim() === "" ? undefined : parseDeliveryStation(raw);
-    },
+    stationCap: stationCapFromEnv,
     // The directory is created with the file: the goal is the first thing a
     // session writes into .pi/, so its parent may not exist yet.
     writeGoalFile: (path, text) => {
@@ -9361,6 +9387,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
     askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
+    // THE SAME CEILING the goal dialog reads (2026-09-15): a restatement is
+    // where the station is FIRST named, so clamping only at the goal step
+    // would mean asking the user about one contract and recording another.
+    stationCap: stationCapFromEnv,
   });
 
 

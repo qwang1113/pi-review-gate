@@ -596,7 +596,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `precommit-tail.ts` | precommit runner 日志的实时 tail（runner 走文件而非管道） |
 | `progress-stream.ts` | 长耗时门禁工具的实时进度输出 |
 | `project-config.ts` | 每项目门禁配置 `.pi/review-gate.json` 的解析与层叠 |
-| `repo-pr-policy.ts` | **同一 repo 一个需求只出一个 PR**（2026-09-15，用户决定）：纯规则 —— 一个 repo 的任务数 ≥2 且未列进 `allowMultiplePrs` ⇒ 该 repo 的有效交付站点收窄为 `commit`（`effectiveRepoStation`），子会话提交完就停、项目经理本地合并、用户验证后再开一个 PR（实测反例：同一 repo 三个任务开了三个 PR）。`narrowedRepoStations` / `narrowedRepoLines`（批准对话框、plan 摘要与任务书渲染）、`capStationAt`（子会话 goal 协商的上界）、`STATION_CAP_ENV`（上界跨进程走环境变量 —— 那是 agent 提示词写不进去的通道）；无 fs、无时钟 |
+| `repo-pr-policy.ts` | **同一 repo 一个需求只出一个 PR**（2026-09-15，用户决定）：纯规则 —— 一个 repo 的任务数 ≥2 且未列进 `allowMultiplePrs` ⇒ 该 repo 的有效交付站点收窄为 `commit`（`effectiveRepoStation`），子会话提交完就停、项目经理本地合并、用户验证后再开一个 PR（实测反例：同一 repo 三个任务开了三个 PR）。`narrowedRepoStations` / `narrowedRepoLines`（批准对话框、plan 摘要与任务书渲染）、`capStationAt`（子会话 goal 协商的上界）、`STATION_CAP_ENV`（上界跨进程走环境变量 —— 那是 agent 提示词写不进去的通道；spawn / `orchestrator_recover` / `session_handoff` 接力三条路径都注入，**一个重开的子会话不该比它第一次启动时能做更多**）；无 fs、无时钟 |
 | `repo-resolve.ts` | 多仓解析：裁决绑定到编辑真正发生的那个仓库 |
 | `restatement.ts` | L8a 需求反述：记录（正文 + hash + 时间 + 站点，落 gate-state 而非工作区）、内容最小校验（长度 + 必须有「改之前 → 改之后」对照，接受的写法在导出的 `RESTATEMENT_CONTRAST_TOKENS` 数组里）、两处拒绝文案（含可照抄骨架，以及**真走得通的**误判出路：`ask_user` 交给用户 / `/gate-mode` 换模式——**不指向 `request_arbitration`**，工具拒绝不产生可申诉记录，去申诉只会被回绝或误裁到别的拦截并白烧配额）、确认框文案，以及工具 `propose_restatement` 的唯一注册入口 |
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |

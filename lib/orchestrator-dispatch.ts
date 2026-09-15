@@ -31,7 +31,7 @@ import {
 
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
 import { deliveryStationLine } from "./delivery-station.ts";
-import { effectiveRepoStation, narrowingReasonFor } from "./repo-pr-policy.ts";
+import { effectiveRepoStation, narrowingReasonFor, taskRepoOf } from "./repo-pr-policy.ts";
 import { spawnAuthorization } from "./orchestrator-gate.ts";
 import { buildTakeoverRoute, discoverOrchestrations } from "./orchestrator-takeover.ts";
 import {
@@ -265,9 +265,15 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // worktree path, which is a directory the child happens to work in. Both the
   // task book and the child's environment carry the same value, so the goal
   // dialog inside the child cannot offer a station the plan already ruled out.
-  const taskRepoRoot = cwd;
-  const stationCap = effectiveRepoStation(plan!, taskRepoRoot, deps.repoRoot);
-  const stationCapReason = narrowingReasonFor(plan!, taskRepoRoot, deps.repoRoot);
+  // THE PLAN'S OWN SPELLING, NOT THE RESOLVED CHECKOUT (round-1 P1, 2026-09-15).
+  // The narrowing is counted over `task.repo ?? <orchestration repo>` — the key
+  // `tasksByRepo` groups by — while `cwd` is what `resolveTaskRepo` returns, a
+  // `git --show-toplevel` that resolves a subdirectory or a symlinked path
+  // somewhere else. Spawning from one key and counting with the other is how a
+  // narrowed repo would hand its child an unlimited station.
+  const taskRepoKey = taskRepoOf(task, deps.repoRoot);
+  const stationCap = effectiveRepoStation(plan!, taskRepoKey, deps.repoRoot);
+  const stationCapReason = narrowingReasonFor(plan!, taskRepoKey, deps.repoRoot);
   const stationCapLine =
     deliveryStationLine(stationCap) + (stationCapReason ? `\n上界原因：${stationCapReason}` : "");
   // ONE CHECKOUT PER WRITER (2026-09-10, user decision). A second child in the
