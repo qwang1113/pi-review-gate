@@ -27,6 +27,7 @@ import {
   type ReviewScopeStamp,
 } from "../lib/orchestrator-channel.ts";
 import type { RoundBinding } from "../lib/audit-round.ts";
+import { REVIEW_ROUND_SPEC } from "../lib/audit-round-specs.ts";
 
 const ROOT = "/repo";
 const HOME = "/home/test";
@@ -662,16 +663,18 @@ test("judge_wait: a round bound without a content stamp says so in the reply", a
   const f = fake();
   const c = seed(f);
   writeReport(f, c, "READY", "rep-2");
-  // The fixture mirrors what `REVIEW_ROUND_SPEC.degradedContentBinding` now
-  // says: the note names the RECORD that is missing (no comparable checkpoint
-  // entry ⇒ no content timestamp), never a range shape — a round without a
-  // checkpoint record may judge an empty range or a real branch-base delivery.
-  f.bindingNote =
-    "本轮绑定说明：门禁状态里还没有可比的 checkpoint 记录 —— 本轮没有**内容诞生的时刻**可比，" +
-    "所以内容时间判据**不适用**，本轮裁决只由 round 与 cursor 绑定。";
+  // Taken FROM THE PRODUCER, never hand-copied: a fixture that re-states the
+  // sentence drifts the moment the sentence changes — which is exactly what
+  // happened to the copy this replaced.
+  const bindingNote = REVIEW_ROUND_SPEC.degradedContentBinding?.();
+  assert.ok(bindingNote, "the review spec must state its degraded-binding note");
+  f.bindingNote = bindingNote;
   const reply = await call(f, "judge_wait", { role: "reviewer" });
   const text = textOf(reply);
   assert.match(text, /绑定说明：/, "the weaker binding is its own line in the wake-up");
+  // What the note names is the RECORD that is missing (no comparable checkpoint
+  // entry ⇒ no content timestamp), not a range shape: a round without a
+  // checkpoint record may judge an empty range or a real branch-base delivery.
   assert.match(text, /内容诞生的时刻/, "…and it names the missing timestamp, not a range shape");
 });
 
