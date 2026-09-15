@@ -242,6 +242,18 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
    is immutable, so you may keep fixing the worktree while the reviewer
    runs.
 
+   **A READY that outruns its own precommit lane is HELD, not refused**
+   (2026-09-15). The lane runs BESIDE the review — that overlap is the ~33s it
+   saves — so a fast reviewer can conclude before the full precommit does. When
+   every other check passes (right commit, right cwd, no unresolved P0/P1) and
+   the ONLY thing missing is that PASS, the gate parks the conclusion instead of
+   recording BLOCKED: `review` stays PENDING and the lane's own landing decides
+   it — a PASS on that same tree replays the conclusion through the same
+   recorder, and you get woken with the READY. **Do not re-submit to get past
+   one**: identical content buys nothing. Editing while the lane runs voids the
+   hold (the tree it judged is gone) and a FAIL retires it through the failure
+   channel — all three endings are listed in the reply.
+
    Precommit still matters for two measured reasons: tests catch the cheap
    defect class the reviewer would otherwise spend minutes finding (a test
    failure is far cheaper to fix than a BLOCKED verdict), and a FAIL is
