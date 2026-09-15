@@ -151,6 +151,104 @@ export function readyLacksVerification(args: {
     recorded === reviewed);
 }
 
+/**
+ * WHY A READY IS BEING WITHHELD — and the reason decides whether the gate
+ * REFUSES the round or merely HOLDS it (2026-09-15).
+ *
+ * Tighten-only either way: a withheld READY is never recorded as READY. What
+ * the reason changes is what the AGENT is told to do next.
+ *
+ *   - `blocking-finding`, `stale` and `cwd-mismatch` are facts about the WORK.
+ *     Waiting changes nothing, so the round is refused (BLOCKED) and the agent
+ *     fixes it, re-bases, or re-reports.
+ *   - `unverified` is a fact about TIME. `judge_submit` runs the full precommit
+ *     BESIDE the review (B1, 2026-09-10), so a fast reviewer can conclude
+ *     before the lane lands — measured on this repository (PR #62, round 4):
+ *     a three-line incremental round concluded in 16s against a 34s lane,
+ *     seven seconds short. Refusing there told the agent to "fix ALL findings"
+ *     on a round that had none, and its only way forward was a whole extra
+ *     review of byte-identical content; the lane PASSed seven seconds later
+ *     with nobody to revisit it. So this ONE reason holds the conclusion
+ *     instead of refusing it (lib/gate-state.ts, `PendingReadyReview`), and the
+ *     lane's own landing replays it through the normal recorder.
+ *
+ * ORDER IS THE CONTRACT. A round that is BOTH stale and unverified is refused,
+ * not held: the checkpoint it judged is no longer HEAD, so a PASS on its tree
+ * would bind a READY to content nobody is looking at any more. Same for a
+ * READY that contradicts itself by carrying an open P0/P1.
+ */
+export type ReadyWithholding = "none" | "unverified" | "stale" | "cwd-mismatch" | "blocking-finding";
+
+export function classifyReadyWithholding(input: {
+  /** The verdict the judge concluded, BEFORE adjudication. */
+  concluded: string;
+  /**
+   * The ADJUDICATOR's own reading: a READY carrying an open P0/P1 is
+   * contradictory, so adjudication turns it BLOCKED.
+   *
+   * A boolean and not the adjudicated verdict WORD, because the recorder
+   * overwrites that word with the three binding checks below — passing it here
+   * would make every one of those refusals look like a contradiction on the
+   * findings, which is exactly the misclassification this signature prevents
+   * (caught by test/verdict-recording.test.ts while this was being written).
+   */
+  blockingFinding: boolean;
+  /** HEAD moved past the commit this round was prepared for. */
+  staleTarget: boolean;
+  /** The round's content has no full-lane PASS on record. */
+  lacksVerification: boolean;
+  /** The verdict's `cwd` is not the repo this round was prepared for. */
+  cwdMismatch: boolean;
+}): ReadyWithholding {
+  if (input.concluded !== "READY") return "none";
+  if (input.blockingFinding) return "blocking-finding";
+  if (input.staleTarget) return "stale";
+  if (input.lacksVerification) return "unverified";
+  if (input.cwdMismatch) return "cwd-mismatch";
+  return "none";
+}
+
+/**
+ * WHAT THE LANE'S OWN LANDING DOES TO A PARKED CONCLUSION (2026-09-15).
+ *
+ * Three outcomes, and each one is a fact about TREES rather than about the
+ * passage of time:
+ *
+ *   - `none` — nothing is parked, or a PASS covered different content than the
+ *     parked round judged (the session edited while the lane ran). The parked
+ *     conclusion stays where it is: its content is still unverified, and the
+ *     next lane is the one that will settle it.
+ *   - `clear` — the lane came back with anything but PASS. The content the
+ *     reviewer approved just failed its full lane, so there is nothing left to
+ *     replay, and the failure channel is already telling the agent why — in the
+ *     language of verification, not of findings.
+ *   - `replay` — a PASS on exactly the parked tree, while the gate's CURRENT
+ *     review target is still that same round. Only here does the parked
+ *     conclusion become the verdict it always was.
+ *
+ * ALL THREE IDS MUST AGREE FOR `replay`, and an absent or empty one on ANY of
+ * them is never a match: an unknown tree is not evidence that two trees are
+ * the same, and replaying onto a round that has moved on would record a READY
+ * nobody is looking at.
+ */
+export type ParkedReadyFate = "none" | "clear" | "replay";
+
+export function parkedReadyFate(args: {
+  /** `pendingReady.tree`, when something is parked. */
+  parkedTree: string | undefined;
+  /** What the lane that just landed returned (`PASS`, `FAIL`, …). */
+  laneVerdict: string;
+  /** `precommit.lastFullPassTree` after this lane landed. */
+  coveredTree: string | undefined;
+  /** The tree the gate's current review target holds. */
+  currentTargetTree: string | undefined;
+}): ParkedReadyFate {
+  const parked = args.parkedTree;
+  if (parked === undefined || parked === "") return "none";
+  if (args.laneVerdict !== "PASS") return "clear";
+  return args.coveredTree === parked && args.currentTargetTree === parked ? "replay" : "none";
+}
+
 export function adjudicateReviewConclusion(input: StructuredConclusion): AdjudicatedReview {
   const findings = input.findings ?? [];
   // Rule 1 — a READY that ships with an open P0/P1 contradicts itself.

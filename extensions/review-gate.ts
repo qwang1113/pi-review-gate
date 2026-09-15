@@ -419,7 +419,7 @@ import { appendTiming } from "../lib/gate-timings.ts";
 import { tailLogFile } from "../lib/precommit-tail.ts";
 // The background lane's failure notice: wording + the "is this still the
 // content under the agent's hands" rule, both pure and unit-tested there.
-import { buildAsyncPrecommitReport, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
+import { buildAsyncPrecommitReport, buildParkedReadyReplayNotice, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
 import {
   decideReviewScope,
   type ReviewScopeDecision,
@@ -464,8 +464,10 @@ import {
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
 import {
   adjudicateReviewConclusion,
+  classifyReadyWithholding,
   fileFindingsFrom,
   normalizeConcludedVerdict,
+  parkedReadyFate,
   readyLacksVerification,
   type ReviewFinding,
 } from "../lib/review-adjudicate.ts";
@@ -6414,7 +6416,50 @@ export default function reviewGate(pi: ExtensionAPI) {
         else laneState.precommit.lastFullPassTree = coveredTree;
         persistRepo(ctx as unknown as ExtensionContext, root);
       }
+      // WHAT THE LANE'S LANDING DOES TO A PARKED CONCLUSION (2026-09-15).
+      // `parkedReadyFate` (pure, lib/review-adjudicate.ts) answers with TREES
+      // rather than with the passage of time: a non-PASS lane retires the
+      // parked round (its content just failed), a PASS on exactly that tree
+      // replays it, and anything else leaves it alone because its content is
+      // still unverified.
+      const fate = parkedReadyFate({
+        parkedTree: laneState.pendingReady?.tree,
+        laneVerdict: verdict,
+        coveredTree,
+        currentTargetTree: reviewTargets.get(root)?.tree,
+      });
+      if (fate !== "none") {
+        const parked = laneState.pendingReady!;
+        delete laneState.pendingReady;
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        if (fate === "replay") {
+          // THE PARKED READY GETS ITS VERDICT NOW. Replayed through the SAME
+          // recorder the normal order uses — the whole reason the conclusion
+          // was parked verbatim is that findings count, fingerprints, the
+          // docSync attestation, the baseline and the round record must come
+          // out exactly as they would have, and a second implementation of
+          // those rules would drift.
+          const recorded = await recordReviewVerdict(parked.conclusion as ReportConclusion, root, ctx);
+          // WAKE THE AGENT: this is a gate state change nobody else will
+          // report. `steer`, exactly like the failure notice below — a
+          // `followUp` would sit in the queue behind a long turn, and the whole
+          // point is that the round is no longer waiting on anything.
+          try {
+            pi.sendMessage(
+              {
+                customType: "review-gate",
+                content: buildParkedReadyReplayNotice({ round: parked.round, tree: parked.tree, recorded }),
+                display: true,
+              },
+              { triggerTurn: true, deliverAs: "steer" },
+            );
+          } catch { /* headless — the recorded verdict is what matters */ }
+        }
+      }
       if (verdict !== "PASS") {
+        // TELL THE AGENT (B1). The content the reviewer approved did not pass
+        // its verification, so this round cannot produce a shippable READY —
+        // and the failure channel names THAT reason, not "findings".
         reportAsyncPrecommit({
           round,
           verified,
@@ -8358,7 +8403,21 @@ export default function reviewGate(pi: ExtensionAPI) {
     reviewScope: (root, st) => reviewScopeFor(root, st),
     previousRoundFindings: (st) => previousRoundFindings(st),
     settledConclusion: (st) => settledConclusion(st),
-    registerReviewTarget: (root, target) => { reviewTargets.set(root, target); },
+    registerReviewTarget: (root, target, ctx) => {
+      reviewTargets.set(root, target);
+      // A PARKED READY DOES NOT SURVIVE ITS ROUND (2026-09-15). A new target
+      // means a new round was dispatched, so the parked one is history: if the
+      // lane that follows ever PASSed on that old tree, replaying it would
+      // record a READY the session has already moved past — and `review`
+      // belongs to the round in flight. The tree comparison in the lane's own
+      // landing checks this too; clearing it here is what keeps the sidecar
+      // from carrying a parked conclusion nobody is waiting on any more.
+      const st = stateForRepo(root);
+      if (st.pendingReady) {
+        delete st.pendingReady;
+        persistRepo(ctx as ExtensionContext, root);
+      }
+    },
     git: {
       // Deliberately NOT the `isAncestor` helper above: that one runs with
       // `encoding: "utf8"` and no `stdio`, which lets git's "fatal: Not a
@@ -8491,6 +8550,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
       ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
     });
+    // THE ADJUDICATOR'S OWN VERDICT, captured before the three binding checks
+    // below overwrite it (2026-09-15). Only THIS one answers "does the round
+    // contradict itself on its findings?" — stale, unverified and the cwd check
+    // each relabel `parsed.verdict` too, and feeding the relabelled word into
+    // `classifyReadyWithholding` made every one of them look like a finding
+    // conflict.
+    const adjudicatedVerdict = parsed.verdict;
     // The agent is running the loop again — a standing ask_user
     // pause is moot (liveness: a stale pause would silently swallow the
     // next auto-continuation after a BLOCKED verdict).
@@ -8598,6 +8664,49 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
 
     const bindTree = parsed.verdict === "READY" ? reviewTargets.get(targetRoot)?.tree ?? null : null;
+    // HOLD, DON'T REFUSE, WHEN THE ONLY THING MISSING IS TIME (2026-09-15).
+    // This function used to write `unverified` straight to BLOCKED and be done
+    // with it — permanently, while the lane that would have cleared it landed
+    // seconds later. The agent read "fix ALL findings and re-review" on a round
+    // whose only finding was a Nit saying nothing had changed, and its only way
+    // forward was re-reviewing byte-identical content. Measured on this repo:
+    // 16s of review against a 34s full lane, seven seconds short.
+    const withholding = classifyReadyWithholding({
+      concluded: verdictRaw,
+      blockingFinding: adjudicatedVerdict !== "READY",
+      staleTarget,
+      lacksVerification: unverified,
+      cwdMismatch: cwdMismatch !== undefined,
+    });
+    if (withholding === "unverified") {
+      const parkedTarget = reviewTargets.get(targetRoot);
+      // No target ⇒ the stale check above already fired and this is a refusal,
+      // not a hold: a parked conclusion with nothing to bind to could never be
+      // replayed into a real verdict.
+      if (parkedTarget) {
+        delete st.pausedQuestion;
+        st.pendingReady = {
+          conclusion: {
+            verdict: "READY",
+            findings: (concluded.findings ?? []) as unknown[],
+            ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
+            ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
+          },
+          tree: parkedTarget.tree,
+          head: parkedTarget.head,
+          round: st.rounds.length + 1,
+          at: new Date().toISOString(),
+        };
+        persistRepo(ctx as unknown as ExtensionContext, targetRoot);
+        return `review-gate: this round's READY is being HELD, not refused — for ${targetRoot} ` +
+          `(round ${st.rounds.length + 1}, tree ${parkedTarget.tree.slice(0, 12)}).\n` +
+          "这一轮的内容**没有任何问题**：只是全量 precommit 还没跑完（B1 让它与审查并行跑，" +
+          "所以 reviewer 可以先交卷）。门禁把结论**原样扣下**了，`review` 仍是 PENDING ——\n" +
+          "  - lane 落 PASS 且 tree 相同 ⇒ 门禁**自动补记 READY** 并唤醒你，可以继续收尾；\n" +
+          "  - lane 落 FAIL ⇒ 挂起被清掉，并按失败通道告诉你原因。\n" +
+          "**不要重跑审查**：重送的同一份内容不会更快拿到结果，只会白烧一轮。";
+      }
+    }
     st.review = {
       verdict: parsed.verdict,
       fingerprint: bindTree,

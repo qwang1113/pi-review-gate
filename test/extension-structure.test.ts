@@ -4418,9 +4418,14 @@ test("P2: prepare_review registers the commit target (baseline/head/tree) for re
   // recomputed when the verdict lands (by then the worktree has moved).
   assert.match(
     REVIEW_PREPARE_SRC,
-    /deps\.registerReviewTarget\(root, \{ baseline, head, tree, scope: \{ range, kind: scopeNow\.scope \} \}\)/,
+    /deps\.registerReviewTarget\(root, \{ baseline, head, tree, scope: \{ range, kind: scopeNow\.scope \} \}, ctx\)/,
+    "the ctx travels with it (2026-09-15): registering a target also RETIRES the previous round's parked READY, and that is a write to the sidecar",
   );
-  assert.match(REVIEW_PREPARE_WIRING(), /registerReviewTarget: \(root, target\) => \{ reviewTargets\.set\(root, target\); \}/);
+  assert.match(
+    REVIEW_PREPARE_WIRING(),
+    /registerReviewTarget: \(root, target, ctx\) => \{\s*reviewTargets\.set\(root, target\);\s*\/\/[^\n]*\n(?:[^\n]*\n)*?\s*const st = stateForRepo\(root\);/,
+    "and the wiring clears the parked conclusion it did not dispatch",
+  );
   // And the map must be consulted inside the recorder, not just written.
   assert.match(recordVerdictBody(), /reviewTargets\.get\(targetRoot\)/);
 });
@@ -5924,8 +5929,8 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
 test("a FAIL that arrives after dispatch is reported, and it withholds the READY", () => {
   assert.match(SRC, /function reportAsyncPrecommit\(/,
     "the failure has a channel of its own — the round was dispatched before this verdict existed, so returning early is no longer available");
-  assert.match(SRC, /if \(verdict !== "PASS"\) \{\s*reportAsyncPrecommit\(\{/,
-    "and every non-PASS verdict goes through it, including a thrown runner");
+  assert.match(SRC, /if \(verdict !== "PASS"\) \{[\s\S]{0,400}?reportAsyncPrecommit\(\{/,
+    "and every non-PASS verdict goes through it, including a thrown runner — the parked-READY handling above runs first and must not swallow it");
   assert.match(
     SRC,
     /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,400}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,40}?bypassActive: st\.bypass\.active,\s*\}\)/,
@@ -5988,7 +5993,7 @@ test("the async FAIL notice never waits for the agent to stop, and names what it
   // recomputed after it (lint:fix may have edited files), i.e. by then it can
   // already be the NEXT round's content.
   const besideAt = SRC.indexOf("function startPrecommitBeside(");
-  const beside = SRC.slice(besideAt, besideAt + 4200);
+  const beside = SRC.slice(besideAt, besideAt + 6400);
   const verifiedAt = beside.indexOf("const verified = worktreeTree(root)");
   const runAt = beside.indexOf('callTool("run_precommit"');
   assert.ok(verifiedAt > 0 && runAt > verifiedAt,

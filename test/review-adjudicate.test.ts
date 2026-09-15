@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 
 import {
   adjudicateReviewConclusion,
+  classifyReadyWithholding,
   fileFindingsFrom,
   findingFingerprint,
   normalizeConcludedVerdict,
+  parkedReadyFate,
   readyLacksVerification,
   severityFindingsFrom,
   type ReviewFinding,
@@ -225,4 +227,86 @@ test("the round's OWN tree counts as evidence, because the live binding is desig
   );
   // And an old caller (neither field) behaves exactly as before.
   assert.equal(readyLacksVerification({ precommitVerdict: "NOT_RUN", bypassActive: false }), true);
+});
+
+// ---- holding a READY instead of refusing it (2026-09-15) ----
+
+test("classifyReadyWithholding: only a fact about TIME is held; the rest are refused", () => {
+  const base = {
+    concluded: "READY",
+    blockingFinding: false,
+    staleTarget: false,
+    lacksVerification: false,
+    cwdMismatch: false,
+  };
+  assert.equal(classifyReadyWithholding(base), "none");
+  // The one reason the gate HOLDS: the reviewer outran its full lane. Measured
+  // on this repository — 16s of review against a 34s lane, seven seconds short
+  // — and the old reading refused the round over it.
+  assert.equal(classifyReadyWithholding({ ...base, lacksVerification: true }), "unverified");
+  // The three that are facts about the WORK, not about time.
+  assert.equal(classifyReadyWithholding({ ...base, staleTarget: true }), "stale");
+  assert.equal(classifyReadyWithholding({ ...base, cwdMismatch: true }), "cwd-mismatch");
+  assert.equal(classifyReadyWithholding({ ...base, blockingFinding: true }), "blocking-finding");
+
+  // ORDER IS THE CONTRACT. A round that is both stale and unverified is
+  // REFUSED, not held: the checkpoint it judged is gone, so a PASS on its tree
+  // would bind a READY to content nobody is looking at any more.
+  assert.equal(classifyReadyWithholding({ ...base, staleTarget: true, lacksVerification: true }), "stale");
+  assert.equal(
+    classifyReadyWithholding({ ...base, blockingFinding: true, lacksVerification: true }),
+    "blocking-finding",
+  );
+  // A BLOCKED conclusion is never withheld — there is nothing to hold.
+  assert.equal(classifyReadyWithholding({ ...base, concluded: "BLOCKED" }), "none");
+});
+
+test("parkedReadyFate: replay needs all three ids, clear needs a failed lane, the rest is 'leave it'", () => {
+  const t = "9f2c";
+  // All three agree ⇒ the held round becomes the verdict it always was.
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: t }),
+    "replay",
+  );
+  // A lane that came back with anything but PASS retires the parked round: its
+  // content is now known bad, and the failure channel already says so in the
+  // language of verification.
+  for (const laneVerdict of ["FAIL", "no verdict", "ERROR"]) {
+    assert.equal(
+      parkedReadyFate({ parkedTree: t, laneVerdict, coveredTree: undefined, currentTargetTree: t }),
+      "clear",
+      laneVerdict,
+    );
+  }
+  // A PASS that covered OTHER content leaves it parked: the round's own content
+  // is still unverified, and the next lane is what settles it.
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: "other", currentTargetTree: t }),
+    "none",
+    "replaying this would record a READY nothing verified",
+  );
+  // A newer round replaced the target ⇒ the parked one is history, never
+  // replayed onto it.
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: "other" }),
+    "none",
+  );
+  // Nothing parked ⇒ nothing to do.
+  assert.equal(
+    parkedReadyFate({ parkedTree: undefined, laneVerdict: "PASS", coveredTree: t, currentTargetTree: t }),
+    "none",
+  );
+  // An EMPTY id is unknown, not equal — the fail-closed direction.
+  assert.equal(
+    parkedReadyFate({ parkedTree: "", laneVerdict: "PASS", coveredTree: "", currentTargetTree: "" }),
+    "none",
+  );
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: undefined, currentTargetTree: t }),
+    "none",
+  );
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: undefined }),
+    "none",
+  );
 });

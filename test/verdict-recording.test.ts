@@ -133,7 +133,18 @@ function recorders(pi: unknown): Recorders {
   return r!;
 }
 
-function sidecar(repo: string): { review: { verdict: string; docSync?: string }; rounds?: Array<Record<string, unknown>> } {
+function sidecar(repo: string): {
+  review: { verdict: string; fingerprint?: string | null; docSync?: string };
+  rounds?: Array<Record<string, unknown>>;
+  pendingReady?: {
+    conclusion: { verdict: string; findings: unknown[] };
+    tree: string;
+    head: string;
+    round: number;
+    at: string;
+  };
+  lastReadyReview?: unknown;
+} {
   return JSON.parse(readFileSync(join(repo, ".pi", "review-gate-state.json"), "utf8"));
 }
 
@@ -168,6 +179,103 @@ async function preparedRepo(): Promise<{ repo: string; pi: ReturnType<typeof mak
   assert.equal(prepared.isError, undefined, `prepare failed: ${prepared.content?.[0]?.text}`);
   return { repo, pi, ctx };
 }
+
+/**
+ * A repo prepared WITHOUT the bypass (2026-09-15).
+ *
+ * The other tests here need the real precommit lane out of the way, and the
+ * bypass is the sanctioned way past it — but a bypass is ALSO exactly what
+ * makes `readyLacksVerification` return false, so that fixture can never reach
+ * the case this one exists for: a reviewer that concludes before its lane
+ * lands. This one commits through git directly (the checkpoint tool is not
+ * what is under test) and leaves `precommit` at NOT_RUN with no full-lane tree
+ * on record — the state a round is in when the lane is still running.
+ */
+async function preparedRepoBeforeItsLane(): Promise<{
+  repo: string;
+  pi: ReturnType<typeof makeMockPi>;
+  ctx: unknown;
+}> {
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const ctx = pi.ctx;
+  await pi.handlers.get("session_start")!({}, ctx);
+  // The gate writes its sidecar under `.pi/`, and this fixture commits through
+  // git by hand: without the ignore, the gate's own state makes the worktree
+  // dirty and `prepare_review` refuses the round before anything can be tested.
+  writeFileSync(join(repo, ".gitignore"), ".pi/\n");
+  writeFileSync(join(repo, "a.ts"), "export const a = 2;\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", "feat: change");
+  const prepared = await internalTool(pi, "prepare_review")("id", { repo }, undefined, undefined, ctx) as {
+    isError?: boolean;
+    content: Array<{ text: string }>;
+  };
+  assert.equal(prepared.isError, undefined, `prepare failed: ${prepared.content?.[0]?.text}`);
+  return { repo, pi, ctx };
+}
+
+test("a READY that outruns its full lane is HELD, not refused (2026-09-15)", async () => {
+  const { repo, pi, ctx } = await preparedRepoBeforeItsLane();
+  const concluded = reportConclusion(readerIO(new Map()), reportRecord(repo, { findings: [], findingsCount: 0 }));
+
+  const text = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+
+  assert.match(text, /HELD/, `the recorder must say it held the round: ${text}`);
+  assert.match(text, /不要重跑/, "and must tell the agent NOT to re-submit — that is the whole saving");
+  const st = sidecar(repo);
+  assert.equal(st.review.verdict, "PENDING", "a held round records NO verdict — nothing may ship on it");
+  assert.equal(st.rounds?.length ?? 0, 0, "and it does not join the round history yet");
+  assert.equal(st.lastReadyReview, undefined, "nor does it move the incremental baseline");
+  assert.ok(st.pendingReady, "the conclusion is parked verbatim");
+  assert.equal(st.pendingReady!.conclusion.verdict, "READY");
+  assert.ok(st.pendingReady!.tree.length > 0, "and it remembers the tree it judged");
+  assert.equal(st.pendingReady!.round, 1);
+});
+
+test("…and replaying it once its verification is satisfied records the READY it always was", async () => {
+  const { repo, pi, ctx } = await preparedRepoBeforeItsLane();
+  const concluded = reportConclusion(readerIO(new Map()), reportRecord(repo, { findings: [], findingsCount: 0 }));
+  assert.match(await recorders(pi).recordReviewVerdict(concluded, repo, ctx), /HELD/);
+  assert.equal(sidecar(repo).review.verdict, "PENDING", "nothing is recorded while it is held");
+
+  // In a real round this is the background lane landing PASS and the gate's
+  // own callback replaying the parked conclusion. This fixture has no precommit
+  // runner to run, so the USER's own `/gate-bypass` stands in for "verification
+  // is satisfied": it is the same `readyLacksVerification` reading a PASS
+  // produces, which is the only condition the replay depends on.
+  await pi.commands.get("gate-bypass")!.handler("fixture: the lane cannot run here", ctx);
+
+  // THE REPLAY — the same recorder call the lane callback makes, which is the
+  // whole reason the conclusion was parked verbatim.
+  const replayed = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+
+  assert.match(replayed, /recorded verdict READY/, replayed);
+  const st = sidecar(repo);
+  assert.equal(st.review.verdict, "READY", "the held round lands as the READY it always was");
+  assert.equal(st.rounds?.length, 1, "and joins the round history exactly as it would have");
+  assert.equal(st.rounds?.[0]?.findingsTotal, 0);
+
+  // CONTROL: the same conclusion recorded straight through (no hold at all)
+  // leaves the same review record. If the replay were a second implementation
+  // of the recording rules, this is where it would show.
+  const direct = await preparedRepoBeforeItsLane();
+  await direct.pi.commands.get("gate-bypass")!.handler("fixture: control", direct.ctx);
+  await recorders(direct.pi).recordReviewVerdict(
+    reportConclusion(readerIO(new Map()), reportRecord(direct.repo, { findings: [], findingsCount: 0 })),
+    direct.repo,
+    direct.ctx,
+  );
+  const held = sidecar(repo);
+  const straight = sidecar(direct.repo);
+  assert.equal(held.review.verdict, straight.review.verdict);
+  assert.equal(held.review.fingerprint, straight.review.fingerprint,
+    "both bind to the reviewed TREE, not to a timestamp or a sha");
+  assert.equal(held.review.docSync, straight.review.docSync);
+  assert.deepEqual(held.rounds?.[0]?.fingerprints, straight.rounds?.[0]?.fingerprints);
+  assert.equal(held.rounds?.[0]?.verdict, straight.rounds?.[0]?.verdict);
+});
 
 /** The EXACT record shape a reviewer round writes today (round 4, verbatim). */
 function reportRecord(repo: string, over: Record<string, unknown> = {}): Record<string, unknown> {

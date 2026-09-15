@@ -5,6 +5,7 @@ import {
   ASYNC_PRECOMMIT_DETAIL_MAX,
   asyncPrecommitReportIsStale,
   buildAsyncPrecommitReport,
+  buildParkedReadyReplayNotice,
 } from "../lib/async-precommit-report.ts";
 
 const TREE_A = "d6d29d5a16e1aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -82,4 +83,29 @@ test("the appended run output is bounded", () => {
   });
   assert.ok(text.endsWith("x".repeat(ASYNC_PRECOMMIT_DETAIL_MAX)));
   assert.ok(text.length < 9000);
+});
+
+// ---------------------------------------------------------------------------
+// the REPLAY notice (2026-09-15) — the mirror image of the failure notice
+
+test("the replay notice names the round and the tree, and says nothing was wrong", () => {
+  const notice = buildParkedReadyReplayNotice({
+    round: 4,
+    tree: TREE_A,
+    recorded: "review-gate: recorded verdict READY for /repo (round 4/15, findings: 1). Next: run precommit for this same repo.",
+  });
+  assert.match(notice, /第 4 轮 READY 现在已重新记录/);
+  // The tree identifies WHICH content was replayed, short-prefixed exactly like
+  // the failure notice so the two read as a pair.
+  assert.match(notice, /d6d29d5a16e1/);
+  assert.ok(!notice.includes(TREE_A), "the full digest is noise here — the failure notice settled that");
+  // WHY IT WAS HELD. Without this the reader sees an unexplained state flip,
+  // which is the failure measured on 2026-09-12 (late notices arriving after
+  // the records said PASS + READY cost two review rounds).
+  assert.match(notice, /不是内容问题/);
+  assert.match(notice, /验证还没跑完/);
+  // And the recorder's own reply closes it: the verdict, the counts, the next
+  // step.
+  assert.match(notice, /recorded verdict READY/);
+  assert.match(notice, /findings: 1/);
 });

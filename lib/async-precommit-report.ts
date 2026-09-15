@@ -145,3 +145,35 @@ export function buildAsyncPrecommitReport(input: AsyncPrecommitReport): string {
   const detail = input.detail.slice(0, ASYNC_PRECOMMIT_DETAIL_MAX);
   return detail ? `${lead}\n\n${detail}` : lead;
 }
+
+/**
+ * THE NOTICE A REPLAYED READY SENDS (2026-09-15).
+ *
+ * Its mirror image is the failure notice above, and the pair is the whole
+ * story of a round that outran its lane: one of them says "the content you
+ * approved failed its verification", and this one says "the content you
+ * approved passed — the verdict you were owed has been recorded, and nothing
+ * was ever wrong with it".
+ *
+ * IT HAS TO SAY WHY, or the agent reads an unexplained state flip as the gate
+ * contradicting itself — the failure measured on 2026-09-12, where late FAIL
+ * notices arrived after the gate's own records said PASS + READY and cost two
+ * review rounds. The round number and the tree are the identity of what was
+ * replayed, so the reader can match the notice against its own round; the
+ * recorder's own reply closes it with the verdict and the next step.
+ */
+export function buildParkedReadyReplayNotice(input: {
+  /** The round the parked conclusion belonged to (1-based). */
+  round: number;
+  /** The tree it judged, replayed verbatim. */
+  tree: string;
+  /** The recorder's reply — it restates the verdict and what comes next. */
+  recorded: string;
+}): string {
+  return (
+    `review-gate: 之前被扣下的第 ${input.round} 轮 READY 现在已重新记录 —— ` +
+    `全量 precommit 落 PASS，tree ${input.tree.slice(0, TREE_PREFIX)}，与那一轮审的内容一致。\n` +
+    "那次扣下只是因为验证还没跑完（B1 让全量与审查并行跑），**不是内容问题**。\n" +
+    input.recorded
+  );
+}
