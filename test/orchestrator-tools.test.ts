@@ -907,8 +907,7 @@ test("recover refuses while the pane is ALIVE, and re-opens the same session id 
     "the task never stopped being true");
 });
 
-test("a recovered child is handed its station ceiling again (2026-09-15)", async () => {
-  // The ceiling lives in the CHILD'S ENVIRONMENT, and a recovered pane is a
+test("a recovered child is handed its station ceiling again (2026-09-15)", async () => {  // The ceiling lives in the CHILD'S ENVIRONMENT, and a recovered pane is a
   // new process — the variable died with the old one. A child that comes back
   // unbounded could negotiate its goal at `pr` and open exactly the second PR
   // the plan's narrowing forbade.
@@ -934,6 +933,57 @@ test("a recovered child is handed its station ceiling again (2026-09-15)", async
   assert.notEqual(after.paneId, before.paneId);
   assert.equal(world.panes.get(after.paneId)!.env[STATION_CAP_ENV], "commit",
     "a restart must not widen what the child was allowed to ship");
+});
+
+test("the ceiling is counted with the PLAN's repo key, not the resolved checkout (round-2 P1)", async () => {
+  // `resolveTaskRepo` returns a `git --show-toplevel`: a plan naming a
+  // subdirectory or a symlinked path resolves SOMEWHERE ELSE. Counting the
+  // narrowing with one key and spawning from the other is how a narrowed repo
+  // hands its child an unlimited station — and the fake resolved every
+  // declared repo to itself, so nothing could catch the two being mixed up.
+  const parsed = parsePlan({
+    title: "同 repo 两任务",
+    intent: "声明的 repo 与解析结果不同",
+    deliveryStation: "pr",
+    tasks: [
+      { id: "t1", title: "A", repo: "/repo/declared" },
+      { id: "t2", title: "B", repo: "/repo/declared", execution: "parallel" },
+    ],
+  });
+  assert.ok(parsed.plan, parsed.problems.join("; "));
+  const world = makeFakeWorld({
+    plan: parsed.plan!,
+    approvePlan: true,
+    resolvableRepos: ["/repo/declared"],
+    taskRepoAliases: { "/repo/declared": "/repo/actual-toplevel" },
+  });
+  const childId = await spawnT1(world);
+  const child = world.runtime().children.find((c) => c.id === childId)!;
+  assert.equal(child.cwd, "/repo/actual-toplevel", "the child really works in the RESOLVED checkout");
+  assert.equal(world.panes.get(child.paneId)!.env[STATION_CAP_ENV], "commit",
+    "…but the narrowing is counted over the key the PLAN wrote, where both tasks live");
+});
+
+test("a recovery with NO approved snapshot gets the STRICTEST ceiling, never none (round-2 P2)", async () => {
+  // The promise is "only ever stricter than the original dispatch". `undefined`
+  // means NO ceiling — the opposite reading — and takeover-then-recover is
+  // exactly the path where the snapshot is missing, because the successor has
+  // not re-submitted the plan yet.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  const before = world.runtime().children[0]!;
+  world.saveRuntime({
+    ...world.runtime(),
+    approvedPlan: undefined,
+    approvedPlanHash: undefined,
+  });
+  world.panes.get(before.paneId)!.alive = false;
+  const recovered = await world.call("orchestrator_recover", { childId, reason: "接管后恢复" });
+  assert.equal(recovered.isError, undefined, replyText(recovered));
+  const after = world.runtime().children[0]!;
+  assert.notEqual(after.paneId, before.paneId);
+  assert.equal(world.panes.get(after.paneId)!.env[STATION_CAP_ENV], "precommit",
+    "no plan on record ⇒ no authorization ⇒ the strictest station");
 });
 
 test("attach hands back the plan, the children, the open questions and the ORPHANS", async () => {

@@ -274,6 +274,16 @@ export interface FakeWorldOptions {
    * declared repo is refused — the fake's equivalent of "not a git root").
    */
   resolvableRepos?: string[];
+  /**
+   * WHERE `resolveTaskRepo` LANDS a declared repo, when that is not the same
+   * path (round-2 P2). In production the resolver returns a `git
+   * --show-toplevel`, so a plan naming a subdirectory or a symlinked path gets
+   * a DIFFERENT string back — and the station ceiling is counted over the
+   * plan's own key (lib/orchestrator-dispatch.ts). Without this map the fake
+   * resolved every declared repo to itself, so declared and resolved could
+   * never disagree and no test could catch the two being mixed up.
+   */
+  taskRepoAliases?: Record<string, string>;
   /** Answers the PM-pane `select` (grant door 3) gives, in order. */
   selectAnswers?: string[];
   /**
@@ -432,7 +442,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     sleep: async () => { /* the fake has no latency */ },
     resolveTaskRepo: (repo) =>
       (options.resolvableRepos ?? ["/repo"]).includes(repo)
-        ? { ok: true, root: repo }
+        ? { ok: true, root: options.taskRepoAliases?.[repo] ?? repo }
         : { ok: false, reason: `fake: "${repo}" 不是已知仓库` },
     knownRepoRoots: () => ["/repo"],
     childJudgeRunning: () => false,

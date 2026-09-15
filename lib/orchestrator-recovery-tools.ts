@@ -64,7 +64,8 @@ import {
   toolReply as reply,
 } from "./orchestrator-tool-kit.ts";
 
-/** A task the plan believes is running while nothing is. */export interface OrphanTask {
+/** A task the plan believes is running while nothing is. */
+export interface OrphanTask {
   taskId: string;
   childId?: string;
   reason: string;
@@ -130,16 +131,28 @@ function recoveredTaskTitle(deps: OrchestratorDeps, taskId: string): string {
  * running (the same reading lib/orchestrator-answer-tools.ts applies when it
  * answers for the user). A snapshot that predates the fields reads as the
  * STRICTEST station and an EMPTY exemption list, which can only ever make a
- * recovered child stricter than its original, never looser.
+ * recovered child stricter than its original, never looser. NO SNAPSHOT AT ALL
+ * gets the same answer for the same reason: no approved plan means no
+ * authorization, and `undefined` ("no ceiling") would be the one reading
+ * LOOSER than the original dispatch — a list recovered before the successor
+ * re-submitted the plan is exactly that case.
  */
 function stationCapForRecoveredChild(
   deps: OrchestratorDeps,
   taskId: string,
-): DeliveryStation | undefined {
+): DeliveryStation {
   const approved = deps.runtime().approvedPlan;
-  if (!approved) return undefined;
+  // NO SNAPSHOT, NO AUTHORIZATION (round-2 P2). Reaching here means this
+  // orchestration holds no plan the user approved — a takeover whose successor
+  // has not re-submitted yet — and returning `undefined` ("no ceiling") would
+  // be the ONE reading looser than the original dispatch, which is the
+  // opposite of what this function promises. The strictest station can only
+  // cost a negotiation; it can never hand out a ship command nobody granted.
+  if (!approved) return DEFAULT_DELIVERY_STATION;
   const task = approved.tasks.find((t) => t.id === taskId);
-  if (!task) return undefined;
+  // Same rule for a task the approved snapshot does not know (the plan grew a
+  // task and has not been re-approved): no record ⇒ nothing to trust.
+  if (!task) return DEFAULT_DELIVERY_STATION;
   return effectiveRepoStation(
     {
       deliveryStation: approved.deliveryStation ?? DEFAULT_DELIVERY_STATION,
@@ -225,7 +238,8 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   const now = new Date(deps.now()).toISOString();
   // THE CEILING SURVIVES THE RESTART (2026-09-15): it lived only in the dead
   // pane's environment, and a child that comes back unbounded can negotiate a
-  // station its plan already ruled out (see stationCapForRecoveredChild).
+  // station its plan already ruled out (see stationCapForRecoveredChild —
+  // which always answers, the strictest station when nothing is on record).
   const stationCap = stationCapForRecoveredChild(deps, child.taskId);
   const opened = await openSessionPane(deps.tmux, {
     ownPane: self,
@@ -239,7 +253,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
       kind: "orchestration-child",
       orchestrationId: deps.runtime().orchestrationId,
       stateVariant: child.stateVariant ?? child.id,
-      ...(stationCap === undefined ? {} : { stationCap }),
+      stationCap,
     },
     command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
     decor: {
