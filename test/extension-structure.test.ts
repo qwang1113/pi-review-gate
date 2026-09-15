@@ -6021,7 +6021,12 @@ test("the async FAIL notice never waits for the agent to stop, and names what it
   // recomputed after it (lint:fix may have edited files), i.e. by then it can
   // already be the NEXT round's content.
   const besideAt = SRC.indexOf("function startPrecommitBeside(");
-  const beside = SRC.slice(besideAt, besideAt + 6400);
+  // The lane's whole body, bounded by the next declaration rather than by a
+  // magic character count: every rule below is about THIS function, and a
+  // window that has to grow with the comments fails for the wrong reason
+  // (round-2: a comment added INSIDE the lane pushed the notice's own call out
+  // of the 6400-character window and turned this red).
+  const beside = SRC.slice(besideAt, SRC.indexOf("function reportAsyncPrecommit(", besideAt));
   const verifiedAt = beside.indexOf("const verified = worktreeTree(root)");
   const runAt = beside.indexOf('callTool("run_precommit"');
   assert.ok(verifiedAt > 0 && runAt > verifiedAt,

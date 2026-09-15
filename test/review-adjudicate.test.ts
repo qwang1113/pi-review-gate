@@ -294,18 +294,19 @@ test("parkedReadyFate: replay needs all three ids, clear needs a failed lane, th
       laneVerdict,
     );
   }
-  // A PASS that covered OTHER content leaves it parked: the round's own content
-  // is still unverified, and the next lane is what settles it.
+  // A PASS that covered OTHER content RETIRES it too (round-2 P2): the lane has
+  // landed, so nothing will come back for this conclusion, and leaving the
+  // record behind would park the round until the next prepare — with the reply
+  // already telling the agent not to re-submit.
   assert.equal(
     parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: "other", currentTargetTree: t }),
-    "none",
-    "replaying this would record a READY nothing verified",
+    "clear",
+    "the session edited while the lane ran — that round judged a tree nobody holds",
   );
-  // A newer round replaced the target ⇒ the parked one is history, never
-  // replayed onto it.
+  // …and a newer round replaced the target: the parked one is history.
   assert.equal(
     parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: "other" }),
-    "none",
+    "clear",
   );
   // Nothing parked ⇒ nothing to do.
   assert.equal(
@@ -319,10 +320,11 @@ test("parkedReadyFate: replay needs all three ids, clear needs a failed lane, th
   );
   assert.equal(
     parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: undefined, currentTargetTree: t }),
-    "none",
+    "clear",
+    "an unreadable tree is not evidence of a match — and the lane is gone either way",
   );
   assert.equal(
     parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: undefined }),
-    "none",
+    "clear",
   );
 });

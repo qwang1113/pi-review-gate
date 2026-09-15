@@ -237,14 +237,21 @@ export function classifyReadyWithholding(input: {
  * Three outcomes, and each one is a fact about TREES rather than about the
  * passage of time:
  *
- *   - `none` — nothing is parked, or a PASS covered different content than the
- *     parked round judged (the session edited while the lane ran). The parked
- *     conclusion stays where it is: its content is still unverified, and the
- *     next lane is the one that will settle it.
- *   - `clear` — the lane came back with anything but PASS. The content the
- *     reviewer approved just failed its full lane, so there is nothing left to
- *     replay, and the failure channel is already telling the agent why — in the
- *     language of verification, not of findings.
+ *   - `none` — nothing is parked. (And ONLY that: a lane that has landed has
+ *     nothing left to come back with, so a PARKED conclusion it did not replay
+ *     is always retired — see `clear`.)
+ *   - `clear` — the parked round is retired. Three ways to get here, and they
+ *     share one reason: the lane has landed, so nothing is coming back for this
+ *     conclusion any more.
+ *       · the lane came back with anything but PASS — the content the reviewer
+ *         approved just failed its full lane;
+ *       · the PASS covered DIFFERENT content (the session edited while the lane
+ *         ran) — the parked round judged a tree nobody is holding any more;
+ *       · the gate's current review target is another round — a newer prepare
+ *         replaced it.
+ *     Leaving a parked record behind in any of those cases is what round-2 P2
+ *     caught: nothing would ever revisit it, while the reply had already told
+ *     the agent not to re-submit.
  *   - `replay` — a PASS on exactly the parked tree, while the gate's CURRENT
  *     review target is still that same round. Only here does the parked
  *     conclusion become the verdict it always was.
@@ -269,7 +276,7 @@ export function parkedReadyFate(args: {
   const parked = args.parkedTree;
   if (parked === undefined || parked === "") return "none";
   if (args.laneVerdict !== "PASS") return "clear";
-  return args.coveredTree === parked && args.currentTargetTree === parked ? "replay" : "none";
+  return args.coveredTree === parked && args.currentTargetTree === parked ? "replay" : "clear";
 }
 
 export function adjudicateReviewConclusion(input: StructuredConclusion): AdjudicatedReview {

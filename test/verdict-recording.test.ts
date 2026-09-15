@@ -278,7 +278,11 @@ test("a READY with no full-lane PASS and NO lane running is REFUSED, not held (r
 
 test("a READY that outruns its lane is HELD, and that lane's own landing replays it (2026-09-15)", async () => {
   const { repo, pi, ctx } = await preparedRepoBeforeItsLane();
-  const concluded = reportConclusion(readerIO(new Map()), reportRecord(repo, { findings: [], findingsCount: 0 }));
+  const judgeScope = { range: "deadbeef..cafebabe", kind: "incremental" };
+  const concluded = reportConclusion(
+    readerIO(new Map()),
+    reportRecord(repo, { findings: [], findingsCount: 0, scope: judgeScope }),
+  );
 
   // Start the lane the way `judge_submit` does, and record the verdict while it
   // is STILL RUNNING — the measured race (16s of review against a 34s lane,
@@ -305,6 +309,34 @@ test("a READY that outruns its lane is HELD, and that lane's own landing replays
   assert.equal(st.pendingReady, undefined, "a replayed conclusion is not left parked");
   assert.equal(st.review.verdict, "READY", "the held round lands as the READY it always was");
   assert.equal(st.rounds?.length, 1, "and joins the round history exactly as it would have");
+
+  // CONTROL — exit-goal criterion 2: the SAME conclusion recorded straight
+  // through (no hold in the way) leaves the same record. A second
+  // implementation of the recording rules is what this comparison would fail.
+  const direct = await preparedRepoBeforeItsLane();
+  await direct.pi.commands.get("gate-bypass")!.handler("fixture: control", direct.ctx);
+  const controlConclusion = reportConclusion(
+    readerIO(new Map()),
+    reportRecord(direct.repo, { findings: [], findingsCount: 0, scope: judgeScope }),
+  );
+  assert.deepEqual(controlConclusion.scope, judgeScope, "the fixture's scope must survive reportConclusion");
+  await recorders(direct.pi).recordReviewVerdict(controlConclusion, direct.repo, direct.ctx);
+  const straight = sidecar(direct.repo);
+  assert.equal(straight.review.verdict, "READY", "the control must reach READY, or it proves nothing");
+  assert.equal(st.review.verdict, straight.review.verdict);
+  assert.equal(st.review.fingerprint, straight.review.fingerprint,
+    "both bind to the reviewed TREE — not to a timestamp or a sha");
+  assert.equal(st.review.docSync, straight.review.docSync);
+  assert.deepEqual(st.rounds?.[0]?.fingerprints, straight.rounds?.[0]?.fingerprints);
+  assert.equal(st.rounds?.[0]?.verdict, straight.rounds?.[0]?.verdict);
+  assert.equal(st.rounds?.[0]?.findingsTotal, straight.rounds?.[0]?.findingsTotal);
+  // The AUDIT PAIR's judged half is where a dropped `scope` would have shown up
+  // (round-1 P2): the parked record carries it, so the replayed round states
+  // what its reviewer read, exactly as a straight one does.
+  const heldScope = st.rounds?.[0]?.scope as { reported?: unknown } | undefined;
+  const straightScope = straight.rounds?.[0]?.scope as { reported?: unknown } | undefined;
+  assert.deepEqual(heldScope?.reported, straightScope?.reported);
+  assert.deepEqual(heldScope?.reported, judgeScope, "and it is the judge's own scope, not a placeholder");
 });
 
 test("…and a round whose verification is already satisfied records its READY straight through", async () => {

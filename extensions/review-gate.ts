@@ -892,6 +892,12 @@ export default function reviewGate(pi: ExtensionAPI) {
    * 2026-09-15) can only be tested end to end by starting one; production
    * reaches this function from `judge_submit` alone, and a test calling it
    * directly grants no authority — it runs the repository's own precommit.
+   *
+   * SIDE EFFECT, since a caller has to know it (round-2 Nit): starting a lane
+   * RESETS the recorded `precommit` entry to `NOT_RUN` — that is what makes a
+   * lane "in flight" observable at all — so a test that starts one leaves the
+   * sidecar saying its verification has not run yet. Nothing reads that entry as
+   * authority; the ship gate wants a PASS on the tree it is shipping.
    */
   (pi as unknown as { __reviewGateTestSeams?: Record<string, unknown> }).__reviewGateTestSeams = {
     startFullLane: (root: string, ctx: unknown) => startPrecommitBeside(root, ctx),
@@ -6447,6 +6453,19 @@ export default function reviewGate(pi: ExtensionAPI) {
         const parked = laneState.pendingReady!;
         delete laneState.pendingReady;
         persistRepo(ctx as unknown as ExtensionContext, root);
+        if (fate === "clear" && verdict === "PASS") {
+          // A PARKED ROUND THE LANE DID NOT REPLAY IS RETIRED, NOT LEFT BEHIND
+          // (round-2 P2): the lane has landed, so nothing is coming back for
+          // this conclusion, and the reply already told the agent not to
+          // re-submit. Silent when the lane FAILED — the failure channel speaks
+          // for that content — but an abandoned hold is worth a line in the
+          // audit trail, since the only other evidence is a missing verdict.
+          log(
+            `parked READY for ${root} dropped: the lane passed ` +
+            `${coveredTree === undefined || coveredTree === "" ? "an unreadable tree" : coveredTree}, ` +
+            `which is not the parked ${parked.tree}`,
+          );
+        }
         if (fate === "replay") {
           // THE PARKED READY GETS ITS VERDICT NOW. Replayed through the SAME
           // recorder the normal order uses — the whole reason the conclusion
