@@ -477,7 +477,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（131 个模块）
+## 五、`lib/` 全量速查表（134 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -503,6 +503,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `audit-round-specs.ts` | 审计回合的**措辞半边**：四种 kind 的 spec（judge 角色、report 绑定方式、pane 标题前缀、fail-closed 与拒绝文案）+ `specForRound`（role 优先，goal/plan 靠 pending kind 分辨）。**引擎合，措辞不合** —— 合并机械部分是引擎的目的，合并句子则是另一种更糟的重构：plan 审计失败要让人去 `submit`，goal 的要去 `propose_loop_goal`。新增一种 round 只动这个文件 |
 | `background-wait.ts` | **「有没有未返回的后台 subagent」的唯一判据**（2026-09-09，事件进、按 agent id 的待完成集合出）：开始 = 工具结果含 pi-subagents 的启动措辞（`started in background … Agent ID: <id>`）、非错误、且该调用是后台的（`run_in_background` 非显式 `false`）；结束 = **只有该 agent 自己的终态信号**（`subagent-notification` 消息的 `details.id`/`others[]`，或 `get_subagent_result` 的**状态行**落在终态集 `completed`/`steered`/`aborted`/`stopped`/`error` —— 状态行锚定而非全文排除 running，正文可能引用任意字样）——**无超时、无「新一轮清空」兜底**（没终态信号就一直算在等，宁可多报 working）。子会话据此在等后台 agent 期间也报 `working`，不再被报成「停下了」 |
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交。判的是**磁盘记录的所有权**（不是进程），一切未知 fail-**closed**（时间戳读不出/在未来/写删失败一律保留 marker），回收窗 4 小时（`CONCURRENT_SESSION_WINDOW_MS`，唯一用途就在这里）。**它与 `session-exclusivity.ts`、`judge-pane.ts` 的判活为什么不可收敛成一条口径**：两处文件头各写一半，行为并排钉在 `test/liveness-criteria.test.ts`（2026-09-06 复核；同日按哲学三删掉的 `judge-session.ts` 才是真正的重复实现——它没有生产调用者） |
+| `change-baseline.ts` | 本次改动的**比较基线**（2026-09-15，dashboard 实测的死锁）：一律 `HEAD`，但仓库处于 merge（`.git/MERGE_HEAD` 存在）时把被合并的 parent 一并算作基线 —— 「不在 HEAD 里」与「是本会话新建的」只在 HEAD 是唯一 parent 时才是同一句话；实测 104 个 staged 新增**全部**来自 `main`，file-size 因此硬拦 checkpoint，而 checkpoint 是 review 的唯一入口（用户只能切 normal 绕过）。`changeBaseRefsFromMergeHeads`（纯，垃圾行不进 argv）/ `readChangeBaseRefs` / `firstBaseContaining` / `isNewInWorktree` |
 | `checkpoint-message.ts` | checkpoint 提交信息（纯函数）：把 `checkpoint` 注入 **scope** 产出合法 Conventional Commits（`type(checkpoint-<scope>)` / `type(checkpoint)` / 非 CC→`chore(checkpoint)` / 已含则幂等），并对非英文 round note 回落英文默认、丢正文（L5 自洽） |
 | `choice-dialog.ts` | **门禁唯一的提问模板**（2026-09-08）：2–4 个选项 + 一个（推荐）+ 追加行「✎ 不选，我说明原因」的构造（`choiceRows`）、校验（`validateChoice`）、解析（`parseChoice`）与渲染（`renderChoice`，注入 `ui.select`/`ui.input`，选中追加行才弹原因框）。`ask_user`、门禁每一处是/否框、两处手写 select 全走它；`ui.confirm` 已无调用点 |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
@@ -578,7 +579,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash。`planHash` 的**产出方**，因此「什么算一个 plan hash」也归它：`isPlanHash` 是那条形状规则的唯一实现，凡从 sidecar 读回授权记录的地方都用它（复制出去的授权校验只会朝放宽的方向漂移） |
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西。也是 sidecar 里那份 runtime 的**唯一净化处**：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；`withoutPlanApproval` 是「换了个新会话能继承什么」的唯一出处（登记表与 grants 留下，许可全部剥离）——写在调用点上的字段清单迟早漏掉新字段。child 记录上的 `worktree`（路径 + 分支）也是在这里净化的：它会被交给 git，所以与其它路径同等强度 |
-| `orchestrator-worktree.ts` | **一个写者一个 checkout**（2026-09-10，用户决定）：纯逻辑模块——路径/分支的**派生与反推**（`childWorktreePath` / `repoRootOfWorktree`，后者反推不出来就**拒绝**而不是猜）、创建 argv（`-b <branch> <path> HEAD`，钉在 HEAD 上而不是分支名）、三种结算（`keep` / `merge`（先 `add -A` + `commit` 提交遗留改动，再 `--no-commit --no-ff` 合入并 staged；**merge 不回收 checkout**——它只是 staged，删了它一次 `merge --abort` 就只剩 reflog，回收交给之后的 `discard`）/ `discard`）的**完整计划**（`planSettlement`，冲突路径在跑之前就定好）、以及未结算 checkout 的识别（`findOrphanWorktrees`：pane 列表读不到就**不下断言**）。git 调用在 `extensions/review-gate.ts` 侧执行 |
+| `orchestrator-worktree.ts` | **一个写者一个 checkout**（2026-09-10，用户决定）：纯逻辑模块——路径/分支的**派生与反推**（`childWorktreePath` / `repoRootOfWorktree`，后者反推不出来就**拒绝**而不是猜）、创建 argv（`-b <branch> <path> HEAD`，钉在 HEAD 上而不是分支名）、三种结算（`keep` / `merge`（先 `add -A` + `commit` 提交遗留改动，再 `--no-commit --no-ff` 合入并 staged，**最后回收 checkout 目录**——2026-09-15 用户决定：四个结算完的子会话就会在仓库旁边留下四个死目录，而分支留着（它是 `merge --abort` 的唯一回退锚，且不占磁盘）/ `discard`（目录 + 分支，对已回收的 checkout 幂等））的**完整计划**（`planSettlement`，冲突路径在跑之前就定好，且冲突时序列在 merge 那一步就断了、**绝不会**走到回收）、以及未结算 checkout 的识别（`findOrphanWorktrees`：pane 列表读不到就**不下断言**）。git 调用在 `extensions/review-gate.ts` 侧执行 |
 | `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close）并注册编排会话工具——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，answer 与 recover/attach 在各自的 `*-tools.ts`；交接工具从 2026-09-14 起**不在这里**（全会话共用的 `session_handoff`，见 `session-handoff-tools.ts`） |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块 |
 | `orchestrator-takeover.ts` | 「仓库里有别人的 plan」时的两个意图：**接管**（从盘上发现本仓库的候选 orchestration id —— sidecar 记录优先、`rg-channels/` 目录名兜底，再判定这个 id 能否被本会话采用）与**归档**（归档文件名、归档载荷、确认框文案）。两条拒绝路径（`orchestrator_plan` 的 write/submit、`orchestrator_spawn`）与两个入口（`orchestrator_attach`、`orchestrator_plan action:archive`）共用同一份判定；纯函数 + 注入式读盘 |
@@ -595,6 +596,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `precommit-tail.ts` | precommit runner 日志的实时 tail（runner 走文件而非管道） |
 | `progress-stream.ts` | 长耗时门禁工具的实时进度输出 |
 | `project-config.ts` | 每项目门禁配置 `.pi/review-gate.json` 的解析与层叠 |
+| `repo-pr-policy.ts` | **同一 repo 一个需求只出一个 PR**（2026-09-15，用户决定）：纯规则 —— 一个 repo 的任务数 ≥2 且未列进 `allowMultiplePrs` ⇒ 该 repo 的有效交付站点收窄为 `commit`（`effectiveRepoStation`），子会话提交完就停、项目经理本地合并、用户验证后再开一个 PR（实测反例：同一 repo 三个任务开了三个 PR）。`narrowedRepoStations` / `narrowedRepoLines`（批准对话框、plan 摘要与任务书渲染）、`capStationAt`（子会话 goal 协商的上界）、`STATION_CAP_ENV`（上界跨进程走环境变量 —— 那是 agent 提示词写不进去的通道）；无 fs、无时钟 |
 | `repo-resolve.ts` | 多仓解析：裁决绑定到编辑真正发生的那个仓库 |
 | `restatement.ts` | L8a 需求反述：记录（正文 + hash + 时间 + 站点，落 gate-state 而非工作区）、内容最小校验（长度 + 必须有「改之前 → 改之后」对照，接受的写法在导出的 `RESTATEMENT_CONTRAST_TOKENS` 数组里）、两处拒绝文案（含可照抄骨架，以及**真走得通的**误判出路：`ask_user` 交给用户 / `/gate-mode` 换模式——**不指向 `request_arbitration`**，工具拒绝不产生可申诉记录，去申诉只会被回绝或误裁到别的拦截并白烧配额）、确认框文案，以及工具 `propose_restatement` 的唯一注册入口 |
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
@@ -627,6 +629,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
 | `workspace-branch.ts` | 保护分支检测（main/master/dev/develop）：checkpoint 与 ship 一律拒绝（2026-09-07 起 `setup_workspace`/工作分支/squash 落地全部退役，只剩这个硬护栏；2026-09-16 起 checkpoint 不再弹确认框，直接拒） |
+| `worktree-seed.ts` | **隔离 checkout 的本地资源同步**（2026-09-15，onchain）：`git worktree add` 只复制 commit，`.pi/review-gate.json`、`.env`、`node_modules` 这些被 gitignore 的东西一律不在 —— 实测子会话读不到本仓 precommit 配置，test 步骤退化成包默认的 `yarn test`（midway 全量、143 文件失败，而改动只有 5 个文件）。清单分**复制**（`.pi/*.json` 配置与 `.pi/agents`，副本改不回主 checkout）与 **symlink**（`.env`、`.env.local`、`node_modules`，单一来源 + 不复制 GB 级目录），**每一条都要求 `git check-ignore` 确认被忽略**，否则跳过（未被忽略的路径带过去会污染 checkout 的 git status，而指纹、precommit 缓存与审查范围都读那棵树）；`.pi/` 运行态文件（state / cache / plan / tasks / judge-sessions）一律不带。`planWorktreeSeed`（纯）+ `seedWorktree`（IO，绝不抛，结果进 spawn 回执） |
 
 ---
 

@@ -92,11 +92,11 @@ export function createWorktreeArgv(repoRoot: string, childId: string): WorktreeA
  *  - `keep`    — leave it, and say so in the receipt. The default, because the
  *                work in it is often the only copy and a default that deletes
  *                is a default that eventually deletes something wanted.
- *  - `merge`   — commit the child's leftovers, then merge its branch into the
+ *  - `merge`   — commit the child's leftovers, merge its branch into the
  *                manager's checkout UNCOMMITTED (staged, so the manager sees
  *                exactly what arrived; `--no-commit --no-ff` is what makes the
- *                conflict rollback possible at all). The child's checkout is
- *                NOT reclaimed here — see `removeWorktreeArgv`.
+ *                conflict rollback possible at all), then RECLAIM the checkout
+ *                directory (the branch stays — see `reclaimWorktreeArgv`).
  *  - `discard` — remove the checkout and its branch.
  */
 export const WORKTREE_SETTLEMENTS = Object.freeze(["keep", "merge", "discard"] as const);
@@ -208,6 +208,31 @@ export function removeWorktreeArgv(repoRoot: string, childId: string): WorktreeA
 }
 
 /**
+ * Reclaim the checkout of a child whose work has JUST BEEN MERGED — the
+ * directory only, never the branch.
+ *
+ * WHY THE DIRECTORY GOES AND THE BRANCH STAYS (user decision, 2026-09-15).
+ * The manager's merge is `--no-commit --no-ff`, so the receipt the manager
+ * reads promises a way back; the branch is that way back. The merge commit
+ * does not exist yet, `git merge --abort` still has to work, and it needs the
+ * merged content to be reachable from somewhere other than the staged index —
+ * delete the branch and an `--abort` after a change of mind leaves the child's
+ * work in the reflog and nowhere else, which is the one outcome this module
+ * refuses to produce ("the work in it is often the only copy").
+ *
+ * What the user DID ask for is the pile of directories: four settled children
+ * left four `<repo>-rg-<child>` checkouts beside the repository, and the next
+ * run has to know which ones are dead. A repository's branches cost nothing
+ * and are visible in `git branch`; a checkout costs disk and is invisible.
+ *
+ * `--force`, like the discard path: a child may have left untracked build
+ * output, and a checkout that refuses to be removed is one nobody reclaims.
+ */
+export function reclaimWorktreeArgv(repoRoot: string, childId: string): WorktreeArgv {
+  return ["-C", repoRoot, "worktree", "remove", "--force", childWorktreePath(repoRoot, childId)];
+}
+
+/**
  * WHAT A SETTLEMENT OWES THE MANAGER, as a plan rather than a sequence of calls.
  *
  * Returned instead of executed so the decision — which is about the manager's
@@ -237,11 +262,18 @@ export function planSettlement(
         steps: [
           ...commitLeftoversArgv(worktreePath, taskId),
           mergeWorktreeArgv(repoRoot, childId),
+          // THE DIRECTORY GOES LAST, AND ONLY AFTER THE MERGE SUCCEEDED
+          // (2026-09-15, user decision). A failure anywhere above stops the
+          // sequence, so a conflicted merge never reaches this step — and the
+          // conflict path below needs the child's checkout exactly where it
+          // is.
+          reclaimWorktreeArgv(repoRoot, childId),
         ],
-        // Back to exactly what the manager had. The CHILD's work is untouched
-        // (its worktree and branch are still there), so a conflict costs a
-        // human decision, not the work. `--no-commit --no-ff` is what makes
-        // this possible at all — see mergeWorktreeArgv.
+        // Back to exactly what the manager had. The CHILD's BRANCH is
+        // untouched, so a conflict costs a human decision, not the work.
+        // `--no-commit --no-ff` is what makes this possible at all — see
+        // mergeWorktreeArgv — and keeping the branch (not the checkout) is
+        // what keeps it possible after the reclaim above.
         onConflict: [abortMergeArgv(repoRoot)],
       };
     case "discard":

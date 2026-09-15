@@ -333,6 +333,9 @@ import {
 } from "../lib/orchestrator-worktree.ts";
 import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
+import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "../lib/change-baseline.ts";
+import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
+import { seedWorktree } from "../lib/worktree-seed.ts";
 import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
@@ -526,6 +529,7 @@ import type { LoopGoal } from "../lib/loop-goal.ts";
 import {
   DEFAULT_DELIVERY_STATION,
   STATION_SHIP_NEXT_STEPS,
+  parseDeliveryStation,
   stationArrivalProblems,
 
   type DeliveryStation,
@@ -2450,16 +2454,42 @@ export default function reviewGate(pi: ExtensionAPI) {
           reason: String(detail ?? (error as Error).message).trim().split("\n").slice(-3).join(" "),
         };
       }
-      return { ok: true as const, path, branch };
+      // SEED IT BEFORE THE CHILD SEES IT (2026-09-15, onchain). `git worktree
+      // add` reproduces the COMMIT, and a repository's local environment is by
+      // definition not in it: the project's gate config, its `.env` and its
+      // `node_modules` are all gitignored. Measured cost of skipping this: a
+      // child whose precommit silently ran `yarn test` (the whole midway
+      // suite) instead of the repository's configured scoped jest — 143 files
+      // failing for reasons that had nothing to do with its change — while the
+      // project manager had to talk it through copying a config file by hand.
+      // lib/worktree-seed.ts owns what may be taken, and why.
+      const seeded = seedWorktree(repoRoot, path);
+      return {
+        ok: true as const,
+        path,
+        branch,
+        ...(seeded.length > 0 ? { note: seeded.join("\n") } : {}),
+      };
     },
     // SETTLE IT (2026-09-10): the manager names the fate of a finished child's
     // checkout; the git sequence is lib/orchestrator-worktree.ts's, so the
     // conflict path is decided there rather than discovered here.
     settleWorktree: ({ childId, taskId, repoRoot, settlement }) => {
       const plan = planSettlement(settlement, repoRoot, childId, taskId);
+      const worktreePath = childWorktreePath(repoRoot, childId);
       if (plan.steps.length === 0) {
-        return { ok: true, text: `worktree 保留在 ${childWorktreePath(repoRoot, childId)}（分支 ${childWorktreeBranch(childId)}）—— 没有动它` };
+        return { ok: true, text: `worktree 保留在 ${worktreePath}（分支 ${childWorktreeBranch(childId)}）—— 没有动它` };
       }
+      // IDEMPOTENT ON AN ALREADY-RECLAIMED CHECKOUT (2026-09-15). A `merge`
+      // reclaims the directory, so a SECOND settlement — or the `discard` a
+      // manager issues afterwards to take the branch away too — contains steps
+      // aimed at a directory that is already gone. `git -C <missing> add -A`
+      // answers "not a git repository", which is a fact about the path and not
+      // about the work, so those steps are DROPPED rather than reported as a
+      // failure: the branch steps and the merge itself still run.
+      const steps = existsSync(worktreePath)
+        ? plan.steps
+        : plan.steps.filter((step) => step[1] !== worktreePath);
       const run = (argv: readonly string[]): { ok: boolean; output: string } => {
         try {
           return { ok: true, output: execFileSync("git", [...argv], { cwd: repoRoot, encoding: "utf8" }).trim() };
@@ -2479,7 +2509,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // settlement over an unclean worktree directory would be lying about
       // where the work is.
       const reclamation: string[] = [];
-      for (const step of plan.steps) {
+      for (const step of steps) {
         const result = run(step);
         if (result.ok) continue;
         const sub = step[2];
@@ -2519,9 +2549,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         reclaimed: reclamation.length === 0,
         text: settlement === "merge"
           ? `已把 ${childId} 的改动合并到当前分支（**已暂存、未提交** —— 看过再 commit）。\n` +
-            `它的 worktree 与分支 \`${childWorktreeBranch(childId)}\` **先保留**：这次合并还只是 staged，` +
+            (reclamation.length === 0
+              ? `它的隔离 checkout（${worktreePath}）**已回收** —— 目录不再占地方。\n`
+              : `⚠️ 合并成功，但这个隔离 checkout 没能回收：${reclamation.join(" / ")}\n路径 ${worktreePath}。\n`) +
+            `分支 \`${childWorktreeBranch(childId)}\` **保留**：这次合并还只是 staged，` +
             `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
-            `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 回收它们 —— ` +
+            `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 连分支一起收回 —— ` +
             `那个调用对已关闭的子会话**同样有效**（它只结算 checkout，不再开门）。`
           : reclamation.length > 0
             ? `⚠️ ${childId} 的 worktree **没能回收**（工作区或分支还留着）：${reclamation.join(" / ")}\n` +
@@ -5939,7 +5972,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       if (here && isProtectedBranch(here)) {
         return {
-          content: [{ type: "text", text: `review-gate: checkpoint 拒绝 — 不能在受保护分支 ${here} 上提交（checkpoint 也是 commit）。请先切到功能分支（如 git checkout -b <branch>）再 checkpoint。` }],
+          content: [{ type: "text", text:
+            `review-gate: checkpoint 拒绝 — 不能在受保护分支 ${here} 上提交（checkpoint 也是 commit）。\n` +
+            "请先切到功能分支：`git checkout -b <type>/<slug>`，名字用英文 kebab-case 概括这次改动" +
+            "（如 `feat/aum-blacklist-purge`、`fix/auth-token-expiry`），**不要**用会话 id 或 `rg-child-…` 这类内部 handle" +
+            " —— 这个分支名会跟着 PR 走，是要给人看的。然后重新 checkpoint。" }],
           details: { committed: false },
           isError: true,
         };
@@ -6082,6 +6119,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         // oversized file blocks — an existing one gets a reminder, because it
         // grew a hundred lines at a time and forcing a rushed split at the
         // end of a task produces worse modules than the sprawl.
+        // MERGE-AWARE BASE (2026-09-15, dashboard). "Absent from HEAD" and
+        // "created by this session" are the same statement ONLY when HEAD is
+        // the sole parent. Mid-merge, HEAD is still the branch tip, so every
+        // file the OTHER side brought in looked newly created — measured: 104
+        // staged additions, all 104 present in `origin/main`, three of them
+        // over the size limit — and the checkpoint was refused with no legal
+        // way through, because the review loop needs exactly that commit. The
+        // session escaped by switching the gate off. lib/change-baseline.ts
+        // carries the full account.
+        const changeBases = readChangeBaseRefs(root);
         const sizeFacts = paths
           .filter(isSizeJudgedFile)
           .map((p) => {
@@ -6092,13 +6139,7 @@ export default function reviewGate(pi: ExtensionAPI) {
               return undefined; // deleted (or unreadable): nothing to judge
             }
             const lines = content.length === 0 ? 0 : content.replace(/\n$/, "").split("\n").length;
-            let isNew = false;
-            try {
-              execFileSync("git", ["cat-file", "-e", `HEAD:${p}`], { cwd: root, stdio: "ignore" });
-            } catch {
-              isNew = true; // not in HEAD ⇒ this change creates it
-            }
-            return { path: p, lines, isNew };
+            return { path: p, lines, isNew: isNewInWorktree(root, p, changeBases) };
           })
           .filter((f): f is { path: string; lines: number; isNew: boolean } => f !== undefined);
         const sizeCheck = fileSizeVerdict(sizeFacts);
@@ -6131,11 +6172,22 @@ export default function reviewGate(pi: ExtensionAPI) {
           } catch {
             return { blocking: [] as string[] }; // unreadable ⇒ no facts, never a block
           }
+          // THE SAME MERGE-AWARE BASE as the size gate above (2026-09-15).
+          // Mid-merge `HEAD:package.json` is the BRANCH side, so every
+          // dependency `main` added would arrive as "new" and demand a written
+          // justification for work this session never did. The first base that
+          // carries the manifest is the one to compare against — HEAD whenever
+          // HEAD has it, which is the pre-existing behaviour.
+          const manifestBase = firstBaseContaining(root, "package.json", changeBases);
           let baseText: string | undefined;
-          try {
-            const out = execFileSync("git", ["show", `HEAD:package.json`], { cwd: root, encoding: "utf8" }) as string;
-            baseText = out;
-          } catch {
+          if (manifestBase) {
+            try {
+              const out = execFileSync("git", ["show", `${manifestBase}:package.json`], { cwd: root, encoding: "utf8" }) as string;
+              baseText = out;
+            } catch {
+              baseText = undefined; // unreadable ⇒ no facts, never a block
+            }
+          } else {
             baseText = undefined; // no base (new repo / new manifest) ⇒ every key is new
           }
           const added = newDependencyNames(worktreeText, baseText);
@@ -9262,6 +9314,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     loopGoalPath: (root) => loopGoalPathIn(root),
     loopGoalRelPath: loopGoalRelPath(SESSION_STATE_VARIANT),
     findProjectAgent: (dir, name) => findProjectAgentText(dir, name),
+    // HOW FAR THIS SESSION MAY SHIP (2026-09-15). Read from the environment
+    // the DISPATCHER wrote (lib/repo-pr-policy.ts), never from anything this
+    // session's own prompt could say: a standalone loop session has no var and
+    // therefore no ceiling, an orchestration child gets the station its task
+    // was dispatched with — the plan's value, narrowed per repo. An ABSENT var
+    // is `undefined` (no ceiling), never `precommit`: those are different
+    // statements and collapsing them would silently freeze every standalone
+    // session at the strictest station.
+    stationCap: () => {
+      const raw = process.env[STATION_CAP_ENV];
+      return raw === undefined || raw.trim() === "" ? undefined : parseDeliveryStation(raw);
+    },
     // The directory is created with the file: the goal is the first thing a
     // session writes into .pi/, so its parent may not exist yet.
     writeGoalFile: (path, text) => {

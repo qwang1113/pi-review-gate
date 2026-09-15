@@ -5137,7 +5137,18 @@ test("a spawner's requested mode applies only to a clean, undecided, interactive
 test("the file-size gate runs at the CHECKPOINT, and only new files can block it", () => {
   const body = toolBodyOf("review_checkpoint");
   assert.match(body, /fileSizeVerdict\(sizeFacts\)/);
-  assert.match(body, /isNew = true/, "membership in HEAD is what makes a file new");
+  // "WHICH FILES ARE NEW" IS NOT A HEAD QUESTION ALONE (2026-09-15): mid-merge
+  // HEAD is still the branch tip, so everything the OTHER side brings in would
+  // count as this session's creation — measured: 104 staged additions, all of
+  // them main's, three of them over the limit, and the checkpoint is the only
+  // way into the review loop. The bases are read once,
+  // through the module that owns the rule.
+  assert.match(body, /const changeBases = readChangeBaseRefs\(root\)/,
+    "the comparison bases come from the merge-aware reader, not from HEAD by hand");
+  assert.match(body, /isNew: isNewInWorktree\(root, p, changeBases\)/,
+    "membership in ANY base is what makes a file NOT new");
+  assert.doesNotMatch(body, /cat-file", "-e", `HEAD:\$\{p\}`/,
+    "the HEAD-only reading is the bug this replaced");
   const blockAt = body.indexOf("sizeCheck.blocking.length > 0");
   assert.ok(blockAt > 0, "an oversized NEW file must refuse the checkpoint");
   assert.ok(body.indexOf("git\", [\"add\", \"-A\"") > blockAt,

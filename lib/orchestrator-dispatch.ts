@@ -30,6 +30,8 @@ import {
 } from "./orchestrator-pane-decor.ts";
 
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
+import { deliveryStationLine } from "./delivery-station.ts";
+import { effectiveRepoStation, narrowingReasonFor } from "./repo-pr-policy.ts";
 import { spawnAuthorization } from "./orchestrator-gate.ts";
 import { buildTakeoverRoute, discoverOrchestrations } from "./orchestrator-takeover.ts";
 import {
@@ -253,6 +255,21 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   }
   const childId = newChildId(taskId, deps.now());
   const marker = buildDeliveryMarker(taskId, deps.now());
+  // HOW FAR THIS CHILD MAY SHIP (2026-09-15, user decision). The plan's
+  // station is the outer contract; when this task's repo holds more than one
+  // task and the user did not allow that repo to split, the ceiling drops to
+  // `commit` — the work ends in a branch, the manager merges it locally, and
+  // ONE PR comes out of the combined result (lib/repo-pr-policy.ts).
+  //
+  // COMPUTED HERE, ONCE, from the repo the TASK declares — not from the
+  // worktree path, which is a directory the child happens to work in. Both the
+  // task book and the child's environment carry the same value, so the goal
+  // dialog inside the child cannot offer a station the plan already ruled out.
+  const taskRepoRoot = cwd;
+  const stationCap = effectiveRepoStation(plan!, taskRepoRoot, deps.repoRoot);
+  const stationCapReason = narrowingReasonFor(plan!, taskRepoRoot, deps.repoRoot);
+  const stationCapLine =
+    deliveryStationLine(stationCap) + (stationCapReason ? `\n上界原因：${stationCapReason}` : "");
   // ONE CHECKOUT PER WRITER (2026-09-10, user decision). A second child in the
   // same repo gets its OWN `git worktree` on its own branch, which is what
   // lets `scheduleNextTasks` stop serializing same-repo tasks. The check is on
@@ -264,7 +281,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // the isolation exists to prevent — and "we could not isolate you" is a
   // reason to wait, never a reason to share.
   const sibling = deps.runtime().children.find((c) => !c.closedAt && c.cwd === cwd);
-  let worktree: { path: string; branch: string } | undefined;
+  let worktree: { path: string; branch: string; note?: string } | undefined;
   if (sibling) {
     const isolated = deps.createWorktree?.(cwd, childId);
     if (!isolated || !isolated.ok) {
@@ -275,7 +292,11 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
         "修好 git（或先 close 掉那个 child）之后再 spawn。",
       );
     }
-    worktree = { path: isolated.path, branch: isolated.branch };
+    worktree = {
+      path: isolated.path,
+      branch: isolated.branch,
+      ...(isolated.note ? { note: isolated.note } : {}),
+    };
     cwd = isolated.path;
   }
   // CROSS-REPO FIX (2026-09-17, measured): the task file MUST land in the
@@ -285,7 +306,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // pi exited at boot, the pane died, and the delivery check found nothing.
   const written = deps.writeTaskFile(
     taskFileName(marker),
-    buildTaskDocument({ marker, taskId, title: task.title, brief }),
+    buildTaskDocument({ marker, taskId, title: task.title, brief, stationCapLine }),
     cwd,
   );
   if (!written.ok) {
@@ -307,6 +328,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
       kind: "orchestration-child",
       orchestrationId: deps.runtime().orchestrationId,
       stateVariant: childId,
+      stationCap,
     },
     // F7/F8 — the task rides in on the argv. No typing, nothing to truncate,
     // no Enter to forget. The reference is REPO-RELATIVE: the pane starts in
@@ -377,6 +399,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   return reply(
     `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动` +
     (worktree ? `（**独立 checkout**：${worktree.path}，分支 \`${worktree.branch}\`）` : "（共享主工作区）") + "。\n" +
+    (worktree?.note ? `隔离 checkout 已带上本地资源：\n${worktree.note}\n` : "") +
     `子会话工作目录（cwd）：${cwd} —— 它的 gate 绑定这个仓库，goal 也绑这里。\n` +
     `任务 ${taskId} 已置为 running，任务书已随 \`pi @${taskFileRelPath(taskFileName(marker))}\` 带进去（落盘：${written.path}）。\n` +
     `投递已核实：${opened.deliveryNote ?? "（本次没有核实项）"}。\n` +

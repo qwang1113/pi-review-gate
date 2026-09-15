@@ -530,6 +530,38 @@ test("L8a: the station the user SEES is the station recorded (both surfaces carr
   assert.equal(f.st.loopGoal?.station, "pr");
 });
 
+test("the plan's ceiling CLAMPS the station — and the user is shown the clamped one (2026-09-15)", async () => {
+  // Same-repo multi-task plans stop at `commit` so ONE PR comes out of a
+  // local merge, and that ceiling arrives as an environment fact the
+  // dispatcher wrote (lib/repo-pr-policy.ts). Clamping rather than refusing is
+  // the point: the value the user reads has to be the value that gets
+  // recorded, or the dialog asks about one contract and writes another.
+  const f = fake();
+  f.st.taskMode = "loop";
+  f.st.restatement = confirmedRestatement("pr");
+  f.deps.stationCap = () => "commit";
+  const shown: string[] = [];
+  f.deps.showToUser = (_ctx, _lead, body) => { shown.push(body); return true; };
+  const dialogs: string[] = [];
+  f.deps.askChoice = async (_ctx, spec, opts) => { dialogs.push(opts?.body ?? ""); return spec.options[0]; };
+  await recordGoalPrereview(f.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+  await doProposeLoopGoal(f.deps, { goal: GOAL, station: "pr" }, uiCtx(f), undefined);
+  assert.equal(f.st.loopGoal?.station, "commit", "the parameter asks for pr; the plan already ruled it out");
+  for (const surface of [shown[0] ?? "", dialogs[0] ?? ""]) {
+    assert.match(surface, /本轮交付站点：commit/, "what is recorded is what was read");
+    assert.match(surface, /allowMultiplePrs/, "the way to lift the ceiling is named where the user reads it");
+  }
+});
+
+test("without a ceiling nothing changes — a standalone loop session negotiates as it always did", async () => {
+  const f = fake();
+  f.st.taskMode = "loop";
+  f.st.restatement = confirmedRestatement("pr");
+  await recordGoalPrereview(f.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+  await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.equal(f.st.loopGoal?.station, "pr");
+});
+
 
 test("registration: the family registers propose_loop_goal and NOTHING else", () => {
   const f = fake();

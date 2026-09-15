@@ -153,6 +153,68 @@ test("a snapshot from BEFORE the station existed is read as the strictest one", 
   assert.equal(decideApprovalCarry(legacy, { ...plan, deliveryStation: "precommit" }).carries, true);
 });
 
+test("ALLOWING a repo to split into several PRs is authority: adding it revokes, removing it carries", () => {
+  // 2026-09-15, user decision. `allowMultiplePrs` looks like bookkeeping and is
+  // not: it decides whether a repo's children may push and open PRs of their
+  // own, or stop at `commit` so ONE PR can come out of a local merge
+  // (lib/repo-pr-policy.ts). A manager that added a repo to it between two
+  // dialogs would be handing itself publish authority the user never granted —
+  // the hole the goal audit found in the first draft of this rule.
+  const plan = fileGrainPlan();
+  const base = approved(plan);
+
+  const widened = decideApprovalCarry(base, { ...plan, allowMultiplePrs: ["/repo"] });
+  assert.equal(widened.carries, false);
+  assert.match(widened.widenings.join("\n"), /allowMultiplePrs/);
+
+  const narrowed = decideApprovalCarry(
+    approved({ ...plan, allowMultiplePrs: ["/repo"] }),
+    { ...plan, allowMultiplePrs: [] },
+  );
+  assert.equal(narrowed.carries, true, "taking the permission away needs no dialog");
+  assert.match(narrowed.amendments.join("\n"), /allowMultiplePrs/);
+
+  const unchanged = decideApprovalCarry(base, { ...plan, allowMultiplePrs: [] });
+  assert.deepEqual(unchanged.widenings, []);
+  assert.deepEqual(unchanged.amendments, []);
+});
+
+test("a snapshot from BEFORE allowMultiplePrs existed reads as the strictest list", () => {
+  const plan = { ...fileGrainPlan(), allowMultiplePrs: ["/repo"] };
+  const legacy = { ...approved(plan), allowMultiplePrs: undefined };
+  assert.equal(
+    decideApprovalCarry(legacy, plan).carries,
+    false,
+    "an approval that never named a repo cannot have allowed splitting it",
+  );
+});
+
+test("the permission SURVIVES the runtime round trip, exactly like the station", () => {
+  // `normalizeApprovedPlan` rebuilds the snapshot field by field, and a field
+  // it does not know is silently dropped — for this one that means the user's
+  // own exemption disappears and every child stops at `commit` again.
+  const plan = { ...fileGrainPlan(), deliveryStation: "pr" as const, allowMultiplePrs: ["/repo"] };
+  const runtime = normalizeRuntime({
+    orchestrationId: "orch-deadbeef-abc",
+    children: [],
+    notify: { sentAt: [], lastByKey: {} },
+    approvedPlanHash: planHash(plan),
+    approvedPlanAt: "2026-09-15T10:00:00.000Z",
+    approvedPlan: snapshotApprovedPlan(plan, planHash(plan), "2026-09-15T10:00:00.000Z"),
+  }, "orch-deadbeef-abc");
+  assert.ok(runtime, "the runtime must survive normalization for this test to mean anything");
+  assert.deepEqual(runtime.approvedPlan?.allowMultiplePrs, ["/repo"]);
+});
+
+test("the dialog the user approves says which repo is held at commit — and stays quiet once allowed", () => {
+  const plan = { ...fileGrainPlan(), deliveryStation: "pr" as const };
+  const body = buildPlanConfirmMessage(plan, "/repo");
+  assert.match(body, /同一 repo 一个需求只出一个 PR/);
+  assert.match(body, /allowMultiplePrs/, "the way to ask for the other thing is stated where the decision is made");
+  const quiet = buildPlanConfirmMessage({ ...plan, allowMultiplePrs: ["/repo"] }, "/repo");
+  assert.doesNotMatch(quiet, /只出一个 PR/);
+});
+
 test("the approved station SURVIVES the runtime round trip", () => {
   // `normalizeApprovedPlan` rebuilds the snapshot field by field, so a field
   // it does not know is silently dropped — which would make every later

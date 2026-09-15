@@ -81,6 +81,8 @@ import { judgeScratchDir } from "./judge-process.ts";
 import { JUDGE_STREAM_ENV, JUDGE_TASK_ENV } from "./judge-side.ts";
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
+import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
+import type { DeliveryStation } from "./delivery-station.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import { mkdirSync } from "node:fs";
 
@@ -120,6 +122,14 @@ export type SessionPaneRole =
       orchestrationId: string;
       /** Its OWN gate sidecar variant — also its exclusivity-guard exemption. */
       stateVariant: string;
+      /**
+       * The delivery station its task may reach (2026-09-15) — the plan's
+       * station, narrowed when its repo holds more than one task
+       * (lib/repo-pr-policy.ts). Absent for a plan that never narrowed
+       * anything and for callers that predate the field, in which case the
+       * child's own negotiation is the only ceiling.
+       */
+      stationCap?: DeliveryStation;
     }
   | {
       kind: "successor";
@@ -165,6 +175,10 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
       // Its OWN gate sidecar, so supervisor and worker never overwrite each
       // other's mode, Q&A record and unmet-gate list.
       [STATE_VARIANT_ENV]: role.stateVariant,
+      // HOW FAR THIS CHILD MAY SHIP (2026-09-15). The dispatcher computed it
+      // from the approved plan; the child's goal dialog reads it so the user
+      // is never offered a station the plan already ruled out.
+      ...(role.stationCap === undefined ? {} : { [STATION_CAP_ENV]: role.stationCap }),
     };
   }
   return { ...role.env };

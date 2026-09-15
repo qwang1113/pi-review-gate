@@ -514,12 +514,42 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    （plan 任务**必须**声明 `repo` 字段——子会话 cwd 就落在那里；2026-09-01 实测
    漏写导致子会话被开在项目经理仓库、goal 绑错、编辑被 L8 拦的死锁，写 plan 时
    强制），同一 repo 的任务由门禁
-   **各自开一个隔离 checkout**（`git worktree`，分支 `rg-child-<childId>`，由
-   `orchestrator_spawn` 在发现同 repo 已有在跑的 child 时自动创建；建不出来就
-   **拒绝启动**，不会让两个写者共用一个工作区），不同 repo 的任务本来就并行；
+   **各自开一个隔离 checkout**（`git worktree`，由 `orchestrator_spawn` 在发现
+   同 repo 已有在跑的 child 时自动创建；建不出来就**拒绝启动**，不会让两个写者
+   共用一个工作区），不同 repo 的任务本来就并行。
+
+   **建出来的 checkout 由门禁自己播种**（`lib/worktree-seed.ts`，2026-09-15，
+   onchain 实测）：`git worktree add` 只复制 commit，而 `.pi/review-gate.json`、
+   `.env`、`node_modules` 这些被 gitignore 的本地前提一律不在。后果是子会话读到
+   一个「不是它父亲规划的那个」仓库：它读不到本仓的 precommit 配置，test 步骤
+   退化成包默认的 `yarn test`（midway 全量，143 个文件失败，而它的改动只有 5 个），
+   项目经理只得手动指挥它补拷配置。现在：复制 `.pi/` 的配置类文件（`review-gate.json`、
+   `settings.json`、`subagents.json`、`agents/`），symlink `.env`、`.env.local`
+   与 `node_modules`，**每一条都先要求 `git check-ignore` 确认被忽略**（未被忽略的
+   路径带过去会污染 checkout 的 git status，而指纹、precommit 缓存与审查范围都读
+   那棵树）；`.pi/` 的运行态文件（state / cache / plan / tasks / judge-sessions）
+   一律不带。播种结果进 spawn 回执。分支名在 `TASK_GOAL_DIRECTIVE` 里**只提示**、
+   不强制：kebab-case 英文描述性名（如 `feat/aum-blacklist-purge`），不要用会话 id
+   那种内部 handle —— 实测三个 PR 的 head 分支都是 `rg-child-<sessionId>`。
+
    完工后由 `orchestrator_close({ worktree:"keep"|"merge"|"discard" })` 决定那个
-   checkout 的去向（默认 `keep`，因为里面的成果常常是唯一副本），孤儿 checkout
-   在 `orchestrator_attach` 的回执里列出、**不自行回收**。
+   checkout 的去向（默认 `keep`，因为里面的成果常常是唯一副本）；**`merge` 在合并
+   成功后自动回收那个目录**（2026-09-15，用户决定：结算过的子会话会把
+   `<repo>-rg-<child>` 越堆越多，而它们对 `git branch` 不可见），只留分支 ——
+   分支是 `git merge --abort` 的唯一回退锚且不占磁盘，确认提交后再用 `discard`
+   连分支一起收回（对已回收的目录幂等）。孤儿 checkout 在 `orchestrator_attach`
+   的回执里列出、**不自行回收**。
+
+2b. **同一个 repo 的一个需求只出一个 PR**（2026-09-15，用户决定）：plan 里同一
+   repo 有 ≥2 个任务、且该 repo 没有被写进 `allowMultiplePrs` ⇒ **该 repo 的交付
+   站点自动收窄为 `commit`**（子会话提交完就停，不 push、不开 PR），项目经理用
+   `orchestrator_close({worktree:"merge"})` 把成果本地合并，用户验证后再开**一个**
+   PR。收窄是收紧、不是扩权，按既有规则平移 plan 批准（不额外弹框），但它在 plan
+   的批准对话框、plan 摘要、子会话的反述/goal 对话框与任务书里都写明；
+   `allowMultiplePrs`（repo 绝对路径列表）是**唯一的放行入口**，把它加进 plan 属于
+   扩权、必须重新问用户，而移除只是收紧。站点上界随 spawn 走环境变量
+   `RG_STATION_CAP` 注入子会话（那是提示词写不进去的通道），子会话 goal 协商的站点
+   展示与记录都不超过它。规则只有一处实现：`lib/repo-pr-policy.ts`。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
    本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的
@@ -537,7 +567,18 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 `judge_submit` 内部的 checkpoint 步骤会拦下**本次新增**且超过
 600 行的源文件（`lib/file-size-gate.ts`）。判定发生在提交 checkpoint 那一刻，
 而不是编辑当下（那时文件还写了一半，硬拦只会逼人盲目重构），且只判源码扩展名
-——Markdown、JSON、锁文件与 fixture 不判长度。存量大文件只输出提醒 ——
+——Markdown、JSON、锁文件与 fixture 不判长度。
+
+「本次新增」的判定是 **merge 感知**的（2026-09-15，dashboard 实测的死锁）：基线是
+`HEAD` **加上** `.git/MERGE_HEAD` 里的每一个 parent。只问 `HEAD` 就等于把「不在分支
+tip 里」当成「是本会话新建的」—— 而 merge 冲突刚解决、merge commit 还没落下的那
+一刻，`HEAD` 仍然是分支 tip，于是 `main` 带进来的文件全部被算成本次新建：实测 104 个
+staged 新增全部来自 `main`，其中 3 个超过 600 行，checkpoint 被硬拦，而 checkpoint 是
+review 循环的唯一入口 —— 一条门禁自己要求的提交被门禁自己拒绝，用户只能切 `normal`
+模式绕过。同一处判定还被依赖论证检查（`package.json` 的比较基线）使用，唯一出处：
+`lib/change-baseline.ts`。
+
+存量大文件只输出提醒 ——
 近 9000 行（截至 2026-08-29）的 `extensions/review-gate.ts` 不是一次写出来的，
 是几十次「只加 100 行」累积的；收尾时硬逼着拆只会拆得更烂。
 

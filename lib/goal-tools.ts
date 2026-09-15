@@ -71,6 +71,7 @@ import {
   parseDeliveryStation,
   type DeliveryStation,
 } from "./delivery-station.ts";
+import { capStationAt } from "./repo-pr-policy.ts";
 
 /** Just enough of pi's tool context for a dialog and a transcript notice. */
 export interface GoalUiContext {
@@ -126,6 +127,17 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
   findProjectAgent(dir: string, name: string): string | undefined;
   /** Write the approved goal (creating its directory). Throws on failure. */
   writeGoalFile(path: string, text: string): void;
+  /**
+   * HOW FAR THIS SESSION MAY SHIP (2026-09-15) — the plan's ceiling for an
+   * orchestration child, read from the environment the dispatcher set
+   * (`STATION_CAP_ENV`). `undefined` means no ceiling beyond the user's own
+   * answer, which is the case for every standalone loop session.
+   *
+   * Injected rather than read from `process.env` here, for the reason every
+   * other environment fact in this module is: the rule is what has to be
+   * testable, and a test should not have to set process-wide state to ask.
+   */
+  stationCap?(): DeliveryStation | undefined;
 }
 
 // ---------- the goal audit recorder (L8b — NOT a tool) ----------
@@ -280,9 +292,32 @@ export async function doProposeLoopGoal(
   // to when they confirmed the restatement, then the strictest value. The
   // user is SHOWN it in both surfaces — a station nobody read is a contract
   // term nobody agreed to — and it is recorded beside the approval.
-  const station: DeliveryStation = isDeliveryStation(String(params.station ?? "").trim().toLowerCase())
+  const requestedStation: DeliveryStation = isDeliveryStation(String(params.station ?? "").trim().toLowerCase())
     ? parseDeliveryStation(params.station)
     : (goalSt.restatement?.station ?? parseDeliveryStation(undefined));
+  // AND ONE CEILING OVER ALL OF THEM (2026-09-15, user decision). An
+  // orchestration child's round stops where its TASK stops, and the plan may
+  // have narrowed this repo to one PR (lib/repo-pr-policy.ts). The ceiling is
+  // an environment fact the dispatcher wrote — never something a prompt could
+  // supply — and a request beyond it is CLAMPED rather than refused, because
+  // the value shown to the user has to be the value that gets recorded: a
+  // dialog asking about `pr` while the gate silently writes `commit` would be
+  // the gate lying to the person it is asking.
+  const stationCap = deps.stationCap?.();
+  const station: DeliveryStation = capStationAt(requestedStation, stationCap);
+  const capNote = stationCap !== undefined && stationCap !== requestedStation
+    ? `⚠️ 交付站点上界 ${stationCap}（不是 ${requestedStation}）：本编排的 plan 收窄了该 repo —— ` +
+      "同一 repo 的一个需求只出一个 PR，子会话提交完就停，由项目经理本地合并、用户验证后再开一个 PR。" +
+      "要分多个 PR，需要在 plan 里声明 allowMultiplePrs 并重新批准。"
+    : undefined;
+  // THE DIALOG GETS THE SHORT FORM (measured). Its body is budgeted and
+  // truncated from the TAIL: the first version of this notice ended with
+  // "declare allowMultiplePrs" — the one fact the reader can act on — and that
+  // is precisely what got cut. The transcript block above carries the full
+  // sentence; the box carries the decision.
+  const capNoteShort = stationCap !== undefined && stationCap !== requestedStation
+    ? `⚠️ 要分多个 PR 就在 plan 里写 allowMultiplePrs；否则本 repo 站点上界 ${stationCap}（非 ${requestedStation}）`
+    : undefined;
   // TWO RENDERINGS OF ONE DEFINITION: the dialog and the transcript block are
   // read by the USER ("由你自己 commit"), the tool reply by the AGENT, which
   // must not read itself as the committer (round-2 P2).
@@ -298,7 +333,7 @@ export async function doProposeLoopGoal(
     uiCtx,
     GOAL_CONFIRM_TITLE,
     buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" +
-      stationLineForUser + "\n" + prereviewLine,
+      stationLineForUser + "\n" + prereviewLine + (capNote ? "\n" + capNote : ""),
   );
   // EITHER the user or (when this session is an orchestration child) the
   // project manager may answer. The channel request carries the FULL draft
@@ -345,7 +380,8 @@ export async function doProposeLoopGoal(
       async (signal) => deps.askChoice(uiCtx, spec, {
         body: buildGoalConfirmMessage(
           goalText,
-          "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine,
+          "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine +
+            (capNoteShort ? "\n" + capNoteShort : ""),
         ),
         pointer: "（目标全文见上方消息）",
         signal,
