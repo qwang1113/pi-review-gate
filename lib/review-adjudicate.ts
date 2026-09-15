@@ -245,10 +245,21 @@ export function classifyReadyWithholding(input: {
  *     conclusion any more.
  *       · the lane came back with anything but PASS — the content the reviewer
  *         approved just failed its full lane;
- *       · the PASS covered DIFFERENT content (the session edited while the lane
- *         ran) — the parked round judged a tree nobody is holding any more;
+ *       · the PASS covered a DIFFERENT tree than the parked round judged (the
+ *         lane captured the worktree before the round's checkpoint, or the
+ *         session re-submitted in between) — the parked round is not the
+ *         content that was verified;
  *       · the gate's current review target is another round — a newer prepare
  *         replaced it.
+ *
+ *     NOTE WHAT IS **NOT** ON THAT LIST: editing the worktree while the lane
+ *     runs. It changes none of the three trees (the parked round's is the
+ *     committed one, the lane's was captured before it started), so a hold
+ *     survives it and still replays — a round-3 finding corrected an earlier
+ *     version of this comment, which claimed the opposite and thereby told the
+ *     agent to stop editing during a review, the one thing this gate wants it
+ *     to keep doing.
+ *
  *     Leaving a parked record behind in any of those cases is what round-2 P2
  *     caught: nothing would ever revisit it, while the reply had already told
  *     the agent not to re-submit.

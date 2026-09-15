@@ -301,7 +301,7 @@ test("parkedReadyFate: replay needs all three ids, clear needs a failed lane, th
   assert.equal(
     parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: "other", currentTargetTree: t }),
     "clear",
-    "the session edited while the lane ran — that round judged a tree nobody holds",
+    "the lane passed a tree the round is not — nothing to replay onto it",
   );
   // …and a newer round replaced the target: the parked one is history.
   assert.equal(

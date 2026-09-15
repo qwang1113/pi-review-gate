@@ -206,13 +206,8 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
      suite ran, or the lane's own `lint:fix` rewrote files), the notice is
      about an earlier round's snapshot — the evidence it carries is still
      worth reading against what you hold now.
-     The MIRROR case is handled for you (2026-09-15): when the reviewer
-     concludes BEFORE its lane lands, the gate HOLDS that conclusion instead
-     of refusing it — nothing is recorded while it is held, `review` stays
-     PENDING — and replays it the moment the lane PASSes on that same tree,
-     waking you with a steered notice. So a round whose content has not
-     changed is never re-submitted: A FAIL on the same content clears the
-     hold and names verification as the reason, not findings.
+     The MIRROR case — the reviewer concluding BEFORE its lane lands — is
+     handled for you (2026-09-15): see the next section.
    - **the checkpoint commit** — the only commit allowed before a READY; the
      gate stamps the checkpoint marker on the subject and records where it
      landed. The review unit is the immutable range `baseline..HEAD`.
@@ -250,9 +245,12 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
    recording BLOCKED: `review` stays PENDING and the lane's own landing decides
    it — a PASS on that same tree replays the conclusion through the same
    recorder, and you get woken with the READY. **Do not re-submit to get past
-   one**: identical content buys nothing. Editing while the lane runs voids the
-   hold (the tree it judged is gone) and a FAIL retires it through the failure
-   channel — all three endings are listed in the reply.
+   one**: identical content buys nothing. The other two endings both retire the
+   hold through the gate's own channels — a FAIL is reported as verification
+   failing, not as findings, and re-submitting (which registers a new review
+   target) supersedes it. Keep editing while the lane runs: that does NOT void
+   the hold — the held round judged a committed tree, and the gate's own ship
+   binding is what an edit invalidates, not this.
 
    Precommit still matters for two measured reasons: tests catch the cheap
    defect class the reviewer would otherwise spend minutes finding (a test
