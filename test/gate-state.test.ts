@@ -1463,7 +1463,15 @@ test("an approval in the sidecar still needs the whole blob to be readable", () 
 /** The exact shape a parked conclusion has. Reused by both tests below. */
 function parkedReady(): Record<string, unknown> {
   return {
-    conclusion: { verdict: "READY", findings: [], cwd: "/repo" },
+    conclusion: {
+      verdict: "READY",
+      findings: [],
+      cwd: "/repo",
+      // The judge's own scope stamp rides along with the conclusion (round-1 P2:
+      // dropping it made a replayed round write a different audit pair than a
+      // straight one).
+      scope: { range: "d694c07f4282..84d7cf0ae608", kind: "incremental" },
+    },
     tree: "b90212e5bfbd4e7c2aaac4e3ba5e0f6b1676053d",
     head: "6613a145e18a",
     round: 5,
@@ -1490,6 +1498,11 @@ test("isPendingReadyReview: only the exact shape is replayable", () => {
   ]) {
     assert.equal(isPendingReadyReview(bad), false, `must refuse ${JSON.stringify(bad)}`);
   }
+  // …but the carried fields are NOT checked: `scope` is stored verbatim and
+  // handed back to the same recorder, so an odd value must not cost the round
+  // its hold (the shape check exists to refuse replays the gate cannot make,
+  // not to re-audit the judge's own report).
+  assert.equal(isPendingReadyReview({ ...parked, conclusion: { ...parked.conclusion, scope: "odd" } }), true);
 });
 
 test("loadSidecar DROPS a malformed parked READY and keeps the rest of the state", () => {
