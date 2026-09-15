@@ -298,6 +298,21 @@ test("the happy path registers the reviewed range and reports it", async () => {
   const stream = String(reply.details?.stream);
   assert.match(stream, /\.pi\/review-stream\/review-[a-z0-9]+-review\.jsonl$/);
   assert.ok(existsSync(join(f.root, ".pi", "review-stream")), "the stream directory is created");
+  // THE QUALITY ROUND'S BRIEF IS BUILT IN THE SAME PASS (2026-09-15): the
+  // routing rule decides whether it is dispatched, but the task text and its
+  // own findings stream have to exist for that route to have something to
+  // send — and building them here is what keeps `git numstat` to ONE read per
+  // round. A prepare that quietly stopped producing them would make every code
+  // round un-dispatchable (the chain fails closed rather than sending a judge
+  // with no brief), so it is asserted, not assumed.
+  const qualityTask = String(reply.details?.qualityTask ?? "");
+  assert.match(qualityTask, /docs\/code-quality-rules\.md/, "the quality brief points at the checklist");
+  assert.match(qualityTask, /pppppppppppp\.\.hhhhhhhhhhhh/, "…carries the same immutable range");
+  assert.match(qualityTask, /ask_user/, "…and the scope-question rule");
+  assert.doesNotMatch(qualityTask, /Review for: correctness/, "never the functional brief");
+  const qualityStream = String(reply.details?.qualityStream ?? "");
+  assert.match(qualityStream, /\.pi\/review-stream\/review-[a-z0-9]+-quality\.jsonl$/, "its own findings stream");
+  assert.ok(existsSync(join(f.root, ".pi", "review-stream")), "…whose directory exists");
   assert.match(textOf(reply), /--- task text ---/, "the payload is delimited for the chain");
   cleanup(f);
 });
