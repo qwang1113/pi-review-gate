@@ -171,13 +171,26 @@ export function readyLacksVerification(args: {
  *     with nobody to revisit it. So this ONE reason holds the conclusion
  *     instead of refusing it (lib/gate-state.ts, `PendingReadyReview`), and the
  *     lane's own landing replays it through the normal recorder.
+ *   - `unverified-idle` is the SAME fact with nobody left to act on it: the
+ *     content has no full-lane PASS and NO lane is running that could land on
+ *     it. Holding here would park the round forever — the only thing that
+ *     clears or replays a parked conclusion is that lane's own landing — and
+ *     the reply would tell the agent not to re-submit while nothing was ever
+ *     going to arrive. So it is REFUSED like the other three (round-1 P1,
+ *     2026-09-15).
  *
  * ORDER IS THE CONTRACT. A round that is BOTH stale and unverified is refused,
  * not held: the checkpoint it judged is no longer HEAD, so a PASS on its tree
  * would bind a READY to content nobody is looking at any more. Same for a
  * READY that contradicts itself by carrying an open P0/P1.
  */
-export type ReadyWithholding = "none" | "unverified" | "stale" | "cwd-mismatch" | "blocking-finding";
+export type ReadyWithholding =
+  | "none"
+  | "unverified"
+  | "unverified-idle"
+  | "stale"
+  | "cwd-mismatch"
+  | "blocking-finding";
 
 export function classifyReadyWithholding(input: {
   /** The verdict the judge concluded, BEFORE adjudication. */
@@ -197,13 +210,23 @@ export function classifyReadyWithholding(input: {
   staleTarget: boolean;
   /** The round's content has no full-lane PASS on record. */
   lacksVerification: boolean;
+  /**
+   * Is a full lane running RIGHT NOW for this repo — i.e. is there something
+   * whose landing could still replay (or clear) a parked conclusion?
+   *
+   * This is what keeps a hold from becoming a dead end (round-1 P1): the ONLY
+   * things that revive a parked READY are the lane's own completion callback
+   * and the next round's prepare, so holding when neither is coming parks the
+   * round forever — while the reply tells the agent not to re-submit.
+   */
+  laneStillRunning: boolean;
   /** The verdict's `cwd` is not the repo this round was prepared for. */
   cwdMismatch: boolean;
 }): ReadyWithholding {
   if (input.concluded !== "READY") return "none";
   if (input.blockingFinding) return "blocking-finding";
   if (input.staleTarget) return "stale";
-  if (input.lacksVerification) return "unverified";
+  if (input.lacksVerification) return input.laneStillRunning ? "unverified" : "unverified-idle";
   if (input.cwdMismatch) return "cwd-mismatch";
   return "none";
 }

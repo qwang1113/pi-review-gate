@@ -206,6 +206,13 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
      suite ran, or the lane's own `lint:fix` rewrote files), the notice is
      about an earlier round's snapshot — the evidence it carries is still
      worth reading against what you hold now.
+     The MIRROR case is handled for you (2026-09-15): when the reviewer
+     concludes BEFORE its lane lands, the gate HOLDS that conclusion instead
+     of refusing it — nothing is recorded while it is held, `review` stays
+     PENDING — and replays it the moment the lane PASSes on that same tree,
+     waking you with a steered notice. So a round whose content has not
+     changed is never re-submitted: A FAIL on the same content clears the
+     hold and names verification as the reason, not findings.
    - **the checkpoint commit** — the only commit allowed before a READY; the
      gate stamps the checkpoint marker on the subject and records where it
      landed. The review unit is the immutable range `baseline..HEAD`.

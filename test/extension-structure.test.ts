@@ -5939,6 +5939,34 @@ test("a FAIL that arrives after dispatch is reported, and it withholds the READY
   assert.match(SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
 });
 
+test("a parked READY is replayed by the lane that lands on its tree, and retired by one that does not", () => {
+  // 2026-09-15. `parkedReadyFate` is the pure decision (three trees, three
+  // outcomes — test/review-adjudicate.test.ts). What this pins is the WIRING,
+  // because the two things that make a hold safe are structural: the replay
+  // goes through the SAME recorder the normal order uses (a second
+  // implementation of the recording rules would drift), and the agent is woken
+  // with a steered notice (this is a gate state change nobody else reports).
+  //
+  // AND THE HOLD NEEDS A LANE THAT CAN COME BACK FOR IT (round-1 P1): with no
+  // lane in flight, parking the conclusion would stop the round forever while
+  // the reply told the agent not to re-submit — the caller passes that fact in
+  // and `classifyReadyWithholding` answers `unverified-idle` (a REFUSAL).
+  assert.match(SRC, /laneStillRunning: inFlightPrecommit\?\.root === targetRoot/);
+  assert.match(SRC, /const fate = parkedReadyFate\(\{/);
+  const replayAt = SRC.indexOf('if (fate === "replay") {');
+  assert.ok(replayAt > 0, "the replay branch is here");
+  const replay = SRC.slice(replayAt, replayAt + 1800);
+  assert.match(replay, /await recordReviewVerdict\(parked\.conclusion as ReportConclusion, root, ctx\)/,
+    "the replay IS the recorder — one implementation of the recording rules");
+  assert.match(replay, /buildParkedReadyReplayNotice\(\{ round: parked\.round, tree: parked\.tree, recorded \}\)/,
+    "and the wording lives in lib/, like the failure notice beside it");
+  assert.match(replay, /deliverAs: "steer"/, "steered, not queued behind a long turn");
+  // The parked record must carry the judge's own SCOPE (round-1 P2): the
+  // recorder pairs it with the dispatched half, so a replay that lost it would
+  // write a different audit pair than a straight record of the same round.
+  assert.match(SRC, /concluded\.scope === undefined \? \{\} : \{ scope: concluded\.scope \}/);
+});
+
 test("the pass-coverage record cites the tree the lane STARTED on, never the post-run one", () => {
   // Reviewer/auditor finding (2026-09-14): the runner's fingerprint is
   // recomputed AFTER it finished (lint:fix may have edited files) and the code

@@ -172,6 +172,14 @@ export interface PendingReadyReview {
     findings: unknown[];
     cwd?: string;
     docSync?: string;
+    /**
+     * The judge's own `scope` (round-1 P2, 2026-09-15). The recorder writes it
+     * beside what the gate dispatched (`sanitizeRoundScope`), so dropping it
+     * here would make a replayed round's audit pair differ from a straight one
+     * — the exact kind of divergence "replayed through the SAME recorder" is
+     * supposed to rule out.
+     */
+    scope?: unknown;
   };
   /** The tree this round judged (from the prepared review target). */
   tree: string;

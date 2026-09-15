@@ -883,6 +883,21 @@ export default function reviewGate(pi: ExtensionAPI) {
   };
 
   /**
+   * The lane, exposed for the ONE test that needs a lane to actually be running.
+   *
+   * WHY THIS IS NOT A BACK DOOR. `startPrecommitBeside` is the gate's own
+   * background verification — the thing a checkpoint is allowed to precede
+   * (B1). A parked READY can only be revived by that lane's own landing, so the
+   * rule "never park a conclusion when no lane is running" (round-1 P1,
+   * 2026-09-15) can only be tested end to end by starting one; production
+   * reaches this function from `judge_submit` alone, and a test calling it
+   * directly grants no authority — it runs the repository's own precommit.
+   */
+  (pi as unknown as { __reviewGateTestSeams?: Record<string, unknown> }).__reviewGateTestSeams = {
+    startFullLane: (root: string, ctx: unknown) => startPrecommitBeside(root, ctx),
+  };
+
+  /**
    * The in-file bodies register through this, which keeps pi's own parameter
    * typing (the typebox schema flows into `execute`'s params) while the
    * definition goes nowhere near the model.
@@ -8676,6 +8691,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       blockingFinding: adjudicatedVerdict !== "READY",
       staleTarget,
       lacksVerification: unverified,
+      // A HOLD NEEDS SOMEONE TO COME BACK FOR IT (round-1 P1, 2026-09-15). The
+      // only two things that revive a parked conclusion are this lane's own
+      // completion callback and the next round's prepare; when the lane has
+      // ALREADY landed (or never started), holding would park the round forever
+      // while telling the agent not to re-submit. `inFlightPrecommit` is
+      // cleared in a microtask AFTER the lane's own callback has run, so a lane
+      // that is still listed here is one whose callback has not finished.
+      laneStillRunning: inFlightPrecommit?.root === targetRoot,
       cwdMismatch: cwdMismatch !== undefined,
     });
     if (withholding === "unverified") {
@@ -8684,13 +8707,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       // not a hold: a parked conclusion with nothing to bind to could never be
       // replayed into a real verdict.
       if (parkedTarget) {
-        delete st.pausedQuestion;
         st.pendingReady = {
           conclusion: {
             verdict: "READY",
             findings: (concluded.findings ?? []) as unknown[],
             ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
             ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
+            // The judge's OWN scope travels too: the recorder pairs it with the
+            // dispatched half (round-1 P2), and a replay that lost it would
+            // write a different audit pair than a straight record of the same
+            // round.
+            ...(concluded.scope === undefined ? {} : { scope: concluded.scope }),
           },
           tree: parkedTarget.tree,
           head: parkedTarget.head,

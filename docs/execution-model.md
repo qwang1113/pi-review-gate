@@ -334,11 +334,14 @@ commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而
   写入侧只认**lane 启动前**抓下的那棵树（`nextFullPassTree`，纯函数），同一棵树
   的 FAIL 会撤销它。
 
-  **降级的四个原因是分开的，而只有一个会被挂起而不是拒绝**（2026-09-15）：
+  **降级的原因是分开的，而只有一个会被挂起而不是拒绝**（2026-09-15）：
   `classifyReadyWithholding`（同一个模块，纯函数）把「为什么扣下这一轮」分成
-  `blocking-finding` / `stale` / `cwd-mismatch` / `unverified` 四类 —— 前三类是
-  **关于工作的事实**（等多久都不会变），立即记成 BLOCKED；`unverified` 是**关于
-  时间的事实**（lane 还在跑），门禁把它**挂起**：结论原样存进 sidecar 的
+  `blocking-finding` / `stale` / `cwd-mismatch` / `unverified` / `unverified-idle`
+  五类 —— 前三类是**关于工作的事实**（等多久都不会变），立即记成 BLOCKED；
+  `unverified-idle`（内容没验证，**而且现在没有任何 lane 在跑**）同样拒绝：
+  挂起只能发生在「还有东西会回来处理它」的时候 —— 回来处理挂起的只有那条 lane
+  自己的落地与下一轮的 prepare，两者都不来时把它挂起就是永久停在 PENDING，
+  而回执还叫 agent 别重跑（round-1 P1）。只有 `unverified`（lane 正在跑）才**挂起**：结论原样存进 sidecar 的
   `pendingReady`（`lib/gate-state.ts`），`review` 保持 PENDING，然后
   - lane 落 PASS 且 tree 相同 ⇒ `parkedReadyFate` 返回 `replay`，门禁把结论
     **重新交给同一个记录器**（`recordReviewVerdict`，不是第二份实现）并 steer

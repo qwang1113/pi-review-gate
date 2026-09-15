@@ -237,13 +237,26 @@ test("classifyReadyWithholding: only a fact about TIME is held; the rest are ref
     blockingFinding: false,
     staleTarget: false,
     lacksVerification: false,
+    laneStillRunning: false,
     cwdMismatch: false,
   };
   assert.equal(classifyReadyWithholding(base), "none");
-  // The one reason the gate HOLDS: the reviewer outran its full lane. Measured
-  // on this repository — 16s of review against a 34s lane, seven seconds short
-  // — and the old reading refused the round over it.
-  assert.equal(classifyReadyWithholding({ ...base, lacksVerification: true }), "unverified");
+  // The one reason the gate HOLDS: the reviewer outran its full lane, and that
+  // lane is STILL RUNNING so its landing will come back for the conclusion.
+  // Measured on this repository — 16s of review against a 34s lane, seven
+  // seconds short — and the old reading refused the round over it.
+  assert.equal(
+    classifyReadyWithholding({ ...base, lacksVerification: true, laneStillRunning: true }),
+    "unverified",
+  );
+  // THE SAME FACT WITH NOBODY LEFT TO ACT ON IT IS A REFUSAL (round-1 P1): the
+  // only things that revive a parked conclusion are that lane's landing and the
+  // next round's prepare, so holding here parks the round forever — while the
+  // reply tells the agent not to re-submit.
+  assert.equal(
+    classifyReadyWithholding({ ...base, lacksVerification: true, laneStillRunning: false }),
+    "unverified-idle",
+  );
   // The three that are facts about the WORK, not about time.
   assert.equal(classifyReadyWithholding({ ...base, staleTarget: true }), "stale");
   assert.equal(classifyReadyWithholding({ ...base, cwdMismatch: true }), "cwd-mismatch");
@@ -252,9 +265,12 @@ test("classifyReadyWithholding: only a fact about TIME is held; the rest are ref
   // ORDER IS THE CONTRACT. A round that is both stale and unverified is
   // REFUSED, not held: the checkpoint it judged is gone, so a PASS on its tree
   // would bind a READY to content nobody is looking at any more.
-  assert.equal(classifyReadyWithholding({ ...base, staleTarget: true, lacksVerification: true }), "stale");
   assert.equal(
-    classifyReadyWithholding({ ...base, blockingFinding: true, lacksVerification: true }),
+    classifyReadyWithholding({ ...base, staleTarget: true, lacksVerification: true, laneStillRunning: true }),
+    "stale",
+  );
+  assert.equal(
+    classifyReadyWithholding({ ...base, blockingFinding: true, lacksVerification: true, laneStillRunning: true }),
     "blocking-finding",
   );
   // A BLOCKED conclusion is never withheld — there is nothing to hold.
