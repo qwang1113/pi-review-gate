@@ -24,12 +24,13 @@
  * classified into exactly one of:
  *
  *   - a WIDENING — a new task, a task's `repo` changed, a dependency removed,
- *     serial→parallel, a higher `maxParallel`, a raised `deliveryStation`. Any
- *     single one of these revokes the approval, and the user is asked again.
+ *     serial→parallel, a higher `maxParallel`, a raised `deliveryStation`, a
+ *     repo ADDED to `allowMultiplePrs`. Any single one of these revokes the
+ *     approval, and the user is asked again.
  *   - an AMENDMENT — a task dropped, a dependency ADDED (more serial, never
- *     less), parallel→serial, a lower `maxParallel`, a lowered station. The
- *     approval carries over, and the amendment is recorded so the change is
- *     never silent.
+ *     less), parallel→serial, a lower `maxParallel`, a lowered station, a
+ *     repo REMOVED from `allowMultiplePrs`. The approval carries over, and
+ *     the amendment is recorded so the change is never silent.
  *
  * WHAT IS NO LONGER HERE (2026-09-17, user decision). The FILE-BOUNDARY
  * algebra used to be the bulk of this comparison: a new path inside an
@@ -84,6 +85,17 @@ export interface ApprovedPlanSnapshot {
    * like less of one.
    */
   deliveryStation?: DeliveryStation;
+  /**
+   * The repos the user allowed to open more than one PR (2026-09-15).
+   *
+   * Optional for the same reason `deliveryStation` is: a runtime written
+   * before the field existed has none, and a MISSING list is read as EMPTY —
+   * the strictest reading — so an old approval can only make the next edit
+   * look like a widening (a repo "newly" allowed to split), never like less
+   * of one. That direction is the whole point: allowing a split is authority
+   * the user grants, never something an orchestrator discovers.
+   */
+  allowMultiplePrs?: string[];
   tasks: ApprovedTaskSnapshot[];
 }
 
@@ -98,6 +110,7 @@ export function snapshotApprovedPlan(
     at,
     maxParallel: plan.maxParallel,
     deliveryStation: plan.deliveryStation,
+    allowMultiplePrs: [...plan.allowMultiplePrs],
     tasks: plan.tasks.map((task) => ({
       id: task.id,
       dependsOn: [...task.dependsOn],
@@ -154,6 +167,26 @@ export function decideApprovalCarry(
     widenings.push(`交付站点从 ${approvedStation} 提到 ${next.deliveryStation}（放开了更多 ship 命令）`);
   } else if (approvedStation !== next.deliveryStation) {
     amendments.push(`交付站点从 ${approvedStation} 收紧到 ${next.deliveryStation}`);
+  }
+
+  // ALLOWING A REPO TO SPLIT INTO SEVERAL PRs IS AUTHORITY TOO (2026-09-15,
+  // user decision). The field looks like bookkeeping and is not: it decides
+  // whether a repo's children may push and open PRs of their own or stop at
+  // `commit` for a local merge (lib/repo-pr-policy.ts). So the same asymmetry
+  // as the station applies — ADDING a repo hands out publish authority and
+  // revokes the approval, REMOVING one takes that authority back and carries.
+  // A snapshot with no list at all reads as empty, so an approval predating
+  // the field can only ever be asked about again.
+  const approvedAllow = new Set(approved.allowMultiplePrs ?? []);
+  const nextAllow = new Set(next.allowMultiplePrs);
+  const newlyAllowed = [...nextAllow].filter((repo) => !approvedAllow.has(repo));
+  if (newlyAllowed.length > 0) {
+    widenings.push(
+      `allowMultiplePrs 新增了 ${newlyAllowed.join("、")} —— 该 repo 的任务从此可以各自开 PR（放开了发布面）`,
+    );
+  }
+  for (const repo of [...approvedAllow].filter((entry) => !nextAllow.has(entry))) {
+    amendments.push(`allowMultiplePrs 移除了 ${repo}（该 repo 回到「一个需求只出一个 PR」）`);
   }
 
 

@@ -52,6 +52,8 @@ import {
   findChild,
   type OrchestratorRuntime,
 } from "./orchestrator-registry.ts";
+import { DEFAULT_DELIVERY_STATION, type DeliveryStation } from "./delivery-station.ts";
+import { effectiveRepoStation, taskRepoOf } from "./repo-pr-policy.ts";
 import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
 import {
   alivePanes,
@@ -111,6 +113,55 @@ export function detectOrphans(
 function recoveredTaskTitle(deps: OrchestratorDeps, taskId: string): string {
   const { plan } = currentPlan(deps);
   return plan?.tasks.find((task) => task.id === taskId)?.title ?? taskId;
+}
+
+/**
+ * The station ceiling a RE-OPENED child must be handed again (2026-09-15).
+ *
+ * A recovered pane is a NEW process: the ceiling the dispatcher wrote into the
+ * original pane's environment died with it. Without this, a child whose repo
+ * the plan narrowed to `commit` would come back with no upper bound at all and
+ * could negotiate a goal at `pr` — able to push and open exactly the second PR
+ * the user forbade.
+ *
+ * RECOMPUTED, not stored: the registry is not a place for derived state, and
+ * the rule has one implementation (lib/repo-pr-policy.ts). The facts come from
+ * the APPROVED snapshot, never from the plan file — an edited-but-unapproved
+ * plan must not be able to raise the ceiling of a child that is already
+ * running (the same reading lib/orchestrator-answer-tools.ts applies when it
+ * answers for the user). A snapshot that predates the fields reads as the
+ * STRICTEST station and an EMPTY exemption list, which can only ever make a
+ * recovered child stricter than its original, never looser. NO SNAPSHOT AT ALL
+ * gets the same answer for the same reason: no approved plan means no
+ * authorization, and `undefined` ("no ceiling") would be the one reading
+ * LOOSER than the original dispatch — a list recovered before the successor
+ * re-submitted the plan is exactly that case.
+ */
+function stationCapForRecoveredChild(
+  deps: OrchestratorDeps,
+  taskId: string,
+): DeliveryStation {
+  const approved = deps.runtime().approvedPlan;
+  // NO SNAPSHOT, NO AUTHORIZATION (round-2 P2). Reaching here means this
+  // orchestration holds no plan the user approved — a takeover whose successor
+  // has not re-submitted yet — and returning `undefined` ("no ceiling") would
+  // be the ONE reading looser than the original dispatch, which is the
+  // opposite of what this function promises. The strictest station can only
+  // cost a negotiation; it can never hand out a ship command nobody granted.
+  if (!approved) return DEFAULT_DELIVERY_STATION;
+  const task = approved.tasks.find((t) => t.id === taskId);
+  // Same rule for a task the approved snapshot does not know (the plan grew a
+  // task and has not been re-approved): no record ⇒ nothing to trust.
+  if (!task) return DEFAULT_DELIVERY_STATION;
+  return effectiveRepoStation(
+    {
+      deliveryStation: approved.deliveryStation ?? DEFAULT_DELIVERY_STATION,
+      ...(approved.allowMultiplePrs === undefined ? {} : { allowMultiplePrs: approved.allowMultiplePrs }),
+      tasks: approved.tasks,
+    },
+    taskRepoOf(task, deps.repoRoot),
+    deps.repoRoot,
+  );
 }
 
 async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
@@ -185,6 +236,11 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   const self = deps.ownPane();
   if (!self) return fail("review-gate: 读不到自己的 pane（$TMUX_PANE），无法开新 pane。");
   const now = new Date(deps.now()).toISOString();
+  // THE CEILING SURVIVES THE RESTART (2026-09-15): it lived only in the dead
+  // pane's environment, and a child that comes back unbounded can negotiate a
+  // station its plan already ruled out (see stationCapForRecoveredChild —
+  // which always answers, the strictest station when nothing is on record).
+  const stationCap = stationCapForRecoveredChild(deps, child.taskId);
   const opened = await openSessionPane(deps.tmux, {
     ownPane: self,
     cwd: child.cwd,
@@ -197,6 +253,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
       kind: "orchestration-child",
       orchestrationId: deps.runtime().orchestrationId,
       stateVariant: child.stateVariant ?? child.id,
+      stationCap,
     },
     command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
     decor: {

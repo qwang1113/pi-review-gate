@@ -42,6 +42,7 @@ import {
   type DeliveryStation,
   type StationAudience,
 } from "./delivery-station.ts";
+import { narrowedRepoLines, normalizeRepoPath } from "./repo-pr-policy.ts";
 
 /** Repo-root-relative location of the plan (gate-excluded via `.pi/`). */
 export const PLAN_RELPATH = ".pi/orchestrator-plan.json";
@@ -120,6 +121,22 @@ export interface OrchestratorPlan {
    * change the user is asked about again.
    */
   deliveryStation: DeliveryStation;
+  /**
+   * REPOS WHOSE TASKS MAY EACH OPEN THEIR OWN PR (2026-09-15, user decision).
+   *
+   * The default — an empty list — is the rule: a requirement that lands in one
+   * repository comes out as ONE pull request, so a repo holding more than one
+   * task has its station narrowed to `commit` and the manager merges locally
+   * before anything is published (lib/repo-pr-policy.ts). Measured need: three
+   * tasks in one repo shipped three PRs (#1217/#1218/#1219) and the user had
+   * to close them and ask for a single combined branch.
+   *
+   * Splitting is the USER's call, never the orchestrator's, which is why the
+   * list is approved content: it is part of {@link canonicalPlanText}, and
+   * ADDING a repo to it is a widening that revokes the approval
+   * (lib/orchestrator-plan-approval.ts) — removing one only narrows.
+   */
+  allowMultiplePrs: string[];
   updatedAt: string;
 }
 
@@ -290,6 +307,17 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
     // to fix (a missing repo, a dependency cycle), never over a field
     // whose safe reading is the strictest one.
     deliveryStation: parseDeliveryStation(obj.deliveryStation),
+    // Read leniently (a non-array or junk entries degrade to the empty list,
+    // the STRICT reading) and normalized so that a trailing slash cannot make
+    // the same repository look like two. Duplicates collapse: this list is a
+    // set of permissions, not a log.
+    allowMultiplePrs: [
+      ...new Set(
+        asStringArray(obj.allowMultiplePrs)
+          .map((entry) => normalizeRepoPath(entry))
+          .filter((entry) => entry.length > 0),
+      ),
+    ],
     updatedAt: asString(obj.updatedAt) || now,
   };
   return { ok: problems.length === 0, plan: problems.length === 0 ? plan : undefined, problems };
@@ -579,6 +607,10 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
     // The delivery station IS approved content: `pr` grants the orchestration
     // the authority to publish, which nobody may hand it silently.
     deliveryStation: plan.deliveryStation,
+    // SORTED, so reordering the list is not a content change that revokes an
+    // approval nobody meant to touch. The PERMISSIONS are what the user
+    // signed; the order they happen to be written in grants nothing.
+    allowMultiplePrs: [...plan.allowMultiplePrs].sort(),
     tasks: plan.tasks.map((t) => ({
       id: t.id,
       title: t.title,
@@ -624,6 +656,12 @@ export function formatPlanSummary(
     deliveryStationLine(plan.deliveryStation, audience),
     "",
   ];
+  // THE NARROWING IS STATED WHERE THE STATION IS (2026-09-15). A plan that
+  // says `pr` while every child in it can only reach `commit` would be a
+  // contract the user cannot read: they would approve "到 PR" and then watch
+  // every child stop short by a rule nobody showed them. The lines come from
+  // the ONE implementation of the rule (lib/repo-pr-policy.ts), never a copy.
+  lines.push(...narrowedRepoLines(plan, repoRoot));
   for (const t of plan.tasks) {
     const deps = t.dependsOn.length ? ` ← ${t.dependsOn.join(", ")}` : "";
     lines.push(

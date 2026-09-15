@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 
 import {
   adjudicateReviewConclusion,
+  classifyReadyWithholding,
   fileFindingsFrom,
   findingFingerprint,
   normalizeConcludedVerdict,
+  parkedReadyFate,
   readyLacksVerification,
   severityFindingsFrom,
   type ReviewFinding,
@@ -225,4 +227,110 @@ test("the round's OWN tree counts as evidence, because the live binding is desig
   );
   // And an old caller (neither field) behaves exactly as before.
   assert.equal(readyLacksVerification({ precommitVerdict: "NOT_RUN", bypassActive: false }), true);
+});
+
+// ---- holding a READY instead of refusing it (2026-09-15) ----
+
+test("classifyReadyWithholding: only a fact about TIME is held; the rest are refused", () => {
+  const base = {
+    concluded: "READY",
+    blockingFinding: false,
+    staleTarget: false,
+    lacksVerification: false,
+    laneStillRunning: false,
+    cwdMismatch: false,
+  };
+  assert.equal(classifyReadyWithholding(base), "none");
+  // The one reason the gate HOLDS: the reviewer outran its full lane, and that
+  // lane is STILL RUNNING so its landing will come back for the conclusion.
+  // Measured on this repository — 16s of review against a 34s lane, seven
+  // seconds short — and the old reading refused the round over it.
+  assert.equal(
+    classifyReadyWithholding({ ...base, lacksVerification: true, laneStillRunning: true }),
+    "unverified",
+  );
+  // THE SAME FACT WITH NOBODY LEFT TO ACT ON IT IS A REFUSAL (round-1 P1): the
+  // only things that revive a parked conclusion are that lane's landing and the
+  // next round's prepare, so holding here parks the round forever — while the
+  // reply tells the agent not to re-submit.
+  assert.equal(
+    classifyReadyWithholding({ ...base, lacksVerification: true, laneStillRunning: false }),
+    "unverified-idle",
+  );
+  // The three that are facts about the WORK, not about time.
+  assert.equal(classifyReadyWithholding({ ...base, staleTarget: true }), "stale");
+  assert.equal(classifyReadyWithholding({ ...base, cwdMismatch: true }), "cwd-mismatch");
+  assert.equal(classifyReadyWithholding({ ...base, blockingFinding: true }), "blocking-finding");
+
+  // ORDER IS THE CONTRACT. A round that is both stale and unverified is
+  // REFUSED, not held: the checkpoint it judged is gone, so a PASS on its tree
+  // would bind a READY to content nobody is looking at any more.
+  assert.equal(
+    classifyReadyWithholding({ ...base, staleTarget: true, lacksVerification: true, laneStillRunning: true }),
+    "stale",
+  );
+  assert.equal(
+    classifyReadyWithholding({ ...base, blockingFinding: true, lacksVerification: true, laneStillRunning: true }),
+    "blocking-finding",
+  );
+  // A BLOCKED conclusion is never withheld — there is nothing to hold.
+  assert.equal(classifyReadyWithholding({ ...base, concluded: "BLOCKED" }), "none");
+});
+
+test("parkedReadyFate: replay needs all three ids, clear needs a failed lane, the rest is 'leave it'", () => {
+  const t = "9f2c";
+  // All three agree ⇒ the held round becomes the verdict it always was.
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: t }),
+    "replay",
+  );
+  // A lane that came back with anything but PASS retires the parked round: its
+  // content is now known bad, and the failure channel already says so in the
+  // language of verification.
+  for (const laneVerdict of ["FAIL", "no verdict", "ERROR"]) {
+    assert.equal(
+      parkedReadyFate({ parkedTree: t, laneVerdict, coveredTree: undefined, currentTargetTree: t }),
+      "clear",
+      laneVerdict,
+    );
+  }
+  // A PASS that covered OTHER content RETIRES it too (round-2 P2): the lane has
+  // landed, so nothing will come back for this conclusion, and leaving the
+  // record behind would park the round until the next prepare — with the reply
+  // already telling the agent not to re-submit.
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: "other", currentTargetTree: t }),
+    "clear",
+    "the lane passed a tree the round is not — nothing to replay onto it",
+  );
+  // …and a newer round replaced the target: the parked one is history.
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: "other" }),
+    "clear",
+  );
+  // Nothing parked ⇒ nothing to do.
+  assert.equal(
+    parkedReadyFate({ parkedTree: undefined, laneVerdict: "PASS", coveredTree: t, currentTargetTree: t }),
+    "none",
+  );
+  // An EMPTY id is unknown, not equal — the fail-closed direction.
+  assert.equal(
+    parkedReadyFate({ parkedTree: "", laneVerdict: "PASS", coveredTree: "", currentTargetTree: "" }),
+    "none",
+  );
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: undefined, currentTargetTree: t }),
+    "clear",
+    "an unreadable tree is not evidence of a match — and the lane is gone either way",
+  );
+  assert.equal(
+    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: undefined }),
+    "clear",
+  );
+  // A WORKTREE EDIT IS NOT AN INPUT, deliberately: it moves none of these three
+  // trees (the parked round's is the committed one, the lane's was captured
+  // before it started), so there is nothing for a caller to pass in. The fix to
+  // `docs/execution-model.md` and the skill (round-3 P2) was exactly this
+  // confusion — the first wording told agents not to edit during a review,
+  // which is the opposite of what this gate wants.
 });

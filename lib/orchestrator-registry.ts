@@ -542,6 +542,17 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
   // STRICTEST station — the fail-closed direction (it can only cost a dialog).
   const deliveryStation = isDeliveryStation(obj.deliveryStation) ? obj.deliveryStation : undefined;
 
+  // The repos allowed to split into several PRs (2026-09-15). Same argument as
+  // the station one line up: the permission decides whether a repo's children
+  // may push and open PRs of their own or stop at `commit` for a local merge
+  // (lib/repo-pr-policy.ts), so a round trip that dropped it would make the
+  // user's own exemption vanish and every child stop short. A runtime written
+  // before the field existed simply has none, and an EMPTY list is the strict
+  // reading the carry check wants — the same fail-closed direction.
+  const allowMultiplePrs = Array.isArray(obj.allowMultiplePrs)
+    ? obj.allowMultiplePrs.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    : undefined;
+
   const tasks: ApprovedPlanSnapshot["tasks"] = [];
   for (const entry of obj.tasks) {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return undefined;
@@ -562,7 +573,14 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     const repo = typeof task.repo === "string" && task.repo.length > 0 ? task.repo : undefined;
     tasks.push({ id, dependsOn, execution, ...(repo ? { repo } : {}) });
   }
-  return { hash: snapshotHash, at, maxParallel, tasks, ...(deliveryStation ? { deliveryStation } : {}) };
+  return {
+    hash: snapshotHash,
+    at,
+    maxParallel,
+    tasks,
+    ...(deliveryStation ? { deliveryStation } : {}),
+    ...(allowMultiplePrs !== undefined && allowMultiplePrs.length > 0 ? { allowMultiplePrs } : {}),
+  };
 }
 
 /** How many amendment entries are kept — enough to explain, bounded on purpose. */

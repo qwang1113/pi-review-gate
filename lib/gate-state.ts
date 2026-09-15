@@ -138,6 +138,83 @@ export interface RoundRecord {
 
 }
 
+/**
+ * A READY review the gate is HOLDING until its content's full-lane precommit
+ * lands (2026-09-15).
+ *
+ * WHY THE GATE HOLDS INSTEAD OF REFUSING. `judge_submit` runs the full
+ * precommit BESIDE the review rather than in front of it (B1, 2026-09-10), so a
+ * fast reviewer can conclude before the suite is done — measured on this
+ * repository (PR #62, round 4): a three-line incremental round concluded in
+ * 16s against a 34s full lane, seven seconds short. The old reading wrote that
+ * as BLOCKED, permanently, and precommit PASSed seven seconds later with
+ * nobody to revisit it: the agent was told to "fix ALL findings and re-review"
+ * on a round whose only finding was a Nit saying nothing had changed, and its
+ * only way forward was a whole extra review of byte-identical content.
+ *
+ * The rule itself is right — content that never passed the full lane must not
+ * be recorded READY — but "we do not know yet" is not "it failed". So the
+ * conclusion is parked here VERBATIM and the lane's own landing revisits it:
+ * a PASS on this tree replays the conclusion through the SAME recorder (there
+ * is one implementation of "record a READY"), a non-PASS clears it and the
+ * failure channel says why. While it is parked `review` stays PENDING, so
+ * nothing can ship on it and no reader sees a verdict that was never made.
+ *
+ * WHY THE WHOLE CONCLUSION AND NOT A FLAG: the replay has to produce exactly
+ * what the normal order would have produced (findings count, fingerprints,
+ * docSync attestation, cwd check), and re-deriving any of those from a summary
+ * would be a second implementation of the recording rules.
+ */
+export interface PendingReadyReview {
+  /** The reviewer's conclusion, exactly as it arrived — replayed verbatim. */
+  conclusion: {
+    verdict: string;
+    findings: unknown[];
+    cwd?: string;
+    docSync?: string;
+    /**
+     * The judge's own `scope` (round-1 P2, 2026-09-15). The recorder writes it
+     * beside what the gate dispatched (`sanitizeRoundScope`), so dropping it
+     * here would make a replayed round's audit pair differ from a straight one
+     * — the exact kind of divergence "replayed through the SAME recorder" is
+     * supposed to rule out.
+     */
+    scope?: unknown;
+  };
+  /** The tree this round judged (from the prepared review target). */
+  tree: string;
+  /** The HEAD at record time — the commit the READY will bind to. */
+  head: string;
+  /** The round it belongs to (1-based, for the notice). */
+  round: number;
+  /** When the reviewer concluded. */
+  at: string;
+}
+
+/**
+ * Is this really a parked conclusion? Fail-closed: anything that is not the
+ * exact shape is DROPPED by {@link loadSidecar} rather than replayed.
+ *
+ * A parked READY is replayed through the normal recorder, so a forged or
+ * half-written record would be a forged verdict — the one thing the sidecar's
+ * other shape checks exist to prevent. Only `READY` is ever parked (the other
+ * withholding reasons refuse the round outright), which is why the verdict
+ * field is checked for that exact value.
+ */
+export function isPendingReadyReview(raw: unknown): raw is PendingReadyReview {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+  const record = raw as Record<string, unknown>;
+  const detail = record.conclusion;
+  if (typeof detail !== "object" || detail === null || Array.isArray(detail)) return false;
+  const conclusion = detail as Record<string, unknown>;
+  if (conclusion.verdict !== "READY") return false;
+  if (!Array.isArray(conclusion.findings)) return false;
+  return typeof record.tree === "string" && record.tree.length > 0 &&
+    typeof record.head === "string" && record.head.length > 0 &&
+    typeof record.at === "string" && record.at.length > 0 &&
+    typeof record.round === "number" && Number.isFinite(record.round);
+}
+
 export interface GateState {
   schema: 1;
   /**
@@ -231,6 +308,15 @@ export interface GateState {
      */
     docSync?: DocSyncAttestation;
   };
+  /**
+   * The READY the gate is holding until its verification lands (2026-09-15).
+   *
+   * Absent is the normal state: it exists only in the window between a
+   * reviewer concluding faster than its full lane and that lane landing. While
+   * it is set, `review` stays PENDING — nothing ships on a verdict that has
+   * not been made yet.
+   */
+  pendingReady?: PendingReadyReview;
   /**
    * The last READY review's git tree and the files it covered.
    *
@@ -689,6 +775,14 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     // precommit verdict) must be rejected so it can't slip past the if-else
     // chain in unmetRequirements and fail-open.
     if (!parsed.review || !GATE_VERDICTS.has(parsed.review.verdict as string)) return undefined;
+    // THE PARKED READY (2026-09-15). Optional, and a malformed one is DROPPED
+    // rather than rejecting the sidecar: dropping is the fail-closed direction
+    // here (a parked conclusion that cannot be replayed is one the gate must
+    // not replay), and `review` stays PENDING either way — so the worst case
+    // is a round that has to be re-submitted, never a replayed forgery.
+    if (parsed.pendingReady !== undefined && !isPendingReadyReview(parsed.pendingReady)) {
+      delete parsed.pendingReady;
+    }
     if (!parsed.precommit || !PRECOMMIT_VERDICTS.has(parsed.precommit.verdict as string)) return undefined;
     // Lane metadata. A forged/unknown value is DROPPED rather than rejecting
     // the sidecar, and dropping is the fail-closed direction: an absent

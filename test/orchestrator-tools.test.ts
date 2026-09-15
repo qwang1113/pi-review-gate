@@ -32,6 +32,8 @@ import { parsePlan } from "../lib/orchestrator-plan.ts";
 import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
 import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
+import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
+import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
 
 /**
  * A crosscheck that PASSES the structure check, for the tests that are about
@@ -239,6 +241,28 @@ test("a task declaring an unresolvable repo is REFUSED, never silently falling b
   assert.equal(world.plan()!.tasks.find((t) => t.id === "t1")!.status, "pending", "the task stays pending");
 });
 
+test("the ONLY way out of the one-PR rule is ON THE TOOL SURFACE (round-1 P1)", () => {
+  // Three surfaces tell the reader to "put the repo into allowMultiplePrs and
+  // re-approve" — the plan approval dialog, the child's task book and its goal
+  // dialog — and the gate narrows to `commit` by DEFAULT. A field the planner
+  // cannot send is not a way out of anything, and the first version of this
+  // rule shipped exactly that: the field existed in the plan parser and in the
+  // approval algebra, and nowhere an agent could reach it.
+  const world = makeFakeWorld();
+  const specs = new Map<string, { description: string; parameters: { properties?: Record<string, unknown> } }>();
+  registerOrchestratorStateTools(
+    { registerTool: (definition) => { specs.set(definition.name, definition as never); } },
+    world.deps,
+  );
+  const plan = specs.get("orchestrator_plan")!;
+  const planProps = plan.parameters.properties?.['plan'] as { properties?: Record<string, unknown> } | undefined;
+  assert.ok(planProps?.properties?.['allowMultiplePrs'],
+    "the plan object must accept allowMultiplePrs — otherwise the refusal points at a surface that does not exist");
+  assert.match(plan.description, /allowMultiplePrs/,
+    "and the tool that writes plans must SAY so: it is the only reader of that description");
+  assert.match(plan.description, /ONE PR/, "the rule itself is stated where plans are written");
+});
+
 test("a task WITHOUT a repo declaration still spawns in the orchestrator's own repo", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);
@@ -246,6 +270,45 @@ test("a task WITHOUT a repo declaration still spawns in the orchestrator's own r
   assert.equal(child.cwd, "/repo", "no repo declared ⇒ the orchestrator's own repo");
   const pane = world.panes.get(child.paneId)!;
   assert.equal(pane.cwd, "/repo");
+});
+
+test("the child's ceiling is the NARROWED station — in its environment AND in its task book (2026-09-15)", async () => {
+  // One requirement, two tasks, one repo, plan at `pr`: the user gets ONE PR
+  // out of a local merge (lib/repo-pr-policy.ts), so EVERY child in that repo
+  // stops at `commit`. The ceiling rides the environment because that is the
+  // one channel the child's own prompt cannot write, and the task book states
+  // it where the child reads before negotiating its goal.
+  const parsed = parsePlan({
+    title: "同 repo 两任务",
+    intent: "验证站点上界",
+    deliveryStation: "pr",
+    tasks: [
+      { id: "t1", title: "A", repo: "/repo" },
+      { id: "t2", title: "B", repo: "/repo", execution: "parallel" },
+    ],
+  });
+  assert.ok(parsed.plan, parsed.problems.join("; "));
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true, resolvableRepos: ["/repo"] });
+  const childId = await spawnT1(world);
+  const child = world.runtime().children.find((c) => c.id === childId)!;
+  assert.equal(world.panes.get(child.paneId)!.env[STATION_CAP_ENV], "commit");
+  const doc = [...world.scratch.values()].join("\n");
+  assert.match(doc, /本轮交付站点：commit/);
+  assert.match(doc, /allowMultiplePrs/, "the way out is named where the child (and its user) reads it");
+});
+
+test("a single-task repo keeps the plan's station — the ceiling is not a blanket downgrade", async () => {
+  const parsed = parsePlan({
+    title: "单任务",
+    intent: "验证站点上界",
+    deliveryStation: "pr",
+    tasks: [{ id: "t1", title: "A", repo: "/repo" }],
+  });
+  assert.ok(parsed.plan, parsed.problems.join("; "));
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true, resolvableRepos: ["/repo"] });
+  const childId = await spawnT1(world);
+  const child = world.runtime().children.find((c) => c.id === childId)!;
+  assert.equal(world.panes.get(child.paneId)!.env[STATION_CAP_ENV], "pr");
 });
 
 test("a spawn is only reported as delivered once the child's gate REPORTS", async () => {
@@ -477,6 +540,65 @@ test("CONSTRAINT 8 / R-7: a goal approval is judged on the CHILD's own draft and
   assert.equal(refused.isError, true, replyText(refused));
   assert.match(replyText(refused), /仓库之外/, "the refusal names what it judged");
   assert.equal(world2.channelOf(c2).filter((r) => r.kind === "answer").length, 0);
+});
+
+test("a station the PLAN narrowed is refused on the user's behalf too (2026-09-15)", async () => {
+  // One requirement, two tasks, one repo: the plan narrows that repo to
+  // `commit` so ONE PR can come out of a local merge (lib/repo-pr-policy.ts).
+  // The manager answers FOR the user here, and it must be held to the
+  // NARROWED ceiling — comparing against the plan's headline `pr` instead
+  // would let it confirm exactly the splitting the user forbade.
+  const parsed = parsePlan({
+    title: "同 repo 两任务",
+    intent: "验证代答的站点上界",
+    deliveryStation: "pr",
+    tasks: [
+      { id: "t1", title: "A", repo: "/repo" },
+      { id: "t2", title: "B", repo: "/repo", execution: "parallel" },
+    ],
+  });
+  assert.ok(parsed.plan, parsed.problems.join("; "));
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true, resolvableRepos: ["/repo"] });
+  const childId = await spawnT1(world);
+  world.childAsks(childId, {
+    requestId: "goal-1",
+    title: "认可这个 loop goal 吗？",
+    options: ["认可，写入 .pi/loop-goal.md", "不认可，退回重谈"],
+    payload: "# 目标\n两个任务的收口",
+    topic: "goal-approval",
+    station: "pr",
+  });
+  const refused = await world.call("orchestrator_answer", {
+    childId, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1,
+  });
+  assert.equal(refused.isError, true, replyText(refused));
+  assert.match(replyText(refused), /站点/, "the refusal names the station it judged");
+  assert.equal(world.channelOf(childId).filter((r) => r.kind === "answer").length, 0,
+    "nothing may be written when the answer is refused");
+
+  // The control: ONE task in that repo is not narrowed at all, so the very
+  // same proxy answer goes through — the rule is per repo, not a blanket ban.
+  const single = parsePlan({
+    title: "单任务",
+    intent: "验证代答的站点上界",
+    deliveryStation: "pr",
+    tasks: [{ id: "t1", title: "A", repo: "/repo" }],
+  });
+  assert.ok(single.plan, single.problems.join("; "));
+  const world2 = makeFakeWorld({ plan: single.plan!, approvePlan: true, resolvableRepos: ["/repo"] });
+  const c2 = await spawnT1(world2);
+  world2.childAsks(c2, {
+    requestId: "goal-1",
+    title: "认可这个 loop goal 吗？",
+    options: ["认可，写入 .pi/loop-goal.md", "不认可，退回重谈"],
+    payload: "# 目标\n单任务",
+    topic: "goal-approval",
+    station: "pr",
+  });
+  const ok = await world2.call("orchestrator_answer", {
+    childId: c2, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1,
+  });
+  assert.equal(ok.isError, undefined, replyText(ok));
 });
 
 test("a goal-approval request with no draft attached is REFUSED rather than approved blind", async () => {
@@ -783,6 +905,86 @@ test("recover refuses while the pane is ALIVE, and re-opens the same session id 
   );
   assert.equal(world.plan()!.tasks.find((t) => t.id === "t1")!.status, "running",
     "the task never stopped being true");
+});
+
+test("a recovered child is handed its station ceiling again (2026-09-15)", async () => {
+  // The ceiling lives in the CHILD'S ENVIRONMENT, and a recovered pane is a
+  // new process — the variable died with the old one. A child that comes back
+  // unbounded could negotiate its goal at `pr` and open exactly the second PR
+  // the plan's narrowing forbade.
+  const parsed = parsePlan({
+    title: "同 repo 两任务",
+    intent: "验证恢复后的站点上界",
+    deliveryStation: "pr",
+    tasks: [
+      { id: "t1", title: "A", repo: "/repo" },
+      { id: "t2", title: "B", repo: "/repo", execution: "parallel" },
+    ],
+  });
+  assert.ok(parsed.plan, parsed.problems.join("; "));
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true, resolvableRepos: ["/repo"] });
+  const childId = await spawnT1(world);
+  const before = world.runtime().children[0]!;
+  assert.equal(world.panes.get(before.paneId)!.env[STATION_CAP_ENV], "commit");
+
+  world.panes.get(before.paneId)!.alive = false;
+  const recovered = await world.call("orchestrator_recover", { childId, reason: "机器睡眠" });
+  assert.equal(recovered.isError, undefined, replyText(recovered));
+  const after = world.runtime().children[0]!;
+  assert.notEqual(after.paneId, before.paneId);
+  assert.equal(world.panes.get(after.paneId)!.env[STATION_CAP_ENV], "commit",
+    "a restart must not widen what the child was allowed to ship");
+});
+
+test("the ceiling is counted with the PLAN's repo key, not the resolved checkout (round-1 P2)", async () => {
+  // `resolveTaskRepo` returns a `git --show-toplevel`: a plan naming a
+  // subdirectory or a symlinked path resolves SOMEWHERE ELSE. Counting the
+  // narrowing with one key and spawning from the other is how a narrowed repo
+  // hands its child an unlimited station — and the fake resolved every
+  // declared repo to itself, so nothing could catch the two being mixed up.
+  const parsed = parsePlan({
+    title: "同 repo 两任务",
+    intent: "声明的 repo 与解析结果不同",
+    deliveryStation: "pr",
+    tasks: [
+      { id: "t1", title: "A", repo: "/repo/declared" },
+      { id: "t2", title: "B", repo: "/repo/declared", execution: "parallel" },
+    ],
+  });
+  assert.ok(parsed.plan, parsed.problems.join("; "));
+  const world = makeFakeWorld({
+    plan: parsed.plan!,
+    approvePlan: true,
+    resolvableRepos: ["/repo/declared"],
+    taskRepoAliases: { "/repo/declared": "/repo/actual-toplevel" },
+  });
+  const childId = await spawnT1(world);
+  const child = world.runtime().children.find((c) => c.id === childId)!;
+  assert.equal(child.cwd, "/repo/actual-toplevel", "the child really works in the RESOLVED checkout");
+  assert.equal(world.panes.get(child.paneId)!.env[STATION_CAP_ENV], "commit",
+    "…but the narrowing is counted over the key the PLAN wrote, where both tasks live");
+});
+
+test("a recovery with NO approved snapshot gets the STRICTEST ceiling, never none (round-2 P2)", async () => {
+  // The promise is "only ever stricter than the original dispatch". `undefined`
+  // means NO ceiling — the opposite reading — and takeover-then-recover is
+  // exactly the path where the snapshot is missing, because the successor has
+  // not re-submitted the plan yet.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  const before = world.runtime().children[0]!;
+  world.saveRuntime({
+    ...world.runtime(),
+    approvedPlan: undefined,
+    approvedPlanHash: undefined,
+  });
+  world.panes.get(before.paneId)!.alive = false;
+  const recovered = await world.call("orchestrator_recover", { childId, reason: "接管后恢复" });
+  assert.equal(recovered.isError, undefined, replyText(recovered));
+  const after = world.runtime().children[0]!;
+  assert.notEqual(after.paneId, before.paneId);
+  assert.equal(world.panes.get(after.paneId)!.env[STATION_CAP_ENV], "precommit",
+    "no plan on record ⇒ no authorization ⇒ the strictest station");
 });
 
 test("attach hands back the plan, the children, the open questions and the ORPHANS", async () => {

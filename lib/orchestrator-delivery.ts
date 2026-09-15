@@ -81,6 +81,14 @@ export function buildTaskDocument(opts: {
   taskId: string;
   title: string;
   brief: string;
+  /**
+   * HOW FAR THIS TASK MAY SHIP (2026-09-15). Appended by the GATE, after the
+   * brief, for the same reason the goal directive below is: the brief is text
+   * the orchestrator writes, so a ceiling that arrived inside it would be the
+   * orchestrator's promise rather than the plan's fact. The child reads this
+   * before it negotiates its own goal, which is exactly when it needs to know.
+   */
+  stationCapLine?: string;
 }): string {
   return [
     `<!-- ${opts.marker} -->`,
@@ -88,6 +96,7 @@ export function buildTaskDocument(opts: {
     "",
     opts.brief.trim(),
     "",
+    ...(opts.stationCapLine ? [opts.stationCapLine, ""] : []),
     TASK_GOAL_DIRECTIVE,
     "",
   ].join("\n");
@@ -120,7 +129,15 @@ export const TASK_GOAL_DIRECTIVE =
   "（上下文、例子、改之前 → 改之后、哪几步会变得不同，外加本轮交付站点 " +
   "precommit / commit / pr），**再**用 `propose_loop_goal` 协商并获批你自己的 goal" +
   "（goal-auditor 审计 + 用户批准）。没有已确认的反述，`propose_loop_goal` 会直接被拒、" +
-  "一个框都不弹；未批准 goal 前，L8 edit gate 会拦下所有 edit/write。";
+  "一个框都不弹；未批准 goal 前，L8 edit gate 会拦下所有 edit/write。\n" +
+  // THE BRANCH NAME IS SHOWN TO PEOPLE (2026-09-15, user decision). Measured:
+  // three PRs whose head branches were `rg-child-<sessionId>` — the handle of
+  // an internal registry, published. The reviewer's own instruction is the
+  // place to say it once; the checkpoint refusal (extensions/review-gate.ts)
+  // repeats it at the moment a session actually needs to create one.
+  "开工前先给自己开一个功能分支：`git checkout -b <type>/<slug>`，名字用英文 kebab-case " +
+  "概括这次改动（如 `feat/aum-blacklist-purge`、`fix/auth-token-expiry`）——" +
+  "**不要**用会话 id 或 `rg-child-…` 这类内部 handle，这个分支名会跟着 PR 走，是要给人看的。";
 
 /**
  * A child's pi session id — DETERMINISTIC, derived from its registry handle.

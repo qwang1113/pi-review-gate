@@ -63,6 +63,7 @@ import {
   parseDeliveryStation,
   type DeliveryStation,
 } from "./delivery-station.ts";
+import { capStationAt } from "./repo-pr-policy.ts";
 import { REVISE_ROW, choiceRows, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
@@ -417,6 +418,18 @@ export interface RestatementToolDeps {
   gitRoot?(dir: string): string | null;
   /** Injectable clock, so a recorded time is assertable. */
   now?(): Date;
+  /**
+   * HOW FAR THIS SESSION MAY SHIP (2026-09-15) — the plan's ceiling for an
+   * orchestration child, read from the environment the dispatcher set
+   * (`STATION_CAP_ENV`). `undefined` means no ceiling (a standalone session).
+   *
+   * It belongs HERE, not only in the goal dialog: a restatement is the FIRST
+   * place a station is named, so a user who confirms `pr` here and then sees
+   * the goal box say `commit` has been asked about one contract and had
+   * another written (round-1 P1). The value clamped here is the value shown,
+   * sent over the channel and recorded.
+   */
+  stationCap?(): DeliveryStation | undefined;
 }
 
 /** Just enough of pi's tool context for a dialog. */
@@ -459,11 +472,27 @@ export async function doProposeRestatement(
   // A missing or misspelled station is READ as the strictest one rather than
   // refused: the reply says which station was recorded, so a typo costs one
   // corrected call instead of an interrupted negotiation.
-  const station = parseDeliveryStation(params.station);
+  const requestedStation = parseDeliveryStation(params.station);
+  // AND THE PLAN'S CEILING APPLIES HERE (round-1 P1, 2026-09-15). The plan
+  // already narrowed this repo, and this dialog is where the station is FIRST
+  // named: asking about `pr` here while the goal box would say `commit` is the
+  // gate asking about one contract and writing another. What is SHOWN, sent
+  // over the channel and recorded is the clamped value.
+  const stationCap = deps.stationCap?.();
+  const station = capStationAt(requestedStation, stationCap);
+  const capNote = stationCap !== undefined && station !== requestedStation
+    ? `⚠️ 交付站点上界 ${stationCap}（不是 ${requestedStation}）：本编排的 plan 收窄了该 repo —— ` +
+      "同一 repo 的一个需求只出一个 PR，先本地合并、用户验证后再开一个 PR。" +
+      "要分多个 PR，需要在 plan 里声明 allowMultiplePrs 并重新批准。"
+    : undefined;
   const text = checked.text;
 
   const uiCtx = ctx as RestatementUiContext;
-  deps.showToUser(uiCtx, RESTATEMENT_CONFIRM_TITLE, buildRestatementTranscriptMessage(text, station));
+  deps.showToUser(
+    uiCtx,
+    RESTATEMENT_CONFIRM_TITLE,
+    buildRestatementTranscriptMessage(text, station) + (capNote ? "\n" + capNote : ""),
+  );
 
   let confirmed = false;
   let reason: string | undefined;
@@ -505,7 +534,7 @@ export async function doProposeRestatement(
       },
       uiCtx.hasUI === true,
       async (renderSignal) => deps.askChoice(uiCtx, spec, {
-        body: buildRestatementConfirmMessage(station),
+        body: buildRestatementConfirmMessage(station) + (capNote ? "\n" + capNote : ""),
         pointer: "（反述全文见上方消息）",
         signal: renderSignal,
       }),

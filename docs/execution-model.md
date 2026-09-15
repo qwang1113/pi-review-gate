@@ -332,7 +332,41 @@ commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而
   被鼓励的正常工作方式 —— 只看活字段会把真实通过的轮次记成 BLOCKED，还会让
   agent 去修一个从未失败的 precommit。树 OID 就是内容身份，所以这条事实不过期；
   写入侧只认**lane 启动前**抓下的那棵树（`nextFullPassTree`，纯函数），同一棵树
-  的 FAIL 会撤销它。FAIL 不再能靠“提前 return”告知，所以它作为自己的一条消息
+  的 FAIL 会撤销它。
+
+  **降级的原因是分开的，而只有一个会被挂起而不是拒绝**（2026-09-15）：
+  `classifyReadyWithholding`（同一个模块，纯函数）把「为什么扣下这一轮」分成
+  `blocking-finding` / `stale` / `cwd-mismatch` / `unverified` / `unverified-idle`
+  五类 —— 前三类是**关于工作的事实**（等多久都不会变），立即记成 BLOCKED；
+  `unverified-idle`（内容没验证，**而且现在没有任何 lane 在跑**）同样拒绝：
+  挂起只能发生在「还有东西会回来处理它」的时候 —— 回来处理挂起的只有那条 lane
+  自己的落地与下一轮的 prepare，两者都不来时把它挂起就是永久停在 PENDING，
+  而回执还叫 agent 别重跑（round-1 P1）。只有 `unverified`（lane 正在跑）才**挂起**：结论原样存进 sidecar 的
+  `pendingReady`（`lib/gate-state.ts`），`review` 保持 PENDING，然后
+  - lane 落 PASS 且 tree 相同 ⇒ `parkedReadyFate` 返回 `replay`，门禁把结论
+    **重新交给同一个记录器**（`recordReviewVerdict`，不是第二份实现）并 steer
+    唤醒 agent；
+  - **其余一切 ⇒ `clear`**，挂起被清。三条路径一个原因：lane 已经落地，
+    不会再有人回来处理这份结论 —— lane 落非 PASS（这轮内容没过全量，走失败
+    通道说清是**验证**而不是 findings）；PASS 但覆盖的不是那一棵（lane 在
+    本轮 checkpoint 之前就抓了工作区，或会话中途又送了一轮）；PASS 但当前
+    review target 的 tree 已换（新一轮 prepare 替换了它）。`none` 于是只剩
+    「本来就没挂起」一种情况：留下任何一条没人接管的挂起记录，都会把那一轮挂到
+    下一次 prepare，而回执早就叫过 agent 别重跑（round-2 P2）。
+
+    **不在那一列上的，是在 lane 期间编辑工作区**：它不改变这三棵树中的任何一棵
+    （挂起轮的是已提交的那一份，lane 的是启动前抓的），所以挂起照样活着、照样
+    重放 —— 最初的说法写成「编辑会作废挂起」，等于告诉 agent 审查期间别改文件，
+    恰好与门禁鼓励的「边审边改」相反（round-3 P2）。
+
+  这条修的是一个实测的时序竞争（本 repo PR #62 第 4 轮：3 行 diff 的增量轮
+  reviewer 16 秒交卷 READY，全量 lane 34 秒后才 PASS，差 7 秒）：旧行为把那
+  7 秒写成永久的 BLOCKED，回执让 agent「fix ALL findings and re-review」，而那一轮
+  唯一的 finding 是一条说「本轮无改动」的 Nit —— 唯一出路是把一字未改的内容
+  再审一遍。
+
+- **时间上确实重叠了**的另一面：lane 落下的**成功**同样需要有人处理，见上面那段；
+  FAIL 不再能靠“提前 return”告知，所以它作为自己的一条消息
   送给 agent —— **走 `steer`，不是 `followUp`**（2026-09-12）：pi 只在 agent
   不再有工具调用时才 drain followUp，而本门禁的存活不变量恰好禁止它在门禁未过时
   停下，于是通知排在同一个 turn 后面不出来。实测：三条 FAIL 通知（03:01 / 03:15 /

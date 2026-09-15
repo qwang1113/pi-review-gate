@@ -333,6 +333,9 @@ import {
 } from "../lib/orchestrator-worktree.ts";
 import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
+import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "../lib/change-baseline.ts";
+import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
+import { seedWorktree } from "../lib/worktree-seed.ts";
 import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
@@ -416,7 +419,7 @@ import { appendTiming } from "../lib/gate-timings.ts";
 import { tailLogFile } from "../lib/precommit-tail.ts";
 // The background lane's failure notice: wording + the "is this still the
 // content under the agent's hands" rule, both pure and unit-tested there.
-import { buildAsyncPrecommitReport, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
+import { buildAsyncPrecommitReport, buildParkedReadyReplayNotice, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
 import {
   decideReviewScope,
   type ReviewScopeDecision,
@@ -461,8 +464,10 @@ import {
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
 import {
   adjudicateReviewConclusion,
+  classifyReadyWithholding,
   fileFindingsFrom,
   normalizeConcludedVerdict,
+  parkedReadyFate,
   readyLacksVerification,
   type ReviewFinding,
 } from "../lib/review-adjudicate.ts";
@@ -526,6 +531,7 @@ import type { LoopGoal } from "../lib/loop-goal.ts";
 import {
   DEFAULT_DELIVERY_STATION,
   STATION_SHIP_NEXT_STEPS,
+  parseDeliveryStation,
   stationArrivalProblems,
 
   type DeliveryStation,
@@ -874,6 +880,27 @@ export default function reviewGate(pi: ExtensionAPI) {
       recordGoalPrereview(goalPrereviewDeps, input, ctx),
     recordReviewVerdict: (concluded: ReportConclusion, repo: string, ctx: unknown) =>
       recordReviewVerdict(concluded, repo, ctx),
+  };
+
+  /**
+   * The lane, exposed for the ONE test that needs a lane to actually be running.
+   *
+   * WHY THIS IS NOT A BACK DOOR. `startPrecommitBeside` is the gate's own
+   * background verification — the thing a checkpoint is allowed to precede
+   * (B1). A parked READY can only be revived by that lane's own landing, so the
+   * rule "never park a conclusion when no lane is running" (round-1 P1,
+   * 2026-09-15) can only be tested end to end by starting one; production
+   * reaches this function from `judge_submit` alone, and a test calling it
+   * directly grants no authority — it runs the repository's own precommit.
+   *
+   * SIDE EFFECT, since a caller has to know it (round-2 Nit): starting a lane
+   * RESETS the recorded `precommit` entry to `NOT_RUN` — that is what makes a
+   * lane "in flight" observable at all — so a test that starts one leaves the
+   * sidecar saying its verification has not run yet. Nothing reads that entry as
+   * authority; the ship gate wants a PASS on the tree it is shipping.
+   */
+  (pi as unknown as { __reviewGateTestSeams?: Record<string, unknown> }).__reviewGateTestSeams = {
+    startFullLane: (root: string, ctx: unknown) => startPrecommitBeside(root, ctx),
   };
 
   /**
@@ -2450,16 +2477,42 @@ export default function reviewGate(pi: ExtensionAPI) {
           reason: String(detail ?? (error as Error).message).trim().split("\n").slice(-3).join(" "),
         };
       }
-      return { ok: true as const, path, branch };
+      // SEED IT BEFORE THE CHILD SEES IT (2026-09-15, onchain). `git worktree
+      // add` reproduces the COMMIT, and a repository's local environment is by
+      // definition not in it: the project's gate config, its `.env` and its
+      // `node_modules` are all gitignored. Measured cost of skipping this: a
+      // child whose precommit silently ran `yarn test` (the whole midway
+      // suite) instead of the repository's configured scoped jest — 143 files
+      // failing for reasons that had nothing to do with its change — while the
+      // project manager had to talk it through copying a config file by hand.
+      // lib/worktree-seed.ts owns what may be taken, and why.
+      const seeded = seedWorktree(repoRoot, path);
+      return {
+        ok: true as const,
+        path,
+        branch,
+        ...(seeded.length > 0 ? { note: seeded.join("\n") } : {}),
+      };
     },
     // SETTLE IT (2026-09-10): the manager names the fate of a finished child's
     // checkout; the git sequence is lib/orchestrator-worktree.ts's, so the
     // conflict path is decided there rather than discovered here.
     settleWorktree: ({ childId, taskId, repoRoot, settlement }) => {
       const plan = planSettlement(settlement, repoRoot, childId, taskId);
+      const worktreePath = childWorktreePath(repoRoot, childId);
       if (plan.steps.length === 0) {
-        return { ok: true, text: `worktree 保留在 ${childWorktreePath(repoRoot, childId)}（分支 ${childWorktreeBranch(childId)}）—— 没有动它` };
+        return { ok: true, text: `worktree 保留在 ${worktreePath}（分支 ${childWorktreeBranch(childId)}）—— 没有动它` };
       }
+      // IDEMPOTENT ON AN ALREADY-RECLAIMED CHECKOUT (2026-09-15). A `merge`
+      // reclaims the directory, so a SECOND settlement — or the `discard` a
+      // manager issues afterwards to take the branch away too — contains steps
+      // aimed at a directory that is already gone. `git -C <missing> add -A`
+      // answers "not a git repository", which is a fact about the path and not
+      // about the work, so those steps are DROPPED rather than reported as a
+      // failure: the branch steps and the merge itself still run.
+      const steps = existsSync(worktreePath)
+        ? plan.steps
+        : plan.steps.filter((step) => step[1] !== worktreePath);
       const run = (argv: readonly string[]): { ok: boolean; output: string } => {
         try {
           return { ok: true, output: execFileSync("git", [...argv], { cwd: repoRoot, encoding: "utf8" }).trim() };
@@ -2479,7 +2532,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // settlement over an unclean worktree directory would be lying about
       // where the work is.
       const reclamation: string[] = [];
-      for (const step of plan.steps) {
+      for (const step of steps) {
         const result = run(step);
         if (result.ok) continue;
         const sub = step[2];
@@ -2506,10 +2559,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         return { ok: false, text: `worktree 结算失败（git ${sub ?? "?"}）：${result.output.trim().slice(0, 600)}` };
       }
-      // ONLY A DISCARD RUNS RECLAMATION, so only a discard can report a failed
-      // one — the note that used to sit here belonged to a variable this round
-      // deleted. A merge has no removal step at all: the checkout is its own
-      // way back from `merge --abort`.
+      // BOTH SETTLEMENTS THAT REMOVE SOMETHING RUN RECLAMATION — `discard`
+      // (checkout + branch) and `merge` (checkout only, 2026-09-15) — so both
+      // can report a failed one. `keep` plans no steps at all and returns
+      // above. A merge that CONFLICTED never got here: the sequence stopped at
+      // the merge step, and its abort leaves the child's checkout exactly
+      // where the human now needs it.
       return {
         ok: true,
         // The RECLAMATION outcome rides back with the settlement, because the
@@ -2519,9 +2574,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         reclaimed: reclamation.length === 0,
         text: settlement === "merge"
           ? `已把 ${childId} 的改动合并到当前分支（**已暂存、未提交** —— 看过再 commit）。\n` +
-            `它的 worktree 与分支 \`${childWorktreeBranch(childId)}\` **先保留**：这次合并还只是 staged，` +
+            (reclamation.length === 0
+              ? `它的隔离 checkout（${worktreePath}）**已回收** —— 目录不再占地方。\n`
+              : `⚠️ 合并成功，但这个隔离 checkout 没能回收：${reclamation.join(" / ")}\n路径 ${worktreePath}。\n`) +
+            `分支 \`${childWorktreeBranch(childId)}\` **保留**：这次合并还只是 staged，` +
             `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
-            `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 回收它们 —— ` +
+            `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 连分支一起收回 —— ` +
             `那个调用对已关闭的子会话**同样有效**（它只结算 checkout，不再开门）。`
           : reclamation.length > 0
             ? `⚠️ ${childId} 的 worktree **没能回收**（工作区或分支还留着）：${reclamation.join(" / ")}\n` +
@@ -2687,6 +2745,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       // omits), pinned by its test — re-doing it here was the second copy the
       // reviewer flagged as a Nit.
       stateVariant: process.env[STATE_VARIANT_ENV],
+      // THE STATION CEILING RIDES THE RELAY TOO (2026-09-15). A successor is a
+      // new process, so a ceiling that lived only in the predecessor's
+      // environment would evaporate: a child whose plan narrowed its repo to
+      // `commit` would come back able to negotiate `pr`. Organic for a
+      // standalone session (the variable is absent ⇒ the field is omitted).
+      stationCap: process.env[STATION_CAP_ENV],
     });
   }
 
@@ -5939,7 +6003,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       if (here && isProtectedBranch(here)) {
         return {
-          content: [{ type: "text", text: `review-gate: checkpoint 拒绝 — 不能在受保护分支 ${here} 上提交（checkpoint 也是 commit）。请先切到功能分支（如 git checkout -b <branch>）再 checkpoint。` }],
+          content: [{ type: "text", text:
+            `review-gate: checkpoint 拒绝 — 不能在受保护分支 ${here} 上提交（checkpoint 也是 commit）。\n` +
+            "请先切到功能分支：`git checkout -b <type>/<slug>`，名字用英文 kebab-case 概括这次改动" +
+            "（如 `feat/aum-blacklist-purge`、`fix/auth-token-expiry`），**不要**用会话 id 或 `rg-child-…` 这类内部 handle" +
+            " —— 这个分支名会跟着 PR 走，是要给人看的。然后重新 checkpoint。" }],
           details: { committed: false },
           isError: true,
         };
@@ -6082,6 +6150,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         // oversized file blocks — an existing one gets a reminder, because it
         // grew a hundred lines at a time and forcing a rushed split at the
         // end of a task produces worse modules than the sprawl.
+        // MERGE-AWARE BASE (2026-09-15, dashboard). "Absent from HEAD" and
+        // "created by this session" are the same statement ONLY when HEAD is
+        // the sole parent. Mid-merge, HEAD is still the branch tip, so every
+        // file the OTHER side brought in looked newly created — measured: 104
+        // staged additions, all 104 present in `origin/main`, three of them
+        // over the size limit — and the checkpoint was refused with no legal
+        // way through, because the review loop needs exactly that commit. The
+        // session escaped by switching the gate off. lib/change-baseline.ts
+        // carries the full account.
+        const changeBases = readChangeBaseRefs(root);
         const sizeFacts = paths
           .filter(isSizeJudgedFile)
           .map((p) => {
@@ -6092,13 +6170,7 @@ export default function reviewGate(pi: ExtensionAPI) {
               return undefined; // deleted (or unreadable): nothing to judge
             }
             const lines = content.length === 0 ? 0 : content.replace(/\n$/, "").split("\n").length;
-            let isNew = false;
-            try {
-              execFileSync("git", ["cat-file", "-e", `HEAD:${p}`], { cwd: root, stdio: "ignore" });
-            } catch {
-              isNew = true; // not in HEAD ⇒ this change creates it
-            }
-            return { path: p, lines, isNew };
+            return { path: p, lines, isNew: isNewInWorktree(root, p, changeBases) };
           })
           .filter((f): f is { path: string; lines: number; isNew: boolean } => f !== undefined);
         const sizeCheck = fileSizeVerdict(sizeFacts);
@@ -6131,11 +6203,22 @@ export default function reviewGate(pi: ExtensionAPI) {
           } catch {
             return { blocking: [] as string[] }; // unreadable ⇒ no facts, never a block
           }
+          // THE SAME MERGE-AWARE BASE as the size gate above (2026-09-15).
+          // Mid-merge `HEAD:package.json` is the BRANCH side, so every
+          // dependency `main` added would arrive as "new" and demand a written
+          // justification for work this session never did. The first base that
+          // carries the manifest is the one to compare against — HEAD whenever
+          // HEAD has it, which is the pre-existing behaviour.
+          const manifestBase = firstBaseContaining(root, "package.json", changeBases);
           let baseText: string | undefined;
-          try {
-            const out = execFileSync("git", ["show", `HEAD:package.json`], { cwd: root, encoding: "utf8" }) as string;
-            baseText = out;
-          } catch {
+          if (manifestBase) {
+            try {
+              const out = execFileSync("git", ["show", `${manifestBase}:package.json`], { cwd: root, encoding: "utf8" }) as string;
+              baseText = out;
+            } catch {
+              baseText = undefined; // unreadable ⇒ no facts, never a block
+            }
+          } else {
             baseText = undefined; // no base (new repo / new manifest) ⇒ every key is new
           }
           const added = newDependencyNames(worktreeText, baseText);
@@ -6354,7 +6437,68 @@ export default function reviewGate(pi: ExtensionAPI) {
         else laneState.precommit.lastFullPassTree = coveredTree;
         persistRepo(ctx as unknown as ExtensionContext, root);
       }
+      // WHAT THE LANE'S LANDING DOES TO A PARKED CONCLUSION (2026-09-15).
+      // `parkedReadyFate` (pure, lib/review-adjudicate.ts) answers with TREES
+      // rather than with the passage of time: a non-PASS lane retires the
+      // parked round (its content just failed), a PASS on exactly that tree
+      // replays it, and anything else leaves it alone because its content is
+      // still unverified.
+      const fate = parkedReadyFate({
+        parkedTree: laneState.pendingReady?.tree,
+        laneVerdict: verdict,
+        coveredTree,
+        currentTargetTree: reviewTargets.get(root)?.tree,
+      });
+      if (fate !== "none") {
+        const parked = laneState.pendingReady!;
+        delete laneState.pendingReady;
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        if (fate === "clear" && verdict === "PASS") {
+          // A PARKED ROUND THE LANE DID NOT REPLAY IS RETIRED, NOT LEFT BEHIND
+          // (round-2 P2): the lane has landed, so nothing is coming back for
+          // this conclusion, and the reply already told the agent not to
+          // re-submit. Silent when the lane FAILED — the failure channel speaks
+          // for that content — but an abandoned hold is worth a line in the
+          // audit trail, since the only other evidence is a missing verdict.
+          // Two causes, two sentences: when the gate moved on to another round
+          // `coveredTree` IS the parked tree, and the "passed X, not the parked
+          // Y" wording would print the same id twice (round-2 Nit).
+          log(
+            coveredTree === parked.tree
+              ? `parked READY for ${root} dropped: the gate moved on to another round (${parked.tree})`
+              : `parked READY for ${root} dropped: the lane passed ` +
+                `${coveredTree === undefined || coveredTree === "" ? "an unreadable tree" : coveredTree}, ` +
+                `which is not the parked ${parked.tree}`,
+          );
+        }
+        if (fate === "replay") {
+          // THE PARKED READY GETS ITS VERDICT NOW. Replayed through the SAME
+          // recorder the normal order uses — the whole reason the conclusion
+          // was parked verbatim is that findings count, fingerprints, the
+          // docSync attestation, the baseline and the round record must come
+          // out exactly as they would have, and a second implementation of
+          // those rules would drift.
+          const recorded = await recordReviewVerdict(parked.conclusion as ReportConclusion, root, ctx);
+          // WAKE THE AGENT: this is a gate state change nobody else will
+          // report. `steer`, exactly like the failure notice below — a
+          // `followUp` would sit in the queue behind a long turn, and the whole
+          // point is that the round is no longer waiting on anything.
+          try {
+            pi.sendMessage(
+              {
+                customType: "review-gate",
+                content: buildParkedReadyReplayNotice({ round: parked.round, tree: parked.tree, recorded }),
+                display: true,
+              },
+              { triggerTurn: true, deliverAs: "steer" },
+            );
+          } catch { /* headless — the recorded verdict is what matters */ }
+        }
+      }
       if (verdict !== "PASS") {
+        // TELL THE AGENT (B1). The content the reviewer approved did not pass
+        // its verification, so this round cannot produce a shippable READY —
+        // and the failure channel names THAT reason, not "findings".
         reportAsyncPrecommit({
           round,
           verified,
@@ -8298,7 +8442,21 @@ export default function reviewGate(pi: ExtensionAPI) {
     reviewScope: (root, st) => reviewScopeFor(root, st),
     previousRoundFindings: (st) => previousRoundFindings(st),
     settledConclusion: (st) => settledConclusion(st),
-    registerReviewTarget: (root, target) => { reviewTargets.set(root, target); },
+    registerReviewTarget: (root, target, ctx) => {
+      reviewTargets.set(root, target);
+      // A PARKED READY DOES NOT SURVIVE ITS ROUND (2026-09-15). A new target
+      // means a new round was dispatched, so the parked one is history: if the
+      // lane that follows ever PASSed on that old tree, replaying it would
+      // record a READY the session has already moved past — and `review`
+      // belongs to the round in flight. The tree comparison in the lane's own
+      // landing checks this too; clearing it here is what keeps the sidecar
+      // from carrying a parked conclusion nobody is waiting on any more.
+      const st = stateForRepo(root);
+      if (st.pendingReady) {
+        delete st.pendingReady;
+        persistRepo(ctx as ExtensionContext, root);
+      }
+    },
     git: {
       // Deliberately NOT the `isAncestor` helper above: that one runs with
       // `encoding: "utf8"` and no `stdio`, which lets git's "fatal: Not a
@@ -8431,6 +8589,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
       ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
     });
+    // THE ADJUDICATOR'S OWN VERDICT, captured before the three binding checks
+    // below overwrite it (2026-09-15). Only THIS one answers "does the round
+    // contradict itself on its findings?" — stale, unverified and the cwd check
+    // each relabel `parsed.verdict` too, and feeding the relabelled word into
+    // `classifyReadyWithholding` made every one of them look like a finding
+    // conflict.
+    const adjudicatedVerdict = parsed.verdict;
     // The agent is running the loop again — a standing ask_user
     // pause is moot (liveness: a stale pause would silently swallow the
     // next auto-continuation after a BLOCKED verdict).
@@ -8538,6 +8703,65 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
 
     const bindTree = parsed.verdict === "READY" ? reviewTargets.get(targetRoot)?.tree ?? null : null;
+    // HOLD, DON'T REFUSE, WHEN THE ONLY THING MISSING IS TIME (2026-09-15).
+    // This function used to write `unverified` straight to BLOCKED and be done
+    // with it — permanently, while the lane that would have cleared it landed
+    // seconds later. The agent read "fix ALL findings and re-review" on a round
+    // whose only finding was a Nit saying nothing had changed, and its only way
+    // forward was re-reviewing byte-identical content. Measured on this repo:
+    // 16s of review against a 34s full lane, seven seconds short.
+    const withholding = classifyReadyWithholding({
+      concluded: verdictRaw,
+      blockingFinding: adjudicatedVerdict !== "READY",
+      staleTarget,
+      lacksVerification: unverified,
+      // A HOLD NEEDS SOMEONE TO COME BACK FOR IT (round-1 P1, 2026-09-15). The
+      // only two things that revive a parked conclusion are this lane's own
+      // completion callback and the next round's prepare; when the lane has
+      // ALREADY landed (or never started), holding would park the round forever
+      // while telling the agent not to re-submit. `inFlightPrecommit` is
+      // cleared in a microtask AFTER the lane's own callback has run, so a lane
+      // that is still listed here is one whose callback has not finished.
+      laneStillRunning: inFlightPrecommit?.root === targetRoot,
+      cwdMismatch: cwdMismatch !== undefined,
+    });
+    if (withholding === "unverified") {
+      const parkedTarget = reviewTargets.get(targetRoot);
+      // No target ⇒ the stale check above already fired and this is a refusal,
+      // not a hold: a parked conclusion with nothing to bind to could never be
+      // replayed into a real verdict.
+      if (parkedTarget) {
+        st.pendingReady = {
+          conclusion: {
+            verdict: "READY",
+            findings: (concluded.findings ?? []) as unknown[],
+            ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
+            ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
+            // The judge's OWN scope travels too: the recorder pairs it with the
+            // dispatched half (round-1 P2), and a replay that lost it would
+            // write a different audit pair than a straight record of the same
+            // round.
+            ...(concluded.scope === undefined ? {} : { scope: concluded.scope }),
+          },
+          tree: parkedTarget.tree,
+          head: parkedTarget.head,
+          round: st.rounds.length + 1,
+          at: new Date().toISOString(),
+        };
+        persistRepo(ctx as unknown as ExtensionContext, targetRoot);
+        return `review-gate: this round's READY is being HELD, not refused — for ${targetRoot} ` +
+          `(round ${st.rounds.length + 1}, tree ${parkedTarget.tree.slice(0, 12)}).\n` +
+          "这一轮的内容**没有任何问题**：只是全量 precommit 还没跑完（B1 让它与审查并行跑，" +
+          "所以 reviewer 可以先交卷）。门禁把结论**原样扣下**了，`review` 仍是 PENDING ——\n" +
+          "  - lane 落 PASS 且 tree 相同 ⇒ 门禁**自动补记 READY** 并唤醒你，可以继续收尾；\n" +
+          "  - lane 落 FAIL ⇒ 挂起被清掉，并按失败通道告诉你原因；\n" +
+          "  - lane 落 PASS 但覆盖的不是这一棵，或门禁已经走到下一轮（你又送了一轮）⇒ 挂起**作废**：" +
+          "那一轮判的内容已经不是当前这一轮了，按常规继续即可。\n" +
+          "**在 lane 跑期间照常编辑工作区**：那不会作废挂起 —— 挂起判的是已提交的那一棵，" +
+          "编辑作废的是 ship 绑定（这是故意的）。\n" +
+          "**不要重跑审查**：重送的同一份内容不会更快拿到结果，只会白烧一轮。";
+      }
+    }
     st.review = {
       verdict: parsed.verdict,
       fingerprint: bindTree,
@@ -8675,7 +8899,22 @@ export default function reviewGate(pi: ExtensionAPI) {
           "review instead of blocking it), and that verification did not pass. The verdict is recorded " +
           "as BLOCKED: nothing here is shippable. Fix what precommit reported and submit the round again; " +
           "if it failed for an environment reason unrelated to this change, that is the user's call — " +
-          "`/gate-bypass <reason>` covers it and leaves a trace."
+          "`/gate-bypass <reason>` covers it and leaves a trace." +
+          // TWO WAYS TO GET HERE, AND THEY TELL THE AGENT OPPOSITE THINGS. A lane
+          // that is still running will record this very conclusion the moment it
+          // passes on this tree (that is the hold's whole point), so re-submitting
+          // buys nothing. With NO lane running there is nothing left to wait for
+          // and nothing that could replay it — the round concluded after its own
+          // verification had already landed without covering this content — so
+          // saying "did not pass" would send the agent looking for a failure that
+          // does not exist (round-7 finding, and the reason the second case is a
+          // refusal at all rather than a hold).
+          (withholding === "unverified-idle"
+            ? " NOTE: no precommit lane is running for this content — nothing is coming back to verify it, " +
+              "so there is nothing to wait for and nothing to replay. Re-submit once you have fixed what " +
+              "precommit reported."
+            : " A full lane IS still running for this content: if it passes on this same tree, this verdict " +
+              "is recorded automatically and you are woken — do NOT re-submit byte-identical content.")
         : "") +
       (cwdMismatch
         ? `\nCWD CHECK FAILED: ${cwdMismatch}. The conclusion requires the judge's own \`pwd\`, ` +
@@ -9232,6 +9471,27 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   /**
+   * HOW FAR THIS SESSION MAY SHIP (2026-09-15) — the ONE reader of
+   * `RG_STATION_CAP`, shared by the goal dialog and the restatement dialog.
+   *
+   * The variable is written by the DISPATCHER (lib/orchestrator-dispatch.ts)
+   * and by nothing else, which is the whole point: it lives in an environment
+   * the session's own prompt cannot reach, so a child cannot talk itself out
+   * of the ceiling its task was dispatched with.
+   *
+   * An ABSENT variable is `undefined` — NO ceiling — and never
+   * `precommit`: a standalone loop session has no plan above it, and reading
+   * absence as the strictest station would silently freeze every ordinary
+   * session at "the gate's checks pass, the user commits". The two statements
+   * are not the same one, so `parseDeliveryStation` (whose default IS the
+   * strictest station) is only reached when the variable is really there.
+   */
+  const stationCapFromEnv = (): DeliveryStation | undefined => {
+    const raw = process.env[STATION_CAP_ENV];
+    return raw === undefined || raw.trim() === "" ? undefined : parseDeliveryStation(raw);
+  };
+
+  /**
    * The GOAL family — `propose_loop_goal` (L8: the user approves this
    * session's exit contract) and the audit recorder behind it (L8b: the
    * goal-auditor's verdict becomes a record) — lives in
@@ -9262,6 +9522,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     loopGoalPath: (root) => loopGoalPathIn(root),
     loopGoalRelPath: loopGoalRelPath(SESSION_STATE_VARIANT),
     findProjectAgent: (dir, name) => findProjectAgentText(dir, name),
+    // HOW FAR THIS SESSION MAY SHIP (2026-09-15). Read from the environment
+    // the DISPATCHER wrote (lib/repo-pr-policy.ts), never from anything this
+    // session's own prompt could say: a standalone loop session has no var and
+    // therefore no ceiling, an orchestration child gets the station its task
+    // was dispatched with — the plan's value, narrowed per repo. An ABSENT var
+    // is `undefined` (no ceiling), never `precommit`: those are different
+    // statements and collapsing them would silently freeze every standalone
+    // session at the strictest station.
+    stationCap: stationCapFromEnv,
     // The directory is created with the file: the goal is the first thing a
     // session writes into .pi/, so its parent may not exist yet.
     writeGoalFile: (path, text) => {
@@ -9297,6 +9566,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
     askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
+    // THE SAME CEILING the goal dialog reads (2026-09-15): a restatement is
+    // where the station is FIRST named, so clamping only at the goal step
+    // would mean asking the user about one contract and recording another.
+    stationCap: stationCapFromEnv,
   });
 
 

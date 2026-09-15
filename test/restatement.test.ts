@@ -233,6 +233,32 @@ test("propose: a refused draft never reaches the user", async () => {
   assert.equal(f.st.restatement, undefined);
 });
 
+test("propose: the plan's ceiling clamps the station HERE, where it is first named (round-1 P1)", async () => {
+  // A restatement is the first place a station appears, and the plan has
+  // already narrowed this repo. Clamping only at the goal dialog would mean
+  // the user confirms `pr` here and the contract records `commit` — the gate
+  // asking about one thing and writing another.
+  const f = fake();
+  const shown: string[] = [];
+  f.deps.showToUser = (_uiCtx, _lead, body) => { shown.push(body); return true; };
+  f.deps.stationCap = () => "commit";
+  const out = await doProposeRestatement(f.deps, { restatement: GOOD, station: "pr" }, UI);
+  assert.equal(out.details?.station, "commit", "what gets recorded is the clamped value");
+  assert.equal(f.st.restatement?.station, "commit");
+  assert.match(shown[0] ?? "", /上界/, "and the user is told, where they read it");
+  assert.match(shown[0] ?? "", /allowMultiplePrs/, "the way to lift it is named");
+
+  // Asking for LESS than the ceiling is not a narrowing and must not be
+  // reported as one (the same false warning the goal dialog had).
+  const stricter = fake();
+  const shownStricter: string[] = [];
+  stricter.deps.showToUser = (_uiCtx, _lead, body) => { shownStricter.push(body); return true; };
+  stricter.deps.stationCap = () => "commit";
+  await doProposeRestatement(stricter.deps, { restatement: GOOD, station: "precommit" }, UI);
+  assert.equal(stricter.st.restatement?.station, "precommit");
+  assert.doesNotMatch(shownStricter[0] ?? "", /上界/, "nothing moved, so nothing may claim it did");
+});
+
 test("propose: an unreadable station is recorded as the strictest one, not refused", async () => {
   const f = fake();
   const out = await doProposeRestatement(f.deps, { restatement: GOOD, station: "开到 PR" }, UI);

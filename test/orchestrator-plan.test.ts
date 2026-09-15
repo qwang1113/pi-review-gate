@@ -454,6 +454,55 @@ test("deliveryStation: the summary the user approves names the station", () => {
   assert.match(formatPlanSummary(planOf()), /precommit/);
 });
 
+// ---------------------------------------------------------------------------
+// allowMultiplePrs (2026-09-15, user decision)
+
+test("allowMultiplePrs: read back, normalized, and EMPTY when absent or unreadable", () => {
+  assert.deepEqual(planOf().allowMultiplePrs, [], "the default is the RULE: one repo, one PR");
+  assert.deepEqual(planOf({ allowMultiplePrs: ["/repo/a"] }).allowMultiplePrs, ["/repo/a"]);
+  assert.deepEqual(
+    planOf({ allowMultiplePrs: ["/repo/a/", "/repo/a", "/repo/b"] }).allowMultiplePrs,
+    ["/repo/a", "/repo/b"],
+    "a trailing slash is the same repository, and this list is a set of permissions, not a log",
+  );
+  for (const broken of ["/repo", 7, null, {}, [7, null]]) {
+    assert.deepEqual(planOf({ allowMultiplePrs: broken }).allowMultiplePrs, [],
+      `unreadable (${JSON.stringify(broken)}) reads as the STRICT list`);
+  }
+});
+
+test("allowMultiplePrs: it is APPROVED CONTENT — adding a repo changes the hash, reordering does not", () => {
+  assert.notEqual(planHash(planOf({ allowMultiplePrs: ["/repo"] })), planHash(planOf()),
+    "the permission hands out publish authority, so the approval cannot survive it unnoticed");
+  assert.equal(
+    planHash(planOf({ allowMultiplePrs: ["/repo", "/other"] })),
+    planHash(planOf({ allowMultiplePrs: ["/other", "/repo"] })),
+    "the order these are written in grants nothing",
+  );
+  assert.ok(
+    canonicalPlanText(planOf({ allowMultiplePrs: ["/repo"] })).includes('"allowMultiplePrs":["/repo"]'),
+    "the permission is part of the content the approval binds to",
+  );
+});
+
+test("the summary names the repo whose tasks are held at commit — and stays quiet when there is nothing to say", () => {
+  const twoInOne = [
+    { id: "a", title: "A", repo: "/repo" },
+    { id: "b", title: "B", repo: "/repo" },
+  ];
+  const summary = formatPlanSummary(planOf({ deliveryStation: "pr", tasks: twoInOne }), "/repo");
+  assert.match(summary, /同一 repo 一个需求只出一个 PR/);
+  assert.match(summary, /allowMultiplePrs/, "the user must be able to read how to ask for the other thing");
+
+  const single = formatPlanSummary(
+    planOf({ deliveryStation: "pr", tasks: [{ id: "a", title: "A", repo: "/repo" }] }), "/repo");
+  assert.doesNotMatch(single, /只出一个 PR/, "one task in a repo is not narrowed at all");
+
+  const allowed = formatPlanSummary(
+    planOf({ deliveryStation: "pr", allowMultiplePrs: ["/repo"], tasks: twoInOne }), "/repo");
+  assert.doesNotMatch(allowed, /只出一个 PR/, "the user's own exemption means there is nothing to warn about");
+});
+
 test("the canonical text is order-independent for sets", () => {
   const a = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["x", "y"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });
   const b = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["y", "x"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });

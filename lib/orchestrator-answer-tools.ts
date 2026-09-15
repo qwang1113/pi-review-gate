@@ -42,6 +42,7 @@ import {
   isStationWidening,
   type DeliveryStation,
 } from "./delivery-station.ts";
+import { effectiveRepoStation, taskRepoOf } from "./repo-pr-policy.ts";
 
 import { appendRecord } from "./orchestrator-channel.ts";
 import { looksLikeDeclineRow, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
@@ -722,7 +723,25 @@ function proxyCrosscheckGuard(
   // Absent (a runtime written before the field existed) reads as the
   // strictest station, the same reading lib/orchestrator-plan-approval.ts
   // applies when it decides whether an edit widened the plan.
-  const planStation: DeliveryStation = deps.runtime().approvedPlan?.deliveryStation ?? DEFAULT_DELIVERY_STATION;
+  //
+  // AND NARROWED PER REPO (2026-09-15): when the approved plan holds more than
+  // one task in this task's repo, that repo stops at `commit` unless the user
+  // allowed it to split (lib/repo-pr-policy.ts). The comparison below is what
+  // stops a manager from confirming on the user's behalf a station the plan
+  // already ruled out — so it has to compare against the NARROWED ceiling, not
+  // the plan's headline station.
+  const approved = deps.runtime().approvedPlan;
+  const planStation: DeliveryStation = approved
+    ? effectiveRepoStation(
+      {
+        deliveryStation: approved.deliveryStation ?? DEFAULT_DELIVERY_STATION,
+        ...(approved.allowMultiplePrs === undefined ? {} : { allowMultiplePrs: approved.allowMultiplePrs }),
+        tasks: approved.tasks,
+      },
+      taskRepoOf(task, deps.repoRoot),
+      deps.repoRoot,
+    )
+    : DEFAULT_DELIVERY_STATION;
   // `request.station` arrives SANITIZED from the channel boundary
   // (`sanitizeDeliveryStation`), so there is nothing to parse here and no
   // second validator to drift: it is one of the three, or it is absent

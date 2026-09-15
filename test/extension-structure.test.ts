@@ -4418,9 +4418,14 @@ test("P2: prepare_review registers the commit target (baseline/head/tree) for re
   // recomputed when the verdict lands (by then the worktree has moved).
   assert.match(
     REVIEW_PREPARE_SRC,
-    /deps\.registerReviewTarget\(root, \{ baseline, head, tree, scope: \{ range, kind: scopeNow\.scope \} \}\)/,
+    /deps\.registerReviewTarget\(root, \{ baseline, head, tree, scope: \{ range, kind: scopeNow\.scope \} \}, ctx\)/,
+    "the ctx travels with it (2026-09-15): registering a target also RETIRES the previous round's parked READY, and that is a write to the sidecar",
   );
-  assert.match(REVIEW_PREPARE_WIRING(), /registerReviewTarget: \(root, target\) => \{ reviewTargets\.set\(root, target\); \}/);
+  assert.match(
+    REVIEW_PREPARE_WIRING(),
+    /registerReviewTarget: \(root, target, ctx\) => \{\s*reviewTargets\.set\(root, target\);\s*\/\/[^\n]*\n(?:[^\n]*\n)*?\s*const st = stateForRepo\(root\);/,
+    "and the wiring clears the parked conclusion it did not dispatch",
+  );
   // And the map must be consulted inside the recorder, not just written.
   assert.match(recordVerdictBody(), /reviewTargets\.get\(targetRoot\)/);
 });
@@ -5137,7 +5142,18 @@ test("a spawner's requested mode applies only to a clean, undecided, interactive
 test("the file-size gate runs at the CHECKPOINT, and only new files can block it", () => {
   const body = toolBodyOf("review_checkpoint");
   assert.match(body, /fileSizeVerdict\(sizeFacts\)/);
-  assert.match(body, /isNew = true/, "membership in HEAD is what makes a file new");
+  // "WHICH FILES ARE NEW" IS NOT A HEAD QUESTION ALONE (2026-09-15): mid-merge
+  // HEAD is still the branch tip, so everything the OTHER side brings in would
+  // count as this session's creation — measured: 104 staged additions, all of
+  // them main's, three of them over the limit, and the checkpoint is the only
+  // way into the review loop. The bases are read once,
+  // through the module that owns the rule.
+  assert.match(body, /const changeBases = readChangeBaseRefs\(root\)/,
+    "the comparison bases come from the merge-aware reader, not from HEAD by hand");
+  assert.match(body, /isNew: isNewInWorktree\(root, p, changeBases\)/,
+    "membership in ANY base is what makes a file NOT new");
+  assert.doesNotMatch(body, /cat-file", "-e", `HEAD:\$\{p\}`/,
+    "the HEAD-only reading is the bug this replaced");
   const blockAt = body.indexOf("sizeCheck.blocking.length > 0");
   assert.ok(blockAt > 0, "an oversized NEW file must refuse the checkpoint");
   assert.ok(body.indexOf("git\", [\"add\", \"-A\"") > blockAt,
@@ -5913,14 +5929,57 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
 test("a FAIL that arrives after dispatch is reported, and it withholds the READY", () => {
   assert.match(SRC, /function reportAsyncPrecommit\(/,
     "the failure has a channel of its own — the round was dispatched before this verdict existed, so returning early is no longer available");
-  assert.match(SRC, /if \(verdict !== "PASS"\) \{\s*reportAsyncPrecommit\(\{/,
-    "and every non-PASS verdict goes through it, including a thrown runner");
+  assert.match(SRC, /if \(verdict !== "PASS"\) \{[\s\S]{0,400}?reportAsyncPrecommit\(\{/,
+    "and every non-PASS verdict goes through it, including a thrown runner — the parked-READY handling above runs first and must not swallow it");
   assert.match(
     SRC,
     /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,400}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,40}?bypassActive: st\.bypass\.active,\s*\}\)/,
     "the verdict recorder refuses a READY on content that never passed the full lane — and answers it from the round's OWN tree, not from the live binding the next edit resets",
   );
   assert.match(SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
+});
+
+test("a parked READY is replayed by the lane that lands on its tree, and retired by one that does not", () => {
+  // 2026-09-15. `parkedReadyFate` is the pure decision (three trees, three
+  // outcomes — test/review-adjudicate.test.ts). What this pins is the WIRING,
+  // because the two things that make a hold safe are structural: the replay
+  // goes through the SAME recorder the normal order uses (a second
+  // implementation of the recording rules would drift), and the agent is woken
+  // with a steered notice (this is a gate state change nobody else reports).
+  //
+  // AND THE HOLD NEEDS A LANE THAT CAN COME BACK FOR IT (round-1 P1): with no
+  // lane in flight, parking the conclusion would stop the round forever while
+  // the reply told the agent not to re-submit — the caller passes that fact in
+  // and `classifyReadyWithholding` answers `unverified-idle` (a REFUSAL).
+  assert.match(SRC, /laneStillRunning: inFlightPrecommit\?\.root === targetRoot/);
+  // …and the refusal tells the agent WHICH way it went, because the two cases
+  // need opposite advice (round-8): a running lane will replay this very
+  // conclusion, an absent one never will.
+  assert.match(SRC, /withholding === "unverified-idle"/,
+    "the UNVERIFIED reply distinguishes 'a lane is still running' from 'nothing is coming'");
+  assert.match(SRC, /const fate = parkedReadyFate\(\{/);
+  // …AND THE LANE'S LANDING IS WHAT DECIDES IT: whatever it answers, a parked
+  // record is never left behind (round-2 P2 — nothing would ever come back for
+  // it). `none` means "nothing was parked", so a deletion under it is correct.
+  const fateAt = SRC.indexOf("const fate = parkedReadyFate({");
+  // Bounded by the branch that follows, not by a character count: a window that
+  // has to grow with the comments fails for the wrong reason (the same lesson
+  // the async-notice test above was just fixed with).
+  const afterFate = SRC.slice(fateAt, SRC.indexOf('if (fate === "replay") {', fateAt));
+  assert.match(afterFate, /if \(fate !== "none"\) \{\s*const parked = laneState\.pendingReady!;\s*delete laneState\.pendingReady;/,
+    "a landed lane retires whatever it did not replay");
+  const replayAt = SRC.indexOf('if (fate === "replay") {');
+  assert.ok(replayAt > 0, "the replay branch is here");
+  const replay = SRC.slice(replayAt, replayAt + 1800);
+  assert.match(replay, /await recordReviewVerdict\(parked\.conclusion as ReportConclusion, root, ctx\)/,
+    "the replay IS the recorder — one implementation of the recording rules");
+  assert.match(replay, /buildParkedReadyReplayNotice\(\{ round: parked\.round, tree: parked\.tree, recorded \}\)/,
+    "and the wording lives in lib/, like the failure notice beside it");
+  assert.match(replay, /deliverAs: "steer"/, "steered, not queued behind a long turn");
+  // The parked record must carry the judge's own SCOPE (round-1 P2): the
+  // recorder pairs it with the dispatched half, so a replay that lost it would
+  // write a different audit pair than a straight record of the same round.
+  assert.match(SRC, /concluded\.scope === undefined \? \{\} : \{ scope: concluded\.scope \}/);
 });
 
 test("the pass-coverage record cites the tree the lane STARTED on, never the post-run one", () => {
@@ -5977,7 +6036,12 @@ test("the async FAIL notice never waits for the agent to stop, and names what it
   // recomputed after it (lint:fix may have edited files), i.e. by then it can
   // already be the NEXT round's content.
   const besideAt = SRC.indexOf("function startPrecommitBeside(");
-  const beside = SRC.slice(besideAt, besideAt + 4200);
+  // The lane's whole body, bounded by the next declaration rather than by a
+  // magic character count: every rule below is about THIS function, and a
+  // window that has to grow with the comments fails for the wrong reason
+  // (round-2: a comment added INSIDE the lane pushed the notice's own call out
+  // of the 6400-character window and turned this red).
+  const beside = SRC.slice(besideAt, SRC.indexOf("function reportAsyncPrecommit(", besideAt));
   const verifiedAt = beside.indexOf("const verified = worktreeTree(root)");
   const runAt = beside.indexOf('callTool("run_precommit"');
   assert.ok(verifiedAt > 0 && runAt > verifiedAt,

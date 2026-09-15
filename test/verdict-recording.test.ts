@@ -54,6 +54,37 @@ before(() => {
   }
   mkdirSync(join(INSTALL, "node_modules"), { recursive: true });
   symlinkSync(join(ROOT, "node_modules", "typebox"), join(INSTALL, "node_modules", "typebox"));
+  // A STAND-IN FOR THE TRUSTED RUNNER (2026-09-15). `resolveTrustedRunner`
+  // looks beside the EXTENSION (the package layout), and this fixture is a
+  // copied package — so without one here the lane cannot run at all, and the
+  // one behaviour that needs a lane actually in flight (a READY that outruns
+  // its verification) would have no end-to-end test. It prints the single
+  // sentinel the gate parses and writes a receipt that satisfies
+  // `validatePrecommitReceipt`; the delay, read from the environment, is what
+  // makes "the lane is still running" a window a test can act inside.
+  mkdirSync(join(INSTALL, "scripts"), { recursive: true });
+  writeFileSync(join(INSTALL, "scripts", "precommit-runner.mjs"), `
+import { writeFileSync } from "node:fs";
+const argv = process.argv.slice(2);
+const arg = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : ""; };
+const delay = Number(process.env.RG_FAKE_RUNNER_DELAY_MS ?? "0");
+await new Promise((r) => setTimeout(r, Number.isFinite(delay) ? delay : 0));
+process.stdout.write("## Overall: ✅ PASS\\n");
+const receipt = arg("--receipt");
+if (receipt) {
+  writeFileSync(receipt, JSON.stringify({
+    schema: 1,
+    nonce: arg("--nonce"),
+    cwd: arg("--cwd"),
+    mode: arg("--mode"),
+    verdict: "PASS",
+    testScope: "full",
+    checksRun: 1,
+    checksFailed: 0,
+  }));
+}
+process.exit(0);
+`);
 });
 after(() => {
   if (REAL_HOME === undefined) delete process.env.HOME;
@@ -133,7 +164,26 @@ function recorders(pi: unknown): Recorders {
   return r!;
 }
 
-function sidecar(repo: string): { review: { verdict: string; docSync?: string }; rounds?: Array<Record<string, unknown>> } {
+/** The gate's own background lane, exposed for the one test that needs it. */
+function seams(pi: unknown): { startFullLane: (root: string, ctx: unknown) => Promise<void> } {
+  const s = (pi as { __reviewGateTestSeams?: { startFullLane: (root: string, ctx: unknown) => Promise<void> } })
+    .__reviewGateTestSeams;
+  assert.ok(s, "the extension must expose the lane on the test seam");
+  return s!;
+}
+
+function sidecar(repo: string): {
+  review: { verdict: string; fingerprint?: string | null; docSync?: string };
+  rounds?: Array<Record<string, unknown>>;
+  pendingReady?: {
+    conclusion: { verdict: string; findings: unknown[] };
+    tree: string;
+    head: string;
+    round: number;
+    at: string;
+  };
+  lastReadyReview?: unknown;
+} {
   return JSON.parse(readFileSync(join(repo, ".pi", "review-gate-state.json"), "utf8"));
 }
 
@@ -168,6 +218,153 @@ async function preparedRepo(): Promise<{ repo: string; pi: ReturnType<typeof mak
   assert.equal(prepared.isError, undefined, `prepare failed: ${prepared.content?.[0]?.text}`);
   return { repo, pi, ctx };
 }
+
+/**
+ * A repo prepared WITHOUT the bypass (2026-09-15).
+ *
+ * The other tests here need the real precommit lane out of the way, and the
+ * bypass is the sanctioned way past it — but a bypass is ALSO exactly what
+ * makes `readyLacksVerification` return false, so that fixture can never reach
+ * the case this one exists for: a reviewer that concludes before its lane
+ * lands. This one commits through git directly (the checkpoint tool is not
+ * what is under test) and leaves `precommit` at NOT_RUN with no full-lane tree
+ * on record — the state a round is in when the lane is still running.
+ */
+async function preparedRepoBeforeItsLane(): Promise<{
+  repo: string;
+  pi: ReturnType<typeof makeMockPi>;
+  ctx: unknown;
+}> {
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const ctx = pi.ctx;
+  await pi.handlers.get("session_start")!({}, ctx);
+  // The gate writes its sidecar under `.pi/`, and this fixture commits through
+  // git by hand: without the ignore, the gate's own state makes the worktree
+  // dirty and `prepare_review` refuses the round before anything can be tested.
+  writeFileSync(join(repo, ".gitignore"), ".pi/\n");
+  writeFileSync(join(repo, "a.ts"), "export const a = 2;\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", "feat: change");
+  const prepared = await internalTool(pi, "prepare_review")("id", { repo }, undefined, undefined, ctx) as {
+    isError?: boolean;
+    content: Array<{ text: string }>;
+  };
+  assert.equal(prepared.isError, undefined, `prepare failed: ${prepared.content?.[0]?.text}`);
+  return { repo, pi, ctx };
+}
+
+test("a READY with no full-lane PASS and NO lane running is REFUSED, not held (round-1 P1)", async () => {
+  // The hold is only legitimate while something can still come back for the
+  // conclusion — the lane's own landing, or the next round's prepare. With no
+  // lane in flight, parking it would stop the round forever (nothing else ever
+  // revisits a parked conclusion) while the reply told the agent NOT to
+  // re-submit. This fixture has no lane running, so it IS that case.
+  const { repo, pi, ctx } = await preparedRepoBeforeItsLane();
+  const concluded = reportConclusion(readerIO(new Map()), reportRecord(repo, { findings: [], findingsCount: 0 }));
+
+  const text = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+
+  assert.match(text, /recorded verdict BLOCKED/, text);
+  assert.match(text, /UNVERIFIED/, "the reply names verification as the reason, not findings");
+  assert.doesNotMatch(text, /不要重跑/,
+    "and it must never tell the agent to wait for a lane that is not running");
+  const st = sidecar(repo);
+  assert.equal(st.review.verdict, "BLOCKED", "refused, exactly as before this mechanism existed");
+  assert.equal(st.pendingReady, undefined, "nothing is parked");
+  assert.equal(st.rounds?.length, 1, "and the round is recorded as it always was");
+});
+
+test("a READY that outruns its lane is HELD, and that lane's own landing replays it (2026-09-15)", async () => {
+  const { repo, pi, ctx } = await preparedRepoBeforeItsLane();
+  const judgeScope = { range: "deadbeef..cafebabe", kind: "incremental" };
+  const concluded = reportConclusion(
+    readerIO(new Map()),
+    reportRecord(repo, { findings: [], findingsCount: 0, scope: judgeScope }),
+  );
+
+  // Start the lane the way `judge_submit` does, and record the verdict while it
+  // is STILL RUNNING — the measured race (16s of review against a 34s lane,
+  // seven seconds short) reproduced on purpose.
+  process.env.RG_FAKE_RUNNER_DELAY_MS = "250";
+  const lane = seams(pi).startFullLane(repo, ctx);
+  try {
+    const text = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+    assert.match(text, /HELD/, `the round must be held, not refused: ${text}`);
+    assert.match(text, /不要重跑/, "and the agent is told not to burn a round on identical content");
+    assert.match(text, /作废/, "…and what the THIRD ending looks like: an edit during the lane voids the hold");
+    // The correction matters as much as the endings: the first wording told the
+    // agent an edit voids the hold, which is the opposite of what this gate
+    // wants it to keep doing during a review (round-3 P2).
+    assert.match(text, /照常编辑工作区/, "…and that editing during the lane does NOT void it");
+    const held = sidecar(repo);
+    assert.equal(held.review.verdict, "PENDING", "nothing ships on a verdict that was never made");
+    assert.equal(held.pendingReady?.conclusion.verdict, "READY");
+    assert.equal(held.rounds?.length ?? 0, 0, "and the round does not join the history yet");
+  } finally {
+    await lane;
+    delete process.env.RG_FAKE_RUNNER_DELAY_MS;
+  }
+
+  // The lane landed PASS on that very tree: the gate replays the conclusion
+  // through the SAME recorder, so the round ends as the READY it always was —
+  // no re-submission, and no second implementation of the recording rules.
+  const st = sidecar(repo);
+  assert.equal(st.pendingReady, undefined, "a replayed conclusion is not left parked");
+  assert.equal(st.review.verdict, "READY", "the held round lands as the READY it always was");
+  assert.equal(st.rounds?.length, 1, "and joins the round history exactly as it would have");
+
+  // CONTROL — exit-goal criterion 2: the SAME conclusion recorded straight
+  // through (no hold in the way) leaves the same record. A second
+  // implementation of the recording rules is what this comparison would fail.
+  const direct = await preparedRepoBeforeItsLane();
+  await direct.pi.commands.get("gate-bypass")!.handler("fixture: control", direct.ctx);
+  const controlConclusion = reportConclusion(
+    readerIO(new Map()),
+    reportRecord(direct.repo, { findings: [], findingsCount: 0, scope: judgeScope }),
+  );
+  assert.deepEqual(controlConclusion.scope, judgeScope, "the fixture's scope must survive reportConclusion");
+  await recorders(direct.pi).recordReviewVerdict(controlConclusion, direct.repo, direct.ctx);
+  const straight = sidecar(direct.repo);
+  assert.equal(straight.review.verdict, "READY", "the control must reach READY, or it proves nothing");
+  assert.equal(st.review.verdict, straight.review.verdict);
+  assert.equal(st.review.fingerprint, straight.review.fingerprint,
+    "both bind to the reviewed TREE — not to a timestamp or a sha");
+  assert.equal(st.review.docSync, straight.review.docSync);
+  assert.deepEqual(st.rounds?.[0]?.fingerprints, straight.rounds?.[0]?.fingerprints);
+  assert.equal(st.rounds?.[0]?.verdict, straight.rounds?.[0]?.verdict);
+  assert.equal(st.rounds?.[0]?.findingsTotal, straight.rounds?.[0]?.findingsTotal);
+  // The AUDIT PAIR's judged half is where a dropped `scope` would have shown up
+  // (round-1 P2): the parked record carries it, so the replayed round states
+  // what its reviewer read, exactly as a straight one does.
+  const heldScope = st.rounds?.[0]?.scope as { reported?: unknown } | undefined;
+  const straightScope = straight.rounds?.[0]?.scope as { reported?: unknown } | undefined;
+  assert.deepEqual(heldScope?.reported, straightScope?.reported);
+  assert.deepEqual(heldScope?.reported, judgeScope, "and it is the judge's own scope, not a placeholder");
+});
+
+test("…and a round whose verification is already satisfied records its READY straight through", async () => {
+  // The other half of the pair: with no hold in the way (here the user's own
+  // `/gate-bypass` stands in for a satisfied verification — the fixture repo has
+  // no precommit runner to run), the very same conclusion is recorded as it
+  // always was. The HOLD-and-replay path itself is judged by
+  // `parkedReadyFate` (pure, in test/review-adjudicate.test.ts) and by the lane
+  // callback's structure in test/extension-structure.test.ts: this fixture
+  // cannot start a real lane, so a held round cannot be produced here.
+  const { repo, pi, ctx } = await preparedRepoBeforeItsLane();
+  await pi.commands.get("gate-bypass")!.handler("fixture: verification is not under test here", ctx);
+  const concluded = reportConclusion(readerIO(new Map()), reportRecord(repo, { findings: [], findingsCount: 0 }));
+
+  const text = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+
+  assert.match(text, /recorded verdict READY/, text);
+  const st = sidecar(repo);
+  assert.equal(st.review.verdict, "READY");
+  assert.equal(st.pendingReady, undefined, "nothing is ever parked on the straight-through path");
+  assert.equal(st.rounds?.length, 1, "the round joins the history exactly as it would have");
+  assert.equal(st.rounds?.[0]?.findingsTotal, 0);
+});
 
 /** The EXACT record shape a reviewer round writes today (round 4, verbatim). */
 function reportRecord(repo: string, over: Record<string, unknown> = {}): Record<string, unknown> {

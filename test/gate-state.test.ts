@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 
 import {
   emptyState,
+  isPendingReadyReview,
   isPlateaued,
   isOscillating,
   countOscillations,
@@ -1454,5 +1455,84 @@ test("an approval in the sidecar still needs the whole blob to be readable", () 
   }));
   assert.equal(loadSidecar(path)?.orchestrator?.approvedPlanHash, undefined,
     "any doubt about the blob drops the authority in it");
+});
+
+// ---------------------------------------------------------------------------
+// pendingReady — a READY the gate HOLDS while its lane lands (2026-09-15)
+
+/** The exact shape a parked conclusion has. Reused by both tests below. */
+function parkedReady(): Record<string, unknown> {
+  return {
+    conclusion: {
+      verdict: "READY",
+      findings: [],
+      cwd: "/repo",
+      // The judge's own scope stamp rides along with the conclusion (round-1 P2:
+      // dropping it made a replayed round write a different audit pair than a
+      // straight one).
+      scope: { range: "d694c07f4282..84d7cf0ae608", kind: "incremental" },
+    },
+    tree: "b90212e5bfbd4e7c2aaac4e3ba5e0f6b1676053d",
+    head: "6613a145e18a",
+    round: 5,
+    at: "2026-09-15T07:56:12.354Z",
+  };
+}
+
+test("isPendingReadyReview: only the exact shape is replayable", () => {
+  const parked = parkedReady();
+  assert.equal(isPendingReadyReview(parked), true);
+  for (const bad of [
+    undefined, null, [], "parked",
+    { ...parked, conclusion: undefined },
+    // Only a READY is ever parked: the other withholding reasons REFUSE the
+    // round outright, so a parked BLOCKED is not a shape the gate produces and
+    // not one it will replay.
+    { ...parked, conclusion: { verdict: "BLOCKED", findings: [] } },
+    { ...parked, conclusion: { verdict: "READY" } },
+    { ...parked, tree: "" },
+    { ...parked, head: "" },
+    { ...parked, at: "" },
+    { ...parked, round: "5" },
+    { ...parked, round: Number.POSITIVE_INFINITY },
+  ]) {
+    assert.equal(isPendingReadyReview(bad), false, `must refuse ${JSON.stringify(bad)}`);
+  }
+  // …but the carried fields are NOT checked: `scope` is stored verbatim and
+  // handed back to the same recorder, so an odd value must not cost the round
+  // its hold (the shape check exists to refuse replays the gate cannot make,
+  // not to re-audit the judge's own report).
+  assert.equal(
+    isPendingReadyReview({
+      ...parked,
+      conclusion: { verdict: "READY", findings: [], cwd: "/repo", scope: "odd" },
+    }),
+    true,
+  );
+});
+
+test("loadSidecar DROPS a malformed parked READY and keeps the rest of the state", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gate-parked-"));
+  const path = join(dir, "state.json");
+  try {
+    const state = emptyState("s", 10);
+    const parked = parkedReady();
+    writeFileSync(path, JSON.stringify({ ...state, pendingReady: parked }));
+    assert.deepEqual(loadSidecar(path)?.pendingReady, parked, "the real shape round-trips");
+
+    for (const bad of [
+      { ...parked, conclusion: { verdict: "BLOCKED", findings: [] } },
+      { ...parked, tree: "" },
+      { ...parked, round: "5" },
+      "not an object",
+    ]) {
+      writeFileSync(path, JSON.stringify({ ...state, pendingReady: bad }));
+      const loaded = loadSidecar(path);
+      assert.equal(loaded?.pendingReady, undefined, `dropped, not replayed: ${JSON.stringify(bad)}`);
+      assert.equal(loaded?.review.verdict, "PENDING", "…and the rest of the state survives the drop");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 

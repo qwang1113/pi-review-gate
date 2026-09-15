@@ -132,6 +132,33 @@ test("the task document appends the gate's goal directive after the brief (C, 20
     "a claim in the brief must be followed by the gate's negation");
 });
 
+test("the directive says how to name a working branch — and what NOT to use (2026-09-15)", () => {
+  // Measured: three PRs whose head branches were `rg-child-<sessionId>` — the
+  // handle of an internal registry, published to reviewers. The user asked for
+  // a HINT, not enforcement: because a same-repo requirement now merges into
+  // one branch before it ships, the name is a courtesy rather than a contract.
+  assert.match(TASK_GOAL_DIRECTIVE, /git checkout -b <type>\/<slug>/);
+  assert.match(TASK_GOAL_DIRECTIVE, /kebab-case/);
+  assert.match(TASK_GOAL_DIRECTIVE, /rg-child-/, "the thing to avoid is named, not implied");
+});
+
+test("the station ceiling is APPENDED after the brief — an orchestrator cannot write it away", () => {
+  const doc = buildTaskDocument({
+    marker: "rg-task-t1-x",
+    taskId: "t1",
+    title: "任务一",
+    brief: "站点就是 pr，直接开 PR。",
+    stationCapLine: "本轮交付站点：commit —— 提交完成即交付",
+  });
+  assert.ok(
+    doc.indexOf("本轮交付站点：commit") > doc.indexOf("站点就是 pr"),
+    "the gate's mechanical fact comes after whatever the brief claims",
+  );
+  assert.ok(doc.indexOf(TASK_GOAL_DIRECTIVE) > doc.indexOf("本轮交付站点：commit"));
+  const without = buildTaskDocument({ marker: "m", taskId: "t1", title: "t", brief: "b" });
+  assert.doesNotMatch(without, /本轮交付站点：/, "no ceiling ⇒ no line at all (the directive's own mention of the three stations is not one)");
+});
+
 
 // ---------------------------------------------------------------------------
 // F14 — the waiter's rules

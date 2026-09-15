@@ -22,6 +22,7 @@ import {
 import { STATE_VARIANT_ENV } from "../lib/gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
+import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
 import { HANDOFF_FILL_PLACEHOLDER } from "../lib/session-handoff.ts";
 
 function fakeDeps(overrides: Partial<SessionHandoffDeps> = {}): {
@@ -197,12 +198,21 @@ test("handoffExtraEnvFor: the successor keeps the mode, the address and its own 
   );
   assert.ok(!(ORCHESTRATION_ID_ENV in handoffExtraEnvFor({ kind: "loop", orchestrationId: "   " })),
     "an absent address is omitted, never passed as blank");
-
   assert.equal(handoffExtraEnvFor({ kind: "child", stateVariant: "child-3" })[STATE_VARIANT_ENV], "child-3");
   assert.ok(!(STATE_VARIANT_ENV in handoffExtraEnvFor({ kind: "loop" })));
+
+  // THE STATION CEILING RIDES THE RELAY (2026-09-15). It lives in the pane's
+  // environment, so a successor that did not receive it would negotiate a goal
+  // its plan already ruled out — and push/open the second PR the user forbade.
+  assert.equal(handoffExtraEnvFor({ kind: "child", stationCap: "commit" })[STATION_CAP_ENV], "commit");
+  assert.ok(!(STATION_CAP_ENV in handoffExtraEnvFor({ kind: "child" })),
+    "a session with no ceiling (a standalone loop) passes none on");
+  assert.ok(!(STATION_CAP_ENV in handoffExtraEnvFor({ kind: "child", stationCap: "   " })),
+    "a blank ceiling is ABSENT, never an empty variable");
 });
 
-test("a judge delegates the pane work through `requestSuccession`, and opens nothing itself", async () => {  const { deps, events } = fakeDeps({
+test("a judge delegates the pane work through `requestSuccession`, and opens nothing itself", async () => {
+  const { deps, events } = fakeDeps({
     kind: () => "judge",
     requestSuccession: (docPath, pendingFill) => {
       events.push(`request:${pendingFill}`);

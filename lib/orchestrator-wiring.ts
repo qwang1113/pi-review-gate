@@ -338,7 +338,7 @@ export interface OrchestratorHostBindings {
   sessionTranscriptPath(): string | undefined;
   /** Give a child its own checkout of a repo (see OrchestratorDeps). */
   createWorktree?(repoRoot: string, childId: string):
-    | { ok: true; path: string; branch: string }
+    | { ok: true; path: string; branch: string; note?: string }
     | { ok: false; reason: string };
   /** Settle a finished child's isolated checkout (see OrchestratorDeps). */
   settleWorktree?(input: {

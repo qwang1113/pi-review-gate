@@ -320,7 +320,19 @@ export interface OrchestratorDeps {
    * dispatch.ts is the only caller, and it fails closed).
    */
   createWorktree?(repoRoot: string, childId: string):
-    | { ok: true; path: string; branch: string }
+    | {
+      ok: true;
+      path: string;
+      branch: string;
+      /**
+       * What the checkout was SEEDED with (2026-09-15) — the local, gitignored
+       * files copied or linked in (lib/worktree-seed.ts), one line each. It
+       * rides back so the spawn receipt can say whether the child can actually
+       * run the repository's own tests, which is the whole reason the seed
+       * exists.
+       */
+      note?: string;
+    }
     | { ok: false; reason: string };
 
   /**

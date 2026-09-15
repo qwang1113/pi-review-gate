@@ -138,8 +138,16 @@ export interface ReviewPrepareToolDeps {
   previousRoundFindings(st: GateState): string[];
   /** The conclusion the previous round already reached, if any. */
   settledConclusion(st: GateState): SettledConclusion | undefined;
-  /** Record the range a verdict will bind to (consumed by the verdict recorder). */
-  registerReviewTarget(root: string, target: PreparedReviewTarget): void;
+  /**
+   * Record the range a verdict will bind to (consumed by the verdict recorder),
+   * and RETIRE any parked READY from the previous round (2026-09-15).
+   *
+   * The ctx travels with it because retiring one is a WRITE: a parked
+   * conclusion belongs to the round that dispatched it, and a new dispatch
+   * makes it history — leaving it in the sidecar would let a later PASS on that
+   * old tree replay a verdict the session has already moved past.
+   */
+  registerReviewTarget(root: string, target: PreparedReviewTarget, ctx: unknown): void;
   /** The git reads, so this module can be tested without a repository. */
   git: ReviewPrepareGit;
   /**
@@ -382,7 +390,7 @@ async function doPrepareReview(
   // with it so the recorder can write down what this round was DISPATCHED to
   // review beside what the judge reports it reviewed (auditability, not a
   // rule: nothing refuses a verdict over a mismatch).
-  deps.registerReviewTarget(root, { baseline, head, tree, scope: { range, kind: scopeNow.scope } });
+  deps.registerReviewTarget(root, { baseline, head, tree, scope: { range, kind: scopeNow.scope } }, ctx);
   const lines = [
     `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
     `stream=${streamPath}`,

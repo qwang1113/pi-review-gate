@@ -20,6 +20,7 @@ import {
   looksLikeMergeConflict,
   mergeWorktreeArgv,
   planSettlement,
+  reclaimWorktreeArgv,
   removeWorktreeArgv,
   repoRootOfWorktree,
 } from "../lib/orchestrator-worktree.ts";
@@ -62,7 +63,7 @@ test("keep touches nothing, and says where the work is", () => {
   assert.equal(WORKTREE_SETTLEMENTS.includes("keep"), true);
 });
 
-test("merge covers ALL the leftovers, then merges without committing — and the conflict path is planned UP FRONT", () => {
+test("merge covers ALL the leftovers, merges without committing, and RECLAIMS the checkout last", () => {
   const plan = planSettlement("merge", REPO, CHILD, "t13");
   // `add -A` THEN `commit`, never `commit -am` (round-5 P1): `-a` stages only
   // MODIFIED/DELETED tracked files, so every file the child CREATED would have
@@ -74,13 +75,18 @@ test("merge covers ALL the leftovers, then merges without committing — and the
   // was impossible. This form can be aborted, and the result is still STAGED.
   assert.deepEqual([...plan.steps[2]!], ["-C", REPO, "merge", "--no-commit", "--no-ff", childWorktreeBranch(CHILD)]);
   assert.ok(!plan.steps[2]!.includes("--squash"), "a squash cannot be rolled back");
-  // AND the reclamation is NOT here (round-6 P2): this merge is `--no-commit`,
-  // so at this point the child's work is STAGED and nothing else — deleting
-  // its checkout and branch would leave a `merge --abort` with no way back to
-  // it except the reflog. `discard` reclaims them once the merge is committed.
-  assert.equal(plan.steps.length, 3, "commit-leftovers, merge — and NOT the reclamation");
-  assert.ok(!plan.steps.some((s) => s[2] === "worktree"),
-    "a staged merge must not delete the only other copy of the work");
+  // THE DIRECTORY GOES, THE BRANCH STAYS (2026-09-15, user decision). The
+  // measured cost of keeping it: four settled children left four
+  // `<repo>-rg-<child>` checkouts beside the repository, invisible to
+  // `git branch` and there forever. The branch is what `git merge --abort`
+  // needs after a change of mind, and it costs nothing.
+  assert.deepEqual([...plan.steps[3]!], [...reclaimWorktreeArgv(REPO, CHILD)]);
+  assert.ok(!plan.steps[3]!.includes("-D"), "deleting the branch would leave a merge --abort with only the reflog");
+  assert.equal(plan.steps.length, 4, "commit-leftovers, merge, reclaim");
+  // ORDER IS THE SAFETY PROPERTY: a failure at any step stops the sequence, so
+  // a CONFLICTED merge never reaches the reclaim — the checkout the human now
+  // has to work in stays exactly where it is.
+  assert.equal(plan.steps[3], plan.steps[plan.steps.length - 1]);
   assert.deepEqual([...(plan.onConflict ?? [])].map((a) => [...a]), [[...abortMergeArgv(REPO)]]);
 });
 
