@@ -8899,7 +8899,22 @@ export default function reviewGate(pi: ExtensionAPI) {
           "review instead of blocking it), and that verification did not pass. The verdict is recorded " +
           "as BLOCKED: nothing here is shippable. Fix what precommit reported and submit the round again; " +
           "if it failed for an environment reason unrelated to this change, that is the user's call — " +
-          "`/gate-bypass <reason>` covers it and leaves a trace."
+          "`/gate-bypass <reason>` covers it and leaves a trace." +
+          // TWO WAYS TO GET HERE, AND THEY TELL THE AGENT OPPOSITE THINGS. A lane
+          // that is still running will record this very conclusion the moment it
+          // passes on this tree (that is the hold's whole point), so re-submitting
+          // buys nothing. With NO lane running there is nothing left to wait for
+          // and nothing that could replay it — the round concluded after its own
+          // verification had already landed without covering this content — so
+          // saying "did not pass" would send the agent looking for a failure that
+          // does not exist (round-7 finding, and the reason the second case is a
+          // refusal at all rather than a hold).
+          (withholding === "unverified-idle"
+            ? " NOTE: no precommit lane is running for this content — nothing is coming back to verify it, " +
+              "so there is nothing to wait for and nothing to replay. Re-submit once you have fixed what " +
+              "precommit reported."
+            : " A full lane IS still running for this content: if it passes on this same tree, this verdict " +
+              "is recorded automatically and you are woken — do NOT re-submit byte-identical content.")
         : "") +
       (cwdMismatch
         ? `\nCWD CHECK FAILED: ${cwdMismatch}. The conclusion requires the judge's own \`pwd\`, ` +
