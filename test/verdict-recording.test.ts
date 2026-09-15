@@ -294,6 +294,10 @@ test("a READY that outruns its lane is HELD, and that lane's own landing replays
     assert.match(text, /HELD/, `the round must be held, not refused: ${text}`);
     assert.match(text, /不要重跑/, "and the agent is told not to burn a round on identical content");
     assert.match(text, /作废/, "…and what the THIRD ending looks like: an edit during the lane voids the hold");
+    // The correction matters as much as the endings: the first wording told the
+    // agent an edit voids the hold, which is the opposite of what this gate
+    // wants it to keep doing during a review (round-3 P2).
+    assert.match(text, /照常编辑工作区/, "…and that editing during the lane does NOT void it");
     const held = sidecar(repo);
     assert.equal(held.review.verdict, "PENDING", "nothing ships on a verdict that was never made");
     assert.equal(held.pendingReady?.conclusion.verdict, "READY");

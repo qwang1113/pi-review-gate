@@ -1502,7 +1502,13 @@ test("isPendingReadyReview: only the exact shape is replayable", () => {
   // handed back to the same recorder, so an odd value must not cost the round
   // its hold (the shape check exists to refuse replays the gate cannot make,
   // not to re-audit the judge's own report).
-  assert.equal(isPendingReadyReview({ ...parked, conclusion: { ...parked.conclusion, scope: "odd" } }), true);
+  assert.equal(
+    isPendingReadyReview({
+      ...parked,
+      conclusion: { verdict: "READY", findings: [], cwd: "/repo", scope: "odd" },
+    }),
+    true,
+  );
 });
 
 test("loadSidecar DROPS a malformed parked READY and keeps the rest of the state", () => {
