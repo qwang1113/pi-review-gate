@@ -907,7 +907,8 @@ test("recover refuses while the pane is ALIVE, and re-opens the same session id 
     "the task never stopped being true");
 });
 
-test("a recovered child is handed its station ceiling again (2026-09-15)", async () => {  // The ceiling lives in the CHILD'S ENVIRONMENT, and a recovered pane is a
+test("a recovered child is handed its station ceiling again (2026-09-15)", async () => {
+  // The ceiling lives in the CHILD'S ENVIRONMENT, and a recovered pane is a
   // new process — the variable died with the old one. A child that comes back
   // unbounded could negotiate its goal at `pr` and open exactly the second PR
   // the plan's narrowing forbade.
@@ -935,7 +936,7 @@ test("a recovered child is handed its station ceiling again (2026-09-15)", async
     "a restart must not widen what the child was allowed to ship");
 });
 
-test("the ceiling is counted with the PLAN's repo key, not the resolved checkout (round-2 P1)", async () => {
+test("the ceiling is counted with the PLAN's repo key, not the resolved checkout (round-1 P2)", async () => {
   // `resolveTaskRepo` returns a `git --show-toplevel`: a plan naming a
   // subdirectory or a symlinked path resolves SOMEWHERE ELSE. Counting the
   // narrowing with one key and spawning from the other is how a narrowed repo
