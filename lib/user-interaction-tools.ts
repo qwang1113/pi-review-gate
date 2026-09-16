@@ -351,7 +351,8 @@ export async function doAskUser(
         // readable.
         //
         // THE GRANT NOTICE STAYS OUT OF THE BODY (reviewer P1, 2026-09-14).
-        // The body is cut from its TAIL, so appending the ⚠️ authorization
+        // The body was cut from its TAIL at the time, so appending the ⚠️
+        // authorization
         // notice after the question let a long question eat it — while
         // picking the recommended row still minted the proxy grant. That is
         // exactly the invisible-authorization hole the notice was added to

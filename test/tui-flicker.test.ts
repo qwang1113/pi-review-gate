@@ -210,7 +210,7 @@ test("FLICKER: the budget follows the REAL terminal — a 20-row window stays sa
     rows: 20, transcriptLines: 30, dialogRows: budgeted, frames: 10,
   });
   assert.equal(safe, 0,
-    "the height this test derives from the gate's own arithmetic must keep a 20-row window stable");
+    "the height this file's own geometry derives (it was exported by lib/dialog-budget.ts) must keep a 20-row window stable");
   const old = await countFullClears(TuiMainScreen, {
     rows: 20, transcriptLines: 30, dialogRows: DIALOG_CHROME_ROWS + DIALOG_BODY_MAX_LINES, frames: 10,
   });
