@@ -485,22 +485,22 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
     ? rawTitle.slice(0, GOAL_DIALOG_TITLE_MAX_CHARS) + "…"
     : rawTitle;
   return (
-    "目标全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
+    // ORDER IS THE BUDGET POLICY (2026-09-16). `fitDialogMessage` truncates
+    // from the TAIL, so the lines are written most-critical-first:
+    //   1. the untrusted facts the user is CONFIRMING (repo, station,
+    //      `goal-auditor 预审: PASS`) — losing one of these means consenting to
+    //      something the dialog never showed;
+    //   2. what approval / rejection will actually do;
+    //   3. the goal's own title, whose full text is on screen right above.
+    // The order used to put (2) before (1) and the title last but ONE, so on a
+    // narrow terminal the truncation cut INTO (1) long before it touched the
+    // title (measured: at 60 columns with a 120-character path, both the
+    // station line and the pre-review line were dropped). Extra untrusted
+    // facts go before everything for the same reason they always did.
+    (extraUntrusted ? extraUntrusted + "\n" : "") +
     "认可后：扩展把它写入 `" + LOOP_GOAL_RELPATH + "`，reviewer 逐条验收。\n" +
     "不认可就拒绝，然后告诉 AI 哪里不对；它会重新跟你确认后再提交。\n" +
-    // Extra untrusted facts (e.g. the repo a goal binds to) go BEFORE the
-    // title: fitDialogMessage truncates from the TAIL, so appending them at
-    // the end would drop exactly the fact the user must confirm.
-    //
-    // NOT SLICED AS A BLOCK (2026-09-16, measured). `slice(0, 200)` cut this
-    // clause by CHARACTER count, before any wrapping or row budget: a ~110
-    // character repo path pushed the station line off mid-sentence and deleted
-    // the `goal-auditor 预审: PASS` line entirely — while the comment right
-    // above claims this position is what keeps them, and the dialog went on
-    // asking for approval. The untrusted VALUE (the path) is capped where it
-    // is built; the consent-critical lines here are short and fixed, so they
-    // are not capped at all.
-    (extraUntrusted ? extraUntrusted + "\n" : "") +
+    "目标全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
     "标题（不可信数据）: " + title
   );
 }
