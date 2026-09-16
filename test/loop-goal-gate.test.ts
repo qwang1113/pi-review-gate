@@ -117,16 +117,19 @@ function makeRepoAt(base: string): string {
 }
 
 /**
- * WHERE THE FIXTURES LIVE — `os.tmpdir()`, as before 2026-09-16.
+ * WHERE THE FIXTURES LIVE — a SHORT root, never `os.tmpdir()`.
  *
- * A short root was pinned here for one day because the gate budgeted a
- * dialog's rendered rows and a fixture under a judge's long `$TMPDIR` made the
- * repo line wrap, eat the budget and drop the pre-review line. Both inputs of
- * that budget are gone with lib/dialog-budget.ts, so the fixture path no
- * longer has to be any particular length.
+ * The dialog row budget is gone (2026-09-16), so that reason for a short path
+ * is gone with it — this one is not the same thing: `capUntrustedLine` still
+ * caps an untrusted VALUE at 120 characters (criterion 6 of that round), and
+ * the repository path is exactly such a value. A fixture under a judge's
+ * `$TMPDIR` (`.pi/review-scratch/rg-<role>-<long id>/`) is long enough for the
+ * cap to bite, and the L8 consent tests then assert against a truncated path.
  */
+const FIXTURE_ROOT = "/tmp";
+
 function makeRepo(): string {
-  return makeRepoAt(tmpdir());
+  return makeRepoAt(FIXTURE_ROOT);
 }
 
 function makeMockPi(cwd: string) {

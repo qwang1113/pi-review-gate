@@ -159,11 +159,14 @@ export interface OrchestratorDeps {
    * same question shape now: 2–4 options, one marked （推荐）, and the
    * `✎ 不选，我说明原因` row whose text box is the reason a rejection carries.
    *
-   * `body` is the long half and goes through the dialog fitter; `pointer`
-   * tells the user WHERE the untruncated text is, and a caller may only pass
-   * one after it has actually shown that text (see
-   * {@link OrchestratorDeps.showToUser}) — promising a message nobody printed
-   * is the bug O-1 filed against the plan dialog.
+   * `body` is the long half (counts, consequences, the facts being confirmed)
+   * and reaches the box WHOLE — no fitter, no `pointer` (user decision,
+   * 2026-09-16: the row budget that used to cut it is gone, see
+   * lib/renderer-mode.ts). What a caller still owes the user is the transcript
+   * copy: anything long enough to need one is printed BEFORE the box opens
+   * (see {@link OrchestratorDeps.showToUser}) — that was the bug O-1 filed
+   * against the plan dialog, and it is why the copy stays even now that
+   * nothing is truncated.
    */
   askChoice(spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
 
