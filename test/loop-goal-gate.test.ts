@@ -26,16 +26,21 @@ import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 // gate session sets (RG_STATE_VARIANT & co.) are cleared before any spawn.
 neutraliseGateEnv();
 
-// PIN THE TERMINAL WIDTH. The gate budgets a dialog's rendered rows against the
-// REAL terminal width (`process.stdout.columns`, else `COLUMNS`, else 80) so a
-// long goal can never push the consent-critical lines off the screen — correct
-// behaviour, and environment-dependent for anyone RUNNING the tests: a runner
-// inherits whatever pane it was started in. Measured 2026-09-16: at COLUMNS=40
-// two assertions in this file failed (the goal dialog truncates before the
-// pre-review line), while 60 and 200 passed — on this branch AND on
-// origin/main, so it is a latent flake rather than a regression. Pinning the
-// width is what makes the suite answer the same way in every pane; the
-// implementation keeps reading the real thing.
+// PIN THE TERMINAL WIDTH — AND, FURTHER DOWN, THE FIXTURE'S PATH.
+//
+// The gate budgets a dialog's rendered rows against the REAL terminal width
+// (`process.stdout.columns`, else `COLUMNS`, else 80) so a long goal can never
+// push the consent-critical lines off the screen — correct behaviour, and
+// environment-dependent for anyone RUNNING the tests, because a runner inherits
+// BOTH inputs of that budget: the width of the pane it was started in, and the
+// LENGTH of the fixture's own path (the repo is rendered on a line too). Each
+// one alone is enough to wrap the text, eat the budget and drop the pre-review
+// line — measured 2026-09-16:
+//   - `COLUMNS=40` with a short fixture root ⇒ 2 failures in this file, 0 at 60
+//     and 200 (and the same on origin/main, so it is a latent flake either way);
+//   - the gate's own judge `$TMPDIR` with the width untouched ⇒ 1 failure — the
+//     path is long enough on its own, which is what `FIXTURE_ROOT` below fixes.
+// So both are pinned. The implementation keeps reading the real thing.
 process.env.COLUMNS = String(DIALOG_ASSUMED_COLUMNS);
 Object.defineProperty(process.stdout, "columns", {
   value: DIALOG_ASSUMED_COLUMNS,
@@ -144,9 +149,10 @@ function makeRepoAt(base: string): string {
  * the dialog budget and truncate the pre-review line — failing an assertion
  * that has nothing to do with what it tests, only when a JUDGE runs the
  * suite. Measured 2026-09-16 in a judge pane: 1/24 failures here with the
- * gate's own TMPDIR, 24/24 with `TMPDIR=/tmp` (and `COLUMNS` made no
- * difference at all). A short root takes the runner's environment out of the
- * budget's inputs.
+ * gate's own TMPDIR, 24/24 with `TMPDIR=/tmp` — and in that same run `COLUMNS`
+ * made no difference at all, because the WIDTH is the other, independent input
+ * (pinned at the top of this file). A short root takes the runner's
+ * environment out of this half of the budget.
  */
 const FIXTURE_ROOT = "/tmp";
 
