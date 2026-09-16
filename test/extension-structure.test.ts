@@ -4111,16 +4111,24 @@ test("a NEW session keeps the orchestration registry but never its approval (B1)
   // session id) lost the predecessor's whole registry, and a takeover had
   // nothing left to take over, which is how `rm` became the only move.
   //
-  // The APPROVAL must NOT survive: it is permission the user gave to a
-  // session that is gone. Re-obtaining it costs one dialog; inheriting it
-  // would let a session nobody approved spawn children.
+  // The APPROVAL survives ONLY for the predecessor's own handoff successor:
+  // for anybody else it is permission the user gave to a session that is
+  // gone, and re-obtaining it costs one dialog. The 2026-09-06 rule is
+  // narrowed to the sessions it was about — WHICH those are is
+  // `isHandoffSuccessorOf`'s one answer (the marker AND the sidecar's own
+  // session id), so the approval cannot ride into a session a third session's
+  // state happens to be sitting there for.
   const at = SRC.indexOf("restored.sessionId !== sessionId");
   assert.ok(at > 0, "the new-session reset branch must exist");
   const branch = SRC.slice(at, SRC.indexOf("} else if (sidecarCorrupt)", at));
   assert.ok(branch.length > 0 && branch.length < 4000, "the branch window must be the branch");
 
-  assert.match(branch, /state\.orchestrator = withoutPlanApproval\(restored\.orchestrator\)/,
+  assert.match(branch, /const relaySuccessor = isHandoffSuccessorOf\(process\.env, restored\.sessionId\)/,
+    "the heir check overlays the marker on the sidecar's owner — one call, both facts");
+  assert.match(branch, /state\.orchestrator = successorRuntime\(restored\.orchestrator, relaySuccessor\)/,
     "the orchestration runtime must be carried into the fresh state, minus the permission");
+  assert.match(branch, /if \(relaySuccessor\) state = inheritGoalContract\(state, restored\)/,
+    "a handoff successor also carries the user's contracts and the round budget");
   // WHICH fields grant power is the registry module's to know. Spelled out
   // here as a destructure, the list went stale the moment the approval grew a
   // field: `approvedPlanHistory` (round 9) would have ridden into a session
@@ -6142,7 +6150,7 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   assert.doesNotMatch(lane, /lastFullPassTree\s*=\s*outcome\.fingerprint/,
     "the post-run fingerprint must never become the record");
   // The rule itself is pure and lives in one place.
-  assert.match(SRC, /^\s*invalidateBindings,\n\s*nextFullPassTree,\n\} from "\.\.\/lib\/gate-state\.ts";/m,
+  assert.match(SRC, /^\s*invalidateBindings,\n(?:\s*\w+,\n)*\s*nextFullPassTree,\n\} from "\.\.\/lib\/gate-state\.ts";/m,
     "one imported rule, not a second copy of the branches here");
   // AND THE THIRD INPUT: what the lane COVERED has to reach the rule.
   // The first attempt read it off the tool's reply (`pre.details?.testScope`)

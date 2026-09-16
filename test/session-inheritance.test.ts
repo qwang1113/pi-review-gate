@@ -22,6 +22,7 @@ import {
   PREDECESSOR_TRANSCRIPT_ENV,
   formatInheritanceBrief,
   handoffGeneration,
+  isHandoffSuccessorOf,
   readInheritance,
   successorEnv,
   successorSessionId,
@@ -88,6 +89,27 @@ test("inheritance is read back, and blanks are treated as absent", () => {
     { predecessorPane: "%1" },
     "an unrecognised kind is dropped, not passed through",
   );
+});
+
+test("inheritance goes to the handoff successor of the session the sidecar belongs to — and to nobody else", () => {
+  // TWO facts, and each one alone is the wrong answer. The marker says the
+  // gate opened this process to replace somebody (`orchestrator_attach` and an
+  // ordinary new session carry none, and their behaviour must not change); the
+  // sidecar's own sessionId says WHOSE state is on disk, so an approval cannot
+  // ride into a session a third session's state happens to be sitting there
+  // for.
+  const predecessor = "01a08908-a531-7764-876a-9fa512fdfd28";
+  const marker = { [PREDECESSOR_SESSION_ENV]: predecessor } as NodeJS.ProcessEnv;
+
+  assert.equal(isHandoffSuccessorOf(marker, predecessor), true, "the predecessor's own successor");
+  assert.equal(isHandoffSuccessorOf(marker, "some-other-session"), false,
+    "another session's sidecar is not the predecessor's state");
+  assert.equal(isHandoffSuccessorOf({} as NodeJS.ProcessEnv, predecessor), false,
+    "no marker ⇒ an ordinary new session or a takeover: nothing is inherited");
+  assert.equal(isHandoffSuccessorOf(marker, undefined), false, "an ownerless sidecar inherits nothing");
+  assert.equal(isHandoffSuccessorOf(marker, "   "), false, "a blank owner is not an owner");
+  assert.equal(isHandoffSuccessorOf({ [PREDECESSOR_SESSION_ENV]: "  " } as NodeJS.ProcessEnv, ""), false,
+    "a blank marker is not a marker");
 });
 
 test("the brief sends the successor to the document first, and says who closes the predecessor", () => {

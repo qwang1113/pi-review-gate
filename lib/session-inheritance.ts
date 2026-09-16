@@ -113,6 +113,33 @@ export function readInheritance(env: NodeJS.ProcessEnv = process.env): Inheritan
   };
 }
 
+/**
+ * Is THIS process the handoff successor OF THE SESSION THE SIDECAR BELONGS TO?
+ *
+ * One question, two facts, because either one alone gives the wrong answer:
+ *
+ *  - the MARKER (`RG_HANDOFF_PREDECESSOR_SESSION`) says the gate opened this
+ *    process to replace somebody. A takeover (`orchestrator_attach`) and an
+ *    ordinary new session carry no marker, and their behaviour — everything
+ *    the predecessor held is reset — stays exactly as it is.
+ *  - the sidecar's OWN `sessionId` says WHOSE state is on disk. A marker alone
+ *    would inherit whatever a THIRD session wrote into this repo's sidecar
+ *    last, and the orchestration approval is permission the user gave to ONE
+ *    session: handing it to a session that session never handed over to is
+ *    the widening this whole gate exists to prevent.
+ *
+ * The two are checked HERE, together, so no caller can carry the marker and
+ * forget the identity — the caller gets one boolean and nothing to sequence.
+ */
+export function isHandoffSuccessorOf(
+  env: NodeJS.ProcessEnv,
+  sidecarSessionId: string | null | undefined,
+): boolean {
+  const predecessor = readInheritance(env).predecessorSession;
+  const owner = (sidecarSessionId ?? "").trim();
+  return predecessor !== undefined && owner.length > 0 && predecessor === owner;
+}
+
 /** The successor's first action, per kind — one sentence, no tool sequencing to remember. */
 const FIRST_ACTION: Record<InheritedKind, string> = {
   orchestrator:

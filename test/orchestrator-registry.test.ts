@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  lineageAuthorizes,
+} from "../lib/orchestrator-plan-approval.ts";
+import {
   closableChild,
   emptyRuntime,
   findChild,
@@ -14,8 +17,8 @@ import {
   normalizeRuntime,
   registerChild,
   runningTaskIds,
+  successorRuntime,
   vanishedChildren,
-  withoutPlanApproval,
   type ChildSession,
   type OrchestratorRuntime,
 } from "../lib/orchestrator-registry.ts";
@@ -219,8 +222,9 @@ test("SECURITY: a blob we could not fully read loses the lineage with the approv
 test("SECURITY: a new session inherits the child REGISTRY and nothing that grants power", () => {
   // The stripping used to be spelled out at the call site in the extension,
   // which is how a newly added authorizing field rides into a session the
-  // user never approved. It is one function now, and this is its contract.
-  const inherited = withoutPlanApproval({
+  // user never approved. It is one function now, and this is its contract
+  // for everything EXCEPT the predecessor's own handoff successor.
+  const inherited = successorRuntime({
     ...runtimeWith(child()),
     approvedPlanHash: GOOD_HASH,
     approvedPlanAt: NOW,
@@ -229,7 +233,7 @@ test("SECURITY: a new session inherits the child REGISTRY and nothing that grant
     grants: [{ scope: "sensitive-edit", grantedAt: NOW, via: "gate-grant" }],
     relay: { handoffPath: "docs/h.md", at: NOW },
     ownPane: "%9",
-  });
+  }, false);
 
   assert.equal(inherited.approvedPlanHash, undefined);
   assert.equal(inherited.approvedPlanAt, undefined);
@@ -242,6 +246,47 @@ test("SECURITY: a new session inherits the child REGISTRY and nothing that grant
   assert.deepEqual(inherited.grants?.map((g) => g.scope), ["sensitive-edit"], "so are the user's own grants");
   assert.equal(inherited.relay?.handoffPath, "docs/h.md");
   assert.equal(inherited.ownPane, "%9");
+});
+
+test("a RELAY successor keeps the approval — same work, same worktree, minutes later", () => {
+  // The 2026-09-06 rule ("the approval is permission the user gave to a
+  // session that is gone") was written about a TAKEOVER and an ordinary new
+  // session. A handoff successor is neither: the predecessor handed the same
+  // work over, and re-obtaining the approval there costs the restatement
+  // dialog, the plan re-audit and the plan approval dialog for a requirement
+  // not one word of which changed. The decision is narrowed, not overturned —
+  // and WHICH sessions count as the successor is `isHandoffSuccessorOf`'s
+  // answer, never this module's guess.
+  const approved: OrchestratorRuntime = {
+    ...runtimeWith(child()),
+    approvedPlanHash: GOOD_HASH,
+    approvedPlanAt: NOW,
+    approvedPlan: {
+      hash: GOOD_HASH,
+      at: NOW,
+      maxParallel: 1,
+      deliveryStation: "commit",
+      tasks: [{ id: "a", dependsOn: [], execution: "serial", repo: "/repo" }],
+    },
+    approvalAmendments: [{ at: NOW, changes: ["细化了边界"] }],
+    approvedPlanHistory: [GOOD_HASH],
+  };
+
+  const inherited = successorRuntime(approved, true);
+
+  assert.equal(inherited.approvedPlanHash, GOOD_HASH);
+  assert.equal(inherited.approvedPlanAt, NOW);
+  assert.deepEqual(inherited.approvedPlan, approved.approvedPlan);
+  assert.deepEqual(inherited.approvalAmendments, approved.approvalAmendments);
+  assert.deepEqual(inherited.approvedPlanHistory, [GOOD_HASH]);
+  assert.deepEqual(inherited.children.map((c) => c.id), ["a-1"], "the live panes travel too");
+
+  // THE CARRY WIDENS NOTHING: the inherited approval is still bound to the
+  // plan CONTENT it names, so a different plan is refused by the very check
+  // that would refuse a freshly obtained approval.
+  assert.equal(lineageAuthorizes(inherited.approvedPlanHistory, GOOD_HASH), true);
+  assert.equal(lineageAuthorizes(inherited.approvedPlanHistory, "b".repeat(64)), false,
+    "an inherited approval authorizes the content the user signed, not the session that holds it");
 });
 
 

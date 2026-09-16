@@ -278,6 +278,34 @@ agent 每轮都要先挑一个。这三个工具连同它们依赖的抓屏与�
 继任关系（`lib/session-exclusivity.ts` 的 `successorOf`，判定排在**心跳新鲜度之前**），
 所以即使前任没来得及释放，接手依然成立。
 
+**接力继承什么，`attach` 不继承什么**（2026-09-16）。继任者带着前任的 session id
+启动，门禁在恢复 sidecar 时就凭这条线认亲：`lib/session-inheritance.ts` 的
+`isHandoffSuccessorOf` 要求**两件事同时成立** —— 环境里有交接标记
+（`RG_HANDOFF_PREDECESSOR_SESSION`），**且** sidecar 里记的 `sessionId` 就是那个前任。
+一个标记不够，因为 sidecar 里可能是**第三个**会话的状态，而许可不能飘进一个前任从没
+交棒给它的会话。
+
+认亲成立时，恢复路径多搬两份**用户已经确认过的内容**（其余一概归零，因为其余都属于
+「这个会话做过的那一轮」，而继任者一轮都没做过）：
+
+- **编排 runtime 的 plan 批准五件套**（`approvedPlanHash` / `approvedPlanAt` /
+  `approvedPlan` / `approvalAmendments` / `approvedPlanHistory`）——
+  `lib/orchestrator-registry.ts` 的 `successorRuntime(runtime, fromHandoff)`。同一份工作、
+  同一个 worktree，几分钟前才批过的 plan 不该再走一遍审计 + 批准框。
+- **会话自己的契约与预算** —— `lib/gate-state.ts` 的 `inheritGoalContract`：
+  `restatement`（需求反述）、`loopGoal`（已批准的 loop goal）、`rounds` /
+  `turnsWithoutGoal`（轮次预算；能靠接力重置的就不是预算了）。
+
+两份都**不放宽任何许可**：每份记录仍绑着它当初绑的**内容**（plan 绑 canonical 文本、
+loop goal 绑 goal 文件文本、反述绑 text+hash），内容一变，既有校验立刻失效 —— 继承只
+搬运记录，不新增任何无条件放行的路径。会话级的**权力**也照旧不继承：`bypass`、
+scope limit 不随接力走，`taskMode` 走它自己的 env 通道。
+
+**`attach` 接管不继承任何东西**：`orchestrator_attach` 的会话不是前任开的继任者，
+环境里没有交接标记，所以它走的是普通新会话的那条分支 —— 批准、反述、goal、预算一律
+重新取得。「批准不随会话转移」（2026-09-06 的用户决定）没有被推翻，只是**收窄**到
+它当初真正针对的那些会话。
+
 接手现场的另一半是 `orchestrator_attach({orchestrationId})`：后继者带着同一个 id 启动
 之后，一次拿回 plan 与任务状态、每个子会话的状态与资产、通道里还没人答的请求，以及
 **孤儿任务**（plan 说 running、却没有存活 pane 在做）—— 那是崩溃或重启唯一会留下的

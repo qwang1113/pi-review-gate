@@ -664,6 +664,60 @@ export function emptyState(sessionId: string | null, maxRounds: number): GateSta
 }
 
 /**
+ * WHAT A HANDOFF SUCCESSOR CARRIES OVER from its predecessor's session state.
+ *
+ * A successor runs as a NEW session id, so the restore path starts it from
+ * {@link emptyState}. Resetting almost all of that is right: a verdict, a
+ * precommit, a fingerprint, a change flag and a bypass all describe ONE
+ * round's work, and the successor has done none of it.
+ *
+ * Four fields describe the USER's contracts instead, and they are the ones a
+ * handover must not throw away — re-asking for them re-asks a question whose
+ * answer has not changed, which is how a project manager's handover cost the
+ * user a restatement dialog, a plan re-audit and a plan approval dialog for a
+ * requirement not one word of which was different:
+ *
+ *  - `restatement` — what the user confirmed the requirement IS (it already
+ *    outlives the drafts that follow it; a handover is one more draft);
+ *  - `loopGoal` — the goal text the user APPROVED;
+ *  - `rounds` / `turnsWithoutGoal` — the ROUND BUDGET. Inherited on purpose,
+ *    and not as a courtesy: a successor that restarts the count would let a
+ *    handover wash away rounds already spent, and the budget exists precisely
+ *    to end a session that is going in circles.
+ *
+ * WHAT DOES NOT CARRY is the rest of {@link GateState}: `bypass`, the scope
+ * limits, the verdicts, the fingerprints, the change flags, the repo set and
+ * the session's own task mode all describe THIS session's standing, and a
+ * successor starts with none of them (the same asymmetry the
+ * concurrent-sidecar merge in this module states from the other side).
+ *
+ * Two more omissions are deliberate rather than forgotten. `goalPrereview`
+ * and `planAudit` are audits of ONE DRAFT — they answer "did a judge read
+ * these exact words?" — so they live and die with the text they judged, and a
+ * successor that has to negotiate anything new re-earns them for the new
+ * draft. Nobody is asked to re-confirm an answer that has not changed, which
+ * is what this function is for; re-running an AUDIT of a changed draft is
+ * exactly what the audit is for.
+ *
+ * None of this widens a permission: every carried record is bound to the
+ * CONTENT it names and re-verified by its reader (`isLoopGoalConfirmed`
+ * against the goal file, `restatementConfirmed` over text+hash,
+ * `approvedPlanHash` against the canonical plan), so a change to any of them
+ * expires the inherited record exactly as fast as a fresh one.
+ */
+export function inheritGoalContract(target: GateState, predecessor: GateState): GateState {
+  return {
+    ...target,
+    ...(predecessor.restatement ? { restatement: predecessor.restatement } : {}),
+    ...(predecessor.loopGoal ? { loopGoal: predecessor.loopGoal } : {}),
+    ...(predecessor.rounds.length > 0 ? { rounds: predecessor.rounds } : {}),
+    ...(predecessor.turnsWithoutGoal !== undefined
+      ? { turnsWithoutGoal: predecessor.turnsWithoutGoal }
+      : {}),
+  };
+}
+
+/**
  * Content-change invalidation — the ONE place a session's own edit downgrades
  * standing bindings. READY → PENDING and PASS → NOT_RUN, and the fingerprint
  * goes with the verdict: a downgraded binding must not keep pointing at the

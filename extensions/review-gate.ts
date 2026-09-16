@@ -321,7 +321,7 @@ import {
 // long block (orchestrator_wait / judge_wait) instead of being queued behind it.
 import { notifyUserInput } from "../lib/poll-wait.ts";
 
-import { formatInheritanceBrief, handoffGeneration, PREDECESSOR_SESSION_ENV, readInheritance, successorEnv, successorSessionId } from "../lib/session-inheritance.ts";
+import { formatInheritanceBrief, handoffGeneration, isHandoffSuccessorOf, PREDECESSOR_SESSION_ENV, readInheritance, successorEnv, successorSessionId } from "../lib/session-inheritance.ts";
 import {
   childWorktreeBranch,
   childWorktreePath,
@@ -331,7 +331,7 @@ import {
   planSettlement,
   repoRootOfWorktree,
 } from "../lib/orchestrator-worktree.ts";
-import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { addGrant, emptyRuntime, hasGrant, successorRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "../lib/change-baseline.ts";
 import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
@@ -474,6 +474,7 @@ import {
   type RoundScopeRecord,
   type ScopeStampRecord,
   invalidateBindings,
+  inheritGoalContract,
   nextFullPassTree,
 } from "../lib/gate-state.ts";
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
@@ -4240,18 +4241,36 @@ export default function reviewGate(pi: ExtensionAPI) {
       // (a plain `pi`, hence a fresh session id) lost the predecessor's whole
       // registry, and a TAKEOVER had nothing left to take over.
       //
-      // The APPROVAL does not survive, and that asymmetry is the point: the
-      // registry is a fact about the world, while the approval is permission
-      // the user gave to a session that is gone. Re-obtaining it costs one
-      // dialog; inheriting it silently would let a session nobody approved
-      // spawn children. WHICH fields carry that permission is
+      // The APPROVAL does not survive — UNLESS this process is the
+      // predecessor's own handoff successor, and THAT asymmetry is the point.
+      // The registry is a fact about the world; the approval is permission the
+      // user gave to a session that is gone, so an ordinary new session (and a
+      // takeover through `orchestrator_attach`, which carries no handoff
+      // marker either) re-obtains it — one dialog, and no session nobody
+      // approved can spawn children. A RELAY SUCCESSOR is the one case where
+      // the same permission was given to the same WORK, minutes ago, in this
+      // same worktree: re-obtaining it there costs the restatement dialog, the
+      // plan re-audit and the plan approval dialog for a requirement not one
+      // word of which changed (measured — that is what a project-manager
+      // handover actually cost the user). The 2026-09-06 decision is narrowed
+      // to the sessions it was about, and WHICH sessions those are is one
+      // answer: `isHandoffSuccessorOf` checks the handoff marker against the
+      // session id the sidecar itself records, so the approval cannot ride
+      // into a session a THIRD session's state happens to be sitting there
+      // for. WHICH fields carry that permission is
       // lib/orchestrator-registry.ts's to know, not this call site's: spelled
       // out here, the list silently went stale the moment the approval grew a
       // field (`approvedPlanHistory` would have ridden into the new session
       // and let it write the plan back to a content it was never granted).
+      const relaySuccessor = isHandoffSuccessorOf(process.env, restored.sessionId);
       if (restored.orchestrator) {
-        state.orchestrator = withoutPlanApproval(restored.orchestrator);
+        state.orchestrator = successorRuntime(restored.orchestrator, relaySuccessor);
       }
+      // …and the successor's own contracts travel the same way: what the user
+      // confirmed the requirement is, the goal they approved, and the round
+      // budget a handover must not reset. The rule (and what deliberately does
+      // NOT carry) is lib/gate-state.ts's.
+      if (relaySuccessor) state = inheritGoalContract(state, restored);
     } else if (sidecarCorrupt) {
       state = emptyState(sessionId, DEFAULT_MAX_ROUNDS);
       state.hasCodeChange = true;
