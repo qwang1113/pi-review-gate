@@ -291,13 +291,15 @@ async function doPrepareReview(
       baseline = lastConcluded;
     } else {
       // Chain rewritten: find the squash point by tree identity (pure
-      // logic in lib/review-baseline.ts, pinned by tests — round-12 P2);
-      // a clean miss falls back to the branch base, then the checkpoint
-      // baseline below.
+      // logic in lib/review-baseline.ts, pinned by tests — round-12 P2).
+      // A clean miss leaves `baseline` unset on purpose: the block below is
+      // the ONE place that decides what an unset baseline falls back to. It
+      // used to call `branchBaseBaseline` again here as well, which was a
+      // second fork of the same rule (and a second `git merge-base` when the
+      // first answer was empty) — round-2 quality P2, 2026-09-16.
       baseline = st.checkpoint?.prevSha && st.review.fingerprint
         ? deps.git.squashPointBaseline(root, st.review.fingerprint, st.checkpoint!.prevSha)
         : undefined;
-      if (!baseline) baseline = deps.git.branchBaseBaseline(root);
     }
   }
   if (!baseline) {
@@ -326,7 +328,13 @@ async function doPrepareReview(
     // a branch base nor a checkpoint to fall back to) and keeps the old
     // empty-range exit-goal round.
     baseline = deps.git.branchBaseBaseline(root);
-    if (!baseline && st.checkpoint) {
+    // `st.checkpoint?.sha`, NOT `st.checkpoint` (round-2 quality P2,
+    // 2026-09-16): `sha` is parsed with no validation, so a record carrying an
+    // EMPTY one would take the IIFE below into `revParse("^")`, throw, and
+    // return "" — a baseline that is not `undefined`, so it survives both the
+    // `baseline === undefined` default below and the empty-range judgement,
+    // and the range becomes `""..HEAD`.
+    if (!baseline && st.checkpoint?.sha) {
       baseline = st.checkpoint.prevSha || (() => {
         try {
           return deps.git.revParse(root, `${st.checkpoint!.sha}^`);
