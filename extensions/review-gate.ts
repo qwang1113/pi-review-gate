@@ -7111,6 +7111,21 @@ export default function reviewGate(pi: ExtensionAPI) {
     /** Judge id — the hierarchy key and channel file name. */
     judgeId?: string;
     error?: string;
+    /**
+     * DID THIS ROUND'S TASK REACH ITS JUDGE? — the fact a FAILED dispatch has
+     * to carry.
+     *
+     * Two failures keep a `paneId` and they mean OPPOSITE things (quality round
+     * P2, 2026-09-16): a boot-check timeout means the task rode in on the pane's
+     * argv and the round is under way (the opener may still wait on it), while a
+     * failed channel write into a REUSED pane means the pane is alive and this
+     * round's task was never delivered. A caller that decides "is the round
+     * running?" from `paneId` alone therefore gets one of the two wrong — and
+     * the one it gets wrong leaves a judge working on a round the agent was
+     * told had failed. Absent on success (it is `ok`), and NEVER inferred:
+     * each failure site says which it is.
+     */
+    delivered?: boolean;
   }
 
   /** Does this role's session dir already hold a transcript to continue? */
@@ -7472,7 +7487,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           text: task,
         });
       } catch (err) {
-        return { ok: false, reused: true, sessionId, sessionDir, paneId: existing.paneId, judgeId, error: `本轮任务写不进通道 —— ${(err as Error).message}` };
+        // NOT DELIVERED: the reuse wrote nothing, so this round's task never
+        // reached the judge — the pane being alive says nothing about it.
+        return { ok: false, reused: true, delivered: false, sessionId, sessionDir, paneId: existing.paneId, judgeId, error: `本轮任务写不进通道 —— ${(err as Error).message}` };
       }
       // ONE write, not two: the Map used to be mutated here (streamPath,
       // spawnedAt) and the table registered right after, which is exactly how
@@ -7647,7 +7664,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // opened leaves the previous lane alone, and the next dispatch decides
         // the same rotation again from a registry that still has it.
         if (opened.deliveryFailed) rotation.retirePrevious();
-        return { ok: false, reused: continuesSession, sessionId, sessionDir, error: detail, ...(opened.paneId === undefined ? {} : { paneId: opened.paneId }), judgeId };
+        return { ok: false, reused: continuesSession, delivered: opened.deliveryFailed === true, sessionId, sessionDir, error: detail, ...(opened.paneId === undefined ? {} : { paneId: opened.paneId }), judgeId };
       }
       // The new pane is up and registered: the lane it replaces is now safe to
       // close and forget (idempotent, and a no-op when nothing changed).
@@ -8454,14 +8471,17 @@ export default function reviewGate(pi: ExtensionAPI) {
           ...(judge.role === "reviewer" && judges.length > 1 ? { qualityRoundDispatched: true } : {}),
         });
         if (!d.ok) {
-          // A KEPT PANE IS A DISPATCHED ROUND (2026-09-05). The only failure that
-          // still names a pane is the boot check timing out, and that path
-          // deliberately keeps the pane AND its registration — the judge may
-          // simply be slow, its task already rode in on the argv, and the receipt
-          // tells the opener to wait on it. So the audited draft goes on record
+          // A KEPT PANE IS A DISPATCHED ROUND (2026-09-05). A boot-check timeout
+          // is the failure that names a pane AND delivered the task (it rode in
+          // on the argv), so the audited draft goes on record
           // here too: without it a late report has no pending kind to bind to and
           // the whole round is lost. `judge_spawn` makes the same call, and the
           // two must not disagree about what a kept pane means.
+          //
+          // …AND A PANE IS NOT ENOUGH TO SAY THAT (quality round P2, 2026-09-16):
+          // the channel-write failure on a REUSED pane also carries one, with the
+          // task never delivered. `delivered` is what tells the two apart, which
+          // is why the abandonment below reads it and not `paneId`.
           if (d.paneId && role === "goal-auditor") {
             pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
             persistJudgeHierarchy();
@@ -8474,18 +8494,19 @@ export default function reviewGate(pi: ExtensionAPI) {
           // re-submitted, started a second quality round beside a head nobody
           // was waiting on any more, and the first one's verdict was orphaned.
           //
-          // …EXCEPT WHEN THE PANE WAS KEPT (functional round P1, 2026-09-16).
-          // The boot-check timeout deliberately keeps the pane AND its
-          // registration — the task rode in on the argv and the round may still
-          // complete — so cancelling the judges already accepted would kill a
-          // healthy quality round, leave this very pane running, and make the
-          // round's READY unrecordable (`decideQualityHold` refuses when nobody
-          // can still deliver the quality verdict) while the receipt points the
-          // agent at the pane it was told to wait on. A kept pane means the
-          // round is DISPATCHED: only a failure that kept nothing abandons it.
-          if (!d.paneId) {
+          // …EXCEPT WHEN THE TASK ACTUALLY REACHED THE JUDGE (functional
+          // round P1 / quality P2, 2026-09-16). Two failures keep a pane and
+          // they mean opposite things: a boot-check timeout means the task rode
+          // in on the pane's argv and the round may still complete (cancelling
+          // the judges already accepted would kill a healthy quality round,
+          // leave this very pane running, and make the round's READY
+          // unrecordable while the receipt points the agent at it), while a
+          // failed channel write into a REUSED pane delivered nothing at all.
+          // `delivered` is that distinction — never `paneId`, which both sites
+          // carry.
+          if (d.delivered !== true) {
             for (const already of accepted) {
-              cancelJudgeRound(root, already.role, "本轮另一个 judge 没能派出 —— 这一轮整体作废");
+              cancelJudgeRound(root, already.role, "本轮另一个 judge 的这一个轮次没投递出去 —— 这一轮整体作废");
             }
           }
           const lead = "review-gate: judge_submit 失败 — ";

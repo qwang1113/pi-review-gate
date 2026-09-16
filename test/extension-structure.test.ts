@@ -6306,12 +6306,16 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
     "the round records WHICH quality judge it dispatched — the fact the hold reads");
   // …AND IN EITHER DIRECTION (functional round P2, 2026-09-16): a round whose
   // SECOND judge cannot start must not leave the first one judging a head the
-  // agent was told had failed. But a failure that KEPT ITS PANE is a dispatched
-  // round (round P1, same day): cancelling the rest there would kill a healthy
-  // quality round and make this one's READY unrecordable while the receipt
-  // points the agent at the pane it just told it to wait on.
-  assert.match(judges, /if \(!d\.paneId\) \{\s*for \(const already of accepted\) \{\s*cancelJudgeRound\(root, already\.role,/,
-    "only a failure that kept NO pane abandons the round");
+  // agent was told had failed. The distinction is `delivered`, NOT `paneId`
+  // (quality round P2, same day): both failure paths keep a pane, but a
+  // boot-check timeout delivered the task on the argv while a failed channel
+  // write into a REUSED pane delivered nothing.
+  assert.match(judges, /if \(d\.delivered !== true\) \{\s*for \(const already of accepted\) \{\s*cancelJudgeRound\(root, already\.role,/,
+    "only a round whose task was NOT delivered abandons its siblings");
+  assert.doesNotMatch(judges, /if \(!d\.paneId\) \{/, "a kept pane is not the test — the two failures mean opposite things");
+  // …and the fact is set by each failure site, never inferred by the caller.
+  assert.match(SRC, /delivered: opened\.deliveryFailed === true/, "the boot-check timeout DID deliver the round (the task rode in on argv)");
+  assert.match(SRC, /delivered: false, sessionId, sessionDir, paneId: existing\.paneId/, "a failed channel write did NOT");
 
   // ── 3. THE PRECONDITION: dispatch keeps it, RECORDING enforces it ───────
   const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
