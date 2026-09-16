@@ -69,7 +69,7 @@
 | `request` | 子 → 编排 | 我弹了一个框：标题、**全部选项（原文、按序）**、正文 payload、topic |
 | `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / orchestrator / dismissed / **interrupted**（instruct 打断时解除的框，不是拒绝） |
 | `answer` | 编排 → 子 | 这个请求的答案 |
-| `instruct` | 编排 → 子 | 打断你并立即投递（`interrupt`，缺省）或切进你当前这一轮（`steer`）；`followUp` 只剩 judge 通道在用 |
+| `instruct` | 编排 → 子 | 打断你并立即投递（`interrupt`，缺省）或切进你当前这一轮（`steer`）；`followUp` 已无生产调用者（judge 次轮派发 2026-09-16 起改用 `interrupt`），枚举值与子会话侧的读取路径保留，只为让旧门禁构建写下的通道记录仍读得懂 |
 | `instruct-ack` | 子 → 编排 | 我注入了（或没能注入，附原因） |
 
 两个方向共用一个文件，每条记录自报 `from`。分成两个文件只会让要同步的路径翻倍：
@@ -274,9 +274,8 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 
 取消它的理由是这个工具的语义：上级发话是因为子会话**现在**就该知道，一条在它要纠正的
 那一轮之后才到的纠正，等于没人执行的纠正。默认值若是「最晚到」的那一种，那么最常见的
-一次调用恰恰最没用。`followUp` 作为**通道枚举值**仍然存在，因为 judge 次轮派发用的就是
-它（一轮任务确实是「你忙完再读」），子会话侧的读取/注入路径也照旧 —— 取消的只是项目
-经理的参数面。
+一次调用恰恰最没用。`followUp` 作为**通道枚举值**仍然存在 —— 子会话侧的读取/注入路径照旧，旧门禁构建写下的通道记录还得读得懂 —— 但**已经没有任何生产调用者**：judge 次轮派发 2026-09-16 起改用 `interrupt`。排队投递让任务停在通道上、而 opener 登记表已经把轮号推到了下一轮，于是旧轮交卷时盖上了新一轮的号（实测：第 1 轮的 BLOCKED 结论被记成 round 2，第 2 轮的结论被当「重复调用」丢弃）。取消的只是项目经理
+的参数面。
 
 文本写进通道，由**子会话自己的门禁**用 pi 的 API 注入。**被替换掉的是什么**：
 `tmux send-keys`，它产出过四条独立缺陷 —— 任务书被截断（F7）、没有 Enter 提交（F8）、
@@ -452,7 +451,7 @@ TOOL end reason=input-abort elapsedMs=23041               ← 170ms 后返回
 
 - **谁能拉**：`event.source !== "extension"`。门禁自己注入的
   `[REVIEW_GATE_RESUME]`、项目经理 `orchestrator_instruct` 的 `steer` 投递、以及 judge
-  通道那条 `followUp` 次轮派发都**不算** —— `steer` 的语义是「带着这条继续做」，而
+  通道那条 judge 次轮派发（2026-09-16 起是 `interrupt`，此前是 `followUp`）都**不算** —— `steer` 的语义是「带着这条继续做」，而
   `interrupt` 在宿主层本来
   就会 abort 当前 turn。否则一条例行注入就能腰斩一轮 review。
 - **打断谁**：本进程里**每一个正在阻塞的 `pollUntil`**。它是等待骨架的第二个中断源
@@ -685,8 +684,10 @@ checkpoint 后，settle 立刻把**上一轮**那份旧 report 当成本轮裁�
 现在 review 的绑定是 `round-and-content`，两条判据**同时**成立才记录，任一不成立都 fail-closed
 （用户决策：round 对不上时**不许**退回时间戳）：
 
-1. `report.round` 等于本轮 dispatch 登记的 `roundSeq`（judge 交卷时从登记表读同一个数，
-   judge 侧代码一行没改）；
+1. `report.round` 等于本轮 dispatch 登记的 `roundSeq`（**那个数随任务一起送给 judge** —— 2026-09-16
+   起写在那条 instruct 记录的 `roundSeq` 字段里，judge 侧优先用它、登记表只作回退；
+   此前它只从登记表读，而登记表在 dispatch 那一刻就已经前进 —— 那正是下面那条被写成
+   「理论情形」的竞态，它 2026-09-16 实测成了事故）；
 2. `report.at` **严格晚于** `state.checkpoint.at`（本轮内容诞生的时刻）。
 
 三条 fail-closed 边界：report 没有 round、登记表没有 `roundSeq`、**在 checkpoint 确实存在的前提下**
@@ -725,8 +726,15 @@ checkpoint 记录都没有**时不拒绝（注意是门禁状态、不是 git �
 
 已知的**退化情形**（不是缺陷，是事实）：worktree 干净时 `review_checkpoint` 不提交也不刷新
 `checkpoint.at`，所以「零改动重新绑定」的那一轮里时间戳判据退化，此时挡住旧 report 的是 round
-与游标。两条判据都挡不住的理论情形只有一种：reviewer 拖到下一轮 checkpoint 之后才交卷 ——
-它交卷时会重读最新的 `roundSeq`，两条判据都会认为它属于新的一轮。
+与游标。
+
+**曾被写成「理论情形」、2026-09-16 实测成事故的那一种，现在修掉了。** 上一轮还在跑时重新
+派发：登记表的 `roundSeq` 在 dispatch 那一刻就前进，而旧轮拖到那时才交卷 —— 它读到的是**新一轮
+的号**，于是旧结论盖在新轮名下（两条判据都认为它属于新的一轮），而真正的新一轮交卷被
+`judge_conclude` 当「重复调用」丢弃。实测：第 1 轮的 BLOCKED 被记成 round 2，第 2 轮（审修
+hermetic 测试）的结论留在 findings 流里没能入账，opener 拿到的则是 round 2 的范围配 round 1 的
+verdict。两处修复：派发改 `interrupt`（不再把任务排在旧轮后面，窗口从整轮时长压到毫秒级），
+以及轮号**随任务走**（上面第 1 条）—— 交卷的轮号不再取决于一张已经前进的表。
 
 
 **「已被 wait 记下」不是过期（2026-09-05，adviser 发现的 P0）**：同步审计链的等待走的就是

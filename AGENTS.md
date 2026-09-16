@@ -90,8 +90,10 @@ reviewer over the WHOLE change:
   submitting (the runner caches by input: unchanged content reuses the
   recorded PASS in seconds). Develop with targeted tests only.
   The reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
-  starts at the last REVIEWED commit, so a chain of checkpoints since the
-  last READY is all covered (round-9 P1); there is no second reviewer of
+  starts at the last commit a round **concluded** about (READY or BLOCKED),
+  and at the BRANCH BASE when no round ever has — a round without a conclusion
+  must never let the baseline step past its content (round-9 P1, round-10 P1);
+  there is no second reviewer of
   kind. When the round's channel report lands, the opener records the verdict
   itself (the gate's settle path records it and wakes you with the standard report; audit chains do the same) — you never carry
   a verdict from one tool to another. The recording keeps every mechanical

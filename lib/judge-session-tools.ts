@@ -54,6 +54,7 @@ import {
   reportText,
   HEARTBEAT_STALE_MS,
   type ChannelIO,
+  type ChannelRecord,
   type ReportConclusion,
   type ReviewScopeStamp,
 } from "./orchestrator-channel.ts";
@@ -385,6 +386,44 @@ function checkOpener(
   return { ok: false, text: `review-gate: ${lastReason}` };
 }
 
+/** The `at` of the newest instruction this pane was given — its newest TASK. */
+function newestInstructAt(records: ReadonlyArray<ChannelRecord>): string | undefined {
+  for (let i = records.length - 1; i >= 0; i -= 1) {
+    const record = records[i]!;
+    if (record.kind === "instruct") return record.at;
+  }
+  return undefined;
+}
+
+/**
+ * Did the consumed report arrive AFTER the pane's newest task?
+ *
+ * The half of `settled` that is not about the pane. `already-consumed` means a
+ * report is in and the cursor passed it — but a `cursor-only` binding
+ * (adviser) never compares round numbers, so immediately after a RE-DISPATCH
+ * the probe would still be looking at the PREVIOUS round's consumed report, on
+ * a pane whose heartbeat has not yet left `idle`, and answer "nothing left to
+ * receive" for a round that has not started. That is the same kind of lie this
+ * criterion exists to kill, pointing the other way (round-1 quality P1,
+ * 2026-09-16).
+ *
+ * "Newer than the task" separates the two cases. No task at all is NOT the
+ * suspect case — a pane's first round arrives as a file, not as an instruction
+ * — so it may settle; an unreadable timestamp may not, because the strict
+ * direction here is the one that does not tell the agent to walk away.
+ */
+function reportIsNewerThanLastTask(
+  reportAt: string | undefined,
+  lastTaskAt: string | undefined,
+): boolean {
+  if (lastTaskAt === undefined) return true;
+  if (reportAt === undefined) return false;
+  const report = Date.parse(reportAt);
+  const task = Date.parse(lastTaskAt);
+  if (!Number.isFinite(report) || !Number.isFinite(task)) return false;
+  return report > task;
+}
+
 // ---------- the wait criteria (this module's own) ----------
 
 export interface PaneJudgeWaitObservation {
@@ -568,7 +607,17 @@ export function probeJudgeRound(
   // in and the cursor has passed it" — the same source, not a new one. The
   // pane state is what keeps it honest: a WORKING pane is a round in flight,
   // and that one still has an event to wait for.
-  if (selected.reason === "already-consumed" && (state === "idle" || state === "done")) {
+  // …and the report must be NEWER than the pane's last task: a `cursor-only`
+  // binding never compares round numbers, so right after a re-dispatch the
+  // only report the probe can see is the PREVIOUS round's, already consumed,
+  // on a pane still reporting `idle` — and answering "nothing left to
+  // receive" for a round that has not started is the same lie in the other
+  // direction (round-1 quality P1, 2026-09-16).
+  if (
+    selected.reason === "already-consumed"
+    && (state === "idle" || state === "done")
+    && reportIsNewerThanLastTask(selected.at, newestInstructAt(read.records))
+  ) {
     paintTitle("done");
     return {
       done: true,

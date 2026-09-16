@@ -9282,11 +9282,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     st.review = {
       verdict: parsed.verdict,
       fingerprint: bindTree,
-      // Round-9 P1: the reviewed COMMIT sha rides the READY so the next
+      // Round-9 P1: the reviewed COMMIT sha rides the verdict so the next
       // prepare can baseline from it (covering every later checkpoint).
-      ...(parsed.verdict === "READY" && reviewTargets.get(targetRoot)
-        ? { commitSha: reviewTargets.get(targetRoot)!.head }
-        : {}),
+      //
+      // EVERY CONCLUDED VERDICT CARRIES IT (2026-09-16), not just READY. The
+      // baseline rule is「从最后一个**有结论**的轮次起算」, and while only READY
+      // was recorded, a round that produced NO conclusion — a re-submit that
+      // interrupted it, a precommit FAIL, a crash — left the next prepare to
+      // guess, and the guess was the newest checkpoint's parent. Measured that
+      // day: a whole round's changes (d28714e..a70f2a1) dropped out of every
+      // later range while the gate went on believing the chain was reviewed.
+      ...(reviewTargets.get(targetRoot) ? { commitSha: reviewTargets.get(targetRoot)!.head } : {}),
       at: new Date().toISOString(),
       // Code↔doc attestation travels with the verdict it came from; absent
       // stays absent (blocks under the docSync knob — fail-closed).

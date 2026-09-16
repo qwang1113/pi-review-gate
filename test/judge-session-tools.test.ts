@@ -915,6 +915,29 @@ test("the wait probe: a round ALREADY concluded and recorded ENDS the wait", () 
   const pending = probeJudgeWait(g.deps, w, { ...cursors, reportId: "rep-12" });
   assert.equal(pending.done, false, "a pane that is working is not a settled round");
   assert.equal(pending.reason, "pending");
+
+  // …AND A RE-DISPATCH CANCELS IT (round-1 quality P1, 2026-09-16). A
+  // `cursor-only` binding (adviser) never compares round numbers, so right
+  // after a new task the probe would still be looking at the PREVIOUS round's
+  // consumed report, on a pane whose heartbeat has not left `idle` — and
+  // 「没有可等的了」 for a round that has not started is the same lie this
+  // criterion exists to kill, pointing the other way.
+  const h = fake();
+  const d = seed(h, { streamPath: "/logs/stream.jsonl" });
+  writeReport(h, d, "READY", "rep-13");
+  noteState(h, d, "idle");
+  appendRecord(channelWriter(h), channelOf(d), {
+    kind: "instruct",
+    from: "orchestrator",
+    at: new Date(1_700_000_060_000).toISOString(),
+    instructId: "in-next",
+    mode: "interrupt",
+    text: "next round, just dispatched",
+  });
+  const awaiting = probeJudgeWait(h.deps, d, { ...cursors, reportId: "rep-13" });
+  assert.equal(awaiting.done, false,
+    "the consumed report is OLDER than this pane's task — the round has not run yet");
+  assert.equal(awaiting.reason, "pending");
 });
 
 test("judge_wait: a leftover report keeps the round open and is named in the reply", async () => {
