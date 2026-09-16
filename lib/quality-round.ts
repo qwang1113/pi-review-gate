@@ -36,6 +36,7 @@
  */
 
 import { buildStreamDirective } from "./review-stream.ts";
+import { QUALITY_ROUND_SPEC, REVIEW_ROUND_SPEC } from "./audit-round-specs.ts";
 
 /**
  * Extensions that carry no code — USED AS AN EXCLUSION LIST, never as a
@@ -238,6 +239,30 @@ export type RoundLanding =
   | { party: "quality"; verdict: string }
   | { party: "reviewer"; verdict: string }
   | { party: "lane"; verdict: string };
+
+/**
+ * WHICH PARTY OF A ROUND AN AUDIT KIND IS — the bridge between the two
+ * vocabularies, and the reason it exists is a measured P1.
+ *
+ * `lib/audit-round-specs.ts` names a round by its KIND (`quality`, `review`,
+ * `goal`, `plan`, `advice`); the cancel matrix names its members by ROLE
+ * (`quality`, `reviewer`). The extension compared the settle's kind against
+ * `"reviewer"` — a word that never appears as a kind — so the matrix's second
+ * row was dead code: a BLOCKED functional round neither stopped the quality
+ * round nor aborted the lane it was spending minutes on, while the receipt and
+ * the quality round's own note promised the agent it had (functional round P1,
+ * 2026-09-16).
+ *
+ * The kinds are READ FROM THE SPECS, not spelled again: a renamed kind then
+ * breaks this bridge loudly (the matrix would receive `undefined` and cancel
+ * nothing) instead of silently skipping one row — and the test below pins both
+ * translations.
+ */
+export function roundCancelParty(kind: string | undefined): "quality" | "reviewer" | undefined {
+  if (kind === QUALITY_ROUND_SPEC.kind) return "quality";
+  if (kind === REVIEW_ROUND_SPEC.kind) return "reviewer";
+  return undefined;
+}
 
 /**
  * WHO STOPS WHOM — the cancel matrix of a parallel round (2026-09-16), as a

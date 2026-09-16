@@ -609,6 +609,12 @@ test("L2 STALL BREAKER: an answered gate dialog is motion — a live negotiation
   assert.match(facts, /previousObservationAt:\s*lastStallObservedAt/, "the EVENT boundary is the previous observation");
   assert.match(facts, /pausedForUser:\s*state\.pausedQuestion !== undefined/,
     "a parked dialog is waiting on a person, not spinning");
+  // The NOTICE's attribution needs the clock too: "we talked to the user" is
+  // only an explanation while it is RECENT (functional round P2, 2026-09-16 —
+  // without the window the provider branch is unreachable for the rest of the
+  // session).
+  assert.match(SRC.slice(breakerAt, SRC.indexOf("REVIEW_GATE_RESUME", start)), /nowMs: Date\.now\(\)/,
+    "the cause classifier is given the time it must judge recency against");
   // The observation stamp is written after the decision, so an interaction that
   // lands later belongs to the NEXT observation (that is what makes it an event).
   assert.match(SRC.slice(breakerAt, SRC.indexOf("REVIEW_GATE_RESUME", start)),
@@ -6298,6 +6304,11 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   assert.ok(failAt > 0 && qualityNoteAt > failAt, "a failed spawn returns before the next judge is started");
   assert.match(judges, /noteQualityRoundDispatched\(root, d\.judgeId\)/,
     "the round records WHICH quality judge it dispatched — the fact the hold reads");
+  // …AND IN EITHER DIRECTION (functional round P2, 2026-09-16): a round whose
+  // SECOND judge cannot start must not leave the first one judging a head the
+  // agent was told had failed.
+  assert.match(judges, /for \(const already of accepted\) \{\s*cancelJudgeRound\(root, already\.role,/,
+    "a half-started round is abandoned, not left running");
 
   // ── 3. THE PRECONDITION: dispatch keeps it, RECORDING enforces it ───────
   const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
@@ -6342,8 +6353,10 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   const applyAt = SRC.indexOf("async function applyRoundCancel(");
   assert.ok(applyAt > 0, "one place applies the matrix");
   const apply = SRC.slice(applyAt, SRC.indexOf("\n  /**", applyAt));
+  assert.match(apply, /const party = roundCancelParty\(kind\)/, "the audit KIND is translated, never compared to a role (functional round P1, 2026-09-16: `kind === \"reviewer\"` was dead — the kind is `review`)");
+  assert.doesNotMatch(apply, /kind === "reviewer"/, "the unreachable comparison may not come back");
   assert.match(apply, /roundCancelPlan\(\{/, "the decision comes from the pure table, not from branches here");
-  assert.match(apply, /kind === "quality" \? \(st\.quality\?\.verdict \?\? ""\) : st\.review\.verdict/,
+  assert.match(apply, /verdict: party === "quality" \? \(st\.quality\?\.verdict \?\? ""\) : st\.review\.verdict/,
     "…and it reads the RECORDED verdict, never the word a judge printed");
   assert.match(apply, /applyCancelPlan\(/, "the effect comes from the ONE applier");
   // The LANE goes through the same table and the same applier — INCLUDING its

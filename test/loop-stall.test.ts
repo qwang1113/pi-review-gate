@@ -250,17 +250,30 @@ test("REGRESSION: a live negotiation does not trip the breaker — and stops cou
 });
 
 test("classifyStallCause: the most specific observable fact wins, provider last", () => {
-  const baseCause = { pausedForUser: false, goalConfirmed: true, hasUnreviewedChanges: false };
+  const NOW = Date.parse("2026-09-16T12:00:00Z");
+  const baseCause = { pausedForUser: false, goalConfirmed: true, hasUnreviewedChanges: false, nowMs: NOW };
   assert.equal(classifyStallCause({ ...baseCause, pausedForUser: true }), "waiting-user");
   assert.equal(classifyStallCause({ ...baseCause, pausedForUser: true, goalConfirmed: false }), "waiting-user");
   assert.equal(classifyStallCause({ ...baseCause, goalConfirmed: false }), "goal-unapproved");
   assert.equal(classifyStallCause({ ...baseCause, hasUnreviewedChanges: true }), "gates-unmet");
+  // A conversation that is STILL GOING is the honest reading of "nothing moved".
   assert.equal(
-    classifyStallCause({ ...baseCause, lastUserInteractionAt: "2026-09-16T10:10:00Z" }),
+    classifyStallCause({ ...baseCause, lastUserInteractionAt: "2026-09-16T11:55:00Z" }),
     "waiting-user",
-    "nothing else outstanding but the session has been talking to a person",
+    "nothing else outstanding, and the gate talked to the user five minutes ago",
+  );
+  // …and one from hours ago is NOT (functional round P2, 2026-09-16): asking
+  // only "did this session ever answer a dialog" made the provider branch — the
+  // only one that names it — unreachable for the rest of the session, so a real
+  // outage would have been reported as 在等用户.
+  assert.equal(
+    classifyStallCause({ ...baseCause, lastUserInteractionAt: "2026-09-16T09:00:00Z" }),
+    "unexplained",
+    "a stale exchange explains nothing about today's turn",
   );
   assert.equal(classifyStallCause(baseCause), "unexplained", "only here does the provider get named");
+  // An unreadable stamp is not evidence of a conversation (fail-closed).
+  assert.equal(classifyStallCause({ ...baseCause, lastUserInteractionAt: "not-a-date" }), "unexplained");
 });
 
 test("the notice for a non-provider cause does NOT send the reader to the provider first", () => {

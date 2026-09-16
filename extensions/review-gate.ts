@@ -410,6 +410,7 @@ import {
   qualityPrecondition,
   qualityRoundSkip,
   qualityStandingFor,
+  roundCancelParty,
   roundCancelPlan,
   skippedQualityRecord,
   type RoundCancelPlan,
@@ -8465,6 +8466,16 @@ export default function reviewGate(pi: ExtensionAPI) {
             persistJudgeHierarchy();
           }
           progress.fail("spawn 失败");
+          // A ROUND NEVER STARTS HALF, IN EITHER DIRECTION (functional round P2,
+          // 2026-09-16). The loop above only guarded quality→reviewer; when the
+          // REVIEWER could not start, the quality judge was already running and
+          // registered, and the reply said the submission FAILED — so the agent
+          // re-submitted, started a second quality round beside a head nobody
+          // was waiting on any more, and the first one's verdict was orphaned.
+          // The round is abandoned explicitly instead.
+          for (const already of accepted) {
+            cancelJudgeRound(root, already.role, "本轮另一个 judge 没能派出 —— 这一轮整体作废");
+          }
           const lead = "review-gate: judge_submit 失败 — ";
           return {
             content: [{ type: "text", text: `${lead}${d.error ?? "review pane 未能开出来"}` }],
@@ -8500,6 +8511,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // parallel path starts two, and naming only the routed one while printing
       // the OTHER's id/pane is how a receipt ends up describing a judge that is
       // not the one it points at — the agent then waits on the wrong pane.
+      // `routed` keeps the detail fields honest for the same reason: they are
+      // matched by ROLE, never by position.
+      const routed = accepted.find((a) => a.role === dispatchRole) ?? accepted[accepted.length - 1];
       const lines = [
         `review-gate: 已受理本轮任务 — ${accepted.map((a) => `${a.role}（judge ${a.judgeId}）`).join(" + ")}。`,
         ...accepted.map((a) => `- ${a.role}: pane ${a.paneId} · transcript ${a.sessionDir}`),
@@ -8530,10 +8544,15 @@ export default function reviewGate(pi: ExtensionAPI) {
           qualityRound: dispatchRole === QUALITY_ROLE,
           /** EVERY judge this submission started, in dispatch order. */
           judges: accepted,
-          reused: accepted[accepted.length - 1]?.reused ?? false,
-          paneId: accepted[accepted.length - 1]?.paneId,
-          judgeId: accepted[accepted.length - 1]?.judgeId,
-          sessionDir: accepted[accepted.length - 1]?.sessionDir,
+          // THE ROUTED JUDGE'S OWN FIELDS, MATCHED BY ROLE (quality round P2,
+          // 2026-09-16): the parallel round starts two judges, and a `role`
+          // naming one of them beside the other's id/pane is the same lie the
+          // reply text had. Position would drift the moment the order changes;
+          // the role cannot.
+          reused: routed.reused,
+          paneId: routed.paneId,
+          judgeId: routed.judgeId,
+          sessionDir: routed.sessionDir,
           streamPath,
         },
       };
@@ -9386,13 +9405,20 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   async function applyRoundCancel(kind: string | undefined, root: string, ctx?: unknown): Promise<string | undefined> {
     const notes: string[] = [];
-    if (kind === "quality" || kind === "reviewer") {
+    // THE KIND IS TRANSLATED, NEVER COMPARED TO A ROLE (functional round P1,
+    // 2026-09-16): a functional round settles as kind `"review"`, so comparing
+    // it with the ROLE name (`reviewer`) was dead code — the matrix's second
+    // row never ran, and a BLOCKED reviewer left the quality round and the lane
+    // running. `roundCancelParty` owns that translation, and the test beside it
+    // pins both directions.
+    const party = roundCancelParty(kind);
+    if (party !== undefined) {
       const st = stateForRepo(root);
       notes.push(
         ...applyCancelPlan(
           roundCancelPlan({
-            party: kind,
-            verdict: kind === "quality" ? (st.quality?.verdict ?? "") : st.review.verdict,
+            party,
+            verdict: party === "quality" ? (st.quality?.verdict ?? "") : st.review.verdict,
           }),
           root,
         ),
@@ -11438,6 +11464,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           hasUnreviewedChanges:
             (state.hasCodeChange || state.hasDocChange) && state.review.verdict !== "READY",
           lastUserInteractionAt,
+          nowMs: Date.now(),
         });
         try { ctx.ui.notify(buildStallNotice(stall.repeats, cause), "warning"); } catch { /* headless */ }
       }

@@ -244,13 +244,30 @@ export function stallInMotion(facts: StallMotionFacts): boolean {
 export type StallCause = "waiting-user" | "goal-unapproved" | "gates-unmet" | "unexplained";
 
 /**
+ * HOW RECENT an exchange with the user has to be for "we are waiting on a
+ * person" to be the honest reading of a stalled loop.
+ *
+ * WHY A WINDOW IS NEEDED AT ALL (functional round P2, 2026-09-16): the first
+ * version asked only whether the session had EVER answered a gate dialog, which
+ * is true for the rest of the session once the goal approval closes — so the
+ * `unexplained` branch (the only one that names the provider) became
+ * unreachable, and a real provider outage would be reported as "waiting for
+ * you, not the provider". Recency is what separates the two.
+ *
+ * It is a REPORTING threshold, never an exemption: whether the loop is excused
+ * is `stallInMotion`'s event rule, and nothing here can keep the breaker off.
+ */
+export const STALL_WAITING_USER_WINDOW_SEC = 30 * 60;
+
+/**
  * WHICH CAUSE THE GATE CAN ACTUALLY SEE — most specific first.
  *
  * The order is the contract: every fact below is read from the sidecar, and a
  * cause may only be claimed when nothing narrower is true. "Provider is down"
  * is the LAST resort, not the first guess — it is the one cause the agent
  * cannot verify from inside the loop, so naming it wrongly costs a round of
- * looking in the wrong place.
+ * looking in the wrong place. And every other branch has to be REACHABLE for
+ * that last one to mean anything: see the window above.
  *
  * `hasUnreviewedChanges` is "this session edited something and no READY covers
  * it" — the case where the agent has an obvious next action and was simply not
@@ -261,13 +278,31 @@ export function classifyStallCause(input: {
   pausedForUser: boolean;
   goalConfirmed: boolean;
   hasUnreviewedChanges: boolean;
+  /** ISO of the last gate↔user exchange that got an answer. */
   lastUserInteractionAt?: string | undefined;
+  /** Now, in ms — passed in so the rule stays pure and testable. */
+  nowMs: number;
+  /** The recency window; see STALL_WAITING_USER_WINDOW_SEC. */
+  windowSec?: number;
 }): StallCause {
   if (input.pausedForUser) return "waiting-user";
   if (!input.goalConfirmed) return "goal-unapproved";
   if (input.hasUnreviewedChanges) return "gates-unmet";
-  if (input.lastUserInteractionAt) return "waiting-user";
-  return "unexplained";
+  return withinWindow(input.lastUserInteractionAt, input.nowMs, input.windowSec ?? STALL_WAITING_USER_WINDOW_SEC)
+    ? "waiting-user"
+    : "unexplained";
+}
+
+/**
+ * Did this ISO stamp land inside the window? Unreadable stamps are NOT recent
+ * (fail-closed: the message falls back to the external causes rather than
+ * claiming a conversation it cannot date).
+ */
+function withinWindow(at: string | undefined, nowMs: number, windowSec: number): boolean {
+  if (!at) return false;
+  const parsed = Date.parse(at);
+  if (!Number.isFinite(parsed)) return false;
+  return nowMs - parsed <= windowSec * 1000;
 }
 
 /**

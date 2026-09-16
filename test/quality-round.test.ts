@@ -9,9 +9,11 @@ import {
   qualityPrecondition,
   qualityRoundSkip,
   qualityStandingFor,
+  roundCancelParty,
   roundCancelPlan,
   skippedQualityRecord,
 } from "../lib/quality-round.ts";
+import { QUALITY_ROUND_SPEC, REVIEW_ROUND_SPEC } from "../lib/audit-round-specs.ts";
 
 test("isSourceFile: unknown = code (fail-closed), only enumerated non-code is skipped", () => {
   // Languages this gate has never been told about are CODE. The gate installs
@@ -127,6 +129,20 @@ test("roundCancelPlan: the FAILED LANE stops only the reviewer — the quality r
     assert.deepEqual(roundCancelPlan({ party: "lane", verdict }), {
       cancelQuality: false, cancelReviewer: true, abortLane: false,
     }, `${verdict}: an unreadable lane verdict is not PASS`);
+  }
+});
+
+test("roundCancelParty: the audit KIND is translated to the matrix's party — `review` is the reviewer's round", () => {
+  // THE P1 THIS PINS (functional round, 2026-09-16): the extension compared the
+  // settle's kind against `"reviewer"`, but a functional round settles as kind
+  // `"review"`, so the matrix's second row was unreachable — a BLOCKED reviewer
+  // neither stopped the quality round nor aborted the lane, while the receipt
+  // told the agent it had.
+  assert.equal(roundCancelParty(QUALITY_ROUND_SPEC.kind), "quality");
+  assert.equal(roundCancelParty(REVIEW_ROUND_SPEC.kind), "reviewer");
+  assert.equal(REVIEW_ROUND_SPEC.kind, "review", "the kind and the role are DIFFERENT words — that is the whole bug");
+  for (const other of ["goal", "plan", "advice", undefined, ""]) {
+    assert.equal(roundCancelParty(other as string | undefined), undefined, `${String(other)} cancels nothing`);
   }
 });
 
