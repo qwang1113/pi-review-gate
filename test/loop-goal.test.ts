@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { MODE_CONFIRM_TITLE, buildModeConfirmMessage } from "../lib/task-mode.ts";
+import { buildModeConfirmMessage } from "../lib/task-mode.ts";
 import {
   GOAL_CONFIRM_TITLE,
   buildGoalTranscriptMessage,

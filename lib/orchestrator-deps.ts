@@ -165,7 +165,7 @@ export interface OrchestratorDeps {
    * {@link OrchestratorDeps.showToUser}) — promising a message nobody printed
    * is the bug O-1 filed against the plan dialog.
    */
-  askChoice(spec: ChoiceSpec, opts?: { body?: string; pointer?: string; signal?: AbortSignal }): Promise<string | undefined>;
+  askChoice(spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
 
   /**
    * Print something to the user's transcript BEFORE a dialog asks about it.

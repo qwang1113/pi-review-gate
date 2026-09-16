@@ -136,7 +136,7 @@ export interface GateCommandDeps extends GateDiagnosisDeps {
   grantProxyScope(scope: string, via: "ask-user" | "gate-grant" | "first-answer"): void;
   loopGoalPresent(): boolean;
   /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
-  askChoice(uiCtx: unknown, spec: ChoiceSpec, opts?: { body?: string; pointer?: string; signal?: AbortSignal }): Promise<string | undefined>;
+  askChoice(uiCtx: unknown, spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
   /** Arm or disarm auto-continuation. */
   setLoopArmed(armed: boolean): void;
   /** Record a task-mode decision (source "user" — an explicit human choice). */

@@ -1053,11 +1053,20 @@ test("FLICKER: dialogs are no longer fitted, and a regular-renderer session is t
   // WHAT REPLACES IT: a session on the DEFAULT renderer is TOLD once, from the
   // host's own `TUI.mode` (a config re-derivation would be a copy of pi's
   // precedence that gets the corners wrong — lib/renderer-mode.ts). The mode
-  // reaches this extension only through the setWidget FACTORY form.
-  assert.match(SRC, /setWidget\("review-gate-agents", \(tui\) => \{[\s\S]{0,120}?tui\.mode/,
-    "the renderer mode comes from the host, through the widget factory");
+  // reaches this extension only through the setWidget FACTORY form, used here
+  // as a one-shot PROBE that is removed immediately: the factory component
+  // would have to wrap its own lines, and pi's RPC host ignores factories
+  // altogether — the status strip stays the string[] form.
+  assert.match(SRC, /setWidget\("review-gate-renderer-probe", \(tui\) => \{[\s\S]{0,160}?noteRendererMode\(tui\.mode, ctx\)/,
+    "the renderer mode comes from the host, through a one-shot widget-factory probe");
+  assert.match(SRC, /setWidget\("review-gate-renderer-probe", undefined\)/,
+    "…and the probe leaves nothing behind");
+  assert.match(SRC, /setWidget\("review-gate-agents", lines, \{ placement: "belowEditor" \}\)/,
+    "the status strip itself stays the string[] form (it is what wraps per line, and RPC keeps it)");
   assert.match(SRC, /rendererModeNoticeDue\(mode, rendererModeNoticeShown\)/,
     "…and whether to speak is the module's pure decision");
+  assert.match(SRC, /ctx\.ui\.notify\(RENDERER_MODE_NOTICE, "warning"\);[\s\S]{0,120}?rendererModeNoticeShown = true;/,
+    "the once-only flag is set AFTER the notice is out, never before it");
   assert.doesNotMatch(SRC, /process\.stdout\?\.rows|process\.env\.LINES/,
     "no row arithmetic may come back: the terminal is no longer consulted");
   // ui.confirm is GONE: the template renders a select, so a stray confirm

@@ -98,7 +98,7 @@ export interface UserInteractionToolDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] },
+    opts?: { body?: string; signal?: AbortSignal; extraRows?: string[] },
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -365,7 +365,6 @@ export async function doAskUser(
           },
           {
             body: q.text,
-            pointer: "（完整问题见上方消息）",
             signal,
             extraRows: [SKIP_REST_CHOICE],
           },

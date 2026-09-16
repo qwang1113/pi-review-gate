@@ -575,8 +575,9 @@ test("read: round 4 asks about each finding, one dialog each, and groups the ans
   // The full text goes to the transcript BEFORE the box. The row budget that
   // used to clip the dialog and make that copy necessary is gone (2026-09-16),
   // but the copy stays: a long finding scrolls past inside a box, and
-  // approving one you cannot read is the bug it guards either way.
-  assert.equal(f.asked[0]?.pointer, undefined, "no truncation pointer any more — nothing is cut");
+  // approving one you cannot read is the bug it guards either way. (Nothing is
+  // asserted about a truncation pointer here — the fake records only what the
+  // real dep signature accepts.)
   assert.equal(f.notices.length, 2);
   assert.equal(f.notices[0]?.lead, "───── Copilot 评审问题 1 / 2：lib/copilot-gh.ts:12 ─────");
   assert.match(f.notices[0]?.body ?? "", /this argv is not escaped/);

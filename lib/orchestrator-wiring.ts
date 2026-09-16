@@ -332,7 +332,7 @@ export interface OrchestratorHostBindings {
   /** The orchestration id this session holds (inherited or freshly minted). */
   orchestrationId(): string;
   /** The gate's one question template, rendered in this pane (see OrchestratorDeps). */
-  askChoice(spec: ChoiceSpec, opts?: { body?: string; pointer?: string; signal?: AbortSignal }): Promise<string | undefined>;
+  askChoice(spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
   /** Print text into the user's transcript (the plan's full text, O-1). */
   showToUser(title: string, text: string): void;
   sessionTranscriptPath(): string | undefined;

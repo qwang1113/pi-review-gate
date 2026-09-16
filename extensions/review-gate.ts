@@ -4225,24 +4225,30 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the answer can differ.
    */
   let rendererModeNoticeShown = false;
+  /** Has this session's renderer probe run? The factory form is the only
+   *  place the host hands over the TUI, and it is worth exactly one call. */
+  let rendererModeProbed = false;
 
   /**
-   * Record which renderer the HOST says this session runs on, and say something
-   * when it is the one that cannot scroll a tall dialog.
+   * Say something when this session is on the renderer that CANNOT scroll a
+   * tall dialog, and stay silent otherwise.
    *
    * The value comes from `TUI.mode` (see `lib/renderer-mode.ts` for why a
    * re-derivation from `--tui-mode` + settings files would be a copy that gets
-   * the corners wrong): it reaches this extension through the `setWidget`
-   * factory, so this is called on every widget install — the notice itself is
-   * what is once-only.
+   * the corners wrong).
    *
-   * `latestCtx?.ui.notify` rather than the TUI directly: the widget factory
-   * runs on the render path, where throwing would take the frame with it.
+   * THE FLAG IS SET ONLY AFTER THE NOTICE IS OUT (round-1 quality P1,
+   * 2026-09-16): the first version marked the session as told and then called
+   * `latestCtx?.ui.notify`, which at probe time is not set yet — so the notice
+   * could never reach anybody. A host that cannot notify must not consume the
+   * session's one chance to say it.
    */
-  function noteRendererMode(mode: RendererMode | undefined): void {
+  function noteRendererMode(mode: RendererMode | undefined, ctx: ExtensionContext): void {
     if (!rendererModeNoticeDue(mode, rendererModeNoticeShown)) return;
-    rendererModeNoticeShown = true;
-    try { latestCtx?.ui.notify(RENDERER_MODE_NOTICE, "warning"); } catch { /* headless */ }
+    try {
+      ctx.ui.notify(RENDERER_MODE_NOTICE, "warning");
+      rendererModeNoticeShown = true;
+    } catch { /* headless — a later probe may still succeed */ }
   }
 
   let lastLayerNotifyText = "";
@@ -4504,19 +4510,29 @@ export default function reviewGate(pi: ExtensionAPI) {
     try {
       const lines = buildGateWidget(gateWidgetFacts());
       const key = lines.join("\n");
+      // THE RENDERER PROBE — once per session, invisible, and removed the
+      // moment it has answered. The `setWidget` FACTORY form is the only place
+      // the host hands an extension the real TUI, and `tui.mode` is the only
+      // honest answer to "is this session on the renderer that can scroll a
+      // tall dialog?" (a config re-derivation would be a copy that gets the
+      // corners wrong — lib/renderer-mode.ts).
+      //
+      // A PROBE, and not the widget itself (round-1 quality P0/P2,
+      // 2026-09-16): a factory component must wrap its own lines (`render(width)`),
+      // while the string[] form is what wraps each line through pi-tui's
+      // `Text` — and pi's RPC host ignores component factories entirely, so
+      // making the status strip a factory would delete it there.
+      if (!rendererModeProbed) {
+        rendererModeProbed = true;
+        ctx.ui.setWidget("review-gate-renderer-probe", (tui) => {
+          noteRendererMode(tui.mode, ctx);
+          return { render: () => [], invalidate: () => {} };
+        }, { placement: "belowEditor" });
+        ctx.ui.setWidget("review-gate-renderer-probe", undefined);
+      }
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
-        // THE FACTORY FORM, and only partly for the widget itself: it is the
-        // one place the host hands an extension the REAL TUI, and `tui.mode`
-        // is the only honest answer to "is this session on the renderer that
-        // can scroll a tall dialog?" — see lib/renderer-mode.ts for why a
-        // config re-derivation would be a copy that gets the corners wrong.
-        // The component is a plain list of pre-rendered lines, which is
-        // exactly what the string[] form built — no import, no layout.
-        ctx.ui.setWidget("review-gate-agents", (tui) => {
-          noteRendererMode(tui.mode);
-          return { render: () => lines, invalidate: () => {} };
-        }, { placement: "belowEditor" });
+        ctx.ui.setWidget("review-gate-agents", lines, { placement: "belowEditor" });
       }
     } catch { /* display-only */ }
   }
@@ -4615,18 +4631,20 @@ export default function reviewGate(pi: ExtensionAPI) {
    * (the recommended one marked), the `✎ 不选，我说明原因` row, and a text
    * box when that row is picked. A yes/no box is not a thing any more.
    *
-   * `body` is the long half (counts, consequences) and is fitted against the
-   * rows this spec will actually draw: a five-row dialog spends rows the old
-   * two-row confirm never did, and the budget is the flicker bug's fix. The
-   * `pointer` names where the full text lives when something had to be cut.
+   * NOTHING IS FITTED, NOTHING IS CUT (user decision, 2026-09-16). Both halves
+   * used to be budgeted against the real terminal — a five-row dialog spends
+   * rows the old two-row confirm never did — because an oversized dialog pushed
+   * the animating spinner out of the viewport and made pi's DEFAULT renderer
+   * clear the screen and the scrollback every frame (measured: 29 of 30 frames).
+   * That cost landed on the lines the user is CONFIRMING, and the renderer the
+   * user runs (fullscreen: the host owns the screen and scrolls) never had the
+   * problem — so the budget is gone and a session that is NOT on it is told
+   * once instead (lib/renderer-mode.ts).
    *
-   * BOTH HALVES ARE BOUNDED, against the REAL terminal (2026-09-14). The body
-   * was budgeted against a hard-coded 24 rows, which is a real flicker on a
-   * 20-row window (measured: 19 full clears in 20 frames), and the TITLE was
-   * never bounded at all — so a long `ask_user` question, which rides in the
-   * title, could push the spinner out of the viewport exactly like an
-   * oversized body. The title is cut at the same budget and points at the
-   * transcript copy printed before the box.
+   * WHAT STILL MATTERS HERE IS ORDER. Callers put the facts being confirmed
+   * BEFORE the agent's own text, because the box is read top-down and the
+   * thing being approved should not come after the label of the thing it is
+   * about (lib/loop-goal.ts states the policy for the goal dialog).
    *
    * `signal` is what lets an ORCHESTRATOR's answer take the box off the
    * user's screen: pi dismisses the dialog when it aborts, and the resolved

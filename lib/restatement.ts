@@ -406,7 +406,7 @@ export interface RestatementToolDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; pointer?: string; signal?: AbortSignal },
+    opts?: { body?: string; signal?: AbortSignal },
   ): Promise<string | undefined>;
   /** Raise a dialog EITHER the human or the orchestrator may answer. */
   askEitherSide(
@@ -535,7 +535,6 @@ export async function doProposeRestatement(
       uiCtx.hasUI === true,
       async (renderSignal) => deps.askChoice(uiCtx, spec, {
         body: buildRestatementConfirmMessage(station) + (capNote ? "\n" + capNote : ""),
-        pointer: "（反述全文见上方消息）",
         signal: renderSignal,
       }),
     );

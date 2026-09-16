@@ -108,7 +108,7 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; pointer?: string; signal?: AbortSignal },
+    opts?: { body?: string; signal?: AbortSignal },
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -396,7 +396,6 @@ export async function doProposeLoopGoal(
           "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine +
             (capNoteShort ? "\n" + capNoteShort : ""),
         ),
-        pointer: "（目标全文见上方消息）",
         signal,
       }),
     );
