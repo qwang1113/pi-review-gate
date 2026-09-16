@@ -226,6 +226,20 @@ export const QUALITY_ROLE = "quality-auditor";
 export const QUALITY_RULES_RELPATH = "docs/code-quality-rules.md";
 
 /**
+ * WHAT JUST LANDED — the input of the cancel matrix.
+ *
+ * The LANE is not a judge (it has no verdict word in common with them: it says
+ * PASS, they say READY), and its row of the table is its own, so it is a case
+ * of this union rather than a fourth enum member of `party`. A caller that
+ * invents a synthetic judge to reach the lane's row is how the matrix ends up
+ * implemented twice — which is what the quality round caught on 2026-09-16.
+ */
+export type RoundLanding =
+  | { party: "quality"; verdict: string }
+  | { party: "reviewer"; verdict: string }
+  | { party: "lane"; verdict: string };
+
+/**
  * WHO STOPS WHOM — the cancel matrix of a parallel round (2026-09-16), as a
  * pure and total table.
  *
@@ -244,7 +258,8 @@ export const QUALITY_RULES_RELPATH = "docs/code-quality-rules.md";
  *    code, and a failing test suite says nothing about the code's quality.
  *
  * `abortLane` is false on the lane's own row because the lane has already
- * landed — there is nothing left to abort.
+ * landed — there is nothing left to abort. The lane's row is fail-closed in
+ * the same direction as the others: only the exact word PASS cancels nothing.
  *
  * A READY cancels nothing: the other party's conclusion is still owed, and a
  * reviewer READY that arrives before the quality verdict is HELD rather than
@@ -259,21 +274,13 @@ export interface RoundCancelPlan {
   abortLane: boolean;
 }
 
-export function roundCancelPlan(input: {
-  /**
-   * Which party just CONCLUDED. Absent means the full LANE landed: the lane is
-   * not a judge, and its row of the matrix is its own.
-   */
-  concluded?: "quality" | "reviewer" | undefined;
-  /** That party's RECORDED verdict (ignored when `concluded` is absent). */
-  verdict?: string | undefined;
-}): RoundCancelPlan {
+export function roundCancelPlan(landing: RoundLanding): RoundCancelPlan {
   const nothing = { cancelQuality: false, cancelReviewer: false, abortLane: false };
-  if (input.concluded === undefined) {
-    return { cancelQuality: false, cancelReviewer: true, abortLane: false };
+  if (landing.party === "lane") {
+    return landing.verdict === "PASS" ? nothing : { cancelQuality: false, cancelReviewer: true, abortLane: false };
   }
-  if (input.verdict === "READY") return nothing;
-  return input.concluded === "quality"
+  if (landing.verdict === "READY") return nothing;
+  return landing.party === "quality"
     ? { cancelQuality: false, cancelReviewer: true, abortLane: true }
     : { cancelQuality: true, cancelReviewer: false, abortLane: true };
 }

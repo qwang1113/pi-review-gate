@@ -412,6 +412,7 @@ import {
   qualityStandingFor,
   roundCancelPlan,
   skippedQualityRecord,
+  type RoundCancelPlan,
 } from "../lib/quality-round.ts";
 import {
   modelChainFor,
@@ -6668,15 +6669,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       // refuses to ship), while the QUALITY round carries on — it reads code,
       // and a failing suite says nothing about the code's quality. The abort is
       // already in effect for this lane: it is the lane itself landing.
-      if (verdict !== "PASS") {
-        cancelJudgeRound(root, "reviewer", "全量 precommit FAIL —— 这一段内容没有可 ship 的 READY");
-      }
+      // THE LANE'S OWN ROW OF THE MATRIX, through the same table and the same
+      // applier the judges' rows use — INCLUDING the PASS case, which the table
+      // answers with "nothing" (a caller-side `if` would be the second copy of
+      // that row the quality round caught on 2026-09-16).
+      applyCancelPlan(roundCancelPlan({ party: "lane", verdict }), root);
       // THEN the parked conclusion, re-asked from BOTH halves (`resumeParkedReady`
-      // consults the trees, the recorded lane verdict and the quality standing):
+      // consults the trees, what THIS landing measured and the quality standing):
       // a non-PASS lane retires the parked round, a PASS on exactly that tree
       // WITH the quality verdict in hand replays it, and anything still owed
       // leaves it parked for the landing that is owed.
-      await resumeParkedReady(root, ctx);
+      await resumeParkedReady(root, ctx, { laneVerdict: verdict, coveredTree });
       // THE LANE'S LANDING IS AN EVENT EITHER WAY (2026-09-16). A PASS used to
       // be silent, and that silence is exactly what stranded a session in a
       // `judge_wait` it could not end: the report it had received said
@@ -8201,9 +8204,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     description:
       "Submit one round of work to a judge role — the ONE entry point for reviewer / adviser / " +
       "goal-auditor. A reviewer submission runs the chain itself, and for a round that carries " +
-      "code that chain runs a QUALITY round first (the gate dispatches `quality-auditor`, then " +
-      "the reviewer automatically once it passes — you never call this twice for one round, and " +
-      "the quality judge is not a role you can name). The gate owns everything procedural: the session id and its directory " +
+      // ONE ENTRY POINT FOR BOTH JUDGES OF A ROUND (2026-09-16): a round that
+      // carries code starts `quality-auditor`, `reviewer` and the full precommit
+      // lane together, and the cancel matrix (lib/quality-round.ts) decides who
+      // stops whom. A reviewer READY that lands before the quality verdict is
+      // HELD until that verdict arrives (never recorded early, never re-run).
+      "code that chain starts the QUALITY round (`quality-auditor`), the functional reviewer and " +
+      "the full precommit lane TOGETHER — the three judge the same commit range, so a non-READY " +
+      "quality verdict kills the reviewer's pane and the lane, a non-READY reviewer kills the " +
+      "quality pane and the lane, and a FAILED lane kills only the reviewer. You never call this " +
+      "twice for one round, and the quality judge is not a role you can name. " +
+      "The gate owns everything procedural: the session id and its directory " +
       "(derived from role+repo, so the judge's context carries across rounds), pane open vs. channel-queued vs. " +
       "fresh kill, and the channel verdict. You pass WHO and WHAT; you never pass a session id, a " +
       "title or a directory. It returns as soon as the round is SUBMITTED, not when the judge is " +
@@ -8420,7 +8431,8 @@ export default function reviewGate(pi: ExtensionAPI) {
           ? []
           : [{ role: "reviewer" as const, task: parallelReviewer.taskText, streamPath: parallelReviewer.streamPath }]),
       ];
-      let dispatch: JudgeDispatch | undefined;
+      /** Every judge this submission started, as it was ACCEPTED. */
+      const accepted: Array<{ role: string; judgeId: string; paneId: string; sessionDir: string; reused: boolean }> = [];
       for (const judge of judges) {
         // The title is a DISPLAY label the gate derives itself (B5: it must not
         // reach the session's directory, or every round starts a new session).
@@ -8460,16 +8472,21 @@ export default function reviewGate(pi: ExtensionAPI) {
             isError: true,
           };
         }
-        dispatch = d;
         // THE ROUND REMEMBERS ITS OWN QUALITY JUDGE, on the target it prepared.
         // This is what `qualityRoundInFlight` reads: a live pane elsewhere in
         // the registry proves nothing (the pane is reused across rounds), so
         // "this round dispatched one and has not recorded its verdict" has to
         // be recorded per round.
         if (judge.role === QUALITY_ROLE && d.judgeId) noteQualityRoundDispatched(root, d.judgeId);
+        accepted.push({
+          role: judge.role,
+          judgeId: d.judgeId ?? "(pending)",
+          paneId: d.paneId ?? "(pending)",
+          sessionDir: d.sessionDir ?? "(pending)",
+          reused: d.reused,
+        });
         progress.done(d.reused ? "已受理（续接同一会话）" : "已受理（新会话）");
       }
-      dispatch = dispatch!; // the loop always sets it: an empty array never occurs
       // The round is ACCEPTED — only now is the audited draft on record. A
       // refused submission (a busy role, a failed spawn) must never replace
       // the draft a running audit is judging: its verdict would be recorded
@@ -8479,11 +8496,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
         persistJudgeHierarchy();
       }
-      const child = judgeChildByRole(root, dispatchRole);
+      // THE REPLY NAMES EVERY JUDGE THIS SUBMISSION STARTED (2026-09-16). The
+      // parallel path starts two, and naming only the routed one while printing
+      // the OTHER's id/pane is how a receipt ends up describing a judge that is
+      // not the one it points at — the agent then waits on the wrong pane.
       const lines = [
-        `review-gate: ${dispatchRole} 已受理本轮任务（${dispatch.reused ? "复用同一 pane，上下文延续" : "新 pane"}，judge ${dispatch.judgeId}）。`,
-        `- pane: ${dispatch.paneId ?? child?.paneId ?? "(pending)"}`,
-        `- transcript: ${dispatch.sessionDir ?? child?.sessionDir ?? "(pending)"}`,
+        `review-gate: 已受理本轮任务 — ${accepted.map((a) => `${a.role}（judge ${a.judgeId}）`).join(" + ")}。`,
+        ...accepted.map((a) => `- ${a.role}: pane ${a.paneId} · transcript ${a.sessionDir}`),
         ...(streamPath ? [`- findings 流（边审边修）: ${streamPath}`] : []),
         // The routing is the gate's, so the gate says which way it went —
         // otherwise "the reviewer is running" and "the quality judge is
@@ -8509,10 +8528,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           role: dispatchRole,
           /** Did THIS submission route to the quality judge? (diagnostic) */
           qualityRound: dispatchRole === QUALITY_ROLE,
-          reused: dispatch.reused,
-          paneId: dispatch.paneId ?? child?.paneId,
-          judgeId: dispatch.judgeId ?? child?.judgeId,
-          sessionDir: dispatch.sessionDir ?? child?.sessionDir,
+          /** EVERY judge this submission started, in dispatch order. */
+          judges: accepted,
+          reused: accepted[accepted.length - 1]?.reused ?? false,
+          paneId: accepted[accepted.length - 1]?.paneId,
+          judgeId: accepted[accepted.length - 1]?.judgeId,
+          sessionDir: accepted[accepted.length - 1]?.sessionDir,
           streamPath,
         },
       };
@@ -9243,8 +9264,19 @@ export default function reviewGate(pi: ExtensionAPI) {
    * `clear` and `replay` both retire the record; only `replay` wakes the agent,
    * because only it changes the gate's verdict (a dropped hold leaves `review`
    * PENDING, which the ordinary RESUME already speaks for).
+   *
+   * `landing` is how the LANE's own callback hands over what it just measured:
+   * a verdict that is not PASS retires the parked record NOW, rather than at
+   * the next settle. The recorded tree alone cannot say it — a FAIL of some
+   * other tree leaves `lastFullPassTree` standing (lib/gate-state.ts), and a
+   * PASS for another tree is equally unreadable from the record (round-2 P2:
+   * nothing may be left behind after the lane it was waiting for has landed).
    */
-  async function resumeParkedReady(root: string, ctx?: unknown): Promise<string[]> {
+  async function resumeParkedReady(
+    root: string,
+    ctx?: unknown,
+    landing?: { laneVerdict: string; coveredTree: string | undefined },
+  ): Promise<string[]> {
     const st = stateForRepo(root);
     const parked = st.pendingReady;
     if (!parked) return [];
@@ -9253,7 +9285,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       parkedTree: parked.tree,
       lane: parkedLaneHalf({
         parkedTree: parked.tree,
-        coveredTree: st.precommit.lastFullPassTree,
+        // The landing's args are passed through when there IS one; otherwise
+        // the half is read from the record (`laneVerdict` absent).
+        ...(landing?.laneVerdict === undefined ? {} : { laneVerdict: landing.laneVerdict }),
+        coveredTree: landing?.coveredTree ?? st.precommit.lastFullPassTree,
         currentTargetTree: target?.tree,
         laneRunning: inFlightPrecommit?.root === root,
       }),
@@ -9263,9 +9298,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       }),
     });
     if (fate === "none" || fate === "hold") return [];
-    delete st.pendingReady;
+    // A LANDING NEEDS A CONTEXT TO WRITE WITH, AND WITHOUT ONE NOTHING MAY
+    // CHANGE (quality round P1, 2026-09-16). This used to delete `pendingReady`
+    // first and return when no ctx was in reach: the in-memory record was gone,
+    // the delete never reached the sidecar, and the reply had already told the
+    // agent not to re-submit — a round that could never be recorded. Now the
+    // record is left exactly where it is and the next settle retries, which is
+    // the same "stay parked until somebody can act" the old guard claimed.
     const liveCtx = ctx ?? latestCtx;
-    if (liveCtx) persistRepo(liveCtx as unknown as ExtensionContext, root);
+    if (!liveCtx) return [];
+    delete st.pendingReady;
+    persistRepo(liveCtx as unknown as ExtensionContext, root);
     if (fate === "clear") {
       log(
         `parked READY for ${root} dropped: its two preconditions can no longer both hold ` +
@@ -9273,9 +9316,6 @@ export default function reviewGate(pi: ExtensionAPI) {
       );
       return [`本轮挂起的 READY 已作废（round ${parked.round}）：它的前提已不可能同时成立，重送一轮即可。`];
     }
-    // A REPLAY NEEDS A CONTEXT TO WRITE FROM. Without one the record stays
-    // parked and the next settle retries — never a half-recorded round.
-    if (!liveCtx) return [];
     const recorded = await recordReviewVerdict(parked.conclusion as ReportConclusion, root, liveCtx);
     const note = buildParkedReadyReplayNotice({ round: parked.round, tree: parked.tree, recorded });
     try {
@@ -9295,7 +9335,42 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * WHAT A CONCLUDED ROUND DOES TO ITS SIBLINGS — the cancel matrix, applied.
+   * APPLY ONE ROW OF THE CANCEL MATRIX — the ONLY place a party is stopped.
+   *
+   * Both the judges' settles and the lane's own landing come through here, so
+   * the table's three rows share one effect implementation (quality round P1,
+   * 2026-09-16: the lane's row was hand-written beside the table, which is
+   * exactly the second implementation the table exists to prevent).
+   *
+   * The lane's remaining minutes verify a tree nobody will ship, and the NEXT
+   * submission would wait for a quiet lane before starting the one that
+   * matters (`waitForQuietLane`) — the abort buys back the wait, not just the
+   * CPU.
+   */
+  function applyCancelPlan(plan: RoundCancelPlan, root: string): string[] {
+    const notes: string[] = [];
+    if (plan.cancelReviewer) {
+      const stopped = cancelJudgeRound(root, "reviewer", "这一轮已经判不过了 —— 内容要改，功能轮不必再过");
+      if (stopped) notes.push(stopped);
+    }
+    if (plan.cancelQuality) {
+      const stopped = cancelJudgeRound(root, QUALITY_ROLE, "这一轮已经判不过了 —— 内容要改，质量轮不必再审");
+      if (stopped) notes.push(stopped);
+    }
+    if (plan.abortLane) {
+      notes.push(
+        abortPrecommitLane(root, "本轮有 judge 判了非 READY —— 内容要改，这轮验证不再有意义")
+          ? "正在跑的全量 precommit 已终止，它的结论作废（改完重新送审时会重跑）。"
+          : "",
+      );
+    }
+    return notes.filter((n) => n !== "");
+  }
+
+  /**
+   * WHAT A CONCLUDED ROUND DOES TO ITS SIBLINGS — the cancel matrix, applied
+   * for a JUDGE's settle (`lib/quality-round.ts` owns the other row, the
+   * lane's, which the lane's own callback applies).
    *
    * ONE decision, TWO settle entry points. A round is recorded by whichever
    * path sees it first — the settle sweep (`recordJudgeConclusion`) or
@@ -9313,30 +9388,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     const notes: string[] = [];
     if (kind === "quality" || kind === "reviewer") {
       const st = stateForRepo(root);
-      const plan = roundCancelPlan({
-        concluded: kind,
-        verdict: kind === "quality" ? st.quality?.verdict : st.review.verdict,
-      });
-      const stopped = [
-        plan.cancelReviewer
-          ? cancelJudgeRound(root, "reviewer", "质量轮判了非 READY —— 这一段内容要改，功能轮不必再过")
-          : undefined,
-        plan.cancelQuality
-          ? cancelJudgeRound(root, QUALITY_ROLE, "功能轮判了非 READY —— 内容要改，质量轮不必再审")
-          : undefined,
-      ].filter((n): n is string => n !== undefined);
-      notes.push(...stopped);
-      if (plan.abortLane) {
-        // The lane's remaining minutes verify a tree nobody will ship, and the
-        // NEXT submission would wait for a quiet lane before starting the one
-        // that matters (`waitForQuietLane`) — the abort buys back the wait, not
-        // just the CPU.
-        notes.push(
-          abortPrecommitLane(root, "本轮有 judge 判了非 READY —— 内容要改，这轮验证不再有意义")
-            ? "正在跑的全量 precommit 已终止，它的结论作废（改完重新送审时会重跑）。"
-            : "",
-        );
-      }
+      notes.push(
+        ...applyCancelPlan(
+          roundCancelPlan({
+            party: kind,
+            verdict: kind === "quality" ? (st.quality?.verdict ?? "") : st.review.verdict,
+          }),
+          root,
+        ),
+      );
     }
     // ALWAYS RE-ASK THE PARKED CONCLUSION: this landing may be the second of
     // its two preconditions (the quality verdict releasing a reviewer READY

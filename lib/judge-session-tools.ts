@@ -233,8 +233,9 @@ export interface JudgeSessionToolDeps {
     /** The round ran under a weaker binding — surfaced, never buried. */
     bindingNote?: string;
     /**
-     * What the gate did because the round ended (the quality round's hand-off:
-     * a released reviewer, a dropped round, a stopped precommit lane).
+     * What the gate did because the round ended (the round's siblings, by the
+     * cancel matrix: a killed judge, a stopped precommit lane, a parked READY
+     * replayed or retired).
      *
      * Its own field, and its own line in the report: the recorded note is
      * shown first-line-only, so a sentence appended to its tail is invisible

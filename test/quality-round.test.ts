@@ -87,25 +87,25 @@ test("skippedQualityRecord: a skip is a READY bound to the head, marked as a ski
 // ---------------------------------------------------------------------------
 
 test("roundCancelPlan: a non-READY QUALITY round stops the reviewer AND the lane", () => {
-  for (const verdict of ["BLOCKED", "NEEDS_HUMAN"]) {
-    assert.deepEqual(roundCancelPlan({ concluded: "quality", verdict }), {
+  for (const verdict of ["BLOCKED", "NEEDS_HUMAN", ""]) {
+    assert.deepEqual(roundCancelPlan({ party: "quality", verdict }), {
       cancelQuality: false, cancelReviewer: true, abortLane: true,
     }, `${verdict}: the reviewer's pane dies and the lane is aborted`);
   }
   // A READY cancels nothing: the functional round is exactly what the gate is
   // still waiting for.
-  assert.deepEqual(roundCancelPlan({ concluded: "quality", verdict: "READY" }), {
+  assert.deepEqual(roundCancelPlan({ party: "quality", verdict: "READY" }), {
     cancelQuality: false, cancelReviewer: false, abortLane: false,
   });
 });
 
 test("roundCancelPlan: a non-READY REVIEWER stops the quality round AND the lane", () => {
   for (const verdict of ["BLOCKED", "NEEDS_HUMAN"]) {
-    assert.deepEqual(roundCancelPlan({ concluded: "reviewer", verdict }), {
+    assert.deepEqual(roundCancelPlan({ party: "reviewer", verdict }), {
       cancelQuality: true, cancelReviewer: false, abortLane: true,
     }, `${verdict}: the quality pane dies and the lane is aborted`);
   }
-  assert.deepEqual(roundCancelPlan({ concluded: "reviewer", verdict: "READY" }), {
+  assert.deepEqual(roundCancelPlan({ party: "reviewer", verdict: "READY" }), {
     cancelQuality: false, cancelReviewer: false, abortLane: false,
   });
 });
@@ -114,13 +114,35 @@ test("roundCancelPlan: the FAILED LANE stops only the reviewer — the quality r
   // The asymmetry is the user's requirement: the quality judge reads code, and
   // a failing test suite says nothing about the code's quality. `abortLane` is
   // false because the lane has already landed — there is nothing left to abort.
-  assert.deepEqual(roundCancelPlan({}), {
+  assert.deepEqual(roundCancelPlan({ party: "lane", verdict: "FAIL" }), {
     cancelQuality: false, cancelReviewer: true, abortLane: false,
   });
-  // An UNKNOWN verdict is never READY: only the exact word cancels nothing.
-  assert.deepEqual(roundCancelPlan({ concluded: "quality", verdict: undefined }), {
-    cancelQuality: false, cancelReviewer: true, abortLane: true,
+  // A PASSING lane cancels nothing, and ONLY that exact word does — an
+  // unreadable verdict is never PASS (the same fail-closed direction the
+  // judges' rows take on a missing READY).
+  assert.deepEqual(roundCancelPlan({ party: "lane", verdict: "PASS" }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
   });
+  for (const verdict of ["", "no verdict", "ERROR"]) {
+    assert.deepEqual(roundCancelPlan({ party: "lane", verdict }), {
+      cancelQuality: false, cancelReviewer: true, abortLane: false,
+    }, `${verdict}: an unreadable lane verdict is not PASS`);
+  }
+});
+
+test("roundCancelPlan: ONE table covers all three parties — no row is implemented twice", () => {
+  // The quality round caught the lane's row living twice (2026-09-16): a hand-
+  // written `if (verdict !== "PASS") cancel(...)` at the lane's landing beside
+  // this table. The table is only worth something if every row goes through
+  // it, so this pins the THREE-PARTY shape the extension relies on.
+  const rows = ([
+    { party: "quality", verdict: "BLOCKED" },
+    { party: "reviewer", verdict: "BLOCKED" },
+    { party: "lane", verdict: "FAIL" },
+  ] as const).map((landing) => roundCancelPlan(landing));
+  assert.deepEqual(rows.map((r) => r.cancelReviewer), [true, false, true]);
+  assert.deepEqual(rows.map((r) => r.cancelQuality), [false, true, false]);
+  assert.deepEqual(rows.map((r) => r.abortLane), [true, true, false]);
 });
 
 test("qualityPrecondition: satisfied / still owed / disproven — the one reading both rules share", () => {

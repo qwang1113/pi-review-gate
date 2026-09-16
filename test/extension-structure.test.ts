@@ -6082,13 +6082,25 @@ test("a parked READY is replayed by the lane that lands on its tree, and retired
   // first version decided the fate at the lane's landing alone, which was
   // right while the lane was the only thing a hold could wait for — with two
   // preconditions landing in either order it would strand half of them.
-  assert.match(SRC, /async function resumeParkedReady\(root: string, ctx\?: unknown\): Promise<string\[]>/,
-    "ONE re-ask of the parked conclusion's two preconditions");
+  assert.match(SRC, /async function resumeParkedReady\(\s*\n\s*root: string,/, "ONE re-ask of the parked conclusion's two preconditions");
+  // …and the lane's own callback hands it what it MEASURED: the recorded tree
+  // cannot say "that lane failed", and leaving a parked record behind after
+  // the lane it was waiting for has landed is exactly what round-2 P2 banned.
+  assert.match(SRC, /await resumeParkedReady\(root, ctx, \{ laneVerdict: verdict, coveredTree \}\)/,
+    "the lane's landing passes its own verdict through");
   assert.match(SRC, /lane: parkedLaneHalf\(\{/, "the lane's half is computed by the pure rule");
   assert.match(SRC, /quality: qualityPrecondition\(\{/, "…and so is the quality round's");
   const resumeAt = SRC.indexOf("async function resumeParkedReady(");
   const resume = SRC.slice(resumeAt, SRC.indexOf("async function applyRoundCancel(", resumeAt));
   assert.match(resume, /if \(fate === "none" \|\| fate === "hold"\) return \[\];/, "a hold leaves the record where it is");
+  // THE CTX GUARD COMES FIRST (quality round P1, 2026-09-16): deleting the
+  // pending record without a context to persist the delete loses a READY the
+  // agent has already been told not to re-submit. The record must be left
+  // untouched when nobody can act on it.
+  const guardAt = resume.indexOf("if (!liveCtx) return [];");
+  const deleteAt = resume.indexOf("delete st.pendingReady;");
+  assert.ok(guardAt > 0 && deleteAt > guardAt,
+    "no context ⇒ nothing changes (the guard precedes the delete)");
   assert.match(resume, /await recordReviewVerdict\(parked\.conclusion as ReportConclusion, root, liveCtx\)/,
     "the replay IS the recorder — one implementation of the recording rules");
   assert.match(resume, /buildParkedReadyReplayNotice\(\{ round: parked\.round, tree: parked\.tree, recorded \}\)/,
@@ -6331,11 +6343,23 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   assert.ok(applyAt > 0, "one place applies the matrix");
   const apply = SRC.slice(applyAt, SRC.indexOf("\n  /**", applyAt));
   assert.match(apply, /roundCancelPlan\(\{/, "the decision comes from the pure table, not from branches here");
-  assert.match(apply, /kind === "quality" \? st\.quality\?\.verdict : st\.review\.verdict/,
+  assert.match(apply, /kind === "quality" \? \(st\.quality\?\.verdict \?\? ""\) : st\.review\.verdict/,
     "…and it reads the RECORDED verdict, never the word a judge printed");
-  assert.match(apply, /cancelJudgeRound\(root, "reviewer",/, "a blocking quality verdict stops the reviewer");
-  assert.match(apply, /cancelJudgeRound\(root, QUALITY_ROLE,/, "a blocking reviewer verdict stops the quality round");
-  assert.match(apply, /abortPrecommitLane\(root,/, "…and the lane verifying that content");
+  assert.match(apply, /applyCancelPlan\(/, "the effect comes from the ONE applier");
+  // The LANE goes through the same table and the same applier — INCLUDING its
+  // PASS case, which the table answers with "nothing" (quality round P1,
+  // 2026-09-16: a hand-written `if (verdict !== "PASS")` at the landing was
+  // the lane's row implemented a second time).
+  assert.match(SRC, /applyCancelPlan\(roundCancelPlan\(\{ party: "lane", verdict \}\), root\)/,
+    "the lane's row is the table's, not a branch beside it");
+  const applierAt = SRC.indexOf("function applyCancelPlan(");
+  const applier = SRC.slice(applierAt, SRC.indexOf("async function applyRoundCancel(", applierAt));
+  assert.match(applier, /plan\.cancelReviewer[\s\S]{0,200}?cancelJudgeRound\(root, "reviewer"/, "a plan's reviewer row terminates the pane");
+  assert.match(applier, /plan\.cancelQuality[\s\S]{0,200}?cancelJudgeRound\(root, QUALITY_ROLE/, "…and its quality row does too");
+  assert.match(applier, /plan\.abortLane[\s\S]{0,200}?abortPrecommitLane\(root,/, "…and its lane row aborts the lane");
+  // The hand-written lane copy may not come back.
+  assert.doesNotMatch(SRC, /if \(verdict !== "PASS"\) \{\s*cancelJudgeRound\(root, "reviewer"/,
+    "the lane's row lives in the table alone");
   assert.match(apply, /await resumeParkedReady\(root, ctx\)/, "every landing re-asks any parked conclusion");
   // BOTH record paths apply it, through the one wrapper (reviewer P1,
   // 2026-09-15: wired into the sweep alone, a round closed by a `judge_wait`
@@ -6353,13 +6377,11 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
     "…and the registry row goes, so the death is never announced and `judge_recover` cannot revive it");
   assert.match(cancel, /absorbJudgeModelEvents\(root, entry\.judgeId\)/, "model events are absorbed BEFORE the row (and its cursors) goes");
   assert.match(cancel, /reapReviewScratch\(entry\.judgeId\)/, "its throwaway worktrees are reclaimed by whoever created them");
-  // The lane's row of the matrix is applied at the lane's own landing: it can
-  // only stop the functional round, and the quality round carries on.
-  assert.match(SRC, /if \(verdict !== "PASS"\) \{\s*cancelJudgeRound\(root, "reviewer",/,
-    "a FAILED lane ends the reviewer and leaves the quality round running");
-  // …and the hand-off note still travels as its OWN field: the standard report
-  // prints the recorded note first-line-only, so a note appended there is
-  // invisible to the one reader it exists for.
+  // The lane's row of the matrix is applied at the lane's own landing, through
+  // the table (see the applier assertions above) — and the hand-off note still
+  // travels as its OWN field: the standard report prints the recorded note
+  // first-line-only, so a note appended there is invisible to the one reader it
+  // exists for.
   assert.match(SRC, /handOffNote: conclusion\.handOffNote,/, "the settle sweep prints it");
 
   // ── 5. THE LANE ABORT: a stopped lane is not a result ──────────────────

@@ -80,9 +80,10 @@ export interface StandardReportInput {
   /**
    * WHAT THE GATE DID NEXT BECAUSE THIS ROUND ENDED — its own line.
    *
-   * Today only the quality round has one: a READY releases the functional
-   * round it was holding (the gate dispatches the reviewer itself), and a
-   * non-READY drops that round and stops the verification running beside it.
+   * Since 2026-09-16 the three parties of a round (quality judge, functional
+   * reviewer, precommit lane) start together, so this line carries the cancel
+   * matrix's outcome: which sibling's pane was killed, whether the lane was
+   * aborted, and whether a parked READY was replayed or retired.
    *
    * It is printed as its own line for the same measured reason `bindingNote`
    * is: the recorded note is shown FIRST-LINE-ONLY, so a sentence appended to
