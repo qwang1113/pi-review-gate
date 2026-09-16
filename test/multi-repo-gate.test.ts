@@ -532,15 +532,24 @@ test("P-multi: /gate-status reports each repo, and a clean stateless repo blocks
   assert.equal(dirty.level, "warning");
 });
 
-test("P-multi: an INHERITED repo carries the successor's standings, never the predecessor's", async () => {
-  // Quality round P1 (2026-09-16). A relay successor inherits the predecessor's
-  // CONTRACTS for every repo it touched — `inheritGoalContract` carries
-  // restatement / loopGoal / rounds / turnsWithoutGoal / sessionReposPaths and
-  // nothing else — because a verdict belongs to the round that earned it, not
-  // to the session that continues the work. `enforcementStateFor` used to hand
-  // out the predecessor's sidecar WHOLE whenever the cache was cold: its READY,
-  // its PASS, and its `/gate-bypass` (which empties `unmetRequirements`
-  // outright), on the path that decides whether work may ship.
+test("P-multi: an INHERITED repo is reported with the successor's standings, never the predecessor's", async () => {
+  // A relay successor inherits the predecessor's CONTRACTS for every repo it
+  // touched — `inheritGoalContract` carries restatement / loopGoal / rounds /
+  // turnsWithoutGoal / sessionReposPaths and nothing else — because a verdict
+  // belongs to the round that earned it, not to the session that continues the
+  // work. The predecessor's sidecar here carries a standing READY + PASS and a
+  // user-granted `/gate-bypass` (which empties `unmetRequirements` outright),
+  // and none of the three may reach the report.
+  //
+  // WHAT THIS PINS: the answer that actually reaches `/gate-status` in a real
+  // session. `syncAllCopilotWatches` walks `sessionRepos` during session_start,
+  // so the cached — narrowed — state is what answers by then, and an
+  // enforcement reader that handed out the raw sidecar on that path fails here.
+  // WHAT IT CANNOT PIN: the cold-cache branch, which a real session reaches no
+  // other way (that walk is what builds the entry). That is why the rule
+  // itself — one loader for both readers, never `onDisk` — is pinned
+  // STRUCTURALLY in test/extension-structure.test.ts, and why the sixth round
+  // deleted the branch rather than testing it.
   const parent = mkdtempSync(join(tmpdir(), "rg-mg14-"));
   rgDirs.push(parent);
   const repoA = makeRepo(parent, "repoA");
