@@ -132,9 +132,18 @@ test("the shape is written in exactly ONE file", () => {
   // The pattern is anchored at the START of a line and lets only a quote char
   // precede the label, because legitimate prose CONTAINS these words: a report
   // line `- 下一步：${handOffNote}`, an answer's `（原因：${reason}）`, the
-  // recorder's `不选，原因：${reason}`. Banned is a line that BUILDS the shape.
-  const SHAPE = /^\s*[`"']?(原因|下一步)：\$\{/m;
-  assert.match(renderer, SHAPE, "self-proof: the scan's pattern matches the renderer it exempts");
+  // recorder's `不选，原因：${reason}`. Banned is a line that BUILDS the shape —
+  // in EITHER of the two forms an author actually types: the template literal
+  // (`原因：${why}`) and the concatenation (`"原因：" + why`). A label assembled
+  // from variables is out of scope; the two above are what a second copy looks
+  // like (reviewer Nit, 2026-09-17: the first version matched the template
+  // form only, while the assertion claimed to catch any hand-rolled copy).
+  const SHAPE = /^\s*[`"']?(原因|下一步)：([`"']\s*\+|\$\{)/m;
+  // Self-proof on BOTH banned shapes: a pattern matching only the renderer's
+  // own form would let the concatenated copy through.
+  assert.match(renderer, SHAPE, "…matches the template literal the renderer writes");
+  assert.match("    \"原因：\" + why,", SHAPE, "…and the double-quoted concatenation");
+  assert.match("    '下一步：' + next,", SHAPE, "…and the single-quoted one");
   const offenders: string[] = [];
   let scanned = 0;
   for (const dir of ["lib", "extensions"]) {
@@ -147,5 +156,5 @@ test("the shape is written in exactly ONE file", () => {
     }
   }
   assert.ok(scanned > 30, `the scan must see the source tree, not an empty listing (saw ${scanned})`);
-  assert.deepEqual(offenders, [], "no second file may hand-roll the labelled shape");
+  assert.deepEqual(offenders, [], "no second file may hand-roll the labelled shape (template literal or concatenation)");
 });
