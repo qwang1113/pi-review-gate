@@ -708,10 +708,15 @@ test("both consent surfaces state the DELIVERY STATION and that raising it re-as
   const transcript = world.shown.join("\n");
   assert.match(transcript, /本轮交付站点/, "the plan the user reads names its station");
   assert.match(transcript, /交付站点往后挪/, "…and says that moving it re-asks");
+  // …AND THE PER-TASK STATION (round-2 P2): the finish task's exemption made
+  // task order carry authority, so a category the dialog does not name is a box
+  // the user cannot expect — and a copy that lists triggers must list them all.
+  assert.match(transcript, /让某个任务自己的交付站点变宽/);
 
   const dialog = buildPlanConfirmMessage(world.plan()!);
   assert.match(dialog, /本轮交付站点/, "the decision box carries the station itself");
   assert.match(dialog, /提高交付站点/, "…and lists it among the changes that revoke the approval");
+  assert.match(dialog, /让某个任务自己的交付站点变宽/, "…including the per-task one the finish task created");
 });
 
 // ---------------------------------------------------------------------------

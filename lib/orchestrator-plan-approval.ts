@@ -56,7 +56,7 @@ import {
   isStationWidening,
   type DeliveryStation,
 } from "./delivery-station.ts";
-import { effectiveTaskStation, type RepoPrPlanInput } from "./repo-pr-policy.ts";
+import { allowsMultiplePrs, effectiveTaskStation, taskRepoOf, type RepoPrPlanInput } from "./repo-pr-policy.ts";
 
 /** The authorization-relevant shape of one task, as the user approved it. */
 export interface ApprovedTaskSnapshot {
@@ -162,6 +162,10 @@ export function decideApprovalCarry(
 
   const approvedById = new Map(approved.tasks.map((task) => [task.id, task]));
   const nextTaskIds = new Set(next.tasks.map((task) => task.id));
+  // The approved side of every per-task comparison, in the shape the station
+  // rule reads: a snapshot from before `deliveryStation` / `allowMultiplePrs`
+  // existed reads as the STRICTEST values, so it can only ever ask the user.
+  const approvedAsPlan = snapshotAsPlan(approved);
 
 
 
@@ -251,15 +255,28 @@ export function decideApprovalCarry(
     // task's STATION instead of the order is what the user actually signed: a
     // reorder that moves no authority is not news, and a change that is real
     // shows up here whatever edit produced it.
-    const beforeStation = effectiveTaskStation(snapshotAsPlan(approved), before, defaultRepo);
-    const nextStation = effectiveTaskStation(next, task, defaultRepo);
-    if (deliveryStationRank(nextStation) > deliveryStationRank(beforeStation)) {
-      widenings.push(
-        `任务 "${task.id}" 的交付站点从 ${beforeStation} 提到 ${nextStation}` +
-        "（plan 的最后一环不受同一 repo 多任务的收窄：改任务顺序/删掉兄弟任务都可能把它提上去）",
-      );
-    } else if (deliveryStationRank(nextStation) < deliveryStationRank(beforeStation)) {
-      amendments.push(`任务 "${task.id}" 的交付站点从 ${beforeStation} 收紧到 ${nextStation}`);
+    //
+    // …AND ONLY WHAT THIS TASK'S OWN CONTEXT DID (round-2 P2). When the plan's
+    // own station moved, or this task's repo gained or lost a split
+    // permission, every task's station moves WITH it: that change is already
+    // stated once, at the plan level above, and repeating it per task would
+    // drown the one real reason in N restatements — each of them naming a
+    // cause (the last-task exemption) that had nothing to do with it. What is
+    // left to report here is exactly the news that is THIS task's: the count
+    // and the order.
+    const taskRepo = taskRepoOf(task, defaultRepo);
+    if (approvedStation === next.deliveryStation &&
+        allowsMultiplePrs(approvedAsPlan, taskRepo) === allowsMultiplePrs(next, taskRepo)) {
+      const beforeStation = effectiveTaskStation(approvedAsPlan, before, defaultRepo);
+      const nextStation = effectiveTaskStation(next, task, defaultRepo);
+      if (deliveryStationRank(nextStation) > deliveryStationRank(beforeStation)) {
+        widenings.push(
+          `任务 "${task.id}" 的交付站点从 ${beforeStation} 提到 ${nextStation}` +
+          "（plan 的最后一环不受同一 repo 多任务的收窄：改任务顺序、或删掉一个兄弟任务都可能把它提上去）",
+        );
+      } else if (deliveryStationRank(nextStation) < deliveryStationRank(beforeStation)) {
+        amendments.push(`任务 "${task.id}" 的交付站点从 ${beforeStation} 收紧到 ${nextStation}`);
+      }
     }
   }
 
