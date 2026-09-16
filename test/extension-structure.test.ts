@@ -6316,6 +6316,12 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // …and the fact is set by each failure site, never inferred by the caller.
   assert.match(SRC, /delivered: opened\.deliveryFailed === true/, "the boot-check timeout DID deliver the round (the task rode in on argv)");
   assert.match(SRC, /delivered: false, sessionId, sessionDir, paneId: existing\.paneId/, "a failed channel write did NOT");
+  // …AND THE DRAFT RECORD FOLLOWS THE SAME FACT (quality round P2, 2026-09-16):
+  // `paneId` was still the test one line below the comment explaining why it
+  // cannot be — an audited draft would go on record for a task the auditor
+  // never received.
+  assert.match(SRC, /if \(d\.delivered === true && role === "goal-auditor"\)/, "an undelivered audit draft is never recorded as pending");
+  assert.doesNotMatch(SRC, /if \(d\.paneId && role === "goal-auditor"\)/, "…and paneId never returns as that test");
 
   // ── 3. THE PRECONDITION: dispatch keeps it, RECORDING enforces it ───────
   const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");

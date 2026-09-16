@@ -8482,7 +8482,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // the channel-write failure on a REUSED pane also carries one, with the
           // task never delivered. `delivered` is what tells the two apart, which
           // is why the abandonment below reads it and not `paneId`.
-          if (d.paneId && role === "goal-auditor") {
+          if (d.delivered === true && role === "goal-auditor") {
             pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
             persistJudgeHierarchy();
           }
