@@ -8,6 +8,7 @@ import {
   findingFingerprint,
   normalizeConcludedVerdict,
   parkedLaneHalf,
+  laneVerifiesTree,
   parkedReadyFate,
   readyLacksVerification,
   severityFindingsFrom,
@@ -283,12 +284,12 @@ test("parkedLaneHalf: ok needs the recorded tree to BE the round's; a landing th
   // A FRESH landing: only a PASS covering exactly the parked tree, while the
   // gate's current target is still that round, is `ok`.
   assert.equal(
-    parkedLaneHalf({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: t, laneRunning: false }),
+    parkedLaneHalf({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: t, laneRunning: false, bypassActive: false }),
     "ok",
   );
   for (const laneVerdict of ["FAIL", "no verdict", "ERROR"]) {
     assert.equal(
-      parkedLaneHalf({ parkedTree: t, laneVerdict, coveredTree: undefined, currentTargetTree: t, laneRunning: false }),
+      parkedLaneHalf({ parkedTree: t, laneVerdict, coveredTree: undefined, currentTargetTree: t, laneRunning: false, bypassActive: false }),
       "veto",
       laneVerdict,
     );
@@ -298,37 +299,69 @@ test("parkedLaneHalf: ok needs the recorded tree to BE the round's; a landing th
   // behind would park the round until the next prepare — with the reply already
   // telling the agent not to re-submit.
   assert.equal(
-    parkedLaneHalf({ parkedTree: t, laneVerdict: "PASS", coveredTree: "other", currentTargetTree: t, laneRunning: false }),
+    parkedLaneHalf({ parkedTree: t, laneVerdict: "PASS", coveredTree: "other", currentTargetTree: t, laneRunning: false, bypassActive: false }),
     "veto",
     "the lane passed a tree the round is not — nothing to replay onto it",
   );
   // …and a newer round replaced the target: the parked one is history.
   assert.equal(
-    parkedLaneHalf({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: "other", laneRunning: false }),
+    parkedLaneHalf({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: "other", laneRunning: false, bypassActive: false }),
     "veto",
   );
   // NO fresh landing (the quality round's landing, the settle backstop): the
   // recorded facts decide, and a lane that is still running is what makes a
   // "not yet" answer a HOLD instead of a retirement.
   assert.equal(
-    parkedLaneHalf({ parkedTree: t, coveredTree: t, currentTargetTree: t, laneRunning: false }),
+    parkedLaneHalf({ parkedTree: t, coveredTree: t, currentTargetTree: t, laneRunning: false, bypassActive: false }),
     "ok",
     "the lane already passed this tree and nothing moved",
   );
   assert.equal(
-    parkedLaneHalf({ parkedTree: t, coveredTree: undefined, currentTargetTree: t, laneRunning: true }),
+    parkedLaneHalf({ parkedTree: t, coveredTree: undefined, currentTargetTree: t, laneRunning: true, bypassActive: false }),
     "pending",
   );
   assert.equal(
-    parkedLaneHalf({ parkedTree: t, coveredTree: undefined, currentTargetTree: t, laneRunning: false }),
+    parkedLaneHalf({ parkedTree: t, coveredTree: undefined, currentTargetTree: t, laneRunning: false, bypassActive: false }),
     "veto",
     "nobody is coming back to verify this content — a hold here is forever",
   );
   // An EMPTY id is unknown, not equal — the fail-closed direction.
   assert.equal(
-    parkedLaneHalf({ parkedTree: "", coveredTree: "", currentTargetTree: "", laneRunning: true }),
+    parkedLaneHalf({ parkedTree: "", coveredTree: "", currentTargetTree: "", laneRunning: true, bypassActive: false }),
     "veto",
   );
+});
+
+test("parkedLaneHalf: a /gate-bypass round owes no lane — 'no lane ran' is not a veto", () => {
+  // THE TWO HALVES MUST AGREE (quality round P1, 2026-09-16). A bypassed
+  // session never gets a full precommit lane (`submitForReview` skips it), so
+  // the recorder already reads "bypass ⇒ nothing is missing"
+  // (`readyLacksVerification`). The parked half did not, and the disagreement
+  // was a loop: the parked READY came back as `veto`, was cleared with
+  // "re-submit", and the re-submission parked into the identical state.
+  const t = "9f2c";
+  assert.equal(
+    parkedLaneHalf({ parkedTree: t, coveredTree: undefined, currentTargetTree: t, laneRunning: false, bypassActive: true }),
+    "ok",
+    "no lane is owed, so the lane half is satisfied",
+  );
+  assert.equal(
+    parkedLaneHalf({ parkedTree: t, coveredTree: "other", currentTargetTree: t, laneRunning: false, bypassActive: true }),
+    "ok",
+    "…and a stale covered tree from an earlier round changes nothing",
+  );
+  assert.equal(
+    parkedLaneHalf({ parkedTree: t, coveredTree: t, currentTargetTree: "other", laneRunning: false, bypassActive: true }),
+    "veto",
+    "a round the gate has moved past is still not replayable",
+  );
+  // ONE rule, both callers: the bypass branch and the tree comparison are the
+  // same function, so the recorder cannot drift away from this half again.
+  assert.equal(laneVerifiesTree({ tree: t, coveredTree: undefined, bypassActive: true }), true);
+  assert.equal(laneVerifiesTree({ tree: t, coveredTree: undefined, bypassActive: false }), false);
+  assert.equal(laneVerifiesTree({ tree: t, coveredTree: t, bypassActive: false }), true);
+  assert.equal(laneVerifiesTree({ tree: undefined, coveredTree: t, bypassActive: false }), false,
+    "an unknown tree is never covered");
 });
 
 test("parkedReadyFate: BOTH preconditions must be satisfied; any veto retires the record", () => {

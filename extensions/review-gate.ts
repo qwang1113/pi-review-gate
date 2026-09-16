@@ -1226,6 +1226,17 @@ export default function reviewGate(pi: ExtensionAPI) {
             s.precommit.verdict = "NOT_RUN";
           }
         }
+        // A relay successor continues the same work in EVERY repo it touched,
+        // so a SECONDARY repo's sidecar is inherited on the same terms as the
+        // primary one — one rule, one function, no second copy of it here
+        // (`isHandoffSuccessorOf` re-checks the marker against the sidecar's
+        // own sessionId, so this can only adopt state the predecessor wrote).
+        // Without it, the moment the successor touched its second repo the
+        // gate would ask it to negotiate a goal it already has (reviewer P2,
+        // round 1).
+        if (existing && isHandoffSuccessorOf(process.env, existing.sessionId)) {
+          s = inheritGoalContract(s, existing);
+        }
       }
       repoStateCache.set(root, s);
     }
@@ -6694,7 +6705,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       // applier the judges' rows use — INCLUDING the PASS case, which the table
       // answers with "nothing" (a caller-side `if` would be the second copy of
       // that row the quality round caught on 2026-09-16).
-      applyCancelPlan(roundCancelPlan({ party: "lane", verdict }), root);
+      //
+      // WHAT IT RETURNED IS DELIVERED, NOT DROPPED (quality round P2,
+      // 2026-09-16): a judge's row has a sibling verdict whose standard report
+      // carries its notes, and the lane's row has none — dropped here, 「本轮有
+      // judge 判了非 READY，正在跑的全量 precommit 已终止」 reached nobody, and
+      // the agent only saw "precommit failed" with no trace of why. The FAIL
+      // notice below IS this row's delivery.
+      const laneCancelNotes = applyCancelPlan(roundCancelPlan({ party: "lane", verdict }), root);
       // THEN the parked conclusion, re-asked from BOTH halves (`resumeParkedReady`
       // consults the trees, what THIS landing measured and the quality standing):
       // a non-PASS lane retires the parked round, a PASS on exactly that tree
@@ -6719,6 +6737,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           current: worktreeTree(root) ?? "",
           verdict,
           detail,
+          ...(laneCancelNotes.length === 0 ? {} : { laneNotes: laneCancelNotes }),
         });
       }
     })();
@@ -7683,6 +7702,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         // opened leaves the previous lane alone, and the next dispatch decides
         // the same rotation again from a registry that still has it.
         if (opened.deliveryFailed) rotation.retirePrevious();
+        // `deliveryFailed` is NOT "the task was lost": the pane exists and
+        // was KEPT, and what failed is the BOOT VERIFICATION — the judge task
+        // itself rode in on argv (lib/session-factory.ts). So a pane that
+        // never acknowledged is still a delivered round the opener may wait
+        // on, which is exactly what `delivered: true` means here (quality
+        // round P2, 2026-09-16: the inverted-looking line needs to say so).
         return { ok: false, reused: continuesSession, delivered: opened.deliveryFailed === true, sessionId, sessionDir, error: detail, ...(opened.paneId === undefined ? {} : { paneId: opened.paneId }), judgeId };
       }
       // The new pane is up and registered: the lane it replaces is now safe to
@@ -8134,7 +8159,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         return {
           ok: false,
-          detail: details.reason === "pane-dead" ? "pane 已消失" : "等待未命中本轮 report",
+          detail:
+            details.reason === "pane-dead" ? "pane 已消失"
+            : details.reason === "cancelled" ? "本轮已被门禁终止（没有 pane 可重开，按 findings 修完重送）"
+            : "等待未命中本轮 report",
         };
       },
       // THE RECLAIM, AND WHAT IT ACHIEVED. The reply used to be awaited and
@@ -9362,6 +9390,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         coveredTree: landing?.coveredTree ?? st.precommit.lastFullPassTree,
         currentTargetTree: target?.tree,
         laneRunning: inFlightPrecommit?.root === root,
+        // BYPASS ARRIVES HERE TOO (quality round P1, 2026-09-16): a bypassed
+        // session never gets a full lane (`submitForReview` skips it), so
+        // "no lane, no tree covered" must not read as "disproven" — that is
+        // exactly how a parked READY was cleared and re-submitted into the
+        // identical park. The rule is shared with the recorder, not restated.
+        bypassActive: st.bypass.active,
       }),
       quality: qualityPrecondition({
         standing: qualityStandingFor({ head: target?.head ?? "", files: target?.files, quality: st.quality }),

@@ -354,6 +354,13 @@ test("a relay successor inherits the user's contracts and the round budget — a
   predecessor.rounds = [{ round: 1, findingsTotal: 2, fingerprints: ["fp"], at: "2026-09-16T00:02:00.000Z" }];
   predecessor.turnsWithoutGoal = 3;
   predecessor.bypass = { active: true, reason: "user said so", at: "2026-09-16T00:03:00.000Z" };
+  predecessor.taskMode = "orchestrator";
+  predecessor.scopeLimit = {
+    preexistingFiles: ["a.ts"],
+    sessionFiles: ["b.ts"],
+    at: "2026-09-16T00:04:00.000Z",
+  };
+  predecessor.sessionReposPaths = ["/other/repo"];
 
   const inherited = inheritGoalContract(emptyState("sess-new", 10), predecessor);
 
@@ -370,6 +377,10 @@ test("a relay successor inherits the user's contracts and the round budget — a
   // particular is ONE session's authorization (`/gate-bypass`), and a
   // succession is not a place for it to ride along.
   assert.equal(inherited.bypass.active, false, "a bypass is never inherited");
+  assert.equal(inherited.taskMode, undefined, "the task mode has its own env channel — not a handover's");
+  assert.equal(inherited.scopeLimit, undefined, "a scope limit is one session's grant");
+  assert.deepEqual(inherited.sessionReposPaths, ["/other/repo"],
+    "but the OTHER repos this work touched do travel — declare_done must still re-check them");
   assert.equal(inherited.review.verdict, "PENDING");
   assert.equal(inherited.sessionId, "sess-new", "the successor stays the session of record");
 });

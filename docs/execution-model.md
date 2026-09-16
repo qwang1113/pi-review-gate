@@ -294,7 +294,10 @@ agent 每轮都要先挑一个。这三个工具连同它们依赖的抓屏与�
   同一个 worktree，几分钟前才批过的 plan 不该再走一遍审计 + 批准框。
 - **会话自己的契约与预算** —— `lib/gate-state.ts` 的 `inheritGoalContract`：
   `restatement`（需求反述）、`loopGoal`（已批准的 loop goal）、`rounds` /
-  `turnsWithoutGoal`（轮次预算；能靠接力重置的就不是预算了）。
+  `turnsWithoutGoal`（轮次预算；能靠接力重置的就不是预算了）、`sessionReposPaths`
+  （本会话碰过的其他 repo —— `declare_done` 要逐个重新夹紧，继承它只会让收尾更**严**）。
+  同一个规则覆盖**每个 repo**，不只仓库本仓：次要 repo 的 sidecar 只要属于前任，
+  也按同一对函数继承（`stateForRepo` 里就是这两行，没有第二份实现）。
 
 两份都**不放宽任何许可**：每份记录仍绑着它当初绑的**内容**（plan 绑 canonical 文本、
 loop goal 绑 goal 文件文本、反述绑 text+hash），内容一变，既有校验立刻失效 —— 继承只
@@ -463,9 +466,18 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
 结论正在等的那一轮（判定在 `roundCancelPlan` 的 `held` 分支，不得写成旁路的 `if`）。
 
 - **取消是真的终止，不是「忽略结果」**：杀的是那个 pane 的进程（复用既有的
-  `closeJudgePaneOf` + 注册表撒行路径）。被取消的 judge 不再出现在注册表里，所以
+  `closeJudgePaneOf` + 注册表删行路径）。被取消的 judge 不再出现在注册表里，所以
   既不会被 `judge_wait` 等到，也不会被子进程看门狗当成「死掉的 judge」再报一次给
   agent；它这一轮的通道报告也不会被记录。取消是 live 动作，不跨重启。
+  - **在飞的 `judge_wait` 也算「等不到它」**（2026-09-16 修复）：它手里的 child 记录是
+    入场时拍的快照，所以光看「pane 消失」会把取消读成崩溃（标准报告会指导 agent
+    `judge_recover` 一个门禁刚撒掉的轮次，而恢复又会因为登记行不在而被拒）。现在它探到
+    pane 消失时先回查注册表：行不在 ⇒ 回一条 `cancelled` 报告（「本轮已被门禁终止」，
+    并明说不要 `judge_recover`）；`judge_recover` 自己对同一事实给出同一句下一步。
+  - **lane 那一行的回执走 precommit 通知**：judge 行的取消由兄弟裁决的标准报告带出
+    （`handOffNote`），lane 行没有兄弟裁决，所以它的 note 由后台 full precommit 的失败
+    通知携带（`AsyncPrecommitReport.laneNotes`）—— 在 2026-09-16 之前它被丢掉，agent
+    只看到「precommit 没过」，看不到「这轮已经被终止」。
 - **质量轮先 READY 不算收口**：reviewer 本来就在跑，本轮结论仍由 reviewer 的
   裁决收口（只有质量轮非 READY 才提前收口）。
 - **reviewer 先交卷 READY 而质量轮还没交卷**，是本设计里唯一的时序竞争，处置是

@@ -765,6 +765,29 @@ test("the round probe: a new report ends it, a dead pane fails it, silence pends
   assert.deepEqual(probeJudgeRound(f.deps, dead, "rep-9", f.binding), { done: true, reason: "pane-dead", openQuestions: [] });
 });
 
+test("judge_wait: a round the gate CANCELLED is not announced as a dead pane to recover", async () => {
+  // Quality round P1, 2026-09-16. `cancelJudgeRound` kills the pane AND drops
+  // the registry row, and this wait captures its child record at its own top —
+  // so a cancellation landing mid-wait looked exactly like a crash, and the
+  // standard report sent the agent to `judge_recover` the very round the gate
+  // had just reclaimed (recovery refuses: the row is gone). The registry tells
+  // the two apart, and the recovery path reads the same fact.
+  const f = fake();
+  seed(f, { paneId: "%7" });
+  // The wait's own entry lookup runs synchronously; the cancellation then
+  // lands in its FIRST POLL GAP (2s by design — there is no injected sleep to
+  // shorten it from here).
+  const pending = call(f, "judge_wait", { role: "reviewer", timeoutMs: 2200 });
+  f.panes = ["%1"]; // the pane dies…
+  f.children = [];  // …and the registry row is dropped with it, as cancelJudgeRound does
+  const reply = await pending;
+  assert.equal(reply.isError, undefined, textOf(reply));
+  const text = textOf(reply);
+  assert.match(text, /本轮已被门禁终止/);
+  assert.doesNotMatch(text, /judge_recover 同 id 重开/, "never the recovery promise — there is no pane to re-open");
+  assert.equal((reply.details as { reason?: string }).reason, "cancelled");
+});
+
 test("the round probe repaints the border — but never through a stranger's pane id", () => {
   // C2: pi overwrites the pane title after boot, so the border is repainted
   // from every reading of the judge's state. The id it writes through is only

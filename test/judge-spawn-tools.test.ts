@@ -346,6 +346,24 @@ test("recover refuses a live pane and an unreadable tmux", async () => {
   assert.match(textOf(unreadable), /读不出来/);
 });
 
+test("recover refuses a round that is no longer in the registry — and names the next step", async () => {
+  // The other half of the pair `judge_wait` forms with recovery (quality round
+  // P1, 2026-09-16): the cancel matrix ends a round by killing its pane AND
+  // dropping its row, so "recover" addresses something that cannot exist. The
+  // refusal has to say which door leads forward instead of leaving the opener
+  // to guess whether it lost a race.
+  const { tools, store } = setup();
+  const spawned = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(spawned.isError, undefined);
+  const judgeId = Object.keys(store.table)[0]!;
+  store.table = emptyHierarchy(); // the gate reclaimed the round's row
+  const gone = await tools.get("judge_recover")!({ judgeId });
+  assert.equal(gone.isError, true);
+  assert.match(textOf(gone), /不在登记表里/);
+  assert.match(textOf(gone), /judge_submit 重新派一轮/);
+  assert.doesNotMatch(textOf(gone), /续 transcript/, "…and it must not promise a recovery it cannot make");
+});
+
 test("recover re-opens a dead pane under the same session id", async () => {
   const reopened: string[][] = [];
   const { tools, store } = setup({

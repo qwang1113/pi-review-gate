@@ -141,14 +141,48 @@ export function readyLacksVerification(args: {
   reviewedTree?: string | undefined;
   bypassActive: boolean;
 }): boolean {
-  if (args.bypassActive) return false;
+  // The live binding still decides when there is one (`precommit: PASS` is the
+  // pre-tree-record behaviour, kept as the fallback); everything else is the
+  // shared rule below — never a second reading of bypass or of the trees.
   if (args.precommitVerdict === "PASS") return false;
-  const recorded = args.lastFullPassTree;
-  const reviewed = args.reviewedTree;
-  // Both sides must be known: an unknown tree proves nothing, and the
-  // direction is fail-closed (withhold).
-  return !(recorded !== undefined && recorded !== "" && reviewed !== undefined && reviewed !== "" &&
-    recorded === reviewed);
+  return !laneVerifiesTree({
+    tree: args.reviewedTree,
+    coveredTree: args.lastFullPassTree,
+    bypassActive: args.bypassActive,
+  });
+}
+
+/**
+ * DID A FULL LANE VERIFY THIS TREE? — the ONE answer, shared by both halves of
+ * the replay question.
+ *
+ * TWO WRITERS, ONE FACT (quality round P1, 2026-09-16). This question used to
+ * be answered twice — once for the RECORDED round (`readyLacksVerification`)
+ * and again for a PARKED one (`parkedLaneHalf`) — and two implementations of
+ * one rule disagree the moment either learns something new. Measured: the
+ * recorder was taught that a `/gate-bypass` session never gets a full lane (so
+ * "no lane ran" cannot mean "unverified"), and the parked half was not — so a
+ * bypassed round that parked its READY on a quality verdict came back through
+ * the other rule as `veto`, was cleared with "re-submit", and re-submitted
+ * into the identical park. The bypass branch and the tree comparison live HERE
+ * now, and both callers read them.
+ *
+ * Fail-closed by construction: every unknown proves nothing.
+ *  - a bypass means no lane is OWED at all, so nothing is missing;
+ *  - an unknown tree on either side is never a match.
+ */
+export function laneVerifiesTree(args: {
+  /** The tree whose verification is in question — the round's reviewed tree. */
+  tree: string | undefined;
+  /** `precommit.lastFullPassTree` — the tree a full lane passed, if one is on record. */
+  coveredTree?: string | undefined;
+  /** The user's own `/gate-bypass` grant — no lane is owed while it stands. */
+  bypassActive: boolean;
+}): boolean {
+  if (args.bypassActive) return true;
+  const tree = args.tree;
+  if (tree === undefined || tree === "") return false;
+  return args.coveredTree === tree;
 }
 
 /**
@@ -319,14 +353,23 @@ export function parkedLaneHalf(args: {
   currentTargetTree: string | undefined;
   /** Is a full lane running for this repo right now? */
   laneRunning: boolean;
+  /** The user's own `/gate-bypass` grant — see `laneVerifiesTree`. */
+  bypassActive: boolean;
 }): ParkedHalf {
   const parked = args.parkedTree;
   if (parked === undefined || parked === "") return "veto";
+  // ONE rule for "was this tree verified", shared with the recorder — never a
+  // second reading of bypass or of `lastFullPassTree` here.
+  const verified = laneVerifiesTree({
+    tree: parked,
+    coveredTree: args.coveredTree,
+    bypassActive: args.bypassActive,
+  });
   if (args.laneVerdict !== undefined) {
     if (args.laneVerdict !== "PASS") return "veto";
-    return args.coveredTree === parked && args.currentTargetTree === parked ? "ok" : "veto";
+    return verified && args.currentTargetTree === parked ? "ok" : "veto";
   }
-  if (args.coveredTree === parked && args.currentTargetTree === parked) return "ok";
+  if (verified) return args.currentTargetTree === parked ? "ok" : "veto";
   return args.laneRunning ? "pending" : "veto";
 }
 

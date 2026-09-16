@@ -944,6 +944,23 @@ export async function doWait(
     ...(observation.notThisRound === undefined ? {} : { notThisRound: observation.notThisRound }),
   };
   if (observation.done && observation.reason === "pane-dead") {
+    // A CANCELLED ROUND IS NOT A DEAD PANE (quality round P1, 2026-09-16).
+    //
+    // The cancel matrix ends a round by killing its pane AND dropping its
+    // registry row (`cancelJudgeRound` in the extension) — and the row is
+    // exactly what `judge_recover` needs. This wait captured its child record
+    // at the top, so a round cancelled WHILE IT WAS IN FLIGHT looked
+    // identical to a crash: the probe saw the pane vanish and the standard
+    // report told the agent to `judge_recover` a round the gate had just
+    // reclaimed, which is then refused because the row is gone (measured
+    // dead end). The registry decides which of the two it is — the same fact
+    // the recovery path reads, so the two halves cannot disagree.
+    if (!deps.findChild(addressed.root, addressed.role, addressed.judgeId)) {
+      return reply(
+        buildStandardReport({ ...base, reason: "cancelled", waitedSeconds }),
+        { done: true, reason: "cancelled", role: child.role, hasVerdict: false },
+      );
+    }
     return reply(
       buildStandardReport({ ...base, reason: "pane-dead", waitedSeconds }),
       { done: true, reason: "pane-dead", role: child.role, hasVerdict: false },

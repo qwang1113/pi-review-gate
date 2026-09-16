@@ -685,6 +685,13 @@ export function emptyState(sessionId: string | null, maxRounds: number): GateSta
  *    handover wash away rounds already spent, and the budget exists precisely
  *    to end a session that is going in circles.
  *
+ * `sessionReposPaths` travels too, and it is the same kind of fact seen from
+ * the other side (reviewer P2, round 1): it is which OTHER repos this session
+ * edited, and `declare_done` re-arms the gate against every one of them. A
+ * handover that dropped it could retire work the predecessor left half-done
+ * in a second repo — the one direction a succession must never move:
+ * inheriting may only ever make completion harder, never easier.
+ *
  * WHAT DOES NOT CARRY is the rest of {@link GateState}: `bypass`, the scope
  * limits, the verdicts, the fingerprints, the change flags, the repo set and
  * the session's own task mode all describe THIS session's standing, and a
@@ -713,6 +720,9 @@ export function inheritGoalContract(target: GateState, predecessor: GateState): 
     ...(predecessor.rounds.length > 0 ? { rounds: predecessor.rounds } : {}),
     ...(predecessor.turnsWithoutGoal !== undefined
       ? { turnsWithoutGoal: predecessor.turnsWithoutGoal }
+      : {}),
+    ...(predecessor.sessionReposPaths && predecessor.sessionReposPaths.length > 0
+      ? { sessionReposPaths: predecessor.sessionReposPaths }
       : {}),
   };
 }

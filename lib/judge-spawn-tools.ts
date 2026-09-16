@@ -560,6 +560,19 @@ async function doRecover(
   }
   const resolved = resolveJudgeId(deps, params);
   if (!resolved.ok) return fail(resolved.text);
+  // A ROUND THAT WAS CANCELLED HAS NOTHING TO RECOVER (quality round P1,
+  // 2026-09-16) — and this is the other half of the pair `judge_wait` forms
+  // with it. The gate ENDS a round by killing its pane and dropping its
+  // registry row; a bare "not in the registry" then leaves the opener
+  // guessing whether it lost a race, so say which door leads forward. The
+  // check runs BEFORE `checkCaller`, which refuses on the same fact with a
+  // reason that does not name the next step.
+  if (!deps.hierarchy()[resolved.judgeId]) {
+    return fail(
+      `review-gate: review ${resolved.judgeId} 不在登记表里 —— 这一轮已被门禁终止（或被收回），没有 pane 可重开。` +
+      "按 findings 修完，用 judge_submit 重新派一轮（不要 recover）。",
+    );
+  }
   const allowed = checkCaller(deps.hierarchy(), resolved.judgeId, caller);
   if (!allowed.ok) return fail(`review-gate: ${allowed.reason}`);
   const entry = deps.hierarchy()[resolved.judgeId]!;

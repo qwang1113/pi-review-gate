@@ -32,7 +32,7 @@ import type { ModelEvent } from "./model-health.ts";
  * new. Each is a DIFFERENT next step, so none of them may render as "a round
  * ended".
  */
-export type StandardReportReason = "report" | "finding" | "question" | "pane-dead" | "model-exhausted" | "pending" | "settled";
+export type StandardReportReason = "report" | "finding" | "question" | "pane-dead" | "cancelled" | "model-exhausted" | "pending" | "settled";
 
 /** First line per reason — the opener reads this one and knows what happened. */
 const HEADLINE: Record<StandardReportReason, string> = {
@@ -40,6 +40,10 @@ const HEADLINE: Record<StandardReportReason, string> = {
   finding: "本轮流出新 findings：",
   question: "本轮有新提问等你回答：",
   "pane-dead": "pane 消失且 verdict 未落盘 —— 本轮不算结束：",
+  // NOT A DEATH (quality round P1, 2026-09-16): the gate ENDED this round on
+  // purpose (the cancel matrix) and reclaimed its pane and its registry row,
+  // so "recover it" is the one instruction that cannot work.
+  cancelled: "本轮已被门禁终止（另一路裁决先到，不是 pane 意外死亡）：",
   "model-exhausted": "链上模型全部失败，本轮无法继续 —— 没有结论：",
   pending: "本轮仍在运行，这段时间没有新消息：",
   // The ONE headline that ends a wait by saying there was nothing to wait for
@@ -252,6 +256,11 @@ function nextStep(input: StandardReportInput, reason: StandardReportReason): str
       return ["下一步：先在代码里确认这些 findings，能修就就地修（审查范围是 immutable commit，工作区编辑不失效本轮）；确实没别的活了再调 judge_wait 继续等。"];
     case "pane-dead":
       return ["下一步：judge_recover 同 id 重开、续 transcript 继续本轮。"];
+    case "cancelled":
+      return [
+        "下一步：这一轮已经结束（另一路裁决先到，门禁按取消矩阵终止了它），它的 pane 与登记行都已收回 —— **不要 judge_recover**（没有 pane 可重开，登记表里也不再是这一轮）。",
+        "按已知的 findings 修完，再用 judge_submit 重新派一轮。",
+      ];
     case "model-exhausted":
       return ["下一步：本轮**没有**任何结论（不是被审对象的问题）。先修模型可达性（~/.pi/review-gate.json 的 agents 链 / provider 认证），再重新派发本轮；冷却期只是个缓冲，不是修复。"];
     case "pending":

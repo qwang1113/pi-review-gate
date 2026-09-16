@@ -4140,6 +4140,21 @@ test("a NEW session keeps the orchestration registry but never its approval (B1)
 });
 
 
+test("a relay successor inherits in EVERY repo, not just the primary one", () => {
+  // P2 (round 1): `stateForRepo` builds a fresh state for a second repo whose
+  // sidecar belongs to a different session id. For the predecessor's own
+  // successor that sidecar is not foreign at all — refusing it would ask the
+  // successor to negotiate a goal it already holds, in the repo it was told to
+  // keep working in. One rule, one function: the same `isHandoffSuccessorOf`
+  // the primary restore path uses (marker AND the sidecar's own session id).
+  const at = SRC.indexOf("function stateForRepo(");
+  assert.ok(at > 0, "stateForRepo must exist");
+  const body = SRC.slice(at, SRC.indexOf("repoStateCache.set(root, s)", at));
+  assert.ok(body.length > 0, "the window must cover the loader");
+  assert.match(body, /if \(existing && isHandoffSuccessorOf\(process\.env, existing\.sessionId\)\) \{\n\s*s = inheritGoalContract\(s, existing\);/,
+    "a secondary repo's sidecar is inherited by the predecessor's successor — same rule, same function");
+});
+
 test("session_start surfaces the migration notice and clears the flag", () => {
   const at = SRC.indexOf('pi.on("session_start"');
   assert.ok(at >= 0, "session_start handler must exist");
