@@ -74,13 +74,18 @@ test("every high-frequency refusal path renders through buildRejection", () => {
   // single call anywhere in the file, which is exactly how the path it claims
   // to cover drifts back to hand-written prose unnoticed. Each end anchor is
   // the next declaration, so the window is the refusal site itself.
+  // Every start anchor must be UNIQUE in its file — asserted below, because a
+  // repeated anchor silently slices the WRONG window (round-2 quality P1:
+  // `if (problems.length > 0) {` matched a model-config notice 5 000 lines
+  // above the declare_done refusal and the case went green off judge_submit's
+  // calls instead).
   const cases: Array<[string, string, string, string]> = [
     ["ask_user batch not conforming", "lib/user-interaction-tools.ts",
       "export async function doAskUser", "const { questions, dropped: droppedQuestions"],
     ["judge_submit submission refused", "extensions/review-gate.ts",
       'name: "judge_submit"', "const progress = createProgressReporter("],
     ["declare_done refused", "extensions/review-gate.ts",
-      "if (problems.length > 0) {", "progress.done("],
+      "// ---------- declare_done tool ----------", 'progress.done("全部满足")'],
     ["goal refused (audit or hash)", "lib/loop-goal.ts",
       "export function buildGoalPrereviewRefusal", "export const GOAL_CONFIRM_TITLE"],
     ["goal refused (loop goal not approved: L8 edit block)", "lib/loop-goal.ts",
@@ -98,8 +103,10 @@ test("every high-frequency refusal path renders through buildRejection", () => {
   ];
   for (const [label, file, from, to] of cases) {
     const src = readFileSync(join(ROOT, file), "utf8");
+    const anchors = src.split(from).length - 1;
+    assert.equal(anchors, 1,
+      `${label}: the start anchor must be UNIQUE in ${file} (found ${anchors}) — a repeated anchor slices the wrong window`);
     const start = src.indexOf(from);
-    assert.ok(start > 0, `${label}: the start anchor is gone from ${file} — fix the anchor, do not delete the case`);
     const end = src.indexOf(to, start);
     assert.ok(end > start, `${label}: the end anchor must follow the start anchor in ${file}`);
     assert.match(src.slice(start, end), /\bbuildRejection\(/,
