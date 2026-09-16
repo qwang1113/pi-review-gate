@@ -28,9 +28,19 @@ import {
   type OpenPrLookup,
 } from "../lib/station-pr-evidence.ts";
 import type { PrSummary } from "../lib/copilot-review.ts";
+import { hermeticGitEnv } from "./helpers/git.ts";
 
+// Hermetic env on EVERY spawn: these fixtures run real `git commit`, and a
+// developer's global `commit.gpgsign` / `core.hooksPath` would otherwise make
+// them slow on one machine and wrong on another (test/hermetic-git.test.ts
+// enforces this for the whole suite). Identity still comes from `-c` at the
+// commit call sites — the hermetic env also removes `user.name`/`user.email`.
 function runGit(dir: string, ...args: string[]): void {
-  execFileSync("git", args, { cwd: dir, stdio: ["ignore", "ignore", "ignore"] });
+  execFileSync("git", args, {
+    cwd: dir,
+    env: hermeticGitEnv(),
+    stdio: ["ignore", "ignore", "ignore"],
+  });
 }
 
 function scratch(prefix: string): string {
