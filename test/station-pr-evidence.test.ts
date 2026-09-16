@@ -10,8 +10,10 @@
  *    branch nobody published.
  *  - the `gh` half takes a fake lookup, so the `state === "OPEN"` rule (a
  *    CLOSED or MERGED PR is NOT an arrival, and neither is an unreadable one)
- *    is exercised without GitHub, and the "unpushed is only read when a PR was
- *    actually found" rule is visible in the result rather than in a comment.
+ *    is exercised without GitHub — and the result type has NOWHERE to put the
+ *    push reading, which is the point: that question is a separate local git
+ *    fact, asked of every `pr` evidence, and `test/delivery-station.test.ts`
+ *    is where the rule about it lives (round-1 review Nit, 2026-09-16).
  */
 
 import test from "node:test";
