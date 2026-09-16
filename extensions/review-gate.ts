@@ -1436,15 +1436,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     // this session's own came down to who looked first: a cold cache failed a
     // never-recorded repo closed, a warm one waved it through
     // `unmetRequirements` with nothing unmet. Same repo, two answers, on the
-    // path that decides whether work may ship. Ownership is read from the DISK
-    // through the one rule `stateForRepo` also uses; the cache only supplies
-    // the fresher copy once that sidecar is known to be ours to rely on.
+    // path that decides whether work may ship.
+    //
+    // ONE LOADER, ONE ANSWER (same round, after the reviewer measured the
+    // first fix): ownership is read from the DISK through the rule
+    // `stateForRepo` also uses, and — that answered — the state itself comes
+    // from that SAME loader, so both readers return one object. A repo of ours
+    // is adopted as it stands; the predecessor's is carried exactly the way the
+    // primary repo is (a fresh state with the user's contracts on it, never the
+    // predecessor's verdicts — which is why the raw sidecar must never be
+    // handed out here).
     const onDisk = loadSidecar(sidecarPath(root));
     if (stateOwnership(process.env, state.sessionId, onDisk?.sessionId) === "foreign") return undefined;
-    // …and the state itself comes from the ONE loader, so both readers see the
-    // same object: a repo of OURS is adopted as it stands, and the
-    // predecessor's is carried the same way the primary repo is (a fresh state
-    // with the user's contracts on it, never the predecessor's verdicts).
     return stateForRepo(root);
   }
 
