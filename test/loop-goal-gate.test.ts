@@ -16,6 +16,7 @@ function isScratchPath(p: string): boolean {
 }
 import { fileURLToPath } from "node:url";
 import { goalTextHash, goalReminderDue } from "../lib/loop-goal.ts";
+import { capUntrustedLine } from "../lib/goal-tools.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
@@ -117,19 +118,16 @@ function makeRepoAt(base: string): string {
 }
 
 /**
- * WHERE THE FIXTURES LIVE — a SHORT root, never `os.tmpdir()`.
+ * WHERE THE FIXTURES LIVE — `os.tmpdir()`, as before 2026-09-16.
  *
- * The dialog row budget is gone (2026-09-16), so that reason for a short path
- * is gone with it — this one is not the same thing: `capUntrustedLine` still
- * caps an untrusted VALUE at 120 characters (criterion 6 of that round), and
- * the repository path is exactly such a value. A fixture under a judge's
- * `$TMPDIR` (`.pi/review-scratch/rg-<role>-<long id>/`) is long enough for the
- * cap to bite, and the L8 consent tests then assert against a truncated path.
+ * A short root was pinned here for two rounds, for two different reasons, and
+ * BOTH are gone: the dialog row budget went with `lib/dialog-budget.ts`, and
+ * the one assertion that depended on `capUntrustedLine`'s 120-character bound
+ * now applies that bound itself instead of asserting the whole path. Nothing
+ * here reads how long a path happens to be on the host that runs it.
  */
-const FIXTURE_ROOT = "/tmp";
-
 function makeRepo(): string {
-  return makeRepoAt(FIXTURE_ROOT);
+  return makeRepoAt(tmpdir());
 }
 
 function makeMockPi(cwd: string) {
@@ -953,7 +951,15 @@ test("L8: propose_loop_goal refuses a NON-repo repo param and shows the binding 
   const repoB = makeRepo();
   await recordPrereview(pi, ctx, GOAL_TEXT, repoB);
   await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT, repo: repoB }, undefined, undefined, ctx);
-  assert.match(dialogText, new RegExp(repoB.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  // WHAT THE DIALOG WOULD ACTUALLY CARRY — not the full path. `capUntrustedLine`
+  // bounds an untrusted value at 120 characters (by design), so asserting the
+  // WHOLE path made this test depend on how long a fixture path happens to be
+  // on the machine that runs it (round-1 review P2, 2026-09-16: on a host whose
+  // tmpdir is long enough, the cap bites and the assertion fails for a reason
+  // that has nothing to do with consent). The cap is applied here instead, so
+  // the assertion is about what the user is shown.
+  const shownRepo = capUntrustedLine(repoB);
+  assert.match(dialogText, new RegExp(shownRepo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     "the consent dialog must name the repo the goal binds to");
 });
 
