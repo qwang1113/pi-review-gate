@@ -11656,22 +11656,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
     state.sessionId = sessionId;
-    // P-multi: re-arm the repo set from the persisted list — a same-session
-    // resume keeps the repos it edited, and a RELAY SUCCESSOR inherits the
-    // predecessor's (lib/gate-state.ts's `inheritGoalContract` is what puts
-    // them on the state). Only repos whose sidecar still exists are re-added —
-    // a deleted checkout must not block declare_done forever.
-    //
-    // THIS RUNS BEFORE ANYTHING CAN persist() (quality round P1, 2026-09-16).
-    // `persist` writes `state.sessionReposPaths` FROM this in-memory set, so a
-    // restore that merely put the inherited paths on the state had them
-    // overwritten by the empty set the first time anything persisted — and a
-    // relay successor always persists early, because the spawner hands it its
-    // mode. The inheritance was dead code until this loop moved above the
-    // first `setTaskMode` call.
-    for (const r of state.sessionReposPaths ?? []) {
-      if (r !== primaryRepoRoot && existsSync(sidecarPath(r))) sessionRepos.add(r);
-    }
     // Take over previous sessions' pane judges: merge their registry + pendings
     // so live panes stay addressable and no second pi is forked onto one
     // session id. Judge panes themselves skip this (they operate nothing).
@@ -11709,6 +11693,27 @@ export default function reviewGate(pi: ExtensionAPI) {
     // restored state — otherwise the wait would sit there unnoticed until the
     // next tool call, which is the blind wait this watcher exists to end.
     syncAllCopilotWatches();
+
+    // P-multi: re-arm the repo set from the persisted list — a same-session
+    // resume keeps the repos it edited, and a RELAY SUCCESSOR inherits the
+    // predecessor's (lib/gate-state.ts's `inheritGoalContract` is what puts
+    // them on the state). Only repos whose sidecar still exists are re-added —
+    // a deleted checkout must not block declare_done forever.
+    //
+    // WHERE IT SITS IS PART OF THE RULE (quality round P1, 2026-09-16).
+    // Above the first persist, because `persist` writes
+    // `state.sessionReposPaths` FROM this in-memory set and a relay successor
+    // ALWAYS persists early (the spawner hands it its mode, and `setTaskMode`
+    // persists) — the inherited list used to be erased before anything could
+    // read it. Below `syncAllCopilotWatches()`, because a repo added here
+    // reaches that loop, `copilotWatchKey` reads the repo's state, and that
+    // POPULATES `repoStateCache` — which `enforcementStateFor` trusts without
+    // re-checking whose sidecar produced it, so `/gate-status` would report an
+    // inherited, never-recorded repo as "PENDING / none" instead of "no
+    // usable gate state".
+    for (const r of state.sessionReposPaths ?? []) {
+      if (r !== primaryRepoRoot && existsSync(sidecarPath(r))) sessionRepos.add(r);
+    }
 
     // Reflect the precommit config source in the status bar right away.
     updateWidget(ctx);
