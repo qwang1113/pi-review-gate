@@ -1,9 +1,9 @@
 /**
  * The checkpoint commit message is a pure function of the agent's round note,
- * and it carries NO checkpoint marker (user decision, 2026-09-16): the history
- * reads as ordinary work, so a checkpoint is `fix(gate): x`, not
- * `fix(checkpoint-gate): x`. The one job left is that the subject is a legal
- * Conventional Commit even when the agent's note is not one.
+ * and it no longer marks the commit as a checkpoint (user decision,
+ * 2026-09-16): the history reads as ordinary work, so a checkpoint is
+ * `fix(gate): x`, not `fix(checkpoint-gate): x`. The one job left is that the
+ * subject is a legal Conventional Commit even when the agent's note is not.
  */
 
 import test from "node:test";

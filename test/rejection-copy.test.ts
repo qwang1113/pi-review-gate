@@ -96,7 +96,10 @@ test("every high-frequency refusal path renders through buildRejection", () => {
       "export function sensitiveEditBlock", "export async function evaluateEditCall"],
     ["edit/write blocked (no path)", "lib/ship-gate-edit-guard.ts",
       "export async function evaluateEditCall", "const absPath = path ? normalizeSensitivePath"],
-    ["edit/write blocked (worktree held by a peer)", "lib/session-exclusivity.ts",
+    // Not one of the six goal-named refusal paths: this is the worktree
+    // occupancy refusal raised at session start, and the same text doubles as
+    // the L8 edit-block reason (extensions/review-gate.ts).
+    ["session start refused (worktree held by a peer)", "lib/session-exclusivity.ts",
       "function refusalText", "Last path segment"],
     ["ship command blocked", "lib/ship-gate-bash.ts",
       "export function buildShipBlockReason", "export async function evaluateShipCommand"],
