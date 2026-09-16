@@ -134,8 +134,24 @@ function makeRepoAt(base: string): string {
   return realpathSync(root);
 }
 
+/**
+ * THE FIXTURE ROOT IS SHORT AND FIXED ON PURPOSE — never `os.tmpdir()`.
+ *
+ * A fixture's repository path is RENDERED: the gate budgets a dialog's rows
+ * from the real length of every line, and `judge_submit` points a judge's
+ * `$TMPDIR` at `.pi/review-scratch/rg-<role>-<long id>/`. A fixture under
+ * `os.tmpdir()` therefore gets a path long enough to wrap the repo line, eat
+ * the dialog budget and truncate the pre-review line — failing an assertion
+ * that has nothing to do with what it tests, only when a JUDGE runs the
+ * suite. Measured 2026-09-16 in a judge pane: 1/24 failures here with the
+ * gate's own TMPDIR, 24/24 with `TMPDIR=/tmp` (and `COLUMNS` made no
+ * difference at all). A short root takes the runner's environment out of the
+ * budget's inputs.
+ */
+const FIXTURE_ROOT = "/tmp";
+
 function makeRepo(): string {
-  return makeRepoAt(tmpdir());
+  return makeRepoAt(FIXTURE_ROOT);
 }
 
 function makeMockPi(cwd: string) {
