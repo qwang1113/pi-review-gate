@@ -707,8 +707,10 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "edits that grant nothing new — a dropped task, an added dependency, " +
       "parallel→serial, a lower maxParallel, a lowered deliveryStation — and records why. " +
       "It REVOKES it for a new task, a change of a task's repo, a removed dependency, " +
-      "serial→parallel, a higher maxParallel, a raised deliveryStation, or a repo ADDED to " +
-      "`allowMultiplePrs`. " +
+      "serial→parallel, a higher maxParallel, a raised deliveryStation, a repo ADDED to " +
+      "`allowMultiplePrs`, or a task whose OWN station got wider — the plan's LAST task is " +
+      "exempt from the same-repo narrowing (it is the one that delivers), so reordering the " +
+      "list or dropping a sibling can hand another task the right to push and open the PR. " +
       "So refine the task list freely as you learn where the work lands; only real widening costs " +
       "the user a dialog. " +
       "REQUIRED BEFORE `submit`: a restatement the USER confirmed (`propose_restatement`) — " +

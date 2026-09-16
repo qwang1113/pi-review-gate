@@ -29,7 +29,7 @@ import {
   snapshotApprovedPlan,
 } from "../lib/orchestrator-plan-approval.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
-import { buildPlanConfirmMessage } from "../lib/orchestrator-tools.ts";
+import { buildPlanConfirmMessage, registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
 import { effectiveTaskStation } from "../lib/repo-pr-policy.ts";
 import { normalizeRuntime } from "../lib/orchestrator-registry.ts";
 
@@ -717,6 +717,23 @@ test("both consent surfaces state the DELIVERY STATION and that raising it re-as
   assert.match(dialog, /本轮交付站点/, "the decision box carries the station itself");
   assert.match(dialog, /提高交付站点/, "…and lists it among the changes that revoke the approval");
   assert.match(dialog, /让某个任务自己的交付站点变宽/, "…including the per-task one the finish task created");
+});
+
+test("the tool description lists the revoking edits the same way (round-3 P2)", () => {
+  // The FOURTH surface of that list: the manager reads it while it is writing
+  // the plan, and it is the one that decides whether reordering feels free.
+  // Pinned here with the other two so the next category added to this rule
+  // reds every surface instead of quietly missing one (round-2 and round-3 P2s
+  // were exactly that miss, twice).
+  const specs = new Map<string, { description?: string }>();
+  const world = makeFakeWorld();
+  registerOrchestratorStateTools({
+    registerTool: (definition: { name: string }) => { specs.set(definition.name, definition as never); },
+  } as never, world.deps);
+  const description = specs.get("orchestrator_plan")?.description ?? "";
+  assert.match(description, /allowMultiplePrs/, "the list is the one this test means to read");
+  assert.match(description, /task whose OWN station got wider/,
+    "the write path must warn the manager that reordering can move the exemption");
 });
 
 // ---------------------------------------------------------------------------
