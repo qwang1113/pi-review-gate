@@ -342,24 +342,23 @@ export async function doAskUser(
         // interview's own escape row, which is not part of the template
         // because only an interview has later questions to skip.
         //
-        // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). A title
-        // is charged to the budget but never cut by it (it is the question
-        // being asked), so a 1200-character question in the title made the box
-        // as tall as it liked and pushed the spinner out of the viewport —
-        // the flicker again, from the one render path that had bypassed the
-        // budget entirely. The full question is in the transcript above
-        // (printed before the first box), and the body's cut points at it.
+        // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). The title
+        // is the short label the reason box repeats; the question is the long
+        // half and belongs in the body. (When a row budget existed this ALSO
+        // kept a 1200-character question from sizing the box — the budget is
+        // gone, the placement is not.) The full question is in the transcript
+        // above (printed before the first box), which is where a long text is
+        // readable.
         //
         // THE GRANT NOTICE STAYS OUT OF THE BODY (reviewer P1, 2026-09-14).
         // The body is cut from its TAIL, so appending the ⚠️ authorization
         // notice after the question let a long question eat it — while
         // picking the recommended row still minted the proxy grant. That is
         // exactly the invisible-authorization hole the notice was added to
-        // close (2026-09-16 P1), so the notice rides in the TITLE: it is
-        // charged to the budget like everything else, but a two-line notice
-        // never overflows the title's share, and what a long body loses is
-        // only the tail of the question (whose full text is in the
-        // transcript).
+        // close (2026-09-16 P1), so the notice rides in the TITLE: it is the
+        // part of the box that is read first and repeated back by the reason
+        // box, and a two-line notice is never the long half. A long question
+        // goes in the body, whose full text is in the transcript anyway.
         return deps.askChoice(
           uiCtx,
           {

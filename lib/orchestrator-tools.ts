@@ -158,7 +158,8 @@ const APPROVAL_SEMANTICS =
  * The plan itself was just printed by {@link buildPlanTranscriptMessage}, and
  * repeating it here is what produced the truncated, unreadable dialog O-1
  * filed. The fixed copy explaining what approval grants comes first, because
- * the dialog fitter truncates from the tail.
+ * the box is read top-down and that copy is what the reader must not miss
+ * (before 2026-09-16 a tail cut decided the same order; nothing is cut now).
  */
 export function buildPlanConfirmMessage(plan: OrchestratorPlan, defaultRepo = ""): string {
   const narrowing = narrowedRepoLines(plan, defaultRepo);

@@ -3497,9 +3497,9 @@ test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surfac
   assert.match(body, /goal-auditor 预审: PASS @/);
   const repoFact = body.indexOf('"绑定仓库(不可信数据): " + repoLine');
   // The DELIVERY STATION (2026-09-06) joins them, between the repo binding and
-  // the audit line: the dialog fitter truncates from the tail, and the two
-  // consent-critical facts (which repo, how far this round goes) must be the
-  // ones that survive.
+  // the audit line: the box is read top-down, and the two consent-critical
+  // facts (which repo, how far this round goes) come before the label of what
+  // is being approved.
   // …and it is the USER's rendering of the station that the dialog prints
   // (2026-09-17): the same sentence exists in a second person for the user and
   // a third person for the agent, and a dialog that printed the agent's copy

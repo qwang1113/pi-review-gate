@@ -287,9 +287,10 @@ export async function doProposeLoopGoal(
   // follows carries only the decision.
   // The pre-review fact is shown to the USER too: the approval is more
   // informed when it is visible that an independent auditor already passed
-  // THIS text. It goes AFTER the repo line on purpose — the dialog budget
-  // truncates from the tail, and the repo binding is the consent-critical
-  // fact that must never be the thing that gets cut.
+  // THIS text. It goes AFTER the repo line on purpose — the box is read
+  // top-down, and the repo binding is the fact the user is confirming first.
+  // (Until 2026-09-16 the order also decided what survived a tail cut; nothing
+  // is cut any more, the reading order is why it stays.)
   // The record is guaranteed to exist here: goalPrereviewPassed() above
   // already required a PASS bound to this text, so this reads it directly
   // rather than advertising a fallback state that cannot occur.
