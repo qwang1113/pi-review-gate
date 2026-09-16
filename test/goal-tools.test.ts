@@ -8,7 +8,6 @@ import {
   type GoalToolDeps,
 } from "../lib/goal-tools.ts";
 import { buildGoalConfirmMessage } from "../lib/loop-goal.ts";
-import { fitDialogMessage } from "../lib/dialog-budget.ts";
 import {
   checkGoalDraft,
   buildGoalRecordReply,
@@ -661,14 +660,10 @@ test("a long repo path cannot cut the consent-critical lines out of the goal dia
   // A short path is left alone entirely.
   assert.equal(capUntrustedLine("/Users/x/repo"), "/Users/x/repo");
 
-  // …AND THE ORDER IS THE BUDGET POLICY. The row budget truncates from the
-  // TAIL, so at a narrow width the goal's own TITLE (whose full text is on
-  // screen right above) is what goes first, and the three lines the user is
-  // actually confirming survive. Measured before the reorder — 60 columns, a
-  // 120-character path — BOTH the station line and the pre-review line were
-  // dropped, which is consent to something the dialog never showed.
-  const fitted = fitDialogMessage("问题", body, "（内容过长，已截断）", 60, 11).message;
-  assert.match(fitted, /goal-auditor 预审: PASS @ /,
-    "the audit fact must survive the ROW budget too, not only the character cap");
-  assert.match(fitted, /本轮交付站点：precommit/, "…and so must the station line");
+  // NOTE (2026-09-16): the ROW-BUDGET half of this test is gone with
+  // lib/dialog-budget.ts. The dialog is no longer fitted to the terminal at
+  // all — the user runs every session on the fullscreen renderer, and a
+  // session that is not on it is TOLD instead (lib/renderer-mode.ts). The
+  // character cap above survives because it is an input-side limit on an
+  // untrusted value, not a fit.
 });

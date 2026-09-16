@@ -435,8 +435,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 它自己转注册 `consent-request-tools.ts` 的两个同意工具
 （`request_scope_limit` / `request_sensitive_edit`，见 §1.2）；
 `agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
-`dialog-budget.ts` 管对话框的渲染行数预算（宿主不截断，长度得自己管；选项行
-也算进预算，`askChoice` 按实际行数收紧正文额度），
+`renderer-mode.ts` 管「这个会话是不是 fullscreen 渲染器」这个读数与对它的提醒（对话框行数预算已于 2026-09-16 删除：产生它的那个闪屏只发生在默认渲染器上，而用户每会话都用 fullscreen；模式来自宿主的 `TUI.mode`，不自己重算配置），
 跨会话的唤醒**不在**这一域：一个编排子会话经它自己的**通道**上报（见域 4），
 全局广播队列已删除；
 `edit-discipline.ts` 管「edit/write 失败后改用 bash 写文件」这个习惯，两条通道
@@ -515,7 +514,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `copilot-review.ts` | L7：PR 之后的 Copilot 审查状态机（请求、逐 thread 消账、预算与终态）；payload 与探针/时间线的纯解析（`parseCopilotProbe` / `parseCopilotTimeline`）；`CopilotReviewState.triage` 带用户自己的裁决，每个转移都带着它走 |
 | `copilot-triage.ts` | L7 用户那半边的纯规则：轮次阈值（`COPILOT_TRIAGE_ASK_FROM_ROUND = 4` 起每条问题先问用户）、线程键（thread id + 最后一条评论 id）、「哪些还没表态」、四组裁决汇总、`triage` 块的 sanitize；无 IO/无时钟 |
 | `delivery-station.ts` | 交付站点（`precommit` / `commit` / `pr`）：类型、解析与缺省（缺失或非法一律读成 `precommit`）、严格度排序、「某站点放行哪些 `ShipCommandKind`」的纯判定与超站拦截文案（`stationShipProblem` / `STATION_SHIP_NEXT_STEPS`，只给用户能走的两条路、不给申诉假出路），以及 `declare_done` 的「到站」判定（`stationArrivalProblems`：`commit` 要工作区干净，`pr` 要三条证据之一 —— 门禁**亲眼看到**成功的 `gh pr create`（`GateState.shippedKinds`）、Copilot 周期已解析出的 PR 号，或**门禁自己查到的、当前分支上开着的 PR**（`lib/station-pr-evidence.ts`）—— **且本地 HEAD 已在它的 upstream 上**（`prEvidencePresent` / `prArrivalProven` 是唯一的两条谓词，扩展也调前者决定要不要发网络查询；「挂着旧 PR、本轮提交还在本地」——包括门禁自己在 PR 开着之后落的 checkpoint——一律判未到站）；无 fs、无时钟，goal 侧、plan 侧与 ship 门禁共用同一份枚举 |
-| `dialog-budget.ts` | 对话框的渲染行数预算——宿主不截断，长度必须自己管；选项行同样计入（`askChoice` 按 `choiceRows` 的实际行数收紧正文额度） |
+| `renderer-mode.ts` | 这个会话跑在哪个渲染器上 —— 以及不在 `fullscreen` 时对它说一次什么（2026-09-16，用户决定）。它就是原来那套对话框行数预算的**替身**：那个预算存在的理由是 **默认（regular）渲染器**下、对话框高到把 spinner 挤出视口时 pi-tui 每帧清屏并擦掉滚回缓冲（实测 40 行终端：39 行 ⇒ 0/30，40 行 ⇒ 29/30）；而拥有整屏、自己滚动的 `fullscreen` 渲染器永远走不到那个分支，用户也每会话都用它。预算的代价落在「用户正在确认的那些行」上（长路径可以带走站点行与审计预审行），所以删掉预算，改为**提醒**。模式只能来自宿主的 `TUI.mode`（经 `setWidget` 的 factory 形式拿到）——自己按 argv + settings 重算就是一份会算错边角的拷贝（项目未 trusted 时 `.pi/settings.json` 整个被忽略、`/settings` 能在会话中途改模式）。纯判定 `rendererModeNoticeDue` + 文案 `RENDERER_MODE_NOTICE` |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |
 | `test-run-discipline.ts` | 识别全量测试/typecheck 命令（无参 `npm test` / `tsc --noEmit` / `node --test` 全树），追加「送审时门禁自动 full precommit」提醒；纯判定 + 文案，judge 豁免在接线处 |
 | `thinking-loop-guard.ts` | 思考空转（pure-thinking spinning）的**判定**：按 thinking/text/toolcall 三类增量折叠当前 assistant 消息，三条件齐备才判空转（零文本零工具调用 + thinking 过门槛 + 尾部 800 字符窗口里出现一整段**连续重复**：至少 2 个不同的 24 字符 n-gram 各重复 ≥12 次、且连续重复区 ≥300 字符）。24 字符与「连续区」两个判据都是实测逼出来的：8 字符 n-gram 会把模板式的正常思考（「步：检查 」每项重复一次）判成循环，而仅看重复次数又挡不住「一条长分隔线」。另导出 `truncateThinkingForDisplay`（显示截断，**字符与行数双上限**，无换行的循环样本也压得住）。纯逻辑、无 I/O，来源 deepseek-ai/deepseek-harness#5976 |

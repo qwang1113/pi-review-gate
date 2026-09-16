@@ -16,7 +16,6 @@ function isScratchPath(p: string): boolean {
 }
 import { fileURLToPath } from "node:url";
 import { goalTextHash, goalReminderDue } from "../lib/loop-goal.ts";
-import { DIALOG_ASSUMED_COLUMNS } from "../lib/dialog-budget.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
@@ -25,28 +24,6 @@ import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 // the gate's state from the fixture alone, so the variables the surrounding
 // gate session sets (RG_STATE_VARIANT & co.) are cleared before any spawn.
 neutraliseGateEnv();
-
-// PIN THE TERMINAL WIDTH — AND, FURTHER DOWN, THE FIXTURE'S PATH.
-//
-// The gate budgets a dialog's rendered rows against the REAL terminal width
-// (`process.stdout.columns`, else `COLUMNS`, else 80) so a long goal can never
-// push the consent-critical lines off the screen — correct behaviour, and
-// environment-dependent for anyone RUNNING the tests, because a runner inherits
-// BOTH inputs of that budget: the width of the pane it was started in, and the
-// LENGTH of the fixture's own path (the repo is rendered on a line too). Each
-// one alone is enough to wrap the text, eat the budget and drop the pre-review
-// line — measured 2026-09-16:
-//   - `COLUMNS=40` with a short fixture root ⇒ 2 failures in this file, 0 at 60
-//     and 200 (and the same on origin/main, so it is a latent flake either way);
-//   - the gate's own judge `$TMPDIR` with the width untouched ⇒ 1 failure — the
-//     path is long enough on its own, which is what `FIXTURE_ROOT` below fixes.
-// So both are pinned. The implementation keeps reading the real thing.
-process.env.COLUMNS = String(DIALOG_ASSUMED_COLUMNS);
-Object.defineProperty(process.stdout, "columns", {
-  value: DIALOG_ASSUMED_COLUMNS,
-  configurable: true,
-  writable: true,
-});
 
 // ---------------------------------------------------------------------------
 // Behavioral regression for the loop goal's core promise: writing
@@ -140,24 +117,16 @@ function makeRepoAt(base: string): string {
 }
 
 /**
- * THE FIXTURE ROOT IS SHORT AND FIXED ON PURPOSE — never `os.tmpdir()`.
+ * WHERE THE FIXTURES LIVE — `os.tmpdir()`, as before 2026-09-16.
  *
- * A fixture's repository path is RENDERED: the gate budgets a dialog's rows
- * from the real length of every line, and `judge_submit` points a judge's
- * `$TMPDIR` at `.pi/review-scratch/rg-<role>-<long id>/`. A fixture under
- * `os.tmpdir()` therefore gets a path long enough to wrap the repo line, eat
- * the dialog budget and truncate the pre-review line — failing an assertion
- * that has nothing to do with what it tests, only when a JUDGE runs the
- * suite. Measured 2026-09-16 in a judge pane: 1/24 failures here with the
- * gate's own TMPDIR, 24/24 with `TMPDIR=/tmp` — and in that same run `COLUMNS`
- * made no difference at all, because the WIDTH is the other, independent input
- * (pinned at the top of this file). A short root takes the runner's
- * environment out of this half of the budget.
+ * A short root was pinned here for one day because the gate budgeted a
+ * dialog's rendered rows and a fixture under a judge's long `$TMPDIR` made the
+ * repo line wrap, eat the budget and drop the pre-review line. Both inputs of
+ * that budget are gone with lib/dialog-budget.ts, so the fixture path no
+ * longer has to be any particular length.
  */
-const FIXTURE_ROOT = "/tmp";
-
 function makeRepo(): string {
-  return makeRepoAt(FIXTURE_ROOT);
+  return makeRepoAt(tmpdir());
 }
 
 function makeMockPi(cwd: string) {

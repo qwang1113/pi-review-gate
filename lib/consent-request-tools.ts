@@ -168,7 +168,7 @@ export async function doRequestScopeLimit(
         ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
       },
       uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, pointer: "（清单与理由见上方消息）", signal }),
+      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
     );
     const pick = parseChoice(outcome.answer, spec);
     ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
@@ -359,7 +359,7 @@ export async function doRequestSensitiveEdit(
         ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
       },
       uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, pointer: "（完整路径与理由见上方消息）", signal }),
+      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
     );
     const pick = parseChoice(outcome.answer, spec);
     ok = pick.kind === "chose" && pick.option === GRANT_LABEL;

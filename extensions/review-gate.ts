@@ -552,13 +552,7 @@ import {
 import { existingPrNotice, hasUnpushedCommits, probeOpenPr, type OpenPrArrival } from "../lib/station-pr-evidence.ts";
 
 
-import {
-  DIALOG_ASSUMED_COLUMNS,
-  DIALOG_ASSUMED_ROWS,
-  dialogTextMaxLines,
-  fitDialogMessage,
-  fitDialogTitle,
-} from "../lib/dialog-budget.ts";
+import { rendererModeNoticeDue, RENDERER_MODE_NOTICE, type RendererMode } from "../lib/renderer-mode.ts";
 import {
   choiceRows,
   parseChoice,
@@ -4225,6 +4219,32 @@ export default function reviewGate(pi: ExtensionAPI) {
   let lastUiCtx: ExtensionContext | undefined;
   let lastAgentsWidget = "";
 
+  /**
+   * Has this session been told about its renderer? At most once per session.
+   * In-memory on purpose: a restart is a new session with a new terminal, and
+   * the answer can differ.
+   */
+  let rendererModeNoticeShown = false;
+
+  /**
+   * Record which renderer the HOST says this session runs on, and say something
+   * when it is the one that cannot scroll a tall dialog.
+   *
+   * The value comes from `TUI.mode` (see `lib/renderer-mode.ts` for why a
+   * re-derivation from `--tui-mode` + settings files would be a copy that gets
+   * the corners wrong): it reaches this extension through the `setWidget`
+   * factory, so this is called on every widget install — the notice itself is
+   * what is once-only.
+   *
+   * `latestCtx?.ui.notify` rather than the TUI directly: the widget factory
+   * runs on the render path, where throwing would take the frame with it.
+   */
+  function noteRendererMode(mode: RendererMode | undefined): void {
+    if (!rendererModeNoticeDue(mode, rendererModeNoticeShown)) return;
+    rendererModeNoticeShown = true;
+    try { latestCtx?.ui.notify(RENDERER_MODE_NOTICE, "warning"); } catch { /* headless */ }
+  }
+
   let lastLayerNotifyText = "";
   /**
    * The agents-layer key of the config the model layers were last rendered
@@ -4479,7 +4499,6 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
     if (!hasUI) return;
-    // belowEditor — the gate status panel. Content-compared so pi only
     // belowEditor — the gate status strip. Content-compared so pi only
     // re-renders when something actually changed.
     try {
@@ -4487,7 +4506,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       const key = lines.join("\n");
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
-        ctx.ui.setWidget("review-gate-agents", lines, { placement: "belowEditor" });
+        // THE FACTORY FORM, and only partly for the widget itself: it is the
+        // one place the host hands an extension the REAL TUI, and `tui.mode`
+        // is the only honest answer to "is this session on the renderer that
+        // can scroll a tall dialog?" — see lib/renderer-mode.ts for why a
+        // config re-derivation would be a copy that gets the corners wrong.
+        // The component is a plain list of pre-rendered lines, which is
+        // exactly what the string[] form built — no import, no layout.
+        ctx.ui.setWidget("review-gate-agents", (tui) => {
+          noteRendererMode(tui.mode);
+          return { render: () => lines, invalidate: () => {} };
+        }, { placement: "belowEditor" });
       }
     } catch { /* display-only */ }
   }
@@ -4579,31 +4608,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * The terminal's REAL row count, read from the same source pi itself reads
-   * (`ProcessTerminal.rows`: `process.stdout.rows`, then `$LINES`, then 24).
-   *
-   * Read per dialog and never cached: resizing the window has to change the
-   * budget, and a headless / non-TTY run falls back to the conservative
-   * constant instead of budgeting for a screen that is not there.
-   */
-  function terminalRows(): number {
-    const rows = Number(process.stdout?.rows) || Number(process.env.LINES) || 0;
-    return Number.isFinite(rows) && rows > 0 ? rows : DIALOG_ASSUMED_ROWS;
-  }
-
-  /**
-   * The terminal's real column count, same source again (pi's
-   * `ProcessTerminal.columns`). Row counts are what prevent the flicker, but
-   * WIDTH decides how many rows a line wraps to: budgeting a 200-column
-   * window at the 80-column assumption cuts text that would have fit, which
-   * is the truncation the user asked us to stop doing.
-   */
-  function terminalColumns(): number {
-    const columns = Number(process.stdout?.columns) || Number(process.env.COLUMNS) || 0;
-    return Number.isFinite(columns) && columns > 0 ? columns : DIALOG_ASSUMED_COLUMNS;
-  }
-
-  /**
    * THE one dialog renderer (user decision, 2026-09-08): the gate's question
    * template with the row budget applied. Every dialog in this file — and
    * every dialog in the tool modules that inject this function — comes
@@ -4632,24 +4636,19 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function askChoice(
     uiCtx: { ui?: ChoiceUi },
     spec: ChoiceSpec,
-    opts: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] } = {},
+    opts: { body?: string; signal?: AbortSignal; extraRows?: string[] } = {},
   ): Promise<string | undefined> {
-    const rows = [...choiceRows(spec), ...(opts.extraRows ?? [])];
-    const pointer = opts.pointer ?? "（内容过长，已截断）";
-    // Two option rows is what the budget was measured with; every extra row
-    // this dialog draws — an interview's escape row included — comes out of
-    // the title + body allowance, on the terminal we are actually on.
-    const budget = dialogTextMaxLines(rows.length, terminalRows());
-    const columns = terminalColumns();
-    // The title gets the budget first (it is the question), minus two rows so
-    // the body is never cut down to nothing by a long title alone.
-    const titleFit = fitDialogTitle(spec.title, Math.max(1, budget - 2), pointer, columns);
-    const titled: ChoiceSpec = titleFit.truncated ? { ...spec, title: titleFit.message } : spec;
-    const fitted = opts.body === undefined
-      ? undefined
-      : fitDialogMessage(titled.title, opts.body, pointer, columns, budget).message;
-    return renderChoice(uiCtx.ui, titled, {
-      ...(fitted === undefined ? {} : { body: fitted }),
+    // NO BUDGET, NO TRUNCATION (user decision, 2026-09-16). This used to fit
+    // the title and the body into a rendered-row budget, because a dialog tall
+    // enough to push the spinner out of the viewport made pi's DEFAULT renderer
+    // clear the screen and the scrollback every frame. That cost landed on the
+    // lines the user is confirming — a long repo path could take the station
+    // line and the audit line with it while the dialog went on asking for
+    // approval — and the renderer the user runs (`fullscreen`, the host owns
+    // the screen and scrolls) never had the problem. A session that is NOT on
+    // it is told once instead: see lib/renderer-mode.ts.
+    return renderChoice(uiCtx.ui, spec, {
+      ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
     });
@@ -10177,7 +10176,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         ui.hasUI === true,
         (signal) => askChoice(ui, spec, {
           ...(opts.body === undefined ? {} : { body: opts.body }),
-          ...(opts.pointer === undefined ? {} : { pointer: opts.pointer }),
           ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
           signal,
         }),

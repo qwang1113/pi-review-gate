@@ -1031,7 +1031,7 @@ test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an
     "the pause path must never enqueue a follow-up message");
 });
 
-test("FLICKER: every dialog goes through the row budget", () => {
+test("FLICKER: dialogs are no longer fitted, and a regular-renderer session is told", () => {
   // An oversized dialog makes it taller than the terminal, which pushes the
   // animating spinner row out of the viewport and turns EVERY spinner frame
   // into a full-screen clear (measured: 29 of 30 frames). askChoice renders
@@ -1039,25 +1039,27 @@ test("FLICKER: every dialog goes through the row budget", () => {
   // bypass it, and no ui.confirm exists any more (2026-09-08).
   const helperAt = SRC.indexOf("async function askChoice");
   const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
-  assert.match(askChoiceBody, /fitDialogMessage\(/,
-    "askChoice must apply the budget");
-  // …AGAINST THE REAL TERMINAL (2026-09-14). The budget used to be pinned to
-  // a 24-row window, so a 20-row one cleared the screen 19 times in 20 frames.
-  // The terminal's own row count is what pi reads too (see terminalRows()).
-  assert.match(askChoiceBody, /dialogTextMaxLines\(rows\.length, terminalRows\(\)\)/,
-    "the budget must follow the terminal we are actually on");
-  // WIDTH matters too: the row count prevents the flicker, but budgeting a
-  // 200-column window at the 80-column assumption cuts text that would have
-  // fit — the truncation this round exists to stop.
-  assert.match(askChoiceBody, /const columns = terminalColumns\(\);/,
-    "the wrap width comes from the terminal, not from a constant");
-  assert.match(SRC, /function terminalColumns\(\): number \{[\s\S]{0,200}process\.stdout\?\.columns/,
-    "…read from the same source pi reads");
-  // …AND THE TITLE IS BOUNDED TOO: `ask_user` puts the question there, and an
-  // unbounded title sizes the dialog no matter how short the body is.
-  assert.match(askChoiceBody, /fitDialogTitle\(/,
-    "a long title must not be able to size the dialog");
-
+  // NO FITTING ANY MORE (user decision, 2026-09-16). The row budget existed
+  // because an oversized dialog pushed the animating spinner out of the
+  // viewport and turned EVERY spinner frame into a full-screen clear (measured:
+  // 29 of 30). The user runs every session on the fullscreen renderer, which
+  // owns the screen and never takes that branch — so the budget is GONE and
+  // this pins its absence: nothing here may silently reintroduce a fit, because
+  // a partial one would cut exactly the lines the dialog is asking about.
+  assert.doesNotMatch(askChoiceBody, /fitDialogMessage\(|fitDialogTitle\(|dialogTextMaxLines\(/,
+    "the dialog must reach the renderer whole");
+  assert.doesNotMatch(SRC, /from "\.\.\/lib\/dialog-budget\.ts"/,
+    "…and the module is deleted, not just unused");
+  // WHAT REPLACES IT: a session on the DEFAULT renderer is TOLD once, from the
+  // host's own `TUI.mode` (a config re-derivation would be a copy of pi's
+  // precedence that gets the corners wrong — lib/renderer-mode.ts). The mode
+  // reaches this extension only through the setWidget FACTORY form.
+  assert.match(SRC, /setWidget\("review-gate-agents", \(tui\) => \{[\s\S]{0,120}?tui\.mode/,
+    "the renderer mode comes from the host, through the widget factory");
+  assert.match(SRC, /rendererModeNoticeDue\(mode, rendererModeNoticeShown\)/,
+    "…and whether to speak is the module's pure decision");
+  assert.doesNotMatch(SRC, /process\.stdout\?\.rows|process\.env\.LINES/,
+    "no row arithmetic may come back: the terminal is no longer consulted");
   // ui.confirm is GONE: the template renders a select, so a stray confirm
   // would be a second dialog shape nobody reviewed.
   const confirms = [...SRC.matchAll(/\.confirm\?\.\(|\.confirm\(/g)].map((m) => m.index ?? 0);

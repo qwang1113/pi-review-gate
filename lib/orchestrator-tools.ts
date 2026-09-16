@@ -96,8 +96,13 @@ export const PLAN_CONFIRM_TITLE = "review-gate: 批准项目经理的任务计�
 /** The row that approves it — one spelling, used by the dialog and the parse. */
 export const PLAN_APPROVE_LABEL = "批准这份 plan";
 
-/** Told to the user when the dialog body had to be cut (O-1). */
-export const PLAN_DIALOG_POINTER = "（plan 全文见上方消息，请先读完再决定）";
+/**
+ * Retired 2026-09-16 with the row budget (kept as a note, not as code): a plan
+ * dialog no longer truncates its body, so there is nothing to point at. The
+ * transcript echo it described is still printed before the dialog opens — see
+ * `buildPlanTranscriptMessage` below — because approving a plan you cannot read
+ * was the O-1 report, and it stays true however the dialog is rendered.
+ */
 
 /**
  * The FULL plan, printed to the transcript before the dialog opens (O-1).
@@ -540,7 +545,6 @@ async function handlePlanAction(
     const planPick = parseChoice(
       await deps.askChoice(planSpec, {
         body: buildPlanConfirmMessage(plan, deps.repoRoot),
-        pointer: PLAN_DIALOG_POINTER,
       }),
       planSpec,
     );

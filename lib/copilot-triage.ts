@@ -208,14 +208,12 @@ export const FINDING_REASON_PLACEHOLDER =
   "直接写你的理由（留空＝只说「不选」）；!skip＝跳过后续问题";
 
 /**
- * What the dialog says where a long comment was cut.
- *
- * The full text is put in the transcript just before the box opens
- * (`askFindings`), which is what makes this pointer TRUE: without that copy
- * the user would be approving a finding they cannot read (round-1 reviewer
- * P1).
+ * Retired 2026-09-16 with the row budget (kept as a note, not as code): the
+ * dialog no longer truncates a finding's body, so there is no cut for a
+ * pointer to explain. The TRANSCRIPT copy it described is still printed before
+ * every finding dialog opens — see the call site in `copilot-review-tools.ts` —
+ * because approving a finding you cannot read is a bug whoever caused it.
  */
-export const FINDING_DIALOG_POINTER = "（已截断 —— 完整评论见上面 transcript 里的那条）";
 
 export function findingChoiceSpec(thread: CopilotThread, index: number, total: number): ChoiceSpec {
   const where = `${thread.path ?? "(no file)"}${thread.line ? ":" + thread.line : ""}`;
