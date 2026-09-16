@@ -4606,7 +4606,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * they have to read. The cap was there for a geometry fear that does not
    * apply to the transcript: the chat container scrolls, and appending 400
    * rows in one shot triggers 0 full clears on the real renderer (measured,
-   * see lib/dialog-budget.ts's docblock). The dialog is the constrained
+   * see lib/renderer-mode.ts). The dialog is the constrained
    * surface, and it already keeps only the decision — the full text belongs
    * here, whole.
    *
@@ -4630,7 +4630,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /**
    * THE one dialog renderer (user decision, 2026-09-08): the gate's question
-   * template with the row budget applied. Every dialog in this file — and
+   * template, whole. Every dialog in this file — and
    * every dialog in the tool modules that inject this function — comes
    * through here, so exactly one shape ever reaches the screen: 2–4 options
    * (the recommended one marked), the `✎ 不选，我说明原因` row, and a text

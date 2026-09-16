@@ -900,11 +900,12 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   // flicker.
   // The title carries the progress label, the question's own headline (so the
   // REASON box, which renders the title alone, says what is being answered)
-  // and the grant notice — all three charged to the title budget rather than
-  // sitting in the tail-cut body. The ORDER inside that title is its own rule
-  // (questionDialogTitle): `fitDialogTitle` cuts from the tail too, so the ⚠️
-  // notice must come FIRST or a small window drops it while the recommended
-  // row still mints the grant.
+  // and the grant notice — all three ahead of the body rather than in its
+  // tail, because the box is read top-down. The ORDER inside that title is its
+  // own rule (questionDialogTitle): the ⚠️ notice must come FIRST or it hides
+  // under the progress label, while the recommended row still mints the grant.
+  // (Before 2026-09-16 a title budget decided what survived; the budget is
+  // gone, the order is not.)
   assert.match(ASK_USER_SRC, /title: questionDialogTitle\(q, index, questions\.length\)/,
     "the dialog title is built by the ONE title rule");
   assert.match(ASK_USER_SRC,
@@ -1034,9 +1035,10 @@ test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an
 test("FLICKER: dialogs are no longer fitted, and a regular-renderer session is told", () => {
   // An oversized dialog makes it taller than the terminal, which pushes the
   // animating spinner row out of the viewport and turns EVERY spinner frame
-  // into a full-screen clear (measured: 29 of 30 frames). askChoice renders
-  // the gate's ONE template and applies lib/dialog-budget.ts; nothing may
-  // bypass it, and no ui.confirm exists any more (2026-09-08).
+  // into a full-screen clear (measured: 29 of 30 frames) — which is why the
+  // session on that renderer is TOLD to switch (lib/renderer-mode.ts) instead
+  // of being fitted. askChoice renders the gate's ONE template whole; nothing
+  // may bypass it, and no ui.confirm exists any more (2026-09-08).
   const helperAt = SRC.indexOf("async function askChoice");
   const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
   // NO FITTING ANY MORE (user decision, 2026-09-16). The row budget existed

@@ -1340,20 +1340,21 @@ Measured against the real `TuiMainScreen` (40-row terminal, 30 spinner frames):
 | 39 rows | 0 / 30 |
 | **40 rows (= terminal height)** | **29 / 30** |
 
-So `lib/dialog-budget.ts` bounds every dialog by **rendered rows** — CJK is
-double-width, and soft wrapping means a 40-character Chinese line costs a full
-80-column row — sized for a 24-row terminal: 24 − 8 (selector chrome) − 2
-(footer) − 2 (slack) = **12 rows for title + message together**. Every
-`ui.confirm` in the extension goes through `confirmBounded`, which applies it;
-`test/extension-structure.test.ts` fails the build if a call site bypasses it.
-Where truncation is possible, the fixed consequence copy is written *first* and
-the agent's untrusted text last, so what gets dropped is never the statement of
-what "yes" grants.
+**What the gate DOES about it (2026-09-16, user decision): nothing is fitted.**
+Dialogs used to be truncated to a rendered-row budget so this could not happen
+(`lib/dialog-budget.ts`, now deleted) — but that budget's cost landed on the
+lines the user is *confirming*: a long repo path could take the station line
+and the audit line with it while the box went on asking for approval. The user
+runs every session on `--tui-mode fullscreen` / `tuiMode: "fullscreen"`
+(`TuiAltScreen`, which owns the screen and scrolls, and never takes that
+branch), so the budget is gone and a session that is NOT on that renderer is
+**told once**, at startup, with both ways to fix it (`lib/renderer-mode.ts`
+reads the host's own `TUI.mode`; it does not re-derive the setting).
 
-Guards: `test/dialog-budget.test.ts` (always runs) and
-`test/tui-flicker.test.ts`, which drives the real renderer and asserts both
-directions — a budgeted dialog never wipes, the pre-fix height still does. The
-latter skips when pi-tui cannot be resolved (it ships with the globally
+Guards: `test/renderer-mode.test.ts` (the decision and the wording, always
+runs) and `test/tui-flicker.test.ts`, which drives the real renderer and is the
+evidence for why the notice exists at all. The latter skips when pi-tui cannot
+be resolved (it ships with the globally
 installed pi, not with this repo).
 
 ### No UI ⇒ the gate runs in `normal` mode

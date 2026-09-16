@@ -160,11 +160,11 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
     // WHAT THE EXTENSION'S askChoice DOES, minus the geometry: it hands
     // `title + body` to renderChoice -> ui.select. The harness drives that
     // same select path, so the tests keep addressing a question by ITS TEXT
-    // (the interview now puts the question in the BODY and only `问题 N/M` in
-    // the title — a title is charged to the row budget but never cut by it).
-    // The row budget itself is tested in test/dialog-budget.test.ts and
-    // test/tui-flicker.test.ts; the batching and race invariants are the
-    // subject here.
+    // (the interview puts the question in the BODY and only `问题 N/M` in the
+    // title, which is what the reason box repeats back).
+    // The batching and race invariants are the subject here; what a box may
+    // contain is not bounded any more (2026-09-16) — see lib/renderer-mode.ts
+    // for why the fitting went away.
     askChoice: async (_uiCtx, spec, opts) => {
       if (opts?.signal === undefined) return undefined;
       const shown = opts.body ? `${spec.title}\n${opts.body}` : spec.title;

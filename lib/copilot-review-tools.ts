@@ -190,14 +190,14 @@ export interface CopilotReviewToolDeps {
     opts: { body?: string; signal?: AbortSignal; extraRows?: string[] },
   ): Promise<string | undefined>;
   /**
-   * Put text in front of the user, in the transcript, right now.
+   * Put text in front of the user, in the transcript, right now. False when
+   * there is no UI to render into.
    *
    * The finding's full text goes here, before the box — a long Copilot comment
    * is easier to read in the transcript than in a box that scrolls, and
-   * otherwise the user is asked to approve a finding they cannot see.
-   * (Until 2026-09-16 this was also forced by the dialog row budget; that is
-   * gone, the reason to print the full text here is not.) there is no UI to render
-   * into.
+   * otherwise the user is asked to approve a finding they cannot see. (Until
+   * 2026-09-16 the dialog row budget also forced it; that is gone, the reason
+   * to print the full text here is not.)
    */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
 }
