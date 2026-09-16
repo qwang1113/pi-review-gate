@@ -490,9 +490,17 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
     "不认可就拒绝，然后告诉 AI 哪里不对；它会重新跟你确认后再提交。\n" +
     // Extra untrusted facts (e.g. the repo a goal binds to) go BEFORE the
     // title: fitDialogMessage truncates from the TAIL, so appending them at
-    // the end would drop exactly the fact the user must confirm. Capped like
-    // every other untrusted text (a path this long is corrupt anyway).
-    (extraUntrusted ? extraUntrusted.slice(0, 200) + "\n" : "") +
+    // the end would drop exactly the fact the user must confirm.
+    //
+    // NOT SLICED AS A BLOCK (2026-09-16, measured). `slice(0, 200)` cut this
+    // clause by CHARACTER count, before any wrapping or row budget: a ~110
+    // character repo path pushed the station line off mid-sentence and deleted
+    // the `goal-auditor 预审: PASS` line entirely — while the comment right
+    // above claims this position is what keeps them, and the dialog went on
+    // asking for approval. The untrusted VALUE (the path) is capped where it
+    // is built; the consent-critical lines here are short and fixed, so they
+    // are not capped at all.
+    (extraUntrusted ? extraUntrusted + "\n" : "") +
     "标题（不可信数据）: " + title
   );
 }

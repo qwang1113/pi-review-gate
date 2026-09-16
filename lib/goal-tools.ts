@@ -264,9 +264,15 @@ export async function doProposeLoopGoal(
   // The goal text goes to the TRANSCRIPT; the binding repo must be shown
   // at CONSENT time (both surfaces), so a repo-scoped approval is never
   // given for a repo the user was not shown.
-  const repoLine = goalRoot === deps.primaryRepoRoot()
-    ? "本仓库 (" + deps.primaryRepoRoot() + ")"
-    : goalRoot;
+  // THE UNTRUSTED VALUE IS CAPPED HERE, NOT AS A BLOCK (2026-09-16). The
+  // dialog builder used to slice the whole "repo + station + pre-review"
+  // clause at 200 characters, so a long path ate the two lines BELOW it: the
+  // station line broke mid-sentence and `goal-auditor 预审: PASS` vanished,
+  // while the dialog went on asking for approval. Capping the value keeps every
+  // line that matters whole — and the full path is in the transcript anyway.
+  const repoLine = capUntrustedLine(
+    goalRoot === deps.primaryRepoRoot() ? "本仓库 (" + deps.primaryRepoRoot() + ")" : goalRoot,
+  );
 
   // Consent comes from a dialog the EXTENSION renders — there is no
   // parameter the model could set to claim it. No UI ⇒ no approval; a
@@ -515,6 +521,23 @@ export async function doProposeLoopGoal(
  * function (`recordGoalPrereview`), which the extension calls when the
  * auditor's round lands — it is not on any tool surface.
  */
+/** How much of ONE untrusted value a dialog line may carry. */
+export const UNTRUSTED_LINE_MAX_CHARS = 120;
+
+/**
+ * Cap ONE untrusted value (a path, a repo slug) so it cannot dominate a dialog.
+ *
+ * PER VALUE, never per BLOCK. Capping a BLOCK of lines by character count is
+ * how the consent-critical lines that FOLLOW it got cut off (2026-09-16): the
+ * slice happens before any wrapping, so it is invisible to the row budget, and
+ * a long path silently took the station line and the `goal-auditor 预审: PASS`
+ * line with it while the dialog went on asking for approval. Every line worth
+ * confirming is short and fixed; only the value inside it needs limiting.
+ */
+export function capUntrustedLine(value: string, max = UNTRUSTED_LINE_MAX_CHARS): string {
+  return value.length > max ? value.slice(0, max) + "…" : value;
+}
+
 export function registerGoalTools(host: ToolHost, deps: GoalToolDeps): void {
   host.registerTool({
     name: "propose_loop_goal",

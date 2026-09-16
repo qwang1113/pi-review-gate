@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import {
   registerGoalTools,
   doProposeLoopGoal,
+  capUntrustedLine,
   type GoalToolDeps,
 } from "../lib/goal-tools.ts";
+import { buildGoalConfirmMessage } from "../lib/loop-goal.ts";
 import {
   checkGoalDraft,
   buildGoalRecordReply,
@@ -632,4 +634,29 @@ test("registration: the tool dispatches to its handler, not to a copy of the log
   const approved = await tools.get("propose_loop_goal")!({ goal: GOAL }, uiCtx(f));
   assert.equal(approved.details?.approved, true);
   assert.equal(f.auditRuns, 0, "the PASS recorded a moment ago is the one it binds to");
+});
+
+test("a long repo path cannot cut the consent-critical lines out of the goal dialog", () => {
+  // 2026-09-16, measured in a judge pane (whose `$TMPDIR` is long enough to
+  // make every fixture path long). The builder sliced the whole
+  // "repo + station + pre-review" clause at 200 CHARACTERS — before any
+  // wrapping or row budget — so the station line broke mid-sentence and the
+  // `goal-auditor 预审: PASS` line vanished entirely, while the dialog went on
+  // asking for approval. Two rounds of attributing that to the terminal width
+  // were wrong for exactly this reason: a character slice is invisible to the
+  // row budget. The cap belongs on the untrusted VALUE.
+  const longPath = "/" + "a-very-long-directory-name/".repeat(8) + "repo";
+  const body = buildGoalConfirmMessage(
+    "目标标题",
+    "绑定仓库(不可信数据): " + capUntrustedLine(longPath) + "\n" +
+      "本轮交付站点：precommit —— 由你自己 commit\n" +
+      "goal-auditor 预审: PASS @ 2026-09-16T00:00:00Z",
+  );
+  assert.match(body, /goal-auditor 预审: PASS @ /,
+    "the fact that an independent audit passed must survive any path length");
+  assert.match(body, /本轮交付站点：precommit/, "…and so must the station line");
+  assert.match(body, /…/, "the pathological path itself is still capped");
+  assert.ok(!body.includes(longPath), "…and capped at the value, not at the block");
+  // A short path is left alone entirely.
+  assert.equal(capUntrustedLine("/Users/x/repo"), "/Users/x/repo");
 });
