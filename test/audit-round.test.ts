@@ -102,7 +102,7 @@ test("selectRoundReport: a cursor-only kind refuses that same report as consumed
   const records = [childReport("rep-round-1", { round: 1 })];
   assert.deepEqual(
     selectRoundReport(records, { binding: "cursor-only", expectedRound: 2, consumedReportId: "rep-round-1" }),
-    { ok: false, reason: "already-consumed", reportId: "rep-round-1" },
+    { ok: false, reason: "already-consumed", reportId: "rep-round-1", round: 1, at: NOW },
   );
 });
 
@@ -118,7 +118,7 @@ test("selectRoundReport: THIS round's report is never refused on round grounds",
   assert.equal(fresh.ok, true, "unconsumed and this round's ⇒ it closes the round");
   assert.deepEqual(
     selectRoundReport(records, { binding: "round-bound", expectedRound: 2, consumedReportId: "rep-round-2" }),
-    { ok: false, reason: "already-consumed", reportId: "rep-round-2" },
+    { ok: false, reason: "already-consumed", reportId: "rep-round-2", round: 2, at: NOW },
     "consumed but this round's ⇒ refused for the cursor, which is the only safe way to reach that reason",
   );
 });
@@ -189,10 +189,17 @@ test("selectRoundReport: a cursor-only kind ignores the round number entirely", 
 
 test("selectRoundReport: a cursor-only kind still refuses its own consumed report", () => {
   const records = [childReport("rep-1", { round: 1 })];
-  assert.deepEqual(
-    selectRoundReport(records, { binding: "cursor-only", expectedRound: 1, consumedReportId: "rep-1" }),
-    { ok: false, reason: "already-consumed", reportId: "rep-1" },
-  );
+  const selected = selectRoundReport(records, { binding: "cursor-only", expectedRound: 1, consumedReportId: "rep-1" });
+  assert.equal(selected.ok, false);
+  assert.equal(selected.reason, "already-consumed");
+  // …AND IT STILL NAMES THE REPORT, `at` included (2026-09-16). One caller has
+  // to judge the report's AGE: the `settled` wait criterion compares it against
+  // the pane's last task, and a miss that dropped `at` made that comparison
+  // answer "no" for every REUSED pane — exactly the case the criterion exists
+  // for (measured: the 6m47s wait ran on a reused pane).
+  assert.equal(selected.ok === false && selected.reportId, "rep-1");
+  assert.equal(selected.ok === false && selected.round, 1);
+  assert.equal(selected.ok === false && selected.at, NOW);
 });
 
 // ---------- the review binding: round AND content, both fail-closed ----------
@@ -414,7 +421,7 @@ test("review binding: its own consumed report is still just 'already recorded'",
     consumedReportId: "rep-4",
     contentAt: CHECKPOINT_AT,
   });
-  assert.deepEqual(selected, { ok: false, reason: "already-consumed", reportId: "rep-4" });
+  assert.deepEqual(selected, { ok: false, reason: "already-consumed", reportId: "rep-4", round: 4, at: NOW });
 });
 
 test("roundBindingFor: only the review kind carries a content stamp", () => {

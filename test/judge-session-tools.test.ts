@@ -938,6 +938,27 @@ test("the wait probe: a round ALREADY concluded and recorded ENDS the wait", () 
   assert.equal(awaiting.done, false,
     "the consumed report is OLDER than this pane's task — the round has not run yet");
   assert.equal(awaiting.reason, "pending");
+
+  // …AND THE SAME PANE SETTLES once its report is the NEWER of the two. That
+  // comparison is the whole criterion: without this half, a rule that only
+  // ever says "pending" would pass the case above by accident (which is how
+  // the first version of it shipped — the consumed miss carried no `at`, so
+  // every reused pane answered "pending" forever).
+  const j = fake();
+  const e = seed(j, { streamPath: "/logs/stream.jsonl" });
+  appendRecord(channelWriter(j), channelOf(e), {
+    kind: "instruct",
+    from: "orchestrator",
+    at: new Date(1_700_000_060_000).toISOString(),
+    instructId: "in-old",
+    mode: "interrupt",
+    text: "the task this report answers",
+  });
+  writeReport(j, e, "READY", "rep-14", { at: new Date(1_700_000_120_000).toISOString() });
+  noteState(j, e, "idle");
+  const freshReason = probeJudgeWait(j.deps, e, { ...cursors, reportId: "rep-14" });
+  assert.equal(freshReason.reason, "settled",
+    "a report NEWER than the pane's last task is this round's — nothing left to receive");
 });
 
 test("judge_wait: a leftover report keeps the round open and is named in the reply", async () => {

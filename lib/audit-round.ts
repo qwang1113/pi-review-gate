@@ -262,7 +262,13 @@ export function selectRoundReport(
     }
   }
   if (last.reportId === opts.consumedReportId) {
-    return { ok: false, reason: "already-consumed", reportId: last.reportId };
+    // `...seen` HERE TOO (2026-09-16). A caller that only asks "is this round
+    // over?" does not care, but one that has to judge the report's AGE does:
+    // the `settled` wait criterion compares it against the pane's last task,
+    // and without `at` that comparison silently answered "no" for every REUSED
+    // pane — which is exactly the case the criterion exists for (measured: the
+    // 6m47s wait ran on a reused pane).
+    return { ok: false, reason: "already-consumed", ...seen };
   }
   return { ok: true, report: last };
 }
