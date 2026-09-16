@@ -472,11 +472,13 @@ export const GOAL_DIALOG_TITLE_MAX_CHARS = 60;
  * what made the terminal flicker, so this stays a handful of lines and the
  * caller runs it through `fitDialogMessage` for the hard bound.
  *
- * ORDER AND BOUNDS. The dialog can be truncated from the END, so the fixed
- * copy stating what approval grants comes FIRST and the agent's own text last;
- * that text is additionally hard-capped, because a goal whose first line is
- * thousands of characters long would otherwise eat the whole budget and push
- * the consequence copy out of the dialog.
+ * ORDER: see the comment on the return below — that is the ONE statement of
+ * the ordering policy, because it depends on every part of the body and a
+ * second copy here is a copy that goes stale (this one did: it still claimed
+ * the consequence copy comes first, which is exactly the order that made a
+ * narrow terminal truncate INTO the consent-critical lines — round-1 review
+ * P1, 2026-09-16). What the BOUNDS are: the agent's own title is hard-capped,
+ * and the caller runs the whole thing through `fitDialogMessage`.
  */
 export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: string): string {
   const normalized = normalizeGoalText(goalText);
