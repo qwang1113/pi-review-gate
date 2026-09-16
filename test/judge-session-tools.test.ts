@@ -885,17 +885,17 @@ test("the wait probe: a round ALREADY concluded and recorded ENDS the wait", () 
   // actually waiting for — the precommit lane landing — had no delivery at
   // all. Blocking to the timeout then hands the opener a state line it reads
   // as "still working", which is the opposite of the truth.
-  const idle = (f: Fake, c: JudgeChildRecord, state: string) => {
+  const noteState = (f: Fake, c: JudgeChildRecord, state: "idle" | "working" | "done") => {
     appendRecord(channelWriter(f), channelOf(c), {
       kind: "state", from: "child", at: new Date(1_700_000_000_000).toISOString(), state,
-    } as ChannelRecord);
+    });
   };
   const cursors = { reportId: undefined, findingCount: 0, announcedQuestions: new Set<string>(), modelEventCount: 0 };
 
   const f = fake();
   const c = seed(f, { streamPath: "/logs/stream.jsonl" });
   writeReport(f, c, "READY", "rep-11");
-  idle(f, c, "idle");
+  noteState(f, c, "idle");
   // Behind the cursor (recorded and consumed) + an idle pane ⇒ nothing can
   // arrive, so the wait says so at once instead of at the timeout.
   const settled = probeJudgeWait(f.deps, c, { ...cursors, reportId: "rep-11" });
@@ -911,7 +911,7 @@ test("the wait probe: a round ALREADY concluded and recorded ENDS the wait", () 
   const g = fake();
   const w = seed(g, { streamPath: "/logs/stream.jsonl" });
   writeReport(g, w, "READY", "rep-12");
-  idle(g, w, "working");
+  noteState(g, w, "working");
   const pending = probeJudgeWait(g.deps, w, { ...cursors, reportId: "rep-12" });
   assert.equal(pending.done, false, "a pane that is working is not a settled round");
   assert.equal(pending.reason, "pending");

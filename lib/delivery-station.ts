@@ -373,6 +373,18 @@ export interface StationArrivalFacts {
 }
 
 /**
+ * The fields the two arrival predicates read.
+ *
+ * Narrower than {@link StationArrivalFacts} on purpose: the extension asks
+ * `prEvidencePresent` BEFORE it has measured the worktree, and a predicate that
+ * demanded `dirty` would force every caller to invent one.
+ */
+export type PrEvidenceFacts = Pick<
+  StationArrivalFacts,
+  "observedPrCreate" | "recordedPr" | "openPr" | "unpushed"
+>;
+
+/**
  * Is there EVIDENCE of a pull request — any of the three, regardless of
  * whether this round's work reached the remote?
  *
@@ -383,7 +395,7 @@ export interface StationArrivalFacts {
  * worst kind of duplicate, where fixing one side leaves the other silently
  * disagreeing with it.
  */
-export function prEvidencePresent(facts: StationArrivalFacts): boolean {
+export function prEvidencePresent(facts: PrEvidenceFacts): boolean {
   return facts.observedPrCreate === true ||
     (facts.recordedPr ?? null) !== null ||
     (facts.openPr ?? null) !== null;
@@ -396,7 +408,7 @@ export function prEvidencePresent(facts: StationArrivalFacts): boolean {
  * an open PR and unpushed commits has not delivered anything, however good the
  * local story looks.
  */
-export function prArrivalProven(facts: StationArrivalFacts): boolean {
+export function prArrivalProven(facts: PrEvidenceFacts): boolean {
   return prEvidencePresent(facts) && facts.unpushed !== true;
 }
 

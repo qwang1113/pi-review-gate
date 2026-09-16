@@ -307,10 +307,11 @@ test("arrival: `pr` owes a committed worktree AND evidence that a PR is open", (
 test("`prEvidencePresent` says 'known to have a PR', and `prArrivalProven` adds the push", () => {
   // The extension calls the FIRST to decide whether asking GitHub is worth a
   // round trip, and the pure judgement calls the SECOND — so both have to
-  // answer exactly the same way for the same facts.
-  assert.equal(prEvidencePresent({ dirty: false }), false);
+  // answer exactly the same way for the same facts. Neither takes `dirty`: the
+  // caller that has not read the worktree yet must still be able to ask.
+  assert.equal(prEvidencePresent({}), false);
   assert.equal(
-    prEvidencePresent({ dirty: false, observedPrCreate: false, recordedPr: null, openPr: null }),
+    prEvidencePresent({ observedPrCreate: false, recordedPr: null, openPr: null }),
     false,
   );
   for (const evidence of [
@@ -318,17 +319,17 @@ test("`prEvidencePresent` says 'known to have a PR', and `prArrivalProven` adds 
     { recordedPr: 42 },
     { openPr: 167 },
   ] as const) {
-    assert.equal(prEvidencePresent({ dirty: false, ...evidence }), true, JSON.stringify(evidence));
-    assert.equal(prArrivalProven({ dirty: false, ...evidence }), true);
-    assert.equal(prArrivalProven({ dirty: false, unpushed: true, ...evidence }), false,
+    assert.equal(prEvidencePresent(evidence), true, JSON.stringify(evidence));
+    assert.equal(prArrivalProven(evidence), true);
+    assert.equal(prArrivalProven({ unpushed: true, ...evidence }), false,
       "evidence of a PR plus unpushed work is NOT an arrival");
   }
   // Evidence alone is not arrival, and arrival is impossible without evidence.
-  assert.equal(prArrivalProven({ dirty: false }), false);
-  assert.equal(prArrivalProven({ dirty: false, unpushed: true }), false);
+  assert.equal(prArrivalProven({}), false);
+  assert.equal(prArrivalProven({ unpushed: true }), false);
   // `unpushed` absent is the READABLE default (nothing was measured), which
   // every pre-2026-09-16 fixture relies on.
-  assert.equal(prArrivalProven({ dirty: false, observedPrCreate: true, unpushed: false }), true);
+  assert.equal(prArrivalProven({ observedPrCreate: true, unpushed: false }), true);
 });
 
 // ---------------------------------------------------------------------------
