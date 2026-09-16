@@ -75,8 +75,9 @@ interface Fake {
   timeline: CopilotTimeline | undefined;
   requested: { ok: boolean; stdout: string; stderr: string };
   support: { support: "CONFIRMED" | "UNKNOWN"; confirmed: boolean };
-  /** Every triage dialog the tool raised, in order. */
-  asked: { spec: ChoiceSpec; body?: string; pointer?: string; extraRows?: string[] }[];
+  /** Every triage dialog the tool raised, in order. Mirrors the REAL dep
+   *  signature — which no longer carries a truncation pointer. */
+  asked: { spec: ChoiceSpec; body?: string; extraRows?: string[] }[];
   /** What the user picks, one entry per dialog; a missing entry is ESC. */
   answers: (string | undefined)[];
   /** The transcript notices the triage wrote, one per asked finding. */

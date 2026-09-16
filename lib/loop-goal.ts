@@ -468,9 +468,9 @@ export const GOAL_DIALOG_TITLE_MAX_CHARS = 60;
 
 /**
  * Dialog body — the decision only. The goal text itself was just printed to
- * the transcript by {@link buildGoalTranscriptMessage}; repeating it here is
- * what made the terminal flicker, so this stays a handful of lines and the
- * caller runs it through `fitDialogMessage` for the hard bound.
+ * the transcript by {@link buildGoalTranscriptMessage}; repeating it here would
+ * bury the decision, so this stays a handful of lines. What the BOUNDS are is
+ * now only input-side: the agent's own title is hard-capped (see below).
  *
  * ORDER: see the comment on the return below — that is the ONE statement of
  * the ordering policy, because it depends on every part of the body and a

@@ -135,7 +135,8 @@ export interface GateCommandDeps extends GateDiagnosisDeps {
   /** Mint a proxy grant for `scope` — /gate-grant's door (2026-09-16). */
   grantProxyScope(scope: string, via: "ask-user" | "gate-grant" | "first-answer"): void;
   loopGoalPresent(): boolean;
-  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  /** Render the gate's one question template (lib/choice-dialog.ts). No fitting —
+   *  the box gets the whole text (lib/renderer-mode.ts says why). */
   askChoice(uiCtx: unknown, spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
   /** Arm or disarm auto-continuation. */
   setLoopArmed(armed: boolean): void;

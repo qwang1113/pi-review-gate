@@ -4225,9 +4225,6 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the answer can differ.
    */
   let rendererModeNoticeShown = false;
-  /** Has this session's renderer probe run? The factory form is the only
-   *  place the host hands over the TUI, and it is worth exactly one call. */
-  let rendererModeProbed = false;
 
   /**
    * Say something when this session is on the renderer that CANNOT scroll a
@@ -4510,26 +4507,30 @@ export default function reviewGate(pi: ExtensionAPI) {
     try {
       const lines = buildGateWidget(gateWidgetFacts());
       const key = lines.join("\n");
-      // THE RENDERER PROBE — once per session, invisible, and removed the
-      // moment it has answered. The `setWidget` FACTORY form is the only place
-      // the host hands an extension the real TUI, and `tui.mode` is the only
-      // honest answer to "is this session on the renderer that can scroll a
-      // tall dialog?" (a config re-derivation would be a copy that gets the
-      // corners wrong — lib/renderer-mode.ts).
+      // THE RENDERER PROBE — invisible, and removed the moment it has
+      // answered. The `setWidget` FACTORY form is the only place the host hands
+      // an extension the real TUI, and `tui.mode` is the only honest answer to
+      // "is this session on the renderer that can scroll a tall dialog?" (a
+      // config re-derivation would be a copy that gets the corners wrong —
+      // lib/renderer-mode.ts).
       //
       // A PROBE, and not the widget itself (round-1 quality P0/P2,
       // 2026-09-16): a factory component must wrap its own lines (`render(width)`),
       // while the string[] form is what wraps each line through pi-tui's
       // `Text` — and pi's RPC host ignores component factories entirely, so
       // making the status strip a factory would delete it there.
-      if (!rendererModeProbed) {
-        rendererModeProbed = true;
-        ctx.ui.setWidget("review-gate-renderer-probe", (tui) => {
-          noteRendererMode(tui.mode, ctx);
-          return { render: () => [], invalidate: () => {} };
-        }, { placement: "belowEditor" });
-        ctx.ui.setWidget("review-gate-renderer-probe", undefined);
-      }
+      //
+      // RE-PROBED on every widget update (round-2 P2, same day): the mode can
+      // change mid-session — `/settings` applies immediately — and the probe
+      // is the only place that reads it. A session that switches TO `regular`
+      // after its first update would otherwise never be told. The NOTICE stays
+      // once-per-session (`rendererModeNoticeShown`), so re-probing is free of
+      // nagging.
+      ctx.ui.setWidget("review-gate-renderer-probe", (tui) => {
+        noteRendererMode(tui.mode, ctx);
+        return { render: () => [], invalidate: () => {} };
+      }, { placement: "belowEditor" });
+      ctx.ui.setWidget("review-gate-renderer-probe", undefined);
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
         ctx.ui.setWidget("review-gate-agents", lines, { placement: "belowEditor" });

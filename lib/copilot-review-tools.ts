@@ -192,9 +192,11 @@ export interface CopilotReviewToolDeps {
   /**
    * Put text in front of the user, in the transcript, right now.
    *
-   * The dialogs are geometric (lib/dialog-budget.ts): a long Copilot comment
-   * does not fit in one, so the finding's FULL text goes here, before the box
-   * — otherwise the user is asked to approve a truncated finding and has
+   * The finding's full text goes here, before the box — a long Copilot comment
+   * is easier to read in the transcript than in a dialog that scrolls past it,
+   * and otherwise the user is asked to approve a finding they cannot see.
+   * (Until 2026-09-16 this was also forced by the dialog row budget; that is
+   * gone, the reason to print the full text here is not.)
    * nowhere to read the rest. Returns false when there is no UI to render
    * into.
    */
