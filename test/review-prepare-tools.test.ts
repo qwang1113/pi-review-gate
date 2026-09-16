@@ -464,6 +464,22 @@ test("the baseline is the last CONCLUDED round — and the branch base when ther
   assert.equal((await call(k)).details?.baseline, "pppppppppppp",
     "no branch base ⇒ the checkpoint's parent, never an empty range");
   cleanup(k);
+
+  // AN INVALIDATED VERDICT KEEPS ITS COMMIT AS THE BASELINE (round-1 review
+  // P2, 2026-09-16 — pinned because it had no test). `invalidateBindings`
+  // flips the verdict back to PENDING on the next edit and LEAVES `commitSha`
+  // in place; reading the verdict here threw that away and re-based the range
+  // on the BRANCH BASE, so every post-READY edit made the next round re-review
+  // the whole branch. This case is what stops a later tidy-up from either
+  // deleting `commitSha` on invalidation or restoring the verdict check.
+  const m = fake();
+  m.st.review = {
+    verdict: "PENDING", fingerprint: null, at: "2026-08-29T00:00:00.000Z", commitSha: "cccccccccccc",
+  };
+  m.ancestors.add("cccccccccccc..HEAD");
+  assert.equal((await call(m)).details?.baseline, "cccccccccccc",
+    "a verdict an edit invalidated must not lose the commit it concluded about");
+  cleanup(m);
 });
 
 test("a bypassed checkpoint is spelled out for the reviewer", async () => {

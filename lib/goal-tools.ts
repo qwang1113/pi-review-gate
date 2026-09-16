@@ -514,13 +514,6 @@ export async function doProposeLoopGoal(
   };
 }
 
-/**
- * The family's SINGLE registration entry point.
- *
- * ONE tool now: `propose_loop_goal`. The audit recorder behind it is a plain
- * function (`recordGoalPrereview`), which the extension calls when the
- * auditor's round lands — it is not on any tool surface.
- */
 /** How much of ONE untrusted value a dialog line may carry. */
 export const UNTRUSTED_LINE_MAX_CHARS = 120;
 
@@ -538,6 +531,13 @@ export function capUntrustedLine(value: string, max = UNTRUSTED_LINE_MAX_CHARS):
   return value.length > max ? value.slice(0, max) + "…" : value;
 }
 
+/**
+ * The family's SINGLE registration entry point.
+ *
+ * ONE tool now: `propose_loop_goal`. The audit recorder behind it is a plain
+ * function (`recordGoalPrereview`), which the extension calls when the
+ * auditor's round lands — it is not on any tool surface.
+ */
 export function registerGoalTools(host: ToolHost, deps: GoalToolDeps): void {
   host.registerTool({
     name: "propose_loop_goal",
