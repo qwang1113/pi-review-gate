@@ -24,7 +24,6 @@ import {
 import {
   COPILOT_TRIAGE_MAX_QUESTIONS,
   DECLINE_CHOICE,
-  FINDING_DIALOG_POINTER,
   FIX_CHOICE,
   IRRELEVANT_CHOICE,
   recordDecision,
@@ -76,8 +75,9 @@ interface Fake {
   timeline: CopilotTimeline | undefined;
   requested: { ok: boolean; stdout: string; stderr: string };
   support: { support: "CONFIRMED" | "UNKNOWN"; confirmed: boolean };
-  /** Every triage dialog the tool raised, in order. */
-  asked: { spec: ChoiceSpec; body?: string; pointer?: string; extraRows?: string[] }[];
+  /** Every triage dialog the tool raised, in order. Mirrors the REAL dep
+   *  signature — which no longer carries a truncation pointer. */
+  asked: { spec: ChoiceSpec; body?: string; extraRows?: string[] }[];
   /** What the user picks, one entry per dialog; a missing entry is ESC. */
   answers: (string | undefined)[];
   /** The transcript notices the triage wrote, one per asked finding. */
@@ -148,7 +148,6 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     delay: (ms) => { state.delays.push(ms); return Promise.resolve(); },
     askFinding: async (_ctx, spec, opts) => {
       state.asked.push({ spec, ...(opts.body === undefined ? {} : { body: opts.body }),
-        ...(opts.pointer === undefined ? {} : { pointer: opts.pointer }),
         ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }) });
       return state.answers.shift();
     },
@@ -574,10 +573,12 @@ test("read: round 4 asks about each finding, one dialog each, and groups the ans
   assert.equal(f.asked[0]?.spec.recommended, FIX_CHOICE);
   assert.deepEqual(f.asked[0]?.extraRows, [SKIP_REST_CHOICE], "an interview still has an escape row");
   assert.match(f.asked[0]?.body ?? "", /this argv is not escaped/, "the dialog carries the comment");
-  assert.equal(f.asked[0]?.pointer, FINDING_DIALOG_POINTER, "and says where the rest of it is");
-  // The full text goes to the transcript BEFORE the box: the dialog's body is
-  // clipped by the row budget, so this copy is what makes the pointer true —
-  // and what keeps a long finding from being approved unseen.
+  // The full text goes to the transcript BEFORE the box. The row budget that
+  // used to clip the dialog and make that copy necessary is gone (2026-09-16),
+  // but the copy stays: a long finding scrolls past inside a box, and
+  // approving one you cannot read is the bug it guards either way. (Nothing is
+  // asserted about a truncation pointer here — the fake records only what the
+  // real dep signature accepts.)
   assert.equal(f.notices.length, 2);
   assert.equal(f.notices[0]?.lead, "───── Copilot 评审问题 1 / 2：lib/copilot-gh.ts:12 ─────");
   assert.match(f.notices[0]?.body ?? "", /this argv is not escaped/);

@@ -42,7 +42,7 @@ The design rule behind every tool below is one line from the user who asked for 
 | `orchestrator_spawn` | “Open a child session for task X.” The gate picks the split direction, injects the orchestration id, starts it in `loop` mode in the repo its task declares, and registers the pane. A second child in the SAME repo gets its **own `git worktree`** on its own branch (2026-09-10, restoring the isolation dropped in 2026-09-07) — so same-repo tasks run in parallel, and if that checkout cannot be created the spawn is refused rather than sharing one. That checkout is then **seeded with the local prerequisites a commit cannot carry** (2026-09-15): the project's `.pi/` config files are copied, `.env` / `.env.local` / `node_modules` are symlinked — each one only when `git check-ignore` confirms it is ignored, so nothing untracked ever appears in the isolated tree. Measured need: a child that cannot read `.pi/review-gate.json` runs the package's default `yarn test` instead of the repository's own scoped command (143 unrelated files failed, against a 5-file change). |
 | `orchestrator_wait` | The orchestrator's **one** information channel — call it every round. Blocking or, with `timeoutMs: 0`, an instant snapshot; the reply is the same either way (see below). |
 | `orchestrator_answer` | Answer the question a child is holding. The question, every option and the full payload are already in the wait receipt — the child wrote them there, so nothing was read off a screen. Approving a child's loop goal — or confirming its requirement restatement — happens here too, and is never a rubber stamp: it requires a `crosscheck` (the task id plus one judgement each on file boundary / task goal / delivery station), it is boundary-checked against the draft the CHILD wrote, and a station looser than the approved plan's is refused. |
-| `orchestrator_instruct` | Say something to a child. `mode` IS the delivery, and it **defaults to `interrupt`** (2026-09-17, user decision: a supervisor writes because the child should know NOW) — it aborts the turn in flight and carries its own text, so one call says "stop, do this instead". The one alternative is `steer` (cut into the current turn without aborting it). `followUp` is **refused at this parameter surface** — a correction that arrives after the round it was meant to correct is a correction nobody applied; it remains a channel delivery mode, and the judge's next-round dispatch still uses it. Nothing is typed at a terminal: the text goes through the child's channel and its own gate injects it with `pi.sendUserMessage`. |
+| `orchestrator_instruct` | Say something to a child. `mode` IS the delivery, and it **defaults to `interrupt`** (2026-09-17, user decision: a supervisor writes because the child should know NOW) — it aborts the turn in flight and carries its own text, so one call says "stop, do this instead". The one alternative is `steer` (cut into the current turn without aborting it). `followUp` is **refused at this parameter surface** — a correction that arrives after the round it was meant to correct is a correction nobody applied; it remains a channel delivery mode (the judge lane used it for its next-round dispatch until 2026-09-16, when a queued task let the round numbering race — that dispatch now interrupts and carries its round number with the task). Nothing is typed at a terminal: the text goes through the child's channel and its own gate injects it with `pi.sendUserMessage`. |
 | `orchestrator_notify` | The **only** channel to the human who is not watching the terminal. |
 | `orchestrator_recover` | Bring a child back after its pane vanished — same `--session-id`, so its transcript continues rather than starting over. |
 | `orchestrator_attach` | Take over a running orchestration: plan, children, unanswered questions, and the orphan tasks a crash left behind. |
@@ -1340,20 +1340,21 @@ Measured against the real `TuiMainScreen` (40-row terminal, 30 spinner frames):
 | 39 rows | 0 / 30 |
 | **40 rows (= terminal height)** | **29 / 30** |
 
-So `lib/dialog-budget.ts` bounds every dialog by **rendered rows** — CJK is
-double-width, and soft wrapping means a 40-character Chinese line costs a full
-80-column row — sized for a 24-row terminal: 24 − 8 (selector chrome) − 2
-(footer) − 2 (slack) = **12 rows for title + message together**. Every
-`ui.confirm` in the extension goes through `confirmBounded`, which applies it;
-`test/extension-structure.test.ts` fails the build if a call site bypasses it.
-Where truncation is possible, the fixed consequence copy is written *first* and
-the agent's untrusted text last, so what gets dropped is never the statement of
-what "yes" grants.
+**What the gate DOES about it (2026-09-16, user decision): nothing is fitted.**
+Dialogs used to be truncated to a rendered-row budget so this could not happen
+(`lib/dialog-budget.ts`, now deleted) — but that budget's cost landed on the
+lines the user is *confirming*: a long repo path could take the station line
+and the audit line with it while the box went on asking for approval. The user
+runs every session on `--tui-mode fullscreen` / `tuiMode: "fullscreen"`
+(`TuiAltScreen`, which owns the screen and scrolls, and never takes that
+branch), so the budget is gone and a session that is NOT on that renderer is
+**told once**, at startup, with both ways to fix it (`lib/renderer-mode.ts`
+reads the host's own `TUI.mode`; it does not re-derive the setting).
 
-Guards: `test/dialog-budget.test.ts` (always runs) and
-`test/tui-flicker.test.ts`, which drives the real renderer and asserts both
-directions — a budgeted dialog never wipes, the pre-fix height still does. The
-latter skips when pi-tui cannot be resolved (it ships with the globally
+Guards: `test/renderer-mode.test.ts` (the decision and the wording, always
+runs) and `test/tui-flicker.test.ts`, which drives the real renderer and is the
+evidence for why the notice exists at all. The latter skips when pi-tui cannot
+be resolved (it ships with the globally
 installed pi, not with this repo).
 
 ### No UI ⇒ the gate runs in `normal` mode

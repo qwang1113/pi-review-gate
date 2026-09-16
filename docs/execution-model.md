@@ -133,14 +133,7 @@ opener 凭它记录结论；
 - **协商正文只走对话区，且不截断**（2026-09-14，用户要求）：三份全文（反述 / goal /
   plan）由 `showToUser` 完整打印，**没有任何字符数上限** —— 对话区可滚动，实测一次
   追加 400 行触发 0 次清屏（`test/tui-flicker.test.ts` 用真实 `TuiMainScreen` 验证）。
-  被行数预算约束的只有**对话框**，而它只承载决策文案（正文永不进框）。对话框的行预算
-  按**真实终端行数**算（`lib/dialog-budget.ts` 的 `dialogTextMaxLines`，来源与 pi 一致：
-  `process.stdout.rows` → `$LINES` → 24），**折行宽度同样按真实列数**
-  （`process.stdout.columns` → `$COLUMNS` → 80 —— 行数决定闪不闪，列数决定一个逻辑行折
-  成几行，对宽窗口按 80 列假设排版就会裁掉本来放得下的正文），标题也在同一份预算内
-  裁剪 —— 小窗口不再因「预算按 24 行写死」而整屏闪烁。终端级的替代路径是 pi 的 `--tui-mode fullscreen`
-  （`TuiAltScreen`：pi 自己拥有屏幕与滚动）；Claude Code 的 `CLAUDE_CODE_NO_FLICKER`
-  只是它渲染切换的遗留 env，对应的是它的 fullscreen 渲染器。
+  被预算约束的**曾**是**对话框**（而它只承载决策文案，正文永不进框）：**2026-09-16 用户决定删掉那套预算** —— 它只服务于**默认（regular）渲染器**下的那个闪屏（实测 40 行终端：39 行 ⇒ 0/30，40 行 ⇒ 29/30），而拥有整屏、自己滚动的 `TuiAltScreen`（`--tui-mode fullscreen` / `tuiMode`）永远走不到那个分支，用户每会话都用它；更要紧的是，行数裁剪的代价落在**用户正在确认的那些行**上（长路径可以带走「交付站点」与审计预审行，而对话框仍在请求批准）。现在：对话框**不裁**，**不在** fullscreen 上的会话由门禁在启动时**提醒一次**（模式取自宿主的 `TUI.mode`，见 `lib/renderer-mode.ts`；不自己按 argv/settings 重算 —— 那是会算错边角的拷贝）。依然保留的只有**输入侧限长**（不可信路径、agent 写的标题）。
 - **主会话存活不变量**（round-18，用户硬约束）：门禁未通过前主会话**不得**
   停止自动循环。`agent_settled` 先跑 `settleFinishedRounds()`：有新 channel report 的
   子会话**立即**以标准报告唤醒（结论、证据位置、记录情况、待答问题）并记入链；
@@ -151,7 +144,9 @@ opener 凭它记录结论；
   `buildWaitDiscipline`）：①有确定性工作先做掉（提示、不强求：送完 reviewer 往往
   没事可做，可以看看下一轮要什么或先备收尾报告）；②确实没活了才调
   `judge_wait`——不是手写 sleep 轮询，也不是结束 turn（存活不变量仍然成立）；
-  ③`judge_wait` 消息驱动：新 finding / judge 提问 / 本轮结论 / pane 消失任一到达即返回。
+  ③`judge_wait` 消息驱动：新 finding / judge 提问 / 本轮结论 / pane 消失，以及
+  **`settled`**（本轮已交卷、已记录且已消费，而 pane 空闲 —— 立即回一个「没有可等的
+  了」而不是阻塞到超时）任一到达即返回。
 
   仅三类情形允许停止：用户显式中止（ESC）、`ask_user` 等待用户回答、
   所有门禁与 goal 均完成。

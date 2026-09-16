@@ -878,6 +878,89 @@ test("the wait probe: this round's conclusion outranks findings that arrived wit
   assert.equal(obs.seenFindingCount, 2, "the findings are still counted — the cursor must advance past them");
 });
 
+test("the wait probe: a round ALREADY concluded and recorded ENDS the wait", () => {
+  // 2026-09-16, measured (notification session): 6 minutes 47 seconds inside a
+  // `judge_wait` whose round had been concluded and recorded at minute two.
+  // The wait's own event sources are the JUDGE's, and what that session was
+  // actually waiting for — the precommit lane landing — had no delivery at
+  // all. Blocking to the timeout then hands the opener a state line it reads
+  // as "still working", which is the opposite of the truth.
+  const noteState = (f: Fake, c: JudgeChildRecord, state: "idle" | "working" | "done") => {
+    appendRecord(channelWriter(f), channelOf(c), {
+      kind: "state", from: "child", at: new Date(1_700_000_000_000).toISOString(), state,
+    });
+  };
+  const cursors = { reportId: undefined, findingCount: 0, announcedQuestions: new Set<string>(), modelEventCount: 0 };
+
+  const f = fake();
+  const c = seed(f, { streamPath: "/logs/stream.jsonl" });
+  writeReport(f, c, "READY", "rep-11");
+  noteState(f, c, "idle");
+  // Behind the cursor (recorded and consumed) + an idle pane ⇒ nothing can
+  // arrive, so the wait says so at once instead of at the timeout.
+  const settled = probeJudgeWait(f.deps, c, { ...cursors, reportId: "rep-11" });
+  assert.equal(settled.done, true);
+  assert.equal(settled.reason, "settled");
+  assert.match(settled.stateLine ?? "", /idle/);
+  // AN UNCONSUMED report still ends as a report: the new criterion must not
+  // steal the round from the path that records it.
+  assert.equal(probeJudgeWait(f.deps, c, cursors).reason, "report",
+    "a verdict nobody has acted on is still the strongest message");
+
+  // …and a WORKING pane is a round in flight — that one still has an event.
+  const g = fake();
+  const w = seed(g, { streamPath: "/logs/stream.jsonl" });
+  writeReport(g, w, "READY", "rep-12");
+  noteState(g, w, "working");
+  const pending = probeJudgeWait(g.deps, w, { ...cursors, reportId: "rep-12" });
+  assert.equal(pending.done, false, "a pane that is working is not a settled round");
+  assert.equal(pending.reason, "pending");
+
+  // …AND A RE-DISPATCH CANCELS IT (round-1 quality P1, 2026-09-16). A
+  // `cursor-only` binding (adviser) never compares round numbers, so right
+  // after a new task the probe would still be looking at the PREVIOUS round's
+  // consumed report, on a pane whose heartbeat has not left `idle` — and
+  // 「没有可等的了」 for a round that has not started is the same lie this
+  // criterion exists to kill, pointing the other way.
+  const h = fake();
+  const d = seed(h, { streamPath: "/logs/stream.jsonl" });
+  writeReport(h, d, "READY", "rep-13");
+  noteState(h, d, "idle");
+  appendRecord(channelWriter(h), channelOf(d), {
+    kind: "instruct",
+    from: "orchestrator",
+    at: new Date(1_700_000_060_000).toISOString(),
+    instructId: "in-next",
+    mode: "interrupt",
+    text: "next round, just dispatched",
+  });
+  const awaiting = probeJudgeWait(h.deps, d, { ...cursors, reportId: "rep-13" });
+  assert.equal(awaiting.done, false,
+    "the consumed report is OLDER than this pane's task — the round has not run yet");
+  assert.equal(awaiting.reason, "pending");
+
+  // …AND THE SAME PANE SETTLES once its report is the NEWER of the two. That
+  // comparison is the whole criterion: without this half, a rule that only
+  // ever says "pending" would pass the case above by accident (which is how
+  // the first version of it shipped — the consumed miss carried no `at`, so
+  // every reused pane answered "pending" forever).
+  const j = fake();
+  const e = seed(j, { streamPath: "/logs/stream.jsonl" });
+  appendRecord(channelWriter(j), channelOf(e), {
+    kind: "instruct",
+    from: "orchestrator",
+    at: new Date(1_700_000_060_000).toISOString(),
+    instructId: "in-old",
+    mode: "interrupt",
+    text: "the task this report answers",
+  });
+  writeReport(j, e, "READY", "rep-14", { at: new Date(1_700_000_120_000).toISOString() });
+  noteState(j, e, "idle");
+  const freshReason = probeJudgeWait(j.deps, e, { ...cursors, reportId: "rep-14" });
+  assert.equal(freshReason.reason, "settled",
+    "a report NEWER than the pane's last task is this round's — nothing left to receive");
+});
+
 test("judge_wait: a leftover report keeps the round open and is named in the reply", async () => {
   const f = fake();
   const c = seed(f);

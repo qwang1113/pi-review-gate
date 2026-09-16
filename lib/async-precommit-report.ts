@@ -93,6 +93,44 @@ export function asyncPrecommitReportIsStale(
   return Boolean(input.verified) && Boolean(input.current) && input.verified !== input.current;
 }
 
+/** What a PASS knows: the round, the content it verified, and what is on disk now. */
+export interface AsyncPrecommitPass {
+  /** Same meaning as {@link AsyncPrecommitReport.round}. */
+  round: number;
+  /** The tree the lane ran against, read before it started. */
+  verified: string;
+  /** The tree at delivery time. */
+  current: string;
+}
+
+/**
+ * The notice a PASS owes the agent (2026-09-16).
+ *
+ * A PASS used to be silent — only failures reached this module — and that
+ * silence is what left a session inside a `judge_wait` it could not end
+ * (measured: 6 minutes 47 seconds, notification session 2026-09-15). The
+ * standard report it had received said 「正在等 precommit lane 落地（HELD）」,
+ * and nothing ever came to say it had: `judge_wait`'s event sources are the
+ * JUDGE's, so the lane's landing was an event with no delivery.
+ *
+ * {@link AsyncPrecommitReport} is deliberately not reused: every field of it
+ * assumes a failure (the verdict to name, the run's output to append), and
+ * widening it would make that builder's "anything but PASS" contract a lie.
+ * A PASS has less to say — it landed, there is nothing to do — and the only
+ * reason it says it at all is that something has to.
+ */
+export function buildAsyncPrecommitPass(input: AsyncPrecommitPass): string {
+  const label = input.round > 0 ? `第 ${input.round} 轮` : "本轮";
+  const verified = shortTree(input.verified);
+  if (asyncPrecommitReportIsStale(input)) {
+    return `review-gate: ${label}的后台 full precommit **PASS** —— 那是 **${label}启动时**那份内容（${verified}），` +
+      `投递这一刻工作区是（${shortTree(input.current)}）。**不用为它做任何事**，` +
+      "你手上的内容由它自己那一轮的 full precommit 判；这条只是告诉你那次验证已经落地。";
+  }
+  return `review-gate: ${label}的后台 full precommit **PASS**（内容 ${verified}）—— ` +
+    "已经落地，没有失败项，**不用再等它**。";
+}
+
 function shortTree(tree: string): string {
   return tree ? tree.slice(0, TREE_PREFIX) : "未知";
 }

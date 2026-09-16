@@ -319,10 +319,10 @@ export const MODE_REASON_MAX_CHARS = 200;
  * and explicitly labeled — the fixed consequence text above it is the only
  * authoritative statement of what "yes" grants.
  *
- * ORDER MATTERS. The dialog is bounded to a few rendered rows (see
- * lib/dialog-budget.ts — an oversized dialog makes the terminal flicker), and
- * the budget truncates from the END. So every fixed, authoritative line comes
- * first and the untrusted reason goes last: if anything is dropped, it is the
+ * ORDER MATTERS. The box is read top-down and the untrusted reason is the
+ * least important part of it, so every fixed, authoritative line comes first
+ * and the reason goes last. (Before 2026-09-16 this also decided what
+ * survived a row budget — the budget is gone, the reading order is not.)
  * agent's text, never the statement of what the user is granting.
  *
  */

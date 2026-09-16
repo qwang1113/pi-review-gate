@@ -90,8 +90,10 @@ reviewer over the WHOLE change:
   submitting (the runner caches by input: unchanged content reuses the
   recorded PASS in seconds). Develop with targeted tests only.
   The reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
-  starts at the last REVIEWED commit, so a chain of checkpoints since the
-  last READY is all covered (round-9 P1); there is no second reviewer of
+  starts at the last commit a round **concluded** about (READY or BLOCKED),
+  and at the BRANCH BASE when no round ever has — a round without a conclusion
+  must never let the baseline step past its content (round-9 P1, round-10 P1);
+  there is no second reviewer of
   kind. When the round's channel report lands, the opener records the verdict
   itself (the gate's settle path records it and wakes you with the standard report; audit chains do the same) — you never carry
   a verdict from one tool to another. The recording keeps every mechanical
@@ -388,6 +390,8 @@ verdict. WAITING-WINDOW DISCIPLINE（2026-09-05 起的口径，`lib/agent-direct
 (2) 确实没活可做了，才调 `judge_wait({role})` 等——不是手写 sleep 轮询，也不是
 结束 turn（主会话是门禁的最后监督者，门禁未通过前不得停止自动循环，存活不变量）;
 (3) `judge_wait` 是**消息驱动**的：新 finding、judge 提问、本轮结论、pane 消失，
+以及 `settled`（本轮已交卷、已记录且已消费而 pane 空闲 —— 立即回一个「没有可等的
+了」而不是阻塞到超时；2026-09-16），
 任一到达即返回，拿到就继续干——它不是「等它跑完」的轮询。没在等的时候，
 settle 唤醒仍是兜底：新消息落盘时门禁会用同一份标准报告叫你
 （结论、证据位置、记录情况、待答问题）。
@@ -485,7 +489,10 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   （2026-09-17 用户决定：上级发话就是要它立刻知道）——中断当前 turn 并带正文立即
   投递，一次调用表达「停下、做这个」。唯一的另一个选项是 `steer`（切进当前这一轮、
   不 abort，给「带着这条继续做」用）。`followUp`（等本轮跑完）**已从参数面取消**，
-  传了直接被拒；它作为通道枚举值仍在，因为 judge 次轮派发用的就是它。
+  传了直接被拒。**judge 次轮派发也不用它**（2026-09-16）：那条排队投递让任务停在
+  通道上、而 opener 登记表已经把轮号推到了下一轮，于是旧轮交卷时盖上了新一轮的号
+  —— 旧结论落到新轮名下，真正的新轮结论被当「重复调用」丢弃；现在派发即 interrupt，
+  轮号随任务一起送过去（`roundSeq` 写在那条 instruct 记录里）。
   `send-keys` 投递路径已删除。
 - **派活戳无模式豁免**（2026-09-17）：每一条**写进通道**的 instruct 都更新
   `lastAssignedAt`（不等回执 —— 只 `received` 的消息回执会失败，但子会话稍后照样

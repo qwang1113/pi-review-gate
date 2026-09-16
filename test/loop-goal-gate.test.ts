@@ -16,6 +16,7 @@ function isScratchPath(p: string): boolean {
 }
 import { fileURLToPath } from "node:url";
 import { goalTextHash, goalReminderDue } from "../lib/loop-goal.ts";
+import { capUntrustedLine } from "../lib/goal-tools.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
@@ -116,6 +117,15 @@ function makeRepoAt(base: string): string {
   return realpathSync(root);
 }
 
+/**
+ * WHERE THE FIXTURES LIVE — `os.tmpdir()`, as before 2026-09-16.
+ *
+ * A short root was pinned here for two rounds, for two different reasons, and
+ * BOTH are gone: the dialog row budget went with `lib/dialog-budget.ts`, and
+ * the one assertion that depended on `capUntrustedLine`'s 120-character bound
+ * now applies that bound itself instead of asserting the whole path. Nothing
+ * here reads how long a path happens to be on the host that runs it.
+ */
 function makeRepo(): string {
   return makeRepoAt(tmpdir());
 }
@@ -471,8 +481,9 @@ test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS —
   assert.equal((approved as { details: { approved?: boolean } }).details.approved, true);
   assert.equal(dialogs, 1, "the audited text reaches the user exactly once");
   // Exit criterion 5: the user must SEE that an independent audit passed — and
-  // see it after the repo binding, which is the consent-critical fact the
-  // dialog budget must never truncate away.
+  // see it after the repo binding, which is the fact they are confirming
+  // first. (Until 2026-09-16 the dialog's tail cut also decided what survived;
+  // nothing is cut now, the order is a reading order.)
   // BOTH surfaces must carry it: the transcript echo (notify) is where the
   // user actually reads the goal, and the dialog is where consent is given.
   // Asserting only the joined text would let one of them go dark.
@@ -941,8 +952,21 @@ test("L8: propose_loop_goal refuses a NON-repo repo param and shows the binding 
   const repoB = makeRepo();
   await recordPrereview(pi, ctx, GOAL_TEXT, repoB);
   await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT, repo: repoB }, undefined, undefined, ctx);
-  assert.match(dialogText, new RegExp(repoB.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-    "the consent dialog must name the repo the goal binds to");
+  // WHAT THE DIALOG WOULD ACTUALLY CARRY — not the full path. `capUntrustedLine`
+  // bounds an untrusted value at 120 characters (by design), so asserting the
+  // WHOLE path made this test depend on how long a fixture path happens to be
+  // on the machine that runs it (round-1 review P2, 2026-09-16).
+  //
+  // WHAT THIS DOES AND DOES NOT PROVE, stated rather than implied: it proves the
+  // dialog carries THIS repo's value and not some other string. Whether that
+  // value also distinguishes repoB from a SIBLING fixture depends on where the
+  // cap lands, and that depends on the host's paths — under a long `$TMPDIR` the
+  // shared `/…/rg-lg-…/` prefix can occupy the whole cap. The cap's head+tail
+  // shape is what keeps the identifying END alive as long as the budget allows
+  // (see its own test in test/goal-tools.test.ts).
+  const shownRepo = capUntrustedLine(repoB);
+  assert.ok(dialogText.includes(shownRepo),
+    `the consent dialog must carry this repo, capped as shown: ${shownRepo}`);
 });
 
 // ---------------------------------------------------------------------------

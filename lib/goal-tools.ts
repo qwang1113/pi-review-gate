@@ -104,11 +104,12 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
   }): Promise<{ ok: true } | { ok: false; text: string }>;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  /** Render the gate's one question template (lib/choice-dialog.ts). No fitting —
+   *  the box gets the whole text (lib/renderer-mode.ts says why). */
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; pointer?: string; signal?: AbortSignal },
+    opts?: { body?: string; signal?: AbortSignal },
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -264,9 +265,15 @@ export async function doProposeLoopGoal(
   // The goal text goes to the TRANSCRIPT; the binding repo must be shown
   // at CONSENT time (both surfaces), so a repo-scoped approval is never
   // given for a repo the user was not shown.
-  const repoLine = goalRoot === deps.primaryRepoRoot()
-    ? "本仓库 (" + deps.primaryRepoRoot() + ")"
-    : goalRoot;
+  // THE UNTRUSTED VALUE IS CAPPED HERE, NOT AS A BLOCK (2026-09-16). The
+  // dialog builder used to slice the whole "repo + station + pre-review"
+  // clause at 200 characters, so a long path ate the two lines BELOW it: the
+  // station line broke mid-sentence and `goal-auditor 预审: PASS` vanished,
+  // while the dialog went on asking for approval. Capping the value keeps every
+  // line that matters whole — and the full path is in the transcript anyway.
+  const repoLine = capUntrustedLine(
+    goalRoot === deps.primaryRepoRoot() ? "本仓库 (" + deps.primaryRepoRoot() + ")" : goalRoot,
+  );
 
   // Consent comes from a dialog the EXTENSION renders — there is no
   // parameter the model could set to claim it. No UI ⇒ no approval; a
@@ -280,9 +287,10 @@ export async function doProposeLoopGoal(
   // follows carries only the decision.
   // The pre-review fact is shown to the USER too: the approval is more
   // informed when it is visible that an independent auditor already passed
-  // THIS text. It goes AFTER the repo line on purpose — the dialog budget
-  // truncates from the tail, and the repo binding is the consent-critical
-  // fact that must never be the thing that gets cut.
+  // THIS text. It goes AFTER the repo line on purpose — the box is read
+  // top-down, and the repo binding is the fact the user is confirming first.
+  // (Until 2026-09-16 the order also decided what survived a tail cut; nothing
+  // is cut any more, the reading order is why it stays.)
   // The record is guaranteed to exist here: goalPrereviewPassed() above
   // already required a PASS bound to this text, so this reads it directly
   // rather than advertising a fallback state that cannot occur.
@@ -317,8 +325,8 @@ export async function doProposeLoopGoal(
       "同一 repo 的一个需求只出一个 PR，子会话提交完就停，由项目经理本地合并、用户验证后再开一个 PR。" +
       "要分多个 PR，需要在 plan 里声明 allowMultiplePrs 并重新批准。"
     : undefined;
-  // THE DIALOG GETS THE SHORT FORM (measured). Its body is budgeted and
-  // truncated from the TAIL: the first version of this notice ended with
+  // THE DIALOG GETS THE SHORT FORM (measured, and it survived the end of the
+  // row budget): the first version of this notice ended with
   // "declare allowMultiplePrs" — the one fact the reader can act on — and that
   // is precisely what got cut. The transcript block above carries the full
   // sentence; the box carries the decision.
@@ -390,7 +398,6 @@ export async function doProposeLoopGoal(
           "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine +
             (capNoteShort ? "\n" + capNoteShort : ""),
         ),
-        pointer: "（目标全文见上方消息）",
         signal,
       }),
     );
@@ -506,6 +513,35 @@ export async function doProposeLoopGoal(
     }],
     details: { approved: true, station },
   };
+}
+
+/** How much of ONE untrusted value a dialog line may carry. */
+export const UNTRUSTED_LINE_MAX_CHARS = 120;
+
+/**
+ * Cap ONE untrusted value (a path, a repo slug) so it cannot dominate a dialog.
+ *
+ * PER VALUE, never per BLOCK. Capping a BLOCK of lines by character count is
+ * how the consent-critical lines that FOLLOW it got cut off (2026-09-16): the
+ * slice happens before any wrapping, so it was invisible to the row budget that
+ * existed then, and a long path silently took the station line and the
+ * `goal-auditor 预审: PASS`
+ * line with it while the dialog went on asking for approval.
+ *
+ * HEAD **AND TAIL**, because a path carries different facts at its two ends:
+ * where it lives (the start) and WHAT it is (the end). A prefix-only cap
+ * truncates inside whatever directory the caller happens to live under, so two
+ * repos side by side (`…/rg-lg-AAAA/repo` and `…/rg-lg-BBBB/repo`) come out
+ * identical — the value stops identifying anything exactly where the cap bites,
+ * and a consent check that matches on it becomes vacuous (round-1 review P2,
+ * 2026-09-16).
+ */
+export function capUntrustedLine(value: string, max = UNTRUSTED_LINE_MAX_CHARS): string {
+  if (value.length <= max) return value;
+  // One cell goes to the ellipsis, the rest splits as evenly as the parity allows.
+  const head = Math.ceil((max - 1) / 2);
+  const tail = max - 1 - head;
+  return value.slice(0, head) + "…" + value.slice(value.length - tail);
 }
 
 /**

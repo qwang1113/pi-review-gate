@@ -94,11 +94,12 @@ export interface UserInteractionToolDeps {
   setLoopArmed(armed: boolean): void;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  /** Render the gate's one question template (lib/choice-dialog.ts). No fitting —
+   *  the box gets the whole text (lib/renderer-mode.ts says why). */
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] },
+    opts?: { body?: string; signal?: AbortSignal; extraRows?: string[] },
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -165,12 +166,14 @@ export type ConsentToolDeps = Pick<
  * The question's own first line, short enough to sit in a box title.
  *
  * WHY THE TITLE NEEDS IT (reviewer Nit, 2026-09-14): the question text lives in
- * the budgeted BODY, and the reason box the template raises for
+ * the BODY (which reaches the box whole — the row budget is gone, 2026-09-16),
+ * and the reason box the template raises for
  * `✎ 不选，我说明原因` renders `spec.title` ALONE — the box the user types
  * their objection into would have said only 「问题 1/3」. One line of the
- * question is charged to the same title budget as everything else — and when
- * that budget runs out the title is cut from the TAIL, which is why the ⚠️
- * notice sits AHEAD of it (see questionDialogTitle).
+ * question is part of that title, which is why the ⚠️ notice sits AHEAD of it
+ * (see questionDialogTitle): the box is read top-down, and the notice is the
+ * part nobody may miss. (Until 2026-09-16 a title budget also decided what
+ * survived; the budget is gone, the order is not.)
  */
 function questionHeadline(q: AskQuestion): string {
   const first = q.text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
@@ -186,10 +189,10 @@ const HEADLINE_MAX_CHARS = 60;
 /**
  * The box title for one question — the ONE place its order is decided.
  *
- * ORDER IS LOAD-BEARING (reviewer P2, 2026-09-14). `fitDialogTitle` cuts from
- * the TAIL, so a ⚠️ authorization notice appended AFTER the progress label is
- * the first thing a small window loses — on a 20-row terminal with four
- * options the title budget is three rows, and the notice announcing that
+ * ORDER STILL MATTERS (and it mattered more before 2026-09-16, when the title
+ * was cut from the TAIL): a ⚠️ authorization notice buried under a progress
+ * label is easy to miss however long the box may be, and the notice
+ * announcing that
  * 「推荐」 grants a proxy authority would be gone while picking that row still
  * minted the grant. Head-first makes "the notice is visible wherever the box
  * is shown at all" true by construction.
@@ -335,28 +338,28 @@ export async function doAskUser(
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped !== undefined) return undefined;
         // ONE renderer for every dialog in the gate — the extension's
-        // `askChoice`, so this box is budgeted like every other one — plus the
+        // `askChoice` — plus the
         // interview's own escape row, which is not part of the template
         // because only an interview has later questions to skip.
         //
-        // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). A title
-        // is charged to the budget but never cut by it (it is the question
-        // being asked), so a 1200-character question in the title made the box
-        // as tall as it liked and pushed the spinner out of the viewport —
-        // the flicker again, from the one render path that had bypassed the
-        // budget entirely. The full question is in the transcript above
-        // (printed before the first box), and the body's cut points at it.
+        // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). The title
+        // is the short label the reason box repeats; the question is the long
+        // half and belongs in the body. (When a row budget existed this ALSO
+        // kept a 1200-character question from sizing the box — the budget is
+        // gone, the placement is not.) The full question is in the transcript
+        // above (printed before the first box), which is where a long text is
+        // readable.
         //
         // THE GRANT NOTICE STAYS OUT OF THE BODY (reviewer P1, 2026-09-14).
-        // The body is cut from its TAIL, so appending the ⚠️ authorization
+        // The body was cut from its TAIL at the time, so appending the ⚠️
+        // authorization
         // notice after the question let a long question eat it — while
         // picking the recommended row still minted the proxy grant. That is
         // exactly the invisible-authorization hole the notice was added to
-        // close (2026-09-16 P1), so the notice rides in the TITLE: it is
-        // charged to the budget like everything else, but a two-line notice
-        // never overflows the title's share, and what a long body loses is
-        // only the tail of the question (whose full text is in the
-        // transcript).
+        // close (2026-09-16 P1), so the notice rides in the TITLE: it is the
+        // part of the box that is read first and repeated back by the reason
+        // box, and a two-line notice is never the long half. A long question
+        // goes in the body, whose full text is in the transcript anyway.
         return deps.askChoice(
           uiCtx,
           {
@@ -365,7 +368,6 @@ export async function doAskUser(
           },
           {
             body: q.text,
-            pointer: "（完整问题见上方消息）",
             signal,
             extraRows: [SKIP_REST_CHOICE],
           },

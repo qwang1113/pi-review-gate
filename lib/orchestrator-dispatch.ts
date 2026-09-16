@@ -459,10 +459,15 @@ const INSTRUCT_MODES = new Set(["interrupt", "steer"]);
  * correction nobody applied. So the default became `interrupt` and asking
  * for `followUp` is refused rather than silently delivered late.
  *
- * It stays in the channel enum and on the child's side on purpose: the judge
- * lane dispatches its next round as a `followUp` (a round IS "read this when
- * you are free"), and a child running an older gate build must keep being
- * able to read one.
+ * It stays in the channel enum and on the child's side on purpose: a child
+ * running an older gate build must keep being able to read one, and
+ * `lib/orchestrator-channel.ts` still carries the value. The judge lane USED to
+ * dispatch its next round this way ("a round IS read this when you are free"),
+ * and that is what the 2026-09-16 fix retired: the queued delivery left the
+ * task on the wire while the opener's table already held the next round's
+ * number, so a pane concluding the previous round stamped its verdict with the
+ * wrong one — and the real conclusion was then refused as a duplicate. The
+ * judge lane now interrupts.
  */
 const RETIRED_INSTRUCT_MODES = new Set(["followUp"]);
 

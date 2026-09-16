@@ -4,8 +4,11 @@ import assert from "node:assert/strict";
 import {
   registerGoalTools,
   doProposeLoopGoal,
+  capUntrustedLine,
+  UNTRUSTED_LINE_MAX_CHARS,
   type GoalToolDeps,
 } from "../lib/goal-tools.ts";
+import { buildGoalConfirmMessage } from "../lib/loop-goal.ts";
 import {
   checkGoalDraft,
   buildGoalRecordReply,
@@ -632,4 +635,46 @@ test("registration: the tool dispatches to its handler, not to a copy of the log
   const approved = await tools.get("propose_loop_goal")!({ goal: GOAL }, uiCtx(f));
   assert.equal(approved.details?.approved, true);
   assert.equal(f.auditRuns, 0, "the PASS recorded a moment ago is the one it binds to");
+});
+
+test("a long repo path cannot cut the consent-critical lines out of the goal dialog", () => {
+  // 2026-09-16, measured in a judge pane (whose `$TMPDIR` is long enough to
+  // make every fixture path long). The builder sliced the whole
+  // "repo + station + pre-review" clause at 200 CHARACTERS — before any
+  // wrapping or row budget — so the station line broke mid-sentence and the
+  // `goal-auditor 预审: PASS` line vanished entirely, while the dialog went on
+  // asking for approval. Two rounds of attributing that to the terminal width
+  // were wrong for exactly this reason: a character slice is invisible to the
+  // row budget. The cap belongs on the untrusted VALUE.
+  const longPath = "/" + "a-very-long-directory-name/".repeat(8) + "repo";
+  const body = buildGoalConfirmMessage(
+    "目标标题",
+    "绑定仓库(不可信数据): " + capUntrustedLine(longPath) + "\n" +
+      "本轮交付站点：precommit —— 由你自己 commit\n" +
+      "goal-auditor 预审: PASS @ 2026-09-16T00:00:00Z",
+  );
+  assert.match(body, /goal-auditor 预审: PASS @ /,
+    "the fact that an independent audit passed must survive any path length");
+  assert.match(body, /本轮交付站点：precommit/, "…and so must the station line");
+  assert.match(body, /…/, "the pathological path itself is still capped");
+  assert.ok(!body.includes(longPath), "…and capped at the value, not at the block");
+  // A short path is left alone entirely.
+  assert.equal(capUntrustedLine("/Users/x/repo"), "/Users/x/repo");
+  // THE CAP KEEPS BOTH ENDS, because a path carries different facts at each:
+  // where it lives, and what it is. A prefix-only cut would destroy the
+  // identifying end exactly when it bites — two sibling repos under a long
+  // `$TMPDIR` would come out identical (round-1 review P2, 2026-09-16).
+  const long = "/a/very/long".padEnd(200, "x") + "/repo";
+  const capped = capUntrustedLine(long);
+  assert.equal(capped.length, UNTRUSTED_LINE_MAX_CHARS, "the cap is the cap");
+  assert.ok(capped.endsWith("/repo"), `the identifying end survives: ${capped}`);
+  assert.ok(capped.startsWith("/a/very/long"), "…and so does where it lives");
+  assert.ok(capped.includes("…"), "with the omission marked");
+
+  // NOTE (2026-09-16): the ROW-BUDGET half of this test is gone with
+  // lib/dialog-budget.ts. The dialog is no longer fitted to the terminal at
+  // all — the user runs every session on the fullscreen renderer, and a
+  // session that is not on it is TOLD instead (lib/renderer-mode.ts). The
+  // character cap above survives because it is an input-side limit on an
+  // untrusted value, not a fit.
 });

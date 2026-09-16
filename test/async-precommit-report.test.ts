@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   ASYNC_PRECOMMIT_DETAIL_MAX,
   asyncPrecommitReportIsStale,
+  buildAsyncPrecommitPass,
   buildAsyncPrecommitReport,
   buildParkedReadyReplayNotice,
 } from "../lib/async-precommit-report.ts";
@@ -11,6 +12,27 @@ import {
 const TREE_A = "d6d29d5a16e1aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TREE_B = "704dcd01e4d37e57db80fe51979564a582beaf54";
 const DETAIL = 'review-gate: precommit for /repo: FAIL [lane full, tests: full] (1/4 checks failed). Failed: test.';
+
+test("a PASS says it LANDED — the one event a session waiting on this lane has", () => {
+  // 2026-09-16. Only failures used to reach this module, so a session told
+  // 「正在等 precommit lane 落地（HELD）」 had nothing to wake on: `judge_wait`'s
+  // event sources are the JUDGE's, and this was not one of them (measured:
+  // 6m47s, notification session 2026-09-15).
+  const same = buildAsyncPrecommitPass({ round: 2, verified: TREE_A, current: TREE_A });
+  assert.match(same, /第 2 轮的后台 full precommit \*\*PASS\*\*/);
+  assert.match(same, /不用再等它/, "the whole reason this notice exists");
+  assert.match(same, /d6d29d5a16e1/, "identity of the content it verified");
+  // It is NOT a failure notice: no verdict to act on, no run output to read.
+  assert.doesNotMatch(same, /没过|FAIL|重新 `judge_submit/);
+
+  // The content moved ⇒ the same downgrade the failure notice does, because
+  // claiming this PASS covers what is on disk now would be the same lie.
+  const stale = buildAsyncPrecommitPass({ round: 2, verified: TREE_A, current: TREE_B });
+  assert.match(stale, /第 2 轮启动时\*\*那份内容（d6d29d5a16e1）/);
+  assert.match(stale, /投递这一刻工作区是（704dcd01e4d3）/);
+  assert.match(stale, /不用为它做任何事/);
+  assert.doesNotMatch(stale, /这份内容（d6d29d5a16e1）通过了|本轮已经通过/);
+});
 
 test("the content on disk unchanged: the notice stays loud and names the round", () => {
   const text = buildAsyncPrecommitReport({

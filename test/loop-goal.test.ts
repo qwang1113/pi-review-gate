@@ -4,8 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DIALOG_BODY_MAX_LINES, fitDialogMessage } from "../lib/dialog-budget.ts";
-import { MODE_CONFIRM_TITLE, buildModeConfirmMessage } from "../lib/task-mode.ts";
+import { buildModeConfirmMessage } from "../lib/task-mode.ts";
 import {
   GOAL_CONFIRM_TITLE,
   buildGoalTranscriptMessage,
@@ -320,55 +319,45 @@ test("the transcript message carries the WHOLE goal — no character cap", () =>
   assert.match(msg, /commit\/push\/PR/);
 });
 
-test("FLICKER: the goal dialog carries the decision, not the goal text", () => {
-  // An oversized ui.confirm makes the dialog taller than the terminal, which
-  // turns every spinner frame into a full-screen clear. The goal text goes to
-  // the transcript (which scrolls); the dialog stays inside the row budget.
+test("the goal dialog carries the decision, not the goal text", () => {
+  // The goal text goes to the transcript (which scrolls); the dialog carries
+  // only what the decision needs. The row budget that used to enforce that is
+  // gone (2026-09-16, the user runs every session on the fullscreen renderer),
+  // so what is pinned here is the CONTENT rule itself: inlining 60 goal lines
+  // into the box would be wrong however tall the box may be.
   const goal = Array.from({ length: 60 }, (_, i) => `- 退出标准 ${i}：这是一条足够长的中文标准描述`).join("\n");
   const dialog = buildGoalConfirmMessage(goal);
-  const fitted = fitDialogMessage(GOAL_CONFIRM_TITLE, dialog);
-  assert.equal(fitted.truncated, false, "the decision copy must fit without truncation");
-  assert.ok(fitted.rows <= DIALOG_BODY_MAX_LINES,
-    `title + dialog must fit the budget (was ${fitted.rows} > ${DIALOG_BODY_MAX_LINES})`);
-  // The goal body itself must NOT be inlined into the dialog.
   assert.doesNotMatch(dialog, /退出标准 30/, "the goal text belongs in the transcript");
   assert.match(dialog, /上方消息/, "the dialog must point at where the full text is");
 });
 
-test("FLICKER: extraUntrusted facts sit BEFORE the title line (truncation cannot eat them)", () => {
-  // Round P2: the bound-repo fact was appended at the END of the dialog, but
-  // fitDialogMessage truncates from the TAIL — the one fact the user must
-  // confirm was the first thing dropped. It must precede the title line.
+test("the facts the user is CONFIRMING come before the title line", () => {
+  // ORDER STILL MATTERS after the budget: the box is read top-down, and the
+  // thing being approved should not come after the label of the thing it is
+  // about. (Before 2026-09-16 this position also decided what survived
+  // truncation — see the ORDER comment in lib/loop-goal.ts.)
   const dialog = buildGoalConfirmMessage("# 目标\n- 标准", "绑定仓库(不可信数据): /some/repo");
   assert.ok(dialog.indexOf("绑定仓库(不可信数据): /some/repo") < dialog.indexOf("标题（不可信数据）"),
     "the extra untrusted fact must come BEFORE the title line");
-  const fitted = fitDialogMessage(GOAL_CONFIRM_TITLE, dialog);
-  assert.equal(fitted.truncated, false, "the decision copy + bound repo must fit without truncation");
-  assert.ok(fitted.message.includes("/some/repo"), "the bound repo must survive fitting");
+  assert.ok(dialog.includes("/some/repo"), "…and it is not capped away");
 });
 
-test("FLICKER: a goal whose FIRST LINE is huge still fits, and loses only the agent's text", () => {
-  // Worst case for the dialog: the untrusted title line is agent-controlled and
-  // unbounded, and CJK costs two cells per character. It must be capped, and it
-  // must sit AFTER the fixed copy so truncation can never eat the consequence.
+test("a goal whose FIRST LINE is huge loses only the agent's own text", () => {
+  // The untrusted title line is agent-controlled and unbounded, and CJK costs
+  // two cells per character — so it is hard-capped. That cap is an INPUT-side
+  // limit (keep an untrusted value from dominating the box), not a fit; it
+  // survived the deletion of the row budget.
   const dialog = buildGoalConfirmMessage("标".repeat(4000) + "\n\n- 退出标准");
-  const fitted = fitDialogMessage(GOAL_CONFIRM_TITLE, dialog);
-  assert.ok(fitted.rows <= DIALOG_BODY_MAX_LINES,
-    `title + dialog must fit the budget (was ${fitted.rows} > ${DIALOG_BODY_MAX_LINES})`);
   assert.ok(dialog.length < 400, `the title line must be capped (dialog was ${dialog.length} chars)`);
-  assert.match(fitted.message, /认可后/, "what approval grants must survive");
-  assert.match(fitted.message, /不认可就拒绝/, "how to decline must survive");
-  assert.match(dialog, /…/, "the over-long title must be visibly cut");
+  assert.match(dialog, /认可后/, "what approval grants is still there");
+  assert.match(dialog, /不认可就拒绝/, "how to decline is still there");
+  assert.match(dialog, /…/, "the over-long title is visibly cut");
 });
 
-test("FLICKER: the mode-downgrade dialog fits the budget, and truncation eats the agent's text last", () => {
-  const fitted = fitDialogMessage(MODE_CONFIRM_TITLE, buildModeConfirmMessage("normal", "x".repeat(400)));
-  assert.ok(fitted.rows <= DIALOG_BODY_MAX_LINES,
-    `title + dialog must fit the budget (was ${fitted.rows} > ${DIALOG_BODY_MAX_LINES})`);
-  // The authoritative consequence copy comes first, so anything dropped is the
-  // agent's untrusted reason — never the statement of what "yes" grants.
-  assert.match(fitted.message, /全部质量门禁将关闭/);
-  assert.match(fitted.message, /锁定 AI 发起的降级请求/);
+test("the mode-downgrade dialog states what 'yes' grants", () => {
+  const dialog = buildModeConfirmMessage("normal", "x".repeat(400));
+  assert.match(dialog, /全部质量门禁将关闭/);
+  assert.match(dialog, /锁定 AI 发起的降级请求/);
 });
 
 // ---------------------------------------------------------------------------

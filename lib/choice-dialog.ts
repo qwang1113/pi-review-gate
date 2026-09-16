@@ -164,8 +164,10 @@ export function reasonTitleOf(spec: ChoiceSpec): string {
  * same as a dismissed list — the user backed out of both halves, and reading
  * that as a decision is how a gate invents an answer.
  *
- * `body` is the budget-fitted extra text (the caller owns the geometry —
- * lib/dialog-budget.ts); it is appended to the title, which is what pi's
+ * `body` is the long half of the question — counts, consequences, the facts
+ * being confirmed — and is passed through WHOLE (user decision, 2026-09-16:
+ * the row budget that used to fit it is gone, see lib/renderer-mode.ts); it is
+ * appended to the title, which is what pi's
  * select renders. `extraRows` are rows the CALLER owns — an interview's
  * `⏭ 跳过后续问题` is the only one today — appended after the template's
  * decline row and deliberately not understood here: the caller decides what

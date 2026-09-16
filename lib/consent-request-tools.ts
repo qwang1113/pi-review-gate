@@ -52,8 +52,10 @@ import type { ConsentToolDeps, UiContext } from "./user-interaction-tools.ts";
 
 /**
  * Max characters of a sensitive path echoed INSIDE the dialog. The path is
- * agent-chosen, so an unbounded one would push the authorization copy out of
- * the row budget; the full path is shown in the transcript instead.
+ * agent-chosen and unbounded, so echoing all of it would bury the
+ * authorization copy under one line; the full path is shown in the transcript
+ * instead. (An INPUT-side cap on an untrusted value — it survived the
+ * 2026-09-16 deletion of the dialog row budget, which was a different thing.)
  */
 export const SENSITIVE_PATH_DIALOG_MAX_CHARS = 60;
 
@@ -115,10 +117,10 @@ export async function doRequestScopeLimit(
   // USER CONSENT — extension-rendered dialog with fixed consequence copy;
   // the agent's reason is displayed as clearly-labeled untrusted data.
   //
-  // The file LISTS go to the transcript, not the dialog: twenty paths is
-  // easily twenty rendered rows, which is exactly the geometry that makes
-  // the terminal flicker (lib/dialog-budget.ts). The dialog keeps the
-  // counts and the consequences.
+  // The file LISTS go to the transcript, not the dialog: twenty paths would
+  // bury the counts and the consequences the user is deciding on. (This was
+  // also a geometry rule until 2026-09-16 — the row budget is gone, the
+  // content rule is not.)
   const preexistingList = preexisting.slice(0, 20).join(", ") || "（仅分支上已有的提交）";
   const sessionList = sessionRel.length > 0 ? sessionRel.slice(0, 20).join(", ") : "（无）";
   const moreP = preexisting.length > 20 ? `（另有 ${preexisting.length - 20} 个未列出）` : "";
@@ -168,7 +170,7 @@ export async function doRequestScopeLimit(
         ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
       },
       uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, pointer: "（清单与理由见上方消息）", signal }),
+      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
     );
     const pick = parseChoice(outcome.answer, spec);
     ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
@@ -312,8 +314,7 @@ export async function doRequestSensitiveEdit(
   //
   // The full path and reason go to the transcript first; the dialog gets a
   // TAIL-truncated path and the reason last, so a pathological path (the
-  // agent picks it) can never push the authorization copy out of a
-  // budget-bounded dialog.
+  // agent picks it) can never bury the authorization copy.
   const shownPath = absPath.length > SENSITIVE_PATH_DIALOG_MAX_CHARS
     ? "…" + absPath.slice(-SENSITIVE_PATH_DIALOG_MAX_CHARS)
     : absPath;
@@ -359,7 +360,7 @@ export async function doRequestSensitiveEdit(
         ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
       },
       uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, pointer: "（完整路径与理由见上方消息）", signal }),
+      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
     );
     const pick = parseChoice(outcome.answer, spec);
     ok = pick.kind === "chose" && pick.option === GRANT_LABEL;

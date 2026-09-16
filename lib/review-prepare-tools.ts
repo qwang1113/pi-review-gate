@@ -260,68 +260,100 @@ async function doPrepareReview(
   // checkpoint itself is the HEAD under review, so baseline..HEAD is the
   // checkpoint's own commits. Old records without prevSha fall back to
   // `git rev-parse <sha>^`.
-  // Round-9 P1 (unreviewed-commit gap): the baseline must be the LAST
-  // REVIEWED commit, not the latest checkpoint's parent — two checkpoints
-  // since the last READY would otherwise leave the earlier one's content
-  // outside every reviewed range while its tree still ships. The READY's
-  // commitSha is used when it is an ancestor of HEAD (the normal chain).
-  // When it is NOT an ancestor the chain was rewritten (squash/rebase):
+  // Round-9 P1 (unreviewed-commit gap): the baseline must be the last commit
+  // a round CONCLUDED about, never the latest checkpoint's parent — two
+  // checkpoints since the last READY would otherwise leave the earlier one's
+  // content outside every reviewed range while its tree still ships.
+  // Round-10 P1 (2026-09-16): "the last round that concluded" means READY **or
+  // BLOCKED**, and the checkpoint fallback below is gone. While only a READY
+  // was recorded, a round that produced NO conclusion at all — a re-submit
+  // that interrupted it, a precommit FAIL before it concluded, a crash — left
+  // the checkpoint's parent to be the baseline, which moved PAST its content:
+  // measured that day, a whole round's changes (d28714e..a70f2a1) dropped out
+  // of every later range while the gate went on believing the chain was
+  // reviewed. No conclusion for this branch at all ⇒ baseline from the BRANCH
+  // BASE, i.e. the whole branch.
+  // The concluded commit is used when it is an ancestor of HEAD (the normal
+  // chain). When it is NOT an ancestor the chain was rewritten (squash/rebase):
   // walk the new chain from the checkpoint's parent to find the SQUASH
   // POINT — the newest commit whose tree equals the reviewed tree — and
   // baseline from there, so the range covers the whole new chain (the
   // squash commit plus every checkpoint after it). No matching tree
   // (a content-changing rebase) falls back to the branch base so the
   // review covers everything.
-  const lastReviewed = st.review?.verdict === "READY" ? st.review.commitSha : undefined;
+  // THE COMMIT SURVIVES AN INVALIDATION (round-1 review P2, 2026-09-16):
+  // `invalidateBindings` flips the VERDICT back to PENDING on the next edit
+  // and deliberately leaves `commitSha` in place — the commit a round
+  // concluded about does not stop existing when the worktree moves on. Reading
+  // the verdict here threw that away and re-based the range on the BRANCH
+  // BASE, i.e. re-reviewing the WHOLE branch after every post-READY edit — the
+  // loop's most expensive step, on the branch that just passed. A missing
+  // `commitSha` is the only thing that means "nothing was ever concluded here".
+  const lastConcluded = st.review.commitSha;
   let baseline: string | undefined;
-  if (lastReviewed) {
+  if (lastConcluded) {
     // The ancestor test used to be a bare try/catch around `git merge-base
     // --is-ancestor`; behind the seam it is the same question asked as a
     // boolean, and the injected implementation runs the same command.
-    if (deps.git.isAncestor(root, lastReviewed, "HEAD")) {
-      baseline = lastReviewed;
+    if (deps.git.isAncestor(root, lastConcluded, "HEAD")) {
+      baseline = lastConcluded;
     } else {
       // Chain rewritten: find the squash point by tree identity (pure
-      // logic in lib/review-baseline.ts, pinned by tests — round-12 P2);
-      // a clean miss falls back to the branch base, then the checkpoint
-      // baseline below.
+      // logic in lib/review-baseline.ts, pinned by tests — round-12 P2).
+      // A clean miss leaves `baseline` unset on purpose: the block below is
+      // the ONE place that decides what an unset baseline falls back to. It
+      // used to call `branchBaseBaseline` again here as well, which was a
+      // second fork of the same rule (and a second `git merge-base` when the
+      // first answer was empty) — round-2 quality P2, 2026-09-16.
       baseline = st.checkpoint?.prevSha && st.review.fingerprint
         ? deps.git.squashPointBaseline(root, st.review.fingerprint, st.checkpoint!.prevSha)
         : undefined;
-      if (!baseline) baseline = deps.git.branchBaseBaseline(root);
     }
   }
   if (!baseline) {
-    if (st.checkpoint?.sha) {
-      baseline =
-        st.checkpoint.prevSha ||
-        (() => {
-          try {
-            return deps.git.revParse(root, `${st.checkpoint!.sha}^`);
-          } catch {
-            // Round-9 P2 / round-10 Nit: a root commit or an unreachable sha
-            // must not throw out of the tool — fall back to the checkpoint
-            // sha itself as the baseline (an empty range at worst: the
-            // reviewer audits the checkpoint commit alone).
-            return st.checkpoint!.sha;
-          }
-        })();
-    } else {
-      // NO CHECKPOINT IS NOT "NO CONTENT" (2026-09-15). This was a hard empty
-      // range, justified as "nothing is frozen to diff" — but a checkpoint is
-      // THIS SESSION's freeze, and a session that never checkpointed still has
-      // whatever its branch carries: content committed by someone else, or by
-      // the agent's own `git commit`. Reading the absence of a record as "there
-      // is no code to audit" made the reviewer's task text assert a fact the
-      // gate had never checked (measured: a 18-file, +2260/-79 delivery was
-      // announced as "There is NO code change to audit").
-      //
-      // So ask git instead: the branch base covers every commit of this branch,
-      // whenever it was made. Undefined (a repo that names no default branch)
-      // keeps the old empty range, and a branch sitting exactly on its base
-      // still renders as head..head below — the genuinely unknown case now
-      // degrades to the old behaviour instead of to a claim.
-      baseline = deps.git.branchBaseBaseline(root);
+    // NO CONCLUSION IS NOT "NO CONTENT" (2026-09-15) — and, since 2026-09-16,
+    // it is also not "the previous checkpoint was reviewed". A checkpoint is
+    // this SESSION's freeze; a session that has not concluded anything about
+    // this branch still has whatever the branch carries: content committed by
+    // someone else, by the agent's own `git commit`, or by a round whose
+    // conclusion never arrived. Reading the absence of a conclusion as "there
+    // is nothing earlier to audit" made the reviewer's task text assert a fact
+    // the gate had never checked (measured then: a 18-file, +2260/-79 delivery
+    // announced as "There is NO code change to audit"; measured again today: a
+    // whole round silently outside every range).
+    //
+    // So ask git instead: the branch base covers every commit of this branch,
+    // whenever it was made.
+    //
+    // AND WHEN GIT CANNOT NAME ONE (2026-09-16): a repository with no remote,
+    // no `main` and no `master` — the shape every sandbox has, and a real
+    // shape for a local-only repo — used to leave the range EMPTY, and an
+    // empty range is a round that demands a clean worktree and then blesses
+    // nothing. There the checkpoint's own parent is the last thing that can
+    // still say "this content was here before this round": too little
+    // coverage is the failure this rule exists to prevent, but NO coverage is
+    // the harder failure. Undefined stays the genuinely-unknown case (neither
+    // a branch base nor a checkpoint to fall back to) and keeps the old
+    // empty-range exit-goal round.
+    baseline = deps.git.branchBaseBaseline(root);
+    // `st.checkpoint?.sha`, NOT `st.checkpoint` (round-2 quality P2,
+    // 2026-09-16): `sha` is parsed with no validation, so a record carrying an
+    // EMPTY one would take the IIFE below into `revParse("^")`, throw, and
+    // return "" — a baseline that is not `undefined`, so it survives both the
+    // `baseline === undefined` default below and the empty-range judgement,
+    // and the range becomes `""..HEAD`.
+    if (!baseline && st.checkpoint?.sha) {
+      baseline = st.checkpoint.prevSha || (() => {
+        try {
+          return deps.git.revParse(root, `${st.checkpoint!.sha}^`);
+        } catch {
+          // Round-9 P2 / round-10 Nit: a root commit or an unreachable sha
+          // must not throw out of the tool — the checkpoint itself is the
+          // baseline (an empty range at worst: the reviewer audits the
+          // checkpoint commit alone).
+          return st.checkpoint!.sha;
+        }
+      })();
     }
   }
   let head = "";

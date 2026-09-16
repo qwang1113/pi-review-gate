@@ -402,11 +402,12 @@ export interface RestatementToolDeps {
   log(message: string): void;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  /** Render the gate's one question template (lib/choice-dialog.ts). No fitting —
+   *  the box gets the whole text (lib/renderer-mode.ts says why). */
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; pointer?: string; signal?: AbortSignal },
+    opts?: { body?: string; signal?: AbortSignal },
   ): Promise<string | undefined>;
   /** Raise a dialog EITHER the human or the orchestrator may answer. */
   askEitherSide(
@@ -535,7 +536,6 @@ export async function doProposeRestatement(
       uiCtx.hasUI === true,
       async (renderSignal) => deps.askChoice(uiCtx, spec, {
         body: buildRestatementConfirmMessage(station) + (capNote ? "\n" + capNote : ""),
-        pointer: "（反述全文见上方消息）",
         signal: renderSignal,
       }),
     );

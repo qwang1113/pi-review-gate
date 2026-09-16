@@ -428,7 +428,7 @@ import { appendTiming } from "../lib/gate-timings.ts";
 import { tailLogFile } from "../lib/precommit-tail.ts";
 // The background lane's failure notice: wording + the "is this still the
 // content under the agent's hands" rule, both pure and unit-tested there.
-import { buildAsyncPrecommitReport, buildParkedReadyReplayNotice, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
+import { buildAsyncPrecommitReport, buildAsyncPrecommitPass, buildParkedReadyReplayNotice, type AsyncPrecommitPass, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
 import {
   decideReviewScope,
   type ReviewScopeDecision,
@@ -541,19 +541,18 @@ import {
   DEFAULT_DELIVERY_STATION,
   STATION_SHIP_NEXT_STEPS,
   parseDeliveryStation,
+  prEvidencePresent,
   stationArrivalProblems,
 
   type DeliveryStation,
 } from "../lib/delivery-station.ts";
+// …and the FACTS that arrival is judged on when no local evidence can answer
+// (2026-09-16): the gate asks GitHub itself instead of waiting for a
+// `gh pr create` exit 0 that an already-open PR makes impossible.
+import { existingPrNotice, hasUnpushedCommits, probeOpenPr, type OpenPrArrival } from "../lib/station-pr-evidence.ts";
 
 
-import {
-  DIALOG_ASSUMED_COLUMNS,
-  DIALOG_ASSUMED_ROWS,
-  dialogTextMaxLines,
-  fitDialogMessage,
-  fitDialogTitle,
-} from "../lib/dialog-budget.ts";
+import { rendererModeNoticeDue, RENDERER_MODE_NOTICE, type RendererMode } from "../lib/renderer-mode.ts";
 import {
   choiceRows,
   parseChoice,
@@ -1444,6 +1443,15 @@ export default function reviewGate(pi: ExtensionAPI) {
   let judgeReviewRange: string | undefined;
   /** The round's full/incremental decision, recovered from the same text. */
   let judgeScopeKind: "full" | "incremental" | undefined;
+  /**
+   * The round number the TASK carried (an instruct record's `roundSeq`), or
+   * undefined for a pane whose task never named one.
+   *
+   * Authoritative over the opener's table for `judge_conclude` (2026-09-16):
+   * the table is bumped at dispatch, so it can already hold a LATER round than
+   * the one this pane is still concluding.
+   */
+  let judgeTaskRound: number | undefined;
   /** Is THIS session a judge pane? (the observer's only scope). */
   function isJudgePane(): boolean {
     return readJudgeSideEnv(process.env) !== undefined;
@@ -1456,11 +1464,19 @@ export default function reviewGate(pi: ExtensionAPI) {
    * means the evidence carries no range flag (a goal audit has none at all),
    * and no decision marker means the report carries no scope kind.
    */
-  function noteJudgeTaskText(text: string | undefined): void {
+  function noteJudgeTaskText(text: string | undefined, roundSeq?: number): void {
     const range = parseReviewRange(text);
     if (range) judgeReviewRange = range;
     const kind = parseReviewScopeKind(text);
     if (kind) judgeScopeKind = kind;
+    // WHICH ROUND THIS TASK IS (2026-09-16). The number travels WITH the task
+    // because the opener's table holds the NEXT dispatch's number by the time a
+    // busy pane reads this one — reading it from there is exactly how an old
+    // verdict got booked against a new round. Only a real number is recorded:
+    // an absent field must not renumber an existing round to 0.
+    if (typeof roundSeq === "number" && Number.isFinite(roundSeq)) {
+      judgeTaskRound = Math.floor(roundSeq);
+    }
   }
   /**
    * THIS round's scope, as this pane read it — the judge half of the audit
@@ -2293,7 +2309,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           const interruptText = instructText(channelIO, instruction);
           // Same as the steer/followUp path below: a round delivered as an
           // interrupt still carries the range the observer records against.
-          if (isJudgePane()) noteJudgeTaskText(interruptText);
+          if (isJudgePane()) noteJudgeTaskText(interruptText, instruction.roundSeq);
           // STOP-FIRST (user decision 2026-09-01): any OPEN dialog is
           // dismissed as INTERRUPTED before the message is injected — a
           // goal box, a question, a consent. The controller is swapped so
@@ -2318,7 +2334,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // A judge pane's instructions ARE its rounds: the next round's task
         // text is where its `baseline..HEAD` is written, so the inspection
         // observer learns the range from the same message the judge reads.
-        if (isJudgePane()) noteJudgeTaskText(text);
+        if (isJudgePane()) noteJudgeTaskText(text, instruction.roundSeq);
         if (!text) {
           acknowledgeInstruct(
             binding,
@@ -4203,6 +4219,35 @@ export default function reviewGate(pi: ExtensionAPI) {
   let lastUiCtx: ExtensionContext | undefined;
   let lastAgentsWidget = "";
 
+  /**
+   * Has this session been told about its renderer? At most once per session.
+   * In-memory on purpose: a restart is a new session with a new terminal, and
+   * the answer can differ.
+   */
+  let rendererModeNoticeShown = false;
+
+  /**
+   * Say something when this session is on the renderer that CANNOT scroll a
+   * tall dialog, and stay silent otherwise.
+   *
+   * The value comes from `TUI.mode` (see `lib/renderer-mode.ts` for why a
+   * re-derivation from `--tui-mode` + settings files would be a copy that gets
+   * the corners wrong).
+   *
+   * THE FLAG IS SET ONLY AFTER THE NOTICE IS OUT (round-1 quality P1,
+   * 2026-09-16): the first version marked the session as told and then called
+   * `latestCtx?.ui.notify`, which at probe time is not set yet — so the notice
+   * could never reach anybody. A host that cannot notify must not consume the
+   * session's one chance to say it.
+   */
+  function noteRendererMode(mode: RendererMode | undefined, ctx: ExtensionContext): void {
+    if (!rendererModeNoticeDue(mode, rendererModeNoticeShown)) return;
+    try {
+      ctx.ui.notify(RENDERER_MODE_NOTICE, "warning");
+      rendererModeNoticeShown = true;
+    } catch { /* headless — a later probe may still succeed */ }
+  }
+
   let lastLayerNotifyText = "";
   /**
    * The agents-layer key of the config the model layers were last rendered
@@ -4457,14 +4502,40 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
     if (!hasUI) return;
-    // belowEditor — the gate status panel. Content-compared so pi only
     // belowEditor — the gate status strip. Content-compared so pi only
     // re-renders when something actually changed.
     try {
       const lines = buildGateWidget(gateWidgetFacts());
       const key = lines.join("\n");
+      // THE RENDERER PROBE — invisible, and removed the moment it has
+      // answered. The `setWidget` FACTORY form is the only place the host hands
+      // an extension the real TUI, and `tui.mode` is the only honest answer to
+      // "is this session on the renderer that can scroll a tall dialog?" (a
+      // config re-derivation would be a copy that gets the corners wrong —
+      // lib/renderer-mode.ts).
+      //
+      // A PROBE, and not the widget itself (round-1 quality P0/P2,
+      // 2026-09-16): a factory component must wrap its own lines (`render(width)`),
+      // while the string[] form is what wraps each line through pi-tui's
+      // `Text` — and pi's RPC host ignores component factories entirely, so
+      // making the status strip a factory would delete it there.
+      //
+      // RE-PROBED when the status strip changes (round-2/3 P2, same day): the
+      // mode can change mid-session — `/settings` applies immediately — and the
+      // probe is the only place that reads it. It used to run on EVERY widget
+      // update, which is every 5s from the refresh timer plus every persist
+      // (round-3 P1); moving it inside the content-changed branch keeps the
+      // reading while making its cost follow real changes. The residual corner
+      // is named: a mode flipped while the strip's content stays identical
+      // mid-session is not noticed until that content moves. The NOTICE stays
+      // once-per-session (`rendererModeNoticeShown`).
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
+        ctx.ui.setWidget("review-gate-renderer-probe", (tui) => {
+          noteRendererMode(tui.mode, ctx);
+          return { render: () => [], invalidate: () => {} };
+        }, { placement: "belowEditor" });
+        ctx.ui.setWidget("review-gate-renderer-probe", undefined);
         ctx.ui.setWidget("review-gate-agents", lines, { placement: "belowEditor" });
       }
     } catch { /* display-only */ }
@@ -4500,16 +4571,17 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- user-visible output channels ----------
   //
-  // Two rules, both learned the hard way (see lib/dialog-budget.ts):
+  // Two rules, both learned the hard way (the measurements live in
+  // lib/renderer-mode.ts now):
   //
-  //  1. LONG TEXT GOES TO THE TRANSCRIPT. `ui.select` renders its title as one
-  //     unclipped block at the bottom of the screen; anything tall enough to
-  //     push the animating spinner row out of the viewport turns every spinner
-  //     frame into a full-screen clear (measured: 29 of 30 frames). The
-  //     transcript scrolls, the dialog does not.
+  //  1. LONG TEXT GOES TO THE TRANSCRIPT. A tall dialog used to make pi's
+  //     DEFAULT renderer clear the screen and the scrollback every frame
+  //     (measured: 29 of 30 frames) — that is why the session on that renderer
+  //     is told to switch, and why anything long belongs in the transcript
+  //     anyway: it scrolls, and the box does not.
   //  2. A DIALOG ONLY CARRIES THE DECISION. Every dialog in this file goes
   //     through askChoice, which renders the gate's one question template
-  //     (lib/choice-dialog.ts) under the row budget.
+  //     (lib/choice-dialog.ts) — whole, no fitting (2026-09-16).
 
   // (There is deliberately NO cap on a transcript notice any more — see
   // showToUser below. The sensitive-path DIALOG cap moved to
@@ -4534,7 +4606,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * they have to read. The cap was there for a geometry fear that does not
    * apply to the transcript: the chat container scrolls, and appending 400
    * rows in one shot triggers 0 full clears on the real renderer (measured,
-   * see lib/dialog-budget.ts's docblock). The dialog is the constrained
+   * see lib/renderer-mode.ts). The dialog is the constrained
    * surface, and it already keeps only the decision — the full text belongs
    * here, whole.
    *
@@ -4557,50 +4629,27 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * The terminal's REAL row count, read from the same source pi itself reads
-   * (`ProcessTerminal.rows`: `process.stdout.rows`, then `$LINES`, then 24).
-   *
-   * Read per dialog and never cached: resizing the window has to change the
-   * budget, and a headless / non-TTY run falls back to the conservative
-   * constant instead of budgeting for a screen that is not there.
-   */
-  function terminalRows(): number {
-    const rows = Number(process.stdout?.rows) || Number(process.env.LINES) || 0;
-    return Number.isFinite(rows) && rows > 0 ? rows : DIALOG_ASSUMED_ROWS;
-  }
-
-  /**
-   * The terminal's real column count, same source again (pi's
-   * `ProcessTerminal.columns`). Row counts are what prevent the flicker, but
-   * WIDTH decides how many rows a line wraps to: budgeting a 200-column
-   * window at the 80-column assumption cuts text that would have fit, which
-   * is the truncation the user asked us to stop doing.
-   */
-  function terminalColumns(): number {
-    const columns = Number(process.stdout?.columns) || Number(process.env.COLUMNS) || 0;
-    return Number.isFinite(columns) && columns > 0 ? columns : DIALOG_ASSUMED_COLUMNS;
-  }
-
-  /**
    * THE one dialog renderer (user decision, 2026-09-08): the gate's question
-   * template with the row budget applied. Every dialog in this file — and
+   * template, whole. Every dialog in this file — and
    * every dialog in the tool modules that inject this function — comes
    * through here, so exactly one shape ever reaches the screen: 2–4 options
    * (the recommended one marked), the `✎ 不选，我说明原因` row, and a text
    * box when that row is picked. A yes/no box is not a thing any more.
    *
-   * `body` is the long half (counts, consequences) and is fitted against the
-   * rows this spec will actually draw: a five-row dialog spends rows the old
-   * two-row confirm never did, and the budget is the flicker bug's fix. The
-   * `pointer` names where the full text lives when something had to be cut.
+   * NOTHING IS FITTED, NOTHING IS CUT (user decision, 2026-09-16). Both halves
+   * used to be budgeted against the real terminal — a five-row dialog spends
+   * rows the old two-row confirm never did — because an oversized dialog pushed
+   * the animating spinner out of the viewport and made pi's DEFAULT renderer
+   * clear the screen and the scrollback every frame (measured: 29 of 30 frames).
+   * That cost landed on the lines the user is CONFIRMING, and the renderer the
+   * user runs (fullscreen: the host owns the screen and scrolls) never had the
+   * problem — so the budget is gone and a session that is NOT on it is told
+   * once instead (lib/renderer-mode.ts).
    *
-   * BOTH HALVES ARE BOUNDED, against the REAL terminal (2026-09-14). The body
-   * was budgeted against a hard-coded 24 rows, which is a real flicker on a
-   * 20-row window (measured: 19 full clears in 20 frames), and the TITLE was
-   * never bounded at all — so a long `ask_user` question, which rides in the
-   * title, could push the spinner out of the viewport exactly like an
-   * oversized body. The title is cut at the same budget and points at the
-   * transcript copy printed before the box.
+   * WHAT STILL MATTERS HERE IS ORDER. Callers put the facts being confirmed
+   * BEFORE the agent's own text, because the box is read top-down and the
+   * thing being approved should not come after the label of the thing it is
+   * about (lib/loop-goal.ts states the policy for the goal dialog).
    *
    * `signal` is what lets an ORCHESTRATOR's answer take the box off the
    * user's screen: pi dismisses the dialog when it aborts, and the resolved
@@ -4610,24 +4659,19 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function askChoice(
     uiCtx: { ui?: ChoiceUi },
     spec: ChoiceSpec,
-    opts: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] } = {},
+    opts: { body?: string; signal?: AbortSignal; extraRows?: string[] } = {},
   ): Promise<string | undefined> {
-    const rows = [...choiceRows(spec), ...(opts.extraRows ?? [])];
-    const pointer = opts.pointer ?? "（内容过长，已截断）";
-    // Two option rows is what the budget was measured with; every extra row
-    // this dialog draws — an interview's escape row included — comes out of
-    // the title + body allowance, on the terminal we are actually on.
-    const budget = dialogTextMaxLines(rows.length, terminalRows());
-    const columns = terminalColumns();
-    // The title gets the budget first (it is the question), minus two rows so
-    // the body is never cut down to nothing by a long title alone.
-    const titleFit = fitDialogTitle(spec.title, Math.max(1, budget - 2), pointer, columns);
-    const titled: ChoiceSpec = titleFit.truncated ? { ...spec, title: titleFit.message } : spec;
-    const fitted = opts.body === undefined
-      ? undefined
-      : fitDialogMessage(titled.title, opts.body, pointer, columns, budget).message;
-    return renderChoice(uiCtx.ui, titled, {
-      ...(fitted === undefined ? {} : { body: fitted }),
+    // NO BUDGET, NO TRUNCATION (user decision, 2026-09-16). This used to fit
+    // the title and the body into a rendered-row budget, because a dialog tall
+    // enough to push the spinner out of the viewport made pi's DEFAULT renderer
+    // clear the screen and the scrollback every frame. That cost landed on the
+    // lines the user is confirming — a long repo path could take the station
+    // line and the audit line with it while the dialog went on asking for
+    // approval — and the renderer the user runs (`fullscreen`, the host owns
+    // the screen and scrolls) never had the problem. A session that is NOT on
+    // it is told once instead: see lib/renderer-mode.ts.
+    return renderChoice(uiCtx.ui, spec, {
+      ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
     });
@@ -5944,6 +5988,34 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
 
+      // A FAILED `gh pr create`: the branch already has a PR.
+      //
+      // `gh` reports that case as an ERROR, which is why the success-only
+      // evidence above can never see it — and why the agent is left reading
+      // gh's stderr and guessing between "append to it" and "open another
+      // one". On 2026-09-16 that guess cost a user an open PR (closed, then
+      // reopened under a new number when the arrival check would not accept
+      // the old one). So the gate asks GitHub itself and says the answer out
+      // loud; user-requested. Normal mode steps aside like every other nudge.
+      // Placement is deliberate: BEFORE the read-only stall guard, whose
+      // "count it like the read family" docblock reads as describing whatever
+      // immediately follows it — and this is not that.
+      if (
+        cmd && event.isError === true && state.taskMode !== "normal"
+        && observedShipKinds(cmd).includes("pr-create")
+      ) {
+        const cmdRepos = resolveCommandRepos(cmd, cwd);
+        for (const root of cmdRepos.ambiguous ? sessionRepos : cmdRepos.repos) {
+          const notice = existingPrNotice(await probeOpenPr(root));
+          if (notice) {
+            return {
+              content: [...(event.content ?? []), { type: "text", text: notice }],
+              isError: true,
+            };
+          }
+        }
+      }
+
       // Read-only drill stall guard (lib/readonly-stall.ts): bash is the
       // drill workhorse (grep/sed through node_modules/), so count it like
       // the read family. Deliberately at the END of the bash branch — after
@@ -6576,7 +6648,15 @@ export default function reviewGate(pi: ExtensionAPI) {
           } catch { /* headless — the recorded verdict is what matters */ }
         }
       }
-      if (verdict !== "PASS") {
+      // THE LANE'S LANDING IS AN EVENT EITHER WAY (2026-09-16). A PASS used to
+      // be silent, and that silence is exactly what stranded a session in a
+      // `judge_wait` it could not end: the report it had received said
+      // 「正在等 precommit lane 落地（HELD）」, and nothing ever came to say it
+      // had (measured: 6m47s, notification session 2026-09-15). FAIL keeps its
+      // loud form; PASS gets the short one — there is nothing to do about it.
+      if (verdict === "PASS") {
+        reportAsyncPrecommitPass({ round, verified, current: worktreeTree(root) ?? "" });
+      } else {
         // TELL THE AGENT (B1). The content the reviewer approved did not pass
         // its verification, so this round cannot produce a shippable READY —
         // and the failure channel names THAT reason, not "findings".
@@ -6626,7 +6706,22 @@ export default function reviewGate(pi: ExtensionAPI) {
    * review has moved on) live in lib/async-precommit-report.ts.
    */
   function reportAsyncPrecommit(input: AsyncPrecommitReport): void {
-    const message = buildAsyncPrecommitReport(input);
+    deliverPrecommitNotice(buildAsyncPrecommitReport(input));
+  }
+
+  /**
+   * A PASS lands too — and this is the ONLY thing that says so
+   * (2026-09-16): a session told it is 「等 precommit lane 落地」 has no other
+   * event to wake on, so a silent PASS is indistinguishable from a lane that
+   * never ran. Same delivery as the failure notice, on purpose: `steer`
+   * reaches the agent at its next tool-call boundary, and the whole point is
+   * that it stops waiting NOW.
+   */
+  function reportAsyncPrecommitPass(input: AsyncPrecommitPass): void {
+    deliverPrecommitNotice(buildAsyncPrecommitPass(input));
+  }
+
+  function deliverPrecommitNotice(message: string): void {
     try {
       pi.sendMessage(
         { customType: "review-gate", content: message, display: true },
@@ -7285,6 +7380,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // CARRIER, the round is the task. No busy refusal exists anymore — a pane judge
     // reads every round via its drain; only a one-shot process read once.
     if (existing?.paneId && paneAlive === true && !opts.fresh) {
+      // THE ROUND NUMBER IS COMPUTED BEFORE THE RECORD IS WRITTEN, and that
+      // order is half the fix (2026-09-16). The entry used to be numbered at
+      // the END of this block, while the task sat queued on the wire — so a
+      // pane finishing its PREVIOUS round in that window read the NEW number
+      // and stamped the OLD conclusion with it: the old verdict landed on the
+      // new round, and the real new one was then refused as a duplicate
+      // (measured: a quality round's BLOCKED verdict booked as round 2, and
+      // round 2's own conclusion dropped). Sending the number WITH the task is
+      // what makes "which round am I concluding" a fact the judge owns.
+      const roundSeq = nextJudgeRound(opener, judgeId);
       try {
         appendRecord(channelIO, judgeChannelTarget(opener, judgeId), {
           kind: "instruct",
@@ -7292,7 +7397,13 @@ export default function reviewGate(pi: ExtensionAPI) {
           from: "orchestrator",
           at: new Date().toISOString(),
           instructId: newChannelId("in", Date.now()),
-          mode: "followUp",
+          // INTERRUPT, not followUp (user decision 2026-09-16): a re-dispatch
+          // means the content under review CHANGED, so waiting for the round
+          // in flight means waiting out a verdict on code that is already gone
+          // — and that wait was also the window the numbering raced in.
+          // `interrupt` stops it and delivers this task now.
+          mode: "interrupt",
+          roundSeq,
           text: task,
         });
       } catch (err) {
@@ -7320,7 +7431,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const live = judgeHierarchy[judgeId] ?? existing;
       const reg = registerJudge(judgeHierarchy, {
         judgeId, openerId: opener, role, repoRoot: root, title, sessionDir,
-        paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
+        paneId: existing.paneId, roundSeq,
         ...(tmuxServer === undefined ? {} : { tmuxServer }),
         // The pane's model does not change because a new round was queued into
         // it — the entry keeps saying what the RUNNING pane was launched on.
@@ -8546,6 +8657,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // carries its own scope block and overwrites it, and a round whose text
       // says nothing new is still running against the same range.
       reviewScope: () => judgeReviewScope(),
+      // The round the TASK said it is, when a task said so — the one reading
+      // that cannot be overtaken by the next dispatch's numbering.
+      taskRound: () => judgeTaskRound,
       // THIS pane's own context usage, taken at the conclusion — the reading
       // the opener cannot take, and the one its rotation policy runs on
       // (lib/judge-rotation.ts). Same wrapper the orchestration layer uses;
@@ -9190,11 +9304,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     st.review = {
       verdict: parsed.verdict,
       fingerprint: bindTree,
-      // Round-9 P1: the reviewed COMMIT sha rides the READY so the next
+      // Round-9 P1: the reviewed COMMIT sha rides the verdict so the next
       // prepare can baseline from it (covering every later checkpoint).
-      ...(parsed.verdict === "READY" && reviewTargets.get(targetRoot)
-        ? { commitSha: reviewTargets.get(targetRoot)!.head }
-        : {}),
+      //
+      // EVERY CONCLUDED VERDICT CARRIES IT (2026-09-16), not just READY. The
+      // baseline rule is「从最后一个**有结论**的轮次起算」, and while only READY
+      // was recorded, a round that produced NO conclusion — a re-submit that
+      // interrupted it, a precommit FAIL, a crash — left the next prepare to
+      // guess, and the guess was the newest checkpoint's parent. Measured that
+      // day: a whole round's changes (d28714e..a70f2a1) dropped out of every
+      // later range while the gate went on believing the chain was reviewed.
+      ...(reviewTargets.get(targetRoot) ? { commitSha: reviewTargets.get(targetRoot)!.head } : {}),
       at: new Date().toISOString(),
       // Code↔doc attestation travels with the verdict it came from; absent
       // stays absent (blocks under the docSync knob — fail-closed).
@@ -9736,11 +9856,14 @@ export default function reviewGate(pi: ExtensionAPI) {
         // gap" — the docblock of `orchestrationDoneProblems`.
 
         //
-        // Both facts are LOCAL and gate-observed: uncommitted work, and a
-        // `gh pr create` the gate watched exit 0 (`shippedKinds`), with the
-        // Copilot-resolved PR number as a second, independent proof. Nothing
-        // here asks GitHub, so a completion never fails because the network
-        // was slow.
+        // Every fact is the gate's OWN: uncommitted work, a `gh pr create` it
+        // watched exit 0 (`shippedKinds`), the PR number the Copilot cycle
+        // resolved, and — when neither of those can answer — a question it
+        // asks GitHub itself (`lib/station-pr-evidence.ts`). That last one is
+        // a network round trip, so it runs ONLY when the free local facts
+        // cannot prove arrival: a completion must never fail because the
+        // network was slow, and must never be IMPOSSIBLE because the PR was
+        // opened before this session existed.
         //
         // PER REPO, not once for the session (round-1 reviewer P2): each repo
         // carries its OWN approved goal and therefore its own station, and the
@@ -9756,11 +9879,35 @@ export default function reviewGate(pi: ExtensionAPI) {
             // UNVERIFIABLE counts as dirty: "I could not read the worktree"
             // is not evidence that the work was committed.
             const files = changedFiles(root);
+            const observedPrCreate = st.shippedKinds?.includes("pr-create") === true;
+            const recordedPr = typeof st.copilot?.pr === "number" ? st.copilot.pr : null;
+            let probe: OpenPrArrival | null = null;
+            let unpushed = false;
+            if (station === "pr") {
+              // ASK GITHUB ONLY WHEN THE FREE EVIDENCE IS SILENT — `gh` reports
+              // "already exists" as an ERROR, so a round that APPENDS to an
+              // open PR leaves `shippedKinds` empty, and a repo with
+              // `copilotReview` off never resolves a number either. Whether a
+              // round has to ask is the module's rule, not a second expression
+              // written here (round-1 quality P1).
+              if (!prEvidencePresent({ observedPrCreate, recordedPr })) {
+                // Named in the progress line: this one can take seconds, and a
+                // silent wait at the last step of a round reads as a hang.
+                progress.step(`查询 PR 状态（${repoLabel(root)}）`);
+                probe = await probeOpenPr(repoDirFor(root));
+              }
+              // …but HAVING a PR is not arriving: work still sitting locally —
+              // a checkpoint commit the gate landed after the PR was opened
+              // included — has not been delivered, and no evidence above can
+              // see that. Pure local git, no network.
+              unpushed = hasUnpushedCommits(repoDirFor(root));
+            }
             const problems = stationArrivalProblems(station, {
               dirty: files === undefined || files.length > 0,
-
-              observedPrCreate: st.shippedKinds?.includes("pr-create") === true,
-              recordedPr: typeof st.copilot?.pr === "number" ? st.copilot.pr : null,
+              observedPrCreate,
+              recordedPr,
+              openPr: probe?.number ?? null,
+              unpushed,
             });
             for (const p of problems) {
               completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
@@ -10052,7 +10199,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         ui.hasUI === true,
         (signal) => askChoice(ui, spec, {
           ...(opts.body === undefined ? {} : { body: opts.body }),
-          ...(opts.pointer === undefined ? {} : { pointer: opts.pointer }),
           ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
           signal,
         }),

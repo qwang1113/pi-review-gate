@@ -32,7 +32,7 @@ import type { ModelEvent } from "./model-health.ts";
  * new. Each is a DIFFERENT next step, so none of them may render as "a round
  * ended".
  */
-export type StandardReportReason = "report" | "finding" | "question" | "pane-dead" | "model-exhausted" | "pending";
+export type StandardReportReason = "report" | "finding" | "question" | "pane-dead" | "model-exhausted" | "pending" | "settled";
 
 /** First line per reason — the opener reads this one and knows what happened. */
 const HEADLINE: Record<StandardReportReason, string> = {
@@ -42,6 +42,11 @@ const HEADLINE: Record<StandardReportReason, string> = {
   "pane-dead": "pane 消失且 verdict 未落盘 —— 本轮不算结束：",
   "model-exhausted": "链上模型全部失败，本轮无法继续 —— 没有结论：",
   pending: "本轮仍在运行，这段时间没有新消息：",
+  // The ONE headline that ends a wait by saying there was nothing to wait for
+  // (2026-09-16). It exists because blocking until the timeout is a lie of a
+  // different kind: the opener reads a state line as "still working", when in
+  // truth the round was concluded and recorded long ago.
+  settled: "本轮已交卷并已记录 —— 没有可等的了（不要重调 judge_wait，去做别的）：",
 };
 
 

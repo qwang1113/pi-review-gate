@@ -438,17 +438,18 @@ export const GOAL_CONFIRM_TITLE = "review-gate: AI 提交了本次任务的目�
  * pinned to the bottom of the screen; a goal-sized block makes the dialog
  * taller than the terminal, which pushes the animating spinner row out of the
  * viewport and turns every spinner frame into a full-screen clear (see
- * lib/dialog-budget.ts for the measurements). The transcript, unlike the
- * dialog, scrolls — so the reviewable text goes there and the dialog keeps
- * only the decision.
+ * lib/renderer-mode.ts — that is where the measurement lives now, and where
+ * the session that is NOT on the fullscreen renderer is told about it). The
+ * transcript, unlike the dialog, scrolls — so the reviewable text goes there
+ * and the dialog keeps only the decision.
  *
  * AND IT IS THE WHOLE GOAL (user decision, 2026-09-14). This used to echo only
  * the first 2000 characters with an `…（已截断）` tail — cutting exactly the
  * text the user is being asked to approve, on a surface that is not
  * constrained at all: measured on the real renderer, appending 400 rows to the
  * transcript triggers 0 full clears, so length here costs nothing but scroll.
- * The dialog's row budget is the only geometry that matters, and the dialog
- * never carries the goal text anyway.
+ * The dialog's height is no longer budgeted at all (2026-09-16), and the
+ * dialog never carries the goal text anyway.
  *
  * A goal can still be too long, but that is refused, not silently shortened:
  * `LOOP_GOAL_MAX_WRITE_CHARS` bounds what the extension will write at all.
@@ -468,15 +469,17 @@ export const GOAL_DIALOG_TITLE_MAX_CHARS = 60;
 
 /**
  * Dialog body — the decision only. The goal text itself was just printed to
- * the transcript by {@link buildGoalTranscriptMessage}; repeating it here is
- * what made the terminal flicker, so this stays a handful of lines and the
- * caller runs it through `fitDialogMessage` for the hard bound.
+ * the transcript by {@link buildGoalTranscriptMessage}; repeating it here would
+ * bury the decision, so this stays a handful of lines. What the BOUNDS are is
+ * now only input-side: the agent's own title is hard-capped (see below).
  *
- * ORDER AND BOUNDS. The dialog can be truncated from the END, so the fixed
- * copy stating what approval grants comes FIRST and the agent's own text last;
- * that text is additionally hard-capped, because a goal whose first line is
- * thousands of characters long would otherwise eat the whole budget and push
- * the consequence copy out of the dialog.
+ * ORDER: see the comment on the return below — that is the ONE statement of
+ * the ordering policy, because it depends on every part of the body and a
+ * second copy here is a copy that goes stale (this one did: it still claimed
+ * the consequence copy comes first, which is exactly the order that made a
+ * narrow terminal truncate INTO the consent-critical lines — round-1 review
+ * P1, 2026-09-16). What the BOUNDS are: the agent's own title is hard-capped,
+ * and the body is passed through whole (no fit — the row budget is gone).
  */
 export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: string): string {
   const normalized = normalizeGoalText(goalText);
@@ -485,14 +488,22 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
     ? rawTitle.slice(0, GOAL_DIALOG_TITLE_MAX_CHARS) + "…"
     : rawTitle;
   return (
-    "目标全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
+    // ORDER IS THE READING ORDER (2026-09-16). `fitDialogMessage` is gone, so
+    // nothing is truncated — but the box is still read top-down, and the lines
+    //   1. the untrusted facts the user is CONFIRMING (repo, station,
+    //      `goal-auditor 预审: PASS`) — losing one of these means consenting to
+    //      something the dialog never showed;
+    //   2. what approval / rejection will actually do;
+    //   3. the goal's own title, whose full text is on screen right above.
+    // The order used to put (2) before (1) and the title last but ONE, so on a
+    // narrow terminal the truncation cut INTO (1) long before it touched the
+    // title (measured: at 60 columns with a 120-character path, both the
+    // station line and the pre-review line were dropped). Extra untrusted
+    // facts go before everything for the same reason they always did.
+    (extraUntrusted ? extraUntrusted + "\n" : "") +
     "认可后：扩展把它写入 `" + LOOP_GOAL_RELPATH + "`，reviewer 逐条验收。\n" +
     "不认可就拒绝，然后告诉 AI 哪里不对；它会重新跟你确认后再提交。\n" +
-    // Extra untrusted facts (e.g. the repo a goal binds to) go BEFORE the
-    // title: fitDialogMessage truncates from the TAIL, so appending them at
-    // the end would drop exactly the fact the user must confirm. Capped like
-    // every other untrusted text (a path this long is corrupt anyway).
-    (extraUntrusted ? extraUntrusted.slice(0, 200) + "\n" : "") +
+    "目标全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
     "标题（不可信数据）: " + title
   );
 }

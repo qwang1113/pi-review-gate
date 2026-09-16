@@ -373,11 +373,35 @@ export interface JudgeConcludeToolDeps {
   inspectionPass(): InspectionPass | undefined;
   /** A zero-inspection READY was refused — the appeal route needs to see it. */
   noteInspectionRefusal(block: InspectionBlock): void;
+  /**
+   * The round number THIS pane's task carried — the `roundSeq` on the
+   * instruction record that delivered it — when the task carried one.
+   *
+   * Authoritative over the hierarchy entry; `readOwnRoundSeq` carries the
+   * measured case that made it so. Required, not optional: an unwired host
+   * falls back to the entry that the whole fix exists to stop trusting.
+   */
+  taskRound(): number | undefined;
   /** A round ended: reset the evidence, and spend the pass when it was used. */
   noteConcluded(usedPass: boolean): void;
 }
 
-/** Read our persisted round number, or refuse when the gate state is unreadable. */
+/**
+ * Which round THIS conclusion belongs to.
+ *
+ * THE TASK'S OWN NUMBER WINS (2026-09-16, measured). The opener's table is
+ * numbered at DISPATCH, so a re-dispatch while a pane is still working makes
+ * it hold a LATER round than the one being concluded: the judge read the new
+ * number off it, stamped its OLD verdict with it — the verdict landed on the
+ * wrong round — and its real conclusion for that round was then refused as a
+ * duplicate. The instruction record carries the number its task was dispatched
+ * under, so the pane knows which round it is without asking a table that has
+ * already moved on.
+ *
+ * The registration is still consulted first, because "your review was closed"
+ * and "your round is N" are different answers, and the entry remains the
+ * fallback for every pane whose task never named a round.
+ */
 function readOwnRoundSeq(deps: JudgeConcludeToolDeps, judgeId: string): { ok: true; round: number } | { ok: false; reason: string } {
   let raw: string | undefined;
   try {
@@ -393,6 +417,10 @@ function readOwnRoundSeq(deps: JudgeConcludeToolDeps, judgeId: string): { ok: tr
     const entry = snap?.judges?.[judgeId];
     if (!entry) {
       return { ok: false, reason: `登记表里没有本 review（${judgeId}）——它可能已被关闭；不要交卷，去问 opener` };
+    }
+    const carried = deps.taskRound();
+    if (typeof carried === "number" && Number.isFinite(carried)) {
+      return { ok: true, round: Math.floor(carried) };
     }
     const seq = entry.roundSeq;
     return { ok: true, round: typeof seq === "number" && Number.isFinite(seq) ? Math.floor(seq) : 0 };

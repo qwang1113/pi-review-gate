@@ -17,9 +17,11 @@
  *
  * pi-tui is not a dependency of this repo (it ships inside the globally
  * installed pi), so the test SKIPS when it cannot be resolved. It is a
- * regression net for the machine that has pi installed, not a CI gate — the
- * always-on guards are the row budget unit tests (test/dialog-budget.test.ts)
- * and the structural assertions (test/extension-structure.test.ts).
+ * regression net for the machine that has pi installed, not a CI gate — and
+ * since 2026-09-16 it is also the EVIDENCE for `lib/renderer-mode.ts`: the
+ * gate no longer budgets dialog height (the user runs every session on the
+ * fullscreen renderer, which never takes this branch), and what a session on
+ * the DEFAULT renderer is told is exactly this measurement.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -27,12 +29,22 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 
-import {
-  DIALOG_BODY_MAX_LINES,
-  DIALOG_CHROME_ROWS,
-  DIALOG_FOOTER_ROWS,
-  dialogTextMaxLines,
-} from "../lib/dialog-budget.ts";
+// The geometry these cases drive, local to the test: it used to be exported by
+// `lib/dialog-budget.ts`, which is gone (the gate no longer fits dialogs to a
+// row budget). The numbers are what the measurement described above needs — a
+// terminal, its chrome, and a dialog tall enough to cross it.
+const DIALOG_ASSUMED_ROWS = 24;
+const DIALOG_CHROME_ROWS = 8;
+const DIALOG_FOOTER_ROWS = 2;
+const DIALOG_SLACK_ROWS = 2;
+function dialogTextMaxLines(optionRows: number, terminalRows = DIALOG_ASSUMED_ROWS): number {
+  return Math.max(
+    2,
+    Math.floor(terminalRows) - DIALOG_CHROME_ROWS - DIALOG_FOOTER_ROWS - DIALOG_SLACK_ROWS -
+      Math.max(0, optionRows - 2),
+  );
+}
+const DIALOG_BODY_MAX_LINES = dialogTextMaxLines(2);
 
 const TUI_RELATIVE = join("@earendil-works", "pi-tui", "dist", "tui-main-screen.js");
 
@@ -197,7 +209,8 @@ test("FLICKER: the budget follows the REAL terminal — a 20-row window stays sa
   const safe = await countFullClears(TuiMainScreen, {
     rows: 20, transcriptLines: 30, dialogRows: budgeted, frames: 10,
   });
-  assert.equal(safe, 0, "a dialog budgeted for the real terminal must keep a 20-row window stable");
+  assert.equal(safe, 0,
+    "the height this file's own geometry derives (it was exported by lib/dialog-budget.ts) must keep a 20-row window stable");
   const old = await countFullClears(TuiMainScreen, {
     rows: 20, transcriptLines: 30, dialogRows: DIALOG_CHROME_ROWS + DIALOG_BODY_MAX_LINES, frames: 10,
   });

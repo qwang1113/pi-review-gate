@@ -59,7 +59,6 @@ import { type ChoiceSpec } from "./choice-dialog.ts";
 import { SKIP_REST_CHOICE } from "./ask-user.ts";
 import {
   COPILOT_TRIAGE_ASK_FROM_ROUND,
-  FINDING_DIALOG_POINTER,
   findingBody,
   findingChoiceSpec,
   findingKey,
@@ -188,16 +187,17 @@ export interface CopilotReviewToolDeps {
   askFinding(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts: { body?: string; pointer?: string; signal?: AbortSignal; extraRows?: string[] },
+    opts: { body?: string; signal?: AbortSignal; extraRows?: string[] },
   ): Promise<string | undefined>;
   /**
-   * Put text in front of the user, in the transcript, right now.
+   * Put text in front of the user, in the transcript, right now. False when
+   * there is no UI to render into.
    *
-   * The dialogs are geometric (lib/dialog-budget.ts): a long Copilot comment
-   * does not fit in one, so the finding's FULL text goes here, before the box
-   * — otherwise the user is asked to approve a truncated finding and has
-   * nowhere to read the rest. Returns false when there is no UI to render
-   * into.
+   * The finding's full text goes here, before the box — a long Copilot comment
+   * is easier to read in the transcript than in a box that scrolls, and
+   * otherwise the user is asked to approve a finding they cannot see. (Until
+   * 2026-09-16 the dialog row budget also forced it; that is gone, the reason
+   * to print the full text here is not.)
    */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
 }
@@ -246,15 +246,16 @@ async function askFindings(
     if (stopped || signal?.aborted) break;
     const spec = findingChoiceSpec(thread, index, plan.ask.length);
     const body = findingBody(thread);
-    // THE TRANSCRIPT COPY GOES UP BEFORE THE BOX. The dialog's body is fitted
-    // to the row budget and the tail of a long comment does not fit; the
-    // pointer that dialog carries (FINDING_DIALOG_POINTER) names this notice,
-    // so it has to exist — an approval screen that hides part of the finding
-    // is how the user approves something they never read.
+    // THE TRANSCRIPT COPY GOES UP BEFORE THE BOX. It used to matter twice:
+    // the dialog's body was fitted to a row budget, so the tail of a long
+    // comment did not fit and a pointer told the user where the rest was. The
+    // budget is gone (2026-09-16) and the dialog now shows the body whole —
+    // but the transcript copy stays, because an approval screen that hides
+    // part of the finding is how the user approves something they never read,
+    // and the comment is long enough to scroll past in a dialog.
     deps.showToUser(ctx, `───── ${spec.title} ─────`, body);
     const picked = await deps.askFinding(ctx, spec, {
       body,
-      pointer: FINDING_DIALOG_POINTER,
       extraRows: [SKIP_REST_CHOICE],
       ...(signal ? { signal } : {}),
     });

@@ -893,32 +893,35 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
   assert.match(ASK_USER_SRC, /return deps\.askChoice\(\s*uiCtx,/,
-    "the pane dialog renders the template through the ONE budgeted renderer");
-  // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14): a title is
-  // charged to the row budget but never cut by it, so a long question in the
-  // title was an unbounded dialog — the one render path that could still
-  // flicker.
+    "the pane dialog renders the template through the ONE renderer");
+  // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). A title is the
+  // short label; the question is the long half and belongs in the body. (When a
+  // row budget existed this also kept a long question from sizing the box — the
+  // budget is gone, the placement is not: the REASON box renders the title
+  // alone, so what the user is answering has to be readable there.)
   // The title carries the progress label, the question's own headline (so the
   // REASON box, which renders the title alone, says what is being answered)
-  // and the grant notice — all three charged to the title budget rather than
-  // sitting in the tail-cut body. The ORDER inside that title is its own rule
-  // (questionDialogTitle): `fitDialogTitle` cuts from the tail too, so the ⚠️
-  // notice must come FIRST or a small window drops it while the recommended
-  // row still mints the grant.
+  // and the grant notice — all three ahead of the body rather than in its
+  // tail, because the box is read top-down. The ORDER inside that title is its
+  // own rule (questionDialogTitle): the ⚠️ notice must come FIRST or it hides
+  // under the progress label, while the recommended row still mints the grant.
+  // (Before 2026-09-16 a title budget decided what survived; the budget is
+  // gone, the order is not.)
   assert.match(ASK_USER_SRC, /title: questionDialogTitle\(q, index, questions\.length\)/,
     "the dialog title is built by the ONE title rule");
   assert.match(ASK_USER_SRC,
     /function questionDialogTitle\(q: AskQuestion, index: number, total: number\): string \{\s*const notice = grantNotice\(q\)\.trim\(\);/,
-    "…and that rule puts the grant notice first, where the tail cut cannot reach it");
+    "…and that rule puts the grant notice first, where it cannot be missed");
   assert.match(ASK_USER_SRC, /body: q\.text,/,
-    "the question text itself rides in the budgeted body");
-  // WHY THE NOTICE IS NOT IN THE BODY (reviewer P1, 2026-09-14): the body is
-  // cut from its TAIL, so appending ⚠️ after a long question let the question
-  // eat the authorization notice — while picking the recommended row still
-  // minted the proxy grant. The title is only cut when IT overflows, and a
-  // two-line notice never does.
+    "the question text itself rides in the body");
+  // WHY THE NOTICE IS NOT IN THE BODY (reviewer P1, 2026-09-14): appending ⚠️
+  // after a long question let the question push the authorization notice out of
+  // sight — while picking the recommended row still minted the proxy grant. The
+  // title is read first. (Until 2026-09-16 it was ALSO the only part a cut could
+  // not reach, so the placement was belt and braces; the budget is gone and the
+  // placement remains, because reading order is what makes it work.)
   assert.doesNotMatch(ASK_USER_SRC, /body: `\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
-    "the grant notice must never sit in the tail-cut body");
+    "the grant notice must never sit in the body, after the question");
   assert.match(ASK_USER_SRC, /extraRows: \[SKIP_REST_CHOICE\]/,
     "the interview's own escape rides along as an extra row");
   assert.doesNotMatch(ASK_USER_SRC, /uiCtx\.ui!\.input!/,
@@ -1031,33 +1034,45 @@ test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an
     "the pause path must never enqueue a follow-up message");
 });
 
-test("FLICKER: every dialog goes through the row budget", () => {
+test("FLICKER: dialogs are no longer fitted, and a regular-renderer session is told", () => {
   // An oversized dialog makes it taller than the terminal, which pushes the
   // animating spinner row out of the viewport and turns EVERY spinner frame
-  // into a full-screen clear (measured: 29 of 30 frames). askChoice renders
-  // the gate's ONE template and applies lib/dialog-budget.ts; nothing may
-  // bypass it, and no ui.confirm exists any more (2026-09-08).
+  // into a full-screen clear (measured: 29 of 30 frames) — which is why the
+  // session on that renderer is TOLD to switch (lib/renderer-mode.ts) instead
+  // of being fitted. askChoice renders the gate's ONE template whole; nothing
+  // may bypass it, and no ui.confirm exists any more (2026-09-08).
   const helperAt = SRC.indexOf("async function askChoice");
   const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
-  assert.match(askChoiceBody, /fitDialogMessage\(/,
-    "askChoice must apply the budget");
-  // …AGAINST THE REAL TERMINAL (2026-09-14). The budget used to be pinned to
-  // a 24-row window, so a 20-row one cleared the screen 19 times in 20 frames.
-  // The terminal's own row count is what pi reads too (see terminalRows()).
-  assert.match(askChoiceBody, /dialogTextMaxLines\(rows\.length, terminalRows\(\)\)/,
-    "the budget must follow the terminal we are actually on");
-  // WIDTH matters too: the row count prevents the flicker, but budgeting a
-  // 200-column window at the 80-column assumption cuts text that would have
-  // fit — the truncation this round exists to stop.
-  assert.match(askChoiceBody, /const columns = terminalColumns\(\);/,
-    "the wrap width comes from the terminal, not from a constant");
-  assert.match(SRC, /function terminalColumns\(\): number \{[\s\S]{0,200}process\.stdout\?\.columns/,
-    "…read from the same source pi reads");
-  // …AND THE TITLE IS BOUNDED TOO: `ask_user` puts the question there, and an
-  // unbounded title sizes the dialog no matter how short the body is.
-  assert.match(askChoiceBody, /fitDialogTitle\(/,
-    "a long title must not be able to size the dialog");
-
+  // NO FITTING ANY MORE (user decision, 2026-09-16). The row budget existed
+  // because an oversized dialog pushed the animating spinner out of the
+  // viewport and turned EVERY spinner frame into a full-screen clear (measured:
+  // 29 of 30). The user runs every session on the fullscreen renderer, which
+  // owns the screen and never takes that branch — so the budget is GONE and
+  // this pins its absence: nothing here may silently reintroduce a fit, because
+  // a partial one would cut exactly the lines the dialog is asking about.
+  assert.doesNotMatch(askChoiceBody, /fitDialogMessage\(|fitDialogTitle\(|dialogTextMaxLines\(/,
+    "the dialog must reach the renderer whole");
+  assert.doesNotMatch(SRC, /from "\.\.\/lib\/dialog-budget\.ts"/,
+    "…and the module is deleted, not just unused");
+  // WHAT REPLACES IT: a session on the DEFAULT renderer is TOLD once, from the
+  // host's own `TUI.mode` (a config re-derivation would be a copy of pi's
+  // precedence that gets the corners wrong — lib/renderer-mode.ts). The mode
+  // reaches this extension only through the setWidget FACTORY form, used here
+  // as a one-shot PROBE that is removed immediately: the factory component
+  // would have to wrap its own lines, and pi's RPC host ignores factories
+  // altogether — the status strip stays the string[] form.
+  assert.match(SRC, /setWidget\("review-gate-renderer-probe", \(tui\) => \{[\s\S]{0,160}?noteRendererMode\(tui\.mode, ctx\)/,
+    "the renderer mode comes from the host, through a one-shot widget-factory probe");
+  assert.match(SRC, /setWidget\("review-gate-renderer-probe", undefined\)/,
+    "…and the probe leaves nothing behind");
+  assert.match(SRC, /setWidget\("review-gate-agents", lines, \{ placement: "belowEditor" \}\)/,
+    "the status strip itself stays the string[] form (it is what wraps per line, and RPC keeps it)");
+  assert.match(SRC, /rendererModeNoticeDue\(mode, rendererModeNoticeShown\)/,
+    "…and whether to speak is the module's pure decision");
+  assert.match(SRC, /ctx\.ui\.notify\(RENDERER_MODE_NOTICE, "warning"\);[\s\S]{0,120}?rendererModeNoticeShown = true;/,
+    "the once-only flag is set AFTER the notice is out, never before it");
+  assert.doesNotMatch(SRC, /process\.stdout\?\.rows|process\.env\.LINES/,
+    "no row arithmetic may come back: the terminal is no longer consulted");
   // ui.confirm is GONE: the template renders a select, so a stray confirm
   // would be a second dialog shape nobody reviewed.
   const confirms = [...SRC.matchAll(/\.confirm\?\.\(|\.confirm\(/g)].map((m) => m.index ?? 0);
@@ -1709,6 +1724,47 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
     "a `pr` round arrives on a `gh pr create` the GATE watched succeed — not on a claim");
   assert.match(body, /st\.copilot\?\.pr/,
     "…with the Copilot-resolved PR number as the second, independent proof");
+  // EVIDENCE 3 (2026-09-16): neither of those exists when the PR was ALREADY
+  // open and this round only appended to it — gh calls "already exists" an
+  // error, and `copilotReview: false` resolves no number — so the gate asks
+  // GitHub itself. The question runs ONLY when the two free facts are silent.
+  assert.match(body, /probeOpenPr\(repoDirFor\(root\)\)/,
+    "the third evidence is a question the GATE asks, never one the agent answers");
+  // …and WHETHER it still has to ask, and whether the round arrived at all,
+  // are the MODULE's two rules rather than a second expression written here
+  // (round-1 quality P1, 2026-09-16): the extension used to re-derive "no local
+  // evidence" in the OPPOSITE polarity, which is the kind of duplicate that
+  // goes wrong silently when only one side is fixed.
+  assert.match(body, /prEvidencePresent\(\{ observedPrCreate, recordedPr \}\)/,
+    "…and the decision to ask GitHub is taken by the module's own predicate");
+  assert.doesNotMatch(codeOnly(body), /station === "pr" && !observedPrCreate && recordedPr === null/,
+    "the opposite-polarity copy of that rule must not come back");
+  // The push reading is asked of EVERY `pr` round, not of one evidence
+  // (round-1 quality P1, 2026-09-16): a checkpoint commit the gate lands after
+  // the PR was opened is invisible to all three evidences alike.
+  assert.match(body, /unpushed = hasUnpushedCommits\(repoDirFor\(root\)\)/,
+    "every `pr` round reads the local upstream — no evidence stands in for it");
+  assert.match(body, /^\s+unpushed,$/m, "…and that reading is what the judgement receives");
+});
+
+test("a FAILED `gh pr create` gets the answer the gate can look up itself", () => {
+  // gh reports "a pull request for branch … already exists" as an ERROR, so the
+  // success-only evidence has never seen it, and the agent is left reading
+  // gh's stderr and guessing between appending to the PR and opening another.
+  // The measured cost (user report, 2026-09-16) was an open PR closed and
+  // reopened under a new number — so the gate asks GitHub and says the answer.
+  const window = windowOf(
+    "// A FAILED `gh pr create`",
+    "const bashReadonlyNudgeText",
+    "failed pr create",
+  );
+  assert.match(window, /event\.isError === true/,
+    "only a failure needs this — a success is already evidence");
+  assert.match(window, /observedShipKinds\(cmd\)\.includes\("pr-create"\)/,
+    "the same narrowed evidence entry point, never the over-matching detector");
+  assert.match(window, /existingPrNotice\(await probeOpenPr\(root\)\)/,
+    "…and the sentence that names the PR comes from the module that asked GitHub");
+  assert.match(codeOnly(window), /state\.taskMode !== "normal"/, "normal mode steps aside");
 });
 
 test("the ship-kind evidence is recorded on SUCCESS, and never behind the Copilot switch", () => {
@@ -2540,9 +2596,10 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // role's `openerId` and lib/session-factory.ts turns it into RG_JUDGE_OPENER.
   const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
   // Sized to the whole function (it grew when the spawn learned to verify its
-  // delivery); a window that stopped short would silently assert about half a
-  // function and pass for the wrong reason.
-  const spawn = SRC.slice(spawnAt, spawnAt + 14000);
+  // delivery, and again when the reuse branch started stamping the round number
+  // into the instruction record); a window that stopped short would silently
+  // assert about half a function and pass for the wrong reason.
+  const spawn = SRC.slice(spawnAt, spawnAt + 19000);
   assert.match(spawn, /kind: "judge",\s*\n\s*openerId: opener,/, "the pane is told who opened it");
   assert.match(
     readFileSync(new URL("../lib/session-factory.ts", import.meta.url), "utf8"),
@@ -2710,7 +2767,14 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   // A living pane takes the round through its channel — there is no
   // refuse-busy anymore (that belonged to the one-shot process).
   assert.match(body, /kind: "instruct"/, "reuse delivers the round as a channel record");
-  assert.match(body, /mode: "followUp"/, "a living pane reads the round when it finishes its turn");
+  assert.match(body, /mode: "interrupt"/,
+    "…as an INTERRUPT: a re-dispatch means the content changed, so the round in flight is already obsolete "+
+    "(user decision 2026-09-16) — waiting for it only waits out a verdict on code that is gone");
+  assert.doesNotMatch(body, /mode: "followUp"/,
+    "the queued delivery is what let the numbering race: the task sat on the wire while the entry moved on");
+  assert.match(body, /const roundSeq = nextJudgeRound\(opener, judgeId\);/,
+    "the round number is computed BEFORE the record is written, so the task can carry it");
+  assert.match(body, /mode: "interrupt",\s*\n\s*roundSeq,/, "…and it travels with the task");
   assert.doesNotMatch(body, /refuse-busy/, "no busy refusal may come back");
   assert.doesNotMatch(body, /spawnJudgeProcess\(\{/, "no process spawn may come back");
   assert.doesNotMatch(body, /registerWatch\(|rememberChildProcess/, "no process watcher may come back");
@@ -3433,9 +3497,9 @@ test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surfac
   assert.match(body, /goal-auditor 预审: PASS @/);
   const repoFact = body.indexOf('"绑定仓库(不可信数据): " + repoLine');
   // The DELIVERY STATION (2026-09-06) joins them, between the repo binding and
-  // the audit line: the dialog fitter truncates from the tail, and the two
-  // consent-critical facts (which repo, how far this round goes) must be the
-  // ones that survive.
+  // the audit line: the box is read top-down, and the two consent-critical
+  // facts (which repo, how far this round goes) come before the label of what
+  // is being approved.
   // …and it is the USER's rendering of the station that the dialog prints
   // (2026-09-17): the same sentence exists in a second person for the user and
   // a third person for the agent, and a dialog that printed the agent's copy
@@ -5949,8 +6013,15 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
 test("a FAIL that arrives after dispatch is reported, and it withholds the READY", () => {
   assert.match(SRC, /function reportAsyncPrecommit\(/,
     "the failure has a channel of its own — the round was dispatched before this verdict existed, so returning early is no longer available");
-  assert.match(SRC, /if \(verdict !== "PASS"\) \{[\s\S]{0,400}?reportAsyncPrecommit\(\{/,
-    "and every non-PASS verdict goes through it, including a thrown runner — the parked-READY handling above runs first and must not swallow it");
+  // BOTH verdicts reach the agent (2026-09-16): a silent PASS is what stranded a
+  // `judge_wait` for 6 minutes 47 seconds — the event had no delivery, and the
+  // wait's own sources are the JUDGE's.
+  assert.match(SRC, /function reportAsyncPrecommitPass\(/, "a PASS lands too, and something has to say so");
+  assert.match(
+    SRC,
+    /if \(verdict === "PASS"\) \{\s*\n\s*reportAsyncPrecommitPass\([\s\S]{0,900}?\} else \{[\s\S]{0,400}?reportAsyncPrecommit\(\{/,
+    "PASS through the short notice, every other verdict through the failure one — including a thrown runner (the parked-READY handling above runs first and must not swallow it)",
+  );
   assert.match(
     SRC,
     /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,400}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,40}?bypassActive: st\.bypass\.active,\s*\}\)/,

@@ -74,6 +74,10 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     persisted: [],
     // HEAD differs from every baseline candidate, so the happy path is the default.
     revs: { HEAD: "hhhhhhhhhhhh", "HEAD^{tree}": "tttttttttttt", "cccccccccccc^": "pppppppppppp" },
+    // The branch's own base. Same value as the checkpoint's parent by default,
+    // so an expectation that did not care WHICH of the two it was keeps
+    // holding — and the cases where it matters set it explicitly.
+    branchBase: "pppppppppppp",
     ancestors: new Set<string>(),
     changed: ["lib/a.ts", "lib/b.ts"],
     clean: true,
@@ -258,6 +262,7 @@ test("no checkpoint on record, and no branch base to compare against — still a
   // no basis to claim anything about the branch, so the round stays the
   // exit-goal audit it has always been.
   f.st.checkpoint = undefined;
+  f.branchBase = undefined;
   const reply = await call(f);
   assert.notEqual(reply.isError, true);
   assert.equal(reply.details?.prepared, true);
@@ -417,20 +422,64 @@ test("a READY commit that is NO LONGER an ancestor falls back rather than trusti
   cleanup(f);
 });
 
-test("no prevSha falls back to the checkpoint's parent, and to the checkpoint itself when that fails", async () => {
+test("the baseline is the last CONCLUDED round — and the branch base when there is none", async () => {
+  // 2026-09-16. The fallback used to be the newest checkpoint's parent, which
+  // moved the baseline PAST any round that produced no conclusion at all — a
+  // re-submit that interrupted it, a precommit FAIL, a crash. Measured that
+  // day: a whole round's changes (d28714e..a70f2a1) dropped out of every later
+  // range while the gate went on believing the chain was reviewed.
   const f = fake();
-  f.st.checkpoint = { sha: "cccccccccccc", prevSha: "", at: "2026-08-29T00:00:00.000Z" };
-  const viaParent = await call(f);
-  assert.equal(viaParent.details?.baseline, "pppppppppppp", "the parent is read from git");
-
-  const g = fake();
-  g.st.checkpoint = { sha: "cccccccccccc", prevSha: "", at: "2026-08-29T00:00:00.000Z" };
-  delete g.revs["cccccccccccc^"]; // a root commit, or an unreachable sha
-  const viaSelf = await call(g);
-  assert.equal(viaSelf.details?.baseline, "cccccccccccc",
-    "a root commit must not throw out of the tool");
+  // The fixture's DEFAULT gives `branchBase` and the checkpoint's `prevSha` the
+  // same value, so older expectations keep holding — which would also make THIS
+  // case pass with the old fallback restored (round-1 review P2, 2026-09-16).
+  // They are pulled apart here so the assertion can actually fail.
+  f.branchBase = "bbbbbbbbbbbb";
+  assert.equal((await call(f)).details?.baseline, "bbbbbbbbbbbb",
+    "no verdict at all ⇒ the branch base, never the checkpoint's parent");
   cleanup(f);
+
+  // A BLOCKED round is a round that CONCLUDED: the next range starts where it
+  // left off, so the reviewer is not made to re-read what a round already
+  // judged. (This is the half that only READY used to record.)
+  const g = fake();
+  g.st.review = { verdict: "BLOCKED", fingerprint: "tttttttttttt", at: "2026-08-29T00:00:00.000Z", commitSha: "cccccccccccc" };
+  g.ancestors.add("cccccccccccc..HEAD");
+  assert.equal((await call(g)).details?.baseline, "cccccccccccc",
+    "a concluded (BLOCKED) round's commit is the baseline");
   cleanup(g);
+
+  // An unreadable verdict (an older sidecar) degrades to the branch base too:
+  // "I cannot tell what was concluded" must not read as "everything was".
+  const h = fake();
+  h.st.review = { verdict: "BLOCKED", fingerprint: "tttttttttttt", at: "2026-08-29T00:00:00.000Z" };
+  assert.equal((await call(h)).details?.baseline, "pppppppppppp");
+  cleanup(h);
+
+  // …and when git cannot NAME a base at all (no remote, no main, no master —
+  // every sandbox, and a real shape for a local-only repo), the checkpoint's
+  // own parent is the fallback. An EMPTY range is not the safe answer here:
+  // it demands a clean worktree and then blesses nothing.
+  const k = fake();
+  k.branchBase = undefined;
+  assert.equal((await call(k)).details?.baseline, "pppppppppppp",
+    "no branch base ⇒ the checkpoint's parent, never an empty range");
+  cleanup(k);
+
+  // AN INVALIDATED VERDICT KEEPS ITS COMMIT AS THE BASELINE (round-1 review
+  // P2, 2026-09-16 — pinned because it had no test). `invalidateBindings`
+  // flips the verdict back to PENDING on the next edit and LEAVES `commitSha`
+  // in place; reading the verdict here threw that away and re-based the range
+  // on the BRANCH BASE, so every post-READY edit made the next round re-review
+  // the whole branch. This case is what stops a later tidy-up from either
+  // deleting `commitSha` on invalidation or restoring the verdict check.
+  const m = fake();
+  m.st.review = {
+    verdict: "PENDING", fingerprint: null, at: "2026-08-29T00:00:00.000Z", commitSha: "cccccccccccc",
+  };
+  m.ancestors.add("cccccccccccc..HEAD");
+  assert.equal((await call(m)).details?.baseline, "cccccccccccc",
+    "a verdict an edit invalidated must not lose the commit it concluded about");
+  cleanup(m);
 });
 
 test("a bypassed checkpoint is spelled out for the reviewer", async () => {
