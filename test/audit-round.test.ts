@@ -694,7 +694,11 @@ test("settle/review: with no checkpoint on record the round still closes", async
   // three rounds later nobody remembers the content criterion was skipped.
   const recorded = settled.status === "recorded" ? settled.text : "";
   assert.match(recorded, /本轮绑定说明/, "the recorded verdict announces the weaker binding");
-  assert.match(recorded, /exit-goal/, "…names the kind of round it was");
+  // What it names is the RECORD that is missing, not a range shape: a session
+  // with no checkpoint record may be judging an empty range or a real
+  // branch-base delivery (the range is the branch's business, 2026-09-15).
+  assert.match(recorded, /还没有可比的 checkpoint 记录/, "…names the record that is missing");
+  assert.match(recorded, /内容诞生的时刻/, "…says the timestamp — not the content — is what is absent");
   assert.match(recorded, /不适用/, "…says the content-time criterion did not apply");
   assert.match(recorded, /round 与 cursor/, "…and what carried the round instead");
   // The normal round must NOT carry that sentence — an announcement that shows

@@ -91,9 +91,9 @@ export type PendingAudit =
  *
  *   The ONE exception, and it is not a weakening: NO checkpoint record in the
  *   gate's own state (not "no checkpoint commit in git" — the record lives in
- *   the session's sidecar and starts empty every session) is the "audit the
- *   exit goal" round (`prepare_review`, empty range,
- *   clean worktree), where nothing is frozen for a verdict to lag behind.
+ *   the session's sidecar and starts empty every session) leaves no content
+ *   STAMP for a verdict to lag behind, whatever range `prepare_review`
+ *   resolves for that round — empty, or the branch base..HEAD since 2026-09-15.
  *   Refusing it would not fail closed, it would make that round unclosable —
  *   no record, no round end, no reachable READY. The round binding and the
  *   cursor still carry it (reviewer P1 + user decision, 2026-09-05).
@@ -202,8 +202,9 @@ export const REVIEW_ROUND_SPEC: AuditRoundSpec = {
   // lying about something the reader can check with one `git log`.
   degradedContentBinding: () =>
     "本轮绑定说明：门禁状态里还没有可比的 checkpoint 记录（新会话 + 干净 worktree 的第一轮就是这种情况，" +
-    "与 git 历史里有多少 checkpoint 提交无关），这是 exit-goal 空范围轮 —— " +
-    "内容时间判据（report 必须晚于本轮 checkpoint）**不适用**，本轮裁决只由 round 与 cursor 绑定。",
+    "与 git 历史里有多少 checkpoint 提交无关）—— 本轮没有**内容诞生的时刻**可比（范围可能是空的 HEAD..HEAD，" +
+    "也可能是分支基点..HEAD 的真实交付），所以内容时间判据（report 必须晚于本轮 checkpoint）**不适用**，" +
+    "本轮裁决只由 round 与 cursor 绑定。",
   // The detail TRAVELS here (2026-09-05): a review round that does not close
   // is usually "the reviewer is still working", but it can also be "a report
   // is sitting in the channel and it is not this round's". Swallowing the

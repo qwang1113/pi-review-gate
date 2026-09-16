@@ -35,6 +35,14 @@ interface Fake {
   revs: Record<string, string>;
   ancestors: Set<string>;
   changed: string[];
+  /**
+   * What `merge-base <default branch> HEAD` resolves to. Undefined is the
+   * "this repo names no default branch" case — the fallback that keeps the
+   * empty range.
+   */
+  branchBase?: string;
+  /** What the squash-point search resolves to (a rewritten reviewed chain). */
+  squashPoint?: string;
   /** Overrides the numstat rows the change index is built from. */
   numstat?: ChangeIndexRow[];
   clean: boolean;
@@ -99,6 +107,8 @@ function fake(overrides: Partial<Fake> = {}): Fake {
       // that want the FALLBACK throw from here.
       numstatInRange: () =>
         (state.numstat ?? state.changed.map((file, i) => ({ file, added: 10 + i, deleted: i }))),
+      branchBaseBaseline: () => state.branchBase,
+      squashPointBaseline: () => state.squashPoint,
       worktreeClean: () => state.clean,
     },
     readText: (p) => state.files[p],
@@ -207,7 +217,7 @@ test("HEAD equal to the baseline is an empty range — accepted as an exit-goal 
   assert.match(textOf(reply), /review round ready/);
   assert.match(textOf(reply), /0 file\(s\)/);
   // The task text tells the reviewer this round audits the EXIT GOAL.
-  assert.match(textOf(reply), /EXIT GOAL is met/);
+  assert.match(textOf(reply), /What this round judges is the EXIT GOAL/);
   // The empty-range round still registers a target (HEAD tree binding).
   assert.equal(f.targets.length, 1);
   cleanup(f);
@@ -241,16 +251,48 @@ test("worktreeClean throwing is fail-closed — treated as NOT clean (round-4 P2
   cleanup(f);
 });
 
-test("no checkpoint on record is allowed — an empty-range exit-goal audit", async () => {
+test("no checkpoint on record, and no branch base to compare against — still an empty-range exit-goal audit", async () => {
   const f = fake();
-  // Drop the checkpoint entirely; HEAD is the baseline, so the range is empty.
+  // Drop the checkpoint entirely, and let `merge-base <default branch> HEAD`
+  // resolve nothing (a repo with no remote and no main/master). The gate has
+  // no basis to claim anything about the branch, so the round stays the
+  // exit-goal audit it has always been.
   f.st.checkpoint = undefined;
   const reply = await call(f);
   assert.notEqual(reply.isError, true);
   assert.equal(reply.details?.prepared, true);
   assert.equal(reply.details?.range, "hhhhhhhhhhhh..hhhhhhhhhhhh");
   assert.equal(reply.details?.fileCount, 0);
-  assert.match(textOf(reply), /EXIT GOAL is met/);
+  assert.match(textOf(reply), /What this round judges is the EXIT GOAL/);
+  cleanup(f);
+});
+
+test("no checkpoint on record but the BRANCH carries commits ⇒ the range is the branch base..HEAD", async () => {
+  const f = fake();
+  // THE REGRESSION THIS PINS (2026-09-15): a session that never checkpointed
+  // still sits on a branch holding whatever was committed before it — by
+  // another session, or by the agent's own `git commit`. Calling that "no code
+  // change to audit" is what made a 18-file delivery reach its reviewer as an
+  // empty-range exit-goal round.
+  f.st.checkpoint = undefined;
+  f.branchBase = "bbbbbbbbbbbb";
+  const reply = await call(f);
+  assert.notEqual(reply.isError, true);
+  assert.equal(reply.details?.baseline, "bbbbbbbbbbbb", "the branch base is the baseline when no checkpoint exists");
+  assert.equal(reply.details?.range, "bbbbbbbbbbbb..hhhhhhhhhhhh");
+  assert.equal(reply.details?.fileCount, 2, "the real file list reaches the CHANGE INDEX");
+  assert.doesNotMatch(textOf(reply), /NO new commits are under review/, "a non-empty range is not worded as an empty one");
+  cleanup(f);
+});
+
+test("a rewritten chain resolves through the squash point when the seam yields one", async () => {
+  const f = fake();
+  f.st.review = { verdict: "READY", fingerprint: "fp", at: "2026-08-29T00:00:00.000Z", commitSha: "rrrrrrrrrrrr" };
+  // Not an ancestor ⇒ rewritten history; the content the READY was bound to
+  // lives at the squash point, which is the baseline the next range starts at.
+  f.squashPoint = "ssssssssssss";
+  const reply = await call(f);
+  assert.equal(reply.details?.baseline, "ssssssssssss");
   cleanup(f);
 });
 

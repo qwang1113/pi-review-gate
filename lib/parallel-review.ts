@@ -440,10 +440,26 @@ export function buildReviewPrompt(
   const streamPath = isolation?.streamPath;
   const range = isolation?.commitRange ?? "baseline..HEAD";
   const lines = [
-    // Empty range: nothing to diff — the round audits ONLY the exit goal.
-    // The reviewer judges whether the task is DONE (goal met), not a diff.
+    // Empty range: nothing is diffed — the round audits the EXIT GOAL.
+    //
+    // IT SAYS WHAT IT KNOWS (2026-09-15). This opened with "There is NO code
+    // change to audit", which is a claim the gate cannot make: an empty range
+    // means no NEW COMMITS SINCE THE BASELINE, and the baseline is a record of
+    // what this session reviewed, not of what the branch holds. A round where
+    // an 18-file delivery sat committed under a session that had never
+    // checkpointed was announced as "no code change to audit", while the main
+    // session's own note described those 18 files. The goal is the contract
+    // here, so point at the goal rather than assert the diff away.
     files.length === 0 && range.split("..")[0] === range.split("..")[1]
-      ? "You are the reviewer of this round. There is NO code change to audit (empty commit range " + `${range}` + ") this round exists to verify the EXIT GOAL is met. Check the loop goal below criterion by criterion (accept only if EVERY criterion is verifiably met), confirm the worktree is clean, and report a READY only when the task is genuinely done. A BLOCKED with findings is the correct verdict when any criterion is unmet or unverifiable."
+      ? "You are the reviewer of this round. NO new commits are under review: the range is empty " +
+        `(${range}) — nothing has been committed since the baseline it is measured from. ` +
+        "What this round judges is the EXIT GOAL — check the loop goal below criterion by criterion " +
+        "(accept only if EVERY criterion is verifiably met), confirm the worktree is clean, and report " +
+        "a READY only when the task is genuinely done. If that goal asks you to audit a wider change " +
+        "than this range covers (a delivery committed before this session, say), audit it: the goal is " +
+        "this round's contract, and the empty range is only what the gate could measure — never a limit " +
+        "on what you may look at. A BLOCKED with findings is the correct verdict when any criterion is " +
+        "unmet or unverifiable."
       : scopeKind === "incremental"
         // SUMMARY + POINTER, never a second copy of the contract: the scope
         // block further down IS the contract (rendered by
@@ -549,8 +565,10 @@ export function buildReviewPrompt(
     // Round-17 (user ask), tightened 2026-09-04: the gate consumes ONLY the
     // conclude call and the finding stream. There is no `notes` parameter for
     // this role — passing one is refused — so the conclusion has nowhere to
-    // become prose, and prose after the call is read by nobody.
-    "输出纪律:交卷即停 —— 调完 judge_conclude 就结束本轮,不写复述、不写自评、不写过程说明;结论就是 verdict + findings(能给证据就填 evidence)。",
+    // become prose, and prose after the call is read by nobody. The
+    // "conclude and stop" discipline itself is stated ONCE, by
+    // {@link JUDGE_COMPLETION_DISCIPLINE} below: this call used to repeat it
+    // one line above, in Chinese, inside an otherwise English task text.
     "",
     JUDGE_COMPLETION_DISCIPLINE,
   );
