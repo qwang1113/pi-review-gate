@@ -15,6 +15,7 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
+import { PLAN_TASK_SKELETON } from "./orchestrator-directives.ts";
 import { buildRestatementMissingRefusal, restatementConfirmed } from "./restatement.ts";
 import { REVISE_ROW, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import { DELIVERY_STATION_CHOICES, deliveryStationLine } from "./delivery-station.ts";
@@ -715,7 +716,12 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "ONE REQUIREMENT, ONE PR PER REPO: when one repo holds more than one task, that repo's " +
       "children stop at `commit` — the manager merges them locally and ONE PR comes out of the " +
       "combined result. `allowMultiplePrs` names the repos the USER allowed to split; it is the " +
-      "ONLY way out of that rule, so never fill it in on your own initiative.",
+      "ONLY way out of that rule, so never fill it in on your own initiative. " +
+      // The manager reads THIS description while writing tasks, so the task
+      // book's shape belongs here too — from the same constant the `note`
+      // field describes itself with and the standing block renders.
+      "每个任务的说明书写在 `plan.tasks[].note`（它不参与批准：改 note 不重审、也不重批）：\n" +
+      PLAN_TASK_SKELETON,
 
     parameters: Type.Object({
       action: Type.Optional(Type.Enum(PLAN_ACTIONS)),
@@ -735,7 +741,16 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
           dependsOn: Type.Optional(Type.Array(Type.String())),
           execution: Type.Optional(Type.Union([Type.Literal("serial"), Type.Literal("parallel")])),
           status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("running"), Type.Literal("done"), Type.Literal("blocked")])),
-          note: Type.Optional(Type.String()),
+          // THE TASK BOOK (user ask, 2026-09-17): this is the field the plan
+          // audit reads (「任务书完整度」) and the only place a task's
+          // instructions live. `note` is excluded from `canonicalPlanText`, so
+          // writing it here grants nothing and revokes nothing — it is
+          // instructions, not a contract boundary.
+          note: Type.Optional(Type.String({
+            description:
+              "任务书写在这里（把 `<…>` 换成你的事实；note 是给子会话的说明书，不参与 plan 批准）：\n" +
+              PLAN_TASK_SKELETON,
+          })),
         })),
         decisions: Type.Optional(Type.Array(Type.Object({
           id: Type.String(),

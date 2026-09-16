@@ -47,6 +47,7 @@ import { REVISE_ROW, choiceRows, parseChoice, type ChoiceSpec } from "./choice-d
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import {
   GOAL_CONFIRM_TITLE,
+  LOOP_GOAL_SKELETON,
   buildGoalConfirmMessage,
   buildGoalPrereviewRefusal,
   buildGoalTranscriptMessage,
@@ -576,7 +577,13 @@ export function registerGoalTools(host: ToolHost, deps: GoalToolDeps): void {
       "repo before editing there; one repo's approval never opens another's write surface. " +
       "`station` says where THIS round stops (" + DELIVERY_STATION_CHOICES + "); omit it and the " +
       "station the user confirmed with the restatement is carried over (nothing on record ⇒ " +
-      "precommit, the strictest). It is shown to the user in the approval dialog.",
+      "precommit, the strictest). It is shown to the user in the approval dialog. " +
+      // THE TEMPLATE TRAVELS WITH THE TOOL (user ask, 2026-09-17): the agent
+      // reads this description BEFORE it drafts anything, which is the only
+      // moment a template can still save the round. The same constant is what
+      // the refusal hands back when an audit rejects the draft — one skeleton,
+      // two moments.
+      "填写模板（把 `<…>` 换成你的事实）：\n" + LOOP_GOAL_SKELETON,
     parameters: Type.Object({
       goal: Type.String({ description: "The full goal text (Markdown) as agreed with the user" }),
       repo: Type.Optional(Type.String({

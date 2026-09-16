@@ -20,6 +20,40 @@
 
 import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
 
+/**
+ * THE PLAN TASK-BOOK SKELETON — what a task's `note` is FOR (user ask,
+ * 2026-09-17: 写 plan 时直接给模板，照着模板改).
+ *
+ * A task used to be a title plus a repo, and everything a child needed to know
+ * about its own job was improvised in prose — or invented by the child. The
+ * plan AUDIT already asks whether each task's `title` + `note` are enough for a
+ * child 「拿到就能独立协商 goal」 (lib/orchestrator-plan-audit.ts) — an ask with
+ * no template behind it, which is how a five-field task book becomes a
+ * one-line note.
+ *
+ * WHY IT IS AIMED AT `note`, AND AT NO STRUCTURED FIELD (user decision,
+ * 2026-09-17): `note` is excluded from `canonicalPlanText`
+ * (lib/orchestrator-plan.ts), so the task book is INSTRUCTIONS, not a contract
+ * boundary — a child that ends up changing a module its note never named
+ * neither voids the plan audit nor revokes the user's approval. Promoting
+ * 「代码落点」 to a structured field would put the 2026-09-17 deadlock back
+ * (「改个文件就要用户重新批准」, which the user abolished). `test/templates.test.ts`
+ * pins both halves: the skeleton is in the `note` description, and
+ * `canonicalPlanText` carries no note text.
+ *
+ * ONE OF THREE, same family as `RESTATEMENT_SKELETON` (lib/restatement.ts) and
+ * `LOOP_GOAL_SKELETON` (lib/loop-goal.ts) — the same 「照抄这个骨架填即可」
+ * opening line and the same `<…>` blanks.
+ */
+export const PLAN_TASK_SKELETON = [
+  "## plan 任务书骨架（照抄这个骨架填即可）",
+  "目标：<这个子会话要达成什么>",
+  "交付：<产出物>",
+  "代码落点：<新代码落在哪个模块或目录；为什么不塞进已有的大文件>",
+  "验收：<子会话自己怎么判断做完了>",
+  "边界：<不做什么>",
+].join("\n");
+
 
 /** The standing block injected every turn in orchestrator mode. */
 export const ORCHESTRATOR_DIRECTIVE =
@@ -54,6 +88,17 @@ export const ORCHESTRATOR_DIRECTIVE =
   "待答请求（问题正文与全部选项都在里面，不需要你去看屏幕）、死亡/僵死与可执行的恢复动作、" +
   "你自己的上下文用量与接力时机、还差什么才能 `declare_done`。" +
   "凡是你需要知道的事，门禁都从这里推给你 —— 你不必记得去查，也不该自己拼查询。\n" +
+
+  "\n" +
+  // THE TASK BOOK HAS A SHAPE, and the manager is the only one who writes it
+  // (user ask, 2026-09-17). Rendered from the constant the `note` field's own
+  // description renders (lib/orchestrator-tools.ts), so the block and the
+  // parameter cannot tell two different stories.
+  "### 任务书怎么写（每个任务的 `note`）\n" +
+  "任务是写给子会话的说明书（不是写给自己的备忘）：字段照抄下面这个骨架填进 `plan.tasks[].note`。\n" +
+  "`note` **不参与 plan 批准**（`canonicalPlanText` 明确排除它）—— 它是说明书，不是契约边界：" +
+  "子会话干活时改到骨架没点名的文件或模块，既不作废审计 PASS、也不撤销用户批准。\n" +
+  PLAN_TASK_SKELETON + "\n" +
 
   "\n" +
   "### 硬约束（门禁会真的拦）\n" +

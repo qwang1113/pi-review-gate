@@ -184,6 +184,15 @@ export const REQUIREMENT_PROTOCOL =
   "同时定下本轮交付到哪一站（precommit / commit / pr）。\n" +
   "4. 没有已确认的反述，`propose_loop_goal` 与 `orchestrator_plan({action:\"submit\"})` " +
   "会直接被拒、一个框都不弹（拒绝文案里有可照抄的骨架）；需求变了就再反述一次，最新一份生效。\n" +
+  // A POINTER, NOT A COPY (2026-09-17, 用户要求). The three skeletons live in
+  // the modules that own their documents — LOOP_GOAL_SKELETON in
+  // lib/loop-goal.ts, PLAN_TASK_SKELETON in lib/orchestrator-directives.ts —
+  // and what the standing block owes the agent is the fact that they EXIST and
+  // where they are shown. Quoting them here would be a second copy of a
+  // template whose whole job is to be filled in once, in one place.
+  "4b. **要写 goal / plan 就照骨架填，别自己发明格式**：goal 骨架见 `propose_loop_goal` 的" +
+  "工具说明（goal 审计打回时，拒绝文案里附的是同一份）；plan 任务书骨架见 `orchestrator_plan` " +
+  "的工具说明与 `plan.tasks[].note` 的描述。\n" +
   // 2026-09-14（用户要求）：「打断」是语义上的插话，不是按 ESC —— 用户不点选项、
   // 直接在框外说别的事。他往往不止一件事要说，而「答完他就立刻重新弹框」会让他
   // 每次都再打断一次。这条不硬拦（用户明确说「不用做得特别死」），但它对三个

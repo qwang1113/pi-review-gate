@@ -366,6 +366,48 @@ export function goalPrereviewPassed(
   return goalTextHash(goalText) === record.hash;
 }
 
+/**
+ * THE GOAL SKELETON — the shape the agent COPIES instead of inventing one
+ * (user ask, 2026-09-17: 「让 agent 在协商 goal 这些地方直接给模板，照着模板改」).
+ *
+ * WHY A TEMPLATE RATHER THAN A DESCRIPTION. The tool description used to
+ * summarise the shape in one English line (task title, one-line intent, 3–7
+ * checkable exit criteria, non-goals, ISO date) and every agent had to
+ * translate that sentence into a document before it could negotiate anything.
+ * The translation is where the checkable parts get lost — a criterion nobody
+ * can falsify, a non-goal that was never decided — and each loss comes back as
+ * a goal-audit round. Handing over the document itself removes the step.
+ *
+ * ONE OF THREE, AND THEY ARE ONE FAMILY: `RESTATEMENT_SKELETON`
+ * (lib/restatement.ts) and `PLAN_TASK_SKELETON` (lib/orchestrator-directives.ts)
+ * open the same way — `## <名字>（照抄这个骨架填即可）` — and blank the same
+ * `<…>` way. `test/templates.test.ts` pins the three together.
+ *
+ * RENDERED, NEVER RESTATED: the surfaces that show it (this module's refusal
+ * and `propose_loop_goal`'s description, lib/goal-tools.ts) interpolate this
+ * constant; the standing block carries a POINTER only. That is what keeps one
+ * copy from drifting into two.
+ *
+ * 「关键测试场景与边界情况」 IS A FIRST-CLASS COLUMN on purpose (user ask):
+ * the criteria say what "done" means, this one says what will actually be
+ * exercised — and naming what is deliberately NOT tested is how a reviewer
+ * learns the boundary was CHOSEN rather than forgotten.
+ */
+export const LOOP_GOAL_SKELETON = [
+  "## loop goal 骨架（照抄这个骨架填即可）",
+  "# <任务标题>",
+  "意图：<一句话>",
+  "退出标准（每条必须能用一个命令或一次具体观察判定）：",
+  "  1. <…>",
+  "关键测试场景与边界情况：",
+  "  - 正常路径：<…>",
+  "  - 边界 / 错误路径：<…>",
+  "  - 明确不测的：<…>（说明为什么）",
+  "非目标：",
+  "  - <…>",
+  "日期：<ISO>",
+].join("\n");
+
 /** Inputs for {@link buildGoalPrereviewRefusal} — all facts the EXTENSION derived. */
 export interface GoalPrereviewRefusalContext {
   /** The pre-review record for the target repo (absent ⇒ never audited). */
@@ -424,6 +466,13 @@ export function buildGoalPrereviewRefusal(ctx: GoalPrereviewRefusalContext): str
       "1. 按反对意见改草稿；",
       "2. 再调一次 `propose_loop_goal` —— 审计是它自己跑的（组装任务、派 judge、裁决、记录 PASS），" +
       "没有单独的审计调用可以打。",
+      // The recovery path a refused draft actually needs: a FORMAT to fill, not
+      // another sentence about the format. Same skeleton the tool description
+      // hands out before the first submit, from the same constant.
+      "3. 照抄下面这个骨架改草稿（`<…>` 换成你的事实）：",
+      "",
+      LOOP_GOAL_SKELETON,
+      "",
       "关于文本本身：提交给用户的 goal 正文必须用简体中文（标识符、路径、代码 token 保持英文），" +
       "否则审计直接拦下（“Simplified Chinese”）。",
       `本次提交的首行：${firstLine.slice(0, 120) || "(空)"}`,
