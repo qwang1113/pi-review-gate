@@ -6447,3 +6447,26 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   assert.ok(noticeAt > abortedAt, "the abort branch precedes the failure notice");
   assert.match(lane.slice(abortedAt, noticeAt), /return;/, "…and returns, so no FAIL is reported");
 });
+
+// ---------------------------------------------------------------------------
+// NOTHING DOWNGRADES AN ORCHESTRATION TO LOOP (2026-09-18)
+//
+// The tempting fix for "the orchestration is finished and nobody can publish"
+// — the manager may not ship (constraint 2), its children of a multi-task repo
+// are capped at `commit` — is to let the manager drop into loop mode and
+// finish the delivery itself. The USER REFUSED it: the fix is a finish TASK in
+// the plan (lib/orchestrator-directives.ts, lib/repo-pr-policy.ts). This scan
+// keeps the refused version from arriving later as a convenience.
+//
+// What the gate DOES do on its own is place a session in `normal` (headless,
+// non-git) and honour a mode a SPAWNER asked for — neither is `loop`, and a
+// relay successor inherits the orchestrator's ROLE rather than being demoted to
+// a loop session (pinned behaviourally in test/session-handoff-tools.test.ts).
+test("nothing writes the loop mode by itself — the plan's finish task delivers", () => {
+  const files = ["extensions", "lib"].flatMap((dir) =>
+    readdirSync(join(ROOT, dir)).filter((f) => f.endsWith(".ts")).map((f) => join(dir, f)));
+  assert.ok(files.length > 50, `the scan must actually walk the source (saw ${files.length} files)`);
+  const autoLoop = files.filter((rel) => /setTaskMode\(\s*["']loop["']/.test(readFileSync(join(ROOT, rel), "utf8")));
+  assert.deepEqual(autoLoop, [],
+    "no path may write `loop` on its own: an orchestration ends through its plan's finish task, not through a mode change");
+});

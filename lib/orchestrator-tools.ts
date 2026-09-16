@@ -15,7 +15,7 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
-import { PLAN_TASK_SKELETON } from "./orchestrator-directives.ts";
+import { PLAN_FINISH_TASK_BRIEF, PLAN_TASK_SKELETON } from "./orchestrator-directives.ts";
 import { buildRestatementMissingRefusal, restatementConfirmed } from "./restatement.ts";
 import { REVISE_ROW, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import { DELIVERY_STATION_CHOICES, deliveryStationLine } from "./delivery-station.ts";
@@ -149,8 +149,8 @@ const APPROVAL_SEMANTICS =
   "以下改动一律**重新**征求你的批准：" +
   "新增任务、把任务换到另一个 repo、删除依赖、把串行改成并行、提高并行上限、把交付站点往后挪" +
   "（precommit → commit → pr，等于放开更多 ship 命令），" +
-  "以及把某个 repo 加进 `allowMultiplePrs`（默认同一 repo 的一个需求只出一个 PR：" +
-  "多任务时该 repo 的站点收窄到 commit，项目经理本地合并后再开一个 PR）。";
+  "以及把某个 repo 加进 `allowMultiplePrs`（默认同一 repo 的一个需求只出一个 PR：多任务时该 repo 的站点" +
+  "收窄到 commit，只有 plan 的最后一环 —— 收尾任务 —— 不受收窄，由它汇合各任务后统一开一个 PR）。";
 
 
 /**
@@ -715,13 +715,16 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "it is a widening like any other. " +
       "ONE REQUIREMENT, ONE PR PER REPO: when one repo holds more than one task, that repo's " +
       "children stop at `commit` — the manager merges them locally and ONE PR comes out of the " +
-      "combined result. `allowMultiplePrs` names the repos the USER allowed to split; it is the " +
+      "combined result, opened by the plan's LAST task (the finish task; that task is never capped). " +
+      "`allowMultiplePrs` names the repos the USER allowed to split; it is the " +
       "ONLY way out of that rule, so never fill it in on your own initiative. " +
       // The manager reads THIS description while writing tasks, so the task
       // book's shape belongs here too — from the same constant the `note`
       // field describes itself with and the standing block renders.
       "每个任务的说明书写在 `plan.tasks[].note`（它不参与批准：改 note 不重审、也不重批）：\n" +
-      PLAN_TASK_SKELETON,
+      PLAN_TASK_SKELETON +
+      "\n\n" +
+      PLAN_FINISH_TASK_BRIEF,
 
     parameters: Type.Object({
       action: Type.Optional(Type.Enum(PLAN_ACTIONS)),
@@ -749,7 +752,9 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
           note: Type.Optional(Type.String({
             description:
               "任务书写在这里（把 `<…>` 换成你的事实；note 是给子会话的说明书，不参与 plan 批准）：\n" +
-              PLAN_TASK_SKELETON,
+              PLAN_TASK_SKELETON +
+              "\n\n" +
+              PLAN_FINISH_TASK_BRIEF,
           })),
         })),
         decisions: Type.Optional(Type.Array(Type.Object({

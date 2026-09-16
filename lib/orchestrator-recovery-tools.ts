@@ -53,7 +53,7 @@ import {
   type OrchestratorRuntime,
 } from "./orchestrator-registry.ts";
 import { DEFAULT_DELIVERY_STATION, type DeliveryStation } from "./delivery-station.ts";
-import { effectiveRepoStation, taskRepoOf } from "./repo-pr-policy.ts";
+import { effectiveTaskStation } from "./repo-pr-policy.ts";
 import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
 import {
   alivePanes,
@@ -153,13 +153,13 @@ function stationCapForRecoveredChild(
   // Same rule for a task the approved snapshot does not know (the plan grew a
   // task and has not been re-approved): no record ⇒ nothing to trust.
   if (!task) return DEFAULT_DELIVERY_STATION;
-  return effectiveRepoStation(
+  return effectiveTaskStation(
     {
       deliveryStation: approved.deliveryStation ?? DEFAULT_DELIVERY_STATION,
       ...(approved.allowMultiplePrs === undefined ? {} : { allowMultiplePrs: approved.allowMultiplePrs }),
       tasks: approved.tasks,
     },
-    taskRepoOf(task, deps.repoRoot),
+    task,
     deps.repoRoot,
   );
 }

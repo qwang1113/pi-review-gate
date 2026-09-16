@@ -38,6 +38,7 @@ neutraliseGateEnv();
 import { LOOP_GOAL_SKELETON, buildGoalPrereviewRefusal } from "../lib/loop-goal.ts";
 import {
   ORCHESTRATOR_DIRECTIVE,
+  PLAN_FINISH_TASK_BRIEF,
   PLAN_TASK_SKELETON,
 } from "../lib/orchestrator-directives.ts";
 import { RESTATEMENT_SKELETON } from "../lib/restatement.ts";
@@ -206,4 +207,34 @@ test("the task book stays free text — canonicalPlanText carries no note (2026-
   assert.ok(!canonical.includes(PLAN_TASK_SKELETON));
   // The note is not dropped — it is the child's brief. It is just not a term.
   assert.match(plan!.tasks[0]!.note ?? "", /代码落点/);
+});
+
+// ---------------------------------------------------------------------------
+// ⑤ the plan ENDS with a delivery task (2026-09-18 user decision)
+//
+// Measured: a plan whose last task was one more feature left NOBODY able to
+// publish — the manager may not ship (constraint 2) and every child of a
+// multi-task repo is capped at `commit` — so the round ended with the work
+// committed and no PR. The fix the user named is in the plan, not in the
+// manager's mode: the LAST task delivers.
+
+test("the finish-task rule reaches every surface the task book reaches — from ONE constant", () => {
+  const world = makeFakeWorld();
+  const specs = captureSpecs((host) => registerOrchestratorStateTools(host, world.deps));
+  const plan = specs.get("orchestrator_plan")!;
+  assert.ok(plan.description.includes(PLAN_FINISH_TASK_BRIEF),
+    "the tool description is read while the plan is being written");
+  assert.ok(taskNoteSpec(plan)!.description.includes(PLAN_FINISH_TASK_BRIEF),
+    "…and so is the field the finish task's book goes in");
+  assert.ok(ORCHESTRATOR_DIRECTIVE.includes(PLAN_FINISH_TASK_BRIEF),
+    "the standing block renders it too — a hand-written second copy is what this constant prevents");
+  // The manager STAYS the manager: the tempting fix for an orchestration that
+  // cannot publish is "drop back into loop mode", which the user refused.
+  assert.match(ORCHESTRATOR_DIRECTIVE, /全程保持编排身份/);
+  assert.match(ORCHESTRATOR_DIRECTIVE, /不降级/);
+  // The brief is PROSE, not a fourth skeleton: the three skeletons are the
+  // documents an agent fills in, and a template that blanked the same way would
+  // have to join that family (opening line + `<…>` blanks).
+  assert.doesNotMatch(PLAN_FINISH_TASK_BRIEF, /照抄这个骨架填即可/);
+  assert.doesNotMatch(PLAN_FINISH_TASK_BRIEF, /<[^<>\n]+>/);
 });

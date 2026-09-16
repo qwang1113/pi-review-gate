@@ -42,7 +42,7 @@ import {
   type DeliveryStation,
   type StationAudience,
 } from "./delivery-station.ts";
-import { narrowedRepoLines, normalizeRepoPath } from "./repo-pr-policy.ts";
+import { finishTaskId, narrowedRepoLines, normalizeRepoPath } from "./repo-pr-policy.ts";
 
 /** Repo-root-relative location of the plan (gate-excluded via `.pi/`). */
 export const PLAN_RELPATH = ".pi/orchestrator-plan.json";
@@ -662,10 +662,25 @@ export function formatPlanSummary(
   // every child stop short by a rule nobody showed them. The lines come from
   // the ONE implementation of the rule (lib/repo-pr-policy.ts), never a copy.
   lines.push(...narrowedRepoLines(plan, repoRoot));
+  // WHICH TASK DELIVERS (2026-09-18). The plan's LAST task is the finish task
+  // by convention (lib/repo-pr-policy.ts), and it is the only one whose station
+  // is the plan's own — saying so is what makes the two lines above read as one
+  // contract instead of two. The rule has ONE home; this is a marker, not a
+  // second copy of it.
+  //
+  // "按约定", not an assessment: whether that last task really IS a delivery
+  // task is the plan AUDIT's judgement (its 10th check). Stating the convention
+  // is what lets both readers — the auditor above all — check it against the
+  // task's own title, and a marker that quietly asserted "this one delivers"
+  // would be the gate telling them the answer it is supposed to be examining.
+  const finish = finishTaskId(plan);
   for (const t of plan.tasks) {
     const deps = t.dependsOn.length ? ` ← ${t.dependsOn.join(", ")}` : "";
+    const finishMark = t.id === finish
+      ? "　← 按约定：plan 的最后一环 = 收尾任务（汇合 → 整体审核 → commit / push / 开 PR 由它完成）"
+      : "";
     lines.push(
-      `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}` +
+      `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}${finishMark}` +
       (t.repo ? `\n    repo：${t.repo}` : ""),
     );
   }

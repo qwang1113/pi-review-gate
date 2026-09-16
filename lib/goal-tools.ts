@@ -323,7 +323,7 @@ export async function doProposeLoopGoal(
   // actually moved it.
   const capNote = stationCap !== undefined && station !== requestedStation
     ? `⚠️ 交付站点上界 ${stationCap}（不是 ${requestedStation}）：本编排的 plan 收窄了该 repo —— ` +
-      "同一 repo 的一个需求只出一个 PR，子会话提交完就停，由项目经理本地合并、用户验证后再开一个 PR。" +
+      "同一 repo 的一个需求只出一个 PR，子会话提交完就停，由 plan 的收尾任务汇合后统一开一个 PR。" +
       "要分多个 PR，需要在 plan 里声明 allowMultiplePrs 并重新批准。"
     : undefined;
   // THE DIALOG GETS THE SHORT FORM (measured, and it survived the end of the

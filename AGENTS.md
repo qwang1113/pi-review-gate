@@ -577,16 +577,20 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 2b. **同一个 repo 的一个需求只出一个 PR**（2026-09-15，用户决定）：plan 里同一
    repo 有 ≥2 个任务、且该 repo 没有被写进 `allowMultiplePrs` ⇒ **该 repo 的交付
-   站点自动收窄为 `commit`**（子会话提交完就停，不 push、不开 PR），项目经理用
-   `orchestrator_close({worktree:"merge"})` 把成果本地合并，用户验证后再开**一个**
-   PR。收窄是收紧、不是扩权，按既有规则平移 plan 批准（不额外弹框），但它在 plan
+   站点收窄为 `commit`**（子会话提交完就停，不 push、不开 PR）。**唯一例外是 plan 的
+   最后一环 —— 收尾任务**（2026-09-18，用户决定）：它按 plan 的 `deliveryStation`
+   交付（汇合其余任务的分支 → 走一次整体审核 → commit → push → 开**一个** PR），
+   被一起收窄就没有能 ship 的一方了（PM 被禁止写代码，实测过整轮卡在交付上的事故）。
+   收尾任务是**位置约定**（plan 顺序的最后一个），不是 plan 的新字段；它照旧计入该
+   repo 的任务数，所以「1 个工作任务 + 收尾任务」里那个工作任务仍然收窄为 `commit`。
+   收窄是收紧、不是扩权，按既有规则平移 plan 批准（不额外弹框），但它在 plan
    的批准对话框、plan 摘要、子会话的反述/goal 对话框与任务书里都写明；
    `allowMultiplePrs`（repo 绝对路径列表）是**唯一的放行入口**，把它加进 plan 属于
    扩权、必须重新问用户，而移除只是收紧。站点上界随 spawn 走环境变量
    `RG_STATION_CAP` 注入子会话（那是提示词写不进去的通道），子会话 goal 协商的站点
    展示与记录都不超过它；**`orchestrator_recover` 重开 pane 与 `session_handoff`
    接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。规则只有一处
-   实现：`lib/repo-pr-policy.ts`。
+   实现：`lib/repo-pr-policy.ts`（`finishTaskId` / `effectiveTaskStation`）。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
    本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的
