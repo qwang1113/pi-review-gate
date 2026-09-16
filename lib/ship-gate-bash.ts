@@ -764,9 +764,11 @@ export async function evaluateShipCommand(
   }
 
   // Record this block so request_arbitration can only contest a REAL block.
-  // The cross-repo hint is part of the recorded text: the arbiter should read
-  // exactly what the agent read, and "your READY is on another repo" is the
-  // single most relevant fact when a multi-repo block is being contested.
+  // The cross-repo hint is part of the RECORDED text — the flat one the
+  // arbiter and the sidecar read. That is no longer the same STRING the agent
+  // read (`shown` is the three-part rendering), but it carries the same facts,
+  // and "your READY is on another repo" is the single most relevant of them
+  // when a multi-repo block is being contested.
   const { recorded, shown } = buildShipBlockReason({
     command,
     ships,
