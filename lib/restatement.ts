@@ -402,7 +402,8 @@ export interface RestatementToolDeps {
   log(message: string): void;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  /** Render the gate's one question template (lib/choice-dialog.ts). No fitting —
+   *  the box gets the whole text (lib/renderer-mode.ts says why). */
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,

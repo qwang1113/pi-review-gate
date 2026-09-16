@@ -826,8 +826,9 @@ export const COPILOT_THREADS_QUERY = `query($owner:String!,$name:String!,$number
  * transcript copy was never the cut — it is that the user must be able to read
  * what they are approving.
  * Bigger than the dialog on
- * purpose: a cap smaller than the transcript copy would throw away the text
- * the pointer promises.
+ * purpose: a cap smaller than the transcript copy would throw away the text the
+ * user needs to read — and the transcript copy is where they read it, because a
+ * box that scrolls is a worse place to read a long comment than the transcript.
  */
 export const COPILOT_THREAD_BODY_CHARS = 1200;
 

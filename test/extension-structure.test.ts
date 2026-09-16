@@ -893,11 +893,12 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
   assert.match(ASK_USER_SRC, /return deps\.askChoice\(\s*uiCtx,/,
-    "the pane dialog renders the template through the ONE budgeted renderer");
-  // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14): a title is
-  // charged to the row budget but never cut by it, so a long question in the
-  // title was an unbounded dialog — the one render path that could still
-  // flicker.
+    "the pane dialog renders the template through the ONE renderer");
+  // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). A title is the
+  // short label; the question is the long half and belongs in the body. (When a
+  // row budget existed this also kept a long question from sizing the box — the
+  // budget is gone, the placement is not: the REASON box renders the title
+  // alone, so what the user is answering has to be readable there.)
   // The title carries the progress label, the question's own headline (so the
   // REASON box, which renders the title alone, says what is being answered)
   // and the grant notice — all three ahead of the body rather than in its
@@ -910,16 +911,17 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the dialog title is built by the ONE title rule");
   assert.match(ASK_USER_SRC,
     /function questionDialogTitle\(q: AskQuestion, index: number, total: number\): string \{\s*const notice = grantNotice\(q\)\.trim\(\);/,
-    "…and that rule puts the grant notice first, where the tail cut cannot reach it");
+    "…and that rule puts the grant notice first, where it cannot be missed");
   assert.match(ASK_USER_SRC, /body: q\.text,/,
-    "the question text itself rides in the budgeted body");
-  // WHY THE NOTICE IS NOT IN THE BODY (reviewer P1, 2026-09-14): the body is
-  // cut from its TAIL, so appending ⚠️ after a long question let the question
-  // eat the authorization notice — while picking the recommended row still
-  // minted the proxy grant. The title is only cut when IT overflows, and a
-  // two-line notice never does.
+    "the question text itself rides in the body");
+  // WHY THE NOTICE IS NOT IN THE BODY (reviewer P1, 2026-09-14): appending ⚠️
+  // after a long question let the question push the authorization notice out of
+  // sight — while picking the recommended row still minted the proxy grant. The
+  // title is read first; (until 2026-09-16 it was also the only part a cut
+  // could not reach, so the placement was belt and braces. The budget is gone;
+  // the placement remains, because reading order is what makes it work.)
   assert.doesNotMatch(ASK_USER_SRC, /body: `\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
-    "the grant notice must never sit in the tail-cut body");
+    "the grant notice must never sit in the body, after the question");
   assert.match(ASK_USER_SRC, /extraRows: \[SKIP_REST_CHOICE\]/,
     "the interview's own escape rides along as an extra row");
   assert.doesNotMatch(ASK_USER_SRC, /uiCtx\.ui!\.input!/,

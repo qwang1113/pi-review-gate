@@ -94,7 +94,8 @@ export interface UserInteractionToolDeps {
   setLoopArmed(armed: boolean): void;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  /** Render the gate's one question template (lib/choice-dialog.ts). No fitting —
+   *  the box gets the whole text (lib/renderer-mode.ts says why). */
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
@@ -169,9 +170,10 @@ export type ConsentToolDeps = Pick<
  * and the reason box the template raises for
  * `✎ 不选，我说明原因` renders `spec.title` ALONE — the box the user types
  * their objection into would have said only 「问题 1/3」. One line of the
- * question is charged to the same title budget as everything else — and when
- * that budget runs out the title is cut from the TAIL, which is why the ⚠️
- * notice sits AHEAD of it (see questionDialogTitle).
+ * question is part of that title, which is why the ⚠️ notice sits AHEAD of it
+ * (see questionDialogTitle): the box is read top-down, and the notice is the
+ * part nobody may miss. (Until 2026-09-16 a title budget also decided what
+ * survived; the budget is gone, the order is not.)
  */
 function questionHeadline(q: AskQuestion): string {
   const first = q.text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";

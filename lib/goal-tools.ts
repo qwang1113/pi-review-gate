@@ -104,7 +104,8 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
   }): Promise<{ ok: true } | { ok: false; text: string }>;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** Render the gate's one question template (lib/choice-dialog.ts), budget applied. */
+  /** Render the gate's one question template (lib/choice-dialog.ts). No fitting —
+   *  the box gets the whole text (lib/renderer-mode.ts says why). */
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
@@ -521,8 +522,9 @@ export const UNTRUSTED_LINE_MAX_CHARS = 120;
  *
  * PER VALUE, never per BLOCK. Capping a BLOCK of lines by character count is
  * how the consent-critical lines that FOLLOW it got cut off (2026-09-16): the
- * slice happens before any wrapping, so it is invisible to the row budget, and
- * a long path silently took the station line and the `goal-auditor 预审: PASS`
+ * slice happens before any wrapping, so it was invisible to the row budget that
+ * existed then, and a long path silently took the station line and the
+ * `goal-auditor 预审: PASS`
  * line with it while the dialog went on asking for approval. Every line worth
  * confirming is short and fixed; only the value inside it needs limiting.
  */
