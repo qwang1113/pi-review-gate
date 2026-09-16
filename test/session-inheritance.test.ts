@@ -24,6 +24,7 @@ import {
   handoffGeneration,
   isHandoffSuccessorOf,
   readInheritance,
+  stateOwnership,
   successorEnv,
   successorSessionId,
 } from "../lib/session-inheritance.ts";
@@ -110,6 +111,24 @@ test("inheritance goes to the handoff successor of the session the sidecar belon
   assert.equal(isHandoffSuccessorOf(marker, "   "), false, "a blank owner is not an owner");
   assert.equal(isHandoffSuccessorOf({ [PREDECESSOR_SESSION_ENV]: "  " } as NodeJS.ProcessEnv, ""), false,
     "a blank marker is not a marker");
+});
+
+test("stateOwnership: mine / the predecessor's / somebody else's — one rule, and only these three answers", () => {
+  const predecessor = "predecessor-session";
+  const own = "this-session";
+  const marker = { [PREDECESSOR_SESSION_ENV]: predecessor } as NodeJS.ProcessEnv;
+
+  assert.equal(stateOwnership({} as NodeJS.ProcessEnv, own, own), "mine");
+  assert.equal(stateOwnership(marker, own, predecessor), "inherited",
+    "the handoff marker AND the sidecar's own owner have to agree");
+  assert.equal(stateOwnership(marker, own, "a-third-session"), "foreign",
+    "…so a third session's state is never inherited");
+  assert.equal(stateOwnership({} as NodeJS.ProcessEnv, own, predecessor), "foreign",
+    "no marker ⇒ an ordinary new session or a takeover inherits nothing");
+  assert.equal(stateOwnership(marker, own, undefined), "foreign", "an ownerless sidecar belongs to nobody");
+  assert.equal(stateOwnership(marker, own, "  "), "foreign", "a blank owner is not an owner");
+  assert.equal(stateOwnership({} as NodeJS.ProcessEnv, null, null), "foreign",
+    "a session with no id of its own owns nothing");
 });
 
 test("the brief sends the successor to the document first, and says who closes the predecessor", () => {

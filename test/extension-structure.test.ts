@@ -4145,14 +4145,17 @@ test("a relay successor inherits in EVERY repo, not just the primary one", () =>
   // sidecar belongs to a different session id. For the predecessor's own
   // successor that sidecar is not foreign at all — refusing it would ask the
   // successor to negotiate a goal it already holds, in the repo it was told to
-  // keep working in. One rule, one function: the same `isHandoffSuccessorOf`
-  // the primary restore path uses (marker AND the sidecar's own session id).
+  // keep working in. One rule, one function: `stateOwnership` (whose three
+  // answers are pinned in test/session-inheritance.test.ts), never a second
+  // inlined comparison here.
   const at = SRC.indexOf("function stateForRepo(");
   assert.ok(at > 0, "stateForRepo must exist");
   const body = SRC.slice(at, SRC.indexOf("repoStateCache.set(root, s)", at));
   assert.ok(body.length > 0, "the window must cover the loader");
-  assert.match(body, /if \(existing && isHandoffSuccessorOf\(process\.env, existing\.sessionId\)\) \{\n\s*s = inheritGoalContract\(s, existing\);/,
+  assert.match(body, /if \(owner === "inherited" && existing\) s = inheritGoalContract\(s, existing\);/,
     "a secondary repo's sidecar is inherited by the predecessor's successor — same rule, same function");
+  assert.match(body, /const owner = stateOwnership\(process\.env, state\.sessionId, existing\?\.sessionId\)/,
+    "…and the answer comes from the shared rule, not from a second comparison");
 });
 
 test("the persisted repo set is re-armed BEFORE anything can persist — a relay successor keeps its repos", () => {
@@ -4172,6 +4175,29 @@ test("the persisted repo set is re-armed BEFORE anything can persist — a relay
     "…and it runs before the first setTaskMode call, which persists the (still empty) set");
   assert.match(SRC.slice(reseedAt, reseedAt + 200), /sessionRepos\.add\(r\)/,
     "the loop re-adds each repo to the in-memory set persist reads");
+});
+
+test("repo-state ownership is ONE rule for the loader AND the enforcement reader", () => {
+  // Quality round P1 (2026-09-16): `enforcementStateFor` returned whatever
+  // `repoStateCache` held, and the cache is filled by `stateForRepo` for any
+  // repo this session merely READ — so the same repo was "mine" or "not mine"
+  // depending on who looked first, and `declare_done` waved a never-recorded
+  // repo through on a warm cache while a cold one refused it.
+  const enforceAt = SRC.indexOf("function enforcementStateFor(");
+  assert.ok(enforceAt > 0, "the enforcement reader must exist");
+  const enforce = SRC.slice(enforceAt, SRC.indexOf("/** Normalize a tool/git path", enforceAt));
+  assert.ok(enforce.length > 0, "the window must cover the function");
+  assert.match(enforce, /stateOwnership\(process\.env, state\.sessionId, onDisk\?\.sessionId\)/,
+    "ownership comes from the DISK, through the shared rule");
+  assert.doesNotMatch(enforce, /if \(cached\) return cached/,
+    "the cache must not answer the ownership question — that is what made the answer order-dependent");
+
+  const loaderAt = SRC.indexOf("function stateForRepo(");
+  const loader = SRC.slice(loaderAt, SRC.indexOf("repoStateCache.set(root, s)", loaderAt));
+  assert.match(loader, /stateOwnership\(process\.env, state\.sessionId, existing\?\.sessionId\)/,
+    "the loader takes the same three answers");
+  assert.doesNotMatch(loader, /sessionId === state\.sessionId/,
+    "…and never re-derives them inline");
 });
 
 test("session_start surfaces the migration notice and clears the flag", () => {
@@ -5439,13 +5465,15 @@ test("restart does not strand pane judges: registry + pendings persist per repo"
   const direct = [...SRC.matchAll(/judgeHierarchy = (?!next;)/g)]
     .filter((m) => !/let judgeHierarchy/.test(SRC.slice(Math.max(0, m.index! - 60), m.index)));
   assert.deepEqual(direct.map((m) => m[0]), [], "no direct table assignment outside the declaration");
-  // …and session_start restores before any tool can run.
-  // The window is a reading heuristic, not a contract: the repo-set re-arming
-  // block below `restore()` legitimately sits before this merge (it has to —
-  // `persist` overwrites what it re-arms), so the window has to reach past it.
+  // …and session_start restores before any tool can run. ANCHORS INSTEAD OF A
+  // WINDOW: a fixed slice of characters is a reading heuristic that breaks
+  // every time a comment above the merge grows (it did, twice, in one round) —
+  // what the rule actually says is "inside session_start, before any tool can
+  // run", so that is what is asserted.
   const startAt = SRC.indexOf('pi.on("session_start"');
-  assert.match(SRC.slice(startAt, startAt + 5000), /ensureHierarchyLoaded\(root\)/,
-    "a restarted session merges previous slices");
+  const mergeAt = SRC.indexOf("ensureHierarchyLoaded(root)", startAt);
+  assert.ok(mergeAt > startAt, "a restarted session merges previous slices");
+  assert.ok(mergeAt - startAt < 8000, "…early in session_start, before any tool can run");
 });
 
 test("restart does not deadlock on a dead opener: dead foreign entries are dropped", () => {

@@ -321,7 +321,7 @@ import {
 // long block (orchestrator_wait / judge_wait) instead of being queued behind it.
 import { notifyUserInput } from "../lib/poll-wait.ts";
 
-import { formatInheritanceBrief, handoffGeneration, isHandoffSuccessorOf, PREDECESSOR_SESSION_ENV, readInheritance, successorEnv, successorSessionId } from "../lib/session-inheritance.ts";
+import { formatInheritanceBrief, handoffGeneration, isHandoffSuccessorOf, PREDECESSOR_SESSION_ENV, readInheritance, stateOwnership, successorEnv, successorSessionId } from "../lib/session-inheritance.ts";
 import {
   childWorktreeBranch,
   childWorktreePath,
@@ -1213,7 +1213,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     let s = repoStateCache.get(root);
     if (!s) {
       const existing = loadSidecar(sidecarPath(root));
-      if (existing && existing.sessionId === state.sessionId) {
+      const owner = stateOwnership(process.env, state.sessionId, existing?.sessionId);
+      if (owner === "mine" && existing) {
         s = existing;
       } else {
         s = emptyState(state.sessionId ?? null, projectConfig.maxRounds);
@@ -1228,15 +1229,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         // A relay successor continues the same work in EVERY repo it touched,
         // so a SECONDARY repo's sidecar is inherited on the same terms as the
-        // primary one — one rule, one function, no second copy of it here
-        // (`isHandoffSuccessorOf` re-checks the marker against the sidecar's
-        // own sessionId, so this can only adopt state the predecessor wrote).
-        // Without it, the moment the successor touched its second repo the
-        // gate would ask it to negotiate a goal it already has (reviewer P2,
-        // round 1).
-        if (existing && isHandoffSuccessorOf(process.env, existing.sessionId)) {
-          s = inheritGoalContract(s, existing);
-        }
+        // primary one — one rule, one function (`lib/session-inheritance.ts`'s
+        // `stateOwnership`), no second copy of it here. Without it, the moment
+        // the successor touched its second repo the gate would ask it to
+        // negotiate a goal it already has (reviewer P2, round 1).
+        if (owner === "inherited" && existing) s = inheritGoalContract(s, existing);
       }
       repoStateCache.set(root, s);
     }
@@ -1424,20 +1421,27 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /** State used for ENFORCEMENT checks (ship gate, declare_done): the
-   *  primary's live state, the in-memory cache, or a sidecar left by THIS
-   *  session. A sidecar from ANOTHER session is NOT trusted here (same policy
-   *  as stateForRepo — see its docstring): it falls through to undefined so
-   *  the caller's fail-closed "no gate state" handling applies (a never-
-   *  edited repo with uncommitted work blocks shipping from it). */
+   *  primary's live state, or a sidecar THIS session may rely on — its own, or
+   *  the predecessor's this handoff continued. A sidecar from anybody else is
+   *  NOT trusted here (same rule as stateForRepo, from the same function): it
+   *  falls through to undefined so the caller's fail-closed "no gate state"
+   *  handling applies (a never-edited repo with uncommitted work blocks
+   *  shipping from it). */
   function enforcementStateFor(root: string): GateState | undefined {
-    // The session's OWN repo answers from the in-memory state; any other repo
-    // must produce a sidecar written by THIS session, or the caller's
-    // fail-closed "no gate state" handling applies.
     if (root === primaryRepoRoot) return state;
-    const cached = repoStateCache.get(root);
-    if (cached) return cached;
-    const loaded = loadSidecar(sidecarPath(root));
-    return loaded && loaded.sessionId === state.sessionId ? loaded : undefined;
+    // THE CACHE IS NOT A SOURCE OF OWNERSHIP (quality round P1, 2026-09-16).
+    // This used to be `repoStateCache.get(root) ?? …`, and `stateForRepo`
+    // fills that cache for any repo this session merely READ — `settleFinishedRounds`
+    // alone walks `sessionRepos` on every settle. So whether a repo counted as
+    // this session's own came down to who looked first: a cold cache failed a
+    // never-recorded repo closed, a warm one waved it through
+    // `unmetRequirements` with nothing unmet. Same repo, two answers, on the
+    // path that decides whether work may ship. Ownership is read from the DISK
+    // through the one rule `stateForRepo` also uses; the cache only supplies
+    // the fresher copy once that sidecar is known to be ours to rely on.
+    const onDisk = loadSidecar(sidecarPath(root));
+    if (stateOwnership(process.env, state.sessionId, onDisk?.sessionId) === "foreign") return undefined;
+    return repoStateCache.get(root) ?? onDisk;
   }
 
   /** Normalize a tool/git path to a repo-relative form for scope comparisons
@@ -11656,6 +11660,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
     state.sessionId = sessionId;
+    // P-multi: re-arm the repo set from the persisted list — a same-session
+    // resume keeps the repos it edited, and a RELAY SUCCESSOR inherits the
+    // predecessor's (lib/gate-state.ts's `inheritGoalContract` is what puts
+    // them on the state). Only repos whose sidecar still exists are re-added —
+    // a deleted checkout must not block declare_done forever.
+    //
+    // IT HAS TO LAND ABOVE THE FIRST persist() (quality round P1, 2026-09-16):
+    // `persist` writes `state.sessionReposPaths` FROM this in-memory set, and a
+    // relay successor ALWAYS persists early (the spawner hands it its mode, and
+    // `setTaskMode` persists) — so an inherited list re-armed any later was
+    // erased before anything could read it, and the inheritance was dead code.
+    for (const r of state.sessionReposPaths ?? []) {
+      if (r !== primaryRepoRoot && existsSync(sidecarPath(r))) sessionRepos.add(r);
+    }
     // Take over previous sessions' pane judges: merge their registry + pendings
     // so live panes stay addressable and no second pi is forked onto one
     // session id. Judge panes themselves skip this (they operate nothing).
@@ -11693,27 +11711,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // restored state — otherwise the wait would sit there unnoticed until the
     // next tool call, which is the blind wait this watcher exists to end.
     syncAllCopilotWatches();
-
-    // P-multi: re-arm the repo set from the persisted list — a same-session
-    // resume keeps the repos it edited, and a RELAY SUCCESSOR inherits the
-    // predecessor's (lib/gate-state.ts's `inheritGoalContract` is what puts
-    // them on the state). Only repos whose sidecar still exists are re-added —
-    // a deleted checkout must not block declare_done forever.
-    //
-    // WHERE IT SITS IS PART OF THE RULE (quality round P1, 2026-09-16).
-    // Above the first persist, because `persist` writes
-    // `state.sessionReposPaths` FROM this in-memory set and a relay successor
-    // ALWAYS persists early (the spawner hands it its mode, and `setTaskMode`
-    // persists) — the inherited list used to be erased before anything could
-    // read it. Below `syncAllCopilotWatches()`, because a repo added here
-    // reaches that loop, `copilotWatchKey` reads the repo's state, and that
-    // POPULATES `repoStateCache` — which `enforcementStateFor` trusts without
-    // re-checking whose sidecar produced it, so `/gate-status` would report an
-    // inherited, never-recorded repo as "PENDING / none" instead of "no
-    // usable gate state".
-    for (const r of state.sessionReposPaths ?? []) {
-      if (r !== primaryRepoRoot && existsSync(sidecarPath(r))) sessionRepos.add(r);
-    }
 
     // Reflect the precommit config source in the status bar right away.
     updateWidget(ctx);

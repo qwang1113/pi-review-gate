@@ -140,6 +140,39 @@ export function isHandoffSuccessorOf(
   return predecessor !== undefined && owner.length > 0 && predecessor === owner;
 }
 
+/**
+ * WHOSE STATE IS THIS? — the ONE answer both readers of a repo's sidecar take
+ * (quality round P1, 2026-09-16).
+ *
+ *  - `mine`      — written by THIS session: adopt it as it stands.
+ *  - `inherited` — written by the predecessor this session's own handoff
+ *                  continued. The user's contracts travel; the predecessor's
+ *                  round standings do not.
+ *  - `foreign`   — anybody else's: not evidence, and not permission.
+ *
+ * WHY THIS IS A FUNCTION AND NOT A COMPARISON AT EACH CALL SITE. Two readers
+ * used to answer it differently: the repo-state loader adopted a sidecar only
+ * for `mine` (and built an empty state otherwise), while the ENFORCEMENT reader
+ * returned whatever its cache held — and that cache is filled by the loader for
+ * ANY repo this session reads. So whether a repo counted as this session's own
+ * depended on who looked first: a cold cache failed a never-recorded repo
+ * closed ("no gate state"), a warm one passed it through `unmetRequirements`
+ * with nothing unmet — the same repo, two answers, on the path that decides
+ * whether work may ship.
+ */
+export type StateOwnership = "mine" | "inherited" | "foreign";
+
+export function stateOwnership(
+  env: NodeJS.ProcessEnv,
+  ownSessionId: string | null | undefined,
+  sidecarSessionId: string | null | undefined,
+): StateOwnership {
+  const own = (ownSessionId ?? "").trim();
+  const theirs = (sidecarSessionId ?? "").trim();
+  if (theirs.length > 0 && theirs === own) return "mine";
+  return isHandoffSuccessorOf(env, theirs) ? "inherited" : "foreign";
+}
+
 /** The successor's first action, per kind — one sentence, no tool sequencing to remember. */
 const FIRST_ACTION: Record<InheritedKind, string> = {
   orchestrator:
