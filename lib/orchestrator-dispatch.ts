@@ -44,6 +44,7 @@ import {
   type OrchestratorRuntime,
 } from "./orchestrator-registry.ts";
 import {
+  buildBranchLine,
   buildChildCommand,
   buildDeliveryMarker,
   buildTaskDocument,
@@ -304,6 +305,22 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     };
     cwd = isolated.path;
   }
+  // WHERE THIS CHILD WORKS (2026-09-18, A) — the gate's own fact, rendered by
+  // the gate (`buildBranchLine`). The fixed 「开工前先给自己开一个功能分支」
+  // sentence this replaces told a FINISH task to fork the very branch it was
+  // spawned to deliver; the branch was known HERE all along.
+  //
+  // `stationCap` is this task's ceiling, and it is what decides whether the
+  // gate's own worktree branch may be published: at `pr` the child ships, so
+  // it must rename the internal handle before pushing (`buildBranchLine` says
+  // how) — while below `pr` the same handle is a private working branch that
+  // must not become a PR head.
+  const branchLine = buildBranchLine({
+    ...(worktree === undefined
+      ? { branch: deps.currentBranch?.(cwd) }
+      : { branch: worktree.branch, isolated: true }),
+    mayShip: stationCap === "pr",
+  });
   // CROSS-REPO FIX (2026-09-17, measured): the task file MUST land in the
   // TASK's repo (the child resolves `@.pi/tasks/<file>` against ITS cwd,
   // which is `cwd` above). Writing it into the ORCHESTRATOR's repo made a
@@ -311,7 +328,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // pi exited at boot, the pane died, and the delivery check found nothing.
   const written = deps.writeTaskFile(
     taskFileName(marker),
-    buildTaskDocument({ marker, taskId, title: task.title, brief, stationCapLine }),
+    buildTaskDocument({ marker, taskId, title: task.title, brief, stationCapLine, branchLine }),
     cwd,
   );
   if (!written.ok) {

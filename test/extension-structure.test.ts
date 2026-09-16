@@ -4863,6 +4863,17 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
 });
 
 
+test("a parallel round's receipt carries BOTH findings streams (B1, 2026-09-18)", () => {
+  const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
+  // The text used to name only the ROUTED judge's stream, so a parallel round's
+  // functional findings — the ones the agent fixes WHILE both judges work — had
+  // no path on the reply, nor in `details`.
+  assert.match(body, /streamPath: judge\.streamPath/,
+    "every accepted judge keeps its own stream");
+  assert.match(body, /\[`- \$\{a\.role\} 的 findings 流（边审边修）: \$\{a\.streamPath\}`\]/,
+    "and the receipt prints one line per judge, matched by role");
+});
+
 test("judge_submit runs the whole submission chain, and cannot dead-end on it", () => {
   const body = windowOf("async function submitForReview(", "\n  /**", "submitForReview");
   // Each step is the TOOL's own execute — one implementation, one set of

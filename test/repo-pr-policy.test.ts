@@ -54,8 +54,8 @@ test("a repo with more than one task stops at commit; a single-task repo keeps t
   assert.equal(effectiveTaskStation(p, T1, REPO), MULTI_TASK_REPO_STATION, "two tasks in one repo ⇒ one PR, merged locally");
   assert.equal(effectiveTaskStation(p, T3, REPO), "pr", "a repo with one task is not narrowed at all");
   assert.deepEqual(
-    narrowedRepoStations(p, REPO).map((n) => ({ repo: n.repo, ids: n.taskIds, capped: n.cappedTaskIds })),
-    [{ repo: REPO, ids: ["t1-ingest", "t2-blacklist"], capped: ["t1-ingest", "t2-blacklist"] }],
+    narrowedRepoStations(p, REPO).map((n) => ({ repo: n.repo, ids: n.taskIds })),
+    [{ repo: REPO, ids: ["t1-ingest", "t2-blacklist"] }],
   );
 });
 
@@ -125,7 +125,8 @@ test("the finish task still COUNTS as a task of its repo (2026-09-18, user decis
   assert.equal(effectiveTaskStation(p, DELIVER, REPO), "pr");
   const [narrowing] = narrowedRepoStations(p, REPO);
   assert.deepEqual(narrowing!.taskIds, ["t1-ingest", "deliver"], "the repo holds both…");
-  assert.deepEqual(narrowing!.cappedTaskIds, ["t1-ingest"], "…and the cap applies to one of them");
+  assert.deepEqual(Object.keys(narrowing!).sort(), ["repo", "station", "taskIds"],
+    "…and the narrowing carries only facts somebody reads (the dead per-task field went, 2026-09-18)");
 });
 
 test("a finish task alone in its repo is not a narrowing at all", () => {

@@ -400,6 +400,19 @@ export interface OrchestratorDeps {
   knownRepoRoots(): string[];
 
   /**
+   * The branch a checkout is on right now, when the gate can read one
+   * (2026-09-18, A).
+   *
+   * The task book states where the child WORKS instead of telling the agent to
+   * run `git checkout -b` (philosophy one), and this is the one fact that
+   * statement needs. `undefined` — a detached HEAD, a directory that is not a
+   * repository, a host with no git capability wired — is NOT an error: the
+   * task book falls back to the naming rule, which is exactly the case where a
+   * new branch really is owed.
+   */
+  currentBranch?(root: string): string | undefined;
+
+  /**
    * Fired on every orchestration-tool execution (2026-08-30, symmetric
    * re-arm).
    *

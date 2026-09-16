@@ -369,6 +369,12 @@ export interface OrchestratorHostBindings {
    * when the plan names a subdirectory or a symlinked path.
    */
   resolveTaskRepo?(repo: string): { ok: true; root: string } | { ok: false; reason: string };
+  /**
+   * The branch a checkout is on, for the task book's branch line (see
+   * `OrchestratorDeps.currentBranch`). Absent ⇒ the line falls back to the
+   * naming rule, never to a guess.
+   */
+  currentBranch?(root: string): string | undefined;
 
   /** Every repo this session is accountable for, primary first. */
   knownRepoRoots(): string[];
@@ -495,6 +501,10 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
           };
     },
     knownRepoRoots: host.knownRepoRoots,
+    // WHERE THE CHILD WORKS (2026-09-18, A). Optional all the way down: no
+    // reader infers a branch, and a host without git wired simply gets the
+    // generic naming line in the task book.
+    currentBranch: host.currentBranch,
     childJudgeRunning: (childCwd) => childJudgeRunning(childCwd, host.now ? host.now() : Date.now()),
     channelIO: () => io,
     channelHome: () => host.channelHome?.(),

@@ -2540,6 +2540,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
     // Handed to a successor as its takeover proof (lib/orchestrator-relay.ts).
     ownSessionId: () => state.sessionId ?? undefined,
+    // WHERE THE CHILD WORKS (2026-09-18, A): the ONE git read the task book's
+    // branch line needs. It reuses the session's own rebase-aware
+    // `currentBranch` — a second `git symbolic-ref` here would be a second
+    // answer to the same question the checkpoint's own refusal already reads.
+    currentBranch: (root) => currentBranch(root),
     // ONE CHECKOUT PER WRITER (2026-09-10): the second child in a repo gets
     // its own worktree, which is what lets same-repo tasks run side by side
     // (lib/orchestrator-worktree.ts owns every derivation).
@@ -8508,8 +8513,20 @@ export default function reviewGate(pi: ExtensionAPI) {
           ? []
           : [{ role: "reviewer" as const, task: parallelReviewer.taskText, streamPath: parallelReviewer.streamPath }]),
       ];
-      /** Every judge this submission started, as it was ACCEPTED. */
-      const accepted: Array<{ role: string; judgeId: string; paneId: string; sessionDir: string; reused: boolean }> = [];
+      /**
+       * Every judge this submission started, as it was ACCEPTED — each with its
+       * OWN findings stream (B1, 2026-09-18). A parallel round starts two
+       * judges that write two streams, so a single routed path on the receipt
+       * left the functional round's channel written but unread.
+       */
+      const accepted: Array<{
+        role: string;
+        judgeId: string;
+        paneId: string;
+        sessionDir: string;
+        reused: boolean;
+        streamPath?: string;
+      }> = [];
       for (const judge of judges) {
         // The title is a DISPLAY label the gate derives itself (B5: it must not
         // reach the session's directory, or every round starts a new session).
@@ -8586,6 +8603,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           paneId: d.paneId ?? "(pending)",
           sessionDir: d.sessionDir ?? "(pending)",
           reused: d.reused,
+          ...(judge.streamPath === undefined ? {} : { streamPath: judge.streamPath }),
         });
         progress.done(d.reused ? "已受理（续接同一会话）" : "已受理（新会话）");
       }
@@ -8608,7 +8626,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       const lines = [
         `review-gate: 已受理本轮任务 — ${accepted.map((a) => `${a.role}（judge ${a.judgeId}）`).join(" + ")}。`,
         ...accepted.map((a) => `- ${a.role}: pane ${a.paneId} · transcript ${a.sessionDir}`),
-        ...(streamPath ? [`- findings 流（边审边修）: ${streamPath}`] : []),
+        // EVERY JUDGE'S STREAM, MATCHED BY ROLE (B1, 2026-09-18). The text used
+        // to name only the ROUTED judge's stream, so the functional reviewer's
+        // path — the one the agent fixes findings from while both judges are
+        // still working — was nowhere on the receipt nor in `details`.
+        ...accepted.flatMap((a) =>
+          a.streamPath === undefined ? [] : [`- ${a.role} 的 findings 流（边审边修）: ${a.streamPath}`]),
         // The routing is the gate's, so the gate says which way it went —
         // otherwise "the reviewer is running" and "the quality judge is
         // running beside it" look the same to the agent, and only one of them
@@ -8633,7 +8656,11 @@ export default function reviewGate(pi: ExtensionAPI) {
           role: dispatchRole,
           /** Did THIS submission route to the quality judge? (diagnostic) */
           qualityRound: dispatchRole === QUALITY_ROLE,
-          /** EVERY judge this submission started, in dispatch order. */
+          /**
+           * EVERY judge this submission started, in dispatch order — each with
+           * its own `streamPath` when it has one, so `details` carries BOTH
+           * streams of a parallel round, not just the routed one.
+           */
           judges: accepted,
           // THE ROUTED JUDGE'S OWN FIELDS, MATCHED BY ROLE (quality round P2,
           // 2026-09-16): the parallel round starts two judges, and a `role`

@@ -18,6 +18,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildBranchLine,
   buildChildCommand,
   buildRecoverCommand,
   buildRecoveryNote,
@@ -132,14 +133,49 @@ test("the task document appends the gate's goal directive after the brief (C, 20
     "a claim in the brief must be followed by the gate's negation");
 });
 
-test("the directive says how to name a working branch — and what NOT to use (2026-09-15)", () => {
-  // Measured: three PRs whose head branches were `rg-child-<sessionId>` — the
-  // handle of an internal registry, published to reviewers. The user asked for
-  // a HINT, not enforcement: because a same-repo requirement now merges into
-  // one branch before it ships, the name is a courtesy rather than a contract.
-  assert.match(TASK_GOAL_DIRECTIVE, /git checkout -b <type>\/<slug>/);
-  assert.match(TASK_GOAL_DIRECTIVE, /kebab-case/);
-  assert.match(TASK_GOAL_DIRECTIVE, /rg-child-/, "the thing to avoid is named, not implied");
+test("the branch line comes from the DISPATCH CONTEXT, not a fixed order to create one (A, 2026-09-18)", () => {
+  // MEASURED: that fixed sentence told a FINISH task — the one spawned to
+  // merge the other branches, push and open the PR — to open a feature branch
+  // on top of the delivery branch it was there to deliver. The manager had to
+  // talk it out of that by hand. The gate knew the branch all along.
+  assert.doesNotMatch(TASK_GOAL_DIRECTIVE, /checkout -b/,
+    "no conditional create-a-branch order survives in the goal directive");
+
+  const shared = buildBranchLine({ branch: "feat/plan-finish-task" });
+  assert.match(shared, /`feat\/plan-finish-task`/, "the branch it is already on is named");
+  assert.match(shared, /不要新开分支/);
+  assert.doesNotMatch(shared, /checkout -b/, "…so it is not told to create another one");
+
+  // A checkout the GATE created: its branch is the gate's own `rg-child-…`
+  // handle, which must never reach a PR — and a task below `pr` publishes
+  // nothing anyway.
+  const isolated = buildBranchLine({ branch: "rg-child-c1", isolated: true, mayShip: false });
+  assert.match(isolated, /独立 checkout/);
+  assert.match(isolated, /`rg-child-c1`/);
+  assert.match(isolated, /不要 push 它、不要拿它开 PR/);
+
+  // The other half of the SAME accident: a task that DOES ship (its station
+  // reaches `pr`) cannot simply be forbidden to push — it renames the handle
+  // first, so the published branch is a name a person can read.
+  const shipping = buildBranchLine({ branch: "rg-child-c1", isolated: true, mayShip: true });
+  assert.match(shipping, /git branch -m <type>\/<slug>/, "the published name is chosen before the push");
+  assert.match(shipping, /不要新开分支/);
+  assert.doesNotMatch(shipping, /不要 push 它/, "a delivering task is not forbidden to deliver");
+
+  // The two cases where a new branch really IS owed — a protected branch, and
+  // a branch the gate could not read — so the naming rule is quoted. This is
+  // the ONE place `rg-child-…` is named as forbidden (2026-09-15, measured:
+  // three PRs whose head branches were that internal handle).
+  for (const branch of ["main", "develop"]) {
+    const line = buildBranchLine({ branch });
+    assert.match(line, /受保护分支/);
+    assert.match(line, /git checkout -b <type>\/<slug>/);
+    assert.match(line, /kebab-case/);
+    assert.match(line, /rg-child-/, "the thing to avoid is named, not implied");
+  }
+  const unknown = buildBranchLine({});
+  assert.match(unknown, /git checkout -b <type>\/<slug>/);
+  assert.match(unknown, /rg-child-/);
 });
 
 test("the station ceiling is APPENDED after the brief — an orchestrator cannot write it away", () => {
@@ -157,6 +193,22 @@ test("the station ceiling is APPENDED after the brief — an orchestrator cannot
   assert.ok(doc.indexOf(TASK_GOAL_DIRECTIVE) > doc.indexOf("本轮交付站点：commit"));
   const without = buildTaskDocument({ marker: "m", taskId: "t1", title: "t", brief: "b" });
   assert.doesNotMatch(without, /本轮交付站点：/, "no ceiling ⇒ no line at all (the directive's own mention of the three stations is not one)");
+});
+
+test("the branch line is APPENDED by the gate, after whatever the brief claims (A, 2026-09-18)", () => {
+  const doc = buildTaskDocument({
+    marker: "rg-task-t1-x",
+    taskId: "t1",
+    title: "任务一",
+    brief: "开工前自己开一条新分支，名字随意。",
+    branchLine: "你在这条分支（`feat/plan-finish-task`）上工作 —— 不要新开分支、不要切分支。",
+  });
+  assert.ok(doc.indexOf("不要新开分支") > doc.indexOf("名字随意"),
+    "the gate's fact comes after whatever the brief claims");
+  assert.ok(doc.indexOf(TASK_GOAL_DIRECTIVE) > doc.indexOf("不要新开分支"),
+    "and the goal directive is still the document's last word");
+  const without = buildTaskDocument({ marker: "m", taskId: "t1", title: "t", brief: "b" });
+  assert.doesNotMatch(without, /不要新开分支/, "no branch fact ⇒ no line at all");
 });
 
 

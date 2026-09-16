@@ -150,14 +150,11 @@ export function allowsMultiplePrs(plan: RepoPrPlanInput, repo: string): boolean 
 /** One repo whose station is narrower than the plan's. */
 export interface RepoNarrowing {
   repo: string;
-  /** EVERY task in this repo, in plan order — including the finish task. */
-  taskIds: string[];
   /**
-   * The subset this cap actually applies to: every task but the plan's LAST
-   * one. The finish task rides in `taskIds` (it counts) and is absent here
-   * (it is never capped).
+   * EVERY task in this repo, in plan order — including the finish task, which
+   * counts towards the one-PR-per-repo rule even though it is never capped.
    */
-  cappedTaskIds: string[];
+  taskIds: string[];
   /** What every capped task in this repo may reach. */
   station: DeliveryStation;
 }
@@ -171,7 +168,6 @@ export function narrowedRepoStations(
   defaultRepo: string,
 ): RepoNarrowing[] {
   const narrowings: RepoNarrowing[] = [];
-  const finish = finishTaskId(plan);
   for (const [repo, taskIds] of tasksByRepo(plan, defaultRepo)) {
     // The COUNT is every task in the repo, the finish task included: it is one
     // PR per repo per requirement, and a plan whose last task publishes while
@@ -185,7 +181,6 @@ export function narrowedRepoStations(
     narrowings.push({
       repo,
       taskIds,
-      cappedTaskIds: taskIds.filter((id) => id !== finish),
       station: MULTI_TASK_REPO_STATION,
     });
   }
