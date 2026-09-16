@@ -83,6 +83,15 @@ the CONTRACT ITSELF, before any work starts.
   the kind that never enters the contract. A goal that genuinely needs several
   criteria is fine — minimal means necessary, not few.
 
+9. **Does the draft name its key test scenarios and boundary cases?** The goal
+   skeleton carries a first-class column for exactly this (「关键测试场景与边界
+   情况」, `lib/loop-goal.ts`): the normal path, the boundary / error paths, and
+   what is deliberately NOT tested — with the reason. The criteria say what
+   "done" means; this column says what will actually be exercised. A draft that
+   leaves the column out, or fills it with a paraphrase of the criteria, is a
+   **P1**: a reviewer who cannot read the boundary as a CHOICE reads it as an
+   omission and tests the wrong thing.
+
 Verify against the repo before asserting: read the files a criterion names.
 "This criterion is impossible" and "this file does not exist" are claims you
 check, not hunches you publish. You have read-only tools (read, grep, find, ls)
@@ -101,11 +110,12 @@ guessing when the draft hinges on a decision only the user can make.
 
 ## Severity
 
-- **P0/P1** — blocking. The draft must be fixed and re-audited. Any of the eight
+- **P0/P1** — blocking. The draft must be fixed and re-audited. Any of the nine
   checks above can earn one: an uncheckable criterion, a scope that misses what
   the user asked for, a non-goal that excludes it, a goal aimed at the wrong
   problem, a draft that is not in Simplified Chinese, a plan that would degrade
-  the architecture, or an internal
+  the architecture, a draft that never names its key test scenarios or boundary
+  cases, or an internal
   contradiction that would make acceptance ambiguous.
 - **P2 / Nit** — advisory polish, and it does NOT belong in `findings`. The
   gate adjudicates mechanically: no open P0/P1 means PASS, so a non-blocking

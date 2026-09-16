@@ -163,3 +163,19 @@ test("the audit task carries the 7th check: minimalism (inside the checklist, me
     assert.ok(!task.includes(rule), `the four checks must not be quoted in the task (found: ${rule})`);
   }
 });
+
+test("the audit task carries the 9th check: architecture & code organization (placement, shared contracts)", () => {
+  const task = buildPlanAuditTask(planOf());
+  assert.match(task, /9\. 架构与代码组织/, "the new check sits inside the checklist");
+  // (a) placement — judged against the repository's real size, because the
+  // hard gate only covers NEW files (lib/file-size-gate.ts, 600 lines).
+  assert.match(task, /代码落点/);
+  assert.match(task, /lib\/file-size-gate\.ts/, "it names the half the hard gate does not cover");
+  // (b) shared contracts between tasks.
+  assert.match(task, /共享契约/);
+  assert.match(task, /dependsOn/);
+  // The 2026-09-17 user decision: file lists are NOT part of a plan, so this
+  // check must not turn into a demand for one.
+  assert.match(task, /任务改哪些文件不是 plan 的一部分/);
+  assert.match(task, /不要因为 plan 没列文件清单/);
+});

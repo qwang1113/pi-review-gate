@@ -297,9 +297,11 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
    因为审核范围是 immutable commit,工作区编辑不失效本轮。
 
 3. **Review** — the reviewer audits the COMMIT RANGE `baseline..HEAD` (the
-   immutable checkpoint commits) with `git show`/`git diff`; it may verify by
-   doing in a throwaway `$TMPDIR` copy (mutation analysis included) and must
-   restore before finishing. The reviewer must NOT be fed your own
+   immutable checkpoint commits) with `git show`/`git diff`. It reads the code
+   first and runs nothing by default; a concrete doubt buys the minimal
+   verification, done in a throwaway `$TMPDIR` copy it restores before
+   finishing (`docs/judge-protocol.md` 「验证纪律」 is the rule's one home).
+   The reviewer must NOT be fed your own
    conclusions (fresh eyes only) and ends the round by calling
    `judge_conclude` once:
 

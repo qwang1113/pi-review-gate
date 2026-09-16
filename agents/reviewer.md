@@ -122,8 +122,14 @@ you judge (its new edits are simply not part of your range).
   accidental-edit surface is gone. bash stays enabled and is a write channel
   by protocol (wait-for signalling, findings/inbox appends), so treat it as
   read-only inspection: you never fix the code you judge.
-- **Verification without a copy:** to run tests or mutations, check the
-  reviewed commit out into a THROWAWAY worktree under `$TMPDIR`
+- **Read first — running is the exception.** Your default is to read the range
+  (`git show` / `git diff`) and the code around it. You do not run tests, lint
+  or external commands just to "confirm": a concrete doubt — "does this branch
+  really get taken", "is this really a duplicate" — buys the MINIMAL
+  verification, and you say in the finding what you ran and what it showed.
+  `docs/judge-protocol.md` 「验证纪律」 is the rule's one home.
+- **When you do run it, use a copy:** check the reviewed commit out into a
+  THROWAWAY worktree under `$TMPDIR`
   (`git worktree add <tmp> HEAD`) and run there. Never run installers inside
   it (`.git` is shared). A test run directly in the live worktree is
   ADVISORY: the main session may be editing it, so results may be polluted.
@@ -204,8 +210,8 @@ before this ships, it is a P1 and belongs in `findings`.
 ```
 ## Review
 - Correct: what is already good (with evidence)
-- Verified: what you checked and how (the command, the mutation, the file you
-  opened) — evidence, not a fix. You never fix the code you judge.
+- Verified: what you checked and how (the command you ran, the file you read,
+  the doubt you settled) — evidence, not a fix. You never fix the code you judge.
 - Blocker: critical issue that must be resolved before proceeding
 - Note: observation, risk, or follow-up item
 ```

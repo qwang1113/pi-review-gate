@@ -377,9 +377,11 @@ files changed since (no history ⇒ full brief).
 
 (c) **The reviewer judges a COMMIT RANGE, and findings stream.** The chain
 inside `judge_submit` computes `baseline..HEAD` (the
-immutable commits under review) and a finding-stream file. Inside its own
-copy a reviewer SHOULD verify by doing — mutation analysis included — and
-must restore before finishing. Because the reviewed range is immutable,
+immutable commits under review) and a finding-stream file. The reviewer READS
+the range and runs nothing by default; a concrete doubt buys the MINIMAL
+verification, done in its own throwaway copy and restored before finishing
+(`docs/judge-protocol.md` 「验证纪律」 is the only substantive home of that rule;
+every surface here only points at it). Because the reviewed range is immutable,
 **you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
 that carry evidence (confirm each in the code first), leave Nits for the
 verdict. WAITING-WINDOW DISCIPLINE（2026-09-05 起的口径，`lib/agent-directives.ts`

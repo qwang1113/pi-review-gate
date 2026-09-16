@@ -269,7 +269,7 @@ export function buildQualityAuditTask(input: {
   const lines = [
     `You are the quality auditor of this round. You judge the CODE ITSELF, on the commit range ${input.range} — immutable git history, and the only code this round judges. Read it with \`git show\` / \`git diff ${input.range}\`.`,
     "",
-    `YOUR CHECKLIST: \`${input.rulesPath}\` — read it FIRST (it is short). It has two layers: L1 (philosophy, architecture, correctness, performance) and L2 (simplicity, readability, maintainability). Only L1/L2 P0/P1 findings BLOCK the round; language-specific best practice and formatting are explicitly NOT yours (the repo's own linters own those).`,
+    `YOUR CHECKLIST: \`${input.rulesPath}\` — read it FIRST (it is short). It has two layers: L1 (philosophy, architecture, correctness, security, performance) and L2 (simplicity, readability, maintainability). Only L1/L2 P0/P1 findings BLOCK the round; language-specific best practice and formatting are explicitly NOT yours (the repo's own linters own those).`,
     "",
     "THE RANGE IS YOUR SCOPE, THE WHOLE REPOSITORY IS YOUR REFERENCE (the checklist's cross-repository clauses): a new helper that already exists elsewhere, an abstraction that two existing modules could share, a function you are touching that is already this messy. Judge the CHANGED lines, but go read the rest of the repo before concluding that a change stands alone.",
     "",
@@ -279,7 +279,7 @@ export function buildQualityAuditTask(input: {
       ? input.changeIndex.trim()
       : `Changed files (${input.files.length}) in ${input.range}:\n${input.files.map((f) => `- ${f}`).join("\n")}`,
     "",
-    `You are reviewing COMMIT RANGE ${input.range}: immutable git history — the main session may keep editing the worktree while you judge (its new edits are not part of your range). Judge the range, NEVER the live tree. You have no edit/write tools (edit/write are excluded); \`bash\` is read-only inspection. To try something, check the reviewed commit out into a THROWAWAY worktree under $TMPDIR (\`git worktree add <tmp> HEAD\`) and run there — never installers inside it (.git is shared). Never run git commit/push or any gh command.`,
+    `You are reviewing COMMIT RANGE ${input.range}: immutable git history — the main session may keep editing the worktree while you judge (its new edits are not part of your range). Judge the range, NEVER the live tree. You have no edit/write tools (edit/write are excluded); \`bash\` is read-only inspection. Read the code first — a concrete doubt buys the minimal verification (docs/judge-protocol.md 「验证纪律」 is the rule); if you do run something, check the reviewed commit out into a THROWAWAY worktree under $TMPDIR (\`git worktree add <tmp> HEAD\`) and run there — never installers inside it (.git is shared). Never run git commit/push or any gh command.`,
   ];
   if (input.session) {
     lines.push(

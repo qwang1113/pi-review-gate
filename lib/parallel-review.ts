@@ -41,9 +41,10 @@ export interface PrecommitBaselineFact {
  * The full suite and typecheck ALREADY ran as part of precommit before this
  * review was prepared; a reviewer re-running them burns minutes per round for
  * zero new information. The block states what was verified and when, and
- * steers the reviewer to targeted tests + mutation checks on the code under
- * scrutiny, with an explicit reopen clause for evidence of staleness. Pure
- * over strings so the wording is testable.
+ * steers the reviewer to the MINIMAL verification a concrete doubt earns —
+ * the discipline itself lives in docs/judge-protocol.md 「验证纪律」 — with an
+ * explicit reopen clause for evidence of staleness. Pure over strings so the
+ * wording is testable.
  */
 export function formatPrecommitBaseline(f: PrecommitBaselineFact): string {
   const lines = [
@@ -63,8 +64,9 @@ export function formatPrecommitBaseline(f: PrecommitBaselineFact): string {
     ...(f.testScope === "full"
       ? [
           "TRUST IT — do NOT re-run the full suite or typecheck: that is exactly the time the baseline just",
-          "spent, for zero new signal. Run ONLY targeted tests for the files you examine (e.g. `node --test",
-          "test/<file>.test.ts`) and mutation checks on the specific code under scrutiny.",
+          "spent, for zero new signal. Read the code first; when a concrete doubt needs a run, run ONLY the",
+          "targeted test that settles it (e.g. `node --test test/<file>.test.ts`) and say what it showed —",
+          "see the verification discipline in docs/judge-protocol.md.",
         ]
       : [
           `The recorded precommit is the ${f.testScope ?? "unknown"} lane — it covered only the related tests,`,
@@ -486,7 +488,7 @@ export function buildReviewPrompt(
     // worktree while the review runs — its new edits simply are not part of
     // the judged range. Verification happens in a THROWAWAY checkout.
     isolation
-      ? `You are reviewing COMMIT RANGE ${range}: immutable git history — the main session may keep editing the worktree while you judge (its new edits are not part of your range). Judge the range with \`git show\` / \`git diff\`, NEVER the live tree. You have no edit/write tools (edit/write are excluded); \`bash\` is read-only inspection. To run tests or mutations, check the reviewed commit out into a THROWAWAY worktree under $TMPDIR (\`git worktree add <tmp> HEAD\`) and run there — never installers inside it (.git is shared). A test run directly in the live worktree is ADVISORY: the main session may be editing it, so results may be polluted. Never run git commit/push or any gh command.`
+      ? `You are reviewing COMMIT RANGE ${range}: immutable git history — the main session may keep editing the worktree while you judge (its new edits are not part of your range). Judge the range with \`git show\` / \`git diff\`, NEVER the live tree. You have no edit/write tools (edit/write are excluded); \`bash\` is read-only inspection. Read the code first and run nothing by default: a concrete doubt buys the MINIMAL verification, and you say in the finding what you ran and what it showed (docs/judge-protocol.md 「验证纪律」). If you do run something, check the reviewed commit out into a THROWAWAY worktree under $TMPDIR (\`git worktree add <tmp> HEAD\`) and run there — never installers inside it (.git is shared). A test run directly in the live worktree is ADVISORY: the main session may be editing it, so results may be polluted. Never run git commit/push or any gh command.`
       : "You are reading the USER'S LIVE WORKTREE, and the main agent may be working in it. Do NOT edit any file. Do NOT run tests that write files. `bash` is read-only inspection only (git diff/log/show, reading files). Never run git commit/push or any gh command. Report what you find.",
   ];
   if (streamPath) lines.push("", buildStreamDirective(streamPath));
