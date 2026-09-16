@@ -271,23 +271,89 @@ export function classifyReadyWithholding(input: {
  * them is never a match: an unknown tree is not evidence that two trees are
  * the same, and replaying onto a round that has moved on would record a READY
  * nobody is looking at.
+ *
+ * TWO PRECONDITIONS, ONE DECISION (2026-09-16). A round whose two judges run
+ * together can be parked for EITHER reason: the lane that verifies its content
+ * has not landed, or the quality round owes a verdict. Those two land in
+ * either order, and each landing must be able to release the conclusion — so
+ * the outcome is computed from the STATE OF BOTH HALVES rather than from the
+ * event that happened to fire:
+ *
+ *   - both `ok`  ⇒ `replay`
+ *   - any `veto` ⇒ `clear` (the content or the round is disproven)
+ *   - otherwise  ⇒ `hold`  (something is still owed)
+ *
+ * Both callers compute their halves and then ask this one function, so the two
+ * landings cannot disagree about the outcome. `hold` is what keeps the record
+ * alive for the other landing; nothing else may decide that.
  */
-export type ParkedReadyFate = "none" | "clear" | "replay";
+export type ParkedReadyFate = "none" | "hold" | "clear" | "replay";
 
-export function parkedReadyFate(args: {
+/** One half of the replay question: satisfied, still owed, or disproven. */
+export type ParkedHalf = "ok" | "pending" | "veto";
+
+/**
+ * THE LANE'S HALF — what the full precommit lane that verifies this content
+ * has said so far.
+ *
+ *  - a NON-PASS landing is a `veto`: the content the reviewer approved just
+ *    failed its full lane, so the parked conclusion describes content that is
+ *    no longer shippable;
+ *  - a PASS covering EXACTLY the parked tree — while the gate's current review
+ *    target is still that same round — is `ok`;
+ *  - otherwise the answer depends on whether ANYONE IS STILL COMING. With a
+ *    lane running (or a fresh landing that was not a replay) the answer is
+ *    `pending` only while that lane can still land on it; a lane that already
+ *    landed on another tree, or a round the gate has moved past, will never
+ *    revisit this conclusion — that is a `veto`, because a hold nobody can end
+ *    parks the round forever (the `unverified-idle` rule, round-1 P1).
+ */
+export function parkedLaneHalf(args: {
   /** `pendingReady.tree`, when something is parked. */
   parkedTree: string | undefined;
-  /** What the lane that just landed returned (`PASS`, `FAIL`, …). */
-  laneVerdict: string;
-  /** `precommit.lastFullPassTree` after this lane landed. */
+  /** What the lane returned, when a lane JUST landed. Absent: no fresh landing. */
+  laneVerdict?: string | undefined;
+  /** `precommit.lastFullPassTree` — after the landing, or as recorded. */
   coveredTree: string | undefined;
   /** The tree the gate's current review target holds. */
   currentTargetTree: string | undefined;
+  /** Is a full lane running for this repo right now? */
+  laneRunning: boolean;
+}): ParkedHalf {
+  const parked = args.parkedTree;
+  if (parked === undefined || parked === "") return "veto";
+  if (args.laneVerdict !== undefined) {
+    if (args.laneVerdict !== "PASS") return "veto";
+    return args.coveredTree === parked && args.currentTargetTree === parked ? "ok" : "veto";
+  }
+  if (args.coveredTree === parked && args.currentTargetTree === parked) return "ok";
+  return args.laneRunning ? "pending" : "veto";
+}
+
+/**
+ * The combination — the ONLY thing the callers act on.
+ *
+ * `hold` is never a permanent state: the caller that holds a conclusion must
+ * have established that BOTH halves can still move (a lane is running, or the
+ * quality round can still conclude — `decideQualityHold` refuses otherwise),
+ * and every landing re-asks this function.
+ */
+export function parkedReadyFate(args: {
+  parkedTree: string | undefined;
+  /** The lane's half — see `parkedLaneHalf`. */
+  lane: ParkedHalf;
+  /**
+   * The quality round's half — computed from `qualityPrecondition`
+   * (lib/quality-round.ts), so the parking rule and the recording rule are ONE
+   * policy rather than two spellings of it.
+   */
+  quality: ParkedHalf;
 }): ParkedReadyFate {
   const parked = args.parkedTree;
   if (parked === undefined || parked === "") return "none";
-  if (args.laneVerdict !== "PASS") return "clear";
-  return args.coveredTree === parked && args.currentTargetTree === parked ? "replay" : "clear";
+  if (args.lane === "veto" || args.quality === "veto") return "clear";
+  if (args.lane === "ok" && args.quality === "ok") return "replay";
+  return "hold";
 }
 
 export function adjudicateReviewConclusion(input: StructuredConclusion): AdjudicatedReview {

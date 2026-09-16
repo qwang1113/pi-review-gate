@@ -4,10 +4,12 @@ import assert from "node:assert/strict";
 import {
   QUALITY_ROLE,
   buildQualityAuditTask,
+  decideQualityHold,
   isSourceFile,
-  qualityFollowUp,
+  qualityPrecondition,
   qualityRoundSkip,
   qualityStandingFor,
+  roundCancelPlan,
   skippedQualityRecord,
 } from "../lib/quality-round.ts";
 
@@ -78,29 +80,76 @@ test("skippedQualityRecord: a skip is a READY bound to the head, marked as a ski
   assert.match(rec.skipReason ?? "", /非代码文件/);
 });
 
-test("qualityFollowUp: READY releases the held round; anything else drops it AND stops the lane", () => {
-  // A pass releases the functional round it was holding…
-  assert.deepEqual(qualityFollowUp({ verdict: "READY", held: true }), {
-    dropHeld: false, abortLane: false, dispatchReviewer: true,
-  });
-  // …and a pass with nothing held changes nothing (the re-submission path:
-  // the router saw the standing pass and went straight to the reviewer).
-  assert.deepEqual(qualityFollowUp({ verdict: "READY", held: false }), {
-    dropHeld: false, abortLane: false, dispatchReviewer: false,
-  });
-  for (const verdict of ["BLOCKED", "NEEDS_HUMAN", undefined]) {
-    // The content is about to change: the held brief is history, and the full
-    // lane verifying that content has nothing left to prove.
-    assert.deepEqual(qualityFollowUp({ verdict, held: true }), {
-      dropHeld: true, abortLane: true, dispatchReviewer: false,
-    }, `${verdict}: a held round is dropped and the lane stopped`);
-    // The lane stop is INDEPENDENT of `held`: a blocking verdict on a round
-    // nobody was holding still wastes the lane's remaining minutes, and the
-    // next submission would wait for a quiet lane first.
-    assert.deepEqual(qualityFollowUp({ verdict, held: false }), {
-      dropHeld: false, abortLane: true, dispatchReviewer: false,
-    }, `${verdict}: the lane stops even with nothing held`);
+// ---------------------------------------------------------------------------
+// THE CANCEL MATRIX (2026-09-16): all three parties start together, so the
+// question is no longer "who runs first" but "who stops whom". Every pair gets
+// an assertion — a matrix tested only on its READY row is not tested at all.
+// ---------------------------------------------------------------------------
+
+test("roundCancelPlan: a non-READY QUALITY round stops the reviewer AND the lane", () => {
+  for (const verdict of ["BLOCKED", "NEEDS_HUMAN"]) {
+    assert.deepEqual(roundCancelPlan({ concluded: "quality", verdict }), {
+      cancelQuality: false, cancelReviewer: true, abortLane: true,
+    }, `${verdict}: the reviewer's pane dies and the lane is aborted`);
   }
+  // A READY cancels nothing: the functional round is exactly what the gate is
+  // still waiting for.
+  assert.deepEqual(roundCancelPlan({ concluded: "quality", verdict: "READY" }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
+  });
+});
+
+test("roundCancelPlan: a non-READY REVIEWER stops the quality round AND the lane", () => {
+  for (const verdict of ["BLOCKED", "NEEDS_HUMAN"]) {
+    assert.deepEqual(roundCancelPlan({ concluded: "reviewer", verdict }), {
+      cancelQuality: true, cancelReviewer: false, abortLane: true,
+    }, `${verdict}: the quality pane dies and the lane is aborted`);
+  }
+  assert.deepEqual(roundCancelPlan({ concluded: "reviewer", verdict: "READY" }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
+  });
+});
+
+test("roundCancelPlan: the FAILED LANE stops only the reviewer — the quality round carries on", () => {
+  // The asymmetry is the user's requirement: the quality judge reads code, and
+  // a failing test suite says nothing about the code's quality. `abortLane` is
+  // false because the lane has already landed — there is nothing left to abort.
+  assert.deepEqual(roundCancelPlan({}), {
+    cancelQuality: false, cancelReviewer: true, abortLane: false,
+  });
+  // An UNKNOWN verdict is never READY: only the exact word cancels nothing.
+  assert.deepEqual(roundCancelPlan({ concluded: "quality", verdict: undefined }), {
+    cancelQuality: false, cancelReviewer: true, abortLane: true,
+  });
+});
+
+test("qualityPrecondition: satisfied / still owed / disproven — the one reading both rules share", () => {
+  const pass = { ok: true as const, basis: "pass" as const };
+  assert.equal(qualityPrecondition({ standing: pass, qualityRoundInFlight: false }), "ok");
+  assert.equal(qualityPrecondition({ standing: pass, qualityRoundInFlight: true }), "ok", "a standing answer wins");
+  const pending = { ok: false as const, reason: "还没有质量轮的结论" };
+  assert.equal(qualityPrecondition({ standing: pending, qualityRoundInFlight: true }), "pending");
+  // NOBODY IS COMING BACK with a verdict (the pane died, or this round never
+  // dispatched one): fail closed rather than park the round forever.
+  assert.equal(qualityPrecondition({ standing: pending, qualityRoundInFlight: false }), "veto");
+});
+
+test("decideQualityHold: record / hold / refuse — and it is the same reading the parking rule uses", () => {
+  const pass = { ok: true as const, basis: "pass" as const };
+  const pending = { ok: false as const, reason: "还没有质量轮的结论" };
+  assert.equal(decideQualityHold({ standing: pass, qualityRoundInFlight: false }), "record");
+  // THE HEADLINE CASE OF THE PARALLEL DESIGN: the reviewer concluded first, the
+  // quality judge is still thinking — hold the conclusion, never record it yet.
+  assert.equal(decideQualityHold({ standing: pending, qualityRoundInFlight: true }), "hold");
+  // A standing recorded for ANOTHER head (the PREVIOUS round's BLOCKED) does
+  // not answer THIS round's question: this round dispatched its own quality
+  // judge, so the conclusion waits for that one instead of being refused on an
+  // older record.
+  assert.equal(
+    decideQualityHold({ standing: { ok: false, reason: "质量轮上一轮判了 BLOCKED" }, qualityRoundInFlight: true }),
+    "hold",
+  );
+  assert.equal(decideQualityHold({ standing: pending, qualityRoundInFlight: false }), "refuse");
 });
 
 test("buildQualityAuditTask: points at the checklist, carries the range and the stream — never the reviewer's brief", () => {

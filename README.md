@@ -387,8 +387,8 @@ can override any of them per agent:
 | Role | When | Gates? | Model priority (first = preferred) | Thinking |
 |------|------|--------|-------------------------------------|----------|
 | **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → Opus 5 | `max` |
-| **`quality-auditor`** (`agents/quality-auditor.md`) | *after* a diff exists and **before the functional reviewer** — judges the CODE ITSELF against the language-neutral checklist in `docs/code-quality-rules.md` (philosophy, architecture, correctness, security, performance; then simplicity, readability, maintainability), with the whole repo as its reference | yes (READY/BLOCKED) — and only a READY releases the reviewer, which the gate then dispatches itself | Fable 5 → Opus 5 | `max` |
-| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists and the quality round has passed — independent audit of whether the change does what the user asked; emits the recorded verdict | yes (READY/BLOCKED) | Fable 5 → Opus 5 | `max` |
+| **`quality-auditor`** (`agents/quality-auditor.md`) | *after* a diff exists, **beside** the functional reviewer — judges the CODE ITSELF against the language-neutral checklist in `docs/code-quality-rules.md` (philosophy, architecture, correctness, security, performance; then simplicity, readability, maintainability), with the whole repo as its reference | yes (READY/BLOCKED) — a non-READY cancels the reviewer's pane and the precommit lane (cancel matrix: `docs/execution-model.md` §「并行三方与取消矩阵」) | Fable 5 → Opus 5 | `max` |
+| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — one `judge_submit` starts it together with the quality round and the precommit lane; independent audit of whether the change does what the user asked; emits the recorded verdict | yes (READY/BLOCKED) — a `READY` that lands before the quality verdict is HELD until that verdict arrives | Fable 5 → Opus 5 | `max` |
 | **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | Fable 5 → Opus 5 | `max` |
 | **`goal-auditor`** (`agents/goal-auditor.md`) | *before the user sees a goal* — audits the DRAFT exit contract (checkable criteria, scope, non-goals, match with the ask, Simplified-Chinese rule) | yes — `propose_loop_goal` dispatches it and records its verdict itself, and shows no dialog without a matching PASS | Fable 5 → Opus 5 | `max` |
 
@@ -996,17 +996,19 @@ the gate registers ONE commit range for the whole change, regardless
 of how many files or lines it spans, and the reviewer audits it all.
 The verdict schema is `REVIEW_VERDICT_SCHEMA` in `lib/parallel-review.ts`.
 
-**Precommit runs FIRST, review second — never concurrently.** The runner
-schedules itself (no flags): any `lint:fix` script runs FIRST — it edits
-files, so the worktree stabilizes before anything reads it — then the
-remaining checks (lint/typecheck/build/test) run in parallel with
-declaration-order output. The review then spends the expensive judges'
-(max thinking) time only on a tree the cheap checks already confirmed
-green. This order is deliberate: a precommit FAIL is cheaper to fix before
-the expensive judge looks, and a review spent on a red tree is a fully
-wasted round — an earlier design ran both concurrently to save wall time
-and was abandoned for exactly that reason. Design record:
-`docs/execution-model.md`.
+**The precommit lane, the quality round and the reviewer all run
+CONCURRENTLY.** Three rules make that safe, and the runner schedules itself
+(no flags): any `lint:fix` script runs FIRST — it edits files, so the
+worktree stabilizes before anything reads it — then the remaining checks
+(lint/typecheck/build/test) run in parallel with declaration-order output.
+The two judges judge the IMMUTABLE `baseline..HEAD` commit range, so a lane
+still running cannot change what they read — and a READY that lands before
+its lane does is HELD until the lane reports, never refused (see
+`lib/review-adjudicate.ts`). And a lane that FAILS ends the reviewer's round
+rather than being reported beside it, while the quality round keeps running
+(it reads code, not test results). Which conclusion stops which party is the
+cancel matrix — its one substantive home is `docs/execution-model.md`
+§「并行三方与取消矩阵」. Design record: `docs/execution-model.md`.
 
 The reviewer ends the round by calling `judge_conclude` once, with structured
 fields:

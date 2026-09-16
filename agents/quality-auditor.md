@@ -1,6 +1,6 @@
 ---
 name: quality-auditor
-description: Dedicated code-quality pre-reviewer — judges the CODE ITSELF (philosophy, architecture, correctness, security, performance, then simplicity and maintainability) on the round's commit range, before the functional reviewer is allowed in
+description: Dedicated code-quality pre-reviewer — judges the CODE ITSELF (philosophy, architecture, correctness, security, performance, then simplicity and maintainability) on the round's commit range, in the same round as the functional reviewer (one `judge_submit` starts both; a non-READY verdict cancels the reviewer's pane and the precommit lane — cancel matrix in docs/execution-model.md)
 model: claude-fable-5
 fallbackModels: claude-opus-5
 thinking: max

@@ -405,10 +405,12 @@ import {
 } from "../lib/ship-gate-hook.ts";
 import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
+  decideQualityHold,
   QUALITY_ROLE,
-  qualityFollowUp,
+  qualityPrecondition,
   qualityRoundSkip,
   qualityStandingFor,
+  roundCancelPlan,
   skippedQualityRecord,
 } from "../lib/quality-round.ts";
 import {
@@ -477,6 +479,7 @@ import {
   classifyReadyWithholding,
   fileFindingsFrom,
   normalizeConcludedVerdict,
+  parkedLaneHalf,
   parkedReadyFate,
   readyLacksVerification,
   type ReviewFinding,
@@ -566,8 +569,11 @@ import {
 // it no longer runs either diagnosis itself.
 import {
   buildStallNotice,
+  classifyStallCause,
   evaluateStall,
+  negotiationFingerprint,
   progressSignature,
+  stallInMotion,
   STALL_MOTION_MAX_AGE_SEC,
   STALL_REPEAT_LIMIT,
   type StallState,
@@ -889,6 +895,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       recordGoalPrereview(goalPrereviewDeps, input, ctx),
     recordReviewVerdict: (concluded: ReportConclusion, repo: string, ctx: unknown) =>
       recordReviewVerdict(concluded, repo, ctx),
+    // THE QUALITY RECORDER, for the same reason the review one is here: since
+    // 2026-09-16 a functional READY can only be recorded when a quality
+    // standing covers the SAME head, so an end-to-end test of the recorder has
+    // to be able to produce the round that precedes it. It is a plain function
+    // (no tool, no registration); the seam only forwards it.
+    recordQualityVerdict: (concluded: ReportConclusion, repo: string, ctx: unknown) =>
+      recordQualityVerdict(concluded, repo, ctx),
   };
 
   /**
@@ -1019,6 +1032,19 @@ export default function reviewGate(pi: ExtensionAPI) {
   // circumstances, and a stale stall must never outlive the session).
   let loopStall: StallState | undefined;
   let stallNoticeShown = false;
+  /**
+   * WHEN THE GATE LAST GOT AN ANSWER OUT OF THE USER, in ISO — written by
+   * `askChoice`, which every one of the gate's dialogs goes through (ask_user's
+   * interview, the restatement / goal / plan approvals, the consent boxes).
+   *
+   * It exists for ONE reader: the stall breaker (`stallInMotion`), which must
+   * not call a live negotiation "no progress". In memory on purpose: `loopStall`
+   * is in memory too, so a restart starts the breaker from zero either way, and
+   * a persisted stamp could only excuse a turn it knows nothing about.
+   */
+  let lastUserInteractionAt: string | undefined;
+  /** ISO of the previous stall observation — what `stallInMotion` compares against. */
+  let lastStallObservedAt: string | undefined;
   /**
    * L7/L8 continuations spent on COMPLETION-only work (waiting for Copilot,
    * negotiating the goal). Separate budget on purpose: a Copilot review that
@@ -3894,28 +3920,59 @@ export default function reviewGate(pi: ExtensionAPI) {
      * guard treats the round as code-bearing (fail-closed).
      */
     files?: readonly string[];
+    /**
+     * THE QUALITY ROUND THIS TARGET DISPATCHED (2026-09-16).
+     *
+     * It is written the moment the quality judge of THIS round is dispatched,
+     * and it is what makes "is the quality round still owed?" a per-ROUND fact
+     * instead of a registry lookup. The quality pane is REUSED across rounds
+     * and outlives its own verdict (it is only closed on `fresh`, on rotation
+     * or when it dies), so "a quality judge exists and is alive" is true for
+     * the rest of the session — a hold predicate built on it would park a
+     * conclusion nothing would ever release.
+     *
+     * `head` is the round it belongs to: a target re-registered by the next
+     * `prepare_review` replaces the whole object, so a stale record cannot
+     * survive into a round it did not dispatch.
+     */
+    qualityRound?: { judgeId: string; head: string };
   }
   const reviewTargets = new Map<string, ReviewTarget>();
 
   /**
-   * THE FUNCTIONAL ROUND A QUALITY ROUND IS HOLDING (2026-09-15).
+   * THE QUALITY JUDGE THIS ROUND DISPATCHED — recorded on the round's target.
    *
-   * When `judge_submit`'s chain routes a round to the quality judge, the
-   * reviewer's brief is built and then WAITS here: it is dispatched verbatim —
-   * same task text, same findings stream, same review target — the moment the
-   * quality verdict lands as READY (`handOffAfterQuality`). One round, one
-   * dispatch of each kind, and the agent never sequences the second one.
-   *
-   * IN MEMORY, deliberately. Nothing re-dispatches a reviewer after a restart
-   * — a new session re-submits, and `submitForReview`'s routing rule decides
-   * from the sidecar's quality standing whether that means "run the quality
-   * round again" (content moved) or "the pass still stands". A persisted copy
-   * would be a second source of truth for the same decision.
-   *
-   * Cleared on a BLOCKED quality verdict as well: that round's content is
-   * about to change, so its reviewer brief is history.
+   * Called only after the dispatch was ACCEPTED (a refused spawn must not make
+   * the round believe a quality verdict is coming).
    */
-  const pendingReviewAfterQuality = new Map<string, { task: string; streamPath?: string; at: string }>();
+  function noteQualityRoundDispatched(root: string, judgeId: string): void {
+    const target = reviewTargets.get(root);
+    if (!target) return; // no target ⇒ nothing to bind the round to (fail-closed elsewhere)
+    target.qualityRound = { judgeId, head: target.head };
+  }
+
+  /**
+   * IS THIS ROUND'S QUALITY JUDGE STILL ABLE TO CONCLUDE? — the fact
+   * `decideQualityHold` (lib/quality-round.ts) needs before it may HOLD a
+   * functional verdict instead of refusing it.
+   *
+   * Three conditions, and each one is here for a measured reason:
+   *  - the ROUND must have dispatched one (a live quality pane somewhere in
+   *    the registry is not the same thing — the pane is reused across rounds
+   *    and outlives its own verdict);
+   *  - its pane must still be alive (`ownLiveJudges`: a persisted entry from a
+   *    previous process has no pane, and a judge that died can never land a
+   *    verdict — holding there parks the round forever);
+   *  - NO verdict may already stand for this head: once one is recorded, the
+   *    standing answers the question and this must not keep a hold alive.
+   */
+  function qualityRoundInFlight(root: string): boolean {
+    const target = reviewTargets.get(root);
+    const round = target?.qualityRound;
+    if (!target || !round || round.head !== target.head) return false;
+    if (stateForRepo(root).quality?.commitSha === target.head) return false;
+    return ownLiveJudges().some((e) => e.judgeId === round.judgeId);
+  }
 
   /**
    * The branch this repo is working on.
@@ -4671,11 +4728,24 @@ export default function reviewGate(pi: ExtensionAPI) {
     // approval — and the renderer the user runs (`fullscreen`, the host owns
     // the screen and scrolls) never had the problem. A session that is NOT on
     // it is told once instead: see lib/renderer-mode.ts.
-    return renderChoice(uiCtx.ui, spec, {
+    const answer = await renderChoice(uiCtx.ui, spec, {
       ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
     });
+    // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
+    // dialog the gate shows — ask_user's interview, the restatement / goal /
+    // plan approvals, the consent boxes for sensitive edits and scope limits —
+    // reaches the user through this function, so this is where "the user
+    // answered" becomes a fact. Its one reader is the stall breaker
+    // (`stallInMotion`): a live negotiation must not be mistaken for a session
+    // that has stopped moving (measured: 80 minutes of goal negotiation
+    // tripped the breaker and was reported as a provider failure).
+    //
+    // Only a REAL answer counts: a dismissed box (undefined) is not the user
+    // engaging with the gate.
+    if (answer !== undefined) lastUserInteractionAt = new Date().toISOString();
+    return answer;
   }
 
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
@@ -6591,64 +6661,22 @@ export default function reviewGate(pi: ExtensionAPI) {
         else laneState.precommit.lastFullPassTree = coveredTree;
         persistRepo(ctx as unknown as ExtensionContext, root);
       }
-      // WHAT THE LANE'S LANDING DOES TO A PARKED CONCLUSION (2026-09-15).
-      // `parkedReadyFate` (pure, lib/review-adjudicate.ts) answers with TREES
-      // rather than with the passage of time: a non-PASS lane retires the
-      // parked round (its content just failed), a PASS on exactly that tree
-      // replays it, and anything else leaves it alone because its content is
-      // still unverified.
-      const fate = parkedReadyFate({
-        parkedTree: laneState.pendingReady?.tree,
-        laneVerdict: verdict,
-        coveredTree,
-        currentTargetTree: reviewTargets.get(root)?.tree,
-      });
-      if (fate !== "none") {
-        const parked = laneState.pendingReady!;
-        delete laneState.pendingReady;
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        if (fate === "clear" && verdict === "PASS") {
-          // A PARKED ROUND THE LANE DID NOT REPLAY IS RETIRED, NOT LEFT BEHIND
-          // (round-2 P2): the lane has landed, so nothing is coming back for
-          // this conclusion, and the reply already told the agent not to
-          // re-submit. Silent when the lane FAILED — the failure channel speaks
-          // for that content — but an abandoned hold is worth a line in the
-          // audit trail, since the only other evidence is a missing verdict.
-          // Two causes, two sentences: when the gate moved on to another round
-          // `coveredTree` IS the parked tree, and the "passed X, not the parked
-          // Y" wording would print the same id twice (round-2 Nit).
-          log(
-            coveredTree === parked.tree
-              ? `parked READY for ${root} dropped: the gate moved on to another round (${parked.tree})`
-              : `parked READY for ${root} dropped: the lane passed ` +
-                `${coveredTree === undefined || coveredTree === "" ? "an unreadable tree" : coveredTree}, ` +
-                `which is not the parked ${parked.tree}`,
-          );
-        }
-        if (fate === "replay") {
-          // THE PARKED READY GETS ITS VERDICT NOW. Replayed through the SAME
-          // recorder the normal order uses — the whole reason the conclusion
-          // was parked verbatim is that findings count, fingerprints, the
-          // docSync attestation, the baseline and the round record must come
-          // out exactly as they would have, and a second implementation of
-          // those rules would drift.
-          const recorded = await recordReviewVerdict(parked.conclusion as ReportConclusion, root, ctx);
-          // WAKE THE AGENT: this is a gate state change nobody else will
-          // report. `steer`, exactly like the failure notice below — a
-          // `followUp` would sit in the queue behind a long turn, and the whole
-          // point is that the round is no longer waiting on anything.
-          try {
-            pi.sendMessage(
-              {
-                customType: "review-gate",
-                content: buildParkedReadyReplayNotice({ round: parked.round, tree: parked.tree, recorded }),
-                display: true,
-              },
-              { triggerTurn: true, deliverAs: "steer" },
-            );
-          } catch { /* headless — the recorded verdict is what matters */ }
-        }
+      // WHAT THE LANE'S LANDING DOES TO THE ROUND (2026-09-16).
+      //
+      // FIRST, the cancel matrix's lane row: a FAILED lane ends the functional
+      // round (its judge would spend minutes judging content the gate already
+      // refuses to ship), while the QUALITY round carries on — it reads code,
+      // and a failing suite says nothing about the code's quality. The abort is
+      // already in effect for this lane: it is the lane itself landing.
+      if (verdict !== "PASS") {
+        cancelJudgeRound(root, "reviewer", "全量 precommit FAIL —— 这一段内容没有可 ship 的 READY");
       }
+      // THEN the parked conclusion, re-asked from BOTH halves (`resumeParkedReady`
+      // consults the trees, the recorded lane verdict and the quality standing):
+      // a non-PASS lane retires the parked round, a PASS on exactly that tree
+      // WITH the quality verdict in hand replays it, and anything still owed
+      // leaves it parked for the landing that is owed.
+      await resumeParkedReady(root, ctx);
       // THE LANE'S LANDING IS AN EVENT EITHER WAY (2026-09-16). A PASS used to
       // be silent, and that silence is exactly what stranded a session in a
       // `judge_wait` it could not end: the report it had received said
@@ -6750,6 +6778,15 @@ export default function reviewGate(pi: ExtensionAPI) {
         streamPath?: string;
         /** Present when the quality round was SKIPPED — printed to the agent. */
         skipNote?: string;
+        /**
+         * THE FUNCTIONAL BRIEF OF A PARALLEL ROUND (2026-09-16). Present
+         * exactly when `role` is the quality judge: the caller dispatches both
+         * judges back to back, because they judge the SAME immutable range and
+         * neither waits for the other. The cancel matrix
+         * (`lib/quality-round.ts`'s `roundCancelPlan`) decides afterwards who
+         * stops whom.
+         */
+        parallelReviewer?: { taskText: string; streamPath?: string };
       }
     | { ok: false; text: string }
   > {
@@ -6832,7 +6869,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     const reviewerTask = withNote(taskText);
     const reviewerStream = typeof prepared.details?.stream === "string" ? prepared.details.stream : undefined;
 
-    // ---------- THE ROUTING RULE (2026-09-15) ----------
+    // ---------- THE ROUTING RULE (2026-09-15, rewritten 2026-09-16) ----------
     //
     // One rule, applied ONCE per round, in one direction:
     //  - a round that carries no code (a docs/data-only round, or the empty
@@ -6841,7 +6878,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     //    the reviewer as well — that is a re-submission of content the quality
     //    judge has already passed (a dead pane, a failed dispatch), and
     //    re-judging it would buy a second wait for the same answer;
-    //  - everything else runs the quality round FIRST.
+    //  - everything else runs the quality round — BESIDE the functional one,
+    //    from the same call. What the quality round gates is therefore no longer
+    //    the DISPATCH (which it cannot: the two start together) but the RECORD:
+    //    a functional READY is held until the quality verdict stands (see
+    //    `recordReviewVerdict`).
     //
     // The file list comes from prepare's own `numstat` (it rode onto the
     // review target), never from a second `git diff` here.
@@ -6862,18 +6903,18 @@ export default function reviewGate(pi: ExtensionAPI) {
         // dispatching a judge with no brief.
         return { ok: false, text: "review-gate: 本轮未送审 — prepare 没有给出质量轮的任务文本（门禁内部不一致）。" };
       }
-      // The functional round is HELD, not lost: the settle path dispatches it
-      // verbatim the moment the quality judge passes (`handOffAfterQuality`).
-      pendingReviewAfterQuality.set(input.root, {
-        task: reviewerTask,
-        ...(reviewerStream === undefined ? {} : { streamPath: reviewerStream }),
-        at: new Date().toISOString(),
-      });
       return {
         ok: true,
         role: QUALITY_ROLE,
         taskText: withNote(qualityTaskText),
         ...(qualityStream === undefined ? {} : { streamPath: qualityStream }),
+        // The functional brief travels WITH it: the two judges are dispatched
+        // in one breath (the caller owns the effects; this chain owns the
+        // routing).
+        parallelReviewer: {
+          taskText: reviewerTask,
+          ...(reviewerStream === undefined ? {} : { streamPath: reviewerStream }),
+        },
       };
     }
     if (skip.skip) {
@@ -7282,17 +7323,35 @@ export default function reviewGate(pi: ExtensionAPI) {
     fresh?: boolean;
     /** This round's findings stream, recorded on the child for judge_wait. */
     streamPath?: string;
+    /**
+     * THE ONE WAY PAST THE QUALITY PRECONDITION (2026-09-16): the caller
+     * dispatched THIS ROUND's quality judge itself, a line above, and the
+     * standing is checked when the verdict is recorded instead. Only
+     * `judge_submit`'s parallel path may pass it — it is never derived from the
+     * registry, because that would make the gate unfalsifiable (the quality
+     * pane is reused and stays alive).
+     */
+    qualityRoundDispatched?: boolean;
   }): Promise<JudgeDispatch> {
     const { root, role } = opts;
     dropDeadForeignJudges();
-    // THE QUALITY PRECONDITION (2026-09-15). The quality judge runs BEFORE the
-    // functional one, and this is the mechanical fact that makes the order
-    // unbypassable rather than a convention: no registered target, or no
-    // quality standing bound to its head, and the reviewer is NOT dispatched.
-    // Two exemptions are real and live in the rule (lib/quality-round.ts): a
-    // round that carries no code at all, and a pass already bound to this head
-    // (a re-submission after a dead pane).
-    if (role === "reviewer") {
+    // THE QUALITY PRECONDITION (2026-09-15). This is the mechanical fact that
+    // makes the quality round unbypassable rather than a convention: no
+    // registered target, or no quality standing bound to its head, and the
+    // reviewer is NOT dispatched.
+    //
+    // IT NO LONGER GATES THE PARALLEL PATH (2026-09-16): the one submission that
+    // starts both judges passes `qualityRoundDispatched`, because it dispatched
+    // the quality judge itself and the standing is checked at RECORD time
+    // instead (`decideQualityHold` — a functional READY is held until the
+    // quality verdict stands). That flag is an explicit argument from that one
+    // call site, NEVER inferred from the registry: inferring it would turn the
+    // mechanical guarantee into an always-true condition.
+    //
+    // Two exemptions remain, and both live in the rule (lib/quality-round.ts):
+    // a round that carries no code at all (recorded as a skip), and a pass
+    // already bound to this head (a re-submission after a dead pane).
+    if (role === "reviewer" && opts.qualityRoundDispatched !== true) {
       const target = reviewTargets.get(root);
       if (!target) {
         return { ok: false, reused: false, error: "没有登记在案的审查范围（prepare 未跑）—— 不能派 reviewer。" };
@@ -7678,7 +7737,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // A quality round OWNS the functional round that is waiting on it:
           // releasing it (or killing it) is part of the record landing, not a
           // follow-up the agent has to remember (philosophy one).
-          const handOffNote = await handOffQualityIfAny(settled.kind, childRoot);
+          const handOffNote = await applyRoundCancel(settled.kind, childRoot, ctx);
           return {
             text: settled.text,
             recorded: true,
@@ -7719,6 +7778,17 @@ export default function reviewGate(pi: ExtensionAPI) {
    * with the watchdog below (no second waiter). Returns true when it woke.
    */
   async function settleFinishedRounds(ctx: ExtensionContext): Promise<boolean> {
+    // A PARKED CONCLUSION IS RE-ASKED HERE, ONCE PER SETTLE (2026-09-16).
+    //
+    // The two landings that can release a hold (the precommit lane, the quality
+    // round) both call it themselves; this call is the BACKSTOP for the case
+    // where the second one will never come — a quality pane that died after the
+    // record was parked, a lane that was aborted by the USER. Without it the
+    // record would sit in the sidecar forever while the reply had already told
+    // the agent not to re-submit, which is the one failure mode a hold may not
+    // have (`decideQualityHold` refuses rather than holds whenever nobody can
+    // end it; this covers the pane dying afterwards).
+    for (const root of sessionRepos) await resumeParkedReady(root, ctx);
     // A judge may have handed its round to a successor since the last sweep:
     // the new session has a new id, hence a new channel, and this merge is what
     // makes the opener look there.
@@ -8251,6 +8321,12 @@ export default function reviewGate(pi: ExtensionAPI) {
        * reports it in the reply; criterion 1 requires it in the return.
        */
       let streamPath: string | undefined;
+      /**
+       * THE FUNCTIONAL BRIEF OF A PARALLEL ROUND (2026-09-16): present when the
+       * chain routed this submission to the quality judge, in which case the
+       * reviewer starts in the same breath (see the loop below).
+       */
+      let parallelReviewer: { taskText: string; streamPath?: string } | undefined;
       // Live progress for the whole submission: precommit → checkpoint →
       // prepare → dispatch. Each step publishes as it starts and as it ends,
       // so a round that stalls shows WHERE it stalled.
@@ -8282,6 +8358,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // deliberately NOT a role the agent can name.
         dispatchRole = chain.role;
         skipNote = chain.skipNote;
+        parallelReviewer = chain.parallelReviewer;
       }
 
       // The other two roles are the same shape: the gate builds the task the
@@ -8324,33 +8401,75 @@ export default function reviewGate(pi: ExtensionAPI) {
           { tag: "main_session_question", label: "你要回答的问题（来自主会话）：", text: task },
         ]);
       }
-      // The title is a DISPLAY label the gate derives itself (B5: it must not
-      // reach the session's directory, or every round starts a new session).
-      const title = `${dispatchRole}-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
-      progress.step(`spawn ${dispatchRole}`);
-      const dispatch = await dispatchJudgeRound({ root, role: dispatchRole, title, task: reviewTask, fresh: params.fresh === true, streamPath });
-      if (!dispatch.ok) {
-        // A KEPT PANE IS A DISPATCHED ROUND (2026-09-05). The only failure that
-        // still names a pane is the boot check timing out, and that path
-        // deliberately keeps the pane AND its registration — the judge may
-        // simply be slow, its task already rode in on the argv, and the receipt
-        // tells the opener to wait on it. So the audited draft goes on record
-        // here too: without it a late report has no pending kind to bind to and
-        // the whole round is lost. `judge_spawn` makes the same call, and the
-        // two must not disagree about what a kept pane means.
-        if (dispatch.paneId && role === "goal-auditor") {
-          pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
-          persistJudgeHierarchy();
+      // ---- THE TWO JUDGES OF ONE ROUND, STARTED TOGETHER (2026-09-16) ----
+      //
+      // The quality judge and the functional judge are dispatched back to back
+      // (two spawns, a second apart) and judge CONCURRENTLY: they read the same
+      // immutable `baseline..HEAD`, so neither has anything to wait for. The
+      // three-way race with the precommit lane is already running behind them.
+      //
+      // WHO STOPS WHOM is NOT decided here — `roundCancelPlan`
+      // (lib/quality-round.ts) owns that table, and the settle path applies it.
+      // The only thing this loop owns is that a round never starts HALF: if the
+      // quality dispatch fails, the reviewer is not dispatched at all (a
+      // functional round whose quality half never started could only ever be
+      // refused at recording time — see `decideQualityHold`).
+      const judges = [
+        { role: dispatchRole, task: reviewTask, streamPath },
+        ...(parallelReviewer === undefined
+          ? []
+          : [{ role: "reviewer" as const, task: parallelReviewer.taskText, streamPath: parallelReviewer.streamPath }]),
+      ];
+      let dispatch: JudgeDispatch | undefined;
+      for (const judge of judges) {
+        // The title is a DISPLAY label the gate derives itself (B5: it must not
+        // reach the session's directory, or every round starts a new session).
+        const title = `${judge.role}-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
+        progress.step(`spawn ${judge.role}`);
+        const d = await dispatchJudgeRound({
+          root,
+          role: judge.role,
+          title,
+          task: judge.task,
+          fresh: params.fresh === true,
+          ...(judge.streamPath === undefined ? {} : { streamPath: judge.streamPath }),
+          // THE ONE PERMISSION TO DISPATCH A REVIEWER WITHOUT A STANDING: this
+          // submission dispatched this round's quality judge a line above, and
+          // the standing is now checked at RECORD time instead. Never inferred
+          // from the registry — a flag the caller must pass.
+          ...(judge.role === "reviewer" && judges.length > 1 ? { qualityRoundDispatched: true } : {}),
+        });
+        if (!d.ok) {
+          // A KEPT PANE IS A DISPATCHED ROUND (2026-09-05). The only failure that
+          // still names a pane is the boot check timing out, and that path
+          // deliberately keeps the pane AND its registration — the judge may
+          // simply be slow, its task already rode in on the argv, and the receipt
+          // tells the opener to wait on it. So the audited draft goes on record
+          // here too: without it a late report has no pending kind to bind to and
+          // the whole round is lost. `judge_spawn` makes the same call, and the
+          // two must not disagree about what a kept pane means.
+          if (d.paneId && role === "goal-auditor") {
+            pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
+            persistJudgeHierarchy();
+          }
+          progress.fail("spawn 失败");
+          const lead = "review-gate: judge_submit 失败 — ";
+          return {
+            content: [{ type: "text", text: `${lead}${d.error ?? "review pane 未能开出来"}` }],
+            details: { submitted: false, busy: false },
+            isError: true,
+          };
         }
-        progress.fail("spawn 失败");
-        const lead = "review-gate: judge_submit 失败 — ";
-        return {
-          content: [{ type: "text", text: `${lead}${dispatch.error ?? "review pane 未能开出来"}` }],
-          details: { submitted: false, busy: false },
-          isError: true,
-        };
+        dispatch = d;
+        // THE ROUND REMEMBERS ITS OWN QUALITY JUDGE, on the target it prepared.
+        // This is what `qualityRoundInFlight` reads: a live pane elsewhere in
+        // the registry proves nothing (the pane is reused across rounds), so
+        // "this round dispatched one and has not recorded its verdict" has to
+        // be recorded per round.
+        if (judge.role === QUALITY_ROLE && d.judgeId) noteQualityRoundDispatched(root, d.judgeId);
+        progress.done(d.reused ? "已受理（续接同一会话）" : "已受理（新会话）");
       }
-      progress.done(dispatch.reused ? "已受理（续接同一会话）" : "已受理（新会话）");
+      dispatch = dispatch!; // the loop always sets it: an empty array never occurs
       // The round is ACCEPTED — only now is the audited draft on record. A
       // refused submission (a busy role, a failed spawn) must never replace
       // the draft a running audit is judging: its verdict would be recorded
@@ -8368,14 +8487,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(streamPath ? [`- findings 流（边审边修）: ${streamPath}`] : []),
         // The routing is the gate's, so the gate says which way it went —
         // otherwise "the reviewer is running" and "the quality judge is
-        // running (and the reviewer comes next, automatically)" look the same
-        // to the agent, and only one of them means "your code is being judged
-        // for quality before anyone looks at whether it works".
+        // running beside it" look the same to the agent, and only one of them
+        // means "your code is being judged for quality as well as for whether
+        // it works".
         ...(dispatchRole === QUALITY_ROLE
           ? [
-              "- 本轮先跑**质量轮**（审代码本身：哲学/架构/正确性/性能，再看简洁可读可维护），" +
-                "判定表 `docs/code-quality-rules.md`。判 READY 后门禁会**自动**派 reviewer 审功能，" +
-                "你不需要为这一轮再调 judge_submit；判 BLOCKED 则标准报告唤醒你（正在跑的全量 precommit 会被终止）。",
+              "- 本轮**同时**跑两个 judge：质量轮（审代码本身：哲学/架构/正确性/性能，再看简洁可读可维护，" +
+                "判定表 `docs/code-quality-rules.md`）与功能轮 reviewer（审需求符合度/测试覆盖/文档同步），" +
+                "外加与它们并行的全量 precommit。你不需要为这一轮再调 judge_submit。",
+              "- 谁先判不过由门禁收口：质量轮非 READY ⇒ 终止 reviewer 与 precommit；reviewer 非 READY ⇒ 终止质量轮与 precommit；" +
+                "precommit FAIL ⇒ 只终止 reviewer，质量轮继续。reviewer 先交卷 READY 而质量轮未交卷时，那份 READY 会被**扣下**，等质量轮结论落地再补记。",
             ]
           : []),
         ...(skipNote ? [`- 质量轮跳过：${skipNote}`] : []),
@@ -8533,7 +8654,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // a hand-off wired into the sweep alone would never run, leaving the
           // held functional round stranded forever while the reply told the
           // agent not to re-submit.
-          const handOffNote = await handOffQualityIfAny(settled.kind, root);
+          const handOffNote = await applyRoundCancel(settled.kind, root, undefined);
           return {
             text: settled.text,
             // Its own field, so `judge_wait`'s wake-up prints it too (the
@@ -9041,8 +9162,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     lastGateEventAt = Date.now();
     return `review-gate: 质量轮记录 ${parsed.verdict} for ${targetRoot}（findings: ${parsed.findingsTotal}）。` +
       (parsed.verdict === "BLOCKED"
-        ? " 先把 findings 全部改掉（它们写在 findings 流里，报告里有路径），再 judge_submit 重新送审。"
-        : " 门禁会自动派 reviewer 审功能，你不需要再调一次。") +
+        ? " 先把 findings 全部改掉（它们写在 findings 流里，报告里有路径），再 judge_submit 重新送审。" +
+          "本轮功能轮如果还在跑，门禁已把它终止（内容要改，它的裁决没有意义）；如果它已经扣了一份 READY 下来，那份 READY 作废。"
+        : " 功能轮本来就在跑（同一个 judge_submit 启动的），你不需要再调一次；" +
+          "若它先交卷的 READY 被扣下，这一步就是补记它的时刻。") +
       (stale
         ? "\nSTALE TARGET：质量轮判的那个 commit 已经不是 HEAD（prepare 之后又落了新 checkpoint）—— " +
           "结论记成 BLOCKED，按上面的方式重新送一轮即可。"
@@ -9053,72 +9176,174 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * THE HAND-OFF (2026-09-15): a finished quality round either releases the
-   * functional round it was holding, or kills it.
+   * KILL ONE PARTY OF A ROUND — for real (2026-09-16).
    *
-   * The verdict it acts on is the RECORDED one (`st.quality.verdict`), not the
-   * word the judge wrote: `recordQualityVerdict` downgrades a READY blocked by
-   * the stale/cwd checks, and dispatching a reviewer off the raw word would
-   * hand the functional round a pass the gate itself refused.
+   * The cancel matrix says "the quality round failing STOPS the reviewer", and
+   * this is what "stops" has to mean: the pane's PROCESS is terminated and its
+   * registry row is dropped. Reading past its output instead would leave a
+   * max-thinking judge burning minutes on content whose verdict can no longer
+   * be recorded — the whole reason the matrix exists is the minutes, not the
+   * output.
    *
-   * BLOCKED is the interesting half, and it does three things (user
-   * requirement): the held reviewer brief is dropped (its content is about to
-   * change), the full lane still verifying that content is ABORTED (it has
-   * nothing left to prove), and the agent is told so — the failure it needs to
-   * act on is the quality findings, not a precommit verdict on a tree that no
-   * longer exists.
+   * DROPPING THE ROW IS ALSO WHAT KEEPS THE KILL SILENT TO THE RIGHT PARTIES:
+   * the child watchdog (`classifyChildren`) and the settle sweep both iterate
+   * the registry, so a cancelled round can no longer be announced as a judge
+   * that DIED (which would send the agent to `judge_recover` a round that is
+   * deliberately gone — and recovery refuses too, since it looks the entry up
+   * in the same registry). What the agent gets instead is the note this returns,
+   * carried by the sibling verdict's standard report.
    *
-   * A READY with nothing held is not an error: that is the re-submission path
-   * (a pane died, a dispatch failed), where the router already saw the standing
-   * pass and went straight to the reviewer.
+   * THE SCRATCH WORKTREES GO WITH IT (`reapReviewScratch`): a cancelled round
+   * can never use them again, and they are the gate's to reclaim (who creates,
+   * reclaims).
+   *
+   * LIVE-ONLY, deliberately: a cancellation is an action on a running process,
+   * so it does not survive a restart — and neither does the state that decided
+   * it (the round is over either way).
    */
-  /**
-   * THE ONE PLACE THAT DECIDES WHETHER A RECORDED ROUND OWES A HAND-OFF.
-   *
-   * Two paths record a round — the settle sweep (`recordJudgeConclusion`) and
-   * `judge_wait`'s `settleRound` — and exactly ONE of them wins the cursor:
-   * the other then reads `already-consumed` and never runs this again. So the
-   * hand-off has to hang off BOTH, which is what this wrapper makes a single
-   * decision instead of two copies of `kind === "quality"` (reviewer P1,
-   * 2026-09-15: wired into the sweep alone, a quality round closed by a wait
-   * stranded its held functional round forever).
-   */
-  async function handOffQualityIfAny(kind: string | undefined, root: string): Promise<string | undefined> {
-    return kind === "quality" ? handOffAfterQuality(root) : undefined;
+  function cancelJudgeRound(root: string, role: string, why: string): string | undefined {
+    const entry = judgeChildByRole(root, role);
+    if (!entry) return undefined; // already concluded and gone: nothing to stop
+    // BEFORE the row goes: what the pane reported about its OWN model is a fact
+    // this round earned (a failed slot has to be cooled down, warned about and
+    // skipped by the next dispatch — lib/judge-model-rotation.ts), and the
+    // absorb reads its cursor off the entry that is about to be removed.
+    absorbJudgeModelEvents(root, entry.judgeId);
+    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
+    const tmuxServer = tmuxServerFrom(process.env);
+    const run = (argv: readonly string[]) => runTmux(argv);
+    const alive = entry.paneId && ownPane && paneClosable(entry, tmuxServer)
+      ? judgePaneAlive(run, ownPane, entry.paneId)
+      : undefined;
+    if (alive === true) closeJudgePaneOf(entry, { opener: entry.openerId, ownPane, tmuxServer, run });
+    setHierarchy(removeJudge(judgeHierarchy, entry.judgeId));
+    reapReviewScratch(entry.judgeId);
+    log(`review-gate: cancelled the ${role} round of ${root} — ${why}`);
+    return `已终止 ${role} 的这一轮（${why}）。`;
   }
 
-  async function handOffAfterQuality(root: string): Promise<string | undefined> {
-    const verdict = stateForRepo(root).quality?.verdict;
-    const held = pendingReviewAfterQuality.get(root);
-    const actions = qualityFollowUp({ verdict, held: held !== undefined });
-    if (actions.dropHeld) pendingReviewAfterQuality.delete(root);
-    const laneStopped = actions.abortLane
-      ? abortPrecommitLane(root, "质量轮没通过 —— 内容要改，这轮验证不再有意义")
-      : false;
-    if (!actions.dispatchReviewer || !held) {
-      // Both notes describe consequences of the SAME fact (this content is
-      // about to change), so they travel as one paragraph — two messages for
-      // one cause read as two problems.
-      const notes: string[] = [];
-      if (actions.dropHeld) notes.push("本轮扣下的功能审查已作废（这一轮的内容要改）。");
-      if (laneStopped) notes.push("正在跑的全量 precommit 已终止，它的结论作废（改完重新送审时会重跑）。");
-      return notes.length === 0 ? undefined : notes.join(" ");
-    }
-    pendingReviewAfterQuality.delete(root);
-    const title = `reviewer-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
-    const dispatched = await dispatchJudgeRound({
-      root,
-      role: "reviewer",
-      title,
-      task: held.task,
-      ...(held.streamPath === undefined ? {} : { streamPath: held.streamPath }),
+  /**
+   * RE-ASK A PARKED CONCLUSION'S TWO PRECONDITIONS and act on the answer.
+   *
+   * A parked READY waits for up to TWO landings — the full lane that verifies
+   * its content, and the quality round that must pass before it may be
+   * recorded — and they arrive in either order. So the fate is computed from
+   * the STATE OF BOTH HALVES (lib/review-adjudicate.ts's `parkedReadyFate`)
+   * rather than from whichever event fired, and this function is called from
+   * every one of them: the lane's landing, the quality round's settlement, and
+   * the settle sweep.
+   *
+   * The sweep call is not a duplicate of the other two — it is the BACKSTOP.
+   * A hold is only legitimate while somebody can still end it
+   * (`decideQualityHold` refuses otherwise, exactly as `unverified-idle`
+   * does); the quality pane can die AFTER the record was parked, and without a
+   * periodic re-ask the conclusion would sit there forever while the reply told
+   * the agent not to re-submit.
+   *
+   * `clear` and `replay` both retire the record; only `replay` wakes the agent,
+   * because only it changes the gate's verdict (a dropped hold leaves `review`
+   * PENDING, which the ordinary RESUME already speaks for).
+   */
+  async function resumeParkedReady(root: string, ctx?: unknown): Promise<string[]> {
+    const st = stateForRepo(root);
+    const parked = st.pendingReady;
+    if (!parked) return [];
+    const target = reviewTargets.get(root);
+    const fate = parkedReadyFate({
+      parkedTree: parked.tree,
+      lane: parkedLaneHalf({
+        parkedTree: parked.tree,
+        coveredTree: st.precommit.lastFullPassTree,
+        currentTargetTree: target?.tree,
+        laneRunning: inFlightPrecommit?.root === root,
+      }),
+      quality: qualityPrecondition({
+        standing: qualityStandingFor({ head: target?.head ?? "", files: target?.files, quality: st.quality }),
+        qualityRoundInFlight: qualityRoundInFlight(root),
+      }),
     });
-    if (!dispatched.ok) {
-      return `review-gate: 质量轮 READY，但自动派 reviewer 失败 —— ${dispatched.error ?? "pane 未能开出来"}。` +
-        "再调一次 `judge_submit({role:\"reviewer\", task:<本轮改动说明>})` 即可：" +
-        "质量结论绑在当前 HEAD，不会重跑质量轮。";
+    if (fate === "none" || fate === "hold") return [];
+    delete st.pendingReady;
+    const liveCtx = ctx ?? latestCtx;
+    if (liveCtx) persistRepo(liveCtx as unknown as ExtensionContext, root);
+    if (fate === "clear") {
+      log(
+        `parked READY for ${root} dropped: its two preconditions can no longer both hold ` +
+        `(round ${parked.round}, tree ${parked.tree.slice(0, 12)})`,
+      );
+      return [`本轮挂起的 READY 已作废（round ${parked.round}）：它的前提已不可能同时成立，重送一轮即可。`];
     }
-    return `质量轮 READY ⇒ 门禁已自动派 reviewer 审功能（judge ${dispatched.judgeId}，${dispatched.reused ? "复用 pane" : "新 pane"}）。**不要**再为这一轮调 judge_submit。`;
+    // A REPLAY NEEDS A CONTEXT TO WRITE FROM. Without one the record stays
+    // parked and the next settle retries — never a half-recorded round.
+    if (!liveCtx) return [];
+    const recorded = await recordReviewVerdict(parked.conclusion as ReportConclusion, root, liveCtx);
+    const note = buildParkedReadyReplayNotice({ round: parked.round, tree: parked.tree, recorded });
+    try {
+      // WAKE THE AGENT: this is a gate state change nobody else will report.
+      // `steer`, exactly like the failure notice — a `followUp` would sit in the
+      // queue behind a long turn, and the whole point is that the round is no
+      // longer waiting on anything.
+      pi.sendMessage(
+        { customType: "review-gate", content: note, display: true },
+        { triggerTurn: true, deliverAs: "steer" },
+      );
+    } catch { /* headless — the recorded verdict is what matters */ }
+    // NO NOTE BACK: the steer above IS the delivery, and a caller that also
+    // prints the same sentence in its report would tell the agent the same
+    // thing twice (one cause, one message).
+    return [];
+  }
+
+  /**
+   * WHAT A CONCLUDED ROUND DOES TO ITS SIBLINGS — the cancel matrix, applied.
+   *
+   * ONE decision, TWO settle entry points. A round is recorded by whichever
+   * path sees it first — the settle sweep (`recordJudgeConclusion`) or
+   * `judge_wait`'s `settleRound` — and the other then only ever reads
+   * `already-consumed`; wired into the sweep alone, a quality round closed by a
+   * wait would never stop the reviewer it just blocked (reviewer P1,
+   * 2026-09-15, learned on the serial design that had the same two paths).
+   *
+   * The verdict it acts on is the RECORDED one, not the word the judge wrote:
+   * both recorders downgrade a READY that fails its own bindings (stale target,
+   * cwd, verification), and cancelling a party off the raw word would end a
+   * round the gate itself just refused.
+   */
+  async function applyRoundCancel(kind: string | undefined, root: string, ctx?: unknown): Promise<string | undefined> {
+    const notes: string[] = [];
+    if (kind === "quality" || kind === "reviewer") {
+      const st = stateForRepo(root);
+      const plan = roundCancelPlan({
+        concluded: kind,
+        verdict: kind === "quality" ? st.quality?.verdict : st.review.verdict,
+      });
+      const stopped = [
+        plan.cancelReviewer
+          ? cancelJudgeRound(root, "reviewer", "质量轮判了非 READY —— 这一段内容要改，功能轮不必再过")
+          : undefined,
+        plan.cancelQuality
+          ? cancelJudgeRound(root, QUALITY_ROLE, "功能轮判了非 READY —— 内容要改，质量轮不必再审")
+          : undefined,
+      ].filter((n): n is string => n !== undefined);
+      notes.push(...stopped);
+      if (plan.abortLane) {
+        // The lane's remaining minutes verify a tree nobody will ship, and the
+        // NEXT submission would wait for a quiet lane before starting the one
+        // that matters (`waitForQuietLane`) — the abort buys back the wait, not
+        // just the CPU.
+        notes.push(
+          abortPrecommitLane(root, "本轮有 judge 判了非 READY —— 内容要改，这轮验证不再有意义")
+            ? "正在跑的全量 precommit 已终止，它的结论作废（改完重新送审时会重跑）。"
+            : "",
+        );
+      }
+    }
+    // ALWAYS RE-ASK THE PARKED CONCLUSION: this landing may be the second of
+    // its two preconditions (the quality verdict releasing a reviewer READY
+    // that the lane already passed, or the reverse).
+    notes.push(...(await resumeParkedReady(root, ctx)));
+    const text = notes.filter((n) => n !== "").join(" ");
+    return text === "" ? undefined : text;
   }
 
   /**
@@ -9200,6 +9425,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     //    squash preserves it). Tighten-only — this can withhold a READY,
     //    never grant one.
     let staleTarget = false;
+    /**
+     * WHY A READY WAS REFUSED FOR THE QUALITY ROUND (2026-09-16) — set only by
+     * the `refuse` outcome of `decideQualityHold`, and printed in the recorded
+     * note so the agent does not read it as a finding against its code.
+     */
+    let qualityRefusal: string | undefined;
     // THE VERIFICATION BINDING (B1, 2026-09-10). The checkpoint gate accepts
     // content whose full lane is STILL RUNNING (that is what makes the lane run
     // beside the chain instead of in front of it), so this is the place that
@@ -9291,7 +9522,34 @@ export default function reviewGate(pi: ExtensionAPI) {
       laneStillRunning: inFlightPrecommit?.root === targetRoot,
       cwdMismatch: cwdMismatch !== undefined,
     });
-    if (withholding === "unverified") {
+    // THE QUALITY PRECONDITION AT THE RECORDING END (2026-09-16). The two
+    // judges of a round start together, so this is where "the quality round has
+    // not passed yet" is enforced now: a READY recorded here would ship a round
+    // no quality judge ever passed.
+    //
+    // IT COMES AFTER the three binding checks on purpose — including the
+    // promotion to BLOCKED from a finding conflict. Each of those is a fact
+    // ABOUT THE WORK, which waiting cannot change; this one is a fact about
+    // TIME, and only a conclusion that is otherwise recordable may be held.
+    const qualityHold =
+      parsed.verdict === "READY" && !staleTarget && withholding === "none"
+        ? decideQualityHold({
+            standing: qualityStandingFor({
+              head: reviewTargets.get(targetRoot)?.head ?? "",
+              files: reviewTargets.get(targetRoot)?.files,
+              quality: st.quality,
+            }),
+            qualityRoundInFlight: qualityRoundInFlight(targetRoot),
+          })
+        : "record";
+    // NOBODY IS COMING BACK WITH A QUALITY VERDICT (the quality pane died, or
+    // this round never dispatched one): fail closed, exactly like
+    // `unverified-idle`. A hold with nothing to end it parks the round forever.
+    if (qualityHold === "refuse") {
+      parsed.verdict = "BLOCKED";
+      qualityRefusal = "质量轮在本轮没有留下任何有效结论（judge 未派出或已死亡）—— 本轮没有可 ship 的 READY。";
+    }
+    if (withholding === "unverified" || qualityHold === "hold") {
       const parkedTarget = reviewTargets.get(targetRoot);
       // No target ⇒ the stale check above already fired and this is a refusal,
       // not a hold: a parked conclusion with nothing to bind to could never be
@@ -9315,6 +9573,21 @@ export default function reviewGate(pi: ExtensionAPI) {
           at: new Date().toISOString(),
         };
         persistRepo(ctx as unknown as ExtensionContext, targetRoot);
+        // TWO REASONS TO HOLD, TWO SENTENCES — and the quality one also says
+        // where to look: a quality judge is allowed to ask the USER a scope
+        // question (`ask_user`), and an agent told only "do not re-submit"
+        // would wait on a box nobody had told it about.
+        if (qualityHold === "hold") {
+          return `review-gate: this round's READY is being HELD, not refused — for ${targetRoot} ` +
+            `(round ${st.rounds.length + 1}, tree ${parkedTarget.tree.slice(0, 12)}).\n` +
+            "这一轮的内容**没有问题**：质量轮（`quality-auditor`）还在审同一段 commit range。" +
+            "门禁把功能轮结论**原样扣下**了，`review` 仍是 PENDING ——\n" +
+            "  - 质量轮落 READY ⇒ 门禁**自动补记 READY** 并唤醒你，可以继续收尾；\n" +
+            "  - 质量轮落非 READY ⇒ 挂起作废，按它的 findings 修完重新送审；\n" +
+            "  - 质量轮 pane 死掉（永远不会再有结论）⇒ 挂起作废，重送一轮即可。\n" +
+            "**不要重跑审查**：重送的同一份内容不会更快拿到结果，只会白烧一轮。" +
+            "若质量轮在问你问题（`judge_wait` / `judge_answer` 会显示），先把它答掉。";
+        }
         return `review-gate: this round's READY is being HELD, not refused — for ${targetRoot} ` +
           `(round ${st.rounds.length + 1}, tree ${parkedTarget.tree.slice(0, 12)}).\n` +
           "这一轮的内容**没有任何问题**：只是全量 precommit 还没跑完（B1 让它与审查并行跑，" +
@@ -9494,6 +9767,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           "different directory is recorded as BLOCKED. If the reviewer ended inside its throwaway " +
           "worktree, have it `cd` back to the repo root and report that instead."
         : "") +
+      // THE QUALITY REFUSAL (2026-09-16): the round's own quality judge never
+      // delivered, so this READY was refused rather than held — and the agent
+      // must not read it as a finding against its code.
+      (qualityRefusal === undefined ? "" : `\nQUALITY PRECONDITION: ${qualityRefusal}`) +
       (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : "");
   }
 
@@ -11030,12 +11307,20 @@ export default function reviewGate(pi: ExtensionAPI) {
 
     // L2 circuit breaker: an unmet gate justifies another turn only while
     // something is still MOVING. When the fingerprint, both verdicts, the round
-    // count and the unmet list are all unchanged for STALL_REPEAT_LIMIT
-    // evaluations in a row, the blocker is external (provider out of quota,
-    // subagent launch failure, unreachable model) and another injection would
-    // only burn the budget telling the agent to retry the impossible — the
-    // observed 7-injection quota burn. Stop injecting and name the cause.
+    // count, the unmet list and the NEGOTIATED CONTRACT are all unchanged for
+    // STALL_REPEAT_LIMIT evaluations in a row, another injection would only
+    // burn the budget telling the agent to retry what is not moving — the
+    // observed 7-injection quota burn. Stop injecting and name the cause the
+    // gate can actually see (`classifyStallCause` reads the sidecar; blaming
+    // the provider first is what sent a user to inspect a healthy model chain
+    // during an 80-minute negotiation, 2026-09-16).
     // Tighten-only: no verdict is granted, ship commands stay blocked.
+    //
+    // WHAT COUNTS AS MOTION is `stallInMotion`'s call, not this file's — a
+    // running judge, the overdue-negotiation directive, a dialog waiting for
+    // the user, and a user answer that arrived after the PREVIOUS observation
+    // (an event, never a grace period).
+    //
     // 2026-09-17 P1 (reviewer): the force-negotiate directive must NOT be
     // swallowed by the stall breaker. The exact scenario it exists for — a
     // read-only probe loop (no edits → fingerprint unchanged, no review →
@@ -11046,6 +11331,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     // to do the one thing that ends the loop. Treat an overdue negotiation as
     // in-motion (same exemption a running reviewer gets), so the directive
     // reaches the agent exactly when it is needed.
+    const motion = {
+      // A running reviewer is why the signature is unchanged: the verdict it
+      // will produce does not exist yet. Cutting the loop off there would
+      // orphan the very review the gate is waiting for — until it is too old
+      // to be believable (see `judgeChildInMotion`).
+      judgeInFlight: judgeChildInMotion(),
+      forceNegotiate,
+      pausedForUser: state.pausedQuestion !== undefined,
+      lastUserInteractionAt,
+      previousObservationAt: lastStallObservedAt,
+    };
     const stall = evaluateStall(
       loopStall,
       progressSignature({
@@ -11054,21 +11350,36 @@ export default function reviewGate(pi: ExtensionAPI) {
         precommitVerdict: state.precommit.verdict,
         rounds: state.rounds.length,
         problems: [...problems, ...completion],
+        // The contract hashes are recorded by the gate itself (the confirmed
+        // restatement, the draft the goal auditor judged, the approval), so
+        // "the requirement moved" is a fact rather than a guess.
+        contract: negotiationFingerprint({
+          restatementHash: state.restatement?.hash,
+          goalDraftHash: state.goalPrereview?.hash,
+          goalApprovalHash: state.loopGoal?.hash,
+        }),
       }),
       STALL_REPEAT_LIMIT,
-      // A running reviewer is why the signature is unchanged: the verdict it
-      // will produce does not exist yet. Cutting the loop off there would
-      // orphan the very review the gate is waiting for, so observable work in
-      // flight counts as motion — until it is too old to be believable.
-      { inMotion: judgeChildInMotion() || forceNegotiate },
+      { inMotion: stallInMotion(motion) },
     );
+    // The observation is stamped AFTER the decision: an interaction that lands
+    // later belongs to the NEXT one, which is what makes the fact an event
+    // rather than a window.
+    lastStallObservedAt = new Date().toISOString();
     loopStall = stall;
     if (stall.stalled) {
       // Once per stall, not once per turn: the state persists in `loopStall`,
       // and any real progress resets both the count and this flag.
       if (!stallNoticeShown) {
         stallNoticeShown = true;
-        try { ctx.ui.notify(buildStallNotice(stall.repeats), "warning"); } catch { /* headless */ }
+        const cause = classifyStallCause({
+          pausedForUser: motion.pausedForUser,
+          goalConfirmed: loopGoalConfirmed(),
+          hasUnreviewedChanges:
+            (state.hasCodeChange || state.hasDocChange) && state.review.verdict !== "READY",
+          lastUserInteractionAt,
+        });
+        try { ctx.ui.notify(buildStallNotice(stall.repeats, cause), "warning"); } catch { /* headless */ }
       }
       updateWidget(ctx);
       confirmStop();

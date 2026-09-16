@@ -558,7 +558,10 @@ test("L2 STALL BREAKER: a running judge child counts as motion (never orphan a l
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   const call = SRC.slice(breakerAt, injectAt);
-  assert.match(call, /inMotion:\s*judgeChildInMotion\(\)/,
+  assert.match(call, /inMotion:\s*stallInMotion\(motion\)/,
+    "the breaker's motion verdict is the ONE pure decision (lib/loop-stall.ts), not an inline ||");
+  const facts = SRC.slice(SRC.indexOf("const motion = {", start), breakerAt);
+  assert.match(facts, /judgeInFlight:\s*judgeChildInMotion\(\)/,
     "the breaker must be told about judge work in flight");
   // The motion probe must be bounded in age, or a hung run would disable the
   // breaker permanently — the exact failure it exists to catch.
@@ -579,14 +582,37 @@ test("L2 STALL BREAKER: an overdue goal negotiation counts as motion (never swal
   const start = SRC.indexOf(LOOP_SETTLED);
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
-  const call = SRC.slice(breakerAt, injectAt);
-  assert.match(call, /inMotion:\s*judgeChildInMotion\(\) \|\| forceNegotiate/,
-    "an overdue negotiation must be in-motion so the directive survives the breaker");
+  const facts = SRC.slice(SRC.indexOf("const motion = {", start), breakerAt);
+  assert.match(facts, /^\s*forceNegotiate,\s*$/m,
+    "an overdue negotiation must reach the motion verdict");
+  assert.match(facts, /stallInMotion|pausedForUser/, "the motion facts are assembled in one place before the breaker");
   // The fact is computed earlier in the handler (before the fingerprint, at the
   // turn counter), so it exists by the time the stall check reads it.
   const settledWindow = SRC.slice(start, injectAt);
   assert.match(settledWindow, /const forceNegotiate = goalNegotiationOverdue\(state\.turnsWithoutGoal\)/,
     "the forceNegotiate fact must be computed before the stall check");
+});
+
+test("L2 STALL BREAKER: an answered gate dialog is motion — a live negotiation is not a stall", () => {
+  // 2026-09-16, measured: 80 minutes of goal negotiation (seven restatement /
+  // goal revisions, repeated questions answered) tripped the breaker and the
+  // notice blamed the provider. The writer and the reader must both stay wired:
+  // `askChoice` is the ONE dialog path, and the breaker reads the stamp as an
+  // EVENT (after the previous observation), never as a grace period.
+  const askChoice = windowOf("async function askChoice(", "\n  }", "askChoice");
+  assert.match(askChoice, /if \(answer !== undefined\) lastUserInteractionAt = new Date\(\)\.toISOString\(\)/,
+    "the dialog path must record the exchange (dismissed boxes do not count)");
+  const start = SRC.indexOf(LOOP_SETTLED);
+  const breakerAt = SRC.indexOf("evaluateStall(", start);
+  const facts = SRC.slice(SRC.indexOf("const motion = {", start), breakerAt);
+  assert.match(facts, /lastUserInteractionAt,/, "the stamp must reach the motion facts");
+  assert.match(facts, /previousObservationAt:\s*lastStallObservedAt/, "the EVENT boundary is the previous observation");
+  assert.match(facts, /pausedForUser:\s*state\.pausedQuestion !== undefined/,
+    "a parked dialog is waiting on a person, not spinning");
+  // The observation stamp is written after the decision, so an interaction that
+  // lands later belongs to the NEXT observation (that is what makes it an event).
+  assert.match(SRC.slice(breakerAt, SRC.indexOf("REVIEW_GATE_RESUME", start)),
+    /lastStallObservedAt = new Date\(\)\.toISOString\(\)/);
 });
 
 
@@ -2725,8 +2751,8 @@ test("judge_submit is the agent's single judge entry and hides every process det
   // The title is derived from the role ACTUALLY dispatched, which the chain
   // decides (`reviewer` for a docs-only round or a standing quality pass,
   // `quality-auditor` otherwise) — the agent still passes no title at all.
-  assert.match(body, /const title = `\$\{dispatchRole\}-/, "the gate derives the display title itself");
-  assert.match(body, /dispatchJudgeRound\(\{ root, role: dispatchRole, title, task/, "dispatch is delegated to the one spawn owner");
+  assert.match(body, /const title = `\$\{judge\.role\}-/, "the gate derives the display title itself");
+  assert.match(body, /dispatchJudgeRound\(\{[\s\S]{0,400}?role: judge\.role,/, "dispatch is delegated to the one spawn owner");
   // The quality round is NOT a role the agent may name: it is routed to. The
   // enum and the second validation come from ONE constant, or they disagree
   // about what "unknown role" means (reviewer P2, 2026-09-15).
@@ -4744,7 +4770,7 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   assert.match(body, /findings 流（边审边修）/, "and names it in the text too");
   // The audited draft is remembered only after the dispatch is ACCEPTED: a
   // refused submission must not overwrite what a running audit is judging.
-  const acceptedAt = body.indexOf("if (!dispatch.ok)");
+  const acceptedAt = body.indexOf("if (!d.ok)");
   const setAt = body.indexOf("pendingAudits.set(root");
   assert.ok(acceptedAt > 0 && setAt > acceptedAt, "the draft is recorded after the dispatch is accepted");
   // …and the recording side closes the loop with that same draft, through the
@@ -6051,24 +6077,29 @@ test("a parked READY is replayed by the lane that lands on its tree, and retired
   assert.match(SRC, /withholding === "unverified-idle"/,
     "the UNVERIFIED reply distinguishes 'a lane is still running' from 'nothing is coming'");
   assert.match(SRC, /const fate = parkedReadyFate\(\{/);
-  // …AND THE LANE'S LANDING IS WHAT DECIDES IT: whatever it answers, a parked
-  // record is never left behind (round-2 P2 — nothing would ever come back for
-  // it). `none` means "nothing was parked", so a deletion under it is correct.
-  const fateAt = SRC.indexOf("const fate = parkedReadyFate({");
-  // Bounded by the branch that follows, not by a character count: a window that
-  // has to grow with the comments fails for the wrong reason (the same lesson
-  // the async-notice test above was just fixed with).
-  const afterFate = SRC.slice(fateAt, SRC.indexOf('if (fate === "replay") {', fateAt));
-  assert.match(afterFate, /if \(fate !== "none"\) \{\s*const parked = laneState\.pendingReady!;\s*delete laneState\.pendingReady;/,
-    "a landed lane retires whatever it did not replay");
-  const replayAt = SRC.indexOf('if (fate === "replay") {');
-  assert.ok(replayAt > 0, "the replay branch is here");
-  const replay = SRC.slice(replayAt, replayAt + 1800);
-  assert.match(replay, /await recordReviewVerdict\(parked\.conclusion as ReportConclusion, root, ctx\)/,
+  // …AND THE RE-ASK IS ONE PLACE, CALLED FROM EVERY LANDING (2026-09-16): the
+  // lane's landing, the quality round's settlement, and the settle sweep. The
+  // first version decided the fate at the lane's landing alone, which was
+  // right while the lane was the only thing a hold could wait for — with two
+  // preconditions landing in either order it would strand half of them.
+  assert.match(SRC, /async function resumeParkedReady\(root: string, ctx\?: unknown\): Promise<string\[]>/,
+    "ONE re-ask of the parked conclusion's two preconditions");
+  assert.match(SRC, /lane: parkedLaneHalf\(\{/, "the lane's half is computed by the pure rule");
+  assert.match(SRC, /quality: qualityPrecondition\(\{/, "…and so is the quality round's");
+  const resumeAt = SRC.indexOf("async function resumeParkedReady(");
+  const resume = SRC.slice(resumeAt, SRC.indexOf("async function applyRoundCancel(", resumeAt));
+  assert.match(resume, /if \(fate === "none" \|\| fate === "hold"\) return \[\];/, "a hold leaves the record where it is");
+  assert.match(resume, /await recordReviewVerdict\(parked\.conclusion as ReportConclusion, root, liveCtx\)/,
     "the replay IS the recorder — one implementation of the recording rules");
-  assert.match(replay, /buildParkedReadyReplayNotice\(\{ round: parked\.round, tree: parked\.tree, recorded \}\)/,
+  assert.match(resume, /buildParkedReadyReplayNotice\(\{ round: parked\.round, tree: parked\.tree, recorded \}\)/,
     "and the wording lives in lib/, like the failure notice beside it");
-  assert.match(replay, /deliverAs: "steer"/, "steered, not queued behind a long turn");
+  assert.match(resume, /deliverAs: "steer"/, "steered, not queued behind a long turn");
+  // The BACKSTOP: a hold whose second precondition can never land (the quality
+  // pane died after the record was parked) must be retired by the settle sweep,
+  // not left to rot while the reply says "do not re-submit".
+  const sweepAt = SRC.indexOf("async function settleFinishedRounds(");
+  assert.match(SRC.slice(sweepAt, sweepAt + 2000), /for \(const root of sessionRepos\) await resumeParkedReady\(root, ctx\);/,
+    "every settle re-asks a parked conclusion");
   // The parked record must carry the judge's own SCOPE (round-1 P2): the
   // recorder pairs it with the dispatched half, so a replay that lost it would
   // write a different audit pair than a straight record of the same round.
@@ -6221,7 +6252,7 @@ test("a settle publishes its stop proof only at the exits that MEAN it", () => {
   assert.match(body, /\/\/ NOT a stop: the agent is still working, so no proof is published here\.[\s\S]{0,40}?if \(!ctx\.isIdle\(\)\) return;/);
 });
 
-test("2026-09-15: the quality round runs FIRST — routing, hand-off, precondition, lane abort", () => {
+test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel matrix, precondition", () => {
   // ── 1. ROUTING: inside the ONE submission chain, after prepare ──────────
   const submitAt = SRC.indexOf("async function submitForReview(");
   assert.ok(submitAt > 0, "the submission chain exists");
@@ -6231,48 +6262,107 @@ test("2026-09-15: the quality round runs FIRST — routing, hand-off, preconditi
   assert.match(submit, /Array\.isArray\(prepared\.details\?\.files\)/, "the chain takes the changed files from prepare");
   assert.match(submit, /qualityRoundSkip\(changedFiles\)/, "…asks whether this round carries code at all");
   assert.match(submit, /qualityStandingFor\(\{/, "…and whether a pass already stands for this head");
-  assert.match(submit, /role: QUALITY_ROLE/, "a code round routes to the QUALITY judge, not the reviewer");
-  assert.match(submit, /pendingReviewAfterQuality\.set\(input\.root, \{/, "and the functional round is HELD, never dropped");
+  assert.match(submit, /role: QUALITY_ROLE/, "a code round routes to the QUALITY judge");
+  // THE WHOLE POINT OF 2026-09-16: the functional brief travels WITH the
+  // quality one, so the two judges start from one submission instead of the
+  // reviewer waiting out the whole quality round.
+  assert.match(submit, /parallelReviewer: \{/, "the functional brief ships with it — the two judges start together");
+  assert.doesNotMatch(SRC, /pendingReviewAfterQuality/, "the serial hold is DELETED, not left beside the parallel path (哲学三)");
+  assert.doesNotMatch(SRC, /handOffAfterQuality|handOffQualityIfAny/, "…and so is the second dispatcher it existed for");
   assert.match(submit, /skippedQualityRecord\(\{/, "a code-free round records the skip, never silently");
   assert.match(submit, /if \(skip\.skip\) \{/, "the skip branch is the pure rule's own answer, not a re-derived one");
   assert.doesNotMatch(submit, /isSourceFile\(/, "the file classification is NOT re-implemented in the extension");
 
-  // ── 2. THE PRECONDITION: the reviewer cannot be dispatched around it ────
+  // ── 2. THE TWO SPAWNS: back to back, and never half a round ────────────
+  const judgesAt = SRC.indexOf("const judges = [");
+  assert.ok(judgesAt > 0, "one loop starts the round's judges");
+  const judges = SRC.slice(judgesAt, SRC.indexOf("const child = judgeChildByRole(root, dispatchRole);", judgesAt));
+  assert.match(judges, /await dispatchJudgeRound\(\{/, "the dispatch owner is reused, not bypassed");
+  // A round never starts HALF: if the quality spawn fails, its error returns
+  // before the reviewer is dispatched (a reviewer whose quality half never
+  // started could only ever be refused at recording time).
+  const failAt = judges.indexOf("if (!d.ok) {");
+  const qualityNoteAt = judges.indexOf("noteQualityRoundDispatched(root, d.judgeId)");
+  assert.ok(failAt > 0 && qualityNoteAt > failAt, "a failed spawn returns before the next judge is started");
+  assert.match(judges, /noteQualityRoundDispatched\(root, d\.judgeId\)/,
+    "the round records WHICH quality judge it dispatched — the fact the hold reads");
+
+  // ── 3. THE PRECONDITION: dispatch keeps it, RECORDING enforces it ───────
   const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
   assert.ok(dispatchAt > 0, "the one dispatch owner exists");
   const dispatch = SRC.slice(dispatchAt, dispatchAt + 3000);
   assert.match(
     dispatch,
-    /if \(role === "reviewer"\) \{[\s\S]{0,900}?qualityStandingFor\(/,
-    "dispatch itself refuses a reviewer without a quality standing for this head",
+    /if \(role === "reviewer" && opts\.qualityRoundDispatched !== true\) \{[\s\S]{0,900}?qualityStandingFor\(/,
+    "dispatch still refuses a reviewer with no quality standing — except the parallel path, which says so explicitly",
   );
   assert.match(dispatch, /没有登记在案的审查范围/, "…and refuses one with no registered target at all");
+  assert.doesNotMatch(dispatch, /judgeChildByRole\(root, QUALITY_ROLE\)/,
+    "the permission is NEVER inferred from the registry: the quality pane is reused and outlives its verdict, so that test would be always true",
+  );
+  // THE PARALLEL PATH IS THE ONLY CALLER that may pass it.
+  assert.equal((SRC.match(/qualityRoundDispatched:\s*true/g) ?? []).length, 1,
+    "exactly one call site grants it");
+  const recordAt = SRC.indexOf("async function recordReviewVerdict(");
+  assert.ok(recordAt > 0, "the recorder exists");
+  const record = SRC.slice(recordAt, SRC.indexOf("    st.review = {", recordAt));
+  assert.match(record, /decideQualityHold\(\{/, "the READY is answered against the quality standing at RECORD time");
+  assert.match(record, /qualityRoundInFlight: qualityRoundInFlight\(targetRoot\)/,
+    "…with THIS round's dispatched judge as the in-flight fact");
+  assert.match(record, /if \(qualityHold === "refuse"\) \{[\s\S]{0,120}?parsed\.verdict = "BLOCKED";/,
+    "nobody coming back ⇒ REFUSE (fail-closed)");
+  assert.match(record, /qualityHold === "hold"/, "…somebody coming back ⇒ HOLD, never record yet");
+  // The in-flight predicate reads the ROUND's own record, and needs a LIVE
+  // pane: a judge that died can never land a verdict, so a hold there would be
+  // forever.
+  const inFlightAt = SRC.indexOf("function qualityRoundInFlight(");
+  assert.ok(inFlightAt > 0, "the in-flight predicate exists");
+  const inFlight = SRC.slice(inFlightAt, inFlightAt + 1400);
+  assert.match(inFlight, /reviewTargets\.get\(root\)/, "the ROUND's own record makes it this round's judge");
+  assert.match(inFlight, /ownLiveJudges\(\)/, "…a live pane is what makes the verdict still possible");
+  assert.match(inFlight, /quality\?\.commitSha === target\.head/, "once a verdict stands for this head, nothing is owed");
+  // …and the round records that judge only after the spawn was ACCEPTED.
+  const noteAt = SRC.indexOf("function noteQualityRoundDispatched(");
+  const note = SRC.slice(noteAt, noteAt + 500);
+  assert.match(note, /target\.qualityRound = \{ judgeId, head: target\.head \}/, "the round owns the pair (judge, head)");
 
-  // ── 3. THE HAND-OFF: the settle path, not the agent ─────────────────────
-  const handAt = SRC.indexOf("async function handOffAfterQuality(");
-  assert.ok(handAt > 0, "the hand-off exists");
-  const hand = SRC.slice(handAt, SRC.indexOf("\n  async function ", handAt + 10));
-  assert.match(hand, /qualityFollowUp\(\{ verdict, held: held !== undefined \}\)/, "the decision comes from the pure rule, not from branches here");
-  assert.match(hand, /abortPrecommitLane\(root,/, "a blocking verdict stops the lane verifying that content");
-  assert.match(hand, /role: "reviewer"/, "a pass dispatches the functional round it was holding");
-  assert.match(hand, /pendingReviewAfterQuality\.delete\(root\)/, "…and releases the hold exactly once");
-  // BOTH record paths hand off, through ONE decision (reviewer P1,
-  // 2026-09-15): a round is recorded by whichever path sees it first — the
-  // settle sweep or `judge_wait` — and the other only ever reads
-  // `already-consumed`. Wired into the sweep alone, a quality round closed by
-  // a wait stranded its held functional round forever.
-  assert.match(SRC, /async function handOffQualityIfAny\(kind: string \| undefined, root: string\)/, "one hand-off decision exists");
-  assert.match(SRC, /const handOffNote = await handOffQualityIfAny\(settled\.kind, childRoot\);/, "the settle sweep hands off");
-  assert.match(SRC, /const handOffNote = await handOffQualityIfAny\(settled\.kind, root\);/, "judge_wait's settleRound does too");
-  assert.doesNotMatch(SRC, /settled\.kind === "quality" \? await handOffAfterQuality/, "no second copy of the kind test");
-  // …and it travels as its OWN field: the standard report prints the recorded
-  // note first-line-only, so a hand-off appended to that text is invisible to
-  // the one reader it exists for (reviewer P1, 2026-09-15).
-  assert.equal((SRC.match(/handOffNote/g) ?? []).length >= 4, true, "the hand-off note travels as a field on both paths");
-  assert.doesNotMatch(SRC, /text: \[settled\.text, handOff\]/, "never folded into the recorded note");
+  // ── 4. THE CANCEL MATRIX: applied on the settle path, from ONE decision ──
+  const applyAt = SRC.indexOf("async function applyRoundCancel(");
+  assert.ok(applyAt > 0, "one place applies the matrix");
+  const apply = SRC.slice(applyAt, SRC.indexOf("\n  /**", applyAt));
+  assert.match(apply, /roundCancelPlan\(\{/, "the decision comes from the pure table, not from branches here");
+  assert.match(apply, /kind === "quality" \? st\.quality\?\.verdict : st\.review\.verdict/,
+    "…and it reads the RECORDED verdict, never the word a judge printed");
+  assert.match(apply, /cancelJudgeRound\(root, "reviewer",/, "a blocking quality verdict stops the reviewer");
+  assert.match(apply, /cancelJudgeRound\(root, QUALITY_ROLE,/, "a blocking reviewer verdict stops the quality round");
+  assert.match(apply, /abortPrecommitLane\(root,/, "…and the lane verifying that content");
+  assert.match(apply, /await resumeParkedReady\(root, ctx\)/, "every landing re-asks any parked conclusion");
+  // BOTH record paths apply it, through the one wrapper (reviewer P1,
+  // 2026-09-15: wired into the sweep alone, a round closed by a `judge_wait`
+  // never stopped anything).
+  assert.equal((SRC.match(/await applyRoundCancel\(settled\.kind,/g) ?? []).length, 2,
+    "the settle sweep AND judge_wait's settleRound both apply it");
+  assert.doesNotMatch(SRC, /settled\.kind === "quality" \? await/, "no second copy of the kind test");
+  // THE KILL IS REAL (user requirement): closing the pane is the existing
+  // close path, and dropping the row is what keeps the watchdog from
+  // announcing the cancelled round as a judge that DIED.
+  const cancelAt = SRC.indexOf("function cancelJudgeRound(");
+  const cancel = SRC.slice(cancelAt, cancelAt + 2000);
+  assert.match(cancel, /closeJudgePaneOf\(entry, \{/, "the pane's process is terminated through the one close path");
+  assert.match(cancel, /setHierarchy\(removeJudge\(judgeHierarchy, entry\.judgeId\)\)/,
+    "…and the registry row goes, so the death is never announced and `judge_recover` cannot revive it");
+  assert.match(cancel, /absorbJudgeModelEvents\(root, entry\.judgeId\)/, "model events are absorbed BEFORE the row (and its cursors) goes");
+  assert.match(cancel, /reapReviewScratch\(entry\.judgeId\)/, "its throwaway worktrees are reclaimed by whoever created them");
+  // The lane's row of the matrix is applied at the lane's own landing: it can
+  // only stop the functional round, and the quality round carries on.
+  assert.match(SRC, /if \(verdict !== "PASS"\) \{\s*cancelJudgeRound\(root, "reviewer",/,
+    "a FAILED lane ends the reviewer and leaves the quality round running");
+  // …and the hand-off note still travels as its OWN field: the standard report
+  // prints the recorded note first-line-only, so a note appended there is
+  // invisible to the one reader it exists for.
   assert.match(SRC, /handOffNote: conclusion\.handOffNote,/, "the settle sweep prints it");
 
-  // ── 4. THE LANE ABORT: a stopped lane is not a result ───────────────────
+  // ── 5. THE LANE ABORT: a stopped lane is not a result ──────────────────
   const laneAt = SRC.indexOf("function startPrecommitBeside(");
   // Wide enough to reach the failure notice at the END of the lane — a
   // truncated window does not fail, it silently stops covering the tail.

@@ -48,29 +48,28 @@ so re-opening with the same `--session-id` continues the same session — its
 context is reused across rounds until a READY lands. Each review round is ONE
 reviewer over the WHOLE change:
 
-- **A code-quality round runs FIRST (2026-09-15, user requirement).** The same
-  chain dispatches `quality-auditor` on the same `baseline..HEAD` range before
-  the functional reviewer exists: it judges the CODE ITSELF (philosophy,
-  architecture, correctness, security, performance — then simplicity, readability,
-  maintainability) against `docs/code-quality-rules.md`, a language-neutral
-  checklist whose cross-repository clauses make the WHOLE repo its reference
-  (a duplicate that already exists elsewhere, an abstraction two modules could
-  share, a function the round touches that is already messy).
+- **The quality round runs BESIDE the functional one (2026-09-16).** One
+  `judge_submit` starts all three over the same `baseline..HEAD` at the same
+  moment: `quality-auditor` (the CODE ITSELF — philosophy, architecture,
+  correctness, security, performance, then simplicity, readability,
+  maintainability — against `docs/code-quality-rules.md`, a language-neutral
+  checklist whose cross-repository clauses make the WHOLE repo its reference),
+  the functional `reviewer`, and the full precommit lane. Who concludes what
+  stops whom is the cancel matrix, whose ONE substantive home is
+  `docs/execution-model.md` §「并行三方与取消矩阵」 — a non-READY quality round
+  kills the reviewer's pane and the lane, a non-READY reviewer kills the quality
+  pane and the lane, a FAILED lane kills the reviewer and leaves the quality
+  round running (it reads code, not test results). A reviewer that concludes
+  READY before the quality round does is HELD (parked) and recorded the moment
+  the quality round passes — never recorded early, never re-reviewed.
   P0/P1 BLOCKS; P2 is recorded only. A finding whose fix needs PRE-EXISTING
   code changed is a question for the USER — the judge puts it through
   `ask_user` (fold it in / only this round's own lines / out of scope) and
-  never widens the round itself.
-  A READY unlocks the functional round, which the gate then dispatches
-  **automatically** — the agent never calls `judge_submit` twice for one round,
-  and `quality-auditor` is NOT a role it can name. A BLOCKED does three
-  things: no reviewer, the standard report wakes the agent, and the full
-  precommit lane still verifying that content is ABORTED (its verdict would
-  describe a tree about to change) — verification is started beside the chain,
-  so the quality round never waits on it and its failure never interrupts the
-  round. Two rounds skip the quality judge legitimately, and the skip is
-  RECORDED and self-reported: a round with no code at all (docs/data only,
-  or the empty exit-goal round), and a re-submission whose HEAD already
-  carries a quality READY.
+  never widens the round itself. The agent never calls `judge_submit` twice for
+  one round, and `quality-auditor` is NOT a role it can name. Two rounds skip
+  the quality judge legitimately, and the skip is RECORDED and self-reported: a
+  round with no code at all (docs/data only, or the empty exit-goal round), and
+  a re-submission whose HEAD already carries a quality READY.
 
 - **Review → ONE call**: `judge_submit({role:"reviewer", task:<what you
   changed this round>})`. The gate runs the whole chain itself — full
@@ -282,7 +281,9 @@ frontmatter in `agents/*.md` is the single source of truth and
   `claude-opus-5`, `thinking: max`.
   `goal-auditor` is the dedicated pre-reviewer of the loop GOAL (read-only
   tools) whose verdict the gate records mechanically; `quality-auditor` is the
-  pre-reviewer of the CODE that runs before the functional reviewer (2026-09-15).
+  pre-reviewer of the CODE, running in the SAME round as the functional reviewer
+  (2026-09-16; one `judge_submit` starts both, and the cancel matrix decides who
+  stops whom — `docs/execution-model.md` §「并行三方与取消矩阵」).
   The L1/L2 execution tiers (`recon` / `fixer`) were retired — the gate
   ships the five judging roles only.
 

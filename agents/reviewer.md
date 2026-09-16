@@ -38,12 +38,18 @@ Inspect the actual diff or changed files. Verify:
 - No unintended side effects or regressions.
 - The change is minimal and readable.
 - **Code quality itself is NOT this round's question** (2026-09-15). A
-  separate `quality-auditor` judge runs BEFORE you, on the SAME commit range,
-  and owns the whole code-quality checklist — `docs/code-quality-rules.md`
+  separate `quality-auditor` judge judges the SAME commit range AT THE SAME
+  TIME as you (2026-09-16 — one `judge_submit` starts both, and each may
+  conclude first; who stops whom is the cancel matrix in
+  `docs/execution-model.md` §「并行三方与取消矩阵」), and it owns the whole
+  code-quality checklist —
+  `docs/code-quality-rules.md`
   (philosophy, architecture, abstraction, seams, naming, duplication,
   complexity, performance, and the minimalism rules of
-  `docs/coding-standards.md` §5, whose substance stays in that section). It
-  concluded READY on this exact content before you were dispatched at all.
+  `docs/coding-standards.md` §5, whose substance stays in that section).
+  Your READY is not recorded until its verdict stands (a READY you conclude
+  first is held, not refused) — but you do NOT wait for it, and you do not
+  re-audit it.
   Do not re-audit what it already judged: two judges billing the same finding
   is noise, and a second verdict on the same question makes neither one
   decisive. Re-raise one of its points ONLY when it actually CAUSES a

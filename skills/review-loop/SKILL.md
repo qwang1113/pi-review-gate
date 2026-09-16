@@ -212,8 +212,10 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
      gate makes its subject a legal Conventional Commit and records where it
      landed. The review unit is the immutable range `baseline..HEAD`.
    - **the range + the findings stream + the task text**.
-   - **the QUALITY round** (2026-09-15) — when the round carries code, the
-     chain dispatches `quality-auditor` FIRST, on the same commit range: it
+   - **the QUALITY round** (2026-09-15) — when the round carries code, one
+     `judge_submit` starts `quality-auditor` on the same commit range AT THE
+     SAME TIME as the functional reviewer and the full precommit lane
+     (2026-09-16): it
      judges the code itself (philosophy, architecture, correctness,
      security, performance — then simplicity, readability, maintainability) against
      `docs/code-quality-rules.md`, a language-neutral checklist whose
@@ -222,13 +224,17 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
      through `ask_user` (the judge asks it; do not widen the round yourself).
      The judge can ask YOU a question too — `judge_wait`/`judge_answer`
      address it by role.
-   - **the dispatch** — ONE judge in its own pane (a living pane takes every
-     new round through its channel). Once the quality round passes, the gate
-     dispatches the reviewer **automatically**: do NOT call `judge_submit` a
-     second time for the same round, and do not try to name `quality-auditor`
-     (it is not in the role enum — the gate routes to it). A quality BLOCKED
-     means the reviewer never runs, the standard report wakes you, and the
-     full lane still verifying that content is ABORTED.
+   - **the dispatch** — ONE judge per role in its own pane (a living pane takes
+     every new round through its channel), all three parties started by that
+     ONE call: do NOT call `judge_submit` a second time for the same round, and
+     do not try to name `quality-auditor` (it is not in the role enum — the
+     gate routes to it). Which conclusion stops which party is the cancel
+     matrix (`docs/execution-model.md` §「并行三方与取消矩阵」): a non-READY
+     quality round really kills the reviewer's pane and the precommit lane, a
+     non-READY reviewer kills the quality pane and the lane, and a FAILED lane
+     kills the reviewer while the quality round carries on. A reviewer READY
+     that lands before the quality verdict is HELD until that verdict arrives
+     — do not re-submit it.
      You never pass a session id, a title or a
      directory. The `subagent` dispatch surface was retired 2026-09-06 with the
      pi-subagents companion — judge roles dispatch ONLY through `judge_submit`.

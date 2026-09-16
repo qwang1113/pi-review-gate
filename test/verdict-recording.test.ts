@@ -118,6 +118,7 @@ type Exec = (id: string, params: unknown, s: unknown, u: unknown, c: unknown) =>
 
 interface Recorders {
   recordReviewVerdict: (concluded: unknown, repo: string, ctx: unknown) => Promise<string>;
+  recordQualityVerdict: (concluded: unknown, repo: string, ctx: unknown) => Promise<string | undefined>;
 }
 
 function makeMockPi(cwd: string) {
@@ -193,7 +194,7 @@ function sidecar(repo: string): {
  * target. Without the target a READY has nothing to bind to and is withheld —
  * so this is what makes "READY was recorded" a meaningful assertion.
  */
-async function preparedRepo(): Promise<{ repo: string; pi: ReturnType<typeof makeMockPi>; ctx: unknown }> {
+async function preparedRepo(recordQualityPass = true): Promise<{ repo: string; pi: ReturnType<typeof makeMockPi>; ctx: unknown }> {
   const repo = makeRepo();
   const pi = makeMockPi(repo);
   reviewGate(pi as never);
@@ -216,6 +217,18 @@ async function preparedRepo(): Promise<{ repo: string; pi: ReturnType<typeof mak
     "id", { repo }, undefined, undefined, ctx,
   ) as { isError?: boolean; content: Array<{ text: string }> };
   assert.equal(prepared.isError, undefined, `prepare failed: ${prepared.content?.[0]?.text}`);
+  // THE QUALITY ROUND OF THIS ROUND HAS PASSED (2026-09-16). `recordReviewVerdict`
+  // refuses a functional READY that no quality standing covers, so a fixture
+  // that wants to exercise the FUNCTIONAL recorder has to model the round the
+  // parallel chain produces: the quality judge concluded READY for this exact
+  // head a moment before the reviewer's own report arrives. `recordQualityPass:
+  // false` is the OTHER half — the refusal the parallel design introduced.
+  if (recordQualityPass) {
+    const quality = await recorders(pi).recordQualityVerdict(
+      { verdict: "READY", findings: [], cwd: repo, docSync: "NOT_NEEDED" }, repo, ctx,
+    );
+    assert.match(String(quality), /质量轮记录 READY/, `quality fixture failed: ${quality}`);
+  }
   return { repo, pi, ctx };
 }
 
@@ -398,6 +411,26 @@ function readerIO(files: Map<string, string>) {
     readText: (p: string) => files.get(p),
   };
 }
+
+test("a functional READY with NO quality standing is REFUSED, never recorded (2026-09-16)", async () => {
+  // THE REFUSAL THE PARALLEL DESIGN INTRODUCES, and the reason it is safe to let
+  // both judges start together: what the quality round gates moved from the
+  // DISPATCH to the RECORD. A standing that is absent while no quality judge is
+  // left to deliver one means nobody is coming back — fail closed (exactly the
+  // `unverified-idle` rule). A standing that is absent while this round's
+  // quality judge is still running HOLDS the conclusion instead, which needs a
+  // live pane and is covered by `decideQualityHold` (pure, in
+  // test/quality-round.test.ts) and by the wiring pins in
+  // test/extension-structure.test.ts.
+  const { repo, pi, ctx } = await preparedRepo(false);
+  const concluded = reportConclusion(readerIO(new Map()), reportRecord(repo, { findings: [], findingsCount: 0 }));
+
+  const text = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+
+  assert.match(text, /recorded verdict BLOCKED/, `the READY must be refused, not recorded: ${text}`);
+  assert.match(text, /QUALITY PRECONDITION/, "…and the agent is told WHICH binding failed");
+  assert.equal(sidecar(repo).review.verdict, "BLOCKED", "nothing a quality round never passed may ship");
+});
 
 test("the opener records a READY from a summary-less structured report (round 4's exact shape)", async () => {
   const { repo, pi, ctx } = await preparedRepo();
