@@ -1441,7 +1441,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the fresher copy once that sidecar is known to be ours to rely on.
     const onDisk = loadSidecar(sidecarPath(root));
     if (stateOwnership(process.env, state.sessionId, onDisk?.sessionId) === "foreign") return undefined;
-    return repoStateCache.get(root) ?? onDisk;
+    // …and the state itself comes from the ONE loader, so both readers see the
+    // same object: a repo of OURS is adopted as it stands, and the
+    // predecessor's is carried the same way the primary repo is (a fresh state
+    // with the user's contracts on it, never the predecessor's verdicts).
+    return stateForRepo(root);
   }
 
   /** Normalize a tool/git path to a repo-relative form for scope comparisons

@@ -4191,6 +4191,10 @@ test("repo-state ownership is ONE rule for the loader AND the enforcement reader
     "ownership comes from the DISK, through the shared rule");
   assert.doesNotMatch(enforce, /if \(cached\) return cached/,
     "the cache must not answer the ownership question — that is what made the answer order-dependent");
+  assert.match(enforce, /return stateForRepo\(root\);/,
+    "…and the state comes from the ONE loader, so an inherited repo gets the NARROWED state");
+  assert.doesNotMatch(enforce, /\?\? onDisk/,
+    "the raw sidecar must never be handed out — it still carries the predecessor's READY / PASS / bypass");
 
   const loaderAt = SRC.indexOf("function stateForRepo(");
   const loader = SRC.slice(loaderAt, SRC.indexOf("repoStateCache.set(root, s)", loaderAt));
