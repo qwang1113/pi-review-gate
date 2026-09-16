@@ -525,11 +525,22 @@ export const UNTRUSTED_LINE_MAX_CHARS = 120;
  * slice happens before any wrapping, so it was invisible to the row budget that
  * existed then, and a long path silently took the station line and the
  * `goal-auditor 预审: PASS`
- * line with it while the dialog went on asking for approval. Every line worth
- * confirming is short and fixed; only the value inside it needs limiting.
+ * line with it while the dialog went on asking for approval.
+ *
+ * HEAD **AND TAIL**, because a path carries different facts at its two ends:
+ * where it lives (the start) and WHAT it is (the end). A prefix-only cap
+ * truncates inside whatever directory the caller happens to live under, so two
+ * repos side by side (`…/rg-lg-AAAA/repo` and `…/rg-lg-BBBB/repo`) come out
+ * identical — the value stops identifying anything exactly where the cap bites,
+ * and a consent check that matches on it becomes vacuous (round-1 review P2,
+ * 2026-09-16).
  */
 export function capUntrustedLine(value: string, max = UNTRUSTED_LINE_MAX_CHARS): string {
-  return value.length > max ? value.slice(0, max) + "…" : value;
+  if (value.length <= max) return value;
+  // One cell goes to the ellipsis, the rest splits as evenly as the parity allows.
+  const head = Math.ceil((max - 1) / 2);
+  const tail = max - 1 - head;
+  return value.slice(0, head) + "…" + value.slice(value.length - tail);
 }
 
 /**

@@ -954,13 +954,19 @@ test("L8: propose_loop_goal refuses a NON-repo repo param and shows the binding 
   // WHAT THE DIALOG WOULD ACTUALLY CARRY — not the full path. `capUntrustedLine`
   // bounds an untrusted value at 120 characters (by design), so asserting the
   // WHOLE path made this test depend on how long a fixture path happens to be
-  // on the machine that runs it (round-1 review P2, 2026-09-16: on a host whose
-  // tmpdir is long enough, the cap bites and the assertion fails for a reason
-  // that has nothing to do with consent). The cap is applied here instead, so
-  // the assertion is about what the user is shown.
+  // on the machine that runs it (round-1 review P2, 2026-09-16).
+  //
+  // WHAT THIS DOES AND DOES NOT PROVE, stated rather than implied: it proves the
+  // dialog carries THIS repo's value and not some other string. It cannot prove
+  // the value distinguishes repoB from a SIBLING fixture, because under a long
+  // `$TMPDIR` the cap sits entirely inside the shared `/…/rg-lg-…/` prefix —
+  // that is a property of the host's paths, not of the gate, and the cap's
+  // head+tail shape is what keeps the identifying end alive where it can be.
   const shownRepo = capUntrustedLine(repoB);
-  assert.match(dialogText, new RegExp(shownRepo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-    "the consent dialog must name the repo the goal binds to");
+  assert.ok(dialogText.includes(shownRepo),
+    `the consent dialog must carry this repo, capped as shown: ${shownRepo}`);
+  assert.equal(capUntrustedLine("/a/very/long".padEnd(200, "x") + "/repo").endsWith("/repo"), true,
+    "…and the cap keeps the identifying END of a path, which is what a prefix cut destroys");
 });
 
 // ---------------------------------------------------------------------------
