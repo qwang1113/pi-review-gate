@@ -6294,7 +6294,18 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // ── 2. THE TWO SPAWNS: back to back, and never half a round ────────────
   const judgesAt = SRC.indexOf("const judges = [");
   assert.ok(judgesAt > 0, "one loop starts the round's judges");
-  const judges = SRC.slice(judgesAt, SRC.indexOf("const child = judgeChildByRole(root, dispatchRole);", judgesAt));
+  // THE END ANCHOR MUST EXIST — AND BE CHECKED (quality round P2, 2026-09-18).
+  // It used to be `const child = judgeChildByRole(root, dispatchRole);`, which
+  // the parallel-dispatch round deleted: `indexOf` returned -1 and
+  // `slice(start, -1)` silently grew this window to the END OF THE FILE (4200
+  // lines of "the two spawns, back to back" that were not the two spawns). The
+  // assertions happened to keep biting, but the boundary was gone — the exact
+  // wrong-window failure this file warns about elsewhere. So: anchor on a
+  // statement the block really ends at, and assert it was found.
+  const judgesEnd = SRC.indexOf("const routed = accepted.find(", judgesAt);
+  assert.ok(judgesEnd > judgesAt,
+    "the end anchor is gone — an unchecked indexOf would widen this window to EOF and every assertion below it would read the wrong body");
+  const judges = SRC.slice(judgesAt, judgesEnd);
   assert.match(judges, /await dispatchJudgeRound\(\{/, "the dispatch owner is reused, not bypassed");
   // A round never starts HALF: if the quality spawn fails, its error returns
   // before the reviewer is dispatched (a reviewer whose quality half never

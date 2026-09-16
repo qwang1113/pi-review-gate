@@ -25,12 +25,15 @@
  *
  *   - a WIDENING — a new task, a task's `repo` changed, a dependency removed,
  *     serial→parallel, a higher `maxParallel`, a raised `deliveryStation`, a
- *     repo ADDED to `allowMultiplePrs`. Any single one of these revokes the
- *     approval, and the user is asked again.
+ *     repo ADDED to `allowMultiplePrs`, or a task whose own STATION got wider
+ *     (2026-09-18: the plan's last task is exempt from the same-repo
+ *     narrowing, so the order carries authority too). Any single one of these
+ *     revokes the approval, and the user is asked again.
  *   - an AMENDMENT — a task dropped, a dependency ADDED (more serial, never
  *     less), parallel→serial, a lower `maxParallel`, a lowered station, a
- *     repo REMOVED from `allowMultiplePrs`. The approval carries over, and
- *     the amendment is recorded so the change is never silent.
+ *     repo REMOVED from `allowMultiplePrs`, a task whose station tightened.
+ *     The approval carries over, and the amendment is recorded so the change
+ *     is never silent.
  *
  * WHAT IS NO LONGER HERE (2026-09-17, user decision). The FILE-BOUNDARY
  * algebra used to be the bulk of this comparison: a new path inside an
@@ -49,9 +52,11 @@
 import { isPlanHash, type OrchestratorPlan, type TaskExecution } from "./orchestrator-plan.ts";
 import {
   DEFAULT_DELIVERY_STATION,
+  deliveryStationRank,
   isStationWidening,
   type DeliveryStation,
 } from "./delivery-station.ts";
+import { effectiveTaskStation, type RepoPrPlanInput } from "./repo-pr-policy.ts";
 
 /** The authorization-relevant shape of one task, as the user approved it. */
 export interface ApprovedTaskSnapshot {
@@ -120,6 +125,15 @@ export function snapshotApprovedPlan(
   };
 }
 
+/** The approval snapshot in the shape the station rule reads. */
+function snapshotAsPlan(approved: ApprovedPlanSnapshot): RepoPrPlanInput {
+  return {
+    deliveryStation: approved.deliveryStation ?? DEFAULT_DELIVERY_STATION,
+    ...(approved.allowMultiplePrs === undefined ? {} : { allowMultiplePrs: approved.allowMultiplePrs }),
+    tasks: approved.tasks,
+  };
+}
+
 /** The verdict: may the approval survive this edit, and what changed? */
 export interface ApprovalCarryDecision {
   /** True ⇒ no dialog: the edit granted nothing new. */
@@ -140,6 +154,8 @@ export interface ApprovalCarryDecision {
 export function decideApprovalCarry(
   approved: ApprovedPlanSnapshot,
   next: OrchestratorPlan,
+  /** The orchestration's own repo — where a task without `repo` lands. */
+  defaultRepo: string,
 ): ApprovalCarryDecision {
   const widenings: string[] = [];
   const amendments: string[] = [];
@@ -224,6 +240,26 @@ export function decideApprovalCarry(
     // another must be re-approved).
     if ((before.repo ?? undefined) !== (task.repo ?? undefined)) {
       widenings.push(`任务 "${task.id}" 的工作 repo 从 ${before.repo ?? "(主 repo)"} 改为 ${task.repo ?? "(主 repo)"}`);
+    }
+
+    // HOW FAR A TASK MAY SHIP IS AUTHORITY TOO, AND THE PLAN'S LAST TASK HAS
+    // THE PLAN'S OWN STATION (2026-09-18). The same-repo narrowing exempts the
+    // LAST task, so an edit that only REORDERS the list can hand a task the
+    // user approved at `commit` the right to push and open the PR — and a
+    // dropped sibling can do the same thing without touching the order at all
+    // (its repo falls back under the two-task threshold). Comparing each
+    // task's STATION instead of the order is what the user actually signed: a
+    // reorder that moves no authority is not news, and a change that is real
+    // shows up here whatever edit produced it.
+    const beforeStation = effectiveTaskStation(snapshotAsPlan(approved), before, defaultRepo);
+    const nextStation = effectiveTaskStation(next, task, defaultRepo);
+    if (deliveryStationRank(nextStation) > deliveryStationRank(beforeStation)) {
+      widenings.push(
+        `任务 "${task.id}" 的交付站点从 ${beforeStation} 提到 ${nextStation}` +
+        "（plan 的最后一环不受同一 repo 多任务的收窄：改任务顺序/删掉兄弟任务都可能把它提上去）",
+      );
+    } else if (deliveryStationRank(nextStation) < deliveryStationRank(beforeStation)) {
+      amendments.push(`任务 "${task.id}" 的交付站点从 ${beforeStation} 收紧到 ${nextStation}`);
     }
   }
 

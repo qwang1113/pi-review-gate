@@ -308,7 +308,7 @@ async function handlePlanAction(
       );
     }
     const carry = runtime.approvedPlan
-      ? decideApprovalCarry(runtime.approvedPlan, next)
+      ? decideApprovalCarry(runtime.approvedPlan, next, deps.repoRoot)
       : { carries: false, widenings: ["门禁没有已批准 plan 的授权快照（记录不可读或来自更早的版本），无法证明这次改动没有扩权"], amendments: [] };
     if (carry.carries) {
       // The approval MOVES to the new content: the hash is what every later

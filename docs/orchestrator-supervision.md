@@ -572,6 +572,8 @@ plan，把每一处差异归入两类之一：
 | `parallel` → `serial` | `serial` → `parallel` |
 | 降低 `maxParallel` | 提高 `maxParallel` |
 | 收紧 `deliveryStation` | 提高 `deliveryStation`（放开更多 ship 命令） |
+| `allowMultiplePrs` 移除某个 repo（该 repo 回到「一个需求只出一个 PR」） | `allowMultiplePrs` 新增某个 repo（该 repo 的任务从此可以各自开 PR） |
+| 某任务的交付站点被**收紧** | 某任务的交付站点被**提高**——plan 的**最后一环**不受同 repo 多任务收窄（2026-09-18），所以改任务顺序、或删掉一个兄弟任务，都可能把这个豁免落到别的任务头上 |
 | 写回**此前已获授权**的内容（见下「撤回一次扩权」） | 任务改到另一个 `repo`（新写面，含改到 plan 里已有的另一个 repo） |
 
 读不到授权快照时一律判扩权 —— fail-closed 的代价只是多弹一次框。
