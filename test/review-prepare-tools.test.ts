@@ -449,6 +449,16 @@ test("the baseline is the last CONCLUDED round — and the branch base when ther
   h.st.review = { verdict: "BLOCKED", fingerprint: "tttttttttttt", at: "2026-08-29T00:00:00.000Z" };
   assert.equal((await call(h)).details?.baseline, "pppppppppppp");
   cleanup(h);
+
+  // …and when git cannot NAME a base at all (no remote, no main, no master —
+  // every sandbox, and a real shape for a local-only repo), the checkpoint's
+  // own parent is the fallback. An EMPTY range is not the safe answer here:
+  // it demands a clean worktree and then blesses nothing.
+  const k = fake();
+  k.branchBase = undefined;
+  assert.equal((await call(k)).details?.baseline, "pppppppppppp",
+    "no branch base ⇒ the checkpoint's parent, never an empty range");
+  cleanup(k);
 });
 
 test("a bypassed checkpoint is spelled out for the reviewer", async () => {

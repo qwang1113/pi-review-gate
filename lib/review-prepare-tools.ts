@@ -313,11 +313,32 @@ async function doPrepareReview(
     // whole round silently outside every range).
     //
     // So ask git instead: the branch base covers every commit of this branch,
-    // whenever it was made. Undefined (a repo that names no default branch)
-    // keeps the old empty range, and a branch sitting exactly on its base
-    // still renders as head..head below — the genuinely unknown case now
-    // degrades to the old behaviour instead of to a claim.
+    // whenever it was made.
+    //
+    // AND WHEN GIT CANNOT NAME ONE (2026-09-16): a repository with no remote,
+    // no `main` and no `master` — the shape every sandbox has, and a real
+    // shape for a local-only repo — used to leave the range EMPTY, and an
+    // empty range is a round that demands a clean worktree and then blesses
+    // nothing. There the checkpoint's own parent is the last thing that can
+    // still say "this content was here before this round": too little
+    // coverage is the failure this rule exists to prevent, but NO coverage is
+    // the harder failure. Undefined stays the genuinely-unknown case (neither
+    // a branch base nor a checkpoint to fall back to) and keeps the old
+    // empty-range exit-goal round.
     baseline = deps.git.branchBaseBaseline(root);
+    if (!baseline && st.checkpoint) {
+      baseline = st.checkpoint.prevSha || (() => {
+        try {
+          return deps.git.revParse(root, `${st.checkpoint!.sha}^`);
+        } catch {
+          // Round-9 P2 / round-10 Nit: a root commit or an unreachable sha
+          // must not throw out of the tool — the checkpoint itself is the
+          // baseline (an empty range at worst: the reviewer audits the
+          // checkpoint commit alone).
+          return st.checkpoint!.sha;
+        }
+      })();
+    }
   }
   let head = "";
   let tree = "";
