@@ -389,7 +389,7 @@ function checkOpener(
 
 export interface PaneJudgeWaitObservation {
   done: boolean;
-  reason: "report" | "pane-dead" | "question" | "finding" | "model-exhausted" | "pending";
+  reason: "report" | "pane-dead" | "question" | "finding" | "model-exhausted" | "pending" | "settled";
   reportId?: string;
   verdict?: string;
   findingsCount?: number;
@@ -556,6 +556,28 @@ export function probeJudgeRound(
   }
   const state = projection.lastState?.state ?? "unknown";
   const since = projection.lastStateSince ?? projection.lastActivityAt ?? "—";
+  // NOTHING LEFT TO RECEIVE (2026-09-16). A wait whose round has ALREADY been
+  // concluded, recorded and consumed, on a pane that is sitting idle, has no
+  // event to deliver — and blocking to the timeout says something FALSE: the
+  // opener reads a state line as "still working". Measured (notification
+  // session, 2026-09-15): six minutes and forty-seven seconds inside a wait
+  // that could not end, while the gate had been green since minute two and the
+  // human had to point it out.
+  //
+  // `already-consumed` is the exact reading that means "this round's report is
+  // in and the cursor has passed it" — the same source, not a new one. The
+  // pane state is what keeps it honest: a WORKING pane is a round in flight,
+  // and that one still has an event to wait for.
+  if (selected.reason === "already-consumed" && (state === "idle" || state === "done")) {
+    paintTitle("done");
+    return {
+      done: true,
+      reason: "settled",
+      stateLine: `${state}（自 ${since}）`,
+      openQuestions,
+      ...withEvents,
+    };
+  }
   paintTitle(projection.lastState?.state, projection.lastStateSince ?? projection.lastActivityAt);
   return {
     done: false,
@@ -918,6 +940,20 @@ export async function doWait(
         waitedSeconds,
       }),
       { done: true, reason: "report", role: child.role, hasVerdict: settled.hasVerdict },
+    );
+  }
+  // NOTHING WAS GOING TO ARRIVE (2026-09-16): the round was concluded and
+  // consumed already, and the pane is idle — so ending the wait here is the
+  // truthful answer, and "keep waiting" is the answer that wastes a session.
+  if (observation.done && observation.reason === "settled") {
+    return reply(
+      buildStandardReport({
+        ...base,
+        reason: "settled",
+        ...(observation.stateLine === undefined ? {} : { stateLine: observation.stateLine }),
+        waitedSeconds,
+      }),
+      { done: true, reason: "settled", role: child.role, hasVerdict: false },
     );
   }
   if (observation.done && observation.reason === "question") {

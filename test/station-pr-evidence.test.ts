@@ -80,8 +80,8 @@ test("hasUnpushedCommits: fail-CLOSED — an unreadable answer reads as unpushed
   assert.equal(hasUnpushedCommits(scratch("rg-not-a-repo-")), true, "not a repository");
 });
 
-test("probeOpenPr: only an OPEN state grants arrival, and only then is a push read", async () => {
-  const dir = freshRepo(); // no upstream ⇒ any PR found here is behind
+test("probeOpenPr: only an OPEN state grants arrival", async () => {
+  const dir = freshRepo();
   const pr = (state: string | null): PrSummary => ({
     number: 7,
     head: null,
@@ -93,7 +93,6 @@ test("probeOpenPr: only an OPEN state grants arrival, and only then is a push re
   const open = await probeOpenPr(dir, { lookup: lookup(pr("OPEN")) });
   assert.equal(open.number, 7);
   assert.equal(open.url, "https://github.com/o/r/pull/7");
-  assert.equal(open.unpushed, true, "the local read is what makes a queried arrival honest");
 
   // A finished PR is not an arrival — `gh pr view` happily returns the CLOSED
   // or MERGED one sitting on this branch, and treating it as "we arrived" is
@@ -101,21 +100,23 @@ test("probeOpenPr: only an OPEN state grants arrival, and only then is a push re
   for (const state of ["CLOSED", "MERGED", null]) {
     const got = await probeOpenPr(dir, { lookup: lookup(pr(state)) });
     assert.equal(got.number, null, `state=${String(state)} is not an open PR`);
-    assert.equal(got.unpushed, false, "…and the local read is skipped entirely");
   }
   // gh said "no PR" (or the probe could not answer): no evidence, no guess.
-  const none = await probeOpenPr(dir, { lookup: lookup(undefined) });
-  assert.deepEqual(none, { number: null, url: null, unpushed: false });
+  assert.deepEqual(await probeOpenPr(dir, { lookup: lookup(undefined) }), { number: null, url: null });
+  // The push question is NOT part of this answer (round-1 quality P1): it is a
+  // local git reading asked of every evidence, and `probeOpenPr`'s result type
+  // deliberately has nowhere to put it.
+  assert.deepEqual(Object.keys(open).sort(), ["number", "url"]);
 });
 
 test("existingPrNotice: names the PR, and names the one move that is right", () => {
   assert.equal(
-    existingPrNotice({ number: null, url: null, unpushed: false }),
+    existingPrNotice({ number: null, url: null }),
     null,
     "no answer found ⇒ the gate has no second opinion on gh's own error",
   );
 
-  const text = existingPrNotice({ number: 167, url: "https://github.com/o/r/pull/167", unpushed: false })!;
+  const text = existingPrNotice({ number: 167, url: "https://github.com/o/r/pull/167" })!;
   assert.match(text, /#167/);
   assert.match(text, /pull\/167/, "the URL is useful when gh printed one");
   assert.match(text, /追加提交/, "the action that is actually right");

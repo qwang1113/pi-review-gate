@@ -304,6 +304,18 @@ export interface ChannelInstructRecord extends ChannelRecordBase {
   from: "orchestrator";
   instructId: string;
   mode: "steer" | "followUp" | "interrupt";
+  /**
+   * WHICH ROUND this instruction is, for the lanes that number them (a judge
+   * pane's rounds). Sent WITH the task, and that is the point (2026-09-16):
+   * the opener's table is numbered at DISPATCH, so a judge still finishing its
+   * previous round would read the NEXT number off it, stamp the old verdict
+   * with it, and have its real conclusion refused as a duplicate. The task is
+   * the one place that says which round it belongs to.
+   *
+   * Absent for every non-judge lane and for an instruction that carries no
+   * round at all; the reader then falls back to the table by itself.
+   */
+  roundSeq?: number;
   text?: string;
   textRef?: ChannelPayloadRef;
 }

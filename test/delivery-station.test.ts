@@ -33,6 +33,8 @@ import {
   isDeliveryStation,
   isStationWidening,
   parseDeliveryStation,
+  prArrivalProven,
+  prEvidencePresent,
   shipKindAllowedAtStation,
   describeAllowedShipKinds,
   stationArrivalProblems,
@@ -243,16 +245,26 @@ test("arrival: `pr` owes a committed worktree AND evidence that a PR is open", (
   // talked a user into closing an open PR.
   assert.deepEqual(stationArrivalProblems("pr", { dirty: false, openPr: 167 }), []);
 
-  // …but a queried PR is not a licence on its own: work still sitting locally
-  // is not where the round stopped, however open the PR on the other end is.
+  // …but NO evidence is a licence on its own against unpushed work (round-1
+  // quality P1, 2026-09-16). Every one of the three only says a PR exists on
+  // the other end — `gh pr create` exiting 0 proves that at THAT moment, so
+  // the checkpoint commit the gate lands afterwards is invisible to it, and
+  // the Copilot number survives across tasks so it says nothing at all about
+  // this round. Work still sitting locally has not been delivered.
   const unpushed = stationArrivalProblems("pr", { dirty: false, openPr: 167, unpushed: true });
   assert.equal(unpushed.length, 1);
   assert.match(unpushed[0]!, /#167/, "the refusal names the PR it found");
   assert.match(unpushed[0]!, /git push/, "…and the one step that fixes it");
-  // The two LOCAL evidences imply their own push, so a stale `unpushed: true`
-  // beside them must not narrow an arrival that already happened.
-  assert.deepEqual(stationArrivalProblems("pr", { dirty: false, observedPrCreate: true, unpushed: true }), []);
-  assert.deepEqual(stationArrivalProblems("pr", { dirty: false, recordedPr: 42, unpushed: true }), []);
+  for (const facts of [
+    { observedPrCreate: true },
+    { recordedPr: 42 },
+  ] as const) {
+    const refused = stationArrivalProblems("pr", { dirty: false, unpushed: true, ...facts });
+    assert.equal(refused.length, 1, `${JSON.stringify(facts)} must not arrive on unpushed work`);
+    assert.match(refused[0]!, /git push/);
+    assert.doesNotMatch(refused[0]!, /没有看到 PR/,
+      "…without claiming no PR exists — a different failure with a different fix");
+  }
   // …and an explicitly null probe is the same fact as an absent one: nothing
   // was shown, so it proves nothing (an unreadable `gh` lands here too).
   assert.equal(stationArrivalProblems("pr", { dirty: false, openPr: null }).length, 1);
@@ -272,6 +284,9 @@ test("arrival: `pr` owes a committed worktree AND evidence that a PR is open", (
     "the advice that cannot work must be gone, not reworded");
   assert.match(noPr[0]!, /gh auth status/, "an empty answer is a broken query — say so");
   assert.match(noPr[0]!, /commit/, "…and name the station that always works as the fallback");
+  // No PR AND unpushed work: the missing PR is the line worth printing — it is
+  // the one whose fix changes what the round can do at all.
+  assert.match(stationArrivalProblems("pr", { dirty: false, unpushed: true })[0]!, /没有看到 PR/);
 
   // A missing field is the same fact as null — an older sidecar never opened
   // a PR either.
@@ -282,6 +297,38 @@ test("arrival: `pr` owes a committed worktree AND evidence that a PR is open", (
   // Both halves missing ⇒ both are reported; a completion should learn
   // everything it still owes in one reply.
   assert.equal(stationArrivalProblems("pr", { dirty: true, recordedPr: null }).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// THE ONE RULE (round-1 quality P1, 2026-09-16): two predicates, not two
+// copies of one written in opposite polarities.
+// ---------------------------------------------------------------------------
+
+test("`prEvidencePresent` says 'known to have a PR', and `prArrivalProven` adds the push", () => {
+  // The extension calls the FIRST to decide whether asking GitHub is worth a
+  // round trip, and the pure judgement calls the SECOND — so both have to
+  // answer exactly the same way for the same facts.
+  assert.equal(prEvidencePresent({ dirty: false }), false);
+  assert.equal(
+    prEvidencePresent({ dirty: false, observedPrCreate: false, recordedPr: null, openPr: null }),
+    false,
+  );
+  for (const evidence of [
+    { observedPrCreate: true },
+    { recordedPr: 42 },
+    { openPr: 167 },
+  ] as const) {
+    assert.equal(prEvidencePresent({ dirty: false, ...evidence }), true, JSON.stringify(evidence));
+    assert.equal(prArrivalProven({ dirty: false, ...evidence }), true);
+    assert.equal(prArrivalProven({ dirty: false, unpushed: true, ...evidence }), false,
+      "evidence of a PR plus unpushed work is NOT an arrival");
+  }
+  // Evidence alone is not arrival, and arrival is impossible without evidence.
+  assert.equal(prArrivalProven({ dirty: false }), false);
+  assert.equal(prArrivalProven({ dirty: false, unpushed: true }), false);
+  // `unpushed` absent is the READABLE default (nothing was measured), which
+  // every pre-2026-09-16 fixture relies on.
+  assert.equal(prArrivalProven({ dirty: false, observedPrCreate: true, unpushed: false }), true);
 });
 
 // ---------------------------------------------------------------------------

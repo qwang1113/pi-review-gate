@@ -1715,10 +1715,21 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   // GitHub itself. The question runs ONLY when the two free facts are silent.
   assert.match(body, /probeOpenPr\(repoDirFor\(root\)\)/,
     "the third evidence is a question the GATE asks, never one the agent answers");
-  assert.match(body, /station === "pr" && !observedPrCreate && recordedPr === null/,
-    "…and it costs a network round trip, so it runs only when no local fact can answer");
-  assert.match(body, /unpushed: probe\?\.unpushed === true/,
-    "an OPEN PR that does not carry this round's commits is not where the round stopped");
+  // …and WHETHER it still has to ask, and whether the round arrived at all,
+  // are the MODULE's two rules rather than a second expression written here
+  // (round-1 quality P1, 2026-09-16): the extension used to re-derive "no local
+  // evidence" in the OPPOSITE polarity, which is the kind of duplicate that
+  // goes wrong silently when only one side is fixed.
+  assert.match(body, /prEvidencePresent\(\{ observedPrCreate, recordedPr \}\)/,
+    "…and the decision to ask GitHub is taken by the module's own predicate");
+  assert.doesNotMatch(codeOnly(body), /station === "pr" && !observedPrCreate && recordedPr === null/,
+    "the opposite-polarity copy of that rule must not come back");
+  // The push reading is asked of EVERY `pr` round, not of one evidence
+  // (round-1 quality P1, 2026-09-16): a checkpoint commit the gate lands after
+  // the PR was opened is invisible to all three evidences alike.
+  assert.match(body, /unpushed = hasUnpushedCommits\(repoDirFor\(root\)\)/,
+    "every `pr` round reads the local upstream — no evidence stands in for it");
+  assert.match(body, /^\s+unpushed,$/m, "…and that reading is what the judgement receives");
 });
 
 test("a FAILED `gh pr create` gets the answer the gate can look up itself", () => {
@@ -2570,9 +2581,10 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // role's `openerId` and lib/session-factory.ts turns it into RG_JUDGE_OPENER.
   const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
   // Sized to the whole function (it grew when the spawn learned to verify its
-  // delivery); a window that stopped short would silently assert about half a
-  // function and pass for the wrong reason.
-  const spawn = SRC.slice(spawnAt, spawnAt + 14000);
+  // delivery, and again when the reuse branch started stamping the round number
+  // into the instruction record); a window that stopped short would silently
+  // assert about half a function and pass for the wrong reason.
+  const spawn = SRC.slice(spawnAt, spawnAt + 19000);
   assert.match(spawn, /kind: "judge",\s*\n\s*openerId: opener,/, "the pane is told who opened it");
   assert.match(
     readFileSync(new URL("../lib/session-factory.ts", import.meta.url), "utf8"),
@@ -2740,7 +2752,14 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   // A living pane takes the round through its channel — there is no
   // refuse-busy anymore (that belonged to the one-shot process).
   assert.match(body, /kind: "instruct"/, "reuse delivers the round as a channel record");
-  assert.match(body, /mode: "followUp"/, "a living pane reads the round when it finishes its turn");
+  assert.match(body, /mode: "interrupt"/,
+    "…as an INTERRUPT: a re-dispatch means the content changed, so the round in flight is already obsolete "+
+    "(user decision 2026-09-16) — waiting for it only waits out a verdict on code that is gone");
+  assert.doesNotMatch(body, /mode: "followUp"/,
+    "the queued delivery is what let the numbering race: the task sat on the wire while the entry moved on");
+  assert.match(body, /const roundSeq = nextJudgeRound\(opener, judgeId\);/,
+    "the round number is computed BEFORE the record is written, so the task can carry it");
+  assert.match(body, /mode: "interrupt",\s*\n\s*roundSeq,/, "…and it travels with the task");
   assert.doesNotMatch(body, /refuse-busy/, "no busy refusal may come back");
   assert.doesNotMatch(body, /spawnJudgeProcess\(\{/, "no process spawn may come back");
   assert.doesNotMatch(body, /registerWatch\(|rememberChildProcess/, "no process watcher may come back");
@@ -5979,8 +5998,15 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
 test("a FAIL that arrives after dispatch is reported, and it withholds the READY", () => {
   assert.match(SRC, /function reportAsyncPrecommit\(/,
     "the failure has a channel of its own — the round was dispatched before this verdict existed, so returning early is no longer available");
-  assert.match(SRC, /if \(verdict !== "PASS"\) \{[\s\S]{0,400}?reportAsyncPrecommit\(\{/,
-    "and every non-PASS verdict goes through it, including a thrown runner — the parked-READY handling above runs first and must not swallow it");
+  // BOTH verdicts reach the agent (2026-09-16): a silent PASS is what stranded a
+  // `judge_wait` for 6 minutes 47 seconds — the event had no delivery, and the
+  // wait's own sources are the JUDGE's.
+  assert.match(SRC, /function reportAsyncPrecommitPass\(/, "a PASS lands too, and something has to say so");
+  assert.match(
+    SRC,
+    /if \(verdict === "PASS"\) \{\s*\n\s*reportAsyncPrecommitPass\([\s\S]{0,900}?\} else \{[\s\S]{0,400}?reportAsyncPrecommit\(\{/,
+    "PASS through the short notice, every other verdict through the failure one — including a thrown runner (the parked-READY handling above runs first and must not swallow it)",
+  );
   assert.match(
     SRC,
     /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,400}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,40}?bypassActive: st\.bypass\.active,\s*\}\)/,

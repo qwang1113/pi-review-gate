@@ -354,16 +354,50 @@ export interface StationArrivalFacts {
    */
   openPr?: number | null;
   /**
-   * Is the local HEAD still ahead of its upstream — i.e. does {@link openPr}
-   * NOT carry this round's commits yet?
+   * Is there work on this branch that the remote does not have yet?
    *
-   * Only consulted next to {@link openPr}, and only in the strict direction:
-   * a branch carrying an old open PR while this round's commits sit unpushed
-   * has not arrived, and no other fact here can see that (`dirty` is about the
-   * worktree, not the remote). The two local evidences imply their own push,
-   * so this never narrows them.
+   * READ FOR EVERY `pr` ROUND, AND ASKED OF EVERY EVIDENCE — including the two
+   * local ones (round-1 quality P1, 2026-09-16). `gh pr create` exiting 0 only
+   * proves a PR existed at that moment: a checkpoint commit the gate itself
+   * lands afterwards sits locally, and so does anything committed after the PR
+   * was opened. The Copilot-resolved number is weaker still — it survives
+   * across tasks, so beside it this reading is the only thing that says
+   * anything about THIS round.
+   *
+   * Measured locally (`git rev-list --count @{upstream}..HEAD`, see
+   * `lib/station-pr-evidence.ts`), so it costs no network: a repo whose `gh`
+   * is unusable still arrives on its local evidence — it just has to have
+   * pushed.
    */
   unpushed?: boolean;
+}
+
+/**
+ * Is there EVIDENCE of a pull request — any of the three, regardless of
+ * whether this round's work reached the remote?
+ *
+ * THE one rule behind "is this branch known to have a PR", called from both
+ * sides: the judgement below, and the extension's decision of whether asking
+ * GitHub is still worth a round trip. It exists because the second copy in
+ * the caller was written in the OPPOSITE polarity (round-1 quality P1) — the
+ * worst kind of duplicate, where fixing one side leaves the other silently
+ * disagreeing with it.
+ */
+export function prEvidencePresent(facts: StationArrivalFacts): boolean {
+  return facts.observedPrCreate === true ||
+    (facts.recordedPr ?? null) !== null ||
+    (facts.openPr ?? null) !== null;
+}
+
+/**
+ * Has this repo ARRIVED at `pr`? — a PR exists AND this round's work is on it.
+ *
+ * The second half is the part every evidence is blind to alone: a branch with
+ * an open PR and unpushed commits has not delivered anything, however good the
+ * local story looks.
+ */
+export function prArrivalProven(facts: StationArrivalFacts): boolean {
+  return prEvidencePresent(facts) && facts.unpushed !== true;
 }
 
 /**
@@ -386,10 +420,21 @@ const PR_ARRIVAL_NO_EVIDENCE =
   "先确认 `gh auth status` 能过;门禁查到就会认,不需要在本会话里重开一个。\n" +
   "  - 确实开不出来时,请用户把本轮站点改回 `commit`(站点是契约,只有用户能改)。";
 
-/** The refusal for a branch that HAS an open PR but has not pushed this round's work. */
-function prArrivalUnpushed(pr: number): string {
-  return `本轮交付站点是 pr:门禁查到 PR #${pr} 是开着的,但本地还有没推上去的提交 —— ` +
-    "先 `git push` 把它们送上去(新提交会自己出现在那个 PR 上),再收尾。";
+/**
+ * ONE refusal for a `pr` round that did not arrive, naming the half that is
+ * actually missing.
+ *
+ * Two different failures wear the same station — nothing showing a PR at all,
+ * and a PR that does not carry this round's work yet — and they need different
+ * next steps (open one / push). When both are true, "no PR" is the one worth
+ * saying.
+ */
+function prArrivalProblemLine(facts: StationArrivalFacts): string {
+  if (!prEvidencePresent(facts)) return PR_ARRIVAL_NO_EVIDENCE;
+  const named = facts.openPr ?? facts.recordedPr ?? null;
+  const which = named === null ? "这一轮的 PR 已经开出来了" : `PR #${named} 是开着的`;
+  return `本轮交付站点是 pr:${which},但本地还有没推上去的提交 —— ` +
+    "先 `git push`(新提交会自己出现在那个 PR 上),再收尾。";
 }
 
 /**
@@ -412,17 +457,12 @@ export function stationArrivalProblems(
       "提交完再收尾（站点 commit 的承诺就是「提交已经做完」）。",
     );
   }
-  // THREE evidences, any one of which is an arrival. The first two are local
-  // and free, which is why the caller only asks GitHub when neither holds.
-  const provenLocally = facts.observedPrCreate === true ||
-    (facts.recordedPr !== undefined && facts.recordedPr !== null);
-  const openPr = facts.openPr ?? null;
-  // The queried evidence additionally has to be PUSHED: an old open PR with
-  // this round's commits still sitting locally is not where the round stopped
-  // (see {@link StationArrivalFacts.unpushed}).
-  const proven = provenLocally || (openPr !== null && facts.unpushed !== true);
-  if (station === "pr" && !proven) {
-    problems.push(openPr === null ? PR_ARRIVAL_NO_EVIDENCE : prArrivalUnpushed(openPr));
+  // 三条证据任一成立就算「有个 PR」,但那还不够:站点 pr 的承诺还包括这份工作
+  // **已经发布出去**。本地还压着没推上去的提交 —— 包括门禁自己刚落下的
+  // checkpoint —— 就是还没到站,而三条证据都看不见这件事(它们只说明远端有个
+  // PR)。谓词只有一份实现,扩展也调它(round-1 quality P1)。
+  if (station === "pr" && !prArrivalProven(facts)) {
+    problems.push(prArrivalProblemLine(facts));
   }
 
   return problems;

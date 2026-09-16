@@ -168,6 +168,8 @@ function setup(over: Partial<{
   scope: ReviewScopeStamp | null;
   /** The judge's own context reading; `null` = a host that reports none. */
   contextPercent: number | null;
+  /** The round the TASK carried; `undefined` = a task that never named one. */
+  taskRound: number | undefined;
 }> = {}): {
   exec: Exec;
   ioFiles: Map<string, string>;
@@ -223,6 +225,9 @@ function setup(over: Partial<{
     // The judge's own context reading, which the opener's rotation policy runs
     // on. `null` means "this host cannot measure usage" — the fail-open case.
     contextPercent: () => (over.contextPercent === null ? undefined : over.contextPercent ?? 12),
+    // The round the task named, when one did. `undefined` (the default) is the
+    // pane whose lane never numbers its rounds — it falls back to the entry.
+    taskRound: () => over.taskRound,
     inspectionPass: () => over.pass,
     noteInspectionRefusal: (block) => { refusals.push(block); },
     noteConcluded: (usedPass) => { concluded.push(usedPass); },
@@ -387,6 +392,33 @@ test("tool: outside a review session, and with an unreadable registry, it refuse
   const r2 = await missing.exec(GOOD);
   assert.equal(r2.isError, true);
   assert.match(r2.content[0]!.text, /不占交卷额度/);
+});
+
+test("the round the TASK carried outranks the opener's entry (2026-09-16)", async () => {
+  // The entry is numbered at DISPATCH, so a re-dispatch while this pane is
+  // still concluding makes it hold a LATER round than the one being concluded.
+  // Reading the number off the entry (the only method before this) stamped the
+  // old verdict with the new round's number, and the real conclusion for that
+  // round was refused as a duplicate. Measured the same day: a quality round's
+  // BLOCKED verdict got booked as round 2, and round 2's own conclusion was
+  // dropped — the opener then read round 2's RANGE next to round 1's verdict.
+  const carried = setup({ hierarchy: hierarchyFile(2), taskRound: 1 });
+  const r = await carried.exec(GOOD);
+  assert.equal(r.isError, undefined, "round 1 has no report yet, so this concludes");
+  assert.equal(lastReport(carried.ioFiles)?.round, 1,
+    "it lands on the round the TASK was dispatched under, not the entry's");
+
+  // Both orders are covered: the entry can also be BEHIND (the ordinary steady
+  // state, where nothing raced), and the task still decides.
+  const behind = setup({ hierarchy: hierarchyFile(1), taskRound: 2 });
+  assert.equal((await behind.exec(GOOD)).isError, undefined);
+  assert.equal(lastReport(behind.ioFiles)?.round, 2);
+
+  // A task that never named a round falls back to the entry: every pane whose
+  // lane does not number its rounds concludes exactly as it did before.
+  const fallback = setup({ hierarchy: hierarchyFile(3) });
+  assert.equal((await fallback.exec(GOOD)).isError, undefined);
+  assert.equal(lastReport(fallback.ioFiles)?.round, 3);
 });
 
 test("tool: THE PROBE — zero inspection + READY is refused, and costs no conclusion", async () => {

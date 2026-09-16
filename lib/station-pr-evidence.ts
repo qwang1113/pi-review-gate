@@ -47,13 +47,6 @@ export interface OpenPrArrival {
   /** 当前分支上开着的 PR 号;查询没给出结果就是 null。 */
   number: number | null;
   url: string | null;
-  /**
-   * 本地 HEAD 是否还有没推上去的提交(含「这个分支没有 upstream」)。
-   *
-   * 只在 {@link number} 不为 null 时有意义 —— 「分支上挂着一个旧 PR,而本轮
-   * 的提交还在本地」不是到站。默认 false 让「没有 PR」这条路径不必比较它。
-   */
-  unpushed: boolean;
 }
 
 /** `gh` 探测的上限:收尾时的一次网络往返,不该拖住 declare_done。 */
@@ -75,24 +68,28 @@ export interface OpenPrProbeDeps {
 }
 
 /**
- * Ask GitHub, once, whether the current branch has an open PR — and if it
- * does, whether the local HEAD is actually ON the remote yet.
+ * Ask GitHub, once, whether the current branch has an open PR.
  *
  * `state === "OPEN"` is required, not merely "a PR was found": a CLOSED or
  * MERGED PR is a branch whose work is over, and `gh pr view` happily returns
  * one. An unreadable `state` is treated the same as no PR — this value only
  * ever GRANTS an arrival, so the strict reading is the safe one.
+ *
+ * It deliberately does NOT read whether the work was pushed: that is a LOCAL
+ * `git` fact ( {@link hasUnpushedCommits} ), it is needed for every `pr`
+ * evidence rather than just this one, and folding it in here made the two
+ * impossible to state separately (round-1 quality P1, 2026-09-16).
  */
 export async function probeOpenPr(
   dir: string,
   deps: OpenPrProbeDeps = {},
 ): Promise<OpenPrArrival> {
-  const none: OpenPrArrival = { number: null, url: null, unpushed: false };
+  const none: OpenPrArrival = { number: null, url: null };
   const lookup = deps.lookup ?? resolveOpenPr;
   const res = await lookup(dir, deps.signal ?? AbortSignal.timeout(PR_PROBE_TIMEOUT_MS));
   const pr = res.pr;
   if (!pr || pr.state !== "OPEN") return none;
-  return { number: pr.number, url: pr.url, unpushed: hasUnpushedCommits(dir) };
+  return { number: pr.number, url: pr.url };
 }
 
 /**
@@ -102,6 +99,11 @@ export async function probeOpenPr(
  * `git rev-list --count @{upstream}..HEAD` answers it without touching the
  * network: a non-zero count is work that exists only here, and a missing
  * upstream (never pushed at all) throws into the same answer.
+ *
+ * It is asked of EVERY `pr` evidence, not next to one of them (round-1
+ * quality P1, 2026-09-16): a watched `gh pr create` only proves a PR existed
+ * at that moment — a checkpoint commit the gate itself lands afterwards sits
+ * locally, and so does any commit made after the PR was opened.
  *
  * FAIL-CLOSED in every unreadable case — git absent, not a repository,
  * unparsable output — because the only consumer is an arrival check that this

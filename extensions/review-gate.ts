@@ -428,7 +428,7 @@ import { appendTiming } from "../lib/gate-timings.ts";
 import { tailLogFile } from "../lib/precommit-tail.ts";
 // The background lane's failure notice: wording + the "is this still the
 // content under the agent's hands" rule, both pure and unit-tested there.
-import { buildAsyncPrecommitReport, buildParkedReadyReplayNotice, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
+import { buildAsyncPrecommitReport, buildAsyncPrecommitPass, buildParkedReadyReplayNotice, type AsyncPrecommitPass, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
 import {
   decideReviewScope,
   type ReviewScopeDecision,
@@ -541,6 +541,7 @@ import {
   DEFAULT_DELIVERY_STATION,
   STATION_SHIP_NEXT_STEPS,
   parseDeliveryStation,
+  prEvidencePresent,
   stationArrivalProblems,
 
   type DeliveryStation,
@@ -548,7 +549,7 @@ import {
 // …and the FACTS that arrival is judged on when no local evidence can answer
 // (2026-09-16): the gate asks GitHub itself instead of waiting for a
 // `gh pr create` exit 0 that an already-open PR makes impossible.
-import { existingPrNotice, probeOpenPr, type OpenPrArrival } from "../lib/station-pr-evidence.ts";
+import { existingPrNotice, hasUnpushedCommits, probeOpenPr, type OpenPrArrival } from "../lib/station-pr-evidence.ts";
 
 
 import {
@@ -1448,6 +1449,15 @@ export default function reviewGate(pi: ExtensionAPI) {
   let judgeReviewRange: string | undefined;
   /** The round's full/incremental decision, recovered from the same text. */
   let judgeScopeKind: "full" | "incremental" | undefined;
+  /**
+   * The round number the TASK carried (an instruct record's `roundSeq`), or
+   * undefined for a pane whose task never named one.
+   *
+   * Authoritative over the opener's table for `judge_conclude` (2026-09-16):
+   * the table is bumped at dispatch, so it can already hold a LATER round than
+   * the one this pane is still concluding.
+   */
+  let judgeTaskRound: number | undefined;
   /** Is THIS session a judge pane? (the observer's only scope). */
   function isJudgePane(): boolean {
     return readJudgeSideEnv(process.env) !== undefined;
@@ -1460,11 +1470,19 @@ export default function reviewGate(pi: ExtensionAPI) {
    * means the evidence carries no range flag (a goal audit has none at all),
    * and no decision marker means the report carries no scope kind.
    */
-  function noteJudgeTaskText(text: string | undefined): void {
+  function noteJudgeTaskText(text: string | undefined, roundSeq?: number): void {
     const range = parseReviewRange(text);
     if (range) judgeReviewRange = range;
     const kind = parseReviewScopeKind(text);
     if (kind) judgeScopeKind = kind;
+    // WHICH ROUND THIS TASK IS (2026-09-16). The number travels WITH the task
+    // because the opener's table holds the NEXT dispatch's number by the time a
+    // busy pane reads this one — reading it from there is exactly how an old
+    // verdict got booked against a new round. Only a real number is recorded:
+    // an absent field must not renumber an existing round to 0.
+    if (typeof roundSeq === "number" && Number.isFinite(roundSeq)) {
+      judgeTaskRound = Math.floor(roundSeq);
+    }
   }
   /**
    * THIS round's scope, as this pane read it — the judge half of the audit
@@ -2297,7 +2315,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           const interruptText = instructText(channelIO, instruction);
           // Same as the steer/followUp path below: a round delivered as an
           // interrupt still carries the range the observer records against.
-          if (isJudgePane()) noteJudgeTaskText(interruptText);
+          if (isJudgePane()) noteJudgeTaskText(interruptText, instruction.roundSeq);
           // STOP-FIRST (user decision 2026-09-01): any OPEN dialog is
           // dismissed as INTERRUPTED before the message is injected — a
           // goal box, a question, a consent. The controller is swapped so
@@ -2322,7 +2340,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // A judge pane's instructions ARE its rounds: the next round's task
         // text is where its `baseline..HEAD` is written, so the inspection
         // observer learns the range from the same message the judge reads.
-        if (isJudgePane()) noteJudgeTaskText(text);
+        if (isJudgePane()) noteJudgeTaskText(text, instruction.roundSeq);
         if (!text) {
           acknowledgeInstruct(
             binding,
@@ -6608,7 +6626,15 @@ export default function reviewGate(pi: ExtensionAPI) {
           } catch { /* headless — the recorded verdict is what matters */ }
         }
       }
-      if (verdict !== "PASS") {
+      // THE LANE'S LANDING IS AN EVENT EITHER WAY (2026-09-16). A PASS used to
+      // be silent, and that silence is exactly what stranded a session in a
+      // `judge_wait` it could not end: the report it had received said
+      // 「正在等 precommit lane 落地（HELD）」, and nothing ever came to say it
+      // had (measured: 6m47s, notification session 2026-09-15). FAIL keeps its
+      // loud form; PASS gets the short one — there is nothing to do about it.
+      if (verdict === "PASS") {
+        reportAsyncPrecommitPass({ round, verified, current: worktreeTree(root) ?? "" });
+      } else {
         // TELL THE AGENT (B1). The content the reviewer approved did not pass
         // its verification, so this round cannot produce a shippable READY —
         // and the failure channel names THAT reason, not "findings".
@@ -6658,7 +6684,22 @@ export default function reviewGate(pi: ExtensionAPI) {
    * review has moved on) live in lib/async-precommit-report.ts.
    */
   function reportAsyncPrecommit(input: AsyncPrecommitReport): void {
-    const message = buildAsyncPrecommitReport(input);
+    deliverPrecommitNotice(buildAsyncPrecommitReport(input));
+  }
+
+  /**
+   * A PASS lands too — and this is the ONLY thing that says so
+   * (2026-09-16): a session told it is 「等 precommit lane 落地」 has no other
+   * event to wake on, so a silent PASS is indistinguishable from a lane that
+   * never ran. Same delivery as the failure notice, on purpose: `steer`
+   * reaches the agent at its next tool-call boundary, and the whole point is
+   * that it stops waiting NOW.
+   */
+  function reportAsyncPrecommitPass(input: AsyncPrecommitPass): void {
+    deliverPrecommitNotice(buildAsyncPrecommitPass(input));
+  }
+
+  function deliverPrecommitNotice(message: string): void {
     try {
       pi.sendMessage(
         { customType: "review-gate", content: message, display: true },
@@ -7317,6 +7358,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // CARRIER, the round is the task. No busy refusal exists anymore — a pane judge
     // reads every round via its drain; only a one-shot process read once.
     if (existing?.paneId && paneAlive === true && !opts.fresh) {
+      // THE ROUND NUMBER IS COMPUTED BEFORE THE RECORD IS WRITTEN, and that
+      // order is half the fix (2026-09-16). The entry used to be numbered at
+      // the END of this block, while the task sat queued on the wire — so a
+      // pane finishing its PREVIOUS round in that window read the NEW number
+      // and stamped the OLD conclusion with it: the old verdict landed on the
+      // new round, and the real new one was then refused as a duplicate
+      // (measured: a quality round's BLOCKED verdict booked as round 2, and
+      // round 2's own conclusion dropped). Sending the number WITH the task is
+      // what makes "which round am I concluding" a fact the judge owns.
+      const roundSeq = nextJudgeRound(opener, judgeId);
       try {
         appendRecord(channelIO, judgeChannelTarget(opener, judgeId), {
           kind: "instruct",
@@ -7324,7 +7375,13 @@ export default function reviewGate(pi: ExtensionAPI) {
           from: "orchestrator",
           at: new Date().toISOString(),
           instructId: newChannelId("in", Date.now()),
-          mode: "followUp",
+          // INTERRUPT, not followUp (user decision 2026-09-16): a re-dispatch
+          // means the content under review CHANGED, so waiting for the round
+          // in flight means waiting out a verdict on code that is already gone
+          // — and that wait was also the window the numbering raced in.
+          // `interrupt` stops it and delivers this task now.
+          mode: "interrupt",
+          roundSeq,
           text: task,
         });
       } catch (err) {
@@ -7352,7 +7409,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const live = judgeHierarchy[judgeId] ?? existing;
       const reg = registerJudge(judgeHierarchy, {
         judgeId, openerId: opener, role, repoRoot: root, title, sessionDir,
-        paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
+        paneId: existing.paneId, roundSeq,
         ...(tmuxServer === undefined ? {} : { tmuxServer }),
         // The pane's model does not change because a new round was queued into
         // it — the entry keeps saying what the RUNNING pane was launched on.
@@ -8578,6 +8635,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // carries its own scope block and overwrites it, and a round whose text
       // says nothing new is still running against the same range.
       reviewScope: () => judgeReviewScope(),
+      // The round the TASK said it is, when a task said so — the one reading
+      // that cannot be overtaken by the next dispatch's numbering.
+      taskRound: () => judgeTaskRound,
       // THIS pane's own context usage, taken at the conclusion — the reading
       // the opener cannot take, and the one its rotation policy runs on
       // (lib/judge-rotation.ts). Same wrapper the orchestration layer uses;
@@ -9793,23 +9853,33 @@ export default function reviewGate(pi: ExtensionAPI) {
             const files = changedFiles(root);
             const observedPrCreate = st.shippedKinds?.includes("pr-create") === true;
             const recordedPr = typeof st.copilot?.pr === "number" ? st.copilot.pr : null;
-            // The gate asks GitHub only when no local fact already proves
-            // arrival — `gh` reports "already exists" as an ERROR, so a round
-            // that APPENDS to an open PR leaves `shippedKinds` empty, and a
-            // repo with `copilotReview` off never resolves a number either.
             let probe: OpenPrArrival | null = null;
-            if (station === "pr" && !observedPrCreate && recordedPr === null) {
-              // Named in the progress line: this one can take seconds, and a
-              // silent wait at the last step of a round reads as a hang.
-              progress.step(`查询 PR 状态（${repoLabel(root)}）`);
-              probe = await probeOpenPr(repoDirFor(root));
+            let unpushed = false;
+            if (station === "pr") {
+              // ASK GITHUB ONLY WHEN THE FREE EVIDENCE IS SILENT — `gh` reports
+              // "already exists" as an ERROR, so a round that APPENDS to an
+              // open PR leaves `shippedKinds` empty, and a repo with
+              // `copilotReview` off never resolves a number either. Whether a
+              // round has to ask is the module's rule, not a second expression
+              // written here (round-1 quality P1).
+              if (!prEvidencePresent({ observedPrCreate, recordedPr })) {
+                // Named in the progress line: this one can take seconds, and a
+                // silent wait at the last step of a round reads as a hang.
+                progress.step(`查询 PR 状态（${repoLabel(root)}）`);
+                probe = await probeOpenPr(repoDirFor(root));
+              }
+              // …but HAVING a PR is not arriving: work still sitting locally —
+              // a checkpoint commit the gate landed after the PR was opened
+              // included — has not been delivered, and no evidence above can
+              // see that. Pure local git, no network.
+              unpushed = hasUnpushedCommits(repoDirFor(root));
             }
             const problems = stationArrivalProblems(station, {
               dirty: files === undefined || files.length > 0,
               observedPrCreate,
               recordedPr,
               openPr: probe?.number ?? null,
-              unpushed: probe?.unpushed === true,
+              unpushed,
             });
             for (const p of problems) {
               completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
