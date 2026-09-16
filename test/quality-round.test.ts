@@ -88,6 +88,27 @@ test("skippedQualityRecord: a skip is a READY bound to the head, marked as a ski
 // an assertion — a matrix tested only on its READY row is not tested at all.
 // ---------------------------------------------------------------------------
 
+test("roundCancelPlan: a PARKED conclusion cancels nothing — the hold is not a verdict", () => {
+  // THE P0 THIS PINS (quality round, 2026-09-16): `recordReviewVerdict` returns
+  // BEFORE writing `st.review` when it holds a READY, so the settle path reads
+  // `review.verdict === "PENDING"` and the matrix used to interpret that as
+  // "the reviewer said BLOCKED" — killing the quality round and aborting the
+  // lane, i.e. exactly the round the hold exists to protect.
+  assert.deepEqual(roundCancelPlan({ party: "reviewer", verdict: "PENDING", held: true }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
+  });
+  // The same `PENDING` WITHOUT a hold IS a real non-READY verdict (a recorder
+  // that refused the conclusion): the row fires as usual.
+  assert.deepEqual(roundCancelPlan({ party: "reviewer", verdict: "PENDING" }), {
+    cancelQuality: true, cancelReviewer: false, abortLane: true,
+  });
+  // A hold is about the REVIEWER's round; the quality round has no such state
+  // (its recorder writes the verdict before returning).
+  assert.deepEqual(roundCancelPlan({ party: "quality", verdict: "READY" }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
+  });
+});
+
 test("roundCancelPlan: a non-READY QUALITY round stops the reviewer AND the lane", () => {
   for (const verdict of ["BLOCKED", "NEEDS_HUMAN", ""]) {
     assert.deepEqual(roundCancelPlan({ party: "quality", verdict }), {

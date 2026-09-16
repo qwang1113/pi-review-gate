@@ -414,6 +414,7 @@ import {
   roundCancelPlan,
   skippedQualityRecord,
   type RoundCancelPlan,
+  type RoundLanding,
 } from "../lib/quality-round.ts";
 import {
   modelChainFor,
@@ -9387,6 +9388,29 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * DID THIS ROUND PARK ITS VERDICT? — i.e. did the recorder deliberately leave
+   * `st.review` at PENDING because something is still owed (the full lane's
+   * PASS, or the quality round's verdict)?
+   *
+   * WHY THE CANCEL MATRIX HAS TO ASK (quality round P0, 2026-09-16).
+   * `recordReviewVerdict` returns BEFORE it writes `st.review` when it HOLDS a
+   * READY, so the settle path still sees `review.verdict === "PENDING"` — and
+   * feeding that to the matrix reads as "a non-READY reviewer" and cancels the
+   * quality round and the lane. That is the exact opposite of the design: the
+   * hold exists so the quality verdict can still arrive. A parked round cancels
+   * NOTHING; every landing re-asks it (`resumeParkedReady`).
+   *
+   * The parked record is matched to the CURRENT round by its tree (the same
+   * identity every other binding check uses), so a leftover record from an
+   * earlier round cannot excuse a real non-READY verdict.
+   */
+  function reviewVerdictIsParked(root: string): boolean {
+    const st = stateForRepo(root);
+    const target = reviewTargets.get(root);
+    return st.pendingReady !== undefined && target !== undefined && st.pendingReady.tree === target.tree;
+  }
+
+  /**
    * WHAT A CONCLUDED ROUND DOES TO ITS SIBLINGS — the cancel matrix, applied
    * for a JUDGE's settle (`lib/quality-round.ts` owns the other row, the
    * lane's, which the lane's own callback applies).
@@ -9401,7 +9425,8 @@ export default function reviewGate(pi: ExtensionAPI) {
    * The verdict it acts on is the RECORDED one, not the word the judge wrote:
    * both recorders downgrade a READY that fails its own bindings (stale target,
    * cwd, verification), and cancelling a party off the raw word would end a
-   * round the gate itself just refused.
+   * round the gate itself just refused. The one state that is NOT a verdict —
+   * a PARKED conclusion — cancels nothing at all (see above).
    */
   async function applyRoundCancel(kind: string | undefined, root: string, ctx?: unknown): Promise<string | undefined> {
     const notes: string[] = [];
@@ -9414,15 +9439,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     const party = roundCancelParty(kind);
     if (party !== undefined) {
       const st = stateForRepo(root);
-      notes.push(
-        ...applyCancelPlan(
-          roundCancelPlan({
-            party,
-            verdict: party === "quality" ? (st.quality?.verdict ?? "") : st.review.verdict,
-          }),
-          root,
-        ),
-      );
+      // THE PARKED FACT IS PART OF THE DECISION, not an `if` beside it: the
+      // table answers "a hold cancels nothing" (quality round P0, 2026-09-16).
+      const landing: RoundLanding =
+        party === "quality"
+          ? { party, verdict: st.quality?.verdict ?? "" }
+          : { party, verdict: st.review.verdict, held: reviewVerdictIsParked(root) };
+      notes.push(...applyCancelPlan(roundCancelPlan(landing), root));
     }
     // ALWAYS RE-ASK THE PARKED CONCLUSION: this landing may be the second of
     // its two preconditions (the quality verdict releasing a reviewer READY

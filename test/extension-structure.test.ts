@@ -6355,9 +6355,19 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   const apply = SRC.slice(applyAt, SRC.indexOf("\n  /**", applyAt));
   assert.match(apply, /const party = roundCancelParty\(kind\)/, "the audit KIND is translated, never compared to a role (functional round P1, 2026-09-16: `kind === \"reviewer\"` was dead — the kind is `review`)");
   assert.doesNotMatch(apply, /kind === "reviewer"/, "the unreachable comparison may not come back");
-  assert.match(apply, /roundCancelPlan\(\{/, "the decision comes from the pure table, not from branches here");
-  assert.match(apply, /verdict: party === "quality" \? \(st\.quality\?\.verdict \?\? ""\) : st\.review\.verdict/,
+  assert.match(apply, /roundCancelPlan\(landing\)/, "the decision comes from the pure table, not from branches here");
+  assert.match(apply, /verdict: st\.quality\?\.verdict \?\? ""[\s\S]{0,120}?: \{ party, verdict: st\.review\.verdict, held: reviewVerdictIsParked\(root\) \}/,
     "…and it reads the RECORDED verdict, never the word a judge printed");
+  // A PARKED CONCLUSION REACHES THE TABLE AS `held` (quality round P0,
+  // 2026-09-16): a held round leaves `st.review` at PENDING, and without this
+  // fact the matrix read that as a non-READY verdict and cancelled the quality
+  // round the hold was waiting for.
+  assert.match(apply, /held: reviewVerdictIsParked\(root\)/, "the parked fact is part of the decision");
+  const parkedAt = SRC.indexOf("function reviewVerdictIsParked(");
+  assert.ok(parkedAt > 0, "the parked predicate exists");
+  const parked = SRC.slice(parkedAt, parkedAt + 900);
+  assert.match(parked, /st\.pendingReady\.tree === target\.tree/,
+    "matched to THIS round by tree — a leftover record from an earlier round must not excuse a real non-READY verdict");
   assert.match(apply, /applyCancelPlan\(/, "the effect comes from the ONE applier");
   // The LANE goes through the same table and the same applier — INCLUDING its
   // PASS case, which the table answers with "nothing" (quality round P1,

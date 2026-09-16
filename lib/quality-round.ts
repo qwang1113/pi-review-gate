@@ -237,7 +237,12 @@ export const QUALITY_RULES_RELPATH = "docs/code-quality-rules.md";
  */
 export type RoundLanding =
   | { party: "quality"; verdict: string }
-  | { party: "reviewer"; verdict: string }
+  /**
+   * `held` — the recorder PARKED this round's conclusion (the full lane's PASS
+   * or the quality verdict is still owed), so `verdict` is not a verdict at all
+   * but the state the sidecar is left in (`PENDING`).
+   */
+  | { party: "reviewer"; verdict: string; held?: boolean }
   | { party: "lane"; verdict: string };
 
 /**
@@ -304,6 +309,13 @@ export function roundCancelPlan(landing: RoundLanding): RoundCancelPlan {
   if (landing.party === "lane") {
     return landing.verdict === "PASS" ? nothing : { cancelQuality: false, cancelReviewer: true, abortLane: false };
   }
+  // A PARKED CONCLUSION IS NOT A VERDICT (quality round P0, 2026-09-16).
+  // `recordReviewVerdict` returns BEFORE writing `st.review` when it holds a
+  // READY, so a caller that reads the sidecar sees `PENDING` — and cancelling
+  // off that reading kills the quality round and the lane, i.e. exactly the
+  // round the hold exists to keep alive. Nothing is cancelled while a round is
+  // parked: every landing re-asks the hold (lib/review-adjudicate.ts).
+  if (landing.party === "reviewer" && landing.held === true) return nothing;
   if (landing.verdict === "READY") return nothing;
   return landing.party === "quality"
     ? { cancelQuality: false, cancelReviewer: true, abortLane: true }

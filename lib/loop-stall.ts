@@ -282,27 +282,23 @@ export function classifyStallCause(input: {
   lastUserInteractionAt?: string | undefined;
   /** Now, in ms — passed in so the rule stays pure and testable. */
   nowMs: number;
-  /** The recency window; see STALL_WAITING_USER_WINDOW_SEC. */
-  windowSec?: number;
 }): StallCause {
   if (input.pausedForUser) return "waiting-user";
   if (!input.goalConfirmed) return "goal-unapproved";
   if (input.hasUnreviewedChanges) return "gates-unmet";
-  return withinWindow(input.lastUserInteractionAt, input.nowMs, input.windowSec ?? STALL_WAITING_USER_WINDOW_SEC)
-    ? "waiting-user"
-    : "unexplained";
+  return withinWindow(input.lastUserInteractionAt, input.nowMs) ? "waiting-user" : "unexplained";
 }
 
 /**
- * Did this ISO stamp land inside the window? Unreadable stamps are NOT recent
- * (fail-closed: the message falls back to the external causes rather than
- * claiming a conversation it cannot date).
+ * Did this ISO stamp land inside the waiting-user window? Unreadable stamps are
+ * NOT recent (fail-closed: the message falls back to the external causes rather
+ * than claiming a conversation it cannot date).
  */
-function withinWindow(at: string | undefined, nowMs: number, windowSec: number): boolean {
+function withinWindow(at: string | undefined, nowMs: number): boolean {
   if (!at) return false;
   const parsed = Date.parse(at);
   if (!Number.isFinite(parsed)) return false;
-  return nowMs - parsed <= windowSec * 1000;
+  return nowMs - parsed <= STALL_WAITING_USER_WINDOW_SEC * 1000;
 }
 
 /**
