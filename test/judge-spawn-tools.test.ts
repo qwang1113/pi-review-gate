@@ -57,6 +57,7 @@ function setup(over: Partial<{
 }> = {}): {
   deps: JudgeSpawnToolDeps;
   tools: Map<string, Exec>;
+  schemas: Map<string, unknown>;
   seen: string[][];
   store: SpawnStore;
 } {
@@ -105,8 +106,14 @@ function setup(over: Partial<{
   };
 
   const tools = new Map<string, Exec>();
+  // The registered PARAMETER SCHEMAS, kept beside the executors: the role enum
+  // a tool advertises is part of its contract, and a test that can only see the
+  // source text cannot tell whether the agent's call will pass validation
+  // (2026-09-17 — the second ROLE_PARAM copy was exactly that failure).
+  const schemas = new Map<string, unknown>();
   const host: ToolHost = {
     registerTool(def) {
+      schemas.set(def.name, def.parameters);
       tools.set(def.name, (params) =>
         def.execute("id", params, undefined, undefined, undefined).then((r) => ({
           content: r.content as Array<{ text: string }>,
@@ -179,7 +186,7 @@ function setup(over: Partial<{
     forgetAudit: () => { delete store.pending; },
   };
   registerJudgeSpawnTools(host, deps);
-  return { deps, tools, seen, store };
+  return { deps, tools, schemas, seen, store };
 }
 
 function textOf(r: { content: Array<{ text: string }> }): string {
@@ -232,6 +239,24 @@ test("spawn rolls back when tmux fails — no dangling registration", async () =
   const result = await tools.get("judge_spawn")!({ kind: "plan" });
   assert.equal(result.isError, true);
   assert.deepEqual(store.table, {}, "registration without a pane is rolled back");
+});
+
+test("judge_answer / judge_recover accept every addressable judge role (2026-09-17)", () => {
+  // MEASURED DEFECT: the gate's standard report said "answer with judge_answer",
+  // and the role enum this module declared by hand omitted `quality-auditor` —
+  // the answer path refused the role of the judge that had asked, and the only
+  // way through was bypassing `role` with `judgeId`. Both tools now advertise
+  // the ONE enum owned by lib/judge-session-tools.ts, and this asserts it on
+  // the REGISTERED SCHEMA: the source text looked correct in both copies.
+  const f = setup();
+  for (const tool of ["judge_answer", "judge_recover"]) {
+    const schema = f.schemas.get(tool) as { properties?: Record<string, { enum?: unknown[] }> } | undefined;
+    assert.deepEqual(
+      schema?.properties?.role?.enum,
+      ["reviewer", "quality-auditor", "adviser", "goal-auditor"],
+      `${tool} must accept the roles an agent can address`,
+    );
+  }
 });
 
 test("a stranger cannot answer another opener's review", async () => {

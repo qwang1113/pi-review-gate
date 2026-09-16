@@ -215,7 +215,7 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
    - **the QUALITY round** (2026-09-15) — when the round carries code, the
      chain dispatches `quality-auditor` FIRST, on the same commit range: it
      judges the code itself (philosophy, architecture, correctness,
-     performance — then simplicity, readability, maintainability) against
+     security, performance — then simplicity, readability, maintainability) against
      `docs/code-quality-rules.md`, a language-neutral checklist whose
      cross-repository clauses make the whole repo its reference. P0/P1 blocks.
      A finding whose fix needs PRE-EXISTING code changed goes to the USER

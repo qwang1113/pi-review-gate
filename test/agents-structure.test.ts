@@ -427,7 +427,7 @@ test("the goal draft must name its key test scenarios and boundary cases, or it 
   // so the pin holds the WORDING and not the column width.
   const flat = auditor.replace(/\s+/g, " ");
   assert.match(flat, /9\. \*\*Does the draft name its key test scenarios and boundary cases\?/, "the 9th check exists");
-  assert.match(flat, /关键测试场景与边界 情况/, "…naming the skeleton column it checks for");
+  assert.match(flat, /关键测试场景与边界\s*情况/, "…naming the skeleton column it checks for");
   assert.match(flat, /lib\/loop-goal\.ts/, "…and pointing at the constant that owns it");
   assert.match(flat, /\*\*P1\*\*/, "…with a P1 when the column is missing");
 });
@@ -448,6 +448,20 @@ test("the quality checklist has a SECURITY section, and the quality judge must a
   const quality = readFileSync(join(AGENTS, "quality-auditor.md"), "utf8");
   assert.match(quality, /MUST-ANSWER/, "quality-auditor.md makes the security section mandatory");
   assert.match(quality, /L1-E1`–`L1-E4|L1-E1/, "…naming the ids it must answer");
+  // The LAYER description itself is copied onto three more surfaces: a quality
+  // round advertised without security is how the section quietly stops being
+  // part of the judge's job description.
+  for (const [file, src] of [
+    ["AGENTS.md", readFileSync(AGENTS_MD, "utf8")],
+    ["README.md", readFileSync(join(ROOT, "README.md"), "utf8")],
+    ["skills/review-loop/SKILL.md", readFileSync(SKILL_MD, "utf8")],
+  ] as const) {
+    assert.match(
+      src.replace(/\s+/g, " "),
+      /architecture, correctness, security, performance/,
+      `${file} advertises the quality layers without security`,
+    );
+  }
 });
 
 test("the checklist asks whether a change piles onto an ALREADY-big file (L1-C8)", () => {

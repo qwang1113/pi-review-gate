@@ -37,9 +37,11 @@ const OLD_DEFAULT =
   /SHOULD verify by doing|verify by doing|mutation analysis included|mutation checks/i;
 
 /**
- * The surfaces allowed to SUMMARISE the rule (and required to point at it):
- * the six the task named, plus the quality round's own task text — the second
- * renderer that hands a judge its brief, and therefore a copy like the rest.
+ * The surfaces allowed to SUMMARISE the rule (and required to point at it).
+ * The task named six COPIES; `lib/parallel-review.ts` carries two of them (its
+ * module header and its per-round task text) inside one file, and the quality
+ * round's task text is the same kind of renderer — so six FILES hold them all,
+ * and the count below is those files.
  */
 const SURFACES: [string, string][] = [
   ["AGENTS.md", read("AGENTS.md")],

@@ -60,9 +60,16 @@ import { verifyJudgeBoot, channelRecordCount } from "./orchestrator-tool-kit.ts"
 import { judgeSessionIdFor, shortRepoHash, type JudgeLane } from "./judge-process.ts";
 
 import { nextRoundSeq } from "./judge-conclude.ts";
+// The shared addressing parameters — ONE definition, in the session-tools
+// module that owns them (see the comment there).
+import { ROLE_PARAM } from "./judge-session-tools.ts";
 /** Goal and plan reviews are the only kinds an agent may open directly. */
 const SPAWN_KIND_PARAM = Type.Enum({ goal: "goal", plan: "plan" });
-const ROLE_PARAM = Type.Optional(Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }));
+// The ONE role enum lives in `lib/judge-session-tools.ts` and is IMPORTED, not
+// re-declared: the second copy this used to carry had drifted — it was missing
+// `quality-auditor`, so `judge_answer({role:"quality-auditor"})` failed schema
+// validation for the very round that had asked the question (2026-09-17).
+// `judge_spawn` does not take the role parameter at all (kind is goal|plan).
 const JUDGE_ID_PARAM = Type.Optional(Type.String({ description: "Judge id returned by judge_spawn; prefer role" }));
 const REPO_PARAM = Type.Optional(Type.String({
   description: "Absolute repo path (required once the session edited several repos)",

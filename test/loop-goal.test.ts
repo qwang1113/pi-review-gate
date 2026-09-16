@@ -383,7 +383,7 @@ test("the L8 edit block names the path forward (negotiate → goal-auditor → d
   // The pre-review is MECHANICAL now, and the gate RUNS it: the copy must name
   // the one call that satisfies the gate, not the old three-step recipe.
   assert.match(block, /goal-auditor/);
-  assert.match(block, /That ONE call runs the/,
+  assert.match(block, /这\*\*一个\*\*调用里就跑完/,
     "the audit is INSIDE propose_loop_goal — there is no second call to make");
   assert.doesNotMatch(block, /prepare_goal_audit|record_goal_prereview/,
     "the agent no longer drives the audit by hand");

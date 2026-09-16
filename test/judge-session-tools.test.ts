@@ -6,6 +6,9 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   registerJudgeSessionTools,
@@ -331,6 +334,22 @@ test("every tool takes the same role / sessionId / repo parameters", () => {
       `${tool} accepts the judge roles an agent can address`,
     );
   }
+});
+
+test("the role enum is declared ONCE in lib/ — the spawn tools import it (2026-09-17)", () => {
+  // The defect this pins: `judge-spawn-tools.ts` carried its own copy of the
+  // role enum, the copy omitted `quality-auditor`, and the gate's own report
+  // then pointed the agent at an answer tool that refused the asking judge.
+  // Text-level assertions could not catch it (both copies looked fine on their
+  // own); what catches it is counting the DECLARATIONS.
+  const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const lib = join(repo, "lib");
+  const declarers = readdirSync(lib)
+    .filter((f) => f.endsWith(".ts"))
+    .filter((f) => /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(/.test(readFileSync(join(lib, f), "utf8")));
+  assert.deepEqual(declarers, ["judge-session-tools.ts"], "a second declaration is how the two drift apart");
+  const spawn = readFileSync(join(lib, "judge-spawn-tools.ts"), "utf8");
+  assert.match(spawn, /import \{ ROLE_PARAM \} from "\.\/judge-session-tools\.ts"/, "…and the consumer imports it");
 });
 
 test("an unaddressed call is refused before the repo is even resolved", async () => {

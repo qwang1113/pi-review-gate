@@ -280,7 +280,15 @@ export interface JudgeSessionToolDeps {
 // that round (judge_submit's role enum deliberately omits it — the chain
 // dispatches it), but the round can ask the agent a question, and waiting on
 // or answering a judge you cannot name would be a dead end.
-const ROLE_PARAM = Type.Optional(Type.Enum({
+//
+// EXPORTED (2026-09-17) so `lib/judge-spawn-tools.ts` — the other module that
+// registers role-addressed tools (`judge_answer` / `judge_recover`) — imports
+// this one instead of keeping a second copy. It kept one, the copy omitted
+// `quality-auditor`, and the consequence was measured: the gate's own report
+// said "use judge_answer" while that tool's schema refused the role of the
+// very judge that had asked.
+// `judge_spawn` deliberately does NOT use it: it only opens goal/plan reviews.
+export const ROLE_PARAM = Type.Optional(Type.Enum({
   reviewer: "reviewer",
   "quality-auditor": "quality-auditor",
   adviser: "adviser",

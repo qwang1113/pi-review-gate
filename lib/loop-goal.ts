@@ -599,7 +599,7 @@ export function loopGoalUnconfirmedEditBlock(repoRoot?: string): string {
       "② `propose_restatement({restatement, station})` 把需求反述给用户确认 —— 是什么、一个例子、" +
       "改之前 → 改之后、哪几步会变，外加本轮交付到哪一站（precommit | commit | pr）；这一步是硬前置，" +
       "没有它下一步不弹框；③ 用简体中文写 goal（标识符、路径、代码 token 保持英文 —— Simplified Chinese），" +
-      "调 `propose_loop_goal`。That ONE call runs the `goal-auditor` audit itself（派发 judge、" +
+      "调 `propose_loop_goal`。这**一个**调用里就跑完 `goal-auditor` 的审计（门禁自己派 judge、" +
       "裁决 —— 只有 P0/P1 算阻塞 —— 记录 PASS），过了才弹用户批准框；审计被打回就按反对意见改完再提交一次。" +
       `自己写 ${LOOP_GOAL_RELPATH} 不算数。` +
       "（如果这个会话本来就不该跑完整循环，先用 set_gate_mode 分类：explore / normal 不要求 goal。）",

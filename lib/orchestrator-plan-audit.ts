@@ -194,7 +194,7 @@ export function buildPlanAuditTask(
     "       有——需求未澄清，P1。",
     "   (b) 任务书完整度：每个任务的 title+note 是否达到『子会话拿到就能独立协商 goal』？",
     "       只写『做分页』没有交互/边界/验收标准的任务书是 P1——子会话会回头找 PM 猜需求。",
-    "   (c) 澄清证据：读 ${opts.sessionDir ? 'PM 的 transcript（' + opts.sessionDir + ' 下 <ts>_' + (opts.sessionId ?? '') + '.jsonl）' : 'PM 的 transcript'}，",
+    `   (c) 澄清证据：读 ${opts.sessionDir ? 'PM 的 transcript（' + opts.sessionDir + ' 下 <ts>_' + (opts.sessionId ?? '') + '.jsonl）' : 'PM 的 transcript'}，`,
     "       找 ask_user/grillme 的 Q&A 段落，逐条对照：澄清结论是否真的反映进了 plan 的任务书？",
     "       需求有歧义、验收标准缺失、或澄清结论没落进 plan——P1。",
     "9. 架构与代码组织（2026-09-17）：把任务合起来看，新职责会不会堆进已经很大的文件？",

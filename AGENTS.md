@@ -51,7 +51,7 @@ reviewer over the WHOLE change:
 - **A code-quality round runs FIRST (2026-09-15, user requirement).** The same
   chain dispatches `quality-auditor` on the same `baseline..HEAD` range before
   the functional reviewer exists: it judges the CODE ITSELF (philosophy,
-  architecture, correctness, performance — then simplicity, readability,
+  architecture, correctness, security, performance — then simplicity, readability,
   maintainability) against `docs/code-quality-rules.md`, a language-neutral
   checklist whose cross-repository clauses make the WHOLE repo its reference
   (a duplicate that already exists elsewhere, an abstraction two modules could

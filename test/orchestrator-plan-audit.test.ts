@@ -89,6 +89,23 @@ test("the 8th check names the transcript location when sessionDir/sessionId are 
   assert.match(task, /sess-123/);
 });
 
+test("the 8th check's transcript pointer is RENDERED, never source code (2026-09-17)", () => {
+  // The line was a double-quoted string carrying a ${…} expression, so the
+  // auditor was handed `读 ${opts.sessionDir ? 'PM 的 transcript…' }` — JS
+  // source in the middle of the audit checklist. The neighbouring block below
+  // it is a real template, which is why the path assertions still passed: the
+  // pointer appeared ELSEWHERE, and the broken line read as prose.
+  for (const opts of [{}, { sessionDir: "/tmp/session-dir", sessionId: "sess-123" }]) {
+    const task = buildPlanAuditTask(planOf(), opts);
+    assert.doesNotMatch(task, /\$\{opts\./, "no JS source may leak into the auditor's task text");
+  }
+  assert.match(
+    buildPlanAuditTask(planOf()).replace(/\s+/g, " "),
+    /读 PM 的 transcript，/,
+    "with no session the fallback reads as prose",
+  );
+});
+
 test("round 5: the plan is UNTRUSTED DATA and sits after the gate's checks", () => {
   const task = buildPlanAuditTask(planOf(), { repoRoot: "/work/pi-review-gate" });
   // ORDER, not presence: the plan is orchestrator-authored text, and a plan
