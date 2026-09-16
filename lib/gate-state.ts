@@ -625,13 +625,13 @@ export interface GateState {
    * which is as close to "a PR exists" as a purely local check can get. It is
    * never written from a parameter, so it cannot be attested by the agent.
    *
-   * The delivery station's ARRIVAL check reads it (lib/delivery-station.ts):
-   * a `pr` round that never ran a successful `gh pr create` did not arrive.
-   * Deliberately NOT the Copilot record (`copilot.pr`), which was the first
-   * attempt and is wrong for this: that number is only filled in by
-   * `copilot_review`, so a repo with no `gh`,
-   * or one where `copilotReview.enabled` is false, opens a real PR and could
-   * never satisfy an arrival gate that insisted on it.
+   * The delivery station's ARRIVAL check reads it (lib/delivery-station.ts),
+   * as ONE of three evidences — the FREE one, so it is consulted before the
+   * gate spends a network round trip. On its own it is not enough, and used to
+   * be the whole check (the bug fixed 2026-09-16): a round that appends to an
+   * ALREADY open PR never produces one, because `gh` reports "already exists"
+   * as an ERROR — which is why the third evidence exists
+   * (lib/station-pr-evidence.ts).
    *
    * Absent / unknown entries are dropped by the loader: this is evidence, and
    * unreadable evidence is no evidence (the arrival then blocks, which is the

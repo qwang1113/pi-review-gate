@@ -477,7 +477,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（135 个模块）
+## 五、`lib/` 全量速查表（136 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -514,7 +514,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `copilot-watch.ts` | L7 等待的全部策略：一条排队证据的判定（`decideCopilotWait`：排队 / 正在审 / 审崩了 / 从没落地 / 读不到，含陈旧事件剔除）、轮询节奏（20–45s）、一次 tick 的判定（落地 / 未排队 / 超时）、唤醒文案；真正的定时器与 `pi.sendUserMessage` 在扩展里 |
 | `copilot-review.ts` | L7：PR 之后的 Copilot 审查状态机（请求、逐 thread 消账、预算与终态）；payload 与探针/时间线的纯解析（`parseCopilotProbe` / `parseCopilotTimeline`）；`CopilotReviewState.triage` 带用户自己的裁决，每个转移都带着它走 |
 | `copilot-triage.ts` | L7 用户那半边的纯规则：轮次阈值（`COPILOT_TRIAGE_ASK_FROM_ROUND = 4` 起每条问题先问用户）、线程键（thread id + 最后一条评论 id）、「哪些还没表态」、四组裁决汇总、`triage` 块的 sanitize；无 IO/无时钟 |
-| `delivery-station.ts` | 交付站点（`precommit` / `commit` / `pr`）：类型、解析与缺省（缺失或非法一律读成 `precommit`）、严格度排序、「某站点放行哪些 `ShipCommandKind`」的纯判定与超站拦截文案（`stationShipProblem` / `STATION_SHIP_NEXT_STEPS`，只给用户能走的两条路、不给申诉假出路），以及 `declare_done` 的「到站」判定（`stationArrivalProblems`：`commit` 要工作区干净，`pr` 还要门禁**亲眼看到**成功的 `gh pr create`（`GateState.shippedKinds`）或 Copilot 周期已解析出的 PR 号）；无 fs、无时钟，goal 侧、plan 侧与 ship 门禁共用同一份枚举 |
+| `delivery-station.ts` | 交付站点（`precommit` / `commit` / `pr`）：类型、解析与缺省（缺失或非法一律读成 `precommit`）、严格度排序、「某站点放行哪些 `ShipCommandKind`」的纯判定与超站拦截文案（`stationShipProblem` / `STATION_SHIP_NEXT_STEPS`，只给用户能走的两条路、不给申诉假出路），以及 `declare_done` 的「到站」判定（`stationArrivalProblems`：`commit` 要工作区干净，`pr` 要三条证据之一 —— 门禁**亲眼看到**成功的 `gh pr create`（`GateState.shippedKinds`）、Copilot 周期已解析出的 PR 号，或**门禁自己查到的、当前分支上开着的 PR**（`lib/station-pr-evidence.ts`；走这一条时还要求本地 HEAD 已在 upstream 上，否则「挂着旧 PR、本轮提交还在本地」会被误判成到站）；无 fs、无时钟，goal 侧、plan 侧与 ship 门禁共用同一份枚举 |
 | `dialog-budget.ts` | 对话框的渲染行数预算——宿主不截断，长度必须自己管；选项行同样计入（`askChoice` 按 `choiceRows` 的实际行数收紧正文额度） |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |
 | `test-run-discipline.ts` | 识别全量测试/typecheck 命令（无参 `npm test` / `tsc --noEmit` / `node --test` 全树），追加「送审时门禁自动 full precommit」提醒；纯判定 + 文案，judge 豁免在接线处 |
@@ -621,6 +621,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `ship-gate-edit-guard.ts` | L1 的 **edit/write 臂**：敏感文件安全底线（`sensitiveEditBlock`，`normal` 模式也生效）、gate-owned 豁免、L8 目标门、orchestrator 写限制、L6 标签检查；检查次序即契约 |
 | `ship-gate-bash.ts` | L1 的 **bash 臂 = ship gate 本体**：tmux backstop、`/gate-bypass`、ship 识别、L5/AI 署名、message-only rewrite 豁免、逐 repo 门禁、**交付站点放行**（既有拦截全过之后再判这条命令是否在站点内，站点由 deps 注入、多 repo 取最严；message-only rewrite 同样豁免；站点拦截不吃仲裁令牌）、一次性仲裁令牌、拦截文案（`describeShips` / `buildShipBlockReason`，站点与质量两半各带各的下一步）；另有唯一一条**只提示不拦截**的探测 `detectHandRolledWaitPolling`（`sleep ≥30s` + 读通道/findings 流 ⇒ 提示改用 `judge_wait`，经 deps 的 `hint` seam 投递、每会话去重） |
 
+| `station-pr-evidence.ts` | 站点 `pr` 的**门禁侧事实采集**（2026-09-16，用户实测的死路：PR 早已开着、只往里追加提交时，`gh` 把「已经有了」当 ERROR 报，`shippedKinds` 永远记不上，`copilotReview` 关掉的仓库连 PR 号也解析不出来 —— 到站判定被逼成「关掉旧 PR 重开一个」）。`probeOpenPr(dir)` 让门禁自己问 GitHub（复用 `lib/copilot-gh.ts` 的 `resolveOpenPr`，只认 `state === "OPEN"` —— CLOSED/MERGED 与读不出的 state 一律不算），再叠一条本地事实 `hasUnpushedCommits`（`git rev-list --count @{upstream}..HEAD`；没有 upstream、不是仓库、读不出，全部算「没推」，因为读它的判定只会更严）；`existingPrNotice` 是失败的 `gh pr create` 之后那条提示（给出 PR 号与 URL，明说往它追加提交、不要关掉重开）。纯判定留在 `lib/delivery-station.ts`，跑进程的事在这里 |
 | `task-mode.ts` | 会话门禁模式模型：normal < explore < loop < orchestrator 与升降级规则 |
 | `text-appeal.ts` | 启发式文本拦截的申诉口子（A 类） |
 | `inspection-appeal.ts` | 第三类申诉口子：judge 被「零审查即 READY」拒掉后走 `request_arbitration`（judge 侧唯一被放行的工具），形状照抄 `text-appeal.ts`——受理判定（配额与本轮不可重掷共用一份额度）、仲裁者 system prompt 与 brief（申诉理由按不可信数据入块）、通行证只绑「本 judge + 本轮」，绝不放行任何命令 |

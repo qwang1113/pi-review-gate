@@ -545,6 +545,10 @@ import {
 
   type DeliveryStation,
 } from "../lib/delivery-station.ts";
+// …and the FACTS that arrival is judged on when no local evidence can answer
+// (2026-09-16): the gate asks GitHub itself instead of waiting for a
+// `gh pr create` exit 0 that an already-open PR makes impossible.
+import { existingPrNotice, probeOpenPr, type OpenPrArrival } from "../lib/station-pr-evidence.ts";
 
 
 import {
@@ -5944,6 +5948,34 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
 
+      // A FAILED `gh pr create`: the branch already has a PR.
+      //
+      // `gh` reports that case as an ERROR, which is why the success-only
+      // evidence above can never see it — and why the agent is left reading
+      // gh's stderr and guessing between "append to it" and "open another
+      // one". On 2026-09-16 that guess cost a user an open PR (closed, then
+      // reopened under a new number when the arrival check would not accept
+      // the old one). So the gate asks GitHub itself and says the answer out
+      // loud; user-requested. Normal mode steps aside like every other nudge.
+      // Placement is deliberate: BEFORE the read-only stall guard, whose
+      // "count it like the read family" docblock reads as describing whatever
+      // immediately follows it — and this is not that.
+      if (
+        cmd && event.isError === true && state.taskMode !== "normal"
+        && observedShipKinds(cmd).includes("pr-create")
+      ) {
+        const cmdRepos = resolveCommandRepos(cmd, cwd);
+        for (const root of cmdRepos.ambiguous ? sessionRepos : cmdRepos.repos) {
+          const notice = existingPrNotice(await probeOpenPr(root));
+          if (notice) {
+            return {
+              content: [...(event.content ?? []), { type: "text", text: notice }],
+              isError: true,
+            };
+          }
+        }
+      }
+
       // Read-only drill stall guard (lib/readonly-stall.ts): bash is the
       // drill workhorse (grep/sed through node_modules/), so count it like
       // the read family. Deliberately at the END of the bash branch — after
@@ -9736,11 +9768,14 @@ export default function reviewGate(pi: ExtensionAPI) {
         // gap" — the docblock of `orchestrationDoneProblems`.
 
         //
-        // Both facts are LOCAL and gate-observed: uncommitted work, and a
-        // `gh pr create` the gate watched exit 0 (`shippedKinds`), with the
-        // Copilot-resolved PR number as a second, independent proof. Nothing
-        // here asks GitHub, so a completion never fails because the network
-        // was slow.
+        // Every fact is the gate's OWN: uncommitted work, a `gh pr create` it
+        // watched exit 0 (`shippedKinds`), the PR number the Copilot cycle
+        // resolved, and — when neither of those can answer — a question it
+        // asks GitHub itself (`lib/station-pr-evidence.ts`). That last one is
+        // a network round trip, so it runs ONLY when the free local facts
+        // cannot prove arrival: a completion must never fail because the
+        // network was slow, and must never be IMPOSSIBLE because the PR was
+        // opened before this session existed.
         //
         // PER REPO, not once for the session (round-1 reviewer P2): each repo
         // carries its OWN approved goal and therefore its own station, and the
@@ -9756,11 +9791,25 @@ export default function reviewGate(pi: ExtensionAPI) {
             // UNVERIFIABLE counts as dirty: "I could not read the worktree"
             // is not evidence that the work was committed.
             const files = changedFiles(root);
+            const observedPrCreate = st.shippedKinds?.includes("pr-create") === true;
+            const recordedPr = typeof st.copilot?.pr === "number" ? st.copilot.pr : null;
+            // The gate asks GitHub only when no local fact already proves
+            // arrival — `gh` reports "already exists" as an ERROR, so a round
+            // that APPENDS to an open PR leaves `shippedKinds` empty, and a
+            // repo with `copilotReview` off never resolves a number either.
+            let probe: OpenPrArrival | null = null;
+            if (station === "pr" && !observedPrCreate && recordedPr === null) {
+              // Named in the progress line: this one can take seconds, and a
+              // silent wait at the last step of a round reads as a hang.
+              progress.step(`查询 PR 状态（${repoLabel(root)}）`);
+              probe = await probeOpenPr(repoDirFor(root));
+            }
             const problems = stationArrivalProblems(station, {
               dirty: files === undefined || files.length > 0,
-
-              observedPrCreate: st.shippedKinds?.includes("pr-create") === true,
-              recordedPr: typeof st.copilot?.pr === "number" ? st.copilot.pr : null,
+              observedPrCreate,
+              recordedPr,
+              openPr: probe?.number ?? null,
+              unpushed: probe?.unpushed === true,
             });
             for (const p of problems) {
               completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);

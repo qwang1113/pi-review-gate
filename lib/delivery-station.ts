@@ -315,10 +315,15 @@ export interface StationArrivalFacts {
   /**
    * Did the gate WATCH a `gh pr create` succeed in this repo?
    *
-   * This is the evidence a `pr` round arrived, and it is the gate's OWN
-   * observation: the ship kind is read off a bash `tool_result` that did not
-   * fail (`GateState.shippedKinds`), never off a parameter the agent could
-   * set. Local, so a completion never fails because GitHub was slow.
+   * The gate's OWN observation: the ship kind is read off a bash
+   * `tool_result` that did not fail (`GateState.shippedKinds`), never off a
+   * parameter the agent could set. Free — no network — which is why it stays
+   * as the cheap first answer.
+   *
+   * It cannot be the ONLY evidence: `gh` reports "a pull request for branch …
+   * already exists" as an ERROR, so a round that appends to an ALREADY open
+   * PR never produces one, and that is an ordinary way to work (user report,
+   * 2026-09-16). {@link openPr} is what covers it.
    */
   observedPrCreate?: boolean;
   /**
@@ -326,13 +331,65 @@ export interface StationArrivalFacts {
    * is one — a SECOND, independent way to prove the same fact, for a PR that
    * was opened outside this session (in the browser, or by an earlier one).
    *
-   * It cannot be the only evidence: that number is filled in by
-   * `copilot_review` alone, so a repo with no
-   * `gh` — or one where `copilotReview.enabled` is false — opens a real PR and
-   * would never be able to satisfy an arrival gate that insisted on it
-   * (round-1 reviewer P1, 2026-09-06).
+   * It cannot be the only evidence either: that number is filled in by
+   * `copilot_review` alone, so a repo with no `gh` — or one where
+   * `copilotReview.enabled` is false — opens a real PR and would never be able
+   * to satisfy an arrival gate that insisted on it (round-1 reviewer P1,
+   * 2026-09-06).
    */
   recordedPr?: number | null;
+  /**
+   * The PR the gate ITSELF found open on this branch (2026-09-16).
+   *
+   * The third evidence, and the only one that covers the case both local ones
+   * miss — the PR was already open and this round merely appended to it. The
+   * question is asked of GitHub by the gate (`lib/station-pr-evidence.ts`),
+   * never answered by the agent, so it is evidence in the same sense as the
+   * two above; this module only reads the answer back.
+   *
+   * `null`/absent means "nothing was shown", never "there is none": the
+   * caller skips the query entirely when a local fact already proves arrival,
+   * and every unreadable answer (gh missing, offline, detached HEAD) lands
+   * here too.
+   */
+  openPr?: number | null;
+  /**
+   * Is the local HEAD still ahead of its upstream — i.e. does {@link openPr}
+   * NOT carry this round's commits yet?
+   *
+   * Only consulted next to {@link openPr}, and only in the strict direction:
+   * a branch carrying an old open PR while this round's commits sit unpushed
+   * has not arrived, and no other fact here can see that (`dirty` is about the
+   * worktree, not the remote). The two local evidences imply their own push,
+   * so this never narrows them.
+   */
+  unpushed?: boolean;
+}
+
+/**
+ * The refusal when NO evidence of an open PR exists — and every exit it names
+ * has to actually work.
+ *
+ * The text used to end with "重跑一次 `gh pr create`(已存在会直接告诉你)",
+ * which was measured FALSE (2026-09-16): gh reports the already-exists case as
+ * an error, the gate records nothing from a failed command, and that advice is
+ * what walked a user into closing an open PR so a fresh `create` could
+ * succeed. The gate now asks GitHub itself, so when the question still comes
+ * back empty the honest next step is to fix the QUERY, not to open a second
+ * PR.
+ */
+const PR_ARRIVAL_NO_EVIDENCE =
+  "本轮交付站点是 pr,但门禁没有看到 PR —— 它自己查过当前分支,上面没有开着的 PR。\n" +
+  "  - 还没开 PR:`git push` 之后跑 `gh pr create`,再收尾。\n" +
+  "  - 推分支还不算开 PR(push 之后还要 `gh pr create`)。\n" +
+  "  - PR 早就开着(网页开的、上一轮会话开的)却仍然看到这条:那是**查询**没跑通 ——" +
+  "先确认 `gh auth status` 能过;门禁查到就会认,不需要在本会话里重开一个。\n" +
+  "  - 确实开不出来时,请用户把本轮站点改回 `commit`(站点是契约,只有用户能改)。";
+
+/** The refusal for a branch that HAS an open PR but has not pushed this round's work. */
+function prArrivalUnpushed(pr: number): string {
+  return `本轮交付站点是 pr:门禁查到 PR #${pr} 是开着的,但本地还有没推上去的提交 —— ` +
+    "先 `git push` 把它们送上去(新提交会自己出现在那个 PR 上),再收尾。";
 }
 
 /**
@@ -355,19 +412,18 @@ export function stationArrivalProblems(
       "提交完再收尾（站点 commit 的承诺就是「提交已经做完」）。",
     );
   }
-  const prProven = facts.observedPrCreate === true ||
+  // THREE evidences, any one of which is an arrival. The first two are local
+  // and free, which is why the caller only asks GitHub when neither holds.
+  const provenLocally = facts.observedPrCreate === true ||
     (facts.recordedPr !== undefined && facts.recordedPr !== null);
-  if (station === "pr" && !prProven) {
-    problems.push(
-      "本轮交付站点是 pr，但门禁没有看到 PR 被开出来 —— 它认的是**它自己观察到的事实**：" +
-      "一条成功跑完的 `gh pr create`（推分支还不算），或者 Copilot 周期已经解析出的 PR 号。\n" +
-      "  - 还没开 PR：`git push` 之后跑 `gh pr create`，再收尾。\n" +
-      "  - PR 是在别处开的（网页、上一轮会话）：跑一次 `copilot_review` 让门禁解析并记下 PR 号；" +
-      "项目关掉了 `copilotReview` 时这条走不通，那就重跑一次 `gh pr create`（已存在会直接告诉你），" +
-      "或者让用户把本轮站点改回 `commit`。",
-    );
+  const openPr = facts.openPr ?? null;
+  // The queried evidence additionally has to be PUSHED: an old open PR with
+  // this round's commits still sitting locally is not where the round stopped
+  // (see {@link StationArrivalFacts.unpushed}).
+  const proven = provenLocally || (openPr !== null && facts.unpushed !== true);
+  if (station === "pr" && !proven) {
+    problems.push(openPr === null ? PR_ARRIVAL_NO_EVIDENCE : prArrivalUnpushed(openPr));
   }
-
 
   return problems;
 }

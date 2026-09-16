@@ -1709,6 +1709,36 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
     "a `pr` round arrives on a `gh pr create` the GATE watched succeed — not on a claim");
   assert.match(body, /st\.copilot\?\.pr/,
     "…with the Copilot-resolved PR number as the second, independent proof");
+  // EVIDENCE 3 (2026-09-16): neither of those exists when the PR was ALREADY
+  // open and this round only appended to it — gh calls "already exists" an
+  // error, and `copilotReview: false` resolves no number — so the gate asks
+  // GitHub itself. The question runs ONLY when the two free facts are silent.
+  assert.match(body, /probeOpenPr\(repoDirFor\(root\)\)/,
+    "the third evidence is a question the GATE asks, never one the agent answers");
+  assert.match(body, /station === "pr" && !observedPrCreate && recordedPr === null/,
+    "…and it costs a network round trip, so it runs only when no local fact can answer");
+  assert.match(body, /unpushed: probe\?\.unpushed === true/,
+    "an OPEN PR that does not carry this round's commits is not where the round stopped");
+});
+
+test("a FAILED `gh pr create` gets the answer the gate can look up itself", () => {
+  // gh reports "a pull request for branch … already exists" as an ERROR, so the
+  // success-only evidence has never seen it, and the agent is left reading
+  // gh's stderr and guessing between appending to the PR and opening another.
+  // The measured cost (user report, 2026-09-16) was an open PR closed and
+  // reopened under a new number — so the gate asks GitHub and says the answer.
+  const window = windowOf(
+    "// A FAILED `gh pr create`",
+    "const bashReadonlyNudgeText",
+    "failed pr create",
+  );
+  assert.match(window, /event\.isError === true/,
+    "only a failure needs this — a success is already evidence");
+  assert.match(window, /observedShipKinds\(cmd\)\.includes\("pr-create"\)/,
+    "the same narrowed evidence entry point, never the over-matching detector");
+  assert.match(window, /existingPrNotice\(await probeOpenPr\(root\)\)/,
+    "…and the sentence that names the PR comes from the module that asked GitHub");
+  assert.match(codeOnly(window), /state\.taskMode !== "normal"/, "normal mode steps aside");
 });
 
 test("the ship-kind evidence is recorded on SUCCESS, and never behind the Copilot switch", () => {
