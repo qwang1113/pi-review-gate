@@ -165,7 +165,8 @@ export type ConsentToolDeps = Pick<
  * The question's own first line, short enough to sit in a box title.
  *
  * WHY THE TITLE NEEDS IT (reviewer Nit, 2026-09-14): the question text lives in
- * the budgeted BODY, and the reason box the template raises for
+ * the BODY (which reaches the box whole — the row budget is gone, 2026-09-16),
+ * and the reason box the template raises for
  * `✎ 不选，我说明原因` renders `spec.title` ALONE — the box the user types
  * their objection into would have said only 「问题 1/3」. One line of the
  * question is charged to the same title budget as everything else — and when
@@ -186,10 +187,10 @@ const HEADLINE_MAX_CHARS = 60;
 /**
  * The box title for one question — the ONE place its order is decided.
  *
- * ORDER IS LOAD-BEARING (reviewer P2, 2026-09-14). `fitDialogTitle` cuts from
- * the TAIL, so a ⚠️ authorization notice appended AFTER the progress label is
- * the first thing a small window loses — on a 20-row terminal with four
- * options the title budget is three rows, and the notice announcing that
+ * ORDER STILL MATTERS (and it mattered more before 2026-09-16, when the title
+ * was cut from the TAIL): a ⚠️ authorization notice buried under a progress
+ * label is easy to miss however long the box may be, and the notice
+ * announcing that
  * 「推荐」 grants a proxy authority would be gone while picking that row still
  * minted the grant. Head-first makes "the notice is visible wherever the box
  * is shown at all" true by construction.
@@ -335,7 +336,7 @@ export async function doAskUser(
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped !== undefined) return undefined;
         // ONE renderer for every dialog in the gate — the extension's
-        // `askChoice`, so this box is budgeted like every other one — plus the
+        // `askChoice` — plus the
         // interview's own escape row, which is not part of the template
         // because only an interview has later questions to skip.
         //

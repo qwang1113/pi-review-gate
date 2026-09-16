@@ -438,17 +438,18 @@ export const GOAL_CONFIRM_TITLE = "review-gate: AI 提交了本次任务的目�
  * pinned to the bottom of the screen; a goal-sized block makes the dialog
  * taller than the terminal, which pushes the animating spinner row out of the
  * viewport and turns every spinner frame into a full-screen clear (see
- * lib/dialog-budget.ts for the measurements). The transcript, unlike the
- * dialog, scrolls — so the reviewable text goes there and the dialog keeps
- * only the decision.
+ * lib/renderer-mode.ts — that is where the measurement lives now, and where
+ * the session that is NOT on the fullscreen renderer is told about it). The
+ * transcript, unlike the dialog, scrolls — so the reviewable text goes there
+ * and the dialog keeps only the decision.
  *
  * AND IT IS THE WHOLE GOAL (user decision, 2026-09-14). This used to echo only
  * the first 2000 characters with an `…（已截断）` tail — cutting exactly the
  * text the user is being asked to approve, on a surface that is not
  * constrained at all: measured on the real renderer, appending 400 rows to the
  * transcript triggers 0 full clears, so length here costs nothing but scroll.
- * The dialog's row budget is the only geometry that matters, and the dialog
- * never carries the goal text anyway.
+ * The dialog's height is no longer budgeted at all (2026-09-16), and the
+ * dialog never carries the goal text anyway.
  *
  * A goal can still be too long, but that is refused, not silently shortened:
  * `LOOP_GOAL_MAX_WRITE_CHARS` bounds what the extension will write at all.
@@ -478,7 +479,7 @@ export const GOAL_DIALOG_TITLE_MAX_CHARS = 60;
  * the consequence copy comes first, which is exactly the order that made a
  * narrow terminal truncate INTO the consent-critical lines — round-1 review
  * P1, 2026-09-16). What the BOUNDS are: the agent's own title is hard-capped,
- * and the caller runs the whole thing through `fitDialogMessage`.
+ * and the body is passed through whole (no fit — the row budget is gone).
  */
 export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: string): string {
   const normalized = normalizeGoalText(goalText);
@@ -487,8 +488,8 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
     ? rawTitle.slice(0, GOAL_DIALOG_TITLE_MAX_CHARS) + "…"
     : rawTitle;
   return (
-    // ORDER IS THE BUDGET POLICY (2026-09-16). `fitDialogMessage` truncates
-    // from the TAIL, so the lines are written most-critical-first:
+    // ORDER IS THE READING ORDER (2026-09-16). `fitDialogMessage` is gone, so
+    // nothing is truncated — but the box is still read top-down, and the lines
     //   1. the untrusted facts the user is CONFIRMING (repo, station,
     //      `goal-auditor 预审: PASS`) — losing one of these means consenting to
     //      something the dialog never showed;

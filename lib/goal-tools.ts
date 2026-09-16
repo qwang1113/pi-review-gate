@@ -323,8 +323,8 @@ export async function doProposeLoopGoal(
       "同一 repo 的一个需求只出一个 PR，子会话提交完就停，由项目经理本地合并、用户验证后再开一个 PR。" +
       "要分多个 PR，需要在 plan 里声明 allowMultiplePrs 并重新批准。"
     : undefined;
-  // THE DIALOG GETS THE SHORT FORM (measured). Its body is budgeted and
-  // truncated from the TAIL: the first version of this notice ended with
+  // THE DIALOG GETS THE SHORT FORM (measured, and it survived the end of the
+  // row budget): the first version of this notice ended with
   // "declare allowMultiplePrs" — the one fact the reader can act on — and that
   // is precisely what got cut. The transcript block above carries the full
   // sentence; the box carries the decision.

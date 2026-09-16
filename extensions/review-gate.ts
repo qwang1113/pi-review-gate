@@ -4520,19 +4520,22 @@ export default function reviewGate(pi: ExtensionAPI) {
       // `Text` — and pi's RPC host ignores component factories entirely, so
       // making the status strip a factory would delete it there.
       //
-      // RE-PROBED on every widget update (round-2 P2, same day): the mode can
-      // change mid-session — `/settings` applies immediately — and the probe
-      // is the only place that reads it. A session that switches TO `regular`
-      // after its first update would otherwise never be told. The NOTICE stays
-      // once-per-session (`rendererModeNoticeShown`), so re-probing is free of
-      // nagging.
-      ctx.ui.setWidget("review-gate-renderer-probe", (tui) => {
-        noteRendererMode(tui.mode, ctx);
-        return { render: () => [], invalidate: () => {} };
-      }, { placement: "belowEditor" });
-      ctx.ui.setWidget("review-gate-renderer-probe", undefined);
+      // RE-PROBED when the status strip changes (round-2/3 P2, same day): the
+      // mode can change mid-session — `/settings` applies immediately — and the
+      // probe is the only place that reads it. It used to run on EVERY widget
+      // update, which is every 5s from the refresh timer plus every persist
+      // (round-3 P1); moving it inside the content-changed branch keeps the
+      // reading while making its cost follow real changes. The residual corner
+      // is named: a mode flipped while the strip's content stays identical
+      // mid-session is not noticed until that content moves. The NOTICE stays
+      // once-per-session (`rendererModeNoticeShown`).
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
+        ctx.ui.setWidget("review-gate-renderer-probe", (tui) => {
+          noteRendererMode(tui.mode, ctx);
+          return { render: () => [], invalidate: () => {} };
+        }, { placement: "belowEditor" });
+        ctx.ui.setWidget("review-gate-renderer-probe", undefined);
         ctx.ui.setWidget("review-gate-agents", lines, { placement: "belowEditor" });
       }
     } catch { /* display-only */ }
@@ -4568,16 +4571,17 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- user-visible output channels ----------
   //
-  // Two rules, both learned the hard way (see lib/dialog-budget.ts):
+  // Two rules, both learned the hard way (the measurements live in
+  // lib/renderer-mode.ts now):
   //
-  //  1. LONG TEXT GOES TO THE TRANSCRIPT. `ui.select` renders its title as one
-  //     unclipped block at the bottom of the screen; anything tall enough to
-  //     push the animating spinner row out of the viewport turns every spinner
-  //     frame into a full-screen clear (measured: 29 of 30 frames). The
-  //     transcript scrolls, the dialog does not.
+  //  1. LONG TEXT GOES TO THE TRANSCRIPT. A tall dialog used to make pi's
+  //     DEFAULT renderer clear the screen and the scrollback every frame
+  //     (measured: 29 of 30 frames) — that is why the session on that renderer
+  //     is told to switch, and why anything long belongs in the transcript
+  //     anyway: it scrolls, and the box does not.
   //  2. A DIALOG ONLY CARRIES THE DECISION. Every dialog in this file goes
   //     through askChoice, which renders the gate's one question template
-  //     (lib/choice-dialog.ts) under the row budget.
+  //     (lib/choice-dialog.ts) — whole, no fitting (2026-09-16).
 
   // (There is deliberately NO cap on a transcript notice any more — see
   // showToUser below. The sensitive-path DIALOG cap moved to
