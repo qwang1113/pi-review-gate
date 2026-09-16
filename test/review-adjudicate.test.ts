@@ -364,6 +364,35 @@ test("parkedLaneHalf: a /gate-bypass round owes no lane — 'no lane ran' is not
     "an unknown tree is never covered");
 });
 
+test("the recorder and the parked half answer the SAME question — one rule, so they cannot disagree again", () => {
+  // THE PROPERTY THE UNIFICATION EXISTS FOR (quality round P1, 2026-09-16).
+  // Every combination of bypass / covered tree / round tree goes through BOTH
+  // halves: the parked half's `ok` must be exactly the recorder's "not
+  // lacking", and `laneVerifiesTree` is what both of them read. Exhaustive on
+  // purpose — the defect lived in one combination nobody had tried.
+  const t = "9f2c";
+  for (const bypassActive of [false, true]) {
+    for (const coveredTree of [t, "other", undefined, ""]) {
+      for (const tree of [t, "other", undefined, ""]) {
+        const where = `bypass=${bypassActive} covered=${String(coveredTree)} tree=${String(tree)}`;
+        const verified = laneVerifiesTree({ tree, coveredTree, bypassActive });
+        assert.equal(
+          readyLacksVerification({ precommitVerdict: "NOT_RUN", reviewedTree: tree, lastFullPassTree: coveredTree, bypassActive }),
+          !verified,
+          `the recorder disagrees with the shared rule: ${where}`,
+        );
+        // A round with no tree at all can never be replayed, bypass or not.
+        const replayable = tree !== undefined && tree !== "";
+        assert.equal(
+          parkedLaneHalf({ parkedTree: tree, coveredTree, currentTargetTree: tree, laneRunning: false, bypassActive }) === "ok",
+          verified && replayable,
+          `the parked half disagrees with the shared rule: ${where}`,
+        );
+      }
+    }
+  }
+});
+
 test("parkedReadyFate: BOTH preconditions must be satisfied; any veto retires the record", () => {
   const t = "9f2c";
   assert.equal(parkedReadyFate({ parkedTree: t, lane: "ok", quality: "ok" }), "replay");

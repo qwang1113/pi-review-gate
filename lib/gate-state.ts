@@ -693,10 +693,10 @@ export function emptyState(sessionId: string | null, maxRounds: number): GateSta
  * inheriting may only ever make completion harder, never easier.
  *
  * WHAT DOES NOT CARRY is the rest of {@link GateState}: `bypass`, the scope
- * limits, the verdicts, the fingerprints, the change flags, the repo set and
- * the session's own task mode all describe THIS session's standing, and a
- * successor starts with none of them (the same asymmetry the
- * concurrent-sidecar merge in this module states from the other side).
+ * limits, the verdicts, the fingerprints, the change flags and the session's
+ * own task mode all describe THIS session's standing, and a successor starts
+ * with none of them (the same asymmetry the concurrent-sidecar merge in this
+ * module states from the other side).
  *
  * Two more omissions are deliberate rather than forgotten. `goalPrereview`
  * and `planAudit` are audits of ONE DRAFT — they answer "did a judge read

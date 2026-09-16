@@ -11656,6 +11656,22 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
     state.sessionId = sessionId;
+    // P-multi: re-arm the repo set from the persisted list — a same-session
+    // resume keeps the repos it edited, and a RELAY SUCCESSOR inherits the
+    // predecessor's (lib/gate-state.ts's `inheritGoalContract` is what puts
+    // them on the state). Only repos whose sidecar still exists are re-added —
+    // a deleted checkout must not block declare_done forever.
+    //
+    // THIS RUNS BEFORE ANYTHING CAN persist() (quality round P1, 2026-09-16).
+    // `persist` writes `state.sessionReposPaths` FROM this in-memory set, so a
+    // restore that merely put the inherited paths on the state had them
+    // overwritten by the empty set the first time anything persisted — and a
+    // relay successor always persists early, because the spawner hands it its
+    // mode. The inheritance was dead code until this loop moved above the
+    // first `setTaskMode` call.
+    for (const r of state.sessionReposPaths ?? []) {
+      if (r !== primaryRepoRoot && existsSync(sidecarPath(r))) sessionRepos.add(r);
+    }
     // Take over previous sessions' pane judges: merge their registry + pendings
     // so live panes stay addressable and no second pi is forked onto one
     // session id. Judge panes themselves skip this (they operate nothing).
@@ -11779,12 +11795,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     for (const f of state.scopeLimit?.sessionFiles ?? []) sessionEditedPaths.add(f);
     if (sessionEditedPaths.size > 0) sessionEdited = true;
 
-    // P-multi: a same-session resume re-arms the repo set too (persisted as
-    // sessionReposPaths by persist()). Only repos whose sidecar still exists
-    // are re-added — a deleted checkout must not block declare_done forever.
-    for (const r of state.sessionReposPaths ?? []) {
-      if (r !== primaryRepoRoot && existsSync(sidecarPath(r))) sessionRepos.add(r);
-    }
+    // (The repo set was re-armed right after `restore()` — it has to land
+    // BEFORE the first persist, which derives the persisted list from the
+    // in-memory set.)
 
     // P0-2: detect pre-existing changes — worktree AND branch commits. A
     // user-granted scope limit exempts exactly the files still in its

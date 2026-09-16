@@ -4155,6 +4155,25 @@ test("a relay successor inherits in EVERY repo, not just the primary one", () =>
     "a secondary repo's sidecar is inherited by the predecessor's successor — same rule, same function");
 });
 
+test("the persisted repo set is re-armed BEFORE anything can persist — a relay successor keeps its repos", () => {
+  // Quality round P1 (2026-09-16): `persist` DERIVES `state.sessionReposPaths`
+  // from the in-memory `sessionRepos` set, so the re-arming loop has to run
+  // before the session's first persist. It used to sit far below `setTaskMode`
+  // (which persists) — and since every relay successor is handed its mode by
+  // the spawner, every successor persisted first, the inherited list was
+  // overwritten with the empty set, and the inheritance was dead code that
+  // nothing could observe.
+  const restoreAt = SRC.indexOf("restore(ctx, sessionId)");
+  const reseedAt = SRC.indexOf("for (const r of state.sessionReposPaths ?? [])");
+  assert.ok(restoreAt > 0 && reseedAt > 0, "both anchors must exist");
+  assert.ok(reseedAt > restoreAt, "the loop re-arms what restore() produced");
+  const firstModeCall = SRC.indexOf("setTaskMode(", restoreAt);
+  assert.ok(firstModeCall === -1 || reseedAt < firstModeCall,
+    "…and it runs before the first setTaskMode call, which persists the (still empty) set");
+  assert.match(SRC.slice(reseedAt, reseedAt + 200), /sessionRepos\.add\(r\)/,
+    "the loop re-adds each repo to the in-memory set persist reads");
+});
+
 test("session_start surfaces the migration notice and clears the flag", () => {
   const at = SRC.indexOf('pi.on("session_start"');
   assert.ok(at >= 0, "session_start handler must exist");
@@ -5421,8 +5440,11 @@ test("restart does not strand pane judges: registry + pendings persist per repo"
     .filter((m) => !/let judgeHierarchy/.test(SRC.slice(Math.max(0, m.index! - 60), m.index)));
   assert.deepEqual(direct.map((m) => m[0]), [], "no direct table assignment outside the declaration");
   // …and session_start restores before any tool can run.
+  // The window is a reading heuristic, not a contract: the repo-set re-arming
+  // block below `restore()` legitimately sits before this merge (it has to —
+  // `persist` overwrites what it re-arms), so the window has to reach past it.
   const startAt = SRC.indexOf('pi.on("session_start"');
-  assert.match(SRC.slice(startAt, startAt + 3000), /ensureHierarchyLoaded\(root\)/,
+  assert.match(SRC.slice(startAt, startAt + 5000), /ensureHierarchyLoaded\(root\)/,
     "a restarted session merges previous slices");
 });
 
