@@ -73,7 +73,7 @@ import {
   STRATEGIC_RESET_CHECKLIST,
   TASK_TEXT_MARKER,
 } from "../lib/constants.ts";
-import { SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "../lib/agent-directives.ts";
+import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "../lib/agent-directives.ts";
 
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
@@ -338,6 +338,7 @@ import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
 import { seedWorktree } from "../lib/worktree-seed.ts";
 import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
+import { buildRejection } from "../lib/rejection-copy.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
 // (A round's conclusion is the channel report. The transcript READ died with
 // judge_read, and the module behind it was deleted 2026-09-06.)
@@ -525,7 +526,7 @@ import {
   // the length cap, the carryover) moved with it into lib/goal-tools.ts +
   // lib/goal-prereview-tools.ts.
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
-  LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
+  loopGoalUnconfirmedEditBlock,
   loopGoalEditGate,
   goalPrereviewPassed,
   goalReminderDue,
@@ -861,7 +862,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    *
    * The internal implementations have to stay reachable by a test — they hold
    * mechanical checks (the precommit receipt, the L5 message rule, the
-   * checkpoint marker, the audit adjudication) whose behavior is the point of
+   * checkpoint commit, the audit adjudication) whose behavior is the point of
    * several suites, and driving them only through the minutes-long chains
    * that call them would test almost nothing.
    *
@@ -5496,9 +5497,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Name the repo that lacks an approved goal: in a multi-repo session an
       // anonymous block makes the agent re-approve the PRIMARY goal and stay
       // blocked forever — the propose_loop_goal `repo` parameter is what
-      // binds a goal to a specific repo.
-      const repoHint = goalRoot === primaryRepoRoot ? "" : ` (repo: ${goalRoot})`;
-      return { block: true, reason: LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK + repoHint };
+      // binds a goal to a specific repo. The hint goes in through the builder,
+      // which puts it on the 现象 line where it is read.
+      return { block: true, reason: loopGoalUnconfirmedEditBlock(goalRoot === primaryRepoRoot ? undefined : goalRoot) };
     }
     return undefined;
   }
@@ -6052,7 +6053,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     label: "Review Checkpoint",
     description:
       "ADVANCED / internal: `judge_submit({role:\"reviewer\"})` runs this itself as step 2 of the " +
-      "submission chain (and stamps the checkpoint marker on the subject) — call it directly only " +
+      "submission chain — call it directly only " +
       "to freeze work without submitting it. " +
       "Commits the current worktree as a checkpoint commit — the ONLY way to commit before a READY " +
       "review. Requires a precommit PASS (it bypasses READY only, never precommit), validates the " +
@@ -7042,10 +7043,10 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
   /**
-   * The checkpoint's commit message — the whole rule (Conventional Commits
-   * with the `checkpoint` marker injected into the SCOPE, and the L5
-   * non-English fallback) lives in lib/checkpoint-message.ts, unit-tested
-   * there. This wrapper only names the call site.
+   * The checkpoint's commit message — the whole rule (a legal Conventional
+   * Commit for every note, plus the L5 non-English fallback) lives in
+   * lib/checkpoint-message.ts, unit-tested there. This wrapper only names the
+   * call site.
    */
   function checkpointMessage(raw: string): string {
     return buildCheckpointMessage(raw);
@@ -8147,12 +8148,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       task: Type.String({
         description:
           "reviewer: what you changed this round, in your words (the gate wraps it in the review " +
-          "task it builds). adviser / goal-auditor: the question or the draft to judge.",
+          "task it builds). " + ROUND_NOTE_HINT + " " +
+          "adviser / goal-auditor: the question or the draft to judge.",
       }),
       message: Type.Optional(Type.String({
         description:
-          "reviewer only: the checkpoint commit message (English, Conventional Commits). The gate " +
-          "adds the checkpoint marker itself. Omit it and the gate derives the message from your " +
+          "reviewer only: the checkpoint commit message (English, Conventional Commits — the gate " +
+          "makes it a legal one if it is not). Omit it and the gate derives the message from your " +
           "task text — but only the parts of it that are ENGLISH: L5 accepts no non-Latin letter " +
           "in a commit message, so a Chinese round note yields the default subject and no body. " +
           "Write this field whenever you want the history to say something — that is the normal " +
@@ -8182,7 +8184,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       // steps would leak fatal to the terminal. Refuse up front.
       if (!sessionInGit) {
         return {
-          content: [{ type: "text", text: "review-gate: 非 git 目录 —— judge_submit 不可用（无仓库可审查）。" }],
+          content: [{
+            type: "text",
+            text: buildRejection({
+              what: "judge_submit 被拒 —— 当前不在 git 仓库里",
+              why: "送审链条（precommit → checkpoint → baseline..HEAD）在仓库外没有意义，git 步骤会直接报致命错误。",
+              by: "agent",
+              next: "换到仓库目录里再送审；如果这一轮本来就不属于任何仓库（纯调研 / 临时脚本），用 `set_gate_mode(\"explore\")` 或 `normal` 收尾。",
+            }),
+          }],
           details: { submitted: false },
           isError: true,
         };
@@ -8195,7 +8205,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       // it, and the two disagreed about what "unknown role" means).
       if (!Object.hasOwn(SUBMITTABLE_JUDGE_ROLES, role)) {
         return {
-          content: [{ type: "text", text: `review-gate: judge_submit rejected — unknown role "${role}".` }],
+          content: [{
+            type: "text",
+            text: buildRejection({
+              what: `judge_submit 被拒 —— 未知的 role "${role}"`,
+              why: `agent 能指定的 judge 角色只有 ${Object.keys(SUBMITTABLE_JUDGE_ROLES).join(" / ")} 这几个；` +
+                "`quality-auditor` 由门禁自己按轮次路由，不是你能点名的角色。",
+              by: "agent",
+              next: "把 role 换成上面列出的一个再调用一次。",
+            }),
+          }],
           details: { submitted: false },
           isError: true,
         };
@@ -8203,7 +8222,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       const task = String(params.task ?? "").trim();
       if (!task) {
         return {
-          content: [{ type: "text", text: "review-gate: judge_submit rejected — the task text is empty." }],
+          content: [{
+            type: "text",
+            text: buildRejection({
+              what: "judge_submit 被拒 —— task 是空的",
+              why: "task 就是这一轮的送审说明，是 reviewer 看到的全部改动上下文；没有它，审查只能靠猜。",
+              by: "agent",
+              next: "用一两句话说清这轮改了什么、为什么（改了哪些文件 / 哪个行为变了 / 为什么这么做），写进 task 再调用一次。",
+            }),
+          }],
           details: { submitted: false },
           isError: true,
         };
@@ -9944,24 +9971,27 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       if (problems.length > 0) {
         progress.fail(`${problems.length} 项未满足`);
+        const staleReady = problems.some((p) => p.includes("modified after the last READY"));
         return {
           content: [{
             type: "text",
-            text: "review-gate: declare_done REJECTED — gates unmet:\n" +
-              problems.map((p) => `  - ${p}`).join("\n") +
-              (orchestratorMode
+            text: buildRejection({
+              what: `declare_done 被拒 —— ${problems.length} 项门禁未满足`,
+              why: "下面是门禁**重新核对**出的未满足项（服务端复检，不看你的 summary）：\n" +
+                problems.map((p) => `  - ${p}`).join("\n"),
+              by: "agent",
+              next: (orchestratorMode
                 // R-30: an orchestrator has no review of its own to run, so
                 // pointing it at the loop would be pointing it at nothing.
                 // These are the SAME items block 5 of the `orchestrator_wait`
                 // receipt lists — one decision function, two surfaces.
-                ? "\n把上面这些做完再退出（这就是 `orchestrator_wait` 回执第 5 块「还差什么」，两处用的是同一个判据函数）。"
-                : "\nComplete the loop (fix → judge_submit({role:\"reviewer\"}) → READY) and try again.") +
-              (problems.some((p) => p.includes("modified after the last READY"))
-                ? "\nTip: any code OR doc edit after a READY review invalidates it — including handoff/design/" +
-                  "plan docs. Finish ALL edits (docs included) FIRST, then run the final review + precommit " +
-                  "as the last steps before declare_done, so the READY fingerprint still matches."
-                : ""),
-
+                ? "把上面这些做完再退出（这就是 `orchestrator_wait` 回执第 5 块「还差什么」，两处用的是同一个判据函数）。"
+                : "跑完审查循环再试：按 findings 修 → `judge_submit({role:\"reviewer\"})` → READY → 再调 `declare_done`。") +
+                (staleReady
+                  ? "\n注意：READY 之后的任何代码或文档编辑都会让它失效（handoff / 设计 / plan 文档也算）。" +
+                    "把所有编辑（含文档）全部做完，再把最后一轮 review + precommit 当作 declare_done 之前的最后两步。"
+                  : ""),
+            }),
           }],
           details: { accepted: false, problems },
           isError: true,

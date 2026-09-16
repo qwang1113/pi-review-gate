@@ -1,15 +1,18 @@
 /**
  * THE CHECKPOINT COMMIT MESSAGE — a pure function of the agent's round note.
  *
- * A checkpoint must be identifiable AS a checkpoint in the history (user
- * requirement), and the marker is the gate's to add. The marker used to be a
- * bare `checkpoint: ` PREFIX, which produced `checkpoint: fix(orch): x` — not
- * a legal Conventional Commit (two colons, and `checkpoint` is not a type).
- * The marker is now INJECTED INTO THE SCOPE instead, so a checkpoint reads as
- * an ordinary `type(checkpoint-<scope>): subject` and passes any conventional
- * tooling (user decision, 2026-08-31). Nothing matched the old prefix — the
- * baseline is computed from the checkpoint's sha, never its message text — so
- * the change is safe.
+ * THE MARKER IS GONE (user decision, 2026-09-16). A checkpoint used to be
+ * identifiable AS a checkpoint in the history: first by a bare `checkpoint: `
+ * prefix (which produced `checkpoint: fix(x): y` — not a legal Conventional
+ * Commit), then by injecting the marker into the SCOPE, so it read
+ * `fix(checkpoint-gate): x`. The user has now asked for the opposite: the
+ * history should read as ordinary work, so the same round lands as
+ * `fix(gate): x`. Nothing read the marker — the baseline is computed from the
+ * checkpoint's sha, never from its message text — so removing it changes no
+ * behaviour, only what a human sees in `git log`.
+ *
+ * WHAT SURVIVES IS THE ONE REAL JOB: the note must come out as a legal
+ * Conventional Commit, including when the agent did not write one.
  *
  * L5 IS THE CONSTRAINT, AND THIS FUNCTION MUST NOT BUILD A MESSAGE IT WOULD
  * REFUSE. The agent's round note is usually CHINESE (this project's output
@@ -23,44 +26,33 @@
 
 import { containsNonLatinLetter } from "./lang-detect.ts";
 
-/** A hyphen-delimited scope segment equal to `checkpoint`. */
-const CHECKPOINT_IN_SCOPE = /(^|-)checkpoint($|-)/i;
-
 /**
  * A Conventional Commits subject: `type(scope)!: description`. The scope and
  * the `!` are optional. Deliberately permissive on `type` (any word) — the
- * point is to place the checkpoint marker, not to validate the vocabulary.
+ * point is a legal shape, not a validated vocabulary.
  */
 const CONVENTIONAL = /^([A-Za-z][A-Za-z0-9]*)(\(([^)]*)\))?(!)?:\s+(.+)$/;
 
 /**
- * Put the `checkpoint` marker where a Conventional Commit keeps its scope.
+ * Make `subject` a legal Conventional Commit.
  *
- * Four cases, matching the user's table:
- *  - has a scope        → `type(checkpoint-<scope>)…: desc`
- *  - has no scope       → `type(checkpoint)…: desc`
- *  - not CC at all      → `chore(checkpoint): <subject>`
- *  - already marked     → idempotent (a scope that already carries the
- *                         `checkpoint` segment is returned unchanged)
+ * A subject that already is one comes back untouched — the agent's own
+ * `type(scope): description`, `!` included. Anything else is wrapped as
+ * `chore: <subject>`, which is the only legal shape left when the first token
+ * is not a type at all (the English fallback `record this round for review`
+ * is the common case).
  */
-export function injectCheckpointScope(subject: string): string {
+export function ensureConventionalSubject(subject: string): string {
   const trimmed = subject.trim();
-  const m = CONVENTIONAL.exec(trimmed);
-  if (!m) return `chore(checkpoint): ${trimmed}`;
-  const type = m[1]!;
-  const scope = m[3];
-  const bang = m[4] ?? "";
-  const desc = m[5]!;
-  if (scope !== undefined && CHECKPOINT_IN_SCOPE.test(scope)) return trimmed;
-  const newScope = scope && scope.length > 0 ? `checkpoint-${scope}` : "checkpoint";
-  return `${type}(${newScope})${bang}: ${desc}`;
+  return CONVENTIONAL.test(trimmed) ? trimmed : `chore: ${trimmed}`;
 }
 
 /**
  * Build the whole checkpoint commit message from the agent's raw round note.
  *
- * Pure: the same input always yields the same message, so the four scope
- * cases and the non-English fallback are unit-testable without a repository.
+ * Pure: the same input always yields the same message, so both the
+ * conventional-commit fallback and the non-English fallback are unit-testable
+ * without a repository.
  */
 export function buildCheckpointMessage(raw: string): string {
   const lines = raw.trim().split("\n");
@@ -69,6 +61,6 @@ export function buildCheckpointMessage(raw: string): string {
   const subject = usableSubject ? firstLine : "record this round for review";
   const rest = (usableSubject ? lines.slice(1).join("\n") : raw).trim();
   const body = containsNonLatinLetter(rest) ? "" : rest;
-  const marked = injectCheckpointScope(subject);
-  return body ? `${marked}\n\n${body}` : marked;
+  const legal = ensureConventionalSubject(subject);
+  return body ? `${legal}\n\n${body}` : legal;
 }

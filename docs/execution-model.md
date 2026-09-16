@@ -382,7 +382,7 @@ commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而
 
 - `run_precommit`（full lane，与链条并行启动）：FAIL 时本轮不产生可 ship 的 READY。
 - `review_checkpoint`：`git add -A && git commit`（英文 message 校验，
-  commit 标题由门禁打上 checkpoint 标记）→ 记录 commit sha。只绕过 READY，
+  提交信息是普通 Conventional Commit，不再带 checkpoint 标记）→ 记录 commit sha。只绕过 READY，
   不绕过 precommit；普通 `git commit` 在 READY 前仍被拦。2026-09-07 起
   直接落在**当前分支**（不再有工作分支）；在 main/master/dev/develop 上
   checkpoint 直接拒绝（2026-09-16 起不再弹确认框，与 ship 拒绝一致）。

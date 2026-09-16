@@ -1,10 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   buildAgentDirectives,
   buildWaitDiscipline,
-  MINIMALISM_REMINDER,
+  WRITE_TIME_REMINDERS,
+  ROUND_NOTE_HINT,
   GATE_ANOMALY_PROTOCOL,
   BATCH_READ_DISCIPLINE,
   REQUIREMENT_PROTOCOL,
@@ -107,22 +111,63 @@ test("EXPLORE_MODE_NOTE carries the delivery-escalation reminder", () => {
 });
 
 // ---------------------------------------------------------------------------
-// MINIMALISM REMINDER (2026-09-08). The write-time half of the doctrine: a
-// nudge, never a block. The rules live in docs/coding-standards.md §5 — this
-// block cites, never quotes (a second copy of the four checks here would
-// drift, and the copy map is the record of how often that has happened).
+// WRITE-TIME REMINDERS (2026-09-08 for the minimalism half, 2026-09-16 for the
+// group). The write-time half of the doctrine: a nudge, never a block. The
+// rules live in `docs/coding-standards.md` §5 and §6 — this block cites their
+// section numbers, never quotes them (a second copy here would drift, and the
+// copy map is the record of how often that has happened). Growing the reminder
+// from one line to a GROUP is the point of the 2026-09-16 change: safety,
+// module placement and nesting used to be caught only by a later review round.
 // ---------------------------------------------------------------------------
 
-test("the standing block carries the minimalism reminder (cite, never quote)", () => {
+test("the standing block carries the write-time reminders (cite, never quote)", () => {
   const text = buildAgentDirectives();
-  assert.ok(text.includes(MINIMALISM_REMINDER), "the reminder renders in the standing block");
-  assert.ok(MINIMALISM_REMINDER.includes("docs/coding-standards.md"), "it cites the standards file");
-  assert.ok(MINIMALISM_REMINDER.includes("§5"), "it cites the section, not the rules");
-  assert.match(MINIMALISM_REMINDER, /只提醒、不阻塞/, "write-time is advisory by contract");
-  assert.match(MINIMALISM_REMINDER, /送审说明/, "it tells the agent where a dependency justification goes");
+  assert.ok(text.includes(WRITE_TIME_REMINDERS), "the reminders render in the standing block");
+  assert.ok(WRITE_TIME_REMINDERS.includes("docs/coding-standards.md"), "they cite the standards file");
+  assert.ok(WRITE_TIME_REMINDERS.includes("§5"), "including the minimalism section");
+  assert.ok(WRITE_TIME_REMINDERS.includes("§6"), "…and the write-time section the standards added for this");
+  assert.match(WRITE_TIME_REMINDERS, /只提醒、不阻塞/, "write-time is advisory by contract");
+  assert.match(WRITE_TIME_REMINDERS, /送审说明/, "it tells the agent where a dependency justification goes");
+  // ≥3 reminders, each one a citation: a section number plus ONE action. A
+  // reminder group that names sections but no action is a table of contents.
+  const lines = WRITE_TIME_REMINDERS.split("\n").filter((l) => l.startsWith("- "));
+  assert.ok(lines.length >= 3, `a GROUP of reminders, not one line (found ${lines.length})`);
+  for (const line of lines) assert.match(line, /§\d/, `every reminder cites a section: ${line}`);
+  assert.match(WRITE_TIME_REMINDERS, /安全/, "the safety clause the review round used to be the only line of defence for");
+  assert.match(WRITE_TIME_REMINDERS, /落点/, "module placement is a WRITE-time decision, so it is asked here");
   for (const rule of ["YAGNI", "复用优先", "能删就删", "新依赖须论证"]) {
-    assert.ok(!MINIMALISM_REMINDER.includes(rule), `the four checks must not be quoted here (found: ${rule})`);
+    assert.ok(!WRITE_TIME_REMINDERS.includes(rule), `the four checks must not be quoted here (found: ${rule})`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The round-note hint (2026-09-16, user decision). ONE constant, because the
+// agent meets the same ask in two places (the tool's parameter description and
+// the standing block's decision table) — two hand-written asks drift, and the
+// one that drifts is the one an agent reads.
+// ---------------------------------------------------------------------------
+
+test("the round-note hint reaches both surfaces from ONE constant", () => {
+  const text = buildAgentDirectives();
+  assert.ok(text.includes(ROUND_NOTE_HINT), "the decision table carries it");
+  assert.match(ROUND_NOTE_HINT, /这轮改了什么、为什么/, "it says WHAT to write");
+  assert.match(ROUND_NOTE_HINT, /reviewer/, "…and who reads it");
+  // The table ROW must carry it (a constant rendered nowhere is not a hint),
+  // and the row must still be the judge_submit row.
+  const row = text.split("\n").find((l) => l.startsWith("| 提交本轮改动送审 |"));
+  assert.ok(row, "the judge_submit row is still there");
+  assert.ok(row!.includes(ROUND_NOTE_HINT), "the row renders the hint, not a summary of it");
+  // …and the OTHER surface: the tool's own `task` parameter description, which
+  // is where an agent looks when composing the field. It must IMPORT the
+  // constant rather than restate the ask (a second hand-written ask is the
+  // copy that drifts).
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const extension = readFileSync(join(root, "extensions", "review-gate.ts"), "utf8");
+  assert.match(extension, /import \{[^}]*ROUND_NOTE_HINT[^}]*\} from "\.\.\/lib\/agent-directives\.ts"/,
+    "the extension imports the one constant");
+  const taskParam = extension.slice(extension.indexOf('task: Type.String({'));
+  assert.ok(taskParam.slice(0, 600).includes("ROUND_NOTE_HINT"),
+    "judge_submit's task description renders it");
 });
 
 test("the standing block carries the two-layer gate-anomaly protocol (2026-09-08)", () => {

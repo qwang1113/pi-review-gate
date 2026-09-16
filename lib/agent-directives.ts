@@ -64,6 +64,43 @@ export const ORCHESTRATOR_WAIT_DISCIPLINE = buildWaitDiscipline("orchestrator_wa
 
 
 /**
+ * WRITE-TIME REMINDERS — the standing block's half of "standards first"
+ * (2026-09-16, user decision).
+ *
+ * WHAT REPLACED WHAT. There used to be ONE reminder here, about minimalism,
+ * and it was the only rule an agent saw before writing. The standards it cited
+ * (§5) now have siblings — safety, module placement, comments and nesting —
+ * and every one of them caught at review time costs a full round. So they are
+ * cited HERE, before the first edit, instead of only by the code-quality
+ * judge afterwards.
+ *
+ * CITE, NEVER QUOTE. Each line names its section of `docs/coding-standards.md`
+ * and one ACTION; the clause text stays in the document (the copy map in
+ * docs/module-map.md §7 records how often a second copy has drifted). The
+ * block is a NUDGE, never a block — write-time is advisory by contract, and
+ * `test/agent-directives.test.ts` pins both halves of that sentence.
+ */
+export const WRITE_TIME_REMINDERS =
+  "写作前提醒（只提醒、不阻塞；条文见 `docs/coding-standards.md`）：\n" +
+  "- §5 最小化：动手前先想复用（仓库已有 / 标准库 / 平台原生 / 已装依赖），能删先删再写，" +
+  "新增依赖必须在送审说明里论证为什么现有手段做不到。\n" +
+  "- §6 安全：外部输入进命令 / 路径 / SQL 之前先转义或走白名单；敏感信息不落盘、不进日志；" +
+  "破坏性操作（删除 / 覆盖 / force push / reset --hard）要显式确认。\n" +
+  "- §6 落点与规模：新增职责先问它落在哪个模块，别往已经很大的文件里加。\n" +
+  "- §6 注释与嵌套：注释写「为什么」不写「是什么」；嵌套超过 3 层用卫语句消掉。";
+
+/**
+ * The round-note hint — what to put in `judge_submit`'s `task`, in both
+ * places the agent can meet it (the tool's parameter description and the
+ * standing block's decision table). ONE constant, so the two cannot drift
+ * into two different asks: the reviewer's whole context for the round is the
+ * text the agent writes here, and an empty or vague note is what turns a
+ * review into a guess.
+ */
+export const ROUND_NOTE_HINT =
+  "写清这轮改了什么、为什么 —— 这段说明就是 reviewer 看到的全部改动上下文。";
+
+/**
  * Situation → tool. Deliberately short: an agent scanning this mid-task must
  * find its row in one pass.
  */
@@ -72,7 +109,8 @@ export const TOOL_DECISION_TABLE =
   "| 你现在要做的事 | 调这个 |\n" +
   "| --- | --- |\n" +
   "| 问用户、等用户拍板 | `ask_user({questions})` — 它会问并暂停循环；别把问题写进回复就结束 |\n" +
-  "| 提交本轮改动送审 | `judge_submit({role:\"reviewer\", task})` — 门禁自己跑 precommit→checkpoint→送审 |\n" +
+  "| 提交本轮改动送审 | `judge_submit({role:\"reviewer\", task})` — 门禁自己跑 precommit→checkpoint→送审；" +
+  ROUND_NOTE_HINT + " |\n" +
   "| 把需求反述给用户确认（谈 goal 之前的必经一步） | `propose_restatement({restatement, station})` — 没有它，propose_loop_goal 直接被拒且不弹框 |\n" +
   "| 提交 goal 草稿 | `propose_loop_goal({goal})` — 门禁自己跑 goal 审计，过了才弹用户批准框 |\n" +
   "| 自己决定不了的设计取舍 | `judge_submit({role:\"adviser\", task})` |\n" +
@@ -83,18 +121,6 @@ export const TOOL_DECISION_TABLE =
   "| 任务做完了 | `declare_done({summary})` — 门禁复检后收尾，工作留在当前分支 |\n" +
   "| 要改敏感文件 / 缩小审查范围 | `request_sensitive_edit` / `request_scope_limit` |";
 
-
-/**
- * MINIMALISM REMINDER — the write-time half of the doctrine (2026-09-08, user
- * decision): a nudge, never a block. The rules live in
- * `docs/coding-standards.md` §5 (their only substantive copy — this block
- * cites, never quotes). Rendered into the standing block by
- * buildAgentDirectives, so every turn carries it exactly once.
- */
-export const MINIMALISM_REMINDER =
-  "最小化提醒（只提醒、不阻塞，规则见 `docs/coding-standards.md` §5）：" +
-  "动手前先想复用（仓库已有 / 标准库 / 平台原生 / 已装依赖），能删先删再写，" +
-  "新增依赖必须在送审说明里论证为什么现有手段做不到。";
 
 /**
  * The check that stops the "ask in prose, end the turn, get woken up" cycle.
@@ -211,7 +237,7 @@ export const EXPLORE_MODE_NOTE =
 
 /** The whole standing block, in the order an agent reads it. */
 export function buildAgentDirectives(mode?: "loop" | "explore"): string {
-  return (`${TOOL_DECISION_TABLE}\n\n${MINIMALISM_REMINDER}\n\n${REQUIREMENT_PROTOCOL}\n\n${BATCH_READ_DISCIPLINE}\n\n${END_OF_TURN_CHECK}` +
+  return (`${TOOL_DECISION_TABLE}\n\n${WRITE_TIME_REMINDERS}\n\n${REQUIREMENT_PROTOCOL}\n\n${BATCH_READ_DISCIPLINE}\n\n${END_OF_TURN_CHECK}` +
     `\n\n${GATE_ANOMALY_PROTOCOL}` +
     (mode === "explore" ? `\n\n${EXPLORE_MODE_NOTE}` : ""));
 }

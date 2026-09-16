@@ -74,7 +74,7 @@ reviewer over the WHOLE change:
 
 - **Review → ONE call**: `judge_submit({role:"reviewer", task:<what you
   changed this round>})`. The gate runs the whole chain itself — full
-  precommit, the checkpoint commit (it stamps the checkpoint marker), the
+  precommit, the checkpoint commit, the
   `baseline..HEAD` computation, the dispatch — and any step that fails sends
   the round back with the reason instead of leaving it half-submitted. The
   full precommit is the exception, because it is started to run BESIDE the

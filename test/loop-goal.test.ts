@@ -20,7 +20,7 @@ import {
   isLoopGoalConfirmed,
   readLoopGoal,
   loopGoalEditGate,
-  LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
+  loopGoalUnconfirmedEditBlock,
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
   goalPrereviewPassed,
   buildGoalPrereviewRefusal,
@@ -269,7 +269,7 @@ test("the Step-0 recipe teaches the RESTATEMENT FIRST — a session following it
   assert.match(LOOP_GOAL_MISSING_DIRECTIVE, /precommit/, "…and the station it also settles");
   // Both BLOCK texts are read at the same moment by an agent that skipped the
   // step, so they carry the same order.
-  for (const block of [LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK]) {
+  for (const block of [loopGoalUnconfirmedEditBlock(), LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK]) {
     assert.match(block, /propose_restatement/);
     assert.ok(block.indexOf("propose_restatement") < block.indexOf("propose_loop_goal"),
       "the block text must name the earlier step first");
@@ -376,23 +376,39 @@ test("loopGoalEditGate: loop/undecided require a confirmed goal; explore/normal 
   assert.equal(loopGoalEditGate({ taskMode: "normal", goalConfirmed: false }), true);
 });
 
-test("LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK names the path forward (negotiate → goal-auditor → dialog)", () => {
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /loop goal/);
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /propose_loop_goal/);
+test("the L8 edit block names the path forward (negotiate → goal-auditor → dialog)", () => {
+  const block = loopGoalUnconfirmedEditBlock();
+  assert.match(block, /loop goal/);
+  assert.match(block, /propose_loop_goal/);
   // The pre-review is MECHANICAL now, and the gate RUNS it: the copy must name
   // the one call that satisfies the gate, not the old three-step recipe.
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /goal-auditor/);
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /That ONE call runs the/,
+  assert.match(block, /goal-auditor/);
+  assert.match(block, /That ONE call runs the/,
     "the audit is INSIDE propose_loop_goal — there is no second call to make");
-  assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /prepare_goal_audit|record_goal_prereview/,
+  assert.doesNotMatch(block, /prepare_goal_audit|record_goal_prereview/,
     "the agent no longer drives the audit by hand");
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /Simplified Chinese/);
+  assert.match(block, /Simplified Chinese/);
   // The ONE asking tool must be named: an agent told to "negotiate" without it
   // writes the question into its reply and ends the turn (the exact iteration
   // this replaced).
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /ask_user/, "the negotiation names the asking tool");
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\.pi\/loop-goal\.md/); // names the real path
-  assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\bblock(er|ed|ing|s)?\b/i, "the reason must not call itself a block");
+  assert.match(block, /ask_user/, "the negotiation names the asking tool");
+  assert.match(block, /\.pi\/loop-goal\.md/); // names the real path
+  assert.doesNotMatch(block, /\bblock(er|ed|ing|s)?\b/i, "the reason must not call itself a block");
+});
+
+// The refusal renderer's shape (user decision, 2026-09-16): 现象 / 原因 / 下一步,
+// with the actor named. The REPO hint has to land on the 现象 line — a
+// multi-repo session that cannot tell WHICH repo is missing its goal
+// re-approves the primary one and stays stuck forever (round P2).
+test("the L8 edit block renders the three-part refusal, repo hint included", () => {
+  const block = loopGoalUnconfirmedEditBlock();
+  const lines = block.split("\n");
+  assert.match(lines[0]!, /^review-gate: edit\/write 被拦/);
+  assert.match(lines[1]!, /^原因：/);
+  assert.match(lines[2]!, /^下一步：你 —— /);
+  assert.doesNotMatch(block, / \(repo:/, "no repo hint when the write lands in the primary repo");
+  const multi = loopGoalUnconfirmedEditBlock("/repos/beta");
+  assert.match(multi.split("\n")[0]!, /\(repo: \/repos\/beta\)$/, "the hint sits on the 现象 line");
 });
 
 test("goalPrereviewPassed: only a PASS bound to THIS exact text opens the dialog", () => {
@@ -415,7 +431,8 @@ test("buildGoalPrereviewRefusal: says WHY, HOW to recover, and echoes the eviden
   const text = "# 目标\n\n一行意图。\n";
   const missing = buildGoalPrereviewRefusal({ goalText: text, auditorInstalled: true, packageAgentsDir: "/pkg/agents" });
   assert.match(missing, /no goal-auditor pre-review has been recorded/);
-  assert.match(missing, /it runs the audit ITSELF/, "must name the call that satisfies the gate");
+  assert.match(missing, /审计是它自己跑的/,
+    "must name the call that satisfies the gate (the audit runs INSIDE propose_loop_goal)");
   assert.doesNotMatch(missing, /tmux|review_spawn/, "the retired dispatch path must not come back");
   assert.match(missing, /Simplified Chinese/, "must state the language rule before another round is burned");
 

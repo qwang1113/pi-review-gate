@@ -63,7 +63,7 @@ export const WORKFLOW_COMMANDS = {
       "AUTONOMOUS PROTOCOL: you run this loop on your own whenever code/doc edits are complete and need the gate — this command is only an explicit trigger; " +
       "do not wait for the user to call it before reviewing your own finished work. " +
       "IT IS ONE CALL: `judge_submit({role:\"reviewer\", task:<what you changed this round>})`. The gate runs the whole chain itself — the FULL " +
-      "precommit lane, the checkpoint commit (it stamps the marker and records the sha), the immutable baseline..HEAD range, the findings-stream " +
+      "precommit lane, the checkpoint commit (it records the sha), the immutable baseline..HEAD range, the findings-stream " +
       "file, and the dispatch — and any step that fails sends the round back with the reason instead of leaving it half-submitted. There is no " +
       "sequence to remember and no separate precommit / checkpoint / prepare / record tool to call: those names are not registered. " +
       "The gate BLOCKS judge roles dispatched through subagent/workflowScript/workflowScriptPath entirely (that sandbox has no per-child isolation, " +

@@ -2102,11 +2102,13 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
 });
 
 test("the checkpoint message is delegated to the pure, unit-tested lib module", () => {
-  // Round-2 P2 (the impossible default) and the 2026-08-31 scope-injection fix
-  // both live in lib/checkpoint-message.ts now, exercised by
-  // test/checkpoint-message.test.ts (four scope cases + the L5 fallback). The
-  // extension only names the call site — pin the delegation so the logic cannot
-  // silently move back inline.
+  // Round-2 P2 (the impossible default) and the L5 non-English fallback both
+  // live in lib/checkpoint-message.ts now, exercised by
+  // test/checkpoint-message.test.ts (the conventional-commit fallback, the
+  // body rules and the L5 fallback). The marker that used to be injected into
+  // the scope is GONE (user decision, 2026-09-16). The extension only names
+  // the call site — pin the delegation so the logic cannot silently move back
+  // inline.
   assert.match(SRC, /import \{ buildCheckpointMessage \} from "\.\.\/lib\/checkpoint-message\.ts"/,
     "the extension imports the pure builder");
   const at = SRC.indexOf("function checkpointMessage(raw: string): string");

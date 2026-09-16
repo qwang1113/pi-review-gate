@@ -55,6 +55,7 @@ import {
 } from "./delivery-station.ts";
 
 import { LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK } from "./loop-goal.ts";
+import { buildRejection } from "./rejection-copy.ts";
 import {
   parseArbitrableAction,
   tokenAuthorizes,
@@ -311,9 +312,23 @@ export function buildShipBlockReason(input: {
         ? "\n上面那些质量门禁项则照常用审查循环清掉（judge_submit → declare_done）。"
         : "")
     : (input.ships.length === 1 && input.ships[0].kind === "pr-edit"
-      ? "跑完审查循环清掉门禁；若这条拦截确实是循环死结（唯一的修法就是这条 gh pr edit），可 request_arbitration。"
+      ? "跑完审查循环清掉门禁（judge_submit → declare_done）；若这条拦截确实是循环死结（唯一的修法就是这条 gh pr edit），可 request_arbitration。"
       : "跑完审查循环清掉门禁（judge_submit → declare_done）。");
-  return { recorded, shown: recorded + "\n" + nextStep };
+  // The agent-facing message is the three-part shape; `recorded` stays the
+  // flat text the arbiter and the sidecar read (its exact bytes are pinned).
+  const shown = buildRejection({
+    what: `${describeShips(input.command, input.ships)} 被拦 —— ` +
+      (stationOnly ? "超出本轮的交付站点" : "质量门禁未满足"),
+    why: "\n" + allProblems.map((p) => `  - ${p}`).join("\n") +
+      (input.ships.length > 1
+        ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them."
+        : "") +
+      input.crossRepoHint,
+    // A station is the user's to move; unmet quality is the agent's to clear.
+    by: stationProblems.length > 0 ? "user" : "agent",
+    next: nextStep,
+  });
+  return { recorded, shown };
 }
 
 
