@@ -110,13 +110,13 @@ export function sensitiveEditBlock(input: {
     block: true,
     reason: buildRejection({
       what: `edit/write 被拦 —— "${input.rawPath}"`,
-      why: `"${input.rawPath}" matches a sensitive-file pattern (.env / 密钥 / credentials)。` +
+      why: `"${input.rawPath}" 命中敏感文件模式（.env / 密钥 / credentials）。` +
         "这是安全底线，不是流程约束 —— 每个模式（含 normal）都拦。",
       by: "user",
       next: input.askable
         ? "两条路，都离不开用户：① 请他改这个文件；② 调 `request_sensitive_edit({path, reason})` " +
           "请他一次性授权这个确切路径（只覆盖这一个路径、只生效一次、10 分钟过期）。"
-        : "请他改这个文件 —— 这个路径 cannot be authorized from here（`.git/` 内部、" +
+        : "请他改这个文件 —— 这个路径不能从这里授权（`.git/` 内部、" +
           "门禁自己的裁决文件，以及用户已经拒绝过授权的路径，一概不从 agent 这边授权）。",
     }),
   };

@@ -107,7 +107,7 @@ const bashCall = (command: string) => ({ toolName: "bash", input: { command } })
 test("sensitiveEditBlock names the path the agent typed, and offers the dialog when the path is askable", () => {
   const block = sensitiveEditBlock({ rawPath: "app/.env", askable: true });
   assert.equal(block.block, true);
-  assert.match(block.reason, /"app\/\.env" matches a sensitive-file pattern/);
+  assert.match(block.reason, /"app\/\.env" 命中敏感文件模式/);
   assert.match(block.reason, /request_sensitive_edit/,
     "an askable path must point at the one-time authorization dialog");
 });
@@ -116,14 +116,14 @@ test("sensitiveEditBlock withholds the dialog route for a path that cannot be au
   const block = sensitiveEditBlock({ rawPath: ".git/hooks/pre-commit", askable: false });
   assert.doesNotMatch(block.reason, /request_sensitive_edit/,
     "a .git internal (or a declined path) must never be presented as authorizable");
-  assert.match(block.reason, /cannot be authorized from here/);
+  assert.match(block.reason, /不能从这里授权/);
 });
 
 test("the edit arm refuses a sensitive path and never reaches the L6 label check", async () => {
   const r = makeDeps();
   const out = await evaluateToolCall(r.deps, editCall(".env"), {});
   assert.equal(out?.block, true);
-  assert.match(out!.reason, /matches a sensitive-file pattern/);
+  assert.match(out!.reason, /命中敏感文件模式/);
   assert.ok(!r.calls.includes("checkTestLabels"), "a refused edit pays no LLM call");
   assert.ok(!r.calls.includes("markSessionEdited"), "a refused edit is not this session's work");
 });

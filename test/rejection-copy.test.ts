@@ -17,7 +17,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -124,4 +124,28 @@ test("the shape is written in exactly ONE file", () => {
   const renderer = readFileSync(join(ROOT, "lib", "rejection-copy.ts"), "utf8");
   assert.match(renderer, /原因：\$\{parts\.why\}/);
   assert.match(renderer, /下一步：\$\{ACTOR_LABEL\[parts\.by\]\} —— \$\{parts\.next\}/);
+  // The NAME promises exclusivity, so the two assertions above are only half of
+  // it: they prove the renderer writes the shape correctly and say nothing
+  // about a second, hand-rolled copy at a call site (quality round P2,
+  // 2026-09-17 — the name was promising a scan that never happened).
+  //
+  // The pattern is anchored at the START of a line and lets only a quote char
+  // precede the label, because legitimate prose CONTAINS these words: a report
+  // line `- 下一步：${handOffNote}`, an answer's `（原因：${reason}）`, the
+  // recorder's `不选，原因：${reason}`. Banned is a line that BUILDS the shape.
+  const SHAPE = /^\s*[`"']?(原因|下一步)：\$\{/m;
+  assert.match(renderer, SHAPE, "self-proof: the scan's pattern matches the renderer it exempts");
+  const offenders: string[] = [];
+  let scanned = 0;
+  for (const dir of ["lib", "extensions"]) {
+    for (const name of readdirSync(join(ROOT, dir))) {
+      if (!name.endsWith(".ts")) continue;
+      const rel = `${dir}/${name}`;
+      if (rel === "lib/rejection-copy.ts") continue;
+      scanned += 1;
+      if (SHAPE.test(readFileSync(join(ROOT, dir, name), "utf8"))) offenders.push(rel);
+    }
+  }
+  assert.ok(scanned > 30, `the scan must see the source tree, not an empty listing (saw ${scanned})`);
+  assert.deepEqual(offenders, [], "no second file may hand-roll the labelled shape");
 });

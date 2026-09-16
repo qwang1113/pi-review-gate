@@ -195,7 +195,7 @@ test("the station block answers 'I think the GATE is wrong', not only 'how do I 
   // A station really can be misread: the record may hold an older station than
   // the one the user agreed to, and a multi-repo command is judged by the
   // STRICTEST station among the repos it touches.
-  assert.match(STATION_SHIP_NEXT_STEPS, /若你认为门禁把站点读错了/,
+  assert.match(STATION_SHIP_NEXT_STEPS, /若这条拦截把站点读错了/,
     "the misjudgement case must be named, not left for the reader to infer");
   assert.match(STATION_SHIP_NEXT_STEPS, /ask_user/,
     "…and answered with a route that exists: the station is the USER's to set");

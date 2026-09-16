@@ -139,10 +139,13 @@ export function formatPlanAuditCarryover(prev: PlanAuditRecord): string {
 /**
  * The auditor's task text.
  *
- * The six checks are the user's own list (task book §7) and they are stated as
- * QUESTIONS ABOUT THE REPOSITORY rather than about the prose: the auditor has
- * read-only tools and its whole value is that it can go and look at whether
- * `lib/` really is where that task will land.
+ * The checks are the user's own list (task book §7) — the array below IS the
+ * list, so no count is repeated here (it said "six" while the array rendered
+ * eight, reviewer Nit 2026-09-17; a count in prose is a second copy of the
+ * list, and it drifts silently) — and they are stated as QUESTIONS ABOUT THE
+ * REPOSITORY rather than about the prose: the auditor has read-only tools and
+ * its whole value is that it can go and look at whether `lib/` really is where
+ * that task will land.
  */
 export function buildPlanAuditTask(
   plan: OrchestratorPlan,

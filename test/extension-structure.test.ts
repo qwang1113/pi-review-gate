@@ -2092,7 +2092,7 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
   // appeal instead.
   for (const [factBlock, src] of [
     ["在受保护分支上", SRC],
-    ["matches a sensitive-file pattern", SHIP_EDIT_SRC],
+    ["命中敏感文件模式", SHIP_EDIT_SRC],
   ] as const) {
     const at = src.indexOf(factBlock);
     assert.ok(at > 0, `the B-class block must exist: ${factBlock}`);
