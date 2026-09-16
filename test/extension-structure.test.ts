@@ -6306,9 +6306,12 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
     "the round records WHICH quality judge it dispatched — the fact the hold reads");
   // …AND IN EITHER DIRECTION (functional round P2, 2026-09-16): a round whose
   // SECOND judge cannot start must not leave the first one judging a head the
-  // agent was told had failed.
-  assert.match(judges, /for \(const already of accepted\) \{\s*cancelJudgeRound\(root, already\.role,/,
-    "a half-started round is abandoned, not left running");
+  // agent was told had failed. But a failure that KEPT ITS PANE is a dispatched
+  // round (round P1, same day): cancelling the rest there would kill a healthy
+  // quality round and make this one's READY unrecordable while the receipt
+  // points the agent at the pane it just told it to wait on.
+  assert.match(judges, /if \(!d\.paneId\) \{\s*for \(const already of accepted\) \{\s*cancelJudgeRound\(root, already\.role,/,
+    "only a failure that kept NO pane abandons the round");
 
   // ── 3. THE PRECONDITION: dispatch keeps it, RECORDING enforces it ───────
   const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");

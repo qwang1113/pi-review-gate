@@ -8473,9 +8473,20 @@ export default function reviewGate(pi: ExtensionAPI) {
           // registered, and the reply said the submission FAILED — so the agent
           // re-submitted, started a second quality round beside a head nobody
           // was waiting on any more, and the first one's verdict was orphaned.
-          // The round is abandoned explicitly instead.
-          for (const already of accepted) {
-            cancelJudgeRound(root, already.role, "本轮另一个 judge 没能派出 —— 这一轮整体作废");
+          //
+          // …EXCEPT WHEN THE PANE WAS KEPT (functional round P1, 2026-09-16).
+          // The boot-check timeout deliberately keeps the pane AND its
+          // registration — the task rode in on the argv and the round may still
+          // complete — so cancelling the judges already accepted would kill a
+          // healthy quality round, leave this very pane running, and make the
+          // round's READY unrecordable (`decideQualityHold` refuses when nobody
+          // can still deliver the quality verdict) while the receipt points the
+          // agent at the pane it was told to wait on. A kept pane means the
+          // round is DISPATCHED: only a failure that kept nothing abandons it.
+          if (!d.paneId) {
+            for (const already of accepted) {
+              cancelJudgeRound(root, already.role, "本轮另一个 judge 没能派出 —— 这一轮整体作废");
+            }
           }
           const lead = "review-gate: judge_submit 失败 — ";
           return {

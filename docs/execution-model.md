@@ -430,6 +430,10 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
 | reviewer 非 READY | 质量轮的 pane（真杀进程）+ precommit lane（abort） | —— |
 | precommit 落 FAIL | reviewer 的 pane（真杀进程） | 质量轮（它只静态读代码，不看测试结果） |
 
+表中第二行的「非 READY」**不包含「扣下」**：一份被 park 的 READY 在 sidecar 里正是
+`PENDING`，而它不是裁决 —— 取消矩阵收到 `held` 这个事实时什么也不做，否则会杀掉这份
+结论正在等的那一轮（判定在 `roundCancelPlan` 的 `held` 分支，不得写成旁路的 `if`）。
+
 - **取消是真的终止，不是「忽略结果」**：杀的是那个 pane 的进程（复用既有的
   `closeJudgePaneOf` + 注册表撒行路径）。被取消的 judge 不再出现在注册表里，所以
   既不会被 `judge_wait` 等到，也不会被子进程看门狗当成「死掉的 judge」再报一次给
