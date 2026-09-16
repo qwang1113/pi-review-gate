@@ -281,7 +281,15 @@ async function doPrepareReview(
   // squash commit plus every checkpoint after it). No matching tree
   // (a content-changing rebase) falls back to the branch base so the
   // review covers everything.
-  const lastConcluded = st.review.verdict === "PENDING" ? undefined : st.review.commitSha;
+  // THE COMMIT SURVIVES AN INVALIDATION (round-1 review P2, 2026-09-16):
+  // `invalidateBindings` flips the VERDICT back to PENDING on the next edit
+  // and deliberately leaves `commitSha` in place — the commit a round
+  // concluded about does not stop existing when the worktree moves on. Reading
+  // the verdict here threw that away and re-based the range on the BRANCH
+  // BASE, i.e. re-reviewing the WHOLE branch after every post-READY edit — the
+  // loop's most expensive step, on the branch that just passed. A missing
+  // `commitSha` is the only thing that means "nothing was ever concluded here".
+  const lastConcluded = st.review.commitSha;
   let baseline: string | undefined;
   if (lastConcluded) {
     // The ancestor test used to be a bare try/catch around `git merge-base

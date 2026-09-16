@@ -429,7 +429,12 @@ test("the baseline is the last CONCLUDED round — and the branch base when ther
   // day: a whole round's changes (d28714e..a70f2a1) dropped out of every later
   // range while the gate went on believing the chain was reviewed.
   const f = fake();
-  assert.equal((await call(f)).details?.baseline, "pppppppppppp",
+  // The fixture's DEFAULT gives `branchBase` and the checkpoint's `prevSha` the
+  // same value, so older expectations keep holding — which would also make THIS
+  // case pass with the old fallback restored (round-1 review P2, 2026-09-16).
+  // They are pulled apart here so the assertion can actually fail.
+  f.branchBase = "bbbbbbbbbbbb";
+  assert.equal((await call(f)).details?.baseline, "bbbbbbbbbbbb",
     "no verdict at all ⇒ the branch base, never the checkpoint's parent");
   cleanup(f);
 

@@ -80,7 +80,7 @@
   进程，pane 留给下一轮复用）；交卷把结构化结论写进 channel report，门禁在每次
   settle 时看到新 report 即记录 verdict，再用标准报告唤醒主会话。父会话不手写轮询、
   不直读 transcript——确实没活可做时调 `judge_wait`（消息驱动：新 finding / judge 提问 /
-  本轮结论 / pane 消失任一到达即返回，返回的是同一份标准报告）。
+  本轮结论 / pane 消失 / **已交卷且无新消息的 `settled`** 任一到达即返回，返回的是同一份标准报告）。
   pane 消失但 verdict 未落盘时本轮不算结束，opener 以同一 session id
 
   重开 pane 续接（`judge_recover`）。judge 有疑问时调 `ask_user`（人与 opener 经通道

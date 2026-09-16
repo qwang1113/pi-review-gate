@@ -151,7 +151,9 @@ opener 凭它记录结论；
   `buildWaitDiscipline`）：①有确定性工作先做掉（提示、不强求：送完 reviewer 往往
   没事可做，可以看看下一轮要什么或先备收尾报告）；②确实没活了才调
   `judge_wait`——不是手写 sleep 轮询，也不是结束 turn（存活不变量仍然成立）；
-  ③`judge_wait` 消息驱动：新 finding / judge 提问 / 本轮结论 / pane 消失任一到达即返回。
+  ③`judge_wait` 消息驱动：新 finding / judge 提问 / 本轮结论 / pane 消失，以及
+  **`settled`**（本轮已交卷、已记录且已消费，而 pane 空闲 —— 立即回一个「没有可等的
+  了」而不是阻塞到超时）任一到达即返回。
 
   仅三类情形允许停止：用户显式中止（ESC）、`ask_user` 等待用户回答、
   所有门禁与 goal 均完成。

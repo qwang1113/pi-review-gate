@@ -16,6 +16,7 @@ function isScratchPath(p: string): boolean {
 }
 import { fileURLToPath } from "node:url";
 import { goalTextHash, goalReminderDue } from "../lib/loop-goal.ts";
+import { DIALOG_ASSUMED_COLUMNS } from "../lib/dialog-budget.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
@@ -24,6 +25,23 @@ import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 // the gate's state from the fixture alone, so the variables the surrounding
 // gate session sets (RG_STATE_VARIANT & co.) are cleared before any spawn.
 neutraliseGateEnv();
+
+// PIN THE TERMINAL WIDTH. The gate budgets a dialog's rendered rows against the
+// REAL terminal width (`process.stdout.columns`, else `COLUMNS`, else 80) so a
+// long goal can never push the consent-critical lines off the screen — correct
+// behaviour, and environment-dependent for anyone RUNNING the tests: a runner
+// inherits whatever pane it was started in. Measured 2026-09-16: at COLUMNS=40
+// two assertions in this file failed (the goal dialog truncates before the
+// pre-review line), while 60 and 200 passed — on this branch AND on
+// origin/main, so it is a latent flake rather than a regression. Pinning the
+// width is what makes the suite answer the same way in every pane; the
+// implementation keeps reading the real thing.
+process.env.COLUMNS = String(DIALOG_ASSUMED_COLUMNS);
+Object.defineProperty(process.stdout, "columns", {
+  value: DIALOG_ASSUMED_COLUMNS,
+  configurable: true,
+  writable: true,
+});
 
 // ---------------------------------------------------------------------------
 // Behavioral regression for the loop goal's core promise: writing
