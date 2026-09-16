@@ -822,13 +822,11 @@ export const COPILOT_THREADS_QUERY = `query($owner:String!,$name:String!,$number
  * How much of a comment is carried at all — a payload bound, not a dialog
  * bound. The dialog shows the body whole (the row budget that used to cut it
  * is gone, 2026-09-16); the full text the user reads is the transcript copy
- * `askFindings` writes before the box opens, because the point of the
- * transcript copy was never the cut — it is that the user must be able to read
- * what they are approving.
- * Bigger than the dialog on
- * purpose: a cap smaller than the transcript copy would throw away the text the
- * user needs to read — and the transcript copy is where they read it, because a
- * box that scrolls is a worse place to read a long comment than the transcript.
+ * `askFindings` writes before the box opens, because the point of that copy
+ * was never the cut — it is that the user must be able to read what they are
+ * approving. The cap exists for the TRANSCRIPT side: it bounds how much of one
+ * comment is carried into the gate at all, and it is generous on purpose — a
+ * cap smaller than what the user has to read would throw the text away.
  */
 export const COPILOT_THREAD_BODY_CHARS = 1200;
 

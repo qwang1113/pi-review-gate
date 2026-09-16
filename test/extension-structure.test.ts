@@ -917,9 +917,9 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   // WHY THE NOTICE IS NOT IN THE BODY (reviewer P1, 2026-09-14): appending ⚠️
   // after a long question let the question push the authorization notice out of
   // sight — while picking the recommended row still minted the proxy grant. The
-  // title is read first; (until 2026-09-16 it was also the only part a cut
-  // could not reach, so the placement was belt and braces. The budget is gone;
-  // the placement remains, because reading order is what makes it work.)
+  // title is read first. (Until 2026-09-16 it was ALSO the only part a cut could
+  // not reach, so the placement was belt and braces; the budget is gone and the
+  // placement remains, because reading order is what makes it work.)
   assert.doesNotMatch(ASK_USER_SRC, /body: `\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
     "the grant notice must never sit in the body, after the question");
   assert.match(ASK_USER_SRC, /extraRows: \[SKIP_REST_CHOICE\]/,
