@@ -965,8 +965,6 @@ test("L8: propose_loop_goal refuses a NON-repo repo param and shows the binding 
   const shownRepo = capUntrustedLine(repoB);
   assert.ok(dialogText.includes(shownRepo),
     `the consent dialog must carry this repo, capped as shown: ${shownRepo}`);
-  assert.equal(capUntrustedLine("/a/very/long".padEnd(200, "x") + "/repo").endsWith("/repo"), true,
-    "…and the cap keeps the identifying END of a path, which is what a prefix cut destroys");
 });
 
 // ---------------------------------------------------------------------------

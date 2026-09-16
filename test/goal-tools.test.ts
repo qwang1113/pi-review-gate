@@ -5,6 +5,7 @@ import {
   registerGoalTools,
   doProposeLoopGoal,
   capUntrustedLine,
+  UNTRUSTED_LINE_MAX_CHARS,
   type GoalToolDeps,
 } from "../lib/goal-tools.ts";
 import { buildGoalConfirmMessage } from "../lib/loop-goal.ts";
@@ -659,6 +660,16 @@ test("a long repo path cannot cut the consent-critical lines out of the goal dia
   assert.ok(!body.includes(longPath), "…and capped at the value, not at the block");
   // A short path is left alone entirely.
   assert.equal(capUntrustedLine("/Users/x/repo"), "/Users/x/repo");
+  // THE CAP KEEPS BOTH ENDS, because a path carries different facts at each:
+  // where it lives, and what it is. A prefix-only cut would destroy the
+  // identifying end exactly when it bites — two sibling repos under a long
+  // `$TMPDIR` would come out identical (round-1 review P2, 2026-09-16).
+  const long = "/a/very/long".padEnd(200, "x") + "/repo";
+  const capped = capUntrustedLine(long);
+  assert.equal(capped.length, UNTRUSTED_LINE_MAX_CHARS, "the cap is the cap");
+  assert.ok(capped.endsWith("/repo"), `the identifying end survives: ${capped}`);
+  assert.ok(capped.startsWith("/a/very/long"), "…and so does where it lives");
+  assert.ok(capped.includes("…"), "with the omission marked");
 
   // NOTE (2026-09-16): the ROW-BUDGET half of this test is gone with
   // lib/dialog-budget.ts. The dialog is no longer fitted to the terminal at
