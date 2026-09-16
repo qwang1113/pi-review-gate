@@ -68,20 +68,42 @@ test("a multi-line next step stays INSIDE the third part", () => {
 // The paths an agent actually hits. A refusal renderer that the high-frequency
 // refusals never reach is the second copy this module exists to prevent.
 
-test("the six high-frequency refusal paths all render through buildRejection", () => {
-  const paths: Array<[string, string]> = [
-    ["ask_user batch not conforming", "lib/user-interaction-tools.ts"],
-    ["judge_submit submission refused", "extensions/review-gate.ts"],
-    ["goal / plan refused (audit or hash)", "lib/loop-goal.ts"],
-    ["goal / plan refused (no restatement)", "lib/restatement.ts"],
-    ["declare_done refused", "extensions/review-gate.ts"],
-    ["edit/write blocked", "lib/ship-gate-edit-guard.ts"],
-    ["edit/write blocked (worktree held by a peer)", "lib/session-exclusivity.ts"],
-    ["ship command blocked", "lib/ship-gate-bash.ts"],
+test("every high-frequency refusal path renders through buildRejection", () => {
+  // [what the path is, file, slice start, slice end]. The call must be INSIDE
+  // the slice: `assert.match(src, /buildRejection\()/` would go green from any
+  // single call anywhere in the file, which is exactly how the path it claims
+  // to cover drifts back to hand-written prose unnoticed. Each end anchor is
+  // the next declaration, so the window is the refusal site itself.
+  const cases: Array<[string, string, string, string]> = [
+    ["ask_user batch not conforming", "lib/user-interaction-tools.ts",
+      "export async function doAskUser", "const { questions, dropped: droppedQuestions"],
+    ["judge_submit submission refused", "extensions/review-gate.ts",
+      'name: "judge_submit"', "const progress = createProgressReporter("],
+    ["declare_done refused", "extensions/review-gate.ts",
+      "if (problems.length > 0) {", "progress.done("],
+    ["goal refused (audit or hash)", "lib/loop-goal.ts",
+      "export function buildGoalPrereviewRefusal", "export const GOAL_CONFIRM_TITLE"],
+    ["goal refused (loop goal not approved: L8 edit block)", "lib/loop-goal.ts",
+      "export function loopGoalUnconfirmedEditBlock", "Pure decision behind the L8 edit gate"],
+    ["goal / plan refused (no restatement)", "lib/restatement.ts",
+      "export function buildRestatementMissingRefusal", "the consent surfaces"],
+    ["edit/write blocked (sensitive file)", "lib/ship-gate-edit-guard.ts",
+      "export function sensitiveEditBlock", "export async function evaluateEditCall"],
+    ["edit/write blocked (no path)", "lib/ship-gate-edit-guard.ts",
+      "export async function evaluateEditCall", "const absPath = path ? normalizeSensitivePath"],
+    ["edit/write blocked (worktree held by a peer)", "lib/session-exclusivity.ts",
+      "function refusalText", "Last path segment"],
+    ["ship command blocked", "lib/ship-gate-bash.ts",
+      "export function buildShipBlockReason", "export async function evaluateShipCommand"],
   ];
-  for (const [label, file] of paths) {
+  for (const [label, file, from, to] of cases) {
     const src = readFileSync(join(ROOT, file), "utf8");
-    assert.match(src, /\bbuildRejection\(/, `${label}: ${file} must render through the shared renderer`);
+    const start = src.indexOf(from);
+    assert.ok(start > 0, `${label}: the start anchor is gone from ${file} — fix the anchor, do not delete the case`);
+    const end = src.indexOf(to, start);
+    assert.ok(end > start, `${label}: the end anchor must follow the start anchor in ${file}`);
+    assert.match(src.slice(start, end), /\bbuildRejection\(/,
+      `${label}: ${file} must render this refusal through the shared renderer`);
   }
 });
 

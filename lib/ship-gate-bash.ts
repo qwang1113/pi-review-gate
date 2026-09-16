@@ -300,11 +300,19 @@ export function buildShipBlockReason(input: {
   const stationProblems = input.stationProblems ?? [];
   const allProblems = [...input.problems, ...stationProblems];
   const stationOnly = stationProblems.length > 0 && input.problems.length === 0;
+  // ONE rendering per fact: `recorded` and `shown` are two surfaces of the same
+  // refusal (the arbiter reads the first, the agent the second), so the list
+  // and the compound-command warning are built once and composed twice.
+  const problemList = allProblems.map((p) => `  - ${p}`).join("\n");
+  const compoundWarning =
+    input.ships.length > 1
+      ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them."
+      : "";
   const recorded =
     `review-gate: ${describeShips(input.command, input.ships)} blocked — ` +
     (stationOnly ? "beyond this round's delivery station:\n" : "quality gates unmet:\n") +
-    allProblems.map((p) => `  - ${p}`).join("\n") +
-    (input.ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "") +
+    problemList +
+    compoundWarning +
     input.crossRepoHint;
   const nextStep = stationProblems.length > 0
     ? STATION_SHIP_NEXT_STEPS +
@@ -319,13 +327,11 @@ export function buildShipBlockReason(input: {
   const shown = buildRejection({
     what: `${describeShips(input.command, input.ships)} 被拦 —— ` +
       (stationOnly ? "超出本轮的交付站点" : "质量门禁未满足"),
-    why: "\n" + allProblems.map((p) => `  - ${p}`).join("\n") +
-      (input.ships.length > 1
-        ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them."
-        : "") +
-      input.crossRepoHint,
-    // A station is the user's to move; unmet quality is the agent's to clear.
-    by: stationProblems.length > 0 ? "user" : "agent",
+    why: "\n" + problemList + compoundWarning + input.crossRepoHint,
+    // Unmet quality is the agent's to clear; a station is the USER's to move.
+    // A mixed refusal is labelled for the agent — it has work to do either
+    // way (the station half is spelled out in `next`, which asks the user).
+    by: stationOnly ? "user" : "agent",
     next: nextStep,
   });
   return { recorded, shown };

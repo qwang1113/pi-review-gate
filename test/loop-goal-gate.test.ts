@@ -650,7 +650,7 @@ test("L8: loop mode with NO confirmed goal blocks edit/write; approval unblocks 
   const pathlessAfterGoal = await handlers.get("tool_call")!({ toolName: "edit", input: {} }, ctx);
   assert.ok(pathlessAfterGoal && (pathlessAfterGoal as { block?: boolean }).block === true,
     "a path-less edit call must fail closed EVEN with a confirmed goal");
-  assert.match(JSON.stringify(pathlessAfterGoal), /without a `path`/,
+  assert.match(JSON.stringify(pathlessAfterGoal), /没有写明 `path`/,
     "the refusal must name the missing path, not the goal");
 });
 

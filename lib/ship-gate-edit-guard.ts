@@ -150,9 +150,9 @@ export async function evaluateEditCall(
     return {
       block: true,
       reason: buildRejection({
-        what: "edit/write 被拦 —— 这次调用 without a `path`",
-        why: "path 是门禁把写入归到某个仓库的唯一依据；没有它，所有按路径判的检查（敏感文件、" +
-          "门禁自有路径、L8 的 goal、项目经理写入限制）都会被静默跳过。",
+        what: "edit/write 被拦 —— 这次调用没有写明 `path`",
+        why: "`path` 是门禁把这次写入归到某个仓库的唯一依据；没有它，所有按路径判的检查" +
+          "（敏感文件、门禁自有路径、L8 的 goal、项目经理写入限制）都会被静默跳过。",
         by: "agent",
         next: "把 `path` 参数显式写上重发这次编辑 —— 工具本身也要求非空 path 才会真的写文件，" +
           "所以重发不损失任何合法用途。",

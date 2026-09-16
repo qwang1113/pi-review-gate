@@ -562,6 +562,10 @@ test("buildShipBlockReason keeps the station and the quality halves distinguisha
   assert.match(stationOnly.recorded, /beyond this round's delivery station/,
     "a station-only block must not be recorded as unmet quality");
   assert.doesNotMatch(stationOnly.shown, /judge_submit/);
+  // WHO CAN CLEAR IT: a station belongs to the user, unmet quality to the
+  // agent. A mixed refusal is labelled for the agent (it has the quality half
+  // to clear); the station half is spelled out in `next`.
+  assert.match(stationOnly.shown, /下一步：用户 —— /);
 
   const mixed = buildShipBlockReason({
     command: "git push",
@@ -573,6 +577,7 @@ test("buildShipBlockReason keeps the station and the quality halves distinguisha
   assert.match(mixed.recorded, /quality gates unmet/);
   assert.match(mixed.recorded, /precommit has not run/);
   assert.match(mixed.shown, /judge_submit/, "the quality half still points at the loop");
+  assert.match(mixed.shown, /下一步：你 —— /);
 });
 
 test("a station refusal is RECORDED as such, so the appeal route can refuse it for free", () => {
