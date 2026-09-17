@@ -899,7 +899,8 @@ tmux capture-pane -p -t <pane> | tail -20
 而通知的用途恰恰是「你没在看的时候叫你」，所以 `on` 天然漏一半。另一个候选 `osascript`
 送达可靠，但点击会拉起 Script Editor（用户实测），不是「回到终端」。最终选的通道是
 `terminal-notifier`（brew，MIT）：点击通知体 `tmux select-window` + `tmux select-pane`
-回到**发通知的那个 pane** 并激活 Ghostty；不加按钮、不换图标。
+回到**发通知的那个 pane**，并激活会话所在的那个 app（取 `__CFBundleIdentifier`；
+认不出来就只切 pane、不激活 —— 不去猜一个 bundle）；不加按钮、不换图标。
 
 **附带学到的两件事（以后别再掉进来）：**
 

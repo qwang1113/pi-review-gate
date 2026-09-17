@@ -13,13 +13,16 @@
  * asked for the click to come back to the terminal, and that is the whole
  * reason this module drives `terminal-notifier` (a 1MB MIT CLI):
  *
- *     terminal-notifier -title … -message … -activate com.mitchellh.ghostty \
+ *     terminal-notifier -title … -message … -activate "$__CFBundleIdentifier" \
  *                       -execute "tmux select-window -t @3; tmux select-pane -t %7"
  *
  * Clicking the banner therefore activates the terminal AND jumps to the very
- * pane that raised it. (No buttons and no custom icon: both were offered and
- * the user declined — macOS has no API for a notification's icon, and an
- * action button needs a process parked on the click.)
+ * pane that raised it. WHICH app is raised is the session's own
+ * (`defaultActivateBundle`), never a guess: the value in that example is the
+ * macOS `__CFBundleIdentifier`, and an unknown one drops `-activate` entirely
+ * so the click can still jump panes. (No buttons and no custom icon: both were
+ * offered and the user declined — macOS has no API for a notification's icon,
+ * and an action button needs a process parked on the click.)
  *
  * WHO MAY RAISE ONE (user decision, 2026-09-17): exactly three kinds of event,
  * and only in a session that has no supervisor above it — a project manager,
