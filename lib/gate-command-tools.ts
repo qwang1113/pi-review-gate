@@ -244,7 +244,14 @@ function registerGateStatus(host: CommandHost, deps: GateCommandDeps): void {
         "── 工作区 ──",
         `changes:   code=${state.hasCodeChange} docs=${state.hasDocChange}`,
         `docSync:   ${projectConfig.docSync ? `ENFORCED (attested: ${state.review.docSync ?? "none"})` : "off"}`,
-        `rounds:    ${state.rounds.length}/${state.maxRounds}`,
+        // TWO ROUND COUNTS, NAMED APART (2026-09-17, user decision). They
+        // used to share one line and the word "rounds": the strip's `轮 N`
+        // counts what this session SENT OUT, this one counted RECORDED
+        // verdicts against the auto-loop brake. Reading one as the other is
+        // exactly the confusion that sent the user here, so neither line
+        // borrows the other's name.
+        `submitted: ${state.sentReviewRounds ?? 0} review round(s) sent (the strip's 轮 N)`,
+        `settled:   ${state.rounds.length} verdict(s) recorded — auto-loop brake at ${state.maxRounds}`,
         `task mode: ${state.taskMode ?? "undecided (behaves as loop; agent decides via set_gate_mode)"}`,
         "── 配置 ──",
         `config:    thinkHarder=${projectConfig.thinkHarder}${state.strategicResetFired ? " (fired)" : ""} gitMemory=${projectConfig.gitMemory}`,

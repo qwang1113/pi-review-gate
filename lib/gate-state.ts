@@ -426,6 +426,24 @@ export interface GateState {
   };
   rounds: RoundRecord[];
   /**
+   * How many reviewer rounds THIS SESSION HAS SENT OUT (2026-09-17, user
+   * decision): the strip's `轮 N` reading, and nothing else.
+   *
+   * WHY IT IS SEPARATE FROM `rounds` ABOVE. `rounds` holds RECORDED verdicts
+   * and drives the convergence checks (oscillation / plateau) and the
+   * `maxRounds` brake — so it can only move when a judge finishes, which made
+   * the strip sit still for the entire duration of every round and read as
+   * broken. This one moves the moment a round is SUBMITTED, and deliberately
+   * survives `declare_done` (the session's reviewing activity is a fact about
+   * the session, not about one task).
+   *
+   * Incremented once per SUCCESSFUL reviewer dispatch in `judge_submit` —
+   * never for a failed one, and never for the adviser / goal-auditor / quality
+   * rounds (those are not review rounds the user asked for). Absent on older
+   * sidecars ⇒ zero rounds sent.
+   */
+  sentReviewRounds?: number;
+  /**
    * The last polish-gate `reason` the agent supplied to prepare_review
    * (round-18). Injected into the NEXT reviewer's task text so the judge can
    * see why this round exists. Absent on older sidecars ⇒ no reason to
@@ -743,6 +761,13 @@ export function inheritGoalContract(target: GateState, predecessor: GateState): 
     ...(predecessor.restatement ? { restatement: predecessor.restatement } : {}),
     ...(predecessor.loopGoal ? { loopGoal: predecessor.loopGoal } : {}),
     ...(predecessor.rounds.length > 0 ? { rounds: predecessor.rounds } : {}),
+    // HOW MUCH REVIEW THIS WORK HAS HAD (2026-09-17, user decision): it is a
+    // fact about the WORK, like the round budget above, not about the process
+    // id that happened to hold the seat — a handover that dropped it would
+    // roll the strip back to `轮 0` mid-task and say nothing was ever sent.
+    ...(predecessor.sentReviewRounds !== undefined
+      ? { sentReviewRounds: predecessor.sentReviewRounds }
+      : {}),
     ...(predecessor.turnsWithoutGoal !== undefined
       ? { turnsWithoutGoal: predecessor.turnsWithoutGoal }
       : {}),

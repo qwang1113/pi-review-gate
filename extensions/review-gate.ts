@@ -82,7 +82,7 @@ import { hostReasonEditor, type CustomDialogHost, type ReasonEditor } from "../l
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
-import { buildGateWidget, type GateWidgetFacts } from "../lib/ui-widget.ts";
+import { buildGateWidget, showsRoundReading, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -4743,6 +4743,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // a repository there is no repo to bind it to, so it must not surface
     // as an unmet requirement either (2026-09-02, user decision).
     if (sessionInGit && !loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    // ROUND READING (2026-09-17, user decision): how many rounds THIS session
+    // SENT OUT — a loop session's own submissions, a judge pane's own round
+    // number. Both are already in memory (no git, no fingerprint, so the
+    // cheap-by-contract rule above holds). Sessions that never send anything
+    // (orchestrator / explore / normal) do not show the segment at all —
+    // `showsRoundReading` is the one place that rule lives, and a judge pane
+    // whose task never named a round shows nothing rather than a 0 it cannot
+    // back up.
+    const judgePane = isJudgePane();
+    const roundReading = judgePane ? judgeTaskRound : (state.sentReviewRounds ?? 0);
     return {
       mode: state.taskMode,
       nonGit: !sessionInGit,
@@ -4752,10 +4762,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       // git at all — no branch is shown.
       branch: sessionInGit ? currentBranch(primaryRepoRoot) ?? "(detached)" : undefined,
       edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
-      // ROUND READING (2026-09-17): the same in-memory counters /gate-status
-      // prints — no git, no fingerprint, so the cheap-by-contract rule above
-      // holds. Outside a repository there is no review to count.
-      ...(sessionInGit ? { rounds: state.rounds.length, maxRounds: state.maxRounds } : {}),
+      ...(sessionInGit && roundReading !== undefined &&
+          showsRoundReading({ mode: state.taskMode, judge: judgePane })
+        ? { rounds: roundReading }
+        : {}),
       unmet: completion,
     };
   }
@@ -8891,6 +8901,21 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // "this round dispatched one and has not recorded its verdict" has to
         // be recorded per round.
         if (judge.role === QUALITY_ROLE && d.judgeId) noteQualityRoundDispatched(root, d.judgeId);
+        // ONE ROUND SENT OUT (2026-09-17, user decision): the strip's `轮 N`.
+        // Counted HERE — a reviewer dispatch that reached the judge — and not
+        // where the verdict is recorded, because "how many rounds have I sent"
+        // is the question that reading answers, and a round a judge is still
+        // reading was sent. A REFUSED dispatch returns above, so a round that
+        // never left is never counted; the adviser / goal-auditor branches
+        // cannot reach this line at all.
+        if (judge.role === "reviewer") {
+          const sent = stateForRepo(root);
+          sent.sentReviewRounds = (sent.sentReviewRounds ?? 0) + 1;
+          // Persisted HERE and not with the round's other bookkeeping: the
+          // count is what the strip renders, and the strip has to move the
+          // moment the round is submitted (persist refreshes the widget).
+          persistRepo(ctx as unknown as ExtensionContext, root);
+        }
         accepted.push({
           role: judge.role,
           judgeId: d.judgeId ?? "(pending)",

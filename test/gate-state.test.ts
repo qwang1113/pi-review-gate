@@ -361,6 +361,10 @@ test("a relay successor inherits the user's contracts and the round budget — a
     at: "2026-09-16T00:04:00.000Z",
   };
   predecessor.sessionReposPaths = ["/other/repo"];
+  // How much review this work has had (2026-09-17, user decision): the strip's
+  // `轮 N`. Also a fact about the WORK rather than the process id — a handover
+  // that dropped it would roll the reading back to `轮 0` mid-task.
+  predecessor.sentReviewRounds = 4;
   // The user's permission to type tmux at all (2026-09-17). It belongs to the
   // WORK, not to a process id: the user said “当前会话和他的继承者”.
   predecessor.tmuxAccess = { at: "2026-09-16T00:05:00.000Z", scope: "session" };
@@ -374,6 +378,7 @@ test("a relay successor inherits the user's contracts and the round budget — a
   assert.equal(restatementConfirmed(inherited.restatement), true, "…and is usable as it stands");
   assert.deepEqual(inherited.loopGoal, predecessor.loopGoal, "so does the goal the user approved");
   assert.equal(inherited.rounds.length, 1, "the round budget is NOT reset by a handover");
+  assert.equal(inherited.sentReviewRounds, 4, "nor is the count of rounds this work has sent out");
   assert.equal(inherited.turnsWithoutGoal, 3, "nor is the force-negotiate counter");
 
   // The rest of the state belongs to the session that did the work. A bypass in

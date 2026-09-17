@@ -321,9 +321,10 @@ unconfigured role and the dispatch fails closed instead of spawning a default.
   `~/.pi/agent/agents/*.md`; `scripts/install-package.mjs` applies only the
   global layer. Writes validate (resolvable spec, supported thinking level)
 - The pi widget (`belowEditor`) is a SINGLE-LINE status strip (mode/branch/
-  edited + unmet count); the full readout — verdicts, config, model chains —
-  lives in the `/gate-status` command. The config itself is plain JSON in
-  `review-gate.json`.
+  edited, plus `轮 N` — the rounds THIS session sent out, shown only in a loop
+  session or a judge pane — and the unmet count); the full readout — verdicts,
+  config, model chains — lives in the `/gate-status` command. The config
+  itself is plain JSON in `review-gate.json`.
 - A missing/corrupt `agents` section is a startup error, not a silent
   pass-through: the session stops and names every role that lacks a
   resolvable chain (`validateAgentsForStartup` + the before_agent_start

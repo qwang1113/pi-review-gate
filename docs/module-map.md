@@ -633,7 +633,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `text-appeal.ts` | 启发式文本拦截的申诉口子（A 类） |
 | `inspection-appeal.ts` | 第三类申诉口子：judge 被「零审查即 READY」拒掉后走 `request_arbitration`（judge 侧唯一被放行的工具），形状照抄 `text-appeal.ts`——受理判定（配额与本轮不可重掷共用一份额度）、仲裁者 system prompt 与 brief（申诉理由按不可信数据入块）、通行证只绑「本 judge + 本轮」，绝不放行任何命令 |
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |
-| `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条**单行**状态条，详情在 `/gate-status`）：mode / 分支 / 已编辑 / **review 轮次 `轮 N/M`**（2026-09-17，数据源是扩展内存里的 `state.rounds.length` 与 `maxRounds`，零 git 开销）/ 未满足项数 |
+| `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条**单行**状态条，详情在 `/gate-status`）：mode / 分支 / 已编辑 / **送审轮次 `轮 N`**（2026-09-17 用户决定：N 是本会话**送出去**的 reviewer 轮次 —— 送审即 +1，不等 reviewer 交卷，`declare_done` 不清零；数据源 loop 侧是 `state.sentReviewRounds`、judge pane 侧是它自己的 `roundSeq`，**无分母**，那个 `/maxRounds` 是 auto-loop 刹车、与审查进度不同源；只有 loop 会话与 judge pane 显示，判定是 `showsRoundReading` 这一条纯函数；零 git 开销）/ 未满足项数 |
 | `untrusted-data.ts` | 主会话/编排层文本的**唯一**降级实现：`asUntrustedData` 包块（命名 tag、载荷内闭合标签中和、截断可见）+ `composeWithUntrustedData` 组装（门禁指令在前、不可信数据块在后），judge 四处任务书拼装点与仲裁/文本申诉/分类器提示词共用 |
 | `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
