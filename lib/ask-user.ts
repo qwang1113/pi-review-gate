@@ -9,8 +9,8 @@
  *
  * One entry point, one meaning: calling it pauses. The gate owns the
  * mechanics — asking one question at a time, tracking "N of M", letting the
- * user cut the interview short, and handing every answer back at once — so
- * the agent only ever writes the questions.
+ * user stop the whole interview by closing the box, and handing every answer
+ * back at once — so the agent only ever writes the questions.
  *
  * Everything here is pure: question hygiene, what a chosen line MEANS, and
  * how the finished interview reads. The SHAPE of a question — the rows, the
@@ -29,8 +29,17 @@ import {
   type ChoiceSpec,
 } from "./choice-dialog.ts";
 
-/** Hard caps: an interview is a decision point, not a survey. */
-export const MAX_QUESTIONS = 10;
+/**
+ * One question's own length cap. There is NO cap on how MANY questions one
+ * call may ask (user decision, 2026-09-17).
+ *
+ * The cap existed to keep an interview from becoming a wall, and it bought the
+ * opposite of what it was for: a batch past it had its TAIL silently discarded,
+ * and the agent — told the rest would come "next round" — usually never asked
+ * again and went off to guess instead, which is the exact failure questions
+ * exist to prevent. The user's own escape is closing the box, and that stops
+ * the whole interview (see resolveQuestion).
+ */
 export const MAX_QUESTION_CHARS = 1200;
 
 /** One question as the agent wrote it — always a choice question. */
@@ -67,8 +76,6 @@ export function isGrantableScope(scope: string | undefined): scope is string {
 export type AnswerKind =
   /** They answered (dialog choice or typed text). */
   | "answered"
-  /** They cut the interview short before reaching this one. */
-  | "skipped"
   /** They asked to answer this one in chat instead of a dialog. */
   | "deferred-to-chat"
   /**
@@ -86,22 +93,21 @@ export interface AskAnswer {
 }
 
 /**
- * The interview's own escape, kept as an explicit ROW because it stops the
- * whole interview rather than answering one question. "Answer in chat" is
- * not a row any more: it is one of the typed escapes below, offered inside
- * the template's reason box.
+ * The interview's one typed escape, offered inside the template's reason box.
+ *
+ * THERE IS NO "skip the rest" ROW ANY MORE (user decision, 2026-09-17): it
+ * promised what closing the box already does, in a second vocabulary — and
+ * every way out of an interview that is not "close the box" is one more thing
+ * the user has to know. Closing stops the whole interview; see
+ * resolveQuestion.
  */
-export const SKIP_REST_CHOICE = "⏭ 跳过后续问题";
-
-/** Typed into the template's reason box, these mean the escapes above. */
-export const SKIP_REST_INPUT = "!skip";
 export const ANSWER_IN_CHAT_INPUT = "!chat";
 
 /**
  * Clean up what the agent submitted, and REFUSE the whole batch when it does
  * not follow the template (user decision, 2026-09-08).
  *
- * It used to be tolerant — empties dropped, a missing recommendation
+ * It used to be tolerant — empties discarded, a missing recommendation
  * tolerated, a question with no options silently degraded to a free-text box
  * — on the theory that refusing would send the agent back to guessing. The
  * user chose the opposite, and the dialogs show why: a question the agent did
@@ -109,12 +115,14 @@ export const ANSWER_IN_CHAT_INPUT = "!chat";
  * keystroke. A rejected batch costs one rewrite; a bad dialog costs the
  * user's attention every single time.
  *
- * Sizes are still capped rather than refused (more questions than
- * MAX_QUESTIONS, an over-long option, more options than the template allows)
- * — those are mechanical, and the reply says what was cut.
+ * Sizes are still capped rather than refused (an over-long question, an
+ * over-long option, more options than the template allows) — those are
+ * mechanical, and the reply says what was cut. The NUMBER of questions is not
+ * capped any more (2026-09-17): asking every one of them, with the box as the
+ * user's way out, is the one behaviour that never silently swallows one.
  */
 export type QuestionsResult =
-  | { ok: true; questions: AskQuestion[]; dropped: number; trimmedOptions: number }
+  | { ok: true; questions: AskQuestion[]; trimmedOptions: number }
   | { ok: false; error: string };
 
 export function validateQuestions(raw: unknown): QuestionsResult {
@@ -134,9 +142,8 @@ export function validateQuestions(raw: unknown): QuestionsResult {
     if (bad) return { ok: false, error: bad };
     if (normalized.trimmed) trimmedOptions += 1;
     questions.push(normalized.question);
-    if (questions.length >= MAX_QUESTIONS) break;
   }
-  return { ok: true, questions, dropped: Math.max(0, raw.length - questions.length), trimmedOptions };
+  return { ok: true, questions, trimmedOptions };
 }
 
 interface NormalizedQuestion {
@@ -191,22 +198,9 @@ export function choiceSpecOf(q: AskQuestion): ChoiceSpec {
   return { title: q.text, options: q.options, recommended: q.recommended };
 }
 
-/**
- * The rows one question shows: the options (recommendation marked), the
- * template's `✎ 不选，我说明原因` row, then the interview's own escape.
- *
- * The decline row is where "none of these" lives in EVERY gate dialog;
- * `⏭ 跳过后续问题` is interview-only, because only an interview has later
- * questions to skip.
- */
-export function buildChoiceList(q: AskQuestion): string[] {
-  return [...choiceRows(choiceSpecOf(q)), SKIP_REST_CHOICE];
-}
-
 export type ChoiceMeaning =
   | { kind: "answered"; answer: string }
   | { kind: "deferred-to-chat" }
-  | { kind: "skip-rest" }
   | { kind: "dismissed" };
 
 /**
@@ -217,16 +211,12 @@ export type ChoiceMeaning =
 export function interpretChoice(picked: string | undefined, q: AskQuestion): ChoiceMeaning {
   const parsed = parseChoice(picked, choiceSpecOf(q));
   if (parsed.kind === "dismissed") return { kind: "dismissed" };
-  if (parsed.kind === "chose") {
-    if (parsed.option === SKIP_REST_CHOICE) return { kind: "skip-rest" };
-    return { kind: "answered", answer: parsed.option };
-  }
+  if (parsed.kind === "chose") return { kind: "answered", answer: parsed.option };
   // The decline row: the user picked none of the options. What they typed is
-  // either one of the interview's typed escapes or the reason itself — and an
-  // empty box is still an answer ("none of these, no reason given"), never a
+  // either the interview's typed escape or the reason itself — and an empty
+  // box is still an answer ("none of these, no reason given"), never a
   // silent dismissal.
   const typed = parsed.reason.trim().toLowerCase();
-  if (typed === SKIP_REST_INPUT) return { kind: "skip-rest" };
   if (typed === ANSWER_IN_CHAT_INPUT) return { kind: "deferred-to-chat" };
   return {
     kind: "answered",
@@ -235,35 +225,28 @@ export function interpretChoice(picked: string | undefined, q: AskQuestion): Cho
 }
 
 
-/**
- * Why the rest of an interview will never be shown.
- *
- * `skip-rest` is the user pressing the escape row; `interrupted` is the
- * project manager firing an instruct, which takes every open box down at
- * once. They are kept apart because they settle the unshown questions
- * differently on the wire (`dismissed` vs `interrupted`), and because a
- * stopped goal approval must never read as a rejection — the same distinction
- * the channel already draws.
- */
-export type InterviewStop = "skip-rest" | "interrupted";
-
 /** What one settled question does to the interview. */
 export interface QuestionResolution {
   answer: AskAnswer;
-  /** Set when THIS question is the one that stops the remaining ones. */
-  stop?: InterviewStop;
+  /**
+   * Set when THIS question is the one that stopped the rest of the interview
+   * — the user closed its box instead of answering. An instruct interrupt is
+   * deliberately NOT this: that is the channel's own `interrupted` outcome,
+   * and a stopped dialog must never read as a user rejection.
+   */
+  stop?: true;
 }
 
 /**
  * What one settled question MEANS — the whole rule, in one pure place.
  *
- * IT EXISTS BECAUSE THE QUESTIONS ARE NOW IN FLIGHT TOGETHER (2026-09-06).
- * The interview used to ask strictly one at a time, so "the user skipped the
- * rest" could be handled by simply not asking them. Every question of a batch
- * is now offered to the project manager the moment the interview starts, so a
- * question can come back ANSWERED even though the user later pressed "skip
- * the rest" — the manager answered it first, and "先答者生效" is the
- * invariant this whole channel is built on. Hence rule one:
+ * IT EXISTS BECAUSE THE QUESTIONS ARE IN FLIGHT TOGETHER (2026-09-06). The
+ * interview used to ask strictly one at a time, so "the user stopped the rest"
+ * could be handled by simply not asking them. Every question of a batch is now
+ * offered to the project manager the moment the interview starts, so a
+ * question can come back ANSWERED even though the user later closed the box on
+ * the rest — the manager answered it first, and "先答者生效" is the invariant
+ * this whole channel is built on. Hence rule one:
  *
  *   AN ANSWER THE RACE DELIVERED IS ALWAYS HONOURED, whatever stopped the
  *   rest.
@@ -275,10 +258,11 @@ export interface QuestionResolution {
  * poll had not picked up yet. Nothing here re-judges that; it reads the
  * outcome the race produced.
  *
- * Only silence is interpreted by the stop reason: skipped when the user chose
- * to skip, unanswered when an instruct took the box away (nobody decided
- * anything — the reply must not claim they did).
-
+ * CLOSING THE BOX IS THE WAY OUT (user decision, 2026-09-17). It stops the
+ * remaining questions — `stop: true`, so the caller stops offering boxes — and
+ * every one of them settles as unanswered, this one included. There used to be
+ * a separate `skipped` outcome for the interview's own escape row; with the row
+ * gone, a question nobody decided about is unanswered, one way or the other.
  */
 export function resolveQuestion(
   q: AskQuestion,
@@ -286,15 +270,10 @@ export function resolveQuestion(
   opts: {
     /** This question's own box was taken down by an instruct. */
     interrupted?: boolean;
-    /** The interview had already stopped when this question settled. */
-    stopped?: InterviewStop;
   } = {},
 ): QuestionResolution {
   if (picked !== undefined) {
     const meaning = interpretChoice(picked, q);
-    if (meaning.kind === "skip-rest") {
-      return { answer: { question: q.text, kind: "skipped" }, stop: "skip-rest" };
-    }
     if (meaning.kind === "answered") {
       return { answer: { question: q.text, kind: "answered", answer: meaning.answer } };
     }
@@ -303,15 +282,13 @@ export function resolveQuestion(
     }
     // A dismissal reported WITH text is not a thing; fall through to silence.
   }
-  if (opts.interrupted) {
-    return { answer: { question: q.text, kind: "unanswered" }, stop: "interrupted" };
-  }
-  if (opts.stopped === "skip-rest") {
-    return { answer: { question: q.text, kind: "skipped" } };
-  }
-  // Dismissed (ESC), no dialog at all, or an interview already stopped by an
-  // instruct: the user asked for nothing, and the reply must say so.
-  return { answer: { question: q.text, kind: "unanswered" } };
+  // An instruct took the box away: nobody decided anything, and the reply must
+  // not claim they did. Deliberately NOT a stop — the interrupt has already
+  // settled the whole batch through the channel.
+  if (opts.interrupted) return { answer: { question: q.text, kind: "unanswered" } };
+  // Dismissed (ESC), or no dialog at all: the user asked for nothing — and
+  // closing the box is how an interview gets stopped.
+  return { answer: { question: q.text, kind: "unanswered" }, stop: true };
 }
 
 
@@ -328,9 +305,7 @@ export function formatAnswers(answers: AskAnswer[]): string {
         ? `→ ${a.answer}`
         : a.kind === "deferred-to-chat"
           ? "→ 用户选择在聊天里详细回答（等他的下一条消息）"
-          : a.kind === "skipped"
-            ? "→ 用户跳过"
-            : "→ 没有得到回答（对话框被关闭，或环境没有对话框）";
+          : "→ 没有得到回答（用户关掉了对话框，或环境没有对话框）";
       return `${head}\n${body}`;
     })
     .join("\n");
@@ -359,12 +334,10 @@ function short(text: string, max: number): string {
  */
 export function formatTranscriptSummary(answers: AskAnswer[]): string {
   const answered = answers.filter((a) => a.kind === "answered").length;
-  const skipped = answers.filter((a) => a.kind === "skipped").length;
   const deferred = answers.filter((a) => a.kind === "deferred-to-chat").length;
   const unanswered = answers.filter((a) => a.kind === "unanswered").length;
   const parts = [`已回答 ${answered}`];
   if (deferred) parts.push(`转聊天 ${deferred}`);
-  if (skipped) parts.push(`跳过 ${skipped}`);
   if (unanswered) parts.push(`未作答 ${unanswered}`);
   const head = `${parts.join(" · ")}（共 ${answers.length} 问）`;
   const lines = answers.map((a, i) => {
@@ -372,9 +345,7 @@ export function formatTranscriptSummary(answers: AskAnswer[]): string {
       ? short(a.answer ?? "", TRANSCRIPT_ANSWER_CHARS)
       : a.kind === "deferred-to-chat"
         ? "（转聊天回答）"
-        : a.kind === "skipped"
-          ? "（跳过）"
-          : "（未作答）";
+        : "（未作答）";
     return `${progressLabel(i, answers.length)} ${short(a.question, TRANSCRIPT_QUESTION_CHARS)} → ${outcome}`;
   });
   return [head, ...lines].join("\n");
@@ -414,7 +385,7 @@ export function resumeFrom(stored: AskProgress | undefined, questions: AskQuesti
   // where the interview resumes.
   const carried: AskAnswer[] = [];
   for (const a of stored.answers) {
-    if (a.kind === "answered" || a.kind === "skipped") carried.push(a);
+    if (a.kind === "answered") carried.push(a);
     else break;
   }
   return carried;
@@ -432,6 +403,6 @@ export function buildNoDialogNotice(questions: AskQuestion[]): string {
   return "review-gate: 这个环境没有可用的对话框（headless / RPC），问题一个都没能展示给用户。\n" +
     "把下面的问题原样写进你的回复，然后结束本轮，等用户回答：\n" +
     questions.map((q, i) =>
-      `${progressLabel(i, questions.length)} ${q.text}\n   选项：${buildChoiceList(q).join(" / ")}`).join("\n");
+      `${progressLabel(i, questions.length)} ${q.text}\n   选项：${choiceRows(choiceSpecOf(q)).join(" / ")}`).join("\n");
 }
 

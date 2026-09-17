@@ -41,7 +41,6 @@ import {
   type ChannelRecord,
 } from "../lib/orchestrator-channel.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
-import { SKIP_REST_CHOICE } from "../lib/ask-user.ts";
 import type { SensitiveGrant } from "../lib/sensitive-grant.ts";
 
 const T0 = 1_700_000_000_000;
@@ -148,7 +147,7 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
       notify: () => {},
       select: (title: string, _options: string[], opts?: { signal?: AbortSignal }) =>
         render(title, opts!.signal!),
-      input: (title: string, _placeholder?: string, opts?: { signal?: AbortSignal }) =>
+      editor: (title: string, opts?: { signal?: AbortSignal }) =>
         render(title, opts!.signal!),
     },
   };
@@ -309,14 +308,14 @@ test("INVARIANT: the HUMAN wins the box that is open while the manager wins the 
 // 4. Nothing may be left OPEN when the interview stops early
 // ---------------------------------------------------------------------------
 
-test("skip the rest: the unshown questions are settled as DISMISSED, not left ringing", async () => {
-  const h = harness((title) => (title.includes("第一题") ? "A" : SKIP_REST_CHOICE));
+test("closing the box stops the whole interview: the rest settle as DISMISSED, none left ringing", async () => {
+  const h = harness((title) => (title.includes("第一题") ? "A" : undefined));
   const text = await h.run(THREE);
 
-  assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["answered", "skipped", "skipped"]);
+  assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["answered", "unanswered", "unanswered"]);
   assert.equal(h.rendered.length, 2, "question 3 is never put in front of the user");
-  assert.deepEqual(settlesOn(h.io).map((s) => s.by), ["human", "human", "dismissed"],
-    "the question the user skipped IN the box is theirs; the one they never saw is a dismissal");
+  assert.deepEqual(settlesOn(h.io).map((s) => s.by), ["human", "dismissed", "dismissed"],
+    "the box the user closed is a dismissal; the question they never saw settles the same way");
   assert.equal(projectChannel(records(h.io)).openRequests.length, 0,
     "a question nobody will ever answer must not stay on the manager's receipt");
   assert.match(text, /循环已暂停/, "an unanswered interview still pauses the loop");
@@ -343,11 +342,11 @@ test("an instruct INTERRUPT takes the whole batch down as interrupted — never 
   assert.deepEqual(h.armed, [false], "and the loop waits for the user");
 });
 
-test("an answer the manager already WON survives the user skipping the rest", async () => {
+test("an answer the manager already WON survives the user closing the box", async () => {
   // 先答者生效, in the one case batching created: the manager's answer to
   // question 3 landed and its watcher took it while the user was still on
-  // question 1 — so by the time the user skips the rest, question 3 is not a
-  // pending question at all. The skip only ever interprets SILENCE.
+  // question 1 — so by the time the user closes the second box, question 3 is
+  // not a pending question at all. Closing only ever interprets SILENCE.
   const h = harness(async (title, self) => {
     if (title.includes("第一题")) {
       const third = requestsOn(self.io).find((r) => r.title.includes("第三题"))!;
@@ -357,12 +356,12 @@ test("an answer the manager already WON survives the user skipping the rest", as
       await new Promise((resolve) => { setTimeout(resolve, 5); });
       return "A";
     }
-    return SKIP_REST_CHOICE;
+    return undefined;
   });
 
   await h.run(THREE);
 
-  assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["answered", "skipped", "answered"]);
+  assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["answered", "unanswered", "answered"]);
   assert.equal(h.state.askUser?.answers[2]?.answer, "F",
     "an answer the race delivered is honoured, whatever stopped the rest");
   assert.equal(projectChannel(records(h.io)).openRequests.length, 0);

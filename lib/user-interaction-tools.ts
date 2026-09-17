@@ -51,7 +51,6 @@ import {
   resumeFrom,
   buildNoDialogNotice,
   progressLabel,
-  buildChoiceList,
   choiceSpecOf,
   resolveQuestion,
 
@@ -59,13 +58,10 @@ import {
   formatTranscriptSummary,
   needsUserReply,
   isGrantableScope,
-  MAX_QUESTIONS,
-  SKIP_REST_CHOICE,
   type AskAnswer,
   type AskQuestion,
-  type InterviewStop,
 } from "./ask-user.ts";
-import { MAX_CHOICE_OPTIONS } from "./choice-dialog.ts";
+import { choiceRows, MAX_CHOICE_OPTIONS } from "./choice-dialog.ts";
 // The batch id is minted with the same collision-resistant helper the channel
 // uses for its own record ids — one generator, not a second convention.
 import { newChannelId } from "./orchestrator-channel.ts";
@@ -75,7 +71,7 @@ export interface UiContext {
   hasUI?: boolean;
   ui?: {
     select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
-    input?: (title: string, placeholder?: string, opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
+    editor?: (title: string, opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
     notify?: (message: string, type?: "info" | "warning" | "error") => void;
   };
 }
@@ -100,7 +96,7 @@ export interface UserInteractionToolDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; signal?: AbortSignal; extraRows?: string[] },
+    opts?: { body?: string; signal?: AbortSignal },
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -164,34 +160,17 @@ export type ConsentToolDeps = Pick<
 // ---------- ask_user ----------
 
 /**
- * The question's own first line, short enough to sit in a box title.
- *
- * WHY THE TITLE NEEDS IT (reviewer Nit, 2026-09-14): the question text lives in
- * the BODY (which reaches the box whole — the row budget is gone, 2026-09-16),
- * and the reason box the template raises for
- * `✎ 不选，我说明原因` renders `spec.title` ALONE — the box the user types
- * their objection into would have said only 「问题 1/3」. One line of the
- * question is part of that title, which is why the ⚠️ notice sits AHEAD of it
- * (see questionDialogTitle): the box is read top-down, and the notice is the
- * part nobody may miss. (Until 2026-09-16 a title budget also decided what
- * survived; the budget is gone, the order is not.)
- */
-function questionHeadline(q: AskQuestion): string {
-  const first = q.text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
-  // Cut by CODE POINTS, not UTF-16 units: `slice` splits a surrogate pair in
-  // half and prints a replacement character (reviewer Nit, 2026-09-14).
-  const points = [...first];
-  return points.length > HEADLINE_MAX_CHARS ? `${points.slice(0, HEADLINE_MAX_CHARS).join("")}…` : first;
-}
-
-/** How much of the question's first line the title carries. */
-const HEADLINE_MAX_CHARS = 60;
-
-/**
  * The box title for one question — the ONE place its order is decided.
  *
- * ORDER STILL MATTERS (and it mattered more before 2026-09-16, when the title
- * was cut from the TAIL): a ⚠️ authorization notice buried under a progress
+ * IT IS A BARE PROGRESS LABEL (user decision, 2026-09-17). It used to carry
+ * the question's first line cut at 60 characters — a half-sentence sitting
+ * directly above the whole question, which is what the user saw and asked to
+ * be rid of: the body below says everything the stub did, and the stub only
+ * ever said it worse. What the reason box needs to know about the question now
+ * rides in ITS OWN title instead (lib/choice-dialog.ts's `reasonTitleOf` gets
+ * the same head), so the 2026-09-14 blindness fix survives intact.
+ *
+ * ORDER STILL MATTERS: a ⚠️ authorization notice buried under a progress
  * label is easy to miss however long the box may be, and the notice
  * announcing that
  * 「推荐」 grants a proxy authority would be gone while picking that row still
@@ -200,7 +179,7 @@ const HEADLINE_MAX_CHARS = 60;
  */
 function questionDialogTitle(q: AskQuestion, index: number, total: number): string {
   const notice = grantNotice(q).trim();
-  const label = `问题 ${progressLabel(index, total)}：${questionHeadline(q)}`;
+  const label = `问题 ${progressLabel(index, total)}`;
   return notice ? `${notice}\n${label}` : label;
 }
 
@@ -249,7 +228,7 @@ export async function doAskUser(
       isError: true,
     };
   }
-  const { questions, dropped: droppedQuestions, trimmedOptions } = checked;
+  const { questions, trimmedOptions } = checked;
   const uiCtx = ctx as UiContext;
   // NO UI AT ALL (print / json / headless RPC): pi hands extensions a
   // no-op UI whose dialogs resolve to undefined and whose notify does
@@ -275,15 +254,15 @@ export async function doAskUser(
   // the dialogs close.
   deps.showToUser(uiCtx, "───── AI 有问题要问你 ─────", questions.map((q, i) =>
     `${progressLabel(i, questions.length)} ${q.text}${grantNotice(q)}` +
-    `\n   选项：${buildChoiceList(q).join(" / ")}`).join("\n"));
+    `\n   选项：${choiceRows(choiceSpecOf(q)).join(" / ")}`).join("\n"));
 
   // An interview interrupted earlier (crash, restart, or the agent
   // re-submitting the same list) resumes where it stopped: the questions
   // the user already settled are not asked again.
   const answers: AskAnswer[] = resumeFrom(state.askUser, questions);
   const resumedCount = answers.length;
-  /** Why the questions still unshown will never be shown. */
-  let stopped: InterviewStop | undefined;
+  /** Is the interview already stopped? Set when a box is closed unanswered. */
+  let stopped = false;
   /** Did ANY dialog actually render? A no is what makes this headless. */
   let anyDialog = false;
 
@@ -319,7 +298,7 @@ export async function doAskUser(
   const asks = remaining.map((q, offset) => {
     const index = firstIndex + offset;
     const prompt = `问题 ${progressLabel(index, questions.length)}\n${q.text}${grantNotice(q)}`;
-    const choices = buildChoiceList(q);
+    const choices = choiceRows(choiceSpecOf(q));
     // EITHER the user or the project manager may answer (when this session is
     // an orchestration child). The channel request carries the question and
     // every row VERBATIM, which is why the supervisor never had to read this
@@ -342,18 +321,16 @@ export async function doAskUser(
         await gates[offset]!.opened;
         // Already settled (the project manager answered it through the
         // channel), or the interview stopped: never put a dead box on screen.
-        if (signal.aborted || stopped !== undefined) return undefined;
+        if (signal.aborted || stopped) return undefined;
         // ONE renderer for every dialog in the gate — the extension's
-        // `askChoice` — plus the
-        // interview's own escape row, which is not part of the template
-        // because only an interview has later questions to skip.
+        // `askChoice`, which is the template plus the host's own boxes.
         //
-        // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). The title
-        // is the short label the reason box repeats; the question is the long
-        // half and belongs in the body. (When a row budget existed this ALSO
-        // kept a 1200-character question from sizing the box — the budget is
-        // gone, the placement is not.) The full question is in the transcript
-        // above (printed before the first box), which is where a long text is
+        // THE QUESTION RIDES IN THE BODY (2026-09-14). The title is the short
+        // label the reason box repeats; the question is the long half and
+        // belongs in the body. (When a row budget existed this ALSO kept a
+        // 1200-character question from sizing the box — the budget is gone,
+        // the placement is not.) The full question is in the transcript above
+        // (printed before the first box), which is where a long text is
         // readable.
         //
         // THE GRANT NOTICE STAYS OUT OF THE BODY (reviewer P1, 2026-09-14).
@@ -375,7 +352,6 @@ export async function doAskUser(
           {
             body: q.text,
             signal,
-            extraRows: [SKIP_REST_CHOICE],
           },
         );
       },
@@ -390,10 +366,9 @@ export async function doAskUser(
     if (outcome.answer !== undefined) anyDialog = true;
     const resolution = resolveQuestion(q, outcome.answer, {
       interrupted: outcome.by === "interrupted",
-      ...(stopped === undefined ? {} : { stopped }),
     });
     answers.push(resolution.answer);
-    if (resolution.stop !== undefined) stopped ??= resolution.stop;
+    if (resolution.stop) stopped = true;
     if (resolution.answer.kind === "answered") {
       // GRANT DOOR 1/3 (2026-09-16, reviewer P1 fix): a question carrying a
       // grantScope mints the proxy grant ONLY when the user picked the exact
@@ -405,13 +380,13 @@ export async function doAskUser(
         deps.grantProxyScope(q.grantScope, "ask-user");
       }
     }
-    // OPENING THE NEXT GATE IS ALSO HOW A CUT-SHORT INTERVIEW SETTLES ITS
+    // OPENING THE NEXT GATE IS ALSO HOW A STOPPED INTERVIEW SETTLES ITS
     // LEFTOVERS. Once `stopped` is set, the next renderer returns immediately,
     // which resolves that question through the same race as any other and
-    // writes its `request-settled` record (`dismissed` for a skip; an
-    // instruct has already settled the whole batch as `interrupted`). So a
-    // question nobody will ever see stops ringing on the project manager's
-    // receipt instead of hanging there unanswerable.
+    // writes its `request-settled` record (`dismissed` for a box the user
+    // closed; an instruct has already settled the whole batch as
+    // `interrupted`). So a question nobody will ever see stops ringing on the
+    // project manager's receipt instead of hanging there unanswerable.
     gates[offset + 1]?.open();
     // Persisted after EVERY question: an interview that dies here resumes
     // at the next one instead of asking the user everything again.
@@ -454,7 +429,6 @@ export async function doAskUser(
       type: "text",
       text: `review-gate: ask_user 采访完成（${formatTranscriptSummary(answers)}）。\n${formatAnswers(answers)}\n` +
         (resumedCount ? `（前 ${resumedCount} 题沿用了上次中断前的回答，没有重复问用户。）\n` : "") +
-        (droppedQuestions ? `（提交了 ${questions.length + droppedQuestions} 个问题，只问了前 ${MAX_QUESTIONS} 个；其余请下一轮再问。）\n` : "") +
         (trimmedOptions ? `（有 ${trimmedOptions} 个问题的选项超过 ${MAX_CHOICE_OPTIONS} 个，已截断到前 ${MAX_CHOICE_OPTIONS} 个。）\n` : "") +
         (pending
           ? "有问题没得到回答 — 循环已暂停，等用户的下一条消息；不要替他决定。"
@@ -475,13 +449,13 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
     name: "ask_user",
     label: "Ask The User",
     // THE INTERVIEW RULE LIVES HERE (user decision, 2026-09-06): optional, and
-    // uncapped in the number of questions. This description is the ONE full
-    // statement of it — it is what the model reads at the moment it decides
-    // whether to ask, and it is the only place that can quote the real
-    // per-call cap. `LOOP_GOAL_MISSING_DIRECTIVE` (lib/loop-goal.ts) carries a
-    // one-line summary and points here; do not let that grow back into a
-    // second wording, which is how the old "ask fewer questions" copy survived
-    // in two places at once.
+    // UNCAPPED in the number of questions — and since 2026-09-17 uncapped in
+    // fact, not just in prose: the cap that DROPPED a long list's tail is gone.
+    // This description is the ONE full statement of the rule — it is what the
+    // model reads at the moment it decides whether to ask. `LOOP_GOAL_MISSING_DIRECTIVE`
+    // (lib/loop-goal.ts) carries a one-line summary and points here; do not let
+    // that grow back into a second wording, which is how the old "ask fewer
+    // questions" copy survived in two places at once.
 
     description:
       "Ask the user something — the ONE entry point for every moment that needs a human: " +
@@ -491,18 +465,21 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
       "the turn (that costs a whole iteration and the user may not even read it as a question). " +
       "EVERY QUESTION FOLLOWS THE GATE'S ONE TEMPLATE: 2–4 options, exactly one of them named " +
       "in `recommended` (the dialog marks it （推荐）), and the gate appends its own row " +
-      "「✎ 不选，我说明原因」 which opens a text box — so the user can always answer with a " +
+      "「✎ 不选，我说明原因」 which opens a MULTI-LINE editor (pi's own: newlines, paste, " +
+      "`ctrl+g` to write it in $EDITOR) — so the user can always answer with a " +
       "reason instead of picking anything. A question with fewer than 2 options, no " +
       "`recommended`, or a recommendation that is not one of the options REJECTS THE WHOLE " +
       "BATCH with no dialog shown — rewrite it and call again. There is no free-text question " +
       "any more. The gate runs the interview: one question at a time with its N / M progress, " +
-      "plus 「⏭ 跳过后续问题」. Every answer comes back at once, unanswered ones marked. Write " +
+      "and closing a box stops the rest — they come back unanswered. Every answer comes back at " +
+      "once. Write " +
       "questions that stand on their own. When later questions depend on the answer to an " +
       "earlier one (pick an architecture, then its details), call ask_user AGAIN for the " +
       "follow-up round instead of guessing the branch. ASK AS MANY AS THE REQUIREMENT IS " +
-      `WORTH: the interview itself is optional (no doubts ⇒ no questions), but there is no cap on ` +
-      `how many you may ask — up to ${MAX_QUESTIONS} per call and another round whenever you need ` +
-      "more. Never trim a real doubt to keep the count down; agreeing on the requirement is " +
+      `WORTH: the interview itself is optional (no doubts ⇒ no questions), and there is NO cap on ` +
+      "how many you may ask — one call may carry the whole list, and a follow-up round is for the " +
+      "questions that DEPEND on an earlier answer. Never trim a real doubt to keep the count down; " +
+      "agreeing on the requirement is " +
       "cheaper than building the wrong one.",
 
     parameters: Type.Object({
@@ -516,7 +493,7 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
             description: "Your own recommendation — MUST be exactly one of `options` (the gate rejects the batch otherwise)",
           }),
         }),
-        { description: `1-${MAX_QUESTIONS} questions, asked in order` },
+        { description: "The questions, asked in order" },
       ),
     }),
     execute: (_id, params, _signal, _onUpdate, ctx) => doAskUser(deps, params, ctx),

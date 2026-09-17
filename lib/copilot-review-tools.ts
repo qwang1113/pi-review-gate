@@ -54,9 +54,6 @@ import type { GateState } from "./gate-state.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import { ghError, type GhResult } from "./copilot-gh.ts";
 import { type ChoiceSpec } from "./choice-dialog.ts";
-// The interview's escape row, imported rather than re-spelled: "skip the rest"
-// is one convention in this gate, and ask-user.ts owns the constant.
-import { SKIP_REST_CHOICE } from "./ask-user.ts";
 import {
   COPILOT_TRIAGE_ASK_FROM_ROUND,
   findingBody,
@@ -187,7 +184,7 @@ export interface CopilotReviewToolDeps {
   askFinding(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; extraRows?: string[] },
+    opts: { body?: string; signal?: AbortSignal },
   ): Promise<string | undefined>;
   /**
    * Put text in front of the user, in the transcript, right now. False when
@@ -225,7 +222,7 @@ const REPLY_THREAD_CMD =
  * second thing to keep right. ponytail: sequential; batch the channel
  * requests here if a supervised child with 10 findings ever shows the cost.
  *
- * A STOP (the escape row, or an abort) does not undo anything: the answers
+ * A STOP (a closed box, or an abort) does not undo anything: the answers
  * already given are kept and persisted with the rest of the state, and the
  * findings that were never asked are simply still unanswered — which asks
  * them again on the next call instead of inventing a decision.
@@ -236,15 +233,15 @@ async function askFindings(
   signal: AbortSignal | undefined,
   findings: readonly CopilotThread[],
   current: CopilotTriageState | undefined,
-): Promise<{ triage: CopilotTriageState | undefined; notes: Map<string, string>; deferred: number; asked: number }> {
-  const plan = triageAskPlan(findings, current);
+): Promise<{ triage: CopilotTriageState | undefined; notes: Map<string, string>; asked: number }> {
+  const pending = triageAskPlan(findings, current);
   /** What the user said when they picked NONE of the three answers. */
   const notes = new Map<string, string>();
   let triage = current;
   let stopped = false;
-  for (const [index, thread] of plan.ask.entries()) {
+  for (const [index, thread] of pending.entries()) {
     if (stopped || signal?.aborted) break;
-    const spec = findingChoiceSpec(thread, index, plan.ask.length);
+    const spec = findingChoiceSpec(thread, index, pending.length);
     const body = findingBody(thread);
     // THE TRANSCRIPT COPY GOES UP BEFORE THE BOX. It used to matter twice:
     // the dialog's body was fitted to a row budget, so the tail of a long
@@ -256,21 +253,21 @@ async function askFindings(
     deps.showToUser(ctx, `───── ${spec.title} ─────`, body);
     const picked = await deps.askFinding(ctx, spec, {
       body,
-      extraRows: [SKIP_REST_CHOICE],
       ...(signal ? { signal } : {}),
     });
     const outcome = triagePickFrom(picked, spec);
-    if (outcome.kind === "skip-rest") {
-      stopped = true;
-      continue;
-    }
     if (outcome.kind === "unanswered") {
       if (outcome.reason) notes.set(findingKey(thread), outcome.reason);
+      // CLOSING THE BOX STOPS THE ROUND (2026-09-17): no box came back at all,
+      // so the user is done answering for now. The findings left unasked hold
+      // no record — which is exactly what puts them back in front of the user
+      // on the next call.
+      if (picked === undefined) stopped = true;
       continue;
     }
     triage = recordDecision(triage, thread, outcome.decision, new Date().toISOString(), outcome.reason);
   }
-  return { triage, notes, deferred: plan.deferred, asked: plan.ask.length };
+  return { triage, notes, asked: pending.length };
 }
 
 /** Where one finding is, as one line an agent can act on. */
@@ -293,7 +290,6 @@ function triageText(args: {
   rounds: number;
   groups: CopilotTriageGroups;
   notes: Map<string, string>;
-  deferred: number;
   resolved: number;
   answered: number;
 }): string {
@@ -344,9 +340,6 @@ function triageText(args: {
   }
   if (groups.irrelevant.length > 0) {
     out.push(`「与我无关」的那几条：只 resolve —— ${RESOLVE_THREAD_CMD}`);
-  }
-  if (args.deferred > 0) {
-    out.push(`（还有 ${args.deferred} 条没来得及问用户，下一次 copilot_review 会接着问。）`);
   }
   out.push("Then call copilot_review again.");
   return out.join("\n");
@@ -965,7 +958,6 @@ async function doCopilotReview(
       rounds: next.rounds,
       groups,
       notes: triageRun.notes,
-      deferred: triageRun.deferred,
       resolved: analysis.resolved,
       answered: analysis.answered,
     })
@@ -1008,7 +1000,6 @@ async function doCopilotReview(
             decline: groups.decline.length,
             irrelevant: groups.irrelevant.length,
             unanswered: groups.unanswered.length,
-            deferred: triageRun.deferred,
           },
         }),
     },

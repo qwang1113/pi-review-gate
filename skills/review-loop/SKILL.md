@@ -510,8 +510,9 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
   product decision, scope, missing access — goes through `ask_user({questions})`.
   It runs the interview (one question at a time with its N / M progress; every
   question follows the gate's ONE template — 2–4 options, exactly one marked
-  （推荐）, and a "✎ 不选，我说明原因" row that opens a reason box — plus
-  「⏭ 跳过后续问题」) and PAUSES the loop until the answers come back, all at
+  （推荐）, and a "✎ 不选，我说明原因" row that opens a multi-line reason editor;
+  closing a box stops the rest, which come back unanswered) and PAUSES the loop
+  until the answers come back, all at
   once. A question with fewer than 2 options or no recommendation is refused
   with no dialog shown. Never
   write the question into your reply and end the turn: that costs an iteration

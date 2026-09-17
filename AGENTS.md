@@ -483,8 +483,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   请求处理），因此它们同在项目经理的**第一份**回执里；`orchestrator_answer` 的
   可选 `answers` 数组一次答完整批，**裁决仍只有一份实现**（单问与批量共用同一
   条校验链，批量不是绕过 crosscheck / 约束 8 的后门），每条独立成败、写进通道的
-  不回滚。子会话那边**仍逐个弹框**，先答者生效这条不变；采访被「跳过后续」或被
-  instruct 打断时，没展示的题就地销账（分别记 `dismissed` / `interrupted`），
+  不回滚。子会话那边**仍逐个弹框**，先答者生效这条不变；用户关掉对话框（＝停整台
+  采访）或采访被 instruct 打断时，没展示的题就地销账（分别记 `dismissed` /
+  `interrupted`），
   不会在回执里挂成永远没人答的请求。同理，`judge_answer` 在有多个待答问题时也
   必须指明 `requestId`（judge pane 与子会话走同一条通道）。
 - **投递走 `pi.sendUserMessage`**：`orchestrator_instruct({mode})` 把文本写进

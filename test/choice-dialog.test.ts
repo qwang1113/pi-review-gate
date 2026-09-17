@@ -89,40 +89,52 @@ test("an unknown line is returned verbatim — the caller decides what it means"
 
 // ---- rendering ----
 
-function fakeUi(picks: { select?: string | undefined; input?: string | undefined }): {
+function fakeUi(picks: { select?: string | undefined; editor?: string | undefined }): {
   ui: ChoiceUi;
-  calls: { selects: string[][]; inputs: string[] };
+  calls: { selects: string[][]; reasons: string[]; signals: (AbortSignal | undefined)[] };
 } {
-  const calls = { selects: [] as string[][], inputs: [] as string[] };
+  const calls = { selects: [] as string[][], reasons: [] as string[], signals: [] as (AbortSignal | undefined)[] };
   return {
     ui: {
       select: async (_title, options) => { calls.selects.push(options); return picks.select; },
-      input: async (title) => { calls.inputs.push(title); return picks.input; },
+      editor: async (title, opts) => {
+        calls.reasons.push(title);
+        calls.signals.push(opts?.signal);
+        return picks.editor;
+      },
     },
     calls,
   };
 }
 
+test("the signal reaches the reason editor — that is what takes the box down", async () => {
+  const { ui, calls } = fakeUi({ select: DECLINE_ROW, editor: "x" });
+  const controller = new AbortController();
+  await renderChoice(ui, spec(), { signal: controller.signal });
+  assert.equal(calls.signals[0], controller.signal);
+});
+
 test("picking an option returns it and never opens the reason box", async () => {
   const { ui, calls } = fakeUi({ select: "B" });
   assert.equal(await renderChoice(ui, spec()), "B");
-  assert.deepEqual(calls.inputs, []);
+  assert.deepEqual(calls.reasons, []);
 });
 
-test("picking the decline row opens the reason box and returns row + reason", async () => {
-  const { ui, calls } = fakeUi({ select: DECLINE_ROW, input: "  两个都不行  " });
+test("picking the decline row opens the reason EDITOR and returns row + reason", async () => {
+  const { ui, calls } = fakeUi({ select: DECLINE_ROW, editor: "  两个都不行  " });
   assert.equal(await renderChoice(ui, spec()), `${DECLINE_ROW}：两个都不行`);
-  assert.equal(calls.inputs.length, 1);
-  assert.match(calls.inputs[0] ?? "", /不选的原因/);
+  assert.equal(calls.reasons.length, 1);
+  assert.match(calls.reasons[0] ?? "", /不选的原因/);
+  assert.match(calls.reasons[0] ?? "", /!chat/, "the hint travels with the editor's title");
 });
 
-test("an empty reason box still returns the bare decline row", async () => {
-  const { ui } = fakeUi({ select: DECLINE_ROW, input: "   " });
+test("an empty reason still returns the bare decline row", async () => {
+  const { ui } = fakeUi({ select: DECLINE_ROW, editor: "   " });
   assert.equal(await renderChoice(ui, spec()), DECLINE_ROW);
 });
 
 test("a dismissed reason box is a dismissal — the user backed out of both halves", async () => {
-  const { ui } = fakeUi({ select: DECLINE_ROW, input: undefined });
+  const { ui } = fakeUi({ select: DECLINE_ROW, editor: undefined });
   assert.equal(await renderChoice(ui, spec()), undefined);
 });
 
@@ -131,20 +143,19 @@ test("no UI at all is a dismissal, never an invented answer", async () => {
   assert.equal(await renderChoice({}, spec()), undefined);
 });
 
-test("the body is appended to the title and the rows stay the template's", async () => {
-  const { ui, calls } = fakeUi({ select: "A" });
+test("the body rides on BOTH titles: the list's and the reason editor's", async () => {
+  const { ui, calls } = fakeUi({ select: DECLINE_ROW, editor: "x" });
   await renderChoice(ui, spec(), { body: "补充说明" });
   assert.deepEqual(calls.selects, [["A（推荐）", "B", DECLINE_ROW]]);
+  // An interview question's list title is a bare `问题 n / m`, so an editor
+  // that repeated only that would ask the user to explain themselves about a
+  // question it never showed (user decision, 2026-09-17).
+  assert.match(calls.reasons[0] ?? "", /补充说明/);
 });
 
-test("extra rows ride along without becoming part of the template", async () => {
-  const { ui, calls } = fakeUi({ select: "⏭ 跳过后续问题" });
-  assert.equal(await renderChoice(ui, spec(), { extraRows: ["⏭ 跳过后续问题"] }), "⏭ 跳过后续问题");
-  assert.deepEqual(calls.selects, [["A（推荐）", "B", DECLINE_ROW, "⏭ 跳过后续问题"]]);
-});
-
-test("the default reason hint names the interview escapes", () => {
+test("the default reason hint advertises no escape that is not honored", () => {
   assert.match(CHOICE_REASON_HINT, /!chat/);
-  assert.match(CHOICE_REASON_HINT, /!skip/);
+  assert.doesNotMatch(CHOICE_REASON_HINT, /skip/i,
+    "the skip-the-rest escape is gone with the row that used to advertise it");
   assert.ok(MAX_CHOICE_OPTIONS >= 2);
 });

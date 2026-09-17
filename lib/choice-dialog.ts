@@ -45,8 +45,8 @@ export const DECLINE_ROW = "✎ 不选，我说明原因";
  */
 export const REVISE_ROW = "✎ 我要改，我说明原因";
 
-/** What the reason box hints at; `!chat`/`!skip` are the interview escapes. */
-export const CHOICE_REASON_HINT = "直接输入原因；!chat=改在聊天里答，!skip=跳过后续";
+/** What the reason box accepts; `!chat` is the interview's escape. */
+export const CHOICE_REASON_HINT = "直接输入原因；!chat=改在聊天里答";
 
 /** Everything the template renders. */
 export interface ChoiceSpec {
@@ -58,8 +58,6 @@ export interface ChoiceSpec {
   recommended: string;
   /** Row label for "none of these" — {@link DECLINE_ROW} by default. */
   declineRow?: string;
-  /** Placeholder for the reason box — {@link CHOICE_REASON_HINT} by default. */
-  reasonPlaceholder?: string;
 }
 
 /** The decline row this spec actually uses. */
@@ -146,12 +144,34 @@ export function looksLikeDeclineRow(row: string): boolean {
 /** The `ui` surface this template needs — a structural subset of pi's. */
 export interface ChoiceUi {
   select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
-  input?: (title: string, placeholder?: string, opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
+  /**
+   * The reason box — a MULTI-LINE editor (user decision, 2026-09-17), not the
+   * single-line prompt it used to be: the user is writing an explanation, and
+   * pi's own editor brings newline handling, paste and `ctrl+g` into their
+   * $EDITOR. The signal is what takes the box off the screen when the other
+   * side answers first (lib/orchestrator-child-channel.ts), so a host that
+   * implements this WITHOUT the signal silently loses that.
+   *
+   * WHY NOT pi's `ui.editor` DIRECTLY: it takes no signal, and a box that
+   * cannot be taken down is how an orchestrator's answer and a user's typing
+   * both look like they worked. `extensions/review-gate.ts` builds this from
+   * pi's own `ExtensionEditorComponent` (same box, signal attached).
+   */
+  editor?: (title: string, opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
 }
 
-/** The reason box's title, so a dismissed box is not read as a decline. */
-export function reasonTitleOf(spec: ChoiceSpec): string {
-  return `${spec.title}\n（不选的原因——留空等于只说「不选」）`;
+/**
+ * The reason box's title: what is being declined, then the hint.
+ *
+ * IT CARRIES THE WHOLE HEAD (2026-09-17). An interview question's list title is
+ * a bare `问题 n / m` now (the truncated first line is gone), and the reason
+ * box renders its own title ALONE — so the full question text has to ride
+ * here, or the user writes an explanation into a box that never says what it
+ * is about. That blindness is exactly what the old 60-character headline
+ * existed to prevent; carrying the WHOLE text fixes it properly.
+ */
+export function reasonTitleOf(dialogTitle: string): string {
+  return `${dialogTitle}\n（不选的原因——留空等于只说「不选」；${CHOICE_REASON_HINT}）`;
 }
 
 /**
@@ -167,26 +187,22 @@ export function reasonTitleOf(spec: ChoiceSpec): string {
  * `body` is the long half of the question — counts, consequences, the facts
  * being confirmed — and is passed through WHOLE (user decision, 2026-09-16:
  * the row budget that used to fit it is gone, see lib/renderer-mode.ts); it is
- * appended to the title, which is what pi's
- * select renders. `extraRows` are rows the CALLER owns — an interview's
- * `⏭ 跳过后续问题` is the only one today — appended after the template's
- * decline row and deliberately not understood here: the caller decides what
- * they mean.
+ * appended to the title, which is what pi's select renders, AND to the reason
+ * editor's title, so the box the user writes in knows what it is about.
+ *
+ * There is no longer an `extraRows` (2026-09-17): it existed for exactly one
+ * caller-owned row — the interview's own escape — and that row is gone. A row
+ * the template itself does not own has no business here.
  */
 export async function renderChoice(
   ui: ChoiceUi | undefined,
   spec: ChoiceSpec,
-  opts: { signal?: AbortSignal; body?: string; extraRows?: string[] } = {},
+  opts: { signal?: AbortSignal; body?: string } = {},
 ): Promise<string | undefined> {
-  const rows = [...choiceRows(spec), ...(opts.extraRows ?? [])];
   const title = opts.body ? `${spec.title}\n${opts.body}` : spec.title;
-  const picked = await ui?.select?.(title, rows, opts.signal ? { signal: opts.signal } : undefined);
+  const picked = await ui?.select?.(title, choiceRows(spec), opts.signal ? { signal: opts.signal } : undefined);
   if (picked !== declineRowOf(spec)) return picked;
-  const reason = await ui?.input?.(
-    reasonTitleOf(spec),
-    spec.reasonPlaceholder ?? CHOICE_REASON_HINT,
-    opts.signal ? { signal: opts.signal } : undefined,
-  );
+  const reason = await ui?.editor?.(reasonTitleOf(title), opts.signal ? { signal: opts.signal } : undefined);
   if (reason === undefined) return undefined;
   const trimmed = reason.trim();
   return trimmed ? `${declineRowOf(spec)}：${trimmed}` : declineRowOf(spec);

@@ -56,7 +56,14 @@ import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+// A VALUE import, the first in this repository, and a deliberate one: the
+// reason box is pi's OWN multi-line editor component (newlines, paste,
+// `ctrl+g` into $EDITOR), built here rather than called as `ui.editor()` so the
+// dialog can be TAKEN DOWN — see `reasonBoxUi` below. No second copy of pi is
+// involved: the extension loader aliases this specifier to pi's own entry
+// (dist/core/extensions/loader.js `_aliases`, `piCodingAgentEntry = packageIndex`).
+import { ExtensionEditorComponent } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import {
@@ -78,6 +85,7 @@ import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "..
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
+import { hostReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
@@ -2515,7 +2523,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     log: (message) => { log(message); },
     orchestrationId: currentOrchestrationId,
     adoptOrchestrationId,
-    askChoice: (spec, opts) => askChoice(latestCtx ?? {}, spec, opts),
+    askChoice: (spec, opts) => askChoice(asChoiceHost(latestCtx ?? {}), spec, opts),
     // O-1 — the plan's full text goes into the TRANSCRIPT before the dialog
     // asks about it, exactly like the loop goal. A plan approval binds to
     // content, so a truncated dialog body was asking the user to sign
@@ -4830,10 +4838,72 @@ export default function reviewGate(pi: ExtensionAPI) {
    * `undefined` is then read as "somebody else settled this", not as a
    * refusal (lib/orchestrator-child-channel.ts owns that distinction).
    */
+  /**
+   * The template's `ui` seam, with the REASON BOX wired to pi's own editor
+   * (2026-09-17).
+   *
+   * WHY NOT `ui.editor()` DIRECTLY: pi's signature is
+   * `editor(title, prefill?)` — it takes no `signal`. This gate's dialog model
+   * rests on a box being taken OFF THE SCREEN when the other side answers
+   * first (lib/orchestrator-child-channel.ts), and a box that stays up after
+   * its answer is settled collects typing nobody will ever read. Building
+   * `ExtensionEditorComponent` here gets the identical box WITH the signal.
+   *
+   * HOSTS WITHOUT `custom` (RPC mode): `ui.custom()` there resolves
+   * `undefined` without ever calling the factory (pi
+   * dist/modes/rpc/rpc-mode.js), which is distinguishable from a user closing
+   * a box — the factory ran in that case — so we fall back to `ui.editor()`,
+   * which RPC DOES forward to its host. Losing the signal there is the lesser
+   * evil: calling it "the user closed the box" would stop the whole interview
+   * (lib/ask-user.ts `resolveQuestion`).
+   */
+  /**
+   * A host context as the template's narrow `ui` seam.
+   *
+   * THE CAST IS LOAD-BEARING (2026-09-17): pi's `ExtensionContext.ui` no longer
+   * SATISFIES `ChoiceUi` structurally, because the reason box's `editor` takes
+   * a `signal` where pi's takes a prefill (see `reasonBoxUi` below for why).
+   * Everything else on the seam is pi's own, unchanged. One named cast beats a
+   * bare `as` at every call site, which is where it would drift.
+   */
+  function asChoiceHost(ctx: unknown): { ui?: ChoiceUi } {
+    return ctx as { ui?: ChoiceUi };
+  }
+
+  /**
+   * The template's `ui` seam, with the REASON BOX wired to pi's own editor.
+   *
+   * THE RULE lives in lib/reason-editor.ts (why not `ui.editor()` directly, and
+   * how a host that cannot render `custom` is told apart from a user closing the
+   * box). What is left here is only what needs pi or this session: `ui.custom`,
+   * pi's `ExtensionEditorComponent`, and the host's own `editor` as the fallback
+   * for a host with no custom components at all (RPC mode).
+   */
+  function reasonBoxUi(host: ChoiceUi | undefined): ChoiceUi | undefined {
+    const h = host as (ChoiceUi & { custom?: ExtensionUIContext["custom"] }) | undefined;
+    if (!h?.custom) return host;
+    const { custom } = h;
+    return {
+      ...host,
+      editor: hostReasonEditor({
+        custom: custom.bind(h) as CustomDialogHost,
+        ...(host?.editor ? { fallback: host.editor.bind(host) } : {}),
+        build: (tui, keybindings, title, done) => new ExtensionEditorComponent(
+          tui as ConstructorParameters<typeof ExtensionEditorComponent>[0],
+          keybindings as ConstructorParameters<typeof ExtensionEditorComponent>[1],
+          title,
+          undefined,
+          done,
+          () => done(undefined),
+        ),
+      }),
+    };
+  }
+
   async function askChoice(
     uiCtx: { ui?: ChoiceUi },
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; extraRows?: string[] } = {},
+    opts: { body?: string; signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
     // NO BUDGET, NO TRUNCATION (user decision, 2026-09-16). This used to fit
     // the title and the body into a rendered-row budget, because a dialog tall
@@ -4844,10 +4914,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // approval — and the renderer the user runs (`fullscreen`, the host owns
     // the screen and scrolls) never had the problem. A session that is NOT on
     // it is told once instead: see lib/renderer-mode.ts.
-    const answer = await renderChoice(uiCtx.ui, spec, {
+    const answer = await renderChoice(reasonBoxUi(uiCtx.ui), spec, {
       ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(opts.signal ? { signal: opts.signal } : {}),
-      ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
     });
     // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
     // dialog the gate shows — ask_user's interview, the restatement / goal /
@@ -10850,13 +10919,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           dialogKind: "select",
           topic: "other",
           title: opts.body ? `${spec.title}\n${opts.body}` : spec.title,
-          options: [...choiceRows(spec), ...(opts.extraRows ?? [])],
+          options: choiceRows(spec),
           payload: `推荐答案：${spec.recommended}`,
         },
         ui.hasUI === true,
         (signal) => askChoice(ui, spec, {
           ...(opts.body === undefined ? {} : { body: opts.body }),
-          ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
           signal,
         }),
       );
@@ -11153,7 +11221,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         try {
           const pick = parseChoice(
             await askChoice(
-              ctx as unknown as ExtensionContext,
+              asChoiceHost(ctx),
               spec,
               { body: buildModeConfirmMessage(effective, params.reason) },
             ),
