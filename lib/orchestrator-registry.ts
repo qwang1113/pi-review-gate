@@ -206,7 +206,7 @@ export interface OrchestratorRuntime {
 }
 /** One proxy authority the user granted the project manager. */
 export interface OrchestrationGrant {
-  /** What the PM may do on the user's behalf: `sensitive-edit` today. */
+  /** What the PM may do on the user's behalf: `sensitive-edit` or `tmux-access`. */
   scope: string;
   /** ISO time the user granted it. */
   grantedAt: string;

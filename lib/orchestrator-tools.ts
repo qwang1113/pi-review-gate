@@ -822,15 +822,12 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
   // mode: the agent has to pick, and the one it picks is the one that happens
   // to be shorter to type.
 
-  // Two tools answering "how are things" is philosophy two's exact failure
-  // mode: the agent has to pick, and the one it picks is the one that happens
-  // to be shorter to type.
-
   // THERE IS NO `orchestrator_notify` EITHER (user decision, 2026-09-17).
   // Letting the manager choose when to interrupt the human is exactly what the
   // notification rule exists to prevent; the gate now raises the banner itself
-  // for three events and for nothing else (lib/user-notify.ts owns the policy,
-  // and the extension owns the three call sites: completion, abnormal exit,
-  // and a dialog that is waiting for the human). A manager that needs a person
-  // calls `ask_user`, which IS one of those three.
+  // for three kinds of event and for nothing else (lib/user-notify.ts owns the
+  // policy; the extension wires the four call sites — completion, abnormal
+  // exit, a dialog that is waiting, and a plan decision being registered,
+  // which is the second entry point of the third kind). A manager that needs a
+  // person calls `ask_user`, which IS one of them.
 }
