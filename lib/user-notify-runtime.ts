@@ -224,7 +224,6 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
       process.on("exit", () => {
         const kind = exitNotifyKind({ cleanShutdown });
         if (!kind) return;
-        const state = deps.state();
         if (!mayNotifyUser({ taskMode: deps.taskMode(), stateVariant: env()[STATE_VARIANT_ENV] })) return;
         notify({
           kind,

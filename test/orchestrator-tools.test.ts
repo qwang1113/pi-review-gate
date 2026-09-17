@@ -748,19 +748,29 @@ test("tmux-access proxy answer: the PM needs the user's scope, exactly like a se
   assert.equal(hasGrant(w2.runtime(), "tmux-access"), true, "the scope the reviewer asked for is the one minted");
   assert.equal(hasGrant(w2.runtime(), "sensitive-edit"), false, "and it does not leak into the other scope");
 
-  // 3) THE PM's ANSWER IS ITSELF a ✎-row refusal: no grant, no dialog, refused.
-  //    (This is `looksLikeDeclineRow`, a different branch from case 1 — hence
-  //    the two cases.)
+  // 3) THE PM's ANSWER IS ITSELF the ✎ row — and that only means anything when
+  //    the ✎ row is one of the rows THIS request offered, or `resolveAnswer`
+  //    rejects it first and the branch below is never reached (reviewer P2).
+  //    To isolate `looksLikeDeclineRow` the row must NOT also match the regex
+  //    beside it: `✎ 不需要` has no 拒绝/取消/不选 in it, so only the ✎ is what
+  //    makes it a refusal.
   const w3 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const c3 = await spawnT1(w3);
-  ask(w3, c3);
-  const r3 = await w3.call("orchestrator_answer", {
-    childId: c3, answer: "✎ 不选，我说明原因：先不动 tmux",
+  w3.childAsks(c3, {
+    requestId: "req-t3",
+    title: "AI 请求在 bash 里使用 tmux 命令——是否授权？",
+    options: ["允许：本会话和接力继任者都能用 tmux", "只允许这一次", "拒绝", "✎ 不需要"],
+    topic: "tmux-access",
   });
-  assert.equal(r3.isError, true, "the ✎ row is a refusal — reading it as a grant request would be the worst misread");
-  assert.ok(!w3.shown.some((line) => line.includes("项目经理想代答")),
-    "a refusal never opens the grant door");
-  assert.equal(w3.channelOf(c3).filter((r) => r.kind === "answer").length, 0, "nothing written");
+  const r3 = await w3.call("orchestrator_answer", {
+    childId: c3, answer: "✎ 不需要",
+  });
+  assert.equal(r3.isError, undefined, replyText(r3));
+  assert.ok(!w3.shown.some((line) => line.includes("项目经理想代答")), "a refusal never opens the grant door");
+  assert.equal(hasGrant(w3.runtime(), "tmux-access"), false, "and it mints nothing");
+  const decl = w3.channelOf(c3).filter((r) => r.kind === "answer");
+  assert.equal(decl.length, 1, "the refusal is written — the child must see that it was refused");
+  assert.match(String(decl[0]!.answer), /✎ 不需要/);
 
   // 4) …and the decline ROW inside the grant dialog is a refusal too, whatever
   //    reason text it carries (it may well say 允许/授权 — the row is the
