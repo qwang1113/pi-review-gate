@@ -9,6 +9,7 @@ import {
   type UserInteractionToolDeps,
 } from "../lib/user-interaction-tools.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
+import type { ChoiceSpec } from "../lib/choice-dialog.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { SENSITIVE_GRANT_TTL_MS, type SensitiveGrant } from "../lib/sensitive-grant.ts";
 import { git, neutraliseHostGitConfig } from "./helpers/git.ts";
