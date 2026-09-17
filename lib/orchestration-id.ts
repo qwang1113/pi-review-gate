@@ -74,6 +74,31 @@ export function newOrchestrationId(repoRoot: string, now: number = Date.now()): 
 }
 
 /**
+ * Is the runtime on disk THIS session's to resume?
+ *
+ * The question is deliberately asked of the runtime's OWN `ownerSessionId`,
+ * never of "the sidecar carried my session id". Those look equivalent and are
+ * not: when a NEW session inherits a foreign runtime (the 2026-09-06 B1 rule,
+ * so a takeover has something to take over) the next persist writes that
+ * runtime under the new session's id — so one reload later the sidecar claims
+ * the bystander owns it, and answering from `sessionId` would hand a previous
+ * orchestration's children and plan approval to a session that never asked.
+ *
+ * A missing owner (an older sidecar) is NO, which leaves `orchestrator_attach`
+ * as the deliberate way in.
+ */
+export function storedRuntimeIsMine(opts: {
+  /** `state.orchestrator?.ownerSessionId` — absent on anything written before 2026-09-17. */
+  ownerSessionId: string | null | undefined;
+  /** This session's own id, if it has one yet. */
+  sessionId: string | null | undefined;
+}): boolean {
+  const owner = typeof opts.ownerSessionId === "string" ? opts.ownerSessionId.trim() : "";
+  const mine = typeof opts.sessionId === "string" ? opts.sessionId.trim() : "";
+  return owner !== "" && mine !== "" && owner === mine;
+}
+
+/**
  * WHICH ORCHESTRATION THIS PROCESS HOLDS WHEN IT STARTS — the startup half of
  * the address, and the third rule in this file's chain.
  *
@@ -95,18 +120,28 @@ export function newOrchestrationId(repoRoot: string, now: number = Date.now()): 
  * were alive, marked their tasks back to `pending`, and re-spawned duplicates.
  * The runtime was on disk the whole time; nothing but this rule was missing.
  *
- * WHY (2) IS GATED ON THE SESSION ID. A sidecar can hold ANOTHER session's
- * runtime — that is exactly the takeover case `orchestrator_attach` exists
- * for, and adopting it here would re-open the 2026-09-06 defect (a fresh
- * session silently taking over a previous orchestration's children and plan
- * approval). The caller answers that question by reading the sidecar's own
- * `sessionId`; this function never guesses it.
+ * WHY (2) IS GATED ON AN OWNER, NOT ON THE SIDECAR'S SESSION ID. A sidecar can
+ * hold ANOTHER session's runtime — that is exactly the takeover case
+ * `orchestrator_attach` exists for, and adopting it here would re-open the
+ * 2026-09-06 defect (a fresh session silently taking over a previous
+ * orchestration's children and plan approval). The sidecar's own `sessionId`
+ * LOOKS like it answers this and does not: the reset path deliberately keeps a
+ * foreign runtime on disk, and the next persist writes it under the NEW
+ * session's id — so one reload later the file claims the bystander owns it.
+ * `storedBelongsToThisSession` must therefore come from the runtime's own
+ * `ownerSessionId` (lib/orchestrator-registry.ts), which only a session that
+ * minted, inherited or adopted the address ever writes.
  */
 export function startupOrchestrationId(opts: {
   env: NodeJS.ProcessEnv;
   /** `state.orchestrator?.orchestrationId` — the persisted runtime, if any. */
   storedId: string | undefined;
-  /** True when that runtime came from a sidecar recording THIS session id. */
+  /**
+   * True when that runtime names THIS session as its owner
+   * (`OrchestratorRuntime.ownerSessionId`) — not "the sidecar carries my
+   * session id", which the reset path re-stamps on any session that merely
+   * inherited the record.
+   */
   storedBelongsToThisSession: boolean;
   repoRoot: string;
   now?: number;

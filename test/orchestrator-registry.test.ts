@@ -133,6 +133,11 @@ test("a well-formed runtime survives a round trip", () => {
     approvedPlanHash: GOOD_HASH,
     approvedPlanAt: NOW,
     ownPane: "%1",
+    // The session that HOLDS the orchestration (2026-09-17). It must round
+    // trip: it is the one fact that decides whether a reload may resume this
+    // record instead of demanding a takeover, so dropping it here would turn
+    // every reload of the owner back into the defect this field fixes.
+    ownerSessionId: "session-owner-1",
     relay: { handoffPath: "docs/h.md", at: NOW, successorPane: "%9" },
   };
   const cleaned = normalizeRuntime(JSON.parse(JSON.stringify(runtime)), "orch-abc-1");

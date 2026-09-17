@@ -50,12 +50,9 @@ import {
   judgeChannelTarget,
   projectChannel,
   readChannel,
-  reportConclusion,
-  reportText,
   HEARTBEAT_STALE_MS,
   type ChannelIO,
   type ChannelRecord,
-  type ReportConclusion,
   type ReviewScopeStamp,
 } from "./orchestrator-channel.ts";
 import {

@@ -31,10 +31,7 @@
 import assert from "node:assert/strict";
 
 import { registerOrchestratorStateTools } from "../../lib/orchestrator-tools.ts";
-import {
-  registerOrchestratorSessionTools,
-  type OrchestratorSessionDeps,
-} from "../../lib/orchestrator-session-tools.ts";
+import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session-tools.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
 import { beginApprovalLineage, snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";

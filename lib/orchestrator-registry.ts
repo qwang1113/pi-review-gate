@@ -119,6 +119,26 @@ export interface ChildSession {
 export interface OrchestratorRuntime {
   /** Stable address of this orchestration (lib/orchestration-id.ts). */
   orchestrationId: string;
+  /**
+   * WHICH SESSION holds this orchestration (2026-09-17).
+   *
+   * It exists so "may I resume MY orchestration after a reload" can be
+   * answered by a fact that cannot be re-stamped — see
+   * `startupOrchestrationId` in lib/orchestration-id.ts. The sidecar's own
+   * `sessionId` LOOKS like that fact and is not: `successorRuntime` keeps a
+   * foreign runtime when a NEW session takes over the file (the 2026-09-06 B1
+   * rule, so a takeover has something to take over), and the very next persist
+   * writes that runtime under the new session's id. Answering the question with
+   * `state.sessionId` therefore told a fresh session, one reload later, that a
+   * previous session's children were its own — a takeover with no
+   * `orchestrator_attach` and no dialog.
+   *
+   * Written only by a session that LEGITIMATELY holds the address: the one that
+   * minted it, the one it was inherited by, and the one that adopted it through
+   * `orchestrator_attach`. Absent (an older sidecar) ⇒ nobody may resume it
+   * implicitly, and the takeover path asks.
+   */
+  ownerSessionId?: string;
   /** The orchestrator's OWN pane: the left column, and its blast-radius limit. */
   ownPane?: string;
   children: ChildSession[];
@@ -551,10 +571,14 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   const approvedPlanHistory = dropped ? [] : normalizeApprovalLineage(obj.approvedPlanHistory);
 
   const successorPane = isPaneId(rawRelay?.successorPane) ? rawRelay.successorPane : undefined;
+  // The owner is an identity, not a path: non-empty and nothing else. It is
+  // never inferred, and never defaulted to anything.
+  const ownerSessionId = str(obj.ownerSessionId);
   return {
     orchestrationId,
     children,
     notify: { sentAt, lastByKey },
+    ...(ownerSessionId ? { ownerSessionId } : {}),
     ...(ownPane ? { ownPane } : {}),
     ...(approvalIntact && hash ? { approvedPlanHash: hash } : {}),
     ...(approvedPlanAt ? { approvedPlanAt } : {}),

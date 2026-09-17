@@ -18,10 +18,11 @@
  * The user's own words: 「谁启动, 干什么, 中间最好不要有空格, 空间很宝贵」 — the two
  * facts they need at a glance, in the order that scans best, with no room
  * spent on padding. It replaced a grammar that carried neither: `@t6-eng-i18n-
- * ci-cd-review-ga` said nothing about who opened the pane, and `@review-
- * goal-auditor` was IDENTICAL for two panes opened by different sessions — the
- * ambiguity the user hit in their own window (measured: window 1 held two
- * goal-auditors, one per opener, with byte-identical borders).
+ * ci-cd-review-ga` said nothing about who opened the pane, and a reviewer's
+ * title was the role and nothing else — so two goal-auditors opened by
+ * different sessions had IDENTICAL borders, the ambiguity the user hit in
+ * their own window (measured: one window held two of them, one per opener,
+ * with byte-identical titles).
  *
  * The owner is not a parameter anyone types: each opener derives it from its
  * OWN identity ({@link selfPaneOwner}) — the project manager is `pm`, an

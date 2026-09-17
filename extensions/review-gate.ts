@@ -252,7 +252,7 @@ import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
 // repository's own worst example of the architecture rule this round adds.
-import { orchestrationIdFromEnv, ORCHESTRATION_ID_ENV, startupOrchestrationId } from "../lib/orchestration-id.ts";
+import { orchestrationIdFromEnv, ORCHESTRATION_ID_ENV, startupOrchestrationId, storedRuntimeIsMine } from "../lib/orchestration-id.ts";
 import { orchestratorDoneProblems } from "../lib/orchestrator-gate.ts";
 import {
   ORCHESTRATOR_DIRECTIVE,
@@ -2496,22 +2496,34 @@ export default function reviewGate(pi: ExtensionAPI) {
   // without one mints its own the first time it needs it.
   let orchestrationIdValue: string | undefined = orchestrationIdFromEnv();
   /**
-   * Did the sidecar this session loaded record THIS session's id?
+   * The session that HOLDS this orchestration, as it is written to the
+   * sidecar (see `OrchestratorRuntime.ownerSessionId`).
    *
-   * It is the difference between "my orchestration, resumed" and "somebody
-   * else's runtime sitting on disk" — and only the first may be adopted
-   * without a takeover (lib/orchestration-id.ts `startupOrchestrationId`).
-   * Set by the state-restore below, which is the one place that knows.
+   * It answers ONE question — "is the runtime on disk mine to resume?" —
+   * and it is deliberately not `state.sessionId`: a fresh session that
+   * inherited a foreign runtime keeps it on disk under its OWN session id
+   * (the B1 rule), so the sidecar's session id cannot tell an owner from a
+   * bystander one reload later. Only the three legitimate holders set this:
+   * the session that resolved the address below, and the one that adopted it
+   * through `orchestrator_attach`.
    */
-  let restoredOwnState = false;
+  let orchestrationOwner: string | undefined;
   function currentOrchestrationId(): string {
     if (!orchestrationIdValue) {
+      const stored = state.orchestrator;
       orchestrationIdValue = startupOrchestrationId({
         env: process.env,
-        storedId: state.orchestrator?.orchestrationId,
-        storedBelongsToThisSession: restoredOwnState,
+        storedId: stored?.orchestrationId,
+        // The durable answer, never "did the sidecar carry my session id" —
+        // the reset path re-stamps that on every persist.
+        storedBelongsToThisSession: storedRuntimeIsMine({
+          ownerSessionId: stored?.ownerSessionId,
+          sessionId: state.sessionId,
+        }),
         repoRoot: primaryRepoRoot,
       });
+      // Whichever way it resolved, THIS session now holds it.
+      orchestrationOwner = state.sessionId ?? undefined;
     }
     return orchestrationIdValue;
   }
@@ -2527,6 +2539,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function adoptOrchestrationId(id: string): void {
     orchestrationIdValue = id;
+    // TAKEOVER IS A CLAIM: from here this session owns the address, and the
+    // sidecar must say so, or its own reload would refuse to resume it.
+    orchestrationOwner = state.sessionId ?? undefined;
   }
   /** Started BY an orchestrator as a worker (not as its relay successor). */
   function isOrchestrationChild(): boolean {
@@ -2537,7 +2552,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   // it is always fresh by the time one of them runs.
   let latestCtx: ExtensionContext | undefined;
   function persistOrchestration(runtime: OrchestratorRuntime): void {
-    state.orchestrator = runtime;
+    // THE OWNER RIDES WITH THE RECORD. A runtime written by a session that
+    // holds the address carries that session as its owner; one inherited but
+    // never claimed (the B1 reset path) keeps the owner it already had, which
+    // is what stops a reload from turning a bystander into the owner.
+    state.orchestrator = orchestrationOwner === undefined
+      ? runtime
+      : { ...runtime, ownerSessionId: orchestrationOwner };
     // No `if (latestCtx)`: an in-memory-only runtime would silently lose the
     // user's plan approval and the child registry on a restart. persist()
     // takes the context only to refresh the status widget, so a missing one
@@ -4349,10 +4370,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (restored && restored.sessionId === sessionId) {
       state = restored;
       continuationsInjected = restoredInjections;
-      // The sidecar is THIS session's own — so the orchestration it records is
-      // this session's orchestration, merely resumed (a reload, a resume, a
-      // restart). See `restoredOwnState` above.
-      restoredOwnState = true;
+      // The orchestration runtime that came with it keeps its OWN
+      // `ownerSessionId` — that field, not this branch, is what answers "may
+      // this session resume it" (see `currentOrchestrationId`).
     } else if (restored && restored.sessionId !== sessionId) {
       state = emptyState(sessionId, restored.maxRounds ?? DEFAULT_MAX_ROUNDS);
       // THE ORCHESTRATION RUNTIME SURVIVES THE RESET (2026-09-06, B1).
@@ -7465,7 +7485,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       retired = true;
       retireJudgeLane(previous, {
         root,
-        opener,
         ownPane: process.env.TMUX_PANE?.trim() || undefined,
         tmuxServer: tmuxServerFrom(process.env),
         run: (argv: readonly string[]) => runTmux(argv),
@@ -7504,31 +7523,32 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     };
   }
 
-  /** What every judge-pane close needs to know about this session's tmux. */
+  /**
+   * What every judge-pane close needs to know about this session's tmux.
+   *
+   * `opener` used to be here too — the label-bar release compared it against
+   * each entry's opener to count "my" panes. That judgement is deleted
+   * (2026-09-17, user decision), and with it the parameter: what remains is
+   * the pane id to close and the runner that closes it.
+   */
   interface JudgeCloseCtx {
-    opener: string;
     ownPane: string | undefined;
     tmuxServer: string | undefined;
     run: JudgePaneRunner;
   }
 
   /**
-   * Close ONE judge's pane, with the label-bar judgement every close path in
-   * this file shares: the window's border line is released only when no
-   * decorated pane of this opener is left, and never by a guest in somebody
-   * else's orchestration.
+   * Close ONE judge's pane.
    *
    * ONE copy, two callers (the `fresh` kill and the lane retire). It was two
    * copies for exactly one round — they sat 150 lines apart and differed only
    * in which variable held the entry, which is how a rule with six copies gets
-   * its seventh (reviewer P2, 2026-09-05).
+   * its seventh (reviewer P2, 2026-09-05). Those two copies also each carried
+   * a copy of the label-bar release; that whole judgement is gone
+   * (2026-09-17), so what is left is the close itself.
    */
   function closeJudgePaneOf(entry: JudgeEntry, ctx: JudgeCloseCtx): void {
     if (!entry.paneId) return;
-    // Closing a pane no longer touches the window's label bar (2026-09-17,
-    // user decision): the toggle resizes every pane in the window (measured:
-    // SIGWINCH, rows 84 ↔ 83), and the release could not see the other
-    // sessions' panes anyway.
     try {
       closeSessionPane(ctx.run, entry.paneId);
     } catch { /* best effort */ }
@@ -7793,11 +7813,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       if (existing.paneId && paneAlive === true && opts.fresh) {
         // FIFTH CLOSE PATH (reviewer, 2026-09-05). A `fresh` round kills the
         // incumbent and re-opens immediately, so the border line would come
-        // straight back — but the re-open can FAIL (no model chain, tmux gone),
-        // and this close also drops the registry row, after which nobody is
-        // left who could release it. So it makes the same judgement as every
-        // other close; the re-open turns the bar back on when it succeeds.
-        closeJudgePaneOf(existing, { opener, ownPane, tmuxServer, run });
+        // straight back — and the re-open can FAIL (no model chain, tmux
+        // gone), which is why this close also drops the registry row. It used
+        // to hand that failure to a label-bar judgement so the bar would not
+        // be stranded; there is nothing to strand any more (2026-09-17: the
+        // bar is turned on and left on).
+        closeJudgePaneOf(existing, { ownPane, tmuxServer, run });
       }
       if (paneAlive === false) reapReviewScratch(sessionId);
       // One removal, one table.
@@ -9557,7 +9578,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const alive = entry.paneId && ownPane && paneClosable(entry, tmuxServer)
       ? judgePaneAlive(run, ownPane, entry.paneId)
       : undefined;
-    if (alive === true) closeJudgePaneOf(entry, { opener: entry.openerId, ownPane, tmuxServer, run });
+    if (alive === true) closeJudgePaneOf(entry, { ownPane, tmuxServer, run });
     setHierarchy(removeJudge(judgeHierarchy, entry.judgeId));
     reapReviewScratch(entry.judgeId);
     log(`review-gate: cancelled the ${role} round of ${root} — ${why}`);
@@ -10560,11 +10581,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         const run = (argv: readonly string[]) => runTmux(argv);
         const closed: string[] = [];
         const tmuxServer = tmuxServerFrom(process.env);
-        // Only the panes this sweep will ACTUALLY close count as decorated:
-        // an entry it skips (a pane id from a tmux server that has since
-        // restarted) is not on screen and must not keep the label bar up
-        // forever (reviewer P2, 2026-09-05).
-        let remainingClosable = ownedJudges.filter((c) => c.paneId && paneClosable(c, tmuxServer)).length;
         for (const child of ownedJudges) {
           // `paneClosable`, not just "has a pane id": a persisted id from a
           // tmux server that has since restarted names whatever now holds that
@@ -10572,7 +10588,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           // ⇒ the entry and its scratch are still reclaimed below, we simply
           // do not send kill-pane into someone else's window.
           if (paneClosable(child, tmuxServer) && ownPane) {
-            remainingClosable -= 1;
             try {
               // Closing a pane no longer touches the window's label bar
               // (2026-09-17, user decision): toggling `pane-border-status`

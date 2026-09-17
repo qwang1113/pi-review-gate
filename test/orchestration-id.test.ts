@@ -13,6 +13,7 @@ import {
   orchestrationIdFromEnv,
   orchestrationRepoHash,
   startupOrchestrationId,
+  storedRuntimeIsMine,
 } from "../lib/orchestration-id.ts";
 import { channelDir } from "../lib/orchestrator-channel.ts";
 
@@ -169,4 +170,29 @@ test("startup: inherited beats the sidecar, the sidecar beats a new id, and a ST
     newOrchestrationId("/repo/a", now),
     "garbage in the sidecar mints a fresh id rather than becoming an address",
   );
+});
+
+/**
+ * THE HOLE THE FIRST VERSION OF THE RULE HAD (functional round, 2026-09-17).
+ *
+ * "Does the sidecar record MY session id" is not the question: a session that
+ * merely INHERITED a foreign runtime keeps it on disk, the next persist writes
+ * it under the inheriting session's id, and one reload later that session would
+ * have adopted a previous orchestration's children and plan approval without
+ * ever calling `orchestrator_attach`. The question is answered by the runtime's
+ * own owner field, which only a session that minted, inherited or adopted the
+ * address writes.
+ */
+test("the runtime on disk is mine only when IT says so — never because the sidecar knows my name", () => {
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "s-1", sessionId: "s-1" }), true,
+    "the session that minted/adopted it resumes it");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "s-0", sessionId: "s-1" }), false,
+    "a bystander that inherited the record is NOT the owner — takeover is orchestrator_attach's job");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: undefined, sessionId: "s-1" }), false,
+    "a sidecar written before this field existed is nobody's to resume implicitly");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "s-1", sessionId: undefined }), false,
+    "a session that does not know its own id cannot be the owner");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "  ", sessionId: "  " }), false,
+    "blank is not an identity");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "s-1", sessionId: null }), false);
 });

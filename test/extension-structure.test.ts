@@ -2837,7 +2837,7 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   // own copy of the close. That helper used to ask the shared label-bar
   // question too; the release is deleted (2026-09-17, user decision), so all
   // that is left of it is the close itself.
-  assert.match(body, /closeJudgePaneOf\(existing, \{ opener, ownPane, tmuxServer, run \}\)/,
+  assert.match(body, /closeJudgePaneOf\(existing, \{ ownPane, tmuxServer, run \}\)/,
     "fresh kills the pane through the shared close helper");
   assert.doesNotMatch(body, /releasesWindowLabels\(\{/,
     "…and does not re-inline the label-bar rule");
