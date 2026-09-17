@@ -9900,11 +9900,24 @@ export default function reviewGate(pi: ExtensionAPI) {
           "**不要重跑审查**：重送的同一份内容不会更快拿到结果，只会白烧一轮。";
       }
     }
-    // WHICH COMMIT THE BASELINE STOPS AT (reviewer P2, 2026-09-18). The field
-    // means "the commit of the last round that CONCLUDED", and a `refuse` is
-    // not a conclusion — the quality judge never left one. Recording THIS
-    // round's head there moved the next prepare's baseline onto content no
-    // quality round had seen.
+    // WHICH COMMIT THE BASELINE STOPS AT. The field means "the commit of the
+    // last round that CONCLUDED", and a round whose QUALITY half never
+    // concluded did not conclude one — the content in its range then entered no
+    // quality round at all, and a later READY whose quality judge read only the
+    // increment would ship it. Recording THIS round's head there is what moved
+    // the next prepare's baseline onto that content.
+    //
+    // THE TEST IS THE STANDING, NOT A LIST OF CASES (quality round P1,
+    // 2026-09-17). It used to special-case ONE way of having no quality
+    // conclusion — the recorder's own `refuse` — while a non-READY functional
+    // verdict reached the same state by another door: the cancel matrix kills
+    // the quality round when the functional one concludes non-READY, so THAT
+    // round's content was quality-unaudited too and the special case did not
+    // cover it. `qualityStandingFor` already answers "does a quality conclusion
+    // stand for this head" (a recorded READY bound to it, or a round with no
+    // code to judge) for the dispatch and for the hold, so it answers this one
+    // as well: standing ⇒ this round's head, anything else ⇒ the previous
+    // value. `refuse` needs no branch of its own; it is one way to fail it.
     //
     // …AND OMITTING THE FIELD IS NOT THE SAME FIX: `st.review` is REPLACED
     // wholesale, so an absent `commitSha` also erases the LAST REAL conclusion
@@ -9914,11 +9927,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     // forward states the fact exactly: this round concluded nothing, the
     // earlier ones still did.
     //
-    // THERE ARE TWO WAYS TO HAVE NO HEAD TO RECORD (reviewer P2, 2026-09-18):
-    // a `refuse`, and a round whose target is not registered in THIS process —
+    // THERE IS A SECOND WAY TO HAVE NO HEAD TO RECORD (reviewer P2,
+    // 2026-09-18): a round whose target is not registered in THIS process —
     // `reviewTargets` is in-memory, so a verdict landing after a restart is
-    // exactly that shape. Both fall through to the previous value.
-    const concludedCommit = (qualityHold === "refuse" ? undefined : reviewTargets.get(targetRoot)?.head)
+    // exactly that shape. Its standing is unanswerable, `qualityStandingFor`
+    // fails closed, and it falls through to the previous value like the rest.
+    const qualityHalfConcluded = qualityStandingFor({
+      head: reviewTargets.get(targetRoot)?.head ?? "",
+      files: reviewTargets.get(targetRoot)?.files,
+      quality: st.quality,
+    }).ok;
+    const concludedCommit = (qualityHalfConcluded ? reviewTargets.get(targetRoot)?.head : undefined)
       ?? st.review.commitSha;
     st.review = {
       verdict: parsed.verdict,

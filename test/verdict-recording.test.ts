@@ -174,7 +174,7 @@ function seams(pi: unknown): { startFullLane: (root: string, ctx: unknown) => Pr
 }
 
 function sidecar(repo: string): {
-  review: { verdict: string; fingerprint?: string | null; docSync?: string };
+  review: { verdict: string; fingerprint?: string | null; docSync?: string; commitSha?: string };
   rounds?: Array<Record<string, unknown>>;
   pendingReady?: {
     conclusion: { verdict: string; findings: unknown[] };
@@ -430,6 +430,53 @@ test("a functional READY with NO quality standing is REFUSED, never recorded (20
   assert.match(text, /recorded verdict BLOCKED/, `the READY must be refused, not recorded: ${text}`);
   assert.match(text, /QUALITY PRECONDITION/, "…and the agent is told WHICH binding failed");
   assert.equal(sidecar(repo).review.verdict, "BLOCKED", "nothing a quality round never passed may ship");
+});
+
+test("a BLOCKED round whose quality half never concluded does not move the baseline (quality round P1, 2026-09-17)", async () => {
+  // THE OTHER DOOR TO THE SAME STATE. `refuse` was the one case the recorder
+  // knew about, but a non-READY functional verdict reaches it by itself: the
+  // cancel matrix kills the quality round, so THAT round's range entered no
+  // quality round at all. Recording its head as "the last concluded commit"
+  // moved the next prepare's baseline onto that content (lib/review-prepare-tools.ts),
+  // and the content then shipped on a later READY whose quality judge read only
+  // the increment. What decides is the STANDING, not a list of cases.
+  const { repo, pi, ctx } = await preparedRepo();
+  const firstHead = git(repo, "rev-parse", "HEAD");
+  const ready = await recorders(pi).recordReviewVerdict(
+    reportConclusion(readerIO(new Map()), reportRecord(repo, { findings: [], findingsCount: 0 })), repo, ctx,
+  );
+  assert.match(ready, /recorded verdict READY/, ready);
+  assert.equal(sidecar(repo).review.commitSha, firstHead,
+    "a round that concluded (quality half included) records the commit it concluded about");
+
+  // Round 2: new content, its own registered target, and NO quality verdict for
+  // this head — the state a round the cancel matrix cut leaves behind. The
+  // commit is made through git rather than the checkpoint tool: this fixture
+  // has no `.pi/` ignore, so the gate's own sidecar would be a changed path and
+  // the checkpoint would refuse the round over it (nothing this test is about).
+  writeFileSync(join(repo, "a.ts"), "export const a = 3;\n");
+  git(repo, "add", "a.ts");
+  git(repo, "commit", "-m", "chore: second round");
+  const second = await internalTool(pi, "prepare_review")(
+    "id", { repo }, undefined, undefined, ctx,
+  ) as { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(second.isError, undefined, `prepare failed: ${second.content?.[0]?.text}`);
+  assert.notEqual(git(repo, "rev-parse", "HEAD"), firstHead, "the fixture must really have a second round");
+
+  const blocked = await recorders(pi).recordReviewVerdict(
+    reportConclusion(readerIO(new Map()), reportRecord(repo, {
+      verdict: "BLOCKED",
+      findings: [{ severity: "P1", file: "a.ts", line: 1, issue: "fixture finding", evidence: "a.ts:1" }],
+      findingsCount: 1,
+    })),
+    repo, ctx,
+  );
+
+  assert.match(blocked, /recorded verdict BLOCKED/, blocked);
+  const st = sidecar(repo);
+  assert.equal(st.review.verdict, "BLOCKED");
+  assert.equal(st.review.commitSha, firstHead,
+    "the baseline stays at the last round that TRULY concluded, so the next round's range still covers this round's content for the quality judge");
 });
 
 test("the opener records a READY from a summary-less structured report (round 4's exact shape)", async () => {

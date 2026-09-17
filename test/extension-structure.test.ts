@@ -6467,23 +6467,30 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   assert.match(record, /if \(qualityHold === "refuse"\) \{[\s\S]{0,120}?parsed\.verdict = "BLOCKED";/,
     "nobody coming back ⇒ REFUSE (fail-closed)");
   assert.match(record, /qualityHold === "hold"/, "…somebody coming back ⇒ HOLD, never record yet");
-  // ── 3b. A REFUSAL IS NOT A CONCLUSION (quality round P1, 2026-09-18) ────
+  // ── 3b. A ROUND IS NOT A CONCLUSION WITHOUT ITS QUALITY HALF ────────────
   // A recorded verdict carries the reviewed COMMIT so the next prepare can
-  // baseline from it. `refuse` is the one branch with no conclusion to carry:
-  // recording a head there moved the next round's BASELINE onto it, and THIS
-  // round's content then entered no quality range at all — a dead pane was
-  // enough to walk unreviewed code past the quality gate.
-  // …and it must carry the PREVIOUS conclusion FORWARD rather than drop the
+  // baseline from it. A round whose quality half never concluded has no
+  // conclusion to carry: recording its head there moved the next round's
+  // BASELINE onto it, and THIS round's content then entered no quality range
+  // at all — a dead pane was enough to walk unreviewed code past the quality
+  // gate.
+  // …AND IT MUST CARRY THE PREVIOUS CONCLUSION FORWARD rather than drop the
   // field: `st.review` is replaced wholesale, so an absent commitSha would
   // erase that too and rebase the next round on the BRANCH BASE (reviewer P2,
   // same day — the whole-branch re-review a wrong first fix produces).
-  const concludedAt = SRC.indexOf("const concludedCommit = ", recordAt);
+  // THE PREDICATE IS THE STANDING, NOT A LIST OF CASES (quality round P1,
+  // 2026-09-17): special-casing the recorder's own `refuse` left the OTHER door
+  // to the same state open — a non-READY functional verdict, whose row in the
+  // cancel matrix kills the quality round. One reading answers both.
+  const concludedAt = SRC.indexOf("const qualityHalfConcluded = ", recordAt);
   assert.ok(concludedAt > 0, "the commit the baseline stops at is decided in one place");
   const concluded = SRC.slice(concludedAt, SRC.indexOf('if (parsed.verdict === "READY")', concludedAt));
+  assert.match(concluded, /qualityStandingFor\(\{/,
+    "the baseline advances only when a quality conclusion STANDS for this head");
   assert.match(concluded, /\?\? st\.review\.commitSha/,
-    "the last CONCLUDED commit is carried forward — a refusal must not move the baseline");
-  assert.match(concluded, /qualityHold === "refuse" \? undefined/,
-    "…starting with a refusal to take THIS round's own head");
+    "the last CONCLUDED commit is carried forward — a round with no quality half must not move the baseline");
+  assert.doesNotMatch(concluded, /qualityHold === "refuse"/,
+    "`refuse` is one way to fail that test, not a branch of its own");
   assert.match(concluded, /commitSha: concludedCommit/);
   // The in-flight predicate reads the ROUND's own record, and needs a LIVE
   // pane: a judge that died can never land a verdict, so a hold there would be
