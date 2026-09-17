@@ -344,6 +344,14 @@ async function doAttach(deps: OrchestratorDeps, params: Record<string, unknown>)
     }
     deps.adoptOrchestrationId(decision.id);
     adopted = true;
+    // THE CLAIM MUST LAND ON DISK NOW, not at the next write that happens to
+    // touch the runtime (quality round, 2026-09-17). `ownerSessionId` exists to
+    // survive a reload, and a takeover can be followed by nothing but
+    // `orchestrator_wait` for a long while — none of which persists the
+    // runtime. Without this line a reload would find a record whose owner is
+    // still the PREVIOUS session, refuse to resume it, and strand the children
+    // this call just adopted.
+    deps.saveRuntime(deps.runtime());
     // B2 — a takeover changes WHO holds an orchestration. That belongs in the
     // log beside the approvals: it is the event that explains why a later
     // record was written by a different session.

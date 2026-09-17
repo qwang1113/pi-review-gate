@@ -2522,9 +2522,15 @@ export default function reviewGate(pi: ExtensionAPI) {
         }),
         repoRoot: primaryRepoRoot,
       });
-      // Whichever way it resolved, THIS session now holds it.
-      orchestrationOwner = state.sessionId ?? undefined;
     }
+    // WHICHEVER WAY IT RESOLVED, THIS SESSION HOLDS IT: an id inherited from
+    // the environment (a relay successor), this session's own resumed runtime,
+    // or a fresh mint. The claim is what the sidecar needs to let THIS session
+    // resume the record after a reload, and it is written with the runtime
+    // (`persistOrchestration`). Note the bystander case cannot reach it: a
+    // stored runtime owned by another session is never adopted here, so the
+    // address this line claims is this session's own new one.
+    orchestrationOwner = state.sessionId ?? undefined;
     return orchestrationIdValue;
   }
   /**
