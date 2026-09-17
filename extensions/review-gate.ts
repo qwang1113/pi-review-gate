@@ -8961,22 +8961,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),
-    // WHO ELSE HAS A DECORATED PANE IN THIS WINDOW — the two halves of that
-    // question, because getting either wrong is visible to the user
-    // (reviewer P2 ×2, 2026-09-05).
-    //
-    // A CHILD of an orchestration cannot count the manager's panes at all:
-    // they are in another session's registry. So it never releases the bar and
-    // the manager does — that is `insideOrchestration`.
-    //
-    // A MANAGER, on the other hand, CAN count them: they are its own children.
-    // Blanket "a manager never releases" was the previous fix and it swung the
-    // defect the other way — a manager with no children left (or none yet)
-    // would leave the border line switched on forever. So it counts.
-    //
-    // Decorated panes were counted here once, to decide whether a close could
-    // take the window's label bar down. GONE with that decision (2026-09-17,
-    // user decision): the bar is turned on and left on.
+    // Decorated panes were counted around here once — a guest test plus a
+    // manager's child count — to decide whether a close could take the window's
+    // shared label bar down. Both are GONE with that decision (2026-09-17, user
+    // decision): taking the bar down writes `pane-border-status`, which resizes
+    // EVERY pane in the window (measured: SIGWINCH, rows 84 ↔ 83), so the bar is
+    // turned on by whoever opens a decorated pane and never turned off.
     now: () => Date.now(),
     readText: (path) => {
       try {

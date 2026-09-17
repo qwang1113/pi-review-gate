@@ -25,7 +25,6 @@ import type { ToolHost, ToolReply } from "./tool-host.ts";
 import {
   checkCaller,
   findJudgeLane,
-  paneClosable,
   registerJudge,
   removeJudge,
   type HierarchyTable,
@@ -51,7 +50,6 @@ import {
 } from "./session-factory.ts";
 import {
   judgePaneAlive,
-  listJudgePanes,
   type JudgePaneRunResult,
 } from "./judge-pane.ts";
 import { verifyJudgeBoot, channelRecordCount } from "./orchestrator-tool-kit.ts";

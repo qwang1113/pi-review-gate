@@ -102,23 +102,7 @@ export function decideReportedChildState(args: {
   return "idle";
 }
 
-/**
- * WHAT THE CHILD IS DOING, in one line — `bash(grep -rn PrimeUsers src/)`.
- *
- * The tool name alone is not the answer the manager needs: every session in
- * the window is running `bash` and `read`; what distinguishes "investigating
- * the schema" from "re-running the same search" is the ARGUMENT. So the
- * argument is rendered — shortened and single-line, because it rides in a
- * receipt row and may be a whole shell pipeline or a file path.
- *
- * KEYS ARE CONSIDERED IN A FIXED ORDER, not by object key order: the same
- * call must render the same way in every process, and `Object.keys` order is
- * whatever the caller happened to build.
- *
- * NEVER THROWS AND NEVER RETURNS CONTROL CHARACTERS (reviewer-facing text is
- * the one place a stray ESC or a newline would break the receipt's layout).
- * An input with no recognisable argument degrades to the bare tool name.
- */
+/** Longest activity line kept — it rides a receipt row, one per child. */
 export const TOOL_ACTIVITY_MAX = 80;
 
 /** Argument keys worth showing, most identifying first. */
@@ -143,6 +127,23 @@ function activityTarget(input: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * WHAT THE CHILD IS DOING, in one line — `bash(grep -rn PrimeUsers src/)`.
+ *
+ * The tool name alone is not the answer the manager needs: every session in
+ * the window is running `bash` and `read`; what distinguishes "investigating
+ * the schema" from "re-running the same search" is the ARGUMENT. So the
+ * argument is rendered — shortened and single-line, because it rides in a
+ * receipt row and may be a whole shell pipeline or a file path.
+ *
+ * KEYS ARE CONSIDERED IN A FIXED ORDER, not by object key order: the same
+ * call must render the same way in every process, and `Object.keys` order is
+ * whatever the caller happened to build.
+ *
+ * NEVER THROWS AND NEVER RETURNS CONTROL CHARACTERS (reviewer-facing text is
+ * the one place a stray ESC or a newline would break the receipt's layout).
+ * An input with no recognisable argument degrades to the bare tool name.
+ */
 export function describeToolActivity(toolName: string, input: unknown): string | undefined {
   const name = String(toolName ?? "")
     // eslint-disable-next-line no-control-regex -- stripping controls is the point

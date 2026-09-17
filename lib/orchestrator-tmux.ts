@@ -296,6 +296,11 @@ export function buildShowPaneLabelsArgv(
   ];
 }
 
+/**
+ * List the pane IDS of the window a pane belongs to — "who is there", for
+ * liveness probing. {@link buildWindowLayoutArgv} asks the other question
+ * ("who is WHERE"), which is what the three-column rule reads.
+ */
 export function buildListPanesArgv(pane: string): readonly string[] {
   return assertSafeTmuxArgv([
     "list-panes",

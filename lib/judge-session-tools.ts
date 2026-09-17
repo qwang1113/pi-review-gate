@@ -60,7 +60,6 @@ import {
 } from "./orchestrator-channel.ts";
 import {
   judgePaneAlive,
-  listJudgePanes,
   type JudgePaneRunResult,
 } from "./judge-pane.ts";
 import {

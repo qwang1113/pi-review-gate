@@ -72,49 +72,37 @@
  * time; re-opening an already-open bar is a no-op, and paying for it on each
  * spawn is what makes the ON state independent of who arrived first.
  *
- * WHO TURNS IT OFF: the LAST decorated pane a session can see, and never a
- * guest. `releasesWindowLabels` + `countDecoratedPanes` (both in
- * lib/session-factory.ts) answer that one question for all five close paths
- * (judge_close, judge_spawn's rollback, a `fresh` round's pre-kill,
- * declare_done's cascade, orchestrator_close). Three properties of that answer
- * are load-bearing:
- *
- *   1. It is turned off with `setw -u`, which RESTORES the user's own
- *      configuration rather than imposing a default we invented.
- *   2. Missing information keeps the bar UP: an unreadable pane list counts
- *      every candidate as still present. A stale bar costs one line that the
- *      next spawn re-establishes; a wrongly removed one blanks a border
- *      somebody is reading.
- *   3. The window is addressed through the caller's OWN live pane whenever it
- *      has one — `setw -t <pane>` only names a window, and the id being closed
- *      may already be gone. Where a caller might not have one it falls back to
- *      the pane being closed (`deps.ownPane() ?? child.paneId` in
- *      orchestrator_close): a best-effort address beats making the release
- *      itself conditional on a diagnostic.
+ * WHO TURNS IT OFF: NOBODY (2026-09-17, user decision). A release path existed
+ * — the last decorated pane a session could see took the bar down with `setw
+ * -u` — and it is DELETED, not fixed. Turning `pane-border-status` on or off
+ * changes EVERY PANE'S HEIGHT: measured on a scratch tmux as SIGWINCH with
+ * `rows 84 → 83` on the way on and `83 → 84` on the way off, while re-setting
+ * the same value triggers nothing at all. So every close of the last gate pane
+ * re-laid out every application in the user's window — their editor, their
+ * shells, a manager's pi — and the next spawn put it back. On top of that, two
+ * of the release's inputs were wrong across sessions (below). One line of
+ * border for the window's lifetime is the cheaper half of that trade.
  *
  * WHAT THIS COSTS THE BYSTANDERS, and it is accepted: a window option applies
  * to panes the gate never opened, so the user's own shell pane in that window
- * grows a border showing its own `#{pane_title}` for as long as any gate pane
- * lives. It is restored by whoever releases the bar. If the user closes every
- * gate pane BY HAND, no close path runs and the bar survives until the window
- * does.
+ * grows a border showing its own `#{pane_title}` — for as long as the window
+ * lives, since nothing takes it down any more.
  *
- * TWO KNOWN CROSS-SESSION MISFIRES, measured 2026-09-06 and deliberately NOT
- * fixed in that round (user decision): both are display-only, and the next
- * spawn re-establishes the bar.
+ * TWO CROSS-SESSION MISFIRES WERE REMOVED WITH THE RELEASE ITSELF (measured
+ * 2026-09-06; they were display-only before, and now cannot happen at all):
  *
  *   (a) A manager running `orchestrator_close` counts its own children and its
  *       own judges — it cannot see a reviewer pane the CHILD opened, because
  *       that pane lives in the child's registry. Closing the last child while
- *       that review is still running takes the bar down under it.
+ *       that review was still running took the bar down under it.
  *   (b) An ordinary loop session opened by hand in a manager's window carries
- *       no `RG_ORCHESTRATION_ID`, so it is not a "guest" by the test above.
- *       Closing its own last judge pane releases the bar under the manager's
+ *       no `RG_ORCHESTRATION_ID`, so it was not a "guest" by that test.
+ *       Closing its own last judge pane released the bar under the manager's
  *       children.
  *
- * Both have ONE root cause — a session can only see panes in its own registry
- * — so the honest fix is a cross-session pane registry, not a special case in
- * the counter. Anyone reaching for that fix should start there.
+ * Both had ONE root cause — a session can only see panes in its own registry —
+ * which is why the fix that stuck was deleting the decision rather than
+ * teaching a counter to see further.
  *
  * Pure module: strings in, strings out. The argv lives in
  * lib/orchestrator-tmux.ts and the execution in the dispatch/lifecycle tools.
@@ -334,13 +322,14 @@ export const PANE_BORDER_FORMAT = "#{pane_title}";
 /** Where the label bar goes. `top` keeps it out of the status line. */
 export const PANE_BORDER_STATUS = "top";
 
-// (`isLastDecoratedChild` is GONE, 2026-09-05. It answered "is this the last
-// decorated CHILD" — one kind of pane, counted from registry rows — and both
-// halves of that were wrong once the same window also held decorated JUDGE
-// panes: a row whose pane the user had closed kept the label bar up forever,
-// and a manager closing its last child blanked a running review's border. The
-// question is now asked once, for every kind of pane, by
-// `releasesWindowLabels` + `countDecoratedPanes` in lib/session-factory.ts.)
+// (`isLastDecoratedChild` is GONE, 2026-09-05 — and the question that replaced
+// it is gone too, 2026-09-17. It asked "is this the last decorated CHILD", one
+// kind of pane counted from registry rows, and both halves were wrong once the
+// same window also held decorated JUDGE panes. The replacement,
+// `releasesWindowLabels` + `countDecoratedPanes`, asked it for every kind of
+// pane — and is deleted as well, because its answer was always a
+// `pane-border-status` write that resized every pane in the window: see this
+// file's header.)
 
 
 /** One line for the receipt, so a colour on screen matches a row in the text. */

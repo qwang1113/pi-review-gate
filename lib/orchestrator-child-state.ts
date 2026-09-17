@@ -589,6 +589,12 @@ export function describeChildStateDetailed(health: ChildHealth): string {
     // fact that turns "it died" into "it died while running `make test`".
     return `${base}${activity}`;
   }
+  if (health.state === "idle") {
+    // The idle branch above needs a progress reading; a child that reported
+    // idle before its first tool call has none, and its activity is exactly
+    // what a manager wants when it decides whether to nudge it.
+    return `${base}${activity}`;
+  }
   return base;
 }
 

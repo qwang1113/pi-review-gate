@@ -359,6 +359,16 @@ test("the row says WHAT the child is doing, not only whether it moved (2026-09-1
   ]));
   assert.equal(withoutActivity.activity, undefined);
   assert.doesNotMatch(describeChildStateDetailed(withoutActivity), /最近/);
+
+  // AN `idle` CHILD WITH NO PROGRESS READING STILL CARRIES IT (quality round,
+  // 2026-09-17): the idle branch above is guarded on `progressStaleSeconds`,
+  // and a child that reported idle before its first tool call has none — the
+  // activity is exactly what a manager needs before it decides to nudge.
+  const earlyIdle = childHealth(observe([
+    { kind: "state", from: "child", at: iso(), state: "idle", activity: "read(lib/gate-state.ts)" },
+  ]));
+  assert.equal(earlyIdle.progressStaleSeconds, undefined, "no reading: this is the branch under test");
+  assert.match(describeChildStateDetailed(earlyIdle), /停下了（没有 declare_done），最近 read\(lib\/gate-state\.ts\)/);
 });
 
 test("the rendered snapshot names the state in words, and says so when there is nobody", () => {
