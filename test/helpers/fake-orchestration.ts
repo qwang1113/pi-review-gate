@@ -132,7 +132,7 @@ export interface FakeWorld {
     payload?: string;
     /** The delivery station this question is about (restatement / goal). */
     station?: string;
-    topic?: "goal-approval" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "sensitive-edit" | "other";
+    topic?: "goal-approval" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "tmux-access" | "other";
     /** Its place in an `ask_user` interview, when it is part of one. */
     batch?: { id: string; index: number; total: number };
 

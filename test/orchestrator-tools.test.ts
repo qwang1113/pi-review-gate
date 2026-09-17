@@ -712,6 +712,51 @@ test("declining a goal with `reason` writes it into the channel — the child re
   assert.equal(answer.reason, "退出条件 3 没有可检查的验收标准", "the decline reason rides in the answer record");
 });
 
+test("tmux-access proxy answer: the PM needs the user's scope, exactly like a sensitive edit", async () => {
+  // Reviewer P2 (2026-09-17). `kill-server` takes the user's whole tmux session
+  // with it, so a child that talked its manager into approving it would have
+  // bypassed the permission the user was just handed. This pins the mapping
+  // (topic → scope): a typo here silently reopens unconditional proxy approval,
+  // and nothing else in the suite would notice.
+  const ask = (w: FakeWorld, c: string) => w.childAsks(c, {
+    requestId: "req-t1",
+    title: "AI 请求在 bash 里使用 tmux 命令——是否授权？",
+    options: ["允许：本会话和接力继任者都能用 tmux", "只允许这一次", "拒绝"],
+    topic: "tmux-access",
+  });
+
+  // 1) No grant + the user refuses the proxy scope → refused, nothing written.
+  const w1 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c1 = await spawnT1(w1);
+  ask(w1, c1);
+  w1.options.selectAnswers = ["拒绝"];
+  const r1 = await w1.call("orchestrator_answer", { childId: c1, answer: "允许：本会话和接力继任者都能用 tmux" });
+  assert.equal(r1.isError, true);
+  assert.match(replyText(r1), /用户拒绝授予tmux 授权代答权/);
+  assert.equal(w1.channelOf(c1).filter((r) => r.kind === "answer").length, 0, "nothing written");
+  assert.equal(hasGrant(w1.runtime(), "tmux-access"), false);
+
+  // 2) The user picks "allow and remember" → the scope is minted AND the
+  //    manager's answer goes through.
+  const w2 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c2 = await spawnT1(w2);
+  ask(w2, c2);
+  w2.options.selectAnswers = ["允许并记住（本 orchestration 内都代答）"];
+  const r2 = await w2.call("orchestrator_answer", { childId: c2, answer: "允许：本会话和接力继任者都能用 tmux" });
+  assert.equal(r2.isError, undefined, replyText(r2));
+  assert.equal(w2.channelOf(c2).filter((r) => r.kind === "answer").length, 1, "the answer was written");
+  assert.equal(hasGrant(w2.runtime(), "tmux-access"), true, "the scope the reviewer asked for is the one minted");
+  assert.equal(hasGrant(w2.runtime(), "sensitive-edit"), false, "and it does not leak into the other scope");
+
+  // 3) A ✎-row refusal is a refusal even though its text says 授权/允许.
+  const w3 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c3 = await spawnT1(w3);
+  ask(w3, c3);
+  w3.options.selectAnswers = ["✎ 不选，我说明原因：先不动 tmux"];
+  const r3 = await w3.call("orchestrator_answer", { childId: c3, answer: "允许：本会话和接力继任者都能用 tmux" });
+  assert.equal(r3.isError, true, "the decline row is the answer, whatever its reason text says");
+});
+
 test("sensitive-edit proxy answer: NO grant → the user's three-choice door in the PM pane decides", async () => {
   // 1) No grant + user picks "拒绝" → refused, nothing written.
   const w1 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });

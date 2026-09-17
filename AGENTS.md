@@ -472,12 +472,13 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   把「人在框里答」与「项目经理经通道答」并列，谁先答谁生效，另一边的框自动
   撤下。框始终弹着 —— 这就是项目经理死亡时的天然回退，因此**没有任何超时机制**。
   2026-08-31 起 `request_scope_limit` / `request_sensitive_edit` 的 consent 框也走
-  同一通道：项目经理可代答（先答先生效）。**但敏感编辑的代答需要用户显式授权**
-  （2026-09-16 起，`orchestrator_answer` 对 sensitive-edit 无授权时弹三选框给用户：
-  「允许并记住 / 仅允许这一次 / 拒绝」）；`request_sensitive_edit` 在项目经理自己的
-  会话里被**直接拒绝**（它没有通道侧可答自己的框，曾把 PM 卡死 2 小时），
-  改走 `orchestrator_answer`。三个授权入口：ask_user 带 `grantScope` 的提问、
-  `/gate-grant sensitive-edit` 命令、首次代答的三选框。
+  同一通道：项目经理可代答（先答先生效）。**但敏感编辑与 tmux 授权的代答需要用户显式授权**
+  （2026-09-16 起 sensitive-edit、2026-09-17 起 tmux-access：`orchestrator_answer` 对这两类
+  无授权时弹三选框给用户：「允许并记住 / 仅允许这一次 / 拒绝」，**推荐拒绝** —— tmux 的
+  爆炸半径与敏感文件同级：`kill-server` 能带走用户整个 tmux 会话）；`request_sensitive_edit`
+  与 `request_tmux_access` 在项目经理自己的会话里被**直接拒绝**（它没有通道侧可答自己的框，
+  曾把 PM 卡死 2 小时），改走 `orchestrator_answer`。三个授权入口：ask_user 带 `grantScope`
+  的提问、`/gate-grant <scope>` 命令（作用域：`sensitive-edit`、`tmux-access`）、首次代答的三选框。
 - **一次 `ask_user` 的多题整批上送、整批回答**（2026-09-06）：子会话在弹出第一个
   框之前，就把本次采访的全部问题一次性写成 N 条 request 记录（新增可选字段
   `batchId` / `batchIndex` / `batchTotal`，只增不改，旧上级照旧当 N 条普通待答

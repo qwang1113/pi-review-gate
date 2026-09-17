@@ -268,7 +268,9 @@ export async function doRequestTmuxAccess(
   if (state.taskMode === "orchestrator" && !deps.canChannelDialogs()) {
     return deny(
       "review-gate: 你是项目经理（orchestrator 会话）—— 不要自己调 request_tmux_access。" +
-      "子会话的授权请求会出现在 orchestrator_wait 回执里，用 orchestrator_answer 代答。",
+      "子会话的授权请求会出现在 orchestrator_wait 回执里，用 orchestrator_answer 代答；" +
+      "但代答**需要用户先授予你 `tmux-access` 作用域**（`/gate-grant tmux-access`），" +
+      "否则门禁会当场把你代答的那个答案转给用户拍板。",
     );
   }
   if (state.tmuxAccess) {
@@ -564,9 +566,11 @@ export function registerConsentRequestTools(host: ToolHost, deps: ConsentToolDep
       "unauthorized tmux operation (a destructive one like `kill-server` / `kill-session` / " +
       "`new-session` / `set -g`, or, in project-manager mode, one an orchestration tool already " +
       "does properly: `split-window` / `send-keys` / `kill-pane`), and this is the ONLY way to " +
-      "lift that. The extension shows the user the gate's dialog (in an orchestration, the " +
-      "project manager may answer it on the child's behalf through the channel — whoever answers " +
-      "first wins). A grant covers THIS session and the `session_handoff` successor it names, so " +
+      "lift that. The extension shows the user the gate's dialog; in an orchestration the child " +
+      "asks its project manager through the channel, but the manager may only answer after the " +
+      "USER granted it the `tmux-access` scope (same rule as a sensitive file — `kill-server` " +
+      "would take the user's whole session with it). A grant covers THIS session and the " +
+      "`session_handoff` successor it names, so " +
       "a long piece of work does not re-ask after a handover; 'once' is consumed by the next tmux " +
       "command. An `orchestrator_attach` takeover inherits nothing. Read-only tmux commands " +
       "(`tmux ls`, `display-message`) were never gated. Ask only when the work genuinely needs " +
