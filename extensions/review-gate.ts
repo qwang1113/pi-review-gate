@@ -4385,7 +4385,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         detail: opts.detail,
         taskMode: state.taskMode,
         stateVariant: process.env[STATE_VARIANT_ENV],
-        tmux: ownTmuxAddress(),
+        // Passed as a THUNK: the eligibility and throttle checks above must not
+        // pay for a tmux round trip (see the field's docblock).
+        tmux: () => ownTmuxAddress(),
         notifierPath: notifierBinary(),
         history,
         now,

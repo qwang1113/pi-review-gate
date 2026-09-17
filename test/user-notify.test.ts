@@ -47,7 +47,7 @@ function plan(overrides: Partial<Parameters<typeof planUserNotify>[0]> = {}) {
     detail: "本轮完成",
     taskMode: "loop",
     stateVariant: undefined,
-    tmux: { paneId: "%7", windowId: "@3" },
+    tmux: () => ({ paneId: "%7", windowId: "@3" }),
     notifierPath: NOTIFIER,
     history: emptyNotifyHistory(),
     now: T0,
@@ -140,6 +140,25 @@ test("the argv is the notifier, the text, the terminal to activate, and the pane
   ]);
   assert.equal(p.argv[0], NOTIFIER, "the binary is RESOLVED: the exit path may have no PATH to search");
   assert.equal(p.key, notifyKey("完成 · pi-review-gate", "本轮完成"));
+});
+
+test("the tmux address is resolved ONLY when a banner actually goes out", () => {
+  // Reviewer P2 (2026-09-17): every gate dialog reaches this path, including
+  // the ones in child sessions and judge panes — and resolving the address is a
+  // synchronous `tmux display-message`. It must not be paid by a session that
+  // can never send, nor by a send the throttle refuses.
+  let asked = 0;
+  const address = () => { asked += 1; return { paneId: "%7", windowId: "@3" }; };
+  assert.equal(plan({ tmux: address, stateVariant: "t1-x" }).status, "skipped");
+  assert.equal(plan({ tmux: address, interactive: false }).status, "skipped");
+  assert.equal(plan({ tmux: address, notifierPath: undefined }).status, "missing");
+  const key = notifyKey("完成 · pi-review-gate", "本轮完成");
+  const history = recordNotify(emptyNotifyHistory(), key, T0);
+  assert.equal(plan({ tmux: address, history, now: T0 + 1 }).status, "throttled");
+  assert.equal(asked, 0, "none of those four ever needed to know where this session lives");
+
+  assert.equal(plan({ tmux: address }).status, "send");
+  assert.equal(asked, 1, "the one that sends asks exactly once");
 });
 
 test("no tmux pane ⇒ no focus command at all, never half of one", () => {

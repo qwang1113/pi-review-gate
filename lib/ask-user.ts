@@ -62,10 +62,16 @@ export interface AskQuestion {
 
 /**
  * Proxy scopes the gate will actually mint — an agent cannot invent one.
- * `sensitive-edit` today; "运维类" is deliberately not a scope until the
- * user names the operations it should cover.
+ *
+ * `sensitive-edit` is the original door (2026-09-16). `tmux-access` joins it
+ * (2026-09-17, reviewer P2): letting the project manager approve a child's
+ * request to type at the user's tmux server has the same blast radius as
+ * authorizing a write to `.env` — `kill-server` takes the user's whole session
+ * with it — so the PM may only do it after the USER granted that scope.
+ * "运维类" is still deliberately not a scope until the user names the
+ * operations it should cover.
  */
-export const GRANTABLE_SCOPES = ["sensitive-edit"] as const;
+export const GRANTABLE_SCOPES = ["sensitive-edit", "tmux-access"] as const;
 
 /** True when `scope` is a grantable proxy scope. */
 export function isGrantableScope(scope: string | undefined): scope is string {

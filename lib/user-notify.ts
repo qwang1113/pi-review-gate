@@ -370,8 +370,16 @@ export function planUserNotify(opts: {
   detail: string;
   taskMode: TaskMode | undefined;
   stateVariant: string | undefined;
-  /** This session's tmux address, when it has one. */
-  tmux?: { paneId: string; windowId?: string | undefined } | undefined;
+  /**
+   * This session's tmux address, when it has one — asked LAZILY.
+   *
+   * A THUNK, not a value (reviewer P2, 2026-09-17): resolving it costs a
+   * synchronous `tmux display-message`, and every gate dialog goes through the
+   * notification path — including the ones in child sessions and judge panes
+   * that can never raise a banner. The policy calls this only on the branch
+   * that actually sends.
+   */
+  tmux?: (() => { paneId: string; windowId?: string | undefined } | undefined) | undefined;
   /** Absolute path of the notifier, or undefined when it is not installed. */
   notifierPath: string | undefined;
   history: NotifyHistory;
@@ -402,7 +410,10 @@ export function planUserNotify(opts: {
   if (!decision.send) return { status: "throttled", reason: decision.reason };
 
   const focusCommand = opts.tmux
-    ? buildFocusCommand({ paneId: opts.tmux.paneId, windowId: opts.tmux.windowId })
+    ? (() => {
+        const address = opts.tmux!();
+        return address ? buildFocusCommand({ paneId: address.paneId, windowId: address.windowId }) : undefined;
+      })()
     : undefined;
   return {
     status: "send",

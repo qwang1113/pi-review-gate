@@ -365,10 +365,10 @@ function registerGateMode(host: CommandHost, deps: GateCommandDeps): void {
 
 function registerGateGrant(host: CommandHost, deps: GateCommandDeps): void {
   host.registerCommand("gate-grant", {
-    description: "Grant the project manager a proxy scope (orchestrator only): /gate-grant sensitive-edit",
+    description: "Grant the project manager a proxy scope (orchestrator only): /gate-grant sensitive-edit | tmux-access",
     handler: async (args, ctx) => {
       const scope = (args ?? "").trim();
-      if (!scope) { ctx.ui.notify("Usage: /gate-grant <scope> — scopes: sensitive-edit", "error"); return; }
+      if (!scope) { ctx.ui.notify(`Usage: /gate-grant <scope> — scopes: ${GRANTABLE_SCOPES.join(", ")}`, "error"); return; }
       if (!GRANTABLE_SCOPES.includes(scope as (typeof GRANTABLE_SCOPES)[number])) {
         ctx.ui.notify(`review-gate: 未知授权范围 "${scope}" —— 可授：${GRANTABLE_SCOPES.join(", ")}`, "error");
         return;

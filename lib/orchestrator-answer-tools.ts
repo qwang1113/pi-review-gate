@@ -479,34 +479,42 @@ async function answerOneRequest(
     if (guard) return { ok: false, requestId: request.requestId, refusal: guard };
   }
 
-  // PROXY-AUTHORITY GATE (2026-09-16, user decision): the project manager
-  // may answer a child's SENSITIVE-EDIT consent request only after the USER
-  // explicitly granted that scope. "I give you full power" in chat is NOT
-  // a grant. Three doors mint one: ask_user with a grant scope, /gate-grant,
-  // or — this door — the user picking "allow and remember" on the FIRST
-  // blocked answer. Declining (refusing the edit) needs no grant: it
-  // changes nothing about the worktree.
-  if (request.topic === "sensitive-edit") {
+  // PROXY-AUTHORITY GATE (2026-09-16 user decision; tmux added 2026-09-17): the
+  // project manager may answer a child's SENSITIVE-EDIT or TMUX-ACCESS consent
+  // request only after the USER explicitly granted that scope. "I give you full
+  // power" in chat is NOT a grant. Three doors mint one: ask_user with a grant
+  // scope, /gate-grant, or — this door — the user picking "allow and remember"
+  // on the FIRST blocked answer. Declining needs no grant: it changes nothing.
+  //
+  // WHY TMUX IS IN THE SAME CLASS as a sensitive file: `kill-server` ends the
+  // user's whole tmux session and `new-session` puts surface outside the window
+  // the work was agreed in — a child that could talk its manager into that
+  // would have bypassed the permission the USER was just handed.
+  const proxyScope = request.topic === "sensitive-edit" ? "sensitive-edit"
+    : request.topic === "tmux-access" ? "tmux-access"
+    : undefined;
+  if (proxyScope) {
+    const what = proxyScope === "sensitive-edit" ? "敏感编辑" : "tmux 授权";
     // A `✎ …` row is a refusal REGARDLESS of its reason text (which may well
     // contain 授权/允许): the row itself is the answer, and reading it as a
     // request to grant would be the worst possible misread (reviewer P1).
     const declining = looksLikeDeclineRow(resolved.answer)
       || (/拒绝|取消|不选|no|reject|deny/i.test(resolved.answer)
         && !/同意|允许|授权|yes|allow|grant/i.test(resolved.answer));
-    if (!declining && !hasGrant(deps.runtime(), "sensitive-edit")) {
+    if (!declining && !hasGrant(deps.runtime(), proxyScope)) {
       // GRANT DOOR 3/3: the user decides in the PM's own pane.
       deps.showToUser(
-        `子会话 ${childId} 请求敏感编辑，项目经理想代答：`,
+        `子会话 ${childId} 请求${what}，项目经理想代答：`,
         `${request.title}\n\n项目经理的答案：${resolved.answer}`,
       );
       const grantSpec: ChoiceSpec = {
-        title: "授予项目经理『敏感编辑代答权』？",
+        title: `授予项目经理『${what}代答权』？`,
         options: ["允许并记住（本 orchestration 内都代答）", "仅允许这一次", "拒绝"],
         recommended: "拒绝",
       };
       const picked = parseChoice(await deps.askChoice(grantSpec), grantSpec);
       if (picked.kind === "chose" && picked.option === grantSpec.options[0]) {
-        deps.saveRuntime(addGrant(deps.runtime(), { scope: "sensitive-edit", grantedAt: new Date(deps.now()).toISOString(), via: "first-answer" }));
+        deps.saveRuntime(addGrant(deps.runtime(), { scope: proxyScope, grantedAt: new Date(deps.now()).toISOString(), via: "first-answer" }));
       } else if (picked.kind === "chose" && picked.option === "仅允许这一次") {
         // fall through — this answer passes once, no grant recorded
       } else {
@@ -514,11 +522,11 @@ async function answerOneRequest(
           ok: false,
           requestId: request.requestId,
           refusal: fail(
-            `review-gate: 用户拒绝授予敏感编辑代答权` +
+            `review-gate: 用户拒绝授予${what}代答权` +
             (picked.kind === "declined" && picked.reason ? `（原因：${picked.reason}）` : "") +
             ` —— 子会话 ${childId} 的请求未代答。` +
-            "（用户可之后用 /gate-grant sensitive-edit 或 ask_user 授予。）",
-            { childId, answered: false, needGrant: "sensitive-edit" },
+            `（用户可之后用 /gate-grant ${proxyScope} 或 ask_user 授予。）`,
+            { childId, answered: false, needGrant: proxyScope },
           ),
         };
       }

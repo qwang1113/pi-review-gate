@@ -620,10 +620,11 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 系统通知（macOS 原生，经 `terminal-notifier`）**由门禁自己发**，不由 agent 决定，且只有
 三类事件：项目经理/独立 loop 会话**完成**或**异常结束**（你手动结束的不算），以及**停
-下来等你回答**（`ask_user` + 门禁自己的每一个对话框）。其余时候一声不响；`orchestrator_notify`
-工具已删除（agent 想找你就只能用 `ask_user`）。点击通知会回到发通知那个 tmux pane。策略与
-argv 在 `lib/user-notify.ts`，接线（三个触发点）在扩展里 —— 详见
-`docs/orchestrator-supervision.md`。
+下来等你回答**（`ask_user` + 门禁自己的每一个对话框，外加每登记一条待你拍板的 plan 决策）。
+其余时候一声不响；`orchestrator_notify` 工具已删除（agent 想找你就只能用 `ask_user`）。
+点击通知会回到发通知那个 tmux pane。策略与 argv 在 `lib/user-notify.ts`；接线在扩展里
+（`declare_done` 被接受、`process.on("exit")` 无 `session_shutdown` 记录、`askChoice`、
+以及 plan 的 `add-decision`）—— 详见 `docs/orchestrator-supervision.md`。
 
 ### 架构规范：新建文件 600 行硬拦，存量只提醒
 
