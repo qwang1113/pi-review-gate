@@ -2581,10 +2581,19 @@ export default function reviewGate(pi: ExtensionAPI) {
     // checkout; the git sequence is lib/orchestrator-worktree.ts's, so the
     // conflict path is decided there rather than discovered here.
     settleWorktree: ({ childId, taskId, repoRoot, settlement }) => {
-      const plan = planSettlement(settlement, repoRoot, childId, taskId);
       const worktreePath = childWorktreePath(repoRoot, childId);
+      // THE BRANCH THE CHECKOUT IS ACTUALLY ON (2026-09-18, reviewer P2). The
+      // task book lets a child whose station reaches `pr` rename the gate's
+      // `rg-child-…` handle before it pushes (lib/orchestrator-delivery.ts
+      // `buildBranchLine`); settling the DERIVED name after that fails with
+      // "branch not found", which reports the manager's checkout as broken
+      // right after they did what the gate asked. One read answers both cases,
+      // and the derived name is the fallback for a checkout that has already
+      // been reclaimed (nothing left to read) or was never renamed.
+      const branch = currentBranch(worktreePath) ?? childWorktreeBranch(childId);
+      const plan = planSettlement(settlement, repoRoot, childId, taskId, branch);
       if (plan.steps.length === 0) {
-        return { ok: true, text: `worktree 保留在 ${worktreePath}（分支 ${childWorktreeBranch(childId)}）—— 没有动它` };
+        return { ok: true, text: `worktree 保留在 ${worktreePath}（分支 ${branch}）—— 没有动它` };
       }
       // IDEMPOTENT ON AN ALREADY-RECLAIMED CHECKOUT (2026-09-15). A `merge`
       // reclaims the directory, so a SECOND settlement — or the `discard` a
@@ -2626,7 +2635,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             ok: false,
             text:
               `合并 ${childId} 的 worktree 时**冲突** —— 已中止，你的工作区回到合并前的样子。\n` +
-              `它的分支 \`${childWorktreeBranch(childId)}\` 仍在 ${childWorktreePath(repoRoot, childId)}，一行都没丢。` +
+              `它的分支 \`${branch}\` 仍在 ${childWorktreePath(repoRoot, childId)}，一行都没丢。` +
               `需要人工解决：在那边 \`git rebase ${repoRoot}\`（或你习惯的方式）后再 \`orchestrator_close\` 一次。\n\n` +
               result.output.trim().split("\n").slice(0, 12).join("\n"),
           };
@@ -2660,13 +2669,13 @@ export default function reviewGate(pi: ExtensionAPI) {
             (reclamation.length === 0
               ? `它的隔离 checkout（${worktreePath}）**已回收** —— 目录不再占地方。\n`
               : `⚠️ 合并成功，但这个隔离 checkout 没能回收：${reclamation.join(" / ")}\n路径 ${worktreePath}。\n`) +
-            `分支 \`${childWorktreeBranch(childId)}\` **保留**：这次合并还只是 staged，` +
+            `分支 \`${branch}\` **保留**：这次合并还只是 staged，` +
             `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
             `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 连分支一起收回 —— ` +
             `那个调用对已关闭的子会话**同样有效**（它只结算 checkout，不再开门）。`
           : reclamation.length > 0
             ? `⚠️ ${childId} 的 worktree **没能回收**（工作区或分支还留着）：${reclamation.join(" / ")}\n` +
-              `路径 ${childWorktreePath(repoRoot, childId)}，分支 \`${childWorktreeBranch(childId)}\`。\n` +
+              `路径 ${childWorktreePath(repoRoot, childId)}，分支 \`${branch}\`。\n` +
               `再调一次 \`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 会重试——` +
               `已经删掉的那一半会被当作已完成，不会重复报错。`
             : `已回收 ${childId} 的 worktree 与分支（丢弃）。`,
@@ -9846,7 +9855,21 @@ export default function reviewGate(pi: ExtensionAPI) {
       // guess, and the guess was the newest checkpoint's parent. Measured that
       // day: a whole round's changes (d28714e..a70f2a1) dropped out of every
       // later range while the gate went on believing the chain was reviewed.
-      ...(reviewTargets.get(targetRoot) ? { commitSha: reviewTargets.get(targetRoot)!.head } : {}),
+      //
+      // …AND `refuse` IS NOT A CONCLUSION (quality round P1, 2026-09-18). The
+      // rule above is about verdicts that CONCLUDED something; `refuse` is the
+      // recorder reporting that the quality judge never left one (its pane
+      // died, or this round dispatched none). Recording the head here moved the
+      // NEXT round's baseline onto it (lib/review-prepare-tools.ts), so this
+      // round's own content entered no quality round's range at all — one pane
+      // death was enough to walk unreviewed code past the quality gate, which
+      // is exactly what 「a round without a conclusion must never let the
+      // baseline step past its content」 forbids. Leaving it unset keeps the
+      // baseline at the last round that truly concluded, so this content stays
+      // inside the next round's range.
+      ...(qualityHold === "refuse" || !reviewTargets.get(targetRoot)
+        ? {}
+        : { commitSha: reviewTargets.get(targetRoot)!.head }),
       at: new Date().toISOString(),
       // Code↔doc attestation travels with the verdict it came from; absent
       // stays absent (blocks under the docSync knob — fail-closed).

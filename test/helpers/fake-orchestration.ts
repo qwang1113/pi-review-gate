@@ -287,6 +287,15 @@ export interface FakeWorldOptions {
   /** Answers the PM-pane `select` (grant door 3) gives, in order. */
   selectAnswers?: string[];
   /**
+   * The branch a checkout is on, as `deps.currentBranch` answers it
+   * (2026-09-18, A).
+   *
+   * ABSENT is the more interesting case and the default: a host with no git
+   * wired, where the task book must fall back to the naming rule rather than
+   * guess at a branch it never read.
+   */
+  currentBranch?: string;
+  /**
    * The requirement restatement `submit` requires (2026-09-06).
    *
    * DEFAULT: a confirmed one — the world models a manager that already did
@@ -444,6 +453,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       (options.resolvableRepos ?? ["/repo"]).includes(repo)
         ? { ok: true, root: options.taskRepoAliases?.[repo] ?? repo }
         : { ok: false, reason: `fake: "${repo}" 不是已知仓库` },
+    ...(options.currentBranch === undefined ? {} : { currentBranch: () => options.currentBranch }),
     knownRepoRoots: () => ["/repo"],
     childJudgeRunning: () => false,
     channelIO: () => io,

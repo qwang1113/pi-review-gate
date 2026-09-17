@@ -6447,6 +6447,17 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   assert.match(record, /if \(qualityHold === "refuse"\) \{[\s\S]{0,120}?parsed\.verdict = "BLOCKED";/,
     "nobody coming back ⇒ REFUSE (fail-closed)");
   assert.match(record, /qualityHold === "hold"/, "…somebody coming back ⇒ HOLD, never record yet");
+  // ── 3b. A REFUSAL IS NOT A CONCLUSION (quality round P1, 2026-09-18) ────
+  // A recorded verdict carries the reviewed COMMIT so the next prepare can
+  // baseline from it. `refuse` is the one branch with no conclusion to carry:
+  // recording a head there moved the next round's BASELINE onto it, and THIS
+  // round's content then entered no quality range at all — a dead pane was
+  // enough to walk unreviewed code past the quality gate.
+  const recordedAt = SRC.indexOf("    st.review = {", recordAt);
+  assert.ok(recordedAt > 0, "the verdict is written in one place");
+  const recorded = SRC.slice(recordedAt, SRC.indexOf('if (parsed.verdict === "READY")', recordedAt));
+  assert.match(recorded, /qualityHold === "refuse"/,
+    "a refused round carries no commitSha — the baseline stays at the last round that CONCLUDED");
   // The in-flight predicate reads the ROUND's own record, and needs a LIVE
   // pane: a judge that died can never land a verdict, so a hold there would be
   // forever.

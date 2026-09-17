@@ -565,9 +565,15 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    与 `node_modules`，**每一条都先要求 `git check-ignore` 确认被忽略**（未被忽略的
    路径带过去会污染 checkout 的 git status，而指纹、precommit 缓存与审查范围都读
    那棵树）；`.pi/` 的运行态文件（state / cache / plan / tasks / judge-sessions）
-   一律不带。播种结果进 spawn 回执。分支名在 `TASK_GOAL_DIRECTIVE` 里**只提示**、
-   不强制：kebab-case 英文描述性名（如 `feat/aum-blacklist-purge`），不要用会话 id
-   那种内部 handle —— 实测三个 PR 的 head 分支都是 `rg-child-<sessionId>`。
+   一律不带。播种结果进 spawn 回执。**分支指令由门禁按派发上下文写进任务书**
+   （`buildBranchLine`，2026-09-18 起；此前是 `TASK_GOAL_DIRECTIVE` 里一句固定的
+   「先给自己开一个功能分支」—— 对收尾任务直接是错的，会让交付分支再叉一条）：
+   同一 checkout ⇒ 点明它实际在的那条分支、不要新开；门禁自建隔离 checkout ⇒ 点明
+   门禁的 `rg-child-…` 分支，站点低于 `pr` 的不许 push / 开 PR，站点到 `pr` 的先
+   `git branch -m` 改成给人看的名字再交付（`orchestrator_close` 的 merge / discard
+   按 checkout 的**实际分支**结算，所以改名不会让结算失败）；只有保护分支或门禁
+   读不到分支时，才给 kebab-case 命名规范（如 `feat/aum-blacklist-purge`）—— 实测
+   三个 PR 的 head 分支都是 `rg-child-<sessionId>`，所以那个 handle 永不作为 PR head。
 
    完工后由 `orchestrator_close({ worktree:"keep"|"merge"|"discard" })` 决定那个
    checkout 的去向（默认 `keep`，因为里面的成果常常是唯一副本）；**`merge` 在合并
