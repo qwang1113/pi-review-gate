@@ -136,7 +136,13 @@ test("an exit WITHOUT a clean shutdown is the one banner nobody else can raise",
   crashed.exit();
   assert.equal(crashed.blocking.length, 1, "the exit path sends, and sends blocking");
   assert.match(crashed.blocking[0]!.join(" "), /异常结束 · pi-review-gate/);
-  assert.match(crashed.blocking[0]!.join(" "), /没有 declare_done/);
+  // WHAT THE BANNER CLAIMS IS BOUNDED BY WHAT THE JUDGE READS (reviewer P2,
+  // 2026-09-17): `cleanShutdown` is the whole decision, so the copy says
+  // "abnormal end" — a session that DID declare_done and then died on a
+  // signal lands here too, and "you never declared done" would be the
+  // opposite of what happened.
+  assert.match(crashed.blocking[0]!.join(" "), /异常结束：进程没有走正常关闭流程/);
+  assert.doesNotMatch(crashed.blocking[0]!.join(" "), /declare_done/);
   assert.deepEqual(crashed.sent, [], "the process is leaving: a detached child would be killed with it");
 
   const quit = harness({ taskMode: "loop" });

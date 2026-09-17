@@ -150,6 +150,13 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
     }
     const [bin, ...args] = argv;
     const child = spawn(bin!, args, { detached: true, stdio: "ignore" });
+    // A DETACHED SPAWN THAT CANNOT START REPORTS IT ASYNCHRONOUSLY (reviewer
+    // P2, 2026-09-17): `spawn` returns a ChildProcess and emits `error` later,
+    // so `notify()`'s try/catch cannot see a binary that vanished or an EACCES
+    // — and an unhandled `error` event on a ChildProcess takes the EXTENSION
+    // HOST down. There is nothing to do with it either way: a banner that
+    // cannot be delivered is the `missing` case the start hint already covers.
+    child.on("error", () => {});
     child.unref();
   }
 
@@ -227,7 +234,15 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
         if (!mayNotifyUser({ taskMode: deps.taskMode(), stateVariant: env()[STATE_VARIANT_ENV] })) return;
         notify({
           kind,
-          detail: "会话没有 declare_done 就退出了（进程异常终止，不是你自己结束的）。",
+          // THE BANNER SAYS WHAT THE JUDGE ACTUALLY KNOWS (reviewer P2,
+          // 2026-09-17): `exitNotifyKind` decides from `cleanShutdown` alone —
+          // "did this process record a session_shutdown" — so a session that
+          // DID declare_done and then died on a signal lands here too, and
+          // claiming it never declared done would tell the user the opposite
+          // of what happened. The SIGKILL limit (no handler runs at all) is
+          // named for the same reason: the sentence has to stay true for
+          // every exit that can reach this line.
+          detail: "会话异常结束：进程没有走正常关闭流程就退出了——如果是你手动 kill 的，忽略这条。",
           blocking: true,
         });
       });

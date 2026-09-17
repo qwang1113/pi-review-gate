@@ -64,6 +64,65 @@ function deny(text: string): ToolReply {
   return { content: [{ type: "text", text }], details: {}, isError: true };
 }
 
+/**
+ * THE ONE CONSENT DIALOG (2026-09-17, user decision — quality round P1: the
+ * third consent tool had just copied the same ~30 lines again, and the file
+ * went 459 → 606).
+ *
+ * What the three tools ACTUALLY share is not their copy — each still writes
+ * its own `spec`, `consentBody` and consequences — but this mechanism: ask
+ * BOTH sides (the pane's human, and for an orchestration child its project
+ * manager through the channel), parse the answer against the spec, and turn
+ * it into one of three outcomes. A dialog that could not be SHOWN is never a
+ * decline, so it does not burn the session's anti-grinding lock.
+ *
+ * THE CONVENTION THAT MAKES IT SHAREABLE: the LAST option of `spec` is the
+ * refusal and every other option is an authorization. All three specs already
+ * read that way; it is checked rather than assumed, because a spec without a
+ * refusal would make its only row read as consent.
+ */
+async function askConsent(
+  deps: ConsentToolDeps,
+  uiCtx: UiContext,
+  opts: { topic: string; spec: ChoiceSpec; consentBody: string; reason: string },
+): Promise<
+  | { outcome: "granted"; option: string }
+  | { outcome: "declined"; declineReason?: string }
+  | { outcome: "unshowable" }
+> {
+  const spec = opts.spec;
+  const refuseLabel = spec.options[spec.options.length - 1];
+  if (spec.options.length < 2 || refuseLabel === undefined) return { outcome: "unshowable" };
+  try {
+    const outcome = await deps.askEitherSide(
+      {
+        dialogKind: "select",
+        topic: opts.topic,
+        // The channel record carries the SAME text the human sees: a project
+        // manager answering on the user's behalf has to read the consequences
+        // (what granting covers, what refusing locks) before it can answer.
+        title: `${spec.title}\n${opts.consentBody}`,
+        options: choiceRows(spec),
+        ...(opts.reason ? { payload: `AI 给出的理由（未经核实）: ${opts.reason.slice(0, 300)}` } : {}),
+      },
+      uiCtx.hasUI === true,
+      (signal) => deps.askChoice(uiCtx, spec, { body: opts.consentBody, signal }),
+    );
+    const pick = parseChoice(outcome.answer, spec);
+    if (pick.kind === "chose" && pick.option !== refuseLabel) {
+      return { outcome: "granted", option: pick.option };
+    }
+    // A refusal typed into the template's reason box is an objection the agent
+    // can act on — dropping it would make the user repeat themselves.
+    return {
+      outcome: "declined",
+      ...(pick.kind === "declined" && pick.reason ? { declineReason: pick.reason } : {}),
+    };
+  } catch {
+    return { outcome: "unshowable" };
+  }
+}
+
 // ---------- request_scope_limit ----------
 
 export async function doRequestScopeLimit(
@@ -146,10 +205,6 @@ export async function doRequestScopeLimit(
     // the gate never nudges the user into weakening it.
     recommended: "拒绝（保持完整门禁）",
   };
-  let ok = false;
-  let dialogFailed = false;
-  /** The user's own typed reason for refusing, when they gave one. */
-  let declineReason: string | undefined;
   const consentBody =
     "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
     `既有变更 ${preexisting.length} 个` +
@@ -157,43 +212,23 @@ export async function doRequestScopeLimit(
     `；本会话修改 ${sessionRel.length} 个（清单见上方消息）。\n` +
     "同意后：审查只需覆盖本会话自己的修改；若本会话没有任何修改，ship 拦截将解除。\n" +
     "拒绝后：AI 本会话内不能再次请求缩小范围。";
-  try {
-    const outcome = await deps.askEitherSide(
-      {
-        dialogKind: "select",
-        topic: "scope-limit",
-        // The channel record carries the SAME text the human sees — the
-        // consequences (what granting covers, what refusing locks) are the
-        // half a project manager answering on the user's behalf must read.
-        title: `${spec.title}\n${consentBody}`,
-        options: choiceRows(spec),
-        ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
-      },
-      uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
-    );
-    const pick = parseChoice(outcome.answer, spec);
-    ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
-    // A refusal typed into the template's reason box is an objection the agent
-    // can act on — dropping it would make the user repeat themselves.
-    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
-  } catch { dialogFailed = true; }
+  const consent = await askConsent(deps, uiCtx, { topic: "scope-limit", spec, consentBody, reason });
 
   // A dialog that could not be shown is NOT a decline: fail closed for
   // THIS request without burning the session's anti-grinding lock.
-  if (dialogFailed) {
+  if (consent.outcome === "unshowable") {
     return deny(
       "review-gate: the confirmation dialog could not be shown — no scope limit granted (fail-closed), " +
       "and this does NOT count as a user decline; retry when an interactive dialog is possible.",
     );
   }
 
-  if (!ok) {
+  if (consent.outcome === "declined") {
     deps.declineScopeLimit();
     return deny(
       "review-gate: DECLINED the scope limit (by the user or the project manager) — the FULL gate applies (pre-existing " +
       "changes included). Scope requests are now locked for this session; continue the loop and cover everything." +
-      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
+      (consent.declineReason ? `\n\n用户的意见：${consent.declineReason}` : ""),
     );
   }
 
@@ -304,43 +339,26 @@ export async function doRequestTmuxAccess(
     `「${ONCE_LABEL}」：下一条 tmux 命令用掉就没。\n` +
     "「拒绝」：本会话不再允许申请，agent 只能用编排工具或请你手跑。\n" +
     "只读命令（tmux ls、display-message 等）从来不在拦截范围。";
-  let ok = false;
-  let once = false;
-  let dialogFailed = false;
-  let declineReason: string | undefined;
-  try {
-    const outcome = await deps.askEitherSide(
-      {
-        dialogKind: "select",
-        topic: "tmux-access",
-        title: `${spec.title}\n${consentBody}`,
-        options: choiceRows(spec),
-        ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
-      },
-      uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
-    );
-    const pick = parseChoice(outcome.answer, spec);
-    ok = pick.kind === "chose" && (pick.option === SESSION_LABEL || pick.option === ONCE_LABEL);
-    once = pick.kind === "chose" && pick.option === ONCE_LABEL;
-    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
-  } catch { dialogFailed = true; }
+  const consent = await askConsent(deps, uiCtx, { topic: "tmux-access", spec, consentBody, reason });
 
-  if (dialogFailed) {
+  if (consent.outcome === "unshowable") {
     return deny(
       "review-gate: the authorization dialog could not be shown — no tmux access granted (fail-closed), " +
       "and this does NOT count as a user decline; retry when an interactive dialog is possible.",
     );
   }
-  if (!ok) {
+  if (consent.outcome === "declined") {
     deps.declineTmuxAccess();
     return deny(
       "review-gate: DECLINED tmux access (by the user or the project manager) — tmux commands stay blocked " +
       "in this session and the request is locked: do not ask again. Use the orchestration tools " +
       "(orchestrator_spawn / orchestrator_close / session_handoff), or ask the USER to run the command. " +
-      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
+      (consent.declineReason ? `\n\n用户的意见：${consent.declineReason}` : ""),
     );
   }
+  // WHICH grant this was is the caller's to read: this spec offers two, and
+  // `askConsent` only promises that it was not the refusal.
+  const once = consent.option === ONCE_LABEL;
 
   state.tmuxAccess = { at: new Date().toISOString(), scope: once ? "once" : "session" };
   deps.persist(ctx);
@@ -459,10 +477,6 @@ export async function doRequestSensitiveEdit(
     // does not recommend handing them to a model.
     recommended: "拒绝（保持拦截）",
   };
-  let ok = false;
-  let dialogFailed = false;
-  /** The user's own typed reason for refusing, when they gave one. */
-  let declineReason: string | undefined;
   const consentBody =
     `文件（完整路径）: ${absPath}\n` +
     `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}\n` +
@@ -471,41 +485,23 @@ export async function doRequestSensitiveEdit(
     "请确认这确实是你本次要求的一部分；文件里的密钥/凭据会暴露给模型。\n" +
     `文件（默认禁止 AI 写入）: ${shownPath}\n` +
     `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}`;
-  try {
-    const outcome = await deps.askEitherSide(
-      {
-        dialogKind: "select",
-        topic: "sensitive-edit",
-        // The channel record carries the SAME text the human sees — a project
-        // manager answering on the user's behalf cannot authorize a path it
-        // was never shown.
-        title: `${spec.title}\n${consentBody}`,
-        options: choiceRows(spec),
-        ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
-      },
-      uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
-    );
-    const pick = parseChoice(outcome.answer, spec);
-    ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
-    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
-  } catch { dialogFailed = true; }
+  const consent = await askConsent(deps, uiCtx, { topic: "sensitive-edit", spec, consentBody, reason });
 
   // A dialog that could not be shown is NOT a decline: fail closed for THIS
   // request without burning the path's anti-grinding lock.
-  if (dialogFailed) {
+  if (consent.outcome === "unshowable") {
     return deny(
       "review-gate: the confirmation dialog could not be shown — no authorization granted " +
       "(fail-closed), and this does NOT count as a user decline; retry when a dialog is possible.",
     );
   }
 
-  if (!ok) {
+  if (consent.outcome === "declined") {
     deps.sensitiveDeclinedPaths.add(absPath);
     return deny(
       `review-gate: DECLINED editing "${raw}" (by the user or the project manager). This path is now locked for the session — ` +
       "do not ask again. Describe the change you wanted and let the user apply it." +
-      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
+      (consent.declineReason ? `\n\n用户的意见：${consent.declineReason}` : ""),
     );
   }
 

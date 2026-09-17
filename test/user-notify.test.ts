@@ -113,7 +113,9 @@ test("each kind says what happened and where", () => {
 
   const failed = buildUserNotifyMessage({ kind: "failed", repoName: "onchain", detail: "" });
   assert.match(failed.title, /异常结束/);
-  assert.match(failed.body, /没有 declare_done/, "the default body must say what a failure IS here");
+  assert.match(failed.body, /异常结束/, "the default body must say what a failure IS here");
+  assert.doesNotMatch(failed.body, /declare_done/,
+    "…and must not claim a cause the judge never checked (reviewer P2, 2026-09-17)");
 
   const needs = buildUserNotifyMessage({ kind: "needs-user", repoName: "onchain", detail: "选哪个方案？" });
   assert.match(needs.title, /需要你/);

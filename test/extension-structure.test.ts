@@ -1210,7 +1210,14 @@ test("request_scope_limit: extension-driven user consent, no 'confirmed' paramet
   const body = toolBodyOf("request_scope_limit");
   // Consent is obtained by the EXTENSION (dialog) — the tool schema exposes
   // only a reason; there is no parameter the model could set to claim consent.
-  assert.match(body, /deps\.askChoice\(/);
+  //
+  // THE DIALOG IS ONE IMPLEMENTATION (2026-09-17, user decision): the third
+  // consent tool had copied this dance again, so the guard moved from "this
+  // body calls askChoice" to "askChoice has exactly ONE call site" — which is
+  // what a fourth tool cannot quietly duplicate.
+  assert.equal((CONSENT_SRC.match(/deps\.askChoice\(/g) ?? []).length, 1,
+    "the consent dialog is rendered in exactly one place (askConsent)");
+  assert.match(body, /askConsent\(deps, uiCtx,/);
   assert.match(body, /parameters: Type\.Object\(\{\s*reason: Type\.String/);
   assert.doesNotMatch(body, /confirmed/);
   // No UI ⇒ fail-closed deny; a declined dialog locks further requests — but
@@ -1221,7 +1228,7 @@ test("request_scope_limit: extension-driven user consent, no 'confirmed' paramet
   assert.match(windowOf("registerUserInteractionTools(pi, {", "\n  });", "user-interaction wiring"),
     /declineScopeLimit: \(\) => \{ scopeLimitDeclined = true; \}/,
     "the decline must land on the session lock the gate actually reads");
-  assert.match(body, /dialogFailed/);
+  assert.match(body, /unshowable/, "a dialog that could not be shown is not a decline");
   assert.match(body, /state\.scopeLimit = \{/);
 });
 
@@ -2359,17 +2366,19 @@ test("sensitive-file guard wired into tool_call", () => {
 test("request_sensitive_edit: the user decides in an extension dialog, not the agent", () => {
   const body = toolBodyOf("request_sensitive_edit");
 
-  assert.match(body, /deps\.askChoice\(/, "the extension must render the dialog itself");
+  assert.match(body, /askConsent\(deps, uiCtx,/, "the extension must render the dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
     "no agent-supplied 'confirmed' parameter — that would be self-approval");
   assert.match(body, /if \(!uiCtx\.hasUI\)/, "no UI must fail closed instead of granting");
-  assert.match(body, /dialogFailed/, "a dialog that could not be shown is not a decline");
+  assert.match(body, /unshowable/, "a dialog that could not be shown is not a decline");
 });
 
 test("SECURITY: request_sensitive_edit refuses .git internals before showing any dialog", () => {
   const body = toolBodyOf("request_sensitive_edit");
   const integrityAt = body.indexOf("isGateIntegrityPath");
-  const confirmAt = body.indexOf("askChoice");
+  // The dialog itself lives in `askConsent` (2026-09-17); what matters here is
+  // that the integrity refusal comes before the tool reaches for it.
+  const confirmAt = body.indexOf("askConsent");
   assert.ok(integrityAt > 0 && confirmAt > 0, "both must exist");
   assert.ok(integrityAt < confirmAt,
     "a user must never be asked to authorize a write to .git/hooks — that would disarm L3");

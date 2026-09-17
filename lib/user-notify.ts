@@ -28,10 +28,12 @@
  * decides that the human is needed. The kinds are {@link UserNotifyKind}:
  *
  *   - `finished`   — `declare_done` was accepted (the round's exit contract met);
- *   - `failed`     — the process ended WITHOUT one, and without a clean
- *                    shutdown: a crash, not a quit. A session the user ends
- *                    themselves (quit, reload, resume, kill, closing the
- *                    terminal) says nothing — they already know;
+ *   - `failed`     — the process ended with NO record of a clean shutdown
+ *                    (pi fires `session_shutdown` for quit, reload, new,
+ *                    resume and fork, and the extension records it): a crash
+ *                    rather than a quit. That record is the WHOLE judge —
+ *                    {@link exitNotifyKind} reads nothing else — so the banner
+ *                    says "abnormal end", never "you never declared done";
  *   - `needs-user` — the gate has stopped and is waiting for an answer that
  *                    only the human can give (every gate dialog, `ask_user`
  *                    included, funnels through one call site).
@@ -151,7 +153,7 @@ export function buildUserNotifyMessage(opts: {
     case "failed":
       return {
         title: `异常结束 · ${where}`,
-        body: detail || "会话没有 declare_done 就退出了（进程异常终止）。",
+        body: detail || "会话异常结束（进程没有走正常关闭流程）。",
       };
     case "needs-user":
     default:
