@@ -49,6 +49,9 @@ function plan(overrides: Partial<Parameters<typeof planUserNotify>[0]> = {}) {
     stateVariant: undefined,
     tmux: () => ({ paneId: "%7", windowId: "@3" }),
     notifierPath: NOTIFIER,
+    // The macOS app the click raises — in production `defaultActivateBundle()`
+    // reads it from `__CFBundleIdentifier`; the pure planner takes it as a fact.
+    activateBundle: "com.mitchellh.ghostty",
     history: emptyNotifyHistory(),
     now: T0,
     interactive: true,
@@ -198,9 +201,24 @@ test("agent-written text lands in its own argv element, never in the click comma
 });
 
 test("the notifier is spawned by its resolved path, and its own argv stays positional", () => {
-  assert.deepEqual(buildNotifierArgv({ title: "T", body: "B" }), [
+  assert.deepEqual(buildNotifierArgv({ title: "T", body: "B", activateBundle: "com.mitchellh.ghostty" }), [
     NOTIFIER_BINARY, "-title", "T", "-message", "B", "-activate", "com.mitchellh.ghostty",
   ], "the pure builder names the binary, and planUserNotify swaps in the resolved path");
+});
+
+test("an unknown host app drops `-activate` — the click still focuses the pane, it just cannot raise a window", () => {
+  // Reviewer Nit (carried two rounds, fixed 2026-09-17): the bundle used to be
+  // hard-coded Ghostty, so a click raised Ghostty for a session running in any
+  // other terminal — and `TERM_PROGRAM` cannot fix that, because inside tmux it
+  // is `tmux`. No bundle ⇒ no `-activate` at all, rather than a guess.
+  assert.deepEqual(buildNotifierArgv({ title: "T", body: "B" }), [
+    NOTIFIER_BINARY, "-title", "T", "-message", "B",
+  ]);
+  const p = plan({ activateBundle: undefined });
+  assert.equal(p.status, "send");
+  if (p.status !== "send") return;
+  assert.ok(!p.argv.includes("-activate"), "a guess is worse than silence here");
+  assert.ok(p.argv.includes("-execute"), "…and the pane is still the click target");
 });
 
 // ---------------------------------------------------------------------------

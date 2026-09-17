@@ -69,8 +69,25 @@ export const NOTIFY_RATE_WINDOW_MS = 5 * 60_000;
 /** The CLI that actually delivers (brew, MIT). */
 export const NOTIFIER_BINARY = "terminal-notifier";
 
-/** Where the click lands: the user's terminal, never Script Editor. */
-export const NOTIFY_ACTIVATE_BUNDLE = "com.mitchellh.ghostty";
+/**
+ * WHERE THE CLICK LANDS: the macOS app this session actually runs in.
+ *
+ * `__CFBundleIdentifier` is set by LaunchServices for every process a GUI app
+ * spawns, and a tmux server inherits it from the terminal that started it —
+ * which is what makes it the right source here. `TERM_PROGRAM` is NOT:
+ * measured 2026-09-17, inside tmux it is literally `tmux`, so a session in
+ * tmux cannot name its terminal that way at all. The constant this replaced —
+ * a hard-coded `com.mitchellh.ghostty` — sent every click to Ghostty whether
+ * or not that is where the session lives (reviewer Nit, carried two rounds).
+ *
+ * Absent (a tmux server started outside a GUI session, a non-macOS host) ⇒
+ * the banner carries no `-activate`: the click still runs `-execute`'s tmux
+ * focus command, it just does not raise the terminal window.
+ */
+export function defaultActivateBundle(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const id = (env["__CFBundleIdentifier"] ?? "").trim();
+  return id.length > 0 ? id : undefined;
+}
 
 /** Said once, at session start, when the binary is missing. */
 export const MISSING_NOTIFIER_HINT =
@@ -198,14 +215,18 @@ export function buildNotifierArgv(opts: {
   body: string;
   /** From {@link buildFocusCommand}; omitted when there is no pane to jump to. */
   focusCommand?: string | undefined;
-  activateBundle?: string;
+  /** From {@link defaultActivateBundle}; omitted ⇒ no `-activate` at all. */
+  activateBundle?: string | undefined;
 }): string[] {
   const argv = [
     NOTIFIER_BINARY,
     "-title", opts.title,
     "-message", opts.body,
-    "-activate", opts.activateBundle ?? NOTIFY_ACTIVATE_BUNDLE,
   ];
+  // NO `-activate` WITHOUT A KNOWN BUNDLE. There is no safe default to fall
+  // back on — a guessed bundle id raises somebody else's app, or nothing —
+  // and the hard-coded Ghostty did exactly that on every other terminal.
+  if (opts.activateBundle) argv.push("-activate", opts.activateBundle);
   if (opts.focusCommand) argv.push("-execute", opts.focusCommand);
   return argv;
 }
@@ -389,6 +410,14 @@ export function planUserNotify(opts: {
   now: number;
   /** False for tests, CI and non-interactive hosts. */
   interactive: boolean;
+  /**
+   * The app a click should raise, from {@link defaultActivateBundle}.
+   *
+   * Passed IN rather than read from the environment here: this function is
+   * pure (its callers' tests depend on that), and the resolution belongs with
+   * the other host facts `lib/user-notify-runtime.ts` injects.
+   */
+  activateBundle?: string | undefined;
 }): UserNotifyPlan {
   if (!opts.interactive) return { status: "skipped", reason: "非交互环境：不发通知" };
   if (!mayNotifyUser({ taskMode: opts.taskMode, stateVariant: opts.stateVariant })) {
@@ -424,6 +453,6 @@ export function planUserNotify(opts: {
     // The binary is spawned by its RESOLVED path: PATH at exit time is not the
     // PATH the session started with, and a crash is exactly when nobody is
     // around to notice that the banner silently failed to start.
-    argv: [opts.notifierPath, ...buildNotifierArgv({ title, body, focusCommand }).slice(1)],
+    argv: [opts.notifierPath, ...buildNotifierArgv({ title, body, focusCommand, activateBundle: opts.activateBundle }).slice(1)],
   };
 }

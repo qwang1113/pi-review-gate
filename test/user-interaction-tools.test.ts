@@ -436,6 +436,27 @@ test("request_scope_limit: a previous decline locks the session, before any dial
   assert.deepEqual(f.asked, [], "a locked session must not raise the dialog again");
 });
 
+test("request_scope_limit: an answer that is NOT one of the rows is a refusal, never a consent", async (t) => {
+  // THE WHITELIST GUARD (functional reviewer P2 + quality round P1, both on
+  // 2026-09-17): `parseChoice` returns an unrecognized line VERBATIM as
+  // `{kind:"chose", option:<text>}` (lib/choice-dialog.ts), so a consent
+  // decided by ELIMINATION ("anything that is not the refusal row") turns any
+  // other text into a GRANT on a path whose whole job is to be conservative.
+  // The three copies the shared helper replaced each matched their own grant
+  // label; this keeps it that way.
+  const dir = mkdtempSync(join(tmpdir(), "rg-scope-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  git(dir, ["init", "-q"]);
+  writeFileSync(join(dir, "old.ts"), "export const a = 1;\n");
+  const f = fake({ cwd: dir, answers: ["随便写的一句话，不是任何一个选项"] });
+
+  const reply = await call(f, "request_scope_limit", { reason: "既有改动" });
+  assert.equal(reply.isError, true);
+  assert.match(textOf(reply), /DECLINED the scope limit/);
+  assert.equal(f.scopeDeclined, true, "an unreadable answer is treated as a refusal");
+  assert.equal(f.st.scopeLimit, undefined, "nothing was granted");
+});
+
 test("request_scope_limit: no UI fails closed", async () => {
   const f = fake();
   const reply = await runWithCtx(f, "request_scope_limit", { reason: "既有改动" }, { hasUI: false });

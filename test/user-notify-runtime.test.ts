@@ -58,7 +58,7 @@ function harness(over: {
       persist: () => { persists += 1; },
       repoName: () => "pi-review-gate",
       taskMode: () => state.taskMode,
-      env: () => ({ TMUX_PANE: "%7", ...(over.env ?? {}) } as NodeJS.ProcessEnv),
+      env: () => ({ TMUX_PANE: "%7", __CFBundleIdentifier: "com.mitchellh.ghostty", ...(over.env ?? {}) } as NodeJS.ProcessEnv),
       interactive: () => over.interactive ?? true,
       runTmux: (argv) => { tmuxCalls.push([...argv]); return { ok: true, stdout: `${over.windowId ?? "@3"}\n` }; },
       now: () => T0,
@@ -99,6 +99,13 @@ test("a banner goes out with this session's own pane as the click target", () =>
   assert.equal(h.state.notify?.sentAt.length, 1, "the throttle is written to the sidecar");
   assert.equal(h.persists, 1, "…and persisted, or a reload would forget it");
   assert.equal(h.blocking.length, 0, "a live session never blocks on the notifier");
+});
+
+test("a host app that cannot be named sends no `-activate` (reviewer Nit, 2026-09-17)", () => {
+  const h = harness({ taskMode: "loop", env: { __CFBundleIdentifier: "" } });
+  assert.equal(h.notify({ kind: "finished", detail: "x" }).status, "sent");
+  assert.ok(!h.sent[0]!.includes("-activate"), "no guessed bundle: the click would raise somebody else's app");
+  assert.ok(h.sent[0]!.includes("-execute"), "the tmux focus command still rides along");
 });
 
 test("nothing is spawned when the session may not send, and tmux is not even asked", () => {

@@ -30,6 +30,7 @@ import type { TaskMode } from "./task-mode.ts";
 import {
   MISSING_NOTIFIER_HINT,
   NOTIFIER_BINARY,
+  defaultActivateBundle,
   emptyNotifyHistory,
   exitNotifyKind,
   mayNotifyUser,
@@ -190,6 +191,10 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
         // synchronous tmux call is paid (quality round P2).
         tmux: () => ownTmuxAddress(),
         notifierPath: notifierPath(),
+        // WHERE A CLICK LANDS (reviewer Nit, carried two rounds): resolved
+        // HERE with the other host facts and passed in, so `planUserNotify`
+        // stays pure. An unknown app ⇒ no `-activate` at all, never a guess.
+        activateBundle: defaultActivateBundle(env()),
         history,
         now: at,
         interactive: deps.interactive(),
