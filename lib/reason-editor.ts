@@ -43,8 +43,19 @@ export type ReasonEditor = (title: string, opts?: { signal?: AbortSignal }) => P
 export interface ReasonEditorHost {
   /** pi's `ui.custom`. Absent on a host that cannot render custom components. */
   custom?: CustomDialogHost;
-  /** pi's `ui.editor` — the multi-line box a host without `custom` can still show. */
-  fallback?: ReasonEditor;
+  /**
+   * The host's OWN box, for a host that cannot render `custom`
+   * (lib/reason-editor.ts's module doc says which one that is).
+   *
+   * TITLE ONLY — NEVER THESE OPTIONS (reviewer P2, 2026-09-17). pi's
+   * `ui.editor(title, prefill?: string)` takes a PREFILL in its second
+   * position, so passing our `{ signal }` through makes the user's box open
+   * prefilled with `[object Object]` — and the fallback is exactly the path
+   * that calls it. This box has no signal to pass anyway (that is the whole
+   * reason `custom` is preferred); the signature says so instead of leaving a
+   * trap for the next caller.
+   */
+  fallback?: (title: string) => Promise<string | undefined>;
   /**
    * Builds the component. The extension passes pi's own
    * `ExtensionEditorComponent`; a test passes anything that calls `done`.
@@ -68,7 +79,7 @@ export interface ReasonEditorHost {
 export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
   const { custom, fallback, build } = host;
   return async (title, opts) => {
-    if (!custom) return fallback?.(title, opts);
+    if (!custom) return fallback?.(title);
     let ran = false;
     const answer = await custom<string | undefined>((tui, _theme, keybindings, done) => {
       ran = true;
@@ -86,6 +97,6 @@ export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
       return build(tui, keybindings, title, finish);
     });
     if (ran || answer !== undefined) return answer;
-    return fallback?.(title, opts);
+    return fallback?.(title);
   };
 }

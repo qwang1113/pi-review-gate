@@ -263,7 +263,17 @@ export async function doAskUser(
   const resumedCount = answers.length;
   /** Is the interview already stopped? Set when a box is closed unanswered. */
   let stopped = false;
-  /** Did ANY dialog actually render? A no is what makes this headless. */
+  /**
+   * Did a QUESTION reach the screen, or an answer come back?
+   *
+   * A no is what makes this a host with no dialogs at all — and the questions
+   * then go back to the agent to carry in its reply. CLOSING A BOX COUNTS AS
+   * REACHING IT (reviewer P1, 2026-09-17): closing is the way OUT of an
+   * interview now, so counting answers instead would tell a user who closed the
+   * first box that "this environment has no dialogs, not one question was
+   * shown" — flatly false, and it costs the agent a whole iteration pasting
+   * every question into its reply.
+   */
   let anyDialog = false;
 
   // ── THE WHOLE INTERVIEW GOES UP FIRST (2026-09-06) ──
@@ -322,6 +332,10 @@ export async function doAskUser(
         // Already settled (the project manager answered it through the
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped) return undefined;
+        // A BOX IS ABOUT TO BE SHOWN. This is the signal `anyDialog` waits for:
+        // it is what tells a real session apart from a host that could not
+        // render anything (see the declaration above).
+        anyDialog = true;
         // ONE renderer for every dialog in the gate — the extension's
         // `askChoice`, which is the template plus the host's own boxes.
         //
@@ -413,9 +427,10 @@ export async function doAskUser(
     deps.setLoopArmed(true);
   }
   deps.persist(ctx);
-  // A UI existed but every dialog came back empty (they were all
-  // dismissed, or the host refused to render them): the questions still
-  // reached nobody, so the agent carries them itself.
+  // A UI existed but no dialog ever reached the screen (the host refused to
+  // render them, or none was raised at all): the questions still reached
+  // nobody, so the agent carries them itself. A box the USER closed is not
+  // this case — it rendered, they chose to stop (see `anyDialog`).
   if (!anyDialog) {
     return {
       content: [{ type: "text", text: buildNoDialogNotice(questions) }],

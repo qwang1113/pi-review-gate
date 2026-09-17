@@ -180,6 +180,29 @@ test("ask_user: the dialog title is a bare progress label, the question rides in
     "the WHOLE question is in the body");
 });
 
+test("ask_user: a box the user CLOSED is not 'this environment has no dialogs'", async () => {
+  // Closing the box is THE way out of an interview (2026-09-17), so this is a
+  // NORMAL path. Reporting it as "no dialogs here — paste every question into
+  // your reply" is false (the box was right in front of them) and costs the
+  // agent a whole iteration. What makes a session headless is that no box ever
+  // reached the screen — not that nobody answered.
+  const f = fake({ confirmAnswer: false });
+  f.deps.askEitherSide = async (_request, _hasUI, render) => {
+    const answer = await render(new AbortController().signal);
+    return { answer, by: "human", requestId: "r1" };
+  };
+  const reply = await call(f, "ask_user", {
+    questions: [
+      { text: "第一题", options: ["A", "B"], recommended: "A" },
+      { text: "第二题", options: ["A", "B"], recommended: "A" },
+    ],
+  });
+  assert.doesNotMatch(textOf(reply), /没有可用的对话框/, "the box WAS shown — do not claim otherwise");
+  assert.doesNotMatch(textOf(reply), /写进你的回复/);
+  assert.match(textOf(reply), /循环已暂停/, "an unanswered interview still pauses the loop");
+  assert.deepEqual(f.armed, [false]);
+});
+
 test("ask_user: an empty question list is refused without touching the loop", async () => {
   const f = fake();
   const reply = await call(f, "ask_user", { questions: [] });

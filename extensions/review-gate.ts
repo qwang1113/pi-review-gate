@@ -78,7 +78,7 @@ import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "..
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { hostReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
+import { hostReasonEditor, type CustomDialogHost, type ReasonEditor } from "../lib/reason-editor.ts";
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
@@ -4804,6 +4804,99 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * A host context as the template's narrow `ui` seam.
+   *
+   * THE CAST IS LOAD-BEARING (2026-09-17): pi's `ExtensionContext.ui` no longer
+   * SATISFIES `ChoiceUi` structurally, because the reason box's `editor` takes
+   * a `signal` where pi's takes a prefill (see `reasonBoxUi` below for why).
+   * Everything else on the seam is pi's own, unchanged. One named cast beats a
+   * bare `as` at every call site, which is where it would drift.
+   */
+  function asChoiceHost(ctx: unknown): { ui?: ChoiceUi } {
+    return ctx as { ui?: ChoiceUi };
+  }
+
+/** pi's editor component CLASS, as a type — see `loadEditorComponent`. */
+type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["ExtensionEditorComponent"];
+
+  /**
+   * pi's own multi-line editor component, resolved ON DEMAND.
+   *
+   * IT USED TO BE A MODULE-SCOPE VALUE IMPORT, and that broke the one case the
+   * loader alias cannot cover: a host that loads this file OUTSIDE pi (the
+   * install fixtures in test/, any tool that imports the extension to inspect
+   * it) has no `@earendil-works/pi-coding-agent` to resolve, so a static import
+   * fails at LOAD time — the whole extension refuses to load, to draw one
+   * dialog. Resolved lazily it degrades instead: no component ⇒ the reason box
+   * stays whatever the host's own `ui.editor` is (multi-line, no signal), and
+   * nothing else changes.
+   *
+   * Inside pi the resolve always succeeds: the extension loader aliases this
+   * specifier to pi's own entry (dist/core/extensions/loader.js `_aliases`,
+   * `piCodingAgentEntry = packageIndex`), so no second copy is involved.
+   */
+  let editorComponent: Promise<EditorComponentCtor | undefined> | undefined;
+  function loadEditorComponent(): Promise<EditorComponentCtor | undefined> {
+    editorComponent ??= import("@earendil-works/pi-coding-agent")
+      .then((pi) => pi.ExtensionEditorComponent)
+      .catch(() => undefined);
+    return editorComponent;
+  }
+
+  /**
+   * pi's own `ui.editor` behind the template's seam.
+   *
+   * IT TAKES A PREFILL, NOT OPTIONS (reviewer P2, 2026-09-17): calling it as
+   * `(title, { signal })` opens the user's box with `[object Object]` already
+   * typed into it — and the RPC fallback is exactly the path that calls it that
+   * way. The signal is dropped deliberately: this box cannot be taken down
+   * (that is why `custom` is preferred at all), and a box showing the question
+   * beats one full of junk.
+   */
+  function asOwnReasonEditor(editor: ExtensionUIContext["editor"]): ReasonEditor {
+    return (title) => editor(title);
+  }
+
+  /**
+   * The template's `ui` seam, with the reason box wired to pi's own editor.
+   *
+   * WHY NOT `ui.editor()` DIRECTLY (2026-09-17): pi's signature is
+   * `editor(title, prefill?)` — no `signal`. This gate's dialog model rests on
+   * a box being taken OFF THE SCREEN the moment the other side answers first
+   * (lib/orchestrator-child-channel.ts), and a box that outlives its answer
+   * collects typing nobody will ever read. The RULE for that — how the two
+   * kinds of `undefined` are told apart, and which host falls back to what —
+   * lives in lib/reason-editor.ts; what is here is only the wiring.
+   */
+  async function reasonBoxUi(host: ChoiceUi | undefined): Promise<ChoiceUi | undefined> {
+    const pi = host as (ChoiceUi & {
+      custom?: ExtensionUIContext["custom"];
+      editor?: ExtensionUIContext["editor"];
+    }) | undefined;
+    const own = pi?.editor ? asOwnReasonEditor(pi.editor.bind(pi)) : undefined;
+    const custom = pi?.custom;
+    const Component = custom ? await loadEditorComponent() : undefined;
+    // No pi package to resolve, or no custom components on this host (RPC):
+    // the host's own editor — ADAPTED, never handed our options.
+    if (!custom || !Component) return own ? { ...host, editor: own } : host;
+    return {
+      ...host,
+      editor: hostReasonEditor({
+        custom: custom.bind(pi) as CustomDialogHost,
+        ...(own ? { fallback: own } : {}),
+        build: (tui, keybindings, title, done) => new Component(
+          tui as ConstructorParameters<EditorComponentCtor>[0],
+          keybindings as ConstructorParameters<EditorComponentCtor>[1],
+          title,
+          undefined,
+          done,
+          () => done(undefined),
+        ),
+      }),
+    };
+  }
+
+  /**
    * THE one dialog renderer (user decision, 2026-09-08): the gate's question
    * template, whole. Every dialog in this file — and
    * every dialog in the tool modules that inject this function — comes
@@ -4831,99 +4924,6 @@ export default function reviewGate(pi: ExtensionAPI) {
    * `undefined` is then read as "somebody else settled this", not as a
    * refusal (lib/orchestrator-child-channel.ts owns that distinction).
    */
-  /**
-   * The template's `ui` seam, with the REASON BOX wired to pi's own editor
-   * (2026-09-17).
-   *
-   * WHY NOT `ui.editor()` DIRECTLY: pi's signature is
-   * `editor(title, prefill?)` — it takes no `signal`. This gate's dialog model
-   * rests on a box being taken OFF THE SCREEN when the other side answers
-   * first (lib/orchestrator-child-channel.ts), and a box that stays up after
-   * its answer is settled collects typing nobody will ever read. Building
-   * `ExtensionEditorComponent` here gets the identical box WITH the signal.
-   *
-   * HOSTS WITHOUT `custom` (RPC mode): `ui.custom()` there resolves
-   * `undefined` without ever calling the factory (pi
-   * dist/modes/rpc/rpc-mode.js), which is distinguishable from a user closing
-   * a box — the factory ran in that case — so we fall back to `ui.editor()`,
-   * which RPC DOES forward to its host. Losing the signal there is the lesser
-   * evil: calling it "the user closed the box" would stop the whole interview
-   * (lib/ask-user.ts `resolveQuestion`).
-   */
-  /**
-   * A host context as the template's narrow `ui` seam.
-   *
-   * THE CAST IS LOAD-BEARING (2026-09-17): pi's `ExtensionContext.ui` no longer
-   * SATISFIES `ChoiceUi` structurally, because the reason box's `editor` takes
-   * a `signal` where pi's takes a prefill (see `reasonBoxUi` below for why).
-   * Everything else on the seam is pi's own, unchanged. One named cast beats a
-   * bare `as` at every call site, which is where it would drift.
-   */
-/** pi's editor component CLASS, as a type — see `loadEditorComponent`. */
-type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["ExtensionEditorComponent"];
-
-  function asChoiceHost(ctx: unknown): { ui?: ChoiceUi } {
-    return ctx as { ui?: ChoiceUi };
-  }
-
-  /**
-   * pi's own multi-line editor component, resolved ON DEMAND.
-   *
-   * IT USED TO BE A MODULE-SCOPE VALUE IMPORT, and that broke the one case the
-   * loader alias cannot cover: a host that loads this file OUTSIDE pi (the
-   * install fixtures in test/, any tool that imports the extension to inspect
-   * it) has no `@earendil-works/pi-coding-agent` to resolve, so a static import
-   * fails at LOAD time — the whole extension refuses to load, to draw one
-   * dialog. Resolved lazily it degrades instead: no component ⇒ the reason box
-   * stays whatever the host's own `ui.editor` is (multi-line, no signal), and
-   * nothing else changes.
-   *
-   * Inside pi the resolve always succeeds: the extension loader aliases this
-   * specifier to pi's own entry (dist/core/extensions/loader.js `_aliases`,
-   * `piCodingAgentEntry = packageIndex`), so no second copy is involved.
-   */
-  let editorComponent: Promise<EditorComponentCtor | undefined> | undefined;
-  function loadEditorComponent(): Promise<EditorComponentCtor | undefined> {
-    editorComponent ??= import("@earendil-works/pi-coding-agent")
-      .then((pi) => pi.ExtensionEditorComponent)
-      .catch(() => undefined);
-    return editorComponent;
-  }
-
-  /**
-   * The template's `ui` seam, with the REASON BOX wired to pi's own editor.
-   *
-   * THE RULE lives in lib/reason-editor.ts (why not `ui.editor()` directly, and
-   * how a host that cannot render `custom` is told apart from a user closing the
-   * box). What is left here is only what needs pi or this session: `ui.custom`,
-   * pi's `ExtensionEditorComponent`, and the host's own `editor` as the fallback
-   * for a host with no custom components at all (RPC mode).
-   */
-  async function reasonBoxUi(host: ChoiceUi | undefined): Promise<ChoiceUi | undefined> {
-    const h = host as (ChoiceUi & { custom?: ExtensionUIContext["custom"] }) | undefined;
-    if (!h?.custom) return host;
-    const Component = await loadEditorComponent();
-    // No pi package to resolve (a host that is not pi): keep whatever editor
-    // the host itself offers instead of dropping the dialog on the floor.
-    if (!Component) return host;
-    const { custom } = h;
-    return {
-      ...host,
-      editor: hostReasonEditor({
-        custom: custom.bind(h) as CustomDialogHost,
-        ...(host?.editor ? { fallback: host.editor.bind(host) } : {}),
-        build: (tui, keybindings, title, done) => new Component(
-          tui as ConstructorParameters<EditorComponentCtor>[0],
-          keybindings as ConstructorParameters<EditorComponentCtor>[1],
-          title,
-          undefined,
-          done,
-          () => done(undefined),
-        ),
-      }),
-    };
-  }
-
   async function askChoice(
     uiCtx: { ui?: ChoiceUi },
     spec: ChoiceSpec,

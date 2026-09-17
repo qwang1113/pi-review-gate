@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { hostReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
+import { resolveQuestion } from "../lib/ask-user.ts";
 
 // ---- the runtime import the extension now depends on ----
 
@@ -20,7 +21,8 @@ test("the value import the extension relies on resolves at runtime", async () =>
  *  never calls it at all (pi dist/modes/rpc/rpc-mode.js). */
 function harness(mode: "interactive" | "rpc" | "no-custom") {
   let componentDone: ((value: string | undefined) => void) | undefined;
-  const calls: { built: string[]; fellBack: string[] } = { built: [], fellBack: [] };
+  const calls: { built: string[]; fellBack: string[]; fallbackArgs: number[] } =
+    { built: [], fellBack: [], fallbackArgs: [] };
 
   const custom: CustomDialogHost = async <T,>(
     factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: T) => void) => unknown,
@@ -33,8 +35,11 @@ function harness(mode: "interactive" | "rpc" | "no-custom") {
 
   const editor = hostReasonEditor({
     ...(mode === "no-custom" ? {} : { custom }),
-    fallback: async (title) => {
+    // `arguments.length` is the point: pi's `ui.editor` takes a PREFILL in
+    // second position, so a second argument here would land in the user's box.
+    fallback: async function (title: string) {
       calls.fellBack.push(title);
+      calls.fallbackArgs.push(arguments.length);
       return "理由写在宿主自己的框里";
     },
     build: (_tui, _keybindings, title, done) => {
@@ -103,6 +108,30 @@ test("a person closing the box IS a dismissal — the fallback must not fire", a
   assert.equal(await pending, undefined);
   assert.deepEqual(h.calls.built, ["head"]);
   assert.deepEqual(h.calls.fellBack, [], "the host rendered it — nobody gets a second box");
+});
+
+test("the fallback gets the TITLE ONLY — pi's second parameter is a prefill", async () => {
+  // pi's signature is `editor(title, prefill)`: handing it our `{ signal }`
+  // options object opens the user's box with `[object Object]` already typed
+  // into it, and the fallback is exactly the path that does it (reviewer P2,
+  // 2026-09-17). The seam's type says so; this pins it at runtime too.
+  const h = harness("no-custom");
+  const controller = new AbortController();
+  assert.equal(await h.editor("head", { signal: controller.signal }), "理由写在宿主自己的框里");
+  assert.deepEqual(h.calls.fallbackArgs, [1]);
+});
+
+test("a fallback answer is an ORDINARY answer — the interview is not stopped", async () => {
+  // The other half of exit criterion 5: the whole point of telling "this host
+  // never ran the factory" apart from "the user closed the box" is that the
+  // first must not stop anything. `resolveQuestion` reads ONLY `undefined` as a
+  // closed box (lib/ask-user.ts), so the contract is one assertion away.
+  const h = harness("rpc");
+  const picked = await h.editor("head");
+  assert.equal(picked, "理由写在宿主自己的框里");
+  const resolution = resolveQuestion({ text: "head", options: ["A", "B"], recommended: "A" }, picked);
+  assert.equal(resolution.stop, undefined, "no closed box ⇒ no stop");
+  assert.equal(resolution.answer.kind, "answered");
 });
 
 test("a host with no custom at all goes straight to its own editor", async () => {
