@@ -37,6 +37,7 @@ import {
   buildTakeoverRoute,
   decideTakeover,
   discoverOrchestrations,
+  takeoverClaimWorthWriting,
 } from "./orchestrator-takeover.ts";
 import { openSessionPane, paneRecoverability } from "./session-factory.ts";
 import { childPaneLabel } from "./orchestrator-pane-decor.ts";
@@ -356,8 +357,12 @@ async function doAttach(deps: OrchestratorDeps, params: Record<string, unknown>)
     // answers `emptyRuntime(id)` for an id it has no record of, and writing
     // THAT would erase whatever another session's record sits in the same
     // file. When there is no record, there is also nothing a reload could
-    // resume — the claim costs nothing by staying in memory.
-    if (deps.recordedRuntime?.()?.orchestrationId === decision.id) {
+    // resume — the claim costs nothing by staying in memory. The rule lives in
+    // lib/orchestrator-takeover.ts with the other takeover decisions.
+    if (takeoverClaimWorthWriting({
+      recordedId: deps.recordedRuntime?.()?.orchestrationId,
+      adoptedId: decision.id,
+    })) {
       deps.saveRuntime(deps.runtime());
     }
     // B2 — a takeover changes WHO holds an orchestration. That belongs in the
