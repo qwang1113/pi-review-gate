@@ -323,6 +323,7 @@ import { notifyUserInput } from "../lib/poll-wait.ts";
 
 import { formatInheritanceBrief, handoffGeneration, isHandoffSuccessorOf, PREDECESSOR_SESSION_ENV, readInheritance, stateOwnership, successorEnv, successorSessionId } from "../lib/session-inheritance.ts";
 import {
+  branchOfListedWorktree,
   childWorktreeBranch,
   childWorktreePath,
   createWorktreeArgv,
@@ -331,7 +332,7 @@ import {
   planSettlement,
   repoRootOfWorktree,
 } from "../lib/orchestrator-worktree.ts";
-import { addGrant, emptyRuntime, hasGrant, successorRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { addGrant, emptyRuntime, findChild, hasGrant, noteWorktreeBranch, successorRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "../lib/change-baseline.ts";
 import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
@@ -2587,10 +2588,19 @@ export default function reviewGate(pi: ExtensionAPI) {
       // `rg-child-…` handle before it pushes (lib/orchestrator-delivery.ts
       // `buildBranchLine`); settling the DERIVED name after that fails with
       // "branch not found", which reports the manager's checkout as broken
-      // right after they did what the gate asked. One read answers both cases,
-      // and the derived name is the fallback for a checkout that has already
-      // been reclaimed (nothing left to read) or was never renamed.
-      const branch = currentBranch(worktreePath) ?? childWorktreeBranch(childId);
+      // right after they did what the gate asked.
+      //
+      // THREE SOURCES, IN THIS ORDER, because each one covers what the previous
+      // cannot. The repository's own listing is the ONLY acceptable first
+      // source — reading the directory asks git, which walks UP to an enclosing
+      // repository when that path is not one, and the name it answers with ends
+      // up in a destructive `branch -D` (quality round P1, 2026-09-18). A merge
+      // RECLAIMS the directory (2026-09-15, user decision), so the `discard`
+      // its receipt asks for next has nothing left to list — it needs the name
+      // this session recorded when it DID read one (below), and the derived
+      // name is the last resort for a child with no worktree record at all.
+      const registered = state.orchestrator ? findChild(state.orchestrator, childId)?.worktree?.branch : undefined;
+      const branch = listedWorktreeBranch(repoRoot, worktreePath) ?? registered ?? childWorktreeBranch(childId);
       const plan = planSettlement(settlement, repoRoot, childId, taskId, branch);
       if (plan.steps.length === 0) {
         return { ok: true, text: `worktree 保留在 ${worktreePath}（分支 ${branch}）—— 没有动它` };
@@ -2651,6 +2661,14 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         return { ok: false, text: `worktree 结算失败（git ${sub ?? "?"}）：${result.output.trim().slice(0, 600)}` };
       }
+      // REMEMBER WHAT THE CHECKOUT TURNED OUT TO BE ON (reviewer P2,
+      // 2026-09-18). Both settlements that get here REMOVE the directory, and
+      // the branch name is then the only thing left to settle with — without
+      // this, the very `discard` the receipt below asks for deletes the derived
+      // name, misses a renamed branch, and reports it reclaimed anyway.
+      const runtime = state.orchestrator;
+      const noted = runtime === undefined ? undefined : noteWorktreeBranch(runtime, childId, branch);
+      if (runtime !== undefined && noted !== undefined && noted !== runtime) persistOrchestration(noted);
       // BOTH SETTLEMENTS THAT REMOVE SOMETHING RUN RECLAMATION — `discard`
       // (checkout + branch) and `merge` (checkout only, 2026-09-15) — so both
       // can report a failed one. `keep` plans no steps at all and returns
@@ -4031,6 +4049,31 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (name) return name;
     } catch { /* detached — maybe a rebase; ask git where it came from */ }
     return rebaseBranch(root);
+  }
+
+  /**
+   * WHICH BRANCH THIS REPOSITORY LISTS FOR ONE OF ITS OWN CHECKOUTS.
+   *
+   * ASKED OF THE REPOSITORY, NEVER OF THE CHECKOUT DIRECTORY (quality round
+   * P1, 2026-09-18). `currentBranch(worktreePath)` is the obvious read and it is
+   * a trap in the one place settlement uses a branch name: when that directory
+   * is not a repository — a `git worktree add` that failed halfway, an emptied
+   * shell left by a failed removal — git walks UP to the enclosing repository
+   * and answers with ITS branch, and that answer then goes to
+   * `git -C <repoRoot> branch -D`, which is destructive. `worktree list` is the
+   * repository's own registry of the checkouts it owns: a path it does not list
+   * yields nothing, so the caller falls through to the name this session
+   * recorded or to the one it derived.
+   */
+  function listedWorktreeBranch(repoRoot: string, worktreePath: string): string | undefined {
+    try {
+      const out = execFileSync("git", ["-C", repoRoot, "worktree", "list", "--porcelain"], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      return branchOfListedWorktree(String(out ?? ""), worktreePath);
+    } catch { return undefined; }
   }
 
   /** The branch a rebase in progress will return to, read from the git dir. */
@@ -9842,6 +9885,20 @@ export default function reviewGate(pi: ExtensionAPI) {
           "**不要重跑审查**：重送的同一份内容不会更快拿到结果，只会白烧一轮。";
       }
     }
+    // WHICH COMMIT THE BASELINE STOPS AT (reviewer P2, 2026-09-18). The field
+    // means "the commit of the last round that CONCLUDED", and a `refuse` is
+    // not a conclusion — the quality judge never left one. Recording THIS
+    // round's head there moved the next prepare's baseline onto content no
+    // quality round had seen.
+    //
+    // …AND OMITTING THE FIELD IS NOT THE SAME FIX: `st.review` is REPLACED
+    // wholesale, so an absent `commitSha` also erased the LAST REAL conclusion
+    // and dropped the next baseline to the BRANCH BASE (a full-branch
+    // re-review). Carrying the previous value forward states the fact exactly —
+    // this round concluded nothing, the earlier ones still did.
+    const concludedCommit = qualityHold === "refuse"
+      ? st.review.commitSha
+      : reviewTargets.get(targetRoot)?.head;
     st.review = {
       verdict: parsed.verdict,
       fingerprint: bindTree,
@@ -9864,12 +9921,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       // round's own content entered no quality round's range at all — one pane
       // death was enough to walk unreviewed code past the quality gate, which
       // is exactly what 「a round without a conclusion must never let the
-      // baseline step past its content」 forbids. Leaving it unset keeps the
-      // baseline at the last round that truly concluded, so this content stays
-      // inside the next round's range.
-      ...(qualityHold === "refuse" || !reviewTargets.get(targetRoot)
-        ? {}
-        : { commitSha: reviewTargets.get(targetRoot)!.head }),
+      // baseline step past its content」 forbids. Carrying the previous value
+      // keeps the baseline at the last round that truly concluded, so this
+      // round's content stays inside the next round's range.
+      ...(concludedCommit === undefined ? {} : { commitSha: concludedCommit }),
       at: new Date().toISOString(),
       // Code↔doc attestation travels with the verdict it came from; absent
       // stays absent (blocks under the docSync knob — fail-closed).

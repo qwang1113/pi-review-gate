@@ -4863,6 +4863,24 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
 });
 
 
+test("settlement reads the branch the checkout is on, and REMEMBERS it for the next call (reviewer P2, 2026-09-18)", () => {
+  const body = windowOf("settleWorktree: ({ childId, taskId, repoRoot, settlement }) => {", "\n    knownRepoRoots:", "settleWorktree");
+  // Three sources, in order: what the REPOSITORY lists for that checkout, what
+  // this session recorded when it last read one, and the name the gate derived.
+  // The first is the repository's own registry (asking the DIRECTORY would let
+  // git climb to an enclosing repo and hand a destructive `branch -D` the wrong
+  // name); the second is what makes the SECOND call work at all — a merge
+  // reclaims the directory, so the `discard` its receipt asks for has nothing
+  // left to list, and the derived name would delete a branch a renamed child no
+  // longer has.
+  assert.match(body, /listedWorktreeBranch\(repoRoot, worktreePath\) \?\? registered \?\? childWorktreeBranch\(childId\)/,
+    "the repository's own listing wins; the recorded name covers a reclaimed one; the derived name is the last resort");
+  assert.doesNotMatch(body, /currentBranch\(worktreePath\)/,
+    "…and the directory is never asked: git would walk up to an enclosing repository");
+  assert.match(body, /noteWorktreeBranch\(runtime, childId, branch\)/,
+    "…and what was read is remembered, so the next settlement deletes the branch that exists");
+});
+
 test("a parallel round's receipt carries BOTH findings streams (B1, 2026-09-18)", () => {
   const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
   // The text used to name only the ROUTED judge's stream, so a parallel round's
@@ -6453,11 +6471,16 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // recording a head there moved the next round's BASELINE onto it, and THIS
   // round's content then entered no quality range at all — a dead pane was
   // enough to walk unreviewed code past the quality gate.
-  const recordedAt = SRC.indexOf("    st.review = {", recordAt);
-  assert.ok(recordedAt > 0, "the verdict is written in one place");
-  const recorded = SRC.slice(recordedAt, SRC.indexOf('if (parsed.verdict === "READY")', recordedAt));
-  assert.match(recorded, /qualityHold === "refuse"/,
-    "a refused round carries no commitSha — the baseline stays at the last round that CONCLUDED");
+  // …and it must carry the PREVIOUS conclusion FORWARD rather than drop the
+  // field: `st.review` is replaced wholesale, so an absent commitSha would
+  // erase that too and rebase the next round on the BRANCH BASE (reviewer P2,
+  // same day — the whole-branch re-review a wrong first fix produces).
+  const concludedAt = SRC.indexOf("const concludedCommit = qualityHold", recordAt);
+  assert.ok(concludedAt > 0, "the commit the baseline stops at is decided in one place");
+  const concluded = SRC.slice(concludedAt, SRC.indexOf('if (parsed.verdict === "READY")', concludedAt));
+  assert.match(concluded, /\? st\.review\.commitSha/,
+    "a refused round carries the last CONCLUDED commit, not its own head");
+  assert.match(concluded, /commitSha: concludedCommit/);
   // The in-flight predicate reads the ROUND's own record, and needs a LIVE
   // pane: a judge that died can never land a verdict, so a hold there would be
   // forever.

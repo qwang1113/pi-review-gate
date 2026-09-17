@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   WORKTREE_SETTLEMENTS,
   abortMergeArgv,
+  branchOfListedWorktree,
   childWorktreeBranch,
   childWorktreePath,
   createWorktreeArgv,
@@ -114,6 +115,33 @@ test("settlement follows the branch the checkout is ACTUALLY on — a renamed on
     "…not the handle it was renamed away from");
   const discard = planSettlement("discard", REPO, CHILD, "t13", renamed);
   assert.equal(discard.steps[1]![4], renamed, "and the deletion names it too — git keeps two things");
+});
+
+test("a checkout's branch comes from the repository's OWN listing — never from the directory (quality P1, 2026-09-18)", () => {
+  // The tempting read — `git -C <worktreePath> symbolic-ref` — answers with the
+  // branch of whatever repository git finds by walking UP when that path is not
+  // one itself (a half-finished `worktree add`, an emptied shell), and that name
+  // reaches `git branch -D`: the wrong answer deletes the manager's own `main`.
+  // `worktree list` is the repository's own registry of the checkouts it owns,
+  // and a path it does not list yields nothing at all.
+  const porcelain = [
+    "worktree /Users/dev/workspace/dashboard",
+    "HEAD aaaa",
+    "branch refs/heads/main",
+    "",
+    `worktree ${childWorktreePath(REPO, CHILD)}`,
+    "HEAD bbbb",
+    "branch refs/heads/feat/aum-blacklist-purge",
+    "",
+  ].join("\n");
+  assert.equal(branchOfListedWorktree(porcelain, childWorktreePath(REPO, CHILD)), "feat/aum-blacklist-purge",
+    "the REPOSITORY tracks the rename, so a renamed checkout still answers");
+  assert.equal(branchOfListedWorktree(porcelain, REPO), "main");
+  assert.equal(branchOfListedWorktree(porcelain, "/Users/dev/workspace/stray"), undefined,
+    "an unlisted path is nothing — never the enclosing repository's branch");
+  assert.equal(branchOfListedWorktree("", childWorktreePath(REPO, CHILD)), undefined);
+  assert.equal(branchOfListedWorktree("worktree /p\nHEAD a\ndetached\n", "/p"), undefined,
+    "a detached checkout has no branch to delete");
 });
 
 test("'already gone' is recognised NARROWLY — the direction that loses work is the other one", () => {

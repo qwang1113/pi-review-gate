@@ -13,6 +13,7 @@ import {
   liveChildren,
   markChildClosed,
   markChildAssigned,
+  noteWorktreeBranch,
   newChildId,
   normalizeRuntime,
   registerChild,
@@ -83,6 +84,26 @@ test("running task ids drive the scheduler, and a LIVE PANE occupies its task (B
   runtime = markChildClosed(runtime, "a-1", NOW);
   assert.deepEqual(runningTaskIds(runtime, ["%2", "%3"]), ["b"],
     "only a closed (or vanished) pane gives the task back");
+});
+
+test("the branch a settlement READ off the checkout is remembered (reviewer P2, 2026-09-18)", () => {
+  // `registerChild` records the branch the GATE created; a child whose station
+  // reaches `pr` renames it before it pushes. Merging reclaims the DIRECTORY,
+  // so the `discard` the merge receipt asks for next has nothing left to read —
+  // without this it deletes the derived name, misses the renamed branch, and
+  // `looksLikeAlreadyGone` reports it reclaimed while it is still there.
+  const runtime = runtimeWith(child({ worktree: { path: "/repo-rg-a-1", branch: "rg-child-a-1" } }));
+  const noted = noteWorktreeBranch(runtime, "a-1", "feat/aum-blacklist-purge");
+  assert.equal(findChild(noted, "a-1")!.worktree!.branch, "feat/aum-blacklist-purge");
+  assert.equal(findChild(noted, "a-1")!.worktree!.path, "/repo-rg-a-1",
+    "only the branch is a READING — the path is not part of it");
+  // A no-op when nothing changed or the child is unknown: this records a
+  // reading, it never invents a record.
+  assert.equal(noteWorktreeBranch(runtime, "a-1", "rg-child-a-1"), runtime);
+  assert.equal(noteWorktreeBranch(runtime, "nobody", "feat/x"), runtime);
+  const withoutWorktree = runtimeWith(child());
+  assert.equal(noteWorktreeBranch(withoutWorktree, "a-1", "feat/x"), withoutWorktree,
+    "…and a child that never had a worktree record does not grow one");
 });
 
 test("only a REGISTERED, open child is closable — the user's panes are unaddressable", () => {

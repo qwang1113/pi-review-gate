@@ -167,6 +167,36 @@ export function abortMergeArgv(repoRoot: string): WorktreeArgv {
   return ["-C", repoRoot, "merge", "--abort"];
 }
 
+/**
+ * WHICH BRANCH THE REPOSITORY LISTS FOR ONE OF ITS OWN CHECKOUTS.
+ *
+ * ASKED OF THE REPOSITORY, NEVER OF THE DIRECTORY (quality round P1,
+ * 2026-09-18). `git -C <path> symbolic-ref` is the obvious read and it is a
+ * trap: when that directory is not a repository — a `worktree add` that failed
+ * halfway, an emptied shell left behind by a failed removal — git walks UP to
+ * the enclosing repository and answers with ITS branch. The answer then goes to
+ * `git -C <repoRoot> branch -D`, a destructive step, so a wrong one deletes the
+ * manager's own `main`. `git worktree list --porcelain` is the repository's own
+ * registry of the checkouts it owns: nothing can climb into it, and a path it
+ * does not list yields nothing at all.
+ *
+ * Pure: the argv and the parsing, no process.
+ */
+export function branchOfListedWorktree(porcelain: string, worktreePath: string): string | undefined {
+  let current: string | undefined;
+  for (const raw of porcelain.split("\n")) {
+    const line = raw.trimEnd();
+    if (line.startsWith("worktree ")) {
+      current = line.slice("worktree ".length).trim();
+      continue;
+    }
+    if (current !== worktreePath || !line.startsWith("branch ")) continue;
+    const ref = line.slice("branch ".length).trim();
+    return ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+  }
+  return undefined;
+}
+
 /** Is this git output a CONFLICT rather than a refusal we should surface? */
 export function looksLikeMergeConflict(output: string): boolean {
   return /CONFLICT \(|Automatic merge failed|fix conflicts/i.test(output);

@@ -380,6 +380,33 @@ export function markChildClosed(
 }
 
 /**
+ * REMEMBER THE BRANCH A CHECKOUT TURNED OUT TO BE ON (reviewer P2, 2026-09-18).
+ *
+ * `registerChild` records the branch the GATE created; a child whose station
+ * reaches `pr` is asked to rename it before it pushes (lib/orchestrator-
+ * delivery.ts `buildBranchLine`). That rename is invisible from here — but a
+ * SETTLEMENT sees it, because it reads the checkout, and this is where the
+ * reading is kept: merging reclaims the DIRECTORY (2026-09-15, user decision),
+ * so the `discard` the merge receipt asks for next has nothing left to read a
+ * branch from. Without this the later call deletes the DERIVED name, a renamed
+ * child no longer has it, `looksLikeAlreadyGone` reads that failure as "already
+ * reclaimed", and the receipt reports the branch as gone while it is still
+ * right there.
+ *
+ * A no-op when nothing changed or the child is unknown: this records a
+ * reading, it never invents a record.
+ */
+export function noteWorktreeBranch(
+  runtime: OrchestratorRuntime,
+  id: string,
+  branch: string,
+): OrchestratorRuntime {
+  const child = findChild(runtime, id);
+  if (!child?.worktree || child.worktree.branch === branch) return runtime;
+  return patchChild(runtime, id, { worktree: { ...child.worktree, branch } });
+}
+
+/**
  * May this pane be closed by `orchestrator_close`?
  *
  * The refusal message names the reason, because the two failure modes need
