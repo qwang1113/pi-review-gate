@@ -277,6 +277,21 @@ export function newChildId(taskId: string, now: number = Date.now()): string {
   return `${safe}-${Math.floor(now).toString(36)}`;
 }
 
+/**
+ * The task a child handle was minted for — the inverse of {@link newChildId}.
+ *
+ * A child session that has no registry of its own still knows its handle:
+ * `RG_STATE_VARIANT` IS the child id (lib/orchestrator-dispatch.ts), and that
+ * is how it names itself on the border of every pane it opens, as the `@<owner>`
+ * half. The grammar is owned here rather than re-derived at the call site, so
+ * the two halves cannot drift.
+ */
+export function taskIdFromChildId(childId: string): string {
+  const raw = String(childId ?? "").trim();
+  const cut = raw.lastIndexOf("-");
+  return cut > 0 ? raw.slice(0, cut) : raw;
+}
+
 /** Add a child. Never mutates its input. */
 export function registerChild(
   runtime: OrchestratorRuntime,

@@ -138,41 +138,39 @@ test("the judge probe repaints the border from the channel projection (C2)", () 
   assert.match(body, /paintTitle\("done"\)/, "…and a finished round says so on the border");
 });
 
-test("both label-bar release sites ask about a CHILD and about a MANAGER's children", () => {
-  // The window-level border line is shared by every pane in the window, so the
-  // LAST decorated pane releases it. "Last" needs two different facts, and each
-  // was measured as a defect on its own (reviewer P2 ×2, 2026-09-05):
-  //   - a CHILD of an orchestration cannot see the manager's panes, so it never
-  //     releases (recognised by the orchestration id in its environment);
-  //   - a MANAGER has decorated panes that are not judges — its children — and
-  //     must count them, or it blanks their borders when it closes its own
-  //     auditor, and never releases at all when it has none.
-  const ext = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
-  const windowAt = (needle: string, chars: number): string => {
-    const at = ext.indexOf(needle);
-    assert.ok(at > 0, `${needle} must exist in the extension`);
-    return ext.slice(at, at + chars);
+test("the label-bar RELEASE is deleted, not bypassed (2026-09-17)", () => {
+  // Five close paths used to share one question — "is this the last decorated
+  // pane I can see" — through `releasesWindowLabels` + `countDecoratedPanes`,
+  // fed by `insideOrchestration` / `otherDecoratedPanes` / `decoratedJudgePanes`
+  // and the `labelBarOwnedByOthers()` guest test. All of it is GONE, and the
+  // reason is a measurement: taking the window's label bar down writes
+  // `pane-border-status`, which RESIZES EVERY PANE IN THE WINDOW (scratch tmux:
+  // SIGWINCH, rows 84 ↔ 83, in both directions; re-setting the same value
+  // triggers nothing). The bar is turned on by whoever opens a decorated pane
+  // and left on.
+  //
+  // Pinned by ABSENCE across the whole tree: a symbol that comes back is a
+  // second path to sequence by hand (philosophy three), and `grep` is the
+  // check the goal names.
+  const roots = ["extensions", "lib"];
+  const offenders: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) { walk(rel); continue; }
+      if (!entry.name.endsWith(".ts")) continue;
+      const text = readFileSync(join(ROOT, rel), "utf8");
+      for (const symbol of ["hideLabelsVia", "releasesWindowLabels", "countDecoratedPanes", "decoratedJudgePanes", "otherDecoratedPanes", "labelBarOwnedByOthers", "buildHidePaneLabelsArgv"]) {
+        // Mentions inside a comment are how this repository records WHY
+        // something was deleted; only code counts.
+        for (const line of text.split("\n")) {
+          if (!line.includes(symbol)) continue;
+          if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+          offenders.push(`${rel}: ${symbol}: ${line.trim()}`);
+        }
+      }
+    }
   };
-  // 1. judge_close's wiring: both questions, through the shared predicates.
-  const judgeWiring = windowAt("insideOrchestration: () =>", 200);
-  assert.match(judgeWiring, /insideOrchestration: \(\) => labelBarOwnedByOthers\(\)/,
-    "a guest in someone else's orchestration window never releases");
-  assert.match(judgeWiring, /otherDecoratedPanes: \(\) => liveOrchestrationChildren\(\)/,
-    "…and a manager's children are counted, not assumed away");
-  // 2. declare_done's cascade asks the SAME two questions.
-  const cascade = windowAt("const releases = releasesWindowLabels({", 320);
-  assert.match(cascade, /remainingDecoratedPanes: remainingClosable \+ liveOrchestrationChildren\(\)/,
-    "the cascade counts the manager's children too");
-  assert.match(cascade, /insideOrchestration: labelBarOwnedByOthers\(\)/,
-    "…and uses the same guest test, not a second spelling of it");
-  // 3. The guest test is about VISIBILITY, not about a role: a manager that
-  //    INHERITED an orchestration carries the id in its environment too, and
-  //    reading the variable alone would file it as a guest forever.
-  const guest = windowAt("function labelBarOwnedByOthers()", 200);
-  assert.match(guest, /ORCHESTRATION_ID_ENV/, "a guest is recognised by the id in its environment");
-  assert.match(guest, /taskMode !== "orchestrator"/, "…but a manager holding that id is not a guest");
-  // 4. And the counter only answers for a manager.
-  const counter = windowAt("function liveOrchestrationChildren()", 300);
-  assert.match(counter, /taskMode !== "orchestrator"/, "nobody else owns child panes");
-  assert.match(counter, /!c\.closedAt/, "…and a closed child is not on screen");
+  for (const root of roots) walk(root);
+  assert.deepEqual(offenders, [], "the release path is deleted, not bypassed");
 });

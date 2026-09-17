@@ -102,6 +102,47 @@ export function buildNotifySequence(
   }
 }
 
+/**
+ * WHAT TO SAY ABOUT DELIVERY, given tmux's `allow-passthrough` (2026-09-17).
+ *
+ * THE DEFECT THIS FIXES. `orchestrator_notify` reported "sent" whenever the
+ * escape sequence reached stdout. Inside tmux that is not delivery: tmux
+ * forwards a DCS passthrough ONLY as far as this option allows — `off`
+ * (the default) forwards nothing at all, `on` forwards only when the pane is
+ * VISIBLE, `all` always (tmux 3.7c manual: "If set to on, passthrough
+ * sequences will be allowed only if the pane is visible. If set to all, they
+ * will be allowed even if the pane is invisible."). A manager notifying the
+ * human from a pane the human is not looking at — the ordinary case, since a
+ * notification is for when they are NOT looking — was told it had reached
+ * them when it had not. Measured on this project's own machine: the user's
+ * `allow-passthrough` is `on`, so every notification sent from a background
+ * window was silently dropped.
+ *
+ * The gate never writes that option (a global option, and the user's own
+ * configuration): it says what happened and hands over the one line that
+ * fixes it, and the user decides.
+ */
+export function passthroughDeliveryNote(effective: string | undefined): string {
+  const fix = "想让通知在**任何** pane 都能送到你面前：在 tmux 里执行 `set -g allow-passthrough all`（这是你的全局配置，门禁不会替你改）。";
+  if (effective === "all") return "";
+  if (effective === "on") {
+    return (
+      "\n⚠️ tmux 的 `allow-passthrough` 是 `on` —— 它**只对可见的 pane** 放行 passthrough：" +
+      "这个 pane 不在你正看的窗口里时，这条通知会被 tmux 直接丢弃（不是延迟，是丢了）。" + fix
+    );
+  }
+  if (effective === "off") {
+    return (
+      "\n⚠️ tmux 的 `allow-passthrough` 是 `off`（默认值）—— tmux **完全不**放行 passthrough：" +
+      "这条通知到不了你面前。" + fix
+    );
+  }
+  return (
+    "\n⚠️ 读不到 tmux 的 `allow-passthrough`，**无法判断**这条通知是否真的送到了你面前" +
+    "（如果它确实是 `off` 或 `on` 且这个 pane 不可见，就会被 tmux 丢弃）。" + fix
+  );
+}
+
 /** Everything needed to emit one notification, already assembled. */
 export interface NotifyPayload {
   title: string;

@@ -8,12 +8,14 @@ import {
   assertSafeTmuxArgv,
   buildEvenLayoutArgv,
   buildKillPaneArgv,
+  buildReadPassthroughArgv,
   buildWindowLayoutArgv,
   buildListPanesArgv,
   buildHandoffPaneArgv,
   buildSpawnPaneArgv,
   isPaneId,
   parsePaneIds,
+  parsePassthroughValue,
   parseSpawnedPaneId,
   parseWindowLayout,
   planPanePlacement,
@@ -181,4 +183,27 @@ test("tmux output is parsed strictly", () => {
   assert.equal(parseSpawnedPaneId("%42\n"), "%42");
   assert.equal(parseSpawnedPaneId(""), undefined, "no id ⇒ the caller must roll back, not guess");
   assert.equal(parseSpawnedPaneId("no such window"), undefined);
+});
+
+/**
+ * READING `allow-passthrough` IS HOW A RECEIPT CAN STOP LYING (2026-09-17).
+ *
+ * A read, never a write: `assertSafeTmuxArgv` refuses every `-g` option WRITE,
+ * and the gate's own notification path uses this to say what tmux will do with
+ * the sequence it just wrote (lib/orchestrator-notify.ts). The values are the
+ * three the manual defines — and anything else is UNKNOWN, which the caller
+ * must report as unknown rather than rounding to a success or a failure.
+ */
+test("reading the passthrough option is a read the guard allows, and parses strictly", () => {
+  assert.deepEqual(buildReadPassthroughArgv(), ["show-options", "-g", "allow-passthrough"]);
+  assert.deepEqual(assertSafeTmuxArgv(buildReadPassthroughArgv()), buildReadPassthroughArgv(),
+    "the gate's own guard accepts it — it forbids the WRITE, not the read");
+  assert.equal(parsePassthroughValue("allow-passthrough on\n"), "on");
+  assert.equal(parsePassthroughValue("allow-passthrough all"), "all");
+  assert.equal(parsePassthroughValue("  allow-passthrough   off  "), "off");
+  assert.equal(parsePassthroughValue("on"), "on", "a bare value is the same answer");
+  assert.equal(parsePassthroughValue(""), undefined, "tmux said nothing");
+  assert.equal(parsePassthroughValue("unknown option: allow-passthrough"), undefined,
+    "an older tmux without the option is UNKNOWN, never the default");
+  assert.equal(parsePassthroughValue("allow-passthrough maybe"), undefined);
 });

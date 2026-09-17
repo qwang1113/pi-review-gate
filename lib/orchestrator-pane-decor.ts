@@ -6,11 +6,26 @@
  * A window with four `pi` panes in it is four identical black rectangles. The
  * user asked (2026-08-30) for each child to be recognizable at a glance, and
  * the honest reading of that request is that IDENTITY ALONE IS NOT ENOUGH: a
- * border that says only `@t1-user-interaction` still forces a human (or an
+ * border that says only `t1@pm:user-interaction` still forces a human (or an
  * orchestrator) to call `orchestrator_wait` to learn what that pane is doing.
  * So the border carries the state and how long it has lasted —
- * `@t1-user-interaction · waiting-judge 220s` — and the supervision probe,
+ * `t1@pm:user-interaction · waiting-judge 220s` — and the supervision probe,
  * which already re-reads every channel on a timer, refreshes it for free.
+ *
+ * ── THE IDENTITY GRAMMAR (2026-09-18, user decision) ──
+ *
+ * `<what>@<who started it>:<name>`, and the identity NEVER carries a space.
+ * The user's own words: 「谁启动, 干什么, 中间最好不要有空格, 空间很宝贵」 — the two
+ * facts they need at a glance, in the order that scans best, with no room
+ * spent on padding. It replaced a grammar that carried neither: `@t6-eng-i18n-
+ * ci-cd-review-ga` said nothing about who opened the pane, and `@review-
+ * goal-auditor` was IDENTICAL for two panes opened by different sessions — the
+ * ambiguity the user hit in their own window (measured: window 1 held two
+ * goal-auditors, one per opener, with byte-identical borders).
+ *
+ * The owner is not a parameter anyone types: each opener derives it from its
+ * OWN identity ({@link selfPaneOwner}) — the project manager is `pm`, an
+ * orchestration child is its task id, and any other loop session is `self`.
  *
  * ── WHERE THIS IS ALLOWED TO LIVE (philosophy one and two, explicitly) ──
  *
@@ -106,6 +121,7 @@
  */
 
 import type { ChildState } from "./orchestrator-child-state.ts";
+import { taskIdFromChildId } from "./orchestrator-registry.ts";
 
 /** One entry of the palette: what tmux is told, and what a human is told. */
 export interface PaneColor {
@@ -169,24 +185,104 @@ export function paneStyleFor(childId: string): string {
   return `fg=${paneColorFor(childId).token}`;
 }
 
-/** Longest label kept: a border that wraps stops being a one-glance read. */
-const LABEL_MAX = 28;
+/**
+ * Longest identity kept: a border that is cut off mid-word still reads, a
+ * border that wraps does not. 44 fits `<taskId>@pm:` plus a normal task slug.
+ */
+const LABEL_MAX = 44;
+
+/** Identity segments are capped individually too, so no one field eats the
+ * whole label (`what` is a task id or a judge role, `who` a task id). */
+const SEGMENT_MAX = 24;
+
+/** The owner word for the project manager's own session. */
+export const PANE_OWNER_PM = "pm";
+/** The owner word for a plain loop session — the person, not a manager. */
+export const PANE_OWNER_SELF = "self";
 
 /**
- * The stable half of a pane title: `@<taskId>-<slugged title>`.
+ * One identity segment, made safe for a tmux format string.
  *
- * The task id leads because that is what every tool argument names, and the
- * slug follows because `@t2` alone tells a human nothing at 3am. Non-ASCII
- * titles collapse to the id rather than being transliterated — a mangled
- * label is worse than a plain one.
+ * `#` and `,` and `:` are dropped for the same reason spaces are: the border
+ * renders `#{pane_title}` and a stray `#` would be read as a format, while a
+ * space is what the user explicitly ruled out. Anything left is either the
+ * character class below or a dash standing in for it — never mojibake.
  */
-export function paneLabelFor(taskId: string, title: string): string {
-  const slug = title
+function segment(raw: string, max: number): string {
+  return String(raw ?? "")
+    .replace(/[^A-Za-z0-9._-]/g, "-")
+    .slice(0, max);
+}
+
+/** The name half: a lowercased, dash-joined reading of a human title. */
+function nameSlug(raw: string): string {
+  return String(raw ?? "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  const label = slug ? `@${taskId}-${slug}` : `@${taskId}`;
-  return label.length > LABEL_MAX ? label.slice(0, LABEL_MAX) : label;
+}
+
+/**
+ * THE ONE GRAMMAR, and the only place a pane identity is spelled.
+ *
+ * The order is `what@who:name` because that is what the eye needs first when
+ * scanning a column of panes: the judge's ROLE, the task's ID, the manager —
+ * and only then whose it is. A non-ASCII or empty `name` leaves `what@who`
+ * alone rather than transliterating it: a mangled label is worse than a plain
+ * one, and `t6@pm` is already unambiguous.
+ */
+export function paneIdentity(opts: { what: string; owner?: string; name?: string }): string {
+  const what = segment(opts.what, SEGMENT_MAX) || "pane";
+  const owner = segment(opts.owner ?? "", SEGMENT_MAX);
+  const head = owner ? `${what}@${owner}` : what;
+  const name = opts.name === undefined ? "" : nameSlug(opts.name);
+  if (!name) return head.slice(0, LABEL_MAX);
+  const room = LABEL_MAX - head.length - 1;
+  return room < 1 ? head.slice(0, LABEL_MAX) : `${head}:${name.slice(0, room)}`;
+}
+
+/**
+ * A child session's identity: `t6@pm:eng-i18n-ci-cd-review-gate`.
+ *
+ * The owner defaults to `pm` because that is a fact about orchestration, not a
+ * guess: children are opened by `orchestrator_spawn`, which only a project
+ * manager can call.
+ */
+export function childPaneLabel(taskId: string, title: string, owner: string = PANE_OWNER_PM): string {
+  return paneIdentity({ what: taskId, owner, name: title });
+}
+
+/**
+ * A judge's identity: `reviewer@t6`, `goal-auditor@pm`, `reviewer@self`.
+ *
+ * The role alone was not enough — two goal-auditors in one window, opened by
+ * two different sessions, had identical borders, and nothing on screen said
+ * which review belonged to whom.
+ */
+export function judgePaneLabel(role: string, owner: string): string {
+  return paneIdentity({ what: role, owner });
+}
+
+/** The project manager's own pane: `pm:pi-review-gate`. */
+export function pmPaneLabel(dirname: string): string {
+  return paneIdentity({ what: PANE_OWNER_PM, name: dirname });
+}
+
+/**
+ * WHO AM I, as the owner half of every pane this session opens.
+ *
+ * Derived from the session's own facts and never passed in: an orchestration
+ * child knows itself from `RG_STATE_VARIANT` (its child id, `<taskId>-<base36>`),
+ * a project manager from the mode it is running in, and every other loop
+ * session is simply `self`. A caller that had to supply this could supply the
+ * wrong one, and nothing downstream could tell.
+ */
+export function selfPaneOwner(opts: { stateVariant?: string | undefined; orchestrator: boolean }): string {
+  // Whitespace is not an identity: `RG_STATE_VARIANT` set to blanks (a hand-run
+  // shell) must read as "no child id", not as a child whose task id is dashes.
+  const childId = segment(String(opts.stateVariant ?? "").replace(/\s+/g, ""), SEGMENT_MAX);
+  if (childId) return taskIdFromChildId(childId);
+  return opts.orchestrator ? PANE_OWNER_PM : PANE_OWNER_SELF;
 }
 
 /** How a state reads on a border — short, English, and never translated. */

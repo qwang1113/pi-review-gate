@@ -133,6 +133,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     now: () => 1_700_000_000_000,
   };
   state.deps = {
+    paneOwner: () => "t6",
     resolveRepo: (requested) => {
       state.calls.push(`resolveRepo(${requested ?? "-"})`);
       return state.repo.ok ? { ok: true, root: ROOT } : { ok: false, error: state.repo.error };
@@ -170,8 +171,6 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     // Faithful to the real wiring: the seeded records below are minted by this
     // same server, so the ordinary paths behave exactly as they did.
     tmuxServer: () => state.tmuxServer,
-    insideOrchestration: () => state.insideOrchestration,
-    otherDecoratedPanes: () => state.otherDecoratedPanes,
     now: () => 1_700_000_000_000,
     readText: (path) => state.files.get(path),
     announcedQuestions: () => state.announced,
@@ -402,137 +401,29 @@ test("judge_close: the opener's pane is killed and the registry entry goes", asy
   assert.deepEqual(reply.details, { closed: true, terminated: true, judgeId: "rg-reviewer-abc" });
 });
 
-test("judge_close: the LAST judge takes the window's label bar down with it", async () => {
-  // Judge panes turn the window-level border line ON (that is the C1 fix), so
-  // something has to turn it back off — otherwise the gate leaves a permanent
-  // mark on a window it was only visiting.
+test("judge_close: closes the pane and writes NO WINDOW OPTION (2026-09-17)", async () => {
+  // Five tests used to live here — the last judge releases, a child never
+  // does, a manager counts its children, an unreadable pane list keeps the bar
+  // up, a registry row is not a decorated pane — and every one of them pinned
+  // a branch of the label-bar RELEASE. The release is deleted: taking the bar
+  // down writes `pane-border-status`, and that RESIZES EVERY PANE IN THE
+  // WINDOW (measured on a scratch tmux: SIGWINCH, rows 84 ↔ 83, in both
+  // directions; re-setting the same value triggers nothing). So closing a
+  // judge may kill a pane and nothing else, and the "is it the last one"
+  // question has no answer left to get wrong across sessions.
   const f = fake();
   seed(f);
-  await call(f, "judge_close", { role: "reviewer" });
+  const reply = await call(f, "judge_close", { role: "reviewer" });
+  assert.equal(reply.isError, undefined, textOf(reply));
   const flat = f.tmuxCalls.map((a) => a.join(" "));
-  const unset = flat.filter((s) => s.startsWith("setw") && s.includes("-u"));
-  assert.equal(unset.length, 2, "both window options are restored to the user's own config");
-  assert.ok(
-    flat.indexOf(unset[0]!) < flat.findIndex((s) => s.startsWith("kill-pane")),
-    "…and BEFORE the pane dies: after kill-pane that id is no longer a setw target",
-  );
-  // …and named by OUR pane (%1), never by the dying judge's (%7): `setw` only
-  // needs a pane to identify the window, and the pane being closed is exactly
-  // the id that may already be gone (a user closing the review pane by hand),
-  // which would leave the bar switched on for good.
-  assert.ok(unset.every((s) => s.includes("-t %1")), "the window is named by a pane that is provably alive");
-  assert.ok(unset.every((s) => !s.includes("%7")), "…not by the pane being closed");
-});
-
-test("judge_close: a CHILD of an orchestration leaves the label bar alone", async () => {
-  // It cannot see the project manager's panes at all, so it can never know it
-  // is the last decorated one; releasing would blank its siblings' borders.
-  const f = fake();
-  f.insideOrchestration = true;
-  seed(f);
-  await call(f, "judge_close", { role: "reviewer" });
-  const flat = f.tmuxCalls.map((a) => a.join(" "));
-  assert.equal(flat.filter((s) => s.startsWith("setw")).length, 0, "no window option is touched");
   assert.ok(flat.some((s) => s.startsWith("kill-pane")), "the pane itself is still closed");
-});
-
-test("judge_close: a MANAGER counts its children, and releases once they are gone", async () => {
-  // A manager mints its orchestration id in process, so its environment says
-  // nothing — it is recognised by its own live children. Blanket "a manager
-  // never releases" left the bar switched on forever when it had none
-  // (reviewer P2, 2026-09-05).
-  const withChildren = fake();
-  withChildren.otherDecoratedPanes = 2;
-  seed(withChildren);
-  await call(withChildren, "judge_close", { role: "reviewer" });
-  assert.equal(
-    withChildren.tmuxCalls.filter((a) => a[0] === "setw").length, 0,
-    "two children are still on screen: their borders must not be blanked",
+  assert.deepEqual(
+    flat.filter((s) => s.startsWith("setw")),
+    [],
+    "no window option is written on close — the bar stays on (user decision 2026-09-17)",
   );
-
-  const alone = fake();
-  alone.otherDecoratedPanes = 0;
-  seed(alone);
-  await call(alone, "judge_close", { role: "reviewer" });
-  assert.equal(
-    alone.tmuxCalls.filter((a) => a[0] === "setw" && a.includes("-u")).length, 2,
-    "with no children left this judge IS the last decorated pane",
-  );
+  assert.deepEqual(f.table.current, {}, "and the registry entry goes, as it always did");
 });
-
-test("judge_close: an unreadable pane list keeps the bar up (missing info is never a licence)", async () => {
-  // The sibling count reads `list-panes`. When tmux cannot answer, the choice
-  // is between litter (keep the bar) and blanking a border that is still in
-  // use — and only one of those is recoverable by the next spawn.
-  const f = fake();
-  seed(f);
-  f.paneListReadable = false;
-  f.table.current = {
-    ...f.table.current,
-    "rg-adviser-xyz": {
-      ...f.table.current["rg-reviewer-abc"]!,
-      judgeId: "rg-adviser-xyz",
-      role: "adviser",
-      paneId: "%9",
-    },
-  };
-  await call(f, "judge_close", { role: "reviewer" });
-  assert.equal(
-    f.tmuxCalls.filter((a) => a[0] === "setw").length, 0,
-    "a sibling that cannot be checked counts as present",
-  );
-});
-
-test("judge_close: a sibling judge still open keeps the label bar up", async () => {
-  const f = fake();
-  seed(f);
-  // A second judge of the same opener, with its own pane — and that pane is ON
-  // SCREEN, which is what makes it a sibling worth keeping the bar for.
-  f.panes = ["%1", "%7", "%9"];
-  f.table.current = {
-    ...f.table.current,
-    "rg-adviser-xyz": {
-      ...f.table.current["rg-reviewer-abc"]!,
-      judgeId: "rg-adviser-xyz",
-      role: "adviser",
-      paneId: "%9",
-    },
-  };
-  await call(f, "judge_close", { role: "reviewer" });
-  const flat = f.tmuxCalls.map((a) => a.join(" "));
-  assert.equal(flat.filter((s) => s.startsWith("setw")).length, 0,
-    "the bar stays up while a decorated sibling is still on screen");
-});
-
-test("judge_close: a sibling that is only a REGISTRY ROW does not keep the bar up", async () => {
-  // The registry outlives panes: one closed by hand, or one minted by a tmux
-  // server that has since restarted, is a row and nothing else. Counting rows
-  // would leave the border line switched on in the user's window forever —
-  // which is the exact litter this release exists to prevent.
-  const f = fake();
-  seed(f);
-  f.table.current = {
-    ...f.table.current,
-    "rg-adviser-gone": {
-      ...f.table.current["rg-reviewer-abc"]!,
-      judgeId: "rg-adviser-gone",
-      role: "adviser",
-      paneId: "%9", // never in f.panes: the pane is gone
-    },
-    "rg-adviser-stranger": {
-      ...f.table.current["rg-reviewer-abc"]!,
-      judgeId: "rg-adviser-stranger",
-      role: "adviser",
-      paneId: "%1",
-      tmuxServer: "other-server,9", // an id this server did not mint
-    },
-  };
-  await call(f, "judge_close", { role: "reviewer" });
-  const flat = f.tmuxCalls.map((a) => a.join(" "));
-  assert.equal(flat.filter((s) => s.startsWith("setw") && s.includes("-u")).length, 2,
-    "neither row is a pane on screen, so this close is the last one");
-});
-
 
 test("judge_close: a pane id from ANOTHER tmux server is never killed", async () => {
   // The registry is persisted now, so a record can outlive the tmux server
@@ -811,7 +702,7 @@ test("the round probe repaints the border — but never through a stranger's pan
   probeJudgeRound(f.deps, c, undefined, f.binding);
   const painted = f.tmuxCalls.filter((a) => a[0] === "select-pane" && a.includes("-T"));
   assert.equal(painted.length, 1, "one repaint per reading");
-  assert.match(painted[0]!.join(" "), /@review-reviewer/, "…labelled by the judge's role");
+  assert.match(painted[0]!.join(" "), /reviewer@t6/, "…labelled by the judge's role AND its opener");
 
   const g = fake();
   g.panes = ["%1", "%72"];

@@ -65,11 +65,11 @@ import {
 } from "./judge-pane.ts";
 import {
   closeSessionPane,
-  countDecoratedPanes,
-  judgePaneLabel,
   refreshSessionPaneTitle,
-  releasesWindowLabels,
 } from "./session-factory.ts";
+// The label grammar lives with the rest of the border identity (ONE renderer:
+// lib/orchestrator-pane-decor.ts), not beside the pane plumbing that writes it.
+import { judgePaneLabel } from "./orchestrator-pane-decor.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import {
   clampWaitTimeout,
@@ -171,26 +171,15 @@ export interface JudgeSessionToolDeps {
   tmux(argv: readonly string[]): JudgePaneRunResult;
   /** This session's own pane — liveness is probed from its window. */
   ownPane(): string | undefined;
+  /**
+   * WHO THIS SESSION IS on a border — the `@<owner>` half of every judge pane
+   * it opens (lib/orchestrator-pane-decor.ts `selfPaneOwner`). Derived from the
+   * session's own environment, never a parameter: a caller that could pass it
+   * could pass the wrong one and nothing downstream could tell.
+   */
+  paneOwner(): string;
   /** The tmux server this process talks to (lib/hierarchy.ts `tmuxServerFrom`). */
   tmuxServer(): string | undefined;
-  /**
-   * Is this session a CHILD of an orchestration?
-   *
-   * The window-level border options are shared by every pane in the window,
-   * and a child cannot see the project manager's panes at all — they live in
-   * another session's registry. So it never releases the bar; the manager,
-   * which CAN count them, does (see `otherDecoratedPanes`).
-   */
-  insideOrchestration(): boolean;
-  /**
-   * Decorated panes this session owns that are NOT judges — a project
-   * manager's live children. Zero for everyone else.
-   *
-   * Without it a manager that closed its own auditor while children were still
-   * running would blank their borders, and a manager with no children would
-   * never release the bar at all (both measured, 2026-09-05).
-   */
-  otherDecoratedPanes(): number;
   /** Injectable clock. */
   now(): number;
   /** Whole file, or undefined when it is absent/unreadable. */
@@ -501,7 +490,7 @@ export interface JudgeWaitCursors {
  * the other caller.
  */
 export function probeJudgeRound(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer" | "paneOwner">,
   child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "role" | "tmuxServer">,
   consumedReportId: string | undefined,
   binding: RoundBinding,
@@ -537,7 +526,7 @@ export function probeJudgeRound(
     const seconds = since ? Math.max(0, (deps.now() - Date.parse(since)) / 1000) : undefined;
     refreshSessionPaneTitle(deps.tmux, {
       paneId: child.paneId,
-      label: judgePaneLabel(child.role),
+      label: judgePaneLabel(child.role, deps.paneOwner()),
       state,
       ...(seconds === undefined || Number.isNaN(seconds) ? {} : { stateForSeconds: seconds }),
       now: deps.now(),
@@ -659,7 +648,7 @@ export function probeJudgeRound(
  * still reports to an opener running the oldest.
  */
 export function probeJudgeWait(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer" | "readText" | "roundBinding">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer" | "readText" | "roundBinding" | "paneOwner">,
   child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath" | "role" | "repoRoot" | "tmuxServer" | "modelSpec">,
   cursors: JudgeWaitCursors,
 ): PaneJudgeWaitObservation {
@@ -793,41 +782,15 @@ export async function doClose(
   if (child.paneId && !paneClosable(child, deps.tmuxServer())) {
     killNote = `pane ${child.paneId} 是另一个 tmux server 铸造的 id（可能已被重新分配），不动它，只清登记`;
   } else if (child.paneId && ownPane) {
-    // THE LABEL BAR COMES DOWN WITH THE LAST DECORATED PANE (2026-09-05).
-    // Judge panes turn the window-level border line ON now (that is the fix
-    // for C1 — a judge used to get a colour nobody could see). Something has
-    // to turn it back off, or the gate leaves a permanent mark on the user's
-    // window; and it must NOT be turned off while a sibling still needs it,
-    // which is what `releasesWindowLabels` decides.
-    // Siblings are panes ON SCREEN, not rows in the registry (reviewer P2,
-    // 2026-09-05): a stale entry — a pane the user closed by hand, or an id
-    // minted by a tmux server that has since restarted — would keep the bar up
-    // forever, which is the litter this whole release exists to prevent. An
-    // UNREADABLE pane list counts a sibling as present: keeping the bar is a
-    // cosmetic cost, blanking a live sibling's border is a wrong answer.
-    const livePanes = listJudgePanes(deps.tmux, ownPane);
-    const siblings = countDecoratedPanes(
-      Object.values(deps.hierarchy())
-        .filter((entry) =>
-          entry.judgeId !== judgeId
-          && entry.openerId === child.openerId
-          && Boolean(entry.paneId)
-          && paneClosable(entry, deps.tmuxServer()))
-        .map((entry) => entry.paneId!),
-      livePanes,
-    );
-    const releases = releasesWindowLabels({
-      // A project manager's live children are decorated panes too, and they
-      // are the ones a premature release would blank.
-      remainingDecoratedPanes: siblings + deps.otherDecoratedPanes(),
-      insideOrchestration: deps.insideOrchestration(),
-    });
-    const killed = closeSessionPane(deps.tmux, child.paneId, {
-      // Addressed through OUR pane, not the dying one: `setw` only needs a
-      // pane to name the window, and the pane being closed may already be gone
-      // (the user closed it by hand), which would leave the bar switched on.
-      ...(releases ? { hideLabelsVia: ownPane } : {}),
-    });
+    // THE LABEL BAR IS NOT TOUCHED HERE (2026-09-17, user decision). Closing a
+    // judge used to take the window's border line down when the caller judged
+    // it the last decorated pane — and that judgement was wrong in both
+    // directions across sessions (a manager cannot see this session's judges;
+    // an ordinary loop session in a manager's window is not a guest), while
+    // the toggle itself RESIZES EVERY PANE IN THE WINDOW (measured on a
+    // scratch tmux: SIGWINCH, rows 84 ↔ 83). The bar stays on; see
+    // `closeSessionPane` in lib/session-factory.ts.
+    const killed = closeSessionPane(deps.tmux, child.paneId);
     terminated = killed.ok;
     killNote = killed.ok ? `pane ${child.paneId} 已关` : `关 pane 失败（${killed.error}），登记照样清除`;
   }

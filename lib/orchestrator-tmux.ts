@@ -230,6 +230,34 @@ export function buildKillPaneArgv(pane: string): readonly string[] {
  * argv element and is never concatenated into a command line.
  */
 
+/**
+ * Read tmux's `allow-passthrough` — the option that decides whether the
+ * notification sequence this gate writes reaches the terminal at all.
+ *
+ * A READ, never a write: the gate refuses every `-g` option write (see
+ * `assertSafeTmuxArgv`), and the user's global configuration is theirs. This
+ * exists only so the receipt can stop claiming a delivery tmux may have
+ * dropped — lib/orchestrator-notify.ts `passthroughDeliveryNote` owns what to
+ * say about each value.
+ */
+export function buildReadPassthroughArgv(): readonly string[] {
+  return assertSafeTmuxArgv(["show-options", "-g", "allow-passthrough"]);
+}
+
+/**
+ * The value tmux printed, or undefined when it printed something this build
+ * does not understand. Fail-soft: an unknown answer must be REPORTED as
+ * unknown, never rounded to "off" or to "fine".
+ */
+export function parsePassthroughValue(stdout: string): "on" | "off" | "all" | undefined {
+  const line = String(stdout ?? "").split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
+  if (!line) return undefined;
+  const value = line.startsWith("allow-passthrough")
+    ? line.slice("allow-passthrough".length).trim()
+    : line;
+  return value === "on" || value === "off" || value === "all" ? value : undefined;
+}
+
 /** Set one pane's border colour (`-P` is the pane style). */
 export function buildPaneStyleArgv(pane: string, style: string): readonly string[] {
   return assertSafeTmuxArgv(["select-pane", "-t", requirePane(pane, "pane"), "-P", style]);
@@ -245,6 +273,15 @@ export function buildPaneTitleArgv(pane: string, title: string): readonly string
  *
  * Two commands rather than one because tmux takes one option per call; the
  * caller runs them in order and treats any failure as cosmetic.
+ *
+ * THERE IS NO UNDO (2026-09-17, user decision). `buildHidePaneLabelsArgv`
+ * existed and is deleted: toggling `pane-border-status` RESIZES EVERY PANE IN
+ * THE WINDOW (measured on a scratch tmux: SIGWINCH, rows 84 ↔ 83, in both
+ * directions; re-setting the same value triggers nothing), so releasing the
+ * bar re-laid out every application in the user's window — their editor,
+ * their shells, a manager's pi — once per orchestration cycle, and the next
+ * spawn put it straight back. The bar stays on for the window's lifetime
+ * instead; see `closeSessionPane` in lib/session-factory.ts.
  */
 export function buildShowPaneLabelsArgv(
   pane: string,
@@ -259,25 +296,6 @@ export function buildShowPaneLabelsArgv(
   ];
 }
 
-/**
- * Undo it — `-u` restores each option to what the user's own config says,
- * which is not the same as setting it to a default we invented.
- */
-export function buildHidePaneLabelsArgv(pane: string): readonly (readonly string[])[] {
-
-  const target = requirePane(pane, "pane");
-  return [
-    assertSafeTmuxArgv(["setw", "-t", target, "-u", "pane-border-status"]),
-    assertSafeTmuxArgv(["setw", "-t", target, "-u", "pane-border-format"]),
-  ];
-}
-
-
-/**
- * List the pane IDS of the window a pane belongs to — "who is there", for
- * liveness probing. {@link buildWindowLayoutArgv} asks the other question
- * ("who is WHERE"), which is what the three-column rule reads.
- */
 export function buildListPanesArgv(pane: string): readonly string[] {
   return assertSafeTmuxArgv([
     "list-panes",

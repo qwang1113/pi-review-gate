@@ -12,6 +12,7 @@ import {
   decideNotify,
   detectNotifyProtocol,
   notifyKey,
+  passthroughDeliveryNote,
   prepareNotification,
   recordNotify,
   sanitizeNotifyText,
@@ -129,4 +130,37 @@ test("writing is the ONE side effect, and it is injectable", () => {
   assert.deepEqual(written, ["SEQ"]);
   assert.doesNotThrow(() => writeNotification("SEQ", () => { throw new Error("no tty"); }),
     "a notification is never a gate condition — a failed write must not throw into a tool");
+});
+
+/**
+ * TOLD HONESTLY (2026-09-17). Inside tmux, writing the sequence is not
+ * delivery: tmux forwards a DCS passthrough only as far as `allow-passthrough`
+ * allows — `off` (the default) forwards nothing, `on` forwards only when the
+ * pane is VISIBLE, `all` always. The receipt used to say "已发出" in all three
+ * cases, and measured on this machine the user's own value is `on` — so every
+ * notification from a background window was dropped while the manager was told
+ * it had reached them.
+ */
+test("the delivery note tells the truth for each allow-passthrough value", () => {
+  assert.equal(passthroughDeliveryNote("all"), "", "nothing to warn about — it really went out");
+
+  const on = passthroughDeliveryNote("on");
+  assert.match(on, /只对可见的 pane/, "the visibility rule is the WHOLE reason a notification vanishes");
+  assert.match(on, /set -g allow-passthrough all/, "…and the one line that fixes it is in the receipt");
+  assert.doesNotMatch(on, /无法判断/, "this value is known, so nothing is hedged");
+
+  const off = passthroughDeliveryNote("off");
+  assert.match(off, /到不了你面前/, "off means it never arrives, visible pane or not");
+  assert.match(off, /set -g allow-passthrough all/);
+  assert.notEqual(off, on, "off and on are different failures and must not share one sentence");
+
+  const unknown = passthroughDeliveryNote(undefined);
+  assert.match(unknown, /无法判断/, "an unreadable value is reported as unknown, never rounded to fine");
+  assert.match(unknown, /set -g allow-passthrough all/);
+
+  // The gate NEVER writes that option itself, and the note must not read as if
+  // it does: it hands over the line and the user decides.
+  for (const note of [on, off, unknown]) {
+    assert.match(note, /门禁不会替你改/, "the user's global config stays the user's");
+  }
 });

@@ -184,6 +184,7 @@ import {
   askThroughChannel,
   bindingPath,
   decideReportedChildState,
+  describeToolActivity,
   pendingInstructions,
   reportState,
   type ChannelDialogOutcome,
@@ -212,11 +213,12 @@ import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
   closeSessionPane,
-  countDecoratedPanes,
   judgePaneDecor,
   openSessionPane,
-  releasesWindowLabels,
 } from "../lib/session-factory.ts";
+// The ONE pane-identity renderer (2026-09-18): what a pane border calls THIS
+// session when it opens a judge.
+import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import {
   readJudgeSideEnv,
   gateStatePersistSkip,
@@ -250,7 +252,7 @@ import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
 // repository's own worst example of the architecture rule this round adds.
-import { newOrchestrationId, orchestrationIdFromEnv, ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
+import { orchestrationIdFromEnv, ORCHESTRATION_ID_ENV, startupOrchestrationId } from "../lib/orchestration-id.ts";
 import { orchestratorDoneProblems } from "../lib/orchestrator-gate.ts";
 import {
   ORCHESTRATOR_DIRECTIVE,
@@ -1949,9 +1951,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       completedAt: state.completion?.at,
     });
     const now = Date.now();
-    const changed = reported !== lastReportedChildState;
+    const changed = reported !== lastReportedChildState || lastToolActivity !== lastReportedActivity;
     if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
     lastReportedChildState = reported;
+    lastReportedActivity = lastToolActivity;
     lastChildReportAt = now;
     const settledSince = lastSettledAt !== undefined && toolCallsSinceSettle === 0 ? lastSettledAt : undefined;
     reportState(
@@ -1970,6 +1973,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         // A supervisor may act on `idle` the moment it sees this, without
         // waiting out the confirmation window.
         ...(settledSince === undefined ? {} : { settledSince }),
+        // WHAT it is doing, for a manager that has only the state word to go on
+        // (2026-09-17, user decision): `working · 自上次推进 3200s` cannot tell
+        // "reading a large tree" from "spinning on the same search".
+        ...(lastToolActivity === undefined ? {} : { activity: lastToolActivity }),
       },
     );
   }
@@ -2005,6 +2012,15 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
   let lastChildReportAt = 0;
   let lastReportedChildState: ChildReportedState | undefined;
+  /**
+   * The activity line last written to the channel.
+   *
+   * Tracked so a NEW tool call republishes the state at once instead of
+   * waiting out `CHILD_STATE_REFRESH_MS` — a receipt that says "working · 最近
+   * read(x)" while the child has been running `make test` for a minute is
+   * exactly the staleness this field exists to remove.
+   */
+  let lastReportedActivity: string | undefined;
   /**
    * Epoch ms of the child's last FORWARD PROGRESS (E). Advanced ONLY by a real
    * agent event — a tool result or a turn boundary — never by the heartbeat, so
@@ -2050,6 +2066,17 @@ export default function reviewGate(pi: ExtensionAPI) {
    * waiting on its own subagent is work, not a stop.
    */
   let backgroundWaits: BackgroundWaits = NO_BACKGROUND_WAITS;
+  /**
+   * The most recent tool call this session made, rendered for the receipt.
+   *
+   * WHY IT RIDES ON `tool_call` AND NOT `tool_result`: the question the
+   * manager is asking is "what is it doing RIGHT NOW", and the call is placed
+   * before the work starts — the result can be minutes later, and a child
+   * whose tool has been running for ten minutes should read as "running
+   * `bash(make test)`", not as the last thing that already finished.
+   * (lib/orchestrator-child-channel.ts `describeToolActivity` renders it.)
+   */
+  let lastToolActivity: string | undefined;
   /** Feed one tool result into the background-wait fold (see the module). */
   function observeBackgroundToolResult(event: {
     toolName: string;
@@ -2468,8 +2495,24 @@ export default function reviewGate(pi: ExtensionAPI) {
   // every child reaching whoever currently holds the role. A session started
   // without one mints its own the first time it needs it.
   let orchestrationIdValue: string | undefined = orchestrationIdFromEnv();
+  /**
+   * Did the sidecar this session loaded record THIS session's id?
+   *
+   * It is the difference between "my orchestration, resumed" and "somebody
+   * else's runtime sitting on disk" — and only the first may be adopted
+   * without a takeover (lib/orchestration-id.ts `startupOrchestrationId`).
+   * Set by the state-restore below, which is the one place that knows.
+   */
+  let restoredOwnState = false;
   function currentOrchestrationId(): string {
-    if (!orchestrationIdValue) orchestrationIdValue = newOrchestrationId(primaryRepoRoot, Date.now());
+    if (!orchestrationIdValue) {
+      orchestrationIdValue = startupOrchestrationId({
+        env: process.env,
+        storedId: state.orchestrator?.orchestrationId,
+        storedBelongsToThisSession: restoredOwnState,
+        repoRoot: primaryRepoRoot,
+      });
+    }
     return orchestrationIdValue;
   }
   /**
@@ -2739,7 +2782,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   // freezes every field at registration time, and these deps are one live
   // object the rest of the session keeps using.
   const sessionDeps: OrchestratorSessionDeps = orchestratorDeps;
-  sessionDeps.decoratedJudgePanes = () => decoratedJudgePaneCount();
   registerOrchestratorSessionTools(pi, sessionDeps);
 
   // ---------- THE ONE HANDOVER (lib/session-handoff-tools.ts) ----------
@@ -3195,46 +3237,24 @@ export default function reviewGate(pi: ExtensionAPI) {
   const SUPERVISION_INTERVAL_MS = 10_000;
 
   /**
-   * How many DECORATED child panes this session still owns.
+   * How many DECORATED child panes this session still owns — the number the
+   * label-bar release used to consult, and now consulted by nobody.
    *
-   * Only a project manager owns any: they are the panes `orchestrator_spawn`
-   * coloured and labelled. Everything else — a plain loop session, a child of
-   * an orchestration — owns none, and a child could not count the manager's
-   * anyway (they are in another session's registry).
-   *
-   * It exists for ONE decision: may this close take the window's shared label
-   * bar down with it (`releasesWindowLabels`)? Counting only judge panes made
-   * a manager blank its children's borders; counting nothing made a manager
-   * leave the bar switched on forever.
+   * KEPT AS A KNOWLEDGE NOTE, NOT AS CODE (2026-09-17, user decision): the
+   * release is gone, and with it every reader of this count. `declare_done`
+   * reports live CHILDREN from the registry directly (`orchestrator-gate.ts`),
+   * so nothing here is load-bearing any more.
    */
-  function liveOrchestrationChildren(): number {
-    if (state.taskMode !== "orchestrator") return 0;
-    try {
-      return orchestratorDeps.runtime().children.filter((c) => !c.closedAt).length;
-    } catch { return 0; }
-  }
 
   /**
-   * Does SOMEONE ELSE own this window's label bar?
-   *
-   * True for a session that lives in an orchestration's window without being
-   * its manager: the decorated panes around it belong to another session's
-   * registry, so it can never know whether it is the last one and must never
-   * release the shared border options.
-   *
-   * NOT simply "the environment carries an orchestration id": a MANAGER
-   * carries it too the moment it inherited the orchestration (a relay
-   * successor, or one that attached to it by id), and filing that manager as
-   * a guest would leave the label bar switched on forever — the same defect
-   * this pair of predicates exists to avoid, entered through a third door.
-   *
-   * Deliberately NOT `isOrchestrationChild()` above: that one answers "was I
-   * started as a worker" (it drives the child directive and the mode guard),
-   * and widening it would change two unrelated decisions.
+   * `labelBarOwnedByOthers()` stood here — the "is this session only a GUEST
+   * in someone else's orchestration window" predicate, which existed solely to
+   * decide whether a close could take the window's shared border options down.
+   * GONE with that decision (2026-09-17, user decision): the bar is turned on
+   * by whoever opens a decorated pane and is never turned off, because the
+   * toggle resizes every pane in the window (measured: SIGWINCH, rows 84 ↔ 83)
+   * and its guest test was wrong in both directions across sessions.
    */
-  function labelBarOwnedByOthers(): boolean {
-    return Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()) && state.taskMode !== "orchestrator";
-  }
 
   /**
    * What the children need from the supervisor RIGHT NOW, as text lines.
@@ -3539,6 +3559,24 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.taskMode === "orchestrator" && orch) return orch;
     return state.sessionId ?? undefined;
   }
+
+  /**
+   * WHO THIS SESSION IS on a pane border — the `@<owner>` half of every judge
+   * pane this session opens (2026-09-18).
+   *
+   * Read from the session's own facts and never from a tool parameter: the
+   * child id it was spawned with (`RG_STATE_VARIANT`), the mode it runs in, and
+   * nothing else. It is NOT `callerIdentity()` — that one answers "may I touch
+   * this judge" and is an opaque session/orchestration id; this one answers
+   * "what should a human read", and an opaque id is exactly what the border
+   * must not print.
+   */
+  function paneOwnerIdentity(): string {
+    return selfPaneOwner({
+      stateVariant: SESSION_STATE_VARIANT,
+      orchestrator: state.taskMode === "orchestrator",
+    });
+  }
   /**
    * The judges THIS session owns — the deleted `childSessions` Map's scope.
    *
@@ -3596,21 +3634,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   /**
    * How many JUDGE panes of this session are decorated and still on screen.
    *
-   * The one consumer is the label-bar release (`releasesWindowLabels`): a
-   * project manager's window holds child panes AND review panes, and a close
-   * path that counts only its own kind either blanks the other kind's border
-   * or leaves the shared border line switched on forever. Both were measured
-   * (2026-09-05).
+   * DELETED WITH ITS ONLY CALLER (2026-09-17, user decision): it existed for
+   * the label-bar release, which is gone — see lib/session-factory.ts
+   * `closeSessionPane` for the measurement that decided it.
    */
-  function decoratedJudgePaneCount(): number {
-    const server = tmuxServerFrom(process.env);
-    return countDecoratedPanes(
-      ownJudges()
-        .filter((entry) => entry.paneId && paneClosable(entry, server))
-        .map((entry) => entry.paneId!),
-      listOwnWindowPanes(),
-    );
-  }
 
 
   /**
@@ -4322,6 +4349,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (restored && restored.sessionId === sessionId) {
       state = restored;
       continuationsInjected = restoredInjections;
+      // The sidecar is THIS session's own — so the orchestration it records is
+      // this session's orchestration, merely resumed (a reload, a resume, a
+      // restart). See `restoredOwnState` above.
+      restoredOwnState = true;
     } else if (restored && restored.sessionId !== sessionId) {
       state = emptyState(sessionId, restored.maxRounds ?? DEFAULT_MAX_ROUNDS);
       // THE ORCHESTRATION RUNTIME SURVIVES THE RESET (2026-09-06, B1).
@@ -5175,7 +5206,21 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     setLastBlockedShip: (record) => { lastBlockedShip = record; },
   };
 
-  pi.on("tool_call", (event, ctx) => evaluateToolCall(shipGateHookDeps, event, ctx));
+  // ONE `tool_call` handler, TWO jobs, and the order is deliberate: the
+  // activity line is refreshed BEFORE the gate decides, so a tool call that
+  // gets blocked is still the last thing this session tried to do (the
+  // receipt's answer to "spinning or working" — 2026-09-17). Captured for
+  // every session and only ever READ by a supervisor looking at a child; a
+  // manager writing a plan pays one string assignment per call. Registering
+  // a SECOND handler here would be a second path, and the vendored hosts
+  // (test fixtures) keep exactly one handler per event.
+  pi.on("tool_call", (event, ctx) => {
+    lastToolActivity = describeToolActivity(
+      String((event as { toolName?: unknown }).toolName ?? ""),
+      (event as { input?: unknown }).input,
+    );
+    return evaluateToolCall(shipGateHookDeps, event, ctx);
+  });
 
   /**
    * THE HINTS RIDE THE RESULT (user decision, 2026-09-14).
@@ -7480,22 +7525,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    */
   function closeJudgePaneOf(entry: JudgeEntry, ctx: JudgeCloseCtx): void {
     if (!entry.paneId) return;
-    const others = countDecoratedPanes(
-      Object.values(judgeHierarchy)
-        .filter((other) =>
-          other.judgeId !== entry.judgeId
-          && other.openerId === ctx.opener
-          && other.paneId
-          && paneClosable(other, ctx.tmuxServer))
-        .map((other) => other.paneId!),
-      ctx.ownPane ? listJudgePanes(ctx.run, ctx.ownPane) : undefined,
-    );
-    const releases = ctx.ownPane !== undefined && releasesWindowLabels({
-      remainingDecoratedPanes: others,
-      insideOrchestration: labelBarOwnedByOthers(),
-    });
+    // Closing a pane no longer touches the window's label bar (2026-09-17,
+    // user decision): the toggle resizes every pane in the window (measured:
+    // SIGWINCH, rows 84 ↔ 83), and the release could not see the other
+    // sessions' panes anyway.
     try {
-      closeSessionPane(ctx.run, entry.paneId, releases ? { hideLabelsVia: ctx.ownPane! } : {});
+      closeSessionPane(ctx.run, entry.paneId);
     } catch { /* best effort */ }
   }
 
@@ -7826,7 +7861,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           sysPromptPath: files.sysPromptPath,
           model: files.model,
         }),
-        decor: judgePaneDecor(judgeId, role),
+        decor: judgePaneDecor(judgeId, role, paneOwnerIdentity()),
         // ONE write, one table, and it happens inside the open: the entry used
         // to be built here and mutated a second time, which is exactly how the
         // two drifted apart.
@@ -8047,6 +8082,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       ownPane: () => ownPane,
       now: () => Date.now(),
       tmuxServer: () => tmuxServerFrom(process.env),
+      paneOwner: () => paneOwnerIdentity(),
     };
     const notices: string[] = [];
     for (const [judgeId, entry] of Object.entries(judgeHierarchy)) {
@@ -8880,6 +8916,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       return resolved;
     },
     callerId: () => callerIdentity(),
+    paneOwner: () => paneOwnerIdentity(),
     // …and the identity a successor REPLACED, so a handover does not orphan the
     // reviewers its predecessor had already dispatched (2026-09-14).
     callerIds: () => callerIdentities(),
@@ -8937,12 +8974,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // defect the other way — a manager with no children left (or none yet)
     // would leave the border line switched on forever. So it counts.
     //
-    // THE ENV ALONE IS NOT THE CHILD TEST: a manager that INHERITED an
-    // orchestration (a relay successor, or one that attached to it by id)
-    // carries the very same variable, and reading it alone would file it as a
-    // child and never let it release either.
-    insideOrchestration: () => labelBarOwnedByOthers(),
-    otherDecoratedPanes: () => liveOrchestrationChildren(),
+    // Decorated panes were counted here once, to decide whether a close could
+    // take the window's label bar down. GONE with that decision (2026-09-17,
+    // user decision): the bar is turned on and left on.
     now: () => Date.now(),
     readText: (path) => {
       try {
@@ -9145,6 +9179,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   }
   registerJudgeSpawnTools(pi, {
     callerId: () => callerIdentity(),
+    paneOwner: () => paneOwnerIdentity(),
     hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy; },
     saveHierarchy: (next) => setHierarchy(next),
     channelIO: () => channelIO,
@@ -9154,7 +9189,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     tmuxServer: () => tmuxServerFrom(process.env),
     now: () => Date.now(),
     sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
-    insideOrchestration: () => labelBarOwnedByOthers(),
     resolveRepo: (requested) => {
       const resolved = resolveToolRepo(requested);
       if (resolved.ok) ensureHierarchyLoaded(resolved.root);
@@ -10550,20 +10584,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           if (paneClosable(child, tmuxServer) && ownPane) {
             remainingClosable -= 1;
             try {
-              // The LAST decorated pane takes the window's label bar down with
-              // it — judge panes turn it on (C1), so something has to turn it
-              // off or the gate leaves a permanent mark on the user's window.
-              // A CHILD of an orchestration never does (it cannot see the
-              // manager's panes); a MANAGER counts its live children, which
-              // are decorated panes of its own.
-              const releases = releasesWindowLabels({
-                remainingDecoratedPanes: remainingClosable + liveOrchestrationChildren(),
-                insideOrchestration: labelBarOwnedByOthers(),
-              });
-              // Through OUR pane: the dying one may already be gone, and a
-              // failed `setw` would leave the bar switched on for good.
-              const closeOpts = releases ? { hideLabelsVia: ownPane } : {};
-              if (closeSessionPane(run, child.paneId!, closeOpts).ok) closed.push(child.paneId!);
+              // Closing a pane no longer touches the window's label bar
+              // (2026-09-17, user decision): toggling `pane-border-status`
+              // resizes EVERY pane in the window (measured: SIGWINCH, rows
+              // 84 ↔ 83), and the release was wrong across sessions besides.
+              if (closeSessionPane(run, child.paneId!).ok) closed.push(child.paneId!);
             } catch { /* best effort */ }
           }
           try { reapReviewScratch(child.judgeId); } catch { /* best effort */ }
@@ -12321,6 +12346,40 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       message: { customType: custom.customType, details: custom.details },
     });
   });
+
+  // …and the EVENT BUS, which is the terminal signal EVERY finished run emits
+  // (2026-09-17, the round that fixed a child stuck reporting `working` after
+  // its own `declare_done`). The notification above is not enough on its own:
+  // pi-subagents skips it when the result was already consumed and holds
+  // others back for batch finalization, so a child that spawned three agents
+  // saw one notification and kept two waits forever. `pi.events.on` registers
+  // the subscription with the extension runtime, so a reload cannot leave the
+  // old handler attached to the new bus.
+  //
+  // IT IS OPTIONAL, like every host capability this extension reaches for: a
+  // host that loads this file outside pi (the install fixtures in test/, a
+  // tool that imports it to inspect it) has no bus, and the gate then keeps
+  // the two signals it always had rather than refusing to load.
+  for (const channel of ["subagents:completed", "subagents:failed"] as const) {
+    pi.events?.on?.(channel, (payload) => {
+      const next = foldBackgroundWaits(backgroundWaits, {
+        kind: "finished",
+        id: (payload as { id?: unknown } | null | undefined)?.id,
+      });
+      // Nothing was waiting on that agent ⇒ nothing to say. Reporting anyway
+      // would write a channel record per finished agent of every session.
+      if (next === backgroundWaits) return;
+      backgroundWaits = next;
+      // The state may be changing from `working` to `idle`/`done` RIGHT NOW,
+      // and a manager may be sitting in a wait: publish it on this event
+      // instead of making it wait out the heartbeat.
+      if (latestCtx) {
+        try {
+          reportChildState(latestCtx, undefined, { force: true });
+        } catch { /* reporting is never allowed to break the session that runs it */ }
+      }
+    });
+  }
 
   pi.registerMarkdownTransformer((markdown, context) =>
     thinkingLoop.truncateDisplay(markdown, context.messageType),

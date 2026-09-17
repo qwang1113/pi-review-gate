@@ -580,11 +580,9 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
 
   registerOrchestratorStateTools(host, deps);
   // A manager's window holds review panes too, and the label-bar release counts
-  // BOTH kinds. The real wiring reads the judge registry; a test just says how
-  // many are on screen. Attached to the SAME deps object the tools were given —
-  // a spread copy would freeze every other field at registration time, and
-  // tests swap `channelIO` afterwards.
-  (deps as OrchestratorSessionDeps).decoratedJudgePanes = () => options.judgePanes ?? 0;
+  // BOTH kinds used to be counted here for the label-bar release; that
+  // decision is gone (2026-09-17, user decision), so the fake carries no
+  // decoration bookkeeping at all — it just registers the tools.
   registerOrchestratorSessionTools(host, deps);
 
   const target = (childId: string) => ({ orchestrationId: ORCHESTRATION_ID, childId, home: "/home/test" });

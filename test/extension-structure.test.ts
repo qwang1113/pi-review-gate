@@ -130,7 +130,7 @@ const HOOK_BODY = [SHIP_HOOK_SRC, SHIP_EDIT_SRC, SHIP_BASH_SRC].join("\n");
 function shipHookWiring(): string {
   return windowOf(
     "const shipGateHookDeps: ShipGateHookDeps = {",
-    "evaluateToolCall(shipGateHookDeps, event, ctx));",
+    "evaluateToolCall(shipGateHookDeps, event, ctx);",
     "L1 hook wiring",
   );
 }
@@ -513,8 +513,12 @@ test("NotebookEdit is in the edit-tool set", () => {
 });
 
 test("L1: tool_call handler exists and can block", () => {
-  // The extension WIRES the hook; lib/ship-gate-hook.ts is what decides.
-  assert.match(SRC, /pi\.on\(["']tool_call["'], \(event, ctx\) => evaluateToolCall\(shipGateHookDeps, event, ctx\)\)/,
+  // The extension WIRES the hook; lib/ship-gate-hook.ts is what decides. The
+  // handler is one block, not a one-liner, because it also refreshes the
+  // activity line a supervisor reads (`describeToolActivity`, 2026-09-17) —
+  // and the gate call itself is still the last thing it does, so a blocked
+  // tool call is still recorded as the last thing the session tried.
+  assert.match(SRC, /pi\.on\(["']tool_call["'], \(event, ctx\) => \{[\s\S]{0,400}?return evaluateToolCall\(shipGateHookDeps, event, ctx\);/,
     "the extension keeps exactly the wiring line");
   assert.match(SHIP_HOOK_SRC, /export async function evaluateToolCall\(/);
   assert.match(HOOK_BODY, /block:\s*true/);
@@ -2563,16 +2567,26 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
     "a judge THIS session dispatched is a fact the gate holds, never something to infer from silence");
   assert.doesNotMatch(report, /capture-pane|screenLooksBusy/, "no screen is consulted, in any state");
   // The branch rules, where they live now — order is load-bearing (forced >
-  // waiting-judge > working [streaming OR background wait] > done > idle).
+  // waiting-judge > streaming > done > background wait > idle). The 2026-09-17
+  // move put the RECORDED COMPLETION above the background wait: a child that
+  // declared done while one of its subagents never sent a terminal signal used
+  // to report `working` for the rest of its life.
   const decideAt = CHILD_CHANNEL_SRC.indexOf("export function decideReportedChildState(");
   assert.ok(decideAt > 0, "the pure derivation lives in lib/orchestrator-child-channel.ts");
   const decide = CHILD_CHANNEL_SRC.slice(decideAt, decideAt + 900);
   assert.match(decide, /"waiting-judge"/,
     "a healthy review round is reported as its own state, never read as a hang");
-  assert.match(decide, /streaming \|\| args\.waitingOnBackground/,
-    "streaming OR waiting-on-background is working");
-  assert.match(decide, /\? "done"/);
-  assert.match(decide, /: "idle"/);
+  assert.match(decide, /if \(args\.streaming\) return "working"/,
+    "a turn actually in flight is working");
+  assert.match(decide, /if \(args\.completedAt\) return "done"/,
+    "…and a recorded declare_done outranks everything below it, including a background wait nobody is coming back for");
+  assert.match(decide, /if \(args\.waitingOnBackground\) return "working"/,
+    "waiting on its own still-running subagent is work, not a stop");
+  assert.ok(
+    decide.indexOf("if (args.completedAt) return") < decide.indexOf("if (args.waitingOnBackground) return"),
+    "the completion is decided before the leftover wait — the whole fix",
+  );
+  assert.match(decide, /return "idle"/);
 
   // Round-4 P0 — THE HEARTBEAT IS A TIMER, not an agent event. This is the
   // whole fix: `agent_settled` / `turn_end` do not fire during a judge_wait,
@@ -2818,20 +2832,20 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
     "reuse is decided by the transcript, not by a live pane");
   assert.match(body, /await openSessionPane\(run, \{/,
     "a real pane open still exists for the no-reuse case — through the ONE factory");
-  // fresh:true kills the living pane FIRST (singleton per role+repo+opener) —
-  // and, being one of the paths that close a decorated pane, it asks the
-  // shared label-bar question on the way out (the re-open turns the border line
-  // back on when it succeeds; when it fails, nobody else is left to release it).
-  // Since 2026-09-05 that question is asked in ONE place: this branch and the
-  // lane retire call the same helper instead of carrying a copy each.
+  // fresh:true kills the living pane FIRST (singleton per role+repo+opener),
+  // and since 2026-09-05 it goes through ONE helper rather than carrying its
+  // own copy of the close. That helper used to ask the shared label-bar
+  // question too; the release is deleted (2026-09-17, user decision), so all
+  // that is left of it is the close itself.
   assert.match(body, /closeJudgePaneOf\(existing, \{ opener, ownPane, tmuxServer, run \}\)/,
     "fresh kills the pane through the shared close helper");
   assert.doesNotMatch(body, /releasesWindowLabels\(\{/,
     "…and does not re-inline the label-bar rule");
   const closeHelper = windowOf("function closeJudgePaneOf(", "\n  /**\n   * Retire a lane the gate has stopped using",
     "closeJudgePaneOf body");
-  assert.match(closeHelper, /closeSessionPane\(ctx\.run, entry\.paneId, releases \?/, "the helper is what closes the pane");
-  assert.match(closeHelper, /insideOrchestration: labelBarOwnedByOthers\(\)/, "…with the same guest test as every other close");
+  assert.match(closeHelper, /closeSessionPane\(ctx\.run, entry\.paneId\)/, "the helper is what closes the pane");
+  assert.doesNotMatch(closeHelper, /setw|-u |hideLabelsVia/,
+    "…and writes no window option: the bar is never released (user decision 2026-09-17)");
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
 });
 
@@ -3496,13 +3510,12 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
 
   // judge_close: kill the PANE, then drop the registry. Idempotent.
   const close = toolBodyOf("judge_close");
-  assert.match(close, /closeSessionPane\(deps\.tmux, child\.paneId, \{/, "the pane is killed, not a process");
-  // …and the window's label bar comes down with the LAST decorated pane, or the
-  // border line judge panes now turn on (C1) would be litter in the user's
-  // window forever — addressed through OUR pane, because the dying one may
-  // already be gone.
-  assert.match(close, /const releases = releasesWindowLabels\(\{/, "the label bar is released by the last close");
-  assert.match(close, /hideLabelsVia: ownPane/, "…and the window is named by a pane that is provably alive");
+  assert.match(close, /closeSessionPane\(deps\.tmux, child\.paneId\)/, "the pane is killed, not a process");
+  // …and NOTHING else: the window's label bar used to come down with the last
+  // decorated pane, and that write resizes every pane in the window (measured:
+  // SIGWINCH, rows 84 ↔ 83). The release is deleted (2026-09-17, user decision).
+  assert.doesNotMatch(close, /releasesWindowLabels|hideLabelsVia|setw/,
+    "no window option is touched by a close");
   assert.match(close, /closed: true/,
     "closing an already-finished child still reports success (idempotent)");
   assert.match(close, /transcript 保留/, "the records remain inspectable after close");
@@ -5012,12 +5025,12 @@ test("the orchestration layer is wired in, and its logic did NOT land in this fi
   // the architecture rule this round introduces, so the orchestration layer
   // must not grow it.
   assert.match(SRC, /registerOrchestratorStateTools\(pi, orchestratorDeps\)/);
-  // The session tools take the orchestration deps PLUS one capability the deps
-  // module has no reason to know about (how many judge panes this window has,
-  // for the shared label-bar release) — still wiring, still no logic here.
+  // The session tools take the orchestration deps as they are: the extra
+  // capability they used to be handed (how many judge panes this window has,
+  // for the shared label-bar release) is gone with the release itself.
   assert.match(SRC, /registerOrchestratorSessionTools\(pi, sessionDeps\)/);
-  assert.match(SRC, /sessionDeps\.decoratedJudgePanes = \(\) => decoratedJudgePaneCount\(\)/,
-    "attached to the live deps object — a spread copy would freeze every other field");
+  assert.match(SRC, /const sessionDeps: OrchestratorSessionDeps = orchestratorDeps/,
+    "the live deps object is passed on — a spread copy would freeze every other field");
   for (const banned of ["buildSpawnPaneArgv", "buildSendMessageArgv", "scheduleNextTasks", "parsePlan("]) {
     assert.ok(!SRC.includes(banned),
       `${banned} belongs in lib/orchestrator-*.ts — the extension only wires the layer up`);

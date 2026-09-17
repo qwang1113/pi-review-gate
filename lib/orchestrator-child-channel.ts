@@ -69,10 +69,18 @@ export const ANSWER_POLL_MS = 750;
  *
  * Order is load-bearing: a forced state (a dialog open ⇒ waiting-input, an
  * instruct ⇒ …) wins; then a gate-started wait (`waiting-judge`); then the
- * "alive" readings — streaming, or waiting on a background subagent the
- * child itself spawned (2026-09-09, lib/background-wait.ts — waiting on its
- * own subagent is work, not a stop); then a recorded completion; and only
- * then `idle`.
+ * "alive" readings — streaming, or a recorded completion; and only then the
+ * lingering background wait, and `idle` last.
+ *
+ * WHY THE COMPLETION OUTRANKS THE BACKGROUND WAIT (2026-09-17). It did not,
+ * and that ordering was half of a measured P0: a child that had spawned three
+ * background agents, was notified of only ONE of them, then declared done and
+ * settled — reported `working` for the rest of its life. `completedAt` is the
+ * child's OWN gate recording that it finished the task; a wait on a subagent
+ * it started is a leftover, and a leftover must never hide a declaration. The
+ * supervisor bounds the completion by the current assignment on its own side
+ * (lib/orchestrator-child-state.ts `completionReported`), so a re-tasked child
+ * cannot claim `done` for the previous round's work.
  */
 export function decideReportedChildState(args: {
   /** A caller-chosen state beats every reading (a dialog just opened…). */
@@ -88,8 +96,71 @@ export function decideReportedChildState(args: {
 }): ChildReportedState {
   if (args.forced !== undefined) return args.forced;
   if (args.judging) return "waiting-judge";
-  if (args.streaming || args.waitingOnBackground) return "working";
-  return args.completedAt ? "done" : "idle";
+  if (args.streaming) return "working";
+  if (args.completedAt) return "done";
+  if (args.waitingOnBackground) return "working";
+  return "idle";
+}
+
+/**
+ * WHAT THE CHILD IS DOING, in one line — `bash(grep -rn PrimeUsers src/)`.
+ *
+ * The tool name alone is not the answer the manager needs: every session in
+ * the window is running `bash` and `read`; what distinguishes "investigating
+ * the schema" from "re-running the same search" is the ARGUMENT. So the
+ * argument is rendered — shortened and single-line, because it rides in a
+ * receipt row and may be a whole shell pipeline or a file path.
+ *
+ * KEYS ARE CONSIDERED IN A FIXED ORDER, not by object key order: the same
+ * call must render the same way in every process, and `Object.keys` order is
+ * whatever the caller happened to build.
+ *
+ * NEVER THROWS AND NEVER RETURNS CONTROL CHARACTERS (reviewer-facing text is
+ * the one place a stray ESC or a newline would break the receipt's layout).
+ * An input with no recognisable argument degrades to the bare tool name.
+ */
+export const TOOL_ACTIVITY_MAX = 80;
+
+/** Argument keys worth showing, most identifying first. */
+const ACTIVITY_KEYS: readonly string[] = Object.freeze([
+  "command", "file_path", "path", "pattern", "description", "url", "query",
+  "task", "prompt", "name", "topic", "glob", "sessionId", "childId",
+]);
+
+function activityTarget(input: unknown): string | undefined {
+  if (typeof input === "string") return input;
+  if (typeof input !== "object" || input === null) return undefined;
+  const record = input as Record<string, unknown>;
+  for (const key of ACTIVITY_KEYS) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  // No known key: the first SHORT string is better than nothing, and a long
+  // one (a file body handed to `write`) is exactly what must not be printed.
+  for (const value of Object.values(record)) {
+    if (typeof value === "string" && value.trim() !== "" && value.length <= 200) return value;
+  }
+  return undefined;
+}
+
+export function describeToolActivity(toolName: string, input: unknown): string | undefined {
+  const name = String(toolName ?? "")
+    // eslint-disable-next-line no-control-regex -- stripping controls is the point
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 24);
+  if (name === "") return undefined;
+  const raw = activityTarget(input);
+  if (raw === undefined) return name;
+  const target = raw
+    // eslint-disable-next-line no-control-regex -- stripping controls is the point
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (target === "") return name;
+  const room = TOOL_ACTIVITY_MAX - name.length - 2;
+  if (room < 4) return name;
+  return `${name}(${target.length > room ? target.slice(0, room - 1) + "…" : target})`;
 }
 
 /** Everything the child side needs to talk on its channel. */
@@ -119,7 +190,7 @@ function stamp(io: ChannelIO): string {
 export function reportState(
   binding: ChildChannelBinding,
   state: ChildReportedState,
-  extra: { contextPercent?: number; dialogTitle?: string; note?: string; waitingFor?: string; lastProgressAt?: string; settledSince?: string; modelEvent?: ModelEvent } = {},
+  extra: { contextPercent?: number; dialogTitle?: string; note?: string; waitingFor?: string; lastProgressAt?: string; settledSince?: string; activity?: string; modelEvent?: ModelEvent } = {},
 ): void {
   try {
     appendRecord(binding.io, binding.target, {

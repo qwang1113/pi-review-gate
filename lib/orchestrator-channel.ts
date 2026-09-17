@@ -150,6 +150,19 @@ export interface ChannelStateRecord extends ChannelRecordBase {
    */
   lastProgressAt?: string;
   /**
+   * WHAT IT IS DOING, in one line — the tool call it made most recently, as
+   * rendered by `describeToolActivity` (e.g. `bash(grep -rn PrimeUsers src/)`).
+   *
+   * WHY (2026-09-17, user decision). A manager reading only `working · 自上次推进
+   * 3200s` cannot tell "reading a large tree" from "spinning on the same
+   * search for the third time" — and the plan's next step depends on that
+   * difference. The state word says WHETHER the child moves; this says WHAT it
+   * is moving on. It is a READING for the receipt: never a wake reason (the
+   * supervisor's newsworthiness does not consult it), and never allowed to
+   * fail a report — an unreadable input degrades to the bare tool name.
+   */
+  activity?: string;
+  /**
    * ISO time this child's LAST TURN ENDED, present ONLY while nothing has run
    * since — a tool call clears it (2026-09-10, user decision).
    *

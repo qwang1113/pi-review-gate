@@ -48,11 +48,13 @@ import {
   orchestratorDoneProblems,
 } from "./orchestrator-gate.ts";
 import { emptyRuntime, formatChildren } from "./orchestrator-registry.ts";
+import { buildReadPassthroughArgv, parsePassthroughValue } from "./orchestrator-tmux.ts";
 import { formatChildHealth } from "./orchestrator-child-state.ts";
 
 import {
   decideNotify,
   notifyKey,
+  passthroughDeliveryNote,
   prepareNotification,
   recordNotify,
 } from "./orchestrator-notify.ts";
@@ -104,6 +106,24 @@ export const PLAN_APPROVE_LABEL = "批准这份 plan";
  * `buildPlanTranscriptMessage` below — because approving a plan you cannot read
  * was the O-1 report, and it stays true however the dialog is rendered.
  */
+
+/**
+ * ASK TMUX WHETHER A NOTIFICATION CAN ACTUALLY REACH THE USER (2026-09-17).
+ *
+ * A read (`show-options -g allow-passthrough`), never a write, and every
+ * failure is reported AS UNKNOWN — the wording for each answer lives in
+ * lib/orchestrator-notify.ts `passthroughDeliveryNote`. This function owns
+ * only the plumbing: one tmux call, no cache (it is asked once per
+ * notification, which is a rare, human-facing event).
+ */
+function deliveryNoteFromTmux(deps: OrchestratorDeps): string {
+  try {
+    const result = deps.tmux(buildReadPassthroughArgv());
+    return passthroughDeliveryNote(result.ok ? parsePassthroughValue(result.stdout) : undefined);
+  } catch {
+    return passthroughDeliveryNote(undefined);
+  }
+}
 
 /**
  * The FULL plan, printed to the transcript before the dialog opens (O-1).
@@ -860,6 +880,16 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       }
       deps.saveRuntime({ ...runtime, notify: recordNotify(runtime.notify, key, now) });
 
+      // ── SAID HONESTLY (2026-09-17) ──
+      //
+      // Inside tmux the sequence reaching stdout is NOT delivery: tmux forwards
+      // a passthrough only as far as `allow-passthrough` allows (off ⇒ never,
+      // on ⇒ only from a VISIBLE pane, all ⇒ always). A manager notifying the
+      // human from a background window was told "已发出" while tmux dropped it.
+      // The value is READ here, never written — the user's global config is
+      // theirs (lib/orchestrator-notify.ts owns the wording for each value).
+      const passthroughNote = deps.env().TMUX ? deliveryNoteFromTmux(deps) : "";
+
       // Reporting a decision is what un-blocks the exit for it (constraint 11):
       // the user now HAS the question, even if they have not answered it.
       const decisionId = String(params.decisionId ?? "").trim();
@@ -881,7 +911,7 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
         }
       }
       return reply(
-        `review-gate: 已通过 ${payload.protocol} 向用户发出系统通知。${decisionNote}`,
+        `review-gate: 已通过 ${payload.protocol} 向用户发出系统通知。${decisionNote}${passthroughNote}`,
         { sent: true, protocol: payload.protocol },
       );
     },

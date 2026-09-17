@@ -803,20 +803,89 @@ L8 edit gate 拦得住 edit，拦不住「读着读着忘了协商」。
 
 - 按 `childId` 派一个稳定颜色（纯函数 —— 同一个子会话在任何进程里看到的都是同一色），
   `select-pane -P fg=colourN` 设边框；
-- `select-pane -T` 设标题，形如 `@t2-gate-commands · waiting-judge 220s` ——
-  **任务名 + 当前状态 + 该状态已持续多久**；
-- window 级 `setw pane-border-status top` / `pane-border-format '#{pane_title}'`
-  打开顶部标签栏（**一律不带 `-g`**，不碰用户全局配置；argv 仍过 `assertSafeTmuxArgv`）。
+- `select-pane -T` 设标题，形如 `<干什么>@<谁启动>:<名字>`，后面接 ` · <state> <age>`：
+  **任务名 + 当前状态 + 该状态已持续多久**。
+
+命名规则只有一处实现（`paneIdentity()`，2026-09-17 用户决定），身份段内部**不允许空格**
+（用户原话：「谁启动, 干什么, 中间最好不要有空格, 空间很宝贵」）：
+
+| pane | 标题 |
+| --- | --- |
+| 子会话（`orchestrator_spawn` 开） | `t6@pm:eng-i18n-ci-cd-review-gate`（标题非 ASCII 时退化成 `t6@pm`） |
+| 评审（子会话开的） | `reviewer@t6` |
+| 评审（项目经理开的） | `goal-auditor@pm` |
+| 评审（普通 loop 会话开的） | `reviewer@self` |
+| 项目经理自己那个 pane | `pm:<目录名>` |
+
+`谁启动` 不是任何人传进来的字符串：每个 opener 从**自己的身份**算（
+`selfPaneOwner()`：env 里的 `RG_STATE_VARIANT` → 子会话的 taskId，否则按模式 → `pm` / `self`）。
+这修的是一个实测歧义：同一个 window 里两个 `goal-auditor` 由不同会话开出，边框**逐字节相同**，
+屏幕上没有任何东西说得出谁是谁。
 
 标题由本来就在周期跑的监督探针顺带刷新，所以不看回执也知道谁在干什么。健康快照每行
-带同一个颜色名（`- [青] t1-… `），屏幕上的色块与回执条目能对上。`orchestrator_close`
-在关掉**最后一个**被装饰的子会话时用 `setw -u` 撤销 window 级设置（早撤会把还在用的
-兄弟 pane 的标签抹掉，不撤就是留垃圾），且撤销发生在 `kill-pane` **之前** —— pane 一死
-它的 id 就不再是合法的 `setw` 目标。
+带同一个颜色名（`- [青] t1-… `），屏幕上的色块与回执条目能对上；探针的行里还会带
+`，最近 bash(grep -rn PrimeUsers src/)` —— 状态词说它**动没动**，这一句说它**在动什么**
+（2026-09-17 用户要求；纯函数 `describeToolActivity`，单行、有上限、剔除控制字符）。
 
-两条边界：它**不是工具、不是 action**（一个展示需求不该让工具集重新长回去），装饰失败
+**项目经理自己那个 pane 也写，而且每个探针无条件重写一次**（2026-09-17）。它是门禁唯一
+没开的 pane（用户自己开的），所以 registry 里没有任何东西会装饰它；而 `pm:<目录名>` 不带状态，
+没有会变的字符串可供去重，pi 又会在启动与每次扩展 rebind 时重写 pane 标题 —— 一次性写入
+会丢，所以这一条走 `paintPaneTitle`（无记忆、无节流），代价是每个探针一次 tmux 调用。
+
+**标签栏只开不关**（2026-09-17 用户决定，实测见下）。旧代码里 `orchestrator_close` 会在关掉
+**最后**一个被装饰的子会话时用 `setw -u` 把 window 级设置撤回去 —— 那条释放路径连同它的
+全部判定（`releasesWindowLabels` / `countDecoratedPanes` / `insideOrchestration` /
+`otherDecoratedPanes` / `decoratedJudgePanes` / `labelBarOwnedByOthers`）已经整条删除：
+关掉标签栏会让整窗每个 pane 少一行，代价高于一行边框。原因见下一节。
+
+两条边界（不变）：它**不是工具、不是 action**（一个展示需求不该让工具集重新长回去），装饰失败
 **只降级成一句提示**，绝不让 spawn 或探针失败。而且它**只出不进**：没有任何判定读
 pane 标题 —— 那就是回到读屏幕了。
+
+真实 tmux 验证（2026-09-17，`tmux -L rgpane-observe`，独立 socket，不动用户的任何 pane）：
+用**出厂的**构造函数写标题，再用 tmux 自己读回 `#{pane_title}` —— 三个身份全部逐字一致：
+`t6@pm:eng-i18n-ci-cd-review-gate` / `goal-auditor@t6` / `pm:pi-review-gate`；
+边界：中文标题退化成 `t7@pm`，`fix-auth` 这样的 taskId 往返正确（`fix-auth@pm:tidy-the-guard`），
+超长截到 44 字符。
+
+window 级 `setw pane-border-status top` / `pane-border-format '#{pane_title}'` 打开顶部标签栏
+（**一律不带 `-g`**，不碰用户全局配置；argv 仍过 `assertSafeTmuxArgv`）。
+
+### 六丁、门禁自己会不会把窗口“摇”坏：实测与取证手法（2026-09-17）
+
+用户在两个 pane 上截到了显示错乱（一段文本被画在别的行上，重复的行、没有字号错位），
+用鼠标选一下那块区域就恢复正常。这一轮**没有**下结论说根因是哪一个，只做了两件事：
+把门禁自己会造成的几何抖动删掉，并留下可判定的取证手法。
+
+**实测（scratch tmux 服务器，不动用户的任何 pane）**：
+
+| 动作 | 结果 |
+| --- | --- |
+| `setw -t <pane> pane-border-status top`（**第一次**） | SIGWINCH，`rows 84 → 83` —— 整窗每个 pane 少一行 |
+| 同一值再设一次 | **无** SIGWINCH（tmux 自己幂等）→ 所以“每次开 pane 重设一遍”无害 |
+| `setw -t <pane> -u pane-border-status` | SIGWINCH，`rows 83 → 84` —— 再来一次 |
+| `setw -t <pane> pane-border-format '…'`（含重复） | 无 SIGWINCH（改格式不改尺寸） |
+
+所以门禁唯一会整窗改几何的常规动作，就是标签栏的开与关；而旧的释放路径会让它**反复开合**
+（子会话/评审全关掉时关一次，下一次 spawn 再开一次），每一次窗口里所有 app（PM 自己的 pi、
+用户的编辑器与 shell）都得重排一遍。这就是删除它而不是修它的理由：一次 ±1 行跳动的代价
+高于一行边框本身。
+
+**下次乱掉时的取证手法（决定性实验）**：看见乱掉时**先不要用鼠标选中**（一选就修好了），
+先取 tmux 自己那一份：
+
+```bash
+tmux capture-pane -p -t <pane> | tail -20
+```
+
+- 网格（capture 的输出）**也乱** ⇒ 是应用把那一帧写坏了；
+- 网格**干净** ⇒ 是 tmux↔终端显示层的偏差，而门禁唯一能造成这条偏差的写法是
+  `lib/orchestrator-notify.ts` 直写 `process.stdout` 的转义序列（桌面通知）。
+
+后者还有一个前提条件需要知道：tmux 的 `allow-passthrough` 决定这条转义序列能不能出去 ——
+`off`（默认）**一律不放行**，`on` 只对**可见**的 pane 放行，`all` 才是不论可见与否都放行。
+用户的配置是 `on`，所以从后台窗口发出的桌面通知会被 tmux 静默丢弃 —— `orchestrator_notify`
+现在会读这个值并在回执里说实话（`passthroughDeliveryNote`），不再笼统地宣称「已发出」。
 
 ---
 

@@ -39,7 +39,7 @@ import {
   discoverOrchestrations,
 } from "./orchestrator-takeover.ts";
 import { openSessionPane, paneRecoverability } from "./session-factory.ts";
-import { paneLabelFor } from "./orchestrator-pane-decor.ts";
+import { childPaneLabel } from "./orchestrator-pane-decor.ts";
 import { findOrphanWorktrees } from "./orchestrator-worktree.ts";
 import {
   buildRecoverCommand,
@@ -257,7 +257,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     },
     command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
     decor: {
-      label: paneLabelFor(child.taskId, recoveredTaskTitle(deps, child.taskId)),
+      label: childPaneLabel(child.taskId, recoveredTaskTitle(deps, child.taskId)),
       colorSeed: child.id,
       state: "working",
       stateForSeconds: 0,
