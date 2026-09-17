@@ -57,13 +57,6 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-// A VALUE import, the first in this repository, and a deliberate one: the
-// reason box is pi's OWN multi-line editor component (newlines, paste,
-// `ctrl+g` into $EDITOR), built here rather than called as `ui.editor()` so the
-// dialog can be TAKEN DOWN — see `reasonBoxUi` below. No second copy of pi is
-// involved: the extension loader aliases this specifier to pi's own entry
-// (dist/core/extensions/loader.js `_aliases`, `piCodingAgentEntry = packageIndex`).
-import { ExtensionEditorComponent } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import {
@@ -4866,8 +4859,35 @@ export default function reviewGate(pi: ExtensionAPI) {
    * Everything else on the seam is pi's own, unchanged. One named cast beats a
    * bare `as` at every call site, which is where it would drift.
    */
+/** pi's editor component CLASS, as a type — see `loadEditorComponent`. */
+type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["ExtensionEditorComponent"];
+
   function asChoiceHost(ctx: unknown): { ui?: ChoiceUi } {
     return ctx as { ui?: ChoiceUi };
+  }
+
+  /**
+   * pi's own multi-line editor component, resolved ON DEMAND.
+   *
+   * IT USED TO BE A MODULE-SCOPE VALUE IMPORT, and that broke the one case the
+   * loader alias cannot cover: a host that loads this file OUTSIDE pi (the
+   * install fixtures in test/, any tool that imports the extension to inspect
+   * it) has no `@earendil-works/pi-coding-agent` to resolve, so a static import
+   * fails at LOAD time — the whole extension refuses to load, to draw one
+   * dialog. Resolved lazily it degrades instead: no component ⇒ the reason box
+   * stays whatever the host's own `ui.editor` is (multi-line, no signal), and
+   * nothing else changes.
+   *
+   * Inside pi the resolve always succeeds: the extension loader aliases this
+   * specifier to pi's own entry (dist/core/extensions/loader.js `_aliases`,
+   * `piCodingAgentEntry = packageIndex`), so no second copy is involved.
+   */
+  let editorComponent: Promise<EditorComponentCtor | undefined> | undefined;
+  function loadEditorComponent(): Promise<EditorComponentCtor | undefined> {
+    editorComponent ??= import("@earendil-works/pi-coding-agent")
+      .then((pi) => pi.ExtensionEditorComponent)
+      .catch(() => undefined);
+    return editorComponent;
   }
 
   /**
@@ -4879,18 +4899,22 @@ export default function reviewGate(pi: ExtensionAPI) {
    * pi's `ExtensionEditorComponent`, and the host's own `editor` as the fallback
    * for a host with no custom components at all (RPC mode).
    */
-  function reasonBoxUi(host: ChoiceUi | undefined): ChoiceUi | undefined {
+  async function reasonBoxUi(host: ChoiceUi | undefined): Promise<ChoiceUi | undefined> {
     const h = host as (ChoiceUi & { custom?: ExtensionUIContext["custom"] }) | undefined;
     if (!h?.custom) return host;
+    const Component = await loadEditorComponent();
+    // No pi package to resolve (a host that is not pi): keep whatever editor
+    // the host itself offers instead of dropping the dialog on the floor.
+    if (!Component) return host;
     const { custom } = h;
     return {
       ...host,
       editor: hostReasonEditor({
         custom: custom.bind(h) as CustomDialogHost,
         ...(host?.editor ? { fallback: host.editor.bind(host) } : {}),
-        build: (tui, keybindings, title, done) => new ExtensionEditorComponent(
-          tui as ConstructorParameters<typeof ExtensionEditorComponent>[0],
-          keybindings as ConstructorParameters<typeof ExtensionEditorComponent>[1],
+        build: (tui, keybindings, title, done) => new Component(
+          tui as ConstructorParameters<EditorComponentCtor>[0],
+          keybindings as ConstructorParameters<EditorComponentCtor>[1],
           title,
           undefined,
           done,
@@ -4914,7 +4938,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // approval — and the renderer the user runs (`fullscreen`, the host owns
     // the screen and scrolls) never had the problem. A session that is NOT on
     // it is told once instead: see lib/renderer-mode.ts.
-    const answer = await renderChoice(reasonBoxUi(uiCtx.ui), spec, {
+    const answer = await renderChoice(await reasonBoxUi(uiCtx.ui), spec, {
       ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(opts.signal ? { signal: opts.signal } : {}),
     });

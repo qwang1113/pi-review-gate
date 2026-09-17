@@ -780,7 +780,9 @@ test("L8: the confirm path no longer asks for a reason (the decline row does)", 
   await handlers.get("session_start")!({}, ctx);
 
   let inputs = 0;
-  (ctx as { ui: { input?: (t: string, p: string) => Promise<string | undefined> } }).ui.input =
+  // The reason box is the template's EDITOR now (multi-line, 2026-09-17), not a
+  // single-line prompt: this counts the reason boxes the GATE raises.
+  (ctx as { ui: { editor?: (t: string, o?: { signal?: AbortSignal }) => Promise<string | undefined> } }).ui.editor =
     async () => { inputs += 1; return "n/a"; };
 
   // Confirm path: the reason box must NOT be shown — the user picked an
