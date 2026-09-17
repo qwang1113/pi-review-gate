@@ -244,6 +244,7 @@ import {
   NOTIFIER_BINARY,
   describeNotifyOutcome,
   emptyNotifyHistory,
+  exitNotifyKind,
   mayNotifyUser,
   planUserNotify,
   recordNotify,
@@ -4437,10 +4438,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   // sessions, and the same policy function answers it (no second rule).
   // ─────────────────────────────────────────────────────────────────────
   process.on("exit", () => {
-    if (cleanShutdown) return;
+    // The rule itself is lib/user-notify.ts's `exitNotifyKind`, tested there:
+    // a clean shutdown (quit | reload | new | resume | fork) says nothing, and
+    // a death with no such record is the one banner nobody else can raise.
+    const kind = exitNotifyKind({ cleanShutdown });
+    if (!kind) return;
     if (!mayNotifyUser({ taskMode: state.taskMode, stateVariant: process.env[STATE_VARIANT_ENV] })) return;
     raiseBanner({
-      kind: "failed",
+      kind,
       detail: "会话没有 declare_done 就退出了（进程异常终止，不是你自己结束的）。",
       blocking: true,
     });

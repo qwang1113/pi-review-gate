@@ -26,6 +26,7 @@ import {
   decideNotify,
   describeNotifyOutcome,
   emptyNotifyHistory,
+  exitNotifyKind,
   mayNotifyUser,
   normalizeNotifyHistory,
   notifyKey,
@@ -91,6 +92,19 @@ test("a child session is skipped with the reason that names the rule", () => {
 // ---------------------------------------------------------------------------
 // WHEN — the three kinds
 // ---------------------------------------------------------------------------
+
+/**
+ * THE FAILURE RULE, on its own (reviewer P1, 2026-09-17): “a session the user
+ * ended themselves is not news, a crash is”. The caller is an `exit` handler,
+ * which cannot be exercised in-process, so the decision lives here and the
+ * wiring that consults it is pinned by test/extension-structure.test.ts.
+ */
+test("a clean shutdown says nothing; anything else is the one banner nobody can raise", () => {
+  assert.equal(exitNotifyKind({ cleanShutdown: true }), undefined,
+    "quit | reload | new | resume | fork — the user did it on purpose");
+  assert.equal(exitNotifyKind({ cleanShutdown: false }), "failed",
+    "no shutdown record and the process is gone: that is a crash");
+});
 
 test("each kind says what happened and where", () => {
   const finished = buildUserNotifyMessage({ kind: "finished", repoName: "onchain", detail: "PR 已开" });

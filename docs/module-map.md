@@ -348,8 +348,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   没有 `capture-pane`；三列布局的落点与等分判定也在这里）、
   `orchestrator-wiring.ts`（跑 tmux、读写 plan、持有通道 IO 与
   监督记忆）、`orchestrator-delivery.ts`（投递并**校验真的送达**才报成功，证据
-  是通道记录与子会话回执）、`user-notify.ts`（桌面通知：三类事件 + 节流 +
-  `terminal-notifier` 的 argv 与点击回 pane）、`orchestrator-guard.ts`（tmux 权限门：
+  是通道记录与子会话回执）、`user-notify.ts`（桌面通知：三种事件 + 节流 +
+  `terminal-notifier` 的 argv 与点击回 pane —— 第三类「停下来等你回答」有两个入口：
+  对话框弹出、以及 plan 决策登记）、`orchestrator-guard.ts`（tmux 权限门：
   未授权拦，授权走 `request_tmux_access`）。
 - **工具与接线**：`orchestrator-tools.ts`（plan / notify）、
   `orchestrator-session-tools.ts`（spawn / instruct / wait / close / handoff 的

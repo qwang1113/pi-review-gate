@@ -908,13 +908,18 @@ tmux capture-pane -p -t <pane> | tail -20
    收到的就是裸文本 —— 这也是本仓 `wrapForTmux` 当年就写对了的一处。
 2. `tmux show-options -g allow-passthrough` 是**只读**的取证手段，不能写：那是用户的全局配置。
 
-**现在只有三类事件会打扰你**（`lib/user-notify.ts` 是唯一出处）：
+**现在只有三类事件会打扰你**（`lib/user-notify.ts` 是唯一出处；第三类有**两个入口**：
+任何一个对话框弹出，以及 plan 里每登记一条待你拍板的决策 —— 与用户给的规则里的
+「1 完成 / 2 失败 / 3 只有我才能解决」逐条对应，多出来的只是同一类的第二个入口）：
 
 1. 项目经理会话 / 独立 loop 会话**完成**（`declare_done` 被接受）；
 2. 同上**异常结束** —— 无 `session_shutdown` 记录的退出（崩溃）；`quit`/`reload`/`new`/
    `resume`/`fork` 都不发（**你手动结束的不算**）；SIGKILL 下没有 handler 能跑，这是本机制的
    诚实边界；
-3. **停下来等你回答**：`askChoice` 是门禁每一个对话框的唯一出口，它一弹就发。
+3. **停下来等你回答**：`askChoice`（门禁每一个对话框的唯一出口）一弹就发；以及
+   `orchestrator_plan({action:"add-decision"})` 登记一条只有你能拍板的决策时 —— 后者是
+   约束 11（「没通知过用户的决策项拦住 declare_done」）能在工具删除后仍然成立的原因，
+   同一瞬间把 `notifiedAt` 盖上。
 
 编排里的**子会话不发通知**（它上面有项目经理，而项目经理能代答）；没装 `terminal-notifier`
 时**不发也不假装送达**，会话开始提示一次 `brew install terminal-notifier`。节流仍在：

@@ -116,6 +116,25 @@ export function mayNotifyUser(opts: {
   return opts.taskMode === "orchestrator" || opts.taskMode === "loop";
 }
 
+/**
+ * DOES THIS EXIT DESERVE A BANNER?
+ *
+ * The whole of user decision 2026-09-17 on failure: a session the user ended
+ * themselves is not news (pi's `session_shutdown` fires for quit, reload, new,
+ * resume and fork, and the extension records it), while a process that dies
+ * with no such record — an uncaught exception, a broken invariant, a provider
+ * failure that took it down — is exactly the thing nobody can see.
+ *
+ * A PURE FUNCTION because the caller is an `exit` handler, where nothing else
+ * can be reached or tested: the handler asks this one question and, if the
+ * answer is a kind, sends it. (It is also the only honest place to state the
+ * LIMIT: SIGKILL runs no handler at all, so a hard kill is silent — and that is
+ * the same case as the user's own `kill`, which they do not need told about.)
+ */
+export function exitNotifyKind(opts: { cleanShutdown: boolean }): UserNotifyKind | undefined {
+  return opts.cleanShutdown ? undefined : "failed";
+}
+
 /** What the banner says, per kind. Pure; sanitization happens in the caller. */
 export function buildUserNotifyMessage(opts: {
   kind: UserNotifyKind;

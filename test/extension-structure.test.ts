@@ -2237,6 +2237,16 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
     "the one synchronous spawn lives in raiseBanner, which the exit handler calls");
   assert.match(SRC.slice(exitHandlerAt, exitHandlerAt + 600), /blocking: true/,
     "and the exit handler is what asks for the blocking send");
+  // THE RULE AND ITS WRING are two halves (reviewer P1, 2026-09-17): the policy
+  // is tested in test/user-notify.test.ts, and what a test CANNOT reach — an
+  // `exit` handler and a pi event — is pinned here: the handler must ask
+  // `exitNotifyKind`, and the shutdown path must be what answers it.
+  assert.match(SRC.slice(exitHandlerAt, exitHandlerAt + 600), /exitNotifyKind\(\{ cleanShutdown \}\)/,
+    "the exit handler must consult the rule, not re-implement it");
+  const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
+  assert.ok(shutdownAt >= 0, "the shutdown handler must still exist");
+  assert.match(SRC.slice(shutdownAt, shutdownAt + 700), /cleanShutdown = true/,
+    "every clean shutdown reason (quit | reload | new | resume | fork) sets the flag the exit path reads");
   assert.match(SRC, /async function runTrustedPrecommit/);
   assert.match(SRC, /abortSignal\?\.addEventListener\("abort"/);
   assert.match(SRC, /detached:\s*true/);

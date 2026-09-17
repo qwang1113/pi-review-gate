@@ -27,7 +27,6 @@
  * the returned runtime into the gate sidecar.
  */
 
-import { emptyNotifyHistory, type NotifyHistory } from "./user-notify.ts";
 import {
   MAX_APPROVAL_LINEAGE,
   type ApprovedPlanSnapshot,
