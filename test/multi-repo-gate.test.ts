@@ -531,3 +531,88 @@ test("P-multi: /gate-status reports each repo, and a clean stateless repo blocks
   assert.match(dirty.text, /uncommitted change\(s\), so ships from it are blocked/);
   assert.equal(dirty.level, "warning");
 });
+
+test("P-multi: an INHERITED repo is reported with the successor's standings, never the predecessor's", async () => {
+  // A relay successor inherits the predecessor's CONTRACTS for every repo it
+  // touched — `inheritGoalContract` carries restatement / loopGoal / rounds /
+  // turnsWithoutGoal / sessionReposPaths and nothing else — because a verdict
+  // belongs to the round that earned it, not to the session that continues the
+  // work. The predecessor's sidecar here carries a standing READY + PASS and a
+  // user-granted `/gate-bypass` (which empties `unmetRequirements` outright),
+  // and none of the three may reach the report.
+  //
+  // WHAT THIS PINS: the answer that actually reaches `/gate-status` in a real
+  // session. `syncAllCopilotWatches` walks `sessionRepos` during session_start,
+  // so the cached — narrowed — state is what answers by then, and an
+  // enforcement reader that handed out the raw sidecar on that path fails here.
+  // WHAT IT CANNOT PIN: the cold-cache branch, which a real session reaches no
+  // other way (that walk is what builds the entry). That is why the rule
+  // itself — one loader for both readers, never `onDisk` — is pinned
+  // STRUCTURALLY in test/extension-structure.test.ts, and why the sixth round
+  // deleted the branch rather than testing it.
+  const parent = mkdtempSync(join(tmpdir(), "rg-mg14-"));
+  rgDirs.push(parent);
+  const repoA = makeRepo(parent, "repoA");
+  const repoB = makeRepo(parent, "repoB");
+  const PREDECESSOR = "predecessor-session";
+
+  const emptySidecar = {
+    schema: 1,
+    fingerprintVersion: 2,
+    hasCodeChange: false,
+    hasDocChange: false,
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+    rounds: [],
+    maxRounds: 10,
+    bypass: { active: false, reason: null, at: null },
+    updatedAt: new Date().toISOString(),
+  };
+  mkdirSync(join(repoA, ".pi"), { recursive: true });
+  writeFileSync(join(repoA, ".pi", "review-gate-state.json"), JSON.stringify({
+    ...emptySidecar,
+    sessionId: "test-session-1",
+    // This session edited repoB once (which is how the successor comes to own
+    // the repo at all); the sidecar beside it is the predecessor's.
+    sessionReposPaths: [repoB],
+  }, null, 2));
+  mkdirSync(join(repoB, ".pi"), { recursive: true });
+  writeFileSync(join(repoB, ".pi", "review-gate-state.json"), JSON.stringify({
+    ...emptySidecar,
+    sessionId: PREDECESSOR,
+    review: { verdict: "READY", fingerprint: "f".repeat(64), at: "2026-09-16T00:00:00.000Z" },
+    precommit: {
+      verdict: "PASS", fingerprint: "f".repeat(64), at: "2026-09-16T00:00:00.000Z",
+      mode: "full", testScope: "full",
+    },
+    bypass: { active: true, reason: "user said so", at: "2026-09-16T00:00:00.000Z" },
+  }, null, 2));
+
+  const previousMarker = process.env.RG_HANDOFF_PREDECESSOR_SESSION;
+  process.env.RG_HANDOFF_PREDECESSOR_SESSION = PREDECESSOR;
+  try {
+    const pi = makeMockPi(repoA);
+    reviewGate(pi as never);
+    const { handlers, commands, notifications, ctx } = pi;
+    await handlers.get("session_start")!({}, ctx);
+    await commands.get("gate-status")!.handler({}, ctx);
+    const status = notifications.at(-1)!.text;
+    const label = repoB.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // The inherited repo IS this session's responsibility (that is the point of
+    // the inheritance)…
+    assert.ok(status.includes(repoB), "an inherited repo stays in the successor's set");
+    // …and it is reported with the SUCCESSOR's narrowed state: the predecessor's
+    // READY, PASS and bypass must none of them survive the handover.
+    assert.match(status, new RegExp(`${label}: review=PENDING precommit=NOT_RUN`),
+      "the inherited repo starts where the successor starts, not where the predecessor stopped");
+    assert.doesNotMatch(status, /review=READY/);
+    assert.doesNotMatch(status, /precommit=PASS/);
+    // The bypass is the sharpest case: `unmetRequirements` returns [] outright
+    // while it stands, so inheriting one would clear a whole repo's gates.
+    assert.doesNotMatch(status, /bypass:\s+on/);
+  } finally {
+    if (previousMarker === undefined) delete process.env.RG_HANDOFF_PREDECESSOR_SESSION;
+    else process.env.RG_HANDOFF_PREDECESSOR_SESSION = previousMarker;
+  }
+});

@@ -169,8 +169,8 @@ opener 凭它记录结论；
 - **等待期的可见性（2026-08-29 起，默认开启）**：耗时工具通过 `execute` 的第
   4 个参数 `onUpdate` 发**进度快照**（`lib/progress-stream.ts`，节流 2s）：
   门禁内部等待（每次探测重发 findings 计数与状态）、`judge_submit`
-  的送审链（precommit → checkpoint → prepare → 质量轮 / 直接 spawn，逐步报；
-  质量轮 READY 后由门禁自动派 reviewer，这一步也在链里）、
+  的送审链（precommit → checkpoint → prepare → 三方同时 spawn，逐步报；
+  质量轮与功能轮属于同一轮，取消矩阵见「并行三方与取消矩阵」）、
   `run_precommit`（runner 日志作为步骤尾部）、`declare_done`（门禁复检 →
   合并）、`copilot_review`（每次网络调用一
   步；等待本身不在这里——它归后台监视器）。进度只进 partialResult，**不进** agent 拿到的 tool result——两条通
@@ -178,8 +178,8 @@ opener 凭它记录结论；
   （L5 语义 / L6 标签 / ship 分类 / AI 署名）改用状态栏：超过 ~3s 才提示一
   次，结束即清除。
 - **标准报告的内容**：新 report 落盘 ⇒ 标准报告（结论、findings 数、流证据位置、
-  记录情况、待答问题、以及门禁因本轮结束做了什么——`handOffNote`，比如质量轮的
-  「已自动派 reviewer」或「自动派发失败，再调一次」）经 followUp 送达并记入链；无 report 的结束（pane 死亡、静默
+  记录情况、待答问题、以及门禁因本轮结束做了什么——`handOffNote`，比如「质量轮没通过，已停掉
+  reviewer 与 precommit」或「reviewer 的 READY 已扣下，等质量轮结论」）经 followUp 送达并记入链；无 report 的结束（pane 死亡、静默
   超限）如实报未记录、不认结论。它与上面的流式快照互不替代：快照给人看，报告给
   agent 干活。
 
@@ -277,6 +277,37 @@ agent 每轮都要先挑一个。这三个工具连同它们依赖的抓屏与�
 新会话一侧另有一道保险：它带着**前任的 session id** 启动，worktree 占用判定认这条
 继任关系（`lib/session-exclusivity.ts` 的 `successorOf`，判定排在**心跳新鲜度之前**），
 所以即使前任没来得及释放，接手依然成立。
+
+**接力继承什么，`attach` 不继承什么**（2026-09-16）。继任者带着前任的 session id
+启动，门禁在恢复 sidecar 时就凭这条线认亲：`lib/session-inheritance.ts` 的
+`isHandoffSuccessorOf` 要求**两件事同时成立** —— 环境里有交接标记
+（`RG_HANDOFF_PREDECESSOR_SESSION`），**且** sidecar 里记的 `sessionId` 就是那个前任。
+一个标记不够，因为 sidecar 里可能是**第三个**会话的状态，而许可不能飘进一个前任从没
+交棒给它的会话。
+
+认亲成立时，恢复路径多搬两份**用户已经确认过的内容**（其余一概归零，因为其余都属于
+「这个会话做过的那一轮」，而继任者一轮都没做过）：
+
+- **编排 runtime 的 plan 批准五件套**（`approvedPlanHash` / `approvedPlanAt` /
+  `approvedPlan` / `approvalAmendments` / `approvedPlanHistory`）——
+  `lib/orchestrator-registry.ts` 的 `successorRuntime(runtime, fromHandoff)`。同一份工作、
+  同一个 worktree，几分钟前才批过的 plan 不该再走一遍审计 + 批准框。
+- **会话自己的契约与预算** —— `lib/gate-state.ts` 的 `inheritGoalContract`：
+  `restatement`（需求反述）、`loopGoal`（已批准的 loop goal）、`rounds` /
+  `turnsWithoutGoal`（轮次预算；能靠接力重置的就不是预算了）、`sessionReposPaths`
+  （本会话碰过的其他 repo —— `declare_done` 要逐个重新夹紧，继承它只会让收尾更**严**）。
+  同一个规则覆盖**每个 repo**，不只仓库本仓：次要 repo 的 sidecar 只要属于前任，
+  也按同一对函数继承（`stateForRepo` 里就是这两行，没有第二份实现）。
+
+两份都**不放宽任何许可**：每份记录仍绑着它当初绑的**内容**（plan 绑 canonical 文本、
+loop goal 绑 goal 文件文本、反述绑 text+hash），内容一变，既有校验立刻失效 —— 继承只
+搬运记录，不新增任何无条件放行的路径。会话级的**权力**也照旧不继承：`bypass`、
+scope limit 不随接力走，`taskMode` 走它自己的 env 通道。
+
+**`attach` 接管不继承任何东西**：`orchestrator_attach` 的会话不是前任开的继任者，
+环境里没有交接标记，所以它走的是普通新会话的那条分支 —— 批准、反述、goal、预算一律
+重新取得。「批准不随会话转移」（2026-09-06 的用户决定）没有被推翻，只是**收窄**到
+它当初真正针对的那些会话。
 
 接手现场的另一半是 `orchestrator_attach({orchestrationId})`：后继者带着同一个 id 启动
 之后，一次拿回 plan 与任务状态、每个子会话的状态与资产、通道里还没人答的请求，以及
@@ -382,7 +413,7 @@ commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而
 
 - `run_precommit`（full lane，与链条并行启动）：FAIL 时本轮不产生可 ship 的 READY。
 - `review_checkpoint`：`git add -A && git commit`（英文 message 校验，
-  commit 标题由门禁打上 checkpoint 标记）→ 记录 commit sha。只绕过 READY，
+  提交信息是普通提交，门禁不再往里注入任何标记）→ 记录 commit sha。只绕过 READY，
   不绕过 precommit；普通 `git commit` 在 READY 前仍被拦。2026-09-07 起
   直接落在**当前分支**（不再有工作分支）；在 main/master/dev/develop 上
   checkpoint 直接拒绝（2026-09-16 起不再弹确认框，与 ship 拒绝一致）。
@@ -414,3 +445,52 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
   按 `.git/rebase-merge/head-name` 还原成原分支——分支规则因此**仍然适用**
   且不再因「无法确定当前分支」误拦，这正是从前「修非英文 message 的两条路
   都被门禁堵死、只剩用户跑 /gate-bypass」的死结所在。
+
+## 并行三方与取消矩阵（2026-09-16）
+
+**正文在这里，其他面只许摘要 + 指回本节。**
+
+一轮送审里跑三件事，**同一时刻启动**：质量轮（`quality-auditor`）、功能轮
+（`reviewer`）、全量 precommit（`startPrecommitBeside`）。三者判的都是同一个
+不可变的 `baseline..HEAD`，互相之间没有串行依赖，而是**谁先判不过谁收口** ——
+这就是取消矩阵：
+
+| 谁先判不过 | 停掉谁 | 谁继续 |
+| --- | --- | --- |
+| 质量轮非 READY（BLOCKED / NEEDS_HUMAN） | reviewer 的 pane（真杀进程）+ precommit lane（abort） | —— |
+| reviewer 非 READY | 质量轮的 pane（真杀进程）+ precommit lane（abort） | —— |
+| precommit 落 FAIL | reviewer 的 pane（真杀进程） | 质量轮（它只静态读代码，不看测试结果） |
+
+表中第二行的「非 READY」**不包含「扣下」**：一份被 park 的 READY 在 sidecar 里正是
+`PENDING`，而它不是裁决 —— 取消矩阵收到 `held` 这个事实时什么也不做，否则会杀掉这份
+结论正在等的那一轮（判定在 `roundCancelPlan` 的 `held` 分支，不得写成旁路的 `if`）。
+
+- **取消是真的终止，不是「忽略结果」**：杀的是那个 pane 的进程（复用既有的
+  `closeJudgePaneOf` + 注册表删行路径）。被取消的 judge 不再出现在注册表里，所以
+  既不会被 `judge_wait` 等到，也不会被子进程看门狗当成「死掉的 judge」再报一次给
+  agent；它这一轮的通道报告也不会被记录。取消是 live 动作，不跨重启。
+  - **在飞的 `judge_wait` 也算「等不到它」**（2026-09-16 修复）：它手里的 child 记录是
+    入场时拍的快照，所以光看「pane 消失」会把取消读成崩溃（标准报告会指导 agent
+    `judge_recover` 一个门禁刚撒掉的轮次，而恢复又会因为登记行不在而被拒）。现在它探到
+    pane 消失时先回查注册表：行不在 ⇒ 回一条 `cancelled` 报告（「本轮已被门禁终止」，
+    并明说不要 `judge_recover`）；`judge_recover` 自己对同一事实给出同一句下一步。
+  - **lane 那一行的回执走 precommit 通知**：judge 行的取消由兄弟裁决的标准报告带出
+    （`handOffNote`），lane 行没有兄弟裁决，所以它的 note 由后台 full precommit 的失败
+    通知携带（`AsyncPrecommitReport.laneNotes`）—— 在 2026-09-16 之前它被丢掉，agent
+    只看到「precommit 没过」，看不到「这轮已经被终止」。
+- **质量轮先 READY 不算收口**：reviewer 本来就在跑，本轮结论仍由 reviewer 的
+  裁决收口（只有质量轮非 READY 才提前收口）。
+- **reviewer 先交卷 READY 而质量轮还没交卷**，是本设计里唯一的时序竞争，处置是
+  **扣下**（park 进 sidecar 的 `pendingReady`）：门禁**不记**这份 READY（记了就等于
+  质量门被架空），也不重跑审查 —— 质量轮 READY 落地时，门禁把这份结论**原样交给
+  同一个记录器**（`recordReviewVerdict`，不是第二份实现）补记；质量轮非 READY 落地时
+  这份 READY 作废。补记仍要重跑既有的绑定检查（HEAD 已移动 ⇒ 不补记，fail-closed）。
+- **`qualityStandingFor` 的门槛从「派发时」挪了一部分到「记录时」**：派发时它仍拦下
+  所有其他调用者（本轮没代码、跳过质量轮的轮次；HEAD 上已有质量 READY 的补送），只有
+  「同一次提交里已经一并派出了质量轮」这一情形放行；READY 要落地必须过记录时那道检查。
+  **结果不变**：没有质量结论的轮次永远拿不到 READY。
+- **precommit FAIL 不终止质量轮，但它的结论也不再是放行权**：lane 挂在一棵内容上时，质量轮继续跑
+  完。它带来的价值是 **findings**——修完必然产生新 checkpoint（HEAD 移动），那份 READY 会被
+  `qualityStandingFor` 判成过期。所以真正的放行永远来自「修完之后那一轮」的质量结论。
+- 旧实现（reviewer 的任务书扣在门禁内存里、等质量轮 READY 再派）**已删除**（哲学三）：
+  三方并行之后它就是第二套实现，留着只会漂移。

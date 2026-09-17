@@ -55,6 +55,7 @@ import {
 } from "./delivery-station.ts";
 
 import { LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK } from "./loop-goal.ts";
+import { buildRejection } from "./rejection-copy.ts";
 import {
   parseArbitrableAction,
   tokenAuthorizes,
@@ -299,11 +300,19 @@ export function buildShipBlockReason(input: {
   const stationProblems = input.stationProblems ?? [];
   const allProblems = [...input.problems, ...stationProblems];
   const stationOnly = stationProblems.length > 0 && input.problems.length === 0;
+  // ONE rendering per fact: `recorded` and `shown` are two surfaces of the same
+  // refusal (the arbiter reads the first, the agent the second), so the list
+  // and the compound-command warning are built once and composed twice.
+  const problemList = allProblems.map((p) => `  - ${p}`).join("\n");
+  const compoundWarning =
+    input.ships.length > 1
+      ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them."
+      : "";
   const recorded =
     `review-gate: ${describeShips(input.command, input.ships)} blocked — ` +
     (stationOnly ? "beyond this round's delivery station:\n" : "quality gates unmet:\n") +
-    allProblems.map((p) => `  - ${p}`).join("\n") +
-    (input.ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "") +
+    problemList +
+    compoundWarning +
     input.crossRepoHint;
   const nextStep = stationProblems.length > 0
     ? STATION_SHIP_NEXT_STEPS +
@@ -311,9 +320,21 @@ export function buildShipBlockReason(input: {
         ? "\n上面那些质量门禁项则照常用审查循环清掉（judge_submit → declare_done）。"
         : "")
     : (input.ships.length === 1 && input.ships[0].kind === "pr-edit"
-      ? "跑完审查循环清掉门禁；若这条拦截确实是循环死结（唯一的修法就是这条 gh pr edit），可 request_arbitration。"
+      ? "跑完审查循环清掉门禁（judge_submit → declare_done）；若这条拦截确实是循环死结（唯一的修法就是这条 gh pr edit），可 request_arbitration。"
       : "跑完审查循环清掉门禁（judge_submit → declare_done）。");
-  return { recorded, shown: recorded + "\n" + nextStep };
+  // The agent-facing message is the three-part shape; `recorded` stays the
+  // flat text the arbiter and the sidecar read (its exact bytes are pinned).
+  const shown = buildRejection({
+    what: `${describeShips(input.command, input.ships)} 被拦 —— ` +
+      (stationOnly ? "超出本轮的交付站点" : "质量门禁未满足"),
+    why: "\n" + problemList + compoundWarning + input.crossRepoHint,
+    // Unmet quality is the agent's to clear; a station is the USER's to move.
+    // A mixed refusal is labelled for the agent — it has work to do either
+    // way (the station half is spelled out in `next`, which asks the user).
+    by: stationOnly ? "user" : "agent",
+    next: nextStep,
+  });
+  return { recorded, shown };
 }
 
 
@@ -743,9 +764,11 @@ export async function evaluateShipCommand(
   }
 
   // Record this block so request_arbitration can only contest a REAL block.
-  // The cross-repo hint is part of the recorded text: the arbiter should read
-  // exactly what the agent read, and "your READY is on another repo" is the
-  // single most relevant fact when a multi-repo block is being contested.
+  // The cross-repo hint is part of the RECORDED text — the flat one the
+  // arbiter and the sidecar read. That is no longer the same STRING the agent
+  // read (`shown` is the three-part rendering), but it carries the same facts,
+  // and "your READY is on another repo" is the single most relevant of them
+  // when a multi-repo block is being contested.
   const { recorded, shown } = buildShipBlockReason({
     command,
     ships,

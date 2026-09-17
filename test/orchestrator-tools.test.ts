@@ -85,6 +85,19 @@ function readyChild(world: FakeWorld, childId: string): void {
   world.childReports(childId, "working");
 }
 
+/**
+ * The task document a spawn wrote under `prefix`.
+ *
+ * It is the only place the brief, the station ceiling and the branch line are
+ * visible together — exactly what the child reads before it negotiates its own
+ * goal, so a mapping that goes in here reaches the child.
+ */
+function taskDocument(world: FakeWorld, prefix = "/repo/"): string {
+  const entry = [...world.scratch.entries()].find(([path]) => path.startsWith(prefix) && path.includes("/.pi/tasks/"));
+  assert.ok(entry, `a spawn writes its task file under ${prefix}`);
+  return entry[1]!;
+}
+
 
 test("the ten orchestration tools are registered, and the deleted ones are not", () => {
   const world = makeFakeWorld();
@@ -309,6 +322,61 @@ test("a single-task repo keeps the plan's station — the ceiling is not a blank
   const childId = await spawnT1(world);
   const child = world.runtime().children.find((c) => c.id === childId)!;
   assert.equal(world.panes.get(child.paneId)!.env[STATION_CAP_ENV], "pr");
+});
+
+test("the task book states the branch the child is on — a FACT, not an order to branch (A, 2026-09-18)", async () => {
+  // Measured: the fixed 「开工前先给自己开一个功能分支」 sentence told a FINISH
+  // task to fork the very branch it was spawned to deliver. The dispatcher knew
+  // the branch all along, so it is now what the task book says.
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    approvePlan: true,
+    currentBranch: "feat/plan-finish-task",
+  });
+  await spawnT1(world);
+  const doc = taskDocument(world);
+  assert.match(doc, /你在这条分支（`feat\/plan-finish-task`）上工作/);
+  assert.doesNotMatch(doc, /git checkout -b/, "the branch is a fact here, not a command to run");
+});
+
+test("an ISOLATED child is told which branch it holds — and whether it may publish it (A, 2026-09-18)", async () => {
+  // The mapping `dispatchSpawn` owns, and the two ways to get it backwards: the
+  // gate's own checkout must be stated as ISOLATED, and a station that reaches
+  // `pr` must NOT be told to stay off the remote — that would leave the one
+  // task that delivers unable to deliver.
+  const parsed = parsePlan({
+    title: "同 repo 两任务",
+    intent: "验证分支行",
+    deliveryStation: "pr",
+    tasks: [
+      { id: "t1", title: "A", repo: "/repo" },
+      { id: "t2", title: "B", repo: "/repo", execution: "parallel" },
+    ],
+  });
+  assert.ok(parsed.plan, parsed.problems.join("; "));
+  const world = makeFakeWorld({
+    plan: parsed.plan!,
+    approvePlan: true,
+    isolateChild: true,
+    resolvableRepos: ["/repo"],
+    currentBranch: "feat/shared-branch",
+  });
+  await spawnT1(world);
+  const shared = taskDocument(world);
+  assert.match(shared, /你在这条分支（`feat\/shared-branch`）上工作/);
+  assert.doesNotMatch(shared, /独立 checkout/, "the first child works in the shared checkout");
+
+  await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "done" });
+  const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  assert.equal(second.isError, undefined, replyText(second));
+  const isolated = taskDocument(world, "/repo-rg-");
+  assert.match(isolated, /独立 checkout/);
+  // t2 is the plan's LAST task, so it keeps the plan's station (`pr`) and IS
+  // the delivery: it renames the gate's handle instead of being told to stay
+  // away from the remote.
+  assert.match(isolated, /本轮交付站点：pr/);
+  assert.match(isolated, /git branch -m <type>\/<slug>/);
+  assert.doesNotMatch(isolated, /不要 push/, "a delivering task is never told not to deliver");
 });
 
 test("a spawn is only reported as delivered once the child's gate REPORTS", async () => {

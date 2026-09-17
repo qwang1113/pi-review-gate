@@ -211,20 +211,44 @@ export function addGrant(
 }
 
 /**
- * The runtime a DIFFERENT session may inherit: the facts about the world,
- * with every trace of the user's permission removed.
+ * The runtime a DIFFERENT session inherits: the facts about the world, and —
+ * only for a genuine handoff successor — the user's approval with them.
  *
- * A new session (a relay successor, or a takeover through
- * `orchestrator_attach`) keeps the child REGISTRY — those panes are alive
- * whatever any process believes — but never the approval: that was permission
- * the user gave to a session that is gone, and re-obtaining it costs one
- * dialog. The extension used to spell the stripping out inline, which is
+ * The child REGISTRY always carries: those panes are alive whatever any
+ * process believes, and a relay that dropped them would leave its successor
+ * supervising nothing. The APPROVAL is the field with two sources of truth:
+ *
+ *  - `fromHandoff: false` — an ordinary new session, or a takeover through
+ *    `orchestrator_attach`. The approval was permission the user gave to a
+ *    session that is gone, and re-obtaining it costs one dialog; inheriting it
+ *    silently would let a session nobody approved spawn children. (The user's
+ *    own standing decision, 2026-09-06.)
+ *  - `fromHandoff: true` — the successor the predecessor's own
+ *    `session_handoff` opened, in this same worktree, to finish the work the
+ *    user already authorized. Here re-obtaining it is NOT one dialog: it is
+ *    the restatement dialog, the plan re-audit and the plan approval dialog,
+ *    for a requirement not one word of which changed (measured: this is what
+ *    a project-manager handover actually cost the user). The 2026-09-06
+ *    decision is narrowed to the sessions it was about, not overturned —
+ *    WHICH sessions those are is `lib/session-inheritance.ts`'s one answer
+ *    (`isHandoffSuccessorOf`), never this module's guess.
+ *
+ * Carrying the approval is not a relaxation: every consumer compares the
+ * RECORD against the CONTENT it names (`approvedPlanHash` against the
+ * canonical plan, the lineage against the plan's history), so an edit to the
+ * plan invalidates an inherited approval exactly as fast as a fresh one.
+ *
+ * The stripping used to be spelled out inline at the call site, which is
  * exactly the shape that goes stale: `approvedPlanHistory` would have ridden
- * into the new session untouched and let it write the plan back to a content
+ * into a new session untouched and let it write the plan back to a content
  * the PREVIOUS session was authorized for. One function, one place to add the
  * next authorizing field, and a test that can drive it directly.
  */
-export function withoutPlanApproval(runtime: OrchestratorRuntime): OrchestratorRuntime {
+export function successorRuntime(
+  runtime: OrchestratorRuntime,
+  fromHandoff: boolean,
+): OrchestratorRuntime {
+  if (fromHandoff) return { ...runtime };
   const {
     approvedPlanHash: _hash,
     approvedPlanAt: _at,
@@ -353,6 +377,33 @@ export function markChildClosed(
   at: string = new Date().toISOString(),
 ): OrchestratorRuntime {
   return patchChild(runtime, id, { closedAt: at });
+}
+
+/**
+ * REMEMBER THE BRANCH A CHECKOUT TURNED OUT TO BE ON (reviewer P2, 2026-09-18).
+ *
+ * `registerChild` records the branch the GATE created; a child whose station
+ * reaches `pr` is asked to rename it before it pushes (lib/orchestrator-
+ * delivery.ts `buildBranchLine`). That rename is invisible from here — but a
+ * SETTLEMENT sees it, because it reads the checkout, and this is where the
+ * reading is kept: merging reclaims the DIRECTORY (2026-09-15, user decision),
+ * so the `discard` the merge receipt asks for next has nothing left to read a
+ * branch from. Without this the later call deletes the DERIVED name, a renamed
+ * child no longer has it, `looksLikeAlreadyGone` reads that failure as "already
+ * reclaimed", and the receipt reports the branch as gone while it is still
+ * right there.
+ *
+ * A no-op when nothing changed or the child is unknown: this records a
+ * reading, it never invents a record.
+ */
+export function noteWorktreeBranch(
+  runtime: OrchestratorRuntime,
+  id: string,
+  branch: string,
+): OrchestratorRuntime {
+  const child = findChild(runtime, id);
+  if (!child?.worktree || child.worktree.branch === branch) return runtime;
+  return patchChild(runtime, id, { worktree: { ...child.worktree, branch } });
 }
 
 /**

@@ -36,6 +36,7 @@ import type { TaskMode } from "./task-mode.ts";
 import { DELIVERY_STATION_CHOICES_EN, type DeliveryStation } from "./delivery-station.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
+import { buildRejection } from "./rejection-copy.ts";
 
 /** Repo-root-relative location of the goal file (gate-excluded via `.pi/`). */
 export const LOOP_GOAL_RELPATH = ".pi/loop-goal.md";
@@ -365,6 +366,48 @@ export function goalPrereviewPassed(
   return goalTextHash(goalText) === record.hash;
 }
 
+/**
+ * THE GOAL SKELETON — the shape the agent COPIES instead of inventing one
+ * (user ask, 2026-09-17: 「让 agent 在协商 goal 这些地方直接给模板，照着模板改」).
+ *
+ * WHY A TEMPLATE RATHER THAN A DESCRIPTION. The tool description used to
+ * summarise the shape in one English line (task title, one-line intent, 3–7
+ * checkable exit criteria, non-goals, ISO date) and every agent had to
+ * translate that sentence into a document before it could negotiate anything.
+ * The translation is where the checkable parts get lost — a criterion nobody
+ * can falsify, a non-goal that was never decided — and each loss comes back as
+ * a goal-audit round. Handing over the document itself removes the step.
+ *
+ * ONE OF THREE, AND THEY ARE ONE FAMILY: `RESTATEMENT_SKELETON`
+ * (lib/restatement.ts) and `PLAN_TASK_SKELETON` (lib/orchestrator-directives.ts)
+ * open the same way — `## <名字>（照抄这个骨架填即可）` — and blank the same
+ * `<…>` way. `test/templates.test.ts` pins the three together.
+ *
+ * RENDERED, NEVER RESTATED: the surfaces that show it (this module's refusal
+ * and `propose_loop_goal`'s description, lib/goal-tools.ts) interpolate this
+ * constant; the standing block carries a POINTER only. That is what keeps one
+ * copy from drifting into two.
+ *
+ * 「关键测试场景与边界情况」 IS A FIRST-CLASS COLUMN on purpose (user ask):
+ * the criteria say what "done" means, this one says what will actually be
+ * exercised — and naming what is deliberately NOT tested is how a reviewer
+ * learns the boundary was CHOSEN rather than forgotten.
+ */
+export const LOOP_GOAL_SKELETON = [
+  "## loop goal 骨架（照抄这个骨架填即可）",
+  "# <任务标题>",
+  "意图：<一句话>",
+  "退出标准（每条必须能用一个命令或一次具体观察判定）：",
+  "  1. <…>",
+  "关键测试场景与边界情况：",
+  "  - 正常路径：<…>",
+  "  - 边界 / 错误路径：<…>",
+  "  - 明确不测的：<…>（说明为什么）",
+  "非目标：",
+  "  - <…>",
+  "日期：<ISO>",
+].join("\n");
+
 /** Inputs for {@link buildGoalPrereviewRefusal} — all facts the EXTENSION derived. */
 export interface GoalPrereviewRefusalContext {
   /** The pre-review record for the target repo (absent ⇒ never audited). */
@@ -414,19 +457,27 @@ export function buildGoalPrereviewRefusal(ctx: GoalPrereviewRefusalContext): str
         ? `Start a new session (the extension self-heals missing agent files from ${ctx.packageAgentsDir} at session start) or copy it from there now.`
         : "The extension could NOT locate the package agents directory (包内 agents 目录无法定位) — run `/gate-doctor` to see the probe result and reinstall the package.")
     : "";
-  return (
-    "review-gate: propose_loop_goal refused — " + why + ". The user's approval dialog is not shown until a " +
-    "dedicated `goal-auditor` audit of THIS exact text passes.\n" +
-    "Recovery path: revise the draft against the objections and call propose_loop_goal again — " +
-    "it runs the audit ITSELF (builds the auditor's task with the carryover and the draft delta, " +
-    "dispatches the judge, adjudicates the verdict and records the PASS). There is no separate " +
-    "audit call to make.\n" +
-
-    "The goal text submitted to the user must be written in Simplified Chinese (technical identifiers, tool " +
-    "names, file paths and code tokens stay English) — the auditor blocks a draft that is not.\n" +
-    "Submitted first line: " + (firstLine.slice(0, 120) || "(empty)") +
-    bootstrap
-  );
+  return buildRejection({
+    what: `propose_loop_goal 被拒 —— ${why}`,
+    why: "用户的批准框只在这一版文本通过 goal-auditor 审计之后才会弹出；" +
+      "审计只看 P0/P1 反对意见（P2/Nit 不阻塞）。",
+    by: "agent",
+    next: [
+      "1. 按反对意见改草稿；",
+      "2. 再调一次 `propose_loop_goal` —— 审计是它自己跑的（组装任务、派 judge、裁决、记录 PASS），" +
+      "没有单独的审计调用可以打。",
+      // The recovery path a refused draft actually needs: a FORMAT to fill, not
+      // another sentence about the format. Same skeleton the tool description
+      // hands out before the first submit, from the same constant.
+      "3. 照抄下面这个骨架改草稿（`<…>` 换成你的事实）：",
+      "",
+      LOOP_GOAL_SKELETON,
+      "",
+      "关于文本本身：提交给用户的 goal 正文必须用简体中文（标识符、路径、代码 token 保持英文），" +
+      "否则审计直接拦下（“Simplified Chinese”）。",
+      `本次提交的首行：${firstLine.slice(0, 120) || "(空)"}`,
+    ].join("\n") + bootstrap,
+  });
 }
 
 export const GOAL_CONFIRM_TITLE = "review-gate: AI 提交了本次任务的目标（退出条约）——是否认可？";
@@ -531,22 +582,29 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
  * which dispatches the judge, adjudicates the verdict (only P0/P1 block) and
  * records it before the user is ever asked. The agent submits a draft, not a
  * sequence.
-
+ *
+ * A FUNCTION, not a constant, since the three-part rewrite: `repoRoot`
+ * belongs in the 现象 line (a multi-repo session that lacks THIS repo's goal
+ * would otherwise re-approve the primary one and stay stuck), and appending
+ * it to a multi-line message would strand it on the last line.
  */
-export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
-  "review-gate: loop mode requires an approved loop goal BEFORE any edit/write call. " +
-  "Negotiate it first, in this order: ask the user with `ask_user` when anything is unclear (it " +
-  "asks them and pauses the loop until they answer), then say the requirement BACK to them with " +
-  "`propose_restatement({restatement, station})` — what it is, an example, BEFORE → AFTER, which " +
-  "steps change, plus where this round stops (precommit | commit | pr). That step is MECHANICAL: " +
-  "without a confirmed restatement the goal call below refuses outright and shows no dialog. " +
-  "Then write the goal in Simplified Chinese (technical identifiers, paths and code " +
-  "tokens stay English) and call `propose_loop_goal` with it. That ONE call runs the " +
-  "`goal-auditor` audit itself (dispatch, adjudicate — only P0/P1 objections count — and record) " +
-  "and shows the user the approval dialog only once it passes. A failed audit means: fix the objections and submit the revised " +
-  "draft the same way. (If this " +
-  "session was never meant to run a full loop, classify it first with set_gate_mode: " +
-  "explore/normal do not require a goal.) Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
+export function loopGoalUnconfirmedEditBlock(repoRoot?: string): string {
+  return buildRejection({
+    what: "edit/write 被拦 —— loop 模式下这个仓库还没有用户批准过的 loop goal" +
+      (repoRoot ? ` (repo: ${repoRoot})` : ""),
+    why: "L8 在编辑发生之前就拦：批准只有在动手之前才有意义 —— 到 ship 才拦是摆设，" +
+      "那时 agent 已经把自己的退出条约写完了。",
+    by: "agent",
+    next: "按这个顺序谈出 goal：① 有不清楚的先 `ask_user` 问用户（它会问并暂停循环）；" +
+      "② `propose_restatement({restatement, station})` 把需求反述给用户确认 —— 是什么、一个例子、" +
+      "改之前 → 改之后、哪几步会变，外加本轮交付到哪一站（precommit | commit | pr）；这一步是硬前置，" +
+      "没有它下一步不弹框；③ 用简体中文写 goal（标识符、路径、代码 token 保持英文 —— Simplified Chinese），" +
+      "调 `propose_loop_goal`。这**一个**调用里就跑完 `goal-auditor` 的审计（门禁自己派 judge、" +
+      "裁决 —— 只有 P0/P1 算阻塞 —— 记录 PASS），过了才弹用户批准框；审计被打回就按反对意见改完再提交一次。" +
+      `自己写 ${LOOP_GOAL_RELPATH} 不算数。` +
+      "（如果这个会话本来就不该跑完整循环，先用 set_gate_mode 分类：explore / normal 不要求 goal。）",
+  });
+}
 
 /**
  * Pure decision behind the L8 edit gate: may an edit/write call pass in the

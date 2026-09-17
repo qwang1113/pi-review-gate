@@ -139,10 +139,13 @@ export function formatPlanAuditCarryover(prev: PlanAuditRecord): string {
 /**
  * The auditor's task text.
  *
- * The six checks are the user's own list (task book §7) and they are stated as
- * QUESTIONS ABOUT THE REPOSITORY rather than about the prose: the auditor has
- * read-only tools and its whole value is that it can go and look at whether
- * `lib/` really is where that task will land.
+ * The checks are the user's own list (task book §7) — the array below IS the
+ * list, so no count is repeated here (it said "six" while the array rendered
+ * eight, reviewer Nit 2026-09-17; a count in prose is a second copy of the
+ * list, and it drifts silently) — and they are stated as QUESTIONS ABOUT THE
+ * REPOSITORY rather than about the prose: the auditor has read-only tools and
+ * its whole value is that it can go and look at whether `lib/` really is where
+ * that task will land.
  */
 export function buildPlanAuditTask(
   plan: OrchestratorPlan,
@@ -194,10 +197,29 @@ export function buildPlanAuditTask(
     "       有——需求未澄清，P1。",
     "   (b) 任务书完整度：每个任务的 title+note 是否达到『子会话拿到就能独立协商 goal』？",
     "       只写『做分页』没有交互/边界/验收标准的任务书是 P1——子会话会回头找 PM 猜需求。",
-    "   (c) 澄清证据：读 ${opts.sessionDir ? 'PM 的 transcript（' + opts.sessionDir + ' 下 <ts>_' + (opts.sessionId ?? '') + '.jsonl）' : 'PM 的 transcript'}，",
+    `   (c) 澄清证据：读 ${opts.sessionDir ? 'PM 的 transcript（' + opts.sessionDir + ' 下 <ts>_' + (opts.sessionId ?? '') + '.jsonl）' : 'PM 的 transcript'}，`,
     "       找 ask_user/grillme 的 Q&A 段落，逐条对照：澄清结论是否真的反映进了 plan 的任务书？",
     "       需求有歧义、验收标准缺失、或澄清结论没落进 plan——P1。",
-
+    "9. 架构与代码组织（2026-09-17）：把任务合起来看，新职责会不会堆进已经很大的文件？",
+    "   (a) 落点：逐任务读 note 的「代码落点」——写不出落点、或落点就是「加到某个已经很长的文件里」",
+    "       而说不出理由（新职责与被改文件的一句话职责对不上）——P1。以仓库现状为准：自己去量那个文件",
+    "       有多大、已经担了几个职责，不要只看任务书的措辞。（`lib/file-size-gate.ts` 只硬拦新建文件",
+    "       超过 600 行，存量文件的继续膨胀没有任何机械拦截，所以这个判断只能在你这里做。）",
+    "   (b) 共享契约：任务之间的公共类型 / 接口 / 模块边界谁先谁后？两个并行任务各自定义同一份契约、",
+    "       或一个任务的产物被另一个任务当输入却没写 dependsOn——P1（结算时冲突，或两个子会话各造一份）。",
+    "   注意：**任务改哪些文件不是 plan 的一部分**（2026-09-17 用户决定：落点只是每个任务 note 里的自由",
+    "   文本），所以这条只判落点与组织的合理性，不要因为 plan 没列文件清单出 finding。",
+    "10. 最后一环是不是收尾任务（2026-09-18，用户决定）：plan 的**最后一个任务**就是收尾环节 ——",
+    "   汇合其余任务的成果、走一次整体审核、commit、push、开 PR。它的站点是 plan.deliveryStation，",
+    "   **不受同一 repo 多任务的收窄影响**（权威是 lib/repo-pr-policy.ts 的 `finishTaskId` 与",
+    "   `effectiveTaskStation`；这是位置约定，不是 plan 的新字段）。",
+    "   最后一环仍是「实现某个功能」的任务，或整个 plan 没有一个把成果交付出去的任务 —— P1：",
+    "   项目经理被硬约束禁止 ship（不写代码，只放行 plan 与交接文档），同 repo 多任务的子会话又被收窄到",
+    "   `commit`，于是**没有任何一方能开 PR**，整轮卡在交付上（2026-09-18 实测的事故）。",
+    "   用仓库事实判：读最后一个任务的 note，它写没写清楚交付物（PR / 已 push 的分支）、汇合谁的工作、",
+    "   整体审核怎么做；顺序对不对（收尾任务排在最末，`dependsOn` 或 plan 顺序上都在其余任务之后），",
+    "   否则它汇合到的是半成品。",
+    "",
     "",
     ...(opts.sessionDir && opts.sessionId
       ? [

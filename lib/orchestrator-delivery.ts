@@ -53,6 +53,8 @@
  * file, reading the channel) belongs to the wiring.
  */
 
+import { isProtectedBranch } from "./workspace-branch.ts";
+
 /** Subdirectory of the gate-owned `.pi/` scope that holds task files. */
 export const TASK_FILE_DIRNAME = "tasks";
 
@@ -89,6 +91,13 @@ export function buildTaskDocument(opts: {
    * before it negotiates its own goal, which is exactly when it needs to know.
    */
   stationCapLine?: string;
+  /**
+   * WHICH BRANCH THIS CHILD WORKS ON (2026-09-18). Appended by the GATE, for
+   * the same reason as the ceiling line above — and it used to be the
+   * OPPOSITE: a fixed sentence inside {@link TASK_GOAL_DIRECTIVE} telling every
+   * child to open a feature branch. See {@link buildBranchLine} for the cost.
+   */
+  branchLine?: string;
 }): string {
   return [
     `<!-- ${opts.marker} -->`,
@@ -97,6 +106,7 @@ export function buildTaskDocument(opts: {
     opts.brief.trim(),
     "",
     ...(opts.stationCapLine ? [opts.stationCapLine, ""] : []),
+    ...(opts.branchLine ? [opts.branchLine, ""] : []),
     TASK_GOAL_DIRECTIVE,
     "",
   ].join("\n");
@@ -129,15 +139,78 @@ export const TASK_GOAL_DIRECTIVE =
   "（上下文、例子、改之前 → 改之后、哪几步会变得不同，外加本轮交付站点 " +
   "precommit / commit / pr），**再**用 `propose_loop_goal` 协商并获批你自己的 goal" +
   "（goal-auditor 审计 + 用户批准）。没有已确认的反述，`propose_loop_goal` 会直接被拒、" +
-  "一个框都不弹；未批准 goal 前，L8 edit gate 会拦下所有 edit/write。\n" +
-  // THE BRANCH NAME IS SHOWN TO PEOPLE (2026-09-15, user decision). Measured:
-  // three PRs whose head branches were `rg-child-<sessionId>` — the handle of
-  // an internal registry, published. The reviewer's own instruction is the
-  // place to say it once; the checkpoint refusal (extensions/review-gate.ts)
-  // repeats it at the moment a session actually needs to create one.
-  "开工前先给自己开一个功能分支：`git checkout -b <type>/<slug>`，名字用英文 kebab-case " +
-  "概括这次改动（如 `feat/aum-blacklist-purge`、`fix/auth-token-expiry`）——" +
-  "**不要**用会话 id 或 `rg-child-…` 这类内部 handle，这个分支名会跟着 PR 走，是要给人看的。";
+  "一个框都不弹；未批准 goal 前，L8 edit gate 会拦下所有 edit/write。";
+
+/**
+ * The one naming rule, quoted wherever a branch actually has to be CREATED.
+ *
+ * THE BRANCH NAME IS SHOWN TO PEOPLE (2026-09-15, user decision). Measured:
+ * three PRs whose head branches were `rg-child-<sessionId>` — the handle of an
+ * internal registry, published. The checkpoint refusal
+ * (extensions/review-gate.ts) states the same rule at the moment a session
+ * actually needs a new branch; this constant states it in the task book.
+ */
+const BRANCH_NAMING_RULE =
+  "名字用英文 kebab-case 概括这次改动（如 `feat/aum-blacklist-purge`、`fix/auth-token-expiry`）——" +
+  "**不要**用会话 id 或 `rg-child-…` 这类内部 handle，这个分支名会跟着 PR 走，是要给人看的";
+
+/**
+ * WHICH BRANCH THIS CHILD WORKS ON — the gate's own fact, per dispatch.
+ *
+ * THE MEASURED FAILURE (2026-09-18, A). This used to be a fixed sentence in
+ * every task book: 「开工前先给自己开一个功能分支：`git checkout -b
+ * <type>/<slug>`」. For the plan's LAST task — the finish task, which exists to
+ * merge the other branches, push and open the PR — that is actively wrong:
+ * following it forks the DELIVERY branch, and the round had to be talked out of
+ * it by hand. For an ordinary child it was merely noise: the gate knew the
+ * branch all along, and the manager had to correct it every round.
+ *
+ * WHAT REPLACES IT is philosophy one — the agent expresses INTENT, the gate
+ * owns HOW. The dispatcher already knows the checkout (it resolved it), whether
+ * it created that checkout itself, and how far the task may ship, so the gate
+ * says where the child IS instead of naming a command it might have to run.
+ *
+ * FOUR SHAPES, and the last two are the ones the fixed sentence got wrong:
+ *  - a shared checkout with a readable, unprotected branch ⇒ name that branch
+ *    and forbid creating another one;
+ *  - a checkout the GATE created (its own `rg-child-…` handle, below `pr`) ⇒
+ *    name it and forbid publishing it: the handle must never become a PR head,
+ *    and this child does not ship anyway;
+ *  - the same, but the station cap reaches `pr` ⇒ it DOES ship, so it must
+ *    rename the gate's handle into something a person can read first —
+ *    forbidding that push outright would leave a delivery task unable to
+ *    deliver, which is the other half of the same accident;
+ *  - an unreadable branch (detached HEAD, no git) or a PROTECTED one ⇒ the one
+ *    case where a new branch really is owed, so the naming rule is quoted.
+ *
+ * PURE, so the four shapes are pinned by tests rather than by a real spawn.
+ */
+export function buildBranchLine(opts: {
+  /** The branch the child's checkout is on, when the gate could read one. */
+  branch?: string | undefined;
+  /** Did the GATE create this checkout (its branch is the gate's own handle)? */
+  isolated?: boolean;
+  /** May this child reach push / PR at all (its station reaches `pr`)? */
+  mayShip?: boolean;
+}): string {
+  const branch = opts.branch?.trim();
+  if (branch === undefined || branch === "") {
+    return `开工前先给自己开一个功能分支：\`git checkout -b <type>/<slug>\`，${BRANCH_NAMING_RULE}。`;
+  }
+  if (opts.isolated === true) {
+    return opts.mayShip === true
+      ? `你在门禁为你开的**独立 checkout** 里工作（分支 \`${branch}\`）—— 不要新开分支、不要切分支。` +
+        `这条分支名是门禁的内部 handle（\`rg-child-…\`），交付前先把它改成给人看的功能分支：` +
+        `\`git branch -m <type>/<slug>\`，${BRANCH_NAMING_RULE}；PR 的 head 就是改后的名字。`
+      : `你在门禁为你开的**独立 checkout** 里工作（分支 \`${branch}\`）—— 不要新开分支、不要切分支；` +
+        "这条分支是门禁的内部工作分支，**不要 push 它、不要拿它开 PR**。";
+  }
+  if (isProtectedBranch(branch)) {
+    return `你现在在受保护分支（\`${branch}\`）上 —— checkpoint 与 \`git commit\` 都会被门禁直接拒绝。` +
+      `先给自己开一个功能分支：\`git checkout -b <type>/<slug>\`，${BRANCH_NAMING_RULE}。`;
+  }
+  return `你在这条分支（\`${branch}\`）上工作 —— 不要新开分支、不要切分支。`;
+}
 
 /**
  * A child's pi session id — DETERMINISTIC, derived from its registry handle.

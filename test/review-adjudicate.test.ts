@@ -7,6 +7,8 @@ import {
   fileFindingsFrom,
   findingFingerprint,
   normalizeConcludedVerdict,
+  parkedLaneHalf,
+  laneVerifiesTree,
   parkedReadyFate,
   readyLacksVerification,
   severityFindingsFrom,
@@ -277,56 +279,137 @@ test("classifyReadyWithholding: only a fact about TIME is held; the rest are ref
   assert.equal(classifyReadyWithholding({ ...base, concluded: "BLOCKED" }), "none");
 });
 
-test("parkedReadyFate: replay needs all three ids, clear needs a failed lane, the rest is 'leave it'", () => {
+test("parkedLaneHalf: ok needs the recorded tree to BE the round's; a landing that is not a replay vetoes", () => {
   const t = "9f2c";
-  // All three agree ⇒ the held round becomes the verdict it always was.
+  // A FRESH landing: only a PASS covering exactly the parked tree, while the
+  // gate's current target is still that round, is `ok`.
   assert.equal(
-    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: t }),
-    "replay",
+    parkedLaneHalf({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: t, laneRunning: false, bypassActive: false }),
+    "ok",
   );
-  // A lane that came back with anything but PASS retires the parked round: its
-  // content is now known bad, and the failure channel already says so in the
-  // language of verification.
   for (const laneVerdict of ["FAIL", "no verdict", "ERROR"]) {
     assert.equal(
-      parkedReadyFate({ parkedTree: t, laneVerdict, coveredTree: undefined, currentTargetTree: t }),
-      "clear",
+      parkedLaneHalf({ parkedTree: t, laneVerdict, coveredTree: undefined, currentTargetTree: t, laneRunning: false, bypassActive: false }),
+      "veto",
       laneVerdict,
     );
   }
-  // A PASS that covered OTHER content RETIRES it too (round-2 P2): the lane has
-  // landed, so nothing will come back for this conclusion, and leaving the
-  // record behind would park the round until the next prepare — with the reply
-  // already telling the agent not to re-submit.
+  // A PASS that covered OTHER content VETOES (round-2 P2): the lane has landed,
+  // so nothing will come back for this conclusion, and leaving the record
+  // behind would park the round until the next prepare — with the reply already
+  // telling the agent not to re-submit.
   assert.equal(
-    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: "other", currentTargetTree: t }),
-    "clear",
+    parkedLaneHalf({ parkedTree: t, laneVerdict: "PASS", coveredTree: "other", currentTargetTree: t, laneRunning: false, bypassActive: false }),
+    "veto",
     "the lane passed a tree the round is not — nothing to replay onto it",
   );
   // …and a newer round replaced the target: the parked one is history.
   assert.equal(
-    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: "other" }),
-    "clear",
+    parkedLaneHalf({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: "other", laneRunning: false, bypassActive: false }),
+    "veto",
   );
-  // Nothing parked ⇒ nothing to do.
+  // NO fresh landing (the quality round's landing, the settle backstop): the
+  // recorded facts decide, and a lane that is still running is what makes a
+  // "not yet" answer a HOLD instead of a retirement.
   assert.equal(
-    parkedReadyFate({ parkedTree: undefined, laneVerdict: "PASS", coveredTree: t, currentTargetTree: t }),
-    "none",
+    parkedLaneHalf({ parkedTree: t, coveredTree: t, currentTargetTree: t, laneRunning: false, bypassActive: false }),
+    "ok",
+    "the lane already passed this tree and nothing moved",
+  );
+  assert.equal(
+    parkedLaneHalf({ parkedTree: t, coveredTree: undefined, currentTargetTree: t, laneRunning: true, bypassActive: false }),
+    "pending",
+  );
+  assert.equal(
+    parkedLaneHalf({ parkedTree: t, coveredTree: undefined, currentTargetTree: t, laneRunning: false, bypassActive: false }),
+    "veto",
+    "nobody is coming back to verify this content — a hold here is forever",
   );
   // An EMPTY id is unknown, not equal — the fail-closed direction.
   assert.equal(
-    parkedReadyFate({ parkedTree: "", laneVerdict: "PASS", coveredTree: "", currentTargetTree: "" }),
-    "none",
+    parkedLaneHalf({ parkedTree: "", coveredTree: "", currentTargetTree: "", laneRunning: true, bypassActive: false }),
+    "veto",
+  );
+});
+
+test("parkedLaneHalf: a /gate-bypass round owes no lane — 'no lane ran' is not a veto", () => {
+  // THE TWO HALVES MUST AGREE (quality round P1, 2026-09-16). A bypassed
+  // session never gets a full precommit lane (`submitForReview` skips it), so
+  // the recorder already reads "bypass ⇒ nothing is missing"
+  // (`readyLacksVerification`). The parked half did not, and the disagreement
+  // was a loop: the parked READY came back as `veto`, was cleared with
+  // "re-submit", and the re-submission parked into the identical state.
+  const t = "9f2c";
+  assert.equal(
+    parkedLaneHalf({ parkedTree: t, coveredTree: undefined, currentTargetTree: t, laneRunning: false, bypassActive: true }),
+    "ok",
+    "no lane is owed, so the lane half is satisfied",
   );
   assert.equal(
-    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: undefined, currentTargetTree: t }),
-    "clear",
-    "an unreadable tree is not evidence of a match — and the lane is gone either way",
+    parkedLaneHalf({ parkedTree: t, coveredTree: "other", currentTargetTree: t, laneRunning: false, bypassActive: true }),
+    "ok",
+    "…and a stale covered tree from an earlier round changes nothing",
   );
   assert.equal(
-    parkedReadyFate({ parkedTree: t, laneVerdict: "PASS", coveredTree: t, currentTargetTree: undefined }),
-    "clear",
+    parkedLaneHalf({ parkedTree: t, coveredTree: t, currentTargetTree: "other", laneRunning: false, bypassActive: true }),
+    "veto",
+    "a round the gate has moved past is still not replayable",
   );
+  // ONE rule, both callers: the bypass branch and the tree comparison are the
+  // same function, so the recorder cannot drift away from this half again.
+  assert.equal(laneVerifiesTree({ tree: t, coveredTree: undefined, bypassActive: true }), true);
+  assert.equal(laneVerifiesTree({ tree: t, coveredTree: undefined, bypassActive: false }), false);
+  assert.equal(laneVerifiesTree({ tree: t, coveredTree: t, bypassActive: false }), true);
+  assert.equal(laneVerifiesTree({ tree: undefined, coveredTree: t, bypassActive: false }), false,
+    "an unknown tree is never covered");
+});
+
+test("the recorder and the parked half answer the SAME question — one rule, so they cannot disagree again", () => {
+  // THE PROPERTY THE UNIFICATION EXISTS FOR (quality round P1, 2026-09-16).
+  // Every combination of bypass / covered tree / round tree goes through BOTH
+  // halves: the parked half's `ok` must be exactly the recorder's "not
+  // lacking", and `laneVerifiesTree` is what both of them read. Exhaustive on
+  // purpose — the defect lived in one combination nobody had tried.
+  const t = "9f2c";
+  for (const bypassActive of [false, true]) {
+    for (const coveredTree of [t, "other", undefined, ""]) {
+      for (const tree of [t, "other", undefined, ""]) {
+        const where = `bypass=${bypassActive} covered=${String(coveredTree)} tree=${String(tree)}`;
+        const verified = laneVerifiesTree({ tree, coveredTree, bypassActive });
+        assert.equal(
+          readyLacksVerification({ precommitVerdict: "NOT_RUN", reviewedTree: tree, lastFullPassTree: coveredTree, bypassActive }),
+          !verified,
+          `the recorder disagrees with the shared rule: ${where}`,
+        );
+        // A round with no tree at all can never be replayed, bypass or not.
+        const replayable = tree !== undefined && tree !== "";
+        assert.equal(
+          parkedLaneHalf({ parkedTree: tree, coveredTree, currentTargetTree: tree, laneRunning: false, bypassActive }) === "ok",
+          verified && replayable,
+          `the parked half disagrees with the shared rule: ${where}`,
+        );
+      }
+    }
+  }
+});
+
+test("parkedReadyFate: BOTH preconditions must be satisfied; any veto retires the record", () => {
+  const t = "9f2c";
+  assert.equal(parkedReadyFate({ parkedTree: t, lane: "ok", quality: "ok" }), "replay");
+  // One precondition still owed ⇒ HOLD: this is the only outcome that keeps the
+  // record alive for the landing that is owed, and it is why a reviewer READY
+  // that arrives before the quality verdict survives instead of being refused.
+  assert.equal(parkedReadyFate({ parkedTree: t, lane: "ok", quality: "pending" }), "hold");
+  assert.equal(parkedReadyFate({ parkedTree: t, lane: "pending", quality: "ok" }), "hold");
+  assert.equal(parkedReadyFate({ parkedTree: t, lane: "pending", quality: "pending" }), "hold");
+  // Either half disproven ⇒ retired. `ok`+`veto` is the measured shape: a
+  // READY parked on a running lane, whose quality round then blocked.
+  assert.equal(parkedReadyFate({ parkedTree: t, lane: "veto", quality: "ok" }), "clear");
+  assert.equal(parkedReadyFate({ parkedTree: t, lane: "ok", quality: "veto" }), "clear");
+  assert.equal(parkedReadyFate({ parkedTree: t, lane: "pending", quality: "veto" }), "clear");
+  // Nothing parked ⇒ nothing to do. An EMPTY id is unknown, not equal.
+  assert.equal(parkedReadyFate({ parkedTree: undefined, lane: "ok", quality: "ok" }), "none");
+  assert.equal(parkedReadyFate({ parkedTree: "", lane: "ok", quality: "ok" }), "none");
   // A WORKTREE EDIT IS NOT AN INPUT, deliberately: it moves none of these three
   // trees (the parked round's is the committed one, the lane's was captured
   // before it started), so there is nothing for a caller to pass in. The fix to

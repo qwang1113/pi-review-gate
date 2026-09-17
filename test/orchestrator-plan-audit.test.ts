@@ -89,6 +89,23 @@ test("the 8th check names the transcript location when sessionDir/sessionId are 
   assert.match(task, /sess-123/);
 });
 
+test("the 8th check's transcript pointer is RENDERED, never source code (2026-09-17)", () => {
+  // The line was a double-quoted string carrying a ${…} expression, so the
+  // auditor was handed `读 ${opts.sessionDir ? 'PM 的 transcript…' }` — JS
+  // source in the middle of the audit checklist. The neighbouring block below
+  // it is a real template, which is why the path assertions still passed: the
+  // pointer appeared ELSEWHERE, and the broken line read as prose.
+  for (const opts of [{}, { sessionDir: "/tmp/session-dir", sessionId: "sess-123" }]) {
+    const task = buildPlanAuditTask(planOf(), opts);
+    assert.doesNotMatch(task, /\$\{opts\./, "no JS source may leak into the auditor's task text");
+  }
+  assert.match(
+    buildPlanAuditTask(planOf()).replace(/\s+/g, " "),
+    /读 PM 的 transcript，/,
+    "with no session the fallback reads as prose",
+  );
+});
+
 test("round 5: the plan is UNTRUSTED DATA and sits after the gate's checks", () => {
   const task = buildPlanAuditTask(planOf(), { repoRoot: "/work/pi-review-gate" });
   // ORDER, not presence: the plan is orchestrator-authored text, and a plan
@@ -162,4 +179,54 @@ test("the audit task carries the 7th check: minimalism (inside the checklist, me
   for (const rule of ["YAGNI", "复用优先", "能删就删", "新依赖须论证"]) {
     assert.ok(!task.includes(rule), `the four checks must not be quoted in the task (found: ${rule})`);
   }
+});
+
+test("the audit task carries the 9th check: architecture & code organization (placement, shared contracts)", () => {
+  const task = buildPlanAuditTask(planOf());
+  assert.match(task, /9\. 架构与代码组织/, "the new check sits inside the checklist");
+  // (a) placement — judged against the repository's real size, because the
+  // hard gate only covers NEW files (lib/file-size-gate.ts, 600 lines).
+  assert.match(task, /代码落点/);
+  assert.match(task, /lib\/file-size-gate\.ts/, "it names the half the hard gate does not cover");
+  // (b) shared contracts between tasks.
+  assert.match(task, /共享契约/);
+  assert.match(task, /dependsOn/);
+  // The 2026-09-17 user decision: file lists are NOT part of a plan, so this
+  // check must not turn into a demand for one.
+  assert.match(task, /任务改哪些文件不是 plan 的一部分/);
+  assert.match(task, /不要因为 plan 没列文件清单/);
+});
+
+// ---------------------------------------------------------------------------
+test("the audit task carries the 10th check: the plan ENDS with a finish task", () => {
+  const task = buildPlanAuditTask(planOf());
+  assert.match(task, /10\. 最后一环是不是收尾任务/, "the new check sits inside the checklist");
+  // WHY it is a P1: without it nobody may publish at all (the manager is
+  // forbidden to ship, the children of a multi-task repo are capped at commit).
+  assert.match(task, /没有任何一方能开 PR/);
+  assert.match(task, /实测的事故/);
+  // The implementation is NAMED, so a renamed helper or a moved rule has to
+  // come back and update this line instead of leaving the auditor guessing.
+  assert.match(task, /lib\/repo-pr-policy\.ts/);
+  assert.match(task, /finishTaskId/);
+  assert.match(task, /effectiveTaskStation/);
+  // A POSITION, not a new plan field — the check must not become a demand for
+  // one (same discipline as the 9th check's file lists).
+  assert.match(task, /位置约定/);
+  assert.match(task, /不是 plan 的新字段/);
+  // And the finish task has to be last in EXECUTION order, not just in the list.
+  assert.match(task, /dependsOn/);
+  assert.match(task, /plan 顺序/);
+});
+
+test("the 10th check is inside the checklist — before the conclude instructions", () => {
+  const task = buildPlanAuditTask(planOf());
+  const check = task.indexOf("10. 最后一环是不是收尾任务");
+  const checklist = task.indexOf("===== 审计要点");
+  const untrusted = task.indexOf("===== 待审计的 plan =====");
+  const conclude = task.indexOf("judge_conclude");
+  assert.ok(checklist >= 0 && untrusted > checklist, "the checks come before the untrusted plan (round 5)");
+  assert.ok(check > checklist && check < untrusted,
+    "a check AFTER the untrusted region (or after the conclude instructions) would never be read as part of the list");
+  assert.ok(conclude > check, "and it is stated as a checklist item, not after the closing instructions");
 });

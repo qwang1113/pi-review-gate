@@ -344,3 +344,95 @@ test("every doc that lists the precommit steps lists the ones the runner runs", 
   }
   assert.ok(listings >= 3, `the scan found only ${listings} written copies of the ladder — check the pattern`);
 });
+
+// ---------------------------------------------------------------------------
+// 5. the review round's cancel matrix (2026-09-16)
+// ---------------------------------------------------------------------------
+
+/**
+ * THE ONE HOME, and the surfaces that summarise it.
+ *
+ * The quality round, the functional reviewer and the precommit lane used to run
+ * in a fixed order (quality first, then the reviewer, the lane beside them).
+ * They now start together and the cancel matrix decides who stops whom — a
+ * table that existed in FIVE prose copies before this test, four of which said
+ * the opposite of what the code does. `docs/module-map.md` §7.1 carries this
+ * row; the anchors below are what proves the scan read a surface that still
+ * discusses the matrix at all.
+ */
+const CANCEL_AUTHORITY = "docs/execution-model.md";
+const CANCEL_SECTION = "并行三方与取消矩阵";
+const CANCEL_SURFACES: ReadonlyArray<{ path: string; anchor: string | RegExp }> = [
+  { path: "AGENTS.md", anchor: "quality round runs BESIDE" },
+  { path: "docs/coding-standards.md", anchor: "审核分两轮，但不是串行" },
+  { path: "README.md", anchor: "the quality round and the reviewer all run" },
+  { path: "skills/review-loop/SKILL.md", anchor: "cancel" },
+  { path: "agents/reviewer.md", anchor: "AT THE SAME" },
+  { path: "agents/quality-auditor.md", anchor: "same round as the functional reviewer" },
+];
+
+test("the cancel matrix has ONE substantive home, and it states all three rows", () => {
+  const authority = readRepoFile(CANCEL_AUTHORITY);
+  assert.ok(authority.includes(CANCEL_SECTION),
+    `${CANCEL_AUTHORITY} must carry the §${CANCEL_SECTION} section — every pointer below aims at it`);
+  // The three rows, as FACTS about who stops whom. Each is the thing four
+  // copies used to get wrong.
+  assert.match(authority, /质量轮非 READY[\s\S]{0,160}reviewer 的 pane[\s\S]{0,120}precommit lane/,
+    "row 1: a blocking quality verdict stops the reviewer AND the lane");
+  assert.match(authority, /reviewer 非 READY[\s\S]{0,160}质量轮的 pane[\s\S]{0,120}precommit lane/,
+    "row 2: a blocking reviewer verdict stops the quality round AND the lane");
+  assert.match(authority, /precommit 落 FAIL[\s\S]{0,160}reviewer 的 pane[\s\S]{0,120}质量轮（它只静态读代码/,
+    "row 3: a FAILED lane stops ONLY the reviewer — the quality round carries on");
+  // …the parking rule the two judges running together makes necessary…
+  assert.match(authority, /扣下/, "the held-READY rule is stated where the matrix is");
+  assert.match(authority, /pendingReady/, "…and names where the hold actually lands");
+  // …and the fact that makes the matrix necessary at all.
+  assert.match(authority, /同一时刻启动/, "the three parties start together");
+});
+
+test("every surface that summarises the cancel matrix says the NEW order and points home", () => {
+  const summaries = readSurfaces(CANCEL_SURFACES);
+  for (const s of summaries) {
+    assert.ok(s.text.includes("execution-model.md"),
+      `${s.path} summarises the matrix but does not point at ${CANCEL_AUTHORITY} — a summary ` +
+      "with no pointer is a copy that goes stale on its own");
+  }
+  const byPath = new Map(summaries.map((s) => [s.path, s.text]));
+  // A pointer alone is not enough: a surface that keeps the OLD model in its own
+  // words sends the reader back to it. Each of these states the fact that moved.
+  assert.match(byPath.get("AGENTS.md")!, /kills the reviewer's pane/,
+    "AGENTS.md must say what a non-READY quality round DOES, not just point");
+  assert.match(byPath.get("README.md")!, /cancel matrix/, "README names the mechanism");
+  assert.match(byPath.get("skills/review-loop/SKILL.md")!, /SAME\s*TIME|at the same time/i,
+    "the shipped skill tells the agent the two judges start together");
+  assert.match(byPath.get("docs/coding-standards.md")!, /同时启动/,
+    "the standards' review section says the two rounds are not serial");
+});
+
+test("no surface still teaches the SERIAL round this replaced (negative, with a self-proof)", () => {
+  // The exact wordings that were wrong. Kept as literals so the SELF-PROOF
+  // below can prove the pattern still matches them: a negative scan whose
+  // regex silently stops matching passes for the wrong reason, and that is the
+  // failure mode this whole file exists to prevent.
+  const GONE = [
+    "A code-quality round runs FIRST",
+    "dispatches `quality-auditor` FIRST",
+    "Once the quality round passes, the gate dispatches the reviewer",
+    "quality round has passed",
+    "Precommit runs FIRST, review second — never concurrently",
+    "过了才是 `reviewer`",
+    "before the functional reviewer",
+    "runs BEFORE you, on the SAME commit range",
+  ];
+  const STALE = new RegExp(GONE.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
+  for (const gone of GONE) {
+    assert.match(gone, STALE, `the negative pattern must match the wording it exists to catch: ${gone}`);
+  }
+  const scanned = readSurfaces(CANCEL_SURFACES.filter((s) => s.path !== CANCEL_AUTHORITY));
+  assert.ok(scanned.length >= 5, "the negative scan must cover every pointer surface");
+  for (const s of scanned) {
+    assert.doesNotMatch(s.text, STALE,
+      `${s.path} still teaches the serial quality round (2026-09-15) — the code starts all three ` +
+      `parties together; the matrix's home is ${CANCEL_AUTHORITY} §${CANCEL_SECTION}`);
+  }
+});

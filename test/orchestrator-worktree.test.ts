@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   WORKTREE_SETTLEMENTS,
   abortMergeArgv,
+  branchOfListedWorktree,
   childWorktreeBranch,
   childWorktreePath,
   createWorktreeArgv,
@@ -58,13 +59,13 @@ test("creation pins the child to HEAD on a branch of its own", () => {
 });
 
 test("keep touches nothing, and says where the work is", () => {
-  const plan = planSettlement("keep", REPO, CHILD, "t13");
+  const plan = planSettlement("keep", REPO, CHILD, "t13", childWorktreeBranch(CHILD));
   assert.deepEqual(plan.steps, [], "keep is the default BECAUSE it is the one that cannot lose work");
   assert.equal(WORKTREE_SETTLEMENTS.includes("keep"), true);
 });
 
 test("merge covers ALL the leftovers, merges without committing, and RECLAIMS the checkout last", () => {
-  const plan = planSettlement("merge", REPO, CHILD, "t13");
+  const plan = planSettlement("merge", REPO, CHILD, "t13", childWorktreeBranch(CHILD));
   // `add -A` THEN `commit`, never `commit -am` (round-5 P1): `-a` stages only
   // MODIFIED/DELETED tracked files, so every file the child CREATED would have
   // been left behind while the receipt said its changes were merged.
@@ -91,12 +92,56 @@ test("merge covers ALL the leftovers, merges without committing, and RECLAIMS th
 });
 
 test("discard removes BOTH the checkout and the branch — git keeps two things", () => {
-  const plan = planSettlement("discard", REPO, CHILD, "t13");
-  assert.deepEqual(plan.steps.map((a) => [...a]), removeWorktreeArgv(REPO, CHILD).map((a) => [...a]));
+  const plan = planSettlement("discard", REPO, CHILD, "t13", childWorktreeBranch(CHILD));
+  assert.deepEqual(plan.steps.map((a) => [...a]),
+    removeWorktreeArgv(REPO, CHILD, childWorktreeBranch(CHILD)).map((a) => [...a]));
   assert.equal(plan.steps.length, 2, "a removed worktree whose branch survives is half a reclamation");
   assert.ok(plan.steps[0]!.includes("--force"),
     "a child may leave untracked build output, and a worktree that refuses to be removed is never reclaimed");
   assert.equal(plan.onConflict, undefined, "there is nothing to roll back on a discard");
+});
+
+test("settlement follows the branch the checkout is ACTUALLY on — a renamed one merges too (A, 2026-09-18)", () => {
+  // The task book tells a child whose station reaches `pr` to rename the
+  // gate's `rg-child-…` handle before it pushes, so an internal handle never
+  // becomes a PR head. Settling the DERIVED name after that fails with
+  // "branch not found" — the gate's own instruction turning into the
+  // manager's error, which is why the branch is a parameter here and not a
+  // derivation.
+  const renamed = "feat/aum-blacklist-purge";
+  const merge = planSettlement("merge", REPO, CHILD, "t13", renamed);
+  assert.equal(merge.steps[2]![5], renamed, "the merge names the branch that EXISTS");
+  assert.equal(merge.steps[2]!.includes(childWorktreeBranch(CHILD)), false,
+    "…not the handle it was renamed away from");
+  const discard = planSettlement("discard", REPO, CHILD, "t13", renamed);
+  assert.equal(discard.steps[1]![4], renamed, "and the deletion names it too — git keeps two things");
+});
+
+test("a checkout's branch comes from the repository's OWN listing — never from the directory (quality P1, 2026-09-18)", () => {
+  // The tempting read — `git -C <worktreePath> symbolic-ref` — answers with the
+  // branch of whatever repository git finds by walking UP when that path is not
+  // one itself (a half-finished `worktree add`, an emptied shell), and that name
+  // reaches `git branch -D`: the wrong answer deletes the manager's own `main`.
+  // `worktree list` is the repository's own registry of the checkouts it owns,
+  // and a path it does not list yields nothing at all.
+  const porcelain = [
+    "worktree /Users/dev/workspace/dashboard",
+    "HEAD aaaa",
+    "branch refs/heads/main",
+    "",
+    `worktree ${childWorktreePath(REPO, CHILD)}`,
+    "HEAD bbbb",
+    "branch refs/heads/feat/aum-blacklist-purge",
+    "",
+  ].join("\n");
+  assert.equal(branchOfListedWorktree(porcelain, childWorktreePath(REPO, CHILD)), "feat/aum-blacklist-purge",
+    "the REPOSITORY tracks the rename, so a renamed checkout still answers");
+  assert.equal(branchOfListedWorktree(porcelain, REPO), "main");
+  assert.equal(branchOfListedWorktree(porcelain, "/Users/dev/workspace/stray"), undefined,
+    "an unlisted path is nothing — never the enclosing repository's branch");
+  assert.equal(branchOfListedWorktree("", childWorktreePath(REPO, CHILD)), undefined);
+  assert.equal(branchOfListedWorktree("worktree /p\nHEAD a\ndetached\n", "/p"), undefined,
+    "a detached checkout has no branch to delete");
 });
 
 test("'already gone' is recognised NARROWLY — the direction that loses work is the other one", () => {

@@ -29,7 +29,8 @@ import {
   snapshotApprovedPlan,
 } from "../lib/orchestrator-plan-approval.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
-import { buildPlanConfirmMessage } from "../lib/orchestrator-tools.ts";
+import { buildPlanConfirmMessage, registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
+import { effectiveTaskStation } from "../lib/repo-pr-policy.ts";
 import { normalizeRuntime } from "../lib/orchestrator-registry.ts";
 
 
@@ -57,6 +58,14 @@ function approved(plan: OrchestratorPlan) {
   return snapshotApprovedPlan(plan, planHash(plan), "2026-08-30T10:00:00.000Z");
 }
 
+/**
+ * Every fixture here works in ONE repo — the orchestration's own — which is
+ * what a task without a `repo` lands in (2026-09-18: the station rule needs it
+ * to count a repo's tasks, and it answers per TASK now, because the plan's last
+ * task is exempt from the same-repo narrowing).
+ */
+const REPO = "/repo";
+
 // ---------------------------------------------------------------------------
 // The rule itself
 // ---------------------------------------------------------------------------
@@ -76,7 +85,7 @@ test("THE round-4 case is gone by construction: a plan task declares no files at
       "a task carries no file scope at all",
     );
   }
-  const decision = decideApprovalCarry(approved(plan), withTask(plan, "t1", { note: "拆成两个文件" }));
+  const decision = decideApprovalCarry(approved(plan), withTask(plan, "t1", { note: "拆成两个文件" }), REPO);
   assert.equal(decision.carries, true, "a note-only edit still carries");
 });
 
@@ -85,22 +94,22 @@ test("every OTHER kind of widening still stops at the user", () => {
   const plan = fileGrainPlan();
   const base = approved(plan);
 
-  const moreParallel = decideApprovalCarry(base, { ...plan, maxParallel: 4 });
+  const moreParallel = decideApprovalCarry(base, { ...plan, maxParallel: 4 }, REPO);
   assert.equal(moreParallel.carries, false);
 
   const newTask = decideApprovalCarry(base, {
     ...plan,
     tasks: [...plan.tasks, { ...plan.tasks[0]!, id: "t4" }],
-  });
+  }, REPO);
   assert.equal(newTask.carries, false);
 
-  const droppedDep = decideApprovalCarry(base, withTask(plan, "t2", { dependsOn: [] }));
+  const droppedDep = decideApprovalCarry(base, withTask(plan, "t2", { dependsOn: [] }), REPO);
   assert.equal(droppedDep.carries, false, "removing a dependency turns a serial chain into a race");
 
-  const nowParallel = decideApprovalCarry(base, withTask(plan, "t1", { execution: "parallel" }));
+  const nowParallel = decideApprovalCarry(base, withTask(plan, "t1", { execution: "parallel" }), REPO);
   assert.equal(nowParallel.carries, false);
 
-  const movedRepo = decideApprovalCarry(base, withTask(plan, "t1", { repo: "/other-repo" }));
+  const movedRepo = decideApprovalCarry(base, withTask(plan, "t1", { repo: "/other-repo" }), REPO);
   assert.equal(movedRepo.carries, false, "moving a task to another repo is a NEW write surface");
   assert.match(movedRepo.widenings.join("\n"), /repo/, "the widening names the repo change");
 });
@@ -113,12 +122,12 @@ test("moving a task to a repo the PLAN already contains is still a widening", ()
   const plan = withTask(fileGrainPlan(), "t3", { repo: "/other-repo" });
   const base = approved(plan);
 
-  const moved = decideApprovalCarry(base, withTask(plan, "t1", { repo: "/other-repo" }));
+  const moved = decideApprovalCarry(base, withTask(plan, "t1", { repo: "/other-repo" }), REPO);
   assert.equal(moved.carries, false, "the target repo already being in the plan grants nothing");
   assert.match(moved.widenings.join("\n"), /repo 从 \/repo 改为 \/other-repo/);
 
   // …while the very same content, unchanged, still carries.
-  assert.equal(decideApprovalCarry(base, plan).carries, true);
+  assert.equal(decideApprovalCarry(base, plan, REPO).carries, true);
 });
 
 test("the DELIVERY STATION is authority: raising it revokes, lowering it carries", () => {
@@ -128,17 +137,17 @@ test("the DELIVERY STATION is authority: raising it revokes, lowering it carries
   const plan = fileGrainPlan();
   const base = approved({ ...plan, deliveryStation: "precommit" });
 
-  const raised = decideApprovalCarry(base, { ...plan, deliveryStation: "pr" });
+  const raised = decideApprovalCarry(base, { ...plan, deliveryStation: "pr" }, REPO);
   assert.equal(raised.carries, false);
   assert.match(raised.widenings.join("\n"), /交付站点/, "the widening says what changed");
 
   const tightened = decideApprovalCarry(
-    approved({ ...plan, deliveryStation: "pr" }), { ...plan, deliveryStation: "commit" },
+    approved({ ...plan, deliveryStation: "pr" }), { ...plan, deliveryStation: "commit" }, REPO,
   );
   assert.equal(tightened.carries, true);
   assert.match(tightened.amendments.join("\n"), /交付站点/, "…and a tightening is still recorded");
 
-  const unchanged = decideApprovalCarry(base, { ...plan, deliveryStation: "precommit" });
+  const unchanged = decideApprovalCarry(base, { ...plan, deliveryStation: "precommit" }, REPO);
   assert.deepEqual(unchanged.widenings, []);
   assert.deepEqual(unchanged.amendments, []);
 });
@@ -149,8 +158,8 @@ test("a snapshot from BEFORE the station existed is read as the strictest one", 
   // can only cost one dialog.
   const plan = fileGrainPlan();
   const legacy = { ...approved(plan), deliveryStation: undefined };
-  assert.equal(decideApprovalCarry(legacy, { ...plan, deliveryStation: "pr" }).carries, false);
-  assert.equal(decideApprovalCarry(legacy, { ...plan, deliveryStation: "precommit" }).carries, true);
+  assert.equal(decideApprovalCarry(legacy, { ...plan, deliveryStation: "pr" }, REPO).carries, false);
+  assert.equal(decideApprovalCarry(legacy, { ...plan, deliveryStation: "precommit" }, REPO).carries, true);
 });
 
 test("ALLOWING a repo to split into several PRs is authority: adding it revokes, removing it carries", () => {
@@ -163,18 +172,19 @@ test("ALLOWING a repo to split into several PRs is authority: adding it revokes,
   const plan = fileGrainPlan();
   const base = approved(plan);
 
-  const widened = decideApprovalCarry(base, { ...plan, allowMultiplePrs: ["/repo"] });
+  const widened = decideApprovalCarry(base, { ...plan, allowMultiplePrs: ["/repo"] }, REPO);
   assert.equal(widened.carries, false);
   assert.match(widened.widenings.join("\n"), /allowMultiplePrs/);
 
   const narrowed = decideApprovalCarry(
     approved({ ...plan, allowMultiplePrs: ["/repo"] }),
     { ...plan, allowMultiplePrs: [] },
+    REPO,
   );
   assert.equal(narrowed.carries, true, "taking the permission away needs no dialog");
   assert.match(narrowed.amendments.join("\n"), /allowMultiplePrs/);
 
-  const unchanged = decideApprovalCarry(base, { ...plan, allowMultiplePrs: [] });
+  const unchanged = decideApprovalCarry(base, { ...plan, allowMultiplePrs: [] }, REPO);
   assert.deepEqual(unchanged.widenings, []);
   assert.deepEqual(unchanged.amendments, []);
 });
@@ -183,7 +193,7 @@ test("a snapshot from BEFORE allowMultiplePrs existed reads as the strictest lis
   const plan = { ...fileGrainPlan(), allowMultiplePrs: ["/repo"] };
   const legacy = { ...approved(plan), allowMultiplePrs: undefined };
   assert.equal(
-    decideApprovalCarry(legacy, plan).carries,
+    decideApprovalCarry(legacy, plan, REPO).carries,
     false,
     "an approval that never named a repo cannot have allowed splitting it",
   );
@@ -233,7 +243,7 @@ test("the approved station SURVIVES the runtime round trip", () => {
   // …and with it on record, dropping back to `commit` is an amendment rather
   // than a re-approval.
   assert.equal(
-    decideApprovalCarry(runtime.approvedPlan!, { ...plan, deliveryStation: "commit" }).carries,
+    decideApprovalCarry(runtime.approvedPlan!, { ...plan, deliveryStation: "commit" }, REPO).carries,
     true,
   );
 });
@@ -248,7 +258,7 @@ test("narrowing in every direction is free: fewer tasks, more dependencies, less
       .filter((t) => t.id !== "t3")
       .map((t) => (t.id === "t1" ? { ...t, execution: "serial" as const } : { ...t, dependsOn: ["t1"] })),
   };
-  const decision = decideApprovalCarry(base, narrowed);
+  const decision = decideApprovalCarry(base, narrowed, REPO);
   assert.equal(decision.carries, true, decision.widenings.join("; "));
   const changes = decision.amendments.join("\n");
   assert.match(changes, /已从 plan 中删除/, "dropping a task is recorded");
@@ -698,9 +708,83 @@ test("both consent surfaces state the DELIVERY STATION and that raising it re-as
   const transcript = world.shown.join("\n");
   assert.match(transcript, /本轮交付站点/, "the plan the user reads names its station");
   assert.match(transcript, /交付站点往后挪/, "…and says that moving it re-asks");
+  // …AND THE PER-TASK STATION (round-2 P2): the finish task's exemption made
+  // task order carry authority, so a category the dialog does not name is a box
+  // the user cannot expect — and a copy that lists triggers must list them all.
+  assert.match(transcript, /让某个任务自己的交付站点变宽/);
 
   const dialog = buildPlanConfirmMessage(world.plan()!);
   assert.match(dialog, /本轮交付站点/, "the decision box carries the station itself");
   assert.match(dialog, /提高交付站点/, "…and lists it among the changes that revoke the approval");
+  assert.match(dialog, /让某个任务自己的交付站点变宽/, "…including the per-task one the finish task created");
+});
+
+test("the tool description lists the revoking edits the same way (round-3 P2)", () => {
+  // The FOURTH surface of that list: the manager reads it while it is writing
+  // the plan, and it is the one that decides whether reordering feels free.
+  // Pinned here with the other two so the next category added to this rule
+  // reds every surface instead of quietly missing one (round-2 and round-3 P2s
+  // were exactly that miss, twice).
+  const specs = new Map<string, { description?: string }>();
+  const world = makeFakeWorld();
+  registerOrchestratorStateTools({
+    registerTool: (definition: { name: string }) => { specs.set(definition.name, definition as never); },
+  } as never, world.deps);
+  const description = specs.get("orchestrator_plan")?.description ?? "";
+  assert.match(description, /allowMultiplePrs/, "the list is the one this test means to read");
+  assert.match(description, /task whose OWN station got wider/,
+    "the write path must warn the manager that reordering can move the exemption");
+});
+
+// ---------------------------------------------------------------------------
+// WHICH TASK DELIVERS (2026-09-18): the plan's LAST task is exempt from the
+// same-repo narrowing (lib/repo-pr-policy.ts), so the ORDER carries authority
+// — and so does dropping a sibling, which is what made the cap apply at all.
+// Neither is visible in the fields this module compared before, so a pure
+// reorder used to carry the approval silently and hand a task the user
+// approved at `commit` the right to push and open the PR.
+// ---------------------------------------------------------------------------
+
+/** Three tasks in ONE repo, and a plan station where the cap is real. */
+function publishPlan(): OrchestratorPlan {
+  return { ...fileGrainPlan(), deliveryStation: "pr" };
+}
+
+/** What the station rule says each task may reach, for the assertions below. */
+function stationOf(plan: OrchestratorPlan, id: string): string {
+  return effectiveTaskStation(plan, plan.tasks.find((t) => t.id === id)!, REPO);
+}
+
+test("REORDERING is authority: whoever is last may publish", () => {
+  const plan = publishPlan();
+  assert.equal(stationOf(plan, "t3"), "pr", "the fixture must have a real exemption to move around");
+  assert.equal(stationOf(plan, "t2"), "commit");
+
+  // Same three tasks, same repos, same dependencies — only t2 and t3 swapped.
+  const swapped: OrchestratorPlan = { ...plan, tasks: [plan.tasks[0]!, plan.tasks[2]!, plan.tasks[1]!] };
+  const decision = decideApprovalCarry(approved(plan), swapped, REPO);
+  assert.equal(decision.carries, false, "t2 is the deliverer now, and the user approved it at commit");
+  assert.match(decision.widenings.join("\n"), /"t2"/, "the widening names the task that gained the station");
+  assert.match(decision.widenings.join("\n"), /交付站点/, "…and the station, not the edit that caused it");
+  assert.match(decision.amendments.join("\n"), /"t3"/, "the task that lost it is recorded too");
+});
+
+test("a reorder that moves no authority is not news", () => {
+  const plan = publishPlan();
+  // t3 keeps delivering; the other two swap places.
+  const midSwap: OrchestratorPlan = { ...plan, tasks: [plan.tasks[1]!, plan.tasks[0]!, plan.tasks[2]!] };
+  const decision = decideApprovalCarry(approved(plan), midSwap, REPO);
+  assert.equal(decision.carries, true, decision.widenings.join("; "));
+  assert.deepEqual(decision.widenings, []);
+  assert.deepEqual(decision.amendments, [], "nothing moved, so nothing is recorded either");
+});
+
+test("dropping a sibling can widen the survivor — the count is what capped it", () => {
+  const plan = publishPlan();
+  const dropped: OrchestratorPlan = { ...plan, tasks: plan.tasks.filter((t) => t.id !== "t3") };
+  const decision = decideApprovalCarry(approved(plan), dropped, REPO);
+  assert.equal(decision.carries, false, "/repo holds two tasks now, so t2 stops being capped");
+  assert.match(decision.widenings.join("\n"), /"t2"/);
+  assert.match(decision.amendments.join("\n"), /已从 plan 中删除/, "the dropped task is still an amendment");
 });
 

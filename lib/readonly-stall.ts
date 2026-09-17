@@ -16,7 +16,8 @@
  * This module is the missing PRODUCTIVITY signal: a counter of consecutive
  * read-only calls with no edit landing in between. When the counter reaches
  * `READONLY_STALL_LIMIT`, the extension appends a NUDGE (never a block) to
- * the next result telling the agent to stop drilling and verify by doing.
+ * the next result telling the agent to stop drilling and settle the question
+ * with a command (a targeted test, a small reproduction).
  *
  * DESIGN CONSTRAINT (mirrors edit-discipline): a NUDGE ONLY — appended text
  * in a tool result. Nothing here blocks, rewrites or interrupts. Drilling

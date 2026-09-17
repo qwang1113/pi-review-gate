@@ -47,6 +47,7 @@ import { REVISE_ROW, choiceRows, parseChoice, type ChoiceSpec } from "./choice-d
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import {
   GOAL_CONFIRM_TITLE,
+  LOOP_GOAL_SKELETON,
   buildGoalConfirmMessage,
   buildGoalPrereviewRefusal,
   buildGoalTranscriptMessage,
@@ -322,7 +323,7 @@ export async function doProposeLoopGoal(
   // actually moved it.
   const capNote = stationCap !== undefined && station !== requestedStation
     ? `⚠️ 交付站点上界 ${stationCap}（不是 ${requestedStation}）：本编排的 plan 收窄了该 repo —— ` +
-      "同一 repo 的一个需求只出一个 PR，子会话提交完就停，由项目经理本地合并、用户验证后再开一个 PR。" +
+      "同一 repo 的一个需求只出一个 PR，子会话提交完就停，由 plan 的收尾任务汇合后统一开一个 PR。" +
       "要分多个 PR，需要在 plan 里声明 allowMultiplePrs 并重新批准。"
     : undefined;
   // THE DIALOG GETS THE SHORT FORM (measured, and it survived the end of the
@@ -576,7 +577,13 @@ export function registerGoalTools(host: ToolHost, deps: GoalToolDeps): void {
       "repo before editing there; one repo's approval never opens another's write surface. " +
       "`station` says where THIS round stops (" + DELIVERY_STATION_CHOICES + "); omit it and the " +
       "station the user confirmed with the restatement is carried over (nothing on record ⇒ " +
-      "precommit, the strictest). It is shown to the user in the approval dialog.",
+      "precommit, the strictest). It is shown to the user in the approval dialog. " +
+      // THE TEMPLATE TRAVELS WITH THE TOOL (user ask, 2026-09-17): the agent
+      // reads this description BEFORE it drafts anything, which is the only
+      // moment a template can still save the round. The same constant is what
+      // the refusal hands back when an audit rejects the draft — one skeleton,
+      // two moments.
+      "填写模板（把 `<…>` 换成你的事实）：\n" + LOOP_GOAL_SKELETON,
     parameters: Type.Object({
       goal: Type.String({ description: "The full goal text (Markdown) as agreed with the user" }),
       repo: Type.Optional(Type.String({

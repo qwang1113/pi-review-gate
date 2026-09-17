@@ -20,6 +20,67 @@
 
 import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
 
+/**
+ * THE PLAN TASK-BOOK SKELETON — what a task's `note` is FOR (user ask,
+ * 2026-09-17: 写 plan 时直接给模板，照着模板改).
+ *
+ * A task used to be a title plus a repo, and everything a child needed to know
+ * about its own job was improvised in prose — or invented by the child. The
+ * plan AUDIT already asks whether each task's `title` + `note` are enough for a
+ * child 「拿到就能独立协商 goal」 (lib/orchestrator-plan-audit.ts) — an ask with
+ * no template behind it, which is how a five-field task book becomes a
+ * one-line note.
+ *
+ * WHY IT IS AIMED AT `note`, AND AT NO STRUCTURED FIELD (user decision,
+ * 2026-09-17): `note` is excluded from `canonicalPlanText`
+ * (lib/orchestrator-plan.ts), so the task book is INSTRUCTIONS, not a contract
+ * boundary — a child that ends up changing a module its note never named
+ * neither voids the plan audit nor revokes the user's approval. Promoting
+ * 「代码落点」 to a structured field would put the 2026-09-17 deadlock back
+ * (「改个文件就要用户重新批准」, which the user abolished). `test/templates.test.ts`
+ * pins both halves: the skeleton is in the `note` description, and
+ * `canonicalPlanText` carries no note text.
+ *
+ * ONE OF THREE, same family as `RESTATEMENT_SKELETON` (lib/restatement.ts) and
+ * `LOOP_GOAL_SKELETON` (lib/loop-goal.ts) — the same 「照抄这个骨架填即可」
+ * opening line and the same `<…>` blanks.
+ */
+export const PLAN_TASK_SKELETON = [
+  "## plan 任务书骨架（照抄这个骨架填即可）",
+  "目标：<这个子会话要达成什么>",
+  "交付：<产出物>",
+  "代码落点：<新代码落在哪个模块或目录；为什么不塞进已有的大文件>",
+  "验收：<子会话自己怎么判断做完了>",
+  "边界：<不做什么>",
+].join("\n");
+
+/**
+ * THE LAST TASK IS THE DELIVERY (2026-09-18, user decision).
+ *
+ * A plan whose last task is one more feature has nobody left to publish it:
+ * the manager may not ship (constraint 2) and every child of a multi-task repo
+ * is capped at `commit` (lib/repo-pr-policy.ts). Measured: a whole round ended
+ * with the work committed, the plan complete and no way to open the PR — and
+ * the fix the user named is this one, not "let the manager drop into loop".
+ *
+ * POSITION, NOT A FIELD: the plan's LAST task IS the finish task
+ * (`finishTaskId`), and its station is `plan.deliveryStation` no matter how
+ * many tasks its repo holds. Rendered wherever the task book is (the `note`
+ * field, the plan tool's description, this standing block) so the manager
+ * cannot write a plan that ends in mid-air — and the plan audit
+ * (lib/orchestrator-plan-audit.ts) objects with a P1 when it happens anyway.
+ */
+export const PLAN_FINISH_TASK_BRIEF = [
+  "## plan 的最后一环 = 收尾任务（位置约定：plan 顺序的**最后一个**任务）",
+  "它不产出新需求，只负责交付：汇合其余任务的成果 → 走一次整体审核 → commit → push → 开 PR。",
+  "它的站点就是 plan 的 `deliveryStation`，**不受「同一 repo 多任务收窄为 commit」的影响**：",
+  "被收窄就没有能 ship 的一方了 —— 你被禁止写代码，同 repo 的子会话又被收窄，整轮会卡在交付上。",
+  "任务书照上面的骨架写，另外写清：交付物（PR 链接 / 已 push 的分支）、要汇合哪些任务、",
+  "整体审核的范围。汇合是你的事：用 `orchestrator_close({worktree: \"merge\"})` 把各任务的分支合进",
+  "自己的工作区，汇合完才派收尾任务 —— 它必须排在最末（其余任务都 done 之后再派），",
+  "否则它汇合到的是半成品。",
+].join("\n");
+
 
 /** The standing block injected every turn in orchestrator mode. */
 export const ORCHESTRATOR_DIRECTIVE =
@@ -56,9 +117,24 @@ export const ORCHESTRATOR_DIRECTIVE =
   "凡是你需要知道的事，门禁都从这里推给你 —— 你不必记得去查，也不该自己拼查询。\n" +
 
   "\n" +
+  // THE TASK BOOK HAS A SHAPE, and the manager is the only one who writes it
+  // (user ask, 2026-09-17). Rendered from the constant the `note` field's own
+  // description renders (lib/orchestrator-tools.ts), so the block and the
+  // parameter cannot tell two different stories.
+  "### 任务书怎么写（每个任务的 `note`）\n" +
+  "任务是写给子会话的说明书（不是写给自己的备忘）：字段照抄下面这个骨架填进 `plan.tasks[].note`。\n" +
+  "`note` **不参与 plan 批准**（`canonicalPlanText` 明确排除它）—— 它是说明书，不是契约边界：" +
+  "子会话干活时改到骨架没点名的文件或模块，既不作废审计 PASS、也不撤销用户批准。\n" +
+  PLAN_TASK_SKELETON + "\n" +
+  "\n" +
+  PLAN_FINISH_TASK_BRIEF + "\n" +
+
+  "\n" +
   "### 硬约束（门禁会真的拦）\n" +
   "1. **plan 未经用户批准，禁止 spawn 任何子会话**。自己写 plan 文件不算数 —— 和 loop goal 同一机制。\n" +
   "2. **禁止写代码**：只放行 plan（`.pi/` 下）与交接/汇报文档（`docs/orchestrator-*.md`）。\n" +
+  "2b. **你全程保持编排身份**：不降级、不切模式、不换到 loop 去收尾 —— 交付是 plan 最后一环" +
+  "（收尾任务）的活，不是你的。plan 少了这一环是你写 plan 的问题：改 plan，别改自己的模式。\n" +
   "3. plan 里还有未完成任务 → `declare_done` 被拒（判据是**整体任务**，不是你自己这一轮）。\n" +
   "4. 还有活着的子会话 → `declare_done` 被拒。\n" +
   "5. 每个任务必须声明 `repo`（该任务工作的仓库绝对路径）；同一 repo 的任务不会并行调度（自动降级串行），" +

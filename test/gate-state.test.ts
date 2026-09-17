@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 
 import {
   emptyState,
+  inheritGoalContract,
   isPendingReadyReview,
   isPlateaued,
   isOscillating,
@@ -24,7 +25,8 @@ import {
   type GateVerdict,
 } from "../lib/gate-state.ts";
 import { FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
-import { restatementHash } from "../lib/restatement.ts";
+import { restatementConfirmed, restatementHash } from "../lib/restatement.ts";
+import { goalTextHash, isLoopGoalConfirmed, type LoopGoal } from "../lib/loop-goal.ts";
 
 const tempDirs: string[] = [];
 function makeTemp(): string {
@@ -332,6 +334,73 @@ test("turnsWithoutGoal: a corrupt counter is dropped (fail-open, never a lock)",
   }
   writeFileSync(path, JSON.stringify({ ...base, turnsWithoutGoal: 42 }));
   assert.equal(loadSidecar(path)?.turnsWithoutGoal, 42, "a real count survives");
+});
+
+// ---------------------------------------------------------------------------
+// the handoff successor — what a relay carries over, and what it never does
+// ---------------------------------------------------------------------------
+
+test("a relay successor inherits the user's contracts and the round budget — and nothing else", () => {
+  const text = "# 任务\n意图：把 A 改成 B";
+  const restated = "改之前 A ⇒ 改之后 B";
+  const predecessor = emptyState("sess-old", 10);
+  predecessor.restatement = {
+    text: restated,
+    hash: restatementHash(restated),
+    at: "2026-09-16T00:00:00.000Z",
+    station: "commit",
+  };
+  predecessor.loopGoal = { hash: goalTextHash(text), at: "2026-09-16T00:01:00.000Z", station: "commit" };
+  predecessor.rounds = [{ round: 1, findingsTotal: 2, fingerprints: ["fp"], at: "2026-09-16T00:02:00.000Z" }];
+  predecessor.turnsWithoutGoal = 3;
+  predecessor.bypass = { active: true, reason: "user said so", at: "2026-09-16T00:03:00.000Z" };
+  predecessor.taskMode = "orchestrator";
+  predecessor.scopeLimit = {
+    preexistingFiles: ["a.ts"],
+    sessionFiles: ["b.ts"],
+    at: "2026-09-16T00:04:00.000Z",
+  };
+  predecessor.sessionReposPaths = ["/other/repo"];
+
+  const inherited = inheritGoalContract(emptyState("sess-new", 10), predecessor);
+
+  // The four fields describe the USER's contracts, not one round's work: a
+  // handover that dropped them made the user answer the same questions again
+  // (measured — restatement dialog, plan re-audit, plan approval dialog).
+  assert.equal(inherited.restatement?.station, "commit", "the requirement the user confirmed travels");
+  assert.equal(restatementConfirmed(inherited.restatement), true, "…and is usable as it stands");
+  assert.deepEqual(inherited.loopGoal, predecessor.loopGoal, "so does the goal the user approved");
+  assert.equal(inherited.rounds.length, 1, "the round budget is NOT reset by a handover");
+  assert.equal(inherited.turnsWithoutGoal, 3, "nor is the force-negotiate counter");
+
+  // The rest of the state belongs to the session that did the work. A bypass in
+  // particular is ONE session's authorization (`/gate-bypass`), and a
+  // succession is not a place for it to ride along.
+  assert.equal(inherited.bypass.active, false, "a bypass is never inherited");
+  assert.equal(inherited.taskMode, undefined, "the task mode has its own env channel — not a handover's");
+  assert.equal(inherited.scopeLimit, undefined, "a scope limit is one session's grant");
+  assert.deepEqual(inherited.sessionReposPaths, ["/other/repo"],
+    "but the OTHER repos this work touched do travel — declare_done must still re-check them");
+  assert.equal(inherited.review.verdict, "PENDING");
+  assert.equal(inherited.sessionId, "sess-new", "the successor stays the session of record");
+});
+
+test("an inherited approval is still bound to the TEXT it approved", () => {
+  const text = "# 任务\n意图：把 A 改成 B";
+  const predecessor = emptyState("sess-old", 10);
+  predecessor.loopGoal = { hash: goalTextHash(text), at: "2026-09-16T00:01:00.000Z", station: "commit" };
+  const inherited = inheritGoalContract(emptyState("sess-new", 10), predecessor);
+  const goal: LoopGoal = { present: true, text, truncated: false, stale: false };
+
+  assert.equal(isLoopGoalConfirmed(goal, inherited.loopGoal, text), true,
+    "the text the user approved is still approved");
+  assert.equal(isLoopGoalConfirmed(goal, inherited.loopGoal, `${text}\n新增一行`), false,
+    "one edit to the goal file expires the inherited approval — the carry widens nothing");
+});
+
+test("a predecessor with nothing to carry changes nothing", () => {
+  const fresh = emptyState("sess-new", 10);
+  assert.deepEqual(inheritGoalContract(fresh, emptyState("sess-old", 10)), fresh);
 });
 
 test("askUser: a malformed interview record is dropped whole", () => {

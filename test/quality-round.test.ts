@@ -4,12 +4,16 @@ import assert from "node:assert/strict";
 import {
   QUALITY_ROLE,
   buildQualityAuditTask,
+  decideQualityHold,
   isSourceFile,
-  qualityFollowUp,
+  qualityPrecondition,
   qualityRoundSkip,
   qualityStandingFor,
+  roundCancelParty,
+  roundCancelPlan,
   skippedQualityRecord,
 } from "../lib/quality-round.ts";
+import { QUALITY_ROUND_SPEC, REVIEW_ROUND_SPEC } from "../lib/audit-round-specs.ts";
 
 test("isSourceFile: unknown = code (fail-closed), only enumerated non-code is skipped", () => {
   // Languages this gate has never been told about are CODE. The gate installs
@@ -78,29 +82,133 @@ test("skippedQualityRecord: a skip is a READY bound to the head, marked as a ski
   assert.match(rec.skipReason ?? "", /非代码文件/);
 });
 
-test("qualityFollowUp: READY releases the held round; anything else drops it AND stops the lane", () => {
-  // A pass releases the functional round it was holding…
-  assert.deepEqual(qualityFollowUp({ verdict: "READY", held: true }), {
-    dropHeld: false, abortLane: false, dispatchReviewer: true,
+// ---------------------------------------------------------------------------
+// THE CANCEL MATRIX (2026-09-16): all three parties start together, so the
+// question is no longer "who runs first" but "who stops whom". Every pair gets
+// an assertion — a matrix tested only on its READY row is not tested at all.
+// ---------------------------------------------------------------------------
+
+test("roundCancelPlan: a PARKED conclusion cancels nothing — the hold is not a verdict", () => {
+  // THE P0 THIS PINS (quality round, 2026-09-16): `recordReviewVerdict` returns
+  // BEFORE writing `st.review` when it holds a READY, so the settle path reads
+  // `review.verdict === "PENDING"` and the matrix used to interpret that as
+  // "the reviewer said BLOCKED" — killing the quality round and aborting the
+  // lane, i.e. exactly the round the hold exists to protect.
+  assert.deepEqual(roundCancelPlan({ party: "reviewer", verdict: "PENDING", held: true }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
   });
-  // …and a pass with nothing held changes nothing (the re-submission path:
-  // the router saw the standing pass and went straight to the reviewer).
-  assert.deepEqual(qualityFollowUp({ verdict: "READY", held: false }), {
-    dropHeld: false, abortLane: false, dispatchReviewer: false,
+  // The same `PENDING` WITHOUT a hold IS a real non-READY verdict (a recorder
+  // that refused the conclusion): the row fires as usual.
+  assert.deepEqual(roundCancelPlan({ party: "reviewer", verdict: "PENDING" }), {
+    cancelQuality: true, cancelReviewer: false, abortLane: true,
   });
-  for (const verdict of ["BLOCKED", "NEEDS_HUMAN", undefined]) {
-    // The content is about to change: the held brief is history, and the full
-    // lane verifying that content has nothing left to prove.
-    assert.deepEqual(qualityFollowUp({ verdict, held: true }), {
-      dropHeld: true, abortLane: true, dispatchReviewer: false,
-    }, `${verdict}: a held round is dropped and the lane stopped`);
-    // The lane stop is INDEPENDENT of `held`: a blocking verdict on a round
-    // nobody was holding still wastes the lane's remaining minutes, and the
-    // next submission would wait for a quiet lane first.
-    assert.deepEqual(qualityFollowUp({ verdict, held: false }), {
-      dropHeld: false, abortLane: true, dispatchReviewer: false,
-    }, `${verdict}: the lane stops even with nothing held`);
+  // A hold is about the REVIEWER's round; the quality round has no such state
+  // (its recorder writes the verdict before returning).
+  assert.deepEqual(roundCancelPlan({ party: "quality", verdict: "READY" }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
+  });
+});
+
+test("roundCancelPlan: a non-READY QUALITY round stops the reviewer AND the lane", () => {
+  for (const verdict of ["BLOCKED", "NEEDS_HUMAN", ""]) {
+    assert.deepEqual(roundCancelPlan({ party: "quality", verdict }), {
+      cancelQuality: false, cancelReviewer: true, abortLane: true,
+    }, `${verdict}: the reviewer's pane dies and the lane is aborted`);
   }
+  // A READY cancels nothing: the functional round is exactly what the gate is
+  // still waiting for.
+  assert.deepEqual(roundCancelPlan({ party: "quality", verdict: "READY" }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
+  });
+});
+
+test("roundCancelPlan: a non-READY REVIEWER stops the quality round AND the lane", () => {
+  for (const verdict of ["BLOCKED", "NEEDS_HUMAN"]) {
+    assert.deepEqual(roundCancelPlan({ party: "reviewer", verdict }), {
+      cancelQuality: true, cancelReviewer: false, abortLane: true,
+    }, `${verdict}: the quality pane dies and the lane is aborted`);
+  }
+  assert.deepEqual(roundCancelPlan({ party: "reviewer", verdict: "READY" }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
+  });
+});
+
+test("roundCancelPlan: the FAILED LANE stops only the reviewer — the quality round carries on", () => {
+  // The asymmetry is the user's requirement: the quality judge reads code, and
+  // a failing test suite says nothing about the code's quality. `abortLane` is
+  // false because the lane has already landed — there is nothing left to abort.
+  assert.deepEqual(roundCancelPlan({ party: "lane", verdict: "FAIL" }), {
+    cancelQuality: false, cancelReviewer: true, abortLane: false,
+  });
+  // A PASSING lane cancels nothing, and ONLY that exact word does — an
+  // unreadable verdict is never PASS (the same fail-closed direction the
+  // judges' rows take on a missing READY).
+  assert.deepEqual(roundCancelPlan({ party: "lane", verdict: "PASS" }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
+  });
+  for (const verdict of ["", "no verdict", "ERROR"]) {
+    assert.deepEqual(roundCancelPlan({ party: "lane", verdict }), {
+      cancelQuality: false, cancelReviewer: true, abortLane: false,
+    }, `${verdict}: an unreadable lane verdict is not PASS`);
+  }
+});
+
+test("roundCancelParty: the audit KIND is translated to the matrix's party — `review` is the reviewer's round", () => {
+  // THE P1 THIS PINS (functional round, 2026-09-16): the extension compared the
+  // settle's kind against `"reviewer"`, but a functional round settles as kind
+  // `"review"`, so the matrix's second row was unreachable — a BLOCKED reviewer
+  // neither stopped the quality round nor aborted the lane, while the receipt
+  // told the agent it had.
+  assert.equal(roundCancelParty(QUALITY_ROUND_SPEC.kind), "quality");
+  assert.equal(roundCancelParty(REVIEW_ROUND_SPEC.kind), "reviewer");
+  assert.equal(REVIEW_ROUND_SPEC.kind, "review", "the kind and the role are DIFFERENT words — that is the whole bug");
+  for (const other of ["goal", "plan", "advice", undefined, ""]) {
+    assert.equal(roundCancelParty(other as string | undefined), undefined, `${String(other)} cancels nothing`);
+  }
+});
+
+test("roundCancelPlan: ONE table covers all three parties — no row is implemented twice", () => {
+  // The quality round caught the lane's row living twice (2026-09-16): a hand-
+  // written `if (verdict !== "PASS") cancel(...)` at the lane's landing beside
+  // this table. The table is only worth something if every row goes through
+  // it, so this pins the THREE-PARTY shape the extension relies on.
+  const rows = ([
+    { party: "quality", verdict: "BLOCKED" },
+    { party: "reviewer", verdict: "BLOCKED" },
+    { party: "lane", verdict: "FAIL" },
+  ] as const).map((landing) => roundCancelPlan(landing));
+  assert.deepEqual(rows.map((r) => r.cancelReviewer), [true, false, true]);
+  assert.deepEqual(rows.map((r) => r.cancelQuality), [false, true, false]);
+  assert.deepEqual(rows.map((r) => r.abortLane), [true, true, false]);
+});
+
+test("qualityPrecondition: satisfied / still owed / disproven — the one reading both rules share", () => {
+  const pass = { ok: true as const, basis: "pass" as const };
+  assert.equal(qualityPrecondition({ standing: pass, qualityRoundInFlight: false }), "ok");
+  assert.equal(qualityPrecondition({ standing: pass, qualityRoundInFlight: true }), "ok", "a standing answer wins");
+  const pending = { ok: false as const, reason: "还没有质量轮的结论" };
+  assert.equal(qualityPrecondition({ standing: pending, qualityRoundInFlight: true }), "pending");
+  // NOBODY IS COMING BACK with a verdict (the pane died, or this round never
+  // dispatched one): fail closed rather than park the round forever.
+  assert.equal(qualityPrecondition({ standing: pending, qualityRoundInFlight: false }), "veto");
+});
+
+test("decideQualityHold: record / hold / refuse — and it is the same reading the parking rule uses", () => {
+  const pass = { ok: true as const, basis: "pass" as const };
+  const pending = { ok: false as const, reason: "还没有质量轮的结论" };
+  assert.equal(decideQualityHold({ standing: pass, qualityRoundInFlight: false }), "record");
+  // THE HEADLINE CASE OF THE PARALLEL DESIGN: the reviewer concluded first, the
+  // quality judge is still thinking — hold the conclusion, never record it yet.
+  assert.equal(decideQualityHold({ standing: pending, qualityRoundInFlight: true }), "hold");
+  // A standing recorded for ANOTHER head (the PREVIOUS round's BLOCKED) does
+  // not answer THIS round's question: this round dispatched its own quality
+  // judge, so the conclusion waits for that one instead of being refused on an
+  // older record.
+  assert.equal(
+    decideQualityHold({ standing: { ok: false, reason: "质量轮上一轮判了 BLOCKED" }, qualityRoundInFlight: true }),
+    "hold",
+  );
+  assert.equal(decideQualityHold({ standing: pending, qualityRoundInFlight: false }), "refuse");
 });
 
 test("buildQualityAuditTask: points at the checklist, carries the range and the stream — never the reviewer's brief", () => {

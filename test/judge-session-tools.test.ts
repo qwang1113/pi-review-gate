@@ -6,6 +6,9 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   registerJudgeSessionTools,
@@ -331,6 +334,22 @@ test("every tool takes the same role / sessionId / repo parameters", () => {
       `${tool} accepts the judge roles an agent can address`,
     );
   }
+});
+
+test("the role enum is declared ONCE in lib/ — the spawn tools import it (2026-09-17)", () => {
+  // The defect this pins: `judge-spawn-tools.ts` carried its own copy of the
+  // role enum, the copy omitted `quality-auditor`, and the gate's own report
+  // then pointed the agent at an answer tool that refused the asking judge.
+  // Text-level assertions could not catch it (both copies looked fine on their
+  // own); what catches it is counting the DECLARATIONS.
+  const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const lib = join(repo, "lib");
+  const declarers = readdirSync(lib)
+    .filter((f) => f.endsWith(".ts"))
+    .filter((f) => /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(/.test(readFileSync(join(lib, f), "utf8")));
+  assert.deepEqual(declarers, ["judge-session-tools.ts"], "a second declaration is how the two drift apart");
+  const spawn = readFileSync(join(lib, "judge-spawn-tools.ts"), "utf8");
+  assert.match(spawn, /import \{ ROLE_PARAM \} from "\.\/judge-session-tools\.ts"/, "…and the consumer imports it");
 });
 
 test("an unaddressed call is refused before the repo is even resolved", async () => {
@@ -744,6 +763,29 @@ test("the round probe: a new report ends it, a dead pane fails it, silence pends
   f.panes = ["%1"];
   const dead = { ...c };
   assert.deepEqual(probeJudgeRound(f.deps, dead, "rep-9", f.binding), { done: true, reason: "pane-dead", openQuestions: [] });
+});
+
+test("judge_wait: a round the gate CANCELLED is not announced as a dead pane to recover", async () => {
+  // Quality round P1, 2026-09-16. `cancelJudgeRound` kills the pane AND drops
+  // the registry row, and this wait captures its child record at its own top —
+  // so a cancellation landing mid-wait looked exactly like a crash, and the
+  // standard report sent the agent to `judge_recover` the very round the gate
+  // had just reclaimed (recovery refuses: the row is gone). The registry tells
+  // the two apart, and the recovery path reads the same fact.
+  const f = fake();
+  seed(f, { paneId: "%7" });
+  // The wait's own entry lookup runs synchronously; the cancellation then
+  // lands in its FIRST POLL GAP (2s by design — there is no injected sleep to
+  // shorten it from here).
+  const pending = call(f, "judge_wait", { role: "reviewer", timeoutMs: 2200 });
+  f.panes = ["%1"]; // the pane dies…
+  f.children = [];  // …and the registry row is dropped with it, as cancelJudgeRound does
+  const reply = await pending;
+  assert.equal(reply.isError, undefined, textOf(reply));
+  const text = textOf(reply);
+  assert.match(text, /本轮已被门禁终止/);
+  assert.doesNotMatch(text, /judge_recover 同 id 重开/, "never the recovery promise — there is no pane to re-open");
+  assert.equal((reply.details as { reason?: string }).reason, "cancelled");
 });
 
 test("the round probe repaints the border — but never through a stranger's pane id", () => {

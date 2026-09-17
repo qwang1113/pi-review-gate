@@ -57,6 +57,7 @@ function setup(over: Partial<{
 }> = {}): {
   deps: JudgeSpawnToolDeps;
   tools: Map<string, Exec>;
+  schemas: Map<string, unknown>;
   seen: string[][];
   store: SpawnStore;
 } {
@@ -105,8 +106,14 @@ function setup(over: Partial<{
   };
 
   const tools = new Map<string, Exec>();
+  // The registered PARAMETER SCHEMAS, kept beside the executors: the role enum
+  // a tool advertises is part of its contract, and a test that can only see the
+  // source text cannot tell whether the agent's call will pass validation
+  // (2026-09-17 — the second ROLE_PARAM copy was exactly that failure).
+  const schemas = new Map<string, unknown>();
   const host: ToolHost = {
     registerTool(def) {
+      schemas.set(def.name, def.parameters);
       tools.set(def.name, (params) =>
         def.execute("id", params, undefined, undefined, undefined).then((r) => ({
           content: r.content as Array<{ text: string }>,
@@ -179,7 +186,7 @@ function setup(over: Partial<{
     forgetAudit: () => { delete store.pending; },
   };
   registerJudgeSpawnTools(host, deps);
-  return { deps, tools, seen, store };
+  return { deps, tools, schemas, seen, store };
 }
 
 function textOf(r: { content: Array<{ text: string }> }): string {
@@ -232,6 +239,24 @@ test("spawn rolls back when tmux fails — no dangling registration", async () =
   const result = await tools.get("judge_spawn")!({ kind: "plan" });
   assert.equal(result.isError, true);
   assert.deepEqual(store.table, {}, "registration without a pane is rolled back");
+});
+
+test("judge_answer / judge_recover accept every addressable judge role (2026-09-17)", () => {
+  // MEASURED DEFECT: the gate's standard report said "answer with judge_answer",
+  // and the role enum this module declared by hand omitted `quality-auditor` —
+  // the answer path refused the role of the judge that had asked, and the only
+  // way through was bypassing `role` with `judgeId`. Both tools now advertise
+  // the ONE enum owned by lib/judge-session-tools.ts, and this asserts it on
+  // the REGISTERED SCHEMA: the source text looked correct in both copies.
+  const f = setup();
+  for (const tool of ["judge_answer", "judge_recover"]) {
+    const schema = f.schemas.get(tool) as { properties?: Record<string, { enum?: unknown[] }> } | undefined;
+    assert.deepEqual(
+      schema?.properties?.role?.enum,
+      ["reviewer", "quality-auditor", "adviser", "goal-auditor"],
+      `${tool} must accept the roles an agent can address`,
+    );
+  }
 });
 
 test("a stranger cannot answer another opener's review", async () => {
@@ -319,6 +344,24 @@ test("recover refuses a live pane and an unreadable tmux", async () => {
   const unreadable = await blind.tools.get("judge_recover")!({ judgeId });
   assert.equal(unreadable.isError, true);
   assert.match(textOf(unreadable), /读不出来/);
+});
+
+test("recover refuses a round that is no longer in the registry — and names the next step", async () => {
+  // The other half of the pair `judge_wait` forms with recovery (quality round
+  // P1, 2026-09-16): the cancel matrix ends a round by killing its pane AND
+  // dropping its row, so "recover" addresses something that cannot exist. The
+  // refusal has to say which door leads forward instead of leaving the opener
+  // to guess whether it lost a race.
+  const { tools, store } = setup();
+  const spawned = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(spawned.isError, undefined);
+  const judgeId = Object.keys(store.table)[0]!;
+  store.table = emptyHierarchy(); // the gate reclaimed the round's row
+  const gone = await tools.get("judge_recover")!({ judgeId });
+  assert.equal(gone.isError, true);
+  assert.match(textOf(gone), /不在登记表里/);
+  assert.match(textOf(gone), /judge_submit 重新派一轮/);
+  assert.doesNotMatch(textOf(gone), /续 transcript/, "…and it must not promise a recovery it cannot make");
 });
 
 test("recover re-opens a dead pane under the same session id", async () => {

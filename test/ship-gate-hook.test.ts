@@ -107,7 +107,7 @@ const bashCall = (command: string) => ({ toolName: "bash", input: { command } })
 test("sensitiveEditBlock names the path the agent typed, and offers the dialog when the path is askable", () => {
   const block = sensitiveEditBlock({ rawPath: "app/.env", askable: true });
   assert.equal(block.block, true);
-  assert.match(block.reason, /"app\/\.env" matches a sensitive-file pattern/);
+  assert.match(block.reason, /"app\/\.env" 命中敏感文件模式/);
   assert.match(block.reason, /request_sensitive_edit/,
     "an askable path must point at the one-time authorization dialog");
 });
@@ -116,14 +116,14 @@ test("sensitiveEditBlock withholds the dialog route for a path that cannot be au
   const block = sensitiveEditBlock({ rawPath: ".git/hooks/pre-commit", askable: false });
   assert.doesNotMatch(block.reason, /request_sensitive_edit/,
     "a .git internal (or a declined path) must never be presented as authorizable");
-  assert.match(block.reason, /cannot be authorized from here/);
+  assert.match(block.reason, /不能从这里授权/);
 });
 
 test("the edit arm refuses a sensitive path and never reaches the L6 label check", async () => {
   const r = makeDeps();
   const out = await evaluateToolCall(r.deps, editCall(".env"), {});
   assert.equal(out?.block, true);
-  assert.match(out!.reason, /matches a sensitive-file pattern/);
+  assert.match(out!.reason, /命中敏感文件模式/);
   assert.ok(!r.calls.includes("checkTestLabels"), "a refused edit pays no LLM call");
   assert.ok(!r.calls.includes("markSessionEdited"), "a refused edit is not this session's work");
 });
@@ -562,6 +562,10 @@ test("buildShipBlockReason keeps the station and the quality halves distinguisha
   assert.match(stationOnly.recorded, /beyond this round's delivery station/,
     "a station-only block must not be recorded as unmet quality");
   assert.doesNotMatch(stationOnly.shown, /judge_submit/);
+  // WHO CAN CLEAR IT: a station belongs to the user, unmet quality to the
+  // agent. A mixed refusal is labelled for the agent (it has the quality half
+  // to clear); the station half is spelled out in `next`.
+  assert.match(stationOnly.shown, /下一步：用户 —— /);
 
   const mixed = buildShipBlockReason({
     command: "git push",
@@ -573,6 +577,7 @@ test("buildShipBlockReason keeps the station and the quality halves distinguisha
   assert.match(mixed.recorded, /quality gates unmet/);
   assert.match(mixed.recorded, /precommit has not run/);
   assert.match(mixed.shown, /judge_submit/, "the quality half still points at the loop");
+  assert.match(mixed.shown, /下一步：你 —— /);
 });
 
 test("a station refusal is RECORDED as such, so the appeal route can refuse it for free", () => {

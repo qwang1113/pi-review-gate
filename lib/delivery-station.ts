@@ -285,13 +285,13 @@ export function stationShipProblem(station: DeliveryStation, kind: ShipCommandKi
  * session's three appeals.
  */
 export const STATION_SHIP_NEXT_STEPS =
-  "交付站点是本轮的**契约**，不是没跑完的质量门禁 —— 再跑一轮审查不会解开它。要走得更远，只有两条合法路径：\n" +
-  "  - loop 会话：请用户重新 `propose_restatement`（选一个更远的站点），再据此重谈 `propose_loop_goal`；\n" +
-  "  - 编排：项目经理把 plan 的 `deliveryStation` 提到该站点，请用户重新批准，子会话再重谈自己的 goal。\n" +
-  "**若你认为门禁把站点读错了**（例如用户其实同意到 commit、记录里却是 precommit；" +
+  "交付站点是本轮的**契约**，不是没跑完的质量门禁 —— 再跑一轮审查不会解开它；能放宽它的只有用户（agent 自己做不到）。两条合法路径：\n" +
+  "  - loop 会话：由用户重新确认一份更远的站点 —— agent 用 `ask_user` 把 `propose_restatement` 交到用户手上，用户定下站点后它再据此重谈 `propose_loop_goal`；\n" +
+  "  - 编排：由用户批准项目经理把 plan 的 `deliveryStation` 提到该站点，子会话再重谈自己的 goal。\n" +
+  "**若这条拦截把站点读错了**（例如用户其实同意到 commit、记录里却是 precommit；" +
   "或多仓库命令按所有涉及仓库中**最严**的那个站点判）：走的是同一条路 —— " +
-  "用 `ask_user` 把它交给用户，请他重新 `propose_restatement` 定下正确的站点，再据此重谈 goal。" +
-  "**不要**去手改 `.pi/loop-goal.md` 或门禁记录：批准绑定内容 hash，改了只会让 goal 失效，站点不会变。";
+  "agent 用 `ask_user` 把它交给用户，由用户重新定下正确的站点，再据此重谈 goal。" +
+  "agent **不要**去手改 `.pi/loop-goal.md` 或门禁记录：批准绑定内容 hash，改了只会让 goal 失效，站点不会变。";
 
 
 // ---------------------------------------------------------------------------

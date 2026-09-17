@@ -31,7 +31,7 @@ import {
 
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
 import { deliveryStationLine } from "./delivery-station.ts";
-import { effectiveRepoStation, narrowingReasonFor, taskRepoOf } from "./repo-pr-policy.ts";
+import { effectiveTaskStation, narrowingReasonFor } from "./repo-pr-policy.ts";
 import { spawnAuthorization } from "./orchestrator-gate.ts";
 import { buildTakeoverRoute, discoverOrchestrations } from "./orchestrator-takeover.ts";
 import {
@@ -44,6 +44,7 @@ import {
   type OrchestratorRuntime,
 } from "./orchestrator-registry.ts";
 import {
+  buildBranchLine,
   buildChildCommand,
   buildDeliveryMarker,
   buildTaskDocument,
@@ -259,21 +260,20 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // station is the outer contract; when this task's repo holds more than one
   // task and the user did not allow that repo to split, the ceiling drops to
   // `commit` — the work ends in a branch, the manager merges it locally, and
-  // ONE PR comes out of the combined result (lib/repo-pr-policy.ts).
-  //
-  // COMPUTED HERE, ONCE, from the repo the TASK declares — not from the
-  // worktree path, which is a directory the child happens to work in. Both the
-  // task book and the child's environment carry the same value, so the goal
-  // dialog inside the child cannot offer a station the plan already ruled out.
-  // THE PLAN'S OWN SPELLING, NOT THE RESOLVED CHECKOUT (round-1 P1, 2026-09-15).
-  // The narrowing is counted over `task.repo ?? <orchestration repo>` — the key
-  // `tasksByRepo` groups by — while `cwd` is what `resolveTaskRepo` returns, a
+  // ONE PR comes out of the combined result (lib/repo-pr-policy.ts). The
+  // plan's LAST task is the exception: it IS the delivery, so it takes the
+  // plan's own station (2026-09-18). The task itself is the argument — the
+  // rule counts over `task.repo ?? <orchestration repo>`, the key
+  // `tasksByRepo` groups by, while `cwd` is what `resolveTaskRepo` returns (a
   // `git --show-toplevel` that resolves a subdirectory or a symlinked path
-  // somewhere else. Spawning from one key and counting with the other is how a
-  // narrowed repo would hand its child an unlimited station.
-  const taskRepoKey = taskRepoOf(task, deps.repoRoot);
-  const stationCap = effectiveRepoStation(plan!, taskRepoKey, deps.repoRoot);
-  const stationCapReason = narrowingReasonFor(plan!, taskRepoKey, deps.repoRoot);
+  // somewhere else). Spawning from one key and counting with the other is how
+  // a narrowed repo would hand its child an unlimited station.
+  //
+  // COMPUTED HERE, ONCE: both this task book and the child's environment carry
+  // the same value (STATION_CAP_ENV, lib/session-factory.ts), so the goal
+  // dialog inside the child cannot offer a station the plan already ruled out.
+  const stationCap = effectiveTaskStation(plan!, task, deps.repoRoot);
+  const stationCapReason = narrowingReasonFor(plan!, task, deps.repoRoot);
   const stationCapLine =
     deliveryStationLine(stationCap) + (stationCapReason ? `\n上界原因：${stationCapReason}` : "");
   // ONE CHECKOUT PER WRITER (2026-09-10, user decision). A second child in the
@@ -305,6 +305,22 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     };
     cwd = isolated.path;
   }
+  // WHERE THIS CHILD WORKS (2026-09-18, A) — the gate's own fact, rendered by
+  // the gate (`buildBranchLine`). The fixed 「开工前先给自己开一个功能分支」
+  // sentence this replaces told a FINISH task to fork the very branch it was
+  // spawned to deliver; the branch was known HERE all along.
+  //
+  // `stationCap` is this task's ceiling, and it is what decides whether the
+  // gate's own worktree branch may be published: at `pr` the child ships, so
+  // it must rename the internal handle before pushing (`buildBranchLine` says
+  // how) — while below `pr` the same handle is a private working branch that
+  // must not become a PR head.
+  const branchLine = buildBranchLine({
+    ...(worktree === undefined
+      ? { branch: deps.currentBranch?.(cwd) }
+      : { branch: worktree.branch, isolated: true }),
+    mayShip: stationCap === "pr",
+  });
   // CROSS-REPO FIX (2026-09-17, measured): the task file MUST land in the
   // TASK's repo (the child resolves `@.pi/tasks/<file>` against ITS cwd,
   // which is `cwd` above). Writing it into the ORCHESTRATOR's repo made a
@@ -312,7 +328,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // pi exited at boot, the pane died, and the delivery check found nothing.
   const written = deps.writeTaskFile(
     taskFileName(marker),
-    buildTaskDocument({ marker, taskId, title: task.title, brief, stationCapLine }),
+    buildTaskDocument({ marker, taskId, title: task.title, brief, stationCapLine, branchLine }),
     cwd,
   );
   if (!written.ok) {

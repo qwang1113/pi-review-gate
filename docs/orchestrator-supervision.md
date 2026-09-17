@@ -510,7 +510,11 @@ repo 哈希，所以「哪些编排属于本仓库」是 id 自己回答的问�
 
 **批准不随接管转移**（用户 2026-09-06 拍板）：登记表是关于世界的事实，批准是用户
 给上一任**会话**的许可。接管后 plan 在门禁眼里未获批，必须重新 `submit`（重跑审计 +
-用户批准框）；回执会明说这一点。
+用户批准框）；回执会明说这一点。**例外只有接力继任者**（2026-09-16）：前任自己
+`session_handoff()` 开出来的那一代（门禁用交接标记 + sidecar 的 sessionId 认亲）保留
+批准五件套、`restatement`、`loopGoal` 与轮次预算 —— 同一份工作同一个人批过一次的
+东西不重批；`attach` 没有交接标记，照旧一个字都不继承。细则见
+`docs/execution-model.md` 的「接力继承什么」。
 
 **进入模式不再被旧 plan 挡住**：身份判定挂在真正需要身份的动作上 ——
 `orchestrator_plan` 的 `write` / `submit` 与 `orchestrator_spawn`；`read` 与 `archive`
@@ -572,6 +576,8 @@ plan，把每一处差异归入两类之一：
 | `parallel` → `serial` | `serial` → `parallel` |
 | 降低 `maxParallel` | 提高 `maxParallel` |
 | 收紧 `deliveryStation` | 提高 `deliveryStation`（放开更多 ship 命令） |
+| `allowMultiplePrs` 移除某个 repo（该 repo 回到「一个需求只出一个 PR」） | `allowMultiplePrs` 新增某个 repo（该 repo 的任务从此可以各自开 PR） |
+| 某任务的交付站点被**收紧** | 某任务的交付站点被**提高**——plan 的**最后一环**不受同 repo 多任务收窄（2026-09-18），所以改任务顺序、或删掉一个兄弟任务，都可能把这个豁免落到别的任务头上 |
 | 写回**此前已获授权**的内容（见下「撤回一次扩权」） | 任务改到另一个 `repo`（新写面，含改到 plan 里已有的另一个 repo） |
 
 读不到授权快照时一律判扩权 —— fail-closed 的代价只是多弹一次框。
@@ -586,7 +592,9 @@ plan，把每一处差异归入两类之一：
 它的安全边有三条：**用户每次新的显式批准会重置世系**（新决定覆盖旧决定，堵死
 「先平移变宽 → 用户后来收窄 → 再写回宽版本」）；世系从 sidecar 读回时按
 `approvedPlanHash` 的同等强度校验，**一条不合形状就整份丢弃**；换了新会话时它跟
-批准一起被 `withoutPlanApproval()` 剥离（登记表与 grants 留下，许可一样不留）。
+批准一起被 `successorRuntime(runtime, false)` 剥离（登记表与 grants 留下，许可一样不留）——
+`fromHandoff: true` 只给前任自己交棒的继任者（2026-09-16，见
+`docs/execution-model.md` 的「接力继承什么」）。
 它的信任边界与 `approvedPlanHash` **完全相同、防线同一** —— 都在门禁不可授权编辑
 的 sidecar 里；形状校验只做 fail-closed，不假装能识破一个格式合法的伪造项。
 

@@ -110,6 +110,30 @@ test("the appended run output is bounded", () => {
 // ---------------------------------------------------------------------------
 // the REPLAY notice (2026-09-15) — the mirror image of the failure notice
 
+test("the matrix's lane notes travel WITH the notice — the lane row has no sibling verdict", () => {
+  // Quality round P2, 2026-09-16: a judge's cancel note rides its sibling
+  // verdict's standard report; the lane's row has no sibling, so dropping the
+  // return value here meant 「正在跑的全量 precommit 已终止」 reached nobody and
+  // the agent saw only "precommit failed".
+  const text = buildAsyncPrecommitReport({
+    round: 2,
+    verified: "f".repeat(40),
+    current: "f".repeat(40),
+    verdict: "FAIL",
+    detail: "1 test failed",
+    laneNotes: ["已终止 reviewer 的这一轮（内容要改）", "  "],
+  });
+  assert.match(text, /已终止 reviewer 的这一轮（内容要改）/);
+  assert.ok(text.indexOf("已终止") < text.indexOf("1 test failed"),
+    "the note comes before the raw output — it is the reason, not an appendix");
+  assert.ok(!text.includes("\n  \n"), "blank notes are dropped, not printed as a dangling line");
+
+  const without = buildAsyncPrecommitReport({
+    round: 2, verified: "f".repeat(40), current: "f".repeat(40), verdict: "FAIL", detail: "x",
+  });
+  assert.ok(!without.includes("已终止"), "absent notes change nothing");
+});
+
 test("the replay notice names the round and the tree, and says nothing was wrong", () => {
   const notice = buildParkedReadyReplayNotice({
     round: 4,

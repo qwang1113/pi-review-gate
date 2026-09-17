@@ -145,14 +145,56 @@ export function commitLeftoversArgv(worktreePath: string, taskId: string): Workt
  * The trade is deliberate: history gains a merge commit where a squash would
  * have had one line, and in exchange a conflict costs one command that
  * actually works.
+ *
+ * THE BRANCH ARGUMENT IS THE POINT (2026-09-18, reviewer P2). Deriving it from
+ * `childId` here was the original shape, and it is wrong in exactly one case:
+ * the child RENAMED it. That is not hypothetical — `buildBranchLine`
+ * (lib/orchestrator-delivery.ts) asks every child whose station reaches `pr`
+ * to rename the gate's `rg-child-…` handle with `git branch -m …` before it
+ * pushes, precisely so an internal handle never becomes a PR head. Settling
+ * the DERIVED name after that fails with "branch not found", which is the
+ * worst shape a gate defect can take: the manager follows the gate's own
+ * instruction, and the gate then reports the manager's checkout as broken.
+ * Callers pass the branch they read off the checkout; `planSettlement` takes
+ * it as a parameter, so no caller can forget it.
  */
-export function mergeWorktreeArgv(repoRoot: string, childId: string): WorktreeArgv {
-  return ["-C", repoRoot, "merge", "--no-commit", "--no-ff", childWorktreeBranch(childId)];
+export function mergeWorktreeArgv(repoRoot: string, branch: string): WorktreeArgv {
+  return ["-C", repoRoot, "merge", "--no-commit", "--no-ff", branch];
 }
 
 /** Abort a conflicted merge, leaving the manager's checkout as it was. */
 export function abortMergeArgv(repoRoot: string): WorktreeArgv {
   return ["-C", repoRoot, "merge", "--abort"];
+}
+
+/**
+ * WHICH BRANCH THE REPOSITORY LISTS FOR ONE OF ITS OWN CHECKOUTS.
+ *
+ * ASKED OF THE REPOSITORY, NEVER OF THE DIRECTORY (quality round P1,
+ * 2026-09-18). `git -C <path> symbolic-ref` is the obvious read and it is a
+ * trap: when that directory is not a repository — a `worktree add` that failed
+ * halfway, an emptied shell left behind by a failed removal — git walks UP to
+ * the enclosing repository and answers with ITS branch. The answer then goes to
+ * `git -C <repoRoot> branch -D`, a destructive step, so a wrong one deletes the
+ * manager's own `main`. `git worktree list --porcelain` is the repository's own
+ * registry of the checkouts it owns: nothing can climb into it, and a path it
+ * does not list yields nothing at all.
+ *
+ * Pure: the argv and the parsing, no process.
+ */
+export function branchOfListedWorktree(porcelain: string, worktreePath: string): string | undefined {
+  let current: string | undefined;
+  for (const raw of porcelain.split("\n")) {
+    const line = raw.trimEnd();
+    if (line.startsWith("worktree ")) {
+      current = line.slice("worktree ".length).trim();
+      continue;
+    }
+    if (current !== worktreePath || !line.startsWith("branch ")) continue;
+    const ref = line.slice("branch ".length).trim();
+    return ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+  }
+  return undefined;
 }
 
 /** Is this git output a CONFLICT rather than a refusal we should surface? */
@@ -200,10 +242,12 @@ export function looksLikeAlreadyGone(output: string): boolean {
  * settles the CONTENT; the checkout is reclaimed by an explicit `discard`
  * once the merge is committed.
  */
-export function removeWorktreeArgv(repoRoot: string, childId: string): WorktreeArgv[] {
+export function removeWorktreeArgv(repoRoot: string, childId: string, branch: string): WorktreeArgv[] {
   return [
     ["-C", repoRoot, "worktree", "remove", "--force", childWorktreePath(repoRoot, childId)],
-    ["-C", repoRoot, "branch", "-D", childWorktreeBranch(childId)],
+    // The branch comes from the CALLER for the same reason the merge does: a
+    // child that renamed it holds a name this module cannot derive.
+    ["-C", repoRoot, "branch", "-D", branch],
   ];
 }
 
@@ -252,6 +296,14 @@ export function planSettlement(
   repoRoot: string,
   childId: string,
   taskId: string,
+  /**
+   * The branch the checkout is ACTUALLY on — read off it by the caller, never
+   * derived here: a child whose station reaches `pr` is told to rename the
+   * gate's handle before it pushes, and settling the name it no longer has is
+   * how the gate turns its own instruction into the manager's error (see
+   * {@link mergeWorktreeArgv}).
+   */
+  branch: string,
 ): SettlementPlan {
   const worktreePath = childWorktreePath(repoRoot, childId);
   switch (settlement) {
@@ -261,7 +313,7 @@ export function planSettlement(
       return {
         steps: [
           ...commitLeftoversArgv(worktreePath, taskId),
-          mergeWorktreeArgv(repoRoot, childId),
+          mergeWorktreeArgv(repoRoot, branch),
           // THE DIRECTORY GOES LAST, AND ONLY AFTER THE MERGE SUCCEEDED
           // (2026-09-15, user decision). A failure anywhere above stops the
           // sequence, so a conflicted merge never reaches this step — and the
@@ -277,7 +329,7 @@ export function planSettlement(
         onConflict: [abortMergeArgv(repoRoot)],
       };
     case "discard":
-      return { steps: removeWorktreeArgv(repoRoot, childId) };
+      return { steps: removeWorktreeArgv(repoRoot, childId, branch) };
   }
 }
 

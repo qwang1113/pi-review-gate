@@ -78,6 +78,16 @@ function runCheck(statePath, repo, env = process.env) {
   // -------------------------------------------------------------------------
   const GATE_VERDICTS = new Set(["PENDING", "READY", "BLOCKED", "NEEDS_HUMAN"]);
   const PRECOMMIT_VERDICTS = new Set(["PASS", "FAIL", "NO_CHECKS_RUN", "NOT_RUN"]);
+  // SESSION MODES — this file's copy of `TaskMode` from lib/task-mode.ts. The
+  // shape check below needs the whole set, and the copy is the one thing on
+  // both sides of the TS/CJS line: `orchestrator` was missing here while the TS
+  // side had treated it as legal since it was introduced, so every push in an
+  // orchestration was refused with "gate state shape/verdict invalid" — a
+  // message that reads as a CORRUPT sidecar, when the sidecar was fine. Keep it
+  // a SET for what the drift guard derives from the TS registry
+  // (test/pre-commit-check.test.ts): adding a mode there and not here is a red
+  // test, not a fail-closed push.
+  const TASK_MODES = new Set(["loop", "explore", "normal", "orchestrator"]);
 
   const readState = () => {
     let state;
@@ -112,7 +122,7 @@ function runCheck(statePath, repo, env = process.env) {
         !Number.isInteger(state.maxRounds) || state.maxRounds < 3 || state.maxRounds > 50 ||
         !state.bypass || typeof state.bypass.active !== "boolean" ||
         !nullableString(state.bypass.reason) || !nullableString(state.bypass.at) ||
-        (state.taskMode !== undefined && state.taskMode !== "loop" && state.taskMode !== "explore" && state.taskMode !== "normal") ||
+        (state.taskMode !== undefined && !TASK_MODES.has(state.taskMode)) ||
         (state.taskModeSource !== undefined && state.taskModeSource !== "auto" && state.taskModeSource !== "user") ||
         (state.strategicResetFired !== undefined && typeof state.strategicResetFired !== "boolean") ||
         (state.pausedQuestion !== undefined &&
@@ -142,6 +152,12 @@ function runCheck(statePath, repo, env = process.env) {
     // SECURITY: only a USER-chosen explore/normal (confirmed dialog or
     // /gate-mode) makes the hook advisory. An agent/auto classification must
     // never weaken the commit gate.
+    //
+    // ORCHESTRATOR IS DELIBERATELY ABSENT from this branch: it is STRICTER than
+    // loop (the project manager writes no code at all), so a mode that must not
+    // weaken the gate cannot be one of the two that do. It is ACCEPTED by the
+    // shape check above, which is the whole fix — the state then goes through
+    // the ordinary verdict chain like any loop session.
     if ((state.taskMode === "explore" || state.taskMode === "normal") &&
         state.taskModeSource === "user") process.exit(11);
     return state;

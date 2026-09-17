@@ -342,7 +342,7 @@ test("formatPrecommitBaseline states what was verified and steers to targeted te
   assert.match(block, /typecheck: passed — `npm run typecheck` \(3s\)/);
   assert.match(block, /test: passed — `npm run test` \(132s\)/);
   assert.match(block, /do NOT re-run the full suite or typecheck/);
-  assert.match(block, /Run ONLY targeted tests/);
+  assert.match(block.replace(/\s+/g, " "), /run ONLY the targeted test that settles it/);
   assert.match(block, /re-run only that one step/);
   // The baseline rides the reviewer task text when given, absent otherwise.
   const withBaseline = buildReviewPrompt(

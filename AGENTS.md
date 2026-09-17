@@ -48,33 +48,32 @@ so re-opening with the same `--session-id` continues the same session — its
 context is reused across rounds until a READY lands. Each review round is ONE
 reviewer over the WHOLE change:
 
-- **A code-quality round runs FIRST (2026-09-15, user requirement).** The same
-  chain dispatches `quality-auditor` on the same `baseline..HEAD` range before
-  the functional reviewer exists: it judges the CODE ITSELF (philosophy,
-  architecture, correctness, performance — then simplicity, readability,
-  maintainability) against `docs/code-quality-rules.md`, a language-neutral
-  checklist whose cross-repository clauses make the WHOLE repo its reference
-  (a duplicate that already exists elsewhere, an abstraction two modules could
-  share, a function the round touches that is already messy).
+- **The quality round runs BESIDE the functional one (2026-09-16).** One
+  `judge_submit` starts all three over the same `baseline..HEAD` at the same
+  moment: `quality-auditor` (the CODE ITSELF — philosophy, architecture,
+  correctness, security, performance, then simplicity, readability,
+  maintainability — against `docs/code-quality-rules.md`, a language-neutral
+  checklist whose cross-repository clauses make the WHOLE repo its reference),
+  the functional `reviewer`, and the full precommit lane. Who concludes what
+  stops whom is the cancel matrix, whose ONE substantive home is
+  `docs/execution-model.md` §「并行三方与取消矩阵」 — a non-READY quality round
+  kills the reviewer's pane and the lane, a non-READY reviewer kills the quality
+  pane and the lane, a FAILED lane kills the reviewer and leaves the quality
+  round running (it reads code, not test results). A reviewer that concludes
+  READY before the quality round does is HELD (parked) and recorded the moment
+  the quality round passes — never recorded early, never re-reviewed.
   P0/P1 BLOCKS; P2 is recorded only. A finding whose fix needs PRE-EXISTING
   code changed is a question for the USER — the judge puts it through
   `ask_user` (fold it in / only this round's own lines / out of scope) and
-  never widens the round itself.
-  A READY unlocks the functional round, which the gate then dispatches
-  **automatically** — the agent never calls `judge_submit` twice for one round,
-  and `quality-auditor` is NOT a role it can name. A BLOCKED does three
-  things: no reviewer, the standard report wakes the agent, and the full
-  precommit lane still verifying that content is ABORTED (its verdict would
-  describe a tree about to change) — verification is started beside the chain,
-  so the quality round never waits on it and its failure never interrupts the
-  round. Two rounds skip the quality judge legitimately, and the skip is
-  RECORDED and self-reported: a round with no code at all (docs/data only,
-  or the empty exit-goal round), and a re-submission whose HEAD already
-  carries a quality READY.
+  never widens the round itself. The agent never calls `judge_submit` twice for
+  one round, and `quality-auditor` is NOT a role it can name. Two rounds skip
+  the quality judge legitimately, and the skip is RECORDED and self-reported: a
+  round with no code at all (docs/data only, or the empty exit-goal round), and
+  a re-submission whose HEAD already carries a quality READY.
 
 - **Review → ONE call**: `judge_submit({role:"reviewer", task:<what you
   changed this round>})`. The gate runs the whole chain itself — full
-  precommit, the checkpoint commit (it stamps the checkpoint marker), the
+  precommit, the checkpoint commit, the
   `baseline..HEAD` computation, the dispatch — and any step that fails sends
   the round back with the reason instead of leaving it half-submitted. The
   full precommit is the exception, because it is started to run BESIDE the
@@ -282,7 +281,9 @@ frontmatter in `agents/*.md` is the single source of truth and
   `claude-opus-5`, `thinking: max`.
   `goal-auditor` is the dedicated pre-reviewer of the loop GOAL (read-only
   tools) whose verdict the gate records mechanically; `quality-auditor` is the
-  pre-reviewer of the CODE that runs before the functional reviewer (2026-09-15).
+  pre-reviewer of the CODE, running in the SAME round as the functional reviewer
+  (2026-09-16; one `judge_submit` starts both, and the cancel matrix decides who
+  stops whom — `docs/execution-model.md` §「并行三方与取消矩阵」).
   The L1/L2 execution tiers (`recon` / `fixer`) were retired — the gate
   ships the five judging roles only.
 
@@ -377,9 +378,11 @@ files changed since (no history ⇒ full brief).
 
 (c) **The reviewer judges a COMMIT RANGE, and findings stream.** The chain
 inside `judge_submit` computes `baseline..HEAD` (the
-immutable commits under review) and a finding-stream file. Inside its own
-copy a reviewer SHOULD verify by doing — mutation analysis included — and
-must restore before finishing. Because the reviewed range is immutable,
+immutable commits under review) and a finding-stream file. The reviewer READS
+the range and runs nothing by default; a concrete doubt buys the MINIMAL
+verification, done in its own throwaway copy and restored before finishing
+(`docs/judge-protocol.md` 「验证纪律」 is the only substantive home of that rule;
+every surface here only points at it). Because the reviewed range is immutable,
 **you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
 that carry evidence (confirm each in the code first), leave Nits for the
 verdict. WAITING-WINDOW DISCIPLINE（2026-09-05 起的口径，`lib/agent-directives.ts`
@@ -516,7 +519,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    直接退 findings、一个框都不弹**，过了才请用户批准。反过来，**不扩权的改动不再
    重新惊动用户**：删任务、加依赖、并行改串行、降并行度、收紧交付站点
    都让批准平移到新内容并记一条审计条目；新增任务、删依赖、串行改并行、
-   提高并行度、任务改到另一个 repo（新写面）一律重批（`lib/orchestrator-plan-approval.ts`）。
+   提高并行度、任务改到另一个 repo（新写面）、**某任务自己的交付站点变宽**
+   （改任务顺序或删掉一个兄弟任务，都可能让「plan 最后一环不受收窄」那份豁免
+   落到别的任务头上，2026-09-18）一律重批（`lib/orchestrator-plan-approval.ts`）。
    任务改哪些**文件**不再是 plan 的一部分（2026-09-17 用户决定）：同一 repo 内的任务
    本来就被门禁串行调度，文件边界防不住任何冲突，只让每次新开一个目录都得重新审计 + 重批。
    这个 plan 审计者是
@@ -560,9 +565,15 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    与 `node_modules`，**每一条都先要求 `git check-ignore` 确认被忽略**（未被忽略的
    路径带过去会污染 checkout 的 git status，而指纹、precommit 缓存与审查范围都读
    那棵树）；`.pi/` 的运行态文件（state / cache / plan / tasks / judge-sessions）
-   一律不带。播种结果进 spawn 回执。分支名在 `TASK_GOAL_DIRECTIVE` 里**只提示**、
-   不强制：kebab-case 英文描述性名（如 `feat/aum-blacklist-purge`），不要用会话 id
-   那种内部 handle —— 实测三个 PR 的 head 分支都是 `rg-child-<sessionId>`。
+   一律不带。播种结果进 spawn 回执。**分支指令由门禁按派发上下文写进任务书**
+   （`buildBranchLine`，2026-09-18 起；此前是 `TASK_GOAL_DIRECTIVE` 里一句固定的
+   「先给自己开一个功能分支」—— 对收尾任务直接是错的，会让交付分支再叉一条）：
+   同一 checkout ⇒ 点明它实际在的那条分支、不要新开；门禁自建隔离 checkout ⇒ 点明
+   门禁的 `rg-child-…` 分支，站点低于 `pr` 的不许 push / 开 PR，站点到 `pr` 的先
+   `git branch -m` 改成给人看的名字再交付（`orchestrator_close` 的 merge / discard
+   按 checkout 的**实际分支**结算，所以改名不会让结算失败）；只有保护分支或门禁
+   读不到分支时，才给 kebab-case 命名规范（如 `feat/aum-blacklist-purge`）—— 实测
+   三个 PR 的 head 分支都是 `rg-child-<sessionId>`，所以那个 handle 永不作为 PR head。
 
    完工后由 `orchestrator_close({ worktree:"keep"|"merge"|"discard" })` 决定那个
    checkout 的去向（默认 `keep`，因为里面的成果常常是唯一副本）；**`merge` 在合并
@@ -574,16 +585,20 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 2b. **同一个 repo 的一个需求只出一个 PR**（2026-09-15，用户决定）：plan 里同一
    repo 有 ≥2 个任务、且该 repo 没有被写进 `allowMultiplePrs` ⇒ **该 repo 的交付
-   站点自动收窄为 `commit`**（子会话提交完就停，不 push、不开 PR），项目经理用
-   `orchestrator_close({worktree:"merge"})` 把成果本地合并，用户验证后再开**一个**
-   PR。收窄是收紧、不是扩权，按既有规则平移 plan 批准（不额外弹框），但它在 plan
+   站点收窄为 `commit`**（子会话提交完就停，不 push、不开 PR）。**唯一例外是 plan 的
+   最后一环 —— 收尾任务**（2026-09-18，用户决定）：它按 plan 的 `deliveryStation`
+   交付（汇合其余任务的分支 → 走一次整体审核 → commit → push → 开**一个** PR），
+   被一起收窄就没有能 ship 的一方了（PM 被禁止写代码，实测过整轮卡在交付上的事故）。
+   收尾任务是**位置约定**（plan 顺序的最后一个），不是 plan 的新字段；它照旧计入该
+   repo 的任务数，所以「1 个工作任务 + 收尾任务」里那个工作任务仍然收窄为 `commit`。
+   收窄是收紧、不是扩权，按既有规则平移 plan 批准（不额外弹框），但它在 plan
    的批准对话框、plan 摘要、子会话的反述/goal 对话框与任务书里都写明；
    `allowMultiplePrs`（repo 绝对路径列表）是**唯一的放行入口**，把它加进 plan 属于
    扩权、必须重新问用户，而移除只是收紧。站点上界随 spawn 走环境变量
    `RG_STATION_CAP` 注入子会话（那是提示词写不进去的通道），子会话 goal 协商的站点
    展示与记录都不超过它；**`orchestrator_recover` 重开 pane 与 `session_handoff`
    接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。规则只有一处
-   实现：`lib/repo-pr-policy.ts`。
+   实现：`lib/repo-pr-policy.ts`（`finishTaskId` / `effectiveTaskStation`）。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
    本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的
@@ -592,6 +607,14 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    占用，编排始终只有一个持有者；继任者带着**前任的 session id** 接管 worktree 占用，
    所以前任没来得及释放也接得上。权威出处只有一处：`docs/execution-model.md`
    的「接力的不断档保证」。
+4. **接力继承的是记录，不是权力**（2026-09-16）：继任者（`lib/session-inheritance.ts`
+   的 `isHandoffSuccessorOf` —— 有交接标记**且** sidecar 里记的 sessionId 就是那个前任，
+   两者缺一不可）保留用户已经确认过的两份记录：plan 批准五件套，与会话的 `restatement`
+   / `loopGoal` / 轮次预算（`rounds` / `turnsWithoutGoal`）。每一条仍绑着它当初绑的
+   **内容**（canonical plan / goal 文本 / 反述 text+hash），内容一变既有校验立刻失效；
+   `bypass`、scope limit、`taskMode` 一律不继承。`orchestrator_attach` 接管没有交接标记
+   ⇒ 任何东西都不继承（2026-09-06 的「批准不随会话转移」只收窄、没被推翻）。规则落在
+   `lib/orchestrator-registry.ts` / `lib/gate-state.ts`，扩展里只做接线。
 
 系统通知（OSC 777/9/99）**只有项目经理能发**，且带节流 —— 单一入口 + 只推给
 用户本人，与 `lib/attention.ts` 禁止的「任何会话都能广播」是相反的形态。

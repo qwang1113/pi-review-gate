@@ -116,6 +116,17 @@ test("buildStandardReport: a question carries its options, a dead pane its recov
   assert.match(dead, /pane 消失且 verdict 未落盘/);
   assert.match(dead, /下一步：judge_recover 同 id 重开/);
 
+  // A CANCELLED ROUND IS THE OPPOSITE INSTRUCTION (quality round P1,
+  // 2026-09-16): the gate ended it and reclaimed the registry row, so the
+  // recovery the pane-dead wording asks for is refused by the very fact that
+  // produced this wake-up.
+  const cancelled = buildStandardReport({ role: "reviewer", judgeId: "j9", reason: "cancelled" });
+  assert.match(cancelled, /本轮已被门禁终止/);
+  assert.doesNotMatch(cancelled, /下一步：judge_recover/,
+    "never the one instruction that cannot work here — the note may only say not to use it");
+  assert.match(cancelled, /不要 judge_recover/);
+  assert.match(cancelled, /judge_submit 重新派一轮/);
+
   const pending = buildStandardReport({ role: "reviewer", judgeId: "j7", reason: "pending", waitedSeconds: 300 });
   assert.match(pending, /本轮仍在运行，这段时间没有新消息/);
   assert.match(pending, /等待纪律/, "a timeout hands back the one wording of the discipline");

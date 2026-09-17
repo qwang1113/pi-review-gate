@@ -1,14 +1,17 @@
 /**
- * THE QUALITY ROUND — a code-quality review that runs BEFORE the functional
- * one (2026-09-15, user requirement).
+ * THE QUALITY ROUND — a code-quality review that runs IN THE SAME ROUND as
+ * the functional one (2026-09-16; it ran before it from 2026-09-15).
  *
  * WHAT IT IS. Every submission already walks a chain inside `judge_submit`:
- * precommit → checkpoint → prepare → dispatch. This module owns the NEW step
- * wedged between prepare and the functional reviewer — the round that judges
- * whether the CODE ITSELF is any good (philosophy / architecture /
- * correctness / performance, then simplicity / readability / maintainability),
- * against a LANGUAGE-NEUTRAL checklist. Only a READY here lets the functional
- * reviewer be dispatched at all.
+ * precommit → checkpoint → prepare → dispatch. This module owns the QUALITY
+ * judge of that round — the one that judges whether the CODE ITSELF is any
+ * good (philosophy / architecture / correctness / performance, then
+ * simplicity / readability / maintainability), against a LANGUAGE-NEUTRAL
+ * checklist. The gate starts it together with the functional reviewer: both
+ * judge the same immutable range, and the cancel matrix below decides who
+ * stops whom. Only a quality READY lets a functional READY be RECORDED — a
+ * reviewer that concludes first has its conclusion held until the quality
+ * verdict lands.
  *
  * WHY A SEPARATE ROLE. `agents/reviewer.md` had architecture, naming and
  * minimalism clauses already, and in practice almost never raised them: a
@@ -17,21 +20,23 @@
  * question — this file is the mechanical half of the quality judge.
  *
  * WHAT LIVES HERE AND WHY. Only decisions, never effects: which rounds skip
- * the quality judge, whether the functional reviewer may be dispatched, what a
- * recorded quality verdict looks like. `extensions/review-gate.ts` wires them
- * (routing in `submitForReview`, the hand-off on settle, killing the precommit
- * lane) and writes nothing of its own — that file is ~11.6k lines and got
- * there one "just add the check here" at a time.
+ * the quality judge, whether the functional reviewer's verdict may be
+ * recorded, who cancels whom, what a recorded quality verdict looks like.
+ * `extensions/review-gate.ts` wires them (routing in `submitForReview`, the
+ * kill on the settle path, killing the precommit lane) and decides nothing of
+ * its own — that file is ~12k lines and got there one "just add the check
+ * here" at a time.
  *
  * THE TWO HALVES OF A QUALITY PASS, kept apart on purpose:
  *  - `qualityRoundSkip` answers "is there anything to judge at all?" — a
  *    documentation-only round has no code-quality question to ask, so it is
  *    SKIPPED (and the skip is recorded, never silent).
- *  - `qualityStandingFor` answers "may the functional reviewer run now?" — the
- *    mechanical gate that makes the quality round unskippable by accident.
+ *  - `qualityStandingFor` answers "does a quality pass stand for this head?"
+ *    — the mechanical fact a recorded READY hangs on.
  */
 
 import { buildStreamDirective } from "./review-stream.ts";
+import { QUALITY_ROUND_SPEC, REVIEW_ROUND_SPEC } from "./audit-round-specs.ts";
 
 /**
  * Extensions that carry no code — USED AS AN EXCLUSION LIST, never as a
@@ -131,11 +136,12 @@ export type QualityStandingResult =
   | { ok: false; reason: string };
 
 /**
- * THE PRECONDITION OF THE FUNCTIONAL REVIEW — the one mechanical fact that
- * makes the quality round unskippable by accident.
+ * THE PRECONDITION OF A RECORDED READY — the mechanical fact that makes the
+ * quality round unskippable by accident.
  *
- * A reviewer may be dispatched only when the CURRENT head carries a quality
- * READY (or the round was skipped as code-free). Everything else fails closed:
+ * A functional READY may be recorded only when the CURRENT head carries a
+ * quality READY (or the round was skipped as code-free). Everything else fails
+ * closed:
  *  - no record at all;
  *  - a record bound to a DIFFERENT head (the content moved after the quality
  *    round judged it — the checkpoint the next submission writes moves HEAD,
@@ -145,6 +151,14 @@ export type QualityStandingResult =
  * A SKIP is recorded as a READY carrying `skipped`, so this function needs no
  * third state: "the quality round decided there was nothing to judge" and "the
  * quality round judged it" are the same permission, recorded differently.
+ *
+ * WHO READS IT. Since 2026-09-16 the two judges start together, so this no
+ * longer gates the DISPATCH in the parallel path (the gate dispatched the
+ * quality judge in the same breath); it gates the RECORD — `decideQualityHold`
+ * below turns it into record / hold / refuse. It still gates the dispatch for
+ * every other caller, and there is exactly one of those: a re-submission whose
+ * head already carries a quality READY (`dispatchJudgeRound`'s explicit
+ * `qualityRoundDispatched` parameter is the only way past it).
  */
 export function qualityStandingFor(input: {
   head: string;
@@ -213,35 +227,158 @@ export const QUALITY_ROLE = "quality-auditor";
 export const QUALITY_RULES_RELPATH = "docs/code-quality-rules.md";
 
 /**
- * WHAT A FINISHED QUALITY ROUND DOES TO THE ROUND IT WAS HOLDING.
+ * WHAT JUST LANDED — the input of the cancel matrix.
  *
- * The hand-off is three separate effects, and each one is right for a reason a
- * reader can check:
- *  - `dispatchReviewer` — the functional round waited for this pass; it runs
- *    now, verbatim (same task text, same findings stream, same target).
- *  - `dropHeld` — a non-READY verdict means the content is ABOUT TO CHANGE, so
- *    the held functional brief describes a round that will never happen.
- *  - `abortLane` — and the full lane still verifying that content has nothing
- *    left to prove either (user requirement: a blocking quality verdict ends
- *    the precommit that runs beside it). This one is independent of `held`: a
- *    blocking verdict on a round nobody was holding still makes the lane's
- *    remaining minutes pointless, and the NEXT submission would wait for a
- *    quiet lane before starting the verification that matters.
- *
- * PURE, so the table below is a test rather than three branches spread through
- * a 12k-line extension.
+ * The LANE is not a judge (it has no verdict word in common with them: it says
+ * PASS, they say READY), and its row of the table is its own, so it is a case
+ * of this union rather than a fourth enum member of `party`. A caller that
+ * invents a synthetic judge to reach the lane's row is how the matrix ends up
+ * implemented twice — which is what the quality round caught on 2026-09-16.
  */
-export interface QualityFollowUp {
-  dropHeld: boolean;
-  abortLane: boolean;
-  dispatchReviewer: boolean;
+export type RoundLanding =
+  | { party: "quality"; verdict: string }
+  /**
+   * `held` — the recorder PARKED this round's conclusion (the full lane's PASS
+   * or the quality verdict is still owed), so `verdict` is not a verdict at all
+   * but the state the sidecar is left in (`PENDING`).
+   */
+  | { party: "reviewer"; verdict: string; held?: boolean }
+  | { party: "lane"; verdict: string };
+
+/**
+ * WHICH PARTY OF A ROUND AN AUDIT KIND IS — the bridge between the two
+ * vocabularies, and the reason it exists is a measured P1.
+ *
+ * `lib/audit-round-specs.ts` names a round by its KIND (`quality`, `review`,
+ * `goal`, `plan`, `advice`); the cancel matrix names its members by ROLE
+ * (`quality`, `reviewer`). The extension compared the settle's kind against
+ * `"reviewer"` — a word that never appears as a kind — so the matrix's second
+ * row was dead code: a BLOCKED functional round neither stopped the quality
+ * round nor aborted the lane it was spending minutes on, while the receipt and
+ * the quality round's own note promised the agent it had (functional round P1,
+ * 2026-09-16).
+ *
+ * The kinds are READ FROM THE SPECS, not spelled again: a renamed kind then
+ * breaks this bridge loudly (the matrix would receive `undefined` and cancel
+ * nothing) instead of silently skipping one row — and the test below pins both
+ * translations.
+ */
+export function roundCancelParty(kind: string | undefined): "quality" | "reviewer" | undefined {
+  if (kind === QUALITY_ROUND_SPEC.kind) return "quality";
+  if (kind === REVIEW_ROUND_SPEC.kind) return "reviewer";
+  return undefined;
 }
 
-export function qualityFollowUp(input: { verdict: string | undefined; held: boolean }): QualityFollowUp {
-  if (input.verdict !== "READY") {
-    return { dropHeld: input.held, abortLane: true, dispatchReviewer: false };
+/**
+ * WHO STOPS WHOM — the cancel matrix of a parallel round (2026-09-16), as a
+ * pure and total table.
+ *
+ * All three parties start together, so "which one failed" decides what happens
+ * to the others, and that is a decision rather than three branches spread
+ * through the extension (which is how the same matrix ends up implemented
+ * twice, once per failing party).
+ *
+ *  - a NON-READY quality verdict ⇒ the reviewer's pane is killed and the lane
+ *    is aborted: this round is blocked, and both were spending minutes on
+ *    content that is about to change;
+ *  - a NON-READY reviewer verdict ⇒ the quality pane is killed and the lane is
+ *    aborted, for the same reason;
+ *  - the LANE fails ⇒ the reviewer is killed, the quality round KEEPS GOING.
+ *    That asymmetry is deliberate (user requirement): the quality judge reads
+ *    code, and a failing test suite says nothing about the code's quality.
+ *
+ * `abortLane` is false on the lane's own row because the lane has already
+ * landed — there is nothing left to abort. The lane's row is fail-closed in
+ * the same direction as the others: only the exact word PASS cancels nothing.
+ *
+ * A READY cancels nothing: the other party's conclusion is still owed, and a
+ * reviewer READY that arrives before the quality verdict is HELD rather than
+ * recorded (`decideQualityHold`).
+ */
+export interface RoundCancelPlan {
+  /** Kill the quality judge's pane. */
+  cancelQuality: boolean;
+  /** Kill the reviewer's pane. */
+  cancelReviewer: boolean;
+  /** Abort the full precommit lane still verifying this content. */
+  abortLane: boolean;
+}
+
+export function roundCancelPlan(landing: RoundLanding): RoundCancelPlan {
+  const nothing = { cancelQuality: false, cancelReviewer: false, abortLane: false };
+  if (landing.party === "lane") {
+    return landing.verdict === "PASS" ? nothing : { cancelQuality: false, cancelReviewer: true, abortLane: false };
   }
-  return { dropHeld: false, abortLane: false, dispatchReviewer: input.held };
+  // A PARKED CONCLUSION IS NOT A VERDICT (quality round P0, 2026-09-16).
+  // `recordReviewVerdict` returns BEFORE writing `st.review` when it holds a
+  // READY, so a caller that reads the sidecar sees `PENDING` — and cancelling
+  // off that reading kills the quality round and the lane, i.e. exactly the
+  // round the hold exists to keep alive. Nothing is cancelled while a round is
+  // parked: every landing re-asks the hold (lib/review-adjudicate.ts).
+  if (landing.party === "reviewer" && landing.held === true) return nothing;
+  if (landing.verdict === "READY") return nothing;
+  return landing.party === "quality"
+    ? { cancelQuality: false, cancelReviewer: true, abortLane: true }
+    : { cancelQuality: true, cancelReviewer: false, abortLane: true };
+}
+
+/** What a functional verdict does with the quality round still owed. */
+export type QualityHold = "record" | "hold" | "refuse";
+
+/**
+ * THE QUALITY PRECONDITION AS ONE THREE-VALUED READING — satisfied, still
+ * owed, or disproven.
+ *
+ * It is the state the parking machinery (lib/review-adjudicate.ts) consumes,
+ * and `decideQualityHold` below is the same reading in the vocabulary of the
+ * RECORDER. One policy, two callers — a second spelling of "is the quality
+ * round still coming?" is how the park rule and the record rule start to
+ * disagree.
+ */
+export type QualityPrecondition = "ok" | "pending" | "veto";
+
+export function qualityPrecondition(input: {
+  /** `qualityStandingFor(...)` for the round's head. */
+  standing: QualityStandingResult;
+  /**
+   * Is THIS ROUND's quality judge still able to conclude? NOT "is some quality
+   * pane alive": the pane is reused across rounds and outlives its own
+   * verdict, so a registry lookup would answer yes forever (and park a round
+   * nothing will ever release). The caller must answer from the round's own
+   * record — a quality judge dispatched against THIS head that has not been
+   * ruled out.
+   */
+  qualityRoundInFlight: boolean;
+}): QualityPrecondition {
+  if (input.standing.ok) return "ok";
+  return input.qualityRoundInFlight ? "pending" : "veto";
+}
+
+/**
+ * MAY THE FUNCTIONAL VERDICT BE RECORDED NOW?
+ *
+ * The quality precondition, applied at the RECORDING end (2026-09-16). The two
+ * judges run together, so a reviewer READY can arrive while the quality round
+ * is still thinking — recording it there would ship a round the quality judge
+ * never passed, which is exactly the guarantee the parallel design must not
+ * cost.
+ *
+ *  - `record` — the standing is there (a pass, or a recorded skip);
+ *  - `hold` — nothing stands YET, and this round's own quality judge is still
+ *    able to conclude: the conclusion is parked verbatim and replayed when
+ *    that verdict lands (lib/review-adjudicate.ts owns the parking);
+ *  - `refuse` — nothing stands and NOBODY is coming back with an answer (the
+ *    quality pane died, or the round never dispatched one): fail closed. This
+ *    is the same rule `unverified-idle` already follows — a hold with nobody
+ *    to end it is a round parked forever.
+ */
+export function decideQualityHold(input: {
+  standing: QualityStandingResult;
+  qualityRoundInFlight: boolean;
+}): QualityHold {
+  const state = qualityPrecondition(input);
+  if (state === "ok") return "record";
+  return state === "pending" ? "hold" : "refuse";
 }
 
 /**
@@ -269,7 +406,7 @@ export function buildQualityAuditTask(input: {
   const lines = [
     `You are the quality auditor of this round. You judge the CODE ITSELF, on the commit range ${input.range} — immutable git history, and the only code this round judges. Read it with \`git show\` / \`git diff ${input.range}\`.`,
     "",
-    `YOUR CHECKLIST: \`${input.rulesPath}\` — read it FIRST (it is short). It has two layers: L1 (philosophy, architecture, correctness, performance) and L2 (simplicity, readability, maintainability). Only L1/L2 P0/P1 findings BLOCK the round; language-specific best practice and formatting are explicitly NOT yours (the repo's own linters own those).`,
+    `YOUR CHECKLIST: \`${input.rulesPath}\` — read it FIRST (it is short). It has two layers: L1 (philosophy, architecture, correctness, security, performance) and L2 (simplicity, readability, maintainability). Only L1/L2 P0/P1 findings BLOCK the round; language-specific best practice and formatting are explicitly NOT yours (the repo's own linters own those).`,
     "",
     "THE RANGE IS YOUR SCOPE, THE WHOLE REPOSITORY IS YOUR REFERENCE (the checklist's cross-repository clauses): a new helper that already exists elsewhere, an abstraction that two existing modules could share, a function you are touching that is already this messy. Judge the CHANGED lines, but go read the rest of the repo before concluding that a change stands alone.",
     "",
@@ -279,7 +416,7 @@ export function buildQualityAuditTask(input: {
       ? input.changeIndex.trim()
       : `Changed files (${input.files.length}) in ${input.range}:\n${input.files.map((f) => `- ${f}`).join("\n")}`,
     "",
-    `You are reviewing COMMIT RANGE ${input.range}: immutable git history — the main session may keep editing the worktree while you judge (its new edits are not part of your range). Judge the range, NEVER the live tree. You have no edit/write tools (edit/write are excluded); \`bash\` is read-only inspection. To try something, check the reviewed commit out into a THROWAWAY worktree under $TMPDIR (\`git worktree add <tmp> HEAD\`) and run there — never installers inside it (.git is shared). Never run git commit/push or any gh command.`,
+    `You are reviewing COMMIT RANGE ${input.range}: immutable git history — the main session may keep editing the worktree while you judge (its new edits are not part of your range). Judge the range, NEVER the live tree. You have no edit/write tools (edit/write are excluded); \`bash\` is read-only inspection. Read the code first — a concrete doubt buys the minimal verification (docs/judge-protocol.md 「验证纪律」 is the rule); if you do run something, check the reviewed commit out into a THROWAWAY worktree under $TMPDIR (\`git worktree add <tmp> HEAD\`) and run there — never installers inside it (.git is shared). Never run git commit/push or any gh command.`,
   ];
   if (input.session) {
     lines.push(

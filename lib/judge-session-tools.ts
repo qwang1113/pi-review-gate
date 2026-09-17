@@ -233,8 +233,9 @@ export interface JudgeSessionToolDeps {
     /** The round ran under a weaker binding — surfaced, never buried. */
     bindingNote?: string;
     /**
-     * What the gate did because the round ended (the quality round's hand-off:
-     * a released reviewer, a dropped round, a stopped precommit lane).
+     * What the gate did because the round ended (the round's siblings, by the
+     * cancel matrix: a killed judge, a stopped precommit lane, a parked READY
+     * replayed or retired).
      *
      * Its own field, and its own line in the report: the recorded note is
      * shown first-line-only, so a sentence appended to its tail is invisible
@@ -280,7 +281,15 @@ export interface JudgeSessionToolDeps {
 // that round (judge_submit's role enum deliberately omits it — the chain
 // dispatches it), but the round can ask the agent a question, and waiting on
 // or answering a judge you cannot name would be a dead end.
-const ROLE_PARAM = Type.Optional(Type.Enum({
+//
+// EXPORTED (2026-09-17) so `lib/judge-spawn-tools.ts` — the other module that
+// registers role-addressed tools (`judge_answer` / `judge_recover`) — imports
+// this one instead of keeping a second copy. It kept one, the copy omitted
+// `quality-auditor`, and the consequence was measured: the gate's own report
+// said "use judge_answer" while that tool's schema refused the role of the
+// very judge that had asked.
+// `judge_spawn` deliberately does NOT use it: it only opens goal/plan reviews.
+export const ROLE_PARAM = Type.Optional(Type.Enum({
   reviewer: "reviewer",
   "quality-auditor": "quality-auditor",
   adviser: "adviser",
@@ -935,6 +944,23 @@ export async function doWait(
     ...(observation.notThisRound === undefined ? {} : { notThisRound: observation.notThisRound }),
   };
   if (observation.done && observation.reason === "pane-dead") {
+    // A CANCELLED ROUND IS NOT A DEAD PANE (quality round P1, 2026-09-16).
+    //
+    // The cancel matrix ends a round by killing its pane AND dropping its
+    // registry row (`cancelJudgeRound` in the extension) — and the row is
+    // exactly what `judge_recover` needs. This wait captured its child record
+    // at the top, so a round cancelled WHILE IT WAS IN FLIGHT looked
+    // identical to a crash: the probe saw the pane vanish and the standard
+    // report told the agent to `judge_recover` a round the gate had just
+    // reclaimed, which is then refused because the row is gone (measured
+    // dead end). The registry decides which of the two it is — the same fact
+    // the recovery path reads, so the two halves cannot disagree.
+    if (!deps.findChild(addressed.root, addressed.role, addressed.judgeId)) {
+      return reply(
+        buildStandardReport({ ...base, reason: "cancelled", waitedSeconds }),
+        { done: true, reason: "cancelled", role: child.role, hasVerdict: false },
+      );
+    }
     return reply(
       buildStandardReport({ ...base, reason: "pane-dead", waitedSeconds }),
       { done: true, reason: "pane-dead", role: child.role, hasVerdict: false },

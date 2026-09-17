@@ -79,6 +79,16 @@ export interface AsyncPrecommitReport {
   verdict: string;
   /** The `run_precommit` reply text, appended verbatim. Never a summary. */
   detail: string;
+  /**
+   * What the CANCEL MATRIX did about this round, when a non-PASS landing ran
+   * its row (quality round P2, 2026-09-16).
+   *
+   * A judge's row hands its notes to the sibling verdict's standard report; the
+   * lane's row has no sibling, so without this the note 「本轮有 judge 判了非
+   * READY，正在跑的全量 precommit 已终止」 reached nobody and the agent saw
+   * only "precommit failed". This notice IS the lane's delivery.
+   */
+  laneNotes?: string[];
 }
 
 /**
@@ -179,9 +189,13 @@ export function buildAsyncPrecommitReport(input: AsyncPrecommitReport): string {
   ].join("\n");
 
   const lead = stale ? staleLead : loudLead;
+  // WHAT THE MATRIX DID travels with the notice that delivers it: the row's
+  // notes are the only place those actions are ever spoken (see `laneNotes`).
+  const cancelNotes = (input.laneNotes ?? []).filter((note) => note.trim().length > 0);
+  const leadWithNotes = cancelNotes.length === 0 ? lead : `${lead}\n${cancelNotes.join("\n")}`;
 
   const detail = input.detail.slice(0, ASYNC_PRECOMMIT_DETAIL_MAX);
-  return detail ? `${lead}\n\n${detail}` : lead;
+  return detail ? `${leadWithNotes}\n\n${detail}` : leadWithNotes;
 }
 
 /**

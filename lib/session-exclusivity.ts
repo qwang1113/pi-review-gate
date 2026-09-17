@@ -65,6 +65,7 @@
 
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
+import { buildRejection } from "./rejection-copy.ts";
 
 /**
  * One live session's claim on a worktree's gate state.
@@ -201,15 +202,18 @@ function isFresh(at: string, now: number): boolean {
 /** The refusal: who holds it, and the two ways out. */
 function refusalText(holder: PresenceRecord, repoRoot: string): string {
   const name = basename(repoRoot);
-  return [
-    `review-gate: 这个 worktree 已被另一个会话占用，本会话不启动门禁。`,
-    `占用者：session ${holder.sessionId}（pid ${holder.pid} @ ${holder.host}，最后心跳 ${holder.at}）。`,
-    `两个会话共用同一份 .pi/review-gate-state.json 与同一份未提交改动——那是 git 钩子唯一能看到的东西，` +
-    `互相覆盖的结果就是「钩子拒绝了门禁刚刚批准的东西」。`,
-    `出路二选一：`,
-    `  1. 各自一个 worktree：git -C ${repoRoot} worktree add ../${name}-2 -b <新分支名>，然后在 ../${name}-2 里开这个会话；`,
-    `  2. 关掉占用的那个会话（上面那个 session），本会话在它的心跳超过 ${Math.round(PRESENCE_FRESH_MS / 1000)} 秒未更新后即可正常启动——不需要手工删任何文件。`,
-  ].join("\n");
+  return buildRejection({
+    what: "这个 worktree 已被另一个会话占用，本会话不启动门禁",
+    why: `占用者：session ${holder.sessionId}（pid ${holder.pid} @ ${holder.host}，最后心跳 ${holder.at}）。` +
+      "两个会话共用同一份 .pi/review-gate-state.json 与同一份未提交改动 —— 那是 git 钩子唯一能看到的东西，" +
+      "互相覆盖的结果就是「钩子拒绝了门禁刚刚批准的东西」。",
+    // Which session survives is the human's call, and only they can close one.
+    by: "user",
+    next:
+      "出路二选一：\n" +
+      `  1. 各自一个 worktree：git -C ${repoRoot} worktree add ../${name}-2 -b <新分支名>，然后在 ../${name}-2 里开这个会话；\n` +
+      `  2. 关掉占用的那个会话（上面那个 session），本会话在它的心跳超过 ${Math.round(PRESENCE_FRESH_MS / 1000)} 秒未更新后即可正常启动 —— 不需要手工删任何文件。`,
+  });
 }
 
 /** Last path segment, without pulling node:path into a pure module. */

@@ -558,7 +558,10 @@ test("L2 STALL BREAKER: a running judge child counts as motion (never orphan a l
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   const call = SRC.slice(breakerAt, injectAt);
-  assert.match(call, /inMotion:\s*judgeChildInMotion\(\)/,
+  assert.match(call, /inMotion:\s*stallInMotion\(motion\)/,
+    "the breaker's motion verdict is the ONE pure decision (lib/loop-stall.ts), not an inline ||");
+  const facts = SRC.slice(SRC.indexOf("const motion = {", start), breakerAt);
+  assert.match(facts, /judgeInFlight:\s*judgeChildInMotion\(\)/,
     "the breaker must be told about judge work in flight");
   // The motion probe must be bounded in age, or a hung run would disable the
   // breaker permanently — the exact failure it exists to catch.
@@ -579,14 +582,43 @@ test("L2 STALL BREAKER: an overdue goal negotiation counts as motion (never swal
   const start = SRC.indexOf(LOOP_SETTLED);
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
-  const call = SRC.slice(breakerAt, injectAt);
-  assert.match(call, /inMotion:\s*judgeChildInMotion\(\) \|\| forceNegotiate/,
-    "an overdue negotiation must be in-motion so the directive survives the breaker");
+  const facts = SRC.slice(SRC.indexOf("const motion = {", start), breakerAt);
+  assert.match(facts, /^\s*forceNegotiate,\s*$/m,
+    "an overdue negotiation must reach the motion verdict");
+  assert.match(facts, /stallInMotion|pausedForUser/, "the motion facts are assembled in one place before the breaker");
   // The fact is computed earlier in the handler (before the fingerprint, at the
   // turn counter), so it exists by the time the stall check reads it.
   const settledWindow = SRC.slice(start, injectAt);
   assert.match(settledWindow, /const forceNegotiate = goalNegotiationOverdue\(state\.turnsWithoutGoal\)/,
     "the forceNegotiate fact must be computed before the stall check");
+});
+
+test("L2 STALL BREAKER: an answered gate dialog is motion — a live negotiation is not a stall", () => {
+  // 2026-09-16, measured: 80 minutes of goal negotiation (seven restatement /
+  // goal revisions, repeated questions answered) tripped the breaker and the
+  // notice blamed the provider. The writer and the reader must both stay wired:
+  // `askChoice` is the ONE dialog path, and the breaker reads the stamp as an
+  // EVENT (after the previous observation), never as a grace period.
+  const askChoice = windowOf("async function askChoice(", "\n  }", "askChoice");
+  assert.match(askChoice, /if \(answer !== undefined\) lastUserInteractionAt = new Date\(\)\.toISOString\(\)/,
+    "the dialog path must record the exchange (dismissed boxes do not count)");
+  const start = SRC.indexOf(LOOP_SETTLED);
+  const breakerAt = SRC.indexOf("evaluateStall(", start);
+  const facts = SRC.slice(SRC.indexOf("const motion = {", start), breakerAt);
+  assert.match(facts, /lastUserInteractionAt,/, "the stamp must reach the motion facts");
+  assert.match(facts, /previousObservationAt:\s*lastStallObservedAt/, "the EVENT boundary is the previous observation");
+  assert.match(facts, /pausedForUser:\s*state\.pausedQuestion !== undefined/,
+    "a parked dialog is waiting on a person, not spinning");
+  // The NOTICE's attribution needs the clock too: "we talked to the user" is
+  // only an explanation while it is RECENT (functional round P2, 2026-09-16 —
+  // without the window the provider branch is unreachable for the rest of the
+  // session).
+  assert.match(SRC.slice(breakerAt, SRC.indexOf("REVIEW_GATE_RESUME", start)), /nowMs: Date\.now\(\)/,
+    "the cause classifier is given the time it must judge recency against");
+  // The observation stamp is written after the decision, so an interaction that
+  // lands later belongs to the NEXT observation (that is what makes it an event).
+  assert.match(SRC.slice(breakerAt, SRC.indexOf("REVIEW_GATE_RESUME", start)),
+    /lastStallObservedAt = new Date\(\)\.toISOString\(\)/);
 });
 
 
@@ -2092,7 +2124,7 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
   // appeal instead.
   for (const [factBlock, src] of [
     ["在受保护分支上", SRC],
-    ["matches a sensitive-file pattern", SHIP_EDIT_SRC],
+    ["命中敏感文件模式", SHIP_EDIT_SRC],
   ] as const) {
     const at = src.indexOf(factBlock);
     assert.ok(at > 0, `the B-class block must exist: ${factBlock}`);
@@ -2102,11 +2134,13 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
 });
 
 test("the checkpoint message is delegated to the pure, unit-tested lib module", () => {
-  // Round-2 P2 (the impossible default) and the 2026-08-31 scope-injection fix
-  // both live in lib/checkpoint-message.ts now, exercised by
-  // test/checkpoint-message.test.ts (four scope cases + the L5 fallback). The
-  // extension only names the call site — pin the delegation so the logic cannot
-  // silently move back inline.
+  // Round-2 P2 (the impossible default) and the L5 non-English fallback both
+  // live in lib/checkpoint-message.ts now, exercised by
+  // test/checkpoint-message.test.ts (the conventional-commit fallback, the
+  // body rules and the L5 fallback). The marker that used to be injected into
+  // the scope is GONE (user decision, 2026-09-16). The extension only names
+  // the call site — pin the delegation so the logic cannot silently move back
+  // inline.
   assert.match(SRC, /import \{ buildCheckpointMessage \} from "\.\.\/lib\/checkpoint-message\.ts"/,
     "the extension imports the pure builder");
   const at = SRC.indexOf("function checkpointMessage(raw: string): string");
@@ -2723,8 +2757,8 @@ test("judge_submit is the agent's single judge entry and hides every process det
   // The title is derived from the role ACTUALLY dispatched, which the chain
   // decides (`reviewer` for a docs-only round or a standing quality pass,
   // `quality-auditor` otherwise) — the agent still passes no title at all.
-  assert.match(body, /const title = `\$\{dispatchRole\}-/, "the gate derives the display title itself");
-  assert.match(body, /dispatchJudgeRound\(\{ root, role: dispatchRole, title, task/, "dispatch is delegated to the one spawn owner");
+  assert.match(body, /const title = `\$\{judge\.role\}-/, "the gate derives the display title itself");
+  assert.match(body, /dispatchJudgeRound\(\{[\s\S]{0,400}?role: judge\.role,/, "dispatch is delegated to the one spawn owner");
   // The quality round is NOT a role the agent may name: it is routed to. The
   // enum and the second validation come from ONE constant, or they disagree
   // about what "unknown role" means (reviewer P2, 2026-09-15).
@@ -4077,16 +4111,24 @@ test("a NEW session keeps the orchestration registry but never its approval (B1)
   // session id) lost the predecessor's whole registry, and a takeover had
   // nothing left to take over, which is how `rm` became the only move.
   //
-  // The APPROVAL must NOT survive: it is permission the user gave to a
-  // session that is gone. Re-obtaining it costs one dialog; inheriting it
-  // would let a session nobody approved spawn children.
+  // The APPROVAL survives ONLY for the predecessor's own handoff successor:
+  // for anybody else it is permission the user gave to a session that is
+  // gone, and re-obtaining it costs one dialog. The 2026-09-06 rule is
+  // narrowed to the sessions it was about — WHICH those are is
+  // `isHandoffSuccessorOf`'s one answer (the marker AND the sidecar's own
+  // session id), so the approval cannot ride into a session a third session's
+  // state happens to be sitting there for.
   const at = SRC.indexOf("restored.sessionId !== sessionId");
   assert.ok(at > 0, "the new-session reset branch must exist");
   const branch = SRC.slice(at, SRC.indexOf("} else if (sidecarCorrupt)", at));
   assert.ok(branch.length > 0 && branch.length < 4000, "the branch window must be the branch");
 
-  assert.match(branch, /state\.orchestrator = withoutPlanApproval\(restored\.orchestrator\)/,
+  assert.match(branch, /const relaySuccessor = isHandoffSuccessorOf\(process\.env, restored\.sessionId\)/,
+    "the heir check overlays the marker on the sidecar's owner — one call, both facts");
+  assert.match(branch, /state\.orchestrator = successorRuntime\(restored\.orchestrator, relaySuccessor\)/,
     "the orchestration runtime must be carried into the fresh state, minus the permission");
+  assert.match(branch, /if \(relaySuccessor\) state = inheritGoalContract\(state, restored\)/,
+    "a handoff successor also carries the user's contracts and the round budget");
   // WHICH fields grant power is the registry module's to know. Spelled out
   // here as a destructure, the list went stale the moment the approval grew a
   // field: `approvedPlanHistory` (round 9) would have ridden into a session
@@ -4097,6 +4139,70 @@ test("a NEW session keeps the orchestration registry but never its approval (B1)
     "the strip list must not be re-inlined here — one place, or it goes stale again");
 });
 
+
+test("a relay successor inherits in EVERY repo, not just the primary one", () => {
+  // P2 (round 1): `stateForRepo` builds a fresh state for a second repo whose
+  // sidecar belongs to a different session id. For the predecessor's own
+  // successor that sidecar is not foreign at all — refusing it would ask the
+  // successor to negotiate a goal it already holds, in the repo it was told to
+  // keep working in. One rule, one function: `stateOwnership` (whose three
+  // answers are pinned in test/session-inheritance.test.ts), never a second
+  // inlined comparison here.
+  const at = SRC.indexOf("function stateForRepo(");
+  assert.ok(at > 0, "stateForRepo must exist");
+  const body = SRC.slice(at, SRC.indexOf("repoStateCache.set(root, s)", at));
+  assert.ok(body.length > 0, "the window must cover the loader");
+  assert.match(body, /if \(owner === "inherited" && existing\) s = inheritGoalContract\(s, existing\);/,
+    "a secondary repo's sidecar is inherited by the predecessor's successor — same rule, same function");
+  assert.match(body, /const owner = stateOwnership\(process\.env, state\.sessionId, existing\?\.sessionId\)/,
+    "…and the answer comes from the shared rule, not from a second comparison");
+});
+
+test("the persisted repo set is re-armed BEFORE anything can persist — a relay successor keeps its repos", () => {
+  // Quality round P1 (2026-09-16): `persist` DERIVES `state.sessionReposPaths`
+  // from the in-memory `sessionRepos` set, so the re-arming loop has to run
+  // before the session's first persist. It used to sit far below `setTaskMode`
+  // (which persists) — and since every relay successor is handed its mode by
+  // the spawner, every successor persisted first, the inherited list was
+  // overwritten with the empty set, and the inheritance was dead code that
+  // nothing could observe.
+  const restoreAt = SRC.indexOf("restore(ctx, sessionId)");
+  const reseedAt = SRC.indexOf("for (const r of state.sessionReposPaths ?? [])");
+  assert.ok(restoreAt > 0 && reseedAt > 0, "both anchors must exist");
+  assert.ok(reseedAt > restoreAt, "the loop re-arms what restore() produced");
+  const firstModeCall = SRC.indexOf("setTaskMode(", restoreAt);
+  assert.ok(firstModeCall === -1 || reseedAt < firstModeCall,
+    "…and it runs before the first setTaskMode call, which persists the (still empty) set");
+  assert.match(SRC.slice(reseedAt, reseedAt + 200), /sessionRepos\.add\(r\)/,
+    "the loop re-adds each repo to the in-memory set persist reads");
+});
+
+test("repo-state ownership is ONE rule for the loader AND the enforcement reader", () => {
+  // Quality round P1 (2026-09-16): `enforcementStateFor` returned whatever
+  // `repoStateCache` held, and the cache is filled by `stateForRepo` for any
+  // repo this session merely READ — so the same repo was "mine" or "not mine"
+  // depending on who looked first, and `declare_done` waved a never-recorded
+  // repo through on a warm cache while a cold one refused it.
+  const enforceAt = SRC.indexOf("function enforcementStateFor(");
+  assert.ok(enforceAt > 0, "the enforcement reader must exist");
+  const enforce = SRC.slice(enforceAt, SRC.indexOf("/** Normalize a tool/git path", enforceAt));
+  assert.ok(enforce.length > 0, "the window must cover the function");
+  assert.match(enforce, /stateOwnership\(process\.env, state\.sessionId, onDisk\?\.sessionId\)/,
+    "ownership comes from the DISK, through the shared rule");
+  assert.doesNotMatch(enforce, /if \(cached\) return cached/,
+    "the cache must not answer the ownership question — that is what made the answer order-dependent");
+  assert.match(enforce, /return stateForRepo\(root\);/,
+    "…and the state comes from the ONE loader, so an inherited repo gets the NARROWED state");
+  assert.doesNotMatch(enforce, /\?\? onDisk/,
+    "the raw sidecar must never be handed out — it still carries the predecessor's READY / PASS / bypass");
+
+  const loaderAt = SRC.indexOf("function stateForRepo(");
+  const loader = SRC.slice(loaderAt, SRC.indexOf("repoStateCache.set(root, s)", loaderAt));
+  assert.match(loader, /stateOwnership\(process\.env, state\.sessionId, existing\?\.sessionId\)/,
+    "the loader takes the same three answers");
+  assert.doesNotMatch(loader, /sessionId === state\.sessionId/,
+    "…and never re-derives them inline");
+});
 
 test("session_start surfaces the migration notice and clears the flag", () => {
   const at = SRC.indexOf('pi.on("session_start"');
@@ -4742,7 +4848,7 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   assert.match(body, /findings 流（边审边修）/, "and names it in the text too");
   // The audited draft is remembered only after the dispatch is ACCEPTED: a
   // refused submission must not overwrite what a running audit is judging.
-  const acceptedAt = body.indexOf("if (!dispatch.ok)");
+  const acceptedAt = body.indexOf("if (!d.ok)");
   const setAt = body.indexOf("pendingAudits.set(root");
   assert.ok(acceptedAt > 0 && setAt > acceptedAt, "the draft is recorded after the dispatch is accepted");
   // …and the recording side closes the loop with that same draft, through the
@@ -4756,6 +4862,37 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
     "a recorded audit does not linger (and the extension's dep persists the drop)");
 });
 
+
+test("settlement reads the branch the checkout is on, and REMEMBERS it for the next call (reviewer P2, 2026-09-18)", () => {
+  const body = windowOf("settleWorktree: ({ childId, taskId, repoRoot, settlement }) => {", "\n    knownRepoRoots:", "settleWorktree");
+  // Three sources, in order: what the REPOSITORY lists for that checkout, what
+  // this session recorded when it last read one, and the name the gate derived.
+  // The first is the repository's own registry (asking the DIRECTORY would let
+  // git climb to an enclosing repo and hand a destructive `branch -D` the wrong
+  // name); the second is what makes the SECOND call work at all — a merge
+  // reclaims the directory, so the `discard` its receipt asks for has nothing
+  // left to list, and the derived name would delete a branch a renamed child no
+  // longer has.
+  assert.match(body, /listedWorktreeBranch\(repoRoot, worktreePath\) \?\? registered \?\? childWorktreeBranch\(childId\)/,
+    "the repository's own listing wins; the recorded name covers a reclaimed one; the derived name is the last resort");
+  assert.doesNotMatch(body, /currentBranch\(worktreePath\)/,
+    "…and the directory is never asked: git would walk up to an enclosing repository");
+  assert.match(SRC, /branchOfListedWorktree\(out, resolved\)/,
+    "the path is matched in BOTH spellings — git records a worktree symlink-resolved (`/tmp` reads back as `/private/tmp`)");
+  assert.match(body, /noteWorktreeBranch\(runtime, childId, branch\)/,
+    "…and what was read is remembered, so the next settlement deletes the branch that exists");
+});
+
+test("a parallel round's receipt carries BOTH findings streams (B1, 2026-09-18)", () => {
+  const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
+  // The text used to name only the ROUTED judge's stream, so a parallel round's
+  // functional findings — the ones the agent fixes WHILE both judges work — had
+  // no path on the reply, nor in `details`.
+  assert.match(body, /streamPath: judge\.streamPath/,
+    "every accepted judge keeps its own stream");
+  assert.match(body, /\[`- \$\{a\.role\} 的 findings 流（边审边修）: \$\{a\.streamPath\}`\]/,
+    "and the receipt prints one line per judge, matched by role");
+});
 
 test("judge_submit runs the whole submission chain, and cannot dead-end on it", () => {
   const body = windowOf("async function submitForReview(", "\n  /**", "submitForReview");
@@ -5363,10 +5500,15 @@ test("restart does not strand pane judges: registry + pendings persist per repo"
   const direct = [...SRC.matchAll(/judgeHierarchy = (?!next;)/g)]
     .filter((m) => !/let judgeHierarchy/.test(SRC.slice(Math.max(0, m.index! - 60), m.index)));
   assert.deepEqual(direct.map((m) => m[0]), [], "no direct table assignment outside the declaration");
-  // …and session_start restores before any tool can run.
+  // …and session_start restores before any tool can run. ANCHORS INSTEAD OF A
+  // WINDOW: a fixed slice of characters is a reading heuristic that breaks
+  // every time a comment above the merge grows (it did, twice, in one round) —
+  // what the rule actually says is "inside session_start, before any tool can
+  // run", so that is what is asserted.
   const startAt = SRC.indexOf('pi.on("session_start"');
-  assert.match(SRC.slice(startAt, startAt + 3000), /ensureHierarchyLoaded\(root\)/,
-    "a restarted session merges previous slices");
+  const mergeAt = SRC.indexOf("ensureHierarchyLoaded(root)", startAt);
+  assert.ok(mergeAt > startAt, "a restarted session merges previous slices");
+  assert.ok(mergeAt - startAt < 8000, "…early in session_start, before any tool can run");
 });
 
 test("restart does not deadlock on a dead opener: dead foreign entries are dropped", () => {
@@ -6049,24 +6191,41 @@ test("a parked READY is replayed by the lane that lands on its tree, and retired
   assert.match(SRC, /withholding === "unverified-idle"/,
     "the UNVERIFIED reply distinguishes 'a lane is still running' from 'nothing is coming'");
   assert.match(SRC, /const fate = parkedReadyFate\(\{/);
-  // …AND THE LANE'S LANDING IS WHAT DECIDES IT: whatever it answers, a parked
-  // record is never left behind (round-2 P2 — nothing would ever come back for
-  // it). `none` means "nothing was parked", so a deletion under it is correct.
-  const fateAt = SRC.indexOf("const fate = parkedReadyFate({");
-  // Bounded by the branch that follows, not by a character count: a window that
-  // has to grow with the comments fails for the wrong reason (the same lesson
-  // the async-notice test above was just fixed with).
-  const afterFate = SRC.slice(fateAt, SRC.indexOf('if (fate === "replay") {', fateAt));
-  assert.match(afterFate, /if \(fate !== "none"\) \{\s*const parked = laneState\.pendingReady!;\s*delete laneState\.pendingReady;/,
-    "a landed lane retires whatever it did not replay");
-  const replayAt = SRC.indexOf('if (fate === "replay") {');
-  assert.ok(replayAt > 0, "the replay branch is here");
-  const replay = SRC.slice(replayAt, replayAt + 1800);
-  assert.match(replay, /await recordReviewVerdict\(parked\.conclusion as ReportConclusion, root, ctx\)/,
+  // …AND THE RE-ASK IS ONE PLACE, CALLED FROM EVERY LANDING (2026-09-16): the
+  // lane's landing, the quality round's settlement, and the settle sweep. The
+  // first version decided the fate at the lane's landing alone, which was
+  // right while the lane was the only thing a hold could wait for — with two
+  // preconditions landing in either order it would strand half of them.
+  assert.match(SRC, /async function resumeParkedReady\(\s*\n\s*root: string,/, "ONE re-ask of the parked conclusion's two preconditions");
+  // …and the lane's own callback hands it what it MEASURED: the recorded tree
+  // cannot say "that lane failed", and leaving a parked record behind after
+  // the lane it was waiting for has landed is exactly what round-2 P2 banned.
+  assert.match(SRC, /await resumeParkedReady\(root, ctx, \{ laneVerdict: verdict, coveredTree \}\)/,
+    "the lane's landing passes its own verdict through");
+  assert.match(SRC, /lane: parkedLaneHalf\(\{/, "the lane's half is computed by the pure rule");
+  assert.match(SRC, /quality: qualityPrecondition\(\{/, "…and so is the quality round's");
+  const resumeAt = SRC.indexOf("async function resumeParkedReady(");
+  const resume = SRC.slice(resumeAt, SRC.indexOf("async function applyRoundCancel(", resumeAt));
+  assert.match(resume, /if \(fate === "none" \|\| fate === "hold"\) return \[\];/, "a hold leaves the record where it is");
+  // THE CTX GUARD COMES FIRST (quality round P1, 2026-09-16): deleting the
+  // pending record without a context to persist the delete loses a READY the
+  // agent has already been told not to re-submit. The record must be left
+  // untouched when nobody can act on it.
+  const guardAt = resume.indexOf("if (!liveCtx) return [];");
+  const deleteAt = resume.indexOf("delete st.pendingReady;");
+  assert.ok(guardAt > 0 && deleteAt > guardAt,
+    "no context ⇒ nothing changes (the guard precedes the delete)");
+  assert.match(resume, /await recordReviewVerdict\(parked\.conclusion as ReportConclusion, root, liveCtx\)/,
     "the replay IS the recorder — one implementation of the recording rules");
-  assert.match(replay, /buildParkedReadyReplayNotice\(\{ round: parked\.round, tree: parked\.tree, recorded \}\)/,
+  assert.match(resume, /buildParkedReadyReplayNotice\(\{ round: parked\.round, tree: parked\.tree, recorded \}\)/,
     "and the wording lives in lib/, like the failure notice beside it");
-  assert.match(replay, /deliverAs: "steer"/, "steered, not queued behind a long turn");
+  assert.match(resume, /deliverAs: "steer"/, "steered, not queued behind a long turn");
+  // The BACKSTOP: a hold whose second precondition can never land (the quality
+  // pane died after the record was parked) must be retired by the settle sweep,
+  // not left to rot while the reply says "do not re-submit".
+  const sweepAt = SRC.indexOf("async function settleFinishedRounds(");
+  assert.match(SRC.slice(sweepAt, sweepAt + 2000), /for \(const root of sessionRepos\) await resumeParkedReady\(root, ctx\);/,
+    "every settle re-asks a parked conclusion");
   // The parked record must carry the judge's own SCOPE (round-1 P2): the
   // recorder pairs it with the dispatched half, so a replay that lost it would
   // write a different audit pair than a straight record of the same round.
@@ -6091,7 +6250,7 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   assert.doesNotMatch(lane, /lastFullPassTree\s*=\s*outcome\.fingerprint/,
     "the post-run fingerprint must never become the record");
   // The rule itself is pure and lives in one place.
-  assert.match(SRC, /^\s*invalidateBindings,\n\s*nextFullPassTree,\n\} from "\.\.\/lib\/gate-state\.ts";/m,
+  assert.match(SRC, /^\s*invalidateBindings,\n(?:\s*\w+,\n)*\s*nextFullPassTree,\n\} from "\.\.\/lib\/gate-state\.ts";/m,
     "one imported rule, not a second copy of the branches here");
   // AND THE THIRD INPUT: what the lane COVERED has to reach the rule.
   // The first attempt read it off the tool's reply (`pre.details?.testScope`)
@@ -6219,7 +6378,7 @@ test("a settle publishes its stop proof only at the exits that MEAN it", () => {
   assert.match(body, /\/\/ NOT a stop: the agent is still working, so no proof is published here\.[\s\S]{0,40}?if \(!ctx\.isIdle\(\)\) return;/);
 });
 
-test("2026-09-15: the quality round runs FIRST — routing, hand-off, precondition, lane abort", () => {
+test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel matrix, precondition", () => {
   // ── 1. ROUTING: inside the ONE submission chain, after prepare ──────────
   const submitAt = SRC.indexOf("async function submitForReview(");
   assert.ok(submitAt > 0, "the submission chain exists");
@@ -6229,48 +6388,183 @@ test("2026-09-15: the quality round runs FIRST — routing, hand-off, preconditi
   assert.match(submit, /Array\.isArray\(prepared\.details\?\.files\)/, "the chain takes the changed files from prepare");
   assert.match(submit, /qualityRoundSkip\(changedFiles\)/, "…asks whether this round carries code at all");
   assert.match(submit, /qualityStandingFor\(\{/, "…and whether a pass already stands for this head");
-  assert.match(submit, /role: QUALITY_ROLE/, "a code round routes to the QUALITY judge, not the reviewer");
-  assert.match(submit, /pendingReviewAfterQuality\.set\(input\.root, \{/, "and the functional round is HELD, never dropped");
+  assert.match(submit, /role: QUALITY_ROLE/, "a code round routes to the QUALITY judge");
+  // THE WHOLE POINT OF 2026-09-16: the functional brief travels WITH the
+  // quality one, so the two judges start from one submission instead of the
+  // reviewer waiting out the whole quality round.
+  assert.match(submit, /parallelReviewer: \{/, "the functional brief ships with it — the two judges start together");
+  assert.doesNotMatch(SRC, /pendingReviewAfterQuality/, "the serial hold is DELETED, not left beside the parallel path (哲学三)");
+  assert.doesNotMatch(SRC, /handOffAfterQuality|handOffQualityIfAny/, "…and so is the second dispatcher it existed for");
   assert.match(submit, /skippedQualityRecord\(\{/, "a code-free round records the skip, never silently");
   assert.match(submit, /if \(skip\.skip\) \{/, "the skip branch is the pure rule's own answer, not a re-derived one");
   assert.doesNotMatch(submit, /isSourceFile\(/, "the file classification is NOT re-implemented in the extension");
 
-  // ── 2. THE PRECONDITION: the reviewer cannot be dispatched around it ────
+  // ── 2. THE TWO SPAWNS: back to back, and never half a round ────────────
+  const judgesAt = SRC.indexOf("const judges = [");
+  assert.ok(judgesAt > 0, "one loop starts the round's judges");
+  // THE END ANCHOR MUST EXIST — AND BE CHECKED (quality round P2, 2026-09-18).
+  // It used to be `const child = judgeChildByRole(root, dispatchRole);`, which
+  // the parallel-dispatch round deleted: `indexOf` returned -1 and
+  // `slice(start, -1)` silently grew this window to the END OF THE FILE (4200
+  // lines of "the two spawns, back to back" that were not the two spawns). The
+  // assertions happened to keep biting, but the boundary was gone — the exact
+  // wrong-window failure this file warns about elsewhere. So: anchor on a
+  // statement the block really ends at, and assert it was found.
+  const judgesEnd = SRC.indexOf("const routed = accepted.find(", judgesAt);
+  assert.ok(judgesEnd > judgesAt,
+    "the end anchor is gone — an unchecked indexOf would widen this window to EOF and every assertion below it would read the wrong body");
+  const judges = SRC.slice(judgesAt, judgesEnd);
+  assert.match(judges, /await dispatchJudgeRound\(\{/, "the dispatch owner is reused, not bypassed");
+  // A round never starts HALF: if the quality spawn fails, its error returns
+  // before the reviewer is dispatched (a reviewer whose quality half never
+  // started could only ever be refused at recording time).
+  const failAt = judges.indexOf("if (!d.ok) {");
+  const qualityNoteAt = judges.indexOf("noteQualityRoundDispatched(root, d.judgeId)");
+  assert.ok(failAt > 0 && qualityNoteAt > failAt, "a failed spawn returns before the next judge is started");
+  assert.match(judges, /noteQualityRoundDispatched\(root, d\.judgeId\)/,
+    "the round records WHICH quality judge it dispatched — the fact the hold reads");
+  // …AND IN EITHER DIRECTION (functional round P2, 2026-09-16): a round whose
+  // SECOND judge cannot start must not leave the first one judging a head the
+  // agent was told had failed. The distinction is `delivered`, NOT `paneId`
+  // (quality round P2, same day): both failure paths keep a pane, but a
+  // boot-check timeout delivered the task on the argv while a failed channel
+  // write into a REUSED pane delivered nothing.
+  assert.match(judges, /if \(d\.delivered !== true\) \{\s*for \(const already of accepted\) \{\s*cancelJudgeRound\(root, already\.role,/,
+    "only a round whose task was NOT delivered abandons its siblings");
+  assert.doesNotMatch(judges, /if \(!d\.paneId\) \{/, "a kept pane is not the test — the two failures mean opposite things");
+  // …and the fact is set by each failure site, never inferred by the caller.
+  assert.match(SRC, /delivered: opened\.deliveryFailed === true/, "the boot-check timeout DID deliver the round (the task rode in on argv)");
+  assert.match(SRC, /delivered: false, sessionId, sessionDir, paneId: existing\.paneId/, "a failed channel write did NOT");
+  // …AND THE DRAFT RECORD FOLLOWS THE SAME FACT (quality round P2, 2026-09-16):
+  // `paneId` was still the test one line below the comment explaining why it
+  // cannot be — an audited draft would go on record for a task the auditor
+  // never received.
+  assert.match(SRC, /if \(d\.delivered === true && role === "goal-auditor"\)/, "an undelivered audit draft is never recorded as pending");
+  assert.doesNotMatch(SRC, /if \(d\.paneId && role === "goal-auditor"\)/, "…and paneId never returns as that test");
+
+  // ── 3. THE PRECONDITION: dispatch keeps it, RECORDING enforces it ───────
   const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
   assert.ok(dispatchAt > 0, "the one dispatch owner exists");
   const dispatch = SRC.slice(dispatchAt, dispatchAt + 3000);
   assert.match(
     dispatch,
-    /if \(role === "reviewer"\) \{[\s\S]{0,900}?qualityStandingFor\(/,
-    "dispatch itself refuses a reviewer without a quality standing for this head",
+    /if \(role === "reviewer" && opts\.qualityRoundDispatched !== true\) \{[\s\S]{0,900}?qualityStandingFor\(/,
+    "dispatch still refuses a reviewer with no quality standing — except the parallel path, which says so explicitly",
   );
   assert.match(dispatch, /没有登记在案的审查范围/, "…and refuses one with no registered target at all");
+  assert.doesNotMatch(dispatch, /judgeChildByRole\(root, QUALITY_ROLE\)/,
+    "the permission is NEVER inferred from the registry: the quality pane is reused and outlives its verdict, so that test would be always true",
+  );
+  // THE PARALLEL PATH IS THE ONLY CALLER that may pass it.
+  assert.equal((SRC.match(/qualityRoundDispatched:\s*true/g) ?? []).length, 1,
+    "exactly one call site grants it");
+  const recordAt = SRC.indexOf("async function recordReviewVerdict(");
+  assert.ok(recordAt > 0, "the recorder exists");
+  const record = SRC.slice(recordAt, SRC.indexOf("    st.review = {", recordAt));
+  assert.match(record, /decideQualityHold\(\{/, "the READY is answered against the quality standing at RECORD time");
+  assert.match(record, /qualityRoundInFlight: qualityRoundInFlight\(targetRoot\)/,
+    "…with THIS round's dispatched judge as the in-flight fact");
+  assert.match(record, /if \(qualityHold === "refuse"\) \{[\s\S]{0,120}?parsed\.verdict = "BLOCKED";/,
+    "nobody coming back ⇒ REFUSE (fail-closed)");
+  assert.match(record, /qualityHold === "hold"/, "…somebody coming back ⇒ HOLD, never record yet");
+  // ── 3b. A ROUND IS NOT A CONCLUSION WITHOUT ITS QUALITY HALF ────────────
+  // A recorded verdict carries the reviewed COMMIT so the next prepare can
+  // baseline from it. A round whose quality half never concluded has no
+  // conclusion to carry: recording its head there moved the next round's
+  // BASELINE onto it, and THIS round's content then entered no quality range
+  // at all — a dead pane was enough to walk unreviewed code past the quality
+  // gate.
+  // …AND IT MUST CARRY THE PREVIOUS CONCLUSION FORWARD rather than drop the
+  // field: `st.review` is replaced wholesale, so an absent commitSha would
+  // erase that too and rebase the next round on the BRANCH BASE (reviewer P2,
+  // same day — the whole-branch re-review a wrong first fix produces).
+  // THE PREDICATE IS THE STANDING, NOT A LIST OF CASES (quality round P1,
+  // 2026-09-17): special-casing the recorder's own `refuse` left the OTHER door
+  // to the same state open — a non-READY functional verdict, whose row in the
+  // cancel matrix kills the quality round. One reading answers both.
+  const concludedAt = SRC.indexOf("const qualityHalfConcluded = ", recordAt);
+  assert.ok(concludedAt > 0, "the commit the baseline stops at is decided in one place");
+  const concluded = SRC.slice(concludedAt, SRC.indexOf('if (parsed.verdict === "READY")', concludedAt));
+  assert.match(concluded, /qualityStandingFor\(\{/,
+    "the baseline advances only when a quality conclusion STANDS for this head");
+  assert.match(concluded, /\?\? st\.review\.commitSha/,
+    "the last CONCLUDED commit is carried forward — a round with no quality half must not move the baseline");
+  assert.doesNotMatch(concluded, /qualityHold === "refuse"/,
+    "`refuse` is one way to fail that test, not a branch of its own");
+  assert.match(concluded, /commitSha: concludedCommit/);
+  // The in-flight predicate reads the ROUND's own record, and needs a LIVE
+  // pane: a judge that died can never land a verdict, so a hold there would be
+  // forever.
+  const inFlightAt = SRC.indexOf("function qualityRoundInFlight(");
+  assert.ok(inFlightAt > 0, "the in-flight predicate exists");
+  const inFlight = SRC.slice(inFlightAt, inFlightAt + 1400);
+  assert.match(inFlight, /reviewTargets\.get\(root\)/, "the ROUND's own record makes it this round's judge");
+  assert.match(inFlight, /ownLiveJudges\(\)/, "…a live pane is what makes the verdict still possible");
+  assert.match(inFlight, /quality\?\.commitSha === target\.head/, "once a verdict stands for this head, nothing is owed");
+  // …and the round records that judge only after the spawn was ACCEPTED.
+  const noteAt = SRC.indexOf("function noteQualityRoundDispatched(");
+  const note = SRC.slice(noteAt, noteAt + 500);
+  assert.match(note, /target\.qualityRound = \{ judgeId, head: target\.head \}/, "the round owns the pair (judge, head)");
 
-  // ── 3. THE HAND-OFF: the settle path, not the agent ─────────────────────
-  const handAt = SRC.indexOf("async function handOffAfterQuality(");
-  assert.ok(handAt > 0, "the hand-off exists");
-  const hand = SRC.slice(handAt, SRC.indexOf("\n  async function ", handAt + 10));
-  assert.match(hand, /qualityFollowUp\(\{ verdict, held: held !== undefined \}\)/, "the decision comes from the pure rule, not from branches here");
-  assert.match(hand, /abortPrecommitLane\(root,/, "a blocking verdict stops the lane verifying that content");
-  assert.match(hand, /role: "reviewer"/, "a pass dispatches the functional round it was holding");
-  assert.match(hand, /pendingReviewAfterQuality\.delete\(root\)/, "…and releases the hold exactly once");
-  // BOTH record paths hand off, through ONE decision (reviewer P1,
-  // 2026-09-15): a round is recorded by whichever path sees it first — the
-  // settle sweep or `judge_wait` — and the other only ever reads
-  // `already-consumed`. Wired into the sweep alone, a quality round closed by
-  // a wait stranded its held functional round forever.
-  assert.match(SRC, /async function handOffQualityIfAny\(kind: string \| undefined, root: string\)/, "one hand-off decision exists");
-  assert.match(SRC, /const handOffNote = await handOffQualityIfAny\(settled\.kind, childRoot\);/, "the settle sweep hands off");
-  assert.match(SRC, /const handOffNote = await handOffQualityIfAny\(settled\.kind, root\);/, "judge_wait's settleRound does too");
-  assert.doesNotMatch(SRC, /settled\.kind === "quality" \? await handOffAfterQuality/, "no second copy of the kind test");
-  // …and it travels as its OWN field: the standard report prints the recorded
-  // note first-line-only, so a hand-off appended to that text is invisible to
-  // the one reader it exists for (reviewer P1, 2026-09-15).
-  assert.equal((SRC.match(/handOffNote/g) ?? []).length >= 4, true, "the hand-off note travels as a field on both paths");
-  assert.doesNotMatch(SRC, /text: \[settled\.text, handOff\]/, "never folded into the recorded note");
+  // ── 4. THE CANCEL MATRIX: applied on the settle path, from ONE decision ──
+  const applyAt = SRC.indexOf("async function applyRoundCancel(");
+  assert.ok(applyAt > 0, "one place applies the matrix");
+  const apply = SRC.slice(applyAt, SRC.indexOf("\n  /**", applyAt));
+  assert.match(apply, /const party = roundCancelParty\(kind\)/, "the audit KIND is translated, never compared to a role (functional round P1, 2026-09-16: `kind === \"reviewer\"` was dead — the kind is `review`)");
+  assert.doesNotMatch(apply, /kind === "reviewer"/, "the unreachable comparison may not come back");
+  assert.match(apply, /roundCancelPlan\(landing\)/, "the decision comes from the pure table, not from branches here");
+  assert.match(apply, /verdict: st\.quality\?\.verdict \?\? ""[\s\S]{0,120}?: \{ party, verdict: st\.review\.verdict, held: reviewVerdictIsParked\(root\) \}/,
+    "…and it reads the RECORDED verdict, never the word a judge printed");
+  // A PARKED CONCLUSION REACHES THE TABLE AS `held` (quality round P0,
+  // 2026-09-16): a held round leaves `st.review` at PENDING, and without this
+  // fact the matrix read that as a non-READY verdict and cancelled the quality
+  // round the hold was waiting for.
+  assert.match(apply, /held: reviewVerdictIsParked\(root\)/, "the parked fact is part of the decision");
+  const parkedAt = SRC.indexOf("function reviewVerdictIsParked(");
+  assert.ok(parkedAt > 0, "the parked predicate exists");
+  const parked = SRC.slice(parkedAt, parkedAt + 900);
+  assert.match(parked, /st\.pendingReady\.tree === target\.tree/,
+    "matched to THIS round by tree — a leftover record from an earlier round must not excuse a real non-READY verdict");
+  assert.match(apply, /applyCancelPlan\(/, "the effect comes from the ONE applier");
+  // The LANE goes through the same table and the same applier — INCLUDING its
+  // PASS case, which the table answers with "nothing" (quality round P1,
+  // 2026-09-16: a hand-written `if (verdict !== "PASS")` at the landing was
+  // the lane's row implemented a second time).
+  assert.match(SRC, /applyCancelPlan\(roundCancelPlan\(\{ party: "lane", verdict \}\), root\)/,
+    "the lane's row is the table's, not a branch beside it");
+  const applierAt = SRC.indexOf("function applyCancelPlan(");
+  const applier = SRC.slice(applierAt, SRC.indexOf("async function applyRoundCancel(", applierAt));
+  assert.match(applier, /plan\.cancelReviewer[\s\S]{0,200}?cancelJudgeRound\(root, "reviewer"/, "a plan's reviewer row terminates the pane");
+  assert.match(applier, /plan\.cancelQuality[\s\S]{0,200}?cancelJudgeRound\(root, QUALITY_ROLE/, "…and its quality row does too");
+  assert.match(applier, /plan\.abortLane[\s\S]{0,200}?abortPrecommitLane\(root,/, "…and its lane row aborts the lane");
+  // The hand-written lane copy may not come back.
+  assert.doesNotMatch(SRC, /if \(verdict !== "PASS"\) \{\s*cancelJudgeRound\(root, "reviewer"/,
+    "the lane's row lives in the table alone");
+  assert.match(apply, /await resumeParkedReady\(root, ctx\)/, "every landing re-asks any parked conclusion");
+  // BOTH record paths apply it, through the one wrapper (reviewer P1,
+  // 2026-09-15: wired into the sweep alone, a round closed by a `judge_wait`
+  // never stopped anything).
+  assert.equal((SRC.match(/await applyRoundCancel\(settled\.kind,/g) ?? []).length, 2,
+    "the settle sweep AND judge_wait's settleRound both apply it");
+  assert.doesNotMatch(SRC, /settled\.kind === "quality" \? await/, "no second copy of the kind test");
+  // THE KILL IS REAL (user requirement): closing the pane is the existing
+  // close path, and dropping the row is what keeps the watchdog from
+  // announcing the cancelled round as a judge that DIED.
+  const cancelAt = SRC.indexOf("function cancelJudgeRound(");
+  const cancel = SRC.slice(cancelAt, cancelAt + 2000);
+  assert.match(cancel, /closeJudgePaneOf\(entry, \{/, "the pane's process is terminated through the one close path");
+  assert.match(cancel, /setHierarchy\(removeJudge\(judgeHierarchy, entry\.judgeId\)\)/,
+    "…and the registry row goes, so the death is never announced and `judge_recover` cannot revive it");
+  assert.match(cancel, /absorbJudgeModelEvents\(root, entry\.judgeId\)/, "model events are absorbed BEFORE the row (and its cursors) goes");
+  assert.match(cancel, /reapReviewScratch\(entry\.judgeId\)/, "its throwaway worktrees are reclaimed by whoever created them");
+  // The lane's row of the matrix is applied at the lane's own landing, through
+  // the table (see the applier assertions above) — and the hand-off note still
+  // travels as its OWN field: the standard report prints the recorded note
+  // first-line-only, so a note appended there is invisible to the one reader it
+  // exists for.
   assert.match(SRC, /handOffNote: conclusion\.handOffNote,/, "the settle sweep prints it");
 
-  // ── 4. THE LANE ABORT: a stopped lane is not a result ───────────────────
+  // ── 5. THE LANE ABORT: a stopped lane is not a result ──────────────────
   const laneAt = SRC.indexOf("function startPrecommitBeside(");
   // Wide enough to reach the failure notice at the END of the lane — a
   // truncated window does not fail, it silently stops covering the tail.
@@ -6296,4 +6590,27 @@ test("2026-09-15: the quality round runs FIRST — routing, hand-off, preconditi
   assert.ok(abortedAt > 0, "the abort branch is inside the lane");
   assert.ok(noticeAt > abortedAt, "the abort branch precedes the failure notice");
   assert.match(lane.slice(abortedAt, noticeAt), /return;/, "…and returns, so no FAIL is reported");
+});
+
+// ---------------------------------------------------------------------------
+// NOTHING DOWNGRADES AN ORCHESTRATION TO LOOP (2026-09-18)
+//
+// The tempting fix for "the orchestration is finished and nobody can publish"
+// — the manager may not ship (constraint 2), its children of a multi-task repo
+// are capped at `commit` — is to let the manager drop into loop mode and
+// finish the delivery itself. The USER REFUSED it: the fix is a finish TASK in
+// the plan (lib/orchestrator-directives.ts, lib/repo-pr-policy.ts). This scan
+// keeps the refused version from arriving later as a convenience.
+//
+// What the gate DOES do on its own is place a session in `normal` (headless,
+// non-git) and honour a mode a SPAWNER asked for — neither is `loop`, and a
+// relay successor inherits the orchestrator's ROLE rather than being demoted to
+// a loop session (pinned behaviourally in test/session-handoff-tools.test.ts).
+test("nothing writes the loop mode by itself — the plan's finish task delivers", () => {
+  const files = ["extensions", "lib"].flatMap((dir) =>
+    readdirSync(join(ROOT, dir)).filter((f) => f.endsWith(".ts")).map((f) => join(dir, f)));
+  assert.ok(files.length > 50, `the scan must actually walk the source (saw ${files.length} files)`);
+  const autoLoop = files.filter((rel) => /setTaskMode\(\s*["']loop["']/.test(readFileSync(join(ROOT, rel), "utf8")));
+  assert.deepEqual(autoLoop, [],
+    "no path may write `loop` on its own: an orchestration ends through its plan's finish task, not through a mode change");
 });

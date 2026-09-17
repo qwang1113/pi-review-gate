@@ -406,7 +406,7 @@ test("minimalism keeps ONE substantive home (§5), and the code-quality round de
   const auditor = readFileSync(join(AGENTS, "goal-auditor.md"), "utf8");
   assert.ok(auditor.includes("docs/coding-standards.md"), "goal-auditor.md cites the standards");
   assert.match(auditor, /Is the goal minimal/, "goal-auditor.md carries the minimalism check");
-  assert.match(auditor, /the eight/, "the severity paragraph counts all eight checks");
+  assert.match(auditor, /the nine/, "the severity paragraph counts all nine checks");
   // The reviewer DEFERS to the quality round instead of re-auditing it.
   const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
   assert.match(reviewer, /quality-auditor/, "reviewer.md names the round that owns code quality");
@@ -416,4 +416,61 @@ test("minimalism keeps ONE substantive home (§5), and the code-quality round de
       assert.ok(!src.includes(rule), `${file} must not quote the four checks (found: ${rule})`);
     }
   }
+});
+
+test("the goal draft must name its key test scenarios and boundary cases, or it is P1", () => {
+  // 2026-09-17: the skeleton carries the column (LOOP_GOAL_SKELETON) and the
+  // auditor is the other half — a draft that never says what will be exercised
+  // gets its boundary read as an omission by the reviewer, not as a choice.
+  const auditor = readFileSync(join(AGENTS, "goal-auditor.md"), "utf8");
+  // Prose rewraps whenever a line is edited — assert on the flattened copy,
+  // so the pin holds the WORDING and not the column width.
+  const flat = auditor.replace(/\s+/g, " ");
+  assert.match(flat, /9\. \*\*Does the draft name its key test scenarios and boundary cases\?/, "the 9th check exists");
+  assert.match(flat, /关键测试场景与边界\s*情况/, "…naming the skeleton column it checks for");
+  assert.match(flat, /lib\/loop-goal\.ts/, "…and pointing at the constant that owns it");
+  assert.match(flat, /\*\*P1\*\*/, "…with a P1 when the column is missing");
+});
+
+test("the quality checklist has a SECURITY section, and the quality judge must answer it", () => {
+  // 2026-09-17: L1 gained a fifth section. Before this, the only security
+  // instruction was one vague line in the role body ("always in scope") and a
+  // checklist with no security entry at all — so a diff that shells out with
+  // an unescaped variable had to be caught by taste, not by a rule id.
+  const rules = readFileSync(join(ROOT, "docs", "code-quality-rules.md"), "utf8");
+  assert.match(rules, /^### E 安全/m, "the checklist carries the security section");
+  for (const id of ["L1-E1", "L1-E2", "L1-E3", "L1-E4"]) {
+    assert.match(rules, new RegExp(`\\| ${id} \\|`), `the security section carries ${id}`);
+  }
+  for (const area of ["注入", "越权", "敏感信息", "破坏性操作"]) {
+    assert.match(rules, new RegExp(area), `L1-E covers ${area}`);
+  }
+  const quality = readFileSync(join(AGENTS, "quality-auditor.md"), "utf8");
+  assert.match(quality, /MUST-ANSWER/, "quality-auditor.md makes the security section mandatory");
+  assert.match(quality, /L1-E1`–`L1-E4|L1-E1/, "…naming the ids it must answer");
+  // The LAYER description itself is copied onto three more surfaces: a quality
+  // round advertised without security is how the section quietly stops being
+  // part of the judge's job description.
+  for (const [file, src] of [
+    ["AGENTS.md", readFileSync(AGENTS_MD, "utf8")],
+    ["README.md", readFileSync(join(ROOT, "README.md"), "utf8")],
+    ["skills/review-loop/SKILL.md", readFileSync(SKILL_MD, "utf8")],
+  ] as const) {
+    assert.match(
+      src.replace(/\s+/g, " "),
+      /architecture, correctness, security, performance/,
+      `${file} advertises the quality layers without security`,
+    );
+  }
+});
+
+test("the checklist asks whether a change piles onto an ALREADY-big file (L1-C8)", () => {
+  // lib/file-size-gate.ts only hard-blocks NEW files over 600 lines, so the
+  // other half — a new responsibility added to an existing sprawl — has no
+  // mechanical guard at all. This is that half, as an explicit question.
+  const rules = readFileSync(join(ROOT, "docs", "code-quality-rules.md"), "utf8");
+  assert.match(rules, /\| L1-C8 \|/, "the architecture section gained the module-size check");
+  assert.match(rules, /lib\/file-size-gate\.ts/, "…and names what it covers that the hard gate does not");
+  assert.match(rules, /新建/, "…new files only");
+  assert.match(rules, /落(到|在)哪个模块/, "…and asks where the new code belongs");
 });

@@ -43,6 +43,7 @@ import type { ToolHost, ToolReply } from "./tool-host.ts";
 import type { GateState } from "./gate-state.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import type { SensitiveGrant } from "./sensitive-grant.ts";
+import { buildRejection } from "./rejection-copy.ts";
 import type { ChoiceSpec } from "./choice-dialog.ts";
 import { registerConsentRequestTools } from "./consent-request-tools.ts";
 import {
@@ -235,9 +236,14 @@ export async function doAskUser(
     return {
       content: [{
         type: "text",
-        text: `review-gate: ask_user rejected — ${checked.error}。` +
-          `每题必须是 ${MAX_CHOICE_OPTIONS} 个以内的选项（至少 2 个）+ 一个 recommended，` +
-          "改完重新调用；这一次一个对话框都没有弹出。",
+        text: buildRejection({
+          what: `ask_user 被拒 —— ${checked.error}`,
+          why: `门禁要求每题 2–${MAX_CHOICE_OPTIONS} 个选项 + 一个 recommended（推荐值须与其中一个选项完全相同），` +
+            "缺任一项整批拒绝。",
+          by: "agent",
+          next: "把上面点名的题补上选项 / 推荐项，或删掉不成立的问题后重新调用 —— " +
+            "这一次一个对话框都没有弹出，用户什么都没看到。",
+        }),
       }],
       details: { asked: 0, answered: 0, pending: false },
       isError: true,

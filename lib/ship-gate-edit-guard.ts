@@ -44,6 +44,7 @@ import { findGrant, isGateIntegrityPath, normalizeSensitivePath, type SensitiveG
 import { isGateOwnedPath, mayBeGateOwned } from "./fingerprint.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { orchestratorWriteBlock } from "./orchestrator-gate.ts";
+import { buildRejection } from "./rejection-copy.ts";
 import type { TaskMode } from "./task-mode.ts";
 
 /** What a `tool_call` handler may answer: a refusal, or nothing at all. */
@@ -107,12 +108,17 @@ export function sensitiveEditBlock(input: {
 }): ToolCallBlock {
   return {
     block: true,
-    reason:
-      `review-gate: "${input.rawPath}" matches a sensitive-file pattern (.env/keys/credentials). ` +
-      (input.askable
-        ? "Ask the user to edit it themselves, or call request_sensitive_edit to ask them " +
-          "for one-time authorization for this exact path."
-        : "Ask the user to edit it themselves — this path cannot be authorized from here."),
+    reason: buildRejection({
+      what: `edit/write 被拦 —— "${input.rawPath}"`,
+      why: `"${input.rawPath}" 命中敏感文件模式（.env / 密钥 / credentials）。` +
+        "这是安全底线，不是流程约束 —— 每个模式（含 normal）都拦。",
+      by: "user",
+      next: input.askable
+        ? "两条路，都离不开用户：① 请他改这个文件；② 调 `request_sensitive_edit({path, reason})` " +
+          "请他一次性授权这个确切路径（只覆盖这一个路径、只生效一次、10 分钟过期）。"
+        : "请他改这个文件 —— 这个路径不能从这里授权（`.git/` 内部、" +
+          "门禁自己的裁决文件，以及用户已经拒绝过授权的路径，一概不从 agent 这边授权）。",
+    }),
   };
 }
 
@@ -143,11 +149,14 @@ export async function evaluateEditCall(
   if (!path) {
     return {
       block: true,
-      reason:
-        "review-gate: edit tool call without a `path` — the gate cannot attribute it to a repo, " +
-        "so every path-based check (sensitive files, gate-owned paths, the L8 goal, the " +
-        "orchestrator write restriction) would be skipped. Re-send the edit with the " +
-        "`path` parameter explicitly named; the gate needs it to run its checks.",
+      reason: buildRejection({
+        what: "edit/write 被拦 —— 这次调用没有写明 `path`",
+        why: "`path` 是门禁把这次写入归到某个仓库的唯一依据；没有它，所有按路径判的检查" +
+          "（敏感文件、门禁自有路径、L8 的 goal、项目经理写入限制）都会被静默跳过。",
+        by: "agent",
+        next: "把 `path` 参数显式写上重发这次编辑 —— 工具本身也要求非空 path 才会真的写文件，" +
+          "所以重发不损失任何合法用途。",
+      }),
     };
   }
   // Match on the NORMALIZED path, not the raw one. `resolve` collapses `.`

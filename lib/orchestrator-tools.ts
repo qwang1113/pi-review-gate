@@ -15,6 +15,7 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
+import { PLAN_FINISH_TASK_BRIEF, PLAN_TASK_SKELETON } from "./orchestrator-directives.ts";
 import { buildRestatementMissingRefusal, restatementConfirmed } from "./restatement.ts";
 import { REVISE_ROW, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import { DELIVERY_STATION_CHOICES, deliveryStationLine } from "./delivery-station.ts";
@@ -147,9 +148,10 @@ const APPROVAL_SEMANTICS =
   "而你每批准一次新内容，之前那条链就作废。\n" +
   "以下改动一律**重新**征求你的批准：" +
   "新增任务、把任务换到另一个 repo、删除依赖、把串行改成并行、提高并行上限、把交付站点往后挪" +
-  "（precommit → commit → pr，等于放开更多 ship 命令），" +
-  "以及把某个 repo 加进 `allowMultiplePrs`（默认同一 repo 的一个需求只出一个 PR：" +
-  "多任务时该 repo 的站点收窄到 commit，项目经理本地合并后再开一个 PR）。";
+  "（precommit → commit → pr，等于放开更多 ship 命令）、让某个任务自己的交付站点变宽" +
+  "（改任务顺序、或删掉一个兄弟任务，都可能让「最后一环不受收窄」那份豁免落到别的任务头上），" +
+  "以及把某个 repo 加进 `allowMultiplePrs`（默认同一 repo 的一个需求只出一个 PR：多任务时该 repo 的站点" +
+  "收窄到 commit，只有 plan 的最后一环 —— 收尾任务 —— 不受收窄，由它汇合各任务后统一开一个 PR）。";
 
 
 /**
@@ -167,6 +169,7 @@ export function buildPlanConfirmMessage(plan: OrchestratorPlan, defaultRepo = ""
     "plan 全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
     "批准后，项目经理才能按这份 plan 开子会话干活。批准的是**内容**：" +
     "新增任务、把任务换到另一个 repo、删依赖、串行改并行、提高并行上限、**提高交付站点**、" +
+    "**让某个任务自己的交付站点变宽**（改任务顺序 / 删掉一个兄弟任务都可能让最后一环的豁免落到别人头上）、" +
     "**把某个 repo 加进 allowMultiplePrs**（放行该 repo 各自开 PR），" +
     "都会让批准失效并重新问你；" +
     "**子会话在自己 repo 内改哪些文件不再报备**，" +
@@ -307,7 +310,7 @@ async function handlePlanAction(
       );
     }
     const carry = runtime.approvedPlan
-      ? decideApprovalCarry(runtime.approvedPlan, next)
+      ? decideApprovalCarry(runtime.approvedPlan, next, deps.repoRoot)
       : { carries: false, widenings: ["门禁没有已批准 plan 的授权快照（记录不可读或来自更早的版本），无法证明这次改动没有扩权"], amendments: [] };
     if (carry.carries) {
       // The approval MOVES to the new content: the hash is what every later
@@ -704,8 +707,10 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "edits that grant nothing new — a dropped task, an added dependency, " +
       "parallel→serial, a lower maxParallel, a lowered deliveryStation — and records why. " +
       "It REVOKES it for a new task, a change of a task's repo, a removed dependency, " +
-      "serial→parallel, a higher maxParallel, a raised deliveryStation, or a repo ADDED to " +
-      "`allowMultiplePrs`. " +
+      "serial→parallel, a higher maxParallel, a raised deliveryStation, a repo ADDED to " +
+      "`allowMultiplePrs`, or a task whose OWN station got wider — the plan's LAST task is " +
+      "exempt from the same-repo narrowing (it is the one that delivers), so reordering the " +
+      "list or dropping a sibling can hand another task the right to push and open the PR. " +
       "So refine the task list freely as you learn where the work lands; only real widening costs " +
       "the user a dialog. " +
       "REQUIRED BEFORE `submit`: a restatement the USER confirmed (`propose_restatement`) — " +
@@ -714,8 +719,16 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "it is a widening like any other. " +
       "ONE REQUIREMENT, ONE PR PER REPO: when one repo holds more than one task, that repo's " +
       "children stop at `commit` — the manager merges them locally and ONE PR comes out of the " +
-      "combined result. `allowMultiplePrs` names the repos the USER allowed to split; it is the " +
-      "ONLY way out of that rule, so never fill it in on your own initiative.",
+      "combined result, opened by the plan's LAST task (the finish task; that task is never capped). " +
+      "`allowMultiplePrs` names the repos the USER allowed to split; it is the " +
+      "ONLY way out of that rule, so never fill it in on your own initiative. " +
+      // The manager reads THIS description while writing tasks, so the task
+      // book's shape belongs here too — from the same constant the `note`
+      // field describes itself with and the standing block renders.
+      "每个任务的说明书写在 `plan.tasks[].note`（它不参与批准：改 note 不重审、也不重批）：\n" +
+      PLAN_TASK_SKELETON +
+      "\n\n" +
+      PLAN_FINISH_TASK_BRIEF,
 
     parameters: Type.Object({
       action: Type.Optional(Type.Enum(PLAN_ACTIONS)),
@@ -735,7 +748,18 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
           dependsOn: Type.Optional(Type.Array(Type.String())),
           execution: Type.Optional(Type.Union([Type.Literal("serial"), Type.Literal("parallel")])),
           status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("running"), Type.Literal("done"), Type.Literal("blocked")])),
-          note: Type.Optional(Type.String()),
+          // THE TASK BOOK (user ask, 2026-09-17): this is the field the plan
+          // audit reads (「任务书完整度」) and the only place a task's
+          // instructions live. `note` is excluded from `canonicalPlanText`, so
+          // writing it here grants nothing and revokes nothing — it is
+          // instructions, not a contract boundary.
+          note: Type.Optional(Type.String({
+            description:
+              "任务书写在这里（把 `<…>` 换成你的事实；note 是给子会话的说明书，不参与 plan 批准）：\n" +
+              PLAN_TASK_SKELETON +
+              "\n\n" +
+              PLAN_FINISH_TASK_BRIEF,
+          })),
         })),
         decisions: Type.Optional(Type.Array(Type.Object({
           id: Type.String(),
