@@ -4877,6 +4877,8 @@ test("settlement reads the branch the checkout is on, and REMEMBERS it for the n
     "the repository's own listing wins; the recorded name covers a reclaimed one; the derived name is the last resort");
   assert.doesNotMatch(body, /currentBranch\(worktreePath\)/,
     "…and the directory is never asked: git would walk up to an enclosing repository");
+  assert.match(SRC, /branchOfListedWorktree\(out, resolved\)/,
+    "the path is matched in BOTH spellings — git records a worktree symlink-resolved (`/tmp` reads back as `/private/tmp`)");
   assert.match(body, /noteWorktreeBranch\(runtime, childId, branch\)/,
     "…and what was read is remembered, so the next settlement deletes the branch that exists");
 });
@@ -6475,11 +6477,13 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // field: `st.review` is replaced wholesale, so an absent commitSha would
   // erase that too and rebase the next round on the BRANCH BASE (reviewer P2,
   // same day — the whole-branch re-review a wrong first fix produces).
-  const concludedAt = SRC.indexOf("const concludedCommit = qualityHold", recordAt);
+  const concludedAt = SRC.indexOf("const concludedCommit = ", recordAt);
   assert.ok(concludedAt > 0, "the commit the baseline stops at is decided in one place");
   const concluded = SRC.slice(concludedAt, SRC.indexOf('if (parsed.verdict === "READY")', concludedAt));
-  assert.match(concluded, /\? st\.review\.commitSha/,
-    "a refused round carries the last CONCLUDED commit, not its own head");
+  assert.match(concluded, /\?\? st\.review\.commitSha/,
+    "the last CONCLUDED commit is carried forward — a refusal must not move the baseline");
+  assert.match(concluded, /qualityHold === "refuse" \? undefined/,
+    "…starting with a refusal to take THIS round's own head");
   assert.match(concluded, /commitSha: concludedCommit/);
   // The in-flight predicate reads the ROUND's own record, and needs a LIVE
   // pane: a judge that died can never land a verdict, so a hold there would be

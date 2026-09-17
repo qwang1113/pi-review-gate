@@ -4067,13 +4067,28 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function listedWorktreeBranch(repoRoot: string, worktreePath: string): string | undefined {
     try {
-      const out = execFileSync("git", ["-C", repoRoot, "worktree", "list", "--porcelain"], {
+      const out = String(execFileSync("git", ["-C", repoRoot, "worktree", "list", "--porcelain"], {
         cwd: repoRoot,
         encoding: "utf8",
         timeout: 10_000,
-      });
-      return branchOfListedWorktree(String(out ?? ""), worktreePath);
+      }) ?? "");
+      // TWO SPELLINGS, ONE CHECKOUT. git records a worktree under the path it
+      // was CREATED with, symlinks resolved — measured on this repository's own
+      // list, where `/tmp/...` reads back as `/private/tmp/...`. The gate
+      // derives the path from the repo root it was handed, so the two differ
+      // whenever a repository lives behind a symlink; a miss would fall through
+      // to the derived name, which is exactly the name a renamed child no
+      // longer has. Both spellings are tried and neither is invented: a path
+      // that cannot be resolved is simply not a match.
+      const resolved = realpathOrUndefined(worktreePath);
+      return branchOfListedWorktree(out, worktreePath)
+        ?? (resolved === undefined ? undefined : branchOfListedWorktree(out, resolved));
     } catch { return undefined; }
+  }
+
+  /** `realpathSync`, or undefined when the path cannot be resolved (it may be gone). */
+  function realpathOrUndefined(target: string): string | undefined {
+    try { return realpathSync(target); } catch { return undefined; }
   }
 
   /** The branch a rebase in progress will return to, read from the git dir. */
@@ -9892,13 +9907,19 @@ export default function reviewGate(pi: ExtensionAPI) {
     // quality round had seen.
     //
     // …AND OMITTING THE FIELD IS NOT THE SAME FIX: `st.review` is REPLACED
-    // wholesale, so an absent `commitSha` also erased the LAST REAL conclusion
-    // and dropped the next baseline to the BRANCH BASE (a full-branch
-    // re-review). Carrying the previous value forward states the fact exactly —
-    // this round concluded nothing, the earlier ones still did.
-    const concludedCommit = qualityHold === "refuse"
-      ? st.review.commitSha
-      : reviewTargets.get(targetRoot)?.head;
+    // wholesale, so an absent `commitSha` also erases the LAST REAL conclusion
+    // and drops the next baseline to the BRANCH BASE (a full-branch re-review),
+    // or — in a repo with no main/master/origin — back onto this round's own
+    // head, reopening the very hole this guards. Carrying the previous value
+    // forward states the fact exactly: this round concluded nothing, the
+    // earlier ones still did.
+    //
+    // THERE ARE TWO WAYS TO HAVE NO HEAD TO RECORD (reviewer P2, 2026-09-18):
+    // a `refuse`, and a round whose target is not registered in THIS process —
+    // `reviewTargets` is in-memory, so a verdict landing after a restart is
+    // exactly that shape. Both fall through to the previous value.
+    const concludedCommit = (qualityHold === "refuse" ? undefined : reviewTargets.get(targetRoot)?.head)
+      ?? st.review.commitSha;
     st.review = {
       verdict: parsed.verdict,
       fingerprint: bindTree,
