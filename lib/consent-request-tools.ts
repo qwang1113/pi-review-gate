@@ -81,10 +81,21 @@ function deny(text: string): ToolReply {
  * read that way; it is checked rather than assumed, because a spec without a
  * refusal would make its only row read as consent.
  */
+/**
+ * THE TOPICS THIS MODULE'S TOOLS ASK UNDER — deliberately NOT `string`.
+ *
+ * The channel's own topic union is the authority on which topics exist
+ * (`lib/orchestrator-channel.ts`), and `askEitherSide` accepts only those; a
+ * bare `string` here silently dropped that check (caught by the precommit
+ * typecheck, not by the tests — node strips types without checking them).
+ * This module asks under exactly these three, so it names exactly these.
+ */
+type ConsentTopic = "scope-limit" | "sensitive-edit" | "tmux-access";
+
 async function askConsent(
   deps: ConsentToolDeps,
   uiCtx: UiContext,
-  opts: { topic: string; spec: ChoiceSpec; consentBody: string; reason: string },
+  opts: { topic: ConsentTopic; spec: ChoiceSpec; consentBody: string; reason: string },
 ): Promise<
   | { outcome: "granted"; option: string }
   | { outcome: "declined"; declineReason?: string }
