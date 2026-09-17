@@ -56,7 +56,7 @@ import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import {
@@ -78,6 +78,7 @@ import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "..
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
+import { hostReasonEditor, type CustomDialogHost, type ReasonEditor } from "../lib/reason-editor.ts";
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
@@ -2515,7 +2516,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     log: (message) => { log(message); },
     orchestrationId: currentOrchestrationId,
     adoptOrchestrationId,
-    askChoice: (spec, opts) => askChoice(latestCtx ?? {}, spec, opts),
+    askChoice: (spec, opts) => askChoice(asChoiceHost(latestCtx ?? {}), spec, opts),
     // O-1 — the plan's full text goes into the TRANSCRIPT before the dialog
     // asks about it, exactly like the loop goal. A plan approval binds to
     // content, so a truncated dialog body was asking the user to sign
@@ -4803,6 +4804,99 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * A host context as the template's narrow `ui` seam.
+   *
+   * THE CAST IS LOAD-BEARING (2026-09-17): pi's `ExtensionContext.ui` no longer
+   * SATISFIES `ChoiceUi` structurally, because the reason box's `editor` takes
+   * a `signal` where pi's takes a prefill (see `reasonBoxUi` below for why).
+   * Everything else on the seam is pi's own, unchanged. One named cast beats a
+   * bare `as` at every call site, which is where it would drift.
+   */
+  function asChoiceHost(ctx: unknown): { ui?: ChoiceUi } {
+    return ctx as { ui?: ChoiceUi };
+  }
+
+/** pi's editor component CLASS, as a type — see `loadEditorComponent`. */
+type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["ExtensionEditorComponent"];
+
+  /**
+   * pi's own multi-line editor component, resolved ON DEMAND.
+   *
+   * IT USED TO BE A MODULE-SCOPE VALUE IMPORT, and that broke the one case the
+   * loader alias cannot cover: a host that loads this file OUTSIDE pi (the
+   * install fixtures in test/, any tool that imports the extension to inspect
+   * it) has no `@earendil-works/pi-coding-agent` to resolve, so a static import
+   * fails at LOAD time — the whole extension refuses to load, to draw one
+   * dialog. Resolved lazily it degrades instead: no component ⇒ the reason box
+   * stays whatever the host's own `ui.editor` is (multi-line, no signal), and
+   * nothing else changes.
+   *
+   * Inside pi the resolve always succeeds: the extension loader aliases this
+   * specifier to pi's own entry (dist/core/extensions/loader.js `_aliases`,
+   * `piCodingAgentEntry = packageIndex`), so no second copy is involved.
+   */
+  let editorComponent: Promise<EditorComponentCtor | undefined> | undefined;
+  function loadEditorComponent(): Promise<EditorComponentCtor | undefined> {
+    editorComponent ??= import("@earendil-works/pi-coding-agent")
+      .then((pi) => pi.ExtensionEditorComponent)
+      .catch(() => undefined);
+    return editorComponent;
+  }
+
+  /**
+   * pi's own `ui.editor` behind the template's seam.
+   *
+   * IT TAKES A PREFILL, NOT OPTIONS (reviewer P2, 2026-09-17): calling it as
+   * `(title, { signal })` opens the user's box with `[object Object]` already
+   * typed into it — and the RPC fallback is exactly the path that calls it that
+   * way. The signal is dropped deliberately: this box cannot be taken down
+   * (that is why `custom` is preferred at all), and a box showing the question
+   * beats one full of junk.
+   */
+  function asOwnReasonEditor(editor: ExtensionUIContext["editor"]): ReasonEditor {
+    return (title) => editor(title);
+  }
+
+  /**
+   * The template's `ui` seam, with the reason box wired to pi's own editor.
+   *
+   * WHY NOT `ui.editor()` DIRECTLY (2026-09-17): pi's signature is
+   * `editor(title, prefill?)` — no `signal`. This gate's dialog model rests on
+   * a box being taken OFF THE SCREEN the moment the other side answers first
+   * (lib/orchestrator-child-channel.ts), and a box that outlives its answer
+   * collects typing nobody will ever read. The RULE for that — how the two
+   * kinds of `undefined` are told apart, and which host falls back to what —
+   * lives in lib/reason-editor.ts; what is here is only the wiring.
+   */
+  async function reasonBoxUi(host: ChoiceUi | undefined): Promise<ChoiceUi | undefined> {
+    const pi = host as (ChoiceUi & {
+      custom?: ExtensionUIContext["custom"];
+      editor?: ExtensionUIContext["editor"];
+    }) | undefined;
+    const own = pi?.editor ? asOwnReasonEditor(pi.editor.bind(pi)) : undefined;
+    const custom = pi?.custom;
+    const Component = custom ? await loadEditorComponent() : undefined;
+    // No pi package to resolve, or no custom components on this host (RPC):
+    // the host's own editor — ADAPTED, never handed our options.
+    if (!custom || !Component) return own ? { ...host, editor: own } : host;
+    return {
+      ...host,
+      editor: hostReasonEditor({
+        custom: custom.bind(pi) as CustomDialogHost,
+        ...(own ? { fallback: own } : {}),
+        build: (tui, keybindings, title, done) => new Component(
+          tui as ConstructorParameters<EditorComponentCtor>[0],
+          keybindings as ConstructorParameters<EditorComponentCtor>[1],
+          title,
+          undefined,
+          done,
+          () => done(undefined),
+        ),
+      }),
+    };
+  }
+
+  /**
    * THE one dialog renderer (user decision, 2026-09-08): the gate's question
    * template, whole. Every dialog in this file — and
    * every dialog in the tool modules that inject this function — comes
@@ -4833,7 +4927,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function askChoice(
     uiCtx: { ui?: ChoiceUi },
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; extraRows?: string[] } = {},
+    opts: { body?: string; signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
     // NO BUDGET, NO TRUNCATION (user decision, 2026-09-16). This used to fit
     // the title and the body into a rendered-row budget, because a dialog tall
@@ -4844,10 +4938,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // approval — and the renderer the user runs (`fullscreen`, the host owns
     // the screen and scrolls) never had the problem. A session that is NOT on
     // it is told once instead: see lib/renderer-mode.ts.
-    const answer = await renderChoice(uiCtx.ui, spec, {
+    const answer = await renderChoice(await reasonBoxUi(uiCtx.ui), spec, {
       ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(opts.signal ? { signal: opts.signal } : {}),
-      ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
     });
     // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
     // dialog the gate shows — ask_user's interview, the restatement / goal /
@@ -10850,13 +10943,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           dialogKind: "select",
           topic: "other",
           title: opts.body ? `${spec.title}\n${opts.body}` : spec.title,
-          options: [...choiceRows(spec), ...(opts.extraRows ?? [])],
+          options: choiceRows(spec),
           payload: `推荐答案：${spec.recommended}`,
         },
         ui.hasUI === true,
         (signal) => askChoice(ui, spec, {
           ...(opts.body === undefined ? {} : { body: opts.body }),
-          ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }),
           signal,
         }),
       );
@@ -11153,7 +11245,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         try {
           const pick = parseChoice(
             await askChoice(
-              ctx as unknown as ExtensionContext,
+              asChoiceHost(ctx),
               spec,
               { body: buildModeConfirmMessage(effective, params.reason) },
             ),

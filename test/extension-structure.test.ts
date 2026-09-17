@@ -954,8 +954,8 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   // placement remains, because reading order is what makes it work.)
   assert.doesNotMatch(ASK_USER_SRC, /body: `\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
     "the grant notice must never sit in the body, after the question");
-  assert.match(ASK_USER_SRC, /extraRows: \[SKIP_REST_CHOICE\]/,
-    "the interview's own escape rides along as an extra row");
+  assert.doesNotMatch(ASK_USER_SRC, /extraRows/,
+    "no caller-owned dialog rows any more — closing the box is the way out");
   assert.doesNotMatch(ASK_USER_SRC, /uiCtx\.ui!\.input!/,
     "no free-text dialog any more — the template's reason box is the only text box");
   assert.match(ASK_USER_SRC, /\$\{q\.text\}\$\{grantNotice\(q\)\}` \+/,
@@ -1007,7 +1007,7 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
     "…and the next turn starts only after this one settled");
   // A question already settled by the project manager, or one the interview
   // will never show, must not put a dead box on the user's screen.
-  assert.match(toolBody, /if \(signal\.aborted \|\| stopped !== undefined\) return undefined;/,
+  assert.match(toolBody, /if \(signal\.aborted \|\| stopped\) return undefined;/,
     "a settled or abandoned question renders nothing");
 
   // A dismissed dialog or a broken UI is NOT consent: it becomes an
@@ -1303,7 +1303,7 @@ test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' par
     "set_gate_mode parameters must be exactly {mode, reason}");
   // Consent comes from ctx.ui.confirm rendered by the EXTENSION, with the
   // fixed-copy dialog builder; only that branch may mint source "user".
-  assert.match(region, /await askChoice\(\s*ctx as unknown as ExtensionContext,\s*spec,\s*\{ body: buildModeConfirmMessage\(/);
+  assert.match(region, /await askChoice\(\s*asChoiceHost\(ctx\),\s*spec,\s*\{ body: buildModeConfirmMessage\(/);
   const confirmAt = region.indexOf("askChoice(");
   const userMint = region.indexOf('setTaskMode(effective, "user"');
   assert.ok(userMint > confirmAt, 'source "user" may only be set after the confirm dialog');

@@ -27,10 +27,10 @@
 
 import type { CopilotThread } from "./copilot-review.ts";
 import { parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
-// The interview's own escape row and its typed twin, imported rather than
-// re-spelled: "skip the rest" is one convention in this gate, and a second
-// constant would be a second thing to keep in sync.
-import { ANSWER_IN_CHAT_INPUT, SKIP_REST_CHOICE, SKIP_REST_INPUT } from "./ask-user.ts";
+// The interview's typed escape, imported rather than re-spelled: "answer in
+// chat" is one convention in this gate, and a second constant would be a
+// second thing to keep in sync.
+import { ANSWER_IN_CHAT_INPUT } from "./ask-user.ts";
 
 /**
  * From this round on, every finding needs the user's approval before it may be
@@ -39,16 +39,6 @@ import { ANSWER_IN_CHAT_INPUT, SKIP_REST_CHOICE, SKIP_REST_INPUT } from "./ask-u
  * the first three rounds matter less.
  */
 export const COPILOT_TRIAGE_ASK_FROM_ROUND = 4;
-
-/**
- * How many findings ONE tool call may put in front of the user.
- *
- * Sibling of `ask_user`'s own per-call cap, for the same reason: an interview
- * is a conversation, not a wall. Findings past the cap are reported as
- * "not asked yet" and picked up by the next `copilot_review` — the tool
- * tells the agent to call it again, so they are never silently dropped.
- */
-export const COPILOT_TRIAGE_MAX_QUESTIONS = 10;
 
 /** The three answers a finding can get, as the user sees them. */
 export const FIX_CHOICE = "修复";
@@ -152,11 +142,17 @@ export function recordDecision(
   return { at: nowIso, records };
 }
 
-/** What one dialog's answer MEANS. `skip-rest` stops the remaining questions. */
+/**
+ * What one dialog's answer MEANS.
+ *
+ * CLOSING THE BOX STOPS THE ROUND (2026-09-17): `dismissed` comes back as
+ * `unanswered`, and the caller (lib/copilot-review-tools.ts) stops asking about
+ * the findings that follow — they simply keep no record, which puts them back
+ * in front of the user on the next `copilot_review`.
+ */
 export type CopilotTriagePick =
   | { kind: "decided"; decision: CopilotDecision; reason?: string }
-  | { kind: "unanswered"; reason?: string }
-  | { kind: "skip-rest" };
+  | { kind: "unanswered"; reason?: string };
 
 /** Everything the agent reads about one finding. */
 export interface CopilotTriageEntry {
@@ -198,21 +194,16 @@ export function summarizeTriage(
 }
 
 /**
- * What the ✎ box offers for a FINDING.
- *
- * The template's default hint advertises `!chat`, which means nothing here
- * (there is no interview to defer to the chat) — so this hint advertises only
- * what is honoured, and `triagePickFrom` honours both escapes it names.
- */
-export const FINDING_REASON_PLACEHOLDER =
-  "直接写你的理由（留空＝只说「不选」）；!skip＝跳过后续问题";
-
-/**
  * Retired 2026-09-16 with the row budget (kept as a note, not as code): the
  * dialog no longer truncates a finding's body, so there is no cut for a
  * pointer to explain. The TRANSCRIPT copy it described is still printed before
  * every finding dialog opens — see the call site in `copilot-review-tools.ts` —
  * because approving a finding you cannot read is a bug whoever caused it.
+ *
+ * The `✎` box's own hint is the template's now (2026-09-17): the reason box is
+ * a multi-line editor with no placeholder to fill, and the one escape it
+ * advertises — `!chat` — is honoured here too (`triagePickFrom`), so a
+ * finding-specific wording would have been a second copy of the same hint.
  */
 
 export function findingChoiceSpec(thread: CopilotThread, index: number, total: number): ChoiceSpec {
@@ -221,7 +212,6 @@ export function findingChoiceSpec(thread: CopilotThread, index: number, total: n
     title: `Copilot 评审问题 ${index + 1} / ${total}：${where}`,
     options: [FIX_CHOICE, DECLINE_CHOICE, IRRELEVANT_CHOICE],
     recommended: FIX_CHOICE,
-    reasonPlaceholder: FINDING_REASON_PLACEHOLDER,
   };
 }
 
@@ -272,12 +262,10 @@ export function triagePickFrom(picked: string | undefined, spec: ChoiceSpec): Co
     // The `✎ 不选，我说明原因` row: they picked none of the three. What they
     // typed is carried to the agent verbatim, but it is NOT a decision.
     const typed = parsed.reason.trim().toLowerCase();
-    // …unless it is one of the escapes the box's own hint advertises.
-    if (typed === SKIP_REST_INPUT) return { kind: "skip-rest" };
+    // …unless it is the escape the box's own hint advertises.
     if (typed === ANSWER_IN_CHAT_INPUT) return { kind: "unanswered", reason: "（他想改在聊天里说）" };
     return parsed.reason ? { kind: "unanswered", reason: parsed.reason } : { kind: "unanswered" };
   }
-  if (parsed.option === SKIP_REST_CHOICE) return { kind: "skip-rest" };
   if (parsed.option === FIX_CHOICE) return { kind: "decided", decision: "fix" };
   if (parsed.option === DECLINE_CHOICE) return { kind: "decided", decision: "decline" };
   if (parsed.option === IRRELEVANT_CHOICE) return { kind: "decided", decision: "irrelevant" };
@@ -286,14 +274,20 @@ export function triagePickFrom(picked: string | undefined, spec: ChoiceSpec): Co
   return { kind: "unanswered", reason: parsed.option };
 }
 
-/** The findings this call will ask about, and how many it must defer. */
+/**
+ * The findings this call will ask about.
+ *
+ * ALL of them (user decision, 2026-09-17): the per-call cap that sliced this
+ * list at ten is gone, for the same reason `ask_user`'s went — a cap that
+ * defers silently reads as "handled" to whoever is skimming. Nothing is
+ * deferred any more; the user's own way out is closing a box, which stops the
+ * round (the caller breaks on the first `unanswered` dismissal).
+ */
 export function triageAskPlan(
   threads: readonly CopilotThread[],
   triage: CopilotTriageState | undefined,
-  max = COPILOT_TRIAGE_MAX_QUESTIONS,
-): { ask: CopilotThread[]; deferred: number } {
-  const pending = threads.filter((t) => needsQuestion(triage, t));
-  return { ask: pending.slice(0, Math.max(0, max)), deferred: Math.max(0, pending.length - max) };
+): CopilotThread[] {
+  return threads.filter((t) => needsQuestion(triage, t));
 }
 
 /**

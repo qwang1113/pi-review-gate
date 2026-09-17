@@ -5,14 +5,11 @@ import {
   resumeFrom,
   buildNoDialogNotice,
   progressLabel,
-  buildChoiceList,
   interpretChoice,
   resolveQuestion,
   formatAnswers,
   formatTranscriptSummary,
   needsUserReply,
-  SKIP_REST_CHOICE,
-  MAX_QUESTIONS,
   MAX_QUESTION_CHARS,
   type AskAnswer,
   type AskQuestion,
@@ -36,7 +33,6 @@ test("a batch that follows the template is accepted as written", () => {
   assert.equal(result.questions.length, 2);
   assert.deepEqual(result.questions[0]?.options, ["A", "B"]);
   assert.equal(result.questions[1]?.recommended, "Y");
-  assert.equal(result.dropped, 0);
   assert.equal(result.trimmedOptions, 0);
 });
 
@@ -86,13 +82,15 @@ test("an empty batch is refused with an actionable message", () => {
   }
 });
 
-test("sizes are CAPPED rather than refused, and the reply says what was cut", () => {
+test("sizes are CAPPED rather than refused — and the NUMBER of questions is not capped at all", () => {
+  // The 10-question cap is gone (user decision, 2026-09-17): it dropped the
+  // tail of a long batch, and an agent told the rest would come "next round"
+  // usually never asked again. Every question goes up now.
   const many = validateQuestions(Array.from({ length: 50 }, (_, i) =>
     ({ text: `q${i}`, options: ["A", "B"], recommended: "A" })));
   assert.equal(many.ok, true);
   if (!many.ok) return;
-  assert.equal(many.questions.length, MAX_QUESTIONS);
-  assert.equal(many.dropped, 50 - MAX_QUESTIONS);
+  assert.equal(many.questions.length, 50, "no question is dropped");
 
   const wide = validateQuestions([{
     text: "q",
@@ -122,21 +120,12 @@ test("progress is 1-based", () => {
   assert.equal(progressLabel(2, 3), "3 / 3");
 });
 
-test("the row list is the template plus the interview's own escape", () => {
-  const rows = buildChoiceList(q("q", ["A", "B"], "B"));
-  assert.deepEqual(rows, ["A", "B（推荐）", DECLINE_ROW, SKIP_REST_CHOICE]);
-});
-
 // ---- what a picked line MEANS ----
 
 test("picking an option returns the option the agent wrote, without the marker", () => {
   const question = q("q", ["A", "B"], "B");
   assert.deepEqual(interpretChoice("B（推荐）", question), { kind: "answered", answer: "B" });
   assert.deepEqual(interpretChoice("A", question), { kind: "answered", answer: "A" });
-});
-
-test("the interview's escape row is recognized", () => {
-  assert.deepEqual(interpretChoice(SKIP_REST_CHOICE, q("q")), { kind: "skip-rest" });
 });
 
 test("the decline row carries the reason as the answer", () => {
@@ -150,10 +139,10 @@ test("the decline row carries the reason as the answer", () => {
     { kind: "answered", answer: "不选（未说明原因）" });
 });
 
-test("the typed escapes work from the decline row's reason box", () => {
-  const question = q("q");
-  assert.deepEqual(interpretChoice(`${DECLINE_ROW}：!skip`, question), { kind: "skip-rest" });
-  assert.deepEqual(interpretChoice(`${DECLINE_ROW}：!CHAT`, question), { kind: "deferred-to-chat" });
+test("the one typed escape works from the decline row's reason box", () => {
+  // Anything else typed there is the reason itself: there is no second escape
+  // to remember (user decision, 2026-09-17).
+  assert.deepEqual(interpretChoice(`${DECLINE_ROW}：!CHAT`, q("q")), { kind: "deferred-to-chat" });
 });
 
 test("a dismissed dialog is neither an answer nor a skip", () => {
@@ -167,12 +156,12 @@ test("the answer sheet reports silence as silence", () => {
   const answers: AskAnswer[] = [
     { question: "范围？", kind: "answered", answer: "A" },
     { question: "分支？", kind: "deferred-to-chat" },
-    { question: "交付？", kind: "skipped" },
+    { question: "交付？", kind: "unanswered" },
   ];
   const text = formatAnswers(answers);
   assert.match(text, /1 \/ 3 范围？\n→ A/);
   assert.match(text, /2 \/ 3 分支？\n→ 用户选择在聊天里详细回答/);
-  assert.match(text, /3 \/ 3 交付？\n→ 用户跳过/);
+  assert.match(text, /3 \/ 3 交付？\n→ 没有得到回答/);
 });
 
 test("an empty interview says so instead of returning an empty string", () => {
@@ -182,13 +171,13 @@ test("an empty interview says so instead of returning an empty string", () => {
 test("the summary counts each outcome", () => {
   const answers: AskAnswer[] = [
     { question: "a", kind: "answered", answer: "x" },
-    { question: "b", kind: "skipped" },
+    { question: "b", kind: "unanswered" },
     { question: "c", kind: "deferred-to-chat" },
   ];
   const summary = formatTranscriptSummary(answers);
   assert.match(summary, /已回答 1/);
   assert.match(summary, /转聊天 1/);
-  assert.match(summary, /跳过 1/);
+  assert.match(summary, /未作答 1/);
   assert.match(summary, /共 3 问/);
 });
 
@@ -197,13 +186,13 @@ test("the transcript keeps the Q&A itself, not just the counts", () => {
   // alone left the user unable to see what they had chosen.
   const summary = formatTranscriptSummary([
     { question: "本轮交付范围？\n（第二行是补充说明）", kind: "answered", answer: "全做：1+2+3+4" },
-    { question: "申诉入口形态？", kind: "skipped" },
+    { question: "申诉入口形态？", kind: "unanswered" },
     { question: "配额存哪？", kind: "deferred-to-chat" },
     { question: "还有别的吗？", kind: "unanswered" },
   ]);
   assert.match(summary, /1 \/ 4 本轮交付范围？ → 全做：1\+2\+3\+4/, "question and chosen answer, one line");
   assert.doesNotMatch(summary, /第二行是补充说明/, "only the question's first line is kept");
-  assert.match(summary, /2 \/ 4 申诉入口形态？ → （跳过）/);
+  assert.match(summary, /2 \/ 4 申诉入口形态？ → （未作答）/);
   assert.match(summary, /3 \/ 4 配额存哪？ → （转聊天回答）/);
   assert.match(summary, /4 \/ 4 还有别的吗？ → （未作答）/);
 });
@@ -220,7 +209,7 @@ test("a long question or answer is capped, never wrapped over several lines", ()
 
 test("the loop waits whenever anything went unanswered", () => {
   assert.equal(needsUserReply([{ question: "a", kind: "answered", answer: "x" }]), false);
-  assert.equal(needsUserReply([{ question: "a", kind: "skipped" }]), true);
+  assert.equal(needsUserReply([{ question: "a", kind: "unanswered" }]), true);
   assert.equal(needsUserReply([{ question: "a", kind: "deferred-to-chat" }]), true);
   assert.equal(needsUserReply([]), false);
 });
@@ -252,15 +241,15 @@ test("no stored progress means a fresh interview", () => {
   assert.deepEqual(resumeFrom({ at: "t", answers: [] }, QS), []);
 });
 
-test("a skip is settled too — it does not re-ask", () => {
+test("an unanswered question is not carried over — the interview resumes there", () => {
   const stored = {
     at: "t",
     answers: [
       { question: "范围？", kind: "answered" as const, answer: "A" },
-      { question: "分支？", kind: "skipped" as const },
+      { question: "分支？", kind: "unanswered" as const },
     ],
   };
-  assert.equal(resumeFrom(stored, QS).length, 2);
+  assert.equal(resumeFrom(stored, QS).length, 1);
 });
 
 // ---- an environment with no dialogs must say so ----
@@ -270,7 +259,7 @@ test("the no-dialog notice hands the questions back to the agent, in full", () =
   assert.match(notice, /没能展示给用户/);
   assert.match(notice, /写进你的回复/);
   assert.match(notice, /范围？/);
-  assert.match(notice, /选项：A（推荐） \/ B \/ ✎ 不选，我说明原因 \/ ⏭ 跳过后续问题/);
+  assert.match(notice, /选项：A（推荐） \/ B \/ ✎ 不选，我说明原因/);
 });
 
 test("an unanswered question reads as unanswered, never as 'ask me in chat'", () => {
@@ -289,40 +278,27 @@ test("an unanswered question keeps the loop waiting", () => {
 
 const PICK = q("选一个", ["A", "B"], "A");
 
-test("an answer the race delivered is honoured, whatever stopped the rest", () => {
+test("an answer the race delivered is honoured", () => {
   // The one case batching created: the project manager answered this question
-  // through the channel before the user pressed "skip the rest" on an earlier
-  // one. 先答者生效 — the stop reason interprets SILENCE, never an answer.
-  assert.deepEqual(resolveQuestion(PICK, "B", { stopped: "skip-rest" }),
-    { answer: { question: "选一个", kind: "answered", answer: "B" } });
-  assert.deepEqual(resolveQuestion(PICK, "B", { stopped: "interrupted" }),
+  // through the channel before the user got to it. 先答者生效.
+  assert.deepEqual(resolveQuestion(PICK, "B"),
     { answer: { question: "选一个", kind: "answered", answer: "B" } });
   // The recommendation marker is stripped: the agent gets the option it wrote.
   assert.equal(resolveQuestion(PICK, "A（推荐）").answer.answer, "A");
 });
 
-test("only SILENCE is interpreted by what stopped the interview", () => {
-  // Skipped: the user chose to stop, so the questions they never saw are
-  // reported as skipped…
-  assert.deepEqual(resolveQuestion(PICK, undefined, { stopped: "skip-rest" }),
-    { answer: { question: "选一个", kind: "skipped" } });
-  // …but an instruct that took the box away is nobody deciding anything, and
-  // the reply must not claim the user did.
-  assert.deepEqual(resolveQuestion(PICK, undefined, { stopped: "interrupted" }),
-    { answer: { question: "选一个", kind: "unanswered" } });
-  assert.deepEqual(resolveQuestion(PICK, undefined),
-    { answer: { question: "选一个", kind: "unanswered" } });
+test("an instruct that took the box away is nobody deciding anything", () => {
+  const interrupted = resolveQuestion(PICK, undefined, { interrupted: true });
+  assert.deepEqual(interrupted, { answer: { question: "选一个", kind: "unanswered" } });
+  assert.equal(interrupted.stop, undefined,
+    "an interrupt is not the user closing anything — the channel settles the batch");
 });
 
-test("a question can STOP the interview, and says which way", () => {
-  const skipped = resolveQuestion(PICK, SKIP_REST_CHOICE);
-  assert.equal(skipped.stop, "skip-rest");
-  assert.equal(skipped.answer.kind, "skipped");
-  const interrupted = resolveQuestion(PICK, undefined, { interrupted: true });
-  assert.equal(interrupted.stop, "interrupted");
-  assert.equal(interrupted.answer.kind, "unanswered");
+test("closing the box stops the WHOLE interview, and says so", () => {
+  const closed = resolveQuestion(PICK, undefined);
+  assert.equal(closed.stop, true);
+  assert.equal(closed.answer.kind, "unanswered");
   // An ordinary answer stops nothing.
   assert.equal(resolveQuestion(PICK, "A").stop, undefined);
   assert.equal(resolveQuestion(PICK, `${DECLINE_ROW}：!chat`).answer.kind, "deferred-to-chat");
-  assert.equal(resolveQuestion(PICK, `${DECLINE_ROW}：!skip`).stop, "skip-rest");
 });

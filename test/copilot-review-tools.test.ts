@@ -22,13 +22,11 @@ import {
   type PrSummary,
 } from "../lib/copilot-review.ts";
 import {
-  COPILOT_TRIAGE_MAX_QUESTIONS,
   DECLINE_CHOICE,
   FIX_CHOICE,
   IRRELEVANT_CHOICE,
   recordDecision,
 } from "../lib/copilot-triage.ts";
-import { SKIP_REST_CHOICE } from "../lib/ask-user.ts";
 import { DECLINE_ROW } from "../lib/choice-dialog.ts";
 
 /**
@@ -77,7 +75,7 @@ interface Fake {
   support: { support: "CONFIRMED" | "UNKNOWN"; confirmed: boolean };
   /** Every triage dialog the tool raised, in order. Mirrors the REAL dep
    *  signature — which no longer carries a truncation pointer. */
-  asked: { spec: ChoiceSpec; body?: string; extraRows?: string[] }[];
+  asked: { spec: ChoiceSpec; body?: string }[];
   /** What the user picks, one entry per dialog; a missing entry is ESC. */
   answers: (string | undefined)[];
   /** The transcript notices the triage wrote, one per asked finding. */
@@ -147,8 +145,7 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     log: (message) => { state.logs.push(message); },
     delay: (ms) => { state.delays.push(ms); return Promise.resolve(); },
     askFinding: async (_ctx, spec, opts) => {
-      state.asked.push({ spec, ...(opts.body === undefined ? {} : { body: opts.body }),
-        ...(opts.extraRows === undefined ? {} : { extraRows: opts.extraRows }) });
+      state.asked.push({ spec, ...(opts.body === undefined ? {} : { body: opts.body }) });
       return state.answers.shift();
     },
     showToUser: (_ctx, lead, body) => { state.notices.push({ lead, body }); return true; },
@@ -571,7 +568,6 @@ test("read: round 4 asks about each finding, one dialog each, and groups the ans
   assert.equal(f.asked[1]?.spec.title, "Copilot 评审问题 2 / 2：lib/foo.ts:7");
   assert.deepEqual(f.asked[0]?.spec.options, [FIX_CHOICE, DECLINE_CHOICE, IRRELEVANT_CHOICE]);
   assert.equal(f.asked[0]?.spec.recommended, FIX_CHOICE);
-  assert.deepEqual(f.asked[0]?.extraRows, [SKIP_REST_CHOICE], "an interview still has an escape row");
   assert.match(f.asked[0]?.body ?? "", /this argv is not escaped/, "the dialog carries the comment");
   // The full text goes to the transcript BEFORE the box. The row budget that
   // used to clip the dialog and make that copy necessary is gone (2026-09-16),
@@ -591,7 +587,7 @@ test("read: round 4 asks about each finding, one dialog each, and groups the ans
   assert.match(text, /⏸ 未获批准（0 条）/);
   assert.match(text, /Then call copilot_review again\./);
 
-  assert.deepEqual(reply.details?.triage, { fix: 1, decline: 1, irrelevant: 0, unanswered: 0, deferred: 0 });
+  assert.deepEqual(reply.details?.triage, { fix: 1, decline: 1, irrelevant: 0, unanswered: 0 });
   // The answers are in the sidecar, keyed by the finding they were made about.
   assert.deepEqual(f.st.copilot?.triage?.records.map((r) => [r.threadId, r.commentId, r.decision, r.reason]), [
     ["T1", "C1", "fix", undefined],
@@ -634,20 +630,23 @@ test("read: Copilot commenting again on the SAME thread is a new question", asyn
 test("read: an unanswered finding is NOT approval — no record, no fix, reported as such", async () => {
   const f = fake();
   atRound(f, 4);
-  f.answers = [undefined, FIX_CHOICE]; // ESC on the first
+  f.answers = [undefined]; // ESC on the first — which is also the way OUT of the round
   const reply = await call(f);
   const text = textOf(reply);
-  assert.equal(f.notices.length, 2, "both findings were shown, even the one nobody answered");
-  assert.match(text, /⏸ 未获批准（1 条）—— 这些代码不许改，只如实告诉他：/);
+  assert.equal(f.notices.length, 1,
+    "closing the box stops the round: the finding after it is never raised");
+  assert.match(text, /⏸ 未获批准（2 条）—— 这些代码不许改，只如实告诉他：/);
   assert.match(text, /- T1 lib\/copilot-gh\.ts:12 —— 他没表态 —— 不许改、不许代他回复。/);
-  assert.match(text, /✅ 修复（1 条）/);
-  assert.equal(f.st.copilot?.triage?.records.length, 1, "only the answered finding is recorded");
-  assert.equal(f.st.copilot?.triage?.records[0]?.threadId, "T2");
+  assert.match(text, /- T2 lib\/foo\.ts:7 —— 他没表态/);
+  assert.equal(f.st.copilot?.triage?.records?.length ?? 0, 0, "nothing was decided — no record at all");
 
-  // …and the next call puts the unanswered one back in front of them.
-  f.answers = [FIX_CHOICE];
+  // …and the next call puts both back in front of them.
+  f.answers = [FIX_CHOICE, FIX_CHOICE];
   const again = await call(f);
-  assert.deepEqual(f.asked.slice(2).map((a) => a.spec.title), ["Copilot 评审问题 1 / 1：lib/copilot-gh.ts:12"]);
+  assert.deepEqual(f.asked.slice(1).map((a) => a.spec.title), [
+    "Copilot 评审问题 1 / 2：lib/copilot-gh.ts:12",
+    "Copilot 评审问题 2 / 2：lib/foo.ts:7",
+  ]);
   assert.match(textOf(again), /✅ 修复（2 条）/);
 });
 
@@ -663,36 +662,35 @@ test("read: the ✎ row is carried to the agent as the user's own words, and is 
   assert.equal(f.st.copilot?.triage?.records[0]?.threadId, "T2");
 });
 
-test("read: skipping the rest leaves the unasked findings unanswered, not decided", async () => {
+test("read: closing the box leaves the unasked findings unanswered, not decided", async () => {
   const f = fake();
   atRound(f, 4);
   f.payload = {
     ...f.payload!,
     threads: [thread({ id: "A" }), thread({ id: "B" }), thread({ id: "C" })],
   };
-  f.answers = [FIX_CHOICE, SKIP_REST_CHOICE];
+  f.answers = [FIX_CHOICE, undefined];
   const reply = await call(f);
-  assert.equal(f.asked.length, 2, "the box the user skipped never opens");
+  assert.equal(f.asked.length, 2, "the box the user closed is the last one raised");
   assert.match(textOf(reply), /✅ 修复（1 条）/);
   assert.match(textOf(reply), /⏸ 未获批准（2 条）/);
   assert.match(textOf(reply), /- B .* —— 他没表态/);
 });
 
-test("read: findings past the per-call cap are reported as deferred, never dropped", async () => {
+test("read: every pending finding is asked about in ONE call — none is deferred", async () => {
   const f = fake();
   atRound(f, 4);
+  const total = 12;
   f.payload = {
     ...f.payload!,
-    threads: Array.from({ length: COPILOT_TRIAGE_MAX_QUESTIONS + 2 }, (_, i) => thread({ id: `T${i}` })),
+    threads: Array.from({ length: total }, (_, i) => thread({ id: `T${i}` })),
   };
-  f.answers = new Array(COPILOT_TRIAGE_MAX_QUESTIONS).fill(FIX_CHOICE);
+  f.answers = new Array(total).fill(FIX_CHOICE);
   const reply = await call(f);
-  assert.equal(f.asked.length, COPILOT_TRIAGE_MAX_QUESTIONS);
-  const triage = reply.details?.triage as { fix: number; unanswered: number; deferred: number };
-  assert.equal(triage.fix, COPILOT_TRIAGE_MAX_QUESTIONS);
-  assert.equal(triage.unanswered, 2, "the ones nobody got to are unanswered, not approved");
-  assert.equal(triage.deferred, 2);
-  assert.match(textOf(reply), /还有 2 条没来得及问用户，下一次 copilot_review 会接着问/);
+  assert.equal(f.asked.length, total, "the whole list goes up, not the first ten");
+  const triage = reply.details?.triage as { fix: number; unanswered: number };
+  assert.equal(triage.fix, total);
+  assert.equal(triage.unanswered, 0);
 });
 
 test("read: a round with nothing actionable asks nothing, however late it is", async () => {

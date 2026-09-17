@@ -422,12 +422,12 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 ### 域 8：用户交互与提示注入
 
 `choice-dialog.ts` 是**门禁唯一的提问模板**（用户决定，2026-09-08）：2–4 个选项
-+ 一个「（推荐）」标记 + 一行「✎ 不选，我说明原因」，选中该行弹输入框、原因随
-答案回传；`ask_user`、门禁自身每一处是/否框、两处手写 `ui.select` 全部渲染它，
++ 一个「（推荐）」标记 + 一行「✎ 不选，我说明原因」，选中该行弹多行理由编辑器、
+原因随答案回传；`ask_user`、门禁自身每一处是/否框、两处手写 `ui.select` 全部渲染它，
 所以屏幕上只有一种对话框形状，`ui.confirm` 在门禁里不再有调用点。
-`ask-user.ts` 是采访模型（逐题推进、上限、跳过与「在聊天里回答」的语义，以及
-`resolveQuestion`：一题结算下来到底算什么 —— 竞速送达的答案一律作数，只有沉默
-才按「是什么中止了采访」解释），
+`ask-user.ts` 是采访模型（逐题推进、**提问数量无上限**、关框即停与「在聊天里回答」
+的语义，以及 `resolveQuestion`：一题结算下来到底算什么 —— 竞速送达的答案一律作数，
+只有沉默才按「是什么中止了采访」解释），
 `user-interaction-tools.ts` 是它的执行侧（工具 `ask_user`：什么时候暂停循环、
 每答一题就落盘、人与项目经理谁先答谁生效；2026-09-06 起**整批问题先一次性上送
 通道再逐题弹框** —— 上级第一份回执就看得到全部题，用户那边仍一次只有一个框），
@@ -476,7 +476,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（137 个模块）
+## 五、`lib/` 全量速查表（138 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -495,7 +495,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表；**等待纪律的唯一出处**（`buildWaitDiscipline`：子会话侧 `judge_wait`、项目经理侧 `orchestrator_wait` 共用同三条，只换工具名与消息种类） |
 
 | `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限；模型走 `agents.arbiter.slots[0]`（配置层），不再硬编码 |
-| `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义；问题的**形状**（2–4 选项 + 推荐 + 追加行）不在这里，在 `choice-dialog.ts`。`validateQuestions` 是整批合规判定（缺选项或缺推荐 ⇒ 整批拒绝且不弹框，尺寸类问题只截断并告知）；`resolveQuestion` 是「一题结算算什么」的唯一判定（竞速送达的答案永远作数，只有沉默才按 `InterviewStop` 解释：跳过 ⇒ skipped，被 instruct 打断 ⇒ unanswered） |
+| `ask-user.ts` | `ask_user` 的采访模型：**提问数量无上限**（2026-09-17 起事实如此 —— 旧口径是「尺寸类问题只截断」，而那个 10 问截断会丢掉一批问题的尾巴，agent 被告诉「下一轮再问」后往往不再问、直接改猜）、逐题推进、关框即停与「在聊天里回答」的语义；问题的**形状**（2–4 选项 + 推荐 + 追加行）不在这里，在 `choice-dialog.ts`。`validateQuestions` 是整批合规判定（缺选项或缺推荐 ⇒ 整批拒绝且不弹框，过长的题/选项只截断并告知）；`resolveQuestion` 是「一题结算算什么」的唯一判定（竞速送达的答案永远作数，只有沉默才解释：**用户关框 ⇒ `stop: true` 停整场**、被 instruct 打断 ⇒ unanswered，两者不可混同，后者由通道自己结算整批） |
 | `async-precommit-report.ts` | 后台 full precommit 落地时那条通知的**措辞 + 是否还算数**（2026-09-12；PASS 侧 2026-09-16）：`buildAsyncPrecommitReport` 输出带轮次与内容指纹的失败文本，`asyncPrecommitReportIsStale` 是唯一判据（lane 启动时那份 tree ≠ 投递时的 worktree tree ⇒ 降级成「旧轮次」文案，**不静默丢弃**；两侧指纹任一侧读不出就不降级——未知永不等于相同，fail-closed）；`buildAsyncPrecommitPass` 是 PASS 的短文案（「已经落地，不用再等它」）—— 在它之前 PASS 一声不响，而 `judge_wait` 的事件源里没有 precommit 落地，实测让一个会话在等一个永远不会来的事件上坐等 6 分 47 秒。为什么必须有它：`judge_submit` 的 lane 是并行的，FAIL 只能事后告知，而原先把这条通知挂在 `followUp` 上（pi 只在 agent 不再有工具调用时才 drain）与「门禁未过不许停循环」的存活不变量互斥，实测延迟 2 小时以上才投递，落地时裁决早已被后续 PASS 取代。扩展只接线：采集「本轮 + 验证的是哪份内容」两个事实，然后 `pi.sendMessage(..., { deliverAs: "steer" })` |
 | `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
 | `audit-round.ts` | **审计回合引擎**（2026-09-05）：「派发 judge → 等本轮 → 选 report → 裁决 → 记录 → 回收」的唯一一份实现。`settleAuditRound` 是结论段（goal / plan / review / advice 四种 kind 都经它，`judge_wait` 与 settle 扫描共用，游标只在这里推进一次、且只在记录落地后推）；`runAuditRound` 是 goal/plan 的同步回合（O-6 的 `judge_close` 是它的一个 `finally`，不再散在每条 return 上；「本轮是不是已被 wait 记完」由 `roundClosedDuringWait` 判——pending 已消费**且**游标已前进，缺一即自己再 settle 并 fail-closed）。`selectRoundReport` 是「哪份 report 收本轮」的唯一判据（round-bound 认 `roundSeq`+游标；cursor-only 只认游标；**round-and-content 认 `roundSeq`+`checkpoint.at`+游标，review 专用**，没有 checkpoint 记录（于是没有可比的 `checkpoint.at`）的轮次则只由 round+游标兜底，否则那种轮次不可收敛——与它的范围空不空无关（2026-09-15 起 `prepare_review` 在无 checkpoint 记录时取分支基点，所以那轮可能是 `HEAD..HEAD`，也可能是基点..HEAD 的真实交付）——per-kind 的真实差异），`roundBindingFor` 是三件事实的唯一推导处；共用它的入口有三个：记录侧 `settleAuditRound`、探测侧 `probeJudgeRound`（`judge_wait` 与 settle 扫描）、以及只要 yes/no 的 `roundHasReported`（子会话心跳据它把状态报成 `waiting-judge`、loop 停滞断路器据它判「还在动」，它替掉了扩展里那份「report 晚于 pane spawn」的旧比较） |
@@ -504,7 +504,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交。判的是**磁盘记录的所有权**（不是进程），一切未知 fail-**closed**（时间戳读不出/在未来/写删失败一律保留 marker），回收窗 4 小时（`CONCURRENT_SESSION_WINDOW_MS`，唯一用途就在这里）。**它与 `session-exclusivity.ts`、`judge-pane.ts` 的判活为什么不可收敛成一条口径**：两处文件头各写一半，行为并排钉在 `test/liveness-criteria.test.ts`（2026-09-06 复核；同日按哲学三删掉的 `judge-session.ts` 才是真正的重复实现——它没有生产调用者） |
 | `change-baseline.ts` | 本次改动的**比较基线**（2026-09-15，dashboard 实测的死锁）：一律 `HEAD`，但仓库处于 merge（`.git/MERGE_HEAD` 存在）时把被合并的 parent 一并算作基线 —— 「不在 HEAD 里」与「是本会话新建的」只在 HEAD 是唯一 parent 时才是同一句话；实测 104 个 staged 新增**全部**来自 `main`，file-size 因此硬拦 checkpoint，而 checkpoint 是 review 的唯一入口（用户只能切 normal 绕过）。`changeBaseRefsFromMergeHeads`（纯，垃圾行不进 argv）/ `readChangeBaseRefs` / `firstBaseContaining` / `isNewInWorktree` |
 | `checkpoint-message.ts` | checkpoint 提交信息（纯函数）：把 agent 的 round note 变成合法 Conventional Commits（已是 CC 则原样保留，否则兜底 `chore: <subject>`），并对非英文 round note 回落英文默认、丢正文（L5 自洽）。**自 2026-09-16 起提交信息就是普通提交：门禁不再往里注入任何标记**（用户决定，理由与旧写法写在模块头注释里） |
-| `choice-dialog.ts` | **门禁唯一的提问模板**（2026-09-08）：2–4 个选项 + 一个（推荐）+ 追加行「✎ 不选，我说明原因」的构造（`choiceRows`）、校验（`validateChoice`）、解析（`parseChoice`）与渲染（`renderChoice`，注入 `ui.select`/`ui.input`，选中追加行才弹原因框）。`ask_user`、门禁每一处是/否框、两处手写 select 全走它；`ui.confirm` 已无调用点 |
+| `choice-dialog.ts` | **门禁唯一的提问模板**（2026-09-08）：2–4 个选项 + 一个（推荐）+ 追加行「✎ 不选，我说明原因」的构造（`choiceRows`）、校验（`validateChoice`）、解析（`parseChoice`）与渲染（`renderChoice`，注入 `ui.select`/`ui.editor`，选中追加行才弹多行理由框）。**没有任何 caller-owned 追加行**（`extraRows` 随 2026-09-17 那次删除一起消失）。`ask_user`、门禁每一处是/否框、两处手写 select 全走它；`ui.confirm` 已无调用点 |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
 | `constants.ts` | 全仓唯一的共享常量：代码/文档扩展名、敏感文件模式、ship 命令种类、语言指令、轮次上限 |
 | `consent-request-tools.ts` | 工具 `request_scope_limit` / `request_sensitive_edit`：两个「请用户放宽门禁」的同意口子，对话与门禁状态经注入的 deps；由 `user-interaction-tools.ts` 转注册 |
@@ -514,6 +514,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `copilot-review.ts` | L7：PR 之后的 Copilot 审查状态机（请求、逐 thread 消账、预算与终态）；payload 与探针/时间线的纯解析（`parseCopilotProbe` / `parseCopilotTimeline`）；`CopilotReviewState.triage` 带用户自己的裁决，每个转移都带着它走 |
 | `copilot-triage.ts` | L7 用户那半边的纯规则：轮次阈值（`COPILOT_TRIAGE_ASK_FROM_ROUND = 4` 起每条问题先问用户）、线程键（thread id + 最后一条评论 id）、「哪些还没表态」、四组裁决汇总、`triage` 块的 sanitize；无 IO/无时钟 |
 | `delivery-station.ts` | 交付站点（`precommit` / `commit` / `pr`）：类型、解析与缺省（缺失或非法一律读成 `precommit`）、严格度排序、「某站点放行哪些 `ShipCommandKind`」的纯判定与超站拦截文案（`stationShipProblem` / `STATION_SHIP_NEXT_STEPS`，只给用户能走的两条路、不给申诉假出路），以及 `declare_done` 的「到站」判定（`stationArrivalProblems`：`commit` 要工作区干净，`pr` 要三条证据之一 —— 门禁**亲眼看到**成功的 `gh pr create`（`GateState.shippedKinds`）、Copilot 周期已解析出的 PR 号，或**门禁自己查到的、当前分支上开着的 PR**（`lib/station-pr-evidence.ts`）—— **且本地 HEAD 已在它的 upstream 上**（`prEvidencePresent` / `prArrivalProven` 是唯一的两条谓词，扩展也调前者决定要不要发网络查询；「挂着旧 PR、本轮提交还在本地」——包括门禁自己在 PR 开着之后落的 checkpoint——一律判未到站）；无 fs、无时钟，goal 侧、plan 侧与 ship 门禁共用同一份枚举 |
+| `reason-editor.ts` | **门禁唯一的理由框**（2026-09-17，用户要求「和 pi 本身的输入框一致」）：`hostReasonEditor` 把 pi 自己的 `ExtensionEditorComponent`（多行、可粘贴、`ctrl+g` 进 $EDITOR）**连 abort 一起**装好 —— 不用 `ui.editor()` 是因为那个签名不收 `signal`，而这个门禁的对话框模型建立在「另一方先答就把框撤下」上（先答者生效、instruct 打断），一个活过自己答案的框会收下没人会读的输入。**两种 `undefined` 必须分开**：RPC 模式的 `ui.custom()` 不调 factory 就返回 `undefined`，把它读成「用户关框」会误停整场采访（`ask-user.ts` 的 `resolveQuestion`），所以判据是**factory 跑没跑**（跑了 ⇒ 是人关的；没跑 ⇒ 这个宿主根本渲染不了自定义组件 ⇒ 回退到 `ui.editor()`）。纯逻辑：组件经 `build` 注入，宿主两个调用经 `custom`/`fallback` 注入。pi 包的 `import()` 只在 `extensions/review-gate.ts` 一处，而且**按需**（`loadEditorComponent` 缓存结果、失败即降级）—— 模块作用域的静态值导入会让「在 pi 之外加载这个文件的宿主」（安装夹具、检查工具）在**加载期**就炸，整个扩展起不来只为了画一个框；拿不到组件类时直接回退到宿主自己的 `ui.editor`（多行、无 signal） |
 | `rejection-copy.ts` | **拒绝文案的唯一渲染器**（2026-09-16，用户决定）：门禁对 agent 说的每一句「不行」都渲成同一形状 —— `review-gate: <现象>` / `原因：<事实>` / `下一步：<你 / 用户 / 门禁> —— <动作>`。四个字段全是必填的（`RejectionParts` / `RejectionActor`），漏一个编译不过 —— 形状由代码保证，不靠作者记得 `docs/coding-standards.md` §7。本轮接入六条高频路径（`ask_user` 批次不合规、`judge_submit` 送审被拒、goal/plan 打回、`declare_done` 被拒、edit/write 被拦、ship 命令被拦），其余随日后改动收敛；**不是框架**：没有严重度、没有错误码、没有注册表 |
 | `renderer-mode.ts` | 这个会话跑在哪个渲染器上 —— 以及不在 `fullscreen` 时对它说一次什么（2026-09-16，用户决定）。它就是原来那套对话框行数预算的**替身**：那个预算存在的理由是 **默认（regular）渲染器**下、对话框高到把 spinner 挤出视口时 pi-tui 每帧清屏并擦掉滚回缓冲（实测 40 行终端：39 行 ⇒ 0/30，40 行 ⇒ 29/30）；而拥有整屏、自己滚动的 `fullscreen` 渲染器永远走不到那个分支，用户也每会话都用它。预算的代价落在「用户正在确认的那些行」上（长路径可以带走站点行与审计预审行），所以删掉预算，改为**提醒**。模式只能来自宿主的 `TUI.mode`（经 `setWidget` 的 factory 形式拿到）——自己按 argv + settings 重算就是一份会算错边角的拷贝（项目未 trusted 时 `.pi/settings.json` 整个被忽略、`/settings` 能在会话中途改模式）。纯判定 `rendererModeNoticeDue` + 文案 `RENDERER_MODE_NOTICE` |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |

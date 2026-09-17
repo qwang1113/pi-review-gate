@@ -56,7 +56,7 @@ interface Fake {
 }
 
 /** A tool context with a UI (the normal, interactive case). */
-const UI_CTX = { hasUI: true, ui: { notify: () => {}, select: undefined, input: undefined } };
+const UI_CTX = { hasUI: true, ui: { notify: () => {}, select: undefined, editor: undefined } };
 
 function fake(over: Partial<Fake> = {}): Fake {
   const f: Fake = {
@@ -162,6 +162,46 @@ test("ONE registration call wires all three user-facing tools", () => {
 });
 
 // ---------- ask_user ----------
+
+test("ask_user: the dialog title is a bare progress label, the question rides in the body", async () => {
+  const f = fake();
+  // The default fake answers without raising a box; this one goes all the way
+  // through the renderer, which is where the title and the body are decided.
+  f.deps.askEitherSide = async (_request, _hasUI, render) => {
+    const answer = await render(new AbortController().signal);
+    return { answer, by: "human", requestId: "r1" };
+  };
+  await call(f, "ask_user", {
+    questions: [{ text: "要改的范围是哪些？\n（第二行是补充）", options: ["A", "B"], recommended: "A" }],
+  });
+  const seen = f.confirms[0]!.split("\n");
+  assert.equal(seen[0], "问题 1 / 1", "no truncated copy of the question in the title");
+  assert.equal(seen.slice(1).join("\n"), "要改的范围是哪些？\n（第二行是补充）",
+    "the WHOLE question is in the body");
+});
+
+test("ask_user: a box the user CLOSED is not 'this environment has no dialogs'", async () => {
+  // Closing the box is THE way out of an interview (2026-09-17), so this is a
+  // NORMAL path. Reporting it as "no dialogs here — paste every question into
+  // your reply" is false (the box was right in front of them) and costs the
+  // agent a whole iteration. What makes a session headless is that no box ever
+  // reached the screen — not that nobody answered.
+  const f = fake({ confirmAnswer: false });
+  f.deps.askEitherSide = async (_request, _hasUI, render) => {
+    const answer = await render(new AbortController().signal);
+    return { answer, by: "human", requestId: "r1" };
+  };
+  const reply = await call(f, "ask_user", {
+    questions: [
+      { text: "第一题", options: ["A", "B"], recommended: "A" },
+      { text: "第二题", options: ["A", "B"], recommended: "A" },
+    ],
+  });
+  assert.doesNotMatch(textOf(reply), /没有可用的对话框/, "the box WAS shown — do not claim otherwise");
+  assert.doesNotMatch(textOf(reply), /写进你的回复/);
+  assert.match(textOf(reply), /循环已暂停/, "an unanswered interview still pauses the loop");
+  assert.deepEqual(f.armed, [false]);
+});
 
 test("ask_user: an empty question list is refused without touching the loop", async () => {
   const f = fake();

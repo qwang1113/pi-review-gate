@@ -326,8 +326,8 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
    `orchestrator_answer({childId, answers:[{requestId, answer}, …]})` —— 每条
    独立裁决（某条被拒不挡其余条，已写进通道的不回滚），逐条 `requestId` 地答也
    照旧可用。子会话那边**仍然一次只弹一个框**，人随时可以介入，先答者生效；
-   用户中途选「跳过后续」或你下发 instruct 打断，剩下那些没展示的题会被就地
-   销账，不会挂在这里反复响铃。
+   用户中途关掉对话框（＝停整场采访）或你下发 instruct 打断，剩下那些没展示的题
+   会被就地销账，不会挂在这里反复响铃。
 3. **死亡与恢复** —— `dead` / `stalled` 的子会话、**未丢失的资产**（分支 / checkpoint /
    review 裁决 / 完成记录）、以及可直接执行的动作（`orchestrator_recover` 或 `orchestrator_close`）；
 4. **你自己的上下文用量与接力时机**（见 §5.1）；

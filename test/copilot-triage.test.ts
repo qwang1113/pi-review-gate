@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 
 import {
   COPILOT_TRIAGE_ASK_FROM_ROUND,
-  COPILOT_TRIAGE_MAX_QUESTIONS,
   COPILOT_TRIAGE_MAX_RECORDS,
   DECLINE_CHOICE,
   FIX_CHOICE,
@@ -21,7 +20,6 @@ import {
   triagePickFrom,
   type CopilotTriageState,
 } from "../lib/copilot-triage.ts";
-import { SKIP_REST_CHOICE } from "../lib/ask-user.ts";
 import { DECLINE_ROW } from "../lib/choice-dialog.ts";
 import type { CopilotThread } from "../lib/copilot-review.ts";
 
@@ -123,18 +121,15 @@ test("the four groups partition the findings, in the order they arrived", () => 
   assert.deepEqual(groups.unanswered.map((e) => e.thread.id), ["c"], "no record ⇒ nobody decided");
 });
 
-test("one call asks about at most its cap, and reports the rest as deferred", () => {
-  const many = Array.from({ length: COPILOT_TRIAGE_MAX_QUESTIONS + 3 }, (_, i) => thread({ id: `T${i}` }));
-  const plan = triageAskPlan(many, undefined);
-  assert.equal(plan.ask.length, COPILOT_TRIAGE_MAX_QUESTIONS);
-  assert.equal(plan.deferred, 3);
-  // Already-decided findings are skipped entirely: they are neither asked
-  // about nor counted as deferred.
+test("one call asks about EVERY pending finding — nothing is deferred", () => {
+  const many = Array.from({ length: 13 }, (_, i) => thread({ id: `T${i}` }));
+  const pending = triageAskPlan(many, undefined);
+  assert.equal(pending.length, 13, "no cap slices the list any more");
+  // Already-decided findings are skipped entirely: they are not asked about.
   const decided = recordDecision(undefined, many[0]!, "fix", AT);
   const second = triageAskPlan(many, decided);
-  assert.equal(second.ask[0]?.id, "T1");
-  assert.equal(second.deferred, 2);
-  assert.equal(triageAskPlan(many, decided, 0).ask.length, 0, "a zero budget asks nothing");
+  assert.equal(second[0]?.id, "T1");
+  assert.equal(second.length, 12);
 });
 
 // ---------- reading the dialog's answer ----------
@@ -160,15 +155,10 @@ test("everything that is NOT one of the three answers is unanswered — never a 
   assert.deepEqual(triagePickFrom("fix it", spec), { kind: "unanswered", reason: "fix it" });
 });
 
-test("the interview escape row stops the questions", () => {
+test("the one honoured escape from the ✎ box is `!chat`", () => {
+  // (Everything else typed there lands in the neighbouring test: carried as
+  // the user's words, never as consent.)
   const spec = findingChoiceSpec(thread(), 0, 3);
-  assert.deepEqual(triagePickFrom(SKIP_REST_CHOICE, spec), { kind: "skip-rest" });
-  // …and so does the typed twin its own hint advertises: a box that names an
-  // escape and then does something else with it is worse than no hint at all.
-  assert.match(spec.reasonPlaceholder ?? "", /!skip/);
-  assert.deepEqual(triagePickFrom(`${DECLINE_ROW}：!skip`, spec), { kind: "skip-rest" });
-  // `!chat` is not advertised for a finding (there is no interview to defer)
-  // but it must not turn into a decision either.
   assert.deepEqual(triagePickFrom(`${DECLINE_ROW}：!chat`, spec),
     { kind: "unanswered", reason: "（他想改在聊天里说）" });
 });
