@@ -360,9 +360,16 @@ export function orchestratorDoneProblems(facts: OrchestratorDoneFacts): string[]
     const silent = unreportedDecisions(facts.plan);
     if (silent.length > 0) {
       problems.push(
-        `有 ${silent.length} 个待用户决策从未通知过用户：` +
+        `有 ${silent.length} 个待用户决策从未通知过用户（约束 11）：` +
         silent.map((d) => d.id).join(", ") +
-        " —— 用 `ask_user` 当面问他（门禁会在框弹出的同时发系统通知），再退出（约束 11）",
+        // THE TEXT NAMED THE WRONG TOOL (quality round P2, 2026-09-17).
+        // `ask_user` does not write `notifiedAt`, and neither does anything
+        // else the PM can call — the ONLY writer is `add-decision`, which
+        // notifies and stamps in one breath. So a decision that got into the
+        // plan without that stamp has exactly one way out: settle it.
+        " —— 唯一能解除它的是拿到你的答复：用 `ask_user` 当面问清楚，" +
+        `再用 \`orchestrator_plan({ action: "resolve-decision", decisionId: "${silent[0]!.id}", answer })\` 落回 plan` +
+        "（登记决策时门禁已经自动通知过一次；没通知成说明通知通道不可用，见 lib/user-notify.ts）。",
       );
     }
     // R-29 — "the user was TOLD" is not "the question was SETTLED". A decision

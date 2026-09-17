@@ -2217,36 +2217,35 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   // spawned async, detached (own process group), with abort + timeout killing
   // the whole process tree.
   //
-  // THE BAN IS ABOUT THE RUNNER, and it is pinned to the runner's own body: the
-  // single `spawnSync` this file is allowed to contain is the exit path's
-  // banner (an `exit` handler cannot await, and the ~50ms notifier must finish
-  // before the process is gone — lib/user-notify.ts). A file-wide ban would
-  // have made that impossible; a ban scoped to the wrong thing would have left
-  // the freeze it was written for.
+  // NO SYNCHRONOUS SPAWN MAY COME BACK HERE. The one the gate allows — the
+  // exit-path banner, an `exit` handler cannot await — lives in
+  // lib/user-notify-runtime.ts, a module of its own (quality round P2: the
+  // runtime half moved out of this file precisely because it was a new job in
+  // an already huge one). A blocking spawn in the extension host freezes every
+  // session, every judge pane and every child in the window.
+  assert.doesNotMatch(SRC, /\bspawnSync\s*\(/, "a blocking spawn in the extension host freezes everything");
   const runnerBody = SRC.slice(SRC.indexOf("async function runTrustedPrecommit"));
   assert.ok(runnerBody.length > 0, "the runner must still be in this file");
   assert.doesNotMatch(runnerBody, /spawnSync\s*\(/,
     "the precommit runner may never spawn synchronously — it runs for minutes");
-  const syncSpawns = [...SRC.matchAll(/\bspawnSync\s*\(/g)];
+  // …AND THE EXIT PATH IS WIRED HERE, because it is what a test cannot reach:
+  // the blocking spawn itself lives in the runtime module, and the two things
+  // the extension owns are the registration and the clean-shutdown flag.
+  const runtimeSrc = readFileSync(join(ROOT, "lib", "user-notify-runtime.ts"), "utf8");
+  const syncSpawns = [...runtimeSrc.matchAll(/\bspawnSync\s*\(/g)];
   assert.equal(syncSpawns.length, 1,
-    "exactly one synchronous spawn CALL in the file — the import and the prose are not calls");
-  const exitHandlerAt = SRC.indexOf("process.on(\"exit\"");
-  assert.ok(exitHandlerAt >= 0, "the exit path must still exist");
-  const bannerFnAt = SRC.indexOf("function raiseBanner(");
-  assert.ok(bannerFnAt >= 0 && bannerFnAt < syncSpawns[0]!.index! && syncSpawns[0]!.index! < exitHandlerAt,
-    "the one synchronous spawn lives in raiseBanner, which the exit handler calls");
-  assert.match(SRC.slice(exitHandlerAt, exitHandlerAt + 600), /blocking: true/,
-    "and the exit handler is what asks for the blocking send");
-  // THE RULE AND ITS WRING are two halves (reviewer P1, 2026-09-17): the policy
-  // is tested in test/user-notify.test.ts, and what a test CANNOT reach — an
-  // `exit` handler and a pi event — is pinned here: the handler must ask
-  // `exitNotifyKind`, and the shutdown path must be what answers it.
-  assert.match(SRC.slice(exitHandlerAt, exitHandlerAt + 600), /exitNotifyKind\(\{ cleanShutdown \}\)/,
-    "the exit handler must consult the rule, not re-implement it");
+    "exactly one synchronous spawn in the runtime — the exit banner, and nothing else");
+  assert.match(runtimeSrc, /process\.on\("exit"/, "the exit handler lives with it");
+  assert.match(runtimeSrc.slice(runtimeSrc.indexOf('process.on("exit"')),
+    /exitNotifyKind\(\{ cleanShutdown \}\)/,
+    "the handler must consult the rule in lib/user-notify.ts, not re-implement it");
+  assert.match(runtimeSrc, /spawnSync\(bin!, args, \{ stdio: "ignore", timeout: 10_000 \}\)/,
+    "bounded — a stuck notifier must not hold the process open");
+  assert.match(SRC, /notifyRuntime\.armExitHandler\(\)/, "the extension registers it once, for the process");
   const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
   assert.ok(shutdownAt >= 0, "the shutdown handler must still exist");
-  assert.match(SRC.slice(shutdownAt, shutdownAt + 700), /cleanShutdown = true/,
-    "every clean shutdown reason (quit | reload | new | resume | fork) sets the flag the exit path reads");
+  assert.match(SRC.slice(shutdownAt, shutdownAt + 700), /notifyRuntime\.markCleanShutdown\(\)/,
+    "every clean shutdown reason (quit | reload | new | resume | fork) records itself, and the handler reads that");
   assert.match(SRC, /async function runTrustedPrecommit/);
   assert.match(SRC, /abortSignal\?\.addEventListener\("abort"/);
   assert.match(SRC, /detached:\s*true/);

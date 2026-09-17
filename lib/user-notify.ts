@@ -184,9 +184,10 @@ export function buildFocusCommand(opts: {
     return `tmux select-window -t ${window}; tmux select-pane -t ${pane}`;
   }
   // No window id (the lookup failed): select the pane where it lives. tmux
-  // accepts a pane id for `select-window` too, and answers by selecting the
-  // window that holds it — so the click still lands, one round trip later.
-  return `tmux select-pane -t ${pane}`;
+  // accepts a pane id for `select-window` too — MEASURED on 3.7c: with the
+  // client on window 0, `select-window -t %1` (a pane in window 1) moved it to
+  // window 1 — so both halves still run and the click lands the same way.
+  return `tmux select-window -t ${pane}; tmux select-pane -t ${pane}`;
 }
 
 /** `terminal-notifier`'s own argv — the binary first, like exec accepts. */
@@ -409,11 +410,9 @@ export function planUserNotify(opts: {
   const decision = decideNotify({ history: opts.history, key, now: opts.now });
   if (!decision.send) return { status: "throttled", reason: decision.reason };
 
-  const focusCommand = opts.tmux
-    ? (() => {
-        const address = opts.tmux!();
-        return address ? buildFocusCommand({ paneId: address.paneId, windowId: address.windowId }) : undefined;
-      })()
+  const address = opts.tmux?.();
+  const focusCommand = address
+    ? buildFocusCommand({ paneId: address.paneId, windowId: address.windowId })
     : undefined;
   return {
     status: "send",

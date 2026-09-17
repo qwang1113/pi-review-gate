@@ -1,0 +1,165 @@
+/**
+ * THE RUNTIME HALF: where the notifier is, where this session lives, and what
+ * an exit means.
+ *
+ * Its policy half (lib/user-notify.ts) is tested on its own; what is tested
+ * here is the plumbing only a process can have — the resolved binary, the tmux
+ * address looked up lazily, the two spawns, and the throttle being written to
+ * the sidecar. Everything is injected, so no test sends anything and none of
+ * them need tmux.
+ */
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { createUserNotifyRuntime } from "../lib/user-notify-runtime.ts";
+import { emptyState, type GateState } from "../lib/gate-state.ts";
+import { NOTIFY_DEDUP_MS } from "../lib/user-notify.ts";
+
+const T0 = 1_700_000_000_000;
+
+interface Harness {
+  notify: (opts: Parameters<ReturnType<typeof createUserNotifyRuntime>["notify"]>[0]) => ReturnType<ReturnType<typeof createUserNotifyRuntime>["notify"]>;
+  runtime: ReturnType<typeof createUserNotifyRuntime>;
+  state: GateState;
+  sent: string[][];
+  blocking: string[][];
+  tmuxCalls: string[][];
+  persists: number;
+  markCleanShutdown(): void;
+  /** Run the registered exit handler the way node would. */
+  exit(): void;
+}
+
+function harness(over: {
+  env?: Record<string, string>;
+  taskMode?: GateState["taskMode"];
+  interactive?: boolean;
+  notifier?: string | undefined;
+  windowId?: string;
+} = {}): Harness {
+  const state = emptyState("sess-1", 10);
+  if (over.taskMode) state.taskMode = over.taskMode;
+  const sent: string[][] = [];
+  const blocking: string[][] = [];
+  const tmuxCalls: string[][] = [];
+  const exitHandlers: Array<() => void> = [];
+  let persists = 0;
+  const realOn = process.on.bind(process);
+  // Capture the handler instead of registering it: a test process must not add
+  // an exit listener per case.
+  (process as unknown as { on: unknown }).on = (event: string, fn: () => void) => {
+    if (event === "exit") { exitHandlers.push(fn); return process; }
+    return (realOn as unknown as (e: string, f: () => void) => unknown)(event, fn) as unknown;
+  };
+  let runtime: ReturnType<typeof createUserNotifyRuntime>;
+  try {
+    runtime = createUserNotifyRuntime({
+      state: () => state,
+      persist: () => { persists += 1; },
+      repoName: () => "pi-review-gate",
+      taskMode: () => state.taskMode,
+      env: () => ({ TMUX_PANE: "%7", ...(over.env ?? {}) } as NodeJS.ProcessEnv),
+      interactive: () => over.interactive ?? true,
+      runTmux: (argv) => { tmuxCalls.push([...argv]); return { ok: true, stdout: `${over.windowId ?? "@3"}\n` }; },
+      now: () => T0,
+      spawnDetached: (argv) => { sent.push([...argv]); },
+      spawnBlocking: (argv) => { blocking.push([...argv]); },
+      resolveNotifier: () => ("notifier" in over ? over.notifier : "/opt/homebrew/bin/terminal-notifier"),
+    });
+    runtime.armExitHandler();
+  } finally {
+    (process as unknown as { on: unknown }).on = realOn;
+  }
+  return {
+    runtime,
+    state,
+    sent,
+    blocking,
+    tmuxCalls,
+    get persists() { return persists; },
+    notify: (opts) => runtime.notify(opts),
+    markCleanShutdown: () => runtime.markCleanShutdown(),
+    exit: () => { for (const handler of exitHandlers) handler(); },
+  } as Harness;
+}
+
+test("a banner goes out with this session's own pane as the click target", () => {
+  const h = harness({ taskMode: "loop" });
+  const outcome = h.notify({ kind: "finished", detail: "本轮完成" });
+  assert.deepEqual(outcome, { status: "sent" });
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(h.sent[0], [
+    "/opt/homebrew/bin/terminal-notifier",
+    "-title", "完成 · pi-review-gate",
+    "-message", "本轮完成",
+    "-activate", "com.mitchellh.ghostty",
+    "-execute", "tmux select-window -t @3; tmux select-pane -t %7",
+  ]);
+  assert.deepEqual(h.tmuxCalls, [["display-message", "-p", "-t", "%7", "#{window_id}"]]);
+  assert.equal(h.state.notify?.sentAt.length, 1, "the throttle is written to the sidecar");
+  assert.equal(h.persists, 1, "…and persisted, or a reload would forget it");
+  assert.equal(h.blocking.length, 0, "a live session never blocks on the notifier");
+});
+
+test("nothing is spawned when the session may not send, and tmux is not even asked", () => {
+  const h = harness({ taskMode: "loop", env: { RG_STATE_VARIANT: "t1-x" } });
+  assert.equal(h.notify({ kind: "finished", detail: "x" }).status, "skipped");
+  assert.deepEqual(h.sent, []);
+  assert.deepEqual(h.tmuxCalls, [], "a child session must not pay for a tmux round trip");
+  assert.equal(h.state.notify, undefined);
+});
+
+test("the notifier is resolved once, and a missing one is reported not swallowed", () => {
+  const missing = harness({ taskMode: "loop", notifier: undefined });
+  const outcome = missing.notify({ kind: "finished", detail: "x" });
+  assert.equal(outcome.status, "missing");
+  assert.match((outcome as { note: string }).note, /brew install terminal-notifier/);
+  assert.deepEqual(missing.sent, []);
+  assert.match(missing.runtime.startHint(), /通知是关的/);
+
+  const present = harness({ taskMode: "loop" });
+  assert.equal(present.runtime.startHint(), "");
+});
+
+test("the same banner twice inside the dedup window is throttled, and the argv is not built", () => {
+  const h = harness({ taskMode: "loop" });
+  assert.equal(h.notify({ kind: "finished", detail: "同一句话" }).status, "sent");
+  const second = h.notify({ kind: "finished", detail: "同一句话" });
+  assert.equal(second.status, "throttled");
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.persists, 1, "a throttled send changes nothing");
+  assert.equal(NOTIFY_DEDUP_MS, 10 * 60_000);
+});
+
+test("an exit WITHOUT a clean shutdown is the one banner nobody else can raise", () => {
+  const crashed = harness({ taskMode: "loop" });
+  crashed.exit();
+  assert.equal(crashed.blocking.length, 1, "the exit path sends, and sends blocking");
+  assert.match(crashed.blocking[0]!.join(" "), /异常结束 · pi-review-gate/);
+  assert.match(crashed.blocking[0]!.join(" "), /没有 declare_done/);
+  assert.deepEqual(crashed.sent, [], "the process is leaving: a detached child would be killed with it");
+
+  const quit = harness({ taskMode: "loop" });
+  quit.markCleanShutdown();
+  quit.exit();
+  assert.deepEqual(quit.blocking, [], "quit | reload | new | resume | fork — the user did it on purpose");
+
+  const child = harness({ taskMode: "loop", env: { RG_STATE_VARIANT: "t1-x" } });
+  child.exit();
+  assert.deepEqual(child.blocking, [], "a child's crash is its manager's business");
+
+  const judge = harness({ env: {}, taskMode: "normal" });
+  judge.exit();
+  assert.deepEqual(judge.blocking, [], "a judge pane may never raise a banner");
+});
+
+test("a clean shutdown recorded AFTER a crash-shaped exit is still silence, and vice versa", () => {
+  // The flag is read at exit time, not at registration time — the ordering of
+  // pi's teardown must not decide whether the user is told.
+  const h = harness({ taskMode: "loop" });
+  h.exit();
+  assert.equal(h.blocking.length, 1);
+  h.markCleanShutdown();
+  h.exit();
+  assert.equal(h.blocking.length, 1, "the second exit is a recorded clean one");
+});

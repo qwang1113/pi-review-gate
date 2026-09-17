@@ -480,7 +480,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（138 个模块）
+## 五、`lib/` 全量速查表（139 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -580,6 +580,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `orchestrator-dispatch.ts` | dispatch 半边：`orchestrator_spawn` / `orchestrator_instruct`；spawn 时按任务声明的 `repo` 解析子会话 cwd（`resolveTaskRepo`，fail-closed——解析不了就拒绝，绝不回退到项目经理自己的 repo），并把分支事实（`deps.currentBranch` 读到的实际分支、是否门禁自建 checkout、站点上界是否到 `pr`）交给 `buildBranchLine` 渲染进任务书 |
 | `orchestrator-gate.ts` | 编排的 10 条硬约束（约束 7/10/14 于 2026-09-07、约束 5 于 2026-09-17 退役），写成纯决策以便逐条单测 |
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
+| `user-notify-runtime.ts` | 通知的运行时半边（2026-09-17 拆出）：解析 `terminal-notifier` 的路径（开一次，退出路径不能再查 PATH）、本会话的 tmux 地址（惰性，只有真要发时才查）、两个 spawn（活会话 detached；`exit` 里只能同步，且给 10s 超时）、以及注册进程退出 handler。拆出理由：那 60 行是新职责，而扩展已经 ~9000 行 |
 | `user-notify.ts` | 桌面通知：三种事件（完成 / 异常结束 / 停下来等用户回答）、只有没有上级的会话能发、`terminal-notifier` 的 argv 与「点回那个 pane」的纯函数、节流。旧的 `orchestrator-notify.ts`（OSC + tmux passthrough）整份删除 |
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash。`planHash` 的**产出方**，因此「什么算一个 plan hash」也归它：`isPlanHash` 是那条形状规则的唯一实现，凡从 sidecar 读回授权记录的地方都用它（复制出去的授权校验只会朝放宽的方向漂移） |
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |

@@ -173,9 +173,11 @@ test("a focus target that is not a tmux id is dropped rather than pasted in", ()
   assert.equal(buildFocusCommand({ paneId: "%7", windowId: "@3" }),
     "tmux select-window -t @3; tmux select-pane -t %7");
   assert.equal(buildFocusCommand({ paneId: "%7", windowId: undefined }),
-    "tmux select-pane -t %7", "with no window, selecting the pane still lands on it");
+    "tmux select-window -t %7; tmux select-pane -t %7",
+    "with no window id, both halves still run — MEASURED: select-window accepts a pane id");
   assert.equal(buildFocusCommand({ paneId: "%7", windowId: "bogus" }),
-    "tmux select-pane -t %7", "an unreadable window id is not a reason to give up on the pane");
+    "tmux select-window -t %7; tmux select-pane -t %7",
+    "an unreadable window id is not a reason to give up on the pane");
   assert.equal(buildFocusCommand({ paneId: "7; rm -rf /", windowId: "@3" }), undefined,
     "the command is handed to a shell — anything that is not an id never gets in");
   assert.equal(buildFocusCommand({ paneId: "", windowId: "@3" }), undefined);

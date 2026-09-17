@@ -46,6 +46,7 @@ import { effectiveTaskStation } from "./repo-pr-policy.ts";
 
 import { appendRecord } from "./orchestrator-channel.ts";
 import { looksLikeDeclineRow, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
+import { isGrantableScope } from "./ask-user.ts";
 import { addGrant, findChild, hasGrant, type ChildSession } from "./orchestrator-registry.ts";
 import { proxyApprovalProblems } from "./orchestrator-gate.ts";
 import { superviseChildren, type PendingRequest } from "./orchestrator-supervisor.ts";
@@ -57,6 +58,20 @@ import {
   toolFail as fail,
   toolReply as reply,
 } from "./orchestrator-tool-kit.ts";
+
+/**
+ * What one proxy scope is called when the USER is asked about it.
+ *
+ * A LABEL TABLE, not a second list of scopes: WHICH topics are proxy-answerable
+ * comes from `isGrantableScope` (lib/ask-user.ts owns the one list). The
+ * identity chain this replaced had to be edited in two places, and the failure
+ * mode of forgetting here was FAIL-OPEN — the project manager would silently
+ * go back to approving that topic unconditionally.
+ */
+const PROXY_SCOPE_LABEL: Record<string, string> = {
+  "sensitive-edit": "敏感编辑",
+  "tmux-access": "tmux 授权",
+};
 
 /** Resolve `answer` against the offered rows: exact text, or a 1-based index. */
 export function resolveAnswer(
@@ -490,11 +505,9 @@ async function answerOneRequest(
   // user's whole tmux session and `new-session` puts surface outside the window
   // the work was agreed in — a child that could talk its manager into that
   // would have bypassed the permission the USER was just handed.
-  const proxyScope = request.topic === "sensitive-edit" ? "sensitive-edit"
-    : request.topic === "tmux-access" ? "tmux-access"
-    : undefined;
+  const proxyScope = isGrantableScope(request.topic) ? request.topic : undefined;
   if (proxyScope) {
-    const what = proxyScope === "sensitive-edit" ? "敏感编辑" : "tmux 授权";
+    const what = PROXY_SCOPE_LABEL[proxyScope] ?? proxyScope;
     // A `✎ …` row is a refusal REGARDLESS of its reason text (which may well
     // contain 授权/允许): the row itself is the answer, and reading it as a
     // request to grant would be the worst possible misread (reviewer P1).

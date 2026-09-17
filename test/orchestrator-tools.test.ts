@@ -748,13 +748,31 @@ test("tmux-access proxy answer: the PM needs the user's scope, exactly like a se
   assert.equal(hasGrant(w2.runtime(), "tmux-access"), true, "the scope the reviewer asked for is the one minted");
   assert.equal(hasGrant(w2.runtime(), "sensitive-edit"), false, "and it does not leak into the other scope");
 
-  // 3) A ✎-row refusal is a refusal even though its text says 授权/允许.
+  // 3) THE PM's ANSWER IS ITSELF a ✎-row refusal: no grant, no dialog, refused.
+  //    (This is `looksLikeDeclineRow`, a different branch from case 1 — hence
+  //    the two cases.)
   const w3 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const c3 = await spawnT1(w3);
   ask(w3, c3);
-  w3.options.selectAnswers = ["✎ 不选，我说明原因：先不动 tmux"];
-  const r3 = await w3.call("orchestrator_answer", { childId: c3, answer: "允许：本会话和接力继任者都能用 tmux" });
-  assert.equal(r3.isError, true, "the decline row is the answer, whatever its reason text says");
+  const r3 = await w3.call("orchestrator_answer", {
+    childId: c3, answer: "✎ 不选，我说明原因：先不动 tmux",
+  });
+  assert.equal(r3.isError, true, "the ✎ row is a refusal — reading it as a grant request would be the worst misread");
+  assert.ok(!w3.shown.some((line) => line.includes("项目经理想代答")),
+    "a refusal never opens the grant door");
+  assert.equal(w3.channelOf(c3).filter((r) => r.kind === "answer").length, 0, "nothing written");
+
+  // 4) …and the decline ROW inside the grant dialog is a refusal too, whatever
+  //    reason text it carries (it may well say 允许/授权 — the row is the
+  //    answer).
+  const w4 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c4 = await spawnT1(w4);
+  ask(w4, c4);
+  w4.options.selectAnswers = ["✎ 不选，我说明原因：先不动 tmux"];
+  const r4 = await w4.call("orchestrator_answer", {
+    childId: c4, answer: "允许：本会话和接力继任者都能用 tmux",
+  });
+  assert.equal(r4.isError, true, "the decline row in the grant dialog decides, not the text beside it");
 });
 
 test("sensitive-edit proxy answer: NO grant → the user's three-choice door in the PM pane decides", async () => {

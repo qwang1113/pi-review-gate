@@ -55,7 +55,7 @@ import { tmpdir, homedir, hostname } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve, basename as pathBasename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { spawn, execFileSync, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -240,17 +240,12 @@ import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.t
 import { runTmux } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
 import {
-  MISSING_NOTIFIER_HINT,
-  NOTIFIER_BINARY,
   describeNotifyOutcome,
-  emptyNotifyHistory,
-  exitNotifyKind,
   mayNotifyUser,
-  planUserNotify,
-  recordNotify,
   type UserNotifyKind,
   type UserNotifyOutcome,
 } from "../lib/user-notify.ts";
+import { createUserNotifyRuntime } from "../lib/user-notify-runtime.ts";
 import { isOwnedChildPane } from "../lib/orchestrator-delivery.ts";
 import {
   foldBackgroundWaits,
@@ -4304,154 +4299,38 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // THE BANNER CHANNEL (user decision, 2026-09-17)
+  // THE BANNER CHANNEL (user decision, 2026-09-17) — DEPS ASSEMBLY ONLY.
   //
   // The gate used to write an OSC escape to stdout and hope tmux forwarded it;
   // it does not reliably (lib/user-notify.ts carries the measurement), and the
-  // manager could fire one whenever it liked. Both are gone. What is left is
-  // this ONE function, called from exactly three places — `declare_done`
-  // accepted, an abnormal exit, and a dialog that is waiting for the human —
-  // and a policy module that decides whether any of them may interrupt.
+  // manager could fire one whenever it liked. Both are gone.
   //
-  // WHY IT LIVES IN THE EXTENSION and not in the policy module: what it needs
-  // is this session's own plumbing — its mode, its `RG_STATE_VARIANT`, its tmux
-  // pane, and a write to the sidecar that survives a crash. The policy takes
-  // all of that as plain values (planUserNotify) and returns either an argv or
-  // a reason, so every branch is testable without a session.
+  // WHERE EACH HALF LIVES, and why: the POLICY (three kinds, who may send,
+  // argv, the click command) is lib/user-notify.ts; the RUNTIME (the resolved
+  // notifier, this session's tmux address, the spawn, the exit handler) is
+  // lib/user-notify-runtime.ts; and this file supplies the session's own
+  // plumbing and calls four methods. Two quality rounds asked for that split
+  // (an extension that is already ~9000 lines must not grow a fourth job) and
+  // both modules are testable without a session because of it.
   // ─────────────────────────────────────────────────────────────────────
-
-  /**
-   * Where `terminal-notifier` is, resolved ONCE.
-   *
-   * Resolved rather than passed by name because a banner is often raised from
-   * the exit handler, where there is no second chance to look anything up:
-   * argv that already carries an absolute path cannot fail on a PATH the
-   * process no longer has. `undefined` is a real answer here — the user has
-   * not installed it — and every caller is told so instead of assuming success.
-   */
-  let notifierResolved: string | undefined | null = null;
-  function notifierBinary(): string | undefined {
-    if (notifierResolved === null) {
-      try {
-        const found = execFileSync("/usr/bin/which", [NOTIFIER_BINARY], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-        notifierResolved = found || undefined;
-      } catch {
-        notifierResolved = undefined;
-      }
-    }
-    return notifierResolved ?? undefined;
-  }
-
-  /**
-   * This session's own tmux address, as the click needs it.
-   *
-   * The window id is a second call because a click has to do two things: move
-   * the CLIENT to the right window and select the right pane inside it. It is
-   * looked up lazily and only when a banner is actually going out, so the
-   * cost is paid on the rare event, never on every oracle call.
-   */
-  function ownTmuxAddress(): { paneId: string; windowId?: string } | undefined {
-    const paneId = (process.env.TMUX_PANE ?? "").trim();
-    if (!/^%\d+$/.test(paneId)) return undefined;
-    try {
-      const out = runTmux(["display-message", "-p", "-t", paneId, "#{window_id}"]);
-      const windowId = out.ok ? out.stdout.trim() : "";
-      return { paneId, ...(/^@\d+$/.test(windowId) ? { windowId } : {}) };
-    } catch {
-      return { paneId };
-    }
-  }
-
-  /**
-   * Raise the banner. `blocking` is for the exit path only (see below).
-   *
-   * Never throws: a notification is a courtesy to a person, not a gate
-   * condition, and the report says which of the four outcomes it was.
-   */
-  function raiseBanner(opts: {
-    kind: UserNotifyKind;
-    detail: string;
-    blocking?: boolean;
-  }): UserNotifyOutcome {
-    try {
-      const now = Date.now();
-      const history = state.notify ?? emptyNotifyHistory();
-      const plan = planUserNotify({
-        kind: opts.kind,
-        repoName: pathBasename(primaryRepoRoot),
-        detail: opts.detail,
-        taskMode: state.taskMode,
-        stateVariant: process.env[STATE_VARIANT_ENV],
-        // Passed as a THUNK: the eligibility and throttle checks above must not
-        // pay for a tmux round trip (see the field's docblock).
-        tmux: () => ownTmuxAddress(),
-        notifierPath: notifierBinary(),
-        history,
-        now,
-        // The same side-effect gate every other terminal-writing path uses: a
-        // test run, a CI job or a headless host must never raise a banner.
-        interactive: sideEffectsEnabled(process.env, process.stdout.isTTY === true),
-      });
-      if (plan.status !== "send") {
-        return plan.status === "missing"
-          ? { status: "missing", note: plan.hint }
-          : { status: plan.status, note: plan.reason };
-      }
-      const [, ...args] = plan.argv;
-      if (opts.blocking) {
-        // The process is on its way out: the child must be RUN, not merely
-        // started, so this is the one synchronous spawn in the file.
-        spawnSync(plan.argv[0]!, args, { stdio: "ignore", timeout: 10_000 });
-      } else {
-        const child = spawn(plan.argv[0]!, args, { detached: true, stdio: "ignore" });
-        child.unref();
-      }
-      state.notify = recordNotify(history, plan.key, now);
-      persist(latestCtx);
-      return { status: "sent" };
-    } catch (error) {
-      return { status: "skipped", note: `发通知时出错：${(error as Error).message}` };
-    }
-  }
-
-  // Set by the `session_shutdown` handler: the user ended or restarted this
-  // session themselves (quit | reload | new | resume | fork). Read by the
-  // process-exit handler below, which is the only place that can tell a crash
-  // from a `/quit`.
-  let cleanShutdown = false;
-
-  // ─────────────────────────────────────────────────────────────────────
-  // KIND TWO of three: the session ended WITHOUT a clean shutdown.
-  //
-  // Registered once, for the whole process, and the only banner that has to
-  // survive the process dying (hence the blocking spawn inside `raiseBanner`).
-  // A `/quit`, a reload, a resume or a fork all set `cleanShutdown` first —
-  // the user did that on purpose and already knows. What is left is the crash:
-  // an uncaught exception, a broken invariant, a provider failure that took
-  // the process down. A SIGKILL leaves no handler to run and no banner is
-  // possible, which is the honest limit of this mechanism — and a kill the
-  // user performed is not news anyway.
-  //
-  // The eligibility check comes FIRST, before anything is resolved or spawned:
-  // this handler runs on every process exit, including judge panes and child
-  // sessions, and the same policy function answers it (no second rule).
-  // ─────────────────────────────────────────────────────────────────────
-  process.on("exit", () => {
-    // The rule itself is lib/user-notify.ts's `exitNotifyKind`, tested there:
-    // a clean shutdown (quit | reload | new | resume | fork) says nothing, and
-    // a death with no such record is the one banner nobody else can raise.
-    const kind = exitNotifyKind({ cleanShutdown });
-    if (!kind) return;
-    if (!mayNotifyUser({ taskMode: state.taskMode, stateVariant: process.env[STATE_VARIANT_ENV] })) return;
-    raiseBanner({
-      kind,
-      detail: "会话没有 declare_done 就退出了（进程异常终止，不是你自己结束的）。",
-      blocking: true,
-    });
+  const notifyRuntime = createUserNotifyRuntime({
+    state: () => state,
+    persist: () => persist(latestCtx),
+    repoName: () => pathBasename(primaryRepoRoot),
+    taskMode: () => state.taskMode,
+    env: () => process.env,
+    interactive: () => sideEffectsEnabled(process.env, process.stdout.isTTY === true),
+    // The gate's own tmux runner: argv, no shell, and it refuses global option
+    // writes on the way (lib/orchestrator-tmux.ts).
+    runTmux: (argv) => runTmux(argv),
   });
+  // KIND TWO of three is registered once, for the whole process: the handler
+  // is inside the runtime, and `markCleanShutdown` (called by the
+  // `session_shutdown` handler below) is what tells it a `/quit` from a crash.
+  notifyRuntime.armExitHandler();
+  /** Raise the banner for one event. Never throws; never claims delivery. */
+  const raiseBanner = (opts: { kind: UserNotifyKind; detail: string; blocking?: boolean }) =>
+    notifyRuntime.notify(opts);
 
   // `ctx` is optional because it is used for ONE thing — refreshing the status
   // widget. A caller that has no context (the orchestration tools persist from
@@ -12256,9 +12135,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     if (
       ctx.hasUI &&
       mayNotifyUser({ taskMode: state.taskMode, stateVariant: process.env[STATE_VARIANT_ENV] }) &&
-      !notifierBinary()
+      notifyRuntime.startHint()
     ) {
-      try { ctx.ui.notify(MISSING_NOTIFIER_HINT, "info"); } catch { /* headless */ }
+      try { ctx.ui.notify(notifyRuntime.startHint(), "info"); } catch { /* headless */ }
     }
 
     // A SPAWNER may hand a session its starting mode (RG_GATE_MODE): a child
@@ -12380,9 +12259,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // A CLEAN SHUTDOWN IS NOT A FAILURE (user decision, 2026-09-17): every
     // reason pi reports here — quit, reload, new, resume, fork — is the user
     // ending or restarting the session themselves, and they already know.
-    // The flag is what the process-exit handler below consults; without it a
-    // crash and a `/quit` would look identical from there.
-    cleanShutdown = true;
+    // The flag is what the runtime's process-exit handler consults; without it
+    // a crash and a `/quit` would look identical from there.
+    notifyRuntime.markCleanShutdown();
     void event;
     // Round-18: stop the referenced child-wait watchdog with the session.
     cancelChildWaitTimer();
