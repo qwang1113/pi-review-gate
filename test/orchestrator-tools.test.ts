@@ -1150,32 +1150,37 @@ test("attach ADOPTS the previous holder's orchestration, registry included", asy
   assert.ok(world.auditLog.some((line) => line.includes("taken over")), "a change of holder is logged");
 });
 
-test("attach does NOT write when the sidecar has no record of the adopted orchestration", async () => {
-  // The other half of the durable claim. `runtime()` answers `emptyRuntime(id)`
-  // for an id it has no record of, so an unconditional write there would erase
-  // whatever runtime the SAME sidecar holds for a different orchestration — one
-  // whose children may still be reporting. WHICH ids count as "has a record"
-  // is decided by `takeoverClaimWorthWriting`, unit-tested beside the takeover
-  // rules (test/orchestrator-takeover.test.ts); at the tool level the fixture
-  // cannot stage it: its `recordedRuntime()` and its live runtime are one slot
-  // (that is faithful to production for everything except this distinction).
-  // What this test pins is the POSITIVE half of the same branch — a takeover
-  // that has a record to claim writes the claim immediately — and it fails if
-  // the branch is removed altogether.
+test("attach does NOT write when the sidecar holds a DIFFERENT orchestration", async () => {
+  // The durable claim is conditional, and this is the branch with consequences
+  // (reviewer P1, 2026-09-17). `runtime()` answers `emptyRuntime(id)` for an id
+  // the sidecar has no record of, so an unconditional write here would store an
+  // empty runtime over the record beside it — the record of a DIFFERENT
+  // orchestration, still describing its children, which is exactly what a later
+  // takeover of THAT one needs to find.
+  //
+  // Remove the `if` in doAttach and this test is the only one that fails: the
+  // rule itself is unit-tested (test/orchestrator-takeover.test.ts), but a rule
+  // that is tested and not WIRED is not a guard.
   const recorded = previousHolder();
+  const other = idOfFakeRepo(1_700_000_500_000);
+  assert.notEqual(other, recorded.orchestrationId, "the two ids must differ for this to mean anything");
   const world = makeFakeWorld({
     plan: twoTaskPlan(),
     recordedRuntime: recorded,
-    channelDirs: [recorded.orchestrationId],
+    // Known to the discovery — its channel directory is on disk — but NOT in
+    // this sidecar's runtime slot.
+    channelDirs: [other],
   });
 
-  const reply = await world.call("orchestrator_attach", { orchestrationId: recorded.orchestrationId });
+  const reply = await world.call("orchestrator_attach", { orchestrationId: other });
 
   assert.equal(reply.isError, undefined, replyText(reply));
-  assert.deepEqual(world.adopted, [recorded.orchestrationId], "the address is still adopted");
-  assert.equal(world.runtime().orchestrationId, recorded.orchestrationId);
-  assert.equal(world.runtimeWriteCount(), 1,
-    "a takeover with a record to claim writes it at once, not at the next runtime write");
+  assert.deepEqual(world.adopted, [other], "the address is still adopted");
+  assert.equal(world.runtime().orchestrationId, other);
+  assert.equal(world.runtimeWriteCount(), 0,
+    "the other orchestration's record must survive an adoption it has nothing to do with");
+  assert.equal(world.deps.recordedRuntime?.()?.orchestrationId, recorded.orchestrationId,
+    "and it is STILL the record on disk, not an empty runtime under the new id");
 });
 
 test("attach refuses to change identity once this session has children of its own", async () => {
