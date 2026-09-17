@@ -1136,6 +1136,14 @@ test("attach ADOPTS the previous holder's orchestration, registry included", asy
   assert.deepEqual(world.adopted, [recorded.orchestrationId], "the id must actually be adopted");
   assert.equal(world.runtime().orchestrationId, recorded.orchestrationId);
   assert.equal(world.runtime().children.length, 1, "the previous holder's registry comes with it");
+  // AND THE CLAIM IS ON DISK, not just in memory (2026-09-17). `ownerSessionId`
+  // exists to let THIS session resume the record after a reload, and a takeover
+  // can be followed by nothing but `orchestrator_wait` for a long while — none
+  // of which persists the runtime. Adopting without writing left the record
+  // naming the previous session as owner, so the next reload refused it and
+  // stranded the children this call had just adopted.
+  assert.equal(world.runtimeWriteCount(), 1,
+    "taking over an orchestration writes the new owner to the sidecar immediately");
   const text = replyText(reply);
   assert.match(text, /已接管编排/);
   assert.match(text, /尚未获批/, "the approval does NOT travel — the new holder must submit again");

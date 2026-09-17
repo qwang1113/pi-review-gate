@@ -104,6 +104,17 @@ export interface FakeWorld {
   options: FakeWorldOptions;
   /** Replace the runtime (used to pre-seed a grant). */
   saveRuntime: (next: OrchestratorRuntime) => void;
+  /**
+   * How many times the runtime has been WRITTEN to that slot.
+   *
+   * A counter rather than an inspection of the value, because the two things a
+   * test needs to tell apart are "the claim was made" and "the claim was
+   * MADE DURABLE": `adoptOrchestrationId` changes the in-memory id and
+   * `saveRuntime` is what a reload can still see, and both end up setting the
+   * same variable here. (2026-09-17: attach adopted without persisting, so a
+   * reload refused to resume the orchestration it had just taken over.)
+   */
+  runtimeWriteCount: () => number;
   /** Everything `showToUser` printed. */
   shown: string[];
   /** Every line the tools wrote to the repo's audit log (B2). */
@@ -331,6 +342,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   let runtime: OrchestratorRuntime = emptyRuntime(ORCHESTRATION_ID);
   /** What the DISK records, when that is somebody else's orchestration (B1). */
   let recordedOverride: OrchestratorRuntime | undefined = options.recordedRuntime;
+  let runtimeWrites = 0;
   let planAudits = 0;
   const tmuxCalls: string[][] = [];
   const handoffEvents: string[] = [];
@@ -415,6 +427,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       return { ok: true, path: `/repo/${relPath}` };
     },
     saveRuntime: (next) => {
+      runtimeWrites += 1;
       runtime = next;
       // The write LANDED on the one slot the disk has: whatever another
       // orchestration had recorded there is now this.
@@ -597,7 +610,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     adopted,
     confirmAnswers,
     options,
-    saveRuntime: (next) => { runtime = next; },
+    saveRuntime: (next) => { runtimeWrites += 1; runtime = next; },
+    runtimeWriteCount: () => runtimeWrites,
     now,
     advance: (ms) => { clock += ms; },
     runtime: () => runtime,

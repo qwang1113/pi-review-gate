@@ -2801,13 +2801,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     onHandoff: () => handoffRetirement(),
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
-  // A manager's window holds BOTH kinds of decorated pane. The session tools
-  // need the judge count for the one decision they share with the judge close
-  // paths: may this close take the window's shared label bar down?
-  //
-  // Attached to the deps object rather than spread into a copy — a copy
-  // freezes every field at registration time, and these deps are one live
-  // object the rest of the session keeps using.
+  // The session tools take the orchestration deps as they are, through an
+  // alias — no extra capability, and no copy: a spread would freeze every
+  // field at registration time, and these deps are one live object the rest of
+  // the session keeps using. (They were once handed a judge-pane count for the
+  // window's shared label bar; that judgement is deleted — the bar is turned
+  // on and never turned off, see lib/session-factory.ts `closeSessionPane`.)
   const sessionDeps: OrchestratorSessionDeps = orchestratorDeps;
   registerOrchestratorSessionTools(pi, sessionDeps);
 
