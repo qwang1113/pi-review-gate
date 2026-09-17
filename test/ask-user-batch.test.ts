@@ -180,6 +180,8 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
     commitsAheadOfBase: async () => 0,
     scopeLimitDeclined: () => false,
     declineScopeLimit: () => {},
+    tmuxAccessDeclined: () => false,
+    declineTmuxAccess: () => {},
     sensitiveGrants: () => [] as SensitiveGrant[],
     storeSensitiveGrants: () => {},
     sensitiveDeclinedPaths: new Set<string>(),

@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+import { mayNotifyUser } from "../lib/user-notify.ts";
 
 import {
   ORCHESTRATOR_DOC_PATTERN,
   formatOrchestrationStatus,
-  notifyAuthorization,
   orchestratorDoneProblems,
   orchestratorWriteBlock,
   proxyApprovalProblems,
@@ -162,7 +164,7 @@ test("CONSTRAINT 8 SAFETY EDGE: an out-of-repo SENSITIVE landing refuses, and sa
   const outside = proxyApprovalProblems(["/Users/someone/.ssh/config"]);
   assert.equal(outside.ok, false);
   assert.match(outside.reason!, /安全底线/, "the human's call, not a technical trade-off");
-  assert.match(outside.reason!, /orchestrator_notify/, "and the refusal says what to do instead");
+  assert.match(outside.reason!, /ask_user/, "and the refusal says what to do instead");
   assert.match(outside.reason!, /sessionEditedFiles/, "and names the fact it judged, so rewording is not a way through");
   assert.match(outside.reason!, /仓库外/, "it explains what out-of-repo means for this check");
   assert.match(outside.reason!, /敏感/, "and that sensitive out-of-repo paths are the exception");
@@ -172,13 +174,24 @@ test("CONSTRAINT 8 SAFETY EDGE: an out-of-repo SENSITIVE landing refuses, and sa
 // CONSTRAINTS 9 and 14 — who may do what
 // ---------------------------------------------------------------------------
 
-test("CONSTRAINT 9: only an orchestrator may notify the human", () => {
-  assert.deepEqual(notifyAuthorization("orchestrator"), { ok: true });
+/**
+ * CONSTRAINT 9 HAS MOVED (user decision, 2026-09-17), and that is what this
+ * asserts: there is no notify tool to authorize, so the only place the rule can
+ * live is the policy module — and it must not have drifted back into the
+ * gate that hands out permissions for TOOLS.
+ */
+test("CONSTRAINT 9: the gate itself notifies, and the rule lives in lib/user-notify.ts", () => {
+  const source = readFileSync(new URL("../lib/orchestrator-gate.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /export function notifyAuthorization/,
+    "a per-tool authorization would mean an agent still decides when to interrupt the human");
+  assert.equal(mayNotifyUser({ taskMode: "orchestrator", stateVariant: undefined }), true);
   for (const mode of ["loop", "explore", "normal", undefined] as const) {
-    const refused = notifyAuthorization(mode);
-    assert.equal(refused.ok, false, `${mode ?? "undecided"} must not raise a desktop banner`);
-    if (!refused.ok) assert.match(refused.reason, /ask_user/, "a child that needs a person has its own tool");
+    if (mode === "loop") continue; // a standalone loop session is one of the three senders
+    assert.equal(mayNotifyUser({ taskMode: mode, stateVariant: undefined }), false,
+      `${mode ?? "undecided"} must not raise a banner`);
   }
+  assert.equal(mayNotifyUser({ taskMode: "loop", stateVariant: "t1-x" }), false,
+    "a child's questions belong to its manager");
 });
 
 

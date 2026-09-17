@@ -78,7 +78,8 @@
 
   - `lib/judge-spawn-tools.ts`：`judge_spawn` / `judge_answer` / `judge_recover`
     （pane judge 的生命周期工具；agent 只表达 goal / plan 意图，审计任务由门禁组装）。
-  - `lib/orchestrator-tools.ts`：`orchestrator_plan`、`orchestrator_notify`。
+  - `lib/orchestrator-tools.ts`：`orchestrator_plan`（`orchestrator_notify` 已删除 ——
+    通知改由门禁自己发，见 `lib/user-notify.ts`）。
   - `lib/orchestrator-session-tools.ts`：`orchestrator_spawn`、
     `orchestrator_instruct`、`orchestrator_wait`、`orchestrator_close`
     （并从这里转注册下面两个模块，所以「有哪些编排工具」
@@ -347,8 +348,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   没有 `capture-pane`；三列布局的落点与等分判定也在这里）、
   `orchestrator-wiring.ts`（跑 tmux、读写 plan、持有通道 IO 与
   监督记忆）、`orchestrator-delivery.ts`（投递并**校验真的送达**才报成功，证据
-  是通道记录与子会话回执）、`orchestrator-notify.ts`（桌面通知，唯一入口 +
-  节流）、`orchestrator-guard.ts`（tmux backstop：拦手写 tmux）。
+  是通道记录与子会话回执）、`user-notify.ts`（桌面通知：三类事件 + 节流 +
+  `terminal-notifier` 的 argv 与点击回 pane）、`orchestrator-guard.ts`（tmux 权限门：
+  未授权拦，授权走 `request_tmux_access`）。
 - **工具与接线**：`orchestrator-tools.ts`（plan / notify）、
   `orchestrator-session-tools.ts`（spawn / instruct / wait / close / handoff 的
   注册，并转注册下面两个模块，所以「有哪些编排工具」只有一个地方回答）、
@@ -444,8 +446,9 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 通道）——**两者都不拦任何东西**，是这一域里最典型的提示级手段。
 
 > **落点**：想让 agent 改掉某个行为习惯，先问这是不是**提示**能解决的——
-> 是就改 `agent-directives.ts`，不是就写成域 1 的机械规则。系统级通知只有
-> 编排层能发（`orchestrator-notify.ts`），任何会话都能广播的形态不要再回来。
+> 是就改 `agent-directives.ts`，不是就写成域 1 的机械规则。系统级通知由**门禁自己**
+> 在三类事件上发（`user-notify.ts`）；agent 已经不能发通知了（`orchestrator_notify`
+> 已删除），任何会话都能广播的形态不要再回来。
 
 ### 域 9：通用基础设施
 
@@ -576,7 +579,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `orchestrator-dispatch.ts` | dispatch 半边：`orchestrator_spawn` / `orchestrator_instruct`；spawn 时按任务声明的 `repo` 解析子会话 cwd（`resolveTaskRepo`，fail-closed——解析不了就拒绝，绝不回退到项目经理自己的 repo），并把分支事实（`deps.currentBranch` 读到的实际分支、是否门禁自建 checkout、站点上界是否到 `pr`）交给 `buildBranchLine` 渲染进任务书 |
 | `orchestrator-gate.ts` | 编排的 10 条硬约束（约束 7/10/14 于 2026-09-07、约束 5 于 2026-09-17 退役），写成纯决策以便逐条单测 |
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
-| `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
+| `user-notify.ts` | 桌面通知：三种事件（完成 / 异常结束 / 停下来等用户回答）、只有没有上级的会话能发、`terminal-notifier` 的 argv 与「点回那个 pane」的纯函数、节流。旧的 `orchestrator-notify.ts`（OSC + tmux passthrough）整份删除 |
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash。`planHash` 的**产出方**，因此「什么算一个 plan hash」也归它：`isPlanHash` 是那条形状规则的唯一实现，凡从 sidecar 读回授权记录的地方都用它（复制出去的授权校验只会朝放宽的方向漂移） |
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西。也是 sidecar 里那份 runtime 的**唯一净化处**：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；`successorRuntime(runtime, fromHandoff)` 是「换了个会话能继承什么」的唯一出处 —— 登记表与 grants 照旧留下；许可只在 `fromHandoff` 为真（前任自己交棒的继任者，判定在 `lib/session-inheritance.ts`）时留下，其余情形全部剥离（写在调用点上的字段清单迟早漏掉新字段）。runtime 还带一个 `ownerSessionId`（2026-09-17）：**哪个会话持有这个编排** —— 它是「reload 后能不能恢复」的唯一依据（`storedRuntimeIsMine`），只有铸出、继承或接管了该地址的会话会写它。child 记录上的 `worktree`（路径 + 分支）也是在这里净化的：它会被交给 git，所以与其它路径同等强度 |

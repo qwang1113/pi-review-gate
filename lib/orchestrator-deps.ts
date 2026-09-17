@@ -24,6 +24,7 @@ import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 
 import type { TaskMode } from "./task-mode.ts";
 import type { RestatementRecord } from "./restatement.ts";
+import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 
 /**
  * The tool-registration seam moved to lib/tool-host.ts once a SECOND family
@@ -292,16 +293,16 @@ export interface OrchestratorDeps {
 
 
   /**
-   * Put the desktop-notification escape sequence on the terminal. Returns
-   * whether it actually went out.
+   * Raise the desktop banner for the HUMAN, if this session is one that may.
    *
-   * Injected rather than written directly for the reason lib/attention.ts
-   * learned the hard way: a test run must never fire a real side effect. The
-   * default implementation is gated by the same `sideEffectsEnabled` check
-   * (no TTY, CI, or a test runner ⇒ false), and a caller that gets `false`
-   * must not record the send against the throttle.
+   * Injected rather than written directly for the reason the old stdout
+   * emitter existed: a test run must never fire a real side effect. The
+   * extension owns the whole thing — which notifier binary, the tmux click
+   * target, the throttle — and `lib/user-notify.ts` owns the policy; a caller
+   * only says WHAT happened (`kind` + `detail`) and gets back an honest
+   * four-way outcome to print.
    */
-  emitNotification(sequence: string): boolean;
+  notifyUser(opts: { kind: UserNotifyKind; detail: string }): UserNotifyOutcome;
 
   /** Size of a repo-relative file in characters; undefined when absent. */
   fileChars(relPath: string): number | undefined;

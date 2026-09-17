@@ -8,14 +8,12 @@ import {
   assertSafeTmuxArgv,
   buildEvenLayoutArgv,
   buildKillPaneArgv,
-  buildReadPassthroughArgv,
   buildWindowLayoutArgv,
   buildListPanesArgv,
   buildHandoffPaneArgv,
   buildSpawnPaneArgv,
   isPaneId,
   parsePaneIds,
-  parsePassthroughValue,
   parseSpawnedPaneId,
   parseWindowLayout,
   planPanePlacement,
@@ -186,24 +184,16 @@ test("tmux output is parsed strictly", () => {
 });
 
 /**
- * READING `allow-passthrough` IS HOW A RECEIPT CAN STOP LYING (2026-09-17).
+ * READING `allow-passthrough` IS GONE (user decision, 2026-09-17).
  *
- * A read, never a write: `assertSafeTmuxArgv` refuses every `-g` option WRITE,
- * and the gate's own notification path uses this to say what tmux will do with
- * the sequence it just wrote (lib/orchestrator-notify.ts). The values are the
- * three the manual defines — and anything else is UNKNOWN, which the caller
- * must report as unknown rather than rounding to a success or a failure.
+ * The gate used to read it so a receipt could stop claiming a delivery tmux
+ * may have dropped. The banner no longer travels through tmux at all
+ * (lib/user-notify.ts carries the measurement that forced the change), so
+ * there is nothing left to ask about — and a reader nothing consults is the
+ * kind of code that quietly comes back.
  */
-test("reading the passthrough option is a read the guard allows, and parses strictly", () => {
-  assert.deepEqual(buildReadPassthroughArgv(), ["show-options", "-g", "allow-passthrough"]);
-  assert.deepEqual(assertSafeTmuxArgv(buildReadPassthroughArgv()), buildReadPassthroughArgv(),
-    "the gate's own guard accepts it — it forbids the WRITE, not the read");
-  assert.equal(parsePassthroughValue("allow-passthrough on\n"), "on");
-  assert.equal(parsePassthroughValue("allow-passthrough all"), "all");
-  assert.equal(parsePassthroughValue("  allow-passthrough   off  "), "off");
-  assert.equal(parsePassthroughValue("on"), "on", "a bare value is the same answer");
-  assert.equal(parsePassthroughValue(""), undefined, "tmux said nothing");
-  assert.equal(parsePassthroughValue("unknown option: allow-passthrough"), undefined,
-    "an older tmux without the option is UNKNOWN, never the default");
-  assert.equal(parsePassthroughValue("allow-passthrough maybe"), undefined);
+test("nothing in the tmux module reads the passthrough option any more", () => {
+  const source = readFileSync(new URL("../lib/orchestrator-tmux.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /allow-passthrough/,
+    "the option belongs to the user's config; with OSC gone the gate has no business reading it");
 });

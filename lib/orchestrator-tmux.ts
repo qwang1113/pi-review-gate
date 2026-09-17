@@ -230,34 +230,6 @@ export function buildKillPaneArgv(pane: string): readonly string[] {
  * argv element and is never concatenated into a command line.
  */
 
-/**
- * Read tmux's `allow-passthrough` — the option that decides whether the
- * notification sequence this gate writes reaches the terminal at all.
- *
- * A READ, never a write: the gate refuses every `-g` option write (see
- * `assertSafeTmuxArgv`), and the user's global configuration is theirs. This
- * exists only so the receipt can stop claiming a delivery tmux may have
- * dropped — lib/orchestrator-notify.ts `passthroughDeliveryNote` owns what to
- * say about each value.
- */
-export function buildReadPassthroughArgv(): readonly string[] {
-  return assertSafeTmuxArgv(["show-options", "-g", "allow-passthrough"]);
-}
-
-/**
- * The value tmux printed, or undefined when it printed something this build
- * does not understand. Fail-soft: an unknown answer must be REPORTED as
- * unknown, never rounded to "off" or to "fine".
- */
-export function parsePassthroughValue(stdout: string): "on" | "off" | "all" | undefined {
-  const line = String(stdout ?? "").split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
-  if (!line) return undefined;
-  const value = line.startsWith("allow-passthrough")
-    ? line.slice("allow-passthrough".length).trim()
-    : line;
-  return value === "on" || value === "off" || value === "all" ? value : undefined;
-}
-
 /** Set one pane's border colour (`-P` is the pane style). */
 export function buildPaneStyleArgv(pane: string, style: string): readonly string[] {
   return assertSafeTmuxArgv(["select-pane", "-t", requirePane(pane, "pane"), "-P", style]);

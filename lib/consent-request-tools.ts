@@ -235,6 +235,128 @@ export async function doRequestScopeLimit(
   };
 }
 
+// ---------- request_tmux_access ----------
+
+/**
+ * The user's permission to type tmux from bash (user decision, 2026-09-17).
+ *
+ * THE ONE RULE THAT MAKES THIS SAFE: the agent asks, the USER decides. There is
+ * no `confirmed` parameter, the dialog is in the way, and a dialog that cannot
+ * be shown is fail-closed — never a grant, and never a decline either (a
+ * decline locks the session's requests, so a broken dialog must not burn it).
+ *
+ * TWO SCOPES, and the safest one is the recommendation: `once` spends itself on
+ * the next tmux command, `session` rides the handoff to the successor as well.
+ * The gate never nudges the user toward handing out the wider one — same rule
+ * as the scope-limit dialog next door.
+ */
+export async function doRequestTmuxAccess(
+  deps: ConsentToolDeps,
+  params: Record<string, unknown>,
+  ctx: unknown,
+): Promise<ToolReply> {
+  const state = deps.state();
+  const uiCtx = ctx as UiContext;
+  const reason = String(params.reason ?? "");
+
+  if (state.taskMode === "normal") {
+    return { content: [{ type: "text", text: "review-gate: normal mode — the gate is off, nothing refuses tmux here; no authorization needed." }], details: {} };
+  }
+  // Same orchestrator self-block as the other two consent tools: the manager's
+  // OWN session has no channel side to answer its own dialog, so asking here
+  // would freeze it on a human-only box. A child asks, the manager answers.
+  if (state.taskMode === "orchestrator" && !deps.canChannelDialogs()) {
+    return deny(
+      "review-gate: 你是项目经理（orchestrator 会话）—— 不要自己调 request_tmux_access。" +
+      "子会话的授权请求会出现在 orchestrator_wait 回执里，用 orchestrator_answer 代答。",
+    );
+  }
+  if (state.tmuxAccess) {
+    return {
+      content: [{ type: "text", text: `review-gate: 已经有 tmux 授权了（scope=${state.tmuxAccess.scope}）—— 直接用，不用再问。` }],
+      details: { granted: true, alreadyGranted: true, scope: state.tmuxAccess.scope },
+    };
+  }
+  if (deps.tmuxAccessDeclined()) {
+    return deny("review-gate: a tmux-access request was already DECLINED this session (by the user or the project manager) — do not ask again; use the orchestration tools, or let the USER run the command by hand.");
+  }
+  if (!uiCtx.hasUI) {
+    return deny("review-gate: no interactive UI — tmux access requires the user's explicit dialog approval (fail-closed). Ask the user out-of-band.");
+  }
+
+  const SESSION_LABEL = "允许：本会话和接力继任者都能用 tmux";
+  const ONCE_LABEL = "只允许这一次";
+  const spec: ChoiceSpec = {
+    title: "review-gate: AI 请求在 bash 里使用 tmux 命令——是否授权？",
+    options: [SESSION_LABEL, ONCE_LABEL, "拒绝"],
+    // THE NARROW ONE IS RECOMMENDED. Granting tmux is handing the agent part of
+    // the user's own working environment (panes, windows, the server itself),
+    // and this gate never nudges toward the wider permission.
+    recommended: ONCE_LABEL,
+  };
+  const consentBody =
+    "被拦下的 tmux 操作是两类：会破坏或越出你 tmux 环境的（kill-server / kill-session / " +
+    "kill-window / new-session / new-window / `set -g` / kill-pane -a），以及项目经理模式下" +
+    "「已有编排工具替它做」的那三个（split-window / send-keys / kill-pane）。\n" +
+    `「${SESSION_LABEL}」：本会话有效，且接力（session_handoff）的继任者继承——一块工作换人不用重问。\n` +
+    `「${ONCE_LABEL}」：下一条 tmux 命令用掉就没。\n` +
+    "「拒绝」：本会话不再允许申请，agent 只能用编排工具或请你手跑。\n" +
+    "只读命令（tmux ls、display-message 等）从来不在拦截范围。";
+  let ok = false;
+  let once = false;
+  let dialogFailed = false;
+  let declineReason: string | undefined;
+  try {
+    const outcome = await deps.askEitherSide(
+      {
+        dialogKind: "select",
+        topic: "tmux-access",
+        title: `${spec.title}\n${consentBody}`,
+        options: choiceRows(spec),
+        ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
+      },
+      uiCtx.hasUI === true,
+      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
+    );
+    const pick = parseChoice(outcome.answer, spec);
+    ok = pick.kind === "chose" && (pick.option === SESSION_LABEL || pick.option === ONCE_LABEL);
+    once = pick.kind === "chose" && pick.option === ONCE_LABEL;
+    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
+  } catch { dialogFailed = true; }
+
+  if (dialogFailed) {
+    return deny(
+      "review-gate: the authorization dialog could not be shown — no tmux access granted (fail-closed), " +
+      "and this does NOT count as a user decline; retry when an interactive dialog is possible.",
+    );
+  }
+  if (!ok) {
+    deps.declineTmuxAccess();
+    return deny(
+      "review-gate: DECLINED tmux access (by the user or the project manager) — tmux commands stay blocked " +
+      "in this session and the request is locked: do not ask again. Use the orchestration tools " +
+      "(orchestrator_spawn / orchestrator_close / session_handoff), or ask the USER to run the command. " +
+      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
+    );
+  }
+
+  state.tmuxAccess = { at: new Date().toISOString(), scope: once ? "once" : "session" };
+  deps.persist(ctx);
+  deps.log(`tmux access granted (scope=${state.tmuxAccess.scope})`);
+  return {
+    content: [{
+      type: "text",
+      text: once
+        ? "review-gate: the user GRANTED tmux access for ONE command. Run exactly what you described, now — " +
+          "the grant is spent by the next tmux operation that passes the gate."
+        : "review-gate: the user GRANTED tmux access to this session and its handoff successor. tmux " +
+          "commands now run; the orchestration tools remain the correct way to open and close child " +
+          "sessions, and the grant dies with the work (an `orchestrator_attach` takeover inherits none of it).",
+    }],
+    details: { granted: true, scope: state.tmuxAccess.scope },
+  };
+}
+
 // ---------- request_sensitive_edit ----------
 
 export async function doRequestSensitiveEdit(
@@ -432,6 +554,27 @@ export function registerConsentRequestTools(host: ToolHost, deps: ConsentToolDep
       reason: Type.String({ description: "One-line justification: which unmet requirements target pre-existing changes (shown to the user as untrusted data)" }),
     }),
     execute: (_id, params, _signal, _onUpdate, ctx) => doRequestScopeLimit(deps, params, ctx),
+  });
+
+  host.registerTool({
+    name: "request_tmux_access",
+    label: "Request Tmux Access",
+    description:
+      "Ask the USER for authorization to run tmux commands from bash. The gate REFUSES an " +
+      "unauthorized tmux operation (a destructive one like `kill-server` / `kill-session` / " +
+      "`new-session` / `set -g`, or, in project-manager mode, one an orchestration tool already " +
+      "does properly: `split-window` / `send-keys` / `kill-pane`), and this is the ONLY way to " +
+      "lift that. The extension shows the user the gate's dialog (in an orchestration, the " +
+      "project manager may answer it on the child's behalf through the channel — whoever answers " +
+      "first wins). A grant covers THIS session and the `session_handoff` successor it names, so " +
+      "a long piece of work does not re-ask after a handover; 'once' is consumed by the next tmux " +
+      "command. An `orchestrator_attach` takeover inherits nothing. Read-only tmux commands " +
+      "(`tmux ls`, `display-message`) were never gated. Ask only when the work genuinely needs " +
+      "tmux, and say what you will run.",
+    parameters: Type.Object({
+      reason: Type.String({ description: "One line: which tmux command(s) and why (shown to the user as untrusted data)" }),
+    }),
+    execute: (_id, params, _signal, _onUpdate, ctx) => doRequestTmuxAccess(deps, params, ctx),
   });
 
   host.registerTool({

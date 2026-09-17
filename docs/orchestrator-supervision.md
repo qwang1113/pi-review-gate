@@ -879,13 +879,46 @@ tmux capture-pane -p -t <pane> | tail -20
 ```
 
 - 网格（capture 的输出）**也乱** ⇒ 是应用把那一帧写坏了；
-- 网格**干净** ⇒ 是 tmux↔终端显示层的偏差，而门禁唯一能造成这条偏差的写法是
-  `lib/orchestrator-notify.ts` 直写 `process.stdout` 的转义序列（桌面通知）。
+- 网格**干净** ⇒ 是 tmux↔终端显示层的偏差。门禁**曾经**是这类偏差的一个可能来源：它当时
+  直接往 `process.stdout` 写 OSC 777/9/99 转义序列（桌面通知）。**那条路已于 2026-09-17
+  整条删除** —— 通知现在交给 `terminal-notifier`（macOS 原生，不经终端），门禁不再写任何
+  终端转义序列；因此以后遇到乱帧，应用侧只剩 pi 自己的渲染与子进程输出。
 
-后者还有一个前提条件需要知道：tmux 的 `allow-passthrough` 决定这条转义序列能不能出去 ——
-`off`（默认）**一律不放行**，`on` 只对**可见**的 pane 放行，`all` 才是不论可见与否都放行。
-用户的配置是 `on`，所以从后台窗口发出的桌面通知会被 tmux 静默丢弃 —— `orchestrator_notify`
-现在会读这个值并在回执里说实话（`passthroughDeliveryNote`），不再笼统地宣称「已发出」。
+## 六戊、通知：一条通道，三类事件（2026-09-17，用户决定）
+
+**为什么要换。** 旧实现是「写 OSC + 指望 tmux 用 `allow-passthrough` 转发」，实测（tmux 3.7c，
+真实客户端 + 抓 pty 字节）：
+
+| `allow-passthrough` | pane 可见 | 结果 |
+| --- | --- | --- |
+| `on`（用户的值） | 是 | 送达 |
+| `on` | **否** | **丢弃**（不是延迟：切回那个窗口也不会补上） |
+| `all` | 否 | 送达 |
+| `off` | 两可 | 一律不送 |
+
+而通知的用途恰恰是「你没在看的时候叫你」，所以 `on` 天然漏一半。另一个候选 `osascript`
+送达可靠，但点击会拉起 Script Editor（用户实测），不是「回到终端」。最终选的通道是
+`terminal-notifier`（brew，MIT）：点击通知体 `tmux select-window` + `tmux select-pane`
+回到**发通知的那个 pane** 并激活 Ghostty；不加按钮、不换图标。
+
+**附带学到的两件事（以后别再掉进来）：**
+
+1. DCS 里的 ESC 必须**成对**：`\ePtmux;` 载荷中的每个 `\e` 要写两次，否则 tmux 的解析器
+   把单个 ESC 当作自己的转义态（`input.c` 的 `dcs_handler → dcs_escape`）吃掉，外层终端
+   收到的就是裸文本 —— 这也是本仓 `wrapForTmux` 当年就写对了的一处。
+2. `tmux show-options -g allow-passthrough` 是**只读**的取证手段，不能写：那是用户的全局配置。
+
+**现在只有三类事件会打扰你**（`lib/user-notify.ts` 是唯一出处）：
+
+1. 项目经理会话 / 独立 loop 会话**完成**（`declare_done` 被接受）；
+2. 同上**异常结束** —— 无 `session_shutdown` 记录的退出（崩溃）；`quit`/`reload`/`new`/
+   `resume`/`fork` 都不发（**你手动结束的不算**）；SIGKILL 下没有 handler 能跑，这是本机制的
+   诚实边界；
+3. **停下来等你回答**：`askChoice` 是门禁每一个对话框的唯一出口，它一弹就发。
+
+编排里的**子会话不发通知**（它上面有项目经理，而项目经理能代答）；没装 `terminal-notifier`
+时**不发也不假装送达**，会话开始提示一次 `brew install terminal-notifier`。节流仍在：
+同样内容 10 分钟内不重复、5 分钟最多 5 条。
 
 ---
 

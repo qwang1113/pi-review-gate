@@ -26,12 +26,11 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync 
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import type { ChoiceSpec } from "./choice-dialog.ts";
-import { sideEffectsEnabled } from "./side-effects.ts";
 import { channelRoot, nodeChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { assertSafeTmuxArgv } from "./orchestrator-tmux.ts";
-import { writeNotification } from "./orchestrator-notify.ts";
+import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
@@ -182,18 +181,18 @@ export function writeTaskFile(
 
 
 /**
- * Emit the notification sequence, gated by the SAME side-effect check
- * lib/attention.ts uses (no TTY, CI, or a test runner ⇒ nothing happens).
+ * The orchestrator tool kit is wired to the session's own notifier.
  *
- * That gate is not tidiness: an escape sequence written from a test run lands
- * on a real terminal, which is exactly the leak the attention module had to
- * be fixed for. Returns whether anything actually went out, so the caller can
- * tell the agent the truth and skip recording a send that never happened.
+ * WHAT USED TO BE HERE, and why it is gone: `emitNotification` wrote an OSC
+ * escape to stdout and trusted tmux to forward it. That is no longer how the
+ * banner is delivered (lib/user-notify.ts carries the measurement), and the
+ * DECISION behind it — may this session interrupt the human at all — does not
+ * belong to the orchestration deps: it belongs to the gate, which knows the
+ * mode and whether anybody is supervising. The deps only FORWARD what a
+ * caller wants to say.
  */
-export function emitNotification(sequence: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (!sideEffectsEnabled(env, process.stdout.isTTY)) return false;
-  writeNotification(sequence);
-  return true;
+export function notifyOutcomeUnavailable(reason: string): UserNotifyOutcome {
+  return { status: "skipped", note: reason };
 }
 
 
@@ -380,6 +379,16 @@ export interface OrchestratorHostBindings {
   knownRepoRoots(): string[];
   knownRepoRoots(): string[];
   /**
+   * Raise the banner for the HUMAN.
+   *
+   * Absent ⇒ nothing is ever sent, and every caller is told exactly that
+   * (`notifyOutcomeUnavailable`) rather than being told it went out. The
+   * extension supplies the real one: it owns the notifier binary, the tmux
+   * click target and the throttle history, while `lib/user-notify.ts` owns
+   * WHO may notify and for what.
+   */
+  notifyUser?(opts: { kind: UserNotifyKind; detail: string }): UserNotifyOutcome;
+  /**
    * Fired on every orchestration-tool execution (2026-08-30, symmetric
    * re-arm). The extension re-arms `loopArmed` here.
    */
@@ -529,7 +538,12 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     ownSessionId: host.ownSessionId,
     createWorktree: host.createWorktree,
     settleWorktree: host.settleWorktree,
-    emitNotification: (sequence) => emitNotification(sequence, env()),
+    // The notifier itself is the EXTENSION's: it knows the session's mode, its
+    // tmux pane and where the throttle history lives, none of which belong to
+    // this wiring layer (see the docblock above). A kit built without one can
+    // still be driven — the caller is told nothing was sent, never that it was.
+    notifyUser: host.notifyUser ?? ((opts) =>
+      notifyOutcomeUnavailable(`这个会话没有接通知通道（${opts.kind}）`)),
     fileChars: (relPath) => fileCharsIn(host.repoRoot, relPath),
     sessionTranscriptPath: host.sessionTranscriptPath,
   };

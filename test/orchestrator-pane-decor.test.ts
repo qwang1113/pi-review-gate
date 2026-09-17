@@ -158,9 +158,10 @@ test("spawn decorates the pane ITSELF — no second call, no extra tool", async 
   assert.match(log, /setw -t %\d+ pane-border-status top/, "and the window bar is turned on");
   assert.match(replyText(reply), /pane 已标记为 t1@pm/, "the reply says what the user will see");
 
-  // Philosophy two: nothing new is addressable.
+  // Philosophy two: nothing new is addressable. (EIGHT, not nine — the
+  // notification tool is gone; the gate sends its own banners now.)
   assert.equal(world.tools.has("orchestrator_decorate"), false);
-  assert.equal([...world.tools.keys()].filter((n) => n.startsWith("orchestrator_")).length, 9);
+  assert.equal([...world.tools.keys()].filter((n) => n.startsWith("orchestrator_")).length, 8);
 });
 
 test("a tmux that refuses cosmetics does NOT fail the spawn", async () => {

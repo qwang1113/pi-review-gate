@@ -93,6 +93,10 @@ function makeDeps(over: Partial<ShipGateHookDeps> & { taskMode?: () => TaskMode 
     setBypassToken: () => { calls.push("setBypassToken"); },
     clearBypassToken: () => { calls.push("clearBypassToken"); },
     computeTokenBindings: async () => { throw new Error("unused"); },
+    // The tmux permission gate: unauthorized by default, which is what every
+    // ship-gate test here expects unless it says otherwise.
+    tmuxAccess: over?.tmuxAccess ?? (() => undefined),
+    consumeTmuxAccess: over?.consumeTmuxAccess ?? (() => {}),
     setLastBlockedShip: () => { calls.push("setLastBlockedShip"); },
   };
   return { calls, state, deps: { ...base, ...over } as ShipGateHookDeps };
@@ -226,16 +230,45 @@ test("normal mode steps aside before the tmux backstop and before ship detection
   assert.equal(await evaluateToolCall(r.deps, bashCall("git commit -m 'x'"), {}), undefined);
 });
 
-test("the tmux backstop is ABOVE /gate-bypass and merely ADVISES — user decision 2026-09-14", async () => {
-  // It used to block, bypass or no bypass. The user's call on 2026-09-14: the
-  // gate says what it knows and lets the command run — a session told not to
-  // type tmux must still be able to RUN one, which is what the end-to-end
-  // verification of the handover path needs.
+test("an unauthorized tmux command is REFUSED, bypass or no bypass — user decision 2026-09-17", async () => {
+  // It used to merely advise (2026-09-14: "hint, do not block"), and that left
+  // the blast radius unchecked. The rule now is a permission: refused without
+  // a grant, and the refusal names the one way to earn it.
   const bypassed = makeDeps({ bypassActive: () => true });
   const out = await evaluateToolCall(bypassed.deps, bashCall("tmux kill-server"), {});
-  assert.equal(out, undefined, "nothing is blocked any more");
-  assert.ok(bypassed.calls.some((c) => c.startsWith("hint:")),
-    "but the session is still told what it is about to do");
+  assert.equal(out?.block, true, "a /gate-bypass is not a licence to destroy the user's tmux environment");
+  assert.match(out!.reason, /已拦截/);
+  assert.match(out!.reason, /request_tmux_access/, "the refusal has to name the way out");
+});
+
+test("a granted tmux command runs, and the advice comes with it", async () => {
+  const granted = makeDeps({ tmuxAccess: () => ({ at: "2026-09-17T00:00:00.000Z", scope: "session" }) });
+  const out = await evaluateToolCall(granted.deps, bashCall("tmux kill-server"), {});
+  assert.equal(out, undefined, "the grant is the user's, and it holds");
+  assert.ok(granted.calls.some((c) => c.startsWith("hint:")), "the tool redirect is still worth saying");
+});
+
+test("a ONE-SHOT grant is spent by the command it authorized", async () => {
+  let spent = 0;
+  const once = makeDeps({
+    tmuxAccess: () => ({ at: "2026-09-17T00:00:00.000Z", scope: "once" }),
+    consumeTmuxAccess: () => { spent += 1; },
+  });
+  assert.equal(await evaluateToolCall(once.deps, bashCall("tmux kill-server"), {}), undefined);
+  assert.equal(spent, 1, "consumed when the command is about to run — the next one must ask again");
+
+  const session = makeDeps({
+    tmuxAccess: () => ({ at: "2026-09-17T00:00:00.000Z", scope: "session" }),
+    consumeTmuxAccess: () => { spent += 1; },
+  });
+  assert.equal(await evaluateToolCall(session.deps, bashCall("tmux kill-server"), {}), undefined);
+  assert.equal(spent, 1, "a session grant is not spent by using it");
+});
+
+test("a read-only tmux command was never gated and still is not", async () => {
+  const deps = makeDeps({});
+  assert.equal(await evaluateToolCall(deps.deps, bashCall("tmux ls"), {}), undefined);
+  assert.equal(await evaluateToolCall(deps.deps, bashCall("tmux display-message -p '#{window_id}'"), {}), undefined);
 });
 
 test("/gate-bypass disarms the SHIP gate, and does so before any ship detection", async () => {

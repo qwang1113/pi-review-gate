@@ -27,7 +27,7 @@
  * the returned runtime into the gate sidecar.
  */
 
-import { emptyNotifyHistory, type NotifyHistory } from "./orchestrator-notify.ts";
+import { emptyNotifyHistory, type NotifyHistory } from "./user-notify.ts";
 import {
   MAX_APPROVAL_LINEAGE,
   type ApprovedPlanSnapshot,
@@ -142,7 +142,6 @@ export interface OrchestratorRuntime {
   /** The orchestrator's OWN pane: the left column, and its blast-radius limit. */
   ownPane?: string;
   children: ChildSession[];
-  notify: NotifyHistory;
   /**
    * The plan hash the USER approved (constraint 1). Absent ⇒ no spawning:
    * writing the plan file grants nothing, exactly like the loop goal.
@@ -285,7 +284,6 @@ export function emptyRuntime(orchestrationId: string): OrchestratorRuntime {
   return {
     orchestrationId,
     children: [],
-    notify: emptyNotifyHistory(),
   };
 }
 
@@ -536,17 +534,6 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     });
   }
 
-  const notify = obj.notify as Record<string, unknown> | undefined;
-  const sentAt = Array.isArray(notify?.sentAt)
-    ? notify.sentAt.filter((t): t is number => typeof t === "number" && Number.isFinite(t))
-    : [];
-  const lastByKey: Record<string, number> = {};
-  if (notify?.lastByKey && typeof notify.lastByKey === "object" && !Array.isArray(notify.lastByKey)) {
-    for (const [k, v] of Object.entries(notify.lastByKey as Record<string, unknown>)) {
-      if (typeof v === "number" && Number.isFinite(v)) lastByKey[k] = v;
-    }
-  }
-
   const hash = str(obj.approvedPlanHash);
   const approvalIntact = !dropped && isPlanHash(hash);
 
@@ -577,7 +564,6 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   return {
     orchestrationId,
     children,
-    notify: { sentAt, lastByKey },
     ...(ownerSessionId ? { ownerSessionId } : {}),
     ...(ownPane ? { ownPane } : {}),
     ...(approvalIntact && hash ? { approvedPlanHash: hash } : {}),

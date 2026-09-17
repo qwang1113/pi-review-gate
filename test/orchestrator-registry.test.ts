@@ -39,7 +39,6 @@ test("a fresh runtime knows its address and owns nothing yet", () => {
   assert.equal(runtime.orchestrationId, "orch-abc-1");
   assert.deepEqual(runtime.children, []);
   assert.equal(runtime.approvedPlanHash, undefined, "no approval ⇒ no spawning");
-  assert.deepEqual(runtime.notify.sentAt, []);
 });
 
 test("a child id is readable and unique per spawn", () => {
@@ -323,8 +322,6 @@ test("garbage in the notify history and the relay record is dropped, not carried
     relay: { handoffPath: "docs/h.md" }, // no `at` ⇒ not a relay record
     ownPane: "%%",
   }, "orch-abc-1");
-  assert.deepEqual(cleaned?.notify.sentAt, [1, 3]);
-  assert.deepEqual(cleaned?.notify.lastByKey, { a: 1 });
   assert.equal(cleaned?.relay, undefined);
   assert.equal(cleaned?.ownPane, undefined);
 });

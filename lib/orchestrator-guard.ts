@@ -9,12 +9,20 @@
  * damage lives, because the blast radius of an improvised tmux command is the
  * USER'S working environment, not a wrong answer.
  *
- * IT HINTS, IT DOES NOT BLOCK (user decision, 2026-09-14). It used to be a
- * hard refusal, and that refusal had to go: a session told not to type tmux
- * must still be able to RUN one, and the end-to-end verification of the
- * handover path needs to open panes from bash. The user's call was "hint, do
- * not block" — so the detection below is unchanged and the decision is
- * reported to the session as advice.
+ * IT NOW BLOCKS — BUT NEVER PERMANENTLY (user decision, 2026-09-17). Between
+ * those two states the rule was "hint, do not block" (2026-09-14), and that
+ * left the blast radius unchecked: the agent could still `kill-server` while
+ * being told not to. The user's rule now is a PERMISSION: an unauthorized tmux
+ * operation is REFUSED, and the refusal names the one way out —
+ * `request_tmux_access`, which puts a dialog in front of the human. A grant
+ * covers the session that asked and the `session_handoff` successor it may
+ * name (see lib/gate-state.ts `tmuxAccess`), so a long piece of work does not
+ * have to re-ask after every handover — and an `orchestrator_attach` takeover
+ * starts with nothing, like every other confirmed record.
+ *
+ * THE AGENT CANNOT GRANT ITSELF ANYTHING. It only asks; the answer comes from
+ * the user's dialog (or, for a child session, from its manager), and a
+ * dialog that cannot be shown is fail-closed.
  *
  * TWO TIERS, and the difference still matters — it is the STRENGTH OF THE
  * HINT:
@@ -50,8 +58,10 @@ export interface TmuxGuardHit {
   tier: TmuxGuardTier;
   /** The offending shell segment, for the message. */
   segment: string;
-  /** Ready-to-show explanation, including what to do instead. */
+  /** What to say when the session HAS permission (advice, not a refusal). */
   reason: string;
+  /** What to say when it does not: the block, plus the way to earn it. */
+  refusal: string;
 }
 
 /**
@@ -266,16 +276,31 @@ function sweepForbidden(text: string): string | undefined {
  * the command is fine. The caller decides when to ask: the gate skips this
  * entirely in `normal` mode, exactly like every other bash rule.
  */
+/**
+ * THE ONE WAY OUT, named identically everywhere (哲学二: one route, spelled
+ * once). A refusal that does not say how to proceed is just a wall.
+ */
+export const TMUX_PERMISSION_ROUTE =
+  "要跑它先取得授权：`request_tmux_access({ reason: \"…\" })` —— 会弹给用户拍板；" +
+  "授权后本会话和它的接力继任者都能用 tmux（也可以选择只允许这一次）。";
+
+/** The block shown when the session has no permission for this subcommand. */
+function refusalText(subcommand: string, danger: string): string {
+  return `review-gate: 已拦截 \`tmux ${subcommand}\` —— ${danger}${TMUX_PERMISSION_ROUTE}`;
+}
+
 /** The refusal for a call the sweep found hidden rather than spelled out. */
 function hiddenHit(subcommand: string, segment: string): TmuxGuardHit {
+  const danger =
+    "它会破坏或越出用户的 tmux 环境，而这条命令把它藏在了包装命令、嵌套 shell 或 shell 语法" +
+    "（子 shell / 命令替换）里。";
   return {
     subcommand,
     tier: "forbidden",
     segment,
+    refusal: refusalText(subcommand, danger),
     reason:
-      `review-gate: 禁止 \`tmux ${subcommand}\` —— 它会破坏或越出用户的 tmux 环境。` +
-      "这条命令把它藏在了包装命令、嵌套 shell 或 shell 语法（子 shell / 命令替换）里，" +
-      "门禁把它当作那条命令来警告（只是提示，不拦）。" +
+      `review-gate: 已授权，命令照常执行。提醒：\`tmux ${subcommand}\` ` + danger +
       "需要开子会话用 `orchestrator_spawn`，接力用 `session_handoff`，救活死掉的用 `orchestrator_recover`。",
   };
 }
@@ -315,26 +340,26 @@ export function detectForbiddenTmux(
     const rendered = tokens.join(" ");
 
     if (ALWAYS_FORBIDDEN.includes(subcommand)) {
+      const danger = "它会破坏或越出用户的 tmux 环境（编排只允许在用户与你约定的那一个 window 内 split）。";
       return {
         subcommand,
         tier: "forbidden",
         segment: rendered,
+        refusal: refusalText(subcommand, danger),
         reason:
-          `review-gate: 不建议 \`tmux ${subcommand}\` —— 它会破坏或越出用户的 tmux 环境` +
-          "（编排只允许在用户与你约定的那一个 window 内 split）。" +
-          "需要开子会话用 `orchestrator_spawn`，接力用 `session_handoff`，救活死掉的用 `orchestrator_recover`。" +
-          "这条只是提示：命令会照常执行。",
+          `review-gate: 已授权，命令照常执行。提醒：\`tmux ${subcommand}\` ` + danger +
+          "需要开子会话用 `orchestrator_spawn`，接力用 `session_handoff`，救活死掉的用 `orchestrator_recover`。",
       };
     }
 
     if (OPTION_SUBCOMMANDS.has(subcommand) && rest.includes("-g")) {
+      const danger = "那是用户的全局 tmux 配置，任何会话都不得改写。";
       return {
         subcommand,
         tier: "forbidden",
         segment: rendered,
-        reason:
-          `review-gate: 不建议 \`tmux ${subcommand} -g\` —— 那是用户的全局 tmux 配置，` +
-          "任何会话都不得改写（只是提示，不拦）。",
+        refusal: refusalText(`${subcommand} -g`, danger),
+        reason: `review-gate: 已授权，命令照常执行。提醒：\`tmux ${subcommand} -g\` ${danger}`,
       };
     }
 
@@ -342,25 +367,27 @@ export function detectForbiddenTmux(
     // included — so it is destructive regardless of mode, unlike a plain
     // kill-pane which merely does what orchestrator_close does properly.
     if (subcommand === "kill-pane" && rest.includes("-a")) {
+      const danger = "它会清掉 window 里其他所有 pane（包括用户自己的）。";
       return {
         subcommand,
         tier: "forbidden",
         segment: rendered,
+        refusal: refusalText("kill-pane -a", danger),
         reason:
-          "review-gate: 不建议 `tmux kill-pane -a` —— 它会清掉 window 里其他所有 pane（包括用户自己的）。" +
-          "要关自己开的子会话，用 `orchestrator_close`（只能关它登记过的 pane）。这条只是提示，不拦。",
+          `review-gate: 已授权，命令照常执行。提醒：\`tmux kill-pane -a\` ` + danger +
+          "要关自己开的子会话，用 `orchestrator_close`（只能关它登记过的 pane）。",
       };
     }
 
     if (opts.orchestratorMode && TOOL_REPLACED.includes(subcommand)) {
+      const danger =
+        "门禁会构造命令、登记 pane 归属并做安全检查；现编的 tmux 命令出错的代价是搞挂用户的工作环境。";
       return {
         subcommand,
         tier: "use-the-tool",
         segment: rendered,
-        reason:
-          `review-gate: 项目经理不手写 tmux —— \`${subcommand}\` 请改用 ${TOOL_FOR[subcommand]}。` +
-          "门禁会构造命令、登记 pane 归属并做安全检查；现编的 tmux 命令出错的代价是搞挂用户的工作环境。" +
-          "这条只是提示：命令会照常执行。",
+        refusal: refusalText(subcommand, `项目经理不手写 tmux —— \`${subcommand}\` 应该改用 ${TOOL_FOR[subcommand]}。`),
+        reason: `review-gate: 已授权，命令照常执行。提醒：${TOOL_FOR[subcommand]} 能做同样的事并带上归属与安全检查。`,
       };
     }
   }

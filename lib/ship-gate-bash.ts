@@ -187,6 +187,16 @@ export interface ShipGateBashDeps {
    */
   hint(message: string): void;
 
+  /**
+   * The user's tmux authorization, if any (lib/gate-state.ts `tmuxAccess`).
+   *
+   * Callbacks rather than values: the grant is minted by a dialog DURING the
+   * session, and a captured snapshot would leave the first command after the
+   * grant still refused.
+   */
+  tmuxAccess(): { at: string; scope: "session" | "once" } | undefined;
+  /** Spend a one-shot grant. Called only once the command is about to run. */
+  consumeTmuxAccess(): void;
   /** The standing single-use arbiter bypass token, if one was issued. */
   bypassToken(): BypassToken | null;
   /** Replace it (used to mark it consumed on attempt). */
@@ -370,26 +380,29 @@ export async function evaluateShipCommand(
   // the mode's defining behavior; explore below never gets this branch.
   if (deps.taskMode() === "normal") return undefined;
 
-  // tmux BACKSTOP (task book §4.3). Placed ABOVE /gate-bypass on purpose:
-  // a bypass is the user's escape from the SHIP gate, and it was never a
-  // licence to destroy their working environment. The destructive
-  // subcommands are refused in every gated mode; the three the
-  // orchestration tools replace are redirected only in orchestrator mode,
-  // where a tool exists to do the same thing correctly. The gate's own tmux
-  // calls never pass through here — they are argv, not bash.
-  // ── THE TMUX BACKSTOP IS A HINT, NOT A BLOCK (user decision, 2026-09-14) ──
+  // tmux PERMISSION GATE (user decision, 2026-09-17). Placed ABOVE /gate-bypass
+  // on purpose: a bypass is the user's escape from the SHIP gate, and it was
+  // never a licence to destroy their working environment. Unauthorized ⇒
+  // REFUSED, and the refusal names `request_tmux_access` — the user's rule is
+  // that the gate does not decide for them, it asks. Authorized ⇒ the command
+  // runs, with the old advice attached (a redirect to the orchestration tools
+  // is still worth saying, it is just no longer an enforcement).
   //
-  // It blocks nothing. The user's call: the gate says what it knows (which tool
-  // does this correctly, which subcommand can damage their window) and then
-  // lets the command run — a session told not to type tmux must still be able
-  // to RUN one, and the end-to-end verification of the handover path needs
-  // exactly that. The detection itself is unchanged (lib/orchestrator-guard.ts)
-  // and still distinguishes the destructive subcommands from the three the
-  // orchestration tools replace, so the hint stays specific.
+  // It used to HINT for both tiers and block nothing (2026-09-14). What
+  // changed is not the detection but who holds it: the blast radius of an
+  // improvised tmux command is the USER'S working environment, and the
+  // permission for that comes from them, not from the agent's judgement.
   const tmuxHit = detectForbiddenTmux(command, {
     orchestratorMode: deps.taskMode() === "orchestrator",
   });
-  if (tmuxHit) deps.hint(tmuxHit.reason);
+  if (tmuxHit) {
+    const access = deps.tmuxAccess();
+    if (!access) return { block: true, reason: tmuxHit.refusal };
+    // A one-shot grant is SPENT here — the command is about to run, so
+    // consuming it after the fact would let a second command ride along.
+    if (access.scope === "once") deps.consumeTmuxAccess();
+    deps.hint(tmuxHit.reason);
+  }
 
   // The hand-rolled WAIT (D6): a hint, not a block, and it sits here — after
   // the tmux backstop, before every early return below — so a session that has

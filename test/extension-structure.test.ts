@@ -78,7 +78,7 @@ const COPILOT_GH_SRC = readFileSync(join(ROOT, "lib", "copilot-gh.ts"), "utf8");
 const ASK_USER_SRC = readFileSync(join(ROOT, "lib", "user-interaction-tools.ts"), "utf8");
 const ASK_USER_TOOLS = new Set(["ask_user"]);
 const CONSENT_SRC = readFileSync(join(ROOT, "lib", "consent-request-tools.ts"), "utf8");
-const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit"]);
+const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit", "request_tmux_access"]);
 /**
  * The GOAL family moved the same way, split by the same rule: the APPROVAL
  * (`propose_loop_goal` — run the audit, ask the user, write the file) in one
@@ -1563,18 +1563,21 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
     // ~300 bytes back from the orchestrator site, so a return smuggled in
     // just above the tier selection was inside it. Anchoring at the call
     // would have quietly narrowed that.
-    "// tmux BACKSTOP (task book §4.3)",
-    "if (tmuxHit) deps.hint(tmuxHit.reason);",
-    "tmux backstop tier",
+    "// tmux PERMISSION GATE (user decision, 2026-09-17)",
+    "deps.hint(tmuxHit.reason);",
+    "tmux permission gate tier",
   );
   assert.match(guardSite, /detectForbiddenTmux\(/,
-    "the second orchestrator site only selects the tmux backstop tier");
-  // ANY return, not the old `/return;/` spelling: the extracted arm writes
-  // every exit as `return undefined;`, so a pattern looking for a bare
-  // `return;` is dead (round-1 P1). The window ends BEFORE the tier's own
-  // `return { block: true, … }`, so nothing legitimate can match here.
-  assert.doesNotMatch(guardSite, /\breturn\b/,
-    "the tmux backstop must not contain a pass-through return");
+    "the second orchestrator site selects the tmux permission tier");
+  // THE RULE INVERTED (user decision 2026-09-17): the arm used to be REQUIRED
+  // to contain no return at all (it only advised). It now has to carry the
+  // refusal — an unauthorized tmux operation is blocked, and the message names
+  // `request_tmux_access`. What must NOT come back is a silent pass-through:
+  // the only two exits are the refusal and the advice.
+  assert.match(guardSite, /if \(!access\) return \{ block: true, reason: tmuxHit\.refusal \}/,
+    "unauthorized tmux is REFUSED — not hinted at");
+  assert.match(guardSite, /detectForbiddenTmux\([\s\S]*?tmuxAccess\(\)/,
+    "the permission is read per call: a grant minted mid-session must count");
   // The L8 explore short-circuit lives in the helper loopGoalEditBlockFor
   // (kept OUT of the handler body on purpose — see its docblock): it only
   // lets EDITS pass in explore. Pin that it exists and that it can never
@@ -2213,7 +2216,27 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   // the extension host's event loop for up to 20 minutes. The runner must be
   // spawned async, detached (own process group), with abort + timeout killing
   // the whole process tree.
-  assert.doesNotMatch(SRC, /spawnSync\s*\(/);
+  //
+  // THE BAN IS ABOUT THE RUNNER, and it is pinned to the runner's own body: the
+  // single `spawnSync` this file is allowed to contain is the exit path's
+  // banner (an `exit` handler cannot await, and the ~50ms notifier must finish
+  // before the process is gone — lib/user-notify.ts). A file-wide ban would
+  // have made that impossible; a ban scoped to the wrong thing would have left
+  // the freeze it was written for.
+  const runnerBody = SRC.slice(SRC.indexOf("async function runTrustedPrecommit"));
+  assert.ok(runnerBody.length > 0, "the runner must still be in this file");
+  assert.doesNotMatch(runnerBody, /spawnSync\s*\(/,
+    "the precommit runner may never spawn synchronously — it runs for minutes");
+  const syncSpawns = [...SRC.matchAll(/\bspawnSync\s*\(/g)];
+  assert.equal(syncSpawns.length, 1,
+    "exactly one synchronous spawn CALL in the file — the import and the prose are not calls");
+  const exitHandlerAt = SRC.indexOf("process.on(\"exit\"");
+  assert.ok(exitHandlerAt >= 0, "the exit path must still exist");
+  const bannerFnAt = SRC.indexOf("function raiseBanner(");
+  assert.ok(bannerFnAt >= 0 && bannerFnAt < syncSpawns[0]!.index! && syncSpawns[0]!.index! < exitHandlerAt,
+    "the one synchronous spawn lives in raiseBanner, which the exit handler calls");
+  assert.match(SRC.slice(exitHandlerAt, exitHandlerAt + 600), /blocking: true/,
+    "and the exit handler is what asks for the blocking send");
   assert.match(SRC, /async function runTrustedPrecommit/);
   assert.match(SRC, /abortSignal\?\.addEventListener\("abort"/);
   assert.match(SRC, /detached:\s*true/);

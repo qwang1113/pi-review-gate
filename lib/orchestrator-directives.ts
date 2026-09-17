@@ -107,7 +107,7 @@ export const ORCHESTRATOR_DIRECTIVE =
   "| 跟它说句话（默认就打断它，让它立刻读到） | `orchestrator_instruct({ childId, message })` |\n" +
   "| 它死了（pane 没了），要救回来 | `orchestrator_recover({ childId })` |\n" +
   "| 接手一个别人留下的编排 | `orchestrator_attach({ orchestrationId })` |\n" +
-  "| 给用户本人发系统通知 | `orchestrator_notify` |\n" +
+  "| 要用户本人拍板（就会发系统通知） | `ask_user` |\n" +
   "| 上下文快满了，交接给下一任 | `session_handoff()`（门禁会把交接文档骨架写好） |\n" +
   "| 关掉某个自己开的子会话 | `orchestrator_close` |\n" +
   "\n" +
@@ -159,8 +159,8 @@ export const ORCHESTRATOR_DIRECTIVE =
   "**你可以自己决定**（但要留档并汇报）：技术取舍、`/gate-bypass`、代批 goal / 代确认反述" +
   "（须带 `crosscheck` 对照，且站点不得宽于 plan）。\n" +
 
-  "**必须叫真人**（不得代答）：丢弃工作区（不可逆）、敏感文件授权。这两件事用 `orchestrator_notify` " +
-  "叫用户，并在 plan 的 decisions 里留一条。\n" +
+  "**必须叫真人**（不得代答）：丢弃工作区（不可逆）、敏感文件授权。这两件事用 `ask_user` " +
+  "当面问他（门禁自己的对话框与 `ask_user` 都会自动弹系统通知，不需要另外去叫人），并在 plan 的 decisions 里留一条。\n" +
   "\n" +
   "### 等待纪律（与子会话侧同一口径）\n" +
   "派完任务就输出总结、结束 turn，是这个角色最容易犯也最贵的错：子会话弹了对话框没人管，" +
@@ -183,7 +183,7 @@ export const ORCHESTRATOR_DIRECTIVE =
   "- 没人答的框会按 10s→30s→60s **再叫你**，不会叫一次就沉默；`done` 是终态，只叫两次（间隔 60s）就安静，" +
   "「很久没再提醒」不等于「没做完」；\n" +
   "- 子会话写到**仓库之外的敏感位置**时也会有一条事件（约束 8 按**实际落点**判，不看 goal 正文写了什么路径）——" +
-  "那是安全底线，用 `orchestrator_notify` 交给用户拍板。\n" +
+  "那是安全底线，用 `ask_user` 交给用户拍板（系统通知由门禁自己发，不需要你叫人）。\n" +
   "\n" +
   "### 有子会话在等你之后的标准动作\n" +
   "回执里已经带着完整的问题与选项（它是子会话自己写进通道的），所以不需要再去看什么：\n" +
@@ -202,7 +202,7 @@ export const ORCHESTRATOR_DIRECTIVE =
 
   "5. 它死了就 `orchestrator_recover({ childId })`（同一 session id 续开，上下文不丢）；" +
   "确认放弃才 `orchestrator_close`（任务回 pending，分支保留）；\n" +
-  "6. 该由真人拍板的（丢工作区、敏感文件、范围变更）不要代答 —— `orchestrator_notify` 叫用户。";
+  "6. 该由真人拍板的（丢工作区、敏感文件、范围变更）不要代答 —— `ask_user` 当面问他。";
 
 
 

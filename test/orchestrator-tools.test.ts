@@ -29,6 +29,7 @@ import {
   type FakeWorld,
 } from "./helpers/fake-orchestration.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
+import { decideNotify, emptyNotifyHistory, notifyKey, recordNotify } from "../lib/user-notify.ts";
 import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
 import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
@@ -49,15 +50,19 @@ const CROSSCHECK_T1 =
 
 
 /**
- * The 9 tools an orchestration session gets, and nothing else.
+ * The 8 tools an orchestration session gets, and nothing else.
  *
  * `session_handoff` is deliberately NOT on this list: it belongs to every
  * kind of session, not to the project manager (lib/session-handoff-tools.ts),
  * and listing it here would claim the orchestration layer owns it.
+ *
+ * `orchestrator_notify` USED TO BE THE NINTH (deleted 2026-09-17): letting the
+ * manager decide when to interrupt the human is what the notification rule
+ * exists to prevent, so the GATE raises the banner now, for three events
+ * (lib/user-notify.ts). A manager that needs a person calls `ask_user`.
  */
 const ORCHESTRATION_TOOLS = [
   "orchestrator_plan",
-  "orchestrator_notify",
   "orchestrator_spawn",
   "orchestrator_instruct",
   "orchestrator_wait",
@@ -99,7 +104,7 @@ function taskDocument(world: FakeWorld, prefix = "/repo/"): string {
 }
 
 
-test("the ten orchestration tools are registered, and the deleted ones are not", () => {
+test("the orchestration tools are registered, and the deleted ones are not", () => {
   const world = makeFakeWorld();
   for (const name of ORCHESTRATION_TOOLS) {
     assert.ok(world.tools.has(name), `${name} must be registered`);
@@ -107,7 +112,12 @@ test("the ten orchestration tools are registered, and the deleted ones are not",
   assert.equal(world.tools.size, ORCHESTRATION_TOOLS.length,
     `exactly ${ORCHESTRATION_TOOLS.length} orchestration tools: ${[...world.tools.keys()].join(", ")}`);
   // Philosophy three: the replaced tools are GONE, not deprecated.
-  for (const gone of ["orchestrator_read", "orchestrator_key", "orchestrator_status", "orchestrator_send", "orchestrator_relay"]) {
+  for (const gone of [
+    "orchestrator_read", "orchestrator_key", "orchestrator_status", "orchestrator_send",
+    "orchestrator_relay",
+    // …and the notify tool, retired with the OSC channel: the gate sends now.
+    "orchestrator_notify",
+  ]) {
     assert.equal(world.tools.has(gone), false, `${gone} must no longer exist`);
   }
 });
@@ -1349,15 +1359,21 @@ test("closing is limited to registered panes and returns the task to pending", a
 // wiring is pinned at its registration site.
 
 // ---------------------------------------------------------------------------
-// notify (unchanged; the only channel that reaches a human who is elsewhere)
+// notify IS NOT A TOOL ANY MORE (user decision, 2026-09-17)
 // ---------------------------------------------------------------------------
 
-test("notify writes once and is then throttled", async () => {
+test("no notification tool is registered, and the throttle lives in the policy module", async () => {
   const world = makeFakeWorld();
-  const first = await world.call("orchestrator_notify", { title: "要你拍板", body: "有个不可逆的决定" });
-  assert.equal(first.isError, undefined, replyText(first));
-  const second = await world.call("orchestrator_notify", { title: "要你拍板", body: "有个不可逆的决定" });
-  assert.match(replyText(second), /节流|throttl/i);
+  for (const name of ["orchestrator_notify", "notify_user"]) {
+    assert.equal(world.tools.get(name), undefined,
+      `${name} would put the decision to interrupt the human back in the agent's hands`);
+  }
+  // The throttle itself is NOT gone — it is what keeps a long run from becoming
+  // a pager storm — and it now guards the gate's own three senders.
+  const key = notifyKey("完成 · x", "done");
+  const history = recordNotify(emptyNotifyHistory(), key, 1_700_000_000_000);
+  const again = decideNotify({ history, key, now: 1_700_000_000_001 });
+  assert.equal(again.send, false);
 });
 
 // ---------------------------------------------------------------------------

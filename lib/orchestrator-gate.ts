@@ -20,7 +20,8 @@
  *   6 same-repo tasks never parallel ... lib/orchestrator-plan.ts (schedule)
  *   7 (retired 2026-09-07: no worktree isolation — cross-repo only)
  *   8 proxied goal touches no secret .... {@link proxyApprovalProblems}
- *   9 notification single entry+throttle. {@link notifyAuthorization} + notify.ts
+ *   9 notification single entry+throttle. lib/user-notify.ts (the GATE sends,
+ *     for three events and no others — there is no notify tool any more)
  *  10 (retired 2026-09-07: work-branch landing is gone)
  *  11 unreported decisions block exit ... {@link orchestratorDoneProblems}
  *  13 children come from the tool ....... lib/orchestrator-guard.ts + registry
@@ -212,7 +213,7 @@ export function proxyApprovalProblems(editedFiles: readonly string[]): ProxyGoal
     reason:
       "代批被拒（约束 8）：子会话**已经写到了仓库之外**的敏感位置 —— " +
       `${outside.slice(0, 8).join(", ")}${outside.length > 8 ? " 等" : ""}。` +
-      "这是安全底线，不是技术取舍：用 `orchestrator_notify` 通知用户，由他决定怎么处理这些改动。" +
+      "这是安全底线，不是技术取舍：用 `ask_user` 当面问用户，由他决定怎么处理这些改动。" +
       "（判定依据是它 sidecar 里的实际落点 sessionEditedFiles，不是 goal 正文里出现过哪些路径 —— " +
       "改写 goal 文本不会让这条通过。仓库外的流程产物如 /tmp 下的报告不算越界；" +
       "仓库外的敏感路径如 ~/.ssh、~/.pi 下的文件仍然算。仓库内改哪些文件不参与判定 —— " +
@@ -222,19 +223,15 @@ export function proxyApprovalProblems(editedFiles: readonly string[]): ProxyGoal
 
 
 // ---------------------------------------------------------------------------
-// Constraint 9 — only an orchestrator may notify the human
+// Constraint 9 — who may notify the human
 // ---------------------------------------------------------------------------
-
-export function notifyAuthorization(taskMode: TaskMode | undefined): Authorization {
-  if (taskMode === "orchestrator") return { ok: true };
-  return {
-    ok: false,
-    reason:
-      "系统通知只有项目经理（orchestrator 模式）能发 —— 这是单一入口的全部意义：" +
-      "过去任何会话都能弹横幅，结果是所有人都被打断。子会话要找人，用 `ask_user`；" +
-      "要找项目经理，attention 会自动送达。",
-  };
-}
+//
+// `notifyAuthorization` USED TO LIVE HERE: a tool-call check that refused
+// everyone but an orchestrator. It is gone with the tool (user decision,
+// 2026-09-17): the GATE raises the banner now, for three events, and the rule
+// about which SESSION may be one of them is `mayNotifyUser` in
+// lib/user-notify.ts — one implementation, next to the throttle it belongs
+// with. Nothing in this module sends anything.
 
 
 // ---------------------------------------------------------------------------
@@ -365,7 +362,7 @@ export function orchestratorDoneProblems(facts: OrchestratorDoneFacts): string[]
       problems.push(
         `有 ${silent.length} 个待用户决策从未通知过用户：` +
         silent.map((d) => d.id).join(", ") +
-        " —— 用 `orchestrator_notify` 告诉他，再退出（约束 11）",
+        " —— 用 `ask_user` 当面问他（门禁会在框弹出的同时发系统通知），再退出（约束 11）",
       );
     }
     // R-29 — "the user was TOLD" is not "the question was SETTLED". A decision

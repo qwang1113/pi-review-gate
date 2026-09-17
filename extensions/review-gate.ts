@@ -52,10 +52,10 @@ import {
   watch as fsWatch, type FSWatcher,
 } from "node:fs";
 import { tmpdir, homedir, hostname } from "node:os";
-import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
+import { join as pathJoin, dirname as pathDirname, resolve as pathResolve, basename as pathBasename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, spawnSync, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -238,6 +238,18 @@ import {
 import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
 import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
+import { sideEffectsEnabled } from "../lib/side-effects.ts";
+import {
+  MISSING_NOTIFIER_HINT,
+  NOTIFIER_BINARY,
+  describeNotifyOutcome,
+  emptyNotifyHistory,
+  mayNotifyUser,
+  planUserNotify,
+  recordNotify,
+  type UserNotifyKind,
+  type UserNotifyOutcome,
+} from "../lib/user-notify.ts";
 import { isOwnedChildPane } from "../lib/orchestrator-delivery.ts";
 import {
   foldBackgroundWaits,
@@ -1167,6 +1179,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   // once the user DECLINES a scope-limit dialog, the agent cannot re-pop it
   // for the rest of the session. /gate-reset clears it. In-memory only.
   let scopeLimitDeclined = false;
+  // The same lock for request_tmux_access (user decision, 2026-09-17). The
+  // GRANT is not in-memory — it lives in the sidecar (`state.tmuxAccess`)
+  // because the user asked for it to cover a handoff successor too; the
+  // REFUSAL is, because "do not ask again" is about this session's nagging.
+  let tmuxAccessDeclined = false;
   // Repo-relative paths of the files THIS session actually edited (successful
   // edit-tool results only). Feeds the request_scope_limit grant (what stays
   // in scope) and the scope directive in the per-turn prompt. In-memory; a
@@ -2574,6 +2591,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   const orchestratorDeps = createOrchestratorDeps({
     repoRoot: primaryRepoRoot,
     taskMode: () => state.taskMode,
+    // THE one banner channel, handed to the tool kit as well: `add-decision`
+    // announces a decision the moment it registers one (constraint 11), and
+    // the deps only forward the asking — every rule lives in the policy module.
+    notifyUser: (opts) => raiseBanner({ kind: opts.kind, detail: opts.detail }),
     // The requirement restatement `submit` demands (2026-09-06). Read live
     // off the state object rather than captured: `propose_restatement` writes
     // it during the same session, and a captured value would make the tool
@@ -4281,6 +4302,150 @@ export default function reviewGate(pi: ExtensionAPI) {
     return true;
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // THE BANNER CHANNEL (user decision, 2026-09-17)
+  //
+  // The gate used to write an OSC escape to stdout and hope tmux forwarded it;
+  // it does not reliably (lib/user-notify.ts carries the measurement), and the
+  // manager could fire one whenever it liked. Both are gone. What is left is
+  // this ONE function, called from exactly three places — `declare_done`
+  // accepted, an abnormal exit, and a dialog that is waiting for the human —
+  // and a policy module that decides whether any of them may interrupt.
+  //
+  // WHY IT LIVES IN THE EXTENSION and not in the policy module: what it needs
+  // is this session's own plumbing — its mode, its `RG_STATE_VARIANT`, its tmux
+  // pane, and a write to the sidecar that survives a crash. The policy takes
+  // all of that as plain values (planUserNotify) and returns either an argv or
+  // a reason, so every branch is testable without a session.
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Where `terminal-notifier` is, resolved ONCE.
+   *
+   * Resolved rather than passed by name because a banner is often raised from
+   * the exit handler, where there is no second chance to look anything up:
+   * argv that already carries an absolute path cannot fail on a PATH the
+   * process no longer has. `undefined` is a real answer here — the user has
+   * not installed it — and every caller is told so instead of assuming success.
+   */
+  let notifierResolved: string | undefined | null = null;
+  function notifierBinary(): string | undefined {
+    if (notifierResolved === null) {
+      try {
+        const found = execFileSync("/usr/bin/which", [NOTIFIER_BINARY], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+        notifierResolved = found || undefined;
+      } catch {
+        notifierResolved = undefined;
+      }
+    }
+    return notifierResolved ?? undefined;
+  }
+
+  /**
+   * This session's own tmux address, as the click needs it.
+   *
+   * The window id is a second call because a click has to do two things: move
+   * the CLIENT to the right window and select the right pane inside it. It is
+   * looked up lazily and only when a banner is actually going out, so the
+   * cost is paid on the rare event, never on every oracle call.
+   */
+  function ownTmuxAddress(): { paneId: string; windowId?: string } | undefined {
+    const paneId = (process.env.TMUX_PANE ?? "").trim();
+    if (!/^%\d+$/.test(paneId)) return undefined;
+    try {
+      const out = runTmux(["display-message", "-p", "-t", paneId, "#{window_id}"]);
+      const windowId = out.ok ? out.stdout.trim() : "";
+      return { paneId, ...(/^@\d+$/.test(windowId) ? { windowId } : {}) };
+    } catch {
+      return { paneId };
+    }
+  }
+
+  /**
+   * Raise the banner. `blocking` is for the exit path only (see below).
+   *
+   * Never throws: a notification is a courtesy to a person, not a gate
+   * condition, and the report says which of the four outcomes it was.
+   */
+  function raiseBanner(opts: {
+    kind: UserNotifyKind;
+    detail: string;
+    blocking?: boolean;
+  }): UserNotifyOutcome {
+    try {
+      const now = Date.now();
+      const history = state.notify ?? emptyNotifyHistory();
+      const plan = planUserNotify({
+        kind: opts.kind,
+        repoName: pathBasename(primaryRepoRoot),
+        detail: opts.detail,
+        taskMode: state.taskMode,
+        stateVariant: process.env[STATE_VARIANT_ENV],
+        tmux: ownTmuxAddress(),
+        notifierPath: notifierBinary(),
+        history,
+        now,
+        // The same side-effect gate every other terminal-writing path uses: a
+        // test run, a CI job or a headless host must never raise a banner.
+        interactive: sideEffectsEnabled(process.env, process.stdout.isTTY === true),
+      });
+      if (plan.status !== "send") {
+        return plan.status === "missing"
+          ? { status: "missing", note: plan.hint }
+          : { status: plan.status, note: plan.reason };
+      }
+      const [, ...args] = plan.argv;
+      if (opts.blocking) {
+        // The process is on its way out: the child must be RUN, not merely
+        // started, so this is the one synchronous spawn in the file.
+        spawnSync(plan.argv[0]!, args, { stdio: "ignore", timeout: 10_000 });
+      } else {
+        const child = spawn(plan.argv[0]!, args, { detached: true, stdio: "ignore" });
+        child.unref();
+      }
+      state.notify = recordNotify(history, plan.key, now);
+      persist(latestCtx);
+      return { status: "sent" };
+    } catch (error) {
+      return { status: "skipped", note: `发通知时出错：${(error as Error).message}` };
+    }
+  }
+
+  // Set by the `session_shutdown` handler: the user ended or restarted this
+  // session themselves (quit | reload | new | resume | fork). Read by the
+  // process-exit handler below, which is the only place that can tell a crash
+  // from a `/quit`.
+  let cleanShutdown = false;
+
+  // ─────────────────────────────────────────────────────────────────────
+  // KIND TWO of three: the session ended WITHOUT a clean shutdown.
+  //
+  // Registered once, for the whole process, and the only banner that has to
+  // survive the process dying (hence the blocking spawn inside `raiseBanner`).
+  // A `/quit`, a reload, a resume or a fork all set `cleanShutdown` first —
+  // the user did that on purpose and already knows. What is left is the crash:
+  // an uncaught exception, a broken invariant, a provider failure that took
+  // the process down. A SIGKILL leaves no handler to run and no banner is
+  // possible, which is the honest limit of this mechanism — and a kill the
+  // user performed is not news anyway.
+  //
+  // The eligibility check comes FIRST, before anything is resolved or spawned:
+  // this handler runs on every process exit, including judge panes and child
+  // sessions, and the same policy function answers it (no second rule).
+  // ─────────────────────────────────────────────────────────────────────
+  process.on("exit", () => {
+    if (cleanShutdown) return;
+    if (!mayNotifyUser({ taskMode: state.taskMode, stateVariant: process.env[STATE_VARIANT_ENV] })) return;
+    raiseBanner({
+      kind: "failed",
+      detail: "会话没有 declare_done 就退出了（进程异常终止，不是你自己结束的）。",
+      blocking: true,
+    });
+  });
+
   // `ctx` is optional because it is used for ONE thing — refreshing the status
   // widget. A caller that has no context (the orchestration tools persist from
   // a callback) must still be able to write the record: dropping the write
@@ -4985,6 +5150,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     spec: ChoiceSpec,
     opts: { body?: string; signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
+    // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
+    // any session shows comes through this function, so "the gate has stopped
+    // and is waiting for the human" needs no second detector. The policy
+    // decides who may be told (a child session's questions belong to its
+    // manager, and the manager answers them) and the throttle keeps a
+    // re-opened dialog from ringing again.
+    //
+    // WAITING, NOT ANSWERING: the banner goes out as the box appears, which is
+    // the moment somebody who is NOT at the terminal needs to know.
+    raiseBanner({ kind: "needs-user", detail: spec.title });
     // NO BUDGET, NO TRUNCATION (user decision, 2026-09-16). This used to fit
     // the title and the body into a rendered-row budget, because a dialog tall
     // enough to push the spinner out of the viewport made pi's DEFAULT renderer
@@ -5226,6 +5401,17 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     appendLesson,
     bypassToken: () => bypassToken,
     setBypassToken: (token) => { bypassToken = token; },
+    // The tmux permission is read LIVE off the state: the grant is minted by a
+    // dialog mid-session, and a captured value would leave the first command
+    // after the grant still refused.
+    tmuxAccess: () => state.tmuxAccess,
+    consumeTmuxAccess: () => {
+      // One use, and only a ONE-SHOT is consumed: a session grant stays until
+      // the session (or its successor) ends.
+      if (state.tmuxAccess?.scope !== "once") return;
+      delete state.tmuxAccess;
+      persist(latestCtx);
+    },
     clearBypassToken,
     computeTokenBindings,
     setLastBlockedShip: (record) => { lastBlockedShip = record; },
@@ -10810,6 +10996,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       loopStall = undefined; // a completed task is real progress
       stallNoticeShown = false;
       persist(ctx as unknown as ExtensionContext);
+      // KIND ONE of three (lib/user-notify.ts): the round's exit contract was
+      // met. Raised HERE, on the accepted path only — a refused `declare_done`
+      // is the session being told to keep working, not news for the human.
+      const notified = raiseBanner({ kind: "finished", detail: String(params.summary ?? "") });
       return {
         content: [{
           type: "text",
@@ -10819,7 +11009,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             (state.checkpoint?.precommitBypassed
               ? "\n注意：本次交付的 checkpoint 是在 `/gate-bypass` 覆盖 precommit 前置的情况下完成的" +
                 "（用户授权，理由已记在 bypass 里）—— 全量测试没有在这份内容上跑过。"
-              : ""),
+              : "") +
+            // Honest about the banner in the same breath: `missing` means the
+            // user was NOT told, which is their cue to install the notifier.
+            (notified.status === "sent" ? "" : `\n（通知：${describeNotifyOutcome(notified)}）`),
         }],
         details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
 
@@ -11027,6 +11220,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     commitsAheadOfBase: () => commitsAheadOfBase(cwd),
     scopeLimitDeclined: () => scopeLimitDeclined,
     declineScopeLimit: () => { scopeLimitDeclined = true; },
+    tmuxAccessDeclined: () => tmuxAccessDeclined,
+    declineTmuxAccess: () => { tmuxAccessDeclined = true; },
     sensitiveGrants: () => sensitiveGrants,
     storeSensitiveGrants: (next) => { sensitiveGrants = next; },
     sensitiveDeclinedPaths,
@@ -12045,6 +12240,20 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // enforcement behaves as loop — never applies to a headless run.
     if (!ctx.hasUI) setTaskMode("normal", "auto", ctx);
 
+    // SAY IT ONCE WHEN THE BANNER CHANNEL IS DEAD (user decision, 2026-09-17).
+    // A notification is how this gate reaches somebody who is not watching —
+    // silently having none of that is the failure mode the whole round is
+    // about. Only for a session that WOULD be allowed to raise one (a manager
+    // or a standalone loop session): a judge pane has no business asking for a
+    // notifier it will never use.
+    if (
+      ctx.hasUI &&
+      mayNotifyUser({ taskMode: state.taskMode, stateVariant: process.env[STATE_VARIANT_ENV] }) &&
+      !notifierBinary()
+    ) {
+      try { ctx.ui.notify(MISSING_NOTIFIER_HINT, "info"); } catch { /* headless */ }
+    }
+
     // A SPAWNER may hand a session its starting mode (RG_GATE_MODE): a child
     // opened by `orchestrator_spawn` is an ordinary loop session, and a relay
     // successor is an orchestrator. Neither should have to classify itself
@@ -12160,7 +12369,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     persist(ctx);
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (event) => {
+    // A CLEAN SHUTDOWN IS NOT A FAILURE (user decision, 2026-09-17): every
+    // reason pi reports here — quit, reload, new, resume, fork — is the user
+    // ending or restarting the session themselves, and they already know.
+    // The flag is what the process-exit handler below consults; without it a
+    // crash and a `/quit` would look identical from there.
+    cleanShutdown = true;
+    void event;
     // Round-18: stop the referenced child-wait watchdog with the session.
     cancelChildWaitTimer();
     // The old session runtime is being torn down (reason: quit | reload |

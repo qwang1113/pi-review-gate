@@ -483,7 +483,10 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
         : { ok: true as const };
     },
 
-    emitNotification: () => true,
+    // No notifier in the fake world: the three events still call this and the
+    // answer is the honest one ("nothing was sent, and here is why"), which
+    // is exactly what a session without `terminal-notifier` sees.
+    notifyUser: () => ({ status: "skipped" as const, note: "测试世界：没有通知通道" }),
     fileChars: () => 500,
     sessionTranscriptPath: () => "/tmp/transcript.jsonl",
     ...(options.isolateChild || options.isolateWithoutSettle

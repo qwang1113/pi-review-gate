@@ -220,7 +220,7 @@ export interface ChannelRequestRecord extends ChannelRecordBase {
    * the full restatement as its `payload`, so a project manager answering for
    * the user judges the child's own words rather than a retyped summary.
    */
-  topic?: "goal-approval" | "goal-reason" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "other";
+  topic?: "goal-approval" | "goal-reason" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "tmux-access" | "other";
   title: string;
   /** The exact rows offered, in order. Empty for `input`. */
   options: string[];
