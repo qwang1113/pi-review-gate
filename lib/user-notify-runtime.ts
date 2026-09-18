@@ -26,6 +26,9 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 
 import type { GateState } from "./gate-state.ts";
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
+// The pane-id shape has ONE implementation (quality round P2, 2026-09-18):
+// lib/orchestrator-tmux.ts's canonical predicate, not a fourth local regex.
+import { isPaneId } from "./orchestrator-tmux.ts";
 import type { TaskMode } from "./task-mode.ts";
 import {
   MISSING_NOTIFIER_HINT,
@@ -33,6 +36,7 @@ import {
   defaultActivateBundle,
   emptyNotifyHistory,
   exitNotifyKind,
+  isWatchingPane,
   mayNotifyUser,
   planUserNotify,
   recordNotify,
@@ -44,6 +48,16 @@ import {
 export interface NotifyTmuxRunner {
   (argv: readonly string[]): { ok: boolean; stdout: string };
 }
+
+/**
+ * How long a synchronous `lsappinfo` call may take.
+ *
+ * The CLI answers in ~10ms on this machine; the bound exists so a wedged
+ * CoreApplicationServices cannot hang the dialog that is opening — or the
+ * process exit handler that is closing, where a stuck child would hold the
+ * exiting session open forever (quality round P2, 2026-09-18).
+ */
+const LSAPPINFO_TIMEOUT_MS = 2_000;
 
 export interface UserNotifyRuntimeDeps {
   /** The session's gate state — the banner throttle is persisted on it. */
@@ -69,6 +83,11 @@ export interface UserNotifyRuntimeDeps {
   spawnBlocking?(argv: readonly string[]): void;
   /** Injected so a test can decide where (or whether) the binary is. */
   resolveNotifier?(): string | undefined;
+  /**
+   * Injected so a test never shells out to `lsappinfo` (and so the
+   * "cannot be read" branch is reachable). Defaults to the real CLI.
+   */
+  frontBundleId?(): string | undefined;
 }
 
 export interface UserNotifyRuntime {
@@ -134,13 +153,106 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
    */
   function ownTmuxAddress(): { paneId: string; windowId?: string } | undefined {
     const paneId = (env().TMUX_PANE ?? "").trim();
-    if (!/^%\d+$/.test(paneId)) return undefined;
+    if (!isPaneId(paneId)) return undefined;
     try {
       const out = deps.runTmux(["display-message", "-p", "-t", paneId, "#{window_id}"]);
       const windowId = out.ok ? out.stdout.trim() : "";
       return { paneId, ...(/^@\d+$/.test(windowId) ? { windowId } : {}) };
     } catch {
       return { paneId };
+    }
+  }
+
+  /**
+   * What each attached tmux client is showing RIGHT NOW.
+   *
+   * `display-message -c <client>` is the one way to ask that question: tmux's
+   * format language exposes no `client_active_pane`, so the client itself has
+   * to be the context of the query. One call per client, and a client tmux
+   * refuses to describe contributes nothing rather than aborting the sweep.
+   *
+   * `[]` is the honest answer when tmux cannot be asked at all — the caller
+   * treats it as "nobody is looking", which is the fail-open direction
+   * lib/user-notify.ts's `isWatchingPane` documents.
+   */
+  function activeClientPanes(): string[] {
+    try {
+      const clients = deps.runTmux(["list-clients", "-F", "#{client_name}"]);
+      if (!clients.ok) return [];
+      const panes: string[] = [];
+      for (const client of clients.stdout.split("\n").map((line) => line.trim()).filter(Boolean)) {
+        const shown = deps.runTmux(["display-message", "-c", client, "-p", "#{pane_id}"]);
+        const pane = shown.ok ? shown.stdout.trim() : "";
+        if (pane) panes.push(pane);
+      }
+      return panes;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Bundle id of the FRONTMOST macOS app, or `undefined` when it cannot be
+   * read (a non-macOS host, `lsappinfo` gone, an output the parse does not
+   * recognize).
+   *
+   * `lsappinfo` is macOS's own CoreApplicationServices CLI and needs no
+   * permission grants — measured on this machine: 9ms for `front` and 11ms for
+   * the lookup, paid only when a banner is otherwise about to go out.
+   */
+  /**
+   * BOTH KINDS OF FAILURE ARE "CANNOT READ": the injected one as well as the
+   * real CLI (reviewer P1, 2026-09-18). Leaving the injected call outside the
+   * try let a throwing stub — or a future reader — escape into `notify()`'s
+   * catch-all and turn into `skipped`, i.e. a banner SUPPRESSED by an error in
+   * the evidence-gathering. That is the one direction this must never fail in.
+   */
+  function frontBundleId(): string | undefined {
+    try {
+      if (deps.frontBundleId) return deps.frontBundleId();
+      // TIMED LIKE EVERY OTHER EXTERNAL CALL IN THIS REPO (quality round P2,
+      // 2026-09-18): this runs synchronously on the dialog path (askChoice ->
+      // raiseBanner) AND inside the process exit handler, where an unbounded
+      // child would hang the box that is opening or the exit that is closing.
+      const front = execFileSync("/usr/bin/lsappinfo", ["front"], {
+        encoding: "utf8",
+        timeout: LSAPPINFO_TIMEOUT_MS,
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (!front) return undefined;
+      const info = execFileSync("/usr/bin/lsappinfo", ["info", "-only", "bundleid", front], {
+        encoding: "utf8",
+        timeout: LSAPPINFO_TIMEOUT_MS,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      return /bundleid="([^"]+)"/i.exec(info)?.[1];
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * IS THE USER LOOKING AT THIS SESSION'S PANE RIGHT NOW?
+   *
+   * FAIL OPEN ALL THE WAY OUT (reviewer P1, 2026-09-18). Every reading below is
+   * host trivia — tmux calls, an `lsappinfo` call — and ANY failure in any of
+   * them must leave the banner ON: a suppressed notification is a user who is
+   * never told, which is strictly worse than one they did not need. The pure
+   * predicate answers `false` for every unknown (lib/user-notify.ts); this
+   * wrapper makes sure a THROW lands there too instead of escaping into
+   * `notify()`'s catch-all — that path is for the notifier failing, not for the
+   * evidence about where the user is looking.
+   */
+  function userIsWatching(paneId: string | undefined, sessionBundleId: string | undefined): boolean {
+    try {
+      return isWatchingPane({
+        paneId,
+        activePanes: activeClientPanes(),
+        frontBundleId: frontBundleId(),
+        sessionBundleId,
+      });
+    } catch {
+      return false;
     }
   }
 
@@ -181,6 +293,21 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
       const state = deps.state();
       const at = now();
       const history = state.notify ?? emptyNotifyHistory();
+      const sessionBundle = defaultActivateBundle(env());
+      // ONE LOOK PER BANNER — NOT per process (quality round P2, 2026-09-18):
+      // the PANE id is fixed for the process, the WINDOW id is not (join-pane /
+      // break-pane / move-pane move this pane elsewhere), so a process-lifetime
+      // cache would make every later click jump to a window this pane has left.
+      // Within one banner the address cannot change, so the two readers share it.
+      let addressResolved = false;
+      let address: { paneId: string; windowId?: string } | undefined;
+      const ownAddress = (): { paneId: string; windowId?: string } | undefined => {
+        if (!addressResolved) {
+          addressResolved = true;
+          address = ownTmuxAddress();
+        }
+        return address;
+      };
       const plan = planUserNotify({
         kind: opts.kind,
         repoName: deps.repoName(),
@@ -189,12 +316,20 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
         stateVariant: env()[STATE_VARIANT_ENV],
         // A THUNK: eligibility and the throttle must be decided BEFORE a
         // synchronous tmux call is paid (quality round P2).
-        tmux: () => ownTmuxAddress(),
+        tmux: () => ownAddress(),
+        // ALSO A THUNK, and lazily resolved for the same reason: this one costs
+        // a client sweep plus two `lsappinfo` calls, and a session that can
+        // never send (a child, a judge pane) must not pay for it either.
+        watching: () => userIsWatching(ownAddress()?.paneId, sessionBundle),
+        // ONE BANNER PER SESSION: the notifier REMOVES an older banner with the
+        // same group, so a four-question interview leaves one banner in
+        // Notification Center instead of four (user report, 2026-09-18).
+        group: state.sessionId ?? undefined,
         notifierPath: notifierPath(),
         // WHERE A CLICK LANDS (reviewer Nit, carried two rounds): resolved
         // HERE with the other host facts and passed in, so `planUserNotify`
         // stays pure. An unknown app ⇒ no `-activate` at all, never a guess.
-        activateBundle: defaultActivateBundle(env()),
+        activateBundle: sessionBundle,
         history,
         now: at,
         interactive: deps.interactive(),

@@ -926,6 +926,13 @@ tmux capture-pane -p -t <pane> | tail -20
 时**不发也不假装送达**，会话开始提示一次 `brew install terminal-notifier`。节流仍在：
 同样内容 10 分钟内不重复、5 分钟最多 5 条。
 
+**你正看着那个 pane（且终端在前台）时不发**（`isWatchingPane`，2026-09-18 用户要求）：该 pane
+是某个 tmux client 的当前活跃 pane **且**前台 app 与会话自己的 `__CFBundleIdentifier` 一致时
+抑制 —— 你已经在读那个框了，再响一声只是打扰；缺任一项事实（切到别的 pane / 终端在浏览器
+后面 / 读不到 tmux 或前台 app）一律照常发。标题是 `<类型> · <repo>`（等你回答 / 任务完成 /
+异常结束），正文带具体内容（问题本身、完成摘要、失败原因），并且每条都带
+`-group <sessionId>` —— 同一会话的通知互相替换，一次四问的采访只在通知中心留下一条。
+
 ---
 
 ## 七、tmux 还剩什么

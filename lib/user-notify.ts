@@ -51,6 +51,18 @@
  * inside {@link NOTIFY_RATE_WINDOW_MS} — an overnight run must be able to say
  * "I need you" without becoming a pager storm.
  *
+ * TWO MORE RULES FROM THE USER'S SAME REPORT (2026-09-18), both of which keep
+ * a CORRECT banner from still being the wrong one:
+ *
+ *   - NOT WHILE THEY ARE LOOKING. A banner is for a person who is NOT at that
+ *     pane: if this session's pane is the active one on an attached tmux client
+ *     AND the session's own app is frontmost, the user is already reading the
+ *     box and a banner is pure interruption ({@link isWatchingPane}).
+ *   - ONE BANNER PER SESSION. Every send carries `-group <session id>`, and the
+ *     notifier removes an older banner with the same group — so a four-question
+ *     interview leaves ONE banner in Notification Center, not four
+ *     ({@link buildNotifierArgv}).
+ *
  * PURE. Every decision lives in {@link planUserNotify}: it takes the state and
  * returns the argv to run or the reason not to. The caller owns the two side
  * effects (`spawn` and persisting the history), so no test can put a banner on
@@ -58,6 +70,12 @@
  */
 
 import type { TaskMode } from "./task-mode.ts";
+// THE PANE-ID SHAPE HAS ONE IMPLEMENTATION (quality round P2, 2026-09-18). This
+// module reads pane ids that tmux itself printed, and the gate's canonical
+// predicate is the one lib/orchestrator-tmux.ts exports — a local `^%\d+$`
+// accepted widths the canonical check rejects, in a repo that then held four
+// copies of the rule.
+import { isPaneId } from "./orchestrator-tmux.ts";
 
 /** Longest title/body a notification actually renders. */
 export const NOTIFY_TITLE_MAX = 80;
@@ -169,7 +187,7 @@ export function buildUserNotifyMessage(opts: {
   const detail = opts.detail.trim();
   switch (opts.kind) {
     case "finished":
-      return { title: `完成 · ${where}`, body: detail || "任务完成。" };
+      return { title: `任务完成 · ${where}`, body: detail || "任务完成。" };
     case "failed":
       return {
         title: `异常结束 · ${where}`,
@@ -177,7 +195,7 @@ export function buildUserNotifyMessage(opts: {
       };
     case "needs-user":
     default:
-      return { title: `需要你 · ${where}`, body: detail || "门禁停下来等你回答。" };
+      return { title: `等你回答 · ${where}`, body: detail || "门禁停下来等你回答。" };
   }
 }
 
@@ -200,7 +218,7 @@ export function buildFocusCommand(opts: {
   windowId: string | undefined;
 }): string | undefined {
   const pane = opts.paneId.trim();
-  if (!/^%\d+$/.test(pane)) return undefined;
+  if (!isPaneId(pane)) return undefined;
   const window = (opts.windowId ?? "").trim();
   if (/^@\d+$/.test(window)) {
     return `tmux select-window -t ${window}; tmux select-pane -t ${pane}`;
@@ -220,18 +238,81 @@ export function buildNotifierArgv(opts: {
   focusCommand?: string | undefined;
   /** From {@link defaultActivateBundle}; omitted ⇒ no `-activate` at all. */
   activateBundle?: string | undefined;
+  /**
+   * The banner's group (usually the session id): the notifier REMOVES an older
+   * banner with the same id, so one session keeps ONE banner in Notification
+   * Center instead of a stack of them (module doc, second bullet).
+   * Omitted only when the session has no id to group under.
+   */
+  group?: string | undefined;
 }): string[] {
   const argv = [
     NOTIFIER_BINARY,
     "-title", opts.title,
     "-message", opts.body,
   ];
+  if (opts.group) argv.push("-group", opts.group);
   // NO `-activate` WITHOUT A KNOWN BUNDLE. There is no safe default to fall
   // back on — a guessed bundle id raises somebody else's app, or nothing —
   // and the hard-coded Ghostty did exactly that on every other terminal.
   if (opts.activateBundle) argv.push("-activate", opts.activateBundle);
   if (opts.focusCommand) argv.push("-execute", opts.focusCommand);
   return argv;
+}
+
+// ---------------------------------------------------------------------------
+// Is the human already looking at it?
+// ---------------------------------------------------------------------------
+
+/**
+ * IS THE USER LOOKING AT THE PANE THAT IS ASKING?
+ *
+ * User decision (2026-09-18): "只有我不在当前会话 panel 的才弹通知". A banner is
+ * for someone who is NOT there, so when the asking session's pane is the one
+ * an attached tmux client currently SHOWS *and* the session's own app is
+ * frontmost, the user is reading the box already and the banner is pure
+ * interruption.
+ *
+ * BOTH HALVES ARE REQUIRED, and they cover different ways of not looking:
+ *   - the ACTIVE-PANE half catches the user driving another window or pane in
+ *     the same terminal (the box is on a pane they are not looking at);
+ *   - the FRONTMOST half catches the terminal being behind a browser or an
+ *     editor (the pane is the active one, but it is not on screen).
+ *
+ * FAIL OPEN, ALWAYS. Every unknown — no pane id, no attached client, an
+ * unreadable frontmost app (`lsappinfo` failing, a non-macOS host), a session
+ * whose own bundle id is unknown — answers `false`, because a suppressed
+ * banner is a user who is never told. Suppression has to be EARNED by two
+ * facts agreeing; it is never the default.
+ *
+ * THE APPS ARE COMPARED LOOSELY, AND THAT IS THE SAFE DIRECTION (quality round
+ * P2, 2026-09-18): `sessionBundleId` is the terminal that started the tmux
+ * SERVER (`__CFBundleIdentifier` is inherited), not necessarily the app hosting
+ * the client that is attached — so attaching from a second terminal app makes
+ * the two differ and the banner GOES OUT. The failure is an extra notification,
+ * never a silent one, and telling the two app identities apart would mean asking
+ * tmux about a client's host, which it does not record.
+ *
+ * PURE: the caller (lib/user-notify-runtime.ts) pays for the two subprocesses
+ * and passes their readings in, so every branch is drivable from a test.
+ */
+export function isWatchingPane(opts: {
+  /** This session's own pane (`TMUX_PANE`), if it runs inside tmux at all. */
+  paneId: string | undefined;
+  /** What each attached tmux client is currently showing. */
+  activePanes: readonly string[];
+  /** Bundle id of the frontmost macOS app, when it could be read. */
+  frontBundleId: string | undefined;
+  /** Bundle id this session lives in (`__CFBundleIdentifier`). */
+  sessionBundleId: string | undefined;
+}): boolean {
+  const pane = (opts.paneId ?? "").trim();
+  if (!isPaneId(pane)) return false;
+  if (!opts.activePanes.some((shown) => shown.trim() === pane)) return false;
+  const front = (opts.frontBundleId ?? "").trim();
+  const session = (opts.sessionBundleId ?? "").trim();
+  if (front.length === 0 || session.length === 0) return false;
+  return front === session;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +488,20 @@ export function planUserNotify(opts: {
    * that actually sends.
    */
   tmux?: (() => { paneId: string; windowId?: string | undefined } | undefined) | undefined;
+  /**
+   * Is the human ALREADY LOOKING at this session ({@link isWatchingPane})?
+   *
+   * Asked LAZILY for the same reason `tmux` is: answering costs a `list-clients`
+   * plus one `display-message` per client plus two `lsappinfo` calls, and every
+   * gate dialog comes through here — including the ones in child sessions and
+   * judge panes that can never raise a banner.
+   */
+  watching?: (() => boolean) | undefined;
+  /**
+   * The notification-centre group (the session id): the notifier removes an
+   * older banner with the same id, so one session never stacks up banners.
+   */
+  group?: string | undefined;
   /** Absolute path of the notifier, or undefined when it is not installed. */
   notifierPath: string | undefined;
   history: NotifyHistory;
@@ -432,7 +527,6 @@ export function planUserNotify(opts: {
     };
   }
   if (!opts.notifierPath) return { status: "missing", hint: MISSING_NOTIFIER_HINT };
-
   const message = buildUserNotifyMessage({
     kind: opts.kind,
     repoName: opts.repoName,
@@ -443,6 +537,14 @@ export function planUserNotify(opts: {
   const key = notifyKey(title, body);
   const decision = decideNotify({ history: opts.history, key, now: opts.now });
   if (!decision.send) return { status: "throttled", reason: decision.reason };
+  // ORDER — AFTER THE THROTTLE (quality round P2, 2026-09-18): answering
+  // "is the user looking" costs three to five synchronous subprocesses, and a
+  // banner the throttle would refuse anyway must not pay for them. A banner
+  // SUPPRESSED here still records nothing, so it spends no throttle slot
+  // either — the next real one goes out.
+  if (opts.watching?.()) {
+    return { status: "skipped", reason: "用户正在看这个 pane（终端在前台），不打扰" };
+  }
 
   const address = opts.tmux?.();
   const focusCommand = address
@@ -456,6 +558,15 @@ export function planUserNotify(opts: {
     // The binary is spawned by its RESOLVED path: PATH at exit time is not the
     // PATH the session started with, and a crash is exactly when nobody is
     // around to notice that the banner silently failed to start.
-    argv: [opts.notifierPath, ...buildNotifierArgv({ title, body, focusCommand, activateBundle: opts.activateBundle }).slice(1)],
+    argv: [
+      opts.notifierPath,
+      ...buildNotifierArgv({
+        title,
+        body,
+        focusCommand,
+        activateBundle: opts.activateBundle,
+        group: opts.group,
+      }).slice(1),
+    ],
   };
 }

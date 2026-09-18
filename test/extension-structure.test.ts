@@ -1128,6 +1128,27 @@ test("FLICKER: dialogs are no longer fitted, and a regular-renderer session is t
   assert.match(askChoiceBody, /renderChoice\(/, "…and it is the one inside askChoice");
 });
 
+test("DIALOG QUEUE: one box at a time, with the host's abort and the question in the banner", () => {
+  // MEASURED (rebate session 01a0b328, 2026-09-18): pi runs the tool calls of
+  // one assistant message in PARALLEL, and the host has a single dialog slot —
+  // `ask_user` + `request_scope_limit` in one message meant the second box
+  // replaced the first, whose promise was never settled again, so the first
+  // tool never returned and the turn hung with no way out (an abort does not
+  // interrupt pi's `Promise.all` over the batch). Every dialog the gate shows
+  // goes through this ONE function, so the fix belongs here.
+  const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
+  assert.match(askChoiceBody, /return scheduleDialog\(async \(\) => \{/,
+    "the whole dialog — list AND reason box — runs under the ONE queue");
+  assert.match(SRC, /const scheduleDialog = createDialogQueue\(\);/,
+    "…and there is one queue per session, not one per call");
+  assert.match(askChoiceBody, /dialogSignal\(uiCtx\.signal, opts\.signal\)/,
+    "the host's abort signal (ESC: ExtensionContext.signal) is merged with the caller's own");
+  assert.match(askChoiceBody, /\}, signal\);/,
+    "the merged signal is handed to the queue — a waiter cancelled while it queues drops out at once");
+  assert.match(askChoiceBody, /dialogNotifyDetail\(spec, opts\.body\)/,
+    "the banner carries the question itself, not only the `问题 1 / 4` label");
+});
+
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
   // A stale ordering would let the auto-continuation steamroll the agent's
   // question with a [REVIEW_GATE_RESUME] follow-up instead of waiting.

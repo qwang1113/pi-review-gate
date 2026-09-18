@@ -27,6 +27,7 @@ import {
   describeNotifyOutcome,
   emptyNotifyHistory,
   exitNotifyKind,
+  isWatchingPane,
   mayNotifyUser,
   normalizeNotifyHistory,
   notifyKey,
@@ -48,6 +49,9 @@ function plan(overrides: Partial<Parameters<typeof planUserNotify>[0]> = {}) {
     taskMode: "loop",
     stateVariant: undefined,
     tmux: () => ({ paneId: "%7", windowId: "@3" }),
+    // The session's own banner group — the notifier removes an older banner
+    // with the same id (user decision, 2026-09-18).
+    group: "sess-1",
     notifierPath: NOTIFIER,
     // The macOS app the click raises — in production `defaultActivateBundle()`
     // reads it from `__CFBundleIdentifier`; the pure planner takes it as a fact.
@@ -110,8 +114,13 @@ test("a clean shutdown says nothing; anything else is the one banner nobody can 
 });
 
 test("each kind says what happened and where", () => {
+  // THE TITLE IS `<type> · <repo>` (user decision, 2026-09-18): the type word
+  // leads, the directory name follows, and the session's ROLE is deliberately
+  // not in it — the user asked for the role once and then withdrew it ("算了,
+  // 不显示角色"). The word `需要你` was the vague half: `等你回答` says what is
+  // being asked of them.
   const finished = buildUserNotifyMessage({ kind: "finished", repoName: "onchain", detail: "PR 已开" });
-  assert.equal(finished.title, "完成 · onchain");
+  assert.equal(finished.title, "任务完成 · onchain");
   assert.equal(finished.body, "PR 已开");
 
   const failed = buildUserNotifyMessage({ kind: "failed", repoName: "onchain", detail: "" });
@@ -121,10 +130,10 @@ test("each kind says what happened and where", () => {
     "…and must not claim a cause the judge never checked (reviewer P2, 2026-09-17)");
 
   const needs = buildUserNotifyMessage({ kind: "needs-user", repoName: "onchain", detail: "选哪个方案？" });
-  assert.match(needs.title, /需要你/);
-  assert.equal(needs.body, "选哪个方案？");
+  assert.equal(needs.title, "等你回答 · onchain");
+  assert.equal(needs.body, "选哪个方案？", "the body carries the actual question");
 
-  assert.equal(buildUserNotifyMessage({ kind: "finished", repoName: "  ", detail: "x" }).title, "完成 · pi",
+  assert.equal(buildUserNotifyMessage({ kind: "finished", repoName: "  ", detail: "x" }).title, "任务完成 · pi",
     "a nameless repo still produces a readable title");
 });
 
@@ -132,19 +141,20 @@ test("each kind says what happened and where", () => {
 // WHAT RUNS
 // ---------------------------------------------------------------------------
 
-test("the argv is the notifier, the text, the terminal to activate, and the pane to jump to", () => {
+test("the argv is the notifier, the text, the group, the terminal to activate, and the pane to jump to", () => {
   const p = plan();
   assert.equal(p.status, "send");
   if (p.status !== "send") return;
   assert.deepEqual(p.argv, [
     NOTIFIER,
-    "-title", "完成 · pi-review-gate",
+    "-title", "任务完成 · pi-review-gate",
     "-message", "本轮完成",
+    "-group", "sess-1",
     "-activate", "com.mitchellh.ghostty",
     "-execute", "tmux select-window -t @3; tmux select-pane -t %7",
   ]);
   assert.equal(p.argv[0], NOTIFIER, "the binary is RESOLVED: the exit path may have no PATH to search");
-  assert.equal(p.key, notifyKey("完成 · pi-review-gate", "本轮完成"));
+  assert.equal(p.key, notifyKey("任务完成 · pi-review-gate", "本轮完成"));
 });
 
 test("the tmux address is resolved ONLY when a banner actually goes out", () => {
@@ -157,7 +167,7 @@ test("the tmux address is resolved ONLY when a banner actually goes out", () => 
   assert.equal(plan({ tmux: address, stateVariant: "t1-x" }).status, "skipped");
   assert.equal(plan({ tmux: address, interactive: false }).status, "skipped");
   assert.equal(plan({ tmux: address, notifierPath: undefined }).status, "missing");
-  const key = notifyKey("完成 · pi-review-gate", "本轮完成");
+  const key = notifyKey("任务完成 · pi-review-gate", "本轮完成");
   const history = recordNotify(emptyNotifyHistory(), key, T0);
   assert.equal(plan({ tmux: address, history, now: T0 + 1 }).status, "throttled");
   assert.equal(asked, 0, "none of those four ever needed to know where this session lives");
@@ -222,6 +232,77 @@ test("an unknown host app drops `-activate` — the click still focuses the pane
 });
 
 // ---------------------------------------------------------------------------
+// Is the user already looking at it? (user decision, 2026-09-18)
+// ---------------------------------------------------------------------------
+
+/** The happy shape of {@link isWatchingPane}: matching pane AND matching app. */
+const WATCHING = {
+  paneId: "%7",
+  activePanes: ["%3", "%7"],
+  frontBundleId: "com.mitchellh.ghostty",
+  sessionBundleId: "com.mitchellh.ghostty",
+};
+
+test("suppression has to be EARNED by two facts agreeing", () => {
+  assert.equal(isWatchingPane(WATCHING), true, "the pane on screen AND the session's app in front");
+
+  assert.equal(isWatchingPane({ ...WATCHING, activePanes: ["%3"] }), false,
+    "the client is showing another pane in the same terminal");
+  assert.equal(isWatchingPane({ ...WATCHING, frontBundleId: "com.google.Chrome" }), false,
+    "the terminal is behind another app: the pane is active but not on screen");
+  assert.equal(isWatchingPane({ ...WATCHING, activePanes: [] }), false,
+    "no attached client at all");
+  assert.equal(isWatchingPane({ ...WATCHING, paneId: undefined }), false, "not in tmux");
+  assert.equal(isWatchingPane({ ...WATCHING, paneId: "7; rm -rf /" }), false, "not a tmux id");
+  assert.equal(isWatchingPane({ ...WATCHING, paneId: " %7 " }), true, "whitespace is trimmed, not compared");
+  assert.equal(isWatchingPane({ ...WATCHING, frontBundleId: undefined }), false,
+    "an unreadable frontmost app must not silence the channel");
+  assert.equal(isWatchingPane({ ...WATCHING, sessionBundleId: "" }), false,
+    "a session that cannot name its own app cannot claim to be watched");
+});
+
+test("a user looking at the box is not interrupted — for any kind of banner", () => {
+  const p = plan({ watching: () => true });
+  assert.equal(p.status, "skipped");
+  if (p.status === "skipped") assert.match(p.reason, /正在看/);
+
+  assert.equal(plan({ kind: "needs-user", detail: "选哪个？", watching: () => false }).status, "send");
+  assert.equal(plan({ kind: "needs-user", detail: "选哪个？", watching: () => true }).status, "skipped");
+});
+
+test("the watching check is asked LAZILY, and only on the path that would send", () => {
+  let watched = 0;
+  const watching = () => { watched += 1; return false; };
+  assert.equal(plan({ watching, stateVariant: "t1-x" }).status, "skipped");
+  assert.equal(plan({ watching, interactive: false }).status, "skipped");
+  assert.equal(plan({ watching, notifierPath: undefined }).status, "missing");
+  assert.equal(watched, 0, "none of those three ever asks whether the user is looking");
+
+  // …and neither does a banner the THROTTLE refuses (quality round P2,
+  // 2026-09-18): the evidence costs three to five synchronous subprocesses, so
+  // the cheap decision comes first and a suppressed banner still records
+  // nothing, leaving the next real one its slot.
+  const history = recordNotify(
+    emptyNotifyHistory(),
+    notifyKey("任务完成 · pi-review-gate", "本轮完成"),
+    T0,
+  );
+  assert.equal(plan({ watching, history, now: T0 + 1 }).status, "throttled");
+  assert.equal(watched, 0, "a throttled banner pays for no evidence either");
+
+  assert.equal(plan({ watching }).status, "send");
+  assert.equal(watched, 1, "the one that sends asks exactly once");
+});
+
+test("one banner per session: the group is what removes the previous one", () => {
+  assert.deepEqual(buildNotifierArgv({ title: "T", body: "B", group: "sess-1" }), [
+    NOTIFIER_BINARY, "-title", "T", "-message", "B", "-group", "sess-1",
+  ], "`-group` is what makes Notification Center keep ONE banner for the session");
+  assert.ok(!buildNotifierArgv({ title: "T", body: "B" }).includes("-group"),
+    "no id ⇒ no group at all, never an empty one");
+});
+
+// ---------------------------------------------------------------------------
 // The four outcomes are told apart
 // ---------------------------------------------------------------------------
 
@@ -274,7 +355,7 @@ test("DIFFERENT text is not deduped, but the rate limit still bounds it", () => 
 });
 
 test("the throttled plan carries the reason and never an argv", () => {
-  const key = notifyKey("完成 · pi-review-gate", "本轮完成");
+  const key = notifyKey("任务完成 · pi-review-gate", "本轮完成");
   const history = recordNotify(emptyNotifyHistory(), key, T0);
   const p = plan({ history, now: T0 + 1000 });
   assert.equal(p.status, "throttled");
