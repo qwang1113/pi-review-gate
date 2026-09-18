@@ -208,3 +208,90 @@ export async function renderChoice(
   return trimmed ? `${declineRowOf(spec)}：${trimmed}` : declineRowOf(spec);
 }
 
+/**
+ * WHAT A DIALOG'S BANNER SAYS: the box's HEAD, then the thing being asked.
+ *
+ * The banner is raised by whoever shows the box, and it used to carry the head
+ * alone — which for an interview question is the bare progress label `问题 1 / 4`
+ * (the question's own first line was deliberately dropped from the list title
+ * on 2026-09-17). A notification whose whole text is a progress label tells the
+ * user nothing about what they are being asked (user report, 2026-09-18), so
+ * the body rides along and the head stays as the anchor.
+ *
+ * The QUESTION itself is what callers must pass as `body`; sanitization and
+ * the length cap belong to the notification layer (lib/user-notify.ts), not to
+ * the shape of a dialog.
+ */
+export function dialogNotifyDetail(spec: ChoiceSpec, body?: string): string {
+  const head = spec.title.trim();
+  const detail = (body ?? "").trim();
+  if (!detail) return head;
+  return head ? `${head} · ${detail}` : detail;
+}
+
+/**
+ * SERIALIZE THE GATE'S DIALOGS — one box on screen, ever.
+ *
+ * WHY THIS IS THE GATE'S JOB, NOT A HOST DETAIL (measured, 2026-09-18). pi runs
+ * the tool calls of ONE assistant message in PARALLEL (`pi-agent-core`
+ * `executeToolCallsParallel`, a `Promise.all` over the batch, and an abort does
+ * not interrupt that await) while the host has exactly ONE dialog slot:
+ * `showExtensionSelector` assigns `this.extensionSelector`, clears the
+ * container and adds the new component. A second dialog therefore REPLACES the
+ * first — the first component is dropped, the callbacks that would settle its
+ * promise are never called again, so the first tool call never returns, the
+ * batch never settles and the turn hangs with no way out.
+ *
+ * MEASURED: rebate session `01a0b328` (2026-09-18) put `ask_user` (4 questions)
+ * and `request_scope_limit` in ONE message — two "needs you" banners 40ms
+ * apart, the user answered the scope-limit box, and the session froze for good.
+ *
+ * ONE QUEUE PER SESSION, and it is held across the WHOLE dialog — the list AND
+ * the reason box that may follow it — because those are one conversation with
+ * the user.
+ *
+ * WHY NOT THE HOST'S OWN `executionMode: "sequential"` (pi's tool flag, which
+ * also sequentializes a batch): that flag has to be repeated on EVERY
+ * dialog-raising tool, and one tool added without it reopens the hole — while
+ * this queue sits on the ONE funnel every dialog already goes through
+ * (AGENTS.md 哲学二: 一件事只有一个入口).
+ */
+export function createDialogQueue(): <T>(run: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return async function schedule<T>(run: () => Promise<T>): Promise<T> {
+    const previous = tail;
+    let release!: () => void;
+    tail = new Promise<void>((resolve) => { release = resolve; });
+    // NOT `.catch`: `tail` settles ONLY through `release`, so a dialog that
+    // threw cannot leave the queue rejected — a queue that stops serving after
+    // one error is the same hang under a different name.
+    await previous;
+    try {
+      return await run();
+    } finally {
+      release();
+    }
+  };
+}
+
+/**
+ * THE SIGNAL A DIALOG LISTENS TO: the caller's own, plus the host's.
+ *
+ * TWO SOURCES, TWO DIFFERENT ESCAPES. The caller's signal is what takes a box
+ * down when the OTHER SIDE answers (an orchestrator's answer, an instruct:
+ * lib/orchestrator-child-channel.ts). The host's (`ExtensionContext.signal`,
+ * the run's own abort signal) is what an ESC press aborts — and without it a
+ * gate box stays on screen after the user cancelled the run, which is how a
+ * dialog outlives the very thing it was asking about (user report,
+ * 2026-09-18: "按 ESC 也无法结束").
+ *
+ * `AbortSignal.any` is the standard combinator, but it REJECTS an empty array,
+ * and "no signal at all" is a shape several callers produce — in a command
+ * handler, or in a test's fake UI.
+ */
+export function dialogSignal(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const live = signals.filter((s): s is AbortSignal => s !== undefined);
+  if (live.length === 0) return undefined;
+  return live.length === 1 ? live[0] : AbortSignal.any(live);
+}
+

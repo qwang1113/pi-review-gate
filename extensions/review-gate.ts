@@ -575,6 +575,9 @@ import { existingPrNotice, hasUnpushedCommits, probeOpenPr, type OpenPrArrival }
 import { rendererModeNoticeDue, RENDERER_MODE_NOTICE, type RendererMode } from "../lib/renderer-mode.ts";
 import {
   choiceRows,
+  createDialogQueue,
+  dialogNotifyDetail,
+  dialogSignal,
   parseChoice,
   renderChoice,
   type ChoiceSpec,
@@ -4929,8 +4932,8 @@ export default function reviewGate(pi: ExtensionAPI) {
    * Everything else on the seam is pi's own, unchanged. One named cast beats a
    * bare `as` at every call site, which is where it would drift.
    */
-  function asChoiceHost(ctx: unknown): { ui?: ChoiceUi } {
-    return ctx as { ui?: ChoiceUi };
+  function asChoiceHost(ctx: unknown): { ui?: ChoiceUi; signal?: AbortSignal } {
+    return ctx as { ui?: ChoiceUi; signal?: AbortSignal };
   }
 
 /** pi's editor component CLASS, as a type — see `loadEditorComponent`. */
@@ -5014,6 +5017,18 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   }
 
   /**
+   * ONE BOX AT A TIME, PER SESSION (2026-09-18).
+   *
+   * pi executes the tool calls of one assistant message in parallel, and the
+   * host has one dialog slot: a second box REPLACES the first and the replaced
+   * one's promise is never settled again — which hangs the first tool, the
+   * batch, and the turn (lib/choice-dialog.ts `createDialogQueue` states the
+   * measurement). Every dialog goes through `askChoice`, so the queue lives
+   * here and covers all of them at once.
+   */
+  const scheduleDialog = createDialogQueue();
+
+  /**
    * THE one dialog renderer (user decision, 2026-09-08): the gate's question
    * template, whole. Every dialog in this file — and
    * every dialog in the tool modules that inject this function — comes
@@ -5042,46 +5057,66 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * refusal (lib/orchestrator-child-channel.ts owns that distinction).
    */
   async function askChoice(
-    uiCtx: { ui?: ChoiceUi },
+    uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
     opts: { body?: string; signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
-    // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
-    // any session shows comes through this function, so "the gate has stopped
-    // and is waiting for the human" needs no second detector. The policy
-    // decides who may be told (a child session's questions belong to its
-    // manager, and the manager answers them) and the throttle keeps a
-    // re-opened dialog from ringing again.
-    //
-    // WAITING, NOT ANSWERING: the banner goes out as the box appears, which is
-    // the moment somebody who is NOT at the terminal needs to know.
-    raiseBanner({ kind: "needs-user", detail: spec.title });
-    // NO BUDGET, NO TRUNCATION (user decision, 2026-09-16). This used to fit
-    // the title and the body into a rendered-row budget, because a dialog tall
-    // enough to push the spinner out of the viewport made pi's DEFAULT renderer
-    // clear the screen and the scrollback every frame. That cost landed on the
-    // lines the user is confirming — a long repo path could take the station
-    // line and the audit line with it while the dialog went on asking for
-    // approval — and the renderer the user runs (`fullscreen`, the host owns
-    // the screen and scrolls) never had the problem. A session that is NOT on
-    // it is told once instead: see lib/renderer-mode.ts.
-    const answer = await renderChoice(await reasonBoxUi(uiCtx.ui), spec, {
-      ...(opts.body === undefined ? {} : { body: opts.body }),
-      ...(opts.signal ? { signal: opts.signal } : {}),
+    // A BOX THAT IS ALREADY SETTLED IS NOT RAISED, AND NOT ANNOUNCED: an
+    // aborted dialog that still rings a banner tells the user to come answer
+    // something nobody is asking any more, and the same check covers the
+    // QUEUED case — a call that waited its turn while the run was aborted
+    // underneath it (2026-09-18).
+    return scheduleDialog(async () => {
+      const signal = dialogSignal(uiCtx.signal, opts.signal);
+      if (signal?.aborted) return undefined;
+      // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
+      // any session shows comes through this function, so "the gate has stopped
+      // and is waiting for the human" needs no second detector. The policy
+      // decides who may be told (a child session's questions belong to its
+      // manager, and the manager answers them) and the throttle keeps a
+      // re-opened dialog from ringing again.
+      //
+      // WAITING, NOT ANSWERING: the banner goes out as the box appears, which
+      // is the moment somebody who is NOT at the terminal needs to know. The
+      // phrase being asked for rides along (body included) — a banner whose
+      // whole text is "问题 1 / 4" tells the user nothing about what they are
+      // being asked (user report, 2026-09-18).
+      raiseBanner({
+        kind: "needs-user",
+        detail: dialogNotifyDetail(spec, opts.body),
+      });
+      // NO BUDGET, NO TRUNCATION (user decision, 2026-09-16). This used to fit
+      // the title and the body into a rendered-row budget, because a dialog tall
+      // enough to push the spinner out of the viewport made pi's DEFAULT renderer
+      // clear the screen and the scrollback every frame. That cost landed on the
+      // lines the user is confirming — a long repo path could take the station
+      // line and the audit line with it while the dialog went on asking for
+      // approval — and the renderer the user runs (`fullscreen`, the host owns
+      // the screen and scrolls) never had the problem. A session that is NOT on
+      // it is told once instead: see lib/renderer-mode.ts.
+      //
+      // THE HOST'S ABORT SIGNAL TRAVELS WITH IT (2026-09-18): `uiCtx.signal` is
+      // `ExtensionContext.signal`, which is what an ESC aborts. Passing only the
+      // caller's own signal left a box on screen after the user cancelled the
+      // run, and the tool waiting on it never came back.
+      const answer = await renderChoice(await reasonBoxUi(uiCtx.ui), spec, {
+        ...(opts.body === undefined ? {} : { body: opts.body }),
+        ...(signal ? { signal } : {}),
+      });
+      // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
+      // dialog the gate shows — ask_user's interview, the restatement / goal /
+      // plan approvals, the consent boxes for sensitive edits and scope limits —
+      // reaches the user through this function, so this is where "the user
+      // answered" becomes a fact. Its one reader is the stall breaker
+      // (`stallInMotion`): a live negotiation must not be mistaken for a session
+      // that has stopped moving (measured: 80 minutes of goal negotiation
+      // tripped the breaker and was reported as a provider failure).
+      //
+      // Only a REAL answer counts: a dismissed box (undefined) is not the user
+      // engaging with the gate.
+      if (answer !== undefined) lastUserInteractionAt = new Date().toISOString();
+      return answer;
     });
-    // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
-    // dialog the gate shows — ask_user's interview, the restatement / goal /
-    // plan approvals, the consent boxes for sensitive edits and scope limits —
-    // reaches the user through this function, so this is where "the user
-    // answered" becomes a fact. Its one reader is the stall breaker
-    // (`stallInMotion`): a live negotiation must not be mistaken for a session
-    // that has stopped moving (measured: 80 minutes of goal negotiation
-    // tripped the breaker and was reported as a provider failure).
-    //
-    // Only a REAL answer counts: a dismissed box (undefined) is not the user
-    // engaging with the gate.
-    if (answer !== undefined) lastUserInteractionAt = new Date().toISOString();
-    return answer;
   }
 
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a

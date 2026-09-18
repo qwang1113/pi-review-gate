@@ -36,6 +36,11 @@ function harness(over: {
   interactive?: boolean;
   notifier?: string | undefined;
   windowId?: string;
+  /** Attached tmux clients, and the pane each of them is showing. */
+  clients?: string[];
+  clientPanes?: Record<string, string>;
+  /** What `lsappinfo` would report — a test never shells out. */
+  frontBundleId?: string | undefined;
 } = {}): Harness {
   const state = emptyState("sess-1", 10);
   if (over.taskMode) state.taskMode = over.taskMode;
@@ -60,7 +65,24 @@ function harness(over: {
       taskMode: () => state.taskMode,
       env: () => ({ TMUX_PANE: "%7", __CFBundleIdentifier: "com.mitchellh.ghostty", ...(over.env ?? {}) } as NodeJS.ProcessEnv),
       interactive: () => over.interactive ?? true,
-      runTmux: (argv) => { tmuxCalls.push([...argv]); return { ok: true, stdout: `${over.windowId ?? "@3"}\n` }; },
+      runTmux: (argv) => {
+        tmuxCalls.push([...argv]);
+        // THE THREE QUESTIONS THE RUNTIME ASKS tmux: where is this session's
+        // window, which clients are attached, and what is each one showing.
+        if (argv[0] === "list-clients") {
+          return { ok: true, stdout: `${(over.clients ?? []).join("\n")}\n` };
+        }
+        if (argv[0] === "display-message" && argv.includes("-c")) {
+          const client = argv[argv.indexOf("-c") + 1] ?? "";
+          const shown = over.clientPanes?.[client];
+          return shown ? { ok: true, stdout: `${shown}\n` } : { ok: false, stdout: "" };
+        }
+        return { ok: true, stdout: `${over.windowId ?? "@3"}\n` };
+      },
+      // A DIFFERENT app by default: the session's own bundle is
+      // `com.mitchellh.ghostty`, and a test that sends a banner must not trip
+      // the "user is already looking" suppression by accident.
+      frontBundleId: () => ("frontBundleId" in over ? over.frontBundleId : "com.other.app"),
       now: () => T0,
       spawnDetached: (argv) => { sent.push([...argv]); },
       spawnBlocking: (argv) => { blocking.push([...argv]); },
@@ -90,12 +112,18 @@ test("a banner goes out with this session's own pane as the click target", () =>
   assert.equal(h.sent.length, 1);
   assert.deepEqual(h.sent[0], [
     "/opt/homebrew/bin/terminal-notifier",
-    "-title", "完成 · pi-review-gate",
+    "-title", "任务完成 · pi-review-gate",
     "-message", "本轮完成",
+    "-group", "sess-1",
     "-activate", "com.mitchellh.ghostty",
     "-execute", "tmux select-window -t @3; tmux select-pane -t %7",
   ]);
-  assert.deepEqual(h.tmuxCalls, [["display-message", "-p", "-t", "%7", "#{window_id}"]]);
+  assert.deepEqual(h.tmuxCalls, [
+    ["display-message", "-p", "-t", "%7", "#{window_id}"],
+    // …and the sweep that answers "is the user already looking at this pane":
+    // no client is attached in this harness, so nothing is on screen.
+    ["list-clients", "-F", "#{client_name}"],
+  ]);
   assert.equal(h.state.notify?.sentAt.length, 1, "the throttle is written to the sidecar");
   assert.equal(h.persists, 1, "…and persisted, or a reload would forget it");
   assert.equal(h.blocking.length, 0, "a live session never blocks on the notifier");
@@ -114,6 +142,49 @@ test("nothing is spawned when the session may not send, and tmux is not even ask
   assert.deepEqual(h.sent, []);
   assert.deepEqual(h.tmuxCalls, [], "a child session must not pay for a tmux round trip");
   assert.equal(h.state.notify, undefined);
+});
+
+test("a user looking at this session's own pane is not interrupted (user decision, 2026-09-18)", () => {
+  const h = harness({
+    taskMode: "loop",
+    clients: ["/dev/ttys001"],
+    clientPanes: { "/dev/ttys001": "%7" },
+    frontBundleId: "com.mitchellh.ghostty",
+  });
+  assert.equal(h.notify({ kind: "needs-user", detail: "选哪个方案？" }).status, "skipped");
+  assert.deepEqual(h.sent, [], "the box is already on the screen they are looking at");
+  assert.equal(h.state.notify, undefined, "a banner not sent does not spend a throttle slot");
+  assert.equal(h.persists, 0, "…and writes nothing to the sidecar");
+});
+
+test("the SAME pane is worth a banner once the terminal is behind another app", () => {
+  const h = harness({
+    taskMode: "loop",
+    clients: ["/dev/ttys001"],
+    clientPanes: { "/dev/ttys001": "%7" },
+    frontBundleId: "com.google.Chrome",
+  });
+  assert.equal(h.notify({ kind: "needs-user", detail: "选哪个方案？" }).status, "sent");
+});
+
+test("the terminal in front but showing ANOTHER pane still gets the banner", () => {
+  const h = harness({
+    taskMode: "loop",
+    clients: ["/dev/ttys001"],
+    clientPanes: { "/dev/ttys001": "%9" },
+    frontBundleId: "com.mitchellh.ghostty",
+  });
+  assert.equal(h.notify({ kind: "needs-user", detail: "选哪个方案？" }).status, "sent");
+});
+
+test("a frontmost app that cannot be read must not silence the channel", () => {
+  const h = harness({
+    taskMode: "loop",
+    clients: ["/dev/ttys001"],
+    clientPanes: { "/dev/ttys001": "%7" },
+    frontBundleId: undefined,
+  });
+  assert.equal(h.notify({ kind: "needs-user", detail: "选哪个方案？" }).status, "sent");
 });
 
 test("the notifier is resolved once, and a missing one is reported not swallowed", () => {

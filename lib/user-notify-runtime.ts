@@ -33,6 +33,7 @@ import {
   defaultActivateBundle,
   emptyNotifyHistory,
   exitNotifyKind,
+  isWatchingPane,
   mayNotifyUser,
   planUserNotify,
   recordNotify,
@@ -69,6 +70,11 @@ export interface UserNotifyRuntimeDeps {
   spawnBlocking?(argv: readonly string[]): void;
   /** Injected so a test can decide where (or whether) the binary is. */
   resolveNotifier?(): string | undefined;
+  /**
+   * Injected so a test never shells out to `lsappinfo` (and so the
+   * "cannot be read" branch is reachable). Defaults to the real CLI.
+   */
+  frontBundleId?(): string | undefined;
 }
 
 export interface UserNotifyRuntime {
@@ -144,6 +150,61 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
     }
   }
 
+  /**
+   * What each attached tmux client is showing RIGHT NOW.
+   *
+   * `display-message -c <client>` is the one way to ask that question: tmux's
+   * format language exposes no `client_active_pane`, so the client itself has
+   * to be the context of the query. One call per client, and a client tmux
+   * refuses to describe contributes nothing rather than aborting the sweep.
+   *
+   * `[]` is the honest answer when tmux cannot be asked at all — the caller
+   * treats it as "nobody is looking", which is the fail-open direction
+   * lib/user-notify.ts's `isWatchingPane` documents.
+   */
+  function activeClientPanes(): string[] {
+    try {
+      const clients = deps.runTmux(["list-clients", "-F", "#{client_name}"]);
+      if (!clients.ok) return [];
+      const panes: string[] = [];
+      for (const client of clients.stdout.split("\n").map((line) => line.trim()).filter(Boolean)) {
+        const shown = deps.runTmux(["display-message", "-c", client, "-p", "#{pane_id}"]);
+        const pane = shown.ok ? shown.stdout.trim() : "";
+        if (pane) panes.push(pane);
+      }
+      return panes;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Bundle id of the FRONTMOST macOS app, or `undefined` when it cannot be
+   * read (a non-macOS host, `lsappinfo` gone, an output the parse does not
+   * recognize).
+   *
+   * `lsappinfo` is macOS's own CoreApplicationServices CLI and needs no
+   * permission grants — measured on this machine: 9ms for `front` and 11ms for
+   * the lookup, paid only when a banner is otherwise about to go out.
+   */
+  function frontBundleId(): string | undefined {
+    if (deps.frontBundleId) return deps.frontBundleId();
+    try {
+      const front = execFileSync("/usr/bin/lsappinfo", ["front"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (!front) return undefined;
+      const info = execFileSync("/usr/bin/lsappinfo", ["info", "-only", "bundleid", front], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      return /bundleid="([^"]+)"/i.exec(info)?.[1];
+    } catch {
+      return undefined;
+    }
+  }
+
   function spawnDetached(argv: readonly string[]): void {
     if (deps.spawnDetached) {
       deps.spawnDetached(argv);
@@ -181,6 +242,19 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
       const state = deps.state();
       const at = now();
       const history = state.notify ?? emptyNotifyHistory();
+      const sessionBundle = defaultActivateBundle(env());
+      // ONE LOOK AT THE TMUX ADDRESS PER BANNER: the click target and the
+      // "is the user already looking" check need the same answer, and the pane
+      // cannot change under us.
+      let addressResolved = false;
+      let address: { paneId: string; windowId?: string } | undefined;
+      const ownAddress = (): { paneId: string; windowId?: string } | undefined => {
+        if (!addressResolved) {
+          addressResolved = true;
+          address = ownTmuxAddress();
+        }
+        return address;
+      };
       const plan = planUserNotify({
         kind: opts.kind,
         repoName: deps.repoName(),
@@ -189,12 +263,25 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
         stateVariant: env()[STATE_VARIANT_ENV],
         // A THUNK: eligibility and the throttle must be decided BEFORE a
         // synchronous tmux call is paid (quality round P2).
-        tmux: () => ownTmuxAddress(),
+        tmux: () => ownAddress(),
+        // ALSO A THUNK, and lazily resolved for the same reason: this one costs
+        // a client sweep plus two `lsappinfo` calls, and a session that can
+        // never send (a child, a judge pane) must not pay for it either.
+        watching: () => isWatchingPane({
+          paneId: ownAddress()?.paneId,
+          activePanes: activeClientPanes(),
+          frontBundleId: frontBundleId(),
+          sessionBundleId: sessionBundle,
+        }),
+        // ONE BANNER PER SESSION: the notifier REMOVES an older banner with the
+        // same group, so a four-question interview leaves one banner in
+        // Notification Center instead of four (user report, 2026-09-18).
+        group: state.sessionId ?? undefined,
         notifierPath: notifierPath(),
         // WHERE A CLICK LANDS (reviewer Nit, carried two rounds): resolved
         // HERE with the other host facts and passed in, so `planUserNotify`
         // stays pure. An unknown app ⇒ no `-activate` at all, never a guess.
-        activateBundle: defaultActivateBundle(env()),
+        activateBundle: sessionBundle,
         history,
         now: at,
         interactive: deps.interactive(),

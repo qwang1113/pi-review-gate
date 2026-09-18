@@ -6,6 +6,9 @@ import {
   MAX_CHOICE_OPTIONS,
   REVISE_ROW,
   choiceRows,
+  createDialogQueue,
+  dialogNotifyDetail,
+  dialogSignal,
   looksLikeDeclineRow,
   optionRow,
   parseChoice,
@@ -158,4 +161,104 @@ test("the default reason hint advertises no escape that is not honored", () => {
   assert.doesNotMatch(CHOICE_REASON_HINT, /skip/i,
     "the skip-the-rest escape is gone with the row that used to advertise it");
   assert.ok(MAX_CHOICE_OPTIONS >= 2);
+});
+
+// ---------------------------------------------------------------------------
+// One dialog at a time (2026-09-18)
+//
+// THE HANG THIS PREVENTS, as measured: pi runs one assistant message's tool
+// calls in parallel (`Promise.all`, unbreakable by an abort) and the host has
+// ONE dialog slot — a second box replaces the first, whose promise is then
+// never settled again. Two gate dialogs in one message therefore froze a
+// session for good (rebate session 01a0b328).
+// ---------------------------------------------------------------------------
+
+/** Let every queued microtask run before the assertion looks. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("the banner is head + question, and never a dangling separator", () => {
+  assert.equal(dialogNotifyDetail(spec({ title: "问题 1 / 4" }), "PR 176 的限流要撤哪些？"),
+    "问题 1 / 4 · PR 176 的限流要撤哪些？",
+    "a progress label alone tells the user nothing about what they are being asked");
+  assert.equal(dialogNotifyDetail(spec({ title: "review-gate: AI 请求缩小审查范围" })),
+    "review-gate: AI 请求缩小审查范围", "a dialog with no body keeps its head alone");
+  assert.equal(dialogNotifyDetail(spec({ title: "  " }), "只有正文"), "只有正文",
+    "no head, no separator");
+  assert.equal(dialogNotifyDetail(spec({ title: "T" }), "   "), "T", "a blank body is not a body");
+});
+
+test("the second box does not open under the first one", async () => {
+  const schedule = createDialogQueue();
+  const order: string[] = [];
+  let answerFirst!: () => void;
+  const firstAnswered = new Promise<void>((resolve) => { answerFirst = resolve; });
+
+  const first = schedule(async () => {
+    order.push("first:opened");
+    await firstAnswered;
+    order.push("first:closed");
+    return "a";
+  });
+  const second = schedule(async () => {
+    order.push("second:opened");
+    return "b";
+  });
+
+  await settle();
+  assert.deepEqual(order, ["first:opened"], "the second box must not be raised while the first is up");
+
+  answerFirst();
+  assert.equal(await first, "a");
+  assert.equal(await second, "b");
+  assert.deepEqual(order, ["first:opened", "first:closed", "second:opened"]);
+});
+
+test("each dialog gets its own answer back, in order", async () => {
+  const schedule = createDialogQueue();
+  const answers = await Promise.all([
+    schedule(async () => "one"),
+    schedule(async () => "two"),
+    schedule(async () => "three"),
+  ]);
+  assert.deepEqual(answers, ["one", "two", "three"]);
+});
+
+test("a dialog that THREW does not wedge the queue", async () => {
+  const schedule = createDialogQueue();
+  const boom = schedule(async (): Promise<string> => { throw new Error("boom"); });
+  const after = schedule(async () => "still serving");
+  await assert.rejects(boom, /boom/);
+  assert.equal(await after, "still serving",
+    "a queue that stops serving after one error is the same hang under a different name");
+});
+
+test("the host's abort and the caller's own are ONE signal for the dialog", () => {
+  assert.equal(dialogSignal(), undefined, "no signal at all is a shape several callers produce");
+  assert.equal(dialogSignal(undefined, undefined), undefined);
+
+  const only = new AbortController();
+  assert.equal(dialogSignal(only.signal), only.signal, "a single source is passed through, not cloned");
+  assert.equal(dialogSignal(undefined, only.signal, undefined), only.signal);
+
+  // The caller's own: an orchestrator answers, or an instruct arrives.
+  const host = new AbortController();
+  const caller = new AbortController();
+  const both = dialogSignal(host.signal, caller.signal)!;
+  assert.equal(both.aborted, false);
+  caller.abort();
+  assert.equal(both.aborted, true);
+
+  // The host's: `ExtensionContext.signal`, which an ESC aborts — without it a
+  // box stays on screen after the run was cancelled.
+  const host2 = new AbortController();
+  const caller2 = new AbortController();
+  const both2 = dialogSignal(host2.signal, caller2.signal)!;
+  host2.abort();
+  assert.equal(both2.aborted, true);
+  assert.equal(caller2.signal.aborted, false, "one side aborting must not abort the other side's controller");
+
+  const dead = new AbortController();
+  dead.abort();
+  assert.equal(dialogSignal(dead.signal, new AbortController().signal)!.aborted, true,
+    "an already-aborted source makes the dialog dead on arrival");
 });

@@ -628,6 +628,12 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 （`declare_done` 被接受、`process.on("exit")` 无 `session_shutdown` 记录、`askChoice`、
 以及 plan 的 `add-decision`）—— 详见 `docs/orchestrator-supervision.md`。
 
+措辞与投递时机（2026-09-18，用户要求）：标题是 `<类型> · <repo>`（等你回答 / 任务完成 /
+异常结束），正文带具体内容（问题本身、完成摘要、失败原因）；**你正看着那个 pane 且终端
+在前台时不发**（`isWatchingPane`：该 pane 是某个 tmux client 的当前活跃 pane 且前台 app
+与会话自己的 `__CFBundleIdentifier` 一致 —— 缺任一项事实一律照常发），同一会话的通知互相
+替换（`-group <sessionId>`），不再在通知中心堆叠。
+
 ### 架构规范：新建文件 600 行硬拦，存量只提醒
 
 `judge_submit` 内部的 checkpoint 步骤会拦下**本次新增**且超过
