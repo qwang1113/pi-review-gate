@@ -477,8 +477,11 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   （2026-09-16 起 sensitive-edit、2026-09-17 起 tmux-access：`orchestrator_answer` 对这两类
   无授权时弹三选框给用户：「允许并记住 / 仅允许这一次 / 拒绝」，**推荐拒绝** —— tmux 的
   爆炸半径与敏感文件同级：`kill-server` 能带走用户整个 tmux 会话）；`request_sensitive_edit`
-  与 `request_tmux_access` 在项目经理自己的会话里被**直接拒绝**（它没有通道侧可答自己的框，
-  曾把 PM 卡死 2 小时），改走 `orchestrator_answer`。三个授权入口：ask_user 带 `grantScope`
+  在项目经理自己的会话里被**直接拒绝**（它没有通道侧可答自己的框，曾把 PM 卡死 2 小时），
+  改走 `orchestrator_answer`。`request_tmux_access` 相反（2026-09-18 用户决定）：PM 自己的
+  tmux 操作**就是**被拦的那一档（`split-window` / `send-keys` / `kill-pane`），把申请也拒掉
+  等于给它一个没有出口的拒绝，所以它和 loop 会话走同一条路 —— 无通道侧时框直接弹给用户，
+  批准后手写 tmux 放行（拦截范围与文案顺序不变）。三个授权入口：ask_user 带 `grantScope`
   的提问、`/gate-grant <scope>` 命令（作用域：`sensitive-edit`、`tmux-access`）、首次代答的三选框。
 - **一次 `ask_user` 的多题整批上送、整批回答**（2026-09-06）：子会话在弹出第一个
   框之前，就把本次采访的全部问题一次性写成 N 条 request 记录（新增可选字段

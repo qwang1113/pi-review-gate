@@ -24,22 +24,24 @@
  * the user's dialog (or, for a child session, from its manager), and a
  * dialog that cannot be shown is fail-closed.
  *
- * TWO TIERS, and the difference still matters — it is the STRENGTH OF THE
- * HINT:
+ * TWO TIERS, and the difference still matters — it is WHAT THE REFUSAL SAYS:
  *
- *  1. ALWAYS WARNED — `kill-session`, `kill-server`, `kill-window`,
+ *  1. ALWAYS FORBIDDEN — `kill-session`, `kill-server`, `kill-window`,
  *     `new-session`, `new-window`, a global option write (`set -g`), and
  *     `kill-pane -a` (which sweeps every OTHER pane in the window, the user's
  *     included). None of these has a legitimate use from inside an agent
  *     session: they either destroy something the user owns or create surface
  *     outside the one window the orchestration was agreed in. No tool
- *     replaces them, so the warning is the strongest one the gate has.
+ *     replaces them, so the refusal is the strongest one the gate has.
  *  2. TOOL-REPLACED — `split-window`, `send-keys`, `kill-pane`. These are
  *     exactly what the orchestration tools do, so in ORCHESTRATOR mode the
- *     hint is not a prohibition but a redirect: the message names the tool to
- *     call instead. Outside orchestrator mode they are left alone; an
- *     ordinary session running tmux for its own reasons is not this module's
- *     business.
+ *     refusal names the tool to call instead. That makes it a redirect, not a
+ *     softer rule: it is refused and lifted exactly like the tier above, by
+ *     the user's grant, and a project manager asks for one the way any other
+ *     session does — it used to be refused the REQUEST itself, which left the
+ *     one role whose tmux the gate blocks with no way out at all (2026-09-18).
+ *     Outside orchestrator mode they are left alone; an ordinary session
+ *     running tmux for its own reasons is not this module's business.
  *
  * QUOTED TEXT IS DATA. Detection runs over the shell lexer's UNQUOTED tokens
  * (lib/shell-lex.ts), so `echo "tmux kill-server"` and a quoted payload inside
