@@ -278,6 +278,18 @@ test("the watching check is asked LAZILY, and only on the path that would send",
   assert.equal(plan({ watching, notifierPath: undefined }).status, "missing");
   assert.equal(watched, 0, "none of those three ever asks whether the user is looking");
 
+  // …and neither does a banner the THROTTLE refuses (quality round P2,
+  // 2026-09-18): the evidence costs three to five synchronous subprocesses, so
+  // the cheap decision comes first and a suppressed banner still records
+  // nothing, leaving the next real one its slot.
+  const history = recordNotify(
+    emptyNotifyHistory(),
+    notifyKey("任务完成 · pi-review-gate", "本轮完成"),
+    T0,
+  );
+  assert.equal(plan({ watching, history, now: T0 + 1 }).status, "throttled");
+  assert.equal(watched, 0, "a throttled banner pays for no evidence either");
+
   assert.equal(plan({ watching }).status, "send");
   assert.equal(watched, 1, "the one that sends asks exactly once");
 });

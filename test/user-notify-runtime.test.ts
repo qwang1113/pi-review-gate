@@ -194,6 +194,18 @@ test("a frontmost app that cannot be read must not silence the channel", () => {
   assert.equal(h.notify({ kind: "needs-user", detail: "选哪个方案？" }).status, "sent");
 });
 
+test("the window in the click target is re-read per banner, the pane id is not", () => {
+  // Quality round P2 (2026-09-18): the pane id is fixed for the process, the
+  // WINDOW id is not — join-pane / break-pane move this pane elsewhere, and a
+  // process-lifetime cache would send every later click to the window it used
+  // to be in.
+  const h = harness({ taskMode: "loop", windowId: "@3" });
+  h.notify({ kind: "finished", detail: "第一轮" });
+  h.notify({ kind: "needs-user", detail: "第二轮" });
+  const lookups = h.tmuxCalls.filter((argv) => argv[0] === "display-message" && argv.includes("-t"));
+  assert.equal(lookups.length, 2, "one address lookup per banner, so the window is fresh");
+});
+
 test("evidence that THROWS must not suppress the banner (fail open)", () => {
   // Reviewer P1, 2026-09-18: the injected reader used to sit outside the
   // try/catch, so a throwing one escaped into `notify()`'s catch-all and the

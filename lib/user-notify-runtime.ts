@@ -26,6 +26,9 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 
 import type { GateState } from "./gate-state.ts";
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
+// The pane-id shape has ONE implementation (quality round P2, 2026-09-18):
+// lib/orchestrator-tmux.ts's canonical predicate, not a fourth local regex.
+import { isPaneId } from "./orchestrator-tmux.ts";
 import type { TaskMode } from "./task-mode.ts";
 import {
   MISSING_NOTIFIER_HINT,
@@ -45,6 +48,16 @@ import {
 export interface NotifyTmuxRunner {
   (argv: readonly string[]): { ok: boolean; stdout: string };
 }
+
+/**
+ * How long a synchronous `lsappinfo` call may take.
+ *
+ * The CLI answers in ~10ms on this machine; the bound exists so a wedged
+ * CoreApplicationServices cannot hang the dialog that is opening — or the
+ * process exit handler that is closing, where a stuck child would hold the
+ * exiting session open forever (quality round P2, 2026-09-18).
+ */
+const LSAPPINFO_TIMEOUT_MS = 2_000;
 
 export interface UserNotifyRuntimeDeps {
   /** The session's gate state — the banner throttle is persisted on it. */
@@ -140,7 +153,7 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
    */
   function ownTmuxAddress(): { paneId: string; windowId?: string } | undefined {
     const paneId = (env().TMUX_PANE ?? "").trim();
-    if (!/^%\d+$/.test(paneId)) return undefined;
+    if (!isPaneId(paneId)) return undefined;
     try {
       const out = deps.runTmux(["display-message", "-p", "-t", paneId, "#{window_id}"]);
       const windowId = out.ok ? out.stdout.trim() : "";
@@ -197,36 +210,25 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
   function frontBundleId(): string | undefined {
     try {
       if (deps.frontBundleId) return deps.frontBundleId();
+      // TIMED LIKE EVERY OTHER EXTERNAL CALL IN THIS REPO (quality round P2,
+      // 2026-09-18): this runs synchronously on the dialog path (askChoice ->
+      // raiseBanner) AND inside the process exit handler, where an unbounded
+      // child would hang the box that is opening or the exit that is closing.
       const front = execFileSync("/usr/bin/lsappinfo", ["front"], {
         encoding: "utf8",
+        timeout: LSAPPINFO_TIMEOUT_MS,
         stdio: ["ignore", "pipe", "ignore"],
       }).trim();
       if (!front) return undefined;
       const info = execFileSync("/usr/bin/lsappinfo", ["info", "-only", "bundleid", front], {
         encoding: "utf8",
+        timeout: LSAPPINFO_TIMEOUT_MS,
         stdio: ["ignore", "pipe", "ignore"],
       });
       return /bundleid="([^"]+)"/i.exec(info)?.[1];
     } catch {
       return undefined;
     }
-  }
-
-  /**
-   * This session's own tmux address, resolved ONCE per process.
-   *
-   * `TMUX_PANE` is fixed for the life of the process, so a second lookup can
-   * only spend another synchronous tmux call — and BOTH the click target and
-   * the "is the user watching" check want the same answer.
-   */
-  let addressResolved = false;
-  let address: { paneId: string; windowId?: string } | undefined;
-  function ownAddress(): { paneId: string; windowId?: string } | undefined {
-    if (!addressResolved) {
-      addressResolved = true;
-      address = ownTmuxAddress();
-    }
-    return address;
   }
 
   /**
@@ -241,10 +243,10 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
    * `notify()`'s catch-all — that path is for the notifier failing, not for the
    * evidence about where the user is looking.
    */
-  function userIsWatching(sessionBundleId: string | undefined): boolean {
+  function userIsWatching(paneId: string | undefined, sessionBundleId: string | undefined): boolean {
     try {
       return isWatchingPane({
-        paneId: ownAddress()?.paneId,
+        paneId,
         activePanes: activeClientPanes(),
         frontBundleId: frontBundleId(),
         sessionBundleId,
@@ -292,6 +294,20 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
       const at = now();
       const history = state.notify ?? emptyNotifyHistory();
       const sessionBundle = defaultActivateBundle(env());
+      // ONE LOOK PER BANNER — NOT per process (quality round P2, 2026-09-18):
+      // the PANE id is fixed for the process, the WINDOW id is not (join-pane /
+      // break-pane / move-pane move this pane elsewhere), so a process-lifetime
+      // cache would make every later click jump to a window this pane has left.
+      // Within one banner the address cannot change, so the two readers share it.
+      let addressResolved = false;
+      let address: { paneId: string; windowId?: string } | undefined;
+      const ownAddress = (): { paneId: string; windowId?: string } | undefined => {
+        if (!addressResolved) {
+          addressResolved = true;
+          address = ownTmuxAddress();
+        }
+        return address;
+      };
       const plan = planUserNotify({
         kind: opts.kind,
         repoName: deps.repoName(),
@@ -304,7 +320,7 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
         // ALSO A THUNK, and lazily resolved for the same reason: this one costs
         // a client sweep plus two `lsappinfo` calls, and a session that can
         // never send (a child, a judge pane) must not pay for it either.
-        watching: () => userIsWatching(sessionBundle),
+        watching: () => userIsWatching(ownAddress()?.paneId, sessionBundle),
         // ONE BANNER PER SESSION: the notifier REMOVES an older banner with the
         // same group, so a four-question interview leaves one banner in
         // Notification Center instead of four (user report, 2026-09-18).

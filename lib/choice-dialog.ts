@@ -1,3 +1,5 @@
+import { raceAbort } from "./abort-race.ts";
+
 /**
  * THE question template — the ONE shape every gate dialog has (user decision,
  * 2026-09-08).
@@ -299,7 +301,9 @@ export function createDialogQueue(): <T>(run: () => Promise<T>, signal?: AbortSi
     try {
       if (signal?.aborted) return undefined;
       if (signal) {
-        if (await waitOrAbort(previous, signal)) return undefined;
+        // `true` means the abort won: the caller skips its dialog. The race
+        // itself lives in lib/abort-race.ts (the reason box races the same way).
+        if (await raceAbort(previous.then(() => false), signal, true)) return undefined;
       } else {
         // NOT `.catch`: `tail` settles ONLY through `release`, so a dialog that
         // threw cannot leave the queue rejected — a queue that stops serving
@@ -313,28 +317,6 @@ export function createDialogQueue(): <T>(run: () => Promise<T>, signal?: AbortSi
       release();
     }
   };
-}
-
-/**
- * Wait for `wait`, or give up as soon as `signal` aborts.
- *
- * Resolves `true` when the signal won — the caller then skips its dialog AND
- * releases the queue. Both listeners are detached on either outcome, so a long
- * queue cannot accumulate them.
- */
-function waitOrAbort(wait: Promise<unknown>, signal: AbortSignal): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    const finish = (cancelled: boolean) => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", onAbort);
-      resolve(cancelled);
-    };
-    const onAbort = () => finish(true);
-    signal.addEventListener("abort", onAbort, { once: true });
-    void wait.then(() => finish(false), () => finish(false));
-  });
 }
 
 /**

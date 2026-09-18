@@ -70,6 +70,12 @@
  */
 
 import type { TaskMode } from "./task-mode.ts";
+// THE PANE-ID SHAPE HAS ONE IMPLEMENTATION (quality round P2, 2026-09-18). This
+// module reads pane ids that tmux itself printed, and the gate's canonical
+// predicate is the one lib/orchestrator-tmux.ts exports — a local `^%\d+$`
+// accepted widths the canonical check rejects, in a repo that then held four
+// copies of the rule.
+import { isPaneId } from "./orchestrator-tmux.ts";
 
 /** Longest title/body a notification actually renders. */
 export const NOTIFY_TITLE_MAX = 80;
@@ -212,7 +218,7 @@ export function buildFocusCommand(opts: {
   windowId: string | undefined;
 }): string | undefined {
   const pane = opts.paneId.trim();
-  if (!/^%\d+$/.test(pane)) return undefined;
+  if (!isPaneId(pane)) return undefined;
   const window = (opts.windowId ?? "").trim();
   if (/^@\d+$/.test(window)) {
     return `tmux select-window -t ${window}; tmux select-pane -t ${pane}`;
@@ -279,6 +285,14 @@ export function buildNotifierArgv(opts: {
  * banner is a user who is never told. Suppression has to be EARNED by two
  * facts agreeing; it is never the default.
  *
+ * THE APPS ARE COMPARED LOOSELY, AND THAT IS THE SAFE DIRECTION (quality round
+ * P2, 2026-09-18): `sessionBundleId` is the terminal that started the tmux
+ * SERVER (`__CFBundleIdentifier` is inherited), not necessarily the app hosting
+ * the client that is attached — so attaching from a second terminal app makes
+ * the two differ and the banner GOES OUT. The failure is an extra notification,
+ * never a silent one, and telling the two app identities apart would mean asking
+ * tmux about a client's host, which it does not record.
+ *
  * PURE: the caller (lib/user-notify-runtime.ts) pays for the two subprocesses
  * and passes their readings in, so every branch is drivable from a test.
  */
@@ -293,7 +307,7 @@ export function isWatchingPane(opts: {
   sessionBundleId: string | undefined;
 }): boolean {
   const pane = (opts.paneId ?? "").trim();
-  if (!/^%\d+$/.test(pane)) return false;
+  if (!isPaneId(pane)) return false;
   if (!opts.activePanes.some((shown) => shown.trim() === pane)) return false;
   const front = (opts.frontBundleId ?? "").trim();
   const session = (opts.sessionBundleId ?? "").trim();
@@ -513,13 +527,6 @@ export function planUserNotify(opts: {
     };
   }
   if (!opts.notifierPath) return { status: "missing", hint: MISSING_NOTIFIER_HINT };
-  // ORDER: after the missing-binary answer, before the throttle. A user who is
-  // looking at the box does not need telling, and a banner that is not sent must
-  // not consume a throttle slot either — the next real one still goes out.
-  if (opts.watching?.()) {
-    return { status: "skipped", reason: "用户正在看这个 pane（终端在前台），不打扰" };
-  }
-
   const message = buildUserNotifyMessage({
     kind: opts.kind,
     repoName: opts.repoName,
@@ -530,6 +537,14 @@ export function planUserNotify(opts: {
   const key = notifyKey(title, body);
   const decision = decideNotify({ history: opts.history, key, now: opts.now });
   if (!decision.send) return { status: "throttled", reason: decision.reason };
+  // ORDER — AFTER THE THROTTLE (quality round P2, 2026-09-18): answering
+  // "is the user looking" costs three to five synchronous subprocesses, and a
+  // banner the throttle would refuse anyway must not pay for them. A banner
+  // SUPPRESSED here still records nothing, so it spends no throttle slot
+  // either — the next real one goes out.
+  if (opts.watching?.()) {
+    return { status: "skipped", reason: "用户正在看这个 pane（终端在前台），不打扰" };
+  }
 
   const address = opts.tmux?.();
   const focusCommand = address

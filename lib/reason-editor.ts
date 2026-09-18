@@ -1,6 +1,5 @@
 /**
- * The gate's MULTI-LINE reason box — pi's own editor, with the abort wired in.
- *
+ * The gate's MULTI-LINE reason box — pi's own editor, with the abort wired in. *
  * WHY THIS EXISTS (user decision, 2026-09-17: "我希望和 pi 本身的输入框行为保持
  * 一致 —— 可以多行，可以用 vim 控制"). The box behind `✎ 不选，我说明原因` used
  * to be pi's single-line `ui.input`: fine for a word, useless for an
@@ -31,14 +30,18 @@
  * wait on an abort while the box itself stays until the host closes it. The
  * difference between the two halves is deliberate and stated where it matters.
  *
+ * THE RACE ITSELF IS NOT OURS (quality round P2, 2026-09-18): both halves of the
+ * gate that need it call lib/abort-race.ts.
+ *
  * Everything here is pure: the component arrives as `build`, and the host's two
  * calls arrive as `custom` / `fallback`. `extensions/review-gate.ts` supplies
  * all three and owns nothing of the rule; this file owns the rule and needs no
  * pi import to state it.
  */
 
-/** pi's `ui.custom`, narrowed to what this module needs. */
-export type CustomDialogHost = <T>(
+import { raceAbort } from "./abort-race.ts";
+
+/** pi's `ui.custom`, narrowed to what this module needs. */export type CustomDialogHost = <T>(
   factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: T) => void) => unknown,
 ) => Promise<T>;
 
@@ -94,6 +97,11 @@ export type HostEditor = (title: string, prefill?: string) => Promise<string | u
 export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
   const { custom, fallback, build } = host;
   return async (title, opts) => {
+    // A DEAD SIGNAL OPENS NOTHING (reviewer P1, 2026-09-18) — checked BEFORE
+    // the host is asked to build anything, on BOTH paths. The custom path is
+    // the one that matters most: it MOUNTS a component, and finishing it a
+    // tick later still puts a box on the user's screen that nobody waits for.
+    if (opts?.signal?.aborted) return undefined;
     if (!custom) return fallback?.(title, opts);
     let ran = false;
     const answer = await custom<string | undefined>((tui, _theme, keybindings, done) => {
@@ -105,9 +113,11 @@ export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
         done(value);
       };
       opts?.signal?.addEventListener("abort", () => finish(undefined), { once: true });
-      // An ALREADY-aborted signal never fires that listener, and `done` is not
-      // called from inside the factory itself — the host may not have mounted
-      // the component yet.
+      // A signal that died BETWEEN the check above and this factory (pi calls
+      // it a tick later on the TUI, never on RPC) must still come down: the
+      // listener above never fires for an already-aborted signal, and `done`
+      // cannot be called from inside the factory itself — the component may not
+      // be mounted yet.
       if (opts?.signal?.aborted) queueMicrotask(() => finish(undefined));
       return build(tui, keybindings, title, finish);
     });
@@ -164,18 +174,10 @@ export function raceReasonEditor(
   signal: AbortSignal | undefined,
 ): Promise<string | undefined> {
   if (!signal) return openBox();
+  // A DEAD SIGNAL OPENS NOTHING: checked here, before the thunk runs, because
+  // the promise-taking version created the box first and only then stopped
+  // waiting (reviewer P1, 2026-09-18).
   if (signal.aborted) return Promise.resolve(undefined);
-  const box = openBox();
-  return new Promise<string | undefined>((resolve) => {
-    let settled = false;
-    const finish = (value: string | undefined) => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", onAbort);
-      resolve(value);
-    };
-    const onAbort = () => finish(undefined);
-    signal.addEventListener("abort", onAbort, { once: true });
-    void box.then(finish, () => finish(undefined));
-  });
+  // The race is shared with the dialog queue: lib/abort-race.ts.
+  return raceAbort(openBox(), signal, undefined);
 }

@@ -170,6 +170,16 @@ test("hostEditorFallback: pi's prefill slot stays EMPTY, and the abort still lan
   assert.deepEqual(seen.titles, ["理由"], "an already-aborted signal does not open the box at all");
 });
 
+test("an already-aborted signal must not BUILD the component either (reviewer P1, 2026-09-18)", async () => {
+  // The custom path is the one that MOUNTS a component: finishing it a tick
+  // later still puts a box on the user's screen that nobody is waiting for.
+  const h = harness("interactive");
+  const dead = new AbortController();
+  dead.abort();
+  assert.equal(await h.editor("head", { signal: dead.signal }), undefined);
+  assert.deepEqual(h.calls.built, [], "the host was never asked to build anything");
+});
+
 test("the RPC path hands the abort through to the host's own box (reviewer P1, 2026-09-18)", async () => {
   // THE COMBINATION THAT WAS BROKEN: `hostReasonEditor` called its fallback with
   // the title ALONE, so the RPC path (custom present, factory never run) reached
