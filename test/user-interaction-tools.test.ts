@@ -247,20 +247,25 @@ test("request_tmux_access: a declined session, no UI, and an unshowable dialog a
   assert.equal(broken.tmuxDeclined, false, "a dialog that never appeared must not burn the lock");
 });
 
-test("request_tmux_access: a project manager with no channel asks the USER, like any other session", async () => {
+test("request_tmux_access: a project manager with no channel side is no longer refused", async () => {
   // The ONE role whose own tmux operations the gate refuses (`split-window` /
   // `send-keys` / `kill-pane` are the tool-replaced tier) used to be refused
-  // the REQUEST as well, so its refusal had no way out at all. It now takes
-  // the route a standalone session takes (2026-09-18): there is no channel
-  // side to ask, so the user's own dialog is the one that appears.
-  const f = fake({ answers: [TMUX_SESSION] });
+  // the REQUEST as well, so its refusal had no way out at all (2026-09-18).
+  //
+  // WHAT THIS COVERS, and what it deliberately does not: the request reaches
+  // the dialog seam and the grant it returns is the one any session gets.
+  // WHICH dialog that seam raises is not this module's contract —
+  // `deps.askEitherSide` decides, and the real one renders the user's own box
+  // when the session has no channel binding (the `!binding` branch in
+  // extensions/review-gate.ts). Asserting the routing HERE would only assert
+  // what the fake was told to do.
+  const f = fake({ answers: [TMUX_SESSION], canChannelDialogs: false });
   f.st.taskMode = "orchestrator";
-  assert.equal(f.canChannelDialogs, false, "a top-level manager has no channel side");
   const reply = await call(f, "request_tmux_access", { reason: "要开一个裸 pane 看日志" });
   assert.equal(reply.isError, undefined, "the manager is no longer refused outright");
   assert.equal(reply.details?.granted, true);
   assert.equal(f.st.tmuxAccess?.scope, "session");
-  assert.equal(f.asked.length, 1, "the manager raises the user's own dialog");
+  assert.equal(f.asked.length, 1, "the request reaches the dialog seam");
 
   // Removing the self-block must not have removed the fail-closed check it
   // used to sit in front of: a manager with no UI is still granted nothing.
