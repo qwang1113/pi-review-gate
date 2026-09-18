@@ -78,7 +78,7 @@ import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "..
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { hostReasonEditor, raceReasonEditor, type CustomDialogHost, type ReasonEditor } from "../lib/reason-editor.ts";
+import { hostEditorFallback, hostReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
@@ -4964,36 +4964,25 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   }
 
   /**
-   * pi's own `ui.editor` behind the template's seam.
-   *
-   * IT TAKES A PREFILL, NOT OPTIONS (reviewer P2, 2026-09-17): calling it as
-   * `(title, { signal })` opens the user's box with `[object Object]` already
-   * typed into it — and the RPC fallback is exactly the path that calls it that
-   * way. The signal still does NOT go into the box; what changed (reviewer P1,
-   * 2026-09-18) is that the gate no longer WAITS on it forever —
-   * `raceReasonEditor` ends the wait on an abort, which is the half we own.
-   */
-  function asOwnReasonEditor(editor: ExtensionUIContext["editor"]): ReasonEditor {
-    return (title, opts) => raceReasonEditor(editor(title), opts?.signal);
-  }
-
-  /**
    * The template's `ui` seam, with the reason box wired to pi's own editor.
    *
    * WHY NOT `ui.editor()` DIRECTLY (2026-09-17): pi's signature is
    * `editor(title, prefill?)` — no `signal`. This gate's dialog model rests on
    * a box being taken OFF THE SCREEN the moment the other side answers first
    * (lib/orchestrator-child-channel.ts), and a box that outlives its answer
-   * collects typing nobody will ever read. The RULE for that — how the two
-   * kinds of `undefined` are told apart, and which host falls back to what —
-   * lives in lib/reason-editor.ts; what is here is only the wiring.
+   * collects typing nobody will ever read. The RULES for that — how the two
+   * kinds of `undefined` are told apart, which host falls back to what, and how
+   * the signal-less fallback still stops being waited on — live in
+   * lib/reason-editor.ts; what is here is only the wiring.
    */
   async function reasonBoxUi(host: ChoiceUi | undefined): Promise<ChoiceUi | undefined> {
     const pi = host as (ChoiceUi & {
       custom?: ExtensionUIContext["custom"];
       editor?: ExtensionUIContext["editor"];
     }) | undefined;
-    const own = pi?.editor ? asOwnReasonEditor(pi.editor.bind(pi)) : undefined;
+    // `hostEditorFallback` reads the signal ITSELF and never forwards our opts
+    // into pi's prefill slot (lib/reason-editor.ts states the trap).
+    const own = pi?.editor ? hostEditorFallback(pi.editor.bind(pi)) : undefined;
     const custom = pi?.custom;
     const Component = custom ? await loadEditorComponent() : undefined;
     // No pi package to resolve, or no custom components on this host (RPC):

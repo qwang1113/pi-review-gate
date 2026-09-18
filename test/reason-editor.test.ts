@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { hostReasonEditor, raceReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
+import { hostEditorFallback, hostReasonEditor, raceReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
 import { resolveQuestion } from "../lib/ask-user.ts";
 
 // ---- the runtime import the extension now depends on ----
@@ -35,8 +35,11 @@ function harness(mode: "interactive" | "rpc" | "no-custom") {
 
   const editor = hostReasonEditor({
     ...(mode === "no-custom" ? {} : { custom }),
-    // `arguments.length` is the point: pi's `ui.editor` takes a PREFILL in
-    // second position, so a second argument here would land in the user's box.
+    // `fallbackArgs` is the point: the fallback is handed OUR opts (it has to
+    // be — that is the only way it can honor an abort, reviewer P1 2026-09-18),
+    // and it is `hostEditorFallback`'s job, not the fallback's, to keep them
+    // out of pi's PREFILL slot. `calls.fallbackArgs` pins which side of that
+    // line this call is on.
     fallback: async function (title: string) {
       calls.fellBack.push(title);
       calls.fallbackArgs.push(arguments.length);
@@ -118,7 +121,8 @@ test("the fallback gets the TITLE ONLY — pi's second parameter is a prefill", 
   const h = harness("no-custom");
   const controller = new AbortController();
   assert.equal(await h.editor("head", { signal: controller.signal }), "理由写在宿主自己的框里");
-  assert.deepEqual(h.calls.fallbackArgs, [1]);
+  assert.deepEqual(h.calls.fallbackArgs, [2],
+    "the fallback is handed our opts so it can honor an abort — the prefill slot is protected by hostEditorFallback instead");
 });
 
 test("a fallback answer is an ORDINARY answer — the interview is not stopped", async () => {
@@ -140,6 +144,56 @@ test("a host with no custom at all goes straight to its own editor", async () =>
   assert.deepEqual(h.calls.built, []);
 });
 
+test("hostEditorFallback: pi's prefill slot stays EMPTY, and the abort still lands", async () => {
+  // Two rules, one adapter (reviewer P1, 2026-09-18): pi's `ui.editor` takes a
+  // PREFILL second, so our opts must never reach it — and the signal it does
+  // read must end the wait, which is all this signal-less box allows.
+  const seen: { titles: string[]; prefill: (string | undefined)[] } = { titles: [], prefill: [] };
+  const hostEditor = (title: string, prefill?: string) => {
+    seen.titles.push(title);
+    seen.prefill.push(prefill);
+    return new Promise<string | undefined>(() => {});
+  };
+  const box = hostEditorFallback(hostEditor);
+
+  const live = new AbortController();
+  const pending = box("理由", { signal: live.signal });
+  live.abort();
+  assert.equal(await pending, undefined, "the wait ends at the abort");
+  assert.deepEqual(seen.titles, ["理由"]);
+  assert.deepEqual(seen.prefill, [undefined],
+    "our opts must never land in pi's prefill position — the box would open with `[object Object]`");
+
+  const dead = new AbortController();
+  dead.abort();
+  assert.equal(await box("理由", { signal: dead.signal }), undefined);
+  assert.deepEqual(seen.titles, ["理由"], "an already-aborted signal does not open the box at all");
+});
+
+test("the RPC path hands the abort through to the host's own box (reviewer P1, 2026-09-18)", async () => {
+  // THE COMBINATION THAT WAS BROKEN: `hostReasonEditor` called its fallback with
+  // the title ALONE, so the RPC path (custom present, factory never run) reached
+  // a fallback that had no signal — and every abort landed as a promise nobody
+  // could settle. Fixing `raceReasonEditor` alone left this path broken.
+  let opened = 0;
+  const editor = hostReasonEditor({
+    custom: async <T,>() => undefined as T,
+    fallback: hostEditorFallback(() => {
+      opened += 1;
+      return new Promise<string | undefined>(() => {});
+    }),
+    // Never reached on this path: the factory above does not run.
+    build: () => "component",
+  });
+
+  const aborter = new AbortController();
+  const pending = editor("head", { signal: aborter.signal });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  aborter.abort();
+  assert.equal(await pending, undefined, "the wait ends at the abort, on this path too");
+  assert.equal(opened, 1, "…and it was the host's own box that was pending");
+});
+
 // ---- the fallback's half of the abort (reviewer P1, 2026-09-18) ----
 
 test("the fallback box cannot be taken down — but nothing keeps WAITING on it", async () => {
@@ -150,22 +204,36 @@ test("the fallback box cannot be taken down — but nothing keeps WAITING on it"
   let answerLater: (value: string | undefined) => void = () => {};
   const box = new Promise<string | undefined>((resolve) => { answerLater = resolve; });
   const aborter = new AbortController();
-  const raced = raceReasonEditor(box, aborter.signal);
+  const raced = raceReasonEditor(() => box, aborter.signal);
   aborter.abort();
   assert.equal(await raced, undefined, "the wait ends at the abort, not at the host's box");
   answerLater("typed after the gate gave up");
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
+test("an aborted signal must not OPEN the box at all (reviewer P1, 2026-09-18)", async () => {
+  // Taking a promise told the caller to create the box first, so an ESC that had
+  // already been pressed popped a text box nothing would ever read. The box is
+  // opened by a thunk precisely so this branch can decline to open it.
+  const dead = new AbortController();
+  dead.abort();
+  let opened = 0;
+  assert.equal(
+    await raceReasonEditor(() => { opened += 1; return Promise.resolve("x"); }, dead.signal),
+    undefined,
+  );
+  assert.equal(opened, 0, "nothing is rendered for a dialog nobody is waiting for");
+});
+
 test("raceReasonEditor: the box wins when it answers, and a dead signal never waits", async () => {
   const live = new AbortController();
-  assert.equal(await raceReasonEditor(Promise.resolve("写完了"), live.signal), "写完了");
+  assert.equal(await raceReasonEditor(() => Promise.resolve("写完了"), live.signal), "写完了");
 
   const same = Promise.resolve("x");
-  assert.equal(raceReasonEditor(same, undefined), same, "no signal ⇒ the host's promise, untouched");
+  assert.equal(raceReasonEditor(() => same, undefined), same, "no signal ⇒ the host's promise, untouched");
 
   const dead = new AbortController();
   dead.abort();
-  assert.equal(await raceReasonEditor(Promise.resolve("x"), dead.signal), undefined,
+  assert.equal(await raceReasonEditor(() => Promise.resolve("x"), dead.signal), undefined,
     "an already-aborted signal resolves without waiting for anything");
 });

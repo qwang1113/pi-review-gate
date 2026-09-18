@@ -52,15 +52,16 @@ export interface ReasonEditorHost {
    * The host's OWN box, for a host that cannot render `custom`
    * (lib/reason-editor.ts's module doc says which one that is).
    *
-   * TITLE ONLY — NEVER THESE OPTIONS (reviewer P2, 2026-09-17). pi's
-   * `ui.editor(title, prefill?: string)` takes a PREFILL in its second
-   * position, so passing our `{ signal }` through makes the user's box open
-   * prefilled with `[object Object]` — and the fallback is exactly the path
-   * that calls it. This box has no signal to pass anyway (that is the whole
-   * reason `custom` is preferred); the signature says so instead of leaving a
-   * trap for the next caller.
+   * IT RECEIVES OUR `opts` — AND MUST NEVER FORWARD THEM TO PI (reviewer P1,
+   * 2026-09-18). pi's `ui.editor(title, prefill?)` takes a PREFILL in second
+   * position, so anything that lands there opens the user's box with
+   * `[object Object]` already typed into it. The adapter below reads `signal`
+   * out of `opts` and passes ONLY the title on; this parameter exists so the
+   * fallback can end its own wait on an abort at all — a fallback called with
+   * the title alone had no signal, and every abort from the user landed as a
+   * promise nobody could settle.
    */
-  fallback?: (title: string) => Promise<string | undefined>;
+  fallback?: ReasonEditor;
   /**
    * Builds the component. The extension passes pi's own
    * `ExtensionEditorComponent`; a test passes anything that calls `done`.
@@ -74,6 +75,15 @@ export interface ReasonEditorHost {
 }
 
 /**
+ * pi's own `ui.editor`, as it really is: a title and an OPTIONAL PREFILL.
+ *
+ * Named so the one place that adapts it can say what it is adapting — and so
+ * the trap above (our `opts` in the prefill position) has a type to break
+ * against rather than a comment to trust.
+ */
+export type HostEditor = (title: string, prefill?: string) => Promise<string | undefined>;
+
+/**
  * The one reason box every gate dialog uses.
  *
  * `done` is called EXACTLY ONCE, whichever side wins: the abort that takes the
@@ -84,7 +94,7 @@ export interface ReasonEditorHost {
 export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
   const { custom, fallback, build } = host;
   return async (title, opts) => {
-    if (!custom) return fallback?.(title);
+    if (!custom) return fallback?.(title, opts);
     let ran = false;
     const answer = await custom<string | undefined>((tui, _theme, keybindings, done) => {
       ran = true;
@@ -102,8 +112,30 @@ export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
       return build(tui, keybindings, title, finish);
     });
     if (ran || answer !== undefined) return answer;
-    return fallback?.(title);
+    // THE FACTORY NEVER RAN (RPC): the host's own box takes over — WITH our
+    // opts, so the fallback can end its own wait (reviewer P1, 2026-09-18).
+    return fallback?.(title, opts);
   };
+}
+
+/**
+ * THE FALLBACK HOST'S EDITOR, ADAPTED: pi's box, and an abort we can honor.
+ *
+ * THE TRAP IS THE SECOND PARAMETER. pi's `ui.editor(title, prefill?)` takes a
+ * PREFILL there, so handing it our `{ signal }` opens the user's box with
+ * `[object Object]` already typed in (reviewer P2, 2026-09-17) — this function
+ * passes the TITLE ALONE, always, and reads the signal itself.
+ *
+ * AND WHAT IT DOES WITH THAT SIGNAL is {@link raceReasonEditor}: the box stays
+ * (it cannot be taken down), but nothing waits on it after an abort — the
+ * defect the round-1 review found twice: first as a dropped signal
+ * (extensions/review-gate.ts adapted the editor as `(title) => editor(title)`),
+ * then as an eager side effect (the box was created before the race began, so
+ * an already-cancelled dialog still popped a box on screen). A THUNK fixes the
+ * second: a dead signal never opens anything at all.
+ */
+export function hostEditorFallback(editor: HostEditor): ReasonEditor {
+  return (title, opts) => raceReasonEditor(() => editor(title), opts?.signal);
 }
 
 /**
@@ -120,13 +152,20 @@ export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
  * settles a promise nobody is listening to, and the host closes it its own way.
  * That is the honest shape of a host limitation we cannot fix from here — the
  * important half (the gate stops waiting) is the one this function owns.
+ *
+ * THE BOX IS OPENED BY A THUNK, and that is load-bearing (reviewer P1,
+ * 2026-09-18): taking a promise told the caller to CREATE the box first, so an
+ * ESC that had already been pressed still popped a text box on screen — one
+ * that nothing would ever read. A signal that is already aborted must not open
+ * anything at all.
  */
 export function raceReasonEditor(
-  box: Promise<string | undefined>,
+  openBox: () => Promise<string | undefined>,
   signal: AbortSignal | undefined,
 ): Promise<string | undefined> {
-  if (!signal) return box;
+  if (!signal) return openBox();
   if (signal.aborted) return Promise.resolve(undefined);
+  const box = openBox();
   return new Promise<string | undefined>((resolve) => {
     let settled = false;
     const finish = (value: string | undefined) => {
