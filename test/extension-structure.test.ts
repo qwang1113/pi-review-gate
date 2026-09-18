@@ -1143,8 +1143,8 @@ test("DIALOG QUEUE: one box at a time, with the host's abort and the question in
     "…and there is one queue per session, not one per call");
   assert.match(askChoiceBody, /dialogSignal\(uiCtx\.signal, opts\.signal\)/,
     "the host's abort signal (ESC: ExtensionContext.signal) is merged with the caller's own");
-  assert.match(askChoiceBody, /if \(signal\?\.aborted\) return undefined;/,
-    "a dialog whose signal is already aborted is not raised and does not ring");
+  assert.match(askChoiceBody, /\}, signal\);/,
+    "the merged signal is handed to the queue — a waiter cancelled while it queues drops out at once");
   assert.match(askChoiceBody, /dialogNotifyDetail\(spec, opts\.body\)/,
     "the banner carries the question itself, not only the `问题 1 / 4` label");
 });

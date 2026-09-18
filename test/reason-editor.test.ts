@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { hostReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
+import { hostReasonEditor, raceReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
 import { resolveQuestion } from "../lib/ask-user.ts";
 
 // ---- the runtime import the extension now depends on ----
@@ -138,4 +138,34 @@ test("a host with no custom at all goes straight to its own editor", async () =>
   const h = harness("no-custom");
   assert.equal(await h.editor("head"), "理由写在宿主自己的框里");
   assert.deepEqual(h.calls.built, []);
+});
+
+// ---- the fallback's half of the abort (reviewer P1, 2026-09-18) ----
+
+test("the fallback box cannot be taken down — but nothing keeps WAITING on it", async () => {
+  // pi's `ui.editor(title, prefill)` takes no signal, so on this path the box
+  // itself stays until the host closes it. The half the gate owns is that an
+  // abort ENDS THE WAIT: without it an ESC left the tool parked on that box for
+  // good — the same hang, one layer down.
+  let answerLater: (value: string | undefined) => void = () => {};
+  const box = new Promise<string | undefined>((resolve) => { answerLater = resolve; });
+  const aborter = new AbortController();
+  const raced = raceReasonEditor(box, aborter.signal);
+  aborter.abort();
+  assert.equal(await raced, undefined, "the wait ends at the abort, not at the host's box");
+  answerLater("typed after the gate gave up");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
+test("raceReasonEditor: the box wins when it answers, and a dead signal never waits", async () => {
+  const live = new AbortController();
+  assert.equal(await raceReasonEditor(Promise.resolve("写完了"), live.signal), "写完了");
+
+  const same = Promise.resolve("x");
+  assert.equal(raceReasonEditor(same, undefined), same, "no signal ⇒ the host's promise, untouched");
+
+  const dead = new AbortController();
+  dead.abort();
+  assert.equal(await raceReasonEditor(Promise.resolve("x"), dead.signal), undefined,
+    "an already-aborted signal resolves without waiting for anything");
 });

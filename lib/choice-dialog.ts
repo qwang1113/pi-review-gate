@@ -250,28 +250,91 @@ export function dialogNotifyDetail(spec: ChoiceSpec, body?: string): string {
  * the reason box that may follow it — because those are one conversation with
  * the user.
  *
+ * A QUEUED DIALOG CAN STILL BE CANCELLED (reviewer P1, 2026-09-18). Waiting for
+ * a turn lasts as long as the box in front of it stays open, so a request whose
+ * signal aborts while it queues — the project manager answered it through the
+ * channel, the user pressed ESC — must come back IMMEDIATELY, not after an
+ * unrelated box closes; a waiter that kept waiting would strand its own tool for
+ * as long as the OTHER dialog does. `signal` is optional: a caller with no
+ * cancellation source simply waits its turn.
+ *
  * WHY NOT THE HOST'S OWN `executionMode: "sequential"` (pi's tool flag, which
  * also sequentializes a batch): that flag has to be repeated on EVERY
  * dialog-raising tool, and one tool added without it reopens the hole — while
  * this queue sits on the ONE funnel every dialog already goes through
  * (AGENTS.md 哲学二: 一件事只有一个入口).
  */
-export function createDialogQueue(): <T>(run: () => Promise<T>) => Promise<T> {
+export function createDialogQueue(): <T>(run: () => Promise<T>, signal?: AbortSignal) => Promise<T | undefined> {
   let tail: Promise<unknown> = Promise.resolve();
-  return async function schedule<T>(run: () => Promise<T>): Promise<T> {
+  return async function schedule<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
     const previous = tail;
-    let release!: () => void;
-    tail = new Promise<void>((resolve) => { release = resolve; });
-    // NOT `.catch`: `tail` settles ONLY through `release`, so a dialog that
-    // threw cannot leave the queue rejected — a queue that stops serving after
-    // one error is the same hang under a different name.
-    await previous;
+    let releaseSelf!: () => void;
+    const self = new Promise<void>((resolve) => { releaseSelf = resolve; });
+    tail = self;
+    let released = false;
+    /**
+     * GIVE UP MY PLACE — AND ONLY MY OWN.
+     *
+     * A cancelled waiter returns at once, but the QUEUE it leaves behind must
+     * stay ordered: whoever is already behind me is waiting for the SAME box I
+     * was (the one my `previous` stands for), and a chain that skipped to the
+     * next promise would let them open a second dialog on top of it — exactly
+     * the defect this module exists to prevent. So:
+     *
+     *   - no waiter behind me ⇒ hand the chain back to `previous` (the queue
+     *     is empty again as far as the next caller is concerned), and settle;
+     *   - someone behind me ⇒ my promise settles when the box I was waiting for
+     *     does; I am no longer on screen, I am just holding the turn.
+     */
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (tail === self) {
+        tail = previous;
+        releaseSelf();
+        return;
+      }
+      void previous.then(() => releaseSelf(), () => releaseSelf());
+    };
     try {
+      if (signal?.aborted) return undefined;
+      if (signal) {
+        if (await waitOrAbort(previous, signal)) return undefined;
+      } else {
+        // NOT `.catch`: `tail` settles ONLY through `release`, so a dialog that
+        // threw cannot leave the queue rejected — a queue that stops serving
+        // after one error is the same hang under a different name.
+        await previous;
+      }
+      // A signal can abort between "my turn arrived" and this line.
+      if (signal?.aborted) return undefined;
       return await run();
     } finally {
       release();
     }
   };
+}
+
+/**
+ * Wait for `wait`, or give up as soon as `signal` aborts.
+ *
+ * Resolves `true` when the signal won — the caller then skips its dialog AND
+ * releases the queue. Both listeners are detached on either outcome, so a long
+ * queue cannot accumulate them.
+ */
+function waitOrAbort(wait: Promise<unknown>, signal: AbortSignal): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (cancelled: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(cancelled);
+    };
+    const onAbort = () => finish(true);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void wait.then(() => finish(false), () => finish(false));
+  });
 }
 
 /**

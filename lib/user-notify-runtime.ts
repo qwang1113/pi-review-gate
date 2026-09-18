@@ -187,9 +187,16 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
    * permission grants — measured on this machine: 9ms for `front` and 11ms for
    * the lookup, paid only when a banner is otherwise about to go out.
    */
+  /**
+   * BOTH KINDS OF FAILURE ARE "CANNOT READ": the injected one as well as the
+   * real CLI (reviewer P1, 2026-09-18). Leaving the injected call outside the
+   * try let a throwing stub — or a future reader — escape into `notify()`'s
+   * catch-all and turn into `skipped`, i.e. a banner SUPPRESSED by an error in
+   * the evidence-gathering. That is the one direction this must never fail in.
+   */
   function frontBundleId(): string | undefined {
-    if (deps.frontBundleId) return deps.frontBundleId();
     try {
+      if (deps.frontBundleId) return deps.frontBundleId();
       const front = execFileSync("/usr/bin/lsappinfo", ["front"], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
@@ -202,6 +209,48 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
       return /bundleid="([^"]+)"/i.exec(info)?.[1];
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * This session's own tmux address, resolved ONCE per process.
+   *
+   * `TMUX_PANE` is fixed for the life of the process, so a second lookup can
+   * only spend another synchronous tmux call — and BOTH the click target and
+   * the "is the user watching" check want the same answer.
+   */
+  let addressResolved = false;
+  let address: { paneId: string; windowId?: string } | undefined;
+  function ownAddress(): { paneId: string; windowId?: string } | undefined {
+    if (!addressResolved) {
+      addressResolved = true;
+      address = ownTmuxAddress();
+    }
+    return address;
+  }
+
+  /**
+   * IS THE USER LOOKING AT THIS SESSION'S PANE RIGHT NOW?
+   *
+   * FAIL OPEN ALL THE WAY OUT (reviewer P1, 2026-09-18). Every reading below is
+   * host trivia — tmux calls, an `lsappinfo` call — and ANY failure in any of
+   * them must leave the banner ON: a suppressed notification is a user who is
+   * never told, which is strictly worse than one they did not need. The pure
+   * predicate answers `false` for every unknown (lib/user-notify.ts); this
+   * wrapper makes sure a THROW lands there too instead of escaping into
+   * `notify()`'s catch-all — that path is for the notifier failing, not for the
+   * evidence about where the user is looking.
+   */
+  function userIsWatching(sessionBundleId: string | undefined): boolean {
+    try {
+      return isWatchingPane({
+        paneId: ownAddress()?.paneId,
+        activePanes: activeClientPanes(),
+        frontBundleId: frontBundleId(),
+        sessionBundleId,
+      });
+    } catch {
+      return false;
     }
   }
 
@@ -243,18 +292,6 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
       const at = now();
       const history = state.notify ?? emptyNotifyHistory();
       const sessionBundle = defaultActivateBundle(env());
-      // ONE LOOK AT THE TMUX ADDRESS PER BANNER: the click target and the
-      // "is the user already looking" check need the same answer, and the pane
-      // cannot change under us.
-      let addressResolved = false;
-      let address: { paneId: string; windowId?: string } | undefined;
-      const ownAddress = (): { paneId: string; windowId?: string } | undefined => {
-        if (!addressResolved) {
-          addressResolved = true;
-          address = ownTmuxAddress();
-        }
-        return address;
-      };
       const plan = planUserNotify({
         kind: opts.kind,
         repoName: deps.repoName(),
@@ -267,12 +304,7 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
         // ALSO A THUNK, and lazily resolved for the same reason: this one costs
         // a client sweep plus two `lsappinfo` calls, and a session that can
         // never send (a child, a judge pane) must not pay for it either.
-        watching: () => isWatchingPane({
-          paneId: ownAddress()?.paneId,
-          activePanes: activeClientPanes(),
-          frontBundleId: frontBundleId(),
-          sessionBundleId: sessionBundle,
-        }),
+        watching: () => userIsWatching(sessionBundle),
         // ONE BANNER PER SESSION: the notifier REMOVES an older banner with the
         // same group, so a four-question interview leaves one banner in
         // Notification Center instead of four (user report, 2026-09-18).

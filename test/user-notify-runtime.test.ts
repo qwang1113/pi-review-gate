@@ -39,8 +39,11 @@ function harness(over: {
   /** Attached tmux clients, and the pane each of them is showing. */
   clients?: string[];
   clientPanes?: Record<string, string>;
-  /** What `lsappinfo` would report — a test never shells out. */
-  frontBundleId?: string | undefined;
+  /** What `lsappinfo` would report — a test never shells out (a THROWING
+   *  reader is expressible too: the fail-open path must survive it). */
+  frontBundleId?: string | undefined | (() => string | undefined);
+  /** Make every tmux call throw — the other half of the same fail-open rule. */
+  tmuxThrows?: boolean;
 } = {}): Harness {
   const state = emptyState("sess-1", 10);
   if (over.taskMode) state.taskMode = over.taskMode;
@@ -67,6 +70,7 @@ function harness(over: {
       interactive: () => over.interactive ?? true,
       runTmux: (argv) => {
         tmuxCalls.push([...argv]);
+        if (over.tmuxThrows) throw new Error("tmux exploded");
         // THE THREE QUESTIONS THE RUNTIME ASKS tmux: where is this session's
         // window, which clients are attached, and what is each one showing.
         if (argv[0] === "list-clients") {
@@ -82,7 +86,10 @@ function harness(over: {
       // A DIFFERENT app by default: the session's own bundle is
       // `com.mitchellh.ghostty`, and a test that sends a banner must not trip
       // the "user is already looking" suppression by accident.
-      frontBundleId: () => ("frontBundleId" in over ? over.frontBundleId : "com.other.app"),
+      frontBundleId: () => {
+        if (typeof over.frontBundleId === "function") return over.frontBundleId();
+        return "frontBundleId" in over ? over.frontBundleId : "com.other.app";
+      },
       now: () => T0,
       spawnDetached: (argv) => { sent.push([...argv]); },
       spawnBlocking: (argv) => { blocking.push([...argv]); },
@@ -185,6 +192,23 @@ test("a frontmost app that cannot be read must not silence the channel", () => {
     frontBundleId: undefined,
   });
   assert.equal(h.notify({ kind: "needs-user", detail: "选哪个方案？" }).status, "sent");
+});
+
+test("evidence that THROWS must not suppress the banner (fail open)", () => {
+  // Reviewer P1, 2026-09-18: the injected reader used to sit outside the
+  // try/catch, so a throwing one escaped into `notify()`'s catch-all and the
+  // outcome came back `skipped` — an error while LOOKING for the user silently
+  // silencing the channel. That catch-all is for the notifier failing, never
+  // for the evidence about where the user is.
+  const bundle = harness({
+    taskMode: "loop",
+    frontBundleId: () => { throw new Error("lsappinfo exploded"); },
+  });
+  assert.equal(bundle.notify({ kind: "needs-user", detail: "选哪个？" }).status, "sent");
+
+  const tmux = harness({ taskMode: "loop", tmuxThrows: true });
+  assert.equal(tmux.notify({ kind: "needs-user", detail: "选哪个？" }).status, "sent",
+    "a tmux that cannot be asked is \"nobody is looking\", not \"say nothing\"");
 });
 
 test("the notifier is resolved once, and a missing one is reported not swallowed", () => {

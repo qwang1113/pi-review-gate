@@ -232,6 +232,81 @@ test("a dialog that THREW does not wedge the queue", async () => {
     "a queue that stops serving after one error is the same hang under a different name");
 });
 
+test("a dialog cancelled while it QUEUES comes back at once, not when the other box closes", async () => {
+  const schedule = createDialogQueue();
+  const order: string[] = [];
+  let answerFirst!: () => void;
+  const firstAnswered = new Promise<void>((resolve) => { answerFirst = resolve; });
+
+  const first = schedule(async () => {
+    order.push("first:opened");
+    await firstAnswered;
+    order.push("first:closed");
+    return "a";
+  });
+
+  const cancelled = new AbortController();
+  const second = schedule(async () => {
+    order.push("second:opened");
+    return "b";
+  }, cancelled.signal);
+
+  // Reviewer P1 of the 2026-09-18 round: waiting for a turn lasts as long as
+  // the box in front stays open, and the other side may have answered
+  // meanwhile (an orchestrator through the channel, an ESC). A waiter that
+  // kept waiting would strand its own tool on an unrelated dialog.
+  cancelled.abort();
+  assert.equal(await second, undefined, "the cancelled dialog returns without ever opening");
+  assert.deepEqual(order, ["first:opened"], "…and the box that is up is untouched");
+
+  // …and the queue keeps serving whoever is behind it.
+  const third = schedule(async () => { order.push("third:opened"); return "c"; });
+  answerFirst();
+  assert.equal(await first, "a");
+  assert.equal(await third, "c", "a cancelled waiter releases its place");
+  assert.deepEqual(order, ["first:opened", "first:closed", "third:opened"]);
+});
+
+test("a cancelled waiter with someone behind it still holds the turn", async () => {
+  // The bug this pins (caught by the first draft of the cancellation fix): a
+  // cancelled waiter that simply released its promise let the NEXT dialog skip
+  // the box it was waiting for and open a second one on top of it.
+  const schedule = createDialogQueue();
+  const order: string[] = [];
+  let answerFirst!: () => void;
+  const firstAnswered = new Promise<void>((resolve) => { answerFirst = resolve; });
+
+  const first = schedule(async () => {
+    order.push("first:opened");
+    await firstAnswered;
+    order.push("first:closed");
+    return "a";
+  });
+  const cancelled = new AbortController();
+  const second = schedule(async () => { order.push("second:opened"); return "b"; }, cancelled.signal);
+  const third = schedule(async () => { order.push("third:opened"); return "c"; });
+
+  cancelled.abort();
+  assert.equal(await second, undefined);
+  await settle();
+  assert.deepEqual(order, ["first:opened"],
+    "the waiter behind a cancelled one still waits for the SAME box, not for a settled promise");
+
+  answerFirst();
+  assert.equal(await first, "a");
+  assert.equal(await third, "c");
+  assert.deepEqual(order, ["first:opened", "first:closed", "third:opened"]);
+});
+
+test("a signal that was already aborted never opens a box", async () => {
+  const schedule = createDialogQueue();
+  const dead = new AbortController();
+  dead.abort();
+  let opened = false;
+  assert.equal(await schedule(async () => { opened = true; return "x"; }, dead.signal), undefined);
+  assert.equal(opened, false, "nothing is rendered for a dialog nobody is waiting for");
+});
+
 test("the host's abort and the caller's own are ONE signal for the dialog", () => {
   assert.equal(dialogSignal(), undefined, "no signal at all is a shape several callers produce");
   assert.equal(dialogSignal(undefined, undefined), undefined);

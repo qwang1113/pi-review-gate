@@ -26,6 +26,11 @@
  *   ran        ⇒ a `undefined` comes from a PERSON (ESC).
  *   never ran  ⇒ this host cannot render a custom component at all.
  *
+ * THE FALLBACK HOST CANNOT BE TAKEN DOWN, ONLY ABANDONED (2026-09-18): its box
+ * is pi's signal-less `ui.editor`, so {@link raceReasonEditor} ends the GATE's
+ * wait on an abort while the box itself stays until the host closes it. The
+ * difference between the two halves is deliberate and stated where it matters.
+ *
  * Everything here is pure: the component arrives as `build`, and the host's two
  * calls arrive as `custom` / `fallback`. `extensions/review-gate.ts` supplies
  * all three and owns nothing of the rule; this file owns the rule and needs no
@@ -99,4 +104,39 @@ export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
     if (ran || answer !== undefined) return answer;
     return fallback?.(title);
   };
+}
+
+/**
+ * THE FALLBACK'S HALF OF THE ABORT: stop WAITING on a box we cannot take down.
+ *
+ * The fallback path is pi's own `ui.editor(title, prefill)`, which takes NO
+ * signal (the module doc says why `custom` is preferred) — so an abort cannot
+ * remove that box from the screen. What the gate still owes the user is that
+ * NOTHING WAITS ON IT: an ESC has to end the tool call, not park it on a box
+ * the user has already cancelled (reviewer P1, 2026-09-18: the merged host
+ * signal reached the renderer and died here).
+ *
+ * The abandoned box is not ours to dispose: if the user answers it later, it
+ * settles a promise nobody is listening to, and the host closes it its own way.
+ * That is the honest shape of a host limitation we cannot fix from here — the
+ * important half (the gate stops waiting) is the one this function owns.
+ */
+export function raceReasonEditor(
+  box: Promise<string | undefined>,
+  signal: AbortSignal | undefined,
+): Promise<string | undefined> {
+  if (!signal) return box;
+  if (signal.aborted) return Promise.resolve(undefined);
+  return new Promise<string | undefined>((resolve) => {
+    let settled = false;
+    const finish = (value: string | undefined) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = () => finish(undefined);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void box.then(finish, () => finish(undefined));
+  });
 }

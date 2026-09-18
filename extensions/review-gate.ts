@@ -78,7 +78,7 @@ import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "..
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { hostReasonEditor, type CustomDialogHost, type ReasonEditor } from "../lib/reason-editor.ts";
+import { hostReasonEditor, raceReasonEditor, type CustomDialogHost, type ReasonEditor } from "../lib/reason-editor.ts";
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
@@ -4969,12 +4969,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * IT TAKES A PREFILL, NOT OPTIONS (reviewer P2, 2026-09-17): calling it as
    * `(title, { signal })` opens the user's box with `[object Object]` already
    * typed into it — and the RPC fallback is exactly the path that calls it that
-   * way. The signal is dropped deliberately: this box cannot be taken down
-   * (that is why `custom` is preferred at all), and a box showing the question
-   * beats one full of junk.
+   * way. The signal still does NOT go into the box; what changed (reviewer P1,
+   * 2026-09-18) is that the gate no longer WAITS on it forever —
+   * `raceReasonEditor` ends the wait on an abort, which is the half we own.
    */
   function asOwnReasonEditor(editor: ExtensionUIContext["editor"]): ReasonEditor {
-    return (title) => editor(title);
+    return (title, opts) => raceReasonEditor(editor(title), opts?.signal);
   }
 
   /**
@@ -5061,14 +5061,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     spec: ChoiceSpec,
     opts: { body?: string; signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
-    // A BOX THAT IS ALREADY SETTLED IS NOT RAISED, AND NOT ANNOUNCED: an
-    // aborted dialog that still rings a banner tells the user to come answer
-    // something nobody is asking any more, and the same check covers the
-    // QUEUED case — a call that waited its turn while the run was aborted
-    // underneath it (2026-09-18).
+    // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
+    // is a getter that asserts the context is still alive, and a dialog can wait
+    // a long time for its turn. Read once and captured, not read again inside.
+    const signal = dialogSignal(uiCtx.signal, opts.signal);
+    // A BOX THAT IS ALREADY SETTLED IS NOT RAISED, AND NOT ANNOUNCED: the queue
+    // drops a waiter whose signal aborts (before OR during its turn) without
+    // raising anything or ringing a banner — telling the user to come answer
+    // something nobody is asking any more is the same mistake.
     return scheduleDialog(async () => {
-      const signal = dialogSignal(uiCtx.signal, opts.signal);
-      if (signal?.aborted) return undefined;
       // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
       // any session shows comes through this function, so "the gate has stopped
       // and is waiting for the human" needs no second detector. The policy
@@ -5116,7 +5117,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // engaging with the gate.
       if (answer !== undefined) lastUserInteractionAt = new Date().toISOString();
       return answer;
-    });
+    }, signal);
   }
 
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
