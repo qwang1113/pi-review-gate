@@ -327,3 +327,29 @@ export function buildArchiveConfirmMessage(opts: {
     "要归档吗？（不确定就选否：接管旧编排的路子还在。）",
   ].join("\n");
 }
+
+/**
+ * MAY A TAKEOVER WRITE ITS CLAIM TO THE SIDECAR?
+ *
+ * A takeover claims an orchestration in memory (`adoptOrchestrationId`) and the
+ * claim has to reach the disk, or the next reload cannot resume what this
+ * session just took over (`ownerSessionId`, lib/orchestrator-registry.ts).
+ *
+ * ONLY WHEN THE SIDECAR ALREADY HOLDS THAT ORCHESTRATION, and that is not
+ * tidiness. `runtime()` answers `emptyRuntime(id)` for an id it has no record
+ * of (lib/orchestrator-wiring.ts), so an unconditional write would store an
+ * EMPTY runtime over whatever record sits there — and a record that still
+ * describes another orchestration's children is exactly what a later takeover
+ * (or the previous holder's own resume) needs to find.
+ *
+ * A missing `recordedId` — no runtime on disk at all — is also a NO: there is
+ * nothing to resume, so the in-memory claim costs nothing by staying in memory.
+ */
+export function takeoverClaimWorthWriting(opts: {
+  /** `deps.recordedRuntime()?.orchestrationId` — what the SIDECAR holds. */
+  recordedId: string | undefined;
+  /** The orchestration this session just adopted. */
+  adoptedId: string;
+}): boolean {
+  return opts.recordedId !== undefined && opts.recordedId === opts.adoptedId;
+}

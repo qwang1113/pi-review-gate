@@ -361,6 +361,13 @@ test("a relay successor inherits the user's contracts and the round budget — a
     at: "2026-09-16T00:04:00.000Z",
   };
   predecessor.sessionReposPaths = ["/other/repo"];
+  // How much review this work has had (2026-09-17, user decision): the strip's
+  // `轮 N`. Also a fact about the WORK rather than the process id — a handover
+  // that dropped it would roll the reading back to `轮 0` mid-task.
+  predecessor.sentReviewRounds = 4;
+  // The user's permission to type tmux at all (2026-09-17). It belongs to the
+  // WORK, not to a process id: the user said “当前会话和他的继承者”.
+  predecessor.tmuxAccess = { at: "2026-09-16T00:05:00.000Z", scope: "session" };
 
   const inherited = inheritGoalContract(emptyState("sess-new", 10), predecessor);
 
@@ -371,6 +378,7 @@ test("a relay successor inherits the user's contracts and the round budget — a
   assert.equal(restatementConfirmed(inherited.restatement), true, "…and is usable as it stands");
   assert.deepEqual(inherited.loopGoal, predecessor.loopGoal, "so does the goal the user approved");
   assert.equal(inherited.rounds.length, 1, "the round budget is NOT reset by a handover");
+  assert.equal(inherited.sentReviewRounds, 4, "nor is the count of rounds this work has sent out");
   assert.equal(inherited.turnsWithoutGoal, 3, "nor is the force-negotiate counter");
 
   // The rest of the state belongs to the session that did the work. A bypass in
@@ -379,6 +387,8 @@ test("a relay successor inherits the user's contracts and the round budget — a
   assert.equal(inherited.bypass.active, false, "a bypass is never inherited");
   assert.equal(inherited.taskMode, undefined, "the task mode has its own env channel — not a handover's");
   assert.equal(inherited.scopeLimit, undefined, "a scope limit is one session's grant");
+  assert.deepEqual(inherited.tmuxAccess, predecessor.tmuxAccess,
+    "the tmux grant travels — the user asked for exactly that (the successor does not re-ask)");
   assert.deepEqual(inherited.sessionReposPaths, ["/other/repo"],
     "but the OTHER repos this work touched do travel — declare_done must still re-check them");
   assert.equal(inherited.review.verdict, "PENDING");
@@ -520,6 +530,35 @@ test("scopeLimit: valid shape round-trips through the sidecar", () => {
   };
   writeFileSync(path, JSON.stringify(s));
   assert.deepEqual(loadSidecar(path)?.scopeLimit, s.scopeLimit);
+});
+
+// ---------------------------------------------------------------------------
+// tmuxAccess — the user's permission to type tmux (request_tmux_access tool)
+// ---------------------------------------------------------------------------
+
+test("tmuxAccess: both scopes round-trip, and anything else fails CLOSED", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const scope of ["session", "once"] as const) {
+    const s = { ...base, tmuxAccess: { at: "2026-09-17T00:00:00.000Z", scope } };
+    writeFileSync(path, JSON.stringify(s));
+    assert.deepEqual(loadSidecar(path)?.tmuxAccess, s.tmuxAccess, `${scope} must survive a restart`);
+  }
+  // AUTHORITY is read the opposite way from bookkeeping: a record the gate
+  // cannot read means NO permission (the agent asks again), never a grant.
+  for (const bad of [
+    "session",
+    42,
+    null,
+    { at: "2026-09-17T00:00:00.000Z" },
+    { at: "2026-09-17T00:00:00.000Z", scope: "forever" },
+    { at: 12, scope: "session" },
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, tmuxAccess: bad }));
+    assert.equal(loadSidecar(path)?.tmuxAccess, undefined,
+      `${JSON.stringify(bad)} must not read as a standing permission`);
+  }
 });
 
 test("scopeLimit: malformed shapes fail toward ABSENT (full-scope gate)", () => {

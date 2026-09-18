@@ -31,10 +31,7 @@
 import assert from "node:assert/strict";
 
 import { registerOrchestratorStateTools } from "../../lib/orchestrator-tools.ts";
-import {
-  registerOrchestratorSessionTools,
-  type OrchestratorSessionDeps,
-} from "../../lib/orchestrator-session-tools.ts";
+import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session-tools.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
 import { beginApprovalLineage, snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
@@ -107,6 +104,17 @@ export interface FakeWorld {
   options: FakeWorldOptions;
   /** Replace the runtime (used to pre-seed a grant). */
   saveRuntime: (next: OrchestratorRuntime) => void;
+  /**
+   * How many times the runtime has been WRITTEN to that slot.
+   *
+   * A counter rather than an inspection of the value, because the two things a
+   * test needs to tell apart are "the claim was made" and "the claim was
+   * MADE DURABLE": `adoptOrchestrationId` changes the in-memory id and
+   * `saveRuntime` is what a reload can still see, and both end up setting the
+   * same variable here. (2026-09-17: attach adopted without persisting, so a
+   * reload refused to resume the orchestration it had just taken over.)
+   */
+  runtimeWriteCount: () => number;
   /** Everything `showToUser` printed. */
   shown: string[];
   /** Every line the tools wrote to the repo's audit log (B2). */
@@ -124,7 +132,7 @@ export interface FakeWorld {
     payload?: string;
     /** The delivery station this question is about (restatement / goal). */
     station?: string;
-    topic?: "goal-approval" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "sensitive-edit" | "other";
+    topic?: "goal-approval" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "tmux-access" | "other";
     /** Its place in an `ask_user` interview, when it is part of one. */
     batch?: { id: string; index: number; total: number };
 
@@ -334,6 +342,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   let runtime: OrchestratorRuntime = emptyRuntime(ORCHESTRATION_ID);
   /** What the DISK records, when that is somebody else's orchestration (B1). */
   let recordedOverride: OrchestratorRuntime | undefined = options.recordedRuntime;
+  let runtimeWrites = 0;
   let planAudits = 0;
   const tmuxCalls: string[][] = [];
   const handoffEvents: string[] = [];
@@ -418,6 +427,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       return { ok: true, path: `/repo/${relPath}` };
     },
     saveRuntime: (next) => {
+      runtimeWrites += 1;
       runtime = next;
       // The write LANDED on the one slot the disk has: whatever another
       // orchestration had recorded there is now this.
@@ -473,7 +483,10 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
         : { ok: true as const };
     },
 
-    emitNotification: () => true,
+    // No notifier in the fake world: the three events still call this and the
+    // answer is the honest one ("nothing was sent, and here is why"), which
+    // is exactly what a session without `terminal-notifier` sees.
+    notifyUser: () => ({ status: "skipped" as const, note: "测试世界：没有通知通道" }),
     fileChars: () => 500,
     sessionTranscriptPath: () => "/tmp/transcript.jsonl",
     ...(options.isolateChild || options.isolateWithoutSettle
@@ -580,11 +593,9 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
 
   registerOrchestratorStateTools(host, deps);
   // A manager's window holds review panes too, and the label-bar release counts
-  // BOTH kinds. The real wiring reads the judge registry; a test just says how
-  // many are on screen. Attached to the SAME deps object the tools were given —
-  // a spread copy would freeze every other field at registration time, and
-  // tests swap `channelIO` afterwards.
-  (deps as OrchestratorSessionDeps).decoratedJudgePanes = () => options.judgePanes ?? 0;
+  // BOTH kinds used to be counted here for the label-bar release; that
+  // decision is gone (2026-09-17, user decision), so the fake carries no
+  // decoration bookkeeping at all — it just registers the tools.
   registerOrchestratorSessionTools(host, deps);
 
   const target = (childId: string) => ({ orchestrationId: ORCHESTRATION_ID, childId, home: "/home/test" });
@@ -602,7 +613,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     adopted,
     confirmAnswers,
     options,
-    saveRuntime: (next) => { runtime = next; },
+    saveRuntime: (next) => { runtimeWrites += 1; runtime = next; },
+    runtimeWriteCount: () => runtimeWrites,
     now,
     advance: (ms) => { clock += ms; },
     runtime: () => runtime,

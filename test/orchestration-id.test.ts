@@ -12,6 +12,8 @@ import {
   normalizeOrchestrationId,
   orchestrationIdFromEnv,
   orchestrationRepoHash,
+  startupOrchestrationId,
+  storedRuntimeIsMine,
 } from "../lib/orchestration-id.ts";
 import { channelDir } from "../lib/orchestrator-channel.ts";
 
@@ -112,4 +114,85 @@ test("isOrchestrationTarget tells the two address kinds apart", () => {
   assert.equal(isOrchestrationTarget("orch-abc-1"), true);
   assert.equal(isOrchestrationTarget("some-session-id"), false);
   assert.equal(isOrchestrationTarget(undefined), false);
+});
+
+/**
+ * WHICH ORCHESTRATION A PROCESS HOLDS WHEN IT STARTS (2026-09-17, measured
+ * defect). A reload of the gate extension re-runs this module, and it used to
+ * mint a fresh id — so the session's OWN children became "another
+ * orchestration's": every spawn was refused, the manager reported "本编排目前
+ * 没有存活的子会话" while two children were alive, and it marked their tasks
+ * back to `pending` and spawned duplicates. The runtime was on disk the whole
+ * time; only this rule was missing.
+ */
+test("startup: inherited beats the sidecar, the sidecar beats a new id, and a STRANGER's sidecar loses", () => {
+  const env = {} as NodeJS.ProcessEnv;
+  const inherited = newOrchestrationId("/repo/a", 1_700_000_000_000);
+  const stored = newOrchestrationId("/repo/a", 1_699_000_000_000);
+  const now = 1_700_500_000_000;
+
+  // 1. The environment is a RELAY (or a child): it wins, always.
+  assert.equal(
+    startupOrchestrationId({
+      env: { [ORCHESTRATION_ID_ENV]: inherited } as NodeJS.ProcessEnv,
+      storedId: stored,
+      storedBelongsToThisSession: true,
+      repoRoot: "/repo/a",
+      now,
+    }),
+    inherited,
+    "a successor inherits the address it was started with",
+  );
+
+  // 2. The session's OWN sidecar: the same orchestration, resumed. This is the
+  //    line whose absence was the defect.
+  assert.equal(
+    startupOrchestrationId({ env, storedId: stored, storedBelongsToThisSession: true, repoRoot: "/repo/a", now }),
+    stored,
+    "a reload of the same session keeps its orchestration — no takeover needed",
+  );
+
+  // 3. SOMEBODY ELSE'S sidecar: never adopted implicitly. That is the takeover
+  //    case, and `orchestrator_attach` is the deliberate way in.
+  const stranger = startupOrchestrationId({ env, storedId: stored, storedBelongsToThisSession: false, repoRoot: "/repo/a", now });
+  assert.notEqual(stranger, stored, "a runtime belonging to another session is not re-stamped onto this one");
+  assert.equal(normalizeOrchestrationId(stranger), stranger, "…and what it gets instead is a real new id");
+
+  // 4. No sidecar at all: mint.
+  const fresh = startupOrchestrationId({ env, storedId: undefined, storedBelongsToThisSession: false, repoRoot: "/repo/a", now });
+  assert.equal(normalizeOrchestrationId(fresh), fresh);
+  assert.notEqual(fresh, stored);
+  assert.notEqual(fresh, inherited);
+
+  // A corrupted stored id cannot ride in: the value still has to look minted.
+  assert.equal(
+    startupOrchestrationId({ env, storedId: "../../etc", storedBelongsToThisSession: true, repoRoot: "/repo/a", now }),
+    newOrchestrationId("/repo/a", now),
+    "garbage in the sidecar mints a fresh id rather than becoming an address",
+  );
+});
+
+/**
+ * THE HOLE THE FIRST VERSION OF THE RULE HAD (functional round, 2026-09-17).
+ *
+ * "Does the sidecar record MY session id" is not the question: a session that
+ * merely INHERITED a foreign runtime keeps it on disk, the next persist writes
+ * it under the inheriting session's id, and one reload later that session would
+ * have adopted a previous orchestration's children and plan approval without
+ * ever calling `orchestrator_attach`. The question is answered by the runtime's
+ * own owner field, which only a session that minted, inherited or adopted the
+ * address writes.
+ */
+test("the runtime on disk is mine only when IT says so — never because the sidecar knows my name", () => {
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "s-1", sessionId: "s-1" }), true,
+    "the session that minted/adopted it resumes it");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "s-0", sessionId: "s-1" }), false,
+    "a bystander that inherited the record is NOT the owner — takeover is orchestrator_attach's job");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: undefined, sessionId: "s-1" }), false,
+    "a sidecar written before this field existed is nobody's to resume implicitly");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "s-1", sessionId: undefined }), false,
+    "a session that does not know its own id cannot be the owner");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "  ", sessionId: "  " }), false,
+    "blank is not an identity");
+  assert.equal(storedRuntimeIsMine({ ownerSessionId: "s-1", sessionId: null }), false);
 });

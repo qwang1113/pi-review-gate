@@ -245,6 +245,15 @@ export function buildPaneTitleArgv(pane: string, title: string): readonly string
  *
  * Two commands rather than one because tmux takes one option per call; the
  * caller runs them in order and treats any failure as cosmetic.
+ *
+ * THERE IS NO UNDO (2026-09-17, user decision). `buildHidePaneLabelsArgv`
+ * existed and is deleted: toggling `pane-border-status` RESIZES EVERY PANE IN
+ * THE WINDOW (measured on a scratch tmux: SIGWINCH, rows 84 ↔ 83, in both
+ * directions; re-setting the same value triggers nothing), so releasing the
+ * bar re-laid out every application in the user's window — their editor,
+ * their shells, a manager's pi — once per orchestration cycle, and the next
+ * spawn put it straight back. The bar stays on for the window's lifetime
+ * instead; see `closeSessionPane` in lib/session-factory.ts.
  */
 export function buildShowPaneLabelsArgv(
   pane: string,
@@ -258,20 +267,6 @@ export function buildShowPaneLabelsArgv(
     assertSafeTmuxArgv(["setw", "-t", target, "pane-border-format", format]),
   ];
 }
-
-/**
- * Undo it — `-u` restores each option to what the user's own config says,
- * which is not the same as setting it to a default we invented.
- */
-export function buildHidePaneLabelsArgv(pane: string): readonly (readonly string[])[] {
-
-  const target = requirePane(pane, "pane");
-  return [
-    assertSafeTmuxArgv(["setw", "-t", target, "-u", "pane-border-status"]),
-    assertSafeTmuxArgv(["setw", "-t", target, "-u", "pane-border-format"]),
-  ];
-}
-
 
 /**
  * List the pane IDS of the window a pane belongs to — "who is there", for

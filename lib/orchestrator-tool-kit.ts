@@ -13,9 +13,10 @@
  */
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
+import { basename } from "node:path";
 import { buildListPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
-import { paneLabelFor } from "./orchestrator-pane-decor.ts";
-import { refreshSessionPaneTitle, type PaneTitleMemory } from "./session-factory.ts";
+import { childPaneLabel, pmPaneLabel } from "./orchestrator-pane-decor.ts";
+import { paintPaneTitle, refreshSessionPaneTitle, type PaneTitleMemory } from "./session-factory.ts";
 import { channelPathFor, projectChannel, readChannel, type ChannelIO } from "./orchestrator-channel.ts";
 import type { ChildAssets, SupervisionSnapshot } from "./orchestrator-supervisor.ts";
 
@@ -495,6 +496,14 @@ export function childChannelProjection(deps: OrchestratorDeps, childId: string) 
  * the same reason — supervision must not degrade because a cosmetic write
  * failed, and a child whose pane is `dead` is skipped rather than written to.
  *
+ * THE MANAGER'S OWN PANE IS PAINTED HERE TOO (2026-09-18, user decision),
+ * unconditionally on every probe. It is the one title the repaint memory
+ * cannot carry: `pm:<repo>` holds no state, so there is no changing string to
+ * diff against — and pi rewrites every pane title at boot and on each
+ * extension rebind, which is exactly how a write-once title goes stale (C2,
+ * lib/session-factory.ts). One tmux write per probe for ONE pane, and the
+ * label survives the next rebind by one poll.
+ *
  * Returns the legend (childId → label) so a caller can print the same names
  * it just painted.
  *
@@ -508,16 +517,17 @@ export function childChannelProjection(deps: OrchestratorDeps, childId: string) 
 export function refreshPaneLabels(
   deps: OrchestratorDeps,
   snapshot: SupervisionSnapshot,
-): Array<{ childId: string; label: string }> {
+): PaneLegend {
+  paintOwnPaneLabel(deps);
   const plan = (() => {
     try { return deps.readPlan().plan; } catch { return undefined; }
   })();
   const memory: PaneTitleMemory = deps.paneDecorMemory();
-  const legend: Array<{ childId: string; label: string }> = [];
+  const legend: PaneLegend = [];
   for (const supervision of snapshot.children) {
     const child = supervision.child;
     const taskTitle = plan?.tasks.find((task) => task.id === child.taskId)?.title ?? child.taskId;
-    const label = paneLabelFor(child.taskId, taskTitle);
+    const label = childPaneLabel(child.taskId, taskTitle);
 
     legend.push({ childId: child.id, label });
     if (supervision.state === "dead") continue;
@@ -536,4 +546,23 @@ export function refreshPaneLabels(
   return legend;
 }
 
+/**
+ * The manager's own border: `pm:<repo dir>` (2026-09-18).
+ *
+ * A project manager's pane is the one pane the gate never opened — the user
+ * did — so nothing in the registry decorates it, and a window of six panes had
+ * no way to say WHICH one was the manager. Called from `refreshPaneLabels`, so
+ * it rides the probe that repaints every child's border anyway; it could be
+ * called the moment a session becomes a manager (`set_gate_mode(
+ * "orchestrator")`, a takeover, the attach path), but nothing needs the title
+ * before the first `orchestrator_wait`, and one caller is one path.
+ */
+export function paintOwnPaneLabel(deps: OrchestratorDeps): void {
+  const ownPane = deps.ownPane();
+  if (!ownPane) return;
+  paintPaneTitle(deps.tmux, ownPane, pmPaneLabel(basename(deps.repoRoot)));
+}
+
+/** The legend `refreshPaneLabels` returns: the labels it just painted. */
+type PaneLegend = Array<{ childId: string; label: string }>;
 

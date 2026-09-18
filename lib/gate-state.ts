@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
 import { normalizeRuntime } from "./orchestrator-registry.ts";
+import { normalizeNotifyHistory } from "./user-notify.ts";
 import { normalizeOrchestrationId } from "./orchestration-id.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
@@ -425,6 +426,24 @@ export interface GateState {
   };
   rounds: RoundRecord[];
   /**
+   * How many reviewer rounds THIS SESSION HAS SENT OUT (2026-09-17, user
+   * decision): the strip's `轮 N` reading, and nothing else.
+   *
+   * WHY IT IS SEPARATE FROM `rounds` ABOVE. `rounds` holds RECORDED verdicts
+   * and drives the convergence checks (oscillation / plateau) and the
+   * `maxRounds` brake — so it can only move when a judge finishes, which made
+   * the strip sit still for the entire duration of every round and read as
+   * broken. This one moves the moment a round is SUBMITTED, and deliberately
+   * survives `declare_done` (the session's reviewing activity is a fact about
+   * the session, not about one task).
+   *
+   * Incremented once per SUCCESSFUL reviewer dispatch in `judge_submit` —
+   * never for a failed one, and never for the adviser / goal-auditor / quality
+   * rounds (those are not review rounds the user asked for). Absent on older
+   * sidecars ⇒ zero rounds sent.
+   */
+  sentReviewRounds?: number;
+  /**
    * The last polish-gate `reason` the agent supplied to prepare_review
    * (round-18). Injected into the NEXT reviewer's task text so the judge can
    * see why this round exists. Absent on older sidecars ⇒ no reason to
@@ -486,6 +505,30 @@ export interface GateState {
     at: string;
     answers: import("./ask-user.ts").AskAnswer[];
   };
+  /**
+   * What the notification throttle remembers: when this session last raised a
+   * banner, and the exact text of the last few (lib/user-notify.ts).
+   *
+   * PER SESSION, not per orchestration (2026-09-17): a standalone loop session
+   * notifies too, and a history only the orchestrator runtime carried would
+   * let one of them become a pager storm while the other stayed silent.
+   * Absent ⇒ nothing sent yet, which can only ever mean one extra banner.
+   */
+  notify?: import("./user-notify.ts").NotifyHistory;
+  /**
+   * The user's authorization to run tmux commands from bash (user decision,
+   * 2026-09-17).
+   *
+   * `session` covers this session AND the `session_handoff` successor it may
+   * name — the user's words were “当前会话和他的继承者”, and this rides the same
+   * inheritance path as every other confirmed record. `once` is consumed by the
+   * first tmux command that goes through.
+   *
+   * NOT inherited by `orchestrator_attach`: a takeover is a different session
+   * taking over an address, not a continuation of this one's judgement, and
+   * the same line already governs the plan approval and the goal contract.
+   */
+  tmuxAccess?: { at: string; scope: "session" | "once" };
   /**
    * A-class text appeals (lib/text-appeal.ts): how many were spent (a quota
    * SHARED with `gh pr edit` arbitration), which contents were already
@@ -718,12 +761,25 @@ export function inheritGoalContract(target: GateState, predecessor: GateState): 
     ...(predecessor.restatement ? { restatement: predecessor.restatement } : {}),
     ...(predecessor.loopGoal ? { loopGoal: predecessor.loopGoal } : {}),
     ...(predecessor.rounds.length > 0 ? { rounds: predecessor.rounds } : {}),
+    // HOW MUCH REVIEW THIS WORK HAS HAD (2026-09-17, user decision): it is a
+    // fact about the WORK, like the round budget above, not about the process
+    // id that happened to hold the seat — a handover that dropped it would
+    // roll the strip back to `轮 0` mid-task and say nothing was ever sent.
+    ...(predecessor.sentReviewRounds !== undefined
+      ? { sentReviewRounds: predecessor.sentReviewRounds }
+      : {}),
     ...(predecessor.turnsWithoutGoal !== undefined
       ? { turnsWithoutGoal: predecessor.turnsWithoutGoal }
       : {}),
     ...(predecessor.sessionReposPaths && predecessor.sessionReposPaths.length > 0
       ? { sessionReposPaths: predecessor.sessionReposPaths }
       : {}),
+    // THE TMUX GRANT TRAVELS WITH THE SEAT (user decision, 2026-09-17: “当前
+    // 会话和他的继承者都能用”). It is permission the USER gave to an on-going
+    // piece of work rather than to a process id — a handover changes who holds
+    // the seat, not what they were allowed to do. A ONE-SHOT grant is carried
+    // as it is: still one use, now owed to the successor.
+    ...(predecessor.tmuxAccess ? { tmuxAccess: predecessor.tmuxAccess } : {}),
   };
 }
 
@@ -1200,6 +1256,23 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
           // prompt as the user's words — it must be a string or absent.
           ((a as { answer?: unknown }).answer === undefined || typeof (a as { answer?: unknown }).answer === "string"));
       if (!ok) delete parsed.askUser;
+    }
+    // The banner throttle is bookkeeping whose worst failure is one extra
+    // notification, so it is read fail-soft: unreadable entries contribute
+    // nothing, and a malformed record can never be rounded into silence.
+    if (parsed.notify !== undefined) {
+      parsed.notify = normalizeNotifyHistory(parsed.notify);
+    }
+    // TMUX ACCESS is AUTHORITY, so it is read the other way round: a record
+    // that does not parse is DROPPED (fail-closed — the agent asks again),
+    // and the scope must be one of the two the tool can mint. A forged or
+    // corrupted value must never read as a standing permission.
+    if (parsed.tmuxAccess !== undefined) {
+      const rec = parsed.tmuxAccess as { at?: unknown; scope?: unknown } | null;
+      const ok = !!rec && typeof rec === "object" && typeof rec.at === "string" &&
+        (rec.scope === "session" || rec.scope === "once");
+      if (ok) parsed.tmuxAccess = { at: rec.at as string, scope: rec.scope as "session" | "once" };
+      else delete parsed.tmuxAccess;
     }
     // APPEALS are anti-abuse bookkeeping, so a malformed record is dropped
     // WHOLE and the session starts from zero spent appeals. That is the safe

@@ -22,6 +22,7 @@ import {
   discoverOrchestrations,
   orchestrationStamp,
   planArchiveRelPath,
+  takeoverClaimWorthWriting,
 } from "../lib/orchestrator-takeover.ts";
 import { newOrchestrationId, orchestrationRepoHash } from "../lib/orchestration-id.ts";
 import { parsePlan, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
@@ -300,4 +301,25 @@ test("the confirm message tells the user what is moving and that nothing is dele
 
   const noPlan = buildArchiveConfirmMessage({ archivePath: ".pi/x.json", liveChildren: 0 });
   assert.match(noPlan, /没有 plan 文件/, "the registry-only case is a different sentence, not a crash");
+});
+
+/**
+ * THE DURABLE HALF OF A TAKEOVER (2026-09-17). Adopting an id in memory is
+ * not enough: `ownerSessionId` (lib/orchestrator-registry.ts) is what lets THIS
+ * session resume the record after a reload, and a manager can spend a long
+ * while after a takeover doing nothing but `orchestrator_wait` — which never
+ * persists the runtime.
+ *
+ * The write is conditional, and this is the condition. `runtime()` answers an
+ * EMPTY runtime for an id the sidecar has no record of, so writing that would
+ * erase the record sitting beside it — a record that still describes another
+ * orchestration's children, which is exactly what a later takeover needs.
+ */
+test("a takeover writes its claim only when the sidecar holds that orchestration", () => {
+  assert.equal(takeoverClaimWorthWriting({ recordedId: "orch-abc-1", adoptedId: "orch-abc-1" }), true,
+    "the sidecar holds it — claim it now, not at the next runtime write");
+  assert.equal(takeoverClaimWorthWriting({ recordedId: "orch-other-2", adoptedId: "orch-abc-1" }), false,
+    "a DIFFERENT orchestration's record must not be replaced by an empty runtime for this one");
+  assert.equal(takeoverClaimWorthWriting({ recordedId: undefined, adoptedId: "orch-abc-1" }), false,
+    "nothing on disk ⇒ nothing a reload could resume ⇒ the claim stays in memory");
 });

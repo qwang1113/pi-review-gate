@@ -25,8 +25,8 @@ import {
   type SessionPaneDecor,
 } from "./session-factory.ts";
 import {
+  childPaneLabel,
   paneColorFor,
-  paneLabelFor,
 } from "./orchestrator-pane-decor.ts";
 
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
@@ -111,7 +111,7 @@ function schedulingVerdict(
  */
 function childPaneDecor(taskId: string, title: string, childId: string): SessionPaneDecor {
   return {
-    label: paneLabelFor(taskId, title),
+    label: childPaneLabel(taskId, title),
     colorSeed: childId,
     state: "working",
     stateForSeconds: 0,

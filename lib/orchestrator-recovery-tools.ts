@@ -37,9 +37,10 @@ import {
   buildTakeoverRoute,
   decideTakeover,
   discoverOrchestrations,
+  takeoverClaimWorthWriting,
 } from "./orchestrator-takeover.ts";
 import { openSessionPane, paneRecoverability } from "./session-factory.ts";
-import { paneLabelFor } from "./orchestrator-pane-decor.ts";
+import { childPaneLabel } from "./orchestrator-pane-decor.ts";
 import { findOrphanWorktrees } from "./orchestrator-worktree.ts";
 import {
   buildRecoverCommand,
@@ -257,7 +258,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     },
     command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
     decor: {
-      label: paneLabelFor(child.taskId, recoveredTaskTitle(deps, child.taskId)),
+      label: childPaneLabel(child.taskId, recoveredTaskTitle(deps, child.taskId)),
       colorSeed: child.id,
       state: "working",
       stateForSeconds: 0,
@@ -344,6 +345,26 @@ async function doAttach(deps: OrchestratorDeps, params: Record<string, unknown>)
     }
     deps.adoptOrchestrationId(decision.id);
     adopted = true;
+    // THE CLAIM MUST LAND ON DISK NOW, not at the next write that happens to
+    // touch the runtime (quality round, 2026-09-17). `ownerSessionId` exists to
+    // survive a reload, and a takeover can be followed by nothing but
+    // `orchestrator_wait` for a long while — none of which persists the
+    // runtime. Without this the record would still name the PREVIOUS session
+    // as the owner, a reload would refuse to resume it, and the children this
+    // call just adopted would be stranded.
+    //
+    // ONLY WHEN THE SIDECAR ACTUALLY HOLDS THIS ORCHESTRATION: `runtime()`
+    // answers `emptyRuntime(id)` for an id it has no record of, and writing
+    // THAT would erase whatever another session's record sits in the same
+    // file. When there is no record, there is also nothing a reload could
+    // resume — the claim costs nothing by staying in memory. The rule lives in
+    // lib/orchestrator-takeover.ts with the other takeover decisions.
+    if (takeoverClaimWorthWriting({
+      recordedId: deps.recordedRuntime?.()?.orchestrationId,
+      adoptedId: decision.id,
+    })) {
+      deps.saveRuntime(deps.runtime());
+    }
     // B2 — a takeover changes WHO holds an orchestration. That belongs in the
     // log beside the approvals: it is the event that explains why a later
     // record was written by a different session.

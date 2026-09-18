@@ -123,6 +123,7 @@ function setup(over: Partial<{
   };
   const deps: JudgeSpawnToolDeps = {
     callerId: () => (over.caller === undefined ? "session-child-1" : over.caller ?? undefined),
+    paneOwner: () => "t6",
     hierarchy: () => store.table,
     saveHierarchy: (next) => { store.table = next; },
     channelIO: () => io,
@@ -150,9 +151,6 @@ function setup(over: Partial<{
     // Instant: the delivery watch is a loop of sleeps, and a test must not
     // spend 30 real seconds proving that it stops at the first evidence.
     sleep: async () => {},
-    // A plain session by default: it owns its window's label bar, so a rolled
-    // back spawn takes the border line down with the pane it just opened.
-    insideOrchestration: () => over.insideOrchestration === true,
     resolveRepo: () => ({ ok: true as const, root: "/repo" }),
     // The gate's lane for this spawn (lib/judge-rotation.ts). The default is a
     // plain first lane; `store.lanesAsked` records every resolution so a test
@@ -418,11 +416,12 @@ test("spawn plan remembers the plan hash for adjudication", async () => {
   assert.equal(store.pending, "plan");
 });
 
-test("a rolled back spawn takes the window's border line back down with it", async () => {
+test("a rolled back spawn closes its pane and writes NO WINDOW OPTION (2026-09-17)", async () => {
   // The pane it opened turned the WINDOW-level border line on (that is the C1
-  // fix). Rolling the spawn back has to undo that too, or a failed bookkeeping
-  // step leaves a permanent mark on the user's window — and the `setw` must be
-  // addressed through OUR pane, since the one being killed may already be gone.
+  // fix); UNDOING that is deleted, because taking the bar down writes
+  // `pane-border-status` and that resizes every pane in the window (measured:
+  // SIGWINCH, rows 84 ↔ 83). A rolled-back spawn therefore closes its pane
+  // and nothing else.
   const { tools, seen, store } = setup({ planRememberFails: true });
   const result = await tools.get("judge_spawn")!({ kind: "plan" });
   assert.equal(result.isError, true);
@@ -433,13 +432,18 @@ test("a rolled back spawn takes the window's border line back down with it", asy
   // (reviewer P2, 2026-09-05).
   assert.deepEqual(store.retired, [], "the previous lane survives a rolled-back spawn");
   const flat = seen.map((a) => a.join(" "));
-  const unset = flat.filter((s) => s.startsWith("setw") && s.includes("-u"));
-  assert.equal(unset.length, 2, "both window options are restored");
-  assert.ok(unset.every((s) => s.includes("-t %1")), "…through the opener's own pane");
-  assert.ok(unset.every((s) => !s.includes("%7")), "…never through the pane being killed");
+  assert.ok(flat.some((s) => s.startsWith("kill-pane")), "the pane it opened is closed");
+  assert.deepEqual(
+    flat.filter((s) => s.startsWith("setw") && s.includes("-u")),
+    [],
+    "no window option is restored on a rollback — the bar stays on (user decision 2026-09-17)",
+  );
 });
 
-test("a rolled back spawn leaves the border line alone when a sibling judge is on screen", async () => {
+test("a rolled-back spawn writes no unset, sibling judge or not", async () => {
+  // The sibling half of the release, and it is the same answer as the no-sibling
+  // half above: no unset is written because no release exists. The sibling is
+  // still staged — a `setw -u` reappearing here is the regression this pins.
   const { tools, seen } = setup({
     planRememberFails: true,
     panes: ["%1", "%9"],

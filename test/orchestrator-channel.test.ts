@@ -37,8 +37,10 @@ import {
   acknowledgeInstruct,
   askThroughChannel,
   decideReportedChildState,
+  describeToolActivity,
   pendingInstructions,
   reportState,
+  TOOL_ACTIVITY_MAX,
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
 import {
@@ -238,8 +240,48 @@ test("what a child reports on a heartbeat: a background wait is working, not idl
   assert.equal(decideReportedChildState({ judging: false, streaming: true, waitingOnBackground: true, completedAt: "t9" }), "working",
     "streaming outranks a recorded completion — done is for a settled child");
   assert.equal(decideReportedChildState({ judging: false, streaming: false, waitingOnBackground: false, completedAt: "t9" }), "done");
+  // THE OTHER HALF OF THE 2026-09-17 P0: a recorded completion outranks a
+  // background wait. The measured child had declared done and settled, and
+  // still reported `working` — because two of its three agents never sent a
+  // terminal signal — so its manager waited on a finished task forever and
+  // the plan stalled behind it. A leftover wait must never hide a declaration.
+  assert.equal(
+    decideReportedChildState({ judging: false, streaming: false, waitingOnBackground: true, completedAt: "t9" }),
+    "done",
+    "declare_done beats a background agent nobody is coming back for",
+  );
   assert.equal(decideReportedChildState({ judging: false, streaming: true, waitingOnBackground: true, forced: "waiting-input" }), "waiting-input",
     "a forced state (an open dialog) beats every reading");
+});
+
+// ---------------------------------------------------------------------------
+// The child side: what it says it is doing
+// ---------------------------------------------------------------------------
+
+test("the activity line names the tool AND its argument, one line, bounded (2026-09-17)", () => {
+  assert.equal(
+    describeToolActivity("bash", { command: "grep -rn PrimeUsers src/", description: "find the writers" }),
+    "bash(grep -rn PrimeUsers src/)",
+    "the FIRST recognised key wins, not the object's own order",
+  );
+  assert.equal(describeToolActivity("read", { file_path: "/repo/docs/05-security/baseline.md" }), "read(/repo/docs/05-security/baseline.md)");
+  assert.equal(describeToolActivity("write", { file_path: "/repo/x.md", content: "a".repeat(5000) }), "write(/repo/x.md)",
+    "a whole file body is never the answer");
+  assert.equal(describeToolActivity("noop", {}), "noop", "no argument ⇒ the bare tool name");
+  assert.equal(describeToolActivity("noop", undefined), "noop");
+  assert.equal(describeToolActivity("", {}), undefined, "no tool name at all is no line at all");
+  assert.equal(describeToolActivity("Agent", { unknownKey: "x" }), "Agent(x)", "an unrecognised short string still beats nothing");
+
+  // One line, always: a command with embedded newlines and control characters
+  // would break the receipt's layout (and an ESC would break far more).
+  const messy = describeToolActivity("bash", { command: "echo a\u001b[31m\nrm -rf /\n\u0007" })!;
+  assert.doesNotMatch(messy, /[\u0000-\u001f\u007f]/, "no control character survives");
+  assert.doesNotMatch(messy, /\n/);
+
+  // Bounded, with the ellipsis INSIDE the parentheses.
+  const long = describeToolActivity("bash", { command: "x".repeat(500) })!;
+  assert.ok(long.length <= TOOL_ACTIVITY_MAX, `activity is ${long.length} chars`);
+  assert.match(long, /…\)$/);
 });
 
 // ---------------------------------------------------------------------------

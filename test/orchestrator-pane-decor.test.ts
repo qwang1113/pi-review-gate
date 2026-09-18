@@ -26,16 +26,22 @@ neutraliseGateEnv();
 
 import { makeFakeWorld, replyText, twoTaskPlan } from "./helpers/fake-orchestration.ts";
 import {
+  childPaneLabel,
+  judgePaneLabel,
   paneColorFor,
-  paneLabelFor,
+  paneIdentity,
   paneStyleFor,
   paneTitleFor,
+  pmPaneLabel,
+  selfPaneOwner,
   PANE_BORDER_FORMAT,
   PANE_BORDER_STATUS,
   PANE_PALETTE,
 } from "../lib/orchestrator-pane-decor.ts";
-import { assertSafeTmuxArgv, buildHidePaneLabelsArgv, buildShowPaneLabelsArgv } from "../lib/orchestrator-tmux.ts";
+import { newChildId, taskIdFromChildId } from "../lib/orchestrator-registry.ts";
+import { assertSafeTmuxArgv, buildShowPaneLabelsArgv } from "../lib/orchestrator-tmux.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
+import * as tmuxModule from "../lib/orchestrator-tmux.ts";
 
 test("a child's colour is a pure function of its id — same child, same colour, forever", () => {
   const first = paneColorFor("t1-mtf5kc1z");
@@ -49,30 +55,66 @@ test("a child's colour is a pure function of its id — same child, same colour,
   assert.ok(spread.size >= 3, "five children must not all land on one colour");
 });
 
-test("the label is the task id plus a readable slug, bounded in length", () => {
-  assert.equal(paneLabelFor("t1", "user interaction tools"), "@t1-user-interaction-tools");
-  assert.equal(paneLabelFor("t2", "命令层"), "@t2", "a non-ASCII title collapses to the id, never to mojibake");
-  assert.ok(paneLabelFor("t3", "a".repeat(80)).length <= 28, "a border that wraps stops being a one-glance read");
+test("the label is `what@who:name` — who opened it, and what it is for", () => {
+  assert.equal(childPaneLabel("t1", "user interaction tools"), "t1@pm:user-interaction-tools");
+  assert.equal(childPaneLabel("t2", "命令层"), "t2@pm", "a non-ASCII title collapses to the id, never to mojibake");
+  assert.ok(childPaneLabel("t3", "a".repeat(80)).length <= 44, "a border that wraps stops being a one-glance read");
+  assert.equal(pmPaneLabel("pi-review-gate"), "pm:pi-review-gate", "the manager's own pane has no opener to name");
+  // A judge's label is its role plus its OPENER — the pair the user could not
+  // tell apart when two goal-auditors sat in one window.
+  assert.equal(judgePaneLabel("goal-auditor", "t6"), "goal-auditor@t6");
+  assert.notEqual(judgePaneLabel("goal-auditor", "t6"), judgePaneLabel("goal-auditor", "pm"));
+});
+
+test("no identity carries a space, and none carries a tmux format character", () => {
+  const labels = [
+    childPaneLabel("t6", "Fix   the #1 bug, now"),
+    judgePaneLabel("reviewer", "t6"),
+    pmPaneLabel("My Repo"),
+    paneIdentity({ what: "t1", owner: "a b", name: "x y" }),
+  ];
+  for (const label of labels) {
+    assert.doesNotMatch(label, /\s/, `no space survives in ${JSON.stringify(label)}`);
+    assert.doesNotMatch(label, /#/, `no format character survives in ${JSON.stringify(label)}`);
+  }
+  assert.equal(childPaneLabel("t6", "Fix   the #1 bug, now"), "t6@pm:fix-the-1-bug-now");
+});
+
+/**
+ * The child id is what a child session knows about itself (`RG_STATE_VARIANT`),
+ * so the owner half of every judge IT opens is read back out of it.
+ */
+test("a child names itself from its own handle, a manager from its mode", () => {
+  const childId = newChildId("t6", 1_700_000_000_000);
+  assert.equal(taskIdFromChildId(childId), "t6");
+  assert.equal(taskIdFromChildId("fix-auth-abc123"), "fix-auth", "a task id may contain a dash and still round-trip");
+  assert.equal(selfPaneOwner({ stateVariant: childId, orchestrator: false }), "t6");
+  // A manager that INHERITED an orchestration carries the same variable as a
+  // child would; it is the MODE that decides, and a child never runs in it.
+  assert.equal(selfPaneOwner({ stateVariant: childId, orchestrator: true }), "t6");
+  assert.equal(selfPaneOwner({ orchestrator: true }), "pm");
+  assert.equal(selfPaneOwner({ orchestrator: false }), "self");
+  assert.equal(selfPaneOwner({ stateVariant: "   ", orchestrator: false }), "self", "blank is not an identity");
 });
 
 test("the title carries the STATE and how long it has held — identity alone is not enough", () => {
   assert.equal(
-    paneTitleFor({ label: "@t1-user-interaction", state: "waiting-input", stateForSeconds: 12 }),
-    "@t1-user-interaction · waiting-input 12s",
+    paneTitleFor({ label: "t1@pm:user-interaction", state: "waiting-input", stateForSeconds: 12 }),
+    "t1@pm:user-interaction · waiting-input 12s",
   );
   assert.equal(
-    paneTitleFor({ label: "@t2-gate-commands", state: "waiting-judge", stateForSeconds: 220 }),
-    "@t2-gate-commands · waiting-judge 220s",
+    paneTitleFor({ label: "t2@pm:gate-commands", state: "waiting-judge", stateForSeconds: 220 }),
+    "t2@pm:gate-commands · waiting-judge 220s",
   );
   assert.match(
-    paneTitleFor({ label: "@t3", state: "working", stateForSeconds: 3600 }),
+    paneTitleFor({ label: "t3@pm", state: "working", stateForSeconds: 3600 }),
     /60m$/,
     "past ten minutes the question is 'how long', which minutes answer better",
   );
 
   assert.equal(
-    paneTitleFor({ label: "@t1", state: "done" }),
-    "@t1 · done",
+    paneTitleFor({ label: "t1@pm", state: "done" }),
+    "t1@pm · done",
     "a state with no clock still renders",
   );
 });
@@ -83,9 +125,11 @@ test("the window options are window-scoped and never carry -g", () => {
     assert.equal(argv[0], "setw");
     assert.deepEqual(assertSafeTmuxArgv(argv), argv, "and the gate's own guard accepts it");
   }
-  for (const argv of buildHidePaneLabelsArgv("%3")) {
-    assert.ok(argv.includes("-u"), "undo restores the user's setting rather than a default we invented");
-  }
+  // There is NO undo builder any more (2026-09-17, user decision): toggling
+  // `pane-border-status` resizes every pane in the window (measured on a
+  // scratch tmux: SIGWINCH, rows 84 ↔ 83), so the bar is turned on once and
+  // left on. Pinned by absence — `buildHidePaneLabelsArgv` is not exported.
+  assert.equal("buildHidePaneLabelsArgv" in tmuxModule, false, "the release path is deleted, not bypassed");
 });
 
 // ("the window bar is removed only for the LAST decorated child" moved with
@@ -110,13 +154,14 @@ test("spawn decorates the pane ITSELF — no second call, no extra tool", async 
   const child = world.runtime().children[0]!;
   const log = tmuxLog(world).join("\n");
   assert.match(log, new RegExp(`select-pane -t ${child.paneId} -P fg=colour\\d+`), "the border colour is set");
-  assert.match(log, new RegExp(`select-pane -t ${child.paneId} -T @t1`), "and the label, with the task in it");
+  assert.match(log, new RegExp(`select-pane -t ${child.paneId} -T t1@pm($|\\s)`), "and the label, with the task AND its opener in it");
   assert.match(log, /setw -t %\d+ pane-border-status top/, "and the window bar is turned on");
-  assert.match(replyText(reply), /pane 已标记为 @t1/, "the reply says what the user will see");
+  assert.match(replyText(reply), /pane 已标记为 t1@pm/, "the reply says what the user will see");
 
-  // Philosophy two: nothing new is addressable.
+  // Philosophy two: nothing new is addressable. (EIGHT, not nine — the
+  // notification tool is gone; the gate sends its own banners now.)
   assert.equal(world.tools.has("orchestrator_decorate"), false);
-  assert.equal([...world.tools.keys()].filter((n) => n.startsWith("orchestrator_")).length, 9);
+  assert.equal([...world.tools.keys()].filter((n) => n.startsWith("orchestrator_")).length, 8);
 });
 
 test("a tmux that refuses cosmetics does NOT fail the spawn", async () => {
@@ -133,7 +178,7 @@ test("a tmux that refuses cosmetics does NOT fail the spawn", async () => {
   assert.equal(world.runtime().children.length, 1, "the child is registered either way");
 });
 
-test("close takes the window bar down before killing the pane, and only then", async () => {
+test("close kills its pane and writes NO WINDOW OPTION (2026-09-17)", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   const child = world.runtime().children[0]!;
@@ -141,27 +186,29 @@ test("close takes the window bar down before killing the pane, and only then", a
   await world.call("orchestrator_close", { childId: child.id });
 
   const log = tmuxLog(world);
-  const unset = log.findIndex((line) => line.includes("-u pane-border-status"));
-  const kill = log.findIndex((line) => line.startsWith(`kill-pane -t ${child.paneId}`));
-  assert.ok(unset >= 0, "the window-level option this orchestration set must be undone");
-  assert.ok(kill >= 0);
-  assert.ok(unset < kill, "after kill-pane the pane id is no longer a valid setw target");
-  // AND the window is named by the ORCHESTRATOR'S OWN pane (%0), never by the
-  // child's (reviewer P2, 2026-09-05): `setw -t <pane>` uses the pane only to
-  // identify a window, and the pane being closed is exactly the id that may
-  // already be gone — a failed option write leaves the bar on for good.
-  const unsets = log.filter((line) => line.startsWith("setw") && line.includes("-u"));
-  assert.equal(unsets.length, 2, "both options are restored");
-  assert.ok(unsets.every((line) => line.includes("-t %0")), "…through a pane that is provably alive");
-  assert.ok(unsets.every((line) => !line.includes(child.paneId)), "…not through the pane being killed");
+  assert.ok(
+    log.some((line) => line.startsWith(`kill-pane -t ${child.paneId}`)),
+    "the pane is killed",
+  );
+  // THE RELEASE IS DELETED, AND THIS IS WHERE IT WOULD COME BACK. Taking the
+  // bar down writes `pane-border-status`, and that RESIZES EVERY PANE IN THE
+  // WINDOW — measured on a scratch tmux as SIGWINCH with `rows 84 → 83`, in
+  // both directions while re-setting the same value triggers nothing. So a
+  // close may kill a pane and nothing else.
+  assert.deepEqual(
+    log.filter((line) => line.includes("-u")),
+    [],
+    "no window option is restored on close — the bar stays on (user decision 2026-09-17)",
+  );
 });
 
-test("close leaves the window bar up while a SIBLING CHILD is still on screen", async () => {
-  // The other half of the same expression (reviewer P2, 2026-09-05: pinning the
-  // judge half alone left this one free to be zeroed). Two live child panes
-  // only happen ACROSS repos — inside one repo the scheduler serializes them —
-  // so the plan declares two, which is also the only shape where a manager
-  // really can be closing one child while another is still labelled.
+test("close leaves every other pane's border alone, sibling or review pane", async () => {
+  // ONE TEST FOR WHAT USED TO BE TWO (2026-09-17). The old pair pinned the
+  // label-bar release's two halves — "a sibling child is still on screen" and
+  // "a review pane is still on screen" — and both were really asking whether
+  // the release ran. There is no release any more: a close writes no window
+  // option, so no sibling can lose its border by construction. The two shapes
+  // that used to differ are driven here so the case itself stays covered.
   const plan = parsePlan({
     title: "跨仓库计划",
     intent: "两个仓库各一个任务，可以并行",
@@ -171,29 +218,37 @@ test("close leaves the window bar up while a SIBLING CHILD is still on screen", 
     ],
   });
   assert.ok(plan.plan, plan.problems.join("; "));
-  const world = makeFakeWorld({
+  const withSibling = makeFakeWorld({
     plan: plan.plan!,
     approvePlan: true,
     resolvableRepos: ["/repo", "/other/repo"],
   });
-  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
-  const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  await withSibling.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const second = await withSibling.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
   assert.equal(second.isError, undefined, replyText(second));
-  const [first, sibling] = world.runtime().children;
-  assert.ok(sibling, "two children in two repos run at once — that is the case under test");
+  await withSibling.call("orchestrator_close", { childId: withSibling.runtime().children[0]!.id });
+  assert.deepEqual(
+    tmuxLog(withSibling).filter((line) => line.startsWith("setw") && line.includes("-u")),
+    [],
+    "the sibling's border is still labelled",
+  );
 
-  await world.call("orchestrator_close", { childId: first!.id });
-
-  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
-  assert.deepEqual(unsets, [], "the sibling's border is still labelled: the bar stays up");
+  const withReview = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, judgePanes: 1 });
+  await withReview.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await withReview.call("orchestrator_close", { childId: withReview.runtime().children[0]!.id });
+  assert.deepEqual(
+    tmuxLog(withReview).filter((line) => line.startsWith("setw") && line.includes("-u")),
+    [],
+    "the review pane still needs the border line it is labelled with",
+  );
 });
 
-test("a CLOSED sibling is not a decorated pane, even if its pane outlived the close", async () => {
-  // The `!c.closedAt` half of the filter (reviewer Nit, 2026-09-05: it could
-  // be deleted and every test stayed green). It matters exactly when a closed
-  // child's pane is still on screen — a kill that failed, or a pane tmux still
-  // lists — because then liveness alone would call it a sibling and the bar
-  // would stay up forever.
+test("close leaves every other pane's border alone, whatever the registry says", async () => {
+  // The old test here — "a CLOSED sibling is not a decorated pane" — pinned the
+  // `!c.closedAt` half of a filter that only the label-bar release read. The
+  // release is deleted (2026-09-17, user decision), so the filter has no
+  // reader; what still matters is the behaviour it protected: a close must not
+  // blank anybody's border, no matter what the registry says about them.
   const plan = parsePlan({
     title: "跨仓库计划",
     intent: "两个仓库各一个任务",
@@ -210,7 +265,7 @@ test("a CLOSED sibling is not a decorated pane, even if its pane outlived the cl
   });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
-  const [first, second] = world.runtime().children;
+  const [first] = world.runtime().children;
 
   // t1 is CLOSED on the books while its pane stays on screen.
   world.saveRuntime({
@@ -219,10 +274,13 @@ test("a CLOSED sibling is not a decorated pane, even if its pane outlived the cl
       c.id === first!.id ? { ...c, closedAt: new Date(world.now()).toISOString() } : c),
   });
 
-  await world.call("orchestrator_close", { childId: second!.id });
+  await world.call("orchestrator_close", { childId: world.runtime().children[1]!.id });
 
-  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
-  assert.equal(unsets.length, 2, "the only child this orchestration still owns is the one closing");
+  assert.deepEqual(
+    tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u")),
+    [],
+    "a row on the books is not a border: nothing is taken down either way",
+  );
 });
 
 
@@ -359,18 +417,6 @@ test("a CLOSED child's checkout can still be settled — the advice the merge re
     "…and only a settlement that REMOVED the checkout is forgotten");
 });
 
-test("close leaves the window bar up while a REVIEW pane is still on screen", async () => {
-  // The other kind of decorated pane. Counting only children was a measured
-  // defect: a manager closing its last child blanked its own review's border.
-  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, judgePanes: 1 });
-  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
-  const child = world.runtime().children[0]!;
-
-  await world.call("orchestrator_close", { childId: child.id });
-
-  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
-  assert.deepEqual(unsets, [], "the review pane still needs the border line it is labelled with");
-});
 
 
 test("the health snapshot names the same colour the border uses", async () => {
@@ -382,6 +428,31 @@ test("the health snapshot names the same colour the border uses", async () => {
   const text = replyText(wait);
   assert.match(text, new RegExp(`\\[${paneColorFor(child.id).name}\\]`),
     "a row in the receipt and a rectangle on screen must be matchable by eye");
+});
+
+test("the manager's OWN pane is labelled `pm:<repo>`, and rebuilt on EVERY probe", async () => {
+  // The manager's pane is the one pane the gate never opened — the user did —
+  // so nothing in a registry decorates it and a window of six panes had no way
+  // to say WHICH one is the manager. It gets a title now, and it is written
+  // UNCONDITIONALLY: `pm:<repo>` holds no state, so there is no changing string
+  // to diff against, and pi rewrites every pane title at boot and on each
+  // extension rebind — a write-once title would go stale exactly when a rebind
+  // happened. One tmux call per probe for ONE pane, and the label survives the
+  // next rebind by a poll.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const pmTitles = (): string[] => tmuxLog(world).filter((line) => line.startsWith("select-pane -t %0 -T pm:"));
+
+  await world.call("orchestrator_wait", { timeoutMs: 0 });
+  const afterFirst = pmTitles();
+  assert.deepEqual(afterFirst, ["select-pane -t %0 -T pm:repo"], "identity first, and it says what it is");
+
+  // The probe runs again with NOTHING changed — and the title is written again.
+  // That is the whole difference from the child/judge repaint path, whose
+  // memory exists to avoid forking tmux once per pane per probe; this is one
+  // pane, and a stale one would be a pane nobody can identify.
+  await world.call("orchestrator_wait", { timeoutMs: 0 });
+  assert.equal(pmTitles().length, 2, "a second probe writes the same title a second time");
 });
 
 test("the probe repaints the label from the health it just measured", async () => {
@@ -398,7 +469,7 @@ test("the probe repaints the label from the health it just measured", async () =
 
   await world.call("orchestrator_wait", { timeoutMs: 0 });
 
-  const titles = tmuxLog(world).filter((line) => line.includes(`-T @t1`));
+  const titles = tmuxLog(world).filter((line) => line.includes(`-T t1@pm`));
   assert.ok(titles.length >= 2, "the title is refreshed by the probe, not only at spawn");
   assert.match(titles[titles.length - 1]!, /waiting-judge/,
     "so the border answers 'what is it doing' without a tool call");
@@ -408,7 +479,7 @@ test("the repaint is throttled — the probe must not fork a tmux process every 
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   const child = world.runtime().children[0]!;
-  const titlesNow = (): number => tmuxLog(world).filter((line) => line.includes("-T @t1")).length;
+  const titlesNow = (): number => tmuxLog(world).filter((line) => line.includes("-T t1@pm")).length;
 
   await world.call("orchestrator_wait", { timeoutMs: 0 });
   const afterFirst = titlesNow();
@@ -431,7 +502,7 @@ test("the repaint is throttled — the probe must not fork a tmux process every 
   world.childReports(child.id, "waiting-judge", { waitingFor: "reviewer" });
   await world.call("orchestrator_wait", { timeoutMs: 0 });
   assert.ok(titlesNow() > afterFirst, "but the border does have to catch up eventually");
-  assert.match(tmuxLog(world).filter((l) => l.includes("-T @t1")).pop()!, /waiting-judge/);
+  assert.match(tmuxLog(world).filter((l) => l.includes("-T t1@pm")).pop()!, /waiting-judge/);
 });
 
 test("the throttle memory belongs to the orchestration, not to the module", async () => {
@@ -448,7 +519,7 @@ test("the throttle memory belongs to the orchestration, not to the module", asyn
   await second.call("orchestrator_wait", { timeoutMs: 0 });
 
   assert.ok(
-    tmuxLog(second).some((line) => line.includes("-T @t1")),
+    tmuxLog(second).some((line) => line.includes("-T t1@pm")),
     "the second orchestration paints its own panes",
   );
 });
@@ -480,30 +551,29 @@ test("the throttle memory belongs to the orchestration, not to the module", asyn
  * display-only and the next spawn re-establishes the bar.)
  */
 
-test("the release is measured over THIS session's registry only — which is the cross-session gap", async () => {
-  // The real close path, with nothing left that this manager can see: no
-  // sibling child, no judge of its own. It releases — and this assertion is
-  // the mirror image of "close leaves the window bar up while a REVIEW pane is
-  // still on screen" above, which is the same code with one visible pane.
+test("closing the last visible child still writes no window option", async () => {
+  // This test used to assert the cross-session MISFIRE as the accepted state:
+  // a manager closing its last child took the window bar down, and a reviewer
+  // pane a CHILD had opened on the same window (invisible to this registry)
+  // lost its border with it. Both halves of that are gone (2026-09-17, user
+  // decision) — the bar is never taken down, so there is nothing left to
+  // misfire on. What remains worth pinning is the shape that produced it: a
+  // manager with zero live children closing one.
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   const child = world.runtime().children[0]!;
 
   await world.call("orchestrator_close", { childId: child.id });
 
-  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
-  assert.ok(
-    unsets.length > 0,
-    "with an empty visible set the manager takes the window bar down",
+  assert.deepEqual(
+    tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u")),
+    [],
+    "its own registry is empty and nothing is taken down — the gap is closed by removal, not by a fix",
   );
-  // …and THAT is the misfire, because the visible set is the manager's own
-  // registry. A reviewer pane opened by the CHILD is on the same window and in
-  // none of these numbers, so it loses its border here. The fix is a
-  // cross-session pane registry; nothing in the counter itself is wrong.
   assert.equal(
     world.runtime().children.filter((c) => !c.closedAt).length,
     0,
-    "the set it measured: its own children, and there are none left",
+    "the set that used to drive the release: its own children, none left",
   );
 });
 

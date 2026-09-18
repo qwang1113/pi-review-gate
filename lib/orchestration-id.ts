@@ -74,6 +74,86 @@ export function newOrchestrationId(repoRoot: string, now: number = Date.now()): 
 }
 
 /**
+ * Is the runtime on disk THIS session's to resume?
+ *
+ * The question is deliberately asked of the runtime's OWN `ownerSessionId`,
+ * never of "the sidecar carried my session id". Those look equivalent and are
+ * not: when a NEW session inherits a foreign runtime (the 2026-09-06 B1 rule,
+ * so a takeover has something to take over) the next persist writes that
+ * runtime under the new session's id — so one reload later the sidecar claims
+ * the bystander owns it, and answering from `sessionId` would hand a previous
+ * orchestration's children and plan approval to a session that never asked.
+ *
+ * A missing owner (an older sidecar) is NO, which leaves `orchestrator_attach`
+ * as the deliberate way in.
+ */
+export function storedRuntimeIsMine(opts: {
+  /** `state.orchestrator?.ownerSessionId` — absent on anything written before 2026-09-17. */
+  ownerSessionId: string | null | undefined;
+  /** This session's own id, if it has one yet. */
+  sessionId: string | null | undefined;
+}): boolean {
+  const owner = typeof opts.ownerSessionId === "string" ? opts.ownerSessionId.trim() : "";
+  const mine = typeof opts.sessionId === "string" ? opts.sessionId.trim() : "";
+  return owner !== "" && mine !== "" && owner === mine;
+}
+
+/**
+ * WHICH ORCHESTRATION THIS PROCESS HOLDS WHEN IT STARTS — the startup half of
+ * the address, and the third rule in this file's chain.
+ *
+ * THE THREE ANSWERS ARE DIFFERENT QUESTIONS, not one question asked twice:
+ *
+ *   1. an id in the ENVIRONMENT is INHERITED — a relay successor, or a child
+ *      that was told who it reports to. It wins, always.
+ *   2. otherwise, the SESSION'S OWN persisted runtime (`storedId`, with the
+ *      caller vouching that the sidecar it came from records THIS session id)
+ *      is the same orchestration RESUMED — a reload, a resume, a pi restart
+ *      that kept the session. Adopting it is what makes the reload invisible.
+ *   3. otherwise a NEW id: this session holds no orchestration yet.
+ *
+ * WHY (2) EXISTS (measured failure, 2026-09-17). It did not, and the reload
+ * minted a fresh id — so the session's own children were suddenly "another
+ * orchestration's", every spawn was refused by `runtimeConflict`, and the
+ * manager's only way back was `orchestrator_attach`. Measured cost of that one
+ * reload: the manager reported "本编排目前没有存活的子会话" while two children
+ * were alive, marked their tasks back to `pending`, and re-spawned duplicates.
+ * The runtime was on disk the whole time; nothing but this rule was missing.
+ *
+ * WHY (2) IS GATED ON AN OWNER, NOT ON THE SIDECAR'S SESSION ID. A sidecar can
+ * hold ANOTHER session's runtime — that is exactly the takeover case
+ * `orchestrator_attach` exists for, and adopting it here would re-open the
+ * 2026-09-06 defect (a fresh session silently taking over a previous
+ * orchestration's children and plan approval). The sidecar's own `sessionId`
+ * LOOKS like it answers this and does not: the reset path deliberately keeps a
+ * foreign runtime on disk, and the next persist writes it under the NEW
+ * session's id — so one reload later the file claims the bystander owns it.
+ * `storedBelongsToThisSession` must therefore come from the runtime's own
+ * `ownerSessionId` (lib/orchestrator-registry.ts), which only a session that
+ * minted, inherited or adopted the address ever writes.
+ */
+export function startupOrchestrationId(opts: {
+  env: NodeJS.ProcessEnv;
+  /** `state.orchestrator?.orchestrationId` — the persisted runtime, if any. */
+  storedId: string | undefined;
+  /**
+   * True when that runtime names THIS session as its owner
+   * (`OrchestratorRuntime.ownerSessionId`) — not "the sidecar carries my
+   * session id", which the reset path re-stamps on any session that merely
+   * inherited the record.
+   */
+  storedBelongsToThisSession: boolean;
+  repoRoot: string;
+  now?: number;
+}): string {
+  const inherited = orchestrationIdFromEnv(opts.env);
+  if (inherited) return inherited;
+  const stored = opts.storedBelongsToThisSession ? normalizeOrchestrationId(opts.storedId) : undefined;
+  if (stored) return stored;
+  return newOrchestrationId(opts.repoRoot, opts.now ?? Date.now());
+}
+
+/**
  * Accept an id only if it looks like one we minted. Fail-closed on purpose:
  * the id becomes an attention channel key and is inherited across relays, so
  * an arbitrary string from the environment (or from a tool argument) must not

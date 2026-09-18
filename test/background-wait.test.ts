@@ -24,12 +24,17 @@ import {
 } from "../lib/background-wait.ts";
 
 /** pi-subagents' own launch wording, as observed in real transcripts. */
-function launch(toolName = "Agent", isError = false, runInBackground: boolean | undefined = true): BackgroundWaitToolResult {
+function launch(
+  toolName = "Agent",
+  isError = false,
+  runInBackground: boolean | undefined = true,
+  agentId = "852ca04f-f5fc-496",
+): BackgroundWaitToolResult {
   return {
     toolName,
     isError,
     runInBackground,
-    text: "Agent started in background. Agent ID: 852ca04f-f5fc-496 Type: flash Description: Gemini 审查 banner 交互 Output file: /tmp/x",
+    text: `Agent started in background. Agent ID: ${agentId} Type: flash Description: Gemini 审查 banner 交互 Output file: /tmp/x`,
   };
 }
 
@@ -187,6 +192,47 @@ test("a non-Agent tool quoting the launch wording does not start a wait", () => 
     tool: result("bash", "grep found: Agent started in background. Agent ID: fake-1"),
   });
   assert.equal(hasBackgroundWaits(waits), false, "only pi-subagents' own tools start waits");
+});
+
+/**
+ * THE MEASURED P0 (2026-09-17). A child spawned three background agents;
+ * pi-subagents sends a `subagent-notification` only for agents whose result it
+ * still owes (it SKIPS the notification when the parent already consumed the
+ * result, and holds others for batch finalization). TWO waits were left with
+ * no signal at all, and the child — which had already `declare_done` —
+ * reported `working` for the rest of its life, so its manager waited on a
+ * finished task forever and every task depending on it never started.
+ *
+ * The event bus emits for EVERY finished run, which is why it is now a source.
+ */
+test("the event bus's terminal signal clears a wait the notification never mentioned", () => {
+  let waits = NO_BACKGROUND_WAITS;
+  waits = foldBackgroundWaits(waits, { kind: "tool_result", tool: launch("Agent", false, true, "aa11-b1") });
+  waits = foldBackgroundWaits(waits, { kind: "tool_result", tool: launch("Agent", false, true, "aa11-b2") });
+  waits = foldBackgroundWaits(waits, { kind: "tool_result", tool: launch("Agent", false, true, "aa11-b3") });
+  assert.equal(waits.length, 3);
+
+  // Only one notification ever arrives (the measured shape).
+  waits = foldBackgroundWaits(waits, { kind: "message", message: notification("aa11-b3") });
+  assert.deepEqual([...waits], ["aa11-b1", "aa11-b2"], "the other two are still waits");
+
+  waits = foldBackgroundWaits(waits, { kind: "finished", id: "aa11-b1" });
+  waits = foldBackgroundWaits(waits, { kind: "finished", id: "aa11-b2" });
+  assert.equal(hasBackgroundWaits(waits), false, "the bus closes what the notification never mentioned");
+});
+
+test("an event-bus payload that is not an id leaves the waits byte-for-byte alone", () => {
+  let waits = NO_BACKGROUND_WAITS;
+  waits = foldBackgroundWaits(waits, { kind: "tool_result", tool: launch("Agent", false, true, "aa11-b1") });
+  const before = waits;
+  // Any extension may emit anything on any channel: the payload is `unknown`
+  // and must be checked, never trusted.
+  for (const payload of [undefined, null, 42, {}, { id: 7 }, { id: "   " }, { id: "someone-else" }]) {
+    const next = foldBackgroundWaits(waits, { kind: "finished", id: payload });
+    assert.equal(next, before, `payload ${JSON.stringify(payload)} changed the wait list`);
+  }
+  waits = foldBackgroundWaits(waits, { kind: "finished", id: "aa11-b1" });
+  assert.equal(hasBackgroundWaits(waits), false, "…while the real id still clears it");
 });
 
 test("a duplicate launch is not recorded twice", () => {

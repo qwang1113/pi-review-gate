@@ -25,15 +25,18 @@ bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 | `orchestrator` | loop **加上**编排约束：本会话只统筹、不写代码，先要你批准一份 plan 才能开子会话；`declare_done` 还要求任务队列清空、没有活着的子会话 | 一轮上下文做不完的大需求 |
 
 `orchestrator`（项目经理）模式需要 tmux —— 它的子会话就是你那个 window 里的 pane。
-它自己不拼 tmux 命令，全部走九个工具：`orchestrator_plan`（写/提交 plan，提交时门禁
+它自己不拼 tmux 命令，全部走八个工具：`orchestrator_plan`（写/提交 plan，提交时门禁
 先派 `goal-auditor` 审一轮）、`orchestrator_spawn`（按 plan 任务开子会话）、
 `orchestrator_wait`（它唯一的信息入口，`timeoutMs: 0` 即快照）、`orchestrator_answer`
 （代答子会话弹出的问题）、`orchestrator_instruct`（给子会话发话/打断）、
 `orchestrator_close`（关掉某个 pane）、`orchestrator_recover`（pane 死了原地复活）、
-`orchestrator_attach`（换人接手一次读回全局）、
-`orchestrator_notify`（**只有它**能发系统通知，且有节流）。
+`orchestrator_attach`（换人接手一次读回全局）。
 
-交接不在这九个里，因为它不是编排专属的：**每一类会话**（loop 主会话 / 编排子会话 /
+系统通知**不是工具**（2026-09-17）：门禁自己在三类事件上发 —— 项目经理/独立 loop 会话完成或
+异常结束、以及任何一个停下来等你回答的框（含 plan 决策登记），你不需要（也不能）去叫人；要用户拍板就
+`ask_user`，它本身就是那三类之一。
+
+交接不在这八个里，因为它不是编排专属的：**每一类会话**（loop 主会话 / 编排子会话 /
 项目经理 / judge）上下文达到窗口 70% 时都会收到门禁提醒，自己调同一个
 `session_handoff()`——门禁会把交接文档骨架写好、开新 pane、给继任者第一条消息，
 并在确认接手后关掉老会话。

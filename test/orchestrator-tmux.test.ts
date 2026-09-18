@@ -182,3 +182,18 @@ test("tmux output is parsed strictly", () => {
   assert.equal(parseSpawnedPaneId(""), undefined, "no id ⇒ the caller must roll back, not guess");
   assert.equal(parseSpawnedPaneId("no such window"), undefined);
 });
+
+/**
+ * READING `allow-passthrough` IS GONE (user decision, 2026-09-17).
+ *
+ * The gate used to read it so a receipt could stop claiming a delivery tmux
+ * may have dropped. The banner no longer travels through tmux at all
+ * (lib/user-notify.ts carries the measurement that forced the change), so
+ * there is nothing left to ask about — and a reader nothing consults is the
+ * kind of code that quietly comes back.
+ */
+test("nothing in the tmux module reads the passthrough option any more", () => {
+  const source = readFileSync(new URL("../lib/orchestrator-tmux.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /allow-passthrough/,
+    "the option belongs to the user's config; with OSC gone the gate has no business reading it");
+});

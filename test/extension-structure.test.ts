@@ -78,7 +78,7 @@ const COPILOT_GH_SRC = readFileSync(join(ROOT, "lib", "copilot-gh.ts"), "utf8");
 const ASK_USER_SRC = readFileSync(join(ROOT, "lib", "user-interaction-tools.ts"), "utf8");
 const ASK_USER_TOOLS = new Set(["ask_user"]);
 const CONSENT_SRC = readFileSync(join(ROOT, "lib", "consent-request-tools.ts"), "utf8");
-const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit"]);
+const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit", "request_tmux_access"]);
 /**
  * The GOAL family moved the same way, split by the same rule: the APPROVAL
  * (`propose_loop_goal` — run the audit, ask the user, write the file) in one
@@ -130,7 +130,7 @@ const HOOK_BODY = [SHIP_HOOK_SRC, SHIP_EDIT_SRC, SHIP_BASH_SRC].join("\n");
 function shipHookWiring(): string {
   return windowOf(
     "const shipGateHookDeps: ShipGateHookDeps = {",
-    "evaluateToolCall(shipGateHookDeps, event, ctx));",
+    "evaluateToolCall(shipGateHookDeps, event, ctx);",
     "L1 hook wiring",
   );
 }
@@ -513,8 +513,12 @@ test("NotebookEdit is in the edit-tool set", () => {
 });
 
 test("L1: tool_call handler exists and can block", () => {
-  // The extension WIRES the hook; lib/ship-gate-hook.ts is what decides.
-  assert.match(SRC, /pi\.on\(["']tool_call["'], \(event, ctx\) => evaluateToolCall\(shipGateHookDeps, event, ctx\)\)/,
+  // The extension WIRES the hook; lib/ship-gate-hook.ts is what decides. The
+  // handler is one block, not a one-liner, because it also refreshes the
+  // activity line a supervisor reads (`describeToolActivity`, 2026-09-17) —
+  // and the gate call itself is still the last thing it does, so a blocked
+  // tool call is still recorded as the last thing the session tried.
+  assert.match(SRC, /pi\.on\(["']tool_call["'], \(event, ctx\) => \{[\s\S]{0,400}?return evaluateToolCall\(shipGateHookDeps, event, ctx\);/,
     "the extension keeps exactly the wiring line");
   assert.match(SHIP_HOOK_SRC, /export async function evaluateToolCall\(/);
   assert.match(HOOK_BODY, /block:\s*true/);
@@ -1206,7 +1210,14 @@ test("request_scope_limit: extension-driven user consent, no 'confirmed' paramet
   const body = toolBodyOf("request_scope_limit");
   // Consent is obtained by the EXTENSION (dialog) — the tool schema exposes
   // only a reason; there is no parameter the model could set to claim consent.
-  assert.match(body, /deps\.askChoice\(/);
+  //
+  // THE DIALOG IS ONE IMPLEMENTATION (2026-09-17, user decision): the third
+  // consent tool had copied this dance again, so the guard moved from "this
+  // body calls askChoice" to "askChoice has exactly ONE call site" — which is
+  // what a fourth tool cannot quietly duplicate.
+  assert.equal((CONSENT_SRC.match(/deps\.askChoice\(/g) ?? []).length, 1,
+    "the consent dialog is rendered in exactly one place (askConsent)");
+  assert.match(body, /askConsent\(deps, uiCtx,/);
   assert.match(body, /parameters: Type\.Object\(\{\s*reason: Type\.String/);
   assert.doesNotMatch(body, /confirmed/);
   // No UI ⇒ fail-closed deny; a declined dialog locks further requests — but
@@ -1217,7 +1228,7 @@ test("request_scope_limit: extension-driven user consent, no 'confirmed' paramet
   assert.match(windowOf("registerUserInteractionTools(pi, {", "\n  });", "user-interaction wiring"),
     /declineScopeLimit: \(\) => \{ scopeLimitDeclined = true; \}/,
     "the decline must land on the session lock the gate actually reads");
-  assert.match(body, /dialogFailed/);
+  assert.match(body, /unshowable/, "a dialog that could not be shown is not a decline");
   assert.match(body, /state\.scopeLimit = \{/);
 });
 
@@ -1559,18 +1570,21 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
     // ~300 bytes back from the orchestrator site, so a return smuggled in
     // just above the tier selection was inside it. Anchoring at the call
     // would have quietly narrowed that.
-    "// tmux BACKSTOP (task book §4.3)",
-    "if (tmuxHit) deps.hint(tmuxHit.reason);",
-    "tmux backstop tier",
+    "// tmux PERMISSION GATE (user decision, 2026-09-17)",
+    "deps.hint(tmuxHit.reason);",
+    "tmux permission gate tier",
   );
   assert.match(guardSite, /detectForbiddenTmux\(/,
-    "the second orchestrator site only selects the tmux backstop tier");
-  // ANY return, not the old `/return;/` spelling: the extracted arm writes
-  // every exit as `return undefined;`, so a pattern looking for a bare
-  // `return;` is dead (round-1 P1). The window ends BEFORE the tier's own
-  // `return { block: true, … }`, so nothing legitimate can match here.
-  assert.doesNotMatch(guardSite, /\breturn\b/,
-    "the tmux backstop must not contain a pass-through return");
+    "the second orchestrator site selects the tmux permission tier");
+  // THE RULE INVERTED (user decision 2026-09-17): the arm used to be REQUIRED
+  // to contain no return at all (it only advised). It now has to carry the
+  // refusal — an unauthorized tmux operation is blocked, and the message names
+  // `request_tmux_access`. What must NOT come back is a silent pass-through:
+  // the only two exits are the refusal and the advice.
+  assert.match(guardSite, /if \(!access\) return \{ block: true, reason: tmuxHit\.refusal \}/,
+    "unauthorized tmux is REFUSED — not hinted at");
+  assert.match(guardSite, /detectForbiddenTmux\([\s\S]*?tmuxAccess\(\)/,
+    "the permission is read per call: a grant minted mid-session must count");
   // The L8 explore short-circuit lives in the helper loopGoalEditBlockFor
   // (kept OUT of the handler body on purpose — see its docblock): it only
   // lets EDITS pass in explore. Pin that it exists and that it can never
@@ -2209,7 +2223,36 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   // the extension host's event loop for up to 20 minutes. The runner must be
   // spawned async, detached (own process group), with abort + timeout killing
   // the whole process tree.
-  assert.doesNotMatch(SRC, /spawnSync\s*\(/);
+  //
+  // NO SYNCHRONOUS SPAWN MAY COME BACK HERE. The one the gate allows — the
+  // exit-path banner, an `exit` handler cannot await — lives in
+  // lib/user-notify-runtime.ts, a module of its own (quality round P2: the
+  // runtime half moved out of this file precisely because it was a new job in
+  // an already huge one). A blocking spawn in the extension host freezes every
+  // session, every judge pane and every child in the window.
+  assert.doesNotMatch(SRC, /\bspawnSync\s*\(/, "a blocking spawn in the extension host freezes everything");
+  const runnerBody = SRC.slice(SRC.indexOf("async function runTrustedPrecommit"));
+  assert.ok(runnerBody.length > 0, "the runner must still be in this file");
+  assert.doesNotMatch(runnerBody, /spawnSync\s*\(/,
+    "the precommit runner may never spawn synchronously — it runs for minutes");
+  // …AND THE EXIT PATH IS WIRED HERE, because it is what a test cannot reach:
+  // the blocking spawn itself lives in the runtime module, and the two things
+  // the extension owns are the registration and the clean-shutdown flag.
+  const runtimeSrc = readFileSync(join(ROOT, "lib", "user-notify-runtime.ts"), "utf8");
+  const syncSpawns = [...runtimeSrc.matchAll(/\bspawnSync\s*\(/g)];
+  assert.equal(syncSpawns.length, 1,
+    "exactly one synchronous spawn in the runtime — the exit banner, and nothing else");
+  assert.match(runtimeSrc, /process\.on\("exit"/, "the exit handler lives with it");
+  assert.match(runtimeSrc.slice(runtimeSrc.indexOf('process.on("exit"')),
+    /exitNotifyKind\(\{ cleanShutdown \}\)/,
+    "the handler must consult the rule in lib/user-notify.ts, not re-implement it");
+  assert.match(runtimeSrc, /spawnSync\(bin!, args, \{ stdio: "ignore", timeout: 10_000 \}\)/,
+    "bounded — a stuck notifier must not hold the process open");
+  assert.match(SRC, /notifyRuntime\.armExitHandler\(\)/, "the extension registers it once, for the process");
+  const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
+  assert.ok(shutdownAt >= 0, "the shutdown handler must still exist");
+  assert.match(SRC.slice(shutdownAt, shutdownAt + 700), /notifyRuntime\.markCleanShutdown\(\)/,
+    "every clean shutdown reason (quit | reload | new | resume | fork) records itself, and the handler reads that");
   assert.match(SRC, /async function runTrustedPrecommit/);
   assert.match(SRC, /abortSignal\?\.addEventListener\("abort"/);
   assert.match(SRC, /detached:\s*true/);
@@ -2323,17 +2366,19 @@ test("sensitive-file guard wired into tool_call", () => {
 test("request_sensitive_edit: the user decides in an extension dialog, not the agent", () => {
   const body = toolBodyOf("request_sensitive_edit");
 
-  assert.match(body, /deps\.askChoice\(/, "the extension must render the dialog itself");
+  assert.match(body, /askConsent\(deps, uiCtx,/, "the extension must render the dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
     "no agent-supplied 'confirmed' parameter — that would be self-approval");
   assert.match(body, /if \(!uiCtx\.hasUI\)/, "no UI must fail closed instead of granting");
-  assert.match(body, /dialogFailed/, "a dialog that could not be shown is not a decline");
+  assert.match(body, /unshowable/, "a dialog that could not be shown is not a decline");
 });
 
 test("SECURITY: request_sensitive_edit refuses .git internals before showing any dialog", () => {
   const body = toolBodyOf("request_sensitive_edit");
   const integrityAt = body.indexOf("isGateIntegrityPath");
-  const confirmAt = body.indexOf("askChoice");
+  // The dialog itself lives in `askConsent` (2026-09-17); what matters here is
+  // that the integrity refusal comes before the tool reaches for it.
+  const confirmAt = body.indexOf("askConsent");
   assert.ok(integrityAt > 0 && confirmAt > 0, "both must exist");
   assert.ok(integrityAt < confirmAt,
     "a user must never be asked to authorize a write to .git/hooks — that would disarm L3");
@@ -2563,16 +2608,26 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
     "a judge THIS session dispatched is a fact the gate holds, never something to infer from silence");
   assert.doesNotMatch(report, /capture-pane|screenLooksBusy/, "no screen is consulted, in any state");
   // The branch rules, where they live now — order is load-bearing (forced >
-  // waiting-judge > working [streaming OR background wait] > done > idle).
+  // waiting-judge > streaming > done > background wait > idle). The 2026-09-17
+  // move put the RECORDED COMPLETION above the background wait: a child that
+  // declared done while one of its subagents never sent a terminal signal used
+  // to report `working` for the rest of its life.
   const decideAt = CHILD_CHANNEL_SRC.indexOf("export function decideReportedChildState(");
   assert.ok(decideAt > 0, "the pure derivation lives in lib/orchestrator-child-channel.ts");
   const decide = CHILD_CHANNEL_SRC.slice(decideAt, decideAt + 900);
   assert.match(decide, /"waiting-judge"/,
     "a healthy review round is reported as its own state, never read as a hang");
-  assert.match(decide, /streaming \|\| args\.waitingOnBackground/,
-    "streaming OR waiting-on-background is working");
-  assert.match(decide, /\? "done"/);
-  assert.match(decide, /: "idle"/);
+  assert.match(decide, /if \(args\.streaming\) return "working"/,
+    "a turn actually in flight is working");
+  assert.match(decide, /if \(args\.completedAt\) return "done"/,
+    "…and a recorded declare_done outranks everything below it, including a background wait nobody is coming back for");
+  assert.match(decide, /if \(args\.waitingOnBackground\) return "working"/,
+    "waiting on its own still-running subagent is work, not a stop");
+  assert.ok(
+    decide.indexOf("if (args.completedAt) return") < decide.indexOf("if (args.waitingOnBackground) return"),
+    "the completion is decided before the leftover wait — the whole fix",
+  );
+  assert.match(decide, /return "idle"/);
 
   // Round-4 P0 — THE HEARTBEAT IS A TIMER, not an agent event. This is the
   // whole fix: `agent_settled` / `turn_end` do not fire during a judge_wait,
@@ -2818,20 +2873,20 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
     "reuse is decided by the transcript, not by a live pane");
   assert.match(body, /await openSessionPane\(run, \{/,
     "a real pane open still exists for the no-reuse case — through the ONE factory");
-  // fresh:true kills the living pane FIRST (singleton per role+repo+opener) —
-  // and, being one of the paths that close a decorated pane, it asks the
-  // shared label-bar question on the way out (the re-open turns the border line
-  // back on when it succeeds; when it fails, nobody else is left to release it).
-  // Since 2026-09-05 that question is asked in ONE place: this branch and the
-  // lane retire call the same helper instead of carrying a copy each.
-  assert.match(body, /closeJudgePaneOf\(existing, \{ opener, ownPane, tmuxServer, run \}\)/,
+  // fresh:true kills the living pane FIRST (singleton per role+repo+opener),
+  // and since 2026-09-05 it goes through ONE helper rather than carrying its
+  // own copy of the close. That helper used to ask the shared label-bar
+  // question too; the release is deleted (2026-09-17, user decision), so all
+  // that is left of it is the close itself.
+  assert.match(body, /closeJudgePaneOf\(existing, \{ ownPane, tmuxServer, run \}\)/,
     "fresh kills the pane through the shared close helper");
   assert.doesNotMatch(body, /releasesWindowLabels\(\{/,
     "…and does not re-inline the label-bar rule");
   const closeHelper = windowOf("function closeJudgePaneOf(", "\n  /**\n   * Retire a lane the gate has stopped using",
     "closeJudgePaneOf body");
-  assert.match(closeHelper, /closeSessionPane\(ctx\.run, entry\.paneId, releases \?/, "the helper is what closes the pane");
-  assert.match(closeHelper, /insideOrchestration: labelBarOwnedByOthers\(\)/, "…with the same guest test as every other close");
+  assert.match(closeHelper, /closeSessionPane\(ctx\.run, entry\.paneId\)/, "the helper is what closes the pane");
+  assert.doesNotMatch(closeHelper, /setw|-u |hideLabelsVia/,
+    "…and writes no window option: the bar is never released (user decision 2026-09-17)");
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
 });
 
@@ -3496,13 +3551,12 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
 
   // judge_close: kill the PANE, then drop the registry. Idempotent.
   const close = toolBodyOf("judge_close");
-  assert.match(close, /closeSessionPane\(deps\.tmux, child\.paneId, \{/, "the pane is killed, not a process");
-  // …and the window's label bar comes down with the LAST decorated pane, or the
-  // border line judge panes now turn on (C1) would be litter in the user's
-  // window forever — addressed through OUR pane, because the dying one may
-  // already be gone.
-  assert.match(close, /const releases = releasesWindowLabels\(\{/, "the label bar is released by the last close");
-  assert.match(close, /hideLabelsVia: ownPane/, "…and the window is named by a pane that is provably alive");
+  assert.match(close, /closeSessionPane\(deps\.tmux, child\.paneId\)/, "the pane is killed, not a process");
+  // …and NOTHING else: the window's label bar used to come down with the last
+  // decorated pane, and that write resizes every pane in the window (measured:
+  // SIGWINCH, rows 84 ↔ 83). The release is deleted (2026-09-17, user decision).
+  assert.doesNotMatch(close, /releasesWindowLabels|hideLabelsVia|setw/,
+    "no window option is touched by a close");
   assert.match(close, /closed: true/,
     "closing an already-finished child still reports success (idempotent)");
   assert.match(close, /transcript 保留/, "the records remain inspectable after close");
@@ -5012,12 +5066,12 @@ test("the orchestration layer is wired in, and its logic did NOT land in this fi
   // the architecture rule this round introduces, so the orchestration layer
   // must not grow it.
   assert.match(SRC, /registerOrchestratorStateTools\(pi, orchestratorDeps\)/);
-  // The session tools take the orchestration deps PLUS one capability the deps
-  // module has no reason to know about (how many judge panes this window has,
-  // for the shared label-bar release) — still wiring, still no logic here.
+  // The session tools take the orchestration deps as they are: the extra
+  // capability they used to be handed (how many judge panes this window has,
+  // for the shared label-bar release) is gone with the release itself.
   assert.match(SRC, /registerOrchestratorSessionTools\(pi, sessionDeps\)/);
-  assert.match(SRC, /sessionDeps\.decoratedJudgePanes = \(\) => decoratedJudgePaneCount\(\)/,
-    "attached to the live deps object — a spread copy would freeze every other field");
+  assert.match(SRC, /const sessionDeps: OrchestratorSessionDeps = orchestratorDeps/,
+    "the live deps object is passed on — a spread copy would freeze every other field");
   for (const banned of ["buildSpawnPaneArgv", "buildSendMessageArgv", "scheduleNextTasks", "parsePlan("]) {
     assert.ok(!SRC.includes(banned),
       `${banned} belongs in lib/orchestrator-*.ts — the extension only wires the layer up`);

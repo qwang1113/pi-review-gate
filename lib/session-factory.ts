@@ -55,7 +55,6 @@ import {
   buildEvenLayoutArgv,
   buildHandoffPaneArgv,
   buildKillPaneArgv,
-  buildHidePaneLabelsArgv,
   buildPaneStyleArgv,
   buildPaneTitleArgv,
   buildShowPaneLabelsArgv,
@@ -68,6 +67,7 @@ import {
   type WindowLayout,
 } from "./orchestrator-tmux.ts";
 import {
+  judgePaneLabel,
   paneStyleFor,
   paneTitleFor,
   PANE_BORDER_FORMAT,
@@ -190,7 +190,7 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
 
 /** Everything the border says about a pane. */
 export interface SessionPaneDecor {
-  /** `@t2-title` for a child, `@review-reviewer` for a judge. */
+  /** `t2@pm:title` for a child, `reviewer@t6` for a judge. */
   label: string;
   /** What the colour hashes on — the child id or the judge id. */
   colorSeed: string;
@@ -293,44 +293,57 @@ export function refreshSessionPaneTitle(
   if (painted && painted.title === title) return false;
   if (painted && opts.now - painted.at < PANE_REPAINT_MIN_MS) return false;
   memory.set(opts.paneId, { title, at: opts.now });
+  paintPaneTitle(run, opts.paneId, title);
+  return true;
+}
+
+/**
+ * Write one pane's title, once, with NO memory and NO throttle — the only
+ * place a title reaches tmux.
+ *
+ * It exists for the ONE pane whose title cannot be deduplicated: the project
+ * manager's OWN pane (`pm:<dir>`), which carries no state and therefore no
+ * changing string to diff against. pi writes its own title at boot and on
+ * every extension rebind (dist/modes/interactive/interactive-mode.js
+ * `updateTerminalTitle`), so a write-once-then-remember approach would go
+ * stale the first time pi rebinds — the caller repaints unconditionally
+ * instead. Failures are swallowed the same way: this is a cosmetic layer, and
+ * a pane that works is worth more than a border that is right.
+ */
+export function paintPaneTitle(run: PaneRunner, paneId: string, title: string): void {
   try {
-    run(buildPaneTitleArgv(opts.paneId, title));
+    run(buildPaneTitleArgv(paneId, title));
   } catch {
     /* cosmetic only — never allowed to affect supervision */
   }
-  return true;
 }
 
 /**
  * Close one pane the gate itself opened (谁创建谁回收).
  *
- * `hideLabelsVia` takes the window-level label bar down first, and it takes a
- * pane id to ADDRESS THE WINDOW WITH — not a boolean, on purpose (reviewer P2,
- * 2026-09-05). `setw -t <pane>` uses the pane only to name a window, and the
- * pane being closed is the one id that may already be gone: a user who closed
- * the review pane by hand leaves a registry row whose id tmux no longer knows,
- * the option write fails, and the bar stays switched on in the user's window
- * forever. The CALLER'S OWN pane is in the same window and is provably alive —
- * the caller is running in it.
+ * IT NO LONGER TOUCHES THE WINDOW'S LABEL BAR (2026-09-17, user decision).
+ * This used to take `hideLabelsVia` and undo `pane-border-status` /
+ * `pane-border-format` when the caller judged this the last decorated pane.
+ * Those are WINDOW options and toggling them CHANGES EVERY PANE'S HEIGHT: on a
+ * scratch tmux this was measured as SIGWINCH with `rows 84 → 83` on the way on
+ * and `83 → 84` on the way off, while re-setting the same value triggers
+ * nothing at all. So closing the last gate pane re-laid out every application
+ * in the user's window — their editor, their shells, and a project manager's
+ * pi — and the next spawn put it straight back: a flap per orchestration
+ * cycle, for a one-line bar.
  *
- * Passing it also expresses the decision: labels come down only when the
- * caller has established that this is the last decorated pane (see
- * `releasesWindowLabels`); undoing them while a sibling still needs them
- * blanks a border that is in use.
+ * The bar is therefore turned ON by whoever opens a decorated pane and is
+ * NEVER turned off again. The cost is one border line in that window for as
+ * long as the window lives — the same cost the decoration already imposes on
+ * bystander panes, and cheaper than moving every pane in the window under a
+ * running TUI.
  */
 export function closeSessionPane(
   run: PaneRunner,
   paneId: string,
-  opts: { hideLabelsVia?: string } = {},
 ): { ok: true } | { ok: false; error: string } {
-  if (opts.hideLabelsVia) {
-    for (const argv of buildHidePaneLabelsArgv(opts.hideLabelsVia)) {
-      try { run(argv); } catch { /* cosmetic */ }
-    }
-  }
   // Probe the window BEFORE the kill: afterwards this id is gone and there is
-  // nothing left to address the window with — the same reason `hideLabelsVia`
-  // takes the caller's own pane instead of the one being closed.
+  // nothing left to address the window with.
   const before = probeWindowLayout(run, paneId);
   try {
     const result = run(buildKillPaneArgv(paneId));
@@ -353,56 +366,12 @@ export function closeSessionPane(
 /**
  * How many of these decorated panes are still ON SCREEN.
  *
- * The registry outlives panes — one the user closed by hand is a row and
- * nothing else — so "how many rows are there" is the wrong count for deciding
- * whether the window's label bar may come down (it never would).
- *
- * An UNREADABLE pane list counts every candidate as present, and that
- * direction is deliberate: keeping the bar up costs a stale border line that
- * the next spawn re-establishes anyway, while taking it down over a live
- * sibling blanks a border somebody is reading.
+ * DELETED WITH ITS ONLY CALLER (2026-09-17, user decision). It answered that
+ * question for the label-bar release, and the release is gone: the bar is
+ * turned on by whoever opens a decorated pane and is never turned off, because
+ * toggling `pane-border-status` resizes every pane in the window (measured:
+ * SIGWINCH, rows 84 ↔ 83).
  */
-export function countDecoratedPanes(
-  paneIds: readonly string[],
-  livePanes: readonly string[] | undefined,
-): number {
-  if (livePanes === undefined) return paneIds.length;
-  return paneIds.filter((id) => livePanes.includes(id)).length;
-}
-
-
-/**
- * May THIS close take the window's label bar down with it?
- *
- * WHY THE QUESTION EXISTS AT ALL. `pane-border-status` / `pane-border-format`
- * are WINDOW options: every pane in the window shares them, including panes
- * this session never opened. Turning them on is what makes a decorated border
- * visible (C1); leaving them on forever is litter in the user's window, and
- * turning them off while a sibling is still labelled blanks a border that is
- * still in use. So it is released by the LAST decorated pane, and only by a
- * session that owns them.
- *
- * "Owns them" is the second half, and it is not a detail. Two facts decide it,
- * and each was measured as a defect on its own (2026-09-05):
- *
- *  - a session that is only a GUEST in an orchestration's window cannot see
- *    the manager's panes at all (they live in another session's registry), so
- *    it can never know it is the last one and never releases;
- *  - a MANAGER can see them — they are its own children — so it counts them
- *    with `countDecoratedPanes` like any other decorated pane, instead of
- *    being exempted by role.
- *
- * All five close paths (judge_close, declare_done's cascade, judge_spawn's
- * rollback, a `fresh` round's pre-kill, orchestrator_close) ask exactly this.
- */
-export function releasesWindowLabels(input: {
-  /** Panes THIS session decorated that are still open once this one is gone. */
-  remainingDecoratedPanes: number;
-  /** True when an orchestration owns this window's label bar. */
-  insideOrchestration: boolean;
-}): boolean {
-  return !input.insideOrchestration && input.remainingDecoratedPanes === 0;
-}
 
 // ---------------------------------------------------------------------------
 // Opening a pane
@@ -701,13 +670,16 @@ export function buildJudgeRecoverCommand(sessionId: string, piBin = "pi"): strin
   return [piBin, "--exclude-tools", "edit,write", "--session-id", sessionId];
 }
 
-/** Stable border label for a judge pane: `@review-<role>`. */
-export function judgePaneLabel(role: string): string {
-  const safe = role.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 20) || "review";
-  return `@review-${safe}`;
-}
-
-/** The decoration a judge pane gets — the same shape a child gets. */
-export function judgePaneDecor(judgeId: string, role: string, state: ChildState = "working"): SessionPaneDecor {
-  return { label: judgePaneLabel(role), colorSeed: judgeId, state };
+/**
+ * The decoration a judge pane gets — the same shape a child gets, and the
+ * owner it carries is the OPENER's own identity (lib/orchestrator-pane-decor.ts
+ * `selfPaneOwner`), never a string a caller made up.
+ */
+export function judgePaneDecor(
+  judgeId: string,
+  role: string,
+  owner: string,
+  state: ChildState = "working",
+): SessionPaneDecor {
+  return { label: judgePaneLabel(role, owner), colorSeed: judgeId, state };
 }

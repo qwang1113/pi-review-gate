@@ -64,6 +64,94 @@ function deny(text: string): ToolReply {
   return { content: [{ type: "text", text }], details: {}, isError: true };
 }
 
+/**
+ * THE TOPICS THIS MODULE'S TOOLS ASK UNDER — deliberately NOT `string`.
+ *
+ * The channel's own topic union is the authority on which topics exist
+ * (`lib/orchestrator-channel.ts`), and `askEitherSide` accepts only those; a
+ * bare `string` here silently dropped that check (caught by the precommit
+ * typecheck, not by the tests — node strips types without checking them).
+ * This module asks under exactly these three, so it names exactly these.
+ */
+type ConsentTopic = "scope-limit" | "sensitive-edit" | "tmux-access";
+
+/**
+ * THE ONE CONSENT DIALOG (2026-09-17, user decision — quality round P1: the
+ * third consent tool had just copied the same ~30 lines again, and the file
+ * went 459 → 606).
+ *
+ * What the three tools ACTUALLY share is not their copy — each still writes
+ * its own `spec`, `consentBody` and consequences — but this mechanism: ask
+ * BOTH sides (the pane's human, and for an orchestration child its project
+ * manager through the channel), parse the answer against the spec, and turn
+ * it into one of three outcomes. A dialog that could not be SHOWN is never a
+ * decline, so it does not burn the session's anti-grinding lock.
+ *
+ * AUTHORIZATION IS A WHITELIST, NEVER A ROW POSITION (functional reviewer P2
+ * + quality round P1, 2026-09-17 — both judges caught the same first draft).
+ * It read `option !== refuseLabel`, i.e. granted by elimination, and that
+ * flips the failure direction on a consent path: `parseChoice` returns an
+ * UNRECOGNIZED line as `{kind:"chose", option:<verbatim>}` (lib/choice-dialog.ts),
+ * so any text that was not the refusal row became a GRANT — and a future spec
+ * whose non-last row is not an authorization would have read as consent too.
+ * Each caller therefore names its own grant labels, exactly as the three
+ * copies did, and everything else is a refusal.
+ */
+async function askConsent(
+  deps: ConsentToolDeps,
+  uiCtx: UiContext,
+  opts: {
+    topic: ConsentTopic;
+    spec: ChoiceSpec;
+    consentBody: string;
+    reason: string;
+    /** The rows that mean YES for this tool — the caller's own labels. */
+    grants: readonly string[];
+  },
+): Promise<
+  | { outcome: "granted"; option: string }
+  | { outcome: "declined"; declineReason?: string }
+  | { outcome: "unshowable" }
+> {
+  const spec = opts.spec;
+  // NO GRANT NAMED ⇒ there is nothing this tool may read as consent: fail
+  // closed without rendering a box whose every answer would be a refusal.
+  if (opts.grants.length === 0) return { outcome: "unshowable" };
+  // …and a spec whose EVERY row is a grant is a box the user cannot say no
+  // in — refuse to show it rather than make "yes" the only reachable answer.
+  if (spec.options.every((o) => opts.grants.includes(o))) return { outcome: "unshowable" };
+  try {
+    const outcome = await deps.askEitherSide(
+      {
+        dialogKind: "select",
+        topic: opts.topic,
+        // The channel record carries the SAME text the human sees: a project
+        // manager answering on the user's behalf has to read the consequences
+        // (what granting covers, what refusing locks) before it can answer.
+        title: `${spec.title}\n${opts.consentBody}`,
+        options: choiceRows(spec),
+        ...(opts.reason ? { payload: `AI 给出的理由（未经核实）: ${opts.reason.slice(0, 300)}` } : {}),
+      },
+      uiCtx.hasUI === true,
+      (signal) => deps.askChoice(uiCtx, spec, { body: opts.consentBody, signal }),
+    );
+    const pick = parseChoice(outcome.answer, spec);
+    // WHITELIST: only a row THIS tool called a grant authorizes anything — an
+    // unrecognized answer is a refusal, not a consent.
+    if (pick.kind === "chose" && opts.grants.includes(pick.option)) {
+      return { outcome: "granted", option: pick.option };
+    }
+    // A refusal typed into the template's reason box is an objection the agent
+    // can act on — dropping it would make the user repeat themselves.
+    return {
+      outcome: "declined",
+      ...(pick.kind === "declined" && pick.reason ? { declineReason: pick.reason } : {}),
+    };
+  } catch {
+    return { outcome: "unshowable" };
+  }
+}
+
 // ---------- request_scope_limit ----------
 
 export async function doRequestScopeLimit(
@@ -146,10 +234,6 @@ export async function doRequestScopeLimit(
     // the gate never nudges the user into weakening it.
     recommended: "拒绝（保持完整门禁）",
   };
-  let ok = false;
-  let dialogFailed = false;
-  /** The user's own typed reason for refusing, when they gave one. */
-  let declineReason: string | undefined;
   const consentBody =
     "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
     `既有变更 ${preexisting.length} 个` +
@@ -157,43 +241,23 @@ export async function doRequestScopeLimit(
     `；本会话修改 ${sessionRel.length} 个（清单见上方消息）。\n` +
     "同意后：审查只需覆盖本会话自己的修改；若本会话没有任何修改，ship 拦截将解除。\n" +
     "拒绝后：AI 本会话内不能再次请求缩小范围。";
-  try {
-    const outcome = await deps.askEitherSide(
-      {
-        dialogKind: "select",
-        topic: "scope-limit",
-        // The channel record carries the SAME text the human sees — the
-        // consequences (what granting covers, what refusing locks) are the
-        // half a project manager answering on the user's behalf must read.
-        title: `${spec.title}\n${consentBody}`,
-        options: choiceRows(spec),
-        ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
-      },
-      uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
-    );
-    const pick = parseChoice(outcome.answer, spec);
-    ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
-    // A refusal typed into the template's reason box is an objection the agent
-    // can act on — dropping it would make the user repeat themselves.
-    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
-  } catch { dialogFailed = true; }
+  const consent = await askConsent(deps, uiCtx, { topic: "scope-limit", spec, consentBody, reason, grants: [GRANT_LABEL] });
 
   // A dialog that could not be shown is NOT a decline: fail closed for
   // THIS request without burning the session's anti-grinding lock.
-  if (dialogFailed) {
+  if (consent.outcome === "unshowable") {
     return deny(
       "review-gate: the confirmation dialog could not be shown — no scope limit granted (fail-closed), " +
       "and this does NOT count as a user decline; retry when an interactive dialog is possible.",
     );
   }
 
-  if (!ok) {
+  if (consent.outcome === "declined") {
     deps.declineScopeLimit();
     return deny(
       "review-gate: DECLINED the scope limit (by the user or the project manager) — the FULL gate applies (pre-existing " +
       "changes included). Scope requests are now locked for this session; continue the loop and cover everything." +
-      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
+      (consent.declineReason ? `\n\n用户的意见：${consent.declineReason}` : ""),
     );
   }
 
@@ -232,6 +296,118 @@ export async function doRequestScopeLimit(
           "ship gate is disarmed for the pre-existing changes; you may proceed.",
     }],
     details: { granted: true, stillArmed, sessionFiles: sessionRel },
+  };
+}
+
+// ---------- request_tmux_access ----------
+
+/**
+ * The user's permission to type tmux from bash (user decision, 2026-09-17).
+ *
+ * THE ONE RULE THAT MAKES THIS SAFE: the agent asks, the USER decides. There is
+ * no `confirmed` parameter, the dialog is in the way, and a dialog that cannot
+ * be shown is fail-closed — never a grant, and never a decline either (a
+ * decline locks the session's requests, so a broken dialog must not burn it).
+ *
+ * TWO SCOPES, and the safest one is the recommendation: `once` spends itself on
+ * the next tmux command, `session` rides the handoff to the successor as well.
+ * The gate never nudges the user toward handing out the wider one — same rule
+ * as the scope-limit dialog next door.
+ */
+export async function doRequestTmuxAccess(
+  deps: ConsentToolDeps,
+  params: Record<string, unknown>,
+  ctx: unknown,
+): Promise<ToolReply> {
+  const state = deps.state();
+  const uiCtx = ctx as UiContext;
+  const reason = String(params.reason ?? "");
+
+  if (state.taskMode === "normal") {
+    return { content: [{ type: "text", text: "review-gate: normal mode — the gate is off, nothing refuses tmux here; no authorization needed." }], details: {} };
+  }
+  // Same orchestrator self-block as the other two consent tools: the manager's
+  // OWN session has no channel side to answer its own dialog, so asking here
+  // would freeze it on a human-only box. A child asks, the manager answers.
+  if (state.taskMode === "orchestrator" && !deps.canChannelDialogs()) {
+    return deny(
+      "review-gate: 你是项目经理（orchestrator 会话）—— 不要自己调 request_tmux_access。" +
+      "子会话的授权请求会出现在 orchestrator_wait 回执里，用 orchestrator_answer 代答；" +
+      "但代答**需要用户先授予你 `tmux-access` 作用域**（`/gate-grant tmux-access`），" +
+      "否则门禁会当场把你代答的那个答案转给用户拍板。",
+    );
+  }
+  if (state.tmuxAccess) {
+    return {
+      content: [{ type: "text", text: `review-gate: 已经有 tmux 授权了（scope=${state.tmuxAccess.scope}）—— 直接用，不用再问。` }],
+      details: { granted: true, alreadyGranted: true, scope: state.tmuxAccess.scope },
+    };
+  }
+  if (deps.tmuxAccessDeclined()) {
+    return deny("review-gate: a tmux-access request was already DECLINED this session (by the user or the project manager) — do not ask again; use the orchestration tools, or let the USER run the command by hand.");
+  }
+  if (!uiCtx.hasUI) {
+    return deny("review-gate: no interactive UI — tmux access requires the user's explicit dialog approval (fail-closed). Ask the user out-of-band.");
+  }
+
+  const SESSION_LABEL = "允许：本会话和接力继任者都能用 tmux";
+  const ONCE_LABEL = "只允许这一次";
+  const spec: ChoiceSpec = {
+    title: "review-gate: AI 请求在 bash 里使用 tmux 命令——是否授权？",
+    options: [SESSION_LABEL, ONCE_LABEL, "拒绝"],
+    // THE NARROW ONE IS RECOMMENDED. Granting tmux is handing the agent part of
+    // the user's own working environment (panes, windows, the server itself),
+    // and this gate never nudges toward the wider permission.
+    recommended: ONCE_LABEL,
+  };
+  const consentBody =
+    "被拦下的 tmux 操作是两类：会破坏或越出你 tmux 环境的（kill-server / kill-session / " +
+    "kill-window / new-session / new-window / `set -g` / kill-pane -a），以及项目经理模式下" +
+    "「已有编排工具替它做」的那三个（split-window / send-keys / kill-pane）。\n" +
+    `「${SESSION_LABEL}」：本会话有效，且接力（session_handoff）的继任者继承——一块工作换人不用重问。\n` +
+    `「${ONCE_LABEL}」：下一条 tmux 命令用掉就没。\n` +
+    "「拒绝」：本会话不再允许申请，agent 只能用编排工具或请你手跑。\n" +
+    "只读命令（tmux ls、display-message 等）从来不在拦截范围。";
+  // WHICH grant this was is the caller's to read: this spec offers two, and
+  // `askConsent` only promises that the answer was one of the two it named.
+  const consent = await askConsent(deps, uiCtx, {
+    topic: "tmux-access", spec, consentBody, reason,
+    grants: [SESSION_LABEL, ONCE_LABEL],
+  });
+
+  if (consent.outcome === "unshowable") {
+    return deny(
+      "review-gate: the authorization dialog could not be shown — no tmux access granted (fail-closed), " +
+      "and this does NOT count as a user decline; retry when an interactive dialog is possible.",
+    );
+  }
+  if (consent.outcome === "declined") {
+    deps.declineTmuxAccess();
+    return deny(
+      "review-gate: DECLINED tmux access (by the user or the project manager) — tmux commands stay blocked " +
+      "in this session and the request is locked: do not ask again. Use the orchestration tools " +
+      "(orchestrator_spawn / orchestrator_close / session_handoff), or ask the USER to run the command. " +
+      (consent.declineReason ? `\n\n用户的意见：${consent.declineReason}` : ""),
+    );
+  }
+  // WHICH grant this was is the caller's to read: this spec offers two, and
+  // `askConsent` only promises that the answer was one of the two it named.
+  const once = consent.option === ONCE_LABEL;
+
+  state.tmuxAccess = { at: new Date().toISOString(), scope: once ? "once" : "session" };
+  deps.persist(ctx);
+  deps.log(`tmux access granted (scope=${state.tmuxAccess.scope})`);
+  return {
+    content: [{
+      type: "text",
+      text: once
+        ? "review-gate: the user GRANTED tmux access for ONE command. Run exactly what you described, now — " +
+          "the grant is spent by the next tmux operation that passes the gate."
+        : "review-gate: the user GRANTED tmux access to this session and its handoff successor. tmux " +
+          "commands now run; the orchestration tools remain the correct way to open and close child " +
+          "sessions, and the grant dies with the work (an `orchestrator_attach` takeover inherits none of it).",
+    }],
+    details: { granted: true, scope: state.tmuxAccess.scope },
   };
 }
 
@@ -335,10 +511,6 @@ export async function doRequestSensitiveEdit(
     // does not recommend handing them to a model.
     recommended: "拒绝（保持拦截）",
   };
-  let ok = false;
-  let dialogFailed = false;
-  /** The user's own typed reason for refusing, when they gave one. */
-  let declineReason: string | undefined;
   const consentBody =
     `文件（完整路径）: ${absPath}\n` +
     `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}\n` +
@@ -347,41 +519,23 @@ export async function doRequestSensitiveEdit(
     "请确认这确实是你本次要求的一部分；文件里的密钥/凭据会暴露给模型。\n" +
     `文件（默认禁止 AI 写入）: ${shownPath}\n` +
     `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}`;
-  try {
-    const outcome = await deps.askEitherSide(
-      {
-        dialogKind: "select",
-        topic: "sensitive-edit",
-        // The channel record carries the SAME text the human sees — a project
-        // manager answering on the user's behalf cannot authorize a path it
-        // was never shown.
-        title: `${spec.title}\n${consentBody}`,
-        options: choiceRows(spec),
-        ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
-      },
-      uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: consentBody, signal }),
-    );
-    const pick = parseChoice(outcome.answer, spec);
-    ok = pick.kind === "chose" && pick.option === GRANT_LABEL;
-    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
-  } catch { dialogFailed = true; }
+  const consent = await askConsent(deps, uiCtx, { topic: "sensitive-edit", spec, consentBody, reason, grants: [GRANT_LABEL] });
 
   // A dialog that could not be shown is NOT a decline: fail closed for THIS
   // request without burning the path's anti-grinding lock.
-  if (dialogFailed) {
+  if (consent.outcome === "unshowable") {
     return deny(
       "review-gate: the confirmation dialog could not be shown — no authorization granted " +
       "(fail-closed), and this does NOT count as a user decline; retry when a dialog is possible.",
     );
   }
 
-  if (!ok) {
+  if (consent.outcome === "declined") {
     deps.sensitiveDeclinedPaths.add(absPath);
     return deny(
       `review-gate: DECLINED editing "${raw}" (by the user or the project manager). This path is now locked for the session — ` +
       "do not ask again. Describe the change you wanted and let the user apply it." +
-      (declineReason ? `\n\n用户的意见：${declineReason}` : ""),
+      (consent.declineReason ? `\n\n用户的意见：${consent.declineReason}` : ""),
     );
   }
 
@@ -432,6 +586,29 @@ export function registerConsentRequestTools(host: ToolHost, deps: ConsentToolDep
       reason: Type.String({ description: "One-line justification: which unmet requirements target pre-existing changes (shown to the user as untrusted data)" }),
     }),
     execute: (_id, params, _signal, _onUpdate, ctx) => doRequestScopeLimit(deps, params, ctx),
+  });
+
+  host.registerTool({
+    name: "request_tmux_access",
+    label: "Request Tmux Access",
+    description:
+      "Ask the USER for authorization to run tmux commands from bash. The gate REFUSES an " +
+      "unauthorized tmux operation (a destructive one like `kill-server` / `kill-session` / " +
+      "`new-session` / `set -g`, or, in project-manager mode, one an orchestration tool already " +
+      "does properly: `split-window` / `send-keys` / `kill-pane`), and this is the ONLY way to " +
+      "lift that. The extension shows the user the gate's dialog; in an orchestration the child " +
+      "asks its project manager through the channel, but the manager may only answer after the " +
+      "USER granted it the `tmux-access` scope (same rule as a sensitive file — `kill-server` " +
+      "would take the user's whole session with it). A grant covers THIS session and the " +
+      "`session_handoff` successor it names, so " +
+      "a long piece of work does not re-ask after a handover; 'once' is consumed by the next tmux " +
+      "command. An `orchestrator_attach` takeover inherits nothing. Read-only tmux commands " +
+      "(`tmux ls`, `display-message`) were never gated. Ask only when the work genuinely needs " +
+      "tmux, and say what you will run.",
+    parameters: Type.Object({
+      reason: Type.String({ description: "One line: which tmux command(s) and why (shown to the user as untrusted data)" }),
+    }),
+    execute: (_id, params, _signal, _onUpdate, ctx) => doRequestTmuxAccess(deps, params, ctx),
   });
 
   host.registerTool({

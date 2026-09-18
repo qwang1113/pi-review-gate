@@ -52,7 +52,7 @@ import {
   watch as fsWatch, type FSWatcher,
 } from "node:fs";
 import { tmpdir, homedir, hostname } from "node:os";
-import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
+import { join as pathJoin, dirname as pathDirname, resolve as pathResolve, basename as pathBasename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
@@ -82,7 +82,7 @@ import { hostReasonEditor, type CustomDialogHost, type ReasonEditor } from "../l
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
-import { buildGateWidget, type GateWidgetFacts } from "../lib/ui-widget.ts";
+import { buildGateWidget, showsRoundReading, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -184,6 +184,7 @@ import {
   askThroughChannel,
   bindingPath,
   decideReportedChildState,
+  describeToolActivity,
   pendingInstructions,
   reportState,
   type ChannelDialogOutcome,
@@ -212,11 +213,12 @@ import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
   closeSessionPane,
-  countDecoratedPanes,
   judgePaneDecor,
   openSessionPane,
-  releasesWindowLabels,
 } from "../lib/session-factory.ts";
+// The ONE pane-identity renderer (2026-09-18): what a pane border calls THIS
+// session when it opens a judge.
+import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import {
   readJudgeSideEnv,
   gateStatePersistSkip,
@@ -236,6 +238,14 @@ import {
 import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
 import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
+import { sideEffectsEnabled } from "../lib/side-effects.ts";
+import {
+  describeNotifyOutcome,
+  mayNotifyUser,
+  type UserNotifyKind,
+  type UserNotifyOutcome,
+} from "../lib/user-notify.ts";
+import { createUserNotifyRuntime } from "../lib/user-notify-runtime.ts";
 import { isOwnedChildPane } from "../lib/orchestrator-delivery.ts";
 import {
   foldBackgroundWaits,
@@ -250,7 +260,7 @@ import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
 // repository's own worst example of the architecture rule this round adds.
-import { newOrchestrationId, orchestrationIdFromEnv, ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
+import { orchestrationIdFromEnv, ORCHESTRATION_ID_ENV, startupOrchestrationId, storedRuntimeIsMine } from "../lib/orchestration-id.ts";
 import { orchestratorDoneProblems } from "../lib/orchestrator-gate.ts";
 import {
   ORCHESTRATOR_DIRECTIVE,
@@ -1165,6 +1175,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   // once the user DECLINES a scope-limit dialog, the agent cannot re-pop it
   // for the rest of the session. /gate-reset clears it. In-memory only.
   let scopeLimitDeclined = false;
+  // The same lock for request_tmux_access (user decision, 2026-09-17). The
+  // GRANT is not in-memory — it lives in the sidecar (`state.tmuxAccess`)
+  // because the user asked for it to cover a handoff successor too; the
+  // REFUSAL is, because "do not ask again" is about this session's nagging.
+  let tmuxAccessDeclined = false;
   // Repo-relative paths of the files THIS session actually edited (successful
   // edit-tool results only). Feeds the request_scope_limit grant (what stays
   // in scope) and the scope directive in the per-turn prompt. In-memory; a
@@ -1949,9 +1964,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       completedAt: state.completion?.at,
     });
     const now = Date.now();
-    const changed = reported !== lastReportedChildState;
+    const changed = reported !== lastReportedChildState || lastToolActivity !== lastReportedActivity;
     if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
     lastReportedChildState = reported;
+    lastReportedActivity = lastToolActivity;
     lastChildReportAt = now;
     const settledSince = lastSettledAt !== undefined && toolCallsSinceSettle === 0 ? lastSettledAt : undefined;
     reportState(
@@ -1970,6 +1986,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         // A supervisor may act on `idle` the moment it sees this, without
         // waiting out the confirmation window.
         ...(settledSince === undefined ? {} : { settledSince }),
+        // WHAT it is doing, for a manager that has only the state word to go on
+        // (2026-09-17, user decision): `working · 自上次推进 3200s` cannot tell
+        // "reading a large tree" from "spinning on the same search".
+        ...(lastToolActivity === undefined ? {} : { activity: lastToolActivity }),
       },
     );
   }
@@ -2005,6 +2025,15 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
   let lastChildReportAt = 0;
   let lastReportedChildState: ChildReportedState | undefined;
+  /**
+   * The activity line last written to the channel.
+   *
+   * Tracked so a NEW tool call republishes the state at once instead of
+   * waiting out `CHILD_STATE_REFRESH_MS` — a receipt that says "working · 最近
+   * read(x)" while the child has been running `make test` for a minute is
+   * exactly the staleness this field exists to remove.
+   */
+  let lastReportedActivity: string | undefined;
   /**
    * Epoch ms of the child's last FORWARD PROGRESS (E). Advanced ONLY by a real
    * agent event — a tool result or a turn boundary — never by the heartbeat, so
@@ -2050,6 +2079,17 @@ export default function reviewGate(pi: ExtensionAPI) {
    * waiting on its own subagent is work, not a stop.
    */
   let backgroundWaits: BackgroundWaits = NO_BACKGROUND_WAITS;
+  /**
+   * The most recent tool call this session made, rendered for the receipt.
+   *
+   * WHY IT RIDES ON `tool_call` AND NOT `tool_result`: the question the
+   * manager is asking is "what is it doing RIGHT NOW", and the call is placed
+   * before the work starts — the result can be minutes later, and a child
+   * whose tool has been running for ten minutes should read as "running
+   * `bash(make test)`", not as the last thing that already finished.
+   * (lib/orchestrator-child-channel.ts `describeToolActivity` renders it.)
+   */
+  let lastToolActivity: string | undefined;
   /** Feed one tool result into the background-wait fold (see the module). */
   function observeBackgroundToolResult(event: {
     toolName: string;
@@ -2468,8 +2508,42 @@ export default function reviewGate(pi: ExtensionAPI) {
   // every child reaching whoever currently holds the role. A session started
   // without one mints its own the first time it needs it.
   let orchestrationIdValue: string | undefined = orchestrationIdFromEnv();
+  /**
+   * The session that HOLDS this orchestration, as it is written to the
+   * sidecar (see `OrchestratorRuntime.ownerSessionId`).
+   *
+   * It answers ONE question — "is the runtime on disk mine to resume?" —
+   * and it is deliberately not `state.sessionId`: a fresh session that
+   * inherited a foreign runtime keeps it on disk under its OWN session id
+   * (the B1 rule), so the sidecar's session id cannot tell an owner from a
+   * bystander one reload later. Only the three legitimate holders set this:
+   * the session that resolved the address below, and the one that adopted it
+   * through `orchestrator_attach`.
+   */
+  let orchestrationOwner: string | undefined;
   function currentOrchestrationId(): string {
-    if (!orchestrationIdValue) orchestrationIdValue = newOrchestrationId(primaryRepoRoot, Date.now());
+    if (!orchestrationIdValue) {
+      const stored = state.orchestrator;
+      orchestrationIdValue = startupOrchestrationId({
+        env: process.env,
+        storedId: stored?.orchestrationId,
+        // The durable answer, never "did the sidecar carry my session id" —
+        // the reset path re-stamps that on every persist.
+        storedBelongsToThisSession: storedRuntimeIsMine({
+          ownerSessionId: stored?.ownerSessionId,
+          sessionId: state.sessionId,
+        }),
+        repoRoot: primaryRepoRoot,
+      });
+    }
+    // WHICHEVER WAY IT RESOLVED, THIS SESSION HOLDS IT: an id inherited from
+    // the environment (a relay successor), this session's own resumed runtime,
+    // or a fresh mint. The claim is what the sidecar needs to let THIS session
+    // resume the record after a reload, and it is written with the runtime
+    // (`persistOrchestration`). Note the bystander case cannot reach it: a
+    // stored runtime owned by another session is never adopted here, so the
+    // address this line claims is this session's own new one.
+    orchestrationOwner = state.sessionId ?? undefined;
     return orchestrationIdValue;
   }
   /**
@@ -2484,6 +2558,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function adoptOrchestrationId(id: string): void {
     orchestrationIdValue = id;
+    // TAKEOVER IS A CLAIM: from here this session owns the address, and the
+    // sidecar must say so, or its own reload would refuse to resume it.
+    orchestrationOwner = state.sessionId ?? undefined;
   }
   /** Started BY an orchestrator as a worker (not as its relay successor). */
   function isOrchestrationChild(): boolean {
@@ -2494,7 +2571,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   // it is always fresh by the time one of them runs.
   let latestCtx: ExtensionContext | undefined;
   function persistOrchestration(runtime: OrchestratorRuntime): void {
-    state.orchestrator = runtime;
+    // THE OWNER RIDES WITH THE RECORD. A runtime written by a session that
+    // holds the address carries that session as its owner; one inherited but
+    // never claimed (the B1 reset path) keeps the owner it already had, which
+    // is what stops a reload from turning a bystander into the owner.
+    state.orchestrator = orchestrationOwner === undefined
+      ? runtime
+      : { ...runtime, ownerSessionId: orchestrationOwner };
     // No `if (latestCtx)`: an in-memory-only runtime would silently lose the
     // user's plan approval and the child registry on a restart. persist()
     // takes the context only to refresh the status widget, so a missing one
@@ -2504,6 +2587,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   const orchestratorDeps = createOrchestratorDeps({
     repoRoot: primaryRepoRoot,
     taskMode: () => state.taskMode,
+    // THE one banner channel, handed to the tool kit as well: `add-decision`
+    // announces a decision the moment it registers one (constraint 11), and
+    // the deps only forward the asking — every rule lives in the policy module.
+    notifyUser: (opts) => raiseBanner({ kind: opts.kind, detail: opts.detail }),
     // The requirement restatement `submit` demands (2026-09-06). Read live
     // off the state object rather than captured: `propose_restatement` writes
     // it during the same session, and a captured value would make the tool
@@ -2731,15 +2818,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     onHandoff: () => handoffRetirement(),
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
-  // A manager's window holds BOTH kinds of decorated pane. The session tools
-  // need the judge count for the one decision they share with the judge close
-  // paths: may this close take the window's shared label bar down?
-  //
-  // Attached to the deps object rather than spread into a copy — a copy
-  // freezes every field at registration time, and these deps are one live
-  // object the rest of the session keeps using.
+  // The session tools take the orchestration deps as they are, through an
+  // alias — no extra capability, and no copy: a spread would freeze every
+  // field at registration time, and these deps are one live object the rest of
+  // the session keeps using. (They were once handed a judge-pane count for the
+  // window's shared label bar; that judgement is deleted — the bar is turned
+  // on and never turned off, see lib/session-factory.ts `closeSessionPane`.)
   const sessionDeps: OrchestratorSessionDeps = orchestratorDeps;
-  sessionDeps.decoratedJudgePanes = () => decoratedJudgePaneCount();
   registerOrchestratorSessionTools(pi, sessionDeps);
 
   // ---------- THE ONE HANDOVER (lib/session-handoff-tools.ts) ----------
@@ -3195,46 +3280,24 @@ export default function reviewGate(pi: ExtensionAPI) {
   const SUPERVISION_INTERVAL_MS = 10_000;
 
   /**
-   * How many DECORATED child panes this session still owns.
+   * How many DECORATED child panes this session still owns — the number the
+   * label-bar release used to consult, and now consulted by nobody.
    *
-   * Only a project manager owns any: they are the panes `orchestrator_spawn`
-   * coloured and labelled. Everything else — a plain loop session, a child of
-   * an orchestration — owns none, and a child could not count the manager's
-   * anyway (they are in another session's registry).
-   *
-   * It exists for ONE decision: may this close take the window's shared label
-   * bar down with it (`releasesWindowLabels`)? Counting only judge panes made
-   * a manager blank its children's borders; counting nothing made a manager
-   * leave the bar switched on forever.
+   * KEPT AS A KNOWLEDGE NOTE, NOT AS CODE (2026-09-17, user decision): the
+   * release is gone, and with it every reader of this count. `declare_done`
+   * reports live CHILDREN from the registry directly (`orchestrator-gate.ts`),
+   * so nothing here is load-bearing any more.
    */
-  function liveOrchestrationChildren(): number {
-    if (state.taskMode !== "orchestrator") return 0;
-    try {
-      return orchestratorDeps.runtime().children.filter((c) => !c.closedAt).length;
-    } catch { return 0; }
-  }
 
   /**
-   * Does SOMEONE ELSE own this window's label bar?
-   *
-   * True for a session that lives in an orchestration's window without being
-   * its manager: the decorated panes around it belong to another session's
-   * registry, so it can never know whether it is the last one and must never
-   * release the shared border options.
-   *
-   * NOT simply "the environment carries an orchestration id": a MANAGER
-   * carries it too the moment it inherited the orchestration (a relay
-   * successor, or one that attached to it by id), and filing that manager as
-   * a guest would leave the label bar switched on forever — the same defect
-   * this pair of predicates exists to avoid, entered through a third door.
-   *
-   * Deliberately NOT `isOrchestrationChild()` above: that one answers "was I
-   * started as a worker" (it drives the child directive and the mode guard),
-   * and widening it would change two unrelated decisions.
+   * `labelBarOwnedByOthers()` stood here — the "is this session only a GUEST
+   * in someone else's orchestration window" predicate, which existed solely to
+   * decide whether a close could take the window's shared border options down.
+   * GONE with that decision (2026-09-17, user decision): the bar is turned on
+   * by whoever opens a decorated pane and is never turned off, because the
+   * toggle resizes every pane in the window (measured: SIGWINCH, rows 84 ↔ 83)
+   * and its guest test was wrong in both directions across sessions.
    */
-  function labelBarOwnedByOthers(): boolean {
-    return Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()) && state.taskMode !== "orchestrator";
-  }
 
   /**
    * What the children need from the supervisor RIGHT NOW, as text lines.
@@ -3539,6 +3602,24 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.taskMode === "orchestrator" && orch) return orch;
     return state.sessionId ?? undefined;
   }
+
+  /**
+   * WHO THIS SESSION IS on a pane border — the `@<owner>` half of every judge
+   * pane this session opens (2026-09-18).
+   *
+   * Read from the session's own facts and never from a tool parameter: the
+   * child id it was spawned with (`RG_STATE_VARIANT`), the mode it runs in, and
+   * nothing else. It is NOT `callerIdentity()` — that one answers "may I touch
+   * this judge" and is an opaque session/orchestration id; this one answers
+   * "what should a human read", and an opaque id is exactly what the border
+   * must not print.
+   */
+  function paneOwnerIdentity(): string {
+    return selfPaneOwner({
+      stateVariant: SESSION_STATE_VARIANT,
+      orchestrator: state.taskMode === "orchestrator",
+    });
+  }
   /**
    * The judges THIS session owns — the deleted `childSessions` Map's scope.
    *
@@ -3596,21 +3677,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   /**
    * How many JUDGE panes of this session are decorated and still on screen.
    *
-   * The one consumer is the label-bar release (`releasesWindowLabels`): a
-   * project manager's window holds child panes AND review panes, and a close
-   * path that counts only its own kind either blanks the other kind's border
-   * or leaves the shared border line switched on forever. Both were measured
-   * (2026-09-05).
+   * DELETED WITH ITS ONLY CALLER (2026-09-17, user decision): it existed for
+   * the label-bar release, which is gone — see lib/session-factory.ts
+   * `closeSessionPane` for the measurement that decided it.
    */
-  function decoratedJudgePaneCount(): number {
-    const server = tmuxServerFrom(process.env);
-    return countDecoratedPanes(
-      ownJudges()
-        .filter((entry) => entry.paneId && paneClosable(entry, server))
-        .map((entry) => entry.paneId!),
-      listOwnWindowPanes(),
-    );
-  }
 
 
   /**
@@ -4228,6 +4298,40 @@ export default function reviewGate(pi: ExtensionAPI) {
     return true;
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // THE BANNER CHANNEL (user decision, 2026-09-17) — DEPS ASSEMBLY ONLY.
+  //
+  // The gate used to write an OSC escape to stdout and hope tmux forwarded it;
+  // it does not reliably (lib/user-notify.ts carries the measurement), and the
+  // manager could fire one whenever it liked. Both are gone.
+  //
+  // WHERE EACH HALF LIVES, and why: the POLICY (three kinds, who may send,
+  // argv, the click command) is lib/user-notify.ts; the RUNTIME (the resolved
+  // notifier, this session's tmux address, the spawn, the exit handler) is
+  // lib/user-notify-runtime.ts; and this file supplies the session's own
+  // plumbing and calls four methods. Two quality rounds asked for that split
+  // (an extension that is already ~9000 lines must not grow a fourth job) and
+  // both modules are testable without a session because of it.
+  // ─────────────────────────────────────────────────────────────────────
+  const notifyRuntime = createUserNotifyRuntime({
+    state: () => state,
+    persist: () => persist(latestCtx),
+    repoName: () => pathBasename(primaryRepoRoot),
+    taskMode: () => state.taskMode,
+    env: () => process.env,
+    interactive: () => sideEffectsEnabled(process.env, process.stdout.isTTY === true),
+    // The gate's own tmux runner: argv, no shell, and it refuses global option
+    // writes on the way (lib/orchestrator-tmux.ts).
+    runTmux: (argv) => runTmux(argv),
+  });
+  // KIND TWO of three is registered once, for the whole process: the handler
+  // is inside the runtime, and `markCleanShutdown` (called by the
+  // `session_shutdown` handler below) is what tells it a `/quit` from a crash.
+  notifyRuntime.armExitHandler();
+  /** Raise the banner for one event. Never throws; never claims delivery. */
+  const raiseBanner = (opts: { kind: UserNotifyKind; detail: string; blocking?: boolean }) =>
+    notifyRuntime.notify(opts);
+
   // `ctx` is optional because it is used for ONE thing — refreshing the status
   // widget. A caller that has no context (the orchestration tools persist from
   // a callback) must still be able to write the record: dropping the write
@@ -4322,6 +4426,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (restored && restored.sessionId === sessionId) {
       state = restored;
       continuationsInjected = restoredInjections;
+      // The orchestration runtime that came with it keeps its OWN
+      // `ownerSessionId` — that field, not this branch, is what answers "may
+      // this session resume it" (see `currentOrchestrationId`).
     } else if (restored && restored.sessionId !== sessionId) {
       state = emptyState(sessionId, restored.maxRounds ?? DEFAULT_MAX_ROUNDS);
       // THE ORCHESTRATION RUNTIME SURVIVES THE RESET (2026-09-06, B1).
@@ -4636,6 +4743,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // a repository there is no repo to bind it to, so it must not surface
     // as an unmet requirement either (2026-09-02, user decision).
     if (sessionInGit && !loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    // ROUND READING (2026-09-17, user decision): how many rounds THIS session
+    // SENT OUT — a loop session's own submissions, a judge pane's own round
+    // number. Both are already in memory (no git, no fingerprint, so the
+    // cheap-by-contract rule above holds). Sessions that never send anything
+    // (orchestrator / explore / normal) do not show the segment at all —
+    // `showsRoundReading` is the one place that rule lives, and a judge pane
+    // whose task never named a round shows nothing rather than a 0 it cannot
+    // back up.
+    const judgePane = isJudgePane();
+    const roundReading = judgePane ? judgeTaskRound : (state.sentReviewRounds ?? 0);
     return {
       mode: state.taskMode,
       nonGit: !sessionInGit,
@@ -4645,10 +4762,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       // git at all — no branch is shown.
       branch: sessionInGit ? currentBranch(primaryRepoRoot) ?? "(detached)" : undefined,
       edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
-      // ROUND READING (2026-09-17): the same in-memory counters /gate-status
-      // prints — no git, no fingerprint, so the cheap-by-contract rule above
-      // holds. Outside a repository there is no review to count.
-      ...(sessionInGit ? { rounds: state.rounds.length, maxRounds: state.maxRounds } : {}),
+      ...(sessionInGit && roundReading !== undefined &&
+          showsRoundReading({ mode: state.taskMode, judge: judgePane })
+        ? { rounds: roundReading }
+        : {}),
       unmet: completion,
     };
   }
@@ -4929,6 +5046,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     spec: ChoiceSpec,
     opts: { body?: string; signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
+    // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
+    // any session shows comes through this function, so "the gate has stopped
+    // and is waiting for the human" needs no second detector. The policy
+    // decides who may be told (a child session's questions belong to its
+    // manager, and the manager answers them) and the throttle keeps a
+    // re-opened dialog from ringing again.
+    //
+    // WAITING, NOT ANSWERING: the banner goes out as the box appears, which is
+    // the moment somebody who is NOT at the terminal needs to know.
+    raiseBanner({ kind: "needs-user", detail: spec.title });
     // NO BUDGET, NO TRUNCATION (user decision, 2026-09-16). This used to fit
     // the title and the body into a rendered-row budget, because a dialog tall
     // enough to push the spinner out of the viewport made pi's DEFAULT renderer
@@ -5170,12 +5297,37 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     appendLesson,
     bypassToken: () => bypassToken,
     setBypassToken: (token) => { bypassToken = token; },
+    // The tmux permission is read LIVE off the state: the grant is minted by a
+    // dialog mid-session, and a captured value would leave the first command
+    // after the grant still refused.
+    tmuxAccess: () => state.tmuxAccess,
+    consumeTmuxAccess: () => {
+      // One use, and only a ONE-SHOT is consumed: a session grant stays until
+      // the session (or its successor) ends.
+      if (state.tmuxAccess?.scope !== "once") return;
+      delete state.tmuxAccess;
+      persist(latestCtx);
+    },
     clearBypassToken,
     computeTokenBindings,
     setLastBlockedShip: (record) => { lastBlockedShip = record; },
   };
 
-  pi.on("tool_call", (event, ctx) => evaluateToolCall(shipGateHookDeps, event, ctx));
+  // ONE `tool_call` handler, TWO jobs, and the order is deliberate: the
+  // activity line is refreshed BEFORE the gate decides, so a tool call that
+  // gets blocked is still the last thing this session tried to do (the
+  // receipt's answer to "spinning or working" — 2026-09-17). Captured for
+  // every session and only ever READ by a supervisor looking at a child; a
+  // manager writing a plan pays one string assignment per call. Registering
+  // a SECOND handler here would be a second path, and the vendored hosts
+  // (test fixtures) keep exactly one handler per event.
+  pi.on("tool_call", (event, ctx) => {
+    lastToolActivity = describeToolActivity(
+      String((event as { toolName?: unknown }).toolName ?? ""),
+      (event as { input?: unknown }).input,
+    );
+    return evaluateToolCall(shipGateHookDeps, event, ctx);
+  });
 
   /**
    * THE HINTS RIDE THE RESULT (user decision, 2026-09-14).
@@ -7420,7 +7572,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       retired = true;
       retireJudgeLane(previous, {
         root,
-        opener,
         ownPane: process.env.TMUX_PANE?.trim() || undefined,
         tmuxServer: tmuxServerFrom(process.env),
         run: (argv: readonly string[]) => runTmux(argv),
@@ -7459,43 +7610,34 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     };
   }
 
-  /** What every judge-pane close needs to know about this session's tmux. */
+  /**
+   * What every judge-pane close needs to know about this session's tmux.
+   *
+   * `opener` used to be here too — the label-bar release compared it against
+   * each entry's opener to count "my" panes. That judgement is deleted
+   * (2026-09-17, user decision), and with it the parameter: what remains is
+   * the pane id to close and the runner that closes it.
+   */
   interface JudgeCloseCtx {
-    opener: string;
     ownPane: string | undefined;
     tmuxServer: string | undefined;
     run: JudgePaneRunner;
   }
 
   /**
-   * Close ONE judge's pane, with the label-bar judgement every close path in
-   * this file shares: the window's border line is released only when no
-   * decorated pane of this opener is left, and never by a guest in somebody
-   * else's orchestration.
+   * Close ONE judge's pane.
    *
    * ONE copy, two callers (the `fresh` kill and the lane retire). It was two
    * copies for exactly one round — they sat 150 lines apart and differed only
    * in which variable held the entry, which is how a rule with six copies gets
-   * its seventh (reviewer P2, 2026-09-05).
+   * its seventh (reviewer P2, 2026-09-05). Those two copies also each carried
+   * a copy of the label-bar release; that whole judgement is gone
+   * (2026-09-17), so what is left is the close itself.
    */
   function closeJudgePaneOf(entry: JudgeEntry, ctx: JudgeCloseCtx): void {
     if (!entry.paneId) return;
-    const others = countDecoratedPanes(
-      Object.values(judgeHierarchy)
-        .filter((other) =>
-          other.judgeId !== entry.judgeId
-          && other.openerId === ctx.opener
-          && other.paneId
-          && paneClosable(other, ctx.tmuxServer))
-        .map((other) => other.paneId!),
-      ctx.ownPane ? listJudgePanes(ctx.run, ctx.ownPane) : undefined,
-    );
-    const releases = ctx.ownPane !== undefined && releasesWindowLabels({
-      remainingDecoratedPanes: others,
-      insideOrchestration: labelBarOwnedByOthers(),
-    });
     try {
-      closeSessionPane(ctx.run, entry.paneId, releases ? { hideLabelsVia: ctx.ownPane! } : {});
+      closeSessionPane(ctx.run, entry.paneId);
     } catch { /* best effort */ }
   }
 
@@ -7758,11 +7900,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       if (existing.paneId && paneAlive === true && opts.fresh) {
         // FIFTH CLOSE PATH (reviewer, 2026-09-05). A `fresh` round kills the
         // incumbent and re-opens immediately, so the border line would come
-        // straight back — but the re-open can FAIL (no model chain, tmux gone),
-        // and this close also drops the registry row, after which nobody is
-        // left who could release it. So it makes the same judgement as every
-        // other close; the re-open turns the bar back on when it succeeds.
-        closeJudgePaneOf(existing, { opener, ownPane, tmuxServer, run });
+        // straight back — and the re-open can FAIL (no model chain, tmux
+        // gone), which is why this close also drops the registry row. It used
+        // to hand that failure to a label-bar judgement so the bar would not
+        // be stranded; there is nothing to strand any more (2026-09-17: the
+        // bar is turned on and left on).
+        closeJudgePaneOf(existing, { ownPane, tmuxServer, run });
       }
       if (paneAlive === false) reapReviewScratch(sessionId);
       // One removal, one table.
@@ -7826,7 +7969,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           sysPromptPath: files.sysPromptPath,
           model: files.model,
         }),
-        decor: judgePaneDecor(judgeId, role),
+        decor: judgePaneDecor(judgeId, role, paneOwnerIdentity()),
         // ONE write, one table, and it happens inside the open: the entry used
         // to be built here and mutated a second time, which is exactly how the
         // two drifted apart.
@@ -8047,6 +8190,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       ownPane: () => ownPane,
       now: () => Date.now(),
       tmuxServer: () => tmuxServerFrom(process.env),
+      paneOwner: () => paneOwnerIdentity(),
     };
     const notices: string[] = [];
     for (const [judgeId, entry] of Object.entries(judgeHierarchy)) {
@@ -8757,6 +8901,21 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // "this round dispatched one and has not recorded its verdict" has to
         // be recorded per round.
         if (judge.role === QUALITY_ROLE && d.judgeId) noteQualityRoundDispatched(root, d.judgeId);
+        // ONE ROUND SENT OUT (2026-09-17, user decision): the strip's `轮 N`.
+        // Counted HERE — a reviewer dispatch that reached the judge — and not
+        // where the verdict is recorded, because "how many rounds have I sent"
+        // is the question that reading answers, and a round a judge is still
+        // reading was sent. A REFUSED dispatch returns above, so a round that
+        // never left is never counted; the adviser / goal-auditor branches
+        // cannot reach this line at all.
+        if (judge.role === "reviewer") {
+          const sent = stateForRepo(root);
+          sent.sentReviewRounds = (sent.sentReviewRounds ?? 0) + 1;
+          // Persisted HERE and not with the round's other bookkeeping: the
+          // count is what the strip renders, and the strip has to move the
+          // moment the round is submitted (persist refreshes the widget).
+          persistRepo(ctx as unknown as ExtensionContext, root);
+        }
         accepted.push({
           role: judge.role,
           judgeId: d.judgeId ?? "(pending)",
@@ -8880,6 +9039,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       return resolved;
     },
     callerId: () => callerIdentity(),
+    paneOwner: () => paneOwnerIdentity(),
     // …and the identity a successor REPLACED, so a handover does not orphan the
     // reviewers its predecessor had already dispatched (2026-09-14).
     callerIds: () => callerIdentities(),
@@ -8924,25 +9084,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),
-    // WHO ELSE HAS A DECORATED PANE IN THIS WINDOW — the two halves of that
-    // question, because getting either wrong is visible to the user
-    // (reviewer P2 ×2, 2026-09-05).
-    //
-    // A CHILD of an orchestration cannot count the manager's panes at all:
-    // they are in another session's registry. So it never releases the bar and
-    // the manager does — that is `insideOrchestration`.
-    //
-    // A MANAGER, on the other hand, CAN count them: they are its own children.
-    // Blanket "a manager never releases" was the previous fix and it swung the
-    // defect the other way — a manager with no children left (or none yet)
-    // would leave the border line switched on forever. So it counts.
-    //
-    // THE ENV ALONE IS NOT THE CHILD TEST: a manager that INHERITED an
-    // orchestration (a relay successor, or one that attached to it by id)
-    // carries the very same variable, and reading it alone would file it as a
-    // child and never let it release either.
-    insideOrchestration: () => labelBarOwnedByOthers(),
-    otherDecoratedPanes: () => liveOrchestrationChildren(),
+    // Decorated panes were counted around here once — a guest test plus a
+    // manager's child count — to decide whether a close could take the window's
+    // shared label bar down. Both are GONE with that decision (2026-09-17, user
+    // decision): taking the bar down writes `pane-border-status`, which resizes
+    // EVERY pane in the window (measured: SIGWINCH, rows 84 ↔ 83), so the bar is
+    // turned on by whoever opens a decorated pane and never turned off.
     now: () => Date.now(),
     readText: (path) => {
       try {
@@ -9145,6 +9292,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   }
   registerJudgeSpawnTools(pi, {
     callerId: () => callerIdentity(),
+    paneOwner: () => paneOwnerIdentity(),
     hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy; },
     saveHierarchy: (next) => setHierarchy(next),
     channelIO: () => channelIO,
@@ -9154,7 +9302,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     tmuxServer: () => tmuxServerFrom(process.env),
     now: () => Date.now(),
     sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
-    insideOrchestration: () => labelBarOwnedByOthers(),
     resolveRepo: (requested) => {
       const resolved = resolveToolRepo(requested);
       if (resolved.ok) ensureHierarchyLoaded(resolved.root);
@@ -9533,7 +9680,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const alive = entry.paneId && ownPane && paneClosable(entry, tmuxServer)
       ? judgePaneAlive(run, ownPane, entry.paneId)
       : undefined;
-    if (alive === true) closeJudgePaneOf(entry, { opener: entry.openerId, ownPane, tmuxServer, run });
+    if (alive === true) closeJudgePaneOf(entry, { ownPane, tmuxServer, run });
     setHierarchy(removeJudge(judgeHierarchy, entry.judgeId));
     reapReviewScratch(entry.judgeId);
     log(`review-gate: cancelled the ${role} round of ${root} — ${why}`);
@@ -10536,11 +10683,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         const run = (argv: readonly string[]) => runTmux(argv);
         const closed: string[] = [];
         const tmuxServer = tmuxServerFrom(process.env);
-        // Only the panes this sweep will ACTUALLY close count as decorated:
-        // an entry it skips (a pane id from a tmux server that has since
-        // restarted) is not on screen and must not keep the label bar up
-        // forever (reviewer P2, 2026-09-05).
-        let remainingClosable = ownedJudges.filter((c) => c.paneId && paneClosable(c, tmuxServer)).length;
         for (const child of ownedJudges) {
           // `paneClosable`, not just "has a pane id": a persisted id from a
           // tmux server that has since restarted names whatever now holds that
@@ -10548,22 +10690,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           // ⇒ the entry and its scratch are still reclaimed below, we simply
           // do not send kill-pane into someone else's window.
           if (paneClosable(child, tmuxServer) && ownPane) {
-            remainingClosable -= 1;
             try {
-              // The LAST decorated pane takes the window's label bar down with
-              // it — judge panes turn it on (C1), so something has to turn it
-              // off or the gate leaves a permanent mark on the user's window.
-              // A CHILD of an orchestration never does (it cannot see the
-              // manager's panes); a MANAGER counts its live children, which
-              // are decorated panes of its own.
-              const releases = releasesWindowLabels({
-                remainingDecoratedPanes: remainingClosable + liveOrchestrationChildren(),
-                insideOrchestration: labelBarOwnedByOthers(),
-              });
-              // Through OUR pane: the dying one may already be gone, and a
-              // failed `setw` would leave the bar switched on for good.
-              const closeOpts = releases ? { hideLabelsVia: ownPane } : {};
-              if (closeSessionPane(run, child.paneId!, closeOpts).ok) closed.push(child.paneId!);
+              // Closing a pane no longer touches the window's label bar
+              // (2026-09-17, user decision): toggling `pane-border-status`
+              // resizes EVERY pane in the window (measured: SIGWINCH, rows
+              // 84 ↔ 83), and the release was wrong across sessions besides.
+              if (closeSessionPane(run, child.paneId!).ok) closed.push(child.paneId!);
             } catch { /* best effort */ }
           }
           try { reapReviewScratch(child.judgeId); } catch { /* best effort */ }
@@ -10775,6 +10907,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       loopStall = undefined; // a completed task is real progress
       stallNoticeShown = false;
       persist(ctx as unknown as ExtensionContext);
+      // KIND ONE of three (lib/user-notify.ts): the round's exit contract was
+      // met. Raised HERE, on the accepted path only — a refused `declare_done`
+      // is the session being told to keep working, not news for the human.
+      const notified = raiseBanner({ kind: "finished", detail: String(params.summary ?? "") });
       return {
         content: [{
           type: "text",
@@ -10784,7 +10920,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             (state.checkpoint?.precommitBypassed
               ? "\n注意：本次交付的 checkpoint 是在 `/gate-bypass` 覆盖 precommit 前置的情况下完成的" +
                 "（用户授权，理由已记在 bypass 里）—— 全量测试没有在这份内容上跑过。"
-              : ""),
+              : "") +
+            // Honest about the banner in the same breath: `missing` means the
+            // user was NOT told, which is their cue to install the notifier.
+            (notified.status === "sent" ? "" : `\n（通知：${describeNotifyOutcome(notified)}）`),
         }],
         details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
 
@@ -10992,6 +11131,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     commitsAheadOfBase: () => commitsAheadOfBase(cwd),
     scopeLimitDeclined: () => scopeLimitDeclined,
     declineScopeLimit: () => { scopeLimitDeclined = true; },
+    tmuxAccessDeclined: () => tmuxAccessDeclined,
+    declineTmuxAccess: () => { tmuxAccessDeclined = true; },
     sensitiveGrants: () => sensitiveGrants,
     storeSensitiveGrants: (next) => { sensitiveGrants = next; },
     sensitiveDeclinedPaths,
@@ -12010,6 +12151,20 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // enforcement behaves as loop — never applies to a headless run.
     if (!ctx.hasUI) setTaskMode("normal", "auto", ctx);
 
+    // SAY IT ONCE WHEN THE BANNER CHANNEL IS DEAD (user decision, 2026-09-17).
+    // A notification is how this gate reaches somebody who is not watching —
+    // silently having none of that is the failure mode the whole round is
+    // about. Only for a session that WOULD be allowed to raise one (a manager
+    // or a standalone loop session): a judge pane has no business asking for a
+    // notifier it will never use.
+    if (
+      ctx.hasUI &&
+      mayNotifyUser({ taskMode: state.taskMode, stateVariant: process.env[STATE_VARIANT_ENV] }) &&
+      notifyRuntime.startHint()
+    ) {
+      try { ctx.ui.notify(notifyRuntime.startHint(), "info"); } catch { /* headless */ }
+    }
+
     // A SPAWNER may hand a session its starting mode (RG_GATE_MODE): a child
     // opened by `orchestrator_spawn` is an ordinary loop session, and a relay
     // successor is an orchestrator. Neither should have to classify itself
@@ -12125,7 +12280,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     persist(ctx);
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (event) => {
+    // A CLEAN SHUTDOWN IS NOT A FAILURE (user decision, 2026-09-17): every
+    // reason pi reports here — quit, reload, new, resume, fork — is the user
+    // ending or restarting the session themselves, and they already know.
+    // The flag is what the runtime's process-exit handler consults; without it
+    // a crash and a `/quit` would look identical from there.
+    notifyRuntime.markCleanShutdown();
+    void event;
     // Round-18: stop the referenced child-wait watchdog with the session.
     cancelChildWaitTimer();
     // The old session runtime is being torn down (reason: quit | reload |
@@ -12321,6 +12483,40 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       message: { customType: custom.customType, details: custom.details },
     });
   });
+
+  // …and the EVENT BUS, which is the terminal signal EVERY finished run emits
+  // (2026-09-17, the round that fixed a child stuck reporting `working` after
+  // its own `declare_done`). The notification above is not enough on its own:
+  // pi-subagents skips it when the result was already consumed and holds
+  // others back for batch finalization, so a child that spawned three agents
+  // saw one notification and kept two waits forever. `pi.events.on` registers
+  // the subscription with the extension runtime, so a reload cannot leave the
+  // old handler attached to the new bus.
+  //
+  // IT IS OPTIONAL, like every host capability this extension reaches for: a
+  // host that loads this file outside pi (the install fixtures in test/, a
+  // tool that imports it to inspect it) has no bus, and the gate then keeps
+  // the two signals it always had rather than refusing to load.
+  for (const channel of ["subagents:completed", "subagents:failed"] as const) {
+    pi.events?.on?.(channel, (payload) => {
+      const next = foldBackgroundWaits(backgroundWaits, {
+        kind: "finished",
+        id: (payload as { id?: unknown } | null | undefined)?.id,
+      });
+      // Nothing was waiting on that agent ⇒ nothing to say. Reporting anyway
+      // would write a channel record per finished agent of every session.
+      if (next === backgroundWaits) return;
+      backgroundWaits = next;
+      // The state may be changing from `working` to `idle`/`done` RIGHT NOW,
+      // and a manager may be sitting in a wait: publish it on this event
+      // instead of making it wait out the heartbeat.
+      if (latestCtx) {
+        try {
+          reportChildState(latestCtx, undefined, { force: true });
+        } catch { /* reporting is never allowed to break the session that runs it */ }
+      }
+    });
+  }
 
   pi.registerMarkdownTransformer((markdown, context) =>
     thinkingLoop.truncateDisplay(markdown, context.messageType),

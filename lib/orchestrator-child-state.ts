@@ -366,6 +366,13 @@ export interface ChildHealth {
    * question nobody answered.
    */
   stateForSeconds?: number;
+  /**
+   * The tool call the child made most recently, as it reported it
+   * (`bash(grep -rn PrimeUsers src/)`). This is the receipt's answer to
+   * "working on WHAT" — the difference between reading a large tree and
+   * re-running the same search (2026-09-17, user decision).
+   */
+  activity?: string;
   /** What it is blocked on while `waiting-judge` (`reviewer`, `precommit`…). */
   waitingFor?: string;
   /**
@@ -414,6 +421,9 @@ export function childHealth(observation: ChildObservation): ChildHealth {
       ? { stateForSeconds: Math.max(0, Math.round((observation.at - sinceMs) / 1000)) }
       : {}),
     ...(open?.title === undefined ? {} : { dialogTitle: open.title }),
+    ...(projection.lastState?.activity === undefined
+      ? {}
+      : { activity: projection.lastState.activity }),
     ...(projection.lastState?.contextPercent === undefined
       ? {}
       : { contextPercent: projection.lastState.contextPercent }),
@@ -525,6 +535,11 @@ export function describeChildState(state: ChildState): string {
  */
 export function describeChildStateDetailed(health: ChildHealth): string {
   const base = describeChildState(health.state);
+  // WHAT it is working on — attached to the states where that is the question
+  // (`working`: spinning or progressing? `idle`/`stalled`: what was it doing
+  // when it stopped?). A `waiting-input` row answers it with the dialog title
+  // instead, and `done` needs no answer at all.
+  const activity = health.activity === undefined ? "" : `，最近 ${health.activity}`;
   if (health.state === "waiting-judge") {
     const what = health.waitingFor ?? "reviewer";
     const forSeconds = health.stateForSeconds === undefined ? "" : `（已等 ${health.stateForSeconds}s）`;
@@ -540,7 +555,7 @@ export function describeChildStateDetailed(health: ChildHealth): string {
     // whether or not the child stepped. The reading separates "its turn just
     // ended" from "it stopped 25 minutes ago", which is the whole question
     // a supervisor has to answer before nudging.
-    return `${base}（自上次推进 ${health.progressStaleSeconds}s）`;
+    return `${base}（自上次推进 ${health.progressStaleSeconds}s）${activity}`;
   }
   if (health.state === "working") {
     // B3 — the overruled `idle` report is named in the line itself, so the
@@ -562,11 +577,23 @@ export function describeChildStateDetailed(health: ChildHealth): string {
       // forward step, so 60 minutes of `working` with no checkpoint reads
       // differently from a hang. No wake, no suggested action.
       const progress = `自上次推进 ${health.progressStaleSeconds}s`;
-      return `${base}（${progress}${doubted}）`;
+      return `${base}（${progress}${doubted}）${activity}`;
     }
     // No progress reading at all (a child that never stamped one). The doubt
     // marker cannot occur without a stamp — it is what produced the doubt —
     // so this branch is the plain `working` line.
+    return `${base}${activity}`;
+  }
+  if (health.state === "stalled" || health.state === "dead") {
+    // What it was last seen doing, for a pane that stopped reporting: the one
+    // fact that turns "it died" into "it died while running `make test`".
+    return `${base}${activity}`;
+  }
+  if (health.state === "idle") {
+    // The idle branch above needs a progress reading; a child that reported
+    // idle before its first tool call has none, and its activity is exactly
+    // what a manager wants when it decides whether to nudge it.
+    return `${base}${activity}`;
   }
   return base;
 }

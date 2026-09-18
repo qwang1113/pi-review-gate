@@ -321,9 +321,10 @@ unconfigured role and the dispatch fails closed instead of spawning a default.
   `~/.pi/agent/agents/*.md`; `scripts/install-package.mjs` applies only the
   global layer. Writes validate (resolvable spec, supported thinking level)
 - The pi widget (`belowEditor`) is a SINGLE-LINE status strip (mode/branch/
-  edited + unmet count); the full readout — verdicts, config, model chains —
-  lives in the `/gate-status` command. The config itself is plain JSON in
-  `review-gate.json`.
+  edited, plus `轮 N` — the rounds THIS session sent out, shown only in a loop
+  session or a judge pane — and the unmet count); the full readout — verdicts,
+  config, model chains — lives in the `/gate-status` command. The config
+  itself is plain JSON in `review-gate.json`.
 - A missing/corrupt `agents` section is a startup error, not a silent
   pass-through: the session stops and names every role that lacks a
   resolvable chain (`validateAgentsForStartup` + the before_agent_start
@@ -435,8 +436,8 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 设计铁律只有一句（用户原话）：**能提供工具的，就不要让会话自己组装。** 项目经理
 只表达意图，门禁负责实现 —— 它不手写 tmux 命令、不写等待脚本、不自己拼通知。
-工具集（9 个）：`orchestrator_plan` / `_spawn` / `_wait` / `_answer` /
-`_instruct` / `_close` / `_recover` / `_attach` / `_notify`
+工具集（8 个）：`orchestrator_plan` / `_spawn` / `_wait` / `_answer` /
+`_instruct` / `_close` / `_recover` / `_attach`
 （判定逻辑在 `lib/orchestrator-*.ts`，`extensions/review-gate.ts` 只接线）。
 交接**不是**编排专属的第十个工具：**每一类会话**（loop 主会话、编排子会话、
 项目经理、judge）共用同一个 `session_handoff()`（`lib/session-handoff-tools.ts`）
@@ -472,12 +473,13 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   把「人在框里答」与「项目经理经通道答」并列，谁先答谁生效，另一边的框自动
   撤下。框始终弹着 —— 这就是项目经理死亡时的天然回退，因此**没有任何超时机制**。
   2026-08-31 起 `request_scope_limit` / `request_sensitive_edit` 的 consent 框也走
-  同一通道：项目经理可代答（先答先生效）。**但敏感编辑的代答需要用户显式授权**
-  （2026-09-16 起，`orchestrator_answer` 对 sensitive-edit 无授权时弹三选框给用户：
-  「允许并记住 / 仅允许这一次 / 拒绝」）；`request_sensitive_edit` 在项目经理自己的
-  会话里被**直接拒绝**（它没有通道侧可答自己的框，曾把 PM 卡死 2 小时），
-  改走 `orchestrator_answer`。三个授权入口：ask_user 带 `grantScope` 的提问、
-  `/gate-grant sensitive-edit` 命令、首次代答的三选框。
+  同一通道：项目经理可代答（先答先生效）。**但敏感编辑与 tmux 授权的代答需要用户显式授权**
+  （2026-09-16 起 sensitive-edit、2026-09-17 起 tmux-access：`orchestrator_answer` 对这两类
+  无授权时弹三选框给用户：「允许并记住 / 仅允许这一次 / 拒绝」，**推荐拒绝** —— tmux 的
+  爆炸半径与敏感文件同级：`kill-server` 能带走用户整个 tmux 会话）；`request_sensitive_edit`
+  与 `request_tmux_access` 在项目经理自己的会话里被**直接拒绝**（它没有通道侧可答自己的框，
+  曾把 PM 卡死 2 小时），改走 `orchestrator_answer`。三个授权入口：ask_user 带 `grantScope`
+  的提问、`/gate-grant <scope>` 命令（作用域：`sensitive-edit`、`tmux-access`）、首次代答的三选框。
 - **一次 `ask_user` 的多题整批上送、整批回答**（2026-09-06）：子会话在弹出第一个
   框之前，就把本次采访的全部问题一次性写成 N 条 request 记录（新增可选字段
   `batchId` / `batchIndex` / `batchTotal`，只增不改，旧上级照旧当 N 条普通待答
@@ -618,8 +620,13 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    ⇒ 任何东西都不继承（2026-09-06 的「批准不随会话转移」只收窄、没被推翻）。规则落在
    `lib/orchestrator-registry.ts` / `lib/gate-state.ts`，扩展里只做接线。
 
-系统通知（OSC 777/9/99）**只有项目经理能发**，且带节流 —— 单一入口 + 只推给
-用户本人，与 `lib/attention.ts` 禁止的「任何会话都能广播」是相反的形态。
+系统通知（macOS 原生，经 `terminal-notifier`）**由门禁自己发**，不由 agent 决定，且只有
+三类事件：项目经理/独立 loop 会话**完成**或**异常结束**（你手动结束的不算），以及**停
+下来等你回答**（`ask_user` + 门禁自己的每一个对话框，外加每登记一条待你拍板的 plan 决策）。
+其余时候一声不响；`orchestrator_notify` 工具已删除（agent 想找你就只能用 `ask_user`）。
+点击通知会回到发通知那个 tmux pane。策略与 argv 在 `lib/user-notify.ts`；接线在扩展里
+（`declare_done` 被接受、`process.on("exit")` 无 `session_shutdown` 记录、`askChoice`、
+以及 plan 的 `add-decision`）—— 详见 `docs/orchestrator-supervision.md`。
 
 ### 架构规范：新建文件 600 行硬拦，存量只提醒
 

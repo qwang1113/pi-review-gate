@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildGateWidget } from "../lib/ui-widget.ts";
+import { buildGateWidget, showsRoundReading } from "../lib/ui-widget.ts";
 
 test("buildGateWidget renders a single-line strip: mode · branch · edited + unmet count", () => {
   const lines = buildGateWidget({
@@ -24,7 +24,7 @@ test("buildGateWidget hides the unmet count when zero", () => {
   assert.match(lines[0]!, /^门禁 · mode explore · 未编辑$/);
 });
 
-test("buildGateWidget falls back to 未初始化 for an unset mode", () => {
+test("buildGateWidget falls back to the uninitialized label for an unset mode", () => {
   const lines = buildGateWidget({
     edited: true,
     unmet: [],
@@ -33,7 +33,7 @@ test("buildGateWidget falls back to 未初始化 for an unset mode", () => {
   assert.match(lines[0]!, /^门禁 · mode 未初始化 · 已编辑$/);
 });
 
-test("buildGateWidget shows 非 git 目录 and no branch outside a repository", () => {
+test("buildGateWidget shows the non-git strip and no branch outside a repository", () => {
   // 2026-09-02 (user decision): outside a git repository the strip leads
   // with 非 git 目录 — mode and branch are both meaningless there, and
   // rendering them would require git calls that leak fatal noise.
@@ -50,41 +50,44 @@ test("buildGateWidget shows 非 git 目录 and no branch outside a repository", 
 });
 
 // ---------------------------------------------------------------------------
-// Round reading (2026-09-17, user decision A): `轮 N/M` on the same one line
+// Round reading (2026-09-17, user decision): how many rounds THIS session
+// SENT OUT — `轮 N`, no denominator, and only in reviewing sessions.
 
-test("buildGateWidget shows the review round and its ceiling, before the unmet count", () => {
+test("buildGateWidget shows the rounds sent, before the unmet count", () => {
   const lines = buildGateWidget({
     mode: "loop",
     branch: "feat/x",
     edited: true,
     rounds: 3,
-    maxRounds: 25,
     unmet: ["code review gate is PENDING (need READY)"],
   });
   assert.equal(lines.length, 1, "the strip stays exactly one line");
-  assert.match(lines[0]!, /^门禁 · mode loop · feat\/x · 已编辑 · 轮 3\/25 · 1 项未满足$/);
+  assert.match(lines[0]!, /^门禁 · mode loop · feat\/x · 已编辑 · 轮 3 · 1 项未满足$/);
 });
 
-test("buildGateWidget shows round 0 before the first review — the reading is always on, not conditional", () => {
-  // The zero is informative: it says "no round has been recorded yet",
-  // which is exactly what a reader wants to know at the start of a session.
-  const lines = buildGateWidget({ mode: "loop", branch: "feat/x", edited: false, rounds: 0, maxRounds: 25, unmet: [] });
-  assert.match(lines[0]!, /^门禁 · mode loop · feat\/x · 未编辑 · 轮 0\/25$/);
+test("buildGateWidget shows round 0 before the first submission — in a loop session the reading is always on, not conditional", () => {
+  // The zero is informative: it says "nothing has been sent yet", which is
+  // exactly what a reader wants at the start of a session — and it stops being
+  // 0 the moment a round is submitted, which is the whole point of counting
+  // submissions rather than recorded verdicts.
+  const lines = buildGateWidget({ mode: "loop", branch: "feat/x", edited: false, rounds: 0, unmet: [] });
+  assert.match(lines[0]!, /^门禁 · mode loop · feat\/x · 未编辑 · 轮 0$/);
 });
 
-test("buildGateWidget degrades to a bare count when the ceiling is unknown or nonsensical", () => {
-  // No denominator is invented: an absent, zero or non-finite ceiling
-  // renders the count alone rather than `轮 3/0` or `轮 3/NaN`.
-  for (const maxRounds of [undefined, 0, Number.NaN]) {
-    const lines = buildGateWidget({ mode: "loop", edited: false, rounds: 3, maxRounds, unmet: [] });
-    assert.match(lines[0]!, /^门禁 · mode loop · 未编辑 · 轮 3$/, String(maxRounds));
-  }
+test("buildGateWidget never renders a denominator", () => {
+  // The old ceiling was `maxRounds`, the auto-loop BRAKE — a different
+  // quantity from the count, and one no reader could tell apart from a review
+  // limit. The brake still bites exactly as before; it is just not on the
+  // strip, so no numerator/denominator shape is left to misread.
+  const lines = buildGateWidget({ mode: "loop", edited: false, rounds: 7, unmet: [] });
+  assert.match(lines[0]!, /^门禁 · mode loop · 未编辑 · 轮 7$/);
+  assert.doesNotMatch(lines[0]!, /\//);
 });
 
 test("buildGateWidget omits the reading entirely when the round count is unknown", () => {
-  // Absent ≠ zero: an unknown count is a silence, never a claim that no
-  // round has run. (This is also the pre-existing shape, so every caller
-  // that has not been taught the new facts keeps its old strip.)
+  // Absent ≠ zero: an unknown count is a silence, never a claim that nothing
+  // was sent. That is the judge pane whose task never named a round, and
+  // every caller that passes no count at all.
   const lines = buildGateWidget({ mode: "loop", branch: "feat/x", edited: true, unmet: [] });
   assert.match(lines[0]!, /^门禁 · mode loop · feat\/x · 已编辑$/);
   assert.doesNotMatch(lines[0]!, /轮/);
@@ -93,7 +96,21 @@ test("buildGateWidget omits the reading entirely when the round count is unknown
 test("buildGateWidget keeps the non-git strip free of the round reading", () => {
   // Outside a repository there is no review to count; the short-circuit
   // branch must stay byte-identical to what it was.
-  const lines = buildGateWidget({ mode: "loop", nonGit: true, edited: false, rounds: 7, maxRounds: 25, unmet: [] });
+  const lines = buildGateWidget({ mode: "loop", nonGit: true, edited: false, rounds: 7, unmet: [] });
   assert.match(lines[0]!, /^门禁 · 非 git 目录 · 未编辑$/);
   assert.doesNotMatch(lines[0]!, /轮/);
+});
+
+test("showsRoundReading: only reviewing sessions — a judge pane, or a loop session", () => {
+  // 2026-09-17, user decision: an orchestrator never reviews (its children
+  // do), and explore / normal send nothing to review — a permanent `轮 0`
+  // there is noise a reader has to learn to ignore.
+  assert.equal(showsRoundReading({ judge: true }), true, "a judge pane counts its own rounds");
+  assert.equal(showsRoundReading({ mode: "loop" }), true, "a loop session counts its own submissions");
+  assert.equal(showsRoundReading({ mode: "orchestrator" }), false);
+  assert.equal(showsRoundReading({ mode: "explore" }), false);
+  assert.equal(showsRoundReading({ mode: "normal" }), false);
+  assert.equal(showsRoundReading({}), false, "an undecided mode is not a licence to show 轮 0");
+  assert.equal(showsRoundReading({ mode: "orchestrator", judge: true }), true,
+    "…but a judge pane is a judge pane whatever mode its state happens to hold");
 });

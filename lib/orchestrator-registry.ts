@@ -27,7 +27,6 @@
  * the returned runtime into the gate sidecar.
  */
 
-import { emptyNotifyHistory, type NotifyHistory } from "./orchestrator-notify.ts";
 import {
   MAX_APPROVAL_LINEAGE,
   type ApprovedPlanSnapshot,
@@ -119,10 +118,29 @@ export interface ChildSession {
 export interface OrchestratorRuntime {
   /** Stable address of this orchestration (lib/orchestration-id.ts). */
   orchestrationId: string;
+  /**
+   * WHICH SESSION holds this orchestration (2026-09-17).
+   *
+   * It exists so "may I resume MY orchestration after a reload" can be
+   * answered by a fact that cannot be re-stamped — see
+   * `startupOrchestrationId` in lib/orchestration-id.ts. The sidecar's own
+   * `sessionId` LOOKS like that fact and is not: `successorRuntime` keeps a
+   * foreign runtime when a NEW session takes over the file (the 2026-09-06 B1
+   * rule, so a takeover has something to take over), and the very next persist
+   * writes that runtime under the new session's id. Answering the question with
+   * `state.sessionId` therefore told a fresh session, one reload later, that a
+   * previous session's children were its own — a takeover with no
+   * `orchestrator_attach` and no dialog.
+   *
+   * Written only by a session that LEGITIMATELY holds the address: the one that
+   * minted it, the one it was inherited by, and the one that adopted it through
+   * `orchestrator_attach`. Absent (an older sidecar) ⇒ nobody may resume it
+   * implicitly, and the takeover path asks.
+   */
+  ownerSessionId?: string;
   /** The orchestrator's OWN pane: the left column, and its blast-radius limit. */
   ownPane?: string;
   children: ChildSession[];
-  notify: NotifyHistory;
   /**
    * The plan hash the USER approved (constraint 1). Absent ⇒ no spawning:
    * writing the plan file grants nothing, exactly like the loop goal.
@@ -188,7 +206,7 @@ export interface OrchestratorRuntime {
 }
 /** One proxy authority the user granted the project manager. */
 export interface OrchestrationGrant {
-  /** What the PM may do on the user's behalf: `sensitive-edit` today. */
+  /** What the PM may do on the user's behalf: `sensitive-edit` or `tmux-access`. */
   scope: string;
   /** ISO time the user granted it. */
   grantedAt: string;
@@ -265,7 +283,6 @@ export function emptyRuntime(orchestrationId: string): OrchestratorRuntime {
   return {
     orchestrationId,
     children: [],
-    notify: emptyNotifyHistory(),
   };
 }
 
@@ -275,6 +292,21 @@ const CHILD_ID_SAFE = /[^A-Za-z0-9._-]/g;
 export function newChildId(taskId: string, now: number = Date.now()): string {
   const safe = taskId.replace(CHILD_ID_SAFE, "-").slice(0, 32);
   return `${safe}-${Math.floor(now).toString(36)}`;
+}
+
+/**
+ * The task a child handle was minted for — the inverse of {@link newChildId}.
+ *
+ * A child session that has no registry of its own still knows its handle:
+ * `RG_STATE_VARIANT` IS the child id (lib/orchestrator-dispatch.ts), and that
+ * is how it names itself on the border of every pane it opens, as the `@<owner>`
+ * half. The grammar is owned here rather than re-derived at the call site, so
+ * the two halves cannot drift.
+ */
+export function taskIdFromChildId(childId: string): string {
+  const raw = String(childId ?? "").trim();
+  const cut = raw.lastIndexOf("-");
+  return cut > 0 ? raw.slice(0, cut) : raw;
 }
 
 /** Add a child. Never mutates its input. */
@@ -501,17 +533,6 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     });
   }
 
-  const notify = obj.notify as Record<string, unknown> | undefined;
-  const sentAt = Array.isArray(notify?.sentAt)
-    ? notify.sentAt.filter((t): t is number => typeof t === "number" && Number.isFinite(t))
-    : [];
-  const lastByKey: Record<string, number> = {};
-  if (notify?.lastByKey && typeof notify.lastByKey === "object" && !Array.isArray(notify.lastByKey)) {
-    for (const [k, v] of Object.entries(notify.lastByKey as Record<string, unknown>)) {
-      if (typeof v === "number" && Number.isFinite(v)) lastByKey[k] = v;
-    }
-  }
-
   const hash = str(obj.approvedPlanHash);
   const approvalIntact = !dropped && isPlanHash(hash);
 
@@ -536,10 +557,13 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   const approvedPlanHistory = dropped ? [] : normalizeApprovalLineage(obj.approvedPlanHistory);
 
   const successorPane = isPaneId(rawRelay?.successorPane) ? rawRelay.successorPane : undefined;
+  // The owner is an identity, not a path: non-empty and nothing else. It is
+  // never inferred, and never defaulted to anything.
+  const ownerSessionId = str(obj.ownerSessionId);
   return {
     orchestrationId,
     children,
-    notify: { sentAt, lastByKey },
+    ...(ownerSessionId ? { ownerSessionId } : {}),
     ...(ownPane ? { ownPane } : {}),
     ...(approvalIntact && hash ? { approvedPlanHash: hash } : {}),
     ...(approvedPlanAt ? { approvedPlanAt } : {}),

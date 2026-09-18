@@ -25,8 +25,16 @@ test("every ALWAYS-FORBIDDEN subcommand is refused, in both modes", () => {
       assert.ok(hit, `tmux ${sub} must be flagged (orchestratorMode=${mode.orchestratorMode})`);
       assert.equal(hit.subcommand, sub);
       assert.equal(hit.tier, "forbidden");
-      assert.match(hit.reason, /不建议/);
-      assert.match(hit.reason, /只是提示/, "the message says it will not block — it is a hint now (user decision 2026-09-14)");
+      // TWO MESSAGES, because there are two situations (user decision,
+      // 2026-09-17): without a grant the command is REFUSED and the text names
+      // the one way to earn it; with one, the command runs and the text is
+      // advice.
+      assert.match(hit.refusal, /已拦截/);
+      assert.match(hit.refusal, /request_tmux_access/, ":refusal must name the way out");
+      assert.match(hit.refusal, /继任者/, "…and say how far a grant reaches");
+      assert.match(hit.reason, /已授权/, "the authorized message must not read as a refusal");
+      assert.match(hit.reason, /orchestrator_spawn/, "neither message drops the tool redirect");
+      assert.doesNotMatch(hit.refusal, /只是提示/, "the gate does not say 'hint' about a block");
     }
   }
 });
@@ -44,7 +52,9 @@ test("every TOOL-REPLACED subcommand is redirected in orchestrator mode and left
     const hit = detectForbiddenTmux(`tmux ${sub} -t %3`, ORCH);
     assert.ok(hit, `tmux ${sub} must be redirected in orchestrator mode`);
     assert.equal(hit.tier, "use-the-tool");
-    assert.match(hit.reason, expectedTool[sub]!, "the refusal names the tool to call instead");
+    assert.match(hit.reason, expectedTool[sub]!, "the authorized message names the tool to call instead");
+    assert.match(hit.refusal, expectedTool[sub]!, "and so does the refusal");
+    assert.match(hit.refusal, /request_tmux_access/, "the refusal also says how to get permission");
     assert.equal(detectForbiddenTmux(`tmux ${sub} -t %3`, LOOP), undefined,
       `${sub} is nobody's business outside orchestrator mode`);
   }

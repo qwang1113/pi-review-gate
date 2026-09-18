@@ -19,16 +19,19 @@ import {
   closeSessionPane,
   decorateSessionPane,
   judgePaneDecor,
-  judgePaneLabel,
   openSessionPane,
+  paintPaneTitle,
   paneRecoverability,
-  releasesWindowLabels,
   refreshSessionPaneTitle,
   PANE_REPAINT_MIN_MS,
   type PaneRunner,
   type PaneTitleMemory,
 } from "../lib/session-factory.ts";
+// The label grammar's ONE home — imported from there, not re-exported by the
+// pane plumbing that writes what it renders (2026-09-18).
+import { judgePaneLabel, pmPaneLabel } from "../lib/orchestrator-pane-decor.ts";
 import { judgeScratchDir } from "../lib/judge-process.ts";
+import * as sessionFactory from "../lib/session-factory.ts";
 
 /** Fake tmux: a split prints %7, everything succeeds. */
 function happyRunner(seen: string[][] = []): PaneRunner {
@@ -97,7 +100,7 @@ test("combination 1 — a judge SPAWN: judge env, own colour, border line, verif
       streamPath: "/repo/.pi/review-stream/r.jsonl",
     },
     command: JUDGE_COMMAND,
-    decor: judgePaneDecor("rg-reviewer-abc123", "reviewer"),
+    decor: judgePaneDecor("rg-reviewer-abc123", "reviewer", "t6"),
     register: (paneId) => registered.push(paneId),
     verify: async () => ({ ok: true, detail: "上报了状态" }),
   });
@@ -120,7 +123,7 @@ test("combination 1 — a judge SPAWN: judge env, own colour, border line, verif
 
   const flat = seen.map((a) => a.join(" "));
   assert.ok(flat.some((s) => s.includes("select-pane") && s.includes("-P")), "a border colour is set");
-  assert.ok(flat.some((s) => s.includes("@review-reviewer")), "the title names the review kind");
+  assert.ok(flat.some((s) => s.includes("@t6")), "the title names the review kind AND who opened it");
   // C1: the WINDOW option that renders the border line used to be set by the
   // orchestration spawn only, so a judge pane opened without a project manager
   // in the window had a colour nobody could see.
@@ -136,7 +139,7 @@ test("combination 2 — a judge RECOVER: same three keys, resume argv, no task f
     layout: "child-column",
     role: { kind: "judge", openerId: "session-child-1", judgeId: "rg-reviewer-abc123", role: "reviewer" },
     command: buildJudgeRecoverCommand("rg-reviewer-abc123"),
-    decor: judgePaneDecor("rg-reviewer-abc123", "reviewer"),
+    decor: judgePaneDecor("rg-reviewer-abc123", "reviewer", "pm"),
   });
   assert.equal(outcome.ok, true);
   const spawn = seen.find((argv) => argv[0] === "split-window")!;
@@ -352,7 +355,7 @@ test("decor failure degrades to a warning, never to a failed open", async () => 
     ownPane: "%1", cwd: "/repo", layout: "child-column",
     role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
     command: ["pi"],
-    decor: judgePaneDecor("j", "reviewer"),
+    decor: judgePaneDecor("j", "reviewer", "self"),
   });
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
@@ -404,7 +407,7 @@ test("the repaint is throttled, skips an unchanged title, and swallows tmux fail
   const run = happyRunner(seen);
   const paint = (state: "working" | "waiting-input", now: number, seconds: number): boolean =>
     refreshSessionPaneTitle(run, {
-      paneId: "%7", label: "@review-reviewer", state, stateForSeconds: seconds, now, memory,
+      paneId: "%7", label: "reviewer@t6", state, stateForSeconds: seconds, now, memory,
     });
 
   assert.equal(paint("working", 1_000, 0), true, "first paint always lands");
@@ -416,39 +419,53 @@ test("the repaint is throttled, skips an unchanged title, and swallows tmux fail
 
   const exploding: PaneRunner = () => { throw new Error("tmux gone"); };
   assert.doesNotThrow(() => refreshSessionPaneTitle(exploding, {
-    paneId: "%9", label: "@review-reviewer", state: "done", now: 5_000, memory,
+    paneId: "%9", label: "reviewer@t6", state: "done", now: 5_000, memory,
   }), "a cosmetic write never breaks supervision");
 });
 
-test("judge labels are stable and sanitized", () => {
-  assert.equal(judgePaneLabel("reviewer"), "@review-reviewer");
-  assert.equal(judgePaneLabel("../../etc"), "@review-..-..-etc");
-  assert.doesNotMatch(judgePaneLabel("../../etc"), /\//, "no path separator survives (dots are display-only, never a path)");
-  assert.equal(judgePaneDecor("rg-reviewer-x", "adviser").colorSeed, "rg-reviewer-x", "colour hashes on the judge id");
+test("judge labels carry the OPENER and are sanitized", () => {
+  assert.equal(judgePaneLabel("reviewer", "t6"), "reviewer@t6");
+  assert.equal(judgePaneLabel("goal-auditor", "pm"), "goal-auditor@pm");
+  // The ambiguity this grammar exists for: same role, different opener, two
+  // DIFFERENT labels (measured: a window held two byte-identical
+  // `@review-goal-auditor` borders).
+  assert.notEqual(judgePaneLabel("goal-auditor", "t6"), judgePaneLabel("goal-auditor", "pm"));
+  assert.equal(judgePaneLabel("../../etc", "x"), "..-..-etc@x");
+  assert.doesNotMatch(judgePaneLabel("../../etc", "../.."), /[\/\s]/, "no path separator and no space survives");
+  assert.equal(judgePaneDecor("rg-reviewer-x", "adviser", "pm").colorSeed, "rg-reviewer-x", "colour hashes on the judge id");
+});
+
+test("the manager's own border is `pm:<dir>`, and painting it is unconditional", () => {
+  assert.equal(pmPaneLabel("pi-review-gate"), "pm:pi-review-gate");
+  assert.equal(pmPaneLabel("My Repo.Dir"), "pm:my-repo-dir", "a raw directory name is slugged, never printed as-is");
+  const seen: string[][] = [];
+  const run: PaneRunner = (argv) => { seen.push([...argv]); return { ok: true, stdout: "", stderr: "" }; };
+  paintPaneTitle(run, "%3", pmPaneLabel("repo"));
+  paintPaneTitle(run, "%3", pmPaneLabel("repo"));
+  assert.equal(seen.length, 2, "no memory and no throttle: pi may have rewritten it in between, so it is repainted every probe");
+  assert.deepEqual(seen[1], ["select-pane", "-t", "%3", "-T", "pm:repo"]);
+  // Cosmetic, always: a tmux that throws must not take supervision down with it.
+  assert.doesNotThrow(() => paintPaneTitle(() => { throw new Error("tmux gone"); }, "%3", "pm:repo"));
 });
 
 // ---------------------------------------------------------------------------
 // Closing
 // ---------------------------------------------------------------------------
 
-test("close kills exactly one pane, and takes the label bar down only when asked", () => {
+test("close kills exactly one pane, and TOUCHES NO WINDOW OPTION", () => {
   const seen: string[][] = [];
   assert.equal(closeSessionPane(happyRunner(seen), "%7").ok, true);
   assert.deepEqual(seen.map((argv) => argv[0]), ["list-panes", "kill-pane"],
     "the window is probed while the pane still exists, then the pane dies");
   assert.deepEqual(seen[1], ["kill-pane", "-t", "%7"]);
 
-  const withLabels: string[][] = [];
-  // Addressed through the CALLER'S pane (%1), never the dying one (%7): `setw`
-  // only needs a pane to name the window, and the pane being closed is exactly
-  // the id that may already be gone — a failed option write would leave the
-  // border line switched on in the user's window for good.
-  closeSessionPane(happyRunner(withLabels), "%7", { hideLabelsVia: "%1" });
-  const flat = withLabels.map((a) => a.join(" "));
-  assert.equal(flat.length, 4, "two option resets, the probe, then the kill");
-  assert.ok(flat[0]!.includes("-u") && flat[0]!.includes("pane-border-status"));
-  assert.ok(flat[0]!.includes("-t %1") && !flat[0]!.includes("%7"), "the window is named by a pane we know is alive");
-  assert.equal(flat[3], "kill-pane -t %7", "the options come down BEFORE the pane dies");
+  // THE RELEASE IS GONE, AND THIS IS WHAT PINS IT (2026-09-17, user decision).
+  // Taking the window's label bar down meant writing `pane-border-status`, and
+  // that RESIZES EVERY PANE IN THE WINDOW — measured on a scratch tmux as
+  // SIGWINCH with `rows 84 → 83`, in both directions. A close now produces
+  // tmux calls that are about closing a pane and nothing else; if any `setw`
+  // ever comes back, this fails.
+  assert.equal(seen.some((argv) => argv[0] === "setw"), false, "no window option is written on close");
 });
 
 test("closing a pane equalises what is left of its column", () => {
@@ -482,15 +499,20 @@ test("closing a pane equalises what is left of its column", () => {
   );
 });
 
-test("who may take the window's label bar down: the last pane, and never a guest", () => {
-  // Turning the bar ON is what makes a decorated border visible (C1); leaving
-  // it on forever is litter in the user's window, and turning it off while a
-  // sibling still needs it blanks a border that is in use.
-  assert.equal(releasesWindowLabels({ remainingDecoratedPanes: 0, insideOrchestration: false }), true);
-  assert.equal(releasesWindowLabels({ remainingDecoratedPanes: 1, insideOrchestration: false }), false,
-    "a sibling still on screen keeps it up");
-  assert.equal(releasesWindowLabels({ remainingDecoratedPanes: 0, insideOrchestration: true }), false,
-    "inside an orchestration the project manager owns that bar — a child never releases it");
+test("THE LABEL BAR IS NEVER RELEASED — and nothing can ask to (2026-09-17)", () => {
+  // `releasesWindowLabels` and `countDecoratedPanes` used to live here, and
+  // this test used to pin their answers. Both are DELETED with the release
+  // path: taking the bar down writes `pane-border-status`, and that resizes
+  // EVERY pane in the window (measured on a scratch tmux: SIGWINCH with
+  // `rows 84 → 83`, in both directions). The user's own decision was "never
+  // turn it off again".
+  //
+  // Pinned by ABSENCE rather than by a fake: a close that produces a `setw`
+  // is the regression, and that is asserted where a close is driven
+  // (`close kills exactly one pane, and TOUCHES NO WINDOW OPTION` above).
+  for (const gone of ["releasesWindowLabels", "countDecoratedPanes"]) {
+    assert.equal(gone in sessionFactory, false, `${gone} is deleted, not bypassed`);
+  }
 });
 
 

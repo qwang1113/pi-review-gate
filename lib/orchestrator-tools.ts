@@ -44,18 +44,11 @@ import {
 
 import {
   formatOrchestrationStatus,
-  notifyAuthorization,
   orchestratorDoneProblems,
 } from "./orchestrator-gate.ts";
 import { emptyRuntime, formatChildren } from "./orchestrator-registry.ts";
 import { formatChildHealth } from "./orchestrator-child-state.ts";
-
-import {
-  decideNotify,
-  notifyKey,
-  prepareNotification,
-  recordNotify,
-} from "./orchestrator-notify.ts";
+import { describeNotifyOutcome } from "./user-notify.ts";
 import {
   ARCHIVE_CONFIRM_TITLE,
   buildArchiveConfirmMessage,
@@ -642,15 +635,30 @@ async function handlePlanAction(
       decisions: [...plan.decisions, { id, question, ...(planEffect ? { planEffect } : {}) }],
       updatedAt: nowIso,
     };
+    // ADDING A DECISION IS ITSELF THE NOTIFICATION (user decision, 2026-09-17).
+    // A decision is by definition something only the human can settle, so the
+    // gate tells them NOW and marks it reported in the same breath — the two
+    // used to be separate steps the manager had to perform (constraint 11),
+    // which meant a decision registered but never announced blocked the exit
+    // for a reason nobody could see.
+    const notified = deps.notifyUser({ kind: "needs-user", detail: question });
+    if (notified.status === "sent") {
+      // The stamp rides the SAME write as the decision: two saves would leave
+      // a window where an announced decision is not yet marked as such.
+      next.decisions = next.decisions.map((d) =>
+        d.id === id ? { ...d, notifiedAt: nowIso } : d,
+      );
+    }
     deps.savePlan(next);
     return reply(
-      `review-gate: 已登记待用户决策 "${id}"（id 由门禁生成）。` +
-      "注意：**没通知过用户的决策项会拦住 declare_done**（约束 11），" +
-      "**通知过但从未 resolve 的也会拦**（R-29）——" +
-      `先用 \`orchestrator_notify({ decisionId: "${id}", … })\` 告诉他，` +
+      `review-gate: 已登记待用户决策 "${id}"（id 由门禁生成）。${describeNotifyOutcome(notified)}` +
+      (notified.status === "sent" ? "" :
+        "\n注意：**没通知过用户的决策项会拦住 declare_done**（约束 11），" +
+        "现在这条就是没通知出去的 —— 把通知通道修好（见上面的原因），" +
+        "或者用 `ask_user` 当面问他。") +
       `拿到答复后用 \`orchestrator_plan({ action: "resolve-decision", decisionId: "${id}", answer })\` 落回 plan。` +
       (planEffect ? `\n已记下这条决策一旦拍板需要的 plan 变更：${planEffect}` : ""),
-      { decisionId: id, planEffect: planEffect || undefined },
+      { decisionId: id, planEffect: planEffect || undefined, notified: notified.status },
     );
   }
 
@@ -686,7 +694,7 @@ async function handlePlanAction(
   );
 }
 
-/** Register `orchestrator_plan` and `orchestrator_notify`. */
+/** Register the `orchestrator_plan` state machine. */
 export function registerOrchestratorStateTools(host: ToolHost, deps: OrchestratorDeps): void {
   host.registerTool({
     name: "orchestrator_plan",
@@ -814,76 +822,12 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
   // mode: the agent has to pick, and the one it picks is the one that happens
   // to be shorter to type.
 
-
-  host.registerTool({
-    name: "orchestrator_notify",
-    label: "Notify The User",
-    description:
-      "Send a DESKTOP notification to the human (the only channel that reaches somebody who is " +
-      "not watching the terminal). ONLY an orchestrator may call it, and it is throttled: " +
-      "identical text is not repeated within 10 minutes and at most 5 notifications go out per " +
-      "5 minutes. Use it for what actually needs a person — an irreversible decision, a blocked " +
-      "plan, the run being finished — not for progress.",
-    parameters: Type.Object({
-      title: Type.String({ description: "Short subject line" }),
-      body: Type.String({ description: "One or two sentences: what happened and what you need" }),
-      decisionId: Type.Optional(Type.String({
-        description: "Plan decision this notification reports — marks it as reported (constraint 11)",
-      })),
-    }),
-    async execute(_id, params) {
-      const auth = notifyAuthorization(deps.taskMode());
-      if (!auth.ok) return fail("review-gate: " + auth.reason);
-      const payload = prepareNotification({
-        title: String(params.title ?? ""),
-        body: String(params.body ?? ""),
-        env: deps.env(),
-      });
-      const runtime = deps.runtime();
-      const key = notifyKey(payload.title, payload.body);
-      const now = deps.now();
-      const decision = decideNotify({ history: runtime.notify, key, now });
-      if (!decision.send) {
-        return fail("review-gate: 通知被节流 —— " + decision.reason, { sent: false });
-      }
-      // The ONE side effect, and it is injected: a test run (or any
-      // non-interactive host) must never put an escape sequence on a real
-      // terminal. A suppressed send is NOT recorded against the throttle —
-      // otherwise the first real notification would be deduplicated away.
-      const emitted = deps.emitNotification(payload.sequence);
-      if (!emitted) {
-        return fail(
-          "review-gate: 通知没有发出去 —— 当前环境不接受终端副作用（无 TTY / CI / 测试进程）。" +
-          "如果确实需要用户知道，改用 `ask_user`。",
-          { sent: false, protocol: payload.protocol },
-        );
-      }
-      deps.saveRuntime({ ...runtime, notify: recordNotify(runtime.notify, key, now) });
-
-      // Reporting a decision is what un-blocks the exit for it (constraint 11):
-      // the user now HAS the question, even if they have not answered it.
-      const decisionId = String(params.decisionId ?? "").trim();
-      let decisionNote = "";
-      if (decisionId) {
-        const { plan } = currentPlan(deps);
-        const target = plan?.decisions.find((d) => d.id === decisionId);
-        if (plan && target) {
-          deps.savePlan({
-            ...plan,
-            decisions: plan.decisions.map((d) =>
-              d.id === decisionId ? { ...d, notifiedAt: new Date(now).toISOString() } : d,
-            ),
-            updatedAt: new Date(now).toISOString(),
-          });
-          decisionNote = `\n决策项 "${decisionId}" 已标记为「已通知用户」，不再拦 declare_done。`;
-        } else {
-          decisionNote = `\n注意：plan 里没有决策项 "${decisionId}"，没有标记任何东西。`;
-        }
-      }
-      return reply(
-        `review-gate: 已通过 ${payload.protocol} 向用户发出系统通知。${decisionNote}`,
-        { sent: true, protocol: payload.protocol },
-      );
-    },
-  });
+  // THERE IS NO `orchestrator_notify` EITHER (user decision, 2026-09-17).
+  // Letting the manager choose when to interrupt the human is exactly what the
+  // notification rule exists to prevent; the gate now raises the banner itself
+  // for three kinds of event and for nothing else (lib/user-notify.ts owns the
+  // policy; the extension wires the four call sites — completion, abnormal
+  // exit, a dialog that is waiting, and a plan decision being registered,
+  // which is the second entry point of the third kind). A manager that needs a
+  // person calls `ask_user`, which IS one of them.
 }

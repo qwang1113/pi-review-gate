@@ -133,6 +133,10 @@ export interface UserInteractionToolDeps {
   scopeLimitDeclined(): boolean;
   /** Record that they did — one decline locks the session. */
   declineScopeLimit(): void;
+  /** Did the user already decline tmux access this session? */
+  tmuxAccessDeclined(): boolean;
+  /** Record that they did — one decline locks the session. */
+  declineTmuxAccess(): void;
   /** The live, never-persisted one-shot sensitive-write grants. */
   sensitiveGrants(): SensitiveGrant[];
   /** Replace them (the grant list is immutable — see lib/sensitive-grant.ts). */
@@ -153,7 +157,8 @@ export type ConsentToolDeps = Pick<
   UserInteractionToolDeps,
   | "state" | "persist" | "showToUser" | "askChoice" | "cwd"
   | "sessionEditedPaths" | "commitsAheadOfBase" | "scopeLimitDeclined"
-  | "declineScopeLimit" | "sensitiveGrants" | "storeSensitiveGrants"
+  | "declineScopeLimit" | "tmuxAccessDeclined" | "declineTmuxAccess"
+  | "sensitiveGrants" | "storeSensitiveGrants"
   | "sensitiveDeclinedPaths" | "log" | "askEitherSide" | "canChannelDialogs"
 >;
 

@@ -25,7 +25,6 @@ import type { ToolHost, ToolReply } from "./tool-host.ts";
 import {
   checkCaller,
   findJudgeLane,
-  paneClosable,
   registerJudge,
   removeJudge,
   type HierarchyTable,
@@ -45,15 +44,12 @@ import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
   closeSessionPane,
-  countDecoratedPanes,
   judgePaneDecor,
   openSessionPane,
   paneRecoverability,
-  releasesWindowLabels,
 } from "./session-factory.ts";
 import {
   judgePaneAlive,
-  listJudgePanes,
   type JudgePaneRunResult,
 } from "./judge-pane.ts";
 import { verifyJudgeBoot, channelRecordCount } from "./orchestrator-tool-kit.ts";
@@ -89,6 +85,9 @@ export interface JudgeSpawnToolDeps {
   tmux(argv: readonly string[]): JudgePaneRunResult;
   /** This session's own pane — the new pane splits off it. */
   ownPane(): string | undefined;
+  /** WHO THIS SESSION IS on a border — the `@<owner>` half of the judge pane
+   * this call opens (lib/orchestrator-pane-decor.ts `selfPaneOwner`). */
+  paneOwner(): string;
   /**
    * The tmux server this process talks to (lib/hierarchy.ts `tmuxServerFrom`).
    *
@@ -101,12 +100,6 @@ export interface JudgeSpawnToolDeps {
   now(): number;
   /** Injectable sleep, so the spawn's delivery check is testable without waiting. */
   sleep(ms: number): Promise<void>;
-  /**
-   * Does someone else own this window's label bar (an orchestration this
-   * session is only a guest in)? A guest never releases it — see
-   * `releasesWindowLabels`. Only the rollback path here asks.
-   */
-  insideOrchestration(): boolean;
   /** Which repo does this call target? Never guessed. */
   resolveRepo(requested: string | undefined): { ok: true; root: string } | { ok: false; error: string };
   /**
@@ -371,7 +364,7 @@ async function doSpawn(
       sysPromptPath: launch.sysPromptPath,
       model: launch.model,
     }),
-    decor: judgePaneDecor(judgeId, role),
+    decor: judgePaneDecor(judgeId, role, deps.paneOwner()),
     // A COMPLETE entry from the first write, and it happens INSIDE the open:
     // this registration used to omit `sessionDir`, which is precisely why
     // `judge_wait` could not find a judge `judge_spawn` had just opened.
@@ -427,29 +420,11 @@ async function doSpawn(
     const remembered = deps.rememberPlanAudit(root);
     if (!remembered.ok) {
       // The pane we just opened turned the window's border line ON
-      // (`decorateSessionPane`), so undoing the spawn has to undo that too —
-      // unless a sibling judge is still on screen and needs it. Same judgement
-      // as `judge_close`, addressed through OUR pane because the one being
-      // killed is the id that may already be gone.
-      const others = countDecoratedPanes(
-        Object.values(deps.hierarchy())
-          .filter((entry) =>
-            entry.judgeId !== judgeId
-            && entry.openerId === caller
-            && Boolean(entry.paneId)
-            // Same attribution rule as `judge_close`: an id minted by a tmux
-            // server that has since restarted names a stranger's pane, not a
-            // sibling of ours, and counting it would keep the bar up forever.
-            && paneClosable(entry, deps.tmuxServer()))
-          .map((entry) => entry.paneId!),
-        listJudgePanes(deps.tmux, ownPane),
-      );
-      const releases = releasesWindowLabels({
-        remainingDecoratedPanes: others,
-        insideOrchestration: deps.insideOrchestration(),
-      });
-      const closeOpts = releases ? { hideLabelsVia: ownPane } : {};
-      try { closeSessionPane(deps.tmux, paneId, closeOpts); } catch { /* best effort */ }
+      // (`decorateSessionPane`), and that line now STAYS ON (2026-09-17, user
+      // decision): undoing it would toggle `pane-border-status`, which resizes
+      // every pane in the window (measured: SIGWINCH, rows 84 ↔ 83). Rolling
+      // back the spawn therefore only closes the pane.
+      try { closeSessionPane(deps.tmux, paneId); } catch { /* best effort */ }
       rollback();
       return fail(`review-gate: plan 备案失败 —— ${remembered.error}`);
     }
@@ -608,7 +583,7 @@ async function doRecover(
       role: entry.role,
     },
     command: buildJudgeRecoverCommand(entry.judgeId),
-    decor: judgePaneDecor(entry.judgeId, entry.role),
+    decor: judgePaneDecor(entry.judgeId, entry.role, deps.paneOwner()),
     // The recovered pane is a NEW pane from THIS server — recording the server
     // with it is what keeps the entry closable later.
     register: (paneId) => {

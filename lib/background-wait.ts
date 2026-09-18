@@ -25,16 +25,30 @@
  * handed out). A failed launch (an error result, or text without the launch
  * wording) never starts a wait.
  *
- * A wait ENDS ONLY on that agent's own terminal signal. Two are recognised,
- * both keyed by the agent id:
+ * A wait ENDS ONLY on that agent's own terminal signal. THREE are recognised
+ * today, and the third is the one that actually fires in practice:
  *
+ *   - the EVENT BUS (`subagents:completed` / `subagents:failed`), whose
+ *     payload carries the agent id. This is the ONLY signal pi-subagents emits
+ *     for EVERY finished run: both the failure paths and the success path
+ *     below reach it (dist/index.js, the AgentManager completion handler).
  *   - a `subagent-notification` message whose `details` carry the id (group
- *     notifications list the other finished agents in `details.others`);
+ *     notifications list the other finished agents in `details.others`).
  *   - a `get_subagent_result` result whose TWO HEADER LINES name the agent
- *     and a TERMINAL status (pi-subagents prints `Agent: <id>\nType: … |
- *     Status: <status> | …`; the status is matched on that line against the
+ *     and a TERMINAL status (the status is matched on that line against the
  *     terminal union — completed / steered / aborted / stopped / error —
  *     never by scanning the whole text, whose body may quote anything).
+ *
+ * WHY THE EVENT BUS WAS ADDED (measured failure, 2026-09-17). pi-subagents
+ * SKIPS the notification when the parent already consumed the result
+ * (`if (record.resultConsumed) return;` in its completion handler), and it
+ * holds others back for batch finalization — so a session that spawned three
+ * background agents received ONE `subagent-notification` and the other two
+ * waits never cleared. The child then reported `working` for the rest of its
+ * life, including AFTER `declare_done`: its manager waited forever, the plan
+ * task stayed `running`, and every task depending on it never started. The
+ * event bus has no such gap — one emit per run, no batching, no
+ * already-consumed branch.
  *
  * There is deliberately NO timeout and NO "a new turn started, clear
  * everything" fallback: both clear waits without a completion signal, and a
@@ -72,10 +86,12 @@ export interface BackgroundWaitMessage {
   details?: unknown;
 }
 
-/** A wait event: a tool finished, or a custom message arrived. */
+/** A wait event: a tool finished, a custom message arrived, or an agent
+ * reached a terminal state on the event bus. */
 export type BackgroundWaitEvent =
   | { kind: "tool_result"; tool: BackgroundWaitToolResult }
-  | { kind: "message"; message: BackgroundWaitMessage };
+  | { kind: "message"; message: BackgroundWaitMessage }
+  | { kind: "finished"; id: unknown };
 
 /** The ids of background agents still waiting on a terminal signal. */
 export type BackgroundWaits = readonly string[];
@@ -155,6 +171,18 @@ export function foldBackgroundWaits(
   waits: BackgroundWaits,
   event: BackgroundWaitEvent,
 ): BackgroundWaits {
+  if (event.kind === "finished") {
+    // The event bus's terminal signal. Its payload is `unknown` by contract
+    // (any extension may emit anything on any channel), so the id is checked
+    // here: an unreadable payload leaves the wait list byte-for-byte alone
+    // rather than clearing a wait on a guess.
+    const id = typeof event.id === "string" ? event.id.trim() : "";
+    // Identity, not equality: an event about an agent nobody is waiting on
+    // leaves the list ALONE, which is what lets a caller tell "this signal
+    // changed what I am waiting for" from "it did not" without a second copy
+    // of the same rule.
+    return id === "" || !waits.includes(id) ? waits : waits.filter((waiting) => waiting !== id);
+  }
   if (event.kind === "message") {
     const done = terminalFromMessage(event.message);
     return done.length === 0 ? waits : waits.filter((id) => !done.includes(id));

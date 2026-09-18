@@ -80,7 +80,7 @@ export interface PlanTask {
 export interface PlanDecision {
   id: string;
   question: string;
-  /** ISO time the user was actually NOTIFIED (orchestrator_notify). */
+  /** ISO time the user was actually NOTIFIED (the gate sends the banner). */
   notifiedAt?: string;
   /** ISO time the answer landed. */
   resolvedAt?: string;

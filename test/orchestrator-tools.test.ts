@@ -29,6 +29,7 @@ import {
   type FakeWorld,
 } from "./helpers/fake-orchestration.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
+import { decideNotify, emptyNotifyHistory, notifyKey, recordNotify } from "../lib/user-notify.ts";
 import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
 import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
@@ -49,15 +50,19 @@ const CROSSCHECK_T1 =
 
 
 /**
- * The 9 tools an orchestration session gets, and nothing else.
+ * The 8 tools an orchestration session gets, and nothing else.
  *
  * `session_handoff` is deliberately NOT on this list: it belongs to every
  * kind of session, not to the project manager (lib/session-handoff-tools.ts),
  * and listing it here would claim the orchestration layer owns it.
+ *
+ * `orchestrator_notify` USED TO BE THE NINTH (deleted 2026-09-17): letting the
+ * manager decide when to interrupt the human is what the notification rule
+ * exists to prevent, so the GATE raises the banner now, for three events
+ * (lib/user-notify.ts). A manager that needs a person calls `ask_user`.
  */
 const ORCHESTRATION_TOOLS = [
   "orchestrator_plan",
-  "orchestrator_notify",
   "orchestrator_spawn",
   "orchestrator_instruct",
   "orchestrator_wait",
@@ -99,7 +104,7 @@ function taskDocument(world: FakeWorld, prefix = "/repo/"): string {
 }
 
 
-test("the ten orchestration tools are registered, and the deleted ones are not", () => {
+test("the orchestration tools are registered, and the deleted ones are not", () => {
   const world = makeFakeWorld();
   for (const name of ORCHESTRATION_TOOLS) {
     assert.ok(world.tools.has(name), `${name} must be registered`);
@@ -107,7 +112,12 @@ test("the ten orchestration tools are registered, and the deleted ones are not",
   assert.equal(world.tools.size, ORCHESTRATION_TOOLS.length,
     `exactly ${ORCHESTRATION_TOOLS.length} orchestration tools: ${[...world.tools.keys()].join(", ")}`);
   // Philosophy three: the replaced tools are GONE, not deprecated.
-  for (const gone of ["orchestrator_read", "orchestrator_key", "orchestrator_status", "orchestrator_send", "orchestrator_relay"]) {
+  for (const gone of [
+    "orchestrator_read", "orchestrator_key", "orchestrator_status", "orchestrator_send",
+    "orchestrator_relay",
+    // …and the notify tool, retired with the OSC channel: the gate sends now.
+    "orchestrator_notify",
+  ]) {
     assert.equal(world.tools.has(gone), false, `${gone} must no longer exist`);
   }
 });
@@ -702,6 +712,79 @@ test("declining a goal with `reason` writes it into the channel — the child re
   assert.equal(answer.reason, "退出条件 3 没有可检查的验收标准", "the decline reason rides in the answer record");
 });
 
+test("tmux-access proxy answer: the PM needs the user's scope, exactly like a sensitive edit", async () => {
+  // Reviewer P2 (2026-09-17). `kill-server` takes the user's whole tmux session
+  // with it, so a child that talked its manager into approving it would have
+  // bypassed the permission the user was just handed. This pins the mapping
+  // (topic → scope): a typo here silently reopens unconditional proxy approval,
+  // and nothing else in the suite would notice.
+  const ask = (w: FakeWorld, c: string) => w.childAsks(c, {
+    requestId: "req-t1",
+    title: "AI 请求在 bash 里使用 tmux 命令——是否授权？",
+    options: ["允许：本会话和接力继任者都能用 tmux", "只允许这一次", "拒绝"],
+    topic: "tmux-access",
+  });
+
+  // 1) No grant + the user refuses the proxy scope → refused, nothing written.
+  const w1 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c1 = await spawnT1(w1);
+  ask(w1, c1);
+  w1.options.selectAnswers = ["拒绝"];
+  const r1 = await w1.call("orchestrator_answer", { childId: c1, answer: "允许：本会话和接力继任者都能用 tmux" });
+  assert.equal(r1.isError, true);
+  assert.match(replyText(r1), /用户拒绝授予tmux 授权代答权/);
+  assert.equal(w1.channelOf(c1).filter((r) => r.kind === "answer").length, 0, "nothing written");
+  assert.equal(hasGrant(w1.runtime(), "tmux-access"), false);
+
+  // 2) The user picks "allow and remember" → the scope is minted AND the
+  //    manager's answer goes through.
+  const w2 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c2 = await spawnT1(w2);
+  ask(w2, c2);
+  w2.options.selectAnswers = ["允许并记住（本 orchestration 内都代答）"];
+  const r2 = await w2.call("orchestrator_answer", { childId: c2, answer: "允许：本会话和接力继任者都能用 tmux" });
+  assert.equal(r2.isError, undefined, replyText(r2));
+  assert.equal(w2.channelOf(c2).filter((r) => r.kind === "answer").length, 1, "the answer was written");
+  assert.equal(hasGrant(w2.runtime(), "tmux-access"), true, "the scope the reviewer asked for is the one minted");
+  assert.equal(hasGrant(w2.runtime(), "sensitive-edit"), false, "and it does not leak into the other scope");
+
+  // 3) THE PM's ANSWER IS ITSELF the ✎ row — and that only means anything when
+  //    the ✎ row is one of the rows THIS request offered, or `resolveAnswer`
+  //    rejects it first and the branch below is never reached (reviewer P2).
+  //    To isolate `looksLikeDeclineRow` the row must NOT also match the regex
+  //    beside it: `✎ 不需要` has no 拒绝/取消/不选 in it, so only the ✎ is what
+  //    makes it a refusal.
+  const w3 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c3 = await spawnT1(w3);
+  w3.childAsks(c3, {
+    requestId: "req-t3",
+    title: "AI 请求在 bash 里使用 tmux 命令——是否授权？",
+    options: ["允许：本会话和接力继任者都能用 tmux", "只允许这一次", "拒绝", "✎ 不需要"],
+    topic: "tmux-access",
+  });
+  const r3 = await w3.call("orchestrator_answer", {
+    childId: c3, answer: "✎ 不需要",
+  });
+  assert.equal(r3.isError, undefined, replyText(r3));
+  assert.ok(!w3.shown.some((line) => line.includes("项目经理想代答")), "a refusal never opens the grant door");
+  assert.equal(hasGrant(w3.runtime(), "tmux-access"), false, "and it mints nothing");
+  const decl = w3.channelOf(c3).filter((r) => r.kind === "answer");
+  assert.equal(decl.length, 1, "the refusal is written — the child must see that it was refused");
+  assert.match(String(decl[0]!.answer), /✎ 不需要/);
+
+  // 4) …and the decline ROW inside the grant dialog is a refusal too, whatever
+  //    reason text it carries (it may well say 允许/授权 — the row is the
+  //    answer).
+  const w4 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c4 = await spawnT1(w4);
+  ask(w4, c4);
+  w4.options.selectAnswers = ["✎ 不选，我说明原因：先不动 tmux"];
+  const r4 = await w4.call("orchestrator_answer", {
+    childId: c4, answer: "允许：本会话和接力继任者都能用 tmux",
+  });
+  assert.equal(r4.isError, true, "the decline row in the grant dialog decides, not the text beside it");
+});
+
 test("sensitive-edit proxy answer: NO grant → the user's three-choice door in the PM pane decides", async () => {
   // 1) No grant + user picks "拒绝" → refused, nothing written.
   const w1 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
@@ -1136,10 +1219,51 @@ test("attach ADOPTS the previous holder's orchestration, registry included", asy
   assert.deepEqual(world.adopted, [recorded.orchestrationId], "the id must actually be adopted");
   assert.equal(world.runtime().orchestrationId, recorded.orchestrationId);
   assert.equal(world.runtime().children.length, 1, "the previous holder's registry comes with it");
+  // AND THE CLAIM IS ON DISK, not just in memory (2026-09-17). `ownerSessionId`
+  // exists to let THIS session resume the record after a reload, and a takeover
+  // can be followed by nothing but `orchestrator_wait` for a long while — none
+  // of which persists the runtime. Adopting without writing left the record
+  // naming the previous session as owner, so the next reload refused it and
+  // stranded the children this call had just adopted.
+  assert.equal(world.runtimeWriteCount(), 1,
+    "taking over an orchestration writes the new owner to the sidecar immediately");
   const text = replyText(reply);
   assert.match(text, /已接管编排/);
   assert.match(text, /尚未获批/, "the approval does NOT travel — the new holder must submit again");
   assert.ok(world.auditLog.some((line) => line.includes("taken over")), "a change of holder is logged");
+});
+
+test("attach does NOT write when the sidecar holds a DIFFERENT orchestration", async () => {
+  // The durable claim is conditional, and this is the branch with consequences
+  // (reviewer P1, 2026-09-17). `runtime()` answers `emptyRuntime(id)` for an id
+  // the sidecar has no record of, so an unconditional write here would store an
+  // empty runtime over the record beside it — the record of a DIFFERENT
+  // orchestration, still describing its children, which is exactly what a later
+  // takeover of THAT one needs to find.
+  //
+  // Remove the `if` in doAttach and this test is the only one that fails: the
+  // rule itself is unit-tested (test/orchestrator-takeover.test.ts), but a rule
+  // that is tested and not WIRED is not a guard.
+  const recorded = previousHolder();
+  const other = idOfFakeRepo(1_700_000_500_000);
+  assert.notEqual(other, recorded.orchestrationId, "the two ids must differ for this to mean anything");
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    recordedRuntime: recorded,
+    // Known to the discovery — its channel directory is on disk — but NOT in
+    // this sidecar's runtime slot.
+    channelDirs: [other],
+  });
+
+  const reply = await world.call("orchestrator_attach", { orchestrationId: other });
+
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.deepEqual(world.adopted, [other], "the address is still adopted");
+  assert.equal(world.runtime().orchestrationId, other);
+  assert.equal(world.runtimeWriteCount(), 0,
+    "the other orchestration's record must survive an adoption it has nothing to do with");
+  assert.equal(world.deps.recordedRuntime?.()?.orchestrationId, recorded.orchestrationId,
+    "and it is STILL the record on disk, not an empty runtime under the new id");
 });
 
 test("attach refuses to change identity once this session has children of its own", async () => {
@@ -1308,15 +1432,21 @@ test("closing is limited to registered panes and returns the task to pending", a
 // wiring is pinned at its registration site.
 
 // ---------------------------------------------------------------------------
-// notify (unchanged; the only channel that reaches a human who is elsewhere)
+// notify IS NOT A TOOL ANY MORE (user decision, 2026-09-17)
 // ---------------------------------------------------------------------------
 
-test("notify writes once and is then throttled", async () => {
+test("no notification tool is registered, and the throttle lives in the policy module", async () => {
   const world = makeFakeWorld();
-  const first = await world.call("orchestrator_notify", { title: "要你拍板", body: "有个不可逆的决定" });
-  assert.equal(first.isError, undefined, replyText(first));
-  const second = await world.call("orchestrator_notify", { title: "要你拍板", body: "有个不可逆的决定" });
-  assert.match(replyText(second), /节流|throttl/i);
+  for (const name of ["orchestrator_notify", "notify_user"]) {
+    assert.equal(world.tools.get(name), undefined,
+      `${name} would put the decision to interrupt the human back in the agent's hands`);
+  }
+  // The throttle itself is NOT gone — it is what keeps a long run from becoming
+  // a pager storm — and it now guards the gate's own three senders.
+  const key = notifyKey("完成 · x", "done");
+  const history = recordNotify(emptyNotifyHistory(), key, 1_700_000_000_000);
+  const again = decideNotify({ history, key, now: 1_700_000_000_001 });
+  assert.equal(again.send, false);
 });
 
 // ---------------------------------------------------------------------------

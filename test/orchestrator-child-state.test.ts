@@ -337,6 +337,40 @@ test("an `idle` row reads its own forward-progress time, never the heartbeat tim
 });
 
 
+test("the row says WHAT the child is doing, not only whether it moved (2026-09-17)", () => {
+  // The user's ask: `working · 自上次推进 3200s` cannot tell "reading a large
+  // tree" from "spinning on the same search". The activity is the child's own
+  // report of its most recent tool call, carried on the same state record.
+  const withActivity = childHealth(observe([
+    { kind: "state", from: "child", at: iso(), state: "working", lastProgressAt: iso(-3_200_000), activity: "bash(grep -rn PrimeUsers src/)" },
+  ]));
+  assert.equal(withActivity.activity, "bash(grep -rn PrimeUsers src/)");
+  assert.equal(withActivity.state, "working", "the activity never changes the state itself");
+  const row = describeChildStateDetailed(withActivity);
+  assert.match(row, /在干活/, "the state word is still first");
+  assert.match(row, /自上次推进 3200s/, "…followed by the progress reading");
+  assert.match(row, /最近 bash\(grep -rn PrimeUsers src\/\)/, "…and the one thing it is working on");
+  assert.match(formatChildHealth([withActivity]), /最近 bash\(/, "the receipt row carries it too");
+
+  // An OLD record (written before this field existed) renders exactly as it
+  // did: the field is additive, never required.
+  const withoutActivity = childHealth(observe([
+    { kind: "state", from: "child", at: iso(), state: "working", lastProgressAt: iso(-30_000) },
+  ]));
+  assert.equal(withoutActivity.activity, undefined);
+  assert.doesNotMatch(describeChildStateDetailed(withoutActivity), /最近/);
+
+  // AN `idle` CHILD WITH NO PROGRESS READING STILL CARRIES IT (quality round,
+  // 2026-09-17): the idle branch above is guarded on `progressStaleSeconds`,
+  // and a child that reported idle before its first tool call has none — the
+  // activity is exactly what a manager needs before it decides to nudge.
+  const earlyIdle = childHealth(observe([
+    { kind: "state", from: "child", at: iso(), state: "idle", activity: "read(lib/gate-state.ts)" },
+  ]));
+  assert.equal(earlyIdle.progressStaleSeconds, undefined, "no reading: this is the branch under test");
+  assert.match(describeChildStateDetailed(earlyIdle), /停下了（没有 declare_done），最近 read\(lib\/gate-state\.ts\)/);
+});
+
 test("the rendered snapshot names the state in words, and says so when there is nobody", () => {
   const rendered = formatChildHealth([
     { childId: "c1", state: "waiting-input", quietForSeconds: 12, dialogTitle: "选一个" },

@@ -29,24 +29,16 @@ import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.
 import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
 
 /**
- * The orchestration deps plus ONE thing lib/orchestrator-deps.ts has no reason
- * to know about: how many JUDGE panes this session has decorated.
+ * The orchestration deps, whole.
  *
- * It exists for a single decision — may this close take the window's shared
- * label bar down (`releasesWindowLabels`)? A project manager's window holds
- * both kinds of decorated pane, and counting only one kind is how the release
- * went wrong twice: it blanked a running review's border, or it left the bar
- * switched on forever. OPTIONAL, so a deps object that predates this (a test
- * fixture, another caller) simply reports no judge panes.
+ * `decoratedJudgePanes()` used to be added here — for the single decision "may
+ * this close take the window's shared label bar down" — and is GONE with that
+ * decision (2026-09-17, user decision): the bar is never taken down, because
+ * toggling it resizes every pane in the window. See `closeSessionPane` in
+ * lib/session-factory.ts.
  */
-export interface OrchestratorSessionDeps extends OrchestratorDeps {
-  decoratedJudgePanes?(): number;
-}
-import {
-  closeSessionPane,
-  countDecoratedPanes,
-  releasesWindowLabels,
-} from "./session-factory.ts";
+export type OrchestratorSessionDeps = OrchestratorDeps;
+import { closeSessionPane } from "./session-factory.ts";
 
 import {
   WORKTREE_SETTLEMENTS,
@@ -442,41 +434,14 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
     // says so. The caller gets the settlement and no close narrative.
     return reply(`review-gate: 子会话 ${child.id} 早已关闭 —— 本次只结算它的 worktree。` + settlementNote, { childId: child.id });
   }
-  // THE SAME JUDGEMENT THE OTHER THREE CLOSE PATHS MAKE (reviewer P2,
-  // 2026-09-05 — "the answer to (c) is: unify them"). This one used to have
-  // its own rule (`isLastDecoratedChild`), and it carried both defects the
-  // others had already shed:
-  //
-  //  - it counted registry ROWS, so a child whose pane the user closed by hand
-  //    kept the bar up forever;
-  //  - it could not see JUDGE panes at all, so closing the last child while a
-  //    review was open blanked the review's border.
-  //
-  // Both are now one question — how many decorated panes can I still see —
-  // asked with the shared counter. `insideOrchestration` is false by
-  // construction: only a project manager reaches this tool (the mode guard),
-  // and a manager is never a guest in its own window.
-  //
-  // Addressed through the ORCHESTRATOR'S OWN pane when it can read it, else
-  // the child's: `setw -t <pane>` only names a window, and the pane being
-  // closed is the id that may already be gone — but the release itself must
-  // not become conditional on a diagnostic.
-  const panes = alivePanes(deps);
-  const releasesLabels = releasesWindowLabels({
-    remainingDecoratedPanes:
-      countDecoratedPanes(
-        runtime.children
-          .filter((c) => c.id !== child.id && !c.closedAt)
-          .map((c) => c.paneId),
-        panes.ok ? panes.panes : undefined,
-      )
-      + (deps.decoratedJudgePanes?.() ?? 0),
-    insideOrchestration: false,
-  });
-  const labelsVia = deps.ownPane() ?? child.paneId;
-  const killed = closeSessionPane(deps.tmux, child.paneId, {
-    ...(releasesLabels ? { hideLabelsVia: labelsVia } : {}),
-  });
+  // THE LABEL BAR IS NOT TOUCHED HERE ANY MORE (2026-09-17, user decision).
+  // This used to be the fourth of five close paths asking one shared
+  // question ("is this the last decorated pane I can see"), and every answer
+  // it could give toggled `pane-border-status` — which resizes EVERY pane in
+  // the window (measured: SIGWINCH, rows 84 ↔ 83) and was measured to be
+  // wrong across sessions besides. Closing a child is now just closing a
+  // child; the bar stays up for the window's lifetime (`closeSessionPane`).
+  const killed = closeSessionPane(deps.tmux, child.paneId);
   if (!killed.ok && !/can't find pane|no such pane/i.test(killed.error)) {
     return fail(`review-gate: 关闭 pane 失败 —— ${killed.error}`);
   }

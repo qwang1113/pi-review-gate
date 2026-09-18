@@ -9,6 +9,7 @@ import {
   type UserInteractionToolDeps,
 } from "../lib/user-interaction-tools.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
+import type { ChoiceSpec } from "../lib/choice-dialog.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { SENSITIVE_GRANT_TTL_MS, type SensitiveGrant } from "../lib/sensitive-grant.ts";
 import { git, neutraliseHostGitConfig } from "./helpers/git.ts";
@@ -41,11 +42,14 @@ interface Fake {
   grants: SensitiveGrant[];
   declined: Set<string>;
   scopeDeclined: boolean;
+  tmuxDeclined: boolean;
   /** What the confirm dialog answers, or "throw" to simulate an unshowable one. */
   confirmAnswer: boolean | "throw";
   /** What each ask_user dialog answers (one per question, in order). */
   answers: Array<string | undefined>;
   asked: string[];
+  /** The last ChoiceSpec rendered — the ORDER and the recommendation live there. */
+  lastSpec?: ChoiceSpec;
   /** This fake session can route dialogs through an orchestration channel. */
   canChannelDialogs: boolean;
   /** Grants minted via grantProxyScope, in order. */
@@ -72,6 +76,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     grants: [],
     declined: new Set<string>(),
     scopeDeclined: false,
+    tmuxDeclined: false,
     confirmAnswer: true,
     answers: [],
     asked: [],
@@ -88,6 +93,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     setLoopArmed: (armed) => { f.armed.push(armed); },
     showToUser: (_uiCtx, lead, body) => { f.notices.push({ lead, body }); return true; },
     askChoice: async (_uiCtx, spec, opts) => {
+      f.lastSpec = spec;
       f.confirms.push(`${spec.title}\n${opts?.body ?? ""}`);
       if (f.confirmAnswer === "throw") throw new Error("no dialog here");
       return f.confirmAnswer ? spec.options[0] : undefined;
@@ -97,7 +103,7 @@ function fake(over: Partial<Fake> = {}): Fake {
       f.asked.push(request.title);
       const answer = f.answers.length > 0
         ? f.answers.shift()!
-        : request.topic === "scope-limit" || request.topic === "sensitive-edit"
+        : request.topic === "scope-limit" || request.topic === "sensitive-edit" || request.topic === "tmux-access"
           ? (f.confirmAnswer === "throw" ? (() => { throw new Error("no dialog here"); })() : (f.confirmAnswer === true ? request.options[0] : undefined))
           : undefined;
       return { answer, by: answer === undefined ? "dismissed" : "human", requestId: "r1" };
@@ -107,6 +113,8 @@ function fake(over: Partial<Fake> = {}): Fake {
     commitsAheadOfBase: async () => f.ahead,
     scopeLimitDeclined: () => f.scopeDeclined,
     declineScopeLimit: () => { f.scopeDeclined = true; },
+    tmuxAccessDeclined: () => f.tmuxDeclined,
+    declineTmuxAccess: () => { f.tmuxDeclined = true; },
     sensitiveGrants: () => f.grants,
     storeSensitiveGrants: (next) => { f.grants = next; },
     sensitiveDeclinedPaths: f.declined,
@@ -156,9 +164,87 @@ function call(f: Fake, tool: string, params: Record<string, unknown> = {}): Prom
 
 // ---------- registration ----------
 
-test("ONE registration call wires all three user-facing tools", () => {
+test("ONE registration call wires all four user-facing tools", () => {
   const f = fake();
-  assert.deepEqual(f.order, ["ask_user", "request_scope_limit", "request_sensitive_edit"]);
+  assert.deepEqual(f.order, ["ask_user", "request_scope_limit", "request_tmux_access", "request_sensitive_edit"]);
+});
+
+// ---------- request_tmux_access ----------
+
+/** The two labels the dialog offers, spelled as the tool spells them. */
+const TMUX_SESSION = "允许：本会话和接力继任者都能用 tmux";
+const TMUX_ONCE = "只允许这一次";
+
+test("request_tmux_access: the user grants the SESSION scope, and it is persisted", async () => {
+  const f = fake({ answers: [TMUX_SESSION] });
+  const reply = await call(f, "request_tmux_access", { reason: "要把错位的 pane 调回去" });
+  assert.equal(reply.details?.granted, true);
+  assert.equal(reply.details?.scope, "session");
+  assert.equal(f.st.tmuxAccess?.scope, "session", "the grant lives in the sidecar, not in memory");
+  assert.ok(f.persists > 0, "a grant that is not written dies with the next reload");
+  assert.equal(f.asked.length, 1, "exactly one dialog, through the channel-aware seam");
+  assert.match(f.asked[0]!, /kill-server/, "the user is told WHICH commands were refused");
+  assert.match(f.asked[0]!, /只读命令/, "and which ones never were");
+});
+
+test("request_tmux_access: the recommendation is the NARROW grant", async () => {
+  const f = fake();
+  // Go all the way through the renderer: the ORDER and the recommendation are
+  // decided by the spec, and the fake's channel path would answer before ever
+  // looking at it.
+  f.deps.askEitherSide = async (_request, _hasUI, render) => {
+    const answer = await render(new AbortController().signal);
+    return { answer, by: "human", requestId: "r1" };
+  };
+  await call(f, "request_tmux_access", { reason: "x" });
+  // Same rule as the scope-limit dialog next door: the gate never nudges the
+  // user toward the wider permission, so the narrow grant is the recommended
+  // one and the standing grant is offered, not pushed.
+  const spec = f.lastSpec!;
+  assert.equal(spec.recommended, TMUX_ONCE);
+  assert.deepEqual(spec.options, [TMUX_SESSION, TMUX_ONCE, "拒绝"]);
+  assert.ok(spec.options.includes(spec.recommended), "the recommendation must be one of the options");
+});
+
+test("request_tmux_access: 'once' is a different scope, and a refusal locks the session", async () => {
+  const once = fake({ answers: [TMUX_ONCE] });
+  const granted = await call(once, "request_tmux_access", { reason: "一条命令" });
+  assert.equal(granted.details?.scope, "once");
+  assert.equal(once.st.tmuxAccess?.scope, "once");
+
+  const no = fake({ confirmAnswer: false });
+  const declined = await call(no, "request_tmux_access", { reason: "x" });
+  assert.equal(declined.isError, true);
+  assert.equal(no.tmuxDeclined, true, "one 'no' is the answer for the session");
+  assert.equal(no.st.tmuxAccess, undefined, "a decline grants nothing");
+});
+
+test("request_tmux_access: an already-granted session is told, not asked again", async () => {
+  const f = fake();
+  f.st.tmuxAccess = { at: "2026-09-17T00:00:00.000Z", scope: "session" };
+  const reply = await call(f, "request_tmux_access", { reason: "再来一次" });
+  assert.equal(reply.details?.alreadyGranted, true);
+  assert.deepEqual(f.asked, [], "no second dialog for a grant that is already standing");
+});
+
+test("request_tmux_access: a declined session, no UI, and an unshowable dialog all fail closed", async () => {
+  const locked = fake({ tmuxDeclined: true });
+  const lockedReply = await call(locked, "request_tmux_access", { reason: "x" });
+  assert.equal(lockedReply.isError, true);
+  assert.match(textOf(lockedReply), /already DECLINED/);
+  assert.deepEqual(locked.asked, [], "a locked session must not raise the dialog again");
+
+  const headless = fake();
+  const noUi = await runWithCtx(headless, "request_tmux_access", { reason: "x" }, { hasUI: false });
+  assert.equal(noUi.isError, true);
+  assert.match(textOf(noUi), /no interactive UI/);
+  assert.equal(headless.tmuxDeclined, false, "fail-closed is not a decline");
+
+  const broken = fake({ confirmAnswer: "throw" });
+  const failed = await call(broken, "request_tmux_access", { reason: "x" });
+  assert.equal(failed.isError, true);
+  assert.match(textOf(failed), /could not be shown/);
+  assert.equal(broken.tmuxDeclined, false, "a dialog that never appeared must not burn the lock");
 });
 
 // ---------- ask_user ----------
@@ -348,6 +434,27 @@ test("request_scope_limit: a previous decline locks the session, before any dial
   assert.equal(reply.isError, true);
   assert.match(textOf(reply), /already DECLINED/);
   assert.deepEqual(f.asked, [], "a locked session must not raise the dialog again");
+});
+
+test("request_scope_limit: an answer that is NOT one of the rows is a refusal, never a consent", async (t) => {
+  // THE WHITELIST GUARD (functional reviewer P2 + quality round P1, both on
+  // 2026-09-17): `parseChoice` returns an unrecognized line VERBATIM as
+  // `{kind:"chose", option:<text>}` (lib/choice-dialog.ts), so a consent
+  // decided by ELIMINATION ("anything that is not the refusal row") turns any
+  // other text into a GRANT on a path whose whole job is to be conservative.
+  // The three copies the shared helper replaced each matched their own grant
+  // label; this keeps it that way.
+  const dir = mkdtempSync(join(tmpdir(), "rg-scope-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  git(dir, ["init", "-q"]);
+  writeFileSync(join(dir, "old.ts"), "export const a = 1;\n");
+  const f = fake({ cwd: dir, answers: ["随便写的一句话，不是任何一个选项"] });
+
+  const reply = await call(f, "request_scope_limit", { reason: "既有改动" });
+  assert.equal(reply.isError, true);
+  assert.match(textOf(reply), /DECLINED the scope limit/);
+  assert.equal(f.scopeDeclined, true, "an unreadable answer is treated as a refusal");
+  assert.equal(f.st.scopeLimit, undefined, "nothing was granted");
 });
 
 test("request_scope_limit: no UI fails closed", async () => {
