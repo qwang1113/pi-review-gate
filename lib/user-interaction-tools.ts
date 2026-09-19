@@ -87,6 +87,17 @@ export interface UiContext {
 export interface UserInteractionToolDeps {
   /** This session's gate state — a GETTER; see "SHARED STATE" above. */
   state(): GateState;
+  /**
+   * THE REPO THIS SESSION'S GATE STATE BELONGS TO — the git ROOT, already
+   * resolved (review round 5 P1).
+   *
+   * `cwd` is where the session was STARTED, which can be a subdirectory of the
+   * repository; `stateForRepo` and `persistRepo` key their sidecars off a repo
+   * root, so a subdirectory reaching them reads and writes the wrong `.pi/`
+   * file. Callers that need to name the repo their question is about ask for it
+   * HERE instead of passing `cwd`.
+   */
+  repoRoot(): string;
   /** Persist it (sidecar write + status widget refresh). */
   persist(ctx: unknown): void;
   /** Arm or disarm auto-continuation — an unanswered question pauses it. */
@@ -168,7 +179,7 @@ export interface UserInteractionToolDeps {
  */
 export type ConsentToolDeps = Pick<
   UserInteractionToolDeps,
-  | "state" | "persist" | "showToUser" | "askChoice" | "cwd"
+  | "state" | "persist" | "showToUser" | "askChoice" | "cwd" | "repoRoot"
   | "sessionEditedPaths" | "commitsAheadOfBase" | "scopeLimitDeclined"
   | "declineScopeLimit" | "tmuxAccessDeclined" | "declineTmuxAccess"
   | "sensitiveGrants" | "storeSensitiveGrants"

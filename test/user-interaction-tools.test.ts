@@ -138,6 +138,7 @@ function fake(over: Partial<Fake> = {}): Fake {
       return { answer, by: answer === undefined ? "dismissed" : "human", requestId: "r1" };
     },
     cwd: f.cwd,
+    repoRoot: () => f.cwd,
     sessionEditedPaths: () => f.sessionEdited,
     commitsAheadOfBase: async () => f.ahead,
     scopeLimitDeclined: () => f.scopeDeclined,

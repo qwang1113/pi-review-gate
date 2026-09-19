@@ -11534,6 +11534,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   // what lets an orchestrator answer the same box the human can).
   registerUserInteractionTools(pi, {
     state: () => state,
+    // THE GIT ROOT, NOT `cwd` (review round 5 P1): the sidecars are keyed by repo
+    // root, and `cwd` may be a subdirectory of it.
+    repoRoot: () => primaryRepoRoot,
     persist: (ctx) => persist(ctx as unknown as ExtensionContext),
     setLoopArmed: (armed) => { loopArmed = armed; },
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as Parameters<typeof showToUser>[0], lead, body),

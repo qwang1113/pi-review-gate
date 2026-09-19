@@ -155,7 +155,13 @@ async function askConsent(
         // the `activeRepoRoot` fallback: a consent question is about the gate
         // state of the repo this session works in, and that does not drift with
         // the edits.
-        repo: deps.cwd,
+        //
+        // `repoRoot()`, NOT `cwd` (review round 5 P1): `cwd` is where the
+        // session started, which may be a SUBDIRECTORY of the repository — and
+        // the sidecar keying is by repo root. This session's consent state is
+        // `deps.state()`, which is the primary repo's, so the record must name
+        // the same one.
+        repo: deps.repoRoot(),
       }),
     );
     if (undecided) return { outcome: "undecided" };
