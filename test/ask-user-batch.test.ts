@@ -175,6 +175,7 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
     askEitherSide: (request, hasUI, renderDialog) =>
       askThroughChannel(binding, { ...request, hasUI }, renderDialog, h.interrupt.signal),
     grantProxyScope: () => {},
+    revokeProxyScope: () => {},
     cwd: "/repo",
     sessionEditedPaths: () => [],
     commitsAheadOfBase: async () => 0,
@@ -195,10 +196,20 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
 }
 
 const THREE = [
-  { text: "第一题：选架构", options: ["A", "B"], recommended: "A" },
-  { text: "第二题：选存储", options: ["C", "D"], recommended: "C" },
-  { text: "第三题：选站点", options: ["E", "F"], recommended: "E" },
+  { text: "第一题：选架构", options: ["单体", "微服务"], recommended: "单体" },
+  { text: "第二题：选存储", options: ["Postgres", "MySQL"], recommended: "Postgres" },
+  { text: "第三题：选站点", options: ["precommit", "pr"], recommended: "precommit" },
 ];
+
+/**
+ * WHAT THE PANE HANDS BACK: the row AS SHOWN (`A. 单体（推荐）`), which is what
+ * pi's selector returns and what the letter parsing has to survive.
+ */
+function rowA(title: string): string {
+  if (title.includes("第一题")) return "A. 单体（推荐）";
+  if (title.includes("第二题")) return "A. Postgres（推荐）";
+  return "A. precommit（推荐）";
+}
 
 // ---------------------------------------------------------------------------
 // 1. The batch reaches the project manager BEFORE the first box is raised
@@ -208,7 +219,7 @@ test("all three questions are on the channel before the FIRST dialog renders", a
   let seenAtFirstRender: Array<Extract<ChannelRecord, { kind: "request" }>> = [];
   const h = harness((title, self) => {
     if (seenAtFirstRender.length === 0) seenAtFirstRender = requestsOn(self.io);
-    return title.includes("第一题") ? "A" : title.includes("第二题") ? "C" : "E";
+    return rowA(title);
   });
 
   await h.run(THREE);
@@ -223,12 +234,12 @@ test("all three questions are on the channel before the FIRST dialog renders", a
   // The questions themselves travel VERBATIM, as they always did: the manager
   // never reads a screen.
   assert.match(seenAtFirstRender[1]!.title, /第二题：选存储/);
-  assert.deepEqual(seenAtFirstRender[1]!.options.slice(0, 2), ["C（推荐）", "D"]);
+  assert.deepEqual(seenAtFirstRender[1]!.options, ["A. Postgres（推荐）", "B. MySQL", "✎ 不选，我说明原因"]);
 });
 
 test("a lone question carries NO batch stamp — an interview of one is just a question", async () => {
-  const h = harness(() => "A");
-  await h.run([{ text: "只有一个问题", options: ["A", "B"], recommended: "A" }]);
+  const h = harness(() => "A. 单体（推荐）");
+  await h.run([{ text: "只有一个问题", options: ["单体", "微服务"], recommended: "单体" }]);
   const [only] = requestsOn(h.io);
   assert.equal(requestsOn(h.io).length, 1);
   assert.equal(only!.batchId, undefined);
@@ -241,7 +252,7 @@ test("a lone question carries NO batch stamp — an interview of one is just a q
 // ---------------------------------------------------------------------------
 
 test("INVARIANT: the pane still shows ONE box at a time, in question order", async () => {
-  const h = harness((title) => (title.includes("第一题") ? "A" : title.includes("第二题") ? "C" : "E"));
+  const h = harness((title) => rowA(title));
   const text = await h.run(THREE);
 
   assert.equal(h.maxConcurrent, 1, "batching must never put three boxes on the user at once");
@@ -250,7 +261,9 @@ test("INVARIANT: the pane still shows ONE box at a time, in question order", asy
   assert.match(h.rendered[1]!, /第二题/);
   assert.match(h.rendered[2]!, /第三题/);
   assert.match(text, /全部已答/);
-  assert.deepEqual(h.state.askUser?.answers.map((a) => a.answer), ["A", "C", "E"]);
+  assert.deepEqual(h.state.askUser?.answers.map((a) => a.answer),
+    ["A. 单体", "A. Postgres", "A. precommit"],
+    "the row the pane hands back is stored as the option, written with its letter");
 });
 
 // ---------------------------------------------------------------------------
@@ -271,7 +284,7 @@ test("INVARIANT: the project manager answers the WHOLE batch in one go, and no b
 
   const text = await h.run(THREE);
 
-  assert.deepEqual(h.state.askUser?.answers.map((a) => a.answer), ["B", "D", "F"],
+  assert.deepEqual(h.state.askUser?.answers.map((a) => a.answer), ["B. 微服务", "B. MySQL", "B. pr"],
     "one round trip answered the whole interview");
   // The boxes for the already-answered questions DO open for an instant and
   // then come down by themselves — the user's decision (2026-09-06): keep the
@@ -290,7 +303,7 @@ test("INVARIANT: the HUMAN wins the box that is open while the manager wins the 
       for (const request of requestsOn(self.io)) {
         if (!request.title.includes("第一题")) orchestratorAnswers(self.io, request.requestId, request.options[1]!);
       }
-      return "A"; // …and the human answers question 1 in the pane, first.
+      return "A. 单体（推荐）"; // …and the human answers question 1 in the pane, first.
     }
     // Questions 2 and 3 are already settled on the channel; their boxes come
     // down on their own, so the human never gets to answer them.
@@ -299,7 +312,7 @@ test("INVARIANT: the HUMAN wins the box that is open while the manager wins the 
 
   await h.run(THREE);
 
-  assert.deepEqual(h.state.askUser?.answers.map((a) => a.answer), ["A", "D", "F"]);
+  assert.deepEqual(h.state.askUser?.answers.map((a) => a.answer), ["A. 单体", "B. MySQL", "B. pr"]);
   const by = settlesOn(h.io).map((s) => s.by);
   assert.deepEqual(by, ["human", "orchestrator", "orchestrator"],
     "the settle record names who actually decided each question");
@@ -311,7 +324,7 @@ test("INVARIANT: the HUMAN wins the box that is open while the manager wins the 
 // ---------------------------------------------------------------------------
 
 test("closing the box stops the whole interview: the rest settle as DISMISSED, none left ringing", async () => {
-  const h = harness((title) => (title.includes("第一题") ? "A" : undefined));
+  const h = harness((title) => (title.includes("第一题") ? "A. 单体（推荐）" : undefined));
   const text = await h.run(THREE);
 
   assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["answered", "unanswered", "unanswered"]);
@@ -352,11 +365,11 @@ test("an answer the manager already WON survives the user closing the box", asyn
   const h = harness(async (title, self) => {
     if (title.includes("第一题")) {
       const third = requestsOn(self.io).find((r) => r.title.includes("第三题"))!;
-      orchestratorAnswers(self.io, third.requestId, "F");
+      orchestratorAnswers(self.io, third.requestId, third.options[1]!);
       // The human takes a moment to decide, which is all the channel watcher
       // needs to take the answer it was given.
       await new Promise((resolve) => { setTimeout(resolve, 5); });
-      return "A";
+      return "A. 单体（推荐）";
     }
     return undefined;
   });
@@ -364,10 +377,10 @@ test("an answer the manager already WON survives the user closing the box", asyn
   await h.run(THREE);
 
   assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["answered", "unanswered", "answered"]);
-  assert.equal(h.state.askUser?.answers[2]?.answer, "F",
+  assert.equal(h.state.askUser?.answers[2]?.answer, "B. pr",
     "an answer the race delivered is honoured, whatever stopped the rest");
   assert.equal(projectChannel(records(h.io)).openRequests.length, 0);
-  const third = settlesOn(h.io).find((s) => s.answer === "F");
+  const third = settlesOn(h.io).find((s) => s.answer === "B. pr");
   assert.equal(third?.by, "orchestrator", "and the wire says who decided it");
 });
 

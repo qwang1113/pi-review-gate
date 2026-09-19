@@ -73,7 +73,7 @@ const PROXY_SCOPE_LABEL: Record<string, string> = {
   "tmux-access": "tmux 授权",
 };
 
-/** Resolve `answer` against the offered rows: exact text, or a 1-based index. */
+/** Resolve `answer` against the offered rows: exact text, a letter, or a 1-based index. */
 export function resolveAnswer(
   request: PendingRequest,
   raw: string,
@@ -83,6 +83,20 @@ export function resolveAnswer(
   if (request.options.length === 0) return { ok: true, answer: text };
   const exact = request.options.find((option) => option === text);
   if (exact !== undefined) return { ok: true, answer: exact };
+  // A BARE LETTER, and the whole point of the 2026-09-19 numbering: the rows
+  // read `A. …`, so `A` is how a project manager quotes one back. This is
+  // resolved BEFORE the substring match below, because a single letter is a
+  // substring of almost every row — answering `A` must land on row A, never on
+  // "which rows happen to contain an a".
+  const letter = /^([A-Za-z])[.、)）]?$/.exec(text);
+  if (letter) {
+    const picked = request.options[letter[1]!.toUpperCase().charCodeAt(0) - 65];
+    if (picked !== undefined) return { ok: true, answer: picked };
+    return {
+      ok: false,
+      reason: `"${text}" 超出选项范围（只有 ${request.options.length} 个选项）`,
+    };
+  }
   // THE TEMPLATE'S DECLINE ROW (2026-09-08): the user (or the PM) picks
   // `✎ 不选，我说明原因` and the reason follows the row after a colon. That
   // whole line is a legitimate answer — the reason is the point — so it is
@@ -109,7 +123,7 @@ export function resolveAnswer(
     ok: false,
     reason:
       `"${text}" 不是这个框里的任何一项。可选：` +
-      request.options.map((option, index) => `${index + 1}. ${option}`).join(" / "),
+      request.options.join(" / "),
   };
 }
 

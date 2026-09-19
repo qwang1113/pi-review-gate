@@ -45,8 +45,66 @@ import { raceAbort } from "./abort-race.ts";
   factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: T) => void) => unknown,
 ) => Promise<T>;
 
+/**
+ * THE BOX'S OWN WAY BACK — and why it needs a sentinel at all (user decision,
+ * 2026-09-19).
+ *
+ * The editor's cancel used to be indistinguishable from the whole question
+ * being abandoned: both were `undefined`. They are two different facts now —
+ * "take me back to the list I was reading" versus "close this question" — and
+ * a host that can tell them apart returns `REASON_EDITOR_BACK` for the first.
+ *
+ * THE TEXT TRAVELS AFTER THE SENTINEL (`REASON_EDITOR_BACK + text`), so the
+ * list can be re-opened with the reason the user was half-way through writing
+ * already in the box. A NUL byte leads it: no user can type one into a dialog,
+ * so a real reason can never be mistaken for this control value.
+ */
+export const REASON_EDITOR_BACK = "\u0000rg-back\u0000";
+
+/** Did the reason box ask to go BACK to the list, rather than close? */
+export function isReasonBack(value: string): boolean {
+  return value.startsWith(REASON_EDITOR_BACK);
+}
+
+/** What was typed before the user pressed ESC on the reason box. */
+export function reasonBackText(value: string): string {
+  return value.slice(REASON_EDITOR_BACK.length);
+}
+
+/**
+ * THE TEXT A CUSTOM EDITOR HOLDS RIGHT NOW, read defensively.
+ *
+ * WHY THIS IS NOT A PUBLIC PI API. `ExtensionEditorComponent` keeps its
+ * `Editor` private and exposes no getter, so a caller that must carry the
+ * half-written reason back to the list has nothing official to read. The read
+ * is STRUCTURAL (a shape check, never `any`) and falls back to `""`: a pi that
+ * renames or hides the fields costs the user a retyped sentence, never a
+ * crashed dialog.
+ *
+ * EXPANDED FIRST. `getText` returns what the editor stores, which is what
+ * `setText` expects back — but a large PASTE is stored as a marker whose id is
+ * valid only inside the instance that made it, so re-opening the box with the
+ * stored form would show the user `[paste #1 …]` instead of their text.
+ * `getExpandedText` is the form pi itself hands an external editor for the same
+ * reason; `getText` is the fallback for a component that only has that one.
+ */
+export function editorTextOf(component: unknown): string {
+  const editor = (component as {
+    editor?: { getExpandedText?: () => string; getText?: () => string };
+  } | undefined)?.editor;
+  try {
+    if (typeof editor?.getExpandedText === "function") return editor.getExpandedText();
+    return typeof editor?.getText === "function" ? editor.getText() : "";
+  } catch {
+    return "";
+  }
+}
+
 /** What the template's `ChoiceUi.editor` is called with. */
-export type ReasonEditor = (title: string, opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
+export type ReasonEditor = (
+  title: string,
+  opts?: { signal?: AbortSignal; prefill?: string },
+) => Promise<string | undefined>;
 
 export interface ReasonEditorHost {
   /** pi's `ui.custom`. Absent on a host that cannot render custom components. */
@@ -68,12 +126,17 @@ export interface ReasonEditorHost {
   /**
    * Builds the component. The extension passes pi's own
    * `ExtensionEditorComponent`; a test passes anything that calls `done`.
+   *
+   * `prefill` is the text the box opens with (the user backed out to the list
+   * and came back), and `onCancel`'s own return value is where a host that can
+   * tell "back" from "close" says so — see {@link REASON_EDITOR_BACK}.
    */
   build(
     tui: unknown,
     keybindings: unknown,
     title: string,
     done: (value: string | undefined) => void,
+    prefill?: string,
   ): unknown;
 }
 
@@ -119,7 +182,7 @@ export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
       // cannot be called from inside the factory itself — the component may not
       // be mounted yet.
       if (opts?.signal?.aborted) queueMicrotask(() => finish(undefined));
-      return build(tui, keybindings, title, finish);
+      return build(tui, keybindings, title, finish, opts?.prefill);
     });
     if (ran || answer !== undefined) return answer;
     // THE FACTORY NEVER RAN (RPC): the host's own box takes over — WITH our
@@ -143,9 +206,16 @@ export function hostReasonEditor(host: ReasonEditorHost): ReasonEditor {
  * then as an eager side effect (the box was created before the race began, so
  * an already-cancelled dialog still popped a box on screen). A THUNK fixes the
  * second: a dead signal never opens anything at all.
+ *
+ * IT CAN CARRY A PREFILL (2026-09-19): pi's own `ui.editor(title, prefill?)`
+ * takes one in second position, which is exactly the half-written reason a
+ * user gets back after backing out to the list. On this path there is no way
+ * back to the LIST (the box cannot say why it closed — `undefined` is all it
+ * reports), so the prefill is the only half of the 2026-09-19 change that
+ * reaches a host without custom components.
  */
 export function hostEditorFallback(editor: HostEditor): ReasonEditor {
-  return (title, opts) => raceReasonEditor(() => editor(title), opts?.signal);
+  return (title, opts) => raceReasonEditor(() => editor(title, opts?.prefill), opts?.signal);
 }
 
 /**

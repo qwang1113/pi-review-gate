@@ -178,6 +178,34 @@ test("the template's decline row is a valid channel answer, reason included", ()
   assert.equal(resolveAnswer(request, "随便写点什么").ok, false);
 });
 
+test("a bare LETTER answers the row it names — never a substring match (2026-09-19)", () => {
+  // The rows are lettered now (`A. …`), so `A` is how a project manager
+  // quotes one back. It must land on row A — not on "whichever rows happen to
+  // contain an a", which is what the substring fallback would do with a single
+  // letter.
+  const request = {
+    requestId: "r1",
+    title: "选一个",
+    options: ["A. 继续（推荐）", "B. 停止", "C. 再说吧"],
+  } as unknown as Parameters<typeof resolveAnswer>[0];
+  const answerOf = (text: string): string | undefined => {
+    const got = resolveAnswer(request, text);
+    return got.ok ? got.answer : undefined;
+  };
+
+  for (const text of ["A", "a", "A."]) assert.equal(answerOf(text), "A. 继续（推荐）", text);
+  assert.equal(answerOf("C"), "C. 再说吧");
+  // Past the end it is a refusal, never a silent pick.
+  const over = resolveAnswer(request, "D");
+  assert.equal(over.ok, false);
+  if (!over.ok) assert.match(over.reason, /超出选项范围/);
+  // …and the forms that worked before keep working: the whole row, the plain
+  // option text, and the 1-based index.
+  assert.equal(answerOf("A. 继续（推荐）"), "A. 继续（推荐）");
+  assert.equal(answerOf("停止"), "B. 停止");
+  assert.equal(answerOf("2"), "B. 停止");
+});
+
 // ---------------------------------------------------------------------------
 // Through the tool.
 

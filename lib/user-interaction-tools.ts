@@ -53,6 +53,7 @@ import {
   progressLabel,
   choiceSpecOf,
   resolveQuestion,
+  stepInterview,
 
   formatAnswers,
   formatTranscriptSummary,
@@ -60,6 +61,7 @@ import {
   isGrantableScope,
   type AskAnswer,
   type AskQuestion,
+  type QuestionResolution,
 } from "./ask-user.ts";
 import { choiceRows, MAX_CHOICE_OPTIONS } from "./choice-dialog.ts";
 // The batch id is minted with the same collision-resistant helper the channel
@@ -91,12 +93,18 @@ export interface UserInteractionToolDeps {
   setLoopArmed(armed: boolean): void;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
-  /** Render the gate's one question template (lib/choice-dialog.ts). No fitting —
-   *  the box gets the whole text (lib/renderer-mode.ts says why). */
+  /**
+   * Render the gate's one question template (lib/choice-dialog.ts). No fitting —
+   * the box gets the whole text (lib/renderer-mode.ts says why).
+   *
+   * `back` draws the `← 返回上一题` row (multi-question interviews only); the
+   * row comes back as `lib/choice-dialog.ts`'s `BACK_ROW`, which the interview
+   * reads with `stepInterview`.
+   */
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; signal?: AbortSignal },
+    opts?: { body?: string; signal?: AbortSignal; back?: boolean },
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -123,6 +131,11 @@ export interface UserInteractionToolDeps {
    * orchestration.
    */
   grantProxyScope(scope: string, via: "ask-user" | "gate-grant" | "first-answer"): void;
+  /**
+   * Take one back (the user walked back to the authorization question and
+   * chose something else — 2026-09-19). Also a no-op outside an orchestration.
+   */
+  revokeProxyScope(scope: string): void;
   /** The session's primary repo/worktree directory. */
   cwd: string;
   /** Repo-relative paths THIS session edited (the never-exempt set). */
@@ -310,6 +323,123 @@ export async function doAskUser(
   // A single question is not an interview: it goes on the wire exactly as it
   // always did, with no stamp for a reader to make sense of.
   const batchId = remaining.length > 1 ? newChannelId("ask", Date.now()) : undefined;
+
+  /**
+   * ONE QUESTION SETTLES — the interview's only place for it.
+   *
+   * Both halves of the interview come through here: a question the dialogs
+   * settled in order, and one the user walked BACK to and re-answered
+   * (2026-09-19). One function is what makes the second indistinguishable from
+   * the first everywhere it matters — the answer list, the proxy grant, and
+   * the progress the sidecar persists after every single question.
+   */
+  function settleAnswer(
+    index: number,
+    q: AskQuestion,
+    picked: string | undefined,
+    opts: { interrupted?: boolean } = {},
+  ): QuestionResolution {
+    const resolution = resolveQuestion(q, picked, opts);
+    answers[index] = resolution.answer;
+    applyGrant(q, resolution.answer);
+    // Persisted after EVERY question: an interview that dies here resumes at
+    // the next one instead of asking the user everything again.
+    state.askUser = { at: new Date().toISOString(), answers: [...answers] };
+    deps.persist(ctx);
+    return resolution;
+  }
+
+  /**
+   * WHAT AN ANSWER DOES TO A PROXY AUTHORITY.
+   *
+   * GRANT DOOR 1/3 (2026-09-16, reviewer P1 fix): a question carrying a
+   * grantScope mints the proxy grant ONLY when the user picked the exact
+   * option the agent RECOMMENDED — the recommended option's own text is the
+   * authorization the user saw and chose (the notice in grantNotice states
+   * it). Substring matching is gone: an unrelated "grant me a few minutes"
+   * can no longer harvest the scope.
+   *
+   * AND A NON-RECOMMENDED ANSWER TAKES IT BACK (user decision, 2026-09-19):
+   * the authorization state of a scope follows the LATEST answer to the
+   * question that asks about it — walking back to an authorization question and
+   * choosing something else is the user changing their mind, and a grant that
+   * outlived the answer that minted it would be authority nobody gave any more.
+   * This holds for a FIRST answer too (a plain "no" now also revokes a scope
+   * some other door granted): revoking is the tightening direction, and two
+   * rules for one question would be one rule too many. An UNANSWERED question
+   * changes nothing — a closed box (or "answer this in chat") is not a refusal
+   * to authorize.
+   */
+  function applyGrant(q: AskQuestion, answer: AskAnswer): void {
+    if (!q.grantScope || !isGrantableScope(q.grantScope)) return;
+    if (answer.kind !== "answered") return;
+    if (answer.option === q.recommended) deps.grantProxyScope(q.grantScope, "ask-user");
+    else deps.revokeProxyScope(q.grantScope);
+  }
+
+  /**
+   * RENDER ONE QUESTION — AND LET THE USER WALK BACK (user decision, 2026-09-19).
+   *
+   * The order of ROWS inside a question is fixed; the order of QUESTIONS is
+   * not a one-way street any more. `← 返回上一题` re-opens an earlier question,
+   * its new answer overwrites the old one, and the box returns to the question
+   * the interview was actually waiting for. Which row does what is
+   * `stepInterview` (lib/ask-user.ts); this is the dialogs and the answer
+   * bookkeeping.
+   *
+   * THE QUESTION RIDES IN THE BODY (2026-09-14). The title is the short label
+   * the reason box repeats; the question is the long half and belongs in the
+   * body. (When a row budget existed this ALSO kept a 1200-character question
+   * from sizing the box — the budget is gone, the placement is not.) The full
+   * question is in the transcript printed before the first box, which is where
+   * a long text is readable.
+   *
+   * THE GRANT NOTICE STAYS OUT OF THE BODY (reviewer P1, 2026-09-14). The body
+   * was cut from its TAIL at the time, so appending the ⚠️ authorization
+   * notice after the question let a long question eat it — while picking the
+   * recommended row still minted the proxy grant. That is exactly the
+   * invisible-authorization hole the notice was added to close (2026-09-16
+   * P1), so the notice rides in the TITLE: it is the part of the box that is
+   * read first and repeated back by the reason box, and a two-line notice is
+   * never the long half. A long question goes in the body, whose full text is
+   * in the transcript anyway.
+   *
+   * ONE SIGNAL FOR THE WHOLE WALK: it is the anchored question's own, so an
+   * answer arriving through the channel — the project manager may settle THAT
+   * question while the user is two questions back — ends the walk exactly as
+   * it ends a single box: the next call finds a dead signal and returns
+   * without drawing anything.
+   *
+   * THE USER OUTRANKS A PROXY ANSWER THAT IS ALREADY ON THE WIRE (by
+   * construction, 2026-09-19). A question the project manager answered while
+   * the user was elsewhere comes back to the screen when the user walks to it:
+   * its box is no longer gated by the settled request, and what the user picks
+   * OVERWRITES the manager's answer in the interview record. That is the
+   * intended reading — the human is the authority the proxy stands in for —
+   * and the channel keeps the manager's own `request-settled` record, because
+   * inventing a second "corrected answer" record would give one dialog two
+   * histories with no rule for which one wins.
+   */
+  async function askWithBacks(anchor: number, signal: AbortSignal): Promise<string | undefined> {
+    let cursor = anchor;
+    for (;;) {
+      const q = questions[cursor]!;
+      const picked = await deps.askChoice(
+        uiCtx,
+        { ...choiceSpecOf(q), title: questionDialogTitle(q, cursor, questions.length) },
+        { body: q.text, signal, back: cursor > 0 },
+      );
+      const step = stepInterview({ anchor, cursor }, picked);
+      if (step.kind === "render") { cursor = step.cursor; continue; }
+      if (step.kind === "answerCurrent") return step.picked;
+      if (step.kind === "close") return undefined;
+      // A question reached by walking back: overwrite it, then return to the
+      // one the interview is waiting for.
+      settleAnswer(step.index, questions[step.index]!, step.picked);
+      cursor = anchor;
+    }
+  }
+
   const asks = remaining.map((q, offset) => {
     const index = firstIndex + offset;
     const prompt = `问题 ${progressLabel(index, questions.length)}\n${q.text}${grantNotice(q)}`;
@@ -342,37 +472,10 @@ export async function doAskUser(
         // render anything (see the declaration above).
         anyDialog = true;
         // ONE renderer for every dialog in the gate — the extension's
-        // `askChoice`, which is the template plus the host's own boxes.
-        //
-        // THE QUESTION RIDES IN THE BODY (2026-09-14). The title is the short
-        // label the reason box repeats; the question is the long half and
-        // belongs in the body. (When a row budget existed this ALSO kept a
-        // 1200-character question from sizing the box — the budget is gone,
-        // the placement is not.) The full question is in the transcript above
-        // (printed before the first box), which is where a long text is
-        // readable.
-        //
-        // THE GRANT NOTICE STAYS OUT OF THE BODY (reviewer P1, 2026-09-14).
-        // The body was cut from its TAIL at the time, so appending the ⚠️
-        // authorization
-        // notice after the question let a long question eat it — while
-        // picking the recommended row still minted the proxy grant. That is
-        // exactly the invisible-authorization hole the notice was added to
-        // close (2026-09-16 P1), so the notice rides in the TITLE: it is the
-        // part of the box that is read first and repeated back by the reason
-        // box, and a two-line notice is never the long half. A long question
-        // goes in the body, whose full text is in the transcript anyway.
-        return deps.askChoice(
-          uiCtx,
-          {
-            ...choiceSpecOf(q),
-            title: questionDialogTitle(q, index, questions.length),
-          },
-          {
-            body: q.text,
-            signal,
-          },
-        );
+        // `askChoice`, which is the template plus the host's own boxes — and
+        // the walk back through already-answered questions lives in
+        // `askWithBacks` just above.
+        return askWithBacks(index, signal);
       },
       // A broken dialog is silence, never an answer — and, now that these
       // calls outlive the statement that made them, never an unhandled
@@ -383,22 +486,10 @@ export async function doAskUser(
   for (const [offset, q] of remaining.entries()) {
     const outcome = await asks[offset]!;
     if (outcome.answer !== undefined) anyDialog = true;
-    const resolution = resolveQuestion(q, outcome.answer, {
+    const resolution = settleAnswer(firstIndex + offset, q, outcome.answer, {
       interrupted: outcome.by === "interrupted",
     });
-    answers.push(resolution.answer);
     if (resolution.stop) stopped = true;
-    if (resolution.answer.kind === "answered") {
-      // GRANT DOOR 1/3 (2026-09-16, reviewer P1 fix): a question carrying a
-      // grantScope mints the proxy grant ONLY when the user picked the exact
-      // option the agent RECOMMENDED — the recommended option's own text is
-      // the authorization the user saw and chose (the notice in grantNotice
-      // states it). Substring matching is gone: an unrelated "grant me a few
-      // minutes" can no longer harvest the scope.
-      if (q.grantScope && isGrantableScope(q.grantScope) && resolution.answer.answer === q.recommended) {
-        deps.grantProxyScope(q.grantScope, "ask-user");
-      }
-    }
     // OPENING THE NEXT GATE IS ALSO HOW A STOPPED INTERVIEW SETTLES ITS
     // LEFTOVERS. Once `stopped` is set, the next renderer returns immediately,
     // which resolves that question through the same race as any other and
@@ -407,10 +498,6 @@ export async function doAskUser(
     // `interrupted`). So a question nobody will ever see stops ringing on the
     // project manager's receipt instead of hanging there unanswerable.
     gates[offset + 1]?.open();
-    // Persisted after EVERY question: an interview that dies here resumes
-    // at the next one instead of asking the user everything again.
-    state.askUser = { at: new Date().toISOString(), answers: [...answers] };
-    deps.persist(ctx);
   }
 
 

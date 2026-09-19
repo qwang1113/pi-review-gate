@@ -928,8 +928,10 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the ONE prompt every surface renders interpolates the notice");
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
-  assert.match(ASK_USER_SRC, /return deps\.askChoice\(\s*uiCtx,/,
+  assert.match(ASK_USER_SRC, /return askWithBacks\(index, signal\);/,
     "the pane dialog renders the template through the ONE renderer");
+  assert.match(ASK_USER_SRC, /const picked = await deps\.askChoice\(\s*uiCtx,/,
+    "…called from the walk-back loop, which is where `← 返回上一题` is handled (2026-09-19)");
   // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). A title is the
   // short label; the question is the long half and belongs in the body. (When a
   // row budget existed this also kept a long question from sizing the box — the
@@ -943,7 +945,7 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   // under the progress label, while the recommended row still mints the grant.
   // (Before 2026-09-16 a title budget decided what survived; the budget is
   // gone, the order is not.)
-  assert.match(ASK_USER_SRC, /title: questionDialogTitle\(q, index, questions\.length\)/,
+  assert.match(ASK_USER_SRC, /title: questionDialogTitle\(q, cursor, questions\.length\)/,
     "the dialog title is built by the ONE title rule");
   assert.match(ASK_USER_SRC,
     /function questionDialogTitle\(q: AskQuestion, index: number, total: number\): string \{\s*const notice = grantNotice\(q\)\.trim\(\);/,
@@ -966,8 +968,10 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the transcript interpolates the notice");
   assert.match(ASK_USER_SRC, /明确授予项目经理/,
     "the notice text states the grant in plain Chinese");
-  assert.match(ASK_USER_SRC, /resolution\.answer\.kind === "answered"[\s\S]{0,900}resolution\.answer\.answer === q\.recommended/,
+  assert.match(ASK_USER_SRC, /if \(answer\.option === q\.recommended\) deps\.grantProxyScope\(q\.grantScope, "ask-user"\);/,
     "minting is an EXACT pick of the recommended row — no substring match");
+  assert.match(ASK_USER_SRC, /else deps\.revokeProxyScope\(q\.grantScope\);/,
+    "and a re-answered authorization question takes the scope back (2026-09-19)");
   assert.doesNotMatch(ASK_USER_SRC, /同意\|允许\|授权\|授予\|yes\|allow\|grant/,
     "the old substring predicate must not come back");
 
@@ -1018,7 +1022,7 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
   // unanswered question, which pauses the loop.
   assert.match(toolBody, /\.catch\(\(\): ChannelDialogOutcome => \(\{ answer: undefined, by: "dismissed", requestId: "" \}\)\)/,
     "a broken dialog is silence, never an answer");
-  assert.match(toolBody, /resolveQuestion\(q, outcome\.answer, \{/,
+  assert.match(toolBody, /const resolution = resolveQuestion\(q, picked, opts\);/,
     "what a settled question MEANS is the one pure rule in lib/ask-user.ts");
 
   // The answers come back in one piece, unanswered ones marked.
@@ -6688,4 +6692,22 @@ test("nothing writes the loop mode by itself — the plan's finish task delivers
   const autoLoop = files.filter((rel) => /setTaskMode\(\s*["']loop["']/.test(readFileSync(join(ROOT, rel), "utf8")));
   assert.deepEqual(autoLoop, [],
     "no path may write `loop` on its own: an orchestration ends through its plan's finish task, not through a mode change");
+});
+
+// ---------------------------------------------------------------------------
+// The reason box has TWO ways out (user decision, 2026-09-19)
+//
+// ESC in the `✎ …` box hands the question BACK to its own list — carrying the
+// half-written reason, so backing out costs nothing — while the LIST's ESC
+// stays what closes the question (and, in an interview, stops the rest). Both
+// halves meet in one wiring (`reasonBoxUi`'s `build`), and that wiring is not
+// reachable from a lib/ unit test: the lib tests drive the seam with a fake
+// component, so nothing there would notice the extension dropping the sentinel
+// or the prefill.
+test("the reason box is wired for BOTH ways out", () => {
+  assert.match(SRC, /REASON_EDITOR_BACK/,
+    "the extension knows the sentinel that means 'back to the list'");
+  assert.match(SRC, /done\(`\$\{REASON_EDITOR_BACK\}\$\{editorTextOf\(component\)\}`\)/,
+    "and cancelling the box carries the text typed so far back with it");
+  assert.match(SRC, /prefill,/, "the box opens with the text the user came back with");
 });

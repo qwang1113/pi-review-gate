@@ -78,7 +78,7 @@ import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "..
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { hostEditorFallback, hostReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
+import { hostEditorFallback, hostReasonEditor, editorTextOf, REASON_EDITOR_BACK, type CustomDialogHost } from "../lib/reason-editor.ts";
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
@@ -343,7 +343,7 @@ import {
   planSettlement,
   repoRootOfWorktree,
 } from "../lib/orchestrator-worktree.ts";
-import { addGrant, emptyRuntime, findChild, hasGrant, noteWorktreeBranch, successorRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { addGrant, emptyRuntime, findChild, hasGrant, noteWorktreeBranch, removeGrant, successorRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "../lib/change-baseline.ts";
 import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
@@ -5063,14 +5063,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       editor: hostReasonEditor({
         custom: custom.bind(pi) as CustomDialogHost,
         ...(own ? { fallback: own } : {}),
-        build: (tui, keybindings, title, done) => new Component(
-          tui as ConstructorParameters<EditorComponentCtor>[0],
-          keybindings as ConstructorParameters<EditorComponentCtor>[1],
-          title,
-          undefined,
-          done,
-          () => done(undefined),
-        ),
+        // THE BOX HAS TWO WAYS OUT (user decision, 2026-09-19): ESC hands the
+        // question BACK to its own list — carrying whatever was typed so far,
+        // so backing out costs nothing — while the LIST's ESC stays what it
+        // always was, closing the question (and, in an interview, stopping the
+        // rest). The component's own text is read defensively; see
+        // `editorTextOf` (lib/reason-editor.ts).
+        build: (tui, keybindings, title, done, prefill) => {
+          const component = new Component(
+            tui as ConstructorParameters<EditorComponentCtor>[0],
+            keybindings as ConstructorParameters<EditorComponentCtor>[1],
+            title,
+            prefill,
+            done,
+            () => done(`${REASON_EDITOR_BACK}${editorTextOf(component)}`),
+          );
+          return component;
+        },
       }),
     };
   }
@@ -5118,7 +5127,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   async function askChoice(
     uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal } = {},
+    opts: { body?: string; signal?: AbortSignal; back?: boolean } = {},
   ): Promise<string | undefined> {
     // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
     // is a getter that asserts the context is still alive, and a dialog can wait
@@ -5161,6 +5170,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // run, and the tool waiting on it never came back.
       const answer = await renderChoice(await reasonBoxUi(uiCtx.ui), spec, {
         ...(opts.body === undefined ? {} : { body: opts.body }),
+        ...(opts.back ? { back: true } : {}),
         ...(signal ? { signal } : {}),
       });
       // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
@@ -11220,6 +11230,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     grantProxyScope: (scope, via) => {
       if (!state.orchestrator) return; // not an orchestration — nothing to grant
       persistOrchestration(addGrant(state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
+    },
+    // The same doorway, closing: the user can walk BACK to an authorization
+    // question (2026-09-19) and answer something else, which takes the scope
+    // away again (lib/user-interaction-tools.ts `applyGrant`).
+    revokeProxyScope: (scope) => {
+      if (!state.orchestrator) return; // not an orchestration — nothing to revoke
+      persistOrchestration(removeGrant(state.orchestrator, scope));
     },
     cwd,
     sessionEditedPaths: () => [...sessionEditedPaths],

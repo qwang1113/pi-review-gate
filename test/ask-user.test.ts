@@ -7,6 +7,7 @@ import {
   progressLabel,
   interpretChoice,
   resolveQuestion,
+  stepInterview,
   formatAnswers,
   formatTranscriptSummary,
   needsUserReply,
@@ -14,7 +15,7 @@ import {
   type AskAnswer,
   type AskQuestion,
 } from "../lib/ask-user.ts";
-import { DECLINE_ROW, MAX_CHOICE_OPTIONS } from "../lib/choice-dialog.ts";
+import { BACK_ROW, DECLINE_ROW, MAX_CHOICE_OPTIONS } from "../lib/choice-dialog.ts";
 
 /** A question that follows the template — the shape every test starts from. */
 function q(text: string, options: string[] = ["A", "B"], recommended = options[0] ?? ""): AskQuestion {
@@ -122,10 +123,15 @@ test("progress is 1-based", () => {
 
 // ---- what a picked line MEANS ----
 
-test("picking an option returns the option the agent wrote, without the marker", () => {
-  const question = q("q", ["A", "B"], "B");
-  assert.deepEqual(interpretChoice("B（推荐）", question), { kind: "answered", answer: "B" });
-  assert.deepEqual(interpretChoice("A", question), { kind: "answered", answer: "A" });
+test("picking a row answers with the option AND the letter — the record matches the screen", () => {
+  const question = q("q", ["继续", "停止"], "停止");
+  assert.deepEqual(interpretChoice("B. 停止（推荐）", question),
+    { kind: "answered", answer: "B. 停止", option: "停止" });
+  assert.deepEqual(interpretChoice("A. 继续", question),
+    { kind: "answered", answer: "A. 继续", option: "继续" });
+  // …and the short forms a user or a project manager reads off the screen.
+  assert.deepEqual(interpretChoice("B", question),
+    { kind: "answered", answer: "B. 停止", option: "停止" });
 });
 
 test("the decline row carries the reason as the answer", () => {
@@ -255,11 +261,11 @@ test("an unanswered question is not carried over — the interview resumes there
 // ---- an environment with no dialogs must say so ----
 
 test("the no-dialog notice hands the questions back to the agent, in full", () => {
-  const notice = buildNoDialogNotice([q("范围？", ["A", "B"], "A")]);
+  const notice = buildNoDialogNotice([q("范围？", ["只改这个模块", "整个仓库"], "只改这个模块")]);
   assert.match(notice, /没能展示给用户/);
   assert.match(notice, /写进你的回复/);
   assert.match(notice, /范围？/);
-  assert.match(notice, /选项：A（推荐） \/ B \/ ✎ 不选，我说明原因/);
+  assert.match(notice, /选项：A\. 只改这个模块（推荐） \/ B\. 整个仓库 \/ ✎ 不选，我说明原因/);
 });
 
 test("an unanswered question reads as unanswered, never as 'ask me in chat'", () => {
@@ -276,15 +282,17 @@ test("an unanswered question keeps the loop waiting", () => {
 
 // ---------- what one settled question MEANS (the batch rule) ----------
 
-const PICK = q("选一个", ["A", "B"], "A");
+const PICK = q("选一个", ["继续", "停止"], "继续");
 
 test("an answer the race delivered is honoured", () => {
   // The one case batching created: the project manager answered this question
   // through the channel before the user got to it. 先答者生效.
-  assert.deepEqual(resolveQuestion(PICK, "B"),
-    { answer: { question: "选一个", kind: "answered", answer: "B" } });
-  // The recommendation marker is stripped: the agent gets the option it wrote.
-  assert.equal(resolveQuestion(PICK, "A（推荐）").answer.answer, "A");
+  assert.deepEqual(resolveQuestion(PICK, "B. 停止"),
+    { answer: { question: "选一个", kind: "answered", answer: "B. 停止", option: "停止" } });
+  // The letter and the recommendation marker are both dropped from the option
+  // itself — the agent's own comparisons run on the text it wrote.
+  assert.equal(resolveQuestion(PICK, "A. 继续（推荐）").answer.answer, "A. 继续");
+  assert.equal(resolveQuestion(PICK, "A. 继续（推荐）").answer.option, "继续");
 });
 
 test("an instruct that took the box away is nobody deciding anything", () => {
@@ -299,6 +307,27 @@ test("closing the box stops the WHOLE interview, and says so", () => {
   assert.equal(closed.stop, true);
   assert.equal(closed.answer.kind, "unanswered");
   // An ordinary answer stops nothing.
-  assert.equal(resolveQuestion(PICK, "A").stop, undefined);
+  assert.equal(resolveQuestion(PICK, "A. 继续").stop, undefined);
   assert.equal(resolveQuestion(PICK, `${DECLINE_ROW}：!chat`).answer.kind, "deferred-to-chat");
+});
+
+// ---------- walking back (user decision, 2026-09-19) ----------
+
+test("the back row moves the cursor one question earlier, and never off the front", () => {
+  assert.deepEqual(stepInterview({ anchor: 2, cursor: 2 }, BACK_ROW), { kind: "render", cursor: 1 });
+  assert.deepEqual(stepInterview({ anchor: 2, cursor: 1 }, BACK_ROW), { kind: "render", cursor: 0 });
+  assert.deepEqual(stepInterview({ anchor: 2, cursor: 0 }, BACK_ROW), { kind: "render", cursor: 0 },
+    "the first question has nowhere to go back to");
+});
+
+test("an answer to the ANCHORED question settles it; an answer on the way back is a revision", () => {
+  assert.deepEqual(stepInterview({ anchor: 2, cursor: 2 }, "A. 继续"),
+    { kind: "answerCurrent", picked: "A. 继续" });
+  assert.deepEqual(stepInterview({ anchor: 2, cursor: 0 }, "B. 停止"),
+    { kind: "revise", index: 0, picked: "B. 停止" });
+});
+
+test("a closed box closes the interview, from whichever question it was", () => {
+  assert.deepEqual(stepInterview({ anchor: 2, cursor: 2 }, undefined), { kind: "close" });
+  assert.deepEqual(stepInterview({ anchor: 2, cursor: 1 }, undefined), { kind: "close" });
 });

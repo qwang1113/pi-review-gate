@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { hostEditorFallback, hostReasonEditor, raceReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
+import { hostEditorFallback, hostReasonEditor, raceReasonEditor, editorTextOf, isReasonBack, reasonBackText, REASON_EDITOR_BACK, type CustomDialogHost } from "../lib/reason-editor.ts";
 import { resolveQuestion } from "../lib/ask-user.ts";
 
 // ---- the runtime import the extension now depends on ----
@@ -21,8 +21,8 @@ test("the value import the extension relies on resolves at runtime", async () =>
  *  never calls it at all (pi dist/modes/rpc/rpc-mode.js). */
 function harness(mode: "interactive" | "rpc" | "no-custom") {
   let componentDone: ((value: string | undefined) => void) | undefined;
-  const calls: { built: string[]; fellBack: string[]; fallbackArgs: number[] } =
-    { built: [], fellBack: [], fallbackArgs: [] };
+  const calls: { built: string[]; fellBack: string[]; fallbackArgs: number[]; prefills: (string | undefined)[] } =
+    { built: [], fellBack: [], fallbackArgs: [], prefills: [] };
 
   const custom: CustomDialogHost = async <T,>(
     factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: T) => void) => unknown,
@@ -45,8 +45,9 @@ function harness(mode: "interactive" | "rpc" | "no-custom") {
       calls.fallbackArgs.push(arguments.length);
       return "理由写在宿主自己的框里";
     },
-    build: (_tui, _keybindings, title, done) => {
+    build: (_tui, _keybindings, title, done, prefill) => {
       calls.built.push(title);
+      calls.prefills.push(prefill);
       componentDone = done;
       return "component";
     },
@@ -144,10 +145,13 @@ test("a host with no custom at all goes straight to its own editor", async () =>
   assert.deepEqual(h.calls.built, []);
 });
 
-test("hostEditorFallback: pi's prefill slot stays EMPTY, and the abort still lands", async () => {
+test("hostEditorFallback: a prefill reaches pi's prefill slot — and our OPTS never do", async () => {
   // Two rules, one adapter (reviewer P1, 2026-09-18): pi's `ui.editor` takes a
   // PREFILL second, so our opts must never reach it — and the signal it does
   // read must end the wait, which is all this signal-less box allows.
+  //
+  // What the second slot is FOR arrives there now (2026-09-19): `prefill` is
+  // the half-written reason a user gets back after backing out to the list.
   const seen: { titles: string[]; prefill: (string | undefined)[] } = { titles: [], prefill: [] };
   const hostEditor = (title: string, prefill?: string) => {
     seen.titles.push(title);
@@ -162,12 +166,18 @@ test("hostEditorFallback: pi's prefill slot stays EMPTY, and the abort still lan
   assert.equal(await pending, undefined, "the wait ends at the abort");
   assert.deepEqual(seen.titles, ["理由"]);
   assert.deepEqual(seen.prefill, [undefined],
-    "our opts must never land in pi's prefill position — the box would open with `[object Object]`");
+    "with no prefill, our opts object must still never land in that slot — the box would open with `[object Object]`");
+
+  const carried = new AbortController();
+  const second = box("理由", { signal: carried.signal, prefill: "写到一半" });
+  assert.deepEqual(seen.prefill, [undefined, "写到一半"], "the user's half-written reason opens the next box");
+  carried.abort();
+  assert.equal(await second, undefined);
 
   const dead = new AbortController();
   dead.abort();
   assert.equal(await box("理由", { signal: dead.signal }), undefined);
-  assert.deepEqual(seen.titles, ["理由"], "an already-aborted signal does not open the box at all");
+  assert.deepEqual(seen.titles, ["理由", "理由"], "an already-aborted signal does not open the box at all");
 });
 
 test("an already-aborted signal must not BUILD the component either (reviewer P1, 2026-09-18)", async () => {
@@ -202,6 +212,36 @@ test("the RPC path hands the abort through to the host's own box (reviewer P1, 2
   aborter.abort();
   assert.equal(await pending, undefined, "the wait ends at the abort, on this path too");
   assert.equal(opened, 1, "…and it was the host's own box that was pending");
+});
+
+// ---- the way back to the list (user decision, 2026-09-19) ----
+
+test("the box opens with the text the user was half-way through", async () => {
+  const h = harness("interactive");
+  const pending = h.editor("head", { prefill: "写到一半" });
+  assert.deepEqual(h.calls.prefills, ["写到一半"], "a host that gets one opens the box with it");
+  assert.deepEqual(h.calls.built, ["head"]);
+  h.submit("写到一半，又加了几个字");
+  assert.equal(await pending, "写到一半，又加了几个字");
+});
+
+test("BACK is its own answer: a sentinel no user can type, with the text after it", () => {
+  assert.equal(isReasonBack(REASON_EDITOR_BACK), true);
+  assert.equal(isReasonBack(`${REASON_EDITOR_BACK}写到一半`), true);
+  assert.equal(isReasonBack("写到一半"), false);
+  assert.equal(isReasonBack(""), false);
+  assert.equal(reasonBackText(`${REASON_EDITOR_BACK}写到一半`), "写到一半");
+  assert.equal(reasonBackText(REASON_EDITOR_BACK), "");
+  assert.ok(REASON_EDITOR_BACK.startsWith("\u0000"),
+    "a NUL byte leads it — no dialog can produce one, so a real reason is never mistaken for this control value");
+});
+
+test("editorTextOf reads the component's text defensively — a pi rename costs a retype, not a crash", () => {
+  assert.equal(editorTextOf({ editor: { getText: () => "写到一半" } }), "写到一半");
+  assert.equal(editorTextOf({}), "", "no editor field ⇒ nothing to carry back");
+  assert.equal(editorTextOf(undefined), "");
+  assert.equal(editorTextOf({ editor: {} }), "");
+  assert.equal(editorTextOf({ editor: { getText: () => { throw new Error("boom"); } } }), "");
 });
 
 // ---- the fallback's half of the abort (reviewer P1, 2026-09-18) ----

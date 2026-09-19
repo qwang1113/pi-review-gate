@@ -229,6 +229,22 @@ export function addGrant(
 }
 
 /**
+ * Take a grant back — the user changed their mind (user decision, 2026-09-19).
+ *
+ * WHY THIS EXISTS AT ALL. The grants were add-only, which was true enough
+ * while the only way to authorize was to pick a row in a dialog the user could
+ * not re-open. `← 返回上一题` ends that: an authorization question can be
+ * answered again, and an approval that outlived the answer that minted it
+ * would be authority the user believes they took back. Returns the SAME
+ * runtime when the scope was not granted, so a caller can persist blindly.
+ */
+export function removeGrant(runtime: OrchestratorRuntime, scope: string): OrchestratorRuntime {
+  const grants = runtime.grants ?? [];
+  const kept = grants.filter((g) => g.scope !== scope);
+  return kept.length === grants.length ? runtime : { ...runtime, grants: kept };
+}
+
+/**
  * The runtime a DIFFERENT session inherits: the facts about the world, and —
  * only for a genuine handoff successor — the user's approval with them.
  *

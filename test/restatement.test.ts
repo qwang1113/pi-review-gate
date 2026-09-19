@@ -320,7 +320,9 @@ test("propose: the PM sees the child's OWN words — the full text travels as th
   await doProposeRestatement(f.deps, { restatement: GOOD, station: "pr" }, UI);
   assert.equal(seen?.topic, "restatement");
   assert.equal(seen?.payload, GOOD, "a retyped summary must never be what gets confirmed");
-  assert.deepEqual(seen?.options, [`${RESTATEMENT_APPROVE_LABEL}（推荐）`, RESTATEMENT_REJECT_LABEL, REVISE_ROW]);
+  assert.deepEqual(seen?.options,
+    [`A. ${RESTATEMENT_APPROVE_LABEL}（推荐）`, `B. ${RESTATEMENT_REJECT_LABEL}`, REVISE_ROW],
+    "the rows carry their letters on the channel too — the PM reads the same list the user does");
   assert.equal(f.st.restatement?.station, "pr");
 });
 

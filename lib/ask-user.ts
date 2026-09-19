@@ -21,9 +21,11 @@
  */
 
 import {
+  BACK_ROW,
   MAX_CHOICE_OPTION_CHARS,
   MAX_CHOICE_OPTIONS,
   choiceRows,
+  optionLabel,
   parseChoice,
   validateChoice,
   type ChoiceSpec,
@@ -94,8 +96,22 @@ export type AnswerKind =
 export interface AskAnswer {
   question: string;
   kind: AnswerKind;
-  /** The chosen option or the typed text; absent unless answered. */
+  /**
+   * The chosen option or the typed text; absent unless answered.
+   *
+   * A CHOSEN OPTION IS WRITTEN AS THE SCREEN WROTE IT — `A. the text` (user
+   * decision, 2026-09-19). The dialog is gone by the time anyone reads the
+   * transcript, so the letter is the only thing that still ties the record to
+   * what the user saw. Everything that is NOT an option (a typed reason, a
+   * deferred-to-chat note) carries no letter, because it never had one.
+   */
   answer?: string;
+  /**
+   * The option's OWN text, without the letter — what the caller's own
+   * comparisons run on (the proxy grant is minted only for the option the
+   * agent recommended). Absent when the answer was not one of the options.
+   */
+  option?: string;
 }
 
 /**
@@ -205,7 +221,7 @@ export function choiceSpecOf(q: AskQuestion): ChoiceSpec {
 }
 
 export type ChoiceMeaning =
-  | { kind: "answered"; answer: string }
+  | { kind: "answered"; answer: string; option?: string }
   | { kind: "deferred-to-chat" }
   | { kind: "dismissed" };
 
@@ -217,7 +233,14 @@ export type ChoiceMeaning =
 export function interpretChoice(picked: string | undefined, q: AskQuestion): ChoiceMeaning {
   const parsed = parseChoice(picked, choiceSpecOf(q));
   if (parsed.kind === "dismissed") return { kind: "dismissed" };
-  if (parsed.kind === "chose") return { kind: "answered", answer: parsed.option };
+  if (parsed.kind === "chose") {
+    // An option the dialog OFFERED carries its letter into the record; free
+    // text (a project manager's own words) is kept exactly as it arrived.
+    const index = q.options.indexOf(parsed.option);
+    return index < 0
+      ? { kind: "answered", answer: parsed.option }
+      : { kind: "answered", answer: optionLabel(parsed.option, q.options), option: parsed.option };
+  }
   // The decline row: the user picked none of the options. What they typed is
   // either the interview's typed escape or the reason itself — and an empty
   // box is still an answer ("none of these, no reason given"), never a
@@ -281,7 +304,14 @@ export function resolveQuestion(
   if (picked !== undefined) {
     const meaning = interpretChoice(picked, q);
     if (meaning.kind === "answered") {
-      return { answer: { question: q.text, kind: "answered", answer: meaning.answer } };
+      return {
+        answer: {
+          question: q.text,
+          kind: "answered",
+          answer: meaning.answer,
+          ...(meaning.option === undefined ? {} : { option: meaning.option }),
+        },
+      };
     }
     if (meaning.kind === "deferred-to-chat") {
       return { answer: { question: q.text, kind: "deferred-to-chat" } };
@@ -297,6 +327,56 @@ export function resolveQuestion(
   return { answer: { question: q.text, kind: "unanswered" }, stop: true };
 }
 
+
+/**
+ * WALKING BACK THROUGH AN INTERVIEW — the whole rule, as a pure step.
+ *
+ * WHY THE STATE MACHINE IS ITS OWN THING (user decision, 2026-09-19). The
+ * interview renders ONE question at a time and settles it; the way back makes
+ * that not a straight line any more — the box on screen is not always the
+ * question the interview is waiting for. The rule has four branches and all
+ * four are decisions about the CURSOR, not about dialogs:
+ *
+ *   - `← 返回上一题` moves the cursor one question back and renders it again;
+ *   - the FIRST question cannot go further back (its list draws no such row,
+ *     and a row that arrives anyway must not walk off the end);
+ *   - a closed box is the interview's stop, from whichever question;
+ *   - an answer to the anchored question settles IT, while an answer to a
+ *     question reached by walking back OVERWRITES that one and sends the user
+ *     back to the anchored question — the skipped questions keep the answers
+ *     they already had (user decision, 2026-09-19: only the changed one is
+ *     re-decided).
+ *
+ * It lives here, away from the dialogs, so every branch is drivable from a
+ * test with three lines and no terminal — the interview's loop in
+ * lib/user-interaction-tools.ts only carries the branches out.
+ */
+export interface InterviewCursor {
+  /** The question the interview is blocked on — where an answer ends the wait. */
+  anchor: number;
+  /** The question on screen right now: the anchor, or an earlier one. */
+  cursor: number;
+}
+
+/** What the row the user picked does to the interview. */
+export type InterviewStep =
+  /** Render this question next. */
+  | { kind: "render"; cursor: number }
+  /** The box was closed: the whole interview stops here. */
+  | { kind: "close" }
+  /** The ANCHORED question was answered — the interview moves on to the next. */
+  | { kind: "answerCurrent"; picked: string }
+  /** A question reached by walking back was RE-answered: overwrite it, then return to the anchor. */
+  | { kind: "revise"; index: number; picked: string };
+
+export function stepInterview(state: InterviewCursor, picked: string | undefined): InterviewStep {
+  if (picked === BACK_ROW) {
+    return { kind: "render", cursor: state.cursor > 0 ? state.cursor - 1 : state.cursor };
+  }
+  if (picked === undefined) return { kind: "close" };
+  if (state.cursor === state.anchor) return { kind: "answerCurrent", picked };
+  return { kind: "revise", index: state.cursor, picked };
+}
 
 /**
  * The interview as the agent reads it back: every question with its answer,

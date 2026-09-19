@@ -10,6 +10,7 @@ import {
 } from "../lib/user-interaction-tools.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import type { ChoiceSpec } from "../lib/choice-dialog.ts";
+import { BACK_ROW, DECLINE_ROW } from "../lib/choice-dialog.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { SENSITIVE_GRANT_TTL_MS, type SensitiveGrant } from "../lib/sensitive-grant.ts";
 import { git, neutraliseHostGitConfig } from "./helpers/git.ts";
@@ -47,6 +48,13 @@ interface Fake {
   confirmAnswer: boolean | "throw";
   /** What each ask_user dialog answers (one per question, in order). */
   answers: Array<string | undefined>;
+  /**
+   * Scripted rows for the PANE dialogs, one per `askChoice` call, in order
+   * (the walk-back tests need the same question asked twice).
+   */
+  dialogRows: Array<string | undefined>;
+  /** Every `askChoice` call's spec and options, in order. */
+  dialogCalls: Array<{ spec: ChoiceSpec; back?: boolean; body?: string }>;
   asked: string[];
   /** The last ChoiceSpec rendered — the ORDER and the recommendation live there. */
   lastSpec?: ChoiceSpec;
@@ -54,6 +62,8 @@ interface Fake {
   canChannelDialogs: boolean;
   /** Grants minted via grantProxyScope, in order. */
   grantsMinted: Array<{ scope: string; via: string }>;
+  /** Scopes taken back via revokeProxyScope, in order. */
+  grantsRevoked: string[];
   cwd: string;
   sessionEdited: string[];
   ahead: number;
@@ -79,9 +89,12 @@ function fake(over: Partial<Fake> = {}): Fake {
     tmuxDeclined: false,
     confirmAnswer: true,
     answers: [],
+    dialogRows: [],
+    dialogCalls: [],
     asked: [],
     canChannelDialogs: false,
     grantsMinted: [],
+    grantsRevoked: [],
     cwd: "/nonexistent-repo",
     sessionEdited: [],
     ahead: 0,
@@ -94,7 +107,9 @@ function fake(over: Partial<Fake> = {}): Fake {
     showToUser: (_uiCtx, lead, body) => { f.notices.push({ lead, body }); return true; },
     askChoice: async (_uiCtx, spec, opts) => {
       f.lastSpec = spec;
+      f.dialogCalls.push({ spec, back: opts?.back, body: opts?.body });
       f.confirms.push(`${spec.title}\n${opts?.body ?? ""}`);
+      if (f.dialogRows.length > 0) return f.dialogRows.shift()!;
       if (f.confirmAnswer === "throw") throw new Error("no dialog here");
       return f.confirmAnswer ? spec.options[0] : undefined;
     },
@@ -120,6 +135,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     sensitiveDeclinedPaths: f.declined,
     log: (message) => { f.logs.push(message); },
     grantProxyScope: (scope, via) => { f.grantsMinted.push({ scope, via }); },
+    revokeProxyScope: (scope) => { f.grantsRevoked.push(scope); },
   };
   const host: ToolHost = {
     registerTool: (definition) => {
@@ -453,6 +469,112 @@ test("ask_user: a grantScope question with no options is refused — free text c
   assert.equal(reply.isError, true);
   assert.deepEqual(f.grantsMinted, [], "a refused batch mints nothing");
   assert.deepEqual(f.asked, [], "and nothing was asked");
+});
+
+// ---------- the way back through an interview (user decision, 2026-09-19) ----------
+
+/** The pane is where walking back happens: drive the dialogs from `dialogRows`. */
+function inPane(f: Fake): void {
+  f.deps.askEitherSide = async (_request, _hasUI, render) => {
+    const answer = await render(new AbortController().signal);
+    return { answer, by: "human", requestId: "r1" };
+  };
+}
+
+/** Three ordinary questions — the interview the walk-back tests walk through. */
+const WALK = [
+  { text: "第一题", options: ["甲", "乙"], recommended: "甲" },
+  { text: "第二题", options: ["丙", "丁"], recommended: "丙" },
+  { text: "第三题", options: ["戊", "己"], recommended: "戊" },
+];
+
+/** The question number each `askChoice` call was for, in order. */
+function askedOrder(f: Fake): Array<string | undefined> {
+  return f.dialogCalls.map((c) => c.spec.title.match(/问题 (\d)/)?.[1]);
+}
+
+test("ask_user: only a question that HAS an earlier one offers the way back", async () => {
+  const f = fake({ dialogRows: ["A. 甲（推荐）", "A. 丙（推荐）", "A. 戊（推荐）"] });
+  inPane(f);
+  await call(f, "ask_user", { questions: WALK });
+  assert.deepEqual(f.dialogCalls.map((c) => c.back), [false, true, true],
+    "question 1 has nowhere to go back to; the rest do");
+});
+
+test("ask_user: walking back re-asks the earlier question, then returns to the interview", async () => {
+  const f = fake({
+    dialogRows: [
+      "A. 甲（推荐）", // 第一题 answered
+      BACK_ROW,          // 第二题: go back
+      "B. 乙",           // 第一题 re-answered — the ONLY answer that changes
+      "A. 丙（推荐）", // 第二题 answered, and the interview carries on
+      "A. 戊（推荐）", // 第三题
+    ],
+  });
+  inPane(f);
+  const reply = await call(f, "ask_user", { questions: WALK });
+
+  assert.equal(f.dialogCalls.length, 5, "the earlier question is asked again");
+  assert.deepEqual(askedOrder(f), ["1", "2", "1", "2", "3"], "…and the box comes back to where it was");
+  assert.equal(f.dialogCalls[3]!.back, true, "the way back is still offered after the walk");
+  assert.deepEqual(f.st.askUser?.answers.map((a) => a.answer), ["B. 乙", "A. 丙", "A. 戊"],
+    "the re-answer overwrote question 1; the later answers are untouched");
+  assert.equal(reply.details?.pending, false, "the interview finished normally");
+});
+
+test("ask_user: the way back reaches question 1 from anywhere, skipping nothing", async () => {
+  const f = fake({
+    dialogRows: [
+      "A. 甲（推荐）",
+      "A. 丙（推荐）",
+      BACK_ROW,        // 第三题 → 第二题
+      BACK_ROW,        // 第二题 → 第一题
+      "B. 乙",         // 第一题 re-answered
+      "A. 戊（推荐）", // back on 第三题
+    ],
+  });
+  inPane(f);
+  await call(f, "ask_user", { questions: WALK });
+
+  assert.deepEqual(askedOrder(f), ["1", "2", "3", "2", "1", "3"],
+    "the cursor walks back one question at a time — the middle one is shown again, not skipped");
+  assert.deepEqual(f.st.askUser?.answers.map((a) => a.answer), ["B. 乙", "A. 丙", "A. 戊"],
+    "only the question actually re-answered is overwritten");
+});
+
+test("ask_user: a scope granted by a question the user walks BACK to is taken back with it", async () => {
+  const f = fake({
+    dialogRows: [
+      "A. 授予（推荐）", // the authorization question: yes
+      BACK_ROW,          // the next question: go back
+      "B. 不授予",       // …and answer it no instead
+    ],
+  });
+  inPane(f);
+  await call(f, "ask_user", {
+    questions: [
+      { text: "是否授予我敏感编辑代答权？", options: ["授予", "不授予"], recommended: "授予", grantScope: "sensitive-edit" },
+      { text: "还有别的吗？", options: ["没有了", "有"], recommended: "没有了" },
+    ],
+  });
+
+  assert.deepEqual(f.grantsMinted, [{ scope: "sensitive-edit", via: "ask-user" }], "the first answer granted it");
+  assert.deepEqual(f.grantsRevoked, ["sensitive-edit"], "and the re-answer took it back");
+});
+
+test("ask_user: the way back is NOT offered over the channel — it is a human row", async () => {
+  const seen: string[][] = [];
+  const f = fake({ dialogRows: ["A. 甲（推荐）", "A. 丙（推荐）"] });
+  f.deps.askEitherSide = async (request, _hasUI, render) => {
+    seen.push(request.options);
+    const answer = await render(new AbortController().signal);
+    return { answer, by: "human", requestId: "r1" };
+  };
+  await call(f, "ask_user", { questions: WALK.slice(0, 2) });
+
+  assert.ok(seen.every((rows) => !rows.includes(BACK_ROW)),
+    "a project manager must never be handed a row that means 'ask the human again'");
+  assert.deepEqual(seen[1], ["A. 丙（推荐）", "B. 丁", DECLINE_ROW], "…the answerable rows, lettered");
 });
 
 // ---------- request_scope_limit ----------

@@ -1253,8 +1253,11 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
           typeof (a as { question?: unknown }).question === "string" &&
           ["answered", "skipped", "deferred-to-chat", "unanswered"].includes(String((a as { kind?: unknown }).kind)) &&
           // An `answer` that is not text would be replayed into the agent's
-          // prompt as the user's words — it must be a string or absent.
-          ((a as { answer?: unknown }).answer === undefined || typeof (a as { answer?: unknown }).answer === "string"));
+          // prompt as the user's words — it must be a string or absent. Same
+          // for the option the answer was picked from (`option`, the letterless
+          // text the proxy-grant rule compares) — 2026-09-19.
+          ((a as { answer?: unknown }).answer === undefined || typeof (a as { answer?: unknown }).answer === "string") &&
+          ((a as { option?: unknown }).option === undefined || typeof (a as { option?: unknown }).option === "string"));
       if (!ok) delete parsed.askUser;
     }
     // The banner throttle is bookkeeping whose worst failure is one extra
