@@ -1568,6 +1568,25 @@ export function mergeConcurrentBindings(
         merged.adviserBaselines = mergeAdviserBaselines(mine.adviserBaselines, disk.adviserBaselines);
     }
   }
+  // THE TESTIMONY MERGES FIRST, AND UNCONDITIONALLY (review round 7 P1).
+  //
+  // A proxy decision is not a binding to inherit — it is a record of what
+  // happened to one session, and the three early returns below (two sessions
+  // that reached no verdict, a fingerprint that moved on, a same-session
+  // re-write) have nothing to say about it. Merging it at the END of this
+  // function meant each of those returns threw the other side's record away,
+  // and the user's completion report then claimed the surviving list was all of
+  // them.
+  //
+  // IT IS WRITTEN BACK to `mine` as well (same finding): the caller's own
+  // object is what the NEXT persist writes from, so a union that lives only in
+  // the returned copy is undone by the very next save.
+  const proxyUnion = mergeProxyDecisions(mine.proxyDecisions, disk.proxyDecisions);
+  if (proxyUnion.length > 0) {
+    mine.proxyDecisions = proxyUnion;
+    merged = { ...merged, proxyDecisions: proxyUnion };
+  }
+
   // Same session (or an unidentifiable file): our own last write — replace it.
   if (!disk.sessionId || disk.sessionId === mine.sessionId) return merged;
 
@@ -1592,8 +1611,6 @@ export function mergeConcurrentBindings(
   const keepPrecommit = candidatePrecommit && disk.precommit.fingerprint === digest;
   if (!keepReview && !keepPrecommit) return merged;
 
-  // WHAT EACH SESSION SAW HAPPEN TO IT (review round 6): a union, not a winner.
-  const proxyUnion = mergeProxyDecisions(mine.proxyDecisions, disk.proxyDecisions);
   return {
     ...merged,
     review: keepReview ? { ...disk.review } : mine.review,
@@ -1602,11 +1619,6 @@ export function mergeConcurrentBindings(
     // otherwise the next round is forced into a full review even though
     // the tree it describes was already reviewed.
     ...(keepReview && disk.lastReviewedTree ? { lastReviewedTree: disk.lastReviewedTree } : {}),
-    // THE PROXY'S TESTIMONY IS A UNION (review round 6), unlike the verdict
-    // blocks above: two sessions sharing a worktree each took their own
-    // decisions, and the user has to be able to see BOTH — an incomplete list
-    // reads as "that was all of them". See `mergeProxyDecisions`.
-    ...(proxyUnion.length === 0 ? {} : { proxyDecisions: proxyUnion }),
   };
 }
 
