@@ -151,6 +151,11 @@ async function askConsent(
         body: opts.consentBody,
         signal,
         onUndecided: () => { undecided = true; },
+        // THE SESSION'S OWN REPO (review round 4 P1), passed rather than left to
+        // the `activeRepoRoot` fallback: a consent question is about the gate
+        // state of the repo this session works in, and that does not drift with
+        // the edits.
+        repo: deps.cwd,
       }),
     );
     if (undecided) return { outcome: "undecided" };

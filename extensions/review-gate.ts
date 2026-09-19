@@ -5290,7 +5290,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   async function askChoice(
     uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; back?: boolean; onUndecided?: () => void } = {},
+    opts: {
+      body?: string;
+      signal?: AbortSignal;
+      back?: boolean;
+      repo?: string;
+      onUndecided?: () => void;
+    } = {},
   ): Promise<string | undefined> {
     // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
     // is a getter that asserts the context is still alive, and a dialog can wait
@@ -5320,10 +5326,18 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // queued behind another one, or a thirty-minute wait, can move it. Bound on
     // the queue's own turn and never re-read: fixing the sidecar's repo while
     // the proxy reads a different one is the same defect from the other end.
-    let dialogRoot = activeRepoRoot.current ?? primaryRepoRoot;
+    //
+    // AN EXPLICIT `opts.repo` OUTRANKS IT AND NEVER DRIFTS (review round 4 P1):
+    // callers that KNOW which repo their question is about (a goal, a
+    // restatement) must say so — a secondary repo's question can be raised
+    // without that repo ever having been the active one, and then the fallback
+    // would file a stand-in's answer under the wrong sidecar AND point the proxy
+    // at the wrong repository.
+    const dialogRootNow = (): string => opts.repo ?? activeRepoRoot.current ?? primaryRepoRoot;
+    let dialogRoot = dialogRootNow();
     const asked = scheduleDialog(async () => {
       markDisplayed?.();
-      dialogRoot = activeRepoRoot.current ?? primaryRepoRoot;
+      dialogRoot = dialogRootNow();
       // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
       // any session shows comes through this function, so "the gate has stopped
       // and is waiting for the human" needs no second detector. The policy

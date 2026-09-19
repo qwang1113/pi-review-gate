@@ -68,6 +68,42 @@ export const REVISE_ROW = "✎ 我要改，我说明原因";
 export const CHOICE_REASON_HINT = "直接输入原因；!chat=改在聊天里答";
 
 /** Everything the template renders. */
+/**
+ * THE OPTIONS EVERY `askChoice` CALLER MAY PASS — declared ONCE.
+ *
+ * Three tool families (`user-interaction-tools`, `goal-tools`, `restatement`)
+ * each declare a deps interface with an `askChoice(uiCtx, spec, opts)` member,
+ * and the three had drifted into three verbatim copies of this object. The cost
+ * is not cosmetic: a field added for one of them silently did not exist for the
+ * others — measured twice on 2026-09-19, when `onUndecided` (review round 3)
+ * and then `repo` (round 4) had to be added in three places at once, and the
+ * first attempt reached only two of them.
+ */
+export interface AskChoiceOpts {
+  /** Extra text the caller wants the user to read before answering. */
+  body?: string;
+  /** The caller's own cancellation (the host's ESC signal is always merged in). */
+  signal?: AbortSignal;
+  /** Draw the `← 返回上一题` row (multi-question interviews only). */
+  back?: boolean;
+  /**
+   * WHICH REPO THIS QUESTION IS ABOUT, when the caller knows (review round 4
+   * P1). `activeRepoRoot` follows the edits and is only ever a FALLBACK: a
+   * multi-repo session approves a goal or confirms a restatement FOR A NAMED
+   * repo, and that repo may never have been the active one. Without an explicit
+   * value, a proxied answer (and the record of it) would be filed against
+   * whatever the session happened to be editing.
+   */
+  repo?: string;
+  /**
+   * CALLED WHEN NOBODY DECIDED (review round 3 P1): the window elapsed and the
+   * proxy could not answer either. Both that and a dismissed box hand the caller
+   * `undefined`, and `lib/consent-request-tools.ts` must tell them apart — a
+   * DECLINE locks a request for the session, and a timeout is not a decline.
+   */
+  onUndecided?: () => void;
+}
+
 export interface ChoiceSpec {
   /** The question itself — becomes the dialog's first line(s). */
   title: string;
