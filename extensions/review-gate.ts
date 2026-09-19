@@ -82,7 +82,7 @@ import { hostEditorFallback, hostReasonEditor, type CustomDialogHost } from "../
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
-import { buildGateWidget, showsRoundReading, type GateWidgetFacts } from "../lib/ui-widget.ts";
+import { buildContractLines, buildGateWidget, planContractRows, showsRoundReading, type ContractFacts, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -552,6 +552,7 @@ import {
   GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
   buildGoalForceNegotiateDirective,
   goalNegotiationOverdue,
+  parseGoalCriteria,
 } from "../lib/loop-goal.ts";
 import type { LoopGoal } from "../lib/loop-goal.ts";
 // The delivery station (where THIS round stops) is a pure contract module;
@@ -4771,6 +4772,75 @@ export default function reviewGate(pi: ExtensionAPI) {
         : {}),
       unmet: completion,
     };
+  }
+
+  /**
+   * The CONTRACT the `/gate-contract` command shows (2026-09-18): a project
+   * manager shows its plan, a loop session (standalone or an orchestrated
+   * child) shows the exit criteria of ITS OWN approved goal.
+   *
+   * On demand, so this runs when the user asks, not on a tick. It is still
+   * CHEAP BY CONTRACT in the same sense as the status strip: one plan file read
+   * or one goal file read, no git, no fingerprint, and nothing here is an
+   * enforcement input.
+   *
+   * Every "this session owns no contract" case funnels into the same empty
+   * result the command then explains: a judge pane (it owns no contract of this
+   * shape), explore/normal/undecided mode, a goal that is unapproved or was
+   * edited after approval (`loopGoalConfirmed()` answers both with the same
+   * false), an absent / unreadable / archived plan, a child whose variant has no
+   * goal, and a non-git directory.
+   */
+  function contractFacts(): ContractFacts {
+    if (!sessionInGit || isJudgePane()) return { rows: [] };
+    if (state.taskMode === "orchestrator") {
+      // Absent file, unreadable JSON and an archived plan all answer the same
+      // way here: no plan ⇒ no rows.
+      return { kind: "plan", rows: planContractRows(readPlanFile(primaryRepoRoot).plan?.tasks) };
+    }
+    if (state.taskMode !== "loop" || !loopGoalConfirmed()) return { rows: [] };
+    // THE RAW FILE, not `LoopGoal.text` — that copy is capped at
+    // LOOP_GOAL_MAX_CHARS for the prompt, and 15 of this repo's 48 goal files
+    // have criteria running past the cut (measured while writing this).
+    let raw: string;
+    try {
+      raw = readFileSync(loopGoalPathIn(primaryRepoRoot), "utf8");
+    } catch {
+      return { rows: [] };
+    }
+    return { kind: "goal", rows: parseGoalCriteria(raw).map((text) => ({ text, state: "pending" })) };
+  }
+
+  /**
+   * What `/gate-contract` prints: the contract lines, and — when there are none
+   * — WHY, in the gate's own words.
+   *
+   * The reason cannot be derived from an empty `string[]` (every "no contract
+   * here" case collapses to the same nothing), and it is the half the reader
+   * actually acts on: "没有契约可显示" without "因为这份 goal 还是一份没被批准的
+   * 草稿" would send them looking for a bug. One function, so there is no second
+   * place where these branches can drift.
+   */
+  function contractReadout(): { lines: string[]; absent?: string } {
+    const lines = buildContractLines(contractFacts());
+    if (lines.length > 0) return { lines };
+    const absent = (why: string) => ({ lines, absent: why });
+    if (!sessionInGit) return absent("这里不是 git 仓库 —— 契约（goal / plan）都是按仓库谈的");
+    if (isJudgePane()) return absent("judge 会话审的是别人的契约，自己不持有一份");
+    if (state.taskMode === "orchestrator") {
+      return absent("没有可显示的 plan：.pi/orchestrator-plan.json 不在、不是合法 JSON，或已被归档");
+    }
+    if (state.taskMode !== "loop") {
+      return absent(`本会话模式是 ${state.taskMode ?? "未初始化"}，它不持有 plan/goal 契约`);
+    }
+    if (!loopGoalConfirmed()) {
+      return absent(
+        readSessionLoopGoal(primaryRepoRoot).present
+          ? "goal 还是一份草稿：用户没批准过这段文本（批准了才有退出标准可看）"
+          : "还没有 goal 文件 —— 先反述需求、让用户批准一份退出契约",
+      );
+    }
+    return absent("已批准的 goal 里解析不出「退出标准」小节的条目");
   }
 
   function updateWidget(ctx: ExtensionContext) {
@@ -12617,6 +12687,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     otherRepoStatus: () => otherRepoStatus(),
     loopGoalConfirmed: () => loopGoalConfirmed(),
     loopGoalPresent: () => readSessionLoopGoal(primaryRepoRoot).present,
+    contract: () => contractReadout(),
     hasProxyGrant: (scope) => hasGrant(state.orchestrator ?? emptyRuntime("none"), scope),
     grantProxyScope: (scope, via) => {
       if (!state.orchestrator) return;

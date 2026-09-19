@@ -131,8 +131,8 @@
 `registerGateCommands(pi, {...})`，命令层整体住在两个模块：
 
 - `lib/gate-command-tools.ts`：命令层的**唯一注册入口**。工作流命令的注册包装、
-  `/precommit` 那条门禁自己跑的 lane，以及 `/gate-status`、`/gate-bypass`、
-  `/gate-mode`、`/gate-reset`、`/gate-lesson` 五个命令的正文；它自己转注册下面
+  `/precommit` 那条门禁自己跑的 lane，以及 `/gate-status`、`/gate-contract`、
+  `/gate-bypass`、`/gate-mode`、`/gate-reset`、`/gate-lesson` 六个命令的正文；它自己转注册下面
   那个模块，所以「有哪些命令」只有一个地方回答。命令 host 的 seam
   （`CommandHost` / `CommandContext`）也定义在这里 —— 工具走
   `lib/tool-host.ts`，命令是另一个面，两者不混用。
@@ -142,7 +142,7 @@
   `lib/model-diagnose.ts` / `lib/gate-doctor.ts`。它不写任何状态，也不喂任何裁决。
   → 改一个命令的文案或时机：改 `lib/gate-command-tools.ts`，不必碰扩展。
 
-- 门禁命令共 6 个：`/gate-status`、`/gate-bypass`、`/gate-mode`、`/gate-reset`、
+- 门禁命令共 7 个：`/gate-status`、`/gate-contract`、`/gate-bypass`、`/gate-mode`、`/gate-reset`、
   `/gate-lesson`、`/gate-doctor`。
 - 工作流命令（`/review`、`/precommit`、`/precommit-fast`、`/verify`、
   `/next-step`、`/risk-assess`、`/smart-commit`、`/create-pr`、
@@ -531,7 +531,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `file-size-gate.ts` | 新建源码文件 600 行硬拦、存量超阈值只提醒的纯判定 |
 | `dependency-justification.ts` | 新增依赖缺书面论证在 checkpoint 硬性打回的纯判定（`newDependencyNames` / `dependencyJustificationVerdict`），`review_checkpoint` 内接线；实现 §5“新依赖须论证”的机械一半，不复述其余三条。引用面（`agents/reviewer.md`、`agents/goal-auditor.md`、goal/plan 审计任务、`WRITE_TIME_REMINDERS` 只许引用 §5）由 §7.1 最小化行钉住 |
 | `fingerprint.ts` | 工作区指纹：内容寻址、暂存无关，门禁裁决与它绑定 |
-| `gate-command-tools.ts` | 命令层的**唯一注册入口**：工作流命令的注册包装、`/precommit` lane，以及 `/gate-status` / `/gate-bypass` / `/gate-mode` / `/gate-reset` / `/gate-lesson` 五个命令正文；命令 host 的 seam（`CommandHost` / `CommandContext`）也在这里；自己转注册 `gate-diagnosis-commands.ts` |
+| `gate-command-tools.ts` | 命令层的**唯一注册入口**：工作流命令的注册包装、`/precommit` lane，以及 `/gate-status` / `/gate-contract` / `/gate-bypass` / `/gate-mode` / `/gate-reset` / `/gate-lesson` 六个命令正文；命令 host 的 seam（`CommandHost` / `CommandContext`）也在这里；自己转注册 `gate-diagnosis-commands.ts`。**`/gate-contract`（2026-09-18，用户决定「不常驻展示, 而是通过某个命令」）**：只读地把本会话那份契约（项目经理 = plan 任务全列；loop 会话与编排子会话 = 已批准 goal 的退出标准全文）打进一个多行 `notify` 块，与 `/gate-status` 同一条显示路、零新 UI 组件；行本身由 `lib/ui-widget.ts` 的 `buildContractLines` 构造，命令只有一个纯判定 `contractNotice`（有行 ⇒ 行；没行 ⇒ 「没有可显示的契约 —— **为什么**」，因为 judge pane / 未批准 goal / 无 plan / 非 git 目录 / 解析不出小节 五者都塌成同一个空数组，不写为什么读者只能当成 bug），`GateCommandDeps` 上只多一个 `contract()` seam。快捷键**刻意不绑**（用户决定：要时自己在 `/settings` 里绑） |
 | `gate-diagnosis-commands.ts` | 两个只读诊断命令面：`/gate-status` 内嵌的模型链读数（`modelDiagnosisLines`）与 `/gate-doctor` 正文；只做环境探测，不写状态、不喂裁决；由 `gate-command-tools.ts` 转注册 |
 | `gate-doctor.ts` | `/gate-doctor` 的只读体检：模型链、provider 允许名单、precommit runner、git 钩子、命令注册表 |
 | `gate-state.ts` | 门禁状态机与 sidecar 读写、未满足项计算、并发绑定合并；也存放门禁**自己观察到**的事实，如 `shippedKinds`（跑成功过的 ship 命令种类，供交付站点的到站判定用；loader 只保留已知词表、去重，读不出来就当没有）与 `precommit.lastFullPassTree`（一棵**真的**跑过全量 lane 的 tree；纯规则 `nextFullPassTree` 只在 lane 启动前那棵树 + full/full PASS 时写入、同一棵树的 FAIL 撤销，编辑降级不碰它——它是内容身份，不是活绑定） |
@@ -560,7 +560,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
 | `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
 | `llm-classify.ts` | 语义第二意见（DeepSeek V4 Flash），契约上只能加拦（TIGHTEN-ONLY） |
-| `loop-goal.ts` | L8：loop 会话退出契约的文件、审批记录与注入 |
+| `loop-goal.ts` | L8：loop 会话退出契约的文件、审批记录与注入。**例外的一条纯展示出口**（2026-09-18）：`parseGoalCriteria(text)` 只从「退出标准」小节里**原样**取出条目（认 `退出标准`/`退出判据`/`Exit criteria` 三种标题、`1.`/`1、`/`- `/`* ` 四种起头；缩进的非条目行算上一条的续行，顶格行一律算小节结束），不改写、不缩写、不排序 —— 曾有一版把它压成「引导小句」，已按用户口径删除（切中文句子只会产出「真值同源」这类裸名词，且需要在屏幕上重写用户批准的契约）。它刻意吃 **goal 文件原文**而不是 `LoopGoal.text` —— 后者为提示词预算在 `LOOP_GOAL_MAX_CHARS` 处截断，实测本仓 48 份 goal 里 15 份的标准落在截断点之后。不参与任何判定 |
 | `loop-stall.ts` | L2 自动续跑的断路器：外部阻塞（限流、模型不可达）时停止空转 |
 | `model-config.ts` | 每个 agent 的模型链配置层：把 `review-gate.json` 的 `agents` 段渲染成 frontmatter；`validateAgentsForStartup` 启动硬检查（无内置默认） |
 | `model-health.ts` | judge 模型槽的**冷却记忆**（纯函数，2026-09-10）：键是 `provider/id`（丢掉 thinking 后缀，否则改一个槽的 level 就把学到的东西忘了）→ 最近一次失败；`MODEL_FAILURE_TTL_MS`（10 分钟）内派发跳过该槽、过期自动恢复（并带条数上限，坏 id 不会把文件撑爆）。`selectHealthySlot` 给「第一个不在冷却期的槽」，全都在冷却时仍按链头派发并标记 `allCooling`（fail-open：开不出来的轮次连失败都报不了）；`recordModelFailure` / `clearModelFailure`（轮转成功即证明目标可用，旧记录必须清掉，否则 TTL 内白白跳过好模型）/ `nextSlotAfter`（pane 侧走链）/ `describeCoolingSlot`。持久化住在 `.pi/judge-hierarchy.json` 的 `modelHealth`（opener 读写；judge pane 按契约从不写仓库状态） |
@@ -634,7 +634,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `text-appeal.ts` | 启发式文本拦截的申诉口子（A 类） |
 | `inspection-appeal.ts` | 第三类申诉口子：judge 被「零审查即 READY」拒掉后走 `request_arbitration`（judge 侧唯一被放行的工具），形状照抄 `text-appeal.ts`——受理判定（配额与本轮不可重掷共用一份额度）、仲裁者 system prompt 与 brief（申诉理由按不可信数据入块）、通行证只绑「本 judge + 本轮」，绝不放行任何命令 |
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |
-| `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条**单行**状态条，详情在 `/gate-status`）：mode / 分支 / 已编辑 / **送审轮次 `轮 N`**（2026-09-17 用户决定：N 是本会话**送出去**的 reviewer 轮次 —— 送审即 +1，不等 reviewer 交卷，`declare_done` 不清零；数据源 loop 侧是 `state.sentReviewRounds`、judge pane 侧是它自己的 `roundSeq`，**无分母**，那个 `/maxRounds` 是 auto-loop 刹车、与审查进度不同源；只有 loop 会话与 judge pane 显示，判定是 `showsRoundReading` 这一条纯函数；零 git 开销）/ 未满足项数 |
+| `ui-widget.ts` | 会话自我展示的两块文本的纯构造（**不是两个 widget**，见下）：① editor 下方那条**单行**状态条（详情在 `/gate-status`）—— mode / 分支 / 已编辑 / **送审轮次 `轮 N`**（2026-09-17 用户决定：N 是本会话**送出去**的 reviewer 轮次 —— 送审即 +1，不等 reviewer 交卷，`declare_done` 不清零；数据源 loop 侧是 `state.sentReviewRounds`、judge pane 侧是它自己的 `roundSeq`，**无分母**，那个 `/maxRounds` 是 auto-loop 刹车、与审查进度不同源；只有 loop 会话与 judge pane 显示，判定是 `showsRoundReading` 这一条纯函数；零 git 开销）/ 未满足项数；② `buildContractLines` + `planContractRows` —— **按需**的契约清单，由 `/gate-contract` 命令打印（2026-09-18 用户决定：不常驻）。项目经理一侧把 plan 任务渲染成四态（`○`pending `▸`running `✓`done `✕`blocked，blocked 后缀「等 tN」只列未完成的依赖）；loop 会话与编排子会话一侧显示已批准 goal 的退出标准（**永远 `○`**：findings 结构里没有 criterion 索引，任何 `✓` 都是假报进度）。条目**原样上屏**，唯一的机械处理是 `plainMarkdown` 剔掉终端渲染不了的 `**`/`__`（本仓 48 份 goal 的 310 条里 122 行带成对星号）。**没住过屏幕，所以不需要省屏**：不截断、不折叠、不上色（`notify` 只能给整块一色），40 条就出 41 行。上一版做过常驻 aboveEditor，连带 `fitToWidth`/`displayWidth`/`charColumns`/`CONTRACT_MAX_ROWS`/`ContractTheme` 与 `declare_done` 专用的 `contractDelivered` 标记一起整条删除（哲学三：不留旧路径、不留开关）。空清单只表示「这个会话不持有一份这种形状的契约」，**为什么**由命令侧补。与状态条同一条纪律：**display-only** —— 零 git、不算 fingerprint，任何判定都不看它 |
 | `untrusted-data.ts` | 主会话/编排层文本的**唯一**降级实现：`asUntrustedData` 包块（命名 tag、载荷内闭合标签中和、截断可见）+ `composeWithUntrustedData` 组装（门禁指令在前、不可信数据块在后），judge 四处任务书拼装点与仲裁/文本申诉/分类器提示词共用 |
 | `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |

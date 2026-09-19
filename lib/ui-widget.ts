@@ -1,10 +1,14 @@
 /**
- * pi-review-gate — TUI widget content builders (pure functions).
+ * pi-review-gate — TUI text builders for the two surfaces a session shows
+ * about itself (pure functions).
  *
- * The extension renders ONE widget via `ctx.ui.setWidget`: belowEditor shows
- * a SINGLE-LINE gate status strip — mode/branch/edited + unmet count. All
- * details live in the `/gate-status` command; the strip is deliberately
- * minimal to keep the editor area quiet.
+ * 1. The widget: ONE `ctx.ui.setWidget` call, belowEditor, a SINGLE-LINE gate
+ *    status strip — mode/branch/edited + unmet count. It is deliberately
+ *    minimal to keep the editor area quiet.
+ * 2. The contract list: NOT a widget. It is rendered on demand by the
+ *    `/gate-contract` command into the same multi-line `notify` block
+ *    `/gate-status` uses (2026-09-18, user decision: 「不常驻展示, 而是通过某个
+ *    命令」 — see the section below).
  *
  * 2026-09-16 — CHEAP BY CONTRACT: the strip must never run git work. It used
  * to include a full worktree fingerprint on every 5s tick (measured ~3.2s in
@@ -92,4 +96,140 @@ export function buildGateWidget(f: GateWidgetFacts): string[] {
   }
   if (f.unmet.length > 0) wsBits.push(`${f.unmet.length} 项未满足`);
   return [`门禁 · ${wsBits.join(" · ")}`];
+}
+
+// ---------------------------------------------------------------------------
+// The contract list — shown ON DEMAND by `/gate-contract` (2026-09-18)
+// ---------------------------------------------------------------------------
+//
+// The strip above answers "what is this session"; this answers "what is it
+// working towards", which otherwise means opening `.pi/orchestrator-plan.json`
+// or `.pi/loop-goal.md`. A PROJECT MANAGER sees its plan tasks with the plan's
+// own statuses; a loop session (standalone or an orchestrated child) sees the
+// exit criteria of ITS approved goal.
+//
+// ON DEMAND, NOT PERMANENT (user decision, same day). An earlier revision of
+// this feature lived above the editor all the time, and everything that came
+// with it — a per-tick rebuild, a content-compare cache, a display-width cut
+// so a long criterion could not steal editor rows, a fold line, theme colors,
+// and a `declare_done` flag whose only job was to retire the strip — is gone.
+// Nothing of that is needed by a list the user asks for, and 哲学三 forbids
+// keeping the old path beside the new one. Consequences worth naming:
+//
+//  - NO truncation and NO height budget: the terminal wraps a long criterion,
+//    and every plan task is listed. Space is not borrowed from anything.
+//  - NO colors: the surface is `notify`, which takes ONE color for the whole
+//    block. The glyphs still carry the state, so nothing is lost that color
+//    was adding.
+//
+// WHAT IT NEVER DOES: judge. A goal row is `○` because nothing in the gate can
+// say "criterion 3 holds" — a reviewer's findings carry `severity`/`file`/
+// `line`/`issue`/`evidence` and NO criterion index, so a `✓` there would be a
+// claim with nothing behind it. Display-only and cheap: no git work, no
+// fingerprint, and nothing here is an enforcement input.
+
+/** The four states a plan task can be in — the plan's own vocabulary. */
+export type ContractState = "pending" | "running" | "done" | "blocked";
+
+export interface ContractRow {
+  /** The contract's OWN words. Shown as written — see `plainMarkdown` for the
+   *  one mechanical thing dropped on the way. */
+  text: string;
+  state: ContractState;
+  /** Plan rows only: the task ids this one is waiting on. */
+  waitingOn?: string[];
+}
+
+export interface ContractFacts {
+  /** Which contract this session owns. Anything else (judge pane, explore,
+   *  normal, a non-git directory, an unapproved goal, no plan) has no rows. */
+  kind?: "plan" | "goal";
+  rows: ContractRow[];
+}
+
+/**
+ * Single-cell glyphs, NOT emoji (the user's call: emoji read as 「比较奇怪」 on
+ * this line). Each is one column wide — like the CJK text beside it, so the
+ * column holds — and the glyph alone says the state, since the surface this
+ * goes to cannot color a line.
+ */
+const CONTRACT_GLYPHS: Record<ContractState, string> = {
+  pending: "○",
+  running: "▸",
+  done: "✓",
+  blocked: "✕",
+};
+
+/** Goal rows have no state to report — see the block comment above. */
+const GOAL_GLYPH = CONTRACT_GLYPHS.pending;
+
+/** The plan facts this builder needs — read structurally, so the widget module
+ *  never imports the orchestrator's types (and the test needs no plan parser). */
+export interface PlanTaskFacts {
+  id: string;
+  title: string;
+  status: ContractState;
+  dependsOn: readonly string[];
+}
+
+/**
+ * Plan tasks → contract rows, with the plan's OWN statuses (nothing invented:
+ * a task whose deps are unmet but which the scheduler still calls `pending`
+ * stays `○`, because `blocked` is the plan's word for a task someone marked
+ * so). `waitingOn` lists the dependencies that are not `done`, which is what
+ * the `✕` row then names — the reader sees WHICH id holds the line, not just
+ * that something does.
+ *
+ * Absent or empty plan ⇒ [] — the one shape every "no contract here" case
+ * arrives as (no plan file, unreadable JSON, an archived plan).
+ */
+export function planContractRows(tasks: readonly PlanTaskFacts[] | undefined): ContractRow[] {
+  if (!tasks || tasks.length === 0) return [];
+  const done = new Set(tasks.filter((t) => t.status === "done").map((t) => t.id));
+  return tasks.map((t) => ({
+    text: `${t.id} ${t.title}`.trim(),
+    state: t.status,
+    waitingOn: (t.dependsOn ?? []).filter((d) => !done.has(d)),
+  }));
+}
+
+/**
+ * Drop markdown BOLD markers, which a text surface cannot render.
+ *
+ * The one and only edit this display makes to a contract's wording, and it is
+ * mechanical: `**交付即清栏**` is the goal file's way of EMPHASISING, and here
+ * the asterisks would just be two stars nobody asked for. Measured across this
+ * repo's 48 goal files, 122 of 310 criteria rows carry a paired `**`, so this
+ * is not a corner case. Nothing is reworded, reordered or shortened.
+ */
+function plainMarkdown(text: string): string {
+  return text.replace(/\*\*|__/g, "").trim();
+}
+
+/**
+ * Build the contract list — the lines `/gate-contract` shows.
+ *
+ * Pure: every fact comes in through `f`. Returns [] for nothing to show, which
+ * is the CALLER's signal to say why there is no contract here (an unapproved
+ * or edited-after-approval goal, an absent / unreadable / archived plan, a
+ * child with no goal of its own, a judge pane, a non-git directory) — the
+ * reason is a gate fact the caller holds, not something this function can see.
+ */
+export function buildContractLines(f: ContractFacts): string[] {
+  if (f.kind !== "plan" && f.kind !== "goal") return [];
+  const rows = f.rows.filter((r) => r && r.text.trim() !== "");
+  if (rows.length === 0) return [];
+
+  const lines =
+    f.kind === "plan"
+      ? [`plan · ${rows.length} 项 · ${rows.filter((r) => r.state === "done").length} 完成`]
+      : ["loop goal · 退出标准"];
+  for (const r of rows) {
+    const glyph = f.kind === "goal" ? GOAL_GLYPH : CONTRACT_GLYPHS[r.state];
+    // The blocker ids stay on the row even though nothing else is decorated:
+    // on a `✕` line, `等 t2` is the one thing the reader can act on.
+    const wait = r.state === "blocked" && r.waitingOn?.length ? ` · 等 ${r.waitingOn.join(" ")}` : "";
+    lines.push(`${glyph} ${plainMarkdown(r.text)}${wait}`);
+  }
+  return lines;
 }
