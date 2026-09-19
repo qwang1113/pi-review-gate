@@ -44,7 +44,7 @@ import type { GateState } from "./gate-state.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import type { SensitiveGrant } from "./sensitive-grant.ts";
 import { buildRejection } from "./rejection-copy.ts";
-import type { ChoiceSpec } from "./choice-dialog.ts";
+import type { AskChoiceOpts, ChoiceSpec } from "./choice-dialog.ts";
 import { registerConsentRequestTools } from "./consent-request-tools.ts";
 import {
   validateQuestions,
@@ -87,6 +87,17 @@ export interface UiContext {
 export interface UserInteractionToolDeps {
   /** This session's gate state — a GETTER; see "SHARED STATE" above. */
   state(): GateState;
+  /**
+   * THE REPO THIS SESSION'S GATE STATE BELONGS TO — the git ROOT, already
+   * resolved (review round 5 P1).
+   *
+   * `cwd` is where the session was STARTED, which can be a subdirectory of the
+   * repository; `stateForRepo` and `persistRepo` key their sidecars off a repo
+   * root, so a subdirectory reaching them reads and writes the wrong `.pi/`
+   * file. Callers that need to name the repo their question is about ask for it
+   * HERE instead of passing `cwd`.
+   */
+  repoRoot(): string;
   /** Persist it (sidecar write + status widget refresh). */
   persist(ctx: unknown): void;
   /** Arm or disarm auto-continuation — an unanswered question pauses it. */
@@ -104,7 +115,7 @@ export interface UserInteractionToolDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; signal?: AbortSignal; back?: boolean },
+    opts?: AskChoiceOpts,
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -168,7 +179,7 @@ export interface UserInteractionToolDeps {
  */
 export type ConsentToolDeps = Pick<
   UserInteractionToolDeps,
-  | "state" | "persist" | "showToUser" | "askChoice" | "cwd"
+  | "state" | "persist" | "showToUser" | "askChoice" | "cwd" | "repoRoot"
   | "sessionEditedPaths" | "commitsAheadOfBase" | "scopeLimitDeclined"
   | "declineScopeLimit" | "tmuxAccessDeclined" | "declineTmuxAccess"
   | "sensitiveGrants" | "storeSensitiveGrants"

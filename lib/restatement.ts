@@ -64,7 +64,7 @@ import {
   type DeliveryStation,
 } from "./delivery-station.ts";
 import { capStationAt } from "./repo-pr-policy.ts";
-import { REVISE_ROW, choiceRows, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
+import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { buildRejection } from "./rejection-copy.ts";
@@ -409,7 +409,7 @@ export interface RestatementToolDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; signal?: AbortSignal },
+    opts?: AskChoiceOpts,
   ): Promise<string | undefined>;
   /** Raise a dialog EITHER the human or the orchestrator may answer. */
   askEitherSide(
@@ -539,6 +539,11 @@ export async function doProposeRestatement(
       async (renderSignal) => deps.askChoice(uiCtx, spec, {
         body: buildRestatementConfirmMessage(station) + (capNote ? "\n" + capNote : ""),
         signal: renderSignal,
+        // THE REPO THE RESTATEMENT BINDS TO (review round 4 P1): same reason as
+        // the goal approval next door — this may be a secondary repo that never
+        // became the active one. `resolveRestatementRepo` answers with a result
+        // object, so the PATH is what travels.
+        repo: repo.ok ? repo.root : undefined,
       }),
     );
     const pick = parseChoice(outcome.answer, spec);

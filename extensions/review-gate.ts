@@ -369,7 +369,7 @@ import {
 } from "../lib/judge-session-tools.ts";
 
 import { registerJudgeSpawnTools } from "../lib/judge-spawn-tools.ts";
-import { awaitRoundReport } from "../lib/judge-lifecycle.ts";
+import { AUDIT_SELF_WAIT_BUDGET_MS, awaitRoundReport } from "../lib/judge-lifecycle.ts";
 
 // The judge tools that RELAY to a session (review_spawn / review_watch /
 // review_send) are the other half of the same family, and are registered the
@@ -487,6 +487,7 @@ import {
   type ScopeStampRecord,
   invalidateBindings,
   inheritGoalContract,
+  mergeProxyDecisions,
   nextFullPassTree,
 } from "../lib/gate-state.ts";
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
@@ -499,6 +500,7 @@ import {
   parkedReadyFate,
   readyLacksVerification,
   type ReviewFinding,
+  type ScopeExemption,
 } from "../lib/review-adjudicate.ts";
 import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
 import {
@@ -679,12 +681,26 @@ import {
   parseArbitrableAction,
   buildArbiterPrompt,
   runArbiter,
+  runArbiterProcess,
+  PROXY_ISOLATION_FLAGS,
   sha256,
   BYPASS_TOKEN_TTL_MS,
   type ArbitrableAction,
   type BypassToken,
   type TokenBindings,
 } from "../lib/arbitration.ts";
+// THE PROXY HALF OF EVERY DIALOG (2026-09-19): the timing, the race and the
+// prompt live in lib/user-proxy.ts, because `askChoice` below is the ONE place
+// all twelve dialogs are rendered and it must stay wiring only.
+import {
+  PROXY_ARBITER_TIMEOUT_MS,
+  PROXY_SYSTEM_PROMPT,
+  buildProxyPrompt,
+  formatProxyDecisionReport,
+  parseProxyDecision,
+  raceWithUserProxy,
+  type ProxyChoice,
+} from "../lib/user-proxy.ts";
 
 // TASK_TEXT_MARKER now lives in lib/constants.ts: the two prepare modules
 // WRITE it and `extractTaskText` below READS it, so one definition serves all
@@ -1020,6 +1036,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       },
       now: () => Date.now(),
       aborted: () => signal?.aborted === true,
+      // THE GATE OWNS ITS OWN BUDGET (2026-09-19). Borrowing `judge_wait`'s
+      // ten-minute cap made an eleven-minute goal audit look like a gate
+      // defect: the budget expired, `awaitRoundEnd` reported 「等待未命中本轮
+      // report」, nothing was recorded, and the agent re-ran the whole audit to
+      // collect a verdict that had already landed. An audit is not an agent
+      // wait — see `AUDIT_SELF_WAIT_BUDGET_MS`.
+      budgetMs: AUDIT_SELF_WAIT_BUDGET_MS,
     }) as ReturnType<typeof callTool>;
 
   }
@@ -1685,7 +1708,10 @@ export default function reviewGate(pi: ExtensionAPI) {
    * timing record) describe the same round the same way.
    */
   function reviewScopeFor(root: string, st: GateState): ReviewScopeDecision {
-    const base = st.lastReadyReview;
+    // WHAT THIS SESSION HAS READ — any concluded round, BLOCKED included.
+    // `settledConclusion` below asks the narrower question (what was
+    // CONFIRMED) and still demands a READY.
+    const base = st.lastReviewedTree;
     // No settled tree ⇒ full anyway. Returning before the lane probe keeps a
     // session that has never had a READY free of a registry scan and a
     // directory read on every turn.
@@ -1741,8 +1767,12 @@ export default function reviewGate(pi: ExtensionAPI) {
    * nothing. Undefined when there is no such review (⇒ a full round anyway).
    */
   function settledConclusion(st: GateState): SettledConclusion | undefined {
-    const base = st.lastReadyReview;
-    if (!base) return undefined;
+    const base = st.lastReviewedTree;
+    // ONLY A READY SETTLES ANYTHING (2026-09-19). A BLOCKED tree is one the
+    // previous round READ — which is why `reviewScopeFor` uses it — but nothing
+    // about it was approved, and handing it to the next reviewer as settled
+    // would tell it to skip exactly the content the previous round refused.
+    if (!base || base.verdict !== "READY") return undefined;
     // `rounds` is the recorded-round COUNT at directive time, not the round
     // that produced the verdict (rounds recorded after it are included) — the
     // directive words it that way too.
@@ -3848,9 +3878,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     setHierarchy({ ...judgeHierarchy, [judgeId]: { ...entry, lastModelEventCount: events.length } });
     const lines = fresh.map((event) => {
       const why = event.error ? `（${event.error}）` : "";
-      return event.exhausted
-        ? `${modelKeyOf(event.spec)} 失败${why}，链上已无可用槽`
-        : `${modelKeyOf(event.spec)} 失败${why} → 切到 ${event.to ? modelKeyOf(event.to) : "?"}`;
+      if (!event.exhausted) {
+        return `${modelKeyOf(event.spec)} 失败${why} → 切到 ${event.to ? modelKeyOf(event.to) : "?"}`;
+      }
+      // The per-slot reasons are what make this line actionable — a banner that
+      // says only "链上已无可用槽" cannot tell a rate limit from a bad model id.
+      const tried = event.tried ?? [];
+      const detail = tried.length === 0
+        ? ""
+        : "：" + tried.map((t) => `${modelKeyOf(t.spec)}（${t.reason}）`).join("、");
+      return `${modelKeyOf(event.spec)} 失败${why}，链上已无可用槽${detail}`;
     });
     try { latestCtx?.ui.notify(`review-gate: judge 模型 fallback —— ${lines.join("；")}`, "warning"); } catch { /* headless */ }
   }
@@ -5137,20 +5174,167 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * `undefined` is then read as "somebody else settled this", not as a
    * refusal (lib/orchestrator-child-channel.ts owns that distinction).
    */
+  /**
+   * ASK THE PROXY (2026-09-19) — what happens when a dialog waits thirty
+   * minutes with nobody at the terminal.
+   *
+   * NO ARBITER, NO PROXY: an unconfigured arbiter resolves to no model, and
+   * this returns `undefined` — which the dialog reads exactly as it reads a
+   * closed box, so a gate with no arbiter still cannot grant anything by
+   * omission. Same fail-closed shape the arbitration paths use.
+   *
+   * The prompt carries a TRANSCRIPT POINTER, not the transcript: the proxy is a
+   * one-shot process (lib/arbitration.ts) and is told where to read the
+   * conversation rather than handed it — the choice `lib/adviser-brief.ts` makes
+   * too, for the same reason (a session log dwarfs the question).
+   */
+  async function proxyAnswerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyChoice | undefined> {
+    const model = resolveArbiterModel();
+    if (!model) return undefined;
+    const transcript = ownTranscriptPath();
+    const prompt = buildProxyPrompt({
+      title: spec.title,
+      // THE ROWS THE USER WOULD HAVE SEEN, verbatim, and the ONLY values the
+      // answer may take: `raceWithUserProxy` refuses anything else, which is what
+      // makes a proxied answer indistinguishable downstream.
+      options: spec.options,
+      ...(body === undefined ? {} : { body }),
+      ...(transcript === undefined ? {} : { transcript }),
+      // WHICH REPO THE PROXY IS ASKED ABOUT (review round 3 P1): the same one
+      // its decision will be filed under. Reading it twice would let the prompt
+      // and the sidecar disagree.
+      repoRoot: root,
+    });
+    const raw = await runArbiterProcess(
+      model, prompt, undefined, PROXY_ARBITER_TIMEOUT_MS, PROXY_SYSTEM_PROMPT,
+      // THE READ-ONLY SET, NOT `--no-tools` (review round 2 P1). The appeal
+      // arbiter's isolation is text-in/JSON-out; this one is asked to READ the
+      // session, and a prompt carrying a transcript pointer is worthless to a
+      // process that cannot open a file.
+      PROXY_ISOLATION_FLAGS,
+    );
+    return parseProxyDecision(raw);
+  }
+
+  /**
+   * WRITE THE DECISION WHERE THE USER WILL SEE IT (2026-09-19).
+   *
+   * This is the whole safety story of the proxy: downstream its answer is
+   * indistinguishable from the user's own — it opens the same doors. The only
+   * thing that keeps that honest is that it is VISIBLE, in three places: this
+   * state record, a notice in the session, and the completion report
+   * `declare_done` prints. A proxy decision that left no trace would be an
+   * authorization the user never gave and cannot discover.
+   */
+  function recordProxyDecision(
+    spec: ChoiceSpec,
+    choice: string,
+    byProxy: { rationale: string; at: string },
+    /**
+     * WHICH REPO'S SIDE CAR (review round 2 P1). The dialog does not know, and
+     * `askChoice` is ONE function for all twelve sites — so the caller resolves
+     * it. A decision recorded under the primary repo while its question belonged
+     * to a secondary one lands in the wrong sidecar AND is missing from that
+     * repo's completion report.
+     */
+    root: string,
+  ): void {
+    const st = stateForRepo(root);
+    st.proxyDecisions = [
+      ...(st.proxyDecisions ?? []),
+      {
+        at: byProxy.at,
+        question: spec.title,
+        options: [...spec.options],
+        choice,
+        rationale: byProxy.rationale,
+      },
+    ];
+    // `persistRepo`, not `persist`: the latter writes the CURRENT repo's
+    // sidecar, and the decision belongs to `root` (review round 2 P1).
+    if (latestCtx) persistRepo(latestCtx, root);
+    try {
+      latestCtx?.ui.notify(
+        `review-gate: 对话框等了 30 分钟无人作答，已由 arbiter 代为决定 —— 「${spec.title}」→ ${choice}` +
+          (byProxy.rationale ? `\n依据：${byProxy.rationale}` : "") +
+          "\n这条会记入 declare_done 的完成报告；你回来可以推翻它（重新走一遍对应的步骤即可）。",
+        "warning",
+      );
+    } catch { /* headless */ }
+  }
+
+  /**
+   * EVERY PROXY DECISION OF THIS SESSION, ACROSS EVERY REPO IT TOUCHED
+   * (review round 2 P1). `declare_done` runs ONCE for the session, while each
+   * decision belongs to whichever repo its dialog was about — reading only the
+   * primary repo's sidecar would silently omit the rest, and an incomplete list
+   * reads as "that was all of them", which is the one thing this record cannot
+   * get wrong.
+   *
+   * Deduped by (time, question, choice): a session that touched the same repo
+   * twice must not print the same decision twice either.
+   */
+  function allProxyDecisions(): NonNullable<GateState["proxyDecisions"]> {
+    // The dedupe lives in `mergeProxyDecisions` (哲学三: one implementation) —
+    // this is the same union, folded over more than two sessions.
+    let out: NonNullable<GateState["proxyDecisions"]> = [];
+    for (const root of sessionRepos) {
+      out = mergeProxyDecisions(out, stateForRepo(root).proxyDecisions);
+    }
+    return out;
+  }
+
   async function askChoice(
     uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; back?: boolean } = {},
+    opts: {
+      body?: string;
+      signal?: AbortSignal;
+      back?: boolean;
+      repo?: string;
+      onUndecided?: () => void;
+    } = {},
   ): Promise<string | undefined> {
     // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
     // is a getter that asserts the context is still alive, and a dialog can wait
     // a long time for its turn. Read once and captured, not read again inside.
-    const signal = dialogSignal(uiCtx.signal, opts.signal);
+    //
+    // THE RACE'S OWN SIGNAL IS MERGED IN HERE (2026-09-19), not at the queue
+    // call alone: the queue slot and the box on screen are the SAME dialog, and
+    // both have to end when the race settles. A proxy answer that released the
+    // queue wait while leaving `renderChoice` on screen would be a dialog the
+    // user can still type into and nobody will ever read.
+    const settledBy = new AbortController();
+    const signal = dialogSignal(uiCtx.signal, opts.signal, settledBy.signal);
     // A BOX THAT IS ALREADY SETTLED IS NOT RAISED, AND NOT ANNOUNCED: the queue
     // drops a waiter whose signal aborts (before OR during its turn) without
     // raising anything or ringing a banner — telling the user to come answer
     // something nobody is asking any more is the same mistake.
-    return scheduleDialog(async () => {
+    // THE WINDOW STARTS WHEN THE BOX DOES (2026-09-19). `askChoice` may be one
+    // of several calls in a single assistant message, and the dialog queue shows
+    // ONE box at a time — so a queued question could reach its thirty minutes
+    // before the user ever saw it (review round 1). `displayed` resolves inside
+    // the queue work below, which is the moment this dialog owns the screen.
+    let markDisplayed: (() => void) | undefined;
+    const displayed = new Promise<void>((resolve) => { markDisplayed = resolve; });
+    // WHICH REPO, BOUND WHEN THE BOX APPEARS (review round 3 P1). The answer
+    // belongs to the work this session was doing when the user would have SEEN
+    // the question — and `activeRepoRoot.current` follows the edits, so a dialog
+    // queued behind another one, or a thirty-minute wait, can move it. Bound on
+    // the queue's own turn and never re-read: fixing the sidecar's repo while
+    // the proxy reads a different one is the same defect from the other end.
+    //
+    // AN EXPLICIT `opts.repo` OUTRANKS IT AND NEVER DRIFTS (review round 4 P1):
+    // callers that KNOW which repo their question is about (a goal, a
+    // restatement) must say so — a secondary repo's question can be raised
+    // without that repo ever having been the active one, and then the fallback
+    // would file a stand-in's answer under the wrong sidecar AND point the proxy
+    // at the wrong repository.
+    const dialogRootNow = (): string => opts.repo ?? activeRepoRoot.current ?? primaryRepoRoot;
+    let dialogRoot = dialogRootNow();
+    const asked = scheduleDialog(async () => {
+      markDisplayed?.();
+      dialogRoot = dialogRootNow();
       // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
       // any session shows comes through this function, so "the gate has stopped
       // and is waiting for the human" needs no second detector. The policy
@@ -5200,6 +5384,49 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       if (answer !== undefined) lastUserInteractionAt = new Date().toISOString();
       return answer;
     }, signal);
+
+    // THE THIRTY-MINUTE HAND-OFF (2026-09-19, user decision). The box above is
+    // unchanged — not closed, not shortened, and a user who answers at minute 29
+    // wins outright. What is new is that minute 30 no longer means "nobody will
+    // ever answer": `arbiter` reads this session's own context and takes the
+    // user's place, and what it answers is recorded as a proxy decision (see
+    // `recordProxyDecision`) so the user can find it afterwards.
+    //
+    // THE RACE IS NOT WRITTEN HERE. Timing, the row check and the
+    // human-always-wins rule live in lib/user-proxy.ts, the only arrangement
+    // that makes them testable without waiting half an hour — this function is
+    // the single render point for all twelve dialogs and stays wiring.
+    const decided = await raceWithUserProxy<string>({
+      direct: asked,
+      displayed,
+      options: spec.options,
+      startProxy: () => proxyAnswerFor(spec, opts.body, dialogRoot),
+    });
+    // Whatever settled it, the box is done — see `settledBy` above.
+    settledBy.abort();
+    if (decided.byProxy !== undefined && decided.answer !== undefined) {
+      recordProxyDecision(spec, decided.answer, decided.byProxy, dialogRoot);
+    } else if (decided.proxyFailed === true) {
+      // NOBODY DECIDED, AND THE USER IS NOT HERE. Say so: a dialog that times
+      // out silently is indistinguishable, to the user, from one that was
+      // answered — and this is the only moment the fact exists. The gate does
+      // NOT invent an answer here; the conservative landing is the absence of
+      // one, which every caller already reads correctly.
+      //
+      // THE CALLER IS TOLD TOO (review round 3 P1): `undefined` alone cannot
+      // distinguish this from a dismissed box, and for a consent request those
+      // two must not have the same consequence — a decline LOCKS the request
+      // for the session, and a timeout is not a decline.
+      try {
+        latestCtx?.ui.notify(
+          `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答，且 arbiter 无法代答` +
+            "（未配置 / 失败 / 输出不可解析）—— 这一项**还没有任何决定**，等你回来处理。",
+          "warning",
+        );
+      } catch { /* headless */ }
+      try { opts.onUndecided?.(); } catch { /* the caller's own bookkeeping */ }
+    }
+    return decided.answer;
   }
 
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
@@ -8764,6 +8991,39 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const root = target.root;
+      // NOTHING OF ITS OWN TO REVIEW, NOTHING TO DISPATCH (2026-09-19). Under a
+      // user-granted scope limit with no edits of its own this session has
+      // ALREADY been told the ship gate is disarmed — but `judge_submit` still
+      // ran the whole chain: a full precommit, a checkpoint, a dispatch, and a
+      // reviewer that could only ever conclude BLOCKED, because its range is the
+      // branch's pre-existing content, which this session is not allowed to
+      // touch. Measured in prime's t3-report-update: that shape burned minutes
+      // per round and then deadlocked on `declare_done` (its own goal forbade
+      // fixing what the reviewer found). The refusal states what the caller's
+      // gate state already says: there is nothing of its own to review.
+      if (params.role === "reviewer") {
+        const scoped = stateForRepo(root);
+        if (scoped.scopeLimit !== undefined && !scoped.hasCodeChange && !scoped.hasDocChange) {
+          return {
+            content: [{
+              type: "text",
+              text: buildRejection({
+                what: "judge_submit 被拒 —— 本会话没有任何自己的改动，且用户已批准缩小审查范围",
+                why:
+                  "门禁只覆盖本会话的改动（`request_scope_limit` 已生效），而本会话在这个仓库里零 edit：" +
+                  "没有东西需要审。派出去的 reviewer 只能拿到分支上**别人**的 diff，然后判出这一轮修不了的 " +
+                  "finding —— 这正是 prime 的 t3-report-update 卡死的那条路。",
+                by: "agent",
+                next:
+                  "直接收尾（`declare_done`）—— ship 拦截已经解除。若确实要审本会话以外的内容，" +
+                  "先让用户 `/gate-reset` 撤掉范围限制。",
+              }),
+            }],
+            details: { refused: "no-session-edits-under-scope-limit" },
+            isError: true,
+          };
+        }
+      }
       // NON-GIT SHORT-CIRCUIT: the review chain (precommit → checkpoint →
       // baseline..HEAD) is meaningless outside a repository, and its git
       // steps would leak fatal to the terminal. Refuse up front.
@@ -9303,11 +9563,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       },
       switchTo: async (spec) => {
         const parsed = parseModelSpec(spec);
-        if (!parsed.provider || !parsed.id || !latestCtx) return false;
+        if (!parsed.provider || !parsed.id) return `spec 里解析不出 provider/id：${spec}`;
+        if (!latestCtx) return "会话还没有可用的 ctx（读不到模型注册表）";
         try {
           const model = latestCtx.modelRegistry.find(parsed.provider, parsed.id);
-          if (!model) return false;
-          if (!(await pi.setModel(model))) return false;
+          if (!model) return `注册表里没有这个模型：${parsed.provider}/${parsed.id}`;
+          if (!(await pi.setModel(model))) return `pi.setModel 拒绝了 ${parsed.provider}/${parsed.id}`;
           // The slot's own level, applied AFTER the switch (setModel resets it
           // to the new model's default). A level the model cannot take is not
           // a reason to abandon a working model — pi clamps it, and an unknown
@@ -9316,7 +9577,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             pi.setThinkingLevel(parsed.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
           }
           return true;
-        } catch { return false; }
+        } catch (err) {
+          const text = err instanceof Error ? err.message : String(err);
+          return `切换 ${spec} 时抛错：${text.slice(0, 160)}`;
+        }
       },
       nudge: (text) => {
         try {
@@ -9678,6 +9942,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * interrupt it), so refusing a quality READY for want of a PASS would refuse
    * every quality round that finishes first — which is the normal case.
    */
+
+  /**
+   * The user's scope exemption, in the shape the adjudicator takes — or
+   * `undefined` when no scope limit is in force, which is the ordinary case
+   * and must stay byte-for-byte the old behaviour.
+   *
+   * BOTH RECORDERS CALL THIS (2026-09-19), and that is the point: the two
+   * adjudications answer different questions — the quality half gates the
+   * reviewer's dispatch, the review half gates shipping — but a quality round
+   * that blocks on an EXEMPTED file still kills the reviewer's pane through the
+   * cancel matrix. Fixing one and not the other leaves the same deadlock
+   * standing at the other door.
+   */
+  function scopeExemptionOf(st: GateState): ScopeExemption | undefined {
+    return st.scopeLimit === undefined ? undefined : { exemptFiles: st.scopeLimit.preexistingFiles };
+  }
+
   async function recordQualityVerdict(
     concluded: ReportConclusion,
     repo: string,
@@ -9688,17 +9969,18 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       return "review-gate: 质量轮的 report 里没有可识别的 verdict —— 什么都没有记录（fail-closed）：" +
         "reviewer **不会**被派出去。用 judge_submit({role:\"reviewer\"}) 重新送这一轮。";
     }
-    const parsed = adjudicateReviewConclusion({
-      verdict: verdictRaw,
-      findings: concluded.findings as ReviewFinding[],
-      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
-    });
     const target = resolveToolRepo(repo);
     if (!target.ok) return target.error;
     const targetRoot = target.root;
     if (!sessionInGit) return "review-gate: 非 git 目录 —— 无法记录质量裁决（无仓库可绑定）。";
     const st = stateForRepo(targetRoot);
     delete st.pausedQuestion;
+    // ONE adjudication, scope-aware since 2026-09-19 — see `ScopeExemption`.
+    const parsed = adjudicateReviewConclusion({
+      verdict: verdictRaw,
+      findings: concluded.findings as ReviewFinding[],
+      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
+    }, scopeExemptionOf(st));
     // THE SAME TWO BINDINGS A REVIEW GETS, for the same reason — a quality
     // READY unlocks the functional round, so it must be bound to the content
     // it actually judged. No target registered ⇒ the round was never prepared
@@ -10028,22 +10310,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         "reviewer 必须通过 judge_conclude 交卷（verdict + findings + cwd）；散文不记录任何东西。" +
         "用 judge_submit({role:\"reviewer\"}) 重跑本轮。";
     }
-    // ONE adjudication for the record: a READY carrying an open P0/P1 is
-    // contradictory and becomes BLOCKED, and the round's findings become the
-    // count and the coarse cross-round fingerprints (lib/review-adjudicate.ts).
-    const parsed = adjudicateReviewConclusion({
-      verdict: verdictRaw,
-      findings: concluded.findings as ReviewFinding[],
-      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
-      ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
-    });
-    // THE ADJUDICATOR'S OWN VERDICT, captured before the three binding checks
-    // below overwrite it (2026-09-15). Only THIS one answers "does the round
-    // contradict itself on its findings?" — stale, unverified and the cwd check
-    // each relabel `parsed.verdict` too, and feeding the relabelled word into
-    // `classifyReadyWithholding` made every one of them look like a finding
-    // conflict.
-    const adjudicatedVerdict = parsed.verdict;
     // The agent is running the loop again — a standing ask_user
     // pause is moot (liveness: a stale pause would silently swallow the
     // next auto-continuation after a BLOCKED verdict).
@@ -10066,6 +10332,26 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
 
     const st = stateForRepo(targetRoot);
     delete st.pausedQuestion;
+    // ONE adjudication for the record: a READY carrying an open P0/P1 is
+    // contradictory and becomes BLOCKED, and the round's findings become the
+    // count and the coarse cross-round fingerprints (lib/review-adjudicate.ts).
+    //
+    // SCOPE-AWARE since 2026-09-19 (`ScopeExemption`): a P0/P1 on a file the
+    // USER exempted no longer contradicts a READY. It needs `st`, so it runs
+    // after the repo is resolved — the pure adjudication is unchanged.
+    const parsed = adjudicateReviewConclusion({
+      verdict: verdictRaw,
+      findings: concluded.findings as ReviewFinding[],
+      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
+      ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
+    }, scopeExemptionOf(st));
+    // THE ADJUDICATOR'S OWN VERDICT, captured before the three binding checks
+    // below overwrite it (2026-09-15). Only THIS one answers "does the round
+    // contradict itself on its findings?" — stale, unverified and the cwd check
+    // each relabel `parsed.verdict` too, and feeding the relabelled word into
+    // `classifyReadyWithholding` made every one of them look like a finding
+    // conflict.
+    const adjudicatedVerdict = parsed.verdict;
     const fp = computeFingerprint(targetRoot);
     // Scope THIS round was judged under — computed BEFORE the new verdict
     // overwrites the baseline, or it would always read as "nothing new".
@@ -10328,12 +10614,17 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // stays absent (blocks under the docSync knob — fail-closed).
       ...(parsed.docSync !== undefined ? { docSync: parsed.docSync } : {}),
     };
-    // A READY verdict moves the incremental-review baseline: it records the
-    // git TREE that was approved and the files that approval covered, so the
-    // NEXT round can state precisely what is new instead of making the
-    // reviewer re-derive the whole diff (lib/review-scope.ts). Neither field
-    // authorizes anything — `review.fingerprint` still does that alone.
-    if (parsed.verdict === "READY") {
+    // EVERY CONCLUDED VERDICT MOVES THE INCREMENTAL BASELINE (2026-09-19), not
+    // just a READY. See `GateState.lastReviewedTree` for the measurement (three
+    // full deep reviews over one diff) and for why the verdict rides along:
+    // `reviewScopeFor` asks what was READ, while `settledConclusion` asks what
+    // was CONFIRMED — and only a READY answers the second, so this write does
+    // not let a BLOCKED tree be handed on as settled.
+    //
+    // Only a round that actually got RECORDED reaches this point: a verdict
+    // refused by a binding check, or a round the cancel matrix terminated, is
+    // not a conclusion and must leave the baseline where it was.
+    {
       const treeOid = reviewTargets.get(targetRoot)?.tree;
       if (treeOid) {
         // What this review ACTUALLY covered. Under a user-granted scope
@@ -10344,9 +10635,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         const files = st.scopeLimit
           ? st.scopeLimit.sessionFiles.slice()
           : reviewCoverageFiles(targetRoot);
-        st.lastReadyReview = {
+        st.lastReviewedTree = {
           treeOid,
           at: new Date().toISOString(),
+          verdict: parsed.verdict,
           ...(files ? { files } : {}),
         };
       }
@@ -11041,7 +11333,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
               : "") +
             // Honest about the banner in the same breath: `missing` means the
             // user was NOT told, which is their cue to install the notifier.
-            (notified.status === "sent" ? "" : `\n（通知：${describeNotifyOutcome(notified)}）`),
+            (notified.status === "sent" ? "" : `\n（通知：${describeNotifyOutcome(notified)}）`) +
+            // WHO DECIDED WHAT (2026-09-19). Printed by the GATE, from the
+            // state record, and never by the summary — a decision the proxy
+            // took on the user's behalf is the one fact this report cannot let
+            // an agent's prose forget. Empty in the ordinary case.
+            formatProxyDecisionReport(allProxyDecisions()),
         }],
         details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
 
@@ -11234,6 +11531,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   // what lets an orchestrator answer the same box the human can).
   registerUserInteractionTools(pi, {
     state: () => state,
+    // THE GIT ROOT, NOT `cwd` (review round 5 P1): the sidecars are keyed by repo
+    // root, and `cwd` may be a subdirectory of it.
+    repoRoot: () => primaryRepoRoot,
     persist: (ctx) => persist(ctx as unknown as ExtensionContext),
     setLoopArmed: (armed) => { loopArmed = armed; },
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as Parameters<typeof showToUser>[0], lead, body),

@@ -225,11 +225,24 @@ export function buildStandardReport(input: StandardReportInput): string {
     lines.push(`- 模型 fallback（${modelEvents.length} 次）：`);
     for (const event of modelEvents) {
       const why = event.error ? `（${event.error}）` : "";
-      lines.push(
-        event.exhausted
-          ? `  ${event.spec} 失败${why} —— 链上已无可用槽，本轮到此为止。`
-          : `  ${event.spec} 失败${why} → 已切到 ${event.to ?? "?"}。`,
-      );
+      if (!event.exhausted) {
+        lines.push(`  ${event.spec} 失败${why} → 已切到 ${event.to ?? "?"}。`);
+        continue;
+      }
+      // THE EXHAUSTED LINE CARRIES THE WHOLE CHAIN (2026-09-19). "链上已无
+      // 可用槽" used to be the entire story, and the two ways a chain dies
+      // are fixed in completely different places: a provider that answered
+      // 503 needs quota or a config edit, a slot the pane could not switch TO
+      // is a broken model id. Measured in prime's t5-verify-ship: ONE recorded
+      // fallback then `chain exhausted`, and the silent refusals in between
+      // cost the round with nothing to diagnose from.
+      const tried = event.tried ?? [];
+      if (tried.length === 0) {
+        lines.push(`  ${event.spec} 失败${why} —— 链上已无可用槽，本轮到此为止。`);
+        continue;
+      }
+      lines.push("  链上已无可用槽，本轮到此为止。试过的槽（依次）：");
+      for (const attempt of tried) lines.push(`    · ${attempt.spec}：${attempt.reason}`);
     }
   }
   if (input.waitedSeconds !== undefined) lines.push(`- 已阻塞等待：${input.waitedSeconds}s`);

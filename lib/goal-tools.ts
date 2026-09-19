@@ -43,7 +43,7 @@ import { join as pathJoin } from "node:path";
 import { Type } from "typebox";
 
 import type { ToolHost, ToolReply } from "./tool-host.ts";
-import { REVISE_ROW, choiceRows, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
+import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import {
   GOAL_CONFIRM_TITLE,
@@ -110,7 +110,7 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; signal?: AbortSignal },
+    opts?: AskChoiceOpts,
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
@@ -400,6 +400,11 @@ export async function doProposeLoopGoal(
             (capNoteShort ? "\n" + capNoteShort : ""),
         ),
         signal,
+        // THE REPO THIS GOAL BINDS TO (review round 4 P1): a multi-repo session
+        // approves a goal per repo, and the one being approved here need not be
+        // the one currently active. The proxy's context and the recorded
+        // decision both hang off this.
+        repo: goalRoot,
       }),
     );
     const pick = parseChoice(outcome.answer, spec);

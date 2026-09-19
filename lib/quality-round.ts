@@ -402,6 +402,13 @@ export function buildQualityAuditTask(input: {
   changeIndex?: string;
   rulesPath: string;
   session?: { dir: string; id: string };
+  /**
+   * The user's scope exemption, when one is in force
+   * (`formatScopeExemptionBlock` in lib/review-carryover.ts). Rendered THERE so
+   * both judge roles — this one and the functional reviewer — read the same
+   * words about which round they are running.
+   */
+  exemptionNote?: string;
 }): string {
   const lines = [
     `You are the quality auditor of this round. You judge the CODE ITSELF, on the commit range ${input.range} — immutable git history, and the only code this round judges. Read it with \`git show\` / \`git diff ${input.range}\`.`,
@@ -425,6 +432,7 @@ export function buildQualityAuditTask(input: {
         + ` ${input.session.dir} (file named <timestamp>_${input.session.id}.jsonl)`,
     );
   }
+  if (input.exemptionNote && input.exemptionNote.trim()) lines.push(input.exemptionNote);
   lines.push("", buildStreamDirective(input.streamPath));
   return lines.join("\n");
 }

@@ -102,6 +102,34 @@ export const ARBITER_ISOLATION_FLAGS: readonly string[] = Object.freeze([
   "--no-context-files", "--no-prompt-templates",
 ]);
 
+/**
+ * THE PROXY'S ARBITER RUNS UNDER A DIFFERENT ISOLATION, and the difference IS
+ * the prompt it is given (2026-09-19).
+ *
+ * `ARBITER_ISOLATION_FLAGS` is `--no-tools`, which is right for an appeal: that
+ * question is "is this one quarantined command legitimate", answerable from the
+ * text alone, and any extra reach could only widen it. The proxy's question is
+ * "what would the user have answered here", and the only honest way to answer
+ * it is to READ the session — so the transcript pointer in its prompt is
+ * useless under `--no-tools` (review round 2 P1: the feature's central
+ * behaviour was unreachable).
+ *
+ * SO IT GETS THE READ-ONLY SET, the same one every reviewing role in this gate
+ * gets (`--exclude-tools edit,write`, lib/session-factory.ts) plus bash
+ * excluded — reading is the whole job, and running things is not part of it.
+ * Everything else stays sealed: no session, no extensions, no context files
+ * (the repository must not push context in that the user's own question did not
+ * come with).
+ *
+ * The escalation this forbids: the proxy cannot edit, cannot run a command and
+ * cannot open a session. It reads and it answers.
+ */
+export const PROXY_ISOLATION_FLAGS: readonly string[] = Object.freeze([
+  "--no-session", "--no-extensions", "--no-skills",
+  "--exclude-tools", "edit,write,bash",
+  "--no-context-files", "--no-prompt-templates",
+]);
+
 /** Arbiter spawn timeout. Max-thinking arbiters are slow; 120s covers it
  *  without hanging the tool pipeline forever on a dead network. */
 export const ARBITER_TIMEOUT_MS = 120_000;
@@ -218,6 +246,43 @@ function splitModel(id: string): { provider: string; model: string } | undefined
 }
 
 /**
+ * Spawn the arbiter and return its RAW output, or undefined on ANY failure
+ * (timeout, spawn error). No parsing happens here.
+ *
+ * THE EXECUTION IS ONE IMPLEMENTATION, THE QUESTIONS ARE SEVERAL (2026-09-19):
+ * "may this `gh pr edit` run once", "is this refused TEXT a legitimate
+ * exception" (lib/text-appeal.ts) and "what would the user answer here, when
+ * nobody has for thirty minutes" (lib/user-proxy.ts) differ only in their
+ * system prompt and how their output is read. Splitting the process half out is
+ * what lets the third one reuse the isolation flags, the model resolution and
+ * the fail-closed contract instead of keeping a second copy of them true.
+ */
+export async function runArbiterProcess(
+  modelId: string,
+  prompt: string,
+  exec: ArbiterExec = defaultArbiterExec,
+  timeoutMs: number = ARBITER_TIMEOUT_MS,
+  systemPrompt: string = ARBITER_SYSTEM_PROMPT,
+  /**
+   * The isolation this process runs under. Defaults to the appeal arbiter's
+   * `--no-tools`; the user proxy passes `PROXY_ISOLATION_FLAGS`, because its
+   * task is to READ the session and a text-only process cannot do that.
+   */
+  flags: readonly string[] = ARBITER_ISOLATION_FLAGS,
+): Promise<string | undefined> {
+  const split = splitModel(modelId);
+  if (!split) return undefined; // malformed id — fail closed (GATE_WINS)
+  const { provider, model } = split;
+  const argv = [
+    "pi", "-p", ...flags,
+    "--provider", provider, "--model", model,
+    "--system-prompt", systemPrompt,
+    prompt,
+  ];
+  return exec(argv, timeoutMs);
+}
+
+/**
  * Spawn the arbiter and return its verdict, or undefined on ANY failure
  * (timeout, spawn error, unparseable/unknown output). The caller MUST treat
  * undefined as GATE_WINS (fail-closed).
@@ -235,16 +300,7 @@ export async function runArbiter(
   timeoutMs: number = ARBITER_TIMEOUT_MS,
   systemPrompt: string = ARBITER_SYSTEM_PROMPT,
 ): Promise<ArbiterVerdict | undefined> {
-  const split = splitModel(modelId);
-  if (!split) return undefined; // malformed id — fail closed (GATE_WINS)
-  const { provider, model } = split;
-  const argv = [
-    "pi", "-p", ...ARBITER_ISOLATION_FLAGS,
-    "--provider", provider, "--model", model,
-    "--system-prompt", systemPrompt,
-    prompt,
-  ];
-  return parseArbiterVerdict(await exec(argv, timeoutMs));
+  return parseArbiterVerdict(await runArbiterProcess(modelId, prompt, exec, timeoutMs, systemPrompt));
 }
 
 // ---------------------------------------------------------------------------

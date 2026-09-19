@@ -7,9 +7,12 @@
  * thinking to re-derive a verdict it already gave, which is the single most
  * expensive step of a loop round.
  *
- * WHAT THIS DOES. The gate remembers the tree the last READY review was bound
- * to. When a new round starts this module computes the INCREMENT since then
- * and decides whether the round may run incrementally at all. It produces a
+ * WHAT THIS DOES. The gate remembers the tree the last CONCLUDED review round
+ * read. When a new round starts this module computes the INCREMENT since then
+ * and decides whether the round may run incrementally at all — a round that
+ * concluded BLOCKED read those files too, and re-reading all of them is what
+ * made prime's t1-prime-encrypt run three full deep reviews (15 + 15 + 6
+ * minutes) over one 65-file diff on 2026-09-19. It produces a
  * DECISION, never prose: the contract handed to the reviewer — what was
  * already settled, what is new, which findings must be re-checked, and what a
  * consistency scan is — is rendered by `lib/review-carryover.ts`, the single
@@ -34,13 +37,13 @@
  * would have to take the settled conclusion on trust. That fact is decided
  * where transcript continuity lives, never re-derived here.
  *
- * FAIL-SAFE. Any missing input (no previous READY tree, unreadable git, an
+ * FAIL-SAFE. Any missing input (no previous review tree, unreadable git, an
  * unparseable diffstat) yields `full`. Incremental is never the default and is
  * never inferred — it is granted only when every precondition is present.
  *
  * WHAT A MISSING INPUT MEANS (2026-09-15). Every one of those inputs is a
- * RECORD — what this session has written down about the last READY round, not
- * a fact about the branch. A round whose record is absent is therefore not a
+ * RECORD — what this session has written down about the last concluded round,
+ * not a fact about the branch. A round whose record is absent is therefore not a
  * round with nothing to build on; it is a round whose reader cannot be told to
  * build on anything, which is why it escalates. The two `reason` strings below
  * are the reviewer's only sight of that distinction, so they say what the
@@ -57,9 +60,9 @@ export type ReviewScopeKind = "full" | "incremental";
 
 export interface ReviewScopeDecision {
   scope: ReviewScopeKind;
-  /** Files changed since the last READY tree (empty when unknown). */
+  /** Files changed since the last reviewed tree (empty when unknown). */
   changedFiles: string[];
-  /** Added + deleted lines since the last READY tree. */
+  /** Added + deleted lines since the last reviewed tree. */
   changedLines: number;
   /**
    * Files in the increment that the previous review never saw. Non-empty
@@ -75,16 +78,25 @@ export interface ReviewScopeDecision {
 
 export interface IncrementInput {
   /**
-   * Tree OID the last READY review was bound to, as THIS session has it on
-   * record. Absent ⇒ the session holds no settled tree: a sibling session's
-   * READY (or a state file that was rotated away) leaves nothing here, and the
-   * round escalates — never read as "there was no previous review".
+   * Tree OID the last CONCLUDED review round read, as THIS session has it on
+   * record (`GateState.lastReviewedTree`). Absent ⇒ the session holds no such
+   * tree: a sibling session's round (or a state file that was rotated away)
+   * leaves nothing here, and the round escalates — never read as "there was no
+   * previous review".
    */
   baseTree?: string;
   /** Files + line counts between that tree and the current worktree. */
   changedFiles?: string[];
   changedLines?: number;
-  /** Files the previous review's diff covered (its own scope). */
+  /**
+   * Files that round actually covered (empty when unknown).
+   *
+   * NOT the same as "approved": on a BLOCKED round these are files the
+   * reviewer READ, and nothing about them was confirmed — which is why the
+   * verdict travels separately in `GateState.lastReviewedTree` and why the
+   * carryover contract still makes the next round re-check that round's
+   * findings one by one.
+   */
   previouslyReviewedFiles?: string[];
   /**
    * Does the judge that will take this round still hold the previous round's
@@ -125,7 +137,7 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
   };
 
   if (!input.baseTree) {
-    return full("this session holds no settled review tree to build on — full deep review");
+    return full("this session holds no review tree to build on — full deep review");
   }
   // THE READER-SIDE PRECONDITION, checked before any content rule: the rest
   // of this function asks whether the INCREMENT is small enough to stand on a
@@ -145,7 +157,7 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
     return full("the increment could not be computed (git unreadable) — full deep review");
   }
   if (changedFiles.length === 0) {
-    return full("nothing changed since the last READY review — re-review the whole change");
+    return full("nothing changed since the last review round — re-review the whole change");
   }
   if (changedFiles.length > INCREMENT_MAX_FILES) {
     return full(

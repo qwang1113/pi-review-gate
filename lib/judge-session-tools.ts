@@ -889,10 +889,20 @@ export async function doWait(
     deps.absorbModelEvents?.(child.repoRoot, child.judgeId);
     rememberCursors(deps, child.judgeId, { lastModelEventCount: observation.seenModelEventCount });
   }
+  // ONLY A STREAM THAT IS ACTUALLY THERE (2026-09-19). The path rode on every
+  // reply because the judge HAD one registered, and the opener was then sent
+  // to a file nobody ever wrote: a round whose findings are all carry-over
+  // writes no new lines, so the file is never created (measured in prime: the
+  // receipt named `review-mu8hnft7-review.jsonl` for exactly such a round).
+  // "The gate lost the evidence" and "this round produced none" are different
+  // facts and only one of them is worth a pointer.
+  const liveStreamPath = child.streamPath !== undefined && deps.readText(child.streamPath) !== undefined
+    ? child.streamPath
+    : undefined;
   const base = {
     role: child.role,
     judgeId: child.judgeId,
-    ...(child.streamPath === undefined ? {} : { streamPath: child.streamPath }),
+    ...(liveStreamPath === undefined ? {} : { streamPath: liveStreamPath }),
     // WHICH MODEL RAN — the launch slot, plus every rotation the pane reported
     // (the events below). One without the other is half the story.
     ...(child.modelSpec === undefined ? {} : { modelSpec: child.modelSpec }),

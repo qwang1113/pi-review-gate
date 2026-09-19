@@ -41,7 +41,7 @@ function harness(opts: {
     chain: () => chain,
     currentSpec: () => current,
     switchTo: async (spec) => {
-      if (opts.refuses?.includes(spec)) return false;
+      if (opts.refuses?.includes(spec)) return "switch refused by this fixture";
       switched.push(spec);
       current = spec;
       return true;
@@ -119,4 +119,34 @@ test("the two notes name the models, and the resume note tells the judge what NO
   assert.match(resume, /切到链上的下一个模型 b\/y/);
   assert.match(resume, /不要重做已经完成的部分/);
   assert.match(buildChainExhaustedNote("a/x"), /不要自己下结论/);
+});
+
+test("an exhausted chain says WHY each slot did not carry the round", async () => {
+  // Measured in prime (t5-verify-ship, 2026-09-19 09:28Z): a 4-slot reviewer
+  // chain reported `chain exhausted` 19 seconds after dispatch with ONE logged
+  // fallback, because every other slot was refused by `switchTo` and that
+  // refusal went nowhere. From the receipt, a provider rate limit and a model
+  // id nobody can resolve were the same event — and they are fixed in
+  // different places. The whole round was lost with nothing to diagnose from.
+  const h = harness({ refuses: [CHAIN[1]!, CHAIN[2]!] });
+  const event = await h.rotation.onModelFailure("503 auth_unavailable");
+  assert.equal(event?.exhausted, true);
+  assert.deepEqual(event?.tried, [
+    { spec: CHAIN[0], reason: "503 auth_unavailable" },
+    { spec: CHAIN[1], reason: "switch refused by this fixture" },
+    { spec: CHAIN[2], reason: "switch refused by this fixture" },
+  ]);
+  // …and the pane's own notice carries them too, so the human watching it is
+  // not left with a bare "exhausted".
+  const note = h.notices.at(-1) ?? "";
+  assert.match(note, /claude-opus-5:max/);
+  assert.match(note, /gpt-6-astra/);
+  assert.match(note, /switch refused by this fixture/);
+});
+
+test("a rotation that SUCCEEDED carries no tried list — the destination is the story", async () => {
+  const h = harness();
+  const event = await h.rotation.onModelFailure("503");
+  assert.equal(event?.to, CHAIN[1]);
+  assert.equal(event?.tried, undefined);
 });

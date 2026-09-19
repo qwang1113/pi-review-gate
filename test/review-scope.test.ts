@@ -53,13 +53,14 @@ test("incremental: a small increment inside already-reviewed files", () => {
   assert.match(d.reason, /1 file/);
 });
 
-test("full: this session holds no settled tree to build on", () => {
+test("full: this session holds no reviewed tree to build on", () => {
   const d = decideReviewScope({ changedFiles: ["src/a.ts"], changedLines: 1 });
   assert.equal(d.scope, "full");
   // The reason names the RECORD that is missing, not a fact about the branch:
-  // a sibling session's READY, or a rotated state file, reaches this branch
-  // with a perfectly reviewable change in hand.
-  assert.match(d.reason, /this session holds no settled review tree/);
+  // a sibling session's round (READY or BLOCKED — both are recorded now), or a
+  // rotated state file, reaches this branch with a perfectly reviewable change
+  // in hand.
+  assert.match(d.reason, /this session holds no review tree to build on/);
 });
 
 test("full: the increment could not be computed (git unreadable)", () => {
@@ -243,8 +244,8 @@ test("a remembering judge is NOT enough on its own — content rules still bind"
   assert.match(d.reason, /never covered/);
 });
 
-test("no settled tree outranks the reader fact — the reason names the real cause", () => {
-  // A session with nothing settled has nothing to carry forward either way;
+test("no reviewed tree outranks the reader fact — the reason names the real cause", () => {
+  // A session with no recorded tree has nothing to carry forward either way;
   // reporting the transcript as the cause would send the reader looking at
   // the wrong thing.
   const d = decideReviewScopeRaw({
@@ -253,6 +254,6 @@ test("no settled tree outranks the reader fact — the reason names the real cau
     judgeRemembersPreviousRound: false,
   });
   assert.equal(d.scope, "full");
-  assert.match(d.reason, /this session holds no settled review tree/);
+  assert.match(d.reason, /this session holds no review tree to build on/);
 });
 

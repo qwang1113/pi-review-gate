@@ -10,6 +10,8 @@ import {
   buildArbiterPrompt,
   runArbiter,
   ARBITER_DECISIONS,
+  ARBITER_ISOLATION_FLAGS,
+  PROXY_ISOLATION_FLAGS,
   BYPASS_TOKEN_TTL_MS,
   type BypassToken,
   type TokenBindings,
@@ -331,4 +333,30 @@ test("runArbiter passes isolation flags and the chosen model to argv", async () 
   assert.ok(seen.includes("--provider"));
   assert.equal(seen[seen.indexOf("--provider") + 1], "prov");
   assert.equal(seen[seen.indexOf("--model") + 1], "mod");
+});
+
+test("the proxy's arbiter can actually read the transcript its prompt points at", () => {
+  // REVIEW ROUND 2 P1. The proxy reused the appeal arbiter's isolation, which is
+  // `--no-tools` — so the transcript pointer in its prompt was unreachable, and
+  // the feature's central behaviour (read the session, then answer) could not
+  // run at all.
+  assert.ok(
+    !PROXY_ISOLATION_FLAGS.includes("--no-tools"),
+    "a process that cannot open a file cannot read the session it is asked about",
+  );
+  assert.match(
+    PROXY_ISOLATION_FLAGS.join(" "),
+    /--exclude-tools\s+edit,write,bash/,
+    "…and the reach it gets is READ-ONLY: reading is the job, running things is not",
+  );
+  assert.ok(
+    PROXY_ISOLATION_FLAGS.includes("--no-session") && PROXY_ISOLATION_FLAGS.includes("--no-extensions"),
+    "…with everything else still sealed",
+  );
+  // THE OTHER DIRECTION MATTERS AS MUCH: this change is about the proxy, and it
+  // must not have widened the appeal arbiter by a single flag.
+  assert.ok(
+    ARBITER_ISOLATION_FLAGS.includes("--no-tools"),
+    "the appeal arbiter keeps its text-in / JSON-out isolation",
+  );
 });

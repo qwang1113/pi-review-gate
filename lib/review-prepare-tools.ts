@@ -45,7 +45,7 @@ import type { ToolRepoTarget } from "./repo-resolve.ts";
 import type { GateState } from "./gate-state.ts";
 import type { ReviewScopeDecision } from "./review-scope.ts";
 // The contract's wording (and the SettledConclusion it carries) has ONE home.
-import { formatReviewScopeDirective, type SettledConclusion } from "./review-carryover.ts";
+import { formatReviewScopeDirective, formatScopeExemptionBlock, type SettledConclusion } from "./review-carryover.ts";
 import { polishReasonRequired } from "./polish-gate.ts";
 import { buildQualityAuditTask, QUALITY_RULES_RELPATH } from "./quality-round.ts";
 import { buildReviewPrompt, changeRowsLargestFirst, extractPrecommitBaseline, formatChangeIndex, type ChangeIndexRow } from "./parallel-review.ts";
@@ -432,6 +432,15 @@ async function doPrepareReview(
   const qualityStreamPath = pathJoin(root, ".pi", "review-stream", `${runId}-quality.jsonl`);
   try { mkdirSync(pathJoin(qualityStreamPath, ".."), { recursive: true }); } catch { /* stream is optional */ }
   const scopeNow = deps.reviewScope(root, st);
+  // THE USER'S EXEMPTION, said once and handed to BOTH judge roles (2026-09-19).
+  // The reviewer gets it inside its scope block; the quality auditor, which
+  // receives no scope block at all, gets it appended to its task. Without it the
+  // two rounds judge files the user already excused — which is how prime's
+  // t2-auth-path-e2e and t3-report-update both deadlocked.
+  const exemptionNote = formatScopeExemptionBlock({
+    exemptFiles: st.scopeLimit?.preexistingFiles ?? [],
+    sessionFiles: st.scopeLimit?.sessionFiles ?? [],
+  });
   // Round-18 polish gate: persist a supplied reason BEFORE building the
   // task, so the reviewer of THIS round sees the reason that authorized it.
   if (polish.required && (reason ?? "").trim()) {
@@ -453,7 +462,7 @@ async function doPrepareReview(
       deps.previousRoundFindings(st),
       deps.settledConclusion(st),
       "reviewer",
-    ),
+    ) + exemptionNote,
     scopeNow.scope,
     { dir: deps.sessionDir(ctx), id: st.sessionId ?? "unknown" },
     precommitBaselineFor(root, st, deps.readText),
@@ -482,6 +491,7 @@ async function doPrepareReview(
     ...(changeIndex === undefined ? {} : { changeIndex }),
     rulesPath: pathJoin(root, QUALITY_RULES_RELPATH),
     session: { dir: deps.sessionDir(ctx), id: st.sessionId ?? "unknown" },
+    ...(exemptionNote === "" ? {} : { exemptionNote }),
   });
   const lines = [
     `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
