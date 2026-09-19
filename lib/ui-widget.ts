@@ -207,6 +207,26 @@ function plainMarkdown(text: string): string {
 }
 
 /**
+ * The line block `/gate-contract` prints, WITH the reason when there is none.
+ *
+ * THE EMPTY LIST MUST ALWAYS CARRY A REASON (reviewer P2, 2026-09-19). The
+ * handler that prints this falls back to "本会话不持有一份 plan/goal 契约" when
+ * an empty list arrives with no explanation — which is true of a session that
+ * owns no contract and FALSE of one whose contract rendered to nothing (every
+ * row blank, so `buildContractLines` dropped them all). Pairing the two here,
+ * in a pure function, is what makes "empty ⇒ explained" an invariant rather
+ * than a coincidence of two call sites.
+ */
+export function buildContractReadout(
+  facts: ContractFacts,
+  absent: string | undefined,
+): { lines: string[]; absent?: string } {
+  const lines = buildContractLines(facts);
+  if (lines.length > 0) return { lines };
+  return { lines, absent: absent ?? "这份契约里没有可显示的内容（条目都是空白）" };
+}
+
+/**
  * Build the contract list — the lines `/gate-contract` shows.
  *
  * Pure: every fact comes in through `f`. Returns [] for nothing to show, which

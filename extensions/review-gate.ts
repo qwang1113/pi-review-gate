@@ -82,7 +82,7 @@ import { hostEditorFallback, hostReasonEditor, editorTextOf, REASON_EDITOR_BACK,
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
-import { buildContractLines, buildGateWidget, planContractRows, showsRoundReading, type ContractFacts, type GateWidgetFacts } from "../lib/ui-widget.ts";
+import { buildContractReadout, buildGateWidget, planContractRows, showsRoundReading, type ContractFacts, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -4846,17 +4846,14 @@ export default function reviewGate(pi: ExtensionAPI) {
    * What `/gate-contract` prints: the contract lines, and — when there are none
    * — WHY, in the gate's own words.
    *
-   * The reason cannot be derived from an empty `string[]` (every "no contract
-   * here" case collapses to the same nothing), and it is the half the reader
-   * actually acts on: "没有契约可显示" without "因为这份 goal 还是一份没被批准的
-   * 草稿" would send them looking for a bug. WHICH situation this is, and what
-   * it is called, is `contractFacts`' own answer — this function prints it.
+   * Which situation this is, and what it is called, is `contractFacts`' own
+   * answer; the pairing of an empty list with its reason is
+   * `buildContractReadout`'s (lib/ui-widget.ts) — an empty list can never
+   * reach the command unexplained.
    */
   function contractReadout(): { lines: string[]; absent?: string } {
     const { facts, absent } = contractFacts();
-    const lines = buildContractLines(facts);
-    if (lines.length > 0 || absent === undefined) return { lines };
-    return { lines, absent };
+    return buildContractReadout(facts, absent);
   }
 
   function updateWidget(ctx: ExtensionContext) {

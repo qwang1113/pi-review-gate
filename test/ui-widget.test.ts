@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildContractLines,
+  buildContractReadout,
   buildGateWidget,
   planContractRows,
   showsRoundReading,
@@ -226,4 +227,24 @@ test("a whitespace-only row is not a contract row, and a real row is not dropped
     2,
     "header + the one real row",
   );
+});
+
+test("buildContractReadout: an empty list ALWAYS carries a reason", () => {
+  // Reviewer P2 (2026-09-19): the command falls back to «本会话不持有一份
+  // plan/goal 契约» for an unexplained empty list, which is TRUE of a session
+  // that owns no contract and false of one whose contract rendered to nothing.
+  const shown = buildContractReadout(
+    { kind: "goal", rows: [{ text: "第一条", state: "pending" }] },
+    "不该出现的理由",
+  );
+  assert.deepEqual(shown.lines, ["loop goal · 退出标准", "○ 第一条"]);
+  assert.equal(shown.absent, undefined, "lines beat any reason");
+
+  const explained = buildContractReadout({ rows: [] }, "goal 还是一份草稿");
+  assert.deepEqual(explained.lines, []);
+  assert.equal(explained.absent, "goal 还是一份草稿", "the caller's reason travels through");
+
+  const blank = buildContractReadout({ kind: "goal", rows: [{ text: "   ", state: "pending" }] }, undefined);
+  assert.deepEqual(blank.lines, [], "every row was blank, so the renderer dropped them all");
+  assert.match(blank.absent ?? "", /空白/, "and the empty list is never handed over unexplained");
 });
