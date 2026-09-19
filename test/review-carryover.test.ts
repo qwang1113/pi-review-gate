@@ -29,6 +29,7 @@ import {
   SCOPE_MARKER_FULL,
   SCOPE_MARKER_INCREMENTAL,
   buildReviewCarryover,
+  formatScopeExemptionBlock,
   formatReviewScopeDirective,
 } from "../lib/review-carryover.ts";
 
@@ -407,5 +408,37 @@ test("every surface that summarises the contract points at the source", () => {
       `${file.path} talks about the incremental contract, so it must name lib/review-carryover.ts as its source`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// The user's scope exemption (2026-09-19)
+// ---------------------------------------------------------------------------
+
+test("the exemption block is EMPTY when nothing is exempt — the ordinary case must not move", () => {
+  // The task text is what the reviewer is told; with no scope limit in force it
+  // has to stay byte-for-byte what it was. An always-present header would also
+  // train the reviewer to skim a section that is usually vacuous.
+  assert.equal(formatScopeExemptionBlock({ exemptFiles: [], sessionFiles: [] }), "");
+});
+
+test("the exemption block names both sides and states the rule the round is judged by", () => {
+  const text = formatScopeExemptionBlock({
+    exemptFiles: ["legacy/a.ts", "legacy/b.ts"],
+    sessionFiles: ["docs/x.md"],
+  });
+  assert.match(text, /SCOPE EXEMPTION IN FORCE/);
+  assert.match(text, /docs\/x\.md/, "the session's own files are named");
+  assert.match(text, /legacy\/a\.ts, legacy\/b\.ts/, "…and so are the exempted ones");
+  // The two sentences that do the work, and the reason each is here:
+  assert.match(text, /does NOT block this round/, "a P0/P1 on an exempted file is recorded, not enforced");
+  assert.match(text, /NO `file` is NOT exempt/, "the fail-closed edge is stated, so the rule is not guessed at");
+});
+
+test("the exemption block counts a long list instead of pasting the branch into the task", () => {
+  const many = Array.from({ length: 25 }, (_, i) => `legacy/f${i}.ts`);
+  const text = formatScopeExemptionBlock({ exemptFiles: many, sessionFiles: [] });
+  assert.match(text, /\(25\)/);
+  assert.match(text, /… \(5 more\)/);
+  assert.doesNotMatch(text, /legacy\/f24\.ts/, "the tail is counted, not pasted");
 });
 

@@ -187,6 +187,29 @@ export function describeCoolingSlot(slot: SkippedSlot, now: number): string {
  * channel in this shape: the opener reads it to cool the slot down, to warn
  * the user, and to say in the round's receipt which model actually ran.
  */
+/**
+ * ONE SLOT'S OUTCOME inside a round that ended on an exhausted chain.
+ *
+ * WHY THIS EXISTS (2026-09-19). `exhausted: true` used to be the whole story,
+ * and the two ways a chain dies are NOT the same fact: a provider answering
+ * 503 has run out of quota, while a slot the pane cannot even switch to is a
+ * broken model id or missing auth. Measured in prime's t5-verify-ship
+ * (2026-09-19 09:28Z): a 4-slot reviewer chain reported `chain exhausted` 19
+ * seconds after dispatch, with ONE recorded fallback — the other slots were
+ * refused by `switchTo` and that refusal was silent, so the receipt could not
+ * tell a rate limit from a typo. It cost the whole round.
+ */
+export interface ModelSlotAttempt {
+  /** The spec that was spent (provider/id + its thinking level). */
+  spec: string;
+  /**
+   * Why this slot did not carry the round: the provider error that took it
+   * out, or the reason the pane could not switch to it at all. Short, for a
+   * receipt — never a stack trace.
+   */
+  reason: string;
+}
+
 export interface ModelEvent {
   /** The spec that failed (provider/id + its thinking level). */
   spec: string;
@@ -198,6 +221,13 @@ export interface ModelEvent {
   exhausted?: boolean;
   /** How many specs this round has spent, including this one. */
   attempts?: number;
+  /**
+   * Every slot this round spent, in order, each with the reason it did not
+   * carry the round — the failed one first, then each one the pane could not
+   * switch to. Present on an `exhausted` event (and only there: a rotation
+   * that succeeded names its destination in `to`).
+   */
+  tried?: readonly ModelSlotAttempt[];
 }
 
 /** How much of a provider error is worth carrying (a receipt is not a log). */

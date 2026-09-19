@@ -225,3 +225,50 @@ export function formatReviewScopeDirective(
     audience,
   });
 }
+
+/**
+ * THE USER'S SCOPE EXEMPTION, SAID MECHANICALLY (2026-09-19).
+ *
+ * `request_scope_limit` has always promised the user that the gate then "covers
+ * only this session's edits" — but that promise travelled as a sentence handed
+ * to the AGENT, and the judge roles never heard it. They received the unchanged
+ * `baseline..HEAD` plus their own standing rule "a P0/P1 blocks", so a round
+ * over a branch carrying someone else's 65-file diff came back BLOCKED on
+ * findings the session was not allowed to fix. Measured in prime:
+ * t2-auth-path-e2e AND t3-report-update both deadlocked on `declare_done` that
+ * way — and t3's own reviewer wrote that its finding "should not be a blocker
+ * under this round's scope limit" before concluding BLOCKED anyway.
+ *
+ * WHY IT IS RENDERED HERE rather than at the call site: this module already owns
+ * the wording of "what this round is", and the exemption is exactly that
+ * question. BOTH judge roles receive this same text — the functional reviewer
+ * inside its scope block, the quality auditor appended to its task — because
+ * the two rounds must agree about which round they are running: a quality round
+ * that blocks on an exempted file kills the reviewer's pane through the cancel
+ * matrix.
+ *
+ * RETURNS AN EMPTY STRING when nothing is exempt, which is the ordinary case:
+ * the task text must then stay byte-for-byte what it was.
+ */
+export function formatScopeExemptionBlock(input: {
+  exemptFiles: readonly string[];
+  sessionFiles: readonly string[];
+}): string {
+  if (input.exemptFiles.length === 0 && input.sessionFiles.length === 0) return "";
+  const show = (files: readonly string[]): string => {
+    const head = files.slice(0, 20).join(", ");
+    if (files.length === 0) return "(none)";
+    return files.length > 20 ? `${head}, … (${files.length - 20} more)` : head;
+  };
+  return [
+    "",
+    "SCOPE EXEMPTION IN FORCE — granted by the USER for this round:",
+    `- This session's OWN changed files (${input.sessionFiles.length}): ${show(input.sessionFiles)}`,
+    `- EXEMPTED by the user — paths that existed BEFORE this session and are NOT this round's ` +
+      `delivery (${input.exemptFiles.length}): ${show(input.exemptFiles)}`,
+    "- A finding that lands on an EXEMPTED file does NOT block this round: report it with its real",
+    "  severity and evidence, in the same findings list, and let it change nothing about your verdict.",
+    "- A finding on one of this session's OWN files blocks exactly as it always did.",
+    "- A finding with NO `file` is NOT exempt — it cannot be matched against that list, so treat it as in scope.",
+  ].join("\n");
+}

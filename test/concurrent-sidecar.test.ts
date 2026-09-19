@@ -127,14 +127,14 @@ test("concurrent sidecar: our own better verdict wins over the foreign one", () 
   assert.equal(merged, mine, "no copy is needed when nothing is carried over");
 });
 
-test("concurrent sidecar: a foreign READY carries over lastReadyReview so the next round can be incremental", () => {
+test("concurrent sidecar: a foreign concluded round carries over lastReviewedTree so the next round can be incremental", () => {
   const theirs = approved("theirs", DIGEST);
-  theirs.lastReadyReview = { treeOid: DIGEST, files: ["src/a.ts"], at: "2026-01-01T00:00:00.000Z" };
+  theirs.lastReviewedTree = { treeOid: DIGEST, files: ["src/a.ts"], at: "2026-01-01T00:00:00.000Z", verdict: "READY" };
   const mine = armed("mine");
   const merged = mergeConcurrentBindings(mine, theirs, () => DIGEST);
 
   assert.equal(merged.review.verdict, "READY");
-  assert.deepEqual(merged.lastReadyReview, theirs.lastReadyReview,
+  assert.deepEqual(merged.lastReviewedTree, theirs.lastReviewedTree,
     "the incremental-review baseline must survive the carry-over");
 });
 

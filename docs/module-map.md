@@ -439,6 +439,11 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 并且是这一族的唯一注册入口——
 它自己转注册 `consent-request-tools.ts` 的两个同意工具
 （`request_scope_limit` / `request_sensitive_edit`，见 §1.2）；
+**没人作答时谁来答**（2026-09-19，用户决定）：每个框弹出满 30 分钟仍无人作答，
+就由 `user-proxy.ts` 交给 `arbiter` 读本会话上下文代答；答案带「由 arbiter 代为决定 + 依据」
+的标记落进 sidecar、在对话区可见，`declare_done` 的完成报告再由门禁机械列出这份清单。
+全部十二个对话点都经过 `extensions/review-gate.ts` 的 `askChoice`，所以计时与竞态只接了
+那一处，十二个落点一行未改（AGENTS.md 哲学一：不让 agent 记住多步流程）；
 `agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
 `renderer-mode.ts` 管「这个会话是不是 fullscreen 渲染器」这个读数与对它的提醒（对话框行数预算已于 2026-09-16 删除：产生它的那个闪屏只发生在默认渲染器上，而用户每会话都用 fullscreen；模式来自宿主的 `TUI.mode`，不自己重算配置），
 跨会话的唤醒**不在**这一域：一个编排子会话经它自己的**通道**上报（见域 4），
@@ -482,7 +487,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（140 个模块）
+## 五、`lib/` 全量速查表（141 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -496,7 +501,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 | 模块 | 一句话职责 |
 | --- | --- |
-| `abort-race.ts` | **「一个 promise 对一次 abort 的赛跑」的唯一实现**（2026-09-18，quality 轮 P2：同一段十五行在一轮里长出了两份）：监听 `abort`（`{once:true}`）、`settled` 守卫保证只结算一次、非 abort 路径摘掉监听、rejection 折进同一个答案。两个调用方：对话框队列（取消 = `true`，跳过这个框）与 reason box 的回退路径（取消 = `undefined`，连框都不开 —— 后者自己先查 `aborted` 再开框）。**没有超时**：门禁不给对话框加超时，`AbortSignal.timeout` 是标准做法 |
+| `abort-race.ts` | **「一个 promise 对一次 abort 的赛跑」的唯一实现**（2026-09-18，quality 轮 P2：同一段十五行在一轮里长出了两份）：监听 `abort`（`{once:true}`）、`settled` 守卫保证只结算一次、非 abort 路径摘掉监听、rejection 折进同一个答案。两个调用方：对话框队列（取消 = `true`，跳过这个框）与 reason box 的回退路径（取消 = `undefined`，连框都不开 —— 后者自己先查 `aborted` 再开框）。**本模块里仍然没有超时**（`AbortSignal.timeout` 是标准做法）；但**门禁从 2026-09-19 起确实给对话框加了超时** —— 30 分钟无人作答后交给 `user-proxy.ts`，那个窗口只住在那一个模块里 |
 | `adviser-brief.ts` | 组装 adviser 咨询的 brief：主会话 transcript 指针 + 结论落盘路径，第二次起带上轮结论与其后改动 |
 | `advisory-prepare-tools.ts` | **内部实现**（不注册给 pi）：组装 adviser brief 与 goal 审计任务文本，由 `judge_submit` / `propose_loop_goal` 调用 |
 | `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表；**等待纪律的唯一出处**（`buildWaitDiscipline`：子会话侧 `judge_wait`、项目经理侧 `orchestrator_wait` 共用同三条，只换工具名与消息种类） |
@@ -585,6 +590,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
 | `user-notify-runtime.ts` | 通知的运行时半边（2026-09-17 拆出）：解析 `terminal-notifier` 的路径（开一次，退出路径不能再查 PATH）、本会话的 tmux 地址（惰性，只有真要发时才查）、两个 spawn（活会话 detached；`exit` 里只能同步，且给 10s 超时）、以及注册进程退出 handler。拆出理由：那 60 行是新职责，而扩展已经 ~9000 行。**2026-09-18 起还负责「用户是否正看着这个 pane」的取证**：`list-clients` + 每个 client 的 `display-message -c` 得到各 client 的当前 pane，`lsappinfo front` 得到前台 app 的 bundle id —— 两条读数都只在否则真要发一条通知时才取（惰性 thunk），`lsappinfo` 带 2s 超时（同步跑在对话框路径与 exit handler 里），tmux 地址按 banner 重新解析（pane id 进程内固定、**window id 不固定**：join-pane/break-pane 会搬家，跨调用缓存会让点击跳去旧 window） |
 | `user-notify.ts` | 桌面通知：三种事件（完成 / 异常结束 / 停下来等用户回答）、只有没有上级的会话能发、`terminal-notifier` 的 argv 与「点回那个 pane」的纯函数、节流。旧的 `orchestrator-notify.ts`（OSC + tmux passthrough）整份删除。**2026-09-18 起**：标题是 `<类型> · <repo>`（等你回答 / 任务完成 / 异常结束）、`-group <sessionId>` 让同一会话的通知互相替换（不再堆叠）、`isWatchingPane` 在「用户正看着这个 pane 且终端在前台」时抑制整条通知（两个事实都成立才算，任一读不到一律照常发；pane id 形状复用 `orchestrator-tmux.ts` 的 `isPaneId`，不再自写正则；前台 app 与 `__CFBundleIdentifier` 的比较是**已知近似** —— 后者是 tmux server 启动时继承的 app，失配方向是多发一条而不是静默）。**取证排在节流之后**：被节流拦下的通知不付 3–5 个同步子进程；被抑制的通知不记额度，下一条照发 |
+| `user-proxy.ts` | **没人回答时谁来答**（2026-09-19，用户决定）：门禁的每个对话框等 30 分钟仍无人作答时，交给 `arbiter` 读本会话上下文代答。纯策略层 —— 窗口计时、先答者胜（用户与经通道作答的项目经理都算「人」，先到先得；arbiter 跑到一半用户答了就以用户为准）、代理答案必须是对话框给过的**候选行原文**（`raceWithUserProxy` 里那一次行校验是唯一一道闸）、提示词给的是 transcript **指针**而非正文、失败/超时/不可解析一律**无答案**，而「无答案」对十二个对话框恰好都是保守方向（授权即拒绝、`request_scope_limit` 保持完整门禁、提问即未作答）；`formatProxyDecisionReport` 渲染 `declare_done` 机械打印的那份清单 —— 用户必须能不费力地看出哪些决定不是自己做的。代答不产生任何额外权力：它只填对话框的答案本身。进程执行复用 `arbitration.ts` 的 `runArbiterProcess`（同一执行实现上的第三种问法，不是第二套实现） |
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash。`planHash` 的**产出方**，因此「什么算一个 plan hash」也归它：`isPlanHash` 是那条形状规则的唯一实现，凡从 sidecar 读回授权记录的地方都用它（复制出去的授权校验只会朝放宽的方向漂移） |
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西。也是 sidecar 里那份 runtime 的**唯一净化处**：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；`successorRuntime(runtime, fromHandoff)` 是「换了个会话能继承什么」的唯一出处 —— 登记表与 grants 照旧留下；许可只在 `fromHandoff` 为真（前任自己交棒的继任者，判定在 `lib/session-inheritance.ts`）时留下，其余情形全部剥离（写在调用点上的字段清单迟早漏掉新字段）。runtime 还带一个 `ownerSessionId`（2026-09-17）：**哪个会话持有这个编排** —— 它是「reload 后能不能恢复」的唯一依据（`storedRuntimeIsMine`），只有铸出、继承或接管了该地址的会话会写它。child 记录上的 `worktree`（路径 + 分支）也是在这里净化的：它会被交给 git，所以与其它路径同等强度 |

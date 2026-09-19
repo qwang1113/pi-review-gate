@@ -25,6 +25,27 @@ export const JUDGE_SESSIONS_RELDIR = ".pi/judge-sessions";
 /** Upper bound for `judge_wait`'s blocking window (goal criterion 1). */
 export const JUDGE_WAIT_MAX_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * How long the GATE ITSELF may wait for an audit it dispatched (2026-09-19).
+ *
+ * `JUDGE_WAIT_MAX_TIMEOUT_MS` above is the window an AGENT gets from
+ * `judge_wait`: ten minutes is right there, because the agent has other work
+ * to do and a cursor makes re-waiting cheap.
+ *
+ * The gate's own chain (`selfAuditWait` → `awaitRoundReport`) used to borrow
+ * that same budget, and the two facts do not match. A goal audit that takes
+ * eleven minutes is ORDINARY — measured in prime on 2026-09-19: submitted
+ * 11:49:21, verdict recorded 12:00:16 — while the borrowed budget ran out at
+ * ten and the chain reported 「等待未命中本轮 report」. Fail-closed, so nothing
+ * was recorded, and the agent had to re-run `propose_loop_goal` to collect a
+ * verdict that had already landed. The failure mode is worse than the wasted
+ * call: the message reads as a gate defect to whoever sees it.
+ *
+ * Thirty minutes is far above every measured audit and still terminates — the
+ * pane is reclaimed, or the round ends for its own reasons, long before it.
+ */
+export const AUDIT_SELF_WAIT_BUDGET_MS = 30 * 60 * 1000;
+
 /** Default blocking window when the caller does not pick one. */
 export const JUDGE_WAIT_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 

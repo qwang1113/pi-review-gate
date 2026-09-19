@@ -218,6 +218,37 @@ function splitModel(id: string): { provider: string; model: string } | undefined
 }
 
 /**
+ * Spawn the arbiter and return its RAW output, or undefined on ANY failure
+ * (timeout, spawn error). No parsing happens here.
+ *
+ * THE EXECUTION IS ONE IMPLEMENTATION, THE QUESTIONS ARE SEVERAL (2026-09-19):
+ * "may this `gh pr edit` run once", "is this refused TEXT a legitimate
+ * exception" (lib/text-appeal.ts) and "what would the user answer here, when
+ * nobody has for thirty minutes" (lib/user-proxy.ts) differ only in their
+ * system prompt and how their output is read. Splitting the process half out is
+ * what lets the third one reuse the isolation flags, the model resolution and
+ * the fail-closed contract instead of keeping a second copy of them true.
+ */
+export async function runArbiterProcess(
+  modelId: string,
+  prompt: string,
+  exec: ArbiterExec = defaultArbiterExec,
+  timeoutMs: number = ARBITER_TIMEOUT_MS,
+  systemPrompt: string = ARBITER_SYSTEM_PROMPT,
+): Promise<string | undefined> {
+  const split = splitModel(modelId);
+  if (!split) return undefined; // malformed id — fail closed (GATE_WINS)
+  const { provider, model } = split;
+  const argv = [
+    "pi", "-p", ...ARBITER_ISOLATION_FLAGS,
+    "--provider", provider, "--model", model,
+    "--system-prompt", systemPrompt,
+    prompt,
+  ];
+  return exec(argv, timeoutMs);
+}
+
+/**
  * Spawn the arbiter and return its verdict, or undefined on ANY failure
  * (timeout, spawn error, unparseable/unknown output). The caller MUST treat
  * undefined as GATE_WINS (fail-closed).
@@ -235,16 +266,7 @@ export async function runArbiter(
   timeoutMs: number = ARBITER_TIMEOUT_MS,
   systemPrompt: string = ARBITER_SYSTEM_PROMPT,
 ): Promise<ArbiterVerdict | undefined> {
-  const split = splitModel(modelId);
-  if (!split) return undefined; // malformed id — fail closed (GATE_WINS)
-  const { provider, model } = split;
-  const argv = [
-    "pi", "-p", ...ARBITER_ISOLATION_FLAGS,
-    "--provider", provider, "--model", model,
-    "--system-prompt", systemPrompt,
-    prompt,
-  ];
-  return parseArbiterVerdict(await exec(argv, timeoutMs));
+  return parseArbiterVerdict(await runArbiterProcess(modelId, prompt, exec, timeoutMs, systemPrompt));
 }
 
 // ---------------------------------------------------------------------------

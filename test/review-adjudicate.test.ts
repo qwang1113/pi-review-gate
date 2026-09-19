@@ -49,6 +49,94 @@ test("the downgrade is TIGHTEN-ONLY: a BLOCKED or NEEDS_HUMAN never becomes READ
   assert.equal(adjudicateReviewConclusion({ verdict: "NEEDS_HUMAN", findings: [] }).verdict, "NEEDS_HUMAN");
 });
 
+// ---- the user-granted scope exemption (2026-09-19) ----
+//
+// `request_scope_limit` promises the USER that the gate "covers only this
+// session's edits". Until now that promise reached the AGENT as a sentence and
+// never reached the judge, so a round over a branch carrying someone else's
+// 65-file diff came back BLOCKED on findings the session was not allowed to
+// fix — measured in prime, where t2-auth-path-e2e and t3-report-update both
+// deadlocked on `declare_done` that way.
+
+test("scope exemption: a P0/P1 on an EXEMPTED file no longer turns a READY into BLOCKED", () => {
+  const out = adjudicateReviewConclusion(
+    { verdict: "READY", findings: [{ severity: "P1", issue: "x", file: "legacy/big.ts", line: 1 }] },
+    { exemptFiles: ["legacy/big.ts"] },
+  );
+  assert.equal(out.verdict, "READY");
+  assert.equal(out.findingsTotal, 1, "it is still REPORTED — recorded, not hidden");
+  assert.equal(out.exemptedBlocking, 1, "…and the count lets the receipt say this READY leaned on it");
+});
+
+test("scope exemption: a P0/P1 on one of the SESSION'S OWN files still blocks", () => {
+  const out = adjudicateReviewConclusion(
+    {
+      verdict: "READY",
+      findings: [
+        { severity: "P1", issue: "mine", file: "src/owned.ts", line: 1 },
+        { severity: "P1", issue: "theirs", file: "legacy/big.ts", line: 1 },
+      ],
+    },
+    { exemptFiles: ["legacy/big.ts"] },
+  );
+  assert.equal(out.verdict, "BLOCKED", "the exemption covers only the paths it names");
+  assert.equal(out.exemptedBlocking, 1);
+});
+
+test("scope exemption FAILS CLOSED on every edge", () => {
+  // No exemption in force ⇒ the old rule, byte for byte. This is the single
+  // most important line in the block: the ordinary case must not move.
+  assert.equal(
+    adjudicateReviewConclusion({ verdict: "READY", findings: [{ severity: "P1", issue: "x", file: "legacy/big.ts" }] }).verdict,
+    "BLOCKED",
+  );
+  // No `file` ⇒ IN SCOPE. A finding the reviewer could not locate is not a
+  // finding on a file the user excused.
+  assert.equal(
+    adjudicateReviewConclusion(
+      { verdict: "READY", findings: [{ severity: "P1", issue: "x" }] },
+      { exemptFiles: ["legacy/big.ts"] },
+    ).verdict,
+    "BLOCKED",
+  );
+  // Matching is EXACT — a near-miss path stays blocking.
+  for (const file of ["./legacy/big.ts", "legacy/other.ts", "legacy/big.tsx", "legacy/big.ts/"]) {
+    assert.equal(
+      adjudicateReviewConclusion(
+        { verdict: "READY", findings: [{ severity: "P1", issue: "x", file }] },
+        { exemptFiles: ["legacy/big.ts"] },
+      ).verdict,
+      "BLOCKED",
+      file,
+    );
+  }
+  // …and a P2 on an exempted file was never blocking in the first place.
+  const p2 = adjudicateReviewConclusion(
+    { verdict: "READY", findings: [{ severity: "P2", issue: "x", file: "legacy/big.ts" }] },
+    { exemptFiles: ["legacy/big.ts"] },
+  );
+  assert.equal(p2.verdict, "READY");
+  assert.equal(p2.exemptedBlocking, 0, "only P0/P1 can be exempted — there was nothing to exempt here");
+});
+
+test("scope exemption is TIGHTEN-ONLY: it never manufactures a READY the reviewer did not give", () => {
+  // It removes findings from Rule 1's count. It does not rewrite a verdict —
+  // a round that concluded BLOCKED, on its own files or on exempted ones, keeps
+  // saying BLOCKED. Whoever wants the blocking question asked again re-runs the
+  // round (which now receives the exemption in its task text).
+  assert.equal(
+    adjudicateReviewConclusion(
+      { verdict: "BLOCKED", findings: [{ severity: "P1", issue: "theirs", file: "legacy/big.ts" }] },
+      { exemptFiles: ["legacy/big.ts"] },
+    ).verdict,
+    "BLOCKED",
+  );
+  assert.equal(
+    adjudicateReviewConclusion({ verdict: "NEEDS_HUMAN", findings: [] }, { exemptFiles: ["legacy/big.ts"] }).verdict,
+    "NEEDS_HUMAN",
+  );
+});
+
 // ---- rule 2: the finding count ----
 
 test("findingsTotal is the number of findings concluded — no self-reported total exists", () => {

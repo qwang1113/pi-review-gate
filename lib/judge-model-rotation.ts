@@ -26,7 +26,7 @@
  * switch, nudge, report) so the state machine is testable without a pane.
  */
 
-import { modelKeyOf, nextSlotAfter, summarizeModelError, type ModelEvent } from "./model-health.ts";
+import { modelKeyOf, nextSlotAfter, summarizeModelError, type ModelEvent, type ModelSlotAttempt } from "./model-health.ts";
 
 /** Everything the rotation needs from the host — all injected. */
 export interface ModelRotationDeps {
@@ -34,8 +34,17 @@ export interface ModelRotationDeps {
   chain: () => readonly string[];
   /** The spec this session is running, as `provider/id`. */
   currentSpec: () => string | undefined;
-  /** Switch model + thinking level; false when the registry/auth refuses it. */
-  switchTo: (spec: string) => Promise<boolean>;
+  /**
+   * Switch model + thinking level. `true` on success; otherwise the REASON it
+   * could not be done ("registry has no such model", "no write context").
+   *
+   * A `boolean` here is what made an exhausted chain undiagnosable: the pane
+   * walked every slot, each refusal was thrown away, and the only thing left
+   * to report was the word `exhausted` (see `ModelSlotAttempt`). A slot the
+   * pane cannot reach and one whose provider is rate-limiting end the round
+   * identically and are fixed in completely different places.
+   */
+  switchTo: (spec: string) => Promise<true | string>;
   /** Keep the round going (a user message; the transcript is preserved). */
   nudge: (text: string) => void;
   /** Publish the event (channel record → the opener's wait). */
@@ -66,9 +75,15 @@ export function buildRotationResumeNote(from: string, to: string, error?: string
 }
 
 /** The note when nothing is left — the pane must not pretend it can continue. */
-export function buildChainExhaustedNote(from: string, error?: string): string {
+export function buildChainExhaustedNote(from: string, error?: string, tried: readonly ModelSlotAttempt[] = []): string {
   const why = error ? `（${error}）` : "";
-  return `门禁：链上的模型都试过了，最后一个 ${from} 也失败${why}。本轮已上报为失败，等 opener 处理，不要自己下结论。`;
+  // The per-slot reasons are for the OPENER's receipt, not for the pane (it
+  // already knows what it tried) — but they cost one line here and make the
+  // pane's own notice truthful instead of merely final.
+  const chain = tried.length === 0
+    ? ""
+    : "\n" + tried.map((t) => `  · ${t.spec}：${t.reason}`).join("\n");
+  return `门禁：链上的模型都试过了，最后一个 ${from} 也失败${why}。本轮已上报为失败，等 opener 处理，不要自己下结论。${chain}`;
 }
 
 export function createModelRotation(deps: ModelRotationDeps): ModelRotation {
@@ -87,6 +102,11 @@ export function createModelRotation(deps: ModelRotationDeps): ModelRotation {
       busy = true;
       try {
         if (!attempted.some((a) => modelKeyOf(a) === modelKeyOf(failed))) attempted.push(failed);
+        // WHY EACH SLOT DID NOT CARRY THE ROUND, in the order they were spent.
+        // The failed one first: its reason is the provider's own error text.
+        const tried: ModelSlotAttempt[] = [
+          { spec: failed, reason: summary ?? "模型失败（provider 未给出原因）" },
+        ];
         let cursor = failed;
         for (;;) {
           const next = nextSlotAfter(chain, cursor, attempted);
@@ -96,13 +116,15 @@ export function createModelRotation(deps: ModelRotationDeps): ModelRotation {
               ...(summary ? { error: summary } : {}),
               exhausted: true,
               attempts: attempted.length,
+              tried,
             };
             deps.report(event);
-            deps.notify(buildChainExhaustedNote(failed, summary), "error");
+            deps.notify(buildChainExhaustedNote(failed, summary, tried), "error");
             return event;
           }
           attempted.push(next.spec);
-          if (await deps.switchTo(next.spec)) {
+          const switched = await deps.switchTo(next.spec);
+          if (switched === true) {
             const note = buildRotationResumeNote(failed, next.spec, summary);
             const event: ModelEvent = {
               spec: failed,
@@ -116,7 +138,9 @@ export function createModelRotation(deps: ModelRotationDeps): ModelRotation {
             return event;
           }
           // The switch itself was refused (no auth, unknown model): that slot
-          // is spent too — keep walking rather than give up on the chain.
+          // is spent too — keep walking rather than give up on the chain, and
+          // KEEP THE REFUSAL so the exhausted receipt can name it.
+          tried.push({ spec: next.spec, reason: switched });
           cursor = next.spec;
         }
       } finally {

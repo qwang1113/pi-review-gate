@@ -138,22 +138,33 @@ test("the lane requirement never masks a more basic failure", () => {
 });
 
 // ---------------------------------------------------------------------------
-// lastReadyReview — the incremental-review baseline
+// lastReviewedTree — the incremental-review baseline
 // ---------------------------------------------------------------------------
 
-test("lastReadyReview round-trips a well-formed baseline", () => {
+test("lastReviewedTree round-trips a well-formed baseline — BLOCKED rounds included", () => {
   const path = sidecarPath(makeTemp());
   const s = readyState();
-  s.lastReadyReview = { treeOid: "a".repeat(40), files: ["src/a.ts"], at: "t" };
+  s.lastReviewedTree = { treeOid: "a".repeat(40), files: ["src/a.ts"], at: "t", verdict: "READY" };
   saveSidecar(path, s);
-  assert.deepEqual(loadSidecar(path)?.lastReadyReview, { treeOid: "a".repeat(40), files: ["src/a.ts"], at: "t" });
+  assert.deepEqual(loadSidecar(path)?.lastReviewedTree, { treeOid: "a".repeat(40), files: ["src/a.ts"], at: "t", verdict: "READY" });
+
+  // WHY A BLOCKED TREE IS KEPT (2026-09-19): the field answers "what has this
+  // session READ", and a round that concluded BLOCKED read those files too.
+  // Requiring a READY here is what made prime's t1-prime-encrypt re-review one
+  // 65-file diff three times. Whether anything was CONFIRMED is a different
+  // question, asked elsewhere (`settledConclusion`, which still demands READY).
+  const blockedPath = sidecarPath(makeTemp());
+  const blocked = readyState();
+  blocked.lastReviewedTree = { treeOid: "c".repeat(40), at: "t", verdict: "BLOCKED" };
+  saveSidecar(blockedPath, blocked);
+  assert.deepEqual(loadSidecar(blockedPath)?.lastReviewedTree, { treeOid: "c".repeat(40), at: "t", verdict: "BLOCKED" });
 });
 
 test("the pass-coverage tree round-trips, and anything that is not an object id is DROPPED", () => {
   // The field decides whether a READY may be recorded without a live PASS, so
   // a garbled one must not survive: dropping it puts the check back on the
   // live verdict, which is the direction that cannot wave an unverified round
-  // through. It is also the SAME judgement `lastReadyReview.treeOid` gets —
+  // through. It is also the SAME judgement `lastReviewedTree.treeOid` gets —
   // both are content identities read back out of a repo-local file.
   const path = sidecarPath(makeTemp());
   const good = readyState();
@@ -180,30 +191,38 @@ test("the pass-coverage tree round-trips, and anything that is not an object id 
   }
 });
 
-test("a malformed lastReadyReview is DROPPED (treeOid reaches a git argv)", () => {
+test("a malformed lastReviewedTree is DROPPED (treeOid reaches a git argv)", () => {
   // `treeOid` is passed to `git diff` as an argument, so an unvalidated string
   // from a tampered — or simply repo-committed — sidecar would be git option
   // injection. Dropping the field is the safe outcome: the next round is then
   // a full review.
+  //
+  // `verdict` is validated for a different reason, and it is not cosmetic: it
+  // is what keeps a BLOCKED tree from being handed to the next reviewer as a
+  // settled conclusion. An unknown word drops the field rather than guessing
+  // which side it is on.
   const path = sidecarPath(makeTemp());
   const base = readyState();
   saveSidecar(path, base); // creates .pi/ so the raw writes below can land
   const bad = [
-    { treeOid: "--output=/tmp/pwned", at: "t" },
-    { treeOid: "HEAD", at: "t" },
-    { treeOid: "a".repeat(39), at: "t" },
-    { treeOid: "A".repeat(40), at: "t" },              // uppercase is not a git oid
-    { treeOid: "a".repeat(40) },                       // no timestamp
-    { treeOid: "a".repeat(40), files: ["ok", 7], at: "t" },
-    { treeOid: "a".repeat(40), files: "src/a.ts", at: "t" },
+    { treeOid: "--output=/tmp/pwned", at: "t", verdict: "READY" },
+    { treeOid: "HEAD", at: "t", verdict: "READY" },
+    { treeOid: "a".repeat(39), at: "t", verdict: "READY" },
+    { treeOid: "A".repeat(40), at: "t", verdict: "READY" },              // uppercase is not a git oid
+    { treeOid: "a".repeat(40), verdict: "READY" },                       // no timestamp
+    { treeOid: "a".repeat(40), at: "t", files: ["ok", 7], verdict: "READY" },
+    { treeOid: "a".repeat(40), at: "t", files: "src/a.ts", verdict: "READY" },
+    { treeOid: "a".repeat(40), at: "t" },                                // no verdict at all
+    { treeOid: "a".repeat(40), at: "t", verdict: "PENDING" },            // not a concluded word
+    { treeOid: "a".repeat(40), at: "t", verdict: 42 },
     "not-an-object",
     null,
   ];
   for (const b of bad) {
-    writeFileSync(path, JSON.stringify({ ...base, lastReadyReview: b }));
+    writeFileSync(path, JSON.stringify({ ...base, lastReviewedTree: b }));
     const loaded = loadSidecar(path);
     assert.ok(loaded, `a bad baseline must not reject the sidecar: ${JSON.stringify(b)}`);
-    assert.equal(loaded!.lastReadyReview, undefined, JSON.stringify(b));
+    assert.equal(loaded!.lastReviewedTree, undefined, JSON.stringify(b));
   }
 });
 
@@ -211,7 +230,7 @@ test("the baseline is never part of the ship decision", () => {
   // It only scopes the NEXT review; a present or absent baseline must not
   // change whether the current state may ship.
   const withBase = readyState();
-  withBase.lastReadyReview = { treeOid: "b".repeat(40), files: ["src/a.ts"], at: "t" };
+  withBase.lastReviewedTree = { treeOid: "b".repeat(40), files: ["src/a.ts"], at: "t", verdict: "READY" };
   assert.deepEqual(unmetRequirements(withBase, FP, false), []);
   assert.deepEqual(unmetRequirements(withBase, FP, false, { requireFullTests: true }), []);
 });

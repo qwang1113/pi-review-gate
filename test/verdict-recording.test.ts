@@ -183,7 +183,7 @@ function sidecar(repo: string): {
     round: number;
     at: string;
   };
-  lastReadyReview?: unknown;
+  lastReviewedTree?: unknown;
 } {
   return JSON.parse(readFileSync(join(repo, ".pi", "review-gate-state.json"), "utf8"));
 }
@@ -590,13 +590,55 @@ test("BINDING (b): a recorded READY binds to the reviewed commit's TREE", async 
   assert.match(text, /recorded verdict READY/, text);
   const st = sidecar(repo) as unknown as {
     review: { verdict: string; fingerprint?: string | null; commitSha?: string };
-    lastReadyReview?: { treeOid?: string };
+    lastReviewedTree?: { treeOid?: string; verdict?: string };
   };
   // CONTENT binding, not commit binding: a squash rewrites the sha and
   // preserves the tree, so this is what survives one.
   assert.equal(st.review.fingerprint, reviewedTree, "the READY binds to the reviewed TREE");
   assert.equal(st.review.commitSha, reviewedHead, "…and remembers the commit it came from, for the next baseline");
-  assert.equal(st.lastReadyReview?.treeOid, reviewedTree, "the incremental baseline moves to that same tree");
+  assert.equal(st.lastReviewedTree?.treeOid, reviewedTree, "the incremental baseline moves to that same tree");
+  assert.equal(st.lastReviewedTree?.verdict, "READY", "…and records WHICH verdict read it");
+});
+
+test("the incremental baseline ALSO moves on a BLOCKED round — it records what was READ", async () => {
+  // WHY (2026-09-19): the field used to be written only for a READY, so a
+  // session whose FIRST round concluded BLOCKED had no tree on record at all.
+  // The next `prepare_review` then fell back to the branch base and re-read the
+  // whole branch: prime's t1-prime-encrypt ran three full deep reviews
+  // (15 + 15 + 6 minutes) over one 65-file diff. Nothing about the range
+  // changes here — `st.review.commitSha` has its own, stricter rule — only how
+  // deep the next round reads.
+  const { repo, pi, ctx } = await preparedRepo();
+  const reviewedTree = git(repo, "rev-parse", "HEAD^{tree}");
+
+  const concluded = reportConclusion(
+    readerIO(new Map()),
+    reportRecord(repo, {
+      verdict: "BLOCKED",
+      findings: [
+        { severity: "P1", file: "a.ts", line: 1, issue: "a defect this round refused to pass", evidence: "a.ts:1" },
+      ],
+      findingsCount: 1,
+    }),
+  );
+  const text = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+  assert.match(text, /recorded verdict BLOCKED/, text);
+
+  const st = sidecar(repo) as unknown as {
+    review: { verdict: string };
+    lastReviewedTree?: { treeOid?: string; verdict?: string };
+  };
+  assert.equal(st.review.verdict, "BLOCKED");
+  assert.equal(
+    st.lastReviewedTree?.treeOid,
+    reviewedTree,
+    "a BLOCKED round READ that tree — the next round must build on it instead of re-reading the whole branch",
+  );
+  assert.equal(
+    st.lastReviewedTree?.verdict,
+    "BLOCKED",
+    "…and the verdict rides along, so `settledConclusion` can still demand a READY before calling anything settled",
+  );
 });
 
 // The cwd check is the third thing a READY must satisfy, and it is checked in

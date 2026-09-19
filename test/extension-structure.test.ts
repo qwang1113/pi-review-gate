@@ -853,8 +853,8 @@ test("INCREMENTAL: the settled conclusion of the previous round is handed to the
     "the previous conclusion must travel with the scope block",
   );
   const fn = windowOf("function settledConclusion(", "\n  }", "settledConclusion");
-  assert.match(fn, /lastReadyReview/, "only an APPROVED tree has settled anything");
-  assert.match(fn, /if \(!base\) return undefined/, "no approved review ⇒ nothing is settled");
+  assert.match(fn, /st\.lastReviewedTree/, "the settled conclusion reads the review baseline");
+  assert.match(fn, /base\.verdict !== "READY"/, "…and only an APPROVED tree has settled anything");
 });
 
 test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits arm the loop flag)", () => {
@@ -1141,8 +1141,14 @@ test("DIALOG QUEUE: one box at a time, with the host's abort and the question in
   // interrupt pi's `Promise.all` over the batch). Every dialog the gate shows
   // goes through this ONE function, so the fix belongs here.
   const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
-  assert.match(askChoiceBody, /return scheduleDialog\(async \(\) => \{/,
+  // The queue call is no longer RETURNED directly (2026-09-19): its promise is
+  // held as `asked` so the thirty-minute proxy race can wait on the SAME one.
+  // The property this line protects is unchanged — one queue, and everything
+  // (list and reason box) inside it.
+  assert.match(askChoiceBody, /const asked = scheduleDialog\(async \(\) => \{/,
     "the whole dialog — list AND reason box — runs under the ONE queue");
+  assert.match(askChoiceBody, /direct: asked,/,
+    "…and that one promise is the human side of the race, so a dialog still has exactly one answer path");
   assert.match(SRC, /const scheduleDialog = createDialogQueue\(\);/,
     "…and there is one queue per session, not one per call");
   assert.match(askChoiceBody, /dialogSignal\(uiCtx\.signal, opts\.signal\)/,
@@ -4605,18 +4611,47 @@ test("the incremental baseline records only what the review actually covered", (
   // Under a user-granted scope limit the review only read the session's own
   // files; recording the whole branch diff would later let the scoper call
   // never-reviewed files "already reviewed" and skip escalating to full.
-  const at = SRC.indexOf("st.lastReadyReview = {");
+  const at = SRC.indexOf("st.lastReviewedTree = {");
   assert.ok(at > 0, "the verdict recorder must set the baseline");
   const before = SRC.slice(at - 900, at);
   assert.match(before, /st\.scopeLimit\s*\n?\s*\?\s*st\.scopeLimit\.sessionFiles/,
     "a scope-limited review must record sessionFiles, not the whole branch diff");
 });
 
-test("the baseline is written only for a READY verdict", () => {
-  // A BLOCKED round must not move the baseline — nothing was approved.
-  const at = SRC.indexOf("st.lastReadyReview = {");
-  const guard = SRC.slice(SRC.lastIndexOf('parsed.verdict === "READY"', at), at);
-  assert.ok(guard.length > 0 && guard.length < 900, "the baseline write must sit inside a READY guard");
+test("the incremental DEPTH baseline moves on any concluded round; the RANGE baseline does not", () => {
+  // TWO QUESTIONS, TWO RULES, and confusing them is what this pins.
+  //
+  // DEPTH (2026-09-19): `lastReviewedTree` answers "what has this session
+  // READ?" and is written for EVERY recorded verdict — requiring a READY here
+  // is what made a session whose first round concluded BLOCKED re-review the
+  // whole branch, three times over one diff in prime. The write must therefore
+  // NOT sit inside a READY guard any more.
+  const depthAt = SRC.indexOf("st.lastReviewedTree = {");
+  const depthGuard = SRC.lastIndexOf('parsed.verdict === "READY"', depthAt);
+  assert.ok(
+    depthGuard === -1 || depthAt - depthGuard > 900,
+    "a BLOCKED round read those files too — the depth baseline must not be READY-gated",
+  );
+  assert.match(
+    SRC.slice(depthAt, depthAt + 400),
+    /verdict: parsed\.verdict/,
+    "…and it records WHICH verdict, so the settled-conclusion rule can still demand a READY",
+  );
+
+  // RANGE: `st.review.commitSha` is the range baseline, and it still advances
+  // only when the QUALITY half concluded. A round whose quality judge was
+  // cancelled has content that never entered a quality round; letting the range
+  // step past it would ship it on a later READY (2026-09-17 quality P1).
+  const rangeAt = SRC.indexOf("const concludedCommit = (qualityHalfConcluded");
+  assert.ok(rangeAt > 0, "the range baseline must be derived from the quality standing");
+  // `qualityStandingFor` answers the question ABOVE the write, and the carried
+  // value IS the write — so the window spans both.
+  assert.match(
+    SRC.slice(Math.max(0, rangeAt - 500), rangeAt + 320),
+    /qualityStandingFor\(/,
+    "…which is what qualityStandingFor answers",
+  );
+  assert.match(SRC.slice(rangeAt, rangeAt + 320), /\?\? st\.review\.commitSha/, "…and otherwise the previous value is carried forward");
 });
 
 test("timings are appended, never read back into a decision", () => {
