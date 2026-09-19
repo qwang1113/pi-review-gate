@@ -109,22 +109,27 @@ export const RECOMMEND_MARKER = "（推荐）";
 const ROW_PREFIX = /^([A-Za-z])\.\s+/;
 
 /**
- * THE LETTER A ROW IS ANSWERED BY: `A` / `a` / `A.` / `A、` → its 0-based
- * index; anything else → `undefined`.
+ * THE POSITION A ROW IS ANSWERED BY, in either shorthand the screen offers:
+ * a letter (`A` / `a` / `A.` / `A、` → 0) or a 1-based index (`1` → 0).
+ * Anything else → `undefined`; an out-of-range position is still an INDEX (the
+ * caller decides what a position past the list means).
  *
- * ONE DEFINITION FOR TWO PARSERS (quality round P2, 2026-09-19). The human's
- * dialog answer goes through `parseChoice` below and the project manager's
- * channel answer goes through `resolveAnswer`
- * (lib/orchestrator-answer-tools.ts); both read a bare letter the same way BY
- * CONSTRUCTION rather than by two copies of the same regex that drift apart
- * the first time one of them is touched (AGENTS.md 哲学二: one thing, one
- * implementation). What each caller does with an out-of-range letter is
- * still its own call — this returns the INDEX, never an option.
+ * ONE DEFINITION FOR TWO PARSERS (quality round P2, both halves, 2026-09-19).
+ * The human's dialog answer goes through `parseChoice` below and the project
+ * manager's channel answer goes through `resolveAnswer`
+ * (lib/orchestrator-answer-tools.ts); both read a bare letter AND a bare number
+ * the same way BY CONSTRUCTION rather than by four copies of two regexes that
+ * drift apart the first time one of them is touched (AGENTS.md 哲学二: one
+ * thing, one implementation). The two shorthands are one function because they
+ * are one question — "is this answer a position, and which one" — and every
+ * caller wants both halves of it.
  */
-export function letterIndexOf(text: string): number | undefined {
-  const letter = /^([A-Za-z])[.、)）]?$/.exec(text.trim());
-  if (!letter) return undefined;
-  return letter[1]!.toUpperCase().charCodeAt(0) - "A".charCodeAt(0);
+export function rowIndexOf(text: string): number | undefined {
+  const trimmed = text.trim();
+  const letter = /^([A-Za-z])[.、)）]?$/.exec(trimmed);
+  if (letter) return letter[1]!.toUpperCase().charCodeAt(0) - "A".charCodeAt(0);
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) - 1;
+  return undefined;
 }
 
 /**
@@ -230,20 +235,13 @@ export function parseChoice(picked: string | undefined, spec: ChoiceSpec): Choic
   // recommendation marker, which is decoration, not content).
   const shown = spec.options.find((option) => option === stripRowDecoration(picked));
   if (shown !== undefined) return { kind: "chose", option: shown };
-  // A BARE LETTER — the short form read off the screen: `A`, `a`, `A.`.
-  // AFTER the exact-text match on purpose: an option whose own text IS `A`
-  // must win over the letter, or `B` would answer the first option. The
-  // reading itself is shared with the channel's parser (`letterIndexOf`).
-  const index = letterIndexOf(picked);
+  // A POSITION READ OFF THE SCREEN — `A`, `a`, `A.` or the 1-based `1`. AFTER
+  // the exact-text match on purpose: an option whose own text IS `A` must win
+  // over the position, or `B` would answer the first option. The reading
+  // itself is shared with the channel's parser (`rowIndexOf`).
+  const index = rowIndexOf(picked);
   if (index !== undefined) {
     const option = spec.options[index];
-    if (option !== undefined) return { kind: "chose", option };
-  }
-  // A 1-BASED INDEX — the shorthand the orchestrator's own answer resolver
-  // already accepts (lib/orchestrator-answer-tools.ts `resolveAnswer`), kept
-  // working now that the rows are labelled with letters instead of numbers.
-  if (/^\d+$/.test(picked.trim())) {
-    const option = spec.options[Number(picked.trim()) - 1];
     if (option !== undefined) return { kind: "chose", option };
   }
   // Anything else is returned verbatim: free text the orchestrator may answer

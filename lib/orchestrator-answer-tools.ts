@@ -45,7 +45,7 @@ import {
 import { effectiveTaskStation } from "./repo-pr-policy.ts";
 
 import { appendRecord } from "./orchestrator-channel.ts";
-import { letterIndexOf, looksLikeDeclineRow, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
+import { looksLikeDeclineRow, parseChoice, rowIndexOf, type ChoiceSpec } from "./choice-dialog.ts";
 import { isGrantableScope } from "./ask-user.ts";
 import { addGrant, findChild, hasGrant, type ChildSession } from "./orchestrator-registry.ts";
 import { proxyApprovalProblems } from "./orchestrator-gate.ts";
@@ -83,18 +83,19 @@ export function resolveAnswer(
   if (request.options.length === 0) return { ok: true, answer: text };
   const exact = request.options.find((option) => option === text);
   if (exact !== undefined) return { ok: true, answer: exact };
-  // A BARE LETTER, and the whole point of the 2026-09-19 numbering: the rows
-  // read `A. …`, so `A` is how a project manager quotes one back. This is
-  // resolved BEFORE the substring match below, because a single letter is a
-  // substring of almost every row — answering `A` must land on row A, never on
-  // "which rows happen to contain an a". The reading itself is the SAME
-  // function the pane's own parser uses (lib/choice-dialog.ts
-  // `letterIndexOf`); only what a past-the-end letter MEANS differs, and that
-  // difference is deliberate: a stray letter inside a dialog falls through to
-  // free text, while a proxy answer is refused outright.
-  const letterIndex = letterIndexOf(text);
-  if (letterIndex !== undefined) {
-    const picked = request.options[letterIndex];
+  // A POSITION, and the whole point of the 2026-09-19 numbering: the rows read
+  // `A. …`, so `A` (or the 1-based `1`, which the channel always accepted) is
+  // how a project manager quotes one back. This is resolved BEFORE the
+  // substring match below, because a single character is a substring of almost
+  // every row — answering `A` must land on row A, never on "which rows happen
+  // to contain an a". The reading itself is the SAME function the pane's own
+  // parser uses (lib/choice-dialog.ts `rowIndexOf`); only what a position past
+  // the end MEANS differs, and that difference is deliberate: a stray position
+  // inside a dialog falls through to free text, while a proxy answer is
+  // refused outright.
+  const rowIndex = rowIndexOf(text);
+  if (rowIndex !== undefined) {
+    const picked = request.options[rowIndex];
     if (picked !== undefined) return { ok: true, answer: picked };
     return {
       ok: false,
@@ -107,15 +108,6 @@ export function resolveAnswer(
   // accepted verbatim rather than rejected as an unknown option.
   const decline = request.options.find(looksLikeDeclineRow);
   if (decline !== undefined && text.startsWith(decline)) return { ok: true, answer: text };
-  if (/^\d+$/.test(text)) {
-    const index = Number(text) - 1;
-    const picked = request.options[index];
-    if (picked !== undefined) return { ok: true, answer: picked };
-    return {
-      ok: false,
-      reason: `序号 ${text} 超出范围（只有 ${request.options.length} 个选项）`,
-    };
-  }
   // Substring match, but ONLY when it is unambiguous. A prefix that matches
   // two rows is exactly how a supervisor picks the wrong one by accident.
   const hits = request.options.filter((option) => option.includes(text));

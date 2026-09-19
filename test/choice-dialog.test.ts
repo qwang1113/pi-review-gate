@@ -10,13 +10,13 @@ import {
   createDialogQueue,
   dialogNotifyDetail,
   dialogSignal,
-  letterIndexOf,
   looksLikeDeclineRow,
   optionLabel,
   optionLetter,
   optionRow,
   parseChoice,
   renderChoice,
+  rowIndexOf,
   validateChoice,
   type ChoiceSpec,
   type ChoiceUi,
@@ -111,16 +111,18 @@ test("an option whose own text is a letter beats the letter index", () => {
   assert.deepEqual(parseChoice("A", s), { kind: "chose", option: "A" });
 });
 
-test("the letter rule is ONE function, shared by the pane parser and the channel parser", () => {
-  assert.equal(letterIndexOf("A"), 0);
-  assert.equal(letterIndexOf("b"), 1);
-  assert.equal(letterIndexOf("C."), 2);
-  assert.equal(letterIndexOf("d、"), 3);
-  assert.equal(letterIndexOf("  A  "), 0, "the answer is trimmed like every other form");
-  assert.equal(letterIndexOf("AB"), undefined, "two letters are not an answer");
-  assert.equal(letterIndexOf("1"), undefined, "that is the index form, and its own branch");
-  assert.equal(letterIndexOf("继续"), undefined);
-  assert.equal(letterIndexOf(""), undefined);
+test("the position rule is ONE function, shared by the pane parser and the channel parser", () => {
+  assert.equal(rowIndexOf("A"), 0);
+  assert.equal(rowIndexOf("b"), 1);
+  assert.equal(rowIndexOf("C."), 2);
+  assert.equal(rowIndexOf("d、"), 3);
+  assert.equal(rowIndexOf("  A  "), 0, "the answer is trimmed like every other form");
+  assert.equal(rowIndexOf("1"), 0, "the 1-based index is the same rule, read the same way");
+  assert.equal(rowIndexOf(" 2 "), 1);
+  assert.equal(rowIndexOf("AB"), undefined, "two letters are not an answer");
+  assert.equal(rowIndexOf("A1"), undefined);
+  assert.equal(rowIndexOf("继续"), undefined);
+  assert.equal(rowIndexOf(""), undefined);
 });
 
 test("a letter past the end of the list is not an answer", () => {

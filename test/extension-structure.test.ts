@@ -6712,12 +6712,15 @@ test("the reason box is wired for BOTH ways out", () => {
   assert.match(SRC, /prefill,/, "the box opens with the text the user came back with");
 });
 
-test("the letter rule has ONE implementation — the channel parser imports it", () => {
-  // Quality round P2 (2026-09-19): the pane's `parseChoice` and the channel's
-  // `resolveAnswer` read a bare `A` through the same regex, written twice. Two
-  // copies of one rule drift apart the first time one of them is touched.
+test("the row-position rule has ONE implementation — the channel parser imports it", () => {
+  // Quality round P2 (2026-09-19, both the letter and the digit half): the
+  // pane's `parseChoice` and the channel's `resolveAnswer` read `A` and `1`
+  // through the same two regexes, written twice. Two copies of one rule drift
+  // apart the first time one of them is touched.
   const answerTools = readFileSync(join(ROOT, "lib", "orchestrator-answer-tools.ts"), "utf8");
   assert.doesNotMatch(answerTools, /charCodeAt\(0\) - 65/,
-    "the letter index is computed in lib/choice-dialog.ts (`letterIndexOf`) and imported, never re-derived");
-  assert.match(answerTools, /letterIndexOf\(text\)/, "…and that is what this parser resolves a bare letter with");
+    "the letter index is computed in lib/choice-dialog.ts (`rowIndexOf`) and imported, never re-derived");
+  assert.doesNotMatch(answerTools, /Number\(text\) - 1/,
+    "and so is the 1-based index — the same function reads both shorthands");
+  assert.match(answerTools, /rowIndexOf\(text\)/, "…and that is what this parser resolves a position with");
 });
