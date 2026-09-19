@@ -203,6 +203,34 @@ test("the proxy prompt carries the question, every row verbatim, and where to re
   assert.match(PROXY_SYSTEM_PROMPT, /用户回来可以推翻/);
 });
 
+test("a race that ended before the box appeared never arms a window", async () => {
+  // The human can answer in the moment between `displayed` resolving and the
+  // callback running. Arming then would spawn an arbiter process whose result
+  // `finish` immediately discards — correct, and a waste of a process.
+  const clock = manualClock();
+  const human = deferred<string | undefined>();
+  const shown: { promise: Promise<void>; mark: () => void } = (() => {
+    let mark: (() => void) | undefined;
+    return { promise: new Promise<void>((resolve) => { mark = resolve; }), mark: () => mark?.() };
+  })();
+  let proxyCalls = 0;
+  const raced = raceWithUserProxy<string>({
+    direct: human.promise,
+    displayed: shown.promise,
+    options: ROWS,
+    schedule: clock.schedule,
+    startProxy: async () => { proxyCalls += 1; return { choice: ROWS[0]!, rationale: "x" }; },
+  });
+
+  human.resolve(ROWS[1]!);
+  assert.equal((await raced).answer, ROWS[1]);
+  shown.mark();
+  await new Promise((r) => setImmediate(r));
+  clock.fire();
+  assert.equal(clock.windows.length, 0, "a settled race arms nothing");
+  assert.equal(proxyCalls, 0);
+});
+
 test("the window is armed when the box APPEARS, not when it was queued", async () => {
   // THE DIALOG QUEUE SHOWS ONE BOX AT A TIME, so `askChoice` may be one of
   // several calls in a single assistant message with the later ones not on

@@ -161,6 +161,13 @@ export async function raceWithUserProxy<T>(input: {
     // and this one is displayed.
     const mayAskProxy = input.options.length > 0;
     const arm = (): void => {
+      // A RACE THAT IS ALREADY OVER MUST NOT ARM (2026-09-19). `displayed` is
+      // resolved by the queue work, and the human can answer in the moment
+      // between that and this callback — arming anyway would spawn an arbiter
+      // process whose result `finish` then throws away. The `settled` guard in
+      // `finish` keeps the RESULT correct; this keeps it from costing a
+      // process (and five minutes of the arbiter's own timeout).
+      if (settled) return;
       timer = schedule(() => {
         if (!mayAskProxy) {
           finish({ answer: undefined, proxyFailed: true });
@@ -271,7 +278,8 @@ export function buildProxyPrompt(input: ProxyPromptInput): string {
   }
   lines.push(
     "",
-    "先读上下文，再从上面的选项里逐字选一个；确实判断不了就输出 null。",
+    "先读上下文，再从上面的选项里逐字选一个。路径读不到、或读完仍判断不了时，就输出 null ——" +
+      "门禁把 null 当作「没有人回答」，这是安全的方向；猜一个没有依据的答案则不是。",
   );
   return lines.join("\n");
 }

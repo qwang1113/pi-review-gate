@@ -681,6 +681,7 @@ import {
   buildArbiterPrompt,
   runArbiter,
   runArbiterProcess,
+  PROXY_ISOLATION_FLAGS,
   sha256,
   BYPASS_TOKEN_TTL_MS,
   type ArbitrableAction,
@@ -5200,7 +5201,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       ...(transcript === undefined ? {} : { transcript }),
       repoRoot: primaryRepoRoot,
     });
-    const raw = await runArbiterProcess(model, prompt, undefined, PROXY_ARBITER_TIMEOUT_MS, PROXY_SYSTEM_PROMPT);
+    const raw = await runArbiterProcess(
+      model, prompt, undefined, PROXY_ARBITER_TIMEOUT_MS, PROXY_SYSTEM_PROMPT,
+      // THE READ-ONLY SET, NOT `--no-tools` (review round 2 P1). The appeal
+      // arbiter's isolation is text-in/JSON-out; this one is asked to READ the
+      // session, and a prompt carrying a transcript pointer is worthless to a
+      // process that cannot open a file.
+      PROXY_ISOLATION_FLAGS,
+    );
     return parseProxyDecision(raw);
   }
 
@@ -5214,8 +5222,20 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * `declare_done` prints. A proxy decision that left no trace would be an
    * authorization the user never gave and cannot discover.
    */
-  function recordProxyDecision(spec: ChoiceSpec, choice: string, byProxy: { rationale: string; at: string }): void {
-    const st = stateForRepo(primaryRepoRoot);
+  function recordProxyDecision(
+    spec: ChoiceSpec,
+    choice: string,
+    byProxy: { rationale: string; at: string },
+    /**
+     * WHICH REPO'S SIDE CAR (review round 2 P1). The dialog does not know, and
+     * `askChoice` is ONE function for all twelve sites — so the caller resolves
+     * it. A decision recorded under the primary repo while its question belonged
+     * to a secondary one lands in the wrong sidecar AND is missing from that
+     * repo's completion report.
+     */
+    root: string,
+  ): void {
+    const st = stateForRepo(root);
     st.proxyDecisions = [
       ...(st.proxyDecisions ?? []),
       {
@@ -5226,7 +5246,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         rationale: byProxy.rationale,
       },
     ];
-    persist(latestCtx);
+    // `persistRepo`, not `persist`: the latter writes the CURRENT repo's
+    // sidecar, and the decision belongs to `root` (review round 2 P1).
+    if (latestCtx) persistRepo(latestCtx, root);
     try {
       latestCtx?.ui.notify(
         `review-gate: 对话框等了 30 分钟无人作答，已由 arbiter 代为决定 —— 「${spec.title}」→ ${choice}` +
@@ -5235,6 +5257,31 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         "warning",
       );
     } catch { /* headless */ }
+  }
+
+  /**
+   * EVERY PROXY DECISION OF THIS SESSION, ACROSS EVERY REPO IT TOUCHED
+   * (review round 2 P1). `declare_done` runs ONCE for the session, while each
+   * decision belongs to whichever repo its dialog was about — reading only the
+   * primary repo's sidecar would silently omit the rest, and an incomplete list
+   * reads as "that was all of them", which is the one thing this record cannot
+   * get wrong.
+   *
+   * Deduped by (time, question, choice): a session that touched the same repo
+   * twice must not print the same decision twice either.
+   */
+  function allProxyDecisions(): NonNullable<GateState["proxyDecisions"]> {
+    const out: NonNullable<GateState["proxyDecisions"]> = [];
+    const seen = new Set<string>();
+    for (const root of sessionRepos) {
+      for (const d of stateForRepo(root).proxyDecisions ?? []) {
+        const key = `${d.at}|${d.question}|${d.choice}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(d);
+      }
+    }
+    return out.sort((a, b) => a.at.localeCompare(b.at));
   }
 
   async function askChoice(
@@ -5336,7 +5383,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // Whatever settled it, the box is done — see `settledBy` above.
     settledBy.abort();
     if (decided.byProxy !== undefined && decided.answer !== undefined) {
-      recordProxyDecision(spec, decided.answer, decided.byProxy);
+      // WHICH REPO (review round 2 P1): the extension tracks the repo this
+      // session is actually working on, and that is the one whose gate state the
+      // decision belongs to.
+      recordProxyDecision(spec, decided.answer, decided.byProxy, activeRepoRoot.current ?? primaryRepoRoot);
     } else if (decided.proxyFailed === true) {
       // NOBODY DECIDED, AND THE USER IS NOT HERE. Say so: a dialog that times
       // out silently is indistinguishable, to the user, from one that was
@@ -11263,7 +11313,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             // state record, and never by the summary — a decision the proxy
             // took on the user's behalf is the one fact this report cannot let
             // an agent's prose forget. Empty in the ordinary case.
-            formatProxyDecisionReport(state.proxyDecisions ?? []),
+            formatProxyDecisionReport(allProxyDecisions()),
         }],
         details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
 

@@ -1202,7 +1202,7 @@ test("declare_done prints the proxy's decisions itself, and the audit wait has i
   const doneBody = toolBodyOf("declare_done");
   assert.match(
     doneBody,
-    /formatProxyDecisionReport\(state\.proxyDecisions/,
+    /formatProxyDecisionReport\(allProxyDecisions\(\)\)/,
     "the completion report must print the proxy's decisions from the state, not from the summary",
   );
   // (b) The gate's own audit wait must NOT borrow `judge_wait`'s ten minutes:
