@@ -78,11 +78,11 @@ import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "..
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { hostEditorFallback, hostReasonEditor, type CustomDialogHost } from "../lib/reason-editor.ts";
+import { hostEditorFallback, hostReasonEditor, editorTextOf, REASON_EDITOR_BACK, type CustomDialogHost } from "../lib/reason-editor.ts";
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
-import { buildGateWidget, showsRoundReading, type GateWidgetFacts } from "../lib/ui-widget.ts";
+import { buildContractReadout, buildGateWidget, planContractRows, showsRoundReading, type ContractFacts, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -343,7 +343,7 @@ import {
   planSettlement,
   repoRootOfWorktree,
 } from "../lib/orchestrator-worktree.ts";
-import { addGrant, emptyRuntime, findChild, hasGrant, noteWorktreeBranch, successorRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { addGrant, emptyRuntime, findChild, hasGrant, noteWorktreeBranch, removeGrant, successorRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "../lib/change-baseline.ts";
 import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
@@ -552,6 +552,7 @@ import {
   GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
   buildGoalForceNegotiateDirective,
   goalNegotiationOverdue,
+  parseGoalCriteria,
 } from "../lib/loop-goal.ts";
 import type { LoopGoal } from "../lib/loop-goal.ts";
 // The delivery station (where THIS round stops) is a pure contract module;
@@ -4773,6 +4774,88 @@ export default function reviewGate(pi: ExtensionAPI) {
     };
   }
 
+  /**
+   * The CONTRACT the `/gate-contract` command shows (2026-09-18): a project
+   * manager shows its plan, a loop session (standalone or an orchestrated
+   * child) shows the exit criteria of ITS OWN approved goal.
+   *
+   * On demand, so this runs when the user asks, not on a tick. It is still
+   * CHEAP BY CONTRACT in the same sense as the status strip: one plan file read
+   * or one goal file read, no git, no fingerprint, and nothing here is an
+   * enforcement input.
+   *
+   * ONE PLACE DECIDES BOTH HALVES (quality round P2, 2026-09-19). The empty
+   * cases and their explanations used to be written TWICE — a chain of bare
+   * `return { rows: [] }` here and a mirrored chain of `absent(...)` in
+   * `contractReadout` — so a new empty case could be added to one half and
+   * silently not the other, and the command would then print a reason that
+   * sounds right and is wrong (the mirroring was mechanical: 4 returns against
+   * 6 branches, and the test only fed a fake readout). `absent` now travels
+   * WITH the facts; the readout's job is to print what it is handed.
+   */
+  function contractFacts(): { facts: ContractFacts; absent?: string } {
+    const none = (absent: string): { facts: ContractFacts; absent: string } => ({
+      facts: { rows: [] },
+      absent,
+    });
+    if (!sessionInGit) return none("这里不是 git 仓库 —— 契约（goal / plan）都是按仓库谈的");
+    if (isJudgePane()) return none("judge 会话审的是别人的契约，自己不持有一份");
+    if (state.taskMode === "orchestrator") {
+      // Absent file, unreadable JSON and an archived plan all answer the same
+      // way here: no plan ⇒ no rows.
+      const rows = planContractRows(readPlanFile(primaryRepoRoot).plan?.tasks);
+      return rows.length > 0
+        ? { facts: { kind: "plan", rows } }
+        : none("没有可显示的 plan：.pi/orchestrator-plan.json 不在、不是合法 JSON，或已被归档");
+    }
+    if (state.taskMode !== "loop") {
+      return none(`本会话模式是 ${state.taskMode ?? "未初始化"}，它不持有 plan/goal 契约`);
+    }
+    if (!loopGoalConfirmed()) {
+      return none(
+        readSessionLoopGoal(primaryRepoRoot).present
+          ? "goal 还是一份草稿：用户没批准过这段文本（批准了才有退出标准可看）"
+          : "还没有 goal 文件 —— 先反述需求、让用户批准一份退出契约",
+      );
+    }
+    const rows = goalCriteriaRows();
+    return rows.length > 0
+      ? { facts: { kind: "goal", rows } }
+      : none("已批准的 goal 里解析不出「退出标准」小节的条目");
+  }
+
+  /**
+   * The approved goal's criteria as contract rows, read from the RAW FILE.
+   *
+   * NOT `LoopGoal.text`: that copy is capped at LOOP_GOAL_MAX_CHARS for the
+   * prompt, and 15 of this repo's 48 goal files have criteria running past the
+   * cut (measured while writing this). A file that cannot be read is no rows —
+   * the same answer as a goal whose criteria section is empty, which is the
+   * case `contractFacts` explains.
+   */
+  function goalCriteriaRows(): ContractFacts["rows"] {
+    try {
+      return parseGoalCriteria(readFileSync(loopGoalPathIn(primaryRepoRoot), "utf8"))
+        .map((text) => ({ text, state: "pending" }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * What `/gate-contract` prints: the contract lines, and — when there are none
+   * — WHY, in the gate's own words.
+   *
+   * Which situation this is, and what it is called, is `contractFacts`' own
+   * answer; the pairing of an empty list with its reason is
+   * `buildContractReadout`'s (lib/ui-widget.ts) — an empty list can never
+   * reach the command unexplained.
+   */
+  function contractReadout(): { lines: string[]; absent?: string } {
+    const { facts, absent } = contractFacts();
+    return buildContractReadout(facts, absent);
+  }
+
   function updateWidget(ctx: ExtensionContext) {
     // Idempotent re-arm (round-2 P2: the session_shutdown comment promised
     // this and it did not exist): every widget-refresh path — the 5s timer
@@ -4993,14 +5076,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       editor: hostReasonEditor({
         custom: custom.bind(pi) as CustomDialogHost,
         ...(own ? { fallback: own } : {}),
-        build: (tui, keybindings, title, done) => new Component(
-          tui as ConstructorParameters<EditorComponentCtor>[0],
-          keybindings as ConstructorParameters<EditorComponentCtor>[1],
-          title,
-          undefined,
-          done,
-          () => done(undefined),
-        ),
+        // THE BOX HAS TWO WAYS OUT (user decision, 2026-09-19): ESC hands the
+        // question BACK to its own list — carrying whatever was typed so far,
+        // so backing out costs nothing — while the LIST's ESC stays what it
+        // always was, closing the question (and, in an interview, stopping the
+        // rest). The component's own text is read defensively; see
+        // `editorTextOf` (lib/reason-editor.ts).
+        build: (tui, keybindings, title, done, prefill) => {
+          const component = new Component(
+            tui as ConstructorParameters<EditorComponentCtor>[0],
+            keybindings as ConstructorParameters<EditorComponentCtor>[1],
+            title,
+            prefill,
+            done,
+            () => done(`${REASON_EDITOR_BACK}${editorTextOf(component)}`),
+          );
+          return component;
+        },
       }),
     };
   }
@@ -5048,7 +5140,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   async function askChoice(
     uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal } = {},
+    opts: { body?: string; signal?: AbortSignal; back?: boolean } = {},
   ): Promise<string | undefined> {
     // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
     // is a getter that asserts the context is still alive, and a dialog can wait
@@ -5091,6 +5183,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // run, and the tool waiting on it never came back.
       const answer = await renderChoice(await reasonBoxUi(uiCtx.ui), spec, {
         ...(opts.body === undefined ? {} : { body: opts.body }),
+        ...(opts.back ? { back: true } : {}),
         ...(signal ? { signal } : {}),
       });
       // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
@@ -11151,6 +11244,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       if (!state.orchestrator) return; // not an orchestration — nothing to grant
       persistOrchestration(addGrant(state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
     },
+    // The same doorway, closing: the user can walk BACK to an authorization
+    // question (2026-09-19) and answer something else, which takes the scope
+    // away again (lib/user-interaction-tools.ts `applyGrant`).
+    revokeProxyScope: (scope) => {
+      if (!state.orchestrator) return; // not an orchestration — nothing to revoke
+      persistOrchestration(removeGrant(state.orchestrator, scope));
+    },
     cwd,
     sessionEditedPaths: () => [...sessionEditedPaths],
     commitsAheadOfBase: () => commitsAheadOfBase(cwd),
@@ -12617,6 +12717,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     otherRepoStatus: () => otherRepoStatus(),
     loopGoalConfirmed: () => loopGoalConfirmed(),
     loopGoalPresent: () => readSessionLoopGoal(primaryRepoRoot).present,
+    contract: () => contractReadout(),
     hasProxyGrant: (scope) => hasGrant(state.orchestrator ?? emptyRuntime("none"), scope),
     grantProxyScope: (scope, via) => {
       if (!state.orchestrator) return;

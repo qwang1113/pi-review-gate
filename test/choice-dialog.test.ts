@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  BACK_ROW,
   CHOICE_REASON_HINT,
   DECLINE_ROW,
   MAX_CHOICE_OPTIONS,
@@ -10,65 +11,123 @@ import {
   dialogNotifyDetail,
   dialogSignal,
   looksLikeDeclineRow,
+  optionLabel,
+  optionLetter,
   optionRow,
   parseChoice,
   renderChoice,
+  rowIndexOf,
   validateChoice,
   type ChoiceSpec,
   type ChoiceUi,
 } from "../lib/choice-dialog.ts";
+import { REASON_EDITOR_BACK } from "../lib/reason-editor.ts";
 
 const spec = (over: Partial<ChoiceSpec> = {}): ChoiceSpec => ({
   title: "选一个？",
-  options: ["A", "B"],
-  recommended: "A",
+  options: ["继续", "停止"],
+  recommended: "继续",
   ...over,
 });
 
 // ---- the shape ----
 
-test("the rows are the options (recommended marked) plus the decline row", () => {
-  assert.deepEqual(choiceRows(spec()), ["A（推荐）", "B", DECLINE_ROW]);
+test("the rows are the lettered options (recommended marked) plus the decline row", () => {
+  assert.deepEqual(choiceRows(spec()), ["A. 继续（推荐）", "B. 停止", DECLINE_ROW]);
+});
+
+test("the letters run A, B, C, D from the first option", () => {
+  assert.deepEqual(
+    choiceRows(spec({ options: ["一", "二", "三", "四"], recommended: "二" })),
+    ["A. 一", "B. 二（推荐）", "C. 三", "D. 四", DECLINE_ROW]);
+  assert.equal(optionLetter(0), "A");
+  assert.equal(optionLetter(3), "D");
 });
 
 test("a caller may rename the decline row — the approval wording", () => {
-  assert.deepEqual(choiceRows(spec({ declineRow: REVISE_ROW })), ["A（推荐）", "B", REVISE_ROW]);
+  assert.deepEqual(choiceRows(spec({ declineRow: REVISE_ROW })),
+    ["A. 继续（推荐）", "B. 停止", REVISE_ROW]);
   assert.ok(looksLikeDeclineRow(REVISE_ROW));
   assert.ok(looksLikeDeclineRow(DECLINE_ROW));
-  assert.equal(looksLikeDeclineRow("A"), false);
+  assert.equal(looksLikeDeclineRow("A. 继续"), false, "a lettered row is not a decline row");
+});
+
+test("the navigation rows carry no letter — they are not answers", () => {
+  assert.doesNotMatch(DECLINE_ROW, /^[A-Z]\. /);
+  assert.doesNotMatch(BACK_ROW, /^[A-Z]\. /);
 });
 
 test("only the recommended option carries the marker", () => {
-  assert.equal(optionRow("A", "A"), "A（推荐）");
-  assert.equal(optionRow("A", "B"), "A");
+  assert.equal(optionRow("继续", "继续", 0), "A. 继续（推荐）");
+  assert.equal(optionRow("继续", "停止", 0), "A. 继续");
+});
+
+test("the record writes an option with its letter, and free text unchanged", () => {
+  assert.equal(optionLabel("停止", ["继续", "停止"]), "B. 停止");
+  assert.equal(optionLabel("别的话", ["继续", "停止"]), "别的话");
 });
 
 // ---- validation ----
 
 test("a well-formed question passes", () => {
-  assert.equal(validateChoice(["A", "B"], "A"), undefined);
+  assert.equal(validateChoice(["继续", "停止"], "继续"), undefined);
 });
 
 test("fewer than two options is refused, with the reason", () => {
-  assert.match(validateChoice(["A"], "A", "第 2 个问题") ?? "", /第 2 个问题只有 1 个选项/);
-  assert.match(validateChoice([], "A") ?? "", /只有 0 个选项/);
-  assert.match(validateChoice(undefined, "A") ?? "", /只有 0 个选项/);
+  assert.match(validateChoice(["继续"], "继续", "第 2 个问题") ?? "", /第 2 个问题只有 1 个选项/);
+  assert.match(validateChoice([], "继续") ?? "", /只有 0 个选项/);
+  assert.match(validateChoice(undefined, "继续") ?? "", /只有 0 个选项/);
 });
 
 test("a missing or unknown recommendation is refused", () => {
-  assert.match(validateChoice(["A", "B"], undefined) ?? "", /没有 recommended/);
-  assert.match(validateChoice(["A", "B"], "C") ?? "", /不在选项里/);
+  assert.match(validateChoice(["继续", "停止"], undefined) ?? "", /没有 recommended/);
+  assert.match(validateChoice(["继续", "停止"], "第三个") ?? "", /不在选项里/);
 });
 
 test("duplicate options are refused", () => {
-  assert.match(validateChoice(["A", "A"], "A") ?? "", /重复选项/);
+  assert.match(validateChoice(["继续", "继续"], "继续") ?? "", /重复选项/);
 });
 
 // ---- parsing ----
 
 test("a chosen option comes back as the caller wrote it", () => {
-  assert.deepEqual(parseChoice("A（推荐）", spec()), { kind: "chose", option: "A" });
-  assert.deepEqual(parseChoice("B", spec()), { kind: "chose", option: "B" });
+  assert.deepEqual(parseChoice("A. 继续（推荐）", spec()), { kind: "chose", option: "继续" });
+  assert.deepEqual(parseChoice("B. 停止", spec()), { kind: "chose", option: "停止" });
+});
+
+test("every shape of the same answer lands on the same option", () => {
+  const s = spec();
+  for (const picked of ["继续", "A", "a", "A.", "A)", "A. 继续", "A. 继续（推荐）"]) {
+    assert.deepEqual(parseChoice(picked, s), { kind: "chose", option: "继续" }, picked);
+  }
+  assert.deepEqual(parseChoice("2", s), { kind: "chose", option: "停止" });
+  assert.deepEqual(parseChoice("B. 停止", s), { kind: "chose", option: "停止" });
+});
+
+test("an option whose own text is a letter beats the letter index", () => {
+  // `A` is a perfectly legal option text; the exact match must win over the
+  // positional reading, or the row labelled `B. A` could never be chosen.
+  const s = spec({ options: ["B", "A"], recommended: "B" });
+  assert.deepEqual(parseChoice("A", s), { kind: "chose", option: "A" });
+});
+
+test("the position rule is ONE function, shared by the pane parser and the channel parser", () => {
+  assert.equal(rowIndexOf("A"), 0);
+  assert.equal(rowIndexOf("b"), 1);
+  assert.equal(rowIndexOf("C."), 2);
+  assert.equal(rowIndexOf("d、"), 3);
+  assert.equal(rowIndexOf("  A  "), 0, "the answer is trimmed like every other form");
+  assert.equal(rowIndexOf("1"), 0, "the 1-based index is the same rule, read the same way");
+  assert.equal(rowIndexOf(" 2 "), 1);
+  assert.equal(rowIndexOf("AB"), undefined, "two letters are not an answer");
+  assert.equal(rowIndexOf("A1"), undefined);
+  assert.equal(rowIndexOf("继续"), undefined);
+  assert.equal(rowIndexOf(""), undefined);
+});
+
+test("a letter past the end of the list is not an answer", () => {
+  assert.deepEqual(parseChoice("D", spec()), { kind: "chose", option: "D" },
+    "beyond the options it is just text, and text is the caller's to interpret");
 });
 
 test("the decline row comes back with its reason", () => {
@@ -92,18 +151,43 @@ test("an unknown line is returned verbatim — the caller decides what it means"
 
 // ---- rendering ----
 
-function fakeUi(picks: { select?: string | undefined; editor?: string | undefined }): {
+/**
+ * A dialog host driven from a script: one entry per call, the last one
+ * repeating. The interview asks the SAME question more than once (`← 返回上一题`
+ * back to the list), so a single fixed answer can no longer express what the
+ * user did.
+ */
+function fakeUi(picks: {
+  selects?: Array<string | undefined>;
+  editors?: Array<string | undefined>;
+} = {}): {
   ui: ChoiceUi;
-  calls: { selects: string[][]; reasons: string[]; signals: (AbortSignal | undefined)[] };
+  calls: {
+    selects: string[][];
+    reasons: string[];
+    prefills: (string | undefined)[];
+    signals: (AbortSignal | undefined)[];
+  };
 } {
-  const calls = { selects: [] as string[][], reasons: [] as string[], signals: [] as (AbortSignal | undefined)[] };
+  const calls = {
+    selects: [] as string[][],
+    reasons: [] as string[],
+    prefills: [] as (string | undefined)[],
+    signals: [] as (AbortSignal | undefined)[],
+  };
+  const at = <T>(list: T[] | undefined, index: number): T | undefined =>
+    list?.[Math.min(index, list.length - 1)];
   return {
     ui: {
-      select: async (_title, options) => { calls.selects.push(options); return picks.select; },
+      select: async (_title, options) => {
+        calls.selects.push(options);
+        return at(picks.selects, calls.selects.length - 1);
+      },
       editor: async (title, opts) => {
         calls.reasons.push(title);
+        calls.prefills.push(opts?.prefill);
         calls.signals.push(opts?.signal);
-        return picks.editor;
+        return at(picks.editors, calls.reasons.length - 1);
       },
     },
     calls,
@@ -111,20 +195,20 @@ function fakeUi(picks: { select?: string | undefined; editor?: string | undefine
 }
 
 test("the signal reaches the reason editor — that is what takes the box down", async () => {
-  const { ui, calls } = fakeUi({ select: DECLINE_ROW, editor: "x" });
+  const { ui, calls } = fakeUi({ selects: [DECLINE_ROW], editors: ["x"] });
   const controller = new AbortController();
   await renderChoice(ui, spec(), { signal: controller.signal });
   assert.equal(calls.signals[0], controller.signal);
 });
 
 test("picking an option returns it and never opens the reason box", async () => {
-  const { ui, calls } = fakeUi({ select: "B" });
-  assert.equal(await renderChoice(ui, spec()), "B");
+  const { ui, calls } = fakeUi({ selects: ["B. 停止"] });
+  assert.equal(await renderChoice(ui, spec()), "B. 停止");
   assert.deepEqual(calls.reasons, []);
 });
 
 test("picking the decline row opens the reason EDITOR and returns row + reason", async () => {
-  const { ui, calls } = fakeUi({ select: DECLINE_ROW, editor: "  两个都不行  " });
+  const { ui, calls } = fakeUi({ selects: [DECLINE_ROW], editors: ["  两个都不行  "] });
   assert.equal(await renderChoice(ui, spec()), `${DECLINE_ROW}：两个都不行`);
   assert.equal(calls.reasons.length, 1);
   assert.match(calls.reasons[0] ?? "", /不选的原因/);
@@ -132,13 +216,59 @@ test("picking the decline row opens the reason EDITOR and returns row + reason",
 });
 
 test("an empty reason still returns the bare decline row", async () => {
-  const { ui } = fakeUi({ select: DECLINE_ROW, editor: "   " });
+  const { ui } = fakeUi({ selects: [DECLINE_ROW], editors: ["   "] });
   assert.equal(await renderChoice(ui, spec()), DECLINE_ROW);
 });
 
 test("a dismissed reason box is a dismissal — the user backed out of both halves", async () => {
-  const { ui } = fakeUi({ select: DECLINE_ROW, editor: undefined });
+  const { ui } = fakeUi({ selects: [DECLINE_ROW], editors: [undefined] });
   assert.equal(await renderChoice(ui, spec()), undefined);
+});
+
+// ---- the way back (2026-09-19) ----
+
+test("the back row is drawn only where a caller asks for it, and always LAST", async () => {
+  const withBack = fakeUi({ selects: ["B. 停止"] });
+  await renderChoice(withBack.ui, spec(), { back: true });
+  assert.deepEqual(withBack.calls.selects, [["A. 继续（推荐）", "B. 停止", DECLINE_ROW, BACK_ROW]]);
+  const without = fakeUi({ selects: ["B. 停止"] });
+  await renderChoice(without.ui, spec());
+  assert.deepEqual(without.calls.selects, [["A. 继续（推荐）", "B. 停止", DECLINE_ROW]]);
+});
+
+test("the back row comes back as itself — the caller reads it with stepInterview", async () => {
+  const { ui } = fakeUi({ selects: [BACK_ROW], editors: ["x"] });
+  // `back: false` still returns the row if a host handed it over; only the
+  // caller decides what it means (lib/ask-user.ts `stepInterview`).
+  assert.equal(await renderChoice(ui, spec()), BACK_ROW);
+});
+
+test("ESC in the reason box goes BACK to the list, keeping what was typed", async () => {
+  const { ui, calls } = fakeUi({
+    selects: [DECLINE_ROW, "B. 停止"],
+    editors: [`${REASON_EDITOR_BACK}写到一半`],
+  });
+  assert.equal(await renderChoice(ui, spec()), "B. 停止");
+  assert.equal(calls.selects.length, 2, "the list is shown again after backing out");
+  assert.equal(calls.prefills[0], undefined, "nothing to prefill on the first opening");
+});
+
+test("the text typed before backing out prefills the next opening", async () => {
+  const { ui, calls } = fakeUi({
+    selects: [DECLINE_ROW, DECLINE_ROW],
+    editors: [`${REASON_EDITOR_BACK}写到一半`, "写完了"],
+  });
+  assert.equal(await renderChoice(ui, spec()), `${DECLINE_ROW}：写完了`);
+  assert.deepEqual(calls.prefills, [undefined, "写到一半"]);
+});
+
+test("backing out with an empty box keeps the earlier text, not the emptiness", async () => {
+  const { ui, calls } = fakeUi({
+    selects: [DECLINE_ROW, DECLINE_ROW],
+    editors: [`${REASON_EDITOR_BACK}先写的`, REASON_EDITOR_BACK, "最后"],
+  });
+  assert.equal(await renderChoice(ui, spec()), `${DECLINE_ROW}：最后`);
+  assert.deepEqual(calls.prefills, [undefined, "先写的", "先写的"]);
 });
 
 test("no UI at all is a dismissal, never an invented answer", async () => {
@@ -147,9 +277,9 @@ test("no UI at all is a dismissal, never an invented answer", async () => {
 });
 
 test("the body rides on BOTH titles: the list's and the reason editor's", async () => {
-  const { ui, calls } = fakeUi({ select: DECLINE_ROW, editor: "x" });
+  const { ui, calls } = fakeUi({ selects: [DECLINE_ROW], editors: ["x"] });
   await renderChoice(ui, spec(), { body: "补充说明" });
-  assert.deepEqual(calls.selects, [["A（推荐）", "B", DECLINE_ROW]]);
+  assert.deepEqual(calls.selects, [["A. 继续（推荐）", "B. 停止", DECLINE_ROW]]);
   // An interview question's list title is a bare `问题 n / m`, so an editor
   // that repeated only that would ask the user to explain themselves about a
   // question it never showed (user decision, 2026-09-17).

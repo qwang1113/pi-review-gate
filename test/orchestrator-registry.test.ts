@@ -5,6 +5,7 @@ import {
   lineageAuthorizes,
 } from "../lib/orchestrator-plan-approval.ts";
 import {
+  addGrant,
   closableChild,
   emptyRuntime,
   findChild,
@@ -13,8 +14,10 @@ import {
   liveChildren,
   markChildClosed,
   markChildAssigned,
+  hasGrant,
   noteWorktreeBranch,
   newChildId,
+  removeGrant,
   normalizeRuntime,
   registerChild,
   runningTaskIds,
@@ -349,4 +352,26 @@ test("the status rendering distinguishes the states the REGISTRY can see", () =>
 
   const dead = formatChildren(runtimeWith(child({ id: "d-1", paneId: "%9" })), []);
   assert.match(dead, /pane 已消失/);
+});
+
+// ---- the grants (user decision, 2026-09-19: 返回上一题 can take one back) ----
+
+test("removeGrant takes ONE scope away and leaves the runtime otherwise identical", () => {
+  let runtime = addGrant(emptyRuntime("orch-abc-1"), { scope: "sensitive-edit", grantedAt: NOW, via: "ask-user" });
+  runtime = addGrant(runtime, { scope: "tmux-access", grantedAt: NOW, via: "gate-grant" });
+  assert.equal(hasGrant(runtime, "sensitive-edit"), true);
+
+  const after = removeGrant(runtime, "sensitive-edit");
+  assert.equal(hasGrant(after, "sensitive-edit"), false, "the scope the user changed their mind about is gone");
+  assert.equal(hasGrant(after, "tmux-access"), true, "and only that one is");
+  assert.equal(after.orchestrationId, runtime.orchestrationId);
+  assert.equal(runtime.grants?.length, 2, "the input runtime is never mutated");
+});
+
+test("removing a scope that was never granted returns the SAME runtime", () => {
+  // A caller persists whatever comes back; an unchanged object keeps an
+  // unchanged fact from looking like an edit.
+  const runtime = addGrant(emptyRuntime("orch-abc-1"), { scope: "sensitive-edit", grantedAt: NOW, via: "ask-user" });
+  assert.equal(removeGrant(runtime, "tmux-access"), runtime);
+  assert.equal(removeGrant(emptyRuntime("orch-abc-1"), "sensitive-edit").grants, undefined);
 });

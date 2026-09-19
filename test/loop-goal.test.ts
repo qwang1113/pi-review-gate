@@ -23,6 +23,7 @@ import {
   loopGoalUnconfirmedEditBlock,
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
   goalPrereviewPassed,
+  parseGoalCriteria,
   buildGoalPrereviewRefusal,
   formatGoalPrereviewCarryover,
   buildGoalAuditTask,
@@ -713,5 +714,103 @@ test("buildGoalAuditTask: the audit task carries the minimalism check (cite §5,
   assert.ok(task.includes("最小指必要"), "minimal means necessary, not few");
   for (const rule of ["YAGNI", "复用优先", "能删就删", "新依赖须论证"]) {
     assert.ok(!task.includes(rule), `the four checks must not be quoted in the task (found: ${rule})`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// parseGoalCriteria — the exit criteria, one short clause each, for DISPLAY
+// (2026-09-18). Never a progress reading: it reports WHAT the contract asks,
+// never whether it holds.
+// ---------------------------------------------------------------------------
+
+test("parseGoalCriteria reads the exit-criteria section and returns every item verbatim", () => {
+  const goal = [
+    "# 任务标题",
+    "意图：一句话。",
+    "",
+    "退出标准（每条都能用一个命令或一次具体观察判定）：",
+    "",
+    "1. `lib/x.ts` 新增 `foo()`：返回原文，不做压缩。",
+    "2. 全量门禁通过 —— `npm test` 全绿，并在一次送审里由 reviewer 确认。",
+    "3. **粗体标签**也算原文的一部分（只有它在屏上不显 `**`，那是显示层的事）。",
+    "",
+    "关键测试场景与边界情况：",
+    "- 正常路径：这条不属于退出标准。",
+  ].join("\n");
+  assert.deepEqual(parseGoalCriteria(goal), [
+    "`lib/x.ts` 新增 `foo()`：返回原文，不做压缩。",
+    "全量门禁通过 —— `npm test` 全绿，并在一次送审里由 reviewer 确认。",
+    "**粗体标签**也算原文的一部分（只有它在屏上不显 `**`，那是显示层的事）。",
+  ]);
+});
+
+test("parseGoalCriteria takes all four item markers and both heading spellings", () => {
+  const cn = ["退出标准：", "1. 甲条。", "2、乙条。", "- 丙条。", "* 丁条。"].join("\n");
+  assert.deepEqual(parseGoalCriteria(cn), ["甲条。", "乙条。", "丙条。", "丁条。"]);
+  const en = ["## Exit criteria (each one checkable)", "1. alpha, then stop", "- beta: also stops"].join("\n");
+  assert.deepEqual(parseGoalCriteria(en), ["alpha, then stop", "beta: also stops"]);
+});
+
+test("parseGoalCriteria keeps delimiters, paths and code spans untouched", () => {
+  const src = [
+    "退出标准：",
+    "1. 规则只有一处出处 docs/execution-model.md 与 lib/x.ts",
+    "2. 遇 `：`、`，`、`。` 也不切",
+  ].join("\n");
+  assert.deepEqual(parseGoalCriteria(src), [
+    "规则只有一处出处 docs/execution-model.md 与 lib/x.ts",
+    "遇 `：`、`，`、`。` 也不切",
+  ]);
+});
+
+test("parseGoalCriteria is empty for a goal with no criteria section, an empty one, or a stray mention", () => {
+  assert.deepEqual(parseGoalCriteria("# 目标\n意图：没有小节。\n"), []);
+  assert.deepEqual(parseGoalCriteria("退出标准：\n\n非目标：\n- 不做这个\n"), []);
+  // The heading must be a heading: the word inside prose or an item is not it.
+  assert.deepEqual(parseGoalCriteria("意图：把退出标准显示出来\n- 这条不是退出标准小节\n"), []);
+});
+
+test("parseGoalCriteria folds an indented continuation in and stops at the next flush-left line", () => {
+  const goal = [
+    "退出标准：",
+    "1. 这条写不完",
+    "   于是换行续在这里",
+    "2. 第二条",
+    "日期：2026-09-18",
+  ].join("\n");
+  assert.deepEqual(parseGoalCriteria(goal), ["这条写不完 于是换行续在这里", "第二条"]);
+});
+
+test("parseGoalCriteria sees the criteria past readLoopGoal's prompt cap (raw file is the source)", () => {
+  // The measurement that made this a criterion: a goal long enough to be
+  // capped in the PROMPT still has to show every row. So the display path
+  // parses the raw file, not LoopGoal.text.
+  const dir = mkdtempSync(join(tmpdir(), "rg-criteria-"));
+  try {
+    mkdirSync(join(dir, ".pi"));
+    const pad = "背景说明。".repeat(400); // pushes the section past 1500 chars
+    const raw = [
+      "# 长目标",
+      "意图：" + pad,
+      "退出标准：",
+      "1. 尾部第一条，被截断副本里看不见。",
+      "2. 尾部第二条，同样看不见。",
+      "日期：2026-09-18",
+    ].join("\n");
+    writeFileSync(join(dir, LOOP_GOAL_RELPATH), raw);
+    const capped = readLoopGoal(dir);
+    assert.ok(capped.truncated, "the prompt copy IS capped (that is the hazard)");
+    assert.ok(capped.text.length < raw.length);
+    assert.deepEqual(parseGoalCriteria(raw), [
+      "尾部第一条，被截断副本里看不见。",
+      "尾部第二条，同样看不见。",
+    ]);
+    assert.deepEqual(
+      parseGoalCriteria(capped.text),
+      [],
+      "the naive source (the capped copy) would have shown NOTHING — which is what this test defends",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

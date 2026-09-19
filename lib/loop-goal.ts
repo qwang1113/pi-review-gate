@@ -675,6 +675,82 @@ function capText(raw: string): string {
   return danglingHighSurrogate ? cut.slice(0, -1) : cut;
 }
 
+// ---------------------------------------------------------------------------
+// The exit-criteria section, read for DISPLAY (2026-09-18)
+// ---------------------------------------------------------------------------
+//
+// `readLoopGoal` caps the body at LOOP_GOAL_MAX_CHARS because that text goes
+// into a PROMPT and a large goal file must not eat the budget. The criteria the
+// `/gate-contract` command prints have the opposite constraint: every one of
+// them must be showable, and the measured reality is that 15 of this repo's 24
+// parseable goal files (48 goal files on disk) carry criteria running past the
+// cap — longest 3678 chars. So the caller feeds this parser the RAW file, and
+// it never sees the truncation marker.
+//
+// A previous revision of this feature also COMPRESSED each criterion down to a
+// leading clause. That is gone (user decision, 2026-09-18): cutting Chinese
+// prose on a delimiter table produced bare nouns —「交付即清栏」「真值同源」—
+// which is less readable than the row it replaced, and it cost a rule table plus
+// tests to keep an unreviewed rewrite of the user's own contract on screen. The
+// criteria are shown as written, every one of them: `/gate-contract` prints
+// the whole list and lets the terminal wrap it, so nothing downstream cuts or
+// folds these strings either.
+
+/** Section headings that mean "the exit criteria follow". */
+const CRITERIA_HEADINGS = /^#{0,6}\s*(退出标准|退出判据|exit\s+criteria)/i;
+
+/** An item, under any of the four markers the goal templates actually use
+ *  (`1. `/`1、`— Chinese enumerations often skip the space —/`- `/`* `). */
+const CRITERIA_ITEM = /^(?:\d+[.、)]\s*|[-*]\s+)(.*)$/;
+
+/**
+ * The goal's exit criteria, VERBATIM, one entry per item — for display.
+ *
+ * This function finds the section and nothing else. It does not rewrite,
+ * shorten or re-order a criterion: the reader is shown what the USER APPROVED,
+ * which is precisely why no compression lives here — an earlier revision cut
+ * each criterion at a delimiter table and put bare nouns on screen in place of
+ * the contract's own sentences.
+ *
+ * What it DOES have to do is pick the section out of a markdown document, so it
+ * knows the four item markers the goal templates actually write (`1. `, `1、` —
+ * Chinese enumerations often skip the space — `- `, `* `), that a criterion may
+ * wrap onto a following line, and where the section ends (the next heading, or
+ * the next `标签：` line such as 关键测试场景 / 非目标 / 日期).
+ *
+ * Returns [] for a goal with no such section, an empty one, or unreadable text.
+ * NEVER reports progress: its output says nothing about whether a criterion
+ * is met.
+ */
+export function parseGoalCriteria(text: string): string[] {
+  const lines = text.split("\n");
+  const start = lines.findIndex(
+    (l) => CRITERIA_HEADINGS.test(l.trim()) && !CRITERIA_ITEM.test(l.trim()),
+  );
+  if (start < 0) return [];
+
+  const items: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    const t = line.trim();
+    if (t === "") continue; // blank lines sit BETWEEN items in every template
+    const item = CRITERIA_ITEM.exec(t);
+    if (item) {
+      items.push(item[1].trim());
+      continue;
+    }
+    // Only an INDENTED non-item line continues the previous criterion. A
+    // flush-left one is a new section: `日期：2026-09-18` carries no trailing
+    // colon yet ends the list, and swallowing it (which an earlier revision of
+    // this rule did) would put 非目标 text on screen as if it were a criterion.
+    if (items.length > 0 && /^\s/.test(line) && !/^#{1,6}\s/.test(t)) {
+      items[items.length - 1] += " " + t;
+      continue;
+    }
+    break; // the next section (关键测试场景 / 非目标 / 日期 …)
+  }
+  return items.filter((s) => s !== "");
+}
+
 /**
  * Step 0 directive, injected while a loop-mode session has no CONFIRMED goal.
  *

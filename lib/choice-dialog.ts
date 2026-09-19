@@ -1,4 +1,5 @@
 import { raceAbort } from "./abort-race.ts";
+import { isReasonBack, reasonBackText } from "./reason-editor.ts";
 
 /**
  * THE question template — the ONE shape every gate dialog has (user decision,
@@ -41,6 +42,22 @@ export const MAX_CHOICE_OPTION_CHARS = 120;
 export const DECLINE_ROW = "✎ 不选，我说明原因";
 
 /**
+ * THE WAY BACK — one question, one row (user decision, 2026-09-19).
+ *
+ * WHY IT IS THE TEMPLATE'S ROW AND NOT A CALLER'S. It is navigation, not an
+ * answer: it carries no text the user chose and no meaning the caller decides.
+ * Its 2026-09-17 predecessor (`extraRows`) was deleted precisely because a row
+ * the template did not own had no business here — and this one the template
+ * DOES own, which is why it comes back as a named row with a switch
+ * (`renderChoice`'s `back`) rather than as a string the interview pastes in.
+ *
+ * IT IS DRAWN, NEVER OFFERED OVER THE CHANNEL: the rows a channel request
+ * carries are `choiceRows` (the options and the decline row), so a project
+ * manager is never handed a row that means "ask the human again".
+ */
+export const BACK_ROW = "← 返回上一题";
+
+/**
  * The same extra row for an APPROVAL dialog, where "none of these" means
  * "do not approve yet — change something first". Same mechanism, the wording
  * the user asked for.
@@ -67,15 +84,88 @@ export function declineRowOf(spec: ChoiceSpec): string {
   return spec.declineRow ?? DECLINE_ROW;
 }
 
-/** The option row as shown: the recommended one carries its marker. */
-export function optionRow(option: string, recommended: string): string {
-  return option === recommended ? `${option}（推荐）` : option;
+/**
+ * THE OPTION LETTERS (user decision, 2026-09-19): `A`, `B`, `C`… from the
+ * first option. Two to four options, so the letters never run past `D`.
+ *
+ * WHY A LETTER AT ALL. The rows are a decision point the user reads top-down,
+ * and "the second one" is a worse handle than `B` — in the 2026-09-19
+ * interview the user's own answers were written as "A / B / C" in chat and
+ * the gate's dialogs carried no such handle, so quoting a row meant quoting
+ * its whole sentence. pi's selector has no letter shortcut (↑↓/j/k only), so
+ * this is a LABEL, never an input method: it exists to be read and repeated.
+ *
+ * THE NAVIGATION ROWS ARE DELIBERATELY NOT NUMBERED: `✎ …` and `← 返回上一题`
+ * are not answers, and a letter in front of them would say they are.
+ */
+export function optionLetter(index: number): string {
+  return String.fromCharCode("A".charCodeAt(0) + index);
+}
+
+/** The marker the recommended row carries — one definition, renderer and parser. */
+export const RECOMMEND_MARKER = "（推荐）";
+
+/** The letters prefix the rows: `A. text`. */
+const ROW_PREFIX = /^([A-Za-z])\.\s+/;
+
+/**
+ * THE POSITION A ROW IS ANSWERED BY, in either shorthand the screen offers:
+ * a letter (`A` / `a` / `A.` / `A、` → 0) or a 1-based index (`1` → 0).
+ * Anything else → `undefined`; an out-of-range position is still an INDEX (the
+ * caller decides what a position past the list means).
+ *
+ * ONE DEFINITION FOR TWO PARSERS (quality round P2, both halves, 2026-09-19).
+ * The human's dialog answer goes through `parseChoice` below and the project
+ * manager's channel answer goes through `resolveAnswer`
+ * (lib/orchestrator-answer-tools.ts); both read a bare letter AND a bare number
+ * the same way BY CONSTRUCTION rather than by four copies of two regexes that
+ * drift apart the first time one of them is touched (AGENTS.md 哲学二: one
+ * thing, one implementation). The two shorthands are one function because they
+ * are one question — "is this answer a position, and which one" — and every
+ * caller wants both halves of it.
+ */
+export function rowIndexOf(text: string): number | undefined {
+  const trimmed = text.trim();
+  const letter = /^([A-Za-z])[.、)）]?$/.exec(trimmed);
+  if (letter) return letter[1]!.toUpperCase().charCodeAt(0) - "A".charCodeAt(0);
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) - 1;
+  return undefined;
+}
+
+/**
+ * `A. text（推荐）` → `text`. A row read back without either decoration (a
+ * project manager typing the text off the receipt) comes back with what was
+ * left of it, and text that never had the decoration is returned unchanged.
+ */
+function stripRowDecoration(picked: string): string {
+  const prefix = ROW_PREFIX.exec(picked);
+  const body = prefix ? picked.slice(prefix[0].length) : picked;
+  return body.endsWith(RECOMMEND_MARKER) ? body.slice(0, -RECOMMEND_MARKER.length) : body;
+}
+
+/** The option row as shown: `A. the text`, the recommended one carrying （推荐）. */
+export function optionRow(option: string, recommended: string, index: number): string {
+  const row = `${optionLetter(index)}. ${option}`;
+  return option === recommended ? `${row}${RECOMMEND_MARKER}` : row;
+}
+
+/**
+ * The option as the RECORD writes it: `A. text`.
+ *
+ * The transcript summary and the tool reply are read long after the dialog is
+ * gone, and `→ A. 只加「← 返回上一题」行` is the line the user can still match
+ * against what the screen showed. Anything that was NOT one of the options
+ * (free text the orchestrator answered with) comes back untouched.
+ */
+export function optionLabel(option: string, options: readonly string[]): string {
+  const index = options.findIndex((candidate) => candidate === option);
+  return index < 0 ? option : `${optionLetter(index)}. ${option}`;
 }
 
 /** Every row the dialog shows, in order: the options, then the decline row. */
 export function choiceRows(spec: ChoiceSpec): string[] {
   return [
-    ...spec.options.map((option) => optionRow(option, spec.recommended)),
+    ...spec.options.map((option, index) => optionRow(option, spec.recommended, index)),
     declineRowOf(spec),
   ];
 }
@@ -134,8 +224,29 @@ export function parseChoice(picked: string | undefined, spec: ChoiceSpec): Choic
   if (picked.startsWith(decline)) {
     return { kind: "declined", reason: picked.slice(decline.length).replace(/^[：:]\s*/, "").trim() };
   }
-  const original = spec.options.find((option) => picked === option || picked === optionRow(option, spec.recommended));
-  return { kind: "chose", option: original ?? picked };
+  // THE TEXT THE CALLER WROTE, first — every internal comparison (a goal
+  // approval's own labels, the interview's recommended-grant check) is made on
+  // this, never on what the screen happened to show.
+  const original = spec.options.find((option) => picked === option);
+  if (original !== undefined) return { kind: "chose", option: original };
+  // A ROW THE LIST SHOWED: `A. text（推荐）` — what the dialog itself returns
+  // when the human picks a row, and what a channel answer carries back after a
+  // project manager answered with the row's own text (with or without the
+  // recommendation marker, which is decoration, not content).
+  const shown = spec.options.find((option) => option === stripRowDecoration(picked));
+  if (shown !== undefined) return { kind: "chose", option: shown };
+  // A POSITION READ OFF THE SCREEN — `A`, `a`, `A.` or the 1-based `1`. AFTER
+  // the exact-text match on purpose: an option whose own text IS `A` must win
+  // over the position, or `B` would answer the first option. The reading
+  // itself is shared with the channel's parser (`rowIndexOf`).
+  const index = rowIndexOf(picked);
+  if (index !== undefined) {
+    const option = spec.options[index];
+    if (option !== undefined) return { kind: "chose", option };
+  }
+  // Anything else is returned verbatim: free text the orchestrator may answer
+  // with, whose meaning only the caller can decide.
+  return { kind: "chose", option: picked };
 }
 
 /** Does this row look like a template decline row (`✎ …`)? */
@@ -159,7 +270,13 @@ export interface ChoiceUi {
    * both look like they worked. `extensions/review-gate.ts` builds this from
    * pi's own `ExtensionEditorComponent` (same box, signal attached).
    */
-  editor?: (title: string, opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
+  /**
+   * `prefill` is the text the box opens with — the interview's way of not
+   * losing half a sentence when the user backs out to the list and returns
+   * (user decision, 2026-09-19). A host that ignores it still works; it just
+   * makes the user retype.
+   */
+  editor?: (title: string, opts?: { signal?: AbortSignal; prefill?: string }) => Promise<string | undefined>;
 }
 
 /**
@@ -194,20 +311,46 @@ export function reasonTitleOf(dialogTitle: string): string {
  *
  * There is no longer an `extraRows` (2026-09-17): it existed for exactly one
  * caller-owned row — the interview's own escape — and that row is gone. A row
- * the template itself does not own has no business here.
+ * the template itself does not own has no business here; the way BACK one
+ * question (2026-09-19) is the template's own, so it is a switch here rather
+ * than a string a caller pastes into the list.
+ *
+ * THE REASON BOX IS NOT A WAY OUT ANY MORE (user decision, 2026-09-19). ESC in
+ * the editor used to close the question — which, for an interview, stops every
+ * remaining question, so a user who opened the box, changed their mind and
+ * pressed ESC lost the whole interview instead of returning to the list they
+ * were reading. A host that CAN tell the two apart (a custom component:
+ * lib/reason-editor.ts's `REASON_EDITOR_BACK`) now opens the list again with
+ * the text so far kept; a host that cannot (the signal-less `ui.editor`
+ * fallback) keeps the old reading, because there `undefined` is the only fact
+ * it has.
  */
 export async function renderChoice(
   ui: ChoiceUi | undefined,
   spec: ChoiceSpec,
-  opts: { signal?: AbortSignal; body?: string } = {},
+  opts: { signal?: AbortSignal; body?: string; back?: boolean } = {},
 ): Promise<string | undefined> {
   const title = opts.body ? `${spec.title}\n${opts.body}` : spec.title;
-  const picked = await ui?.select?.(title, choiceRows(spec), opts.signal ? { signal: opts.signal } : undefined);
-  if (picked !== declineRowOf(spec)) return picked;
-  const reason = await ui?.editor?.(reasonTitleOf(title), opts.signal ? { signal: opts.signal } : undefined);
-  if (reason === undefined) return undefined;
-  const trimmed = reason.trim();
-  return trimmed ? `${declineRowOf(spec)}：${trimmed}` : declineRowOf(spec);
+  // The back row is drawn here, NOT added to `choiceRows`: the rows a channel
+  // request offers a project manager must stay the answerable ones.
+  const rows = opts.back ? [...choiceRows(spec), BACK_ROW] : choiceRows(spec);
+  let prefill: string | undefined;
+  for (;;) {
+    const picked = await ui?.select?.(title, rows, opts.signal ? { signal: opts.signal } : undefined);
+    if (picked !== declineRowOf(spec)) return picked;
+    const reason = await ui?.editor?.(reasonTitleOf(title), {
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(prefill === undefined ? {} : { prefill }),
+    });
+    // ESC IN THE BOX: back to the list, holding on to what was typed.
+    if (reason !== undefined && isReasonBack(reason)) {
+      prefill = reasonBackText(reason) || prefill;
+      continue;
+    }
+    if (reason === undefined) return undefined;
+    const trimmed = reason.trim();
+    return trimmed ? `${declineRowOf(spec)}：${trimmed}` : declineRowOf(spec);
+  }
 }
 
 /**

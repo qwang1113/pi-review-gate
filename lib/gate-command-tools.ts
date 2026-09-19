@@ -135,6 +135,17 @@ export interface GateCommandDeps extends GateDiagnosisDeps {
   /** Mint a proxy grant for `scope` — /gate-grant's door (2026-09-16). */
   grantProxyScope(scope: string, via: "ask-user" | "gate-grant" | "first-answer"): void;
   loopGoalPresent(): boolean;
+  /**
+   * This session's CONTRACT for `/gate-contract`: the lines to print, and —
+   * when there are none — the reason in the gate's own words.
+   *
+   * One seam because the two halves are one decision: an empty `string[]` is
+   * what a judge pane, an unapproved goal, an absent plan and a non-git
+   * directory all collapse to, and the reader cannot tell those apart from a
+   * bug. The caller holds the mode and the goal state; the pure builder in
+   * `lib/ui-widget.ts` holds the lines.
+   */
+  contract(): { lines: string[]; absent?: string };
   /** Render the gate's one question template (lib/choice-dialog.ts). No fitting —
    *  the box gets the whole text (lib/renderer-mode.ts says why). */
   askChoice(uiCtx: unknown, spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
@@ -301,6 +312,71 @@ function registerGateStatus(host: CommandHost, deps: GateCommandDeps): void {
 
 // ---------- the four state-changing commands ----------
 
+/**
+ * The `/gate-contract` handler, as a function of the ONE dep it reads.
+ *
+ * Exported for its own sake: this is the half of the command with behaviour in
+ * it (what to print, what to print when there is nothing, and what NOT to do
+ * when there is no terminal), and a decision that can only be reached through
+ * `registerGateCommands` is a decision no test reads. Taking
+ * `Pick<…, "contract">` rather than the whole `GateCommandDeps` says the same
+ * thing the body does — this command touches no other state.
+ */
+export function gateContractHandler(
+  deps: Pick<GateCommandDeps, "contract">,
+): (ctx: { hasUI?: boolean; ui: { notify(message: string, type?: "info" | "warning" | "error"): void } }) => void {
+  return (ctx) => {
+    // No terminal to print into (print / JSON mode, RPC without a UI): leave.
+    // `notify` is a no-op there, so this is a STATED behaviour rather than a
+    // crash, and it is the one exit-criterion case that is not about text.
+    if (ctx.hasUI === false) return;
+    const notice = contractNotice(deps.contract());
+    ctx.ui.notify(notice.text, notice.type);
+  };
+}
+
+/**
+ * `/gate-contract` — the exit contract THIS session is working to.
+ *
+ * The plan (project manager) or the approved goal's exit criteria (loop
+ * session, including an orchestrated child, which reads its OWN variant file).
+ * On demand rather than permanent (2026-09-18, user decision: 「不常驻展示,
+ * 而是通过某个命令」): nothing about this list is worth stealing editor rows
+ * between the times someone asks for it, and once it is not permanent there is
+ * no reason to truncate a long criterion or fold the tail — the terminal wraps,
+ * and every row is shown.
+ *
+ * Read-ONLY. It changes no state, runs no git, blocks nothing, and shares
+ * `/gate-status`'s surface rather than inventing a second way to show text. No
+ * shortcut is registered (the user's call): bind one in `/settings`.
+ */
+function registerGateContract(host: CommandHost, deps: GateCommandDeps): void {
+  host.registerCommand("gate-contract", {
+    description: "Show this session's contract (plan tasks / goal exit criteria)",
+    handler: async (_args, ctx) => gateContractHandler(deps)(ctx),
+  });
+}
+
+/**
+ * The one decision `/gate-contract` makes, as a pure function: what to print.
+ *
+ * Kept separate from the handler because the empty case is the interesting one:
+ * an empty list is NOT "you have no contract", it is "here is why nothing was
+ * showable" — and only the caller knows which of its five reasons it was.
+ */
+function contractNotice(readout: { lines: string[]; absent?: string }): {
+  text: string;
+  type: "info" | "warning";
+} {
+  if (readout.lines.length > 0) return { text: readout.lines.join("\n"), type: "info" };
+  return {
+    text: `review-gate: 这里没有可显示的契约 —— ${readout.absent ?? "本会话不持有一份 plan/goal 契约"}`,
+    // warning, not info: "nothing to show" is the reader's cue that something
+    // upstream is missing (an unapproved goal, no plan yet), not a normal answer.
+    type: "warning",
+  };
+}
+
 function registerGateBypass(host: CommandHost, deps: GateCommandDeps): void {
   host.registerCommand("gate-bypass", {
     description: "Bypass the review gate (requires a reason; user-confirmed)",
@@ -461,6 +537,7 @@ export function registerGateCommands(host: CommandHost, deps: GateCommandDeps): 
     registerWorkflowCommand(host, deps, name);
   }
   registerGateStatus(host, deps);
+  registerGateContract(host, deps);
   registerGateBypass(host, deps);
   registerGateGrant(host, deps);
   registerGateMode(host, deps);

@@ -45,7 +45,7 @@ import {
 import { effectiveTaskStation } from "./repo-pr-policy.ts";
 
 import { appendRecord } from "./orchestrator-channel.ts";
-import { looksLikeDeclineRow, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
+import { looksLikeDeclineRow, parseChoice, rowIndexOf, type ChoiceSpec } from "./choice-dialog.ts";
 import { isGrantableScope } from "./ask-user.ts";
 import { addGrant, findChild, hasGrant, type ChildSession } from "./orchestrator-registry.ts";
 import { proxyApprovalProblems } from "./orchestrator-gate.ts";
@@ -73,7 +73,7 @@ const PROXY_SCOPE_LABEL: Record<string, string> = {
   "tmux-access": "tmux 授权",
 };
 
-/** Resolve `answer` against the offered rows: exact text, or a 1-based index. */
+/** Resolve `answer` against the offered rows: exact text, a letter, or a 1-based index. */
 export function resolveAnswer(
   request: PendingRequest,
   raw: string,
@@ -83,21 +83,31 @@ export function resolveAnswer(
   if (request.options.length === 0) return { ok: true, answer: text };
   const exact = request.options.find((option) => option === text);
   if (exact !== undefined) return { ok: true, answer: exact };
+  // A POSITION, and the whole point of the 2026-09-19 numbering: the rows read
+  // `A. …`, so `A` (or the 1-based `1`, which the channel always accepted) is
+  // how a project manager quotes one back. This is resolved BEFORE the
+  // substring match below, because a single character is a substring of almost
+  // every row — answering `A` must land on row A, never on "which rows happen
+  // to contain an a". The reading itself is the SAME function the pane's own
+  // parser uses (lib/choice-dialog.ts `rowIndexOf`); only what a position past
+  // the end MEANS differs, and that difference is deliberate: a stray position
+  // inside a dialog falls through to free text, while a proxy answer is
+  // refused outright.
+  const rowIndex = rowIndexOf(text);
+  if (rowIndex !== undefined) {
+    const picked = request.options[rowIndex];
+    if (picked !== undefined) return { ok: true, answer: picked };
+    return {
+      ok: false,
+      reason: `"${text}" 超出选项范围（只有 ${request.options.length} 个选项）`,
+    };
+  }
   // THE TEMPLATE'S DECLINE ROW (2026-09-08): the user (or the PM) picks
   // `✎ 不选，我说明原因` and the reason follows the row after a colon. That
   // whole line is a legitimate answer — the reason is the point — so it is
   // accepted verbatim rather than rejected as an unknown option.
   const decline = request.options.find(looksLikeDeclineRow);
   if (decline !== undefined && text.startsWith(decline)) return { ok: true, answer: text };
-  if (/^\d+$/.test(text)) {
-    const index = Number(text) - 1;
-    const picked = request.options[index];
-    if (picked !== undefined) return { ok: true, answer: picked };
-    return {
-      ok: false,
-      reason: `序号 ${text} 超出范围（只有 ${request.options.length} 个选项）`,
-    };
-  }
   // Substring match, but ONLY when it is unambiguous. A prefix that matches
   // two rows is exactly how a supervisor picks the wrong one by accident.
   const hits = request.options.filter((option) => option.includes(text));
@@ -109,7 +119,7 @@ export function resolveAnswer(
     ok: false,
     reason:
       `"${text}" 不是这个框里的任何一项。可选：` +
-      request.options.map((option, index) => `${index + 1}. ${option}`).join(" / "),
+      request.options.join(" / "),
   };
 }
 
