@@ -1493,6 +1493,53 @@ export function saveSidecar(path: string, state: GateState): void {
  * `taskMode`, change flags, scope limits and rounds always stay this
  * session's own — a foreign bypass or advisory mode must never leak in.
  */
+/**
+ * ONE DECISION THE PROXY MADE ON THE USER'S BEHALF, as the state records it.
+ *
+ * Declared on its own rather than inline on the field because a second consumer
+ * exists: `mergeProxyDecisions` below unions two sessions' lists (review round
+ * 6), and `lib/user-proxy.ts` renders them for the completion report.
+ */
+export interface ProxyDecisionRecord {
+  at: string;
+  /** The dialog's own question, verbatim (its title). */
+  question: string;
+  /** The rows it chose from, verbatim. */
+  options: string[];
+  /** The row the proxy chose — one of `options`, verbatim. */
+  choice: string;
+  /** Why, in the proxy's own words. */
+  rationale: string;
+}
+
+/**
+ * The UNION of two sessions' proxy decisions, oldest first.
+ *
+ * NOT a winner-takes-it like the verdict blocks beside it, and the difference is
+ * a fact about what this record IS. A verdict is a binding on shared content, so
+ * two of them cannot both be the answer; a proxy decision is TESTIMONY about
+ * what happened to one session, and dropping one side would tell the user "these
+ * were all of them" about a list that was not — the one thing this record cannot
+ * get wrong.
+ *
+ * Deduped by (time, question, choice): the same decision arriving twice (a
+ * re-merge of the same side, a relay successor) is still one decision.
+ */
+export function mergeProxyDecisions(
+  mine: readonly ProxyDecisionRecord[] | undefined,
+  theirs: readonly ProxyDecisionRecord[] | undefined,
+): ProxyDecisionRecord[] {
+  const out: ProxyDecisionRecord[] = [];
+  const seen = new Set<string>();
+  for (const record of [...(mine ?? []), ...(theirs ?? [])]) {
+    const key = `${record.at}|${record.question}|${record.choice}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(record);
+  }
+  return out.sort((a, b) => a.at.localeCompare(b.at));
+}
+
 export function mergeConcurrentBindings(
   mine: GateState,
   disk: GateState | undefined,
@@ -1545,6 +1592,8 @@ export function mergeConcurrentBindings(
   const keepPrecommit = candidatePrecommit && disk.precommit.fingerprint === digest;
   if (!keepReview && !keepPrecommit) return merged;
 
+  // WHAT EACH SESSION SAW HAPPEN TO IT (review round 6): a union, not a winner.
+  const proxyUnion = mergeProxyDecisions(mine.proxyDecisions, disk.proxyDecisions);
   return {
     ...merged,
     review: keepReview ? { ...disk.review } : mine.review,
@@ -1553,6 +1602,11 @@ export function mergeConcurrentBindings(
     // otherwise the next round is forced into a full review even though
     // the tree it describes was already reviewed.
     ...(keepReview && disk.lastReviewedTree ? { lastReviewedTree: disk.lastReviewedTree } : {}),
+    // THE PROXY'S TESTIMONY IS A UNION (review round 6), unlike the verdict
+    // blocks above: two sessions sharing a worktree each took their own
+    // decisions, and the user has to be able to see BOTH — an incomplete list
+    // reads as "that was all of them". See `mergeProxyDecisions`.
+    ...(proxyUnion.length === 0 ? {} : { proxyDecisions: proxyUnion }),
   };
 }
 

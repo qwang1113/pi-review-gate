@@ -138,6 +138,31 @@ test("concurrent sidecar: a foreign concluded round carries over lastReviewedTre
     "the incremental-review baseline must survive the carry-over");
 });
 
+test("proxy decisions UNION across a concurrent sidecar — neither session's list is dropped", () => {
+  // Review round 6. A verdict is a BINDING on shared content, so two of them
+  // cannot both be the answer; a proxy decision is TESTIMONY about one session,
+  // and dropping a side would tell the user "these were all of them" about a
+  // list that was not — the one thing that record cannot get wrong.
+  const mine = armed("mine");
+  mine.proxyDecisions = [
+    { at: "2026-02-02T00:00:00.000Z", question: "q-mine", options: ["A"], choice: "A", rationale: "r" },
+  ];
+  const theirs = approved("theirs", DIGEST);
+  theirs.proxyDecisions = [
+    { at: "2026-01-01T00:00:00.000Z", question: "q-theirs", options: ["B"], choice: "B", rationale: "r" },
+    // The SAME decision both sides hold (they merged earlier, or a relay
+    // successor inherited it) is still one decision.
+    { at: "2026-02-02T00:00:00.000Z", question: "q-mine", options: ["A"], choice: "A", rationale: "r" },
+  ];
+
+  const merged = mergeConcurrentBindings(mine, theirs, () => DIGEST);
+  assert.deepEqual(
+    merged.proxyDecisions?.map((d) => d.question),
+    ["q-theirs", "q-mine"],
+    "both sides survive, oldest first, and the duplicate counts once",
+  );
+});
+
 test("concurrent sidecar: our own BAD verdict is never upgraded by a foreign good one", () => {
   // Two sessions, one tree, opposite conclusions. Worst verdict wins is the
   // rule everywhere in this gate; a fingerprint match proves the other session

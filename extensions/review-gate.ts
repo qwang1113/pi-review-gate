@@ -487,6 +487,7 @@ import {
   type ScopeStampRecord,
   invalidateBindings,
   inheritGoalContract,
+  mergeProxyDecisions,
   nextFullPassTree,
 } from "../lib/gate-state.ts";
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
@@ -5274,17 +5275,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * twice must not print the same decision twice either.
    */
   function allProxyDecisions(): NonNullable<GateState["proxyDecisions"]> {
-    const out: NonNullable<GateState["proxyDecisions"]> = [];
-    const seen = new Set<string>();
+    // The dedupe lives in `mergeProxyDecisions` (哲学三: one implementation) —
+    // this is the same union, folded over more than two sessions.
+    let out: NonNullable<GateState["proxyDecisions"]> = [];
     for (const root of sessionRepos) {
-      for (const d of stateForRepo(root).proxyDecisions ?? []) {
-        const key = `${d.at}|${d.question}|${d.choice}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push(d);
-      }
+      out = mergeProxyDecisions(out, stateForRepo(root).proxyDecisions);
     }
-    return out.sort((a, b) => a.at.localeCompare(b.at));
+    return out;
   }
 
   async function askChoice(
