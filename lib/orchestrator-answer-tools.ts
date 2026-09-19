@@ -45,7 +45,7 @@ import {
 import { effectiveTaskStation } from "./repo-pr-policy.ts";
 
 import { appendRecord } from "./orchestrator-channel.ts";
-import { looksLikeDeclineRow, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
+import { letterIndexOf, looksLikeDeclineRow, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import { isGrantableScope } from "./ask-user.ts";
 import { addGrant, findChild, hasGrant, type ChildSession } from "./orchestrator-registry.ts";
 import { proxyApprovalProblems } from "./orchestrator-gate.ts";
@@ -87,10 +87,14 @@ export function resolveAnswer(
   // read `A. …`, so `A` is how a project manager quotes one back. This is
   // resolved BEFORE the substring match below, because a single letter is a
   // substring of almost every row — answering `A` must land on row A, never on
-  // "which rows happen to contain an a".
-  const letter = /^([A-Za-z])[.、)）]?$/.exec(text);
-  if (letter) {
-    const picked = request.options[letter[1]!.toUpperCase().charCodeAt(0) - 65];
+  // "which rows happen to contain an a". The reading itself is the SAME
+  // function the pane's own parser uses (lib/choice-dialog.ts
+  // `letterIndexOf`); only what a past-the-end letter MEANS differs, and that
+  // difference is deliberate: a stray letter inside a dialog falls through to
+  // free text, while a proxy answer is refused outright.
+  const letterIndex = letterIndexOf(text);
+  if (letterIndex !== undefined) {
+    const picked = request.options[letterIndex];
     if (picked !== undefined) return { ok: true, answer: picked };
     return {
       ok: false,

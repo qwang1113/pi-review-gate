@@ -4784,31 +4784,62 @@ export default function reviewGate(pi: ExtensionAPI) {
    * or one goal file read, no git, no fingerprint, and nothing here is an
    * enforcement input.
    *
-   * Every "this session owns no contract" case funnels into the same empty
-   * result the command then explains: a judge pane (it owns no contract of this
-   * shape), explore/normal/undecided mode, a goal that is unapproved or was
-   * edited after approval (`loopGoalConfirmed()` answers both with the same
-   * false), an absent / unreadable / archived plan, a child whose variant has no
-   * goal, and a non-git directory.
+   * ONE PLACE DECIDES BOTH HALVES (quality round P2, 2026-09-19). The empty
+   * cases and their explanations used to be written TWICE — a chain of bare
+   * `return { rows: [] }` here and a mirrored chain of `absent(...)` in
+   * `contractReadout` — so a new empty case could be added to one half and
+   * silently not the other, and the command would then print a reason that
+   * sounds right and is wrong (the mirroring was mechanical: 4 returns against
+   * 6 branches, and the test only fed a fake readout). `absent` now travels
+   * WITH the facts; the readout's job is to print what it is handed.
    */
-  function contractFacts(): ContractFacts {
-    if (!sessionInGit || isJudgePane()) return { rows: [] };
+  function contractFacts(): { facts: ContractFacts; absent?: string } {
+    const none = (absent: string): { facts: ContractFacts; absent: string } => ({
+      facts: { rows: [] },
+      absent,
+    });
+    if (!sessionInGit) return none("这里不是 git 仓库 —— 契约（goal / plan）都是按仓库谈的");
+    if (isJudgePane()) return none("judge 会话审的是别人的契约，自己不持有一份");
     if (state.taskMode === "orchestrator") {
       // Absent file, unreadable JSON and an archived plan all answer the same
       // way here: no plan ⇒ no rows.
-      return { kind: "plan", rows: planContractRows(readPlanFile(primaryRepoRoot).plan?.tasks) };
+      const rows = planContractRows(readPlanFile(primaryRepoRoot).plan?.tasks);
+      return rows.length > 0
+        ? { facts: { kind: "plan", rows } }
+        : none("没有可显示的 plan：.pi/orchestrator-plan.json 不在、不是合法 JSON，或已被归档");
     }
-    if (state.taskMode !== "loop" || !loopGoalConfirmed()) return { rows: [] };
-    // THE RAW FILE, not `LoopGoal.text` — that copy is capped at
-    // LOOP_GOAL_MAX_CHARS for the prompt, and 15 of this repo's 48 goal files
-    // have criteria running past the cut (measured while writing this).
-    let raw: string;
+    if (state.taskMode !== "loop") {
+      return none(`本会话模式是 ${state.taskMode ?? "未初始化"}，它不持有 plan/goal 契约`);
+    }
+    if (!loopGoalConfirmed()) {
+      return none(
+        readSessionLoopGoal(primaryRepoRoot).present
+          ? "goal 还是一份草稿：用户没批准过这段文本（批准了才有退出标准可看）"
+          : "还没有 goal 文件 —— 先反述需求、让用户批准一份退出契约",
+      );
+    }
+    const rows = goalCriteriaRows();
+    return rows.length > 0
+      ? { facts: { kind: "goal", rows } }
+      : none("已批准的 goal 里解析不出「退出标准」小节的条目");
+  }
+
+  /**
+   * The approved goal's criteria as contract rows, read from the RAW FILE.
+   *
+   * NOT `LoopGoal.text`: that copy is capped at LOOP_GOAL_MAX_CHARS for the
+   * prompt, and 15 of this repo's 48 goal files have criteria running past the
+   * cut (measured while writing this). A file that cannot be read is no rows —
+   * the same answer as a goal whose criteria section is empty, which is the
+   * case `contractFacts` explains.
+   */
+  function goalCriteriaRows(): ContractFacts["rows"] {
     try {
-      raw = readFileSync(loopGoalPathIn(primaryRepoRoot), "utf8");
+      return parseGoalCriteria(readFileSync(loopGoalPathIn(primaryRepoRoot), "utf8"))
+        .map((text) => ({ text, state: "pending" }));
     } catch {
-      return { rows: [] };
+      return [];
     }
-    return { kind: "goal", rows: parseGoalCriteria(raw).map((text) => ({ text, state: "pending" })) };
   }
 
   /**
@@ -4818,29 +4849,14 @@ export default function reviewGate(pi: ExtensionAPI) {
    * The reason cannot be derived from an empty `string[]` (every "no contract
    * here" case collapses to the same nothing), and it is the half the reader
    * actually acts on: "没有契约可显示" without "因为这份 goal 还是一份没被批准的
-   * 草稿" would send them looking for a bug. One function, so there is no second
-   * place where these branches can drift.
+   * 草稿" would send them looking for a bug. WHICH situation this is, and what
+   * it is called, is `contractFacts`' own answer — this function prints it.
    */
   function contractReadout(): { lines: string[]; absent?: string } {
-    const lines = buildContractLines(contractFacts());
-    if (lines.length > 0) return { lines };
-    const absent = (why: string) => ({ lines, absent: why });
-    if (!sessionInGit) return absent("这里不是 git 仓库 —— 契约（goal / plan）都是按仓库谈的");
-    if (isJudgePane()) return absent("judge 会话审的是别人的契约，自己不持有一份");
-    if (state.taskMode === "orchestrator") {
-      return absent("没有可显示的 plan：.pi/orchestrator-plan.json 不在、不是合法 JSON，或已被归档");
-    }
-    if (state.taskMode !== "loop") {
-      return absent(`本会话模式是 ${state.taskMode ?? "未初始化"}，它不持有 plan/goal 契约`);
-    }
-    if (!loopGoalConfirmed()) {
-      return absent(
-        readSessionLoopGoal(primaryRepoRoot).present
-          ? "goal 还是一份草稿：用户没批准过这段文本（批准了才有退出标准可看）"
-          : "还没有 goal 文件 —— 先反述需求、让用户批准一份退出契约",
-      );
-    }
-    return absent("已批准的 goal 里解析不出「退出标准」小节的条目");
+    const { facts, absent } = contractFacts();
+    const lines = buildContractLines(facts);
+    if (lines.length > 0 || absent === undefined) return { lines };
+    return { lines, absent };
   }
 
   function updateWidget(ctx: ExtensionContext) {

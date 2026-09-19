@@ -109,6 +109,25 @@ export const RECOMMEND_MARKER = "（推荐）";
 const ROW_PREFIX = /^([A-Za-z])\.\s+/;
 
 /**
+ * THE LETTER A ROW IS ANSWERED BY: `A` / `a` / `A.` / `A、` → its 0-based
+ * index; anything else → `undefined`.
+ *
+ * ONE DEFINITION FOR TWO PARSERS (quality round P2, 2026-09-19). The human's
+ * dialog answer goes through `parseChoice` below and the project manager's
+ * channel answer goes through `resolveAnswer`
+ * (lib/orchestrator-answer-tools.ts); both read a bare letter the same way BY
+ * CONSTRUCTION rather than by two copies of the same regex that drift apart
+ * the first time one of them is touched (AGENTS.md 哲学二: one thing, one
+ * implementation). What each caller does with an out-of-range letter is
+ * still its own call — this returns the INDEX, never an option.
+ */
+export function letterIndexOf(text: string): number | undefined {
+  const letter = /^([A-Za-z])[.、)）]?$/.exec(text.trim());
+  if (!letter) return undefined;
+  return letter[1]!.toUpperCase().charCodeAt(0) - "A".charCodeAt(0);
+}
+
+/**
  * `A. text（推荐）` → `text`. A row read back without either decoration (a
  * project manager typing the text off the receipt) comes back with what was
  * left of it, and text that never had the decoration is returned unchanged.
@@ -213,10 +232,11 @@ export function parseChoice(picked: string | undefined, spec: ChoiceSpec): Choic
   if (shown !== undefined) return { kind: "chose", option: shown };
   // A BARE LETTER — the short form read off the screen: `A`, `a`, `A.`.
   // AFTER the exact-text match on purpose: an option whose own text IS `A`
-  // must win over the letter, or `B` would answer the first option.
-  const letter = /^([A-Za-z])[.、)）]?$/.exec(picked.trim());
-  if (letter) {
-    const option = spec.options[letter[1]!.toUpperCase().charCodeAt(0) - 65];
+  // must win over the letter, or `B` would answer the first option. The
+  // reading itself is shared with the channel's parser (`letterIndexOf`).
+  const index = letterIndexOf(picked);
+  if (index !== undefined) {
+    const option = spec.options[index];
     if (option !== undefined) return { kind: "chose", option };
   }
   // A 1-BASED INDEX — the shorthand the orchestrator's own answer resolver
