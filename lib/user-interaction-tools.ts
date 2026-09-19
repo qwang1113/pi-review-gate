@@ -104,7 +104,25 @@ export interface UserInteractionToolDeps {
   askChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
-    opts?: { body?: string; signal?: AbortSignal; back?: boolean },
+    opts?: {
+      body?: string;
+      signal?: AbortSignal;
+      back?: boolean;
+      /**
+       * CALLED WHEN NOBODY DECIDED (2026-09-19): the window elapsed and the
+       * proxy could not answer either (no arbiter, a failure, unparseable
+       * output).
+       *
+       * DISTINCT FROM A DISMISSED BOX ON PURPOSE — both hand the caller
+       * `undefined`, but "the user said no" and "nobody was there" must not
+       * carry the same consequence. A DECLINE locks the request for the rest of
+       * the session (`lib/consent-request-tools.ts`), which is exactly what a
+       * timeout must not do: the user was never asked, so there is nothing to
+       * remember a refusal about, and they must be able to ask again when they
+       * are back.
+       */
+      onUndecided?: () => void;
+    },
   ): Promise<string | undefined>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever

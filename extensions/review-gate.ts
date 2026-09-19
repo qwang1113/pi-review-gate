@@ -5187,7 +5187,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * conversation rather than handed it — the choice `lib/adviser-brief.ts` makes
    * too, for the same reason (a session log dwarfs the question).
    */
-  async function proxyAnswerFor(spec: ChoiceSpec, body: string | undefined): Promise<ProxyChoice | undefined> {
+  async function proxyAnswerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyChoice | undefined> {
     const model = resolveArbiterModel();
     if (!model) return undefined;
     const transcript = ownTranscriptPath();
@@ -5199,7 +5199,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       options: spec.options,
       ...(body === undefined ? {} : { body }),
       ...(transcript === undefined ? {} : { transcript }),
-      repoRoot: primaryRepoRoot,
+      // WHICH REPO THE PROXY IS ASKED ABOUT (review round 3 P1): the same one
+      // its decision will be filed under. Reading it twice would let the prompt
+      // and the sidecar disagree.
+      repoRoot: root,
     });
     const raw = await runArbiterProcess(
       model, prompt, undefined, PROXY_ARBITER_TIMEOUT_MS, PROXY_SYSTEM_PROMPT,
@@ -5287,7 +5290,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   async function askChoice(
     uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; back?: boolean } = {},
+    opts: { body?: string; signal?: AbortSignal; back?: boolean; onUndecided?: () => void } = {},
   ): Promise<string | undefined> {
     // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
     // is a getter that asserts the context is still alive, and a dialog can wait
@@ -5311,8 +5314,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // the queue work below, which is the moment this dialog owns the screen.
     let markDisplayed: (() => void) | undefined;
     const displayed = new Promise<void>((resolve) => { markDisplayed = resolve; });
+    // WHICH REPO, BOUND WHEN THE BOX APPEARS (review round 3 P1). The answer
+    // belongs to the work this session was doing when the user would have SEEN
+    // the question — and `activeRepoRoot.current` follows the edits, so a dialog
+    // queued behind another one, or a thirty-minute wait, can move it. Bound on
+    // the queue's own turn and never re-read: fixing the sidecar's repo while
+    // the proxy reads a different one is the same defect from the other end.
+    let dialogRoot = activeRepoRoot.current ?? primaryRepoRoot;
     const asked = scheduleDialog(async () => {
       markDisplayed?.();
+      dialogRoot = activeRepoRoot.current ?? primaryRepoRoot;
       // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
       // any session shows comes through this function, so "the gate has stopped
       // and is waiting for the human" needs no second detector. The policy
@@ -5378,21 +5389,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       direct: asked,
       displayed,
       options: spec.options,
-      startProxy: () => proxyAnswerFor(spec, opts.body),
+      startProxy: () => proxyAnswerFor(spec, opts.body, dialogRoot),
     });
     // Whatever settled it, the box is done — see `settledBy` above.
     settledBy.abort();
     if (decided.byProxy !== undefined && decided.answer !== undefined) {
-      // WHICH REPO (review round 2 P1): the extension tracks the repo this
-      // session is actually working on, and that is the one whose gate state the
-      // decision belongs to.
-      recordProxyDecision(spec, decided.answer, decided.byProxy, activeRepoRoot.current ?? primaryRepoRoot);
+      recordProxyDecision(spec, decided.answer, decided.byProxy, dialogRoot);
     } else if (decided.proxyFailed === true) {
       // NOBODY DECIDED, AND THE USER IS NOT HERE. Say so: a dialog that times
       // out silently is indistinguishable, to the user, from one that was
       // answered — and this is the only moment the fact exists. The gate does
       // NOT invent an answer here; the conservative landing is the absence of
       // one, which every caller already reads correctly.
+      //
+      // THE CALLER IS TOLD TOO (review round 3 P1): `undefined` alone cannot
+      // distinguish this from a dismissed box, and for a consent request those
+      // two must not have the same consequence — a decline LOCKS the request
+      // for the session, and a timeout is not a decline.
       try {
         latestCtx?.ui.notify(
           `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答，且 arbiter 无法代答` +
@@ -5400,6 +5413,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           "warning",
         );
       } catch { /* headless */ }
+      try { opts.onUndecided?.(); } catch { /* the caller's own bookkeeping */ }
     }
     return decided.answer;
   }
