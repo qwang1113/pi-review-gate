@@ -75,6 +75,7 @@ test("a human answer inside the window never starts the proxy", async () => {
   const outcome = await raced;
   assert.equal(outcome.answer, ROWS[1]);
   assert.equal(outcome.byProxy, undefined, "the user's own answer carries no proxy mark");
+  assert.equal(outcome.proxyFailed, undefined, "…and an ANSWERED dialog owes nobody anything");
   assert.equal(proxyCalls, 0, "…and the proxy was never even asked");
 
   // THE TIMER IS GONE, not merely unused: a live one would keep the process
@@ -141,7 +142,7 @@ test("a proxy answer that is not one of the offered rows is NO answer", async ()
   }
 });
 
-test("a proxy that fails, throws, or declines settles as NO answer", async () => {
+test("a proxy that fails, throws, or declines settles as NO answer — and REPORTS that nobody decided", async () => {
   for (const startProxy of [
     async () => undefined,
     async () => { throw new Error("arbiter died"); },
@@ -158,6 +159,10 @@ test("a proxy that fails, throws, or declines settles as NO answer", async () =>
     const outcome = await raced;
     assert.equal(outcome.answer, undefined);
     assert.equal(outcome.byProxy, undefined);
+    // THE DIFFERENCE THE CALLER CANNOT RECOVER ON ITS OWN: `answer: undefined`
+    // is also what a CLOSED box returns, and those two moments owe the user
+    // different things — one is answered, one still has a decision outstanding.
+    assert.equal(outcome.proxyFailed, true, "a decision is still owed, and the gate must be able to say so");
   }
 });
 
@@ -174,6 +179,7 @@ test("a dialog with no rows never asks the proxy — the window settles as unans
   clock.fire();
   const outcome = await raced;
   assert.equal(outcome.answer, undefined);
+  assert.equal(outcome.proxyFailed, true, "the window elapsed with nothing to ask — nobody decided");
   assert.equal(proxyCalls, 0, "there is nothing to choose from, so there is nothing to ask");
 });
 
@@ -195,6 +201,41 @@ test("the proxy prompt carries the question, every row verbatim, and where to re
   assert.match(PROXY_SYSTEM_PROMPT, /逐字完全相同/);
   // …and the one thing that keeps it honest:
   assert.match(PROXY_SYSTEM_PROMPT, /用户回来可以推翻/);
+});
+
+test("the window is armed when the box APPEARS, not when it was queued", async () => {
+  // THE DIALOG QUEUE SHOWS ONE BOX AT A TIME, so `askChoice` may be one of
+  // several calls in a single assistant message with the later ones not on
+  // screen yet. Their thirty minutes must not be running — measured in review
+  // round 1: a second dialog behind one that stayed open past the window was
+  // answered by the proxy before the user had ever seen the question.
+  const clock = manualClock();
+  const human = deferred<string | undefined>();
+  const shown: { promise: Promise<void>; mark: () => void } = (() => {
+    let mark: (() => void) | undefined;
+    return { promise: new Promise<void>((resolve) => { mark = resolve; }), mark: () => mark?.() };
+  })();
+  let proxyCalls = 0;
+  const raced = raceWithUserProxy<string>({
+    direct: human.promise,
+    displayed: shown.promise,
+    options: ROWS,
+    schedule: clock.schedule,
+    startProxy: async () => { proxyCalls += 1; return { choice: ROWS[0]!, rationale: "x" }; },
+  });
+
+  assert.equal(clock.windows.length, 0, "a queued question has no window yet");
+  clock.fire();
+  assert.equal(proxyCalls, 0, "and nothing can fire for it");
+
+  shown.mark();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(clock.windows.length, 1, "the window starts when the box does");
+
+  clock.fire();
+  const outcome = await raced;
+  assert.equal(proxyCalls, 1);
+  assert.equal(outcome.byProxy?.rationale, "x");
 });
 
 test("the completion report names every proxy decision — and is EMPTY when there were none", () => {

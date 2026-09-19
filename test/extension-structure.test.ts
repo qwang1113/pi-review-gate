@@ -1151,12 +1151,67 @@ test("DIALOG QUEUE: one box at a time, with the host's abort and the question in
     "…and that one promise is the human side of the race, so a dialog still has exactly one answer path");
   assert.match(SRC, /const scheduleDialog = createDialogQueue\(\);/,
     "…and there is one queue per session, not one per call");
-  assert.match(askChoiceBody, /dialogSignal\(uiCtx\.signal, opts\.signal\)/,
+  assert.match(askChoiceBody, /dialogSignal\(uiCtx\.signal, opts\.signal,/,
     "the host's abort signal (ESC: ExtensionContext.signal) is merged with the caller's own");
   assert.match(askChoiceBody, /\}, signal\);/,
-    "the merged signal is handed to the queue — a waiter cancelled while it queues drops out at once");
+    "the merged signal (host + caller + the race's own) is what the queue waiter is registered under");
+  assert.match(
+    askChoiceBody,
+    /const signal = dialogSignal\(uiCtx\.signal, opts\.signal, settledBy\.signal\);/,
+    "…because the race's signal is merged into the one BOTH the queue and the box receive",
+  );
+  assert.match(askChoiceBody, /settledBy\.abort\(\);/,
+    "…and the race aborts it on EVERY way out, so a settled dialog never leaves a live box behind");
+  // THE WINDOW IS ARMED WHEN THE BOX APPEARS, NOT WHEN IT WAS QUEUED (review
+  // round 1 P1): the dialog queue shows ONE box at a time, so a queued
+  // question's thirty minutes must not be running before the user has ever
+  // seen it.
+  assert.match(askChoiceBody, /markDisplayed\?\.\(\);/, "the box's own first line marks the window open");
+  assert.match(askChoiceBody, /displayed,/, "…and the race is handed that promise");
   assert.match(askChoiceBody, /dialogNotifyDetail\(spec, opts\.body\)/,
     "the banner carries the question itself, not only the `问题 1 / 4` label");
+});
+
+test("judge_submit refuses a round when the session has no edits of its own under a scope limit", () => {
+  // THE THIRD HALF OF THE SCOPE-LIMIT FIX (2026-09-19). Telling the reviewer
+  // about the exemption fixes what a round CONCLUDES; this is what stops the
+  // round from being dispatched at all when there is nothing of its own to
+  // judge. Without it the chain still ran a full precommit, a checkpoint and a
+  // reviewer over the branch's pre-existing content — minutes per round, every
+  // round ending BLOCKED on findings the session may not fix (prime's
+  // t3-report-update, which then deadlocked on `declare_done`).
+  const at = SRC.indexOf('refused: "no-session-edits-under-scope-limit"');
+  assert.ok(at > 0, "the refusal must exist");
+  const guard = SRC.slice(Math.max(0, at - 1400), at);
+  assert.match(guard, /params\.role === "reviewer"/, "it applies to the review round only, never to advisers or goal audits");
+  assert.match(guard, /scoped\.scopeLimit !== undefined/, "…and only when the user actually granted a scope limit");
+  assert.match(
+    guard,
+    /!scoped\.hasCodeChange && !scoped\.hasDocChange/,
+    "…and only when this session has changed nothing at all",
+  );
+});
+
+test("declare_done prints the proxy's decisions itself, and the audit wait has its own budget", () => {
+  // TWO FACTS THE GATE MUST STATE RATHER THAN TRUST TO PROSE.
+  //
+  // (a) A decision the proxy took on the user's behalf is INVISIBLE unless the
+  //     gate says so — downstream it is indistinguishable from their own, and
+  //     the agent's summary is not a record. So the completion report prints it
+  //     from the state, mechanically (empty in the ordinary case).
+  const doneBody = toolBodyOf("declare_done");
+  assert.match(
+    doneBody,
+    /formatProxyDecisionReport\(state\.proxyDecisions/,
+    "the completion report must print the proxy's decisions from the state, not from the summary",
+  );
+  // (b) The gate's own audit wait must NOT borrow `judge_wait`'s ten minutes:
+  //     measured 2026-09-19, an eleven-minute goal audit was reported as
+  //     「等待未命中本轮 report」 because the borrowed budget ran out, and the
+  //     agent had to re-run the audit to collect a verdict already on disk.
+  const waitFn = windowOf("async function selfAuditWait", "\n  }", "selfAuditWait");
+  assert.match(waitFn, /budgetMs: AUDIT_SELF_WAIT_BUDGET_MS/, "the gate's own wait carries its own budget");
+  assert.doesNotMatch(waitFn, /JUDGE_WAIT_MAX_TIMEOUT_MS/, "…and not the agent-facing one");
 });
 
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {

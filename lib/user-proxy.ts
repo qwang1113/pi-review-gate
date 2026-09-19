@@ -78,6 +78,18 @@ export interface ProxyRaceOutcome<T> {
    * a value here rather than a flag the caller could forget to read.
    */
   byProxy?: { rationale: string; at: string };
+  /**
+   * THE WINDOW ELAPSED AND THE PROXY COULD NOT ANSWER — nobody has decided.
+   *
+   * A separate fact from `answer: undefined`, which is what an ANSWERED dialog
+   * returns when the human declined or closed the box. The caller needs the
+   * difference because it owes the user two different things: a call that was
+   * answered needs nothing more, while this case means a decision is still
+   * owed and the user was not there to make it. The gate says so out loud
+   * (measured need: a dialog that times out silently is indistinguishable, to
+   * the user, from one that was answered).
+   */
+  proxyFailed?: true;
 }
 
 /**
@@ -98,6 +110,21 @@ export interface ProxyRaceOutcome<T> {
 export async function raceWithUserProxy<T>(input: {
   /** The human's own answer — the dialog's existing promise. */
   direct: Promise<T | undefined>;
+  /**
+   * RESOLVES WHEN THE QUESTION IS ACTUALLY ON SCREEN (2026-09-19).
+   *
+   * The window answers "did the user have this question for thirty minutes?",
+   * and a dialog can sit in a QUEUE behind another one for long stretches — the
+   * dialog queue shows one box at a time, so a second `askChoice` in the same
+   * assistant message waits its turn. Starting the clock when the caller queued
+   * it meant a question could be answered by the proxy BEFORE the user ever saw
+   * it (review round 1, measured: a second dialog behind one that stayed open
+   * past the window).
+   *
+   * Omitted ⇒ the window starts immediately, which is what a caller with no
+   * queue in front of it wants.
+   */
+  displayed?: Promise<void>;
   /** Start the proxy's attempt. Called AT MOST ONCE, and only after the window. */
   startProxy: () => Promise<ProxyChoice | undefined>;
   /** The rows the answer must be one of, verbatim. Empty ⇒ the proxy is not asked. */
@@ -125,31 +152,42 @@ export async function raceWithUserProxy<T>(input: {
 
     // A dialog with nothing to choose from is not a question the proxy can
     // answer, and it must not become a hang: the window still runs, and its
-    // expiry settles as "nobody answered".
+    // expiry settles as "nobody answered" — REPORTED as the proxy's failure,
+    // because a decision is still owed.
+    //
+    // THE WINDOW IS ARMED WHEN THE BOX APPEARS, not when it was queued — see
+    // `displayed`. A race that never arms is not a hang: the dialog ahead of it
+    // has its own window, and whichever way THAT one ends, the queue advances
+    // and this one is displayed.
     const mayAskProxy = input.options.length > 0;
-    timer = schedule(() => {
-      if (!mayAskProxy) {
-        finish({ answer: undefined });
-        return;
-      }
-      void input.startProxy().then(
-        (decision) => {
-          // THE ROW CHECK IS HERE, NOT IN THE PARSER: it is the rule that makes
-          // a proxied answer indistinguishable from a human one downstream, so
-          // it is enforced on the single path every proxy answer travels.
-          const choice = decision?.choice;
-          if (decision === undefined || typeof choice !== "string" || !input.options.includes(choice)) {
-            finish({ answer: undefined });
-            return;
-          }
-          finish({
-            answer: choice as unknown as T,
-            byProxy: { rationale: decision.rationale, at: new Date(now()).toISOString() },
-          });
-        },
-        () => finish({ answer: undefined }),
-      );
-    }, timeoutMs);
+    const arm = (): void => {
+      timer = schedule(() => {
+        if (!mayAskProxy) {
+          finish({ answer: undefined, proxyFailed: true });
+          return;
+        }
+        void input.startProxy().then(
+          (decision) => {
+            // THE ROW CHECK IS HERE, NOT IN THE PARSER: it is the rule that
+            // makes a proxied answer indistinguishable from a human one
+            // downstream, so it is enforced on the single path every proxy
+            // answer travels.
+            const choice = decision?.choice;
+            if (decision === undefined || typeof choice !== "string" || !input.options.includes(choice)) {
+              finish({ answer: undefined, proxyFailed: true });
+              return;
+            }
+            finish({
+              answer: choice as unknown as T,
+              byProxy: { rationale: decision.rationale, at: new Date(now()).toISOString() },
+            });
+          },
+          () => finish({ answer: undefined, proxyFailed: true }),
+        );
+      }, timeoutMs);
+    };
+    if (input.displayed === undefined) arm();
+    else void input.displayed.then(arm);
 
     void input.direct.then(
       (answer) => finish({ answer }),

@@ -5245,12 +5245,27 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
     // is a getter that asserts the context is still alive, and a dialog can wait
     // a long time for its turn. Read once and captured, not read again inside.
-    const signal = dialogSignal(uiCtx.signal, opts.signal);
+    //
+    // THE RACE'S OWN SIGNAL IS MERGED IN HERE (2026-09-19), not at the queue
+    // call alone: the queue slot and the box on screen are the SAME dialog, and
+    // both have to end when the race settles. A proxy answer that released the
+    // queue wait while leaving `renderChoice` on screen would be a dialog the
+    // user can still type into and nobody will ever read.
+    const settledBy = new AbortController();
+    const signal = dialogSignal(uiCtx.signal, opts.signal, settledBy.signal);
     // A BOX THAT IS ALREADY SETTLED IS NOT RAISED, AND NOT ANNOUNCED: the queue
     // drops a waiter whose signal aborts (before OR during its turn) without
     // raising anything or ringing a banner — telling the user to come answer
     // something nobody is asking any more is the same mistake.
+    // THE WINDOW STARTS WHEN THE BOX DOES (2026-09-19). `askChoice` may be one
+    // of several calls in a single assistant message, and the dialog queue shows
+    // ONE box at a time — so a queued question could reach its thirty minutes
+    // before the user ever saw it (review round 1). `displayed` resolves inside
+    // the queue work below, which is the moment this dialog owns the screen.
+    let markDisplayed: (() => void) | undefined;
+    const displayed = new Promise<void>((resolve) => { markDisplayed = resolve; });
     const asked = scheduleDialog(async () => {
+      markDisplayed?.();
       // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
       // any session shows comes through this function, so "the gate has stopped
       // and is waiting for the human" needs no second detector. The policy
@@ -5314,11 +5329,27 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // the single render point for all twelve dialogs and stays wiring.
     const decided = await raceWithUserProxy<string>({
       direct: asked,
+      displayed,
       options: spec.options,
       startProxy: () => proxyAnswerFor(spec, opts.body),
     });
+    // Whatever settled it, the box is done — see `settledBy` above.
+    settledBy.abort();
     if (decided.byProxy !== undefined && decided.answer !== undefined) {
       recordProxyDecision(spec, decided.answer, decided.byProxy);
+    } else if (decided.proxyFailed === true) {
+      // NOBODY DECIDED, AND THE USER IS NOT HERE. Say so: a dialog that times
+      // out silently is indistinguishable, to the user, from one that was
+      // answered — and this is the only moment the fact exists. The gate does
+      // NOT invent an answer here; the conservative landing is the absence of
+      // one, which every caller already reads correctly.
+      try {
+        latestCtx?.ui.notify(
+          `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答，且 arbiter 无法代答` +
+            "（未配置 / 失败 / 输出不可解析）—— 这一项**还没有任何决定**，等你回来处理。",
+          "warning",
+        );
+      } catch { /* headless */ }
     }
     return decided.answer;
   }
