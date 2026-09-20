@@ -86,12 +86,12 @@ export function armingFromFacts(facts: ArmingFacts): ArmingFlags {
  */
 export function reconcileArming(current: ArmingFlags, facts: ArmingFacts): ArmingFlags & { changed: boolean } {
   const hasBranchCommits = facts.commitsAhead > 0;
+  // ONE IMPLEMENTATION OF THE RULE, both branches (review round 2 P2): the
+  // non-empty case IS `armingFromFacts`, spelled by calling it — a copy of its
+  // two expressions here is the same drift this module exists to remove.
   const justified: ArmingFlags = facts.files.length === 0
     ? { hasCodeChange: hasBranchCommits, hasDocChange: hasBranchCommits }
-    : {
-        hasCodeChange: hasBranchCommits || facts.files.some(isCodeFile),
-        hasDocChange: facts.files.some(isDocFile),
-      };
+    : armingFromFacts(facts);
   const hasCodeChange = current.hasCodeChange && justified.hasCodeChange;
   const hasDocChange = current.hasDocChange && justified.hasDocChange;
   return {

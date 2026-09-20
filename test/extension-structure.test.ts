@@ -6852,6 +6852,12 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
     "…and pays for the git call the old kind-only clearing never made",
   );
   assert.match(turnEnd, /couldReconcile\(current, files\)/, "…skipped when nothing could be cleared");
+  assert.match(
+    turnEnd,
+    /for \(const root of sessionRepos\) \{\n      if \(root === primaryRepoRoot\) continue;/,
+    "…and every OTHER repo the session worked in is reconciled by the same rule (quality round 2 P2): a secondary repo's flags had no clearing path at all",
+  );
+  assert.match(turnEnd, /reconcileArming\(repoCurrent, \{/, "…with the same two facts");
   assert.doesNotMatch(
     turnEnd,
     /!files\.some\(isCodeFile\)/,
@@ -6967,6 +6973,28 @@ test("F4: the round's receipt names the checkpoint and the files in it", () => {
     /\.\.\.\(checkpointFacts === undefined \? \{\} : \{ checkpoint: checkpointFacts \}\)/,
     "…and it is in `details` too, not only in prose",
   );
+});
+
+test("the arming rule itself exists ONCE — the reconciliation calls it, never re-spells it", () => {
+  // Quality round 2 P2: the whole point of the module is that the rule cannot
+  // drift, so a second copy of its two expressions inside `reconcileArming`
+  // (they were there) is the same defect one level down.
+  const arming = readFileSync(join(ROOT, "lib", "gate-arming.ts"), "utf8");
+  const reconcile = arming.slice(
+    arming.indexOf("export function reconcileArming"),
+    arming.indexOf("export function couldReconcile"),
+  );
+  assert.ok(reconcile.length > 0, "the reconciliation is in this module");
+  assert.doesNotMatch(
+    reconcile,
+    /files\.some\(/,
+    "…and it re-spells neither expression — that copy was the finding",
+  );
+  assert.match(reconcile, /: armingFromFacts\(facts\);/, "the non-empty branch CALLS the rule");
+  // The two `files.some(isCodeFile/isDocFile)` expressions that remain are the
+  // rule's own definition and `couldReconcile`'s cheap guard — different
+  // questions with the same input, not a second copy of the rule.
+  assert.equal(arming.match(/files\.some\(isCodeFile\)/g)?.length, 2, "the code-file test is not scattered");
 });
 
 test("F2: the seeder re-checks gitignore in the DESTINATION, and tells the truth when it cannot", () => {

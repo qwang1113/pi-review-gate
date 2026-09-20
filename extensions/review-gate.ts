@@ -1512,14 +1512,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     return stateForRepo(root);
   }
 
-  /** Normalize a tool/git path to a repo-relative form for scope comparisons
-   *  (changedFiles() emits repo-root-relative paths; edit tools may pass
-   *  absolute). NOTE: assumes the session cwd IS the repo root — the same
-   *  standing assumption sidecarPath() and every changedFiles()/isCodeFile()
-   *  consumer in this file already make; scope-set membership relies on it. */
   /**
    * The path as the REPOSITORY sees it — the form `git status`, `git ls-files`
-   * and a reviewer's findings all use.
+   * and a reviewer's findings all use (changedFiles() emits the same form; edit
+   * tools may pass absolute).
    *
    * ROOT-RELATIVE, NOT `cwd`-RELATIVE (review round 1 P1, drill F3). A session
    * launched inside a subdirectory used to record `x.ts` for `<root>/sub/x.ts`:
@@ -1530,6 +1526,10 @@ export default function reviewGate(pi: ExtensionAPI) {
    * `lib/out-of-repo-paths.ts` reads as "this child wrote outside the repo".
    * A path genuinely outside the repository still comes back absolute — that is
    * the signal that module needs.
+   *
+   * (The two sentences that used to stand here — "assumes the session cwd IS the
+   * repo root" — described the behaviour this replaces, and scope-set membership
+   * no longer relies on that assumption.)
    */
   function repoRelative(p: string): string {
     const abs = p.startsWith("/") ? p : pathJoin(cwd, p);
@@ -6436,11 +6436,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       if (state.taskMode === "normal") return;
 
       // P-multi: an edit OUTSIDE the session repo arms THAT repo's own gate.
-      // A code/doc file's repo becomes the active repo (the target for the
-      // next verdict record / run_precommit) and joins the declare_done set.
-      // A non-code/doc edit (config dumps, scratch) must NOT retarget the
-      // active repo or grow the set (round-3 Nit — it would only waste a
-      // round on a change-less repo).
+      // A code/doc file's repo joins the declare_done set and becomes the
+      // active repo (the target for the next verdict record / run_precommit).
+      // ANY file's repo joins the set (review round 2 P1, drill F3): since the
+      // checkpoint commits this session's OWN new files — `.json`, `.yaml`,
+      // scratch — a repo holding one of them is a repo the session worked in,
+      // and leaving it out of the set would drop it from declare_done's coverage
+      // while its file sat in the gate's own-list. This SUPERSEDES the earlier
+      // "a non-code edit must not grow the set" nit: that was about wasting a
+      // round on a change-less repo, and the fail-closed direction wins over the
+      // round (a branch ahead is unreviewed work in every repo alike).
       const absEditPath = path.startsWith("/") ? path : pathJoin(cwd, path);
       // Attribution climbs to the nearest EXISTING ancestor first: `git
       // rev-parse` fails on a directory that does not exist, and a `write`
@@ -12959,6 +12964,35 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // return below for that reason.
     noteChildProgress(); // E — a turn boundary is forward progress (the timer heartbeat is not).
     reportChildState(ctx);
+
+    // …AND EVERY OTHER REPO THIS SESSION WORKED IN (quality round 2 P2). The
+    // rule is one rule, and a secondary repo had NO reconciliation path at all:
+    // once armed it stayed armed — while `declare_done` counts every repo in
+    // `sessionRepos`, so a flag nothing justifies any more kept the task
+    // unclosable. Same functions as the primary block below, clear-only, and the
+    // branch-ahead fact still holds an unreviewed branch open (the F1 rule), so
+    // this can only un-arm what the facts no longer support.
+    //
+    // Only repos with a state ALREADY created this session are visited
+    // (`repoStateCache`): a repo that was merely mentioned must not get a sidecar
+    // written for it here.
+    for (const root of sessionRepos) {
+      if (root === primaryRepoRoot) continue;
+      const st = repoStateCache.get(root);
+      if (st === undefined || (!st.hasCodeChange && !st.hasDocChange)) continue;
+      const repoFiles = changedFiles(root);
+      if (repoFiles === undefined) continue;
+      const repoCurrent = { hasCodeChange: st.hasCodeChange, hasDocChange: st.hasDocChange };
+      if (!couldReconcile(repoCurrent, repoFiles)) continue;
+      const repoNext = reconcileArming(repoCurrent, {
+        files: repoFiles,
+        commitsAhead: commitsAheadOfBaseSync(root),
+      });
+      if (!repoNext.changed) continue;
+      st.hasCodeChange = repoNext.hasCodeChange;
+      st.hasDocChange = repoNext.hasDocChange;
+      persistRepo(ctx as unknown as ExtensionContext, root);
+    }
 
     if (!state.hasCodeChange && !state.hasDocChange) return;
     const allFiles = changedFiles(cwd);
