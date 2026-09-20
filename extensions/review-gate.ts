@@ -76,6 +76,8 @@ import {
 import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "../lib/agent-directives.ts";
 
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
+import { armingFromFacts, couldReconcile, reconcileArming } from "../lib/gate-arming.ts";
+import { planCheckpointSweep } from "../lib/checkpoint-sweep.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { hostEditorFallback, hostReasonEditor, editorTextOf, REASON_EDITOR_BACK, type CustomDialogHost } from "../lib/reason-editor.ts";
@@ -369,7 +371,7 @@ import {
 } from "../lib/judge-session-tools.ts";
 
 import { registerJudgeSpawnTools } from "../lib/judge-spawn-tools.ts";
-import { awaitRoundReport } from "../lib/judge-lifecycle.ts";
+import { AUDIT_SELF_WAIT_BUDGET_MS, awaitRoundReport } from "../lib/judge-lifecycle.ts";
 
 // The judge tools that RELAY to a session (review_spawn / review_watch /
 // review_send) are the other half of the same family, and are registered the
@@ -487,6 +489,7 @@ import {
   type ScopeStampRecord,
   invalidateBindings,
   inheritGoalContract,
+  mergeProxyDecisions,
   nextFullPassTree,
 } from "../lib/gate-state.ts";
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
@@ -499,6 +502,7 @@ import {
   parkedReadyFate,
   readyLacksVerification,
   type ReviewFinding,
+  type ScopeExemption,
 } from "../lib/review-adjudicate.ts";
 import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
 import {
@@ -679,12 +683,26 @@ import {
   parseArbitrableAction,
   buildArbiterPrompt,
   runArbiter,
+  runArbiterProcess,
+  PROXY_ISOLATION_FLAGS,
   sha256,
   BYPASS_TOKEN_TTL_MS,
   type ArbitrableAction,
   type BypassToken,
   type TokenBindings,
 } from "../lib/arbitration.ts";
+// THE PROXY HALF OF EVERY DIALOG (2026-09-19): the timing, the race and the
+// prompt live in lib/user-proxy.ts, because `askChoice` below is the ONE place
+// all twelve dialogs are rendered and it must stay wiring only.
+import {
+  PROXY_ARBITER_TIMEOUT_MS,
+  PROXY_SYSTEM_PROMPT,
+  buildProxyPrompt,
+  formatProxyDecisionReport,
+  parseProxyDecision,
+  raceWithUserProxy,
+  type ProxyChoice,
+} from "../lib/user-proxy.ts";
 
 // TASK_TEXT_MARKER now lives in lib/constants.ts: the two prepare modules
 // WRITE it and `extractTaskText` below READS it, so one definition serves all
@@ -794,10 +812,15 @@ function findProjectAgentText(projectAgentsDir: string, name: string): string | 
 }
 
 /** Detect commits ahead of the upstream tracking branch or main/master. P0: also
-    checks @{upstream} so local commits ahead of remote on any branch are caught. */
-async function commitsAheadOfBase(cwd: string): Promise<number> {
+    checks @{upstream} so local commits ahead of remote on any branch are caught.
+
+    SYNC ON PURPOSE (review round 1 P1, drill F1 follow-up): the secondary-repo
+    arming site (`stateForRepo`) is a synchronous state factory, and a branch
+    ahead of its base arms the gate THERE as well — a repo whose only work is
+    already committed must not read as "nothing to review" to the ship gate,
+    which is exactly the fail-open F1 closed for the primary repo. */
+function commitsAheadOfBaseSync(cwd: string): number {
   try {
-    const { execFileSync } = await import("node:child_process");
     // Priority 1: upstream tracking branch (catches local ahead of remote on any branch)
     try {
       const out = execFileSync("git", ["rev-list", "--count", "@{upstream}..HEAD"], {
@@ -830,6 +853,11 @@ async function commitsAheadOfBase(cwd: string): Promise<number> {
     }
   } catch { /* git unavailable */ }
   return 0;
+}
+
+/** The async spelling the injectable dep seam declares. ONE implementation. */
+async function commitsAheadOfBase(cwd: string): Promise<number> {
+  return commitsAheadOfBaseSync(cwd);
 }
 
 export default function reviewGate(pi: ExtensionAPI) {
@@ -1020,6 +1048,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       },
       now: () => Date.now(),
       aborted: () => signal?.aborted === true,
+      // THE GATE OWNS ITS OWN BUDGET (2026-09-19). Borrowing `judge_wait`'s
+      // ten-minute cap made an eleven-minute goal audit look like a gate
+      // defect: the budget expired, `awaitRoundEnd` reported 「等待未命中本轮
+      // report」, nothing was recorded, and the agent re-ran the whole audit to
+      // collect a verdict that had already landed. An audit is not an agent
+      // wait — see `AUDIT_SELF_WAIT_BUDGET_MS`.
+      budgetMs: AUDIT_SELF_WAIT_BUDGET_MS,
     }) as ReturnType<typeof callTool>;
 
   }
@@ -1240,13 +1275,18 @@ export default function reviewGate(pi: ExtensionAPI) {
       } else {
         s = emptyState(state.sessionId ?? null, projectConfig.maxRounds);
         const files = changedFiles(root);
-        if (files && files.length > 0) {
-          if (files.some(isCodeFile)) s.hasCodeChange = true;
-          if (files.some(isDocFile)) s.hasDocChange = true;
-          if (s.hasCodeChange || s.hasDocChange) {
-            s.review.verdict = "PENDING";
-            s.precommit.verdict = "NOT_RUN";
-          }
+        // SAME RULE as every other arming site (`lib/gate-arming.ts`, 2026-09-20),
+        // and BOTH facts — the branch-ahead half included (review round 1 P1):
+        // a secondary repo whose only work is already committed would otherwise
+        // read as "nothing to review" to that repo's ship gate, which is the
+        // fail-open F1 closed for the primary repo. The sync helper exists for
+        // this call site (it is a synchronous state factory).
+        const armed = armingFromFacts({ files: files ?? [], commitsAhead: commitsAheadOfBaseSync(root) });
+        if (armed.hasCodeChange || armed.hasDocChange) {
+          s.hasCodeChange = armed.hasCodeChange;
+          s.hasDocChange = armed.hasDocChange;
+          s.review.verdict = "PENDING";
+          s.precommit.verdict = "NOT_RUN";
         }
         // A relay successor continues the same work in EVERY repo it touched,
         // so a SECONDARY repo's sidecar is inherited on the same terms as the
@@ -1472,14 +1512,28 @@ export default function reviewGate(pi: ExtensionAPI) {
     return stateForRepo(root);
   }
 
-  /** Normalize a tool/git path to a repo-relative form for scope comparisons
-   *  (changedFiles() emits repo-root-relative paths; edit tools may pass
-   *  absolute). NOTE: assumes the session cwd IS the repo root — the same
-   *  standing assumption sidecarPath() and every changedFiles()/isCodeFile()
-   *  consumer in this file already make; scope-set membership relies on it. */
+  /**
+   * The path as the REPOSITORY sees it — the form `git status`, `git ls-files`
+   * and a reviewer's findings all use (changedFiles() emits the same form; edit
+   * tools may pass absolute).
+   *
+   * ROOT-RELATIVE, NOT `cwd`-RELATIVE (review round 1 P1, drill F3). A session
+   * launched inside a subdirectory used to record `x.ts` for `<root>/sub/x.ts`:
+   * that matched nothing downstream. The checkpoint's "did this session write
+   * it" test compares against git's root-relative paths, so the session's own
+   * new file was left out of its own commit; and a file inside the repo but
+   * outside that `cwd` was recorded as an ABSOLUTE path, which
+   * `lib/out-of-repo-paths.ts` reads as "this child wrote outside the repo".
+   * A path genuinely outside the repository still comes back absolute — that is
+   * the signal that module needs.
+   *
+   * (The two sentences that used to stand here — "assumes the session cwd IS the
+   * repo root" — described the behaviour this replaces, and scope-set membership
+   * no longer relies on that assumption.)
+   */
   function repoRelative(p: string): string {
     const abs = p.startsWith("/") ? p : pathJoin(cwd, p);
-    return abs.startsWith(cwd + "/") ? abs.slice(cwd.length + 1) : abs;
+    return abs.startsWith(primaryRepoRoot + "/") ? abs.slice(primaryRepoRoot.length + 1) : abs;
   }
 
   // LLM semantic guard layer (DeepSeek V4 Flash — lib/llm-classify.ts).
@@ -1685,7 +1739,10 @@ export default function reviewGate(pi: ExtensionAPI) {
    * timing record) describe the same round the same way.
    */
   function reviewScopeFor(root: string, st: GateState): ReviewScopeDecision {
-    const base = st.lastReadyReview;
+    // WHAT THIS SESSION HAS READ — any concluded round, BLOCKED included.
+    // `settledConclusion` below asks the narrower question (what was
+    // CONFIRMED) and still demands a READY.
+    const base = st.lastReviewedTree;
     // No settled tree ⇒ full anyway. Returning before the lane probe keeps a
     // session that has never had a READY free of a registry scan and a
     // directory read on every turn.
@@ -1741,8 +1798,12 @@ export default function reviewGate(pi: ExtensionAPI) {
    * nothing. Undefined when there is no such review (⇒ a full round anyway).
    */
   function settledConclusion(st: GateState): SettledConclusion | undefined {
-    const base = st.lastReadyReview;
-    if (!base) return undefined;
+    const base = st.lastReviewedTree;
+    // ONLY A READY SETTLES ANYTHING (2026-09-19). A BLOCKED tree is one the
+    // previous round READ — which is why `reviewScopeFor` uses it — but nothing
+    // about it was approved, and handing it to the next reviewer as settled
+    // would tell it to skip exactly the content the previous round refused.
+    if (!base || base.verdict !== "READY") return undefined;
     // `rounds` is the recorded-round COUNT at directive time, not the round
     // that produced the verdict (rounds recorded after it are included) — the
     // directive words it that way too.
@@ -3848,9 +3909,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     setHierarchy({ ...judgeHierarchy, [judgeId]: { ...entry, lastModelEventCount: events.length } });
     const lines = fresh.map((event) => {
       const why = event.error ? `（${event.error}）` : "";
-      return event.exhausted
-        ? `${modelKeyOf(event.spec)} 失败${why}，链上已无可用槽`
-        : `${modelKeyOf(event.spec)} 失败${why} → 切到 ${event.to ? modelKeyOf(event.to) : "?"}`;
+      if (!event.exhausted) {
+        return `${modelKeyOf(event.spec)} 失败${why} → 切到 ${event.to ? modelKeyOf(event.to) : "?"}`;
+      }
+      // The per-slot reasons are what make this line actionable — a banner that
+      // says only "链上已无可用槽" cannot tell a rate limit from a bad model id.
+      const tried = event.tried ?? [];
+      const detail = tried.length === 0
+        ? ""
+        : "：" + tried.map((t) => `${modelKeyOf(t.spec)}（${t.reason}）`).join("、");
+      return `${modelKeyOf(event.spec)} 失败${why}，链上已无可用槽${detail}`;
     });
     try { latestCtx?.ui.notify(`review-gate: judge 模型 fallback —— ${lines.join("；")}`, "warning"); } catch { /* headless */ }
   }
@@ -5110,6 +5178,116 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   const scheduleDialog = createDialogQueue();
 
   /**
+   * ASK THE PROXY (2026-09-19) — what happens when a dialog waits thirty
+   * minutes with nobody at the terminal.
+   *
+   * NO ARBITER, NO PROXY: an unconfigured arbiter resolves to no model, and
+   * this returns `undefined` — which the dialog reads exactly as it reads a
+   * closed box, so a gate with no arbiter still cannot grant anything by
+   * omission. Same fail-closed shape the arbitration paths use.
+   *
+   * The prompt carries a TRANSCRIPT POINTER, not the transcript: the proxy is a
+   * one-shot process (lib/arbitration.ts) and is told where to read the
+   * conversation rather than handed it — the choice `lib/adviser-brief.ts` makes
+   * too, for the same reason (a session log dwarfs the question).
+   */
+  async function proxyAnswerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyChoice | undefined> {
+    const model = resolveArbiterModel();
+    if (!model) return undefined;
+    const transcript = ownTranscriptPath();
+    const prompt = buildProxyPrompt({
+      title: spec.title,
+      // THE ROWS THE USER WOULD HAVE SEEN, verbatim, and the ONLY values the
+      // answer may take: `raceWithUserProxy` refuses anything else, which is what
+      // makes a proxied answer indistinguishable downstream.
+      options: spec.options,
+      ...(body === undefined ? {} : { body }),
+      ...(transcript === undefined ? {} : { transcript }),
+      // WHICH REPO THE PROXY IS ASKED ABOUT (review round 3 P1): the same one
+      // its decision will be filed under. Reading it twice would let the prompt
+      // and the sidecar disagree.
+      repoRoot: root,
+    });
+    const raw = await runArbiterProcess(
+      model, prompt, undefined, PROXY_ARBITER_TIMEOUT_MS, PROXY_SYSTEM_PROMPT,
+      // THE READ-ONLY SET, NOT `--no-tools` (review round 2 P1). The appeal
+      // arbiter's isolation is text-in/JSON-out; this one is asked to READ the
+      // session, and a prompt carrying a transcript pointer is worthless to a
+      // process that cannot open a file.
+      PROXY_ISOLATION_FLAGS,
+    );
+    return parseProxyDecision(raw);
+  }
+
+  /**
+   * WRITE THE DECISION WHERE THE USER WILL SEE IT (2026-09-19).
+   *
+   * This is the whole safety story of the proxy: downstream its answer is
+   * indistinguishable from the user's own — it opens the same doors. The only
+   * thing that keeps that honest is that it is VISIBLE, in three places: this
+   * state record, a notice in the session, and the completion report
+   * `declare_done` prints. A proxy decision that left no trace would be an
+   * authorization the user never gave and cannot discover.
+   */
+  function recordProxyDecision(
+    spec: ChoiceSpec,
+    choice: string,
+    byProxy: { rationale: string; at: string },
+    /**
+     * WHICH REPO'S SIDE CAR (review round 2 P1). The dialog does not know, and
+     * `askChoice` is ONE function for all twelve sites — so the caller resolves
+     * it. A decision recorded under the primary repo while its question belonged
+     * to a secondary one lands in the wrong sidecar AND is missing from that
+     * repo's completion report.
+     */
+    root: string,
+  ): void {
+    const st = stateForRepo(root);
+    st.proxyDecisions = [
+      ...(st.proxyDecisions ?? []),
+      {
+        at: byProxy.at,
+        question: spec.title,
+        options: [...spec.options],
+        choice,
+        rationale: byProxy.rationale,
+      },
+    ];
+    // `persistRepo`, not `persist`: the latter writes the CURRENT repo's
+    // sidecar, and the decision belongs to `root` (review round 2 P1).
+    if (latestCtx) persistRepo(latestCtx, root);
+    try {
+      latestCtx?.ui.notify(
+        `review-gate: 对话框等了 30 分钟无人作答，已由 arbiter 代为决定 —— 「${spec.title}」→ ${choice}` +
+          (byProxy.rationale ? `\n依据：${byProxy.rationale}` : "") +
+          "\n这条会记入 declare_done 的完成报告；你回来可以推翻它（重新走一遍对应的步骤即可）。",
+        "warning",
+      );
+    } catch { /* headless */ }
+  }
+
+  /**
+   * EVERY PROXY DECISION OF THIS SESSION, ACROSS EVERY REPO IT TOUCHED
+   * (review round 2 P1). `declare_done` runs ONCE for the session, while each
+   * decision belongs to whichever repo its dialog was about — reading only the
+   * primary repo's sidecar would silently omit the rest, and an incomplete list
+   * reads as "that was all of them", which is the one thing this record cannot
+   * get wrong.
+   *
+   * Deduped by (time, question, choice): a session that touched the same repo
+   * twice must not print the same decision twice either.
+   */
+  function allProxyDecisions(): NonNullable<GateState["proxyDecisions"]> {
+    // The dedupe lives in `mergeProxyDecisions` (哲学三: one implementation) —
+    // this is the same union, folded over more than two sessions.
+    let out: NonNullable<GateState["proxyDecisions"]> = [];
+    for (const root of sessionRepos) {
+      out = mergeProxyDecisions(out, stateForRepo(root).proxyDecisions);
+    }
+    return out;
+  }
+
+  /**
    * THE one dialog renderer (user decision, 2026-09-08): the gate's question
    * template, whole. Every dialog in this file — and
    * every dialog in the tool modules that inject this function — comes
@@ -5140,17 +5318,54 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   async function askChoice(
     uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; back?: boolean } = {},
+    opts: {
+      body?: string;
+      signal?: AbortSignal;
+      back?: boolean;
+      repo?: string;
+      onUndecided?: () => void;
+    } = {},
   ): Promise<string | undefined> {
     // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
     // is a getter that asserts the context is still alive, and a dialog can wait
     // a long time for its turn. Read once and captured, not read again inside.
-    const signal = dialogSignal(uiCtx.signal, opts.signal);
+    //
+    // THE RACE'S OWN SIGNAL IS MERGED IN HERE (2026-09-19), not at the queue
+    // call alone: the queue slot and the box on screen are the SAME dialog, and
+    // both have to end when the race settles. A proxy answer that released the
+    // queue wait while leaving `renderChoice` on screen would be a dialog the
+    // user can still type into and nobody will ever read.
+    const settledBy = new AbortController();
+    const signal = dialogSignal(uiCtx.signal, opts.signal, settledBy.signal);
     // A BOX THAT IS ALREADY SETTLED IS NOT RAISED, AND NOT ANNOUNCED: the queue
     // drops a waiter whose signal aborts (before OR during its turn) without
     // raising anything or ringing a banner — telling the user to come answer
     // something nobody is asking any more is the same mistake.
-    return scheduleDialog(async () => {
+    // THE WINDOW STARTS WHEN THE BOX DOES (2026-09-19). `askChoice` may be one
+    // of several calls in a single assistant message, and the dialog queue shows
+    // ONE box at a time — so a queued question could reach its thirty minutes
+    // before the user ever saw it (review round 1). `displayed` resolves inside
+    // the queue work below, which is the moment this dialog owns the screen.
+    let markDisplayed: (() => void) | undefined;
+    const displayed = new Promise<void>((resolve) => { markDisplayed = resolve; });
+    // WHICH REPO, BOUND WHEN THE BOX APPEARS (review round 3 P1). The answer
+    // belongs to the work this session was doing when the user would have SEEN
+    // the question — and `activeRepoRoot.current` follows the edits, so a dialog
+    // queued behind another one, or a thirty-minute wait, can move it. Bound on
+    // the queue's own turn and never re-read: fixing the sidecar's repo while
+    // the proxy reads a different one is the same defect from the other end.
+    //
+    // AN EXPLICIT `opts.repo` OUTRANKS IT AND NEVER DRIFTS (review round 4 P1):
+    // callers that KNOW which repo their question is about (a goal, a
+    // restatement) must say so — a secondary repo's question can be raised
+    // without that repo ever having been the active one, and then the fallback
+    // would file a stand-in's answer under the wrong sidecar AND point the proxy
+    // at the wrong repository.
+    const dialogRootNow = (): string => opts.repo ?? activeRepoRoot.current ?? primaryRepoRoot;
+    let dialogRoot = dialogRootNow();
+    const asked = scheduleDialog(async () => {
+      markDisplayed?.();
+      dialogRoot = dialogRootNow();
       // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
       // any session shows comes through this function, so "the gate has stopped
       // and is waiting for the human" needs no second detector. The policy
@@ -5200,6 +5415,49 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       if (answer !== undefined) lastUserInteractionAt = new Date().toISOString();
       return answer;
     }, signal);
+
+    // THE THIRTY-MINUTE HAND-OFF (2026-09-19, user decision). The box above is
+    // unchanged — not closed, not shortened, and a user who answers at minute 29
+    // wins outright. What is new is that minute 30 no longer means "nobody will
+    // ever answer": `arbiter` reads this session's own context and takes the
+    // user's place, and what it answers is recorded as a proxy decision (see
+    // `recordProxyDecision`) so the user can find it afterwards.
+    //
+    // THE RACE IS NOT WRITTEN HERE. Timing, the row check and the
+    // human-always-wins rule live in lib/user-proxy.ts, the only arrangement
+    // that makes them testable without waiting half an hour — this function is
+    // the single render point for all twelve dialogs and stays wiring.
+    const decided = await raceWithUserProxy<string>({
+      direct: asked,
+      displayed,
+      options: spec.options,
+      startProxy: () => proxyAnswerFor(spec, opts.body, dialogRoot),
+    });
+    // Whatever settled it, the box is done — see `settledBy` above.
+    settledBy.abort();
+    if (decided.byProxy !== undefined && decided.answer !== undefined) {
+      recordProxyDecision(spec, decided.answer, decided.byProxy, dialogRoot);
+    } else if (decided.proxyFailed === true) {
+      // NOBODY DECIDED, AND THE USER IS NOT HERE. Say so: a dialog that times
+      // out silently is indistinguishable, to the user, from one that was
+      // answered — and this is the only moment the fact exists. The gate does
+      // NOT invent an answer here; the conservative landing is the absence of
+      // one, which every caller already reads correctly.
+      //
+      // THE CALLER IS TOLD TOO (review round 3 P1): `undefined` alone cannot
+      // distinguish this from a dismissed box, and for a consent request those
+      // two must not have the same consequence — a decline LOCKS the request
+      // for the session, and a timeout is not a decline.
+      try {
+        latestCtx?.ui.notify(
+          `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答，且 arbiter 无法代答` +
+            "（未配置 / 失败 / 输出不可解析）—— 这一项**还没有任何决定**，等你回来处理。",
+          "warning",
+        );
+      } catch { /* headless */ }
+      try { opts.onUndecided?.(); } catch { /* the caller's own bookkeeping */ }
+    }
+    return decided.answer;
   }
 
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
@@ -6178,11 +6436,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       if (state.taskMode === "normal") return;
 
       // P-multi: an edit OUTSIDE the session repo arms THAT repo's own gate.
-      // A code/doc file's repo becomes the active repo (the target for the
-      // next verdict record / run_precommit) and joins the declare_done set.
-      // A non-code/doc edit (config dumps, scratch) must NOT retarget the
-      // active repo or grow the set (round-3 Nit — it would only waste a
-      // round on a change-less repo).
+      // A code/doc file's repo joins the declare_done set and becomes the
+      // active repo (the target for the next verdict record / run_precommit).
+      // ANY file's repo joins the set (review round 2 P1, drill F3): since the
+      // checkpoint commits this session's OWN new files — `.json`, `.yaml`,
+      // scratch — a repo holding one of them is a repo the session worked in,
+      // and leaving it out of the set would drop it from declare_done's coverage
+      // while its file sat in the gate's own-list. This SUPERSEDES the earlier
+      // "a non-code edit must not grow the set" nit: that was about wasting a
+      // round on a change-less repo, and the fail-closed direction wins over the
+      // round (a branch ahead is unreviewed work in every repo alike).
       const absEditPath = path.startsWith("/") ? path : pathJoin(cwd, path);
       // Attribution climbs to the nearest EXISTING ancestor first: `git
       // rev-parse` fails on a directory that does not exist, and a `write`
@@ -6244,20 +6507,33 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         const otherRepo = editScope.root;
         const isProjectFile = isCodeFile(path) || isDocFile(path);
         const isNewRepo = !sessionRepos.has(otherRepo);
+        // THE REPO SET FOLLOWS THE RECORDING (review round 2 P1). A session that
+        // wrote only a `.json` in another repo HAS worked there: leaving that
+        // repo out of `sessionRepos` would drop it from `declare_done`'s
+        // coverage and from the sidecar's repo list while its file sits in the
+        // checkpoint's own-list. The ACTIVE repo still follows PROJECT files
+        // alone — a scratch path must not retarget verdict recording.
+        sessionRepos.add(otherRepo);
         if (isProjectFile) {
-          sessionRepos.add(otherRepo);
           activeRepoRoot.current = otherRepo;
         }
         const s = stateForRepo(otherRepo);
         let dirty = false;
         if (isCodeFile(path) && !s.hasCodeChange) { s.hasCodeChange = true; dirty = true; }
         if (isDocFile(path) && !s.hasDocChange) { s.hasDocChange = true; dirty = true; }
+        // EVERY path this session wrote is recorded, code/doc or not — the same
+        // rule as the primary branch below (review round 1 P1, drill F3):
+        // `review_checkpoint` commits THIS repo's own new files and nothing else,
+        // and a new `.json`/`.yaml` file of a secondary repo was left looking
+        // like a stranger's. The path is root-relative because that is the form
+        // git answers in (this branch already did that; the primary branch did
+        // not, and compared against `cwd` — fixed in `repoRelative`).
+        const rel = absEditPath.startsWith(otherRepo + "/")
+          ? absEditPath.slice(otherRepo.length + 1)
+          : absEditPath;
+        if (!s.sessionEditedFiles) s.sessionEditedFiles = [];
+        if (!s.sessionEditedFiles.includes(rel)) { s.sessionEditedFiles.push(rel); dirty = true; }
         if (isProjectFile) {
-          const rel = absEditPath.startsWith(otherRepo + "/")
-            ? absEditPath.slice(otherRepo.length + 1)
-            : absEditPath;
-          if (!s.sessionEditedFiles) s.sessionEditedFiles = [];
-          if (!s.sessionEditedFiles.includes(rel)) s.sessionEditedFiles.push(rel);
           invalidateBindings(s);
           // A NEW EDIT UN-FINISHES THE TASK (round-2 hardening). The
           // completion record is what a supervising orchestrator reads to
@@ -6294,14 +6570,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       activeRepoRoot.current = primaryRepoRoot;
       if (isCodeFile(path) && !state.hasCodeChange) { state.hasCodeChange = true; dirty = true; }
       if (isDocFile(path) && !state.hasDocChange) { state.hasDocChange = true; dirty = true; }
+      // EVERY PATH THIS SESSION WROTE IS RECORDED, code/doc or not (drill F3,
+      // 2026-09-20). The checkpoint commits this session's OWN new files and
+      // nothing else, and this list is how it knows which are its own: a
+      // `.json` fixture or a `.yaml` config is exactly as much this round's
+      // work as a `.ts` file, while extension-based classification would leave
+      // it looking like a stranger's file and keep it out of the reviewed
+      // commit. The ARMING below stays code/doc-only — that is a different
+      // question ("is there anything to review?") and its answer did not
+      // change.
+      const rel = repoRelative(path);
+      sessionEditedPaths.add(rel);
+      if (!state.sessionEditedFiles) state.sessionEditedFiles = [];
+      if (!state.sessionEditedFiles.includes(rel)) { state.sessionEditedFiles.push(rel); dirty = true; }
       if (isCodeFile(path) || isDocFile(path)) {
         // Scope tracking: this file is part of THIS session's own work — it is
         // always IN scope, even under a user-granted scope limit (which the
         // persisted lists must reflect across restarts).
-        const rel = repoRelative(path);
-        sessionEditedPaths.add(rel);
-        if (!state.sessionEditedFiles) state.sessionEditedFiles = [];
-        if (!state.sessionEditedFiles.includes(rel)) state.sessionEditedFiles.push(rel);
         if (state.scopeLimit) {
           if (!state.scopeLimit.sessionFiles.includes(rel)) {
             state.scopeLimit.sessionFiles.push(rel);
@@ -6443,8 +6728,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           // primary-repo-only; other repos always arm.
           const exempt = root === primaryRepoRoot ? new Set(state.scopeLimit?.preexistingFiles ?? []) : new Set<string>();
           const arming = exempt.size > 0 ? files.filter((f) => !exempt.has(f)) : files;
-          if (arming.some(isCodeFile) && !st.hasCodeChange) { st.hasCodeChange = true; }
-          if (arming.some(isDocFile) && !st.hasDocChange) { st.hasDocChange = true; }
+          // The file-kind half of the rule is `lib/gate-arming.ts`'s, here as
+          // everywhere (2026-09-20): this command brought dirty state BACK, and
+          // "what does it arm" is one question with one answer. `commitsAhead:
+          // 0` — this site re-arms on what the git command just restored, not on
+          // the branch's history (which `session_start` owns).
+          const armed = armingFromFacts({ files: arming, commitsAhead: 0 });
+          if (armed.hasCodeChange && !st.hasCodeChange) { st.hasCodeChange = true; }
+          if (armed.hasDocChange && !st.hasDocChange) { st.hasDocChange = true; }
           if (st.hasCodeChange || st.hasDocChange) {
             invalidateBindings(st);
             clearBypassToken();
@@ -6903,14 +7194,58 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           };
         }
 
-        const sweptIn = paths;
+        // WHAT THIS COMMIT TAKES — AND WHAT IT LEAVES (drill F3, 2026-09-20).
+        //
+        // `git add -A` took EVERYTHING, including files this session never
+        // wrote and no `.gitignore` covers: measured in the drill, the seeded
+        // `node_modules` symlink went into the history as `+1/−0 node_modules`
+        // and the reviewer read it out of its own change index. The gate's own
+        // commit is the one place nobody sees what is being added until
+        // afterwards, and a commit is not undoable in someone else's
+        // repository.
+        //
+        // So the sweep keeps:
+        //   - every TRACKED change (`M`/`D`/`R`/…) — that is the round's work;
+        //   - untracked paths THIS SESSION wrote through edit/write
+        //     (`st.sessionEditedFiles`), which is what makes a NEW file
+        //     reviewable at all;
+        // and leaves every other untracked-and-unignored path where it is:
+        // a file the session never touched is not this round's work, and
+        // committing it silently is how a secret, an artefact carrying an
+        // absolute path, or build output ends up in the history of the one
+        // tool whose job is to be careful.
+        //
+        // The leftover list comes from `ls-files -z`, NOT from the porcelain
+        // lines above: git QUOTES and escapes unusual names in `status`, and
+        // handing that form back as a pathspec matches nothing.
+        const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z"], {
+          cwd: root,
+          encoding: "utf8",
+        }).split("\0").filter((p) => p.length > 0);
+        const leftOut = planCheckpointSweep({ untracked, own: st.sessionEditedFiles ?? [] }).leftOut;
         execFileSync("git", ["add", "-A"], { cwd: root, encoding: "utf8" });
+        if (leftOut.length > 0) {
+          // Unstage, do not skip: `add -A` is still the right primitive for
+          // the tracked half (deletes and renames included), and `reset`
+          // leaves the leftover files exactly where they were — untracked, in
+          // the worktree, and named in the receipt.
+          execFileSync("git", ["reset", "-q", "--", ...leftOut], { cwd: root, encoding: "utf8" });
+        }
         execFileSync("git", ["commit", "-m", message], {
           cwd: root,
           encoding: "utf8",
           env: { ...process.env, REVIEW_GATE_BYPASS: "1" },
         });
         const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+        // THE COMMITTED FILES, READ FROM THE COMMIT (drill F4). The receipt
+        // used to describe the WORKTREE — which is how the symlink above could
+        // be committed without ever appearing in it — so it now reports what
+        // the commit actually carries.
+        const sweptIn = execFileSync(
+          "git",
+          ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", sha],
+          { cwd: root, encoding: "utf8" },
+        ).split("\0").filter((p) => p.length > 0);
         // Round-4 P2: the sha is persisted so prepare_review can compute
         // baseline..HEAD against it. Round-8 P1: record HEAD^ as prevSha —
         // the baseline start for the NEXT prepare — so the documented
@@ -6936,6 +7271,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             type: "text",
             text: `review-gate: checkpoint committed ${sha.slice(0, 12)} — \"${message}\". This commit is the review unit for the next round (baseline..HEAD).` +
               `\n\nCHECKPOINT_SHA=${sha}\nFiles: ${sweptIn.length} — ${sweptIn.slice(0, 20).join(", ")}${sweptIn.length > 20 ? " …" : ""}` +
+              // WHAT DID NOT GO IN, SAID OUT LOUD (drill F3/F4). A path left
+              // behind is invisible otherwise: the round reviews `baseline..HEAD`,
+              // so a change parked in an uncommitted file is a change nobody
+              // judged.
+              (leftOut.length > 0
+                ? `\n\n**未提交（${leftOut.length}）**：${leftOut.slice(0, 20).join(", ")}${leftOut.length > 20 ? " …" : ""}` +
+                  "\n这些路径没有被 gitignore，也不是本会话通过 edit/write 写过的文件 —— 门禁没有把它们带进这次提交（它们仍在 worktree 里）。" +
+                  "若其中有本轮的改动，请用 edit/write 工具重写一遍再送审：否则它不会进入审查范围 `baseline..HEAD`。"
+                : "") +
               (precommitBypassed
                 // R-22: never let a bypassed round read like a clean one.
                 ? "\n\n**本轮 precommit 被 `/gate-bypass` 覆盖**（用户授权）：全量测试并没有在这份内容上跑过。" +
@@ -6948,7 +7292,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
                   "run only targeted tests for files you keep editing, and let the round's own full lane be the single gate).") +
               (sizeCheck.advisory.length ? "\n\n" + formatFileSizeVerdict(sizeCheck) : ""),
           }],
-          details: { committed: true, sha, precommitBypassed },
+          details: { committed: true, sha, precommitBypassed, files: sweptIn, leftOut },
 
         };
       } catch (err) {
@@ -7268,6 +7612,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         /** Present when the quality round was SKIPPED — printed to the agent. */
         skipNote?: string;
         /**
+         * WHAT THIS CHAIN JUST FROZE (drill F4, 2026-09-20).
+         *
+         * `judge_submit` is the only surface the agent reads after a round is
+         * submitted, and it used to name neither the commit nor the files in
+         * it — so a checkpoint that swept something it should not have (F3:
+         * the seeded `node_modules` symlink) left no trace anywhere the agent
+         * or the user would look.
+         */
+        checkpoint?: { sha: string; files: string[]; leftOut: string[] };
+        /**
          * THE FUNCTIONAL BRIEF OF A PARALLEL ROUND (2026-09-16). Present
          * exactly when `role` is the quality judge: the caller dispatches both
          * judges back to back, because they judge the SAME immutable range and
@@ -7327,6 +7681,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       };
     }
     input.progress?.done(typeof commit.details?.sha === "string" ? String(commit.details.sha).slice(0, 12) : "worktree 已冻结");
+    const stringsOf = (value: unknown): string[] =>
+      Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+    const checkpoint = typeof commit.details?.sha === "string"
+      ? {
+          sha: commit.details.sha,
+          files: stringsOf(commit.details.files),
+          leftOut: stringsOf(commit.details.leftOut),
+        }
+      : undefined;
     // 3. Compute the range and the findings stream, and take the ready-made
     //    reviewer task text. `reason` rides along for the polish gate: without
     //    it a round after two READYs could never be submitted through the one
@@ -7397,6 +7760,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         role: QUALITY_ROLE,
         taskText: withNote(qualityTaskText),
         ...(qualityStream === undefined ? {} : { streamPath: qualityStream }),
+        ...(checkpoint === undefined ? {} : { checkpoint }),
         // The functional brief travels WITH it: the two judges are dispatched
         // in one breath (the caller owns the effects; this chain owns the
         // routing).
@@ -7422,6 +7786,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       ok: true,
       role: "reviewer",
       taskText: reviewerTask,
+      ...(checkpoint === undefined ? {} : { checkpoint }),
       // The findings stream is the agent's half of the round: it fixes what
       // the judge confirms WHILE the judge works. Dropping the path here would
       // leave that channel written but unread.
@@ -8764,6 +9129,39 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const root = target.root;
+      // NOTHING OF ITS OWN TO REVIEW, NOTHING TO DISPATCH (2026-09-19). Under a
+      // user-granted scope limit with no edits of its own this session has
+      // ALREADY been told the ship gate is disarmed — but `judge_submit` still
+      // ran the whole chain: a full precommit, a checkpoint, a dispatch, and a
+      // reviewer that could only ever conclude BLOCKED, because its range is the
+      // branch's pre-existing content, which this session is not allowed to
+      // touch. Measured in prime's t3-report-update: that shape burned minutes
+      // per round and then deadlocked on `declare_done` (its own goal forbade
+      // fixing what the reviewer found). The refusal states what the caller's
+      // gate state already says: there is nothing of its own to review.
+      if (params.role === "reviewer") {
+        const scoped = stateForRepo(root);
+        if (scoped.scopeLimit !== undefined && !scoped.hasCodeChange && !scoped.hasDocChange) {
+          return {
+            content: [{
+              type: "text",
+              text: buildRejection({
+                what: "judge_submit 被拒 —— 本会话没有任何自己的改动，且用户已批准缩小审查范围",
+                why:
+                  "门禁只覆盖本会话的改动（`request_scope_limit` 已生效），而本会话在这个仓库里零 edit：" +
+                  "没有东西需要审。派出去的 reviewer 只能拿到分支上**别人**的 diff，然后判出这一轮修不了的 " +
+                  "finding —— 这正是 prime 的 t3-report-update 卡死的那条路。",
+                by: "agent",
+                next:
+                  "直接收尾（`declare_done`）—— ship 拦截已经解除。若确实要审本会话以外的内容，" +
+                  "先让用户 `/gate-reset` 撤掉范围限制。",
+              }),
+            }],
+            details: { refused: "no-session-edits-under-scope-limit" },
+            isError: true,
+          };
+        }
+      }
       // NON-GIT SHORT-CIRCUIT: the review chain (precommit → checkpoint →
       // baseline..HEAD) is meaningless outside a repository, and its git
       // steps would leak fatal to the terminal. Refuse up front.
@@ -8842,6 +9240,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
        * reviewer starts in the same breath (see the loop below).
        */
       let parallelReviewer: { taskText: string; streamPath?: string } | undefined;
+      /**
+       * WHAT THE CHAIN FROZE, for the receipt (drill F4). Set by the reviewer
+       * chain only — the adviser and goal-audit branches make no commit.
+       */
+      let checkpointFacts: { sha: string; files: string[]; leftOut: string[] } | undefined;
       // Live progress for the whole submission: precommit → checkpoint →
       // prepare → dispatch. Each step publishes as it starts and as it ends,
       // so a round that stalls shows WHERE it stalled.
@@ -8874,6 +9277,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         dispatchRole = chain.role;
         skipNote = chain.skipNote;
         parallelReviewer = chain.parallelReviewer;
+        checkpointFacts = chain.checkpoint;
       }
 
       // The other two roles are the same shape: the gate builds the task the
@@ -9084,6 +9488,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             ]
           : []),
         ...(skipNote ? [`- 质量轮跳过：${skipNote}`] : []),
+        // THE COMMIT THIS ROUND JUDGES, AND WHAT WENT INTO IT (drill F4). The
+        // receipt named panes, transcripts and streams but not the reviewed
+        // unit itself — so "the gate committed a file I never wrote" (F3) was
+        // unreadable here, which is the only place the agent looks.
+        ...(checkpointFacts === undefined
+          ? []
+          : [
+              `- checkpoint ${checkpointFacts.sha.slice(0, 12)} 已冻结 ${checkpointFacts.files.length} 个文件：` +
+                `${checkpointFacts.files.slice(0, 12).join(", ")}${checkpointFacts.files.length > 12 ? " …" : ""}`,
+              ...(checkpointFacts.leftOut.length === 0
+                ? []
+                : [
+                    `- **未提交（${checkpointFacts.leftOut.length}）**：${checkpointFacts.leftOut.slice(0, 12).join(", ")}` +
+                      `${checkpointFacts.leftOut.length > 12 ? " …" : ""}` +
+                      " —— 未被 gitignore、也不是本会话用 edit/write 写过的文件；若其中有本轮改动，用它重写一遍再送下一轮。",
+                  ]),
+            ]),
         "- 本轮结束（通道 report 落盘）即完成；门禁会用标准报告唤醒你（结论、证据位置、记录情况、待答问题）。现在别等，先做别的确定性工作。",
       ];
       return {
@@ -9099,6 +9520,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
            * streams of a parallel round, not just the routed one.
            */
           judges: accepted,
+          ...(checkpointFacts === undefined ? {} : { checkpoint: checkpointFacts }),
           // THE ROUTED JUDGE'S OWN FIELDS, MATCHED BY ROLE (quality round P2,
           // 2026-09-16): the parallel round starts two judges, and a `role`
           // naming one of them beside the other's id/pane is the same lie the
@@ -9303,11 +9725,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       },
       switchTo: async (spec) => {
         const parsed = parseModelSpec(spec);
-        if (!parsed.provider || !parsed.id || !latestCtx) return false;
+        if (!parsed.provider || !parsed.id) return `spec 里解析不出 provider/id：${spec}`;
+        if (!latestCtx) return "会话还没有可用的 ctx（读不到模型注册表）";
         try {
           const model = latestCtx.modelRegistry.find(parsed.provider, parsed.id);
-          if (!model) return false;
-          if (!(await pi.setModel(model))) return false;
+          if (!model) return `注册表里没有这个模型：${parsed.provider}/${parsed.id}`;
+          if (!(await pi.setModel(model))) return `pi.setModel 拒绝了 ${parsed.provider}/${parsed.id}`;
           // The slot's own level, applied AFTER the switch (setModel resets it
           // to the new model's default). A level the model cannot take is not
           // a reason to abandon a working model — pi clamps it, and an unknown
@@ -9316,7 +9739,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             pi.setThinkingLevel(parsed.thinking as Parameters<typeof pi.setThinkingLevel>[0]);
           }
           return true;
-        } catch { return false; }
+        } catch (err) {
+          const text = err instanceof Error ? err.message : String(err);
+          return `切换 ${spec} 时抛错：${text.slice(0, 160)}`;
+        }
       },
       nudge: (text) => {
         try {
@@ -9678,6 +10104,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * interrupt it), so refusing a quality READY for want of a PASS would refuse
    * every quality round that finishes first — which is the normal case.
    */
+
+  /**
+   * The user's scope exemption, in the shape the adjudicator takes — or
+   * `undefined` when no scope limit is in force, which is the ordinary case
+   * and must stay byte-for-byte the old behaviour.
+   *
+   * BOTH RECORDERS CALL THIS (2026-09-19), and that is the point: the two
+   * adjudications answer different questions — the quality half gates the
+   * reviewer's dispatch, the review half gates shipping — but a quality round
+   * that blocks on an EXEMPTED file still kills the reviewer's pane through the
+   * cancel matrix. Fixing one and not the other leaves the same deadlock
+   * standing at the other door.
+   */
+  function scopeExemptionOf(st: GateState): ScopeExemption | undefined {
+    return st.scopeLimit === undefined ? undefined : { exemptFiles: st.scopeLimit.preexistingFiles };
+  }
+
   async function recordQualityVerdict(
     concluded: ReportConclusion,
     repo: string,
@@ -9688,17 +10131,18 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       return "review-gate: 质量轮的 report 里没有可识别的 verdict —— 什么都没有记录（fail-closed）：" +
         "reviewer **不会**被派出去。用 judge_submit({role:\"reviewer\"}) 重新送这一轮。";
     }
-    const parsed = adjudicateReviewConclusion({
-      verdict: verdictRaw,
-      findings: concluded.findings as ReviewFinding[],
-      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
-    });
     const target = resolveToolRepo(repo);
     if (!target.ok) return target.error;
     const targetRoot = target.root;
     if (!sessionInGit) return "review-gate: 非 git 目录 —— 无法记录质量裁决（无仓库可绑定）。";
     const st = stateForRepo(targetRoot);
     delete st.pausedQuestion;
+    // ONE adjudication, scope-aware since 2026-09-19 — see `ScopeExemption`.
+    const parsed = adjudicateReviewConclusion({
+      verdict: verdictRaw,
+      findings: concluded.findings as ReviewFinding[],
+      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
+    }, scopeExemptionOf(st));
     // THE SAME TWO BINDINGS A REVIEW GETS, for the same reason — a quality
     // READY unlocks the functional round, so it must be bound to the content
     // it actually judged. No target registered ⇒ the round was never prepared
@@ -10028,22 +10472,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         "reviewer 必须通过 judge_conclude 交卷（verdict + findings + cwd）；散文不记录任何东西。" +
         "用 judge_submit({role:\"reviewer\"}) 重跑本轮。";
     }
-    // ONE adjudication for the record: a READY carrying an open P0/P1 is
-    // contradictory and becomes BLOCKED, and the round's findings become the
-    // count and the coarse cross-round fingerprints (lib/review-adjudicate.ts).
-    const parsed = adjudicateReviewConclusion({
-      verdict: verdictRaw,
-      findings: concluded.findings as ReviewFinding[],
-      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
-      ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
-    });
-    // THE ADJUDICATOR'S OWN VERDICT, captured before the three binding checks
-    // below overwrite it (2026-09-15). Only THIS one answers "does the round
-    // contradict itself on its findings?" — stale, unverified and the cwd check
-    // each relabel `parsed.verdict` too, and feeding the relabelled word into
-    // `classifyReadyWithholding` made every one of them look like a finding
-    // conflict.
-    const adjudicatedVerdict = parsed.verdict;
     // The agent is running the loop again — a standing ask_user
     // pause is moot (liveness: a stale pause would silently swallow the
     // next auto-continuation after a BLOCKED verdict).
@@ -10066,6 +10494,26 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
 
     const st = stateForRepo(targetRoot);
     delete st.pausedQuestion;
+    // ONE adjudication for the record: a READY carrying an open P0/P1 is
+    // contradictory and becomes BLOCKED, and the round's findings become the
+    // count and the coarse cross-round fingerprints (lib/review-adjudicate.ts).
+    //
+    // SCOPE-AWARE since 2026-09-19 (`ScopeExemption`): a P0/P1 on a file the
+    // USER exempted no longer contradicts a READY. It needs `st`, so it runs
+    // after the repo is resolved — the pure adjudication is unchanged.
+    const parsed = adjudicateReviewConclusion({
+      verdict: verdictRaw,
+      findings: concluded.findings as ReviewFinding[],
+      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
+      ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
+    }, scopeExemptionOf(st));
+    // THE ADJUDICATOR'S OWN VERDICT, captured before the three binding checks
+    // below overwrite it (2026-09-15). Only THIS one answers "does the round
+    // contradict itself on its findings?" — stale, unverified and the cwd check
+    // each relabel `parsed.verdict` too, and feeding the relabelled word into
+    // `classifyReadyWithholding` made every one of them look like a finding
+    // conflict.
+    const adjudicatedVerdict = parsed.verdict;
     const fp = computeFingerprint(targetRoot);
     // Scope THIS round was judged under — computed BEFORE the new verdict
     // overwrites the baseline, or it would always read as "nothing new".
@@ -10328,12 +10776,17 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // stays absent (blocks under the docSync knob — fail-closed).
       ...(parsed.docSync !== undefined ? { docSync: parsed.docSync } : {}),
     };
-    // A READY verdict moves the incremental-review baseline: it records the
-    // git TREE that was approved and the files that approval covered, so the
-    // NEXT round can state precisely what is new instead of making the
-    // reviewer re-derive the whole diff (lib/review-scope.ts). Neither field
-    // authorizes anything — `review.fingerprint` still does that alone.
-    if (parsed.verdict === "READY") {
+    // EVERY CONCLUDED VERDICT MOVES THE INCREMENTAL BASELINE (2026-09-19), not
+    // just a READY. See `GateState.lastReviewedTree` for the measurement (three
+    // full deep reviews over one diff) and for why the verdict rides along:
+    // `reviewScopeFor` asks what was READ, while `settledConclusion` asks what
+    // was CONFIRMED — and only a READY answers the second, so this write does
+    // not let a BLOCKED tree be handed on as settled.
+    //
+    // Only a round that actually got RECORDED reaches this point: a verdict
+    // refused by a binding check, or a round the cancel matrix terminated, is
+    // not a conclusion and must leave the baseline where it was.
+    {
       const treeOid = reviewTargets.get(targetRoot)?.tree;
       if (treeOid) {
         // What this review ACTUALLY covered. Under a user-granted scope
@@ -10344,9 +10797,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         const files = st.scopeLimit
           ? st.scopeLimit.sessionFiles.slice()
           : reviewCoverageFiles(targetRoot);
-        st.lastReadyReview = {
+        st.lastReviewedTree = {
           treeOid,
           at: new Date().toISOString(),
+          verdict: parsed.verdict,
           ...(files ? { files } : {}),
         };
       }
@@ -11041,7 +11495,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
               : "") +
             // Honest about the banner in the same breath: `missing` means the
             // user was NOT told, which is their cue to install the notifier.
-            (notified.status === "sent" ? "" : `\n（通知：${describeNotifyOutcome(notified)}）`),
+            (notified.status === "sent" ? "" : `\n（通知：${describeNotifyOutcome(notified)}）`) +
+            // WHO DECIDED WHAT (2026-09-19). Printed by the GATE, from the
+            // state record, and never by the summary — a decision the proxy
+            // took on the user's behalf is the one fact this report cannot let
+            // an agent's prose forget. Empty in the ordinary case.
+            formatProxyDecisionReport(allProxyDecisions()),
         }],
         details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
 
@@ -11234,6 +11693,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   // what lets an orchestrator answer the same box the human can).
   registerUserInteractionTools(pi, {
     state: () => state,
+    // THE GIT ROOT, NOT `cwd` (review round 5 P1): the sidecars are keyed by repo
+    // root, and `cwd` may be a subdirectory of it.
+    repoRoot: () => primaryRepoRoot,
     persist: (ctx) => persist(ctx as unknown as ExtensionContext),
     setLoopArmed: (armed) => { loopArmed = armed; },
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as Parameters<typeof showToUser>[0], lead, body),
@@ -12349,17 +12811,18 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
       const allFiles = changedFiles(cwd);
       const files = state.scopeLimit && allFiles ? allFiles.filter((f) => !exempt.has(f)) : allFiles;
-      const hasDirtyFiles = files && files.length > 0;
-      const ahead = state.scopeLimit ? 0 : await commitsAheadOfBase(cwd);
-      const hasBranchCommits = ahead > 0;
+      // ONE RULE, ONE IMPLEMENTATION (drill F1): `turn_end` asks the same
+      // question of the same facts, and the two copies of it had drifted.
+      const armed = armingFromFacts({
+        files: files ?? [],
+        commitsAhead: state.scopeLimit ? 0 : await commitsAheadOfBase(cwd),
+      });
 
-      if (hasDirtyFiles || hasBranchCommits) {
-        if (hasDirtyFiles && files!.some(isCodeFile)) {
-          state.hasCodeChange = true;
-        } else if (hasBranchCommits) {
+      if (armed.hasCodeChange || armed.hasDocChange) {
+        if (armed.hasCodeChange) {
           state.hasCodeChange = true;
         }
-        if (hasDirtyFiles && files!.some(isDocFile)) {
+        if (armed.hasDocChange) {
           state.hasDocChange = true;
         }
         state.review.verdict = "PENDING";
@@ -12502,6 +12965,35 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     noteChildProgress(); // E — a turn boundary is forward progress (the timer heartbeat is not).
     reportChildState(ctx);
 
+    // …AND EVERY OTHER REPO THIS SESSION WORKED IN (quality round 2 P2). The
+    // rule is one rule, and a secondary repo had NO reconciliation path at all:
+    // once armed it stayed armed — while `declare_done` counts every repo in
+    // `sessionRepos`, so a flag nothing justifies any more kept the task
+    // unclosable. Same functions as the primary block below, clear-only, and the
+    // branch-ahead fact still holds an unreviewed branch open (the F1 rule), so
+    // this can only un-arm what the facts no longer support.
+    //
+    // Only repos with a state ALREADY created this session are visited
+    // (`repoStateCache`): a repo that was merely mentioned must not get a sidecar
+    // written for it here.
+    for (const root of sessionRepos) {
+      if (root === primaryRepoRoot) continue;
+      const st = repoStateCache.get(root);
+      if (st === undefined || (!st.hasCodeChange && !st.hasDocChange)) continue;
+      const repoFiles = changedFiles(root);
+      if (repoFiles === undefined) continue;
+      const repoCurrent = { hasCodeChange: st.hasCodeChange, hasDocChange: st.hasDocChange };
+      if (!couldReconcile(repoCurrent, repoFiles)) continue;
+      const repoNext = reconcileArming(repoCurrent, {
+        files: repoFiles,
+        commitsAhead: commitsAheadOfBaseSync(root),
+      });
+      if (!repoNext.changed) continue;
+      st.hasCodeChange = repoNext.hasCodeChange;
+      st.hasDocChange = repoNext.hasDocChange;
+      persistRepo(ctx as unknown as ExtensionContext, root);
+    }
+
     if (!state.hasCodeChange && !state.hasDocChange) return;
     const allFiles = changedFiles(cwd);
     if (allFiles === undefined) return;
@@ -12513,20 +13005,22 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // user/bypass action — session edits re-arm the gate first).
     const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
     const files = state.scopeLimit ? allFiles.filter((f) => !exempt.has(f)) : allFiles;
-    if (files.length === 0 && ((await commitsAheadOfBase(cwd)) === 0 || state.scopeLimit !== undefined)) {
-      state.hasCodeChange = false;
-      state.hasDocChange = false;
-      persist(ctx);
-      return;
-    }
-    let dirty = false;
-    if (state.hasCodeChange && files.length > 0 && !files.some(isCodeFile)) {
-      state.hasCodeChange = false; dirty = true;
-    }
-    if (state.hasDocChange && files.length > 0 && !files.some(isDocFile)) {
-      state.hasDocChange = false; dirty = true;
-    }
-    if (dirty) persist(ctx);
+    // ASK THE SAME QUESTION ARMING ASKS (drill F1, 2026-09-19) — and it is the
+    // SAME code (`lib/gate-arming.ts`). This block used to read only the
+    // working tree's file KINDS, so one untracked non-code file (measured: the
+    // seeded `node_modules` symlink) cleared an arming that commits ahead of
+    // the base were holding up, and the ship gate let unreviewed commits pass.
+    // The git call is paid only when a flag could actually be cleared.
+    const current = { hasCodeChange: state.hasCodeChange, hasDocChange: state.hasDocChange };
+    if (!couldReconcile(current, files)) return;
+    const next = reconcileArming(current, {
+      files,
+      commitsAhead: state.scopeLimit ? 0 : await commitsAheadOfBase(cwd),
+    });
+    if (!next.changed) return;
+    state.hasCodeChange = next.hasCodeChange;
+    state.hasDocChange = next.hasDocChange;
+    persist(ctx);
   });
 
   // ---------- thinking-loop guard ----------

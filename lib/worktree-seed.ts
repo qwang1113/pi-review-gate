@@ -164,16 +164,28 @@ export function planWorktreeSeed(facts: SeedFacts, entries: readonly SeedEntry[]
 
 /** Is this relative path ignored by the repository at `root`? */
 function isIgnored(root: string, relPath: string): boolean {
+  return ignoreVerdict(root, relPath) === "ignored";
+}
+
+/**
+ * The THREE-WAY answer, because "git says this is not ignored" and "git could
+ * not be asked" are different facts with different consequences (drill F2,
+ * 2026-09-20).
+ *
+ * `check-ignore` exits 1 for "not ignored" — the answer a seeded path has to be
+ * removed over — while "no git", "not a repository" and a broken index are exit
+ * 128 or a spawn failure. Collapsing those into `false` was harmless while only
+ * the source checkout was asked (a refusal to seed is the safe reading there);
+ * it is NOT harmless for the destination-side verification, where `false`
+ * deletes a path the child may need because a `git` call could not be made at
+ * all. Unknown ⇒ the plan-time answer stands.
+ */
+export function ignoreVerdict(root: string, relPath: string): "ignored" | "not-ignored" | "unknown" {
   try {
     execFileSync("git", ["-C", root, "check-ignore", "-q", "--", relPath], { stdio: "ignore" });
-    return true;
+    return "ignored";
   } catch (error) {
-    // `check-ignore` exits 1 for "not ignored" — the answer we want — and
-    // anything else (no git, not a repository, a broken index) is also "do not
-    // touch it": the safe reading of an unknown answer is to leave the file
-    // where it is.
-    void error;
-    return false;
+    return (error as { status?: number }).status === 1 ? "not-ignored" : "unknown";
   }
 }
 
@@ -211,6 +223,29 @@ export function seedWorktree(mainRoot: string, worktreeRoot: string): string[] {
       } else {
         if (existsSync(to)) rmQuietly(to);
         symlinkSync(from, to);
+      }
+      // THE VERIFICATION HAS TO HAPPEN IN THE DESTINATION (drill F2,
+      // 2026-09-19). `planWorktreeSeed` asked the MAIN checkout, and the two
+      // can answer differently about the same path: `node_modules/` (trailing
+      // slash) matches the DIRECTORY in the main checkout and NOT the symlink
+      // this function just created in the new one, so `git check-ignore`
+      // exited 1 there and the seeded path showed up as `?? node_modules` in
+      // the isolated checkout's git status. That untracked entry was the fuel
+      // for a fail-open of the ship gate (F1): what the seeder exists to
+      // prevent must not depend on the source checkout's answer.
+      //
+      // A path that does not survive the check is REMOVED again — leaving it
+      // would repeat exactly the pollution this refuses — and reported, unlike
+      // the plan-time skips below: these two are not the same fact, and only
+      // this one means "the checkout you got is missing something you may
+      // have expected".
+      if (ignoreVerdict(worktreeRoot, action.path) === "not-ignored") {
+        rmQuietly(to);
+        lines.push(
+          `⚠ ${action.path} 没有带过去 —— 目标 checkout 的 git 不忽略它（源 checkout 里成立、在隔离 checkout 里不成立），` +
+          "留着会污染它的 git status；子会话自己按需处理",
+        );
+        continue;
       }
       lines.push(`✔ ${action.kind === "copy" ? "已复制" : "已链接"} ${action.path} —— ${action.why}`);
     } catch (error) {

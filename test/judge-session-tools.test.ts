@@ -791,6 +791,29 @@ test("the wait probe: the round's criteria first, then question, then finding", 
   assert.equal(probeJudgeWait(f.deps, c, cursors).reason, "report", "a finished round outranks both");
 });
 
+test("the receipt points at a stream file only when the round actually wrote one", async () => {
+  // THE POINTER IS A CLAIM, so it has to be true. A round whose findings are
+  // all carry-over writes no new lines and the file is never created — yet the
+  // receipt named it anyway (measured in prime:
+  // `review-mu8hnft7-review.jsonl` for exactly such a round). "The gate lost the
+  // evidence" and "this round produced none" are different facts, and only one
+  // of them is worth sending the opener to look at.
+  const f = fake();
+  const c = seed(f, { streamPath: "/logs/stream.jsonl" });
+
+  const empty = await call(f, "judge_wait", { sessionId: c.judgeId, timeoutMs: 1 });
+  assert.doesNotMatch(
+    textOf(empty),
+    /\/logs\/stream\.jsonl/,
+    "a stream nobody wrote must not be named as the evidence",
+  );
+
+  // …and a REAL one still is: the check is existence, not "has findings".
+  f.files.set("/logs/stream.jsonl", `${JSON.stringify({ severity: "P2", issue: "naming" })}\n`);
+  const withStream = await call(f, "judge_wait", { sessionId: c.judgeId, timeoutMs: 1 });
+  assert.match(textOf(withStream), /\/logs\/stream\.jsonl/, "a real stream file is still pointed at");
+});
+
 // ITEM 2 OF THE ROUND-4 TASK, pinned as its own case. The ordering inside
 // `probeJudgeWait` already put a finished round ahead of a finding — this test
 // exists so a refactor cannot quietly invert it: an opener told "2 new

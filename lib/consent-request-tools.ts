@@ -111,6 +111,12 @@ async function askConsent(
 ): Promise<
   | { outcome: "granted"; option: string }
   | { outcome: "declined"; declineReason?: string }
+  /**
+   * NOBODY DECIDED: the dialog waited out its window and the proxy could not
+   * answer either. Deliberately NOT folded into `declined` — see the flag's
+   * comment at the `askEitherSide` call below.
+   */
+  | { outcome: "undecided" }
   | { outcome: "unshowable" }
 > {
   const spec = opts.spec;
@@ -121,6 +127,14 @@ async function askConsent(
   // in — refuse to show it rather than make "yes" the only reachable answer.
   if (spec.options.every((o) => opts.grants.includes(o))) return { outcome: "unshowable" };
   try {
+    // NOBODY DECIDED IS NOT A DECLINE (2026-09-19, review round 3 P1). The
+    // proxy's failure arrives through this flag rather than through the answer,
+    // because it and a dismissed box are BOTH `undefined` — and telling them
+    // apart is the whole difference between "the user refused this" and "the
+    // user was never asked". The three consent tools lock a declined request
+    // for the rest of the session; a timeout must not, or the user comes back
+    // to a door that was closed in their absence.
+    let undecided = false;
     const outcome = await deps.askEitherSide(
       {
         dialogKind: "select",
@@ -133,8 +147,24 @@ async function askConsent(
         ...(opts.reason ? { payload: `AI 给出的理由（未经核实）: ${opts.reason.slice(0, 300)}` } : {}),
       },
       uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, { body: opts.consentBody, signal }),
+      (signal) => deps.askChoice(uiCtx, spec, {
+        body: opts.consentBody,
+        signal,
+        onUndecided: () => { undecided = true; },
+        // THE SESSION'S OWN REPO (review round 4 P1), passed rather than left to
+        // the `activeRepoRoot` fallback: a consent question is about the gate
+        // state of the repo this session works in, and that does not drift with
+        // the edits.
+        //
+        // `repoRoot()`, NOT `cwd` (review round 5 P1): `cwd` is where the
+        // session started, which may be a SUBDIRECTORY of the repository — and
+        // the sidecar keying is by repo root. This session's consent state is
+        // `deps.state()`, which is the primary repo's, so the record must name
+        // the same one.
+        repo: deps.repoRoot(),
+      }),
     );
+    if (undecided) return { outcome: "undecided" };
     const pick = parseChoice(outcome.answer, spec);
     // WHITELIST: only a row THIS tool called a grant authorizes anything — an
     // unrecognized answer is a refusal, not a consent.
@@ -252,6 +282,17 @@ export async function doRequestScopeLimit(
     );
   }
 
+  // NOBODY DECIDED IS NOT A DECLINE (review round 3 P1): the window elapsed and
+  // the proxy could not answer either. Conservative landing = the full gate
+  // (nothing was granted), but NOT a lock — there is no refusal to remember,
+  // and the user must be able to ask again when they are back.
+  if (consent.outcome === "undecided") {
+    return deny(
+      "review-gate: NOBODY ANSWERED the scope-limit request — the dialog waited out its window and the proxy could not " +
+      "decide either (no arbiter configured, or it failed). **Nothing was decided**: the FULL gate still applies " +
+      "(pre-existing changes included), and this request is NOT locked — ask again when the user is back.",
+    );
+  }
   if (consent.outcome === "declined") {
     deps.declineScopeLimit();
     return deny(
@@ -376,6 +417,15 @@ export async function doRequestTmuxAccess(
     return deny(
       "review-gate: the authorization dialog could not be shown — no tmux access granted (fail-closed), " +
       "and this does NOT count as a user decline; retry when an interactive dialog is possible.",
+    );
+  }
+  // Same rule as the scope limit above: a timeout is not a refusal, so this
+  // does NOT lock (review round 3 P1).
+  if (consent.outcome === "undecided") {
+    return deny(
+      "review-gate: NOBODY ANSWERED the tmux-access request — the dialog waited out its window and the proxy could not " +
+      "decide either. **Nothing was decided**: tmux commands stay blocked, and this request is NOT locked — ask again " +
+      "when the user is back.",
     );
   }
   if (consent.outcome === "declined") {
@@ -527,6 +577,15 @@ export async function doRequestSensitiveEdit(
     );
   }
 
+  // Same rule again: a timeout is not a refusal, so this path is NOT added to
+  // the session's locked set (review round 3 P1).
+  if (consent.outcome === "undecided") {
+    return deny(
+      `review-gate: NOBODY ANSWERED the sensitive-edit request for "${raw}" — the dialog waited out its window and the ` +
+      "proxy could not decide either. **Nothing was decided**: the path is not authorized, and it is NOT locked — ask " +
+      "again when the user is back, or let them apply the change themselves.",
+    );
+  }
   if (consent.outcome === "declined") {
     deps.sensitiveDeclinedPaths.add(absPath);
     return deny(

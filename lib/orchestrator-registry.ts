@@ -483,7 +483,7 @@ export function closableChild(
  * Sanitize a runtime read back from the gate sidecar.
  *
  * The sidecar is an ordinary repo-local file, so everything in it is
- * UNTRUSTED — the same reason `lastReadyReview.treeOid` is validated before it
+ * UNTRUSTED — the same reason `lastReviewedTree.treeOid` is validated before it
  * reaches `git diff`. Two things in here have authority and are therefore
  * checked hardest:
  *

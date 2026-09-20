@@ -153,6 +153,9 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
   };
   h.deps = {
     state: () => h.state,
+    // The git root the sidecars are keyed by (review round 5 P1) — this harness
+    // has no repository, so anything stable will do.
+    repoRoot: () => "/repo",
     persist: () => {},
     setLoopArmed: (armed) => { h.armed.push(armed); },
     showToUser: () => true,

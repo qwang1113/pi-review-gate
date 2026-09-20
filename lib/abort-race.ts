@@ -10,9 +10,12 @@
  * whose whole JOB is "settle exactly once" is two chances to get that wrong
  * (AGENTS.md 哲学三: 永不并行两套实现).
  *
- * WHAT IT IS NOT: a timeout. There is no clock here and no default — the gate
- * has no dialog timeout by design (a box stays until the user or the other side
- * answers it), and `AbortSignal.timeout` is the standard way to supply one.
+ * WHAT IT IS NOT: a timeout. There is no clock here and no default — this
+ * module races an abort and nothing else. The GATE does have a dialog timeout
+ * since 2026-09-19 (thirty minutes, then `lib/user-proxy.ts` hands the question
+ * to the arbiter), but that window lives in that one module and reaches this one
+ * as a plain signal; `AbortSignal.timeout` remains the standard way to supply
+ * one.
  *
  * PURE and tiny on purpose: no IO, no globals, and the answer for the aborted
  * case is the caller's (`onAbort`), because "a cancelled dialog" is `undefined`

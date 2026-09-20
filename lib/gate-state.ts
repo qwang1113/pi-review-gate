@@ -354,7 +354,7 @@ export interface GateState {
    * Lets the NEXT adviser consultation of the SAME goal be told what changed
    * since the previous one (goal criterion 3: incremental advisory), without
    * a consultation of a DIFFERENT goal overwriting the baseline. It is
-   * DIAGNOSTIC INPUT only, like `lastReadyReview` — it never feeds the ship
+   * DIAGNOSTIC INPUT only, like `lastReviewedTree` — it never feeds the ship
    * decision. Absent ⇒ the next consultation gets an empty changed-files
    * list and treats the previous conclusion as still standing.
    */
@@ -371,11 +371,83 @@ export interface GateState {
    * last advanced.
    */
   adviserBaselines?: Record<string, { tree: string; prevTree: string | null; confirmed: number }>;
-  lastReadyReview?: {
+  /**
+   * THE LAST TREE A REVIEW ROUND CONCLUDED ABOUT (2026-09-19), and the verdict
+   * it concluded WITH.
+   *
+   * This was `lastReadyReview`, written on READY alone — so a round that
+   * concluded BLOCKED left no trace of what it had read, and the next
+   * `prepare_review` fell back to the branch base and re-reviewed the entire
+   * branch. Measured in prime on 2026-09-19: t1-prime-encrypt ran three full
+   * deep reviews back to back (15 + 15 + 6 minutes) over the same 65-file
+   * diff, because its very first round concluded BLOCKED and the field stayed
+   * empty.
+   *
+   * TWO CONSUMERS, TWO DIFFERENT QUESTIONS — which is why the verdict rides
+   * along instead of the field being split in two:
+   *   - `reviewScopeFor` asks "what has this session already READ?" — any
+   *     concluded round answers that, and `lib/review-scope.ts`'s own
+   *     `unreviewedFiles` escalation still forces a FULL round whenever the
+   *     increment touches a file the previous round never saw;
+   *   - `settledConclusion` asks "what has this session CONFIRMED?" — only a
+   *     READY answers that. Handing a BLOCKED tree to the next reviewer as
+   *     settled would tell it to skip precisely the content the previous
+   *     round refused.
+   *
+   * The RANGE baseline is untouched by this field: `st.review.commitSha` still
+   * moves only when the quality half concluded (`qualityStandingFor`), so a
+   * round whose quality judge was cancelled keeps its content inside every
+   * later range. Only the DEPTH of the next round reads this tree.
+   *
+   * DIAGNOSTIC INPUT otherwise, like `adviserBaselines` — it never feeds the
+   * ship decision.
+   */
+  lastReviewedTree?: {
     treeOid: string;
     files?: string[];
     at: string;
+    /**
+     * The verdict of the round this tree was reviewed in. Only the three
+     * recorded words are accepted (a tampered or unknown value drops the
+     * whole field, which buys a full review — fail-closed).
+     */
+    verdict: string;
   };
+  /**
+   * EVERY DECISION THE PROXY MADE ON THE USER'S BEHALF (2026-09-19), oldest
+   * first.
+   *
+   * The user leaves, and the gate's dialogs used to wait forever — a session
+   * parked on a plan decision, another on a goal approval, with the machine
+   * idle. Now a dialog that goes unanswered for `PROXY_ANSWER_TIMEOUT_MS` is
+   * handed to `arbiter`, which reads the session's own context and takes the
+   * user's place (lib/user-proxy.ts).
+   *
+   * THIS RECORD IS THE WHOLE SAFETY STORY. Downstream, a stand-in's answer is
+   * indistinguishable from the user's own — it opens exactly the same doors
+   * (`request_sensitive_edit`, `/gate-bypass`, a goal approval). The only thing
+   * that keeps that honest is that the user can SEE it, so two rules follow and
+   * both are implemented:
+   *   - `declare_done` prints this list mechanically in the completion report;
+   *     the user must never have to wonder which decisions were theirs;
+   *   - each entry carries enough to re-run the step (question, rows, choice,
+   *     reason), so overturning one is re-asking — never undoing.
+   *
+   * DIAGNOSTIC otherwise: it never feeds the ship decision. A tampered record
+   * could only HIDE a proxy decision, which is why nothing here authorizes
+   * anything — the answers took effect when they were given.
+   */
+  proxyDecisions?: Array<{
+    at: string;
+    /** The dialog's own question, verbatim (its title). */
+    question: string;
+    /** The rows it chose from, verbatim. */
+    options: string[];
+    /** The row the proxy chose — one of `options`, verbatim. */
+    choice: string;
+    /** Why, in the proxy's own words. */
+    rationale: string;
+  }>;
   precommit: {
     verdict: PrecommitVerdict;
     fingerprint: string | null;
@@ -958,16 +1030,38 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     // repo-committed) sidecar would be git option injection — `--output=…`
     // and friends. Accept only a real object id; drop the whole field
     // otherwise, which just means the next round is a full review.
-    if (parsed.lastReadyReview !== undefined) {
-      const b = parsed.lastReadyReview as Record<string, unknown> | null;
+    //
+    // `verdict` is validated the same way: it is what stops a BLOCKED tree
+    // from being read as a settled conclusion (`settledConclusion`), so an
+    // unknown word drops the field rather than guessing which side it is on.
+    if (parsed.lastReviewedTree !== undefined) {
+      const b = parsed.lastReviewedTree as Record<string, unknown> | null;
       const validOid = typeof b?.treeOid === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(b.treeOid);
       const validFiles = b?.files === undefined ||
         (Array.isArray(b.files) && b.files.every((f: unknown) => typeof f === "string"));
-      if (!b || typeof b !== "object" || Array.isArray(b) || !validOid || !validFiles || typeof b.at !== "string") {
-        delete parsed.lastReadyReview;
+      const validVerdict = b?.verdict === "READY" || b?.verdict === "BLOCKED" || b?.verdict === "NEEDS_HUMAN";
+      if (!b || typeof b !== "object" || Array.isArray(b) || !validOid || !validFiles || !validVerdict || typeof b.at !== "string") {
+        delete parsed.lastReviewedTree;
       }
     }
-    // Orchestration runtime. Same threat model as `lastReadyReview` above:
+    // The proxy's record. Shape-validated for one reason: `declare_done` prints
+    // it back to the user, so a garbled entry would either crash the completion
+    // report or quietly drop a decision nobody else witnessed. A bad shape drops
+    // the WHOLE list rather than printing half of it — an incomplete list reads
+    // as "that was all of them", which is the one thing this record cannot lie
+    // about.
+    if (parsed.proxyDecisions !== undefined) {
+      const rows = parsed.proxyDecisions;
+      const entryOk = (value: unknown): boolean => {
+        const e = value as Record<string, unknown> | null;
+        return !!e && typeof e === "object" && !Array.isArray(e) &&
+          typeof e.at === "string" && typeof e.question === "string" &&
+          typeof e.choice === "string" && typeof e.rationale === "string" &&
+          Array.isArray(e.options) && e.options.every((o: unknown) => typeof o === "string");
+      };
+      if (!Array.isArray(rows) || !rows.every(entryOk)) delete parsed.proxyDecisions;
+    }
+    // Orchestration runtime. Same threat model as `lastReviewedTree` above:
     // this blob carries the USER'S plan approval (which authorizes spawning
     // child sessions) and tmux pane ids (which become command targets), and
     // it lives in an ordinary repo-local file. `normalizeRuntime` validates
@@ -1395,10 +1489,57 @@ export function saveSidecar(path: string, state: GateState): void {
  * this only removes the gratuitous loss of a verdict that is provably valid.
  *
  * Scope is deliberately narrow: only the two verdict blocks and the
- * incremental-review baseline (`lastReadyReview`). `bypass`,
+ * incremental-review baseline (`lastReviewedTree`). `bypass`,
  * `taskMode`, change flags, scope limits and rounds always stay this
  * session's own — a foreign bypass or advisory mode must never leak in.
  */
+/**
+ * ONE DECISION THE PROXY MADE ON THE USER'S BEHALF, as the state records it.
+ *
+ * Declared on its own rather than inline on the field because a second consumer
+ * exists: `mergeProxyDecisions` below unions two sessions' lists (review round
+ * 6), and `lib/user-proxy.ts` renders them for the completion report.
+ */
+export interface ProxyDecisionRecord {
+  at: string;
+  /** The dialog's own question, verbatim (its title). */
+  question: string;
+  /** The rows it chose from, verbatim. */
+  options: string[];
+  /** The row the proxy chose — one of `options`, verbatim. */
+  choice: string;
+  /** Why, in the proxy's own words. */
+  rationale: string;
+}
+
+/**
+ * The UNION of two sessions' proxy decisions, oldest first.
+ *
+ * NOT a winner-takes-it like the verdict blocks beside it, and the difference is
+ * a fact about what this record IS. A verdict is a binding on shared content, so
+ * two of them cannot both be the answer; a proxy decision is TESTIMONY about
+ * what happened to one session, and dropping one side would tell the user "these
+ * were all of them" about a list that was not — the one thing this record cannot
+ * get wrong.
+ *
+ * Deduped by (time, question, choice): the same decision arriving twice (a
+ * re-merge of the same side, a relay successor) is still one decision.
+ */
+export function mergeProxyDecisions(
+  mine: readonly ProxyDecisionRecord[] | undefined,
+  theirs: readonly ProxyDecisionRecord[] | undefined,
+): ProxyDecisionRecord[] {
+  const out: ProxyDecisionRecord[] = [];
+  const seen = new Set<string>();
+  for (const record of [...(mine ?? []), ...(theirs ?? [])]) {
+    const key = `${record.at}|${record.question}|${record.choice}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(record);
+  }
+  return out.sort((a, b) => a.at.localeCompare(b.at));
+}
+
 export function mergeConcurrentBindings(
   mine: GateState,
   disk: GateState | undefined,
@@ -1427,6 +1568,25 @@ export function mergeConcurrentBindings(
         merged.adviserBaselines = mergeAdviserBaselines(mine.adviserBaselines, disk.adviserBaselines);
     }
   }
+  // THE TESTIMONY MERGES FIRST, AND UNCONDITIONALLY (review round 7 P1).
+  //
+  // A proxy decision is not a binding to inherit — it is a record of what
+  // happened to one session, and the three early returns below (two sessions
+  // that reached no verdict, a fingerprint that moved on, a same-session
+  // re-write) have nothing to say about it. Merging it at the END of this
+  // function meant each of those returns threw the other side's record away,
+  // and the user's completion report then claimed the surviving list was all of
+  // them.
+  //
+  // IT IS WRITTEN BACK to `mine` as well (same finding): the caller's own
+  // object is what the NEXT persist writes from, so a union that lives only in
+  // the returned copy is undone by the very next save.
+  const proxyUnion = mergeProxyDecisions(mine.proxyDecisions, disk.proxyDecisions);
+  if (proxyUnion.length > 0) {
+    mine.proxyDecisions = proxyUnion;
+    merged = { ...merged, proxyDecisions: proxyUnion };
+  }
+
   // Same session (or an unidentifiable file): our own last write — replace it.
   if (!disk.sessionId || disk.sessionId === mine.sessionId) return merged;
 
@@ -1458,7 +1618,7 @@ export function mergeConcurrentBindings(
     // The incremental-review baseline must survive the carry-over too,
     // otherwise the next round is forced into a full review even though
     // the tree it describes was already reviewed.
-    ...(keepReview && disk.lastReadyReview ? { lastReadyReview: disk.lastReadyReview } : {}),
+    ...(keepReview && disk.lastReviewedTree ? { lastReviewedTree: disk.lastReviewedTree } : {}),
   };
 }
 

@@ -43,6 +43,13 @@ interface Fake {
   grants: SensitiveGrant[];
   declined: Set<string>;
   scopeDeclined: boolean;
+  /**
+   * THE TIMEOUT PATH (review round 3 P1): nobody answered the dialog AND the
+   * proxy could not either. It reaches the caller as `onUndecided` plus an
+   * `undefined` answer — the same `undefined` a dismissed box gives — which is
+   * exactly why the caller has to be told separately.
+   */
+  proxyFailed: boolean;
   tmuxDeclined: boolean;
   /** What the confirm dialog answers, or "throw" to simulate an unshowable one. */
   confirmAnswer: boolean | "throw";
@@ -86,6 +93,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     grants: [],
     declined: new Set<string>(),
     scopeDeclined: false,
+    proxyFailed: false,
     tmuxDeclined: false,
     confirmAnswer: true,
     answers: [],
@@ -109,13 +117,19 @@ function fake(over: Partial<Fake> = {}): Fake {
       f.lastSpec = spec;
       f.dialogCalls.push({ spec, back: opts?.back, body: opts?.body });
       f.confirms.push(`${spec.title}\n${opts?.body ?? ""}`);
+      if (f.proxyFailed) { opts?.onUndecided?.(); return undefined; }
       if (f.dialogRows.length > 0) return f.dialogRows.shift()!;
       if (f.confirmAnswer === "throw") throw new Error("no dialog here");
       return f.confirmAnswer ? spec.options[0] : undefined;
     },
     canChannelDialogs: () => f.canChannelDialogs ?? false,
-    askEitherSide: async (request) => {
+    askEitherSide: async (request, _hasUI, thunk) => {
       f.asked.push(request.title);
+      // THE TIMEOUT PATH (review round 3 P1) runs the HUMAN side with nobody
+      // there: `askChoice` calls `onUndecided` and answers `undefined`, which is
+      // what a dismissed box looks like too — and telling them apart is the
+      // whole point of that flag.
+      if (f.proxyFailed) return { answer: await thunk(new AbortController().signal), by: "dismissed", requestId: "r1" };
       const answer = f.answers.length > 0
         ? f.answers.shift()!
         : request.topic === "scope-limit" || request.topic === "sensitive-edit" || request.topic === "tmux-access"
@@ -124,6 +138,7 @@ function fake(over: Partial<Fake> = {}): Fake {
       return { answer, by: answer === undefined ? "dismissed" : "human", requestId: "r1" };
     },
     cwd: f.cwd,
+    repoRoot: () => f.cwd,
     sessionEditedPaths: () => f.sessionEdited,
     commitsAheadOfBase: async () => f.ahead,
     scopeLimitDeclined: () => f.scopeDeclined,
@@ -578,6 +593,27 @@ test("ask_user: the way back is NOT offered over the channel — it is a human r
 });
 
 // ---------- request_scope_limit ----------
+
+test("request_scope_limit: nobody answering is NOT a decline — the request stays open", async (t) => {
+  // REVIEW ROUND 3 P1. The dialog waited out its window and the proxy could not
+  // decide either; the conservative landing is the FULL gate (nothing granted),
+  // and the consent path used to reach that landing through the DECLINE branch —
+  // which also locked the request for the session and wrote a refusal the user
+  // never gave. They come back to a door closed in their absence, and the goal
+  // says they must be able to walk the step again.
+  const dir = mkdtempSync(join(tmpdir(), "rg-scope-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  git(dir, ["init", "-q"]);
+  writeFileSync(join(dir, "old.ts"), "export const a = 1;\n");
+  const f = fake({ cwd: dir, proxyFailed: true });
+
+  const reply = await call(f, "request_scope_limit", { reason: "既有改动" });
+  assert.equal(reply.isError, true);
+  assert.match(textOf(reply), /NOBODY ANSWERED/);
+  assert.match(textOf(reply), /NOT locked/, "…and the reply says so — the next call depends on that fact");
+  assert.equal(f.scopeDeclined, false, "a timeout must NEVER lock the request");
+  assert.equal(f.st.scopeLimit, undefined, "…and nothing was granted either");
+});
 
 test("request_scope_limit: a previous decline locks the session, before any dialog", async () => {
   const f = fake({ scopeDeclined: true });

@@ -64,6 +64,59 @@ export interface AdjudicatedReview {
   findingFingerprints: string[];
   docSync?: DocSyncAttestation | undefined;
   cwd?: string | undefined;
+  /**
+   * How many P0/P1 findings this adjudication EXCLUDED because they landed on
+   * files the user exempted (`ScopeExemption`). Zero in the ordinary case; a
+   * non-zero count is what makes "this READY leaned on a scope limit" sayable
+   * in the round's receipt instead of invisible.
+   */
+  exemptedBlocking: number;
+}
+
+/**
+ * A user-granted scope exemption, as the round's chain has it.
+ *
+ * WHY THIS REACHES THE ADJUDICATOR AT ALL (2026-09-19). `request_scope_limit`
+ * promises the USER that the gate "covers only this session's edits", and that
+ * promise lived entirely in a sentence handed to the AGENT: the reviewer
+ * received the unchanged `baseline..HEAD` plus its own standing rule "a P0/P1
+ * blocks", so a round on a branch carrying someone else's 65-file diff came
+ * back BLOCKED on findings the session could not legally fix. Measured in
+ * prime: t2-auth-path-e2e AND t3-report-update both deadlocked on
+ * `declare_done` that way — and t3's own reviewer wrote that the finding
+ * "should not be a blocker under this round's scope limit" before concluding
+ * BLOCKED anyway.
+ *
+ * The exemption changes WHICH findings Rule 1 counts. It never invents a
+ * finding, never edits one, and cannot touch a file the session itself
+ * changed: the edit handler moves every touched path back OUT of the exempt
+ * snapshot (`extensions/review-gate.ts`), so "whoever changed it owns it"
+ * needs no second rule here.
+ */
+export interface ScopeExemption {
+  /**
+   * Repo-relative paths the user exempted
+   * (`GateState.scopeLimit.preexistingFiles`).
+   */
+  exemptFiles: readonly string[];
+}
+
+/**
+ * Does this finding block the round, once the user's exemption is applied?
+ *
+ * TWO FAIL-CLOSED EDGES, and both matter more than the happy path: with no
+ * exemption in force every P0/P1 blocks exactly as it always did, and a
+ * finding whose `file` is missing or unreadable is treated as IN SCOPE — a
+ * finding the reviewer could not locate is not a finding on a file the user
+ * excused. Matching is exact: a path that does not match the snapshot byte for
+ * byte stays blocking.
+ */
+function blocksTheRound(finding: ReviewFinding, exempt: ReadonlySet<string> | undefined): boolean {
+  if (!isBlockingSeverity(finding.severity)) return false;
+  if (exempt === undefined) return true;
+  const file = typeof finding.file === "string" ? finding.file.trim() : "";
+  if (file === "") return true;
+  return !exempt.has(file);
 }
 
 /**
@@ -399,11 +452,22 @@ export function parkedReadyFate(args: {
   return "hold";
 }
 
-export function adjudicateReviewConclusion(input: StructuredConclusion): AdjudicatedReview {
+export function adjudicateReviewConclusion(
+  input: StructuredConclusion,
+  exemption?: ScopeExemption,
+): AdjudicatedReview {
   const findings = input.findings ?? [];
   // Rule 1 — a READY that ships with an open P0/P1 contradicts itself.
-  const hasBlocking = findings.some((f) => isBlockingSeverity(f.severity));
-  const verdict = input.verdict === "READY" && hasBlocking ? "BLOCKED" : input.verdict;
+  //
+  // SCOPE-AWARE (2026-09-19): with a user-granted scope limit in force, only
+  // findings on files the gate still covers can contradict anything. A round
+  // that concluded BLOCKED on an exempted file keeps that verdict — this is
+  // not a machine that overrules a reviewer, it is the rule that stops one
+  // from being enforced against work the user already excused.
+  const exempt = exemption === undefined ? undefined : new Set(exemption.exemptFiles);
+  const blocking = findings.filter((f) => blocksTheRound(f, exempt));
+  const verdict = input.verdict === "READY" && blocking.length > 0 ? "BLOCKED" : input.verdict;
+  const blockingTotal = findings.filter((f) => isBlockingSeverity(f.severity)).length;
   // Rule 3 — one fingerprint per finding, in order, and NOT deduplicated.
   //
   // The old fence parser deduplicated only when it MERGED two fences of one
@@ -429,6 +493,7 @@ export function adjudicateReviewConclusion(input: StructuredConclusion): Adjudic
     // also enumerate).
     findingsTotal: findings.length,
     findingFingerprints: fingerprints,
+    exemptedBlocking: blockingTotal - blocking.length,
     ...(docSync === undefined ? {} : { docSync }),
     ...(cwdRaw === "" ? {} : { cwd: cwdRaw }),
   };

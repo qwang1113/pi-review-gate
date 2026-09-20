@@ -853,8 +853,8 @@ test("INCREMENTAL: the settled conclusion of the previous round is handed to the
     "the previous conclusion must travel with the scope block",
   );
   const fn = windowOf("function settledConclusion(", "\n  }", "settledConclusion");
-  assert.match(fn, /lastReadyReview/, "only an APPROVED tree has settled anything");
-  assert.match(fn, /if \(!base\) return undefined/, "no approved review ⇒ nothing is settled");
+  assert.match(fn, /st\.lastReviewedTree/, "the settled conclusion reads the review baseline");
+  assert.match(fn, /base\.verdict !== "READY"/, "…and only an APPROVED tree has settled anything");
 });
 
 test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits arm the loop flag)", () => {
@@ -1141,16 +1141,77 @@ test("DIALOG QUEUE: one box at a time, with the host's abort and the question in
   // interrupt pi's `Promise.all` over the batch). Every dialog the gate shows
   // goes through this ONE function, so the fix belongs here.
   const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
-  assert.match(askChoiceBody, /return scheduleDialog\(async \(\) => \{/,
+  // The queue call is no longer RETURNED directly (2026-09-19): its promise is
+  // held as `asked` so the thirty-minute proxy race can wait on the SAME one.
+  // The property this line protects is unchanged — one queue, and everything
+  // (list and reason box) inside it.
+  assert.match(askChoiceBody, /const asked = scheduleDialog\(async \(\) => \{/,
     "the whole dialog — list AND reason box — runs under the ONE queue");
+  assert.match(askChoiceBody, /direct: asked,/,
+    "…and that one promise is the human side of the race, so a dialog still has exactly one answer path");
   assert.match(SRC, /const scheduleDialog = createDialogQueue\(\);/,
     "…and there is one queue per session, not one per call");
-  assert.match(askChoiceBody, /dialogSignal\(uiCtx\.signal, opts\.signal\)/,
+  assert.match(askChoiceBody, /dialogSignal\(uiCtx\.signal, opts\.signal,/,
     "the host's abort signal (ESC: ExtensionContext.signal) is merged with the caller's own");
   assert.match(askChoiceBody, /\}, signal\);/,
-    "the merged signal is handed to the queue — a waiter cancelled while it queues drops out at once");
+    "the merged signal (host + caller + the race's own) is what the queue waiter is registered under");
+  assert.match(
+    askChoiceBody,
+    /const signal = dialogSignal\(uiCtx\.signal, opts\.signal, settledBy\.signal\);/,
+    "…because the race's signal is merged into the one BOTH the queue and the box receive",
+  );
+  assert.match(askChoiceBody, /settledBy\.abort\(\);/,
+    "…and the race aborts it on EVERY way out, so a settled dialog never leaves a live box behind");
+  // THE WINDOW IS ARMED WHEN THE BOX APPEARS, NOT WHEN IT WAS QUEUED (review
+  // round 1 P1): the dialog queue shows ONE box at a time, so a queued
+  // question's thirty minutes must not be running before the user has ever
+  // seen it.
+  assert.match(askChoiceBody, /markDisplayed\?\.\(\);/, "the box's own first line marks the window open");
+  assert.match(askChoiceBody, /displayed,/, "…and the race is handed that promise");
   assert.match(askChoiceBody, /dialogNotifyDetail\(spec, opts\.body\)/,
     "the banner carries the question itself, not only the `问题 1 / 4` label");
+});
+
+test("judge_submit refuses a round when the session has no edits of its own under a scope limit", () => {
+  // THE THIRD HALF OF THE SCOPE-LIMIT FIX (2026-09-19). Telling the reviewer
+  // about the exemption fixes what a round CONCLUDES; this is what stops the
+  // round from being dispatched at all when there is nothing of its own to
+  // judge. Without it the chain still ran a full precommit, a checkpoint and a
+  // reviewer over the branch's pre-existing content — minutes per round, every
+  // round ending BLOCKED on findings the session may not fix (prime's
+  // t3-report-update, which then deadlocked on `declare_done`).
+  const at = SRC.indexOf('refused: "no-session-edits-under-scope-limit"');
+  assert.ok(at > 0, "the refusal must exist");
+  const guard = SRC.slice(Math.max(0, at - 1400), at);
+  assert.match(guard, /params\.role === "reviewer"/, "it applies to the review round only, never to advisers or goal audits");
+  assert.match(guard, /scoped\.scopeLimit !== undefined/, "…and only when the user actually granted a scope limit");
+  assert.match(
+    guard,
+    /!scoped\.hasCodeChange && !scoped\.hasDocChange/,
+    "…and only when this session has changed nothing at all",
+  );
+});
+
+test("declare_done prints the proxy's decisions itself, and the audit wait has its own budget", () => {
+  // TWO FACTS THE GATE MUST STATE RATHER THAN TRUST TO PROSE.
+  //
+  // (a) A decision the proxy took on the user's behalf is INVISIBLE unless the
+  //     gate says so — downstream it is indistinguishable from their own, and
+  //     the agent's summary is not a record. So the completion report prints it
+  //     from the state, mechanically (empty in the ordinary case).
+  const doneBody = toolBodyOf("declare_done");
+  assert.match(
+    doneBody,
+    /formatProxyDecisionReport\(allProxyDecisions\(\)\)/,
+    "the completion report must print the proxy's decisions from the state, not from the summary",
+  );
+  // (b) The gate's own audit wait must NOT borrow `judge_wait`'s ten minutes:
+  //     measured 2026-09-19, an eleven-minute goal audit was reported as
+  //     「等待未命中本轮 report」 because the borrowed budget ran out, and the
+  //     agent had to re-run the audit to collect a verdict already on disk.
+  const waitFn = windowOf("async function selfAuditWait", "\n  }", "selfAuditWait");
+  assert.match(waitFn, /budgetMs: AUDIT_SELF_WAIT_BUDGET_MS/, "the gate's own wait carries its own budget");
+  assert.doesNotMatch(waitFn, /JUDGE_WAIT_MAX_TIMEOUT_MS/, "…and not the agent-facing one");
 });
 
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
@@ -4605,18 +4666,47 @@ test("the incremental baseline records only what the review actually covered", (
   // Under a user-granted scope limit the review only read the session's own
   // files; recording the whole branch diff would later let the scoper call
   // never-reviewed files "already reviewed" and skip escalating to full.
-  const at = SRC.indexOf("st.lastReadyReview = {");
+  const at = SRC.indexOf("st.lastReviewedTree = {");
   assert.ok(at > 0, "the verdict recorder must set the baseline");
   const before = SRC.slice(at - 900, at);
   assert.match(before, /st\.scopeLimit\s*\n?\s*\?\s*st\.scopeLimit\.sessionFiles/,
     "a scope-limited review must record sessionFiles, not the whole branch diff");
 });
 
-test("the baseline is written only for a READY verdict", () => {
-  // A BLOCKED round must not move the baseline — nothing was approved.
-  const at = SRC.indexOf("st.lastReadyReview = {");
-  const guard = SRC.slice(SRC.lastIndexOf('parsed.verdict === "READY"', at), at);
-  assert.ok(guard.length > 0 && guard.length < 900, "the baseline write must sit inside a READY guard");
+test("the incremental DEPTH baseline moves on any concluded round; the RANGE baseline does not", () => {
+  // TWO QUESTIONS, TWO RULES, and confusing them is what this pins.
+  //
+  // DEPTH (2026-09-19): `lastReviewedTree` answers "what has this session
+  // READ?" and is written for EVERY recorded verdict — requiring a READY here
+  // is what made a session whose first round concluded BLOCKED re-review the
+  // whole branch, three times over one diff in prime. The write must therefore
+  // NOT sit inside a READY guard any more.
+  const depthAt = SRC.indexOf("st.lastReviewedTree = {");
+  const depthGuard = SRC.lastIndexOf('parsed.verdict === "READY"', depthAt);
+  assert.ok(
+    depthGuard === -1 || depthAt - depthGuard > 900,
+    "a BLOCKED round read those files too — the depth baseline must not be READY-gated",
+  );
+  assert.match(
+    SRC.slice(depthAt, depthAt + 400),
+    /verdict: parsed\.verdict/,
+    "…and it records WHICH verdict, so the settled-conclusion rule can still demand a READY",
+  );
+
+  // RANGE: `st.review.commitSha` is the range baseline, and it still advances
+  // only when the QUALITY half concluded. A round whose quality judge was
+  // cancelled has content that never entered a quality round; letting the range
+  // step past it would ship it on a later READY (2026-09-17 quality P1).
+  const rangeAt = SRC.indexOf("const concludedCommit = (qualityHalfConcluded");
+  assert.ok(rangeAt > 0, "the range baseline must be derived from the quality standing");
+  // `qualityStandingFor` answers the question ABOVE the write, and the carried
+  // value IS the write — so the window spans both.
+  assert.match(
+    SRC.slice(Math.max(0, rangeAt - 500), rangeAt + 320),
+    /qualityStandingFor\(/,
+    "…which is what qualityStandingFor answers",
+  );
+  assert.match(SRC.slice(rangeAt, rangeAt + 320), /\?\? st\.review\.commitSha/, "…and otherwise the previous value is carried forward");
 });
 
 test("timings are appended, never read back into a decision", () => {
@@ -6723,4 +6813,195 @@ test("the row-position rule has ONE implementation — the channel parser import
   assert.doesNotMatch(answerTools, /Number\(text\) - 1/,
     "and so is the 1-based index — the same function reads both shorthands");
   assert.match(answerTools, /rowIndexOf\(text\)/, "…and that is what this parser resolves a position with");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DRILL F1–F4 (2026-09-20) — the defects the real-session drill measured.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("F1: arming and its reconciliation ask the SAME question, of both facts", () => {
+  // The fail-open (drill F1): arming had two sources — a dirty code/doc file,
+  // and commits ahead of the base — and the reconciliation at `turn_end` read
+  // only the first. One untracked non-code file (the seeded `node_modules`
+  // symlink) cleared `hasCodeChange` while eight unreviewed commits sat on the
+  // branch, and the ship gate let everything through.
+  assert.match(
+    SRC,
+    /import \{ armingFromFacts, couldReconcile, reconcileArming \} from "\.\.\/lib\/gate-arming\.ts"/,
+    "the rule lives in lib/gate-arming.ts and both sites import it — 哲学三: no second copy",
+  );
+
+  const armAt = SRC.indexOf("const armed = armingFromFacts({");
+  assert.ok(armAt > 0, "the ARMING sites ask the shared rule");
+  assert.equal(
+    SRC.match(/armingFromFacts\(/g)?.length,
+    3,
+    "three arming sites (session_start, the git re-arm, a secondary repo) — one rule, one implementation",
+  );
+  assert.equal(
+    SRC.match(/commitsAhead: state\.scopeLimit \? 0 : await commitsAheadOfBase\(cwd\)/g)?.length,
+    2,
+    "…and the branch-commit fact is read at the two sites that can see it: arm and reconcile",
+  );
+
+  const turnEnd = windowOf('pi.on("turn_end", async (_event, ctx) => {', "\n  });", "turn_end handler");
+  assert.match(turnEnd, /reconcileArming\(current, \{/, "the reconciliation asks the same rule");
+  assert.match(
+    turnEnd,
+    /commitsAhead: state\.scopeLimit \? 0 : await commitsAheadOfBase\(cwd\)/,
+    "…and pays for the git call the old kind-only clearing never made",
+  );
+  assert.match(turnEnd, /couldReconcile\(current, files\)/, "…skipped when nothing could be cleared");
+  assert.match(
+    turnEnd,
+    /for \(const root of sessionRepos\) \{\n      if \(root === primaryRepoRoot\) continue;/,
+    "…and every OTHER repo the session worked in is reconciled by the same rule (quality round 2 P2): a secondary repo's flags had no clearing path at all",
+  );
+  assert.match(turnEnd, /reconcileArming\(repoCurrent, \{/, "…with the same two facts");
+  assert.doesNotMatch(
+    turnEnd,
+    /!files\.some\(isCodeFile\)/,
+    "the file-kind-only clearing is GONE — that is the line that disarmed the branch",
+  );
+  // The two RE-ARM sites (a git command restoring dirty state, a secondary
+  // repo's first sidecar) took the same function, so no site composes the rule
+  // out of file kinds any more — that composition was the drift F1 exploited.
+  assert.doesNotMatch(SRC, /some\(isCodeFile\)/, "no site decides arming from file kinds itself");
+  assert.doesNotMatch(SRC, /some\(isDocFile\)/, "…nor for the doc half");
+  // The secondary-repo site is a SYNCHRONOUS state factory, and it needs the
+  // branch fact too (review round 1 P1): a repo whose only work is already
+  // committed must not read as "nothing to review" to ITS ship gate.
+  assert.match(
+    SRC,
+    /armingFromFacts\(\{ files: files \?\? \[\], commitsAhead: commitsAheadOfBaseSync\(root\) \}\)/,
+    "the secondary-repo arming supplies the branch-ahead fact, not a hard-coded 0",
+  );
+  assert.equal(
+    SRC.match(/"rev-list", "--count"/g)?.length,
+    3,
+    "'how far ahead is this branch' has ONE implementation — the async dep seam wraps the sync one",
+  );
+  assert.match(
+    SRC,
+    /async function commitsAheadOfBase\(cwd: string\): Promise<number> \{\n  return commitsAheadOfBaseSync\(cwd\);\n\}/,
+    "…and that wrapper only delegates",
+  );
+  assert.equal(
+    SRC.match(/armingFromFacts\(/g)?.length,
+    3,
+    "three arming sites plus this file's import — one rule, one implementation",
+  );
+});
+
+test("F3: the checkpoint commits this session's own files, and NAMES what it leaves", () => {
+  const body = windowOf('name: "review_checkpoint"', "\n  });", "review_checkpoint tool");
+  assert.match(body, /"ls-files", "--others", "--exclude-standard", "-z"/,
+    "the untracked set comes from git in its RAW path form");
+  assert.match(body, /planCheckpointSweep\(\{ untracked, own: st\.sessionEditedFiles \?\? \[\] \}\)/,
+    "…and the split is the pure rule in lib/checkpoint-sweep.ts");
+  assert.match(body, /"reset", "-q", "--", \.\.\.leftOut/,
+    "`add -A` still sweeps the tracked half; the leftovers are UNSTAGED again");
+  assert.doesNotMatch(body, /\["add", "-A"\] \}?, \{ cwd: root, encoding: "utf8" \}\);\n\s+execFileSync\("git", \["commit"/,
+    "nothing commits straight after the bare sweep any more");
+  assert.match(body, /"diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", sha/,
+    "the receipt's file list is read FROM THE COMMIT, not from the worktree (drill F4)");
+  assert.match(body, /未提交（\$\{leftOut\.length\}）/, "…and the leftovers are named, not silently dropped");
+  assert.match(body, /files: sweptIn, leftOut/, "both lists travel in `details`, for the round receipt");
+});
+
+test("F3: every path the edit tools wrote is recorded, code or not", () => {
+  // The checkpoint can only recognise the session's OWN new files if the
+  // recording covers them: a `.json` fixture or a `.yaml` config is as much
+  // this round's work as a `.ts` file, and extension-based classification left
+  // it looking like a stranger's file.
+  assert.match(
+    SRC,
+    /EVERY PATH THIS SESSION WROTE IS RECORDED, code\/doc or not/,
+    "the rule says what it is for",
+  );
+  const at = SRC.indexOf("const rel = repoRelative(path);\n      sessionEditedPaths.add(rel);");
+  assert.ok(at > 0, "recording happens for every edit, before the code/doc branch");
+  const before = SRC.slice(Math.max(0, at - 900), at);
+  assert.match(before, /if \(isCodeFile\(path\) && !state\.hasCodeChange\)/, "…after the ARMED flags, which stay code/doc-only");
+  const after = SRC.slice(at, at + 500);
+  assert.doesNotMatch(
+    after.slice(0, after.indexOf("sessionEditedPaths.add(rel)")),
+    /isCodeFile\(path\) \|\| isDocFile\(path\)\) \{/,
+    "the recording itself is not behind a file-kind test",
+  );
+  // …and the SAME is true of a SECONDARY repo (review round 1 P1): its new
+  // `.json`/`.yaml` files were recorded only when they were project files.
+  const otherRepo = SRC.slice(
+    SRC.indexOf('if (editScope.scope === "other-repo")'),
+    SRC.indexOf("// P-multi: an edit in the PRIMARY repo makes it the active repo again"),
+  );
+  assert.ok(otherRepo.length > 0, "the other-repo branch exists");
+  assert.ok(
+    otherRepo.indexOf("s.sessionEditedFiles.push(rel)") < otherRepo.lastIndexOf("if (isProjectFile) {"),
+    "a secondary repo records EVERY path this session wrote, not only its project files",
+  );
+  assert.ok(
+    otherRepo.indexOf("sessionRepos.add(otherRepo)") < otherRepo.indexOf("if (isProjectFile) {"),
+    "…and the REPO SET follows the recording (review round 2 P1): a repo this session wrote into belongs in declare_done's coverage even when the file is not a project file",
+  );
+  // RECORDED IN THE FORM GIT ANSWERS IN (review round 1 P1): `cwd`-relative
+  // paths matched nothing, so a session started in a subdirectory left its own
+  // new file out of its own checkpoint — and an in-repo file outside that cwd
+  // was recorded absolute, which `lib/out-of-repo-paths.ts` reads as a
+  // violation.
+  assert.match(
+    SRC,
+    /return abs\.startsWith\(primaryRepoRoot \+ "\/"\) \? abs\.slice\(primaryRepoRoot\.length \+ 1\) : abs;/,
+    "recorded paths are REPO-root-relative, never cwd-relative",
+  );
+});
+
+test("F4: the round's receipt names the checkpoint and the files in it", () => {
+  assert.match(
+    SRC,
+    /checkpoint\?: \{ sha: string; files: string\[\]; leftOut: string\[\] \}/,
+    "the chain carries the checkpoint facts out to the caller",
+  );
+  assert.match(SRC, /checkpointFacts = chain\.checkpoint;/, "…the caller keeps them");
+  const receiptAt = SRC.indexOf("const routed = accepted.find((a) => a.role === dispatchRole)");
+  assert.ok(receiptAt > 0, "the receipt exists");
+  const receipt = SRC.slice(receiptAt, receiptAt + 3000);
+  assert.match(receipt, /- checkpoint \$\{checkpointFacts\.sha\.slice\(0, 12\)\} 已冻结/, "the commit is named on the receipt");
+  assert.match(receipt, /未提交（\$\{checkpointFacts\.leftOut\.length\}）/, "and so is what stayed out of it");
+  assert.match(
+    SRC,
+    /\.\.\.\(checkpointFacts === undefined \? \{\} : \{ checkpoint: checkpointFacts \}\)/,
+    "…and it is in `details` too, not only in prose",
+  );
+});
+
+test("the arming rule itself exists ONCE — the reconciliation calls it, never re-spells it", () => {
+  // Quality round 2 P2: the whole point of the module is that the rule cannot
+  // drift, so a second copy of its two expressions inside `reconcileArming`
+  // (they were there) is the same defect one level down.
+  const arming = readFileSync(join(ROOT, "lib", "gate-arming.ts"), "utf8");
+  const reconcile = arming.slice(
+    arming.indexOf("export function reconcileArming"),
+    arming.indexOf("export function couldReconcile"),
+  );
+  assert.ok(reconcile.length > 0, "the reconciliation is in this module");
+  assert.doesNotMatch(
+    reconcile,
+    /files\.some\(/,
+    "…and it re-spells neither expression — that copy was the finding",
+  );
+  assert.match(reconcile, /: armingFromFacts\(facts\);/, "the non-empty branch CALLS the rule");
+  // The two `files.some(isCodeFile/isDocFile)` expressions that remain are the
+  // rule's own definition and `couldReconcile`'s cheap guard — different
+  // questions with the same input, not a second copy of the rule.
+  assert.equal(arming.match(/files\.some\(isCodeFile\)/g)?.length, 2, "the code-file test is not scattered");
+});
+
+test("F2: the seeder re-checks gitignore in the DESTINATION, and tells the truth when it cannot", () => {
+  const seed = readFileSync(join(ROOT, "lib", "worktree-seed.ts"), "utf8");
+  assert.match(seed, /ignoreVerdict\(worktreeRoot, action\.path\) === "not-ignored"/,
+    "the destination answers, not the source checkout that was asked at plan time");
+  assert.match(seed, /export function ignoreVerdict\(/, "…through the three-way verdict, so `not ignored` and `could not ask` stay different");
+  assert.match(seed, /rmQuietly\(to\);/, "a path the destination does not ignore is removed again");
+  assert.match(seed, /没有带过去/, "…and the receipt says so");
 });

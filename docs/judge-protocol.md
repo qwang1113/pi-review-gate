@@ -129,6 +129,12 @@ reviewer / quality-auditor / goal-auditor 传 `notes` 会被**显式拒绝**（�
 `docSync`）。没有 fence 合成，也没有 fence 解析：opener 直接读数据，
 `lib/review-adjudicate.ts` 在这份数据上做裁决（READY 携带未解决 P0/P1 → BLOCKED、
 findings 计数、跨轮 fingerprint）。
+**用户批准过 `request_scope_limit` 时**，落在他那张豁免名单上的文件里的 P0/P1 不计入
+那条「未解决」（`ScopeExemption`）：它们照常写进 findings、照常计数（`exemptedBlocking`），
+只是不再把 READY 变成 BLOCKED。边界只有一条，也不靠 agent 转述：任务文本里由门禁
+自己带上「本轮交付面」那段（`formatScopeExemptionBlock`），而裁决只豁免**这张名单上的
+路径** —— 本会话自己改过的文件照旧阻塞，没有 `file` 的 finding 也算在范围内（fail-closed）。
+反过来不成立：reviewer 自己判的 BLOCKED 不会被抬成 READY，豁免只改变 Rule 1 数哪些 finding。
 
 ## 零审查的 READY 会被当场拒（2026-09-05）
 

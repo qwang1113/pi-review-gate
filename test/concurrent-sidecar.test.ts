@@ -127,15 +127,69 @@ test("concurrent sidecar: our own better verdict wins over the foreign one", () 
   assert.equal(merged, mine, "no copy is needed when nothing is carried over");
 });
 
-test("concurrent sidecar: a foreign READY carries over lastReadyReview so the next round can be incremental", () => {
+test("concurrent sidecar: a foreign concluded round carries over lastReviewedTree so the next round can be incremental", () => {
   const theirs = approved("theirs", DIGEST);
-  theirs.lastReadyReview = { treeOid: DIGEST, files: ["src/a.ts"], at: "2026-01-01T00:00:00.000Z" };
+  theirs.lastReviewedTree = { treeOid: DIGEST, files: ["src/a.ts"], at: "2026-01-01T00:00:00.000Z", verdict: "READY" };
   const mine = armed("mine");
   const merged = mergeConcurrentBindings(mine, theirs, () => DIGEST);
 
   assert.equal(merged.review.verdict, "READY");
-  assert.deepEqual(merged.lastReadyReview, theirs.lastReadyReview,
+  assert.deepEqual(merged.lastReviewedTree, theirs.lastReviewedTree,
     "the incremental-review baseline must survive the carry-over");
+});
+
+test("proxy decisions UNION across a concurrent sidecar — neither session's list is dropped", () => {
+  // Review round 6. A verdict is a BINDING on shared content, so two of them
+  // cannot both be the answer; a proxy decision is TESTIMONY about one session,
+  // and dropping a side would tell the user "these were all of them" about a
+  // list that was not — the one thing that record cannot get wrong.
+  const mine = armed("mine");
+  mine.proxyDecisions = [
+    { at: "2026-02-02T00:00:00.000Z", question: "q-mine", options: ["A"], choice: "A", rationale: "r" },
+  ];
+  const theirs = approved("theirs", DIGEST);
+  theirs.proxyDecisions = [
+    { at: "2026-01-01T00:00:00.000Z", question: "q-theirs", options: ["B"], choice: "B", rationale: "r" },
+    // The SAME decision both sides hold (they merged earlier, or a relay
+    // successor inherited it) is still one decision.
+    { at: "2026-02-02T00:00:00.000Z", question: "q-mine", options: ["A"], choice: "A", rationale: "r" },
+  ];
+
+  const merged = mergeConcurrentBindings(mine, theirs, () => DIGEST);
+  assert.deepEqual(
+    merged.proxyDecisions?.map((d) => d.question),
+    ["q-theirs", "q-mine"],
+    "both sides survive, oldest first, and the duplicate counts once",
+  );
+});
+
+test("proxy decisions survive a merge even when NEITHER side has a verdict to inherit", () => {
+  // Review round 7 P1. The union used to sit at the END of
+  // `mergeConcurrentBindings`, so the three early returns above it discarded it
+  // — and "two sessions that concluded nothing" is not an edge case, it is the
+  // ordinary shape of a shared worktree. The write-back matters just as much:
+  // the caller's own object is what the NEXT persist writes from, so a union
+  // that lives only in the returned copy is undone by the next save.
+  const mine = armed("mine");
+  const theirs = armed("theirs");
+  mine.proxyDecisions = [
+    { at: "2026-02-02T00:00:00.000Z", question: "q-mine", options: ["A"], choice: "A", rationale: "r" },
+  ];
+  theirs.proxyDecisions = [
+    { at: "2026-01-01T00:00:00.000Z", question: "q-theirs", options: ["B"], choice: "B", rationale: "r" },
+  ];
+
+  const merged = mergeConcurrentBindings(mine, theirs, () => DIGEST);
+  assert.deepEqual(
+    merged.proxyDecisions?.map((d) => d.question),
+    ["q-theirs", "q-mine"],
+    "no verdict to inherit is no reason to forget what happened",
+  );
+  assert.deepEqual(
+    mine.proxyDecisions?.map((d) => d.question),
+    ["q-theirs", "q-mine"],
+    "…and the caller's own object carries it, or the next persist undoes the merge",
+  );
 });
 
 test("concurrent sidecar: our own BAD verdict is never upgraded by a foreign good one", () => {

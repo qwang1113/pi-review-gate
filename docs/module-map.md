@@ -439,6 +439,11 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 并且是这一族的唯一注册入口——
 它自己转注册 `consent-request-tools.ts` 的两个同意工具
 （`request_scope_limit` / `request_sensitive_edit`，见 §1.2）；
+**没人作答时谁来答**（2026-09-19，用户决定）：每个框弹出满 30 分钟仍无人作答，
+就由 `user-proxy.ts` 交给 `arbiter` 读本会话上下文代答；答案带「由 arbiter 代为决定 + 依据」
+的标记落进 sidecar、在对话区可见，`declare_done` 的完成报告再由门禁机械列出这份清单。
+全部十二个对话点都经过 `extensions/review-gate.ts` 的 `askChoice`，所以计时与竞态只接了
+那一处，十二个落点一行未改（AGENTS.md 哲学一：不让 agent 记住多步流程）；
 `agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
 `renderer-mode.ts` 管「这个会话是不是 fullscreen 渲染器」这个读数与对它的提醒（对话框行数预算已于 2026-09-16 删除：产生它的那个闪屏只发生在默认渲染器上，而用户每会话都用 fullscreen；模式来自宿主的 `TUI.mode`，不自己重算配置），
 跨会话的唤醒**不在**这一域：一个编排子会话经它自己的**通道**上报（见域 4），
@@ -482,7 +487,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（140 个模块）
+## 五、`lib/` 全量速查表（143 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -496,7 +501,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 | 模块 | 一句话职责 |
 | --- | --- |
-| `abort-race.ts` | **「一个 promise 对一次 abort 的赛跑」的唯一实现**（2026-09-18，quality 轮 P2：同一段十五行在一轮里长出了两份）：监听 `abort`（`{once:true}`）、`settled` 守卫保证只结算一次、非 abort 路径摘掉监听、rejection 折进同一个答案。两个调用方：对话框队列（取消 = `true`，跳过这个框）与 reason box 的回退路径（取消 = `undefined`，连框都不开 —— 后者自己先查 `aborted` 再开框）。**没有超时**：门禁不给对话框加超时，`AbortSignal.timeout` 是标准做法 |
+| `abort-race.ts` | **「一个 promise 对一次 abort 的赛跑」的唯一实现**（2026-09-18，quality 轮 P2：同一段十五行在一轮里长出了两份）：监听 `abort`（`{once:true}`）、`settled` 守卫保证只结算一次、非 abort 路径摘掉监听、rejection 折进同一个答案。两个调用方：对话框队列（取消 = `true`，跳过这个框）与 reason box 的回退路径（取消 = `undefined`，连框都不开 —— 后者自己先查 `aborted` 再开框）。**本模块里仍然没有超时**（`AbortSignal.timeout` 是标准做法）；但**门禁从 2026-09-19 起确实给对话框加了超时** —— 30 分钟无人作答后交给 `user-proxy.ts`，那个窗口只住在那一个模块里 |
 | `adviser-brief.ts` | 组装 adviser 咨询的 brief：主会话 transcript 指针 + 结论落盘路径，第二次起带上轮结论与其后改动 |
 | `advisory-prepare-tools.ts` | **内部实现**（不注册给 pi）：组装 adviser brief 与 goal 审计任务文本，由 `judge_submit` / `propose_loop_goal` 调用 |
 | `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表；**等待纪律的唯一出处**（`buildWaitDiscipline`：子会话侧 `judge_wait`、项目经理侧 `orchestrator_wait` 共用同三条，只换工具名与消息种类） |
@@ -511,6 +516,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交。判的是**磁盘记录的所有权**（不是进程），一切未知 fail-**closed**（时间戳读不出/在未来/写删失败一律保留 marker），回收窗 4 小时（`CONCURRENT_SESSION_WINDOW_MS`，唯一用途就在这里）。**它与 `session-exclusivity.ts`、`judge-pane.ts` 的判活为什么不可收敛成一条口径**：两处文件头各写一半，行为并排钉在 `test/liveness-criteria.test.ts`（2026-09-06 复核；同日按哲学三删掉的 `judge-session.ts` 才是真正的重复实现——它没有生产调用者） |
 | `change-baseline.ts` | 本次改动的**比较基线**（2026-09-15，dashboard 实测的死锁）：一律 `HEAD`，但仓库处于 merge（`.git/MERGE_HEAD` 存在）时把被合并的 parent 一并算作基线 —— 「不在 HEAD 里」与「是本会话新建的」只在 HEAD 是唯一 parent 时才是同一句话；实测 104 个 staged 新增**全部**来自 `main`，file-size 因此硬拦 checkpoint，而 checkpoint 是 review 的唯一入口（用户只能切 normal 绕过）。`changeBaseRefsFromMergeHeads`（纯，垃圾行不进 argv）/ `readChangeBaseRefs` / `firstBaseContaining` / `isNewInWorktree` |
 | `checkpoint-message.ts` | checkpoint 提交信息（纯函数）：把 agent 的 round note 变成合法 Conventional Commits（已是 CC 则原样保留，否则兜底 `chore: <subject>`），并对非英文 round note 回落英文默认、丢正文（L5 自洽）。**自 2026-09-16 起提交信息就是普通提交：门禁不再往里注入任何标记**（用户决定，理由与旧写法写在模块头注释里） |
+| `checkpoint-sweep.ts` | **checkpoint 到底提交哪些未跟踪文件**（2026-09-20，演练 F3 实测）：门禁自己的 checkpoint 原本是裸 `git add -A`（还带 `REVIEW_GATE_BYPASS=1`），把「未被 gitignore 且本会话从未用 edit/write 写过」的东西一并提交进仓库 —— 实测：隔离 checkout 的 `node_modules` 软链以 `+1/−0 node_modules` 进了历史，reviewer 是从自己的 change index 里认出来的。纯函数 `planCheckpointSweep` 只做一件事：把 `git ls-files --others --exclude-standard -z` 给出的未跟踪路径（**raw 形式**，不是 `status` 那个带引号转义的）按「本会话写过（`GateState.sessionEditedFiles`，**精确匹配**，不做 glob）」切成 `own` / `leftOut` —— own 进提交，leftOut 原样留在 worktree 并在收条与 `judge_submit` 回执里点名。tracked 改动不参与这个判断（`M`/`D`/`R` 就是本轮工作，仍由 `add -A` 扫入） |
 | `choice-dialog.ts` | **门禁唯一的提问模板**（2026-09-08）：2–4 个选项 + 一个（推荐）+ 追加行「✎ 不选，我说明原因」的构造（`choiceRows`）、校验（`validateChoice`）、解析（`parseChoice`）与渲染（`renderChoice`，注入 `ui.select`/`ui.editor`，选中追加行才弹多行理由框）。**没有任何 caller-owned 追加行**（`extraRows` 随 2026-09-17 那次删除一起消失；**2026-09-19 的 `← 返回上一题` 是模板自己的行**，由 `renderChoice` 的 `back` 开关画在最后一行、只画给屏幕 —— 通道请求的 rows 永远是 `choiceRows`，不含导航行）。**2026-09-19：字母编号与两道退路** —— `optionLetter`/`optionRow` 给每个选项行加 `A. ` 前缀（导航行不编号），`optionLabel` 是记录里的写法（`→ A. 文本`）；`parseChoice` 把 `A`/`a`/`A.`/`A. 文本`/选项原文/1 起序号都归一到**选项原文**（原文先行：一个文本恰好是 `A` 的选项不该被位置读法抢走）；理由框里按 ESC 回来的是 `lib/reason-editor.ts` 的 `REASON_EDITOR_BACK` 哨兵（打字内容跟在哨兵后，重开框时作 prefill），而 `undefined` 仍是「关掉这题」。`ask_user`、门禁每一处是/否框、两处手写 select 全走它；`ui.confirm` 已无调用点。**一次只弹一个框**（2026-09-18）：`createDialogQueue` 是那个串行队列——pi 并行执行同一批工具、宿主只有一个对话框槽位，并发的第二个框会顶掉第一个且它的 Promise 永不 settle，实测 rebate 会话 `01a0b328` 整轮卡死、ESC 也无效；`dialogSignal` 把宿主 `ExtensionContext.signal`（ESC 中止的就是它）与调用方自己的 signal 合并成框要监听的那一个；`dialogNotifyDetail` 决定这条对话框的通知正文（框标题 + 问题本身，不再只是「问题 1 / 4」）。**排队中的框可被取消**：等待期间 signal abort ⇒ 立即返回、不等前面的框关闭（否则通道侧已答完的请求会挂在前一个框上），且取消者把自己的队位交还给它在等的那个框 —— 取消者若直接放行，后来的框会跳过那个框、在它上面再开一个 |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
 | `constants.ts` | 全仓唯一的共享常量：代码/文档扩展名、敏感文件模式、ship 命令种类、语言指令、轮次上限 |
@@ -533,6 +539,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `file-size-gate.ts` | 新建源码文件 600 行硬拦、存量超阈值只提醒的纯判定 |
 | `dependency-justification.ts` | 新增依赖缺书面论证在 checkpoint 硬性打回的纯判定（`newDependencyNames` / `dependencyJustificationVerdict`），`review_checkpoint` 内接线；实现 §5“新依赖须论证”的机械一半，不复述其余三条。引用面（`agents/reviewer.md`、`agents/goal-auditor.md`、goal/plan 审计任务、`WRITE_TIME_REMINDERS` 只许引用 §5）由 §7.1 最小化行钉住 |
 | `fingerprint.ts` | 工作区指纹：内容寻址、暂存无关，门禁裁决与它绑定 |
+| `gate-arming.ts` | **「本会话有没有需要审的东西」的唯一判据**（2026-09-20，演练 F1 的 fail-open）：arming 有两条来源 —— 工作区里脏的 code/doc 文件、分支领先 base 的 commit —— 而这条规则以前被抄成了两份（`session_start` 的 arming 与 `turn_end` 的对账），对账那份只看工作区文件类型，于是一个未跟踪的非 code 文件（实测：隔离 checkout 的 `node_modules` 软链）就能把「分支上还压着 8 个未审 commit」造成的 arming 清掉，而 `lib/ship-gate-bash.ts` 读到「本会话没有改动」后整个 ship 门禁放行（`git commit` / `git push` / `gh pr create` 都不再过门禁）。现在 `armingFromFacts`（事实 → 该 arm 什么）/ `reconcileArming`（clear-only，两个来源都问）/ `couldReconcile`（不值得付 git 调用时提前返回）是**唯一实现**，三个 arming 点（`session_start`、git 命令 re-arm、次级 repo 首个 sidecar）与 `turn_end` 对账共用；`files` 已由调用方按 scope limit 豁免表过滤、`commitsAhead` 在 scope limit 下由调用方置 0。**单路径的 edit 事件不走这里**（它问的是「这一次编辑算不算 code 编辑」，答案只看那个路径自己的扩展名，`extensions/review-gate.ts` 的 edit handler 直接问 `isCodeFile` / `isDocFile`） |
 | `gate-command-tools.ts` | 命令层的**唯一注册入口**：工作流命令的注册包装、`/precommit` lane，以及 `/gate-status` / `/gate-contract` / `/gate-bypass` / `/gate-mode` / `/gate-reset` / `/gate-lesson` 六个命令正文；命令 host 的 seam（`CommandHost` / `CommandContext`）也在这里；自己转注册 `gate-diagnosis-commands.ts`。**`/gate-contract`（2026-09-18，用户决定「不常驻展示, 而是通过某个命令」）**：只读地把本会话那份契约（项目经理 = plan 任务全列；loop 会话与编排子会话 = 已批准 goal 的退出标准全文）打进一个多行 `notify` 块，与 `/gate-status` 同一条显示路、零新 UI 组件；行本身由 `lib/ui-widget.ts` 的 `buildContractLines` 构造，命令只有一个纯判定 `contractNotice`（有行 ⇒ 行；没行 ⇒ 「没有可显示的契约 —— **为什么**」，因为 judge pane / 未批准 goal / 无 plan / 非 git 目录 / 解析不出小节 五者都塌成同一个空数组，不写为什么读者只能当成 bug），`GateCommandDeps` 上只多一个 `contract()` seam。快捷键**刻意不绑**（用户决定：要时自己在 `/settings` 里绑） |
 | `gate-diagnosis-commands.ts` | 两个只读诊断命令面：`/gate-status` 内嵌的模型链读数（`modelDiagnosisLines`）与 `/gate-doctor` 正文；只做环境探测，不写状态、不喂裁决；由 `gate-command-tools.ts` 转注册 |
 | `gate-doctor.ts` | `/gate-doctor` 的只读体检：模型链、provider 允许名单、precommit runner、git 钩子、命令注册表 |
@@ -585,6 +592,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
 | `user-notify-runtime.ts` | 通知的运行时半边（2026-09-17 拆出）：解析 `terminal-notifier` 的路径（开一次，退出路径不能再查 PATH）、本会话的 tmux 地址（惰性，只有真要发时才查）、两个 spawn（活会话 detached；`exit` 里只能同步，且给 10s 超时）、以及注册进程退出 handler。拆出理由：那 60 行是新职责，而扩展已经 ~9000 行。**2026-09-18 起还负责「用户是否正看着这个 pane」的取证**：`list-clients` + 每个 client 的 `display-message -c` 得到各 client 的当前 pane，`lsappinfo front` 得到前台 app 的 bundle id —— 两条读数都只在否则真要发一条通知时才取（惰性 thunk），`lsappinfo` 带 2s 超时（同步跑在对话框路径与 exit handler 里），tmux 地址按 banner 重新解析（pane id 进程内固定、**window id 不固定**：join-pane/break-pane 会搬家，跨调用缓存会让点击跳去旧 window） |
 | `user-notify.ts` | 桌面通知：三种事件（完成 / 异常结束 / 停下来等用户回答）、只有没有上级的会话能发、`terminal-notifier` 的 argv 与「点回那个 pane」的纯函数、节流。旧的 `orchestrator-notify.ts`（OSC + tmux passthrough）整份删除。**2026-09-18 起**：标题是 `<类型> · <repo>`（等你回答 / 任务完成 / 异常结束）、`-group <sessionId>` 让同一会话的通知互相替换（不再堆叠）、`isWatchingPane` 在「用户正看着这个 pane 且终端在前台」时抑制整条通知（两个事实都成立才算，任一读不到一律照常发；pane id 形状复用 `orchestrator-tmux.ts` 的 `isPaneId`，不再自写正则；前台 app 与 `__CFBundleIdentifier` 的比较是**已知近似** —— 后者是 tmux server 启动时继承的 app，失配方向是多发一条而不是静默）。**取证排在节流之后**：被节流拦下的通知不付 3–5 个同步子进程；被抑制的通知不记额度，下一条照发 |
+| `user-proxy.ts` | **没人回答时谁来答**（2026-09-19，用户决定）：门禁的每个对话框等 30 分钟仍无人作答时，交给 `arbiter` 读本会话上下文代答。纯策略层 —— 窗口计时、先答者胜（用户与经通道作答的项目经理都算「人」，先到先得；arbiter 跑到一半用户答了就以用户为准）、代理答案必须是对话框给过的**候选行原文**（`raceWithUserProxy` 里那一次行校验是唯一一道闸）、提示词给的是 transcript **指针**而非正文（它跑在 `PROXY_ISOLATION_FLAGS` 的**只读**工具集下，不是 appeal arbiter 的 `--no-tools` —— 第 2 轮 P1 实测：拿不到工具时那个指针是废的，功能的核心行为根本跑不起来）、失败/超时/不可解析一律**无答案**，而「无答案」对十二个对话框恰好都是保守方向（授权即拒绝、`request_scope_limit` 保持完整门禁、提问即未作答）；`formatProxyDecisionReport` 渲染 `declare_done` 机械打印的那份清单 —— 用户必须能不费力地看出哪些决定不是自己做的。代答不产生任何额外权力：它只填对话框的答案本身。进程执行复用 `arbitration.ts` 的 `runArbiterProcess`（同一执行实现上的第三种问法，不是第二套实现） |
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash。`planHash` 的**产出方**，因此「什么算一个 plan hash」也归它：`isPlanHash` 是那条形状规则的唯一实现，凡从 sidecar 读回授权记录的地方都用它（复制出去的授权校验只会朝放宽的方向漂移） |
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西。也是 sidecar 里那份 runtime 的**唯一净化处**：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；`successorRuntime(runtime, fromHandoff)` 是「换了个会话能继承什么」的唯一出处 —— 登记表与 grants 照旧留下；许可只在 `fromHandoff` 为真（前任自己交棒的继任者，判定在 `lib/session-inheritance.ts`）时留下，其余情形全部剥离（写在调用点上的字段清单迟早漏掉新字段）。runtime 还带一个 `ownerSessionId`（2026-09-17）：**哪个会话持有这个编排** —— 它是「reload 后能不能恢复」的唯一依据（`storedRuntimeIsMine`），只有铸出、继承或接管了该地址的会话会写它。child 记录上的 `worktree`（路径 + 分支）也是在这里净化的：它会被交给 git，所以与其它路径同等强度 |
