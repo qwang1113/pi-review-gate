@@ -6814,3 +6814,123 @@ test("the row-position rule has ONE implementation — the channel parser import
     "and so is the 1-based index — the same function reads both shorthands");
   assert.match(answerTools, /rowIndexOf\(text\)/, "…and that is what this parser resolves a position with");
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DRILL F1–F4 (2026-09-20) — the defects the real-session drill measured.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("F1: arming and its reconciliation ask the SAME question, of both facts", () => {
+  // The fail-open (drill F1): arming had two sources — a dirty code/doc file,
+  // and commits ahead of the base — and the reconciliation at `turn_end` read
+  // only the first. One untracked non-code file (the seeded `node_modules`
+  // symlink) cleared `hasCodeChange` while eight unreviewed commits sat on the
+  // branch, and the ship gate let everything through.
+  assert.match(
+    SRC,
+    /import \{ armingFromFacts, couldReconcile, reconcileArming \} from "\.\.\/lib\/gate-arming\.ts"/,
+    "the rule lives in lib/gate-arming.ts and both sites import it — 哲学三: no second copy",
+  );
+
+  const armAt = SRC.indexOf("const armed = armingFromFacts({");
+  assert.ok(armAt > 0, "the ARMING sites ask the shared rule");
+  assert.equal(
+    SRC.match(/armingFromFacts\(/g)?.length,
+    3,
+    "three arming sites (session_start, the git re-arm, a secondary repo) — one rule, one implementation",
+  );
+  assert.equal(
+    SRC.match(/commitsAhead: state\.scopeLimit \? 0 : await commitsAheadOfBase\(cwd\)/g)?.length,
+    2,
+    "…and the branch-commit fact is read at the two sites that can see it: arm and reconcile",
+  );
+
+  const turnEnd = windowOf('pi.on("turn_end", async (_event, ctx) => {', "\n  });", "turn_end handler");
+  assert.match(turnEnd, /reconcileArming\(current, \{/, "the reconciliation asks the same rule");
+  assert.match(
+    turnEnd,
+    /commitsAhead: state\.scopeLimit \? 0 : await commitsAheadOfBase\(cwd\)/,
+    "…and pays for the git call the old kind-only clearing never made",
+  );
+  assert.match(turnEnd, /couldReconcile\(current, files\)/, "…skipped when nothing could be cleared");
+  assert.doesNotMatch(
+    turnEnd,
+    /!files\.some\(isCodeFile\)/,
+    "the file-kind-only clearing is GONE — that is the line that disarmed the branch",
+  );
+  // The two RE-ARM sites (a git command restoring dirty state, a secondary
+  // repo's first sidecar) took the same function, so no site composes the rule
+  // out of file kinds any more — that composition was the drift F1 exploited.
+  assert.doesNotMatch(SRC, /some\(isCodeFile\)/, "no site decides arming from file kinds itself");
+  assert.doesNotMatch(SRC, /some\(isDocFile\)/, "…nor for the doc half");
+  assert.equal(
+    SRC.match(/armingFromFacts\(/g)?.length,
+    3,
+    "three arming sites plus this file's import — one rule, one implementation",
+  );
+});
+
+test("F3: the checkpoint commits this session's own files, and NAMES what it leaves", () => {
+  const body = windowOf('name: "review_checkpoint"', "\n  });", "review_checkpoint tool");
+  assert.match(body, /"ls-files", "--others", "--exclude-standard", "-z"/,
+    "the untracked set comes from git in its RAW path form");
+  assert.match(body, /planCheckpointSweep\(\{ untracked, own: st\.sessionEditedFiles \?\? \[\] \}\)/,
+    "…and the split is the pure rule in lib/checkpoint-sweep.ts");
+  assert.match(body, /"reset", "-q", "--", \.\.\.leftOut/,
+    "`add -A` still sweeps the tracked half; the leftovers are UNSTAGED again");
+  assert.doesNotMatch(body, /\["add", "-A"\] \}?, \{ cwd: root, encoding: "utf8" \}\);\n\s+execFileSync\("git", \["commit"/,
+    "nothing commits straight after the bare sweep any more");
+  assert.match(body, /"diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", sha/,
+    "the receipt's file list is read FROM THE COMMIT, not from the worktree (drill F4)");
+  assert.match(body, /未提交（\$\{leftOut\.length\}）/, "…and the leftovers are named, not silently dropped");
+  assert.match(body, /files: sweptIn, leftOut/, "both lists travel in `details`, for the round receipt");
+});
+
+test("F3: every path the edit tools wrote is recorded, code or not", () => {
+  // The checkpoint can only recognise the session's OWN new files if the
+  // recording covers them: a `.json` fixture or a `.yaml` config is as much
+  // this round's work as a `.ts` file, and extension-based classification left
+  // it looking like a stranger's file.
+  assert.match(
+    SRC,
+    /EVERY PATH THIS SESSION WROTE IS RECORDED, code\/doc or not/,
+    "the rule says what it is for",
+  );
+  const at = SRC.indexOf("const rel = repoRelative(path);\n      sessionEditedPaths.add(rel);");
+  assert.ok(at > 0, "recording happens for every edit, before the code/doc branch");
+  const before = SRC.slice(Math.max(0, at - 900), at);
+  assert.match(before, /if \(isCodeFile\(path\) && !state\.hasCodeChange\)/, "…after the ARMED flags, which stay code/doc-only");
+  const after = SRC.slice(at, at + 500);
+  assert.doesNotMatch(
+    after.slice(0, after.indexOf("sessionEditedPaths.add(rel)")),
+    /isCodeFile\(path\) \|\| isDocFile\(path\)\) \{/,
+    "the recording itself is not behind a file-kind test",
+  );
+});
+
+test("F4: the round's receipt names the checkpoint and the files in it", () => {
+  assert.match(
+    SRC,
+    /checkpoint\?: \{ sha: string; files: string\[\]; leftOut: string\[\] \}/,
+    "the chain carries the checkpoint facts out to the caller",
+  );
+  assert.match(SRC, /checkpointFacts = chain\.checkpoint;/, "…the caller keeps them");
+  const receiptAt = SRC.indexOf("const routed = accepted.find((a) => a.role === dispatchRole)");
+  assert.ok(receiptAt > 0, "the receipt exists");
+  const receipt = SRC.slice(receiptAt, receiptAt + 3000);
+  assert.match(receipt, /- checkpoint \$\{checkpointFacts\.sha\.slice\(0, 12\)\} 已冻结/, "the commit is named on the receipt");
+  assert.match(receipt, /未提交（\$\{checkpointFacts\.leftOut\.length\}）/, "and so is what stayed out of it");
+  assert.match(
+    SRC,
+    /\.\.\.\(checkpointFacts === undefined \? \{\} : \{ checkpoint: checkpointFacts \}\)/,
+    "…and it is in `details` too, not only in prose",
+  );
+});
+
+test("F2: the seeder re-checks gitignore in the DESTINATION, and tells the truth when it cannot", () => {
+  const seed = readFileSync(join(ROOT, "lib", "worktree-seed.ts"), "utf8");
+  assert.match(seed, /ignoreVerdict\(worktreeRoot, action\.path\) === "not-ignored"/,
+    "the destination answers, not the source checkout that was asked at plan time");
+  assert.match(seed, /export function ignoreVerdict\(/, "…through the three-way verdict, so `not ignored` and `could not ask` stay different");
+  assert.match(seed, /rmQuietly\(to\);/, "a path the destination does not ignore is removed again");
+  assert.match(seed, /没有带过去/, "…and the receipt says so");
+});

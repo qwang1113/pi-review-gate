@@ -76,6 +76,8 @@ import {
 import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "../lib/agent-directives.ts";
 
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
+import { armingFromFacts, couldReconcile, reconcileArming } from "../lib/gate-arming.ts";
+import { planCheckpointSweep } from "../lib/checkpoint-sweep.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { hostEditorFallback, hostReasonEditor, editorTextOf, REASON_EDITOR_BACK, type CustomDialogHost } from "../lib/reason-editor.ts";
@@ -1263,13 +1265,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       } else {
         s = emptyState(state.sessionId ?? null, projectConfig.maxRounds);
         const files = changedFiles(root);
-        if (files && files.length > 0) {
-          if (files.some(isCodeFile)) s.hasCodeChange = true;
-          if (files.some(isDocFile)) s.hasDocChange = true;
-          if (s.hasCodeChange || s.hasDocChange) {
-            s.review.verdict = "PENDING";
-            s.precommit.verdict = "NOT_RUN";
-          }
+        // SAME RULE as every other arming site (`lib/gate-arming.ts`, 2026-09-20):
+        // a secondary repo's pre-existing dirty work must still arm the gate,
+        // and "what do these files arm" is answered in exactly one place. No
+        // branch-commit fact here — this is the worktree this session is about
+        // to work in, not a branch history it has.
+        const armed = armingFromFacts({ files: files ?? [], commitsAhead: 0 });
+        if (armed.hasCodeChange || armed.hasDocChange) {
+          s.hasCodeChange = armed.hasCodeChange;
+          s.hasDocChange = armed.hasDocChange;
+          s.review.verdict = "PENDING";
+          s.precommit.verdict = "NOT_RUN";
         }
         // A relay successor continues the same work in EVERY repo it touched,
         // so a SECONDARY repo's sidecar is inherited on the same terms as the
@@ -5147,34 +5153,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   const scheduleDialog = createDialogQueue();
 
   /**
-   * THE one dialog renderer (user decision, 2026-09-08): the gate's question
-   * template, whole. Every dialog in this file — and
-   * every dialog in the tool modules that inject this function — comes
-   * through here, so exactly one shape ever reaches the screen: 2–4 options
-   * (the recommended one marked), the `✎ 不选，我说明原因` row, and a text
-   * box when that row is picked. A yes/no box is not a thing any more.
-   *
-   * NOTHING IS FITTED, NOTHING IS CUT (user decision, 2026-09-16). Both halves
-   * used to be budgeted against the real terminal — a five-row dialog spends
-   * rows the old two-row confirm never did — because an oversized dialog pushed
-   * the animating spinner out of the viewport and made pi's DEFAULT renderer
-   * clear the screen and the scrollback every frame (measured: 29 of 30 frames).
-   * That cost landed on the lines the user is CONFIRMING, and the renderer the
-   * user runs (fullscreen: the host owns the screen and scrolls) never had the
-   * problem — so the budget is gone and a session that is NOT on it is told
-   * once instead (lib/renderer-mode.ts).
-   *
-   * WHAT STILL MATTERS HERE IS ORDER. Callers put the facts being confirmed
-   * BEFORE the agent's own text, because the box is read top-down and the
-   * thing being approved should not come after the label of the thing it is
-   * about (lib/loop-goal.ts states the policy for the goal dialog).
-   *
-   * `signal` is what lets an ORCHESTRATOR's answer take the box off the
-   * user's screen: pi dismisses the dialog when it aborts, and the resolved
-   * `undefined` is then read as "somebody else settled this", not as a
-   * refusal (lib/orchestrator-child-channel.ts owns that distinction).
-   */
-  /**
    * ASK THE PROXY (2026-09-19) — what happens when a dialog waits thirty
    * minutes with nobody at the terminal.
    *
@@ -5284,6 +5262,34 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     return out;
   }
 
+  /**
+   * THE one dialog renderer (user decision, 2026-09-08): the gate's question
+   * template, whole. Every dialog in this file — and
+   * every dialog in the tool modules that inject this function — comes
+   * through here, so exactly one shape ever reaches the screen: 2–4 options
+   * (the recommended one marked), the `✎ 不选，我说明原因` row, and a text
+   * box when that row is picked. A yes/no box is not a thing any more.
+   *
+   * NOTHING IS FITTED, NOTHING IS CUT (user decision, 2026-09-16). Both halves
+   * used to be budgeted against the real terminal — a five-row dialog spends
+   * rows the old two-row confirm never did — because an oversized dialog pushed
+   * the animating spinner out of the viewport and made pi's DEFAULT renderer
+   * clear the screen and the scrollback every frame (measured: 29 of 30 frames).
+   * That cost landed on the lines the user is CONFIRMING, and the renderer the
+   * user runs (fullscreen: the host owns the screen and scrolls) never had the
+   * problem — so the budget is gone and a session that is NOT on it is told
+   * once instead (lib/renderer-mode.ts).
+   *
+   * WHAT STILL MATTERS HERE IS ORDER. Callers put the facts being confirmed
+   * BEFORE the agent's own text, because the box is read top-down and the
+   * thing being approved should not come after the label of the thing it is
+   * about (lib/loop-goal.ts states the policy for the goal dialog).
+   *
+   * `signal` is what lets an ORCHESTRATOR's answer take the box off the
+   * user's screen: pi dismisses the dialog when it aborts, and the resolved
+   * `undefined` is then read as "somebody else settled this", not as a
+   * refusal (lib/orchestrator-child-channel.ts owns that distinction).
+   */
   async function askChoice(
     uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
@@ -6521,14 +6527,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       activeRepoRoot.current = primaryRepoRoot;
       if (isCodeFile(path) && !state.hasCodeChange) { state.hasCodeChange = true; dirty = true; }
       if (isDocFile(path) && !state.hasDocChange) { state.hasDocChange = true; dirty = true; }
+      // EVERY PATH THIS SESSION WROTE IS RECORDED, code/doc or not (drill F3,
+      // 2026-09-20). The checkpoint commits this session's OWN new files and
+      // nothing else, and this list is how it knows which are its own: a
+      // `.json` fixture or a `.yaml` config is exactly as much this round's
+      // work as a `.ts` file, while extension-based classification would leave
+      // it looking like a stranger's file and keep it out of the reviewed
+      // commit. The ARMING below stays code/doc-only — that is a different
+      // question ("is there anything to review?") and its answer did not
+      // change.
+      const rel = repoRelative(path);
+      sessionEditedPaths.add(rel);
+      if (!state.sessionEditedFiles) state.sessionEditedFiles = [];
+      if (!state.sessionEditedFiles.includes(rel)) { state.sessionEditedFiles.push(rel); dirty = true; }
       if (isCodeFile(path) || isDocFile(path)) {
         // Scope tracking: this file is part of THIS session's own work — it is
         // always IN scope, even under a user-granted scope limit (which the
         // persisted lists must reflect across restarts).
-        const rel = repoRelative(path);
-        sessionEditedPaths.add(rel);
-        if (!state.sessionEditedFiles) state.sessionEditedFiles = [];
-        if (!state.sessionEditedFiles.includes(rel)) state.sessionEditedFiles.push(rel);
         if (state.scopeLimit) {
           if (!state.scopeLimit.sessionFiles.includes(rel)) {
             state.scopeLimit.sessionFiles.push(rel);
@@ -6670,8 +6685,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           // primary-repo-only; other repos always arm.
           const exempt = root === primaryRepoRoot ? new Set(state.scopeLimit?.preexistingFiles ?? []) : new Set<string>();
           const arming = exempt.size > 0 ? files.filter((f) => !exempt.has(f)) : files;
-          if (arming.some(isCodeFile) && !st.hasCodeChange) { st.hasCodeChange = true; }
-          if (arming.some(isDocFile) && !st.hasDocChange) { st.hasDocChange = true; }
+          // The file-kind half of the rule is `lib/gate-arming.ts`'s, here as
+          // everywhere (2026-09-20): this command brought dirty state BACK, and
+          // "what does it arm" is one question with one answer. `commitsAhead:
+          // 0` — this site re-arms on what the git command just restored, not on
+          // the branch's history (which `session_start` owns).
+          const armed = armingFromFacts({ files: arming, commitsAhead: 0 });
+          if (armed.hasCodeChange && !st.hasCodeChange) { st.hasCodeChange = true; }
+          if (armed.hasDocChange && !st.hasDocChange) { st.hasDocChange = true; }
           if (st.hasCodeChange || st.hasDocChange) {
             invalidateBindings(st);
             clearBypassToken();
@@ -7130,14 +7151,58 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           };
         }
 
-        const sweptIn = paths;
+        // WHAT THIS COMMIT TAKES — AND WHAT IT LEAVES (drill F3, 2026-09-20).
+        //
+        // `git add -A` took EVERYTHING, including files this session never
+        // wrote and no `.gitignore` covers: measured in the drill, the seeded
+        // `node_modules` symlink went into the history as `+1/−0 node_modules`
+        // and the reviewer read it out of its own change index. The gate's own
+        // commit is the one place nobody sees what is being added until
+        // afterwards, and a commit is not undoable in someone else's
+        // repository.
+        //
+        // So the sweep keeps:
+        //   - every TRACKED change (`M`/`D`/`R`/…) — that is the round's work;
+        //   - untracked paths THIS SESSION wrote through edit/write
+        //     (`st.sessionEditedFiles`), which is what makes a NEW file
+        //     reviewable at all;
+        // and leaves every other untracked-and-unignored path where it is:
+        // a file the session never touched is not this round's work, and
+        // committing it silently is how a secret, an artefact carrying an
+        // absolute path, or build output ends up in the history of the one
+        // tool whose job is to be careful.
+        //
+        // The leftover list comes from `ls-files -z`, NOT from the porcelain
+        // lines above: git QUOTES and escapes unusual names in `status`, and
+        // handing that form back as a pathspec matches nothing.
+        const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z"], {
+          cwd: root,
+          encoding: "utf8",
+        }).split("\0").filter((p) => p.length > 0);
+        const leftOut = planCheckpointSweep({ untracked, own: st.sessionEditedFiles ?? [] }).leftOut;
         execFileSync("git", ["add", "-A"], { cwd: root, encoding: "utf8" });
+        if (leftOut.length > 0) {
+          // Unstage, do not skip: `add -A` is still the right primitive for
+          // the tracked half (deletes and renames included), and `reset`
+          // leaves the leftover files exactly where they were — untracked, in
+          // the worktree, and named in the receipt.
+          execFileSync("git", ["reset", "-q", "--", ...leftOut], { cwd: root, encoding: "utf8" });
+        }
         execFileSync("git", ["commit", "-m", message], {
           cwd: root,
           encoding: "utf8",
           env: { ...process.env, REVIEW_GATE_BYPASS: "1" },
         });
         const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+        // THE COMMITTED FILES, READ FROM THE COMMIT (drill F4). The receipt
+        // used to describe the WORKTREE — which is how the symlink above could
+        // be committed without ever appearing in it — so it now reports what
+        // the commit actually carries.
+        const sweptIn = execFileSync(
+          "git",
+          ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", sha],
+          { cwd: root, encoding: "utf8" },
+        ).split("\0").filter((p) => p.length > 0);
         // Round-4 P2: the sha is persisted so prepare_review can compute
         // baseline..HEAD against it. Round-8 P1: record HEAD^ as prevSha —
         // the baseline start for the NEXT prepare — so the documented
@@ -7163,6 +7228,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             type: "text",
             text: `review-gate: checkpoint committed ${sha.slice(0, 12)} — \"${message}\". This commit is the review unit for the next round (baseline..HEAD).` +
               `\n\nCHECKPOINT_SHA=${sha}\nFiles: ${sweptIn.length} — ${sweptIn.slice(0, 20).join(", ")}${sweptIn.length > 20 ? " …" : ""}` +
+              // WHAT DID NOT GO IN, SAID OUT LOUD (drill F3/F4). A path left
+              // behind is invisible otherwise: the round reviews `baseline..HEAD`,
+              // so a change parked in an uncommitted file is a change nobody
+              // judged.
+              (leftOut.length > 0
+                ? `\n\n**未提交（${leftOut.length}）**：${leftOut.slice(0, 20).join(", ")}${leftOut.length > 20 ? " …" : ""}` +
+                  "\n这些路径没有被 gitignore，也不是本会话通过 edit/write 写过的文件 —— 门禁没有把它们带进这次提交（它们仍在 worktree 里）。" +
+                  "若其中有本轮的改动，请用 edit/write 工具重写一遍再送审：否则它不会进入审查范围 `baseline..HEAD`。"
+                : "") +
               (precommitBypassed
                 // R-22: never let a bypassed round read like a clean one.
                 ? "\n\n**本轮 precommit 被 `/gate-bypass` 覆盖**（用户授权）：全量测试并没有在这份内容上跑过。" +
@@ -7175,7 +7249,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
                   "run only targeted tests for files you keep editing, and let the round's own full lane be the single gate).") +
               (sizeCheck.advisory.length ? "\n\n" + formatFileSizeVerdict(sizeCheck) : ""),
           }],
-          details: { committed: true, sha, precommitBypassed },
+          details: { committed: true, sha, precommitBypassed, files: sweptIn, leftOut },
 
         };
       } catch (err) {
@@ -7495,6 +7569,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         /** Present when the quality round was SKIPPED — printed to the agent. */
         skipNote?: string;
         /**
+         * WHAT THIS CHAIN JUST FROZE (drill F4, 2026-09-20).
+         *
+         * `judge_submit` is the only surface the agent reads after a round is
+         * submitted, and it used to name neither the commit nor the files in
+         * it — so a checkpoint that swept something it should not have (F3:
+         * the seeded `node_modules` symlink) left no trace anywhere the agent
+         * or the user would look.
+         */
+        checkpoint?: { sha: string; files: string[]; leftOut: string[] };
+        /**
          * THE FUNCTIONAL BRIEF OF A PARALLEL ROUND (2026-09-16). Present
          * exactly when `role` is the quality judge: the caller dispatches both
          * judges back to back, because they judge the SAME immutable range and
@@ -7554,6 +7638,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       };
     }
     input.progress?.done(typeof commit.details?.sha === "string" ? String(commit.details.sha).slice(0, 12) : "worktree 已冻结");
+    const stringsOf = (value: unknown): string[] =>
+      Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+    const checkpoint = typeof commit.details?.sha === "string"
+      ? {
+          sha: commit.details.sha,
+          files: stringsOf(commit.details.files),
+          leftOut: stringsOf(commit.details.leftOut),
+        }
+      : undefined;
     // 3. Compute the range and the findings stream, and take the ready-made
     //    reviewer task text. `reason` rides along for the polish gate: without
     //    it a round after two READYs could never be submitted through the one
@@ -7624,6 +7717,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         role: QUALITY_ROLE,
         taskText: withNote(qualityTaskText),
         ...(qualityStream === undefined ? {} : { streamPath: qualityStream }),
+        ...(checkpoint === undefined ? {} : { checkpoint }),
         // The functional brief travels WITH it: the two judges are dispatched
         // in one breath (the caller owns the effects; this chain owns the
         // routing).
@@ -7649,6 +7743,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       ok: true,
       role: "reviewer",
       taskText: reviewerTask,
+      ...(checkpoint === undefined ? {} : { checkpoint }),
       // The findings stream is the agent's half of the round: it fixes what
       // the judge confirms WHILE the judge works. Dropping the path here would
       // leave that channel written but unread.
@@ -9102,6 +9197,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
        * reviewer starts in the same breath (see the loop below).
        */
       let parallelReviewer: { taskText: string; streamPath?: string } | undefined;
+      /**
+       * WHAT THE CHAIN FROZE, for the receipt (drill F4). Set by the reviewer
+       * chain only — the adviser and goal-audit branches make no commit.
+       */
+      let checkpointFacts: { sha: string; files: string[]; leftOut: string[] } | undefined;
       // Live progress for the whole submission: precommit → checkpoint →
       // prepare → dispatch. Each step publishes as it starts and as it ends,
       // so a round that stalls shows WHERE it stalled.
@@ -9134,6 +9234,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         dispatchRole = chain.role;
         skipNote = chain.skipNote;
         parallelReviewer = chain.parallelReviewer;
+        checkpointFacts = chain.checkpoint;
       }
 
       // The other two roles are the same shape: the gate builds the task the
@@ -9344,6 +9445,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             ]
           : []),
         ...(skipNote ? [`- 质量轮跳过：${skipNote}`] : []),
+        // THE COMMIT THIS ROUND JUDGES, AND WHAT WENT INTO IT (drill F4). The
+        // receipt named panes, transcripts and streams but not the reviewed
+        // unit itself — so "the gate committed a file I never wrote" (F3) was
+        // unreadable here, which is the only place the agent looks.
+        ...(checkpointFacts === undefined
+          ? []
+          : [
+              `- checkpoint ${checkpointFacts.sha.slice(0, 12)} 已冻结 ${checkpointFacts.files.length} 个文件：` +
+                `${checkpointFacts.files.slice(0, 12).join(", ")}${checkpointFacts.files.length > 12 ? " …" : ""}`,
+              ...(checkpointFacts.leftOut.length === 0
+                ? []
+                : [
+                    `- **未提交（${checkpointFacts.leftOut.length}）**：${checkpointFacts.leftOut.slice(0, 12).join(", ")}` +
+                      `${checkpointFacts.leftOut.length > 12 ? " …" : ""}` +
+                      " —— 未被 gitignore、也不是本会话用 edit/write 写过的文件；若其中有本轮改动，用它重写一遍再送下一轮。",
+                  ]),
+            ]),
         "- 本轮结束（通道 report 落盘）即完成；门禁会用标准报告唤醒你（结论、证据位置、记录情况、待答问题）。现在别等，先做别的确定性工作。",
       ];
       return {
@@ -9359,6 +9477,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
            * streams of a parallel round, not just the routed one.
            */
           judges: accepted,
+          ...(checkpointFacts === undefined ? {} : { checkpoint: checkpointFacts }),
           // THE ROUTED JUDGE'S OWN FIELDS, MATCHED BY ROLE (quality round P2,
           // 2026-09-16): the parallel round starts two judges, and a `role`
           // naming one of them beside the other's id/pane is the same lie the
@@ -12649,17 +12768,18 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
       const allFiles = changedFiles(cwd);
       const files = state.scopeLimit && allFiles ? allFiles.filter((f) => !exempt.has(f)) : allFiles;
-      const hasDirtyFiles = files && files.length > 0;
-      const ahead = state.scopeLimit ? 0 : await commitsAheadOfBase(cwd);
-      const hasBranchCommits = ahead > 0;
+      // ONE RULE, ONE IMPLEMENTATION (drill F1): `turn_end` asks the same
+      // question of the same facts, and the two copies of it had drifted.
+      const armed = armingFromFacts({
+        files: files ?? [],
+        commitsAhead: state.scopeLimit ? 0 : await commitsAheadOfBase(cwd),
+      });
 
-      if (hasDirtyFiles || hasBranchCommits) {
-        if (hasDirtyFiles && files!.some(isCodeFile)) {
-          state.hasCodeChange = true;
-        } else if (hasBranchCommits) {
+      if (armed.hasCodeChange || armed.hasDocChange) {
+        if (armed.hasCodeChange) {
           state.hasCodeChange = true;
         }
-        if (hasDirtyFiles && files!.some(isDocFile)) {
+        if (armed.hasDocChange) {
           state.hasDocChange = true;
         }
         state.review.verdict = "PENDING";
@@ -12813,20 +12933,22 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // user/bypass action — session edits re-arm the gate first).
     const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
     const files = state.scopeLimit ? allFiles.filter((f) => !exempt.has(f)) : allFiles;
-    if (files.length === 0 && ((await commitsAheadOfBase(cwd)) === 0 || state.scopeLimit !== undefined)) {
-      state.hasCodeChange = false;
-      state.hasDocChange = false;
-      persist(ctx);
-      return;
-    }
-    let dirty = false;
-    if (state.hasCodeChange && files.length > 0 && !files.some(isCodeFile)) {
-      state.hasCodeChange = false; dirty = true;
-    }
-    if (state.hasDocChange && files.length > 0 && !files.some(isDocFile)) {
-      state.hasDocChange = false; dirty = true;
-    }
-    if (dirty) persist(ctx);
+    // ASK THE SAME QUESTION ARMING ASKS (drill F1, 2026-09-19) — and it is the
+    // SAME code (`lib/gate-arming.ts`). This block used to read only the
+    // working tree's file KINDS, so one untracked non-code file (measured: the
+    // seeded `node_modules` symlink) cleared an arming that commits ahead of
+    // the base were holding up, and the ship gate let unreviewed commits pass.
+    // The git call is paid only when a flag could actually be cleared.
+    const current = { hasCodeChange: state.hasCodeChange, hasDocChange: state.hasDocChange };
+    if (!couldReconcile(current, files)) return;
+    const next = reconcileArming(current, {
+      files,
+      commitsAhead: state.scopeLimit ? 0 : await commitsAheadOfBase(cwd),
+    });
+    if (!next.changed) return;
+    state.hasCodeChange = next.hasCodeChange;
+    state.hasDocChange = next.hasDocChange;
+    persist(ctx);
   });
 
   // ---------- thinking-loop guard ----------

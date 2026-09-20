@@ -90,6 +90,74 @@ test("a real checkout gets the gate config, .env and node_modules — and NOT th
   }
 });
 
+test("IGNORE IS RE-CHECKED IN THE DESTINATION: a `node_modules/` pattern does not cover the symlink the seed makes there", () => {
+  // DRILL F2 (2026-09-19), measured: `node_modules/` (trailing slash) matches
+  // the DIRECTORY in the main checkout and NOT the symlink seeded into the new
+  // one, so `git check-ignore` answered 1 there and the isolated checkout
+  // carried `?? node_modules` — the untracked entry that then cleared the
+  // session's arming in the gate itself (F1). What the seeder exists to prevent
+  // must not depend on which side of the worktree boundary the question is
+  // asked.
+  const root = mkdtempSync(join(tmpdir(), "rg-seed-dest-"));
+  const repo = join(root, "repo");
+  const worktree = join(root, "repo-rg-child1");
+  try {
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(repo, ".gitignore"), ".pi/\n.env\nnode_modules/\n");
+    mkdirSync(join(repo, "node_modules/dep"), { recursive: true });
+    writeFileSync(join(repo, "node_modules/dep/index.js"), "module.exports = 1;\n");
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    const git = (...args: string[]): string =>
+      execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: hermeticGitEnv() });
+    git("init", "-q");
+    git("add", "-A");
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "init");
+    git("worktree", "add", "-q", worktree);
+
+    const lines = seedWorktree(repo, worktree);
+
+    assert.equal(
+      existsSync(join(worktree, "node_modules")),
+      false,
+      "a path the destination does not ignore is removed again — leaving it is the pollution this refuses",
+    );
+    assert.match(
+      lines.find((l) => l.includes("node_modules")) ?? "",
+      /没有带过去/,
+      "…and the receipt says so, because a checkout missing something must not read as a complete one",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an UNVERIFIABLE destination (no git to ask) keeps what the source checkout cleared", () => {
+  // "not ignored" and "could not ask" are different answers (lib/worktree-seed.ts
+  // `ignoreVerdict`): the first removes the path, the second must not — a git
+  // that cannot answer is not evidence against a path the plan already accepted.
+  const root = mkdtempSync(join(tmpdir(), "rg-seed-unknown-"));
+  const repo = join(root, "repo");
+  try {
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(repo, ".gitignore"), ".env\nnode_modules/\n");
+    writeFileSync(join(repo, ".env"), "MONGO=x\n");
+    const git = (...args: string[]): string =>
+      execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: hermeticGitEnv() });
+    git("init", "-q");
+    git("add", "-A");
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "init");
+    // A plain directory: `git -C` finds no repository here (nor above it).
+    const worktree = join(root, "not-a-repo");
+    mkdirSync(worktree);
+
+    seedWorktree(repo, worktree);
+
+    assert.equal(existsSync(join(worktree, ".env")), true, "the plan-time answer stands when the destination cannot be asked");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a path git does NOT ignore is left alone, even when it exists", () => {
   const root = mkdtempSync(join(tmpdir(), "rg-seed-skip-"));
   const repo = join(root, "repo");

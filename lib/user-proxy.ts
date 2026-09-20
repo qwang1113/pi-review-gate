@@ -285,15 +285,6 @@ export function buildProxyPrompt(input: ProxyPromptInput): string {
 }
 
 /**
- * Read the proxy's answer out of its output, or `undefined` for every shape
- * that is not a usable decision.
- *
- * `undefined` is the ONLY failure value, deliberately: every caller reads it as
- * "no answer", which is the same thing it reads when the user closes the box.
- * The row check is NOT here — it needs the option list and lives in
- * `raceWithUserProxy`, on the single path every answer travels.
- */
-/**
  * WHAT THE PROXY DECIDED, SAID BACK TO THE USER (2026-09-19).
  *
  * `declare_done` is the one moment a task is read from beginning to end. If any
@@ -327,6 +318,15 @@ export function formatProxyDecisionReport(
     "（例如对同一个 goal 重新 `propose_loop_goal`）。"
   );
 }
+/**
+ * Read the proxy's answer out of its output, or `undefined` for every shape
+ * that is not a usable decision.
+ *
+ * `undefined` is the ONLY failure value, deliberately: every caller reads it as
+ * "no answer", which is the same thing it reads when the user closes the box.
+ * The row check is NOT here — it needs the option list and lives in
+ * `raceWithUserProxy`, on the single path every answer travels.
+ */
 export function parseProxyDecision(raw: string | undefined): ProxyChoice | undefined {
   const text = (raw ?? "").trim();
   if (text === "" || text === "null") return undefined;
