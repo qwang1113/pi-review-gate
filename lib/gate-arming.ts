@@ -74,9 +74,24 @@ export function armingFromFacts(facts: ArmingFacts): ArmingFlags {
  * happens where work is done (an edit, a bash command, `session_start`), and a
  * reconciliation that could arm would be a second answer to the question this
  * module exists to answer once.
+ *
+ * AN EMPTY WORKTREE IS NOT EVIDENCE ABOUT KINDS (review round 1 P1). This is
+ * where "clear what is no longer justified" is not the same function as
+ * `armingFromFacts`, and the difference is measurable: the checkpoint commits a
+ * documentation-only round, the worktree goes clean, and the branch is now
+ * ahead. Reading the doc flag off an empty file list would clear BOTH flags and
+ * hand that round's commits to a ship gate that sees "nothing changed" — the
+ * exact fail-open this module exists to close, reached from the other side. An
+ * empty list therefore clears only when the branch has nothing ahead either.
  */
 export function reconcileArming(current: ArmingFlags, facts: ArmingFacts): ArmingFlags & { changed: boolean } {
-  const justified = armingFromFacts(facts);
+  const hasBranchCommits = facts.commitsAhead > 0;
+  const justified: ArmingFlags = facts.files.length === 0
+    ? { hasCodeChange: hasBranchCommits, hasDocChange: hasBranchCommits }
+    : {
+        hasCodeChange: hasBranchCommits || facts.files.some(isCodeFile),
+        hasDocChange: facts.files.some(isDocFile),
+      };
   const hasCodeChange = current.hasCodeChange && justified.hasCodeChange;
   const hasDocChange = current.hasDocChange && justified.hasDocChange;
   return {

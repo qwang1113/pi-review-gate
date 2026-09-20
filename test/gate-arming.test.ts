@@ -72,9 +72,13 @@ test("a dirty code file keeps the flag, and a doc flag is never propped up by br
 
   const docOnly = reconcileArming(
     { hasCodeChange: false, hasDocChange: true },
-    { files: [], commitsAhead: 2 },
+    { files: ["lib/a.ts"], commitsAhead: 2 },
   );
-  assert.equal(docOnly.hasDocChange, false, "a branch ahead is code work; it says nothing about documentation");
+  assert.equal(
+    docOnly.hasDocChange,
+    false,
+    "a branch ahead is code work; it says nothing about documentation — the doc flag follows the FILES",
+  );
 });
 
 test("reconciliation never SETS a flag — arming happens where work happens", () => {
@@ -83,6 +87,25 @@ test("reconciliation never SETS a flag — arming happens where work happens", (
     { hasCodeChange: fromNothing.hasCodeChange, hasDocChange: fromNothing.hasDocChange, changed: fromNothing.changed },
     { hasCodeChange: false, hasDocChange: false, changed: false },
     "clear-only, or the reconciliation becomes a second answer to the arming question",
+  );
+});
+
+test("an EMPTY worktree clears nothing while the branch is ahead — the docs-only round (review round 1 P1)", () => {
+  // The checkpoint commits a documentation-only round; the worktree goes clean
+  // and the branch is now ahead. Reading the doc flag off an empty file list
+  // would clear BOTH flags and hand that round's commits to a ship gate that
+  // sees "nothing changed".
+  const kept = reconcileArming({ hasCodeChange: false, hasDocChange: true }, { files: [], commitsAhead: 1 });
+  assert.deepEqual(
+    { hasCodeChange: kept.hasCodeChange, hasDocChange: kept.hasDocChange, changed: kept.changed },
+    { hasCodeChange: false, hasDocChange: true, changed: false },
+    "an empty worktree is not evidence about KINDS — the branch-ahead fact still holds the round open",
+  );
+  const cleared = reconcileArming({ hasCodeChange: true, hasDocChange: true }, { files: [], commitsAhead: 0 });
+  assert.deepEqual(
+    { hasCodeChange: cleared.hasCodeChange, hasDocChange: cleared.hasDocChange, changed: cleared.changed },
+    { hasCodeChange: false, hasDocChange: false, changed: true },
+    "…and with nothing ahead either, a clean worktree IS the end of it",
   );
 });
 

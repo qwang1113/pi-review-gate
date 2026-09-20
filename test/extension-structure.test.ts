@@ -6862,6 +6862,24 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
   // out of file kinds any more — that composition was the drift F1 exploited.
   assert.doesNotMatch(SRC, /some\(isCodeFile\)/, "no site decides arming from file kinds itself");
   assert.doesNotMatch(SRC, /some\(isDocFile\)/, "…nor for the doc half");
+  // The secondary-repo site is a SYNCHRONOUS state factory, and it needs the
+  // branch fact too (review round 1 P1): a repo whose only work is already
+  // committed must not read as "nothing to review" to ITS ship gate.
+  assert.match(
+    SRC,
+    /armingFromFacts\(\{ files: files \?\? \[\], commitsAhead: commitsAheadOfBaseSync\(root\) \}\)/,
+    "the secondary-repo arming supplies the branch-ahead fact, not a hard-coded 0",
+  );
+  assert.equal(
+    SRC.match(/"rev-list", "--count"/g)?.length,
+    3,
+    "'how far ahead is this branch' has ONE implementation — the async dep seam wraps the sync one",
+  );
+  assert.match(
+    SRC,
+    /async function commitsAheadOfBase\(cwd: string\): Promise<number> \{\n  return commitsAheadOfBaseSync\(cwd\);\n\}/,
+    "…and that wrapper only delegates",
+  );
   assert.equal(
     SRC.match(/armingFromFacts\(/g)?.length,
     3,
@@ -6904,6 +6922,27 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
     after.slice(0, after.indexOf("sessionEditedPaths.add(rel)")),
     /isCodeFile\(path\) \|\| isDocFile\(path\)\) \{/,
     "the recording itself is not behind a file-kind test",
+  );
+  // …and the SAME is true of a SECONDARY repo (review round 1 P1): its new
+  // `.json`/`.yaml` files were recorded only when they were project files.
+  const otherRepo = SRC.slice(
+    SRC.indexOf('if (editScope.scope === "other-repo")'),
+    SRC.indexOf("// P-multi: an edit in the PRIMARY repo makes it the active repo again"),
+  );
+  assert.ok(otherRepo.length > 0, "the other-repo branch exists");
+  assert.ok(
+    otherRepo.indexOf("s.sessionEditedFiles.push(rel)") < otherRepo.lastIndexOf("if (isProjectFile) {"),
+    "a secondary repo records EVERY path this session wrote, not only its project files",
+  );
+  // RECORDED IN THE FORM GIT ANSWERS IN (review round 1 P1): `cwd`-relative
+  // paths matched nothing, so a session started in a subdirectory left its own
+  // new file out of its own checkpoint — and an in-repo file outside that cwd
+  // was recorded absolute, which `lib/out-of-repo-paths.ts` reads as a
+  // violation.
+  assert.match(
+    SRC,
+    /return abs\.startsWith\(primaryRepoRoot \+ "\/"\) \? abs\.slice\(primaryRepoRoot\.length \+ 1\) : abs;/,
+    "recorded paths are REPO-root-relative, never cwd-relative",
   );
 });
 

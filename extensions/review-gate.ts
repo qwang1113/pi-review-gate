@@ -812,10 +812,15 @@ function findProjectAgentText(projectAgentsDir: string, name: string): string | 
 }
 
 /** Detect commits ahead of the upstream tracking branch or main/master. P0: also
-    checks @{upstream} so local commits ahead of remote on any branch are caught. */
-async function commitsAheadOfBase(cwd: string): Promise<number> {
+    checks @{upstream} so local commits ahead of remote on any branch are caught.
+
+    SYNC ON PURPOSE (review round 1 P1, drill F1 follow-up): the secondary-repo
+    arming site (`stateForRepo`) is a synchronous state factory, and a branch
+    ahead of its base arms the gate THERE as well — a repo whose only work is
+    already committed must not read as "nothing to review" to the ship gate,
+    which is exactly the fail-open F1 closed for the primary repo. */
+function commitsAheadOfBaseSync(cwd: string): number {
   try {
-    const { execFileSync } = await import("node:child_process");
     // Priority 1: upstream tracking branch (catches local ahead of remote on any branch)
     try {
       const out = execFileSync("git", ["rev-list", "--count", "@{upstream}..HEAD"], {
@@ -848,6 +853,11 @@ async function commitsAheadOfBase(cwd: string): Promise<number> {
     }
   } catch { /* git unavailable */ }
   return 0;
+}
+
+/** The async spelling the injectable dep seam declares. ONE implementation. */
+async function commitsAheadOfBase(cwd: string): Promise<number> {
+  return commitsAheadOfBaseSync(cwd);
 }
 
 export default function reviewGate(pi: ExtensionAPI) {
@@ -1265,12 +1275,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       } else {
         s = emptyState(state.sessionId ?? null, projectConfig.maxRounds);
         const files = changedFiles(root);
-        // SAME RULE as every other arming site (`lib/gate-arming.ts`, 2026-09-20):
-        // a secondary repo's pre-existing dirty work must still arm the gate,
-        // and "what do these files arm" is answered in exactly one place. No
-        // branch-commit fact here — this is the worktree this session is about
-        // to work in, not a branch history it has.
-        const armed = armingFromFacts({ files: files ?? [], commitsAhead: 0 });
+        // SAME RULE as every other arming site (`lib/gate-arming.ts`, 2026-09-20),
+        // and BOTH facts — the branch-ahead half included (review round 1 P1):
+        // a secondary repo whose only work is already committed would otherwise
+        // read as "nothing to review" to that repo's ship gate, which is the
+        // fail-open F1 closed for the primary repo. The sync helper exists for
+        // this call site (it is a synchronous state factory).
+        const armed = armingFromFacts({ files: files ?? [], commitsAhead: commitsAheadOfBaseSync(root) });
         if (armed.hasCodeChange || armed.hasDocChange) {
           s.hasCodeChange = armed.hasCodeChange;
           s.hasDocChange = armed.hasDocChange;
@@ -1506,9 +1517,23 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  absolute). NOTE: assumes the session cwd IS the repo root — the same
    *  standing assumption sidecarPath() and every changedFiles()/isCodeFile()
    *  consumer in this file already make; scope-set membership relies on it. */
+  /**
+   * The path as the REPOSITORY sees it — the form `git status`, `git ls-files`
+   * and a reviewer's findings all use.
+   *
+   * ROOT-RELATIVE, NOT `cwd`-RELATIVE (review round 1 P1, drill F3). A session
+   * launched inside a subdirectory used to record `x.ts` for `<root>/sub/x.ts`:
+   * that matched nothing downstream. The checkpoint's "did this session write
+   * it" test compares against git's root-relative paths, so the session's own
+   * new file was left out of its own commit; and a file inside the repo but
+   * outside that `cwd` was recorded as an ABSOLUTE path, which
+   * `lib/out-of-repo-paths.ts` reads as "this child wrote outside the repo".
+   * A path genuinely outside the repository still comes back absolute — that is
+   * the signal that module needs.
+   */
   function repoRelative(p: string): string {
     const abs = p.startsWith("/") ? p : pathJoin(cwd, p);
-    return abs.startsWith(cwd + "/") ? abs.slice(cwd.length + 1) : abs;
+    return abs.startsWith(primaryRepoRoot + "/") ? abs.slice(primaryRepoRoot.length + 1) : abs;
   }
 
   // LLM semantic guard layer (DeepSeek V4 Flash — lib/llm-classify.ts).
@@ -6485,12 +6510,19 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         let dirty = false;
         if (isCodeFile(path) && !s.hasCodeChange) { s.hasCodeChange = true; dirty = true; }
         if (isDocFile(path) && !s.hasDocChange) { s.hasDocChange = true; dirty = true; }
+        // EVERY path this session wrote is recorded, code/doc or not — the same
+        // rule as the primary branch below (review round 1 P1, drill F3):
+        // `review_checkpoint` commits THIS repo's own new files and nothing else,
+        // and a new `.json`/`.yaml` file of a secondary repo was left looking
+        // like a stranger's. The path is root-relative because that is the form
+        // git answers in (this branch already did that; the primary branch did
+        // not, and compared against `cwd` — fixed in `repoRelative`).
+        const rel = absEditPath.startsWith(otherRepo + "/")
+          ? absEditPath.slice(otherRepo.length + 1)
+          : absEditPath;
+        if (!s.sessionEditedFiles) s.sessionEditedFiles = [];
+        if (!s.sessionEditedFiles.includes(rel)) { s.sessionEditedFiles.push(rel); dirty = true; }
         if (isProjectFile) {
-          const rel = absEditPath.startsWith(otherRepo + "/")
-            ? absEditPath.slice(otherRepo.length + 1)
-            : absEditPath;
-          if (!s.sessionEditedFiles) s.sessionEditedFiles = [];
-          if (!s.sessionEditedFiles.includes(rel)) s.sessionEditedFiles.push(rel);
           invalidateBindings(s);
           // A NEW EDIT UN-FINISHES THE TASK (round-2 hardening). The
           // completion record is what a supervising orchestrator reads to
