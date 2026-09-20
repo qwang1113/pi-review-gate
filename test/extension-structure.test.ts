@@ -6934,6 +6934,10 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
     otherRepo.indexOf("s.sessionEditedFiles.push(rel)") < otherRepo.lastIndexOf("if (isProjectFile) {"),
     "a secondary repo records EVERY path this session wrote, not only its project files",
   );
+  assert.ok(
+    otherRepo.indexOf("sessionRepos.add(otherRepo)") < otherRepo.indexOf("if (isProjectFile) {"),
+    "…and the REPO SET follows the recording (review round 2 P1): a repo this session wrote into belongs in declare_done's coverage even when the file is not a project file",
+  );
   // RECORDED IN THE FORM GIT ANSWERS IN (review round 1 P1): `cwd`-relative
   // paths matched nothing, so a session started in a subdirectory left its own
   // new file out of its own checkpoint — and an in-repo file outside that cwd

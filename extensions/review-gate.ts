@@ -6502,8 +6502,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         const otherRepo = editScope.root;
         const isProjectFile = isCodeFile(path) || isDocFile(path);
         const isNewRepo = !sessionRepos.has(otherRepo);
+        // THE REPO SET FOLLOWS THE RECORDING (review round 2 P1). A session that
+        // wrote only a `.json` in another repo HAS worked there: leaving that
+        // repo out of `sessionRepos` would drop it from `declare_done`'s
+        // coverage and from the sidecar's repo list while its file sits in the
+        // checkpoint's own-list. The ACTIVE repo still follows PROJECT files
+        // alone — a scratch path must not retarget verdict recording.
+        sessionRepos.add(otherRepo);
         if (isProjectFile) {
-          sessionRepos.add(otherRepo);
           activeRepoRoot.current = otherRepo;
         }
         const s = stateForRepo(otherRepo);
