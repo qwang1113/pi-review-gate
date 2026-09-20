@@ -17,11 +17,18 @@
  * when the SAME facts no longer justify it.
  *
  * WHAT THE CALLER OWNS. The two facts are read from git, which this module
- * does not touch: `files` arrives already filtered by the scope-limit
- * exemption (`GateState.scopeLimit.preexistingFiles`), and `commitsAhead` is
- * already 0 when a user-granted scope limit suspends branch-commit arming.
- * Both call sites apply those two rules identically today; keeping them at the
+ * does not touch, and so are the two rules that qualify them for the PRIMARY
+ * repo: `files` arrives filtered by the scope-limit exemption
+ * (`GateState.scopeLimit.preexistingFiles`), and `commitsAhead` is 0 when a
+ * user-granted scope limit suspends branch-commit arming. Keeping both at the
  * call site keeps this module a pure decision.
+ *
+ * THERE ARE FOUR CALL SITES, and the secondary pair applies neither rule
+ * because scope limits are a PRIMARY-repo grant: `session_start` (arm), the
+ * git-command re-arm (arm), a secondary repo's first sidecar (arm), and
+ * `turn_end`, which reconciles the primary AND walks `sessionRepos` for every
+ * other repo this session worked in (reconcile). All four pass the same facts
+ * in the same shape; only the primary two have a scope-limit filter to apply.
  *
  * NOT A FINGERPRINT AND NOT A VERDICT: this says whether there is anything for
  * the gate to be armed about, never whether it has been reviewed.
@@ -33,14 +40,15 @@ import { isCodeFile, isDocFile } from "./constants.ts";
 export interface ArmingFacts {
   /**
    * Dirty paths in the worktree, ALREADY filtered by the scope-limit
-   * exemption. Empty is ordinary (a clean tree, or one holding only files the
-   * user exempted).
+   * exemption (primary repo only). Empty is ordinary (a clean tree, or one
+   * holding only files the user exempted).
    */
   files: readonly string[];
   /**
    * Commits this branch has ahead of its base. 0 under a user-granted scope
-   * limit, where a new commit is either the consented exempted work being
-   * shipped or a user action — never this session's own unprotected work.
+   * limit (a primary-repo grant), where a new commit is either the consented
+   * exempted work being shipped or a user action — never this session's own
+   * unprotected work.
    */
   commitsAhead: number;
 }
