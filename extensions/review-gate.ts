@@ -9103,6 +9103,19 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // the dialog cannot ride in on someone else's PASS.
         return st.planAudit?.verdict === "PASS" && st.planAudit.hash === pending.hash;
       },
+      // THE EVIDENCE THE RECLAIM CANNOT ERASE (2026-09-21). Same content
+      // binding as `auditPassed`, but blind to the VERDICT — a recorded FAIL
+      // closes the round just as much as a PASS does, and reading it as "not
+      // recorded" is what threw the auditor's findings away and sent the
+      // caller a fail-closed notice instead. The timestamp is what keeps an
+      // earlier round's record for identical content from closing this one.
+      recordedThisRound: (root, pending) => {
+        const st = root === primaryRepoRoot ? state : stateForRepo(root);
+        const record = pending.kind === "goal"
+          ? (st.goalPrereview?.hash === goalTextHash(pending.draft) ? st.goalPrereview : undefined)
+          : (st.planAudit?.hash === pending.hash ? st.planAudit : undefined);
+        return record !== undefined && record.at >= pending.startedAt;
+      },
       // Rebuilt from the RECORD, so a round the wait settled still hands the
       // caller its findings instead of a bare "审计记录：FAIL". The plan can:
       // `formatPlanAuditRefusal` is a pure function of the record it just

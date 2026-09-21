@@ -29,6 +29,7 @@ import {
   QUALITY_ROUND_SPEC,
   REVIEW_ROUND_SPEC,
   specForRound,
+  type AuditRoundSpec,
   type PendingAudit,
 } from "../lib/audit-round-specs.ts";
 import type { ChannelRecord, ChannelReportRecord, ReportConclusion } from "../lib/orchestrator-channel.ts";
@@ -533,6 +534,8 @@ interface FakeState {
   qualityRounds: number;
   /** undefined = "could not record right now" (no usable tool context). */
   recordResult: string | undefined;
+  /** Judge ids whose pane `settleAuditRound` reclaimed at round end. */
+  reclaimed: string[];
   /**
    * `checkpoint.at` of the repo — the content stamp a REVIEW verdict must be
    * newer than. Default: an hour before the reports, i.e. a healthy round.
@@ -553,6 +556,7 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     reviewRounds: 0,
     qualityRounds: 0,
     recordResult: "recorded",
+    reclaimed: [],
     checkpointAt: CHECKPOINT_AT,
     ...over,
   };
@@ -587,6 +591,17 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
       state.qualityRounds += 1;
       return state.recordResult;
     },
+    // FAITHFUL, and this one had to be learned the hard way (2026-09-21): the
+    // extension's reclaim goes through `judge_close`, which DELETES the
+    // registry row. A fake that only recorded the call left the entry — and
+    // its cursor — alive, so the synchronous chain's "did the wait record this
+    // round?" detector kept passing in tests while it read `undefined` in
+    // production and fail-closed three PASSed plan audits in a row.
+    reclaimJudgePane: async (_root, judgeId) => {
+      state.reclaimed.push(judgeId);
+      state.entry = undefined;
+      return { ok: true, hadPane: true, terminated: true };
+    },
   };
   return { state, deps };
 }
@@ -604,8 +619,11 @@ test("settle/review: the round is recorded and its cursor consumed exactly once"
   assert.deepEqual(state.forgotten, []);
 
   // THE SAME REPORT, A SECOND PATH (the wait and the settle sweep both close
-  // rounds). The cursor the first one wrote is what makes this a no-op.
-  state.entry = { ...state.entry!, lastReportId: "rep-2" };
+  // rounds). The cursor the first one wrote is what makes this a no-op — and
+  // the row carrying it is re-registered here because recording the round took
+  // the old one with the pane (2026-09-21); the next dispatch of this role
+  // re-registers the same judge id.
+  state.entry = { judgeId: "j-1", openerId: "o-1", role: "reviewer", roundSeq: 2, lastReportId: "rep-2" };
   const second = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
   assert.equal(second.status, "miss");
   assert.equal(second.status === "miss" && second.reason, "already-consumed");
@@ -629,7 +647,8 @@ test("settle/quality: the quality round is recorded through the same engine, onc
   assert.equal(state.reviewRounds, 0, "a quality round is not a review round");
   assert.deepEqual(state.cursors, ["rep-2"]);
 
-  state.entry = { ...state.entry!, lastReportId: "rep-2" };
+  // Re-registered with the cursor the record wrote — same reason as above.
+  state.entry = { judgeId: "j-1", openerId: "o-1", role: "quality-auditor", roundSeq: 2, lastReportId: "rep-2" };
   const second = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
   assert.equal(second.status, "miss");
   assert.equal(second.status === "miss" && second.reason, "already-consumed");
@@ -904,6 +923,18 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
     pendingAudit: () => state.pending,
     forgetPending: (root) => { state.forgotten.push(root); state.pending = undefined; },
     advanceCursor: (_judgeId, reportId) => { state.cursors.push(reportId); },
+    // Same reclaim as the settle fake, re-bound to THIS state object (the
+    // spread above cloned the settle fake's copy).
+    reclaimJudgePane: async (_root, judgeId) => {
+      state.reclaimed.push(judgeId);
+      state.entry = undefined;
+      return { ok: true, hadPane: true, terminated: true };
+    },
+    // The RECORD is the evidence, content-bound exactly as the extension
+    // binds it: a goal to its draft, a plan to its hash.
+    recordedThisRound: (_root, pending) => (pending.kind === "goal"
+      ? state.goalDrafts.includes(pending.draft)
+      : state.planRecords.some((r) => r.hash === pending.hash)),
     savePlanAudit: (_root, record) => { state.planRecords.push(record); },
     recordGoal: async ({ pending }) => { state.goalDrafts.push(pending.draft); return state.recordResult; },
     dispatch: (input) => {
@@ -1057,6 +1088,49 @@ test("run: a round the WAIT already recorded still passes (observer-records)", a
     { status: "unknown" },
     "…which is exactly why a second settle cannot be the detector",
   );
+});
+
+// THE SAME EDGE, AFTER THE PANE STARTED DYING WITH ITS ROUND (2026-09-21).
+// Recording a round now frees the judge's pane, and that close DELETES the
+// registry row — so the cursor the detector above reads is gone, and a round
+// the wait just recorded looks to the chain like a round nobody recorded.
+// Measured in prime: three plan audits PASSed (state + audit log) and each one
+// came back as a fail-closed notice, with no approval dialog and no way to
+// converge; a goal audit's findings were swallowed the same way.
+async function runWithFaithfulReclaim(spec: AuditRoundSpec, pending: PendingAudit) {
+  const { state, deps } = makeRunDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
+  });
+  // Exactly what production does: judge_wait settles the round, and the
+  // record's own reclaim then drops the registry row.
+  deps.awaitRoundEnd = async () => {
+    await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+    return { ok: true, detail: "" };
+  };
+  const outcome = await runAuditRound(deps, { spec, root: ROOT, task: "审计", pending });
+  return { state, outcome };
+}
+
+test("run/goal: the reclaim deletes the registry row, and the round STILL closes", async () => {
+  const { state, outcome } = await runWithFaithfulReclaim(
+    GOAL_AUDIT_SPEC,
+    { kind: "goal", draft: "# 目标草稿", startedAt: NOW },
+  );
+  assert.deepEqual(outcome, { ok: true }, "a recorded audit must reach the user, not a fail-closed notice");
+  assert.deepEqual(state.reclaimed, ["j-1"], "…and the pane was still freed at round end");
+  assert.equal(state.entry, undefined, "…leaving no registry row to read a cursor from");
+  assert.deepEqual(state.goalDrafts, ["# 目标草稿"], "recorded exactly once, by the wait");
+});
+
+test("run/plan: the reclaim deletes the registry row, and the round STILL closes", async () => {
+  const { state, outcome } = await runWithFaithfulReclaim(
+    PLAN_AUDIT_SPEC,
+    { kind: "plan", hash: "h-1", planText: "# plan", startedAt: NOW },
+  );
+  assert.deepEqual(outcome, { ok: true });
+  assert.deepEqual(state.reclaimed, ["j-1"]);
+  assert.equal(state.planRecords.length, 1, "recorded exactly once, by the wait");
 });
 
 // THE OTHER HALF OF THAT EVIDENCE. A pending entry that vanished WITHOUT the
