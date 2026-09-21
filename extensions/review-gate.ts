@@ -9762,18 +9762,28 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // and a long tool call looks the same from outside. The channel knows the
     // difference: a request with no answer after it is a round that is ALIVE
     // and waiting on the opener.
+    // …AND A REQUEST SETTLED IN THE PANE IS SETTLED TOO (reviewer P1,
+    // 2026-09-21). `request-settled` is how a question answered BY THE HUMAN in
+    // the pane (or dismissed, or interrupted) is recorded — a different record
+    // kind, and there is never an `answer` record for it. Counting only
+    // `answer` meant every such question stayed "open" forever, and since a
+    // judge's channel is appended to across ROUNDS, it short-circuited the
+    // silence reading for every later round on that lane: the feature was
+    // effectively dead.
     judgeBlockedOnOpener: (child) => {
       try {
         const target = judgeChannelTarget(child.openerId, child.judgeId);
         const records = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
-        const answered = new Set<string>();
+        const resolved = new Set<string>();
         for (const r of records) {
-          if (r.kind === "answer") answered.add((r as { requestId?: string }).requestId ?? "");
+          if (r.kind === "answer" || r.kind === "request-settled") {
+            resolved.add((r as { requestId?: string }).requestId ?? "");
+          }
         }
         let pending = false;
         for (const r of records) {
           if (r.kind !== "request") continue;
-          pending = !answered.has((r as { requestId?: string }).requestId ?? "");
+          pending = !resolved.has((r as { requestId?: string }).requestId ?? "");
         }
         return pending;
       } catch {
