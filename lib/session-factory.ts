@@ -55,8 +55,8 @@ import {
   buildEvenLayoutArgv,
   buildHandoffPaneArgv,
   buildKillPaneArgv,
+  buildPaneLabelArgv,
   buildPaneStyleArgv,
-  buildPaneTitleArgv,
   buildShowPaneLabelsArgv,
   buildSpawnPaneArgv,
   buildWindowLayoutArgv,
@@ -68,6 +68,7 @@ import {
 } from "./orchestrator-tmux.ts";
 import {
   judgePaneLabel,
+  paneIdentity,
   paneStyleFor,
   paneTitleFor,
   PANE_BORDER_FORMAT,
@@ -253,7 +254,7 @@ export function decorateSessionPane(
     }
   };
   attempt(buildPaneStyleArgv(paneId, paneStyleFor(decor.colorSeed)));
-  attempt(buildPaneTitleArgv(paneId, paneTitleFor({
+  attempt(buildPaneLabelArgv(paneId, paneTitleFor({
     label: decor.label,
     state: decor.state,
     ...(decor.stateForSeconds === undefined ? {} : { stateForSeconds: decor.stateForSeconds }),
@@ -289,12 +290,15 @@ export const PANE_REPAINT_MIN_MS = 5_000;
 const DEFAULT_TITLE_MEMORY: PaneTitleMemory = new Map<string, { title: string; at: number }>();
 
 /**
- * Repaint one pane's title — THE fix for C2, and the only title writer.
+ * Repaint one pane's label, and the only writer of one.
  *
- * pi overwrites the pane title with its own after boot, so a title written once
- * at spawn is gone within seconds. The cure is the one the orchestration side
- * already had: rewrite it from every health reading. Judges now share this
- * function, so a judge border ages exactly like a child's one.
+ * WHAT IT IS FOR NOW (2026-09-22): the STATE and its age. It used to be the
+ * fix for C2 as well — pi overwrote `pane_title` after boot, so a label written
+ * at spawn was gone within seconds and only a repaint brought it back — and
+ * that half is gone with the move to the `@rg_label` pane option
+ * (lib/orchestrator-tmux.ts `buildPaneLabelArgv`), which pi does not touch. The
+ * label still has to age (`waiting-judge 220s`), so the repaint stays, shared
+ * by judges and children alike.
  *
  * The state comes from the CHANNEL projection at the call site — never from a
  * screen. Returns whether tmux was actually asked to paint.
@@ -329,18 +333,20 @@ export function refreshSessionPaneTitle(
  * Write one pane's title, once, with NO memory and NO throttle — the only
  * place a title reaches tmux.
  *
- * It exists for the ONE pane whose title cannot be deduplicated: the project
+ * It exists for the ONE pane whose label cannot be deduplicated: the project
  * manager's OWN pane (`pm:<dir>`), which carries no state and therefore no
- * changing string to diff against. pi writes its own title at boot and on
- * every extension rebind (dist/modes/interactive/interactive-mode.js
- * `updateTerminalTitle`), so a write-once-then-remember approach would go
- * stale the first time pi rebinds — the caller repaints unconditionally
- * instead. Failures are swallowed the same way: this is a cosmetic layer, and
- * a pane that works is worth more than a border that is right.
+ * changing string to diff against. The caller repaints it unconditionally,
+ * which costs one tmux call per probe for one pane; the reason it HAD to be
+ * unconditional (pi rewriting `pane_title` at boot and on every extension
+ * rebind, dist/modes/interactive/interactive-mode.js `updateTerminalTitle`) is
+ * gone now that the label is a pane option pi never writes, so this could be
+ * memoised the day that one call matters. Failures are swallowed the same way:
+ * this is a cosmetic layer, and a pane that works is worth more than a border
+ * that is right.
  */
 export function paintPaneTitle(run: PaneRunner, paneId: string, title: string): void {
   try {
-    run(buildPaneTitleArgv(paneId, title));
+    run(buildPaneLabelArgv(paneId, title));
   } catch {
     /* cosmetic only — never allowed to affect supervision */
   }
@@ -710,4 +716,21 @@ export function judgePaneDecor(
   state: ChildState = "working",
 ): SessionPaneDecor {
   return { label: judgePaneLabel(role, owner), colorSeed: judgeId, state };
+}
+
+/**
+ * The decoration a WORKER pane gets: `x@self`, `probe@t3`.
+ *
+ * Same shape and same owner rule as a judge's, and it is written ONCE — a
+ * worker has no health probe to repaint it, which is exactly why the label is
+ * a pane user option pi cannot overwrite (lib/orchestrator-tmux.ts
+ * `PANE_LABEL_OPTION`). Without this, a worker pane was the one gate-opened
+ * pane on screen with nothing on its border.
+ */
+export function workerPaneDecor(
+  workerId: string,
+  owner: string,
+  state: ChildState = "working",
+): SessionPaneDecor {
+  return { label: paneIdentity({ what: workerId, owner }), colorSeed: workerId, state };
 }

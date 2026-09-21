@@ -64,7 +64,7 @@ function makeWorld(opts: {
   const io = opts.io ?? memoryChannelIO(() => NOW);
   const files = new Map<string, string>();
   let registry: WorkerRegistry = {};
-  const opened: Array<{ command: readonly string[]; role: unknown }> = [];
+  const opened: Array<{ command: readonly string[]; role: unknown; decor: unknown }> = [];
   const killed: string[] = [];
   const logs: string[] = [];
   const alive = opts.alive ?? true;
@@ -79,12 +79,13 @@ function makeWorld(opts: {
     paneAlive: () => alive,
     openPane: async (spec) => {
       if (opts.paneOpens === false) return { ok: false, error: "tmux 拒绝开 pane" };
-      opened.push({ command: spec.command, role: spec.role });
+      opened.push({ command: spec.command, role: spec.role, decor: spec.decor });
       spec.register("%42");
       return { ok: true, paneId: "%42" };
     },
     killPane: (paneId) => { killed.push(paneId); return true; },
     openerId: () => opts.openerId ?? "%1",
+    paneOwner: () => "self",
     repoRoot: () => "/repo",
     channelIO: io,
     channelHome: () => undefined,
@@ -164,6 +165,16 @@ test("a worker pane is READ-ONLY by its tool surface, and resumes by session id"
   assert.ok(command.some((arg) => arg.startsWith("@@") === false && arg.startsWith("@")), "the task is an @file argument");
   assert.match(reply.content[0]!.text, /worker-1/, "the receipt names the worker id it minted");
   assert.equal(world.registry()["worker-1"]?.sessionId, workerSessionId("worker-1"));
+});
+
+test("a worker pane is DECORATED like every other gate pane — identity on its border", async () => {
+  const world = makeWorld();
+  await world.call("worker_submit", { workerId: "probe", task: "看一眼" });
+  assert.deepEqual(world.opened[0]!.decor, {
+    label: "probe@self",
+    colorSeed: "probe",
+    state: "working",
+  }, "the worker used to be the one gate-opened pane with a blank border");
 });
 
 test("the system prompt the pane runs carries the preset's own words", async () => {

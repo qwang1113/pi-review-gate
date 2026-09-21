@@ -38,7 +38,8 @@
 import { Type } from "typebox";
 import type { ToolHost } from "./tool-host.ts";
 import type { ToolReply } from "./tool-host.ts";
-import type { SessionPaneRole } from "./session-factory.ts";
+import type { SessionPaneDecor, SessionPaneRole } from "./session-factory.ts";
+import { workerPaneDecor } from "./session-factory.ts";
 import type { ChannelIO, ChannelTarget, ChannelRecord, ChannelRequestRecord, ChannelReportRecord } from "./orchestrator-channel.ts";
 import { appendRecord, channelPathFor, newChannelId, readChannel, requestPayload } from "./orchestrator-channel.ts";
 import type { AgentsConfigMap } from "./model-config.ts";
@@ -73,12 +74,21 @@ export interface WorkerToolDeps {
     cwd: string;
     command: readonly string[];
     role: SessionPaneRole;
+    /** Border colour + label, so a worker pane is not a blank rectangle. */
+    decor: SessionPaneDecor;
     register: (paneId: string) => void;
   }): Promise<{ ok: true; paneId: string } | { ok: false; error: string }>;
   /** Kill a pane. `ok: false` is tolerated (already gone ⇒ still closed). */
   killPane(paneId: string): boolean;
   /** The opener id this session dispatches under (its own pane, normally). */
   openerId(): string;
+  /**
+   * WHO THIS SESSION IS on a border — the `@<owner>` half of the label
+   * (lib/orchestrator-pane-decor.ts `selfPaneOwner`). It is derived from the
+   * session's own facts, never from a tool parameter, which is why it is a
+   * seam and not an argument: `pm`, a task id, or `self`.
+   */
+  paneOwner(): string;
   /** The repo workers are dispatched against. */
   repoRoot(): string;
   channelIO: ChannelIO;
@@ -537,6 +547,7 @@ async function openWorkerPane(
     cwd: deps.repoRoot(),
     command,
     role: { kind: "worker", openerId, workerId: opts.workerId, role: opts.role },
+    decor: workerPaneDecor(opts.workerId, deps.paneOwner()),
     register: (paneId) => {
       const registry = deps.readRegistry();
       // THE CURSOR SURVIVES A REOPEN (reviewer P1, 2026-09-21): `reportedAt` is

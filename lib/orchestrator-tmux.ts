@@ -220,9 +220,10 @@ export function buildKillPaneArgv(pane: string): readonly string[] {
  * WHY THIS IS NOT THE FORBIDDEN KIND OF CONFIG WRITE. `assertSafeTmuxArgv`
  * refuses any option write carrying `-g`, because that is the user's GLOBAL
  * configuration and no gate has business touching it. These are window- and
- * pane-scoped: `select-pane -P/-T` affects exactly one pane the registry
- * created, and `setw -t <pane>` affects the window that pane lives in — the
- * one the orchestration was invited into. Both are undone on close.
+ * pane-scoped: `select-pane -P` affects exactly one pane the registry
+ * created, `set -p -t <pane> @rg_label` writes a USER OPTION on that same
+ * pane, and `setw -t <pane>` affects the window that pane lives in — the one
+ * the orchestration was invited into.
  *
  * The colour and title STRINGS are decided in lib/orchestrator-pane-decor.ts;
  * everything here does is put them in an argv array where no shell can see
@@ -230,14 +231,37 @@ export function buildKillPaneArgv(pane: string): readonly string[] {
  * argv element and is never concatenated into a command line.
  */
 
+/**
+ * The pane user option the gate's label lives in.
+ *
+ * It is spelled HERE, beside the argv that writes it, and imported by
+ * lib/orchestrator-pane-decor.ts for the border format that reads it — the
+ * writer and the reader must never drift into two spellings, and this module
+ * imports nothing, so it is the end of the dependency chain the other way
+ * round (decor → registry → tmux).
+ */
+export const PANE_LABEL_OPTION = "@rg_label";
+
 /** Set one pane's border colour (`-P` is the pane style). */
 export function buildPaneStyleArgv(pane: string, style: string): readonly string[] {
   return assertSafeTmuxArgv(["select-pane", "-t", requirePane(pane, "pane"), "-P", style]);
 }
 
-/** Set one pane's title — what `pane-border-format` then renders. */
-export function buildPaneTitleArgv(pane: string, title: string): readonly string[] {
-  return assertSafeTmuxArgv(["select-pane", "-t", requirePane(pane, "pane"), "-T", title]);
+/**
+ * Write one pane's LABEL — the string `pane-border-format` then renders.
+ *
+ * A PANE USER OPTION (`@rg_label`), not `select-pane -T` (2026-09-22). The
+ * title was never ours: pi writes its own into `pane_title` at boot and on
+ * every extension rebind, so a label written at spawn was gone within seconds.
+ * The judge and orchestration panes survived that only because their health
+ * probes repaint on a timer; a worker pane, which has no probe, simply stayed
+ * blank. `@rg_label` is a namespace nothing else writes, so the label written
+ * once at spawn is still there minutes later — and the border format falls
+ * back to `#{pane_title}` for panes the gate never opened
+ * (lib/orchestrator-pane-decor.ts `PANE_BORDER_FORMAT`).
+ */
+export function buildPaneLabelArgv(pane: string, label: string): readonly string[] {
+  return assertSafeTmuxArgv(["set", "-p", "-t", requirePane(pane, "pane"), PANE_LABEL_OPTION, label]);
 }
 
 /**

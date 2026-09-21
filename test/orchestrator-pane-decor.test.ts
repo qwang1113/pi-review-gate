@@ -39,7 +39,13 @@ import {
   PANE_PALETTE,
 } from "../lib/orchestrator-pane-decor.ts";
 import { newChildId, taskIdFromChildId } from "../lib/orchestrator-registry.ts";
-import { assertSafeTmuxArgv, buildShowPaneLabelsArgv } from "../lib/orchestrator-tmux.ts";
+import {
+  assertSafeTmuxArgv,
+  buildPaneLabelArgv,
+  buildShowPaneLabelsArgv,
+  PANE_LABEL_OPTION,
+  UnsafeTmuxCommand,
+} from "../lib/orchestrator-tmux.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
 import * as tmuxModule from "../lib/orchestrator-tmux.ts";
 
@@ -119,6 +125,34 @@ test("the title carries the STATE and how long it has held — identity alone is
   );
 });
 
+test("the label is a pane USER OPTION, so pi cannot overwrite it", () => {
+  // pi writes its own `pane_title` at boot and on every extension rebind, so a
+  // label written once at spawn used to vanish within seconds — survived only
+  // by the health probes that repaint, which a worker pane does not have.
+  assert.deepEqual(
+    buildPaneLabelArgv("%453", "x@self · working"),
+    ["set", "-p", "-t", "%453", "@rg_label", "x@self · working"],
+  );
+  assert.deepEqual(
+    assertSafeTmuxArgv(buildPaneLabelArgv("%453", "t1@pm")),
+    buildPaneLabelArgv("%453", "t1@pm"),
+    "the gate's own guard accepts it — `set -p` is pane-scoped and carries no -g",
+  );
+  assert.throws(() => buildPaneLabelArgv("; rm -rf /", "t1@pm"), UnsafeTmuxCommand,
+    "a pane id is still validated: a label write is not a hole in the argv rules");
+});
+
+test("the border format reads the gate's label and falls back to the pane's own title", () => {
+  // Both branches, read out of tmux's own conditional syntax: gate-opened panes
+  // show what the gate wrote, and the BYSTANDERS in that window (the user's own
+  // shell — the bar is window-scoped and never taken down) keep what they had.
+  const match = /^#\{\?([^,]+),(.+),(.+)\}$/.exec(PANE_BORDER_FORMAT);
+  assert.ok(match, `not a tmux conditional: ${PANE_BORDER_FORMAT}`);
+  assert.equal(match[1], PANE_LABEL_OPTION, "the condition is the option the gate writes");
+  assert.equal(match[2], `#{${PANE_LABEL_OPTION}}`, "set ⇒ the gate's label");
+  assert.equal(match[3], "#{pane_title}", "unset ⇒ the pane's own title, exactly as before");
+});
+
 test("the window options are window-scoped and never carry -g", () => {
   for (const argv of buildShowPaneLabelsArgv("%3", PANE_BORDER_STATUS, PANE_BORDER_FORMAT)) {
     assert.doesNotMatch(argv.join(" "), /(^| )-g( |$)/, "the user's global config is not ours to touch");
@@ -154,7 +188,7 @@ test("spawn decorates the pane ITSELF — no second call, no extra tool", async 
   const child = world.runtime().children[0]!;
   const log = tmuxLog(world).join("\n");
   assert.match(log, new RegExp(`select-pane -t ${child.paneId} -P fg=colour\\d+`), "the border colour is set");
-  assert.match(log, new RegExp(`select-pane -t ${child.paneId} -T t1@pm($|\\s)`), "and the label, with the task AND its opener in it");
+  assert.match(log, new RegExp(`set -p -t ${child.paneId} @rg_label t1@pm($|\\s)`), "and the label, with the task AND its opener in it");
   assert.match(log, /setw -t %\d+ pane-border-status top/, "and the window bar is turned on");
   assert.match(replyText(reply), /pane 已标记为 t1@pm/, "the reply says what the user will see");
 
@@ -441,11 +475,11 @@ test("the manager's OWN pane is labelled `pm:<repo>`, and rebuilt on EVERY probe
   // next rebind by a poll.
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
-  const pmTitles = (): string[] => tmuxLog(world).filter((line) => line.startsWith("select-pane -t %0 -T pm:"));
+  const pmTitles = (): string[] => tmuxLog(world).filter((line) => line.startsWith("set -p -t %0 @rg_label pm:"));
 
   await world.call("orchestrator_wait", { timeoutMs: 0 });
   const afterFirst = pmTitles();
-  assert.deepEqual(afterFirst, ["select-pane -t %0 -T pm:repo"], "identity first, and it says what it is");
+  assert.deepEqual(afterFirst, ["set -p -t %0 @rg_label pm:repo"], "identity first, and it says what it is");
 
   // The probe runs again with NOTHING changed — and the title is written again.
   // That is the whole difference from the child/judge repaint path, whose
@@ -469,7 +503,7 @@ test("the probe repaints the label from the health it just measured", async () =
 
   await world.call("orchestrator_wait", { timeoutMs: 0 });
 
-  const titles = tmuxLog(world).filter((line) => line.includes(`-T t1@pm`));
+  const titles = tmuxLog(world).filter((line) => line.includes(`@rg_label t1@pm`));
   assert.ok(titles.length >= 2, "the title is refreshed by the probe, not only at spawn");
   assert.match(titles[titles.length - 1]!, /waiting-judge/,
     "so the border answers 'what is it doing' without a tool call");
@@ -479,7 +513,7 @@ test("the repaint is throttled — the probe must not fork a tmux process every 
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   const child = world.runtime().children[0]!;
-  const titlesNow = (): number => tmuxLog(world).filter((line) => line.includes("-T t1@pm")).length;
+  const titlesNow = (): number => tmuxLog(world).filter((line) => line.includes("@rg_label t1@pm")).length;
 
   await world.call("orchestrator_wait", { timeoutMs: 0 });
   const afterFirst = titlesNow();
@@ -502,7 +536,7 @@ test("the repaint is throttled — the probe must not fork a tmux process every 
   world.childReports(child.id, "waiting-judge", { waitingFor: "reviewer" });
   await world.call("orchestrator_wait", { timeoutMs: 0 });
   assert.ok(titlesNow() > afterFirst, "but the border does have to catch up eventually");
-  assert.match(tmuxLog(world).filter((l) => l.includes("-T t1@pm")).pop()!, /waiting-judge/);
+  assert.match(tmuxLog(world).filter((l) => l.includes("@rg_label t1@pm")).pop()!, /waiting-judge/);
 });
 
 test("the throttle memory belongs to the orchestration, not to the module", async () => {
@@ -519,7 +553,7 @@ test("the throttle memory belongs to the orchestration, not to the module", asyn
   await second.call("orchestrator_wait", { timeoutMs: 0 });
 
   assert.ok(
-    tmuxLog(second).some((line) => line.includes("-T t1@pm")),
+    tmuxLog(second).some((line) => line.includes("@rg_label t1@pm")),
     "the second orchestration paints its own panes",
   );
 });

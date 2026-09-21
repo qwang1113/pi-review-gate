@@ -111,6 +111,7 @@
 
 import type { ChildState } from "./orchestrator-child-state.ts";
 import { taskIdFromChildId } from "./orchestrator-registry.ts";
+import { PANE_LABEL_OPTION } from "./orchestrator-tmux.ts";
 
 /** One entry of the palette: what tmux is told, and what a human is told. */
 export interface PaneColor {
@@ -193,7 +194,8 @@ export const PANE_OWNER_SELF = "self";
  * One identity segment, made safe for a tmux format string.
  *
  * `#` and `,` and `:` are dropped for the same reason spaces are: the border
- * renders `#{pane_title}` and a stray `#` would be read as a format, while a
+ * renders the label through a tmux FORMAT and a stray `#` would be read as one
+ * (and a `,` would split the conditional in {@link PANE_BORDER_FORMAT}), while a
  * space is what the user explicitly ruled out. Anything left is either the
  * character class below or a dash standing in for it — never mojibake.
  */
@@ -314,11 +316,15 @@ export function paneTitleFor(opts: {
 /**
  * `pane-border-format`, in tmux's own syntax.
  *
- * `#{pane_title}` and nothing else: the title is already the whole message,
- * and every extra token here is a format string that could break on a tmux
- * version we did not test.
+ * TWO SOURCES, AND THE CONDITIONAL IS THE POINT (2026-09-22). A gate-opened
+ * pane carries `@rg_label` — a pane user option pi cannot overwrite, unlike
+ * `pane_title`, which pi rewrites at boot and on every rebind — so its border
+ * renders what the gate wrote. Every OTHER pane in the window is a bystander
+ * (the user's own shell), has no `@rg_label`, and keeps rendering its own
+ * `#{pane_title}` exactly as before: this option is window-scoped and stays on
+ * for the window's lifetime, so the fallback is not a nicety.
  */
-export const PANE_BORDER_FORMAT = "#{pane_title}";
+export const PANE_BORDER_FORMAT = `#{?${PANE_LABEL_OPTION},#{${PANE_LABEL_OPTION}},#{pane_title}}`;
 
 /** Where the label bar goes. `top` keeps it out of the status line. */
 export const PANE_BORDER_STATUS = "top";

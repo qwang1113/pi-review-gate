@@ -816,7 +816,7 @@ L8 edit gate 拦得住 edit，拦不住「读着读着忘了协商」。
 
 - 按 `childId` 派一个稳定颜色（纯函数 —— 同一个子会话在任何进程里看到的都是同一色），
   `select-pane -P fg=colourN` 设边框；
-- `select-pane -T` 设标题，形如 `<干什么>@<谁启动>:<名字>`，后面接 ` · <state> <age>`：
+- `set -p @rg_label` 写标题，形如 `<干什么>@<谁启动>:<名字>`，后面接 ` · <state> <age>`：
   **任务名 + 当前状态 + 该状态已持续多久**。
 
 命名规则只有一处实现（`paneIdentity()`，2026-09-17 用户决定），身份段内部**不允许空格**
@@ -842,8 +842,17 @@ L8 edit gate 拦得住 edit，拦不住「读着读着忘了协商」。
 
 **项目经理自己那个 pane 也写，而且每个探针无条件重写一次**（2026-09-17）。它是门禁唯一
 没开的 pane（用户自己开的），所以 registry 里没有任何东西会装饰它；而 `pm:<目录名>` 不带状态，
-没有会变的字符串可供去重，pi 又会在启动与每次扩展 rebind 时重写 pane 标题 —— 一次性写入
-会丢，所以这一条走 `paintPaneTitle`（无记忆、无节流），代价是每个探针一次 tmux 调用。
+没有会变的字符串可供去重，所以这一条走 `paintPaneTitle`（无记忆、无节流），代价是每个探针
+一次 tmux 调用。（它当初**必须**无条件重写，是因为 pi 会在启动与每次扩展 rebind 时改写
+`pane_title`；2026-09-22 标题搬进 `@rg_label` 之后这个理由已经消失，行为保留不动。）
+
+**标题写的是 pane 用户选项 `@rg_label`，不是 `pane_title`**（2026-09-22）。pi 启动后会用
+自己的标题覆盖 `pane_title`，judge / 子会话只是靠周期重绘硬顶回来，而 worker pane 没有
+任何重绘循环 —— 它就是屏幕上唯一一个门禁开的、边框却空白的 pane。`set -p -t <pane>
+@rg_label <标题>`（`buildPaneLabelArgv`，仍不带 `-g`、仍过 `assertSafeTmuxArgv`）写的是
+pi 不碰的命名空间，写一次几分钟后还在；worker pane 也随之补上装饰（`workerPaneDecor`，
+label 即 `<workerId>@<owner>`，颜色按 workerId 取）。周期重绘保留，但它现在只为
+**状态与时长**（`waiting-judge 220s`）服务，不再是为了跟 pi 抢标题。
 
 **标签栏只开不关**（2026-09-17 用户决定，实测见下）。旧代码里 `orchestrator_close` 会在关掉
 **最后**一个被装饰的子会话时用 `setw -u` 把 window 级设置撤回去 —— 那条释放路径连同它的
@@ -856,13 +865,17 @@ L8 edit gate 拦得住 edit，拦不住「读着读着忘了协商」。
 pane 标题 —— 那就是回到读屏幕了。
 
 真实 tmux 验证（2026-09-17，`tmux -L rgpane-observe`，独立 socket，不动用户的任何 pane）：
-用**出厂的**构造函数写标题，再用 tmux 自己读回 `#{pane_title}` —— 三个身份全部逐字一致：
+用**出厂的**构造函数写标题，再用 tmux 自己读回（2026-09-17 那次读的是 `#{pane_title}`；
+标题搬家后同一手法读 `#{@rg_label}`，2026-09-22 在 tmux 3.7c 上复测通过）—— 三个身份全部逐字一致：
 `t6@pm:eng-i18n-ci-cd-review-gate` / `goal-auditor@t6` / `pm:pi-review-gate`；
 边界：中文标题退化成 `t7@pm`，`fix-auth` 这样的 taskId 往返正确（`fix-auth@pm:tidy-the-guard`），
 超长截到 44 字符。
 
-window 级 `setw pane-border-status top` / `pane-border-format '#{pane_title}'` 打开顶部标签栏
-（**一律不带 `-g`**，不碰用户全局配置；argv 仍过 `assertSafeTmuxArgv`）。
+window 级 `setw pane-border-status top` / `pane-border-format
+'#{?@rg_label,#{@rg_label},#{pane_title}}'` 打开顶部标签栏（**一律不带 `-g`**，不碰用户全局
+配置；argv 仍过 `assertSafeTmuxArgv`）。条件式是给**旁观者**留的：标签栏是 window 级的、
+而且只开不关，所以用户自己那个 shell pane 也会长出边框 —— 它没有 `@rg_label`，照旧渲染
+自己的 `#{pane_title}`。
 
 ### 六丁、门禁自己会不会把窗口“摇”坏：实测与取证手法（2026-09-17）
 

@@ -9886,6 +9886,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           cwd: spec.cwd,
           layout: "child-column",
           role: spec.role,
+          decor: spec.decor,
           command: spec.command,
           register: spec.register,
         });
@@ -9908,6 +9909,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // wait on an empty one. The session id survives all three (pi resumes
       // the same transcript by it), which is what keeps a worker reachable.
       openerId: () => state.sessionId?.trim() || "gate",
+      paneOwner: () => paneOwnerIdentity(),
       repoRoot: () => activeRepoRoot.current,
       channelIO,
       channelHome: () => undefined,

@@ -468,7 +468,8 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   无进展的 `working` 与卡死可被区分 —— 它只是回执里的一个**读数**，不改变
   `isNewsworthy`、不叫醒项目经理。`screenLooksBusy`、屏幕解析与按键模拟全部删除，
   tmux 在编排层只剩三件事：**判 pane 存活**、**开关 pane**、**给 pane 上色与标题**
-  （纯展示，`select-pane -P/-T` + window 级 `setw pane-border-*`，一律不带 `-g`）。
+  （纯展示，`select-pane -P` + pane 用户选项 `set -p @rg_label`（pi 会覆盖 `pane_title`，
+  这个命名空间它不碰）+ window 级 `setw pane-border-*`，一律不带 `-g`）。
 - **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：门禁内部等待、
   full precommit、任何长命令都发生在**同一个 turn 内部**，agent 既不 settle 也不
   结束 turn，挂在 `agent_settled` / `turn_end` 上的心跳因此必然超时 —— 一个正在等

@@ -700,7 +700,7 @@ test("the round probe repaints the border — but never through a stranger's pan
     state: "working",
   });
   probeJudgeRound(f.deps, c, undefined, f.binding);
-  const painted = f.tmuxCalls.filter((a) => a[0] === "select-pane" && a.includes("-T"));
+  const painted = f.tmuxCalls.filter((a) => a[0] === "set" && a.includes("@rg_label"));
   assert.equal(painted.length, 1, "one repaint per reading");
   assert.match(painted[0]!.join(" "), /reviewer@t6/, "…labelled by the judge's role AND its opener");
 
