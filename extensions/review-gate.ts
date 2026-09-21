@@ -12231,7 +12231,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // act on: approve a goal carrying「真实验收方案」, or switch the stage off.
       if (stageIsOn("acceptance", root) && st.hasCodeChange) {
         notes.push(skippedReason);
-        progress.step?.("真实验收（跳过：没有用户批准的验收方案）");
+        // THE LINE STAYS GENERIC, THE REASON RIDES THE NOTE (reviewer Nit,
+        // 2026-09-22): this branch is reached by THREE skips — no plan, the
+        // goal's own exemption, and a dispatcher-marked session — so naming one
+        // of them here would be wrong two times out of three. The reply below
+        // carries `skippedReason`, which is the module's word for THIS skip.
+        progress.step?.("真实验收（跳过）");
       }
       return undefined;
     }
