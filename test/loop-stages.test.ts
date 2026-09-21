@@ -358,7 +358,7 @@ test("the REAL L3 pre-commit checker honors the same record (exit codes, not pro
 
   // THE QUALITY VERDICT is mirrored too (2026-09-22): with the review stage
   // released, it takes the review's place — required, and bound to the tree.
-  const tree = readyState(dir).review.fingerprint;
+  const tree = (readyState(dir).review as { fingerprint: string }).fingerprint;
   writeState(dir, {
     ...base,
     quality: { verdict: "BLOCKED", commitSha: "c", treeSha: tree, at: "t" },
