@@ -534,18 +534,22 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
         { workerId, reportId: projection.report.reportId, kind: "report" },
       );
     }
-    // A DEAD PANE WITH NOTHING NEW IS NEWS TOO (reviewer P2, 2026-09-21): the
-    // old loop spent the whole 300-second timeout to report "it is gone" —
-    // something it had read on the very first iteration. A worker whose pane is
-    // gone and whose channel holds no unconsumed report cannot produce anything
-    // else, and saying so NOW is what "message-driven" is supposed to mean.
+    // A WORKER THAT CANNOT SPEAK AGAIN IS NEWS TOO (reviewer P2, 2026-09-21):
+    // `paneId === undefined` means its pane was CLOSED — nothing will ever
+    // write to that channel again — and a dead pane means the same. The old
+    // loop spent the whole 300-second timeout to report either, something it
+    // had read on the very first iteration. A worker whose pane is gone and
+    // whose channel holds no unconsumed report cannot produce anything else,
+    // and saying so NOW is what "message-driven" is supposed to mean.
     const entry = registry[workerId];
-    if (entry?.paneId !== undefined && !deps.paneAlive(entry.paneId)) {
+    if (entry && (entry.paneId === undefined || !deps.paneAlive(entry.paneId))) {
+      const closed = entry.paneId === undefined;
       return reply(
-        `review-gate: worker ${workerId} 的 pane（${entry.paneId}）已不在，通道里也没有未消费的报告 —— 它不会再有新消息了。\n` +
+        `review-gate: worker ${workerId} ${closed ? "的 pane 已经关掉了" : `的 pane（${entry.paneId}）已不在`}，` +
+        "通道里也没有未消费的报告 —— 它不会再有新消息了。\n" +
         `接着用：\`worker_submit({ workerId: "${workerId}", task: … })\`（同一 session id 重开，它还记得上次读过的）；` +
         `不用了就 \`worker_close({ workerId: "${workerId}" })\`。`,
-        { workerId, kind: "gone", alive: false },
+        { workerId, kind: "gone", alive: false, closed },
       );
     }
     if (timeoutMs === 0 || deps.now() - started >= timeoutMs) {

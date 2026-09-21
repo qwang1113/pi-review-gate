@@ -352,6 +352,19 @@ test("closing an already-closed worker is idempotent even when the server cannot
   assert.deepEqual(second.killed, [], "and nothing was killed");
 });
 
+test("waiting on a CLOSED worker returns immediately, not after the timeout", async () => {
+  // A closed worker can never write to its channel again, so "wait for it" is
+  // a question with a known answer — and the answer used to take 300 seconds
+  // (reviewer P2, 2026-09-21).
+  const world = makeWorld();
+  await world.call("worker_submit", { task: "第一次" });
+  await world.call("worker_close", { workerId: "worker-1" });
+  const reply = await world.call("worker_wait", { workerId: "worker-1", timeoutMs: 300_000 });
+  assert.equal((reply.details as { kind?: string })?.kind, "gone");
+  assert.match(world.text(reply), /已经关掉/);
+  assert.match(world.text(reply), /worker_submit/, "and it says how to continue the conversation");
+});
+
 test("close on an unknown worker is a no-op, not an error", async () => {
   const world = makeWorld();
   const reply = await world.call("worker_close", { workerId: "worker-9" });
