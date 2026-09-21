@@ -754,8 +754,21 @@ verdict。两处修复：派发改 `interrupt`（不再把任务排在旧轮后�
 发现的第二个 P0）**。第一版判据是「二次 settle 返回 `already-consumed`」，它在生产里走不到 ——
 记录成功会先 `forgetPending`，而 pending 正是 `specForRound` 挑 kind 的依据，所以二次 settle
 返回的是 `unknown`，和「压根没派过审计」长得一模一样。现在的判据是 `roundClosedDuringWait`：
-**pending 已被消费**且**游标已从等待前的位置前进** —— 这两件事只有 `settleAuditRound` 记录
-成功时才会同时发生。两个条件缺一，就由本链自己 settle，仍然 fail-closed。
+**pending 必须已被消费**（这一道是前置，不成立就一定没记录），然后问**记录本身** ——
+`recordedThisRound`：存在一份绑定本轮内容（goal 绑 draft、plan 绑 hash）且时间戳 ≥ 本轮
+`startedAt` 的裁决。两半都必须有：内容绑定挡掉别的草稿留下的记录，时间戳挡掉**同样内容的
+上一轮**留下的记录（重提同一份草稿是常态）。这个判据**故意不看 verdict** —— 记录下来的 FAIL
+同样结束本轮，把它读成「没记录」正是审计 findings 被吞掉的根因。登记行还活着时，「游标已从
+等待前的位置前进」仍作为更廉价的后备判据。全不成立才由本链自己 settle，仍然 fail-closed。
+
+**为什么不能只问游标（2026-09-21，实测事故）**：`fe41069` 让记录成功后立刻回收 judge pane，
+而回收走 `doClose` → `saveHierarchy(removeJudge(...))`，**连登记行一起删掉** —— 游标就住在那
+一行里。于是一轮刚被 wait 记完，回到本链时登记行已经没了，游标那半答「没记录」，正好答错它
+被写出来要识别的那一种情况。实测：prime 仓同一个 plan hash 连续三条 `orchestrator plan audit
+PASS` 落进 state 与审计日志，三次 submit 全部返回 fail-closed，批准框一次没弹、永远收敛不了。
+**回收动作销毁了「已回收」这件事的唯一证据**，所以证据换成记录 —— 记录没有任何回收动作会碰。
+（不能反过来让 goal/plan 跳过回收：它们还有 `judge_submit({role:"goal-auditor"})` 与
+`judge_spawn({kind:"goal"|"plan"})` 两个异步派发面不走本链，没有 `finally` 替它们关 pane。）
 
 配套的游标规则同样重要：`dispatchJudgeRound` 复用 pane 时**保留** `lastReportId`（重派不
 等于把旧 report 变新），`fresh:true` 开新 pane 时把游标**播种**到 channel 当前最新那条

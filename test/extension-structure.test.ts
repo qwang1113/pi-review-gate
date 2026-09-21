@@ -4942,6 +4942,22 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
     "a record bound to this round's content closes it, registry row or not");
   assert.match(detector, /cursorNow !== undefined && cursorNow !== input\.cursorBefore/,
     "…and a cursor that never moved is not a record either — the pending entry must be gone for both");
+  // The EXTENSION supplies that evidence, and both halves of it are load-
+  // bearing. Content alone would let the PREVIOUS round's record for an
+  // identical draft (resubmitting one is the common case) close a round that
+  // has not reported yet; the timestamp alone would let any record of any
+  // draft do it. And it must stay blind to the verdict: a recorded FAIL closes
+  // the round too, and reading it as "not recorded" is what swallowed the
+  // auditor's findings whole.
+  const evidence = windowIn(SRC, "      recordedThisRound: (root, pending) => {", "\n      },", "recordedThisRound");
+  assert.match(evidence, /st\.goalPrereview\?\.hash === goalTextHash\(pending\.draft\)/,
+    "a goal's record is bound to the draft this round dispatched");
+  assert.match(evidence, /st\.planAudit\?\.hash === pending\.hash/,
+    "…and a plan's to its hash");
+  assert.match(evidence, /record !== undefined && record\.at >= pending\.startedAt/,
+    "…and an EARLIER round's record for identical content closes nothing");
+  assert.doesNotMatch(evidence, /verdict/,
+    "a recorded FAIL closes the round as much as a PASS — this may not read the verdict");
   assert.match(engineRun, /if \(settled\.status !== "recorded"\)/,
     "…and anything the engine itself did not record fails closed");
   // The done/reason judgement itself is wired ONCE, in the run deps.
