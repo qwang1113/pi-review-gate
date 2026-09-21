@@ -442,6 +442,28 @@ test("a proxy may not answer the stage checklist (quality round P1, 2026-09-22)"
   assert.match(wiring, /proxy: false/, "the stage checklist must not be handed to the arbiter proxy");
   assert.match(SRC, /options: opts\.proxy === false \? \[\] : spec\.options/,
     "…and the dialog turns that request into the race's own no-proxy signal");
+  // AND IT MUST NOT BLAME THE ARBITER (quality round P2): the timeout notice
+  // is the user's only clue that a decision is still owed, and “arbiter 无法代答”
+  // would read as a broken machine rather than a deliberate policy. Both copies
+  // live in the same dialog body, which is where the branch is read from.
+  const raceAt = SRC.indexOf("options: opts.proxy === false ? [] : spec.options");
+  assert.ok(raceAt > 0, "the dialog knows the no-proxy request");
+  const notice = SRC.slice(raceAt, raceAt + 2500);
+  assert.match(notice, /opts\.proxy === false/, "the timeout notice branches on it");
+  assert.match(notice, /不问 arbiter 代答/, "…and does not report a deliberate policy as a broken arbiter");
+  assert.match(notice, /arbiter 无法代答/, "the other dialogs' wording is left alone");
+});
+
+test("a skipped quality round carries the tree the ship gate verifies (quality round P1)", () => {
+  // With the review stage OFF the quality record IS the ship requirement, and
+  // a record without `treeSha` cannot be verified. A docs-only SKIP used to
+  // write exactly that shape (lib/quality-round.ts's `skippedQualityRecord`
+  // takes an OPTIONAL tree), so the next ship would have failed closed on a
+  // tree nobody recorded.
+  const at = SRC.indexOf("st.quality = skippedQualityRecord({");
+  assert.ok(at > 0, "the chain records the skipped quality round");
+  assert.match(SRC.slice(at, at + 700), /tree: skipTarget\.tree/,
+    "the skip binds to the prepared tree, the same source the verdict recorder reads");
 });
 
 test("the no-acceptance declaration is only read from a goal that is in force", () => {

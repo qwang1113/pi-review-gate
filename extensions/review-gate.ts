@@ -5689,9 +5689,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // two must not have the same consequence — a decline LOCKS the request
       // for the session, and a timeout is not a decline.
       try {
+        // THE NOTICE MUST NOT BLAME THE ARBITER FOR A CHOICE WE MADE (quality
+        // round P2, 2026-09-22): with `proxy: false` the stand-in was switched
+        // off on purpose, and the generic “arbiter 无法代答（未配置 / 失败 / 输出
+        // 不可解析）” would tell the user their machine is broken.
         latestCtx?.ui.notify(
-          `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答，且 arbiter 无法代答` +
-            "（未配置 / 失败 / 输出不可解析）—— 这一项**还没有任何决定**，等你回来处理。",
+          opts.proxy === false
+            ? `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答 —— 这一题**不问 arbiter 代答**` +
+              "（机器不替用户决定这一类问题），所以还没有任何决定，等你回来处理。"
+            : `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答，且 arbiter 无法代答` +
+              "（未配置 / 失败 / 输出不可解析）—— 这一项**还没有任何决定**，等你回来处理。",
           "warning",
         );
       } catch { /* headless */ }
@@ -8194,8 +8201,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // Recorded, never silent: a skipped round and a judged round both end as
       // "quality is fine", and the difference must survive into the sidecar.
       const st = stateForRepo(input.root);
+      const skipTarget = reviewTargets.get(input.root);
       st.quality = skippedQualityRecord({
         head: preparedHead,
+        // THE SKIP CARRIES ITS TREE TOO (quality round P1, 2026-09-22): with the
+        // review stage OFF the quality record IS the ship requirement, and a
+        // record without a `treeSha` cannot be verified — so a docs-only SKIP
+        // would have failed closed on a tree it never named. Same source the
+        // verdict recorder reads (`reviewTargets`, registered by prepare).
+        ...(skipTarget?.tree === undefined ? {} : { tree: skipTarget.tree }),
         reason: skip.reason ?? "",
         at: new Date().toISOString(),
       });
