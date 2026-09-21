@@ -47,8 +47,10 @@
  */
 
 import { handoffDue, HANDOFF_PERCENT } from "./session-handoff.ts";
+import { nextRewakeDelayMs } from "./orchestrator-child-state.ts";
 import {
   formatSupervisionReceipt,
+  type PendingRequest,
   type SupervisionEvent,
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
@@ -68,6 +70,28 @@ export type ChildWaitReason =
    * have returned instantly with nothing new to report.
    */
 
+  /**
+   * A question is hanging RIGHT NOW — the FACT, not a state transition.
+   *
+   * ── WHY THIS IS NOT COVERED BY `supervision` (2026-09-22) ──
+   *
+   * A supervision event is manufactured by `decideSupervisionEvents`, which
+   * is memory-gated: an unchanged `waiting-input` only re-rings once its
+   * 10s→30s→60s backoff comes due, and the memory it consults is SHARED with
+   * the background supervision timer (10s) and the `agent_settled`
+   * continuation. Every backoff step is a multiple of that 10s tick, so each
+   * due moment landed on a timer tick and the timer consumed it first — the
+   * wait's own 2s probes fell forever between two consumptions. Measured:
+   * a child's dialog opened at 12:43:23, the manager's wait started at
+   * 12:43:25 and returned 910 SECONDS later with 「等人回答（已等 910s）」.
+   *
+   * So an open request ends the wait on its own evidence: the channel says a
+   * question is unanswered. Nothing else has to agree, and nothing else can
+   * take it away. The de-duplication moved WITH it — onto the requestId
+   * (lib/orchestrator-session-tools.ts), which is the thing being announced,
+   * instead of onto a per-child STATE that three consumers share.
+   */
+  | "pending-request"
   /** Its pane is gone — it died, or the user closed it. */
   | "pane-gone"
   /** Nothing yet. */
@@ -76,6 +100,11 @@ export type ChildWaitReason =
 export interface ChildWaitObservation {
   /** Newsworthy states the supervisor manufactured on this poll. */
   events?: SupervisionEvent[];
+  /**
+   * Questions that are unanswered right now AND have not been announced by a
+   * wait yet. Present ⇒ this wait ends; see `pending-request`.
+   */
+  pendingRequests?: PendingRequest[];
   /* No `done` flag: completion arrives as a supervision event (see above). */
   /** Its pane still exists right now. */
   paneAlive: boolean;
@@ -83,6 +112,69 @@ export interface ChildWaitObservation {
   livenessUnknown?: boolean;
   /** Free-form progress line for the live snapshot (never a criterion). */
   note?: string;
+}
+
+/**
+ * What a wait remembers about a question it has already handed over.
+ *
+ * Keyed by the REQUEST, which is the thing being announced. The supervision
+ * memory is keyed by child+state and is drained by three consumers, and both
+ * halves of that were defects: the timer ate every due re-report before the
+ * wait's probe could see one (a 910-second wait beside a two-second-old
+ * dialog), and a second question asked while the first was still open was not
+ * "a change of state", so it was not news at all.
+ */
+export interface AnnouncedRequest {
+  requestId: string;
+  /** Epoch ms of the last time a wait handed this question over. */
+  at: number;
+  /** How many times it has been handed over. */
+  reports: number;
+}
+
+/**
+ * WHICH open questions this wait must hand over now — and what to remember.
+ *
+ * A question that has never been announced is due at once (that is the whole
+ * fix: the first probe after a dialog opens returns). One already announced
+ * re-rings on the SAME 10s→30s→60s backoff an unanswered thing always had,
+ * so a question the manager chose not to answer is neither forgotten nor
+ * turned into a busy poll.
+ *
+ * PRUNING IS STRUCTURAL: the returned memory is built from `open` alone, so a
+ * question the child has settled simply is not carried forward — "答过的不再
+ * 算" needs no rule of its own, and the record cannot grow without bound.
+ *
+ * A wait scoped to one child advances nothing that belongs to a sibling:
+ * out-of-scope entries are carried through UNCHANGED, so the sibling's
+ * question is still owed an announcement on the next unscoped call — the same
+ * rule the event path has always had.
+ */
+export function dueRequests(input: {
+  open: readonly PendingRequest[];
+  announced: readonly AnnouncedRequest[];
+  at: number;
+  /** Only these requests may END this wait. */
+  childId?: string;
+}): { due: PendingRequest[]; memory: AnnouncedRequest[] } {
+  const previous = new Map(input.announced.map((a) => [a.requestId, a]));
+  const due: PendingRequest[] = [];
+  const memory: AnnouncedRequest[] = [];
+  for (const request of input.open) {
+    const seen = previous.get(request.requestId);
+    const inScope = input.childId === undefined || request.childId === input.childId;
+    // `reports` counts what has already gone out, so the delay before the
+    // next one is indexed from `reports - 1` — after the first announcement
+    // the wait is the FIRST backoff step (10s), not the second.
+    const ready = seen === undefined || input.at >= seen.at + nextRewakeDelayMs(seen.reports - 1);
+    if (inScope && ready) {
+      due.push(request);
+      memory.push({ requestId: request.requestId, at: input.at, reports: (seen?.reports ?? 0) + 1 });
+    } else if (seen !== undefined) {
+      memory.push(seen);
+    }
+  }
+  return { due, memory };
 }
 
 export interface ChildWaitDecision {
@@ -99,14 +191,36 @@ export interface ChildWaitDecision {
  *
  * ORDER MATTERS, and every step of it was paid for:
  *
- *  1. supervision events come first — they name the child and the state, and
- *     they are the only signal that exists for a child that stopped without
- *     asking anything (R-23) or finished without saying so (R3-5);
- *     — a completion is one of those events, not a separate criterion (B4);
- *  2. UNKNOWN liveness (never a death, F14) before a vanished pane, so a
+ *  1. an UNANSWERED QUESTION leads, on the channel's own evidence rather
+ *     than on an event memory three consumers drain (`pending-request`,
+ *     2026-09-22). A child blocked on a dialog is the whole orchestration
+ *     standing still, and it is the one state whose next action is the
+ *     manager's alone — so it names the reply even when other news arrived
+ *     on the same probe (that news is in blocks 1–3 either way);
+ *  2. supervision events — they name the child and the state, and they are
+ *     the only signal that exists for a child that stopped without asking
+ *     anything (R-23) or finished without saying so (R3-5); a completion is
+ *     one of those events, not a separate criterion (B4);
+ *  3. UNKNOWN liveness (never a death, F14) before a vanished pane, so a
  *     transient tmux failure cannot end supervision.
  */
 export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitDecision {
+  // The FACT first: a question nobody has answered ends the wait whether or
+  // not any memory thinks it is due, and it leads the reply.
+  const pending = observation.pendingRequests ?? [];
+  if (pending.length > 0) {
+    const first = pending[0]!;
+    const rest = pending.length > 1 ? `（另有 ${pending.length - 1} 个待答请求）` : "";
+    return {
+      done: true,
+      reason: "pending-request",
+      childId: first.childId,
+      summary:
+        `${first.childId} 在等回答：「${first.title}」` +
+        `（${first.options.length} 个选项，requestId=${first.requestId}）${rest}`,
+    };
+  }
+
   const events = observation.events ?? [];
   if (events.length > 0) {
     const first = events[0]!;

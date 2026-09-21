@@ -58,6 +58,7 @@ import { orchestratorDoneProblems } from "./orchestrator-gate.ts";
 import {
   buildWaitReceipt,
   clampChildWaitTimeout,
+  dueRequests,
   evaluateChildWait,
   type ChildWaitDecision,
   type ChildWaitObservation,
@@ -66,6 +67,7 @@ import {
   decideSupervisionEvents,
   reportedDoneIds,
   superviseChildren,
+  type SupervisionMemory,
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
 import { dispatchInstruct, dispatchSpawn } from "./orchestrator-dispatch.ts";
@@ -120,6 +122,11 @@ function snapshotResult(observation: ChildWaitObservation): PollWaitResult<Child
  *     (lib/orchestrator-supervisor.ts), so `waiting-input`, `done`, `idle`,
  *     `stalled` and `dead` produce events even when no child ever rang — and
  *     an unanswered question rings AGAIN on the 10s→30s→60s backoff.
+ *     AN OPEN QUESTION DOES NOT WAIT FOR THAT BACKOFF: it ends the wait on
+ *     the channel's own evidence (`pending-request`), because the backoff's
+ *     memory is shared with the 10s supervision timer and every due moment
+ *     landed on a timer tick — the timer consumed each one and a manager sat
+ *     for 910 seconds beside a dialog opened 2 seconds before it called.
  *  2. NOTHING IS SWALLOWED, because nothing has to be filtered: each child's
  *     traffic is its own file. There is no foreign event to drop and no
  *     ownership to re-derive.
@@ -184,16 +191,59 @@ async function doWait(
     // — the probe is already here, so the screen never lags the receipt.
     refreshPaneLabels(deps, snapshot);
 
-
     // The event rules carry a memory across polls, and it lives in the
     // sidecar rather than in this closure: a wait that rebuilt it would see
     // every state as "changed" and re-ring the same question forever.
-    const decided = decideSupervisionEvents(snapshot, deps.supervisionMemory(), deps.now());
-    deps.saveSupervisionMemory(decided.memory);
+    //
+    // IT IS CONSUMED ON EVERY PROBE, INCLUDING THE ONES THAT RETURN BELOW.
+    // The background timer injects 「子会话需要你」 from this same memory, so a
+    // probe that returned without draining it would leave the timer to ring a
+    // second time about the dialog this call is already handing over — one
+    // question, two announcers (quality round P2).
+    const before = deps.supervisionMemory();
+    const decided = decideSupervisionEvents(snapshot, before, deps.now());
     // A wait scoped to ONE child reports only that child's events; its
-    // siblings' stay in the memory as un-reported and ring on the next call.
-    const events = childId ? decided.events.filter((e) => e.childId === childId) : decided.events;
-    if (events.length > 0) return { events, paneAlive: true };
+    // siblings' stay in the memory as un-reported and ring on the next call
+    // — which is true only because their entries are put BACK (quality round
+    // 3, P2: saving the whole memory spent news this reply then filtered out,
+    // the same leak as the P1 above reached from the scope filter).
+    deps.saveSupervisionMemory(childId ? keepOutOfScope(before, decided.memory, childId) : decided.memory);
+    const scoped = childId ? decided.events.filter((e) => e.childId === childId) : decided.events;
+    // A `waiting-input` event is NOT a second announcement of the same
+    // question. The block below owns that news, on better terms (per request,
+    // from the first probe, immune to the other two consumers of this memory),
+    // and letting both speak would ring twice for one dialog.
+    const events = scoped.filter((e) => e.state !== "waiting-input");
+
+    // THE FACT, ahead of the manufactured events: a question that is
+    // unanswered RIGHT NOW ends this wait whatever any memory thinks is due,
+    // and it is remembered BY REQUEST — so neither another consumer's timing
+    // nor the absence of a state CHANGE can hide it.
+    //
+    // A DEAD child's question is not one anybody can answer, and a stalled
+    // child's gate is not listening either: there the headline is the corpse,
+    // which the event path names. Their requests are left out so the death is
+    // what ends this wait — and they are announced again if it comes back.
+    const troubled = new Set(snapshot.troubled.map((t) => t.child.id));
+    const requests = dueRequests({
+      open: snapshot.requests.filter((r) => !troubled.has(r.childId)),
+      announced: deps.announcedRequests(),
+      at: deps.now(),
+      ...(childId ? { childId } : {}),
+    });
+    deps.saveAnnouncedRequests(requests.memory);
+    // BOTH KINDS OF NEWS TRAVEL IN ONE OBSERVATION (quality round 2, P1).
+    // Returning the questions alone dropped the events this same probe had
+    // just marked as reported in the shared memory: a sibling's `done` or
+    // `dead` would have been announced by nobody — not by this reply, and not
+    // by the timer either — until its next backoff step came due.
+    if (requests.due.length > 0 || events.length > 0) {
+      return {
+        ...(events.length > 0 ? { events } : {}),
+        ...(requests.due.length > 0 ? { pendingRequests: requests.due } : {}),
+        paneAlive: true,
+      };
+    }
 
     // F14 — an unreadable pane list is UNKNOWN liveness, never a death.
     if (!panes.ok) return { paneAlive: false, livenessUnknown: true };
@@ -297,6 +347,25 @@ async function doWait(
     );
   }
   return reply(`review-gate: ${receipt.text}`, details);
+}
+
+/**
+ * The memory a SCOPED wait may write: the one child it is watching advances,
+ * everybody else keeps the entry it had.
+ *
+ * A sibling with no previous entry is left out entirely rather than carried
+ * from `advanced` — "never announced" is exactly what the next unscoped call
+ * has to see to announce it.
+ */
+function keepOutOfScope(
+  before: SupervisionMemory,
+  advanced: SupervisionMemory,
+  childId: string,
+): SupervisionMemory {
+  const next: SupervisionMemory = { ...before };
+  if (advanced[childId] !== undefined) next[childId] = advanced[childId]!;
+  else delete next[childId];
+  return next;
 }
 
 /** The receipt still renders when supervision never ran (an empty snapshot). */
@@ -558,8 +627,10 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
       "looks for itself rather than only listening: every poll re-reads each child's channel, so " +
       "a child that raised a question (waiting-input), one that FINISHED (done), one that quietly " +
       "STOPPED (idle), one that went silent while its pane lives (stalled) and one whose pane " +
-      "vanished (dead) each produce an event even when nothing rang. An unanswered question rings " +
-      "again on a 10s→30s→60s backoff; a completion rings twice, 60s apart, then stays quiet. " +
+      "vanished (dead) each produce an event even when nothing rang. A question that is ALREADY " +
+      "hanging when you call ends the very first probe — it is a fact on the channel, not a state " +
+      "change — and one you leave unanswered rings again on a 10s→30s→60s backoff; a completion " +
+      "rings twice, 60s apart, then stays quiet. " +
       "EVERY reply — blocked, interrupted or instant — carries the same four blocks: (1) the " +
       "health of every child, (2) the questions waiting for you, with their full text and every " +
       "option, structured (nothing is read off a screen), (3) dead / stalled children with the " +

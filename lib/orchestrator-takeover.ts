@@ -234,7 +234,8 @@ export function buildTakeoverRoute(opts: {
   lines.push("");
   lines.push(
     "B. 放弃旧编排、另起一轮：`orchestrator_plan({ action: \"archive\" })` —— " +
-    "门禁把 plan 连同编排登记表归档成一个带时间戳的文件（绝不删除），并在动手前问用户一句。",
+    "门禁把 plan 连同编排登记表归档成一个带时间戳的文件（绝不删除）；" +
+    "plan 里还有没做完的任务时，动手前问用户一句。",
   );
   return lines.join("\n");
 }
@@ -293,6 +294,34 @@ export function buildPlanArchive(opts: {
     null,
     2,
   ) + "\n";
+}
+
+/**
+ * DOES THIS ARCHIVE NEED THE USER'S PERMISSION?
+ *
+ * The dialog exists to protect WORK IN PROGRESS: putting a plan away while
+ * part of it is unfinished is a decision only the human can make. When every
+ * task is `done` there is nothing left to strand — a live pane was already
+ * refused outright, before this is ever asked — so the confirmation is a
+ * click that can only be answered one way, and the user asked for it to go.
+ *
+ * The two half-states, and why they land where they do:
+ * - A plan file that does NOT parse (`plan` undefined, `planFilePresent`):
+ *   the task states are unreadable, so "all done" cannot be established.
+ *   Fail closed and ask.
+ * - NO plan file, only the registry: nothing the user ever approved is being
+ *   moved and there is no task list left to protect — the plan was already
+ *   removed by hand, which is the very dead end this action exists to open.
+ *   Asking would be asking about run state alone. Archive it.
+ */
+export function archiveNeedsConfirm(opts: {
+  /** The parsed plan, when the file parses. */
+  plan?: OrchestratorPlan;
+  /** Is there a plan FILE at all (a corrupt one counts)? */
+  planFilePresent: boolean;
+}): boolean {
+  if (!opts.plan) return opts.planFilePresent;
+  return opts.plan.tasks.some((task) => (task.status ?? "pending") !== "done");
 }
 
 /** The dialog title the user sees before an archive happens. */

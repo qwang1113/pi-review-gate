@@ -17,10 +17,14 @@
  * content (the approval binds to a tree), and it is why orchestration children
  * in one repo each get their own checkout. A worker that could edit would put
  * an unsupervised writer in the middle of that contract. So the pane is opened
- * with `--exclude-tools edit,write,bash` — the tool surface itself, not a rule
- * the worker is asked to obey — and `bash` is in that list because it writes
- * too (`echo > f`, `sed -i`): leaving it in would have made "read-only" a
- * nominal promise. See `buildWorkerPaneCommand` for what that costs.
+ * with `--exclude-tools edit,write` — the tools an agent reaches for to "just
+ * fix it" are not on its surface at all.
+ *
+ * `bash` IS on it (user decision, 2026-09-22), because investigation without
+ * commands is guesswork: `git log`, `rg`, a targeted test. That makes the
+ * read-only contract a PROMPT rule for bash rather than a surface fact — the
+ * prompt below states it, and the gate's ship block still refuses commit /
+ * push / PR from any pane. See `buildWorkerPaneCommand`.
  *
  * ── HOW IT SPEAKS ──
  *
@@ -89,8 +93,10 @@ export function buildWorkerSystemPrompt(opts: {
     `工作仓库：${opts.repoRoot}`,
     "",
     "## 工作方式",
-    "- 你**只能读**：`read` / `grep` / `find` / `ls` 是你全部的工具 —— `edit`、`write`、`bash` 都不在。",
-    "- 需要跑命令（测试、git 历史）才能确定的事：把「需要跑什么、为什么」写进结论，让上级去跑；**不要猜**。",
+    "- 你**不能写**：`edit`、`write` 不在你的工具里，也**不许用 bash 落笔** —— 不改文件、不建文件、不删文件，"
+      + "不 `git commit` / `git push` / `gh pr create`（这些门禁也会硬拦），不跑任何会改动工作区的命令（`sed -i`、`>` 重定向、`git checkout --`、`git stash`…）。",
+    "- 你**可以跑只读命令**：`bash` 用于取证 —— `git log` / `git diff` / `git show`、`rg` / `ls` / `cat`、跑测试看它是不是真的挂了。要跑就跑，别把「这个你自己去跑」推回给上级。",
+    "- 跑测试这类会写临时文件的命令：只用系统临时目录，不要在仓库里留下任何东西。",
     "- **一条消息里并行发多个读取** —— pi 会把同一条消息里的工具调用并行执行，一个工具调用就是一个完整来回。",
     "- 找证据，不要凭印象：每句「在哪里」都要能指到具体文件与行号。",
     "- 不确定就写清楚不确定在哪、你需要什么才能确定；**不要编**。",

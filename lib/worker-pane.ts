@@ -165,28 +165,24 @@ export function withWorker(registry: WorkerRegistry, entry: WorkerEntry): Worker
 /**
  * The argv a worker pane runs.
  *
- * ── THE READ-ONLY SET IS THREE TOOLS WIDE, NOT TWO (reviewer P1, 2026-09-21) ──
+ * ── THE DENY LIST IS THE JUDGE'S: `edit,write` (user decision, 2026-09-22) ──
  *
- * `--exclude-tools edit,write` is what every reviewing role in this gate gets,
- * and for a JUDGE it is enough to call the pane read-only in the sense that
- * matters there: a judge does not write, and its `bash` exists to VERIFY (run
- * the test, check the build) — the gate's own arbitration proxy, which must not
- * run anything, appends `bash` to the same list (`PROXY_ISOLATION_FLAGS`,
- * lib/arbitration.ts).
+ * `bash` WAS on this list, on the theory that a worker which cannot write at
+ * all is safer beside the main agent. Measured cost: a worker could not run
+ * `git log`, `rg`, or a single test — so every question that needed evidence
+ * rather than reading came back as "you should run this yourself", which is
+ * the opposite of spending someone else's context. A judge has had `bash` all
+ * along for exactly that reason (verify, don't guess); the arbitration proxy
+ * is the one role that really must run nothing, and it keeps `bash` on its own
+ * deny list (`PROXY_ISOLATION_FLAGS`, lib/arbitration.ts).
  *
- * A WORKER'S contract is stronger than a judge's — the user asked for sessions
- * that cannot write at all, which is what makes several of them safe to run
- * beside the main agent — and `edit`/`write` alone cannot deliver it: `bash`
- * writes files (`echo > f`, `sed -i`, `git checkout --`), so a worker that kept
- * it could quietly invalidate the very review binding this design exists to
- * protect. Excluding it is what makes the promise true rather than nominal.
- *
- * WHAT A WORKER LOSES, said plainly: it cannot run commands. Read, grep, find
- * and ls are the whole surface, which covers what a worker is FOR (read these
- * files, list those call sites, tell me which of them parse the config). A
- * question that genuinely needs a command run — a test, a git history — is the
- * main session's to answer, and a worker that hit one writes down that it did
- * instead of guessing.
+ * SO WHAT HOLDS THE WORKTREE NOW, stated honestly: `bash` can write (`echo >
+ * f`, `sed -i`), so "never writes" is no longer a property of the tool
+ * surface. It rests on two things that were always the real guards — the
+ * system prompt says bash is for READ-ONLY diagnostics and forbids writing
+ * files, and the gate's ship block still refuses `git commit` / `git push` /
+ * `gh pr create` from any pane. `edit`/`write` stay excluded because those are
+ * the tools an agent reaches for when it decides to "just fix it".
  */
 export function buildWorkerPaneCommand(opts: {
   sessionId: string;
@@ -199,7 +195,7 @@ export function buildWorkerPaneCommand(opts: {
   return [
     opts.piBin ?? "pi",
     "--no-skills",
-    "--exclude-tools", "edit,write,bash",
+    "--exclude-tools", "edit,write",
     "--system-prompt", opts.sysPromptPath,
     "--model", opts.model,
     "--session-dir", opts.sessionDir,

@@ -28,6 +28,7 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import type { ChoiceSpec } from "./choice-dialog.ts";
 import { channelRoot, nodeChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
+import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { assertSafeTmuxArgv } from "./orchestrator-tmux.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
@@ -418,6 +419,10 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
   // changed and would re-ring the same unanswered question on every poll.
   const io = nodeChannelIO();
   let memory: SupervisionMemory = {};
+  // …and ONE record of the questions a wait has already announced. Kept apart
+  // from the memory above because that one is drained by the background timer
+  // too (see `announcedRequests` in lib/orchestrator-deps.ts).
+  let announced: readonly AnnouncedRequest[] = [];
   // Same ownership rule as the supervision memory: one per orchestration, so
   // the border-repaint throttle cannot leak between orchestrations (or, in a
   // test process, between worlds).
@@ -519,6 +524,8 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     channelHome: () => host.channelHome?.(),
     supervisionMemory: () => memory,
     saveSupervisionMemory: (next) => { memory = next; },
+    announcedRequests: () => announced,
+    saveAnnouncedRequests: (next) => { announced = next; },
     paneDecorMemory: () => paneDecor,
 
     contextPercent: () => host.contextPercent?.(),

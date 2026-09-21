@@ -468,7 +468,8 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   无进展的 `working` 与卡死可被区分 —— 它只是回执里的一个**读数**，不改变
   `isNewsworthy`、不叫醒项目经理。`screenLooksBusy`、屏幕解析与按键模拟全部删除，
   tmux 在编排层只剩三件事：**判 pane 存活**、**开关 pane**、**给 pane 上色与标题**
-  （纯展示，`select-pane -P/-T` + window 级 `setw pane-border-*`，一律不带 `-g`）。
+  （纯展示，`select-pane -P` + pane 用户选项 `set -p @rg_label`（pi 会覆盖 `pane_title`，
+  这个命名空间它不碰）+ window 级 `setw pane-border-*`，一律不带 `-g`）。
 - **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：门禁内部等待、
   full precommit、任何长命令都发生在**同一个 turn 内部**，agent 既不 settle 也不
   结束 turn，挂在 `agent_settled` / `turn_end` 上的心跳因此必然超时 —— 一个正在等
@@ -689,8 +690,12 @@ child processes — see the review protocol above.)
 
 The worker family is how you spawn one: `worker_submit({task})` opens a
 READ-ONLY tmux pane (the same pane machinery the judges use, `--exclude-tools
-edit,write`), `worker_wait` collects its report or the question it is blocked
-on, `worker_answer` answers that question, and `worker_close` frees the pane —
+edit,write`; `bash` IS available since 2026-09-22 — a worker that cannot run
+`git log`, `rg` or a test investigates nothing — and its read-only use is held
+by the worker prompt plus the gate's own ship block, not by the tool surface),
+`worker_wait` collects its report or the question it is blocked
+on — it is interruptible, so ESC or simply typing ends it at once and consumes
+nothing — `worker_answer` answers that question, and `worker_close` frees the pane —
 the conversation survives, so submitting under the same `workerId` again
 continues the same session instead of re-explaining the background. It
 replaced `npm:@tintinweb/pi-subagents` (the `Agent` / `SubagentWorkflow`

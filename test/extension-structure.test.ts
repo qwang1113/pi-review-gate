@@ -5468,6 +5468,18 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   const read = windowOf("function superviseNow(", "\n  }", "superviseNow");
   assert.match(read, /superviseChildren\(\{/, "and that read is the supervisor module's");
   assert.match(read, /io: channelIO/, "over the channels, never a pane");
+  // ONE TRUTH ABOUT "IS ANYONE WAITING FOR A REPLY" (2026-09-22). This read
+  // feeds the `[ORCHESTRATION] 子会话需要你` injection and `orchestrator_wait`
+  // builds its receipt from the same module — but the wait passes
+  // `deps.channelHome()` and this one did not, so the two agreed only for as
+  // long as no host bound a channel home.
+  assert.match(read, /channelHome\(\)/,
+    "the timer must read the SAME channel root the wait receipt does");
+  // …and the pane reading is the tool-kit's one implementation, rather than a
+  // second hand-assembled tmux call.
+  const panes = windowOf("function alivePaneIdsForSupervision(", "\n  }", "alivePaneIdsForSupervision");
+  assert.match(panes, /alivePanes\(orchestratorDeps\)/, "one pane measurement, shared with the wait");
+  assert.doesNotMatch(panes, /orchestratorDeps\.tmux\(/, "the duplicated argv is gone");
   const shutdown = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown");
   assert.match(shutdown, /stopSupervisionTimer\(\)/, "a leaked timer would keep waking a session that is gone");
 });
@@ -5496,8 +5508,11 @@ test("B4/F14: the INJECTED wrap-up block reads the same channels and never inven
 
   // And the pane reading itself must fail to UNKNOWN, not to empty.
   const panes = windowOf("function alivePaneIdsForSupervision(", "\n  }", "alivePaneIdsForSupervision");
-  assert.match(panes, /if \(!listed\.ok\) return undefined;/, "a failed list-panes measures nothing");
-  assert.match(panes, /catch \{[\s\S]*return undefined;/, "and neither does a throw");
+  // The measurement itself is `alivePanes` (lib/orchestrator-tool-kit.ts),
+  // which swallows both a failed call and a throw into `ok: false`; UNKNOWN
+  // has to survive the conversion to a Set.
+  assert.match(panes, /read\.ok \? new Set\(read\.panes\) : undefined/,
+    "a failed measurement stays UNKNOWN rather than becoming an empty set");
   assert.doesNotMatch(panes, /return new Set\(\);/, "an empty set here would read as a graveyard");
 });
 
@@ -5567,6 +5582,14 @@ test("a spawner's requested mode applies only to a clean, undecided, interactive
   assert.match(block, /isEnforcedMode\(requestedBySpawner\)/,
     "a spawner may hand over a tighter starting point, never a looser one");
   assert.match(block, /!== "orchestrator" \|\| process\.env\.TMUX/);
+  // THE ONE NON-ENFORCED REQUEST (2026-09-21): a WORKER pane asking for
+  // explore. Undecided behaved as loop, and the measured cost was a worker
+  // being continued 1/15, 2/15 … after it had already reported. It is not a
+  // relaxation: the worker identity is REQUIRED, so an ordinary session that
+  // sets RG_GATE_MODE=explore in its own environment is still ignored.
+  assert.match(block, /requestedBySpawner === "explore" && readWorkerSideEnv\(process\.env\)/,
+    "a worker pane's explore is honoured — and only a worker pane's");
+  assert.match(block, /setTaskMode\("explore", "auto", ctx\)/);
 });
 
 test("the file-size gate runs at the CHECKPOINT, and only new files can block it", () => {
@@ -5897,7 +5920,7 @@ test("a judge session writes NO gate state, and says so outside the repo", () =>
   for (const fn of ["persist", "persistRepo"]) {
     const body = windowOf(`function ${fn}(`, /\n  \}\n/, `${fn} body`);
     const guardAt = body.indexOf("noteGateStatePersistSkip(ctx)");
-    assert.ok(guardAt > 0, `${fn} must consult the judge-side skip`);
+    assert.ok(guardAt > 0, `${fn} must consult the write-skip decision`);
     // Window self-proof: this really is a persisting function (if the window
     // missed the writes, "the guard comes first" would be vacuously true).
     const writeAt = body.search(/saveSidecarPreservingConcurrent|recordBlockedMarker/);
@@ -5905,9 +5928,12 @@ test("a judge session writes NO gate state, and says so outside the repo", () =>
     assert.ok(guardAt < writeAt, `${fn}: the skip must be decided BEFORE anything is written`);
   }
 
-  // The decision itself lives in lib/judge-side.ts, where it is unit-tested —
-  // the extension must not re-derive "am I a judge" with its own condition.
-  assert.match(SRC, /gateStatePersistSkip\(process\.env\)/, "the rule has one home");
+  // The decision itself lives in lib/session-exclusivity.ts, where it is
+  // unit-tested — the extension must not re-derive "am I a judge / a worker"
+  // with its own condition.
+  assert.match(SRC, /gateStateWriteSkip\(process\.env\)/, "the rule has one home");
+  assert.doesNotMatch(codeOnly(SRC), /gateStatePersistSkip\(process\.env\)/,
+    "the judge-only predecessor is gone, not kept beside it");
 
   // And the audit record must not become the very thing it reports: no file
   // write of any kind inside the recorder.
@@ -5936,8 +5962,8 @@ test("a judge session writes NO gate state, and says so outside the repo", () =>
     if (inFunnel) continue;
     // Outside a funnel ⇒ the call must carry both guards itself.
     const window = codeOnly(SRC).slice(Math.max(0, call.index! - 700), call.index);
-    assert.match(window, /gateStatePersistSkip\(process\.env\)/,
-      `a gate-state write at offset ${call.index} is not behind the judge guard`);
+    assert.match(window, /gateStateWriteSkip\(process\.env\)/,
+      `a gate-state write at offset ${call.index} is not behind the reporting-shell guard`);
     assert.match(window, /state\.exclusivityRefusal/,
       `a gate-state write at offset ${call.index} is not behind the worktree guard`);
   }

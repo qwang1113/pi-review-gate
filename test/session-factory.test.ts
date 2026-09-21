@@ -443,7 +443,8 @@ test("the manager's own border is `pm:<dir>`, and painting it is unconditional",
   paintPaneTitle(run, "%3", pmPaneLabel("repo"));
   paintPaneTitle(run, "%3", pmPaneLabel("repo"));
   assert.equal(seen.length, 2, "no memory and no throttle: pi may have rewritten it in between, so it is repainted every probe");
-  assert.deepEqual(seen[1], ["select-pane", "-t", "%3", "-T", "pm:repo"]);
+  assert.deepEqual(seen[1], ["set", "-p", "-t", "%3", "@rg_label", "pm:repo"],
+    "a pane USER OPTION, not the title — pi rewrites `pane_title` and would erase it");
   // Cosmetic, always: a tmux that throws must not take supervision down with it.
   assert.doesNotThrow(() => paintPaneTitle(() => { throw new Error("tmux gone"); }, "%3", "pm:repo"));
 });

@@ -10,6 +10,7 @@ import {
   PRESENCE_HEARTBEAT_MS,
   checkSessionExclusivity,
   claimsMainSidecar,
+  gateStateWriteSkip,
   parsePresence,
   presenceFor,
   presenceIsOurs,
@@ -44,12 +45,55 @@ const JUDGE: NodeJS.ProcessEnv = {
 };
 /** An orchestration child: its own sidecar variant. */
 const CHILD: NodeJS.ProcessEnv = { RG_STATE_VARIANT: "child-7" };
+/** A worker pane: all three identity keys, no state variant. */
+const WORKER: NodeJS.ProcessEnv = {
+  RG_WORKER_OPENER: "session-main-1",
+  RG_WORKER_ID: "rg-worker-timing-probe",
+  RG_WORKER_ROLE: "worker",
+};
+
+test("a judge and a worker write NO gate state; everybody else persists as before", () => {
+  // Measured 2026-09-05 (judge): the judge pane has no RG_STATE_VARIANT, so
+  // its gate wrote the OPENER's sidecar — sessionId became rg-reviewer-…,
+  // taskMode fell from orchestrator to none. A worker pane is opened the same
+  // way, so it is the same exposure (2026-09-21).
+  const judge = gateStateWriteSkip(JUDGE);
+  assert.ok(judge, "a judge pane must be barred from the repo's gate state");
+  assert.equal(judge.id, "rg-reviewer-abc");
+  assert.equal(judge.role, "reviewer");
+  assert.match(judge.reason, /rg-reviewer-abc/, "the record names WHICH pane skipped");
+  assert.match(judge.reason, /sidecar/, "…and what it declined to write");
+
+  const worker = gateStateWriteSkip(WORKER);
+  assert.ok(worker, "a worker pane must be barred from it too — same file, same accident");
+  assert.equal(worker.id, "rg-worker-timing-probe");
+  assert.equal(worker.role, "worker");
+  assert.match(worker.reason, /rg-worker-timing-probe/, "the record names WHICH pane skipped");
+  assert.match(worker.reason, /sidecar/, "…and what it declined to write");
+
+  // The other direction matters just as much: this must not quietly disarm
+  // persistence for sessions that DO own state.
+  assert.equal(gateStateWriteSkip(PLAIN), undefined, "a normal session persists");
+  assert.equal(gateStateWriteSkip(CHILD), undefined,
+    "an orchestration child has its OWN sidecar and keeps writing it");
+  assert.equal(gateStateWriteSkip({ RG_JUDGE_ID: "rg-reviewer-abc" }), undefined,
+    "half an identity is not a judge (same rule readJudgeSideEnv applies)");
+  assert.equal(gateStateWriteSkip({ RG_WORKER_ID: "rg-worker-1", RG_WORKER_ROLE: "worker" }), undefined,
+    "half an identity is not a worker either (readWorkerSideEnv's own rule)");
+});
 
 test("the exemption matrix: who claims the main sidecar at all", () => {
   assert.equal(claimsMainSidecar(PLAIN), true, "an ordinary session claims it");
   assert.equal(claimsMainSidecar({ RG_ORCHESTRATION_ID: "orch-1" }), true,
     "a project manager writes the main sidecar too, so it claims it");
   assert.equal(claimsMainSidecar(JUDGE), false, "a judge writes no gate state");
+  // A WORKER shares the worktree by design — it reads the repo its opener is
+  // working in. Refusing it locked the pair out of each other's checkout in
+  // BOTH directions: the worker was told "this worktree is taken", and a
+  // worker that started first locked out the main session (2026-09-21).
+  assert.equal(claimsMainSidecar(WORKER), false, "a worker writes no gate state");
+  assert.equal(claimsMainSidecar({ RG_WORKER_ID: "rg-worker-1" }), true,
+    "…but half a worker identity is an ordinary session, exempted from nothing");
   assert.equal(claimsMainSidecar(CHILD), false, "an orchestration child writes its own variant file");
   // A judge that is ALSO given a variant is still a judge — neither writes the
   // main sidecar, so the order of these two checks cannot matter.
@@ -58,6 +102,7 @@ test("the exemption matrix: who claims the main sidecar at all", () => {
 
 test("the exemption matrix × a live incumbent: only the second CLAIMANT is refused", () => {
   const live = holder(5_000);
+  assert.equal(verdict(WORKER, live).ok, true, "a worker reads beside its opener, it does not claim");
   // The row that refuses.
   const plain = verdict(PLAIN, live);
   assert.equal(plain.ok, false, "a second ordinary session in one worktree is refused");

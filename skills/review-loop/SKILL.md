@@ -123,7 +123,10 @@ parallel-safe: readers never write to the worktree, so they cannot invalidate a
 binding or race with each other. When you need to explore several areas of the
 codebase, fan out read-only scans with the WORKER family —
 `worker_submit({task})` opens a read-only tmux pane (same pane machinery the
-judges use), `worker_wait` collects its report or the question it is blocked on,
+judges use: no `edit`/`write`, while `bash` is available for READ-ONLY
+diagnostics — `git log`, `rg`, running a test), `worker_wait` collects its
+report or the question it is blocked on (ESC or typing a message ends the wait
+at once and consumes nothing),
 and `worker_close` frees the pane while keeping the conversation (the same
 `workerId` continues it later). Each worker reads its own files and returns
 findings; you merge the results. Exploration and editing may also overlap:
@@ -133,8 +136,9 @@ different file (the single-writer invariant still holds — only YOU write).
 ### Serial writers — exactly one writer in the worktree
 
 Write-capable work goes through the orchestration layer, not through a worker:
-a WORKER is read-only by its tool surface (`--exclude-tools edit,write`), so
-it can run beside anything, but an orchestration child's edits change the
+a WORKER has no writing tools on its surface (`--exclude-tools edit,write`) and
+is told to keep its `bash` read-only, so it can run beside anything, but an
+orchestration child's edits change the
 worktree like any other — which is why same-repo children each get their own
 checkout and run **serially** in one worktree (a review recorded before them
 can no longer ship: the binding tree moved, and concurrent writers would keep
