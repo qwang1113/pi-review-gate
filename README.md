@@ -156,6 +156,17 @@ L8  Loop-goal approval    loop mode → the exit contract must be NEGOTIATED wit
                           goal body is withheld from the prompt). The approval
                           also carries the round's DELIVERY STATION, which L1
                           then enforces and `declare_done` checks arrival at
+L9  Real acceptance       loop mode → the GATE itself dispatches the
+                          `acceptance` judge the first time `declare_done`
+                          finds code and no verdict bound to the current
+                          worktree: it BRINGS THE CHANGED SYSTEM UP and works
+                          the goal's 真实验收方案 on it (real call, real
+                          returned data, the neighbouring paths re-checked).
+                          COMPLETION-only like L7 — fixing a finding needs a
+                          commit, so a ship-level requirement would block its
+                          own remedy — and it is NOT one of the parallel three
+                          (the cancel matrix has no seat for it)
+                          (rules: lib/acceptance-round.ts)
 ```
 
 **Arbiter (circular-block escape).** Layered on top of L1: when the ship gate

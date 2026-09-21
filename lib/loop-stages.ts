@@ -214,6 +214,14 @@ export interface StagesOfferFacts {
  * explore/normal are refused for the opposite reason: their gates are already
  * advisory/off, and offering five switches for a gate that is not enforcing
  * anything would be noise.
+ *
+ * AN UNDECIDED SESSION (`mode === undefined`) IS OFFERED, deliberately
+ * (reviewer Nit, 2026-09-22): the switches are the SESSION's setting and the
+ * answer is recorded the moment it is given, so a box shown before
+ * `set_gate_mode` answers is not a consumed chance — the mode/goal gate that
+ * may then block the FIRST EDIT is a different question asked by a different
+ * mechanism, and refusing this one early would only move the same dialog
+ * later. Only a mode that already answers the question is refused.
  */
 export function stagesOffered(facts: StagesOfferFacts): string | undefined {
   if (facts.mode === "orchestrator") {

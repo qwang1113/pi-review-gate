@@ -261,6 +261,32 @@ test("extractAcceptancePlan takes the section verbatim and stops at the next hea
       `${heading} opens the section too`,
     );
   }
+  // A NESTED SUB-HEAD IS NOT A SECTION (reviewer P2, 2026-09-22). The
+  // skeleton's own acceptance plan is a list of colon-terminated labels, and
+  // one of them carrying its content on the NEXT line used to close the
+  // section at its own first bullet — the judge was handed no plan at all.
+  // Depth is what makes an item nested, so depth is the discriminator.
+  const nested = [
+    "# 任务",
+    "真实验收方案：",
+    "  - 正向真实调用：",
+    "     起服务，调 /x，期望 200",
+    "  - 反向验证：",
+    "     再调 /y 确认没坏",
+    "非目标：",
+    "  - 不做 z",
+  ].join("\n");
+  assert.equal(
+    extractAcceptancePlan(nested),
+    "  - 正向真实调用：\n     起服务，调 /x，期望 200\n  - 反向验证：\n     再调 /y 确认没坏",
+    "a deeper sub-head keeps the section open — the plan arrives whole",
+  );
+  // …and a deeper MARKDOWN heading is content for the same reason: it is
+  // inside the section, not a new one.
+  assert.equal(
+    extractAcceptancePlan("# 任务\n真实验收方案：\n  ### 正向真实调用\n     起服务\n非目标：\n", ),
+    "  ### 正向真实调用\n     起服务",
+  );
 });
 
 /* ──────────────────────────── the dispatched task ────────────────────────── */

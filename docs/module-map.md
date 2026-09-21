@@ -180,7 +180,7 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 
 ---
 
-## 二、L1–L8：每层落在哪
+## 二、L1–L9：每层落在哪
 
 关卡不是一层一个文件，而是「判定在 `lib/`、接线在扩展、纵深防御在
 `hooks/` 与 `scripts/`」的分工。
@@ -195,6 +195,7 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 | **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/pre-commit-check.cjs` → 进程内 `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
 | **L7** Copilot 审查 | PR 之后的审查闭环：请求、有证据的等待、逐 thread 消账；第 4 轮起每条问题先经用户逐条审批 | `lib/copilot-review-tools.ts`（工具 `copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线（弹框经 `askFinding` 注入、等待由 `lib/copilot-watch.ts` 的后台监视器唤醒） | `lib/copilot-review.ts`、`lib/copilot-watch.ts`、`lib/copilot-triage.ts` |
 | **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | `lib/goal-tools.ts`（工具 `propose_loop_goal`，内部自跑 goal 审计）+ `lib/goal-prereview-tools.ts`（普通函数 `recordGoalPrereview`：裁决落成记录，不注册成工具），扩展只接线 | `lib/loop-goal.ts` |
+| **L9** 真实验收轮 | 完成时刻的真实执行验收：本轮有代码改动、且没有绑定当前内容的验收结论时，门禁在 `declare_done` 内**自己**派 `acceptance`；非 READY、或结论绑定的内容已移动 ⇒ 拒绝完成（**不进 `unmetRequirements`** —— 修验收 finding 要 commit，那会被它自己拦住） | `extensions/review-gate.ts` 的 `armAcceptanceRound` / `dispatchAcceptanceRound`（接线、派发、指纹与记录），派发与结算复用 `dispatchJudgeRound` / `settleAuditRound` | `lib/acceptance-round.ts`（判定表、任务文本、`RG_ACCEPTANCE_GATE` 渲染）、`agents/acceptance.md`（角色纪律）、`lib/repo-pr-policy.ts`（哪个任务验收） |
 
 > **落点指引**：加一条新的**判定规则**（什么该拦、什么该放）→ 落在
 > `lib/` 里对应的纯模块，并配一个 `test/*.test.ts`；只有「把判定接到某个
@@ -758,7 +759,7 @@ test 名称，同一个文件后面跟着的名称都归它。零个是正常情
 
 | 同一段口径的副本处 | 权威在哪 | 实测备注 |
 | --- | --- | --- |
-| L1–L8 分层清单：`README.md` 的 ASCII 图（`L1 Ship gate` … `L8 Loop-goal approval`）↔ 本文 §二的表 | 无单一权威（分散在各层实现） | `test/module-map.test.ts` 只覆盖 §五；README 端只有零散句子被别的测试 pin，层级表本身不在其中 |
+| L1–L9 分层清单：`README.md` 的 ASCII 图（`L1 Ship gate` … `L8 Loop-goal approval`、`L9 Real acceptance`）↔ 本文 §二的表 | 无单一权威（分散在各层实现） | `test/module-map.test.ts` 只覆盖 §五；README 端只有零散句子被别的测试 pin，层级表本身不在其中。**L9（验收轮）自 2026-09-22 起在场：给分层表加层时两层都要加**，否则「代码里的 L9」在两张表里都找不到 |
 | judge 默认模型链：`scripts/install-package.mjs` 的 `DEFAULT_AGENTS`、`AGENTS.md` 正文、`README.md` 的配置示例 | `agents/*.md` 的 frontmatter（这一端有 pin，见 7.1）；**且自 2026-09-10 起它就是运行时输入**：派发与 pane 都读这条链（`lib/model-health.ts` / `lib/judge-model-rotation.ts`） | `test/install-package.test.ts` 只验安装**行为**，从不校验 `DEFAULT_AGENTS` 的内容与 `agents/*.md` 一致。**2026-09-17 实测已经漂了**：`DEFAULT_AGENTS.arbiter` 是 `onekey/gpt-5.6-sol:max`（与 `lib/project-config.ts` 的 `DEFAULT_ARBITER_MODEL` 同源），而 `agents/arbiter.md` 与 AGENTS.md 都写 `claude-fable-5` → `claude-opus-5`。收敛前要先由用户拍板哪一份是对的（跨模型仲裁是不是刻意的），所以本轮只记录、不动 |
 | 整份文档从未被任何测试读到：`docs/coding-standards.md` | —— | 2026-09-08 起 §5 最小化准则进入多个测试的扫描面（见 §7.1 最小化行），其余章节仍只被 `review-carryover.test.ts` 查增量契约一项。（`docs/orchestrator-supervision.md`、`docs/hierarchical-session-design.md`、`docs/dev-flow.md` 已于 2026-09-17 进入 `test/copy-convergence.test.ts` 与 `test/delivery-station.test.ts` 的扫描面，不再是「零测试读到」）|
 | 五个环节开关的口径（默认全开＝今天的行为；未勾的环节在它每一个卡点放行；编排模式与其子会话不提供）：`AGENTS.md` §Single-review loop、`README.md` 的「Five stages, switchable — and all five ON by default」段、`/gate-status` 与底部 widget 的读数文案（`lib/gate-command-tools.ts` / `lib/ui-widget.ts`） | `lib/loop-stages.ts`（`stageOpen` / `LOOP_STAGES`、框的标题与正文、以及工具注册都在同一模块） | 实现侧有 pin（`test/loop-stages.test.ts`、`test/gate-state.test.ts`、`test/extension-structure.test.ts`），散文副本没有任何测试扫到 —— 改文案与改常量是两件事，回头把两边对齐 |

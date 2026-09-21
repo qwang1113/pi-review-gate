@@ -178,6 +178,22 @@ export function sanitizeAcceptanceRecord(raw: unknown): AcceptanceRecord | undef
 /* ─────────────────────────── what the gate should do ─────────────────────── */
 
 /**
+ * IS A ROUND DISPATCHED AND STILL OWED A VERDICT?
+ *
+ * The ONE reading of the record's AWAITING state, for the readers OUTSIDE the
+ * decision table. The completion path needs it for a reason the table cannot
+ * express: the cascade-close that abandons unrecorded judge rounds must NOT
+ * reclaim the pane of a round the gate is itself waiting on. Closing it first
+ * makes `acceptanceRoundAlive` answer "gone", and `acceptanceDecision`'s own
+ * `roundAlive === false` rule then dispatches a second round on top of a
+ * working judge — the first one is killed and paid for twice (reviewer P1,
+ * 2026-09-22).
+ */
+export function acceptanceRoundInFlight(record: AcceptanceRecord | undefined): boolean {
+  return record?.status === "AWAITING";
+}
+
+/**
  * WHY THIS ROUND WAS DISPATCHED, in one word — the decision `declare_done`
  * acts on. `skip` covers every "not owed" case (`status` says which), `pass`
  * is a READY that still binds, `wait` is a round already in flight, `block` is
@@ -386,11 +402,29 @@ export function parseNoAcceptanceDeclaration(goalText: string): { reason: string
 /** The heading that opens the goal's real-acceptance plan. */
 export const ACCEPTANCE_PLAN_HEADING = "真实验收方案";
 
-/** Is this line the start of another top-level section of the goal? */
-function isSectionHeading(line: string): boolean {
+/** Leading whitespace of one goal line — what tells a sub-head from a section. */
+function indentOf(line: string): number {
+  return line.length - line.trimStart().length;
+}
+
+/**
+ * Is this line the start of another TOP-LEVEL section of the goal?
+ *
+ * IT MUST NOT BE INDENTED DEEPER THAN THE SECTION THAT IS OPEN (reviewer P2,
+ * 2026-09-22). The matcher used to accept ANY colon-terminated line, and the
+ * goal skeleton's own acceptance plan is a list of them: a goal that writes
+ * 「  - 正向真实调用：」 and puts the content on the NEXT line closed the section
+ * at its own first bullet, so `extractAcceptancePlan` returned undefined and
+ * the acceptance judge was handed no plan at all. A nested item is indented
+ * DEEPER than the heading that opened the section — that is what makes it
+ * nested — so the depth is the discriminator, and `#`-headings are held to it
+ * too (a `### 正向真实调用` inside the section is content, not a new section).
+ */
+function isSectionHeading(line: string, sectionIndent: number): boolean {
   const t = line.trim();
-  if (t === "" || t.startsWith("#")) return t.startsWith("#");
-  return t.endsWith("：") || t.endsWith(":");
+  if (t === "") return false;
+  if (indentOf(line) > sectionIndent) return false;
+  return t.startsWith("#") || t.endsWith("：") || t.endsWith(":");
 }
 
 /**
@@ -410,9 +444,11 @@ export function extractAcceptancePlan(goalText: string): string | undefined {
   const lines = goalText.split("\n");
   const start = lines.findIndex((line) => stripLinePrefix(line).startsWith(ACCEPTANCE_PLAN_HEADING));
   if (start < 0) return undefined;
+  // The section's OWN depth, so a nested sub-head cannot close it (below).
+  const sectionIndent = indentOf(lines[start]!);
   const body: string[] = [];
   for (const line of lines.slice(start + 1)) {
-    if (isSectionHeading(line)) break;
+    if (isSectionHeading(line, sectionIndent)) break;
     body.push(line);
   }
   const text = body.join("\n");

@@ -476,6 +476,7 @@ import {
   acceptanceDecision,
   acceptanceGateOpen,
   acceptanceProblems,
+  acceptanceRoundInFlight,
   buildAcceptanceTask,
   parseNoAcceptanceDeclaration,
   type AcceptanceDecision,
@@ -12281,7 +12282,25 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // — a dead pane still leaves a registry entry, a scratch worktree and
       // (for an auditor) a pending audit to reclaim. The opener filter is
       // what keeps it off a PEER's review.
-      const ownedJudges = ownJudges();
+      //
+      // AN IN-FLIGHT ACCEPTANCE ROUND IS NOT ABANDONED HERE (reviewer P1,
+      // 2026-09-22). This tool is the one that dispatched it, and the reply it
+      // gave told the agent to WAIT for it — so a second `declare_done` must
+      // reach `acceptanceDecision`'s AWAITING branch. Closing the pane first
+      // made `acceptanceRoundAlive()` answer “gone”, and the decision's own
+      // `roundAlive === false` rule then dispatched a SECOND round on top of a
+      // working judge: the first was killed and paid for twice.
+      //
+      // ONLY that role, and ONLY while its own record says AWAITING (a
+      // concluded round — READY / BLOCKED / SKIPPED / DISABLED — is reclaimed
+      // like every other finished judge). A pane that really died is still
+      // re-dispatched, because `acceptanceRoundAlive` reads the PANE: leaving
+      // the registry entry here changes nothing about that decision. Killing
+      // the pane by hand (tmux) remains the way to abandon a round that is
+      // alive but will never conclude.
+      const ownedJudges = ownJudges().filter((child) =>
+        !(child.role === "acceptance" && acceptanceRoundInFlight(stateForRepo(child.repoRoot).acceptance)),
+      );
       if (ownedJudges.length > 0 && (state.taskMode === "loop" || orchestratorMode)) {
         const ownPane = process.env.TMUX_PANE?.trim() || undefined;
         const run = (argv: readonly string[]) => runTmux(argv);

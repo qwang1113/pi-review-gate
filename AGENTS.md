@@ -713,7 +713,7 @@ review 循环的唯一入口 —— 一条门禁自己要求的提交被门禁�
 「我正好打开的那个文件」。
 
 「落在哪个模块」不该靠猜：`docs/module-map.md` 是这份地图 —— 它写清了
-`extensions/review-gate.ts` 与 `lib/` 各模块的职责分工（含 L1–L8 每层落在哪、
+`extensions/review-gate.ts` 与 `lib/` 各模块的职责分工（含 L1–L9 每层落在哪、
 工具族为什么注册在 `lib/orchestrator-*-tools.ts` 而不是扩展里），以及 `hooks/`
 / `scripts/` / `agents/` / `test/` 的落点约定。动手前先查它，别先打开编辑器；
 新增或删除 `lib/` 模块时，同一轮改动里顺手同步它那张速查表。

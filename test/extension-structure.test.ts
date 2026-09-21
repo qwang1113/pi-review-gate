@@ -5873,7 +5873,7 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
   // declare_done's cascade-close deliberately uses the WIDER scope: a dead
   // pane still leaves an entry, a scratch worktree and a pending audit to
   // reclaim. What must never widen is the opener.
-  assert.match(SRC, /const ownedJudges = ownJudges\(\);/, "cascade-close is opener-scoped");
+  assert.match(SRC, /const ownedJudges = ownJudges\(\)\.filter\(\(child\) =>/, "cascade-close is opener-scoped");
   // The health snapshot the hosted wait is built from.
   assert.match(SRC, /for \(const c of ownJudges\(\)\) \{/, "the child snapshot lists own judges only");
 });
@@ -5893,9 +5893,21 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
  * guarantee that finishing a task can never strand a pane — and a round that
  * makes it consult the policy and then close everything anyway would add the
  * decorative call site the policy module explicitly argues against.
+ *
+ * THE ONE EXEMPTION (2026-09-22, reviewer P1): the pane of the round the gate
+ * is ITSELF waiting on is filtered out of the list — the acceptance round, and
+ * only while its own record still says AWAITING. Closing it first made
+ * `acceptanceRoundAlive()` answer “gone”, and `acceptanceDecision`'s own
+ * `roundAlive === false` rule then dispatched a SECOND round on top of a
+ * working judge (the first one killed and paid for twice). The guarantee above
+ * is untouched, and the reason is mechanical: while a record says AWAITING the
+ * decision is `wait` and `declare_done` returns that refusal, so the
+ * completion path — the only path the sweep runs on — is UNREACHABLE with an
+ * exempted pane. The policy module calls the sweep “the terminus for a pane
+ * whose round never concluded”; an in-flight round has a terminus of its own.
  */
 test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by dispatcher", () => {
-  const sweep = windowOf("const ownedJudges = ownJudges();", "progress.step(`联关", "declare_done cascade");
+  const sweep = windowOf("const ownedJudges = ownJudges()", "progress.step(`联关", "declare_done cascade");
   // It closes what it owns, one by one, with no question about provenance.
   assert.match(sweep, /for \(const child of ownedJudges\) \{/, "every owned judge is visited");
   for (const dispatcherish of ["judgePaneReclaim", "dispatchedBy", "atRoundEnd", "judge-pane-policy"]) {
@@ -7161,4 +7173,29 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   const unmetBody = unmet.slice(0, unmet.indexOf("\nexport function", 10));
   assert.ok(unmetBody.length > 0, "the ship authority is in gate-state.ts");
   assert.doesNotMatch(unmetBody, /acceptance/i, "the acceptance round answers completion, never shipping");
+  // 4. A SECOND declare_done MUST REACH THE WAIT BRANCH (reviewer P1,
+  //    2026-09-22). The cascade-close that abandons unrecorded rounds must not
+  //    reclaim the pane the gate is ITSELF waiting on: closing it first made
+  //    `acceptanceRoundAlive` answer false, and the module's own
+  //    `roundAlive === false` rule then dispatched a second round on top of a
+  //    working judge — the first one killed and paid for twice.
+  const cascade = windowOf(
+    "const ownedJudges = ownJudges()",
+    "progress.step(`联关",
+    "acceptance cascade-close",
+  );
+  assert.match(
+    cascade,
+    /child\.role === "acceptance" && acceptanceRoundInFlight\(stateForRepo\(child\.repoRoot\)\.acceptance\)/,
+    "an IN-FLIGHT acceptance round is filtered out of the cascade-close",
+  );
+  // ..and the reading itself stays in the module (哲学二): a literal
+  // `status === "AWAITING"` here would be a second answer to one question.
+  const acceptanceSrc = readFileSync(join(ROOT, "lib", "acceptance-round.ts"), "utf8");
+  assert.match(acceptanceSrc, /export function acceptanceRoundInFlight\(/);
+  assert.doesNotMatch(
+    code,
+    /acceptance\?\.status === "AWAITING"/,
+    "the extension asks the module, never the raw status",
+  );
 });
