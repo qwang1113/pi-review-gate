@@ -40,8 +40,8 @@ test("agents/*.md exactly matches KNOWN_AGENTS (config/render see every agent)",
   assert.ok(files.length >= 4, `expected all 4 agents, found ${files.length}`);
 });
 
-test("L3 judges (reviewer/quality-auditor/adviser/arbiter/goal-auditor) think at max — the verdict tier never degrades", () => {
-  for (const f of ["reviewer.md", "quality-auditor.md", "adviser.md", "arbiter.md", "goal-auditor.md"]) {
+test("L3 judges (reviewer/quality-auditor/adviser/arbiter/goal-auditor/acceptance) think at max — the verdict tier never degrades", () => {
+  for (const f of ["reviewer.md", "quality-auditor.md", "adviser.md", "arbiter.md", "goal-auditor.md", "acceptance.md"]) {
     assert.match(frontmatter(f), /^thinking: max$/m, `${f}: L3 must think at max`);
   }
 });
@@ -51,7 +51,7 @@ test("incremental-review roles run context: fresh — nothing forks the main ses
   // conversation: their task text carries the goal, the scope, and the
   // transcript location to read ON DEMAND. A regression to fork would
   // silently re-add the token/time cost the incremental contract removes.
-  for (const f of ["reviewer.md", "quality-auditor.md", "adviser.md", "goal-auditor.md"]) {
+  for (const f of ["reviewer.md", "quality-auditor.md", "adviser.md", "goal-auditor.md", "acceptance.md"]) {
     assert.match(frontmatter(f), /^defaultContext: fresh$/m, `${f}: must default to fresh context`);
   }
   // The judging roles that stay fork-based do so deliberately (arbiter needs
@@ -92,7 +92,7 @@ test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its ve
 test("L3 judge roles pin the exact strong-tier chain (model + fallbacks + max thinking)", () => {
   const STRONG_FALLBACK =
     /^fallbackModels: claude-opus-5$/m;
-  for (const f of ["reviewer.md", "quality-auditor.md", "adviser.md", "arbiter.md"]) {
+  for (const f of ["reviewer.md", "quality-auditor.md", "adviser.md", "arbiter.md", "acceptance.md"]) {
     const body = frontmatter(f);
     assert.match(body, /^model: claude-fable-5$/m, `${f}: L3 primary must be claude-fable-5`);
     assert.match(body, /^thinking: max$/m, `${f}: L3 must think at max`);

@@ -1720,7 +1720,12 @@ test("normal mode: prompt-transparent except the language directive; loop resume
   // BEFORE any gate text is appended.
   const promptAt = SRC.indexOf('pi.on("before_agent_start"');
   assert.ok(promptAt >= 0);
-  const promptBody = SRC.slice(promptAt, promptAt + 5000);
+  // The handler's REAL end, not a fixed-width window: the check is an order
+  // inside THIS handler, so the slice must cover the handler and nothing else.
+  // (A magic window silently moved the anchors out of scope whenever the
+  // startup check grew.)
+  const promptEnd = SRC.indexOf('\n  pi.on("', promptAt + 10);
+  const promptBody = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
   const langAt = promptBody.indexOf("LANGUAGE_DIRECTIVE");
   const normalAt = promptBody.indexOf('state.taskMode === "normal"');
   const directiveAt = promptBody.indexOf("GATE_MODE_DECISION_DIRECTIVE");
@@ -1748,7 +1753,8 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   // 1. before_agent_start injects the discipline paragraph in every
   //    non-normal mode (after the normal early return).
   const promptAt = SRC.indexOf('pi.on("before_agent_start"');
-  const promptBody = SRC.slice(promptAt, promptAt + 5000);
+  const promptEnd = SRC.indexOf('\n  pi.on("', promptAt + 10);
+  const promptBody = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
   const normalAt = promptBody.indexOf('state.taskMode === "normal"');
   const disciplineAt = promptBody.indexOf("EDIT_DISCIPLINE_DIRECTIVE");
   assert.ok(disciplineAt > normalAt, "discipline directive must be injected after the normal-mode return");
@@ -1759,7 +1765,7 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   const decl = SRC.slice(SRC.indexOf("let editFailurePending = false;") - 600, SRC.indexOf("let editFailurePending = false;"));
   assert.match(decl, /cleared ONLY on a successful edit|cleared only on a successful edit/,
     "the declaration comment must state the new close-on-edit/nudge semantics");
-  const beforeAgent = SRC.slice(promptAt, promptAt + 4000);
+  const beforeAgent = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
   assert.doesNotMatch(beforeAgent, /editFailurePending = false/,
     "before_agent_start must NOT clear the window any more");
   // 2. tool_result: a FAILED edit arms the window and appends the nudge.
@@ -2993,12 +2999,13 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // One role enum, shared by both tools (a third spelling of it is how
 
   // two of them would silently start accepting different roles).
-  // Four roles: the judge roles an AGENT may address. `arbiter` runs outside
-  // this surface, and `quality-auditor` is here even though the agent never
-  // REQUESTS that round — a round that can ask a question must be answerable.
+  // Five roles: the judge roles an AGENT may address. `arbiter` runs outside
+  // this surface, and `quality-auditor` / `acceptance` are here even though the
+  // agent never REQUESTS those rounds — a round that can ask a question must be
+  // answerable.
   assert.match(
     JUDGE_TOOLS_SRC,
-    /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(\{\s*reviewer: "reviewer",\s*"quality-auditor": "quality-auditor",\s*adviser: "adviser",\s*"goal-auditor": "goal-auditor",\s*\}\)\)/,
+    /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(\{\s*reviewer: "reviewer",\s*"quality-auditor": "quality-auditor",\s*adviser: "adviser",\s*"goal-auditor": "goal-auditor",\s*acceptance: "acceptance",\s*\}\)\)/,
     "the shared role parameter is the judge roles an agent can address",
   );
   for (const tool of ["judge_close", "judge_wait"]) {

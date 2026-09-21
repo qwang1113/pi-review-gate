@@ -17,8 +17,9 @@
  * three internal reporting-shell modes. plan/goal are the two task templates
  * of the goal-auditor role: they share the reporting-shell tool policy and
  * completion discipline and differ only in framing. review covers the
- * reviewer/quality-auditor/adviser/arbiter roles, whose role-specific bodies stay in
- * agents/<role>.md — this entry owns only the shared shell discipline.
+ * reviewer/quality-auditor/acceptance/adviser/arbiter roles, whose role-specific
+ * bodies stay in agents/<role>.md — this entry owns only the shared shell
+ * discipline.
  */
 
 import type { TaskMode } from "./task-mode.ts";
@@ -216,12 +217,12 @@ export function resolveGateMode(input: {
   kind?: JudgeKind | undefined;
 }): GateMode {
   const role = (input.judgeRole ?? "").trim().toLowerCase();
-  // The quality judge runs under the SAME reporting shell as the reviewer:
-  // same read-only discipline, same findings stream, same judge_conclude. It
-  // differs in what it judges (its own role body says so), not in how it
-  // reports — a fourth shell would be a second implementation of the same
-  // contract.
-  if (role === "reviewer" || role === "quality-auditor" || role === "adviser" || role === "arbiter") return "review";
+  // The quality and acceptance judges run under the SAME reporting shell as the
+  // reviewer: same read-only discipline, same findings stream, same
+  // judge_conclude. They differ in what they judge (their own role bodies say
+  // so), not in how they report — a shell per role would be a second
+  // implementation of the same contract.
+  if (role === "reviewer" || role === "quality-auditor" || role === "adviser" || role === "arbiter" || role === "acceptance") return "review";
   if (role === "goal-auditor") return input.kind === "plan" ? "plan" : "goal";
   if (role !== "") return "loop";
   return input.taskMode ?? "undecided";

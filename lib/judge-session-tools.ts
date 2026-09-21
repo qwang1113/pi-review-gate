@@ -293,11 +293,16 @@ export interface JudgeSessionToolDeps {
 // said "use judge_answer" while that tool's schema refused the role of the
 // very judge that had asked.
 // `judge_spawn` deliberately does NOT use it: it only opens goal/plan reviews.
+//
+// `acceptance` is a gate-dispatched round like `quality-auditor`: the agent
+// never ASKS for it, but the round can ask a question, and a judge that asked
+// a question must be answerable / recoverable / waitable.
 export const ROLE_PARAM = Type.Optional(Type.Enum({
   reviewer: "reviewer",
   "quality-auditor": "quality-auditor",
   adviser: "adviser",
   "goal-auditor": "goal-auditor",
+  acceptance: "acceptance",
 }));
 const SESSION_ID_PARAM = Type.Optional(Type.String({ description: "Judge id (its session id); prefer role" }));
 const REPO_PARAM = Type.Optional(Type.String({

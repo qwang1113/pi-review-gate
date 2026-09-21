@@ -251,7 +251,7 @@ test("judge_answer / judge_recover accept every addressable judge role (2026-09-
     const schema = f.schemas.get(tool) as { properties?: Record<string, { enum?: unknown[] }> } | undefined;
     assert.deepEqual(
       schema?.properties?.role?.enum,
-      ["reviewer", "quality-auditor", "adviser", "goal-auditor"],
+      ["reviewer", "quality-auditor", "adviser", "goal-auditor", "acceptance"],
       `${tool} must accept the roles an agent can address`,
     );
   }

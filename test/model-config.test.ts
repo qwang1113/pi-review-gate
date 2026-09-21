@@ -28,6 +28,9 @@ import {
   projectAgentIdentity,
   resolvePackageAgentsDir,
   ensureAgentFilesPresent,
+  healMissingAgentSlots,
+  defaultSlotsFromRoleText,
+  startupAgentsCheck,
   validateAgentsForStartup,
 } from "../lib/model-config.ts";
 
@@ -1279,4 +1282,189 @@ test("validateAgentsForStartup passes a fully configured role", () => {
   const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
   assert.equal(checks.reviewer.ok, true);
 });
+});
+
+// ---------------------------------------------------------------------------
+// Startup slot self-heal: a role NO config layer declares gets the package default
+// ---------------------------------------------------------------------------
+
+test("defaultSlotsFromRoleText pins bare ids and keeps a spec's own thinking level", () => {
+  assert.deepEqual(
+    defaultSlotsFromRoleText(
+      "---\nname: acceptance\nmodel: claude-fable-5\nfallbackModels: claude-opus-5\nthinking: max\n---\nbody\n",
+    ),
+    ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"],
+  );
+  // A spec that already carries its own level keeps it — `:max:max` resolves to nothing.
+  assert.deepEqual(
+    defaultSlotsFromRoleText(
+      "---\nmodel: claude-fable-5:high\nfallbackModels: onekey/gpt-5.6-sol:low\nthinking: max\n---\n",
+    ),
+    ["anthropic/claude-fable-5:high", "onekey/gpt-5.6-sol:low"],
+  );
+  // A file with no model line has nothing to heal from.
+  assert.equal(defaultSlotsFromRoleText("---\nname: nobody\n---\nbody\n"), undefined);
+});
+
+test("healMissingAgentSlots fills the GAP only, keeps every user pin, and is byte-stable", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-slot-heal-"));
+  try {
+    const pkg = join(dir, "pkg");
+    const cfg = join(dir, "review-gate.json");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(
+      join(pkg, "acceptance.md"),
+      "---\nname: acceptance\nmodel: claude-fable-5\nfallbackModels: claude-sonnet-5\nthinking: max\n---\nbody\n",
+    );
+    writeFileSync(
+      cfg,
+      JSON.stringify({ copilotReview: { enabled: false }, agents: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } } }, null, 2) + "\n",
+      "utf8",
+    );
+
+    const res = healMissingAgentSlots({ configPath: cfg, agentsDir: pkg, roles: ["acceptance", "reviewer"], registry: REG });
+    assert.deepEqual(res.healed, ["acceptance"], "only the role NO layer declared is merged");
+    assert.deepEqual(res.problems, []);
+
+    const after = JSON.parse(readFileSync(cfg, "utf8"));
+    assert.deepEqual(after.agents.acceptance, {
+      auto: false,
+      slots: ["anthropic/claude-fable-5:max", "anthropic/claude-sonnet-5:max"],
+    });
+    assert.deepEqual(after.agents.reviewer, { auto: false, slots: ["onekey/gpt-5.6-sol:high"] }, "the user's pin is untouched");
+    assert.deepEqual(after.copilotReview, { enabled: false }, "unrelated config keys survive");
+
+    // The healed section passes the startup hard check for that role.
+    const { map } = effectiveAgentsConfig(after.agents, undefined, ["acceptance"]);
+    assert.equal(validateAgentsForStartup(map, REG, ["acceptance"]).acceptance.ok, true);
+
+    // Idempotent: a second run writes nothing at all.
+    const healedText = readFileSync(cfg, "utf8");
+    const second = healMissingAgentSlots({ configPath: cfg, agentsDir: pkg, roles: ["acceptance"], registry: REG });
+    assert.deepEqual(second.healed, []);
+    assert.equal(readFileSync(cfg, "utf8"), healedText, "a fully healed config is never rewritten");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("healMissingAgentSlots creates the config file when none exists", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-slot-heal-new-"));
+  try {
+    const pkg = join(dir, "pkg");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "acceptance.md"), "---\nname: acceptance\nmodel: claude-fable-5\nthinking: max\n---\n");
+    const cfg = join(dir, ".pi", "review-gate.json");
+    const res = healMissingAgentSlots({ configPath: cfg, agentsDir: pkg, roles: ["acceptance"], registry: REG });
+    assert.deepEqual(res.healed, ["acceptance"]);
+    const written = JSON.parse(readFileSync(cfg, "utf8"));
+    assert.deepEqual(Object.keys(written), ["agents"], "a fresh file carries only what the heal wrote");
+    assert.deepEqual(written.agents.acceptance.slots, ["anthropic/claude-fable-5:max"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("healMissingAgentSlots refuses to write over a corrupt config, a bad agents section, or an unresolvable chain", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-slot-heal-bad-"));
+  try {
+    const pkg = join(dir, "pkg");
+    mkdirSync(pkg, { recursive: true });
+    // The package default cannot be resolved against THIS registry.
+    writeFileSync(join(pkg, "acceptance.md"), "---\nname: acceptance\nmodel: claude-nonexistent\nthinking: max\n---\n");
+
+    const broke = join(dir, "broke.json");
+    writeFileSync(broke, "{ not json", "utf8");
+    const corrupted = healMissingAgentSlots({ configPath: broke, agentsDir: pkg, roles: ["acceptance"], registry: REG });
+    assert.deepEqual(corrupted.healed, []);
+    assert.match(corrupted.problems.join("\n"), /读取\/解析失败/);
+    assert.equal(readFileSync(broke, "utf8"), "{ not json", "a corrupt file is never rewritten");
+
+    const unresolvablePath = join(dir, "unresolvable.json");
+    const unresolvable = healMissingAgentSlots({ configPath: unresolvablePath, agentsDir: pkg, roles: ["acceptance"], registry: REG });
+    assert.deepEqual(unresolvable.healed, []);
+    assert.match(unresolvable.problems.join("\n"), /不可解析/);
+    assert.equal(existsSync(unresolvablePath), false, "refusing to write must not leave an empty file behind");
+
+    const badAgents = join(dir, "bad-agents.json");
+    writeFileSync(badAgents, JSON.stringify({ agents: [] }), "utf8");
+    const notObject = healMissingAgentSlots({ configPath: badAgents, agentsDir: pkg, roles: ["acceptance"], registry: REG });
+    assert.deepEqual(notObject.healed, []);
+    assert.match(notObject.problems.join("\n"), /agents 段不是对象/);
+    assert.equal(readFileSync(badAgents, "utf8"), JSON.stringify({ agents: [] }), "left exactly as it was");
+
+    // No package agents dir / no shipped file: reported, never a silent no-op.
+    const noSource = healMissingAgentSlots({ configPath: join(dir, "none.json"), agentsDir: null, roles: ["acceptance"], registry: REG });
+    assert.deepEqual(noSource.healed, []);
+    assert.match(noSource.problems.join("\n"), /没有可补的默认 slots/);
+
+    // Unwritable target (the parent path is a FILE): a problem line, never a throw.
+    writeFileSync(join(pkg, "goal-auditor.md"), "---\nname: goal-auditor\nmodel: claude-fable-5\nthinking: max\n---\n");
+    const blocker = join(dir, "blocker");
+    writeFileSync(blocker, "x", "utf8");
+    assert.doesNotThrow(() => {
+      const blocked = healMissingAgentSlots({ configPath: join(blocker, "nested.json"), agentsDir: pkg, roles: ["goal-auditor"], registry: REG });
+      assert.deepEqual(blocked.healed, []);
+      assert.match(blocked.problems.join("\n"), /写入失败/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startupAgentsCheck heals an unconfigured role and re-validates without touching a pin", () => {
+  const dir = mkdtempSync(join(tmpdir(), "startup-agents-"));
+  try {
+    const pkg = join(dir, "pkg");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "acceptance.md"), "---\nname: acceptance\nmodel: claude-fable-5\nthinking: max\n---\n");
+    const cfg = join(dir, "review-gate.json");
+    writeFileSync(cfg, JSON.stringify({ agents: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } } }), "utf8");
+
+    const res = startupAgentsCheck({
+      agentsGlobal: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } },
+      agentsProject: undefined,
+      registry: REG,
+      configPath: cfg,
+      agentsDir: pkg,
+      validNames: ["reviewer", "acceptance"],
+    });
+    assert.deepEqual(res.healed, ["acceptance"]);
+    assert.deepEqual(res.healProblems, []);
+    assert.equal(res.checks.reviewer.ok, true, "the user's pinned role still passes");
+    assert.equal(res.checks.acceptance.ok, true, "the healed role passes on the re-run");
+
+    // A role the user pinned to something UNRESOLVABLE is never overwritten:
+    // the heal is for gaps, and the refusal that follows is the user's to fix.
+    const badCfg = join(dir, "bad.json");
+    const bad = startupAgentsCheck({
+      agentsGlobal: { reviewer: { auto: false, slots: ["anthropic/claude-nonexistent:max"] } },
+      agentsProject: undefined,
+      registry: REG,
+      configPath: badCfg,
+      agentsDir: pkg,
+      validNames: ["reviewer"],
+    });
+    assert.deepEqual(bad.healed, []);
+    assert.equal(bad.checks.reviewer.ok, false);
+    assert.equal(existsSync(badCfg), false, "a bad pin is never rewritten — or even created");
+
+    // A fully configured layer touches nothing at all.
+    const healthyCfg = join(dir, "healthy.json");
+    const healthyText = JSON.stringify({ agents: { acceptance: { auto: false, slots: ["anthropic/claude-fable-5:max"] } } });
+    writeFileSync(healthyCfg, healthyText, "utf8");
+    const healthy = startupAgentsCheck({
+      agentsGlobal: { acceptance: { auto: false, slots: ["anthropic/claude-fable-5:max"] } },
+      agentsProject: undefined,
+      registry: REG,
+      configPath: healthyCfg,
+      agentsDir: pkg,
+      validNames: ["acceptance"],
+    });
+    assert.deepEqual(healthy.healed, []);
+    assert.equal(healthy.checks.acceptance.ok, true);
+    assert.equal(readFileSync(healthyCfg, "utf8"), healthyText, "no gap ⇒ no write");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -251,7 +251,7 @@ commit message）与 `scripts/scan-test-labels.cjs`（L6 的测试标签扫描�
 
 ### 域 3：judge 会话与审查协议（2026-09-04 起：pane 模型）
 
-judge（reviewer / quality-auditor / adviser / goal-auditor）是**独立 pane 里的交互 pi**，归 opener
+judge（reviewer / quality-auditor / adviser / goal-auditor / acceptance）是**独立 pane 里的交互 pi**，归 opener
 所有（项目经理 → 子会话 → review，plan review 由项目经理自开；跨级调用一律
 fail-closed）：`session-factory.ts` 开 pane（**全仓唯一入口**：split → 登记 → 装饰 →
 等分 → 投递核实，与编排子会话同一条路径；argv 全部复用 `orchestrator-tmux.ts`，颜色标题复用
@@ -483,7 +483,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | --- | --- | --- |
 | `hooks/` | L3 纵深防御：`pre-commit`（薄壳：环境清理 + 布局 fail-closed + 单次 exec `scripts/pre-commit-check.cjs`，全链校验在那边）、`pre-push`（同一套 + full lane 要求）、`commit-msg`（AI 署名 + L5 英文，覆盖编辑器里写的 message） | 新增一条**离开 pi 也必须成立**的检查；bash 写成，不能 import TypeScript |
 | `scripts/` | 跑得起来的执行体：`precommit-runner.mjs`（确定性质量门）、`precommit-plan.mjs`（纯规划，可单测，含负载自适应并发）、`precommit-cache.mjs`（按输入摘要缓存每步）、`precommit-config.mjs`（读 `.pi/review-gate.json` 的 precommit 段）、`pre-commit-check.cjs`（2026-09-08：钩子全链单进程入口，进程内复用下面三个）、`compute-fingerprint.cjs`（钩子用的指纹，镜像 `lib/fingerprint.ts`）、`check-staged-divergence.cjs`（导出 `runMain` 供进程内复用）、`scan-test-labels.cjs`（L6，导出 `main(repo)`）、`install-git-hooks.sh`、`install-package.mjs` | **新增一条 precommit 检查**（改 runner + plan）；新增钩子要用的、不能依赖 TypeScript 的逻辑（CJS/MJS） |
-| `agents/` | 五个角色定义：`reviewer`、`quality-auditor`、`adviser`、`goal-auditor`、`arbiter`。frontmatter 是模型链、thinking、工具集的**单一事实源** | **新增或调整一个 judge 角色**：先改这里的 md，模型链由 `lib/model-config.ts` 渲染/校验 |
+| `agents/` | 六个角色定义：`reviewer`、`quality-auditor`、`adviser`、`goal-auditor`、`arbiter`、`acceptance`。frontmatter 是模型链、thinking、工具集的**单一事实源** | **新增或调整一个 judge 角色**：先改这里的 md，模型链由 `lib/model-config.ts` 渲染/校验 |
 | `skills/` | 随包分发给 pi 的技能（`package.json` 的 `files` 含 `skills/`，pi 直接从包里加载，因此写在这里就等于全局可用——**不要**再往 `~/.pi/agent/skills/` 手抄副本，那会漂移）。只有一条：`skills/review-loop` 描述审查循环怎么跑 | **收录判据（2026-09-05 用户定，删掉三条不合格的之后立的界）**：skill 只写**环境事实**——这个仓库需要哪些必备依赖、怎么把它跑起来、基本现状与结构约定，也就是**门禁不会注入、而新来的人不知道就会踩坑**的东西。不进 skill 的三类：① 门禁自己的规则与流程（它每轮都自己注入，写成 skill 是重复，且会随门禁改动安静过期）；② 为门禁缺陷发明的绕行办法（那是待办清单上的一条缺陷，不是知识——缺陷修好后没人回来删它，它就从避坑指南变成误导）；③ 只对某一轮成立的排查过程 |
 
 ---
@@ -759,6 +759,6 @@ test 名称，同一个文件后面跟着的名称都归它。零个是正常情
 ### 7.4 这张表的边界（诚实说明）
 
 它**不是穷尽的**：`extensions/review-gate.ts` 近九千行的注释级复述只抽查过、
-`agents/*.md` 四个角色正文彼此之间没做交叉比对、`docs/rounds/*.md` 作为历史
+`agents/*.md` 各角色正文彼此之间没做交叉比对、`docs/rounds/*.md` 作为历史
 存档一律不比对。发现新的一对就往 7.1 / 7.2 加一行——加行时顺手确认引用格式，
 `test/copy-map.test.ts` 会替你核对名称是否真实存在。

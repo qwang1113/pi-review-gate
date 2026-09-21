@@ -83,7 +83,7 @@ import {
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { armingFromFacts, couldReconcile, reconcileArming } from "../lib/gate-arming.ts";
 import { planCheckpointSweep } from "../lib/checkpoint-sweep.ts";
-import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
+import { defaultProjectConfig, globalConfigPath, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { hostEditorFallback, hostReasonEditor, editorTextOf, REASON_EDITOR_BACK, type CustomDialogHost } from "../lib/reason-editor.ts";
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
@@ -645,7 +645,7 @@ import {
   parseModelSpec,
   resolvePackageAgentsDir,
   ensureAgentFilesPresent,
-  validateAgentsForStartup,
+  startupAgentsCheck,
 } from "../lib/model-config.ts";
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
 import {
@@ -13565,16 +13565,33 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // gate off explicitly).
     if (state.taskMode !== "normal") {
       try {
-        const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-        const checks = validateAgentsForStartup(map, loadRegistry(), KNOWN_AGENTS);
+        // ONE call: validate every role, self-heal the roles NO layer declares
+        // (merged into ~/.pi/review-gate.json, gaps only), validate again.
+        // Adding a role to KNOWN_AGENTS used to brick every session whose config
+        // predates it — the session could not even start to be told to run the
+        // installer. The ordering lives in lib/model-config.ts, where it is
+        // testable; this site only says where the config and registry live.
+        const { checks, healed, healProblems } = startupAgentsCheck({
+          agentsGlobal: projectConfig.agentsGlobal,
+          agentsProject: projectConfig.agentsProject,
+          registry: loadRegistry(),
+          configPath: globalConfigPath(),
+          agentsDir: resolvePackageAgentsDir(),
+        });
+        if (healed.length > 0) {
+          log(`self-healed missing agent slots into ${globalConfigPath()}: ${healed.join(", ")}`);
+        }
         const bad = Object.entries(checks).filter(([, c]) => c && !c.ok);
         if (bad.length > 0) {
           const details = bad.map(([name, c]) => `- ${name}: ${c?.reason ?? "未知原因"}`).join("\n");
+          const healNote = healProblems.length > 0
+            ? `\n启动自愈也没能补上（原因如下）：\n${healProblems.map((p) => `- ${p}`).join("\n")}`
+            : "";
           return {
             systemPrompt:
               systemPrompt +
               `\n\n## REVIEW-GATE: 配置错误，会话无法启动\n` +
-              `角色模型配置不完整 —— 以下角色无法获得可派发的模型链：\n${details}\n` +
+              `角色模型配置不完整 —— 以下角色无法获得可派发的模型链：\n${details}${healNote}\n` +
               `\n请修复 ~/.pi/review-gate.json（或运行安装脚本重建默认配置）后重开会话。` +
               `\n在配置修复前，本会话拒绝执行任何工作（ship 命令仍被拦截）。`
           };

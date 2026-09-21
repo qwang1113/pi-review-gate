@@ -45,7 +45,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { AgentsConfigMap } from "./model-config.ts";
-import { extractFrontmatterChain, resolvePackageAgentsDir, splitThinkingSuffix } from "./model-config.ts";
+import { defaultSlotsFromRoleText, resolvePackageAgentsDir } from "./model-config.ts";
 import { UNTRUSTED_DATA_RULE } from "./untrusted-data.ts";
 /**
  * The shared judge protocol — THE embedded copy (see F5 above; test
@@ -156,6 +156,7 @@ export const JUDGE_ROLES: readonly string[] = Object.freeze([
   "quality-auditor",
   "adviser",
   "goal-auditor",
+  "acceptance",
 ]);
 
 /**
@@ -264,43 +265,17 @@ export function modelChainFor(agents: AgentsConfigMap, role: string, repoRoot: s
   const roleFile = resolveRoleFile(repoRoot, role, home);
   if (!roleFile) return [];
   try {
-    const chain = extractFrontmatterChain(readFileSync(roleFile, "utf8"));
-    if (!chain?.model) return [];
-    const fallback = defaultThinking(roleFile);
-    // Frontmatter models are bare ids ("claude-fable-5"); pi --model resolves
-    // bare ids only when unique, so pin the package's own provider family when
-    // none is written. A spec that already carries its own level keeps it —
-    // the level is per-model (a rendered chain writes `:xhigh` on one slot and
-    // `:max` on the next), and appending the default again would render
-    // `…:max:max`, which resolves to nothing.
-    return [chain.model, ...chain.fallback].map((spec) => pinModelSpec(spec, fallback));
+    // The built-in chain is read by the SAME helper the startup self-heal uses
+    // (`defaultSlotsFromRoleText`, lib/model-config.ts): bare ids are pinned to
+    // the package's provider family there, per-slot thinking suffixes are kept,
+    // and a role that deploys here can never disagree with the slots the heal
+    // writes into the user's config.
+    return defaultSlotsFromRoleText(readFileSync(roleFile, "utf8")) ?? [];
   } catch { /* fall through */ }
   // NO BUILT-IN DEFAULT (user requirement 2026-08-30). A role without a
   // resolvable chain is a configuration error — the caller fails closed
   // (the startup hard check is what surfaces it to the user).
   return [];
-}
-
-/** `bare-id` → `anthropic/bare-id:<level>`; a spec with its own level is kept. */
-function pinModelSpec(spec: string, fallbackThinking: string): string {
-  const trimmed = spec.trim();
-  if (!trimmed) return trimmed;
-  const { base, thinking } = splitThinkingSuffix(trimmed);
-  const pinned = base.includes("/") ? base : `anthropic/${base}`;
-  return `${pinned}:${thinking ?? fallbackThinking}`;
-}
-
-function defaultThinking(roleFile: string): string {
-  try {
-    const text = readFileSync(roleFile, "utf8");
-    // Scoped to the frontmatter block — a body line "thinking: …" must not
-    // match (round-2 Nit).
-    const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
-    const m = /^thinking:\s*(\S+)\s*$/m.exec(fm ?? "");
-    return m?.[1] ?? "max";
-  } catch {
-    return "max";
-  }
 }
 
 export interface JudgeSpawnInput {

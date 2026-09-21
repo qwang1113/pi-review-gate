@@ -282,15 +282,22 @@ frontmatter in `agents/*.md` is the single source of truth and
 `lib/model-config.ts` renders/validates the chains:
 
 - **Strong tier — judging** (`reviewer`, `quality-auditor`, `adviser`,
-  `arbiter`, `goal-auditor`): `claude-fable-5` primary, fallback chain
-  `claude-opus-5`, `thinking: max`.
+  `arbiter`, `goal-auditor`, `acceptance`): `claude-fable-5` primary, fallback
+  chain `claude-opus-5`, `thinking: max`.
   `goal-auditor` is the dedicated pre-reviewer of the loop GOAL (read-only
   tools) whose verdict the gate records mechanically; `quality-auditor` is the
   pre-reviewer of the CODE, running in the SAME round as the functional reviewer
   (2026-09-16; one `judge_submit` starts both, and the cancel matrix decides who
   stops whom — `docs/execution-model.md` §「并行三方与取消矩阵」).
+  `acceptance` is the real-environment acceptance judge (2026-09-22): it does
+  not read the diff for quality — it starts the changed system for real, works
+  the loop goal's acceptance plan, compares the returned data and re-checks the
+  neighbouring paths the change could have broken. With no real execution
+  evidence it may not conclude READY, and it never exempts itself when real
+  acceptance is impossible — it reports that instead. The gate dispatches this
+  role; `judge_submit` never accepts the name.
   The L1/L2 execution tiers (`recon` / `fixer`) were retired — the gate
-  ships the five judging roles only. Read-only WORK roles are the other kind
+  ships the six judging roles only. Read-only WORK roles are the other kind
   (`agents.worker*`, 2026-09-21): NOT in `KNOWN_AGENTS`, not part of the
   session-start hard check, and an unconfigured one fails at DISPATCH time
   instead — see §Read-only exploration.
@@ -306,13 +313,20 @@ frontmatter in `agents/*.md` is the single source of truth and
 **Model configuration layer (per-agent slots, NO built-in defaults).**
 Every role's model chain comes from the `agents` section of `review-gate.json` —
 there is no silent built-in fallback. `scripts/install-package.mjs` writes a
-default 5-role `agents` section to `~/.pi/review-gate.json` when the file is
+default 6-role `agents` section to `~/.pi/review-gate.json` when the file is
 absent, and merges in ONLY the roles missing from an existing file (never
 overwrites a user's own pins). At session start the gate HARD-CHECKS every
-role (reviewer/quality-auditor/adviser/arbiter/goal-auditor): a missing entry, an
-empty slot list, or an unresolvable spec STOPS the session with the reason
-(`validateAgentsForStartup`). The launch resolver returns an EMPTY chain for an
-unconfigured role and the dispatch fails closed instead of spawning a default.
+role (reviewer/quality-auditor/adviser/arbiter/goal-auditor/acceptance) and,
+BEFORE refusing, SELF-HEALS the roles NO layer declares: it merges the
+package's own default chain (from `agents/<role>.md`) into
+`~/.pi/review-gate.json` and checks again — gaps only, a role the user pinned
+is untouched, and a chain the current registry cannot resolve is not written
+(2026-09-22, `healMissingAgentSlots`; the ordering is `startupAgentsCheck`).
+A role still unconfigured after that, an empty slot list, or an unresolvable
+spec STOPS the session with the reason (`validateAgentsForStartup`), and the
+heal's own failures ride along in that message. The launch resolver returns an
+EMPTY chain for an unconfigured role and the dispatch fails closed instead of
+spawning a default.
 
 - `agents.<name>.auto` — `false` uses `slots: [spec, ...]` (`slots[0]` =
   main model, rest = fallbacks). Every slot may carry its own `:thinking`
@@ -320,7 +334,8 @@ unconfigured role and the dispatch fails closed instead of spawning a default.
   thinking. `auto: true` keeps the upstream default chain as a shadow
   overlay (so a higher layer can shadow a lower layer's slot render), but
   the STARTUP check still requires an explicit slot list for every role —
-  an unconfigured role is an error, never a silent default.
+  an unconfigured role is refused, and the only thing that fills the gap is
+  the recorded self-heal above (never a silent per-dispatch default).
 - **Arbiter goes through the same config layer**: `agents.arbiter.slots[0]`
   is the arbiter model (project-config's legacy `arbiter.model` field is a
   fallback only). An unconfigured arbiter fails closed (GATE_WINS).

@@ -224,12 +224,16 @@ function registerCompanions() {
  */
 async function applyGlobalModelConfig() {
   try {
-  // ── DEFAULT AGENTS SECTION (user requirement 2026-08-30: NO built-in
-  // defaults — the config file must exist and name every role's slots).
+  // ── DEFAULT AGENTS SECTION. The config file must name every role's slots — a
+  // role WITHOUT a resolvable chain is refused at session start. Since
+  // 2026-09-22 the startup check also SELF-HEALS a role no layer declares by
+  // merging the package default into this same file (lib/model-config.ts
+  // healMissingAgentSlots), so this section is the fresh-install path of that
+  // rule, not the only way a role ever gets configured.
   //  - file ABSENT  → write the full default agents section (every role the
-  //    gate can dispatch: five judges plus the read-only worker preset).
-  //    overwrite a role the user already configured — that would silently
-  //    undo their pins on every upgrade).
+  //    gate can dispatch: six judges plus the read-only worker preset).
+  //  - file PRESENT → fill ONLY the roles missing from it — never overwrite a
+  //    role the user already configured (that would silently undo their pins).
   const cfgPath = join(homedir(), ".pi", "review-gate.json");
   const DEFAULT_AGENTS = {
     reviewer: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
@@ -240,6 +244,9 @@ async function applyGlobalModelConfig() {
     adviser: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
     arbiter: { auto: false, slots: ["onekey/gpt-5.6-sol:max"] },
     "goal-auditor": { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
+    // The real-environment acceptance judge: its own slot at the judging tier,
+    // dispatched by the gate (never named by the agent).
+    acceptance: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
     // READ-ONLY WORKERS (2026-09-21) — the pane-shaped successor to the
     // pi-subagents `Agent` tool. NOT part of the session-start hard check
     // (lib/model-config.ts `KNOWN_AGENTS`): this entry exists so a fresh
