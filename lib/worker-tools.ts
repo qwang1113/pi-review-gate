@@ -111,6 +111,20 @@ export function workerChannelTarget(openerId: string, workerId: string, home?: s
   return { orchestrationId: openerId, childId: `worker-${workerId}`, ...(home === undefined ? {} : { home }) };
 }
 
+/**
+ * WHERE AN EXISTING WORKER'S CHANNEL IS — read from its registry entry, never
+ * re-derived from this session's environment (reviewer P1, 2026-09-21).
+ *
+ * The opener's pane id changes on every restart, re-attach and handover, so a
+ * re-derived target points at a channel the worker never wrote to: its report
+ * lands where nobody looks and the caller waits on an empty file forever. The
+ * entry is the record of who opened it, so the entry is what answers.
+ */
+function workerTargetFor(deps: WorkerToolDeps, registry: WorkerRegistry, workerId: string): ChannelTarget {
+  const recorded = registry[workerId]?.openerId;
+  return workerChannelTarget(recorded ?? deps.openerId(), workerId, deps.channelHome());
+}
+
 /** Everything a worker has said that the opener has not consumed yet. */
 export interface WorkerProjection {
   /** The newest report on the channel, with the id used to dedupe it. */
@@ -162,17 +176,22 @@ export function projectWorkerChannel(io: ChannelIO, records: readonly ChannelRec
 }
 
 /** Read one worker's channel, tolerating a channel that does not exist yet. */
-function readWorkerChannel(deps: WorkerToolDeps, workerId: string): WorkerProjection {
-  const path = channelPathFor(...targetParts(deps, workerId));
+function readWorkerChannel(deps: WorkerToolDeps, registry: WorkerRegistry, workerId: string): WorkerProjection {
   try {
+    const path = channelPathFor(...targetParts(deps, registry, workerId));
     return projectWorkerChannel(deps.channelIO, readChannel(deps.channelIO, path).records);
   } catch {
     return { records: 0 };
   }
 }
 
-function targetParts(deps: WorkerToolDeps, workerId: string): [string, string, string | undefined] {
-  return [deps.openerId(), `worker-${workerId}`, deps.channelHome()];
+function targetParts(
+  deps: WorkerToolDeps,
+  registry: WorkerRegistry,
+  workerId: string,
+): [string, string, string | undefined] {
+  const target = workerTargetFor(deps, registry, workerId);
+  return [target.orchestrationId, target.childId, target.home];
 }
 
 /** Mint the next free worker id (`worker-1`, `worker-2`, …). */
@@ -217,8 +236,8 @@ export function registerWorkerTools(host: ToolHost, deps: WorkerToolDeps): void 
     description:
       "Give a piece of READ-ONLY work to a worker session in its own tmux pane — the pane-shaped replacement " +
       "for a background subagent. The worker runs the model configured for its role in ~/.pi/review-gate.json " +
-      "(`agents.worker*`, with its own `prompt`), cannot edit files (edit/write are excluded from its tool " +
-      "surface, so several workers can run at once without invalidating a recorded review), and reports back " +
+      "(`agents.worker*`, with its own `prompt`), cannot edit files or run commands (edit/write/bash are excluded " +
+      "from its tool surface, so several workers can run at once without invalidating a recorded review), and reports back " +
       "through `worker_wait`. Pass the SAME `workerId` to continue an existing worker: a living pane receives " +
       "the text as a message, a closed pane is re-opened with the same session id so the worker keeps its " +
       "context. Omit `workerId` and the gate mints one and tells you which.",
@@ -308,7 +327,7 @@ async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown
   // child uses, so it is read by the pane's own gate and cannot be truncated,
   // reordered or read as a dialog keypress.
   if (existing && deps.paneAlive(existing.paneId)) {
-    const target = workerChannelTarget(deps.openerId(), workerId, deps.channelHome());
+    const target = workerTargetFor(deps, registry, workerId);
     const instructId = newChannelId("wi", deps.now());
     appendRecord(deps.channelIO, target, {
       kind: "instruct",
@@ -380,6 +399,10 @@ async function openWorkerPane(
     register: (paneId) => {
       deps.saveRegistry(withWorker(deps.readRegistry(), {
         workerId: opts.workerId,
+        // RECORDED, not re-derived: this is the channel the worker will write
+        // its report to, and the only thing that keeps it reachable after the
+        // opener's pane (or session) changes.
+        openerId: deps.openerId(),
         role: opts.role,
         model: opts.model,
         paneId,
@@ -409,7 +432,7 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
   const started = deps.now();
   const seen = registry[workerId]?.reportedAt;
   for (;;) {
-    const projection = readWorkerChannel(deps, workerId);
+    const projection = readWorkerChannel(deps, registry, workerId);
     if (projection.question) {
       return reply(
         `review-gate: worker ${workerId} 在等你回答：\n\n${projection.question.title}\n` +
@@ -460,7 +483,8 @@ async function answerWorker(deps: WorkerToolDeps, params: Record<string, unknown
   if (!isWorkerId(workerId)) return fail(`review-gate: workerId "${workerId}" 不合法。`);
   const answer = String(params.answer ?? "").trim();
   if (!answer) return fail("review-gate: answer 不能为空。");
-  const projection = readWorkerChannel(deps, workerId);
+  const registry = deps.readRegistry();
+  const projection = readWorkerChannel(deps, registry, workerId);
   const requestId = typeof params.requestId === "string" ? params.requestId.trim() : projection.question?.requestId;
   if (!requestId) {
     return fail(
@@ -482,7 +506,7 @@ async function answerWorker(deps: WorkerToolDeps, params: Record<string, unknown
         { workerId, requestId },
       );
     }
-    appendRecord(deps.channelIO, workerChannelTarget(deps.openerId(), workerId, deps.channelHome()), {
+    appendRecord(deps.channelIO, workerTargetFor(deps, registry, workerId), {
       kind: "answer",
       from: "orchestrator",
       at: new Date(deps.now()).toISOString(),
@@ -491,7 +515,7 @@ async function answerWorker(deps: WorkerToolDeps, params: Record<string, unknown
     });
     return reply(`review-gate: 已回复 worker ${workerId}：${picked}`, { workerId, requestId, answer: picked });
   }
-  appendRecord(deps.channelIO, workerChannelTarget(deps.openerId(), workerId, deps.channelHome()), {
+  appendRecord(deps.channelIO, workerTargetFor(deps, registry, workerId), {
     kind: "answer",
     from: "orchestrator",
     at: new Date(deps.now()).toISOString(),

@@ -9835,7 +9835,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           return false;
         }
       },
-      openerId: () => process.env.TMUX_PANE?.trim() || "gate",
+      // STABLE OPENER IDENTITY, not the pane (reviewer P1, 2026-09-21):
+      // `TMUX_PANE` changes on every restart, re-attach and handover, and it is
+      // half of every worker channel path — so a worker dispatched before one
+      // of those would report into a file nobody reads and the caller would
+      // wait on an empty one. The session id survives all three (pi resumes
+      // the same transcript by it), which is what keeps a worker reachable.
+      openerId: () => state.sessionId?.trim() || "gate",
       repoRoot: () => activeRepoRoot.current,
       channelIO,
       channelHome: () => undefined,

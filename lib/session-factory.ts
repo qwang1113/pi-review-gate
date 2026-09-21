@@ -183,6 +183,13 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
       [WORKER_OPENER_ENV]: role.openerId,
       [WORKER_ID_ENV]: role.workerId,
       [WORKER_ROLE_ENV]: role.role,
+      // NOT loop (2026-09-21). A worker has no goal to negotiate, no round to
+      // submit and nothing to ship — it reads and reports — so telling it to
+      // classify itself into the full loop would hand it a machinery it cannot
+      // use (an unapproved-goal gate over a session that never asked for one).
+      // `explore` is the mode that already means "investigation, ship still
+      // blocked", which is exactly a worker's contract.
+      [GATE_MODE_ENV]: "explore",
     };
   }
   if (role.kind === "orchestration-child") {

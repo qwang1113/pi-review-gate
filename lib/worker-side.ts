@@ -17,8 +17,10 @@
  * content (the approval binds to a tree), and it is why orchestration children
  * in one repo each get their own checkout. A worker that could edit would put
  * an unsupervised writer in the middle of that contract. So the pane is opened
- * with `--exclude-tools edit,write` — the tool surface itself, not a rule the
- * worker is asked to obey.
+ * with `--exclude-tools edit,write,bash` — the tool surface itself, not a rule
+ * the worker is asked to obey — and `bash` is in that list because it writes
+ * too (`echo > f`, `sed -i`): leaving it in would have made "read-only" a
+ * nominal promise. See `buildWorkerPaneCommand` for what that costs.
  *
  * ── HOW IT SPEAKS ──
  *
@@ -87,7 +89,8 @@ export function buildWorkerSystemPrompt(opts: {
     `工作仓库：${opts.repoRoot}`,
     "",
     "## 工作方式",
-    "- 你**只能读**：`edit` / `write` 不在你的工具面里。需要改动的地方写进结论，不要动手。",
+    "- 你**只能读**：`read` / `grep` / `find` / `ls` 是你全部的工具 —— `edit`、`write`、`bash` 都不在。",
+    "- 需要跑命令（测试、git 历史）才能确定的事：把「需要跑什么、为什么」写进结论，让上级去跑；**不要猜**。",
     "- **一条消息里并行发多个读取** —— pi 会把同一条消息里的工具调用并行执行，一个工具调用就是一个完整来回。",
     "- 找证据，不要凭印象：每句「在哪里」都要能指到具体文件与行号。",
     "- 不确定就写清楚不确定在哪、你需要什么才能确定；**不要编**。",

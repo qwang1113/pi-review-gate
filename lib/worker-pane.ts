@@ -21,12 +21,25 @@
 
 import type { PaneRunResult } from "./session-factory.ts";
 
+/** The job a worker pane runs — the argv a runner executes. */
+export type WorkerPaneRunner = (argv: readonly string[]) => PaneRunResult;
+
 /** Repo-root-relative location of the worker registry (gate-excluded via `.pi/`). */
 export const WORKER_REGISTRY_RELPATH = ".pi/worker-sessions.json";
 
 /** One dispatched worker. Every field is needed to close or resume it. */
 export interface WorkerEntry {
   workerId: string;
+  /**
+   * WHO OWNS THIS WORKER'S CHANNEL — written at dispatch and read back from
+   * here afterwards, never re-derived from the environment (reviewer P1,
+   * 2026-09-21). Deriving it meant `TMUX_PANE`, which every restart, every
+   * re-attach and every handover changes: the worker's report would land on a
+   * channel nobody reads any more, and the caller would wait forever on an
+   * empty one. It is stored so the conversation survives the opener's pane
+   * changing under it.
+   */
+  openerId: string;
   /** The configured preset it was launched as (`worker`, `worker-recon`, …). */
   role: string;
   /** The model spec that was actually launched, for the record and the receipt. */
@@ -78,16 +91,17 @@ export function parseWorkerRegistry(raw: unknown): WorkerRegistry {
     if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
     const e = value as Record<string, unknown>;
     const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+    const openerId = str(e.openerId);
     const role = str(e.role);
     const model = str(e.model);
     const paneId = str(e.paneId);
     const sessionId = str(e.sessionId);
     const repoRoot = str(e.repoRoot);
     const createdAt = str(e.createdAt);
-    if (!role || !model || !paneId || !sessionId || !repoRoot || !createdAt) continue;
+    if (!openerId || !role || !model || !paneId || !sessionId || !repoRoot || !createdAt) continue;
     const reportedAt = str(e.reportedAt);
     out[id] = {
-      workerId: id, role, model, paneId, sessionId, repoRoot, createdAt,
+      workerId: id, openerId, role, model, paneId, sessionId, repoRoot, createdAt,
       ...(reportedAt === undefined ? {} : { reportedAt }),
     };
   }
@@ -113,13 +127,28 @@ export function withoutWorker(registry: WorkerRegistry, workerId: string): Worke
 /**
  * The argv a worker pane runs.
  *
- * IT DIFFERS FROM A JUDGE PANE IN EXACTLY ONE FLAG, and that flag is the
- * contract: `--exclude-tools edit,write` is present in both (a worker is
- * read-only, and the tool surface — not a rule — is what enforces it), and a
- * worker adds nothing else. No summarised brief, no `--system-prompt` from a
- * role file: the prompt is built by lib/worker-side.ts from the configured
- * preset, and the task arrives as pi's own `@file` message, so nothing the
- * user typed is ever quoted onto a command line.
+ * ── THE READ-ONLY SET IS THREE TOOLS WIDE, NOT TWO (reviewer P1, 2026-09-21) ──
+ *
+ * `--exclude-tools edit,write` is what every reviewing role in this gate gets,
+ * and for a JUDGE it is enough to call the pane read-only in the sense that
+ * matters there: a judge does not write, and its `bash` exists to VERIFY (run
+ * the test, check the build) — the gate's own arbitration proxy, which must not
+ * run anything, appends `bash` to the same list (`PROXY_ISOLATION_FLAGS`,
+ * lib/arbitration.ts).
+ *
+ * A WORKER'S contract is stronger than a judge's — the user asked for sessions
+ * that cannot write at all, which is what makes several of them safe to run
+ * beside the main agent — and `edit`/`write` alone cannot deliver it: `bash`
+ * writes files (`echo > f`, `sed -i`, `git checkout --`), so a worker that kept
+ * it could quietly invalidate the very review binding this design exists to
+ * protect. Excluding it is what makes the promise true rather than nominal.
+ *
+ * WHAT A WORKER LOSES, said plainly: it cannot run commands. Read, grep, find
+ * and ls are the whole surface, which covers what a worker is FOR (read these
+ * files, list those call sites, tell me which of them parse the config). A
+ * question that genuinely needs a command run — a test, a git history — is the
+ * main session's to answer, and a worker that hit one writes down that it did
+ * instead of guessing.
  */
 export function buildWorkerPaneCommand(opts: {
   sessionId: string;
@@ -132,7 +161,7 @@ export function buildWorkerPaneCommand(opts: {
   return [
     opts.piBin ?? "pi",
     "--no-skills",
-    "--exclude-tools", "edit,write",
+    "--exclude-tools", "edit,write,bash",
     "--system-prompt", opts.sysPromptPath,
     "--model", opts.model,
     "--session-dir", opts.sessionDir,
@@ -145,6 +174,3 @@ export function buildWorkerPaneCommand(opts: {
 export function workerSessionDirName(workerId: string): string {
   return `rg-worker-${workerId}`;
 }
-
-/** Unused import guard: the runner type is part of this module's contract. */
-export type WorkerPaneRunner = (argv: readonly string[]) => PaneRunResult;

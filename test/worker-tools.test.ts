@@ -48,8 +48,16 @@ function workerPreset(extra: Record<string, unknown> = {}) {
   return { auto: false, slots: ["onekey/gpt-5.6-sol:high"], source: "global" as const, ...extra };
 }
 
-function makeWorld(opts: { agents?: AgentsConfigMap; alive?: boolean; paneOpens?: boolean } = {}) {
-  const io = memoryChannelIO(() => NOW);
+function makeWorld(opts: {
+  agents?: AgentsConfigMap;
+  alive?: boolean;
+  paneOpens?: boolean;
+  /** This session's opener identity — the channel owner for NEW workers. */
+  openerId?: string;
+  /** Share one channel store with another world (a restart/handover). */
+  io?: ReturnType<typeof memoryChannelIO>;
+} = {}) {
+  const io = opts.io ?? memoryChannelIO(() => NOW);
   const files = new Map<string, string>();
   let registry: WorkerRegistry = {};
   const opened: Array<{ command: readonly string[]; role: unknown }> = [];
@@ -67,7 +75,7 @@ function makeWorld(opts: { agents?: AgentsConfigMap; alive?: boolean; paneOpens?
       return { ok: true, paneId: "%42" };
     },
     killPane: (paneId) => { killed.push(paneId); return true; },
-    openerId: () => "%1",
+    openerId: () => opts.openerId ?? "%1",
     repoRoot: () => "/repo",
     channelIO: io,
     channelHome: () => undefined,
@@ -93,6 +101,7 @@ function makeWorld(opts: { agents?: AgentsConfigMap; alive?: boolean; paneOpens?
   return {
     deps, io, files, tools, opened, killed, logs,
     registry: () => registry,
+    saveRegistry: (next: WorkerRegistry) => { registry = next; },
     call: (name: string, params: Record<string, unknown> = {}) => tools.get(name)!.execute("t", params),
     text: (r: ToolReply) => r.content.map((c) => c.text).join("\n"),
   };
@@ -136,8 +145,8 @@ test("a worker pane is READ-ONLY by its tool surface, and resumes by session id"
   assert.equal(world.opened.length, 1);
   const command = world.opened[0]!.command;
   assert.deepEqual(command.slice(command.indexOf("--exclude-tools"), command.indexOf("--exclude-tools") + 2),
-    ["--exclude-tools", "edit,write"],
-    "read-only is the tool surface, not a rule the worker is asked to obey");
+    ["--exclude-tools", "edit,write,bash"],
+    "read-only must be TRUE, not nominal: `bash` writes files too, so it belongs in the deny list beside edit/write");
   assert.ok(command.includes("--session-id"));
   assert.equal(command[command.indexOf("--session-id") + 1], workerSessionId("worker-1"),
     "the session id is DERIVED from the worker id — that is what makes resume work");
@@ -202,7 +211,6 @@ test("worker_wait returns the report, and does not deliver the same one twice", 
   const world = makeWorld();
   await world.call("worker_submit", { task: "列出 X 的调用点" });
   appendWorkerReport(world.io, workerChannelTarget("%1", "worker-1"), { result: "共 3 处：a.ts:10、b.ts:22、c.ts:7" });
-
   const first = await world.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
   assert.match(world.text(first), /共 3 处/);
   assert.equal((first.details as { kind?: string })?.kind, "report");
@@ -294,17 +302,39 @@ test("nextWorkerId never reuses a registered id", () => {
 });
 
 test("the registry drops a malformed entry instead of guessing a pane", () => {
+  const good = { openerId: "s1", role: "worker", model: "m", paneId: "%9", sessionId: "s", repoRoot: "/repo", createdAt: "t" };
   const parsed = parseWorkerRegistry({
     workers: {
-      good: { role: "worker", model: "m", paneId: "%9", sessionId: "s", repoRoot: "/repo", createdAt: "t" },
-      missingPane: { role: "worker", model: "m", sessionId: "s", repoRoot: "/repo", createdAt: "t" },
-      "../evil": { role: "worker", model: "m", paneId: "%1", sessionId: "s", repoRoot: "/repo", createdAt: "t" },
+      good,
+      missingPane: { ...good, paneId: undefined },
+      missingOpener: { ...good, openerId: undefined },
+      "../evil": good,
     },
   });
   assert.deepEqual(Object.keys(parsed), ["good"],
-    "a bad entry would make worker_close aim a kill at somebody else's session");
+    "a bad entry would make worker_close aim a kill at somebody else's session, or a wait read somebody else's channel");
   assert.deepEqual(parseWorkerRegistry(JSON.parse(serializeWorkerRegistry(parsed))), parsed, "round trip");
   assert.deepEqual(parseWorkerRegistry("not an object"), {});
+});
+
+// The opener id in an entry is what locates the worker's CHANNEL, and it is
+// read back from the entry rather than re-derived from this session — deriving
+// it from `TMUX_PANE` meant every restart/re-attach/handover silently moved the
+// channel, and the report landed where nobody was waiting (reviewer P1,
+// 2026-09-21).
+test("a worker stays reachable after the opener's own identity changes", async () => {
+  const first = makeWorld();
+  await first.call("worker_submit", { task: "看一下" });
+  assert.equal(first.registry()["worker-1"]?.openerId, "%1", "the opener is recorded at dispatch");
+  appendWorkerReport(first.io, workerChannelTarget("%1", "worker-1"), { result: "结论" });
+
+  // SAME registry and SAME channel store, but this session's opener identity
+  // is different now (a restarted pane, a handover).
+  const second = makeWorld({ openerId: "%999", io: first.io });
+  second.saveRegistry(first.registry());
+  const reply = await second.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
+  assert.match(second.text(reply), /结论/,
+    "the channel is found through the RECORDED opener — re-deriving it reads an empty file");
 });
 
 test("the projection answers the two questions a caller has", () => {
