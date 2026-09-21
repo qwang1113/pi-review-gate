@@ -615,6 +615,7 @@ import {
   type ChoiceUi,
 } from "../lib/choice-dialog.ts";
 import {
+  MULTI_UNAVAILABLE,
   buildMultiChoiceBox,
   defaultMultiChoiceKey,
   renderMultiChoice,
@@ -5584,8 +5585,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // tripped the breaker and was reported as a provider failure).
       //
       // Only a REAL answer counts: a dismissed box (undefined) is not the user
-      // engaging with the gate.
-      if (answer !== undefined) lastUserInteractionAt = new Date().toISOString();
+      // engaging with the gate — and neither is the checklist sentinel, which
+      // says the opposite of “the user did something”: NO host could draw that
+      // question (quality round P2, 2026-09-22).
+      if (answer !== undefined && answer !== MULTI_UNAVAILABLE) {
+        lastUserInteractionAt = new Date().toISOString();
+      }
       return answer;
     }, signal);
 

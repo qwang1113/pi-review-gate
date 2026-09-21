@@ -604,8 +604,9 @@ test("L2 STALL BREAKER: an answered gate dialog is motion — a live negotiation
   // `askChoice` is the ONE dialog path, and the breaker reads the stamp as an
   // EVENT (after the previous observation), never as a grace period.
   const askChoice = windowOf("async function askDialog(", "\n  }", "askDialog");
-  assert.match(askChoice, /if \(answer !== undefined\) lastUserInteractionAt = new Date\(\)\.toISOString\(\)/,
-    "the dialog path must record the exchange (dismissed boxes do not count)");
+  assert.match(askChoice, /if \(answer !== undefined && answer !== MULTI_UNAVAILABLE\)[\s\S]{0,90}?lastUserInteractionAt = new Date\(\)\.toISOString\(\)/,
+    "the dialog path must record the exchange — a dismissed box does not count, and neither does the checklist sentinel " +
+    "(it means NO host could draw the question: quality round P2, 2026-09-22)");
   const start = SRC.indexOf(LOOP_SETTLED);
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const facts = SRC.slice(SRC.indexOf("const motion = {", start), breakerAt);

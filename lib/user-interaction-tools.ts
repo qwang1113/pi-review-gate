@@ -331,6 +331,15 @@ export async function doAskUser(
    * said out loud in the reply.
    */
   let unrenderableChecklist = false;
+  /**
+   * WHICH QUESTIONS NO HOST COULD DRAW — kept HERE, not in a renderer's return
+   * value (quality round P2, 2026-09-22): whatever a renderer returns is taken
+   * as the human's answer by `askThroughChannel` and written into the
+   * request-settled record, so returning the sentinel settled the question as
+   * ANSWERED with a NUL-bearing string — and took it off the project manager's
+   * receipt, which is the one place an answer could still have come from.
+   */
+  const unrenderable = new Set<number>();
 
   // ── THE WHOLE INTERVIEW GOES UP FIRST (2026-09-06) ──
   //
@@ -526,11 +535,15 @@ export async function doAskUser(
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped) return undefined;
         const answered = await askWithBacks(index, signal);
-        // NOTHING WAS SHOWN TRAVELS BACK AS THE SENTINEL, never as `undefined`
-        // (quality round P2, 2026-09-22): `undefined` out of a renderer means
-        // “the user closed the box”, and the caller below settles that as a
-        // stop. The sentinel instead settles as one unanswered question.
-        if (answered !== MULTI_UNAVAILABLE) anyDialog = true;
+        // NOTHING WAS SHOWN STAYS HERE: the renderer answers with the same
+        // `undefined` a closed box gives (so the channel settles it as
+        // dismissed, never as an answer nobody gave), and the FACT that no host
+        // could draw it is recorded in `unrenderable` for the loop below.
+        if (answered === MULTI_UNAVAILABLE) {
+          unrenderable.add(index);
+          return undefined;
+        }
+        anyDialog = true;
         return answered;
       },
       // A broken dialog is silence, never an answer — and, now that these
@@ -545,12 +558,12 @@ export async function doAskUser(
     // question was never shown, so it settles as UNANSWERED — and, unlike a
     // closed box, it does NOT stop the rest of the interview. A host without
     // custom components can still ask every radio question behind it.
-    const unrenderable = outcome.answer === MULTI_UNAVAILABLE;
-    if (unrenderable) unrenderableChecklist = true;
+    const skipped = unrenderable.has(firstIndex + offset);
+    if (skipped) unrenderableChecklist = true;
     else if (outcome.answer !== undefined) anyDialog = true;
-    const resolution = settleAnswer(firstIndex + offset, q, unrenderable ? undefined : outcome.answer, {
+    const resolution = settleAnswer(firstIndex + offset, q, skipped ? undefined : outcome.answer, {
       interrupted: outcome.by === "interrupted",
-      ...(unrenderable ? { unavailable: true } : {}),
+      ...(skipped ? { unavailable: true } : {}),
     });
     if (resolution.stop) stopped = true;
     // OPENING THE NEXT GATE IS ALSO HOW A STOPPED INTERVIEW SETTLES ITS

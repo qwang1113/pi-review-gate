@@ -104,10 +104,12 @@ export function isWorkerRoleName(name: string): boolean {
  * path fails SILENTLY, which is precisely how a bootstrap deadlock survives.
  *
  * Evaluated lazily at CALL time, never at module scope, and defensive about
- * `import.meta.url`: scripts/install-package.mjs imports this module as a
- * base64 DATA URL, where `fileURLToPath` throws. A module-level evaluation
- * would take the whole postinstall render down with it; null lets each caller
- * fall back to the sourceDir it already knows.
+ * `import.meta.url`: `scripts/install-package.mjs` stages this module into a
+ * temporary directory and imports it by file URL (a `data:` URL has no base,
+ * so a relative import such as `./atomic-write.ts` would not resolve there),
+ * and `fileURLToPath` throws in any context where there is no file on disk. A
+ * module-level evaluation would take the whole postinstall render down with
+ * it; null lets each caller fall back to the sourceDir it already knows.
  *
  * `baseDir` exists so the PROBE ORDER itself is testable against temp dirs
  * (production callers pass nothing and get this module's own directory); it is

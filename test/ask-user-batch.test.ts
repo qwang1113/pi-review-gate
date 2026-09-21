@@ -476,6 +476,13 @@ test("a checklist no host can draw goes back to the agent — it is NOT a closed
   assert.match(reply, /\[ \] A\. 预检/, "checkbox rows, so the agent carries the shape with it");
   assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["unanswered"]);
   assert.equal(h.armed.at(-1), false, "the loop still pauses: the user owes an answer");
+  // AND THE SENTINEL NEVER LEAVES THIS PROCESS (reviewer P2, 2026-09-22): a
+  // renderer's return value IS the human's answer on the wire, so carrying it
+  // out would settle the question as answered — with a NUL-bearing string —
+  // and drop it off the project manager's receipt.
+  for (const settled of settlesOn(h.io)) {
+    assert.doesNotMatch(settled.answer ?? "", /\u0000/, "nothing sentinel-shaped may reach the channel");
+  }
 });
 
 test("a batch with one unrenderable checklist still asks the rest — and says which half was lost", async () => {
