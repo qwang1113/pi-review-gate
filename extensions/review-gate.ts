@@ -13047,10 +13047,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     //
     // THE ONE NON-ENFORCED REQUEST THAT IS HONOURED: a WORKER pane asking for
     // `explore` (2026-09-21). That is not a relaxation of the consent rule it
-    // sits beside — the worker's tool surface IS its constraint (it runs
-    // without edit/write/bash), so `explore` is not a looser starting point
-    // for it, it is the only honest description of a session that reads and
-    // reports. Left undecided it behaved as loop (fail-closed), and the
+    // sits beside — a worker runs without `edit`/`write` and its `bash` is
+    // bound to read-only use (prompt + the ship block `explore` keeps), so
+    // `explore` is not a looser starting point for it, it is the only honest
+    // description of a session that reads and reports. Left undecided it behaved as loop (fail-closed), and the
     // measured cost was a worker being told to negotiate a loop goal it has no
     // way to negotiate: after `worker_report` the gate injected
     // `[REVIEW_GATE_RESUME]` and continued it 1/15, 2/15, … — a full LLM turn

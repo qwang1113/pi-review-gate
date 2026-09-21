@@ -144,7 +144,8 @@ export interface GateStateWriteSkip {
  *    sidecar's `sessionId` became `rg-reviewer-…` and its `taskMode` fell from
  *    `orchestrator` to none — the reviewing session quietly overwriting the
  *    state of the session being reviewed.
- *  - a WORKER is read-only by construction (no edit/write/bash) and reports
+ *  - a WORKER cannot edit (no edit/write on its surface; its `bash` is bound
+ *    to read-only use by its prompt and by the ship block) and reports
  *    through its channel. Same exposure for the same reason: it is opened
  *    without `RG_STATE_VARIANT`, so its gate would write the opener's file.
  *    Until 2026-09-21 it was saved only by being REFUSED by the exclusivity

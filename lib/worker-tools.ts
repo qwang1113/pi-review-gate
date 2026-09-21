@@ -52,6 +52,7 @@ import {
   type WorkerRegistry,
 } from "./worker-pane.ts";
 import { buildWorkerSystemPrompt, buildWorkerTaskDocument } from "./worker-side.ts";
+import { pollUntil } from "./poll-wait.ts";
 
 /** How long `worker_wait` polls before reporting the state it found. */
 export const WORKER_WAIT_DEFAULT_MS = 300_000;
@@ -305,8 +306,9 @@ export function registerWorkerTools(host: ToolHost, deps: WorkerToolDeps): void 
     description:
       "Give a piece of READ-ONLY work to a worker session in its own tmux pane — the pane-shaped replacement " +
       "for a background subagent. The worker runs the model configured for its role in ~/.pi/review-gate.json " +
-      "(`agents.worker*`, with its own `prompt`), cannot edit files or run commands (edit/write/bash are excluded " +
-      "from its tool surface, so several workers can run at once without invalidating a recorded review), and reports back " +
+      "(`agents.worker*`, with its own `prompt`), cannot edit files (`edit`/`write` are excluded from its tool " +
+      "surface) and may run READ-ONLY commands only — `git log`, `rg`, a test — so several workers can run at " +
+      "once without invalidating a recorded review. It reports back " +
       "through `worker_wait`. Pass the SAME `workerId` to continue an existing worker: a living pane receives " +
       "the text as a message, a closed pane is re-opened with the same session id so the worker keeps its " +
       "context. Omit `workerId` and the gate mints one and tells you which.",
@@ -332,12 +334,13 @@ export function registerWorkerTools(host: ToolHost, deps: WorkerToolDeps): void 
       "Wait for a worker's next message and return it: its report (the result) or a question it is blocked " +
       "on. Message-driven — it returns as soon as either lands, not when the worker exits, and a question " +
       "stays pending until `worker_answer` retires it. `timeoutMs: 0` is an instant snapshot. A worker that " +
-      "has already reported does not report twice: the same report is not delivered again unless it is new.",
+      "has already reported does not report twice: the same report is not delivered again unless it is new. " +
+      "The wait is INTERRUPTIBLE: ESC, or simply typing a message, returns it immediately and consumes nothing.",
     parameters: Type.Object({
       workerId: Type.Optional(Type.String({ description: "Which worker. Required once you have more than one." })),
       timeoutMs: Type.Optional(Type.Number({ description: "How long to wait (default 300000, 0 = snapshot)." })),
     }),
-    execute: (_id, params) => waitWorker(deps, params),
+    execute: (_id, params, signal) => waitWorker(deps, params, signal),
   });
 
   host.registerTool({
@@ -581,7 +584,27 @@ async function openWorkerPane(
   return { ok: true, paneId: opened.paneId };
 }
 
-async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>): Promise<ToolReply> {
+/**
+ * What one probe of a worker's channel found. `kind: "pending"` is the only
+ * observation the wait keeps polling on; every other one ENDS it.
+ *
+ * The probe is READ-ONLY on purpose (2026-09-22): the consumed-report cursor
+ * moves in the reply path, after the loop, so an interrupted wait cannot mark
+ * a report delivered that nobody ever saw.
+ */
+interface WorkerWaitObservation {
+  kind: "question" | "report" | "gone" | "pending";
+  question?: NonNullable<WorkerProjection["question"]>;
+  report?: NonNullable<WorkerProjection["report"]>;
+  /** Its pane is gone; `deliveredReportId` names the report already handed over, if any. */
+  gone?: { closed: boolean; paneId?: string; deliveredReportId?: string };
+}
+
+async function waitWorker(
+  deps: WorkerToolDeps,
+  params: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<ToolReply> {
   const registry = deps.readRegistry();
   const asked = typeof params.workerId === "string" ? params.workerId.trim() : "";
   const workerId = asked || onlineWorkerId(deps, registry);
@@ -594,11 +617,31 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
     ? Math.max(0, params.timeoutMs)
     : WORKER_WAIT_DEFAULT_MS;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => { setTimeout(r, ms); }));
-  const started = deps.now();
-  let seen = registry[workerId]?.reportedAt;
+  const seen = registry[workerId]?.reportedAt;
 
   // The two things a worker channel can carry, as replies — shared by the
   // probe below and by the last look taken before declaring it gone.
+  // How this worker's pane READS right now — shared by every "nothing to hand
+  // over" reply, and computed at reply time because liveness is a reading.
+  const paneLine = (): string => {
+    const entry = registry[workerId];
+    if (!entry) return "它不在注册表里 —— 可能已经被 close 过。\n";
+    if (entry.paneId === undefined) return "它的 pane 已经关过（登记还在，所以可以接着用）。\n";
+    // "存活，但没有任何新消息" — the aliveness is a READING; "still working"
+    // was an assertion this side cannot make (quality P2).
+    return `pane ${entry.paneId}：${ownedPaneAlive(deps, entry) ? "存活，但没有任何新消息" : "已不在"}。\n`;
+  };
+
+  const abortedReply = (why: "signal" | "user-input", waitedMs: number): ToolReply =>
+    reply(
+      `review-gate: 等 worker ${workerId} 的调用被打断了（${
+        why === "user-input" ? "有人在跟你说话" : "ESC"
+      }，等了 ${Math.round(waitedMs / 1000)}s）——它还没有交给你的新消息。\n` +
+      paneLine() +
+      "**什么都没有被消费**：它已经写下的、以及之后才交的报告，下次 `worker_wait` 照样读得到。",
+      { workerId, kind: "aborted", alive: ownedPaneAlive(deps, registry[workerId]), abortReason: why },
+    );
+
   const questionReply = (q: NonNullable<WorkerProjection["question"]>): ToolReply =>
     reply(
       `review-gate: worker ${workerId} 在等你回答：\n\n${q.title}\n` +
@@ -608,24 +651,22 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
       { workerId, requestId: q.requestId, kind: "question" },
     );
   const reportReply = (r: NonNullable<WorkerProjection["report"]>): ToolReply => {
+    // THE CURSOR MOVES HERE AND NOWHERE ELSE (2026-09-22): only a report this
+    // call actually HANDS OVER may be marked consumed. An interrupted wait
+    // (ESC, or the user typing) returns without touching it, so the next
+    // `worker_wait` still delivers whatever landed.
     const current = registry[workerId];
     if (current) deps.saveRegistry(withWorker(registry, { ...current, reportedAt: r.reportId }));
-    // THE CONSUMED-FLAG IS WHAT MAKES THE NEXT PROBE HONEST (reviewer P1,
-    // 2026-09-21): it moves in memory too, so a report this call already handed
-    // over cannot be handed over again by a later probe in the same wait — and
-    // the `gone` verdict below can say WHY it is not delivering anything
-    // instead of silently stepping over a report it decided not to repeat.
-    seen = r.reportId;
     return reply(
       `review-gate: worker ${workerId} 交活了：\n\n${r.text}`,
       { workerId, reportId: r.reportId, kind: "report" },
     );
   };
 
-  for (;;) {
+  const probe = async (): Promise<WorkerWaitObservation> => {
     const projection = readWorkerChannel(deps, registry, workerId);
-    if (projection.question) return questionReply(projection.question);
-    if (projection.report && projection.report.reportId !== seen) return reportReply(projection.report);
+    if (projection.question) return { kind: "question", question: projection.question };
+    if (projection.report && projection.report.reportId !== seen) return { kind: "report", report: projection.report };
     // A WORKER THAT CANNOT SPEAK AGAIN IS NEWS TOO (reviewer P2, 2026-09-21):
     // `paneId === undefined` means its pane was CLOSED — nothing will ever
     // write to that channel again — and a dead pane means the same. The old
@@ -648,43 +689,78 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
       // of reporting "nothing" a few milliseconds before the answer arrives.
       await sleep(WORKER_WAIT_POLL_MS * 4);
       const after = readWorkerChannel(deps, registry, workerId);
-      if (after.question) return questionReply(after.question);
-      if (after.report && after.report.reportId !== seen) return reportReply(after.report);
-      const closed = entry.paneId === undefined;
-      // SAY WHICH KIND OF "NOTHING" THIS IS (reviewer P1, 2026-09-21): a
-      // channel whose newest report was ALREADY handed over is a different
-      // fact from one that never carried a report, and stepping over the first
-      // silently reads as "it never said anything".
-      const already = after.report !== undefined;
-      return reply(
-        `review-gate: worker ${workerId} ${closed ? "的 pane 已经关掉了" : `的 pane（${entry.paneId}）已不在`}，` +
-        (already
-          ? `它最后那份报告（${after.report!.reportId}）本次已交付过 —— 没有更新的内容。\n`
+      if (after.question) return { kind: "question", question: after.question };
+      if (after.report && after.report.reportId !== seen) return { kind: "report", report: after.report };
+      return {
+        kind: "gone",
+        gone: {
+          closed: entry.paneId === undefined,
+          // SAY WHICH KIND OF "NOTHING" THIS IS (reviewer P1, 2026-09-21): a
+          // channel whose newest report was ALREADY handed over is a different
+          // fact from one that never carried a report, and stepping over the
+          // first silently reads as "it never said anything".
+          ...(after.report === undefined ? {} : { deliveredReportId: after.report.reportId }),
+          ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
+        },
+      };
+    }
+    return { kind: "pending" };
+  };
+
+  // AN ALREADY-CANCELLED CALL DOES NOT EVEN LOOK. Probing first would be
+  // harmless for reading, but it could DELIVER a report — and a report handed
+  // to a call the host has already cancelled is a report nobody reads, with
+  // its consumed-cursor moved. Returning here keeps the channel untouched.
+  if (signal?.aborted) return abortedReply("signal", 0);
+
+  // THE LOOP IS THE GATE'S OWN SKELETON (lib/poll-wait.ts, 2026-09-22). The
+  // hand-written `for(;;) await sleep(500)` that used to live here ignored the
+  // host's `signal` and had nobody watching for a user message, so a wait was
+  // unreachable for its whole 300s budget — measured. `pollUntil` races both
+  // interrupts against every probe and every sleep, exactly as `judge_wait`
+  // and `orchestrator_wait` do.
+  const waited = timeoutMs === 0
+    // A ZERO BUDGET IS "look once", not "race a 0ms timer against the probe":
+    // through pollUntil that race is winnable by the timer, and the snapshot
+    // would come back as "not one probe finished".
+    ? { observation: await probe(), aborted: false, waitedMs: 0, abortReason: undefined }
+    : await pollUntil<WorkerWaitObservation>({
+      probe,
+      isDone: (o) => o.kind !== "pending",
+      budgetMs: timeoutMs,
+      pollMs: WORKER_WAIT_POLL_MS,
+      now: deps.now,
+      sleep,
+      ...(signal === undefined ? {} : { signal }),
+    });
+
+  const observation = waited.observation;
+  // DELIVERY BEATS THE INTERRUPT LABEL: a message that arrived in the same
+  // tick the user spoke is still a message, and `pollUntil` reports `aborted`
+  // from the end state regardless of what ended the loop.
+  if (observation?.kind === "question") return questionReply(observation.question!);
+  if (observation?.kind === "report") return reportReply(observation.report!);
+  if (observation?.kind === "gone") {
+    const gone = observation.gone!;
+    return reply(
+      `review-gate: worker ${workerId} ${gone.closed ? "的 pane 已经关掉了" : `的 pane（${gone.paneId}）已不在`}，` +
+        (gone.deliveredReportId !== undefined
+          ? `它最后那份报告（${gone.deliveredReportId}）本次已交付过 —— 没有更新的内容。\n`
           : "现在通道里没有新消息。\n") +
-        "（如果它在被杀之前写过报告，那份仍在通道里：再 `worker_wait` 一次就能读到 —— 这里不会丢弃任何东西。）\n" +
-        `接着用：\`worker_submit({ workerId: "${workerId}", task: … })\`（同一 session id 重开，它还记得上次读过的）；` +
-        `不用了就 \`worker_close({ workerId: "${workerId}" })\`。`,
-        { workerId, kind: "gone", alive: false, closed },
-      );
-    }
-    if (timeoutMs === 0 || deps.now() - started >= timeoutMs) {
-      const entry = registry[workerId];
-      const alive = ownedPaneAlive(deps, entry);
-      return reply(
-        `review-gate: worker ${workerId} 还没有新消息（等了 ${Math.round((deps.now() - started) / 1000)}s）。\n` +
-        (entry
-          ? (entry.paneId === undefined
-              ? "它的 pane 已经关过（登记还在，所以可以接着用）。\n"
-              // "存活，但没有任何新消息" — the aliveness is a READING; "still
-              // working" was an assertion this side cannot make (quality P2).
-              : `pane ${entry.paneId}：${alive ? "存活，但没有任何新消息" : "已不在"}。\n`)
-          : "它不在注册表里 —— 可能已经被 close 过。\n") +
-        `再等一次，或 \`worker_close({workerId: "${workerId}"})\` 收掉它。`,
-        { workerId, kind: "timeout", alive },
-      );
-    }
-    await sleep(WORKER_WAIT_POLL_MS);
+      "（如果它在被杀之前写过报告，那份仍在通道里：再 `worker_wait` 一次就能读到 —— 这里不会丢弃任何东西。）\n" +
+      `接着用：\`worker_submit({ workerId: "${workerId}", task: … })\`（同一 session id 重开，它还记得上次读过的）；` +
+      `不用了就 \`worker_close({ workerId: "${workerId}" })\`。`,
+      { workerId, kind: "gone", alive: false, closed: gone.closed },
+    );
   }
+
+  if (waited.aborted) return abortedReply(waited.abortReason ?? "signal", waited.waitedMs);
+  return reply(
+    `review-gate: worker ${workerId} 还没有新消息（等了 ${Math.round(waited.waitedMs / 1000)}s）。\n` +
+    paneLine() +
+    `再等一次，或 \`worker_close({workerId: "${workerId}"})\` 收掉它。`,
+    { workerId, kind: "timeout", alive: ownedPaneAlive(deps, registry[workerId]) },
+  );
 }
 
 /** The only worker a `worker_wait` may default to: the one that is running. */

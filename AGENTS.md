@@ -690,8 +690,12 @@ child processes — see the review protocol above.)
 
 The worker family is how you spawn one: `worker_submit({task})` opens a
 READ-ONLY tmux pane (the same pane machinery the judges use, `--exclude-tools
-edit,write`), `worker_wait` collects its report or the question it is blocked
-on, `worker_answer` answers that question, and `worker_close` frees the pane —
+edit,write`; `bash` IS available since 2026-09-22 — a worker that cannot run
+`git log`, `rg` or a test investigates nothing — and its read-only use is held
+by the worker prompt plus the gate's own ship block, not by the tool surface),
+`worker_wait` collects its report or the question it is blocked
+on — it is interruptible, so ESC or simply typing ends it at once and consumes
+nothing — `worker_answer` answers that question, and `worker_close` frees the pane —
 the conversation survives, so submitting under the same `workerId` again
 continues the same session instead of re-explaining the background. It
 replaced `npm:@tintinweb/pi-subagents` (the `Agent` / `SubagentWorkflow`

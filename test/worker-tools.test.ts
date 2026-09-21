@@ -6,9 +6,11 @@
  *
  *  - a worker that cannot be configured must FAIL rather than run on some
  *    default model nobody chose;
- *  - the pane must be read-only by its tool surface (`--exclude-tools
+ *  - the pane must have no WRITING tools on its surface (`--exclude-tools
  *    edit,write`), because that is what makes several workers safe to run at
- *    once;
+ *    once — `bash` is deliberately NOT on that list (2026-09-22: a worker that
+ *    cannot run `git log` or a test investigates nothing);
+ *  - a wait must be INTERRUPTIBLE, and must consume nothing when interrupted;
  *  - a second submit to a LIVING worker is a message, not a second worker;
  *  - a closed worker's next submit RESUMES the same session, which is the
  *    whole reason closing one is allowed to save screen space.
@@ -101,7 +103,9 @@ function makeWorld(opts: {
     log: (m) => logs.push(m),
   };
 
-  const tools = new Map<string, { execute: (id: string, params: Record<string, unknown>) => Promise<ToolReply> }>();
+  const tools = new Map<string, {
+    execute: (id: string, params: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolReply>;
+  }>();
   const host = {
     registerTool: (def: { name: string; execute: unknown }) => {
       tools.set(def.name, def as never);
@@ -113,7 +117,8 @@ function makeWorld(opts: {
     deps, io, files, tools, opened, killed, logs,
     registry: () => registry,
     saveRegistry: (next: WorkerRegistry) => { registry = next; },
-    call: (name: string, params: Record<string, unknown> = {}) => tools.get(name)!.execute("t", params),
+    call: (name: string, params: Record<string, unknown> = {}, signal?: AbortSignal) =>
+      tools.get(name)!.execute("t", params, signal),
     text: (r: ToolReply) => r.content.map((c) => c.text).join("\n"),
   };
 }
@@ -156,8 +161,10 @@ test("a worker pane is READ-ONLY by its tool surface, and resumes by session id"
   assert.equal(world.opened.length, 1);
   const command = world.opened[0]!.command;
   assert.deepEqual(command.slice(command.indexOf("--exclude-tools"), command.indexOf("--exclude-tools") + 2),
-    ["--exclude-tools", "edit,write,bash"],
-    "read-only must be TRUE, not nominal: `bash` writes files too, so it belongs in the deny list beside edit/write");
+    ["--exclude-tools", "edit,write"],
+    "the WRITING tools are off the surface — and `bash` is not one of them (2026-09-22): " +
+    "a worker that cannot run `git log`, `rg` or a test cannot investigate anything, " +
+    "so bash rides on the prompt's read-only rule plus the gate's own ship block");
   assert.ok(command.includes("--session-id"));
   assert.equal(command[command.indexOf("--session-id") + 1], workerSessionId("worker-1"),
     "the session id is DERIVED from the worker id — that is what makes resume work");
@@ -285,6 +292,46 @@ test("worker_wait returns the report, and does not deliver the same one twice", 
   const second = await world.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
   assert.equal((second.details as { kind?: string })?.kind, "timeout",
     "a report already consumed is not re-delivered — otherwise every later wait re-reports the same answer");
+});
+
+test("an ABORTED wait returns at once, says so, and consumes nothing", async () => {
+  // Measured in prime (session 01a0c3ae-…, 2026-09-22): `worker_wait` ran a
+  // hand-written `for(;;) await sleep(500)` and its registration dropped the
+  // host's `signal`, so ESC did nothing and the call blocked out its full 300s.
+  const world = makeWorld();
+  await world.call("worker_submit", { task: "去看看" });
+  appendWorkerReport(world.io, workerChannelTarget("%1", "worker-1"), { result: "没人读到的结论" });
+
+  const reply = await world.call(
+    "worker_wait",
+    { workerId: "worker-1", timeoutMs: 300_000 },
+    AbortSignal.abort(),
+  );
+  assert.equal((reply.details as { kind?: string })?.kind, "aborted", world.text(reply));
+  assert.match(world.text(reply), /打断/, "the reply says WHY it came back empty-handed");
+  assert.equal(world.registry()["worker-1"]?.reportedAt, undefined,
+    "an interrupted wait must not advance the consumed-report cursor — nothing was handed over");
+
+  // …and the proof that nothing was consumed: the next wait still delivers it.
+  const next = await world.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
+  assert.equal((next.details as { kind?: string })?.kind, "report");
+  assert.match(world.text(next), /没人读到的结论/);
+});
+
+test("an abort MID-WAIT ends it too — and still consumes nothing", async () => {
+  // The realistic shape: the call is already blocking when the user gives up.
+  // `pollUntil` races the signal against every sleep, so this must not run out
+  // the 300s budget either.
+  const controller = new AbortController();
+  const world = makeWorld({ onSleep: () => controller.abort() });
+  await world.call("worker_submit", { task: "去看看" });
+  const reply = await world.call(
+    "worker_wait",
+    { workerId: "worker-1", timeoutMs: 300_000 },
+    controller.signal,
+  );
+  assert.equal((reply.details as { kind?: string })?.kind, "aborted", world.text(reply));
+  assert.equal(world.registry()["worker-1"]?.reportedAt, undefined);
 });
 
 test("worker_wait surfaces a QUESTION with its options, and worker_answer retires it", async () => {
