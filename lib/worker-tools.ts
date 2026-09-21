@@ -47,7 +47,6 @@ import {
   isWorkerId,
   withWorker,
   workerSessionId,
-  withoutWorker,
   type WorkerEntry,
   type WorkerRegistry,
 } from "./worker-pane.ts";
@@ -365,7 +364,7 @@ async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown
   // the worker as a message, through the same instruct channel an orchestration
   // child uses, so it is read by the pane's own gate and cannot be truncated,
   // reordered or read as a dialog keypress.
-  if (existing && deps.paneAlive(existing.paneId)) {
+  if (existing?.paneId !== undefined && deps.paneAlive(existing.paneId)) {
     const target = workerTargetFor(deps, registry, workerId);
     const instructId = newChannelId("wi", deps.now());
     appendRecord(deps.channelIO, target, {
@@ -534,7 +533,7 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
     // gone and whose channel holds no unconsumed report cannot produce anything
     // else, and saying so NOW is what "message-driven" is supposed to mean.
     const entry = registry[workerId];
-    if (entry && !deps.paneAlive(entry.paneId)) {
+    if (entry?.paneId !== undefined && !deps.paneAlive(entry.paneId)) {
       return reply(
         `review-gate: worker ${workerId} 的 pane（${entry.paneId}）已不在，通道里也没有未消费的报告 —— 它不会再有新消息了。\n` +
         `接着用：\`worker_submit({ workerId: "${workerId}", task: … })\`（同一 session id 重开，它还记得上次读过的）；` +
@@ -544,11 +543,15 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
     }
     if (timeoutMs === 0 || deps.now() - started >= timeoutMs) {
       const entry = registry[workerId];
-      const alive = entry ? deps.paneAlive(entry.paneId) : false;
+      const alive = entry?.paneId !== undefined ? deps.paneAlive(entry.paneId) : false;
       return reply(
         `review-gate: worker ${workerId} 还没有新消息（等了 ${Math.round((deps.now() - started) / 1000)}s）。\n` +
         (entry
-          ? `pane ${entry.paneId}：${alive ? "存活，仍在干活" : "已不在"}。\n`
+          ? (entry.paneId === undefined
+              ? "它的 pane 已经关过（登记还在，所以可以接着用）。\n"
+              // "存活，但没有任何新消息" — the aliveness is a READING; "still
+              // working" was an assertion this side cannot make (quality P2).
+              : `pane ${entry.paneId}：${alive ? "存活，但没有任何新消息" : "已不在"}。\n`)
           : "它不在注册表里 —— 可能已经被 close 过。\n") +
         `再等一次，或 \`worker_close({workerId: "${workerId}"})\` 收掉它。`,
         { workerId, kind: "timeout", alive },
@@ -562,7 +565,10 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
 function onlineWorkerId(deps: WorkerToolDeps, registry: WorkerRegistry): string | undefined {
   const ids = Object.keys(registry);
   if (ids.length === 1) return ids[0];
-  const live = ids.filter((id) => deps.paneAlive(registry[id]!.paneId));
+  const live = ids.filter((id) => {
+    const paneId = registry[id]!.paneId;
+    return paneId !== undefined && deps.paneAlive(paneId);
+  });
   return live.length === 1 ? live[0] : undefined;
 }
 
@@ -621,21 +627,33 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
   if (!entry) {
     return reply(`review-gate: worker ${workerId} 不在注册表里（已经关过，或从没派过）。`, { workerId, closed: false });
   }
-  // OWNERSHIP BEFORE THE KILL (reviewer P2, 2026-09-21). The registry entry
-  // names a pane id, and pane ids are handed out by a tmux SERVER: if the
-  // server restarted, `%42` may now be somebody else's session, and
-  // `kill-pane` would close theirs. The judge registry records the server for
-  // exactly this reason; a mismatch is refused rather than resolved.
+  // FAIL-CLOSED OWNERSHIP (reviewer P1, 2026-09-21). A recorded server we
+  // cannot RE-READ is not a licence to kill: an unreadable identity is missing
+  // information, and after a tmux restart that pane id may belong to somebody
+  // else's session entirely. Only an exact match proceeds.
   const tmuxServer = deps.tmuxServer?.();
-  if (entry.tmuxServer !== undefined && tmuxServer !== undefined && entry.tmuxServer !== tmuxServer) {
+  if (entry.tmuxServer !== undefined && entry.tmuxServer !== tmuxServer) {
     return fail(
-      `review-gate: 拒绝关闭 worker ${workerId} —— 它登记在 tmux server ${entry.tmuxServer}，当前是 ${tmuxServer}。` +
-      "那个 pane id 现在可能属于别的会话，关它就是误伤。登记已保留，请人工确认后处理。",
+      `review-gate: 拒绝关闭 worker ${workerId} —— 它登记在 tmux server ${entry.tmuxServer}，` +
+      `当前读到的是 ${tmuxServer ?? "读不到"}。那个 pane id 现在可能属于别的会话，关它就是误伤。` +
+      "登记已保留，请人工确认后处理。",
       { workerId, closed: false },
     );
   }
+  if (entry.paneId === undefined) {
+    return reply(`review-gate: worker ${workerId} 的 pane 已经关过了（登记还在，同一 id 可以接着用）。`, {
+      workerId, closed: true, paneId: undefined,
+    });
+  }
   const killed = deps.killPane(entry.paneId);
-  deps.saveRegistry(withoutWorker(registry, workerId));
+  // THE ENTRY STAYS (reviewer P1, 2026-09-21). Closing a pane releases SCREEN
+  // SPACE, not the conversation: the channel owner, the session id and the
+  // report cursor are exactly what a later `worker_submit` needs to resume the
+  // same session. Dropping the entry meant a resume opened a NEW channel under
+  // the current session's identity (the old reports unreachable) with the
+  // consumed-report cursor reset (the newest one re-delivered).
+  const { paneId: _closedPane, ...kept } = entry;
+  deps.saveRegistry(withWorker(registry, kept));
   return reply(
     `review-gate: worker ${workerId} 的 pane ${entry.paneId} ${killed ? "已关闭" : "已不在（视为关闭）"}。\n` +
     "它的 transcript 留在磁盘上：再用同一个 `workerId` 派活会接着同一会话（`" + entry.sessionId + "`）。",

@@ -268,15 +268,25 @@ test("worker_answer refuses an ambiguous answer rather than guessing", async () 
 // close / resume
 // ---------------------------------------------------------------------------
 
-test("close frees the pane and the next submit RESUMES the same session", async () => {
+test("close frees the pane, and the next submit RESUMES the same session", async () => {
   const world = makeWorld();
   await world.call("worker_submit", { task: "第一次" });
   const closed = await world.call("worker_close", { workerId: "worker-1" });
   assert.equal(closed.isError, undefined, world.text(closed));
   assert.deepEqual(world.killed, ["%42"]);
-  assert.equal(world.registry()["worker-1"], undefined, "a closed worker is not addressable as a pane");
+  // THE ENTRY STAYS (reviewer P1, 2026-09-21): closing releases SCREEN SPACE,
+  // not the conversation — the channel owner, the session id and the report
+  // cursor are what a later resume needs.
+  assert.equal(world.registry()["worker-1"]?.paneId, undefined, "the pane is released");
+  assert.equal(world.registry()["worker-1"]?.sessionId, workerSessionId("worker-1"),
+    "…while the entry (and the channel it names) is kept");
+  assert.equal(world.registry()["worker-1"]?.openerId, "%1");
 
-  // The pane is gone (paneAlive false) ⇒ the same id re-opens the SAME session.
+  // Closing twice is a no-op, not a second kill.
+  const again = await world.call("worker_close", { workerId: "worker-1" });
+  assert.equal(again.isError, undefined);
+  assert.deepEqual(world.killed, ["%42"], "no second kill-pane for an already-closed worker");
+
   const world2 = makeWorld({ alive: false });
   await world2.call("worker_submit", { task: "第一次", workerId: "worker-1" });
   const resumed = await world2.call("worker_submit", { task: "接着上次那个问题，换一批文件", workerId: "worker-1" });
@@ -287,6 +297,27 @@ test("close frees the pane and the next submit RESUMES the same session", async 
       "both dispatches ran the SAME session id — the worker keeps its context");
   }
   assert.match(world2.text(resumed), /接着用/, "and the receipt says the context carried over");
+});
+
+test("a resume after close keeps the channel AND the consumed-report cursor", async () => {
+  // The two things `withoutWorker` would have thrown away (reviewer P1).
+  const first = makeWorld();
+  await first.call("worker_submit", { task: "第一次" });
+  appendWorkerReport(first.io, workerChannelTarget("%1", "worker-1"), { result: "第一份结论" });
+  const consumed = await first.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
+  assert.match(first.text(consumed), /第一份结论/);
+  await first.call("worker_close", { workerId: "worker-1" });
+
+  // A DIFFERENT session resumes it: the entry's recorded opener is what locates
+  // the channel, and its cursor is what keeps the old report from being
+  // delivered as if it had just landed.
+  const second = makeWorld({ alive: false, openerId: "%999", io: first.io });
+  second.saveRegistry(first.registry());
+  await second.call("worker_submit", { task: "接着上次", workerId: "worker-1" });
+  assert.equal(second.registry()["worker-1"]?.openerId, "%1", "the channel owner survives the close");
+  const again = await second.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
+  assert.doesNotMatch(second.text(again), /第一份结论/,
+    "an already-consumed report is not re-delivered after a close+resume");
 });
 
 test("close on an unknown worker is a no-op, not an error", async () => {

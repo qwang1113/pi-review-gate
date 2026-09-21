@@ -57,7 +57,16 @@ export interface WorkerEntry {
   role: string;
   /** The model spec that was actually launched, for the record and the receipt. */
   model: string;
-  paneId: string;
+  /**
+   * The pane this worker currently runs in, or `undefined` when its pane has
+   * been CLOSED (2026-09-21, reviewer P1).
+   *
+   * Closing a pane is not forgetting the worker: the entry keeps the channel
+   * owner, the session id and the report cursor, which is exactly what a later
+   * `worker_submit` with the same id needs to RESUME the same conversation
+   * instead of forking a new one on a new channel.
+   */
+  paneId?: string;
   /**
    * The tmux SERVER this pane id came from, when the caller knows it.
    *
@@ -115,15 +124,18 @@ export function parseWorkerRegistry(raw: unknown): WorkerRegistry {
     const openerId = str(e.openerId);
     const role = str(e.role);
     const model = str(e.model);
-    const paneId = str(e.paneId);
     const sessionId = str(e.sessionId);
     const repoRoot = str(e.repoRoot);
     const createdAt = str(e.createdAt);
-    if (!openerId || !role || !model || !paneId || !sessionId || !repoRoot || !createdAt) continue;
+    // `paneId` is OPTIONAL since 2026-09-21: a closed worker keeps its entry
+    // (channel owner, session id, report cursor) with no pane.
+    if (!openerId || !role || !model || !sessionId || !repoRoot || !createdAt) continue;
+    const paneId = str(e.paneId);
     const reportedAt = str(e.reportedAt);
     const tmuxServer = str(e.tmuxServer);
     out[id] = {
-      workerId: id, openerId, role, model, paneId, sessionId, repoRoot, createdAt,
+      workerId: id, openerId, role, model, sessionId, repoRoot, createdAt,
+      ...(paneId === undefined ? {} : { paneId }),
       ...(reportedAt === undefined ? {} : { reportedAt }),
       ...(tmuxServer === undefined ? {} : { tmuxServer }),
     };
@@ -141,7 +153,15 @@ export function withWorker(registry: WorkerRegistry, entry: WorkerEntry): Worker
   return { ...registry, [entry.workerId]: entry };
 }
 
-/** Drop a worker WITHOUT mutating the input (a closed pane is not addressable). */
+/**
+ * Drop a worker WITHOUT mutating the input.
+ *
+ * NO LONGER USED BY `worker_close` (2026-09-21, reviewer P1): closing a pane
+ * releases screen space, not the conversation, so the entry stays with its
+ * pane cleared. Kept exported because forgetting a worker completely is still
+ * a thing a caller may need (a registry the user asks to reset), and the
+ * operation is one line — but it must never be the close path again.
+ */
 export function withoutWorker(registry: WorkerRegistry, workerId: string): WorkerRegistry {
   const { [workerId]: _gone, ...rest } = registry;
   return rest;
