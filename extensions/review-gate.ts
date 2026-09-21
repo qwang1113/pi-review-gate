@@ -3473,11 +3473,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       children: open,
       livePanes,
       io: channelIO,
-      // THE SAME CHANNEL ROOT `orchestrator_wait` READS (2026-09-22). Omitting
-      // it left the background timer reading the real agent home while the
-      // wait read the host's — two answers to "is anyone waiting for a reply",
-      // and the timer's is the one that gets injected into the manager's
-      // transcript as 「子会话需要你」.
+      // THE SAME CHANNEL ROOT `orchestrator_wait` READS (2026-09-22). The two
+      // agree today only because this host happens to provide no channel home,
+      // so both fall back to the agent home — a coincidence, not a guarantee:
+      // the wait passes `deps.channelHome()` and this read did not, so the
+      // moment a host binds one, the timer's 「子会话需要你」 injection and the
+      // receipt the manager checks it against would read different directories.
       ...(orchestratorDeps.channelHome() === undefined ? {} : { home: orchestratorDeps.channelHome()! }),
       at: Date.now(),
     });

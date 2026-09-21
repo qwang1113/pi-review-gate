@@ -190,12 +190,38 @@ async function doWait(
     // — the probe is already here, so the screen never lags the receipt.
     refreshPaneLabels(deps, snapshot);
 
-    // THE FACT FIRST (2026-09-22): a question that is unanswered RIGHT NOW
-    // ends this wait, before anything memory-gated gets a say — and it is
-    // remembered BY REQUEST, so neither the background timer's consumption of
-    // the state memory nor the absence of a state CHANGE can hide it.
+    // The event rules carry a memory across polls, and it lives in the
+    // sidecar rather than in this closure: a wait that rebuilt it would see
+    // every state as "changed" and re-ring the same question forever.
+    //
+    // IT IS CONSUMED ON EVERY PROBE, INCLUDING THE ONES THAT RETURN BELOW.
+    // The background timer injects 「子会话需要你」 from this same memory, so a
+    // probe that returned without draining it would leave the timer to ring a
+    // second time about the dialog this call is already handing over — one
+    // question, two announcers (quality round P2).
+    const decided = decideSupervisionEvents(snapshot, deps.supervisionMemory(), deps.now());
+    deps.saveSupervisionMemory(decided.memory);
+    // A wait scoped to ONE child reports only that child's events; its
+    // siblings' stay in the memory as un-reported and ring on the next call.
+    const scoped = childId ? decided.events.filter((e) => e.childId === childId) : decided.events;
+    // A `waiting-input` event is NOT a second announcement of the same
+    // question. The block below owns that news, on better terms (per request,
+    // from the first probe, immune to the other two consumers of this memory),
+    // and letting both speak would ring twice for one dialog.
+    const events = scoped.filter((e) => e.state !== "waiting-input");
+
+    // THE FACT, ahead of the manufactured events: a question that is
+    // unanswered RIGHT NOW ends this wait whatever any memory thinks is due,
+    // and it is remembered BY REQUEST — so neither another consumer's timing
+    // nor the absence of a state CHANGE can hide it.
+    //
+    // A DEAD child's question is not one anybody can answer, and a stalled
+    // child's gate is not listening either: there the headline is the corpse,
+    // which the event path names. Their requests are left out so the death is
+    // what ends this wait — and they are announced again if it comes back.
+    const troubled = new Set(snapshot.troubled.map((t) => t.child.id));
     const requests = dueRequests({
-      open: snapshot.requests,
+      open: snapshot.requests.filter((r) => !troubled.has(r.childId)),
       announced: deps.announcedRequests(),
       at: deps.now(),
       ...(childId ? { childId } : {}),
@@ -203,20 +229,6 @@ async function doWait(
     deps.saveAnnouncedRequests(requests.memory);
     if (requests.due.length > 0) return { pendingRequests: requests.due, paneAlive: true };
 
-
-    // The event rules carry a memory across polls, and it lives in the
-    // sidecar rather than in this closure: a wait that rebuilt it would see
-    // every state as "changed" and re-ring the same question forever.
-    const decided = decideSupervisionEvents(snapshot, deps.supervisionMemory(), deps.now());
-    deps.saveSupervisionMemory(decided.memory);
-    // A wait scoped to ONE child reports only that child's events; its
-    // siblings' stay in the memory as un-reported and ring on the next call.
-    const scoped = childId ? decided.events.filter((e) => e.childId === childId) : decided.events;
-    // A `waiting-input` event is NOT a second announcement of the same
-    // question. The block above already owns that news, on better terms (per
-    // request, from the first probe, immune to the other two consumers of the
-    // state memory), and letting both speak would ring twice for one dialog.
-    const events = scoped.filter((e) => e.state !== "waiting-input");
     if (events.length > 0) return { events, paneAlive: true };
 
     // F14 — an unreadable pane list is UNKNOWN liveness, never a death.

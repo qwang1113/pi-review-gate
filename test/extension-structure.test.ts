@@ -5469,9 +5469,10 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   assert.match(read, /superviseChildren\(\{/, "and that read is the supervisor module's");
   assert.match(read, /io: channelIO/, "over the channels, never a pane");
   // ONE TRUTH ABOUT "IS ANYONE WAITING FOR A REPLY" (2026-09-22). This read
-  // feeds the `[ORCHESTRATION] 子会话需要你` injection; `orchestrator_wait`'s
-  // receipt is built from the same module with the host's channel home passed
-  // in. Omitting it here pointed the two at different directories.
+  // feeds the `[ORCHESTRATION] 子会话需要你` injection and `orchestrator_wait`
+  // builds its receipt from the same module — but the wait passes
+  // `deps.channelHome()` and this one did not, so the two agreed only for as
+  // long as no host bound a channel home.
   assert.match(read, /channelHome\(\)/,
     "the timer must read the SAME channel root the wait receipt does");
   // …and the pane reading is the tool-kit's one implementation, rather than a

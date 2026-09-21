@@ -232,6 +232,13 @@ test("A: a question that is already hanging ends the wait on the first probe", a
   assert.equal((again.details as { done: boolean }).done, false,
     "the same question must not end a second wait one instant later");
   assert.match(replyText(again), /req-restate-1/, "block 2 still lists it — it is still open");
+
+  // ONE QUESTION, ONE ANNOUNCER (quality round P2): the probe drained the
+  // state memory on its way through, so the background timer — which injects
+  // 「子会话需要你」 from that same memory — has nothing to say about the dialog
+  // this wait just handed over.
+  const timer = decideSupervisionEvents(timerSnapshot(world), world.deps.supervisionMemory(), world.now());
+  assert.deepEqual(timer.events, [], "the timer must not ring a second time for one dialog");
 });
 
 test("A: a question the child has settled is no longer a reason to return", async () => {
@@ -244,6 +251,22 @@ test("A: a question the child has settled is no longer a reason to return", asyn
   const reply = await world.call("orchestrator_wait", { timeoutMs: 0 });
   assert.equal((reply.details as { done: boolean }).done, false, "an answered question is not news");
   assert.match(replyText(reply), /没有任何子会话在等回答/);
+});
+
+test("A: a dead child's open question does not hide the death", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  world.childAsks(childId, { requestId: "req-7", title: "confirm?", options: ["yes", "no"] });
+  // The pane goes away with the dialog still on the channel: nobody can
+  // answer it any more, and the corpse is the headline.
+  world.panes.get(world.runtime().children[0]!.paneId)!.alive = false;
+
+  const reply = await world.call("orchestrator_wait", { timeoutMs: 0 });
+  const details = reply.details as { done: boolean; reason: string };
+  assert.equal(details.done, true);
+  assert.notEqual(details.reason, "pending-request",
+    "answering a dead child is not the next action — recovering it is");
+  assert.match(replyText(reply), /pane 已消失/);
 });
 
 test("A': the background timer having consumed the re-report does not silence the wait", async () => {
