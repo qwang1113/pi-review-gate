@@ -674,6 +674,27 @@ export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
    */
   auditPassed(root: string, pending: PendingAudit): boolean;
   /**
+   * DID A RECORD FOR **THIS** ROUND LAND — evidence that survives the reclaim.
+   *
+   * The pair of writes a record makes (pending forgotten, cursor advanced) is
+   * the older evidence, and half of it lives in the JUDGE REGISTRY — which the
+   * round-end reclaim deletes (`judge_close` drops the row even when the kill
+   * fails). So from 2026-09-21 a round the WAIT recorded came back to this
+   * chain looking like a round nobody recorded: three consecutive plan audits
+   * PASSed, were written to the gate's state and its audit log, and were each
+   * reported to the project manager as `fail-closed` with no approval dialog
+   * and no way to converge (measured in prime, `.pi/review-gate-audit.log`
+   * 186-188; the same round swallowed a goal audit's findings whole).
+   *
+   * This asks the RECORD instead of the registry: is there a verdict bound to
+   * the content this round dispatched, stamped at or after this round started?
+   * Both halves are required — the content binding keeps another draft's
+   * record out, and the timestamp keeps an EARLIER round's record for
+   * IDENTICAL content (a resubmitted draft, which is the common case) from
+   * closing a round that has not reported yet.
+   */
+  recordedThisRound(root: string, pending: PendingAudit): boolean;
+  /**
    * The refusal text rebuilt FROM THE RECORD, for a round the wait settled.
    *
    * The recorded note only exists where the record was made, and under the
@@ -709,12 +730,22 @@ export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
  * pending entry it needs to pick a kind is exactly what a successful record
  * consumes, so a settled round comes back as `unknown` — indistinguishable
  * from "nothing was ever dispatched" (reviewer P0, 2026-09-05).
+ *
+ * AND THE CURSOR IS NO LONGER THERE TO READ (2026-09-21): recording a round
+ * now frees the judge's pane, and that close drops the registry row the cursor
+ * lives in — so a round the wait recorded arrives here with no entry at all,
+ * and the cursor half answers "nothing was recorded" for the one case it was
+ * written to detect. `recordedThisRound` is the same question asked of the
+ * RECORD, which no reclaim touches; the cursor stays as the cheaper check for
+ * the rounds whose entry is still alive, and neither may pass on its own
+ * without the pending entry having been consumed.
  */
 function roundClosedDuringWait(
-  deps: SettleAuditRoundDeps,
-  input: { judgeId: string; root: string; cursorBefore: string | undefined },
+  deps: RunAuditRoundDeps,
+  input: { judgeId: string; root: string; cursorBefore: string | undefined; pending: PendingAudit },
 ): boolean {
   if (deps.pendingAudit(input.root) !== undefined) return false;
+  if (deps.recordedThisRound(input.root, input.pending)) return true;
   const cursorNow = deps.judgeEntry(input.judgeId)?.lastReportId;
   return cursorNow !== undefined && cursorNow !== input.cursorBefore;
 }
@@ -784,7 +815,7 @@ export async function runAuditRound(
     // read. (That was already true before this engine existed: the goal chain
     // recorded inside its wait and always fell back to the label.)
     let note: string | undefined;
-    if (!roundClosedDuringWait(deps, { judgeId, root, cursorBefore })) {
+    if (!roundClosedDuringWait(deps, { judgeId, root, cursorBefore, pending: input.pending })) {
       const settled = await settleAuditRound(deps, { judgeId, root });
       if (settled.status !== "recorded") {
         // A miss already carries the kind's own fail-closed sentence, naming
