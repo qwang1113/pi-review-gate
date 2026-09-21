@@ -71,6 +71,25 @@ reviewer over the WHOLE change:
   round with no code at all (docs/data only, or the empty exit-goal round), and
   a re-submission whose HEAD already carries a quality READY.
 
+- **验收轮是完成时刻的第六个 judge，由门禁自己派（2026-09-22，L9）.** 它不是
+  `judge_submit` 的产物：本轮有代码改动、且没有绑定当前内容的验收结论时，
+  `declare_done` 内部**自己**派出 `acceptance`（agent 叫不动它 —— `judge_submit`
+  不接受这个名字），并把下一步写成 `judge_wait({role:"acceptance"})`；非 READY、
+  或那份 READY 绑定的内容已经移动 ⇒ 拒绝完成。它**不进 `unmetRequirements`** ——
+  修验收 finding 要 commit，而 commit 又要过 ship 门禁，进了那一层就是自我死锁
+  （理由写在 `lib/acceptance-round.ts` 的 docblock 里）。判据是 goal 的
+  「真实验收方案」段：真起、真调、比返回数据、再验邻居路径；没有真实执行证据不得
+  READY，环境确实跑不起来时如实报 BLOCKED 而不是自我豁免。取消矩阵里没有它 ——
+  矩阵裁的是同一时刻并行的三方，验收轮是完成时刻单独的一轮。
+
+- **五个环节是用户的开关，默认全开（2026-09-22）.** goal 协商（含需求反述）、功能
+  审查、质量审查、真实验收、全量 precommit —— 用户自己在门禁的固定五勾清单里选
+  （`choose_loop_stages`，无参；还没有记录时，第一次 `propose_restatement` 或第一次
+  edit/write 之前门禁会自己弹同一个框）。未勾的环节在它**每一个卡点**直接放行：它的
+  工作不跑、它的拦截也不成立（goal 关 ⇒ 需求反述与交付站点一并没有）。编排模式与
+  它的子会话不提供这个开关，一律跑完整循环。判定、记录与文案只有一处：
+  `lib/loop-stages.ts`。
+
 - **Review → ONE call**: `judge_submit({role:"reviewer", task:<what you
   changed this round>})`. The gate runs the whole chain itself — full
   precommit, the checkpoint commit, the
@@ -127,7 +146,8 @@ reviewer over the WHOLE change:
 
 Detail: `docs/execution-model.md` + `docs/judge-protocol.md` +
 `docs/hierarchical-session-design.md`; runtime
-contract: `lib/judge-pane.ts` + `lib/hierarchy.ts` + `lib/judge-prompt.ts`.
+contract: `lib/judge-pane.ts` + `lib/hierarchy.ts` + `lib/judge-prompt.ts`;
+验收轮与环节开关: `lib/acceptance-round.ts` + `lib/loop-stages.ts`。
 
 The review loop is AGENT-DRIVEN: you start it yourself once edits
 are complete (one `judge_submit`) — the slash commands are only optional
@@ -617,20 +637,24 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 2b. **同一个 repo 的一个需求只出一个 PR**（2026-09-15，用户决定）：plan 里同一
    repo 有 ≥2 个任务、且该 repo 没有被写进 `allowMultiplePrs` ⇒ **该 repo 的交付
-   站点收窄为 `commit`**（子会话提交完就停，不 push、不开 PR）。**唯一例外是 plan 的
-   最后一环 —— 收尾任务**（2026-09-18，用户决定）：它按 plan 的 `deliveryStation`
-   交付（汇合其余任务的分支 → 走一次整体审核 → commit → push → 开**一个** PR），
-   被一起收窄就没有能 ship 的一方了（PM 被禁止写代码，实测过整轮卡在交付上的事故）。
-   收尾任务是**位置约定**（plan 顺序的最后一个），不是 plan 的新字段；它照旧计入该
-   repo 的任务数，所以「1 个工作任务 + 收尾任务」里那个工作任务仍然收窄为 `commit`。
+   站点收窄为 `commit`**（子会话提交完就停，不 push、不开 PR）。**唯一例外是 plan
+   顺序的最后一个任务 —— 独立验收任务**（2026-09-22，用户决定把交付尾环拆成两环：
+   倒数第二个 = **收尾任务**，汇合其余任务的分支 → 走一次整体审核 → commit，它照旧
+   收窄；最后一个 = **验收任务**，不产出新需求、不改业务代码，只做真实验收并交付
+   push → 开**一个** PR）：被一起收窄就没有能 ship 的一方了（PM 被禁止写代码，
+   实测过整轮卡在交付上的事故）。两环都是**位置约定**，不是 plan 的新字段；验收
+   任务照旧计入该 repo 的任务数，所以「1 个工作任务 + 收尾任务 + 验收任务」里那个
+   工作任务仍然收窄为 `commit`。
    收窄是收紧、不是扩权，按既有规则平移 plan 批准（不额外弹框），但它在 plan
    的批准对话框、plan 摘要、子会话的反述/goal 对话框与任务书里都写明；
    `allowMultiplePrs`（repo 绝对路径列表）是**唯一的放行入口**，把它加进 plan 属于
    扩权、必须重新问用户，而移除只是收紧。站点上界随 spawn 走环境变量
    `RG_STATION_CAP` 注入子会话（那是提示词写不进去的通道），子会话 goal 协商的站点
    展示与记录都不超过它；**`orchestrator_recover` 重开 pane 与 `session_handoff`
-   接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。规则只有一处
-   实现：`lib/repo-pr-policy.ts`（`finishTaskId` / `effectiveTaskStation`）。
+   接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。验收 gate 走同一条
+   注入通道：`RG_ACCEPTANCE_GATE` 只对 plan 的最后一个任务写 `on`，其余编排子会话
+   一律 `off`，而「谁验收」由 `acceptanceTaskId` 一个判定回答。规则只有一处实现：
+   `lib/repo-pr-policy.ts`（`acceptanceTaskId` / `effectiveTaskStation`）。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
    本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的
