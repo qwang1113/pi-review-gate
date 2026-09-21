@@ -123,17 +123,6 @@ export interface RoundSilenceFacts {
   nowMs: number;
   /** Has this round produced a report (or a settlement)? */
   hasReport: boolean;
-  /**
-   * Is the judge BLOCKED on a question only the opener can answer?
-   *
-   * Review P1, 2026-09-21: a judge waiting for an answer writes nothing to its
-   * transcript — it is IDLE BY DESIGN — and a long tool call looks the same
-   * from the outside. Both are the ROUND WORKING, and reporting them as "never
-   * started" would tell the opener to throw away a live round (with the hint to
-   * re-dispatch). A blocked-on-opener round is exactly the case where the wait
-   * receipt already carries the question, so the caller knows it is alive.
-   */
-  blockedOnOpener?: boolean;
 }
 
 /**
@@ -150,7 +139,6 @@ export interface RoundSilenceFacts {
  */
 export function roundLooksUnstarted(facts: RoundSilenceFacts): boolean {
   if (facts.hasReport) return false;
-  if (facts.blockedOnOpener) return false;
   // NO READING ⇒ NO VERDICT (fail-open, like every other liveness judgement in
   // this gate): an unreadable transcript is missing INFORMATION, not evidence
   // of silence.

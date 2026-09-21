@@ -950,7 +950,6 @@ test("judge_wait reports a silent round as a READING — and never re-dispatches
   const stale = Date.now() - 300_000;
   f.deps.transcriptActivityAt = () => stale;
   f.deps.roundDispatchedAt = () => stale;
-  f.deps.judgeBlockedOnOpener = () => false;
 
   const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
   assert.equal((reply.details as { unstarted?: boolean })?.unstarted, true);
@@ -964,22 +963,6 @@ test("judge_wait reports a silent round as a READING — and never re-dispatches
     false,
     "the wait only reports — it never re-dispatches or kills a round",
   );
-});
-
-test("a round blocked on a question is NOT reported as unstarted", async () => {
-  // A judge parked on a question writes nothing to its transcript BY DESIGN —
-  // calling that "never started" would tell the opener to throw away a live
-  // round (reviewer P1, 2026-09-21).
-  const f = fake();
-  seed(f);
-  const stale = Date.now() - 300_000;
-  f.deps.transcriptActivityAt = () => stale;
-  f.deps.roundDispatchedAt = () => stale;
-  f.deps.judgeBlockedOnOpener = () => true;
-
-  const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
-  assert.equal((reply.details as { unstarted?: boolean })?.unstarted, false);
-  assert.doesNotMatch(textOf(reply), /没有任何写入/);
 });
 
 test("the wait probe: a rotation is news, an EXHAUSTED chain ends the round", () => {

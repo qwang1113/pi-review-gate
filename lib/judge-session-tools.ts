@@ -168,16 +168,6 @@ export interface JudgeSessionToolDeps {
    * record that actually carried this round. Undefined ⇒ fail-open.
    */
   roundDispatchedAt?(child: JudgeChildRecord): number | undefined;
-  /**
-   * Is this judge blocked on a question only the OPENER can answer?
-   *
-   * A judge waiting for an answer writes nothing to its transcript — it is
-   * idle BY DESIGN — and a long tool call looks the same from outside. Both are
-   * the round WORKING; calling them "never started" would tell the opener to
-   * throw away a live round (reviewer P1, 2026-09-21). Undefined ⇒ treated as
-   * not blocked (fail-open in the direction of NOT declaring a round dead).
-   */
-  judgeBlockedOnOpener?(child: JudgeChildRecord): boolean;
   /** Locate a pane judge by ROLE (preferred) or by judge id. */
   findChild(root: string, role: string | undefined, judgeId: string | undefined): JudgeChildRecord | undefined;
   /**
@@ -1072,7 +1062,6 @@ export async function doWait(
           })() }),
     nowMs: Date.now(),
     hasReport: false,
-    ...(deps.judgeBlockedOnOpener?.(child) === true ? { blockedOnOpener: true } : {}),
   });
   return reply(
     buildStandardReport({

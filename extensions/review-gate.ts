@@ -9757,39 +9757,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       const ms = Date.parse(at);
       return Number.isFinite(ms) ? ms : undefined;
     },
-    // …AND A ROUND WAITING FOR AN ANSWER IS NOT A SILENT ONE (reviewer P1):
-    // a judge parked on a question writes nothing to its transcript by design,
-    // and a long tool call looks the same from outside. The channel knows the
-    // difference: a request with no answer after it is a round that is ALIVE
-    // and waiting on the opener.
-    // …AND A REQUEST SETTLED IN THE PANE IS SETTLED TOO (reviewer P1,
-    // 2026-09-21). `request-settled` is how a question answered BY THE HUMAN in
-    // the pane (or dismissed, or interrupted) is recorded — a different record
-    // kind, and there is never an `answer` record for it. Counting only
-    // `answer` meant every such question stayed "open" forever, and since a
-    // judge's channel is appended to across ROUNDS, it short-circuited the
-    // silence reading for every later round on that lane: the feature was
-    // effectively dead.
-    judgeBlockedOnOpener: (child) => {
-      try {
-        const target = judgeChannelTarget(child.openerId, child.judgeId);
-        const records = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
-        const resolved = new Set<string>();
-        for (const r of records) {
-          if (r.kind === "answer" || r.kind === "request-settled") {
-            resolved.add((r as { requestId?: string }).requestId ?? "");
-          }
-        }
-        let pending = false;
-        for (const r of records) {
-          if (r.kind !== "request") continue;
-          pending = !resolved.has((r as { requestId?: string }).requestId ?? "");
-        }
-        return pending;
-      } catch {
-        return false;
-      }
-    },
+    // …AND NOTHING NARROWS IT FURTHER. An earlier version also asked the
+    // channel "is this judge parked on an unanswered question", to keep a
+    // waiting round out of the reading. Three review rounds found three ways
+    // for that predicate to go stale (a question settled in the pane, an
+    // abandoned one, and the cross-round channel having no floor), each one
+    // silently disabling the reading for the rest of that lane's life. It was
+    // never needed: the receipt REPORTS a reading, and already names "parked on
+    // a dialog nobody answered" as one of its three explanations. A reading
+    // does not have to know which one it is.
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),
