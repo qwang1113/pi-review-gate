@@ -471,6 +471,13 @@ async function openWorkerPane(
       // cursor meant every reopen (a dead pane resumed, an id reused after
       // close) re-delivered the newest report as if it had just landed.
       const prior = registry[opts.workerId];
+      // THE SERVER READING SURVIVES TOO (reviewer P1, 2026-09-21): a fresh
+      // reading wins, but an UNREADABLE one must not erase what is recorded —
+      // `worker_close` refuses to kill when the recorded server disagrees with
+      // the current one, and a dropped field silently removes that check. The
+      // stale-forever risk is the safe direction here: a server that really
+      // changed makes the next close refuse, which is a human's call.
+      const tmuxServer = deps.tmuxServer?.() ?? prior?.tmuxServer;
       deps.saveRegistry(withWorker(registry, {
         workerId: opts.workerId,
         openerId,
@@ -481,7 +488,7 @@ async function openWorkerPane(
         repoRoot: deps.repoRoot(),
         createdAt: new Date(deps.now()).toISOString(),
         ...(prior?.reportedAt === undefined ? {} : { reportedAt: prior.reportedAt }),
-        ...(deps.tmuxServer?.() === undefined ? {} : { tmuxServer: deps.tmuxServer()! }),
+        ...(tmuxServer === undefined ? {} : { tmuxServer }),
       }));
     },
   });
@@ -627,6 +634,15 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
   if (!entry) {
     return reply(`review-gate: worker ${workerId} 不在注册表里（已经关过，或从没派过）。`, { workerId, closed: false });
   }
+  // IDEMPOTENT FIRST (reviewer P2, 2026-09-21): a worker with no pane has
+  // nothing to kill, so there is no mis-kill for the ownership check below to
+  // prevent — and refusing the CALL here reported a failed close for a worker
+  // that is already closed.
+  if (entry.paneId === undefined) {
+    return reply(`review-gate: worker ${workerId} 的 pane 已经关过了（登记还在，同一 id 可以接着用）。`, {
+      workerId, closed: true, paneId: undefined,
+    });
+  }
   // FAIL-CLOSED OWNERSHIP (reviewer P1, 2026-09-21). A recorded server we
   // cannot RE-READ is not a licence to kill: an unreadable identity is missing
   // information, and after a tmux restart that pane id may belong to somebody
@@ -639,11 +655,6 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
       "登记已保留，请人工确认后处理。",
       { workerId, closed: false },
     );
-  }
-  if (entry.paneId === undefined) {
-    return reply(`review-gate: worker ${workerId} 的 pane 已经关过了（登记还在，同一 id 可以接着用）。`, {
-      workerId, closed: true, paneId: undefined,
-    });
   }
   const killed = deps.killPane(entry.paneId);
   // THE ENTRY STAYS (reviewer P1, 2026-09-21). Closing a pane releases SCREEN

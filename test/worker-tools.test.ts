@@ -56,6 +56,8 @@ function makeWorld(opts: {
   openerId?: string;
   /** Share one channel store with another world (a restart/handover). */
   io?: ReturnType<typeof memoryChannelIO>;
+  /** The tmux server this session can read — omitted ⇒ it cannot be read. */
+  tmuxServer?: string;
 } = {}) {
   const io = opts.io ?? memoryChannelIO(() => NOW);
   const files = new Map<string, string>();
@@ -92,6 +94,7 @@ function makeWorld(opts: {
     agents: () => opts.agents ?? agentsWith({ worker: workerPreset() }),
     now: () => clock,
     sleep: async (ms: number) => { clock += ms; },
+    ...(opts.tmuxServer === undefined ? {} : { tmuxServer: () => opts.tmuxServer }),
     log: (m) => logs.push(m),
   };
 
@@ -318,6 +321,35 @@ test("a resume after close keeps the channel AND the consumed-report cursor", as
   const again = await second.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
   assert.doesNotMatch(second.text(again), /第一份结论/,
     "an already-consumed report is not re-delivered after a close+resume");
+});
+
+test("a resume keeps the recorded tmux server when the current one cannot be read", async () => {
+  // `worker_close` refuses to kill when the recorded server disagrees with the
+  // current one — so dropping the field on a resume would silently remove that
+  // check (reviewer P1, 2026-09-21).
+  const first = makeWorld({ tmuxServer: "srv-1" });
+  await first.call("worker_submit", { task: "第一次" });
+  assert.equal(first.registry()["worker-1"]?.tmuxServer, "srv-1");
+
+  const second = makeWorld({ alive: false, openerId: "%999", io: first.io }); // no reading ⇒ none passed
+  second.saveRegistry(first.registry());
+  await second.call("worker_submit", { task: "接着上次", workerId: "worker-1" });
+  assert.equal(second.registry()["worker-1"]?.tmuxServer, "srv-1",
+    "an unreadable server must not erase the recorded one");
+});
+
+test("closing an already-closed worker is idempotent even when the server cannot be read", async () => {
+  // Nothing to kill ⇒ no mis-kill for the ownership check to prevent, so the
+  // check must not turn a no-op into a refusal (reviewer P2, 2026-09-21).
+  const first = makeWorld({ tmuxServer: "srv-1" });
+  await first.call("worker_submit", { task: "第一次" });
+  await first.call("worker_close", { workerId: "worker-1" });
+
+  const second = makeWorld({ openerId: "%999", io: first.io });
+  second.saveRegistry(first.registry());
+  const again = await second.call("worker_close", { workerId: "worker-1" });
+  assert.equal(again.isError, undefined, "an already-closed worker is not a failed close");
+  assert.deepEqual(second.killed, [], "and nothing was killed");
 });
 
 test("close on an unknown worker is a no-op, not an error", async () => {
