@@ -67,6 +67,7 @@ import {
   decideSupervisionEvents,
   reportedDoneIds,
   superviseChildren,
+  type SupervisionMemory,
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
 import { dispatchInstruct, dispatchSpawn } from "./orchestrator-dispatch.ts";
@@ -199,10 +200,14 @@ async function doWait(
     // probe that returned without draining it would leave the timer to ring a
     // second time about the dialog this call is already handing over — one
     // question, two announcers (quality round P2).
-    const decided = decideSupervisionEvents(snapshot, deps.supervisionMemory(), deps.now());
-    deps.saveSupervisionMemory(decided.memory);
+    const before = deps.supervisionMemory();
+    const decided = decideSupervisionEvents(snapshot, before, deps.now());
     // A wait scoped to ONE child reports only that child's events; its
-    // siblings' stay in the memory as un-reported and ring on the next call.
+    // siblings' stay in the memory as un-reported and ring on the next call
+    // — which is true only because their entries are put BACK (quality round
+    // 3, P2: saving the whole memory spent news this reply then filtered out,
+    // the same leak as the P1 above reached from the scope filter).
+    deps.saveSupervisionMemory(childId ? keepOutOfScope(before, decided.memory, childId) : decided.memory);
     const scoped = childId ? decided.events.filter((e) => e.childId === childId) : decided.events;
     // A `waiting-input` event is NOT a second announcement of the same
     // question. The block below owns that news, on better terms (per request,
@@ -342,6 +347,25 @@ async function doWait(
     );
   }
   return reply(`review-gate: ${receipt.text}`, details);
+}
+
+/**
+ * The memory a SCOPED wait may write: the one child it is watching advances,
+ * everybody else keeps the entry it had.
+ *
+ * A sibling with no previous entry is left out entirely rather than carried
+ * from `advanced` — "never announced" is exactly what the next unscoped call
+ * has to see to announce it.
+ */
+function keepOutOfScope(
+  before: SupervisionMemory,
+  advanced: SupervisionMemory,
+  childId: string,
+): SupervisionMemory {
+  const next: SupervisionMemory = { ...before };
+  if (advanced[childId] !== undefined) next[childId] = advanced[childId]!;
+  else delete next[childId];
+  return next;
 }
 
 /** The receipt still renders when supervision never ran (an empty snapshot). */

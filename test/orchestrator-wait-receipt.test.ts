@@ -33,6 +33,7 @@ import {
   type SupervisionSnapshot,
 } from "../lib/orchestrator-supervisor.ts";
 import { markChildAssigned } from "../lib/orchestrator-registry.ts";
+import { parsePlan } from "../lib/orchestrator-plan.ts";
 
 async function spawnT1(world: FakeWorld): Promise<string> {
   const reply = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
@@ -267,6 +268,39 @@ test("A: a dead child's open question does not hide the death", async () => {
   assert.notEqual(details.reason, "pending-request",
     "answering a dead child is not the next action — recovering it is");
   assert.match(replyText(reply), /pane 已消失/);
+});
+
+test("a wait scoped to one child does not spend its siblings' news", async () => {
+  const plan = parsePlan({
+    title: "测试计划",
+    intent: "两个仓库各一个任务",
+    tasks: [
+      { id: "t1", title: "任务一", repo: "/repo" },
+      { id: "t2", title: "任务二", repo: "/other/repo" },
+    ],
+  });
+  assert.ok(plan.plan, plan.problems.join("; "));
+  const world = makeFakeWorld({
+    plan: plan.plan!,
+    approvePlan: true,
+    resolvableRepos: ["/repo", "/other/repo"],
+  });
+  const first = await spawnT1(world);
+  const spawned = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  assert.equal(spawned.isError, undefined, replyText(spawned));
+  const second = world.runtime().children[1]!.id;
+  world.childAsks(first, { requestId: "req-2", title: "confirm?", options: ["yes", "no"] });
+  world.childReports(second, "done");
+
+  const scoped = await world.call("orchestrator_wait", { childId: first, timeoutMs: 0 });
+  assert.equal((scoped.details as { reason: string }).reason, "pending-request");
+
+  // The sibling's completion was decided on that same probe and filtered out
+  // of the reply — it must still be owed, not silently spent.
+  const next = await world.call("orchestrator_wait", { timeoutMs: 0 });
+  assert.equal((next.details as { done: boolean }).done, true);
+  assert.equal((next.details as { reason: string }).reason, "supervision");
+  assert.match(replyText(next), /已完成/, "the completion nobody announced yet leads the next reply");
 });
 
 test("A': the background timer having consumed the re-report does not silence the wait", async () => {
