@@ -930,7 +930,9 @@ export function validateAgentsForStartup(
       // what the user pinned.
       checks[name] = {
         ok: false,
-        reason: `角色 ${name} 未配置模型链（auto:${String(e.auto)}，slots 为空）——安装脚本应在 ~/.pi/review-gate.json 写入该角色的默认 slots`,
+        reason:
+          `角色 ${name} 未配置模型链（auto:${String(e.auto)}，slots 为空）——` +
+          `把它写成 auto:false + slots，或删掉该键让启动自愈补上包内默认链`,
       };
       continue;
     }
