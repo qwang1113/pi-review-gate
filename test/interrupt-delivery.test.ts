@@ -45,7 +45,6 @@ function makeWorld(opts: { idleAfter?: number; waitMs?: number; sendNowThrows?: 
       if (opts.sendNowThrows) throw new Error("agent is streaming");
       calls.push(`now:${text}`);
     },
-    sendQueued: (text: string) => { calls.push(`queued:${text}`); },
     sleep: async (ms: number) => { at += ms; },
     now: () => at,
     waitMs: opts.waitMs ?? 1_000,
@@ -78,25 +77,31 @@ test("the delivery carries NO `deliverAs` — that is the form that opens a turn
   const { world, calls } = makeWorld({ idleAfter: 0 });
   await deliverInterrupt("正文", world);
   assert.ok(calls.includes("now:正文"));
-  assert.ok(!calls.some((c) => c.startsWith("queued:")), "the queued form is the fallback, never the normal path");
+  assert.deepEqual(calls, ["abort", "now:正文"], "the ONLY call is the bare one — `deliverAs` never appears");
 });
 
-test("a pane that never stops does NOT lose the text", async () => {
-  // A wedged turn must not wedge the drain (the caller's re-entrancy guard
-  // would then swallow every later instruction) — but a bounded wait must
-  // never drop the message either.
+test("a pane that never stops is DEFERRED — nothing is queued into the dead queue", async () => {
+  // The first version of this module fell back to `deliverAs: "steer"` here,
+  // on the theory that a queued message is at least not a lost one. It was the
+  // SAME deadlock: the queue it queued into is the one the abort stopped
+  // draining (`shouldStopAfterTurn` returns before the drain), so a timeout
+  // parked the text forever while the ack said "delivered". A wait that does
+  // not reach idle now delivers NOTHING, and the text stays in the channel for
+  // the next drain to retry.
   const { world, calls } = makeWorld({ idleAfter: Number.POSITIVE_INFINITY, waitMs: 500 });
   const result = await deliverInterrupt("正文", world);
-  assert.equal(result.delivered, "queued");
-  assert.ok(calls.includes("queued:正文"), "the text is handed over anyway");
+  assert.equal(result.delivered, "deferred");
+  assert.deepEqual(calls, ["abort"], "nothing was sent — the caller keeps the text and retries");
   assert.ok(result.waitedMs >= 500, "…after the bounded wait, not before it");
 });
 
-test("if the pane starts streaming again mid-handoff, the text is queued rather than thrown away", async () => {
-  const { world, calls } = makeWorld({ idleAfter: 0, sendNowThrows: true });
-  const result = await deliverInterrupt("正文", world);
-  assert.equal(result.delivered, "queued");
-  assert.deepEqual(calls, ["abort", "queued:正文"], "the throw is caught and the fallback carries it");
+test("a deferred delivery sends nothing at all, whatever the mode would have been", async () => {
+  // Guard against a future "just queue it" reflex: the module has exactly ONE
+  // side effect on the failure path — the abort.
+  const { world, calls } = makeWorld({ idleAfter: Number.POSITIVE_INFINITY, waitMs: 100 });
+  await deliverInterrupt("正文", world);
+  assert.deepEqual(calls.filter((c) => c.startsWith("now:")), [], "no direct send");
+  assert.equal(calls.length, 1, "and no second delivery mechanism");
 });
 
 test("waitForIdle returns how long it waited, and gives up at the bound", async () => {
@@ -112,7 +117,7 @@ test("waitForIdle returns how long it waited, and gives up at the bound", async 
 });
 
 test("the bounds are the ones the design states", () => {
-  assert.equal(INTERRUPT_IDLE_WAIT_MS, 30_000);
+  assert.equal(INTERRUPT_IDLE_WAIT_MS, 3_000);
   assert.equal(INTERRUPT_POLL_MS, 50);
 });
 

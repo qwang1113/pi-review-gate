@@ -2531,20 +2531,22 @@ export default function reviewGate(pi: ExtensionAPI) {
               abort: () => ctx.abort?.(),
               isIdle: () => ctx.isIdle?.() === true,
               // NO `deliverAs`: by pi's own contract that is the form which
-              // "sends immediately and triggers a new turn" — and it throws if
-              // the agent is streaming again, which is why the queued fallback
-              // exists.
+              // "sends immediately and triggers a new turn".
               sendNow: (text) => pi.sendUserMessage(text),
-              sendQueued: (text) => pi.sendUserMessage(text, { deliverAs: "steer" }),
             });
+            // A DEFERRED DELIVERY IS NOT AN INJECTION (2026-09-21): the text is
+            // still in the channel, and the next drain retries it. Acknowledging
+            // it as `injected` is how the opener was told "delivered" about a
+            // message nobody had read — the ack says which stage was ACTUALLY
+            // reached, which is the whole point of the two-stage handshake.
             acknowledgeInstruct(
               binding,
               instruction.instructId,
               true,
               delivered.delivered === "turn"
                 ? `已中止当前 turn，等 pane 空闲（${delivered.waitedMs}ms）后作为新一轮投递`
-                : `等待 pane 空闲超时（${delivered.waitedMs}ms），正文已按 steer 排队（未丢弃）`,
-              "injected",
+                : `pane 仍在忙（已等 ${delivered.waitedMs}ms）—— 正文留在通道里，下一次 drain 再投`,
+              delivered.delivered === "turn" ? "injected" : "received",
             );
           } else {
             ctx.abort?.();

@@ -26,39 +26,39 @@
  *      tool calls — but the abort ends the run at `shouldStopAfterTurn` and
  *      RETURNS, skipping the drain. The queue is never read again.
  *
- * So the text was neither delivered nor lost-with-an-error: it sat in a queue
- * nobody would ever drain, the ack said `injected`, and the opener waited
- * forever. The same drain serves orchestration children, so
- * `orchestrator_instruct({ mode: "interrupt" })` could lose a message the same
- * way.
+ * ── THE ANSWER IS "WAIT", NOT "QUEUE" (corrected 2026-09-21) ──
  *
- * ── THE TWO STEPS ──
+ * The first version of this module waited for idle and, if the wait ran out,
+ * handed the text to `deliverAs: "steer"` as a fallback — on the theory that a
+ * queued message is at least not a lost one. THAT WAS WRONG, and it is the
+ * same deadlock wearing a different hat: the queue it falls back to is exactly
+ * the one the abort skipped draining, so a timeout would park the text
+ * forever while reporting it as delivered. (The fallback was also unreachable
+ * in practice: pi's own `sendUserMessage` swallows the streaming-without-mode
+ * throw, so the `try/catch` that was supposed to route around it never fired.)
  *
- * `abort()` first, then WAIT for the pane to actually be idle, and only then
- * hand the text over WITHOUT `deliverAs`. pi's contract is explicit about what
- * each shape does (docs/extensions.md, `pi.sendUserMessage`):
+ * So a wait that does not reach idle DELIVERS NOTHING. It returns `deferred`,
+ * the caller acknowledges the instruction as `received` (not `injected`), and
+ * the text simply STAYS IN THE CHANNEL — where the next drain (a heartbeat, an
+ * `agent_settled`, the next round) picks it up and tries again. Nothing is
+ * lost, nothing sits in an unread queue, and the ack tells the truth about
+ * which stage the delivery reached.
  *
- *   - not streaming → the message is sent immediately and triggers a new turn;
- *   - streaming → `deliverAs` is REQUIRED, and omitting it throws.
- *
- * That is the whole fix: after the wait, "no `deliverAs`" is not a shortcut, it
- * is the only form that starts the round. The wait is bounded, because a turn
- * that refuses to stop must not wedge the drain (the re-entrancy guard in the
- * caller would then swallow every later instruction) — and a bounded wait must
- * never drop the text, so the fallback QUEUES it: a queued message is
- * recoverable, a dropped one is not.
+ * The wait is short on purpose (3s): an abort lands in milliseconds, so a pane
+ * that is still busy after that is not "about to stop" — it is running a tool
+ * call, and the honest move is to come back later rather than to hold the
+ * caller's drain hostage.
  *
  * PURE: every effect is injected (sleep, clock), so the whole timing contract
  * is drivable from a test with no timer and no pane.
  */
 
 /**
- * How long to wait for a turn to actually stop before falling back to a queued
- * delivery. Long enough for a tool call to finish and an abort to land; short
- * enough that a wedged pane does not hold the drain (and the messages behind
- * it) hostage.
+ * How long to wait for a turn to actually stop before DEFERRING the delivery
+ * to the next drain. An abort lands in milliseconds; a pane still busy after
+ * this is running a tool call, and waiting longer only delays the ack.
  */
-export const INTERRUPT_IDLE_WAIT_MS = 30_000;
+export const INTERRUPT_IDLE_WAIT_MS = 3_000;
 
 /** Polling interval. `ctx.isIdle()` is a synchronous local read — this is a
  *  cheap check, not a network round-trip. */
@@ -71,17 +71,11 @@ export interface InterruptDeliveryDeps {
   isIdle: () => boolean;
   /**
    * Open a NEW turn with the text — `pi.sendUserMessage(text)` with no
-   * `deliverAs`. Throws if the agent is streaming again (pi's contract), which
-   * the caller's implementation must let escape: this module falls back rather
-   * than dying.
+   * `deliverAs`. pi's contract: not streaming ⇒ sent immediately as a new
+   * turn; streaming ⇒ no `deliverAs` is an error. Only ever called once the
+   * pane has been OBSERVED idle.
    */
   sendNow: (text: string) => void;
-  /**
-   * Queue the text behind the running turn — `deliverAs: "steer"`. The
-   * fallback, used only when the wait could not reach idle: a queued message
-   * can still be retrieved, a dropped one cannot.
-   */
-  sendQueued: (text: string) => void;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   waitMs?: number;
@@ -91,10 +85,11 @@ export interface InterruptDeliveryDeps {
 export interface InterruptDeliveryResult {
   /**
    * `turn` — the pane reached idle and the text opened a new turn (the
-   * normal, correct path). `queued` — the wait expired (or the pane started
-   * streaming again mid-handoff) and the text was queued instead.
+   * normal, correct path). `deferred` — the wait expired first, so NOTHING
+   * was delivered: the text stays in the channel and the next drain retries
+   * it. A `deferred` result must NOT be acknowledged as `injected`.
    */
-  delivered: "turn" | "queued";
+  delivered: "turn" | "deferred";
   /** Time spent waiting for idle, in ms. */
   waitedMs: number;
 }
@@ -132,12 +127,11 @@ export async function waitForIdle(opts: {
 }
 
 /**
- * The whole interrupt handoff: request the stop, wait for it, then speak in the
- * one form that starts a round.
+ * The whole interrupt handoff: request the stop, wait for it, and ONLY THEN
+ * speak — in the one form that starts a round.
  *
- * ORDER IS THE FIX. Reversing the first two lines (or dropping the wait) is the
- * deadlock above; skipping the abort leaves the old turn running and the text
- * queued behind it.
+ * ORDER IS THE FIX. Reversing the first two steps (or dropping the wait)
+ * recreates the deadlock above.
  */
 export async function deliverInterrupt(
   text: string,
@@ -151,20 +145,11 @@ export async function deliverInterrupt(
     ...(deps.waitMs === undefined ? {} : { waitMs: deps.waitMs }),
     ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
   });
-  if (waited.idle) {
-    try {
-      deps.sendNow(text);
-      return { delivered: "turn", waitedMs: waited.waitedMs };
-    } catch {
-      // DEFENSIVE, AND NOT REACHABLE IN THIS pi BUILD (quality round P2,
-      // 2026-09-21): the idle check and this call sit in the same tick, so a
-      // pane cannot start streaming between them, and pi's own
-      // `sendUserMessage` catches its internal rejection rather than throwing.
-      // Kept as a guard against a future build that DOES throw — but the
-      // no-message-is-lost guarantee does not rest on it: it rests on the
-      // bounded wait above and on `sendQueued` below.
-    }
+  if (!waited.idle) {
+    // NOTHING IS SENT. See the module docblock: the fallback this replaced
+    // queued the text into the very queue the abort stopped draining.
+    return { delivered: "deferred", waitedMs: waited.waitedMs };
   }
-  deps.sendQueued(text);
-  return { delivered: "queued", waitedMs: waited.waitedMs };
+  deps.sendNow(text);
+  return { delivered: "turn", waitedMs: waited.waitedMs };
 }
