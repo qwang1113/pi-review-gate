@@ -437,6 +437,10 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 形状标记是 `ChoiceSpec.defaultChecked`（**存在即多选**，内容就是清单打开时勾好的那一组）。
 跨两种题型的不变量只有一条：**直接回车 ＝ 接受提问方的推荐** —— 单选题靠必填的 `recommended`，
 多选题靠必填的 `defaultChecked`（缺了整批拒绝，因为它就是那个推荐）。
+**已知落点（2026-09-22，quality 轮记录）**：宿主画不出复选框时（RPC 的 `ui.custom` 不跑 factory），哨兵 `MULTI_UNAVAILABLE`
+只在采访内部生效 —— 通道侧仍把这题结算成 `dismissed`，所以「这题没展示给任何人」与「用户关掉了框」在通道记录里分不出，
+项目经理也没有第二次机会答它（编排子会话本身总是 TUI，所以这条路径很窄：RPC 宿主 + 多选 + PM 未来得及答）。
+为什么不给通道加第三个 `by` 值，写在哨兵的定义处（`multi-choice-dialog.ts`）。
 `ask-user.ts` 是采访模型（逐题推进、**提问数量无上限**、关框即停与「在聊天里回答」
 的语义，以及 `resolveQuestion`：一题结算下来到底算什么 —— 竞速送达的答案一律作数，
 只有沉默才按「是什么中止了采访」解释），
