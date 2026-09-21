@@ -324,8 +324,8 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   }
   // WHERE THIS CHILD WORKS (2026-09-18, A) — the gate's own fact, rendered by
   // the gate (`buildBranchLine`). The fixed 「开工前先给自己开一个功能分支」
-  // sentence this replaces told a FINISH task to fork the very branch it was
-  // spawned to deliver; the branch was known HERE all along.
+  // sentence this replaces told the plan's LAST task (the acceptance task) to
+  // fork the very branch it was spawned to deliver; the branch was known HERE all along.
   //
   // `stationCap` is this task's ceiling, and it is what decides whether the
   // gate's own worktree branch may be published: at `pr` the child ships, so

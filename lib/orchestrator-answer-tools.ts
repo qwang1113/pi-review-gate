@@ -761,7 +761,8 @@ function proxyCrosscheckGuard(
   // stops a manager from confirming on the user's behalf a station the plan
   // already ruled out — so it has to compare against the NARROWED ceiling, not
   // the plan's headline station.
-  // AND THE FINISH TASK IS EXEMPT (2026-09-18): the plan's LAST task takes the
+  // AND THE ACCEPTANCE TASK IS EXEMPT (2026-09-18; the tail became two links
+  // 2026-09-22): the plan's LAST task takes the
   // plan's own station — it is the one that delivers, and capping it would
   // leave nobody who may publish. `effectiveTaskStation` is the ONE place that
   // answers the question, so this comparison cannot disagree with the ceiling

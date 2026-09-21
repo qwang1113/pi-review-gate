@@ -33,7 +33,7 @@
  * philosophy three forbids; a module with no filesystem, no clock and no plan
  * import can be called from every one of them.
  *
- * ── THE FINISH TASK IS EXEMPT (2026-09-18, user decision) ──
+ * ── THE TAIL IS TWO LINKS; ONLY THE LAST ONE IS EXEMPT (2026-09-22) ──
  *
  * The rule above, applied to EVERY task, left an orchestration with nobody
  * who could publish: the manager may not ship (constraint 2 confines it to the
@@ -43,18 +43,30 @@
  * proposal to drop back to loop mode was refused by the user, who named the
  * real fix: the plan's LAST task IS the delivery.
  *
- * So the LAST task in plan order is never capped — it takes
- * `plan.deliveryStation` and it is the one that merges the other branches, is
- * reviewed as a whole, commits, pushes and opens the PR. It still COUNTS as a
- * task of its repo (2026-09-18): one repo publishes ONE PR per requirement, so
- * a last task that ships while a sibling opens its own PR would publish the
- * same requirement twice.
+ * 2026-09-18 put that whole tail on ONE task: the last task merged the other
+ * branches, was reviewed as a whole, committed, pushed and opened the PR. That
+ * made the session which wrote the code the one that declared it good. The
+ * tail is TWO links now (2026-09-22, user decision), split by position again:
  *
- * POSITION, NOT A FIELD. There is no `kind: "finish"` in the plan schema and
- * there must not be one: `canonicalPlanText` is exactly what the user
- * approved, and a new field would be a new thing to approve (and a new way to
- * say the delivery belongs to nobody). What objects when the last task is not
- * a delivery task is the plan audit — `lib/orchestrator-plan-audit.ts`.
+ *  - the SECOND-TO-LAST task is the WRAP-UP (收尾任务): it merges the other
+ *    branches, takes the whole through one review, and commits. It is capped
+ *    by the rule above like any other task — merging is work, and work stops
+ *    at `commit` when its repo publishes one PR.
+ *  - the LAST task is the independent ACCEPTANCE task (验收任务): no new
+ *    requirement, no business code — it runs the REAL acceptance and delivers
+ *    (push, PR). It is the ONE task this cap never touches, because capping it
+ *    would leave nobody who may publish at all.
+ *
+ * Both of them still COUNT as tasks of their repo (2026-09-18): one repo
+ * publishes ONE PR per requirement, so a last task that ships while a sibling
+ * opens its own PR would publish the same requirement twice.
+ *
+ * POSITION, NOT A FIELD. There is no `kind: "finish"` / `kind: "acceptance"`
+ * in the plan schema and there must not be one: `canonicalPlanText` is exactly
+ * what the user approved, and a new field would be a new thing to approve (and
+ * a new way to say the delivery belongs to nobody). What objects when the last
+ * task is not an independent acceptance task is the plan audit —
+ * `lib/orchestrator-plan-audit.ts`.
  */
 
 import { deliveryStationRank, type DeliveryStation } from "./delivery-station.ts";
@@ -117,15 +129,31 @@ export function normalizeRepoPath(path: string): string {
 }
 
 /**
- * The plan's LAST task — the one that delivers (see the header). `undefined`
- * only for a plan with no tasks at all.
+ * The plan's LAST task — the INDEPENDENT ACCEPTANCE task (验收任务): it runs
+ * the real acceptance and delivers (push + PR). `undefined` only for a plan
+ * with no tasks at all.
+ *
+ * ── HANDOFF: THIS IS THE DETERMINATION (t2-round consumes it) ──
+ *
+ * "Which child session's acceptance gate is open?" is answered HERE and
+ * nowhere else: the acceptance task IS the plan's last task, by position. A
+ * consumer asks for it by name (`acceptanceTaskId(plan)`) — it never
+ * re-derives the index and never writes a second predicate, which is how the
+ * gate and the station rule would drift apart. The wrap-up task (merge + one
+ * whole review + commit) is the plan's SECOND-to-last; it is capped by the
+ * rule below like any other task, and only the task this function names takes
+ * `plan.deliveryStation` uncapped.
  *
  * Exported because the convention has more than one reader: the station rule
  * below, the summary the user approves (`formatPlanSummary` marks it) and the
- * plan audit's checklist. ONE function, so "which task is the finish task"
- * cannot be answered two ways.
+ * plan audit's checklist. ONE function, so "which task is the acceptance
+ * task" cannot be answered two ways.
+ *
+ * (Renamed 2026-09-22, with the split: the WRAP-UP task is the 收尾任务, so a
+ * name built on "finish" pointed at two different tasks depending on who read
+ * it.)
  */
-export function finishTaskId(plan: RepoPrPlanInput): string | undefined {
+export function acceptanceTaskId(plan: RepoPrPlanInput): string | undefined {
   return plan.tasks.length > 0 ? plan.tasks[plan.tasks.length - 1]!.id : undefined;
 }
 
@@ -151,8 +179,9 @@ export function allowsMultiplePrs(plan: RepoPrPlanInput, repo: string): boolean 
 export interface RepoNarrowing {
   repo: string;
   /**
-   * EVERY task in this repo, in plan order — including the finish task, which
-   * counts towards the one-PR-per-repo rule even though it is never capped.
+   * EVERY task in this repo, in plan order — including the acceptance task,
+   * which counts towards the one-PR-per-repo rule even though it is never
+   * capped.
    */
   taskIds: string[];
   /** What every capped task in this repo may reach. */
@@ -169,9 +198,9 @@ export function narrowedRepoStations(
 ): RepoNarrowing[] {
   const narrowings: RepoNarrowing[] = [];
   for (const [repo, taskIds] of tasksByRepo(plan, defaultRepo)) {
-    // The COUNT is every task in the repo, the finish task included: it is one
-    // PR per repo per requirement, and a plan whose last task publishes while
-    // a sibling opens its own PR publishes the same requirement twice.
+    // The COUNT is every task in the repo, the acceptance task included: it is
+    // one PR per repo per requirement, and a plan whose last task publishes
+    // while a sibling opens its own PR publishes the same requirement twice.
     if (taskIds.length < 2) continue;
     if (allowsMultiplePrs(plan, repo)) continue;
     // A plan that already stops at or below the cap is not narrowed — saying
@@ -202,8 +231,8 @@ export function effectiveTaskStation(
   task: RepoPrTask,
   defaultRepo: string,
 ): DeliveryStation {
-  // The finish task delivers; capping it would leave nobody who may publish.
-  if (task.id === finishTaskId(plan)) return plan.deliveryStation;
+  // The acceptance task delivers; capping it would leave nobody who may publish.
+  if (task.id === acceptanceTaskId(plan)) return plan.deliveryStation;
   const repo = taskRepoOf(task, defaultRepo);
   const narrowed = narrowedRepoStations(plan, defaultRepo).find((n) => n.repo === repo);
   return narrowed ? narrowed.station : plan.deliveryStation;
@@ -231,17 +260,17 @@ export function narrowedRepoLines(
   defaultRepo: string,
   indent = "  - ",
 ): string[] {
-  const finish = finishTaskId(plan);
+  const acceptance = acceptanceTaskId(plan);
   return narrowedRepoStations(plan, defaultRepo).map((n) => {
     // The exemption is stated where the station is, for the same reason the
     // narrowing itself is: a plan that says "every child stops at commit" while
     // one of them is about to open the PR is a contract the user cannot read.
-    const exempt = finish !== undefined && n.taskIds.includes(finish)
-      ? `（最后一环 ${finish} 是收尾任务、不受这条收窄）`
+    const exempt = acceptance !== undefined && n.taskIds.includes(acceptance)
+      ? `（最后一环 ${acceptance} 是独立验收任务、不受这条收窄）`
       : "";
     return indent + `同一 repo 一个需求只出一个 PR：${n.repo} 上有 ${n.taskIds.length} 个任务（${n.taskIds.join("、")}）` +
       `⇒ 该 repo 的交付站点收窄为 ${n.station}${exempt} —— 其余子会话提交完就停，` +
-      `收尾任务汇合它们、走一次整体审核后开出这一个 PR。` +
+      `收尾任务汇合它们、走一次整体审核并 commit，最后的验收任务开出这一个 PR。` +
       `要分多个 PR，请在 plan 里把该 repo 写进 allowMultiplePrs 并重新批准。`;
   });
 }
@@ -249,20 +278,20 @@ export function narrowedRepoLines(
 /**
  * The same fact, as one sentence, for a station line that needs the reason.
  *
- * `undefined` for the finish task: its station is the plan's, so there is no
- * narrowing to explain — and a task book that explained one anyway would tell
- * the child it may not do the very thing it was spawned for.
+ * `undefined` for the acceptance task: its station is the plan's, so there is
+ * no narrowing to explain — and a task book that explained one anyway would
+ * tell the child it may not do the very thing it was spawned for.
  */
 export function narrowingReasonFor(
   plan: RepoPrPlanInput,
   task: RepoPrTask,
   defaultRepo: string,
 ): string | undefined {
-  if (task.id === finishTaskId(plan)) return undefined;
+  if (task.id === acceptanceTaskId(plan)) return undefined;
   const target = taskRepoOf(task, defaultRepo);
   const found = narrowedRepoStations(plan, defaultRepo).find((n) => n.repo === target);
   if (!found) return undefined;
   return `该 repo 有 ${found.taskIds.length} 个任务（${found.taskIds.join("、")}）—— 同一 repo 的一个需求只出一个 PR：` +
-    `其余任务的成果由收尾任务（${finishTaskId(plan) ?? "最后一环"}）汇合后统一交付。` +
+    `其余任务的成果由收尾任务汇合、由独立验收任务（${acceptanceTaskId(plan) ?? "最后一环"}）统一交付。` +
     `要分多个 PR，需要在 plan 里声明 allowMultiplePrs。`;
 }
