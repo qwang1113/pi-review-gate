@@ -603,7 +603,7 @@ test("L2 STALL BREAKER: an answered gate dialog is motion — a live negotiation
   // notice blamed the provider. The writer and the reader must both stay wired:
   // `askChoice` is the ONE dialog path, and the breaker reads the stamp as an
   // EVENT (after the previous observation), never as a grace period.
-  const askChoice = windowOf("async function askChoice(", "\n  }", "askChoice");
+  const askChoice = windowOf("async function askDialog(", "\n  }", "askDialog");
   assert.match(askChoice, /if \(answer !== undefined\) lastUserInteractionAt = new Date\(\)\.toISOString\(\)/,
     "the dialog path must record the exchange (dismissed boxes do not count)");
   const start = SRC.indexOf(LOOP_SETTLED);
@@ -930,8 +930,9 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the CHANNEL title is that prompt");
   assert.match(ASK_USER_SRC, /return askWithBacks\(index, signal\);/,
     "the pane dialog renders the template through the ONE renderer");
-  assert.match(ASK_USER_SRC, /const picked = await deps\.askChoice\(\s*uiCtx,/,
-    "…called from the walk-back loop, which is where `← 返回上一题` is handled (2026-09-19)");
+  assert.match(ASK_USER_SRC, /const picked = q\.multiple[\s\S]{0,140}?await deps\.askMultiChoice\(uiCtx,[\s\S]{0,140}?await deps\.askChoice\(uiCtx,/,
+    "…both shapes dispatched from the walk-back loop, which is where `← 返回上一题` is handled (2026-09-19): " +
+    "the checkbox question goes to its OWN renderer, the radio one to the template");
   // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). A title is the
   // short label; the question is the long half and belongs in the body. (When a
   // row budget existed this also kept a long question from sizing the box — the
@@ -1081,8 +1082,12 @@ test("FLICKER: dialogs are no longer fitted, and a regular-renderer session is t
   // session on that renderer is TOLD to switch (lib/renderer-mode.ts) instead
   // of being fitted. askChoice renders the gate's ONE template whole; nothing
   // may bypass it, and no ui.confirm exists any more (2026-09-08).
-  const helperAt = SRC.indexOf("async function askChoice");
-  const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
+  // The BODY lives in `askDialog` since 2026-09-22: the checkbox shape is the
+  // same dialog with a different renderer, so `askChoice` / `askMultiChoice`
+  // are one-line forwarders and every structural rule below is asserted
+  // against the body they share.
+  const helperAt = SRC.indexOf("async function askDialog");
+  const askChoiceBody = windowOf("async function askDialog", "\n  }", "askDialog");
   // NO FITTING ANY MORE (user decision, 2026-09-16). The row budget existed
   // because an oversized dialog pushed the animating spinner out of the
   // viewport and turned EVERY spinner frame into a full-screen clear (measured:
@@ -1129,7 +1134,8 @@ test("FLICKER: dialogs are no longer fitted, and a regular-renderer session is t
   const directRenders = [...SRC.matchAll(/renderChoice\(/g)].length;
   assert.equal(directRenders, 1,
     `askChoice must be the only renderChoice call site (found ${directRenders})`);
-  assert.match(askChoiceBody, /renderChoice\(/, "…and it is the one inside askChoice");
+  assert.match(SRC, /renderChoice\(/, "…and the ONE radio render call site is the dialog body");
+  assert.match(askChoiceBody, /renderMultiChoice\(/, "…with the checkbox shape beside it, on the same seam");
 });
 
 test("DIALOG QUEUE: one box at a time, with the host's abort and the question in the banner", () => {
@@ -1140,7 +1146,7 @@ test("DIALOG QUEUE: one box at a time, with the host's abort and the question in
   // tool never returned and the turn hung with no way out (an abort does not
   // interrupt pi's `Promise.all` over the batch). Every dialog the gate shows
   // goes through this ONE function, so the fix belongs here.
-  const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
+  const askChoiceBody = windowOf("async function askDialog", "\n  }", "askDialog");
   // The queue call is no longer RETURNED directly (2026-09-19): its promise is
   // held as `asked` so the thirty-minute proxy race can wait on the SAME one.
   // The property this line protects is unchanged — one queue, and everything
@@ -6898,7 +6904,7 @@ test("the row-position rule has ONE implementation — the channel parser import
     "the letter index is computed in lib/choice-dialog.ts (`rowIndexOf`) and imported, never re-derived");
   assert.doesNotMatch(answerTools, /Number\(text\) - 1/,
     "and so is the 1-based index — the same function reads both shorthands");
-  assert.match(answerTools, /rowIndexOf\(text\)/, "…and that is what this parser resolves a position with");
+  assert.match(answerTools, /rowIndexOf\(/, "…and that is what this parser resolves a position with (one shared reader, called once per token)");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

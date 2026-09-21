@@ -74,6 +74,67 @@ const PROXY_SCOPE_LABEL: Record<string, string> = {
 };
 
 /** Resolve `answer` against the offered rows: exact text, a letter, or a 1-based index. */
+/**
+ * The separators a project manager may use to quote several rows at once
+ * (2026-09-22): `A, C` / `A、C` / `A C` / `A+C` / `A/C`. The child side parses
+ * ONE canonical spelling (`lib/multi-choice-dialog.ts`'s `" / "`), and this
+ * is where a human's own loose punctuation is turned into it.
+ */
+const MULTI_ANSWER_SPLIT = /[,，、+/\s]+/;
+
+/** The separator the canonical multiple-choice answer is written with. */
+const MULTI_ANSWER_JOIN = " / ";
+
+/**
+ * WHICH ROW a single token quotes — the reading BOTH shapes share.
+ *
+ * The order is the one the answer numbering implies: an EXACT row first (an
+ * option whose own text is `A` must win over the position), then a POSITION
+ * (`A` / `1`), then an unambiguous SUBSTRING. A position past the last row is
+ * refused rather than read as free text — deliberately different from the
+ * pane's own parser, which lets a stray letter fall through to free text.
+ */
+function readRow(token: string, options: string[]): { row: string } | { reason: string } {
+  const exact = options.find((option) => option === token);
+  if (exact !== undefined) return { row: exact };
+  const rowIndex = rowIndexOf(token);
+  if (rowIndex !== undefined) {
+    const picked = options[rowIndex];
+    if (picked !== undefined) return { row: picked };
+    return { reason: `"${token}" 超出选项范围（只有 ${options.length} 个选项）` };
+  }
+  const hits = options.filter((option) => option.includes(token));
+  if (hits.length === 1) return { row: hits[0]! };
+  if (hits.length > 1) return { reason: `"${token}" 同时匹配 ${hits.length} 个选项，不敢替它选` };
+  return { reason: `"${token}" 不是这个框里的任何一项。可选：` + options.join(MULTI_ANSWER_JOIN) };
+}
+
+/**
+ * SEVERAL ROWS AT ONCE — the multiple-choice half of a proxy answer.
+ *
+ * The whole string is read as ONE row first (a single `A` is the common case),
+ * and only then split. That order matters: splitting first would turn a single
+ * option whose own text contains a comma into two "rows" nobody offered.
+ * A segment that reads as nothing refuses the WHOLE answer — guessing which
+ * half a manager meant is how a wrong tick gets minted.
+ */
+function resolveMultiAnswer(
+  options: string[],
+  text: string,
+): { ok: true; answer: string } | { ok: false; reason: string } {
+  const whole = readRow(text, options);
+  if ("row" in whole) return { ok: true, answer: whole.row };
+  const tokens = text.split(MULTI_ANSWER_SPLIT).map((token) => token.trim()).filter(Boolean);
+  if (tokens.length < 2) return { ok: false, reason: whole.reason };
+  const rows: string[] = [];
+  for (const token of tokens) {
+    const read = readRow(token, options);
+    if ("reason" in read) return { ok: false, reason: `多选答案里有一段读不出来：${read.reason}` };
+    if (!rows.includes(read.row)) rows.push(read.row);
+  }
+  return { ok: true, answer: rows.join(MULTI_ANSWER_JOIN) };
+}
+
 export function resolveAnswer(
   request: PendingRequest,
   raw: string,
@@ -81,46 +142,18 @@ export function resolveAnswer(
   const text = raw.trim();
   if (text.length === 0) return { ok: false, reason: "answer 是空的" };
   if (request.options.length === 0) return { ok: true, answer: text };
-  const exact = request.options.find((option) => option === text);
-  if (exact !== undefined) return { ok: true, answer: exact };
-  // A POSITION, and the whole point of the 2026-09-19 numbering: the rows read
-  // `A. …`, so `A` (or the 1-based `1`, which the channel always accepted) is
-  // how a project manager quotes one back. This is resolved BEFORE the
-  // substring match below, because a single character is a substring of almost
-  // every row — answering `A` must land on row A, never on "which rows happen
-  // to contain an a". The reading itself is the SAME function the pane's own
-  // parser uses (lib/choice-dialog.ts `rowIndexOf`); only what a position past
-  // the end MEANS differs, and that difference is deliberate: a stray position
-  // inside a dialog falls through to free text, while a proxy answer is
-  // refused outright.
-  const rowIndex = rowIndexOf(text);
-  if (rowIndex !== undefined) {
-    const picked = request.options[rowIndex];
-    if (picked !== undefined) return { ok: true, answer: picked };
-    return {
-      ok: false,
-      reason: `"${text}" 超出选项范围（只有 ${request.options.length} 个选项）`,
-    };
-  }
   // THE TEMPLATE'S DECLINE ROW (2026-09-08): the user (or the PM) picks
   // `✎ 不选，我说明原因` and the reason follows the row after a colon. That
   // whole line is a legitimate answer — the reason is the point — so it is
-  // accepted verbatim rather than rejected as an unknown option.
+  // accepted verbatim rather than rejected as an unknown option. It is read
+  // BEFORE the rows for BOTH shapes, and it is the same row either way.
   const decline = request.options.find(looksLikeDeclineRow);
   if (decline !== undefined && text.startsWith(decline)) return { ok: true, answer: text };
-  // Substring match, but ONLY when it is unambiguous. A prefix that matches
-  // two rows is exactly how a supervisor picks the wrong one by accident.
-  const hits = request.options.filter((option) => option.includes(text));
-  if (hits.length === 1) return { ok: true, answer: hits[0]! };
-  if (hits.length > 1) {
-    return { ok: false, reason: `"${text}" 同时匹配 ${hits.length} 个选项，不敢替它选` };
-  }
-  return {
-    ok: false,
-    reason:
-      `"${text}" 不是这个框里的任何一项。可选：` +
-      request.options.join(" / "),
-  };
+  // SEVERAL ANSWERS ARE LEGAL ON A CHECKBOX QUESTION ONLY (2026-09-22); a
+  // radio question keeps the single-row reading it always had.
+  if (request.multiple) return resolveMultiAnswer(request.options, text);
+  const read = readRow(text, request.options);
+  return "reason" in read ? { ok: false, reason: read.reason } : { ok: true, answer: read.row };
 }
 
 // ---------------------------------------------------------------------------
@@ -832,6 +865,9 @@ export function registerOrchestratorAnswerTool(host: ToolHost, deps: Orchestrato
       "comparison you made against the plan task — and is bounded by constraint 8: the draft " +
       "checked is the one the CHILD wrote into the channel, so no text you could pass can widen " +
       "what was approved, and a station looser than the approved plan's is refused. " +
+      "A CHECKBOX question (the receipt marks it 「多选题（可答多项）」) takes SEVERAL answers: " +
+      "write them as `A, C` — commas, 、, spaces, `+` and `/` all separate them — and it accepts " +
+      "a single `A` too; a row it cannot read refuses the whole answer rather than guessing. " +
       "A child's `ask_user` INTERVIEW arrives as a batch (its questions share a batch stamp and " +
       "all of them are in the receipt at once): answer the whole thing in ONE call with " +
       "`answers: [{requestId, answer}, ...]` instead of one call per question. Every item is " +

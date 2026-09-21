@@ -129,6 +129,14 @@ export async function raceWithUserProxy<T>(input: {
   startProxy: () => Promise<ProxyChoice | undefined>;
   /** The rows the answer must be one of, verbatim. Empty ⇒ the proxy is not asked. */
   options: readonly string[];
+  /**
+   * MAY THE PROXY PICK SEVERAL ROWS? — a checkbox question (2026-09-22). The
+   * rows look identical either way, so without this flag a proxy answering a
+   * checklist with more than one tick would be read as an answer that is not
+   * one of the options, and the whole question would settle as “nobody
+   * answered”.
+   */
+  multiple?: boolean;
   timeoutMs?: number;
   schedule?: ProxyScheduler;
   now?: () => number;
@@ -180,7 +188,8 @@ export async function raceWithUserProxy<T>(input: {
             // downstream, so it is enforced on the single path every proxy
             // answer travels.
             const choice = decision?.choice;
-            if (decision === undefined || typeof choice !== "string" || !input.options.includes(choice)) {
+            if (decision === undefined || typeof choice !== "string" ||
+              !isAcceptedProxyChoice(choice, input.options, input.multiple === true)) {
               finish({ answer: undefined, proxyFailed: true });
               return;
             }
@@ -204,6 +213,32 @@ export async function raceWithUserProxy<T>(input: {
 }
 
 /**
+ * The separator a MULTIPLE-CHOICE proxy answer joins its rows with — the same
+ * one `lib/multi-choice-dialog.ts` writes.
+ */
+const PROXY_MULTI_JOIN = " / ";
+
+/**
+ * IS THIS A ROW THE PROXY MAY PICK? — the check that makes a proxied answer
+ * indistinguishable from a human one, on BOTH shapes (2026-09-22).
+ *
+ * A radio question takes exactly one row. A checkbox question may take several,
+ * written the way the rest of the gate writes them (`A. 甲 / C. 丙`), and every
+ * segment still has to be a row somebody offered — the check is WIDENED BY
+ * SHAPE, never loosened. A row nobody offered, or a string that joins nothing,
+ * settles as “nobody answered”, which is the safe direction.
+ */
+export function isAcceptedProxyChoice(
+  choice: string,
+  options: readonly string[],
+  multiple: boolean,
+): boolean {
+  if (!multiple) return options.includes(choice);
+  const segments = choice.split(PROXY_MULTI_JOIN).map((segment) => segment.trim()).filter(Boolean);
+  return segments.length > 0 && segments.every((segment) => options.includes(segment));
+}
+
+/**
  * The proxy's own task, as `runArbiter` takes it.
  *
  * IT IS TOLD WHAT IT IS, because that is the whole difference between a
@@ -219,6 +254,8 @@ export const PROXY_SYSTEM_PROMPT = [
   "- 你会先拿到问题的完整文本、全部选项、每个选项的后果，以及这个会话的上下文（transcript 文件路径）。",
   "- **先去读上下文**：这个会话在做什么、进行到哪一步、有没有更重要的约束。不要只看选项的字面意思就选。",
   "- 从给定的选项里选一个，`choice` 必须与某个选项**逐字完全相同**（不要改写、不要加标点、不要只写序号）。",
+  "- 题目说明它**是多选题**时，`choice` 可以是多个选项用 `\" / \"` 连接（例如 `A. 甲 / C. 丙`）：" +
+  "每一段仍须与某个选项逐字完全相同，至少一段。",
   "- 你的决定会被标注「由 arbiter 代为决定」并记下来，用户回来可以推翻。所以要选你**真的**认为合理的那个，不要为了保守而敷衍。",
   "- 选项之外的东西一律不产生效果：候选之外的字符串会被丢弃，等同于没有人回答。",
   "- 信息实在不足以判断时，输出 `null`。",
@@ -235,6 +272,8 @@ export interface ProxyPromptInput {
   title: string;
   /** The rows, in order. The answer must be one of these, verbatim. */
   options: readonly string[];
+  /** This is a CHECKBOX question: the answer may name several rows (2026-09-22). */
+  multiple?: boolean;
   /** The body the human would have read (consequences, untrusted data, …). */
   body?: string;
   /** Where the conversation lives, for the proxy to grep on demand. */
@@ -256,7 +295,9 @@ export function buildProxyPrompt(input: ProxyPromptInput): string {
     input.title.trim(),
     `</question>`,
     "",
-    "选项（`choice` 必须是其中某一条的原文）：",
+    input.multiple
+      ? "选项（多选题：`choice` 可以是其中若干条的原文，用 \" / \" 连接，例如 `A. 甲 / C. 丙`）："
+      : "选项（`choice` 必须是其中某一条的原文）：",
     ...input.options.map((o, i) => `  ${i + 1}. ${o}`),
   ];
   if (input.body && input.body.trim() !== "") {
@@ -278,7 +319,9 @@ export function buildProxyPrompt(input: ProxyPromptInput): string {
   }
   lines.push(
     "",
-    "先读上下文，再从上面的选项里逐字选一个。路径读不到、或读完仍判断不了时，就输出 null ——" +
+    (input.multiple
+      ? "先读上下文，再从上面的选项里逐字选出你要的那几条（多条用 \" / \" 连接）。路径读不到、或读完仍判断不了时，就输出 null ——"
+      : "先读上下文，再从上面的选项里逐字选一个。路径读不到、或读完仍判断不了时，就输出 null ——") +
       "门禁把 null 当作「没有人回答」，这是安全的方向；猜一个没有依据的答案则不是。",
   );
   return lines.join("\n");

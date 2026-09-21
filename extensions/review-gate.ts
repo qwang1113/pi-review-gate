@@ -614,6 +614,13 @@ import {
   type ChoiceSpec,
   type ChoiceUi,
 } from "../lib/choice-dialog.ts";
+import {
+  buildMultiChoiceBox,
+  renderMultiChoice,
+  type MultiChoiceHost,
+  type MultiChoiceTheme,
+  type MultiSelectOutcome,
+} from "../lib/multi-choice-dialog.ts";
 // The model-chain diagnosis and the /gate-doctor checks are reached only
 // through lib/gate-diagnosis-commands.ts now — this file wires that module,
 // it no longer runs either diagnosis itself.
@@ -5196,7 +5203,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * the signal-less fallback still stops being waited on — live in
    * lib/reason-editor.ts; what is here is only the wiring.
    */
-  async function reasonBoxUi(host: ChoiceUi | undefined): Promise<ChoiceUi | undefined> {
+  async function reasonBoxUi(host: ChoiceUi | undefined): Promise<(ChoiceUi & MultiChoiceHost) | undefined> {
     const pi = host as (ChoiceUi & {
       custom?: ExtensionUIContext["custom"];
       editor?: ExtensionUIContext["editor"];
@@ -5206,11 +5213,21 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const own = pi?.editor ? hostEditorFallback(pi.editor.bind(pi)) : undefined;
     const custom = pi?.custom;
     const Component = custom ? await loadEditorComponent() : undefined;
+    // THE CHECKBOX SHAPE NEEDS NO PI COMPONENT CLASS (2026-09-22): it renders
+    // its own lines and only borrows `ui.custom` to get on screen. So it is
+    // wired off the SAME `custom` the reason box uses, before the branch below.
+    const multiSelect: MultiChoiceHost["multiSelect"] = custom
+      ? (title, spec, opts = {}) => mountMultiChoice(custom.bind(pi) as CustomDialogHost, title, spec, opts)
+      : undefined;
     // No pi package to resolve, or no custom components on this host (RPC):
     // the host's own editor — ADAPTED, never handed our options.
-    if (!custom || !Component) return own ? { ...host, editor: own } : host;
+    if (!custom || !Component) {
+      const ui = own ? { ...host, editor: own } : host;
+      return multiSelect ? { ...ui, multiSelect } : ui;
+    }
     return {
       ...host,
+      ...(multiSelect ? { multiSelect } : {}),
       editor: hostReasonEditor({
         custom: custom.bind(pi) as CustomDialogHost,
         ...(own ? { fallback: own } : {}),
@@ -5233,6 +5250,43 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         },
       }),
     };
+  }
+
+  /**
+   * MOUNT THE CHECKBOX BOX onto pi's `ui.custom` — the same abort discipline
+   * the reason box has (lib/reason-editor.ts), for the same reason: this
+   * gate's dialogs are raced against a project manager's answer, and a box
+   * that cannot be taken down collects ticks nobody will ever read.
+   *
+   * A HOST THAT CANNOT MOUNT IT SAYS SO (RPC resolves `undefined` WITHOUT
+   * running the factory). That `undefined` is then the caller's own “nothing
+   * was shown”, never an invented empty answer.
+   */
+  function mountMultiChoice(
+    custom: CustomDialogHost,
+    title: string,
+    spec: ChoiceSpec,
+    opts: { signal?: AbortSignal; back?: boolean } = {},
+  ): Promise<MultiSelectOutcome | undefined> {
+    if (opts.signal?.aborted) return Promise.resolve({ kind: "dismissed" });
+    return custom<MultiSelectOutcome | undefined>((tui, theme, _keybindings, done) => {
+      let settled = false;
+      const finish = (value: MultiSelectOutcome | undefined) => {
+        if (settled) return;
+        settled = true;
+        done(value);
+      };
+      opts.signal?.addEventListener("abort", () => finish({ kind: "dismissed" }), { once: true });
+      if (opts.signal?.aborted) queueMicrotask(() => finish({ kind: "dismissed" }));
+      return buildMultiChoiceBox({
+        title,
+        spec,
+        ...(opts.back ? { back: true } : {}),
+        theme: theme as unknown as MultiChoiceTheme,
+        done: finish,
+        requestRender: () => (tui as { requestRender?: () => void } | undefined)?.requestRender?.(),
+      });
+    });
   }
 
   /**
@@ -5271,6 +5325,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // answer may take: `raceWithUserProxy` refuses anything else, which is what
       // makes a proxied answer indistinguishable downstream.
       options: spec.options,
+      // A CHECKBOX QUESTION TAKES SEVERAL (2026-09-22): the proxy may name
+      // several rows, and the check that accepts them widens by SHAPE only.
+      ...(spec.defaultChecked === undefined ? {} : { multiple: true }),
       ...(body === undefined ? {} : { body }),
       ...(transcript === undefined ? {} : { transcript }),
       // WHICH REPO THE PROXY IS ASKED ABOUT (review round 3 P1): the same one
@@ -5385,7 +5442,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * `undefined` is then read as "somebody else settled this", not as a
    * refusal (lib/orchestrator-child-channel.ts owns that distinction).
    */
-  async function askChoice(
+  async function askDialog(
     uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
     opts: {
@@ -5395,6 +5452,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       repo?: string;
       onUndecided?: () => void;
     } = {},
+    /**
+     * WHICH OF THE TWO SHAPES IS DRAWN (2026-09-22). Everything else about a
+     * dialog is shape-free — the queue, the banner, the thirty-minute proxy
+     * race and the record all belong to the WORDS being asked, not to how the
+     * rows are drawn — so the shape travels as this one flag rather than as a
+     * second copy of a five-hundred-line function.
+     */
+    checkbox = false,
   ): Promise<string | undefined> {
     // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
     // is a getter that asserts the context is still alive, and a dialog can wait
@@ -5466,11 +5531,18 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // `ExtensionContext.signal`, which is what an ESC aborts. Passing only the
       // caller's own signal left a box on screen after the user cancelled the
       // run, and the tool waiting on it never came back.
-      const answer = await renderChoice(await reasonBoxUi(uiCtx.ui), spec, {
-        ...(opts.body === undefined ? {} : { body: opts.body }),
-        ...(opts.back ? { back: true } : {}),
-        ...(signal ? { signal } : {}),
-      });
+      const answerBox = await reasonBoxUi(uiCtx.ui);
+      const answer = checkbox
+        ? await renderMultiChoice(answerBox, spec, {
+          ...(opts.body === undefined ? {} : { body: opts.body }),
+          ...(opts.back ? { back: true } : {}),
+          ...(signal ? { signal } : {}),
+        })
+        : await renderChoice(answerBox, spec, {
+          ...(opts.body === undefined ? {} : { body: opts.body }),
+          ...(opts.back ? { back: true } : {}),
+          ...(signal ? { signal } : {}),
+        });
       // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
       // dialog the gate shows — ask_user's interview, the restatement / goal /
       // plan approvals, the consent boxes for sensitive edits and scope limits —
@@ -5501,6 +5573,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       direct: asked,
       displayed,
       options: spec.options,
+      ...(spec.defaultChecked === undefined ? {} : { multiple: true }),
       startProxy: () => proxyAnswerFor(spec, opts.body, dialogRoot),
     });
     // Whatever settled it, the box is done — see `settledBy` above.
@@ -5528,6 +5601,24 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       try { opts.onUndecided?.(); } catch { /* the caller's own bookkeeping */ }
     }
     return decided.answer;
+  }
+
+  /** The radio shape — one answer (lib/choice-dialog.ts). */
+  async function askChoice(
+    uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
+    spec: ChoiceSpec,
+    opts: { body?: string; signal?: AbortSignal; back?: boolean; repo?: string; onUndecided?: () => void } = {},
+  ): Promise<string | undefined> {
+    return askDialog(uiCtx, spec, opts, false);
+  }
+
+  /** The checkbox shape — several answers (lib/multi-choice-dialog.ts). */
+  async function askMultiChoice(
+    uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
+    spec: ChoiceSpec,
+    opts: { body?: string; signal?: AbortSignal; back?: boolean; repo?: string; onUndecided?: () => void } = {},
+  ): Promise<string | undefined> {
+    return askDialog(uiCtx, spec, opts, true);
   }
 
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
@@ -11986,6 +12077,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     setLoopArmed: (armed) => { loopArmed = armed; },
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as Parameters<typeof showToUser>[0], lead, body),
     askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
+    askMultiChoice: (uiCtx, spec, opts) => askMultiChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
     canChannelDialogs: () => childBinding() !== undefined,
     grantProxyScope: (scope, via) => {

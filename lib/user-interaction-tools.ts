@@ -52,6 +52,7 @@ import {
   buildNoDialogNotice,
   progressLabel,
   choiceSpecOf,
+  questionRows,
   resolveQuestion,
   stepInterview,
 
@@ -64,6 +65,7 @@ import {
   type QuestionResolution,
 } from "./ask-user.ts";
 import { choiceRows, MAX_CHOICE_OPTIONS } from "./choice-dialog.ts";
+import { multiSelectionLabel } from "./multi-choice-dialog.ts";
 // The batch id is minted with the same collision-resistant helper the channel
 // uses for its own record ids — one generator, not a second convention.
 import { newChannelId } from "./orchestrator-channel.ts";
@@ -113,6 +115,18 @@ export interface UserInteractionToolDeps {
    * reads with `stepInterview`.
    */
   askChoice(
+    uiCtx: unknown,
+    spec: ChoiceSpec,
+    opts?: AskChoiceOpts,
+  ): Promise<string | undefined>;
+  /**
+   * THE CHECKBOX SHAPE (2026-09-22): the same dialog, drawn as a checklist the
+   * user may answer with several ticks. Same contract as {@link askChoice} —
+   * the returned line is the one `lib/multi-choice-dialog.ts` writes (and
+   * `parseMultiChoice` reads), `undefined` is a dismissal — and the same
+   * dialog machinery behind it: one queue, one banner, one proxy race.
+   */
+  askMultiChoice(
     uiCtx: unknown,
     spec: ChoiceSpec,
     opts?: AskChoiceOpts,
@@ -283,7 +297,7 @@ export async function doAskUser(
   // the dialogs close.
   deps.showToUser(uiCtx, "───── AI 有问题要问你 ─────", questions.map((q, i) =>
     `${progressLabel(i, questions.length)} ${q.text}${grantNotice(q)}` +
-    `\n   选项：${choiceRows(choiceSpecOf(q)).join(" / ")}`).join("\n"));
+    `\n   选项：${questionRows(q).join(" / ")}`).join("\n"));
 
   // An interview interrupted earlier (crash, restart, or the agent
   // re-submitting the same list) resumes where it stopped: the questions
@@ -435,11 +449,14 @@ export async function doAskUser(
     let cursor = anchor;
     for (;;) {
       const q = questions[cursor]!;
-      const picked = await deps.askChoice(
-        uiCtx,
-        { ...choiceSpecOf(q), title: questionDialogTitle(q, cursor, questions.length) },
-        { body: q.text, signal, back: cursor > 0 },
-      );
+      // ONE dialog per question, whichever of the two shapes it is: the box,
+      // the queue, the banner and the proxy race are all behind these two
+      // seams, and only the RENDERING differs (radio list vs checklist).
+      const spec = { ...choiceSpecOf(q), title: questionDialogTitle(q, cursor, questions.length) };
+      const opts = { body: q.text, signal, back: cursor > 0 };
+      const picked = q.multiple
+        ? await deps.askMultiChoice(uiCtx, spec, opts)
+        : await deps.askChoice(uiCtx, spec, opts);
       const step = stepInterview({ anchor, cursor }, picked);
       if (step.kind === "render") { cursor = step.cursor; continue; }
       if (step.kind === "answerCurrent") return step.picked;
@@ -454,11 +471,13 @@ export async function doAskUser(
   const asks = remaining.map((q, offset) => {
     const index = firstIndex + offset;
     const prompt = `问题 ${progressLabel(index, questions.length)}\n${q.text}${grantNotice(q)}`;
-    const choices = choiceRows(choiceSpecOf(q));
+    const choices = questionRows(q);
     // EITHER the user or the project manager may answer (when this session is
     // an orchestration child). The channel request carries the question and
     // every row VERBATIM, which is why the supervisor never had to read this
-    // screen — and never mis-parsed it.
+    // screen — and never mis-parsed it. A checklist also carries its shape and
+    // the group its author recommends, so a manager answering for the user
+    // knows that several answers are wanted and what a bare “approve” means.
     return deps.askEitherSide(
       {
         // Every question is a choice question now (2026-09-08): the template
@@ -467,7 +486,10 @@ export async function doAskUser(
         topic: "ask-user",
         title: prompt,
         options: choices,
-        payload: `推荐答案：${q.recommended}`,
+        ...(q.multiple ? { multiple: true as const } : {}),
+        payload: q.multiple
+          ? `多选题（可以勾选多项）· 推荐勾选：${multiSelectionLabel(q.defaultChecked ?? [], q.options) || "（一项都不勾）"}`
+          : `推荐答案：${q.recommended}`,
         ...(batchId === undefined
           ? {}
           : { batch: { id: batchId, index, total: questions.length } }),
@@ -591,7 +613,14 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
       "any more. The gate runs the interview: one question at a time with its N / M progress, " +
       "and closing a box stops the rest — they come back unanswered. Every answer comes back at " +
       "once. Write " +
-      "questions that stand on their own. When later questions depend on the answer to an " +
+      "questions that stand on their own. A MULTIPLE-CHOICE question sets `multiple: true` and " +
+      "MUST then give `defaultChecked` — the boxes the checklist opens TICKED, i.e. the group you " +
+      "recommend, and exactly what a user who presses Enter without touching anything submits " +
+      "(`[]` recommends none of them). Such a question needs NO `recommended`, and an empty " +
+      "checklist answer is a real answer, not a skip. " +
+      "WRITE OPTION TEXTS WITHOUT THEIR OWN NUMBERING — the gate prefixes every row with `A. `, " +
+      "`B. ` … itself, so an option written `A. 甲` would reach the user as `A. A. 甲`. " +
+      "When later questions depend on the answer to an " +
       "earlier one (pick an architecture, then its details), call ask_user AGAIN for the " +
       "follow-up round instead of guessing the branch. ASK AS MANY AS THE REQUIREMENT IS " +
       `WORTH: the interview itself is optional (no doubts ⇒ no questions), and there is NO cap on ` +
@@ -605,11 +634,17 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
         Type.Object({
           text: Type.String({ description: "The complete question, with the context the user needs to decide" }),
           options: Type.Array(Type.String(), {
-            description: `The choices: ${MAX_CHOICE_OPTIONS} at most, 2 at least, each one short enough to read in a dialog row`,
+            description: `The choices: ${MAX_CHOICE_OPTIONS} at most, 2 at least, each one short enough to read in a dialog row. Write the TEXT ONLY — the gate adds the \`A. / B. \` numbering itself.`,
           }),
-          recommended: Type.String({
-            description: "Your own recommendation — MUST be exactly one of `options` (the gate rejects the batch otherwise)",
-          }),
+          recommended: Type.Optional(Type.String({
+            description: "Your own recommendation — MUST be exactly one of `options` on a radio question (the gate rejects the batch otherwise). Optional on a `multiple` question, where `defaultChecked` plays that role.",
+          })),
+          multiple: Type.Optional(Type.Boolean({
+            description: "This question takes SEVERAL answers — a checkbox list. Requires `defaultChecked`.",
+          })),
+          defaultChecked: Type.Optional(Type.Array(Type.String(), {
+            description: "REQUIRED when `multiple` is true: the options the checklist opens TICKED — the group you recommend, and what a plain Enter submits. `[]` recommends none of them.",
+          })),
         }),
         { description: "The questions, asked in order" },
       ),

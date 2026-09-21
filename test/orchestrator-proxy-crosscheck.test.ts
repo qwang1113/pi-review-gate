@@ -206,6 +206,45 @@ test("a bare LETTER answers the row it names — never a substring match (2026-0
   assert.equal(answerOf("2"), "B. 停止");
 });
 
+test("a CHECKBOX question takes several rows — and only a checkbox does (2026-09-22)", () => {
+  const checkbox = {
+    requestId: "r2",
+    title: "开哪几个环节？",
+    multiple: true,
+    options: ["[x] A. 预检", "[ ] B. 质量审查", "[ ] C. precommit", DECLINE_ROW],
+  } as unknown as Parameters<typeof resolveAnswer>[0];
+  const answerOf = (text: string): string | undefined => {
+    const got = resolveAnswer(checkbox, text);
+    return got.ok ? got.answer : undefined;
+  };
+
+  // Several rows, in whatever punctuation a human reaches for — the child side
+  // parses ONE canonical spelling, so normalizing it is this function's job.
+  const both = "[x] A. 预检 / [ ] C. precommit";
+  for (const text of ["A, C", "A、C", "A C", "A+C", "A/C"]) {
+    assert.equal(answerOf(text), both, text);
+  }
+  assert.equal(answerOf("预检、precommit"), both, "the option's own text names the row too");
+  assert.equal(answerOf("A A"), "[x] A. 预检", "a repeat is one tick, not two");
+  assert.equal(answerOf("B"), "[ ] B. 质量审查", "a single row is still the common case");
+  assert.equal(answerOf(DECLINE_ROW) === DECLINE_ROW, true, "✎ stays a legitimate answer on both shapes");
+
+  // A segment nobody can read refuses the WHOLE answer: guessing which half a
+  // manager meant is how a wrong tick gets minted.
+  for (const text of ["A, Z", "预检, 不存在"]) {
+    const refused = resolveAnswer(checkbox, text);
+    assert.equal(refused.ok, false, text);
+    if (!refused.ok) assert.match(refused.reason, /读不出来/);
+  }
+  assert.equal(resolveAnswer(checkbox, "").ok, false, "an empty answer is not “tick none of them”");
+
+  // THE RADIO READING IS UNTOUCHED: on a single-choice question `A, C` is still
+  // not a row, and is still refused.
+  const radio = { ...checkbox, multiple: undefined } as unknown as Parameters<typeof resolveAnswer>[0];
+  const radioAnswer = resolveAnswer(radio, "A, C");
+  assert.equal(radioAnswer.ok, false);
+});
+
 // ---------------------------------------------------------------------------
 // Through the tool.
 

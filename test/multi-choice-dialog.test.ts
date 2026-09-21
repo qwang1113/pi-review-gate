@@ -1,0 +1,277 @@
+/**
+ * THE CHECKBOX SHAPE — rows, parsing, the key state machine, the box itself.
+ *
+ * WHAT MAKES THIS SHAPE WORTH A SECOND FILE is the one promise it has to keep
+ * in common with the radio list: 「直接回车 ＝ 接受提问方的推荐」. A radio
+ * question's recommendation is `recommended`; a checkbox question's is
+ * `defaultChecked`, and the initial state below IS that group — so `Enter`
+ * with nothing touched must submit exactly it.
+ *
+ * Everything is driven through the pure layers (text + state machine) and
+ * through the component's own `render`/`handleInput`, which is what a terminal
+ * would drive. No pi runtime is involved: the box renders its own lines.
+ */
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { BACK_ROW, DECLINE_ROW, type ChoiceSpec, type ChoiceUi } from "../lib/choice-dialog.ts";
+import {
+  MULTI_ANSWER_SEPARATOR,
+  buildMultiChoiceBox,
+  multiChoiceKey,
+  multiChoiceRow,
+  multiChoiceRows,
+  multiChoiceStart,
+  multiSelectionLabel,
+  parseMultiChoice,
+  renderMultiChoice,
+  truncateToWidth,
+  type MultiSelectOutcome,
+} from "../lib/multi-choice-dialog.ts";
+
+const spec = (over: Partial<ChoiceSpec> = {}): ChoiceSpec => ({
+  title: "开哪几个环节？",
+  options: ["预检", "quality 审查", "功能审查", "precommit"],
+  defaultChecked: ["预检", "quality 审查"],
+  ...over,
+});
+
+/** A box driven the way a terminal drives it, collecting what it answered. */
+function boxOf(spec_: ChoiceSpec, opts: { back?: boolean } = {}) {
+  const outcomes: MultiSelectOutcome[] = [];
+  let renders = 0;
+  const box = buildMultiChoiceBox({
+    title: spec_.title,
+    spec: spec_,
+    ...(opts.back ? { back: true } : {}),
+    done: (outcome) => outcomes.push(outcome),
+    requestRender: () => { renders += 1; },
+  });
+  return { box, outcomes, renders: () => renders };
+}
+
+// ---- the rows ----
+
+test("every option row carries its letter AND its checkbox", () => {
+  assert.equal(multiChoiceRow("预检", spec(), 0, true), "[x] A. 预检");
+  assert.equal(multiChoiceRow("功能审查", spec(), 2, false), "[ ] C. 功能审查");
+  assert.deepEqual(multiChoiceRows(spec(), ["预检"]), [
+    "[x] A. 预检",
+    "[ ] B. quality 审查",
+    "[ ] C. 功能审查",
+    "[ ] D. precommit",
+    DECLINE_ROW,
+  ]);
+});
+
+test("a recommendation the author does give is still marked — it is just optional", () => {
+  const rows = multiChoiceRows(spec({ recommended: "功能审查" }), []);
+  assert.deepEqual(rows.slice(0, 2), ["[ ] A. 预检", "[ ] B. quality 审查"]);
+  assert.equal(rows[2], "[ ] C. 功能审查（推荐）");
+});
+
+test("the navigation rows carry NO checkbox — they are not things you tick", () => {
+  const rows = multiChoiceRows(spec(), [], { back: true });
+  assert.equal(rows.at(-2), DECLINE_ROW);
+  assert.equal(rows.at(-1), BACK_ROW);
+  assert.ok(!rows.at(-1)!.startsWith("["));
+  assert.ok(!rows.at(-2)!.startsWith("["));
+});
+
+// ---- the label ----
+
+test("the answer is written in the OPTION LIST'S order, whatever order they were ticked", () => {
+  assert.equal(
+    multiSelectionLabel(["功能审查", "预检"], spec().options),
+    `A. 预检${MULTI_ANSWER_SEPARATOR}C. 功能审查`);
+  assert.equal(multiSelectionLabel([], spec().options), "", "nothing ticked is an empty answer, not a missing one");
+});
+
+// ---- parsing ----
+
+test("an empty confirmed answer is a list of none — never a dismissal", () => {
+  assert.deepEqual(parseMultiChoice("", spec()), { kind: "chose", options: [] });
+  assert.deepEqual(parseMultiChoice(undefined, spec()), { kind: "dismissed" });
+});
+
+test("every spelling of the same tick lands on the same option", () => {
+  for (const picked of ["A", "a", "A.", "1", "预检", "A. 预检"]) {
+    assert.deepEqual(parseMultiChoice(picked, spec()), { kind: "chose", options: ["预检"] }, picked);
+  }
+});
+
+test("several ticks come back as several options, in option order", () => {
+  assert.deepEqual(
+    parseMultiChoice(`A. 预检${MULTI_ANSWER_SEPARATOR}C. 功能审查`, spec()),
+    { kind: "chose", options: ["预检", "功能审查"] });
+  assert.deepEqual(parseMultiChoice("C / A", spec()), { kind: "chose", options: ["预检", "功能审查"] });
+  assert.deepEqual(parseMultiChoice("预检 / 预检", spec()), { kind: "chose", options: ["预检"] }, "a repeat is not two ticks");
+});
+
+test("the decline row is the same row it is on the radio list, reason included", () => {
+  assert.deepEqual(parseMultiChoice(DECLINE_ROW, spec()), { kind: "declined", reason: "" });
+  assert.deepEqual(parseMultiChoice(`${DECLINE_ROW}：都不开`, spec()), { kind: "declined", reason: "都不开" });
+});
+
+test("a quoted row may still carry its checkbox — the mark is stripped, not refused", () => {
+  assert.deepEqual(parseMultiChoice("[ ] A. 预检", spec()), { kind: "chose", options: ["预检"] });
+  assert.deepEqual(
+    parseMultiChoice(`[x] A. 预检${MULTI_ANSWER_SEPARATOR}[ ] C. 功能审查`, spec()),
+    { kind: "chose", options: ["预检", "功能审查"] });
+});
+
+test("a line nobody can read says so instead of guessing ticks", () => {
+  assert.deepEqual(parseMultiChoice("Z", spec()), { kind: "unreadable", text: "Z" });
+  assert.deepEqual(parseMultiChoice("预检 / 不存在", spec()), { kind: "unreadable", text: "预检 / 不存在" });
+});
+
+// ---- the state machine ----
+
+test("the list OPENS on the group its author recommends — that is what Enter accepts", () => {
+  assert.deepEqual(multiChoiceStart(spec()).checked, ["预检", "quality 审查"]);
+  assert.deepEqual(multiChoiceStart(spec({ defaultChecked: [] })).checked, []);
+});
+
+test("space ticks and untickes the row under the cursor, and nothing else", () => {
+  const s = multiChoiceStart(spec({ defaultChecked: [] }));
+  const down = multiChoiceKey(s, spec(), "\u001b[B");
+  assert.equal(down.kind, "redraw");
+  const ticked = multiChoiceKey((down as { state: typeof s }).state, spec(), " ");
+  assert.equal(ticked.kind, "redraw");
+  assert.deepEqual((ticked as { state: typeof s }).state.checked, ["quality 审查"]);
+  const unticked = multiChoiceKey((ticked as { state: typeof s }).state, spec(), " ");
+  assert.deepEqual((unticked as { state: typeof s }).state.checked, []);
+});
+
+test("j/k move like the arrows, and the cursor WRAPS at both ends", () => {
+  const s = multiChoiceStart(spec());
+  assert.equal((multiChoiceKey(s, spec(), "j") as { state: { cursor: number } }).state.cursor, 1);
+  assert.equal((multiChoiceKey(s, spec(), "k") as { state: { cursor: number } }).state.cursor, 4,
+    "up from the first row lands on the decline row (5 rows)");
+  const last = { ...s, cursor: 4 };
+  assert.equal((multiChoiceKey(last, spec(), "j") as { state: { cursor: number } }).state.cursor, 0);
+});
+
+test("space on a navigation row does nothing — a tick cannot be put on ✎ or ←", () => {
+  const onDecline = { ...multiChoiceStart(spec()), cursor: 4 };
+  assert.deepEqual(multiChoiceKey(onDecline, spec(), " "), { kind: "none" });
+  const onBack = { ...multiChoiceStart(spec()), cursor: 5 };
+  assert.deepEqual(multiChoiceKey(onBack, spec(), " ", { back: true }), { kind: "none" });
+});
+
+test("Enter submits the ticks — including an EMPTY list, which is a real answer", () => {
+  assert.deepEqual(multiChoiceKey(multiChoiceStart(spec()), spec(), "\r"), {
+    kind: "submit",
+    options: ["预检", "quality 审查"],
+  });
+  assert.deepEqual(multiChoiceKey(multiChoiceStart(spec({ defaultChecked: [] })), spec(), "\r"), {
+    kind: "submit",
+    options: [],
+  });
+});
+
+test("Enter on the decline row declines, and on the way back it goes back", () => {
+  const onDecline = { ...multiChoiceStart(spec()), cursor: 4 };
+  assert.deepEqual(multiChoiceKey(onDecline, spec(), "\r"), { kind: "decline" });
+  const onBack = { ...multiChoiceStart(spec()), cursor: 5 };
+  assert.deepEqual(multiChoiceKey(onBack, spec(), "\r", { back: true }), { kind: "back" });
+  assert.deepEqual(multiChoiceKey(multiChoiceStart(spec()), spec(), "\u001b"), { kind: "close" });
+  assert.deepEqual(multiChoiceKey(multiChoiceStart(spec()), spec(), "x"), { kind: "none" });
+});
+
+// ---- the box ----
+
+test("the box renders its title, its rows and a footer, and finishes exactly once", () => {
+  const { box, outcomes, renders } = boxOf(spec());
+  const lines = box.render(80);
+  assert.equal(lines[0], "开哪几个环节？");
+  assert.match(lines[2]!, /❯ \[x\] A\. 预检/);
+  assert.match(lines[3]!, /^ {2}\[x\] B\. quality 审查/);
+  assert.match(lines.at(-1)!, /空格/);
+
+  box.handleInput("\u001b[B");
+  box.handleInput(" ");
+  assert.equal(renders(), 2, "each state change asks the TUI to redraw");
+  box.handleInput("\r");
+  box.handleInput("\r");
+  assert.deepEqual(outcomes, [{ kind: "picked", options: ["预检"] }], "the second Enter is after the box is gone");
+});
+
+test("a disposed box answers nothing — the host took it off the screen", () => {
+  const { box, outcomes } = boxOf(spec());
+  box.dispose();
+  box.handleInput("\r");
+  assert.deepEqual(outcomes, []);
+});
+
+test("every rendered line fits the width it was given", () => {
+  const { box } = boxOf(spec({ options: ["一个很长很长很长很长的环节名字", "短的"] }));
+  // The measurement is the TERMINAL'S notion of a cell, which is what the
+  // truncation has to satisfy: CJK is two columns, everything the gate draws
+  // itself (`❯`, `…`, `[x]`, ANSI escapes) is one or none.
+  const wide = (cp: number) =>
+    (cp >= 0x1100 && cp <= 0x115f) ||
+    (cp >= 0x2e80 && cp <= 0xa4cf) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xff00 && cp <= 0xff60);
+  for (const line of box.render(12)) {
+    let visible = 0;
+    for (const char of line.replace(/\u001b\[[0-9;]*m/g, "")) visible += wide(char.codePointAt(0)!) ? 2 : 1;
+    assert.ok(visible <= 12, `“${line}” is ${visible} cells wide`);
+  }
+});
+
+// ---- width ----
+
+test("truncation counts CELLS: a wide character is two, an escape is none", () => {
+  assert.equal(truncateToWidth("abc", 2), "a…", "the ellipsis occupies a cell of its own");
+  assert.equal(truncateToWidth("中文", 3), "中…");
+  assert.equal(truncateToWidth("中文", 4), "中文");
+  assert.equal(truncateToWidth("\u001b[31mabc\u001b[0m", 2), "\u001b[31ma…");
+  assert.equal(truncateToWidth("anything", 0), "");
+});
+
+// ---- the dialog ----
+
+test("the dialog returns the line the parser reads, for every outcome", async () => {
+  const ui = (outcome: MultiSelectOutcome) => ({ multiSelect: async () => outcome });
+
+  assert.equal(
+    await renderMultiChoice(ui({ kind: "picked", options: ["功能审查", "预检"] }), spec()),
+    `A. 预检${MULTI_ANSWER_SEPARATOR}C. 功能审查`);
+  assert.equal(await renderMultiChoice(ui({ kind: "picked", options: [] }), spec()), "");
+  assert.equal(await renderMultiChoice(ui({ kind: "back" }), spec()), BACK_ROW);
+  assert.equal(await renderMultiChoice(ui({ kind: "dismissed" }), spec()), undefined);
+  assert.equal(await renderMultiChoice(undefined, spec()), undefined, "no host = nothing shown, never an invented answer");
+});
+
+test("the decline row opens the reason box; what it returns is the row plus the reason", async () => {
+  const hosts: (ChoiceUi & { multiSelect: () => Promise<MultiSelectOutcome> })[] = [];
+  const ui = (reason: string | undefined) => {
+    const host = {
+      multiSelect: async () => ({ kind: "decline" as const }),
+      editor: async () => reason,
+    };
+    hosts.push(host as never);
+    return host;
+  };
+  assert.equal(await renderMultiChoice(ui("都不开"), spec()), `${DECLINE_ROW}：都不开`);
+  assert.equal(await renderMultiChoice(ui(""), spec()), DECLINE_ROW, "an empty reason is still a decline");
+  assert.equal(await renderMultiChoice(ui(undefined), spec()), undefined, "backing out of the box decides nothing");
+});
+
+test("ESC in the reason box re-opens the LIST, on the details the user chose so far", async () => {
+  const seen: Array<string[] | undefined> = [];
+  let first = true;
+  const ui = {
+    multiSelect: async (_title: string, spec_: ChoiceSpec) => {
+      seen.push(spec_.defaultChecked);
+      if (first) { first = false; return { kind: "decline" as const }; }
+      return { kind: "picked" as const, options: ["功能审查"] };
+    },
+    editor: async () => `${"\u0000rg-back\u0000"}都省了吧`,
+  };
+  assert.equal(await renderMultiChoice(ui, spec()), "C. 功能审查");
+  assert.deepEqual(seen, [["预检", "quality 审查"], ["预检", "quality 审查"]],
+    "the ticks survive the round trip through the reason box");
+});

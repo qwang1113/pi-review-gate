@@ -425,12 +425,18 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ### 域 8：用户交互与提示注入
 
-`choice-dialog.ts` 是**门禁唯一的提问模板**（用户决定，2026-09-08；2026-09-19 加字母编号与两道退路）：2–4 个选项
+`choice-dialog.ts` 是**门禁唯一的提问模板**（用户决定，2026-09-08；2026-09-19 加字母编号与两道退路；2026-09-22 加第二种形状）：2–4 个选项
 （每个带 `A. ` 字母编号）+ 一个「（推荐）」标记 + 一行「✎ 不选，我说明原因」，选中该行弹多行理由编辑器、
 原因随答案回传；多题采访从第 2 题起还多一行「← 返回上一题」（它只画给屏幕，通道请求的选项里没有它），
 理由编辑器里按 ESC 退回选项列表、已输入文字保留 —— 选项列表的 ESC 仍然关框停整场采访。
 `ask_user`、门禁自身每一处是/否框、两处手写 `ui.select` 全部渲染它，
-所以屏幕上只有一种对话框形状，`ui.confirm` 在门禁里不再有调用点。
+`ui.confirm` 在门禁里不再有调用点。
+**`multi-choice-dialog.ts` 是第二种形状：复选清单**（2026-09-22，用户决定；同样由门禁自己与 `ask_user` 共用，
+字母编号 / ✎ 行 / ESC 与「← 返回上一题」全部沿用上面那一套）—— 形如 `[x] A. 预检（推荐）` / `[ ] B. …`，
+空格勾选、回车确认（返回被勾选项的结构化列表）、一项都不勾回车也是合法答案（t5-stages 的「环节全关」）；
+形状标记是 `ChoiceSpec.defaultChecked`（**存在即多选**，内容就是清单打开时勾好的那一组）。
+跨两种题型的不变量只有一条：**直接回车 ＝ 接受提问方的推荐** —— 单选题靠必填的 `recommended`，
+多选题靠必填的 `defaultChecked`（缺了整批拒绝，因为它就是那个推荐）。
 `ask-user.ts` 是采访模型（逐题推进、**提问数量无上限**、关框即停与「在聊天里回答」
 的语义，以及 `resolveQuestion`：一题结算下来到底算什么 —— 竞速送达的答案一律作数，
 只有沉默才按「是什么中止了采访」解释），
@@ -443,7 +449,8 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 **没人作答时谁来答**（2026-09-19，用户决定）：每个框弹出满 30 分钟仍无人作答，
 就由 `user-proxy.ts` 交给 `arbiter` 读本会话上下文代答；答案带「由 arbiter 代为决定 + 依据」
 的标记落进 sidecar、在对话区可见，`declare_done` 的完成报告再由门禁机械列出这份清单。
-全部十二个对话点都经过 `extensions/review-gate.ts` 的 `askChoice`，所以计时与竞态只接了
+全部十二个对话点都经过 `extensions/review-gate.ts` 的 `askDialog`（单选 `askChoice` / 多选 `askMultiChoice`
+是它的两个一行转发），所以计时与竞态只接了
 那一处，十二个落点一行未改（AGENTS.md 哲学一：不让 agent 记住多步流程）；
 `agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
 `renderer-mode.ts` 管「这个会话是不是 fullscreen 渲染器」这个读数与对它的提醒（对话框行数预算已于 2026-09-16 删除：产生它的那个闪屏只发生在默认渲染器上，而用户每会话都用 fullscreen；模式来自宿主的 `TUI.mode`，不自己重算配置），
@@ -488,7 +495,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（147 个模块）
+## 五、`lib/` 全量速查表（148 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -508,7 +515,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表；**等待纪律的唯一出处**（`buildWaitDiscipline`：子会话侧 `judge_wait`、项目经理侧 `orchestrator_wait` 共用同三条，只换工具名与消息种类） |
 
 | `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限；模型走 `agents.arbiter.slots[0]`（配置层），不再硬编码 |
-| `ask-user.ts` | `ask_user` 的采访模型：**提问数量无上限**（2026-09-17 起事实如此 —— 旧口径是「尺寸类问题只截断」，而那个 10 问截断会丢掉一批问题的尾巴，agent 被告诉「下一轮再问」后往往不再问、直接改猜）、逐题推进、关框即停与「在聊天里回答」的语义；问题的**形状**（2–4 选项 + 字母编号 + 推荐 + 追加行）不在这里，在 `choice-dialog.ts`。`validateQuestions` 是整批合规判定（缺选项或缺推荐 ⇒ 整批拒绝且不弹框，过长的题/选项只截断并告知）；`resolveQuestion` 是「一题结算算什么」的唯一判定（竞速送达的答案永远作数，只有沉默才解释：**用户关框 ⇒ `stop: true` 停整场**、被 instruct 打断 ⇒ unanswered，两者不可混同，后者由通道自己结算整批）。`stepInterview`（2026-09-19）是**往回退**的纯状态机：`← 返回上一题` 退一格且退不过第 1 题、锚点题作答 ⇒ `answerCurrent`、退回后作答 ⇒ `revise`（只覆盖那一题，被跳过的题保留原答案）、关框 ⇒ 停整场；`AskAnswer.answer` 记屏幕上的写法 `A. 文本`，`option` 留选项原文供门禁自己做比较（授权只认推荐项的原文） |
+| `ask-user.ts` | `ask_user` 的采访模型：**提问数量无上限**（2026-09-17 起事实如此 —— 旧口径是「尺寸类问题只截断」，而那个 10 问截断会丢掉一批问题的尾巴，agent 被告诉「下一轮再问」后往往不再问、直接改猜）、逐题推进、关框即停与「在聊天里回答」的语义；问题的**形状**（2–4 选项 + 字母编号 + 推荐 + 追加行）不在这里，在 `choice-dialog.ts`。`validateQuestions` 是整批合规判定（缺选项或缺推荐 ⇒ 整批拒绝且不弹框，过长的题/选项只截断并告知）；`resolveQuestion` 是「一题结算算什么」的唯一判定（竞速送达的答案永远作数，只有沉默才解释：**用户关框 ⇒ `stop: true` 停整场**、被 instruct 打断 ⇒ unanswered，两者不可混同，后者由通道自己结算整批）。`stepInterview`（2026-09-19）是**往回退**的纯状态机：`← 返回上一题` 退一格且退不过第 1 题、锚点题作答 ⇒ `answerCurrent`、退回后作答 ⇒ `revise`（只覆盖那一题，被跳过的题保留原答案）、关框 ⇒ 停整场；`AskAnswer.answer` 记屏幕上的写法 `A. 文本`，`option` 留选项原文供门禁自己做比较（授权只认推荐项的原文）。**多选题（2026-09-22）**：`multiple` 必须显式带 `defaultChecked`（缺了整批拒绝；`[]` = 推荐一项都不勾），它不需要 `recommended`（给了就照样标（推荐））、不允许 `grantScope`（授权必须唯一）；答案记成 `A. 预检 / C. precommit`（选项顺序）加结构化的 `AskAnswer.options`，空勾选记成 `MULTI_NONE_ANSWER`（是答案，不是沉默），`questionRows` 是「这道题在文本里长什么样」的唯一出处（多选 ⇒ 勾选框形态），采访、transcript 与 headless 通知共用 |
 | `async-precommit-report.ts` | 后台 full precommit 落地时那条通知的**措辞 + 是否还算数**（2026-09-12；PASS 侧 2026-09-16）：`buildAsyncPrecommitReport` 输出带轮次与内容指纹的失败文本，`asyncPrecommitReportIsStale` 是唯一判据（lane 启动时那份 tree ≠ 投递时的 worktree tree ⇒ 降级成「旧轮次」文案，**不静默丢弃**；两侧指纹任一侧读不出就不降级——未知永不等于相同，fail-closed）；`buildAsyncPrecommitPass` 是 PASS 的短文案（「已经落地，不用再等它」）—— 在它之前 PASS 一声不响，而 `judge_wait` 的事件源里没有 precommit 落地，实测让一个会话在等一个永远不会来的事件上坐等 6 分 47 秒。为什么必须有它：`judge_submit` 的 lane 是并行的，FAIL 只能事后告知，而原先把这条通知挂在 `followUp` 上（pi 只在 agent 不再有工具调用时才 drain）与「门禁未过不许停循环」的存活不变量互斥，实测延迟 2 小时以上才投递，落地时裁决早已被后续 PASS 取代。扩展只接线：采集「本轮 + 验证的是哪份内容」两个事实，然后 `pi.sendMessage(..., { deliverAs: "steer" })` |
 | `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
 | `audit-round.ts` | **审计回合引擎**（2026-09-05）：「派发 judge → 等本轮 → 选 report → 裁决 → 记录 → 回收」的唯一一份实现。`settleAuditRound` 是结论段（goal / plan / review / advice 四种 kind 都经它，`judge_wait` 与 settle 扫描共用，游标只在这里推进一次、且只在记录落地后推）；`runAuditRound` 是 goal/plan 的同步回合（O-6 的 `judge_close` 是它的一个 `finally`，不再散在每条 return 上；「本轮是不是已被 wait 记完」由 `roundClosedDuringWait` 判——pending 必须已消费，再问 `recordedThisRound`（记录侧的证据：一份绑定本轮内容、时间戳 ≥ 本轮 `startedAt` 的裁决，**不看 verdict**，FAIL 同样结束本轮），登记行还活着时游标已前进也算；全不成立才自己再 settle 并 fail-closed。问记录而不是只问游标，是因为一轮结束就回收 pane（2026-09-21）会连登记行一起删掉，游标那半证据被回收动作自己销毁了）。`selectRoundReport` 是「哪份 report 收本轮」的唯一判据（round-bound 认 `roundSeq`+游标；cursor-only 只认游标；**round-and-content 认 `roundSeq`+`checkpoint.at`+游标，review 专用**，没有 checkpoint 记录（于是没有可比的 `checkpoint.at`）的轮次则只由 round+游标兜底，否则那种轮次不可收敛——与它的范围空不空无关（2026-09-15 起 `prepare_review` 在无 checkpoint 记录时取分支基点，所以那轮可能是 `HEAD..HEAD`，也可能是基点..HEAD 的真实交付）——per-kind 的真实差异），`roundBindingFor` 是三件事实的唯一推导处；共用它的入口有三个：记录侧 `settleAuditRound`、探测侧 `probeJudgeRound`（`judge_wait` 与 settle 扫描）、以及只要 yes/no 的 `roundHasReported`（子会话心跳据它把状态报成 `waiting-judge`、loop 停滞断路器据它判「还在动」，它替掉了扩展里那份「report 晚于 pane spawn」的旧比较） |
@@ -519,6 +526,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `checkpoint-message.ts` | checkpoint 提交信息（纯函数）：把 agent 的 round note 变成合法 Conventional Commits（已是 CC 则原样保留，否则兜底 `chore: <subject>`），并对非英文 round note 回落英文默认、丢正文（L5 自洽）。**自 2026-09-16 起提交信息就是普通提交：门禁不再往里注入任何标记**（用户决定，理由与旧写法写在模块头注释里） |
 | `checkpoint-sweep.ts` | **checkpoint 到底提交哪些未跟踪文件**（2026-09-20，演练 F3 实测）：门禁自己的 checkpoint 原本是裸 `git add -A`（还带 `REVIEW_GATE_BYPASS=1`），把「未被 gitignore 且本会话从未用 edit/write 写过」的东西一并提交进仓库 —— 实测：隔离 checkout 的 `node_modules` 软链以 `+1/−0 node_modules` 进了历史，reviewer 是从自己的 change index 里认出来的。纯函数 `planCheckpointSweep` 只做一件事：把 `git ls-files --others --exclude-standard -z` 给出的未跟踪路径（**raw 形式**，不是 `status` 那个带引号转义的）按「本会话写过（`GateState.sessionEditedFiles`，**精确匹配**，不做 glob）」切成 `own` / `leftOut` —— own 进提交，leftOut 原样留在 worktree 并在收条与 `judge_submit` 回执里点名。tracked 改动不参与这个判断（`M`/`D`/`R` 就是本轮工作，仍由 `add -A` 扫入） |
 | `choice-dialog.ts` | **门禁唯一的提问模板**（2026-09-08）：2–4 个选项 + 一个（推荐）+ 追加行「✎ 不选，我说明原因」的构造（`choiceRows`）、校验（`validateChoice`）、解析（`parseChoice`）与渲染（`renderChoice`，注入 `ui.select`/`ui.editor`，选中追加行才弹多行理由框）。**没有任何 caller-owned 追加行**（`extraRows` 随 2026-09-17 那次删除一起消失；**2026-09-19 的 `← 返回上一题` 是模板自己的行**，由 `renderChoice` 的 `back` 开关画在最后一行、只画给屏幕 —— 通道请求的 rows 永远是 `choiceRows`，不含导航行）。**2026-09-19：字母编号与两道退路** —— `optionLetter`/`optionRow` 给每个选项行加 `A. ` 前缀（导航行不编号），`optionLabel` 是记录里的写法（`→ A. 文本`）；`parseChoice` 把 `A`/`a`/`A.`/`A. 文本`/选项原文/1 起序号都归一到**选项原文**（原文先行：一个文本恰好是 `A` 的选项不该被位置读法抢走）；理由框里按 ESC 回来的是 `lib/reason-editor.ts` 的 `REASON_EDITOR_BACK` 哨兵（打字内容跟在哨兵后，重开框时作 prefill），而 `undefined` 仍是「关掉这题」。`ask_user`、门禁每一处是/否框、两处手写 select 全走它；`ui.confirm` 已无调用点。**一次只弹一个框**（2026-09-18）：`createDialogQueue` 是那个串行队列——pi 并行执行同一批工具、宿主只有一个对话框槽位，并发的第二个框会顶掉第一个且它的 Promise 永不 settle，实测 rebate 会话 `01a0b328` 整轮卡死、ESC 也无效；`dialogSignal` 把宿主 `ExtensionContext.signal`（ESC 中止的就是它）与调用方自己的 signal 合并成框要监听的那一个；`dialogNotifyDetail` 决定这条对话框的通知正文（框标题 + 问题本身，不再只是「问题 1 / 4」）。**排队中的框可被取消**：等待期间 signal abort ⇒ 立即返回、不等前面的框关闭（否则通道侧已答完的请求会挂在前一个框上），且取消者把自己的队位交还给它在等的那个框 —— 取消者若直接放行，后来的框会跳过那个框、在它上面再开一个 |
+| `multi-choice-dialog.ts` | **第二种对话框形状：复选清单**（2026-09-22，用户决定）—— 与 `choice-dialog.ts` 共用同一套词汇（字母编号、`DECLINE_ROW`、推荐标记、位置读法 `parseChoice`），但自己持有行渲染（`multiChoiceRow(s)`：`[x] A. 文本（推荐）`）、纯状态机（`multiChoiceStart` / `multiChoiceKey`：空格勾选、↑↓ 与 j/k 移动并环绕、回车提交、ESC 关闭、导航行不可勾选）、解析（`parseMultiChoice`：`""` = 一项都不勾、`" / "` 连接的多项、✎ 行含原因、读不懂的段 ⇒ `unreadable` 而**不是**猜勾选）与 TUI 组件（`buildMultiChoiceBox`，自己渲染行、不依赖 pi 组件类，宽度按终端 cell 算）。`renderMultiChoice` 是那条与 `renderChoice` 同形的异步路径（defer 到 ✎ 行时走同一个 `declineReason`）。**形状标记是 `ChoiceSpec.defaultChecked`（存在即多选）**；不变量：直接回车 = 提交打开时勾好的那一组 |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
 | `constants.ts` | 全仓唯一的共享常量：代码/文档扩展名、敏感文件模式、ship 命令种类、语言指令、轮次上限 |
 | `consent-request-tools.ts` | 工具 `request_scope_limit` / `request_sensitive_edit`：两个「请用户放宽门禁」的同意口子，对话与门禁状态经注入的 deps；由 `user-interaction-tools.ts` 转注册 |
