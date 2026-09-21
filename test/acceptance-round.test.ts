@@ -195,6 +195,27 @@ test("the no-acceptance clause is an exemption only WITH a reason", () => {
   assert.equal(parseNoAcceptanceDeclaration("# t\n本轮无真实验收（）\n"), undefined, "empty parens are not a reason");
   assert.equal(parseNoAcceptanceDeclaration("# t\n本轮无真实验收（无）\n"), undefined, "a one-character placeholder is not a reason");
   assert.equal(parseNoAcceptanceDeclaration("# t\n本轮有真实验收\n"), undefined);
+  // MENTION IS NOT DECLARATION (2026-09-22, quality round P1). The skeleton
+  // and every goal that explains this rule carry the phrase, and the first
+  // version read BOTH as an exemption — measured on this round's own goal,
+  // which would have skipped its own acceptance round.
+  assert.equal(
+    parseNoAcceptanceDeclaration(
+      "真实验收方案（acceptance judge 按它验收；没有东西可验收就写「本轮无真实验收（理由）」—— 那是要用户拍板的豁免）：\n  - 正向真实调用：<…>",
+    ),
+    undefined,
+    "a mention inside another line is not a declaration",
+  );
+  assert.equal(
+    parseNoAcceptanceDeclaration("  - 本轮无真实验收（理由）\n"),
+    undefined,
+    "the skeleton's unfilled blank is a placeholder, not a reason",
+  );
+  assert.deepEqual(
+    parseNoAcceptanceDeclaration("  - 本轮无真实验收：本轮只改文档，没有可运行的东西。"),
+    { reason: "本轮只改文档，没有可运行的东西。" },
+    "a bullet PREFIX is stripped; the clause itself must OPEN the line",
+  );
 });
 
 test("extractAcceptancePlan takes the section verbatim and stops at the next heading", () => {
@@ -213,6 +234,21 @@ test("extractAcceptancePlan takes the section verbatim and stops at the next hea
   );
   assert.equal(extractAcceptancePlan("# 任务\n退出标准：\n  1. x\n"), undefined, "no section: undefined, never an empty plan");
   assert.equal(extractAcceptancePlan("# 任务\n真实验收方案：\n非目标：\n  - z\n"), undefined, "an empty section is not a plan");
+  // THE SECTION IS FOUND BY ITS OPENING LINE (2026-09-22, quality round P1),
+  // not by the first mention: criteria that NAME the column come earlier.
+  const withMention = [
+    "# 任务",
+    "退出标准：",
+    "  1. `LOOP_GOAL_SKELETON` 含「真实验收方案」段。",
+    "真实验收方案：",
+    "  - 正向真实调用：起服务，调 /x，期望 200",
+    "非目标：",
+  ].join("\n");
+  assert.equal(
+    extractAcceptancePlan(withMention),
+    "  - 正向真实调用：起服务，调 /x，期望 200",
+    "a mention in the criteria does not become the plan",
+  );
 });
 
 /* ──────────────────────────── the dispatched task ────────────────────────── */

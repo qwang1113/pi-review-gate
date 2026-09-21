@@ -344,24 +344,37 @@ export const NO_ACCEPTANCE_CLAUSE = "本轮无真实验收";
 /**
  * Read the goal's "no real acceptance this round" declaration, if it has one.
  *
- * Returns `{ reason }` ONLY when the clause carries usable text after it —
- * 「本轮无真实验收（理由）」 with nothing inside is NOT an exemption, and
- * neither is a prose paragraph that mentions the phrase. Fail-closed direction:
- * an unreadable declaration means the round is still owed, which costs a
- * dispatch, never a release.
+ * ONLY A LINE THAT OPENS WITH THE CLAUSE COUNTS (2026-09-22, quality round
+ * P1). The first version looked for the substring anywhere on the line, and
+ * that made every MENTION of it a declaration: the goal skeleton itself says
+ * 「就写「本轮无真实验收（理由）」」 inside the section heading, and any goal that
+ * describes this very rule carries the phrase in its prose — measured on this
+ * round's own goal, which parsed as a SKIP because it explains the exemption.
+ * A leading bullet or number is stripped (the skeleton lists its items);
+ * everything else must be the clause itself.
+ *
+ * A PLACEHOLDER IS NOT A REASON either: the skeleton's `（理由）` / `<理由>` is
+ * a blank to fill in, and a draft that submits it unfilled must not skip the
+ * round by accident. Fail-closed in both directions — an unreadable
+ * declaration means the round is still owed, which costs a dispatch, never a
+ * release.
  */
 export function parseNoAcceptanceDeclaration(goalText: string): { reason: string } | undefined {
   for (const line of goalText.split("\n")) {
-    const idx = line.indexOf(NO_ACCEPTANCE_CLAUSE);
-    if (idx < 0) continue;
-    let tail = line.slice(idx + NO_ACCEPTANCE_CLAUSE.length).trim();
+    const stripped = line.trim().replace(/^(?:[-*•]|\d+[.)]|[（(]\d+[）)])\s*/, "");
+    if (!stripped.startsWith(NO_ACCEPTANCE_CLAUSE)) continue;
+    let tail = stripped.slice(NO_ACCEPTANCE_CLAUSE.length).trim();
     // 去掉包裹的括号与「理由：」前缀，剩下的就是理由本身。
     tail = tail
       .replace(/^[（(【\[「]?\s*(理由\s*)?[:：]?\s*/, "")
       .replace(/[）)】\]」]\s*$/, "")
       .trim();
-    // 两个字符以下不构成理由（「无」「-」这类占位）。
-    if (tail.length >= 2) return { reason: tail };
+    // 两个字符以下不构成理由（「无」「-」这类占位）；「理由」/「reason」与
+    // 骨架里的 `<…>` 空白也是占位，不是理由。
+    if (tail.length < 2) continue;
+    if (/^(?:理由|reason|why|说明)$/i.test(tail)) continue;
+    if (/^<.+>$/.test(tail)) continue;
+    return { reason: tail };
   }
   return undefined;
 }
@@ -379,14 +392,21 @@ function isSectionHeading(line: string): boolean {
 /**
  * The goal's real-acceptance plan — the section the judge works through.
  *
- * `undefined` when the goal has no such section (an older goal, or one that
- * declared no acceptance). The whole section is handed over verbatim: it is
- * agent-authored text and travels as UNTRUSTED DATA in the task, but it is
- * also the USER-APPROVED checklist, so nothing here may summarize or trim it.
+ * THE SECTION IS FOUND BY ITS OPENING LINE, not by the first mention of the
+ * phrase (2026-09-22, quality round P1): a goal whose criteria say
+ * 「`LOOP_GOAL_SKELETON` 含「真实验收方案」段」 mentions it long before the section
+ * exists, and a substring search handed the judge that criteria text as if it
+ * were the plan. Leading bullets and numbers are stripped so a nested section
+ * still opens; `undefined` means the goal has no such section (an older goal,
+ * or one that declared no acceptance). The section is handed over verbatim:
+ * it is agent-authored text and travels as UNTRUSTED DATA in the task, but it
+ * is also the USER-APPROVED checklist, so nothing here may summarize it.
  */
 export function extractAcceptancePlan(goalText: string): string | undefined {
   const lines = goalText.split("\n");
-  const start = lines.findIndex((l) => l.includes(ACCEPTANCE_PLAN_HEADING));
+  const start = lines.findIndex((line) =>
+    line.trim().replace(/^(?:[-*•]|\d+[.)]|[（(]\d+[）)])\s*/, "").startsWith(ACCEPTANCE_PLAN_HEADING),
+  );
   if (start < 0) return undefined;
   const body: string[] = [];
   for (const line of lines.slice(start + 1)) {

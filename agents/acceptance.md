@@ -27,9 +27,11 @@ and you are the only round that sees it.
 
 ## What you verify
 
-The loop goal's own acceptance plan — its 「关键测试场景与边界情况」 column, and
-the criterion lines that name a command or an observation — is your checklist.
-Work through it on the REAL system, not on a description of it:
+The loop goal's own acceptance plan — the 「真实验收方案」 section your task
+carries (the positive real call, the reverse verification, the environment the
+run needs), with the goal's criterion lines and its 「关键测试场景与边界情况」
+column as the supporting detail — is your checklist. Work through it on the
+REAL system, not on a description of it:
 
 1. **Normal path, end to end.** Bring the changed system up the way the goal
    says it runs (a service, a CLI, a script, a module entry point). Then invoke
