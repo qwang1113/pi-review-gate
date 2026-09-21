@@ -262,6 +262,22 @@ import { channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-ki
 // and the reason it is a module rather than four lines here — the ordering is
 // the whole fix (lib/interrupt-delivery.ts carries the measured deadlock).
 import { deliverInterrupt } from "../lib/interrupt-delivery.ts";
+// WORKER PANES (2026-09-21): the tmux-pane replacement for the pi-subagents
+// `Agent` tool. Four tools on the agent surface, one on the worker surface,
+// and the pane factory they both go through.
+import { registerWorkerTools } from "../lib/worker-tools.ts";
+import {
+  JUDGE_PANE_RECLAIM,
+  reclaimAuditLine,
+  type JudgePaneReclaimOutcome,
+} from "../lib/judge-pane-policy.ts";
+import { readWorkerSideEnv, registerWorkerReportTool } from "../lib/worker-side.ts";
+import {
+  parseWorkerRegistry,
+  serializeWorkerRegistry,
+  workerSessionDirName,
+  WORKER_REGISTRY_RELPATH,
+} from "../lib/worker-pane.ts";
 import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
@@ -1860,6 +1876,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     // a judge pane is a child process with a gate, not a second channel.
     // (Heartbeat, dialog race and round-task drain all funnel through this
     // binding, so they work for judges with no further wiring.)
+    //
+    // A WORKER PANE JOINS THE SAME LIST (2026-09-21), and this one branch is
+    // the whole of its channel story: `ask_user` inside the worker reaches the
+    // opener through the dialog race, and `worker_submit`'s message to a live
+    // worker is injected by the child-side drain — both without a line of
+    // worker-specific transport.
+    const workerSide = readWorkerSideEnv(process.env);
+    if (workerSide) {
+      return {
+        io: channelIO,
+        target: { orchestrationId: workerSide.openerId, childId: `worker-${workerSide.workerId}` },
+        ...(state.sessionId ? { sessionId: state.sessionId } : {}),
+      };
+    }
     const judgeSide = readJudgeSideEnv(process.env);
     if (!judgeSide) return undefined;
     return {
@@ -8841,6 +8871,44 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * fall back to the last UI context, and with neither they record NOTHING and
    * say so, which the engine turns into "stay armed, retry next settle".
    */
+  /**
+   * THE ONE CLOSE PATH for a judge THIS session opened.
+   *
+   * Two callers, one implementation (2026-09-21): the gate's synchronous
+   * chains (`auditRunDeps.closeJudge`) and the round-end reclaim that now
+   * frees an AGENT-dispatched review pane too
+   * (`auditRoundDeps.reclaimJudgePane`). They are one function on purpose —
+   * "read hadPane BEFORE the close, close by judgeId, map the reply's outcome"
+   * is exactly the sequence whose two copies drift, and a reclaim that reports
+   * the wrong outcome is a leftover pane nobody can find again (`judge_close`
+   * drops the registry row even when the kill fails).
+   *
+   * SAME BYPASS AS THE WAIT (2026-09-08): the gate reclaims a judge it opened
+   * itself — `callTool("judge_close", { repo: root })` would refuse on an
+   * unedited repo and leak the pane (measured: five "judge pane 回收失败…is not
+   * one of the repositories" in the audit log). `doClose` by judgeId keeps the
+   * opener check and skips only the repo-addressing.
+   */
+  async function closeOwnedJudge(
+    root: string,
+    judgeId: string | undefined,
+    role: string,
+  ): Promise<JudgePaneReclaimOutcome> {
+    // `hadPane` is read HERE, before the close, because it is the only moment
+    // it is still knowable.
+    const hadPane = judgeChildByRole(root, role)?.paneId !== undefined;
+    if (judgeId === undefined) {
+      return { ok: true, hadPane: false, terminated: false, note: "no judge on record — nothing to close." };
+    }
+    const closed = await doClose(selfSessionDeps(), { role, sessionId: judgeId }, true); // gateSelf: this session opened it
+    return {
+      ok: closed.isError !== true && (closed.details as { closed?: unknown } | undefined)?.closed === true,
+      hadPane,
+      terminated: (closed.details as { terminated?: unknown } | undefined)?.terminated === true,
+      note: toolText(closed as { content: { type: string; text: string }[] }).split("\n")[0]?.trim() || undefined,
+    };
+  }
+
   function auditRoundDeps(ctx?: unknown): SettleAuditRoundDeps {
     return {
       judgeEntry: (judgeId) => {
@@ -8870,6 +8938,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       conclusionOf: (report) => reportConclusion(channelIO, report),
       proseOf: (report) => reportText(channelIO, report),
       advanceCursor: (judgeId, reportId) => advanceReportCursor(judgeId, reportId),
+      // ROUND END FREES THE PANE (2026-09-21, user decision): a review pane no
+      // longer waits for declare_done. The verdict is already on record — what
+      // the judge produced is the opener's — so the pane is screen space, and
+      // closing it costs no context: the next `judge_submit` for this role
+      // finds a dead pane and re-opens the SAME session id, transcript and all.
+      reclaimJudgePane: async (root, judgeId, role) => {
+        const outcome = await closeOwnedJudge(root, judgeId, role);
+        // SILENCE IS THE NORMAL CASE (lib/judge-pane-policy.ts): a reclaim that
+        // did what the policy promises is not news, and a log that records every
+        // success is a log nobody greps. A line appears only when the pane's fate
+        // is NOT what the policy promises — which is the one moment the leftover
+        // pane would otherwise become unfindable (the registry row is dropped
+        // even when the kill failed).
+        const line = reclaimAuditLine({ role, policy: JUDGE_PANE_RECLAIM, outcome });
+        if (line !== undefined) log(line);
+        return outcome;
+      },
       pendingAudit: (root) => pendingAudits.get(root),
       forgetPending: (root) => dropAudits(root),
       nowIso: () => new Date().toISOString(),
@@ -9000,25 +9085,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // after that reply is discarded the leftover pane is unreachable — the
       // row it would be found by no longer exists. `hadPane` is read HERE,
       // before the close, because it is the only moment it is still knowable.
-      closeJudge: async (root, role) => {
-        // SAME BYPASS AS THE WAIT (2026-09-08): the gate reclaims the auditor
-        // it opened itself — `callTool("judge_close", { repo: root })` would
-        // refuse on an unedited repo and leak the pane (measured: five
-        // "judge pane 回收失败…is not one of the repositories" in the audit
-        // log). `doClose` by judgeId keeps the opener check, skips only the
-        // repo-addressing.
-        const hadPane = judgeChildByRole(root, role)?.paneId !== undefined;
-        const judgeId = judgeChildByRole(root, role)?.judgeId;
-        const closed = judgeId === undefined
-          ? { isError: false, content: [{ type: "text", text: "no judge on record — nothing to close." }], details: { closed: true, terminated: false } }
-          : await doClose(selfSessionDeps(), { role, sessionId: judgeId }, true); // gateSelf: gate's own reclaim
-        return {
-          ok: closed.isError !== true && (closed.details as { closed?: unknown } | undefined)?.closed === true,
-          hadPane,
-          terminated: (closed.details as { terminated?: unknown } | undefined)?.terminated === true,
-          note: toolText(closed as { content: { type: string; text: string }[] }).split("\n")[0]?.trim() || undefined,
-        };
-      },
+      closeJudge: async (root, role) => closeOwnedJudge(root, judgeChildByRole(root, role)?.judgeId, role),
       auditPassed: (root, pending) => {
         const st = root === primaryRepoRoot ? state : stateForRepo(root);
         if (pending.kind === "goal") return goalPrereviewPassed(st.goalPrereview, pending.draft);
@@ -9718,6 +9785,108 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   // hosts. A second registration is not a second implementation: both
   // executes close over `judgeSessionDeps`.
   registerJudgeWaitTool(pi, judgeSessionDeps);
+
+  // -----------------------------------------------------------------------
+  // WORKER TOOLS (2026-09-21) — the tmux-pane replacement for the
+  // pi-subagents `Agent` tool, and the answer to the user's requirement that
+  // opening a subagent and opening a review pane be the same act.
+  //
+  // SURFACE MATTERS, and it is the only guard these need: the four dispatch
+  // tools go on the AGENT surface and never inside a judge or worker pane (a
+  // judge is read-only by contract; a worker that could dispatch workers is a
+  // recursion nobody asked for), while `worker_report` goes on the WORKER
+  // surface alone, so a main session can never fabricate a worker's answer.
+  // -----------------------------------------------------------------------
+  if (!readJudgeSideEnv(process.env) && !readWorkerSideEnv(process.env)) {
+    const workerRegistryPath = () => pathJoin(activeRepoRoot.current, WORKER_REGISTRY_RELPATH);
+    registerWorkerTools(pi, {
+      ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
+      paneAlive: (paneId) => {
+        const self = process.env.TMUX_PANE?.trim();
+        if (!self) return false;
+        try {
+          return judgePaneAlive(runTmux, self, paneId) === true;
+        } catch {
+          // Unreadable tmux is missing INFORMATION: a worker whose liveness
+          // cannot be read is treated as gone, and `worker_submit` opens the
+          // pane again under the SAME session id — which is the safe direction
+          // (a resumed transcript beats a message nobody reads).
+          return false;
+        }
+      },
+      openPane: async (spec) => {
+        const opened = await openSessionPane(runTmux, {
+          ownPane: spec.ownPane,
+          cwd: spec.cwd,
+          layout: "child-column",
+          role: spec.role,
+          command: spec.command,
+          register: spec.register,
+        });
+        return opened.ok ? { ok: true, paneId: opened.paneId } : { ok: false, error: opened.error };
+      },
+      killPane: (paneId) => {
+        try {
+          // The factory's own close: it probes the window first and evens out
+          // the column afterwards, so freeing screen space does not leave a
+          // half-height neighbour behind.
+          return closeSessionPane(runTmux, paneId).ok;
+        } catch {
+          return false;
+        }
+      },
+      openerId: () => process.env.TMUX_PANE?.trim() || "gate",
+      repoRoot: () => activeRepoRoot.current,
+      channelIO,
+      channelHome: () => undefined,
+      workDirFor: (workerId) => pathJoin(activeRepoRoot.current, ".pi", "worker-sessions", workerId),
+      // THE OTHER HALF OF THE RESUME KEY: the session id alone finds nothing
+      // if the transcript directory is not the one it was written to.
+      sessionDirFor: (workerId) =>
+        pathJoin(activeRepoRoot.current, ".pi", "judge-sessions", workerSessionDirName(workerId), "sessions"),
+      writeFile: (path, content) => {
+        try {
+          mkdirSync(pathDirname(path), { recursive: true });
+          writeFileSync(path, content, "utf8");
+          return { ok: true };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      },
+      readRegistry: () => {
+        try {
+          return parseWorkerRegistry(JSON.parse(readFileSync(workerRegistryPath(), "utf8")));
+        } catch {
+          // No file yet, or an unreadable one: both mean "no workers", and a
+          // registry that cannot be read must never be repaired into a guess
+          // (lib/worker-pane.ts drops malformed ENTRIES for the same reason).
+          return {};
+        }
+      },
+      saveRegistry: (registry) => {
+        try {
+          mkdirSync(pathDirname(workerRegistryPath()), { recursive: true });
+          writeFileSync(workerRegistryPath(), serializeWorkerRegistry(registry), "utf8");
+        } catch (error) {
+          log(`worker registry write failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+      agents: () => {
+        const cfg = freshProjectConfig(activeRepoRoot.current);
+        return effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject).map;
+      },
+      now: () => Date.now(),
+      log,
+    });
+  }
+  if (readWorkerSideEnv(process.env)) {
+    registerWorkerReportTool(pi, {
+      env: () => process.env,
+      channelIO: () => channelIO,
+      now: () => Date.now(),
+      cwd: () => cwd,
+    });
+  }
 
   /**
    * THE PANE'S OWN MODEL SELF-HEAL (2026-09-10).

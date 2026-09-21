@@ -290,7 +290,10 @@ frontmatter in `agents/*.md` is the single source of truth and
   (2026-09-16; one `judge_submit` starts both, and the cancel matrix decides who
   stops whom — `docs/execution-model.md` §「并行三方与取消矩阵」).
   The L1/L2 execution tiers (`recon` / `fixer`) were retired — the gate
-  ships the five judging roles only.
+  ships the five judging roles only. Read-only WORK roles are the other kind
+  (`agents.worker*`, 2026-09-21): NOT in `KNOWN_AGENTS`, not part of the
+  session-start hard check, and an unconfigured one fails at DISPATCH time
+  instead — see §Read-only exploration.
 
 > **Why the chains are short.** every fallback in the
 > (a provider that is not configured) fails the whole agent launch. The
@@ -416,7 +419,9 @@ session id, no second dispatch surface). The `subagent` dispatch surface was ret
 pi-subagents companion — a judge role can only be dispatched through
 `judge_submit`, so there is no second path to sequence by hand (the
 workflow-sandbox block that used to guard `subagent` calls died with it: the
-tool the block protected no longer exists). The
+tool the block protected no longer exists). Read-only WORK is a different
+family (`worker_submit` / `worker_wait` / `worker_answer` / `worker_close`,
+2026-09-21) and never dispatches a judge. The
 single reviewer is one `judge_submit` call per round; you never pass a session
 id, a title or a directory — the gate derives all three from role+repo.
 **One session per role, continued across rounds**: the session id is
@@ -572,7 +577,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    一个「不是它父亲规划的那个」仓库：它读不到本仓的 precommit 配置，test 步骤
    退化成包默认的 `yarn test`（midway 全量，143 个文件失败，而它的改动只有 5 个），
    项目经理只得手动指挥它补拷配置。现在：复制 `.pi/` 的配置类文件（`review-gate.json`、
-   `settings.json`、`subagents.json`、`agents/`），symlink `.env`、`.env.local`
+   `settings.json`、`agents/`），symlink `.env`、`.env.local`
    与 `node_modules`，**每一条都先要求 `git check-ignore` 确认被忽略**（未被忽略的
    路径带过去会污染 checkout 的 git status，而指纹、precommit 缓存与审查范围都读
    那棵树）；`.pi/` 的运行态文件（state / cache / plan / tasks / judge-sessions）
@@ -673,7 +678,7 @@ review 循环的唯一入口 —— 一条门禁自己要求的提交被门禁�
 / `scripts/` / `agents/` / `test/` 的落点约定。动手前先查它，别先打开编辑器；
 新增或删除 `lib/` 模块时，同一轮改动里顺手同步它那张速查表。
 
-### Read-only exploration — parallel-safe
+### Read-only exploration — parallel-safe, and now a TOOL (2026-09-21)
 
 Parallel read-only exploration (code reading, analysis) is inherently
 safe: readers never write to the worktree, so they cannot invalidate
@@ -681,6 +686,25 @@ a binding or race with each other. Spawn several concurrently, overlap
 exploration with your own edits, and merge the findings. Only the main
 agent writes to the worktree. (Adviser consultations run as judge
 child processes — see the review protocol above.)
+
+The worker family is how you spawn one: `worker_submit({task})` opens a
+READ-ONLY tmux pane (the same pane machinery the judges use, `--exclude-tools
+edit,write`), `worker_wait` collects its report or the question it is blocked
+on, `worker_answer` answers that question, and `worker_close` frees the pane —
+the conversation survives, so submitting under the same `workerId` again
+continues the same session instead of re-explaining the background. It
+replaced `npm:@tintinweb/pi-subagents` (the `Agent` / `SubagentWorkflow`
+tools), which is why there is no background-agent tool any more and no second
+way to spawn anything. What each worker runs is configured in
+`~/.pi/review-gate.json` under `agents.worker*` (a model chain per preset plus
+its own `prompt`); a preset that is not configured FAILS the dispatch rather
+than running on some default model, and a `model` argument overrides the first
+slot for one dispatch.
+
+**Judges and workers both free their pane at round end** (2026-09-21): a
+recorded verdict is the deliverable, a pane is screen space. The next dispatch
+of the same role re-opens the SAME session id, so nothing is lost when one
+goes away.
 
 ### Wave daily — removed
 

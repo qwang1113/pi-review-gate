@@ -4834,16 +4834,21 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
   // is no longer "one per return branch" (which is how a branch leaks a pane)
   // but a single `finally` in the engine, and the extension holds exactly one
   // judge_close wiring for it.
-  // 2026-09-06 (t9d): that `finally` is also the ONE execution point of the
-  // pane-lifecycle policy, so the close is gated by `judgePaneReclaim` rather
-  // than written as an unconditional statement — and the reclaim's outcome is
+  // 2026-09-06 (t9d): that `finally` is also where the pane-lifecycle policy is
+  // applied, so the close is gated by `JUDGE_PANE_RECLAIM` rather than written
+  // as an unconditional statement — and the reclaim's outcome is
   // no longer discarded. What must not change is the property this test has
   // always been about: it runs on every path out of the round.
   const engineRun = windowIn(AUDIT_ROUND_SRC, "export async function runAuditRound(", "\n}", "runAuditRound");
   const finallyBlock = engineRun.slice(engineRun.indexOf("} finally {"));
   assert.ok(finallyBlock.startsWith("} finally {"), "the round still ends in a finally");
-  assert.match(finallyBlock, /judgePaneReclaim\("gate"\)/,
-    "the policy decides that this pane is reclaimed here — this call site does not");
+  // 2026-09-21: the policy is a CONSTANT now — every judge pane is freed at
+  // round end, so there is no dispatcher to look up (`lib/judge-pane-policy.ts`
+  // explains what replaced the 2026-09-06 two-policy split).
+  assert.match(finallyBlock, /const policy = JUDGE_PANE_RECLAIM;/,
+    "the policy is consulted here — this call site does not decide for itself");
+  assert.match(finallyBlock, /if \(policy\.atRoundEnd\)/,
+    "…and what it says is what runs");
   assert.match(finallyBlock, /await deps\.closeJudge\(root, spec\.role\)/,
     "the close runs on EVERY path out of the round, fail-closed ones included");
   assert.match(finallyBlock, /reclaimAuditLine\(/,
@@ -5815,8 +5820,13 @@ test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by disp
  * leftover pane cannot be found by anything — the row it would be found by no
  * longer exists.
  */
-test("the audit chain's closeJudge reports what the reclaim achieved", () => {
-  const dep = windowOf("closeJudge: async (root, role) => {", /\n      \},\n/, "closeJudge dep");
+test("the audit chain's close path reports what the reclaim achieved", () => {
+  // THE CLOSE MOVED INTO ONE HELPER (2026-09-21): the gate's synchronous
+  // chains (`closeJudge`) and the round-end reclaim that now frees an
+  // agent-dispatched review pane both call `closeOwnedJudge`, because "read
+  // hadPane before the close, close by judgeId, map the reply" is exactly the
+  // sequence whose two copies drift.
+  const dep = windowOf("async function closeOwnedJudge(", /\n  \}\n/, "closeOwnedJudge helper");
   assert.match(dep, /return \{/, "the outcome is returned, never discarded");
   // 2026-09-08: the close goes through `doClose` directly (gate-self bypass
   // of the repo check) — the terminated reading is a cast-guarded property
@@ -5830,6 +5840,14 @@ test("the audit chain's closeJudge reports what the reclaim achieved", () => {
   const callAt = dep.indexOf("doClose(selfSessionDeps()");
   assert.ok(hadPaneAt >= 0 && callAt >= 0, "both halves are present");
   assert.ok(hadPaneAt < callAt, "hadPane must be read before the row is dropped");
+  // …and BOTH callers go through it, so a reclaim cannot report an outcome
+  // the close never produced.
+  assert.match(SRC,
+    /closeJudge: async \(root, role\) => closeOwnedJudge\(/,
+    "the gate's own chains use the shared close path");
+  assert.match(SRC,
+    /reclaimJudgePane: async \(root, judgeId, role\) => \{[\s\S]*?closeOwnedJudge\(root, judgeId, role\)/,
+    "…and so does the round-end reclaim");
 });
 
 

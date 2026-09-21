@@ -1,65 +1,62 @@
 /**
- * THE TWO PANE-LIFECYCLE POLICIES, pinned so the split cannot be "tidied up".
+ * THE PANE-LIFECYCLE POLICY — one answer, pinned.
  *
- * The gate reclaims its OWN auditor when the round that opened it ends, and
- * leaves the agent's review pane alone until `declare_done`. The user settled
- * that on 2026-09-06 — keep both, do not unify — and until now it existed only
- * as prose scattered across three files, which is the state a refactor eats.
+ * There used to be TWO (the gate's own auditor died at round end, the agent's
+ * review pane lived until `declare_done`), and this file pinned the split so a
+ * refactor could not "tidy it up". The user settled the other way on
+ * 2026-09-21: a recorded verdict is the deliverable, a pane is screen space,
+ * and the next dispatch re-opens the SAME session id — so EVERY judge pane is
+ * freed when its round is recorded.
  *
  * What is tested here is the DECISION and the audit line. That the decision is
- * acted upon lives in test/audit-round.test.ts (the one execution point), and
- * that `declare_done`'s sweep is deliberately source-blind lives in
- * test/extension-structure.test.ts — see this module's docblock for why the
- * second policy is enforced by tool topology rather than by a branch.
+ * acted upon lives in test/audit-round.test.ts (both execution points: the
+ * gate's synchronous chains and the conclusion half that records an agent's
+ * review), and that `declare_done`'s sweep is still source-blind — the
+ * terminus for a pane whose round never concluded — lives in
+ * test/extension-structure.test.ts.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  judgePaneReclaim,
+  JUDGE_PANE_RECLAIM,
   reclaimAuditLine,
   type JudgePaneReclaimOutcome,
 } from "../lib/judge-pane-policy.ts";
 
 const CLEAN: JudgePaneReclaimOutcome = { ok: true, hadPane: true, terminated: true };
-const GATE = judgePaneReclaim("gate");
 
-test("the gate's own auditor is reclaimed by the round that opened it", () => {
-  assert.equal(GATE.at, "round-end");
-  assert.equal(GATE.atRoundEnd, true);
-  assert.match(GATE.why, /谁派谁收/);
+test("every judge pane is reclaimed at ROUND END (2026-09-21, user decision)", () => {
+  assert.equal(JUDGE_PANE_RECLAIM.at, "round-end");
+  assert.equal(JUDGE_PANE_RECLAIM.atRoundEnd, true);
+  // The reason has to be the one that makes closing a pane safe: the verdict is
+  // already recorded, and the conversation is not lost with the pane.
+  assert.match(JUDGE_PANE_RECLAIM.why, /同一 session id/);
 });
 
-test("the agent's review pane lives until declare_done", () => {
-  const agent = judgePaneReclaim("agent");
-  assert.equal(agent.at, "declare-done");
-  assert.equal(agent.atRoundEnd, false);
-  assert.match(agent.why, /declare_done/);
-});
-
-test("the two policies are genuinely different — that is the whole point", () => {
-  // A regression that collapsed them into one answer would make every test
-  // above pass individually while destroying the rule.
-  assert.notEqual(GATE.at, judgePaneReclaim("agent").at);
-  assert.notEqual(GATE.atRoundEnd, judgePaneReclaim("agent").atRoundEnd);
-});
-
-test("`atRoundEnd` agrees with `at` — no call site has to compare strings", () => {
-  for (const dispatcher of ["gate", "agent"] as const) {
-    const policy = judgePaneReclaim(dispatcher);
-    assert.equal(policy.atRoundEnd, policy.at === "round-end", dispatcher);
-  }
+test("the dispatcher no longer chooses a lifetime — the two-policy split is GONE", async () => {
+  // A regression that reintroduced `judgePaneReclaim(dispatcher)` with two
+  // branches would restore the rule the user replaced, and no assertion above
+  // would notice. So the module is scanned for it.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, resolve } = await import("node:path");
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const src = readFileSync(resolve(root, "lib/judge-pane-policy.ts"), "utf8");
+  assert.doesNotMatch(src, /judgePaneReclaim\s*\(/, "the dispatcher lookup must not come back");
+  assert.doesNotMatch(src, /declare-done/, "and neither must the policy it used to select");
+  assert.match(src, /JUDGE_PANE_RECLAIM/, "the one policy is what callers read");
 });
 
 test("a reclaim that did what the policy promises says nothing", () => {
-  assert.equal(reclaimAuditLine({ role: "goal-auditor", policy: GATE, outcome: CLEAN }), undefined);
+  assert.equal(reclaimAuditLine({ role: "goal-auditor", policy: JUDGE_PANE_RECLAIM, outcome: CLEAN }), undefined);
 });
 
 test("a pane that was never registered is silent too — nothing was leaked", () => {
   assert.equal(
     reclaimAuditLine({
       role: "goal-auditor",
-      policy: GATE,
+      policy: JUDGE_PANE_RECLAIM,
       outcome: { ok: true, hadPane: false, terminated: false, note: "没有登记 pane，无需动手" },
     }),
     undefined,
@@ -71,7 +68,7 @@ test("an unconfirmed kill is reported as UNCONFIRMED, not as a leak", () => {
   // say it did not see the pane go; it cannot say it leaked one.
   const line = reclaimAuditLine({
     role: "goal-auditor",
-    policy: GATE,
+    policy: JUDGE_PANE_RECLAIM,
     outcome: { ok: true, hadPane: true, terminated: false, note: "关 pane 失败（no such pane），登记照样清除" },
   });
   assert.ok(line);
@@ -79,14 +76,14 @@ test("an unconfirmed kill is reported as UNCONFIRMED, not as a leak", () => {
   assert.match(line, /登记已清除/);
   assert.doesNotMatch(line, /回收失败/);
   assert.match(line, /goal-auditor/, "the role is named — a log line has to be greppable");
-  assert.match(line, /谁派谁收/, "…and it carries the policy it was executing");
+  assert.match(line, /同一 session id/, "…and it carries the policy it was executing");
   assert.match(line, /关 pane 失败/, "…and the closing tool's own words");
 });
 
 test("a close that failed outright says so, and warns that BOTH may remain", () => {
   const line = reclaimAuditLine({
-    role: "goal-auditor",
-    policy: GATE,
+    role: "reviewer",
+    policy: JUDGE_PANE_RECLAIM,
     outcome: { ok: false, hadPane: true, terminated: false, note: "judge_close 被拒" },
   });
   assert.ok(line);
@@ -99,7 +96,7 @@ test("a failed close is loud even when no pane was registered", () => {
   // not complete, what is left behind is unknown, and unknown is not silence.
   const line = reclaimAuditLine({
     role: "goal-auditor",
-    policy: GATE,
+    policy: JUDGE_PANE_RECLAIM,
     outcome: { ok: false, hadPane: false, terminated: false },
   });
   assert.ok(line);
@@ -110,7 +107,7 @@ test("a missing or blank note leaves no dangling separator", () => {
   for (const note of [undefined, "", "   "]) {
     const line = reclaimAuditLine({
       role: "goal-auditor",
-      policy: GATE,
+      policy: JUDGE_PANE_RECLAIM,
       outcome: { ok: false, hadPane: true, terminated: false, ...(note === undefined ? {} : { note }) },
     });
     assert.ok(line);

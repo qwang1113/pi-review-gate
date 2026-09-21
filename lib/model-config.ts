@@ -784,8 +784,9 @@ export function replaceFrontmatterModels(
 }
 
 /**
- * Fold a YAML folded (`>` / `>-`) block scalar exactly the way pi-subagents
- * does (node_modules/pi-subagents/src/agents/frontmatter.ts `foldBlock`):
+ * Fold a YAML folded (`>` / `>-`) block scalar the way the agent-file loader
+ * does (this parser was a literal port of the pi-subagents one, kept because
+ * the semantics are the ones on disk):
  * blank lines are PARAGRAPH separators that survive as newlines, and a
  * more-indented line keeps its own line break. A plain
  * `replace(/\n[ \t]*\/g, " ")` collapsed both into single spaces, so a folded
@@ -825,8 +826,8 @@ function foldBlock(block: string): string {
  */
 export function frontmatterBlock(text: string): string | undefined {
   const normalized = text.replace(/\r\n/g, "\n");
-  // Delimiter handling is a LITERAL port of pi-subagents' parseFrontmatter
-  // (node_modules/pi-subagents/src/agents/frontmatter.ts:65-79) rather than a
+  // Delimiter handling is a LITERAL port of the agent-file parser's
+  // `parseFrontmatter` rather than a
   // regex approximation of it: the runtime only checks `startsWith("---")` and
   // then `indexOf("\n---", 3)`, so `--- `, `---\t` and even `---anything` all
   // OPEN a frontmatter block. A stricter `^---\n` reported such a file as NOT
@@ -866,9 +867,8 @@ export function parseAgentFrontmatterFields(text: string): Record<string, string
   let currentLines: string[] | null = null;
   let currentFolded = false;
   // LITERAL blocks (`|` / `|-`) admit blank continuation lines just like folded
-  // ones — pi-subagents' parseFrontmatter gates on `(currentFolded ||
-  // currentLiteral) && trimmed === ""` (node_modules/pi-subagents/src/agents/
-  // frontmatter.ts:92). Tracking only `folded` truncated a literal block at its
+  // ones — the agent-file parser gates on `(currentFolded ||
+  // currentLiteral) && trimmed === ""`. Tracking only `folded` truncated a literal block at its
   // first blank line (and emptied one that STARTS blank), so
   // projectAgentIdentity reported a runtime-loadable project agent as not
   // loadable and the shadow detection silently missed it.

@@ -75,10 +75,13 @@ import {
   type ReportBinding,
 } from "./audit-round-specs.ts";
 // WHEN THE PANE THIS CHAIN OPENED GOES AWAY — and what a half-done reclaim
-// has to say out loud. The rule lives there; the one place it is executed is
-// this file's `runAuditRound` reclaim step.
+// has to say out loud. ONE policy (round end, 2026-09-21), executed in two
+// places that are the same rule rather than two rules: this file's
+// `runAuditRound` reclaim step (the gate's own synchronous chains) and
+// `settleAuditRound`'s below it (the agent's review rounds, which conclude
+// asynchronously through the channel).
 import {
-  judgePaneReclaim,
+  JUDGE_PANE_RECLAIM,
   reclaimAuditLine,
   type JudgePaneReclaimOutcome,
 } from "./judge-pane-policy.ts";
@@ -382,6 +385,20 @@ export interface SettleAuditRoundDeps {
    * (reviewer P1 + user decision, 2026-09-05).
    */
   checkpointAt(root: string): string | undefined;
+  /**
+   * Free the pane of the judge whose round JUST closed (2026-09-21).
+   *
+   * CALLED ONLY AFTER A VERDICT IS ON RECORD — that ordering is the whole
+   * safety argument: the conclusion is already the opener's, so the pane is
+   * screen space and nothing else. Freeing it does not cost the conversation
+   * either: the next dispatch of the same role re-opens the SAME session id
+   * (`judge_submit` falls through to a fresh open when the registered pane is
+   * dead, and the transcript continues by session id).
+   *
+   * Optional so the conclusion half stays drivable without tmux — absent ⇒
+   * nothing is reclaimed.
+   */
+  reclaimJudgePane?(root: string, judgeId: string, role: string): Promise<JudgePaneReclaimOutcome>;
   /** Persist one repo's plan-audit record (the extension owns gate state). */
   savePlanAudit(root: string, record: PlanAuditRecord): void;
   /**
@@ -580,6 +597,28 @@ export async function settleAuditRound(
   // `forgetPending` turns two rounds into one that silently drops state).
   if (spec.kind === "goal" || spec.kind === "plan") deps.forgetPending(input.root);
   deps.advanceCursor(entry.judgeId, report.reportId);
+  // ── AND NOW THE PANE GOES (2026-09-21, user decision) ──
+  //
+  // AFTER the verdict is on record, never before: that ordering is the whole
+  // safety argument. The conclusion is the opener's now, so the pane is screen
+  // space — and freeing it costs no context, because the next dispatch of this
+  // role re-opens the SAME session id (`judge_submit` falls through to a fresh
+  // open when the registered pane is dead; the transcript continues by session
+  // id, so the review never starts from zero).
+  //
+  // Best effort, and LOUD when it is not enough: a throw here must not replace
+  // the round's verdict with an exception raised by its cleanup, so it is
+  // caught into the same audit line a failed close produces.
+  if (deps.reclaimJudgePane) {
+    try {
+      await deps.reclaimJudgePane(input.root, entry.judgeId, entry.role);
+    } catch {
+      // A throw from cleanup must never replace the round's verdict with an
+      // exception — the verdict is already recorded, and the CALLER's own
+      // `reclaimJudgePane` is where a half-done reclaim becomes a log line
+      // (`reclaimAuditLine`), because that side knows which log it belongs in.
+    }
+  }
   return {
     status: "recorded",
     kind: spec.kind,
@@ -772,15 +811,9 @@ export async function runAuditRound(
   } finally {
     // ─────────── THE ONE EXECUTION POINT of the pane-lifecycle policy ────────
     //
-    // This chain IS the gate dispatching for itself: goal and plan audits are
-    // the only kinds that reach `runAuditRound` (a code review enters the
-    // engine at the conclusion half), and the agent neither asked for this
-    // auditor nor can see it. So the dispatcher is not a per-spec field — it
-    // is what this function is — and lib/judge-pane-policy.ts decides what
-    // that means. There is deliberately no second call site; that module's
-    // docblock says why, and `declare_done`'s source-blind sweep is pinned by
-    // a test rather than by a branch that would only pretend to consult this.
-    const policy = judgePaneReclaim("gate");
+    // ONE policy for every judge pane (2026-09-21): the round that concludes
+    // on it frees it, whoever dispatched it.
+    const policy = JUDGE_PANE_RECLAIM;
     if (policy.atRoundEnd) {
       // Best effort, and LOUD when it is not enough. A throw here would
       // replace the round's real answer with an exception raised by its

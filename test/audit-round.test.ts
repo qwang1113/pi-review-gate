@@ -33,7 +33,7 @@ import {
 } from "../lib/audit-round-specs.ts";
 import type { ChannelRecord, ChannelReportRecord, ReportConclusion } from "../lib/orchestrator-channel.ts";
 import type { PlanAuditRecord } from "../lib/orchestrator-plan-audit.ts";
-import { judgePaneReclaim, type JudgePaneReclaimOutcome } from "../lib/judge-pane-policy.ts";
+import { JUDGE_PANE_RECLAIM, type JudgePaneReclaimOutcome } from "../lib/judge-pane-policy.ts";
 
 const NOW = "2026-09-05T12:00:00.000Z";
 /** The checkpoint this round reviews — an hour BEFORE the reports above. */
@@ -1198,7 +1198,7 @@ async function runWithReclaim(over: Partial<RunState>) {
 test("reclaim: the policy decides it, and a clean reclaim stays out of the log", async () => {
   // The rule is not inlined here — it is asked for. A policy that stopped
   // saying "round-end" would stop this close from happening at all.
-  assert.equal(judgePaneReclaim("gate").atRoundEnd, true);
+  assert.equal(JUDGE_PANE_RECLAIM.atRoundEnd, true);
   const { state, outcome, reclaimLines } = await runWithReclaim({});
   assert.deepEqual(outcome, { ok: true });
   assert.deepEqual(state.closed, ["goal-auditor"]);

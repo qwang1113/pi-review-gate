@@ -226,7 +226,8 @@ async function applyGlobalModelConfig() {
   try {
   // ── DEFAULT AGENTS SECTION (user requirement 2026-08-30: NO built-in
   // defaults — the config file must exist and name every role's slots).
-  //  - file ABSENT  → write the full 4-role default agents section.
+  //  - file ABSENT  → write the full default agents section (every role the
+  //    gate can dispatch: five judges plus the read-only worker preset).
   //    overwrite a role the user already configured — that would silently
   //    undo their pins on every upgrade).
   const cfgPath = join(homedir(), ".pi", "review-gate.json");
@@ -239,6 +240,12 @@ async function applyGlobalModelConfig() {
     adviser: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
     arbiter: { auto: false, slots: ["onekey/gpt-5.6-sol:max"] },
     "goal-auditor": { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
+    // READ-ONLY WORKERS (2026-09-21) — the pane-shaped successor to the
+    // pi-subagents `Agent` tool. NOT part of the session-start hard check
+    // (lib/model-config.ts `KNOWN_AGENTS`): this entry exists so a fresh
+    // install can dispatch one, and a preset the user adds later
+    // (`worker-recon`, `worker-strong`, …) carries its own `prompt`.
+    worker: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
   };
   try {
     if (!existsSync(cfgPath)) {
@@ -301,11 +308,19 @@ async function applyGlobalModelConfig() {
     const source = readFileSync(join(ROOT, "lib", "model-config.ts"), "utf8");
     const js = (await import("node:module")).stripTypeScriptTypes(source, { mode: "transform", sourceMap: false });
     const dataUrl = `data:text/javascript;base64,${Buffer.from(js, "utf8").toString("base64")}`;
-    const { effectiveAgentsConfig, applyAgentConfigLayer, loadRegistry } = await import(dataUrl);
+    const { effectiveAgentsConfig, applyAgentConfigLayer, loadRegistry, isWorkerRoleName } = await import(dataUrl);
     const { map, diagnostics } = effectiveAgentsConfig(agents, undefined);
     for (const d of diagnostics) log(`  ⚠ model config: ${d}`);
+    // WORKER PRESETS ARE NOT RENDERED (2026-09-21). The render layer exists so a
+    // role's MODEL CHAIN can be read back out of `agents/<role>.md`; a worker's
+    // chain is read straight from the section it was configured in
+    // (`lib/worker-tools.ts` `resolveWorkerRole`) and it has no prompt file to
+    // render into. Passing one through here is how the install grew an
+    // "upstream file missing: agents/worker.md" warning for a file that should
+    // never have been expected.
+    const renderable = Object.fromEntries(Object.entries(map).filter(([name]) => !isWorkerRoleName(name)));
     const res = applyAgentConfigLayer({
-      agents: map,
+      agents: renderable,
       targetDir: AGENTS_DST,
       sourceDir: join(ROOT, "agents"),
       registry: loadRegistry(),

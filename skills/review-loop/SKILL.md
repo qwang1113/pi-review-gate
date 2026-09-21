@@ -115,25 +115,31 @@ audit binds to the revised text, so any edit needs a fresh PASS.
 **Slicing the work**: turn each criterion (or vertical slice) into a
 sequential round of the same single review loop; there is no module table,
 no plan state, no planner (the subagent machinery was retired with the
-pi-subagents companion).
+pi-subagents companion; read-only WORK is the `worker_*` family — see below).
 ### Parallel exploration — read-only scans run concurrently
 
 Read-only exploration (code reading, analysis) is inherently
 parallel-safe: readers never write to the worktree, so they cannot invalidate a
 binding or race with each other. When you need to explore several areas of the
-codebase, fan out read-only scans (or subagent calls if a subagent tool is
-available in your pi setup) — each reads its own files and returns
+codebase, fan out read-only scans with the WORKER family —
+`worker_submit({task})` opens a read-only tmux pane (same pane machinery the
+judges use), `worker_wait` collects its report or the question it is blocked on,
+and `worker_close` frees the pane while keeping the conversation (the same
+`workerId` continues it later). Each worker reads its own files and returns
 findings; you merge the results. Exploration and editing may also overlap:
-while a read-only scan surveys the code, you can concurrently edit a
+while a worker surveys the code, you can concurrently edit a
 different file (the single-writer invariant still holds — only YOU write).
 (Adviser consultations run in their own judge panes.)
 ### Serial writers — exactly one writer in the worktree
 
-Write-capable subagents run **serially in this worktree** when a subagent
-tool is available: their edits change the worktree like any other, so a review
-recorded before them can no longer ship (the binding tree moved), and
-concurrent writers would keep invalidating the binding between precommit and
-review. Read-only scans may run in parallel. You stay the single writer of
+Write-capable work goes through the orchestration layer, not through a worker:
+a WORKER is read-only by its tool surface (`--exclude-tools edit,write`), so
+it can run beside anything, but an orchestration child's edits change the
+worktree like any other — which is why same-repo children each get their own
+checkout and run **serially** in one worktree (a review recorded before them
+can no longer ship: the binding tree moved, and concurrent writers would keep
+invalidating the binding between precommit and review). Read-only scans may run
+in parallel. You stay the single writer of
 record: you run
 precommit, you run the review, you fix findings — never delegate the gate
 itself.
