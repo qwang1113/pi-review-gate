@@ -103,18 +103,15 @@ export function acceptanceGateValue(plan: RepoPrPlanInput, taskId: string): "on"
  * but could not dispatch it (the reason field says why).
  *
  * The last three are terminal for the CURRENT content: they stop holding
- * `declare_done` back — READY only while its fingerprint still matches, which
- * is what {@link acceptanceReleased} decides.
+ * `declare_done` back, and HOW is `acceptanceDecision`'s rule (the only one
+ * there is — the READY binds to the fingerprint, the two unconditional
+ * releases do not; a dead second reading of it was deleted 2026-09-22 on the
+ * user's call, quality round P1).
  */
 export type AcceptanceStatus = "ARMED" | "AWAITING" | "READY" | "BLOCKED" | "SKIPPED" | "DISABLED";
 
 const ACCEPTANCE_STATUSES: ReadonlySet<string> = new Set<AcceptanceStatus>([
   "ARMED", "AWAITING", "READY", "BLOCKED", "SKIPPED", "DISABLED",
-]);
-
-/** The statuses that can release the requirement (see `acceptanceReleased`). */
-export const RELEASED_ACCEPTANCE_STATUSES: ReadonlySet<AcceptanceStatus> = new Set<AcceptanceStatus>([
-  "READY", "SKIPPED", "DISABLED",
 ]);
 
 /**
@@ -176,23 +173,6 @@ export function sanitizeAcceptanceRecord(raw: unknown): AcceptanceRecord | undef
     ...(reason === undefined ? {} : { reason }),
     ...(findingsTotal === undefined ? {} : { findingsTotal }),
   };
-}
-
-/**
- * IS THE REQUIREMENT RELEASED BY THIS RECORD, against THIS content?
- *
- * READY must name the fingerprint currently on the worktree — the one exact
- * comparison the review READY makes. An empty current fingerprint ("git could
- * not be read") never matches: unknown content is not the content that passed.
- *
- * SKIPPED and DISABLED are unconditional: they are statements about the GOAL
- * and about the GATE, not about the content — nothing a later edit does can
- * make "this round has no real acceptance" stop being true.
- */
-export function acceptanceReleased(record: AcceptanceRecord | undefined, fingerprint: string): boolean {
-  if (!record || !RELEASED_ACCEPTANCE_STATUSES.has(record.status)) return false;
-  if (record.status !== "READY") return true;
-  return fingerprint !== "" && record.fingerprint !== undefined && record.fingerprint === fingerprint;
 }
 
 /* ─────────────────────────── what the gate should do ─────────────────────── */

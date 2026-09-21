@@ -252,6 +252,15 @@ export interface LoopStagesDeps {
   /** The refusal to show, or `undefined` when this session may choose. */
   refusal(): string | undefined;
   /** The checkbox dialog (lib/multi-choice-dialog.ts's line shape). */
+  /**
+   * The checkbox dialog (lib/multi-choice-dialog.ts's line shape).
+   *
+   * THE HOST MUST NOT LET A PROXY ANSWER IT (quality round P1, 2026-09-22):
+   * this dialog is a checklist, so a stand-in that names only SOME rows would
+   * silently switch the unnamed stages OFF — a machine turning gates off in
+   * the user's name. The extension wires `proxy: false` for this call; a host
+   * that proxies it anyway is breaking this contract.
+   */
   askMulti(uiCtx: unknown, spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
   /** Write the record where the five checkpoints read it. */
   persist(record: LoopStagesRecord, ctx: unknown): void;

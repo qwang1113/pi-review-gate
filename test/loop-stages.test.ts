@@ -250,18 +250,28 @@ test("each switch releases its own half of the ship authority", () => {
   const reviewOff = unmetCodeState();
   reviewOff.stages = stagesWith(["review"]);
   const onlyPrecommit = unmetRequirements(reviewOff, "tree-oid", false);
-  assert.ok(!onlyPrecommit.some((p) => /review/.test(p)), "a released review stage stops blocking");
-  assert.deepEqual(onlyPrecommit, ["precommit has not run"]);
+  assert.ok(!onlyPrecommit.some((p) => /^(code|doc) review gate is/.test(p)), "a released review stage stops blocking");
+  assert.deepEqual(onlyPrecommit, [
+    // The quality stage is still ON, and with no reviewer to carry its verdict
+    // it takes the review's place (see the test below).
+    "quality round is NOT_RUN (need READY) — the review stage is off, so this is the verdict that stands between the code and a ship; submit a round (`judge_submit`) to run it",
+    "precommit has not run",
+  ]);
 
   const precommitOff = unmetCodeState();
   precommitOff.stages = stagesWith(["precommit"]);
   const onlyReview = unmetRequirements(precommitOff, "tree-oid", false);
   assert.ok(!onlyReview.some((p) => /precommit/.test(p)), "a released precommit stage stops blocking");
-  assert.deepEqual(onlyReview, ["code review gate is PENDING (need READY)"]);
+  assert.deepEqual(onlyReview, ["code review gate is PENDING (need READY)"],
+    "with review ON the quality round is carried by the review's own record — no second requirement appears");
 
+  // BOTH released, quality still on: the quality round is the only judge left,
+  // so it is required; releasing it too is what lets the round ship with none.
   const bothOff = unmetCodeState();
   bothOff.stages = stagesWith(["review", "precommit"]);
-  assert.deepEqual(unmetRequirements(bothOff, "tree-oid", false), [], "two released stages ship");
+  assert.equal(unmetRequirements(bothOff, "tree-oid", false).length, 1);
+  bothOff.stages = stagesWith(["review", "precommit", "quality"]);
+  assert.deepEqual(unmetRequirements(bothOff, "tree-oid", false), [], "three released stages ship");
 });
 
 test("the doc-review half is released by the same review switch", () => {
@@ -273,16 +283,30 @@ test("the doc-review half is released by the same review switch", () => {
   assert.deepEqual(unmetRequirements(docs, "tree-oid", false), []);
 });
 
-test("a BLOCKED quality round still stops the ship when nothing else carries it", () => {
-  // With the review stage ON the quality verdict gates the READY's RECORD; with
-  // it OFF nothing else reads it, and the user kept quality on — so a refusal
-  // must not sail through (lib/gate-state.ts, mirrored by the L3 hook).
+test("with the review stage off, the quality verdict IS the review — and it is content-bound", () => {
+  // With review ON the quality verdict gates the READY's RECORD; with it OFF
+  // nothing else reads it, so it takes the review's place: required, and bound
+  // to the tree it judged (quality round P2, 2026-09-22).
   const st = unmetCodeState();
   st.stages = stagesWith(["review", "precommit"]);
-  st.quality = { verdict: "BLOCKED", commitSha: "c", at: "t" };
-  const problems = unmetRequirements(st, "tree-oid", false);
+
+  // Never ran ⇒ the round is owed.
+  let problems = unmetRequirements(st, "tree-oid", false);
   assert.equal(problems.length, 1);
-  assert.match(problems[0]!, /quality round is BLOCKED/);
+  assert.match(problems[0]!, /quality round is NOT_RUN \(need READY\)/);
+
+  // A refusal binds exactly like a review verdict.
+  st.quality = { verdict: "BLOCKED", commitSha: "c", treeSha: "tree-oid", at: "t" };
+  assert.match(unmetRequirements(st, "tree-oid", false)[0]!, /quality round is BLOCKED \(need READY\)/);
+
+  // A READY unlocks only the tree it judged.
+  st.quality = { verdict: "READY", commitSha: "c", treeSha: "tree-oid", at: "t" };
+  assert.deepEqual(unmetRequirements(st, "tree-oid", false), []);
+  assert.match(unmetRequirements(st, "other-tree", false)[0]!, /modified after the last quality READY/,
+    "an edit after the quality READY withdraws it, exactly like the review's own binding");
+  st.quality = { verdict: "READY", commitSha: "c", at: "t" };
+  assert.match(unmetRequirements(st, "tree-oid", false)[0]!, /modified after the last quality READY/,
+    "a record with no tree binding is unverifiable — fail closed");
 
   // …and releasing the quality stage releases it like everything else.
   st.stages = stagesWith(["review", "precommit", "quality"]);
@@ -324,8 +348,8 @@ test("the REAL L3 pre-commit checker honors the same record (exit codes, not pro
   writeState(dir, { ...base, stages: stagesWith(["precommit"]) });
   assert.equal(check(dir), 1, "releasing precommit alone still blocks on review");
 
-  writeState(dir, { ...base, stages: stagesWith(["review", "precommit"]) });
-  assert.equal(check(dir), 0, "both released ⇒ the commit hook lets the commit through");
+  writeState(dir, { ...base, stages: stagesWith(["review", "precommit", "quality"]) });
+  assert.equal(check(dir), 0, "all three released ⇒ the commit hook lets the commit through");
 
   // A partial/forged record is invalid state: the hook fails CLOSED rather
   // than reading a half-written switch-off (the same rule as the sanitizer).
@@ -333,17 +357,31 @@ test("the REAL L3 pre-commit checker honors the same record (exit codes, not pro
   assert.equal(check(dir), 1, "an unreadable stage record fails closed");
 
   // THE QUALITY VERDICT is mirrored too (2026-09-22): with the review stage
-  // released, a recorded BLOCKED quality round is the only thing left standing
-  // between the code and a commit.
+  // released, it takes the review's place — required, and bound to the tree.
+  const tree = readyState(dir).review.fingerprint;
   writeState(dir, {
     ...base,
-    quality: { verdict: "BLOCKED", commitSha: "c", at: "t" },
+    quality: { verdict: "BLOCKED", commitSha: "c", treeSha: tree, at: "t" },
     stages: stagesWith(["review", "precommit"]),
   });
   assert.equal(check(dir), 1, "a BLOCKED quality round with no reviewer to carry it still blocks");
   writeState(dir, {
     ...base,
-    quality: { verdict: "BLOCKED", commitSha: "c", at: "t" },
+    quality: { verdict: "READY", commitSha: "c", treeSha: tree, at: "t" },
+    stages: stagesWith(["review", "precommit"]),
+  });
+  assert.equal(check(dir), 0, "a quality READY on this exact tree stands in for the missing review");
+  writeState(dir, {
+    ...base,
+    // The tree the quality round judged is the PREVIOUS content: the worktree
+    // has moved since, and nothing else would notice.
+    quality: { verdict: "READY", commitSha: "c", treeSha: "0".repeat(40), at: "t" },
+    stages: stagesWith(["review", "precommit"]),
+  });
+  assert.equal(check(dir), 1, "a quality READY bound to other content must not ship");
+  writeState(dir, {
+    ...base,
+    quality: { verdict: "BLOCKED", commitSha: "c", treeSha: tree, at: "t" },
     stages: stagesWith(["review", "precommit", "quality"]),
   });
   assert.equal(check(dir), 0, "…and releasing the quality stage releases it");
@@ -390,6 +428,32 @@ test("the five checkpoints read the ONE query, not a second rule", () => {
   assert.match(SRC, /registerLoopStageTools\(pi, loopStageDeps\)/, "the tool is registered");
   assert.match(SRC, /ensureLoopStages: \(ctx\) => ensureLoopStagesFor\(ctx\)/,
     "the fallback is wired into the L1 hook for the first edit / restatement");
+});
+
+test("a proxy may not answer the stage checklist (quality round P1, 2026-09-22)", () => {
+  // The checkbox travels through the gate's own dialog, which races every
+  // question against the thirty-minute arbiter hand-off. A stand-in naming only
+  // SOME rows would record the unnamed ones as OFF — a machine switching gates
+  // off in the user's name. The one place that can express “not this question”
+  // is the dialog's `proxy` option, and it must be wired false HERE.
+  const start = SRC.indexOf("const loopStageDeps: LoopStagesDeps = {");
+  assert.ok(start > 0, "the stage deps exist");
+  const wiring = SRC.slice(start, SRC.indexOf("\n  };", start));
+  assert.match(wiring, /proxy: false/, "the stage checklist must not be handed to the arbiter proxy");
+  assert.match(SRC, /options: opts\.proxy === false \? \[\] : spec\.options/,
+    "…and the dialog turns that request into the race's own no-proxy signal");
+});
+
+test("the no-acceptance declaration is only read from a goal that is in force", () => {
+  // `parseNoAcceptanceDeclaration` reads TEXT, so a leftover goal file could
+  // exempt this round from real acceptance — and with the goal stage off there
+  // is no approval requirement left to notice (quality round P2, 2026-09-22).
+  const at = SRC.indexOf("const declared = ");
+  assert.ok(at > 0, "armAcceptanceRound reads the declaration");
+  const read = SRC.slice(at, at + 400);
+  assert.match(read, /goal\.present && loopGoalConfirmed\(root, st\)/,
+    "the declaration is gated on the goal this session actually had approved");
+  assert.match(read, /parseNoAcceptanceDeclaration\(goal\.text\)/);
 });
 
 test("the widget shows the switches only when something is off", () => {

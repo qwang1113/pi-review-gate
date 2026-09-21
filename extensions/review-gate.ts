@@ -5526,6 +5526,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       back?: boolean;
       repo?: string;
       onUndecided?: () => void;
+      /**
+       * MAY THE ARBITER STAND IN FOR THE USER on this question?
+       *
+       * Default true — every dialog carries the thirty-minute hand-off
+       * (lib/user-proxy.ts, user decision 2026-09-19). `false` is for the one
+       * question a machine has no business answering: the stage checklist,
+       * where a partial stand-in answer would switch gates OFF. The window
+       * still runs; its expiry is the ordinary “nobody decided” landing.
+       */
+      proxy?: boolean;
     } = {},
     /**
      * WHICH OF THE TWO SHAPES IS DRAWN (2026-09-22). Everything else about a
@@ -5651,7 +5661,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const decided = await raceWithUserProxy<string>({
       direct: asked,
       displayed,
-      options: spec.options,
+      // NO PROXY FOR A QUESTION A MACHINE MUST NOT ANSWER (quality round P1,
+      // 2026-09-22). An empty option list IS how lib/user-proxy.ts turns the
+      // arbiter off: the window still runs and its expiry still settles as
+      // “nobody answered”, so an unattended session unblocks exactly as before —
+      // it just does not get a machine-made decision. The one caller that asks
+      // for this is the stage checklist (`choose_loop_stages`): a stand-in that
+      // ticks a SUBSET of its rows would silently switch OFF the unticked
+      // gates, which is the opposite of what that dialog is for.
+      options: opts.proxy === false ? [] : spec.options,
       ...(spec.defaultChecked === undefined ? {} : { multiple: true }),
       startProxy: () => proxyAnswerFor(spec, opts.body, dialogRoot),
     });
@@ -5695,7 +5713,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   async function askMultiChoice(
     uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
     spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; back?: boolean; repo?: string; onUndecided?: () => void } = {},
+    opts: { body?: string; signal?: AbortSignal; back?: boolean; repo?: string; onUndecided?: () => void; proxy?: boolean } = {},
   ): Promise<string | undefined> {
     return askDialog(uiCtx, spec, opts, true);
   }
@@ -6549,7 +6567,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       judge: isJudgePane(),
       orchestrated: orchestrationIdFromEnv(process.env) !== undefined,
     }),
-    askMulti: (uiCtx, spec, opts) => askMultiChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
+    askMulti: (uiCtx, spec, opts) => askMultiChoice(uiCtx as { ui?: ChoiceUi }, spec, {
+      ...opts,
+      // A MACHINE MUST NOT TURN THE GATES OFF (quality round P1, 2026-09-22):
+      // see `askDialog`'s `proxy` option.
+      proxy: false,
+    }),
     persist: (record, ctx) => applyStages(record, ctx),
     log: (message) => log(`[stages] ${message}`),
   };
@@ -12044,7 +12067,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const root = primaryRepoRoot;
     const st = stateForRepo(root);
     const goal = readSessionLoopGoal(root);
-    const declared = parseNoAcceptanceDeclaration(goal.present ? goal.text : "");
+    // THE DECLARATION IS READ FROM A GOAL THAT IS IN FORCE (quality round P2,
+    // 2026-09-22). `parseNoAcceptanceDeclaration` only reads TEXT, so a
+    // leftover `.pi/loop-goal.md` from an earlier task could exempt this round
+    // from real acceptance — and with the goal stage switched OFF there is no
+    // approval requirement left to notice it (lib/loop-goal.ts's stage-off
+    // directive says out loud that such a file is not this session's
+    // contract). An unapproved draft is the same class of file.
+    const declared = goal.present && loopGoalConfirmed(root, st)
+      ? parseNoAcceptanceDeclaration(goal.text)
+      : undefined;
     const fp = computeFingerprint(root);
     const fingerprint = fp.unavailable ? "" : fp.digest;
     const decision: AcceptanceDecision = acceptanceDecision({

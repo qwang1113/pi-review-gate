@@ -1830,15 +1830,22 @@ export function unmetRequirements(
   // With the review stage ON, a quality verdict gates the RECORD of the
   // functional READY (lib/quality-round.ts's `decideQualityHold`) and this
   // block would be a second reading of one rule. With the review stage OFF
-  // there is no READY to hold, so a BLOCKED quality verdict would bind
-  // NOTHING: the user kept the quality stage on, its judge ran and refused
-  // the code, and the work would ship anyway. This is a TIGHTENING only — a
-  // recorded BLOCKED — so it can never block on a binding it cannot verify.
-  if (state.hasCodeChange && !reviewOn && qualityOn && state.quality?.verdict === "BLOCKED") {
-    problems.push(
-      "quality round is BLOCKED (the review stage is off, so nothing else carries this verdict) — " +
-      "fix its findings and submit the next round",
-    );
+  // there is no READY to hold, so the quality verdict would bind NOTHING: the
+  // user kept the quality stage on, its judge ran and refused the code, and
+  // the work would ship anyway. So here the quality verdict IS the review —
+  // required, and bound to the content it judged exactly as `review` is
+  // (quality round P2, 2026-09-22: checking only for a recorded BLOCKED left
+  // a READY that any later edit walked away from).
+  if (state.hasCodeChange && !reviewOn && qualityOn) {
+    const quality = state.quality;
+    if (quality?.verdict !== "READY") {
+      problems.push(
+        `quality round is ${quality?.verdict ?? "NOT_RUN"} (need READY) — the review stage is off, so this is the verdict ` +
+        "that stands between the code and a ship; submit a round (`judge_submit`) to run it",
+      );
+    } else if (quality.treeSha === undefined || quality.treeSha !== currentFingerprint) {
+      problems.push("code was modified after the last quality READY (fingerprint mismatch)");
+    }
   }
 
   if (state.hasCodeChange && reviewOn) {

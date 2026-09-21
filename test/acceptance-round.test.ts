@@ -30,7 +30,6 @@ import {
   acceptanceGateOpen,
   acceptanceGateValue,
   acceptanceProblems,
-  acceptanceReleased,
   buildAcceptanceTask,
   extractAcceptancePlan,
   parseNoAcceptanceDeclaration,
@@ -166,17 +165,6 @@ test("a settled verdict binds, and the binding is what decides pass or dispatch"
     acceptanceDecision({ ...base, record: { status: "SKIPPED", at: AT } }).action,
     "dispatch",
   );
-});
-
-test("acceptanceReleased: READY needs the exact fingerprint, the other two need nothing", () => {
-  assert.equal(acceptanceReleased({ status: "READY", fingerprint: "fp-1", at: AT }, "fp-1"), true);
-  assert.equal(acceptanceReleased({ status: "READY", fingerprint: "fp-1", at: AT }, "fp-2"), false);
-  assert.equal(acceptanceReleased({ status: "READY", fingerprint: "fp-1", at: AT }, ""), false);
-  assert.equal(acceptanceReleased({ status: "READY", at: AT }, "fp-1"), false, "no binding is not a match");
-  assert.equal(acceptanceReleased({ status: "SKIPPED", at: AT }, "fp-9"), true);
-  assert.equal(acceptanceReleased({ status: "DISABLED", at: AT }, ""), true);
-  assert.equal(acceptanceReleased({ status: "BLOCKED", at: AT }, "fp-9"), false);
-  assert.equal(acceptanceReleased(undefined, "fp-9"), false);
 });
 
 /* ─────────────────────────────── the goal side ───────────────────────────── */
@@ -352,7 +340,6 @@ test("against a REAL worktree: armed, then READY binds, then an edit un-binds it
     assert.notEqual(after.digest, before.digest, "an edit moves the fingerprint");
     const stale = acceptanceDecision({ hasCodeChange: true, gateOpen: true, fingerprint: after.digest, record });
     assert.equal(stale.action, "dispatch", "the old READY no longer answers for this content");
-    assert.equal(acceptanceReleased(record, after.digest), false);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

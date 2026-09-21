@@ -396,13 +396,16 @@ function runCheck(statePath, repo, env = process.env) {
     }
   }
 
-  // A QUALITY BLOCKED WITH NO REVIEW ROUND TO CARRY IT (mirror of
+  // THE QUALITY STAGE WITH NO REVIEW ROUND TO CARRY IT (mirror of
   // lib/gate-state.ts's rule, 2026-09-22): with the review stage on, the
-  // quality verdict gates the REVIEW's recording; with it off the verdict
-  // would bind nothing at all, and the user kept the quality stage on.
-  if (state.hasCodeChange && !reviewOn && stageOpen("quality") &&
-      state.quality && state.quality.verdict === "BLOCKED") {
-    problems.push("quality round is BLOCKED");
+  // quality verdict gates the REVIEW's recording; with it off it IS the
+  // review — required, and bound to the content it judged.
+  if (state.hasCodeChange && !reviewOn && stageOpen("quality")) {
+    if (!state.quality || state.quality.verdict !== "READY") {
+      problems.push(`quality round is ${state.quality ? state.quality.verdict : "NOT_RUN"} (need READY)`);
+    } else if (typeof state.quality.treeSha !== "string" || state.quality.treeSha !== currentFp) {
+      problems.push("code was modified after the last quality READY (fingerprint mismatch)");
+    }
   }
 
   if (state.hasCodeChange && precommitOn) {
