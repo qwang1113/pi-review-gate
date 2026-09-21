@@ -20,14 +20,26 @@
  * WHO IS EXEMPT, AND WHY IT IS NOT A LIST OF SPECIAL CASES. Exclusivity is
  * over the main sidecar, so the exemption follows from who writes one:
  *
- *  - a JUDGE pane (`RG_JUDGE_*`) writes no gate state at all (lib/judge-side.ts),
+ *  - a JUDGE pane (`RG_JUDGE_*`) and a WORKER pane (`RG_WORKER_*`) write no
+ *    gate state at all (`gateStateWriteSkip` below),
  *  - an ORCHESTRATION CHILD (`RG_STATE_VARIANT`) writes its own file,
  *
- * and both of them live in the very same worktree by design — a judge's cwd is
- * the repo it reviews, and a child's cwd is the repo its task declares.
- * Refusing them would kill every review and every orchestration, so the
- * question is never "which roles do we let through" but "does this session
- * claim the shared file".
+ * and all of them live in the very same worktree by design — a judge's cwd is
+ * the repo it reviews, a worker's is the repo it reads, and a child's cwd is
+ * the repo its task declares.
+ * Refusing them would kill every review, every worker and every orchestration,
+ * so the question is never "which roles do we let through" but "does this
+ * session claim the shared file".
+ *
+ * WHY THE WRITE-SKIP DECISION LIVES HERE TOO (2026-09-21). "Does this session
+ * claim the main sidecar" and "may this session write gate state at all" are
+ * the same subject read twice, and they were answered in two modules — so a
+ * role added to one (the worker) was missed by the other, which is exactly the
+ * accident this module is about. They are one rule now: `gateStateWriteSkip`
+ * is the ONE entry every caller asks, and `claimsMainSidecar` is derived from
+ * it (claim = writes gate state AND has no variant file of its own). The
+ * orchestration child is the single case where the two answers differ, and it
+ * differs for a stated reason: it writes, just not this file.
  *
  * WHY THIS IS NOT THE SAME QUESTION THE OTHER LIVENESS CHECKS ASK
  * (2026-09-06, the "three liveness criteria" convergence review).
@@ -65,6 +77,7 @@
 
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
+import { readWorkerSideEnv } from "./worker-side.ts";
 import { buildRejection } from "./rejection-copy.ts";
 
 /**
@@ -108,19 +121,84 @@ export const PRESENCE_HEARTBEAT_MS = 10_000;
 /** File name under `.pi/`, beside the sidecar it protects. */
 export const PRESENCE_FILENAME = "session-presence.json";
 
+/** Why a write to the repo's gate state was skipped — the audit record's content. */
+export interface GateStateWriteSkip {
+  /** The pane's own handle (judge id / worker id) — diagnostic, for the record. */
+  id: string;
+  /** Its role, as the pane itself was launched with. */
+  role: string;
+  /** One line, for the pane's own session record and its notice. */
+  reason: string;
+}
+
+/**
+ * Must THIS session keep its hands off the repo's gate state?
+ *
+ * The gate sidecar (`.pi/review-gate-state.json`) is the MAIN session's — its
+ * mode, its verdicts, its unmet list, and the only thing the git hooks can
+ * see. Two pane kinds run inside somebody else's worktree and have no state of
+ * their own that anybody reads:
+ *
+ *  - a JUDGE is "a reporting shell … never an enforcer": heartbeats, answers,
+ *    one report per round. Measured 2026-09-05, before this existed: the
+ *    sidecar's `sessionId` became `rg-reviewer-…` and its `taskMode` fell from
+ *    `orchestrator` to none — the reviewing session quietly overwriting the
+ *    state of the session being reviewed.
+ *  - a WORKER is read-only by construction (no edit/write/bash) and reports
+ *    through its channel. Same exposure for the same reason: it is opened
+ *    without `RG_STATE_VARIANT`, so its gate would write the opener's file.
+ *    Until 2026-09-21 it was saved only by being REFUSED by the exclusivity
+ *    guard above — take that refusal away (as the worker fix must) and the
+ *    `setTaskMode` at session start persists the worker's state over the main
+ *    one.
+ *
+ * Fail-closed on the WRITE side, which for once means writing nothing:
+ * skipping costs these panes nothing and protects the one record that decides
+ * whether code may ship. `undefined` means "an ordinary session — persist
+ * normally".
+ */
+export function gateStateWriteSkip(env: NodeJS.ProcessEnv): GateStateWriteSkip | undefined {
+  // Each identity is read through the module that OWNS it, so "is this a
+  // judge/worker" cannot drift from that side's own answer (and a
+  // half-configured pane is not one, by those modules' own rule).
+  const judge = readJudgeSideEnv(env);
+  if (judge) {
+    return {
+      id: judge.judgeId,
+      role: judge.role,
+      reason:
+        `review-gate: 本会话是 ${judge.role} review（${judge.judgeId}），已跳过对仓库门禁状态的写入——` +
+        "review 只负责评审（心跳、答 opener、落 report），主 sidecar 与 .blocked marker 属于 opener，" +
+        "judge 写它会把 opener 的 sessionId 与 taskMode 覆盖掉。",
+    };
+  }
+  const worker = readWorkerSideEnv(env);
+  if (worker) {
+    return {
+      id: worker.workerId,
+      role: worker.role,
+      reason:
+        `review-gate: 本会话是 worker ${worker.workerId}（${worker.role}），已跳过对仓库门禁状态的写入——` +
+        "worker 只读、只交一次 report，主 sidecar 与 .blocked marker 属于开它的会话，" +
+        "worker 写它会把上级的 sessionId 与 taskMode 覆盖掉。",
+    };
+  }
+  return undefined;
+}
+
 /**
  * Does this session claim the worktree's MAIN gate sidecar?
  *
- * `false` for the two session kinds that share the worktree by design and
- * write elsewhere (a judge writes nothing, an orchestration child writes its
- * own variant file). Everything else — an ordinary loop session, an explore
- * session, a project manager — claims it.
+ * `false` for the session kinds that share the worktree by design and write
+ * elsewhere (a judge and a worker write no gate state, an orchestration child
+ * writes its own variant file). Everything else — an ordinary loop session, an
+ * explore session, a project manager — claims it.
  */
 export function claimsMainSidecar(env: NodeJS.ProcessEnv): boolean {
-  // Both questions are asked through the modules that OWN them, so "is this a
-  // judge" cannot drift from the judge side's own answer, and the variant name
-  // is not spelled a second time.
-  if (readJudgeSideEnv(env) !== undefined) return false;
+  // Derived, never re-derived: a pane that writes no gate state cannot be
+  // claiming the file it never writes.
+  if (gateStateWriteSkip(env) !== undefined) return false;
+  // …and the variant name is not spelled a second time either.
   if ((env[STATE_VARIANT_ENV] ?? "").trim()) return false;
   return true;
 }

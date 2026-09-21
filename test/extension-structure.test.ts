@@ -5567,6 +5567,14 @@ test("a spawner's requested mode applies only to a clean, undecided, interactive
   assert.match(block, /isEnforcedMode\(requestedBySpawner\)/,
     "a spawner may hand over a tighter starting point, never a looser one");
   assert.match(block, /!== "orchestrator" \|\| process\.env\.TMUX/);
+  // THE ONE NON-ENFORCED REQUEST (2026-09-21): a WORKER pane asking for
+  // explore. Undecided behaved as loop, and the measured cost was a worker
+  // being continued 1/15, 2/15 … after it had already reported. It is not a
+  // relaxation: the worker identity is REQUIRED, so an ordinary session that
+  // sets RG_GATE_MODE=explore in its own environment is still ignored.
+  assert.match(block, /requestedBySpawner === "explore" && readWorkerSideEnv\(process\.env\)/,
+    "a worker pane's explore is honoured — and only a worker pane's");
+  assert.match(block, /setTaskMode\("explore", "auto", ctx\)/);
 });
 
 test("the file-size gate runs at the CHECKPOINT, and only new files can block it", () => {
@@ -5897,7 +5905,7 @@ test("a judge session writes NO gate state, and says so outside the repo", () =>
   for (const fn of ["persist", "persistRepo"]) {
     const body = windowOf(`function ${fn}(`, /\n  \}\n/, `${fn} body`);
     const guardAt = body.indexOf("noteGateStatePersistSkip(ctx)");
-    assert.ok(guardAt > 0, `${fn} must consult the judge-side skip`);
+    assert.ok(guardAt > 0, `${fn} must consult the write-skip decision`);
     // Window self-proof: this really is a persisting function (if the window
     // missed the writes, "the guard comes first" would be vacuously true).
     const writeAt = body.search(/saveSidecarPreservingConcurrent|recordBlockedMarker/);
@@ -5905,9 +5913,12 @@ test("a judge session writes NO gate state, and says so outside the repo", () =>
     assert.ok(guardAt < writeAt, `${fn}: the skip must be decided BEFORE anything is written`);
   }
 
-  // The decision itself lives in lib/judge-side.ts, where it is unit-tested —
-  // the extension must not re-derive "am I a judge" with its own condition.
-  assert.match(SRC, /gateStatePersistSkip\(process\.env\)/, "the rule has one home");
+  // The decision itself lives in lib/session-exclusivity.ts, where it is
+  // unit-tested — the extension must not re-derive "am I a judge / a worker"
+  // with its own condition.
+  assert.match(SRC, /gateStateWriteSkip\(process\.env\)/, "the rule has one home");
+  assert.doesNotMatch(codeOnly(SRC), /gateStatePersistSkip\(process\.env\)/,
+    "the judge-only predecessor is gone, not kept beside it");
 
   // And the audit record must not become the very thing it reports: no file
   // write of any kind inside the recorder.
@@ -5936,8 +5947,8 @@ test("a judge session writes NO gate state, and says so outside the repo", () =>
     if (inFunnel) continue;
     // Outside a funnel ⇒ the call must carry both guards itself.
     const window = codeOnly(SRC).slice(Math.max(0, call.index! - 700), call.index);
-    assert.match(window, /gateStatePersistSkip\(process\.env\)/,
-      `a gate-state write at offset ${call.index} is not behind the judge guard`);
+    assert.match(window, /gateStateWriteSkip\(process\.env\)/,
+      `a gate-state write at offset ${call.index} is not behind the reporting-shell guard`);
     assert.match(window, /state\.exclusivityRefusal/,
       `a gate-state write at offset ${call.index} is not behind the worktree guard`);
   }

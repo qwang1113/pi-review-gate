@@ -228,7 +228,6 @@ import {
 import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import {
   readJudgeSideEnv,
-  gateStatePersistSkip,
   JUDGE_TASK_ENV,
   JUDGE_STREAM_ENV,
 } from "../lib/judge-side.ts";
@@ -237,6 +236,7 @@ import {
   PRESENCE_HEARTBEAT_MS,
   checkSessionExclusivity,
   claimsMainSidecar,
+  gateStateWriteSkip,
   parsePresence,
   presenceFor,
   presenceIsOurs,
@@ -4424,7 +4424,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the very thing being fixed.
    */
   function noteGateStatePersistSkip(ctx?: ExtensionContext): boolean {
-    const skip = gateStatePersistSkip(process.env);
+    const skip = gateStateWriteSkip(process.env);
     if (!skip) return false;
     if (!gateStateSkipAnnounced) {
       gateStateSkipAnnounced = true;
@@ -4474,7 +4474,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   // a callback) must still be able to write the record: dropping the write
   // instead would lose the user's plan approval on a restart.
   function persist(ctx?: ExtensionContext) {
-    // A judge writes NO gate state (lib/judge-side.ts explains why). Checked
+    // A judge and a worker write NO gate state (lib/session-exclusivity.ts
+    // explains why — it is the same question as the exclusivity guard). Checked
     // here, at the single funnel every gate-state write goes through, rather
     // than at each call site — a new caller must not be able to reintroduce it.
     if (noteGateStatePersistSkip(ctx)) return;
@@ -13041,12 +13042,26 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // that is still UNDECIDED and interactive, and only for the two enforced
     // modes — a spawner can hand out a tighter starting point, never a looser
     // one. Anything else in the variable is ignored (normalizeTaskMode).
+    //
+    // THE ONE NON-ENFORCED REQUEST THAT IS HONOURED: a WORKER pane asking for
+    // `explore` (2026-09-21). That is not a relaxation of the consent rule it
+    // sits beside — the worker's tool surface IS its constraint (it runs
+    // without edit/write/bash), so `explore` is not a looser starting point
+    // for it, it is the only honest description of a session that reads and
+    // reports. Left undecided it behaved as loop (fail-closed), and the
+    // measured cost was a worker being told to negotiate a loop goal it has no
+    // way to negotiate: after `worker_report` the gate injected
+    // `[REVIEW_GATE_RESUME]` and continued it 1/15, 2/15, … — a full LLM turn
+    // each. The worker identity is required, so nothing an ordinary session
+    // can put in its own environment reaches this branch.
     if (ctx.hasUI && state.taskMode === undefined) {
       const requestedBySpawner = requestedModeFromEnv();
       if (isEnforcedMode(requestedBySpawner) && requestedBySpawner !== undefined) {
         if (requestedBySpawner !== "orchestrator" || process.env.TMUX) {
           setTaskMode(requestedBySpawner, "auto", ctx);
         }
+      } else if (requestedBySpawner === "explore" && readWorkerSideEnv(process.env)) {
+        setTaskMode("explore", "auto", ctx);
       }
     }
 
@@ -13123,7 +13138,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // marker would be the reporting shell editing the fail-closed signal of
     // the session it is reviewing, and a refused session would be doing it to
     // the session that holds this worktree (reviewer P1, 2026-09-05).
-    if (!gateStatePersistSkip(process.env) && !state.exclusivityRefusal) {
+    if (!gateStateWriteSkip(process.env) && !state.exclusivityRefusal) {
       reconcileBlockedMarker(blockedMarkerPath(sidecarPath(cwd)), { sessionId: state.sessionId });
     }
 
