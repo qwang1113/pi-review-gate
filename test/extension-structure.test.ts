@@ -2750,8 +2750,14 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   const drain = SRC.slice(drainAt, drainAt + 6500);
   assert.match(drain, /pi\.sendUserMessage\(text, \{ deliverAs: instruction\.mode \}\)/,
     "delivery is pi's own API, raced against a short bound so the ack is not minutes late");
-  assert.match(drain, /deliverAs: "steer"/,
-    "an interrupt WITH text aborts then delivers the message immediately (2026-08-31)");
+  assert.match(drain, /await deliverInterrupt\(interruptText, \{/,
+    "an interrupt WITH text goes through the stop-then-speak handoff (2026-09-21): abort, WAIT for the pane to be idle, and only then send");
+  assert.match(drain, /sendNow: \(text\) => pi\.sendUserMessage\(text\)/,
+    "…and the delivery is the BARE call — `deliverAs` is what queued the text into the queue the abort stopped draining");
+  assert.doesNotMatch(drain, /deliverAs: "steer"/,
+    "the losing race must not come back: `abort()` then `steer` is the 552-second deadlock (lib/interrupt-delivery.ts)");
+  assert.match(drain, /delivered\.delivered === "turn" \? "injected" : "received"/,
+    "a deferred delivery is acknowledged as RECEIVED, never as injected");
   assert.match(drain, /ctx\.abort\?\.\(\)/, "interrupt is ctx.abort(), not a Ctrl-C keystroke");
   // STOP-FIRST (2026-09-01): an open dialog is dismissed BEFORE the message
   // is injected — the measured deadlock was the box staying up while the
