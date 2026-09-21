@@ -109,10 +109,22 @@ export interface ChoiceSpec {
   title: string;
   /** The options, in the order they are shown. 2–4 of them. */
   options: string[];
-  /** Which option is marked （推荐）. MUST be one of `options`. */
-  recommended: string;
+  /**
+   * Which option is marked （推荐）. MUST be one of `options` for a RADIO
+   * question (lib/choice-dialog.ts's `validateChoice`); a checkbox question may
+   * carry none, and one it does not name simply draws without the marker.
+   */
+  recommended?: string;
   /** Row label for "none of these" — {@link DECLINE_ROW} by default. */
   declineRow?: string;
+  /**
+   * THE FIELD THAT MAKES A QUESTION MULTIPLE (user decision, 2026-09-22): its
+   * presence — the array itself, empty included — is the shape test, and its
+   * contents are the boxes the list OPENS with, i.e. the group its author
+   * recommends and therefore what a plain Enter submits. The checkbox shape
+   * lives in lib/multi-choice-dialog.ts; this object is what both shapes share.
+   */
+  defaultChecked?: string[];
 }
 
 /** The decline row this spec actually uses. */
@@ -180,7 +192,7 @@ function stripRowDecoration(picked: string): string {
 }
 
 /** The option row as shown: `A. the text`, the recommended one carrying （推荐）. */
-export function optionRow(option: string, recommended: string, index: number): string {
+export function optionRow(option: string, recommended: string | undefined, index: number): string {
   const row = `${optionLetter(index)}. ${option}`;
   return option === recommended ? `${row}${RECOMMEND_MARKER}` : row;
 }
@@ -219,16 +231,25 @@ export function validateChoice(
   recommended: string | undefined,
   /** Where in the call this question is, e.g. "第 2 个问题". */
   where = "这个问题",
+  /**
+   * Is a recommendation REQUIRED? Every radio question owes one — that is what
+   * pressing Enter submits (user decision, 2026-09-22). A CHECKBOX question
+   * does not: its equivalent is `ChoiceSpec.defaultChecked`, and the checkbox
+   * shape's own validator (lib/ask-user.ts `validateQuestions`) owns it. What
+   * a checkbox question still owes is that a recommendation it DOES give is
+   * one of the options — hence an option rather than a boolean.
+   */
+  opts: { recommendedRequired?: boolean } = {},
 ): string | undefined {
   if (!options || options.length < MIN_CHOICE_OPTIONS) {
     return `${where}只有 ${options?.length ?? 0} 个选项 —— 每题必须给 ${MIN_CHOICE_OPTIONS}–${MAX_CHOICE_OPTIONS} 个选项`;
   }
   if (!recommended) {
-    return `${where}没有 recommended —— 每题必须标出一个推荐选项`;
-  }
-  if (!options.includes(recommended)) {
+    if (opts.recommendedRequired !== false) return `${where}没有 recommended —— 每题必须标出一个推荐选项`;
+  } else if (!options.includes(recommended)) {
     return `${where}的 recommended "${recommended}" 不在选项里 —— 推荐值必须与其中一个选项完全相同`;
   }
+  if (options.length > MAX_CHOICE_OPTIONS) return `${where}的选项超过 ${MAX_CHOICE_OPTIONS} 个`;
   const seen = new Set<string>();
   for (const option of options) {
     if (seen.has(option)) return `${where}有重复选项 "${option}" —— 选项文本必须唯一`;
@@ -374,19 +395,49 @@ export async function renderChoice(
   for (;;) {
     const picked = await ui?.select?.(title, rows, opts.signal ? { signal: opts.signal } : undefined);
     if (picked !== declineRowOf(spec)) return picked;
-    const reason = await ui?.editor?.(reasonTitleOf(title), {
+    const step = await declineReason(ui, spec, {
       ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(prefill === undefined ? {} : { prefill }),
     });
-    // ESC IN THE BOX: back to the list, holding on to what was typed.
-    if (reason !== undefined && isReasonBack(reason)) {
-      prefill = reasonBackText(reason) || prefill;
-      continue;
-    }
-    if (reason === undefined) return undefined;
-    const trimmed = reason.trim();
-    return trimmed ? `${declineRowOf(spec)}：${trimmed}` : declineRowOf(spec);
+    if (step.kind === "answer") return step.picked;
+    if (step.kind === "dismissed") return undefined;
+    prefill = step.prefill ?? prefill;
   }
+}
+
+/** What the decline row's reason box did. */
+export type DeclineStep =
+  | { kind: "answer"; picked: string }
+  | { kind: "back"; prefill?: string }
+  | { kind: "dismissed" };
+
+/**
+ * THE DECLINE ROW'S SECOND HALF — one implementation for BOTH dialog shapes.
+ *
+ * A radio list and a checkbox list reach this the same way (the row itself is
+ * `looksLikeDeclineRow`'s), and everything that made it delicate is shape-free:
+ * the reason box carries the WHOLE question head, ESC in it goes BACK to the
+ * list with the half-written text instead of closing the question, and a box
+ * nobody decided in is a dismissal rather than a made-up “none of these”.
+ * Two copies of that would be two places for the ESC reading to drift.
+ */
+export async function declineReason(
+  ui: ChoiceUi | undefined,
+  spec: ChoiceSpec,
+  opts: { signal?: AbortSignal; body?: string; prefill?: string } = {},
+): Promise<DeclineStep> {
+  const title = opts.body ? `${spec.title}\n${opts.body}` : spec.title;
+  const reason = await ui?.editor?.(reasonTitleOf(title), {
+    ...(opts.signal ? { signal: opts.signal } : {}),
+    ...(opts.prefill === undefined ? {} : { prefill: opts.prefill }),
+  });
+  if (reason !== undefined && isReasonBack(reason)) {
+    return { kind: "back", ...(reasonBackText(reason) ? { prefill: reasonBackText(reason) } : {}) };
+  }
+  if (reason === undefined) return { kind: "dismissed" };
+  const trimmed = reason.trim();
+  return { kind: "answer", picked: trimmed ? `${declineRowOf(spec)}：${trimmed}` : declineRowOf(spec) };
 }
 
 /**

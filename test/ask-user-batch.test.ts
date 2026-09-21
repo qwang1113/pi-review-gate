@@ -32,6 +32,9 @@ import assert from "node:assert/strict";
 
 import { doAskUser, type UserInteractionToolDeps } from "../lib/user-interaction-tools.ts";
 import { askThroughChannel, type ChildChannelBinding } from "../lib/orchestrator-child-channel.ts";
+import type { ChoiceSpec } from "../lib/choice-dialog.ts";
+import { DECLINE_ROW } from "../lib/choice-dialog.ts";
+import { MULTI_UNAVAILABLE } from "../lib/multi-choice-dialog.ts";
 import {
   appendRecord,
   channelPathFor,
@@ -91,6 +94,8 @@ interface Harness {
   state: GateState;
   /** Titles of the boxes actually raised in the pane, in order. */
   rendered: string[];
+  /** Every CHECKBOX rendering this interview asked for (2026-09-22). */
+  multiCalls: Array<{ spec: ChoiceSpec; back: boolean; body?: string }>;
   /** The largest number of boxes that were on screen at the same time. */
   maxConcurrent: number;
   armed: boolean[];
@@ -108,7 +113,11 @@ interface Harness {
  * into the channel first — which is how a test makes the project manager and
  * the human race for the same box.
  */
-function harness(answerInPane: (title: string, h: Harness) => string | undefined | Promise<string | undefined>): Harness {
+function harness(
+  answerInPane: (title: string, h: Harness) => string | undefined | Promise<string | undefined>,
+  /** `multiUnavailable` stands for a host whose `ui.custom` never mounts (RPC). */
+  harnessOpts: { multiUnavailable?: boolean } = {},
+): Harness {
   const io = memoryIO();
   const binding: ChildChannelBinding = {
     io,
@@ -123,6 +132,7 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
     io,
     state: emptyState("sess-1", 10),
     rendered: [],
+    multiCalls: [],
     maxConcurrent: 0,
     armed: [],
     interrupt: new AbortController(),
@@ -168,6 +178,19 @@ function harness(answerInPane: (title: string, h: Harness) => string | undefined
     // contain is not bounded any more (2026-09-16) — see lib/renderer-mode.ts
     // for why the fitting went away.
     askChoice: async (_uiCtx, spec, opts) => {
+      if (opts?.signal === undefined) return undefined;
+      const shown = opts.body ? `${spec.title}\n${opts.body}` : spec.title;
+      return render(shown, opts.signal);
+    },
+    // THE CHECKBOX ENTRY POINT (2026-09-22), driving the same fake pane: the
+    // call itself is recorded, so a test can tell WHICH shape rendered a
+    // question — a checklist that silently went through the radio renderer is
+    // exactly the defect this seam exists to expose.
+    askMultiChoice: async (_uiCtx, spec, opts) => {
+      h.multiCalls.push({ spec, back: opts?.back === true, body: opts?.body });
+      // RPC resolves `ui.custom` WITHOUT running the factory: the caller gets
+      // the sentinel, not a dismissal (reviewer P2, 2026-09-22).
+      if (harnessOpts.multiUnavailable) return MULTI_UNAVAILABLE;
       if (opts?.signal === undefined) return undefined;
       const shown = opts.body ? `${spec.title}\n${opts.body}` : spec.title;
       return render(shown, opts.signal);
@@ -387,3 +410,92 @@ test("an answer the manager already WON survives the user closing the box", asyn
   assert.equal(third?.by, "orchestrator", "and the wire says who decided it");
 });
 
+// ---------------------------------------------------------------------------
+// 6. The CHECKBOX shape goes through its OWN renderer (2026-09-22)
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY THIS IS ASSERTED AT THE WIRING LEVEL. The checkbox box, its parser and
+ * its state machine have their own unit tests (test/multi-choice-dialog.test.ts)
+ * — and all of them would still pass if the interview kept handing every
+ * question to the RADIO renderer: the answer would come back as one tick, the
+ * question would look answered, and the user would have seen a single-choice
+ * list. This test drives the whole interview and watches which entry point was
+ * called, which rows went on the wire, and what the record says.
+ */
+test("a checklist question is rendered as a CHECKBOX, and travels as one", async () => {
+  const QUESTIONS = [
+    { text: "第一题：选架构", options: ["单体", "微服务"], recommended: "单体" },
+    {
+      text: "第二题：开哪几个环节？",
+      multiple: true,
+      defaultChecked: ["预检"],
+      options: ["预检", "质量审查", "precommit"],
+    },
+  ];
+  const h = harness((title) => {
+    if (title.includes("第二题")) return "A. 预检 / C. precommit";
+    return "A. 单体（推荐）";
+  });
+
+  const reply = await h.run(QUESTIONS);
+
+  assert.equal(h.multiCalls.length, 1, "exactly one question was a checkbox question");
+  const call = h.multiCalls[0]!;
+  assert.equal(call.spec.title, "问题 2 / 2", "the title stays the bare progress label");
+  assert.equal(call.body, "第二题：开哪几个环节？", "the question rides in the body, as it does for a radio list");
+  assert.deepEqual(call.spec.defaultChecked, ["预检"], "the list opens on the group its author recommends");
+  assert.equal(call.back, true, "the second question draws the way back");
+
+  const requests = requestsOn(h.io);
+  assert.equal(requests[0]!.multiple, undefined, "a radio question carries no checkbox flag");
+  assert.equal(requests[1]!.multiple, true);
+  assert.deepEqual(requests[1]!.options, ["[x] A. 预检", "[ ] B. 质量审查", "[ ] C. precommit", DECLINE_ROW],
+    "the manager sees the rows the USER sees, checkbox marks — and the default ticks — included");
+  assert.match(requests[1]!.payload ?? "", /推荐勾选：A\. 预检/, "…and what a bare “approve” would mean");
+
+  assert.equal(h.state.askUser?.answers[1]?.kind, "answered");
+  assert.deepEqual(h.state.askUser?.answers[1]?.options, ["预检", "precommit"]);
+  assert.equal(h.state.askUser?.answers[1]?.answer, "A. 预检 / C. precommit");
+  assert.match(reply, /A\. 预检 \/ C\. precommit/);
+});
+
+// ---------------------------------------------------------------------------
+// 7. A host that cannot draw a CHECKBOX must say so (reviewer P2, 2026-09-22)
+// ---------------------------------------------------------------------------
+
+test("a checklist no host can draw goes back to the agent — it is NOT a closed box", async () => {
+  const h = harness(() => "A. 单体（推荐）", { multiUnavailable: true });
+  const reply = await h.run([
+    { text: "第一题：开哪几个环节？", multiple: true, defaultChecked: [], options: ["预检", "precommit"] },
+  ]);
+
+  assert.equal(h.multiCalls.length, 1, "the checkbox entry point was asked");
+  assert.equal(reply.includes("采访完成"), false, "…and nothing was reported as a finished interview");
+  assert.match(reply, /没有可用的对话框/, "the questions go back to the agent instead");
+  assert.match(reply, /\[ \] A\. 预检/, "checkbox rows, so the agent carries the shape with it");
+  assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["unanswered"]);
+  assert.equal(h.armed.at(-1), false, "the loop still pauses: the user owes an answer");
+  // AND THE SENTINEL NEVER LEAVES THIS PROCESS (reviewer P2, 2026-09-22): a
+  // renderer's return value IS the human's answer on the wire, so carrying it
+  // out would settle the question as answered — with a NUL-bearing string —
+  // and drop it off the project manager's receipt.
+  for (const settled of settlesOn(h.io)) {
+    assert.doesNotMatch(settled.answer ?? "", /\u0000/, "nothing sentinel-shaped may reach the channel");
+  }
+});
+
+test("a batch with one unrenderable checklist still asks the rest — and says which half was lost", async () => {
+  // THE CHECKLIST IS FIRST on purpose (quality round P2, 2026-09-22): settled as
+  // a DISMISSED box it set `stopped`, and the radio question behind it was
+  // never shown at all — on a host that could still draw it.
+  const h = harness(() => "A. 单体（推荐）", { multiUnavailable: true });
+  const reply = await h.run([
+    { text: "第一题：开哪几个环节？", multiple: true, defaultChecked: [], options: ["预检", "quality 审查", "precommit"] },
+    { text: "第二题：选架构", options: ["单体", "微服务"], recommended: "单体" },
+  ]);
+
+  assert.match(reply, /第二题[\s\S]*→ A\. 单体/, "the radio question BEHIND the checklist was still asked");
+  assert.match(reply, /画不出复选清单/, "…and the agent is told why the other one has no answer");
+  assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["unanswered", "answered"]);
+});

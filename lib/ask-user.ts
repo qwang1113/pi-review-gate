@@ -30,6 +30,14 @@ import {
   validateChoice,
   type ChoiceSpec,
 } from "./choice-dialog.ts";
+import {
+  defaultCheckedOf,
+  isMultipleChoice,
+  MULTI_ANSWER_SEPARATOR,
+  multiChoiceRows,
+  multiSelectionLabel,
+  parseMultiChoice,
+} from "./multi-choice-dialog.ts";
 
 /**
  * One question's own length cap. There is NO cap on how MANY questions one
@@ -50,8 +58,30 @@ export interface AskQuestion {
   text: string;
   /** 2–4 choices. There is no free-text question any more (2026-09-08). */
   options: string[];
-  /** The agent's own recommendation — must equal one of `options`. */
+  /**
+   * The agent's own recommendation — must equal one of `options`.
+   *
+   * REQUIRED ON A RADIO QUESTION (that is what pressing Enter submits), and
+   * deliberately optional on a {@link AskQuestion.multiple} one, where the
+   * role is played by `defaultChecked` (user decision, 2026-09-22). A
+   * checkbox question that does give one still draws it as （推荐）.
+   */
   recommended: string;
+  /**
+   * THIS QUESTION TAKES SEVERAL ANSWERS — the checkbox shape (2026-09-22).
+   *
+   * `true` must come with a `defaultChecked` — the group the question author
+   * recommends — so that “press Enter, accept the recommendation” means the
+   * same thing on both shapes. The default is deliberately NOT guessed: an
+   * unticked list nobody chose is not a recommendation.
+   */
+  multiple?: true;
+  /**
+   * The options a checklist question opens TICKED. Required when `multiple` is
+   * set (an empty array is a legitimate answer: “recommend none of them”), and
+   * every entry must be one of `options`.
+   */
+  defaultChecked?: string[];
   /**
    * ORCHESTRATOR ONLY (2026-09-16): when the project manager asks the user
    * for a proxy authority, this names the scope (e.g. `sensitive-edit`).
@@ -112,6 +142,13 @@ export interface AskAnswer {
    * agent recommended). Absent when the answer was not one of the options.
    */
   option?: string;
+  /**
+   * THE TICKED OPTIONS, as text, in option order — present for a checklist
+   * answer only (2026-09-22), empty when the user confirmed with nothing
+   * ticked. The caller that wants structure reads this instead of splitting
+   * `answer` back apart.
+   */
+  options?: string[];
 }
 
 /**
@@ -160,12 +197,66 @@ export function validateQuestions(raw: unknown): QuestionsResult {
     const where = `第 ${index + 1} 个问题`;
     const normalized = normalizeOne(item);
     if (!normalized) return { ok: false, error: `${where}没有可读的 text —— 每题都要有完整的问题文本。` };
-    const bad = validateChoice(normalized.question.options, normalized.question.recommended, where);
+    const question = normalized.question;
+    // A DEFAULT TICK ON A RADIO QUESTION IS A MISTAKE, NOT A NO-OP (2026-09-22):
+    // silently dropping it would let an agent believe the box opens with its
+    // picks while the user sees a plain single-choice list.
+    if (!question.multiple && (item as { defaultChecked?: unknown } | null)?.defaultChecked !== undefined) {
+      return {
+        ok: false,
+        error: `${where}带了 defaultChecked 但没有 multiple: true —— 默认勾选只对多选题有意义；` +
+          "单选题请用 recommended 表达推荐值。",
+      };
+    }
+    const bad = question.multiple
+      ? validateMultiple(question, where)
+      // A radio question owes its recommendation; a checkbox one owes the
+      // default ticks instead (validateMultiple), which is the SAME promise
+      // “Enter accepts what the asker recommends” under the other shape.
+      : validateChoice(question.options, question.recommended, where);
     if (bad) return { ok: false, error: bad };
     if (normalized.trimmed) trimmedOptions += 1;
-    questions.push(normalized.question);
+    questions.push(question);
   }
   return { ok: true, questions, trimmedOptions };
+}
+
+/**
+ * What a MULTIPLE-CHOICE question must satisfy (user decision, 2026-09-22).
+ *
+ * The option list rules are the radio ones (2–4 rows, no duplicates) with the
+ * recommendation NO LONGER required — `defaultChecked` is what a bare Enter
+ * submits instead, and the whole point of requiring it is that the promise
+ * 「直接回车 ＝ 接受提问方的推荐」 survives the shape change.
+ */
+function validateMultiple(q: AskQuestion, where: string): string | undefined {
+  if (q.grantScope) {
+    return `${where}既是多选题又带 grantScope —— 授权题的答案必须唯一（推荐哪一项就是授权哪一项），` +
+      "因此只能是单选题。";
+  }
+  const bad = validateChoice(q.options, q.recommended, where, { recommendedRequired: false });
+  if (bad) return bad;
+  if (q.defaultChecked === undefined) {
+    return `${where}是多选题但没有 defaultChecked —— 多选题必须显式给出推荐勾选的那一组，` +
+      "想推荐一项都不勾就写 `defaultChecked: []`（直接回车交的就是这一组）。";
+  }
+  // THE SEPARATOR MAY NOT APPEAR IN AN OPTION (quality round P2, 2026-09-22).
+  // `A. 甲 / C. 丙` is how a checklist answer is written down, so an option
+  // whose own text contains `" / "` cannot be told apart from two ticks —
+  // silently, and in the losing direction (the whole answer becomes
+  // unreadable). Refused here, at the one entry every question comes through.
+  for (const option of q.options) {
+    if (option.includes(MULTI_ANSWER_SEPARATOR)) {
+      return `${where}的选项 "${option}" 里含有多选答案的分隔符 "${MULTI_ANSWER_SEPARATOR.trim()}" —— ` +
+        "它是勾选项之间的分隔符，出现在选项里就分不出「一项叫这个名字」与「勾了两项」；请换一种写法。";
+    }
+  }
+  for (const option of q.defaultChecked) {
+    if (!q.options.includes(option)) {
+      return `${where}的 defaultChecked 里有不在选项里的 "${option}" —— 它只能从选项里选。`;
+    }
+  }
+  return undefined;
 }
 
 interface NormalizedQuestion {
@@ -197,6 +288,16 @@ function normalizeOne(item: unknown): NormalizedQuestion | undefined {
   const grantScope = typeof rawGrant === "string" && rawGrant.trim() !== ""
     ? rawGrant.trim().slice(0, MAX_CHOICE_OPTION_CHARS)
     : undefined;
+  // A multiple-choice flag and its default ticks. The flag only counts when it
+  // is exactly `true` (a `"yes"` is not a checkbox), and the ticks are kept
+  // only when they were GIVEN — `undefined` is what the validator refuses.
+  const multiple = (item as { multiple?: unknown })?.multiple === true;
+  const rawChecked = (item as { defaultChecked?: unknown })?.defaultChecked;
+  const defaultChecked = Array.isArray(rawChecked)
+    ? rawChecked
+      .filter((o): o is string => typeof o === "string" && o.trim() !== "")
+      .map((o) => o.trim().slice(0, MAX_CHOICE_OPTION_CHARS))
+    : undefined;
   // A grantScope question is ALWAYS a choice question (every question is),
   // and the scope is recognized from a fixed list — an agent cannot invent one.
   return {
@@ -204,6 +305,8 @@ function normalizeOne(item: unknown): NormalizedQuestion | undefined {
       text: trimmedText,
       options,
       recommended,
+      ...(multiple ? { multiple: true as const } : {}),
+      ...(multiple && defaultChecked !== undefined ? { defaultChecked } : {}),
       ...(grantScope && isGrantableScope(grantScope) ? { grantScope } : {}),
     },
     trimmed: all.length > options.length,
@@ -215,13 +318,34 @@ export function progressLabel(index: number, total: number): string {
   return `${index + 1} / ${total}`;
 }
 
-/** The question as the gate's one template sees it. */
+/**
+ * The question as the gate's dialog shapes see it.
+ *
+ * A multiple-choice question carries its own shape marker: `defaultChecked`
+ * present IS 「this is a checklist」 (lib/multi-choice-dialog.ts), and its
+ * contents are the boxes the list opens with.
+ */
 export function choiceSpecOf(q: AskQuestion): ChoiceSpec {
-  return { title: q.text, options: q.options, recommended: q.recommended };
+  return {
+    title: q.text,
+    options: q.options,
+    recommended: q.recommended,
+    ...(q.multiple ? { defaultChecked: q.defaultChecked ?? [] } : {}),
+  };
+}
+
+/**
+ * This question's rows as TEXT — checkbox rows for a checklist, radio rows
+ * otherwise. ONE statement of “what the question offers”, so the transcript
+ * the user reads and the headless fallback can never disagree about the shape.
+ */
+export function questionRows(q: AskQuestion): string[] {
+  const spec = choiceSpecOf(q);
+  return isMultipleChoice(spec) ? multiChoiceRows(spec, defaultCheckedOf(spec)) : choiceRows(spec);
 }
 
 export type ChoiceMeaning =
-  | { kind: "answered"; answer: string; option?: string }
+  | { kind: "answered"; answer: string; option?: string; options?: string[] }
   | { kind: "deferred-to-chat" }
   | { kind: "dismissed" };
 
@@ -250,6 +374,48 @@ export function interpretChoice(picked: string | undefined, q: AskQuestion): Cho
   return {
     kind: "answered",
     answer: parsed.reason ? `不选，原因：${parsed.reason}` : "不选（未说明原因）",
+  };
+}
+
+/** How a confirmed-but-empty checklist answer reads in the record. */
+export const MULTI_NONE_ANSWER = "（一项都没勾）";
+
+/**
+ * What a line the user picked MEANS when the question is a CHECKLIST.
+ *
+ * Same three outcomes the radio shape has, with the one difference that makes
+ * the shape worth having: the answer is a LIST. An EMPTY list is a real answer
+ * here (the user confirmed without ticking anything — t5-stages' “every stage
+ * off”), which is why it is spelled out rather than confused with silence:
+ * `undefined` stays the dismissal it has always been.
+ *
+ * A line nobody can read is recorded VERBATIM with no ticks — a proxy that
+ * answers a dialog with prose must not thereby tick boxes on the user's behalf.
+ */
+export function interpretMultiChoice(picked: string | undefined, q: AskQuestion): ChoiceMeaning {
+  const parsed = parseMultiChoice(picked, choiceSpecOf(q));
+  if (parsed.kind === "dismissed") return { kind: "dismissed" };
+  if (parsed.kind === "declined") {
+    const typed = parsed.reason.trim().toLowerCase();
+    if (typed === ANSWER_IN_CHAT_INPUT) return { kind: "deferred-to-chat" };
+    return {
+      kind: "answered",
+      answer: parsed.reason ? `不选，原因：${parsed.reason}` : "不选（未说明原因）",
+      options: [],
+    };
+  }
+  if (parsed.kind === "unreadable") {
+    // NO `options` AT ALL, NOT AN EMPTY ARRAY (quality round P2, 2026-09-22):
+    // an empty list means “the user ticked nothing”, and a caller that reads
+    // only the structured half must not see a prose answer it cannot judge as
+    // the same thing. `answer` still carries the text verbatim.
+    return { kind: "answered", answer: parsed.text };
+  }
+  if (parsed.options.length === 0) return { kind: "answered", answer: MULTI_NONE_ANSWER, options: [] };
+  return {
+    kind: "answered",
+    answer: multiSelectionLabel(parsed.options, q.options),
+    options: parsed.options,
   };
 }
 
@@ -302,7 +468,10 @@ export function resolveQuestion(
   } = {},
 ): QuestionResolution {
   if (picked !== undefined) {
-    const meaning = interpretChoice(picked, q);
+    // WHICH READER READS IT IS THE SHAPE'S OWN BUSINESS: a checklist answer is
+    // a list, and forcing it through the radio reader would keep exactly one
+    // tick and silently drop the rest.
+    const meaning = q.multiple ? interpretMultiChoice(picked, q) : interpretChoice(picked, q);
     if (meaning.kind === "answered") {
       return {
         answer: {
@@ -310,6 +479,7 @@ export function resolveQuestion(
           kind: "answered",
           answer: meaning.answer,
           ...(meaning.option === undefined ? {} : { option: meaning.option }),
+          ...(meaning.options === undefined ? {} : { options: meaning.options }),
         },
       };
     }
@@ -489,6 +659,6 @@ export function buildNoDialogNotice(questions: AskQuestion[]): string {
   return "review-gate: 这个环境没有可用的对话框（headless / RPC），问题一个都没能展示给用户。\n" +
     "把下面的问题原样写进你的回复，然后结束本轮，等用户回答：\n" +
     questions.map((q, i) =>
-      `${progressLabel(i, questions.length)} ${q.text}\n   选项：${choiceRows(choiceSpecOf(q)).join(" / ")}`).join("\n");
+      `${progressLabel(i, questions.length)} ${q.text}\n   选项：${questionRows(q).join(" / ")}`).join("\n");
 }
 

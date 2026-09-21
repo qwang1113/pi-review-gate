@@ -224,6 +224,17 @@ export interface ChannelRequestRecord extends ChannelRecordBase {
   title: string;
   /** The exact rows offered, in order. Empty for `input`. */
   options: string[];
+  /**
+   * THIS QUESTION TAKES SEVERAL ANSWERS (2026-09-22) — a checkbox list, not a
+   * radio one. The rows look the same (`A. text`), so without this flag a
+   * project manager would answer a multiple-choice question with exactly one
+   * row and believe that was all it took; with it, `orchestrator_answer`
+   * accepts a LIST and normalizes it to the shape the child parses.
+   *
+   * Optional, so a record written by an older child simply reads as a radio
+   * question — which is what it was.
+   */
+  multiple?: boolean;
   /** The full text behind the question (a goal draft, a plan) when there is one. */
   payload?: string;
   payloadRef?: ChannelPayloadRef;

@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   parseModelSpec,
   splitThinkingSuffix,
@@ -1441,6 +1442,42 @@ test("healMissingAgentSlots refuses to write over a corrupt config, a bad agents
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the self-heal replaces the config ATOMICALLY — a reader never sees a half file (P1 from f544605)", () => {
+  // PICKED UP CROSS-TASK (user decision, 2026-09-22): every OTHER session and
+  // judge pane on the machine reads `review-gate.json` while it is written, and
+  // a half-written one reads as CORRUPT — the user's own pinned chains are then
+  // reported unresolvable and those sessions refuse to start.
+  const dir = mkdtempSync(join(tmpdir(), "agent-slot-heal-atomic-"));
+  try {
+    const pkg = join(dir, "pkg");
+    const cfg = join(dir, "review-gate.json");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "acceptance.md"), "---\nname: acceptance\nmodel: claude-fable-5\nthinking: max\n---\n");
+    writeFileSync(cfg, JSON.stringify({ agents: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } } }, null, 2) + "\n", "utf8");
+
+    const res = healMissingAgentSlots({ configPath: cfg, agentsDir: pkg, roles: ["acceptance", "reviewer"], registry: REG });
+    assert.deepEqual(res.healed, ["acceptance"]);
+    assert.deepEqual(readdirSync(dir).filter((name) => name.includes(".tmp-")), [],
+      "the write goes through the temp-then-rename path, so no sibling is left behind");
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(cfg, "utf8")).agents), ["reviewer", "acceptance"],
+      "the user's pin and the healed role are both in the file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // AND IT IS THE REPOSITORY'S ONE ATOMIC WRITE: a behaviour test cannot catch a
+  // bare `writeFileSync` (it lands the same bytes), so the call site is
+  // asserted where it lives — the same shape `lib/file-size-gate.ts` and the
+  // structural tests use for “one implementation, no second path”.
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "model-config.ts"), "utf8");
+  const healBody = source.slice(
+    source.indexOf("export function healMissingAgentSlots"),
+    source.indexOf("export interface StartupAgentsResult"),
+  );
+  assert.match(healBody, /writeFileAtomic\(opts\.configPath/);
+  assert.doesNotMatch(healBody, /writeFileSync\(opts\.configPath/);
 });
 
 test("startupAgentsCheck heals an unconfigured role and re-validates without touching a pin", () => {

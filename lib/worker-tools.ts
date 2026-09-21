@@ -41,7 +41,7 @@ import type { ToolReply } from "./tool-host.ts";
 import type { SessionPaneDecor, SessionPaneRole } from "./session-factory.ts";
 import { workerPaneDecor } from "./session-factory.ts";
 import type { ChannelIO, ChannelTarget, ChannelRecord, ChannelRequestRecord, ChannelReportRecord } from "./orchestrator-channel.ts";
-import { appendRecord, channelPathFor, newChannelId, readChannel, requestPayload } from "./orchestrator-channel.ts";
+import { appendRecord, channelPathFor, newChannelId, readChannel, reportText, requestPayload } from "./orchestrator-channel.ts";
 import type { AgentsConfigMap } from "./model-config.ts";
 import {
   buildWorkerPaneCommand,
@@ -171,10 +171,23 @@ export function projectWorkerChannel(io: ChannelIO, records: readonly ChannelRec
   let question: WorkerProjection["question"];
   for (const r of records) {
     if (r.kind === "report") {
-      const text = (r as ChannelReportRecord).summary;
-      if (typeof text === "string" && text.trim()) {
-        report = { reportId: (r as ChannelReportRecord).reportId, text: text.trim(), at: r.at };
-      }
+      const record = r as ChannelReportRecord;
+      // THE REPORT IS NOT ALWAYS INLINE (P0, 2026-09-22). A report past the
+      // inline budget is spilled to a side file and the record keeps only
+      // `summaryRef` — reading `summary` alone made `worker_wait` answer
+      // 「没有新消息」 forever for every long report (measured on a real one:
+      // `{"kind":"report",…,"summaryRef":{…,"chars":19657}}`). `reportText`
+      // is the ONE reader that knows both shapes; the request records below
+      // already went through its twin (`requestPayload`).
+      const text = reportText(io, record)?.trim();
+      report = {
+        reportId: record.reportId,
+        // A SPILL NOBODY CAN READ IS REPORTED, NOT SWALLOWED: dropping it
+        // silently is indistinguishable, to the caller, from a worker that
+        // never reported at all.
+        text: text || unreadableReport(record),
+        at: r.at,
+      };
       continue;
     }
     if (r.kind === "request") {
@@ -183,17 +196,33 @@ export function projectWorkerChannel(io: ChannelIO, records: readonly ChannelRec
       // OLDEST first: a worker blocked on question one must not be answered out
       // of order by a later one.
       if (!question) {
+        const payload = requestPayload(io, req);
         question = {
           requestId: req.requestId,
           title: req.title,
           options: req.options ?? [],
           at: req.at,
-          ...(requestPayload(io, req) === undefined ? {} : { payload: requestPayload(io, req)! }),
+          ...(payload === undefined ? {} : { payload }),
         };
       }
     }
   }
   return { ...(report === undefined ? {} : { report }), ...(question === undefined ? {} : { question }), records: records.length };
+}
+
+/**
+ * WHAT A REPORT SAYS WHEN ITS TEXT CANNOT BE READ — a fact, not silence.
+ *
+ * Two shapes: a `summaryRef` that points at nothing readable (the side file
+ * was pruned, the path is stale), and a record that carried neither an inline
+ * summary nor a reference. Both used to vanish into “no new message”, which is
+ * the one answer a caller can never act on.
+ */
+function unreadableReport(record: ChannelReportRecord): string {
+  const ref = record.summaryRef;
+  return ref
+    ? `（报告读不到：${ref.path} 不存在或为空；记录声明 ${ref.chars} 字符）`
+    : "（报告没有内容：既没有内联 summary 也没有 summaryRef）";
 }
 
 /** Read one worker's channel, tolerating a channel that does not exist yet. */

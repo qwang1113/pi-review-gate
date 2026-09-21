@@ -25,7 +25,7 @@ neutraliseGateEnv();
 import { memoryChannelIO } from "./helpers/fake-orchestration.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import type { AgentsConfigMap } from "../lib/model-config.ts";
-import { appendRecord, type ChannelRecord } from "../lib/orchestrator-channel.ts";
+import { appendRecord, channelPathFor, readChannel, type ChannelRecord } from "../lib/orchestrator-channel.ts";
 import {
   nextWorkerId,
   projectWorkerChannel,
@@ -616,4 +616,43 @@ test("the projection answers the two questions a caller has", () => {
   assert.equal(projection.report?.text, "第一次的结论");
   assert.equal(projection.question?.title, "继续吗？");
   assert.equal(projection.question?.options.length, 0, "an option-less question is still a question");
+});
+
+test("a report too long to inline still reaches the caller — the summaryRef is READ (2026-09-22)", () => {
+  const io = memoryChannelIO(() => NOW);
+  const target = workerChannelTarget("%1", "worker-1");
+  // MEASURED IN THE FIELD: a worker's long report is spilled to a side file
+  // (`{"kind":"report",…,"summaryRef":{…,"chars":19657}}`) and the record keeps
+  // no `summary` at all — reading the inline field alone made `worker_wait`
+  // answer 「没有新消息」 forever while the report sat on disk.
+  const long = "结论：这一轮查到的每一处调用点都在下面。".repeat(120);
+  appendWorkerReport(io, target, { result: long });
+  const records = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
+  const stored = records.at(-1) as { summary?: string; summaryRef?: { path: string; chars: number } };
+  assert.equal(stored.summary, undefined, "the fixture really did spill the report");
+  assert.ok(stored.summaryRef, "…and the only copy is the side file");
+
+  assert.equal(projectWorkerChannel(io, records).report?.text, long);
+});
+
+test("a report nobody can read is SAID, never silently dropped", () => {
+  const io = memoryChannelIO(() => NOW);
+  const target = workerChannelTarget("%1", "worker-1");
+  appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(NOW).toISOString(), verdict: "READY",
+    reportId: "rep-gone", summaryRef: { path: "/gone/rep-gone.payload", chars: 4096 },
+  });
+  appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(NOW).toISOString(), verdict: "READY",
+    reportId: "rep-empty",
+  });
+  const records = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
+
+  const unreadable = projectWorkerChannel(io, [records[0]!]);
+  assert.match(unreadable.report?.text ?? "", /报告读不到/,
+    "a dropped report and a worker that never reported are indistinguishable to the caller");
+  assert.match(unreadable.report?.text ?? "", /\/gone\/rep-gone\.payload/);
+
+  const empty = projectWorkerChannel(io, [records[1]!]);
+  assert.match(empty.report?.text ?? "", /没有内容/);
 });

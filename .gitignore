@@ -1,4 +1,12 @@
-node_modules/
+# NO TRAILING SLASH on purpose (2026-09-22): `node_modules/` matches only a
+# DIRECTORY, so a linked worktree whose dependencies arrive as a SYMLINK stayed
+# untracked — which both stopped lib/worktree-seed.ts from seeding it there
+# (`git check-ignore node_modules` answered “not ignored”) and moved the gate's
+# worktree fingerprint away from `HEAD^{tree}` (the fingerprint adds untracked
+# paths to a shadow index). That second half was measured: every parked READY
+# was then cleared, because `lib/review-adjudicate.ts`'s `laneVerifiesTree`
+# compares `precommit.lastFullPassTree` with the review target's commit tree.
+node_modules
 *.log
 .pi/review-gate-state.json
 # Per-session sidecar variants (RG_STATE_VARIANT): an orchestrator's children

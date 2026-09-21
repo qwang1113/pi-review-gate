@@ -20,10 +20,10 @@
  * per repo (`npx pi-review-gate-install-hooks` or the shipped script). A
  * missing `pi` CLI or a registration failure logs guidance instead of aborting.
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -312,10 +312,33 @@ async function applyGlobalModelConfig() {
       return;
     }
     const agents = raw && typeof raw === "object" ? raw.agents : undefined;
-    const source = readFileSync(join(ROOT, "lib", "model-config.ts"), "utf8");
-    const js = (await import("node:module")).stripTypeScriptTypes(source, { mode: "transform", sourceMap: false });
-    const dataUrl = `data:text/javascript;base64,${Buffer.from(js, "utf8").toString("base64")}`;
-    const { effectiveAgentsConfig, applyAgentConfigLayer, loadRegistry } = await import(dataUrl);
+    // ── HOW THE LIB IS LOADED (2026-09-22) ──
+    // Node REFUSES to type-strip a file UNDER `node_modules`, and a real npm
+    // postinstall's cwd IS `node_modules/pi-review-gate` — so the module is
+    // staged into a throwaway directory first (node strips the types there) and
+    // imported by file URL. The staging takes the module's RELATIVE imports
+    // along: a `data:` URL has no base, so `./atomic-write.ts` was unresolvable
+    // and the entire render was skipped with a warning (measured — the
+    // global-layer render silently stopped covering every model chain).
+    const stage = mkdtempSync(join(tmpdir(), "pi-review-gate-lib-"));
+    let lib;
+    try {
+      const source = readFileSync(join(ROOT, "lib", "model-config.ts"), "utf8");
+      // ONE LEVEL OF RELATIVE IMPORTS IS ENOUGH TODAY (`atomic-write` pulls in
+      // nothing but `node:fs`); a staged module that ever grows a relative
+      // dependency of its own needs this walk to recurse.
+      const deps = [...source.matchAll(/from "\.\/([\w.-]+)\.ts"/g)].map((m) => m[1]);
+      for (const name of ["model-config", ...deps]) {
+        copyFileSync(join(ROOT, "lib", `${name}.ts`), join(stage, `${name}.ts`));
+      }
+      lib = await import(pathToFileURL(join(stage, "model-config.ts")).href);
+    } finally {
+      // THE COPIES ARE DISPOSABLE once imported (the modules live in memory),
+      // and a postinstall that leaked a directory per run slowly filled $TMPDIR
+      // (quality round P2, 2026-09-22).
+      rmSync(stage, { recursive: true, force: true });
+    }
+    const { effectiveAgentsConfig, applyAgentConfigLayer, loadRegistry } = lib;
     const { map, diagnostics } = effectiveAgentsConfig(agents, undefined);
     for (const d of diagnostics) log(`  ⚠ model config: ${d}`);
     // Worker presets are filtered INSIDE the renderer (`applyAgentConfigLayer`

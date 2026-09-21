@@ -43,6 +43,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeFileAtomic } from "./atomic-write.ts";
 
 /** Max slots an agent may configure; longer lists are truncated with a diagnostic. */
 export const MAX_SLOTS = 4;
@@ -103,10 +104,12 @@ export function isWorkerRoleName(name: string): boolean {
  * path fails SILENTLY, which is precisely how a bootstrap deadlock survives.
  *
  * Evaluated lazily at CALL time, never at module scope, and defensive about
- * `import.meta.url`: scripts/install-package.mjs imports this module as a
- * base64 DATA URL, where `fileURLToPath` throws. A module-level evaluation
- * would take the whole postinstall render down with it; null lets each caller
- * fall back to the sourceDir it already knows.
+ * `import.meta.url`: `scripts/install-package.mjs` stages this module into a
+ * temporary directory and imports it by file URL (a `data:` URL has no base,
+ * so a relative import such as `./atomic-write.ts` would not resolve there),
+ * and `fileURLToPath` throws in any context where there is no file on disk. A
+ * module-level evaluation would take the whole postinstall render down with
+ * it; null lets each caller fall back to the sourceDir it already knows.
  *
  * `baseDir` exists so the PROBE ORDER itself is testable against temp dirs
  * (production callers pass nothing and get this module's own directory); it is
@@ -347,8 +350,14 @@ export function healMissingAgentSlots(opts: {
     return result;
   }
   try {
-    mkdirSync(dirname(opts.configPath), { recursive: true });
-    writeFileSync(opts.configPath, JSON.stringify({ ...raw, agents }, null, 2) + "\n", "utf8");
+    // ATOMIC REPLACEMENT, NOT A BARE WRITE (P1, cross-task fix picked up from
+    // f544605 — see this round's commit message): every OTHER session and judge
+    // pane on the machine reads this file while it is being written, and a
+    // half-written `review-gate.json` reads as CORRUPT — after which the user's
+    // own pinned chains are reported unresolvable and those sessions refuse to
+    // start. lib/atomic-write.ts is the repository's one implementation of
+    // temp-then-rename; nothing else about the heal changed.
+    writeFileAtomic(opts.configPath, JSON.stringify({ ...raw, agents }, null, 2) + "\n");
   } catch (e) {
     result.problems.push(
       `${opts.configPath}: 写入失败（${e instanceof Error ? e.message : String(e)}）—— 缺角色没有补上`,

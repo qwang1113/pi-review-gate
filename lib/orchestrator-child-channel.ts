@@ -237,6 +237,8 @@ export interface ChannelDialogRequest {
   title: string;
   /** The rows offered, in order. Empty for a free-text input. */
   options: string[];
+  /** This question takes several answers — a checkbox list (2026-09-22). */
+  multiple?: boolean;
   /** The full text behind the question (a goal draft, a plan…), when there is one. */
   payload?: string;
   /**
@@ -304,6 +306,7 @@ export async function askThroughChannel(
     ...(request.topic === undefined ? {} : { topic: request.topic }),
     title: request.title,
     options: request.options,
+    ...(request.multiple ? { multiple: true } : {}),
     ...(request.payload === undefined ? {} : { payload: request.payload }),
     ...(request.station === undefined ? {} : { station: request.station }),
     // The batch stamp is FLATTENED onto the record on purpose: three optional
