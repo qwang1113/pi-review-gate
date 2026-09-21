@@ -1023,8 +1023,9 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
   // unanswered question, which pauses the loop.
   assert.match(toolBody, /\.catch\(\(\): ChannelDialogOutcome => \(\{ answer: undefined, by: "dismissed", requestId: "" \}\)\)/,
     "a broken dialog is silence, never an answer");
-  assert.match(toolBody, /const resolution = resolveQuestion\(q, picked, opts\);/,
-    "what a settled question MEANS is the one pure rule in lib/ask-user.ts");
+  assert.match(toolBody, /: resolveQuestion\(q, picked, opts\);/,
+    "what a settled question MEANS is the one pure rule in lib/ask-user.ts" +
+    " — reached for every question that was actually shown, which is what the ternary above it is about (a question no host could draw settles as unanswered WITHOUT a stop)");
 
   // The answers come back in one piece, unanswered ones marked.
   assert.match(toolBody, /formatAnswers\(answers\)/);

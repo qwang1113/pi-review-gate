@@ -375,9 +375,16 @@ export async function doAskUser(
     index: number,
     q: AskQuestion,
     picked: string | undefined,
-    opts: { interrupted?: boolean } = {},
+    opts: { interrupted?: boolean; unavailable?: boolean } = {},
   ): QuestionResolution {
-    const resolution = resolveQuestion(q, picked, opts);
+    // NOT SHOWN IS UNANSWERED, AND STOPS NOTHING (quality round P2, 2026-09-22):
+    // the same landing `resolveQuestion` gives an interrupted box, for the same
+    // reason — nobody decided anything, and the rest of the batch must still be
+    // asked. Reading it as a dismissed box instead took every question behind
+    // it down on a host that could have drawn them.
+    const resolution = opts.unavailable
+      ? { answer: { question: q.text, kind: "unanswered" as const } }
+      : resolveQuestion(q, picked, opts);
     answers[index] = resolution.answer;
     applyGrant(q, resolution.answer);
     // Persisted after EVERY question: an interview that dies here resumes at
@@ -519,14 +526,11 @@ export async function doAskUser(
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped) return undefined;
         const answered = await askWithBacks(index, signal);
-        // DID A BOX ACTUALLY REACH THE SCREEN? — the fact `anyDialog` waits
-        // for, and it is only true once the question came back with something
-        // OTHER than “no host could draw this” (reviewer P2, 2026-09-22).
-        if (answered === MULTI_UNAVAILABLE) {
-          unrenderableChecklist = true;
-          return undefined;
-        }
-        anyDialog = true;
+        // NOTHING WAS SHOWN TRAVELS BACK AS THE SENTINEL, never as `undefined`
+        // (quality round P2, 2026-09-22): `undefined` out of a renderer means
+        // “the user closed the box”, and the caller below settles that as a
+        // stop. The sentinel instead settles as one unanswered question.
+        if (answered !== MULTI_UNAVAILABLE) anyDialog = true;
         return answered;
       },
       // A broken dialog is silence, never an answer — and, now that these
@@ -537,9 +541,16 @@ export async function doAskUser(
 
   for (const [offset, q] of remaining.entries()) {
     const outcome = await asks[offset]!;
-    if (outcome.answer !== undefined) anyDialog = true;
-    const resolution = settleAnswer(firstIndex + offset, q, outcome.answer, {
+    // A CHECKLIST NO HOST COULD DRAW (quality round P2, 2026-09-22): the
+    // question was never shown, so it settles as UNANSWERED — and, unlike a
+    // closed box, it does NOT stop the rest of the interview. A host without
+    // custom components can still ask every radio question behind it.
+    const unrenderable = outcome.answer === MULTI_UNAVAILABLE;
+    if (unrenderable) unrenderableChecklist = true;
+    else if (outcome.answer !== undefined) anyDialog = true;
+    const resolution = settleAnswer(firstIndex + offset, q, unrenderable ? undefined : outcome.answer, {
       interrupted: outcome.by === "interrupted",
+      ...(unrenderable ? { unavailable: true } : {}),
     });
     if (resolution.stop) stopped = true;
     // OPENING THE NEXT GATE IS ALSO HOW A STOPPED INTERVIEW SETTLES ITS

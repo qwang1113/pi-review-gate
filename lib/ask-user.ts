@@ -33,6 +33,7 @@ import {
 import {
   defaultCheckedOf,
   isMultipleChoice,
+  MULTI_ANSWER_SEPARATOR,
   multiChoiceRows,
   multiSelectionLabel,
   parseMultiChoice,
@@ -61,7 +62,7 @@ export interface AskQuestion {
    * The agent's own recommendation — must equal one of `options`.
    *
    * REQUIRED ON A RADIO QUESTION (that is what pressing Enter submits), and
-   * deliberately optional on a {{@link AskQuestion.multiple}} one, where the
+   * deliberately optional on a {@link AskQuestion.multiple} one, where the
    * role is played by `defaultChecked` (user decision, 2026-09-22). A
    * checkbox question that does give one still draws it as （推荐）.
    */
@@ -239,6 +240,17 @@ function validateMultiple(q: AskQuestion, where: string): string | undefined {
     return `${where}是多选题但没有 defaultChecked —— 多选题必须显式给出推荐勾选的那一组，` +
       "想推荐一项都不勾就写 `defaultChecked: []`（直接回车交的就是这一组）。";
   }
+  // THE SEPARATOR MAY NOT APPEAR IN AN OPTION (quality round P2, 2026-09-22).
+  // `A. 甲 / C. 丙` is how a checklist answer is written down, so an option
+  // whose own text contains `" / "` cannot be told apart from two ticks —
+  // silently, and in the losing direction (the whole answer becomes
+  // unreadable). Refused here, at the one entry every question comes through.
+  for (const option of q.options) {
+    if (option.includes(MULTI_ANSWER_SEPARATOR)) {
+      return `${where}的选项 "${option}" 里含有多选答案的分隔符 "${MULTI_ANSWER_SEPARATOR.trim()}" —— ` +
+        "它是勾选项之间的分隔符，出现在选项里就分不出「一项叫这个名字」与「勾了两项」；请换一种写法。";
+    }
+  }
   for (const option of q.defaultChecked) {
     if (!q.options.includes(option)) {
       return `${where}的 defaultChecked 里有不在选项里的 "${option}" —— 它只能从选项里选。`;
@@ -392,7 +404,13 @@ export function interpretMultiChoice(picked: string | undefined, q: AskQuestion)
       options: [],
     };
   }
-  if (parsed.kind === "unreadable") return { kind: "answered", answer: parsed.text, options: [] };
+  if (parsed.kind === "unreadable") {
+    // NO `options` AT ALL, NOT AN EMPTY ARRAY (quality round P2, 2026-09-22):
+    // an empty list means “the user ticked nothing”, and a caller that reads
+    // only the structured half must not see a prose answer it cannot judge as
+    // the same thing. `answer` still carries the text verbatim.
+    return { kind: "answered", answer: parsed.text };
+  }
   if (parsed.options.length === 0) return { kind: "answered", answer: MULTI_NONE_ANSWER, options: [] };
   return {
     kind: "answered",

@@ -415,6 +415,31 @@ test("a checklist may not be an AUTHORIZATION question — consent has one answe
   assert.match(refused.ok === false ? refused.error : "", /grantScope/);
 });
 
+test("an option CONTAINING the answer separator is refused — it could not be read back", () => {
+  // `A. 甲 / C. 丙` is how a checklist answer is written down (quality round P2,
+  // 2026-09-22), so an option whose own text contains `" / "` makes one tick
+  // and two ticks the same string — silently, in the losing direction.
+  const refused = validateQuestions([
+    { text: "选方案？", multiple: true, defaultChecked: [], options: ["A / B 方案", "只有 A"] },
+  ]);
+  assert.equal(refused.ok, false);
+  assert.match(refused.ok === false ? refused.error : "", /分隔符/);
+
+  // The radio shape is untouched: it never joins several rows into one string.
+  const radio = validateQuestions([
+    { text: "选方案？", options: ["A / B 方案", "只有 A"], recommended: "只有 A" },
+  ]);
+  assert.equal(radio.ok, true, radio.ok === false ? radio.error : "");
+});
+
+test("a checklist answer nobody can read keeps the text but claims NO ticks", () => {
+  const confused = resolveQuestion(checklist(), "一段谁都看不懂的话");
+  assert.equal(confused.answer.kind, "answered");
+  assert.equal(confused.answer.answer, "一段谁都看不懂的话");
+  assert.equal(confused.answer.options, undefined,
+    "an empty list means “ticked nothing”; prose must not be able to claim it");
+});
+
 test("the checklist answer is a LIST in option order — and an empty one is an answer", () => {
   const question = checklist();
   const picked = resolveQuestion(question, "C. precommit / A. 预检");

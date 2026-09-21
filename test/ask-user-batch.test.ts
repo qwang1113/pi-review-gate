@@ -479,16 +479,16 @@ test("a checklist no host can draw goes back to the agent — it is NOT a closed
 });
 
 test("a batch with one unrenderable checklist still asks the rest — and says which half was lost", async () => {
-  const h = harness(
-    (title) => (title.includes("第二题") ? "A. 预检 / C. precommit" : "A. 单体（推荐）"),
-    { multiUnavailable: true },
-  );
+  // THE CHECKLIST IS FIRST on purpose (quality round P2, 2026-09-22): settled as
+  // a DISMISSED box it set `stopped`, and the radio question behind it was
+  // never shown at all — on a host that could still draw it.
+  const h = harness(() => "A. 单体（推荐）", { multiUnavailable: true });
   const reply = await h.run([
-    { text: "第一题：选架构", options: ["单体", "微服务"], recommended: "单体" },
-    { text: "第二题：开哪几个环节？", multiple: true, defaultChecked: [], options: ["预检", "quality 审查", "precommit"] },
+    { text: "第一题：开哪几个环节？", multiple: true, defaultChecked: [], options: ["预检", "quality 审查", "precommit"] },
+    { text: "第二题：选架构", options: ["单体", "微服务"], recommended: "单体" },
   ]);
 
-  assert.match(reply, /第一题[\s\S]*→ A\. 单体/, "the radio question was asked and answered");
+  assert.match(reply, /第二题[\s\S]*→ A\. 单体/, "the radio question BEHIND the checklist was still asked");
   assert.match(reply, /画不出复选清单/, "…and the agent is told why the other one has no answer");
-  assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["answered", "unanswered"]);
+  assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["unanswered", "answered"]);
 });
