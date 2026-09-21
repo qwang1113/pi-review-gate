@@ -24,6 +24,7 @@ import {
 } from "../lib/audit-round.ts";
 import {
   ADVICE_ROUND_SPEC,
+  ACCEPTANCE_ROUND_SPEC,
   GOAL_AUDIT_SPEC,
   PLAN_AUDIT_SPEC,
   QUALITY_ROUND_SPEC,
@@ -511,6 +512,13 @@ test("specForRound: the role decides, except for the two that share one judge", 
   // role, the review's binding, and no dependence on a pending audit.
   assert.equal(specForRound("quality-auditor"), QUALITY_ROUND_SPEC);
   assert.equal(QUALITY_ROUND_SPEC.binding, "round-and-content");
+  // The acceptance round is the sixth, on the SAME engine (2026-09-22): its
+  // own role, the review/quality binding (a verdict must never be recorded
+  // against a tree its judge never ran), and no pending audit — it is
+  // dispatched by the gate at completion, not submitted by an agent.
+  assert.equal(specForRound("acceptance"), ACCEPTANCE_ROUND_SPEC);
+  assert.equal(ACCEPTANCE_ROUND_SPEC.binding, "round-and-content");
+  assert.equal(ACCEPTANCE_ROUND_SPEC.role, "acceptance");
   // No pending audit ⇒ nothing this round could be recorded against. The kind
   // is never guessed from the role alone.
   assert.equal(specForRound("goal-auditor"), undefined);
@@ -532,6 +540,8 @@ interface FakeState {
   reviewRounds: number;
   /** Quality rounds recorded through the engine (2026-09-15). */
   qualityRounds: number;
+  /** Acceptance rounds recorded through the engine (2026-09-22). */
+  acceptanceRounds: number;
   /** undefined = "could not record right now" (no usable tool context). */
   recordResult: string | undefined;
   /** Judge ids whose pane `settleAuditRound` reclaimed at round end. */
@@ -555,6 +565,7 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     goalDrafts: [],
     reviewRounds: 0,
     qualityRounds: 0,
+    acceptanceRounds: 0,
     recordResult: "recorded",
     reclaimed: [],
     checkpointAt: CHECKPOINT_AT,
@@ -589,6 +600,10 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     },
     recordQuality: async () => {
       state.qualityRounds += 1;
+      return state.recordResult;
+    },
+    recordAcceptance: async () => {
+      state.acceptanceRounds += 1;
       return state.recordResult;
     },
     // FAITHFUL, and this one had to be learned the hard way (2026-09-21): the
@@ -653,6 +668,42 @@ test("settle/quality: the quality round is recorded through the same engine, onc
   assert.equal(second.status, "miss");
   assert.equal(second.status === "miss" && second.reason, "already-consumed");
   assert.equal(state.qualityRounds, 1, "one report, one record");
+});
+
+test("settle/acceptance: the acceptance round is recorded through the same engine, once", async () => {
+  const { state, deps } = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "acceptance", roundSeq: 2, lastReportId: "rep-round-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "BLOCKED" })],
+  });
+  const first = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(first.status, "recorded");
+  assert.equal(first.status === "recorded" && first.kind, "acceptance");
+  assert.equal(state.acceptanceRounds, 1);
+  assert.equal(state.reviewRounds, 0, "an acceptance round is not a review round");
+  assert.equal(state.qualityRounds, 0, "nor a quality round");
+  assert.deepEqual(state.forgotten, [], "no pending entry: the gate dispatched it, it signs nothing");
+  assert.deepEqual(state.cursors, ["rep-2"]);
+
+  state.entry = { judgeId: "j-1", openerId: "o-1", role: "acceptance", roundSeq: 2, lastReportId: "rep-2" };
+  const second = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(second.status, "miss");
+  assert.equal(second.status === "miss" && second.reason, "already-consumed");
+  assert.equal(state.acceptanceRounds, 1, "one report, one record");
+});
+
+test("settle/acceptance: a report older than this round's checkpoint is refused (content binding)", async () => {
+  // Same measured failure the review and quality bindings exist for: the
+  // acceptance verdict releases COMPLETION, so a leftover report recorded here
+  // would let a finished-looking task through on a round that ran against
+  // content which is already gone.
+  const { state, deps } = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "acceptance", roundSeq: 2, lastReportId: "rep-round-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "READY", at: "2026-09-05T10:00:00.000Z" })],
+  });
+  const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(settled.status, "miss");
+  assert.equal(state.acceptanceRounds, 0);
+  assert.deepEqual(state.cursors, []);
 });
 
 test("settle/quality: a report older than this round's checkpoint is refused (content binding)", async () => {

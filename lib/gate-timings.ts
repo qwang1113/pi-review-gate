@@ -91,7 +91,26 @@ export interface QualityTiming {
   findingsTotal: number;
 }
 
-export type GateTiming = PrecommitTiming | ReviewTiming | QualityTiming;
+/**
+ * ONE ACCEPTANCE ROUND (2026-09-22) — its own kind for the same reason the
+ * quality round has one: it answers a different question (does it run for
+ * real?) and a trend line that mixed it with the review round could not say
+ * which one got slower. Same "upper bound since the previous gate event"
+ * caveat: the judge is its own process in its own pane.
+ */
+export interface AcceptanceTiming {
+  kind: "acceptance";
+  at: string;
+  repo: string;
+  verdict: string;
+  /** How long the round took, from the previous gate event. UPPER BOUND. */
+  approxMs: number;
+  approximate: true;
+  /** Findings the round carried (0 on a clean pass). */
+  findingsTotal: number;
+}
+
+export type GateTiming = PrecommitTiming | ReviewTiming | QualityTiming | AcceptanceTiming;
 function timingsPath(repoRoot: string): string {
   return join(repoRoot, TIMINGS_RELPATH);
 }

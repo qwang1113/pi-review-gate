@@ -143,6 +143,7 @@ import {
   judgeWorkDirBasename,
   legacyJudgeWorkDirBasename,
   selectStaleJudgeSessionDirs,
+  isBlockingSeverity,
   JUDGE_SESSIONS_RELDIR,
 } from "../lib/judge-lifecycle.ts";
 import {
@@ -456,6 +457,16 @@ import {
   type RoundCancelPlan,
   type RoundLanding,
 } from "../lib/quality-round.ts";
+import {
+  ACCEPTANCE_GATE_ENV,
+  acceptanceDecision,
+  acceptanceGateOpen,
+  acceptanceProblems,
+  buildAcceptanceTask,
+  parseNoAcceptanceDeclaration,
+  type AcceptanceDecision,
+  type AcceptanceStatus,
+} from "../lib/acceptance-round.ts";
 import {
   modelChainFor,
   writeJudgeSpawnFiles,
@@ -3077,6 +3088,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // `commit` would come back able to negotiate `pr`. Organic for a
       // standalone session (the variable is absent ⇒ the field is omitted).
       stationCap: process.env[STATION_CAP_ENV],
+      // And the ACCEPTANCE GATE rides it (2026-09-22), for exactly the same
+      // reason: a relay is a new process, and the variable's ABSENCE means ON.
+      acceptanceGate: process.env[ACCEPTANCE_GATE_ENV],
     });
   }
 
@@ -9008,6 +9022,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         if (!recordCtx) return undefined;
         return recordQualityVerdict(concluded, root, recordCtx);
       },
+      // The acceptance round's recorder — the sixth, wired exactly like the
+      // quality one: the round ENDS when its report lands, and what the report
+      // says is adjudicated here, never by the agent.
+      recordAcceptance: async ({ root, concluded }) => {
+        const recordCtx = ctx ?? lastUiCtx;
+        if (!recordCtx) return undefined;
+        return recordAcceptanceVerdict(concluded, root, recordCtx);
+      },
     };
   }
 
@@ -10489,6 +10511,115 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   }
 
   /**
+   * THE ACCEPTANCE ROUND's recorder — the sixth, beside `recordQualityVerdict`
+   * (2026-09-22).
+   *
+   * WHAT DIFFERS from its siblings: the verdict binds to the WORKTREE
+   * FINGERPRINT the gate dispatched the round against, and a mismatch is not a
+   * dropped report — it is recorded as BLOCKED, because the judge really did
+   * run and really did answer, just about content that is no longer there. The
+   * record keeps the DISPATCH's fingerprint when it is stale, so it can never
+   * release content the round never ran on: `acceptanceDecision` sees the
+   * mismatch and re-dispatches.
+   */
+  async function recordAcceptanceVerdict(
+    concluded: ReportConclusion,
+    repo: string,
+    ctx: unknown,
+  ): Promise<string | undefined> {
+    const verdictRaw = normalizeConcludedVerdict(concluded.verdict);
+    if (!verdictRaw) {
+      return "review-gate: 验收轮的 report 里没有可识别的 verdict —— 什么都没有记录（fail-closed）：" +
+        "下一次 `declare_done` 会重新派验收轮。";
+    }
+    const target = resolveToolRepo(repo);
+    if (!target.ok) return target.error;
+    const targetRoot = target.root;
+    if (!sessionInGit) return "review-gate: 非 git 目录 —— 无法记录验收裁决（无仓库可绑定）。";
+    const st = stateForRepo(targetRoot);
+    delete st.pausedQuestion;
+    // ONE adjudication, shared with the review and quality recorders: a READY
+    // carrying P0/P1 findings contradicts itself, and the cwd is a required
+    // field of the verdict schema.
+    const parsed = adjudicateReviewConclusion({
+      verdict: verdictRaw,
+      findings: concluded.findings as ReviewFinding[],
+      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
+    }, scopeExemptionOf(st));
+    const dispatchedFingerprint = st.acceptance?.fingerprint;
+    const dispatchedJudgeId = st.acceptance?.judgeId;
+    const fp = computeFingerprint(targetRoot);
+    const currentFingerprint = fp.unavailable ? "" : fp.digest;
+    // NO DISPATCH RECORD IS NOT A PASS: without the fingerprint the round was
+    // dispatched against there is nothing to compare, so the verdict cannot
+    // release anything (fail-closed — it is recorded as BLOCKED instead).
+    const stale = currentFingerprint === "" || dispatchedFingerprint === undefined ||
+      dispatchedFingerprint !== currentFingerprint;
+    let cwdMismatch: string | undefined;
+    if (parsed.verdict === "READY") {
+      const claimed = parsed.cwd;
+      if (claimed === undefined || claimed.trim() === "") {
+        cwdMismatch = "the verdict carries no `cwd` (a required field: run `pwd` and report it)";
+      } else if (canonicalPath(claimed) !== canonicalPath(targetRoot)) {
+        cwdMismatch = `the verdict's cwd ${JSON.stringify(claimed)} is not the repo this round ran in (${targetRoot})`;
+      }
+    }
+    if (stale || cwdMismatch !== undefined) parsed.verdict = "BLOCKED";
+    // The RECORD's status vocabulary is narrower than a verdict's: `NEEDS_HUMAN`
+    // is not a state the completion gate knows how to release, so anything that
+    // is not READY is recorded as BLOCKED — which is what it does to
+    // completion — while `verdict` keeps the judge's own word verbatim.
+    const status: AcceptanceStatus = parsed.verdict === "READY" ? "READY" : "BLOCKED";
+    const blockingSummary = (concluded.findings as ReviewFinding[])
+      .filter((f) => isBlockingSeverity(f.severity))
+      .slice(0, 3)
+      .map((f) => `${f.severity}${f.file ? ` ${f.file}${f.line === undefined ? "" : `:${f.line}`}` : ""} ${f.issue}`.trim())
+      .join("；");
+    const at = new Date().toISOString();
+    st.acceptance = {
+      status,
+      verdict: parsed.verdict,
+      // THE CONTENT THIS VERDICT BELONGS TO: the dispatch's when the round is
+      // stale, the current one when it is fresh.
+      ...(stale
+        ? (dispatchedFingerprint === undefined ? {} : { fingerprint: dispatchedFingerprint })
+        : { fingerprint: currentFingerprint }),
+      at,
+      ...(dispatchedJudgeId === undefined ? {} : { judgeId: dispatchedJudgeId }),
+      findingsTotal: parsed.findingsTotal,
+      ...(parsed.verdict === "READY"
+        ? {}
+        : {
+            reason: stale
+              ? "本轮验收跑的内容已经不是当前内容（结论在验收期间内容又变了），这份结论作废"
+              : blockingSummary || `${parsed.findingsTotal} 条 findings（见验收轮的 report / findings 流）`,
+          }),
+    };
+    persistRepo(ctx as unknown as ExtensionContext, targetRoot);
+    appendTiming(targetRoot, {
+      kind: "acceptance",
+      at,
+      repo: targetRoot,
+      verdict: parsed.verdict,
+      approxMs: Math.max(0, Date.now() - lastGateEventAt),
+      approximate: true,
+      findingsTotal: parsed.findingsTotal,
+    });
+    lastGateEventAt = Date.now();
+    return `review-gate: 验收轮记录 ${parsed.verdict} for ${targetRoot}（findings: ${parsed.findingsTotal}）。` +
+      (parsed.verdict === "READY"
+        ? " 真实验收这一关已过；内容不变的话，再调一次 `declare_done` 就会完成。"
+        : " 按 findings 修完再走一遍审查循环（`judge_submit`）；内容一改，这份结论自动失效并重新验收。") +
+      (stale
+        ? "\nSTALE：验收轮跑的内容与当前内容不同（指纹不匹配）—— 结论记成 BLOCKED（绑定它当初跑的那份内容），" +
+          "下一次 `declare_done` 会重新派验收轮。"
+        : "") +
+      (cwdMismatch === undefined
+        ? ""
+        : `\nCWD CHECK FAILED: ${cwdMismatch}。验收裁决需要 judge 自己的 \`pwd\`，与派发的仓库不符时记成 BLOCKED。`);
+  }
+
+  /**
    * KILL ONE PARTY OF A ROUND — for real (2026-09-16).
    *
    * The cancel matrix says "the quality round failing STOPS the reviewer", and
@@ -11439,6 +11570,170 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     },
   });
 
+  /* ─────────────────── L9: the acceptance round, armed at completion ─────────────────── */
+
+  /**
+   * IS THE DISPATCHED ACCEPTANCE ROUND'S PANE STILL THERE?
+   *
+   * `false` is what lets `acceptanceDecision` re-dispatch instead of waiting
+   * for a report nobody will write. `undefined` (no own pane, an unverifiable
+   * pane id) is NOT "dead": killing or replacing a pane on a guess is worse
+   * than waiting, and `judge_recover` remains the explicit way out.
+   */
+  function acceptanceRoundAlive(root: string): boolean | undefined {
+    const entry = judgeChildByRole(root, "acceptance");
+    if (!entry) return false;
+    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
+    const tmuxServer = tmuxServerFrom(process.env);
+    if (!entry.paneId || !ownPane || !paneClosable(entry, tmuxServer)) return undefined;
+    return judgePaneAlive((argv) => runTmux(argv), ownPane, entry.paneId) === true;
+  }
+
+  /**
+   * DISPATCH THE ACCEPTANCE ROUND — the gate's own, from completion.
+   *
+   * The round rides the EXISTING engine (`dispatchJudgeRound`): it gets the
+   * same session-id derivation, the same pane, the same channel and the same
+   * `settleAuditRound` closing path every other judge has, which is why this
+   * function is a task builder and a bookkeeping write and nothing else. The
+   * AWAITING record is written BEFORE anything can ask again: it is what makes
+   * the second `declare_done` wait rather than dispatch beside a judge that is
+   * already working.
+   */
+  async function dispatchAcceptanceRound(
+    ctx: unknown,
+    fingerprint: string,
+  ): Promise<{ ok: true; judgeId: string } | { ok: false; error: string }> {
+    const root = primaryRepoRoot;
+    const goal = readSessionLoopGoal(root);
+    const target = reviewTargets.get(root);
+    const stamp = fingerprint !== "" ? fingerprint.slice(0, 12) : String(Date.now());
+    const streamPath = pathJoin(root, ".pi", "review-stream", `acceptance-${stamp}.jsonl`);
+    try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
+    const task = `${buildAcceptanceTask({
+      repoRoot: root,
+      goalText: goal.present ? goal.text : "",
+      ...(target === undefined
+        ? {}
+        : { range: `${target.baseline.slice(0, 12)}..${target.head.slice(0, 12)}` }),
+      ...(target?.files === undefined ? {} : { files: target.files }),
+    })}\n\n${buildStreamDirective(streamPath)}`;
+    const d = await dispatchJudgeRound({
+      root,
+      role: "acceptance",
+      title: `acceptance-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`,
+      task,
+      streamPath,
+    });
+    if (!d.ok) return { ok: false, error: d.error ?? "dispatch failed" };
+    const judgeId = d.judgeId ?? d.sessionId;
+    // A successful dispatch without an id would leave the round unaddressable —
+    // a gate defect, reported instead of written down as a promise.
+    if (judgeId === undefined) return { ok: false, error: "dispatch 没有返回 judge id（门禁自身的缺陷）" };
+    const st = stateForRepo(root);
+    st.acceptance = {
+      status: "AWAITING",
+      at: new Date().toISOString(),
+      judgeId,
+      ...(fingerprint === "" ? {} : { fingerprint }),
+      reason: "验收轮已派出",
+    };
+    persistRepo(ctx as unknown as ExtensionContext, root);
+    return { ok: true, judgeId };
+  }
+
+  /**
+   * THE COMPLETION-TIME ACCEPTANCE STEP.
+   *
+   * Returns a tool reply when completion must NOT be accepted — a round was
+   * just dispatched, a verdict blocks, or the dispatch itself failed — and
+   * `undefined` when the acceptance question does not stand in the way.
+   *
+   * DELIBERATELY NOT IN `unmetRequirements` (lib/gate-state.ts). That function
+   * is the SHIP authority the git hooks read, and an acceptance requirement
+   * there would block its own remedy: fixing an acceptance finding needs a
+   * commit, and the commit would still be waiting on acceptance. The Copilot
+   * cycle (lib/copilot-review.ts) is held the same way, on completion only.
+   */
+  async function armAcceptanceRound(ctx: unknown, progress: { step?: (t: string) => void; fail?: (t: string) => void }) {
+    const root = primaryRepoRoot;
+    const st = stateForRepo(root);
+    const goal = readSessionLoopGoal(root);
+    const declared = parseNoAcceptanceDeclaration(goal.present ? goal.text : "");
+    const fp = computeFingerprint(root);
+    const fingerprint = fp.unavailable ? "" : fp.digest;
+    const decision: AcceptanceDecision = acceptanceDecision({
+      hasCodeChange: st.hasCodeChange,
+      gateOpen: acceptanceGateOpen(process.env),
+      ...(declared === undefined ? {} : { goalSkipsAcceptance: declared.reason }),
+      fingerprint,
+      ...(st.acceptance === undefined ? {} : { record: st.acceptance }),
+      roundAlive: acceptanceRoundAlive(root),
+    });
+    /** One shape for every refusal — the same fields `declare_done` rejects with. */
+    const refusal = (problems: string[], armed: boolean, judgeId?: string) => {
+      // The tool call is ENDING without completing, so the progress line is
+      // closed the same way every other refusal in `declare_done` closes it.
+      progress.fail?.(armed ? "真实验收轮已派出" : "真实验收未过");
+      return {
+      content: [{
+        type: "text" as const,
+        text: buildRejection({
+          what: armed
+            ? "declare_done 暂不能完成 —— 真实验收轮已派出"
+            : `declare_done 被拒 —— ${problems.length} 项门禁未满足`,
+          why: problems.length > 0
+            ? "下面是门禁**重新核对**出的未满足项（服务端复检，不看你的 summary）：\n" +
+              problems.map((p) => `  - ${p}`).join("\n")
+            : "门禁自己派出了 acceptance 轮，在它交卷之前这一轮不能算完成。",
+          by: "agent",
+          next: armed
+            ? "用 `judge_wait({role:\"acceptance\"})` 等它的结论（report 落盘后门禁会用标准报告唤醒你）；" +
+              "验收 READY 且内容没有变化时，再调一次 `declare_done` 就会完成。"
+            : "按验收 findings 修 → 走一遍审查循环（`judge_submit({role:\"reviewer\"})`）→ 再 `declare_done`；" +
+              "内容一改，旧的验收结论自动失效并重新验收。",
+        }),
+      }],
+      details: {
+        accepted: false,
+        problems,
+        ...(armed ? { acceptanceArmed: true } : {}),
+        ...(judgeId === undefined ? {} : { judgeId }),
+      },
+      isError: true,
+    };
+    };
+
+    if (decision.action === "pass") return undefined;
+    if (decision.action === "skip") {
+      // RECORDED, never silent — the same rule the quality round's SKIP
+      // follows. Written only when it actually changes: a completion call must
+      // not rewrite the sidecar on every try.
+      if (st.acceptance?.status !== decision.status || st.acceptance.reason !== decision.reason) {
+        st.acceptance = {
+          status: decision.status,
+          at: new Date().toISOString(),
+          reason: decision.reason,
+        };
+        persistRepo(ctx as unknown as ExtensionContext, root);
+      }
+      return undefined;
+    }
+    if (decision.action === "wait" || decision.action === "block") {
+      // The projection, not a second reading of the decision: what declares
+      // itself blocking is what lands in the completion problem list.
+      return refusal(acceptanceProblems(decision), false);
+    }
+    const dispatched = await dispatchAcceptanceRound(ctx, fingerprint);
+    if (!dispatched.ok) {
+      return refusal(
+        [`验收轮派不出去（${dispatched.error}）—— 门禁不会静默跳过它；修好之后再 declare_done。`],
+        false,
+      );
+    }
+    return refusal([], true, dispatched.judgeId);
+  }
+
   // ---------- declare_done tool ----------
 
   pi.registerTool({
@@ -11706,6 +12001,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           details: { accepted: false, problems },
           isError: true,
         };
+      }
+      // ── L9 — THE REAL-ACCEPTANCE ROUND (2026-09-22, user decision) ──
+      //
+      // The gate's OWN dispatch, at completion: the agent has no tool that
+      // starts this round and deliberately never will — a round an agent can
+      // ask for is a round an agent can skip past. It runs AFTER every other
+      // gate is satisfied (the branch above already rejected when anything
+      // else was unmet), so the judge runs on content that is otherwise
+      // finished, and its verdict binds to that content's fingerprint.
+      //
+      // LOOP ONLY, and never for an orchestrator: explore/normal completions
+      // are advisory and must not spend a top-tier judge, and a project
+      // manager has no code of its own to accept.
+      if (!orchestratorMode && state.taskMode === "loop") {
+        progress.step("真实验收");
+        const acceptance = await armAcceptanceRound(ctx, progress);
+        if (acceptance) return acceptance;
       }
       progress.done("全部满足");
       // No landing step anymore (2026-09-07, user decision): the work stays

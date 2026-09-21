@@ -26,6 +26,7 @@ import { normalizeNotifyHistory } from "./user-notify.ts";
 import { normalizeOrchestrationId } from "./orchestration-id.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
+import { sanitizeAcceptanceRecord, type AcceptanceRecord } from "./acceptance-round.ts";
 import { restatementHash, type RestatementRecord } from "./restatement.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
 import { SHIP_COMMAND_KINDS, type ShipCommandKind } from "./constants.ts";
@@ -658,6 +659,24 @@ export interface GateState {
    */
   copilot?: CopilotReviewState;
   /**
+   * L9: the REAL-ACCEPTANCE round — the sixth judge, dispatched by the GATE
+   * from `declare_done` itself (2026-09-22, user decision; lib/acceptance-round.ts).
+   *
+   * Written by the gate's own dispatch path (AWAITING) and by its conclusion
+   * recorder (READY / BLOCKED), plus the two terminal releases that need no
+   * judge (SKIPPED: this round has no real acceptance; DISABLED: the gate is
+   * off for this session). Its READY binds to the WORKTREE FINGERPRINT, the
+   * same binding the review READY carries — the round ran against that
+   * content, so any edit invalidates it.
+   *
+   * Deliberately NOT read by {@link unmetRequirements}, for the same measured
+   * reason {@link copilot} is not: fixing an acceptance finding requires a
+   * commit, so an acceptance requirement inside the ship authority would block
+   * its own remedy. It gates task COMPLETION instead (declare_done). Absent ⇒
+   * no acceptance conclusion: the round is owed (fail-closed).
+   */
+  acceptance?: AcceptanceRecord;
+  /**
    * L8: the user's approval of the CURRENT loop-goal text (hash + time,
    * written only by propose_loop_goal after an extension-rendered dialog).
    *
@@ -872,6 +891,16 @@ export function invalidateBindings(st: GateState): void {
   if (st.precommit.verdict === "PASS") {
     st.precommit.verdict = "NOT_RUN";
     st.precommit.fingerprint = null;
+  }
+  // THE ACCEPTANCE RECORD follows the REVIEW's rule (2026-09-22): a
+  // conclusion earned against a fingerprint that just moved is not a
+  // conclusion about this content any more. Deleting it puts the round back
+  // to ARMED, which costs a dispatch — the direction that cannot release a
+  // changed round. The two terminal releases stay: SKIPPED is a statement
+  // about the GOAL and DISABLED one about the GATE, and no later edit can
+  // falsify either.
+  if (st.acceptance && st.acceptance.status !== "SKIPPED" && st.acceptance.status !== "DISABLED") {
+    delete st.acceptance;
   }
   // THE QUALITY STANDING IS DELIBERATELY NOT CLEARED HERE (2026-09-15).
   //
@@ -1242,6 +1271,15 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
       const copilot = sanitizeCopilotState(parsed.copilot);
       if (copilot) parsed.copilot = copilot;
       else delete parsed.copilot;
+    }
+    // L9: a malformed acceptance record is treated as ABSENT — and absence is
+    // exactly the fail-closed direction here, because "no record" means the
+    // round is OWED. A record that could only ever release completion is the
+    // one shape this must never guess at.
+    if (parsed.acceptance !== undefined) {
+      const acceptance = sanitizeAcceptanceRecord(parsed.acceptance);
+      if (acceptance) parsed.acceptance = acceptance;
+      else delete parsed.acceptance;
     }
     // L8: a malformed goal approval is treated as ABSENT — the fail-closed
     // direction here is "not approved" (goal body withheld, loop ships

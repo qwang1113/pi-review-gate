@@ -37,6 +37,7 @@ import { DELIVERY_STATION_CHOICES_EN, type DeliveryStation } from "./delivery-st
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
 import { buildRejection } from "./rejection-copy.ts";
+import { parseNoAcceptanceDeclaration } from "./acceptance-round.ts";
 
 /** Repo-root-relative location of the goal file (gate-excluded via `.pi/`). */
 export const LOOP_GOAL_RELPATH = ".pi/loop-goal.md";
@@ -271,6 +272,9 @@ export function buildGoalAuditTask(
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
     "审计标准: 退出标准是否可检查(falsifiable)、是否覆盖用户核心诉求、Non-goals 是否明确、有无内部矛盾或与仓库现状冲突的表述。",
+    "真实验收方案(P1): 草稿必须写明「真实验收方案」（正向真实调用 / 反向验证 / 环境前提），" +
+      "或者写明「本轮无真实验收（理由）」并给出理由；缺这一段、方案不可执行（没有真实的调用与观察，只写「跑测试」之类的话），" +
+      "或声明无验收却不给理由是 P1。",
     "最小化检查(引用 `docs/coding-standards.md` Section 5——实质条文只在那里，不在此复述): 用户没要的工作(顺手重构、推测性开关、凑数的验收标准)是 P1；真正需要的多条标准不算多——最小指必要，不指条数少。",
     ...(opts.sessionDir && opts.sessionId
       ? [
@@ -403,6 +407,10 @@ export const LOOP_GOAL_SKELETON = [
   "  - 正常路径：<…>",
   "  - 边界 / 错误路径：<…>",
   "  - 明确不测的：<…>（说明为什么）",
+  "真实验收方案（acceptance judge 在真实环境里按它验收；确实没有可真实验收的东西，就写「本轮无真实验收（理由）」—— 那是要用户在批准框里拍板的豁免）：",
+  "  - 正向真实调用：<起什么、调什么、期望返回什么>",
+  "  - 反向验证：<改完后要再确认哪些原本正确的行为没被破坏>",
+  "  - 环境前提：<要真实跑起来需要什么>",
   "非目标：",
   "  - <…>",
   "日期：<ISO>",
@@ -538,6 +546,10 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
   const title = rawTitle.length > GOAL_DIALOG_TITLE_MAX_CHARS
     ? rawTitle.slice(0, GOAL_DIALOG_TITLE_MAX_CHARS) + "…"
     : rawTitle;
+  // Read through the SAME parser the completion-time decision uses, so the
+  // line below and the skip it authorizes can never disagree about whether the
+  // clause is present and whether it carries a reason.
+  const noAcceptance = parseNoAcceptanceDeclaration(normalized);
   return (
     // ORDER IS THE READING ORDER (2026-09-16). `fitDialogMessage` is gone, so
     // nothing is truncated — but the box is still read top-down, and the lines
@@ -552,6 +564,15 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
     // station line and the pre-review line were dropped). Extra untrusted
     // facts go before everything for the same reason they always did.
     (extraUntrusted ? extraUntrusted + "\n" : "") +
+    // THE ONE EXEMPTION ONLY THE USER MAY GRANT (2026-09-22). A goal that
+    // declares this round has nothing to accept for real is consenting to skip
+    // the acceptance judge, so the box that asks for consent says so — in its
+    // own line, before the ordinary approval copy, because a narrow terminal
+    // truncates from the bottom. An acceptance judge may never exempt itself;
+    // this line is where the decision actually happens.
+    (noAcceptance === undefined
+      ? ""
+      : `⚠️ 本轮无真实验收：${noAcceptance.reason} —— 认可即同意这一轮跳过真实验收（该豁免只有你能拍板，验收 agent 无权自行豁免）。\n`) +
     "认可后：扩展把它写入 `" + LOOP_GOAL_RELPATH + "`，reviewer 逐条验收。\n" +
     "不认可就拒绝，然后告诉 AI 哪里不对；它会重新跟你确认后再提交。\n" +
     "目标全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +

@@ -84,6 +84,7 @@ import { WORKER_ID_ENV, WORKER_OPENER_ENV, WORKER_ROLE_ENV } from "./worker-side
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
+import { ACCEPTANCE_GATE_ENV } from "./acceptance-round.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import { mkdirSync } from "node:fs";
@@ -132,6 +133,16 @@ export type SessionPaneRole =
        * child's own negotiation is the only ceiling.
        */
       stationCap?: DeliveryStation;
+      /**
+       * Whether this child may run the REAL-ACCEPTANCE round (2026-09-22).
+       *
+       * `"on"` for the plan's LAST task — the independent acceptance task
+       * (`acceptanceTaskId`) — and `"off"` for every other child of an
+       * orchestration, whose completion must not spend a top-tier judge on an
+       * acceptance nobody asked for. Absent for a standalone session, which
+       * reads absence as ON (lib/acceptance-round.ts `acceptanceGateOpen`).
+       */
+      acceptanceGate?: "on" | "off";
     }
   | {
       kind: "worker";
@@ -208,6 +219,10 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
       // from the approved plan; the child's goal dialog reads it so the user
       // is never offered a station the plan already ruled out.
       ...(role.stationCap === undefined ? {} : { [STATION_CAP_ENV]: role.stationCap }),
+      // WHETHER THIS CHILD RUNS THE ACCEPTANCE ROUND. Same argument as the
+      // ceiling above: an environment fact written by the dispatcher, which is
+      // the one channel a child's own prompt cannot forge.
+      ...(role.acceptanceGate === undefined ? {} : { [ACCEPTANCE_GATE_ENV]: role.acceptanceGate }),
     };
   }
   return { ...role.env };

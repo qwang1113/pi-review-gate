@@ -68,6 +68,13 @@ Work through it on the REAL system, not on a description of it:
 - **Do not edit anything.** You have `bash` for RUNNING things, and `read` /
   `grep` / `find` / `ls` for reading them. Fixing a problem you found would
   destroy the independence of the verdict: report it instead.
+- **Leave the worktree exactly as you found it.** Running things may produce
+  files (logs, build output, fixtures); put them under `$TMPDIR` — the gate
+  points it at a scratch directory of this round — or remove them before you
+  conclude. The completion gate checks the worktree right after you, and it
+  cannot tell your leftovers from the session's own work: an untracked file
+  you leave behind fails `declare_done` for a reason you would be the only
+  one to know.
 - **A flaky or environment-dependent failure is reported as observed.** Give
   the command, the output, and the condition, and say plainly whether you could
   reproduce it. Never round an unreproducible failure up to PASS or down to a

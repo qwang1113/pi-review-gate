@@ -32,6 +32,7 @@ import {
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
 import { deliveryStationLine } from "./delivery-station.ts";
 import { effectiveTaskStation, narrowingReasonFor } from "./repo-pr-policy.ts";
+import { acceptanceGateValue } from "./acceptance-round.ts";
 import { spawnAuthorization } from "./orchestrator-gate.ts";
 import { buildTakeoverRoute, discoverOrchestrations } from "./orchestrator-takeover.ts";
 import {
@@ -368,6 +369,10 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
       orchestrationId: deps.runtime().orchestrationId,
       stateVariant: childId,
       stationCap,
+      // WHETHER THIS CHILD RUNS THE ACCEPTANCE ROUND (2026-09-22): only the
+      // plan's LAST task (the independent acceptance task) gets it, by the
+      // rule in lib/repo-pr-policy.ts — never re-derived here.
+      acceptanceGate: acceptanceGateValue(plan!, taskId) as "on" | "off",
     },
     // F7/F8 — the task rides in on the argv. No typing, nothing to truncate,
     // no Enter to forget. The reference is REPO-RELATIVE: the pane starts in

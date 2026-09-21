@@ -138,6 +138,60 @@ test("the lane requirement never masks a more basic failure", () => {
 });
 
 // ---------------------------------------------------------------------------
+// acceptance — the real-acceptance round's slot (L9, 2026-09-22)
+// ---------------------------------------------------------------------------
+
+test("the acceptance record round-trips, and a garbled one is DROPPED (the round stays owed)", () => {
+  const path = sidecarPath(makeTemp());
+  const s = readyState();
+  const record = {
+    status: "BLOCKED" as const,
+    verdict: "BLOCKED",
+    fingerprint: FP,
+    at: "t",
+    judgeId: "j-1",
+    findingsTotal: 2,
+    reason: "服务起不来",
+  };
+  s.acceptance = record;
+  saveSidecar(path, s);
+  assert.deepEqual(loadSidecar(path)?.acceptance, record, "every field survives the round trip");
+
+  // An unknown status is the dangerous one: it is the only shape that could be
+  // READ as a release. Dropping it means "no acceptance conclusion", i.e. the
+  // round is owed — the fail-closed direction.
+  const badPath = sidecarPath(makeTemp());
+  const bad = readyState();
+  bad.acceptance = { status: "SHIP_IT", at: "t" } as never;
+  saveSidecar(badPath, bad);
+  assert.equal(loadSidecar(badPath)?.acceptance, undefined);
+});
+
+test("invalidateBindings clears an acceptance conclusion, but keeps the two terminal releases", () => {
+  const content = readyState();
+  content.acceptance = { status: "READY", verdict: "READY", fingerprint: FP, at: "t" };
+  invalidateBindings(content);
+  assert.equal(content.acceptance, undefined, "a conclusion about content follows the content");
+
+  const awaiting = readyState();
+  awaiting.acceptance = { status: "AWAITING", at: "t", judgeId: "j-1", fingerprint: FP };
+  invalidateBindings(awaiting);
+  assert.equal(awaiting.acceptance, undefined);
+
+  // SKIPPED is a statement about the GOAL and DISABLED one about the GATE;
+  // no later edit can falsify either, so they stay.
+  const skipped = readyState();
+  skipped.acceptance = { status: "SKIPPED", at: "t", reason: "本轮没有代码改动" };
+  invalidateBindings(skipped);
+  assert.equal(skipped.acceptance?.status, "SKIPPED");
+
+  const disabled = readyState();
+  disabled.acceptance = { status: "DISABLED", at: "t", reason: "编排子会话" };
+  invalidateBindings(disabled);
+  assert.equal(disabled.acceptance?.status, "DISABLED");
+});
+
+// ---------------------------------------------------------------------------
 // lastReviewedTree — the incremental-review baseline
 // ---------------------------------------------------------------------------
 

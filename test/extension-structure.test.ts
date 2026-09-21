@@ -7121,3 +7121,33 @@ test("F2: the seeder re-checks gitignore in the DESTINATION, and tells the truth
   assert.match(seed, /rmQuietly\(to\);/, "a path the destination does not ignore is removed again");
   assert.match(seed, /没有带过去/, "…and the receipt says so");
 });
+
+test("the acceptance round is armed from declare_done, on the EXISTING engine, and never ships (2026-09-22)", () => {
+  const code = codeOnly(SRC);
+  // 1. THE TRIGGER is completion, and only in loop mode: an orchestrator has
+  // no code of its own to accept, and explore/normal completions are advisory.
+  assert.match(
+    code,
+    /if \(!orchestratorMode && state\.taskMode === "loop"\) \{\s*progress\.step\("真实验收"\);\s*const acceptance = await armAcceptanceRound\(ctx, progress\);/,
+    "the step is wired into declare_done's own body, loop only",
+  );
+  assert.match(code, /acceptanceDecision\(\{/, "the decision comes from the module, not from a branch here");
+  // 2. ONE ROUND ENGINE (哲学三): the dispatch goes through dispatchJudgeRound
+  // and the round closes through the settle engine's recorder seam — neither is
+  // re-implemented for this round.
+  const dispatch = windowOf("async function dispatchAcceptanceRound", "\n  /**", "dispatchAcceptanceRound");
+  assert.match(dispatch, /dispatchJudgeRound\(\{/);
+  assert.match(dispatch, /role: "acceptance",/);
+  assert.doesNotMatch(dispatch, /openSessionPane|runTmux\(|appendRecord\(/,
+    "a second pane/dispatch path is exactly what the third philosophy forbids");
+  assert.match(SRC, /recordAcceptance: async \(\{ root, concluded \}\) =>/, "the recorder is wired beside recordQuality's");
+  const arm = windowOf("async function armAcceptanceRound", "\n  // ---------- declare_done tool", "armAcceptanceRound");
+  assert.match(arm, /acceptanceProblems\(decision\)/, "what blocks is the module's projection, not a second reading");
+  assert.match(arm, /dispatchAcceptanceRound\(ctx, fingerprint\)/);
+  // 3. NEVER IN THE SHIP AUTHORITY: fixing an acceptance finding requires a
+  // commit, so a requirement in `unmetRequirements` would block its own remedy.
+  const unmet = GATE_STATE_SRC.slice(GATE_STATE_SRC.indexOf("export function unmetRequirements("));
+  const unmetBody = unmet.slice(0, unmet.indexOf("\nexport function", 10));
+  assert.ok(unmetBody.length > 0, "the ship authority is in gate-state.ts");
+  assert.doesNotMatch(unmetBody, /acceptance/i, "the acceptance round answers completion, never shipping");
+});
