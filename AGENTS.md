@@ -72,8 +72,10 @@ reviewer over the WHOLE change:
   a re-submission whose HEAD already carries a quality READY.
 
 - **验收轮是完成时刻的第六个 judge，由门禁自己派（2026-09-22，L9）.** 它不是
-  `judge_submit` 的产物：本轮有代码改动、且没有绑定当前内容的验收结论时，
-  `declare_done` 内部**自己**派出 `acceptance`（agent 叫不动它 —— `judge_submit`
+  `judge_submit` 的产物：本轮有代码改动、有一份**用户批准的**验收方案（goal 的
+  「真实验收方案」段——goal 环节关闭或 goal 未批准时就没有方案，该轮会被记录成
+  SKIPPED 跳过），且没有绑定当前内容的验收结论时，`declare_done` 内部**自己**派出 `acceptance`
+  （agent 叫不动它 —— `judge_submit`
   不接受这个名字），并把下一步写成 `judge_wait({role:"acceptance"})`；非 READY、
   或那份 READY 绑定的内容已经移动 ⇒ 拒绝完成。它**不进 `unmetRequirements`** ——
   修验收 finding 要 commit，而 commit 又要过 ship 门禁，进了那一层就是自我死锁
@@ -164,8 +166,9 @@ the loop-goal approval dialog.
 条规则）。`ask_user`、门禁自己每一处是/否框（goal 批准、plan 批准、plan 归档、
 需求反述确认、`request_sensitive_edit`、`request_scope_limit`、`set_gate_mode`
 降级确认、`/gate-bypass`、`/gate-grant`）与两处手写 `ui.select` 全部走它，
-`ui.confirm` 在门禁里已无调用点。agent 提交的问题缺选项（<2）或缺推荐 ⇒
-**整批被拒、一个框都不弹**；选项超 4 个只截断并告知。**两道退路也不在 agent 手里，
+`ui.confirm` 在门禁里已无调用点。agent 提交的**单选题**缺选项（<2）或缺推荐 ⇒
+**整批被拒、一个框都不弹**（多选题例外：它用 `defaultChecked` 而不是 `recommended`）；
+选项超 4 个只截断并告知。**两道退路也不在 agent 手里，
 而是模板自己的**（2026-09-19）：多题采访从第 2 题起多一行「← 返回上一题」，
 退回改答只会覆盖被改的那一题（授权题重答则按同一条规则重新裁决：非推荐项收回该
 scope）；理由输入框里按 ESC 退回选项列表（已输入文字保留），选项列表按 ESC 仍然是

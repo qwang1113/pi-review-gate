@@ -97,6 +97,21 @@ test("the decision table, in precedence order", () => {
   );
 });
 
+test("no approved acceptance plan ⇒ SKIP with a reason, never a dispatch with nothing to work from (2026-09-22)", () => {
+  const base = { hasCodeChange: true, gateOpen: true, fingerprint: "fp-1" };
+  // ABSENT is “present”: an older caller keeps dispatching (the stricter side).
+  assert.equal(acceptanceDecision(base).action, "dispatch");
+  const noPlan = acceptanceDecision({ ...base, hasPlan: false });
+  assert.equal(noPlan.action === "skip" && noPlan.status, "SKIPPED");
+  assert.match(noPlan.reason, /验收方案/, "the reason says what is missing");
+  assert.match(noPlan.reason, /goal/, "…and names the way out");
+  assert.deepEqual(acceptanceProblems(noPlan), [], "a skip blocks nothing");
+  // A settled record still decides: the plan check is about DISPATCHING, so a
+  // READY bound to this content passes exactly as it did before.
+  const ready: AcceptanceRecord = { status: "READY", verdict: "READY", fingerprint: "fp-1", at: AT };
+  assert.equal(acceptanceDecision({ ...base, hasPlan: false, record: ready }).action, "pass");
+});
+
 test("skip says WHICH kind of not-owed it is, and never blocks", () => {
   const disabled = acceptanceDecision({ hasCodeChange: true, gateOpen: false, fingerprint: "fp" });
   assert.equal(disabled.action === "skip" && disabled.status, "DISABLED");

@@ -653,9 +653,10 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
       "in `recommended` (the dialog marks it （推荐）), and the gate appends its own row " +
       "「✎ 不选，我说明原因」 which opens a MULTI-LINE editor (pi's own: newlines, paste, " +
       "`ctrl+g` to write it in $EDITOR) — so the user can always answer with a " +
-      "reason instead of picking anything. A question with fewer than 2 options, no " +
+      "reason instead of picking anything. A SINGLE-ANSWER question with fewer than 2 options, no " +
       "`recommended`, or a recommendation that is not one of the options REJECTS THE WHOLE " +
-      "BATCH with no dialog shown — rewrite it and call again. There is no free-text question " +
+      "BATCH with no dialog shown — rewrite it and call again (a MULTIPLE-CHOICE question " +
+      "carries `defaultChecked` instead of `recommended`; see below). There is no free-text question " +
       "any more. The gate runs the interview: one question at a time with its N / M progress, " +
       "and closing a box stops the rest — they come back unanswered. Every answer comes back at " +
       "once. Write " +

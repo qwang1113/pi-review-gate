@@ -220,6 +220,14 @@ export function readyLacksVerification(args: {
  * into the identical park. The bypass branch and the tree comparison live HERE
  * now, and both callers read them.
  *
+ * `bypassActive` IS “NO LANE IS OWED”, not “a bypass was granted” (quality
+ * round P1, 2026-09-22): a round whose precommit stage the user switched OFF
+ * gets no lane either, so the extension composes the two into this one flag
+ * (`laneVerificationWaived`) and BOTH call sites read that composition. Feeding
+ * them separately is the same failure the paragraph above describes: the
+ * recorder would withhold every READY of that combination as `unverified-idle`
+ * while the parked half disagreed.
+ *
  * Fail-closed by construction: every unknown proves nothing.
  *  - a bypass means no lane is OWED at all, so nothing is missing;
  *  - an unknown tree on either side is never a match.
@@ -232,6 +240,9 @@ export function laneVerifiesTree(args: {
   /** The user's own `/gate-bypass` grant — no lane is owed while it stands. */
   bypassActive: boolean;
 }): boolean {
+  // THE FLAG MEANS “NO LANE IS OWED” — the caller composes a bypass and the
+  // switched-off precommit stage into it (extension's `laneVerificationWaived`),
+  // so reading it as “a bypass was granted” here would be a second vocabulary.
   if (args.bypassActive) return true;
   const tree = args.tree;
   if (tree === undefined || tree === "") return false;

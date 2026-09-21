@@ -145,7 +145,8 @@ const APPROVAL_SEMANTICS =
   "（precommit → commit → pr，等于放开更多 ship 命令）、让某个任务自己的交付站点变宽" +
   "（改任务顺序、或删掉一个兄弟任务，都可能让「最后一环不受收窄」那份豁免落到别的任务头上），" +
   "以及把某个 repo 加进 `allowMultiplePrs`（默认同一 repo 的一个需求只出一个 PR：多任务时该 repo 的站点" +
-  "收窄到 commit，只有 plan 的最后一环 —— 收尾任务 —— 不受收窄，由它汇合各任务后统一开一个 PR）。";
+  "收窄到 commit；只有 plan 的最后一环 —— 独立验收任务 —— 不受这条收窄（倒数第二个收尾任务" +
+  "汇合各任务、走一次整体审核并 commit，最后一个验收任务只做真实验收 + push + 开这一个 PR）。";
 
 
 /**
@@ -746,7 +747,10 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "it is a widening like any other. " +
       "ONE REQUIREMENT, ONE PR PER REPO: when one repo holds more than one task, that repo's " +
       "children stop at `commit` — the manager merges them locally and ONE PR comes out of the " +
-      "combined result, opened by the plan's LAST task (the finish task; that task is never capped). " +
+      "combined result. The plan's TAIL is TWO tasks: the second-to-last (the wrap-up) merges the " +
+      "siblings' branches, takes the whole through one review and commits — it is capped like any " +
+      "other task — and the LAST one (the independent acceptance task) runs the real acceptance, " +
+      "pushes and opens that PR; only that task is never capped. " +
       "`allowMultiplePrs` names the repos the USER allowed to split; it is the " +
       "ONLY way out of that rule, so never fill it in on your own initiative. " +
       // The manager reads THIS description while writing tasks, so the task

@@ -478,6 +478,7 @@ import {
   acceptanceProblems,
   acceptanceRoundInFlight,
   buildAcceptanceTask,
+  extractAcceptancePlan,
   parseNoAcceptanceDeclaration,
   type AcceptanceDecision,
   type AcceptanceStatus,
@@ -6521,6 +6522,27 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   }
 
   /**
+   * DOES THIS ROUND OWE NO FULL-LANE VERIFICATION? (quality round P1, 2026-09-22)
+   *
+   * TWO ways a round owes no lane, and to the adjudicator they are ONE fact
+   * (`lib/review-adjudicate.ts`'s `laneVerifiesTree` reads it as "no lane is
+   * OWED at all, so nothing is missing"): the user's `/gate-bypass`, and the
+   * user's own precommit stage switch. With that stage OFF the chain starts no
+   * lane at all (`submitForReview` skips it), so `lastFullPassTree` can never
+   * catch up with the content and the old reading withheld EVERY READY as
+   * `unverified-idle` — REFUSED, not held — which made the legal combination
+   * unconvergeable, and contradicted the switch's own copy (“precommit 关 ⇒
+   * 不跑 lane，checkpoint 与 ship 都不再要求 precommit PASS”).
+   *
+   * ONE function for BOTH readers — the recorder and the parked-READY re-ask:
+   * a second composition at the other call site is how the two readings drift
+   * (`laneVerifiesTree`'s docblock is the other half of this rule).
+   */
+  function laneVerificationWaived(root: string, st: GateState = stateForRepo(root)): boolean {
+    return st.bypass.active || !stageIsOn("precommit", root);
+  }
+
+  /**
    * IS THE GOAL CONTRACT SATISFIED — because the user approved it, or because
    * the user switched the goal stage off?
    *
@@ -11146,8 +11168,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // session never gets a full lane (`submitForReview` skips it), so
         // "no lane, no tree covered" must not read as "disproven" — that is
         // exactly how a parked READY was cleared and re-submitted into the
-        // identical park. The rule is shared with the recorder, not restated.
-        bypassActive: st.bypass.active,
+        // identical park. The rule is shared with the recorder, not restated:
+        // `laneVerificationWaived` is that ONE composition (and the precommit
+        // stage switch joins the bypass in it, quality round P1 2026-09-22).
+        bypassActive: laneVerificationWaived(root, st),
       }),
       quality: qualityPrecondition({
         standing: qualityStandingFor({ head: target?.head ?? "", files: target?.files, quality: st.quality }),
@@ -11410,7 +11434,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           // depending on the live binding the next round's edits reset.
           lastFullPassTree: st.precommit.lastFullPassTree,
           reviewedTree: reviewTargets.get(targetRoot)?.tree,
-          bypassActive: st.bypass.active,
+          // A bypass AND a switched-off precommit stage both mean "this round
+          // owes no lane" — one composition, shared with the parked re-ask
+          // (`laneVerificationWaived`).
+          bypassActive: laneVerificationWaived(targetRoot, st),
         })
       ) {
         unverified = true;
@@ -12001,6 +12028,24 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   /* ─────────────────── L9: the acceptance round, armed at completion ─────────────────── */
 
   /**
+   * THE GOAL THAT GOVERNS THE ACCEPTANCE ROUND — the ONE read of it.
+   *
+   * BOTH halves of the round read THIS: the “no real acceptance this round”
+   * declaration and the acceptance plan handed to the judge. A goal that is
+   * not IN FORCE is not this round's contract — a leftover `.pi/loop-goal.md`
+   * from an earlier task, or an unapproved draft, could otherwise EXEMPT the
+   * round from real acceptance or hand the judge a checklist nobody agreed to,
+   * and with the goal stage switched OFF there is no approval requirement left
+   * to notice such a file (`lib/loop-goal.ts`'s stage-off directive says out
+   * loud that such a file is not this session's contract). `undefined` = no
+   * contract for this round, and then there is no plan to work either.
+   */
+  function acceptanceGoalText(root: string, st: GateState): string | undefined {
+    const goal = readSessionLoopGoal(root);
+    return goal.present && loopGoalConfirmed(root, st) ? goal.text : undefined;
+  }
+
+  /**
    * IS THE DISPATCHED ACCEPTANCE ROUND'S PANE STILL THERE?
    *
    * `false` is what lets `acceptanceDecision` re-dispatch instead of waiting
@@ -12031,16 +12076,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   async function dispatchAcceptanceRound(
     ctx: unknown,
     fingerprint: string,
+    goalText: string,
   ): Promise<{ ok: true; judgeId: string } | { ok: false; error: string }> {
     const root = primaryRepoRoot;
-    const goal = readSessionLoopGoal(root);
     const target = reviewTargets.get(root);
     const stamp = fingerprint !== "" ? fingerprint.slice(0, 12) : String(Date.now());
     const streamPath = pathJoin(root, ".pi", "review-stream", `acceptance-${stamp}.jsonl`);
     try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
     const task = `${buildAcceptanceTask({
       repoRoot: root,
-      goalText: goal.present ? goal.text : "",
+      goalText,
       ...(target === undefined
         ? {}
         : { range: `${target.baseline.slice(0, 12)}..${target.head.slice(0, 12)}` }),
@@ -12086,17 +12131,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   async function armAcceptanceRound(ctx: unknown, progress: { step?: (t: string) => void; fail?: (t: string) => void }) {
     const root = primaryRepoRoot;
     const st = stateForRepo(root);
-    const goal = readSessionLoopGoal(root);
-    // THE DECLARATION IS READ FROM A GOAL THAT IS IN FORCE (quality round P2,
-    // 2026-09-22). `parseNoAcceptanceDeclaration` only reads TEXT, so a
-    // leftover `.pi/loop-goal.md` from an earlier task could exempt this round
-    // from real acceptance — and with the goal stage switched OFF there is no
-    // approval requirement left to notice it (lib/loop-goal.ts's stage-off
-    // directive says out loud that such a file is not this session's
-    // contract). An unapproved draft is the same class of file.
-    const declared = goal.present && loopGoalConfirmed(root, st)
-      ? parseNoAcceptanceDeclaration(goal.text)
-      : undefined;
+    // ONE READ FOR BOTH HALVES (quality round P2, 2026-09-22): the declaration
+    // and the plan handed to the judge come from the SAME goal — and only from
+    // one that is IN FORCE. `parseNoAcceptanceDeclaration` only reads TEXT, so
+    // an unapproved draft or a leftover `.pi/loop-goal.md` could exempt this
+    // round; read the other way, the same file could hand the judge a checklist
+    // that was never approved for this round. See `acceptanceGoalText`.
+    const goalText = acceptanceGoalText(root, st);
+    const declared = goalText === undefined ? undefined : parseNoAcceptanceDeclaration(goalText);
+    const plan = goalText === undefined ? undefined : extractAcceptancePlan(goalText);
     const fp = computeFingerprint(root);
     const fingerprint = fp.unavailable ? "" : fp.digest;
     const decision: AcceptanceDecision = acceptanceDecision({
@@ -12108,6 +12151,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // re-dispatch rules — stay lib/acceptance-round.ts's, unchanged.
       gateOpen: acceptanceGateOpen(process.env) && stageIsOn("acceptance", root),
       ...(declared === undefined ? {} : { goalSkipsAcceptance: declared.reason }),
+      // NO PLAN ⇒ SKIP, never a dispatch with nothing to work from (quality
+      // round P2, 2026-09-22): a judge told to work a checklist it does not
+      // have can only answer BLOCKED, and no action of the agent could resolve
+      // that. The module's reason names both ways out.
+      ...(plan === undefined ? { hasPlan: false } : {}),
       fingerprint,
       ...(st.acceptance === undefined ? {} : { record: st.acceptance }),
       roundAlive: acceptanceRoundAlive(root),
@@ -12176,7 +12224,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // itself blocking is what lands in the completion problem list.
       return refusal(acceptanceProblems(decision), false);
     }
-    const dispatched = await dispatchAcceptanceRound(ctx, fingerprint);
+    const dispatched = await dispatchAcceptanceRound(ctx, fingerprint, goalText ?? "");
     if (!dispatched.ok) {
       return refusal(
         [`验收轮派不出去（${dispatched.error}）—— 门禁不会静默跳过它；修好之后再 declare_done。`],

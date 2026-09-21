@@ -47,6 +47,7 @@ import { doProposeRestatement, type RestatementToolDeps } from "../lib/restateme
 import { doProposeLoopGoal, type GoalToolDeps } from "../lib/goal-tools.ts";
 import { emptyState, unmetRequirements, type GateState } from "../lib/gate-state.ts";
 import { acceptanceDecision, acceptanceGateOpen } from "../lib/acceptance-round.ts";
+import { readyLacksVerification } from "../lib/review-adjudicate.ts";
 import { buildGateWidget } from "../lib/ui-widget.ts";
 import { makeGitRepo, writeState, readyState } from "./helpers/hook-fixtures.ts";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
@@ -512,6 +513,42 @@ test("the five checkpoints read the ONE query, not a second rule", () => {
     "the fallback is wired into the L1 hook for the first edit / restatement");
 });
 
+test("precommit off owes no lane: the verification binding never withholds that READY (quality round P1, 2026-09-22)", () => {
+  // The combination's deadlock: with the stage off the chain starts no lane at
+  // all, so `lastFullPassTree` can never catch up with the content — and the
+  // old reading withheld EVERY READY as `unverified-idle` (REFUSED, not held),
+  // which nothing the agent could do would end.
+  //
+  // TWO halves, pinned together: the extension composes “no lane is owed” ONCE
+  // and BOTH adjudication sites read that composition (the recorder and the
+  // parked-READY re-ask). Feeding them separately is the drift the adjudicator's
+  // docblock records from 2026-09-16.
+  const at = SRC.indexOf("function laneVerificationWaived(");
+  assert.ok(at > 0, "the composition exists");
+  const body = SRC.slice(at, SRC.indexOf("\n  }", at));
+  assert.match(body, /st\.bypass\.active \|\| !stageIsOn\("precommit", root\)/,
+    "the user's bypass and the switched-off stage are ONE fact");
+  assert.equal(
+    (SRC.match(/bypassActive: laneVerificationWaived\(/g) ?? []).length,
+    2,
+    "the recorder and the parked-READY re-ask both read the composition",
+  );
+  assert.doesNotMatch(SRC, /bypassActive: st\.bypass\.active,/,
+    "no site reads the bypass alone — that is how the two halves drift");
+  // …and the flag it feeds means “no lane is owed”: a round nobody has to
+  // verify is NOT withheld as unverified.
+  assert.equal(
+    readyLacksVerification({
+      precommitVerdict: "NOT_RUN",
+      lastFullPassTree: "old-tree",
+      reviewedTree: "this-round-tree",
+      bypassActive: true,
+    }),
+    false,
+    "a round that owes no lane is never reported unverified",
+  );
+});
+
 test("a proxy may not answer the stage checklist (quality round P1, 2026-09-22)", () => {
   // The checkbox travels through the gate's own dialog, which races every
   // question against the thirty-minute arbiter hand-off. A stand-in naming only
@@ -552,12 +589,26 @@ test("the no-acceptance declaration is only read from a goal that is in force", 
   // `parseNoAcceptanceDeclaration` reads TEXT, so a leftover goal file could
   // exempt this round from real acceptance — and with the goal stage off there
   // is no approval requirement left to notice (quality round P2, 2026-09-22).
+  //
+  // ONE READ FOR BOTH HALVES (quality round P2, 2026-09-22): the declaration
+  // and the PLAN handed to the judge are the same question, so the guard lives
+  // in `acceptanceGoalText` and both halves go through it — the plan side used
+  // to re-read `readSessionLoopGoal` unguarded.
+  const goalRead = SRC.indexOf("function acceptanceGoalText(");
+  assert.ok(goalRead > 0, "the one read of the governing goal exists");
+  const guard = SRC.slice(goalRead, SRC.indexOf("\n  }", goalRead));
+  assert.match(guard, /goal\.present && loopGoalConfirmed\(root, st\)/,
+    "only a goal this session actually had approved is in force");
   const at = SRC.indexOf("const declared = ");
   assert.ok(at > 0, "armAcceptanceRound reads the declaration");
-  const read = SRC.slice(at, at + 400);
-  assert.match(read, /goal\.present && loopGoalConfirmed\(root, st\)/,
-    "the declaration is gated on the goal this session actually had approved");
-  assert.match(read, /parseNoAcceptanceDeclaration\(goal\.text\)/);
+  const read = SRC.slice(at - 300, at + 400);
+  assert.match(read, /acceptanceGoalText\(root, st\)/, "…through that one read");
+  assert.match(read, /parseNoAcceptanceDeclaration\(goalText\)/);
+  assert.match(read, /extractAcceptancePlan\(goalText\)/, "the plan comes from the same text");
+  const dispatchAt = SRC.indexOf("async function dispatchAcceptanceRound(");
+  const dispatch = SRC.slice(dispatchAt, dispatchAt + 900);
+  assert.doesNotMatch(dispatch, /readSessionLoopGoal\(/,
+    "the plan side re-reads nothing — the text is handed in");
 });
 
 test("the widget shows the switches only when something is off", () => {

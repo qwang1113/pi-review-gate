@@ -223,6 +223,22 @@ export interface AcceptanceDecisionInput {
    * that carries usable text (a bare 「本轮无真实验收」 is not an exemption).
    */
   goalSkipsAcceptance?: string | undefined;
+  /**
+   * IS THERE A PLAN TO WORK? — `extractAcceptancePlan` over a goal that is IN
+   * FORCE (`lib/loop-goal.ts`'s approval, not just the file being there).
+   *
+   * `false` SKIPS with a reason instead of dispatching a judge that has nothing
+   * to work from: the round's whole mandate is the user-approved「真实验收方案」，
+   * so with the goal stage switched OFF and no approved goal on record there is
+   * no checklist to verify against — and a judge told to work a plan it does
+   * not have can only answer BLOCKED, which no action of the agent could ever
+   * resolve (a hold nobody can end). The reason names both ways out.
+   *
+   * ABSENT IS “PRESENT” on purpose: the direction that must never happen by
+   * default is a silent SKIP, so an older caller that does not know this input
+   * keeps dispatching (the stricter side).
+   */
+  hasPlan?: boolean;
   /** The CURRENT worktree fingerprint digest; `""` when it cannot be read. */
   fingerprint: string;
   /** The record the sidecar carries, if any. */
@@ -309,6 +325,14 @@ export function acceptanceDecision(input: AcceptanceDecisionInput): AcceptanceDe
         reason: "内容已经变了，上一轮的 BLOCKED 结论针对的是旧内容 —— 重新验收。",
       };
     default:
+      if (input.hasPlan === false) {
+        return {
+          action: "skip",
+          status: "SKIPPED",
+          reason: "本轮没有用户批准的验收方案（goal 环节关闭、或 goal 尚未批准——起草中的草稿不算合同）" +
+            "—— 没有可依据的清单就不派验收轮：批准一份带「真实验收方案」的 goal，或者把验收环节也关掉。",
+        };
+      }
       return {
         action: "dispatch",
         reason: "还没有绑定当前内容的验收结论 —— 门禁现在派出 acceptance 轮（真实验收）。",

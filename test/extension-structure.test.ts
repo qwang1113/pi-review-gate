@@ -6474,7 +6474,7 @@ test("a FAIL that arrives after dispatch is reported, and it withholds the READY
   );
   assert.match(
     SRC,
-    /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,400}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,40}?bypassActive: st\.bypass\.active,\s*\}\)/,
+    /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,500}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,400}?bypassActive: laneVerificationWaived\(targetRoot, st\),\s*\}\)/,
     "the verdict recorder refuses a READY on content that never passed the full lane — and answers it from the round's OWN tree, not from the live binding the next edit resets",
   );
   assert.match(SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
@@ -7166,7 +7166,9 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   assert.match(SRC, /recordAcceptance: async \(\{ root, concluded \}\) =>/, "the recorder is wired beside recordQuality's");
   const arm = windowOf("async function armAcceptanceRound", "\n  // ---------- declare_done tool", "armAcceptanceRound");
   assert.match(arm, /acceptanceProblems\(decision\)/, "what blocks is the module's projection, not a second reading");
-  assert.match(arm, /dispatchAcceptanceRound\(ctx, fingerprint\)/);
+  assert.match(arm, /dispatchAcceptanceRound\(ctx, fingerprint, goalText \?\? ""\)/,
+    "the goal text is handed to the dispatch (one read for both halves, 2026-09-22)");
+  assert.match(arm, /hasPlan: false/, "no approved acceptance plan ⇒ SKIP, never a plan-less dispatch");
   // 3. NEVER IN THE SHIP AUTHORITY: fixing an acceptance finding requires a
   // commit, so a requirement in `unmetRequirements` would block its own remedy.
   const unmet = GATE_STATE_SRC.slice(GATE_STATE_SRC.indexOf("export function unmetRequirements("));

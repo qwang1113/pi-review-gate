@@ -508,7 +508,9 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
 
 - **派发者是门禁，不是 agent**：`declare_done` 内部调 `acceptanceDecision`
   （`lib/acceptance-round.ts` 的纯判定表）—— 本轮没有代码改动、goal 声明「本轮无
-  真实验收（理由）」、或环境把这次会话标记为不验收 ⇒ skip（SKIPPED / DISABLED）；
+  真实验收（理由）」、本轮没有一份**用户批准的**验收方案（`hasPlan: false`：goal 环节
+  关闭或 goal 未批准，草稿不算合同）、或环境把这次会话标记为不验收 ⇒ skip
+  （SKIPPED / DISABLED）；
   没有绑定当前内容的结论 ⇒ 门禁**自己**派轮（agent 手上没有起它的工具，
   `judge_submit` 也不接受这个角色名）；AWAITING ⇒ 等它的报告（pane 没了就重新派，
   不空等）；结论绑定内容 ⇒ 比对当前工作区指纹，一致才放行。
