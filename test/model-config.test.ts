@@ -1348,6 +1348,37 @@ test("healMissingAgentSlots fills the GAP only, keeps every user pin, and is byt
   }
 });
 
+test("healMissingAgentSlots treats an EMPTY entry as a gap, but never overwrites a declared one", () => {
+  // `"acceptance": {}` parses as "absent" everywhere else in this module, so it
+  // must heal here too — otherwise the only exit was an installer that fills
+  // MISSING keys only (quality-auditor P2, 2026-09-22).
+  const dir = mkdtempSync(join(tmpdir(), "agent-slot-heal-empty-"));
+  try {
+    const pkg = join(dir, "pkg");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "acceptance.md"), "---\nname: acceptance\nmodel: claude-fable-5\nthinking: max\n---\n");
+
+    const empty = join(dir, "empty.json");
+    writeFileSync(empty, JSON.stringify({ agents: { acceptance: {} } }), "utf8");
+    const healed = healMissingAgentSlots({ configPath: empty, agentsDir: pkg, roles: ["acceptance"], registry: REG });
+    assert.deepEqual(healed.healed, ["acceptance"]);
+    assert.deepEqual(JSON.parse(readFileSync(empty, "utf8")).agents.acceptance.slots, ["anthropic/claude-fable-5:max"]);
+    // …and the healed file now passes the startup check for that role.
+    const { map } = effectiveAgentsConfig(JSON.parse(readFileSync(empty, "utf8")).agents, undefined, ["acceptance"]);
+    assert.equal(validateAgentsForStartup(map, REG, ["acceptance"]).acceptance.ok, true);
+
+    // A NON-empty entry — even an unusable one — is the user's declaration.
+    const declared = join(dir, "declared.json");
+    const declaredText = JSON.stringify({ agents: { acceptance: { auto: true } } });
+    writeFileSync(declared, declaredText, "utf8");
+    const kept = healMissingAgentSlots({ configPath: declared, agentsDir: pkg, roles: ["acceptance"], registry: REG });
+    assert.deepEqual(kept.healed, [], "an explicitly declared entry is never overwritten");
+    assert.equal(readFileSync(declared, "utf8"), declaredText, "the file is untouched");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("healMissingAgentSlots creates the config file when none exists", () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-slot-heal-new-"));
   try {

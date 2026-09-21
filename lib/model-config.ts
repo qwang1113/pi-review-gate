@@ -314,8 +314,17 @@ export function healMissingAgentSlots(opts: {
   }
   const agents: Record<string, unknown> = { ...(existing as Record<string, unknown> | undefined) };
   const added: string[] = [];
+  // An EMPTY object is "not a config" — the parser makes the same equivalence
+  // (`parseAgentsSection`: an empty object stays absent), so it must not count
+  // as a pin here either. Without this, `"acceptance": {}` was a deadlock:
+  // nothing healed it and the refusal pointed at the installer, which only
+  // fills MISSING keys (quality-auditor P2, 2026-09-22).
+  const isEmptyEntry = (v: unknown): boolean =>
+    typeof v === "object" && v !== null && !Array.isArray(v) && Object.keys(v as Record<string, unknown>).length === 0;
   for (const role of wanted) {
-    if (Object.hasOwn(agents, role)) continue; // the file already names it — a user pin, never touched
+    // GAPS ONLY: a NON-empty entry is the user's declaration, whatever it says
+    // — it is never overwritten, and the refusal tells them how to fix it.
+    if (Object.hasOwn(agents, role) && !isEmptyEntry(agents[role])) continue;
     const slots = defaultSlotsForRole(opts.agentsDir, role);
     if (!slots) {
       result.problems.push(`角色 ${role} 缺位，但包内 agents/${role}.md 不可读或没有 model 行 —— 没有可补的默认 slots`);
