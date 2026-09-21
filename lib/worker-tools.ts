@@ -511,38 +511,46 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => { setTimeout(r, ms); }));
   const started = deps.now();
   const seen = registry[workerId]?.reportedAt;
+
+  // The two things a worker channel can carry, as replies — shared by the
+  // probe below and by the last look taken before declaring it gone.
+  const questionReply = (q: NonNullable<WorkerProjection["question"]>): ToolReply =>
+    reply(
+      `review-gate: worker ${workerId} 在等你回答：\n\n${q.title}\n` +
+      (q.options.length ? "\n" + q.options.map((o, i) => `  ${i + 1}. ${o}`).join("\n") : "") +
+      (q.payload ? `\n\n${q.payload}` : "") +
+      `\n\n用 \`worker_answer({workerId: "${workerId}", requestId: "${q.requestId}", answer: "…"})\` 回它。`,
+      { workerId, requestId: q.requestId, kind: "question" },
+    );
+  const reportReply = (r: NonNullable<WorkerProjection["report"]>): ToolReply => {
+    const current = registry[workerId];
+    if (current) deps.saveRegistry(withWorker(registry, { ...current, reportedAt: r.reportId }));
+    return reply(
+      `review-gate: worker ${workerId} 交活了：\n\n${r.text}`,
+      { workerId, reportId: r.reportId, kind: "report" },
+    );
+  };
+
   for (;;) {
     const projection = readWorkerChannel(deps, registry, workerId);
-    if (projection.question) {
-      return reply(
-        `review-gate: worker ${workerId} 在等你回答：\n\n${projection.question.title}\n` +
-        (projection.question.options.length
-          ? "\n" + projection.question.options.map((o, i) => `  ${i + 1}. ${o}`).join("\n")
-          : "") +
-        (projection.question.payload ? `\n\n${projection.question.payload}` : "") +
-        `\n\n用 \`worker_answer({workerId: "${workerId}", requestId: "${projection.question.requestId}", answer: "…"})\` 回它。`,
-        { workerId, requestId: projection.question.requestId, kind: "question" },
-      );
-    }
-    if (projection.report && projection.report.reportId !== seen) {
-      const entry = registry[workerId];
-      if (entry) {
-        deps.saveRegistry(withWorker(registry, { ...entry, reportedAt: projection.report.reportId }));
-      }
-      return reply(
-        `review-gate: worker ${workerId} 交活了：\n\n${projection.report.text}`,
-        { workerId, reportId: projection.report.reportId, kind: "report" },
-      );
-    }
+    if (projection.question) return questionReply(projection.question);
+    if (projection.report && projection.report.reportId !== seen) return reportReply(projection.report);
     // A WORKER THAT CANNOT SPEAK AGAIN IS NEWS TOO (reviewer P2, 2026-09-21):
     // `paneId === undefined` means its pane was CLOSED — nothing will ever
     // write to that channel again — and a dead pane means the same. The old
     // loop spent the whole 300-second timeout to report either, something it
-    // had read on the very first iteration. A worker whose pane is gone and
-    // whose channel holds no unconsumed report cannot produce anything else,
-    // and saying so NOW is what "message-driven" is supposed to mean.
+    // had read on the very first iteration.
     const entry = registry[workerId];
     if (entry && (entry.paneId === undefined || !deps.paneAlive(entry.paneId))) {
+      // …BUT NOT BEFORE ITS LAST WORDS HAVE LANDED (reviewer P1, 2026-09-21).
+      // `worker_close` kills the pane, and a report the worker had already
+      // written can reach the channel after our last read and before the kill
+      // takes effect — declaring "gone" on one read would drop it. One more
+      // poll is enough for a file append that is already in flight.
+      await sleep(WORKER_WAIT_POLL_MS);
+      const after = readWorkerChannel(deps, registry, workerId);
+      if (after.question) return questionReply(after.question);
+      if (after.report && after.report.reportId !== seen) return reportReply(after.report);
       const closed = entry.paneId === undefined;
       return reply(
         `review-gate: worker ${workerId} ${closed ? "的 pane 已经关掉了" : `的 pane（${entry.paneId}）已不在`}，` +

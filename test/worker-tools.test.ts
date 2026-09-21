@@ -365,6 +365,20 @@ test("waiting on a CLOSED worker returns immediately, not after the timeout", as
   assert.match(world.text(reply), /worker_submit/, "and it says how to continue the conversation");
 });
 
+test("'gone' never outranks a report — a closed worker's last words are still delivered", async () => {
+  // The race the reviewer named (2026-09-21): `worker_close` kills the pane,
+  // and a report the worker had already written can reach the channel around
+  // the same moment. Declaring it gone on a single read would drop that report.
+  const world = makeWorld();
+  await world.call("worker_submit", { task: "最后一次调查" });
+  appendWorkerReport(world.io, workerChannelTarget("%1", "worker-1"), { result: "关掉之前写下的结论" });
+  await world.call("worker_close", { workerId: "worker-1" });
+
+  const reply = await world.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
+  assert.equal((reply.details as { kind?: string })?.kind, "report", "the report wins over the gone verdict");
+  assert.match(world.text(reply), /关掉之前写下的结论/);
+});
+
 test("close on an unknown worker is a no-op, not an error", async () => {
   const world = makeWorld();
   const reply = await world.call("worker_close", { workerId: "worker-9" });
