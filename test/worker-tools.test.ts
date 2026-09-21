@@ -379,6 +379,25 @@ test("'gone' never outranks a report — a closed worker's last words are still 
   assert.match(world.text(reply), /关掉之前写下的结论/);
 });
 
+test("'gone' is not a dead end — a report that lands later is read by the next wait", async () => {
+  // What makes a late report safe is NOT the wait window (no finite window can
+  // promise anything about a process being killed): it is that nothing is
+  // discarded — the entry and the channel both stay. This test pins that
+  // property, which is the one the reviewer's P1 was actually about.
+  const world = makeWorld();
+  await world.call("worker_submit", { task: "第一次" });
+  await world.call("worker_close", { workerId: "worker-1" });
+
+  const first = await world.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
+  assert.equal((first.details as { kind?: string })?.kind, "gone");
+
+  // The report lands AFTER the wait already said "gone".
+  appendWorkerReport(world.io, workerChannelTarget("%1", "worker-1"), { result: "慢了一拍落地的结论" });
+  const second = await world.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
+  assert.equal((second.details as { kind?: string })?.kind, "report", "nothing was thrown away by the gone verdict");
+  assert.match(world.text(second), /慢了一拍落地的结论/);
+});
+
 test("close on an unknown worker is a no-op, not an error", async () => {
   const world = makeWorld();
   const reply = await world.call("worker_close", { workerId: "worker-9" });

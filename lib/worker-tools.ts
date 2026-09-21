@@ -542,19 +542,28 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
     // had read on the very first iteration.
     const entry = registry[workerId];
     if (entry && (entry.paneId === undefined || !deps.paneAlive(entry.paneId))) {
-      // …BUT NOT BEFORE ITS LAST WORDS HAVE LANDED (reviewer P1, 2026-09-21).
-      // `worker_close` kills the pane, and a report the worker had already
-      // written can reach the channel after our last read and before the kill
-      // takes effect — declaring "gone" on one read would drop it. One more
-      // poll is enough for a file append that is already in flight.
-      await sleep(WORKER_WAIT_POLL_MS);
+      // …BUT NOT BEFORE ITS LAST WORDS HAVE HAD A MOMENT TO LAND (reviewer P1,
+      // 2026-09-21). `worker_close` kills the pane, and a report the worker had
+      // already written can reach the channel around the same moment.
+      //
+      // WHY THIS IS A WINDOW AND NOT A GUARANTEE, stated honestly: the only
+      // writer left is a process that is being killed, so anything it wrote is
+      // either already in the file or will never arrive — the residual
+      // uncertainty is how long the kill takes to take effect, and no finite
+      // wait can be "long enough" for an arbitrary one. What makes the report
+      // safe is not this sleep, it is that NOTHING IS DISCARDED: the entry and
+      // the channel both stay, so the next `worker_wait` reads whatever
+      // landed after this one returned. The sleep just avoids the common case
+      // of reporting "nothing" a few milliseconds before the answer arrives.
+      await sleep(WORKER_WAIT_POLL_MS * 4);
       const after = readWorkerChannel(deps, registry, workerId);
       if (after.question) return questionReply(after.question);
       if (after.report && after.report.reportId !== seen) return reportReply(after.report);
       const closed = entry.paneId === undefined;
       return reply(
         `review-gate: worker ${workerId} ${closed ? "的 pane 已经关掉了" : `的 pane（${entry.paneId}）已不在`}，` +
-        "通道里也没有未消费的报告 —— 它不会再有新消息了。\n" +
+        "现在通道里没有新消息。\n" +
+        "（如果它在被杀之前写过报告，那份仍在通道里：再 `worker_wait` 一次就能读到 —— 这里不会丢弃任何东西。）\n" +
         `接着用：\`worker_submit({ workerId: "${workerId}", task: … })\`（同一 session id 重开，它还记得上次读过的）；` +
         `不用了就 \`worker_close({ workerId: "${workerId}" })\`。`,
         { workerId, kind: "gone", alive: false, closed },
