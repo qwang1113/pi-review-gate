@@ -46,6 +46,7 @@ import {
 } from "../lib/orchestrator-answer-tools.ts";
 import { ORCHESTRATOR_DIRECTIVE } from "../lib/orchestrator-directives.ts";
 import { DECLINE_ROW, REVISE_ROW } from "../lib/choice-dialog.ts";
+import { parseMultiChoice } from "../lib/multi-choice-dialog.ts";
 
 import type { FakeWorld } from "./helpers/fake-orchestration.ts";
 
@@ -243,6 +244,43 @@ test("a CHECKBOX question takes several rows — and only a checkbox does (2026-
   const radio = { ...checkbox, multiple: undefined } as unknown as Parameters<typeof resolveAnswer>[0];
   const radioAnswer = resolveAnswer(radio, "A, C");
   assert.equal(radioAnswer.ok, false);
+});
+
+test("a manager's answer READS BACK as a checklist answer — the two ends are one format", () => {
+  // THE CLOSED LOOP THIS SHAPE LIVES OR DIES BY (2026-09-22): what
+  // `resolveAnswer` hands the child must be exactly what
+  // `lib/multi-choice-dialog.ts`'s parser reads. Each end was tested alone,
+  // which left the wire format BETWEEN them unpinned — and the rows travel with
+  // their checkboxes (`[x] A. 预检`) while the child's own option list does not.
+  const request = {
+    requestId: "r3",
+    title: "开哪几个环节？",
+    multiple: true,
+    options: ["[x] A. 预检", "[ ] B. 质量审查", "[ ] C. precommit", DECLINE_ROW],
+  } as unknown as Parameters<typeof resolveAnswer>[0];
+  const spec = {
+    title: "开哪几个环节？",
+    options: ["预检", "质量审查", "precommit"],
+    defaultChecked: ["预检"],
+  };
+
+  const several = resolveAnswer(request, "A, C");
+  assert.equal(several.ok, true);
+  if (several.ok) {
+    assert.deepEqual(parseMultiChoice(several.answer, spec), { kind: "chose", options: ["预检", "precommit"] });
+  }
+
+  const one = resolveAnswer(request, "B");
+  assert.equal(one.ok, true);
+  if (one.ok) {
+    assert.deepEqual(parseMultiChoice(one.answer, spec), { kind: "chose", options: ["质量审查"] });
+  }
+
+  const declined = resolveAnswer(request, `${DECLINE_ROW}：先不开`);
+  assert.equal(declined.ok, true);
+  if (declined.ok) {
+    assert.deepEqual(parseMultiChoice(declined.answer, spec), { kind: "declined", reason: "先不开" });
+  }
 });
 
 // ---------------------------------------------------------------------------
