@@ -58,6 +58,8 @@ function makeWorld(opts: {
   io?: ReturnType<typeof memoryChannelIO>;
   /** The tmux server this session can read — omitted ⇒ it cannot be read. */
   tmuxServer?: string;
+  /** Runs inside every fake `sleep` — how a test writes a mid-wait ack. */
+  onSleep?: () => void;
 } = {}) {
   const io = opts.io ?? memoryChannelIO(() => NOW);
   const files = new Map<string, string>();
@@ -93,7 +95,7 @@ function makeWorld(opts: {
     saveRegistry: (next) => { registry = next; },
     agents: () => opts.agents ?? agentsWith({ worker: workerPreset() }),
     now: () => clock,
-    sleep: async (ms: number) => { clock += ms; },
+    sleep: async (ms: number) => { clock += ms; opts.onSleep?.(); },
     ...(opts.tmuxServer === undefined ? {} : { tmuxServer: () => opts.tmuxServer }),
     log: (m) => logs.push(m),
   };
@@ -170,6 +172,52 @@ test("the system prompt the pane runs carries the preset's own words", async () 
   const written = [...world.files.values()].join("\n");
   assert.match(written, /你是侦察兵：只报事实。/);
   assert.match(written, /只读/, "…and the read-only contract is stated to the worker as well");
+});
+
+test("the append receipt reads the LAST ack — a received-then-injected handshake is a confirmation", async () => {
+  // The handshake ALWAYS writes `received` first and only writes `injected`
+  // once the text reached the agent. Reading the FIRST ack therefore reported
+  // "not confirmed" for every append that ever worked (quality round P1, 6th
+  // report, 2026-09-21).
+  let chan!: ReturnType<typeof memoryChannelIO>;
+  let patched = false;
+  const world = makeWorld({
+    io: (chan = memoryChannelIO(() => NOW)),
+    onSleep: () => {
+      if (patched) return;
+      patched = true;
+      const id = [...chan.files.values()].join("\n").trim().split("\n")
+        .map((line) => JSON.parse(line) as { kind?: string; instructId?: string })
+        .findLast((r) => r.kind === "instruct")?.instructId;
+      if (!id) return;
+      const target = workerChannelTarget("%1", "worker-1");
+      for (const stage of ["received", "injected"] as const) {
+        appendRecord(chan, target, {
+          kind: "instruct-ack", from: "child", at: new Date(NOW).toISOString(),
+          instructId: id, delivered: true, stage,
+        });
+      }
+    },
+  });
+  await world.call("worker_submit", { task: "第一次" });
+  const reply = await world.call("worker_submit", { task: "追加", workerId: "worker-1" });
+  assert.equal((reply.details as { injected?: boolean })?.injected, true,
+    "the injected ack — the LAST one — is what confirms the append");
+  assert.match(world.text(reply), /已确认注入/);
+});
+
+test("a preset whose model spec cannot be resolved is refused, not launched", () => {
+  // Worker chains never pass through the render layer (it filters them), so
+  // this is the only place a typo'd provider/model is caught before pi tries
+  // and fails to start the pane (quality round P2, 2026-09-21).
+  const agents = agentsWith({ worker: workerPreset() });
+  const refused = resolveWorkerRole(agents, "worker", undefined, (spec) => ({ ok: false, reason: `unknown model ${spec}` }));
+  assert.equal(refused.ok, false);
+  assert.match(refused.ok === false ? refused.reason : "", /不可解析/);
+  assert.match(refused.ok === false ? refused.reason : "", /agents\.worker\.slots/, "…and it names where to fix it");
+
+  const good = resolveWorkerRole(agents, "worker", undefined, () => ({ ok: true }));
+  assert.equal(good.ok, true, "a resolvable spec passes");
 });
 
 test("a second submit to a LIVING worker is a message, not a second worker", async () => {

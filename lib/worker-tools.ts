@@ -94,6 +94,15 @@ export interface WorkerToolDeps {
   tmuxServer?(): string | undefined;
   /** The effective `agents` config: worker presets are the roles named `worker*`. */
   agents(): AgentsConfigMap;
+  /**
+   * Does this model spec resolve against the user's registry?
+   *
+   * Injected because reading the registry is the CALLER's business
+   * (lib/model-config.ts `validateSpec` + `loadRegistry`), and the answer is
+   * what keeps a typo'd preset from being discovered only when pi refuses to
+   * start the pane. Optional in the seam so protocol tests need no registry.
+   */
+  validateModel?(spec: string): { ok: boolean; reason?: string };
   now(): number;
   sleep?(ms: number): Promise<void>;
   log(message: string): void;
@@ -195,6 +204,23 @@ function targetParts(
   return [target.orchestrationId, target.childId, target.home];
 }
 
+/**
+ * Is this worker's pane still OURS?
+ *
+ * The same ownership rule `worker_close` applies (quality round P2,
+ * 2026-09-21): a pane id is minted by a tmux SERVER, so after a restart `%42`
+ * may belong to somebody else's session. Close already refuses on a mismatch,
+ * and the three OTHER readers of liveness — submit's "is it still running",
+ * wait's gone test, and the default-worker pick — must give the same answer,
+ * or the gate would append a task to (or wait on) a stranger's pane.
+ */
+function ownedPaneAlive(deps: WorkerToolDeps, entry: WorkerEntry | undefined): boolean {
+  if (!entry || entry.paneId === undefined) return false;
+  const current = deps.tmuxServer?.();
+  if (entry.tmuxServer !== undefined && entry.tmuxServer !== current) return false;
+  return deps.paneAlive(entry.paneId);
+}
+
 /** Mint the next free worker id (`worker-1`, `worker-2`, …). */
 export function nextWorkerId(registry: WorkerRegistry): string {
   for (let i = 1; ; i += 1) {
@@ -208,6 +234,17 @@ export function resolveWorkerRole(
   agents: AgentsConfigMap,
   role: string,
   overrideModel?: string,
+  /**
+   * Registry check for the spec, injected (quality round P2, 2026-09-21).
+   *
+   * A worker preset's chain is read straight from the config section, so it
+   * never passes through `applyAgentConfigLayer` — which is where every OTHER
+   * role's slots get validated. Without this, a typo (`agents.worker.slots[0]
+   * = "onekey/gpt-6-astr:max"`) is discovered only when pi refuses to start the
+   * pane. Fail-closed like the missing-preset case: an unresolvable spec is a
+   * configuration error, not something to paper over.
+   */
+  validate?: (spec: string) => { ok: boolean; reason?: string },
 ): { ok: true; model: string; prompt?: string } | { ok: false; reason: string } {
   const entry = agents[role];
   if (!entry || entry.source === "default") {
@@ -221,10 +258,19 @@ export function resolveWorkerRole(
   }
   if (entry.malformed) return { ok: false, reason: `worker 角色 \`${role}\` 的配置字段非法（malformed）` };
   const override = overrideModel?.trim();
-  if (override) return { ok: true, model: override, ...(entry.prompt === undefined ? {} : { prompt: entry.prompt }) };
-  const model = entry.slots[0];
+  const model = override || entry.slots[0];
   if (!model) {
     return { ok: false, reason: `worker 角色 \`${role}\` 的 slots 是空的 —— 没有可派发的模型` };
+  }
+  const checked = validate?.(model);
+  if (checked && !checked.ok) {
+    return {
+      ok: false,
+      reason:
+        `worker 角色 \`${role}\` 的模型 spec \`${model}\` 不可解析（${checked.reason ?? "原因未知"}）—— ` +
+        `改 ~/.pi/review-gate.json 里的 agents.${role}.slots${override ? "，或换掉本次的 model 覆盖" : ""}；` +
+        "派一个起不来的 pane 等于把任务丢进黑洞。",
+    };
   }
   return { ok: true, model, ...(entry.prompt === undefined ? {} : { prompt: entry.prompt }) };
 }
@@ -328,7 +374,14 @@ async function waitForInstructAck(
   for (;;) {
     try {
       const path = channelPathFor(...targetParts(deps, registry, workerId));
-      const ack = readChannel(deps.channelIO, path).records.find(
+      // THE LAST ACK, NOT THE FIRST (quality round P1, 6th report, 2026-09-21):
+      // the handshake always writes `received` first and only writes `injected`
+      // once the instruction was actually applied — so `.find` always returned
+      // the `received` record and this predicate could never be true. Every
+      // "injected" the caller was ever told about came from... nowhere; the
+      // helper simply always answered "not confirmed". `findLast` reads the
+      // stage the instruction actually reached.
+      const ack = readChannel(deps.channelIO, path).records.findLast(
         (r) => r.kind === "instruct-ack" && (r as { instructId?: unknown }).instructId === instructId,
       ) as { delivered?: unknown; stage?: unknown } | undefined;
       if (ack) {
@@ -346,7 +399,12 @@ async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown
   const task = String(params.task ?? "").trim();
   if (!task) return fail("review-gate: `task` 不能为空 —— worker 看不到你的上下文，任务书就是它的全部输入。");
   const role = String(params.role ?? "worker").trim() || "worker";
-  const resolved = resolveWorkerRole(deps.agents(), role, typeof params.model === "string" ? params.model : undefined);
+  const resolved = resolveWorkerRole(
+    deps.agents(),
+    role,
+    typeof params.model === "string" ? params.model : undefined,
+    deps.validateModel,
+  );
   if (!resolved.ok) return fail(`review-gate: ${resolved.reason}`);
 
   const registry = deps.readRegistry();
@@ -364,7 +422,7 @@ async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown
   // the worker as a message, through the same instruct channel an orchestration
   // child uses, so it is read by the pane's own gate and cannot be truncated,
   // reordered or read as a dialog keypress.
-  if (existing?.paneId !== undefined && deps.paneAlive(existing.paneId)) {
+  if (ownedPaneAlive(deps, existing)) {
     const target = workerTargetFor(deps, registry, workerId);
     const instructId = newChannelId("wi", deps.now());
     appendRecord(deps.channelIO, target, {
@@ -547,7 +605,7 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
     // loop spent the whole 300-second timeout to report either, something it
     // had read on the very first iteration.
     const entry = registry[workerId];
-    if (entry && (entry.paneId === undefined || !deps.paneAlive(entry.paneId))) {
+    if (entry && !ownedPaneAlive(deps, entry)) {
       // …BUT NOT BEFORE ITS LAST WORDS HAVE HAD A MOMENT TO LAND (reviewer P1,
       // 2026-09-21). `worker_close` kills the pane, and a report the worker had
       // already written can reach the channel around the same moment.
@@ -584,7 +642,7 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
     }
     if (timeoutMs === 0 || deps.now() - started >= timeoutMs) {
       const entry = registry[workerId];
-      const alive = entry?.paneId !== undefined ? deps.paneAlive(entry.paneId) : false;
+      const alive = ownedPaneAlive(deps, entry);
       return reply(
         `review-gate: worker ${workerId} 还没有新消息（等了 ${Math.round((deps.now() - started) / 1000)}s）。\n` +
         (entry
@@ -606,10 +664,7 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
 function onlineWorkerId(deps: WorkerToolDeps, registry: WorkerRegistry): string | undefined {
   const ids = Object.keys(registry);
   if (ids.length === 1) return ids[0];
-  const live = ids.filter((id) => {
-    const paneId = registry[id]!.paneId;
-    return paneId !== undefined && deps.paneAlive(paneId);
-  });
+  const live = ids.filter((id) => ownedPaneAlive(deps, registry[id]));
   return live.length === 1 ? live[0] : undefined;
 }
 

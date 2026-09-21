@@ -637,6 +637,7 @@ import {
   effectiveAgentsConfig,
   applyAgentConfigLayer,
   loadRegistry,
+  validateSpec,
   KNOWN_AGENTS,
   KNOWN_THINKING_LEVELS,
   projectAgentIdentity,
@@ -9893,6 +9894,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       agents: () => {
         const cfg = freshProjectConfig(activeRepoRoot.current);
         return effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject).map;
+      },
+      // The registry check the renderer used to do for every role — worker
+      // presets never reach `applyAgentConfigLayer` (it filters them), so this
+      // is where their specs get validated instead of at pane-open time.
+      validateModel: (spec) => {
+        const verdict = validateSpec(loadRegistry(), spec);
+        return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason };
       },
       tmuxServer: () => tmuxServerFrom(process.env),
       now: () => Date.now(),
