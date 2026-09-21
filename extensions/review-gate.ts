@@ -6596,12 +6596,17 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   let stagesAsked = false;
   async function ensureLoopStagesFor(ctx: unknown): Promise<void> {
     if (stagesAsked || state.stages !== undefined) return;
-    stagesAsked = true;
+    // THE ELIGIBILITY CHECK COMES FIRST (reviewer Nit, 2026-09-22): setting the
+    // once-per-session flag before it would spend the only chance on a session
+    // that could not be asked — an explore/edit session promoted to loop later
+    // would never see the fallback box, and only an explicit
+    // `choose_loop_stages` call would exist.
     if (stagesOffered({
       mode: state.taskMode,
       judge: isJudgePane(),
       orchestrated: orchestrationIdFromEnv(process.env) !== undefined,
     }) !== undefined) return;
+    stagesAsked = true;
     await ensureLoopStages(loopStageDeps, ctx);
   }
 
@@ -12145,11 +12150,21 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // RECORDED, never silent — the same rule the quality round's SKIP
       // follows. Written only when it actually changes: a completion call must
       // not rewrite the sidecar on every try.
-      if (st.acceptance?.status !== decision.status || st.acceptance.reason !== decision.reason) {
+      //
+      // THE REASON NAMES THE RELEVANT CAUSE (reviewer P2, 2026-09-22).
+      // `acceptanceDecision` writes DISABLED for BOTH ways the gate can be off,
+      // and its copy names the orchestration rule — which is the wrong story in
+      // a standalone session whose USER switched the acceptance stage off. The
+      // STATUS stays the module's (semantics untouched); only the recorded
+      // reason is composed here, where the switch is known.
+      const skippedReason = !stageIsOn("acceptance", root)
+        ? "验收环节已关闭（用户设定的环节开关）—— 跳过真实验收。"
+        : decision.reason;
+      if (st.acceptance?.status !== decision.status || st.acceptance.reason !== skippedReason) {
         st.acceptance = {
           status: decision.status,
           at: new Date().toISOString(),
-          reason: decision.reason,
+          reason: skippedReason,
         };
         persistRepo(ctx as unknown as ExtensionContext, root);
       }

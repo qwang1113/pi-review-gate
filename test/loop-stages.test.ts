@@ -43,6 +43,8 @@ import {
   type LoopStagesRecord,
 } from "../lib/loop-stages.ts";
 import { MULTI_UNAVAILABLE } from "../lib/multi-choice-dialog.ts";
+import { doProposeRestatement, type RestatementToolDeps } from "../lib/restatement.ts";
+import { doProposeLoopGoal, type GoalToolDeps } from "../lib/goal-tools.ts";
 import { emptyState, unmetRequirements, type GateState } from "../lib/gate-state.ts";
 import { acceptanceDecision, acceptanceGateOpen } from "../lib/acceptance-round.ts";
 import { buildGateWidget } from "../lib/ui-widget.ts";
@@ -398,6 +400,86 @@ test("the hook's stage list is the TS module's list (drift guard)", () => {
   const names = match[1]!.split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
   assert.deepEqual(names, [...LOOP_STAGES],
     "a stage added on the TS side must be added to the hook — otherwise its sidecar reads as corrupt");
+});
+
+test("goal off: both contract tools short-circuit BEFORE any other step", async () => {
+  // Exit criterion 3 (`goal 关 ⇒ 不跑 goal 审计、不弹批准框、免需求反述`) rests on
+  // these two early returns, and the deps below make it behavioural: every
+  // member except the state read THROWS, so reaching one is a failed test
+  // rather than a detail nobody asserts (reviewer P2, 2026-09-22).
+  const boom = (name: string) => () => { throw new Error(`must not be reached: ${name}`); };
+  const depsFor = (record: LoopStagesRecord | undefined) => {
+    const st = { ...emptyState("test-session", 10), ...(record === undefined ? {} : { stages: record }) };
+    return {
+      primaryRepoRoot: () => "/repo",
+      cwd: () => "/repo",
+      stateFor: () => st,
+      persist: boom("persist"),
+      log: boom("log"),
+      runGoalAudit: async () => { throw new Error("must not be reached: runGoalAudit"); },
+      showToUser: boom("showToUser"),
+      askChoice: async () => { throw new Error("must not be reached: askChoice"); },
+      askEitherSide: async () => { throw new Error("must not be reached: askEitherSide"); },
+      loopGoalPath: () => "/repo/.pi/loop-goal.md",
+      loopGoalRelPath: ".pi/loop-goal.md",
+      findProjectAgent: boom("findProjectAgent"),
+      writeGoalFile: boom("writeGoalFile"),
+    };
+  };
+
+  const off = stagesWith(["goal"]);
+  const restated = await doProposeRestatement(
+    depsFor(off) as unknown as RestatementToolDeps,
+    { restatement: "whatever the agent wrote", station: "commit" },
+    { hasUI: true },
+  );
+  assert.match(restated.content[0]!.text, /goal 环节已关闭/);
+  assert.notEqual(restated.isError, true, "the stage is off: this is an answer, not a refusal");
+
+  const proposed = await doProposeLoopGoal(
+    depsFor(off) as unknown as GoalToolDeps,
+    { goal: "# any draft" },
+    { hasUI: true },
+    undefined,
+    undefined,
+  );
+  assert.match(proposed.content[0]!.text, /goal 环节已关闭/);
+  assert.equal(proposed.details?.approved, false, "no approval is invented for a switched-off stage");
+
+  // AND THE STAGE BEING ON IS STILL THE ORDINARY PATH: the same untouchable
+  // deps now reach the draft checks and refuse the draft, which is what proves
+  // the early return is keyed on the switch and not on the deps being stubs.
+  const on = await doProposeRestatement(
+    depsFor(stagesWith([])) as unknown as RestatementToolDeps,
+    { restatement: "太短了", station: "commit" },
+    { hasUI: true },
+  );
+  assert.equal(on.isError, true, "a stage that is ON evaluates the draft exactly as before");
+});
+
+test("the fallback keeps its one chance for a session that can actually be asked", () => {
+  // Reviewer Nit: `stagesAsked` used to be set BEFORE the eligibility check, so
+  // an explore/normal edit spent it and a later promotion to loop never saw the
+  // box.
+  const at = SRC.indexOf("async function ensureLoopStagesFor(");
+  assert.ok(at > 0, "the fallback exists");
+  const body = SRC.slice(at, at + 1000);
+  assert.ok(body.indexOf("stagesOffered(") < body.indexOf("stagesAsked = true"),
+    "the refusal is checked before the once-per-session flag is spent");
+});
+
+test("the body says what a released goal stage does to the delivery station", () => {
+  // Reviewer P2: the station ceiling comes from the goal, and the checkbox is
+  // where the user reads what they are switching off.
+  assert.match(LOOP_STAGES_BODY, /交付站点上限也随之消失/);
+});
+
+test("an acceptance round the USER switched off records that reason, not the orchestration one", () => {
+  // Reviewer P2: `acceptanceDecision` writes DISABLED for both causes and its
+  // copy names the orchestration rule; the status stays the module's, the
+  // recorded reason is composed where the switch is known.
+  assert.match(SRC, /const skippedReason = !stageIsOn\("acceptance", root\)/);
+  assert.match(SRC, /reason: skippedReason,/);
 });
 
 // ---------------------------------------------------------------------------

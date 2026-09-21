@@ -83,7 +83,8 @@ export const LOOP_STAGES_TITLE = "review-gate: 本轮运行哪些环节？";
 export const LOOP_STAGES_BODY: string = [
   "默认五项全部勾选＝今天的行为。空格勾选 / 取消 · ↑↓ 移动 · 回车确认 · esc 关闭。",
   "不勾的环节，门禁在它**每一个卡点**处直接放行（不再询问、不再拦截）：",
-  "  · goal 关 ⇒ 不做需求反述、不跑 goal 审计、不弹批准框，编辑与 ship 不再因「无已批准 goal」被拦；",
+  "  · goal 关 ⇒ 不做需求反述、不跑 goal 审计、不弹批准框，编辑与 ship 不再因「无已批准 goal」被拦；" +
+  "交付站点上限也随之消失（站点来自 goal，没有 goal 就没有它）；",
   "  · 功能审查关 ⇒ 不派 reviewer，ship 时代码审查视为满足；",
   "  · 质量审查关 ⇒ 不派 quality-auditor（取消矩阵里不再有这一方）；",
   "  · 真实验收关 ⇒ declare_done 不再派验收轮；",
