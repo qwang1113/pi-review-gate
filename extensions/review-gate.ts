@@ -12223,12 +12223,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         persistRepo(ctx as unknown as ExtensionContext, root);
       }
       // RECORDED IS NOT ENOUGH FOR THIS ONE (quality round P2, 2026-09-22): the
-      // sidecar is a file nobody reads, and a skip that releases a gate the
-      // user left ON has to say so where the outcome is read. The OTHER two
-      // skips are this design's steady state (no code, stage off) and stay
-      // quiet — this one means “acceptance is ON, the round has code, and
-      // there is no approved plan to verify it against”, which the user has to
-      // act on: approve a goal carrying「真实验收方案」, or switch the stage off.
+      // sidecar is a file nobody reads, and a skip has to say so where the
+      // outcome is read. The two STEADY-STATE skips never enter here — “no
+      // code” and “the stage switched off” are excluded by the condition below
+      // — so what is left is the class a user has to act on: an acceptance gate
+      // he left ON, a round WITH code, released anyway (no approved plan, the
+      // goal's own exemption, or a dispatcher-marked session). The note carries
+      // `skippedReason`, the module's word for THIS skip.
       if (stageIsOn("acceptance", root) && st.hasCodeChange) {
         notes.push(skippedReason);
         // THE LINE STAYS GENERIC, THE REASON RIDES THE NOTE (reviewer Nit,
