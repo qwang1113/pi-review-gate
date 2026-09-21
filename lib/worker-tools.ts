@@ -205,20 +205,32 @@ function targetParts(
 }
 
 /**
- * Is this worker's pane still OURS?
+ * May we treat this pane id as OURS?
  *
- * The same ownership rule `worker_close` applies (quality round P2,
- * 2026-09-21): a pane id is minted by a tmux SERVER, so after a restart `%42`
- * may belong to somebody else's session. Close already refuses on a mismatch,
- * and the three OTHER readers of liveness — submit's "is it still running",
- * wait's gone test, and the default-worker pick — must give the same answer,
- * or the gate would append a task to (or wait on) a stranger's pane.
+ * ONE implementation, because FOUR places ask the same question (reviewer P1,
+ * 2026-09-21): `worker_close` before it kills, and submit / wait / the
+ * default-worker pick before they trust liveness. Two copies of "the recorded
+ * server must match, and a recorded server we cannot RE-READ is not a match"
+ * is exactly how one of them drifts back to trusting a stranger's pane — the
+ * pane id a tmux server mints can be re-issued to somebody else after a
+ * restart.
+ *
+ * An entry with NO recorded server (written before the field existed) skips
+ * the check: there is nothing to disagree with.
+ */
+export function paneIsOurs(entry: WorkerEntry | undefined, currentServer: string | undefined): boolean {
+  if (!entry || entry.paneId === undefined) return false;
+  return entry.tmuxServer === undefined || entry.tmuxServer === currentServer;
+}
+
+/**
+ * Is this worker's pane still alive AND ours? — the liveness question, asked
+ * by submit / wait / the default-worker pick; `paneIsOurs` is shared with the
+ * kill path so all four give the same answer.
  */
 function ownedPaneAlive(deps: WorkerToolDeps, entry: WorkerEntry | undefined): boolean {
-  if (!entry || entry.paneId === undefined) return false;
-  const current = deps.tmuxServer?.();
-  if (entry.tmuxServer !== undefined && entry.tmuxServer !== current) return false;
-  return deps.paneAlive(entry.paneId);
+  if (!paneIsOurs(entry, deps.tmuxServer?.())) return false;
+  return deps.paneAlive(entry!.paneId!);
 }
 
 /** Mint the next free worker id (`worker-1`, `worker-2`, …). */
@@ -379,11 +391,15 @@ async function waitForInstructAck(
       // once the instruction was actually applied — so `.find` always returned
       // the `received` record and this predicate could never be true. Every
       // "injected" the caller was ever told about came from... nowhere; the
-      // helper simply always answered "not confirmed". `findLast` reads the
-      // stage the instruction actually reached.
-      const ack = readChannel(deps.channelIO, path).records.findLast(
+      // helper simply always answered "not confirmed".
+      //
+      // Written as filter + index rather than `findLast`/`at(-1)` on purpose
+      // (reviewer P2): those are recent additions, and this path runs on
+      // whatever Node the user's pi started with.
+      const acks = readChannel(deps.channelIO, path).records.filter(
         (r) => r.kind === "instruct-ack" && (r as { instructId?: unknown }).instructId === instructId,
-      ) as { delivered?: unknown; stage?: unknown } | undefined;
+      );
+      const ack = acks.length > 0 ? (acks[acks.length - 1] as { delivered?: unknown; stage?: unknown }) : undefined;
       if (ack) {
         return { injected: ack.delivered === true && (ack.stage === undefined || ack.stage === "injected") };
       }
@@ -737,7 +753,7 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
   // information, and after a tmux restart that pane id may belong to somebody
   // else's session entirely. Only an exact match proceeds.
   const tmuxServer = deps.tmuxServer?.();
-  if (entry.tmuxServer !== undefined && entry.tmuxServer !== tmuxServer) {
+  if (!paneIsOurs(entry, tmuxServer)) {
     return fail(
       `review-gate: 拒绝关闭 worker ${workerId} —— 它登记在 tmux server ${entry.tmuxServer}，` +
       `当前读到的是 ${tmuxServer ?? "读不到"}。那个 pane id 现在可能属于别的会话，关它就是误伤。` +

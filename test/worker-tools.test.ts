@@ -371,6 +371,30 @@ test("a resume after close keeps the channel AND the consumed-report cursor", as
     "an already-consumed report is not re-delivered after a close+resume");
 });
 
+test("an UNREADABLE server does not make a pane ours — the ownership rule is the same one close uses", async () => {
+  // `ownedPaneAlive`'s guard is `entry.tmuxServer !== undefined && entry.tmuxServer !== current`:
+  // a RECORDED server that no longer matches — including "cannot be read at
+  // all", where `current` is undefined — is not ours. Only an entry that never
+  // recorded a server (written before the field existed) skips the check, and
+  // that is exactly what `worker_close` does with the same data.
+  const first = makeWorld({ tmuxServer: "srv-1" });
+  await first.call("worker_submit", { task: "第一次" });
+  assert.equal(first.registry()["worker-1"]?.tmuxServer, "srv-1");
+
+  // Same registry, same channel, same LIVE pane id — but this session cannot
+  // read which server it is on.
+  const moved = makeWorld({ openerId: "%999", io: first.io, alive: true });
+  moved.saveRegistry(first.registry());
+  const waited = await moved.call("worker_wait", { workerId: "worker-1", timeoutMs: 0 });
+  assert.notEqual((waited.details as { kind?: string })?.kind, "report",
+    "a pane we cannot prove is ours is not treated as ours");
+  assert.equal((waited.details as { kind?: string; alive?: boolean })?.alive, false);
+
+  const submitted = await moved.call("worker_submit", { task: "追加", workerId: "worker-1" });
+  assert.equal(submitted.isError, undefined, moved.text(submitted));
+  assert.equal(moved.opened.length, 1, "the append did NOT ride on the unprovable pane — it re-opened the session");
+});
+
 test("a resume keeps the recorded tmux server when the current one cannot be read", async () => {
   // `worker_close` refuses to kill when the recorded server disagrees with the
   // current one — so dropping the field on a resume would silently remove that
