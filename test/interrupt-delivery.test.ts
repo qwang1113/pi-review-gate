@@ -20,7 +20,9 @@ import { fileURLToPath } from "node:url";
 import {
   INTERRUPT_IDLE_WAIT_MS,
   INTERRUPT_POLL_MS,
+  ROUND_SILENT_MS,
   deliverInterrupt,
+  roundLooksUnstarted,
   waitForIdle,
 } from "../lib/interrupt-delivery.ts";
 
@@ -114,6 +116,29 @@ test("waitForIdle returns how long it waited, and gives up at the bound", async 
   const gave = await waitForIdle(stuck);
   assert.equal(gave.idle, false);
   assert.ok(gave.waitedMs >= 300, "and it stops when the clock runs out");
+});
+
+test("a round that never touched its transcript LOOKS unstarted — and that is only a REPORT", () => {
+  // Goal 6(d). A heartbeat proves a PROCESS, not a round: the 552-second
+  // freeze had two live panes whose gates were reporting happily while no
+  // agent turn was running. The transcript is the one reading that moves only
+  // when the agent works.
+  const nowMs = 10_000_000;
+  const quiet = nowMs - ROUND_SILENT_MS - 1;
+  assert.equal(roundLooksUnstarted({ nowMs, hasReport: false, transcriptActivityAtMs: quiet }), true);
+  assert.equal(roundLooksUnstarted({ nowMs, hasReport: false, transcriptActivityAtMs: nowMs - 1_000 }), false,
+    "a transcript written seconds ago is work in progress, not silence");
+  assert.equal(roundLooksUnstarted({ nowMs, hasReport: true, transcriptActivityAtMs: quiet }), false,
+    "a round that reported is a round that ran");
+  // FAIL-OPEN on a missing reading: information missing is not evidence.
+  assert.equal(roundLooksUnstarted({ nowMs, hasReport: false }), false);
+  // The dispatch is a FLOOR under the transcript, never a substitute for it:
+  // a transcript whose last line predates this round must not look silent from
+  // the start of time.
+  assert.equal(
+    roundLooksUnstarted({ nowMs, hasReport: false, dispatchedAtMs: nowMs - 1_000, transcriptActivityAtMs: 1 }),
+    false,
+  );
 });
 
 test("the bounds are the ones the design states", () => {

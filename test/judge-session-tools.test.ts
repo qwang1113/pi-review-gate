@@ -927,7 +927,16 @@ test("judge_wait: a leftover report keeps the round open and is named in the rep
   assert.match(text, /仍在等/, "…and says the round is still open");
   assert.doesNotMatch(text, /结论：READY/, "a verdict nobody recorded is never displayed as this round's");
   assert.equal(f.calls.some((c2) => c2.startsWith("settleRound")), false, "and nothing is recorded");
-  assert.deepEqual(reply.details, { done: false, reason: "pending", role: "reviewer", hasVerdict: false });
+  assert.deepEqual(reply.details, {
+    done: false,
+    reason: "pending",
+    role: "reviewer",
+    hasVerdict: false,
+    // Goal 6(d), 2026-09-21: the receipt also answers "did this round ever
+    // start" — false here because this fixture reports no transcript reading
+    // at all, which is fail-open (information missing, not evidence).
+    unstarted: false,
+  });
 });
 
 

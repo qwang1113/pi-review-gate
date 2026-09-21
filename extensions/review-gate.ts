@@ -9723,6 +9723,45 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     },
     channelIO: () => channelIO,
     channelHome: () => undefined,
+    // THE ONE READING A HEARTBEAT CANNOT GIVE (goal 6(d), 2026-09-21): the
+    // judge's transcript mtime. A live pane whose gate is reporting proves a
+    // PROCESS; only writes to the transcript prove a TURN is running — which
+    // is exactly the difference the 552-second freeze fell into.
+    transcriptActivityAt: (child) => {
+      if (!child.sessionDir) return undefined;
+      try {
+        let newest: number | undefined;
+        for (const name of readdirSync(child.sessionDir)) {
+          if (!name.endsWith(".jsonl")) continue;
+          try {
+            const at = statSync(pathJoin(child.sessionDir, name)).mtimeMs;
+            if (newest === undefined || at > newest) newest = at;
+          } catch { /* one unreadable file is not a verdict on the rest */ }
+        }
+        return newest;
+      } catch {
+        return undefined;
+      }
+    },
+    // THE FLOOR UNDER THAT READING: a fresh round on a REUSED lane has a
+    // transcript whose last line predates the dispatch, so without this the
+    // silence would be measured from the start of time. The newest `instruct`
+    // on the judge's channel IS this round (that is what dispatched it).
+    roundDispatchedAt: (child) => {
+      try {
+        const caller = callerIdentity();
+        if (caller === undefined) return undefined;
+        const target = judgeChannelTarget(caller, child.judgeId);
+        const path = channelPathFor(target.orchestrationId, target.childId, target.home);
+        const instructs = readChannel(channelIO, path).records.filter((r) => r.kind === "instruct");
+        const last = instructs.length > 0 ? instructs[instructs.length - 1] : undefined;
+        if (last === undefined) return undefined;
+        const at = Date.parse((last as { at?: string }).at ?? "");
+        return Number.isFinite(at) ? at : undefined;
+      } catch {
+        return undefined;
+      }
+    },
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),

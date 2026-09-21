@@ -83,6 +83,7 @@ import { buildStandardReport, type OpenQuestionBrief } from "./judge-report.ts";
 import type { ModelEvent } from "./model-health.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import { pollUntil } from "./poll-wait.ts";
+import { ROUND_SILENT_MS, roundLooksUnstarted } from "./interrupt-delivery.ts";
 import { parseStream } from "./review-stream.ts";
 
 
@@ -149,6 +150,24 @@ export interface JudgeSessionToolDeps {
   /** Opener registry (extension-owned) and its persistence. */
   hierarchy(): HierarchyTable;
   saveHierarchy(next: HierarchyTable): void;
+  /**
+   * When this judge's transcript was last written, in ms — the ONE reading
+   * that moves only when the agent actually works (`roundLooksUnstarted`,
+   * goal 6(d), 2026-09-21). Undefined when unreadable ⇒ fail-open: a missing
+   * reading is information missing, never evidence of silence.
+   */
+  transcriptActivityAt?(child: JudgeChildRecord): number | undefined;
+  /**
+   * When THIS round was dispatched, in ms — the FLOOR under the transcript
+   * reading (goal 6(d), reviewer P1, 2026-09-21).
+   *
+   * Without it a judge whose transcript was last written before this round
+   * (which is every fresh dispatch on a reused lane) looks silent from the
+   * start of time and gets reported as "never started" the instant it is
+   * asked. The reading is the newest `instruct` on the judge's channel — the
+   * record that actually carried this round. Undefined ⇒ fail-open.
+   */
+  roundDispatchedAt?(child: JudgeChildRecord): number | undefined;
   /** Locate a pane judge by ROLE (preferred) or by judge id. */
   findChild(root: string, role: string | undefined, judgeId: string | undefined): JudgeChildRecord | undefined;
   /**
@@ -1020,14 +1039,43 @@ export async function doWait(
       { done: true, reason: "finding", role: child.role, hasVerdict: false },
     );
   }
+  // “DID THIS ROUND EVER START?” (goal 6(d), 2026-09-21).
+  //
+  // A heartbeat proves a PROCESS, not a round: the 552-second freeze
+  // (01a0c22c) had two live panes whose gates were reporting happily while no
+  // agent turn was running. The transcript is the one reading that moves only
+  // when the agent works, so a round that dispatched a while ago, has produced
+  // no report, and has not touched its transcript is reported as LOOKING
+  // unstarted — with the action that resolves it, never by taking it.
+  const silent = roundLooksUnstarted({
+    ...(deps.roundDispatchedAt === undefined
+      ? {}
+      : { ...(() => {
+            const at = deps.roundDispatchedAt!(child);
+            return at === undefined ? {} : { dispatchedAtMs: at };
+          })() }),
+    ...(deps.transcriptActivityAt === undefined
+      ? {}
+      : { ...(() => {
+            const at = deps.transcriptActivityAt!(child);
+            return at === undefined ? {} : { transcriptActivityAtMs: at };
+          })() }),
+    nowMs: Date.now(),
+    hasReport: false,
+  });
   return reply(
     buildStandardReport({
       ...base,
       reason: "pending",
       ...(observation.stateLine === undefined ? {} : { stateLine: observation.stateLine }),
       waitedSeconds,
-    }),
-    { done: false, reason: "pending", role: child.role, hasVerdict: false },
+    }) +
+      (silent
+        ? `\n\n⚠️ 本轮看上去**从未开跑**：派发至今没有任何 transcript 活动、也没有 report（阈值 ${Math.round(ROUND_SILENT_MS / 60_000)} 分钟）。\n` +
+          `pane ${child.paneId ?? "（无记录）"} 还活着，但心跳只能证明进程在、证明不了这一轮在跑。\n` +
+          "建议：`judge_submit({ fresh: true })` 重开这一轮（门禁不会自动重派 —— 自动重派既掩盖缺陷，也可能同时跑两轮）。"
+        : ""),
+    { done: false, reason: "pending", role: child.role, hasVerdict: false, unstarted: silent },
   );
 }
 

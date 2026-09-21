@@ -97,6 +97,61 @@ export interface InterruptDeliveryResult {
 /** `sleep` that a test can replace; the default is the real one. */
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
 
+// ---------------------------------------------------------------------------
+// "THE ROUND NEVER STARTED" — silence, told apart from work
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a dispatched round may produce NOTHING before it looks unstarted.
+ *
+ * Measured case this exists for (01a0c22c): two judges sat frozen for 552
+ * seconds with `judge_wait` polling an empty channel. The pane was alive and
+ * its gate was heartbeating — a heartbeat proves a PROCESS, not a round — so
+ * every available reading said "working" while nothing was happening at all.
+ * The transcript is the one thing that moves only when the agent actually
+ * works.
+ */
+export const ROUND_SILENT_MS = 180_000;
+
+/** Everything the "did this round ever start" question needs, as readings. */
+export interface RoundSilenceFacts {
+  /** When the round was dispatched, ms (the registry entry's `dispatchedAt`). */
+  dispatchedAtMs?: number;
+  /** Last write to the judge's transcript, ms — undefined when unreadable. */
+  transcriptActivityAtMs?: number;
+  /** Now, ms. */
+  nowMs: number;
+  /** Has this round produced a report (or a settlement)? */
+  hasReport: boolean;
+}
+
+/**
+ * Does this round look like it never started?
+ *
+ * THE ANSWER IS A SUGGESTION, NEVER AN ACTION: the caller says it out loud in
+ * its receipt (with the pane and the elapsed time) and leaves the decision —
+ * `judge_submit({ fresh: true })` — to the agent. Re-dispatching by itself
+ * would hide the defect AND risk two rounds running at once.
+ *
+ * Fail-open on every missing reading, like every other liveness judgement in
+ * this gate: an unreadable transcript is missing INFORMATION, not evidence of
+ * silence.
+ */
+export function roundLooksUnstarted(facts: RoundSilenceFacts): boolean {
+  if (facts.hasReport) return false;
+  // NO READING ⇒ NO VERDICT (fail-open, like every other liveness judgement in
+  // this gate): an unreadable transcript is missing INFORMATION, not evidence
+  // of silence.
+  const reference = facts.transcriptActivityAtMs ?? facts.dispatchedAtMs;
+  if (reference === undefined) return false;
+  // A transcript that moved AFTER the dispatch is activity; the dispatch is
+  // only ever a FLOOR under it (otherwise a transcript whose last line predates
+  // this round would look silent from the start of time rather than from the
+  // start of the round).
+  const start = facts.dispatchedAtMs === undefined ? reference : Math.max(reference, facts.dispatchedAtMs);
+  return facts.nowMs - start >= ROUND_SILENT_MS;
+}
+
 /**
  * Wait until `isIdle()` is true, or until the window runs out.
  *
