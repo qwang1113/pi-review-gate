@@ -64,6 +64,11 @@ function makeWorld(opts: {
   const killed: string[] = [];
   const logs: string[] = [];
   const alive = opts.alive ?? true;
+  // A CLOCK THE SLEEPS MOVE. Every wait loop in the module is bounded by
+  // `now() - started >= budget`, so a frozen clock plus a no-op sleep is an
+  // infinite loop — which is exactly what the first version of this fixture
+  // did, and it was a real test hang rather than a missing assertion.
+  let clock = NOW;
 
   const deps: WorkerToolDeps = {
     ownPane: () => "%1",
@@ -85,8 +90,8 @@ function makeWorld(opts: {
     readRegistry: () => registry,
     saveRegistry: (next) => { registry = next; },
     agents: () => opts.agents ?? agentsWith({ worker: workerPreset() }),
-    now: () => NOW,
-    sleep: async () => { /* the wait loops are driven by the channel, not the clock */ },
+    now: () => clock,
+    sleep: async (ms: number) => { clock += ms; },
     log: (m) => logs.push(m),
   };
 

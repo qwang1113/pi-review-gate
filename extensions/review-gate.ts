@@ -73,7 +73,12 @@ import {
   STRATEGIC_RESET_CHECKLIST,
   TASK_TEXT_MARKER,
 } from "../lib/constants.ts";
-import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "../lib/agent-directives.ts";
+import {
+  ROUND_NOTE_HINT,
+  SCOPE_ESCALATION_PROTOCOL,
+  SETTLED_TOOL_REMINDER,
+  WAIT_DISCIPLINE_HINT,
+} from "../lib/agent-directives.ts";
 
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { armingFromFacts, couldReconcile, reconcileArming } from "../lib/gate-arming.ts";
@@ -277,6 +282,7 @@ import {
   serializeWorkerRegistry,
   workerSessionDirName,
   WORKER_REGISTRY_RELPATH,
+  WORKER_SESSION_ROOT,
 } from "../lib/worker-pane.ts";
 import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
@@ -9845,11 +9851,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       repoRoot: () => activeRepoRoot.current,
       channelIO,
       channelHome: () => undefined,
-      workDirFor: (workerId) => pathJoin(activeRepoRoot.current, ".pi", "worker-sessions", workerId),
+      workDirFor: (workerId) => pathJoin(activeRepoRoot.current, ".pi", WORKER_SESSION_ROOT, workerId),
       // THE OTHER HALF OF THE RESUME KEY: the session id alone finds nothing
       // if the transcript directory is not the one it was written to.
+      // NOT under `.pi/judge-sessions/` (reviewer P2, 2026-09-21): that root is
+      // swept by the judge lifecycle, whose staleness rule matches a directory
+      // name ending in `-<8 hex>` and is NOT in the judge registry — and a
+      // worker id like `abc12345` produces exactly that shape, so its
+      // transcript directory would be removed the next time the sweep ran.
       sessionDirFor: (workerId) =>
-        pathJoin(activeRepoRoot.current, ".pi", "judge-sessions", workerSessionDirName(workerId), "sessions"),
+        pathJoin(activeRepoRoot.current, ".pi", WORKER_SESSION_ROOT, workerSessionDirName(workerId), "sessions"),
       writeFile: (path, content) => {
         try {
           mkdirSync(pathDirname(path), { recursive: true });
@@ -9881,6 +9892,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         const cfg = freshProjectConfig(activeRepoRoot.current);
         return effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject).map;
       },
+      tmuxServer: () => tmuxServerFrom(process.env),
       now: () => Date.now(),
       log,
     });
@@ -13532,7 +13544,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const problems = gateArmed
       ? unmetRequirements(state, fp!.digest, fp!.unavailable, { requireDocSync: projectConfig.docSync })
       : [];
-    if (state.taskMode === "explore") {
+    // A WORKER IS NOT AN EXPLORE SESSION (2026-09-21). The worker pane carries
+    // `RG_GATE_MODE=explore` so it does not classify itself into the loop, but
+    // the explore prompt is written for an agent that owns a task — it says
+    // 「任务满意完成即可自行 declare_done」 and 「若任务变成交付性工作，先
+    // set_gate_mode("loop")」, while a worker's own system prompt says 「用
+    // worker_report 交一次，然后停下」. Two contradicting closing instructions in
+    // one prompt is how a worker ends a turn without reporting (reviewer P2).
+    if (state.taskMode === "explore" && !readWorkerSideEnv(process.env)) {
       return {
         systemPrompt:
           systemPrompt +
@@ -13593,7 +13612,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // never rendered them. `gateArmed` gates the unmet-problems list below,
     // not the directives block.
     const loopDirectives =
-      state.taskMode === "loop" ? "\n\n" + MODE_REGISTRY.loop.prompt : "";
+      state.taskMode === "loop"
+        ? "\n\n" + MODE_REGISTRY.loop.prompt +
+          // TOP-LEVEL ONLY (2026-09-21): the shared loop block reaches
+          // orchestration children as well, and a child's
+          // `set_gate_mode("orchestrator")` is refused mechanically — telling
+          // it to ask the user to switch would send it to a dead end. The
+          // rule is appended here, where the session that can act on it gets
+          // it (lib/gate-modes.ts explains why the block itself omits it).
+          (isOrchestrationChild() ? "" : "\n\n" + SCOPE_ESCALATION_PROTOCOL)
+        : "";
     systemPrompt += loopDirectives;
 
     // MODE-UNDECIDED early return (2026-08-30): the Review Gate block below

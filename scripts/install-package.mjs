@@ -308,19 +308,13 @@ async function applyGlobalModelConfig() {
     const source = readFileSync(join(ROOT, "lib", "model-config.ts"), "utf8");
     const js = (await import("node:module")).stripTypeScriptTypes(source, { mode: "transform", sourceMap: false });
     const dataUrl = `data:text/javascript;base64,${Buffer.from(js, "utf8").toString("base64")}`;
-    const { effectiveAgentsConfig, applyAgentConfigLayer, loadRegistry, isWorkerRoleName } = await import(dataUrl);
+    const { effectiveAgentsConfig, applyAgentConfigLayer, loadRegistry } = await import(dataUrl);
     const { map, diagnostics } = effectiveAgentsConfig(agents, undefined);
     for (const d of diagnostics) log(`  ⚠ model config: ${d}`);
-    // WORKER PRESETS ARE NOT RENDERED (2026-09-21). The render layer exists so a
-    // role's MODEL CHAIN can be read back out of `agents/<role>.md`; a worker's
-    // chain is read straight from the section it was configured in
-    // (`lib/worker-tools.ts` `resolveWorkerRole`) and it has no prompt file to
-    // render into. Passing one through here is how the install grew an
-    // "upstream file missing: agents/worker.md" warning for a file that should
-    // never have been expected.
-    const renderable = Object.fromEntries(Object.entries(map).filter(([name]) => !isWorkerRoleName(name)));
+    // Worker presets are filtered INSIDE the renderer (`applyAgentConfigLayer`
+    // in lib/model-config.ts): there are three call sites and one rule.
     const res = applyAgentConfigLayer({
-      agents: renderable,
+      agents: map,
       targetDir: AGENTS_DST,
       sourceDir: join(ROOT, "agents"),
       registry: loadRegistry(),

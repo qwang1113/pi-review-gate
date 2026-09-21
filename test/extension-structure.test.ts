@@ -1558,8 +1558,15 @@ test("loop directives: decision table injects on every turn, incl. unarmed first
   assert.ok(exploreAt > 0, "explore branch must inject the registry explore prompt too");
   assert.ok(exploreAt < loopAt, "the explore early-return injection sits before the loop one");
   // The registry wires the table itself: loop unconditionally, explore with note.
-  assert.ok(GATE_MODES_SRC.includes("buildAgentDirectives()"), "registry loop prompt carries the table");
+  assert.ok(GATE_MODES_SRC.includes("buildAgentDirectives(undefined, { scopeEscalation: false })"),
+    "registry loop prompt carries the table");
   assert.ok(GATE_MODES_SRC.includes('buildAgentDirectives("explore")'), "registry explore prompt carries the table");
+  // THE SCOPE-ESCALATION ROW IS TOP-LEVEL ONLY (2026-09-21): the shared loop
+  // block also reaches orchestration CHILDREN, whose `set_gate_mode("orchestrator")`
+  // the gate refuses — a rule there would send them to a call that cannot
+  // succeed. It is appended where the session that can act on it gets it.
+  assert.match(SRC, /isOrchestrationChild\(\) \? "" : "\\n\\n" \+ SCOPE_ESCALATION_PROTOCOL/,
+    "the scope-escalation row is appended only where it can be acted on");
   // The undecided-clean early return (added round 3) must sit AFTER the
   // injection, so a loop session never loses the decision table: loop mode
   // falls through regardless of gateArmed.

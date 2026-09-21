@@ -456,12 +456,21 @@ export function mergeTaskProgress(
 /**
  * Move ONE task, returning a NEW plan (the caller persists it) or the reason
  * the move was refused. Never mutates its input.
+ *
+ * NO `note` OPTION (2026-09-21). There used to be one, and it wrote straight
+ * onto the task — which since 2026-09-17 is the TASK BOOK. So a status change
+ * carried a reason and silently REPLACED the assignment the plan had been
+ * audited and approved for, and `orchestrator_spawn`'s fallback ("use the task
+ * book when no `task` was typed") then handed that remark to a child session
+ * as its first message: measured, a re-dispatched child opened with 「上一个
+ * 子会话已经不在了（pane 消失或已关闭）…」 instead of its assignment. A status
+ * reason is a log line; the field has exactly one writer (`write`).
  */
 export function applyTaskStatus(
   plan: OrchestratorPlan,
   taskId: string,
   to: TaskStatus,
-  opts: { note?: string; now?: string } = {},
+  opts: { now?: string } = {},
 ): { ok: true; plan: OrchestratorPlan } | { ok: false; reason: string } {
   const task = plan.tasks.find((t) => t.id === taskId);
   if (!task) return { ok: false, reason: `plan 里没有任务 "${taskId}"` };
@@ -483,9 +492,7 @@ export function applyTaskStatus(
       return { ok: false, reason: `任务 "${taskId}" 的前置任务尚未完成：${blockers.join(", ")}` };
     }
   }
-  const tasks = plan.tasks.map((t) =>
-    t.id === taskId ? { ...t, status: to, note: opts.note ?? t.note } : t,
-  );
+  const tasks = plan.tasks.map((t) => (t.id === taskId ? { ...t, status: to } : t));
   return { ok: true, plan: { ...plan, tasks, updatedAt: opts.now ?? new Date().toISOString() } };
 }
 

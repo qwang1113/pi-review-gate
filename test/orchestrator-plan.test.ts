@@ -192,13 +192,17 @@ test("applyTaskStatus refuses to start a task whose prerequisites are unfinished
   if (!refused.ok) assert.match(refused.reason, /前置任务尚未完成/);
 });
 
-test("a legal move returns a NEW plan and records the note", () => {
+test("a legal move returns a NEW plan and does NOT touch the task book", () => {
+  // NO `note` OPTION ANY MORE (2026-09-21): the field IS the task book, so a
+  // status reason written here silently replaced the assignment the plan had
+  // been audited and approved for — and `orchestrator_spawn`'s fallback then
+  // handed that remark to a child as its first message.
   const plan = planOf();
-  const moved = applyTaskStatus(plan, "a", "running", { note: "child a-1", now: NOW });
+  const moved = applyTaskStatus(plan, "a", "running", { now: NOW });
   assert.ok(moved.ok);
   if (moved.ok) {
     assert.equal(moved.plan.tasks[0]!.status, "running");
-    assert.equal(moved.plan.tasks[0]!.note, "child a-1");
+    assert.equal(moved.plan.tasks[0]!.note, undefined, "a status change never writes the task book");
     assert.notEqual(moved.plan, plan);
     assert.equal(plan.tasks[0]!.status, "pending");
   }
@@ -214,8 +218,11 @@ test("mergeTaskProgress: a NOTE the rewrite supplies wins over the old one", () 
   // The measured defect: `write` carried a new note for an existing task and
   // the merge pinned the OLD one back, silently. Four consecutive rounds of
   // orchestration hit it; each project manager had to work around it.
-  const previous = applyTaskStatus(planOf(), "a", "running", { note: "旧备注", now: NOW });
-  assert.ok(previous.ok);
+  const previous = planOf({
+    tasks: [{ id: "a", title: "抽 plan 模块", note: "旧备注" }, { id: "b", title: "抽 tmux 模块" }],
+  });
+  const running = applyTaskStatus(previous, "a", "running", { now: NOW });
+  assert.ok(running.ok);
   const next = planOf({
     tasks: [
       { id: "a", title: "抽 plan 模块", note: "新备注" },
@@ -223,7 +230,7 @@ test("mergeTaskProgress: a NOTE the rewrite supplies wins over the old one", () 
     ],
   });
 
-  const merged = mergeTaskProgress(previous.ok ? previous.plan : undefined, next);
+  const merged = mergeTaskProgress(running.ok ? running.plan : undefined, next);
 
   assert.equal(merged.tasks[0]!.note, "新备注", "a note the caller supplied must land");
   assert.equal(merged.tasks[0]!.status, "running", "the STATUS is still execution's to own");
@@ -232,10 +239,13 @@ test("mergeTaskProgress: a NOTE the rewrite supplies wins over the old one", () 
 test("mergeTaskProgress: an OMITTED note still inherits the previous one", () => {
   // The other half of the same rule: a rewrite that simply does not mention
   // notes must not wipe the ones execution recorded.
-  const previous = applyTaskStatus(planOf(), "a", "running", { note: "旧备注", now: NOW });
-  assert.ok(previous.ok);
+  const previous = planOf({
+    tasks: [{ id: "a", title: "抽 plan 模块", note: "旧备注" }, { id: "b", title: "抽 tmux 模块" }],
+  });
+  const running = applyTaskStatus(previous, "a", "running", { now: NOW });
+  assert.ok(running.ok);
 
-  const merged = mergeTaskProgress(previous.ok ? previous.plan : undefined, planOf());
+  const merged = mergeTaskProgress(running.ok ? running.plan : undefined, planOf());
 
   assert.equal(merged.tasks[0]!.note, "旧备注");
   assert.equal(merged.tasks[0]!.status, "running");

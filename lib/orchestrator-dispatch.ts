@@ -233,7 +233,14 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   const nowIso = new Date(deps.now()).toISOString();
   const abandoned = abandonedRunningTask(deps.runtime(), task, panes.panes);
   if (abandoned.abandoned) {
-    const back = applyTaskStatus(plan!, taskId, "pending", { note: abandoned.note, now: nowIso });
+    // THE REASON GOES TO THE LOG, NOT ONTO THE TASK (2026-09-21).
+    // `plan.tasks[].note` is the TASK BOOK since 2026-09-17, and
+    // `orchestrator_spawn` falls back to it when no `task` was typed — so a
+    // remark written here was handed to the next child as its assignment
+    // (measured: a re-dispatched child opened with 「上一个子会话已经不在了…」
+    // instead of its task).
+    const back = applyTaskStatus(plan!, taskId, "pending", { now: nowIso });
+    if (back.ok) deps.log(`task ${taskId} 退回 pending：${abandoned.note}`);
     if (!back.ok) {
       return fail(`review-gate: 任务 "${taskId}" 卡在 running 且退不回 pending —— ${back.reason}`);
     }
@@ -409,11 +416,13 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     const failedPane = opened.paneId;
     const current = currentPlan(deps).plan;
     if (current) {
-      const back = applyTaskStatus(current, taskId, "pending", {
-        note: `spawn 未能确认子会话起跑（${evidenceLine}）`,
-        now: new Date(deps.now()).toISOString(),
-      });
-      if (back.ok) deps.savePlan(back.plan);
+      const back = applyTaskStatus(current, taskId, "pending", { now: new Date(deps.now()).toISOString() });
+      if (back.ok) {
+        deps.savePlan(back.plan);
+        // Same rule as above: the reason is a log line, never a rewrite of
+        // the task book.
+        deps.log(`task ${taskId} 退回 pending：spawn 未能确认子会话起跑（${evidenceLine}）`);
+      }
     }
     return fail(
       `review-gate: ${opened.error}\n` +

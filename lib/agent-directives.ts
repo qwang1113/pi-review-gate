@@ -283,9 +283,23 @@ export const SCOPE_ESCALATION_PROTOCOL =
   "用户不同意 ⇒ 就留在 loop 模式按现在的流程把这件事做完，**不要再提第二次**。";
 
 /** The whole standing block, in the order an agent reads it. */
-export function buildAgentDirectives(mode?: "loop" | "explore"): string {
+export function buildAgentDirectives(
+  mode?: "loop" | "explore",
+  opts: {
+    /**
+     * Render the SCOPE-ESCALATION rule? FALSE for the shared `loop` mode prompt
+     * (2026-09-21). That block is injected into orchestration CHILDREN too, and
+     * a child's `set_gate_mode("orchestrator")` is refused mechanically — so
+     * the rule would send it to a call that cannot succeed. The row belongs to
+     * sessions that can act on it, which is why the TOP-LEVEL injection site
+     * appends it (extensions/review-gate.ts).
+     */
+    scopeEscalation?: boolean;
+  } = {},
+): string {
+  const scope = opts.scopeEscalation === false ? "" : `${SCOPE_ESCALATION_PROTOCOL}\n\n`;
   return (`${TOOL_DECISION_TABLE}\n\n${WRITE_TIME_REMINDERS}\n\n${REQUIREMENT_PROTOCOL}\n\n` +
-    (mode === "explore" ? "" : `${SCOPE_ESCALATION_PROTOCOL}\n\n`) +
+    (mode === "explore" ? "" : scope) +
     `${BATCH_READ_DISCIPLINE}\n\n${END_OF_TURN_CHECK}` +
     `\n\n${GATE_ANOMALY_PROTOCOL}` +
     (mode === "explore" ? `\n\n${EXPLORE_MODE_NOTE}` : ""));

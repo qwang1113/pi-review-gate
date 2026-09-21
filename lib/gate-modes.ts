@@ -147,7 +147,12 @@ export const MODE_REGISTRY: Readonly<Record<GateMode, ModeSpec>> = Object.freeze
     deniedTools: NO_DENY,
   },
   loop: {
-    prompt: `${buildAgentDirectives()}\n${LOOP_FLOW_TAIL}`,
+    // The SCOPE-ESCALATION row is deliberately NOT in the shared block
+    // (2026-09-21): this prompt also reaches orchestration CHILDREN, whose
+    // `set_gate_mode("orchestrator")` the gate refuses, so the rule would tell
+    // them to call a tool that cannot succeed. The top-level injection site
+    // appends it where it applies.
+    prompt: `${buildAgentDirectives(undefined, { scopeEscalation: false })}\n${LOOP_FLOW_TAIL}`,
     enforcement: "full",
     internalOnly: false,
     deniedTools: NO_DENY,

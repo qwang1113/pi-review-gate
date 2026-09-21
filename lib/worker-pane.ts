@@ -27,6 +27,19 @@ export type WorkerPaneRunner = (argv: readonly string[]) => PaneRunResult;
 /** Repo-root-relative location of the worker registry (gate-excluded via `.pi/`). */
 export const WORKER_REGISTRY_RELPATH = ".pi/worker-sessions.json";
 
+/**
+ * Where a worker's own files live under `.pi/` — its prompt, its task book, and
+ * the pi transcript that makes a reopen CONTINUE the conversation.
+ *
+ * DELIBERATELY NOT `.pi/judge-sessions/` (reviewer P2, 2026-09-21). That root
+ * is swept by the judge lifecycle, whose staleness rule deletes a directory
+ * whose name ends in `-<8 hex>` and is not in the judge registry — and a
+ * perfectly legal worker id like `abc12345` renders `rg-worker-worker-abc12345`,
+ * which is exactly that shape. A worker's transcript being removed by another
+ * feature's cleanup is a silent loss of the thing resume is made of.
+ */
+export const WORKER_SESSION_ROOT = "worker-sessions";
+
 /** One dispatched worker. Every field is needed to close or resume it. */
 export interface WorkerEntry {
   workerId: string;
@@ -45,6 +58,14 @@ export interface WorkerEntry {
   /** The model spec that was actually launched, for the record and the receipt. */
   model: string;
   paneId: string;
+  /**
+   * The tmux SERVER this pane id came from, when the caller knows it.
+   *
+   * A pane id is minted by a server: after a restart `%42` can belong to
+   * somebody else's session entirely, so `worker_close` compares this before
+   * killing (reviewer P2, 2026-09-21). Same rule as the judge registry.
+   */
+  tmuxServer?: string;
   sessionId: string;
   repoRoot: string;
   createdAt: string;
@@ -100,9 +121,11 @@ export function parseWorkerRegistry(raw: unknown): WorkerRegistry {
     const createdAt = str(e.createdAt);
     if (!openerId || !role || !model || !paneId || !sessionId || !repoRoot || !createdAt) continue;
     const reportedAt = str(e.reportedAt);
+    const tmuxServer = str(e.tmuxServer);
     out[id] = {
       workerId: id, openerId, role, model, paneId, sessionId, repoRoot, createdAt,
       ...(reportedAt === undefined ? {} : { reportedAt }),
+      ...(tmuxServer === undefined ? {} : { tmuxServer }),
     };
   }
   return out;

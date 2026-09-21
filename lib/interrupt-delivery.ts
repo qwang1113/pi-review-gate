@@ -156,8 +156,13 @@ export async function deliverInterrupt(
       deps.sendNow(text);
       return { delivered: "turn", waitedMs: waited.waitedMs };
     } catch {
-      // The pane started streaming again between the check and the handoff.
-      // Not an error worth surfacing: the fallback still carries the text.
+      // DEFENSIVE, AND NOT REACHABLE IN THIS pi BUILD (quality round P2,
+      // 2026-09-21): the idle check and this call sit in the same tick, so a
+      // pane cannot start streaming between them, and pi's own
+      // `sendUserMessage` catches its internal rejection rather than throwing.
+      // Kept as a guard against a future build that DOES throw — but the
+      // no-message-is-lost guarantee does not rest on it: it rests on the
+      // bounded wait above and on `sendQueued` below.
     }
   }
   deps.sendQueued(text);

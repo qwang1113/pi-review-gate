@@ -1028,7 +1028,18 @@ export interface ApplyAgentLayerResult {
  */
 export function applyAgentConfigLayer(opts: ApplyAgentLayerOptions): ApplyAgentLayerResult {
   const result: ApplyAgentLayerResult = { written: [], deleted: [], errors: [], warnings: [] };
-  const names = Object.keys(opts.agents);
+  // WORKER PRESETS ARE NOT RENDERED (2026-09-21, reviewer P1). The render layer
+  // exists so a role's MODEL CHAIN can be read back out of `agents/<role>.md`;
+  // a worker's chain is read straight from the config section
+  // (`lib/worker-tools.ts` `resolveWorkerRole`) and it has no prompt file to
+  // render into. Passing one through here is not harmless: with an `agents.worker`
+  // entry in the config (which the installer now writes for every user) the
+  // renderer looked for `agents/worker.md`, which the package does not ship and
+  // which the installer's retired-file sweep had already removed — an error per
+  // session start for a file that should never have been expected. Filtered HERE
+  // rather than at the call sites: there are three of them, and a rule copied
+  // per caller is a rule that drifts.
+  const names = Object.keys(opts.agents).filter((name) => !isWorkerRoleName(name));
   // NOTE: no unconditional mkdirSync — creating the target dir eagerly leaves
   // an empty all-default layer behind (extension session-start applied with no
   // `agents` section would otherwise materialize <repo>/.pi/agents for

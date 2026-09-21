@@ -91,6 +91,8 @@ export interface WorkerToolDeps {
   writeFile(path: string, content: string): { ok: true } | { ok: false; error: string };
   readRegistry(): WorkerRegistry;
   saveRegistry(registry: WorkerRegistry): void;
+  /** The tmux SERVER this session lives on, when resolvable — see WorkerEntry. */
+  tmuxServer?(): string | undefined;
   /** The effective `agents` config: worker presets are the roles named `worker*`. */
   agents(): AgentsConfigMap;
   now(): number;
@@ -304,6 +306,43 @@ export function registerWorkerTools(host: ToolHost, deps: WorkerToolDeps): void 
 // the four implementations
 // ---------------------------------------------------------------------------
 
+/** How long `worker_submit` waits for the pane's gate to confirm an append. */
+export const WORKER_ACK_WAIT_MS = 8_000;
+
+/**
+ * Wait for the pane's own gate to say it injected this instruction.
+ *
+ * The ack (`instruct-ack`, stage `injected`) is written by the CHILD's gate —
+ * the only party that knows whether the text reached the agent. Absent budget
+ * ⇒ a plain report of what was seen: `injected: false` means NOT CONFIRMED,
+ * never "failed" (the message is in the channel either way).
+ */
+async function waitForInstructAck(
+  deps: WorkerToolDeps,
+  registry: WorkerRegistry,
+  workerId: string,
+  instructId: string,
+  budgetMs = WORKER_ACK_WAIT_MS,
+): Promise<{ injected: boolean }> {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => { setTimeout(r, ms); }));
+  const started = deps.now();
+  for (;;) {
+    try {
+      const path = channelPathFor(...targetParts(deps, registry, workerId));
+      const ack = readChannel(deps.channelIO, path).records.find(
+        (r) => r.kind === "instruct-ack" && (r as { instructId?: unknown }).instructId === instructId,
+      ) as { delivered?: unknown; stage?: unknown } | undefined;
+      if (ack) {
+        return { injected: ack.delivered === true && (ack.stage === undefined || ack.stage === "injected") };
+      }
+    } catch {
+      // Unreadable channel this tick — keep waiting; the budget is the verdict.
+    }
+    if (deps.now() - started >= budgetMs) return { injected: false };
+    await sleep(WORKER_WAIT_POLL_MS);
+  }
+}
+
 async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const task = String(params.task ?? "").trim();
   if (!task) return fail("review-gate: `task` 不能为空 —— worker 看不到你的上下文，任务书就是它的全部输入。");
@@ -337,11 +376,23 @@ async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown
       mode: "interrupt",
       text: task,
     });
-    deps.log(`worker ${workerId}: 追加任务已投递（pane ${existing.paneId} 存活）`);
+    // EARN THE RECEIPT (reviewer P2, 2026-09-21). Appending a record proves
+    // nothing: the pane's own gate is what reads it, and its ack is the only
+    // evidence the text was injected. `orchestrator_instruct` verifies for the
+    // same reason ("一条没人读的消息不算投递"), and without it a worker whose
+    // pane is alive but whose gate never drains leaves the caller waiting on an
+    // answer nobody was ever asked for. Bounded, because a worker deep in a
+    // tool call takes as long as it takes — and the honest answer then is
+    // "written, not yet confirmed".
+    const ack = await waitForInstructAck(deps, registry, workerId, instructId);
+    deps.log(`worker ${workerId}: 追加任务${ack.injected ? "已注入" : "已写入通道（未确认注入）"}（pane ${existing.paneId} 存活）`);
     return reply(
-      `review-gate: worker ${workerId} 仍在 pane ${existing.paneId} 上跑 —— 追加任务已投递给它（同一会话，不是新 worker）。\n` +
-      "用 `worker_wait({workerId})` 收它的回复。",
-      { workerId, paneId: existing.paneId, mode: "instruct" },
+      `review-gate: worker ${workerId} 仍在 pane ${existing.paneId} 上跑 —— 追加任务` +
+      (ack.injected
+        ? "它自己的门禁已确认注入（同一会话，不是新 worker）。"
+        : `已写进它的通道，但 ${Math.round(WORKER_ACK_WAIT_MS / 1000)}s 内没等到注入确认（它可能正忙）。`) +
+      "\n用 `worker_wait({workerId: …})` 收它的回复；若一直没动静，`worker_close` 后重新 `worker_submit` 会在同一 session 上重开。",
+      { workerId, paneId: existing.paneId, mode: "instruct", injected: ack.injected },
     );
   }
 
@@ -414,7 +465,14 @@ async function openWorkerPane(
     command,
     role: { kind: "worker", openerId, workerId: opts.workerId, role: opts.role },
     register: (paneId) => {
-      deps.saveRegistry(withWorker(deps.readRegistry(), {
+      const registry = deps.readRegistry();
+      // THE CURSOR SURVIVES A REOPEN (reviewer P1, 2026-09-21): `reportedAt` is
+      // the ONLY thing that says "this report has been consumed", and
+      // `withWorker` replaces the whole entry — so rebuilding it without the
+      // cursor meant every reopen (a dead pane resumed, an id reused after
+      // close) re-delivered the newest report as if it had just landed.
+      const prior = registry[opts.workerId];
+      deps.saveRegistry(withWorker(registry, {
         workerId: opts.workerId,
         openerId,
         role: opts.role,
@@ -423,6 +481,8 @@ async function openWorkerPane(
         sessionId,
         repoRoot: deps.repoRoot(),
         createdAt: new Date(deps.now()).toISOString(),
+        ...(prior?.reportedAt === undefined ? {} : { reportedAt: prior.reportedAt }),
+        ...(deps.tmuxServer?.() === undefined ? {} : { tmuxServer: deps.tmuxServer()! }),
       }));
     },
   });
@@ -466,6 +526,20 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
       return reply(
         `review-gate: worker ${workerId} 交活了：\n\n${projection.report.text}`,
         { workerId, reportId: projection.report.reportId, kind: "report" },
+      );
+    }
+    // A DEAD PANE WITH NOTHING NEW IS NEWS TOO (reviewer P2, 2026-09-21): the
+    // old loop spent the whole 300-second timeout to report "it is gone" —
+    // something it had read on the very first iteration. A worker whose pane is
+    // gone and whose channel holds no unconsumed report cannot produce anything
+    // else, and saying so NOW is what "message-driven" is supposed to mean.
+    const entry = registry[workerId];
+    if (entry && !deps.paneAlive(entry.paneId)) {
+      return reply(
+        `review-gate: worker ${workerId} 的 pane（${entry.paneId}）已不在，通道里也没有未消费的报告 —— 它不会再有新消息了。\n` +
+        `接着用：\`worker_submit({ workerId: "${workerId}", task: … })\`（同一 session id 重开，它还记得上次读过的）；` +
+        `不用了就 \`worker_close({ workerId: "${workerId}" })\`。`,
+        { workerId, kind: "gone", alive: false },
       );
     }
     if (timeoutMs === 0 || deps.now() - started >= timeoutMs) {
@@ -546,6 +620,19 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
   const entry = registry[workerId];
   if (!entry) {
     return reply(`review-gate: worker ${workerId} 不在注册表里（已经关过，或从没派过）。`, { workerId, closed: false });
+  }
+  // OWNERSHIP BEFORE THE KILL (reviewer P2, 2026-09-21). The registry entry
+  // names a pane id, and pane ids are handed out by a tmux SERVER: if the
+  // server restarted, `%42` may now be somebody else's session, and
+  // `kill-pane` would close theirs. The judge registry records the server for
+  // exactly this reason; a mismatch is refused rather than resolved.
+  const tmuxServer = deps.tmuxServer?.();
+  if (entry.tmuxServer !== undefined && tmuxServer !== undefined && entry.tmuxServer !== tmuxServer) {
+    return fail(
+      `review-gate: 拒绝关闭 worker ${workerId} —— 它登记在 tmux server ${entry.tmuxServer}，当前是 ${tmuxServer}。` +
+      "那个 pane id 现在可能属于别的会话，关它就是误伤。登记已保留，请人工确认后处理。",
+      { workerId, closed: false },
+    );
   }
   const killed = deps.killPane(entry.paneId);
   deps.saveRegistry(withoutWorker(registry, workerId));
