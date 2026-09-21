@@ -1378,6 +1378,29 @@ test("archive does NOTHING when the user declines (and when there is no dialog a
   assert.equal(world.scratch.size, 0, "and nothing may have been written");
 });
 
+test("archive asks NOBODY when every task is done — and the receipt says what it took away", async () => {
+  const finished = twoTaskPlan();
+  const world = makeFakeWorld({
+    plan: { ...finished, tasks: finished.tasks.map((t) => ({ ...t, status: "done" as const })) },
+    recordedRuntime: previousHolder(),
+  });
+  // `confirmAnswers` stays EMPTY: the fake dialog answers "no row picked" to
+  // anything it is asked, so an archive that succeeds here is an archive that
+  // never opened a box (and it is also the headless case).
+  const reply = await world.call("orchestrator_plan", { action: "archive" });
+
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.equal(world.plan(), undefined, "the plan file is out of the way");
+  assert.ok([...world.scratch.keys()].some((path) => path.includes("orchestrator-plan.archived-")),
+    "the archive file must exist");
+  assert.equal(world.deps.recordedRuntime()?.children.length, 0, "the registry went with it");
+  const text = replyText(reply);
+  assert.match(text, /orchestrator-plan\.archived-/, "the receipt names WHERE it landed");
+  assert.match(text, /《测试计划》/, "…WHICH plan went away…");
+  assert.match(text, /2 个任务/, "…how big it was…");
+  assert.match(text, /没有删除任何东西/, "…and that nothing was destroyed");
+});
+
 test("archive moves the plan AND the registry aside, then the repo is free for a new plan", async () => {
   const recorded = previousHolder();
   const world = makeFakeWorld({ plan: twoTaskPlan(), recordedRuntime: recorded });
