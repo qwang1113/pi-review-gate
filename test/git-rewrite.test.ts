@@ -79,7 +79,10 @@ test("the pre-commit hook applies the same no-content exemption", () => {
   assert.match(checker, /"diff", "--cached", "--quiet", "HEAD"/,
     "the index — what the commit publishes — is measured too");
   const exemptionAt = checker.indexOf("headTree === currentFp");
-  const gatesAt = checker.indexOf("if (state.hasCodeChange) {");
+  // The content gates' own anchor moves with the stage switches (2026-09-22):
+  // `reviewOn` is the first one, and it is still the gate the exemption must
+  // precede.
+  const gatesAt = checker.indexOf("if (state.hasCodeChange && reviewOn) {");
   assert.ok(exemptionAt > 0 && gatesAt > exemptionAt,
     "the exemption must be decided BEFORE the content gates run");
 });
