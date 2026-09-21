@@ -1468,3 +1468,44 @@ test("startupAgentsCheck heals an unconfigured role and re-validates without tou
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("startupAgentsCheck re-checks against the config FILE, not the caller's stale snapshot", () => {
+  // MEASURED P1 (quality-auditor, 2026-09-22): a session reads its config ONCE,
+  // so its next turn passes the PRE-HEAL snapshot again. The first call heals
+  // the file; the second finds nothing left to heal — and a re-check gated on
+  // `healed.length > 0` then returned the PRE-HEAL failure, injecting "session
+  // cannot start" on every turn while the config on disk was already correct.
+  const dir = mkdtempSync(join(tmpdir(), "startup-agents-stale-"));
+  try {
+    const pkg = join(dir, "pkg");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "acceptance.md"), "---\nname: acceptance\nmodel: claude-fable-5\nthinking: max\n---\n");
+    const cfg = join(dir, "review-gate.json");
+    const staleSnapshot = { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } };
+
+    const first = startupAgentsCheck({
+      agentsGlobal: staleSnapshot,
+      agentsProject: undefined,
+      registry: REG,
+      configPath: cfg,
+      agentsDir: pkg,
+      validNames: ["reviewer", "acceptance"],
+    });
+    assert.deepEqual(first.healed, ["acceptance"]);
+    assert.equal(first.checks.acceptance.ok, true);
+
+    // The SAME stale snapshot again — what a long-lived session keeps passing.
+    const second = startupAgentsCheck({
+      agentsGlobal: staleSnapshot,
+      agentsProject: undefined,
+      registry: REG,
+      configPath: cfg,
+      agentsDir: pkg,
+      validNames: ["reviewer", "acceptance"],
+    });
+    assert.deepEqual(second.healed, [], "the file is already healed — nothing left to write");
+    assert.equal(second.checks.acceptance.ok, true, "the round must not report the pre-heal failure on a healed file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

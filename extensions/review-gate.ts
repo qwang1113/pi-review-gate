@@ -13571,13 +13571,21 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // predates it — the session could not even start to be told to run the
         // installer. The ordering lives in lib/model-config.ts, where it is
         // testable; this site only says where the config and registry live.
-        const { checks, healed, healProblems } = startupAgentsCheck({
+        const { checks, healed, healProblems, agentsSection } = startupAgentsCheck({
           agentsGlobal: projectConfig.agentsGlobal,
           agentsProject: projectConfig.agentsProject,
           registry: loadRegistry(),
           configPath: globalConfigPath(),
           agentsDir: resolvePackageAgentsDir(),
         });
+        if (agentsSection !== undefined) {
+          // The SESSION's snapshot follows the file it just healed. A session
+          // reads its config ONCE, so without this every downstream reader
+          // (`resolveArbiterModel`, the layer renderer, dispatch) keeps seeing
+          // the pre-heal state: the startup check passes while this session
+          // still configures nothing (quality-auditor P2, 2026-09-22).
+          projectConfig = { ...projectConfig, agentsGlobal: agentsSection };
+        }
         if (healed.length > 0) {
           log(`self-healed missing agent slots into ${globalConfigPath()}: ${healed.join(", ")}`);
         }

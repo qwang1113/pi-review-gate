@@ -100,9 +100,11 @@ prose counts as no conclusion at all.
 - `"BLOCKED"` means at least one P0/P1 stands — including "this could not be
   really accepted".
 - Each finding names the command or path that demonstrates it; write `issue`
-  and `suggestion` in Simplified Chinese, one concise sentence each, and keep
-  `verdict` / `severity` ASCII exactly as written (READY / BLOCKED, P0 / P1 /
-  P2 / Nit). Add `evidence` when it carries something a file:line cannot.
+  in Simplified Chinese — one concise sentence that states the problem AND the
+  one-line fix (the finding schema has no separate `suggestion` field, so a fix
+  written anywhere else is dropped) — and keep `verdict` / `severity` ASCII
+  exactly as written (READY / BLOCKED, P0 / P1 / P2 / Nit). Add `evidence` when
+  it carries something a file:line cannot.
 - **Conclude and stop.** Prose after the call is read by nobody. Do not write a
   recap, a self-assessment or a process narration; the conclusion IS the call.
 - Call exactly ONCE per round — a second call is refused. Keep findings terse

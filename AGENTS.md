@@ -391,8 +391,8 @@ skill, the `/review` prompt, the reviewer role body, the judge protocol) may
 carry a summary and a pointer only. Two consequences worth knowing without
 reading it: the contract never narrows what a reviewer may look at, and a
 settled conclusion may always be reopened with evidence.
-(b2) **Fresh context, read on demand — MECHANICALLY.** The four review
-roles (reviewer, quality-auditor, adviser, goal-auditor) each run in their OWN pane (interactive
+(b2) **Fresh context, read on demand — MECHANICALLY.** The review roles
+(reviewer, quality-auditor, adviser, goal-auditor, acceptance) each run in their OWN pane (interactive
 pi with `--session-id`) — they never
 transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
 to grep on demand. `judge_submit({role:"adviser"})` builds that brief itself:

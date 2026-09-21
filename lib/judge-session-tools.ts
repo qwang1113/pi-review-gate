@@ -297,13 +297,18 @@ export interface JudgeSessionToolDeps {
 // `acceptance` is a gate-dispatched round like `quality-auditor`: the agent
 // never ASKS for it, but the round can ask a question, and a judge that asked
 // a question must be answerable / recoverable / waitable.
-export const ROLE_PARAM = Type.Optional(Type.Enum({
+//
+// The list is a NAMED constant because the "needs a role" refusal below names
+// the same roles in words: `acceptance` was added to the enum and not to that
+// sentence, and the two lists had no way to notice (reviewer P2, 2026-09-22).
+export const ADDRESSABLE_JUDGE_ROLES: Readonly<Record<string, string>> = Object.freeze({
   reviewer: "reviewer",
   "quality-auditor": "quality-auditor",
   adviser: "adviser",
   "goal-auditor": "goal-auditor",
   acceptance: "acceptance",
-}));
+});
+export const ROLE_PARAM = Type.Optional(Type.Enum(ADDRESSABLE_JUDGE_ROLES));
 const SESSION_ID_PARAM = Type.Optional(Type.String({ description: "Judge id (its session id); prefer role" }));
 const REPO_PARAM = Type.Optional(Type.String({
   description: "Absolute repo path (required once the session edited several repos)",
@@ -358,7 +363,7 @@ function addressJudge(
   const role = params.role ? String(params.role) : undefined;
   const judgeId = params.sessionId ? String(params.sessionId) : undefined;
   if (!role && !judgeId) {
-    return { ok: false, text: `review-gate: ${toolName} needs a role (reviewer / quality-auditor / adviser / goal-auditor).` };
+    return { ok: false, text: `review-gate: ${toolName} needs a role (${Object.keys(ADDRESSABLE_JUDGE_ROLES).join(" / ")}).` };
   }
   // Gate-self path (2026-09-08): ONLY when the direct caller passes
   // `gateSelf === true` as a FUNCTION ARGUMENT — i.e. the gate's own audit

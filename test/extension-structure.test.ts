@@ -1747,6 +1747,29 @@ test("restore validates persisted taskMode through normalizeTaskMode", () => {
   assert.match(SRC, /normalizeTaskMode/);
 });
 
+test("startup self-heal reports the roles it merged, from the same handler that refuses", () => {
+  // Goal criterion: a heal that REWRITES the user's ~/.pi/review-gate.json must
+  // say so — a silent rewrite is the one outcome nobody could debug. The
+  // behavior face (which roles, gaps only) is asserted in
+  // test/model-config.test.ts; this pins the wiring that reports it.
+  const promptAt = SRC.indexOf('pi.on("before_agent_start"');
+  const promptEnd = SRC.indexOf('\n  pi.on("', promptAt + 10);
+  const handler = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
+  assert.match(handler, /startupAgentsCheck\(\{/, "the startup check is the healing entry point");
+  assert.match(handler, /if \(healed\.length > 0\)/, "a heal is announced…");
+  assert.match(
+    handler,
+    /log\(`self-healed missing agent slots into \$\{globalConfigPath\(\)\}: \$\{healed\.join\(", "\)\}`\)/,
+    "…with the roles it merged and the file it wrote",
+  );
+  // The heal's own failures ride the refusal instead of disappearing.
+  assert.match(handler, /const healNote = healProblems\.length > 0/, "a failed heal is surfaced with the refusal");
+  // …and the session's own snapshot follows the file, or every downstream
+  // reader keeps the pre-heal state while the check reports a pass.
+  assert.match(handler, /projectConfig = \{ \.\.\.projectConfig, agentsGlobal: agentsSection \}/,
+    "the healed section is adopted by the session (arbiter resolution, dispatch)");
+});
+
 test("edit-discipline nudges: prompt-only guidance, wired at the three sites", () => {
   // USER REQUIREMENT: prompt-level correction (no enforcement) for the
   // recurring "edit failed → bash edits the file" workaround. Three sites:
@@ -3005,9 +3028,16 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // answerable.
   assert.match(
     JUDGE_TOOLS_SRC,
-    /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(\{\s*reviewer: "reviewer",\s*"quality-auditor": "quality-auditor",\s*adviser: "adviser",\s*"goal-auditor": "goal-auditor",\s*acceptance: "acceptance",\s*\}\)\)/,
-    "the shared role parameter is the judge roles an agent can address",
+    /export const ADDRESSABLE_JUDGE_ROLES: Readonly<Record<string, string>> = Object\.freeze\(\{\s*reviewer: "reviewer",\s*"quality-auditor": "quality-auditor",\s*adviser: "adviser",\s*"goal-auditor": "goal-auditor",\s*acceptance: "acceptance",\s*\}\);/,
+    "the named shared role list is the judge roles an agent can address",
   );
+  // …and BOTH consumers come from it. The enum and the "needs a role" refusal
+  // text were two literals, and adding `acceptance` to only one of them is
+  // exactly the drift this pins (reviewer P2, 2026-09-22).
+  assert.match(JUDGE_TOOLS_SRC, /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(ADDRESSABLE_JUDGE_ROLES\)\)/,
+    "the parameter enum is built from the list");
+  assert.match(JUDGE_TOOLS_SRC, /needs a role \(\$\{Object\.keys\(ADDRESSABLE_JUDGE_ROLES\)\.join\(" \/ "\)\}\)/,
+    "the refusal text is built from the same list");
   for (const tool of ["judge_close", "judge_wait"]) {
 
     const body = toolBodyOf(tool);

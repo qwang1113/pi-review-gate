@@ -358,6 +358,15 @@ export interface StartupAgentsResult {
   healed: string[];
   /** Why a heal attempt could not fill a role — empty when none was needed or it succeeded. */
   healProblems: string[];
+  /**
+   * The config file's `agents` section as the heal left it (undefined when the
+   * heal never ran or the file was unreadable). The CALLER should adopt it in
+   * place of its in-memory snapshot: a session reads its config once, and
+   * everything downstream of the startup check (`resolveArbiterModel`, layer
+   * rendering, dispatch) would otherwise keep seeing the pre-heal state — a
+   * session that passed the check while still configuring nothing.
+   */
+  agentsSection?: Record<string, unknown>;
 }
 
 /**
@@ -387,6 +396,7 @@ export function startupAgentsCheck(opts: {
   const bad = failing(checks);
   const healProblems: string[] = [];
   let healed: string[] = [];
+  let agentsSection: Record<string, unknown> | undefined;
   if (bad.length > 0) {
     // GAPS ONLY: a role no layer declares. One the user pinned (even badly) is
     // their config to fix — overwriting it would silently discard their choice.
@@ -399,12 +409,22 @@ export function startupAgentsCheck(opts: {
     });
     healProblems.push(...heal.problems);
     healed = heal.healed;
-    if (healed.length > 0) {
-      const merged = effectiveAgentsConfig(heal.agentsSection ?? opts.agentsGlobal, opts.agentsProject, validNames);
+    agentsSection = heal.agentsSection;
+    // RE-VALIDATE AGAINST THE FILE, not against the caller's snapshot — and
+    // not only when THIS call wrote something. `agentsGlobal` is read once per
+    // session, so a role healed on an earlier turn lives in the file and
+    // nowhere in memory; gating the re-check on `healed.length > 0` made every
+    // later turn find the file already complete (nothing left to heal), skip
+    // the re-check, and return the PRE-HEAL failure — a session that reports
+    // "cannot start" on every turn while the config on disk is fine
+    // (quality-auditor P1, 2026-09-22). `agentsSection` is the file's section
+    // as the heal left it, written or not.
+    if (heal.agentsSection !== undefined) {
+      const merged = effectiveAgentsConfig(heal.agentsSection, opts.agentsProject, validNames);
       checks = validateAgentsForStartup(merged.map, opts.registry, validNames);
     }
   }
-  return { checks, healed, healProblems };
+  return { checks, healed, healProblems, ...(agentsSection === undefined ? {} : { agentsSection }) };
 }
 
 // ---------------------------------------------------------------------------
