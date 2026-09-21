@@ -15,6 +15,7 @@ import {
 
   EXPLORE_MODE_NOTE,
   ORCHESTRATOR_WAIT_DISCIPLINE,
+  SCOPE_ESCALATION_PROTOCOL,
   WAIT_DISCIPLINE_HINT,
 } from "../lib/agent-directives.ts";
 import { ORCHESTRATOR_DIRECTIVE } from "../lib/orchestrator-directives.ts";
@@ -269,4 +270,30 @@ test("the judge protocol points at the index the gate pre-builds", () => {
     "the protocol names the block the task text carries");
   assert.match(JUDGE_COMMON_PROTOCOL, /最大的文件优先/,
     "…and the property that makes it usable (largest first)");
+});
+
+// ---------------------------------------------------------------------------
+// HOW BIG IS THIS? (user ask, 2026-09-21). A requirement that outgrows one
+// session has to reach the project-manager mode — and the user asked for it to
+// be ASKED for, with the agent throwing the switch itself, not announced as a
+// limitation and not left for the user to type.
+// ---------------------------------------------------------------------------
+
+test("the standing block makes a loop session SIZE the work before starting it", () => {
+  const block = buildAgentDirectives();
+  assert.ok(block.includes(SCOPE_ESCALATION_PROTOCOL), "the rule is rendered, not summarised");
+  for (const mark of ["一个会话做不完", "可并行的独立部分", "多个仓库"]) {
+    assert.ok(block.includes(mark), `the user's own mark must survive: ${mark}`);
+  }
+  assert.match(block, /ask_user/, "the way to reach the user about it");
+  assert.match(block, /set_gate_mode\("orchestrator"\)/,
+    "and the switch is the AGENT's to throw — the user asked not to have to type a command");
+  assert.match(block, /不要再提第二次/, "a refusal is final: no second ask");
+});
+
+test("explore mode does NOT carry the scope question — it has an upgrade path of its own", () => {
+  const explore = buildAgentDirectives("explore");
+  assert.doesNotMatch(explore, /一个会话做不完/,
+    "an explore session escalates to loop first (EXPLORE_MODE_NOTE); asking about the manager here would skip that step");
+  assert.ok(explore.includes(EXPLORE_MODE_NOTE), "…and the step it does take is still stated");
 });

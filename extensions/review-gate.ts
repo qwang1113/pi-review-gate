@@ -258,6 +258,10 @@ import {
 // The delivery probe a judge spawn shares with an orchestration spawn: same
 // polling, same evidence, same verdict — only the channel path differs.
 import { channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-kit.ts";
+// STOP-FIRST, THEN SPEAK (2026-09-21): the two-step an `interrupt` has to be,
+// and the reason it is a module rather than four lines here — the ordering is
+// the whole fix (lib/interrupt-delivery.ts carries the measured deadlock).
+import { deliverInterrupt } from "../lib/interrupt-delivery.ts";
 import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
@@ -2477,15 +2481,37 @@ export default function reviewGate(pi: ExtensionAPI) {
           // stops the current turn if one is running.
           gateInterruptController.abort();
           gateInterruptController = new AbortController();
-          ctx.abort?.();
           if (interruptText) {
-            // sendUserMessage is fire-and-forget in this pi build (the loader
-            // does not return the promise), so there is nothing to await or
-            // race: the message is handed to pi synchronously and the ack
-            // records that. A failure surfaces as the child never acking.
-            pi.sendUserMessage(interruptText, { deliverAs: "steer" });
-            acknowledgeInstruct(binding, instruction.instructId, true, "已解除等待并立即投递正文 (deliverAs:steer)", "injected");
+            // STOP FIRST, THEN SPEAK — AND WAIT FOR THE STOP TO LAND
+            // (2026-09-21). `ctx.abort()` is SYNCHRONOUS on this side and does
+            // not wait for the turn to end, so handing the text to pi while the
+            // agent was still streaming queued it as `steer` — and the abort's
+            // own end-of-run skipped the drain those queued messages wait for.
+            // Measured: two judges of one round froze for 552s with the
+            // dispatch sitting unread, and the same drain serves orchestration
+            // children. lib/interrupt-delivery.ts owns the contract; this is
+            // only the pi surface.
+            const delivered = await deliverInterrupt(interruptText, {
+              abort: () => ctx.abort?.(),
+              isIdle: () => ctx.isIdle?.() === true,
+              // NO `deliverAs`: by pi's own contract that is the form which
+              // "sends immediately and triggers a new turn" — and it throws if
+              // the agent is streaming again, which is why the queued fallback
+              // exists.
+              sendNow: (text) => pi.sendUserMessage(text),
+              sendQueued: (text) => pi.sendUserMessage(text, { deliverAs: "steer" }),
+            });
+            acknowledgeInstruct(
+              binding,
+              instruction.instructId,
+              true,
+              delivered.delivered === "turn"
+                ? `已中止当前 turn，等 pane 空闲（${delivered.waitedMs}ms）后作为新一轮投递`
+                : `等待 pane 空闲超时（${delivered.waitedMs}ms），正文已按 steer 排队（未丢弃）`,
+              "injected",
+            );
           } else {
+            ctx.abort?.();
             acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
           }
           continue;

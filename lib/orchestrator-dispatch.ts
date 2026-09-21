@@ -200,11 +200,21 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // The task text is no longer typed into a pane — it IS the child's first
   // message, carried in the argv (F7). An empty one would open a session with
   // nothing to do, which is exactly the state the hand-run deadlocked in.
-  const brief = String(params.task ?? "").trim();
+  //
+  // THE TASK BOOK IS THE FALLBACK (2026-09-21). `plan.tasks[].note` is the
+  // assignment the plan was audited and approved for, and until now the spawn
+  // path never read it: the child was handed whatever `task` the manager typed
+  // at spawn time, so the text the auditor checked, the text the user approved
+  // and the text the child received could all differ, with nothing keeping
+  // them in step. An explicit `task` still wins (a manager may tailor the
+  // opening message); omitting it now hands over the task book itself.
+  const brief = String(params.task ?? "").trim() || (task.note ?? "").trim();
   if (!brief) {
     return fail(
-      "review-gate: `task`（给子会话的任务说明）不能为空 —— 它现在是子会话启动时的第一条消息" +
-      "（写成任务文件、用 `pi @file` 带进去），没有它就等于开了一个空会话，正是上一轮 F8 的死锁现场。",
+      `review-gate: 任务 "${taskId}" 没有任务书可交给子会话 —— \`plan.tasks[].note\` 是空的，` +
+      "`task` 参数也是空的。任务书是子会话启动时的第一条消息（写成任务文件、用 `pi @file` 带进去），" +
+      "没有它就等于开了一个空会话，正是上一轮 F8 的死锁现场。\n" +
+      "用 `orchestrator_plan({action:\"write\"})` 给这个任务补上 note（骨架见工具说明），或这次直接传 `task`。",
     );
   }
 

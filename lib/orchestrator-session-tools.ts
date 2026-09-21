@@ -512,7 +512,12 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
       "pane — a pane nobody registered cannot be addressed later. Requires a plan the USER approved.",
     parameters: Type.Object({
       taskId: Type.String({ description: "Plan task id this child will work on" }),
-      task: Type.Optional(Type.String({ description: "Opening message sent to the child right away" })),
+      task: Type.Optional(Type.String({
+        description:
+          "Opening message sent to the child right away. OMIT IT and this task's `note` (its task book, " +
+          "the text the plan was audited and approved for) is used verbatim — pass one only to tailor the " +
+          "opening message beyond the task book.",
+      })),
     }),
     execute: guarded((params) => dispatchSpawn(deps, params)),
   });

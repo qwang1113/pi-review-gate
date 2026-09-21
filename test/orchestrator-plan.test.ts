@@ -532,3 +532,35 @@ test("the summary is readable and names every task with its repo", () => {
   assert.match(summary, /\[pending\] a \(serial\)/);
   assert.match(summary, /并行上限：2/);
 });
+
+// MEASURED DEFECT (2026-09-21): the summary is the text the plan auditor is
+// handed, the text the user reads before approving, and the text
+// `orchestrator_plan({action:"read"})` returns — and it rendered none of the
+// task book. The auditor's own checklist orders it to read the note ("is this
+// task book complete enough for a child to negotiate its goal", "read the
+// landing place", "read the finish task's note"), so it reported 「四个任务仍然
+// 没有 note」 on four consecutive submissions of a plan whose four notes were
+// all present, 600–1100 characters each. No revision of a note could change
+// that verdict.
+test("the summary renders the TASK BOOK — the plan the auditor and the user actually read", () => {
+  const tasks = [
+    { id: "a", title: "做事", repo: "/repo", note: "目标：把 A 做完\n代码落点：lib/a.ts（新模块，不塞进大文件）" },
+    { id: "b", title: "第二件", repo: "/repo" },
+  ];
+  const summary = formatPlanSummary(planOf({ tasks }), "/repo");
+  assert.match(summary, /任务书：/);
+  assert.match(summary, /目标：把 A 做完/);
+  assert.match(summary, /代码落点：lib\/a\.ts/);
+  // Every line of the note is indented under its task, so a multi-line task
+  // book cannot read as a sibling of the next task.
+  assert.match(summary, /\n      代码落点：lib\/a\.ts/);
+  // A task without a task book renders without the header.
+  const withoutNote = formatPlanSummary(planOf({ tasks: [{ id: "b", title: "第二件", repo: "/repo" }] }), "/repo");
+  assert.doesNotMatch(withoutNote, /任务书：/);
+  // RENDERING IT IS NOT APPROVING IT: the note still never reaches the hash,
+  // so revising a task book costs nobody a re-approval.
+  const withoutNotes = planOf({ tasks: tasks.map(({ note: _note, ...rest }) => rest) });
+  assert.equal(planHash(planOf({ tasks })), planHash(withoutNotes),
+    "the note is rendered, never authorized — the approval must not see it");
+  assert.doesNotMatch(canonicalPlanText(planOf({ tasks })), /代码落点/);
+});

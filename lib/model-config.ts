@@ -63,6 +63,36 @@ export const KNOWN_AGENTS: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * WORKER ROLE NAMES (2026-09-21) — the presets `worker_submit` may name.
+ *
+ * WHAT A WORKER IS. A read-only pane session the agent dispatches for a piece
+ * of work it does not want to spend its own context on ("list every caller of
+ * X", "read these twelve files and tell me which ones parse the config"). It
+ * is the tmux-pane successor to the pi-subagents `Agent` tool, and the user
+ * asked for the presets to live in the SAME place the judge roles' model
+ * chains live — `~/.pi/review-gate.json` — rather than in a second config file
+ * with a second loading rule.
+ *
+ * THE NAMING CONVENTION, and why it is a prefix rather than a list: the set of
+ * presets is the user's to invent (a fast one for recon, a strong one for
+ * analysis), so there is no fixed list to validate against. `worker` and
+ * anything named `worker-*` are presets; every other name in the `agents`
+ * section must be one of {@link KNOWN_AGENTS}, so a typo in a JUDGE name still
+ * reports itself instead of quietly becoming an unreachable worker.
+ *
+ * NOT in {@link KNOWN_AGENTS}, deliberately: that list is what the session-start
+ * check hard-fails on, and a session that never dispatches a worker must not
+ * refuse to open because no worker preset is configured. The worker path fails
+ * closed at CALL time instead.
+ */
+export const WORKER_ROLE_PREFIX = "worker";
+
+/** Is `name` a worker preset (`worker`, `worker-recon`, …)? */
+export function isWorkerRoleName(name: string): boolean {
+  return name === WORKER_ROLE_PREFIX || name.startsWith(`${WORKER_ROLE_PREFIX}-`);
+}
+
+/**
  * Locate the `agents/` directory INSIDE this package.
  *
  * We PROBE the layouts the package really ships under instead of trusting one
@@ -407,6 +437,13 @@ export interface AgentSlotSettings {
   auto: boolean;
   /** Effective slot chain (order = priority). Only honored when `auto` is false. */
   slots: string[];
+  /**
+   * The role's own system prompt, for roles that HAVE one in config (worker
+   * presets, 2026-09-21). The judge roles do not use it: their system prompt
+   * is built in code (`buildJudgeSystemPrompt`) because it has to name the
+   * repo and the round's contract.
+   */
+  prompt?: string;
   /** Which layer provided the settings. */
   source: "project" | "global" | "default";
   /** The entry was EXPLICITLY present but every field was invalid — the
@@ -418,7 +455,7 @@ export type AgentsConfigMap = Record<string, AgentSlotSettings>;
 
 export interface ParseAgentsResult {
   /** Only the agents actually present in the section (auto-filled to defaults). */
-  sections: Record<string, { auto?: boolean; slots?: string[]; malformed?: boolean }>;
+  sections: Record<string, { auto?: boolean; slots?: string[]; prompt?: string; malformed?: boolean }>;
   /** Human-readable diagnostics (truncation, unknown names). */
   diagnostics: string[];
 }
@@ -435,7 +472,10 @@ export function parseAgentsSection(
     return result;
   }
   for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!validNames.includes(name)) {
+    // Workers are named by CONVENTION (`worker`, `worker-*`), judges by the
+    // package's own list — an unknown name is still reported, so a typo in a
+    // judge role does not become an unreachable worker (2026-09-21).
+    if (!validNames.includes(name) && !isWorkerRoleName(name)) {
       result.diagnostics.push(`agents.${name} is not a known agent name; ignored`);
       continue;
     }
@@ -449,7 +489,7 @@ export function parseAgentsSection(
       continue;
     }
     const entry = value as Record<string, unknown>;
-    const out: { auto?: boolean; slots?: string[] } = {};
+    const out: { auto?: boolean; slots?: string[]; prompt?: string } = {};
     let autoInvalid = false;
     let slotsInvalid = false;
     if (entry.auto !== undefined && typeof entry.auto === "boolean") {
@@ -482,9 +522,21 @@ export function parseAgentsSection(
         slotsInvalid = true;
       }
     }
+    // A WORKER PRESET'S PROMPT (2026-09-21). Free text the user writes, and it
+    // reaches the pane as its `--system-prompt` FILE — never as an argv value,
+    // for the same reason a task file is used instead of a message: a
+    // multi-line string on a command line is one quoting bug away from a
+    // different program.
+    if (entry.prompt !== undefined) {
+      if (typeof entry.prompt === "string" && entry.prompt.trim().length > 0) {
+        out.prompt = entry.prompt;
+      } else {
+        result.diagnostics.push(`agents.${name}.prompt is not a non-empty string; ignored`);
+      }
+    }
     if (slotsInvalid || autoInvalid) {
       result.sections[name] = { malformed: true };
-    } else if (out.auto !== undefined || out.slots !== undefined) {
+    } else if (out.auto !== undefined || out.slots !== undefined || out.prompt !== undefined) {
       result.sections[name] = out;
     } else if (Object.keys(entry).length > 0) {
       // An entry with fields but NO valid one (e.g. `{slots:[1]}` or
@@ -501,6 +553,25 @@ export function parseAgentsSection(
 }
 
 /**
+ * Every `worker*` key either layer declares, in a stable order and without
+ * duplicates.
+ *
+ * The names are DISCOVERED rather than listed (2026-09-21): the whole point of
+ * a preset is that the user invents it (`worker-recon`, `worker-strong`), so a
+ * fixed registry would only be a second place to forget to add one.
+ */
+export function collectWorkerRoleNames(...raws: readonly unknown[]): string[] {
+  const found: string[] = [];
+  for (const raw of raws) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+    for (const name of Object.keys(raw as Record<string, unknown>)) {
+      if (isWorkerRoleName(name) && !found.includes(name)) found.push(name);
+    }
+  }
+  return found;
+}
+
+/**
  * Effective per-agent settings: project wins per agent, then global, then the
  * default (`auto: true`, empty slots). `source` records which layer decided,
  * so the UI can label it.
@@ -510,15 +581,16 @@ export function effectiveAgentsConfig(
   projectRaw: unknown,
   validNames: readonly string[] = KNOWN_AGENTS,
 ): { map: AgentsConfigMap; diagnostics: string[] } {
+  const names = [...validNames, ...collectWorkerRoleNames(globalRaw, projectRaw)];
   const map: AgentsConfigMap = {};
   const diagnostics: string[] = [];
-  for (const name of validNames) map[name] = { auto: true, slots: [], source: "default" };
+  for (const name of names) map[name] = { auto: true, slots: [], source: "default" };
 
   const apply = (raw: unknown, source: "global" | "project") => {
-    const parsed = parseAgentsSection(raw, validNames);
+    const parsed = parseAgentsSection(raw, names);
     diagnostics.push(...parsed.diagnostics);
     for (const [name, entry] of Object.entries(parsed.sections)) {
-      if (!validNames.includes(name)) continue; // unknown agent names ignored
+      if (!names.includes(name)) continue; // unknown agent names ignored
       if (entry.malformed) {
         // Explicitly present but field-invalid: keep whatever this layer
         // previously rendered — never treat it as "unconfigured" (the
@@ -530,6 +602,7 @@ export function effectiveAgentsConfig(
       map[name] = {
         auto: entry.auto ?? true,
         slots: entry.slots ?? [],
+        ...(entry.prompt === undefined ? {} : { prompt: entry.prompt }),
         source,
       };
     }
@@ -541,7 +614,7 @@ export function effectiveAgentsConfig(
   // an empty slot list is never a silent no-review state, and the renderer writes
   // the default-chain overlay so this layer shadows any lower slot render.
   // Surface it so the deployed default is never a surprise.
-  for (const name of validNames) {
+  for (const name of names) {
     const e = map[name]!;
     if (e.source !== "default" && e.auto === false && e.slots.length === 0) {
       diagnostics.push(`${name}: auto:false with an empty slot list — rendering the built-in default chain (an empty slot list is never a silent no-review state)`);

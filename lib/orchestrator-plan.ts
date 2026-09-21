@@ -72,7 +72,27 @@ export interface PlanTask {
   /** What the plan ASKED for; the scheduler may downgrade it (constraint 6). */
   execution: TaskExecution;
   status: TaskStatus;
-  /** Free-form: why blocked, what was decided, which child ran it. */
+  /**
+   * THE TASK BOOK — the assignment this task's child session is handed.
+   *
+   * Five sections, per {@link PLAN_TASK_SKELETON}: goal / deliverable / which
+   * module the code lands in / how the child knows it is done / what is out of
+   * scope. Written at PLAN time, so the plan AUDIT can refuse a task book too
+   * vague to negotiate a goal from, and the user can read every assignment in
+   * the approval transcript.
+   *
+   * This comment said "why blocked, what was decided, which child ran it" — a
+   * STATUS REMARK — until 2026-09-21. The field was re-pointed at the task book
+   * on 2026-09-17 (when file boundaries left the plan and the landing place
+   * moved here as free text) while the old comment and a second writer stayed
+   * behind: `set-status` wrote its reason onto this very field, overwriting the
+   * assignment. The status writer is gone now (`lib/orchestrator-tools.ts`);
+   * status reasons go to the gate log.
+   *
+   * Deliberately NOT part of {@link canonicalPlanText}: it grants nothing (no
+   * repo, no dependency, no parallelism, no station), so revising it must not
+   * revoke the user's approval.
+   */
   note?: string;
 }
 
@@ -683,6 +703,29 @@ export function formatPlanSummary(
       `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}${finishMark}` +
       (t.repo ? `\n    repo：${t.repo}` : ""),
     );
+    // THE TASK BOOK IS RENDERED (2026-09-21). Two facts make this line load-
+    // bearing rather than decorative, and both were measured as failures:
+    //
+    //  1. The plan AUDIT is told to check "is this task book complete enough for
+    //     a child to negotiate its own goal" (its 8th check), "read the landing
+    //     place", "read the finish task's note" (9th and 10th) — while this
+    //     summary, which IS the plan the auditor is given, rendered only the
+    //     structured fields. The auditor reported "四个任务仍然没有 note" on four
+    //     consecutive submissions of a plan whose notes were all present and
+    //     600–1100 characters long, and no revision of the notes could ever
+    //     change that conclusion.
+    //  2. The same summary IS the text the user reads before approving and the
+    //     text `orchestrator_plan({action:"read"})` returns, so the assignment
+    //     every child would receive was invisible to the two parties who decide
+    //     whether it is right.
+    //
+    // Rendering it changes NO hash: `canonicalPlanText` still excludes the note
+    // (that is what keeps a note revision free of a re-approval), so this is a
+    // reading-side fix and nothing else.
+    const note = (t.note ?? "").trim();
+    if (note) {
+      lines.push("    任务书：", ...note.split("\n").map((line) => `      ${line}`));
+    }
   }
   // NO "parallel downgrade" LINE ANY MORE (2026-09-10). It reported that two
   // tasks in one repo could not run at once — which stopped being true when

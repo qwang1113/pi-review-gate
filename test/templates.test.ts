@@ -142,7 +142,33 @@ test("the plan task book reaches both surfaces the manager writes it on", () => 
   // The ONE field the skeleton belongs to. The top-level `note` is
   // `set-status`'s 「why did this task move」 — a different question, and a
   // template there would be shown to a manager that is not writing a task book.
-  assert.equal(propsOf(plan)["note"]?.description, "Why — recorded on the task");
+  //
+  // It also says what it must NOT do (2026-09-21, user decision): land on the
+  // task book. `applyTaskStatus` used to write this reason straight onto
+  // `plan.tasks[].note`, so a status change overwrote the assignment the plan
+  // had been audited and approved for.
+  const statusNote = propsOf(plan)["note"]?.description ?? "";
+  assert.match(statusNote, /set-status/);
+  assert.match(statusNote, /task book/);
+  assert.ok(!statusNote.includes(PLAN_TASK_SKELETON), "the skeleton belongs to the task book alone");
+  assert.doesNotMatch(statusNote, /照抄这个骨架填即可/);
+});
+
+test("a set-status reason never lands on the task book (2026-09-21)", async () => {
+  const parsed = parsePlan({
+    title: "plan",
+    intent: "任务书只有一个写者",
+    tasks: [{ id: "t1", title: "任务一", repo: "/repo", note: "目标：把任务书写清楚" }],
+  });
+  assert.ok(parsed.ok, `fixture must parse: ${parsed.problems?.join("; ") ?? ""}`);
+  const world = makeFakeWorld({ plan: parsed.plan! });
+  await world.call("orchestrator_plan", {
+    action: "set-status", taskId: "t1", status: "blocked", note: "等上游接口",
+  });
+  assert.equal(world.plan()?.tasks.find((t) => t.id === "t1")?.note, "目标：把任务书写清楚",
+    "the task book survives a status change — the field has exactly one writer");
+  assert.equal(world.plan()?.tasks.find((t) => t.id === "t1")?.status, "blocked",
+    "…while the status itself still moved");
 });
 
 test("the project manager's standing block renders the task book from the same constant", () => {

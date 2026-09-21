@@ -605,12 +605,18 @@ async function handlePlanAction(
     if (!plan) return fail("review-gate: 还没有 plan。");
     const taskId = String(params.taskId ?? "");
     const status = String(params.status ?? "") as TaskStatus;
-    const moved = applyTaskStatus(plan, taskId, status, {
-      note: params.note === undefined ? undefined : String(params.note),
-      now: nowIso,
-    });
+    // NO `note` LANDS ON THE TASK (2026-09-21). `set-status` used to carry one
+    // and `applyTaskStatus` writes it straight onto the task — and since
+    // 2026-09-17 that field IS the task book (`plan.tasks[].note`, the text a
+    // child session is handed as its assignment), so a status change silently
+    // OVERWROTE the instructions the plan was audited and approved for. The
+    // plan has exactly one free-text field per task and the task book owns it;
+    // a status reason is a log line, not a rewrite of the assignment.
+    const reason = String(params.note ?? "").trim();
+    const moved = applyTaskStatus(plan, taskId, status, { now: nowIso });
     if (!moved.ok) return fail("review-gate: " + moved.reason);
     deps.savePlan(moved.plan);
+    if (reason) deps.log(`orchestrator task ${taskId} → ${status}: ${reason}`);
     return reply(`review-gate: 任务 ${taskId} → ${status}。\n` + formatPlanSummary(moved.plan));
   }
 
@@ -793,7 +799,11 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       })),
       taskId: Type.Optional(Type.String({ description: "For action=\"set-status\"" })),
       status: Type.Optional(Type.Enum({ pending: "pending", running: "running", done: "done", blocked: "blocked" })),
-      note: Type.Optional(Type.String({ description: "Why — recorded on the task" })),
+      note: Type.Optional(Type.String({
+        description:
+          "For action=\"set-status\": WHY. Recorded in the gate log only — it never touches the task " +
+          "book (`plan.tasks[].note`), which is the assignment a child session is handed.",
+      })),
       decisionId: Type.Optional(Type.String({
         description: "For action=\"resolve-decision\" (add-decision mints its own id)",
       })),
