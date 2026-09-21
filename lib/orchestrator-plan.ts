@@ -718,7 +718,7 @@ export function formatPlanSummary(
     //
     //  1. The plan AUDIT is told to check "is this task book complete enough for
     //     a child to negotiate its own goal" (its 8th check), "read the landing
-    //     place", "read the finish task's note" (9th and 10th) — while this
+    //     place", "read the last two tasks' notes" (9th and 10th) — while this
     //     summary, which IS the plan the auditor is given, rendered only the
     //     structured fields. The auditor reported "四个任务仍然没有 note" on four
     //     consecutive submissions of a plan whose notes were all present and

@@ -198,9 +198,9 @@ export function narrowedRepoStations(
 ): RepoNarrowing[] {
   const narrowings: RepoNarrowing[] = [];
   for (const [repo, taskIds] of tasksByRepo(plan, defaultRepo)) {
-    // The COUNT is every task in the repo, the finish task included: it is one
-    // PR per repo per requirement, and a plan whose last task publishes while
-    // a sibling opens its own PR publishes the same requirement twice.
+    // The COUNT is every task in the repo, the acceptance task included: it is
+    // one PR per repo per requirement, and a plan whose last task publishes
+    // while a sibling opens its own PR publishes the same requirement twice.
     if (taskIds.length < 2) continue;
     if (allowsMultiplePrs(plan, repo)) continue;
     // A plan that already stops at or below the cap is not narrowed — saying
