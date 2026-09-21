@@ -295,6 +295,21 @@ export type MultiSelectOutcome =
  * “Nothing could render this.” The interview reads it and hands the questions
  * back to the agent (the same landing as a host with no dialogs), rather than
  * recording a box the user never saw as closed.
+ *
+ * KNOWN LIMIT, ACCEPTED (quality round P2, 2026-09-22). When such a question
+ * goes through the ORCHESTRATION channel, the channel side settles it as
+ * `dismissed` — the same `undefined` a closed box gives, because over there a
+ * renderer's return value IS the human's answer. So a project manager reading
+ * the record cannot tell “nobody was shown this” from “the user closed it”, and
+ * its own chance to answer ends when the human side does. Fixing that properly
+ * means teaching the channel a third outcome (`unshown`) — a new value on a
+ * contract whose whole point is that a human answer and a proxy answer are
+ * indistinguishable downstream — and the reachable case is narrow: it needs a
+ * host with no custom components (RPC) AND a checklist question AND a manager
+ * that was not already answering. The direction is safe either way: the
+ * question settles as unanswered inside the interview (never as an answer),
+ * this process never puts the sentinel on the wire, and the reply names the
+ * checklist that was not shown.
  */
 export const MULTI_UNAVAILABLE = "\u0000rg-multi-unavailable\u0000";
 
