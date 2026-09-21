@@ -55,7 +55,7 @@ export const PLAN_TASK_SKELETON = [
 ].join("\n");
 
 /**
- * THE LAST TASK IS THE DELIVERY (2026-09-18, user decision).
+ * THE LAST TWO TASKS ARE THE TAIL (2026-09-22, user decision).
  *
  * A plan whose last task is one more feature has nobody left to publish it:
  * the manager may not ship (constraint 2) and every child of a multi-task repo
@@ -63,22 +63,33 @@ export const PLAN_TASK_SKELETON = [
  * with the work committed, the plan complete and no way to open the PR — and
  * the fix the user named is this one, not "let the manager drop into loop".
  *
- * POSITION, NOT A FIELD: the plan's LAST task IS the finish task
- * (`finishTaskId`), and its station is `plan.deliveryStation` no matter how
- * many tasks its repo holds. Rendered wherever the task book is (the `note`
- * field, the plan tool's description, this standing block) so the manager
- * cannot write a plan that ends in mid-air — and the plan audit
+ * 2026-09-18 put that whole tail on ONE task, which made the session that
+ * wrote the code the one that declared it good. The tail is TWO links now: the
+ * SECOND-to-last task merges, takes the whole through one review and commits;
+ * the LAST one is the independent acceptance task — no new requirement, no
+ * business code — and it delivers (push, PR).
+ *
+ * POSITION, NOT A FIELD: the plan's LAST task IS the acceptance task
+ * (`acceptanceTaskId`), and its station is `plan.deliveryStation` no matter how
+ * many tasks its repo holds; the wrap-up is second-to-last and is capped like
+ * any other task. Rendered wherever the task book is (the `note` field, the
+ * plan tool's description, this standing block) so the manager cannot write a
+ * plan that ends in mid-air — and the plan audit
  * (lib/orchestrator-plan-audit.ts) objects with a P1 when it happens anyway.
  */
 export const PLAN_FINISH_TASK_BRIEF = [
-  "## plan 的最后一环 = 收尾任务（位置约定：plan 顺序的**最后一个**任务）",
-  "它不产出新需求，只负责交付：汇合其余任务的成果 → 走一次整体审核 → commit → push → 开 PR。",
+  "## plan 的最后两环 = 收尾任务 + 独立验收任务（位置约定：plan 顺序的**倒数第二个**与**最后一个**，不是 plan 的新字段）",
+  "**倒数第二个 = 收尾任务**：汇合其余任务的成果 → 走一次整体审核 → commit。",
+  "它的站点按同一 repo 规则收窄（同一 repo 的一个需求只出一个 PR）—— 汇合是你的事：",
+  "用 `orchestrator_close({worktree: \"merge\"})` 把各任务的分支合进你的工作区，汇合完才派它。",
+  "**最后一个 = 独立验收任务**：不产出新需求、不改业务代码，只做真实验收与交付 ——",
+  "跑真实路径 / 命令 / 观察（不是复述实现）→ push → 开 PR。",
   "它的站点就是 plan 的 `deliveryStation`，**不受「同一 repo 多任务收窄为 commit」的影响**：",
   "被收窄就没有能 ship 的一方了 —— 你被禁止写代码，同 repo 的子会话又被收窄，整轮会卡在交付上。",
-  "任务书照上面的骨架写，另外写清：交付物（PR 链接 / 已 push 的分支）、要汇合哪些任务、",
-  "整体审核的范围。汇合是你的事：用 `orchestrator_close({worktree: \"merge\"})` 把各任务的分支合进",
-  "自己的工作区，汇合完才派收尾任务 —— 它必须排在最末（其余任务都 done 之后再派），",
-  "否则它汇合到的是半成品。",
+  "两个任务书都照上面的骨架写，另外写清：收尾任务的汇合范围与整体审核怎么做；",
+  "验收任务怎么做真实验收、交付物是什么（PR 链接 / 已 push 的分支）。",
+  "派发顺序：其余任务都 done 之后再派收尾任务，它 commit 之后再派验收任务 ——",
+  "否则它们拿到的是半成品。",
 ].join("\n");
 
 
@@ -134,7 +145,7 @@ export const ORCHESTRATOR_DIRECTIVE =
   "1. **plan 未经用户批准，禁止 spawn 任何子会话**。自己写 plan 文件不算数 —— 和 loop goal 同一机制。\n" +
   "2. **禁止写代码**：只放行 plan（`.pi/` 下）与交接/汇报文档（`docs/orchestrator-*.md`）。\n" +
   "2b. **你全程保持编排身份**：不降级、不切模式、不换到 loop 去收尾 —— 交付是 plan 最后一环" +
-  "（收尾任务）的活，不是你的。plan 少了这一环是你写 plan 的问题：改 plan，别改自己的模式。\n" +
+  "（独立验收任务）的活，不是你的。plan 少了这一环是你写 plan 的问题：改 plan，别改自己的模式。\n" +
   "3. plan 里还有未完成任务 → `declare_done` 被拒（判据是**整体任务**，不是你自己这一轮）。\n" +
   "4. 还有活着的子会话 → `declare_done` 被拒。\n" +
   "5. 每个任务必须声明 `repo`（该任务工作的仓库绝对路径）；同一 repo 的任务不会并行调度（自动降级串行），" +

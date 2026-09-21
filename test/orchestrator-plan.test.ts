@@ -513,20 +513,26 @@ test("the summary names the repo whose tasks are held at commit — and stays qu
   assert.doesNotMatch(allowed, /只出一个 PR/, "the user's own exemption means there is nothing to warn about");
 });
 
-// The plan's LAST task is the finish task (2026-09-18) — it is the one that
-// merges, is reviewed as a whole, commits, pushes and opens the PR, and the
-// only one whose station is the plan's own.
-test("the summary marks WHICH task delivers — and only that one", () => {
+// The plan's LAST two tasks are the tail (2026-09-22): the second-to-last is
+// the wrap-up (merge → one review → commit), the last is the INDEPENDENT
+// acceptance task (real acceptance → push → PR) — and only the latter keeps the
+// plan's own station.
+test("the summary marks WHICH task accepts and delivers — and only that one", () => {
   const tasks = [
     { id: "work", title: "做事", repo: "/repo" },
-    { id: "deliver", title: "收尾", repo: "/repo" },
+    { id: "wrap", title: "收尾", repo: "/repo" },
+    { id: "accept", title: "验收", repo: "/repo" },
   ];
   const lines = formatPlanSummary(planOf({ deliveryStation: "pr", tasks }), "/repo").split("\n");
-  const deliver = lines.find((l) => l.startsWith("- [pending] deliver"));
+  const accept = lines.find((l) => l.startsWith("- [pending] accept"));
+  const wrap = lines.find((l) => l.startsWith("- [pending] wrap"));
   const work = lines.find((l) => l.startsWith("- [pending] work"));
-  assert.ok(deliver && work, "both tasks are listed with their status");
-  assert.match(deliver!, /收尾任务/, "the user approves the station — they must see who carries it out");
-  assert.doesNotMatch(work!, /收尾任务/);
+  assert.ok(accept && wrap && work, "every task is listed with its status");
+  assert.match(accept!, /独立验收任务/, "the user approves the station — they must see who carries it out");
+  assert.match(accept!, /真实验收/, "…and that the last link runs the real acceptance");
+  assert.doesNotMatch(wrap!, /独立验收任务/,
+    "the wrap-up merges and commits — it does not accept, and it is not the exempt one");
+  assert.doesNotMatch(work!, /独立验收任务/);
 });
 
 test("the canonical text is order-independent for sets", () => {
