@@ -175,11 +175,25 @@ const UP_SEQUENCES = ["\u001b[A", "\u001bOA", "k"];
 const DOWN_SEQUENCES = ["\u001b[B", "\u001bOB", "j"];
 const ENTER_SEQUENCES = ["\r", "\n"];
 
+/**
+ * SPACE, in every spelling a terminal may send it: the plain byte, the Kitty
+ * CSI-u form (`\u001b[32u`, with or without its explicit “no modifier”, and
+ * with the base-layout variant `\u001b[32::32;1u`), and xterm's
+ * modifyOtherKeys form (`\u001b[27;1;32~`).
+ *
+ * THIS ONE KEY IS MATCHED HERE EVEN WHEN A HOST SUPPLIES ITS READER, because
+ * there is nothing to borrow: pi's select keybindings are up/down/pageUp/
+ * pageDown/confirm/cancel, and a CHECKBOX has no binding to toggle one.
+ * Matching the sequences literally keeps the terminal's protocol in one place
+ * rather than shipping a second copy of pi-tui's key table.
+ */
+const SPACE_SEQUENCES = /^(?: |\u001b\[32(?:::\d+)?(?:;1)?u|\u001b\[27;1;32~)$/;
+
 export function defaultMultiChoiceKey(data: string): MultiChoiceKeyName | undefined {
   if (UP_SEQUENCES.includes(data)) return "up";
   if (DOWN_SEQUENCES.includes(data)) return "down";
   if (ENTER_SEQUENCES.includes(data)) return "enter";
-  if (data === " ") return "space";
+  if (SPACE_SEQUENCES.test(data)) return "space";
   if (data === "\u001b") return "escape";
   return undefined;
 }

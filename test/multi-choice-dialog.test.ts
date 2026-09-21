@@ -318,4 +318,10 @@ test("the fallback reader names every key the box understands", () => {
   assert.equal(defaultMultiChoiceKey(" "), "space");
   assert.equal(defaultMultiChoiceKey("\u001b"), "escape");
   assert.equal(defaultMultiChoiceKey("q"), undefined);
+  // SPACE IS THE ONE KEY pi's select keybindings cannot lend us (there is no
+  // toggle binding), so the terminal's other spellings live HERE: Kitty CSI-u
+  // and xterm modifyOtherKeys.
+  for (const space of ["\u001b[32u", "\u001b[32;1u", "\u001b[32::32;1u", "\u001b[27;1;32~"]) {
+    assert.equal(defaultMultiChoiceKey(space), "space", JSON.stringify(space));
+  }
 });
