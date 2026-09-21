@@ -992,6 +992,20 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
              whole push → PR chain through)
 ```
 
+**Five stages, switchable — and all five ON by default.** The goal negotiation
+(with its restatement), the `reviewer`, the `quality-auditor`, the
+real-acceptance round and the full precommit lane are the USER's switches:
+`choose_loop_stages` (no parameters) opens the gate's own five-item checklist,
+and a stage that is not ticked is **released at every one of its checkpoints** —
+its work does not run, its blocks do not apply, and the goal stage takes the
+restatement requirement with it. An empty submission is a legal “all five off”,
+and pressing Enter accepts the all-ticked defaults, so a session that never
+opens the box behaves exactly as before. The gate shows the same box itself
+before `propose_restatement` and before the first edit when nothing has been
+chosen yet; `/gate-status` and the status strip name the stages that are off.
+Orchestrator mode and its child sessions are not offered the switch — they
+always run the full loop. The rule and the record live in `lib/loop-stages.ts`.
+
 **One reviewer per round, whatever the diff size.** There is no tiering:
 the gate registers ONE commit range for the whole change, regardless
 of how many files or lines it spans, and the reviewer audits it all.

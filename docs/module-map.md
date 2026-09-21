@@ -499,7 +499,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（148 个模块）
+## 五、`lib/` 全量速查表（150 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -585,6 +585,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `llm-classify.ts` | 语义第二意见（DeepSeek V4 Flash），契约上只能加拦（TIGHTEN-ONLY） |
 | `loop-goal.ts` | L8：loop 会话退出契约的文件、审批记录与注入。**例外的一条纯展示出口**（2026-09-18）：`parseGoalCriteria(text)` 只从「退出标准」小节里**原样**取出条目（认 `退出标准`/`退出判据`/`Exit criteria` 三种标题、`1.`/`1、`/`- `/`* ` 四种起头；缩进的非条目行算上一条的续行，顶格行一律算小节结束），不改写、不缩写、不排序 —— 曾有一版把它压成「引导小句」，已按用户口径删除（切中文句子只会产出「真值同源」这类裸名词，且需要在屏幕上重写用户批准的契约）。它刻意吃 **goal 文件原文**而不是 `LoopGoal.text` —— 后者为提示词预算在 `LOOP_GOAL_MAX_CHARS` 处截断，实测本仓 48 份 goal 里 15 份的标准落在截断点之后。不参与任何判定 |
 | `loop-stall.ts` | L2 自动续跑的断路器：外部阻塞（限流、模型不可达）时停止空转 |
+| `loop-stages.ts` | **五个环节的开关（2026-09-22，用户决定）**：goal（含需求反述）、功能审查 reviewer、质量审查 quality-auditor、真实验收 acceptance、全量 precommit —— 默认**全开＝今天的行为**（没有记录 ⇒ `stageOpen` 一律 true，老 sidecar 与全新会话行为一致）。用户自己在**门禁自己的**五项复选框里勾选（`loopStagesSpec`：行文本即选项原文，`defaultChecked` 是推荐组，空勾合法＝全关）；`choose_loop_stages` 是**无参**工具（agent 只表达意图，框的文案、默认、记录、放行全归门禁），`ensureLoopStages` 是**同一份实现**的兜底入口（第一次 edit/write 或 `propose_restatement` 时尚无记录 ⇒ 门禁自己弹同一个框，扩展侧一线程一次、关框/画不出框都只按默认走、不记录假答案）。记录落在 `GateState.stages`（`sanitizeLoopStages` 全有或全无：半份记录丢弃 → 回到全开，因为一条记录只能**放宽**门禁）；五个卡点各自调**同一个** `stageOpen`（ship 权威在 `gate-state.ts` 的 `unmetRequirements`，L3 钩子在 `scripts/pre-commit-check.cjs` 读同一份 sidecar），故「关了但还拦」在两层不可能出现；编排模式与其子会话、judge pane 一律不提供（`stagesOffered`，一律走完整循环） |
 | `model-config.ts` | 每个 agent 的模型链配置层：把 `review-gate.json` 的 `agents` 段渲染成 frontmatter；`validateAgentsForStartup` 启动硬检查（无内置默认） |
 | `model-health.ts` | judge 模型槽的**冷却记忆**（纯函数，2026-09-10）：键是 `provider/id`（丢掉 thinking 后缀，否则改一个槽的 level 就把学到的东西忘了）→ 最近一次失败；`MODEL_FAILURE_TTL_MS`（10 分钟）内派发跳过该槽、过期自动恢复（并带条数上限，坏 id 不会把文件撑爆）。`selectHealthySlot` 给「第一个不在冷却期的槽」，全都在冷却时仍按链头派发并标记 `allCooling`（fail-open：开不出来的轮次连失败都报不了）；`recordModelFailure` / `clearModelFailure`（轮转成功即证明目标可用，旧记录必须清掉，否则 TTL 内白白跳过好模型）/ `nextSlotAfter`（pane 侧走链）/ `describeCoolingSlot`。持久化住在 `.pi/judge-hierarchy.json` 的 `modelHealth`（opener 读写；judge pane 按契约从不写仓库状态） |
 | `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |

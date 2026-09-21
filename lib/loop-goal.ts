@@ -851,6 +851,24 @@ export function buildUnconfirmedGoalDirective(goal: LoopGoal): string {
   );
 }
 
+/**
+ * Injected when the USER switched the goal stage off (2026-09-22,
+ * lib/loop-stages.ts). No restatement, no audit, no approval dialog — and SAYING
+ * SO is the point: the missing-goal directive would otherwise send the agent to
+ * negotiate a contract the user has explicitly released.
+ */
+export function buildGoalStageOffDirective(): string {
+  return (
+    "## Loop goal — this session has none (the goal stage is OFF)\n" +
+    "The USER switched the goal stage off for this session, so there is no exit contract to " +
+    "negotiate: do NOT call `propose_restatement` or `propose_loop_goal`, and a leftover " +
+    "`" + LOOP_GOAL_RELPATH + "` in the repo is not this session's contract. Work to what the " +
+    "user actually asked for; the edit gate and the ship gate do not require an approved goal, " +
+    "and deliveries stop wherever the stage switches and the plan leave them. To switch the " +
+    "stage back on, call `choose_loop_stages` — the user re-ticks it in the gate's own box."
+  );
+}
+
 /** Per-process data fence for the injected goal text (see buildLoopGoalDirective). */
 const FENCE = "LOOP-GOAL-" + randomBytes(4).toString("hex");
 

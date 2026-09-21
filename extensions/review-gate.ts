@@ -434,6 +434,20 @@ import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
 // module owns their bodies (and lib/goal-prereview-tools.ts the audit record).
 import { registerGoalTools } from "../lib/goal-tools.ts";
 import { registerRestatementTools } from "../lib/restatement.ts";
+// THE FIVE STAGE SWITCHES (2026-09-22): the rule, the record, the dialog and
+// the tool live in ONE module; this file only reads `stageOpen` at the five
+// checkpoints and wires the deps the module needs.
+import {
+  ensureLoopStages,
+  registerLoopStageTools,
+  stageOpen,
+  stagesOff,
+  stagesOffered,
+  stagesSummary,
+  type LoopStage,
+  type LoopStagesDeps,
+  type LoopStagesRecord,
+} from "../lib/loop-stages.ts";
 import { recordGoalPrereview, type GoalPrereviewDeps } from "../lib/goal-prereview-tools.ts";
 // The L1 tool_call hook moved the same way — it was the single biggest thing
 // left in this file. lib/ship-gate-hook.ts owns the dispatch (and the
@@ -578,6 +592,7 @@ import {
   loopGoalRelPath,
 
   buildLoopGoalDirective,
+  buildGoalStageOffDirective,
   goalTextHash,
   isLoopGoalConfirmed,
   readLoopGoal,
@@ -1344,6 +1359,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         // negotiate a goal it already has (reviewer P2, round 1).
         if (owner === "inherited" && existing) s = inheritGoalContract(s, existing);
       }
+      // THE STAGE SWITCHES ARE A SESSION FACT, carried into every repo this
+      // session writes (2026-09-22, lib/loop-stages.ts): the box is answered
+      // once for the session, so a second repo must not read "no record" as
+      // "all five on" — the L3 hooks read the repo-local sidecar, and they
+      // would otherwise keep blocking on a stage the user switched off. A
+      // repo that carries its own record keeps it.
+      if (s.stages === undefined && state.stages !== undefined) s.stages = state.stages;
       repoStateCache.set(root, s);
     }
     return s;
@@ -3670,7 +3692,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
       }
     }
-    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    if (!goalStageSatisfied()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     return [...problems, ...completion];
   }
 
@@ -4908,7 +4930,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // NON-GIT SHORT-CIRCUIT: the loop goal is a per-REPO contract — outside
     // a repository there is no repo to bind it to, so it must not surface
     // as an unmet requirement either (2026-09-02, user decision).
-    if (sessionInGit && !loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    if (sessionInGit && !goalStageSatisfied()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     // ROUND READING (2026-09-17, user decision): how many rounds THIS session
     // SENT OUT — a loop session's own submissions, a judge pane's own round
     // number. Both are already in memory (no git, no fingerprint, so the
@@ -4932,6 +4954,11 @@ export default function reviewGate(pi: ExtensionAPI) {
           showsRoundReading({ mode: state.taskMode, judge: judgePane })
         ? { rounds: roundReading }
         : {}),
+      // THE STAGE SWITCHES, visible on the strip whenever anything is OFF
+      // (2026-09-22, user decision: a released checkpoint must be readable at a
+      // glance). All-on renders nothing, which keeps today's strip unchanged;
+      // this is in-memory state, so the cheap-by-contract rule above holds.
+      ...(stagesOff(state.stages).length > 0 ? { stages: stagesSummary(state.stages) } : {}),
       unmet: completion,
     };
   }
@@ -4973,11 +5000,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.taskMode !== "loop") {
       return none(`本会话模式是 ${state.taskMode ?? "未初始化"}，它不持有 plan/goal 契约`);
     }
-    if (!loopGoalConfirmed()) {
+    if (!goalStageSatisfied()) {
       return none(
-        readSessionLoopGoal(primaryRepoRoot).present
-          ? "goal 还是一份草稿：用户没批准过这段文本（批准了才有退出标准可看）"
-          : "还没有 goal 文件 —— 先反述需求、让用户批准一份退出契约",
+        stageIsOn("goal")
+          ? (readSessionLoopGoal(primaryRepoRoot).present
+            ? "goal 还是一份草稿：用户没批准过这段文本（批准了才有退出标准可看）"
+            : "还没有 goal 文件 —— 先反述需求、让用户批准一份退出契约")
+          : "goal 环节已关闭（用户设定的环节开关）—— 本会话不持有 goal 契约",
       );
     }
     const rows = goalCriteriaRows();
@@ -5847,6 +5876,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
 
     isEditTool: (toolName) => EDIT_TOOL_NAMES.has(toolName),
     isJudgeSession: () => readJudgeSideEnv(process.env) !== undefined,
+    // THE STAGE FALLBACK (2026-09-22): the box the USER answers once per
+    // session, raised by the gate itself when the first edit (or the
+    // restatement that precedes it) arrives without a choice on record.
+    ensureLoopStages: (ctx) => ensureLoopStagesFor(ctx),
     cwd: () => cwd,
     primaryRepoRoot: () => primaryRepoRoot,
     taskMode: () => state.taskMode,
@@ -5874,7 +5907,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     headCommitTree,
     hasStagedChanges,
     unreviewedTreesSince,
-    loopGoalConfirmed: () => loopGoalConfirmed(),
+    loopGoalConfirmed: () => goalStageSatisfied(),
     deliveryStation: (root) => deliveryStationFor(root),
 
     crossRepoVerdictHint,
@@ -6441,6 +6474,107 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     return isLoopGoalConfirmed(goal, st.loopGoal, raw);
   }
 
+  // ---------- the five stage switches (2026-09-22, lib/loop-stages.ts) ----------
+
+  /**
+   * THE SESSION'S STAGE RECORD, read for one repo.
+   *
+   * The user's choice is a SESSION fact (the box is shown once, by this
+   * session), while the sidecar that carries it is per repo — so a repo this
+   * session has not written to yet falls back to the primary repo's copy
+   * instead of reading "no record" as "all five on" behind the user's back.
+   */
+  function loopStagesRecord(root: string = primaryRepoRoot): LoopStagesRecord | undefined {
+    const st = root === primaryRepoRoot ? state : stateForRepo(root);
+    return st.stages ?? state.stages;
+  }
+
+  /** IS THIS STAGE ON? — the ONE query, at all five checkpoints. */
+  function stageIsOn(stage: LoopStage, root?: string): boolean {
+    return stageOpen(loopStagesRecord(root), stage);
+  }
+
+  /**
+   * IS THE GOAL CONTRACT SATISFIED — because the user approved it, or because
+   * the user switched the goal stage off?
+   *
+   * This is the ENFORCEMENT question, and it is deliberately not folded into
+   * `loopGoalConfirmed`: that one is a FACT ("this exact text carries the
+   * user's approval") read by the approval machinery itself, while this one
+   * asks what the gate should do about it. A stage that is off answers the
+   * second question positively without inventing an approval the user never
+   * gave.
+   */
+  function goalStageSatisfied(root: string = primaryRepoRoot, st: GateState = state): boolean {
+    return !stageIsOn("goal", root) || loopGoalConfirmed(root, st);
+  }
+
+  /**
+   * THE LOOP'S STANDING GOAL DIRECTIVE, stage-aware (2026-09-22).
+   *
+   * With the goal stage ON this is `buildLoopGoalDirective` over this repo's
+   * file and approval (unchanged). With it OFF there is no contract to
+   * negotiate, and the missing-goal text would send the agent to negotiate one
+   * anyway — so the agent is told the truth instead (lib/loop-goal.ts owns
+   * that wording, like every other goal paragraph).
+   */
+  function loopGoalDirectiveText(): string {
+    if (!stageIsOn("goal")) return buildGoalStageOffDirective();
+    return buildLoopGoalDirective(readSessionLoopGoal(primaryRepoRoot), goalStageSatisfied());
+  }
+
+  /**
+   * Write the user's choice where every checkpoint reads it: on the primary
+   * state, and MIRRORED into every repo this session knows about — each repo
+   * has its own sidecar, and the L3 hooks read the repo-local one, so a
+   * secondary repo without the mirror would keep enforcing a stage the user
+   * switched off.
+   */
+  function applyStages(record: LoopStagesRecord, ctx: unknown): void {
+    state.stages = record;
+    for (const root of knownRepoRoots()) {
+      const st = stateForRepo(root);
+      if (st === state) continue;
+      st.stages = record;
+      persistRepo(ctx as unknown as ExtensionContext, root);
+    }
+    persist(ctx as unknown as ExtensionContext);
+  }
+
+  /** The five deps the stage module needs; the dialog is the gate's own box. */
+  const loopStageDeps: LoopStagesDeps = {
+    state: () => state,
+    refusal: () => stagesOffered({
+      mode: state.taskMode,
+      judge: isJudgePane(),
+      orchestrated: orchestrationIdFromEnv(process.env) !== undefined,
+    }),
+    askMulti: (uiCtx, spec, opts) => askMultiChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
+    persist: (record, ctx) => applyStages(record, ctx),
+    log: (message) => log(`[stages] ${message}`),
+  };
+
+  /**
+   * THE FALLBACK, asked before a tool whose gate the switches decide
+   * (`propose_restatement`, or the first edit/write).
+   *
+   * ONCE PER SESSION, and only while there is no record: a box the user closed
+   * is an answer too ("run it as it is"), and re-opening it on every edit would
+   * be grinding. A host that cannot draw it says so once and then keeps the
+   * defaults — the same landing a dismissed box has.
+   */
+  let stagesAsked = false;
+  async function ensureLoopStagesFor(ctx: unknown): Promise<void> {
+    if (stagesAsked || state.stages !== undefined) return;
+    stagesAsked = true;
+    if (stagesOffered({
+      mode: state.taskMode,
+      judge: isJudgePane(),
+      orchestrated: orchestrationIdFromEnv(process.env) !== undefined,
+    }) !== undefined) return;
+    await ensureLoopStages(loopStageDeps, ctx);
+  }
+
   /**
    * WHERE THIS ROUND STOPS for one repo, or `undefined` when this session has
    * no delivery contract at all (lib/delivery-station.ts).
@@ -6466,6 +6600,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       return state.orchestrator?.approvedPlan?.deliveryStation ?? DEFAULT_DELIVERY_STATION;
     }
     if (state.taskMode !== "loop") return undefined;
+    // A stage that is off has no contract to read a station from — the same
+    // `undefined` ("no ceiling beyond the ordinary gates") a session that
+    // never negotiated a goal has always got.
+    if (!stageIsOn("goal", root)) return undefined;
     const st = root === primaryRepoRoot ? state : stateForRepo(root);
     if (!loopGoalConfirmed(root, st)) return undefined;
     return st.loopGoal?.station ?? DEFAULT_DELIVERY_STATION;
@@ -6511,7 +6649,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         gitRootOfDir(nearestExistingDir(pathDirname(absPath))) ?? primaryRepoRoot
       : primaryRepoRoot;
     const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
-    if (!loopGoalEditGate({ taskMode: state.taskMode, goalConfirmed: loopGoalConfirmed(goalRoot, goalSt) })) {
+    if (!loopGoalEditGate({ taskMode: state.taskMode, goalConfirmed: goalStageSatisfied(goalRoot, goalSt) })) {
       // Name the repo that lacks an approved goal: in a multi-repo session an
       // anonymous block makes the agent re-approve the PRIMARY goal and stay
       // blocked forever — the propose_loop_goal `repo` parameter is what
@@ -6849,7 +6987,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         state.taskMode !== "explore" &&
         state.taskMode !== "normal" &&
         state.taskMode !== "orchestrator" &&
-        !loopGoalConfirmed() &&
+        !goalStageSatisfied() &&
         goalReminderDue({
           now: nowMs,
           lastAt: lastGoalReminderAt,
@@ -7230,6 +7368,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // which is why each of them stamps `precommitBypassed` and why the
       // receipt below says so out loud rather than only the first time.
       const precommitBypassed = st.bypass.active;
+      // A STAGE THAT IS OFF IS NOT A PREREQUISITE (2026-09-22, user decision):
+      // with `precommit` switched off the lane never runs, and a checkpoint
+      // that demanded its PASS would be unsatisfiable — the same deadlock the
+      // bypass above exists for, so it is released the same way (and said out
+      // loud on the receipt below, where the bypass is named too).
+      const precommitStageOn = stageIsOn("precommit", root);
       // B1 (2026-09-10): a checkpoint MAY land while its verification is IN
       // FLIGHT — that is the whole point of running the long lane beside the
       // chain instead of in front of it. The receipt is the live promise, not
@@ -7238,11 +7382,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // arrives afterwards withdraws the round's READY (see
       // `recordReviewVerdict`) and wakes the agent with the reason.
       const verifyingNow =
+        precommitStageOn &&
         !precommitBypassed &&
         inFlightPrecommit?.root === root &&
         st.precommit.verdict === "NOT_RUN";
 
-      if (!precommitBypassed && !verifyingNow && st.precommit.verdict !== "PASS") {
+      if (precommitStageOn && !precommitBypassed && !verifyingNow && st.precommit.verdict !== "PASS") {
         return {
           content: [{
             type: "text",
@@ -7258,7 +7403,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // Round-4 P2: dev-flow requires the FULL suite (lint + typecheck +
       // build + test) before a checkpoint and 送审 — a fast-lane PASS would
       // otherwise let a round go to review with the suite never run.
-      if (!precommitBypassed && !verifyingNow && st.precommit.testScope !== "full") {
+      if (precommitStageOn && !precommitBypassed && !verifyingNow && st.precommit.testScope !== "full") {
         return {
           content: [{
             type: "text",
@@ -7503,9 +7648,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
                   "注意 bypass 是**会话级**的：在本会话里它对之后每一次 checkpoint 同样生效，" +
                   "根因修好之后请让用户 `/gate-reset`（或重开会话），别让它一直挂着。"
 
-                : "\n\nThe required full precommit already ran typecheck + build + the COMPLETE test suite on this exact content " +
+                : precommitStageOn
+                ? "\n\nThe required full precommit already ran typecheck + build + the COMPLETE test suite on this exact content " +
                   "(cache: an unchanged input set is reused in seconds — do NOT manually re-run the full suite or `tsc`; " +
-                  "run only targeted tests for files you keep editing, and let the round's own full lane be the single gate).") +
+                  "run only targeted tests for files you keep editing, and let the round's own full lane be the single gate)."
+                // THE SWITCH SAYS IT, NOT A SILENCE (2026-09-22): a reader must
+                // never conclude the suite ran when it was released by choice.
+                : "\n\n**precommit 环节已关闭**（用户设定的环节开关）：本轮不跑全量测试，ship 也不要求 precommit PASS。") +
               (sizeCheck.advisory.length ? "\n\n" + formatFileSizeVerdict(sizeCheck) : ""),
           }],
           details: { committed: true, sha, precommitBypassed, files: sweptIn, leftOut },
@@ -7821,8 +7970,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   }): Promise<
     | {
         ok: true;
-        /** WHICH role this chain dispatches after prepare (see the routing rule below). */
-        role: "reviewer" | typeof QUALITY_ROLE;
+        /**
+         * WHICH role this chain dispatches after prepare (see the routing rule
+         * below). `null` = NOTHING was dispatched: the user switched the review
+         * and quality stages off, so the chain ran only what is on (the
+         * precommit lane) and there is no judge to start.
+         */
+        role: "reviewer" | typeof QUALITY_ROLE | null;
         taskText: string;
         streamPath?: string;
         /** Present when the quality round was SKIPPED — printed to the agent. */
@@ -7852,14 +8006,22 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // 1. It has to build. A full lane, because a checkpoint that only ran the
     //    related tests cannot clear the ship gate later anyway.
     //
+    //    UNLESS the user switched the precommit stage off (2026-09-22) — then
+    //    there is nothing to run and nothing to wait for, and the whole lane
+    //    (its spawn, its cache probe, its minutes) is skipped.
+    //
     //    UNLESS the user issued a `/gate-bypass` (R-22). Then this step is
     //    SKIPPED rather than run-and-ignored: re-running a precommit that is
     //    failing for an environment reason costs minutes and changes nothing,
     //    and the whole point of the bypass is that the user already decided
     //    this round ships without it. The fact is recorded on the checkpoint
     //    and repeated to the reviewer.
+    const precommitOn = stageIsOn("precommit", input.root);
     const bypassActive = stateForRepo(input.root).bypass.active;
-    if (bypassActive) {
+    if (!precommitOn) {
+      input.progress?.step("precommit（环节已关闭，跳过）");
+      input.progress?.done("OFF");
+    } else if (bypassActive) {
       input.progress?.step("precommit (被 /gate-bypass 覆盖，跳过)");
       input.progress?.done("BYPASSED");
     } else {
@@ -7956,7 +8118,20 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // review target), never from a second `git diff` here.
     const changedFiles = Array.isArray(prepared.details?.files) ? (prepared.details.files as string[]) : undefined;
     const preparedHead = typeof prepared.details?.head === "string" ? prepared.details.head : "";
-    const skip = qualityRoundSkip(changedFiles);
+    // THE USER'S STAGE SWITCHES, read once for this round (2026-09-22,
+    // lib/loop-stages.ts). `review` off means no functional judge is started —
+    // the CHECKPOINT still runs (the round is still frozen), and a quality
+    // round that is on still runs alone. `quality` off is expressed as the
+    // same SKIP a code-free round gets, recorded the same way, so
+    // `qualityStandingFor` reads one shape and not two.
+    const reviewOn = stageIsOn("review", input.root);
+    const qualityOn = stageIsOn("quality", input.root);
+    const skip = qualityOn
+      ? qualityRoundSkip(changedFiles)
+      : {
+          skip: true as const,
+          reason: "质量环节已关闭（用户设定的环节开关）—— 不派 quality-auditor",
+        };
     const standing = qualityStandingFor({
       head: preparedHead,
       files: changedFiles,
@@ -7979,11 +8154,17 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         ...(checkpoint === undefined ? {} : { checkpoint }),
         // The functional brief travels WITH it: the two judges are dispatched
         // in one breath (the caller owns the effects; this chain owns the
-        // routing).
-        parallelReviewer: {
-          taskText: reviewerTask,
-          ...(reviewerStream === undefined ? {} : { streamPath: reviewerStream }),
-        },
+        // routing) — and only when the functional stage is ON: with that
+        // switch off there is no second judge to start at all (user decision,
+        // 2026-09-22).
+        ...(reviewOn
+          ? {
+              parallelReviewer: {
+                taskText: reviewerTask,
+                ...(reviewerStream === undefined ? {} : { streamPath: reviewerStream }),
+              },
+            }
+          : {}),
       };
     }
     if (skip.skip) {
@@ -7996,7 +8177,20 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         at: new Date().toISOString(),
       });
       persistRepo(input.ctx as unknown as ExtensionContext, input.root);
-      input.progress?.done("质量轮跳过（无代码改动）");
+      input.progress?.done(qualityOn ? "质量轮跳过（无代码改动）" : "质量轮跳过（环节已关闭）");
+    }
+    if (!reviewOn) {
+      // NOTHING LEFT TO DISPATCH: the functional stage is off, and a quality
+      // round that was owed has already returned above. The chain still ran
+      // the precommit lane and the checkpoint — those are their own switches —
+      // so the round is frozen and the caller reports what it got.
+      return {
+        ok: true,
+        role: null,
+        taskText: "",
+        ...(checkpoint === undefined ? {} : { checkpoint }),
+        ...(skip.skip ? { skipNote: skip.reason ?? "" } : {}),
+      };
     }
     return {
       ok: true,
@@ -9492,14 +9686,34 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           isError: true,
         };
       }
+      // THE GOAL STAGE RELEASES THE GOAL AUDIT TOO (2026-09-22, lib/loop-stages.ts):
+      // `propose_loop_goal` short-circuits when it is off, and this is the other
+      // entrance to the same judge — running a minutes-long audit for a contract
+      // the user switched off would be work nobody asked for, and a step the
+      // agent could mistake for one it still owes.
+      if (role === "goal-auditor" && !stageIsOn("goal")) {
+        return {
+          content: [{
+            type: "text",
+            text: "review-gate: goal 环节已关闭（用户设定的环节开关）—— 本轮不跑 goal 审计，也不需要协商 goal。\n" +
+              "直接按用户的要求干活即可；要恢复 goal 环节，让用户重开开关（再调一次 `choose_loop_stages`）。",
+          }],
+          details: { submitted: false, goalStageOff: true },
+          isError: true,
+        };
+      }
       // SUBMITTING FOR REVIEW IS A CHAIN, and the gate runs all of it: the
       // agent describes its change, the gate proves it builds (precommit),
       // freezes it (checkpoint), computes the reviewed range (prepare) and
       // only then dispatches. Any step failing sends the round back with the
       // reason — nothing half-submitted, no manual four-step dance.
       let reviewTask = task;
-      /** WHICH judge this submission actually dispatches — see `submitForReview`. */
-      let dispatchRole = role;
+      /**
+       * WHICH judge this submission actually dispatches — see `submitForReview`.
+       * `null` = the user switched review AND quality off, so the chain froze
+       * the round and dispatched nobody (the receipt below says so).
+       */
+      let dispatchRole: string | null = role;
       /** Printed when the quality round was skipped (docs/data-only round). */
       let skipNote: string | undefined;
       /**
@@ -9608,11 +9822,35 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // functional round whose quality half never started could only ever be
       // refused at recording time — see `decideQualityHold`).
       const judges = [
-        { role: dispatchRole, task: reviewTask, streamPath },
+        ...(dispatchRole === null ? [] : [{ role: dispatchRole, task: reviewTask, streamPath }]),
         ...(parallelReviewer === undefined
           ? []
           : [{ role: "reviewer" as const, task: parallelReviewer.taskText, streamPath: parallelReviewer.streamPath }]),
       ];
+      if (judges.length === 0) {
+        // A RELEASED STAGE DISPATCHES NOBODY (2026-09-22). Both judge stages are
+        // off, so there is no pane to open — and the receipt still names what
+        // the chain DID do (precommit, the checkpoint), because "nothing was
+        // submitted" and "nothing needed submitting" are different facts.
+        const reviewStageOn = stageIsOn("review", root);
+        const qualityStageOn = stageIsOn("quality", root);
+        return {
+          content: [{
+            type: "text",
+            text: [
+              "review-gate: 本轮没有派任何 judge（用户设定的环节开关）。",
+              ...(reviewStageOn ? [] : ["- 功能审查 reviewer：环节已关闭 —— ship 时该卡点视为满足。"]),
+              ...(qualityStageOn ? [] : ["- 代码质量审查 quality-auditor：环节已关闭 —— 不派质量轮。"]),
+              ...(skipNote === undefined ? [] : [`- 质量轮跳过：${skipNote}`]),
+              ...(checkpointFacts === undefined
+                ? []
+                : [`- checkpoint ${checkpointFacts.sha.slice(0, 12)} 已冻结 ${checkpointFacts.files.length} 个文件。`]),
+              "要恢复哪个环节，就再调一次 `choose_loop_stages`（用户重新勾选，门禁自己弹框）。",
+            ].join("\n"),
+          }],
+          details: { submitted: true, judges: [], stageOff: true },
+        };
+      }
       /**
        * Every judge this submission started, as it was ACCEPTED — each with its
        * OWN findings stream (B1, 2026-09-18). A parallel round starts two
@@ -9754,11 +9992,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // it works".
         ...(dispatchRole === QUALITY_ROLE
           ? [
-              "- 本轮**同时**跑两个 judge：质量轮（审代码本身：哲学/架构/正确性/性能，再看简洁可读可维护，" +
-                "判定表 `docs/code-quality-rules.md`）与功能轮 reviewer（审需求符合度/测试覆盖/文档同步），" +
-                "外加与它们并行的全量 precommit。你不需要为这一轮再调 judge_submit。",
-              "- 谁先判不过由门禁收口：质量轮非 READY ⇒ 终止 reviewer 与 precommit；reviewer 非 READY ⇒ 终止质量轮与 precommit；" +
-                "precommit FAIL ⇒ 只终止 reviewer，质量轮继续。reviewer 先交卷 READY 而质量轮未交卷时，那份 READY 会被**扣下**，等质量轮结论落地再补记。",
+              ...(parallelReviewer === undefined
+                // QUALITY ALONE (2026-09-22): the user switched the functional
+                // stage off, so the receipt must not promise a reviewer that
+                // was never started.
+                ? [
+                    "- 本轮**只**跑质量轮（功能审查环节已关闭，用户设定的环节开关）：质量轮审代码本身" +
+                      "（哲学/架构/正确性/性能，再看简洁可读可维护，判定表 `docs/code-quality-rules.md`），" +
+                      "外加按开关运行的 precommit。你不需要为这一轮再调 judge_submit；要恢复功能审查，" +
+                      "让用户重开开关（`choose_loop_stages`）。",
+                  ]
+                : [
+                    "- 本轮**同时**跑两个 judge：质量轮（审代码本身：哲学/架构/正确性/性能，再看简洁可读可维护，" +
+                      "判定表 `docs/code-quality-rules.md`）与功能轮 reviewer（审需求符合度/测试覆盖/文档同步），" +
+                      "外加与它们并行的全量 precommit。你不需要为这一轮再调 judge_submit。",
+                    "- 谁先判不过由门禁收口：质量轮非 READY ⇒ 终止 reviewer 与 precommit；reviewer 非 READY ⇒ 终止质量轮与 precommit；" +
+                      "precommit FAIL ⇒ 只终止 reviewer，质量轮继续。reviewer 先交卷 READY 而质量轮未交卷时，那份 READY 会被**扣下**，等质量轮结论落地再补记。",
+                  ]),
             ]
           : []),
         ...(skipNote ? [`- 质量轮跳过：${skipNote}`] : []),
@@ -10631,8 +10881,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       (parsed.verdict === "BLOCKED"
         ? " 先把 findings 全部改掉（它们写在 findings 流里，报告里有路径），再 judge_submit 重新送审。" +
           "本轮功能轮如果还在跑，门禁已把它终止（内容要改，它的裁决没有意义）；如果它已经扣了一份 READY 下来，那份 READY 作废。"
-        : " 功能轮本来就在跑（同一个 judge_submit 启动的），你不需要再调一次；" +
-          "若它先交卷的 READY 被扣下，这一步就是补记它的时刻。") +
+        : stageIsOn("review", targetRoot)
+        ? " 功能轮本来就在跑（同一个 judge_submit 启动的），你不需要再调一次；" +
+          "若它先交卷的 READY 被扣下，这一步就是补记它的时刻。"
+        : " 功能审查环节已关闭（用户设定的环节开关）—— 没有 reviewer 在跑，也不需要跑；" +
+          "质量结论已记入 sidecar，ship 时按它自己的卡点生效。") +
       (stale
         ? "\nSTALE TARGET：质量轮判的那个 commit 已经不是 HEAD（prepare 之后又落了新 checkpoint）—— " +
           "结论记成 BLOCKED，按上面的方式重新送一轮即可。"
@@ -11796,7 +12049,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const fingerprint = fp.unavailable ? "" : fp.digest;
     const decision: AcceptanceDecision = acceptanceDecision({
       hasCodeChange: st.hasCodeChange,
-      gateOpen: acceptanceGateOpen(process.env),
+      // TWO WAYS THIS ROUND CAN BE OFF, composed into the ONE `gateOpen` the
+      // t2 module owns (2026-09-22): the dispatcher's environment value (an
+      // orchestration child that is not the plan's acceptance task) and the
+      // USER's stage switch. The internal semantics — DISABLED, the record, the
+      // re-dispatch rules — stay lib/acceptance-round.ts's, unchanged.
+      gateOpen: acceptanceGateOpen(process.env) && stageIsOn("acceptance", root),
       ...(declared === undefined ? {} : { goalSkipsAcceptance: declared.reason }),
       fingerprint,
       ...(st.acceptance === undefined ? {} : { record: st.acceptance }),
@@ -12006,7 +12264,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
           }
         }
-        if (state.taskMode === "loop" && !loopGoalConfirmed()) {
+        if (state.taskMode === "loop" && !goalStageSatisfied()) {
           completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
         }
         // DID THIS ROUND ARRIVE AT ITS STATION (2026-09-06)?
@@ -12035,7 +12293,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // second repo's `pr` contract go unchecked behind the primary repo's
         // `precommit` one — the strictest station demands the LEAST here,
         // which is the opposite of the ship gate's fold.
-        if (state.taskMode === "loop" && loopGoalConfirmed()) {
+        if (state.taskMode === "loop" && goalStageSatisfied()) {
           for (const root of sessionRepos) {
             const station = deliveryStationFor(root);
             if (station === undefined) continue; // no contract for that repo
@@ -12339,6 +12597,19 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // would mean asking the user about one contract and recording another.
     stationCap: stationCapFromEnv,
   });
+
+  /**
+   * `choose_loop_stages` (2026-09-22) — the USER's five stage switches, ONE
+   * no-parameter tool. The module owns the rule, the record, the box's copy and
+   * the tool itself (lib/loop-stages.ts); this file passes the deps it needs,
+   * exactly as the goal and restatement families above do.
+   *
+   * THE SAME DEPS BACK THE FALLBACK: `ensureLoopStagesFor` (wired into the L1
+   * tool_call hook) shows the identical box when the first edit or
+   * `propose_restatement` arrives without a choice on record, so there is one
+   * implementation and one set of rules for both entrances.
+   */
+  registerLoopStageTools(pi, loopStageDeps);
 
 
 
@@ -12666,9 +12937,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // mode is normally decided as the session's first action — without
         // this the agent could edit for a whole turn before ever seeing the
         // exit contract it is supposed to establish first.
-        const goalNote = effective === "loop"
-          ? "\n\n" + buildLoopGoalDirective(readSessionLoopGoal(primaryRepoRoot), loopGoalConfirmed())
-          : "";
+        const goalNote = effective === "loop" ? "\n\n" + loopGoalDirectiveText() : "";
         return {
           content: [{
             type: "text",
@@ -13054,7 +13323,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // settled loop turn (explore/normal/orchestrator/aborted all returned
     // above), and the count persists so a restart cannot reset the clock.
     // Cleared in doProposeLoopGoal on approval.
-    if (!loopGoalConfirmed()) {
+    if (!goalStageSatisfied()) {
       state.turnsWithoutGoal = (state.turnsWithoutGoal ?? 0) + 1;
     } else {
       state.turnsWithoutGoal = undefined;
@@ -13082,7 +13351,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
       }
     }
-    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    if (!goalStageSatisfied()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     // Goal-only continuation: the ONLY remaining item is the unapproved loop
     // goal. If the agent already grilled the user and is waiting for the
     // answer, ask_user already paused the loop — the resume text below
@@ -13275,7 +13544,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         stallNoticeShown = true;
         const cause = classifyStallCause({
           pausedForUser: motion.pausedForUser,
-          goalConfirmed: loopGoalConfirmed(),
+          goalConfirmed: goalStageSatisfied(),
           hasUnreviewedChanges:
             (state.hasCodeChange || state.hasDocChange) && state.review.verdict !== "READY",
           lastUserInteractionAt,
@@ -13912,7 +14181,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * (reset → persist → notify) and nothing else.
    */
   function resetSessionState(): void {
+    // THE USER'S STAGE SWITCHES SURVIVE THE RESET (2026-09-22, lib/loop-stages.ts):
+    // they are the user's own configuration of the gates, not a verdict or a
+    // lock — clearing them would silently turn gates back ON behind the choice
+    // the box recorded. `/gate-status` names them, and `choose_loop_stages`
+    // re-opens the box when the user wants them changed.
+    const stages = state.stages;
     state = emptyState(state.sessionId, state.maxRounds);
+    if (stages) state.stages = stages;
     armLoop();
     continuationsInjected = 0;
     orchestratorContinuations = 0; // goal 6 — reset with the loop budget
@@ -14126,15 +14402,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // turn, before any edit arms the gate. An UNCONFIRMED goal has its body
     // withheld (L8) and blocks ships at L1; the hooks stay out of it.
     if (state.taskMode === "loop") {
-      const goal = readSessionLoopGoal(primaryRepoRoot);
-
-      const goalConfirmed = loopGoalConfirmed();
-      systemPrompt += "\n\n" + buildLoopGoalDirective(goal, goalConfirmed);
+      const goalConfirmed = goalStageSatisfied();
+      systemPrompt += "\n\n" + loopGoalDirectiveText();
       // 2026-09-17: once the un-goaled turn count hits the threshold, the
       // standing goal directive is escalated to the force-negotiate form on
       // EVERY turn (not only in the RESUME injection) — the agent cannot miss
-      // that the ONLY acceptable next action is goal negotiation.
-      if (!goalConfirmed && goalNegotiationOverdue(state.turnsWithoutGoal)) {
+      // that the ONLY acceptable next action is goal negotiation. With the
+      // goal stage OFF there is nothing to negotiate, so it never escalates.
+      if (stageIsOn("goal") && !goalConfirmed && goalNegotiationOverdue(state.turnsWithoutGoal)) {
         systemPrompt += "\n\n" + buildGoalForceNegotiateDirective(state.turnsWithoutGoal);
       }
 

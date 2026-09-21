@@ -43,6 +43,9 @@ import { join as pathJoin, dirname as pathDirname } from "node:path";
 
 import { computeFingerprint } from "./fingerprint.ts";
 import { unmetRequirements, type GateState } from "./gate-state.ts";
+// The one place the stage switches are decided (lib/loop-stages.ts); the
+// readout renders its summary rather than re-deriving "is this stage off".
+import { stageOpen, stagesSummary } from "./loop-stages.ts";
 import { formatPrecommitSummary, lastPrecommitTiming } from "./gate-timings.ts";
 import { isEnforcedMode, normalizeTaskMode, type TaskMode } from "./task-mode.ts";
 import { ORCHESTRATOR_NEEDS_TMUX } from "./orchestrator-directives.ts";
@@ -239,14 +242,19 @@ function registerGateStatus(host: CommandHost, deps: GateCommandDeps): void {
       const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
       const others = deps.otherRepoStatus();
       // ---- 裁决 (verdicts) ----
-      const review = `review:    ${state.review.verdict}${state.review.at ? ` (${state.review.at})` : ""}`;
+      const review = `review:    ${state.review.verdict}${state.review.at ? ` (${state.review.at})` : ""}` +
+        // A RELEASED CHECKPOINT MUST NOT READ AS A BLOCKED ONE (2026-09-22): the
+        // verdict word below is still whatever was last recorded, and without
+        // this note `review: PENDING` next to an open ship gate is unreadable.
+        (stageOpen(state.stages, "review") ? "" : " — 环节已关闭（ship 不再要求它）");
       const precommit = `precommit: ${state.precommit.verdict}` +
         (state.precommit.verdict === "PASS"
           ? ` [lane ${state.precommit.mode ?? "?"}, tests: ${state.precommit.testScope ?? "unknown"}]` +
             (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run") +
             (state.precommit.testScope === "skipped" ? " — ⚠️ tests were NOT run in this lane" : "")
           : "") +
-        (state.precommit.at ? ` (${state.precommit.at})` : "");
+        (state.precommit.at ? ` (${state.precommit.at})` : "") +
+        (stageOpen(state.stages, "precommit") ? "" : " — 环节已关闭（不跑也不拦）");
       const lines = [
         "── 裁决 ──",
         review,
@@ -273,11 +281,21 @@ function registerGateStatus(host: CommandHost, deps: GateCommandDeps): void {
           ? [`paused:    awaiting user answer to "${state.pausedQuestion.question.slice(0, 120)}" (${state.pausedQuestion.at})`]
           : []),
         "── 门禁 ──",
+        // The five switches, always named (2026-09-22): `全部开启（默认）` is
+        // the statement that today's behaviour is in force, and a reader who
+        // sees a checkpoint released otherwise has somewhere to look.
+        `stages:    ${stagesSummary(state.stages)}`,
         // L8: whether THIS text is the contract the user approved (loop mode
         // ships are blocked until it is), and L7: the Copilot cycle, which
         // gates completion only — both are easy to misread from the outside,
         // so the readout names them explicitly.
-        `loop goal: ${deps.loopGoalConfirmed() ? "approved by the user" : deps.loopGoalPresent() ? "DRAFT — not approved (loop-mode ships blocked)" : "none"}`,
+        `loop goal: ${!stageOpen(state.stages, "goal")
+          ? "OFF — goal 环节已关闭（不审计、不批准、免需求反述）"
+          : deps.loopGoalConfirmed()
+            ? "approved by the user"
+            : deps.loopGoalPresent()
+              ? "DRAFT — not approved (loop-mode ships blocked)"
+              : "none"}`,
         ...(state.copilot
           ? [`copilot:   ${state.copilot.status}${state.copilot.pr ? ` PR #${state.copilot.pr}` : ""}` +
             ` (round ${state.copilot.rounds}, no round cap` +

@@ -70,6 +70,7 @@ import { gitRootOfDir } from "./repo-resolve.ts";
 import { buildRejection } from "./rejection-copy.ts";
 import type { TaskMode } from "./task-mode.ts";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
+import { stageOpen, type LoopStagesRecord } from "./loop-stages.ts";
 
 // ---------------------------------------------------------------------------
 // the record
@@ -264,6 +265,8 @@ export function checkRestatementText(raw: unknown): RestatementCheck {
 export interface RestatementStateSlice {
   restatement?: RestatementRecord;
   taskMode?: TaskMode;
+  /** The user's five stage switches (lib/loop-stages.ts). Absent ⇒ all on. */
+  stages?: LoopStagesRecord;
 }
 
 /**
@@ -464,6 +467,22 @@ export async function doProposeRestatement(
   params: Record<string, unknown>,
   ctx: unknown,
 ): Promise<ToolReply> {
+  // THE GOAL STAGE, READ FIRST (2026-09-22, lib/loop-stages.ts). When the user
+  // switched the goal stage off, the whole requirement — the restatement
+  // included — is waived: there is no contract to protect and no question to
+  // ask. Evaluating the text here would be answering a question nobody asked,
+  // so this comes before every other check, and it renders NO dialog.
+  if (!stageOpen(deps.stateFor(deps.primaryRepoRoot()).stages, "goal")) {
+    return {
+      content: [{
+        type: "text",
+        text: "review-gate: goal 环节已关闭（用户设定的环节开关）—— 本轮不需要需求反述，也不会协商 loop goal。\n" +
+          "直接开工：门禁不会因为「无已批准 goal」拦你的编辑或提交。要恢复 goal 环节，" +
+          "让用户重开开关（再调一次 `choose_loop_stages`，门禁会自己弹框）。",
+      }],
+      details: { confirmed: false, goalStageOff: true },
+    };
+  }
   const checked = checkRestatementText(params.restatement);
   if (!checked.ok) {
     return { content: [{ type: "text", text: checked.text }], details: { confirmed: false }, isError: true };

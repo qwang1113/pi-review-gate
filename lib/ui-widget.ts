@@ -53,6 +53,17 @@ export interface GateWidgetFacts {
    * (never rendered as 0, which would be a claim rather than a silence).
    */
   rounds?: number;
+  /**
+   * The stage switches, already summarised (`lib/loop-stages.ts`'s
+   * `stagesSummary`: `已关闭 review、precommit`), shown only when at least one
+   * stage is off. All five on renders nothing, so a default session's strip is
+   * byte-for-byte what it was before the switches existed.
+   *
+   * WHY IT IS ON THE STRIP (2026-09-22, user decision): a checkpoint the user
+   * released has to be readable without asking — otherwise "the gate let this
+   * through" and "the gate is broken" look identical from the outside.
+   */
+  stages?: string;
   /** Unmet requirements (ship-gate problems). */
   unmet: string[];
 }
@@ -94,6 +105,7 @@ export function buildGateWidget(f: GateWidgetFacts): string[] {
   if (typeof f.rounds === "number" && Number.isFinite(f.rounds)) {
     wsBits.push(`轮 ${f.rounds}`);
   }
+  if (f.stages) wsBits.push(f.stages);
   if (f.unmet.length > 0) wsBits.push(`${f.unmet.length} 项未满足`);
   return [`门禁 · ${wsBits.join(" · ")}`];
 }

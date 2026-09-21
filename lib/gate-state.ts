@@ -27,6 +27,7 @@ import { normalizeOrchestrationId } from "./orchestration-id.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
 import { sanitizeAcceptanceRecord, type AcceptanceRecord } from "./acceptance-round.ts";
+import { sanitizeLoopStages, stageOpen, type LoopStagesRecord } from "./loop-stages.ts";
 import { restatementHash, type RestatementRecord } from "./restatement.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
 import { SHIP_COMMAND_KINDS, type ShipCommandKind } from "./constants.ts";
@@ -677,6 +678,17 @@ export interface GateState {
    */
   acceptance?: AcceptanceRecord;
   /**
+   * THE FIVE STAGE SWITCHES the USER chose for this session (2026-09-22;
+   * lib/loop-stages.ts owns the rule and the dialog). Absent ⇒ all five are on,
+   * which is exactly today's behaviour — an older sidecar and a session that
+   * never opened the box behave identically.
+   *
+   * IT IS THE ONE READ FOR {@link unmetRequirements}'s review/precommit halves:
+   * the git hooks read the same record out of this same sidecar, so the L1 ship
+   * gate and the L3 hook can never disagree about whether a stage is off.
+   */
+  stages?: LoopStagesRecord;
+  /**
    * L8: the user's approval of the CURRENT loop-goal text (hash + time,
    * written only by propose_loop_goal after an extension-rendered dialog).
    *
@@ -865,6 +877,11 @@ export function inheritGoalContract(target: GateState, predecessor: GateState): 
     ...(predecessor.sessionReposPaths && predecessor.sessionReposPaths.length > 0
       ? { sessionReposPaths: predecessor.sessionReposPaths }
       : {}),
+    // THE STAGE SWITCHES FOLLOW THE WORK, not the process id (2026-09-22): the
+    // successor continues the same task, so a stage the user released must stay
+    // released — inheriting none would silently re-enable the gate the user
+    // switched off, mid-task, with the once-per-session box already spent.
+    ...(predecessor.stages ? { stages: predecessor.stages } : {}),
     // THE TMUX GRANT TRAVELS WITH THE SEAT (user decision, 2026-09-17: “当前
     // 会话和他的继承者都能用”). It is permission the USER gave to an on-going
     // piece of work rather than to a process id — a handover changes who holds
@@ -1280,6 +1297,15 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
       const acceptance = sanitizeAcceptanceRecord(parsed.acceptance);
       if (acceptance) parsed.acceptance = acceptance;
       else delete parsed.acceptance;
+    }
+    // A malformed stage record is treated as ABSENT, which is the defaults:
+    // every stage ON. A record can only ever RELEASE a gate, so a partial or
+    // forged one must never be read as a switch-off (lib/loop-stages.ts's
+    // sanitizer is all-or-nothing for the same reason).
+    if (parsed.stages !== undefined) {
+      const stages = sanitizeLoopStages(parsed.stages);
+      if (stages) parsed.stages = stages;
+      else delete parsed.stages;
     }
     // L8: a malformed goal approval is treated as ABSENT — the fail-closed
     // direction here is "not approved" (goal body withheld, loop ships
@@ -1721,6 +1747,13 @@ export function saveSidecarPreservingConcurrent(
 /**
  * The single authority on "may we ship?".
  * Returns the list of unmet requirements (empty = ship allowed).
+ *
+ * THE USER'S STAGE SWITCHES ARE READ HERE (2026-09-22, lib/loop-stages.ts).
+ * `review` off releases the review block (code and docs alike), `precommit`
+ * off releases the precommit block; each block is skipped whole, and each is
+ * read independently because the two switches are independent. The L3 git
+ * hooks read the SAME record out of the SAME sidecar, so the L1 ship gate and
+ * the commit hook can never disagree about a stage the user switched off.
  */
 export function unmetRequirements(
   state: GateState | undefined,
@@ -1784,7 +1817,31 @@ export function unmetRequirements(
     return problems;
   }
 
-  if (state.hasCodeChange) {
+  // THE USER'S STAGE SWITCHES, read once (lib/loop-stages.ts is the only place
+  // that answers "is this stage on?"). An off stage releases its whole block
+  // below: no review requirement, no precommit requirement. The two are read
+  // independently because they are independent switches.
+  const reviewOn = stageOpen(state.stages, "review");
+  const precommitOn = stageOpen(state.stages, "precommit");
+  const qualityOn = stageOpen(state.stages, "quality");
+
+  // A QUALITY ROUND THAT SAID NO, WITH NO REVIEW ROUND TO CARRY IT (2026-09-22).
+  //
+  // With the review stage ON, a quality verdict gates the RECORD of the
+  // functional READY (lib/quality-round.ts's `decideQualityHold`) and this
+  // block would be a second reading of one rule. With the review stage OFF
+  // there is no READY to hold, so a BLOCKED quality verdict would bind
+  // NOTHING: the user kept the quality stage on, its judge ran and refused
+  // the code, and the work would ship anyway. This is a TIGHTENING only — a
+  // recorded BLOCKED — so it can never block on a binding it cannot verify.
+  if (state.hasCodeChange && !reviewOn && qualityOn && state.quality?.verdict === "BLOCKED") {
+    problems.push(
+      "quality round is BLOCKED (the review stage is off, so nothing else carries this verdict) — " +
+      "fix its findings and submit the next round",
+    );
+  }
+
+  if (state.hasCodeChange && reviewOn) {
     // Fail-closed: only an explicit READY bound to the current fingerprint passes.
     // (Any non-READY value — including an unknown/forged one — falls here.)
     if (state.review.verdict !== "READY") {
@@ -1808,7 +1865,9 @@ export function unmetRequirements(
         'must include "docSync": "UPDATED" | "NOT_NEEDED"; re-run the independent review',
       );
     }
+  }
 
+  if (state.hasCodeChange && precommitOn) {
     // Fail-closed: only an explicit PASS bound to the current fingerprint is a
     // pass. Anything else — NOT_RUN, FAIL, NO_CHECKS_RUN, or an unknown/forged
     // verdict — blocks. The default branch guards against a value that somehow
@@ -1836,7 +1895,7 @@ export function unmetRequirements(
     }
   }
 
-  if (state.hasDocChange && !state.hasCodeChange) {
+  if (state.hasDocChange && !state.hasCodeChange && reviewOn) {
     if (state.review.verdict !== "READY") {
       problems.push(`doc review gate is ${state.review.verdict} (need READY)`);
     } else if (state.review.fingerprint !== currentFingerprint) {

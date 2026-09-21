@@ -43,6 +43,7 @@ import { join as pathJoin } from "node:path";
 import { Type } from "typebox";
 
 import type { ToolHost, ToolReply } from "./tool-host.ts";
+import { stageOpen } from "./loop-stages.ts";
 import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import {
@@ -161,6 +162,21 @@ export async function doProposeLoopGoal(
   onUpdate: unknown,
   signal?: AbortSignal | undefined,
 ): Promise<ToolReply> {
+  // THE GOAL STAGE, READ FIRST (2026-09-22, lib/loop-stages.ts): with it off
+  // the gate needs no contract at all — no restatement, no audit round, no
+  // approval dialog — so this short-circuits ahead of every other step and
+  // renders nothing.
+  if (!stageOpen(deps.stateFor(deps.primaryRepoRoot()).stages, "goal")) {
+    return {
+      content: [{
+        type: "text",
+        text: "review-gate: goal 环节已关闭（用户设定的环节开关）—— 本轮不协商 loop goal，" +
+          "不跑 goal 审计，也不弹批准框。\n直接开工即可：编辑与 ship 不会被「无已批准 goal」拦住。" +
+          "要恢复 goal 环节，让用户重开开关（再调一次 `choose_loop_stages`）。",
+      }],
+      details: { approved: false, goalStageOff: true },
+    };
+  }
   // Empty draft, the write cap, and the repo the goal binds to — the same
   // three checks the audit record runs, in the same order (lib/goal-prereview-tools.ts).
   const checked = checkGoalDraft({

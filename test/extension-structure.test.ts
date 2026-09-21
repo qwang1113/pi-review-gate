@@ -348,8 +348,10 @@ test("loop goal: injected ONLY in loop mode, before the unarmed early-return", (
   // Anchored on the call, not on its argument expression: the goal is now read
   // into a local (the oversized-requirement checkpoint reads the same value),
   // and this assertion is about WHERE the directive is injected, not how the
-  // argument is spelled.
-  const injectAt = SRC.indexOf("buildLoopGoalDirective(", handlerAt);
+  // argument is spelled. Since 2026-09-22 the paragraph itself is built by
+  // `loopGoalDirectiveText()` — the ONE reader of the goal stage switch — so
+  // the anchor is that helper's call site inside this handler.
+  const injectAt = SRC.indexOf("loopGoalDirectiveText()", handlerAt);
   assert.ok(injectAt > 0, "loop-goal directive must be injected in before_agent_start");
   const exploreReturnAt = SRC.indexOf('state.taskMode === "explore"', handlerAt);
   // The unarmed early-return was REMOVED 2026-08-30: the loop directives (goal +
@@ -368,10 +370,11 @@ test("loop goal: set_gate_mode(loop) delivers Step 0 in the same turn it decides
   // as the session's first action — without this the agent could edit for a
   // whole turn before ever seeing the exit contract.
   const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
-  const toolInjectAt = SRC.indexOf("buildLoopGoalDirective(readSessionLoopGoal(");
+  const toolInjectAt = SRC.indexOf('const goalNote = effective === "loop"');
 
   assert.ok(toolInjectAt > 0 && toolInjectAt < handlerAt, "set_gate_mode must inject the goal too");
-  assert.match(SRC.slice(toolInjectAt - 200, toolInjectAt), /effective === "loop"/);
+  assert.match(SRC.slice(toolInjectAt, toolInjectAt + 200), /loopGoalDirectiveText\(\)/,
+    "…through the stage-aware helper (2026-09-22): an OFF goal stage must not be told to negotiate");
 });
 
 test("loop goal: the read-only NUDGE teaches the restatement step, in the right order", () => {
@@ -1893,8 +1896,8 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   assert.equal(calls, 1, "exactly one call site — a second reading would be a second contract");
   const body = toolBodyOf("declare_done");
   assert.match(body, /stationArrivalProblems\(/, "…and it is inside declare_done");
-  assert.match(body, /state\.taskMode === "loop" && loopGoalConfirmed\(\)/,
-    "the station is only known once the user approved a goal that carries one");
+  assert.match(body, /state\.taskMode === "loop" && goalStageSatisfied\(\)/,
+    "the station is only known once the user approved a goal that carries one — or switched the goal stage off");
   assert.match(body, /changedFiles\(root\)/, "committed-ness is measured, not asserted by the agent");
   assert.match(body, /st\.shippedKinds\?\.includes\("pr-create"\)/,
     "a `pr` round arrives on a `gh pr create` the GATE watched succeed — not on a claim");
@@ -5740,8 +5743,8 @@ test("non-git directory: the gate short-circuits entirely (user decision 2026-09
     "the status strip must not run git outside a repository");
   assert.match(widget, /branch: sessionInGit/, "non-git branch must be absent, not \"(detached)\"");
   // The loop goal is a per-repo contract — not an unmet requirement outside one.
-  assert.match(widget, /sessionInGit && !loopGoalConfirmed\(\)/,
-    "the loop-goal unmet must not surface outside a repository");
+  assert.match(widget, /sessionInGit && !goalStageSatisfied\(\)/,
+    "the loop-goal unmet must not surface outside a repository, nor when the user released the goal stage");
   // The widget WIRING is pinned too: `nonGit: !sessionInGit` — flipping it
   // to a constant would render the 非 git 目录 strip for repo sessions.
   assert.match(widget, /nonGit: !sessionInGit,/,
@@ -6439,9 +6442,9 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
     /const verifyingNow =[\s\S]{0,120}?inFlightPrecommit\?\.root === root[\s\S]{0,80}?st\.precommit\.verdict === "NOT_RUN"/,
     "the receipt for a pending checkpoint is the LIVE promise in THIS process AND a verdict that has not landed yet — the promise is cleared in a microtask, so the verdict is what makes the test exact",
   );
-  assert.match(gate, /if \(!precommitBypassed && !verifyingNow && st\.precommit\.verdict !== "PASS"\)/,
-    "no live verification ⇒ the old rule, unchanged (fail-closed)");
-  assert.match(gate, /if \(!precommitBypassed && !verifyingNow && st\.precommit\.testScope !== "full"\)/,
+  assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && st\.precommit\.verdict !== "PASS"\)/,
+    "no live verification ⇒ the old rule, unchanged (fail-closed) — plus the one release the USER owns: a stage switched off");
+  assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && st\.precommit\.testScope !== "full"\)/,
     "…and the lane requirement with it");
 });
 
@@ -7089,7 +7092,7 @@ test("F4: the round's receipt names the checkpoint and the files in it", () => {
   assert.match(SRC, /checkpointFacts = chain\.checkpoint;/, "…the caller keeps them");
   const receiptAt = SRC.indexOf("const routed = accepted.find((a) => a.role === dispatchRole)");
   assert.ok(receiptAt > 0, "the receipt exists");
-  const receipt = SRC.slice(receiptAt, receiptAt + 3000);
+  const receipt = SRC.slice(receiptAt, receiptAt + 5000);
   assert.match(receipt, /- checkpoint \$\{checkpointFacts\.sha\.slice\(0, 12\)\} 已冻结/, "the commit is named on the receipt");
   assert.match(receipt, /未提交（\$\{checkpointFacts\.leftOut\.length\}）/, "and so is what stayed out of it");
   assert.match(
