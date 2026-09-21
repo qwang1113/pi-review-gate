@@ -65,7 +65,7 @@ import {
   type QuestionResolution,
 } from "./ask-user.ts";
 import { choiceRows, MAX_CHOICE_OPTIONS } from "./choice-dialog.ts";
-import { multiSelectionLabel } from "./multi-choice-dialog.ts";
+import { MULTI_UNAVAILABLE, multiSelectionLabel } from "./multi-choice-dialog.ts";
 // The batch id is minted with the same collision-resistant helper the channel
 // uses for its own record ids — one generator, not a second convention.
 import { newChannelId } from "./orchestrator-channel.ts";
@@ -125,6 +125,10 @@ export interface UserInteractionToolDeps {
    * the returned line is the one `lib/multi-choice-dialog.ts` writes (and
    * `parseMultiChoice` reads), `undefined` is a dismissal — and the same
    * dialog machinery behind it: one queue, one banner, one proxy race.
+   *
+   * ONE EXTRA OUTCOME: {@link MULTI_UNAVAILABLE}, when the host cannot mount a
+   * checkbox box at all (RPC runs no custom component). It is NOT a dismissal:
+   * the caller must not record a question nobody was shown as closed.
    */
   askMultiChoice(
     uiCtx: unknown,
@@ -318,6 +322,15 @@ export async function doAskUser(
    * every question into its reply.
    */
   let anyDialog = false;
+  /**
+   * DID A CHECKLIST GET DROPPED FOR A REASON THE USER CANNOT SEE?
+   *
+   * A host with no custom components (RPC) can draw the radio list and NOT the
+   * checkbox — so a batch can be half shown, and that half must not look like a
+   * question the user chose to skip (reviewer P2, 2026-09-22). Tracked here and
+   * said out loud in the reply.
+   */
+  let unrenderableChecklist = false;
 
   // ── THE WHOLE INTERVIEW GOES UP FIRST (2026-09-06) ──
   //
@@ -457,6 +470,11 @@ export async function doAskUser(
       const picked = q.multiple
         ? await deps.askMultiChoice(uiCtx, spec, opts)
         : await deps.askChoice(uiCtx, spec, opts);
+      // NOTHING WAS SHOWN (reviewer P2, 2026-09-22): neither an answer nor a
+      // dismissal — the renderer above reads the sentinel and leaves
+      // `anyDialog` alone, so the interview reports it the way it reports a
+      // host with no dialogs at all.
+      if (picked === MULTI_UNAVAILABLE) return picked;
       const step = stepInterview({ anchor, cursor }, picked);
       if (step.kind === "render") { cursor = step.cursor; continue; }
       if (step.kind === "answerCurrent") return step.picked;
@@ -500,15 +518,16 @@ export async function doAskUser(
         // Already settled (the project manager answered it through the
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped) return undefined;
-        // A BOX IS ABOUT TO BE SHOWN. This is the signal `anyDialog` waits for:
-        // it is what tells a real session apart from a host that could not
-        // render anything (see the declaration above).
+        const answered = await askWithBacks(index, signal);
+        // DID A BOX ACTUALLY REACH THE SCREEN? — the fact `anyDialog` waits
+        // for, and it is only true once the question came back with something
+        // OTHER than “no host could draw this” (reviewer P2, 2026-09-22).
+        if (answered === MULTI_UNAVAILABLE) {
+          unrenderableChecklist = true;
+          return undefined;
+        }
         anyDialog = true;
-        // ONE renderer for every dialog in the gate — the extension's
-        // `askChoice`, which is the template plus the host's own boxes — and
-        // the walk back through already-answered questions lives in
-        // `askWithBacks` just above.
-        return askWithBacks(index, signal);
+        return answered;
       },
       // A broken dialog is silence, never an answer — and, now that these
       // calls outlive the statement that made them, never an unhandled
@@ -570,6 +589,9 @@ export async function doAskUser(
       text: `review-gate: ask_user 采访完成（${formatTranscriptSummary(answers)}）。\n${formatAnswers(answers)}\n` +
         (resumedCount ? `（前 ${resumedCount} 题沿用了上次中断前的回答，没有重复问用户。）\n` : "") +
         (trimmedOptions ? `（有 ${trimmedOptions} 个问题的选项超过 ${MAX_CHOICE_OPTIONS} 个，已截断到前 ${MAX_CHOICE_OPTIONS} 个。）\n` : "") +
+        (unrenderableChecklist
+          ? "（这个环境画不出复选清单：上面的多选题没有展示给用户，请把它们的选项写进你的回复、让用户自己勾选。）\n"
+          : "") +
         (pending
           ? "有问题没得到回答 — 循环已暂停，等用户的下一条消息；不要替他决定。"
           : "全部已答 — 按答案继续。"),

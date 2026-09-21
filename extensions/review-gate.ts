@@ -616,8 +616,10 @@ import {
 } from "../lib/choice-dialog.ts";
 import {
   buildMultiChoiceBox,
+  defaultMultiChoiceKey,
   renderMultiChoice,
   type MultiChoiceHost,
+  type MultiChoiceKeyReader,
   type MultiChoiceTheme,
   type MultiSelectOutcome,
 } from "../lib/multi-choice-dialog.ts";
@@ -5269,7 +5271,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     opts: { signal?: AbortSignal; back?: boolean } = {},
   ): Promise<MultiSelectOutcome | undefined> {
     if (opts.signal?.aborted) return Promise.resolve({ kind: "dismissed" });
-    return custom<MultiSelectOutcome | undefined>((tui, theme, _keybindings, done) => {
+    let ran = false;
+    return custom<MultiSelectOutcome | undefined>((tui, theme, keybindings, done) => {
+      ran = true;
       let settled = false;
       const finish = (value: MultiSelectOutcome | undefined) => {
         if (settled) return;
@@ -5283,10 +5287,37 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         spec,
         ...(opts.back ? { back: true } : {}),
         theme: theme as unknown as MultiChoiceTheme,
+        readKey: multiChoiceKeyReader(keybindings),
         done: finish,
         requestRender: () => (tui as { requestRender?: () => void } | undefined)?.requestRender?.(),
       });
-    });
+    }).then((outcome) =>
+      // THE FACTORY NEVER RUNNING IS NOT A CLOSED BOX (reviewer P2, 2026-09-22):
+      // RPC resolves `undefined` WITHOUT mounting anything, and reading that as
+      // "the user dismissed it" stopped the whole interview over a question
+      // nobody was ever shown.
+      (ran ? outcome : { kind: "unavailable" as const }));
+  }
+
+  /**
+   * THE HOST'S OWN KEY READER — pi's keybindings, so the checkbox box follows
+   * whatever protocol the terminal negotiated and whatever the user rebound
+   * `tui.select.*` to (reviewer P1, 2026-09-22: a terminal on the Kitty
+   * keyboard protocol sends ESC as `\u001b[27u`, which a raw-byte table missed
+   * entirely — the box could not be closed at all). Space is not one of pi's
+   * select keybindings, so it falls through to the shape's own reader.
+   */
+  function multiChoiceKeyReader(keybindings: unknown): MultiChoiceKeyReader {
+    const kb = keybindings as { matches?: (data: string, keybinding: string) => boolean } | undefined;
+    return (data) => {
+      if (kb?.matches) {
+        if (kb.matches(data, "tui.select.up")) return "up";
+        if (kb.matches(data, "tui.select.down")) return "down";
+        if (kb.matches(data, "tui.select.confirm")) return "enter";
+        if (kb.matches(data, "tui.select.cancel")) return "escape";
+      }
+      return defaultMultiChoiceKey(data);
+    };
   }
 
   /**

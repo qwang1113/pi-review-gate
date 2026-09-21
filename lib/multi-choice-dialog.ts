@@ -152,6 +152,38 @@ export function parseMultiChoice(picked: string | undefined, spec: ChoiceSpec): 
 
 // ---------- the state machine ----------
 
+/**
+ * THE KEYS THE BOX ITSELF UNDERSTANDS — its own vocabulary, not a terminal's.
+ *
+ * WHAT A RAW INPUT STRING MEANS IS NOT DECIDED HERE (reviewer P1, 2026-09-22).
+ * A terminal that negotiated the Kitty keyboard protocol sends ESC as
+ * `\u001b[27u`, not `\u001b`; the previous table matched only the raw byte, so
+ * on such a terminal ESC and Ctrl+C did NOTHING at all — the box could not be
+ * closed. pi-tui already owns that knowledge (`matchesKey`, and the
+ * `KeybindingsManager` the `ui.custom` factory is HANDED as its third
+ * argument), so the reading arrives as {@link MultiChoiceKeyReader} and the
+ * default below is only the fallback for a host that has none (a test, or an
+ * extension loaded outside pi).
+ */
+export type MultiChoiceKeyName = "up" | "down" | "enter" | "space" | "escape";
+
+/** Turn one raw input chunk into one of the names above, or nothing. */
+export type MultiChoiceKeyReader = (data: string) => MultiChoiceKeyName | undefined;
+
+/** The plain sequences, plus j/k — what a host with no keybindings gets. */
+const UP_SEQUENCES = ["\u001b[A", "\u001bOA", "k"];
+const DOWN_SEQUENCES = ["\u001b[B", "\u001bOB", "j"];
+const ENTER_SEQUENCES = ["\r", "\n"];
+
+export function defaultMultiChoiceKey(data: string): MultiChoiceKeyName | undefined {
+  if (UP_SEQUENCES.includes(data)) return "up";
+  if (DOWN_SEQUENCES.includes(data)) return "down";
+  if (ENTER_SEQUENCES.includes(data)) return "enter";
+  if (data === " ") return "space";
+  if (data === "\u001b") return "escape";
+  return undefined;
+}
+
 /** Where the cursor is and what is ticked. */
 export interface MultiChoiceState {
   /** Cursor row: an option (0..options.length-1), the decline row, or `back`. */
@@ -183,13 +215,6 @@ export type MultiChoiceAction =
   /** ESC — the box is closed, nobody decided anything. */
   | { kind: "close" };
 
-/** The rows of the cursor's neighbourhood, read as one value. */
-const UP_KEYS = ["\u001b[A", "\u001bOA", "k"];
-const DOWN_KEYS = ["\u001b[B", "\u001bOB", "j"];
-const ENTER_KEYS = ["\r", "\n"];
-const SPACE = " ";
-const ESCAPE = "\u001b";
-
 /**
  * ONE KEY PRESS, as a pure step. Positions are read in the SAME order the rows
  * are drawn (options, decline, back), and the cursor WRAPS — a list longer than
@@ -199,18 +224,19 @@ export function multiChoiceKey(
   state: MultiChoiceState,
   spec: ChoiceSpec,
   data: string,
-  opts: { back?: boolean } = {},
+  opts: { back?: boolean; readKey?: MultiChoiceKeyReader } = {},
 ): MultiChoiceAction {
   const rows = multiChoiceRowCount(spec, opts);
   const declineRow = spec.options.length;
   const backRow = declineRow + (opts.back ? 1 : 0);
-  if (UP_KEYS.includes(data)) {
+  const key = (opts.readKey ?? defaultMultiChoiceKey)(data);
+  if (key === "up") {
     return { kind: "redraw", state: { ...state, cursor: (state.cursor + rows - 1) % rows } };
   }
-  if (DOWN_KEYS.includes(data)) {
+  if (key === "down") {
     return { kind: "redraw", state: { ...state, cursor: (state.cursor + 1) % rows } };
   }
-  if (data === SPACE) {
+  if (key === "space") {
     // SPACE IS A CHECKBOX, NOT A BUTTON: on the navigation rows it does nothing,
     // so ticking the decline row (or the way back) is impossible by accident.
     const option = spec.options[state.cursor];
@@ -220,13 +246,13 @@ export function multiChoiceKey(
       : [...state.checked, option];
     return { kind: "redraw", state: { ...state, checked } };
   }
-  if (ENTER_KEYS.includes(data)) {
+  if (key === "enter") {
     if (state.cursor === declineRow) return { kind: "decline" };
     if (opts.back && state.cursor === backRow) return { kind: "back" };
     // THE OPTION LIST'S OWN ORDER, whatever order they were ticked in.
     return { kind: "submit", options: spec.options.filter((option) => state.checked.includes(option)) };
   }
-  if (data === ESCAPE) return { kind: "close" };
+  if (key === "escape") return { kind: "close" };
   return { kind: "none" };
 }
 
@@ -235,9 +261,28 @@ export function multiChoiceKey(
 /** What the checkbox host reports. */
 export type MultiSelectOutcome =
   | { kind: "picked"; options: string[] }
-  | { kind: "decline" }
+  /**
+   * The user picked the ✎ row. `checked` is what he had ticked at that moment:
+   * ESC-ing out of the reason box must re-open the list he left, not a list
+   * reset to the author's defaults (reviewer P2, 2026-09-22).
+   */
+  | { kind: "decline"; checked: string[] }
   | { kind: "back" }
-  | { kind: "dismissed" };
+  | { kind: "dismissed" }
+  /**
+   * THE HOST COULD NOT PUT A BOX ON SCREEN AT ALL — the factory never ran
+   * (RPC; reviewer P2, 2026-09-22). It is NOT a dismissal: the user closed
+   * nothing, and reporting it as one made the interview stop the whole batch
+   * on a question nobody was ever shown.
+   */
+  | { kind: "unavailable" };
+
+/**
+ * “Nothing could render this.” The interview reads it and hands the questions
+ * back to the agent (the same landing as a host with no dialogs), rather than
+ * recording a box the user never saw as closed.
+ */
+export const MULTI_UNAVAILABLE = "\u0000rg-multi-unavailable\u0000";
 
 /**
  * The host seam: a checkbox list the caller may mount however it can. A host
@@ -281,10 +326,18 @@ export async function renderMultiChoice(
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(opts.back ? { back: true } : {}),
       },
-    ) ?? { kind: "dismissed" };
+    );
+    // NO HOST IS NOT A DISMISSAL (reviewer P2, 2026-09-22): a host that cannot
+    // draw a checkbox never showed the question, and the caller must hear that
+    // rather than be handed an `undefined` that means “the user closed it”.
+    if (outcome === undefined) return MULTI_UNAVAILABLE;
     if (outcome.kind === "picked") return multiSelectionLabel(outcome.options, spec.options);
     if (outcome.kind === "back") return BACK_ROW;
+    if (outcome.kind === "unavailable") return MULTI_UNAVAILABLE;
     if (outcome.kind === "dismissed") return undefined;
+    // THE TICKS SURVIVE THE REASON BOX (reviewer P2, 2026-09-22): the user may
+    // ESC back out of it, and the list must come back as he left it.
+    checked = outcome.checked;
     // The decline row's second half is the SAME conversation the radio shape
     // has (lib/choice-dialog.ts): a reason box whose ESC re-opens the list,
     // with whatever was typed carried along.
@@ -318,6 +371,12 @@ export interface MultiChoiceBoxOptions {
   done: (outcome: MultiSelectOutcome) => void;
   /** Ask the TUI to redraw. Absent ⇒ nothing to ask (a test). */
   requestRender?: () => void;
+  /**
+   * WHAT A RAW INPUT CHUNK MEANS — the host's own reader (pi's keybindings),
+   * so ESC follows whatever protocol the terminal negotiated. Absent ⇒
+   * {@link defaultMultiChoiceKey}.
+   */
+  readKey?: MultiChoiceKeyReader;
   /** The footer line. The default states the four keys. */
   hint?: string;
 }
@@ -366,7 +425,10 @@ export function buildMultiChoiceBox(opts: MultiChoiceBoxOptions): MultiChoiceBox
     },
     handleInput(data: string): void {
       if (finished) return;
-      const action = multiChoiceKey(state, spec, data, { back });
+      const action = multiChoiceKey(state, spec, data, {
+        back,
+        ...(opts.readKey ? { readKey: opts.readKey } : {}),
+      });
       switch (action.kind) {
         case "redraw":
           state = action.state;
@@ -376,7 +438,7 @@ export function buildMultiChoiceBox(opts: MultiChoiceBoxOptions): MultiChoiceBox
           finish({ kind: "picked", options: action.options });
           return;
         case "decline":
-          finish({ kind: "decline" });
+          finish({ kind: "decline", checked: state.checked });
           return;
         case "back":
           finish({ kind: "back" });
@@ -393,7 +455,6 @@ export function buildMultiChoiceBox(opts: MultiChoiceBoxOptions): MultiChoiceBox
   };
 }
 
-/** Bold the title line the way every other gate box does — the one decoration. */
 // ---------- width ----------
 
 /**
@@ -408,6 +469,10 @@ export function buildMultiChoiceBox(opts: MultiChoiceBoxOptions): MultiChoiceBox
  * component as a seam), and a static import of `@earendil-works/pi-tui` would
  * make the whole shape unloadable outside pi. The table below is the narrow
  * subset a dialog in Chinese actually hits.
+ *
+ * A CUT LINE LOSES ITS TRAILING ANSI RESET — deliberately: pi's TUI appends a
+ * full SGR reset to every rendered line itself (`applyLineResets`), so a style
+ * can never leak past the line it was opened on.
  */
 export function truncateToWidth(text: string, width: number): string {
   if (width <= 0) return "";

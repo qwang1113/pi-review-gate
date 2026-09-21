@@ -174,12 +174,17 @@ test("a CHECKBOX question may be answered with SEVERAL rows — and only a check
 });
 
 test("the proxy's task text says so when the question is a CHECKBOX", () => {
-  const checkbox = buildProxyPrompt({ title: "开哪几个环节？", options: ["A. 预检", "B. 质量审查"], multiple: true });
+  const checkbox = buildProxyPrompt({ title: "开哪几个环节？", options: ["预检", "质量审查"], multiple: true });
   assert.match(checkbox, /多选题/);
   assert.match(checkbox, /\" \/ \"/);
-  const radio = buildProxyPrompt({ title: "选一个", options: ["A. 是", "B. 否"] });
+  // REVIEWER P2 (2026-09-22): the options the proxy is GIVEN are raw texts
+  // rendered as `1. 预检`, so an example written with the DIALOG's letters
+  // (`A. 甲 / C. 丙`) asked for a string `isAcceptedProxyChoice` then refuses.
+  assert.doesNotMatch(checkbox, /A\. 甲 \/ C\. 丙/);
+  assert.match(checkbox, /不要写进 choice/);
+  const radio = buildProxyPrompt({ title: "选一个", options: ["是", "否"] });
   assert.doesNotMatch(radio, /多选题/);
-  assert.match(radio, /必须是其中某一条的原文/);
+  assert.match(radio, /必须是其中某一条的正文/);
 });
 
 test("a proxy that fails, throws, or declines settles as NO answer — and REPORTS that nobody decided", async () => {

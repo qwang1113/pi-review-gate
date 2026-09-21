@@ -928,8 +928,8 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the ONE prompt every surface renders interpolates the notice");
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
-  assert.match(ASK_USER_SRC, /return askWithBacks\(index, signal\);/,
-    "the pane dialog renders the template through the ONE renderer");
+  assert.match(ASK_USER_SRC, /await askWithBacks\(index, signal\)/,
+    "the pane dialog renders the template through the ONE renderer — and reads its result, so a box no host could draw is not counted as shown");
   assert.match(ASK_USER_SRC, /const picked = q\.multiple[\s\S]{0,140}?await deps\.askMultiChoice\(uiCtx,[\s\S]{0,140}?await deps\.askChoice\(uiCtx,/,
     "…both shapes dispatched from the walk-back loop, which is where `← 返回上一题` is handled (2026-09-19): " +
     "the checkbox question goes to its OWN renderer, the radio one to the template");

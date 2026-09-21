@@ -17,7 +17,9 @@ import assert from "node:assert/strict";
 import { BACK_ROW, DECLINE_ROW, type ChoiceSpec, type ChoiceUi } from "../lib/choice-dialog.ts";
 import {
   MULTI_ANSWER_SEPARATOR,
+  MULTI_UNAVAILABLE,
   buildMultiChoiceBox,
+  defaultMultiChoiceKey,
   multiChoiceKey,
   multiChoiceRow,
   multiChoiceRows,
@@ -28,6 +30,7 @@ import {
   truncateToWidth,
   type MultiSelectOutcome,
 } from "../lib/multi-choice-dialog.ts";
+import { REASON_EDITOR_BACK } from "../lib/reason-editor.ts";
 
 const spec = (over: Partial<ChoiceSpec> = {}): ChoiceSpec => ({
   title: "开哪几个环节？",
@@ -242,36 +245,77 @@ test("the dialog returns the line the parser reads, for every outcome", async ()
   assert.equal(await renderMultiChoice(ui({ kind: "picked", options: [] }), spec()), "");
   assert.equal(await renderMultiChoice(ui({ kind: "back" }), spec()), BACK_ROW);
   assert.equal(await renderMultiChoice(ui({ kind: "dismissed" }), spec()), undefined);
-  assert.equal(await renderMultiChoice(undefined, spec()), undefined, "no host = nothing shown, never an invented answer");
+  // NO HOST IS NOT A DISMISSAL (reviewer P2): a host that cannot draw a checkbox
+  // never showed the question, and the caller has to hear that.
+  assert.equal(await renderMultiChoice(undefined, spec()), MULTI_UNAVAILABLE);
+  assert.equal(await renderMultiChoice(ui({ kind: "unavailable" }), spec()), MULTI_UNAVAILABLE);
 });
 
 test("the decline row opens the reason box; what it returns is the row plus the reason", async () => {
-  const hosts: (ChoiceUi & { multiSelect: () => Promise<MultiSelectOutcome> })[] = [];
-  const ui = (reason: string | undefined) => {
-    const host = {
-      multiSelect: async () => ({ kind: "decline" as const }),
-      editor: async () => reason,
-    };
-    hosts.push(host as never);
-    return host;
-  };
+  const ui = (reason: string | undefined) => ({
+    multiSelect: async () => ({ kind: "decline" as const, checked: [] }),
+    editor: async () => reason,
+  });
   assert.equal(await renderMultiChoice(ui("都不开"), spec()), `${DECLINE_ROW}：都不开`);
   assert.equal(await renderMultiChoice(ui(""), spec()), DECLINE_ROW, "an empty reason is still a decline");
   assert.equal(await renderMultiChoice(ui(undefined), spec()), undefined, "backing out of the box decides nothing");
 });
 
-test("ESC in the reason box re-opens the LIST, on the details the user chose so far", async () => {
+test("ESC in the reason box re-opens the LIST as the user left it (reviewer P2)", async () => {
   const seen: Array<string[] | undefined> = [];
   let first = true;
   const ui = {
     multiSelect: async (_title: string, spec_: ChoiceSpec) => {
       seen.push(spec_.defaultChecked);
-      if (first) { first = false; return { kind: "decline" as const }; }
+      if (first) {
+        first = false;
+        // He had already ticked C before choosing ✎ — that is the state the
+        // list has to come back to, not the author's defaults.
+        return { kind: "decline" as const, checked: ["功能审查"] };
+      }
       return { kind: "picked" as const, options: ["功能审查"] };
     },
-    editor: async () => `${"\u0000rg-back\u0000"}都省了吧`,
+    editor: async () => `${REASON_EDITOR_BACK}都省了吧`,
   };
   assert.equal(await renderMultiChoice(ui, spec()), "C. 功能审查");
-  assert.deepEqual(seen, [["预检", "quality 审查"], ["预检", "quality 审查"]],
-    "the ticks survive the round trip through the reason box");
+  assert.deepEqual(seen, [["预检", "quality 审查"], ["功能审查"]],
+    "the ticks the user made survive the round trip through the reason box");
+});
+
+test("a raw input chunk is READ by the host when it has one — that is how ESC survives", () => {
+  // REVIEWER P1: a terminal on the Kitty keyboard protocol sends ESC as
+  // `\u001b[27u`, and Ctrl+C as `\u001b[99;5u`. The default table cannot know
+  // that; pi's keybindings can, and the box takes them as a reader.
+  const kittyEscape = "\u001b[27u";
+  assert.equal(defaultMultiChoiceKey(kittyEscape), undefined,
+    "the fallback table deliberately knows only the plain sequences");
+  assert.deepEqual(multiChoiceKey(multiChoiceStart(spec()), spec(), kittyEscape),
+    { kind: "none" });
+
+  const readKey = (data: string) => (data === kittyEscape ? "escape" as const : defaultMultiChoiceKey(data));
+  assert.deepEqual(multiChoiceKey(multiChoiceStart(spec()), spec(), kittyEscape, { readKey }),
+    { kind: "close" }, "with the host's reader the same bytes close the box");
+  assert.deepEqual(multiChoiceKey(multiChoiceStart(spec()), spec(), "j", { readKey }),
+    { kind: "redraw", state: { cursor: 1, checked: ["预检", "quality 审查"] } },
+    "…and a key the reader does not recognise still falls through to the shape's own table");
+
+  // The COMPONENT takes the same seam, which is what makes the fix reach the
+  // screen rather than only the state machine.
+  const outcomes: MultiSelectOutcome[] = [];
+  const box = buildMultiChoiceBox({
+    title: "t", spec: spec(), readKey, done: (outcome) => outcomes.push(outcome),
+  });
+  box.handleInput(kittyEscape);
+  assert.deepEqual(outcomes, [{ kind: "dismissed" }]);
+});
+
+test("the fallback reader names every key the box understands", () => {
+  assert.equal(defaultMultiChoiceKey("\u001b[A"), "up");
+  assert.equal(defaultMultiChoiceKey("k"), "up");
+  assert.equal(defaultMultiChoiceKey("\u001bOB"), "down");
+  assert.equal(defaultMultiChoiceKey("j"), "down");
+  assert.equal(defaultMultiChoiceKey("\r"), "enter");
+  assert.equal(defaultMultiChoiceKey(" "), "space");
+  assert.equal(defaultMultiChoiceKey("\u001b"), "escape");
+  assert.equal(defaultMultiChoiceKey("q"), undefined);
 });
