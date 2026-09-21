@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   MAX_LISTED_CANDIDATES,
   belongsToRepo,
+  archiveNeedsConfirm,
   buildArchiveConfirmMessage,
   buildPlanArchive,
   buildTakeoverRoute,
@@ -301,6 +302,22 @@ test("the confirm message tells the user what is moving and that nothing is dele
 
   const noPlan = buildArchiveConfirmMessage({ archivePath: ".pi/x.json", liveChildren: 0 });
   assert.match(noPlan, /没有 plan 文件/, "the registry-only case is a different sentence, not a crash");
+});
+
+test("only an UNFINISHED plan buys a confirmation dialog", () => {
+  const unfinished = planOf();
+  assert.equal(archiveNeedsConfirm({ plan: unfinished, planFilePresent: true }), true,
+    "pending tasks are work in progress — only the human may put that away");
+
+  const allDone = { ...unfinished, tasks: unfinished.tasks.map((t) => ({ ...t, status: "done" as const })) };
+  assert.equal(archiveNeedsConfirm({ plan: allDone, planFilePresent: true }), false,
+    "nothing is stranded by archiving a finished plan, so the box could only be answered one way");
+
+  // A file that does not parse hides its task states — "all done" cannot be
+  // established, so it falls back to asking.
+  assert.equal(archiveNeedsConfirm({ planFilePresent: true }), true);
+  // Registry only: nothing the user approved is being moved.
+  assert.equal(archiveNeedsConfirm({ planFilePresent: false }), false);
 });
 
 /**

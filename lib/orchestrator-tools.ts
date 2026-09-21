@@ -51,6 +51,7 @@ import { formatChildHealth } from "./orchestrator-child-state.ts";
 import { describeNotifyOutcome } from "./user-notify.ts";
 import {
   ARCHIVE_CONFIRM_TITLE,
+  archiveNeedsConfirm,
   buildArchiveConfirmMessage,
   buildPlanArchive,
   buildTakeoverRoute,
@@ -419,34 +420,40 @@ async function handlePlanAction(
     }
 
     const archivePath = planArchiveRelPath(nowIso);
-    // THE USER DECIDES (2026-09-06, their answer to the design question).
-    // The gate's one dialog template (2026-09-08) makes that literal: no UI
-    // means no row is picked, which reads as "not archived", and the decline
-    // row lets the user say WHY they are keeping it.
-    const archiveSpec: ChoiceSpec = {
-      title: ARCHIVE_CONFIRM_TITLE,
-      options: ["归档", "不归档"],
-      recommended: "不归档",
-    };
-    const archivePick = parseChoice(
-      await deps.askChoice(archiveSpec, {
-        body: buildArchiveConfirmMessage({
-          ...(existing ? { plan: existing } : {}),
-          archivePath,
-          liveChildren: openChildren.length,
+    // THE USER DECIDES — but only while some of the plan is UNFINISHED
+    // (2026-09-06 for the dialog, 2026-09-22 for the exemption). A plan whose
+    // every task is done strands nobody, so the box could only be answered
+    // one way.
+    const needsConfirm = archiveNeedsConfirm({ ...(existing ? { plan: existing } : {}), planFilePresent });
+    if (needsConfirm) {
+      // The gate's one dialog template (2026-09-08): no UI means no row is
+      // picked, which reads as "not archived", and the decline row lets the
+      // user say WHY they are keeping it.
+      const archiveSpec: ChoiceSpec = {
+        title: ARCHIVE_CONFIRM_TITLE,
+        options: ["归档", "不归档"],
+        recommended: "不归档",
+      };
+      const archivePick = parseChoice(
+        await deps.askChoice(archiveSpec, {
+          body: buildArchiveConfirmMessage({
+            ...(existing ? { plan: existing } : {}),
+            archivePath,
+            liveChildren: openChildren.length,
+          }),
         }),
-      }),
-      archiveSpec,
-    );
-    if (!(archivePick.kind === "chose" && archivePick.option === "归档")) {
-      return fail(
-        "review-gate: 用户没有同意归档（或当前环境没有可用的对话框）——什么都没有动，plan 还在原处。" +
-        (archivePick.kind === "declined" && archivePick.reason
-          ? `\n他的意见：${archivePick.reason}`
-          : "") +
-        "\n另一条路仍然可用：`orchestrator_attach` 接管这份 plan 所属的编排。",
-        { archived: false },
+        archiveSpec,
       );
+      if (!(archivePick.kind === "chose" && archivePick.option === "归档")) {
+        return fail(
+          "review-gate: 用户没有同意归档（或当前环境没有可用的对话框）——什么都没有动，plan 还在原处。" +
+          (archivePick.kind === "declined" && archivePick.reason
+            ? `\n他的意见：${archivePick.reason}`
+            : "") +
+          "\n另一条路仍然可用：`orchestrator_attach` 接管这份 plan 所属的编排。",
+          { archived: false },
+        );
+      }
     }
 
     const written = deps.archivePlan(
@@ -485,6 +492,11 @@ async function handlePlanAction(
       `review-gate: 已归档 ${moved} → ${written.path}（**没有删除任何东西**` +
       (planFilePresent ? `，原 ${PLAN_RELPATH} 已改名留在归档旁边` : "") +
       ")。\n" +
+      // Nobody was asked, so the receipt has to say WHAT went away: the plan
+      // the user approved, by name and size.
+      (!needsConfirm && existing
+        ? `没有问你：《${existing.title}》的 ${existing.tasks.length} 个任务全部 done，也没有活着的子会话。\n`
+        : "") +
       (planFilePresent
         ? `${PLAN_RELPATH} 已让出来了 —— 现在可以 \`orchestrator_plan({action:"write"})\` 写这一轮自己的 plan，`
         : "本仓库本来就没有 plan 文件；现在门禁记录也干净了 —— `orchestrator_plan({action:\"write\"})` 写这一轮自己的 plan，") +
@@ -715,7 +727,8 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "the state machine — `write` never changes a status), \"add-decision\" / \"resolve-decision\" " +
       "(questions only the human can settle), \"archive\" (a PREVIOUS orchestration's plan is in " +
       "this repo and you are starting a new round: the gate moves it aside — plan AND child " +
-      "registry — into a timestamped file in `.pi/`, asks the user first, and NEVER deletes " +
+      "registry — into a timestamped file in `.pi/`, asks the user first WHEN THE PLAN STILL " +
+      "HAS UNFINISHED TASKS (every task done ⇒ it just archives), and NEVER deletes " +
       "anything; it refuses while a registered child pane is still alive and points you at " +
       "`orchestrator_attach` instead). WHAT `write` DOES TO THE APPROVAL: it keeps it for " +
       "edits that grant nothing new — a dropped task, an added dependency, " +
