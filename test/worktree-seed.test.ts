@@ -194,10 +194,15 @@ test("THIS REPOSITORY's gitignore covers node_modules as a NAME, so a symlink is
   //      equalled `HEAD^{tree}` — and lib/review-adjudicate.ts's
   //      `laneVerifiesTree` compares exactly those two, so every parked READY
   //      was cleared with “its two preconditions can no longer both hold”.
+  // HERMETIC: the question is whether THIS REPOSITORY ignores the name, so the
+  // user's own `core.excludesFile` must not be able to answer for it — and
+  // every raw git spawn in this suite goes through the same guard
+  // (`test/hermetic-git.test.ts` scans call sites).
   let ignored = "";
   try {
     ignored = execFileSync("git", ["check-ignore", "-v", "node_modules"], {
       cwd: join(import.meta.dirname, ".."),
+      env: hermeticGitEnv(),
       encoding: "utf8",
     });
   } catch {
