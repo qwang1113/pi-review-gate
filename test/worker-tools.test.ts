@@ -337,6 +337,27 @@ test("a worker stays reachable after the opener's own identity changes", async (
     "the channel is found through the RECORDED opener — re-deriving it reads an empty file");
 });
 
+test("resuming a dead worker keeps the channel it already had", async () => {
+  // A worker that already exists owns a channel under the opener that FIRST
+  // opened it. Re-stamping this session's identity on a resume would move the
+  // address while everything the worker ever said stayed behind — including
+  // the report the caller is waiting for (reviewer P1, 2026-09-21).
+  const first = makeWorld();
+  await first.call("worker_submit", { task: "第一次" });
+  assert.equal(first.registry()["worker-1"]?.openerId, "%1");
+
+  // Same worker, same channel store, but resumed by a session whose own
+  // identity is different (a restart, a handover) — and the pane is gone, so
+  // this really is the resume path.
+  const second = makeWorld({ alive: false, openerId: "%999", io: first.io });
+  second.saveRegistry(first.registry());
+  const resumed = await second.call("worker_submit", { task: "接着上次那个", workerId: "worker-1" });
+  assert.equal(resumed.isError, undefined, second.text(resumed));
+  assert.equal(second.registry()["worker-1"]?.openerId, "%1", "the channel stays where the history is");
+  const role = second.opened.at(-1)?.role as { openerId?: string } | undefined;
+  assert.equal(role?.openerId, "%1", "…and the resumed pane is told to report there");
+});
+
 test("the projection answers the two questions a caller has", () => {
   const io = memoryChannelIO(() => NOW);
   const target = workerChannelTarget("%1", "worker-1");

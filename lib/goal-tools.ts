@@ -215,7 +215,7 @@ export async function doProposeLoopGoal(
     // The auditor has to be installed for any of this to work. Checked
     // FIRST, because a missing agent is a setup problem with a concrete
     // fix, not an audit that failed. Dispatchability is what matters, not
-    // a filename: pi-subagents keys agents by their frontmatter `name`,
+    // a filename: the loader keys agents by their frontmatter `name`,
     // so a copy called custom.md that declares `name: goal-auditor` IS
     // dispatchable and must not be reported as missing. EVERY layer is
     // resolved that way — the same rule gate-doctor applies — so the two
@@ -223,7 +223,7 @@ export async function doProposeLoopGoal(
     const packageAgentsDir = resolvePackageAgentsDir();
     const auditorInstalled =
       deps.findProjectAgent(pathJoin(homedir(), ".pi", "agent", "agents"), "goal-auditor") !== undefined ||
-      // Both project layers are consulted: pi-subagents loads them from the
+      // Both project layers are consulted: the loader reads them from the
       // SESSION's project root, while a multi-repo goal binds to goalRoot —
       // checking only one of them would look in the wrong directory.
       [pathJoin(goalRoot, ".pi", "agents"), pathJoin(deps.primaryRepoRoot(), ".pi", "agents")]

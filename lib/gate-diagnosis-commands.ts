@@ -101,7 +101,7 @@ export function modelDiagnosisLines(deps: GateDiagnosisDeps, registry?: unknown)
     // (project outranks global, exactly like the runtime load order).
     const readAgent = (name: string): string | undefined => {
       // Project layer wins by IDENTITY (frontmatter `name`), not basename:
-      // pi-subagents registers any .md under the project dir under its
+      // the loader registers any .md under the project dir under its
       // frontmatter name, so custom.md carrying `name: reviewer` really
       // shadows the global reviewer (round-11 P1/P2).
       const projText = deps.findProjectAgentText(projectAgentsDir, name);
@@ -170,7 +170,7 @@ export function modelDiagnosisLines(deps: GateDiagnosisDeps, registry?: unknown)
       }
     };
     // The PROJECT layer is enumerated by frontmatter IDENTITY, not basename:
-    // pi-subagents registers a project file under its `name`, so a
+    // the loader registers a project file under its `name`, so a
     // `custom.md` carrying `name: foo` is live as `foo`. Enumerating it as
     // "custom" made readAgent (which resolves by identity) find nothing, and
     // a project-ONLY agent whose basename differs from its name was invisible
@@ -227,7 +227,7 @@ export async function runGateDoctorCommand(deps: GateDiagnosisDeps, ctx: Command
     packageRoot,
     agentsDir: pathJoin(home, ".pi", "agent", "agents"),
     // Project-layer overrides outrank the global copies for diagnosis
-    // (round-2 P2) — same per-file precedence pi-subagents loads with.
+    // (round-2 P2) — same per-file precedence the loader uses.
     projectAgentsDir: pathJoin(deps.primaryRepoRoot(), ".pi", "agents"),
     modelsStorePath: pathJoin(home, ".pi", "agent", "models-store.json"),
     globalConfigPath: globalConfigPath(home),

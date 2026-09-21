@@ -345,7 +345,16 @@ async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown
     );
   }
 
-  const open = await openWorkerPane(deps, { workerId, role, task, model: resolved.model, prompt: resolved.prompt });
+  const open = await openWorkerPane(deps, {
+    workerId,
+    // An EXISTING worker keeps its channel; a new one is born on this
+    // session's identity.
+    openerId: existing?.openerId ?? deps.openerId(),
+    role,
+    task,
+    model: resolved.model,
+    ...(resolved.prompt === undefined ? {} : { prompt: resolved.prompt }),
+  });
   if (!open.ok) return fail(`review-gate: worker ${workerId} 没能启动 —— ${open.error}`);
   return reply(
     `review-gate: worker ${workerId}（角色 ${role}，模型 ${resolved.model}）已在 pane ${open.paneId} 启动。\n` +
@@ -360,7 +369,7 @@ async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown
 
 async function openWorkerPane(
   deps: WorkerToolDeps,
-  opts: { workerId: string; role: string; task: string; model: string; prompt?: string },
+  opts: { workerId: string; openerId: string; role: string; task: string; model: string; prompt?: string },
 ): Promise<{ ok: true; paneId: string } | { ok: false; error: string }> {
   const ownPane = deps.ownPane();
   if (!ownPane) {
@@ -391,18 +400,23 @@ async function openWorkerPane(
   });
   // The pane is opened by the ONE factory every other pane goes through; what
   // this function adds is only WHAT to open (lib/session-factory.ts owns how).
+  //
+  // RESUME KEEPS THE CHANNEL THE WORKER ALREADY HAS (reviewer P1, 2026-09-21).
+  // `opts.openerId` is fixed when the WORKER IS BORN and never re-stamped: a
+  // worker that already exists owns a channel under the opener that first
+  // opened it, so stamping this session's identity on a resume would move the
+  // address while everything the worker ever said stayed behind — including
+  // the report the caller is waiting for.
+  const openerId = opts.openerId;
   const opened = await deps.openPane({
     ownPane,
     cwd: deps.repoRoot(),
     command,
-    role: { kind: "worker", openerId: deps.openerId(), workerId: opts.workerId, role: opts.role },
+    role: { kind: "worker", openerId, workerId: opts.workerId, role: opts.role },
     register: (paneId) => {
       deps.saveRegistry(withWorker(deps.readRegistry(), {
         workerId: opts.workerId,
-        // RECORDED, not re-derived: this is the channel the worker will write
-        // its report to, and the only thing that keeps it reachable after the
-        // opener's pane (or session) changes.
-        openerId: deps.openerId(),
+        openerId,
         role: opts.role,
         model: opts.model,
         paneId,
