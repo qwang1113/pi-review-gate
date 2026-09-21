@@ -510,7 +510,7 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
     : WORKER_WAIT_DEFAULT_MS;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => { setTimeout(r, ms); }));
   const started = deps.now();
-  const seen = registry[workerId]?.reportedAt;
+  let seen = registry[workerId]?.reportedAt;
 
   // The two things a worker channel can carry, as replies — shared by the
   // probe below and by the last look taken before declaring it gone.
@@ -525,6 +525,12 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
   const reportReply = (r: NonNullable<WorkerProjection["report"]>): ToolReply => {
     const current = registry[workerId];
     if (current) deps.saveRegistry(withWorker(registry, { ...current, reportedAt: r.reportId }));
+    // THE CONSUMED-FLAG IS WHAT MAKES THE NEXT PROBE HONEST (reviewer P1,
+    // 2026-09-21): it moves in memory too, so a report this call already handed
+    // over cannot be handed over again by a later probe in the same wait — and
+    // the `gone` verdict below can say WHY it is not delivering anything
+    // instead of silently stepping over a report it decided not to repeat.
+    seen = r.reportId;
     return reply(
       `review-gate: worker ${workerId} 交活了：\n\n${r.text}`,
       { workerId, reportId: r.reportId, kind: "report" },
@@ -560,9 +566,16 @@ async function waitWorker(deps: WorkerToolDeps, params: Record<string, unknown>)
       if (after.question) return questionReply(after.question);
       if (after.report && after.report.reportId !== seen) return reportReply(after.report);
       const closed = entry.paneId === undefined;
+      // SAY WHICH KIND OF "NOTHING" THIS IS (reviewer P1, 2026-09-21): a
+      // channel whose newest report was ALREADY handed over is a different
+      // fact from one that never carried a report, and stepping over the first
+      // silently reads as "it never said anything".
+      const already = after.report !== undefined;
       return reply(
         `review-gate: worker ${workerId} ${closed ? "的 pane 已经关掉了" : `的 pane（${entry.paneId}）已不在`}，` +
-        "现在通道里没有新消息。\n" +
+        (already
+          ? `它最后那份报告（${after.report!.reportId}）本次已交付过 —— 没有更新的内容。\n`
+          : "现在通道里没有新消息。\n") +
         "（如果它在被杀之前写过报告，那份仍在通道里：再 `worker_wait` 一次就能读到 —— 这里不会丢弃任何东西。）\n" +
         `接着用：\`worker_submit({ workerId: "${workerId}", task: … })\`（同一 session id 重开，它还记得上次读过的）；` +
         `不用了就 \`worker_close({ workerId: "${workerId}" })\`。`,

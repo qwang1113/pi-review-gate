@@ -153,19 +153,14 @@ export function withWorker(registry: WorkerRegistry, entry: WorkerEntry): Worker
   return { ...registry, [entry.workerId]: entry };
 }
 
-/**
- * Drop a worker WITHOUT mutating the input.
+/* `withoutWorker` WAS HERE, AND IS DELETED (2026-09-21, reviewer P1).
  *
- * NO LONGER USED BY `worker_close` (2026-09-21, reviewer P1): closing a pane
- * releases screen space, not the conversation, so the entry stays with its
- * pane cleared. Kept exported because forgetting a worker completely is still
- * a thing a caller may need (a registry the user asks to reset), and the
- * operation is one line — but it must never be the close path again.
- */
-export function withoutWorker(registry: WorkerRegistry, workerId: string): WorkerRegistry {
-  const { [workerId]: _gone, ...rest } = registry;
-  return rest;
-}
+ * It removed a worker from the registry outright, and `worker_close` was its
+ * only caller — which was the bug: closing a pane releases SCREEN SPACE, not
+ * the conversation, and the entry carries the channel owner, the session id
+ * and the consumed-report cursor a later resume needs. The close path now
+ * clears `paneId` and keeps everything else. It is deleted rather than kept
+ * for a hypothetical caller, because its obvious use IS the mistake. */
 
 /**
  * The argv a worker pane runs.
