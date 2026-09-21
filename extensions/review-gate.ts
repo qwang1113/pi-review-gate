@@ -73,7 +73,12 @@ import {
   STRATEGIC_RESET_CHECKLIST,
   TASK_TEXT_MARKER,
 } from "../lib/constants.ts";
-import { ROUND_NOTE_HINT, SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "../lib/agent-directives.ts";
+import {
+  ROUND_NOTE_HINT,
+  SCOPE_ESCALATION_PROTOCOL,
+  SETTLED_TOOL_REMINDER,
+  WAIT_DISCIPLINE_HINT,
+} from "../lib/agent-directives.ts";
 
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { armingFromFacts, couldReconcile, reconcileArming } from "../lib/gate-arming.ts";
@@ -258,6 +263,27 @@ import {
 // The delivery probe a judge spawn shares with an orchestration spawn: same
 // polling, same evidence, same verdict — only the channel path differs.
 import { channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-kit.ts";
+// STOP-FIRST, THEN SPEAK (2026-09-21): the two-step an `interrupt` has to be,
+// and the reason it is a module rather than four lines here — the ordering is
+// the whole fix (lib/interrupt-delivery.ts carries the measured deadlock).
+import { deliverInterrupt } from "../lib/interrupt-delivery.ts";
+// WORKER PANES (2026-09-21): the tmux-pane replacement for the pi-subagents
+// `Agent` tool. Four tools on the agent surface, one on the worker surface,
+// and the pane factory they both go through.
+import { registerWorkerTools } from "../lib/worker-tools.ts";
+import {
+  JUDGE_PANE_RECLAIM,
+  reclaimAuditLine,
+  type JudgePaneReclaimOutcome,
+} from "../lib/judge-pane-policy.ts";
+import { readWorkerSideEnv, registerWorkerReportTool } from "../lib/worker-side.ts";
+import {
+  parseWorkerRegistry,
+  serializeWorkerRegistry,
+  workerSessionDirName,
+  WORKER_REGISTRY_RELPATH,
+  WORKER_SESSION_ROOT,
+} from "../lib/worker-pane.ts";
 import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
@@ -611,6 +637,7 @@ import {
   effectiveAgentsConfig,
   applyAgentConfigLayer,
   loadRegistry,
+  validateSpec,
   KNOWN_AGENTS,
   KNOWN_THINKING_LEVELS,
   projectAgentIdentity,
@@ -1856,6 +1883,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     // a judge pane is a child process with a gate, not a second channel.
     // (Heartbeat, dialog race and round-task drain all funnel through this
     // binding, so they work for judges with no further wiring.)
+    //
+    // A WORKER PANE JOINS THE SAME LIST (2026-09-21), and this one branch is
+    // the whole of its channel story: `ask_user` inside the worker reaches the
+    // opener through the dialog race, and `worker_submit`'s message to a live
+    // worker is injected by the child-side drain — both without a line of
+    // worker-specific transport.
+    const workerSide = readWorkerSideEnv(process.env);
+    if (workerSide) {
+      return {
+        io: channelIO,
+        target: { orchestrationId: workerSide.openerId, childId: `worker-${workerSide.workerId}` },
+        ...(state.sessionId ? { sessionId: state.sessionId } : {}),
+      };
+    }
     const judgeSide = readJudgeSideEnv(process.env);
     if (!judgeSide) return undefined;
     return {
@@ -2477,15 +2518,39 @@ export default function reviewGate(pi: ExtensionAPI) {
           // stops the current turn if one is running.
           gateInterruptController.abort();
           gateInterruptController = new AbortController();
-          ctx.abort?.();
           if (interruptText) {
-            // sendUserMessage is fire-and-forget in this pi build (the loader
-            // does not return the promise), so there is nothing to await or
-            // race: the message is handed to pi synchronously and the ack
-            // records that. A failure surfaces as the child never acking.
-            pi.sendUserMessage(interruptText, { deliverAs: "steer" });
-            acknowledgeInstruct(binding, instruction.instructId, true, "已解除等待并立即投递正文 (deliverAs:steer)", "injected");
+            // STOP FIRST, THEN SPEAK — AND WAIT FOR THE STOP TO LAND
+            // (2026-09-21). `ctx.abort()` is SYNCHRONOUS on this side and does
+            // not wait for the turn to end, so handing the text to pi while the
+            // agent was still streaming queued it as `steer` — and the abort's
+            // own end-of-run skipped the drain those queued messages wait for.
+            // Measured: two judges of one round froze for 552s with the
+            // dispatch sitting unread, and the same drain serves orchestration
+            // children. lib/interrupt-delivery.ts owns the contract; this is
+            // only the pi surface.
+            const delivered = await deliverInterrupt(interruptText, {
+              abort: () => ctx.abort?.(),
+              isIdle: () => ctx.isIdle?.() === true,
+              // NO `deliverAs`: by pi's own contract that is the form which
+              // "sends immediately and triggers a new turn".
+              sendNow: (text) => pi.sendUserMessage(text),
+            });
+            // A DEFERRED DELIVERY IS NOT AN INJECTION (2026-09-21): the text is
+            // still in the channel, and the next drain retries it. Acknowledging
+            // it as `injected` is how the opener was told "delivered" about a
+            // message nobody had read — the ack says which stage was ACTUALLY
+            // reached, which is the whole point of the two-stage handshake.
+            acknowledgeInstruct(
+              binding,
+              instruction.instructId,
+              true,
+              delivered.delivered === "turn"
+                ? `已中止当前 turn，等 pane 空闲（${delivered.waitedMs}ms）后作为新一轮投递`
+                : `pane 仍在忙（已等 ${delivered.waitedMs}ms）—— 正文留在通道里，下一次 drain 再投`,
+              delivered.delivered === "turn" ? "injected" : "received",
+            );
           } else {
+            ctx.abort?.();
             acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
           }
           continue;
@@ -8815,6 +8880,44 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * fall back to the last UI context, and with neither they record NOTHING and
    * say so, which the engine turns into "stay armed, retry next settle".
    */
+  /**
+   * THE ONE CLOSE PATH for a judge THIS session opened.
+   *
+   * Two callers, one implementation (2026-09-21): the gate's synchronous
+   * chains (`auditRunDeps.closeJudge`) and the round-end reclaim that now
+   * frees an AGENT-dispatched review pane too
+   * (`auditRoundDeps.reclaimJudgePane`). They are one function on purpose —
+   * "read hadPane BEFORE the close, close by judgeId, map the reply's outcome"
+   * is exactly the sequence whose two copies drift, and a reclaim that reports
+   * the wrong outcome is a leftover pane nobody can find again (`judge_close`
+   * drops the registry row even when the kill fails).
+   *
+   * SAME BYPASS AS THE WAIT (2026-09-08): the gate reclaims a judge it opened
+   * itself — `callTool("judge_close", { repo: root })` would refuse on an
+   * unedited repo and leak the pane (measured: five "judge pane 回收失败…is not
+   * one of the repositories" in the audit log). `doClose` by judgeId keeps the
+   * opener check and skips only the repo-addressing.
+   */
+  async function closeOwnedJudge(
+    root: string,
+    judgeId: string | undefined,
+    role: string,
+  ): Promise<JudgePaneReclaimOutcome> {
+    // `hadPane` is read HERE, before the close, because it is the only moment
+    // it is still knowable.
+    const hadPane = judgeChildByRole(root, role)?.paneId !== undefined;
+    if (judgeId === undefined) {
+      return { ok: true, hadPane: false, terminated: false, note: "no judge on record — nothing to close." };
+    }
+    const closed = await doClose(selfSessionDeps(), { role, sessionId: judgeId }, true); // gateSelf: this session opened it
+    return {
+      ok: closed.isError !== true && (closed.details as { closed?: unknown } | undefined)?.closed === true,
+      hadPane,
+      terminated: (closed.details as { terminated?: unknown } | undefined)?.terminated === true,
+      note: toolText(closed as { content: { type: string; text: string }[] }).split("\n")[0]?.trim() || undefined,
+    };
+  }
+
   function auditRoundDeps(ctx?: unknown): SettleAuditRoundDeps {
     return {
       judgeEntry: (judgeId) => {
@@ -8844,6 +8947,23 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       conclusionOf: (report) => reportConclusion(channelIO, report),
       proseOf: (report) => reportText(channelIO, report),
       advanceCursor: (judgeId, reportId) => advanceReportCursor(judgeId, reportId),
+      // ROUND END FREES THE PANE (2026-09-21, user decision): a review pane no
+      // longer waits for declare_done. The verdict is already on record — what
+      // the judge produced is the opener's — so the pane is screen space, and
+      // closing it costs no context: the next `judge_submit` for this role
+      // finds a dead pane and re-opens the SAME session id, transcript and all.
+      reclaimJudgePane: async (root, judgeId, role) => {
+        const outcome = await closeOwnedJudge(root, judgeId, role);
+        // SILENCE IS THE NORMAL CASE (lib/judge-pane-policy.ts): a reclaim that
+        // did what the policy promises is not news, and a log that records every
+        // success is a log nobody greps. A line appears only when the pane's fate
+        // is NOT what the policy promises — which is the one moment the leftover
+        // pane would otherwise become unfindable (the registry row is dropped
+        // even when the kill failed).
+        const line = reclaimAuditLine({ role, policy: JUDGE_PANE_RECLAIM, outcome });
+        if (line !== undefined) log(line);
+        return outcome;
+      },
       pendingAudit: (root) => pendingAudits.get(root),
       forgetPending: (root) => dropAudits(root),
       nowIso: () => new Date().toISOString(),
@@ -8974,25 +9094,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // after that reply is discarded the leftover pane is unreachable — the
       // row it would be found by no longer exists. `hadPane` is read HERE,
       // before the close, because it is the only moment it is still knowable.
-      closeJudge: async (root, role) => {
-        // SAME BYPASS AS THE WAIT (2026-09-08): the gate reclaims the auditor
-        // it opened itself — `callTool("judge_close", { repo: root })` would
-        // refuse on an unedited repo and leak the pane (measured: five
-        // "judge pane 回收失败…is not one of the repositories" in the audit
-        // log). `doClose` by judgeId keeps the opener check, skips only the
-        // repo-addressing.
-        const hadPane = judgeChildByRole(root, role)?.paneId !== undefined;
-        const judgeId = judgeChildByRole(root, role)?.judgeId;
-        const closed = judgeId === undefined
-          ? { isError: false, content: [{ type: "text", text: "no judge on record — nothing to close." }], details: { closed: true, terminated: false } }
-          : await doClose(selfSessionDeps(), { role, sessionId: judgeId }, true); // gateSelf: gate's own reclaim
-        return {
-          ok: closed.isError !== true && (closed.details as { closed?: unknown } | undefined)?.closed === true,
-          hadPane,
-          terminated: (closed.details as { terminated?: unknown } | undefined)?.terminated === true,
-          note: toolText(closed as { content: { type: string; text: string }[] }).split("\n")[0]?.trim() || undefined,
-        };
-      },
+      closeJudge: async (root, role) => closeOwnedJudge(root, judgeChildByRole(root, role)?.judgeId, role),
       auditPassed: (root, pending) => {
         const st = root === primaryRepoRoot ? state : stateForRepo(root);
         if (pending.kind === "goal") return goalPrereviewPassed(st.goalPrereview, pending.draft);
@@ -9621,6 +9723,49 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     },
     channelIO: () => channelIO,
     channelHome: () => undefined,
+    // THE ONE READING A HEARTBEAT CANNOT GIVE (goal 6(d), 2026-09-21): the
+    // judge's transcript mtime. A live pane whose gate is reporting proves a
+    // PROCESS; only writes to the transcript prove a TURN is running — which
+    // is exactly the difference the 552-second freeze fell into.
+    transcriptActivityAt: (child) => {
+      if (!child.sessionDir) return undefined;
+      try {
+        let newest: number | undefined;
+        for (const name of readdirSync(child.sessionDir)) {
+          if (!name.endsWith(".jsonl")) continue;
+          try {
+            const at = statSync(pathJoin(child.sessionDir, name)).mtimeMs;
+            if (newest === undefined || at > newest) newest = at;
+          } catch { /* one unreadable file is not a verdict on the rest */ }
+        }
+        return newest;
+      } catch {
+        return undefined;
+      }
+    },
+    // THE FLOOR UNDER THAT READING — from the REGISTRY, not from the channel
+    // (quality round P1, 2026-09-21). The first version rebuilt it as "the
+    // newest `instruct` on the judge's channel", which is only written on the
+    // LIVE-PANE-REUSE path: a fresh open carries its task as a task file, and
+    // goal/plan audits never write an instruct at all. So the reading was the
+    // PREVIOUS round's timestamp or nothing — precisely the case this floor
+    // exists for. `JudgeEntry.spawnedAt` is stamped on EVERY dispatch and is
+    // already the registry's own answer to "when did this round start".
+    roundDispatchedAt: (child) => {
+      const at = judgeHierarchy[child.judgeId]?.spawnedAt;
+      if (at === undefined) return undefined;
+      const ms = Date.parse(at);
+      return Number.isFinite(ms) ? ms : undefined;
+    },
+    // …AND NOTHING NARROWS IT FURTHER. An earlier version also asked the
+    // channel "is this judge parked on an unanswered question", to keep a
+    // waiting round out of the reading. Three review rounds found three ways
+    // for that predicate to go stale (a question settled in the pane, an
+    // abandoned one, and the cross-round channel having no floor), each one
+    // silently disabling the reading for the rest of that lane's life. It was
+    // never needed: the receipt REPORTS a reading, and already names "parked on
+    // a dialog nobody answered" as one of its three explanations. A reading
+    // does not have to know which one it is.
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),
@@ -9692,6 +9837,127 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   // hosts. A second registration is not a second implementation: both
   // executes close over `judgeSessionDeps`.
   registerJudgeWaitTool(pi, judgeSessionDeps);
+
+  // -----------------------------------------------------------------------
+  // WORKER TOOLS (2026-09-21) — the tmux-pane replacement for the
+  // pi-subagents `Agent` tool, and the answer to the user's requirement that
+  // opening a subagent and opening a review pane be the same act.
+  //
+  // SURFACE MATTERS, and it is the only guard these need: the four dispatch
+  // tools go on the AGENT surface and never inside a judge or worker pane (a
+  // judge is read-only by contract; a worker that could dispatch workers is a
+  // recursion nobody asked for), while `worker_report` goes on the WORKER
+  // surface alone, so a main session can never fabricate a worker's answer.
+  // -----------------------------------------------------------------------
+  if (!readJudgeSideEnv(process.env) && !readWorkerSideEnv(process.env)) {
+    const workerRegistryPath = () => pathJoin(activeRepoRoot.current, WORKER_REGISTRY_RELPATH);
+    registerWorkerTools(pi, {
+      ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
+      paneAlive: (paneId) => {
+        const self = process.env.TMUX_PANE?.trim();
+        if (!self) return false;
+        try {
+          return judgePaneAlive(runTmux, self, paneId) === true;
+        } catch {
+          // Unreadable tmux is missing INFORMATION: a worker whose liveness
+          // cannot be read is treated as gone, and `worker_submit` opens the
+          // pane again under the SAME session id — which is the safe direction
+          // (a resumed transcript beats a message nobody reads).
+          return false;
+        }
+      },
+      openPane: async (spec) => {
+        const opened = await openSessionPane(runTmux, {
+          ownPane: spec.ownPane,
+          cwd: spec.cwd,
+          layout: "child-column",
+          role: spec.role,
+          command: spec.command,
+          register: spec.register,
+        });
+        return opened.ok ? { ok: true, paneId: opened.paneId } : { ok: false, error: opened.error };
+      },
+      killPane: (paneId) => {
+        try {
+          // The factory's own close: it probes the window first and evens out
+          // the column afterwards, so freeing screen space does not leave a
+          // half-height neighbour behind.
+          return closeSessionPane(runTmux, paneId).ok;
+        } catch {
+          return false;
+        }
+      },
+      // STABLE OPENER IDENTITY, not the pane (reviewer P1, 2026-09-21):
+      // `TMUX_PANE` changes on every restart, re-attach and handover, and it is
+      // half of every worker channel path — so a worker dispatched before one
+      // of those would report into a file nobody reads and the caller would
+      // wait on an empty one. The session id survives all three (pi resumes
+      // the same transcript by it), which is what keeps a worker reachable.
+      openerId: () => state.sessionId?.trim() || "gate",
+      repoRoot: () => activeRepoRoot.current,
+      channelIO,
+      channelHome: () => undefined,
+      workDirFor: (workerId) => pathJoin(activeRepoRoot.current, ".pi", WORKER_SESSION_ROOT, workerId),
+      // THE OTHER HALF OF THE RESUME KEY: the session id alone finds nothing
+      // if the transcript directory is not the one it was written to.
+      // NOT under `.pi/judge-sessions/` (reviewer P2, 2026-09-21): that root is
+      // swept by the judge lifecycle, whose staleness rule matches a directory
+      // name ending in `-<8 hex>` and is NOT in the judge registry — and a
+      // worker id like `abc12345` produces exactly that shape, so its
+      // transcript directory would be removed the next time the sweep ran.
+      sessionDirFor: (workerId) =>
+        pathJoin(activeRepoRoot.current, ".pi", WORKER_SESSION_ROOT, workerSessionDirName(workerId), "sessions"),
+      writeFile: (path, content) => {
+        try {
+          mkdirSync(pathDirname(path), { recursive: true });
+          writeFileSync(path, content, "utf8");
+          return { ok: true };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      },
+      readRegistry: () => {
+        try {
+          return parseWorkerRegistry(JSON.parse(readFileSync(workerRegistryPath(), "utf8")));
+        } catch {
+          // No file yet, or an unreadable one: both mean "no workers", and a
+          // registry that cannot be read must never be repaired into a guess
+          // (lib/worker-pane.ts drops malformed ENTRIES for the same reason).
+          return {};
+        }
+      },
+      saveRegistry: (registry) => {
+        try {
+          mkdirSync(pathDirname(workerRegistryPath()), { recursive: true });
+          writeFileSync(workerRegistryPath(), serializeWorkerRegistry(registry), "utf8");
+        } catch (error) {
+          log(`worker registry write failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+      agents: () => {
+        const cfg = freshProjectConfig(activeRepoRoot.current);
+        return effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject).map;
+      },
+      // The registry check the renderer used to do for every role — worker
+      // presets never reach `applyAgentConfigLayer` (it filters them), so this
+      // is where their specs get validated instead of at pane-open time.
+      validateModel: (spec) => {
+        const verdict = validateSpec(loadRegistry(), spec);
+        return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason };
+      },
+      tmuxServer: () => tmuxServerFrom(process.env),
+      now: () => Date.now(),
+      log,
+    });
+  }
+  if (readWorkerSideEnv(process.env)) {
+    registerWorkerReportTool(pi, {
+      env: () => process.env,
+      channelIO: () => channelIO,
+      now: () => Date.now(),
+      cwd: () => cwd,
+    });
+  }
 
   /**
    * THE PANE'S OWN MODEL SELF-HEAL (2026-09-10).
@@ -13331,7 +13597,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const problems = gateArmed
       ? unmetRequirements(state, fp!.digest, fp!.unavailable, { requireDocSync: projectConfig.docSync })
       : [];
-    if (state.taskMode === "explore") {
+    // A WORKER IS NOT AN EXPLORE SESSION (2026-09-21). The worker pane carries
+    // `RG_GATE_MODE=explore` so it does not classify itself into the loop, but
+    // the explore prompt is written for an agent that owns a task — it says
+    // 「任务满意完成即可自行 declare_done」 and 「若任务变成交付性工作，先
+    // set_gate_mode("loop")」, while a worker's own system prompt says 「用
+    // worker_report 交一次，然后停下」. Two contradicting closing instructions in
+    // one prompt is how a worker ends a turn without reporting (reviewer P2).
+    if (state.taskMode === "explore" && !readWorkerSideEnv(process.env)) {
       return {
         systemPrompt:
           systemPrompt +
@@ -13392,7 +13665,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // never rendered them. `gateArmed` gates the unmet-problems list below,
     // not the directives block.
     const loopDirectives =
-      state.taskMode === "loop" ? "\n\n" + MODE_REGISTRY.loop.prompt : "";
+      state.taskMode === "loop"
+        ? "\n\n" + MODE_REGISTRY.loop.prompt +
+          // TOP-LEVEL ONLY (2026-09-21): the shared loop block reaches
+          // orchestration children as well, and a child's
+          // `set_gate_mode("orchestrator")` is refused mechanically — telling
+          // it to ask the user to switch would send it to a dead end. The
+          // rule is appended here, where the session that can act on it gets
+          // it (lib/gate-modes.ts explains why the block itself omits it).
+          (isOrchestrationChild() ? "" : "\n\n" + SCOPE_ESCALATION_PROTOCOL)
+        : "";
     systemPrompt += loopDirectives;
 
     // MODE-UNDECIDED early return (2026-08-30): the Review Gate block below

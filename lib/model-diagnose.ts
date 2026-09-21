@@ -73,7 +73,7 @@ export function parseAgentFrontmatter(
         // A genuinely BLANK line, however, ENDS the block upstream: a plain
         // (non-folded, non-literal) block fails the continuation test, so the
         // items AFTER the blank line are never part of the value and never
-        // deploy. Verified directly against pi-subagents' parseFrontmatter:
+        // deploy. Verified directly against the loader's parser:
         // `fallbackModels:\n  - c/d\n\n  - e/f` yields ONLY `c/d`. Skipping
         // the blank line here reported `e/f` as a usable fallback that the
         // runtime will never start (deployed ≠ diagnosed).
@@ -186,13 +186,13 @@ export function diagnoseChain(
     ? [parsed.model ?? "", ...(parsed.fallbackModels ?? [])].filter(Boolean)
     : [];
   // A standalone `thinking:` frontmatter field applies to EVERY candidate
-  // at deploy time (pi-subagents appends it to each model), so the diagnosis
+  // at deploy time (the renderer appends it to each model), so the diagnosis
   // must check the chain with that level implied — a bare spec + `thinking:
   // max` is only usable if `:max` resolves (round-11 P2).
   //
-  // But an UNKNOWN word is not a level: pi-subagents' resolveEffectiveThinking
-  // does `THINKING_LEVELS.find((level) => level === configThinking)`
-  // (node_modules/pi-subagents/src/shared/model-info.ts:40), so `thinking:
+  // But an UNKNOWN word is not a level: the loader's effective-thinking
+  // resolution is `THINKING_LEVELS.find((level) => level === configThinking)`,
+  // so `thinking:
   // banana` / `thinking: false` resolves to undefined and the model deploys
   // BARE. Applying it here refused reasoning:false candidates that really do
   // run — the doctor reported a live chain as dead (deployed ≠ diagnosed).

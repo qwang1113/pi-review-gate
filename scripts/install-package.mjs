@@ -226,7 +226,8 @@ async function applyGlobalModelConfig() {
   try {
   // ── DEFAULT AGENTS SECTION (user requirement 2026-08-30: NO built-in
   // defaults — the config file must exist and name every role's slots).
-  //  - file ABSENT  → write the full 4-role default agents section.
+  //  - file ABSENT  → write the full default agents section (every role the
+  //    gate can dispatch: five judges plus the read-only worker preset).
   //    overwrite a role the user already configured — that would silently
   //    undo their pins on every upgrade).
   const cfgPath = join(homedir(), ".pi", "review-gate.json");
@@ -239,6 +240,12 @@ async function applyGlobalModelConfig() {
     adviser: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
     arbiter: { auto: false, slots: ["onekey/gpt-5.6-sol:max"] },
     "goal-auditor": { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
+    // READ-ONLY WORKERS (2026-09-21) — the pane-shaped successor to the
+    // pi-subagents `Agent` tool. NOT part of the session-start hard check
+    // (lib/model-config.ts `KNOWN_AGENTS`): this entry exists so a fresh
+    // install can dispatch one, and a preset the user adds later
+    // (`worker-recon`, `worker-strong`, …) carries its own `prompt`.
+    worker: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
   };
   try {
     if (!existsSync(cfgPath)) {
@@ -304,6 +311,8 @@ async function applyGlobalModelConfig() {
     const { effectiveAgentsConfig, applyAgentConfigLayer, loadRegistry } = await import(dataUrl);
     const { map, diagnostics } = effectiveAgentsConfig(agents, undefined);
     for (const d of diagnostics) log(`  ⚠ model config: ${d}`);
+    // Worker presets are filtered INSIDE the renderer (`applyAgentConfigLayer`
+    // in lib/model-config.ts): there are three call sites and one rule.
     const res = applyAgentConfigLayer({
       agents: map,
       targetDir: AGENTS_DST,

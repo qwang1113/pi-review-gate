@@ -79,6 +79,7 @@ import { JUDGE_ID_ENV, JUDGE_OPENER_ENV, JUDGE_ROLE_ENV } from "./judge-pane.ts"
 // reclaimed from: ONE derivation, so the two sides cannot drift apart.
 import { judgeScratchDir } from "./judge-process.ts";
 import { JUDGE_STREAM_ENV, JUDGE_TASK_ENV } from "./judge-side.ts";
+import { WORKER_ID_ENV, WORKER_OPENER_ENV, WORKER_ROLE_ENV } from "./worker-side.ts";
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
@@ -132,6 +133,15 @@ export type SessionPaneRole =
       stationCap?: DeliveryStation;
     }
   | {
+      kind: "worker";
+      /** The session that dispatched it — also its channel owner. */
+      openerId: string;
+      /** Its stable handle: the resume key for both the session id and the channel. */
+      workerId: string;
+      /** Which configured preset it runs as. */
+      role: string;
+    }
+  | {
       kind: "successor";
       /** A relay hands over its own inheritance env, built by the relay module. */
       env: Readonly<Record<string, string>>;
@@ -162,6 +172,24 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
       // deleted with the round. The two sides must name the same directory;
       // test/judge-scratch.test.ts pins exactly that.
       TMPDIR: judgeScratchDir(role.judgeId),
+    };
+  }
+  if (role.kind === "worker") {
+    // The THREE keys a worker pane is: who opened it, which worker it is, and
+    // which preset it was launched as. All three are required on the far side
+    // (lib/worker-side.ts), because a pane that binds a channel without knowing
+    // whose it is would report into somebody else's file.
+    return {
+      [WORKER_OPENER_ENV]: role.openerId,
+      [WORKER_ID_ENV]: role.workerId,
+      [WORKER_ROLE_ENV]: role.role,
+      // NOT loop (2026-09-21). A worker has no goal to negotiate, no round to
+      // submit and nothing to ship — it reads and reports — so telling it to
+      // classify itself into the full loop would hand it a machinery it cannot
+      // use (an unapproved-goal gate over a session that never asked for one).
+      // `explore` is the mode that already means "investigation, ship still
+      // blocked", which is exactly a worker's contract.
+      [GATE_MODE_ENV]: "explore",
     };
   }
   if (role.kind === "orchestration-child") {

@@ -1,5 +1,5 @@
 /**
- * The pi-subagents session-dir convention: `~/.pi/agent/sessions/--<encoded>--`
+ * The pi session-dir convention: `~/.pi/agent/sessions/--<encoded>--`
  * where the encoding is pi's own. The fresh-context review roles (reviewer,
  * adviser, goal-auditor) get this directory in their task text and read the
  * main session's transcript from it ON DEMAND — so the encoding must match

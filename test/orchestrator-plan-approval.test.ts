@@ -338,9 +338,12 @@ test("a spawn is still authorized after an amendable edit — the whole point", 
   assert.equal(spawn.isError, undefined, replyText(spawn));
 });
 
-test("`write` PRESERVES task status and note — a rewrite is not an execution reset", async () => {
+test("`write` PRESERVES task status — a rewrite is not an execution reset", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "running" });
+  // The reason rides along — and lands in the gate log, NOT on the task book
+  // (2026-09-21, user decision: `plan.tasks[].note` is the assignment a child
+  // session is handed, so a status change must not rewrite it).
   await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "done", note: "已合并" });
   await world.call("orchestrator_plan", { action: "set-status", taskId: "t2", status: "running" });
 
@@ -359,7 +362,8 @@ test("`write` PRESERVES task status and note — a rewrite is not an execution r
 
   const plan = world.plan()!;
   assert.equal(plan.tasks.find((t) => t.id === "t1")?.status, "done", "a merged task must not be reported as pending");
-  assert.equal(plan.tasks.find((t) => t.id === "t1")?.note, "已合并");
+  assert.equal(plan.tasks.find((t) => t.id === "t1")?.note, undefined,
+    "a set-status reason is a log line — it never becomes the task book");
   assert.equal(plan.tasks.find((t) => t.id === "t2")?.status, "running");
   assert.equal(plan.tasks.find((t) => t.id === "t3")?.status, "pending", "only a NEW task starts at pending");
 });
@@ -383,6 +387,9 @@ test("`write` ACCEPTS a note update for an existing task, and the approval survi
   }, undefined, true);
   assert.ok(approved.plan, `fixture must parse: ${approved.problems.join("; ")}`);
   const world = makeFakeWorld({ plan: approved.plan!, approvePlan: true });
+  // 「旧备注」 no longer lands anywhere on the task (2026-09-21) — set-status
+  // writes its reason to the gate log. The point of this test is the NEXT
+  // call: a `write` that carries a note must still have it land.
   await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "running", note: "旧备注" });
 
   const written = await world.call("orchestrator_plan", {

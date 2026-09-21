@@ -1,106 +1,60 @@
 /**
- * WHEN A JUDGE'S PANE IS RECLAIMED — two policies, on purpose, written down.
+ * WHEN A JUDGE'S PANE IS RECLAIMED — ONE policy, and it is ROUND END.
  *
- * The gate runs judges in tmux panes, and there are exactly TWO answers to
- * "when does that pane go away". They are different because the panes are
- * different, and the user settled it on 2026-09-06: keep both, do not unify
- * them. What was missing was not the behaviour — it was a place that says
- * WHICH is which and WHY, so the next reader cannot mistake the split for an
- * accident and "tidy it up".
+ * ── WHAT IT REPLACED (user decision, 2026-09-21) ──
  *
- * ── THE TWO POLICIES ──
+ * There used to be TWO policies, written down on purpose (2026-09-06): the
+ * gate's own auditor died at round end, while an agent-dispatched review pane
+ * lived until `declare_done`, because "closing it when the round ends would
+ * take the findings off the screen at the exact moment somebody wants to look
+ * at them".
  *
- *  (a) THE GATE'S OWN AUDITOR — reclaimed at ROUND END ("谁派谁收", O-6).
- *      `propose_loop_goal` and `orchestrator_plan({action:"submit"})` open a
- *      `goal-auditor` as their OWN implementation. The agent never asked for
- *      it, never sees it in an `orchestrator_wait` or `judge_wait` receipt,
- *      and therefore has no way to know it exists — so nobody but the chain
- *      that opened it can close it, and a leftover would block `declare_done`
- *      on a judge the agent was never told about. Its life is the CALL that
- *      opened it, not the session.
+ * The user's ruling is that the pane is SCREEN SPACE, not the deliverable:
+ * the verdict is already on record, readable in the wake-up report and in the
+ * review documents, and a finished pane sitting in the window costs room that
+ * the next round wants. So every judge pane is freed when its round is
+ * recorded, and the conversation is NOT lost with it — the next dispatch of
+ * the same role re-opens the SAME session id ("a dead record falls through to
+ * a fresh open below, the transcript continues by session id, so the review
+ * never starts from zero"), which is what makes freeing the pane free.
  *
- *  (b) THE AGENT'S REVIEW PANE — reclaimed at DECLARE_DONE.
- *      `judge_submit({role:"reviewer"})` opens a pane the agent asked for and
- *      a HUMAN reads. Closing it when the round ends would take the findings
- *      off the screen at the exact moment somebody wants to look at them, so
- *      it lives until the task does.
+ * ── WHY THE DISPATCHER NO LONGER MATTERS ──
  *
- * ── WHY THIS MODULE HAS EXACTLY ONE EXECUTION POINT ──
+ * The old split existed to answer ONE question — "does the round that opened
+ * it reclaim it?" — and it is now the same answer for both dispatchers, so the
+ * question, the `JudgePaneDispatcher` type and the lookup that answered it are
+ * GONE rather than left as a two-branch table with identical branches. What
+ * survives is {@link JUDGE_PANE_RECLAIM} (the policy, for a log line's wording)
+ * and {@link reclaimAuditLine} (what a half-done reclaim looks like).
  *
- * Only (a) is a decision anything makes at runtime, and it is made in ONE
- * place: `runAuditRound`'s reclaim step (lib/audit-round.ts). Policy (b) is
- * not enforced by a branch anywhere — it is enforced by the TOOL TOPOLOGY,
- * which is stronger:
- *
- *  - `judge_close` is registered on the INTERNAL host only, so the agent
- *    cannot close a judge pane at all (extensions/review-gate.ts: "its only
- *    callers are the gate's own audit chains");
- *  - `declare_done`'s cascade closes every judge of this opener, blind to who
- *    dispatched it, which is the terminus for anything still standing.
- *
- * So a "second execution point" would have to be `declare_done` asking this
- * module a question and then doing what it was going to do anyway. That is a
- * DECORATIVE call site, and a decorative call site is worse than none: it
- * tells the next reader the rule is enforced there when it is not. The
- * `declare_done` side is pinned by a TEST instead — the sweep is source-blind
- * and closes by opener — and that test and this docblock point at each other.
- *
- * A NOTE ON A DESIGN THAT WAS REJECTED (2026-09-06, adviser P1). Stamping the
- * dispatcher onto the registry entry was considered and dropped: the three
- * paths that can open a `goal-auditor` (this engine, `judge_submit`,
- * `judge_spawn`) all land on the SAME row (one per role+repo+opener+lane), so
- * the field would describe the last dispatch rather than the pane — and the
- * failure it was meant to expose cannot happen anyway, because `judge_close`
- * drops the row even when the kill fails.
+ * `declare_done`'s cascade still closes whatever is left, blind to who opened
+ * it: it is the terminus for a pane whose round never concluded (a killed
+ * round, a crashed opener), not a second implementation of this rule.
  *
  * Pure: no filesystem, no clock, no process — the caller acts, this decides.
  */
 
-/** Who opened the pane. The answer to "when is it reclaimed" follows from it. */
-export type JudgePaneDispatcher =
-  /** The gate itself, inside one of its own synchronous audit chains. */
-  | "gate"
-  /** The agent, through a tool it called on purpose. */
-  | "agent";
+/** The moment a judge pane is reclaimed. */
+export type JudgePaneReclaimPoint = "round-end";
 
-/** The two moments a judge pane can be reclaimed at. */
-export type JudgePaneReclaimPoint = "round-end" | "declare-done";
-
-/** What the policy says about one dispatcher's panes. */
+/** What the policy says, and why — the `why` goes into the audit log. */
 export interface JudgePaneReclaimPolicy {
   at: JudgePaneReclaimPoint;
-  /**
-   * Does the ROUND that opened it reclaim it? The one question a caller can
-   * act on — pre-answered here so no call site compares strings and none of
-   * them can disagree about what `"round-end"` spells.
-   */
+  /** Does the ROUND that opened it reclaim it? Pre-answered, so no call site
+   *  compares strings and none of them can disagree about the spelling. */
   atRoundEnd: boolean;
-  /** Why, in one sentence — it goes into the audit log beside the outcome. */
+  /** Why, in one sentence. */
   why: string;
 }
 
-const GATE_POLICY: JudgePaneReclaimPolicy = {
-  at: "round-end",
-  atRoundEnd: true,
-  why: "门禁自派的审计员：agent 从没要求过它、也在任何回执里看不到它，只能谁派谁收",
-};
-
-const AGENT_POLICY: JudgePaneReclaimPolicy = {
-  at: "declare-done",
-  atRoundEnd: false,
-  why: "agent 自派、人要看的 review pane：留到 declare_done 由级联关统一收",
-};
-
 /**
- * WHEN IS THIS DISPATCHER'S PANE RECLAIMED?
- *
- * The whole policy, as one lookup. Callers act on `atRoundEnd`; the two other
- * fields exist so a log line or a receipt can say what was decided and why
- * without re-deriving either.
+ * THE policy (2026-09-21). One constant, because there is one answer.
  */
-export function judgePaneReclaim(dispatcher: JudgePaneDispatcher): JudgePaneReclaimPolicy {
-  return dispatcher === "gate" ? GATE_POLICY : AGENT_POLICY;
-}
+export const JUDGE_PANE_RECLAIM: JudgePaneReclaimPolicy = Object.freeze({
+  at: "round-end" as JudgePaneReclaimPoint,
+  atRoundEnd: true,
+  why: "一轮结论已记录，pane 就该让位：下一轮用同一 session id 重开，屏幕留给正在跑的那一轮",
+});
 
 /** What a reclaim attempt actually achieved, as the closing tool reported it. */
 export interface JudgePaneReclaimOutcome {

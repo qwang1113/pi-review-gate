@@ -244,9 +244,63 @@ export const EXPLORE_MODE_NOTE =
   "若用户的任务变成**交付性工作**（修复、实现、重构、要提交上线），先调用 `set_gate_mode(\"loop\")` " +
   "升级到完整门禁循环（立即生效，无需用户确认），再开始改代码；只有纯分析/只读调查才留在 explore。";
 
+/**
+ * HOW BIG IS THIS? — asked BEFORE the work starts (user ask, 2026-09-21).
+ *
+ * WHAT IT PREVENTS. A loop session given a requirement that outgrows it has
+ * two bad options and picks one: grind on until the context runs out (the
+ * work is lost, or a handover interrupts it mid-round), or assemble a
+ * half-parallel approach by hand. The right shape — a plan, several child
+ * sessions, one exit contract — exists (`set_gate_mode("orchestrator")`) and
+ * was reachable only by the USER typing it. The measured cost is a whole run
+ * spent in the wrong mode.
+ *
+ * THE USER'S OWN THREE MARKS (verbatim from the request): 一个会话做不完 /
+ * 有明显可并行的独立部分 / 要改多个仓库. They are deliberately coarse: this is
+ * a judgement call the agent makes from the requirement in front of it, not a
+ * threshold the gate can measure, so a fine-grained rule would be a rule the
+ * agent cannot apply.
+ *
+ * ASK FIRST, THEN SWITCH (user decision, 2026-09-21): the agent names what it
+ * sees, asks with a RECOMMENDATION, and only then calls `set_gate_mode`
+ * itself — the user never has to type a command. A refusal is final: no
+ * second ask, and the work continues in loop mode.
+ *
+ * LOOP MODE ONLY. `set_gate_mode` upgrades are immediate, so an explore
+ * session that gets delivery work follows {@link EXPLORE_MODE_NOTE} to loop
+ * first; a project manager is already past this decision (it has no plan to
+ * write a bigger one into).
+ */
+export const SCOPE_ESCALATION_PROTOCOL =
+  "## 开工前先量一下活儿有多大（命中就在动手前问用户）\n" +
+  "动手之前先拿你面前这个需求对照三条 —— 命中任一条，就是「该交给项目经理调度」的活儿：\n" +
+  "① 一个会话做不完（要改的东西多到一个上下文撑不住，或明显要分几轮才能完成）；\n" +
+  "② 有明显可并行的独立部分（几块互不重叠的写面可以同时开工）；\n" +
+  "③ 要改多个仓库（跨 repo 的改动天然要统一协调与统一交付）。\n" +
+  "命中任一条 ⇒ **先用 `ask_user` 主动问用户**要不要切成项目经理模式，把你的判断和推荐一起说清楚；\n" +
+  "用户同意 ⇒ **你自己调 `set_gate_mode(\"orchestrator\")` 完成切换**（命令由你敲，不要让用户去敲），" +
+  "然后按编排流程写 plan、请他批准、派子会话；\n" +
+  "用户不同意 ⇒ 就留在 loop 模式按现在的流程把这件事做完，**不要再提第二次**。";
+
 /** The whole standing block, in the order an agent reads it. */
-export function buildAgentDirectives(mode?: "loop" | "explore"): string {
-  return (`${TOOL_DECISION_TABLE}\n\n${WRITE_TIME_REMINDERS}\n\n${REQUIREMENT_PROTOCOL}\n\n${BATCH_READ_DISCIPLINE}\n\n${END_OF_TURN_CHECK}` +
+export function buildAgentDirectives(
+  mode?: "loop" | "explore",
+  opts: {
+    /**
+     * Render the SCOPE-ESCALATION rule? FALSE for the shared `loop` mode prompt
+     * (2026-09-21). That block is injected into orchestration CHILDREN too, and
+     * a child's `set_gate_mode("orchestrator")` is refused mechanically — so
+     * the rule would send it to a call that cannot succeed. The row belongs to
+     * sessions that can act on it, which is why the TOP-LEVEL injection site
+     * appends it (extensions/review-gate.ts).
+     */
+    scopeEscalation?: boolean;
+  } = {},
+): string {
+  const scope = opts.scopeEscalation === false ? "" : `${SCOPE_ESCALATION_PROTOCOL}\n\n`;
+  return (`${TOOL_DECISION_TABLE}\n\n${WRITE_TIME_REMINDERS}\n\n${REQUIREMENT_PROTOCOL}\n\n` +
+    (mode === "explore" ? "" : scope) +
+    `${BATCH_READ_DISCIPLINE}\n\n${END_OF_TURN_CHECK}` +
     `\n\n${GATE_ANOMALY_PROTOCOL}` +
     (mode === "explore" ? `\n\n${EXPLORE_MODE_NOTE}` : ""));
 }

@@ -1558,8 +1558,15 @@ test("loop directives: decision table injects on every turn, incl. unarmed first
   assert.ok(exploreAt > 0, "explore branch must inject the registry explore prompt too");
   assert.ok(exploreAt < loopAt, "the explore early-return injection sits before the loop one");
   // The registry wires the table itself: loop unconditionally, explore with note.
-  assert.ok(GATE_MODES_SRC.includes("buildAgentDirectives()"), "registry loop prompt carries the table");
+  assert.ok(GATE_MODES_SRC.includes("buildAgentDirectives(undefined, { scopeEscalation: false })"),
+    "registry loop prompt carries the table");
   assert.ok(GATE_MODES_SRC.includes('buildAgentDirectives("explore")'), "registry explore prompt carries the table");
+  // THE SCOPE-ESCALATION ROW IS TOP-LEVEL ONLY (2026-09-21): the shared loop
+  // block also reaches orchestration CHILDREN, whose `set_gate_mode("orchestrator")`
+  // the gate refuses — a rule there would send them to a call that cannot
+  // succeed. It is appended where the session that can act on it gets it.
+  assert.match(SRC, /isOrchestrationChild\(\) \? "" : "\\n\\n" \+ SCOPE_ESCALATION_PROTOCOL/,
+    "the scope-escalation row is appended only where it can be acted on");
   // The undecided-clean early return (added round 3) must sit AFTER the
   // injection, so a loop session never loses the decision table: loop mode
   // falls through regardless of gateArmed.
@@ -2743,8 +2750,14 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   const drain = SRC.slice(drainAt, drainAt + 6500);
   assert.match(drain, /pi\.sendUserMessage\(text, \{ deliverAs: instruction\.mode \}\)/,
     "delivery is pi's own API, raced against a short bound so the ack is not minutes late");
-  assert.match(drain, /deliverAs: "steer"/,
-    "an interrupt WITH text aborts then delivers the message immediately (2026-08-31)");
+  assert.match(drain, /await deliverInterrupt\(interruptText, \{/,
+    "an interrupt WITH text goes through the stop-then-speak handoff (2026-09-21): abort, WAIT for the pane to be idle, and only then send");
+  assert.match(drain, /sendNow: \(text\) => pi\.sendUserMessage\(text\)/,
+    "…and the delivery is the BARE call — `deliverAs` is what queued the text into the queue the abort stopped draining");
+  assert.doesNotMatch(drain, /deliverAs: "steer"/,
+    "the losing race must not come back: `abort()` then `steer` is the 552-second deadlock (lib/interrupt-delivery.ts)");
+  assert.match(drain, /delivered\.delivered === "turn" \? "injected" : "received"/,
+    "a deferred delivery is acknowledged as RECEIVED, never as injected");
   assert.match(drain, /ctx\.abort\?\.\(\)/, "interrupt is ctx.abort(), not a Ctrl-C keystroke");
   // STOP-FIRST (2026-09-01): an open dialog is dismissed BEFORE the message
   // is injected — the measured deadlock was the box staying up while the
@@ -4834,16 +4847,21 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
   // is no longer "one per return branch" (which is how a branch leaks a pane)
   // but a single `finally` in the engine, and the extension holds exactly one
   // judge_close wiring for it.
-  // 2026-09-06 (t9d): that `finally` is also the ONE execution point of the
-  // pane-lifecycle policy, so the close is gated by `judgePaneReclaim` rather
-  // than written as an unconditional statement — and the reclaim's outcome is
+  // 2026-09-06 (t9d): that `finally` is also where the pane-lifecycle policy is
+  // applied, so the close is gated by `JUDGE_PANE_RECLAIM` rather than written
+  // as an unconditional statement — and the reclaim's outcome is
   // no longer discarded. What must not change is the property this test has
   // always been about: it runs on every path out of the round.
   const engineRun = windowIn(AUDIT_ROUND_SRC, "export async function runAuditRound(", "\n}", "runAuditRound");
   const finallyBlock = engineRun.slice(engineRun.indexOf("} finally {"));
   assert.ok(finallyBlock.startsWith("} finally {"), "the round still ends in a finally");
-  assert.match(finallyBlock, /judgePaneReclaim\("gate"\)/,
-    "the policy decides that this pane is reclaimed here — this call site does not");
+  // 2026-09-21: the policy is a CONSTANT now — every judge pane is freed at
+  // round end, so there is no dispatcher to look up (`lib/judge-pane-policy.ts`
+  // explains what replaced the 2026-09-06 two-policy split).
+  assert.match(finallyBlock, /const policy = JUDGE_PANE_RECLAIM;/,
+    "the policy is consulted here — this call site does not decide for itself");
+  assert.match(finallyBlock, /if \(policy\.atRoundEnd\)/,
+    "…and what it says is what runs");
   assert.match(finallyBlock, /await deps\.closeJudge\(root, spec\.role\)/,
     "the close runs on EVERY path out of the round, fail-closed ones included");
   assert.match(finallyBlock, /reclaimAuditLine\(/,
@@ -5815,8 +5833,13 @@ test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by disp
  * leftover pane cannot be found by anything — the row it would be found by no
  * longer exists.
  */
-test("the audit chain's closeJudge reports what the reclaim achieved", () => {
-  const dep = windowOf("closeJudge: async (root, role) => {", /\n      \},\n/, "closeJudge dep");
+test("the audit chain's close path reports what the reclaim achieved", () => {
+  // THE CLOSE MOVED INTO ONE HELPER (2026-09-21): the gate's synchronous
+  // chains (`closeJudge`) and the round-end reclaim that now frees an
+  // agent-dispatched review pane both call `closeOwnedJudge`, because "read
+  // hadPane before the close, close by judgeId, map the reply" is exactly the
+  // sequence whose two copies drift.
+  const dep = windowOf("async function closeOwnedJudge(", /\n  \}\n/, "closeOwnedJudge helper");
   assert.match(dep, /return \{/, "the outcome is returned, never discarded");
   // 2026-09-08: the close goes through `doClose` directly (gate-self bypass
   // of the repo check) — the terminated reading is a cast-guarded property
@@ -5830,6 +5853,14 @@ test("the audit chain's closeJudge reports what the reclaim achieved", () => {
   const callAt = dep.indexOf("doClose(selfSessionDeps()");
   assert.ok(hadPaneAt >= 0 && callAt >= 0, "both halves are present");
   assert.ok(hadPaneAt < callAt, "hadPane must be read before the row is dropped");
+  // …and BOTH callers go through it, so a reclaim cannot report an outcome
+  // the close never produced.
+  assert.match(SRC,
+    /closeJudge: async \(root, role\) => closeOwnedJudge\(/,
+    "the gate's own chains use the shared close path");
+  assert.match(SRC,
+    /reclaimJudgePane: async \(root, judgeId, role\) => \{[\s\S]*?closeOwnedJudge\(root, judgeId, role\)/,
+    "…and so does the round-end reclaim");
 });
 
 

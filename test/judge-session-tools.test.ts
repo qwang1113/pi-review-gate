@@ -927,9 +927,43 @@ test("judge_wait: a leftover report keeps the round open and is named in the rep
   assert.match(text, /仍在等/, "…and says the round is still open");
   assert.doesNotMatch(text, /结论：READY/, "a verdict nobody recorded is never displayed as this round's");
   assert.equal(f.calls.some((c2) => c2.startsWith("settleRound")), false, "and nothing is recorded");
-  assert.deepEqual(reply.details, { done: false, reason: "pending", role: "reviewer", hasVerdict: false });
+  assert.deepEqual(reply.details, {
+    done: false,
+    reason: "pending",
+    role: "reviewer",
+    hasVerdict: false,
+    // Goal 6(d), 2026-09-21: the receipt also answers "did this round ever
+    // start" — false here because this fixture reports no transcript reading
+    // at all, which is fail-open (information missing, not evidence).
+    unstarted: false,
+  });
 });
 
+
+test("judge_wait reports a silent round as a READING — and never re-dispatches it", async () => {
+  // Goal 6(d), 2026-09-21. The pane is ALIVE (its gate heartbeats) and the
+  // channel has no report — the two readings available before this change both
+  // said "working" while nothing was happening, which is exactly the
+  // 552-second freeze.
+  const f = fake();
+  seed(f);
+  const stale = Date.now() - 300_000;
+  f.deps.transcriptActivityAt = () => stale;
+  f.deps.roundDispatchedAt = () => stale;
+
+  const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
+  assert.equal((reply.details as { unstarted?: boolean })?.unstarted, true);
+  const text = textOf(reply);
+  assert.match(text, /没有任何写入/, "the receipt reports the READING it has");
+  assert.doesNotMatch(text, /从未开跑/, "…and does not accuse the round of never having run");
+  assert.match(text, /judge_submit\(\{ fresh: true \}\)/, "the receipt names the action");
+  // REPORTING IS NOT ACTING: nothing was dispatched or killed.
+  assert.equal(
+    f.tmuxCalls.some((argv) => argv.includes("kill-pane") || argv.includes("split-window")),
+    false,
+    "the wait only reports — it never re-dispatches or kills a round",
+  );
+});
 
 test("the wait probe: a rotation is news, an EXHAUSTED chain ends the round", () => {
   const f = fake();

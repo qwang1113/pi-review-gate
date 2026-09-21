@@ -263,7 +263,7 @@ export interface DoctorDeps {
   agentsDir: string;
   /** Project-layer agent overrides (<repo>/.pi/agents) — when set, a file
    *  present there outranks the global copy for chain diagnosis, mirroring
-   *  pi-subagents' load order (round-2 P2: doctor used to report the GLOBAL
+   *  the agent-file loader's order (round-2 P2: doctor used to report the GLOBAL
    *  chain while the PROJECT override was what actually spawned). */
   projectAgentsDir?: string;
   modelsStorePath: string;
@@ -326,7 +326,7 @@ export function installScriptPathFrom(agentsDir: string | null, packageRoot: str
  * package's own agents dir (or the user removed the file mid-session).
  *
  * BOTH layers are resolved by frontmatter IDENTITY, because that is what
- * pi-subagents actually dispatches on: a file called custom.md declaring
+ * the loader actually dispatches on: a file called custom.md declaring
  * `name: goal-auditor` IS the role, while a `goal-auditor.md` whose
  * frontmatter lacks name+description (or names another role) is skipped at
  * load time. Judging by filename would therefore cut both ways — a false
@@ -336,7 +336,7 @@ export function installScriptPathFrom(agentsDir: string | null, packageRoot: str
 export function goalAuditorCheck(deps: DoctorDeps): DoctorCheck {
   /**
    * File in `dir` whose frontmatter declares `name: goal-auditor`. LAST match
-   * wins, exactly like pi-subagents' own `projectMap.set(name, agent)` — with
+   * wins, exactly like the loader's own name→agent map — with
    * two files claiming the role, this must name the one the runtime deploys.
    */
   const identityFileIn = (dir: string): string | undefined => {
@@ -351,7 +351,7 @@ export function goalAuditorCheck(deps: DoctorDeps): DoctorCheck {
   const globalFile = identityFileIn(deps.agentsDir);
   const inGlobal = globalFile !== undefined;
   const projectIdentityFile = deps.projectAgentsDir ? identityFileIn(deps.projectAgentsDir) : undefined;
-  // IDENTITY ONLY — no filename fallback in either layer: pi-subagents skips a
+  // IDENTITY ONLY — no filename fallback in either layer: the loader skips a
   // file whose frontmatter lacks name+description (or declares another role),
   // so `goal-auditor.md` alone is NOT evidence of dispatchability, and passing
   // on it would be a false PASS for the one check meant to catch an
@@ -452,14 +452,13 @@ function modelChainCheck(deps: DoctorDeps): DoctorCheck {
       advice: ["re-run the postinstall (scripts/install-package.mjs) — it copies agents/*.md to ~/.pi/agent/agents/"],
     };
   }
-  // Project-layer-only files are diagnosed too (round-5 P2): pi-subagents
-  // loads anything under <repo>/.pi/agents, so a file that exists ONLY in
+  // Project-layer-only files are diagnosed too (round-5 P2): the loader
+  // reads anything under <repo>/.pi/agents, so a file that exists ONLY in
   // the project layer (no global copy) is still a live chain the doctor
   // must see — enumerate the UNION, project-first per file below.
   //
   // KNOWN LIMITATION (deliberate): this enumeration is FLAT, while
-  // pi-subagents' loadAgentsFromDir walks `listFilesRecursive`
-  // (node_modules/pi-subagents/src/agents/agents.ts:1516). An agent file in a
+  // the loader walks subdirectories recursively. An agent file in a
   // SUBDIRECTORY of <repo>/.pi/agents is therefore loaded at runtime but not
   // diagnosed here. Widening this would mean a recursive contract for the
   // injected `readdir` dep (it returns plain names and cannot report file
@@ -485,7 +484,7 @@ function modelChainCheck(deps: DoctorDeps): DoctorCheck {
   }
   const factsAvailable = (deps.registryFacts?.models.length ?? 0) > 0;
   const entries: ModelChainEntry[] = [];
-  // pi-subagents registers agents under their frontmatter `name` and lets a
+  // The loader registers agents under their frontmatter `name` and lets a
   // project agent override a global one OF THE SAME NAME (basename is
   // irrelevant). Build identity → project-text first (round-11 P1: a
   // custom.md carrying `name: reviewer` really shadows the global reviewer).

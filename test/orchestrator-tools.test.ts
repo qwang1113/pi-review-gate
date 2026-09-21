@@ -389,6 +389,45 @@ test("an ISOLATED child is told which branch it holds — and whether it may pub
   assert.doesNotMatch(isolated, /不要 push/, "a delivering task is never told not to deliver");
 });
 
+// THE TASK BOOK IS WHAT THE CHILD READS (2026-09-21). `plan.tasks[].note` is
+// the assignment the plan was audited and approved for, and the spawn path
+// never read it: the child got whatever `task` the manager typed at spawn
+// time, so the audited text, the approved text and the delivered text could
+// all differ, with nothing keeping them in step.
+test("a spawn with no `task` hands over the task BOOK", async () => {
+  const parsed = parsePlan({
+    title: "计划",
+    intent: "任务书就是子会话的第一条消息",
+    tasks: [{
+      id: "t1",
+      title: "任务一",
+      repo: "/repo",
+      note: "目标：把分页做出来\n代码落点：lib/pagination.ts（新模块）",
+    }],
+  }, undefined, true);
+  assert.ok(parsed.plan, `fixture must parse: ${parsed.problems.join("; ")}`);
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true, resolvableRepos: ["/repo"] });
+  const reply = await world.call("orchestrator_spawn", { taskId: "t1" });
+  assert.equal(reply.isError, undefined, replyText(reply));
+  const doc = taskDocument(world);
+  assert.match(doc, /目标：把分页做出来/);
+  assert.match(doc, /代码落点：lib\/pagination\.ts/);
+});
+
+test("a spawn still refuses when NEITHER the task book nor `task` says anything", async () => {
+  const parsed = parsePlan({
+    title: "计划",
+    intent: "没有任务书也没有 task",
+    tasks: [{ id: "t1", title: "任务一", repo: "/repo" }],
+  }, undefined, true);
+  assert.ok(parsed.plan, `fixture must parse: ${parsed.problems.join("; ")}`);
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true, resolvableRepos: ["/repo"] });
+  const reply = await world.call("orchestrator_spawn", { taskId: "t1" });
+  assert.equal(reply.isError, true, "an empty session is exactly the deadlock F8 measured");
+  assert.match(replyText(reply), /note/, "the refusal names the field the manager has to fill");
+  assert.equal(world.runtime().children.length, 0, "and no pane was opened");
+});
+
 test("a spawn is only reported as delivered once the child's gate REPORTS", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, autoReport: false });
   // No channel record and no sidecar: the pane opened, but nothing proves the

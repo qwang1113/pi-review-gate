@@ -200,11 +200,21 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // The task text is no longer typed into a pane — it IS the child's first
   // message, carried in the argv (F7). An empty one would open a session with
   // nothing to do, which is exactly the state the hand-run deadlocked in.
-  const brief = String(params.task ?? "").trim();
+  //
+  // THE TASK BOOK IS THE FALLBACK (2026-09-21). `plan.tasks[].note` is the
+  // assignment the plan was audited and approved for, and until now the spawn
+  // path never read it: the child was handed whatever `task` the manager typed
+  // at spawn time, so the text the auditor checked, the text the user approved
+  // and the text the child received could all differ, with nothing keeping
+  // them in step. An explicit `task` still wins (a manager may tailor the
+  // opening message); omitting it now hands over the task book itself.
+  const brief = String(params.task ?? "").trim() || (task.note ?? "").trim();
   if (!brief) {
     return fail(
-      "review-gate: `task`（给子会话的任务说明）不能为空 —— 它现在是子会话启动时的第一条消息" +
-      "（写成任务文件、用 `pi @file` 带进去），没有它就等于开了一个空会话，正是上一轮 F8 的死锁现场。",
+      `review-gate: 任务 "${taskId}" 没有任务书可交给子会话 —— \`plan.tasks[].note\` 是空的，` +
+      "`task` 参数也是空的。任务书是子会话启动时的第一条消息（写成任务文件、用 `pi @file` 带进去），" +
+      "没有它就等于开了一个空会话，正是上一轮 F8 的死锁现场。\n" +
+      "用 `orchestrator_plan({action:\"write\"})` 给这个任务补上 note（骨架见工具说明），或这次直接传 `task`。",
     );
   }
 
@@ -223,7 +233,14 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   const nowIso = new Date(deps.now()).toISOString();
   const abandoned = abandonedRunningTask(deps.runtime(), task, panes.panes);
   if (abandoned.abandoned) {
-    const back = applyTaskStatus(plan!, taskId, "pending", { note: abandoned.note, now: nowIso });
+    // THE REASON GOES TO THE LOG, NOT ONTO THE TASK (2026-09-21).
+    // `plan.tasks[].note` is the TASK BOOK since 2026-09-17, and
+    // `orchestrator_spawn` falls back to it when no `task` was typed — so a
+    // remark written here was handed to the next child as its assignment
+    // (measured: a re-dispatched child opened with 「上一个子会话已经不在了…」
+    // instead of its task).
+    const back = applyTaskStatus(plan!, taskId, "pending", { now: nowIso });
+    if (back.ok) deps.log(`task ${taskId} 退回 pending：${abandoned.note}`);
     if (!back.ok) {
       return fail(`review-gate: 任务 "${taskId}" 卡在 running 且退不回 pending —— ${back.reason}`);
     }
@@ -399,11 +416,13 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     const failedPane = opened.paneId;
     const current = currentPlan(deps).plan;
     if (current) {
-      const back = applyTaskStatus(current, taskId, "pending", {
-        note: `spawn 未能确认子会话起跑（${evidenceLine}）`,
-        now: new Date(deps.now()).toISOString(),
-      });
-      if (back.ok) deps.savePlan(back.plan);
+      const back = applyTaskStatus(current, taskId, "pending", { now: new Date(deps.now()).toISOString() });
+      if (back.ok) {
+        deps.savePlan(back.plan);
+        // Same rule as above: the reason is a log line, never a rewrite of
+        // the task book.
+        deps.log(`task ${taskId} 退回 pending：spawn 未能确认子会话起跑（${evidenceLine}）`);
+      }
     }
     return fail(
       `review-gate: ${opened.error}\n` +

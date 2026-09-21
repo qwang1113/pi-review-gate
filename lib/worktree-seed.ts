@@ -80,11 +80,6 @@ export const SEED_ENTRIES: readonly SeedEntry[] = Object.freeze([
   },
   {
     kind: "copy",
-    path: ".pi/subagents.json",
-    why: "pi-subagents 的项目级配置（子代理类型与模型）",
-  },
-  {
-    kind: "copy",
     path: ".pi/agents",
     why: "项目层的 agent 渲染（/gate-config 写的模型链）",
   },
