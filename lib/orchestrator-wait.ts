@@ -191,31 +191,22 @@ export interface ChildWaitDecision {
  *
  * ORDER MATTERS, and every step of it was paid for:
  *
- *  1. supervision events come first — they name the child and the state, and
- *     they are the only signal that exists for a child that stopped without
- *     asking anything (R-23) or finished without saying so (R3-5);
- *     — a completion is one of those events, not a separate criterion (B4);
- *  2. an UNANSWERED QUESTION is a criterion of its own, on the channel's own
- *     evidence rather than on an event memory three consumers drain
- *     (`pending-request`, 2026-09-22);
+ *  1. an UNANSWERED QUESTION leads, on the channel's own evidence rather
+ *     than on an event memory three consumers drain (`pending-request`,
+ *     2026-09-22). A child blocked on a dialog is the whole orchestration
+ *     standing still, and it is the one state whose next action is the
+ *     manager's alone — so it names the reply even when other news arrived
+ *     on the same probe (that news is in blocks 1–3 either way);
+ *  2. supervision events — they name the child and the state, and they are
+ *     the only signal that exists for a child that stopped without asking
+ *     anything (R-23) or finished without saying so (R3-5); a completion is
+ *     one of those events, not a separate criterion (B4);
  *  3. UNKNOWN liveness (never a death, F14) before a vanished pane, so a
  *     transient tmux failure cannot end supervision.
  */
 export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitDecision {
-  const events = observation.events ?? [];
-  if (events.length > 0) {
-    const first = events[0]!;
-    const rest = events.length > 1 ? `（另有 ${events.length - 1} 条事件）` : "";
-    return {
-      done: true,
-      reason: "supervision",
-      childId: first.childId,
-      summary: `${first.summary}${rest}`,
-    };
-  }
-
-  // The FACT, right after the manufactured events: a question nobody has
-  // answered ends the wait whether or not any memory thinks it is due.
+  // The FACT first: a question nobody has answered ends the wait whether or
+  // not any memory thinks it is due, and it leads the reply.
   const pending = observation.pendingRequests ?? [];
   if (pending.length > 0) {
     const first = pending[0]!;
@@ -227,6 +218,18 @@ export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitD
       summary:
         `${first.childId} 在等回答：「${first.title}」` +
         `（${first.options.length} 个选项，requestId=${first.requestId}）${rest}`,
+    };
+  }
+
+  const events = observation.events ?? [];
+  if (events.length > 0) {
+    const first = events[0]!;
+    const rest = events.length > 1 ? `（另有 ${events.length - 1} 条事件）` : "";
+    return {
+      done: true,
+      reason: "supervision",
+      childId: first.childId,
+      summary: `${first.summary}${rest}`,
     };
   }
 

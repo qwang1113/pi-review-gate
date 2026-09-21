@@ -77,6 +77,19 @@ test("nothing yet is not an end state, and the note becomes the live snapshot", 
   assert.equal(decision.summary, "子会话 a-1 仍在 pane %2");
 });
 
+test("news that arrived on the same probe travels together, led by the question", () => {
+  // Quality round 2, P1: the probe marks its events reported in the SHARED
+  // memory, so an event dropped on the way out is an event nobody announces —
+  // not this reply, and not the background timer either.
+  const decision = evaluateChildWait({
+    events: [{ childId: "c2", state: "done", summary: "c2：已完成" }],
+    pendingRequests: [question("c1", "r1")],
+    paneAlive: true,
+  });
+  assert.equal(decision.reason, "pending-request", "the blocked child leads");
+  assert.equal(decision.childId, "c1");
+});
+
 test("an unanswered question is due at once, then on the documented backoff", () => {
   const open = [question("c1", "r1")];
   const first = dueRequests({ open, announced: [], at: 1_000 });

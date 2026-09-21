@@ -227,9 +227,18 @@ async function doWait(
       ...(childId ? { childId } : {}),
     });
     deps.saveAnnouncedRequests(requests.memory);
-    if (requests.due.length > 0) return { pendingRequests: requests.due, paneAlive: true };
-
-    if (events.length > 0) return { events, paneAlive: true };
+    // BOTH KINDS OF NEWS TRAVEL IN ONE OBSERVATION (quality round 2, P1).
+    // Returning the questions alone dropped the events this same probe had
+    // just marked as reported in the shared memory: a sibling's `done` or
+    // `dead` would have been announced by nobody — not by this reply, and not
+    // by the timer either — until its next backoff step came due.
+    if (requests.due.length > 0 || events.length > 0) {
+      return {
+        ...(events.length > 0 ? { events } : {}),
+        ...(requests.due.length > 0 ? { pendingRequests: requests.due } : {}),
+        paneAlive: true,
+      };
+    }
 
     // F14 — an unreadable pane list is UNKNOWN liveness, never a death.
     if (!panes.ok) return { paneAlive: false, livenessUnknown: true };
