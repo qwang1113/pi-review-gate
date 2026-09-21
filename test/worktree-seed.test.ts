@@ -182,3 +182,27 @@ test("a path git does NOT ignore is left alone, even when it exists", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("THIS REPOSITORY's gitignore covers node_modules as a NAME, so a symlink is ignored too", () => {
+  // MEASURED (2026-09-22, t4-dialog): with `node_modules/` — a trailing slash
+  // matches only a DIRECTORY — two things broke at once in a linked worktree,
+  // where the dependencies arrive as a SYMLINK:
+  //   1. this seeder REFUSED to take it (`git check-ignore node_modules`
+  //      answered “not ignored”), so that checkout could not run its own tests;
+  //   2. once it was linked by hand anyway, the gate's worktree fingerprint
+  //      (lib/fingerprint.ts adds UNTRACKED paths to a shadow index) no longer
+  //      equalled `HEAD^{tree}` — and lib/review-adjudicate.ts's
+  //      `laneVerifiesTree` compares exactly those two, so every parked READY
+  //      was cleared with “its two preconditions can no longer both hold”.
+  let ignored = "";
+  try {
+    ignored = execFileSync("git", ["check-ignore", "-v", "node_modules"], {
+      cwd: join(import.meta.dirname, ".."),
+      encoding: "utf8",
+    });
+  } catch {
+    assert.fail("`git check-ignore node_modules` must match — see this test's comment for what breaks without it");
+  }
+  assert.match(ignored, /node_modules\s+node_modules$/m,
+    "the repository must ignore the NAME, not only a directory");
+});
