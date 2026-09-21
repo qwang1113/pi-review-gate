@@ -49,6 +49,7 @@ import {
   type ChildReportedState,
 } from "../../lib/orchestrator-channel.ts";
 import type { SupervisionMemory } from "../../lib/orchestrator-supervisor.ts";
+import type { AnnouncedRequest } from "../../lib/orchestrator-wait.ts";
 import type { TaskMode } from "../../lib/task-mode.ts";
 import { STATE_VARIANT_ENV } from "../../lib/gate-state.ts";
 import { PREDECESSOR_PANE_ENV } from "../../lib/session-inheritance.ts";
@@ -375,6 +376,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   const adopted: string[] = [];
   const confirmAnswers: boolean[] = [];
   let memory: SupervisionMemory = {};
+  let announced: readonly AnnouncedRequest[] = [];
   const paneDecor = new Map<string, { title: string; at: number }>();
 
   const env: Record<string, string> = { TMUX_PANE: "%0", ...(options.env ?? {}) };
@@ -470,6 +472,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     channelHome: () => "/home/test",
     supervisionMemory: () => memory,
     saveSupervisionMemory: (next) => { memory = next; },
+    announcedRequests: () => announced,
+    saveAnnouncedRequests: (next) => { announced = next; },
     paneDecorMemory: () => paneDecor,
 
     contextPercent: () => options.contextPercent,

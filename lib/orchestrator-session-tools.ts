@@ -58,6 +58,7 @@ import { orchestratorDoneProblems } from "./orchestrator-gate.ts";
 import {
   buildWaitReceipt,
   clampChildWaitTimeout,
+  dueRequests,
   evaluateChildWait,
   type ChildWaitDecision,
   type ChildWaitObservation,
@@ -120,6 +121,11 @@ function snapshotResult(observation: ChildWaitObservation): PollWaitResult<Child
  *     (lib/orchestrator-supervisor.ts), so `waiting-input`, `done`, `idle`,
  *     `stalled` and `dead` produce events even when no child ever rang — and
  *     an unanswered question rings AGAIN on the 10s→30s→60s backoff.
+ *     AN OPEN QUESTION DOES NOT WAIT FOR THAT BACKOFF: it ends the wait on
+ *     the channel's own evidence (`pending-request`), because the backoff's
+ *     memory is shared with the 10s supervision timer and every due moment
+ *     landed on a timer tick — the timer consumed each one and a manager sat
+ *     for 910 seconds beside a dialog opened 2 seconds before it called.
  *  2. NOTHING IS SWALLOWED, because nothing has to be filtered: each child's
  *     traffic is its own file. There is no foreign event to drop and no
  *     ownership to re-derive.
@@ -184,6 +190,19 @@ async function doWait(
     // — the probe is already here, so the screen never lags the receipt.
     refreshPaneLabels(deps, snapshot);
 
+    // THE FACT FIRST (2026-09-22): a question that is unanswered RIGHT NOW
+    // ends this wait, before anything memory-gated gets a say — and it is
+    // remembered BY REQUEST, so neither the background timer's consumption of
+    // the state memory nor the absence of a state CHANGE can hide it.
+    const requests = dueRequests({
+      open: snapshot.requests,
+      announced: deps.announcedRequests(),
+      at: deps.now(),
+      ...(childId ? { childId } : {}),
+    });
+    deps.saveAnnouncedRequests(requests.memory);
+    if (requests.due.length > 0) return { pendingRequests: requests.due, paneAlive: true };
+
 
     // The event rules carry a memory across polls, and it lives in the
     // sidecar rather than in this closure: a wait that rebuilt it would see
@@ -192,7 +211,12 @@ async function doWait(
     deps.saveSupervisionMemory(decided.memory);
     // A wait scoped to ONE child reports only that child's events; its
     // siblings' stay in the memory as un-reported and ring on the next call.
-    const events = childId ? decided.events.filter((e) => e.childId === childId) : decided.events;
+    const scoped = childId ? decided.events.filter((e) => e.childId === childId) : decided.events;
+    // A `waiting-input` event is NOT a second announcement of the same
+    // question. The block above already owns that news, on better terms (per
+    // request, from the first probe, immune to the other two consumers of the
+    // state memory), and letting both speak would ring twice for one dialog.
+    const events = scoped.filter((e) => e.state !== "waiting-input");
     if (events.length > 0) return { events, paneAlive: true };
 
     // F14 — an unreadable pane list is UNKNOWN liveness, never a death.
@@ -558,8 +582,10 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
       "looks for itself rather than only listening: every poll re-reads each child's channel, so " +
       "a child that raised a question (waiting-input), one that FINISHED (done), one that quietly " +
       "STOPPED (idle), one that went silent while its pane lives (stalled) and one whose pane " +
-      "vanished (dead) each produce an event even when nothing rang. An unanswered question rings " +
-      "again on a 10s→30s→60s backoff; a completion rings twice, 60s apart, then stays quiet. " +
+      "vanished (dead) each produce an event even when nothing rang. A question that is ALREADY " +
+      "hanging when you call ends the very first probe — it is a fact on the channel, not a state " +
+      "change — and one you leave unanswered rings again on a 10s→30s→60s backoff; a completion " +
+      "rings twice, 60s apart, then stays quiet. " +
       "EVERY reply — blocked, interrupted or instant — carries the same four blocks: (1) the " +
       "health of every child, (2) the questions waiting for you, with their full text and every " +
       "option, structured (nothing is read off a screen), (3) dead / stalled children with the " +

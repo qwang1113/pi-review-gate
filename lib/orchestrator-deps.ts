@@ -20,6 +20,7 @@ import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
 import type { ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
+import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 
 
 import type { TaskMode } from "./task-mode.ts";
@@ -243,6 +244,23 @@ export interface OrchestratorDeps {
    */
   supervisionMemory(): SupervisionMemory;
   saveSupervisionMemory(next: SupervisionMemory): void;
+
+  /**
+   * requestIds a WAIT has already handed to the orchestrator — the
+   * de-duplication of the `pending-request` criterion, and nothing else's.
+   *
+   * SEPARATE FROM {@link supervisionMemory} ON PURPOSE (2026-09-22). That one
+   * is keyed by child+STATE and is drained by three consumers (the 10s
+   * supervision timer, the `agent_settled` continuation, the wait probe), so
+   * a wait's ability to return depended on who got to it first — measured as
+   * a 910-second wait beside a dialog that had been open for two seconds.
+   * This record is keyed by the thing actually being announced, is written
+   * only by the wait, and is PRUNED to the requests still open on every probe
+   * — so an answered question leaves it by itself and it cannot grow without
+   * bound.
+   */
+  announcedRequests(): readonly AnnouncedRequest[];
+  saveAnnouncedRequests(next: readonly AnnouncedRequest[]): void;
 
   /**
    * What each child's pane border currently says — the repaint throttle.

@@ -370,6 +370,26 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 事件记忆（`SupervisionMemory`）由**调用方持有**并在 `orchestrator_wait` 与后台定时器
 之间共享，所以两者不会重复叫同一件事；它绝不是模块级变量，这样测试可以直接构造它。
 
+**但「有人在等回答」不走这份记忆**（2026-09-22，实测缺陷）。它按 requestId 单独计：
+`lib/orchestrator-wait.ts` 的 `dueRequests` 拿**此刻通道里未销账的 request** 与 wait
+自己的一份 `AnnouncedRequest[]`（经 `OrchestratorDeps.announcedRequests` 注入）比对 ——
+没报过的**立刻**结束 wait（判据 `pending-request`），报过的仍按同一条 10s→30s→60s
+退避再叫；记忆由「当前仍未销账」这一集合重建，所以答掉的自动出局、集合不会无限增长。
+`orchestrator_wait` 的探针因此**丢弃 `waiting-input` 事件**：同一个框由上面这条判据
+负责，两边都说话就会为一个框响两次。
+
+两个必须记住的理由：
+
+- 那份共享记忆有**三个**消费者（10s 后台定时器、`agent_settled` 编排续跑、wait 的 2s
+  探针），而 10/30/60 全是 10s 的整数倍 —— 每个重报点都恰好落在定时器那一跳上，
+  定时器永远先消费，wait 的探针永远落在两次消费之间。实测：子会话的反述框
+  12:43:23.041Z 建立，项目经理 12:43:25 调 `orchestrator_wait({timeoutMs:900000})`，
+  **910 秒**后才返回，第一块写「等人回答（已等 910s）」；那 15 分钟里定时器每 60s
+  造一条 `[ORCHESTRATION]` 注入，全堆在宿主队列里，等 wait 返回、框也答掉之后才一条
+  条刷出来 —— 「已答复的请求还被提醒六次」是这同一个根因的后果。
+- 一场 `ask_user` 采访里**第二个**问题不是状态跃迁（子会话一直是 `waiting-input`），
+  按 child+state 计的记忆根本看不见它；按 requestId 计就看得见。
+
 **投递不再以「项目经理空闲」为前提**（2026-09-14，用户要求）。后台定时器
 （`startSupervisionTimer`，10s）原先第一句就是 `if (!ctx.isIdle?.()) return;`，理由
 是「忙时叫醒只是噪音」。当时的代价记在另一头：项目经理正在写 plan、跑审计或读子会话

@@ -262,7 +262,7 @@ import {
 } from "../lib/background-wait.ts";
 // The delivery probe a judge spawn shares with an orchestration spawn: same
 // polling, same evidence, same verdict — only the channel path differs.
-import { channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-kit.ts";
+import { alivePanes, channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-kit.ts";
 // STOP-FIRST, THEN SPEAK (2026-09-21): the two-step an `interrupt` has to be,
 // and the reason it is a module rather than four lines here — the ordering is
 // the whole fix (lib/interrupt-delivery.ts carries the measured deadlock).
@@ -3473,6 +3473,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       children: open,
       livePanes,
       io: channelIO,
+      // THE SAME CHANNEL ROOT `orchestrator_wait` READS (2026-09-22). Omitting
+      // it left the background timer reading the real agent home while the
+      // wait read the host's — two answers to "is anyone waiting for a reply",
+      // and the timer's is the one that gets injected into the manager's
+      // transcript as 「子会话需要你」.
+      ...(orchestratorDeps.channelHome() === undefined ? {} : { home: orchestratorDeps.channelHome()! }),
       at: Date.now(),
     });
   }
@@ -3488,15 +3494,12 @@ export default function reviewGate(pi: ExtensionAPI) {
    * rest of the gate addresses and a test can drive it.
    */
   function alivePaneIdsForSupervision(): Set<string> | undefined {
-    const self = orchestratorDeps.ownPane();
-    if (!self) return undefined;
-    try {
-      const listed = orchestratorDeps.tmux(["list-panes", "-t", self, "-F", "#{pane_id}"]);
-      if (!listed.ok) return undefined;
-      return new Set(listed.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
-    } catch {
-      return undefined;
-    }
+    // `alivePanes` is the reading `orchestrator_wait` itself takes (argv built
+    // by lib/orchestrator-tmux.ts, output filtered by `parsePaneIds`). This
+    // used to hand-assemble the same `list-panes` call and keep every non-
+    // empty line as a pane id — a second implementation of one measurement.
+    const read = alivePanes(orchestratorDeps);
+    return read.ok ? new Set(read.panes) : undefined;
   }
 
   function stopSupervisionTimer(): void {

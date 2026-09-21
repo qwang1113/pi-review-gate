@@ -5468,6 +5468,17 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   const read = windowOf("function superviseNow(", "\n  }", "superviseNow");
   assert.match(read, /superviseChildren\(\{/, "and that read is the supervisor module's");
   assert.match(read, /io: channelIO/, "over the channels, never a pane");
+  // ONE TRUTH ABOUT "IS ANYONE WAITING FOR A REPLY" (2026-09-22). This read
+  // feeds the `[ORCHESTRATION] 子会话需要你` injection; `orchestrator_wait`'s
+  // receipt is built from the same module with the host's channel home passed
+  // in. Omitting it here pointed the two at different directories.
+  assert.match(read, /channelHome\(\)/,
+    "the timer must read the SAME channel root the wait receipt does");
+  // …and the pane reading is the tool-kit's one implementation, rather than a
+  // second hand-assembled tmux call.
+  const panes = windowOf("function alivePaneIdsForSupervision(", "\n  }", "alivePaneIdsForSupervision");
+  assert.match(panes, /alivePanes\(orchestratorDeps\)/, "one pane measurement, shared with the wait");
+  assert.doesNotMatch(panes, /orchestratorDeps\.tmux\(/, "the duplicated argv is gone");
   const shutdown = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown");
   assert.match(shutdown, /stopSupervisionTimer\(\)/, "a leaked timer would keep waking a session that is gone");
 });
@@ -5496,8 +5507,11 @@ test("B4/F14: the INJECTED wrap-up block reads the same channels and never inven
 
   // And the pane reading itself must fail to UNKNOWN, not to empty.
   const panes = windowOf("function alivePaneIdsForSupervision(", "\n  }", "alivePaneIdsForSupervision");
-  assert.match(panes, /if \(!listed\.ok\) return undefined;/, "a failed list-panes measures nothing");
-  assert.match(panes, /catch \{[\s\S]*return undefined;/, "and neither does a throw");
+  // The measurement itself is `alivePanes` (lib/orchestrator-tool-kit.ts),
+  // which swallows both a failed call and a throw into `ok: false`; UNKNOWN
+  // has to survive the conversion to a Set.
+  assert.match(panes, /read\.ok \? new Set\(read\.panes\) : undefined/,
+    "a failed measurement stays UNKNOWN rather than becoming an empty set");
   assert.doesNotMatch(panes, /return new Set\(\);/, "an empty set here would read as a graveyard");
 });
 

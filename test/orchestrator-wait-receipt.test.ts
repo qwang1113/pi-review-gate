@@ -27,6 +27,11 @@ neutraliseGateEnv();
 
 import { makeFakeWorld, replyText, twoTaskPlan, type FakeWorld } from "./helpers/fake-orchestration.ts";
 import { IDLE_PROGRESS_GRACE_MS } from "../lib/orchestrator-child-state.ts";
+import {
+  decideSupervisionEvents,
+  superviseChildren,
+  type SupervisionSnapshot,
+} from "../lib/orchestrator-supervisor.ts";
 import { markChildAssigned } from "../lib/orchestrator-registry.ts";
 
 async function spawnT1(world: FakeWorld): Promise<string> {
@@ -38,6 +43,19 @@ async function spawnT1(world: FakeWorld): Promise<string> {
 }
 
 const iso = (world: FakeWorld, offsetMs = 0) => new Date(world.now() + offsetMs).toISOString();
+
+/** The snapshot the BACKGROUND TIMER builds — same inputs as the wait's. */
+function timerSnapshot(world: FakeWorld): SupervisionSnapshot {
+  const children = world.runtime().children.filter((c) => !c.closedAt);
+  return superviseChildren({
+    orchestrationId: world.runtime().orchestrationId,
+    children,
+    livePanes: new Set(children.map((c) => c.paneId)),
+    io: world.deps.channelIO(),
+    home: world.deps.channelHome()!,
+    at: world.now(),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // B3 — a child that is turning the crank is not a child that stopped
@@ -115,6 +133,7 @@ test("B4: the gate does NOT close the task itself, and the child still blocks th
   assert.doesNotMatch(text, /没有了，可以 declare_done/);
 });
 
+// review-gate: allow-non-english — the label quotes the gate's own receipt line
 test("B4: a child that finished and THEN lost its pane is not called '从未报告完成'", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);
@@ -170,4 +189,100 @@ test("F14: when `list-panes` cannot be read the wrap-up claims no deaths", async
   assert.match(text, /F14/);
   assert.doesNotMatch(text, /没有了，可以 declare_done/,
     "unknown liveness blocks the exit rather than opening it");
+});
+
+// ---------------------------------------------------------------------------
+// A — an open question is a FACT, and the wait ends on it
+//
+// Measured 2026-09-22: a child's restatement dialog opened at 12:43:23.041Z,
+// the manager called `orchestrator_wait({timeoutMs: 900000})` two seconds
+// later, and the call returned 910 SECONDS afterwards with 「等人回答（已等
+// 910s）」 in block 1 — a child sat in front of a dialog nobody was coming to
+// answer for a quarter of an hour, inside the one tool whose job is to report
+// that dialog. The event path could not see it: `waiting-input` was not a
+// state CHANGE, and every due re-report landed on the background timer's 10s
+// tick, which consumed it before the wait's 2s probe could.
+// ---------------------------------------------------------------------------
+
+test("A: a question that is already hanging ends the wait on the first probe", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  // The child has been `working` all along — no state change is coming.
+  world.childReports(childId, "working", { lastProgressAt: iso(world) });
+  world.childAsks(childId, {
+    requestId: "req-restate-1",
+    title: "restate-ok?",
+    options: ["yes", "no"],
+    payload: "before -> after…",
+    topic: "restatement",
+  });
+
+  const reply = await world.call("orchestrator_wait", { timeoutMs: 0 });
+  const details = reply.details as { done: boolean; reason: string; openRequests: number };
+  assert.equal(details.done, true, "an unanswered question must end the wait by itself");
+  assert.equal(details.reason, "pending-request");
+  assert.equal(details.openRequests, 1);
+  const text = replyText(reply);
+  assert.match(text, /req-restate-1/, "block 2 names the request the manager has to answer");
+  assert.match(text, /restate-ok\?/);
+
+  // …and it is not re-announced on the next breath: the backoff moved onto the
+  // requestId, so one dialog cannot turn the wait into a busy poll.
+  const again = await world.call("orchestrator_wait", { timeoutMs: 0 });
+  assert.equal((again.details as { done: boolean }).done, false,
+    "the same question must not end a second wait one instant later");
+  assert.match(replyText(again), /req-restate-1/, "block 2 still lists it — it is still open");
+});
+
+test("A: a question the child has settled is no longer a reason to return", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  world.childAsks(childId, { requestId: "req-1", title: "pick-one", options: ["a", "b"] });
+  world.childSettles(childId, "req-1", "orchestrator");
+  world.childReports(childId, "working", { lastProgressAt: iso(world) });
+
+  const reply = await world.call("orchestrator_wait", { timeoutMs: 0 });
+  assert.equal((reply.details as { done: boolean }).done, false, "an answered question is not news");
+  assert.match(replyText(reply), /没有任何子会话在等回答/);
+});
+
+test("A': the background timer having consumed the re-report does not silence the wait", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  world.childAsks(childId, { requestId: "req-9", title: "approve-goal?", options: ["yes", "no"] });
+
+  // EXACTLY what the background timer does (`drainSupervisionNews`): read the
+  // same channels, decide the events, write the memory back.
+  const drained = decideSupervisionEvents(timerSnapshot(world), world.deps.supervisionMemory(), world.now());
+  assert.equal(drained.events.length, 1, "the timer is the one that got there first");
+  world.deps.saveSupervisionMemory(drained.memory);
+
+  const reply = await world.call("orchestrator_wait", { timeoutMs: 0 });
+  const details = reply.details as { done: boolean; reason: string };
+  assert.equal(details.done, true, "the wait reads the channel, not the timer's leftovers");
+  assert.equal(details.reason, "pending-request");
+});
+
+// ---------------------------------------------------------------------------
+// B — ONE truth about "is anyone waiting for a reply"
+// ---------------------------------------------------------------------------
+
+test("B: a settled request produces no waiting-input event, whatever the heartbeat says", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  world.childAsks(childId, { requestId: "req-mub8kj6p-5qwytw", title: "confirm?", options: ["yes", "no"] });
+  world.childSettles(childId, "req-mub8kj6p-5qwytw", "orchestrator");
+  // Its heartbeat is a moment behind and still reports the dialog it no
+  // longer has open — the stale half of the pair that produced six repeats of
+  // 「子会话需要你…requestId=…」 after the question had been answered.
+  world.childReports(childId, "waiting-input");
+
+  const snapshot = timerSnapshot(world);
+  assert.deepEqual(snapshot.requests, [], "the channel says it was settled");
+  const decided = decideSupervisionEvents(snapshot, {}, world.now());
+  assert.equal(
+    decided.events.some((e) => e.state === "waiting-input" || e.requestId !== undefined),
+    false,
+    "the injected nudge must not outlive the answer",
+  );
 });
