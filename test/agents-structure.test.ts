@@ -406,7 +406,7 @@ test("minimalism keeps ONE substantive home (§5), and the code-quality round de
   const auditor = readFileSync(join(AGENTS, "goal-auditor.md"), "utf8");
   assert.ok(auditor.includes("docs/coding-standards.md"), "goal-auditor.md cites the standards");
   assert.match(auditor, /Is the goal minimal/, "goal-auditor.md carries the minimalism check");
-  assert.match(auditor, /the nine/, "the severity paragraph counts all nine checks");
+  assert.match(auditor, /the ten/, "the severity paragraph counts all ten checks");
   // The reviewer DEFERS to the quality round instead of re-auditing it.
   const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
   assert.match(reviewer, /quality-auditor/, "reviewer.md names the round that owns code quality");

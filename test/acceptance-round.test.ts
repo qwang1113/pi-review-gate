@@ -19,7 +19,6 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,20 +38,19 @@ import {
   type AcceptanceRecord,
 } from "../lib/acceptance-round.ts";
 import { computeFingerprint } from "../lib/fingerprint.ts";
+import { git } from "./helpers/git.ts";
 
 const AT = "2026-09-22T00:00:00.000Z";
 
 /** A REAL repository: `git` runs, a file is committed, nothing is faked. */
 function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "rg-acceptance-"));
-  const git = (...args: string[]) =>
-    execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  git("init", "-q");
-  git("config", "user.email", "gate@example.com");
-  git("config", "user.name", "gate");
+  git(dir, ["init", "-q"]);
+  git(dir, ["config", "user.email", "gate@example.com"]);
+  git(dir, ["config", "user.name", "gate"]);
   writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
-  git("add", "-A");
-  git("commit", "-qm", "init");
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-qm", "init"]);
   return dir;
 }
 

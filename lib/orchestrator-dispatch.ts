@@ -372,7 +372,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
       // WHETHER THIS CHILD RUNS THE ACCEPTANCE ROUND (2026-09-22): only the
       // plan's LAST task (the independent acceptance task) gets it, by the
       // rule in lib/repo-pr-policy.ts — never re-derived here.
-      acceptanceGate: acceptanceGateValue(plan!, taskId) as "on" | "off",
+      acceptanceGate: acceptanceGateValue(plan!, taskId),
     },
     // F7/F8 — the task rides in on the argv. No typing, nothing to truncate,
     // no Enter to forget. The reference is REPO-RELATIVE: the pane starts in
