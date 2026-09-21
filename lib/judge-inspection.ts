@@ -49,7 +49,7 @@ import { lexSegments } from "./shell-lex.ts";
 import { SCOPE_MARKER_FULL, SCOPE_MARKER_INCREMENTAL } from "./review-carryover.ts";
 
 /** What kind of looking an observed action was. */
-export type InspectionKind = "file-read" | "diff" | "search";
+export type InspectionKind = "file-read" | "diff" | "search" | "run";
 
 /** Everything the gate observed about THIS round's inspection. */
 export interface InspectionEvidence {
@@ -288,21 +288,52 @@ export function touchesGateOwnedPath(
 }
 
 /**
+ * WHOSE ROUND IS IT, WHEN RUNNING COUNTS AS INSPECTING?
+ *
+ * For most verdict-bearing roles it does NOT: `classifyShellCommand` recognises
+ * the read-only shapes (a diff, a grep, a cat), and "I ran the test suite" is
+ * deliberately not evidence that the code was reviewed.
+ *
+ * `acceptance` is the one role whose JOB is to run the thing — its task text
+ * says so, its role body says so, and a round that starts a service, calls the
+ * changed interface and compares the answer may never read a file at all. Held
+ * to the reviewer's rule it could only conclude READY by pretending to read,
+ * which is exactly what the refusal text tells judges NOT to do — so the
+ * execution itself is its inspection (2026-09-22, functional round P2).
+ *
+ * A role not on this list keeps the old behaviour: execution alone is still
+ * zero inspection (fail-closed).
+ */
+export const EXECUTION_INSPECTION_ROLES: ReadonlySet<string> = new Set(["acceptance"]);
+
+/** Does this role's successful execution count as an inspection action? */
+export function executionCountsFor(role: string | undefined): boolean {
+  return role !== undefined && EXECUTION_INSPECTION_ROLES.has(role.trim().toLowerCase());
+}
+
+/**
  * Is this successful tool call an inspection action? `undefined` means it is
  * not — a write, a listing, a test run, a channel append, or a read of the
  * round's own protocol material. The caller must only offer SUCCESSFUL calls:
  * a failed read inspected nothing.
+ *
+ * `opts.executionCounts` opens the one door described above
+ * ({@link EXECUTION_INSPECTION_ROLES}): a shell command that is NOT a read-only
+ * shape is still an action, because for that role running it is the review.
  */
 export function classifyInspection(
   observation: InspectionObservation,
   ownPaths: readonly string[] = [],
+  opts: { executionCounts?: boolean } = {},
 ): ClassifiedInspection | undefined {
   if (touchesGateOwnedPath(observation, ownPaths)) return undefined;
   const name = observation.toolName.trim().toLowerCase();
   if (SHELL_TOOLS.has(name)) {
     const command = stringField(observation.input, "command") || stringField(observation.input, "cmd");
     const kind = classifyShellCommand(command);
-    return kind === undefined ? undefined : { kind, text: command };
+    if (kind !== undefined) return { kind, text: command };
+    if (opts.executionCounts === true && command.trim() !== "") return { kind: "run", text: command };
+    return undefined;
   }
   if (FILE_READ_TOOLS.has(name)) return { kind: "file-read", text: "" };
   if (SEARCH_TOOLS.has(name)) return { kind: "search", text: "" };
@@ -317,6 +348,12 @@ export interface InspectionContext {
   round?: number | undefined;
   /** Exact paths this round was handed (task file, findings stream). */
   ownPaths?: readonly string[] | undefined;
+  /**
+   * The judge ROLE this round runs as — the one fact that decides whether
+   * running something counts as inspecting it
+   * ({@link EXECUTION_INSPECTION_ROLES}). Absent ⇒ the strict rule.
+   */
+  role?: string | undefined;
 }
 
 /**
@@ -336,7 +373,9 @@ export function observeInspection(
   context: InspectionContext = {},
 ): InspectionEvidence {
   const { range, round } = context;
-  const classified = classifyInspection(observation, context.ownPaths ?? []);
+  const classified = classifyInspection(observation, context.ownPaths ?? [], {
+    executionCounts: executionCountsFor(context.role),
+  });
   if (!classified) return previous;
   const base = evidenceForRound(previous, round);
   const kinds = base.kinds.includes(classified.kind)

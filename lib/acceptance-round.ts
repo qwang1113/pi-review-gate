@@ -342,6 +342,27 @@ export function acceptanceProblems(decision: AcceptanceDecision): string[] {
 export const NO_ACCEPTANCE_CLAUSE = "本轮无真实验收";
 
 /**
+ * The decoration a goal line may carry BEFORE its first real token.
+ *
+ * The skeleton writes plain lines, but a draft is free to format them — a
+ * markdown heading, a bullet, an ordered item, a bolded opener — and both
+ * parsers below must see THROUGH that without ever seeing past a mention of
+ * the phrase. One helper, so "what opens the line" is answered the same way
+ * for the clause and for the section heading.
+ */
+function stripLinePrefix(line: string): string {
+  return line
+    .trim()
+    .replace(/^#{1,6}\s*/, "")
+    // A bullet must be followed by SPACE, or the `*` of `**bold**` would be
+    // eaten and the bold wrapper below would never match.
+    .replace(/^(?:[-*•]\s+|\d+[.)]\s+|[（(]\d+[）)]\s*)/, "")
+    .replace(/^\*\*(.+?)\*\*/, "$1")
+    .replace(/^__(.+?)__/, "$1")
+    .trim();
+}
+
+/**
  * Read the goal's "no real acceptance this round" declaration, if it has one.
  *
  * ONLY A LINE THAT OPENS WITH THE CLAUSE COUNTS (2026-09-22, quality round
@@ -350,8 +371,7 @@ export const NO_ACCEPTANCE_CLAUSE = "本轮无真实验收";
  * 「就写「本轮无真实验收（理由）」」 inside the section heading, and any goal that
  * describes this very rule carries the phrase in its prose — measured on this
  * round's own goal, which parsed as a SKIP because it explains the exemption.
- * A leading bullet or number is stripped (the skeleton lists its items);
- * everything else must be the clause itself.
+ * Leading decoration is stripped; everything else must be the clause itself.
  *
  * A PLACEHOLDER IS NOT A REASON either: the skeleton's `（理由）` / `<理由>` is
  * a blank to fill in, and a draft that submits it unfilled must not skip the
@@ -361,12 +381,16 @@ export const NO_ACCEPTANCE_CLAUSE = "本轮无真实验收";
  */
 export function parseNoAcceptanceDeclaration(goalText: string): { reason: string } | undefined {
   for (const line of goalText.split("\n")) {
-    const stripped = line.trim().replace(/^(?:[-*•]|\d+[.)]|[（(]\d+[）)])\s*/, "");
+    const stripped = stripLinePrefix(line);
     if (!stripped.startsWith(NO_ACCEPTANCE_CLAUSE)) continue;
     let tail = stripped.slice(NO_ACCEPTANCE_CLAUSE.length).trim();
-    // 去掉包裹的括号与「理由：」前缀，剩下的就是理由本身。
+    // 「（理由）：<文本>」 is the form the skeleton TEACHES, so the wrapper is one
+    // unit: the optional paren, the optional 「理由」, its closing paren and a
+    // following colon all come off together. Peeling them one at a time left
+    // the 「）：」 stuck to the reason, and that string is shown to the user in
+    // the approval box and recorded in the SKIPPED note.
     tail = tail
-      .replace(/^[（(【\[「]?\s*(理由\s*)?[:：]?\s*/, "")
+      .replace(/^[（(【\[「]?\s*(?:理由\s*)?[）)】\]」]?\s*[:：]?\s*/, "")
       .replace(/[）)】\]」]\s*$/, "")
       .trim();
     // 两个字符以下不构成理由（「无」「-」这类占位）；「理由」/「reason」与
@@ -404,9 +428,7 @@ function isSectionHeading(line: string): boolean {
  */
 export function extractAcceptancePlan(goalText: string): string | undefined {
   const lines = goalText.split("\n");
-  const start = lines.findIndex((line) =>
-    line.trim().replace(/^(?:[-*•]|\d+[.)]|[（(]\d+[）)])\s*/, "").startsWith(ACCEPTANCE_PLAN_HEADING),
-  );
+  const start = lines.findIndex((line) => stripLinePrefix(line).startsWith(ACCEPTANCE_PLAN_HEADING));
   if (start < 0) return undefined;
   const body: string[] = [];
   for (const line of lines.slice(start + 1)) {

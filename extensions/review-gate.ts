@@ -6459,6 +6459,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           // repository — reading the task a probe wrote is what the probe
           // asked for, and crediting it would make this gate decorative.
           ownPaths: judgeOwnPaths(),
+          // WHOSE round this is (2026-09-22, reviewer P2): the acceptance
+          // judge's job IS to run the thing, so for that role a successful
+          // execution is an inspection action — otherwise a round that never
+          // needed to read a file could only conclude READY by pretending to.
+          role: readJudgeSideEnv(process.env)?.role,
         },
       );
     }

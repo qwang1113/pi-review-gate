@@ -216,6 +216,19 @@ test("the no-acceptance clause is an exemption only WITH a reason", () => {
     { reason: "本轮只改文档，没有可运行的东西。" },
     "a bullet PREFIX is stripped; the clause itself must OPEN the line",
   );
+  // THE FORM THE SKELETON TEACHES (2026-09-22, quality round P2): the wrapper
+  // is one unit, so the reason does not carry its closing paren and colon into
+  // the user's approval box and the SKIPPED note.
+  assert.deepEqual(
+    parseNoAcceptanceDeclaration("本轮无真实验收（理由）：这一个只改 .md，没有服务可起。"),
+    { reason: "这一个只改 .md，没有服务可起。" },
+    "「（理由）：」 comes off as one wrapper",
+  );
+  assert.deepEqual(
+    parseNoAcceptanceDeclaration("- **本轮无真实验收（理由）**：只改文档。"),
+    { reason: "只改文档。" },
+    "a bolded, bulleted opener is still the clause opening the line",
+  );
 });
 
 test("extractAcceptancePlan takes the section verbatim and stops at the next heading", () => {
@@ -249,6 +262,17 @@ test("extractAcceptancePlan takes the section verbatim and stops at the next hea
     "  - 正向真实调用：起服务，调 /x，期望 200",
     "a mention in the criteria does not become the plan",
   );
+  // MARKDOWN DECORATION IS NOT A DIFFERENT LINE (2026-09-22, quality round
+  // P2): a section written as a heading or in bold is the same section, and
+  // returning undefined would leave the judge without the plan it was told to
+  // work from.
+  for (const heading of ["## 真实验收方案：", "**真实验收方案**：", "- 真实验收方案："]) {
+    assert.equal(
+      extractAcceptancePlan(`# 任务\n${heading}\n  - 正向真实调用：起服务\n非目标：\n`),
+      "  - 正向真实调用：起服务",
+      `${heading} opens the section too`,
+    );
+  }
 });
 
 /* ──────────────────────────── the dispatched task ────────────────────────── */
