@@ -9743,23 +9743,41 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         return undefined;
       }
     },
-    // THE FLOOR UNDER THAT READING: a fresh round on a REUSED lane has a
-    // transcript whose last line predates the dispatch, so without this the
-    // silence would be measured from the start of time. The newest `instruct`
-    // on the judge's channel IS this round (that is what dispatched it).
+    // THE FLOOR UNDER THAT READING — from the REGISTRY, not from the channel
+    // (quality round P1, 2026-09-21). The first version rebuilt it as "the
+    // newest `instruct` on the judge's channel", which is only written on the
+    // LIVE-PANE-REUSE path: a fresh open carries its task as a task file, and
+    // goal/plan audits never write an instruct at all. So the reading was the
+    // PREVIOUS round's timestamp or nothing — precisely the case this floor
+    // exists for. `JudgeEntry.spawnedAt` is stamped on EVERY dispatch and is
+    // already the registry's own answer to "when did this round start".
     roundDispatchedAt: (child) => {
+      const at = judgeHierarchy[child.judgeId]?.spawnedAt;
+      if (at === undefined) return undefined;
+      const ms = Date.parse(at);
+      return Number.isFinite(ms) ? ms : undefined;
+    },
+    // …AND A ROUND WAITING FOR AN ANSWER IS NOT A SILENT ONE (reviewer P1):
+    // a judge parked on a question writes nothing to its transcript by design,
+    // and a long tool call looks the same from outside. The channel knows the
+    // difference: a request with no answer after it is a round that is ALIVE
+    // and waiting on the opener.
+    judgeBlockedOnOpener: (child) => {
       try {
-        const caller = callerIdentity();
-        if (caller === undefined) return undefined;
-        const target = judgeChannelTarget(caller, child.judgeId);
-        const path = channelPathFor(target.orchestrationId, target.childId, target.home);
-        const instructs = readChannel(channelIO, path).records.filter((r) => r.kind === "instruct");
-        const last = instructs.length > 0 ? instructs[instructs.length - 1] : undefined;
-        if (last === undefined) return undefined;
-        const at = Date.parse((last as { at?: string }).at ?? "");
-        return Number.isFinite(at) ? at : undefined;
+        const target = judgeChannelTarget(child.openerId, child.judgeId);
+        const records = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
+        const answered = new Set<string>();
+        for (const r of records) {
+          if (r.kind === "answer") answered.add((r as { requestId?: string }).requestId ?? "");
+        }
+        let pending = false;
+        for (const r of records) {
+          if (r.kind !== "request") continue;
+          pending = !answered.has((r as { requestId?: string }).requestId ?? "");
+        }
+        return pending;
       } catch {
-        return undefined;
+        return false;
       }
     },
     tmux: (argv) => runTmux(argv),

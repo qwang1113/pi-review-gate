@@ -940,6 +940,48 @@ test("judge_wait: a leftover report keeps the round open and is named in the rep
 });
 
 
+test("judge_wait reports a silent round as a READING — and never re-dispatches it", async () => {
+  // Goal 6(d), 2026-09-21. The pane is ALIVE (its gate heartbeats) and the
+  // channel has no report — the two readings available before this change both
+  // said "working" while nothing was happening, which is exactly the
+  // 552-second freeze.
+  const f = fake();
+  seed(f);
+  const stale = Date.now() - 300_000;
+  f.deps.transcriptActivityAt = () => stale;
+  f.deps.roundDispatchedAt = () => stale;
+  f.deps.judgeBlockedOnOpener = () => false;
+
+  const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
+  assert.equal((reply.details as { unstarted?: boolean })?.unstarted, true);
+  const text = textOf(reply);
+  assert.match(text, /没有任何写入/, "the receipt reports the READING it has");
+  assert.doesNotMatch(text, /从未开跑/, "…and does not accuse the round of never having run");
+  assert.match(text, /judge_submit\(\{ fresh: true \}\)/, "the receipt names the action");
+  // REPORTING IS NOT ACTING: nothing was dispatched or killed.
+  assert.equal(
+    f.tmuxCalls.some((argv) => argv.includes("kill-pane") || argv.includes("split-window")),
+    false,
+    "the wait only reports — it never re-dispatches or kills a round",
+  );
+});
+
+test("a round blocked on a question is NOT reported as unstarted", async () => {
+  // A judge parked on a question writes nothing to its transcript BY DESIGN —
+  // calling that "never started" would tell the opener to throw away a live
+  // round (reviewer P1, 2026-09-21).
+  const f = fake();
+  seed(f);
+  const stale = Date.now() - 300_000;
+  f.deps.transcriptActivityAt = () => stale;
+  f.deps.roundDispatchedAt = () => stale;
+  f.deps.judgeBlockedOnOpener = () => true;
+
+  const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
+  assert.equal((reply.details as { unstarted?: boolean })?.unstarted, false);
+  assert.doesNotMatch(textOf(reply), /没有任何写入/);
+});
+
 test("the wait probe: a rotation is news, an EXHAUSTED chain ends the round", () => {
   const f = fake();
   const c = seed(f);
