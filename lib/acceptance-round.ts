@@ -178,6 +178,21 @@ export function sanitizeAcceptanceRecord(raw: unknown): AcceptanceRecord | undef
 /* ─────────────────────────── what the gate should do ─────────────────────── */
 
 /**
+ * THE RECORD AS ONE LINE — the status surfaces' readout (`/gate-status`).
+ *
+ * Why it exists at all (quality round P2, 2026-09-22): a SKIPPED round is a
+ * gate the USER left ON being released, and the recorded reason is the only
+ * thing that says why. A record nobody renders is a decision nobody can audit;
+ * the single-line widget has no room for it, the status command does.
+ */
+export function acceptanceStatusLine(record: AcceptanceRecord | undefined): string | undefined {
+  if (record === undefined) return undefined;
+  const at = record.at === "" ? "" : ` (${record.at})`;
+  const reason = record.reason === undefined ? "" : ` — ${record.reason.slice(0, 160)}`;
+  return `acceptance: ${record.status}${at}${reason}`;
+}
+
+/**
  * IS A ROUND DISPATCHED AND STILL OWED A VERDICT?
  *
  * The ONE reading of the record's AWAITING state, for the readers OUTSIDE the

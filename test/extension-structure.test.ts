@@ -7151,7 +7151,7 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   // no code of its own to accept, and explore/normal completions are advisory.
   assert.match(
     code,
-    /if \(!orchestratorMode && state\.taskMode === "loop"\) \{\s*progress\.step\("真实验收"\);\s*const acceptance = await armAcceptanceRound\(ctx, progress\);/,
+    /if \(!orchestratorMode && state\.taskMode === "loop"\) \{\s*progress\.step\("真实验收"\);\s*const acceptance = await armAcceptanceRound\(ctx, progress, acceptanceNotes\);/,
     "the step is wired into declare_done's own body, loop only",
   );
   assert.match(code, /acceptanceDecision\(\{/, "the decision comes from the module, not from a branch here");
@@ -7169,6 +7169,14 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   assert.match(arm, /dispatchAcceptanceRound\(ctx, fingerprint, goalText \?\? ""\)/,
     "the goal text is handed to the dispatch (one read for both halves, 2026-09-22)");
   assert.match(arm, /hasPlan: false/, "no approved acceptance plan ⇒ SKIP, never a plan-less dispatch");
+  // 5. A SKIP THE USER HAS TO ACT ON IS NOT LEFT IN THE SIDECAR (quality round
+  //    P2, 2026-09-22): the reason rides into the completion reply, and the
+  //    status command renders the record. The other two skips stay quiet —
+  //    they are the design's steady state.
+  assert.match(arm, /notes\.push\(skippedReason\)/);
+  assert.match(SRC, /acceptanceNotes\.length \?/, "the reason reaches the outcome the human reads");
+  const statusCmd = readFileSync(join(ROOT, "lib", "gate-command-tools.ts"), "utf8");
+  assert.match(statusCmd, /acceptanceStatusLine\(state\.acceptance\)/, "…and /gate-status renders the record");
   // 3. NEVER IN THE SHIP AUTHORITY: fixing an acceptance finding requires a
   // commit, so a requirement in `unmetRequirements` would block its own remedy.
   const unmet = GATE_STATE_SRC.slice(GATE_STATE_SRC.indexOf("export function unmetRequirements("));

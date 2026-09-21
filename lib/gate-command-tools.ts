@@ -46,6 +46,8 @@ import { unmetRequirements, type GateState } from "./gate-state.ts";
 // The one place the stage switches are decided (lib/loop-stages.ts); the
 // readout renders its summary rather than re-deriving "is this stage off".
 import { stageOpen, stagesSummary } from "./loop-stages.ts";
+// The acceptance round's own readout line (the record is the module's).
+import { acceptanceStatusLine } from "./acceptance-round.ts";
 import { formatPrecommitSummary, lastPrecommitTiming } from "./gate-timings.ts";
 import { isEnforcedMode, normalizeTaskMode, type TaskMode } from "./task-mode.ts";
 import { ORCHESTRATOR_NEEDS_TMUX } from "./orchestrator-directives.ts";
@@ -259,6 +261,11 @@ function registerGateStatus(host: CommandHost, deps: GateCommandDeps): void {
         "── 裁决 ──",
         review,
         precommit,
+        // THE ACCEPTANCE RECORD IS RENDERED TOO (quality round P2, 2026-09-22):
+        // a SKIPPED round releases a gate the user left ON, and the reason is
+        // the only thing that says why — a record nobody prints is a decision
+        // nobody can audit.
+        ...(acceptanceStatusLine(state.acceptance) === undefined ? [] : [acceptanceStatusLine(state.acceptance)!]),
         ...formatPrecommitSummary(lastPrecommitTiming(primaryRepoRoot)),
         "── 工作区 ──",
         `changes:   code=${state.hasCodeChange} docs=${state.hasDocChange}`,

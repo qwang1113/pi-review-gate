@@ -30,6 +30,7 @@ import {
   acceptanceGateOpen,
   acceptanceGateValue,
   acceptanceProblems,
+  acceptanceStatusLine,
   buildAcceptanceTask,
   extractAcceptancePlan,
   parseNoAcceptanceDeclaration,
@@ -110,6 +111,15 @@ test("no approved acceptance plan ⇒ SKIP with a reason, never a dispatch with 
   // READY bound to this content passes exactly as it did before.
   const ready: AcceptanceRecord = { status: "READY", verdict: "READY", fingerprint: "fp-1", at: AT };
   assert.equal(acceptanceDecision({ ...base, hasPlan: false, record: ready }).action, "pass");
+});
+
+test("the status line renders the record — including WHY a round was skipped (2026-09-22)", () => {
+  assert.equal(acceptanceStatusLine(undefined), undefined, "no record, no line");
+  assert.equal(
+    acceptanceStatusLine({ status: "SKIPPED", at: AT, reason: "本轮没有用户批准的验收方案" }),
+    `acceptance: SKIPPED (${AT}) — 本轮没有用户批准的验收方案`,
+  );
+  assert.equal(acceptanceStatusLine({ status: "READY", at: AT }), `acceptance: READY (${AT})`);
 });
 
 test("skip says WHICH kind of not-owed it is, and never blocks", () => {

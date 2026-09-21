@@ -12128,7 +12128,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * commit, and the commit would still be waiting on acceptance. The Copilot
    * cycle (lib/copilot-review.ts) is held the same way, on completion only.
    */
-  async function armAcceptanceRound(ctx: unknown, progress: { step?: (t: string) => void; fail?: (t: string) => void }) {
+  async function armAcceptanceRound(
+    ctx: unknown,
+    progress: { step?: (t: string) => void; fail?: (t: string) => void },
+    /** Skip reasons worth telling the human — see the skip branch below. */
+    notes: string[] = [],
+  ) {
     const root = primaryRepoRoot;
     const st = stateForRepo(root);
     // ONE READ FOR BOTH HALVES (quality round P2, 2026-09-22): the declaration
@@ -12216,6 +12221,17 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           reason: skippedReason,
         };
         persistRepo(ctx as unknown as ExtensionContext, root);
+      }
+      // RECORDED IS NOT ENOUGH FOR THIS ONE (quality round P2, 2026-09-22): the
+      // sidecar is a file nobody reads, and a skip that releases a gate the
+      // user left ON has to say so where the outcome is read. The OTHER two
+      // skips are this design's steady state (no code, stage off) and stay
+      // quiet — this one means “acceptance is ON, the round has code, and
+      // there is no approved plan to verify it against”, which the user has to
+      // act on: approve a goal carrying「真实验收方案」, or switch the stage off.
+      if (stageIsOn("acceptance", root) && st.hasCodeChange) {
+        notes.push(skippedReason);
+        progress.step?.("真实验收（跳过：没有用户批准的验收方案）");
       }
       return undefined;
     }
@@ -12532,9 +12548,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // LOOP ONLY, and never for an orchestrator: explore/normal completions
       // are advisory and must not spend a top-tier judge, and a project
       // manager has no code of its own to accept.
+      // WHAT THE ACCEPTANCE ROUND DID WHEN IT DID NOT RUN (quality round P2,
+      // 2026-09-22): a note for the outcome the human reads, not only for the
+      // sidecar — see the skip branch in `armAcceptanceRound`.
+      const acceptanceNotes: string[] = [];
       if (!orchestratorMode && state.taskMode === "loop") {
         progress.step("真实验收");
-        const acceptance = await armAcceptanceRound(ctx, progress);
+        const acceptance = await armAcceptanceRound(ctx, progress, acceptanceNotes);
         if (acceptance) return acceptance;
       }
       progress.done("全部满足");
@@ -12603,6 +12623,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         content: [{
           type: "text",
           text: `review-gate: done accepted. ${params.summary}` +
+            // WHAT THE USER'S OWN SWITCHES SKIPPED (quality round P2, 2026-09-22).
+            // The gate's one line here, from the record — never from the
+            // summary: a released gate is a fact the agent's prose cannot be
+            // trusted to carry.
+            (acceptanceNotes.length ? `\n真实验收：${acceptanceNotes.join("；")}` : "") +
             // R-22 — a round that shipped without a precommit says so, here,
             // where the human reads the outcome.
             (state.checkpoint?.precommitBypassed
