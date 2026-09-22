@@ -7175,11 +7175,15 @@ test("editing ANY project file un-finishes the task — completion does not surv
 
   const crossBook = SRC.indexOf(
     "if (!s.sessionEditedFiles.includes(rel)) { s.sessionEditedFiles.push(rel); dirty = true; }");
-  const crossDelete = SRC.indexOf("if (s.completion) { delete s.completion; dirty = true; }", crossBook);
+  const crossDelete = SRC.indexOf("if (state.completion) { delete state.completion; sessionUnfinished = true; }", crossBook);
   const crossBranch = SRC.indexOf("if (isProjectFile) {", crossBook);
   assert.ok(crossBook > 0 && crossBranch > crossBook, "the cross-repo edit branch exists");
   assert.ok(crossDelete > crossBook && crossDelete < crossBranch,
-    "…and the cross-repo branch deletes that repo's completion the same way");
+    "…and it clears the SESSION's record — `declare_done` writes completion on the PRIMARY state " +
+      "only, so clearing a per-repo one left the session looking finished while this repo's " +
+      "bindings had just been invalidated (quality round P1, 2026-09-22)");
+  assert.match(SRC.slice(crossDelete, crossDelete + 1600), /if \(sessionUnfinished\) persist\(ctx/,
+    "…and the PRIMARY sidecar is written, or a restart would resurrect the record");
 
   // WHAT DID NOT CHANGE: the ARMING is still code/doc-only ("is there anything to
   // review?" is a different question, and its answer did not change).
@@ -7236,6 +7240,15 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   assert.doesNotMatch(step, /primaryRepoRoot/,
     "nothing in the per-repo step may fall back to the primary repo (that is the bug it fixes)");
   assert.match(step, /hasPlan: false/, "no approved acceptance plan ⇒ SKIP, never a plan-less dispatch");
+  // 4c. THE AGGREGATE REFUSAL HAS TO BE USABLE (reviewer + quality round P2,
+  //     2026-09-22): `judge_wait` refuses to guess the repo once a session has
+  //     edited more than one (lib/repo-resolve.ts), and an armed repo beside a
+  //     blocking one means both must be settled before completion.
+  assert.match(arm, /const waitLine = \(rows: typeof armedRows\)/,
+    "the wait copy is composed from which repos actually ARMED");
+  assert.match(arm, /repo:\$\{JSON\.stringify\(r\.root\)\}/, "…and names that repo");
+  assert.match(arm, /不会因为验收 READY 而消失/,
+    "…and says the other repo's blocking problem survives the acceptance READY");
   // 4b. THE PLAN IS READ FROM THE WHOLE FILE, NEVER FROM THE PROMPT COPY
   //     (real-session P1, 2026-09-22): `goal.text` is capped at
   //     LOOP_GOAL_MAX_CHARS for prompt injection, and the acceptance plan is

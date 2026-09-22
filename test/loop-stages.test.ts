@@ -314,6 +314,14 @@ test("the switches ride the loop prompt — and reach an UNDECIDED session too",
     "…at that one guarded site, so the agent cannot miss the switches");
   assert.doesNotMatch(SRC, /if \(state\.taskMode === "explore" \|\| state\.taskMode === "normal"\) \{\n\s+const stagesBlock/,
     "explore/normal keep the gate out of their prompt");
+  // …AND THE BLOCK'S POINTER MUST NOT DANGLE (quality round P2, 2026-09-22):
+  // with the goal stage OFF the block says “see the goal paragraph above”, and
+  // in an undecided session the loop branch below does not inject it.
+  const undecidedGoal = SRC.indexOf('if (state.taskMode === undefined && !stageIsOn("goal")) {');
+  assert.ok(undecidedGoal > at && undecidedGoal < at + 1200,
+    "an undecided session whose goal stage is off gets that paragraph injected too");
+  assert.match(SRC.slice(undecidedGoal, undecidedGoal + 220), /buildGoalStageOffDirective\(\)/,
+    "…the same body the pointer names");
 });
 
 // ---------------------------------------------------------------------------

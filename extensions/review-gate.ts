@@ -479,6 +479,7 @@ import {
   acceptanceGateOpen,
   acceptanceProblems,
   acceptanceRoundInFlight,
+  acceptanceStatusLine,
   buildAcceptanceTask,
   extractAcceptancePlan,
   parseNoAcceptanceDeclaration,
@@ -1527,6 +1528,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         `changes=${st.hasCodeChange ? "code" : st.hasDocChange ? "docs" : "none"} — ` +
         (unmet.length ? `BLOCKED: ${unmet.join("; ")}` : "OPEN"),
       );
+      // THE ACCEPTANCE RECORD RIDES ALONG (quality round P2, 2026-09-22): the
+      // round is decided PER REPO since this same day, so a secondary repo's
+      // READY / SKIPPED (with its reason) / BLOCKED would otherwise exist only
+      // in a sidecar nobody reads — the same "recorded is not enough" rule the
+      // primary's own line above obeys. Rendered only when there is one.
+      const acceptanceLine = acceptanceStatusLine(st.acceptance);
+      if (acceptanceLine !== undefined) lines.push(`    ${acceptanceLine}`);
     }
     return { lines, blocked };
   }
@@ -6976,7 +6984,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // The ARMING below stays code/doc-only — that is the different
         // question ("is there anything to review?") and its answer did not
         // change.
-        if (s.completion) { delete s.completion; dirty = true; }
+        //
+        // AND THE SESSION'S RECORD LIVES ON THE PRIMARY STATE (quality round
+        // P1, 2026-09-22): `declare_done` writes `state.completion` there and
+        // nowhere else, so a per-repo record is one this session never carries
+        // — clearing that instead left the SESSION looking finished while THIS
+        // repo's bindings had just been invalidated: the same stranding the
+        // primary branch fixes below, reached through the other door.
+        let sessionUnfinished = false;
+        if (state.completion) { delete state.completion; sessionUnfinished = true; }
         if (isProjectFile) {
           invalidateBindings(s);
           armLoop();
@@ -6992,6 +7008,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           // repo from the resumed declare_done set.
           if (isNewRepo) persist(ctx as unknown as ExtensionContext);
         }
+        // The session's own completion lived on the PRIMARY state (see above),
+        // so its deletion has to reach that sidecar even when this repo's own
+        // state was already clean.
+        if (sessionUnfinished) persist(ctx as unknown as ExtensionContext);
         return;
       }
 
@@ -12249,15 +12269,33 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // reason that was simply not true, for a session whose code lived in a
     // secondary repo. One refusal is returned for all of them, each problem
     // labelled with its repo when there is more than one.
-    const results: Array<{ problems: string[]; armed: boolean; judgeId?: string }> = [];
+    const results: Array<{ root: string; problems: string[]; armed: boolean; judgeId?: string }> = [];
     for (const root of [...sessionRepos]) {
       const outcome = await acceptanceStepForRepo(ctx, root, progress, notes);
-      if (outcome !== undefined) results.push(outcome);
+      if (outcome !== undefined) results.push({ root, ...outcome });
     }
     if (results.length === 0) return undefined;
     const problems = results.flatMap((r) => r.problems);
-    const armed = results.some((r) => r.armed);
+    const armedRows = results.filter((r) => r.armed);
+    const armed = armedRows.length > 0;
     const judgeId = results.find((r) => r.judgeId !== undefined)?.judgeId;
+    // WHICH REPO THE AGENT MUST NAME WHEN IT WAITS (reviewer P2 + quality round
+    // P2, 2026-09-22): `judge_wait` REFUSES to guess once a session has edited
+    // more than one repo (lib/repo-resolve.ts), so a copy line that says
+    // `judge_wait({role:"acceptance"})` is a dead end in exactly the sessions
+    // this per-repo aggregation is for. And an armed repo beside a blocking one
+    // means BOTH have to be dealt with — the acceptance READY does not clear
+    // the other repo's problem.
+    const waitLine = (rows: typeof armedRows): string => {
+      if (rows.length === 1 && sessionRepos.size === 1) {
+        return "用 `judge_wait({role:\"acceptance\"})` 等它的结论（report 落盘后门禁会用标准报告唤醒你）";
+      }
+      const named = rows.map((r) => `\`judge_wait({role:"acceptance", repo:${JSON.stringify(r.root)}})\``);
+      return named.length === 1
+        ? `验收轮已派出（${repoLabel(rows[0]!.root)}）：用 ${named[0]} 等它的结论（多 repo 会话必须显式给 repo）`
+        : `验收轮已在 ${rows.map((r) => repoLabel(r.root)).join("、")} 派出：逐个用 ` +
+          "`judge_wait({role:\"acceptance\", repo:\"<该 repo 路径>\"})` 等它们的结论（多 repo 会话必须显式给 repo）";
+    };
     // The tool call is ENDING without completing, so the progress line is
     // closed the same way every other refusal in `declare_done` closes it.
     progress.fail?.(armed ? "真实验收轮已派出" : "真实验收未过");
@@ -12274,8 +12312,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             : "门禁自己派出了 acceptance 轮，在它交卷之前这一轮不能算完成。",
           by: "agent",
           next: armed
-            ? "用 `judge_wait({role:\"acceptance\"})` 等它的结论（report 落盘后门禁会用标准报告唤醒你）；" +
-              "验收 READY 且内容没有变化时，再调一次 `declare_done` 就会完成。"
+            ? waitLine(armedRows) +
+              (problems.length > 0
+                ? "；**另外**上面列出的未满足项不会因为验收 READY 而消失 —— 两件事都处理干净再 declare_done。"
+                : "；验收 READY 且内容没有变化时，再调一次 `declare_done` 就会完成。")
             : "按验收 findings 修 → 走一遍审查循环（`judge_submit({role:\"reviewer\"})`）→ 再 `declare_done`；" +
               "内容一改，旧的验收结论自动失效并重新验收。",
         }),
@@ -14734,6 +14774,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     if (state.taskMode === "loop" || state.taskMode === undefined) {
       const stagesBlock = buildStagesDirective(loopStagesRecord());
       if (stagesBlock) systemPrompt += "\n\n" + stagesBlock;
+      // THE POINTER MUST NOT DANGLE (quality round P2, 2026-09-22): with the
+      // goal stage OFF the block says “see the goal paragraph above”, and in an
+      // UNDECIDED session that paragraph is not injected by the loop branch
+      // below — the agent would still not know whether it owes a goal, which is
+      // the very question this block exists to answer. Inject it for exactly
+      // that case (one line, and never twice: the loop branch owns its own).
+      if (state.taskMode === undefined && !stageIsOn("goal")) {
+        systemPrompt += "\n\n" + buildGoalStageOffDirective();
+      }
     }
 
     if (state.taskMode === "loop") {
