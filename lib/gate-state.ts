@@ -33,7 +33,7 @@ import { isDeliveryStation } from "./delivery-station.ts";
 import { SHIP_COMMAND_KINDS, type ShipCommandKind } from "./constants.ts";
 
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
-import type { QualityRecord } from "./quality-round.ts";
+import { isSkippedQualityRecord, type QualityRecord } from "./quality-round.ts";
 import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
 
 import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
@@ -1838,9 +1838,19 @@ export function unmetRequirements(
   // a READY that any later edit walked away from).
   if (state.hasCodeChange && !reviewOn && qualityOn) {
     const quality = state.quality;
-    if (quality?.verdict !== "READY") {
+    // A SKIP RECORD IS NOT A CONCLUSION HERE EITHER (2026-09-22, acceptance
+    // round P1). `skippedQualityRecord` writes one for a round the quality
+    // judge was never owed — the stage was off, or the round carried no code —
+    // so it says nothing about the code this ship is about. Reading only
+    // `verdict` let「quality 关 → 编辑 → judge_submit（写下跳过记录）→ 重开
+    // quality」commit and push with no quality judge ever having run: the same
+    // cross-switch rule `lib/quality-round.ts`'s `qualityStandingFor` closed on
+    // the review path, missed on this second reader. The brand has ONE reading
+    // (`isSkippedQualityRecord`), so this reader cannot drift from the other.
+    const skipped = isSkippedQualityRecord(quality);
+    if (skipped || quality?.verdict !== "READY") {
       problems.push(
-        `quality round is ${quality?.verdict ?? "NOT_RUN"} (need READY) — the review stage is off, so this is the verdict ` +
+        `quality round is ${skipped ? "SKIPPED" : quality?.verdict ?? "NOT_RUN"} (need READY) — the review stage is off, so this is the verdict ` +
         "that stands between the code and a ship; submit a round (`judge_submit`) to run it",
       );
     } else if (quality.treeSha === undefined || quality.treeSha !== currentFingerprint) {

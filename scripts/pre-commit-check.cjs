@@ -401,8 +401,16 @@ function runCheck(statePath, repo, env = process.env) {
   // quality verdict gates the REVIEW's recording; with it off it IS the
   // review — required, and bound to the content it judged.
   if (state.hasCodeChange && !reviewOn && stageOpen("quality")) {
-    if (!state.quality || state.quality.verdict !== "READY") {
-      problems.push(`quality round is ${state.quality ? state.quality.verdict : "NOT_RUN"} (need READY)`);
+    // A SKIP RECORD IS NOT A CONCLUSION (2026-09-22, acceptance round P1;
+    // mirror of lib/gate-state.ts's rule): it only says the round that wrote it
+    // had no code to judge — the stage was off, or the round carried no code —
+    // so with the stage back on it must not stand in for the quality READY this
+    // block requires. The rule is lib/quality-round.ts's
+    // `isSkippedQualityRecord`; this file carries its copy because it runs in
+    // checkouts where the TS extension is never loaded.
+    const skipped = !!state.quality && state.quality.verdict === "READY" && state.quality.skipped === true;
+    if (skipped || !state.quality || state.quality.verdict !== "READY") {
+      problems.push(`quality round is ${skipped ? "SKIPPED" : state.quality ? state.quality.verdict : "NOT_RUN"} (need READY)`);
     } else if (typeof state.quality.treeSha !== "string" || state.quality.treeSha !== currentFp) {
       problems.push("code was modified after the last quality READY (fingerprint mismatch)");
     }
