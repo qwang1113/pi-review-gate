@@ -72,6 +72,25 @@ export const STAGE_LABELS: Readonly<Record<LoopStage, string>> = Object.freeze({
 export const LOOP_STAGES_TITLE = "review-gate: 本轮运行哪些环节？";
 
 /**
+ * WHAT TURNING A STAGE OFF MEANS — the per-stage consequence sentence.
+ *
+ * TWO CONSUMERS, ONE SOURCE (2026-09-22): the user's dialog body
+ * ({@link LOOP_STAGES_BODY}, which has to say what they are switching off) and
+ * the prompt-side rendering ({@link buildStagesDirective}, which has to say it
+ * to the AGENT). Those two are the pair this table is for — the other places
+ * that mention a switched-off stage (the dedicated goal directive, the tool
+ * replies in the extension) keep their own wording on purpose.
+ */
+export const STAGE_OFF_CONSEQUENCES: Readonly<Record<LoopStage, string>> = Object.freeze({
+  goal: "不做需求反述、不跑 goal 审计、不弹批准框，编辑与 ship 不再因「无已批准 goal」被拦；" +
+    "交付站点上限也随之消失（站点来自 goal，没有 goal 就没有它）",
+  review: "不派 reviewer，ship 时代码审查视为满足",
+  quality: "不派 quality-auditor（取消矩阵里不再有这一方）",
+  acceptance: "declare_done 不再派验收轮",
+  precommit: "不跑 lane，checkpoint 与 ship 都不再要求 precommit PASS",
+});
+
+/**
  * The box's body: what the checkboxes mean and what an unchecked one does.
  *
  * It is deliberately complete rather than terse — this is the ONE place the
@@ -83,12 +102,7 @@ export const LOOP_STAGES_TITLE = "review-gate: 本轮运行哪些环节？";
 export const LOOP_STAGES_BODY: string = [
   "默认五项全部勾选＝今天的行为。空格勾选 / 取消 · ↑↓ 移动 · 回车确认 · esc 关闭。",
   "不勾的环节，门禁在它**每一个卡点**处直接放行（不再询问、不再拦截）：",
-  "  · goal 关 ⇒ 不做需求反述、不跑 goal 审计、不弹批准框，编辑与 ship 不再因「无已批准 goal」被拦；" +
-  "交付站点上限也随之消失（站点来自 goal，没有 goal 就没有它）；",
-  "  · 功能审查关 ⇒ 不派 reviewer，ship 时代码审查视为满足；",
-  "  · 质量审查关 ⇒ 不派 quality-auditor（取消矩阵里不再有这一方）；",
-  "  · 真实验收关 ⇒ declare_done 不再派验收轮；",
-  "  · precommit 关 ⇒ 不跑 lane，checkpoint 与 ship 都不再要求 precommit PASS。",
+  ...LOOP_STAGES.map((s) => `  · ${STAGE_LABELS[s]} 关 ⇒ ${STAGE_OFF_CONSEQUENCES[s]}；`),
   "五项互相独立，任意组合合法；一项都不勾（空勾提交）＝五个环节全部关闭。",
 ].join("\n");
 
@@ -137,6 +151,52 @@ export function sanitizeLoopStages(raw: unknown): LoopStagesRecord | undefined {
  */
 export function stageOpen(record: LoopStagesRecord | undefined, stage: LoopStage): boolean {
   return record?.stages[stage] !== false;
+}
+
+/**
+ * THE SWITCHES THE USER THREW, said to the AGENT (2026-09-22, user requirement).
+ *
+ * A released stage is a fact the GATE owns, and without this line the agent can
+ * only learn it by getting it wrong: the five checkpoints simply return to
+ * their ordinary shapes, and the signs are tool replies that arrive after the
+ * work was done — or not at all. Measured: with the acceptance stage off, a
+ * session wrote a real-acceptance plan into its goal and started building the
+ * scene for it, a round `stageIsOn` had already made unreachable, because no
+ * text it could read ever said the switch was off. One line, injected wherever
+ * the loop directives are injected, replaces "go dig
+ * `.pi/review-gate-state.json` out of the repo".
+ *
+ * NO RECORD ⇒ THE EMPTY STRING: `stageOpen` already answers "all on" for a
+ * session that never opened the box, and a five-row block in every such session
+ * would be noise rather than information.
+ */
+export function buildStagesDirective(record: LoopStagesRecord | undefined): string {
+  if (!record) return "";
+  const state = LOOP_STAGES.map((s) => `${s} ${stageOpen(record, s) ? "开" : "**关**"}`).join(" · ");
+  const off = LOOP_STAGES.filter((s) => !stageOpen(record, s));
+  if (off.length === 0) return `## 环节开关（用户设定）：${state}`;
+  return [
+    "## 环节开关（用户设定）",
+    state,
+    "关掉的环节在它每一个卡点直接放行 —— 它的工作不跑、它的拦截也不成立：",
+    // `goal` is the ONE exception: its switched-off behaviour already has a
+    // paragraph of its own in this same prompt (`buildGoalStageOffDirective`,
+    // lib/loop-goal.ts), and saying it twice is how two texts start drifting.
+    ...off
+      .filter((s) => s !== "goal")
+      .map((s) => `- ${STAGE_LABELS[s]} ⇒ ${STAGE_OFF_CONSEQUENCES[s]}；`),
+    ...(off.includes("goal") ? ["- goal 关掉后的行为见上面那段 goal 指令（它专门说过了）。"] : []),
+    "不要为关掉的环节做任何准备：不写它的方案、不搭它的现场、不提前替它跑一遍。" +
+      // The goal skeleton asks for a 「真实验收方案」 section in EVERY session,
+      // so a session whose acceptance stage is off owes that section's
+      // REPLACEMENT, not its content — otherwise the next goal audit reads the
+      // missing section as a P1, or worse, the agent builds a scene for a round
+      // that will never be dispatched.
+      (off.includes("acceptance")
+        ? "验收已关：goal 里按「本轮无真实验收（用户关闭了验收环节）」写即可，不要写验收方案。"
+        : "") +
+      "要恢复某个环节，让用户重开开关（再调一次 `choose_loop_stages`）。",
+  ].join("\n");
 }
 
 /** The stages the user switched OFF, in dialog order. */

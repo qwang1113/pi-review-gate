@@ -438,6 +438,7 @@ import { registerRestatementTools } from "../lib/restatement.ts";
 // the tool live in ONE module; this file only reads `stageOpen` at the five
 // checkpoints and wires the deps the module needs.
 import {
+  buildStagesDirective,
   ensureLoopStages,
   registerLoopStageTools,
   stageOpen,
@@ -3599,6 +3600,13 @@ export default function reviewGate(pi: ExtensionAPI) {
             arbitrationPaused,
           },
           handedOff: handedOffSession,
+          // DONE by its own account: `declare_done` recorded the completion
+          // and no edit has deleted it since (an edit deletes it). Checked
+          // BEFORE the problem thunk on purpose — a finished session must not
+          // pay a worktree fingerprint every tick to be told it is finished,
+          // and the human's own merge / pull / checkout in this worktree must
+          // not re-open a contract this session already met.
+          completed: !!state.completion,
           lastRevivalAt,
           now: Date.now(),
           intervalMs: REVIVAL_INTERVAL_MS,
@@ -14663,6 +14671,18 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     if (state.taskMode === "loop") {
       const goalConfirmed = goalStageSatisfied();
       systemPrompt += "\n\n" + loopGoalDirectiveText();
+      // THE USER'S SWITCH RECORD, READABLE BY THE AGENT (2026-09-22, user ask).
+      //
+      // Every other surface that knows about a switched-off stage is either the
+      // dispatch (silent), a tool reply (too late), or the user's own dialog
+      // (not addressed to the agent) — so a released stage used to be a fact
+      // the agent could only learn by doing work nobody owes. Measured the same
+      // day: acceptance off, and the session still wrote a real-acceptance plan
+      // and started building its scene. The rendering itself ("no record ⇒
+      // nothing", the per-stage wording) lives in lib/loop-stages.ts, next to
+      // the table the user's checklist renders.
+      const stagesBlock = buildStagesDirective(loopStagesRecord());
+      if (stagesBlock) systemPrompt += "\n\n" + stagesBlock;
       // 2026-09-17: once the un-goaled turn count hits the threshold, the
       // standing goal directive is escalated to the force-negotiate form on
       // EVERY turn (not only in the RESUME injection) — the agent cannot miss

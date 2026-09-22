@@ -16,6 +16,7 @@ function inputs(over: Partial<RevivalInputs> = {}): RevivalInputs {
     idle: true,
     humanStop: { aborted: false, awaitingAnswer: false, bypassed: false, arbitrationPaused: false },
     handedOff: false,
+    completed: false,
     now,
     intervalMs: REVIVAL_INTERVAL_MS,
     ...over,
@@ -126,6 +127,40 @@ describe("decideRevival — handoff", () => {
     const d = decideRevival(inputs({ mode: "orchestrator", handedOff: true }));
     assert.equal(d.revive, false);
     assert.match(d.reason, /交接/);
+  });
+});
+
+describe("decideRevival — a session that already finished", () => {
+  it("does not revive a session that recorded its completion", () => {
+    const d = decideRevival(inputs({ completed: true }));
+    assert.equal(d.revive, false);
+    assert.match(d.reason, /完成/);
+  });
+
+  it("still revives once the record is gone (never done, or deleted by a later edit)", () => {
+    assert.equal(decideRevival(inputs({ completed: false })).revive, true);
+  });
+
+  it("checks completion BEFORE the expensive problems thunk", () => {
+    let calls = 0;
+    const d = decideRevival(inputs({
+      completed: true,
+      exitProblems: () => { calls += 1; return ["code was modified after the last READY review"]; },
+    }));
+    assert.equal(d.revive, false);
+    assert.equal(calls, 0, "a finished session must not pay a worktree fingerprint every tick");
+  });
+
+  it("covers the orchestrator too — the fact is about the session, not the loop", () => {
+    const d = decideRevival(inputs({ mode: "orchestrator", completed: true }));
+    assert.equal(d.revive, false);
+  });
+
+  it("changes no human-stop conclusion when both are true", () => {
+    const d = decideRevival(
+      inputs({ completed: true, humanStop: { ...inputs().humanStop, aborted: true } }),
+    );
+    assert.equal(d.revive, false);
   });
 });
 

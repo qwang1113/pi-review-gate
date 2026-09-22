@@ -36,6 +36,17 @@
  * message; a session waiting on `ask_user` is not nagged while the human is
  * typing into the dialog.
  *
+ * AND A SESSION THAT HAS ALREADY FINISHED (2026-09-22). The gate records that
+ * fact itself — `state.completion`, written by `declare_done`, deleted by the
+ * edit path ("a new edit un-finishes the task") — which makes it the one fact
+ * meaning "this contract is met AND nothing has touched it since". Without it
+ * the decision can only see the LIVE worktree, and then a human's own merge /
+ * pull / checkout in that same checkout re-opens a contract the session
+ * already discharged: it wakes a delivered session to re-review work that
+ * already shipped. Measured (onchain, 2026-09-22): `declare_done` at 12:35
+ * with the PR open, the human merged that branch into develop at 14:30:20,
+ * the next tick revived it 11 s later over 219 commits it never wrote.
+ *
  * Pure: facts in, a decision out. No I/O, no clock of its own, no state — the
  * extension owns the timer and the state, this owns the judgement.
  */
@@ -94,6 +105,14 @@ export interface RevivalInputs {
    * not: reviving it would put two project managers on one orchestration.
    */
   handedOff: boolean;
+  /**
+   * The gate RECORDED this session's completion (`declare_done`) and nothing
+   * has edited since — the edit path deletes that record ("a new edit
+   * un-finishes the task"), so this one fact covers both halves. Same
+   * category as `handedOff`: finished by its own account, not stalled. The
+   * extension reads it off `state.completion`.
+   */
+  completed: boolean;
   /** When this session last injected a revival (ms epoch; undefined = never). */
   lastRevivalAt?: number;
   now: number;
@@ -116,7 +135,8 @@ export function isRevivableMode(mode: string): boolean {
  * Should the gate wake this session up right now?
  *
  * Order matters and encodes BOTH the precedence and the cost: identity (is
- * there a contract at all) → consent (did a human stop this) → timing
+ * there a contract at all — and has this session already discharged it, by
+ * `completed` or by `handedOff`) → consent (did a human stop this) → timing
  * (is it idle, is it due) → need (is anything actually unmet). The cheap
  * guards run before the expensive problem thunk, so a session that is
  * paused, working or throttled never pays for the fingerprint scan. Human
@@ -129,6 +149,14 @@ export function decideRevival(inputs: RevivalInputs): RevivalDecision {
   }
   if (inputs.handedOff) {
     return { revive: false, reason: "本会话已交接编排给后继者 —— 主动退出，不是停滞" };
+  }
+  // DONE BY ITS OWN ACCOUNT, and checked before the human stops for the same
+  // reason `handedOff` is: there is no contract left to enforce, so there is
+  // nothing for a human stop to outrank. Both halves of the fact are covered
+  // by the record itself — an edit deletes `state.completion`, so "completed"
+  // means "met, and untouched since".
+  if (inputs.completed) {
+    return { revive: false, reason: "已记录完成（declare_done）且此后没有任何编辑 —— 契约已兑现" };
   }
 
   // Consent before need: a human stop is honoured even with the contract wide

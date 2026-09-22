@@ -28,7 +28,9 @@ import {
   LOOP_STAGES,
   LOOP_STAGES_BODY,
   STAGE_LABELS,
+  STAGE_OFF_CONSEQUENCES,
   allStagesOn,
+  buildStagesDirective,
   chooseLoopStages,
   ensureLoopStages,
   formatStagesOutcome,
@@ -73,6 +75,14 @@ function stagesWith(off: LoopStage[] = [], at = "2026-09-22T00:00:00.000Z"): Loo
   const record = sanitizeLoopStages({ stages: { ...allStagesOn(), ...Object.fromEntries(off.map((s) => [s, false])) }, at });
   assert.ok(record, "the fixture record must be well-formed");
   return record;
+}
+
+/** This module's own source — the "one copy" drift guard reads it. */
+const MODULE_SRC = readFileSync(join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "lib", "loop-stages.ts"), "utf8");
+
+/** Escape a literal for use inside a RegExp. */
+function escapeRe(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** A code-change state whose gates are all unmet (the strictest baseline). */
@@ -233,6 +243,72 @@ test("re-opening the box offers the CURRENT record, not a fresh all-on default",
   // instead of silently re-enabling four stages.
   const off = stagesWith([...LOOP_STAGES]);
   assert.deepEqual(loopStagesSpec(off).defaultChecked, []);
+});
+
+test("the prompt block and the user's dialog body share ONE consequence table", () => {
+  // Exit criterion 3: exactly these two consumers, one source. Both render
+  // every stage's consequence from `STAGE_OFF_CONSEQUENCES` — so each sentence
+  // exists ONCE in the module, and neither surface can drift from the other.
+  // A source line may wrap one literal in two (`"…" +` / `"…"`), which is
+  // formatting, not a second copy — join those first, then count.
+  const flattened = MODULE_SRC.replace(/"\s*\+\s*\n\s*"/g, "");
+  for (const stage of LOOP_STAGES) {
+    const needle = STAGE_OFF_CONSEQUENCES[stage];
+    assert.equal(flattened.split(needle).length - 1, 1, `${stage}'s consequence is written once (the shared table)`);
+    assert.match(LOOP_STAGES_BODY, new RegExp(escapeRe(needle)), `the dialog body renders ${stage} from it`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 1b. The prompt-side rendering (2026-09-22, user requirement)
+// ---------------------------------------------------------------------------
+
+test("no record renders NOTHING — a session that never opened the box is unchanged", () => {
+  assert.equal(buildStagesDirective(undefined), "");
+});
+
+test("all five on says so in one line and releases nothing", () => {
+  const text = buildStagesDirective(stagesWith([]));
+  assert.match(text, /环节开关（用户设定）/);
+  for (const stage of LOOP_STAGES) assert.match(text, new RegExp(`${stage} 开`), `${stage} is reported ON`);
+  assert.doesNotMatch(text, /关 ⇒/, "nothing is off ⇒ no consequence sentence may appear");
+  assert.doesNotMatch(text, /不要为/, "and no 'prepare nothing' instruction either");
+});
+
+test("every stage the user throws is named with its consequence", () => {
+  for (const off of LOOP_STAGES) {
+    const text = buildStagesDirective(stagesWith([off]));
+    assert.match(text, new RegExp(`${off} \\*\\*关\\*\\*`), `${off} is named as off`);
+    assert.match(text, /不要为关掉的环节做任何准备/, "the agent is told to prepare nothing for it");
+    if (off === "goal") {
+      // THE ONE EXCEPTION (audit Nit): the goal's switched-off behaviour has a
+      // paragraph of its own in the same prompt, so this block must not state
+      // it a second time — it points at it instead.
+      assert.doesNotMatch(text, /不做需求反述/, "the goal-off wording is not duplicated here");
+      assert.match(text, /见上面那段 goal 指令/, "…and it says where that wording lives");
+      continue;
+    }
+    assert.match(text, new RegExp(escapeRe(STAGE_OFF_CONSEQUENCES[off])), `${off} off ⇒ its consequence rides along`);
+  }
+});
+
+test("acceptance off says what to write INSTEAD, and names the way back", () => {
+  const text = buildStagesDirective(stagesWith(["acceptance"]));
+  assert.match(text, /本轮无真实验收（用户关闭了验收环节）/, "the goal's replacement clause is spelled out");
+  assert.match(text, /不要写验收方案/, "and the plan it replaces is named");
+  assert.match(text, /choose_loop_stages/, "re-opening the switch is named too");
+  // …and it does NOT leak into a session where acceptance is on: there the
+  // goal owes a real plan, and telling it otherwise would be the same bug in
+  // the other direction.
+  assert.doesNotMatch(buildStagesDirective(stagesWith(["review"])), /本轮无真实验收/);
+});
+
+test("the switches ride the loop prompt (wiring)", () => {
+  assert.match(SRC, /buildStagesDirective\(loopStagesRecord\(\)\)/, "the extension renders the session's own record");
+  const at = SRC.indexOf('systemPrompt += "\\n\\n" + loopGoalDirectiveText();');
+  assert.ok(at > 0, "the loop's goal directive is injected here");
+  assert.match(SRC.slice(at, at + 1500), /buildStagesDirective/,
+    "and the switch block is injected at the same place — the agent cannot miss it");
 });
 
 // ---------------------------------------------------------------------------
