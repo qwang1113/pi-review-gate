@@ -597,8 +597,17 @@ test("the no-acceptance declaration is only read from a goal that is in force", 
   const goalRead = SRC.indexOf("function acceptanceGoalText(");
   assert.ok(goalRead > 0, "the one read of the governing goal exists");
   const guard = SRC.slice(goalRead, SRC.indexOf("\n  }", goalRead));
-  assert.match(guard, /goal\.present && loopGoalConfirmed\(root, st\)/,
+  // The guard's SHAPE is not the rule — `goal.present && loopGoalConfirmed(…)`
+  // and its De Morgan form (`if (!goal.present || !loopGoalConfirmed(…)) return
+  // undefined`) say the same thing, and pinning one spelling made an unrelated
+  // change to this function (reading the whole file instead of the capped
+  // prompt copy, 2026-09-22) fail a test about approval. What must hold: the
+  // file has to be there, it has to be the one this session had approved, and
+  // anything else leaves the round with NO contract.
+  assert.match(guard, /goal\.present/, "the goal file must be there");
+  assert.match(guard, /loopGoalConfirmed\(root, st\)/,
     "only a goal this session actually had approved is in force");
+  assert.match(guard, /return undefined/, "…and anything else is no contract (fail-closed)");
   const at = SRC.indexOf("const declared = ");
   assert.ok(at > 0, "armAcceptanceRound reads the declaration");
   const read = SRC.slice(at - 300, at + 400);
