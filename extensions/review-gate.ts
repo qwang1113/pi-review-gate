@@ -9949,12 +9949,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           details: {
             submitted: true,
             judges: [],
-            // `stageOff` NAMES A CAUSE, so it may only be true when one of the
-            // two stages really is off (reviewer P2, 2026-09-22): this branch
-            // is also reached with BOTH switches on (the head already carries
-            // a quality READY), and a machine reader trusting the flag would
-            // repeat the misattribution the prose above no longer makes.
-            stageOff: !reviewStageOn || !qualityStageOn,
+            // A CONSTANT, BECAUSE THIS BRANCH HAS ONE CAUSE THAT ALWAYS HOLDS
+            // (quality round P2, 2026-09-22): `judges.length === 0` is only
+            // ever reached with `role: null`, and the chain produces that on
+            // `!reviewOn` alone — so the functional stage IS off here, every
+            // time. The previous round's `!reviewStageOn || !qualityStageOn`
+            // was a tautology dressed up as a condition. The field says “a
+            // stage is off”, never “every stage is off”: the quality stage's
+            // own state is what the prose above states.
+            stageOff: true,
           },
         };
       }
