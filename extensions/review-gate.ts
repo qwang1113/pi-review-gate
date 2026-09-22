@@ -8203,6 +8203,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       head: preparedHead,
       files: changedFiles,
       quality: stateForRepo(input.root).quality,
+      // THE USER'S SWITCH travels with the record: a skip written while the
+      // stage was off stops standing once it is back on (the rule itself is
+      // lib/quality-round.ts's, read here as one input of the same judgement).
+      stageOn: qualityOn,
     });
     if (!skip.skip && !standing.ok) {
       const qualityTaskText = typeof prepared.details?.qualityTask === "string" ? prepared.details.qualityTask : undefined;
@@ -8716,6 +8720,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // never as "nothing to judge" (lib/quality-round.ts).
         files: target.files,
         quality: stateForRepo(root).quality,
+        stageOn: stageIsOn("quality", root),
       });
       if (!standing.ok) {
         return { ok: false, reused: false, error: `质量轮还没有放行这一轮 —— ${standing.reason}` };
@@ -11223,7 +11228,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         bypassActive: laneVerificationWaived(root, st),
       }),
       quality: qualityPrecondition({
-        standing: qualityStandingFor({ head: target?.head ?? "", files: target?.files, quality: st.quality }),
+        standing: qualityStandingFor({ head: target?.head ?? "", files: target?.files, quality: st.quality, stageOn: stageIsOn("quality", root) }),
         qualityRoundInFlight: qualityRoundInFlight(root),
       }),
     });
@@ -11557,6 +11562,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // promotion to BLOCKED from a finding conflict. Each of those is a fact
     // ABOUT THE WORK, which waiting cannot change; this one is a fact about
     // TIME, and only a conclusion that is otherwise recordable may be held.
+    //
+    // …AND A SKIP RECORD ONLY STANDS WHILE THE STAGE IS OFF (2026-09-22), so
+    // the user's switch is read ONCE here and handed to both readers below
+    // (this hold, and the baseline decision) — the rule itself lives in
+    // `lib/quality-round.ts`'s `qualityStandingFor`.
+    const qualityStageOn = stageIsOn("quality", targetRoot);
     const qualityHold =
       parsed.verdict === "READY" && !staleTarget && withholding === "none"
         ? decideQualityHold({
@@ -11564,6 +11575,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
               head: reviewTargets.get(targetRoot)?.head ?? "",
               files: reviewTargets.get(targetRoot)?.files,
               quality: st.quality,
+              stageOn: qualityStageOn,
             }),
             qualityRoundInFlight: qualityRoundInFlight(targetRoot),
           })
@@ -11663,6 +11675,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       head: reviewTargets.get(targetRoot)?.head ?? "",
       files: reviewTargets.get(targetRoot)?.files,
       quality: st.quality,
+      stageOn: qualityStageOn,
     }).ok;
     const concludedCommit = (qualityHalfConcluded ? reviewTargets.get(targetRoot)?.head : undefined)
       ?? st.review.commitSha;

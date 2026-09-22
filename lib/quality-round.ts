@@ -128,6 +128,12 @@ export interface QualityStanding {
   verdict: string;
   /** The reviewed HEAD the verdict binds to. */
   commitSha?: string;
+  /**
+   * The round carried NO quality judge at all — recorded, never silent
+   * (`skippedQualityRecord`). `qualityStandingFor` reads it as a PERMISSION
+   * that depends on the stage switch, never as a conclusion.
+   */
+  skipped?: boolean;
 }
 
 /** Why the functional reviewer is (or is not) allowed to run. */
@@ -148,9 +154,13 @@ export type QualityStandingResult =
  *    which is exactly how a stale pass is caught);
  *  - a recorded BLOCKED.
  *
- * A SKIP is recorded as a READY carrying `skipped`, so this function needs no
- * third state: "the quality round decided there was nothing to judge" and "the
- * quality round judged it" are the same permission, recorded differently.
+ * A SKIP IS A PERMISSION, AND IT BELONGS TO THE STAGE (2026-09-22). It is
+ * recorded as a READY carrying `skipped`, but what it says is only "the round
+ * that wrote me had no code to judge" — there was none, or the user had the
+ * stage switched off. So the stage switch is an input here: with the stage ON
+ * and code in the round, an old skip no longer answers for it (the rule and its
+ * two exceptions are the branch below). A READY a judge actually produced
+ * carries no `skipped` and is untouched by the switch.
  *
  * WHO READS IT. Since 2026-09-16 the two judges start together, so this no
  * longer gates the DISPATCH in the parallel path (the gate dispatched the
@@ -164,9 +174,46 @@ export function qualityStandingFor(input: {
   head: string;
   files: readonly string[] | undefined;
   quality: QualityStanding | undefined;
+  /**
+   * IS THE USER'S QUALITY STAGE ON RIGHT NOW? Read by the CALLER from the
+   * user's own switch record (`lib/loop-stages.ts`) — this module owns no I/O,
+   * so the fact arrives as a parameter like the head and the file list do.
+   */
+  stageOn: boolean;
 }): QualityStandingResult {
   const skip = qualityRoundSkip(input.files);
   const standing = input.quality;
+  // A SKIP RECORD IS A PERMISSION, NOT A CONCLUSION (2026-09-22).
+  //
+  // `skippedQualityRecord` writes one for a round the quality judge was never
+  // owed: nothing but docs/data changed, or the user had the stage switched
+  // OFF. Either way it says nothing about the code the round DOES carry, so it
+  // stands in exactly two cases:
+  //  - this round carries no code either (`skip.skip`): no judge is owed, and
+  //    the record is not what the permission rests on;
+  //  - the stage is STILL OFF (`stageOn === false`): the round runs no quality
+  //    judge either way, and calling one now would be running a stage the user
+  //    has switched off.
+  // With the stage back ON and code in the round, an old skip stops answering:
+  // it was written while the stricter round the user asked for was not running,
+  // and no `commitSha` check can repair that — the head it names never went in
+  // front of a quality judge. (Before this rule it answered
+  // `{ok:true, basis:"pass"}`, so「关掉再打开」left every later round without a
+  // quality judge at all; reported by the 2026-09-22 acceptance round.)
+  //
+  // A REAL PASS IS DELIBERATELY NOT READ HERE: only the `skipped` brand reaches
+  // this branch, so a READY a judge actually produced keeps standing for its
+  // head after the stage is turned back on — invalidating those on every toggle
+  // would re-run the whole quality round for nothing.
+  if (standing?.verdict === "READY" && standing.skipped === true) {
+    if (skip.skip || !input.stageOn) return { ok: true, basis: "skipped" };
+    return {
+      ok: false,
+      reason:
+        "上一条质量记录是「跳过」——它写下时质量环节关闭（或那一轮没有代码），它不是质量轮对本轮代码的结论。" +
+        "质量环节现在已经打开，本轮的代码改动必须重新过一遍质量轮",
+    };
+  }
   if (standing?.verdict === "READY") {
     if (standing.commitSha && standing.commitSha === input.head) {
       return { ok: true, basis: "pass" };
@@ -196,9 +243,7 @@ export interface QualityRecord extends QualityStanding {
   commitSha: string;
   treeSha?: string;
   at: string;
-  /** The round carried no quality round at all — recorded, never silent. */
-  skipped?: boolean;
-  /** Why it was skipped, in the words the agent will read. */
+  /** Why it was skipped, in the words the agent will read (see `skipped`). */
   skipReason?: string;
   /** How many findings the round carried (diagnostics, like rounds[]). */
   findingsTotal?: number;

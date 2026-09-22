@@ -43,25 +43,25 @@ test("qualityStandingFor: the reviewer is dispatched only on a pass bound to THI
   const head = "a".repeat(40);
   const files = ["lib/a.ts"];
 
-  const missing = qualityStandingFor({ head, files, quality: undefined });
+  const missing = qualityStandingFor({ head, files, quality: undefined, stageOn: true });
   assert.equal(missing.ok, false);
   assert.match(missing.ok ? "" : missing.reason, /还没有质量轮的结论/);
 
-  const stale = qualityStandingFor({ head, files, quality: { verdict: "READY", commitSha: "b".repeat(40) } });
+  const stale = qualityStandingFor({ head, files, quality: { verdict: "READY", commitSha: "b".repeat(40) }, stageOn: true });
   assert.equal(stale.ok, false);
   assert.match(stale.ok ? "" : stale.reason, /已经过期/);
 
-  const blocked = qualityStandingFor({ head, files, quality: { verdict: "BLOCKED", commitSha: head } });
+  const blocked = qualityStandingFor({ head, files, quality: { verdict: "BLOCKED", commitSha: head }, stageOn: true });
   assert.equal(blocked.ok, false);
   assert.match(blocked.ok ? "" : blocked.reason, /BLOCKED/);
 
-  const pass = qualityStandingFor({ head, files, quality: { verdict: "READY", commitSha: head } });
+  const pass = qualityStandingFor({ head, files, quality: { verdict: "READY", commitSha: head }, stageOn: true });
   assert.deepEqual(pass, { ok: true, basis: "pass" });
 });
 
 test("qualityStandingFor: a code-free round is permitted WITHOUT a quality record (recorded as skipped)", () => {
   const files = ["README.md", "docs/x.md"];
-  const result = qualityStandingFor({ head: "c".repeat(40), files, quality: undefined });
+  const result = qualityStandingFor({ head: "c".repeat(40), files, quality: undefined, stageOn: true });
   assert.deepEqual(result, { ok: true, basis: "skipped" });
 
   // …but a code round with a stale record is still refused, and that ordering
@@ -70,6 +70,7 @@ test("qualityStandingFor: a code-free round is permitted WITHOUT a quality recor
     head: "d".repeat(40),
     files: [...files, "lib/a.ts"],
     quality: { verdict: "READY", commitSha: "c".repeat(40) },
+    stageOn: true,
   });
   assert.equal(staleWithCode.ok, false);
 });
@@ -80,6 +81,63 @@ test("skippedQualityRecord: a skip is a READY bound to the head, marked as a ski
   assert.equal(rec.skipped, true);
   assert.equal(rec.commitSha, "e".repeat(40));
   assert.match(rec.skipReason ?? "", /非代码文件/);
+});
+
+test("qualityStandingFor: a SKIP record stops answering once the stage is back ON (2026-09-22)", () => {
+  // WHAT THIS PINS. The record the gate writes while the user has the quality
+  // stage OFF (`extensions/review-gate.ts`'s `skippedQualityRecord`) used to
+  // answer `{ok:true, basis:"pass"}` for any head it was bound to, so turning
+  // the stage off and back on left every later submission without a quality
+  // judge — the user had just asked for the stricter round.
+  const head = "a".repeat(40);
+  const files = ["lib/a.ts", "README.md"];
+  const skipRecord = skippedQualityRecord({
+    head,
+    reason: "质量环节已关闭（用户设定的环节开关）—— 不派 quality-auditor",
+    at: "2026-09-22T00:00:00.000Z",
+  });
+
+  // ① STILL OFF ⇒ the skip is the permission it was written as: no judge runs
+  // and the record blocks nothing (the stage's own copy promises exactly that).
+  assert.deepEqual(
+    qualityStandingFor({ head, files, quality: skipRecord, stageOn: false }),
+    { ok: true, basis: "skipped" },
+  );
+
+  // ② BACK ON, same head, and the round still carries code ⇒ the skip is NOT a
+  // conclusion, which is what makes the next `judge_submit` dispatch a quality
+  // round again (the head it names never went in front of one).
+  const reopened = qualityStandingFor({ head, files, quality: skipRecord, stageOn: true });
+  assert.equal(reopened.ok, false);
+  assert.match(reopened.ok ? "" : reopened.reason, /跳过/);
+
+  // ③ A CODE-FREE ROUND IS PERMITTED EITHER WAY — its permission is the rule
+  // (`qualityRoundSkip`), not the record that happens to be on disk.
+  assert.deepEqual(
+    qualityStandingFor({ head, files: ["README.md", "docs/x.md"], quality: skipRecord, stageOn: true }),
+    { ok: true, basis: "skipped" },
+  );
+});
+
+test("qualityStandingFor: a REAL quality pass survives turning the stage back ON", () => {
+  // The other half of the rule: only the `skipped` brand is read against the
+  // switch. A READY a quality judge actually produced keeps standing for its
+  // head — invalidating those on every toggle would re-run every quality round.
+  const head = "a".repeat(40);
+  const files = ["lib/a.ts"];
+  const real = { verdict: "READY", commitSha: head };
+  assert.deepEqual(qualityStandingFor({ head, files, quality: real, stageOn: true }), { ok: true, basis: "pass" });
+  assert.deepEqual(qualityStandingFor({ head, files, quality: real, stageOn: false }), { ok: true, basis: "pass" });
+  // …and the switch changes nothing about the STALE / BLOCKED answers: those
+  // are facts about the work, not about the stage.
+  assert.equal(
+    qualityStandingFor({ head, files, quality: { verdict: "READY", commitSha: "b".repeat(40) }, stageOn: true }).ok,
+    false,
+  );
+  assert.equal(
+    qualityStandingFor({ head, files, quality: { verdict: "BLOCKED", commitSha: head }, stageOn: true }).ok,
+    false,
+  );
 });
 
 // ---------------------------------------------------------------------------
