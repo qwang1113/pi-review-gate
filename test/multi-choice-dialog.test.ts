@@ -200,6 +200,34 @@ test("the box renders its title, its rows and a footer, and finishes exactly onc
   assert.deepEqual(outcomes, [{ kind: "picked", options: ["预检"] }], "the second Enter is after the box is gone");
 });
 
+test("a theme whose fg/bold read their own state survives the box (real-session P0)", () => {
+  // PI HANDS OVER AN INSTANCE, NOT A BAG OF FUNCTIONS. Its Theme.fg/bold read
+  // `this` (the real one throws `Cannot read properties of undefined (reading
+  // 'fgColors')`), so taking the method off the object and calling it detached
+  // killed the pi process on the box's FIRST render. The methods below fail in
+  // exactly the same way when their receiver is lost.
+  const theme = {
+    colors: { accent: "«A»", dim: "«D»" } as Record<string, string>,
+    fg(this: { colors: Record<string, string> }, color: string, text: string): string {
+      return `${this.colors[color] ?? "?"}${text}`;
+    },
+    bold(this: { colors: Record<string, string> }, text: string): string {
+      return `«B»${text}`;
+    },
+  };
+  const outcomes: MultiSelectOutcome[] = [];
+  const box = buildMultiChoiceBox({
+    title: "标题",
+    spec: spec(),
+    theme,
+    done: (outcome) => outcomes.push(outcome),
+  });
+  const lines = box.render(80);
+  assert.ok(lines.some((line) => line.includes("«B»标题")), "bold lost its receiver");
+  assert.ok(lines.some((line) => line.includes("«A»")), "the cursor row lost its colour");
+  assert.ok(lines.some((line) => line.includes("«D»")), "the footer lost its colour");
+});
+
 test("a disposed box answers nothing — the host took it off the screen", () => {
   const { box, outcomes } = boxOf(spec());
   box.dispose();

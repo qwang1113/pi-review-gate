@@ -431,8 +431,20 @@ export function buildMultiChoiceBox(opts: MultiChoiceBoxOptions): MultiChoiceBox
   const back = opts.back ?? false;
   let state = multiChoiceStart(spec);
   let finished = false;
-  const fg = opts.theme?.fg ?? ((_color: string, text: string) => text);
-  const bold = opts.theme?.bold ?? ((text: string) => text);
+  // PI'S THEME METHODS ARE NOT FREE FUNCTIONS (real-session P0, 2026-09-22):
+  // `theme.fg` / `theme.bold` read instance state (`this.fgColors`), so the
+  // detached reference `opts.theme?.fg` yields throws
+  // `Cannot read properties of undefined (reading 'fgColors')` on the FIRST
+  // render of the box — and pi dies of the uncaughtException with it, taking
+  // the whole session down before the user ever sees a row. Call them through
+  // the object that owns them; no theme (tests, a headless host) stays the
+  // identity. The cast at `mountMultiChoice` cannot fix this: the receiver is
+  // lost at the CALL below, not at the boundary.
+  const theme = opts.theme;
+  const fg = theme?.fg
+    ? (color: string, text: string) => theme.fg!(color, text)
+    : (_color: string, text: string) => text;
+  const bold = theme?.bold ? (text: string) => theme.bold!(text) : (text: string) => text;
   const finish = (outcome: MultiSelectOutcome) => {
     if (finished) return;
     finished = true;
