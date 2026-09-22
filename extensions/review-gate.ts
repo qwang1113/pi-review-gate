@@ -12087,7 +12087,21 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    */
   function acceptanceGoalText(root: string, st: GateState): string | undefined {
     const goal = readSessionLoopGoal(root);
-    return goal.present && loopGoalConfirmed(root, st) ? goal.text : undefined;
+    if (!goal.present || !loopGoalConfirmed(root, st)) return undefined;
+    // THE RAW FILE, NOT THE PROMPT COPY (real-session P1, 2026-09-22).
+    // `goal.text` is capped at `LOOP_GOAL_MAX_CHARS` for prompt injection, and
+    // the acceptance plan is the LAST section of the skeleton — measured on the
+    // round that found this: a 3130-character goal with「真实验收方案」at offset
+    // 2164, so the capped copy ends before it, `extractAcceptancePlan` answers
+    // undefined, `hasPlan` is false and the acceptance round is SILENTLY
+    // SKIPPED as “no approved plan” — the stricter gate released by a size
+    // limit. The approval above already proved this file readable, so read it
+    // whole; unreadable stays unapproved, the same fail-closed rule.
+    try {
+      return readFileSync(loopGoalPathIn(root), "utf8");
+    } catch {
+      return undefined;
+    }
   }
 
   /**

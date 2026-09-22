@@ -7174,6 +7174,16 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   assert.match(arm, /dispatchAcceptanceRound\(ctx, fingerprint, goalText \?\? ""\)/,
     "the goal text is handed to the dispatch (one read for both halves, 2026-09-22)");
   assert.match(arm, /hasPlan: false/, "no approved acceptance plan ⇒ SKIP, never a plan-less dispatch");
+  // 4b. THE PLAN IS READ FROM THE WHOLE FILE, NEVER FROM THE PROMPT COPY
+  //     (real-session P1, 2026-09-22): `goal.text` is capped at
+  //     LOOP_GOAL_MAX_CHARS for prompt injection, and the acceptance plan is
+  //     the skeleton's LAST section — measured on the round that found this, a
+  //     3130-character goal put「真实验收方案」at offset 2164, so the capped copy
+  //     ended before it, the plan read as absent, and a SIZE LIMIT silently
+  //     released the stricter gate.
+  const goalTextRead = windowOf("function acceptanceGoalText", "\n  /**", "acceptanceGoalText");
+  assert.match(goalTextRead, /readFileSync\(loopGoalPathIn\(root\), "utf8"\)/,
+    "the approved file is read whole; the capped prompt copy cannot carry the plan");
   // 5. A SKIP THE USER HAS TO ACT ON IS NOT LEFT IN THE SIDECAR (quality round
   //    P2, 2026-09-22): the reason rides into the completion reply, and the
   //    status command renders the record. The other two skips stay quiet —
