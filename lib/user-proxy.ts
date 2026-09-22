@@ -40,6 +40,12 @@
  * can never introduce one.
  */
 
+// THE MULTIPLE-CHOICE WIRE SEPARATOR IS IMPORTED, NOT SPELLED AGAIN (quality
+// round P2, 2026-09-22): a second literal here would only have to drift once
+// for a proxied answer to stop parsing as rows and silently degrade into one
+// free-text answer, and this module is already one of that wire's consumers.
+import { MULTI_ANSWER_SEPARATOR } from "./multi-choice-dialog.ts";
+
 /** How long a dialog waits for a human before the proxy takes over. */
 export const PROXY_ANSWER_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -213,12 +219,6 @@ export async function raceWithUserProxy<T>(input: {
 }
 
 /**
- * The separator a MULTIPLE-CHOICE proxy answer joins its rows with — the same
- * one `lib/multi-choice-dialog.ts` writes.
- */
-const PROXY_MULTI_JOIN = " / ";
-
-/**
  * IS THIS A ROW THE PROXY MAY PICK? — the check that makes a proxied answer
  * indistinguishable from a human one, on BOTH shapes (2026-09-22).
  *
@@ -234,7 +234,7 @@ export function isAcceptedProxyChoice(
   multiple: boolean,
 ): boolean {
   if (!multiple) return options.includes(choice);
-  const segments = choice.split(PROXY_MULTI_JOIN).map((segment) => segment.trim()).filter(Boolean);
+  const segments = choice.split(MULTI_ANSWER_SEPARATOR).map((segment) => segment.trim()).filter(Boolean);
   return segments.length > 0 && segments.every((segment) => options.includes(segment));
 }
 

@@ -8040,6 +8040,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         /** Present when the quality round was SKIPPED — printed to the agent. */
         skipNote?: string;
         /**
+         * WHY NOTHING WAS DISPATCHED WITH THE QUALITY STAGE STILL ON (quality
+         * round P2, 2026-09-22): the same `role: null` shape is also reached
+         * when the current head ALREADY carries a bound quality READY, and the
+         * receipt's generic “no judge was dispatched (the user's stage
+         * switches)” then reads as if a stage were missing. Carrying the real
+         * reason keeps the receipt honest without a second decision anywhere.
+         */
+        qualityStandingNote?: string;
+        /**
          * WHAT THIS CHAIN JUST FROZE (drill F4, 2026-09-20).
          *
          * `judge_submit` is the only surface the agent reads after a round is
@@ -8254,7 +8263,18 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         role: null,
         taskText: "",
         ...(checkpoint === undefined ? {} : { checkpoint }),
-        ...(skip.skip ? { skipNote: skip.reason ?? "" } : {}),
+        // REACHED TWO WAYS, AND THE RECEIPT MUST NOT CONFUSE THEM (quality
+        // round P2, 2026-09-22): the quality stage is off (or the round is a
+        // skip), OR it is ON and this head already carries a bound quality
+        // READY — `standing.ok` above sent the other case to a quality
+        // dispatch. The second one is not a missing stage: it is the same
+        // content being judged once.
+        ...(skip.skip
+          ? { skipNote: skip.reason ?? "" }
+          : {
+              qualityStandingNote:
+                "代码质量审查 quality-auditor：当前 head 已有绑定的质量结论（同一份内容不再重复派质量轮）。",
+            }),
       };
     }
     return {
@@ -9781,6 +9801,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       let dispatchRole: string | null = role;
       /** Printed when the quality round was skipped (docs/data-only round). */
       let skipNote: string | undefined;
+      /** Printed when the quality stage is ON and the head is already judged. */
+      let qualityStandingNote: string | undefined;
       /**
        * Where THIS round's findings stream lives — the channel the agent
        * reads while the judge is still working. Every role that has one
@@ -9829,6 +9851,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // deliberately NOT a role the agent can name.
         dispatchRole = chain.role;
         skipNote = chain.skipNote;
+        qualityStandingNote = chain.qualityStandingNote;
         parallelReviewer = chain.parallelReviewer;
         checkpointFacts = chain.checkpoint;
       }
@@ -9903,14 +9926,24 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           content: [{
             type: "text",
             text: [
-              "review-gate: 本轮没有派任何 judge（用户设定的环节开关）。",
+              // NEUTRAL ON PURPOSE: this branch is reached with the switches
+              // on as well (a head that already carries its quality READY), so
+              // naming the switches as the cause would be wrong there — each
+              // line below states its own reason instead.
+              "review-gate: 本轮没有派任何 judge。",
               ...(reviewStageOn ? [] : ["- 功能审查 reviewer：环节已关闭 —— ship 时该卡点视为满足。"]),
               ...(qualityStageOn ? [] : ["- 代码质量审查 quality-auditor：环节已关闭 —— 不派质量轮。"]),
+              ...(qualityStandingNote === undefined ? [] : [`- ${qualityStandingNote}`]),
               ...(skipNote === undefined ? [] : [`- 质量轮跳过：${skipNote}`]),
               ...(checkpointFacts === undefined
                 ? []
                 : [`- checkpoint ${checkpointFacts.sha.slice(0, 12)} 已冻结 ${checkpointFacts.files.length} 个文件。`]),
-              "要恢复哪个环节，就再调一次 `choose_loop_stages`（用户重新勾选，门禁自己弹框）。",
+              // ONLY WHEN SOMETHING IS ACTUALLY OFF: “re-open the switches” is
+              // advice nobody needs when the reason nothing was dispatched is a
+              // quality READY that already covers this head.
+              ...(reviewStageOn && qualityStageOn
+                ? []
+                : ["要恢复哪个环节，就再调一次 `choose_loop_stages`（用户重新勾选，门禁自己弹框）。"]),
             ].join("\n"),
           }],
           details: { submitted: true, judges: [], stageOff: true },

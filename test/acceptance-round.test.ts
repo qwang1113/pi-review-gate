@@ -113,6 +113,28 @@ test("no approved acceptance plan ⇒ SKIP with a reason, never a dispatch with 
   assert.equal(acceptanceDecision({ ...base, hasPlan: false, record: ready }).action, "pass");
 });
 
+test("a dispatch with no plan to hand over is a SKIP on EVERY path, not just the no-record one (reviewer P2, 2026-09-22)", () => {
+  const base = { hasCodeChange: true, gateOpen: true, fingerprint: "fp-2", hasPlan: false };
+  // THE CASE THAT USED TO DISPATCH AN EMPTY TASK: the round is owed (the record
+  // no longer describes this content) and there is no checklist to give the
+  // judge, which can only end in a BLOCKED no action of the agent can resolve.
+  const movedReady: AcceptanceRecord = { status: "READY", verdict: "READY", fingerprint: "fp-1", at: AT };
+  assert.equal(acceptanceDecision({ ...base, record: movedReady }).action, "skip", "a moved READY");
+  const movedBlocked: AcceptanceRecord = { status: "BLOCKED", verdict: "BLOCKED", fingerprint: "fp-1", at: AT };
+  assert.equal(acceptanceDecision({ ...base, record: movedBlocked }).action, "skip", "a moved BLOCKED");
+  // …and so is a round whose pane died: re-dispatching is exactly what buys it.
+  const waiting: AcceptanceRecord = { status: "AWAITING", at: AT, judgeId: "j1" };
+  assert.equal(
+    acceptanceDecision({ ...base, record: waiting, roundAlive: false }).action,
+    "skip",
+    "a dead pane",
+  );
+  // The plan check never overrides a record that already decides: both halves
+  // of the settled pair keep their own outcome.
+  assert.equal(acceptanceDecision({ ...base, fingerprint: "fp-1", record: movedReady }).action, "pass");
+  assert.equal(acceptanceDecision({ ...base, fingerprint: "fp-1", record: movedBlocked }).action, "block");
+});
+
 test("the status line renders the record — including WHY a round was skipped (2026-09-22)", () => {
   assert.equal(acceptanceStatusLine(undefined), undefined, "no record, no line");
   assert.equal(

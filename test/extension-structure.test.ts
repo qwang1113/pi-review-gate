@@ -6438,9 +6438,12 @@ test("both change-index git reads are rename-safe and shell-safe", () => {
 // ---------------------------------------------------------------------------
 
 test("the full lane is started WITHOUT being awaited, and the checkpoint accepts a live verification", () => {
-  const submitAt = SRC.indexOf("async function submitForReview(");
-  assert.ok(submitAt > 0, "the chain is here");
-  const submit = SRC.slice(submitAt, submitAt + 4000);
+  // BOUNDED BY THE NEXT DECLARATION, NOT BY A BYTE COUNT (2026-09-22): the
+  // window used to be `submitAt + 4000`, so a type-doc comment growing inside
+  // the chain pushed the very calls these assertions name out of view and the
+  // test failed for a reason that has nothing to do with the rule it pins —
+  // exactly the failure mode `windowIn`'s own docblock describes.
+  const submit = windowIn(SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
   assert.match(submit, /void startPrecommitBeside\(input\.root, input\.ctx\)/,
     "the long lane starts and the chain runs beside it — awaiting here is exactly the 33s the agent used to lose");
   assert.doesNotMatch(submit, /await callTool\(\s*"run_precommit"/,
@@ -6621,8 +6624,10 @@ test("ONE full lane per repo: a second round waits for a quiet lane, and NEVER j
   // else.
   const startAt = SRC.indexOf("async function waitForQuietLane(");
   assert.ok(startAt > 0, "the waiting is its own named act");
-  const submitAt = SRC.indexOf("async function submitForReview(");
-  const submit = SRC.slice(submitAt, submitAt + 4000);
+  // Same anchor-bounded window as the sibling test above, and for the same
+  // reason: the rule is about THIS function, so the window must end where the
+  // function does rather than at a byte count that rots.
+  const submit = windowIn(SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
   const waitAt = submit.indexOf("await waitForQuietLane(input.root)");
   const startLaneAt = submit.indexOf("void startPrecommitBeside(input.root, input.ctx)");
   assert.ok(waitAt > 0 && startLaneAt > waitAt,

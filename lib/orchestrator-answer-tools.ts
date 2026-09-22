@@ -46,6 +46,10 @@ import { effectiveTaskStation } from "./repo-pr-policy.ts";
 
 import { appendRecord } from "./orchestrator-channel.ts";
 import { looksLikeDeclineRow, parseChoice, rowIndexOf, type ChoiceSpec } from "./choice-dialog.ts";
+// THE CANONICAL WIRE SEPARATOR, imported rather than spelled again (quality
+// round P2, 2026-09-22): this module WRITES the answer the child side parses,
+// so a second literal here is a second dialect waiting to drift.
+import { MULTI_ANSWER_SEPARATOR } from "./multi-choice-dialog.ts";
 import { isGrantableScope } from "./ask-user.ts";
 import { addGrant, findChild, hasGrant, type ChildSession } from "./orchestrator-registry.ts";
 import { proxyApprovalProblems } from "./orchestrator-gate.ts";
@@ -82,9 +86,6 @@ const PROXY_SCOPE_LABEL: Record<string, string> = {
  */
 const MULTI_ANSWER_SPLIT = /[,，、+/\s]+/;
 
-/** The separator the canonical multiple-choice answer is written with. */
-const MULTI_ANSWER_JOIN = " / ";
-
 /**
  * WHICH ROW a single token quotes — the reading BOTH shapes share.
  *
@@ -106,7 +107,7 @@ function readRow(token: string, options: string[]): { row: string } | { reason: 
   const hits = options.filter((option) => option.includes(token));
   if (hits.length === 1) return { row: hits[0]! };
   if (hits.length > 1) return { reason: `"${token}" 同时匹配 ${hits.length} 个选项，不敢替它选` };
-  return { reason: `"${token}" 不是这个框里的任何一项。可选：` + options.join(MULTI_ANSWER_JOIN) };
+  return { reason: `"${token}" 不是这个框里的任何一项。可选：` + options.join(MULTI_ANSWER_SEPARATOR) };
 }
 
 /**
@@ -132,7 +133,7 @@ function resolveMultiAnswer(
     if ("reason" in read) return { ok: false, reason: `多选答案里有一段读不出来：${read.reason}` };
     if (!rows.includes(read.row)) rows.push(read.row);
   }
-  return { ok: true, answer: rows.join(MULTI_ANSWER_JOIN) };
+  return { ok: true, answer: rows.join(MULTI_ANSWER_SEPARATOR) };
 }
 
 export function resolveAnswer(

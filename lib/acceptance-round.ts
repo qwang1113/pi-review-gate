@@ -306,10 +306,35 @@ export function acceptanceDecision(input: AcceptanceDecisionInput): AcceptanceDe
     };
   }
   const rec = input.record;
+  /**
+   * NO PLAN, NO DISPATCH — the ONE shape every “we owe this round a dispatch”
+   * branch goes through (reviewer P2, 2026-09-22).
+   *
+   * This check used to sit in the switch's `default` alone, so a READY /
+   * BLOCKED record whose fingerprint had moved — or an AWAITING round whose
+   * pane died — fell through to `dispatch` while the goal was no longer in
+   * force. The extension builds the round's task from `goalText ?? ""`, i.e. an
+   * EMPTY checklist: a judge that can only answer BLOCKED, and no action of
+   * the agent could ever resolve it — re-negotiating the goal is precisely the
+   * stage the user switched off in the state that gets here.
+   *
+   * WHAT IT DOES NOT OVERRIDE: a settled record still decides for itself. A
+   * READY bound to this content PASSES and a bound BLOCKED still blocks —
+   * neither needs a new checklist, so neither is affected.
+   */
+  const missingPlan = (): AcceptanceDecision | undefined =>
+    input.hasPlan === false
+      ? {
+          action: "skip",
+          status: "SKIPPED",
+          reason: "本轮没有用户批准的验收方案（goal 环节关闭、或 goal 尚未批准——起草中的草稿不算合同）" +
+            "—— 没有可依据的清单就不派验收轮：批准一份带「真实验收方案」的 goal，或者把验收环节也关掉。",
+        }
+      : undefined;
   switch (rec?.status) {
     case "AWAITING":
       if (input.roundAlive === false) {
-        return {
+        return missingPlan() ?? {
           action: "dispatch",
           reason: "上一轮验收的 pane 已经不在了（门禁不会等一个不会来的报告）—— 重新派出验收轮（同一个 session id，transcript 继续）。",
         };
@@ -323,7 +348,7 @@ export function acceptanceDecision(input: AcceptanceDecisionInput): AcceptanceDe
       if (input.fingerprint !== "" && rec.fingerprint === input.fingerprint) {
         return { action: "pass", reason: "验收 READY 且绑定当前内容 —— 真实验收这一关已过。" };
       }
-      return {
+      return missingPlan() ?? {
         action: "dispatch",
         reason: "上一次验收 READY 绑定的内容已经不是当前内容（编辑/提交移动了指纹）—— 上一份结论作废，需要重新验收。",
       };
@@ -335,20 +360,12 @@ export function acceptanceDecision(input: AcceptanceDecisionInput): AcceptanceDe
             "；按 findings 修完再走一遍审查循环（内容一改，这份结论自动失效并重新验收）。",
         };
       }
-      return {
+      return missingPlan() ?? {
         action: "dispatch",
         reason: "内容已经变了，上一轮的 BLOCKED 结论针对的是旧内容 —— 重新验收。",
       };
     default:
-      if (input.hasPlan === false) {
-        return {
-          action: "skip",
-          status: "SKIPPED",
-          reason: "本轮没有用户批准的验收方案（goal 环节关闭、或 goal 尚未批准——起草中的草稿不算合同）" +
-            "—— 没有可依据的清单就不派验收轮：批准一份带「真实验收方案」的 goal，或者把验收环节也关掉。",
-        };
-      }
-      return {
+      return missingPlan() ?? {
         action: "dispatch",
         reason: "还没有绑定当前内容的验收结论 —— 门禁现在派出 acceptance 轮（真实验收）。",
       };
