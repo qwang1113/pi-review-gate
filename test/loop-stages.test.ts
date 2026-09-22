@@ -302,10 +302,20 @@ test("with the review stage off, the quality verdict IS the review — and it is
   st.quality = { verdict: "BLOCKED", commitSha: "c", treeSha: "tree-oid", at: "t" };
   assert.match(unmetRequirements(st, "tree-oid", false)[0]!, /quality round is BLOCKED \(need READY\)/);
 
-  st.quality = { verdict: "READY", commitSha: "c", treeSha: "tree-oid", at: "t", skipped: true };
+  // A SKIP STANDS FOR EXACTLY ONE REASON (acceptance round P1, 2026-09-22):
+  // the round had no code to judge. A skip written because the stage was OFF
+  // does not stand once it is back on.
+  st.quality = { verdict: "READY", commitSha: "c", treeSha: "tree-oid", at: "t", skipped: true, skipCause: "stage-off" };
   assert.match(unmetRequirements(st, "tree-oid", false)[0]!, /quality round is SKIPPED \(need READY\)/,
-    "a SKIP record is not the quality READY this authority requires (acceptance round P1, 2026-09-22): it was written " +
-      "because the stage was off, so with the stage back ON and code in the worktree it proves nothing about this code");
+    "a stage-off SKIP record is not the quality READY this authority requires: with the stage back ON and code in the " +
+      "worktree it proves nothing about this code");
+  // …while a CODE-FREE skip IS the standing for its content (functional round
+  // P1, same day): refusing it too made every docs-only round unshippable.
+  st.quality = { verdict: "READY", commitSha: "c", treeSha: "tree-oid", at: "t", skipped: true, skipCause: "no-code" };
+  assert.deepEqual(unmetRequirements(st, "tree-oid", false), [],
+    "a code-free round's skip stands — no quality judge is ever owed for that content");
+  assert.match(unmetRequirements(st, "other-tree", false)[0]!, /modified after the last quality READY/,
+    "…and it is still bound to the tree it was written for");
 
   // A READY unlocks only the tree it judged.
   st.quality = { verdict: "READY", commitSha: "c", treeSha: "tree-oid", at: "t" };
@@ -379,12 +389,24 @@ test("the REAL L3 pre-commit checker honors the same record (exit codes, not pro
     // 「quality 关 → 编辑 → judge_submit → 重开 quality」must not ship on it —
     // the stage is ON again, and no quality judge ever saw this code.
     quality: {
-      verdict: "READY", commitSha: "c", treeSha: tree, at: "t", skipped: true,
+      verdict: "READY", commitSha: "c", treeSha: tree, at: "t", skipped: true, skipCause: "stage-off",
       skipReason: "质量环节已关闭（用户设定的环节开关）—— 不派 quality-auditor",
     },
     stages: stagesWith(["review", "precommit"]),
   });
-  assert.equal(check(dir), 1, "a SKIP record must not stand in for the quality READY once the stage is back on");
+  assert.equal(check(dir), 1, "a stage-off SKIP record must not stand in for the quality READY once the stage is back on");
+  writeState(dir, {
+    ...base,
+    // …AND A CODE-FREE SKIP IS A DIFFERENT THING (functional round P1, same
+    // day): no quality judge is owed for a docs-only round, so the hook must
+    // not block the commit on it either.
+    quality: {
+      verdict: "READY", commitSha: "c", treeSha: tree, at: "t", skipped: true, skipCause: "no-code",
+      skipReason: "本轮只改动了非代码文件",
+    },
+    stages: stagesWith(["review", "precommit"]),
+  });
+  assert.equal(check(dir), 0, "a code-free skip still stands — refusing it would deadlock every docs-only round");
   writeState(dir, {
     ...base,
     quality: { verdict: "READY", commitSha: "c", treeSha: tree, at: "t" },

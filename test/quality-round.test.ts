@@ -5,6 +5,7 @@ import {
   QUALITY_ROLE,
   buildQualityAuditTask,
   decideQualityHold,
+  isContentFreeQualitySkip,
   isSkippedQualityRecord,
   isSourceFile,
   qualityPrecondition,
@@ -77,7 +78,7 @@ test("qualityStandingFor: a code-free round is permitted WITHOUT a quality recor
 });
 
 test("skippedQualityRecord: a skip is a READY bound to the head, marked as a skip", () => {
-  const rec = skippedQualityRecord({ head: "e".repeat(40), tree: "f".repeat(40), reason: "本轮只改动了非代码文件", at: "2026-09-15T00:00:00.000Z" });
+  const rec = skippedQualityRecord({ head: "e".repeat(40), tree: "f".repeat(40), reason: "本轮只改动了非代码文件", at: "2026-09-15T00:00:00.000Z", cause: "no-code" });
   assert.equal(rec.verdict, "READY");
   assert.equal(rec.skipped, true);
   assert.equal(rec.commitSha, "e".repeat(40));
@@ -87,6 +88,14 @@ test("skippedQualityRecord: a skip is a READY bound to the head, marked as a ski
   assert.equal(isSkippedQualityRecord(rec), true);
   assert.equal(isSkippedQualityRecord({ verdict: "READY", commitSha: "e".repeat(40) }), false);
   assert.equal(isSkippedQualityRecord(undefined), false);
+  // THE CAUSE DECIDES WHETHER THE SKIP STANDS FOR A SHIP (2026-09-22, functional
+  // round P1): only "no judge was owed" does. A stage-off skip does not.
+  assert.equal(isContentFreeQualitySkip(rec), true, "a code-free round's skip is the standing for that content");
+  const stageOff = skippedQualityRecord({ head: "e".repeat(40), reason: "质量环节已关闭", at: "t", cause: "stage-off" });
+  assert.equal(isSkippedQualityRecord(stageOff), true, "it is still a skip…");
+  assert.equal(isContentFreeQualitySkip(stageOff), false, "…but not one that may stand for the code");
+  assert.equal(isContentFreeQualitySkip(undefined), false);
+  assert.equal(isContentFreeQualitySkip({ verdict: "READY", commitSha: "e".repeat(40) }), false);
 });
 
 test("qualityStandingFor: a SKIP record stops answering once the stage is back ON (2026-09-22)", () => {
@@ -101,6 +110,7 @@ test("qualityStandingFor: a SKIP record stops answering once the stage is back O
     head,
     reason: "质量环节已关闭（用户设定的环节开关）—— 不派 quality-auditor",
     at: "2026-09-22T00:00:00.000Z",
+    cause: "stage-off",
   });
 
   // ① STILL OFF ⇒ the skip is the permission it was written as: no judge runs

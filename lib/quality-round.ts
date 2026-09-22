@@ -134,6 +134,16 @@ export interface QualityStanding {
    * that depends on the stage switch, never as a conclusion.
    */
   skipped?: boolean;
+  /**
+   * WHY the round was skipped — the fact the SHIP readers need (2026-09-22,
+   * functional round P1). A skip written for a CODE-FREE round stands
+   * (`qualityRoundSkip` says no quality judge is owed for that content), while
+   * a skip written because the USER had the stage switched off stands only
+   * while it still is. Reading `skipped` alone made the ship authority refuse
+   * both, which deadlocked every docs-only round in a session whose code change
+   * had already been judged. `isContentFreeQualitySkip` is the ONE reading.
+   */
+  skipCause?: "stage-off" | "no-code";
 }
 
 /**
@@ -155,6 +165,22 @@ export interface QualityStanding {
  */
 export function isSkippedQualityRecord(record: QualityStanding | undefined): boolean {
   return record?.verdict === "READY" && record.skipped === true;
+}
+
+/**
+ * MAY THIS SKIP STAND FOR THE CONTENT IT IS BOUND TO — the SHIP readers'
+ * question (`lib/gate-state.ts`'s quality block and the L3 hook's copy of it),
+ * and the ONE reading of the `skipCause` brand.
+ *
+ * It stands for exactly one cause: the round carried no code, so no quality
+ * judge was ever owed for that content (`qualityRoundSkip`). A skip written
+ * because the stage was OFF does NOT stand once the stage is back on — the
+ * stricter round the user asked for never ran, and the head it names never went
+ * in front of a quality judge. (Refusing both was the first cut of this rule;
+ * it made a docs-only round unshippable — functional round P1, 2026-09-22.)
+ */
+export function isContentFreeQualitySkip(record: QualityStanding | undefined): boolean {
+  return isSkippedQualityRecord(record) && record?.skipCause === "no-code";
 }
 
 /** Why the functional reviewer is (or is not) allowed to run. */
@@ -270,14 +296,26 @@ export interface QualityRecord extends QualityStanding {
   findingsTotal?: number;
 }
 
-/** The quality record for a code-free round (see `qualityRoundSkip`). */
-export function skippedQualityRecord(input: { head: string; tree?: string; reason: string; at: string }): QualityRecord {
+/** The quality record for a round the quality judge was never owed. */
+export function skippedQualityRecord(input: {
+  head: string;
+  tree?: string;
+  reason: string;
+  at: string;
+  /**
+   * WHY there was no judge — REQUIRED, because the ship readers treat the two
+   * causes differently (`isContentFreeQualitySkip`) and a caller that forgets
+   * this would silently write a record that can never stand.
+   */
+  cause: "stage-off" | "no-code";
+}): QualityRecord {
   return {
     verdict: "READY",
     commitSha: input.head,
     ...(input.tree === undefined ? {} : { treeSha: input.tree }),
     at: input.at,
     skipped: true,
+    skipCause: input.cause,
     skipReason: input.reason,
   };
 }

@@ -8264,6 +8264,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // would have failed closed on a tree it never named. Same source the
         // verdict recorder reads (`reviewTargets`, registered by prepare).
         ...(skipTarget?.tree === undefined ? {} : { tree: skipTarget.tree }),
+        // AND IT CARRIES WHY (functional round P1, 2026-09-22): the ship
+        // readers accept a code-free skip and refuse a stage-off one, so the
+        // cause is recorded here, where BOTH are known — `qualityOn` is false
+        // exactly when the skip above was manufactured from the switch.
+        cause: qualityOn ? "no-code" : "stage-off",
         reason: skip.reason ?? "",
         at: new Date().toISOString(),
       });

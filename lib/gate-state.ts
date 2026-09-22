@@ -33,7 +33,7 @@ import { isDeliveryStation } from "./delivery-station.ts";
 import { SHIP_COMMAND_KINDS, type ShipCommandKind } from "./constants.ts";
 
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
-import { isSkippedQualityRecord, type QualityRecord } from "./quality-round.ts";
+import { isContentFreeQualitySkip, isSkippedQualityRecord, type QualityRecord } from "./quality-round.ts";
 import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
 
 import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
@@ -1838,22 +1838,26 @@ export function unmetRequirements(
   // a READY that any later edit walked away from).
   if (state.hasCodeChange && !reviewOn && qualityOn) {
     const quality = state.quality;
-    // A SKIP RECORD IS NOT A CONCLUSION HERE EITHER (2026-09-22) — the P1 the
-    // plan's last-round real-run 验收 found. `skippedQualityRecord` writes one
-    // for a round the quality judge was never owed: the stage was off, or the
-    // round carried no code. It says nothing about the code this ship is about.
-    // Reading only `verdict` let「quality 关 → 编辑 → judge_submit（写下跳过记录）
-    // → 重开 quality」commit and push with no quality judge ever having run: the
-    // same cross-switch rule `lib/quality-round.ts`'s `qualityStandingFor`
-    // closed on the review path, missed on this second reader. The brand has ONE
-    // reading (`isSkippedQualityRecord`), so this reader cannot drift from the
-    // other.
+    // A SKIP STANDS FOR EXACTLY ONE REASON (2026-09-22, the P1 the plan's
+    // last-round real-run 验收 found): the round had no code to judge, so no
+    // quality judge was ever owed for it. That is why the record carries its
+    // cause — the first cut of this rule refused EVERY skip, which made a
+    // docs-only round unshippable in a session whose code had already been
+    // judged (functional round P1, same day). A skip written because the stage
+    // was OFF still does not stand once the stage is back on: the stricter
+    // round the user asked for never ran, and reading only `verdict` let
+    // 「quality 关 → 编辑 → judge_submit（写下跳过记录）→ 重开 quality」commit and
+    // push with no quality judge ever having seen this code. Both brands are
+    // read through quality-round.ts's predicates, so this reader cannot drift
+    // from `qualityStandingFor`.
     const skipped = isSkippedQualityRecord(quality);
-    if (skipped || quality?.verdict !== "READY") {
-      problems.push(
-        `quality round is ${skipped ? "SKIPPED" : quality?.verdict ?? "NOT_RUN"} (need READY) — the review stage is off, so this is the verdict ` +
-        "that stands between the code and a ship; submit a round (`judge_submit`) to run it",
-      );
+    const needReady =
+      "(need READY) — the review stage is off, so this is the verdict " +
+      "that stands between the code and a ship; submit a round (`judge_submit`) to run it";
+    if (skipped && !isContentFreeQualitySkip(quality)) {
+      problems.push(`quality round is SKIPPED ${needReady}`);
+    } else if (quality?.verdict !== "READY") {
+      problems.push(`quality round is ${quality?.verdict ?? "NOT_RUN"} ${needReady}`);
     } else if (quality.treeSha === undefined || quality.treeSha !== currentFingerprint) {
       problems.push("code was modified after the last quality READY (fingerprint mismatch)");
     }
