@@ -1595,10 +1595,16 @@ test("loop directives: all-gates-green block names the completion steps", () => 
   const greenAt = SRC.indexOf("All gates satisfied", handlerAt);
   assert.ok(greenAt > 0, "all-green branch must exist");
   const greenLine = SRC.slice(greenAt, greenAt + 220);
-  // The 收尾 line is LOOP-only: an undecided session must not see it
-  // (reviewer P2-4 — the loop block presumes a chosen mode).
-  assert.match(SRC.slice(greenAt - 80, greenAt), /state\.taskMode === "loop"/,
-    "the 收尾 line is gated on loop mode");
+  // The 收尾 line is gated on the LOOP'S SEMANTICS: explore/normal get the
+  // plain "you may ship." — and an UNDECIDED session gets the 收尾 line,
+  // because it runs those semantics (lib/task-mode.ts: undecided behaves as
+  // loop, fail-closed). The historical P2-4 note here said an undecided
+  // session must NOT see it; the gate's own behaviour contradicts that —
+  // `loopGoalEditGate` answers `goalConfirmed` for undecided, i.e. it HOLDS
+  // the session to the approved goal, and this round's real-session P1 showed
+  // what the same `=== "loop"` spelling did to the acceptance round.
+  assert.match(SRC.slice(greenAt - 80, greenAt), /isEnforcedMode\(state\.taskMode\)/,
+    "the 收尾 line is gated on the loop's semantics, undecided included");
   assert.match(greenLine, /declare_done/, "green branch names declare_done as the next step");
   assert.match(greenLine, /copilot_review/, "green branch names the Copilot cycle");
 });

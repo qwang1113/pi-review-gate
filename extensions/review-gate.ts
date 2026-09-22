@@ -4999,7 +4999,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         ? { facts: { kind: "plan", rows } }
         : none("没有可显示的 plan：.pi/orchestrator-plan.json 不在、不是合法 JSON，或已被归档");
     }
-    if (state.taskMode !== "loop") {
+    if (!isEnforcedMode(state.taskMode)) {
       return none(`本会话模式是 ${state.taskMode ?? "未初始化"}，它不持有 plan/goal 契约`);
     }
     if (!goalStageSatisfied()) {
@@ -9916,32 +9916,36 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           : [{ role: "reviewer" as const, task: parallelReviewer.taskText, streamPath: parallelReviewer.streamPath }]),
       ];
       if (judges.length === 0) {
-        // A RELEASED STAGE DISPATCHES NOBODY (2026-09-22). Both judge stages are
-        // off, so there is no pane to open — and the receipt still names what
-        // the chain DID do (precommit, the checkpoint), because "nothing was
+        // A RELEASED STAGE DISPATCHES NOBODY (2026-09-22). No judge stage is due,
+        // so there is no pane to open — and the receipt still names what the
+        // chain DID do (precommit, the checkpoint), because "nothing was
         // submitted" and "nothing needed submitting" are different facts.
-        const reviewStageOn = stageIsOn("review", root);
+        //
+        // `dispatchRole === null` ⟺ the review stage is OFF (quality round P2,
+        // 2026-09-22): the chain is built for a role, and the ONE thing that
+        // hands back `role: null` is `submitForReview` on a released review
+        // stage — a session with review off but quality on gets QUALITY_ROLE and
+        // never reaches this branch. So the reviewer line below is stated
+        // unconditionally: the `reviewStageOn ? …` guard it used to have was an
+        // unreachable branch claiming a case that cannot happen, and the
+        // comment beside it described that case out loud.
         const qualityStageOn = stageIsOn("quality", root);
         return {
           content: [{
             type: "text",
             text: [
-              // NEUTRAL ON PURPOSE: this branch is reached with the switches
-              // on as well (a head that already carries its quality READY), so
-              // naming the switches as the cause would be wrong there — each
-              // line below states its own reason instead.
               "review-gate: 本轮没有派任何 judge。",
-              ...(reviewStageOn ? [] : ["- 功能审查 reviewer：环节已关闭 —— ship 时该卡点视为满足。"]),
+              "- 功能审查 reviewer：环节已关闭 —— ship 时该卡点视为满足。",
               ...(qualityStageOn ? [] : ["- 代码质量审查 quality-auditor：环节已关闭 —— 不派质量轮。"]),
               ...(qualityStandingNote === undefined ? [] : [`- ${qualityStandingNote}`]),
               ...(skipNote === undefined ? [] : [`- 质量轮跳过：${skipNote}`]),
               ...(checkpointFacts === undefined
                 ? []
                 : [`- checkpoint ${checkpointFacts.sha.slice(0, 12)} 已冻结 ${checkpointFacts.files.length} 个文件。`]),
-              // ONLY WHEN SOMETHING IS ACTUALLY OFF: “re-open the switches” is
-              // advice nobody needs when the reason nothing was dispatched is a
-              // quality READY that already covers this head.
-              ...(reviewStageOn && qualityStageOn
+              // ONLY WHEN THE QUALITY STAGE IS OFF: the review switch is always
+              // off here, so the only remaining reason to say “re-open the
+              // switches” is a quality stage the user turned off.
+              ...(qualityStageOn
                 ? []
                 : ["要恢复哪个环节，就再调一次 `choose_loop_stages`（用户重新勾选，门禁自己弹框）。"]),
             ].join("\n"),
@@ -14760,7 +14764,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           : "") +
         (problems.length
           ? `Current unmet:\n${problems.map((p) => `- ${p}`).join("\n")}`
-          : state.taskMode === "loop"
+          : isEnforcedMode(state.taskMode)
             ? "All gates satisfied — 收尾：跑一次 `declare_done`（门禁合并分支）；若已建 PR，还有 `copilot_review` 周期待收。"
             : "All gates satisfied — you may ship.")
     };
