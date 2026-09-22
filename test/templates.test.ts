@@ -30,12 +30,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 
 neutraliseGateEnv();
 
-import { LOOP_GOAL_SKELETON, buildGoalPrereviewRefusal } from "../lib/loop-goal.ts";
+import { LOOP_GOAL_SKELETON, buildGoalAuditTask, buildGoalConfirmMessage, buildGoalPrereviewRefusal } from "../lib/loop-goal.ts";
 import {
   ORCHESTRATOR_DIRECTIVE,
   PLAN_FINISH_TASK_BRIEF,
@@ -193,6 +194,31 @@ test("the three skeletons are ONE family — same opening line, same blanks", ()
   for (const [name, skeleton] of SKELETONS) {
     assert.match(skeleton, /<[^<>\n]+>/, `${name}: blanks are angle brackets, one per thing to decide`);
   }
+});
+
+test("the goal skeleton carries the real-acceptance column, and its absence is a P1 on both audit surfaces", () => {
+  assert.match(LOOP_GOAL_SKELETON, /真实验收方案/);
+  assert.match(LOOP_GOAL_SKELETON, /正向真实调用/);
+  assert.match(LOOP_GOAL_SKELETON, /反向验证/);
+  assert.match(LOOP_GOAL_SKELETON, /环境前提/);
+  assert.match(LOOP_GOAL_SKELETON, /本轮无真实验收/);
+  // BOTH audit surfaces state the check, each in its own words: the
+  // gate-rendered task (what the auditor is handed) and the role body (what it
+  // was launched with). One copy without the other is how a standard drifts.
+  assert.match(buildGoalAuditTask("# t\n意图：x"), /真实验收方案\(P1\)/);
+  const roleBody = readFileSync(new URL("../agents/goal-auditor.md", import.meta.url), "utf8");
+  assert.match(roleBody, /真实验收方案/);
+  assert.match(roleBody, /P1/);
+  assert.match(roleBody, /本轮无真实验收/);
+});
+
+test("the approval dialog SHOWS the no-acceptance exemption, because the user is the one granting it", () => {
+  const shown = buildGoalConfirmMessage("# t\n真实验收方案：\n  本轮无真实验收（这一轮只改文档）\n");
+  assert.match(shown, /本轮无真实验收/);
+  assert.match(shown, /这一轮只改文档/, "the reason is shown, not just the clause");
+  assert.match(shown, /只有你能拍板/);
+  // A bare clause is not an exemption, so the dialog says nothing about one.
+  assert.doesNotMatch(buildGoalConfirmMessage("# t\n真实验收方案：\n  本轮无真实验收\n"), /本轮无真实验收：/);
 });
 
 test("the standing block POINTS at the templates instead of quoting a second copy", () => {

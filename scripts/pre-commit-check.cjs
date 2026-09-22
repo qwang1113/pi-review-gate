@@ -89,6 +89,19 @@ function runCheck(statePath, repo, env = process.env) {
   // test, not a fail-closed push.
   const TASK_MODES = new Set(["loop", "explore", "normal", "orchestrator"]);
 
+  // THE FIVE STAGE SWITCHES (2026-09-22) — this file's copy of
+  // lib/loop-stages.ts's shape and of its ONE query. The switches are the
+  // USER's: a stage that is off releases its whole block below, and the
+  // extension's L1 ship gate reads the same record out of the same sidecar
+  // (lib/gate-state.ts's `unmetRequirements`), so the two can never disagree.
+  // ALL-OR-NOTHING on purpose: a partial record is invalid state, not five
+  // switches with a missing one, because a record can only ever RELAX a gate.
+  const LOOP_STAGES = ["goal", "review", "quality", "acceptance", "precommit"];
+  const validStages = (v) => v === undefined ||
+    (v && typeof v === "object" && !Array.isArray(v) && typeof v.at === "string" &&
+      v.stages && typeof v.stages === "object" && !Array.isArray(v.stages) &&
+      LOOP_STAGES.every((s) => typeof v.stages[s] === "boolean"));
+
   const readState = () => {
     let state;
     try {
@@ -140,6 +153,7 @@ function runCheck(statePath, repo, env = process.env) {
           !(Array.isArray(state.sessionEditedFiles) &&
             state.sessionEditedFiles.every((v) => typeof v === "string"))) ||
         (state.fingerprintVersion !== undefined && !Number.isInteger(state.fingerprintVersion)) ||
+        !validStages(state.stages) ||
         (state.checkpoint !== undefined &&
           !(typeof state.checkpoint === "object" && state.checkpoint !== null &&
             typeof state.checkpoint.sha === "string" && /^[0-9a-f]{40}$/.test(state.checkpoint.sha) &&
@@ -165,6 +179,8 @@ function runCheck(statePath, repo, env = process.env) {
 
   const state = readState();
   const requireFullTests = env.REVIEW_GATE_REQUIRE_FULL === "1";
+  /** lib/loop-stages.ts's `stageOpen`, over this file's state. */
+  const stageOpen = (stage) => state.stages === undefined || state.stages.stages[stage] !== false;
 
   // -------------------------------------------------------------------------
   // Per-project docSync knob (defense-in-depth mirror of unmetRequirements).
@@ -340,8 +356,12 @@ function runCheck(statePath, repo, env = process.env) {
   }
 
   const problems = [];
+  // THE USER'S STAGE SWITCHES: an off stage releases its block whole, and the
+  // two blocks are read independently because the switches are independent.
+  const reviewOn = stageOpen("review");
+  const precommitOn = stageOpen("precommit");
 
-  if (state.hasCodeChange) {
+  if (state.hasCodeChange && reviewOn) {
     if (state.review.verdict !== "READY") {
       problems.push(`review is ${state.review.verdict}`);
     } else if (!state.review.fingerprint) {
@@ -374,7 +394,31 @@ function runCheck(statePath, repo, env = process.env) {
         problems.push(`unreviewed commits since the last READY review (${unreviewed} commit(s) with content no reviewer saw) — checkpoint the new work and run the next review round before shipping`);
       }
     }
+  }
 
+  // THE QUALITY STAGE WITH NO REVIEW ROUND TO CARRY IT (mirror of
+  // lib/gate-state.ts's rule, 2026-09-22): with the review stage on, the
+  // quality verdict gates the REVIEW's recording; with it off it IS the
+  // review — required, and bound to the content it judged.
+  if (state.hasCodeChange && !reviewOn && stageOpen("quality")) {
+    // A SKIP STANDS FOR EXACTLY ONE REASON (2026-09-22, acceptance round P1;
+    // mirror of lib/gate-state.ts's rule, which mirrors
+    // lib/quality-round.ts's `isContentFreeQualitySkip`): the round had no code
+    // to judge, so no quality judge was ever owed for it. A skip written
+    // because the stage was OFF does not stand once it is back on. Refusing
+    // every skip made a docs-only round unshippable (functional round P1, same
+    // day). This file carries its copy because it runs in checkouts where the
+    // TS extension is never loaded.
+    const skipped = !!state.quality && state.quality.verdict === "READY" && state.quality.skipped === true;
+    const stageOffSkip = skipped && state.quality.skipCause !== "no-code";
+    if (stageOffSkip || !state.quality || state.quality.verdict !== "READY") {
+      problems.push(`quality round is ${skipped ? "SKIPPED" : state.quality ? state.quality.verdict : "NOT_RUN"} (need READY)`);
+    } else if (typeof state.quality.treeSha !== "string" || state.quality.treeSha !== currentFp) {
+      problems.push("code was modified after the last quality READY (fingerprint mismatch)");
+    }
+  }
+
+  if (state.hasCodeChange && precommitOn) {
     // Fail-closed: only an explicit PASS bound to the current fingerprint passes.
     if (state.precommit.verdict === "PASS") {
       if (!state.precommit.fingerprint) {
@@ -396,7 +440,9 @@ function runCheck(statePath, repo, env = process.env) {
     } else {
       problems.push(`precommit verdict unrecognized (${String(state.precommit.verdict)})`);
     }
-  } else if (state.hasDocChange) {
+  }
+
+  if (!state.hasCodeChange && state.hasDocChange && reviewOn) {
     if (state.review.verdict !== "READY") {
       problems.push(`doc review is ${state.review.verdict}`);
     } else if (!state.review.fingerprint) {

@@ -532,6 +532,51 @@ test("P-multi: /gate-status reports each repo, and a clean stateless repo blocks
   assert.equal(dirty.level, "warning");
 });
 
+test("P-multi: /gate-status prints a SECONDARY repo's acceptance record too (quality round P2, 2026-09-22)", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "rg-mg14-"));
+  rgDirs.push(parent);
+  const repoA = makeRepo(parent, "repoA");
+  const repoB = makeRepo(parent, "repoB");
+  const sidecar = (extra: Record<string, unknown>) => ({
+    schema: 1,
+    fingerprintVersion: 2,
+    sessionId: "test-session-1",
+    hasCodeChange: true,
+    hasDocChange: false,
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+    rounds: [],
+    maxRounds: 10,
+    bypass: { active: false, reason: null, at: null },
+    updatedAt: new Date().toISOString(),
+    ...extra,
+  });
+
+  mkdirSync(join(repoA, ".pi"), { recursive: true });
+  writeFileSync(join(repoA, ".pi", "review-gate-state.json"),
+    JSON.stringify(sidecar({ sessionReposPaths: [repoB] }), null, 2));
+  // repoB is THIS session's own repo, and it carries a SKIPPED acceptance
+  // record. The round is decided per repo since the same day, so that decision
+  // has to be READABLE here — a record nobody prints is a decision nobody can
+  // audit (the rule the primary repo's own line already follows).
+  mkdirSync(join(repoB, ".pi"), { recursive: true });
+  writeFileSync(join(repoB, ".pi", "review-gate-state.json"),
+    JSON.stringify(sidecar({
+      acceptance: { status: "SKIPPED", at: "2026-09-22T00:00:00.000Z", reason: "本轮没有代码改动 —— 跳过验收轮。" },
+    }), null, 2));
+
+  const pi = makeMockPi(repoA);
+  reviewGate(pi as never);
+  const { handlers, commands, notifications, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  await commands.get("gate-status")!.handler({}, ctx);
+  const text = notifications.at(-1)!.text;
+  assert.match(text, new RegExp(`${repoB.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: review=`),
+    "the repo is still listed with its own standings");
+  assert.match(text, /acceptance: SKIPPED/, "…and its acceptance record rides along");
+  assert.match(text, /本轮没有代码改动/, "with the reason that makes a skip auditable");
+});
+
 test("P-multi: an INHERITED repo is reported with the successor's standings, never the predecessor's", async () => {
   // A relay successor inherits the predecessor's CONTRACTS for every repo it
   // touched — `inheritGoalContract` carries restatement / loopGoal / rounds /

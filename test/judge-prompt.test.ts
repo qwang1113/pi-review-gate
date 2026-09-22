@@ -39,7 +39,7 @@ test("judge roles are exactly the tmux-child roles", () => {
   // The quality judge is a judge CHILD like the others (own pane, own session
   // id, judge_conclude). It is the only one the agent cannot ASK for — that
   // restriction lives in judge_submit's parameter schema, not here.
-  assert.deepEqual(JUDGE_ROLES, ["reviewer", "quality-auditor", "adviser", "goal-auditor"]);
+  assert.deepEqual(JUDGE_ROLES, ["reviewer", "quality-auditor", "adviser", "goal-auditor", "acceptance"]);
 });
 
 test("agentRoleBody strips the frontmatter block", () => {

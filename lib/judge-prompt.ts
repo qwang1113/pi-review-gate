@@ -45,7 +45,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { AgentsConfigMap } from "./model-config.ts";
-import { extractFrontmatterChain, resolvePackageAgentsDir, splitThinkingSuffix } from "./model-config.ts";
+import { defaultSlotsFromRoleText, resolvePackageAgentsDir } from "./model-config.ts";
 import { UNTRUSTED_DATA_RULE } from "./untrusted-data.ts";
 /**
  * The shared judge protocol — THE embedded copy (see F5 above; test
@@ -74,6 +74,13 @@ export const JUDGE_COMMON_PROTOCOL = `## 运行形态（独立 pane）
 
 - **默认动作是读**：\`git show\` / \`git diff\` 给出的 range、被审文件本身、仓库里既有的实现。结论从代码里读出来，不从「跑一遍看看」里猜。
 - **不跑测试、不跑 lint、不跑外部命令**，除非你已经有一个具体的怀疑 ——「这条分支真的会走到吗」「这个边界真是这样吗」「这里真是重复实现吗」。有怀疑就花最小的代价把它验掉（一个用例、一次 \`node --test <file>\`、一次 grep），并把「跑了什么、看到什么」写进对应 finding 或证据里。
+- **唯一的例外是 \`acceptance\`（2026-09-22）**：这一轮的任务**就是跑** —— 真起、真调、
+  比返回数据、再验邻居路径，所以「默认只读代码」对它不成立。它的纪律写在它自己的角色
+  文件 \`agents/acceptance.md\`（没有真实执行证据不得 READY、跑不起来就如实报 BLOCKED
+  而不是自我豁免、不编辑任何东西、跑完把工作区恢复原状），任务文本由
+  \`lib/acceptance-round.ts\` 的 \`buildAcceptanceTask\` 组装。它是**完成时刻**单独的一轮：
+  门禁在 \`declare_done\` 里派它，不与功能轮 / 质量轮 / precommit lane 并行，取消矩阵里
+  也就没有它。
 - **precommit 基线与 FINDINGS 流已经告诉你哪些检查在这份内容上跑过了**：再跑一遍不产生新信息，只会把时间再花一遍；反过来，你没跑过的检查也不能假装有结论。
 - **真要跑就在副本里跑**：把被审 commit check out 到 \`$TMPDIR\` 下的 throwaway worktree，在那里跑；绝不改被审的工作区，跑完恢复原状。
 - **「跑过测试」不算审查动作**：\`READY\` 需要的是真读过被审代码（见「零审查的 READY 会被当场拒」）。
@@ -156,6 +163,7 @@ export const JUDGE_ROLES: readonly string[] = Object.freeze([
   "quality-auditor",
   "adviser",
   "goal-auditor",
+  "acceptance",
 ]);
 
 /**
@@ -264,43 +272,17 @@ export function modelChainFor(agents: AgentsConfigMap, role: string, repoRoot: s
   const roleFile = resolveRoleFile(repoRoot, role, home);
   if (!roleFile) return [];
   try {
-    const chain = extractFrontmatterChain(readFileSync(roleFile, "utf8"));
-    if (!chain?.model) return [];
-    const fallback = defaultThinking(roleFile);
-    // Frontmatter models are bare ids ("claude-fable-5"); pi --model resolves
-    // bare ids only when unique, so pin the package's own provider family when
-    // none is written. A spec that already carries its own level keeps it —
-    // the level is per-model (a rendered chain writes `:xhigh` on one slot and
-    // `:max` on the next), and appending the default again would render
-    // `…:max:max`, which resolves to nothing.
-    return [chain.model, ...chain.fallback].map((spec) => pinModelSpec(spec, fallback));
+    // The built-in chain is read by the SAME helper the startup self-heal uses
+    // (`defaultSlotsFromRoleText`, lib/model-config.ts): bare ids are pinned to
+    // the package's provider family there, per-slot thinking suffixes are kept,
+    // and a role that deploys here can never disagree with the slots the heal
+    // writes into the user's config.
+    return defaultSlotsFromRoleText(readFileSync(roleFile, "utf8")) ?? [];
   } catch { /* fall through */ }
   // NO BUILT-IN DEFAULT (user requirement 2026-08-30). A role without a
   // resolvable chain is a configuration error — the caller fails closed
   // (the startup hard check is what surfaces it to the user).
   return [];
-}
-
-/** `bare-id` → `anthropic/bare-id:<level>`; a spec with its own level is kept. */
-function pinModelSpec(spec: string, fallbackThinking: string): string {
-  const trimmed = spec.trim();
-  if (!trimmed) return trimmed;
-  const { base, thinking } = splitThinkingSuffix(trimmed);
-  const pinned = base.includes("/") ? base : `anthropic/${base}`;
-  return `${pinned}:${thinking ?? fallbackThinking}`;
-}
-
-function defaultThinking(roleFile: string): string {
-  try {
-    const text = readFileSync(roleFile, "utf8");
-    // Scoped to the frontmatter block — a body line "thinking: …" must not
-    // match (round-2 Nit).
-    const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
-    const m = /^thinking:\s*(\S+)\s*$/m.exec(fm ?? "");
-    return m?.[1] ?? "max";
-  } catch {
-    return "max";
-  }
 }
 
 export interface JudgeSpawnInput {

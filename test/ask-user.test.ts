@@ -6,12 +6,14 @@ import {
   buildNoDialogNotice,
   progressLabel,
   interpretChoice,
+  questionRows,
   resolveQuestion,
   stepInterview,
   formatAnswers,
   formatTranscriptSummary,
   needsUserReply,
   MAX_QUESTION_CHARS,
+  MULTI_NONE_ANSWER,
   type AskAnswer,
   type AskQuestion,
 } from "../lib/ask-user.ts";
@@ -330,4 +332,142 @@ test("an answer to the ANCHORED question settles it; an answer on the way back i
 test("a closed box closes the interview, from whichever question it was", () => {
   assert.deepEqual(stepInterview({ anchor: 2, cursor: 2 }, undefined), { kind: "close" });
   assert.deepEqual(stepInterview({ anchor: 2, cursor: 1 }, undefined), { kind: "close" });
+});
+
+// ---------- the CHECKBOX shape (user decision, 2026-09-22) ----------
+
+/**
+ * THE INVARIANT BOTH SHAPES OWE: 「直接回车 ＝ 接受提问方的推荐」.
+ *
+ * A radio question pays for it with `recommended` (still required, still
+ * refused when missing); a checkbox question pays with `defaultChecked` — the
+ * group the list opens ticked. That is why the second field is REQUIRED and
+ * the second shape needs no recommendation at all.
+ */
+const checklist = (over: Partial<AskQuestion> = {}): AskQuestion => ({
+  text: "开哪几个环节？",
+  options: ["预检", "quality 审查", "precommit"],
+  recommended: "",
+  multiple: true,
+  defaultChecked: [],
+  ...over,
+});
+
+test("a checklist with no defaultChecked is refused — there is nothing Enter would accept", () => {
+  const missing = validateQuestions([
+    { text: "开哪几个环节？", multiple: true, options: ["预检", "审查"] },
+  ]);
+  assert.equal(missing.ok, false);
+  assert.match(missing.ok === false ? missing.error : "", /defaultChecked/);
+
+  const ok = validateQuestions([
+    { text: "开哪几个环节？", multiple: true, defaultChecked: ["预检"], options: ["预检", "审查"] },
+  ]);
+  assert.equal(ok.ok, true, ok.ok === false ? ok.error : "");
+  assert.deepEqual(ok.ok === true ? ok.questions[0]!.defaultChecked : undefined, ["预检"]);
+});
+
+test("an EMPTY defaultChecked is a real recommendation — “tick none of them”", () => {
+  const none = validateQuestions([
+    { text: "开哪几个环节？", multiple: true, defaultChecked: [], options: ["预检", "审查"] },
+  ]);
+  assert.equal(none.ok, true, none.ok === false ? none.error : "");
+  assert.deepEqual(none.ok === true ? none.questions[0]!.defaultChecked : undefined, []);
+});
+
+test("a tick that is not on the list is refused, and so is a tick on a RADIO question", () => {
+  const stray = validateQuestions([
+    { text: "开哪几个环节？", multiple: true, defaultChecked: ["不存在"], options: ["预检", "审查"] },
+  ]);
+  assert.equal(stray.ok, false);
+  assert.match(stray.ok === false ? stray.error : "", /defaultChecked 里有不在选项里的/);
+
+  // A default tick an agent believes in while the user sees a plain
+  // single-choice list is exactly the silent misunderstanding this refuses.
+  const radio = validateQuestions([
+    { text: "选一个？", options: ["A", "B"], recommended: "A", defaultChecked: ["A"] },
+  ]);
+  assert.equal(radio.ok, false);
+  assert.match(radio.ok === false ? radio.error : "", /defaultChecked 但没有 multiple/);
+});
+
+test("a checklist needs no recommended — but one it DOES give must be an option", () => {
+  const without = validateQuestions([
+    { text: "开哪几个环节？", multiple: true, defaultChecked: ["预检"], options: ["预检", "审查"] },
+  ]);
+  assert.equal(without.ok, true, without.ok === false ? without.error : "");
+
+  const stray = validateQuestions([
+    { text: "开哪几个环节？", multiple: true, defaultChecked: [], options: ["预检", "审查"], recommended: "第三个" },
+  ]);
+  assert.equal(stray.ok, false);
+  assert.match(stray.ok === false ? stray.error : "", /不在选项里/);
+});
+
+test("a checklist may not be an AUTHORIZATION question — consent has one answer", () => {
+  const refused = validateQuestions([
+    {
+      text: "授予权限？", multiple: true, defaultChecked: [],
+      options: ["允许", "拒绝"], grantScope: "sensitive-edit",
+    },
+  ]);
+  assert.equal(refused.ok, false);
+  assert.match(refused.ok === false ? refused.error : "", /grantScope/);
+});
+
+test("an option CONTAINING the answer separator is refused — it could not be read back", () => {
+  // `A. 甲 / C. 丙` is how a checklist answer is written down (quality round P2,
+  // 2026-09-22), so an option whose own text contains `" / "` makes one tick
+  // and two ticks the same string — silently, in the losing direction.
+  const refused = validateQuestions([
+    { text: "选方案？", multiple: true, defaultChecked: [], options: ["A / B 方案", "只有 A"] },
+  ]);
+  assert.equal(refused.ok, false);
+  assert.match(refused.ok === false ? refused.error : "", /分隔符/);
+
+  // The radio shape is untouched: it never joins several rows into one string.
+  const radio = validateQuestions([
+    { text: "选方案？", options: ["A / B 方案", "只有 A"], recommended: "只有 A" },
+  ]);
+  assert.equal(radio.ok, true, radio.ok === false ? radio.error : "");
+});
+
+test("a checklist answer nobody can read keeps the text but claims NO ticks", () => {
+  const confused = resolveQuestion(checklist(), "一段谁都看不懂的话");
+  assert.equal(confused.answer.kind, "answered");
+  assert.equal(confused.answer.answer, "一段谁都看不懂的话");
+  assert.equal(confused.answer.options, undefined,
+    "an empty list means “ticked nothing”; prose must not be able to claim it");
+});
+
+test("the checklist answer is a LIST in option order — and an empty one is an answer", () => {
+  const question = checklist();
+  const picked = resolveQuestion(question, "C. precommit / A. 预检");
+  assert.equal(picked.answer.kind, "answered");
+  assert.deepEqual(picked.answer.options, ["预检", "precommit"], "option order, not the order they were ticked");
+  assert.equal(picked.answer.answer, "A. 预检 / C. precommit");
+
+  const confirmedNothing = resolveQuestion(question, "");
+  assert.equal(confirmedNothing.answer.kind, "answered");
+  assert.deepEqual(confirmedNothing.answer.options, []);
+  assert.equal(confirmedNothing.answer.answer, MULTI_NONE_ANSWER);
+
+  const declined = resolveQuestion(question, `${DECLINE_ROW}：一个都不开"`);
+  assert.equal(declined.answer.kind, "answered");
+  assert.deepEqual(declined.answer.options, []);
+
+  // A closed box is still nothing of the sort, on either shape.
+  const dismissed = resolveQuestion(question, undefined);
+  assert.equal(dismissed.answer.kind, "unanswered");
+  assert.equal(dismissed.stop, true);
+});
+
+test("the checklist's rows travel as CHECKBOX rows, in the transcript and the headless notice", () => {
+  assert.deepEqual(questionRows(checklist({ defaultChecked: ["预检"] })), [
+    "[x] A. 预检",
+    "[ ] B. quality 审查",
+    "[ ] C. precommit",
+    DECLINE_ROW,
+  ]);
+  assert.match(buildNoDialogNotice([checklist({ defaultChecked: ["预检"] })]), /\[x\] A\. 预检/);
 });

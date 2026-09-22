@@ -122,6 +122,14 @@ function fake(over: Partial<Fake> = {}): Fake {
       if (f.confirmAnswer === "throw") throw new Error("no dialog here");
       return f.confirmAnswer ? spec.options[0] : undefined;
     },
+    // NOTHING IN THIS FIXTURE ASKS A CHECKBOX QUESTION (2026-09-22). The shape
+    // has its own two homes — lib/multi-choice-dialog.ts's unit tests and
+    // test/ask-user-batch.test.ts's wiring test — and a fake that silently
+    // answered one here would hide a CONSENT dialog that had somehow grown a
+    // checklist.
+    askMultiChoice: async () => {
+      throw new Error("user-interaction fixture: no checkbox dialogs are expected here");
+    },
     canChannelDialogs: () => f.canChannelDialogs ?? false,
     askEitherSide: async (request, _hasUI, thunk) => {
       f.asked.push(request.title);

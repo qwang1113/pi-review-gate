@@ -23,6 +23,7 @@ import { STATE_VARIANT_ENV } from "../lib/gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
+import { ACCEPTANCE_GATE_ENV } from "../lib/acceptance-round.ts";
 import { HANDOFF_FILL_PLACEHOLDER } from "../lib/session-handoff.ts";
 
 function fakeDeps(overrides: Partial<SessionHandoffDeps> = {}): {
@@ -209,6 +210,16 @@ test("handoffExtraEnvFor: the successor keeps the mode, the address and its own 
     "a session with no ceiling (a standalone loop) passes none on");
   assert.ok(!(STATION_CAP_ENV in handoffExtraEnvFor({ kind: "child", stationCap: "   " })),
     "a blank ceiling is ABSENT, never an empty variable");
+
+  // THE ACCEPTANCE GATE RIDES IT TOO (2026-09-22). Absence means ON, so a
+  // successor that lost the flag would come back owing an acceptance round its
+  // plan never gave it.
+  assert.equal(handoffExtraEnvFor({ kind: "child", acceptanceGate: "off" })[ACCEPTANCE_GATE_ENV], "off");
+  assert.equal(handoffExtraEnvFor({ kind: "child", acceptanceGate: "on" })[ACCEPTANCE_GATE_ENV], "on");
+  assert.ok(!(ACCEPTANCE_GATE_ENV in handoffExtraEnvFor({ kind: "child" })),
+    "a standalone session passes none on");
+  assert.ok(!(ACCEPTANCE_GATE_ENV in handoffExtraEnvFor({ kind: "child", acceptanceGate: "   " })),
+    "a blank flag is ABSENT, never an empty variable");
 });
 
 test("a judge delegates the pane work through `requestSuccession`, and opens nothing itself", async () => {

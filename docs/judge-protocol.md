@@ -1,10 +1,10 @@
 # Judge 角色统一协议（judge-protocol）
 
 goal-auditor（目标审核者）、reviewer（代码审核者）、quality-auditor（代码质量审核者）、
-adviser（建议者）四个角色共享同一条执行契约，只是任务不同。本协议作为**系统提示词**在子会话
+adviser（建议者）、acceptance（真实验收者）五个角色共享同一条执行契约，只是任务不同。本协议作为**系统提示词**在子会话
 启动时一次性注入，不随每轮任务重复；主会话只在发现走偏时直接 send 纠正。
 
-（`arbiter` 是第五个 judge 角色，走独立的仲裁入口，不在这四个的回合链里。）
+（`arbiter` 是第六个 judge 角色，走独立的仲裁入口，不在这五个的回合链里。）
 
 ## 运行形态
 
@@ -30,6 +30,13 @@ adviser（建议者）四个角色共享同一条执行契约，只是任务不�
 
 - **默认动作是读**：`git show` / `git diff` 给出的 range、被审文件本身、仓库里既有的实现。结论从代码里读出来，不从「跑一遍看看」里猜。
 - **不跑测试、不跑 lint、不跑外部命令**，除非你已经有一个具体的怀疑 ——「这条分支真的会走到吗」「这个边界真是这样吗」「这里真是重复实现吗」。有怀疑就花最小的代价把它验掉（一个用例、一次 `node --test <file>`、一次 grep），并把「跑了什么、看到什么」写进对应 finding 或证据里。
+- **唯一的例外是 `acceptance`（2026-09-22）**：这一轮的任务**就是跑** —— 真起、真调、
+  比返回数据、再验邻居路径，所以「默认只读代码」对它不成立。它的纪律写在它自己的角色
+  文件 `agents/acceptance.md`（没有真实执行证据不得 READY、跑不起来就如实报 BLOCKED
+  而不是自我豁免、不编辑任何东西、跑完把工作区恢复原状），任务文本由
+  `lib/acceptance-round.ts` 的 `buildAcceptanceTask` 组装。它是**完成时刻**单独的一轮：
+  门禁在 `declare_done` 里派它，不与功能轮 / 质量轮 / precommit lane 并行，取消矩阵里
+  也就没有它。
 - **precommit 基线与 FINDINGS 流已经告诉你哪些检查在这份内容上跑过了**：再跑一遍不产生新信息，只会把时间再花一遍；反过来，你没跑过的检查也不能假装有结论。
 - **真要跑就在副本里跑**：把被审 commit check out 到 `$TMPDIR` 下的 throwaway worktree，在那里跑；绝不改被审的工作区，跑完恢复原状。
 - **「跑过测试」不算审查动作**：`READY` 需要的是真读过被审代码（见「零审查的 READY 会被当场拒」）。
@@ -109,6 +116,7 @@ schema 和上面那条「交卷即停」就已经知道该怎么交卷。）
 | `reviewer` | `verdict` + `findings[]` + `cwd`（+ `docSync`） | 结论是裁决与发现；没有写散文的地方，比任何提示词都管用 |
 | `quality-auditor` | `verdict` + `findings[]` + `cwd` | 同上 |
 | `goal-auditor` | `verdict` + `findings[]` + `cwd` | 同上 |
+| `acceptance` | `verdict` + `findings[]` + `cwd` | 同上；证据是**真实命令与它的真实输出**，不是「读了代码觉得能跑」（`agents/acceptance.md`） |
 | `adviser` | 上述 + `notes` | 它的产出**就是**正文，opener 会引用（`conclusionExcerpt`） |
 
 reviewer / quality-auditor / goal-auditor 传 `notes` 会被**显式拒绝**（提示「本角色不接受 notes，

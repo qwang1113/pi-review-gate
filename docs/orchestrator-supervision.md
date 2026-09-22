@@ -650,6 +650,19 @@ plan，把每一处差异归入两类之一：
 `maxParallel` 是否安全、每个任务是否可独立验收、最小化检查（2026-09-08：可合并的任务、
 用户没要的工作、为并行而并行拆出来的任务是 P1）。
 
+**最后两环也在审计清单里（2026-09-22，第 10 条）**：checklist 要求 plan 的**最后两个任务**
+构成交付尾环 —— 倒数第二个是**收尾任务**（汇合其余任务的成果 → 走一次整体审核 → commit，
+照旧按同一 repo 规则收窄），最后一个是**独立验收任务**（不产出新需求、不改业务代码，只做
+真实验收 → push → 开 PR）。三种写法是 P1：最后一个仍是实现任务、有多个产出任务而倒数
+第二个仍是实现任务、以及整个 plan 没有一个能交付的任务（项目经理被禁止 ship，同 repo 的
+子会话又被收窄到 `commit`，于是没有任何一方能开 PR —— 2026-09-18 实测事故）。两个都是
+**位置约定**，不是 plan 的新字段；哪个任务验收、哪个任务能越过收窄，只由
+`lib/repo-pr-policy.ts` 的 `acceptanceTaskId` / `effectiveTaskStation` 回答（散文副本在
+`AGENTS.md` §2b 与 `README.md` 的「One requirement, one PR per repo」那段）。验收 gate
+是否对某个子会话开着源自同一个判定：dispatcher 只给 plan 的最后一个任务写
+`RG_ACCEPTANCE_GATE=on`，其余子会话一律 `off`，重开 pane 与接力也重新注入同一个值
+（`lib/acceptance-round.ts` 的 `acceptanceGateValue` 只是那个判定的渲染）。
+
 **PM 条（2026-09-17，PM=产品经理）**：需求是否已澄清、goal 是否可派生——逐任务核对
 `plan.decisions` 有无未解决（缺 `resolvedAt`）的需求决策、任务书是否达到『子会话拿到
 就能独立协商 goal』的完整度（只写『做分页』没有交互/边界/验收标准就是 P1）、以及读

@@ -92,6 +92,19 @@ the CONTRACT ITSELF, before any work starts.
    **P1**: a reviewer who cannot read the boundary as a CHOICE reads it as an
    omission and tests the wrong thing.
 
+10. **Does the draft carry a REAL-ACCEPTANCE PLAN?** The goal skeleton carries
+   「真实验收方案」 (`lib/loop-goal.ts`): the positive real call (what to start,
+   what to invoke, what should come back), the reverse verification (which
+   previously-correct behaviour must be re-confirmed afterwards), and the
+   environment the run needs. A draft that leaves the column out, or fills it
+   with something that never actually runs the change ("run the tests", "read
+   the code and check"), is a **P1** — the acceptance judge is dispatched at
+   completion and has nothing else to work from. A draft MAY instead declare
+   「本轮无真实验收（理由）」: the reason is mandatory (a bare clause is not an
+   exemption), and that line is shown in the user's approval dialog, because
+   the exemption is the USER's to grant. A judge never exempts itself, and a
+   draft that implies it may is a P1.
+
 Verify against the repo before asserting: read the files a criterion names.
 "This criterion is impossible" and "this file does not exist" are claims you
 check, not hunches you publish. You have read-only tools (read, grep, find, ls)
@@ -110,12 +123,12 @@ guessing when the draft hinges on a decision only the user can make.
 
 ## Severity
 
-- **P0/P1** — blocking. The draft must be fixed and re-audited. Any of the nine
+- **P0/P1** — blocking. The draft must be fixed and re-audited. Any of the ten
   checks above can earn one: an uncheckable criterion, a scope that misses what
   the user asked for, a non-goal that excludes it, a goal aimed at the wrong
   problem, a draft that is not in Simplified Chinese, a plan that would degrade
   the architecture, a draft that never names its key test scenarios or boundary
-  cases, or an internal
+  cases, a missing or unrunnable real-acceptance plan, or an internal
   contradiction that would make acceptance ambiguous.
 - **P2 / Nit** — advisory polish, and it does NOT belong in `findings`. The
   gate adjudicates mechanically: no open P0/P1 means PASS, so a non-blocking

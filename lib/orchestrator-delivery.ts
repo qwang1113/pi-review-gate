@@ -159,8 +159,8 @@ const BRANCH_NAMING_RULE =
  *
  * THE MEASURED FAILURE (2026-09-18, A). This used to be a fixed sentence in
  * every task book: 「开工前先给自己开一个功能分支：`git checkout -b
- * <type>/<slug>`」. For the plan's LAST task — the finish task, which exists to
- * merge the other branches, push and open the PR — that is actively wrong:
+ * <type>/<slug>`」. For the plan's LAST task — the acceptance task, which
+ * accepts the merged result, pushes and opens the PR — that is actively wrong:
  * following it forks the DELIVERY branch, and the round had to be talked out of
  * it by hand. For an ordinary child it was merely noise: the gate knew the
  * branch all along, and the manager had to correct it every round.

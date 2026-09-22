@@ -434,6 +434,14 @@ export interface SettleAuditRoundDeps {
    * closes the round stays one implementation, here.
    */
   recordQuality(input: { root: string; concluded: ReportConclusion }): Promise<string | undefined>;
+  /**
+   * Write down the ACCEPTANCE round's verdict (2026-09-22). The sixth
+   * recorder, beside the quality one and for the same reason: what gets
+   * written differs (a fingerprint-bound release the COMPLETION gate reads
+   * with no ship binding at all), while WHICH report closes the round stays
+   * one implementation, here.
+   */
+  recordAcceptance(input: { root: string; concluded: ReportConclusion }): Promise<string | undefined>;
 }
 
 /** What one closing round did. `text`, where present, is for the agent. */
@@ -561,6 +569,8 @@ export async function settleAuditRound(
     text = await deps.recordReview({ root: input.root, concluded });
   } else if (spec.kind === "quality") {
     text = await deps.recordQuality({ root: input.root, concluded });
+  } else if (spec.kind === "acceptance") {
+    text = await deps.recordAcceptance({ root: input.root, concluded });
   } else if (spec.kind === "goal" && pending?.kind === "goal") {
     text = await deps.recordGoal({ root: input.root, pending, concluded });
   } else if (spec.kind === "plan" && pending?.kind === "plan") {

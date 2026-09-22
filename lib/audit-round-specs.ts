@@ -27,7 +27,7 @@
  * report closes it?" — and answering that question in a second place is
  * exactly the duplication the engine removes. It records nothing.
  */
-export type AuditKind = "goal" | "plan" | "review" | "quality" | "advice";
+export type AuditKind = "goal" | "plan" | "review" | "quality" | "advice" | "acceptance";
 
 /**
  * The audit a repo has DISPATCHED and not yet recorded.
@@ -243,6 +243,30 @@ export const QUALITY_ROUND_SPEC: AuditRoundSpec = {
 };
 
 /**
+ * THE ACCEPTANCE ROUND's spec (registered 2026-09-22; the round itself is
+ * dispatched by the gate, not by the agent). It judges the SAME commit range
+ * as the review and quality rounds and therefore carries the same binding: a
+ * leftover report must never record a verdict against a tree its judge never
+ * ran. The dispatch and the recording land in the round's own module; the
+ * sentences live here, with every other round's.
+ */
+export const ACCEPTANCE_ROUND_SPEC: AuditRoundSpec = {
+  kind: "acceptance",
+  role: "acceptance",
+  binding: "round-and-content",
+  titlePrefix: "acceptance",
+  degradedContentBinding: () =>
+    "本轮绑定说明：门禁状态里还没有可比的 checkpoint 记录（新会话 + 干净 worktree 的第一轮就是这种情况）—— " +
+    "内容时间判据（report 必须晚于本轮 checkpoint）**不适用**，本轮裁决只由 round 与 cursor 绑定。",
+  unfinished: (detail) =>
+    `验收轮还没有可记录的 channel report（${detail}）——门禁不会拿别的轮次的裁决顶本轮；` +
+    "report 落盘后会用标准报告唤醒你，pane 已消失可用 judge_recover 重开。",
+  notDispatched: (reason) => `review-gate: 验收轮没能派出去 —— ${reason}`,
+  unaddressable: () => "review-gate: 验收轮已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。",
+  rejected: (note) => note ?? "review-gate: 本轮验收裁决没有可读的记录。",
+};
+
+/**
  * Advice is a ROUND, but not a verdict: the adviser's whole deliverable is its
  * prose, and nothing records it. It has a spec anyway so that "which report
  * closes this round" has exactly ONE implementation — the reason the engine
@@ -274,6 +298,7 @@ export function specForRound(role: string, pendingKind?: AuditKind): AuditRoundS
   if (role === "reviewer") return REVIEW_ROUND_SPEC;
   if (role === "quality-auditor") return QUALITY_ROUND_SPEC;
   if (role === "adviser") return ADVICE_ROUND_SPEC;
+  if (role === "acceptance") return ACCEPTANCE_ROUND_SPEC;
   if (role !== "goal-auditor") return undefined;
   if (pendingKind === "goal") return GOAL_AUDIT_SPEC;
   if (pendingKind === "plan") return PLAN_AUDIT_SPEC;

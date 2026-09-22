@@ -142,6 +142,51 @@ test("a proxy answer that is not one of the offered rows is NO answer", async ()
   }
 });
 
+test("a CHECKBOX question may be answered with SEVERAL rows — and only a checkbox may (2026-09-22)", async () => {
+  const CHECKBOX = ["A. 预检", "B. 质量审查", "C. precommit"];
+  const run = async (choice: string, multiple: boolean) => {
+    const clock = manualClock();
+    const human = deferred<string | undefined>();
+    const raced = raceWithUserProxy<string>({
+      direct: human.promise,
+      options: CHECKBOX,
+      ...(multiple ? { multiple: true } : {}),
+      schedule: clock.schedule,
+      startProxy: async () => ({ choice, rationale: "上下文里两次提到这两个环节" }),
+    });
+    clock.fire();
+    return raced;
+  };
+
+  const both = await run("A. 预检 / C. precommit", true);
+  assert.equal(both.answer, "A. 预检 / C. precommit", "a checklist answer names every row the proxy picked");
+  assert.ok(both.byProxy, "…and it is still marked as the proxy's own decision");
+  assert.equal((await run("A. 预检", true)).answer, "A. 预检", "one tick is still an answer");
+
+  // EVERY segment must be a row somebody offered: the check is widened by
+  // SHAPE, never loosened, and one bad segment refuses the whole answer.
+  for (const choice of ["A. 预检 / Z", "A. 预检 / B", " / "]) {
+    assert.equal((await run(choice, true)).answer, undefined, choice);
+  }
+
+  // …and a RADIO question still takes exactly one row.
+  assert.equal((await run("A. 预检 / C. precommit", false)).answer, undefined);
+});
+
+test("the proxy's task text says so when the question is a CHECKBOX", () => {
+  const checkbox = buildProxyPrompt({ title: "开哪几个环节？", options: ["预检", "质量审查"], multiple: true });
+  assert.match(checkbox, /多选题/);
+  assert.match(checkbox, /\" \/ \"/);
+  // REVIEWER P2 (2026-09-22): the options the proxy is GIVEN are raw texts
+  // rendered as `1. 预检`, so an example written with the DIALOG's letters
+  // (`A. 甲 / C. 丙`) asked for a string `isAcceptedProxyChoice` then refuses.
+  assert.doesNotMatch(checkbox, /A\. 甲 \/ C\. 丙/);
+  assert.match(checkbox, /不要写进 choice/);
+  const radio = buildProxyPrompt({ title: "选一个", options: ["是", "否"] });
+  assert.doesNotMatch(radio, /多选题/);
+  assert.match(radio, /必须是其中某一条的正文/);
+});
+
 test("a proxy that fails, throws, or declines settles as NO answer — and REPORTS that nobody decided", async () => {
   for (const startProxy of [
     async () => undefined,

@@ -46,6 +46,7 @@ import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
+import { ACCEPTANCE_GATE_ENV } from "./acceptance-round.ts";
 import {
   buildHandoffDoc,
   formatContextStatus,
@@ -296,6 +297,13 @@ export function handoffExtraEnvFor(input: {
   stateVariant?: string;
   /** This session's delivery-station ceiling, when it has one. */
   stationCap?: string;
+  /**
+   * This session's ACCEPTANCE-GATE value, when it has one (2026-09-22). A
+   * RELAY IS A NEW PROCESS: a child whose flag lived only in the predecessor's
+   * environment would come back with the variable absent — which reads as ON
+   * — and an ordinary work task would suddenly owe a real-acceptance round.
+   */
+  acceptanceGate?: string;
 }): Record<string, string> {
   // THE SUCCESSOR KEEPS THE PREDECESSOR'S MODE (2026-09-14, measured). The
   // first version hardcoded "loop" for everything that was not an orchestrator,
@@ -313,6 +321,8 @@ export function handoffExtraEnvFor(input: {
   if (orchestration) env[ORCHESTRATION_ID_ENV] = orchestration;
   const stationCap = (input.stationCap ?? "").trim();
   if (stationCap) env[STATION_CAP_ENV] = stationCap;
+  const acceptanceGate = (input.acceptanceGate ?? "").trim();
+  if (acceptanceGate) env[ACCEPTANCE_GATE_ENV] = acceptanceGate;
   return env;
 }
 

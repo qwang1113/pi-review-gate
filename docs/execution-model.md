@@ -495,3 +495,40 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
   `qualityStandingFor` 判成过期。所以真正的放行永远来自「修完之后那一轮」的质量结论。
 - 旧实现（reviewer 的任务书扣在门禁内存里、等质量轮 READY 再派）**已删除**（哲学三）：
   三方并行之后它就是第二套实现，留着只会漂移。
+
+## 验收轮：完成时刻的单人轮（2026-09-22 引入，L9）
+
+**它不在上面的矩阵里。** 取消矩阵裁的是**同一时刻并存的三方**；验收轮与它们不同时
+存在 —— 它由 `declare_done` 触发，跑在审查循环**之后**、完成**之前**：
+
+| 时刻 | 谁在跑 | 谁决定「这轮能不能完成」 |
+| --- | --- | --- |
+| `judge_submit` | 质量轮 + 功能轮 + 全量 lane（并行三方，见上一节） | 本轮裁决（READY 绑定 commit 的 tree） |
+| `declare_done` | `acceptance` 一轮（单独） | 验收结论（READY 绑定**工作区指纹**） |
+
+- **派发者是门禁，不是 agent**：`declare_done` 内部调 `acceptanceDecision`
+  （`lib/acceptance-round.ts` 的纯判定表）—— 本轮没有代码改动、goal 声明「本轮无
+  真实验收（理由）」、本轮没有一份**用户批准的**验收方案（`hasPlan: false`：goal 环节
+  关闭或 goal 未批准，草稿不算合同）、或环境把这次会话标记为不验收 ⇒ skip
+  （SKIPPED / DISABLED）；
+  没有绑定当前内容的结论 ⇒ 门禁**自己**派轮（agent 手上没有起它的工具，
+  `judge_submit` 也不接受这个角色名）；AWAITING ⇒ 等它的报告（pane 没了就重新派，
+  不空等）；结论绑定内容 ⇒ 比对当前工作区指纹，一致才放行。
+- **「这次会话不验收」有两个来源，而它们合成同一个开关**：编排 dispatcher 写的
+  `RG_ACCEPTANCE_GATE`（只有 plan 的最后一个任务拿到 `on`，判定出处是
+  `lib/repo-pr-policy.ts` 的 `acceptanceTaskId`），与用户自己的环节开关
+  （`lib/loop-stages.ts` 的 `stageOpen("acceptance")`）。两者在扩展里 **&&** 成一个
+  `gateOpen` 交给同一张判定表 —— 不再有第二份「验收要不要跑」的判定。
+- **绑定的是工作区指纹，不是当时那份 commit 的 tree**：验收要跑起来，跑的就是工作区
+  现在这份。`lib/fingerprint.ts` 的摘要把任何一次改动都算进去，所以「审查完又改了一
+  行」会让旧 READY 失效并重新验收，而不是带着过期结论完成。
+- **它只拦 `declare_done`，不进 `unmetRequirements`**：后者是 ship 权威、被 git 钩子
+  读；把验收放进去，修验收 finding 需要的那个 commit 会被它自己拦住 —— 一个自我
+  死锁。Copilot 周期（L7）用同一条口径，也挂在完成条件层。
+- **与取消矩阵的关系只有一句**：验收轮落在矩阵之后，矩阵的每一行都不会去动它
+  （那时三方都已收口）；验收轮非 READY 也不取消任何东西 —— 它没有并行的同伴，它
+  拒绝的是「完成」，出路是修 findings 再走一轮审查循环。
+- 判定、任务文本与 goal 的两个解析器都在 `lib/acceptance-round.ts`，记录写在
+  `GateState.acceptance`（每仓库一份 sidecar），派发与结算复用既有引擎
+  （`dispatchJudgeRound` / `settleAuditRound`）。
+

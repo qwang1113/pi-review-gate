@@ -26,12 +26,14 @@ import { normalizeNotifyHistory } from "./user-notify.ts";
 import { normalizeOrchestrationId } from "./orchestration-id.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
+import { sanitizeAcceptanceRecord, type AcceptanceRecord } from "./acceptance-round.ts";
+import { sanitizeLoopStages, stageOpen, type LoopStagesRecord } from "./loop-stages.ts";
 import { restatementHash, type RestatementRecord } from "./restatement.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
 import { SHIP_COMMAND_KINDS, type ShipCommandKind } from "./constants.ts";
 
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
-import type { QualityRecord } from "./quality-round.ts";
+import { isContentFreeQualitySkip, isSkippedQualityRecord, type QualityRecord } from "./quality-round.ts";
 import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
 
 import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
@@ -658,6 +660,35 @@ export interface GateState {
    */
   copilot?: CopilotReviewState;
   /**
+   * L9: the REAL-ACCEPTANCE round — the sixth judge, dispatched by the GATE
+   * from `declare_done` itself (2026-09-22, user decision; lib/acceptance-round.ts).
+   *
+   * Written by the gate's own dispatch path (AWAITING) and by its conclusion
+   * recorder (READY / BLOCKED), plus the two terminal releases that need no
+   * judge (SKIPPED: this round has no real acceptance; DISABLED: the gate is
+   * off for this session). Its READY binds to the WORKTREE FINGERPRINT, the
+   * same binding the review READY carries — the round ran against that
+   * content, so any edit invalidates it.
+   *
+   * Deliberately NOT read by {@link unmetRequirements}, for the same measured
+   * reason {@link copilot} is not: fixing an acceptance finding requires a
+   * commit, so an acceptance requirement inside the ship authority would block
+   * its own remedy. It gates task COMPLETION instead (declare_done). Absent ⇒
+   * no acceptance conclusion: the round is owed (fail-closed).
+   */
+  acceptance?: AcceptanceRecord;
+  /**
+   * THE FIVE STAGE SWITCHES the USER chose for this session (2026-09-22;
+   * lib/loop-stages.ts owns the rule and the dialog). Absent ⇒ all five are on,
+   * which is exactly today's behaviour — an older sidecar and a session that
+   * never opened the box behave identically.
+   *
+   * IT IS THE ONE READ FOR {@link unmetRequirements}'s review/precommit halves:
+   * the git hooks read the same record out of this same sidecar, so the L1 ship
+   * gate and the L3 hook can never disagree about whether a stage is off.
+   */
+  stages?: LoopStagesRecord;
+  /**
    * L8: the user's approval of the CURRENT loop-goal text (hash + time,
    * written only by propose_loop_goal after an extension-rendered dialog).
    *
@@ -846,6 +877,11 @@ export function inheritGoalContract(target: GateState, predecessor: GateState): 
     ...(predecessor.sessionReposPaths && predecessor.sessionReposPaths.length > 0
       ? { sessionReposPaths: predecessor.sessionReposPaths }
       : {}),
+    // THE STAGE SWITCHES FOLLOW THE WORK, not the process id (2026-09-22): the
+    // successor continues the same task, so a stage the user released must stay
+    // released — inheriting none would silently re-enable the gate the user
+    // switched off, mid-task, with the once-per-session box already spent.
+    ...(predecessor.stages ? { stages: predecessor.stages } : {}),
     // THE TMUX GRANT TRAVELS WITH THE SEAT (user decision, 2026-09-17: “当前
     // 会话和他的继承者都能用”). It is permission the USER gave to an on-going
     // piece of work rather than to a process id — a handover changes who holds
@@ -872,6 +908,16 @@ export function invalidateBindings(st: GateState): void {
   if (st.precommit.verdict === "PASS") {
     st.precommit.verdict = "NOT_RUN";
     st.precommit.fingerprint = null;
+  }
+  // THE ACCEPTANCE RECORD follows the REVIEW's rule (2026-09-22): a
+  // conclusion earned against a fingerprint that just moved is not a
+  // conclusion about this content any more. Deleting it puts the round back
+  // to ARMED, which costs a dispatch — the direction that cannot release a
+  // changed round. The two terminal releases stay: SKIPPED is a statement
+  // about the GOAL and DISABLED one about the GATE, and no later edit can
+  // falsify either.
+  if (st.acceptance && st.acceptance.status !== "SKIPPED" && st.acceptance.status !== "DISABLED") {
+    delete st.acceptance;
   }
   // THE QUALITY STANDING IS DELIBERATELY NOT CLEARED HERE (2026-09-15).
   //
@@ -1242,6 +1288,24 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
       const copilot = sanitizeCopilotState(parsed.copilot);
       if (copilot) parsed.copilot = copilot;
       else delete parsed.copilot;
+    }
+    // L9: a malformed acceptance record is treated as ABSENT — and absence is
+    // exactly the fail-closed direction here, because "no record" means the
+    // round is OWED. A record that could only ever release completion is the
+    // one shape this must never guess at.
+    if (parsed.acceptance !== undefined) {
+      const acceptance = sanitizeAcceptanceRecord(parsed.acceptance);
+      if (acceptance) parsed.acceptance = acceptance;
+      else delete parsed.acceptance;
+    }
+    // A malformed stage record is treated as ABSENT, which is the defaults:
+    // every stage ON. A record can only ever RELEASE a gate, so a partial or
+    // forged one must never be read as a switch-off (lib/loop-stages.ts's
+    // sanitizer is all-or-nothing for the same reason).
+    if (parsed.stages !== undefined) {
+      const stages = sanitizeLoopStages(parsed.stages);
+      if (stages) parsed.stages = stages;
+      else delete parsed.stages;
     }
     // L8: a malformed goal approval is treated as ABSENT — the fail-closed
     // direction here is "not approved" (goal body withheld, loop ships
@@ -1683,6 +1747,13 @@ export function saveSidecarPreservingConcurrent(
 /**
  * The single authority on "may we ship?".
  * Returns the list of unmet requirements (empty = ship allowed).
+ *
+ * THE USER'S STAGE SWITCHES ARE READ HERE (2026-09-22, lib/loop-stages.ts).
+ * `review` off releases the review block (code and docs alike), `precommit`
+ * off releases the precommit block; each block is skipped whole, and each is
+ * read independently because the two switches are independent. The L3 git
+ * hooks read the SAME record out of the SAME sidecar, so the L1 ship gate and
+ * the commit hook can never disagree about a stage the user switched off.
  */
 export function unmetRequirements(
   state: GateState | undefined,
@@ -1746,7 +1817,53 @@ export function unmetRequirements(
     return problems;
   }
 
-  if (state.hasCodeChange) {
+  // THE USER'S STAGE SWITCHES, read once (lib/loop-stages.ts is the only place
+  // that answers "is this stage on?"). An off stage releases its whole block
+  // below: no review requirement, no precommit requirement. The two are read
+  // independently because they are independent switches.
+  const reviewOn = stageOpen(state.stages, "review");
+  const precommitOn = stageOpen(state.stages, "precommit");
+  const qualityOn = stageOpen(state.stages, "quality");
+
+  // A QUALITY ROUND THAT SAID NO, WITH NO REVIEW ROUND TO CARRY IT (2026-09-22).
+  //
+  // With the review stage ON, a quality verdict gates the RECORD of the
+  // functional READY (lib/quality-round.ts's `decideQualityHold`) and this
+  // block would be a second reading of one rule. With the review stage OFF
+  // there is no READY to hold, so the quality verdict would bind NOTHING: the
+  // user kept the quality stage on, its judge ran and refused the code, and
+  // the work would ship anyway. So here the quality verdict IS the review —
+  // required, and bound to the content it judged exactly as `review` is
+  // (quality round P2, 2026-09-22: checking only for a recorded BLOCKED left
+  // a READY that any later edit walked away from).
+  if (state.hasCodeChange && !reviewOn && qualityOn) {
+    const quality = state.quality;
+    // A SKIP STANDS FOR EXACTLY ONE REASON (2026-09-22, the P1 the plan's
+    // last-round real-run 验收 found): the round had no code to judge, so no
+    // quality judge was ever owed for it. That is why the record carries its
+    // cause — the first cut of this rule refused EVERY skip, which made a
+    // docs-only round unshippable in a session whose code had already been
+    // judged (functional round P1, same day). A skip written because the stage
+    // was OFF still does not stand once the stage is back on: the stricter
+    // round the user asked for never ran, and reading only `verdict` let
+    // 「quality 关 → 编辑 → judge_submit（写下跳过记录）→ 重开 quality」commit and
+    // push with no quality judge ever having seen this code. Both brands are
+    // read through quality-round.ts's predicates, so this reader cannot drift
+    // from `qualityStandingFor`.
+    const skipped = isSkippedQualityRecord(quality);
+    const needReady =
+      "(need READY) — the review stage is off, so this is the verdict " +
+      "that stands between the code and a ship; submit a round (`judge_submit`) to run it";
+    if (skipped && !isContentFreeQualitySkip(quality)) {
+      problems.push(`quality round is SKIPPED ${needReady}`);
+    } else if (quality?.verdict !== "READY") {
+      problems.push(`quality round is ${quality?.verdict ?? "NOT_RUN"} ${needReady}`);
+    } else if (quality.treeSha === undefined || quality.treeSha !== currentFingerprint) {
+      problems.push("code was modified after the last quality READY (fingerprint mismatch)");
+    }
+  }
+
+  if (state.hasCodeChange && reviewOn) {
     // Fail-closed: only an explicit READY bound to the current fingerprint passes.
     // (Any non-READY value — including an unknown/forged one — falls here.)
     if (state.review.verdict !== "READY") {
@@ -1770,7 +1887,9 @@ export function unmetRequirements(
         'must include "docSync": "UPDATED" | "NOT_NEEDED"; re-run the independent review',
       );
     }
+  }
 
+  if (state.hasCodeChange && precommitOn) {
     // Fail-closed: only an explicit PASS bound to the current fingerprint is a
     // pass. Anything else — NOT_RUN, FAIL, NO_CHECKS_RUN, or an unknown/forged
     // verdict — blocks. The default branch guards against a value that somehow
@@ -1798,7 +1917,7 @@ export function unmetRequirements(
     }
   }
 
-  if (state.hasDocChange && !state.hasCodeChange) {
+  if (state.hasDocChange && !state.hasCodeChange && reviewOn) {
     if (state.review.verdict !== "READY") {
       problems.push(`doc review gate is ${state.review.verdict} (need READY)`);
     } else if (state.review.fingerprint !== currentFingerprint) {

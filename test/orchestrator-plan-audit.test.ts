@@ -198,9 +198,14 @@ test("the audit task carries the 9th check: architecture & code organization (pl
 });
 
 // ---------------------------------------------------------------------------
-test("the audit task carries the 10th check: the plan ENDS with a finish task", () => {
+test("the audit task carries the 10th check: the plan ENDS with an independent acceptance task", () => {
   const task = buildPlanAuditTask(planOf());
-  assert.match(task, /10\. 最后一环是不是收尾任务/, "the new check sits inside the checklist");
+  assert.match(task, /10\. 最后两环的分工/, "the new check sits inside the checklist");
+  // The TWO links, by position: the second-to-last wraps up, the last accepts.
+  assert.match(task, /倒数第二个 = 收尾任务/, "the merge / whole review / commit link is named");
+  assert.match(task, /最后一个 = 独立验收任务/, "…and so is the link that accepts and delivers");
+  assert.match(task, /不产出新需求、不改业务代码、只做真实验收与交付/,
+    "the acceptance task's own terms — what makes it INDEPENDENT");
   // WHY it is a P1: without it nobody may publish at all (the manager is
   // forbidden to ship, the children of a multi-task repo are capped at commit).
   assert.match(task, /没有任何一方能开 PR/);
@@ -208,20 +213,42 @@ test("the audit task carries the 10th check: the plan ENDS with a finish task", 
   // The implementation is NAMED, so a renamed helper or a moved rule has to
   // come back and update this line instead of leaving the auditor guessing.
   assert.match(task, /lib\/repo-pr-policy\.ts/);
-  assert.match(task, /finishTaskId/);
+  assert.match(task, /acceptanceTaskId/);
   assert.match(task, /effectiveTaskStation/);
+  assert.doesNotMatch(task, /finishTaskId/, "the old name is gone, not living beside the new one");
   // A POSITION, not a new plan field — the check must not become a demand for
   // one (same discipline as the 9th check's file lists).
   assert.match(task, /位置约定/);
   assert.match(task, /不是 plan 的新字段/);
-  // And the finish task has to be last in EXECUTION order, not just in the list.
+  // And the tail has to be last in EXECUTION order, not just in the list.
   assert.match(task, /dependsOn/);
   assert.match(task, /plan 顺序/);
 });
 
+test("the 10th check states the shape it P1s: a last task that is not an acceptance task", () => {
+  // The plan the rule rejects — its last task is one more feature, so the
+  // session that wrote the code would be the one that declares it good.
+  const broken = planOf({
+    tasks: [
+      { id: "work", title: "做功能", repo: "/work/pi-review-gate" },
+      { id: "more", title: "再做一点", repo: "/work/pi-review-gate" },
+    ],
+  });
+  const task = buildPlanAuditTask(broken);
+  assert.match(task, /最后一个任务仍是「实现某个功能」的任务/, "the rejected shape is spelled out");
+  assert.match(task, /等于自评/, "and WHY it is rejected: the author grades their own work");
+  // The acceptance half is required in its own right, not merely implied by a
+  // "delivers" half — that is the whole point of the 2026-09-22 split.
+  assert.ok(task.includes("真实验收是跑真实路径 / 命令 / 观察（不是复述实现，也不是给自己打分）"),
+    "the acceptance is defined as a real run, not a restatement");
+  // …and the offending plan itself is in front of the auditor (the untrusted
+  // block), so the check is not an abstract rule it has to take on faith.
+  assert.ok(task.includes("再做一点"), "the plan under audit rides in the same task text");
+});
+
 test("the 10th check is inside the checklist — before the conclude instructions", () => {
   const task = buildPlanAuditTask(planOf());
-  const check = task.indexOf("10. 最后一环是不是收尾任务");
+  const check = task.indexOf("10. 最后两环的分工");
   const checklist = task.indexOf("===== 审计要点");
   const untrusted = task.indexOf("===== 待审计的 plan =====");
   const conclude = task.indexOf("judge_conclude");

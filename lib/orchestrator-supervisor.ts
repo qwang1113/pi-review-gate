@@ -93,6 +93,8 @@ export interface PendingRequest {
   topic?: ChannelRequestRecord["topic"];
   title: string;
   options: string[];
+  /** This question takes several answers — see `ChannelRequestRecord.multiple`. */
+  multiple?: boolean;
   /** The full text behind the question, when the child attached one. */
   payload?: string;
   /**
@@ -229,6 +231,7 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
         ...(open.topic === undefined ? {} : { topic: open.topic }),
         title: open.title,
         options: open.options,
+        ...(open.multiple ? { multiple: true } : {}),
         ...(payload === undefined ? {} : { payload }),
         // Sanitized HERE, at the wire→consumer boundary: a station the child
         // wrote that is not one of the three is dropped, so no reader has to
@@ -392,7 +395,10 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
           // The interview marker rides on the SAME line as the id, so the
           // manager sees "this is one of five" exactly where it decides what
           // to answer — and sees nothing extra for an ordinary lone question.
-          (request.batch ? ` · 采访 \`${request.batch.id}\` 第 ${request.batch.index + 1}/${request.batch.total} 题` : ""),
+          (request.batch ? ` · 采访 \`${request.batch.id}\` 第 ${request.batch.index + 1}/${request.batch.total} 题` : "") +
+          // SAME PLACE, SAME REASON (2026-09-22): an answer of one row where
+          // several were wanted is the one mistake this shape invites.
+          (request.multiple ? " · 多选题（可答多项）" : ""),
         `  问题：${request.title}`,
         ...(request.options.length > 0
           ? request.options.map((option, index) => `    ${index + 1}. ${option}`)
@@ -407,6 +413,10 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
       ...(snapshot.requests.some((r) => r.batch)
         ? ["同一「采访」的多题是一次 `ask_user` 提交的整批，**一次调用答完**：" +
            "`orchestrator_answer({childId, answers:[{requestId, answer}, …]})`（每条独立裁决）。"]
+        : []),
+      ...(snapshot.requests.some((r) => r.multiple)
+        ? ["多选题可以一次答好几项：`answer` 写成 `A, C`（逗号、顿号、空格分隔都行）；" +
+           "一个都不勾就回 ✎ 那一行。"]
         : []),
     );
 

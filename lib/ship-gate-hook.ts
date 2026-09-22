@@ -68,6 +68,17 @@ export interface ShipGateHookDeps extends EditGuardDeps, ShipGateBashDeps {
   isEditTool(toolName: string): boolean;
   /** True when THIS session is a judge pane (reporting shell, not a worker). */
   isJudgeSession(): boolean;
+  /**
+   * THE STAGE FALLBACK (2026-09-22, lib/loop-stages.ts): before a tool whose
+   * gate the five stage switches decide — an edit/write, or
+   * `propose_restatement` — give the USER the chance to set them, when this
+   * session has not chosen yet. Idempotent and once-per-session by the gate's
+   * own contract (a closed box is an answer too), so the hook may call it on
+   * every edit without re-asking. Orchestrator mode, its children, judge panes
+   * and non-loop modes are the implementation's own refusal — the hook does not
+   * know about them.
+   */
+  ensureLoopStages?(ctx: unknown): Promise<void>;
 }
 
 
@@ -90,6 +101,15 @@ export async function evaluateToolCall(
   const judgeDenied = judgeDeniedReason(event.toolName);
   if (judgeDenied && deps.isJudgeSession()) return { block: true, reason: judgeDenied };
   const input = event.input as Record<string, unknown>;
+  // THE STAGE FALLBACK runs BEFORE the edit arm (2026-09-22): the switches are
+  // read by both arms below (the goal edit gate, the precommit/review ship
+  // requirement), and a user who has not answered yet gets the ONE gate-owned
+  // box here — before a write lands, which is the last moment where the answer
+  // still changes what this session does.
+  if (deps.ensureLoopStages &&
+      (deps.isEditTool(event.toolName) || event.toolName === "propose_restatement")) {
+    await deps.ensureLoopStages(ctx);
+  }
   if (deps.isEditTool(event.toolName)) {
     return evaluateEditCall(deps, input, ctx);
   }

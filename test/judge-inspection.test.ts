@@ -245,6 +245,40 @@ test("a round that inspected concludes; adviser and non-READY verdicts are never
   }
 });
 
+test("the acceptance judge's EXECUTION is its inspection; nobody else's is", () => {
+  // Its job is to RUN the thing: start the service, call the interface,
+  // compare the answer. Held to the reviewer's rule it could only conclude
+  // READY by pretending to read — the very move the refusal text forbids
+  // (2026-09-22, functional round P2).
+  const ran = { toolName: "bash", input: { command: "npm test" } };
+  assert.deepEqual(
+    classifyInspection(ran, [], { executionCounts: true }),
+    { kind: "run", text: "npm test" },
+  );
+  assert.equal(classifyInspection(ran, [], { executionCounts: false }), undefined, "the reviewer's rule is unchanged");
+  assert.equal(classifyInspection(ran), undefined, "and the default is the strict rule");
+  // A read-only command is still classified as what it IS, never downgraded.
+  assert.deepEqual(
+    classifyInspection({ toolName: "bash", input: { command: "git diff a1b2c3d4..HEAD" } }, [], { executionCounts: true }),
+    { kind: "diff", text: "git diff a1b2c3d4..HEAD" },
+  );
+
+  const accepted = observeInspection(emptyInspection(), ran, { role: "acceptance" });
+  assert.equal(accepted.actions, 1);
+  assert.deepEqual(accepted.kinds, ["run"]);
+  assert.deepEqual(
+    decideInspection({ role: "acceptance", verdict: "READY", evidence: accepted }),
+    { ok: true, usedPass: false },
+  );
+
+  // The door opens for EXECUTION, not for concluding without doing anything:
+  // the same command observed for another role leaves the acceptance round at
+  // zero actions, and a zero-action acceptance READY is still refused.
+  const otherRole = observeInspection(emptyInspection(), ran, { role: "reviewer" });
+  assert.equal(otherRole.actions, 0);
+  assert.equal(decideInspection({ role: "acceptance", verdict: "READY", evidence: emptyInspection() }).ok, false);
+});
+
 test("a granted pass carries the READY, and the caller is told to spend it", () => {
   const granted = decideInspection({
     role: "reviewer", verdict: "READY", evidence: emptyInspection(), passAuthorized: true,

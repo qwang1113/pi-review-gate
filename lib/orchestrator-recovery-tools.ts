@@ -55,6 +55,7 @@ import {
 } from "./orchestrator-registry.ts";
 import { DEFAULT_DELIVERY_STATION, type DeliveryStation } from "./delivery-station.ts";
 import { effectiveTaskStation } from "./repo-pr-policy.ts";
+import { acceptanceGateValue } from "./acceptance-round.ts";
 import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
 import {
   alivePanes,
@@ -165,6 +166,31 @@ function stationCapForRecoveredChild(
   );
 }
 
+/**
+ * WHETHER A RE-OPENED CHILD MAY RUN THE ACCEPTANCE ROUND (2026-09-22).
+ *
+ * The twin of {@link stationCapForRecoveredChild}, for the same reason and
+ * with the same rule about facts: the flag lived only in the dead pane's
+ * environment, and a recovered child that came back without it would read
+ * ABSENCE AS ON — so a plan's ordinary work task would suddenly owe a
+ * top-tier acceptance round on its own completion. RECOMPUTED from the
+ * approved snapshot through the plan rule, never stored. No snapshot, or a
+ * task the snapshot does not know ⇒ `off`, the strict direction for this flag
+ * (it removes an entitlement, it never hands one out).
+ */
+function acceptanceGateForRecoveredChild(deps: OrchestratorDeps, taskId: string): "on" | "off" {
+  const approved = deps.runtime().approvedPlan;
+  if (!approved) return "off";
+  return acceptanceGateValue(
+    {
+      deliveryStation: approved.deliveryStation ?? DEFAULT_DELIVERY_STATION,
+      ...(approved.allowMultiplePrs === undefined ? {} : { allowMultiplePrs: approved.allowMultiplePrs }),
+      tasks: approved.tasks,
+    },
+    taskId,
+  );
+}
+
 async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const childId = String(params.childId ?? "").trim();
   const runtime = deps.runtime();
@@ -242,6 +268,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   // station its plan already ruled out (see stationCapForRecoveredChild —
   // which always answers, the strictest station when nothing is on record).
   const stationCap = stationCapForRecoveredChild(deps, child.taskId);
+  const acceptanceGate = acceptanceGateForRecoveredChild(deps, child.taskId);
   const opened = await openSessionPane(deps.tmux, {
     ownPane: self,
     cwd: child.cwd,
@@ -255,6 +282,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
       orchestrationId: deps.runtime().orchestrationId,
       stateVariant: child.stateVariant ?? child.id,
       stationCap,
+      acceptanceGate,
     },
     command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
     decor: {

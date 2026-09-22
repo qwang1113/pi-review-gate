@@ -348,8 +348,10 @@ test("loop goal: injected ONLY in loop mode, before the unarmed early-return", (
   // Anchored on the call, not on its argument expression: the goal is now read
   // into a local (the oversized-requirement checkpoint reads the same value),
   // and this assertion is about WHERE the directive is injected, not how the
-  // argument is spelled.
-  const injectAt = SRC.indexOf("buildLoopGoalDirective(", handlerAt);
+  // argument is spelled. Since 2026-09-22 the paragraph itself is built by
+  // `loopGoalDirectiveText()` — the ONE reader of the goal stage switch — so
+  // the anchor is that helper's call site inside this handler.
+  const injectAt = SRC.indexOf("loopGoalDirectiveText()", handlerAt);
   assert.ok(injectAt > 0, "loop-goal directive must be injected in before_agent_start");
   const exploreReturnAt = SRC.indexOf('state.taskMode === "explore"', handlerAt);
   // The unarmed early-return was REMOVED 2026-08-30: the loop directives (goal +
@@ -368,10 +370,11 @@ test("loop goal: set_gate_mode(loop) delivers Step 0 in the same turn it decides
   // as the session's first action — without this the agent could edit for a
   // whole turn before ever seeing the exit contract.
   const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
-  const toolInjectAt = SRC.indexOf("buildLoopGoalDirective(readSessionLoopGoal(");
+  const toolInjectAt = SRC.indexOf('const goalNote = effective === "loop"');
 
   assert.ok(toolInjectAt > 0 && toolInjectAt < handlerAt, "set_gate_mode must inject the goal too");
-  assert.match(SRC.slice(toolInjectAt - 200, toolInjectAt), /effective === "loop"/);
+  assert.match(SRC.slice(toolInjectAt, toolInjectAt + 200), /loopGoalDirectiveText\(\)/,
+    "…through the stage-aware helper (2026-09-22): an OFF goal stage must not be told to negotiate");
 });
 
 test("loop goal: the read-only NUDGE teaches the restatement step, in the right order", () => {
@@ -603,9 +606,10 @@ test("L2 STALL BREAKER: an answered gate dialog is motion — a live negotiation
   // notice blamed the provider. The writer and the reader must both stay wired:
   // `askChoice` is the ONE dialog path, and the breaker reads the stamp as an
   // EVENT (after the previous observation), never as a grace period.
-  const askChoice = windowOf("async function askChoice(", "\n  }", "askChoice");
-  assert.match(askChoice, /if \(answer !== undefined\) lastUserInteractionAt = new Date\(\)\.toISOString\(\)/,
-    "the dialog path must record the exchange (dismissed boxes do not count)");
+  const askChoice = windowOf("async function askDialog(", "\n  }", "askDialog");
+  assert.match(askChoice, /if \(answer !== undefined && answer !== MULTI_UNAVAILABLE\)[\s\S]{0,90}?lastUserInteractionAt = new Date\(\)\.toISOString\(\)/,
+    "the dialog path must record the exchange — a dismissed box does not count, and neither does the checklist sentinel " +
+    "(it means NO host could draw the question: quality round P2, 2026-09-22)");
   const start = SRC.indexOf(LOOP_SETTLED);
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const facts = SRC.slice(SRC.indexOf("const motion = {", start), breakerAt);
@@ -928,10 +932,11 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the ONE prompt every surface renders interpolates the notice");
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
-  assert.match(ASK_USER_SRC, /return askWithBacks\(index, signal\);/,
-    "the pane dialog renders the template through the ONE renderer");
-  assert.match(ASK_USER_SRC, /const picked = await deps\.askChoice\(\s*uiCtx,/,
-    "…called from the walk-back loop, which is where `← 返回上一题` is handled (2026-09-19)");
+  assert.match(ASK_USER_SRC, /await askWithBacks\(index, signal\)/,
+    "the pane dialog renders the template through the ONE renderer — and reads its result, so a box no host could draw is not counted as shown");
+  assert.match(ASK_USER_SRC, /const picked = q\.multiple[\s\S]{0,140}?await deps\.askMultiChoice\(uiCtx,[\s\S]{0,140}?await deps\.askChoice\(uiCtx,/,
+    "…both shapes dispatched from the walk-back loop, which is where `← 返回上一题` is handled (2026-09-19): " +
+    "the checkbox question goes to its OWN renderer, the radio one to the template");
   // THE QUESTION RIDES IN THE BODY, NOT THE TITLE (2026-09-14). A title is the
   // short label; the question is the long half and belongs in the body. (When a
   // row budget existed this also kept a long question from sizing the box — the
@@ -1022,8 +1027,9 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
   // unanswered question, which pauses the loop.
   assert.match(toolBody, /\.catch\(\(\): ChannelDialogOutcome => \(\{ answer: undefined, by: "dismissed", requestId: "" \}\)\)/,
     "a broken dialog is silence, never an answer");
-  assert.match(toolBody, /const resolution = resolveQuestion\(q, picked, opts\);/,
-    "what a settled question MEANS is the one pure rule in lib/ask-user.ts");
+  assert.match(toolBody, /: resolveQuestion\(q, picked, opts\);/,
+    "what a settled question MEANS is the one pure rule in lib/ask-user.ts" +
+    " — reached for every question that was actually shown, which is what the ternary above it is about (a question no host could draw settles as unanswered WITHOUT a stop)");
 
   // The answers come back in one piece, unanswered ones marked.
   assert.match(toolBody, /formatAnswers\(answers\)/);
@@ -1081,8 +1087,12 @@ test("FLICKER: dialogs are no longer fitted, and a regular-renderer session is t
   // session on that renderer is TOLD to switch (lib/renderer-mode.ts) instead
   // of being fitted. askChoice renders the gate's ONE template whole; nothing
   // may bypass it, and no ui.confirm exists any more (2026-09-08).
-  const helperAt = SRC.indexOf("async function askChoice");
-  const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
+  // The BODY lives in `askDialog` since 2026-09-22: the checkbox shape is the
+  // same dialog with a different renderer, so `askChoice` / `askMultiChoice`
+  // are one-line forwarders and every structural rule below is asserted
+  // against the body they share.
+  const helperAt = SRC.indexOf("async function askDialog");
+  const askChoiceBody = windowOf("async function askDialog", "\n  }", "askDialog");
   // NO FITTING ANY MORE (user decision, 2026-09-16). The row budget existed
   // because an oversized dialog pushed the animating spinner out of the
   // viewport and turned EVERY spinner frame into a full-screen clear (measured:
@@ -1129,7 +1139,8 @@ test("FLICKER: dialogs are no longer fitted, and a regular-renderer session is t
   const directRenders = [...SRC.matchAll(/renderChoice\(/g)].length;
   assert.equal(directRenders, 1,
     `askChoice must be the only renderChoice call site (found ${directRenders})`);
-  assert.match(askChoiceBody, /renderChoice\(/, "…and it is the one inside askChoice");
+  assert.match(SRC, /renderChoice\(/, "…and the ONE radio render call site is the dialog body");
+  assert.match(askChoiceBody, /renderMultiChoice\(/, "…with the checkbox shape beside it, on the same seam");
 });
 
 test("DIALOG QUEUE: one box at a time, with the host's abort and the question in the banner", () => {
@@ -1140,7 +1151,7 @@ test("DIALOG QUEUE: one box at a time, with the host's abort and the question in
   // tool never returned and the turn hung with no way out (an abort does not
   // interrupt pi's `Promise.all` over the batch). Every dialog the gate shows
   // goes through this ONE function, so the fix belongs here.
-  const askChoiceBody = windowOf("async function askChoice", "\n  }", "askChoice");
+  const askChoiceBody = windowOf("async function askDialog", "\n  }", "askDialog");
   // The queue call is no longer RETURNED directly (2026-09-19): its promise is
   // held as `asked` so the thirty-minute proxy race can wait on the SAME one.
   // The property this line protects is unchanged — one queue, and everything
@@ -1584,10 +1595,16 @@ test("loop directives: all-gates-green block names the completion steps", () => 
   const greenAt = SRC.indexOf("All gates satisfied", handlerAt);
   assert.ok(greenAt > 0, "all-green branch must exist");
   const greenLine = SRC.slice(greenAt, greenAt + 220);
-  // The 收尾 line is LOOP-only: an undecided session must not see it
-  // (reviewer P2-4 — the loop block presumes a chosen mode).
-  assert.match(SRC.slice(greenAt - 80, greenAt), /state\.taskMode === "loop"/,
-    "the 收尾 line is gated on loop mode");
+  // The 收尾 line is gated on the LOOP'S SEMANTICS: explore/normal get the
+  // plain "you may ship." — and an UNDECIDED session gets the 收尾 line,
+  // because it runs those semantics (lib/task-mode.ts: undecided behaves as
+  // loop, fail-closed). The historical P2-4 note here said an undecided
+  // session must NOT see it; the gate's own behaviour contradicts that —
+  // `loopGoalEditGate` answers `goalConfirmed` for undecided, i.e. it HOLDS
+  // the session to the approved goal, and this round's real-session P1 showed
+  // what the same `=== "loop"` spelling did to the acceptance round.
+  assert.match(SRC.slice(greenAt - 80, greenAt), /isEnforcedMode\(state\.taskMode\)/,
+    "the 收尾 line is gated on the loop's semantics, undecided included");
   assert.match(greenLine, /declare_done/, "green branch names declare_done as the next step");
   assert.match(greenLine, /copilot_review/, "green branch names the Copilot cycle");
 });
@@ -1720,7 +1737,12 @@ test("normal mode: prompt-transparent except the language directive; loop resume
   // BEFORE any gate text is appended.
   const promptAt = SRC.indexOf('pi.on("before_agent_start"');
   assert.ok(promptAt >= 0);
-  const promptBody = SRC.slice(promptAt, promptAt + 5000);
+  // The handler's REAL end, not a fixed-width window: the check is an order
+  // inside THIS handler, so the slice must cover the handler and nothing else.
+  // (A magic window silently moved the anchors out of scope whenever the
+  // startup check grew.)
+  const promptEnd = SRC.indexOf('\n  pi.on("', promptAt + 10);
+  const promptBody = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
   const langAt = promptBody.indexOf("LANGUAGE_DIRECTIVE");
   const normalAt = promptBody.indexOf('state.taskMode === "normal"');
   const directiveAt = promptBody.indexOf("GATE_MODE_DECISION_DIRECTIVE");
@@ -1742,13 +1764,37 @@ test("restore validates persisted taskMode through normalizeTaskMode", () => {
   assert.match(SRC, /normalizeTaskMode/);
 });
 
+test("startup self-heal reports the roles it merged, from the same handler that refuses", () => {
+  // Goal criterion: a heal that REWRITES the user's ~/.pi/review-gate.json must
+  // say so — a silent rewrite is the one outcome nobody could debug. The
+  // behavior face (which roles, gaps only) is asserted in
+  // test/model-config.test.ts; this pins the wiring that reports it.
+  const promptAt = SRC.indexOf('pi.on("before_agent_start"');
+  const promptEnd = SRC.indexOf('\n  pi.on("', promptAt + 10);
+  const handler = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
+  assert.match(handler, /startupAgentsCheck\(\{/, "the startup check is the healing entry point");
+  assert.match(handler, /if \(healed\.length > 0\)/, "a heal is announced…");
+  assert.match(
+    handler,
+    /log\(`self-healed missing agent slots into \$\{globalConfigPath\(\)\}: \$\{healed\.join\(", "\)\}`\)/,
+    "…with the roles it merged and the file it wrote",
+  );
+  // The heal's own failures ride the refusal instead of disappearing.
+  assert.match(handler, /const healNote = healProblems\.length > 0/, "a failed heal is surfaced with the refusal");
+  // …and the session's own snapshot follows the file, or every downstream
+  // reader keeps the pre-heal state while the check reports a pass.
+  assert.match(handler, /projectConfig = \{ \.\.\.projectConfig, agentsGlobal: agentsSection \}/,
+    "the healed section is adopted by the session (arbiter resolution, dispatch)");
+});
+
 test("edit-discipline nudges: prompt-only guidance, wired at the three sites", () => {
   // USER REQUIREMENT: prompt-level correction (no enforcement) for the
   // recurring "edit failed → bash edits the file" workaround. Three sites:
   // 1. before_agent_start injects the discipline paragraph in every
   //    non-normal mode (after the normal early return).
   const promptAt = SRC.indexOf('pi.on("before_agent_start"');
-  const promptBody = SRC.slice(promptAt, promptAt + 5000);
+  const promptEnd = SRC.indexOf('\n  pi.on("', promptAt + 10);
+  const promptBody = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
   const normalAt = promptBody.indexOf('state.taskMode === "normal"');
   const disciplineAt = promptBody.indexOf("EDIT_DISCIPLINE_DIRECTIVE");
   assert.ok(disciplineAt > normalAt, "discipline directive must be injected after the normal-mode return");
@@ -1759,7 +1805,7 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   const decl = SRC.slice(SRC.indexOf("let editFailurePending = false;") - 600, SRC.indexOf("let editFailurePending = false;"));
   assert.match(decl, /cleared ONLY on a successful edit|cleared only on a successful edit/,
     "the declaration comment must state the new close-on-edit/nudge semantics");
-  const beforeAgent = SRC.slice(promptAt, promptAt + 4000);
+  const beforeAgent = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
   assert.doesNotMatch(beforeAgent, /editFailurePending = false/,
     "before_agent_start must NOT clear the window any more");
   // 2. tool_result: a FAILED edit arms the window and appends the nudge.
@@ -1856,8 +1902,9 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   assert.equal(calls, 1, "exactly one call site — a second reading would be a second contract");
   const body = toolBodyOf("declare_done");
   assert.match(body, /stationArrivalProblems\(/, "…and it is inside declare_done");
-  assert.match(body, /state\.taskMode === "loop" && loopGoalConfirmed\(\)/,
-    "the station is only known once the user approved a goal that carries one");
+  assert.match(body, /isEnforcedMode\(state\.taskMode\) && goalStageSatisfied\(\)/,
+    "the station is only known once the user approved a goal that carries one — or switched the goal stage off; " +
+    "the loop question is isEnforcedMode's, so an UNDECIDED session is judged too (real-session P1, 2026-09-22)");
   assert.match(body, /changedFiles\(root\)/, "committed-ness is measured, not asserted by the agent");
   assert.match(body, /st\.shippedKinds\?\.includes\("pr-create"\)/,
     "a `pr` round arrives on a `gh pr create` the GATE watched succeed — not on a claim");
@@ -1968,8 +2015,9 @@ test("the ship gate reads the station from the APPROVED contract, and from nothi
   assert.match(fn, /state\.taskMode === "orchestrator"/);
   assert.match(fn, /approvedPlan\?\.deliveryStation/,
     "an orchestration's ceiling is the plan the USER approved, not the plan file on disk");
-  assert.match(fn, /state\.taskMode !== "loop"\) return undefined/,
-    "explore and normal have no contract — undefined, never the strictest station");
+  assert.match(fn, /!isEnforcedMode\(state\.taskMode\)\) return undefined/,
+    "explore and normal have no contract — undefined, never the strictest station; " +
+    "undecided carries the loop's contract (real-session P1, 2026-09-22), so it is NOT in this branch");
   assert.match(fn, /loopGoalConfirmed\(root, st\)\) return undefined/,
     "…and neither does a repo whose goal was never approved (L8 refuses that ship on its own terms)");
   assert.match(fn, /st\.loopGoal\?\.station \?\? DEFAULT_DELIVERY_STATION/,
@@ -2993,14 +3041,22 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // One role enum, shared by both tools (a third spelling of it is how
 
   // two of them would silently start accepting different roles).
-  // Four roles: the judge roles an AGENT may address. `arbiter` runs outside
-  // this surface, and `quality-auditor` is here even though the agent never
-  // REQUESTS that round — a round that can ask a question must be answerable.
+  // Five roles: the judge roles an AGENT may address. `arbiter` runs outside
+  // this surface, and `quality-auditor` / `acceptance` are here even though the
+  // agent never REQUESTS those rounds — a round that can ask a question must be
+  // answerable.
   assert.match(
     JUDGE_TOOLS_SRC,
-    /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(\{\s*reviewer: "reviewer",\s*"quality-auditor": "quality-auditor",\s*adviser: "adviser",\s*"goal-auditor": "goal-auditor",\s*\}\)\)/,
-    "the shared role parameter is the judge roles an agent can address",
+    /export const ADDRESSABLE_JUDGE_ROLES: Readonly<Record<string, string>> = Object\.freeze\(\{\s*reviewer: "reviewer",\s*"quality-auditor": "quality-auditor",\s*adviser: "adviser",\s*"goal-auditor": "goal-auditor",\s*acceptance: "acceptance",\s*\}\);/,
+    "the named shared role list is the judge roles an agent can address",
   );
+  // …and BOTH consumers come from it. The enum and the "needs a role" refusal
+  // text were two literals, and adding `acceptance` to only one of them is
+  // exactly the drift this pins (reviewer P2, 2026-09-22).
+  assert.match(JUDGE_TOOLS_SRC, /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(ADDRESSABLE_JUDGE_ROLES\)\)/,
+    "the parameter enum is built from the list");
+  assert.match(JUDGE_TOOLS_SRC, /needs a role \(\$\{Object\.keys\(ADDRESSABLE_JUDGE_ROLES\)\.join\(" \/ "\)\}\)/,
+    "the refusal text is built from the same list");
   for (const tool of ["judge_close", "judge_wait"]) {
 
     const body = toolBodyOf(tool);
@@ -5695,8 +5751,8 @@ test("non-git directory: the gate short-circuits entirely (user decision 2026-09
     "the status strip must not run git outside a repository");
   assert.match(widget, /branch: sessionInGit/, "non-git branch must be absent, not \"(detached)\"");
   // The loop goal is a per-repo contract — not an unmet requirement outside one.
-  assert.match(widget, /sessionInGit && !loopGoalConfirmed\(\)/,
-    "the loop-goal unmet must not surface outside a repository");
+  assert.match(widget, /sessionInGit && !goalStageSatisfied\(\)/,
+    "the loop-goal unmet must not surface outside a repository, nor when the user released the goal stage");
   // The widget WIRING is pinned too: `nonGit: !sessionInGit` — flipping it
   // to a constant would render the 非 git 目录 strip for repo sessions.
   assert.match(widget, /nonGit: !sessionInGit,/,
@@ -5825,7 +5881,7 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
   // declare_done's cascade-close deliberately uses the WIDER scope: a dead
   // pane still leaves an entry, a scratch worktree and a pending audit to
   // reclaim. What must never widen is the opener.
-  assert.match(SRC, /const ownedJudges = ownJudges\(\);/, "cascade-close is opener-scoped");
+  assert.match(SRC, /const ownedJudges = ownJudges\(\)\.filter\(\(child\) =>/, "cascade-close is opener-scoped");
   // The health snapshot the hosted wait is built from.
   assert.match(SRC, /for \(const c of ownJudges\(\)\) \{/, "the child snapshot lists own judges only");
 });
@@ -5845,9 +5901,21 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
  * guarantee that finishing a task can never strand a pane — and a round that
  * makes it consult the policy and then close everything anyway would add the
  * decorative call site the policy module explicitly argues against.
+ *
+ * THE ONE EXEMPTION (2026-09-22, reviewer P1): the pane of the round the gate
+ * is ITSELF waiting on is filtered out of the list — the acceptance round, and
+ * only while its own record still says AWAITING. Closing it first made
+ * `acceptanceRoundAlive()` answer “gone”, and `acceptanceDecision`'s own
+ * `roundAlive === false` rule then dispatched a SECOND round on top of a
+ * working judge (the first one killed and paid for twice). The guarantee above
+ * is untouched, and the reason is mechanical: while a record says AWAITING the
+ * decision is `wait` and `declare_done` returns that refusal, so the
+ * completion path — the only path the sweep runs on — is UNREACHABLE with an
+ * exempted pane. The policy module calls the sweep “the terminus for a pane
+ * whose round never concluded”; an in-flight round has a terminus of its own.
  */
 test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by dispatcher", () => {
-  const sweep = windowOf("const ownedJudges = ownJudges();", "progress.step(`联关", "declare_done cascade");
+  const sweep = windowOf("const ownedJudges = ownJudges()", "progress.step(`联关", "declare_done cascade");
   // It closes what it owns, one by one, with no question about provenance.
   assert.match(sweep, /for \(const child of ownedJudges\) \{/, "every owned judge is visited");
   for (const dispatcherish of ["judgePaneReclaim", "dispatchedBy", "atRoundEnd", "judge-pane-policy"]) {
@@ -6378,9 +6446,12 @@ test("both change-index git reads are rename-safe and shell-safe", () => {
 // ---------------------------------------------------------------------------
 
 test("the full lane is started WITHOUT being awaited, and the checkpoint accepts a live verification", () => {
-  const submitAt = SRC.indexOf("async function submitForReview(");
-  assert.ok(submitAt > 0, "the chain is here");
-  const submit = SRC.slice(submitAt, submitAt + 4000);
+  // BOUNDED BY THE NEXT DECLARATION, NOT BY A BYTE COUNT (2026-09-22): the
+  // window used to be `submitAt + 4000`, so a type-doc comment growing inside
+  // the chain pushed the very calls these assertions name out of view and the
+  // test failed for a reason that has nothing to do with the rule it pins —
+  // exactly the failure mode `windowIn`'s own docblock describes.
+  const submit = windowIn(SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
   assert.match(submit, /void startPrecommitBeside\(input\.root, input\.ctx\)/,
     "the long lane starts and the chain runs beside it — awaiting here is exactly the 33s the agent used to lose");
   assert.doesNotMatch(submit, /await callTool\(\s*"run_precommit"/,
@@ -6394,9 +6465,9 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
     /const verifyingNow =[\s\S]{0,120}?inFlightPrecommit\?\.root === root[\s\S]{0,80}?st\.precommit\.verdict === "NOT_RUN"/,
     "the receipt for a pending checkpoint is the LIVE promise in THIS process AND a verdict that has not landed yet — the promise is cleared in a microtask, so the verdict is what makes the test exact",
   );
-  assert.match(gate, /if \(!precommitBypassed && !verifyingNow && st\.precommit\.verdict !== "PASS"\)/,
-    "no live verification ⇒ the old rule, unchanged (fail-closed)");
-  assert.match(gate, /if \(!precommitBypassed && !verifyingNow && st\.precommit\.testScope !== "full"\)/,
+  assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && st\.precommit\.verdict !== "PASS"\)/,
+    "no live verification ⇒ the old rule, unchanged (fail-closed) — plus the one release the USER owns: a stage switched off");
+  assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && st\.precommit\.testScope !== "full"\)/,
     "…and the lane requirement with it");
 });
 
@@ -6414,7 +6485,7 @@ test("a FAIL that arrives after dispatch is reported, and it withholds the READY
   );
   assert.match(
     SRC,
-    /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,400}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,40}?bypassActive: st\.bypass\.active,\s*\}\)/,
+    /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,500}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,400}?bypassActive: laneVerificationWaived\(targetRoot, st\),\s*\}\)/,
     "the verdict recorder refuses a READY on content that never passed the full lane — and answers it from the round's OWN tree, not from the live binding the next edit resets",
   );
   assert.match(SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
@@ -6561,8 +6632,10 @@ test("ONE full lane per repo: a second round waits for a quiet lane, and NEVER j
   // else.
   const startAt = SRC.indexOf("async function waitForQuietLane(");
   assert.ok(startAt > 0, "the waiting is its own named act");
-  const submitAt = SRC.indexOf("async function submitForReview(");
-  const submit = SRC.slice(submitAt, submitAt + 4000);
+  // Same anchor-bounded window as the sibling test above, and for the same
+  // reason: the rule is about THIS function, so the window must end where the
+  // function does rather than at a byte count that rots.
+  const submit = windowIn(SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
   const waitAt = submit.indexOf("await waitForQuietLane(input.root)");
   const startLaneAt = submit.indexOf("void startPrecommitBeside(input.root, input.ctx)");
   assert.ok(waitAt > 0 && startLaneAt > waitAt,
@@ -6748,7 +6821,8 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   const inFlight = SRC.slice(inFlightAt, inFlightAt + 1400);
   assert.match(inFlight, /reviewTargets\.get\(root\)/, "the ROUND's own record makes it this round's judge");
   assert.match(inFlight, /ownLiveJudges\(\)/, "…a live pane is what makes the verdict still possible");
-  assert.match(inFlight, /quality\?\.commitSha === target\.head/, "once a verdict stands for this head, nothing is owed");
+  assert.match(inFlight, /quality\?\.commitSha === target\.head && !isSkippedQualityRecord\(quality\)/,
+    "once a JUDGE's verdict stands for this head, nothing is owed — a SKIP record is not one (functional P1, 2026-09-22: a skip bound here read as concluded while its quality judge was still running, so the functional READY was refused into BLOCKED and the cancel matrix killed that live pane)");
   // …and the round records that judge only after the spawn was ACCEPTED.
   const noteAt = SRC.indexOf("function noteQualityRoundDispatched(");
   const note = SRC.slice(noteAt, noteAt + 500);
@@ -6891,7 +6965,7 @@ test("the row-position rule has ONE implementation — the channel parser import
     "the letter index is computed in lib/choice-dialog.ts (`rowIndexOf`) and imported, never re-derived");
   assert.doesNotMatch(answerTools, /Number\(text\) - 1/,
     "and so is the 1-based index — the same function reads both shorthands");
-  assert.match(answerTools, /rowIndexOf\(text\)/, "…and that is what this parser resolves a position with");
+  assert.match(answerTools, /rowIndexOf\(/, "…and that is what this parser resolves a position with (one shared reader, called once per token)");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7044,7 +7118,7 @@ test("F4: the round's receipt names the checkpoint and the files in it", () => {
   assert.match(SRC, /checkpointFacts = chain\.checkpoint;/, "…the caller keeps them");
   const receiptAt = SRC.indexOf("const routed = accepted.find((a) => a.role === dispatchRole)");
   assert.ok(receiptAt > 0, "the receipt exists");
-  const receipt = SRC.slice(receiptAt, receiptAt + 3000);
+  const receipt = SRC.slice(receiptAt, receiptAt + 5000);
   assert.match(receipt, /- checkpoint \$\{checkpointFacts\.sha\.slice\(0, 12\)\} 已冻结/, "the commit is named on the receipt");
   assert.match(receipt, /未提交（\$\{checkpointFacts\.leftOut\.length\}）/, "and so is what stayed out of it");
   assert.match(
@@ -7083,4 +7157,145 @@ test("F2: the seeder re-checks gitignore in the DESTINATION, and tells the truth
   assert.match(seed, /export function ignoreVerdict\(/, "…through the three-way verdict, so `not ignored` and `could not ask` stay different");
   assert.match(seed, /rmQuietly\(to\);/, "a path the destination does not ignore is removed again");
   assert.match(seed, /没有带过去/, "…and the receipt says so");
+});
+
+test("editing ANY project file un-finishes the task — completion does not survive a .json edit (2026-09-22)", () => {
+  // The completion record is what the survival invariant reads (lib/session-revival.ts)
+  // AND what a supervising orchestrator reads to call a child `done`. It used to be
+  // deleted only inside the code/doc branch, so a `.json`/`.yaml` edit after
+  // `declare_done` stranded the session: the invariant stayed silent (nothing had
+  // un-finished it) while the ship gate kept blocking on the moved fingerprint.
+  const primaryBook = SRC.indexOf(
+    "if (!state.sessionEditedFiles.includes(rel)) { state.sessionEditedFiles.push(rel); dirty = true; }");
+  const primaryDelete = SRC.indexOf("if (state.completion) { delete state.completion; dirty = true; }", primaryBook);
+  const primaryBranch = SRC.indexOf("if (isCodeFile(path) || isDocFile(path)) {", primaryBook);
+  assert.ok(primaryBook > 0 && primaryBranch > primaryBook, "the primary edit branch exists");
+  assert.ok(primaryDelete > primaryBook && primaryDelete < primaryBranch,
+    "the deletion sits between the bookkeeping and the code/doc gate — outside it");
+
+  const crossBook = SRC.indexOf(
+    "if (!s.sessionEditedFiles.includes(rel)) { s.sessionEditedFiles.push(rel); dirty = true; }");
+  const crossDelete = SRC.indexOf("if (state.completion) { delete state.completion; sessionUnfinished = true; }", crossBook);
+  const crossBranch = SRC.indexOf("if (isProjectFile) {", crossBook);
+  assert.ok(crossBook > 0 && crossBranch > crossBook, "the cross-repo edit branch exists");
+  assert.ok(crossDelete > crossBook && crossDelete < crossBranch,
+    "…and it clears the SESSION's record — `declare_done` writes completion on the PRIMARY state " +
+      "only, so clearing a per-repo one left the session looking finished while this repo's " +
+      "bindings had just been invalidated (quality round P1, 2026-09-22)");
+  assert.match(SRC.slice(crossDelete, crossDelete + 1600), /if \(sessionUnfinished\) persist\(ctx/,
+    "…and the PRIMARY sidecar is written, or a restart would resurrect the record");
+
+  // WHAT DID NOT CHANGE: the ARMING is still code/doc-only ("is there anything to
+  // review?" is a different question, and its answer did not change).
+  assert.match(SRC.slice(primaryBranch, primaryBranch + 1200), /armLoop\(\)/);
+  assert.match(SRC.slice(crossBranch, crossBranch + 800), /armLoop\(\)/);
+});
+
+test("the acceptance round is armed from declare_done, on the EXISTING engine, and never ships (2026-09-22)", () => {
+  const code = codeOnly(SRC);
+  // 1. THE TRIGGER is completion, under LOOP semantics — and an UNDECIDED
+  // session runs those too (real-session P1, 2026-09-22): the first version
+  // asked `state.taskMode === "loop"` in so many words, which matched nothing
+  // for a session whose agent never called `set_gate_mode`, and released the
+  // round SILENTLY (no dispatch, no SKIPPED note). `lib/task-mode.ts` owns the
+  // answer — `isEnforcedMode` — and says why callers must ask it instead of
+  // comparing to "loop".
+  assert.match(
+    code,
+    /if \(isEnforcedMode\(state\.taskMode\) && !orchestratorMode\) \{\s*progress\.step\("真实验收"\);\s*const acceptance = await armAcceptanceRound\(ctx, progress, acceptanceNotes\);/,
+    "the step is wired into declare_done's own body, for loop semantics (undecided included)",
+  );
+  // …AND THE MODE IS NOT RE-DERIVED HERE — a second spelling of “is this the
+  // loop?” is exactly how the two answers drifted apart and released the round.
+  const acceptanceStep = windowOf(
+    "const acceptanceNotes: string[] = [];",
+    'progress.done("全部满足")',
+    "declare_done 的验收步骤",
+  );
+  assert.doesNotMatch(
+    acceptanceStep,
+    /taskMode\s*===\s*"loop"/,
+    "the loop question has ONE home: isEnforcedMode",
+  );
+  assert.match(code, /acceptanceDecision\(\{/, "the decision comes from the module, not from a branch here");
+  // 2. ONE ROUND ENGINE (哲学三): the dispatch goes through dispatchJudgeRound
+  // and the round closes through the settle engine's recorder seam — neither is
+  // re-implemented for this round.
+  const dispatch = windowOf("async function dispatchAcceptanceRound", "\n  /**", "dispatchAcceptanceRound");
+  assert.match(dispatch, /dispatchJudgeRound\(\{/);
+  assert.match(dispatch, /role: "acceptance",/);
+  assert.doesNotMatch(dispatch, /openSessionPane|runTmux\(|appendRecord\(/,
+    "a second pane/dispatch path is exactly what the third philosophy forbids");
+  assert.match(SRC, /recordAcceptance: async \(\{ root, concluded \}\) =>/, "the recorder is wired beside recordQuality's");
+  const arm = windowOf("async function armAcceptanceRound", "\n  /**", "armAcceptanceRound");
+  assert.match(arm, /for \(const root of \[\.\.\.sessionRepos\]\)/,
+    "PER REPO (2026-09-22): every repo this session edited is walked, not just the primary");
+  assert.match(arm, /await acceptanceStepForRepo\(ctx, root, progress, notes\)/);
+  assert.match(arm, /const judgeId = results\.find/, "one refusal carries every repo's outcome");
+  const step = windowOf("async function acceptanceStepForRepo", "\n  // ---------- declare_done tool", "acceptanceStepForRepo");
+  assert.match(step, /acceptanceProblems\(decision\)/, "what blocks is the module's projection, not a second reading");
+  assert.match(step, /dispatchAcceptanceRound\(ctx, root, fingerprint, goalText \?\? ""\)/,
+    "the goal text is handed to the dispatch (one read for both halves, 2026-09-22) — dispatched in ITS repo");
+  assert.match(step, /const st = stateForRepo\(root\)/, "each repo's OWN state, never the primary's");
+  assert.doesNotMatch(step, /primaryRepoRoot/,
+    "nothing in the per-repo step may fall back to the primary repo (that is the bug it fixes)");
+  assert.match(step, /hasPlan: false/, "no approved acceptance plan ⇒ SKIP, never a plan-less dispatch");
+  // 4c. THE AGGREGATE REFUSAL HAS TO BE USABLE (reviewer + quality round P2,
+  //     2026-09-22): `judge_wait` refuses to guess the repo once a session has
+  //     edited more than one (lib/repo-resolve.ts), and an armed repo beside a
+  //     blocking one means both must be settled before completion.
+  assert.match(arm, /const waitLine = \(rows: typeof armedRows\)/,
+    "the wait copy is composed from which repos actually ARMED");
+  assert.match(arm, /repo:\$\{JSON\.stringify\(r\.root\)\}/, "…and names that repo");
+  assert.match(arm, /不会因为验收 READY 而消失/,
+    "…and says the other repo's blocking problem survives the acceptance READY");
+  // 4b. THE PLAN IS READ FROM THE WHOLE FILE, NEVER FROM THE PROMPT COPY
+  //     (real-session P1, 2026-09-22): `goal.text` is capped at
+  //     LOOP_GOAL_MAX_CHARS for prompt injection, and the acceptance plan is
+  //     the skeleton's LAST section — measured on the round that found this, a
+  //     3130-character goal put「真实验收方案」at offset 2164, so the capped copy
+  //     ended before it, the plan read as absent, and a SIZE LIMIT silently
+  //     released the stricter gate.
+  const goalTextRead = windowOf("function acceptanceGoalText", "\n  /**", "acceptanceGoalText");
+  assert.match(goalTextRead, /readFileSync\(loopGoalPathIn\(root\), "utf8"\)/,
+    "the approved file is read whole; the capped prompt copy cannot carry the plan");
+  // 5. A SKIP THE USER HAS TO ACT ON IS NOT LEFT IN THE SIDECAR (quality round
+  //    P2, 2026-09-22): the reason rides into the completion reply, and the
+  //    status command renders the record. The other two skips stay quiet —
+  //    they are the design's steady state.
+  assert.match(step, /notes\.push\(skippedReason\)/);
+  assert.match(SRC, /acceptanceNotes\.length \?/, "the reason reaches the outcome the human reads");
+  const statusCmd = readFileSync(join(ROOT, "lib", "gate-command-tools.ts"), "utf8");
+  assert.match(statusCmd, /acceptanceStatusLine\(state\.acceptance\)/, "…and /gate-status renders the record");
+  // 3. NEVER IN THE SHIP AUTHORITY: fixing an acceptance finding requires a
+  // commit, so a requirement in `unmetRequirements` would block its own remedy.
+  const unmet = GATE_STATE_SRC.slice(GATE_STATE_SRC.indexOf("export function unmetRequirements("));
+  const unmetBody = unmet.slice(0, unmet.indexOf("\nexport function", 10));
+  assert.ok(unmetBody.length > 0, "the ship authority is in gate-state.ts");
+  assert.doesNotMatch(unmetBody, /acceptance/i, "the acceptance round answers completion, never shipping");
+  // 4. A SECOND declare_done MUST REACH THE WAIT BRANCH (reviewer P1,
+  //    2026-09-22). The cascade-close that abandons unrecorded rounds must not
+  //    reclaim the pane the gate is ITSELF waiting on: closing it first made
+  //    `acceptanceRoundAlive` answer false, and the module's own
+  //    `roundAlive === false` rule then dispatched a second round on top of a
+  //    working judge — the first one killed and paid for twice.
+  const cascade = windowOf(
+    "const ownedJudges = ownJudges()",
+    "progress.step(`联关",
+    "acceptance cascade-close",
+  );
+  assert.match(
+    cascade,
+    /child\.role === "acceptance" && acceptanceRoundInFlight\(stateForRepo\(child\.repoRoot\)\.acceptance\)/,
+    "an IN-FLIGHT acceptance round is filtered out of the cascade-close",
+  );
+  // ..and the reading itself stays in the module (哲学二): a literal
+  // `status === "AWAITING"` here would be a second answer to one question.
+  const acceptanceSrc = readFileSync(join(ROOT, "lib", "acceptance-round.ts"), "utf8");
+  assert.match(acceptanceSrc, /export function acceptanceRoundInFlight\(/);
+  assert.doesNotMatch(
+    code,
+    /acceptance\?\.status === "AWAITING"/,
+    "the extension asks the module, never the raw status",
+  );
 });
