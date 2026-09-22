@@ -9946,7 +9946,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
                 : ["要恢复哪个环节，就再调一次 `choose_loop_stages`（用户重新勾选，门禁自己弹框）。"]),
             ].join("\n"),
           }],
-          details: { submitted: true, judges: [], stageOff: true },
+          details: {
+            submitted: true,
+            judges: [],
+            // `stageOff` NAMES A CAUSE, so it may only be true when one of the
+            // two stages really is off (reviewer P2, 2026-09-22): this branch
+            // is also reached with BOTH switches on (the head already carries
+            // a quality READY), and a machine reader trusting the flag would
+            // repeat the misattribution the prose above no longer makes.
+            stageOff: !reviewStageOn || !qualityStageOn,
+          },
         };
       }
       /**
