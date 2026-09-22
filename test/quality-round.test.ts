@@ -5,6 +5,7 @@ import {
   QUALITY_ROLE,
   buildQualityAuditTask,
   decideQualityHold,
+  isSkippedQualityRecord,
   isSourceFile,
   qualityPrecondition,
   qualityRoundSkip,
@@ -81,6 +82,11 @@ test("skippedQualityRecord: a skip is a READY bound to the head, marked as a ski
   assert.equal(rec.skipped, true);
   assert.equal(rec.commitSha, "e".repeat(40));
   assert.match(rec.skipReason ?? "", /非代码文件/);
+  // …and the brand is read through ONE predicate, so this rule and the
+  // extension's in-flight rule cannot drift about what counts as an answer.
+  assert.equal(isSkippedQualityRecord(rec), true);
+  assert.equal(isSkippedQualityRecord({ verdict: "READY", commitSha: "e".repeat(40) }), false);
+  assert.equal(isSkippedQualityRecord(undefined), false);
 });
 
 test("qualityStandingFor: a SKIP record stops answering once the stage is back ON (2026-09-22)", () => {

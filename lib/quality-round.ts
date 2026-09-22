@@ -136,6 +136,27 @@ export interface QualityStanding {
   skipped?: boolean;
 }
 
+/**
+ * IS THIS RECORD A SKIP — the permission `skippedQualityRecord` writes for a
+ * round the quality judge was never owed — rather than a judge's conclusion?
+ *
+ * THE ONE READING OF THE `skipped` BRAND, because two rules must agree about it
+ * and would drift if each tested the field itself:
+ *  - `qualityStandingFor` below: a skip stops answering for a code-bearing
+ *    round once the stage is back ON;
+ *  - the extension's `qualityRoundInFlight`: a skip bound to this head is NOT
+ *    "this round's judge already answered", so the judge dispatched for that
+ *    head is still the one that can conclude it (reading `commitSha` alone
+ *    refused the functional READY of a round whose quality judge was running —
+ *    functional round P1, 2026-09-22).
+ *
+ * The verdict must be READY for the brand to count: `skippedQualityRecord` only
+ * ever writes it that way, and a corrupt record must not buy a permission.
+ */
+export function isSkippedQualityRecord(record: QualityStanding | undefined): boolean {
+  return record?.verdict === "READY" && record.skipped === true;
+}
+
 /** Why the functional reviewer is (or is not) allowed to run. */
 export type QualityStandingResult =
   | { ok: true; basis: "pass" | "skipped" }
@@ -205,7 +226,7 @@ export function qualityStandingFor(input: {
   // this branch, so a READY a judge actually produced keeps standing for its
   // head after the stage is turned back on — invalidating those on every toggle
   // would re-run the whole quality round for nothing.
-  if (standing?.verdict === "READY" && standing.skipped === true) {
+  if (isSkippedQualityRecord(standing)) {
     if (skip.skip || !input.stageOn) return { ok: true, basis: "skipped" };
     return {
       ok: false,

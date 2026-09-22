@@ -6821,7 +6821,8 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   const inFlight = SRC.slice(inFlightAt, inFlightAt + 1400);
   assert.match(inFlight, /reviewTargets\.get\(root\)/, "the ROUND's own record makes it this round's judge");
   assert.match(inFlight, /ownLiveJudges\(\)/, "…a live pane is what makes the verdict still possible");
-  assert.match(inFlight, /quality\?\.commitSha === target\.head/, "once a verdict stands for this head, nothing is owed");
+  assert.match(inFlight, /quality\?\.commitSha === target\.head && !isSkippedQualityRecord\(quality\)/,
+    "once a JUDGE's verdict stands for this head, nothing is owed — a SKIP record is not one (functional P1, 2026-09-22: a skip bound here read as concluded while its quality judge was still running, so the functional READY was refused into BLOCKED and the cancel matrix killed that live pane)");
   // …and the round records that judge only after the spawn was ACCEPTED.
   const noteAt = SRC.indexOf("function noteQualityRoundDispatched(");
   const note = SRC.slice(noteAt, noteAt + 500);

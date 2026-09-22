@@ -461,6 +461,7 @@ import {
 import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   decideQualityHold,
+  isSkippedQualityRecord,
   QUALITY_ROLE,
   qualityPrecondition,
   qualityRoundSkip,
@@ -4282,13 +4283,25 @@ export default function reviewGate(pi: ExtensionAPI) {
    *    previous process has no pane, and a judge that died can never land a
    *    verdict — holding there parks the round forever);
    *  - NO verdict may already stand for this head: once one is recorded, the
-   *    standing answers the question and this must not keep a hold alive.
+   *    standing answers the question and this must not keep a hold alive. A
+   *    SKIP record is NOT such a verdict (2026-09-22) — it is a permission the
+   *    quality judge was never owed, so with the stage back ON the judge
+   *    dispatched for this head is still the one that can conclude it.
    */
   function qualityRoundInFlight(root: string): boolean {
     const target = reviewTargets.get(root);
     const round = target?.qualityRound;
     if (!target || !round || round.head !== target.head) return false;
-    if (stateForRepo(root).quality?.commitSha === target.head) return false;
+    // THE RECORD MUST BE A JUDGE'S ANSWER, NOT A SKIP (functional P1,
+    // 2026-09-22): with the stage back ON a skip bound to this head does not
+    // stand for it (`lib/quality-round.ts`'s `qualityStandingFor`), so reading
+    // `commitSha` alone said "nobody is coming back" on a round whose quality
+    // judge was running — the functional READY was refused and recorded
+    // BLOCKED, and that BLOCKED ran the cancel matrix and killed the live
+    // quality pane. `isSkippedQualityRecord` is the ONE reading of the brand
+    // (a second `skipped` test here is how the two rules drift).
+    const quality = stateForRepo(root).quality;
+    if (quality?.commitSha === target.head && !isSkippedQualityRecord(quality)) return false;
     return ownLiveJudges().some((e) => e.judgeId === round.judgeId);
   }
 
