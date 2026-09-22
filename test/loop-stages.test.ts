@@ -303,12 +303,17 @@ test("acceptance off says what to write INSTEAD, and names the way back", () => 
   assert.doesNotMatch(buildStagesDirective(stagesWith(["review"])), /本轮无真实验收/);
 });
 
-test("the switches ride the loop prompt (wiring)", () => {
+test("the switches ride the loop prompt — and reach an UNDECIDED session too", () => {
   assert.match(SRC, /buildStagesDirective\(loopStagesRecord\(\)\)/, "the extension renders the session's own record");
-  const at = SRC.indexOf('systemPrompt += "\\n\\n" + loopGoalDirectiveText();');
-  assert.ok(at > 0, "the loop's goal directive is injected here");
-  assert.match(SRC.slice(at, at + 1500), /buildStagesDirective/,
-    "and the switch block is injected at the same place — the agent cannot miss it");
+  // ONE injection, shared by both cases: loop, and a session that has not
+  // classified its mode yet (isEnforcedMode treats it as the loop, and the
+  // checklist can already have been answered).
+  const at = SRC.indexOf('if (state.taskMode === "loop" || state.taskMode === undefined) {');
+  assert.ok(at > 0, "the block is injected for the loop AND for an undecided session");
+  assert.match(SRC.slice(at, at + 400), /buildStagesDirective/,
+    "…at that one guarded site, so the agent cannot miss the switches");
+  assert.doesNotMatch(SRC, /if \(state\.taskMode === "explore" \|\| state\.taskMode === "normal"\) \{\n\s+const stagesBlock/,
+    "explore/normal keep the gate out of their prompt");
 });
 
 // ---------------------------------------------------------------------------

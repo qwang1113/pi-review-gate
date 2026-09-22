@@ -180,6 +180,25 @@ test("no record or an ARMED record: dispatch; AWAITING: wait unless the pane is 
   assert.match(acceptanceProblems(acceptanceDecision({ ...base, record: awaiting }))[0]!, /judge_wait/);
 });
 
+test("no usable fingerprint ⇒ block, never dispatch (2026-09-22)", () => {
+  // THE ARM WAS REACHABLE, which is why this is a fix and not a guard for the
+  // record: with an empty fingerprint the round could never bind, its verdict
+  // was recorded as stale (BLOCKED) without a fingerprint, and the next
+  // `declare_done` dispatched AGAIN — a loop with no exit that burns a
+  // top-tier model every time. Fail closed with a reason a human can act on.
+  const base = { hasCodeChange: true, gateOpen: true, fingerprint: "" };
+  for (const record of [undefined, { status: "READY", verdict: "READY", fingerprint: "fp-1", at: AT } as AcceptanceRecord]) {
+    const d = acceptanceDecision({ ...base, ...(record === undefined ? {} : { record }) });
+    assert.equal(d.action, "block", "an unreadable fingerprint blocks instead of dispatching");
+    assert.match(d.action === "block" ? d.reason : "", /指纹/, "the reason names the missing fingerprint");
+    assert.match(d.action === "block" ? d.reason : "", /人处置/, "…and says this one needs a human");
+  }
+  // …and the SKIP reasons still win on their own terms, fingerprint or not:
+  // a switched-off stage and a round with no code are released as before.
+  assert.equal(acceptanceDecision({ ...base, gateOpen: false }).action, "skip");
+  assert.equal(acceptanceDecision({ ...base, hasCodeChange: false }).action, "skip");
+});
+
 test("a settled verdict binds, and the binding is what decides pass or dispatch", () => {
   const base = { hasCodeChange: true, gateOpen: true, fingerprint: "fp-1" };
   const blocked: AcceptanceRecord = { status: "BLOCKED", verdict: "BLOCKED", fingerprint: "fp-1", at: AT, reason: "服务起不来" };
@@ -203,8 +222,9 @@ test("a settled verdict binds, and the binding is what decides pass or dispatch"
   );
   assert.equal(
     acceptanceDecision({ ...base, record: ready, fingerprint: "" }).action,
-    "dispatch",
-    "an unreadable fingerprint can never confirm a pass",
+    "block",
+    "an unreadable fingerprint can never confirm a pass — and it cannot dispatch either " +
+      "(2026-09-22: a round whose verdict could never bind used to be re-dispatched forever)",
   );
   // A SKIPPED/DISABLED record is advice about a state that has since changed:
   // the default branch re-evaluates instead of trusting it.

@@ -20,7 +20,10 @@
  *                   fingerprint and the pass stops applying — the same rule
  *                   the review READY lives by.
  *   BLOCKED         completion is refused with the round's own words; the fix
- *                   is code, so the next round re-accepts what changed.
+ *                   is code, so the next round re-accepts what changed. Also
+ *                   the answer when there is NO USABLE FINGERPRINT at all:
+ *                   a round whose verdict could never bind is never dispatched
+ *                   (2026-09-22 — it used to be, and re-dispatched forever).
  *   SKIPPED         no code at all, or the GOAL itself declared this round has
  *                   no real acceptance (the user approved that clause).
  *   DISABLED        the gate is turned off for this session by the environment
@@ -303,6 +306,39 @@ export function acceptanceDecision(input: AcceptanceDecisionInput): AcceptanceDe
       action: "skip",
       status: "SKIPPED",
       reason: "本轮没有代码改动 —— 没有可真实验收的东西，跳过验收轮。",
+    };
+  }
+  // NO USABLE FINGERPRINT ⇒ NEVER DISPATCH (2026-09-22).
+  //
+  // This arm is REACHABLE, which is why it is a fix and not a guard for the
+  // record: with no fingerprint the round cannot bind anything, yet the old
+  // flow dispatched it, recorded the verdict as stale (BLOCKED), kept the
+  // record without a fingerprint, and dispatched AGAIN on the next
+  // `declare_done` — a loop with no exit that burns a top-tier model every
+  // time. Three facts make it reachable, all verifiable in the tree:
+  //
+  //   1. `declare_done` passes `fingerprintUnavailable: false` as a LITERAL to
+  //      `unmetRequirements` (extensions/review-gate.ts), so the
+  //      “worktree fingerprint unavailable” problem at lib/gate-state.ts:1816
+  //      is never produced from that call site;
+  //   2. this module is fed `computeFingerprint(root)` (the worktree digest —
+  //      an unreadable submodule, a failed `write-tree` or a sparse-checkout
+  //      all make it unavailable), which is NOT the same computation as the
+  //      `headCommitTree` the completion path compares;
+  //   3. `unmetRequirements` returns `[]` outright while a `/gate-bypass` is
+  //      active, so a bypassed session reaches this step with everything else
+  //      released — including the review/precommit problems that would
+  //      otherwise have stopped it first.
+  //
+  // FAIL-CLOSED, and the reason says what the human has to do: this is the
+  // same direction the review and precommit gates take when the worktree
+  // cannot be read. It deliberately does NOT release the round (a skip here
+  // would silently retire the user's acceptance switch).
+  if (input.fingerprint === "") {
+    return {
+      action: "block",
+      reason: "本轮工作区指纹取不到（git 读不出这棵树）—— 验收结论无法绑定到任何内容，所以不派验收轮。" +
+        "这是要人处置的一类（submodule 不可读 / sparse-checkout / 写树失败），把仓库修好后重新 declare_done。",
     };
   }
   const rec = input.record;

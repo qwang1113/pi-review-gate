@@ -107,10 +107,11 @@ export interface RevivalInputs {
   handedOff: boolean;
   /**
    * The gate RECORDED this session's completion (`declare_done`) and nothing
-   * has edited since — the edit path deletes that record ("a new edit
-   * un-finishes the task"), so this one fact covers both halves. Same
-   * category as `handedOff`: finished by its own account, not stalled. The
-   * extension reads it off `state.completion`.
+   * has edited since — ANY file of the repo's own work, not only code/doc (the
+   * edit path deletes `state.completion` outside its code/doc gate; the ARMING
+   * stays inside it, which is a different question), so this one fact covers
+   * both halves. Same category as `handedOff`: finished by its own account,
+   * not stalled. The extension reads it off `state.completion`.
    */
   completed: boolean;
   /** When this session last injected a revival (ms epoch; undefined = never). */

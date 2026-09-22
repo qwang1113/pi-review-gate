@@ -7159,6 +7159,34 @@ test("F2: the seeder re-checks gitignore in the DESTINATION, and tells the truth
   assert.match(seed, /没有带过去/, "…and the receipt says so");
 });
 
+test("editing ANY project file un-finishes the task — completion does not survive a .json edit (2026-09-22)", () => {
+  // The completion record is what the survival invariant reads (lib/session-revival.ts)
+  // AND what a supervising orchestrator reads to call a child `done`. It used to be
+  // deleted only inside the code/doc branch, so a `.json`/`.yaml` edit after
+  // `declare_done` stranded the session: the invariant stayed silent (nothing had
+  // un-finished it) while the ship gate kept blocking on the moved fingerprint.
+  const primaryBook = SRC.indexOf(
+    "if (!state.sessionEditedFiles.includes(rel)) { state.sessionEditedFiles.push(rel); dirty = true; }");
+  const primaryDelete = SRC.indexOf("if (state.completion) { delete state.completion; dirty = true; }", primaryBook);
+  const primaryBranch = SRC.indexOf("if (isCodeFile(path) || isDocFile(path)) {", primaryBook);
+  assert.ok(primaryBook > 0 && primaryBranch > primaryBook, "the primary edit branch exists");
+  assert.ok(primaryDelete > primaryBook && primaryDelete < primaryBranch,
+    "the deletion sits between the bookkeeping and the code/doc gate — outside it");
+
+  const crossBook = SRC.indexOf(
+    "if (!s.sessionEditedFiles.includes(rel)) { s.sessionEditedFiles.push(rel); dirty = true; }");
+  const crossDelete = SRC.indexOf("if (s.completion) { delete s.completion; dirty = true; }", crossBook);
+  const crossBranch = SRC.indexOf("if (isProjectFile) {", crossBook);
+  assert.ok(crossBook > 0 && crossBranch > crossBook, "the cross-repo edit branch exists");
+  assert.ok(crossDelete > crossBook && crossDelete < crossBranch,
+    "…and the cross-repo branch deletes that repo's completion the same way");
+
+  // WHAT DID NOT CHANGE: the ARMING is still code/doc-only ("is there anything to
+  // review?" is a different question, and its answer did not change).
+  assert.match(SRC.slice(primaryBranch, primaryBranch + 1200), /armLoop\(\)/);
+  assert.match(SRC.slice(crossBranch, crossBranch + 800), /armLoop\(\)/);
+});
+
 test("the acceptance round is armed from declare_done, on the EXISTING engine, and never ships (2026-09-22)", () => {
   const code = codeOnly(SRC);
   // 1. THE TRIGGER is completion, under LOOP semantics — and an UNDECIDED
@@ -7195,11 +7223,19 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   assert.doesNotMatch(dispatch, /openSessionPane|runTmux\(|appendRecord\(/,
     "a second pane/dispatch path is exactly what the third philosophy forbids");
   assert.match(SRC, /recordAcceptance: async \(\{ root, concluded \}\) =>/, "the recorder is wired beside recordQuality's");
-  const arm = windowOf("async function armAcceptanceRound", "\n  // ---------- declare_done tool", "armAcceptanceRound");
-  assert.match(arm, /acceptanceProblems\(decision\)/, "what blocks is the module's projection, not a second reading");
-  assert.match(arm, /dispatchAcceptanceRound\(ctx, fingerprint, goalText \?\? ""\)/,
-    "the goal text is handed to the dispatch (one read for both halves, 2026-09-22)");
-  assert.match(arm, /hasPlan: false/, "no approved acceptance plan ⇒ SKIP, never a plan-less dispatch");
+  const arm = windowOf("async function armAcceptanceRound", "\n  /**", "armAcceptanceRound");
+  assert.match(arm, /for \(const root of \[\.\.\.sessionRepos\]\)/,
+    "PER REPO (2026-09-22): every repo this session edited is walked, not just the primary");
+  assert.match(arm, /await acceptanceStepForRepo\(ctx, root, progress, notes\)/);
+  assert.match(arm, /const judgeId = results\.find/, "one refusal carries every repo's outcome");
+  const step = windowOf("async function acceptanceStepForRepo", "\n  // ---------- declare_done tool", "acceptanceStepForRepo");
+  assert.match(step, /acceptanceProblems\(decision\)/, "what blocks is the module's projection, not a second reading");
+  assert.match(step, /dispatchAcceptanceRound\(ctx, root, fingerprint, goalText \?\? ""\)/,
+    "the goal text is handed to the dispatch (one read for both halves, 2026-09-22) — dispatched in ITS repo");
+  assert.match(step, /const st = stateForRepo\(root\)/, "each repo's OWN state, never the primary's");
+  assert.doesNotMatch(step, /primaryRepoRoot/,
+    "nothing in the per-repo step may fall back to the primary repo (that is the bug it fixes)");
+  assert.match(step, /hasPlan: false/, "no approved acceptance plan ⇒ SKIP, never a plan-less dispatch");
   // 4b. THE PLAN IS READ FROM THE WHOLE FILE, NEVER FROM THE PROMPT COPY
   //     (real-session P1, 2026-09-22): `goal.text` is capped at
   //     LOOP_GOAL_MAX_CHARS for prompt injection, and the acceptance plan is
@@ -7214,7 +7250,7 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   //    P2, 2026-09-22): the reason rides into the completion reply, and the
   //    status command renders the record. The other two skips stay quiet —
   //    they are the design's steady state.
-  assert.match(arm, /notes\.push\(skippedReason\)/);
+  assert.match(step, /notes\.push\(skippedReason\)/);
   assert.match(SRC, /acceptanceNotes\.length \?/, "the reason reaches the outcome the human reads");
   const statusCmd = readFileSync(join(ROOT, "lib", "gate-command-tools.ts"), "utf8");
   assert.match(statusCmd, /acceptanceStatusLine\(state\.acceptance\)/, "…and /gate-status renders the record");

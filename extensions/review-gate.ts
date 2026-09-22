@@ -6966,14 +6966,19 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           : absEditPath;
         if (!s.sessionEditedFiles) s.sessionEditedFiles = [];
         if (!s.sessionEditedFiles.includes(rel)) { s.sessionEditedFiles.push(rel); dirty = true; }
+        // A NEW EDIT UN-FINISHES THE TASK — for EVERY file, not only code/doc
+        // (2026-09-22). The completion record is what a supervising
+        // orchestrator reads to decide a child is `done`, AND what the revival
+        // guard reads to decide a session may be left stopped. Leaving it in
+        // place for a `.json`/`.yaml` edit stranded exactly that session: the
+        // invariant stayed silent (nothing had "un-finished" it) while the
+        // ship gate kept blocking, because the worktree fingerprint HAD moved.
+        // The ARMING below stays code/doc-only — that is the different
+        // question ("is there anything to review?") and its answer did not
+        // change.
+        if (s.completion) { delete s.completion; dirty = true; }
         if (isProjectFile) {
           invalidateBindings(s);
-          // A NEW EDIT UN-FINISHES THE TASK (round-2 hardening). The
-          // completion record is what a supervising orchestrator reads to
-          // decide a child is `done`; a session that starts editing again is
-          // working, whoever asked it to — including a human typing straight
-          // into the pane, which no orchestration tool can observe.
-          if (s.completion) delete s.completion;
           armLoop();
           if (s.pausedQuestion) delete s.pausedQuestion;
           dirty = true;
@@ -7016,6 +7021,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       sessionEditedPaths.add(rel);
       if (!state.sessionEditedFiles) state.sessionEditedFiles = [];
       if (!state.sessionEditedFiles.includes(rel)) { state.sessionEditedFiles.push(rel); dirty = true; }
+      // Same as the cross-repo branch above: ANY file of this repo's own
+      // project un-finishes the task (2026-09-22), while the ARMING below
+      // stays code/doc-only.
+      if (state.completion) { delete state.completion; dirty = true; }
       if (isCodeFile(path) || isDocFile(path)) {
         // Scope tracking: this file is part of THIS session's own work — it is
         // always IN scope, even under a user-granted scope limit (which the
@@ -7034,10 +7043,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           if (idx >= 0) state.scopeLimit.preexistingFiles.splice(idx, 1);
         }
         invalidateBindings(state);
-        // Same as the cross-repo branch above: editing again means this task
-        // is not finished any more, so the completion an orchestrator reads
-        // must go with it.
-        if (state.completion) delete state.completion;
         armLoop();
         // The agent resumed working on its own — a standing question pause
         // (ask_user) is moot; clear it so the loop enforces again.
@@ -12177,10 +12182,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    */
   async function dispatchAcceptanceRound(
     ctx: unknown,
+    /** The repo this round runs in — one round per repo the session edited. */
+    root: string,
     fingerprint: string,
     goalText: string,
   ): Promise<{ ok: true; judgeId: string } | { ok: false; error: string }> {
-    const root = primaryRepoRoot;
     const target = reviewTargets.get(root);
     const stamp = fingerprint !== "" ? fingerprint.slice(0, 12) : String(Date.now());
     const streamPath = pathJoin(root, ".pi", "review-stream", `acceptance-${stamp}.jsonl`);
@@ -12236,8 +12242,77 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     /** Skip reasons worth telling the human — see the skip branch below. */
     notes: string[] = [],
   ) {
-    const root = primaryRepoRoot;
+    // EVERY REPO THIS SESSION EDITED, each judged on its own facts
+    // (2026-09-22). The record was always per-repo (`stateForRepo(root)`), and
+    // so are the goal, the fingerprint and the code-change flag — reading only
+    // the primary's `hasCodeChange` recorded 「SKIPPED —— 本轮没有代码改动」, a
+    // reason that was simply not true, for a session whose code lived in a
+    // secondary repo. One refusal is returned for all of them, each problem
+    // labelled with its repo when there is more than one.
+    const results: Array<{ problems: string[]; armed: boolean; judgeId?: string }> = [];
+    for (const root of [...sessionRepos]) {
+      const outcome = await acceptanceStepForRepo(ctx, root, progress, notes);
+      if (outcome !== undefined) results.push(outcome);
+    }
+    if (results.length === 0) return undefined;
+    const problems = results.flatMap((r) => r.problems);
+    const armed = results.some((r) => r.armed);
+    const judgeId = results.find((r) => r.judgeId !== undefined)?.judgeId;
+    // The tool call is ENDING without completing, so the progress line is
+    // closed the same way every other refusal in `declare_done` closes it.
+    progress.fail?.(armed ? "真实验收轮已派出" : "真实验收未过");
+    return {
+      content: [{
+        type: "text" as const,
+        text: buildRejection({
+          what: armed
+            ? "declare_done 暂不能完成 —— 真实验收轮已派出"
+            : `declare_done 被拒 —— ${problems.length} 项门禁未满足`,
+          why: problems.length > 0
+            ? "下面是门禁**重新核对**出的未满足项（服务端复检，不看你的 summary）：\n" +
+              problems.map((p) => `  - ${p}`).join("\n")
+            : "门禁自己派出了 acceptance 轮，在它交卷之前这一轮不能算完成。",
+          by: "agent",
+          next: armed
+            ? "用 `judge_wait({role:\"acceptance\"})` 等它的结论（report 落盘后门禁会用标准报告唤醒你）；" +
+              "验收 READY 且内容没有变化时，再调一次 `declare_done` 就会完成。"
+            : "按验收 findings 修 → 走一遍审查循环（`judge_submit({role:\"reviewer\"})`）→ 再 `declare_done`；" +
+              "内容一改，旧的验收结论自动失效并重新验收。",
+        }),
+      }],
+      details: {
+        accepted: false,
+        problems,
+        ...(armed ? { acceptanceArmed: true } : {}),
+        ...(judgeId === undefined ? {} : { judgeId }),
+      },
+      isError: true,
+    };
+  }
+
+  /**
+   * ONE REPO'S ACCEPTANCE STEP — the decision, its record writes and its
+   * dispatch, for a SINGLE repo root.
+   *
+   * Extracted from `armAcceptanceRound` (2026-09-22) so that the round is
+   * decided per repo: the goal, the fingerprint, the code-change flag and the
+   * `acceptance` record are all per-repo facts, and a session whose code lived
+   * in a secondary repo used to get a false 「本轮没有代码改动」 skip.
+   *
+   * Returns `undefined` when this repo owes nothing (pass or skip — the skip is
+   * recorded here, with its reason), else the shape `armAcceptanceRound`
+   * aggregates into one refusal.
+   */
+  async function acceptanceStepForRepo(
+    ctx: unknown,
+    root: string,
+    /** Only `step` is used here: a skip the user has to act on must show up in the progress line. */
+    progress: { step?: (t: string) => void },
+    notes: string[],
+  ): Promise<{ problems: string[]; armed: boolean; judgeId?: string } | undefined> {
     const st = stateForRepo(root);
+    /** Names the repo in every problem, for the sessions that have more than one. */
+    const label = sessionRepos.size > 1 ? `[${repoLabel(root)}] ` : "";
     // ONE READ FOR BOTH HALVES (quality round P2, 2026-09-22): the declaration
     // and the plan handed to the judge come from the SAME goal — and only from
     // one that is IN FORCE. `parseNoAcceptanceDeclaration` only reads TEXT, so
@@ -12267,40 +12342,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       ...(st.acceptance === undefined ? {} : { record: st.acceptance }),
       roundAlive: acceptanceRoundAlive(root),
     });
-    /** One shape for every refusal — the same fields `declare_done` rejects with. */
-    const refusal = (problems: string[], armed: boolean, judgeId?: string) => {
-      // The tool call is ENDING without completing, so the progress line is
-      // closed the same way every other refusal in `declare_done` closes it.
-      progress.fail?.(armed ? "真实验收轮已派出" : "真实验收未过");
-      return {
-      content: [{
-        type: "text" as const,
-        text: buildRejection({
-          what: armed
-            ? "declare_done 暂不能完成 —— 真实验收轮已派出"
-            : `declare_done 被拒 —— ${problems.length} 项门禁未满足`,
-          why: problems.length > 0
-            ? "下面是门禁**重新核对**出的未满足项（服务端复检，不看你的 summary）：\n" +
-              problems.map((p) => `  - ${p}`).join("\n")
-            : "门禁自己派出了 acceptance 轮，在它交卷之前这一轮不能算完成。",
-          by: "agent",
-          next: armed
-            ? "用 `judge_wait({role:\"acceptance\"})` 等它的结论（report 落盘后门禁会用标准报告唤醒你）；" +
-              "验收 READY 且内容没有变化时，再调一次 `declare_done` 就会完成。"
-            : "按验收 findings 修 → 走一遍审查循环（`judge_submit({role:\"reviewer\"})`）→ 再 `declare_done`；" +
-              "内容一改，旧的验收结论自动失效并重新验收。",
-        }),
-      }],
-      details: {
-        accepted: false,
-        problems,
-        ...(armed ? { acceptanceArmed: true } : {}),
-        ...(judgeId === undefined ? {} : { judgeId }),
-      },
-      isError: true,
-    };
-    };
-
     if (decision.action === "pass") return undefined;
     if (decision.action === "skip") {
       // RECORDED, never silent — the same rule the quality round's SKIP
@@ -12346,16 +12387,20 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     if (decision.action === "wait" || decision.action === "block") {
       // The projection, not a second reading of the decision: what declares
       // itself blocking is what lands in the completion problem list.
-      return refusal(acceptanceProblems(decision), false);
+      return { problems: acceptanceProblems(decision).map((p) => label + p), armed: false };
     }
-    const dispatched = await dispatchAcceptanceRound(ctx, fingerprint, goalText ?? "");
+    // THE MODULE NEVER SAYS "dispatch" WITHOUT A USABLE FINGERPRINT: it blocks
+    // instead (see `acceptanceDecision`'s no-fingerprint rule, lib/acceptance-round.ts),
+    // so this call is only reachable with one. A second judgement here would be
+    // the drift that rule exists to prevent.
+    const dispatched = await dispatchAcceptanceRound(ctx, root, fingerprint, goalText ?? "");
     if (!dispatched.ok) {
-      return refusal(
-        [`验收轮派不出去（${dispatched.error}）—— 门禁不会静默跳过它；修好之后再 declare_done。`],
-        false,
-      );
+      return {
+        problems: [`${label}验收轮派不出去（${dispatched.error}）—— 门禁不会静默跳过它；修好之后再 declare_done。`],
+        armed: false,
+      };
     }
-    return refusal([], true, dispatched.judgeId);
+    return { problems: [], armed: true, judgeId: dispatched.judgeId };
   }
 
   // ---------- declare_done tool ----------
@@ -14668,21 +14713,32 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // gone (2026-08-30): the goal and the decision table must reach the first
     // turn, before any edit arms the gate. An UNCONFIRMED goal has its body
     // withheld (L8) and blocks ships at L1; the hooks stay out of it.
+    // THE USER'S SWITCH RECORD, READABLE BY THE AGENT (2026-09-22, user ask).
+    //
+    // Every other surface that knows about a switched-off stage is either the
+    // dispatch (silent), a tool reply (too late), or the user's own dialog
+    // (not addressed to the agent) — so a released stage used to be a fact
+    // the agent could only learn by doing work nobody owes. Measured the same
+    // day: acceptance off, and the session still wrote a real-acceptance plan
+    // and started building its scene. The rendering itself ("no record ⇒
+    // nothing", the per-stage wording) lives in lib/loop-stages.ts, next to
+    // the table the user's checklist renders.
+    //
+    // AN UNDECIDED SESSION GETS IT TOO (2026-09-22): `isEnforcedMode(undefined)`
+    // is true, the edit gate and the completion path already treat an undecided
+    // session as the loop, and `stagesOffered` lets it answer the checklist —
+    // so a session that answered the box BEFORE calling `set_gate_mode` must not
+    // lose the fact for however long it stays undecided. Orchestrator is
+    // excluded (never offered the switches, so it has no record to render),
+    // and explore/normal keep the gate out of their prompt entirely.
+    if (state.taskMode === "loop" || state.taskMode === undefined) {
+      const stagesBlock = buildStagesDirective(loopStagesRecord());
+      if (stagesBlock) systemPrompt += "\n\n" + stagesBlock;
+    }
+
     if (state.taskMode === "loop") {
       const goalConfirmed = goalStageSatisfied();
       systemPrompt += "\n\n" + loopGoalDirectiveText();
-      // THE USER'S SWITCH RECORD, READABLE BY THE AGENT (2026-09-22, user ask).
-      //
-      // Every other surface that knows about a switched-off stage is either the
-      // dispatch (silent), a tool reply (too late), or the user's own dialog
-      // (not addressed to the agent) — so a released stage used to be a fact
-      // the agent could only learn by doing work nobody owes. Measured the same
-      // day: acceptance off, and the session still wrote a real-acceptance plan
-      // and started building its scene. The rendering itself ("no record ⇒
-      // nothing", the per-stage wording) lives in lib/loop-stages.ts, next to
-      // the table the user's checklist renders.
-      const stagesBlock = buildStagesDirective(loopStagesRecord());
-      if (stagesBlock) systemPrompt += "\n\n" + stagesBlock;
       // 2026-09-17: once the un-goaled turn count hits the threshold, the
       // standing goal directive is escalated to the force-negotiate form on
       // EVERY turn (not only in the RESUME injection) — the agent cannot miss
