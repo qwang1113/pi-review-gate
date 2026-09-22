@@ -1896,8 +1896,9 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   assert.equal(calls, 1, "exactly one call site — a second reading would be a second contract");
   const body = toolBodyOf("declare_done");
   assert.match(body, /stationArrivalProblems\(/, "…and it is inside declare_done");
-  assert.match(body, /state\.taskMode === "loop" && goalStageSatisfied\(\)/,
-    "the station is only known once the user approved a goal that carries one — or switched the goal stage off");
+  assert.match(body, /isEnforcedMode\(state\.taskMode\) && goalStageSatisfied\(\)/,
+    "the station is only known once the user approved a goal that carries one — or switched the goal stage off; " +
+    "the loop question is isEnforcedMode's, so an UNDECIDED session is judged too (real-session P1, 2026-09-22)");
   assert.match(body, /changedFiles\(root\)/, "committed-ness is measured, not asserted by the agent");
   assert.match(body, /st\.shippedKinds\?\.includes\("pr-create"\)/,
     "a `pr` round arrives on a `gh pr create` the GATE watched succeed — not on a claim");
@@ -2008,8 +2009,9 @@ test("the ship gate reads the station from the APPROVED contract, and from nothi
   assert.match(fn, /state\.taskMode === "orchestrator"/);
   assert.match(fn, /approvedPlan\?\.deliveryStation/,
     "an orchestration's ceiling is the plan the USER approved, not the plan file on disk");
-  assert.match(fn, /state\.taskMode !== "loop"\) return undefined/,
-    "explore and normal have no contract — undefined, never the strictest station");
+  assert.match(fn, /!isEnforcedMode\(state\.taskMode\)\) return undefined/,
+    "explore and normal have no contract — undefined, never the strictest station; " +
+    "undecided carries the loop's contract (real-session P1, 2026-09-22), so it is NOT in this branch");
   assert.match(fn, /loopGoalConfirmed\(root, st\)\) return undefined/,
     "…and neither does a repo whose goal was never approved (L8 refuses that ship on its own terms)");
   assert.match(fn, /st\.loopGoal\?\.station \?\? DEFAULT_DELIVERY_STATION/,
@@ -7152,12 +7154,29 @@ test("F2: the seeder re-checks gitignore in the DESTINATION, and tells the truth
 
 test("the acceptance round is armed from declare_done, on the EXISTING engine, and never ships (2026-09-22)", () => {
   const code = codeOnly(SRC);
-  // 1. THE TRIGGER is completion, and only in loop mode: an orchestrator has
-  // no code of its own to accept, and explore/normal completions are advisory.
+  // 1. THE TRIGGER is completion, under LOOP semantics — and an UNDECIDED
+  // session runs those too (real-session P1, 2026-09-22): the first version
+  // asked `state.taskMode === "loop"` in so many words, which matched nothing
+  // for a session whose agent never called `set_gate_mode`, and released the
+  // round SILENTLY (no dispatch, no SKIPPED note). `lib/task-mode.ts` owns the
+  // answer — `isEnforcedMode` — and says why callers must ask it instead of
+  // comparing to "loop".
   assert.match(
     code,
-    /if \(!orchestratorMode && state\.taskMode === "loop"\) \{\s*progress\.step\("真实验收"\);\s*const acceptance = await armAcceptanceRound\(ctx, progress, acceptanceNotes\);/,
-    "the step is wired into declare_done's own body, loop only",
+    /if \(isEnforcedMode\(state\.taskMode\) && !orchestratorMode\) \{\s*progress\.step\("真实验收"\);\s*const acceptance = await armAcceptanceRound\(ctx, progress, acceptanceNotes\);/,
+    "the step is wired into declare_done's own body, for loop semantics (undecided included)",
+  );
+  // …AND THE MODE IS NOT RE-DERIVED HERE — a second spelling of “is this the
+  // loop?” is exactly how the two answers drifted apart and released the round.
+  const acceptanceStep = windowOf(
+    "const acceptanceNotes: string[] = [];",
+    'progress.done("全部满足")',
+    "declare_done 的验收步骤",
+  );
+  assert.doesNotMatch(
+    acceptanceStep,
+    /taskMode\s*===\s*"loop"/,
+    "the loop question has ONE home: isEnforcedMode",
   );
   assert.match(code, /acceptanceDecision\(\{/, "the decision comes from the module, not from a branch here");
   // 2. ONE ROUND ENGINE (哲学三): the dispatch goes through dispatchJudgeRound

@@ -6657,7 +6657,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     if (state.taskMode === "orchestrator") {
       return state.orchestrator?.approvedPlan?.deliveryStation ?? DEFAULT_DELIVERY_STATION;
     }
-    if (state.taskMode !== "loop") return undefined;
+    if (!isEnforcedMode(state.taskMode)) return undefined;
     // A stage that is off has no contract to read a station from — the same
     // `undefined` ("no ceiling beyond the ordinary gates") a session that
     // never negotiated a goal has always got.
@@ -12430,7 +12430,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       const ownedJudges = ownJudges().filter((child) =>
         !(child.role === "acceptance" && acceptanceRoundInFlight(stateForRepo(child.repoRoot).acceptance)),
       );
-      if (ownedJudges.length > 0 && (state.taskMode === "loop" || orchestratorMode)) {
+      if (ownedJudges.length > 0 && isEnforcedMode(state.taskMode)) {
         const ownPane = process.env.TMUX_PANE?.trim() || undefined;
         const run = (argv: readonly string[]) => runTmux(argv);
         const closed: string[] = [];
@@ -12473,7 +12473,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
           }
         }
-        if (state.taskMode === "loop" && !goalStageSatisfied()) {
+        if (isEnforcedMode(state.taskMode) && !goalStageSatisfied()) {
           completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
         }
         // DID THIS ROUND ARRIVE AT ITS STATION (2026-09-06)?
@@ -12502,7 +12502,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // second repo's `pr` contract go unchecked behind the primary repo's
         // `precommit` one — the strictest station demands the LEAST here,
         // which is the opposite of the ship gate's fold.
-        if (state.taskMode === "loop" && goalStageSatisfied()) {
+        if (isEnforcedMode(state.taskMode) && goalStageSatisfied()) {
           for (const root of sessionRepos) {
             const station = deliveryStationFor(root);
             if (station === undefined) continue; // no contract for that repo
@@ -12610,14 +12610,20 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // else was unmet), so the judge runs on content that is otherwise
       // finished, and its verdict binds to that content's fingerprint.
       //
-      // LOOP ONLY, and never for an orchestrator: explore/normal completions
-      // are advisory and must not spend a top-tier judge, and a project
-      // manager has no code of its own to accept.
+      // LOOP SEMANTICS ONLY, never an orchestrator — and UNDECIDED COUNTS AS
+      // THE LOOP (real-session P1, 2026-09-22). The first version of this line
+      // asked whether the mode WAS loop, in so many words, and that question has
+      // no true branch for a session whose agent never called `set_gate_mode`:
+      // no dispatch, no SKIPPED note, `declare_done` returned "done accepted".
+      // `isEnforcedMode` is the ONE answer to “does this session run the loop's
+      // semantics?” — lib/task-mode.ts says so, and the SAME question was asked
+      // wrong a few lines above for the goal and station checks. Never re-derive
+      // it here.
       // WHAT THE ACCEPTANCE ROUND DID WHEN IT DID NOT RUN (quality round P2,
       // 2026-09-22): a note for the outcome the human reads, not only for the
       // sidecar — see the skip branch in `armAcceptanceRound`.
       const acceptanceNotes: string[] = [];
-      if (!orchestratorMode && state.taskMode === "loop") {
+      if (isEnforcedMode(state.taskMode) && !orchestratorMode) {
         progress.step("真实验收");
         const acceptance = await armAcceptanceRound(ctx, progress, acceptanceNotes);
         if (acceptance) return acceptance;
