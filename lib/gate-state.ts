@@ -1838,15 +1838,16 @@ export function unmetRequirements(
   // a READY that any later edit walked away from).
   if (state.hasCodeChange && !reviewOn && qualityOn) {
     const quality = state.quality;
-    // A SKIP RECORD IS NOT A CONCLUSION HERE EITHER (2026-09-22, acceptance
-    // round P1). `skippedQualityRecord` writes one for a round the quality
-    // judge was never owed — the stage was off, or the round carried no code —
-    // so it says nothing about the code this ship is about. Reading only
-    // `verdict` let「quality 关 → 编辑 → judge_submit（写下跳过记录）→ 重开
-    // quality」commit and push with no quality judge ever having run: the same
-    // cross-switch rule `lib/quality-round.ts`'s `qualityStandingFor` closed on
-    // the review path, missed on this second reader. The brand has ONE reading
-    // (`isSkippedQualityRecord`), so this reader cannot drift from the other.
+    // A SKIP RECORD IS NOT A CONCLUSION HERE EITHER (2026-09-22) — the P1 the
+    // plan's last-round real-run 验收 found. `skippedQualityRecord` writes one
+    // for a round the quality judge was never owed: the stage was off, or the
+    // round carried no code. It says nothing about the code this ship is about.
+    // Reading only `verdict` let「quality 关 → 编辑 → judge_submit（写下跳过记录）
+    // → 重开 quality」commit and push with no quality judge ever having run: the
+    // same cross-switch rule `lib/quality-round.ts`'s `qualityStandingFor`
+    // closed on the review path, missed on this second reader. The brand has ONE
+    // reading (`isSkippedQualityRecord`), so this reader cannot drift from the
+    // other.
     const skipped = isSkippedQualityRecord(quality);
     if (skipped || quality?.verdict !== "READY") {
       problems.push(
