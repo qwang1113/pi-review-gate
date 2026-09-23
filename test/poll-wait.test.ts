@@ -92,6 +92,9 @@ test("ESC ends a long sleep at once, not at the end of the gap", async () => {
     isDone: () => false,
     budgetMs: 60_000,
     pollMs: 45_000,
+    // A sleep that never ends on its own: only the abort can end this wait,
+    // and no real 45s timer is left to hold the test process open.
+    sleep: () => new Promise<void>(() => {}),
     signal: controller.signal,
   });
   assert.equal(result.aborted, true);
