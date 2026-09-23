@@ -62,6 +62,8 @@ interface Fake {
   delays: number[];
   calls: GhCall[];
   enabled: boolean;
+  /** The SESSION's gate mode (a repo's own state carries none). */
+  mode: string | undefined;
   repo: { ok: boolean; error: string };
   /** What each faked gh member answers. */
   openPr: { pr?: PrSummary; error?: string };
@@ -121,6 +123,7 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     delays: [],
     calls: [],
     enabled: true,
+    mode: undefined,
     repo: { ok: true, error: "" },
     openPr: { pr: PR },
     slug: "o/r",
@@ -141,6 +144,7 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     persist: (_ctx, root) => { state.persisted.push(root); },
     repoDir: (root) => `${root}/dir`,
     copilotEnabled: () => state.enabled,
+    sessionMode: () => state.mode,
     armLoop: () => { state.armed += 1; },
     log: (message) => { state.logs.push(message); },
     delay: (ms) => { state.delays.push(ms); return Promise.resolve(); },
@@ -400,7 +404,10 @@ function landedPayload(): CopilotPayload {
 
 test("wait: in loop mode the call BLOCKS until the review lands, then reads it in the same call", async () => {
   const f = fake();
-  f.st.taskMode = "loop";
+  // The SESSION is in loop mode; the repo's own state carries no mode (a
+  // second repo's never does) — the wait must still block.
+  f.mode = "loop";
+  assert.equal(f.st.taskMode, undefined);
   awaiting(f);
   const waiting: boolean[] = [];
   f.deps.onWaiting = (active) => { waiting.push(active); };
@@ -423,7 +430,7 @@ test("wait: in loop mode the call BLOCKS until the review lands, then reads it i
 
 test("wait: ESC cuts the blocking wait short with a resumable reply, never 'end the turn'", async () => {
   const f = fake();
-  f.st.taskMode = "orchestrator";
+  f.mode = "orchestrator";
   awaiting(f);
   const controller = new AbortController();
   f.deps.delay = async () => { controller.abort(); };

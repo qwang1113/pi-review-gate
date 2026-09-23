@@ -173,6 +173,12 @@ export interface CopilotReviewToolDeps {
   gh: CopilotGhAccess;
   /** The poll's wait between attempts (injected so tests do not sleep). */
   delay(ms: number): Promise<void>;
+  /**
+   * This SESSION's gate mode. Not `stateFor(root).taskMode`: the mode is a
+   * session fact kept on the primary state only, and a second repo's state
+   * carries none — reading it there would never block in that repo.
+   */
+  sessionMode(): string | undefined;
   /** The clock the blocking wait reads (injected so tests can age a wait). */
   now?: () => number;
   /**
@@ -1044,7 +1050,7 @@ async function runCopilotReview(
     const reply = await doCopilotReview(deps, params, signal, onUpdate, ctx);
     if (reply.details?.status !== "AWAITING" || pass >= COPILOT_MAX_WAIT_PASSES) return reply;
     const target = deps.resolveRepo(typeof params.repo === "string" ? params.repo : undefined);
-    if (!target.ok || !watchRunsInMode(deps.stateFor(target.root).taskMode)) return reply;
+    if (!target.ok || !watchRunsInMode(deps.sessionMode())) return reply;
     const outcome = await waitForCopilot(deps, target.root, signal, onUpdate);
     if (outcome.ended) continue;
     return cutShortReply(reply, outcome);

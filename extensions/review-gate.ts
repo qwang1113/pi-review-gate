@@ -12783,6 +12783,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
     repoDir: (root) => repoDirFor(root),
     copilotEnabled: (st) => copilotEnabled(st),
+    sessionMode: () => state.taskMode,
     onWaiting: (active) => {
       copilotWaitSince = active ? Date.now() : undefined;
       if (latestCtx) reportChildState(latestCtx, undefined, { force: true });
