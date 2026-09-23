@@ -12642,7 +12642,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             // list is a union across sessions and would otherwise replay
             // earlier tasks' decisions in every later report.
             formatProxyDecisionReport(
-              sessionProxyDecisions(allProxyDecisions(), [state.sessionId, readInheritance().predecessorSession]),
+              sessionProxyDecisions(allProxyDecisions(), [state.sessionId ?? undefined, readInheritance().predecessorSession]),
             ),
         }],
         details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
