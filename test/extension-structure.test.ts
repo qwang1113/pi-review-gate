@@ -4641,61 +4641,18 @@ test("REGRESSION (P0b): the no-tests-warning is wired into the tool result and /
     "the gate-status warning must be keyed on the skipped scope");
 });
 
-test("the Copilot requirement stops nagging ONLY where a watcher owns the wait", () => {
-  // The background watcher turns "wait for Copilot" from a poll the agent has
-  // to run into a wake it receives. The wiring that matters is small and easy
-  // to lose in a refactor, so it is pinned here:
-  //
-  //  1. the filter is passed by the two NUDGE sites (the L2 continuation and
-  //     the revival timer), never by declare_done — a review that has not
-  //     landed is still an unfinished task, and a session that could be talked
-  //     into "done" while waiting is the whole bug this feature fixes;
-  //  2. the watcher is armed from EVERY persist, so no state write can leave an
-  //     AWAITING cycle unwatched;
-  //  3. it has a lifecycle: session_start re-arms it from the restored sidecar,
-  //     session_shutdown stops it, and a tick re-checks the mode and the cycle.
-  const nudged = SRC.split("copilotProblemsFor(st, { nudge: true, root })").length - 1;
-  assert.equal(nudged, 2, "the continuation and the revival timer are the two nudge sites");
-  const doneBody = toolBodyOf("declare_done");
-  assert.match(doneBody, /copilotProblemsFor\(st\)/,
-    "declare_done reads the UNFILTERED list — a wait is not a completion");
-  assert.doesNotMatch(doneBody, /watchedAwait|nudge: true/,
-    "and it must never learn about the watcher's exception");
-
-  assert.match(SRC, /function syncCopilotWatch\(/, "the arming helper must exist");
-  assert.ok(SRC.includes("syncCopilotWatch(primaryRepoRoot)"),
-    "persist() arms the primary repo's watcher — every bare persist(ctx) goes through it");
-  assert.match(SRC, /if \(root === primaryRepoRoot\) \{ persist\(ctx\); return; \}/,
-    "and persistRepo delegates the primary repo to it instead of syncing twice");
-  assert.equal(SRC.split("a watcher never fails a persist").length - 1, 2,
-    "the primary funnel and a second repo's own sidecar write are the two arming sites");
-  assert.match(SRC, /syncAllCopilotWatches\(\);/, "session_start re-arms from the restored state");
-  assert.match(SRC, /stopAllCopilotWatches\(\);/, "session_shutdown stops the timers it owns");
-  assert.match(SRC, /watchRunsInMode\(state\.taskMode\)/, "a tick re-checks the mode");
-  assert.match(SRC, /if \(latestCtx\?\.isIdle\(\)\) pi\.sendUserMessage\(line\);/,
-    "and the wake uses the idle/steer idiom");
-  // The cadence, the verdict and the wording all come from the pure module —
-  // the extension owns the timer and the delivery, nothing else.
-  assert.match(SRC, /decideWatchTick\(\{ state: cycle, probe, now: Date\.now\(\) \}\)/);
-  // A tick awaits two network calls (the slug, then the probe), and the cycle
-  // can move inside those seconds (a re-request bumps `rounds`, a release ends
-  // it, a push re-arms it), so the ownership check exists on BOTH sides of the
-  // awaits — before them, to skip a tick nobody is waiting for, and after
-  // them, so a wake cannot describe an old cycle nor a `stopCopilotWatch`
-  // clear the timer a newer one armed. There is deliberately NO third check
-  // after the wake: everything from the last probe to the stop is synchronous.
-  assert.match(SRC, /function tickStillOwns\(root: string, entry: CopilotWatchHandle\)/);
-  assert.equal(SRC.split("tickStillOwns(root, entry)").length - 1, 2,
-    "one guard before the awaits and one after — and no unreachable third");
-  // ONE wake per cycle: a delivered wake leaves the state AWAITING until the
-  // agent answers it, so every persist in between would re-arm the same cycle
-  // and steer the same message in again. The memo is what stops that — and it
-  // may only be set where the wake was actually DELIVERED.
-  assert.match(SRC, /const copilotWoken = new Set<string>\(\)/);
-  assert.equal(SRC.split("copilotWoken.add(entry.key)").length - 1, 1,
-    "exactly one place remembers a delivered wake");
-  assert.match(SRC, /copilotWoken\.has\(key\)/, "and arming consults it before arming again");
-  assert.match(SRC, /copilotWoken\.clear\(\)/, "a resumed session may announce the cycle again");
+test("the Copilot wait blocks inside copilot_review and reads as a gate-owned wait (2026-09-23)", () => {
+  // The background watcher that woke an idle session is GONE: it was why the
+  // tool told the agent to end its turn, and an orchestration child that did
+  // so read as `idle` — its manager was woken every minute for the whole wait.
+  assert.doesNotMatch(SRC, /copilotTick|deliverCopilotWake|copilotWoken|syncCopilotWatch|watchedAwait/,
+    "no background Copilot watcher may come back");
+  // Every caller reads the one unfiltered list: a wait is never hidden from a nudge.
+  assert.doesNotMatch(SRC, /copilotProblemsFor\(st, \{/, "no nudge-only filter");
+  // The blocking call is reported on the child heartbeat as a gate-owned wait,
+  // so a supervising manager is not woken by it.
+  assert.match(SRC, /if \(copilotWaitSince !== undefined\) return \{ role: "copilot", since: copilotWaitSince \}/);
+  assert.match(SRC, /onWaiting: \(active\) => \{\n\s+copilotWaitSince = active \? Date\.now\(\) : undefined;/);
 });
 
 test("copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {

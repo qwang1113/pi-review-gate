@@ -1,6 +1,16 @@
 /**
- * The BACKGROUND WATCHER for one Copilot review request: how often to look,
- * what a look means, and the one message it sends when there is news.
+ * The WAIT for one Copilot review request: how often to look, what a look
+ * means, and the blocking loop `copilot_review` runs until there is news.
+ *
+ * 2026-09-23: THE WAIT BLOCKS INSIDE THE TOOL. Until then a background timer in
+ * the extension polled the PR and sent the session a wake message, and the tool
+ * told the agent to end its turn meanwhile. An orchestration child that did so
+ * reported `idle` for the whole ~16-minute wait, and its manager's
+ * `orchestrator_wait` was woken every minute by "stopped without declare_done"
+ * (prime orchestration, 2026-09-23). A session does not end its turn before
+ * `declare_done` (AGENTS.md 总则), so the wait is {@link awaitCopilotNews}: the
+ * same tick decision, run by `copilot_review` itself, interruptible by ESC and
+ * by the user typing. The history below explains why the GATE polls at all.
  *
  * WHY THIS EXISTS. Until 2026-09-14 the wait for a Copilot review was carried
  * by the agent: the then-`check_copilot_review` polled for 3 × 20 seconds
@@ -14,19 +24,17 @@
  * agent cannot see the PR, and the only thing it can do with a tool call is
  * ask again.
  *
- * The gate CAN see the PR. So the waiting moves here: a timer polls the LIGHT
- * query (~1 KB, see `COPILOT_PROBE_QUERY`) while the requirement is AWAITING,
- * and the agent is woken only when there is something to act on. `steer`-style
- * polling is replaced by this, and it is why `copilotProblems({watchedAwait})`
- * can stop nagging the revival timer about a wait that is already being
- * watched.
+ * The gate CAN see the PR. So the waiting moves here: the LIGHT query (~1 KB,
+ * see `COPILOT_PROBE_QUERY`) is polled on a backing-off cadence while the
+ * requirement is AWAITING, and the call returns only when there is something
+ * to act on.
  *
  * WHAT IT IS NOT. It reads nothing else, writes no gate state and decides no
  * verdict of its own: the CYCLE's transitions are lib/copilot-review.ts (which
  * owns the state machine and the payload parsers), the tool owns the state
  * writes, and this module owns the wait end to end — what an unanswered
  * request is doing ({@link decideCopilotWait}), how often to look again, and
- * the one sentence that wakes the session. That split is what keeps every
+ * when the wait is over. That split is what keeps every
  * branch below unit-testable without a GitHub, a clock or a session.
  *
  * WHAT IT DELIBERATELY DOES NOT DO. It does not run the timeline probe (two
@@ -37,6 +45,7 @@
  * would be the same blind waiting with a bigger bill.
  */
 
+import { pollUntil, type AbortLike } from "./poll-wait.ts";
 import {
   analyzeCopilot,
   COPILOT_AWAIT_TIMEOUT_MS,
@@ -206,11 +215,11 @@ export const WATCH_EARLY_MS = 3 * 60 * 1000;
 export const WATCH_LATE_MS = 10 * 60 * 1000;
 
 /**
- * Is a background watcher allowed to run in this gate mode at all?
+ * May `copilot_review` block on the wait in this gate mode at all?
  *
  * `normal` has no gates to enforce and `explore` is a research session whose
- * deliverable is knowledge — neither has a Copilot requirement to watch, and a
- * timer that polls GitHub in them would be the gate inventing work.
+ * deliverable is knowledge — neither has a Copilot requirement to wait out, so
+ * the call just reports the state there.
  */
 export function watchRunsInMode(mode: string | undefined): boolean {
   return mode === "loop" || mode === "orchestrator";
@@ -224,14 +233,16 @@ export function watchIntervalMs(waitedMs: number | null): number {
   return COPILOT_WATCH_SLOWEST_MS;
 }
 
-/** Why the agent is being woken. */
+/** Why the wait ended with news. */
 export type CopilotWakeReason = "landed" | "not-landed" | "timeout";
 
 export type CopilotWatchTick =
-  /** Nothing to watch: the requirement left AWAITING, or the probe was silent. */
+  /** Keep waiting: nothing landed yet, or the probe was silent. */
   | { kind: "wait"; state: CopilotWaitState; waitedMs: number | null; intervalMs: number }
-  /** Something happened — deliver `message`, then stop the watcher. */
-  | { kind: "wake"; reason: CopilotWakeReason; waitedMs: number | null; message: string };
+  /** The cycle is no longer AWAITING — there is nothing left to wait for. */
+  | { kind: "settled"; waitedMs: number | null }
+  /** Something happened — the tool reads the result next. */
+  | { kind: "wake"; reason: CopilotWakeReason; waitedMs: number | null };
 
 /**
  * One tick's decision.
@@ -261,33 +272,16 @@ export function decideWatchTick(args: {
   // answer. "How long has this cycle been waiting, and is the budget spent?"
   // is anchored on the FIRST request — the same anchor `evaluateCopilot` and
   // the tool's diagnosis use, so a re-request (after a request GitHub never
-  // queued) cannot make the watcher's timeout wake up a round late.
+  // queued) cannot make the wait's timeout fire a round late.
   const landingAnchor = state.requestedAt ?? state.armedAt;
   const waitedMs = waitedSince(state.firstRequestedAt ?? state.requestedAt ?? state.armedAt, args.now);
-  if (state.status !== "AWAITING") {
-    return { kind: "wait", state: "unknown", waitedMs, intervalMs: COPILOT_WATCH_INTERVAL_MS };
-  }
+  if (state.status !== "AWAITING") return { kind: "settled", waitedMs };
   if (probe) {
     const analysis = analyzeCopilot(probe.payload, { anchorAt: landingAnchor });
-    if (analysis.reviewed) {
-      return {
-        kind: "wake",
-        reason: "landed",
-        waitedMs,
-        message: landedMessage(state, waitedMs),
-      };
-    }
+    if (analysis.reviewed) return { kind: "wake", reason: "landed", waitedMs };
   }
   if (waitedMs !== null && waitedMs >= COPILOT_AWAIT_TIMEOUT_MS) {
-    return {
-      kind: "wake",
-      reason: "timeout",
-      waitedMs,
-      message:
-        `[REVIEW_GATE_COPILOT] PR #${state.pr} 已等满 ${minutes(waitedMs)} 仍没有 Copilot 审查。` +
-        "调 copilot_review：它会查时间线区分「Copilot 跑挂了」与「仍在审」并给出下一步（重发一次或释放要求）。" +
-        "不要自己循环调用。",
-    };
+    return { kind: "wake", reason: "timeout", waitedMs };
   }
   const verdict = decideCopilotWait({
     evidence: probe === undefined ? undefined : queueEvidenceFrom(state, probe),
@@ -296,20 +290,7 @@ export function decideWatchTick(args: {
     requestedAt: state.requestedAt ?? state.armedAt,
     now: args.now,
   });
-  if (verdict.state === "not-landed") {
-    // The sentence names the LAST request's age, not the cycle's: the verdict's
-    // 90-second window is about the request GitHub just failed to take, and
-    // after a re-send the cycle's total would read as a lie about THIS one.
-    return {
-      kind: "wake",
-      reason: "not-landed",
-      waitedMs,
-      message:
-        `[REVIEW_GATE_COPILOT] PR #${state.pr} 的审查请求发出后 ${seconds(verdict.waitedMs ?? 0)} 仍未在 GitHub 上排队` +
-        "（pending reviewer 与 copilot_work_started 都没有）——请求没有被接住。调 copilot_review：它会重发一次，" +
-        "再不行就按不可用释放并要求你如实告诉用户。",
-    };
-  }
+  if (verdict.state === "not-landed") return { kind: "wake", reason: "not-landed", waitedMs };
   return { kind: "wait", state: verdict.state, waitedMs, intervalMs: watchIntervalMs(waitedMs) };
 }
 
@@ -333,21 +314,58 @@ function queueEvidenceFrom(state: CopilotReviewState, probe: CopilotProbe) {
   };
 }
 
-function landedMessage(state: CopilotReviewState, waitedMs: number | null): string {
-  return (
-    `[REVIEW_GATE_COPILOT] PR #${state.pr} 的 Copilot 审查已落地` +
-    (waitedMs === null ? "" : `（请求后 ${minutes(waitedMs)}）`) +
-    "。调 copilot_review 读结果：第 4 轮起每条会发现先弹框问用户怎么处理，然后只做他批过的事。" +
-    "不用再自己轮询——门禁会在有变化时叫你。"
-  );
+/** How the blocking wait ended. */
+export interface CopilotWaitOutcome {
+  /** Set when a tick found news (or the cycle left AWAITING under us). */
+  ended?: CopilotWakeReason | "settled";
+  /** ESC (`signal`) or the user typing (`user-input`) cut the wait short. */
+  interrupted?: "signal" | "user-input";
+  waitedMs: number;
 }
 
-function minutes(ms: number): string {
-  return `${(ms / 60_000).toFixed(1)} 分钟`;
-}
-
-function seconds(ms: number): string {
-  return `${Math.round(ms / 1000)} 秒`;
+/**
+ * Block until the outstanding request has news, the user interrupts, or the
+ * budget is spent — the wait `copilot_review` runs instead of telling the agent
+ * to end its turn.
+ *
+ * `state` is re-read on every tick (a push or another call can move the cycle
+ * while we sleep); `probe` is the LIGHT query. A failed probe is not news, the
+ * same rule the tick decision has always had. The budget is a safety net past
+ * the cycle's own 30-minute timeout: the tick itself turns that timeout into a
+ * `timeout` wake, so running out of budget means something else went wrong and
+ * the caller simply reports "still waiting, call again".
+ */
+export async function awaitCopilotNews(args: {
+  state: () => CopilotReviewState | undefined;
+  probe: (state: CopilotReviewState) => Promise<CopilotProbe | undefined>;
+  signal?: AbortLike;
+  budgetMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<CopilotWaitOutcome> {
+  const now = args.now ?? Date.now;
+  const waited = await pollUntil<CopilotWatchTick>({
+    probe: async () => {
+      const state = args.state();
+      if (!state) return { kind: "settled", waitedMs: null };
+      const probe = state.status === "AWAITING" ? await args.probe(state) : undefined;
+      // Re-read: the probe is a network round trip, and the verdict is about
+      // the cycle as it is NOW.
+      return decideWatchTick({ state: args.state() ?? state, probe, now: now() });
+    },
+    isDone: (tick) => tick.kind !== "wait",
+    pollMs: (tick) => (tick.kind === "wait" ? tick.intervalMs : COPILOT_WATCH_INTERVAL_MS),
+    budgetMs: args.budgetMs ?? COPILOT_AWAIT_TIMEOUT_MS + COPILOT_WATCH_SLOWEST_MS * 2,
+    ...(args.signal ? { signal: args.signal } : {}),
+    now,
+    ...(args.sleep ? { sleep: args.sleep } : {}),
+  });
+  const tick = waited.observation;
+  return {
+    ...(tick?.kind === "wake" ? { ended: tick.reason } : tick?.kind === "settled" ? { ended: "settled" as const } : {}),
+    ...(waited.aborted && waited.abortReason ? { interrupted: waited.abortReason } : {}),
+    waitedMs: waited.waitedMs,
+  };
 }
 
 function waitedSince(iso: string | undefined, now: number): number | null {

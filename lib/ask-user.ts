@@ -657,7 +657,8 @@ export function resumeFrom(stored: AskProgress | undefined, questions: AskQuesti
  */
 export function buildNoDialogNotice(questions: AskQuestion[]): string {
   return "review-gate: 这个环境没有可用的对话框（headless / RPC），问题一个都没能展示给用户。\n" +
-    "把下面的问题原样写进你的回复，然后结束本轮，等用户回答：\n" +
+    "把下面的问题原样写进你的回复，然后结束本轮，等用户回答" +
+    "（这是「declare_done 前不结束 turn」的唯一一类例外：在等人）：\n" +
     questions.map((q, i) =>
       `${progressLabel(i, questions.length)} ${q.text}\n   选项：${questionRows(q).join(" / ")}`).join("\n");
 }

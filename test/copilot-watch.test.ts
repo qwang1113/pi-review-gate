@@ -1,11 +1,11 @@
 /**
- * L7 — the background watcher (lib/copilot-watch.ts).
+ * L7 — the Copilot wait (lib/copilot-watch.ts).
  *
  * What is under test is the POLICY that replaced the agent's blind polling:
- * how often the gate looks, what a look means, and the one sentence that wakes
- * the session. Each test names the failure it prevents — a wake with no news
- * (which trains the agent to ignore wakes), a silent tick that loses the
- * review, or a wait that never ends because the probe failed.
+ * how often the gate looks, what a look means, and when the blocking wait
+ * `copilot_review` runs is over. Each test names the failure it prevents — a
+ * wake with no news, a silent tick that loses the review, or a wait that never
+ * ends because the probe failed.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,6 +17,7 @@ import {
   COPILOT_WATCH_SLOWEST_MS,
   WATCH_EARLY_MS,
   WATCH_LATE_MS,
+  awaitCopilotNews,
   decideWatchTick,
   watchIntervalMs,
   watchRunsInMode,
@@ -79,14 +80,11 @@ test("the cadence backs off as the wait gets old — it is a ~16 minute answer",
   assert.equal(watchIntervalMs(WATCH_LATE_MS), COPILOT_WATCH_SLOWEST_MS);
 });
 
-test("a landed review wakes the session, and the message says what to do", () => {
+test("a landed review ends the wait", () => {
   const tick = decideWatchTick({ state: cycle(), probe: landedProbe(), now: NOW + 16 * 60_000 });
   assert.equal(tick.kind, "wake");
   assert.equal(tick.kind === "wake" && tick.reason, "landed");
   assert.equal(tick.kind === "wake" && tick.waitedMs, 16 * 60_000);
-  assert.match(tick.kind === "wake" ? tick.message : "", /\[REVIEW_GATE_COPILOT\] PR #592 的 Copilot 审查已落地（请求后 16\.0 分钟）/);
-  assert.match(tick.kind === "wake" ? tick.message : "", /调 copilot_review/);
-  assert.match(tick.kind === "wake" ? tick.message : "", /不用再自己轮询/);
 });
 
 test("a review that lands AFTER the budget still wins — landing is news, not a timer", () => {
@@ -119,24 +117,25 @@ test("a request that never landed wakes as soon as the grace window closes", () 
     now: NOW + COPILOT_LANDING_GRACE_MS + 20_000,
   });
   assert.equal(tick.kind === "wake" && tick.reason, "not-landed");
-  assert.match(tick.kind === "wake" ? tick.message : "", /请求没有被接住/);
-  assert.match(tick.kind === "wake" ? tick.message : "", /重发一次/);
 });
 
-test("the not-landed wake quotes the LAST request's age, not the cycle's", () => {
+test("the not-landed grace window runs on the LAST request, not the cycle's first", () => {
   // The verdict's 90-second window is about the request GitHub just failed to
-  // take. After a re-send the cycle is older than that request, and quoting
-  // the cycle's total would misdescribe the very window being reported.
+  // take. A re-send 10 minutes into the cycle gets its own window.
   const first = "2026-08-07T09:00:00.000Z";
   const resent = "2026-08-07T09:10:00.000Z";
+  const young = decideWatchTick({
+    state: cycle({ requestedAt: resent, firstRequestedAt: first }),
+    probe: probe({ queued: false }),
+    now: Date.parse(resent) + 30_000,
+  });
+  assert.equal(young.kind, "wait", "30s after the re-send is too early, however old the cycle");
   const tick = decideWatchTick({
     state: cycle({ requestedAt: resent, firstRequestedAt: first }),
     probe: probe({ queued: false }),
     now: Date.parse(resent) + COPILOT_LANDING_GRACE_MS + 20_000,
   });
   assert.equal(tick.kind === "wake" && tick.reason, "not-landed");
-  assert.match(tick.kind === "wake" ? tick.message : "", /请求发出后 110 秒/,
-    "110s since the re-send — not the 710s the cycle has been open (600s of it before the re-send)");
 });
 
 test("a queued request that never produces a review ends at the budget, not before", () => {
@@ -154,19 +153,82 @@ test("a queued request that never produces a review ends at the budget, not befo
     now: NOW + COPILOT_AWAIT_TIMEOUT_MS,
   });
   assert.equal(tick.kind === "wake" && tick.reason, "timeout");
-  assert.match(tick.kind === "wake" ? tick.message : "", /已等满 30\.0 分钟/);
-  assert.match(tick.kind === "wake" ? tick.message : "", /查时间线/);
 });
 
-test("a cycle that is no longer AWAITING is not watched (the state owns the decision)", () => {
+test("a cycle that is no longer AWAITING ends the wait as settled (the state owns the decision)", () => {
   const tick = decideWatchTick({ state: cycle({ status: "SATISFIED" }), probe: landedProbe(), now: NOW });
-  assert.equal(tick.kind, "wait", "no wake for a cycle somebody already closed");
+  assert.equal(tick.kind, "settled", "nothing left to wait for on a closed cycle");
   const open = decideWatchTick({
     state: cycle({ status: "OPEN", openThreads: 2 }),
     probe: landedProbe(),
     now: NOW + 60_000,
   });
-  assert.equal(open.kind, "wait", "OPEN findings are acted on by the tool, not by a wake");
+  assert.equal(open.kind, "settled", "OPEN findings are read by the tool's next pass");
+});
+
+// ---- awaitCopilotNews: the blocking wait copilot_review runs ----
+
+/** A fake clock that the injected sleep advances. */
+function fakeClock(start = NOW) {
+  let t = start;
+  const sleeps: number[] = [];
+  return {
+    now: () => t,
+    sleep: async (ms: number) => { sleeps.push(ms); t += ms; },
+    sleeps,
+  };
+}
+
+test("the wait blocks through quiet ticks and ends when the review lands", async () => {
+  const clock = fakeClock();
+  const answers = [probe(), undefined, probe(), landedProbe()];
+  let probes = 0;
+  const outcome = await awaitCopilotNews({
+    state: () => cycle(),
+    probe: async () => answers[probes++],
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+  assert.equal(outcome.ended, "landed");
+  assert.equal(outcome.interrupted, undefined);
+  assert.equal(probes, 4, "a failed probe is not news — it kept waiting");
+  assert.deepEqual(clock.sleeps, [COPILOT_WATCH_INTERVAL_MS, COPILOT_WATCH_INTERVAL_MS, COPILOT_WATCH_INTERVAL_MS]);
+});
+
+test("the wait ends at the cycle's budget with a timeout, not before", async () => {
+  const clock = fakeClock(NOW + COPILOT_AWAIT_TIMEOUT_MS - 60_000);
+  const outcome = await awaitCopilotNews({
+    state: () => cycle(),
+    probe: async () => probe(),
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+  assert.equal(outcome.ended, "timeout");
+  assert.ok(clock.sleeps.every((ms) => ms === COPILOT_WATCH_SLOWEST_MS), "late in the wait it polls slowly");
+});
+
+test("a cycle closed under the wait ends it as settled, without probing GitHub", async () => {
+  let probes = 0;
+  const outcome = await awaitCopilotNews({
+    state: () => cycle({ status: "SATISFIED" }),
+    probe: async () => { probes++; return probe(); },
+    sleep: async () => {},
+  });
+  assert.equal(outcome.ended, "settled");
+  assert.equal(probes, 0);
+});
+
+test("ESC interrupts the wait and says so", async () => {
+  const signal = { aborted: false };
+  const outcome = await awaitCopilotNews({
+    state: () => cycle(),
+    probe: async () => probe(),
+    signal,
+    now: () => NOW + 60_000,
+    sleep: async () => { signal.aborted = true; },
+  });
+  assert.equal(outcome.ended, undefined);
+  assert.equal(outcome.interrupted, "signal");
 });
 
 test("the start time of an OLDER run does not describe this cycle, but a remembered one does", () => {

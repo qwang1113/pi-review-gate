@@ -398,9 +398,10 @@ station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
    half is due (the extension runs `gh` itself — you cannot report this
    outcome). It asks GitHub for the review and confirms it was queued, or it
    reports what an outstanding request is doing:
-   - `queued` / `working` ⇒ **do nothing and do NOT poll.** The gate watches the
-     PR in the background and wakes you when the review lands (measured: median
-     ~16 minutes, p90 ~19, worst ~23). Do other work, or end the turn.
+   - `queued` / `working` ⇒ the call itself **blocks** until the review lands
+     (measured: median ~16 minutes, p90 ~19, worst ~23) and then reads it in the
+     same call. ESC or a typed message interrupts it; call `copilot_review` again
+     to resume. Never end the turn to wait for Copilot.
    - `failed` / `never landed` ⇒ the gate has already re-sent the request, or
      released the requirement with the reason. Read the reply; there is nothing
      to poll for either way.

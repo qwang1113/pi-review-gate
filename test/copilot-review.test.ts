@@ -587,16 +587,11 @@ test("the problem lines name the next concrete action for each open status", () 
   assert.deepEqual(copilotProblems(undefined), []);
 });
 
-test("a WAITED-if-watched cycle stops nagging the continuation, but still blocks declare_done", () => {
-  // The background watcher owns the wait: repeating "it has not come back yet"
-  // every revival tick is the blind polling this gate just stopped doing.
-  assert.deepEqual(copilotProblems(armed(), { watchedAwait: true }), []);
-  assert.equal(copilotProblems(armed()).length, 1,
-    "without a watcher the line is still there — a wait nobody watches must be visible");
-  // Every OTHER unfinished status keeps its line whatever the flag says: the
-  // flag is about a wait in flight, not about being finished.
-  assert.match(copilotProblems(armed({ status: "ARMED" }), { watchedAwait: true })[0], /call copilot_review/);
-  assert.match(copilotProblems(armed({ status: "OPEN", openThreads: 1 }), { watchedAwait: true })[0], /still need work/);
+test("an AWAITING cycle tells the session to call the blocking tool, never to idle", () => {
+  const [line] = copilotProblems(armed());
+  assert.match(line, /call copilot_review/);
+  assert.match(line, /blocks until the review lands/);
+  assert.match(line, /do not end the turn/);
 });
 
 test("releasing keeps the audit trail (why, when, against which head)", () => {

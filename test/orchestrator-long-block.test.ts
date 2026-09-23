@@ -51,7 +51,7 @@ const HEARTBEAT_MS = 10_000;
  * with the INDEPENDENT heartbeat re-reporting every tick — exactly what the
  * extension's timer does while the agent produces no events at all.
  */
-function judgeWaitRecords(forMs: number): ChannelRecord[] {
+function judgeWaitRecords(forMs: number, waitingFor = "reviewer"): ChannelRecord[] {
   const records: ChannelRecord[] = [
     { kind: "state", from: "child", at: new Date(T0).toISOString(), state: "working" },
   ];
@@ -61,7 +61,7 @@ function judgeWaitRecords(forMs: number): ChannelRecord[] {
       from: "child",
       at: new Date(T0 + elapsed).toISOString(),
       state: "waiting-judge",
-      waitingFor: "reviewer",
+      waitingFor,
     });
   }
   return records;
@@ -216,6 +216,15 @@ test("the rendered health line reads as reassurance, with the duration in it", (
   assert.match(line, /在等 reviewer/);
   assert.match(line, /220s/);
   assert.match(line, /别打断/);
+});
+
+test("a child blocked in copilot_review for 16 minutes reads as a copilot wait and wakes nobody (2026-09-23)", () => {
+  // The prime orchestration: children that ended their turn to wait for
+  // Copilot read as `idle`, and the manager was woken every minute.
+  const health = childHealth(observe(judgeWaitRecords(16 * 60_000, "copilot"), 16 * 60_000));
+  assert.equal(health.state, "waiting-judge");
+  assert.equal(isNewsworthy(health.state), false);
+  assert.match(describeChildStateDetailed(health), /在等 copilot（已等 \d+s） —— 正常，别打断/);
 });
 
 test("`orchestrator_recover`'s refusal tells the orchestrator to LOOK, not to interrupt", async () => {

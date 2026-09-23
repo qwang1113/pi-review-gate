@@ -380,28 +380,17 @@ export function isCopilotOutstanding(state: CopilotReviewState | undefined): boo
 /**
  * The unmet-requirement lines for `declare_done` / the L2 continuation.
  * Empty when nothing is outstanding. Never used by the ship gate.
- *
- * `opts.watchedAwait` drops the AWAITING line: the background watcher owns
- * that wait and WILL wake the session when the review lands, so repeating
- * "it has not come back yet" every revival tick is the blind polling this
- * gate just stopped doing. It is deliberately opt-in per call site —
- * `declare_done` never passes it, because a review that has not landed is
- * still an unfinished task.
  */
-export function copilotProblems(
-  state: CopilotReviewState | undefined,
-  opts: { watchedAwait?: boolean } = {},
-): string[] {
+export function copilotProblems(state: CopilotReviewState | undefined): string[] {
   if (!isCopilotOutstanding(state) || !state) return [];
   const pr = state.pr === null ? "the PR" : `PR #${state.pr}`;
   switch (state.status) {
     case "ARMED":
       return [`Copilot code review not requested for ${pr} — call copilot_review`];
     case "AWAITING":
-      if (opts.watchedAwait) return [];
       return [
         `Copilot code review of ${pr} has not come back yet — call copilot_review ` +
-        "(the gate is watching the PR in the background; it cannot be waited out by polling)",
+        "(the call itself blocks until the review lands; do not end the turn to wait for it)",
       ];
     case "OPEN":
       return [
@@ -1165,7 +1154,7 @@ export function evaluateCopilot(
       status: state.requestedAt ? "AWAITING" : "ARMED",
       at: opts.nowIso,
       note: state.requestedAt
-        ? "Copilot has not posted its review yet — the gate watches the PR and wakes this session when it lands"
+        ? "Copilot has not posted its review yet — copilot_review blocks until it lands"
         : "no Copilot review of this PR yet — call copilot_review to request one",
       openThreads: 0,
     };

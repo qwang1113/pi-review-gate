@@ -516,7 +516,7 @@ export function describeChildState(state: ChildState): string {
   switch (state) {
     case "working": return "在干活";
     case "waiting-input": return "等人回答";
-    case "waiting-judge": return "在等门禁自己派出去的活（reviewer / precommit）";
+    case "waiting-judge": return "在等门禁自己派出去的活（reviewer / precommit / copilot）";
     case "done": return "已完成";
     case "idle": return "停下了（没有 declare_done）";
     case "mode-changed": return "切换了门禁模式";

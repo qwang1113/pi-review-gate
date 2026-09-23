@@ -75,8 +75,11 @@ export interface PollWaitOptions<T> {
   isDone: (observation: T) => boolean;
   /** How long the call may block, in ms. */
   budgetMs: number;
-  /** Gap between probes (default 2s — the same cadence as the UI throttle). */
-  pollMs?: number;
+  /**
+   * Gap between probes (default 2s — the same cadence as the UI throttle), or
+   * a function of the last observation for a wait whose cadence slows down.
+   */
+  pollMs?: number | ((observation: T) => number);
   /** Called after EVERY probe, including the first: the live snapshot. */
   onProbe?: (observation: T, elapsedMs: number) => void;
   /** The user pressing ESC. Checked before each sleep and each probe. */
@@ -161,7 +164,8 @@ const USER_INPUT = Symbol("poll-wait:user-input");
 export async function pollUntil<T>(opts: PollWaitOptions<T>): Promise<PollWaitResult<T>> {
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
+  const gap = (observation: T): number =>
+    typeof opts.pollMs === "function" ? opts.pollMs(observation) : opts.pollMs ?? DEFAULT_POLL_MS;
   const startedAt = now();
   const deadline = startedAt + opts.budgetMs;
   const timer = (opts.deadlineTimer ?? realDeadlineTimer)(opts.budgetMs);
@@ -204,7 +208,7 @@ export async function pollUntil<T>(opts: PollWaitOptions<T>): Promise<PollWaitRe
       if (opts.isDone(observation)) break;
       if (stopRequested()) break;
       if (now() >= deadline) break;
-      const slept = await Promise.race([sleep(pollMs), expired, interrupted]);
+      const slept = await Promise.race([sleep(gap(observation)), expired, interrupted]);
       if (slept === TIMED_OUT) break;
       if (slept === USER_INPUT) break;
       if (stopRequested()) break;
