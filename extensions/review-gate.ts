@@ -712,14 +712,6 @@ import {
   copilotProblems,
   parsePrView,
 } from "../lib/copilot-review.ts";
-// The background watcher's POLICY (cadence, verdict, the sentence that wakes
-// the session) is pure and unit-tested there; this file owns only its timer.
-import {
-  COPILOT_WATCH_INTERVAL_MS,
-  COPILOT_WATCH_SLOWEST_MS,
-  decideWatchTick,
-  watchRunsInMode,
-} from "../lib/copilot-watch.ts";
 import {
   fetchCopilotPayload,
   fetchCopilotProbe,
@@ -769,6 +761,7 @@ import {
   formatProxyDecisionReport,
   parseProxyDecision,
   raceWithUserProxy,
+  sessionProxyDecisions,
   type ProxyChoice,
 } from "../lib/user-proxy.ts";
 
@@ -1427,7 +1420,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch {
       recordBlockedMarker(blockedMarkerPath(sidecarPath(root)), { sessionId: s.sessionId });
     }
-    try { syncCopilotWatch(root); } catch { /* a watcher never fails a persist */ }
   }
 
   /** Human label for a repo in messages. The primary repo has no distinctive
@@ -2005,6 +1997,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       const since = Date.parse(judge.spawnedAt);
       return { role: judge.role, since: Number.isFinite(since) ? since : Date.now() };
     }
+    // A `copilot_review` call blocking on GitHub is the same kind of fact: a
+    // wait the gate itself owns, not a stop.
+    if (copilotWaitSince !== undefined) return { role: "copilot", since: copilotWaitSince };
     return undefined;
   }
 
@@ -3707,7 +3702,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     const completion: string[] = [];
     for (const root of sessionRepos) {
       const st = root === primaryRepoRoot ? state : stateForRepo(root);
-      for (const p of copilotProblemsFor(st, { nudge: true, root })) {
+      for (const p of copilotProblemsFor(st)) {
         completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
       }
     }
@@ -4590,12 +4585,6 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Store continuation count alongside state so it survives restarts.
       pi.appendEntry(ENTRY_TYPE, { state, continuationsInjected });
     } catch { /* older Pi without appendEntry */ }
-    // The L7 watcher follows the state that was just written — armed HERE, at
-    // the funnel every persist goes through, rather than at the tool that
-    // happens to write a Copilot cycle today (a no-op whenever this repo has
-    // no outstanding one). Arming it at the write sites is the kind of list
-    // that goes stale silently.
-    try { syncCopilotWatch(primaryRepoRoot); } catch { /* a watcher never fails a persist */ }
     if (ctx) updateWidget(ctx);
   }
 
@@ -5484,6 +5473,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         options: [...spec.options],
         choice,
         rationale: byProxy.rationale,
+        ...(state.sessionId ? { sessionId: state.sessionId } : {}),
       },
     ];
     // `persistRepo`, not `persist`: the latter writes the CURRENT repo's
@@ -6279,20 +6269,14 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * Copilot problems for one repo — a COMPLETION-only requirement.
    * Never consulted by the ship gate (see lib/copilot-review.ts header).
    *
-   * `nudge` + `root` (the L2 continuation and the revival timer) additionally
-   * DROP the "has not come back yet" line while a live watcher holds that
-   * wait: repeating it every revival tick is exactly the blind polling the
-   * watcher replaced, and the session is told once, by the wake message, when
-   * there is actually something to do. `declare_done` never passes it — a
-   * review that has not landed is still an unfinished task.
+   * The AWAITING line stays in the revival nudge too: the wait itself is
+   * `copilot_review`'s blocking call, so a session whose turn ended mid-wait is
+   * told to call it again — never to sit idle until something wakes it
+   * (AGENTS.md 总则: no turn ends before declare_done).
    */
-  function copilotProblemsFor(
-    st: GateState | undefined,
-    opts: { nudge?: boolean; root?: string } = {},
-  ): string[] {
+  function copilotProblemsFor(st: GateState | undefined): string[] {
     if (!st || !copilotEnabled(st)) return [];
-    const watched = opts.nudge === true && opts.root !== undefined && copilotWatchHolds(opts.root);
-    return copilotProblems(st.copilot, { watchedAwait: watched });
+    return copilotProblems(st.copilot);
   }
 
   /** The directory `gh` should run in for a given repo root. */
@@ -6300,205 +6284,19 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     return root === primaryRepoRoot ? cwd : root;
   }
 
-  // ---------- L7: the background watcher ----------
+  // ---------- L7: the wait is copilot_review's own blocking call ----------
   //
-  // WHY THE GATE POLLS INSTEAD OF THE AGENT (measured, 2026-09-14):
-  // request → Copilot review has a median of 15.8 minutes (50 paired rounds on
-  // server-service-dashboard PR #592; p90 19.4, worst 23.4). An agent that can
-  // only "call the tool again" therefore spends the wait doing nothing useful:
-  // a measured round spent five such calls and 16.5 minutes to discover a
-  // review that had been posted at minute 13. The gate CAN look — so it does,
-  // on a timer, with the LIGHT query (~1 KB: head + pending-reviewer flag +
-  // the last reviews) and wakes this session the moment there is news.
-  //
-  // The policy (cadence, verdict, wording) is `lib/copilot-watch.ts`; this is
-  // the timer, the guards and the delivery. The timer is deliberately
-  // REFERENCED, for the same reason the child-wait watchdog is: while a review
-  // is outstanding the process must stay alive to receive the wake. It is
-  // stopped by session_shutdown, by a mode it may not run in, and by its own
-  // cycle leaving AWAITING — re-checked on EVERY tick rather than trusted from
-  // arm time, because the state moves while a tick is in flight (a new push
-  // re-arms the cycle, the tool releases it, the user switches mode).
+  // The background watcher that used to live here (a timer that polled the PR
+  // and sent the session a wake message) was deleted 2026-09-23: it was the
+  // reason `copilot_review` told the agent to END ITS TURN and wait to be
+  // called, and an orchestration child that did so read as idle — its manager
+  // was woken every minute for the whole ~16-minute wait. The wait now blocks
+  // inside the tool (lib/copilot-watch.ts `awaitCopilotNews`); all this file
+  // keeps is the fact that the call is blocking, so the child heartbeat can
+  // report it as a gate-owned wait (see activeJudgeWait).
 
-  interface CopilotWatchHandle {
-    /** The cycle being watched: `root|pr|rounds`. A different cycle replaces it. */
-    key: string;
-    /** owner/name, resolved once — a tick must not spend a call on it. */
-    slug?: string;
-    timer?: ReturnType<typeof setTimeout>;
-  }
-  const copilotWatches = new Map<string, CopilotWatchHandle>();
-
-  /**
-   * Cycle keys that were already WOKEN for — at most one wake per cycle, and
-   * the reason it has to be remembered rather than derived.
-   *
-   * A delivered wake does not change the state: the cycle is still AWAITING
-   * until the agent answers it with a `copilot_review` call, and every persist
-   * in between (another tool's write, a mode switch, the checkpoint) re-arms
-   * the watcher for that very key. Without this memo the SAME "the review has
-   * landed" message would steer into the session again ≥20s later, and again —
-   * a wake is a user message, so repeating it costs the agent a turn each time.
-   *
-   * Losing the wake is not losing the requirement: with no live watcher the
-   * continuation («has not come back yet — call copilot_review») is back, and
-   * the budget still ends the cycle.
-   */
-  const copilotWoken = new Set<string>();
-
-  function watchStateFor(root: string): GateState {
-    return root === primaryRepoRoot ? state : stateForRepo(root);
-  }
-
-  /** The cycle a watcher would be watching for this repo, if there is one. */
-  function copilotWatchKey(root: string): string | undefined {
-    const cycle = watchStateFor(root).copilot;
-    if (!cycle || cycle.status !== "AWAITING" || cycle.pr === null) return undefined;
-    return `${root}|${cycle.pr}|${cycle.rounds}`;
-  }
-
-  /** Is a LIVE watcher holding this repo's wait? (see copilotProblemsFor) */
-  function copilotWatchHolds(root: string): boolean {
-    const entry = copilotWatches.get(root);
-    return entry !== undefined && entry.key === copilotWatchKey(root);
-  }
-
-  function stopCopilotWatch(root: string): void {
-    const entry = copilotWatches.get(root);
-    if (!entry) return;
-    if (entry.timer) clearTimeout(entry.timer);
-    copilotWatches.delete(root);
-  }
-
-  function stopAllCopilotWatches(): void {
-    for (const root of [...copilotWatches.keys()]) stopCopilotWatch(root);
-    // The memo dies with the session's timers: a resumed session re-reads the
-    // sidecar and may have to announce the same cycle again.
-    copilotWoken.clear();
-  }
-
-  /**
-   * Match the running watchers to the state that was just written. Called from
-   * EVERY persist (and from session_start), so there is no path that can leave
-   * an AWAITING cycle unwatched — the alternative, arming it at each of the
-   * sites that write one, is the kind of list that goes stale silently.
-   */
-  function syncCopilotWatch(root: string): void {
-    const key = copilotWatchKey(root);
-    if (key === undefined || copilotWoken.has(key)) {
-      // Nothing to watch, or something already announced this very cycle.
-      stopCopilotWatch(root);
-      return;
-    }
-    if (copilotWatches.get(root)?.key === key) return;
-    stopCopilotWatch(root);
-    copilotWatches.set(root, { key });
-    scheduleCopilotTick(root, COPILOT_WATCH_INTERVAL_MS);
-  }
-
-  function syncAllCopilotWatches(): void {
-    for (const root of knownRepoRoots()) {
-      try { syncCopilotWatch(root); } catch { /* never a reason to break a caller */ }
-    }
-  }
-
-  function scheduleCopilotTick(root: string, delayMs: number): void {
-    const entry = copilotWatches.get(root);
-    if (!entry) return;
-    if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => { void copilotTick(root); }, Math.max(1_000, delayMs));
-  }
-
-  /**
-   * Is this tick STILL the watcher of record for the cycle it started on?
-   *
-   * A tick awaits two network calls (the slug, then the probe), and the state
-   * can move inside those seconds: a re-request bumps `rounds` (a new cycle
-   * key), a release ends the cycle, a push re-arms it. Acting on the snapshot
-   * taken before the await would announce an OLD cycle — and, worse,
-   * `stopCopilotWatch` would clear the timer a newer cycle had just armed,
-   * leaving that cycle unwatched until the next persist.
-   */
-  function tickStillOwns(root: string, entry: CopilotWatchHandle): boolean {
-    return copilotWatches.get(root) === entry && copilotWatchKey(root) === entry.key;
-  }
-
-  /** One poll: ask GitHub, decide, and either reschedule or wake the session. */
-  async function copilotTick(root: string): Promise<void> {
-    const entry = copilotWatches.get(root);
-    if (!entry) return;
-    try {
-      if (!watchRunsInMode(state.taskMode)) { stopCopilotWatch(root); return; }
-      if (!tickStillOwns(root, entry)) { syncCopilotWatch(root); return; }
-      const cycle = watchStateFor(root).copilot;
-      if (!cycle || cycle.pr === null) { stopCopilotWatch(root); return; }
-      // A human stop suppresses the WAKE, not the news — but there is no point
-      // spending gh calls on a session nobody asked to continue either, so the
-      // poll itself backs off to its slowest cadence until the stop lifts.
-      if (!copilotWakeAllowed()) { scheduleCopilotTick(root, COPILOT_WATCH_SLOWEST_MS); return; }
-      const dir = repoDirFor(root);
-      const slug = entry.slug ?? await resolveRepoSlug(dir, {
-        number: cycle.pr,
-        head: cycle.head ?? null,
-        url: null,
-        state: null,
-      });
-      if (!slug) { scheduleCopilotTick(root, COPILOT_WATCH_INTERVAL_MS); return; }
-      entry.slug = slug;
-      const probe = await fetchCopilotProbe(dir, slug, cycle.pr);
-      // AGAIN after the probe: everything above was read before a network round
-      // trip, and the verdict is about the cycle as it is NOW.
-      if (!tickStillOwns(root, entry)) { syncCopilotWatch(root); return; }
-      const tick = decideWatchTick({ state: cycle, probe, now: Date.now() });
-      if (tick.kind === "wait") { scheduleCopilotTick(root, tick.intervalMs); return; }
-      if (!deliverCopilotWake(root, tick.message)) {
-        // The stop arrived between the two checks: keep the watcher armed and
-        // draw the same verdict again next tick, so the wake is late rather
-        // than lost.
-        scheduleCopilotTick(root, COPILOT_WATCH_SLOWEST_MS);
-        return;
-      }
-      // No ownership re-check AFTER the delivery: `decideWatchTick` and
-      // `deliverCopilotWake` are both synchronous, so nothing can move between
-      // the check above and this stop (the only await in the tick is the
-      // probe, and that window is already guarded).
-      stopCopilotWatch(root);
-      copilotWoken.add(entry.key);
-      log(`copilot watcher woke the session for PR #${cycle.pr}: ${tick.reason}`);
-    } catch {
-      // A failed tick is not news. The next one retries, and a timer callback
-      // must never let an exception reach the process.
-      scheduleCopilotTick(root, COPILOT_WATCH_INTERVAL_MS);
-    }
-  }
-
-  /**
-   * May this session be woken at all? The same guards the revival timer
-   * honours: a mode with no loop, an open dialog, an explicit ESC, or a
-   * disarmed loop each mean "not now" — never "forget about it".
-   */
-  function copilotWakeAllowed(): boolean {
-    if (!watchRunsInMode(state.taskMode)) return false;
-    return !(state.pausedQuestion || lastRunAborted || !loopArmed || state.bypass.active);
-  }
-
-  /**
-   * Deliver the watcher's news the way every other gate notice is delivered
-   * (idle ⇒ a plain user message, which IS the next turn; busy ⇒ steer, so it
-   * rides that run instead of being rejected).
-   *
-   * Returns false when the stop is in force by the time we get here; the
-   * caller reschedules rather than dropping the news.
-   */
-  function deliverCopilotWake(root: string, text: string): boolean {
-    if (!copilotWakeAllowed()) return false;
-    try {
-      const line = sessionRepos.size > 1 ? `[${repoLabel(root)}] ${text}` : text;
-      if (latestCtx?.isIdle()) pi.sendUserMessage(line);
-      else pi.sendUserMessage(line, { deliverAs: "steer" });
-    } catch { /* the session is gone; there is nobody left to wake */ }
-    return true;
-  }
+  /** When the current `copilot_review` call started blocking, if it is. */
+  let copilotWaitSince: number | undefined;
 
   // ---------- L8: the loop goal must be one the USER approved ----------
 
@@ -12840,7 +12638,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             // state record, and never by the summary — a decision the proxy
             // took on the user's behalf is the one fact this report cannot let
             // an agent's prose forget. Empty in the ordinary case.
-            formatProxyDecisionReport(allProxyDecisions()),
+            // Only THIS session's (and its handoff predecessor's): the sidecar
+            // list is a union across sessions and would otherwise replay
+            // earlier tasks' decisions in every later report.
+            formatProxyDecisionReport(
+              sessionProxyDecisions(allProxyDecisions(), [state.sessionId ?? undefined, readInheritance().predecessorSession]),
+            ),
         }],
         details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
 
@@ -12987,6 +12790,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
     repoDir: (root) => repoDirFor(root),
     copilotEnabled: (st) => copilotEnabled(st),
+    sessionMode: () => state.taskMode,
+    onWaiting: (active) => {
+      copilotWaitSince = active ? Date.now() : undefined;
+      if (latestCtx) reportChildState(latestCtx, undefined, { force: true });
+    },
     armLoop: () => { armLoop(); },
     log: (message) => log(message),
     gh: {
@@ -13692,14 +13500,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // an open Copilot review cycle and an unapproved loop goal. They keep the
     // loop running after the code itself is clean, which is the whole point of
     // "the PR is not done when it is opened".
-    //
-    // The Copilot line is dropped while the background watcher holds the wait
-    // (`nudge: true`): this continuation is what used to make the agent poll,
-    // and the watcher wakes it instead.
     const completion: string[] = [];
     for (const root of sessionRepos) {
       const st = root === primaryRepoRoot ? state : stateForRepo(root);
-      for (const p of copilotProblemsFor(st, { nudge: true, root })) {
+      for (const p of copilotProblemsFor(st)) {
         completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
       }
     }
@@ -14030,12 +13834,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     startChildHeartbeat(ctx);
     reportChildState(ctx, undefined, { force: true });
 
-    // L7: a restarted (or resumed) session inherits the Copilot cycle that is
-    // still outstanding in its sidecar, so the watcher is re-armed from the
-    // restored state — otherwise the wait would sit there unnoticed until the
-    // next tool call, which is the blind wait this watcher exists to end.
-    syncAllCopilotWatches();
-
     // Reflect the precommit config source in the status bar right away.
     updateWidget(ctx);
 
@@ -14271,11 +14069,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     releaseWorktree();
     // …and stop watching somebody else's heartbeat (a refused session's timer).
     stopExclusivityRecheck();
-    // The Copilot watcher belongs to this session's process: a leaked one would
-    // keep polling GitHub for a session that is gone (and its wake would go
-    // nowhere). session_start re-arms it from the restored state.
-    stopAllCopilotWatches();
-
     // Judge children are independent pi processes — they survive the session
     // by design (their session files persist, so a fresh session can resume
     // or close them). Nothing to clear here anymore: the registry IS the
@@ -14891,7 +14684,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         "use for it.\n" +
         (state.pausedQuestion
           ? `Loop currently PAUSED awaiting the user's answer to: "${state.pausedQuestion.question.slice(0, 200)}". ` +
-            "If the user has replied, continue the loop; otherwise end the turn after asking.\n"
+            "If the user has replied, continue the loop; otherwise end the turn after asking " +
+            "(the one exception to 'no turn ends before declare_done': you are waiting for a HUMAN).\n"
           : "") +
         (state.scopeLimit
           ? "SCOPE LIMIT (user-approved): the gate covers ONLY this session's own edits" +

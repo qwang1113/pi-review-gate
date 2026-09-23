@@ -62,6 +62,8 @@ interface Fake {
   delays: number[];
   calls: GhCall[];
   enabled: boolean;
+  /** The SESSION's gate mode (a repo's own state carries none). */
+  mode: string | undefined;
   repo: { ok: boolean; error: string };
   /** What each faked gh member answers. */
   openPr: { pr?: PrSummary; error?: string };
@@ -121,6 +123,7 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     delays: [],
     calls: [],
     enabled: true,
+    mode: undefined,
     repo: { ok: true, error: "" },
     openPr: { pr: PR },
     slug: "o/r",
@@ -141,6 +144,7 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     persist: (_ctx, root) => { state.persisted.push(root); },
     repoDir: (root) => `${root}/dir`,
     copilotEnabled: () => state.enabled,
+    sessionMode: () => state.mode,
     armLoop: () => { state.armed += 1; },
     log: (message) => { state.logs.push(message); },
     delay: (ms) => { state.delays.push(ms); return Promise.resolve(); },
@@ -296,7 +300,8 @@ test("request: no review for this head asks GitHub, confirms the queue, and reco
   assert.equal(reply.details?.rounds, 1);
   assert.equal(reply.details?.queue, "working");
   assert.match(textOf(reply), /Copilot review requested for PR #42 \(round 1\) — Copilot is working on the review/);
-  assert.match(textOf(reply), /wakes you when it lands — do NOT poll it\./);
+  assert.match(textOf(reply), /median of ~16 minutes/);
+  assert.doesNotMatch(textOf(reply), /end the turn|wakes you/, "no turn is ended to wait for Copilot");
   assert.doesNotMatch(textOf(reply), /usually answers within a minute/, "the measured claim replaced the folk one");
   assert.equal(f.st.copilot?.status, "AWAITING");
   assert.equal(f.st.copilot?.supportConfirmed, true);
@@ -388,16 +393,67 @@ test("request: UNKNOWN availability changes the WAIT note, never the request its
 
 // ---------- the wait half: evidence instead of a blind timer ----------
 
-test("wait: a queued request reports what GitHub says and tells the agent to stop polling", async () => {
+/** A probe/payload pair that says Copilot answered after the request. */
+function landedPayload(): CopilotPayload {
+  return {
+    head: "headsha",
+    reviews: [{ author: "copilot", submittedAt: new Date(Date.now() + 60_000).toISOString(), commit: "headsha", state: "COMMENTED" }],
+    threads: [thread()],
+  };
+}
+
+test("wait: in loop mode the call BLOCKS until the review lands, then reads it in the same call", async () => {
+  const f = fake();
+  // The SESSION is in loop mode; the repo's own state carries no mode (a
+  // second repo's never does) — the wait must still block.
+  f.mode = "loop";
+  assert.equal(f.st.taskMode, undefined);
+  awaiting(f);
+  const waiting: boolean[] = [];
+  f.deps.onWaiting = (active) => { waiting.push(active); };
+  // Queued for the diagnosis and two quiet ticks, then the review is there.
+  const probes = [queuedProbe(), queuedProbe(), undefined];
+  f.deps.gh.fetchCopilotProbe = async () => {
+    const next = probes.shift();
+    if (probes.length === 0 && next === undefined) {
+      f.payload = landedPayload();
+      return { head: "headsha", queued: false, payload: landedPayload() };
+    }
+    return next;
+  };
+  const reply = await call(f);
+  assert.equal(reply.details?.status, "OPEN", "the landed review was read in the SAME call");
+  assert.match(textOf(reply), /1 Copilot thread\(s\) waiting on you/);
+  assert.deepEqual(waiting, [true, false], "the heartbeat is told the call blocked, and that it stopped");
+  assert.ok(f.delays.length >= 1, "it waited between probes");
+});
+
+test("wait: ESC cuts the blocking wait short with a resumable reply, never 'end the turn'", async () => {
+  const f = fake();
+  f.mode = "orchestrator";
+  awaiting(f);
+  const controller = new AbortController();
+  f.deps.delay = async () => { controller.abort(); };
+  const waiting: boolean[] = [];
+  f.deps.onWaiting = (active) => { waiting.push(active); };
+  const reply = await call(f, {}, controller.signal);
+  assert.equal(reply.details?.status, "AWAITING");
+  assert.equal(reply.details?.waited, "cut-short");
+  assert.equal(reply.details?.interrupted, "signal");
+  assert.match(textOf(reply), /call copilot_review again to keep waiting/);
+  assert.match(textOf(reply), /Do not end the turn/);
+  assert.deepEqual(waiting, [true, false]);
+});
+
+test("wait: outside loop/orchestrator mode a queued request only reports what GitHub says", async () => {
   const f = fake();
   awaiting(f);
   const reply = await call(f);
   assert.equal(reply.details?.status, "AWAITING");
   assert.equal(reply.details?.queue, "working");
   assert.match(textOf(reply), /Copilot has not posted its review of PR #42 yet — working after/);
-  assert.match(textOf(reply), /There is nothing to poll for: the gate watches the PR in the background/);
-  assert.doesNotMatch(textOf(reply), /call copilot_review again in a minute/);
-  // No waiting inside the call: the gate's watcher owns the timer.
+  assert.doesNotMatch(textOf(reply), /end the turn|wakes you/);
+  // No blocking wait where no loop runs (the fake state has no task mode).
   assert.deepEqual(f.delays, []);
   assert.equal(f.armed, 1, "still outstanding, so the loop stays armed");
   assert.equal(f.st.copilot?.queue?.state, "working");

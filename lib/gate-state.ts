@@ -439,17 +439,7 @@ export interface GateState {
    * could only HIDE a proxy decision, which is why nothing here authorizes
    * anything — the answers took effect when they were given.
    */
-  proxyDecisions?: Array<{
-    at: string;
-    /** The dialog's own question, verbatim (its title). */
-    question: string;
-    /** The rows it chose from, verbatim. */
-    options: string[];
-    /** The row the proxy chose — one of `options`, verbatim. */
-    choice: string;
-    /** Why, in the proxy's own words. */
-    rationale: string;
-  }>;
+  proxyDecisions?: ProxyDecisionRecord[];
   precommit: {
     verdict: PrecommitVerdict;
     fingerprint: string | null;
@@ -1103,6 +1093,7 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         return !!e && typeof e === "object" && !Array.isArray(e) &&
           typeof e.at === "string" && typeof e.question === "string" &&
           typeof e.choice === "string" && typeof e.rationale === "string" &&
+          (e.sessionId === undefined || typeof e.sessionId === "string") &&
           Array.isArray(e.options) && e.options.every((o: unknown) => typeof o === "string");
       };
       if (!Array.isArray(rows) || !rows.every(entryOk)) delete parsed.proxyDecisions;
@@ -1574,6 +1565,13 @@ export interface ProxyDecisionRecord {
   choice: string;
   /** Why, in the proxy's own words. */
   rationale: string;
+  /**
+   * The session whose dialog it answered. The list is a UNION across sessions
+   * (see below), so `declare_done` reports only its own session's entries by
+   * this id (2026-09-23: a completion report listed four decisions from a task
+   * finished days earlier). Absent on records written before the field existed.
+   */
+  sessionId?: string;
 }
 
 /**

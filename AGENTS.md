@@ -33,6 +33,24 @@ default, make it safe by default rather than adding a switch.
 > 不加开关、不留兼容层、不做「advanced entry」这类后门。留着的旧路径不会
 > 安静地待着：它会被人用、会漂移、会在某一轮变成事故的那一半。
 
+### 总则 · `declare_done` 之前不主动结束 turn（2026-09-23，用户决定）
+
+与三条哲学同级。loop 会话、编排子会话、项目经理在 `declare_done` 被接受之前，
+**不得主动结束 turn**：有活就干，要等就调门禁提供的阻塞式等待工具
+（`judge_wait` / `worker_wait` / `orchestrator_wait`，以及本身就阻塞到结果的
+`copilot_review`）。
+
+**这条同样约束门禁自己的后续修改**：门禁的工具、回复与提示文案不得让 agent 靠
+「结束 turn、等门禁叫醒」来等待；一件需要等的事，门禁就提供一个阻塞、可被 ESC 与
+用户输入打断、打断后可再调续等的工具（哲学一）。实测的反例：`copilot_review` 曾回
+「end the turn — you will be called」，编排子会话照做后整段 ~16 分钟都报 `idle`，
+项目经理的 `orchestrator_wait` 每分钟被叫醒一次。
+
+例外只有**在等人**，且文案要点明它是例外：用户在 `ask_user` 里选择转聊天回答
+（循环 pausedQuestion）、环境没有对话框（headless）只能把问题写进回复、用户用
+Alt+Enter 排队的 followUp 消息需要 turn 边界才能进来。judge / worker 会话没有
+`declare_done`，不在此列（它们「交卷即停」）。
+
 
 ### Single-review loop (the only execution path, agent-initiated)
 

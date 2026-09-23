@@ -17,8 +17,30 @@ import {
   formatProxyDecisionReport,
   parseProxyDecision,
   raceWithUserProxy,
+  sessionProxyDecisions,
   type ProxyScheduler,
 } from "../lib/user-proxy.ts";
+
+test("the completion report claims only this session's decisions and its handoff predecessor's", () => {
+  const row = (at: string, sessionId?: string) => ({
+    at, question: `q-${at}`, options: ["a", "b"], choice: "a", rationale: "r",
+    ...(sessionId === undefined ? {} : { sessionId }),
+  });
+  const all = [
+    row("2026-09-19T21:06:37Z"), // written before the field existed — a past task
+    row("2026-09-20T00:35:52Z", "other"), // a concurrent / earlier session
+    row("2026-09-23T07:00:00Z", "pred"), // the session this one continued
+    row("2026-09-23T08:00:00Z", "me"),
+  ];
+  assert.deepEqual(
+    sessionProxyDecisions(all, ["me", "pred"]).map((d) => d.at),
+    ["2026-09-23T07:00:00Z", "2026-09-23T08:00:00Z"],
+  );
+  assert.deepEqual(sessionProxyDecisions(all, ["me", undefined]).map((d) => d.sessionId), ["me"],
+    "no predecessor: only this session's own");
+  assert.equal(formatProxyDecisionReport(sessionProxyDecisions(all.slice(0, 2), ["me"])), "",
+    "history alone prints no proxy section at all");
+});
 
 /** A scheduler a test fires by hand — the window is a fact to be triggered. */
 function manualClock(): {
