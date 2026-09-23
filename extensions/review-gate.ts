@@ -761,6 +761,7 @@ import {
   formatProxyDecisionReport,
   parseProxyDecision,
   raceWithUserProxy,
+  sessionProxyDecisions,
   type ProxyChoice,
 } from "../lib/user-proxy.ts";
 
@@ -5472,6 +5473,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         options: [...spec.options],
         choice,
         rationale: byProxy.rationale,
+        ...(state.sessionId ? { sessionId: state.sessionId } : {}),
       },
     ];
     // `persistRepo`, not `persist`: the latter writes the CURRENT repo's
@@ -12636,7 +12638,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             // state record, and never by the summary — a decision the proxy
             // took on the user's behalf is the one fact this report cannot let
             // an agent's prose forget. Empty in the ordinary case.
-            formatProxyDecisionReport(allProxyDecisions()),
+            // Only THIS session's (and its handoff predecessor's): the sidecar
+            // list is a union across sessions and would otherwise replay
+            // earlier tasks' decisions in every later report.
+            formatProxyDecisionReport(
+              sessionProxyDecisions(allProxyDecisions(), [state.sessionId, readInheritance().predecessorSession]),
+            ),
         }],
         details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
 

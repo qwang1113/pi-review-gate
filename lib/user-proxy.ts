@@ -361,6 +361,22 @@ export function formatProxyDecisionReport(
   );
 }
 /**
+ * The decisions a completion report may claim as THIS session's.
+ *
+ * The sidecar keeps every session's decisions (a union — testimony is never
+ * dropped), so the report filters by the session that made them: this one and
+ * the predecessor its own handoff continued. A record with no `sessionId` was
+ * written before the field existed and belongs to no session we can name.
+ */
+export function sessionProxyDecisions<T extends { sessionId?: string }>(
+  decisions: readonly T[],
+  sessionIds: ReadonlyArray<string | undefined>,
+): T[] {
+  const mine = new Set(sessionIds.filter((id): id is string => !!id));
+  return decisions.filter((d) => d.sessionId !== undefined && mine.has(d.sessionId));
+}
+
+/**
  * Read the proxy's answer out of its output, or `undefined` for every shape
  * that is not a usable decision.
  *

@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   emptyState,
+  loadSidecar,
   mergeConcurrentBindings,
   saveSidecarPreservingConcurrent,
   type GateState,
@@ -190,6 +191,23 @@ test("proxy decisions survive a merge even when NEITHER side has a verdict to in
     ["q-theirs", "q-mine"],
     "…and the caller's own object carries it, or the next persist undoes the merge",
   );
+});
+
+test("a proxy decision's sessionId survives the sidecar, and a malformed one voids the list", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-proxy-sid-"));
+  try {
+    const path = join(dir, "state.json");
+    const st = armed("me");
+    st.proxyDecisions = [
+      { at: "2026-09-23T08:00:00.000Z", question: "q", options: ["A"], choice: "A", rationale: "r", sessionId: "me" },
+    ];
+    writeFileSync(path, JSON.stringify(st));
+    assert.equal(loadSidecar(path)?.proxyDecisions?.[0]?.sessionId, "me");
+    writeFileSync(path, JSON.stringify({ ...st, proxyDecisions: [{ ...st.proxyDecisions[0], sessionId: 42 }] }));
+    assert.equal(loadSidecar(path)?.proxyDecisions, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("concurrent sidecar: our own BAD verdict is never upgraded by a foreign good one", () => {

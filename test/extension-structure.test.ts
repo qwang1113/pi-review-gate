@@ -1213,9 +1213,11 @@ test("declare_done prints the proxy's decisions itself, and the audit wait has i
   const doneBody = toolBodyOf("declare_done");
   assert.match(
     doneBody,
-    /formatProxyDecisionReport\(allProxyDecisions\(\)\)/,
-    "the completion report must print the proxy's decisions from the state, not from the summary",
+    /formatProxyDecisionReport\(\s*sessionProxyDecisions\(allProxyDecisions\(\), \[state\.sessionId, readInheritance\(\)\.predecessorSession\]\),\s*\)/,
+    "the completion report prints the proxy's decisions from the state — only this session's and its handoff predecessor's (2026-09-23)",
   );
+  assert.match(SRC, /\.\.\.\(state\.sessionId \? \{ sessionId: state\.sessionId \} : \{\}\)/,
+    "each recorded decision carries the session that made it");
   // (b) The gate's own audit wait must NOT borrow `judge_wait`'s ten minutes:
   //     measured 2026-09-19, an eleven-minute goal audit was reported as
   //     「等待未命中本轮 report」 because the borrowed budget ran out, and the
