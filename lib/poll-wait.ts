@@ -23,6 +23,9 @@
 /** Just the part of an AbortSignal this loop reads. */
 export interface AbortLike {
   readonly aborted: boolean;
+  /** A real AbortSignal has these: an abort then ends a sleep at once. */
+  addEventListener?(type: "abort", listener: () => void): void;
+  removeEventListener?(type: "abort", listener: () => void): void;
 }
 
 /**
@@ -187,6 +190,10 @@ export async function pollUntil<T>(opts: PollWaitOptions<T>): Promise<PollWaitRe
     wake = () => resolve(USER_INPUT);
   });
   userInputWaiters.add(wake);
+  // ESC ends a sleep the same instant (the gap can be 45s for a Copilot wait);
+  // the label still comes from `aborted()`, which wins over user input below.
+  const onAbort = (): void => wake();
+  opts.signal?.addEventListener?.("abort", onAbort);
   const stopRequested = (): boolean => aborted() || interruptedByInput();
 
   let observation: T | undefined;
@@ -219,6 +226,7 @@ export async function pollUntil<T>(opts: PollWaitOptions<T>): Promise<PollWaitRe
     }
   } finally {
     userInputWaiters.delete(wake);
+    opts.signal?.removeEventListener?.("abort", onAbort);
     timer.cancel();
   }
   // ESC wins the label when both fired: the host cancelled the call, so there

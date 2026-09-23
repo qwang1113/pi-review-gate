@@ -83,6 +83,22 @@ test("every probe publishes a snapshot, the first one included", async () => {
     "the wait is visible from its first second, not only from the second probe");
 });
 
+test("ESC ends a long sleep at once, not at the end of the gap", async () => {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 10);
+  const started = Date.now();
+  const result = await pollUntil({
+    probe: () => 1,
+    isDone: () => false,
+    budgetMs: 60_000,
+    pollMs: 45_000,
+    signal: controller.signal,
+  });
+  assert.equal(result.aborted, true);
+  assert.equal(result.abortReason, "signal");
+  assert.ok(Date.now() - started < 5_000, "the 45s sleep did not have to run out");
+});
+
 test("an abort stops the wait and says so", async () => {
   const clock = fakeClock();
   const signal = { aborted: false };
