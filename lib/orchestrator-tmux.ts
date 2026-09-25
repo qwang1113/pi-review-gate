@@ -219,8 +219,22 @@ export function assertSafeTmuxArgv(
     }
   }
   // A global option write would change the user's own configuration.
-  if ((canonical === "set" || canonical === "set-option" || canonical === "setw" || canonical === "set-window-option") && argv.includes("-g")) {
-    throw new UnsafeTmuxCommand(`tmux ${canonical} -g 会改用户全局配置，禁止`);
+  //
+  // `set-environment -g` BELONGS HERE (quality round P1, 2026-09-25): tmux
+  // IGNORES `-t` when `-g` is given, so that one argv writes the SERVER's
+  // environment — every session the user has — which is a wider blast radius
+  // than the `set -g` this list already refuses. The gate's own builder never
+  // passes `-g`; the point of the check is the builder somebody adds later.
+  //
+  // `show-environment -g` (and `show-options -g`) are READS and stay allowed,
+  // which is the rule this list already had: `show-options -g` is not in it
+  // either.
+  if (
+    (canonical === "set" || canonical === "set-option" || canonical === "setw" ||
+      canonical === "set-window-option" || canonical === "set-environment") &&
+    argv.includes("-g")
+  ) {
+    throw new UnsafeTmuxCommand(`tmux ${canonical} -g 会改用户全局配置（或全局环境），禁止`);
   }
   return argv;
 }

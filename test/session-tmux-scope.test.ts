@@ -84,9 +84,18 @@ function fakeServer(opts: {
   markerFails?: boolean;
   /** The kill fails. */
   killFails?: boolean;
-} = {}): { run: ScopeRunner; calls: string[][]; sessions: Map<string, string> } {
+  /** What the session's OWN environment already holds (a polluted session). */
+  env?: Record<string, string>;
+  /** `show-environment` itself fails — the gate cannot see what is in there. */
+  envReadFails?: boolean;
+  /** tmux refuses the removal. */
+  envUnsetFails?: boolean;
+  /** …or throws while trying. */
+  envUnsetThrows?: boolean;
+} = {}): { run: ScopeRunner; calls: string[][]; sessions: Map<string, string>; env: Record<string, string> } {
   const sessions = new Map<string, string>();
   if (opts.existing) sessions.set(opts.existing.name, opts.existing.owner);
+  const env: Record<string, string> = { ...(opts.env ?? {}) };
   const calls: string[][] = [];
   const run: ScopeRunner = (argv) => {
     calls.push([...argv]);
@@ -111,6 +120,16 @@ function fakeServer(opts: {
       return { ok: true, stdout: "", stderr: "" };
     }
     if (sub === "show-options") return { ok: true, stdout: `${sessions.get(target) ?? ""}\n`, stderr: "" };
+    if (sub === "show-environment") {
+      if (opts.envReadFails) return { ok: false, stdout: "", stderr: "tmux refused the read" };
+      return { ok: true, stdout: Object.entries(env).map(([key, value]) => `${key}=${value}`).join("\n"), stderr: "" };
+    }
+    if (sub === "set-environment") {
+      if (opts.envUnsetThrows) throw new Error("tmux blew up on set-environment");
+      if (opts.envUnsetFails) return { ok: false, stdout: "", stderr: "tmux refused the unset" };
+      delete env[String(argv[argv.length - 1])];
+      return { ok: true, stdout: "", stderr: "" };
+    }
     if (sub === "kill-session") {
       if (opts.killFails) return { ok: false, stdout: "", stderr: "tmux refused the kill" };
       sessions.delete(target);
@@ -118,7 +137,7 @@ function fakeServer(opts: {
     }
     return { ok: true, stdout: "", stderr: "" } satisfies ScopeRunResult;
   };
-  return { run, calls, sessions };
+  return { run, calls, sessions, env };
 }
 
 interface FakeScope extends TmuxScope {
@@ -300,6 +319,48 @@ test("the first child creates the session WITH it; a later one joins", () => {
   assert.deepEqual([second.windowId, second.paneId], ["@9", "%10"]);
   assert.equal(scope.writes, 1, "and writes no second record");
   assert.equal(server.calls.filter((a) => a[0] === "new-session").length, 1);
+});
+
+test("a polluted session is healed before it is reused — and a heal that FAILS refuses the spawn", () => {
+  // 1) HEALED, before the child opens, and only the gate's own namespace.
+  const polluted = fakeServer({
+    existing: { name: NAME, owner: SESSION_ID },
+    env: { RG_WORKER_ID: "worker-5", PATH: "/usr/bin" },
+  });
+  const opened = openScopeWindow(polluted.run, fakeScope(), { cwd: "/repo", command: ["pi"] });
+  assert.equal(opened.ok, true, opened.ok ? "" : opened.error);
+  assert.equal(polluted.env.RG_WORKER_ID, undefined, "the gate's own variable is gone");
+  assert.equal(polluted.env.PATH, "/usr/bin", "and nothing that is not ours is touched");
+  const unsetAt = polluted.calls.findIndex((a) => a[0] === "set-environment");
+  const windowAt = polluted.calls.findIndex((a) => a[0] === "new-window");
+  assert.ok(unsetAt >= 0 && windowAt > unsetAt, "the clean-up precedes the child that would inherit it");
+
+  // 2) THE READ FAILS ⇒ the spawn is refused: an unknown is never acted on.
+  const blindEnv = fakeServer({ existing: { name: NAME, owner: SESSION_ID }, envReadFails: true });
+  const refused = openScopeWindow(blindEnv.run, fakeScope(), { cwd: "/repo", command: ["pi"] });
+  assert.equal(refused.ok, false, "a child that might wear somebody else's identity is not worth the risk");
+  if (!refused.ok) assert.match(refused.error, /读不到/);
+  assert.equal(blindEnv.calls.some((a) => a[0] === "new-window"), false, "and no window is opened");
+
+  // 3) TMUX REFUSES THE UNSET ⇒ refused, naming the variable that could not go.
+  const stubborn = fakeServer({
+    existing: { name: NAME, owner: SESSION_ID },
+    env: { RG_JUDGE_ID: "reviewer-1" },
+    envUnsetFails: true,
+  });
+  const refused2 = openScopeWindow(stubborn.run, fakeScope(), { cwd: "/repo", command: ["pi"] });
+  assert.equal(refused2.ok, false);
+  if (!refused2.ok) assert.match(refused2.error, /RG_JUDGE_ID/);
+
+  // 4) …OR THROWS: same refusal, same naming — the failure direction is the point.
+  const blowsUp = fakeServer({
+    existing: { name: NAME, owner: SESSION_ID },
+    env: { RG_JUDGE_ID: "reviewer-1" },
+    envUnsetThrows: true,
+  });
+  const refused3 = openScopeWindow(blowsUp.run, fakeScope(), { cwd: "/repo", command: ["pi"] });
+  assert.equal(refused3.ok, false);
+  if (!refused3.ok) assert.match(refused3.error, /RG_JUDGE_ID/);
 });
 
 test("a session wearing OUR name that is not ours is neither reused nor killed", () => {

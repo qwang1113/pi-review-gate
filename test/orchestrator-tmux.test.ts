@@ -114,6 +114,20 @@ test("every session-scoped command needs a declaration AND a target that names o
   // The aliases are held to the same rule, not to a second one.
   assert.throws(() => assertSafeTmuxArgv(["new", "-s", "lab"], own), UnsafeTmuxCommand);
   assert.throws(() => assertSafeTmuxArgv(["killw", "-t", `lab:@1`], own), UnsafeTmuxCommand);
+  // A GLOBAL ENVIRONMENT WRITE IS REFUSED LIKE ANY OTHER GLOBAL WRITE
+  // (quality round P1, 2026-09-25): tmux ignores `-t` when `-g` is given, so
+  // `set-environment -g` writes the SERVER's environment — every session the
+  // user has.
+  assert.throws(
+    () => assertSafeTmuxArgv(["set-environment", "-g", "-t", SESSION, "-u", "RG_WORKER_ID"], own),
+    UnsafeTmuxCommand,
+  );
+  assert.throws(() => assertSafeTmuxArgv(["set-environment", "-g", "KEY", "value"], own), UnsafeTmuxCommand);
+  // The READS are session-scoped too, and that is the honest reading of the
+  // list: `show-environment` is in it, so it must name a session of ours — the
+  // gate has no business reading the server's GLOBAL environment either.
+  assert.throws(() => assertSafeTmuxArgv(["show-environment", "-g"], own), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["set-environment", "-g", "KEY", "value"], own), UnsafeTmuxCommand);
   // The in-session forms pass.
   assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-session", "-t", SESSION], own));
   assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-window", "-t", `${SESSION}:@12`], own));

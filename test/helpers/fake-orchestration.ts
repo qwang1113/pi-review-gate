@@ -627,6 +627,14 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     }
     if (sub === "set-environment") {
       const target = String(argv[argv.indexOf("-t") + 1]);
+      // `-g` writes the SERVER's environment (tmux ignores `-t` when `-g` is
+      // given) — every session the user has. The gate refuses it at the argv
+      // layer, and the fake refuses it too: a fake that modelled `-g` as a
+      // session write would show green for a call that changes the user's
+      // global environment (quality round P2, 2026-09-25).
+      if (argv.includes("-g")) {
+        return { ok: false, stdout: "", stderr: "fake tmux: -g is the user's global environment, not a session's" };
+      }
       const session = sessions.get(target);
       if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
       const unset = argv.includes("-u");
