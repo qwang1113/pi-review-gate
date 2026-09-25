@@ -536,6 +536,15 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   一个 window；opener 自己的窗口**一个 pane 都不多**。`declare_done` 关掉自己那一个
   session（名字由本会话身份派生；sidecar 记录只用于确认「是我建的」，且必须与派生结果逐字段相符才被采信）。**接力后继者是唯一例外**：它仍
   split 在 opener 原窗口里（用户选的），专属 session 只收 judge / worker / PM 子会话。
+- **每个会话还能给自己取一个全局唯一的名字**（2026-09-25 用户决定，t2）：`name_session({name})`
+  （kebab-case、2–32）把名字写进 window title 与 window 级 user option `@rg_session_name`
+  （状态栏据它显示「目录名 · 会话名」，没命名的 window 逐字不变），并登记到
+  `~/.pi/agent/rg-sessions/<名字>.json`。撞上活着的占用者**直接拒绝并点名占用者**（repo/状态/登记时间），
+  绝不加后缀、不覆盖、不踢人；只有心跳陈旧 **且** pid 不在 **且** pane 不在才能接管；会话启动时扫一遍
+  回收死者留下的 tmux session/登记/inbox（先比对 `@rg_scope_owner` 标记），`declare_done` 与进程退出腾出名字。
+  **判定全在 `lib/session-registry.ts`（名字与占用判定）、`lib/session-orphan-sweep.ts`（回收）与
+  `lib/session-name-tools.ts`（工具 + 生命周期）**，扩展只接线四件事（注册工具、
+  session_start 接管+扫孤儿+装定时器、declare_done 释放、进程 exit 释放）；`@名字` 发消息是 t3 的活。
 - **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：门禁内部等待、
   full precommit、任何长命令都发生在**同一个 turn 内部**，agent 既不 settle 也不
   结束 turn，挂在 `agent_settled` / `turn_end` 上的心跳因此必然超时 —— 一个正在等

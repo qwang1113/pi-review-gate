@@ -25,6 +25,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { installTmuxStatusFormat as applyTmuxStatusFormat } from "./tmux-status-format.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -67,6 +68,24 @@ const COMPANION_PACKAGES = [
 
 function log(line) {
   process.stdout.write(`[pi-review-gate] ${line}\n`);
+}
+
+/**
+ * THE TMUX STATUS LINE — the one thing this package writes outside itself, and
+ * it writes the USER's config file rather than a running tmux server (never
+ * `tmux set -g`, which the gate refuses at the argv layer). The rule, the
+ * conditional format and the backup all live in
+ * `scripts/tmux-status-format.mjs` — one importable module, so the installer and
+ * `test/tmux-status-format.test.ts` cannot disagree about what "already
+ * rewritten" means.
+ */
+function installTmuxStatusFormat() {
+  const result = applyTmuxStatusFormat({ log });
+  if (result.status === "missing") log("  · ~/.tmux.conf not found — nothing to do for the tmux status line");
+  else if (result.status === "already") log("  · the tmux status line already shows「目录名 · 会话名」— left as is");
+  else if (result.status === "no-format-line") log("  · no window-status-format using #{b:pane_current_path} in ~/.tmux.conf — left as is");
+  else if (result.status === "unreadable") log(`  ⚠ could not read ${result.confPath}: ${result.error}`);
+  else if (result.status === "failed") log(`  ⚠ could not rewrite ${result.confPath}: ${result.error}`);
 }
 
 function isGitRepo(dir) {
@@ -376,5 +395,10 @@ try {
   installHooksHere();
 } catch (e) {
   log(`  ✗ hook install failed: ${e.message}`);
+}
+try {
+  installTmuxStatusFormat();
+} catch (e) {
+  log(`  ✗ tmux status line install failed: ${e.message}`);
 }
 log("done (extension + skills load natively via the pi package manifest)");

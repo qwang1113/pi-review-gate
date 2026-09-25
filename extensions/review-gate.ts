@@ -327,7 +327,11 @@ import {
   successorOpeningMessage,
   type SessionHandoffDeps,
 } from "../lib/session-handoff-tools.ts";
-
+// THE NAME A SESSION CAN BE FOUND BY (2026-09-25, t2): the tool, its registry,
+// the heartbeat that renews it, the sweep that reclaims what dead sessions left
+// behind, and the release `declare_done` / process exit owe. Everything but the
+// wiring lives in these two modules.
+import { createSessionNaming } from "../lib/session-name-tools.ts";
 import {
   buildPlanAuditTask,
   formatPlanAuditCarryover,
@@ -3867,14 +3871,101 @@ export default function reviewGate(pi: ExtensionAPI) {
    * already broken. The raw runner is imported under a different name so that
    * forgetting is not expressible: there is no unguarded `runTmux` in scope.
    */
-  const runTmux = (argv: readonly string[], env?: NodeJS.ProcessEnv) =>
+  const runTmux = (argv: readonly string[], env?: NodeJS.ProcessEnv, extraSessions?: readonly string[]) =>
     rawTmux(argv, env ?? process.env, {
       ownSessions: addressableSessions(tmuxScope, [
         ...ownJudges().map((entry) => entry.tmuxSession),
         ...(state.orchestrator?.children ?? []).map((child) => child.tmuxSession),
         ...workerRegistrySessions(),
+        // SESSIONS THIS CALL PROVED ARE GATE SESSIONS ANYWAY (2026-09-25, t2).
+        // The orphan sweep kills the dedicated session of a session that is
+        // GONE — nobody alive can declare that name, so it arrives here already
+        // marker-verified (lib/session-registry.ts reads `@rg_scope_owner` and
+        // compares it with the dead entry's session id before building the
+        // kill). Shape-checked again by `addressableSessions`, so only names
+        // this gate could have derived are ever accepted.
+        ...(extraSessions ?? []),
       ]),
     });
+
+  /**
+   * THE SESSION'S OWN NAME (2026-09-25, t2) — the tool, the registry, the
+   * heartbeat and the sweep, built once and wired at the moments below.
+   *
+   * A REGISTRY RATHER THAN GATE STATE, and deliberately: the name is global
+   * (it has to be reachable from a session in another repository), it is
+   * renewed by a timer, and it is read by processes that never share this
+   * session's state — `~/.pi/agent/rg-sessions/<name>.json` is the unit, one
+   * file per name (lib/session-registry.ts says why that layout, and why a live
+   * holder is never evicted).
+   */
+  const sessionNaming = createSessionNaming({
+    runTmux: (argv, ownSessions) => runTmux(argv, undefined, ownSessions),
+    sessionId: () => state.sessionId?.trim() || undefined,
+    ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
+    repoRoot: () => primaryRepoRoot,
+    cwd: () => cwd,
+    // WHAT KIND OF SESSION THIS IS — the same sources handoffKind() reads, plus
+    // the worker pane (which is a reporting shell of its own kind).
+    mode: () => {
+      if (readJudgeSideEnv(process.env)) return "judge";
+      if (readWorkerSideEnv(process.env)) return "worker";
+      if (state.taskMode === "orchestrator") return "orchestrator";
+      if ((process.env[STATE_VARIANT_ENV] ?? "").trim()) return "child";
+      return state.taskMode ?? "loop";
+    },
+    // A COARSE READING IS ENOUGH FOR THE REGISTRY: the question it answers is
+    // "is anybody there", and the heartbeat is what proves that.
+    state: () => (latestCtx?.isIdle?.() ? "idle" : "working"),
+    scopeSession: () => tmuxScope.read()?.name,
+    log: (message) => log(`review-gate[session-name] ${message}`),
+    onLost: (reason) => {
+      // NOT A SILENT LOSS: the session is told the moment its renewal finds the
+      // name gone, because everything that addressed it by name now reaches
+      // somebody else (or nobody).
+      log(`review-gate[session-name] ${reason}`);
+      try { latestCtx?.ui?.notify?.(`review-gate: ${reason}`, "warning"); } catch { /* headless */ }
+    },
+  });
+
+  /**
+   * THE NAME'S CLOCK — a timer of the extension, not of the agent.
+   * Same reason the child heartbeat is a timer (round-4 P0): a session blocked
+   * in a `judge_wait`, a full precommit or any long tool call is INSIDE one
+   * turn, so nothing agent-driven fires — and a registration that stops being
+   * renewed starts looking like a dead holder, which is the one thing that must
+   * never happen to a session that is alive. It runs for the whole session and
+   * does nothing while no name is held (lib/session-name-tools.ts `tick`).
+   */
+  let sessionNamingTimer: ReturnType<typeof setInterval> | undefined;
+  function startSessionNamingHeartbeat(): void {
+    if (sessionNamingTimer) return;
+    sessionNamingTimer = setInterval(() => {
+      try { sessionNaming.tick(); } catch { /* a heartbeat must never break its session */ }
+    }, sessionNaming.heartbeatMs);
+    // Never the reason the process stays alive.
+    (sessionNamingTimer as unknown as { unref?: () => void }).unref?.();
+  }
+  function stopSessionNamingHeartbeat(): void {
+    if (sessionNamingTimer) clearInterval(sessionNamingTimer);
+    sessionNamingTimer = undefined;
+  }
+  // THE NAME GOES BACK WHEN THE PROCESS DIES, however it dies (t2). Registered
+  // once per process: a name left behind by a crash is exactly what the next
+  // session's sweep has to clean up, so the honest exit releases it and the
+  // sweep stays the backstop.
+  process.on("exit", () => {
+    try { sessionNaming.release(); } catch { /* the process is already going */ }
+  });
+
+  // `name_session()` — THE SESSION'S OWN NAME (2026-09-25, t2). Registered for
+  // EVERY kind of session (user decision): a window title and a status line are
+  // worth the same to a judge pane as to a loop session, and a name is how
+  // another session addresses this one (`@名字`, t3). Naming yourself is not one
+  // of the things a reporting shell may not do (`JUDGE_DENIED_TOOLS` is that
+  // list, and this tool is not on it).
+  sessionNaming.register(pi);
+
   /**
    * WHICH MODEL SLOTS ARE BAD, per repo (lib/model-health.ts).
    *
@@ -12725,6 +12816,15 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // killing the session they live in would be the one thing that section
       // promises not to do.
       const sessionClose = closeOwnSession((argv) => runTmux(argv), tmuxScope);
+      // ── AND THE NAME GOES BACK WITH IT (t2, 2026-09-25) ──
+      //
+      // The name is a lease on a human-visible surface: the window title and the
+      // status line go back to what they said before, and the registration is
+      // deleted so the next session can take the name. A failure is reported
+      // and never blocks — the work is finished — and the sweep in
+      // lib/session-registry.ts is the backstop for a name that outlives its
+      // session.
+      const namingRelease = sessionNaming.release();
       return {
         content: [{
           type: "text",
@@ -12747,6 +12847,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             // happen — including refusing to kill a session the marker says is
             // not ours.
             (sessionClose.ok ? "" : `\n（专属 tmux session 未清干净：${sessionClose.error}）`) +
+            // The session's NAME, reported only when it was NOT given back:
+            // the name is what other sessions address this one by, so a
+            // stranded one is a fact the human has to know (and the next
+            // session's sweep is the backstop).
+            (namingRelease.released ? "" : `\n（会话名字未腾出：${namingRelease.error ?? "未知原因"}）`) +
             // WHO DECIDED WHAT (2026-09-19). Printed by the GATE, from the
             // state record, and never by the summary — a decision the proxy
             // took on the user's behalf is the one fact this report cannot let
@@ -14143,6 +14248,26 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     applySessionExclusivity(ctx);
 
     persist(ctx);
+
+    // ── THE NAME, AT STARTUP (t2, 2026-09-25) ──
+    //
+    // Two things happen here, and both belong to the FIRST moment a session is
+    // alive: it re-adopts the registration its own session id already holds (a
+    // restart or a reload keeps its name), and it SWEEPS what dead sessions
+    // left behind — their tmux sessions, registrations and inboxes. The sweep
+    // is judged in lib/session-registry.ts and fires only on provable death;
+    // it runs once per session and its report goes to the log.
+    const namingStart = sessionNaming.onSessionStart();
+    if (namingStart.adopted !== undefined) {
+      log(`review-gate[session-name] 本会话沿用已登记的名字 ${namingStart.adopted}`);
+    }
+    for (const reaped of namingStart.sweep.reaped) {
+      log(
+        `review-gate[session-name] 回收孤儿：${reaped.name}（${reaped.sessionId}）` +
+        `${reaped.sessionKilled ? "，已 kill 它的专属 tmux session" : ""}${reaped.inboxRemoved ? "，已清 inbox" : ""}`,
+      );
+    }
+    startSessionNamingHeartbeat();
   });
 
   pi.on("session_shutdown", (event) => {
@@ -14165,6 +14290,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // so a later subagent-session shutdown cannot leave the widget frozen).
     lastUiCtx = undefined;
     disarmUiRefreshTimer();
+    // The name's renewal clock is this session's too, and a reload keeps the
+    // NAME: the new instance adopts its own registration by session id at
+    // session_start, so nothing is released here — only the timer stops, and
+    // the process-exit handler is what gives the name back.
+    stopSessionNamingHeartbeat();
     // The supervision probe is a timer this session owns; a leaked one would
     // keep waking a session that is gone.
     stopSupervisionTimer();
@@ -14188,6 +14318,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // persisted table, and dropping it on shutdown is precisely what used to
     // strand a live pane nobody could address after a restart.
 
+    // The name's renewal clock: stopped, NOT released — a reload/new/resume
+    // keeps the same session id and adopts the same registration at
+    // session_start, while a real shutdown releases it through the process-exit
+    // handler registered beside the runtime.
+    stopSessionNamingHeartbeat();
   });
 
   pi.on("session_compact", async (_event, ctx) => {

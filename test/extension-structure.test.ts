@@ -3102,7 +3102,40 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
     "the raw runner is imported under a name nothing can call by accident");
   assert.equal((SRC.match(/const runTmux = /g) ?? []).length, 1,
     "exactly ONE wrapper defines this session's runTmux");
-  assert.match(SRC, /const runTmux = \(argv: readonly string\[\], env\?: NodeJS\.ProcessEnv\) =>[\s\S]{0,200}rawTmux\(argv, env \?\? process\.env, \{[\s\S]{0,200}ownSessions: addressableSessions\(tmuxScope,/, "…and it attaches the sessions lib/session-tmux-scope.ts derived for this process");
+  assert.match(SRC, /const runTmux = \(argv: readonly string\[\], env\?: NodeJS\.ProcessEnv, extraSessions\?: readonly string\[\]\) =>[\s\S]{0,200}rawTmux\(argv, env \?\? process\.env, \{[\s\S]{0,200}ownSessions: addressableSessions\(tmuxScope,/, "…and it attaches the sessions lib/session-tmux-scope.ts derived for this process");
+  // THE THIRD PARAMETER IS THE ONLY WIDENING, AND IT ARRIVES ALREADY PROVEN
+  // (2026-09-25, t2): the orphan sweep kills the dedicated session of a session
+  // that is GONE — nobody alive holds that name, so it cannot come from a
+  // registry row. lib/session-registry.ts reads its `@rg_scope_owner` marker
+  // and compares it with the dead entry's session id before the kill is built,
+  // and `addressableSessions` shape-checks the name again here, so the widening
+  // is one verified name at a time and never a caller-supplied session.
+  assert.match(SRC, /sessionNaming = createSessionNaming\(\{\s*runTmux: \(argv, ownSessions\) => runTmux\(argv, undefined, ownSessions\)/, "the naming module's runner is the same guarded wrapper");
+  // THE FOUR MOMENTS THE SESSION'S NAME LIVES IN (2026-09-25, t2). All the
+  // judgement is in lib/session-registry.ts + lib/session-name-tools.ts; the
+  // extension only connects the lifecycle, and a connection that is DROPPED is
+  // exactly the kind of defect no unit test can see (the modules are fine on
+  // their own). One registered tool, one adoption+sweep at start, one renewal
+  // clock, one release at the exit contract and one at process death.
+  assert.equal((SRC.match(/sessionNaming\.register\(pi\)/g) ?? []).length, 1,
+    "name_session is registered exactly once, for every kind of session");
+  assert.match(SRC, /const namingStart = sessionNaming\.onSessionStart\(\);/,
+    "session start adopts its own registration and sweeps the orphans");
+  assert.match(SRC, /const namingRelease = sessionNaming\.release\(\);/,
+    "declare_done gives the name back");
+  assert.match(SRC, /namingRelease\.released \? "" : `\\n（会话名字未腾出：\$\{namingRelease\.error \?\? "未知原因"\}）`/,
+    "…and reports it when it could not, instead of claiming a clean exit");
+  assert.match(SRC, /sessionNamingTimer = setInterval\(\(\) => \{\s*try \{ sessionNaming\.tick\(\); \} catch/, 
+    "the renewal rides a timer of the extension, not an agent event");
+  assert.match(SRC, /\}, sessionNaming\.heartbeatMs\);/,
+    "…on the interval the registry module owns");
+  assert.match(SRC, /process\.on\("exit", \(\) => \{\s*try \{ sessionNaming\.release\(\); \} catch/,
+    "a dying process releases its name rather than leaving it for the sweep");
+  // A SHUTDOWN IS NOT A DEATH: quit | reload | new | resume | fork all keep the
+  // same session id, so the clock stops and the NEXT session_start adopts the
+  // same registration. Releasing here would rename a session that never died.
+  assert.match(SRC, /stopSessionNamingHeartbeat\(\);\s*\n  \}\);/,
+    "session_shutdown stops the clock without giving the name away");
   // THE LIST HAS TWO HALVES THAT ARE EASY TO GET WRONG IN OPPOSITE DIRECTIONS
   // (2026-09-25, quality round P2):
   //  - TOO WIDE: the judge registry FILE is shared with other sessions in this

@@ -30,7 +30,7 @@
 
 | 事件 | 门禁在这里做什么 |
 | --- | --- |
-| `session_start` | 恢复 sidecar 状态、判定会话模式、装配常驻指令 |
+| `session_start` | 恢复 sidecar 状态、判定会话模式、装配常驻指令；按 session id 接管本会话已登记的名字，并扫一遍注册表回收死会话留下的 tmux session/登记/inbox（t2），然后装上名字续期定时器 |
 | `before_agent_start` | 每轮注入 L4 语言指令、goal 摘要、per-turn 协议提醒 |
 | `tool_call` | L1 ship 拦截、敏感文件拦截、L5 文案判定 —— **正文已搬进 `lib/ship-gate-hook.ts` + 两条臂**，扩展只留一行接线与注入的 deps |
 | `tool_result` | 追踪本轮编辑、记录 precommit 结果、编辑纪律 nudge、附加提示 |
@@ -39,7 +39,7 @@
 | `agent_settled` | L2 自动续跑（递归保护、轮次上限、平台期停止）；思考空转熔断的提示也在这里发出（`abort()` 之后会话才空闲，steer 队列得等下一次 run 才被取用） |
 | `turn_end` | 本轮编辑/提交状态对账（哪些改动仍在武装门禁） |
 | `message_start` / `message_update` / `message_end` | 思考空转熔断：把 assistant 流的三类增量（thinking / text / toolcall）喂给 `lib/thinking-loop-controller.ts`，assistant 消息边界重置与收尾；扩展只转发，判定与动作都在那两个模块里。**另有一条 `message_end`**（2026-09-09）折叠 `subagent-notification` 自定义消息，喂给 `background-wait.ts` 的终态信号；同一条信号还有**事件总线**那个来源（`pi.events.on("subagents:completed" / "subagents:failed")`，2026-09-17，每次跑完都发），两者都只做一件事：把那个 agent id 从等待集合里去掉 |
-| `session_shutdown` | 收尾清理（watcher、临时资源） |
+| `session_shutdown` | 收尾清理（watcher、临时资源）；停掉名字续期定时器（**不释放名字**——reload/new/resume 保持同一 session id，下一次 `session_start` 接管同一份登记；真正的退出由进程 `exit` 钩子释放） |
 | `session_compact` | 压缩后重新注入门禁状态与 git 记忆 |
 
 核对（这张表的完整判据）：`grep -n 'pi\.on("' extensions/review-gate.ts` —— 当前 14 个。
@@ -51,7 +51,7 @@
   2026-09-07 退役）。
   核对：`grep -c '^  pi.registerTool({' extensions/review-gate.ts` → 当前 4。
 
-- **19 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+- **20 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
   - `lib/goal-tools.ts`：`propose_loop_goal`（L8：跑 goal 审计 → 问用户 →
     写文件），并且是这一族的**唯一注册入口**——扩展里只有一次
     `registerGoalTools(pi, {...})` 接线。审计记录侧在
@@ -90,8 +90,13 @@
   - `lib/orchestrator-answer-tools.ts`：`orchestrator_answer`。
   - `lib/orchestrator-recovery-tools.ts`：`orchestrator_recover`、
     `orchestrator_attach`。
+  - `lib/session-name-tools.ts`：`name_session`（给本会话起一个全局唯一的名字：占登记 →
+    写 window title 与 window 级 user option `@rg_session_name` → 心跳续期 → 释放）。
+    **注册表、唯一性在 `lib/session-registry.ts`，回收在 `lib/session-orphan-sweep.ts`**，
+    扩展只接线四件事：注册工具、`session_start` 的接管+扫孤儿+装定时器、`declare_done` 的释放、进程 `exit` 的释放。
   核对：`grep -rh 'name: "' lib/*.ts | grep -oE 'name: "[a-z_]+"' | sort -u | wc -l`
-  → 25，其中 3 个是下面说的**内部实现**（`prepare_review` / `prepare_adviser` /
+  → 32（2026-09-25 实测；这个数只随文件漂，写在这里是告诉你**怎么数**，
+  不是让你记住它），其中 3 个是下面说的**内部实现**（`prepare_review` / `prepare_adviser` /
   `prepare_goal_audit`，注册在 internalHost），不注册给 pi。
 
 - **5 个实现存在，但不是工具**（2026-08-30，哲学三）。`run_precommit`、
@@ -506,7 +511,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（151 个模块）
+## 五、`lib/` 全量速查表（154 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -650,6 +655,9 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `session-handoff.ts` | **唯一的会话交接策略**（2026-09-14，用户决定）：阈值 `HANDOFF_PERCENT = 70`（orchestrator 的 80/90 与 judge 的 60 三个数字合并成一个）、`handoffDue`（读数缺失**不提醒**——用缺失信息报警会训练读者忽略它）、`buildHandoffDoc`（骨架：契约 / 未完成工作 / transcript 指针 + 明确标为「自述」的 agent 补充段）、`handoffAccepted`（接手判据：**读过交接文档 且** 有过一次成功工具调用，两条同时成立——只跑命令不算，这正是用户同意的形状）。纯函数 |
 | `session-handoff-tools.ts` | 两个工具（无参数、全会话共用）：`session_handoff()` 写骨架文档 → 开新 pane（argv 第一条消息就指向文档——这正是旧路径缺的那一步）→ 记录交接 → 老会话退位；开 pane 失败或抛异常则回滚占用。judge 分支：judge **自己**在旁边的 pane 开新一代（派生 id）并把新 id 写回登记表（opener 的 settle 重读后读到新通道）。`context_status()` 把门禁自己每轮都在量的上下文读数（tokens / 窗口 / 百分比 + 70% 阈值判定）交给会话本人——agent 无法访问 `ctx.getContextUsage()`，不提供工具就只会靠感觉估（2026-09-14 实测：一个会话整轮按 35.8% 的上下文做了“快满了”的预算） |
 | `session-inheritance.ts` | 后继者继承什么：`successorEnv`（前任 pane / 交接文档 / 前任 transcript / **前任 session id**（接管 worktree 占用的继任凭据）/ kind）、`readInheritance`、`formatInheritanceBrief`（明说「门禁会自动关掉前任」——旧 brief 让新会话自己调 `orchestrator_close`，那正是两个会话互相干等的根因）、`successorSessionId` / `handoffGeneration`（`-h1`/`-h2` 链式派生，接力历史写在 id 里） |
+| `session-name-tools.ts` | **`name_session` 与命名的四步生命周期**（2026-09-25 用户决定）：取一个全局唯一的名字 → 写 window title + window 级 user option `@rg_session_name` → 心跳续期 → 释放。工具与生命周期本体都在这里（判定与分类全在 `session-registry.ts`），扩展只接线：`register(pi)`、`session_start` 的 `onSessionStart()`（接管自己的登记 + 扫孤儿）、按 `heartbeatMs` 装定时器调 `tick()`、`declare_done` 与进程 `exit` 调 `release()`。改名是「先腾旧名、再占新名」，旧名腾不出来就**拒绝改名**（否则同一个 session id 会留下两份登记，而它看起来永远是活的）。`liveSessionNames()` 给 t3 的发送侧用：只列活着的，读不出的单独报出来 |
+| `session-orphan-sweep.ts` | **回收死会话留下的东西**（2026-09-25，t2）：会话启动时扫一遍注册表，只对「心跳过期 + pid 不在 + pane 不在」的条目动手 —— 先比对它自己那份 `scopeSession` 的 `@rg_scope_owner` 标记等于该条目的 sessionId（**标记读与 kill 走同一条 tmux 名字解析**；tmux 3.7c 实测无精确命中时 `-t` 会回落成前缀匹配，所以杀的前提是「刚读到「标记是死者的」，而不是名字长得像），然后把登记**先改名移开再删**（期间被重新登记的会被识别出来并放回去），最后清掉 `<名字>.inbox.jsonl`。专属 session 已经不在了不是错误：靠 server 自己的名字列表区分「已消失」与「读不到」，前者照样清登记。与注册表分居两个模块：注册表只读一个名字，回收要杀别人留下的 session。任一事实读不到一律 fail-closed（`SweepReport.kept` 里点名理由） |
+| `session-registry.ts` | **全局会话注册表**（2026-09-25 用户决定）：`~/.pi/agent/rg-sessions/<名字>.json`，每名字一个文件（并发写落不同文件，一个名字的写坏了不牵连别人；唯一性由文件系统回答）。名字形状（kebab-case、2–32）、原子占用（**空位靠 `O_EXCL` 创建、接管靠 `rename(2)` 把死条目移开** —— 两个进程同时看到同一个空位/同一个死名字时只能一个赢）、占用者三分类 `live`/`dead`/`unknown`（心跳 30s 续、>180s 算陈旧，且必须 pid 不在 **且** pane 不在才判 dead；任一事实读不到即 unknown）、续期/释放（只删自己的），以及 inbox 路径约定 `<名字>.inbox.jsonl`（t3 用）。tmux/文件系统/pid 都从注入的 seam 进，所以竞态与 fail-closed 分支都能单测。**回收死在另一个模块**：`session-orphan-sweep.ts` |
 | `session-revival.ts` | 存活不变量（2026-08-30）：会话在退出契约未满足时停下，门禁就周期性唤醒它。纯判定：看不见续跑预算与 loop-stall 断路器（它们管注入路径，管不了「停下」），但尊重人的叫停（ESC / ask_user / bypass / 仲裁 pause）、handoff 交接，以及**已记录完成**（`state.completion`：`declare_done` 写、**任何 project 文件被编辑就删**（2026-09-22 把删除移出 code/doc 分支 —— 之前改 `.json`/`.yaml` 既不清它也不 armLoop，会话就卡在「不叫醒」与「ship 仍拦」之间），所以它一条就同时表示「契约已兑」与「此后没动过」；2026-09-22 加，此前人在同一 checkout 里的 merge / pull / checkout 会把已交付的会话叫回来复审） |
 | `session-dir.ts` | pi 的 session-dir 编码约定，fresh-context 角色据此找到主会话 transcript |
 | `session-exclusivity.ts` | 一个 worktree 只允许一个「占用主 sidecar」的会话：心跳存在文件（`.pi/session-presence.json`）判活，第二个占用者 fail-closed 拒绝——拦 edit/write、拦 ship、连门禁自己的 checkpoint 提交与 goal 文件写入一并拦（`normal` 模式除外：那个模式的定义就是门禁整体关闭，所以不发拒绝；它只在 worktree 空闲时写心跳，已被占用时既不拒绝也不写——凭据属于占用者）。judge、worker 与编排子会话因为不写主 sidecar 而天然豁免。**「谁不写主门禁状态」这条判定本身也住在这里**（`gateStateWriteSkip`，2026-09-21 从 `judge-side.ts` 搬入并补上 worker）：它与独占判定是同一个主题读两遍，分居两处的结果就是新增角色（worker）只被其中一处认出来 —— 现在 `claimsMainSidecar` 由它派生（写门禁状态 **且** 没有自己的 variant 文件才算占用），编排子会话是两个答案唯一不同的一档（它写，只是不写这个文件）。裁决输入只有**心跳新鲜度**（60s 窗，`PRESENCE_FRESH_MS`），`pid`/`host` 仅作诊断（这一点与 `blocked-marker.ts` 相同，**但两者的失败方向相反**）；一切未知（文件缺失/损坏/时钟异常/未来时间戳）一律 fail-**open** 放行——**只有一个正面事实（刚写的心跳）才能拒绝**，占用者消失后自动复检解除。2026-09-10 新增第二条放行：**继任关系** —— `session_handoff` 起的后继者带着前任的 session id（`RG_HANDOFF_PREDECESSOR_SESSION`），占用者 id 等于它即放行；该判定排在**新鲜度之前**，因为「前任还没来得及释放」正是它要覆盖的场景（实测：后继者被自己前任的心跳拒之门外，报「这个 worktree 已被另一个会话占用」后 pi 随即退出）。**它与 `blocked-marker.ts`、`judge-pane.ts` 的判活为什么不可收敛**：见本文件头与 `test/liveness-criteria.test.ts`（2026-09-06 复核） |

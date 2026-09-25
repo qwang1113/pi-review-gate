@@ -383,6 +383,99 @@ export function buildReadSessionOwnerArgv(ownSession: string): readonly string[]
 }
 
 /**
+ * ── THE SESSION'S OWN NAME ON SCREEN (2026-09-25, t2) ──
+ *
+ * Three builders, and they are the only writes the gate makes to the surface
+ * the HUMAN looks at rather than the gate's own: the window TITLE (what
+ * `prefix w` and `tmux ls` show) and a window-level user option the status bar
+ * renders. Both are written when a session names itself
+ * (lib/session-name-tools.ts) and taken back when it releases the name.
+ *
+ * THE OPTION IS NOT COSMETIC AND NOT A TITLE. `pane_title`/`window_name` are
+ * namespaces other programs write (pi overwrites the pane title at boot, which
+ * is why the gate's labels moved to `@rg_label`); a tmux USER OPTION is a
+ * namespace nothing else touches, so `#{@rg_session_name}` in the user's status
+ * line renders the name the session chose, minutes after it chose it.
+ * `-g` never appears: the user's own configuration is theirs, and the option
+ * lives on ONE window.
+ */
+export const SESSION_NAME_OPTION = "@rg_session_name";
+
+/**
+ * A name that is safe to put into a tmux format and into an argv:
+ * printable, no control characters, no `#{` (which tmux would EXPAND when the
+ * option is rendered), and short. The product rules (kebab-case, 2–32 chars)
+ * live in lib/session-registry.ts — this is only the transport floor.
+ */
+function requireDisplayName(value: string, what: string): string {
+  const raw = String(value ?? "");
+  if (raw.length === 0 || raw.length > 64 || /[\u0000-\u001f\u007f]/.test(raw) || raw.includes("#{")) {
+    throw new UnsafeTmuxCommand(`${what} 不能作为 tmux 展示名：${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
+
+/** Rename the window a pane lives in — the session's own window. */
+export function buildRenameWindowArgv(target: string, name: string): readonly string[] {
+  return assertSafeTmuxArgv(["rename-window", "-t", requirePane(target, "target"), requireDisplayName(name, "window name")]);
+}
+
+/** Write the window-level option the status bar reads (`set -w`, never `-g`). */
+export function buildSetSessionNameOptionArgv(target: string, name: string): readonly string[] {
+  return assertSafeTmuxArgv([
+    "set", "-w", "-t", requirePane(target, "target"), SESSION_NAME_OPTION, requireDisplayName(name, "option value"),
+  ]);
+}
+
+/**
+ * Take it back: `-u` removes the window-level setting, so the status line falls
+ * through to whatever the user configured for an unnamed window.
+ */
+export function buildUnsetSessionNameOptionArgv(target: string): readonly string[] {
+  return assertSafeTmuxArgv(["set", "-wu", "-t", requirePane(target, "target"), SESSION_NAME_OPTION]);
+}
+
+/**
+ * Read MY OWN coordinates: which tmux session, which window, and what that
+ * window is currently CALLED (the last one so a release can put the title
+ * back).
+ *
+ * Read, never derived: the pane id is tmux's own (`$TMUX_PANE`), and the
+ * session/window it sits in are what tmux says right now — the opener's
+ * dedicated session for a child, the user's own window for a loop session, a
+ * relay successor's split. Nothing here guesses the topology.
+ */
+export function buildReadOwnCoordsArgv(pane: string): readonly string[] {
+  return assertSafeTmuxArgv([
+    "display-message", "-p", "-t", requirePane(pane, "pane"),
+    `#{session_name}|#{window_id}|#{${SESSION_NAME_OPTION}}|#{window_name}`,
+  ]);
+}
+
+/**
+ * Parse what {@link buildReadOwnCoordsArgv} printed.
+ *
+ * The separator is `|` and the window NAME (the only free-form field, and the
+ * only one that could contain it) is taken as the REST of the line, so a window
+ * whose name carries a `|` still parses.
+ */
+export function parseOwnCoords(stdout: string):
+  | { session: string; window: string; windowName: string; option: string }
+  | undefined {
+  const line = String(stdout ?? "").split(/\r?\n/)[0] ?? "";
+  const parts = line.split("|");
+  if (parts.length < 4) return undefined;
+  const session = parts[0].trim();
+  const window = parts[1].trim();
+  const option = parts[2].trim();
+  // The window NAME is the rest of the line: it is the only free-form field and
+  // the only one that could itself contain the separator.
+  const windowName = parts.slice(3).join("|").trim();
+  if (session.length === 0 || !isWindowId(window)) return undefined;
+  return { session, window, windowName, option };
+}
+
+/**
  * Close ONE window — the object a child session is, after 2026-09-25.
  *
  * The target is written `<session>:<@id>` rather than a bare `@id`, and that is
