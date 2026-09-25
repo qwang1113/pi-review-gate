@@ -70,6 +70,7 @@ import {
   sanitizeScopeRecord,
   type TmuxScope,
 } from "../lib/session-tmux-scope.ts";
+import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
 import { readJudgeSideEnv } from "../lib/judge-side.ts";
 import { createOrchestratorDeps, runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
@@ -227,8 +228,11 @@ function findProjectAgentText(projectAgentsDir: string, name: string): string | 
  * per PROCESS, re-pointed by the factory, is the whole fix.
  */
 let sessionNamingAtExit: { release(): unknown } | undefined;
+/** Same shape, same reason: the CURRENT session's own tmux session (t4, lib/session-scope-exit.ts). */
+let sessionScopeAtExit: (() => void) | undefined;
 process.on("exit", () => {
   try { sessionNamingAtExit?.release(); } catch { /* the process is already going */ }
+  try { sessionScopeAtExit?.(); } catch { /* the process is already going */ }
 });
 
 export default function reviewGate(pi: ExtensionAPI) {
@@ -769,6 +773,16 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
   // THE NAME GOES BACK WHEN THE PROCESS DIES, however it dies (t2).
   sessionNamingAtExit = sessionNaming;
+  // AND THE SESSION'S OWN TMUX SESSION WITH IT (t4) — idempotent, so a /quit
+  // that already closed it in session_shutdown finds nothing here.
+  const closeScopeOnExit = (): void => {
+    const outcome = closeOwnSessionOnExit((argv) => runTmux(argv), tmuxScope, {
+      handedOff: handedOff(),
+      openChildren: (cells.state.orchestrator?.children ?? []).filter((child) => !child.closedAt).length,
+    });
+    log(`review-gate[session-scope] 退出时：${outcome.note}`);
+  };
+  sessionScopeAtExit = closeScopeOnExit;
   // `name_session()` / `send_message()` — registered for EVERY kind of session
   // (user decision, 2026-09-25).
   sessionNaming.register(pi);
@@ -1327,6 +1341,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     cancelChildWaitTimer: () => l2.cancelChildWaitTimer(),
     notify: notifyRuntime,
     naming: sessionNaming,
+    closeScopeOnExit,
     log,
   });
   pi.on("session_start", (_event, ctx) => lifecycle.onSessionStart(ctx));

@@ -61,6 +61,8 @@ export interface SessionLifecycleDeps {
     onSessionStart(): { adopted?: string; sweep: { reaped: Array<{ name: string; sessionId: string; sessionKilled?: boolean }> } };
     release(): unknown;
   };
+  /** Close this session's own tmux session on a non-`declare_done` exit (lib/session-scope-exit.ts). */
+  closeScopeOnExit(): void;
   log(text: string): void;
 }
 
@@ -299,7 +301,13 @@ export function createSessionLifecycle(cells: SessionCells, deps: SessionLifecyc
     // `fork` REPLACE the session while the pane and pid stay, so without this
     // release the old registration would keep looking live.
     runtime.stopSessionNamingHeartbeat();
-    if (event.reason !== "reload") deps.naming.release();
+    if (event.reason !== "reload") {
+      deps.naming.release();
+      // ── AND ITS OWN TMUX SESSION (t4, 2026-09-26) ── a session replaced or
+      // quit here never reaches declare_done, and nothing else would reclaim
+      // the judge / worker windows it opened. `reload` keeps the session id.
+      deps.closeScopeOnExit();
+    }
   }
 
   async function onSessionCompact(): Promise<void> {
