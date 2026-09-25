@@ -30,12 +30,13 @@ import { channelRoot, nodeChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
-import { assertSafeTmuxArgv } from "./orchestrator-tmux.ts";
+import { assertSafeTmuxArgv, type SafeTmuxOptions } from "./orchestrator-tmux.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
+import { ownSessionName } from "./session-tmux-scope.ts";
 
 
 
@@ -45,10 +46,22 @@ import type { HandoffRetirement, OrchestratorDeps, PlanRead, TmuxRunResult } fro
 import type { TaskMode } from "./task-mode.ts";
 import type { RestatementRecord } from "./restatement.ts";
 
-/** Run one tmux command with no shell in between. */
-export function runTmux(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): TmuxRunResult {
+/**
+ * Run one tmux command with no shell in between.
+ *
+ * `guard` is the DECLARATION that makes "only my own session" true on this side
+ * of the seam too (2026-09-25): every caller passes the name its own scope
+ * derived, so `new-session` / `new-window` / `kill-window` / `kill-session` are
+ * refused here unless their target IS this session. `kill-server` is refused
+ * regardless.
+ */
+export function runTmux(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  guard: SafeTmuxOptions = {},
+): TmuxRunResult {
   try {
-    assertSafeTmuxArgv(argv);
+    assertSafeTmuxArgv(argv, guard);
   } catch (error) {
     return { ok: false, stdout: "", stderr: (error as Error).message };
   }
@@ -491,7 +504,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     },
     readPlan: () => readPlanFile(host.repoRoot),
     savePlan: (plan) => writePlanFile(host.repoRoot, plan),
-    tmux: (argv) => runTmux(argv, env()),
+    tmux: (argv) => runTmux(argv, env(), { ownSession: ownSessionName(host.scope) }),
     scope: host.scope,
     ownPane: () => {
       const pane = env().TMUX_PANE?.trim();

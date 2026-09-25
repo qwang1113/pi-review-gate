@@ -20,6 +20,7 @@ import {
   windowClosable,
   judgeChildRecordOf,
   paneCoordsOf,
+  paneIdUsable,
   type JudgeEntry,
 } from "../lib/hierarchy.ts";
 
@@ -189,6 +190,22 @@ test("paneCoordsOf carries the WHOLE pane, so a re-registration cannot lose half
   assert.deepEqual(paneCoordsOf(entry()), {});
   assert.deepEqual(paneCoordsOf(entry({ paneId: "%7" })), { paneId: "%7" },
     "a half-coordinate is carried as the half it is, and the closer still refuses it");
+});
+
+test("LIVENESS is not CLOSABILITY: a live legacy pane must not read as dead", () => {
+  // 2026-09-25, quality round P2. `windowClosable` asks for the coordinates a
+  // KILL is addressed by (window id + session name); `paneIdUsable` asks the one
+  // question a liveness or reuse decision needs (was this pane id minted by the
+  // server we are talking to). A judge entry written before the window topology
+  // has no window coordinates while its pane is alive and perfectly reusable —
+  // judging it with the kill's rule made the dispatch open a SECOND window for
+  // the same judge id, and made the `fresh` path drop the registry row without
+  // closing anything.
+  const legacy = { paneId: "%7", tmuxServer: "sock,1" };
+  assert.equal(paneIdUsable(legacy, "sock,1"), true, "alive and reusable");
+  assert.equal(windowClosable(legacy, "sock,1"), false, "…and not closable by a guess");
+  assert.equal(paneIdUsable(legacy, "sock,2"), false, "another server's id is not our pane either way");
+  assert.equal(paneIdUsable({}, "sock,1"), true, "missing information never reads as dead");
 });
 
 test("judgeChildRecordOf carries EVERY coordinate a reader acts on (2026-09-25, quality P1)", () => {

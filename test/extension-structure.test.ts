@@ -3092,6 +3092,21 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
     "no hand-written copy of the projection may come back");
   assert.match(wiring, /judgeChildRecordOf\(c, root\)/,
     "…including the by-role lookup, which supplies the repo it resolved");
+  // AND THE RUNNER CARRIES THE DECLARATION (2026-09-25). `runTmux` refuses the
+  // four session commands unless its caller declares the session it owns, so the
+  // extension must never call the RAW runner: one guarded wrapper, used by every
+  // tmux seam in the file, is what makes "only my own session" true at the
+  // executor as well as in the builders. A second `runTmux` definition (or a
+  // direct `rawTmux` call) would be a path with no declaration at all.
+  assert.match(SRC, /import \{ runTmux as rawTmux \} from "\.\.\/lib\/orchestrator-wiring\.ts"/,
+    "the raw runner is imported under a name nothing can call by accident");
+  assert.equal((SRC.match(/const runTmux = /g) ?? []).length, 1,
+    "exactly ONE wrapper defines this session's runTmux");
+  assert.match(SRC, /rawTmux\(argv, env \?\? process\.env, \{ ownSession: ownSessionName\(tmuxScope\) \}\)/,
+    "…and it attaches the declaration lib/session-tmux-scope.ts derived for this process");
+  // The wrapper's body is the ONLY call: anything else calling the raw runner
+  // directly is a path with no declaration at all.
+  assert.equal((SRC.match(/rawTmux\(/g) ?? []).length, 1, "only the wrapper calls the raw runner");
   // AND THE OTHER DIRECTION: an entry that is RE-registered (a new round queued
   // into a live pane, a rotated lane) must carry the whole pane forward. Copying
   // `paneId` by hand and forgetting the window pair was the second instance of

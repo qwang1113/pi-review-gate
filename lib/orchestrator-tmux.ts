@@ -152,19 +152,19 @@ export interface SafeTmuxOptions {
 /**
  * Last line of defense before the gate spawns tmux: the argv must not name a
  * destructive subcommand, must not write a global option, and — for the four
- * session-scoped ones — may only address a session of the gate's own shape.
+ * session-scoped ones — may only address the session the caller declares as its
+ * own.
  *
- * TWO DOORS, and the difference is what the caller knows:
+ * EVERY CALLER DECLARES, including the executor (2026-09-25).
+ * {@link SafeTmuxOptions.ownSession} is not optional in practice: a BUILDER
+ * passes the name it was given, and the runner that spawns tmux passes the name
+ * its own scope derived (`lib/session-tmux-scope.ts` `ownSessionName`), so "only
+ * my own session" holds on both sides of the seam. An argv naming one of the
+ * four WITHOUT a declaration is refused even when its target looks like a gate
+ * session — looking like ours is not being ours, and a refusal here costs one
+ * clear message while accepting it costs somebody else's screen.
  *
- *  - a BUILDER passes {@link SafeTmuxOptions.ownSession}, so the target must be
- *    exactly that session (`<name>` or `<name>:@id`) — this is the check that
- *    makes "only my own session" literal;
- *  - the EXECUTOR (lib/orchestrator-wiring.ts `runTmux`) knows no session name,
- *    so it checks what it CAN check: the session part of the target must be a
- *    name the gate could have derived (`rg-…`). A user's own session can never
- *    be addressed through this door, whoever assembled the argv.
- *
- * `kill-server` passes neither: no name makes it safe.
+ * `kill-server` is refused unconditionally: no declaration makes it safe.
  */
 export function assertSafeTmuxArgv(
   argv: readonly string[],
@@ -179,19 +179,18 @@ export function assertSafeTmuxArgv(
   }
   if (OWN_SESSION_TMUX_SUBCOMMANDS.includes(sub)) {
     const own = opts.ownSession;
-    if (own !== undefined && !isOwnSessionName(own)) {
+    if (own === undefined || !isOwnSessionName(own)) {
       throw new UnsafeTmuxCommand(
-        `ownSession 不是门禁自己派生的 session 名（形如 rg-<repo>-<id>）：${JSON.stringify(own)}`,
+        `tmux ${sub} 只允许作用于本会话自己的专属 session（缺少或非法的 ownSession 声明）：${JSON.stringify(argv)}`,
       );
     }
     // `new-session` NAMES its session with `-s`; everything else ADDRESSES one
     // with `-t`. `-t` on new-session means "group with", which is a different
     // session's business — refuse it rather than interpret it.
     const target = sub === "new-session" ? flagValue(argv, "-s") : flagValue(argv, "-t");
-    if (target === undefined || !targetStaysInScope(target, own)) {
+    if (target === undefined || !targetNamesOwnSession(target, own)) {
       throw new UnsafeTmuxCommand(
-        `tmux ${sub} 只能作用于门禁自己的 session${own === undefined ? "（目标必须形如 rg-…）" : ` ${own}`}：` +
-        JSON.stringify(target),
+        `tmux ${sub} 的目标必须是本会话自己的 session ${own}（实际：${JSON.stringify(target)}）`,
       );
     }
     if (sub === "new-session" && argv.includes("-t")) {
@@ -206,20 +205,15 @@ export function assertSafeTmuxArgv(
 }
 
 /**
- * Does this tmux target stay inside a session the gate could own?
+ * Does this tmux target stay inside the session the caller DECLARED?
  *
- * With a session declared: exactly it (`<name>`) or something inside it
- * (`<name>:…`) — a bare `@12` / `%3`, which tmux would happily resolve to
- * whatever now holds that id, is refused. Without one (the executor's door):
- * the session part must still be a gate-derived name.
- *
- * `own === ""` is treated as "nothing declared" (the executor passes no
- * second argument at all; an empty string is the same fact from a caller).
+ * `<name>` (the session itself) and `<name>:…` (a window or pane inside it) are
+ * inside. Anything else is not — including a bare `@12` / `%3`, which tmux
+ * would happily resolve to whatever now holds that id, and including ANOTHER
+ * gate session's name.
  */
-function targetStaysInScope(target: string, own: string | undefined): boolean {
-  const [session] = target.split(":");
-  if (own) return target === own || target.startsWith(`${own}:`);
-  return isOwnSessionName(session);
+function targetNamesOwnSession(target: string, own: string): boolean {
+  return target === own || target.startsWith(`${own}:`);
 }
 
 /** `-e K=V` pairs, in a stable order so the argv is testable. */

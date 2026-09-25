@@ -270,7 +270,7 @@ export function judgeLive(
   currentServer: string | undefined,
 ): boolean {
   if (entry.paneId === undefined) return false;
-  if (!paneIdComparable(entry, currentServer)) return false;
+  if (!paneIdUsable(entry, currentServer)) return false;
   return panes === undefined || panes.includes(entry.paneId);
 }
 
@@ -302,9 +302,18 @@ export function windowClosable(
  *
  * Only the KNOWN-DIFFERENT case is a refusal. An entry with no recorded server
  * stays comparable so that "is it live" keeps its never-kill-on-missing-info
- * default; `paneClosable` applies the stricter rule itself.
+ * default; `windowClosable` applies the stricter rule itself.
+ *
+ * EXPORTED BECAUSE "MAY I REUSE / IS IT ALIVE" IS NOT "MAY I KILL" (2026-09-25,
+ * quality round P2). `windowClosable` asks for a window id AND a session name —
+ * the coordinates a KILL is addressed by — and a judge entry written before the
+ * window topology has neither, while its pane is perfectly alive and perfectly
+ * reusable. Judging liveness with the kill's rule made a live legacy pane look
+ * dead: the dispatch opened a SECOND window for the same judge id (two processes
+ * for one judge) and the `fresh` path dropped the registry row without closing
+ * anything. Whoever asks "is it alive" asks THIS; only the kill asks the other.
  */
-function paneIdComparable(
+export function paneIdUsable(
   entry: Pick<JudgeEntry, "tmuxServer">,
   currentServer: string | undefined,
 ): boolean {

@@ -175,7 +175,6 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
       }
       return { ok: true, stdout: "", stderr: "" };
     },
-    ownPane: () => "%1",
     // Faithful to the real wiring: the seeded records below are minted by this
     // same server, so the ordinary paths behave exactly as they did.
     tmuxServer: () => state.tmuxServer,

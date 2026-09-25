@@ -42,6 +42,7 @@ import {
   checkCaller,
   removeJudge,
   windowClosable,
+  paneIdUsable,
   type HierarchyTable,
 } from "./hierarchy.ts";
 import {
@@ -194,8 +195,6 @@ export interface JudgeSessionToolDeps {
   channelHome(): string | undefined;
   /** One tmux invocation (argv, never a shell string). */
   tmux(argv: readonly string[]): JudgePaneRunResult;
-  /** This session's own pane — liveness is probed from its window. */
-  ownPane(): string | undefined;
   /**
    * WHO THIS SESSION IS on a border — the `@<owner>` half of every judge pane
    * it opens (lib/orchestrator-pane-decor.ts `selfPaneOwner`). Derived from the
@@ -525,7 +524,7 @@ export interface JudgeWaitCursors {
  * the other caller.
  */
 export function probeJudgeRound(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer" | "paneOwner">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "now" | "tmuxServer" | "paneOwner">,
   child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "windowId" | "tmuxSession" | "role" | "tmuxServer">,
   consumedReportId: string | undefined,
   binding: RoundBinding,
@@ -557,7 +556,11 @@ export function probeJudgeRound(
    */
   const paintTitle = (state: ChildState | undefined, since?: string): void => {
     if (!child.paneId || !child.role || state === undefined) return;
-    if (!windowClosable(child, deps.tmuxServer())) return;
+    // `paneIdUsable`, NOT `windowClosable`: writing a title through a pane id
+    // needs the same single fact `judgeLive` uses (was this id minted by the
+    // server we are talking to), and an entry from before the window topology
+    // has no window coordinates while its pane is perfectly painted-able.
+    if (!paneIdUsable(child, deps.tmuxServer())) return;
     const seconds = since ? Math.max(0, (deps.now() - Date.parse(since)) / 1000) : undefined;
     refreshSessionPaneTitle(deps.tmux, {
       paneId: child.paneId,
@@ -682,7 +685,7 @@ export function probeJudgeRound(
  * still reports to an opener running the oldest.
  */
 export function probeJudgeWait(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer" | "readText" | "roundBinding" | "paneOwner">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "now" | "tmuxServer" | "readText" | "roundBinding" | "paneOwner">,
   child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath" | "role" | "repoRoot" | "tmuxServer" | "modelSpec">,
   cursors: JudgeWaitCursors,
 ): PaneJudgeWaitObservation {

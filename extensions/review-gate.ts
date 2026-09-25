@@ -200,7 +200,7 @@ import {
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
 import { supervisionTarget } from "../lib/orchestration-id.ts";
-import { emptyHierarchy, findJudgeLane, judgeChildRecordOf, judgeLive, listByOpener, paneCoordsOf, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
+import { emptyHierarchy, findJudgeLane, judgeChildRecordOf, judgeLive, listByOpener, paneCoordsOf, paneIdUsable, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
   decideJudgeRotation,
   judgeObjectId,
@@ -229,6 +229,7 @@ import {
 // record and the one session `declare_done` closes.
 import {
   closeOwnSession,
+  ownSessionName,
   sanitizeScopeRecord,
   type TmuxScope,
 } from "../lib/session-tmux-scope.ts";
@@ -253,7 +254,7 @@ import {
 } from "../lib/session-exclusivity.ts";
 import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
 import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
-import { runTmux } from "../lib/orchestrator-wiring.ts";
+import { runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
 import {
   describeNotifyOutcome,
@@ -2792,6 +2793,24 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
     now: () => new Date().toISOString(),
   };
+
+  /**
+   * THE RUNNER, and the only one this file uses (2026-09-25).
+   *
+   * It carries THIS session's declaration on every call, which is what makes
+   * "the gate may only touch its own tmux session" true at the executor too: the
+   * four session commands (`new-session` / `new-window` / `kill-window` /
+   * `kill-session`) are refused unless their target is the session
+   * `lib/session-tmux-scope.ts` derived for this process.
+   *
+   * WHY A WRAPPER INSTEAD OF PASSING THE DECLARATION AT EACH CALL SITE: there
+   * are a dozen of them (every tool's deps, the judge close helpers, the
+   * declare_done cascade), and a rule one caller can forget is a rule that is
+   * already broken. The raw runner is imported under a different name so that
+   * forgetting is not expressible: there is no unguarded `runTmux` in scope.
+   */
+  const runTmux = (argv: readonly string[], env?: NodeJS.ProcessEnv) =>
+    rawTmux(argv, env ?? process.env, { ownSession: ownSessionName(tmuxScope) });
 
   const orchestratorDeps = createOrchestratorDeps({
     repoRoot: primaryRepoRoot,
@@ -8536,7 +8555,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     entry: JudgeEntry,
     ctx: JudgeCloseCtx & { root: string },
   ): void {
-    const usable = windowClosable(entry, ctx.tmuxServer);
+    const usable = paneIdUsable(entry, ctx.tmuxServer);
     const alive = usable && entry.paneId
       ? judgePaneAlive(ctx.run, entry.paneId)
       : undefined;
@@ -8686,7 +8705,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // restarted, and `%7` would then be a stranger's pane — reusing it would
     // send this round's task into it. Not comparable ⇒ treat as dead, which
     // falls through to a fresh open below (transcript continues by id).
-    const paneUsable = existing !== undefined && windowClosable(existing, tmuxServer);
+    // `paneIdUsable`, NOT `windowClosable`: this asks whether the recorded PANE
+    // is still comparable (may I reuse it / am I waiting on it), while
+    // `windowClosable` answers the narrower "may I kill it" — inside
+    // `closeJudgePaneOf`. Judging reuse with the kill's rule made a live judge
+    // pane from before the window topology look dead, and the dispatch opened a
+    // SECOND window for the same judge id (2026-09-25, quality round P2).
+    const paneUsable = existing !== undefined && paneIdUsable(existing, tmuxServer);
     const paneAlive = paneUsable && existing?.paneId ? judgePaneAlive(run, existing.paneId) : undefined;
     // A living pane takes the round through its channel: the pane is the
     // CARRIER, the round is the task. No busy refusal exists anymore — a pane judge
@@ -9068,12 +9093,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // responsible for its own identity AND the one it replaced.
     const mine = new Set(callerIdentities());
     if (mine.size === 0) return false;
-    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
     const deps = {
       channelIO: () => channelIO,
       channelHome: () => undefined,
       tmux: (argv: readonly string[]) => runTmux(argv),
-      ownPane: () => ownPane,
       now: () => Date.now(),
       tmuxServer: () => tmuxServerFrom(process.env),
       paneOwner: () => paneOwnerIdentity(),
@@ -10182,7 +10205,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // a dialog nobody answered" as one of its three explanations. A reading
     // does not have to know which one it is.
     tmux: (argv) => runTmux(argv),
-    ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),
     // Decorated panes were counted around here once — a guest test plus a
     // manager's child count — to decide whether a close could take the window's
@@ -11035,7 +11057,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const ownPane = process.env.TMUX_PANE?.trim() || undefined;
     const tmuxServer = tmuxServerFrom(process.env);
     const run = (argv: readonly string[]) => runTmux(argv);
-    const alive = entry.paneId && windowClosable(entry, tmuxServer)
+    const alive = entry.paneId && paneIdUsable(entry, tmuxServer)
       ? judgePaneAlive(run, entry.paneId)
       : undefined;
     if (alive === true) closeJudgePaneOf(entry, { ownPane, tmuxServer, run });
@@ -12008,7 +12030,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const entry = judgeChildByRole(root, "acceptance");
     if (!entry) return false;
     const tmuxServer = tmuxServerFrom(process.env);
-    if (!entry.paneId || !windowClosable(entry, tmuxServer)) return undefined;
+    if (!entry.paneId || !paneIdUsable(entry, tmuxServer)) return undefined;
     return judgePaneAlive((argv) => runTmux(argv), entry.paneId) === true;
   }
 

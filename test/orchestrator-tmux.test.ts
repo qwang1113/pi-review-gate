@@ -101,24 +101,36 @@ test("the four session commands need the session name AND a target that names it
   assert.doesNotThrow(() => assertSafeTmuxArgv(["new-window", "-t", SESSION], { ownSession: SESSION }));
 });
 
-test("the EXECUTOR's door has no session to compare, so it checks the shape instead", () => {
-  // lib/orchestrator-wiring.ts `runTmux` re-validates every argv on its way out
-  // and knows no session name (the runner seam is `(argv) => …`). If this door
-  // demanded the full declaration, the gate's OWN session commands would be
-  // refused in production while passing in every unit test — so the rule it
-  // applies is the one it can apply: only gate-shaped sessions are addressable.
-  assert.doesNotThrow(() => assertSafeTmuxArgv(["new-session", "-d", "-s", SESSION]));
-  assert.doesNotThrow(() => assertSafeTmuxArgv(["new-window", "-t", SESSION]));
-  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-window", "-t", `${SESSION}:@12`]));
-  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-session", "-t", SESSION]));
-  // The USER's own session can never be addressed through this door,
-  // whatever assembled the argv.
+test("a caller that declares NOTHING cannot run the four — looking like ours is not being ours", () => {
+  // THE EXECUTOR'S HALF OF THE SAME RULE (2026-09-25). The runner that spawns
+  // tmux knows no session of its own, so it is handed the declaration by its
+  // caller (lib/orchestrator-wiring.ts `runTmux(argv, env, guard)`, and in the
+  // extension by the ONE wrapper every tmux call goes through). Without it, a
+  // gate-shaped target is still refused: shape is not ownership, and the cost of
+  // refusing is one clear message while the cost of accepting is somebody else's
+  // screen.
+  for (const argv of [
+    ["new-session", "-d", "-s", SESSION],
+    ["new-window", "-t", SESSION],
+    ["kill-window", "-t", `${SESSION}:@12`],
+    ["kill-session", "-t", SESSION],
+  ]) {
+    assert.throws(() => assertSafeTmuxArgv(argv), UnsafeTmuxCommand, `${argv.join(" ")} without a declaration`);
+  }
+  // …and WITH the declaration they pass, which is what the gate's own path does.
+  for (const argv of [
+    ["new-session", "-d", "-s", SESSION],
+    ["new-window", "-t", SESSION],
+    ["kill-window", "-t", `${SESSION}:@12`],
+    ["kill-session", "-t", SESSION],
+  ]) {
+    assert.doesNotThrow(() => assertSafeTmuxArgv(argv, { ownSession: SESSION }), `${argv.join(" ")} declared`);
+  }
+  // The user's own session can never be addressed, declared or not.
   assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "my-work"]), UnsafeTmuxCommand);
-  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "my-work:@3"]), UnsafeTmuxCommand);
-  assert.throws(() => assertSafeTmuxArgv(["new-window", "-t", "lab"]), UnsafeTmuxCommand);
-  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "@12"]), UnsafeTmuxCommand);
-  // …and `kill-server` is still refused here too.
-  assert.throws(() => assertSafeTmuxArgv(["kill-server"]), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "my-work:@3"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  // …and `kill-server` is refused in every case.
+  assert.throws(() => assertSafeTmuxArgv(["kill-server"], { ownSession: SESSION }), UnsafeTmuxCommand);
 });
 
 test("new-session may not be grouped into another session", () => {

@@ -196,6 +196,27 @@ function resolveScope(scope: TmuxScope): ResolvedScope {
   return { ok: true, name, owner: sessionId };
 }
 
+/**
+ * The tmux session name this scope IS — the one derivation, exposed so the
+ * EXECUTOR can hold the same line the builders do.
+ *
+ * The builders pass the name they were given (`ownSession` in
+ * {@link ./orchestrator-tmux.ts assertSafeTmuxArgv}), but the runner that
+ * actually spawns tmux knows no name of its own: without this, the gate's own
+ * `new-session` / `kill-window` could only be checked by their SHAPE there, and
+ * "only my own session" would be true of the builders and merely
+ * plausible of the executor. With it, the same declaration rides every call.
+ *
+ * `undefined` when this session has no id to derive a name from — in which case
+ * the caller passes no declaration, and the executor refuses the four session
+ * commands outright (which is what the gate wants: it cannot own a session it
+ * cannot name).
+ */
+export function ownSessionName(scope: TmuxScope): string | undefined {
+  const resolved = resolveScope(scope);
+  return resolved.ok ? resolved.name : undefined;
+}
+
 /** What a child window needs from its opener. */
 export interface OpenScopeWindowOptions {
   /** Working directory for the new window (the child's repo or worktree). */
