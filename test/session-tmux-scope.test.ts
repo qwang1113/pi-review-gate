@@ -18,6 +18,7 @@ import {
   UnsafeTmuxCommand,
   assertSafeTmuxArgv,
   buildKillWindowArgv,
+  buildUnsetSessionEnvArgv,
   isOwnSessionName,
   SESSION_OWNER_OPTION,
 } from "../lib/orchestrator-tmux.ts";
@@ -335,14 +336,28 @@ test("a polluted session is healed before it is reused — and a heal that FAILS
   const windowAt = polluted.calls.findIndex((a) => a[0] === "new-window");
   assert.ok(unsetAt >= 0 && windowAt > unsetAt, "the clean-up precedes the child that would inherit it");
 
-  // 2) THE READ FAILS ⇒ the spawn is refused: an unknown is never acted on.
+  // 3) A NAME THAT IS ODD BUT REAL IS STILL REMOVABLE (quality round P2): a
+  // strict identifier rule here would brick the session — the key could never
+  // be cleared, and the fail-closed heal would then refuse every later spawn.
+  const odd = fakeServer({
+    existing: { name: NAME, owner: SESSION_ID },
+    env: { "RG_A-B": "junk" },
+  });
+  const oddOpened = openScopeWindow(odd.run, fakeScope(), { cwd: "/repo", command: ["pi"] });
+  assert.equal(oddOpened.ok, true, oddOpened.ok ? "" : oddOpened.error);
+  assert.equal(odd.env["RG_A-B"], undefined, "an odd-but-removable name does not brick the session");
+  // What cannot ride an argv is still refused: a leading `-` would be read as a
+  // flag by tmux.
+  assert.throws(() => buildUnsetSessionEnvArgv(NAME, "-g"), UnsafeTmuxCommand);
+
+  // 4) THE READ FAILS ⇒ the spawn is refused: an unknown is never acted on.
   const blindEnv = fakeServer({ existing: { name: NAME, owner: SESSION_ID }, envReadFails: true });
   const refused = openScopeWindow(blindEnv.run, fakeScope(), { cwd: "/repo", command: ["pi"] });
   assert.equal(refused.ok, false, "a child that might wear somebody else's identity is not worth the risk");
   if (!refused.ok) assert.match(refused.error, /读不到/);
   assert.equal(blindEnv.calls.some((a) => a[0] === "new-window"), false, "and no window is opened");
 
-  // 3) TMUX REFUSES THE UNSET ⇒ refused, naming the variable that could not go.
+  // 5) TMUX REFUSES THE UNSET ⇒ refused, naming the variable that could not go.
   const stubborn = fakeServer({
     existing: { name: NAME, owner: SESSION_ID },
     env: { RG_JUDGE_ID: "reviewer-1" },
@@ -352,7 +367,7 @@ test("a polluted session is healed before it is reused — and a heal that FAILS
   assert.equal(refused2.ok, false);
   if (!refused2.ok) assert.match(refused2.error, /RG_JUDGE_ID/);
 
-  // 4) …OR THROWS: same refusal, same naming — the failure direction is the point.
+  // 6) …OR THROWS: same refusal, same naming — the failure direction is the point.
   const blowsUp = fakeServer({
     existing: { name: NAME, owner: SESSION_ID },
     env: { RG_JUDGE_ID: "reviewer-1" },
