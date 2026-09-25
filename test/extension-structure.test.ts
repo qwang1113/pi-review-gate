@@ -3290,7 +3290,7 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // session (new id, new instance, `held` gone) while the pane and the pid stay
   // — without the release the old registration keeps looking LIVE and the name
   // can never be taken again in that window.
-  assert.match(SRC, /stopSessionNamingHeartbeat\(\);\s*\n    if \(event\.reason !== "reload"\) deps\.naming\.release\(\);/,
+  assert.match(SRC, /stopSessionNamingHeartbeat\(\);\s*\n    if \(event\.reason !== "reload"\) \{\n      deps\.naming\.release\(\);/,
     "session_shutdown stops the clock and gives the name back for every reason but a reload");
   // BOTH HALVES OF THE CLOCK, EACH EXACTLY ONCE: the Nit of quality round 2 was
   // a second, redundant stop in the same handler (harmless — `clearInterval` is

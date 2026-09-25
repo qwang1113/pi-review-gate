@@ -227,9 +227,9 @@ function findProjectAgentText(projectAgentsDir: string, name: string): string | 
  * registered inside it would accumulate one listener per session. One listener
  * per PROCESS, re-pointed by the factory, is the whole fix.
  */
-let sessionNamingAtExit: { release(): unknown } | undefined;
 /** Same shape, same reason: the CURRENT session's own tmux session (t4, lib/session-scope-exit.ts). */
 let sessionScopeAtExit: (() => void) | undefined;
+let sessionNamingAtExit: { release(): unknown } | undefined;
 process.on("exit", () => {
   try { sessionNamingAtExit?.release(); } catch { /* the process is already going */ }
   try { sessionScopeAtExit?.(); } catch { /* the process is already going */ }
