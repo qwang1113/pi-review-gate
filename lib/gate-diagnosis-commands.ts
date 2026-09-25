@@ -175,9 +175,10 @@ export function modelDiagnosisLines(deps: GateDiagnosisDeps, registry?: unknown)
     const { map } = effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject);
     const workers = Object.entries(map)
       .filter(([name, e]) => isWorkerRoleName(name) && e.source !== "default")
-      // A declared preset with no usable slot list refuses session start, so
+      // A declared preset without an explicit slot list (same test as the
+      // startup check: auto:false AND slots) refuses session start, so
       // it is shown as BLOCKED here rather than dropped.
-      .map(([name, e]) => ({ ...diagnoseSpecs(name, e.slots, facts), ...(e.slots.length === 0 ? { blocked: true } : {}) }));
+      .map(([name, e]) => ({ ...diagnoseSpecs(name, e.slots, facts), ...(e.auto !== false || e.slots.length === 0 ? { blocked: true } : {}) }));
     const entries = [
       ...judges.filter((e): e is NonNullable<typeof e> => e !== null && e.chain.length > 0),
       ...workers,

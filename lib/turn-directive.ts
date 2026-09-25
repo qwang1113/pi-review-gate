@@ -116,7 +116,7 @@ export function createTurnDirective(cells: SessionCells, deps: TurnDirectiveDeps
         `\n请修复 ~/.pi/review-gate.json 后重开会话：` +
         `\n- 不在 agents 段里的角色（或值为空对象的）：启动时会自动补上包内默认链；` +
         `\n- 已有条目但不可用的角色（auto:true / slots 为空 / spec 不可解析）：改成明确的 auto:false + slots，` +
-        `或删掉这个键让门禁补默认。` +
+        `或删掉这个键让门禁补默认（worker 预设没有包内默认，删掉即不再有该预设）。` +
         `\n在配置修复前，本会话拒绝执行任何工作（ship 命令仍被拦截）。`;
     } catch (e) {
       return `\n\n## REVIEW-GATE: 配置检查异常，会话无法启动\n` +
