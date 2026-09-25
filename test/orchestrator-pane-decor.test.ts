@@ -212,7 +212,7 @@ test("a tmux that refuses cosmetics does NOT fail the spawn", async () => {
   assert.equal(world.runtime().children.length, 1, "the child is registered either way");
 });
 
-test("close kills its pane and writes NO WINDOW OPTION (2026-09-17)", async () => {
+test("close kills its WINDOW and writes NO WINDOW OPTION (2026-09-17)", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   const child = world.runtime().children[0]!;
@@ -221,14 +221,15 @@ test("close kills its pane and writes NO WINDOW OPTION (2026-09-17)", async () =
 
   const log = tmuxLog(world);
   assert.ok(
-    log.some((line) => line.startsWith(`kill-pane -t ${child.paneId}`)),
-    "the pane is killed",
+    log.some((line) => line.startsWith(`kill-window -t ${child.tmuxSession}:${child.windowId}`)),
+    `the child's window is closed, addressed through the session that owns it: ${log.join(" | ")}`,
   );
   // THE RELEASE IS DELETED, AND THIS IS WHERE IT WOULD COME BACK. Taking the
   // bar down writes `pane-border-status`, and that RESIZES EVERY PANE IN THE
   // WINDOW — measured on a scratch tmux as SIGWINCH with `rows 84 → 83`, in
-  // both directions while re-setting the same value triggers nothing. So a
-  // close may kill a pane and nothing else.
+  // both directions while re-setting the same value triggers nothing. Under
+  // the window topology a child's bar lives in the CHILD's window and stops
+  // existing with it, so a close writes no window option at all.
   assert.deepEqual(
     log.filter((line) => line.includes("-u")),
     [],

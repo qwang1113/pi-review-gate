@@ -14,7 +14,7 @@
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
 import { basename } from "node:path";
-import { buildListPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
+import { buildListServerPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
 import { childPaneLabel, pmPaneLabel } from "./orchestrator-pane-decor.ts";
 import { paintPaneTitle, refreshSessionPaneTitle, type PaneTitleMemory } from "./session-factory.ts";
 import { channelPathFor, projectChannel, readChannel, type ChannelIO } from "./orchestrator-channel.ts";
@@ -72,7 +72,7 @@ export function requireOrchestratorMode(deps: OrchestratorDeps): ToolReply | und
 }
 
 /**
- * Pane ids that exist at this instant.
+ * Pane ids that exist at this instant — ON THE WHOLE SERVER.
  *
  * Asked fresh on every call rather than cached: between two tool calls a
  * child can die, and a cached "alive" is exactly what would let
@@ -80,12 +80,15 @@ export function requireOrchestratorMode(deps: OrchestratorDeps): ToolReply | und
  * means tmux could not be read — the caller treats that as "nothing is
  * provably alive", which is the fail-closed direction for spawning and the
  * fail-open one for exiting, so both callers check it explicitly.
+ *
+ * SERVER-WIDE, NOT THE OPENER'S WINDOW (2026-09-25): a child is now a window
+ * of the opener's own tmux session (lib/session-tmux-scope.ts), so asking
+ * "which panes share my window" would answer "none" for every one of them and
+ * every healthy child would read as gone.
  */
 export function alivePanes(deps: OrchestratorDeps): { panes: string[]; ok: boolean } {
-  const self = deps.ownPane();
-  if (!self) return { panes: [], ok: false };
   try {
-    const result = deps.tmux(buildListPanesArgv(self));
+    const result = deps.tmux(buildListServerPanesArgv());
     if (!result.ok) return { panes: [], ok: false };
     return { panes: parsePaneIds(result.stdout), ok: true };
   } catch {

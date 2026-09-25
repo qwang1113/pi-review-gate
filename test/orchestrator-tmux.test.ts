@@ -1,161 +1,204 @@
+/**
+ * THE argv BUILDERS AND THE SAFETY DOOR (2026-09-25 topology).
+ *
+ * What is pinned here is the SHAPE of the commands and, more importantly, WHO
+ * may be addressed by them: `new-session` / `new-window` / `kill-window` /
+ * `kill-session` are commands the agent must never improvise, and the gate now
+ * genuinely needs all four. The tests below exist to make sure the door that
+ * lets them through requires a session name and that the argv's own target
+ * names it — including through the short aliases.
+ *
+ * The three-column layout it replaced (`planPanePlacement`,
+ * `buildWindowLayoutArgv`, `parseWindowLayout`, `buildEvenLayoutArgv`) has no
+ * test left because it has no code left; the last test in this file asserts
+ * exactly that, so a resurrected copy cannot pass unnoticed.
+ */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
-  FORBIDDEN_TMUX_SUBCOMMANDS,
+  NEVER_ALLOWED_TMUX_SUBCOMMANDS,
+  OWN_SESSION_TMUX_SUBCOMMANDS,
+  SESSION_OWNER_OPTION,
   UnsafeTmuxCommand,
   assertSafeTmuxArgv,
-  buildEvenLayoutArgv,
-  buildKillPaneArgv,
-  buildWindowLayoutArgv,
-  buildListPanesArgv,
   buildHandoffPaneArgv,
-  buildSpawnPaneArgv,
+  buildKillPaneArgv,
+  buildKillSessionArgv,
+  buildKillWindowArgv,
+  buildListServerPanesArgv,
+  buildListSessionsArgv,
+  buildNewSessionArgv,
+  buildNewWindowArgv,
+  buildReadSessionOwnerArgv,
+  buildSetSessionOwnerArgv,
+  isOwnSessionName,
   isPaneId,
+  isWindowId,
   parsePaneIds,
+  parseSessionNames,
   parseSpawnedPaneId,
-  parseWindowLayout,
-  planPanePlacement,
+  parseSpawnedWindow,
 } from "../lib/orchestrator-tmux.ts";
 
-test("a pane id is validated, never trusted", () => {
+const SESSION = "rg-pi-review-gate-d104b8a270";
+
+test("ids are validated, never trusted", () => {
   for (const good of ["%0", "%12", "%9999"]) assert.equal(isPaneId(good), true);
   for (const bad of ["", "12", "pane12", "%", "%1a", "%-1", "@1", "%1;rm -rf /", undefined, null, 12]) {
     assert.equal(isPaneId(bad), false, `${JSON.stringify(bad)} is not a pane id`);
   }
-});
-
-test("every builder REFUSES a bad pane id rather than interpolating it", () => {
-  // The commands are argv (no shell), so this is not about quoting — it is
-  // about never addressing a target we did not get from tmux itself.
-  assert.throws(() => buildKillPaneArgv("not-a-pane"), UnsafeTmuxCommand);
-  assert.throws(() => buildListPanesArgv("$(whoami)"), UnsafeTmuxCommand);
-  assert.throws(
-    () => buildSpawnPaneArgv({ placement: { direction: "-h", target: "" }, cwd: "/repo" }),
-    UnsafeTmuxCommand,
-  );
-  assert.throws(
-    () => buildSpawnPaneArgv({ placement: { direction: "-v", target: "bogus" }, cwd: "/repo" }),
-    UnsafeTmuxCommand,
-  );
-  assert.throws(() => buildEvenLayoutArgv("%1;rm -rf /"), UnsafeTmuxCommand);
-  assert.throws(() => buildWindowLayoutArgv("not-a-pane"), UnsafeTmuxCommand);
-  assert.throws(() => buildHandoffPaneArgv({ orchestratorPane: "x", cwd: "/repo" }), UnsafeTmuxCommand);
-});
-
-test("the gate holds ITSELF to the forbidden list", () => {
-  // "the gate is exempt from the bash guard" must never come to mean "the
-  // gate may do the forbidden thing".
-  assert.deepEqual([...FORBIDDEN_TMUX_SUBCOMMANDS].sort(),
-    ["kill-server", "kill-session", "kill-window", "new", "new-session", "new-window", "neww"]);
-  for (const sub of FORBIDDEN_TMUX_SUBCOMMANDS) {
-    assert.throws(() => assertSafeTmuxArgv([sub, "-t", "%1"]), UnsafeTmuxCommand, `${sub} must be refused`);
+  for (const good of ["@0", "@12"]) assert.equal(isWindowId(good), true);
+  for (const bad of ["", "@", "%1", "12", "@1;ls", undefined]) {
+    assert.equal(isWindowId(bad), false, `${JSON.stringify(bad)} is not a window id`);
   }
+});
+
+test("a session name is only one the GATE could have derived", () => {
+  assert.equal(isOwnSessionName(SESSION), true);
+  assert.equal(isOwnSessionName("rg-repo-abc123"), true);
+  // A colon is tmux's own session/window separator: a name carrying one could
+  // be used to aim a scoped command at somebody else's window.
+  for (const bad of ["", "lab", "rg:a", "rg-repo-a;b", "other-rg-repo-abc123", "rg-repo-ABC", undefined, 7]) {
+    assert.equal(isOwnSessionName(bad), false, `${JSON.stringify(bad)} is not a gate session name`);
+  }
+});
+
+test("kill-server is refused in EVERY case — no session name makes it safe", () => {
+  assert.deepEqual([...NEVER_ALLOWED_TMUX_SUBCOMMANDS], ["kill-server"]);
+  assert.throws(() => assertSafeTmuxArgv(["kill-server"]), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-server"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv([]), UnsafeTmuxCommand);
+});
+
+test("the four session commands need the session name AND a target that names it", () => {
+  assert.deepEqual(
+    [...OWN_SESSION_TMUX_SUBCOMMANDS].sort(),
+    ["kill-session", "kill-window", "killw", "new", "new-session", "new-window", "neww"],
+  );
+  // With a declared scope, but pointing somewhere else: refused.
+  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "lab"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["new-window", "-t", "lab"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  // …including at ANOTHER gate-looking session: "mine" is an exact match, not
+  // "a name of my shape".
+  assert.throws(
+    () => assertSafeTmuxArgv(["kill-session", "-t", "rg-other-repo-abcdef1234"], { ownSession: SESSION }),
+    UnsafeTmuxCommand,
+  );
+  // A window target must stay inside the session — a bare `@id` would resolve
+  // against whatever now owns that number.
+  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "@12"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  // And the scope itself must be a name the gate could have derived.
+  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "lab"], { ownSession: "lab" }), UnsafeTmuxCommand);
+  // The aliases are held to the same rule, not to a second one.
+  assert.throws(() => assertSafeTmuxArgv(["new", "-s", "lab"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["killw", "-t", `lab:@1`], { ownSession: SESSION }), UnsafeTmuxCommand);
+  // The in-session forms pass.
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-session", "-t", SESSION], { ownSession: SESSION }));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-window", "-t", `${SESSION}:@12`], { ownSession: SESSION }));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["new-window", "-t", SESSION], { ownSession: SESSION }));
+});
+
+test("the EXECUTOR's door has no session to compare, so it checks the shape instead", () => {
+  // lib/orchestrator-wiring.ts `runTmux` re-validates every argv on its way out
+  // and knows no session name (the runner seam is `(argv) => …`). If this door
+  // demanded the full declaration, the gate's OWN session commands would be
+  // refused in production while passing in every unit test — so the rule it
+  // applies is the one it can apply: only gate-shaped sessions are addressable.
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["new-session", "-d", "-s", SESSION]));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["new-window", "-t", SESSION]));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-window", "-t", `${SESSION}:@12`]));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-session", "-t", SESSION]));
+  // The USER's own session can never be addressed through this door,
+  // whatever assembled the argv.
+  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "my-work"]), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "my-work:@3"]), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["new-window", "-t", "lab"]), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "@12"]), UnsafeTmuxCommand);
+  // …and `kill-server` is still refused here too.
+  assert.throws(() => assertSafeTmuxArgv(["kill-server"]), UnsafeTmuxCommand);
+});
+
+test("new-session may not be grouped into another session", () => {
+  // `-t` on new-session means "join this session's group", which is another
+  // session's business entirely — refused rather than interpreted.
+  assert.throws(
+    () => assertSafeTmuxArgv(["new-session", "-d", "-s", SESSION, "-t", SESSION], { ownSession: SESSION }),
+    UnsafeTmuxCommand,
+  );
+});
+
+test("no argv may write a GLOBAL option", () => {
   assert.throws(() => assertSafeTmuxArgv(["set-option", "-g", "mouse", "on"]), UnsafeTmuxCommand);
   assert.throws(() => assertSafeTmuxArgv(["setw", "-g", "x", "y"]), UnsafeTmuxCommand);
-  assert.throws(() => assertSafeTmuxArgv([]), UnsafeTmuxCommand);
   assert.doesNotThrow(() => assertSafeTmuxArgv(["set-option", "-t", "%1", "remain-on-exit", "on"]),
     "a pane-local option is fine");
 });
 
-test("THE LAYOUT: fewer than three columns opens a new one, three stacks in the third", () => {
-  const panes = (...ids: string[]) => ids.map((id, top) => ({ id, left: 0, top }));
-  assert.deepEqual(planPanePlacement([panes("%1")]), { direction: "-h", target: "%1" },
-    "one column ⇒ open a second one off the only pane");
-  assert.deepEqual(planPanePlacement([panes("%1"), panes("%2")]), { direction: "-h", target: "%2" },
-    "two columns ⇒ open the third beside the rightmost column's lone pane");
-  // The lone pane decides WHERE (a plain split beside it lands where the third
-  // column belongs, keeping the SHARED column rightmost); `-f` is the fallback
-  // for the shape with no lone column, where a plain split would nest.
-  assert.deepEqual(
-    planPanePlacement([panes("%1"), panes("%2", "%3", "%4")]),
-    { direction: "-h", target: "%1" },
-    "the rightmost column already shares its height ⇒ open beside the column that sits alone",
-  );
-  assert.deepEqual(
-    planPanePlacement([panes("%1", "%2"), panes("%3", "%4")]),
-    { direction: "-h", target: "%4", full: true },
-    "no column sits alone ⇒ -f still opens a real column",
-  );
-  assert.deepEqual(
-    planPanePlacement([panes("%1"), panes("%2"), panes("%3", "%4", "%5")]),
-    { direction: "-v", target: "%5" },
-    "three columns ⇒ stack under the THIRD column's last pane, never open a fourth",
-  );
-  assert.deepEqual(
-    planPanePlacement([panes("%1"), panes("%2"), panes("%3"), panes("%4")]),
-    { direction: "-v", target: "%3" },
-    "a window that is ALREADY too wide is not merged: the new pane still lands in the third column",
-  );
-  assert.throws(() => planPanePlacement([]), /非空/, "an empty layout is a bug, not a layout");
+test("every builder REFUSES a bad target rather than interpolating it", () => {
+  assert.throws(() => buildKillPaneArgv("not-a-pane"), UnsafeTmuxCommand);
+  assert.throws(() => buildKillWindowArgv(SESSION, "%1"), UnsafeTmuxCommand, "a pane id is not a window id");
+  assert.throws(() => buildKillWindowArgv("lab", "@1"), UnsafeTmuxCommand);
+  assert.throws(() => buildKillSessionArgv("lab"), UnsafeTmuxCommand);
+  assert.throws(() => buildNewSessionArgv({ ownSession: "lab", cwd: "/repo" }), UnsafeTmuxCommand);
+  assert.throws(() => buildHandoffPaneArgv({ orchestratorPane: "x", cwd: "/repo" }), UnsafeTmuxCommand);
 });
 
-test("the window's geometry is grouped by pane_left, never guessed", () => {
-  // What tmux actually printed on a scratch server after three horizontal
-  // splits and two vertical ones: the third column's panes share a left.
-  const layout = parseWindowLayout([
-    "%3 100 25 0",
-    "%1 0 0 0",
-    "%4 100 50 0",
-    "%2 100 0 0",
-  ].join("\n"));
-  assert.deepEqual(layout.columns.map((c) => c.map((p) => p.id)), [["%1"], ["%2", "%3", "%4"]],
-    "columns left→right, panes within a column top→bottom");
-  assert.equal(layout.zoomed, false);
-  assert.equal(parseWindowLayout("%1 0 0 1").zoomed, true, "a zoomed pane is reported, so equalising can stand down");
-  assert.deepEqual(parseWindowLayout("no server running").columns, [], "noise is not a layout");
-  assert.deepEqual(parseWindowLayout("%1 0 0").columns, [[{ id: "%1", left: 0, top: 0 }]],
-    "a build that does not print the zoom flag still yields the geometry");
-});
-
-test("equalising addresses ONE pane — tmux spreads that pane's parent container", () => {
-  // The whole three-column rule rests on this: a third-column pane spreads
-  // that column's HEIGHTS, a first-column pane spreads the COLUMNS' widths.
-  assert.deepEqual(buildEvenLayoutArgv("%5"), ["select-layout", "-E", "-t", "%5"]);
-});
-
-test("the layout probe asks for the geometry and nothing else", () => {
-  assert.deepEqual(buildWindowLayoutArgv("%5"), [
-    "list-panes", "-t", "%5", "-F", "#{pane_id} #{pane_left} #{pane_top} #{window_zoomed_flag}",
-  ]);
-});
-
-test("a spawn asks tmux for the new pane id — it is never guessed", () => {
-  const argv = buildSpawnPaneArgv({ placement: { direction: "-h", target: "%1" }, cwd: "/repo" });
-  assert.deepEqual(argv.slice(0, 4), ["split-window", "-h", "-t", "%1"]);
-  assert.deepEqual(argv.slice(argv.indexOf("-F"), argv.indexOf("-F") + 2), ["-F", "#{pane_id}"]);
+test("a new session opens WITH its first child — no stray shell window", () => {
+  const argv = buildNewSessionArgv({
+    ownSession: SESSION,
+    cwd: "/repo",
+    env: { RG_GATE_MODE: "loop", RG_STATE_VARIANT: "t1-abc" },
+    command: ["pi", "@.pi/tasks/t1.md"],
+    windowName: "t1@pm",
+  });
+  assert.deepEqual(argv.slice(0, 3), ["new-session", "-d", "-s"]);
+  assert.equal(argv[3], SESSION);
   assert.deepEqual(argv.slice(argv.indexOf("-c"), argv.indexOf("-c") + 2), ["-c", "/repo"]);
+  assert.deepEqual(argv.slice(argv.indexOf("-n"), argv.indexOf("-n") + 2), ["-n", "t1@pm"]);
+  const pairs = argv.filter((_, i) => argv[i - 1] === "-e");
+  assert.deepEqual(pairs, ["RG_GATE_MODE=loop", "RG_STATE_VARIANT=t1-abc"], "sorted, so the argv is testable");
+  assert.ok(argv.includes("-P") && argv.includes("-F"), "tmux prints what it created");
+  assert.equal(argv[argv.indexOf("#{window_id} #{pane_id}") - 1], "-F");
+  assert.deepEqual(argv.slice(-2), ["pi", "@.pi/tasks/t1.md"], "the child's own command IS the first window");
+});
+
+test("a later child joins the session as one more window", () => {
+  const argv = buildNewWindowArgv({ ownSession: SESSION, cwd: "/repo", command: ["pi"] });
+  assert.deepEqual(argv.slice(0, 3), ["new-window", "-t", SESSION]);
+  assert.ok(!argv.includes("-d"), "only the session itself is detached");
   assert.equal(argv[argv.length - 1], "pi", "an interactive pi is the default command");
 });
 
-test("a new column carries -f; stacking inside a column does not", () => {
-  const opening = buildSpawnPaneArgv({
-    placement: { direction: "-h", target: "%5", full: true },
-    cwd: "/repo",
-  });
-  assert.deepEqual(opening.slice(0, 5), ["split-window", "-h", "-f", "-t", "%5"],
-    "-f spans the window height, so the split is a real column wherever the target sits");
-  assert.ok(opening.includes("-P") && opening.includes("-F"), "and tmux still prints the new pane id");
-  const stacking = buildSpawnPaneArgv({ placement: { direction: "-v", target: "%5" }, cwd: "/repo" });
-  assert.ok(!stacking.includes("-f"), "-f would make the new pane full-width and wreck the third column");
-});
-
-test("environment travels as -e pairs, in a stable order", () => {
-  const argv = buildSpawnPaneArgv({
-    placement: { direction: "-v", target: "%1" },
-    cwd: "/repo",
-    env: { RG_ORCHESTRATION_ID: "orch-abc-1", RG_GATE_MODE: "loop" },
-  });
-  const pairs = argv.filter((_, i) => argv[i - 1] === "-e");
-  assert.deepEqual(pairs, ["RG_GATE_MODE=loop", "RG_ORCHESTRATION_ID=orch-abc-1"],
-    "sorted, so the argv is testable");
-});
-
-test("a handoff always splits off the orchestrator's own pane", () => {
+test("the relay is the ONE split left, always off the opener's own pane", () => {
   const argv = buildHandoffPaneArgv({ orchestratorPane: "%1", cwd: "/repo" });
   assert.deepEqual(argv.slice(0, 4), ["split-window", "-h", "-t", "%1"],
-    "horizontal, so closing the old pane hands the left column to the successor");
+    "horizontal, so closing the old pane hands its place to the successor");
+});
+
+test("a window is killed THROUGH its session, never by a bare id", () => {
+  assert.deepEqual(buildKillWindowArgv(SESSION, "@7"), ["kill-window", "-t", `${SESSION}:@7`]);
+  assert.deepEqual(buildKillSessionArgv(SESSION), ["kill-session", "-t", SESSION]);
+  // The relay path still closes one pane — the rectangle in the user's window
+  // that the retiring session itself sits in.
+  assert.deepEqual(buildKillPaneArgv("%5"), ["kill-pane", "-t", "%5"]);
+});
+
+test("the ownership marker is read back, and an unset one is a real answer", () => {
+  assert.deepEqual(
+    buildSetSessionOwnerArgv(SESSION, "019fbb1d-9e78-7ebf-88bf-d104b8a270ed"),
+    ["set", "-t", SESSION, SESSION_OWNER_OPTION, "019fbb1d-9e78-7ebf-88bf-d104b8a270ed"],
+  );
+  assert.deepEqual(buildReadSessionOwnerArgv(SESSION), ["show-options", "-t", SESSION, "-qv", SESSION_OWNER_OPTION]);
+  // Measured (tmux 3.7c): an unset option prints NOTHING and exits 0, so an
+  // empty reading is "nobody claimed it" — never a failed call.
+  assert.deepEqual(parseSessionNames(""), []);
+});
+
+test("liveness is a SERVER-WIDE pane list — a window target cannot answer it", () => {
+  assert.deepEqual(buildListServerPanesArgv(), ["list-panes", "-a", "-F", "#{pane_id}"]);
+  assert.deepEqual(buildListSessionsArgv(), ["list-sessions", "-F", "#{session_name}"]);
 });
 
 test("NOTHING in this module can type at a pane any more (2026-08-30)", () => {
@@ -169,18 +212,45 @@ test("NOTHING in this module can type at a pane any more (2026-08-30)", () => {
   assert.doesNotMatch(source, /"capture-pane"/, "and nothing here reads a screen");
 });
 
-
-test("kill and list address a PANE and nothing wider", () => {
-  assert.deepEqual(buildKillPaneArgv("%5"), ["kill-pane", "-t", "%5"]);
-  assert.deepEqual(buildListPanesArgv("%5"), ["list-panes", "-t", "%5", "-F", "#{pane_id}"]);
-});
-
 test("tmux output is parsed strictly", () => {
   assert.deepEqual(parsePaneIds("%1\n%2\n\n  %3  \n"), ["%1", "%2", "%3"]);
   assert.deepEqual(parsePaneIds("error: no server running"), [], "noise is not a pane list");
   assert.equal(parseSpawnedPaneId("%42\n"), "%42");
   assert.equal(parseSpawnedPaneId(""), undefined, "no id ⇒ the caller must roll back, not guess");
   assert.equal(parseSpawnedPaneId("no such window"), undefined);
+  assert.deepEqual(parseSessionNames("lab\n\n work \n"), ["lab", "work"]);
+  assert.deepEqual(parseSpawnedWindow("@3 %7\n"), { windowId: "@3", paneId: "%7" });
+  // HALF A COORDINATE IS NOT ONE: a window id without its pane, or a garbled
+  // line, must leave the caller nothing to address.
+  assert.equal(parseSpawnedWindow("@3\n"), undefined);
+  assert.equal(parseSpawnedWindow("%7\n"), undefined);
+  assert.equal(parseSpawnedWindow("no server running"), undefined);
+  assert.equal(parseSpawnedWindow(""), undefined);
+});
+
+/**
+ * THE THREE-COLUMN LAYOUT IS DELETED, AND THIS IS WHAT KEEPS IT DELETED
+ * (philosophy three, 2026-09-25).
+ *
+ * The functions that planned, probed and equalised the user's window have no
+ * caller any more, so a resurrected copy would be invisible to every other
+ * test in this file — they test what exists. This one tests what must NOT.
+ */
+test("the window-layout machinery is gone from the module AND from its tests", async () => {
+  const mod = await import("../lib/orchestrator-tmux.ts");
+  for (const gone of [
+    "planPanePlacement",
+    "buildWindowLayoutArgv",
+    "parseWindowLayout",
+    "buildEvenLayoutArgv",
+    "buildSpawnPaneArgv",
+  ]) {
+    assert.ok(!(gone in mod), `${gone} must not come back`);
+  }
+  // …and no surviving builder may emit the equaliser, which is what the
+  // lay-out used to run after every spawn and every close.
+  const source = readFileSync(new URL("../lib/orchestrator-tmux.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /"select-layout"/);
 });
 
 /**

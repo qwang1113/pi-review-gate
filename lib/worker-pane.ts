@@ -68,6 +68,16 @@ export interface WorkerEntry {
    */
   paneId?: string;
   /**
+   * The WINDOW this worker runs in and the session that owns it (2026-09-25).
+   *
+   * A worker is a window of its opener's own tmux session now, so `worker_close`
+   * kills `kill-window -t <tmuxSession>:<windowId>`: the session half is what
+   * keeps a stale window id from reaching a window the user owns. Dropped
+   * together with `paneId` when the worker is closed.
+   */
+  windowId?: string;
+  tmuxSession?: string;
+  /**
    * The tmux SERVER this pane id came from, when the caller knows it.
    *
    * A pane id is minted by a server: after a restart `%42` can belong to
@@ -131,11 +141,15 @@ export function parseWorkerRegistry(raw: unknown): WorkerRegistry {
     // (channel owner, session id, report cursor) with no pane.
     if (!openerId || !role || !model || !sessionId || !repoRoot || !createdAt) continue;
     const paneId = str(e.paneId);
+    const windowId = str(e.windowId);
+    const tmuxSession = str(e.tmuxSession);
     const reportedAt = str(e.reportedAt);
     const tmuxServer = str(e.tmuxServer);
     out[id] = {
       workerId: id, openerId, role, model, sessionId, repoRoot, createdAt,
       ...(paneId === undefined ? {} : { paneId }),
+      ...(windowId === undefined ? {} : { windowId }),
+      ...(tmuxSession === undefined ? {} : { tmuxSession }),
       ...(reportedAt === undefined ? {} : { reportedAt }),
       ...(tmuxServer === undefined ? {} : { tmuxServer }),
     };

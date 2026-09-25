@@ -20,6 +20,7 @@
 
 import type { PendingAudit } from "./audit-round-specs.ts";
 import type { ModelHealth } from "./model-health.ts";
+import { isOwnSessionName, isWindowId } from "./orchestrator-tmux.ts";
 
  /** One judge pane the gate knows about. */
 export interface JudgeEntry {
@@ -44,6 +45,19 @@ export interface JudgeEntry {
   sessionDir: string;
   /** tmux pane id, once the pane exists. */
   paneId?: string;
+  /**
+   * The WINDOW the judge runs in, and the session that owns it (2026-09-25).
+   *
+   * A judge is a window of its opener's own tmux session now, so this pair is
+   * what closes it: `kill-window` is addressed `<tmuxSession>:<windowId>`, which
+   * is what keeps a stale id from reaching a window the user owns
+   * (lib/session-factory.ts `closeSessionWindow`). Entries recorded before this
+   * change have neither, and are therefore never closed by id — the same
+   * fail-closed direction as a missing `tmuxServer` below.
+   */
+  windowId?: string;
+  /** The session name (`rg-…`) that window belongs to. */
+  tmuxSession?: string;
   /**
    * WHICH tmux server issued that pane id (`<socket>,<server pid>` from $TMUX).
    *
@@ -261,19 +275,24 @@ export function judgeLive(
 }
 
 /**
- * May the gate CLOSE this pane by its recorded id? — the opposite default.
+ * May the gate CLOSE this window by its recorded ids? — the opposite default.
  *
- * Here missing information must not ACT: killing by a pane id minted by
- * another tmux server would close whatever now holds that number (2026-09-05,
- * adviser P1). An entry whose server is unknown, or that predates the field,
- * is therefore not closable — the caller still drops the entry and reclaims
- * its scratch, it just does not send `kill-pane`.
+ * Here missing information must not ACT: killing by an id minted by another
+ * tmux server would close whatever now holds that number (2026-09-05, adviser
+ * P1), and under the window topology a name or a window id we cannot trust is
+ * exactly the same hazard — only now the target is written
+ * `<session>:<@id>`, so a mistaken id can only ever land inside the gate's own
+ * session. Both halves are required: an entry whose server is unknown, that
+ * predates the field, or that carries no window/target is not closable — the
+ * caller still drops the entry and reclaims its scratch, it just does not send
+ * `kill-window`.
  */
-export function paneClosable(
-  entry: Pick<JudgeEntry, "paneId" | "tmuxServer">,
+export function windowClosable(
+  entry: Pick<JudgeEntry, "paneId" | "windowId" | "tmuxSession" | "tmuxServer">,
   currentServer: string | undefined,
-): boolean {
-  if (entry.paneId === undefined) return false;
+): entry is Pick<JudgeEntry, "windowId" | "tmuxSession"> & { windowId: string; tmuxSession: string } {
+  if (!entry.windowId || !isWindowId(entry.windowId)) return false;
+  if (!entry.tmuxSession || !isOwnSessionName(entry.tmuxSession)) return false;
   if (entry.tmuxServer === undefined || currentServer === undefined) return false;
   return entry.tmuxServer === currentServer;
 }

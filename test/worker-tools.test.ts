@@ -82,10 +82,12 @@ function makeWorld(opts: {
     openPane: async (spec) => {
       if (opts.paneOpens === false) return { ok: false, error: "tmux 拒绝开 pane" };
       opened.push({ command: spec.command, role: spec.role, decor: spec.decor });
-      spec.register("%42");
+      // The WINDOW is what the registry records now (2026-09-25); the pane id
+      // rides along because liveness is still read from it.
+      spec.register({ paneId: "%42", windowId: "@42", sessionName: "rg-repo-abcdef1234" });
       return { ok: true, paneId: "%42" };
     },
-    killPane: (paneId) => { killed.push(paneId); return true; },
+    closeWindow: (coords) => { killed.push(coords.windowId); return true; },
     openerId: () => opts.openerId ?? "%1",
     paneOwner: () => "self",
     repoRoot: () => "/repo",
@@ -377,12 +379,12 @@ test("worker_answer refuses an ambiguous answer rather than guessing", async () 
 // close / resume
 // ---------------------------------------------------------------------------
 
-test("close frees the pane, and the next submit RESUMES the same session", async () => {
+test("close frees the WINDOW, and the next submit RESUMES the same session", async () => {
   const world = makeWorld();
   await world.call("worker_submit", { task: "第一次" });
   const closed = await world.call("worker_close", { workerId: "worker-1" });
   assert.equal(closed.isError, undefined, world.text(closed));
-  assert.deepEqual(world.killed, ["%42"]);
+  assert.deepEqual(world.killed, ["@42"], "the kill is addressed by WINDOW, not by pane");
   // THE ENTRY STAYS (reviewer P1, 2026-09-21): closing releases SCREEN SPACE,
   // not the conversation — the channel owner, the session id and the report
   // cursor are what a later resume needs.
@@ -394,7 +396,7 @@ test("close frees the pane, and the next submit RESUMES the same session", async
   // Closing twice is a no-op, not a second kill.
   const again = await world.call("worker_close", { workerId: "worker-1" });
   assert.equal(again.isError, undefined);
-  assert.deepEqual(world.killed, ["%42"], "no second kill-pane for an already-closed worker");
+  assert.deepEqual(world.killed, ["@42"], "no second kill-window for an already-closed worker");
 
   const world2 = makeWorld({ alive: false });
   await world2.call("worker_submit", { task: "第一次", workerId: "worker-1" });

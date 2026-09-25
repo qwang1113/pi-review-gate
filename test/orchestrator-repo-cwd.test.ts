@@ -28,6 +28,7 @@ neutraliseHostGitConfig();
 
 import { createOrchestratorDeps } from "../lib/orchestrator-wiring.ts";
 import type { OrchestratorHostBindings } from "../lib/orchestrator-wiring.ts";
+import type { TmuxScope } from "../lib/session-tmux-scope.ts";
 
 const tempDirs: string[] = [];
 function makeRepo(): string {
@@ -41,9 +42,24 @@ function makeRepo(): string {
 }
 after(() => { for (const d of tempDirs) rmSync(d, { recursive: true, force: true }); });
 
+/**
+ * The tmux-scope seam — present because the deps require it, never exercised
+ * here: these tests drive repo resolution and orchestration identity, not
+ * spawning. `sessionId()` answers undefined so an accidental spawn would fail
+ * loudly rather than create a session on a real machine.
+ */
+const unusedScope: TmuxScope = {
+  sessionId: () => undefined,
+  repoRoot: () => "/tmp",
+  read: () => undefined,
+  write: () => {},
+  now: () => new Date(0).toISOString(),
+};
+
 function depsWith(repoRoot: string) {
   const host: OrchestratorHostBindings = {
     repoRoot,
+    scope: unusedScope,
     taskMode: () => "orchestrator" as const,
     // These tests drive repo resolution and identity, not the plan gate, so
     // the restatement binding only has to exist.
@@ -121,6 +137,7 @@ test("runtimeConflict: fresh session + foreign sidecar runtime => the foreign id
   const root = makeRepo();
   const host: OrchestratorHostBindings = {
     repoRoot: root,
+    scope: unusedScope,
     taskMode: () => "orchestrator" as const,
     restatement: () => undefined,
     // The sidecar holds ANOTHER orchestration's runtime.
@@ -163,6 +180,7 @@ test("runtime(): a FOREIGN runtime is never re-stamped with this session's id (B
   };
   const host: OrchestratorHostBindings = {
     repoRoot: root,
+    scope: unusedScope,
     taskMode: () => "orchestrator" as const,
     restatement: () => undefined,
     loadRuntime: () => foreign,
@@ -202,6 +220,7 @@ test("runtime(): a session whose id MATCHES the record keeps the record (relay +
   };
   const host: OrchestratorHostBindings = {
     repoRoot: root,
+    scope: unusedScope,
     taskMode: () => "orchestrator" as const,
     restatement: () => undefined,
     loadRuntime: () => stored,
@@ -225,6 +244,7 @@ test("runtimeConflict: a relay successor (env id present) is NOT a conflict", ()
   const root = makeRepo();
   const host: OrchestratorHostBindings = {
     repoRoot: root,
+    scope: unusedScope,
     taskMode: () => "orchestrator" as const,
     restatement: () => undefined,
     loadRuntime: () => ({
@@ -251,6 +271,7 @@ test("runtimeConflict: no sidecar runtime is never a conflict", () => {
   const root = makeRepo();
   const host: OrchestratorHostBindings = {
     repoRoot: root,
+    scope: unusedScope,
     taskMode: () => "orchestrator" as const,
     restatement: () => undefined,
     loadRuntime: () => undefined,

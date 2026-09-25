@@ -85,6 +85,11 @@ function child(overrides: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
     repoRoot: ROOT,
     openerId: OPENER,
     paneId: "%7",
+    // The WINDOW it runs in and the session that owns it (2026-09-25): a judge
+    // is a window of its opener's own tmux session, and this pair is what
+    // closes it.
+    windowId: "@7",
+    tmuxSession: "rg-repo-abcdef1234",
     // Minted by the same server the fake session runs on, like a real spawn.
     tmuxServer: "sock,1",
     sessionDir: "/sessions/reviewer",
@@ -160,9 +165,12 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
         if (!state.paneListReadable) return { ok: false, stdout: "", stderr: "no server" };
         return { ok: true, stdout: `${state.panes.join("\n")}\n`, stderr: "" };
       }
-      if (argv[0] === "kill-pane") {
-        const pane = String(argv[argv.length - 1]);
-        state.panes = state.panes.filter((p) => p !== pane);
+      if (argv[0] === "kill-window") {
+        // The target is `<session>:<@id>`, and this fake pairs a window @N with
+        // the pane %N it holds — which is what the real topology does.
+        const target = String(argv[argv.length - 1]);
+        const windowId = target.includes(":") ? target.slice(target.indexOf(":") + 1) : target;
+        state.panes = state.panes.filter((p) => p !== windowId.replace("@", "%"));
         return { ok: true, stdout: "", stderr: "" };
       }
       return { ok: true, stdout: "", stderr: "" };
@@ -242,6 +250,10 @@ function seed(f: Fake, over: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
       judgeId: c.judgeId, openerId: c.openerId, role: c.role, repoRoot: c.repoRoot,
       title: c.role, sessionDir: c.sessionDir,
       ...(c.paneId === undefined ? {} : { paneId: c.paneId }),
+      // …and the window/session pair beside it, without which the entry is
+      // deliberately NOT closable (`windowClosable`).
+      ...(c.windowId === undefined ? {} : { windowId: c.windowId }),
+      ...(c.tmuxSession === undefined ? {} : { tmuxSession: c.tmuxSession }),
       ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
       // A real spawn records the server that minted the pane id ALONGSIDE it
       // (`registerJudge`), and every judgement about that pane — kill it,
@@ -390,15 +402,18 @@ test("judge_close: closing nothing is a SUCCESS (idempotent sweep)", async () =>
   assert.deepEqual(reply.details, { closed: true, terminated: false, judgeId: undefined });
 });
 
-test("judge_close: the opener's pane is killed and the registry entry goes", async () => {
+test("judge_close: the opener's WINDOW is killed and the registry entry goes", async () => {
   const f = fake();
   seed(f);
   const reply = await call(f, "judge_close", { role: "reviewer" });
   assert.equal(reply.isError, undefined, textOf(reply));
-  assert.deepEqual(f.panes, ["%1"], "the pane is killed");
+  assert.deepEqual(f.panes, ["%1"], "the judge's window is gone");
+  assert.ok(f.tmuxCalls.some((argv) => argv[0] === "kill-window"
+    && argv[argv.length - 1] === "rg-repo-abcdef1234:@7"),
+    "addressed through the session that owns it, so a stale id cannot reach a window of the user's");
   assert.deepEqual(f.table.current, {}, "the registry entry goes with it");
   assert.ok(f.calls.includes("cancelWaitTimer"), "the hosted-wait watchdog is cancelled");
-  assert.match(textOf(reply), /pane %7 已关/);
+  assert.match(textOf(reply), /window @7 已关/);
   assert.deepEqual(reply.details, { closed: true, terminated: true, judgeId: "rg-reviewer-abc" });
 });
 
@@ -417,7 +432,7 @@ test("judge_close: closes the pane and writes NO WINDOW OPTION (2026-09-17)", as
   const reply = await call(f, "judge_close", { role: "reviewer" });
   assert.equal(reply.isError, undefined, textOf(reply));
   const flat = f.tmuxCalls.map((a) => a.join(" "));
-  assert.ok(flat.some((s) => s.startsWith("kill-pane")), "the pane itself is still closed");
+  assert.ok(flat.some((s) => s.startsWith("kill-window")), "the window itself is still closed");
   assert.deepEqual(
     flat.filter((s) => s.startsWith("setw")),
     [],
@@ -426,7 +441,7 @@ test("judge_close: closes the pane and writes NO WINDOW OPTION (2026-09-17)", as
   assert.deepEqual(f.table.current, {}, "and the registry entry goes, as it always did");
 });
 
-test("judge_close: a pane id from ANOTHER tmux server is never killed", async () => {
+test("judge_close: an id from ANOTHER tmux server is never killed", async () => {
   // The registry is persisted now, so a record can outlive the tmux server
   // that minted its pane id — and tmux hands ids out from %0 again after a
   // restart. Reachable from a plain judge_close({role}) in a resumed session,
@@ -435,7 +450,7 @@ test("judge_close: a pane id from ANOTHER tmux server is never killed", async ()
   seed(f, { tmuxServer: "sock,OLD-SERVER" });
   const reply = await call(f, "judge_close", { role: "reviewer" });
   assert.equal(reply.isError, undefined, textOf(reply));
-  assert.deepEqual(f.panes, ["%1", "%7"], "the stranger's pane is left alone");
+  assert.deepEqual(f.panes, ["%1", "%7"], "the stranger's window is left alone");
   assert.equal((reply.details as { terminated: boolean }).terminated, false);
   assert.match(textOf(reply), /另一个 tmux server/, "…and the reply says why it did not");
   // The registry still has to be cleaned up: the entry is the thing this

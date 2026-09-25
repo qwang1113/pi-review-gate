@@ -43,11 +43,12 @@ import { resolveAnswer } from "./orchestrator-answer-tools.ts";
 import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
-  closeSessionPane,
+  closeSessionWindow,
   judgePaneDecor,
-  openSessionPane,
+  openSessionWindow,
   paneRecoverability,
 } from "./session-factory.ts";
+import type { TmuxScope } from "./session-tmux-scope.ts";
 import {
   judgePaneAlive,
   type JudgePaneRunResult,
@@ -83,8 +84,15 @@ export interface JudgeSpawnToolDeps {
   channelHome(): string | undefined;
   /** One tmux invocation (argv, never a shell string). */
   tmux(argv: readonly string[]): JudgePaneRunResult;
-  /** This session's own pane — the new pane splits off it. */
+  /** This session's own pane — proves we are IN tmux before anything is opened. */
   ownPane(): string | undefined;
+  /**
+   * The opener's OWN tmux session (lib/session-tmux-scope.ts): created on the
+   * first judge, reused by every later one, and recorded in this session's
+   * sidecar. Every judge is a WINDOW of it, so the user's window never gains a
+   * pane (user decision, 2026-09-25).
+   */
+  scope: TmuxScope;
   /** WHO THIS SESSION IS on a border — the `@<owner>` half of the judge pane
    * this call opens (lib/orchestrator-pane-decor.ts `selfPaneOwner`). */
   paneOwner(): string;
@@ -240,8 +248,7 @@ async function doSpawn(
   // SECOND pane for the same role beside the live one.
   const incumbent = findJudgeLane(deps.hierarchy(), { role, repoRoot: root, openerId: caller });
   if (incumbent?.paneId) {
-    const ownPane = deps.ownPane();
-    const alive = ownPane ? judgePaneAlive(deps.tmux, ownPane, incumbent.paneId) : undefined;
+    const alive = judgePaneAlive(deps.tmux, incumbent.paneId);
     if (alive === true) {
       return fail(`review-gate: review ${incumbent.judgeId} 的 pane（${incumbent.paneId}）还开着——新一轮走 judge_submit（pane 复用），不要重开。`);
     }
@@ -345,10 +352,10 @@ async function doSpawn(
   // appended — so "there is a record" proves nothing about the pane opened
   // below. Only a record ABOVE this watermark does.
   const baseline = channelRecordCount(deps.channelIO(), judgeChannelPath);
-  const opened = await openSessionPane(deps.tmux, {
-    ownPane,
+  const opened = await openSessionWindow(deps.tmux, {
+    scope: deps.scope,
     cwd: root,
-    layout: "child-column",
+    layout: "own-session-window",
     role: {
       kind: "judge",
       openerId: caller,
@@ -368,7 +375,7 @@ async function doSpawn(
     // A COMPLETE entry from the first write, and it happens INSIDE the open:
     // this registration used to omit `sessionDir`, which is precisely why
     // `judge_wait` could not find a judge `judge_spawn` had just opened.
-    register: (paneId) => {
+    register: (coords) => {
       const withPane = registerJudge(deps.hierarchy(), {
         judgeId,
         openerId: caller,
@@ -376,7 +383,13 @@ async function doSpawn(
         repoRoot: root, roundSeq: birthSeq,
         title: role,
         sessionDir: launch.sessionDir,
-        paneId,
+        paneId: coords.paneId,
+        // The WINDOW and the session that owns it, recorded together with the
+        // pane id: they are what closes this judge (`closeSessionWindow`
+        // addresses `<session>:<@window>`), and an entry missing either half is
+        // deliberately not closable rather than closable by a guess.
+        ...(coords.windowId === undefined ? {} : { windowId: coords.windowId }),
+        ...(coords.sessionName === undefined ? {} : { tmuxSession: coords.sessionName }),
         modelSpec: launch.model,
         lastModelEventCount: birthModelEventCount,
         ...(deps.tmuxServer() === undefined ? {} : { tmuxServer: deps.tmuxServer()! }),
@@ -419,12 +432,14 @@ async function doSpawn(
   } else {
     const remembered = deps.rememberPlanAudit(root);
     if (!remembered.ok) {
-      // The pane we just opened turned the window's border line ON
-      // (`decorateSessionPane`), and that line now STAYS ON (2026-09-17, user
-      // decision): undoing it would toggle `pane-border-status`, which resizes
-      // every pane in the window (measured: SIGWINCH, rows 84 ↔ 83). Rolling
-      // back the spawn therefore only closes the pane.
-      try { closeSessionPane(deps.tmux, paneId); } catch { /* best effort */ }
+      // The child's own window is the only thing that needs closing: its
+      // border line lives in THAT window and stops existing with it
+      // (lib/orchestrator-tmux.ts `buildShowPaneLabelsArgv`).
+      if (opened.windowId && opened.sessionName) {
+        try {
+          closeSessionWindow(deps.tmux, { ownSession: opened.sessionName, windowId: opened.windowId });
+        } catch { /* best effort */ }
+      }
       rollback();
       return fail(`review-gate: plan 备案失败 —— ${remembered.error}`);
     }
@@ -561,7 +576,7 @@ async function doRecover(
   const verdict = paneRecoverability({
     registered: true,
     ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
-    paneAlive: entry.paneId ? judgePaneAlive(deps.tmux, ownPane, entry.paneId) : undefined,
+    paneAlive: entry.paneId ? judgePaneAlive(deps.tmux, entry.paneId) : undefined,
   });
   if (verdict === "no-pane") {
     return fail(`review-gate: review ${entry.judgeId} 没有登记 pane——它可能从未成功开出来，用 judge_spawn 重开。`);
@@ -572,10 +587,10 @@ async function doRecover(
   if (verdict !== "recoverable") {
     return fail("review-gate: tmux 读不出来，无法确认它到底死没死——信息缺失时不重开。");
   }
-  const opened = await openSessionPane(deps.tmux, {
-    ownPane,
+  const opened = await openSessionWindow(deps.tmux, {
+    scope: deps.scope,
     cwd: entry.repoRoot,
-    layout: "child-column",
+    layout: "own-session-window",
     role: {
       kind: "judge",
       openerId: entry.openerId,
@@ -584,13 +599,16 @@ async function doRecover(
     },
     command: buildJudgeRecoverCommand(entry.judgeId),
     decor: judgePaneDecor(entry.judgeId, entry.role, deps.paneOwner()),
-    // The recovered pane is a NEW pane from THIS server — recording the server
-    // with it is what keeps the entry closable later.
-    register: (paneId) => {
+    // The recovered judge is a NEW window from THIS server — recording the
+    // window, the session and the server with it is what keeps the entry
+    // closable later.
+    register: (coords) => {
       const recoveredServer = deps.tmuxServer();
       const updated = registerJudge(deps.hierarchy(), {
         ...entry,
-        paneId,
+        paneId: coords.paneId,
+        ...(coords.windowId === undefined ? {} : { windowId: coords.windowId }),
+        ...(coords.sessionName === undefined ? {} : { tmuxSession: coords.sessionName }),
         ...(recoveredServer === undefined ? {} : { tmuxServer: recoveredServer }),
       });
       if (updated.ok) deps.saveHierarchy(updated.table);

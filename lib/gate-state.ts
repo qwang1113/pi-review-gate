@@ -594,6 +594,21 @@ export interface GateState {
    */
   tmuxAccess?: { at: string; scope: "session" | "once" };
   /**
+   * THE ONE TMUX SESSION THIS SESSION CREATED FOR ITS CHILDREN (2026-09-25).
+   *
+   * Written the first time a child is opened (lib/session-tmux-scope.ts) and
+   * read back by every later open AND by `declare_done`, which closes it. It is
+   * a RECORD, not a permission: the name is derived from this session's own
+   * identity, the session carries a marker (`@rg_scope_owner`) written at
+   * creation, and the kill proceeds only when the marker matches this record.
+   *
+   * NOT inherited by a handoff successor: a relay keeps the old layout (user
+   * decision, 2026-09-25 — the successor opens beside its predecessor in the
+   * user's window), and the successor's own children belong to the successor's
+   * own session.
+   */
+  tmuxScope?: import("./session-tmux-scope.ts").TmuxScopeRecord;
+  /**
    * A-class text appeals (lib/text-appeal.ts): how many were spent (a quota
    * SHARED with `gh pr edit` arbitration), which contents were already
    * decided (so a refused text cannot be re-rolled), and the single live

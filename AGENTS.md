@@ -54,11 +54,13 @@ Alt+Enter 排队的 followUp 消息需要 turn 边界才能进来。judge / work
 
 ### Single-review loop (the only execution path, agent-initiated)
 
-**Judge roles run in their own panes** — the review is the only parallel
-loop, and each review runs in its OWN tmux pane (interactive pi with a
-deterministic `--session-id`), opened by whoever owns it (hierarchy:
+**Judge roles run in their own windows** — the review is the only parallel
+loop, and each review runs in its OWN tmux window of the opener's own dedicated
+session (2026-09-25, user decision: `rg-<repo>-<session id 尾>`，懒建，见
+`lib/session-tmux-scope.ts`；此前是 opener 窗口里的一个 pane)、an interactive pi with a
+deterministic `--session-id`, opened by whoever owns it (hierarchy:
 project manager → child session → review; plan review opened by the project
-manager itself). The judge pane loads the review-gate extension in judge mode
+manager itself). The judge window loads the review-gate extension in judge mode
 (a reporting shell: heartbeat, dialog race, verdict report — never an
 enforcer). It runs with
 `--exclude-tools edit,write`; its session id is DETERMINISTIC per role+repo,
@@ -433,7 +435,7 @@ carry a summary and a pointer only. Two consequences worth knowing without
 reading it: the contract never narrows what a reviewer may look at, and a
 settled conclusion may always be reopened with evidence.
 (b2) **Fresh context, read on demand — MECHANICALLY.** The review roles
-(reviewer, quality-auditor, adviser, goal-auditor, acceptance) each run in their OWN pane (interactive
+(reviewer, quality-auditor, adviser, goal-auditor, acceptance) each run in their OWN window (interactive
 pi with `--session-id`) — they never
 transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
 to grep on demand. `judge_submit({role:"adviser"})` builds that brief itself:
@@ -469,8 +471,9 @@ from the report's exact bytes (the gate's settle path records it and wakes you w
 questions through the channel (human in the pane and opener race, first answer
 wins) — answer with judge_answer, or resubmit the same role
 (`judge_submit` resumes the session, context intact).
-(d) **The judge child runs in its own pane — MECHANICALLY ENFORCED.**
-`judge_submit` opens the judge in a tmux pane (interactive pi, same deterministic
+(d) **The judge child runs in its own window — MECHANICALLY ENFORCED.**
+`judge_submit` opens the judge as a tmux window of the opener's own session
+(interactive pi, same deterministic
 session id, no second dispatch surface). The `subagent` dispatch surface was retired
 pi-subagents companion — a judge role can only be dispatched through
 `judge_submit`, so there is no second path to sequence by hand (the
@@ -482,9 +485,9 @@ single reviewer is one `judge_submit` call per round; you never pass a session
 id, a title or a directory — the gate derives all three from role+repo.
 **One session per role, continued across rounds**: the session id is
 deterministic per role+repo, so the next round re-opens the SAME transcript
-(that is how a judge's context carries over until a READY). A living pane takes
-every new round through its channel (a pane judge reads each round via its
-drain); `fresh: true` kills the pane first. The recording withholds a READY
+(that is how a judge's context carries over until a READY). A living window takes
+every new round through its channel (a window judge reads each round via its
+drain); `fresh: true` kills the window first. The recording withholds a READY
 unless the round was PREPARED (a
 registered `baseline..HEAD` target) and the verdict carries the child's `cwd`
 (measured with `pwd`, a required field of the verdict schema). While a judge
@@ -523,9 +526,16 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   健康快照给出「自上次推进（工具调用 / turn 边界，不含心跳）以来的时长」，让长时间
   无进展的 `working` 与卡死可被区分 —— 它只是回执里的一个**读数**，不改变
   `isNewsworthy`、不叫醒项目经理。`screenLooksBusy`、屏幕解析与按键模拟全部删除，
-  tmux 在编排层只剩三件事：**判 pane 存活**、**开关 pane**、**给 pane 上色与标题**
+  tmux 在编排层只剩三件事：**判 pane 存活**（`list-panes -a`，整个 server 地列 ——
+  子会话 2026-09-25 起不再跟 opener 在同一个 window 里）、**开关一个 window**
+  （opener 懒建的专属 session，见下一段）与**给 pane 上色与标题**
   （纯展示，`select-pane -P` + pane 用户选项 `set -p @rg_label`（pi 会覆盖 `pane_title`，
   这个命名空间它不碰）+ window 级 `setw pane-border-*`，一律不带 `-g`）。
+- **子会话住哪**（2026-09-25 用户决定）：opener 第一次要开子会话时懒建一个自己的
+  tmux session（`rg-<repo>-<session id 尾>`，`lib/session-tmux-scope.ts`），每个子会话
+  一个 window；opener 自己的窗口**一个 pane 都不多**。`declare_done` 关掉自己那一个
+  session（名字只从 sidecar 读、并比对 owner 标记）。**接力后继者是唯一例外**：它仍
+  split 在 opener 原窗口里（用户选的），专属 session 只收 judge / worker / PM 子会话。
 - **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：门禁内部等待、
   full precommit、任何长命令都发生在**同一个 turn 内部**，agent 既不 settle 也不
   结束 turn，挂在 `agent_settled` / `turn_end` 上的心跳因此必然超时 —— 一个正在等

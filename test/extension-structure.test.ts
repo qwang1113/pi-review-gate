@@ -3020,8 +3020,8 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   // session id continues the transcript that is already on disk.
   assert.match(body, /hasTranscript\(sessionDir\)/,
     "reuse is decided by the transcript, not by a live pane");
-  assert.match(body, /await openSessionPane\(run, \{/,
-    "a real pane open still exists for the no-reuse case — through the ONE factory");
+  assert.match(body, /await openSessionWindow\(run, \{/,
+    "a real child open still exists for the no-reuse case — through the ONE factory");
   // fresh:true kills the living pane FIRST (singleton per role+repo+opener),
   // and since 2026-09-05 it goes through ONE helper rather than carrying its
   // own copy of the close. That helper used to ask the shared label-bar
@@ -3033,7 +3033,7 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
     "…and does not re-inline the label-bar rule");
   const closeHelper = windowOf("function closeJudgePaneOf(", "\n  /**\n   * Retire a lane the gate has stopped using",
     "closeJudgePaneOf body");
-  assert.match(closeHelper, /closeSessionPane\(ctx\.run, entry\.paneId\)/, "the helper is what closes the pane");
+  assert.match(closeHelper, /closeSessionWindow\(ctx\.run, \{ ownSession: entry\.tmuxSession, windowId: entry\.windowId \}\)/, "the helper is what closes the window");
   assert.doesNotMatch(closeHelper, /setw|-u |hideLabelsVia/,
     "…and writes no window option: the bar is never released (user decision 2026-09-17)");
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
@@ -3671,7 +3671,7 @@ test("the verdict recorder actually runs the cwd check it demands", () => {
   assert.match(body, /CWD CHECK FAILED/, "and the agent is told why");
 });
 
-test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is the carrier", () => {
+test("user ask 2026-08-28: the judge SESSION is the managed entity, the window is the carrier", () => {
   // The dispatcher must RECORD the session-side paths at spawn time (the
   // transcript dir and the pane), plus WHO opened it.
   const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
@@ -3706,9 +3706,13 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
   assert.match(SRC.slice(helperAt, helperAt + 600), /judgeChannelTarget\(judge\.openerId, judge\.judgeId\)/,
     "…from THAT judge's own channel file");
 
-  // judge_close: kill the PANE, then drop the registry. Idempotent.
+  // judge_close: kill the WINDOW, then drop the registry. Idempotent.
   const close = toolBodyOf("judge_close");
-  assert.match(close, /closeSessionPane\(deps\.tmux, child\.paneId\)/, "the pane is killed, not a process");
+  assert.match(
+    close,
+    /closeSessionWindow\(deps\.tmux, \{ ownSession: child\.tmuxSession, windowId: child\.windowId \}\)/,
+    "the child's window is closed, not a process",
+  );
   // …and NOTHING else: the window's label bar used to come down with the last
   // decorated pane, and that write resizes every pane in the window (measured:
   // SIGWINCH, rows 84 ↔ 83). The release is deleted (2026-09-17, user decision).

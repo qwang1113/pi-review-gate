@@ -26,18 +26,27 @@ function happyRunner(seen: string[][] = []): JudgePaneRunner {
 }
 
 test("an unreadable pane list is missing information, never death", () => {
-  assert.equal(listJudgePanes(() => ({ ok: false, stdout: "", stderr: "x" }), "%1"), undefined);
-  assert.equal(judgePaneAlive(() => ({ ok: false, stdout: "", stderr: "x" }), "%1", "%7"), undefined);
+  assert.equal(listJudgePanes(() => ({ ok: false, stdout: "", stderr: "x" })), undefined);
+  assert.equal(judgePaneAlive(() => ({ ok: false, stdout: "", stderr: "x" }), "%7"), undefined);
   const run = happyRunner();
-  assert.deepEqual(listJudgePanes(run, "%1"), ["%1", "%7"]);
-  assert.equal(judgePaneAlive(run, "%1", "%7"), true);
-  assert.equal(judgePaneAlive(run, "%1", "%9"), false);
+  assert.deepEqual(listJudgePanes(run), ["%1", "%7"]);
+  assert.equal(judgePaneAlive(run, "%7"), true);
+  assert.equal(judgePaneAlive(run, "%9"), false);
+});
+
+test("the pane list is asked SERVER-WIDE, not about the opener's window", () => {
+  // A child is a window of the opener's own tmux session now (2026-09-25), so
+  // a window-scoped list would answer "none" for every live child and report
+  // every one of them as dead.
+  const seen: string[][] = [];
+  listJudgePanes(happyRunner(seen));
+  assert.deepEqual(seen[0], ["list-panes", "-a", "-F", "#{pane_id}"]);
 });
 
 test("a thrown tmux call is missing information too, never death", () => {
   const throwing: JudgePaneRunner = () => { throw new Error("no server"); };
-  assert.equal(listJudgePanes(throwing, "%1"), undefined);
-  assert.equal(judgePaneAlive(throwing, "%1", "%7"), undefined);
+  assert.equal(listJudgePanes(throwing), undefined);
+  assert.equal(judgePaneAlive(throwing, "%7"), undefined);
 });
 
 test("the judge env keys are a frozen wire format", () => {

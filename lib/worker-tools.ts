@@ -38,7 +38,7 @@
 import { Type } from "typebox";
 import type { ToolHost } from "./tool-host.ts";
 import type { ToolReply } from "./tool-host.ts";
-import type { SessionPaneDecor, SessionPaneRole } from "./session-factory.ts";
+import type { SessionPaneCoords, SessionPaneDecor, SessionPaneRole } from "./session-factory.ts";
 import { workerPaneDecor } from "./session-factory.ts";
 import type { ChannelIO, ChannelTarget, ChannelRecord, ChannelRequestRecord, ChannelReportRecord } from "./orchestrator-channel.ts";
 import { appendRecord, channelPathFor, newChannelId, readChannel, reportText, requestPayload } from "./orchestrator-channel.ts";
@@ -65,22 +65,27 @@ export interface WorkerToolDeps {
   /** Is this pane id still alive? */
   paneAlive(paneId: string): boolean;
   /**
-   * Open the pane through the ONE factory every pane goes through
-   * (`openSessionPane` in lib/session-factory.ts). Injected rather than
+   * Open the window through the ONE factory every child goes through
+   * (`openSessionWindow` in lib/session-factory.ts). Injected rather than
    * imported so this module owns WHAT is opened and that module owns HOW —
    * and so the protocol below is testable without tmux.
    */
   openPane(spec: {
-    ownPane: string;
     cwd: string;
     command: readonly string[];
     role: SessionPaneRole;
-    /** Border colour + label, so a worker pane is not a blank rectangle. */
+    /** Border colour + label, so a worker window is not a blank rectangle. */
     decor: SessionPaneDecor;
-    register: (paneId: string) => void;
+    register: (coords: SessionPaneCoords) => void;
   }): Promise<{ ok: true; paneId: string } | { ok: false; error: string }>;
-  /** Kill a pane. `ok: false` is tolerated (already gone ⇒ still closed). */
-  killPane(paneId: string): boolean;
+  /**
+   * Close a worker's WINDOW (2026-09-25). `ok: false` is tolerated (already
+   * gone ⇒ still closed).
+   *
+   * A window rather than a pane because that is what a worker is: a window of
+   * its opener's own tmux session, addressed `<ownSession>:<@id>`.
+   */
+  closeWindow(coords: { ownSession: string; windowId: string }): boolean;
   /** The opener id this session dispatches under (its own pane, normally). */
   openerId(): string;
   /**
@@ -523,7 +528,7 @@ async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown
   });
   if (!open.ok) return fail(`review-gate: worker ${workerId} 没能启动 —— ${open.error}`);
   return reply(
-    `review-gate: worker ${workerId}（角色 ${role}，模型 ${resolved.model}）已在 pane ${open.paneId} 启动。\n` +
+    `review-gate: worker ${workerId}（角色 ${role}，模型 ${resolved.model}）已在 window ${open.windowId ?? open.paneId} 启动。\n` +
     (existing
       ? "它上一次的会话被**接着用**了（同一 session id）—— 它还记得之前读过的东西。\n"
       : "") +
@@ -536,11 +541,12 @@ async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown
 async function openWorkerPane(
   deps: WorkerToolDeps,
   opts: { workerId: string; openerId: string; role: string; task: string; model: string; prompt?: string },
-): Promise<{ ok: true; paneId: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; paneId: string; windowId?: string } | { ok: false; error: string }> {
   const ownPane = deps.ownPane();
   if (!ownPane) {
-    return { ok: false, error: "读不到自己的 tmux pane（$TMUX_PANE）—— worker 是 tmux pane 会话，没有 tmux 就开不出来。" };
+    return { ok: false, error: "读不到自己的 tmux pane（$TMUX_PANE）—— 门禁必须在 tmux 里跑，才能开子会话。" };
   }
+  let windowId: string | undefined;
   const workDir = deps.workDirFor(opts.workerId);
   const sysPromptPath = `${workDir}/system-prompt.md`;
   const taskPath = `${workDir}/task.md`;
@@ -575,12 +581,12 @@ async function openWorkerPane(
   // the report the caller is waiting for.
   const openerId = opts.openerId;
   const opened = await deps.openPane({
-    ownPane,
     cwd: deps.repoRoot(),
     command,
     role: { kind: "worker", openerId, workerId: opts.workerId, role: opts.role },
     decor: workerPaneDecor(opts.workerId, deps.paneOwner()),
-    register: (paneId) => {
+    register: (coords) => {
+      windowId = coords.windowId;
       const registry = deps.readRegistry();
       // THE CURSOR SURVIVES A REOPEN (reviewer P1, 2026-09-21): `reportedAt` is
       // the ONLY thing that says "this report has been consumed", and
@@ -600,7 +606,9 @@ async function openWorkerPane(
         openerId,
         role: opts.role,
         model: opts.model,
-        paneId,
+        paneId: coords.paneId,
+        ...(coords.windowId === undefined ? {} : { windowId: coords.windowId }),
+        ...(coords.sessionName === undefined ? {} : { tmuxSession: coords.sessionName }),
         sessionId,
         repoRoot: deps.repoRoot(),
         createdAt: new Date(deps.now()).toISOString(),
@@ -610,7 +618,7 @@ async function openWorkerPane(
     },
   });
   if (!opened.ok) return { ok: false, error: opened.error };
-  return { ok: true, paneId: opened.paneId };
+  return { ok: true, paneId: opened.paneId, ...(windowId === undefined ? {} : { windowId }) };
 }
 
 /**
@@ -877,17 +885,19 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
       { workerId, closed: false },
     );
   }
-  const killed = deps.killPane(entry.paneId);
-  // THE ENTRY STAYS (reviewer P1, 2026-09-21). Closing a pane releases SCREEN
-  // SPACE, not the conversation: the channel owner, the session id and the
-  // report cursor are exactly what a later `worker_submit` needs to resume the
-  // same session. Dropping the entry meant a resume opened a NEW channel under
-  // the current session's identity (the old reports unreachable) with the
+  const killed = entry.windowId && entry.tmuxSession
+    ? deps.closeWindow({ ownSession: entry.tmuxSession, windowId: entry.windowId })
+    : false;
+  // THE ENTRY STAYS (reviewer P1, 2026-09-21). Closing a window releases
+  // SCREEN SPACE, not the conversation: the channel owner, the session id and
+  // the report cursor are exactly what a later `worker_submit` needs to resume
+  // the same session. Dropping the entry meant a resume opened a NEW channel
+  // under the current session's identity (the old reports unreachable) with the
   // consumed-report cursor reset (the newest one re-delivered).
-  const { paneId: _closedPane, ...kept } = entry;
+  const { paneId: _closedPane, windowId: _closedWindow, tmuxSession: _closedSession, ...kept } = entry;
   deps.saveRegistry(withWorker(registry, kept));
   return reply(
-    `review-gate: worker ${workerId} 的 pane ${entry.paneId} ${killed ? "已关闭" : "已不在（视为关闭）"}。\n` +
+    `review-gate: worker ${workerId} 的 window ${entry.windowId ?? entry.paneId} ${killed ? "已关闭" : "已不在（视为关闭）"}。\n` +
     "它的 transcript 留在磁盘上：再用同一个 `workerId` 派活会接着同一会话（`" + entry.sessionId + "`）。",
     { workerId, closed: true, paneId: entry.paneId },
   );

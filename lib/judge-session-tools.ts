@@ -40,8 +40,8 @@ import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import {
   checkCaller,
-  paneClosable,
   removeJudge,
+  windowClosable,
   type HierarchyTable,
 } from "./hierarchy.ts";
 import {
@@ -60,7 +60,7 @@ import {
   type JudgePaneRunResult,
 } from "./judge-pane.ts";
 import {
-  closeSessionPane,
+  closeSessionWindow,
   refreshSessionPaneTitle,
 } from "./session-factory.ts";
 // The label grammar lives with the rest of the border identity (ONE renderer:
@@ -103,6 +103,16 @@ export interface JudgeChildRecord {
   openerId: string;
   /** tmux pane id, once the pane exists. */
   paneId?: string;
+  /**
+   * The WINDOW the judge runs in, and the session that owns it (2026-09-25).
+   *
+   * Same pair, same reason as lib/hierarchy.ts `JudgeEntry`: a judge is a window
+   * of its opener's own session, `judge_close` addresses it
+   * `<tmuxSession>:<windowId>`, and an entry missing either half is never
+   * closed by a guess.
+   */
+  windowId?: string;
+  tmuxSession?: string;
   /**
    * Which tmux server minted `paneId` — carried so `judge_close` can tell
    * whether it may kill by it.
@@ -516,7 +526,7 @@ export interface JudgeWaitCursors {
  */
 export function probeJudgeRound(
   deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer" | "paneOwner">,
-  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "role" | "tmuxServer">,
+  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "windowId" | "tmuxSession" | "role" | "tmuxServer">,
   consumedReportId: string | undefined,
   binding: RoundBinding,
 ): PaneJudgeWaitObservation {
@@ -547,7 +557,7 @@ export function probeJudgeRound(
    */
   const paintTitle = (state: ChildState | undefined, since?: string): void => {
     if (!child.paneId || !child.role || state === undefined) return;
-    if (!paneClosable(child, deps.tmuxServer())) return;
+    if (!windowClosable(child, deps.tmuxServer())) return;
     const seconds = since ? Math.max(0, (deps.now() - Date.parse(since)) / 1000) : undefined;
     refreshSessionPaneTitle(deps.tmux, {
       paneId: child.paneId,
@@ -610,8 +620,7 @@ export function probeJudgeRound(
           ...(selected.at === undefined ? {} : { at: selected.at }),
           detail: describeRoundMiss(selected),
         };
-  const ownPane = deps.ownPane();
-  const paneAlive = child.paneId && ownPane ? judgePaneAlive(deps.tmux, ownPane, child.paneId) : undefined;
+  const paneAlive = child.paneId ? judgePaneAlive(deps.tmux, child.paneId) : undefined;
   const withEvents = withModelEvents;
   if (paneAlive === false) {
     return { done: true, reason: "pane-dead", openQuestions, ...withEvents, ...(notThisRound === undefined ? {} : { notThisRound }) };
@@ -732,8 +741,7 @@ export function paneJudgeStalled(
   const target = judgeChannelTarget(child.openerId, child.judgeId, home);
   const read = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home));
   const projection = projectChannel(read.records);
-  const ownPane = deps.ownPane();
-  const paneAlive = child.paneId && ownPane ? judgePaneAlive(deps.tmux, ownPane, child.paneId) : undefined;
+  const paneAlive = child.paneId ? judgePaneAlive(deps.tmux, child.paneId) : undefined;
   return isStalled(projection, paneAlive, deps.now(), HEARTBEAT_STALE_MS);
 }
 
@@ -796,28 +804,27 @@ export async function doClose(
   if (!allowed.ok) return fail(allowed.text, closeFailDetails());
   // Cancel the hosted wait so no wake fires for a close we initiated.
   deps.cancelWaitTimer();
-  const ownPane = deps.ownPane();
   let terminated = false;
-  let killNote = "没有登记 pane，无需动手";
-  // `paneClosable`, not merely "there is a pane id": the registry is
-  // persisted, so a record restored after a tmux server restart carries an id
-  // that server has since handed to somebody else. Killing by it would close a
-  // stranger's pane, and this is reachable from an ordinary
-  // `judge_close({role})` in a resumed session (reviewer P1, 2026-09-05).
-  if (child.paneId && !paneClosable(child, deps.tmuxServer())) {
-    killNote = `pane ${child.paneId} 是另一个 tmux server 铸造的 id（可能已被重新分配），不动它，只清登记`;
-  } else if (child.paneId && ownPane) {
-    // THE LABEL BAR IS NOT TOUCHED HERE (2026-09-17, user decision). Closing a
-    // judge used to take the window's border line down when the caller judged
-    // it the last decorated pane — and that judgement was wrong in both
-    // directions across sessions (a manager cannot see this session's judges;
-    // an ordinary loop session in a manager's window is not a guest), while
-    // the toggle itself RESIZES EVERY PANE IN THE WINDOW (measured on a
-    // scratch tmux: SIGWINCH, rows 84 ↔ 83). The bar stays on; see
-    // `closeSessionPane` in lib/session-factory.ts.
-    const killed = closeSessionPane(deps.tmux, child.paneId);
+  let killNote = "没有登记 window，无需动手";
+  // `windowClosable`, not merely "there is a window id": the registry is
+  // persisted, so a record restored after a tmux server restart carries ids
+  // that server has since handed to somebody else. The target is built as
+  // `<session>:<@window>` from the SAME record, so a wrong id can only reach a
+  // window of the gate's own session — and an entry missing either half is
+  // left alone entirely (reviewer P1, 2026-09-05).
+  if (!windowClosable(child, deps.tmuxServer())) {
+    if (child.windowId) {
+      killNote = `window ${child.windowId} 不能按记录关（是另一个 tmux server 铸造的 id，或记录里缺 session/window 坐标），只清登记`;
+    }
+  } else {
+    // THE LABEL BAR IS NOT TOUCHED HERE (2026-09-17, user decision). It used
+    // to be taken down when the caller judged this the last decorated pane,
+    // and that judgement was wrong across sessions besides resizing every pane
+    // in the window on both edges. Under the window topology the bar belongs to
+    // the CHILD's window and disappears with it.
+    const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
     terminated = killed.ok;
-    killNote = killed.ok ? `pane ${child.paneId} 已关` : `关 pane 失败（${killed.error}），登记照样清除`;
+    killNote = killed.ok ? `window ${child.windowId} 已关` : `关 window 失败（${killed.error}），登记照样清除`;
   }
   deps.saveHierarchy(removeJudge(deps.hierarchy(), judgeId));
   // A closed audit takes its draft with it — same reason as fresh:true.

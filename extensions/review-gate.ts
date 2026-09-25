@@ -200,7 +200,7 @@ import {
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
 import { supervisionTarget } from "../lib/orchestration-id.ts";
-import { emptyHierarchy, findJudgeLane, judgeLive, listByOpener, paneClosable, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
+import { emptyHierarchy, findJudgeLane, judgeLive, listByOpener, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
   decideJudgeRotation,
   judgeObjectId,
@@ -221,9 +221,17 @@ import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
   closeSessionPane,
+  closeSessionWindow,
   judgePaneDecor,
-  openSessionPane,
+  openSessionWindow,
 } from "../lib/session-factory.ts";
+// MY OWN TMUX SESSION (2026-09-25): the name, the lazy creation, the ownership
+// record and the one session `declare_done` closes.
+import {
+  closeOwnSession,
+  sanitizeScopeRecord,
+  type TmuxScope,
+} from "../lib/session-tmux-scope.ts";
 // The ONE pane-identity renderer (2026-09-18): what a pane border calls THIS
 // session when it opens a judge.
 import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
@@ -2764,8 +2772,30 @@ export default function reviewGate(pi: ExtensionAPI) {
     // costs a redraw, never the record.
     persist(latestCtx);
   }
+  /**
+   * MY OWN TMUX SESSION, as `lib/session-tmux-scope.ts` needs it: the identity
+   * a name is derived from, and the sidecar that records what was created.
+   *
+   * It is built ONCE and injected everywhere a child can be opened (judge /
+   * worker / orchestration child), so "which session do my children go in" has
+   * one answer in the process. Nothing here takes a name from a parameter: the
+   * record is written only when this session really creates the session, and
+   * read back from there afterwards.
+   */
+  const tmuxScope: TmuxScope = {
+    sessionId: () => state.sessionId?.trim() || undefined,
+    repoRoot: () => primaryRepoRoot,
+    read: () => sanitizeScopeRecord(state.tmuxScope),
+    write: (record) => {
+      state.tmuxScope = record;
+      persist(latestCtx ?? lastUiCtx);
+    },
+    now: () => new Date().toISOString(),
+  };
+
   const orchestratorDeps = createOrchestratorDeps({
     repoRoot: primaryRepoRoot,
+    scope: tmuxScope,
     taskMode: () => state.taskMode,
     // THE one banner channel, handed to the tool kit as well: `add-decision`
     // announces a decision the moment it registers one (constraint 11), and
@@ -3151,7 +3181,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     openSuccessor: async (spec) => {
       const ownPane = (process.env.TMUX_PANE ?? "").trim();
       if (!ownPane) return { ok: false, error: "本会话不在 tmux pane 里" };
-      const opened = await openSessionPane(runTmux, {
+      // THE ONE LAYOUT THAT STILL SPLITS (user decision, 2026-09-25): a relay is
+      // the human's own seat changing hands, so the successor lands in their
+      // window rather than in a tmux session of its own.
+      const opened = await openSessionWindow(runTmux, {
+        scope: tmuxScope,
         ownPane,
         cwd,
         layout: "beside-opener",
@@ -3230,7 +3264,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     ensureHierarchyLoaded(cwd);
     const entry = judgeHierarchy[side.judgeId];
     const successorId = successorSessionId(side.judgeId, handoffGeneration(side.judgeId) + 1);
-    const opened = await openSessionPane(runTmux, {
+    const opened = await openSessionWindow(runTmux, {
+      scope: tmuxScope,
       ownPane,
       cwd,
       layout: "beside-opener",
@@ -3861,10 +3896,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     return mine;
   }
 
-  /** The judge panes this window currently has, or undefined when unreadable. */
+  /**
+   * The panes this session's tmux SERVER has, or undefined when unreadable.
+   *
+   * SERVER-WIDE since 2026-09-25: a judge is no longer a pane of this window,
+   * and asking about the window would answer "none" for every live one.
+   */
   function listOwnWindowPanes(): string[] | undefined {
-    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
-    try { return ownPane ? listJudgePanes((argv) => runTmux(argv), ownPane) : undefined; }
+    try { return listJudgePanes((argv) => runTmux(argv)); }
     catch { return undefined; }
   }
 
@@ -8456,7 +8495,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   }
 
   /**
-   * Close ONE judge's pane.
+   * Close ONE judge's WINDOW.
    *
    * ONE copy, two callers (the `fresh` kill and the lane retire). It was two
    * copies for exactly one round — they sat 150 lines apart and differed only
@@ -8464,11 +8503,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * its seventh (reviewer P2, 2026-09-05). Those two copies also each carried
    * a copy of the label-bar release; that whole judgement is gone
    * (2026-09-17), so what is left is the close itself.
+   *
+   * A WINDOW since 2026-09-25, addressed `<tmuxSession>:<windowId>` from the
+   * entry itself, and only when `windowClosable` accepts both halves — a judge
+   * from an older build (no window recorded) is not closed by a guess, which
+   * is the same fail-closed rule its own `judge_close` applies.
    */
   function closeJudgePaneOf(entry: JudgeEntry, ctx: JudgeCloseCtx): void {
-    if (!entry.paneId) return;
+    if (!windowClosable(entry, ctx.tmuxServer)) return;
     try {
-      closeSessionPane(ctx.run, entry.paneId);
+      closeSessionWindow(ctx.run, { ownSession: entry.tmuxSession, windowId: entry.windowId });
     } catch { /* best effort */ }
   }
 
@@ -8492,9 +8536,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     entry: JudgeEntry,
     ctx: JudgeCloseCtx & { root: string },
   ): void {
-    const usable = paneClosable(entry, ctx.tmuxServer);
-    const alive = usable && ctx.ownPane && entry.paneId
-      ? judgePaneAlive(ctx.run, ctx.ownPane, entry.paneId)
+    const usable = windowClosable(entry, ctx.tmuxServer);
+    const alive = usable && entry.paneId
+      ? judgePaneAlive(ctx.run, entry.paneId)
       : undefined;
     if (alive === true) closeJudgePaneOf(entry, ctx);
     // The retired lane's scratch worktrees can never be used again — whether
@@ -8642,8 +8686,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // restarted, and `%7` would then be a stranger's pane — reusing it would
     // send this round's task into it. Not comparable ⇒ treat as dead, which
     // falls through to a fresh open below (transcript continues by id).
-    const paneUsable = existing !== undefined && paneClosable(existing, tmuxServer);
-    const paneAlive = paneUsable && ownPane ? judgePaneAlive(run, ownPane, existing!.paneId!) : undefined;
+    const paneUsable = existing !== undefined && windowClosable(existing, tmuxServer);
+    const paneAlive = paneUsable && existing?.paneId ? judgePaneAlive(run, existing.paneId) : undefined;
     // A living pane takes the round through its channel: the pane is the
     // CARRIER, the round is the task. No busy refusal exists anymore — a pane judge
     // reads every round via its drain; only a one-shot process read once.
@@ -8783,10 +8827,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // A judge's channel OUTLIVES its panes, so only a record ABOVE this
       // watermark proves that the pane opened below actually came up.
       const baselineRecords = channelRecordCount(channelIO, judgeChannelPath);
-      const opened = await openSessionPane(run, {
-        ownPane,
+      const opened = await openSessionWindow(run, {
+        scope: tmuxScope,
         cwd: root,
-        layout: "child-column",
+        layout: "own-session-window",
         role: {
           kind: "judge",
           openerId: opener,
@@ -8805,7 +8849,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // ONE write, one table, and it happens inside the open: the entry used
         // to be built here and mutated a second time, which is exactly how the
         // two drifted apart.
-        register: (paneId) => {
+        register: (coords) => {
           const reg = registerJudge(judgeHierarchy, {
             judgeId,
             openerId: opener,
@@ -8813,7 +8857,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             repoRoot: root,
             title,
             sessionDir,
-            paneId, roundSeq: nextJudgeRound(opener, judgeId),
+            paneId: coords.paneId,
+            // The window and its session, recorded with the pane id: they are
+            // what closes this judge (`kill-window -t <session>:<@window>`),
+            // and the session half is what keeps the kill inside ours.
+            ...(coords.windowId === undefined ? {} : { windowId: coords.windowId }),
+            ...(coords.sessionName === undefined ? {} : { tmuxSession: coords.sessionName }),
+            roundSeq: nextJudgeRound(opener, judgeId),
             ...(tmuxServer === undefined ? {} : { tmuxServer }),
             ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
             ...(freshModelEventCount === undefined ? {} : { lastModelEventCount: freshModelEventCount }),
@@ -10244,23 +10294,21 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     registerWorkerTools(pi, {
       ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
       paneAlive: (paneId) => {
-        const self = process.env.TMUX_PANE?.trim();
-        if (!self) return false;
         try {
-          return judgePaneAlive(runTmux, self, paneId) === true;
+          return judgePaneAlive(runTmux, paneId) === true;
         } catch {
           // Unreadable tmux is missing INFORMATION: a worker whose liveness
           // cannot be read is treated as gone, and `worker_submit` opens the
-          // pane again under the SAME session id — which is the safe direction
-          // (a resumed transcript beats a message nobody reads).
+          // window again under the SAME session id — which is the safe
+          // direction (a resumed transcript beats a message nobody reads).
           return false;
         }
       },
       openPane: async (spec) => {
-        const opened = await openSessionPane(runTmux, {
-          ownPane: spec.ownPane,
+        const opened = await openSessionWindow(runTmux, {
+          scope: tmuxScope,
           cwd: spec.cwd,
-          layout: "child-column",
+          layout: "own-session-window",
           role: spec.role,
           decor: spec.decor,
           command: spec.command,
@@ -10268,12 +10316,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         });
         return opened.ok ? { ok: true, paneId: opened.paneId } : { ok: false, error: opened.error };
       },
-      killPane: (paneId) => {
+      closeWindow: (coords) => {
         try {
-          // The factory's own close: it probes the window first and evens out
-          // the column afterwards, so freeing screen space does not leave a
-          // half-height neighbour behind.
-          return closeSessionPane(runTmux, paneId).ok;
+          // The factory's own close: `kill-window -t <session>:<@id>`, so a
+          // stale id can only reach a window of this session's own tmux
+          // session.
+          return closeSessionWindow(runTmux, coords).ok;
         } catch {
           return false;
         }
@@ -10501,6 +10549,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     channelHome: () => undefined,
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
+    // Every judge this session opens is a window of THIS session's own tmux
+    // session — never a pane taken from the user's window.
+    scope: tmuxScope,
     tmuxServer: () => tmuxServerFrom(process.env),
     now: () => Date.now(),
     sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -11009,8 +11060,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const ownPane = process.env.TMUX_PANE?.trim() || undefined;
     const tmuxServer = tmuxServerFrom(process.env);
     const run = (argv: readonly string[]) => runTmux(argv);
-    const alive = entry.paneId && ownPane && paneClosable(entry, tmuxServer)
-      ? judgePaneAlive(run, ownPane, entry.paneId)
+    const alive = entry.paneId && windowClosable(entry, tmuxServer)
+      ? judgePaneAlive(run, entry.paneId)
       : undefined;
     if (alive === true) closeJudgePaneOf(entry, { ownPane, tmuxServer, run });
     setHierarchy(removeJudge(judgeHierarchy, entry.judgeId));
@@ -11981,10 +12032,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   function acceptanceRoundAlive(root: string): boolean | undefined {
     const entry = judgeChildByRole(root, "acceptance");
     if (!entry) return false;
-    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
     const tmuxServer = tmuxServerFrom(process.env);
-    if (!entry.paneId || !ownPane || !paneClosable(entry, tmuxServer)) return undefined;
-    return judgePaneAlive((argv) => runTmux(argv), ownPane, entry.paneId) === true;
+    if (!entry.paneId || !windowClosable(entry, tmuxServer)) return undefined;
+    return judgePaneAlive((argv) => runTmux(argv), entry.paneId) === true;
   }
 
   /**
@@ -12357,33 +12407,33 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         !(child.role === "acceptance" && acceptanceRoundInFlight(stateForRepo(child.repoRoot).acceptance)),
       );
       if (ownedJudges.length > 0 && isEnforcedMode(state.taskMode)) {
-        const ownPane = process.env.TMUX_PANE?.trim() || undefined;
         const run = (argv: readonly string[]) => runTmux(argv);
         const closed: string[] = [];
         const tmuxServer = tmuxServerFrom(process.env);
         for (const child of ownedJudges) {
-          // `paneClosable`, not just "has a pane id": a persisted id from a
+          // `windowClosable`, not just "has a window id": a persisted id from a
           // tmux server that has since restarted names whatever now holds that
-          // number, and this is a kill (2026-09-05, adviser P1). Unverifiable
-          // ⇒ the entry and its scratch are still reclaimed below, we simply
-          // do not send kill-pane into someone else's window.
-          if (paneClosable(child, tmuxServer) && ownPane) {
+          // number, and this is a kill (2026-09-05, adviser P1). Unverifiable ⇒
+          // the entry and its scratch are still reclaimed below, we simply do
+          // not send kill-window into a window that may not be ours.
+          if (windowClosable(child, tmuxServer)) {
             try {
-              // Closing a pane no longer touches the window's label bar
-              // (2026-09-17, user decision): toggling `pane-border-status`
-              // resizes EVERY pane in the window (measured: SIGWINCH, rows
-              // 84 ↔ 83), and the release was wrong across sessions besides.
-              if (closeSessionPane(run, child.paneId!).ok) closed.push(child.paneId!);
+              // The target is `<session>:<@window>` from the entry itself, so a
+              // leftover id can only reach a window of THIS session's own tmux
+              // session — never one the user owns.
+              if (closeSessionWindow(run, { ownSession: child.tmuxSession, windowId: child.windowId }).ok) {
+                closed.push(child.windowId);
+              }
             } catch { /* best effort */ }
           }
           try { reapReviewScratch(child.judgeId); } catch { /* best effort */ }
           setHierarchy(removeJudge(judgeHierarchy, child.judgeId));
           if (child.role === "goal-auditor") dropAudits(child.repoRoot);
         }
-        progress.step(`联关 ${ownedJudges.length} 个 review pane${closed.length ? `（已关 ${closed.join("、")}）` : ""}`);
+        progress.step(`联关 ${ownedJudges.length} 个 review window${closed.length ? `（已关 ${closed.join("、")}）` : ""}`);
       } else if (ownedJudges.length > 0) {
         for (const child of ownedJudges) {
-          problems.push(`[${repoLabel(child.repoRoot)}] judge pane ${child.paneId ?? "(无 pane)"} (${child.role}) 仍开着——explore/normal 下仅提醒，不代关。`);
+          problems.push(`[${repoLabel(child.repoRoot)}] judge window ${child.windowId ?? "(无 window)"} (${child.role}) 仍开着——explore/normal 下仅提醒，不代关。`);
         }
       }
       // L7/L8 — completion-only requirements. Neither is in
@@ -12616,6 +12666,25 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // met. Raised HERE, on the accepted path only — a refused `declare_done`
       // is the session being told to keep working, not news for the human.
       const notified = raiseBanner({ kind: "finished", detail: String(params.summary ?? "") });
+      // ── CLOSE MY OWN TMUX SESSION (2026-09-25) ──
+      //
+      // The one session this process created for its children, killed with
+      // every window still in it. The name comes from THIS session's sidecar
+      // and the kill is gated on the ownership marker written at creation, so
+      // a name that is not provably ours is left alone; having created no
+      // session at all is the normal empty case, not an error
+      // (lib/session-tmux-scope.ts).
+      //
+      // A FAILURE HERE IS REPORTED, NEVER BLOCKING: the work is finished, and
+      // an unreachable tmux must not strand a completed task — the leftover
+      // session is a fact the human is told about, and t2's orphan sweep is
+      // the backstop for it.
+      //
+      // ENFORCED MODES ONLY, like the judge cascade above it: an explore/normal
+      // session returns earlier and leaves its children running on purpose, so
+      // killing the session they live in would be the one thing that section
+      // promises not to do.
+      const sessionClose = closeOwnSession((argv) => runTmux(argv), tmuxScope);
       return {
         content: [{
           type: "text",
@@ -12634,6 +12703,10 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             // Honest about the banner in the same breath: `missing` means the
             // user was NOT told, which is their cue to install the notifier.
             (notified.status === "sent" ? "" : `\n（通知：${describeNotifyOutcome(notified)}）`) +
+            // The gate's OWN session cleanup, reported only when it did not
+            // happen — including refusing to kill a session the marker says is
+            // not ours.
+            (sessionClose.ok ? "" : `\n（专属 tmux session 未清干净：${sessionClose.error}）`) +
             // WHO DECIDED WHAT (2026-09-19). Printed by the GATE, from the
             // state record, and never by the summary — a decision the proxy
             // took on the user's behalf is the one fact this report cannot let

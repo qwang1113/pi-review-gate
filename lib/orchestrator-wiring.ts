@@ -35,6 +35,7 @@ import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
+import type { TmuxScope } from "./session-tmux-scope.ts";
 
 
 
@@ -331,6 +332,14 @@ export interface OrchestratorHostBindings {
   adoptOrchestrationId(id: string): void;
   /** The orchestration id this session holds (inherited or freshly minted). */
   orchestrationId(): string;
+  /**
+   * THIS session's own tmux session (lib/session-tmux-scope.ts): every child
+   * this manager spawns is a window of it, so the manager's window never gains
+   * a pane (user decision, 2026-09-25). Handed over as a seam rather than
+   * rebuilt here — the record lives in the gate sidecar, which the extension
+   * owns.
+   */
+  scope: TmuxScope;
   /** The gate's one question template, rendered in this pane (see OrchestratorDeps). */
   askChoice(spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
   /** Print text into the user's transcript (the plan's full text, O-1). */
@@ -483,6 +492,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     readPlan: () => readPlanFile(host.repoRoot),
     savePlan: (plan) => writePlanFile(host.repoRoot, plan),
     tmux: (argv) => runTmux(argv, env()),
+    scope: host.scope,
     ownPane: () => {
       const pane = env().TMUX_PANE?.trim();
       return pane && pane.length > 0 ? pane : undefined;

@@ -25,7 +25,7 @@
  * branch runs with a fake instead of a terminal.
  */
 import {
-  buildListPanesArgv,
+  buildListServerPanesArgv,
   parsePaneIds,
 } from "./orchestrator-tmux.ts";
 
@@ -47,12 +47,19 @@ export interface JudgePaneRunResult {
 export type JudgePaneRunner = (argv: readonly string[]) => JudgePaneRunResult;
 
 /**
- * Which panes exist right now. `undefined` means the list itself is
- * unreadable — missing information, never evidence of death.
+ * Which panes exist right now — ON THE WHOLE SERVER. `undefined` means the
+ * list itself is unreadable — missing information, never evidence of death.
+ *
+ * IT IS NO LONGER SCOPED TO THE OPENER'S WINDOW (2026-09-25). It used to be
+ * `list-panes -t <opener's pane>`, which was the same thing as "my children"
+ * only while children were split into that window; now they are windows of
+ * other tmux sessions, so the window-scoped reading would have reported every
+ * live child as DEAD — and an opener told its judge is gone goes and re-does
+ * the round.
  */
-export function listJudgePanes(run: JudgePaneRunner, ownPane: string): string[] | undefined {
+export function listJudgePanes(run: JudgePaneRunner): string[] | undefined {
   try {
-    const result = run(buildListPanesArgv(ownPane));
+    const result = run(buildListServerPanesArgv());
     if (!result.ok) return undefined;
     return parsePaneIds(result.stdout);
   } catch {
@@ -63,10 +70,9 @@ export function listJudgePanes(run: JudgePaneRunner, ownPane: string): string[] 
 /** Is this pane still alive? Unreadable list ⇒ undefined (never "dead"). */
 export function judgePaneAlive(
   run: JudgePaneRunner,
-  ownPane: string,
   paneId: string,
 ): boolean | undefined {
-  const panes = listJudgePanes(run, ownPane);
+  const panes = listJudgePanes(run);
   if (panes === undefined) return undefined;
   return panes.includes(paneId);
 }

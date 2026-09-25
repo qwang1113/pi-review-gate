@@ -17,7 +17,7 @@ import {
   parseHierarchySnapshot,
   tmuxServerFrom,
   judgeLive,
-  paneClosable,
+  windowClosable,
   type JudgeEntry,
 } from "../lib/hierarchy.ts";
 
@@ -140,16 +140,29 @@ test("judgeLive: missing information keeps a judge ALIVE, a foreign server does 
   assert.equal(judgeLive({ tmuxServer: "sock,1" }, ["%7"], "sock,1"), false, "no pane ⇒ not running");
 });
 
-test("paneClosable: the OPPOSITE default — unverifiable means do not kill", () => {
-  assert.equal(paneClosable({ paneId: "%7", tmuxServer: "sock,1" }, "sock,1"), true);
-  assert.equal(paneClosable({ paneId: "%7", tmuxServer: "sock,1" }, "sock,2"), false, "another server's pane id");
+test("windowClosable: the OPPOSITE default — unverifiable means do not kill", () => {
+  const ok = { paneId: "%7", windowId: "@7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1" };
+  assert.equal(windowClosable(ok, "sock,1"), true);
+  assert.equal(windowClosable(ok, "sock,2"), false, "another server's window id");
   // These two are exactly where the pair diverges: judgeLive says "alive"
-  // (missing info must not end a wait), paneClosable says "do not kill"
+  // (missing info must not end a wait), windowClosable says "do not kill"
   // (missing info must not act). Asserting them side by side is the point.
-  assert.equal(paneClosable({ paneId: "%7" }, "sock,1"), false, "no recorded server ⇒ not killable");
+  assert.equal(windowClosable({ ...ok, tmuxServer: undefined }, "sock,1"), false, "no recorded server ⇒ not killable");
   assert.equal(judgeLive({ paneId: "%7" }, undefined, "sock,1"), true, "…while the same entry stays alive");
-  assert.equal(paneClosable({ paneId: "%7", tmuxServer: "sock,1" }, undefined), false, "we are not in tmux ⇒ not killable");
-  assert.equal(paneClosable({ tmuxServer: "sock,1" }, "sock,1"), false, "no pane id ⇒ nothing to close");
+  assert.equal(windowClosable(ok, undefined), false, "we are not in tmux ⇒ not killable");
+  assert.equal(windowClosable({ paneId: "%7", windowId: "@7", tmuxSession: "rg-repo-abcdef1234" }, "sock,1"), false,
+    "no recorded server ⇒ not killable");
+  // HALF A COORDINATE IS NOT A COORDINATE (2026-09-25): the target is written
+  // `<session>:<@window>`, so either half missing means the kill cannot be
+  // scoped to the gate's own session — and an unscoped kill is not sent.
+  assert.equal(windowClosable({ paneId: "%7", windowId: "@7", tmuxServer: "sock,1" }, "sock,1"), false,
+    "no session name ⇒ nothing to scope the kill to");
+  assert.equal(windowClosable({ paneId: "%7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1" }, "sock,1"), false,
+    "no window id ⇒ nothing to close");
+  assert.equal(windowClosable({ paneId: "%7", windowId: "%7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1" }, "sock,1"), false,
+    "a pane id is not a window id — a leftover record is not closable");
+  assert.equal(windowClosable({ paneId: "%7", windowId: "@7", tmuxSession: "not-a-gate-session", tmuxServer: "sock,1" }, "sock,1"), false,
+    "a session name the gate could not have derived is refused before it becomes a tmux target");
 });
 
 test("listByOpener returns exactly the opener's judges for cascade-close", () => {
