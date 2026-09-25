@@ -1003,8 +1003,11 @@ tmux capture-pane -p -t <pane> | tail -20
 
 两件事，都不涉及渲染：
 
-- **`list-panes`** —— pane 是否存活（`dead` 的唯一来源）；
-- **`split-window` / `kill-pane`** —— 开一个 pane、关一个 pane。
+- **`list-panes -a`** —— pane 是否存活（`dead` 的唯一来源；整个 server 地列，因为子会话
+  现在不跟 opener 在同一个 window 里）；
+- **`new-session` / `new-window` / `kill-window`** —— 子会话的落点：opener 懒建的那个专属
+  session 里的一个 window（2026-09-25 用户决定）；`list-sessions` 是它的懒建前提。
+- **`split-window` / `kill-pane`** —— 只剩接力一条路径：后继者仍 split 在用户原窗口里。
 
 `lib/orchestrator-tmux.ts` 里已经没有 `send-keys` 也没有 `capture-pane` 的构造器，
 `test/orchestrator-tmux.test.ts` 直接对源码断言这一点 —— 一个「留着没人用」的构造器
@@ -1025,7 +1028,7 @@ tmux capture-pane -p -t <pane> | tail -20
 | `lib/orchestrator-answer-tools.ts` | `orchestrator_answer`（含约束 8 的仓库外敏感路径检查、代批必填的 `crosscheck` 对照与其词表、站点不得宽于 plan 的判定） | 判定可单测 |
 | `lib/orchestrator-recovery-tools.ts` | `orchestrator_recover` / `orchestrator_attach`、孤儿检测 | 孤儿判定是纯函数 |
 | `lib/orchestrator-takeover.ts` | 盘上候选编排 id 的发现、接管采用判定、接管/归档路由文案、归档载荷与确认框文案（§6.2 / §6.2b） | 纯函数 + 注入式读盘 |
-| `lib/orchestrator-tmux.ts` | 仅剩的 tmux 构造：开/关/列 pane + 读窗口几何 + `select-layout -E` 等分 + pane 装饰（不带 `-g`）；三列布局的落点与等分判定在这里 | 纯函数 |
+| `lib/orchestrator-tmux.ts` | 仅剩的 tmux 构造：建/关 session、开/关 window、开/关 pane、列 pane、列 session + pane 装饰（不带 `-g`）+ session 归属标记；四个 session 级子命令要显式声明自己的 session 名且目标指向它 | 纯函数 |
 
 协议级测试（不依赖真实 tmux、不依赖 pi 进程、不碰磁盘）：
 `test/orchestrator-channel.test.ts`、`test/orchestrator-child-state.test.ts`、

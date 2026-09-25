@@ -38,7 +38,7 @@ import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
  * lib/session-factory.ts.
  */
 export type OrchestratorSessionDeps = OrchestratorDeps;
-import { closeSessionPane } from "./session-factory.ts";
+import { closeSessionWindow, windowAlreadyGone } from "./session-factory.ts";
 
 import {
   WORKTREE_SETTLEMENTS,
@@ -509,11 +509,30 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
   // question ("is this the last decorated pane I can see"), and every answer
   // it could give toggled `pane-border-status` — which resizes EVERY pane in
   // the window (measured: SIGWINCH, rows 84 ↔ 83) and was measured to be
-  // wrong across sessions besides. Closing a child is now just closing a
-  // child; the bar stays up for the window's lifetime (`closeSessionPane`).
-  const killed = closeSessionPane(deps.tmux, child.paneId);
-  if (!killed.ok && !/can't find pane|no such pane/i.test(killed.error)) {
-    return fail(`review-gate: 关闭 pane 失败 —— ${killed.error}`);
+  // wrong across sessions besides. Under the window topology a child's bar
+  // belongs to the child's own window and disappears with it.
+  //
+  // A child is closed by WINDOW, not by pane (2026-09-25), and only when the
+  // registry can prove the window is one the gate owns: the target is written
+  // `<tmuxSession>:<windowId>` from the SAME record, so a stale id can only
+  // reach a window of the gate's own session.
+  //
+  // A RECORD WITH NO COORDINATES IS NOT A DEAD END (2026-09-25, quality round
+  // P2). A row written by an older build has neither half — it cannot be
+  // addressed at all — and the first version of this code FAILED the whole
+  // close there, leaving the child `running` forever and contradicting the
+  // sentence above it. It takes the same direction as the judge path: the
+  // window is LEFT ALONE (nothing is killed by a guess), the registration is
+  // cleared, and the reply says which of the two happened.
+  let killNote: string | undefined;
+  if (child.windowId && child.tmuxSession) {
+    const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
+    if (!killed.ok && !windowAlreadyGone(killed.error)) {
+      return fail(`review-gate: 关闭 window 失败 —— ${killed.error}`);
+    }
+    if (!killed.ok) killNote = "（它的 window 已经不在了）";
+  } else {
+    killNote = "（登记里没有 window/session 坐标 —— 旧版登记，只清登记，没去关窗）";
   }
 
   deps.saveRuntime(markChildClosed(deps.runtime(), child.id, new Date(deps.now()).toISOString()));
@@ -530,7 +549,7 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
     ? "。别忘了把它的任务状态置为 done 或 pending（`orchestrator_plan`）。"
     : `。任务 ${child.taskId} 当前是 ${closedTask.status}，无需再动。`;
   return reply(
-    `review-gate: 子会话 ${child.id}（pane ${child.paneId}）已关闭` + statusNudge + settlementNote,
+    `review-gate: 子会话 ${child.id}（window ${child.windowId ?? "（无记录）"}）已关闭${killNote ?? ""}` + statusNudge + settlementNote,
     { childId: child.id },
   );
 

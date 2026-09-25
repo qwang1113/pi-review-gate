@@ -20,6 +20,7 @@
 
 import type { PendingAudit } from "./audit-round-specs.ts";
 import type { ModelHealth } from "./model-health.ts";
+import { isOwnSessionName, isWindowId } from "./orchestrator-tmux.ts";
 
  /** One judge pane the gate knows about. */
 export interface JudgeEntry {
@@ -44,6 +45,19 @@ export interface JudgeEntry {
   sessionDir: string;
   /** tmux pane id, once the pane exists. */
   paneId?: string;
+  /**
+   * The WINDOW the judge runs in, and the session that owns it (2026-09-25).
+   *
+   * A judge is a window of its opener's own tmux session now, so this pair is
+   * what closes it: `kill-window` is addressed `<tmuxSession>:<windowId>`, which
+   * is what keeps a stale id from reaching a window the user owns
+   * (lib/session-factory.ts `closeSessionWindow`). Entries recorded before this
+   * change have neither, and are therefore never closed by id — the same
+   * fail-closed direction as a missing `tmuxServer` below.
+   */
+  windowId?: string;
+  /** The session name (`rg-…`) that window belongs to. */
+  tmuxSession?: string;
   /**
    * WHICH tmux server issued that pane id (`<socket>,<server pid>` from $TMUX).
    *
@@ -256,24 +270,29 @@ export function judgeLive(
   currentServer: string | undefined,
 ): boolean {
   if (entry.paneId === undefined) return false;
-  if (!paneIdComparable(entry, currentServer)) return false;
+  if (!paneIdUsable(entry, currentServer)) return false;
   return panes === undefined || panes.includes(entry.paneId);
 }
 
 /**
- * May the gate CLOSE this pane by its recorded id? — the opposite default.
+ * May the gate CLOSE this window by its recorded ids? — the opposite default.
  *
- * Here missing information must not ACT: killing by a pane id minted by
- * another tmux server would close whatever now holds that number (2026-09-05,
- * adviser P1). An entry whose server is unknown, or that predates the field,
- * is therefore not closable — the caller still drops the entry and reclaims
- * its scratch, it just does not send `kill-pane`.
+ * Here missing information must not ACT: killing by an id minted by another
+ * tmux server would close whatever now holds that number (2026-09-05, adviser
+ * P1), and under the window topology a name or a window id we cannot trust is
+ * exactly the same hazard — only now the target is written
+ * `<session>:<@id>`, so a mistaken id can only ever land inside the gate's own
+ * session. Both halves are required: an entry whose server is unknown, that
+ * predates the field, or that carries no window/target is not closable — the
+ * caller still drops the entry and reclaims its scratch, it just does not send
+ * `kill-window`.
  */
-export function paneClosable(
-  entry: Pick<JudgeEntry, "paneId" | "tmuxServer">,
+export function windowClosable(
+  entry: Pick<JudgeEntry, "paneId" | "windowId" | "tmuxSession" | "tmuxServer">,
   currentServer: string | undefined,
-): boolean {
-  if (entry.paneId === undefined) return false;
+): entry is Pick<JudgeEntry, "windowId" | "tmuxSession"> & { windowId: string; tmuxSession: string } {
+  if (!entry.windowId || !isWindowId(entry.windowId)) return false;
+  if (!entry.tmuxSession || !isOwnSessionName(entry.tmuxSession)) return false;
   if (entry.tmuxServer === undefined || currentServer === undefined) return false;
   return entry.tmuxServer === currentServer;
 }
@@ -283,14 +302,106 @@ export function paneClosable(
  *
  * Only the KNOWN-DIFFERENT case is a refusal. An entry with no recorded server
  * stays comparable so that "is it live" keeps its never-kill-on-missing-info
- * default; `paneClosable` applies the stricter rule itself.
+ * default; `windowClosable` applies the stricter rule itself.
+ *
+ * EXPORTED BECAUSE "MAY I REUSE / IS IT ALIVE" IS NOT "MAY I KILL" (2026-09-25,
+ * quality round P2). `windowClosable` asks for a window id AND a session name —
+ * the coordinates a KILL is addressed by — and a judge entry written before the
+ * window topology has neither, while its pane is perfectly alive and perfectly
+ * reusable. Judging liveness with the kill's rule made a live legacy pane look
+ * dead: the dispatch opened a SECOND window for the same judge id (two processes
+ * for one judge) and the `fresh` path dropped the registry row without closing
+ * anything. Whoever asks "is it alive" asks THIS; only the kill asks the other.
  */
-function paneIdComparable(
+export function paneIdUsable(
   entry: Pick<JudgeEntry, "tmuxServer">,
   currentServer: string | undefined,
 ): boolean {
   if (entry.tmuxServer === undefined || currentServer === undefined) return true;
   return entry.tmuxServer === currentServer;
+}
+
+/**
+ * THE PANE COORDINATES an entry already carries — the four fields that address
+ * the child it runs in (its pane, its window, the session that owns the window,
+ * and the tmux server that minted the ids). Spread into a RE-registration.
+ *
+ * WHY THIS EXISTS (2026-09-25, quality round P1 and its second instance). A
+ * re-registration is written as a fresh object literal — a new round queued
+ * into a live pane, or a rotated lane — and every coordinate has to be copied
+ * across by hand. Naming them once, as one value, is what makes the next
+ * coordinate a one-line change here instead of a silent hole in whichever
+ * literal somebody forgot: an entry that loses its window pair can no longer be
+ * closed at all (`windowClosable` requires both halves), and the loss is
+ * invisible until somebody looks at a screen that never empties.
+ *
+ * Absent fields stay ABSENT rather than becoming `undefined` keys: the
+ * fail-closed readers distinguish "not recorded" from "recorded as nothing".
+ */
+export function paneCoordsOf(entry: JudgeEntry): {
+  paneId?: string;
+  windowId?: string;
+  tmuxSession?: string;
+  tmuxServer?: string;
+} {
+  return {
+    ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
+    ...(entry.windowId === undefined ? {} : { windowId: entry.windowId }),
+    ...(entry.tmuxSession === undefined ? {} : { tmuxSession: entry.tmuxSession }),
+    ...(entry.tmuxServer === undefined ? {} : { tmuxServer: entry.tmuxServer }),
+  };
+}
+
+/**
+ * THE ONE PROJECTION from a registry entry to what the judge tools operate on.
+ *
+ * WHY IT IS A FUNCTION AND NOT THREE OBJECT LITERALS (2026-09-25, quality round
+ * P1). The extension wrote this mapping by hand in three places (the two
+ * `findChild*` seams and the settle sweep's inline probe record), and when the
+ * window topology added `windowId` + `tmuxSession` to the entry, all three were
+ * missed: `windowClosable` requires BOTH halves, so `judge_close` and the
+ * round-end reclaim silently stopped being able to close a judge's window —
+ * they reported "cannot close by record" forever while every unit test passed
+ * (those inject their own `findChild`, so the hand-written projection was the
+ * one thing no test reached).
+ *
+ * It lives HERE, where {@link JudgeEntry} is defined: the set of fields a reader
+ * needs is a fact about the entry, and the next field added to the entry has
+ * exactly one place to be carried to. The return type is structural — the
+ * session tools' own `JudgeChildRecord` — so no module has to import the other.
+ *
+ * `repoRoot` may be overridden by the caller: resolving a judge by role searches
+ * per repo, and the sweep probes an entry whose `repoRoot` is optional.
+ */
+export function judgeChildRecordOf(entry: JudgeEntry, repoRoot?: string): {
+  judgeId: string;
+  role: string;
+  repoRoot: string;
+  openerId: string;
+  paneId?: string;
+  windowId?: string;
+  tmuxSession?: string;
+  tmuxServer?: string;
+  sessionDir: string;
+  streamPath?: string;
+  modelSpec?: string;
+} {
+  return {
+    judgeId: entry.judgeId,
+    role: entry.role,
+    repoRoot: repoRoot ?? entry.repoRoot,
+    openerId: entry.openerId,
+    sessionDir: entry.sessionDir,
+    ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
+    // The WINDOW and the session that owns it travel with the pane id: they
+    // are what `closeSessionWindow` addresses (`<session>:<@window>`), and an
+    // entry missing either half is deliberately not closable.
+    ...(entry.windowId === undefined ? {} : { windowId: entry.windowId }),
+    ...(entry.tmuxSession === undefined ? {} : { tmuxSession: entry.tmuxSession }),
+    ...(entry.tmuxServer === undefined ? {} : { tmuxServer: entry.tmuxServer }),
+    ...(entry.streamPath === undefined ? {} : { streamPath: entry.streamPath }),
+    ...(entry.modelSpec === undefined ? {} : { modelSpec: entry.modelSpec }),
+  };
 }
 
 /** Every judge one opener owns — what `declare_done` cascade-closes. */

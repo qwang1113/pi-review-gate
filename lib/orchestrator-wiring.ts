@@ -30,11 +30,13 @@ import { channelRoot, nodeChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
-import { assertSafeTmuxArgv } from "./orchestrator-tmux.ts";
+import { assertSafeTmuxArgv, type SafeTmuxOptions } from "./orchestrator-tmux.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
+import type { TmuxScope } from "./session-tmux-scope.ts";
+import { addressableSessions, createOwnershipProbe } from "./session-tmux-scope.ts";
 
 
 
@@ -44,10 +46,22 @@ import type { HandoffRetirement, OrchestratorDeps, PlanRead, TmuxRunResult } fro
 import type { TaskMode } from "./task-mode.ts";
 import type { RestatementRecord } from "./restatement.ts";
 
-/** Run one tmux command with no shell in between. */
-export function runTmux(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): TmuxRunResult {
+/**
+ * Run one tmux command with no shell in between.
+ *
+ * `guard` is the DECLARATION that makes "only sessions of mine" true on this side
+ * of the seam too (2026-09-25): every caller passes the sessions it may address
+ * (`lib/session-tmux-scope.ts addressableSessions`), so `new-session` /
+ * `new-window` / `kill-window` / `kill-session` are refused here unless their
+ * target IS one of them. `kill-server` is refused regardless.
+ */
+export function runTmux(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  guard: SafeTmuxOptions = {},
+): TmuxRunResult {
   try {
-    assertSafeTmuxArgv(argv);
+    assertSafeTmuxArgv(argv, guard);
   } catch (error) {
     return { ok: false, stdout: "", stderr: (error as Error).message };
   }
@@ -331,6 +345,14 @@ export interface OrchestratorHostBindings {
   adoptOrchestrationId(id: string): void;
   /** The orchestration id this session holds (inherited or freshly minted). */
   orchestrationId(): string;
+  /**
+   * THIS session's own tmux session (lib/session-tmux-scope.ts): every child
+   * this manager spawns is a window of it, so the manager's window never gains
+   * a pane (user decision, 2026-09-25). Handed over as a seam rather than
+   * rebuilt here — the record lives in the gate sidecar, which the extension
+   * owns.
+   */
+  scope: TmuxScope;
   /** The gate's one question template, rendered in this pane (see OrchestratorDeps). */
   askChoice(spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
   /** Print text into the user's transcript (the plan's full text, O-1). */
@@ -427,6 +449,11 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
   // the border-repaint throttle cannot leak between orchestrations (or, in a
   // test process, between worlds).
   const paneDecor = new Map<string, { title: string; at: number }>();
+  // ONE ownership probe per orchestration: it remembers one `@rg_scope_owner`
+  // read per session name for the life of this process, so the declaration on
+  // every tmux call stays a map lookup instead of a subprocess
+  // (lib/session-tmux-scope.ts `createOwnershipProbe`).
+  const ownershipProbe = createOwnershipProbe(host.scope, (argv) => runTmux(argv));
 
 
   const deps: OrchestratorDeps = {
@@ -482,7 +509,15 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     },
     readPlan: () => readPlanFile(host.repoRoot),
     savePlan: (plan) => writePlanFile(host.repoRoot, plan),
-    tmux: (argv) => runTmux(argv, env()),
+    tmux: (argv) =>
+      runTmux(argv, env(), {
+        ownSessions: addressableSessions(
+          host.scope,
+          deps.runtime().children.map((c) => c.tmuxSession),
+          ownershipProbe,
+        ),
+      }),
+    scope: host.scope,
     ownPane: () => {
       const pane = env().TMUX_PANE?.trim();
       return pane && pane.length > 0 ? pane : undefined;

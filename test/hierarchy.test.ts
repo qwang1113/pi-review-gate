@@ -17,7 +17,10 @@ import {
   parseHierarchySnapshot,
   tmuxServerFrom,
   judgeLive,
-  paneClosable,
+  windowClosable,
+  judgeChildRecordOf,
+  paneCoordsOf,
+  paneIdUsable,
   type JudgeEntry,
 } from "../lib/hierarchy.ts";
 
@@ -140,16 +143,113 @@ test("judgeLive: missing information keeps a judge ALIVE, a foreign server does 
   assert.equal(judgeLive({ tmuxServer: "sock,1" }, ["%7"], "sock,1"), false, "no pane ⇒ not running");
 });
 
-test("paneClosable: the OPPOSITE default — unverifiable means do not kill", () => {
-  assert.equal(paneClosable({ paneId: "%7", tmuxServer: "sock,1" }, "sock,1"), true);
-  assert.equal(paneClosable({ paneId: "%7", tmuxServer: "sock,1" }, "sock,2"), false, "another server's pane id");
+test("windowClosable: the OPPOSITE default — unverifiable means do not kill", () => {
+  const ok = { paneId: "%7", windowId: "@7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1" };
+  assert.equal(windowClosable(ok, "sock,1"), true);
+  assert.equal(windowClosable(ok, "sock,2"), false, "another server's window id");
   // These two are exactly where the pair diverges: judgeLive says "alive"
-  // (missing info must not end a wait), paneClosable says "do not kill"
+  // (missing info must not end a wait), windowClosable says "do not kill"
   // (missing info must not act). Asserting them side by side is the point.
-  assert.equal(paneClosable({ paneId: "%7" }, "sock,1"), false, "no recorded server ⇒ not killable");
+  assert.equal(windowClosable({ ...ok, tmuxServer: undefined }, "sock,1"), false, "no recorded server ⇒ not killable");
   assert.equal(judgeLive({ paneId: "%7" }, undefined, "sock,1"), true, "…while the same entry stays alive");
-  assert.equal(paneClosable({ paneId: "%7", tmuxServer: "sock,1" }, undefined), false, "we are not in tmux ⇒ not killable");
-  assert.equal(paneClosable({ tmuxServer: "sock,1" }, "sock,1"), false, "no pane id ⇒ nothing to close");
+  assert.equal(windowClosable(ok, undefined), false, "we are not in tmux ⇒ not killable");
+  assert.equal(windowClosable({ paneId: "%7", windowId: "@7", tmuxSession: "rg-repo-abcdef1234" }, "sock,1"), false,
+    "no recorded server ⇒ not killable");
+  // HALF A COORDINATE IS NOT A COORDINATE (2026-09-25): the target is written
+  // `<session>:<@window>`, so either half missing means the kill cannot be
+  // scoped to the gate's own session — and an unscoped kill is not sent.
+  assert.equal(windowClosable({ paneId: "%7", windowId: "@7", tmuxServer: "sock,1" }, "sock,1"), false,
+    "no session name ⇒ nothing to scope the kill to");
+  assert.equal(windowClosable({ paneId: "%7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1" }, "sock,1"), false,
+    "no window id ⇒ nothing to close");
+  assert.equal(windowClosable({ paneId: "%7", windowId: "%7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1" }, "sock,1"), false,
+    "a pane id is not a window id — a leftover record is not closable");
+  assert.equal(windowClosable({ paneId: "%7", windowId: "@7", tmuxSession: "not-a-gate-session", tmuxServer: "sock,1" }, "sock,1"), false,
+    "a session name the gate could not have derived is refused before it becomes a tmux target");
+});
+
+test("paneCoordsOf carries the WHOLE pane, so a re-registration cannot lose half of it", () => {
+  // THE SECOND INSTANCE OF THE SAME DEFECT (2026-09-25, quality round P1). A
+  // re-registration — a new round queued into a LIVE judge pane, a rotated lane
+  // — is written as a fresh object literal, and each coordinate has to be copied
+  // across by hand. The reuse path copied `paneId` and forgot `windowId` /
+  // `tmuxSession`, so every round after the first left an entry its own close
+  // path must refuse: a pane alive on screen that nothing can close.
+  const live = entry({
+    paneId: "%7", windowId: "@7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1",
+  });
+  assert.deepEqual(paneCoordsOf(live), {
+    paneId: "%7", windowId: "@7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1",
+  });
+  // The property the callers rely on: whatever comes out must still satisfy the
+  // rule their own closers apply.
+  const reregistered: JudgeEntry = { ...entry({ roundSeq: 2 }), ...paneCoordsOf(live) };
+  assert.equal(windowClosable(reregistered, "sock,1"), true,
+    "a re-registered entry stays closable — otherwise the pane is stranded");
+  // And the fail-closed direction survives: nothing recorded stays nothing.
+  assert.deepEqual(paneCoordsOf(entry()), {});
+  assert.deepEqual(paneCoordsOf(entry({ paneId: "%7" })), { paneId: "%7" },
+    "a half-coordinate is carried as the half it is, and the closer still refuses it");
+});
+
+test("LIVENESS is not CLOSABILITY: a live legacy pane must not read as dead", () => {
+  // 2026-09-25, quality round P2. `windowClosable` asks for the coordinates a
+  // KILL is addressed by (window id + session name); `paneIdUsable` asks the one
+  // question a liveness or reuse decision needs (was this pane id minted by the
+  // server we are talking to). A judge entry written before the window topology
+  // has no window coordinates while its pane is alive and perfectly reusable —
+  // judging it with the kill's rule made the dispatch open a SECOND window for
+  // the same judge id, and made the `fresh` path drop the registry row without
+  // closing anything.
+  const legacy = { paneId: "%7", tmuxServer: "sock,1" };
+  assert.equal(paneIdUsable(legacy, "sock,1"), true, "alive and reusable");
+  assert.equal(windowClosable(legacy, "sock,1"), false, "…and not closable by a guess");
+  assert.equal(paneIdUsable(legacy, "sock,2"), false, "another server's id is not our pane either way");
+  assert.equal(paneIdUsable({}, "sock,1"), true, "missing information never reads as dead");
+});
+
+test("judgeChildRecordOf carries EVERY coordinate a reader acts on (2026-09-25, quality P1)", () => {
+  // THE REGRESSION THIS EXISTS FOR. The extension used to write this mapping by
+  // hand in three places; when the window topology added `windowId` and
+  // `tmuxSession` to the entry, all three were missed — and because
+  // `windowClosable` needs BOTH halves, `judge_close` and the round-end reclaim
+  // could no longer close a judge's window at all. Nothing caught it: the unit
+  // tests of those tools inject their own `findChild`, so the hand-written
+  // projection was the one link no test reached.
+  const full = judgeChildRecordOf(entry({
+    paneId: "%7",
+    windowId: "@7",
+    tmuxSession: "rg-repo-abcdef1234",
+    tmuxServer: "sock,1",
+    streamPath: "/repo/.pi/review-stream/r.jsonl",
+    modelSpec: "anthropic/claude-fable-5:max",
+  }));
+  assert.deepEqual(full, {
+    judgeId: "rg-reviewer-abc123",
+    role: "reviewer",
+    repoRoot: "/repo",
+    openerId: "session-child-1",
+    sessionDir: "/repo/.pi/judge-sessions/reviewer-abc-def/sessions",
+    paneId: "%7",
+    windowId: "@7",
+    tmuxSession: "rg-repo-abcdef1234",
+    tmuxServer: "sock,1",
+    streamPath: "/repo/.pi/review-stream/r.jsonl",
+    modelSpec: "anthropic/claude-fable-5:max",
+  });
+  // THE POINT OF THE TEST, stated as the caller's own question: whatever the
+  // projection produces must satisfy the rule the CLOSER applies to it. A
+  // projection that drops a coordinate fails here, not in production.
+  assert.equal(windowClosable(full, "sock,1"), true,
+    "a fully recorded judge must be closable through its own projection");
+  // And the repo override: the settle sweep probes an entry whose repoRoot may
+  // be absent, so the caller supplies the repo it resolved.
+  assert.equal(judgeChildRecordOf(entry({ repoRoot: "/somewhere-else" }), "/resolved").repoRoot, "/resolved");
+  // Absent coordinates stay ABSENT rather than becoming `undefined` keys: the
+  // distinction is what the fail-closed readers depend on.
+  assert.equal("windowId" in judgeChildRecordOf(entry()), false);
+  assert.equal(windowClosable(judgeChildRecordOf(entry({ paneId: "%7" })), "sock,1"), false,
+    "a judge from an older build is not closed by a guess");
 });
 
 test("listByOpener returns exactly the opener's judges for cascade-close", () => {

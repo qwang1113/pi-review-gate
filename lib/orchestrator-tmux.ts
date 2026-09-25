@@ -1,56 +1,54 @@
 /**
- * tmux COMMAND CONSTRUCTION — the orchestrator never writes a tmux command,
+ * tmux COMMAND CONSTRUCTION — the gate never writes a tmux command by hand,
  * so this module writes all of them.
  *
  * WHY (user requirement, 2026-08-29: "if a tool can be provided, do not make
  * the session assemble it"). Every tmux failure measured in the hand-run
  * orchestration came from an improvised command, and the cost of an improvised
  * tmux command is not a wrong answer — it is the USER'S WORKING ENVIRONMENT.
- * A stray `kill-session` ends the window they are watching from. So the layout
- * rules live here, once, as argv arrays, and the agent only expresses intent.
+ * A stray `kill-session` ends the window they are watching from. So the rules
+ * live here, once, as argv arrays, and the agent only expresses intent.
  *
  * ARGV, NOT A SHELL STRING. Every builder returns an argument ARRAY for
- * execFile-style spawning: no shell parses it, so a pane id or a message body
- * can never become another command. On top of that {@link assertSafeTmuxArgv}
- * refuses the destructive subcommands outright — the gate's own execution path
- * is held to the same list the bash guard enforces against the agent
- * (lib/orchestrator-guard.ts), so "the gate is exempt from the guard" can
- * never mean "the gate may do the forbidden thing".
+ * execFile-style spawning: no shell parses it, so an id or a message body can
+ * never become another command.
  *
- * THE LAYOUT (user requirement, 2026-09-08: 一个 window 最多 3 列，前两列固定
- * 独占一列，第三个会话之后共享第三列、高度等分):
+ * ── THE TOPOLOGY (2026-09-25, user decision) ──
  *
- *     window
- *     ├─ column 1   one pane, full height   (the opener / project manager)
- *     ├─ column 2   one pane, full height   (the first session opened)
- *     └─ column 3   EVERY remaining pane, height shared evenly
+ * A session's children no longer share the user's window. The opener keeps the
+ * pane it already had — the one the human is watching — and every child it
+ * opens lives as a WINDOW of the opener's own dedicated tmux session
+ * (`rg-<repo>-<session id 尾 10 位>`, derived and owned by
+ * lib/session-tmux-scope.ts — the TAIL, not the head: pi's ids are UUIDv7, so
+ * their leading bits are a millisecond timestamp every session of the same
+ * minute shares): one child per window, created lazily the first
+ * time a child is needed, closed by `kill-window` when it is done.
  *
- *  - fewer than three columns → `split-window -h` beside a pane that sits
- *    ALONE in its column (the rightmost such column): a lone pane's parent IS
- *    the window root, so the split flattens into a real sibling column and
- *    lands where the third one belongs, keeping the SHARED column rightmost.
- *    Splitting a pane inside a multi-pane column NESTS a half-width pane there
- *    instead — measured, and reachable: close the middle column of a
- *    three-column window and the third column's panes ARE the second one. If
- *    NO column sits alone (a shape the gate never builds), the split carries
- *    `-f`, which spans the window height and opens a real column at the right
- *    edge. Both are regression tests in
- *    test/tmux-window-layout.integration.test.ts, and both branches are also
- *    pinned by the unit test;
- *  - three or more → `split-window -v` off the third column's last pane;
- *  - a handoff (giving the orchestration to a successor) → `split-window -h`
- *    off the orchestrator's own pane, so the successor lands beside it and
- *    inherits the left column when the old pane is closed. That is the ONE
- *    deliberate exception: it holds a fourth column for as long as both panes
- *    are alive.
+ * WHAT THAT REPLACED, and why nothing of it is left: the three-column layout
+ * planner, the window-geometry probe and the equaliser that spread a column's
+ * space. They existed to squeeze every child into the user's window without
+ * nesting panes. They are DELETED, not kept "for the relay": with one child per
+ * window there is no geometry to plan, and a second implementation of "where
+ * does a session go" would be the drift this repository refuses (哲学三).
+ * (They are not named here on purpose — the round's exit criterion is that the
+ * identifiers are gone from the tree, and a mention kept "for history" is
+ * exactly how a removed name comes back as a search hit somebody trusts.)
  *
- * WHICH COLUMN IS "THE THIRD" IS A FACT ABOUT THE WINDOW, NOT ABOUT A REGISTRY
- * (2026-09-08). The old rule asked the opener's own child list, and every
- * session keeps its own — so a judge pane opened by a child, or a second
- * orchestration in the same window, each saw "no children yet" and opened a
- * NEW column. The user's own window had five. The rule now reads the window's
- * real geometry ({@link buildWindowLayoutArgv}) and decides in
- * {@link planPanePlacement}; equalising the result is {@link buildEvenLayoutArgv}.
+ * THE ONE PATH THAT STILL SPLITS THE USER'S WINDOW is the RELAY
+ * ({@link buildHandoffPaneArgv}): a successor orchestrator opens beside its
+ * predecessor, where the human is already looking, so a handover does not move
+ * the screen (user decision, 2026-09-25, explicitly NOT moved into the
+ * dedicated session).
+ *
+ * ── THE SAFETY DOOR ──
+ *
+ * `new-session` / `new-window` / `kill-window` / `kill-session` are commands
+ * the agent must never improvise (lib/orchestrator-guard.ts refuses them at
+ * the bash layer) and the gate now genuinely needs. They are therefore not
+ * "forbidden" but SCOPED: {@link assertSafeTmuxArgv} refuses any of them unless
+ * the caller declares the session it owns AND the argv's own target names that
+ * session (`<name>` or `<name>:@id`). `kill-server` is refused unconditionally
+ * — no session name makes it safe.
  *
  * Pure module: builds and validates argv. It never spawns anything.
  */
@@ -58,22 +56,71 @@
 /** A tmux pane id as tmux itself prints it: `%` followed by digits. */
 const PANE_ID = /^%\d{1,10}$/;
 
-/** tmux subcommands the gate itself must never run (see the header). */
-export const FORBIDDEN_TMUX_SUBCOMMANDS: readonly string[] = Object.freeze([
-  "kill-session",
+/** A tmux window id as tmux itself prints it: `@` followed by digits. */
+const WINDOW_ID = /^@\d{1,10}$/;
+
+/**
+ * The shape of a session the GATE created for itself.
+ *
+ * Deliberately narrower than "any string": everything here is emitted by
+ * {@link ./session-tmux-scope.ts deriveSessionName}, and the character class is
+ * what keeps a target from carrying tmux syntax of its own — no `:` (the
+ * session/window separator an attacker would use to escape the scope), no `.`
+ * (tmux rejects it in session names anyway), no whitespace, no leading dash.
+ */
+const OWN_SESSION_NAME = /^rg-[a-z0-9-]{1,48}$/;
+
+/** Subcommands no session name can make safe: they destroy the whole server. */
+export const NEVER_ALLOWED_TMUX_SUBCOMMANDS: readonly string[] = Object.freeze([
   "kill-server",
-  "kill-window",
-  "new-session",
-  "new",
-  "new-window",
-  "neww",
 ]);
 
+/**
+ * Subcommands that create or destroy surface, allowed ONLY against the
+ * caller's own session ({@link SafeTmuxOptions.ownSession}).
+ *
+ * Aliases are listed beside their long form on purpose: the check runs on the
+ * canonical name, so `killw` cannot slip past a rule written for `kill-window`.
+ */
+export const OWN_SESSION_TMUX_SUBCOMMANDS: readonly string[] = Object.freeze([
+  "kill-session",
+  "kill-window",
+  "killw",
+  "new",
+  "new-session",
+  "new-window",
+  "neww",
+  // The ENVIRONMENT of a session is the other thing a gate session owns about
+  // ITS OWN session — and the only other one that can be aimed wrong (2026-09-25).
+  "set-environment",
+  "show-environment",
+]);
+
+const SUBCOMMAND_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  new: "new-session",
+  neww: "new-window",
+  killw: "kill-window",
+});
+
 export class UnsafeTmuxCommand extends Error {}
+
+function canonicalSubcommand(sub: string): string {
+  return SUBCOMMAND_ALIASES[sub] ?? sub;
+}
 
 /** True for a syntactically valid pane id. Fail-closed: anything else is refused. */
 export function isPaneId(value: unknown): value is string {
   return typeof value === "string" && PANE_ID.test(value);
+}
+
+/** True for a syntactically valid window id. Same fail-closed rule. */
+export function isWindowId(value: unknown): value is string {
+  return typeof value === "string" && WINDOW_ID.test(value);
+}
+
+/** True for a session name the gate could have derived for itself. */
+export function isOwnSessionName(value: unknown): value is string {
+  return typeof value === "string" && OWN_SESSION_NAME.test(value);
 }
 
 function requirePane(value: string, what: string): string {
@@ -83,80 +130,467 @@ function requirePane(value: string, what: string): string {
   return value;
 }
 
-/**
- * Last line of defense before the gate spawns tmux: the argv must not name a
- * destructive subcommand. Called by every builder AND by the executor, so a
- * future builder cannot quietly bypass it.
- */
-export function assertSafeTmuxArgv(argv: readonly string[]): readonly string[] {
-  const sub = argv[0];
-  if (typeof sub !== "string" || sub.length === 0) {
-    throw new UnsafeTmuxCommand("tmux 命令缺少子命令");
-  }
-  if (FORBIDDEN_TMUX_SUBCOMMANDS.includes(sub)) {
+function requireOwnSession(value: string, what: string): string {
+  if (!isOwnSessionName(value)) {
     throw new UnsafeTmuxCommand(
-      `tmux ${sub} 属于禁止清单（会影响用户的 session/window），门禁自己也不执行`,
+      `${what} 不是门禁自己派生的 session 名（形如 rg-<repo>-<id 尾>）：${JSON.stringify(value)}`,
     );
   }
+  return value;
+}
+
+/** The value of `-t` / `-s` in an argv, or undefined when the flag is absent. */
+function flagValue(argv: readonly string[], flag: string): string | undefined {
+  const at = argv.indexOf(flag);
+  return at < 0 || at + 1 >= argv.length ? undefined : argv[at + 1];
+}
+
+export interface SafeTmuxOptions {
+  /**
+   * The tmux sessions this caller MAY ADDRESS — its own, plus any it holds
+   * coordinates for.
+   *
+   * A list rather than one name because "mine" is not one thing (2026-09-25,
+   * quality round P1): a RELAY SUCCESSOR keeps the previous seat's windows in
+   * its registries (`callerIdentities()` counts the predecessor's judges as its
+   * own), and those windows live in the PREDECESSOR'S session — a successor
+   * that could only declare its own name could never close them. A builder
+   * always passes exactly ONE name; the runner passes
+   * `lib/session-tmux-scope.ts addressableSessions(...)`.
+   */
+  ownSessions?: readonly string[];
+}
+
+/**
+ * Last line of defense before the gate spawns tmux: the argv must not name a
+ * destructive subcommand, must not write a global option, and — for the four
+ * session-scoped ones — may only address a session the caller declares.
+ *
+ * EVERY CALLER DECLARES, including the executor (2026-09-25).
+ * {@link SafeTmuxOptions.ownSessions} is not optional in practice: a BUILDER
+ * passes the single name it was given, and the runner that spawns tmux passes
+ * every session it holds coordinates for
+ * (`lib/session-tmux-scope.ts` `addressableSessions`), so "only sessions of
+ * mine" holds on both sides of the seam. An argv naming one of the four WITHOUT
+ * a declaration is refused even when its target looks like a gate session —
+ * looking like ours is not being ours, and a refusal here costs one clear
+ * message while accepting it costs somebody else's screen.
+ *
+ * `kill-server` is refused unconditionally: no declaration makes it safe.
+ */
+export function assertSafeTmuxArgv(
+  argv: readonly string[],
+  opts: SafeTmuxOptions = {},
+): readonly string[] {
+  const sub = String(argv[0] ?? "");
+  if (!sub || sub.startsWith("-")) {
+    // A LEADING GLOBAL FLAG is not the gate's business (2026-09-25): `-L sock
+    // kill-session …` would otherwise put `-L` where the subcommand belongs and
+    // slip the whole check — including `kill-server`. The gate never passes one
+    // (its socket comes from the environment), so refusing is free.
+    throw new UnsafeTmuxCommand(`tmux 命令必须以子命令开头，不接受全局 flag（实际：${JSON.stringify(sub)}）`);
+  }
+  const canonical = canonicalSubcommand(sub);
+  if (NEVER_ALLOWED_TMUX_SUBCOMMANDS.includes(canonical)) {
+    throw new UnsafeTmuxCommand(`tmux ${canonical} 会带走用户的整个 tmux server，任何情况都禁止`);
+  }
+  if (OWN_SESSION_TMUX_SUBCOMMANDS.includes(canonical)) {
+    const allowed = (opts.ownSessions ?? []).filter((name) => isOwnSessionName(name));
+    if (allowed.length === 0) {
+      throw new UnsafeTmuxCommand(
+        `tmux ${canonical} 只允许作用于本会话自己的专属 session（缺少或非法的 ownSessions 声明）：${JSON.stringify(argv)}`,
+      );
+    }
+    // `new-session` NAMES its session with `-s`; everything else ADDRESSES one
+    // with `-t`. `-t` on new-session means "group with", which is a different
+    // session's business — refuse it rather than interpret it.
+    const target = canonical === "new-session" ? flagValue(argv, "-s") : flagValue(argv, "-t");
+    // THE TARGET MUST NAME ONE OF THE DECLARED SESSIONS — `<name>` or
+    // `<name>:@window`, compared on the session half. A bare `@12` / `%3` never
+    // matches (tmux would resolve it against whatever now holds that id), and
+    // neither does another gate session's name.
+    if (target === undefined || !allowed.includes(sessionPartOf(target))) {
+      throw new UnsafeTmuxCommand(
+        `tmux ${canonical} 的目标必须是本会话自己的 session 之一（${allowed.join("、")}）：${JSON.stringify(target)}`,
+      );
+    }
+    if (canonical === "new-session" && argv.includes("-t")) {
+      throw new UnsafeTmuxCommand("tmux new-session -t 是「加入别的 session 组」，门禁不做");
+    }
+  }
   // A global option write would change the user's own configuration.
-  if ((sub === "set" || sub === "set-option" || sub === "setw" || sub === "set-window-option") && argv.includes("-g")) {
-    throw new UnsafeTmuxCommand(`tmux ${sub} -g 会改用户全局配置，禁止`);
+  //
+  // `set-environment -g` BELONGS HERE (quality round P1, 2026-09-25): tmux
+  // IGNORES `-t` when `-g` is given, so that one argv writes the SERVER's
+  // environment — every session the user has — which is a wider blast radius
+  // than the `set -g` this list already refuses. The gate's own builder never
+  // passes `-g`; the point of the check is the builder somebody adds later.
+  //
+  // `show-environment -g` (and `show-options -g`) are READS and stay allowed,
+  // which is the rule this list already had: `show-options -g` is not in it
+  // either.
+  if (
+    (canonical === "set" || canonical === "set-option" || canonical === "setw" ||
+      canonical === "set-window-option" || canonical === "set-environment") &&
+    argv.includes("-g")
+  ) {
+    throw new UnsafeTmuxCommand(`tmux ${canonical} -g 会改用户全局配置（或全局环境），禁止`);
   }
   return argv;
 }
 
-export interface SpawnPaneOptions {
-  /** Where the new pane goes — the answer {@link planPanePlacement} gives. */
-  placement: PanePlacement;
-  /** Working directory for the new pane (a repo root or a worktree). */
-  cwd: string;
-  /** Environment injected into the pane (orchestration id, gate mode…). */
-  env?: Readonly<Record<string, string>>;
-  /** The command the pane runs. Defaults to an interactive `pi`. */
-  command?: readonly string[];
-}
-
-/** `-e K=V` pairs, in a stable order so the argv is testable. */
-function envArgs(env: Readonly<Record<string, string>> | undefined): string[] {
-  if (!env) return [];
-  return Object.keys(env)
-    .sort()
-    .flatMap((key) => ["-e", `${key}=${env[key]}`]);
+/**
+ * The session a tmux target names: `<name>`, `<name>:@id` and `<name>:%id` all
+ * name the same session, and that is the field the scope check compares.
+ */
+function sessionPartOf(target: string): string {
+  const at = target.indexOf(":");
+  return at < 0 ? target : target.slice(0, at);
 }
 
 /**
- * Open a child session pane, following the layout rules in the header.
+ * The child's environment, carried BY ITS OWN COMMAND instead of by tmux.
  *
- * `-P -F '#{pane_id}'` makes tmux PRINT the new pane id, which is how the
- * registry learns what it just created — guessing it (or listing panes and
+ * WHY NOT `-e` (2026-09-25, measured in the t5 acceptance round):
+ * `new-session -e K=V` writes K=V into the tmux SESSION's environment, and
+ * every window opened in that session afterwards inherits it. The FIRST
+ * child's identity — a worker's `RG_WORKER_ID`, its `RG_GATE_MODE=explore` —
+ * was therefore stamped onto the whole session, and a judge opened later came
+ * up carrying BOTH identities: it reported its state into the WORKER's channel
+ * file, its own channel stayed empty, and the opener's boot verification timed
+ * out — the round could never complete. (`new-window -e` does not write the
+ * session environment, but it INHERITS whatever is already in it, so one leak
+ * is forever.) The user's own window was never affected: a relay successor is
+ * `split-window`, whose `-e` stays on the pane.
+ *
+ * `env K=V … <command>` puts the variables in the one place they belong — the
+ * process of THIS window — and leaves tmux's own environment untouched.
+ * `env(1)` execs the command, so the pane still runs the child itself.
+ */
+function envCommand(
+  env: Readonly<Record<string, string>> | undefined,
+  command: readonly string[] | undefined,
+): string[] {
+  const cmd = [...(command ?? ["pi"])];
+  const pairs = env === undefined
+    ? []
+    : Object.keys(env).sort().map((key) => `${key}=${env[key]}`);
+  // Sorted, so the argv stays testable.
+  return pairs.length === 0 ? cmd : ["env", ...pairs, ...cmd];
+}
+
+/**
+ * The session-level user option that says WHO created a session.
+ *
+ * It is the difference between "this name is mine because it looks like mine"
+ * and "this name is mine because I wrote my id into it": before reusing or
+ * killing a session, {@link buildReadSessionOwnerArgv} reads this and the
+ * caller compares it with its own session id. A name collision (two sessions
+ * whose ids share their first eight characters) or a leftover from a run that
+ * crashed between `new-session` and the marker therefore cannot be mistaken
+ * for our own.
+ */
+export const SESSION_OWNER_OPTION = "@rg_scope_owner";
+
+/**
+ * A WINDOW COORDINATE read back from disk — both halves or nothing.
+ *
+ * The pair (which window, in which session) is what a close is addressed by, and
+ * the halves are meaningless apart: a window id without its session cannot be
+ * scoped (`windowClosable` refuses it), and a session name without a window
+ * names nothing to close. So a record where either half is missing or malformed
+ * yields `undefined` — the registries then leave BOTH off, and the entry reads
+ * as "this child predates the window topology" instead of half-recorded.
+ *
+ * It lives here because the SHAPES live here, and because two disk boundaries
+ * (the orchestration sidecar and the worker registry) ask the same question:
+ * one implementation, so their answers cannot drift apart (2026-09-25, quality
+ * round P2 — the same fields had been shape-checked on one side only).
+ */
+export function parseWindowCoords(
+  raw: { windowId?: unknown; tmuxSession?: unknown },
+): { windowId: string; tmuxSession: string } | undefined {
+  const windowId = isWindowId(raw?.windowId) ? raw.windowId : undefined;
+  const tmuxSession = isOwnSessionName(raw?.tmuxSession) ? raw.tmuxSession : undefined;
+  return windowId === undefined || tmuxSession === undefined ? undefined : { windowId, tmuxSession };
+}
+
+/** How many ids or windows tmux prints for one creation. */
+export interface SessionWindowCoords {
+  windowId: string;
+  paneId: string;
+}
+
+export interface ScopeWindowOptions {
+  /** The session this window belongs to — always the caller's OWN (see the header). */
+  ownSession: string;
+  /** Working directory for the new window (a repo root or a worktree). */
+  cwd: string;
+  /**
+   * Environment injected into the window (orchestration id, gate mode…),
+   * injected through the child's OWN command (`envCommand`) — never through
+   * tmux, which would keep it for the whole session.
+   */
+  env?: Readonly<Record<string, string>>;
+  /** The command the window runs. Defaults to an interactive `pi`. */
+  command?: readonly string[];
+  /**
+   * The window's NAME, which is what `tmux ls` / `prefix w` shows. The gate
+   * passes its own label (`reviewer@self`, `t1@pm`) so a human can tell the
+   * windows apart without attaching to any of them (user decision, 2026-09-25).
+   */
+  windowName?: string;
+}
+
+/**
+ * Open the FIRST window of the session — and the session with it.
+ *
+ * That is what makes the session LAZY: nothing is created until a child is
+ * actually needed, and the child's own command is the session's first window,
+ * so there is never a stray shell window to clean up afterwards.
+ *
+ * `-P -F '#{window_id} #{pane_id}'` makes tmux PRINT what it created, which is
+ * how the registry learns its coordinates — guessing them (or listing and
  * diffing) is exactly the improvisation this module removes.
  */
-export function buildSpawnPaneArgv(opts: SpawnPaneOptions): readonly string[] {
-  const command = opts.command ?? ["pi"];
+export function buildNewSessionArgv(opts: ScopeWindowOptions): readonly string[] {
+  const session = requireOwnSession(opts.ownSession, "ownSession");
   return assertSafeTmuxArgv([
-    "split-window",
-    opts.placement.direction,
-    // `-f` spans the whole window's other axis instead of splitting the
-    // target — the one flag that turns a split into a NEW COLUMN wherever the
-    // target happens to sit (see the header).
-    ...(opts.placement.full ? ["-f"] : []),
-    "-t",
-    requirePane(opts.placement.target, "placement.target"),
+    "new-session",
+    "-d",
+    "-s",
+    session,
     "-c",
     opts.cwd,
-    ...envArgs(opts.env),
+    ...(opts.windowName === undefined ? [] : ["-n", opts.windowName]),
     "-P",
     "-F",
-    "#{pane_id}",
-    ...command,
+    "#{window_id} #{pane_id}",
+    ...envCommand(opts.env, opts.command),
+  ], { ownSessions: [session] });
+}
+
+/** Open ONE MORE window (`@id`) in the session the caller owns. */
+export function buildNewWindowArgv(opts: ScopeWindowOptions): readonly string[] {
+  const session = requireOwnSession(opts.ownSession, "ownSession");
+  return assertSafeTmuxArgv([
+    "new-window",
+    "-t",
+    session,
+    "-c",
+    opts.cwd,
+    ...(opts.windowName === undefined ? [] : ["-n", opts.windowName]),
+    "-P",
+    "-F",
+    "#{window_id} #{pane_id}",
+    ...envCommand(opts.env, opts.command),
+  ], { ownSessions: [session] });
+}
+
+/**
+ * Every session on the server, by name — "who is there", read-only.
+ *
+ * IT IS ONE CALL ON PURPOSE. `has-session` answers "does MINE exist" and fails
+ * identically for "no" and for "tmux is unreachable"; telling those apart would
+ * mean parsing tmux's stderr. A server-wide list cannot fail for the boring
+ * reason, so a failure is genuinely "I cannot see tmux" — and a caller that
+ * cannot see tmux must not start creating sessions in what may be a new server.
+ */
+export function buildListSessionsArgv(): readonly string[] {
+  return assertSafeTmuxArgv(["list-sessions", "-F", "#{session_name}"]);
+}
+
+/**
+ * Read a SESSION's own environment — one `KEY=VALUE` per line.
+ *
+ * The reading exists for one job: finding the gate's own variables that an
+ * earlier build left in a session's environment, so they can be removed before
+ * they are inherited by a child of another kind (`healSessionEnv`,
+ * lib/session-tmux-scope.ts).
+ */
+export function buildListSessionEnvArgv(ownSession: string): readonly string[] {
+  const session = requireOwnSession(ownSession, "ownSession");
+  return assertSafeTmuxArgv(["show-environment", "-t", session], { ownSessions: [session] });
+}
+
+/**
+ * Remove ONE variable from a session's environment.
+ *
+ * The name is checked for the two things an ARGV cannot survive, not for
+ * looking like an identifier (quality round P2, then acceptance round P2,
+ * 2026-09-25): there is no shell here, so an odd-but-real name is perfectly
+ * removable — including one with a SPACE in it, which tmux accepts and an argv
+ * element carries verbatim. Refusing such a name would BRICK the session:
+ * `healSessionEnv` selects by the `RG_` prefix, so a key it cannot remove is a
+ * key that stays inherited, and (because the heal fails closed) every later
+ * spawn of that session would be refused with no way out. What is still refused
+ * is what would change the meaning of the argv: a leading `-` (tmux would read
+ * it as a flag) and a name carrying `=` (which is really two arguments).
+ */
+export function buildUnsetSessionEnvArgv(ownSession: string, key: string): readonly string[] {
+  const session = requireOwnSession(ownSession, "ownSession");
+  const name = String(key ?? "");
+  if (name.length === 0 || name.startsWith("-") || name.includes("=")) {
+    throw new UnsafeTmuxCommand(`环境变量名不能作为 argv 传递：${JSON.stringify(key)}`);
+  }
+  return assertSafeTmuxArgv(["set-environment", "-t", session, "-u", name], { ownSessions: [session] });
+}
+
+/**
+ * Write the ownership marker into a session the gate just created.
+ *
+ * Cosmetic-looking, load-bearing in fact: it is what makes "is this session
+ * mine?" a READ rather than a guess, both when the session is reused
+ * (`rg-<repo>-<id 尾>` colliding across two processes) and before the one
+ * destructive act the gate performs on it.
+ */
+export function buildSetSessionOwnerArgv(ownSession: string, owner: string): readonly string[] {
+  const session = requireOwnSession(ownSession, "ownSession");
+  return assertSafeTmuxArgv(
+    ["set", "-t", session, SESSION_OWNER_OPTION, owner],
+    { ownSessions: [session] },
+  );
+}
+
+/**
+ * Read the marker back. An unset option prints NOTHING and exits 0 (measured:
+ * tmux 3.7c), so an empty reading is "no owner recorded", never a failed call.
+ */
+export function buildReadSessionOwnerArgv(ownSession: string): readonly string[] {
+  const session = requireOwnSession(ownSession, "ownSession");
+  return assertSafeTmuxArgv(["show-options", "-t", session, "-qv", SESSION_OWNER_OPTION], { ownSessions: [session] });
+}
+
+/**
+ * ── THE SESSION'S OWN NAME ON SCREEN (2026-09-25, t2) ──
+ *
+ * Three builders, and they are the only writes the gate makes to the surface
+ * the HUMAN looks at rather than the gate's own: the window TITLE (what
+ * `prefix w` and `tmux ls` show) and a window-level user option the status bar
+ * renders. Both are written when a session names itself
+ * (lib/session-name-tools.ts) and taken back when it releases the name.
+ *
+ * THE OPTION IS NOT COSMETIC AND NOT A TITLE. `pane_title`/`window_name` are
+ * namespaces other programs write (pi overwrites the pane title at boot, which
+ * is why the gate's labels moved to `@rg_label`); a tmux USER OPTION is a
+ * namespace nothing else touches, so `#{@rg_session_name}` in the user's status
+ * line renders the name the session chose, minutes after it chose it.
+ * `-g` never appears: the user's own configuration is theirs, and the option
+ * lives on ONE window.
+ */
+export const SESSION_NAME_OPTION = "@rg_session_name";
+
+/**
+ * A name that is safe to put into a tmux format and into an argv:
+ * printable, no control characters, no `#{` (which tmux would EXPAND when the
+ * option is rendered), and short. The product rules (kebab-case, 2–32 chars)
+ * live in lib/session-registry.ts — this is only the transport floor.
+ */
+function requireDisplayName(value: string, what: string): string {
+  const raw = String(value ?? "");
+  if (raw.length === 0 || raw.length > 64 || /[\u0000-\u001f\u007f]/.test(raw) || raw.includes("#{")) {
+    throw new UnsafeTmuxCommand(`${what} 不能作为 tmux 展示名：${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
+
+/** Rename the window a pane lives in — the session's own window. */
+export function buildRenameWindowArgv(target: string, name: string): readonly string[] {
+  return assertSafeTmuxArgv(["rename-window", "-t", requirePane(target, "target"), requireDisplayName(name, "window name")]);
+}
+
+/** Write the window-level option the status bar reads (`set -w`, never `-g`). */
+export function buildSetSessionNameOptionArgv(target: string, name: string): readonly string[] {
+  return assertSafeTmuxArgv([
+    "set", "-w", "-t", requirePane(target, "target"), SESSION_NAME_OPTION, requireDisplayName(name, "option value"),
   ]);
 }
 
 /**
- * Open the SUCCESSOR orchestrator beside the current one (handoff).
- * Always horizontal off the orchestrator's own pane: when the old pane is
- * closed afterwards, tmux expands the successor into the left column, which
- * is what makes the handover invisible in the user's layout.
+ * Take it back: `-u` removes the window-level setting, so the status line falls
+ * through to whatever the user configured for an unnamed window.
+ */
+export function buildUnsetSessionNameOptionArgv(target: string): readonly string[] {
+  return assertSafeTmuxArgv(["set", "-wu", "-t", requirePane(target, "target"), SESSION_NAME_OPTION]);
+}
+
+/**
+ * Read MY OWN coordinates: which tmux session, which window, and what that
+ * window is currently CALLED (the last one so a release can put the title
+ * back).
+ *
+ * Read, never derived: the pane id is tmux's own (`$TMUX_PANE`), and the
+ * session/window it sits in are what tmux says right now — the opener's
+ * dedicated session for a child, the user's own window for a loop session, a
+ * relay successor's split. Nothing here guesses the topology.
+ */
+export function buildReadOwnCoordsArgv(pane: string): readonly string[] {
+  return assertSafeTmuxArgv([
+    "display-message", "-p", "-t", requirePane(pane, "pane"),
+    `#{session_name}|#{window_id}|#{${SESSION_NAME_OPTION}}|#{window_name}`,
+  ]);
+}
+
+/**
+ * Parse what {@link buildReadOwnCoordsArgv} printed.
+ *
+ * The separator is `|` and the window NAME (the only free-form field, and the
+ * only one that could contain it) is taken as the REST of the line, so a window
+ * whose name carries a `|` still parses.
+ */
+export function parseOwnCoords(stdout: string):
+  | { session: string; window: string; windowName: string; option: string }
+  | undefined {
+  const line = String(stdout ?? "").split(/\r?\n/)[0] ?? "";
+  const parts = line.split("|");
+  if (parts.length < 4) return undefined;
+  const session = parts[0].trim();
+  const window = parts[1].trim();
+  const option = parts[2].trim();
+  // The window NAME is the rest of the line: it is the only free-form field and
+  // the only one that could itself contain the separator.
+  const windowName = parts.slice(3).join("|").trim();
+  if (session.length === 0 || !isWindowId(window)) return undefined;
+  return { session, window, windowName, option };
+}
+
+/**
+ * Close ONE window — the object a child session is, after 2026-09-25.
+ *
+ * The target is written `<session>:<@id>` rather than a bare `@id`, and that is
+ * the point: a stale or wrong window id can then only ever reach a window of
+ * the gate's OWN session, never one of the user's
+ * ({@link assertSafeTmuxArgv} refuses the bare form).
+ */
+export function buildKillWindowArgv(ownSession: string, windowId: string): readonly string[] {
+  const session = requireOwnSession(ownSession, "ownSession");
+  if (!isWindowId(windowId)) {
+    throw new UnsafeTmuxCommand(`不是合法的 tmux window id（形如 @12）：${JSON.stringify(windowId)}`);
+  }
+  return assertSafeTmuxArgv(["kill-window", "-t", `${session}:${windowId}`], { ownSessions: [session] });
+}
+
+/**
+ * Close the session itself, with every window still in it — what `declare_done`
+ * does to the one session this process created.
+ *
+ * There is no "close a session by id": tmux sessions are named, and the name is
+ * derived from THIS session's own identity (lib/session-tmux-scope.ts), read
+ * back from its sidecar. A caller cannot pass one in, which is what keeps this
+ * from becoming "kill whatever session you are told about".
+ */
+export function buildKillSessionArgv(ownSession: string): readonly string[] {
+  const session = requireOwnSession(ownSession, "ownSession");
+  return assertSafeTmuxArgv(["kill-session", "-t", session], { ownSessions: [session] });
+}
+
+/**
+ * Open the SUCCESSOR orchestrator beside the current one.
+ *
+ * THE ONE PLACE THE GATE SPLITS THE USER'S WINDOW (user decision, 2026-09-25).
+ * A relay is the human's own seat changing hands, not another child session:
+ * the successor lands where they are already looking, and when the predecessor
+ * pane closes tmux expands the successor into its place.
  */
 export function buildHandoffPaneArgv(opts: {
   orchestratorPane: string;
@@ -172,11 +606,10 @@ export function buildHandoffPaneArgv(opts: {
     self,
     "-c",
     opts.cwd,
-    ...envArgs(opts.env),
     "-P",
     "-F",
     "#{pane_id}",
-    ...(opts.command ?? ["pi"]),
+    ...envCommand(opts.env, opts.command),
   ]);
 }
 
@@ -197,38 +630,51 @@ export function buildHandoffPaneArgv(opts: {
  *  - an ANSWER to a dialog is written to the same channel and resolves the
  *    `ui.select` the child's gate is already awaiting — no keystroke exists
  *    anywhere in that path.
- *
- * What is left in this module is what tmux is genuinely for: creating a pane,
- * closing a pane, and enumerating which panes exist.
  */
 
-
-/** Close ONE pane. Panes only — never a window, never a session. */
+/** Close ONE pane — the relay path only, where the pane IS the user's own spot. */
 export function buildKillPaneArgv(pane: string): readonly string[] {
   return assertSafeTmuxArgv(["kill-pane", "-t", requirePane(pane, "pane")]);
+}
+
+/**
+ * List every pane on the tmux SERVER, which is the new liveness question.
+ *
+ * IT USED TO BE "the panes of the opener's window" (`list-panes -t %<own>`), and
+ * that reading silently became a lie the moment children moved into their own
+ * windows: a live child is not in the opener's window any more, so every one of
+ * them would have been reported DEAD — the failure direction that sends an
+ * opener off to re-do work that is running.
+ *
+ * `-a` cannot fail for the boring reason either. Asking about one window or
+ * session fails (`can't find window`) both when that window is GONE — the
+ * ordinary "it finished" — and when tmux cannot be read; distinguishing the two
+ * would mean parsing tmux's stderr. A server-wide list fails only when the
+ * server itself is unreachable, which is genuinely "unknown".
+ */
+export function buildListServerPanesArgv(): readonly string[] {
+  return assertSafeTmuxArgv(["list-panes", "-a", "-F", "#{pane_id}"]);
 }
 
 /**
  * ── PANE DECORATION (2026-08-30) ──
  *
  * Four builders, all cosmetic, and they are the ONLY writes this module makes
- * that are not about creating, closing or listing a pane. They exist because
- * the user asked for children to be tellable apart on screen, and because the
- * gate — not the orchestrator — has to be the one that runs them (philosophy
- * one: the project manager never assembles a tmux command).
+ * that are not about creating, closing or listing a session's surface. They
+ * exist because the user asked for children to be tellable apart on screen, and
+ * because the gate — not the orchestrator — has to be the one that runs them
+ * (philosophy one: the project manager never assembles a tmux command).
+ *
+ * In the window topology each of these targets the CHILD'S OWN window, so the
+ * label bar a child turns on is the child's own — it used to be a window option
+ * shared with the user's editor and shells.
  *
  * WHY THIS IS NOT THE FORBIDDEN KIND OF CONFIG WRITE. `assertSafeTmuxArgv`
  * refuses any option write carrying `-g`, because that is the user's GLOBAL
  * configuration and no gate has business touching it. These are window- and
- * pane-scoped: `select-pane -P` affects exactly one pane the registry
- * created, `set -p -t <pane> @rg_label` writes a USER OPTION on that same
- * pane, and `setw -t <pane>` affects the window that pane lives in — the one
- * the orchestration was invited into.
- *
- * The colour and title STRINGS are decided in lib/orchestrator-pane-decor.ts;
- * everything here does is put them in an argv array where no shell can see
- * them. A title is arbitrary text (a task title), so it travels as its own
- * argv element and is never concatenated into a command line.
+ * pane-scoped: `select-pane -P` affects exactly one pane the registry created,
+ * `set -p -t <pane> @rg_label` writes a USER OPTION on that same pane, and
+ * `setw -t <pane>` affects the window that pane lives in.
  */
 
 /**
@@ -276,8 +722,9 @@ export function buildPaneLabelArgv(pane: string, label: string): readonly string
  * directions; re-setting the same value triggers nothing), so releasing the
  * bar re-laid out every application in the user's window — their editor,
  * their shells, a manager's pi — once per orchestration cycle, and the next
- * spawn put it straight back. The bar stays on for the window's lifetime
- * instead; see `closeSessionPane` in lib/session-factory.ts.
+ * spawn put it straight back. Under the window topology that whole trade is
+ * moot for the user's window: a child's bar is turned on in the CHILD'S window,
+ * which exists for as long as the child does.
  */
 export function buildShowPaneLabelsArgv(
   pane: string,
@@ -292,19 +739,12 @@ export function buildShowPaneLabelsArgv(
   ];
 }
 
-/**
- * List the pane IDS of the window a pane belongs to — "who is there", for
- * liveness probing. {@link buildWindowLayoutArgv} asks the other question
- * ("who is WHERE"), which is what the three-column rule reads.
- */
-export function buildListPanesArgv(pane: string): readonly string[] {
-  return assertSafeTmuxArgv([
-    "list-panes",
-    "-t",
-    requirePane(pane, "pane"),
-    "-F",
-    "#{pane_id}",
-  ]);
+/** Session names, one per line, trimmed. Blank lines are not names. */
+export function parseSessionNames(stdout: string): string[] {
+  return String(stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 }
 
 /** Read back what tmux printed for `-P -F '#{pane_id}'` (or list-panes). */
@@ -320,129 +760,18 @@ export function parseSpawnedPaneId(stdout: string): string | undefined {
   return parsePaneIds(stdout)[0];
 }
 
-// ---------------------------------------------------------------------------
-// The window's own geometry (three-column rule, 2026-09-08)
-// ---------------------------------------------------------------------------
-
-/** One pane as tmux reports its place in the window. */
-export interface WindowPane {
-  id: string;
-  /** Column membership: panes sharing `left` are in the same column. */
-  left: number;
-  /** Order within the column. */
-  top: number;
-}
-
-/** The window as it actually looks right now. */
-export interface WindowLayout {
-  /** Left→right; panes within a column top→bottom. Never empty once parsed. */
-  columns: WindowPane[][];
-  /** One pane is zoomed — equalising would fight what the user is reading. */
-  zoomed: boolean;
-}
-
-/** Probe the geometry of the window a pane lives in. */
-export function buildWindowLayoutArgv(pane: string): readonly string[] {
-  return assertSafeTmuxArgv([
-    "list-panes",
-    "-t",
-    requirePane(pane, "pane"),
-    "-F",
-    "#{pane_id} #{pane_left} #{pane_top} #{window_zoomed_flag}",
-  ]);
-}
-
 /**
- * Group what tmux printed into columns.
+ * The window AND pane a creation printed (`-P -F '#{window_id} #{pane_id}'`).
  *
- * PANES SHARING A `left` ARE ONE COLUMN — that is the whole grouping rule, and
- * it is measured rather than inferred from split history: after three
- * horizontal splits and two vertical ones the window reports
- * `{p1, p2, p3[child, child, child]}`, and only `left` tells the two levels
- * apart. A line that does not parse is skipped — a format this build does not
- * understand must not invent a layout.
+ * Both are needed and neither is guessed: the window id is what closes the
+ * child later, the pane id is what the liveness probe and the border target.
+ * A line that does not carry both is not a coordinate — the caller rolls back
+ * instead of addressing something it did not measure.
  */
-export function parseWindowLayout(stdout: string): WindowLayout {
-  const panes: WindowPane[] = [];
-  let zoomed = false;
+export function parseSpawnedWindow(stdout: string): SessionWindowCoords | undefined {
   for (const raw of String(stdout ?? "").split(/\r?\n/)) {
-    const [id, rawLeft, rawTop, flag] = raw.trim().split(/\s+/);
-    const left = Number(rawLeft);
-    const top = Number(rawTop);
-    if (!isPaneId(id) || !Number.isInteger(left) || !Number.isInteger(top)) continue;
-    panes.push({ id, left, top });
-    if (flag === "1") zoomed = true;
+    const [windowId, paneId] = raw.trim().split(/\s+/);
+    if (isWindowId(windowId) && isPaneId(paneId)) return { windowId, paneId };
   }
-  panes.sort((a, b) => a.left - b.left || a.top - b.top);
-  const columns: WindowPane[][] = [];
-  let currentLeft: number | undefined;
-  for (const pane of panes) {
-    if (currentLeft === undefined || pane.left !== currentLeft) {
-      columns.push([]);
-      currentLeft = pane.left;
-    }
-    columns[columns.length - 1]!.push(pane);
-  }
-  return { columns, zoomed };
-}
-
-/** Where a new pane goes, in tmux's own vocabulary. */
-export interface PanePlacement {
-  /** `-h` opens a column, `-v` stacks inside one. */
-  direction: "-h" | "-v";
-  /** The pane tmux splits — or, with `full`, the pane the new column lands beside. */
-  target: string;
-  /**
-   * Pass `-f`: the new pane spans the whole window's other axis instead of
-   * splitting the target. Only meaningful with `-h`, where it is what makes
-   * the split a real column.
-   */
-  full?: boolean;
-}
-
-/**
- * THE RULE, in one function: fewer than three columns ⇒ open a new one;
- * otherwise ⇒ stack under the third column's last pane.
- *
- * Requires a non-empty layout — the caller probed a live pane, so the window
- * holds at least that pane.
- */
-export function planPanePlacement(columns: readonly (readonly WindowPane[])[]): PanePlacement {
-  if (columns.length === 0) {
-    throw new Error("planPanePlacement 需要一个非空的窗口布局");
-  }
-  if (columns.length >= 3) {
-    const third = columns[2]!;
-    return { direction: "-v", target: third[third.length - 1]!.id };
-  }
-  // OPENING A NEW COLUMN, and the lone pane is what decides where it goes.
-  //
-  // A plain `-h` split is FLATTENED into the target's parent container when
-  // the direction matches, and NESTS a half-width pane inside it when it does
-  // not — measured: splitting the last pane of a two-column window whose right
-  // column held three panes produced `{c1, c2[…{half, half}]}` and the
-  // three-column rule became a lie. A lone pane's parent IS the window root,
-  // so splitting beside it lands exactly where the third column belongs, with
-  // the shared column staying rightmost.
-  const alone = [...columns].reverse().find((column) => column.length === 1);
-  if (alone) return { direction: "-h", target: alone[0]!.id };
-  // No column sits alone — a shape the gate never builds. A plain split would
-  // nest, so `-f` is the only way to get a real column here; it lands at the
-  // right edge (measured: `-f` ignores the target's position entirely), which
-  // is where the shared column ends up anyway.
-  const rightmost = columns[columns.length - 1]!;
-  return { direction: "-h", target: rightmost[rightmost.length - 1]!.id, full: true };
-}
-
-/**
- * Equalise the space a pane shares with its SIBLINGS (`select-layout -E`).
- *
- * tmux spreads the target pane's PARENT container evenly, so the target picks
- * the axis: a third-column pane equalises that column's heights, a
- * first-column pane equalises the columns' widths. Both were measured on a
- * scratch tmux server (16/16/16 heights, 66/66/66 widths) before this was
- * wired in — the whole rule rests on that behaviour.
- */
-export function buildEvenLayoutArgv(pane: string): readonly string[] {
-  return assertSafeTmuxArgv(["select-layout", "-E", "-t", requirePane(pane, "pane")]);
+  return undefined;
 }

@@ -7,6 +7,12 @@
  * on the two things that are cross-process contracts — the ENV key set and the
  * argv shape — plus the decoration and the delivery check that used to exist on
  * one side only (C1, C2, and the judge-side receipt).
+ *
+ * AND ON WHERE THE CHILD LANDS (2026-09-25, user decision): a child is a WINDOW
+ * of the opener's own tmux session — `new-session` for the first one, `new-window`
+ * for every later one — with the gate's label as the window name. The ONE
+ * exception is the relay, which still splits the opener's own pane because a
+ * handover must not move the user's screen.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -17,9 +23,10 @@ import {
   buildJudgeRecoverCommand,
   buildSessionEnv,
   closeSessionPane,
+  closeSessionWindow,
   decorateSessionPane,
   judgePaneDecor,
-  openSessionPane,
+  openSessionWindow,
   paintPaneTitle,
   paneRecoverability,
   refreshSessionPaneTitle,
@@ -31,45 +38,75 @@ import {
 // pane plumbing that writes what it renders (2026-09-18).
 import { judgePaneLabel, pmPaneLabel } from "../lib/orchestrator-pane-decor.ts";
 import { judgeScratchDir } from "../lib/judge-process.ts";
+import type { TmuxScope, TmuxScopeRecord } from "../lib/session-tmux-scope.ts";
+import { deriveSessionName } from "../lib/session-tmux-scope.ts";
 import * as sessionFactory from "../lib/session-factory.ts";
 
-/** Fake tmux: a split prints %7, everything succeeds. */
-function happyRunner(seen: string[][] = []): PaneRunner {
-  return (argv) => {
-    seen.push([...argv]);
-    if (argv[0] === "split-window") return { ok: true, stdout: "%7\n", stderr: "" };
-    return { ok: true, stdout: "", stderr: "" };
-  };
-}
+const SESSION_ID = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
+// Derived by the production function, never hardcoded: the test asserts the
+// SAME name the gate would build from this session's identity.
+const OWN_SESSION = deriveSessionName("/repo", SESSION_ID)!;
 
 /**
- * Fake tmux whose window CHANGES SHAPE when the split lands: `list-panes`
- * answers `before` until a split has happened, then `after`. The strings are
- * the real `#{pane_id} #{pane_left} #{pane_top} #{window_zoomed_flag}` format,
- * so the geometry the rule reads is the geometry tmux prints.
+ * A fake tmux for the window topology: the first child creates the session and
+ * every later one joins it, and each creation prints `@id %id` the way the real
+ * `-P -F '#{window_id} #{pane_id}'` does.
  */
-function windowRunner(before: string, after: string, seen: string[][] = []): PaneRunner {
-  let split = false;
+function happyRunner(seen: string[][] = []): PaneRunner {
+  let windowSeq = 7;
+  let created = false;
+  let owner = "";
   return (argv) => {
     seen.push([...argv]);
-    if (argv[0] === "list-panes") return { ok: true, stdout: split ? after : before, stderr: "" };
-    if (argv[0] === "split-window") {
-      split = true;
-      return { ok: true, stdout: "%9\n", stderr: "" };
+    const sub = argv[0];
+    if (sub === "list-sessions") return { ok: true, stdout: created ? `${OWN_SESSION}\n` : "", stderr: "" };
+    if (sub === "split-window") return { ok: true, stdout: "%7\n", stderr: "" };
+    if (sub === "show-options") return { ok: true, stdout: owner ? `${owner}\n` : "", stderr: "" };
+    if (sub === "set") {
+      owner = String(argv[argv.length - 1]);
+      return { ok: true, stdout: "", stderr: "" };
+    }
+    if (sub === "new-session" || sub === "new-window") {
+      created = true;
+      return { ok: true, stdout: `@${windowSeq++} %${windowSeq}\n`, stderr: "" };
     }
     return { ok: true, stdout: "", stderr: "" };
   };
 }
 
-/** `-e K=V` pairs back out of a spawn argv, as a map. */
+/**
+ * The child's environment, read back out of its OWN command — the `env K=V …`
+ * prefix `lib/orchestrator-tmux.ts` builds. Never tmux's `-e`: that one writes
+ * the SESSION environment, which every later window of the session inherits
+ * (measured 2026-09-25).
+ */
 function envOf(argv: readonly string[]): Record<string, string> {
   const env: Record<string, string> = {};
-  for (let i = 0; i < argv.length - 1; i++) {
-    if (argv[i] !== "-e") continue;
-    const [key, ...rest] = argv[i + 1]!.split("=");
+  const envAt = argv.indexOf("env");
+  if (envAt < 0) return env;
+  for (const token of argv.slice(envAt + 1)) {
+    if (!token.includes("=")) break;
+    const [key, ...rest] = token.split("=");
     env[key!] = rest.join("=");
   }
   return env;
+}
+
+/** The scope seam, with the sidecar record kept in memory. */
+interface FakeScope extends TmuxScope {
+  record: TmuxScopeRecord | undefined;
+}
+
+function fakeScope(): FakeScope {
+  const scope: FakeScope = {
+    record: undefined,
+    sessionId: () => SESSION_ID,
+    repoRoot: () => "/repo",
+    read: () => scope.record,
+    write: (record) => { scope.record = record; },
+    now: () => "2026-09-25T00:00:00.000Z",
+  };
+  return scope;
 }
 
 const JUDGE_COMMAND = buildJudgePaneCommand({
@@ -87,10 +124,10 @@ const JUDGE_COMMAND = buildJudgePaneCommand({
 test("combination 1 — a judge SPAWN: judge env, own colour, border line, verified boot", async () => {
   const seen: string[][] = [];
   const registered: string[] = [];
-  const outcome = await openSessionPane(happyRunner(seen), {
-    ownPane: "%1",
+  const outcome = await openSessionWindow(happyRunner(seen), {
+    scope: fakeScope(),
     cwd: "/repo",
-    layout: "child-column",
+    layout: "own-session-window",
     role: {
       kind: "judge",
       openerId: "session-child-1",
@@ -101,16 +138,17 @@ test("combination 1 — a judge SPAWN: judge env, own colour, border line, verif
     },
     command: JUDGE_COMMAND,
     decor: judgePaneDecor("rg-reviewer-abc123", "reviewer", "t6"),
-    register: (paneId) => registered.push(paneId),
+    register: (coords) => registered.push(coords.paneId),
     verify: async () => ({ ok: true, detail: "上报了状态" }),
   });
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
-  assert.equal(outcome.paneId, "%7", "the id comes from tmux, never from a guess");
-  assert.deepEqual(registered, ["%7"], "registration happens inside the open");
+  assert.equal(outcome.paneId, "%8", "the id comes from tmux, never from a guess");
+  assert.deepEqual(registered, ["%8"], "registration happens inside the open");
   assert.equal(outcome.deliveryNote, "上报了状态");
 
-  const spawn = seen.find((argv) => argv[0] === "split-window")!;
+  const spawn = seen.find((argv) => argv[0] === "new-session")!;
+  assert.ok(spawn, "the child created the opener's own session");
   assert.deepEqual(envOf(spawn), {
     RG_JUDGE_OPENER: "session-child-1",
     RG_JUDGE_ID: "rg-reviewer-abc123",
@@ -120,29 +158,32 @@ test("combination 1 — a judge SPAWN: judge env, own colour, border line, verif
     // Plus the scratch root the reaper reads back (test/judge-scratch.test.ts).
     TMPDIR: judgeScratchDir("rg-reviewer-abc123"),
   }, "exactly the judge variables — the judge side reads these by name");
+  assert.equal(seen.some((argv) => argv[0] === "split-window"), false,
+    "the user's window is untouched: the child is a window of the opener's own session");
 
   const flat = seen.map((a) => a.join(" "));
   assert.ok(flat.some((s) => s.includes("select-pane") && s.includes("-P")), "a border colour is set");
   assert.ok(flat.some((s) => s.includes("@t6")), "the title names the review kind AND who opened it");
   // C1: the WINDOW option that renders the border line used to be set by the
   // orchestration spawn only, so a judge pane opened without a project manager
-  // in the window had a colour nobody could see.
+  // in the window had a colour nobody could see. In the window topology it is
+  // set on the CHILD's own window, which is even safer.
   assert.ok(flat.some((s) => s.includes("pane-border-status")), "the border LINE is turned on (C1)");
   assert.ok(flat.some((s) => s.includes("pane-border-format")), "and given its format (C1)");
 });
 
 test("combination 2 — a judge RECOVER: same three keys, resume argv, no task file", async () => {
   const seen: string[][] = [];
-  const outcome = await openSessionPane(happyRunner(seen), {
-    ownPane: "%1",
+  const outcome = await openSessionWindow(happyRunner(seen), {
+    scope: fakeScope(),
     cwd: "/repo",
-    layout: "child-column",
+    layout: "own-session-window",
     role: { kind: "judge", openerId: "session-child-1", judgeId: "rg-reviewer-abc123", role: "reviewer" },
     command: buildJudgeRecoverCommand("rg-reviewer-abc123"),
     decor: judgePaneDecor("rg-reviewer-abc123", "reviewer", "pm"),
   });
   assert.equal(outcome.ok, true);
-  const spawn = seen.find((argv) => argv[0] === "split-window")!;
+  const spawn = seen.find((argv) => argv[0] === "new-session")!;
   assert.deepEqual(envOf(spawn), {
     RG_JUDGE_OPENER: "session-child-1",
     RG_JUDGE_ID: "rg-reviewer-abc123",
@@ -153,142 +194,73 @@ test("combination 2 — a judge RECOVER: same three keys, resume argv, no task f
   assert.ok(!spawn.some((a) => a.startsWith("@")), "no argv message: nothing to re-deliver");
 });
 
-test("combination 3 — an orchestration SPAWN: orchestration env, stacked in the third column", async () => {
+test("combination 3 — an orchestration SPAWN: orchestration env, a window WITH the gate's label", async () => {
   const seen: string[][] = [];
-  // Three columns already: the new child belongs under the third one's last
-  // pane, whatever this opener's own child list says.
-  const outcome = await openSessionPane(windowRunner(
-    ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0"].join("\n"),
-    ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0", "%9 200 60 0"].join("\n"),
-    seen,
-  ), {
-    ownPane: "%1",
+  const outcome = await openSessionWindow(happyRunner(seen), {
+    scope: fakeScope(),
     cwd: "/repo",
-    layout: "child-column",
+    layout: "own-session-window",
     role: { kind: "orchestration-child", orchestrationId: "orch-abc-1", stateVariant: "t1-xyz" },
     command: ["pi", "@.pi/tasks/t1.md"],
     decor: { label: "@t1-thing", colorSeed: "t1-xyz", state: "working", stateForSeconds: 0 },
     verify: async () => ({ ok: true, detail: "通道有记录" }),
   });
   assert.equal(outcome.ok, true);
-  const spawn = seen.find((argv) => argv[0] === "split-window")!;
+  const spawn = seen.find((argv) => argv[0] === "new-session")!;
   assert.deepEqual(envOf(spawn), {
     RG_ORCHESTRATION_ID: "orch-abc-1",
     RG_GATE_MODE: "loop",
     RG_STATE_VARIANT: "t1-xyz",
   }, "the child's own sidecar variant is ALSO its exclusivity-guard exemption");
-  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-v", "-t", "%6"],
-    "three columns ⇒ stack under the third column's last pane");
-  assert.deepEqual(seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" ")), [
-    "select-layout -E -t %5",
-    "select-layout -E -t %1",
-  ], "then spread the third column's heights, then the columns' widths");
+  assert.deepEqual(spawn.slice(0, 4), ["new-session", "-d", "-s", OWN_SESSION],
+    "the child creates the opener's own session when it is the first one");
+  assert.deepEqual(spawn.slice(spawn.indexOf("-n"), spawn.indexOf("-n") + 2), ["-n", "@t1-thing"],
+    "and the window carries the gate's label, so `tmux ls` says who is who");
+  assert.equal(seen.some((argv) => argv[0] === "split-window"), false, "no column, no split, no resize");
 });
 
-test("the three-column rule reads the WINDOW, never the opener's own child list", async () => {
-  // The measured defect (2026-09-08): every session keeps its own child list,
-  // so a judge opened by a child — or a second orchestration in the same
-  // window — each saw "no children yet" and opened a NEW column. The user's
-  // window had five. Here the opener has no children at all, and the window
-  // already has two columns: the next pane must open the third one.
+test("a SECOND child joins the session instead of creating it", async () => {
+  const scope = fakeScope();
   const seen: string[][] = [];
-  await openSessionPane(windowRunner(
-    ["%1 0 0 0", "%2 100 0 0"].join("\n"),
-    ["%1 0 0 0", "%2 100 0 0", "%9 200 0 0"].join("\n"),
-    seen,
-  ), {
-    ownPane: "%1",
-    cwd: "/repo",
-    layout: "child-column",
-    role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
-    command: ["pi"],
-  });
-  const spawn = seen.find((argv) => argv[0] === "split-window")!;
-  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%2"],
-    "two columns ⇒ open the third beside the rightmost column's lone pane");
-  assert.deepEqual(seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" ")),
-    ["select-layout -E -t %1"], "the window is three columns wide now ⇒ spread the widths once");
+  const run = happyRunner(seen);
+  for (const judgeId of ["j-1", "j-2"]) {
+    const outcome = await openSessionWindow(run, {
+      scope,
+      cwd: "/repo",
+      layout: "own-session-window",
+      role: { kind: "judge", openerId: "o", judgeId, role: "reviewer" },
+      command: ["pi"],
+    });
+    assert.equal(outcome.ok, true, outcome.ok ? "" : outcome.error);
+  }
+  assert.deepEqual(seen.filter((argv) => argv[0] === "new-session").length, 1, "the session is created ONCE");
+  assert.deepEqual(seen.filter((argv) => argv[0] === "new-window").length, 1, "and the second child joins it");
+  assert.equal(scope.record?.name, OWN_SESSION, "the sidecar records what was created");
+  assert.equal(scope.record?.owner, SESSION_ID, "and who owns it");
 });
 
-test("widths are spread off a pane that sits ALONE, never one inside a shared column", async () => {
-  // A pane inside a multi-pane column spreads THAT COLUMN's heights, not the
-  // window's widths (reviewer P2). The width pass therefore has to pick a lone
-  // pane — and it must not touch a column this round never changed.
+test("combination 4 — an orchestration RECOVER: same env, its own window again", async () => {
   const seen: string[][] = [];
-  await openSessionPane(windowRunner(
-    ["%1 0 0 0", "%2 0 30 0", "%3 100 0 0", "%5 200 0 0"].join("\n"),
-    ["%1 0 0 0", "%2 0 30 0", "%3 100 0 0", "%5 200 0 0", "%9 200 60 0"].join("\n"),
-    seen,
-  ), {
-    ownPane: "%1",
+  await openSessionWindow(happyRunner(seen), {
+    scope: fakeScope(),
     cwd: "/repo",
-    layout: "child-column",
-    role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
-    command: ["pi"],
-  });
-  assert.deepEqual(seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" ")), [
-    "select-layout -E -t %5",
-    "select-layout -E -t %3",
-  ], "the changed column first, then the widths off the lone pane in column 2");
-});
-
-test("an unreadable window falls back to splitting the opener — the pane must open", async () => {
-  const seen: string[][] = [];
-  await openSessionPane(happyRunner(seen), {
-    ownPane: "%1",
-    cwd: "/repo",
-    layout: "child-column",
-    role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
-    command: ["pi"],
-  });
-  const spawn = seen.find((argv) => argv[0] === "split-window")!;
-  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%1"],
-    "no geometry ⇒ split the opener itself; a layout we cannot read is not a reason to fail the spawn");
-  assert.equal(seen.filter((argv) => argv[0] === "select-layout").length, 0, "and nothing is equalised");
-});
-
-test("a zoomed window is left alone — the user is reading it", async () => {
-  // DEFENSIVE BRANCH, and this test pins the BRANCH, not a state a live server
-  // reaches: measured on the lab server, `split-window`, `kill-pane` and
-  // `select-layout -E` each unzoom the window, so the probe feeding this can
-  // only see `zoomed` if tmux changes that behaviour. The user asked for the
-  // guard, so it stays — asserted here so it cannot rot.
-  const seen: string[][] = [];
-  await openSessionPane(windowRunner(
-    ["%1 0 0 1", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0"].join("\n"),
-    ["%1 0 0 1", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0", "%9 200 60 0"].join("\n"),
-    seen,
-  ), {
-    ownPane: "%1",
-    cwd: "/repo",
-    layout: "child-column",
-    role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
-    command: ["pi"],
-  });
-  assert.equal(seen.filter((argv) => argv[0] === "select-layout").length, 0,
-    "equalising a zoomed window would fight what the user is looking at");
-});
-
-test("combination 4 — an orchestration RECOVER: same env, split off the opener when no column exists", async () => {
-  const seen: string[][] = [];
-  await openSessionPane(happyRunner(seen), {
-    ownPane: "%1",
-    cwd: "/repo",
-    layout: "child-column",
+    layout: "own-session-window",
     role: { kind: "orchestration-child", orchestrationId: "orch-abc-1", stateVariant: "t1-xyz" },
     command: ["pi", "--session-id", "rg-child-t1", "@.pi/tasks/note.md"],
     decor: { label: "@t1-thing", colorSeed: "t1-xyz", state: "working", stateForSeconds: 0 },
   });
-  const spawn = seen.find((argv) => argv[0] === "split-window")!;
+  const spawn = seen.find((argv) => argv[0] === "new-session")!;
   assert.equal(envOf(spawn).RG_STATE_VARIANT, "t1-xyz", "a recovered child keeps its exemption");
-  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%1"], "no column yet ⇒ split the opener");
+  assert.deepEqual(spawn.slice(0, 4), ["new-session", "-d", "-s", OWN_SESSION]);
+  assert.equal(seen.some((argv) => argv[0] === "split-window"), false, "the user's window is not touched");
 });
 
-test("combination 5 — a relay SUCCESSOR: beside the opener, its own env, no border", async () => {
+test("combination 5 — a relay SUCCESSOR: beside the opener, its own env, no border, NO session", async () => {
   const seen: string[][] = [];
   // No `register` and no `decor`: a successor is not a child — it takes the
   // orchestration over, so nothing registers it and nothing paints it.
-  const outcome = await openSessionPane(happyRunner(seen), {
+  const outcome = await openSessionWindow(happyRunner(seen), {
+    scope: fakeScope(),
     ownPane: "%1",
     cwd: "/repo",
     layout: "beside-opener",
@@ -305,18 +277,36 @@ test("combination 5 — a relay SUCCESSOR: beside the opener, its own env, no bo
     RG_GATE_MODE: "orchestrator",
     RG_HANDOFF_PATH: "docs/h.md",
   }, "a successor's env is the relay's own, passed through unchanged");
-  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%1"], "beside the opener, so it inherits the left column");
+  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%1"],
+    "THE ONE REMAINING SPLIT: a handover lands where the human is already looking");
+  assert.equal(seen.some((argv) => argv[0].startsWith("new-")), false,
+    "and it creates no tmux session — a successor's own children get their own");
   assert.equal(seen.filter((a) => a[0] === "select-pane").length, 0, "no border: a successor is not a child");
   assert.equal(seen.filter((a) => a[0] === "setw").length, 0, "and no window option either");
+});
+
+test("a relay with no opener pane is refused, not guessed", async () => {
+  const outcome = await openSessionWindow(happyRunner(), {
+    scope: fakeScope(),
+    cwd: "/repo",
+    layout: "beside-opener",
+    role: { kind: "successor", env: {} },
+    command: ["pi"],
+  });
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.match(outcome.error, /ownPane/);
 });
 
 // ---------------------------------------------------------------------------
 // Failure handling
 // ---------------------------------------------------------------------------
 
-test("a failed split is a failed open — never a guessed pane id", async () => {
-  const outcome = await openSessionPane(() => ({ ok: false, stdout: "", stderr: "no server" }), {
-    ownPane: "%1", cwd: "/repo", layout: "child-column",
+test("a failed creation is a failed open — never a guessed id", async () => {
+  const run: PaneRunner = (argv) => argv[0] === "list-sessions"
+    ? { ok: true, stdout: "", stderr: "" }
+    : { ok: false, stdout: "", stderr: "no server" };
+  const outcome = await openSessionWindow(run, {
+    scope: fakeScope(), cwd: "/repo", layout: "own-session-window",
     role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
     command: ["pi"],
   });
@@ -326,9 +316,9 @@ test("a failed split is a failed open — never a guessed pane id", async () => 
   assert.equal(outcome.paneId, undefined, "nothing exists, so nothing is named");
 });
 
-test("an empty spawn print is a failed open", async () => {
-  const outcome = await openSessionPane(() => ({ ok: true, stdout: "\n", stderr: "" }), {
-    ownPane: "%1", cwd: "/repo", layout: "child-column",
+test("an empty creation print is a failed open — a half coordinate is not one", async () => {
+  const outcome = await openSessionWindow(() => ({ ok: true, stdout: "@3\n", stderr: "" }), {
+    scope: fakeScope(), cwd: "/repo", layout: "own-session-window",
     role: { kind: "successor", env: {} },
     command: ["pi"],
   });
@@ -336,8 +326,12 @@ test("an empty spawn print is a failed open", async () => {
 });
 
 test("a thrown tmux call is a failed open, not an exception the caller must catch", async () => {
-  const outcome = await openSessionPane(() => { throw new Error("tmux exploded"); }, {
-    ownPane: "%1", cwd: "/repo", layout: "child-column",
+  const run: PaneRunner = (argv) => {
+    if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
+    throw new Error("tmux exploded");
+  };
+  const outcome = await openSessionWindow(run, {
+    scope: fakeScope(), cwd: "/repo", layout: "own-session-window",
     role: { kind: "successor", env: {} },
     command: ["pi"],
   });
@@ -348,11 +342,18 @@ test("a thrown tmux call is a failed open, not an exception the caller must catc
 
 test("decor failure degrades to a warning, never to a failed open", async () => {
   const run: PaneRunner = (argv) => {
-    if (argv[0] === "split-window") return { ok: true, stdout: "%7\n", stderr: "" };
+    if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
+    if (argv[0] === "new-session" || argv[0] === "new-window") return { ok: true, stdout: "@7 %8\n", stderr: "" };
+    // The OWNERSHIP MARKER is not cosmetic: a tmux that refuses `set -t <session>
+    // @rg_scope_owner` leaves a session nothing can reuse or kill, so
+    // `openScopeWindow` drops the whole session there — asserted in
+    // test/session-tmux-scope.test.ts. Only the DISPLAY writes are refused
+    // here, which is what this test is about.
+    if (argv[0] === "set" && !argv.includes("-p")) return { ok: true, stdout: "", stderr: "" };
     return { ok: false, stdout: "", stderr: "select failed" };
   };
-  const outcome = await openSessionPane(run, {
-    ownPane: "%1", cwd: "/repo", layout: "child-column",
+  const outcome = await openSessionWindow(run, {
+    scope: fakeScope(), cwd: "/repo", layout: "own-session-window",
     role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
     command: ["pi"],
     decor: judgePaneDecor("j", "reviewer", "self"),
@@ -365,20 +366,21 @@ test("decor failure degrades to a warning, never to a failed open", async () => 
   assert.match(outcome.decorWarning ?? "", /select failed/);
 });
 
-test("a failed delivery check KEEPS the pane and its registration", async () => {
+test("a failed delivery check KEEPS the window and its registration", async () => {
   const registered: string[] = [];
-  const outcome = await openSessionPane(happyRunner(), {
-    ownPane: "%1", cwd: "/repo", layout: "child-column",
+  const outcome = await openSessionWindow(happyRunner(), {
+    scope: fakeScope(), cwd: "/repo", layout: "own-session-window",
     role: { kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" },
     command: ["pi"],
-    register: (paneId) => registered.push(paneId),
+    register: (coords) => registered.push(coords.paneId),
     verify: async () => ({ ok: false, detail: "通道里一条记录都没有" }),
   });
   assert.equal(outcome.ok, false);
   if (outcome.ok) return;
   assert.equal(outcome.deliveryFailed, true);
-  assert.equal(outcome.paneId, "%7", "the pane is named so the caller can wait on it");
-  assert.deepEqual(registered, ["%7"], "the registration survives: it may only be slow");
+  assert.equal(outcome.paneId, "%8", "the child is named so the caller can wait on it");
+  assert.equal(outcome.windowId, "@7", "…with its window too, so the caller can close exactly it");
+  assert.deepEqual(registered, ["%8"], "the registration survives: it may only be slow");
   assert.match(outcome.error, /一条记录都没有/);
 });
 
@@ -453,64 +455,35 @@ test("the manager's own border is `pm:<dir>`, and painting it is unconditional",
 // Closing
 // ---------------------------------------------------------------------------
 
-test("close kills exactly one pane, and TOUCHES NO WINDOW OPTION", () => {
+test("a child is closed by WINDOW, addressed through the session that owns it", () => {
   const seen: string[][] = [];
-  assert.equal(closeSessionPane(happyRunner(seen), "%7").ok, true);
-  assert.deepEqual(seen.map((argv) => argv[0]), ["list-panes", "kill-pane"],
-    "the window is probed while the pane still exists, then the pane dies");
-  assert.deepEqual(seen[1], ["kill-pane", "-t", "%7"]);
-
+  assert.equal(closeSessionWindow(happyRunner(seen), { ownSession: OWN_SESSION, windowId: "@7" }).ok, true);
+  assert.deepEqual(seen, [["kill-window", "-t", `${OWN_SESSION}:@7`]],
+    "one call, and the target can only reach a window of the gate's own session");
   // THE RELEASE IS GONE, AND THIS IS WHAT PINS IT (2026-09-17, user decision).
-  // Taking the window's label bar down meant writing `pane-border-status`, and
+  // Taking a window's label bar down meant writing `pane-border-status`, and
   // that RESIZES EVERY PANE IN THE WINDOW — measured on a scratch tmux as
-  // SIGWINCH with `rows 84 → 83`, in both directions. A close now produces
-  // tmux calls that are about closing a pane and nothing else; if any `setw`
-  // ever comes back, this fails.
+  // SIGWINCH with `rows 84 → 83`, in both directions. Under the window
+  // topology the bar belongs to the CHILD's window and stops existing with it.
   assert.equal(seen.some((argv) => argv[0] === "setw"), false, "no window option is written on close");
+  assert.equal(seen.some((argv) => argv[0] === "list-panes"), false,
+    "and nothing is probed: there is no column left to even out");
 });
 
-test("closing a pane equalises what is left of its column", () => {
-  const closeWith = (before: string, after: string): string[] => {
-    const seen: string[][] = [];
-    let killed = false;
-    const run: PaneRunner = (argv) => {
-      seen.push([...argv]);
-      if (argv[0] === "kill-pane") { killed = true; return { ok: true, stdout: "", stderr: "" }; }
-      if (argv[0] === "list-panes") return { ok: true, stdout: killed ? after : before, stderr: "" };
-      return { ok: true, stdout: "", stderr: "" };
-    };
-    assert.equal(closeSessionPane(run, "%6").ok, true);
-    return seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" "));
-  };
-  // The third column survives with two panes ⇒ its heights AND the widths.
-  assert.deepEqual(
-    closeWith(
-      ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0"].join("\n"),
-      ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%8 200 30 0"].join("\n"),
-    ),
-    ["select-layout -E -t %5", "select-layout -E -t %1"],
-  );
-  // Down to one pane in that column ⇒ there is no height left to share.
-  assert.deepEqual(
-    closeWith(
-      ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0", "%6 200 30 0"].join("\n"),
-      ["%1 0 0 0", "%2 100 0 0", "%5 200 0 0"].join("\n"),
-    ),
-    ["select-layout -E -t %1"],
-  );
+test("the RELAY path still closes exactly one PANE, and touches nothing else", () => {
+  const seen: string[][] = [];
+  assert.equal(closeSessionPane(happyRunner(seen), "%7").ok, true);
+  assert.deepEqual(seen, [["kill-pane", "-t", "%7"]],
+    "the predecessor's own rectangle in the USER's window — a kill-window there would take the successor with it");
 });
 
 test("THE LABEL BAR IS NEVER RELEASED — and nothing can ask to (2026-09-17)", () => {
   // `releasesWindowLabels` and `countDecoratedPanes` used to live here, and
   // this test used to pin their answers. Both are DELETED with the release
   // path: taking the bar down writes `pane-border-status`, and that resizes
-  // EVERY pane in the window (measured on a scratch tmux: SIGWINCH with
-  // `rows 84 → 83`, in both directions). The user's own decision was "never
-  // turn it off again".
-  //
-  // Pinned by ABSENCE rather than by a fake: a close that produces a `setw`
-  // is the regression, and that is asserted where a close is driven
-  // (`close kills exactly one pane, and TOUCHES NO WINDOW OPTION` above).
+  // EVERY pane in the window. The user's own decision was "never turn it off
+  // again", and the window topology finished the job — the bar now lives in
+  // the child's window.
   for (const gone of ["releasesWindowLabels", "countDecoratedPanes"]) {
     assert.equal(gone in sessionFactory, false, `${gone} is deleted, not bypassed`);
   }
@@ -518,7 +491,9 @@ test("THE LABEL BAR IS NEVER RELEASED — and nothing can ask to (2026-09-17)", 
 
 
 test("close failure is reported, not swallowed", () => {
-  const outcome = closeSessionPane(() => ({ ok: false, stdout: "", stderr: "gone" }), "%7");
+  const outcome = closeSessionWindow(() => ({ ok: false, stdout: "", stderr: "gone" }), {
+    ownSession: OWN_SESSION, windowId: "@7",
+  });
   assert.equal(outcome.ok, false);
   if (outcome.ok) return;
   assert.equal(outcome.error, "gone");
@@ -559,7 +534,7 @@ test("the env builder is the only assembly point, and it omits what it was not g
   assert.notEqual(built, relay, "a copy: the caller's object is never handed to tmux by reference");
 });
 
-test("opening a judge pane CREATES the scratch TMPDIR it hands the judge (reviewer P1)", async () => {
+test("opening a judge window CREATES the scratch TMPDIR it hands the judge (reviewer P1)", async () => {
   // The env key is only useful if the directory exists: `mktemp -d` under a
   // missing `$TMPDIR` is ENOENT, so a judge told to build a throwaway worktree
   // under it was handed a path nothing had made. The gate that will reclaim it
@@ -570,16 +545,16 @@ test("opening a judge pane CREATES the scratch TMPDIR it hands the judge (review
   rmSync(scratch, { recursive: true, force: true });
   assert.equal(existsSync(scratch), false, "the test starts from nothing");
   try {
-    const outcome = await openSessionPane(happyRunner(), {
-      ownPane: "%1",
+    const outcome = await openSessionWindow(happyRunner(), {
+      scope: fakeScope(),
       cwd: "/repo",
-      layout: "child-column",
+      layout: "own-session-window",
       role: { kind: "judge", openerId: "session-child-1", judgeId, role: "reviewer" },
       command: JUDGE_COMMAND,
     });
     assert.equal(outcome.ok, true);
-    assert.ok(existsSync(scratch), "the pane's TMPDIR exists by the time the pane does");
-    // …and a non-judge pane has no TMPDIR to create.
+    assert.ok(existsSync(scratch), "the child's TMPDIR exists by the time the child does");
+    // …and a non-judge child has no TMPDIR to create.
     const child = buildSessionEnv({ kind: "orchestration-child", orchestrationId: "orch-1", stateVariant: "t2" });
     assert.equal(child.TMPDIR, undefined);
   } finally {

@@ -24,14 +24,26 @@
  *    silence deadlocks its opener.
  *
  * Each of those is the same defect: a step that one caller performs and another
- * forgets. So the steps stop being callers' business. {@link openSessionPane}
- * performs the whole sequence — spawn, register, decorate, verify — in one
- * fixed order, and the callers express only WHAT they want opened.
+ * forgets. So the steps stop being callers' business. {@link openSessionWindow}
+ * performs the whole sequence — open the window (splitting the user's window
+ * only for a relay), register, decorate, verify — in one fixed order, and the
+ * callers express only WHAT they want opened.
+ *
+ * ── WHERE A SESSION LANDS (2026-09-25, user decision) ──
+ *
+ * A child is a WINDOW of the opener's own dedicated tmux session
+ * (`rg-<repo>-<id tail>`, lib/session-tmux-scope.ts), created lazily the first
+ * time a child is needed. The user's window is left exactly as it was: the
+ * three-column layout planning, the geometry probe and the equaliser that used
+ * to squeeze panes into it are DELETED, not bypassed. The one exception is the
+ * RELAY ({@link buildHandoffPaneArgv}): a successor orchestrator splits off the
+ * opener's own pane, because that is the spot the human is already watching.
  *
  * ── WHAT IS NOT HERE ──
  *
- * tmux argv construction stays in lib/orchestrator-tmux.ts (this module is its
- * only consumer), the colour/label/title STRINGS stay in
+ * tmux argv construction stays in lib/orchestrator-tmux.ts (this module and
+ * lib/session-tmux-scope.ts are its only consumers — one for a child's window,
+ * one for the session itself), the colour/label/title STRINGS stay in
  * lib/orchestrator-pane-decor.ts, and the role prompt/tool policy stays in
  * lib/gate-modes.ts. This module sequences them; it invents nothing.
  *
@@ -52,20 +64,19 @@
  */
 
 import {
-  buildEvenLayoutArgv,
   buildHandoffPaneArgv,
   buildKillPaneArgv,
+  buildKillWindowArgv,
   buildPaneLabelArgv,
   buildPaneStyleArgv,
   buildShowPaneLabelsArgv,
-  buildSpawnPaneArgv,
-  buildWindowLayoutArgv,
   parseSpawnedPaneId,
-  parseWindowLayout,
-  planPanePlacement,
-  type PanePlacement,
-  type WindowLayout,
+  type SessionWindowCoords,
 } from "./orchestrator-tmux.ts";
+import {
+  openScopeWindow,
+  type TmuxScope,
+} from "./session-tmux-scope.ts";
 import {
   judgePaneLabel,
   paneIdentity,
@@ -368,32 +379,61 @@ export function paintPaneTitle(run: PaneRunner, paneId: string, title: string): 
 }
 
 /**
- * Close one pane the gate itself opened (谁创建谁回收).
+ * Close ONE WINDOW the gate itself opened (谁创建谁回收) — the normal path since
+ * 2026-09-25, when a child session became a window of the opener's own session.
  *
- * IT NO LONGER TOUCHES THE WINDOW'S LABEL BAR (2026-09-17, user decision).
- * This used to take `hideLabelsVia` and undo `pane-border-status` /
- * `pane-border-format` when the caller judged this the last decorated pane.
- * Those are WINDOW options and toggling them CHANGES EVERY PANE'S HEIGHT: on a
- * scratch tmux this was measured as SIGWINCH with `rows 84 → 83` on the way on
- * and `83 → 84` on the way off, while re-setting the same value triggers
- * nothing at all. So closing the last gate pane re-laid out every application
- * in the user's window — their editor, their shells, and a project manager's
- * pi — and the next spawn put it straight back: a flap per orchestration
- * cycle, for a one-line bar.
+ * `kill-window` rather than `kill-pane`, and nothing else: panes are not
+ * created, split or equalised here any more. There is no label bar to take down
+ * either, for the reason it is turned on in the first place — a child's bar is
+ * an option of the CHILD'S window, which stops existing with the child.
  *
- * The bar is therefore turned ON by whoever opens a decorated pane and is
- * NEVER turned off again. The cost is one border line in that window for as
- * long as the window lives — the same cost the decoration already imposes on
- * bystander panes, and cheaper than moving every pane in the window under a
- * running TUI.
+ * The window id alone is not enough to address it: the target is built as
+ * `<ownSession>:<@id>` from the coordinates the registry recorded at spawn, so a
+ * stale id can only ever reach a window of the gate's own session
+ * (lib/orchestrator-tmux.ts `buildKillWindowArgv`).
+ */
+export function closeSessionWindow(
+  run: PaneRunner,
+  coords: { ownSession: string; windowId: string },
+): { ok: true } | { ok: false; error: string } {
+  try {
+    const result = run(buildKillWindowArgv(coords.ownSession, coords.windowId));
+    if (!result.ok) {
+      return { ok: false, error: result.stderr || "tmux kill-window 失败" };
+    }
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
+  return { ok: true };
+}
+
+/**
+ * Did this close failure mean “it is already gone” rather than “tmux refused”?
+ *
+ * ONE READING FOR EVERY CLOSE PATH (2026-09-25, quality round P2).
+ * `orchestrator_close` had this regex inline and `worker_close` had nothing at
+ * all, so the same fact was reported two different ways — and the worker path's
+ * version told a caller a window might still be on screen when it had simply
+ * been closed already, while leaving the coordinates in the registry forever.
+ * The distinction belongs beside the close it describes.
+ */
+export function windowAlreadyGone(error: string | undefined): boolean {
+  return /can't find window|no such window|no server running/i.test(error ?? "");
+}
+
+/**
+ * Close ONE PANE — the RELAY path, and after 2026-09-25 the only one.
+ *
+ * The predecessor's own pane is not a session window: it is the rectangle in
+ * the USER'S window where the retiring session sits, and the successor was
+ * split off it. It is closed by the session that occupies it, once the
+ * successor has demonstrably taken over; a `kill-window` there would take the
+ * successor with it.
  */
 export function closeSessionPane(
   run: PaneRunner,
   paneId: string,
 ): { ok: true } | { ok: false; error: string } {
-  // Probe the window BEFORE the kill: afterwards this id is gone and there is
-  // nothing left to address the window with.
-  const before = probeWindowLayout(run, paneId);
   try {
     const result = run(buildKillPaneArgv(paneId));
     if (!result.ok) {
@@ -402,13 +442,6 @@ export function closeSessionPane(
   } catch (error) {
     return { ok: false, error: (error as Error).message };
   }
-  const survivor = before?.columns.flat().find((pane) => pane.id !== paneId);
-  // The column the closed pane lived in is the one whose heights changed; name
-  // it by a survivor so the equaliser spreads THAT column and nothing else.
-  const focus = before?.columns
-    .find((column) => column.some((pane) => pane.id === paneId))
-    ?.find((pane) => pane.id !== paneId)?.id;
-  if (survivor) evenOutWindow(run, survivor.id, focus);
   return { ok: true };
 }
 
@@ -426,15 +459,19 @@ export function closeSessionPane(
 // Opening a pane
 // ---------------------------------------------------------------------------
 
-/** Where the new pane goes. */
+/**
+ * Where a new session goes.
+ *
+ * TWO LAYOUTS, and the second one is a deliberate exception the user chose
+ * (2026-09-25): a relay successor keeps the old behaviour — beside its
+ * predecessor, in the user's own window — because a handover is the human's
+ * seat changing hands, not another child session. Everything else is a window
+ * of the opener's own tmux session.
+ */
 export type SessionPaneLayout =
-  /**
-   * The window decides (three-column rule, 2026-09-08): the first two columns
-   * hold one pane each, the third shares its height — see
-   * `planPanePlacement` in lib/orchestrator-tmux.ts.
-   */
-  | "child-column"
-  /** Beside the opener (a relay successor, which inherits the left column). */
+  /** A window of the opener's own session (lib/session-tmux-scope.ts). */
+  | "own-session-window"
+  /** Beside the opener, in the user's window — the relay path only. */
   | "beside-opener";
 
 /** Delivery verification: did the far side actually come up? */
@@ -444,157 +481,154 @@ export interface DeliveryProof {
   detail: string;
 }
 
+/**
+ * The coordinates a child is addressed by later.
+ *
+ * `windowId` is what closes it and `sessionName` is the session that owns it
+ * (the pair is what keeps a kill inside the gate's own session). Both are
+ * ABSENT for the relay layout, whose pane lives in the user's window and is
+ * closed by nobody but its own occupant (lib/orchestrator-tmux.ts
+ * `buildKillPaneArgv`).
+ */
+export interface SessionPaneCoords {
+  paneId: string;
+  windowId?: string;
+  sessionName?: string;
+}
+
 export interface SessionPaneSpec {
-  /** The opener's OWN pane — every layout is expressed relative to it. */
-  ownPane: string;
+  /** The opener's OWN tmux session — created lazily by the first child. */
+  scope: TmuxScope;
   cwd: string;
   layout: SessionPaneLayout;
   role: SessionPaneRole;
-  /** The full argv the pane runs (an interactive pi, built by the caller). */
+  /** The full argv the child runs (an interactive pi, built by the caller). */
   command: readonly string[];
+  /**
+   * The opener's OWN pane — REQUIRED for the relay layout, which splits it, and
+   * ignored by the window layout, which never touches the user's window.
+   */
+  ownPane?: string;
   /** Omitted ⇒ undecorated (a successor orchestrator owns no border). */
   decor?: SessionPaneDecor;
   /**
-   * Record the new pane BEFORE anything else looks for it. Registration is a
-   * step, not a caller's afterthought: delivery evidence is polled after it,
-   * and an unregistered pane is unaddressable by every later tool.
+   * Record the new coordinates BEFORE anything else looks for them.
+   * Registration is a step, not a caller's afterthought: delivery evidence is
+   * polled after it, and an unregistered child is unaddressable by every later
+   * tool.
    */
-  register?: (paneId: string) => void;
+  register?: (coords: SessionPaneCoords) => void;
   /** Earn the receipt. Omitted ⇒ nothing to verify (a successor has no channel). */
   verify?: (paneId: string) => Promise<DeliveryProof>;
 }
 
 export type SessionPaneOutcome =
-  | { ok: true; paneId: string; decorWarning?: string; deliveryNote?: string }
-  | {
+  | ({ ok: true; decorWarning?: string; deliveryNote?: string } & SessionPaneCoords)
+  | ({
       ok: false;
       error: string;
-      /** Set when the pane EXISTS and was kept: verification is what failed. */
-      paneId?: string;
+      /** Set when the child EXISTS and was kept: verification is what failed. */
       deliveryFailed?: boolean;
-    };
+    } & Partial<SessionPaneCoords>);
 
 /**
- * Read the geometry of the window a pane lives in. `undefined` = unreadable,
- * and unreadable is missing INFORMATION, never a licence to guess (the same
- * direction `judge-pane.ts` takes about liveness).
- */
-function probeWindowLayout(run: PaneRunner, via: string): WindowLayout | undefined {
-  try {
-    const result = run(buildWindowLayoutArgv(via));
-    if (!result.ok) return undefined;
-    const layout = parseWindowLayout(result.stdout);
-    return layout.columns.length > 0 ? layout : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * WHERE THE NEXT PANE GOES (three-column rule, 2026-09-08).
- *
- * The window's own geometry decides, not the opener's child list — every
- * session keeps a child list of its own, which is exactly how one window ended
- * up with five columns. An unreadable window falls back to splitting the
- * opener: OPENING THE PANE MUST SUCCEED, the layout is best-effort.
- */
-function placementFor(run: PaneRunner, ownPane: string): PanePlacement {
-  const layout = probeWindowLayout(run, ownPane);
-  // Unreadable window ⇒ the plainest split off the opener (goal exit criterion
-  // 1). No `-f`: with no geometry to reason about, the least surprising thing
-  // is to split the pane we are actually running in.
-  if (!layout) return { direction: "-h", target: ownPane };
-  return planPanePlacement(layout.columns);
-}
-
-/**
- * Equalise the window after a pane JOINED or LEFT it (user requirement
- * 2026-09-08). Two axes, both via `select-layout -E` on a pane whose parent
- * container is the thing to spread:
- *
- *  - the column that CHANGED gets its heights spread evenly. `focus` names a
- *    pane in it (the new pane, or a survivor of the column a pane was closed
- *    from). Spreading EVERY multi-pane column would also undo a manual resize
- *    on a column this round never touched (reviewer P2);
- *  - a window that is exactly three columns wide gets its COLUMNS spread
- *    evenly — but only off a pane that sits ALONE in its column, because a
- *    pane inside a shared column would spread that column's heights instead
- *    (reviewer P2).
- *
- * More than three columns is deliberately left alone: the user's call was that
- * the rule stops NEW wide windows, it does not merge the ones already open.
- *
- * A zoomed window is skipped — the user is reading it. MEASURED (2026-09-08,
- * lab server): `split-window`, `kill-pane` AND `select-layout -E` each unzoom
- * the window, so on both paths that call this the probe never sees a zoomed
- * window in today's tmux. The guard stays because the user asked for it and
- * because it is what stops the equaliser from fighting a zoom if tmux ever
- * stops clearing it — it is defensive, and its unit test pins the BRANCH, not
- * a state a live server reaches.
- *
- * Best-effort throughout: a cosmetic layout must never fail the spawn or the
- * close it follows.
- */
-function evenOutWindow(run: PaneRunner, via: string, focus?: string): void {
-  const layout = probeWindowLayout(run, via);
-  if (!layout || layout.zoomed) return;
-  const even = (target: string): void => {
-    try { run(buildEvenLayoutArgv(target)); } catch { /* cosmetic */ }
-  };
-  const changed = focus
-    ? layout.columns.find((column) => column.some((pane) => pane.id === focus))
-    : undefined;
-  if (changed && changed.length > 1) even(changed[0]!.id);
-  const alone = layout.columns.find((column) => column.length === 1);
-  if (layout.columns.length === 3 && alone) even(alone[0]!.id);
-}
-
-/**
- * Open one pane, in the fixed order every caller now shares:
- * spawn → register → decorate → even → verify.
+ * Open one child session, in the fixed order every caller shares:
+ * open → register → decorate → verify.
  *
  * The order is the point. Registering before verification is what keeps a
- * pane addressable when its delivery check fails (the pane may well be alive
- * and merely slow), and decorating before verification means a pane a human is
- * staring at is already labelled while the gate is still waiting on evidence.
+ * child addressable when its delivery check fails (it may well be alive and
+ * merely slow), and decorating before verification means the window a human is
+ * about to look at is already labelled while the gate is still waiting on
+ * evidence.
  *
- * Pane ids come back from tmux itself (`-P -F '#{pane_id}'`), never from
- * listing-and-diffing.
+ * Coordinates come back from tmux itself (`-P -F '#{window_id} #{pane_id}'`),
+ * never from listing-and-diffing.
  */
-export async function openSessionPane(
+export async function openSessionWindow(
   run: PaneRunner,
   spec: SessionPaneSpec,
 ): Promise<SessionPaneOutcome> {
   const env = buildSessionEnv(spec.role);
-  // THE SCRATCH ROOT HAS TO EXIST BEFORE THE PANE USES IT (reviewer P1,
+  // THE SCRATCH ROOT HAS TO EXIST BEFORE THE CHILD USES IT (reviewer P1,
   // 2026-09-14). `TMPDIR` is the judge's throwaway-worktree root, and anything
   // that allocates a temporary directory through it (`mktemp -d`, mkdtemp)
   // fails with ENOENT when the directory is not there — including a reviewer
   // making its own scratch space. Creating it here covers every way a judge
-  // pane is opened (spawn, rotation, recover), and it is the same directory
-  // `reapReviewScratch` removes when the pane goes: whoever creates it clears
+  // window is opened (spawn, rotation, recover), and it is the same directory
+  // `reapReviewScratch` removes when the window goes: whoever creates it clears
   // it. Only roles whose env carries a TMPDIR are touched, and a failure is
-  // not worth refusing the pane over — a judge with an unusable scratch dir
+  // not worth refusing the child over — a judge with an unusable scratch dir
   // can still review (it just cannot build throwaway worktrees under it).
   const scratch = env.TMPDIR;
   if (scratch) {
     try { mkdirSync(scratch, { recursive: true }); } catch { /* best effort */ }
   }
+  const coords = spec.layout === "beside-opener"
+    ? openRelayPane(run, spec, env)
+    : openScopeWindow(run, spec.scope, {
+        cwd: spec.cwd,
+        env,
+        command: spec.command,
+        // THE WINDOW NAME IS THE LABEL (user decision, 2026-09-25). `tmux ls`
+        // and `prefix w` are the only ways to see a child without attaching to
+        // it, and a list of identical `pi` entries tells nobody anything.
+        ...(spec.decor === undefined ? {} : { windowName: spec.decor.label }),
+      });
+  if (!coords.ok) {
+    // A FAILED OPEN YIELDS NO COORDINATES, and there is nothing to keep
+    // (2026-09-25, quality round P2): both openers return `{ok:false; error}`
+    // and nothing else, so the `"paneId" in coords` carry-forward that used to
+    // sit here could only ever produce `{}`. The case it LOOKED like it handled
+    // — opened, but the delivery check failed — is the `deliveryFailed` branch
+    // below, which has real coordinates to keep.
+    return { ok: false, error: coords.error };
+  }
+  // EXPLICIT FIELDS, never a spread of the scope's own result (2026-09-25):
+  // that result carries an `ok` of its own, and spreading it here silently
+  // overwrote the outcome of a FAILED delivery check with `ok: true` — caught
+  // by the failure-path test, which is why the coordinates are copied by hand.
+  const place: SessionPaneCoords = {
+    paneId: coords.paneId,
+    ...(coords.windowId === undefined ? {} : { windowId: coords.windowId }),
+    ...(coords.sessionName === undefined ? {} : { sessionName: coords.sessionName }),
+  };
+  spec.register?.(place);
+  const decorWarning = spec.decor ? decorateSessionPane(run, place.paneId, spec.decor) : undefined;
+  if (spec.verify) {
+    const proof = await spec.verify(place.paneId);
+    if (!proof.ok) {
+      return { ok: false, error: proof.detail, ...place, deliveryFailed: true };
+    }
+    return {
+      ok: true,
+      ...place,
+      ...(decorWarning === undefined ? {} : { decorWarning }),
+      deliveryNote: proof.detail,
+    };
+  }
+  return { ok: true, ...place, ...(decorWarning === undefined ? {} : { decorWarning }) };
+}
+
+/**
+ * Split the opener's OWN pane for a relay successor — the one path that still
+ * touches the user's window (user decision, 2026-09-25).
+ *
+ * No window id comes back, and that is correct rather than an omission: this
+ * child lives in the user's window, is never closed by `kill-window`, and is
+ * replaced by its own successor when it retires.
+ */
+function openRelayPane(
+  run: PaneRunner,
+  spec: SessionPaneSpec,
+  env: Readonly<Record<string, string>>,
+): ({ ok: true } & SessionPaneCoords) | { ok: false; error: string } {
+  const ownPane = spec.ownPane;
+  if (!ownPane) {
+    return { ok: false, error: "接力后继者需要 opener 自己的 pane 作落点（ownPane 缺失）" };
+  }
   let spawned: PaneRunResult;
   try {
-    spawned = run(spec.layout === "beside-opener"
-      ? buildHandoffPaneArgv({
-          orchestratorPane: spec.ownPane,
-          cwd: spec.cwd,
-          env,
-          command: spec.command,
-        })
-      : buildSpawnPaneArgv({
-          placement: placementFor(run, spec.ownPane),
-          cwd: spec.cwd,
-          env,
-          command: spec.command,
-        }));
+    spawned = run(buildHandoffPaneArgv({ orchestratorPane: ownPane, cwd: spec.cwd, env, command: spec.command }));
   } catch (error) {
     return { ok: false, error: (error as Error).message };
   }
@@ -605,26 +639,7 @@ export async function openSessionPane(
   if (!paneId) {
     return { ok: false, error: "tmux 没有返回新 pane id" };
   }
-  spec.register?.(paneId);
-  const decorWarning = spec.decor ? decorateSessionPane(run, paneId, spec.decor) : undefined;
-  // A handoff pane is the one layout the three-column rule does not govern: it
-  // belongs beside the opener so the successor inherits the left column when
-  // the predecessor closes. Equalising here would only make the momentary
-  // fourth column prettier.
-  if (spec.layout !== "beside-opener") evenOutWindow(run, paneId, paneId);
-  if (spec.verify) {
-    const proof = await spec.verify(paneId);
-    if (!proof.ok) {
-      return { ok: false, error: proof.detail, paneId, deliveryFailed: true };
-    }
-    return {
-      ok: true,
-      paneId,
-      ...(decorWarning === undefined ? {} : { decorWarning }),
-      deliveryNote: proof.detail,
-    };
-  }
-  return { ok: true, paneId, ...(decorWarning === undefined ? {} : { decorWarning }) };
+  return { ok: true, paneId };
 }
 
 // ---------------------------------------------------------------------------

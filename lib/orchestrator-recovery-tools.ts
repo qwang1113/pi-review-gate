@@ -39,7 +39,7 @@ import {
   discoverOrchestrations,
   takeoverClaimWorthWriting,
 } from "./orchestrator-takeover.ts";
-import { openSessionPane, paneRecoverability } from "./session-factory.ts";
+import { openSessionWindow, paneRecoverability } from "./session-factory.ts";
 import { childPaneLabel } from "./orchestrator-pane-decor.ts";
 import { findOrphanWorktrees } from "./orchestrator-worktree.ts";
 import {
@@ -269,10 +269,10 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   // which always answers, the strictest station when nothing is on record).
   const stationCap = stationCapForRecoveredChild(deps, child.taskId);
   const acceptanceGate = acceptanceGateForRecoveredChild(deps, child.taskId);
-  const opened = await openSessionPane(deps.tmux, {
-    ownPane: self,
+  const opened = await openSessionWindow(deps.tmux, {
+    scope: deps.scope,
     cwd: child.cwd,
-    layout: "child-column",
+    layout: "own-session-window",
     // Same env as the original spawn — including the sidecar variant, which is
     // ALSO what exempts a child from the session-exclusivity guard: a recovered
     // pane without it would be refused at boot as a second session in the
@@ -295,12 +295,22 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     // id, its cwd and its task, because none of those died with the process.
     // The new assignment stamp is what makes its OLD completion history
     // rather than a verdict (there is no cached `doneAt` to clear — B4).
-    register: (paneId) => {
+    register: (coords) => {
       deps.saveRuntime({
         ...deps.runtime(),
         children: deps.runtime().children.map((c) =>
           c.id === child.id
-            ? { ...c, paneId, lastAssignedAt: now, taskFile: taskFileRelPath(noteName) }
+            ? {
+                ...c,
+                paneId: coords.paneId,
+                // A recovered child is a NEW window (its old one died with the
+                // process), so the coordinates are re-pointed with the pane id
+                // rather than kept.
+                ...(coords.windowId === undefined ? {} : { windowId: coords.windowId }),
+                ...(coords.sessionName === undefined ? {} : { tmuxSession: coords.sessionName }),
+                lastAssignedAt: now,
+                taskFile: taskFileRelPath(noteName),
+              }
             : c,
         ),
       });

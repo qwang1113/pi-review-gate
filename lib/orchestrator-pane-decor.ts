@@ -66,7 +66,7 @@
  * to be reconstructed from the code that writes them.
  *
  * WHO TURNS IT ON: every DECORATED pane open, and it does not check first.
- * `openSessionPane` (lib/session-factory.ts) calls `decorateSessionPane` when
+ * `openSessionWindow` (lib/session-factory.ts) calls `decorateSessionPane` when
  * — and only when — that open asked for decoration (`spec.decor`), which is
  * how a pane that wants no border, such as the relay successor, takes none.
  * For the opens that DO decorate, the two window options are set again every

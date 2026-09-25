@@ -324,7 +324,7 @@ test("review binding: an unreadable report stamp fails closed against a real che
  *   2. `prepare_review` registers the range;
  *   3. only then is the judge dispatched, and `roundSeq` is registered by that
  *      dispatch — on the pane-reuse path after the channel write succeeds, on
- *      the fresh-pane path inside `openSessionPane`'s `register` callback.
+ *      the fresh-pane path inside `openSessionWindow`'s `register` callback.
  *
  * So a dispatch that FAILS at step 3 (channel write throws, pane cannot be
  * opened) leaves the registry holding the PREVIOUS round's `roundSeq` while

@@ -60,6 +60,10 @@ function makeWorld(opts: {
   io?: ReturnType<typeof memoryChannelIO>;
   /** The tmux server this session can read — omitted ⇒ it cannot be read. */
   tmuxServer?: string;
+  /** `closeWindow` refuses (tmux rejected the kill) — the window may still exist. */
+  closeFails?: boolean;
+  /** `closeWindow` says the window is already gone (`can't find window`). */
+  closeGone?: boolean;
   /** Runs inside every fake `sleep` — how a test writes a mid-wait ack. */
   onSleep?: () => void;
 } = {}) {
@@ -82,10 +86,21 @@ function makeWorld(opts: {
     openPane: async (spec) => {
       if (opts.paneOpens === false) return { ok: false, error: "tmux 拒绝开 pane" };
       opened.push({ command: spec.command, role: spec.role, decor: spec.decor });
-      spec.register("%42");
+      // The WINDOW is what the registry records now (2026-09-25); the pane id
+      // rides along because liveness is still read from it.
+      spec.register({ paneId: "%42", windowId: "@42", sessionName: "rg-repo-abcdef1234" });
       return { ok: true, paneId: "%42" };
     },
-    killPane: (paneId) => { killed.push(paneId); return true; },
+    closeWindow: (coords) => {
+      killed.push(coords.windowId);
+      // TWO DIFFERENT FAILURES (2026-09-25, quality round P2): a refusal leaves
+      // the window possibly on screen, while "it is already gone" means the
+      // close DID happen (somebody else closed it, or a restart took the
+      // server). A fake that can only say one of them cannot drive both paths.
+      if (opts.closeGone === true) return { ok: false, error: "can't find window: @42" };
+      if (opts.closeFails === true) return { ok: false, error: "tmux 拒绝" };
+      return { ok: true };
+    },
     openerId: () => opts.openerId ?? "%1",
     paneOwner: () => "self",
     repoRoot: () => "/repo",
@@ -377,12 +392,12 @@ test("worker_answer refuses an ambiguous answer rather than guessing", async () 
 // close / resume
 // ---------------------------------------------------------------------------
 
-test("close frees the pane, and the next submit RESUMES the same session", async () => {
+test("close frees the WINDOW, and the next submit RESUMES the same session", async () => {
   const world = makeWorld();
   await world.call("worker_submit", { task: "第一次" });
   const closed = await world.call("worker_close", { workerId: "worker-1" });
   assert.equal(closed.isError, undefined, world.text(closed));
-  assert.deepEqual(world.killed, ["%42"]);
+  assert.deepEqual(world.killed, ["@42"], "the kill is addressed by WINDOW, not by pane");
   // THE ENTRY STAYS (reviewer P1, 2026-09-21): closing releases SCREEN SPACE,
   // not the conversation — the channel owner, the session id and the report
   // cursor are what a later resume needs.
@@ -394,7 +409,7 @@ test("close frees the pane, and the next submit RESUMES the same session", async
   // Closing twice is a no-op, not a second kill.
   const again = await world.call("worker_close", { workerId: "worker-1" });
   assert.equal(again.isError, undefined);
-  assert.deepEqual(world.killed, ["%42"], "no second kill-pane for an already-closed worker");
+  assert.deepEqual(world.killed, ["@42"], "no second kill-window for an already-closed worker");
 
   const world2 = makeWorld({ alive: false });
   await world2.call("worker_submit", { task: "第一次", workerId: "worker-1" });
@@ -406,6 +421,50 @@ test("close frees the pane, and the next submit RESUMES the same session", async
       "both dispatches ran the SAME session id — the worker keeps its context");
   }
   assert.match(world2.text(resumed), /接着用/, "and the receipt says the context carried over");
+});
+
+test("a window that is ALREADY GONE counts as closed — only a refusal keeps the coordinates", async () => {
+  // 2026-09-25 (quality round P2): the two failures were one boolean, so a
+  // worker whose window had already been closed was reported as a FAILED close
+  // and kept its coordinates forever — the same reading `orchestrator_close`
+  // had already got right.
+  const world = makeWorld({ closeGone: true });
+  await world.call("worker_submit", { task: "第一次" });
+  const closed = await world.call("worker_close", { workerId: "worker-1" });
+  assert.equal(closed.isError, undefined, world.text(closed));
+  assert.equal((closed.details as { closed?: boolean })?.closed, true, "gone is closed, not failed");
+  assert.match(world.text(closed), /已经不在了/);
+  assert.equal(world.registry()["worker-1"]?.windowId, undefined, "the coordinates go — there is nothing left to address");
+  assert.equal(
+    world.registry()["worker-1"]?.sessionId,
+    workerSessionId("worker-1"),
+    "…while the conversation is kept, exactly as a refused close keeps it",
+  );
+});
+
+test("a close tmux REFUSED keeps the coordinates — the window may still be there, and a resume must not open a second one", async () => {
+  // REVIEWER P1 (round 1): the receipt was made honest about a refused close
+  // while the entry still lost its `windowId`/`tmuxSession` — so the next
+  // `worker_submit` found no window to ride on and opened a SECOND one beside a
+  // window that may well still be on screen (two workers, one leaked pane).
+  const world = makeWorld({ closeFails: true });
+  await world.call("worker_submit", { task: "第一次" });
+  const refused = await world.call("worker_close", { workerId: "worker-1" });
+  assert.equal(refused.isError, undefined, world.text(refused));
+  assert.match(world.text(refused), /关闭失败/);
+  assert.equal((refused.details as { closed?: boolean })?.closed, false, "nothing claims it was closed");
+  assert.equal(world.registry()["worker-1"]?.windowId, "@42", "the window is still recorded — it may still be on screen");
+  assert.equal(world.registry()["worker-1"]?.tmuxSession, "rg-repo-abcdef1234");
+
+  // THE POINT: the unclosed window is still addressable, so a resume rides it
+  // instead of opening a second one.
+  await world.call("worker_submit", { task: "追加", workerId: "worker-1" });
+  assert.equal(world.opened.length, 1, "no second window was opened while the first may still be there");
+  // …and a retry of the close reports the same true thing (idempotent, no lie).
+  const retried = await world.call("worker_close", { workerId: "worker-1" });
+  assert.equal(retried.isError, undefined);
+  assert.match(world.text(retried), /关闭失败/);
+  assert.deepEqual(world.killed, ["@42", "@42"], "the retry tried the recorded window again");
 });
 
 test("a resume after close keeps the channel AND the consumed-report cursor", async () => {
@@ -559,6 +618,38 @@ test("the registry drops a malformed entry instead of guessing a pane", () => {
     "a bad entry would make worker_close aim a kill at somebody else's session, or a wait read somebody else's channel");
   assert.deepEqual(parseWorkerRegistry(JSON.parse(serializeWorkerRegistry(parsed))), parsed, "round trip");
   assert.deepEqual(parseWorkerRegistry("not an object"), {});
+});
+
+test("the registry sanitizes the WINDOW pair by SHAPE, like the orchestration sidecar does", () => {
+  // Both halves become a tmux target (`<session>:<@window>`), and this file is
+  // on disk — so they are validated exactly as lib/orchestrator-registry.ts
+  // validates the same fields on the orchestration side (2026-09-25, quality
+  // round P2: the two disk boundaries had two answers to one question).
+  const good = {
+    openerId: "s1", role: "worker", model: "m", paneId: "%9", windowId: "@9",
+    tmuxSession: "rg-repo-abcdef1234", sessionId: "s", repoRoot: "/repo", createdAt: "t",
+  };
+  const parsed = parseWorkerRegistry({
+    workers: {
+      good,
+      // A window id that is really a pane id, a session name the gate could not
+      // have derived, and a target carrying tmux syntax of its own.
+      badwindow: { ...good, windowId: "%9" },
+      badsession: { ...good, tmuxSession: "my-work" },
+      injected: { ...good, tmuxSession: "rg-repo-abcdef1234:@9" },
+      missingwindow: { ...good, windowId: undefined },
+    },
+  });
+  assert.deepEqual(parsed.good, { workerId: "good", ...good }, "a well-formed record round-trips untouched");
+  for (const id of ["badwindow", "badsession", "injected"]) {
+    assert.equal(parsed[id]?.windowId, undefined, `${id}: nothing half-recorded is carried`);
+    assert.equal(parsed[id]?.tmuxSession, undefined, `${id}: neither half survives on its own`);
+    assert.equal(parsed[id]?.paneId, "%9", "…while the rest of the entry is kept (liveness still reads it)");
+  }
+  // A record from before the window topology has neither half: that is a
+  // legitimate entry (it just cannot be closed by window), not a malformed one.
+  assert.equal(parsed.missingwindow?.paneId, "%9");
+  assert.equal(parsed.missingwindow?.windowId, undefined);
 });
 
 // The opener id in an entry is what locates the worker's CHANNEL, and it is

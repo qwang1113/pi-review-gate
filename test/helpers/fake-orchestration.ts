@@ -31,6 +31,11 @@
 import assert from "node:assert/strict";
 
 import { registerOrchestratorStateTools } from "../../lib/orchestrator-tools.ts";
+import {
+  sanitizeScopeRecord,
+  type TmuxScope,
+  type TmuxScopeRecord,
+} from "../../lib/session-tmux-scope.ts";
 import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session-tools.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
@@ -92,6 +97,15 @@ export interface FakeWorld {
   tools: Map<string, (params: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolReply>>;
   deps: OrchestratorDeps;
   panes: Map<string, FakePane>;
+  /**
+   * The tmux SESSIONS and WINDOWS this world has (2026-09-25). A child is a
+   * window of the opener's own session now, so a test asserts on these to pin
+   * the topology — e.g. "the user's own window gained no pane".
+   */
+  sessions: Map<string, { owner: string; windows: Set<string> }>;
+  windows: Map<string, { id: string; session: string; paneId: string; name?: string }>;
+  /** What this session recorded about the tmux session it created. */
+  scopeRecord: { value: TmuxScopeRecord | undefined };
   io: ChannelIO & { files: Map<string, string> };
   runtime: () => OrchestratorRuntime;
   plan: () => OrchestratorPlan | undefined;
@@ -186,6 +200,13 @@ export interface FakeWorldOptions {
   approvePlan?: boolean;
   env?: Record<string, string>;
   contextPercent?: number;
+  /**
+   * This session's own pi session id — the input the tmux session name is
+   * derived from (lib/session-tmux-scope.ts). Defaults to a UUIDv7-shaped id,
+   * including its DASHES, because the derivation takes the id's alphanumeric
+   * tail and a test should see the real shape.
+   */
+  sessionId?: string;
   /** Make `list-panes` fail, so liveness is UNKNOWN rather than false. */
   tmuxBroken?: boolean;
   /**
@@ -340,6 +361,24 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     ["%0", { id: "%0", command: [], env: {}, alive: true }],
   ]);
   let paneSeq = 1;
+  /**
+   * THE TMUX SESSIONS AND WINDOWS (2026-09-25), modelled because they are now
+   * what a child IS: `new-session` creates the opener's own session with the
+   * first child in it, `new-window` adds the next one, `kill-window` frees it
+   * and `kill-session` takes the lot. A window records the pane it holds, so a
+   * test can assert the user's own window gained nothing.
+   */
+  const sessions = new Map<string, { owner: string; windows: Set<string>; env: Record<string, string> }>();
+  const windows = new Map<string, { id: string; session: string; paneId: string; name?: string }>();
+  let windowSeq = 0;
+  const scopeRecord: { value: TmuxScopeRecord | undefined } = { value: undefined };
+  const scope: TmuxScope = {
+    sessionId: () => options.sessionId ?? "019fbb1d-9e78-7ebf-88bf-d104b8a270ed",
+    repoRoot: () => "/repo",
+    read: () => sanitizeScopeRecord(scopeRecord.value),
+    write: (record) => { scopeRecord.value = record; },
+    now: () => new Date(now()).toISOString(),
+  };
   let runtime: OrchestratorRuntime = emptyRuntime(ORCHESTRATION_ID);
   /** What the DISK records, when that is somebody else's orchestration (B1). */
   let recordedOverride: OrchestratorRuntime | undefined = options.recordedRuntime;
@@ -442,6 +481,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     savePlan: (next) => { plan = next; },
     tmux: (argv) => runFakeTmux(argv),
     ownPane: () => env.TMUX_PANE,
+    scope,
     // ONE dialog stub for the whole template (2026-09-08): every approval and
     // consent dialog is an askChoice now, so a test says which ROW it wants.
     // `confirmAnswers` keeps its old meaning (true ⇒ the first option); the
@@ -542,7 +582,10 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     // 2026-09-22: the label moved to a pane user option, and leaving it out
     // would drop it into the catch-all failure below, so every fake world
     // would see a decoration failure it never asked for.
-    const decorative = sub === "select-pane" || sub === "setw" || sub === "set";
+    //
+    // `set -p` is the PANE option; `set -t <session> @…` is a SESSION option
+    // (the ownership marker) and is handled below — hence the `-p` test.
+    const decorative = sub === "select-pane" || sub === "setw" || (sub === "set" && argv.includes("-p"));
     if (decorative) {
       return options.tmuxDecorFails
         ? { ok: false, stdout: "", stderr: "fake tmux: refused a cosmetic option" }
@@ -554,22 +597,89 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       const live = [...panes.values()].filter((p) => p.alive).map((p) => p.id);
       return { ok: true, stdout: live.join("\n"), stderr: "" };
     }
-    if (sub === "split-window") {
-      if (options.splitWindowThrows) throw new Error("fake tmux: split-window blew up");
+    if (sub === "list-sessions") {
+      if (options.tmuxBroken) return { ok: false, stdout: "", stderr: "no server running" };
+      return { ok: true, stdout: [...sessions.keys()].join("\n"), stderr: "" };
+    }
+    if (sub === "set") {
+      // The ownership marker: `set -t <session> @rg_scope_owner <value>`.
+      const target = String(argv[argv.indexOf("-t") + 1]);
+      const session = sessions.get(target);
+      if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
+      session.owner = String(argv[argv.length - 1]);
+      return { ok: true, stdout: "", stderr: "" };
+    }
+    // THE SESSION'S OWN ENVIRONMENT (2026-09-25). The gate reads it before it
+    // REUSES a session and removes anything a previous build left there
+    // (`healSessionEnv`): passing a child's environment through tmux `-e` put
+    // the first child's identity in the session, every later window inherited
+    // it, and a judge reported into the worker's channel. The fake models the
+    // two calls so a test can drive that heal for real.
+    if (sub === "show-environment") {
+      const target = String(argv[argv.indexOf("-t") + 1]);
+      const session = sessions.get(target);
+      if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
+      return {
+        ok: true,
+        stdout: Object.entries(session.env).map(([key, value]) => `${key}=${value}`).join("\n"),
+        stderr: "",
+      };
+    }
+    if (sub === "set-environment") {
+      const target = String(argv[argv.indexOf("-t") + 1]);
+      // `-g` writes the SERVER's environment (tmux ignores `-t` when `-g` is
+      // given) — every session the user has. The gate refuses it at the argv
+      // layer, and the fake refuses it too: a fake that modelled `-g` as a
+      // session write would show green for a call that changes the user's
+      // global environment (quality round P2, 2026-09-25).
+      if (argv.includes("-g")) {
+        return { ok: false, stdout: "", stderr: "fake tmux: -g is the user's global environment, not a session's" };
+      }
+      const session = sessions.get(target);
+      if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
+      const unset = argv.includes("-u");
+      const key = String(argv[argv.length - (unset ? 1 : 2)]);
+      if (unset) delete session.env[key];
+      else session.env[key] = String(argv[argv.length - 1]);
+      return { ok: true, stdout: "", stderr: "" };
+    }
+    if (sub === "show-options") {
+      const target = String(argv[argv.indexOf("-t") + 1]);
+      const session = sessions.get(target);
+      if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
+      return { ok: true, stdout: session.owner ? `${session.owner}\n` : "", stderr: "" };
+    }
+    if (sub === "new-session" || sub === "new-window" || sub === "split-window") {
+      if (options.splitWindowThrows) throw new Error(`fake tmux: ${String(sub)} blew up`);
       if (options.splitWindowFails) return { ok: false, stdout: "", stderr: "fake tmux: cannot create pane" };
       const id = `%${paneSeq++}`;
       const cwdAt = argv.indexOf("-c");
+      const nameAt = argv.indexOf("-n");
+      // The format element is searched by CONTAINS: the window builders print
+      // `#{window_id} #{pane_id}` in one argv element, the relay prints
+      // `#{pane_id}` alone. The command starts after whichever one it was.
+      const marker = argv.findIndex((arg) => arg.includes("#{pane_id}"));
+      const raw = marker >= 0 ? argv.slice(marker + 1).map(String) : [];
+      // THE CHILD'S ENVIRONMENT RIDES ITS OWN COMMAND (`env K=V … pi`), never
+      // tmux `-e` (2026-09-25): `new-session -e` writes the SESSION environment,
+      // and every window opened later in that session inherited it — a judge
+      // came up wearing the worker's identity and reported into the worker's
+      // channel. The fake reads the shape the builders really send.
       const paneEnv: Record<string, string> = {};
-      for (let i = 0; i < argv.length - 1; i++) {
-        if (argv[i] === "-e") {
-          const [key, ...rest] = String(argv[i + 1]).split("=");
+      let command = raw;
+      if (raw[0] === "env") {
+        let i = 1;
+        for (; i < raw.length; i++) {
+          const token = raw[i]!;
+          if (!token.includes("=")) break;
+          const [key, ...rest] = token.split("=");
           paneEnv[key!] = rest.join("=");
         }
+        command = raw.slice(i);
       }
-      const marker = argv.indexOf("#{pane_id}");
       panes.set(id, {
         id,
-        command: marker >= 0 ? argv.slice(marker + 1).map(String) : [],
+        command,
         ...(cwdAt >= 0 ? { cwd: String(argv[cwdAt + 1]) } : {}),
         env: paneEnv,
         alive: true,
@@ -588,7 +698,60 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       // instead of a state variant. Recorded as the boot line in the handoff
       // event stream, so a test can pin "release came first".
       if (paneEnv[PREDECESSOR_PANE_ENV] !== undefined) handoffEvents.push("pane-opened");
-      return { ok: true, stdout: `${id}\n`, stderr: "" };
+      if (sub === "split-window") return { ok: true, stdout: `${id}\n`, stderr: "" };
+      // New session or new window: the session is named with `-s`, an added
+      // window with `-t`, and BOTH print the window id first.
+      const sessionName = sub === "new-session"
+        ? String(argv[argv.indexOf("-s") + 1])
+        : String(argv[argv.indexOf("-t") + 1]);
+      if (sub === "new-session") {
+        if (sessions.has(sessionName)) {
+          panes.get(id)!.alive = false;
+          return { ok: false, stdout: "", stderr: `duplicate session: ${sessionName}` };
+        }
+        sessions.set(sessionName, { owner: "", windows: new Set(), env: {} });
+      } else if (!sessions.has(sessionName)) {
+        panes.get(id)!.alive = false;
+        return { ok: false, stdout: "", stderr: `can't find session: ${sessionName}` };
+      }
+      const windowId = `@${windowSeq++}`;
+      windows.set(windowId, {
+        id: windowId,
+        session: sessionName,
+        paneId: id,
+        ...(nameAt >= 0 ? { name: String(argv[nameAt + 1]) } : {}),
+      });
+      sessions.get(sessionName)!.windows.add(windowId);
+      return { ok: true, stdout: `${windowId} ${id}\n`, stderr: "" };
+    }
+    if (sub === "kill-window") {
+      const target = String(argv[argv.indexOf("-t") + 1]);
+      const windowId = target.includes(":") ? target.slice(target.indexOf(":") + 1) : target;
+      const window = windows.get(windowId);
+      if (!window) return { ok: false, stdout: "", stderr: `can't find window: ${windowId}` };
+      windows.delete(windowId);
+      const session = sessions.get(window.session);
+      session?.windows.delete(windowId);
+      const pane = panes.get(window.paneId);
+      if (pane) pane.alive = false;
+      // tmux reclaims a session whose last window is gone.
+      if (session && session.windows.size === 0) sessions.delete(window.session);
+      return { ok: true, stdout: "", stderr: "" };
+    }
+    if (sub === "kill-session") {
+      const target = String(argv[argv.indexOf("-t") + 1]);
+      const session = sessions.get(target);
+      if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
+      for (const windowId of session.windows) {
+        const window = windows.get(windowId);
+        if (window) {
+          const pane = panes.get(window.paneId);
+          if (pane) pane.alive = false;
+          windows.delete(windowId);
+        }
+      }
+      sessions.delete(target);
+      return { ok: true, stdout: "", stderr: "" };
     }
     if (sub === "kill-pane") {
       const target = String(argv[argv.indexOf("-t") + 1]);
@@ -613,6 +776,9 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     tools,
     deps,
     panes,
+    sessions,
+    windows,
+    scopeRecord,
     io,
     scratch,
     sidecars,

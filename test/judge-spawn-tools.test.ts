@@ -54,6 +54,10 @@ function setup(over: Partial<{
   planRememberFails?: boolean;
   /** The lane the gate resolves for this spawn (default: a plain first lane). */
   lane?: { lane: { objectId: string; generation: number }; roundsInObject: number };
+  /** tmux sessions the fake server already has (default: none). */
+  existingSessions?: string[];
+  /** A tmux-scope record already in the sidecar (default: none). */
+  scopeRecord?: { name: string; owner: string; createdAt: string };
 }> = {}): {
   deps: JudgeSpawnToolDeps;
   tools: Map<string, Exec>;
@@ -83,16 +87,23 @@ function setup(over: Partial<{
   /**
    * The boot report a freshly opened judge pane writes on its own channel.
    *
-   * Who it is comes out of the spawn argv itself (`-e RG_JUDGE_ID=…`), the
-   * same way the real pane learns it — so this fake cannot drift from the
-   * env contract the factory builds.
+   * Who it is comes out of the spawn argv itself (`env RG_JUDGE_ID=…`, the
+   * child's own command prefix), the same way the real pane learns it — so
+   * this fake cannot drift from the env contract the factory builds.
    */
   const reportBooted = (argv: readonly string[]): void => {
     const env = new Map<string, string>();
-    for (let i = 0; i < argv.length - 1; i++) {
-      if (argv[i] !== "-e") continue;
-      const [key, ...rest] = argv[i + 1]!.split("=");
-      env.set(key!, rest.join("="));
+    // NEVER tmux `-e` (2026-09-25, measured): it writes the SESSION environment,
+    // so the first child's identity was inherited by every later window of the
+    // session — a judge ended up reporting into the worker's channel. The
+    // factory prefixes the child's own command with `env K=V …` instead.
+    const envAt = argv.indexOf("env");
+    if (envAt >= 0) {
+      for (const token of argv.slice(envAt + 1)) {
+        if (!token.includes("=")) break;
+        const [key, ...rest] = token.split("=");
+        env.set(key!, rest.join("="));
+      }
     }
     const judgeId = env.get("RG_JUDGE_ID");
     const openerId = env.get("RG_JUDGE_OPENER");
@@ -135,15 +146,30 @@ function setup(over: Partial<{
     tmux: (argv) => {
       const base = over.tmux ?? ((inner: readonly string[]) => {
         seen.push([...inner]);
+        if (inner[0] === "list-sessions") return { ok: true, stdout: over.existingSessions?.join("\n") ?? "", stderr: "" };
+        if (inner[0] === "new-session" || inner[0] === "new-window") {
+          return { ok: true, stdout: "@7 %7\n", stderr: "" };
+        }
         if (inner[0] === "split-window") return { ok: true, stdout: "%7\n", stderr: "" };
         if (inner[0] === "list-panes") return { ok: true, stdout: `${store.panes.join("\n")}\n`, stderr: "" };
         return { ok: true, stdout: "", stderr: "" };
       });
       const result = base(argv);
-      if (argv[0] === "split-window" && result.ok) reportBooted(argv);
+      if ((argv[0] === "new-session" || argv[0] === "new-window" || argv[0] === "split-window") && result.ok) {
+        reportBooted(argv);
+      }
       return result;
     },
     ownPane: () => (over.ownPane === undefined ? "%1" : over.ownPane ?? undefined),
+    // Every judge is a window of the opener's own tmux session (2026-09-25);
+    // the fake scope answers from this session's own identity.
+    scope: {
+      sessionId: () => "019fbb1d-9e78-7ebf-88bf-d104b8a270ed",
+      repoRoot: () => "/repo",
+      read: () => over.scopeRecord,
+      write: () => { /* the test reads what it needs off the hierarchy */ },
+      now: () => "2026-09-25T00:00:00.000Z",
+    },
     // Faithful to the real wiring: a session in tmux always has a server, and
     // every pane it opens is minted by that one.
     tmuxServer: () => (over.tmuxServer === undefined ? "sock,1" : over.tmuxServer ?? undefined),
@@ -209,7 +235,7 @@ test("spawn plan opens a pane, registers the opener, and names the judge", async
   const entry = store.table[ids[0]!]!;
   assert.equal(entry.openerId, "session-child-1");
   assert.equal(entry.paneId, "%7");
-  // Recorded WITH the pane id. Without it `paneClosable` refuses forever, so
+  // Recorded WITH the pane id. Without it `windowClosable` refuses forever, so
   // declare_done's cascade would delete the entry and leave the pane running
   // with nobody able to address it (reviewer P1, 2026-09-05).
   assert.equal(entry.tmuxServer, "sock,1", "the pane id is useless without the server that minted it");
@@ -368,6 +394,8 @@ test("recover re-opens a dead pane under the same session id", async () => {
     panes: ["%1"],
     tmux: (argv) => {
       reopened.push([...argv]);
+      if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
+      if (argv[0] === "new-session" || argv[0] === "new-window") return { ok: true, stdout: "@9 %9\n", stderr: "" };
       if (argv[0] === "split-window") return { ok: true, stdout: "%9\n", stderr: "" };
       if (argv[0] === "list-panes") return { ok: true, stdout: "%1\n", stderr: "" };
       return { ok: true, stdout: "", stderr: "" };
@@ -384,8 +412,9 @@ test("recover re-opens a dead pane under the same session id", async () => {
   assert.equal(store.table[judgeId]!.paneId, "%9");
   assert.equal(store.table[judgeId]!.tmuxServer, "sock,1",
     "the recovered pane records its server too, or the entry stops being closable");
-  const resume = reopened.find((a) => a[0] === "split-window" && a.includes("%9") === false);
-  assert.ok(resume, "a second split-window ran for the recovery");
+  const resume = reopened.find((a) =>
+    (a[0] === "new-session" || a[0] === "new-window") && a.includes("%9") === false);
+  assert.ok(resume, "a second window was opened for the recovery");
   assert.ok(resume!.includes("--session-id") && resume!.includes(judgeId), "recovery resumes the SAME session id");
 });
 
@@ -416,11 +445,11 @@ test("spawn plan remembers the plan hash for adjudication", async () => {
   assert.equal(store.pending, "plan");
 });
 
-test("a rolled back spawn closes its pane and writes NO WINDOW OPTION (2026-09-17)", async () => {
-  // The pane it opened turned the WINDOW-level border line on (that is the C1
+test("a rolled back spawn closes its window and writes NO WINDOW OPTION (2026-09-17)", async () => {
+  // The window it opened turned ITS OWN WINDOW's border line on (that is the C1
   // fix); UNDOING that is deleted, because taking the bar down writes
   // `pane-border-status` and that resizes every pane in the window (measured:
-  // SIGWINCH, rows 84 ↔ 83). A rolled-back spawn therefore closes its pane
+  // SIGWINCH, rows 84 ↔ 83). A rolled-back spawn therefore closes its window
   // and nothing else.
   const { tools, seen, store } = setup({ planRememberFails: true });
   const result = await tools.get("judge_spawn")!({ kind: "plan" });
@@ -432,7 +461,7 @@ test("a rolled back spawn closes its pane and writes NO WINDOW OPTION (2026-09-1
   // (reviewer P2, 2026-09-05).
   assert.deepEqual(store.retired, [], "the previous lane survives a rolled-back spawn");
   const flat = seen.map((a) => a.join(" "));
-  assert.ok(flat.some((s) => s.startsWith("kill-pane")), "the pane it opened is closed");
+  assert.ok(flat.some((s) => s.startsWith("kill-window")), "the window it opened is closed");
   assert.deepEqual(
     flat.filter((s) => s.startsWith("setw") && s.includes("-u")),
     [],

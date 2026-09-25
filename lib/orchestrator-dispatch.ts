@@ -21,7 +21,7 @@ import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
 import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
 
 import {
-  openSessionPane,
+  openSessionWindow,
   type SessionPaneDecor,
 } from "./session-factory.ts";
 import {
@@ -104,7 +104,7 @@ function schedulingVerdict(
  * step the orchestrator takes after `orchestrator_spawn` returns — it is one
  * of the atomic things a spawn already does, exactly like writing the task
  * file. Since 2026-09-05 that atomicity is structural: the decoration happens
- * inside `openSessionPane` (lib/session-factory.ts) for EVERY kind of pane, so
+ * inside `openSessionWindow` (lib/session-factory.ts) for EVERY kind of pane, so
  * this function only says what to write.
  *
  * FAILURE IS COSMETIC, ALWAYS — the factory downgrades every tmux failure here
@@ -355,10 +355,10 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
 
   const decor = childPaneDecor(taskId, task.title, childId);
   let evidence: DeliveryEvidence | undefined;
-  const opened = await openSessionPane(deps.tmux, {
-    ownPane: self,
+  const opened = await openSessionWindow(deps.tmux, {
+    scope: deps.scope,
     cwd,
-    layout: "child-column",
+    layout: "own-session-window",
     // The environment is assembled by the factory — one place for a contract
     // three different processes read (orchestration id so wake-ups survive a
     // relay, `loop` so the child does not classify itself into something else,
@@ -382,11 +382,18 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     decor,
     // Registration rides INSIDE the open (an unregistered pane is
     // unaddressable, and the delivery probe below runs right after it).
-    register: (paneId) => {
+    register: (coords) => {
       deps.saveRuntime(registerChild(deps.runtime(), {
         id: childId,
         taskId,
-        paneId,
+        paneId: coords.paneId,
+        // WHERE THE CHILD LIVES, recorded with the pane id: closing it is
+        // `kill-window -t <session>:<window>`, and the session half is what
+        // keeps that kill inside the manager's own session. A child whose
+        // record lost either half is never closed by a guess
+        // (lib/orchestrator-registry.ts).
+        ...(coords.windowId === undefined ? {} : { windowId: coords.windowId }),
+        ...(coords.sessionName === undefined ? {} : { tmuxSession: coords.sessionName }),
         cwd,
         ...(worktree ? { worktree } : {}),
         stateVariant: childId,

@@ -19,6 +19,7 @@ import type { OrchestratorPlan } from "./orchestrator-plan.ts";
 import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
 import type { ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelIO } from "./orchestrator-channel.ts";
+import type { TmuxScope } from "./session-tmux-scope.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 
@@ -150,6 +151,12 @@ export interface OrchestratorDeps {
   tmux(argv: readonly string[]): TmuxRunResult;
   /** The orchestrator's own pane id, from $TMUX_PANE. */
   ownPane(): string | undefined;
+  /**
+   * The MANAGER's own tmux session (lib/session-tmux-scope.ts): every child it
+   * spawns is a window of it, so the manager's window never gains a pane (user
+   * decision, 2026-09-25). Created lazily by the first spawn.
+   */
+  scope: TmuxScope;
 
   /**
    * Render the gate's ONE question template (lib/choice-dialog.ts) in the

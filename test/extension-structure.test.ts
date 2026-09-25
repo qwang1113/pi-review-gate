@@ -3020,8 +3020,8 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   // session id continues the transcript that is already on disk.
   assert.match(body, /hasTranscript\(sessionDir\)/,
     "reuse is decided by the transcript, not by a live pane");
-  assert.match(body, /await openSessionPane\(run, \{/,
-    "a real pane open still exists for the no-reuse case — through the ONE factory");
+  assert.match(body, /await openSessionWindow\(run, \{/,
+    "a real child open still exists for the no-reuse case — through the ONE factory");
   // fresh:true kills the living pane FIRST (singleton per role+repo+opener),
   // and since 2026-09-05 it goes through ONE helper rather than carrying its
   // own copy of the close. That helper used to ask the shared label-bar
@@ -3033,7 +3033,7 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
     "…and does not re-inline the label-bar rule");
   const closeHelper = windowOf("function closeJudgePaneOf(", "\n  /**\n   * Retire a lane the gate has stopped using",
     "closeJudgePaneOf body");
-  assert.match(closeHelper, /closeSessionPane\(ctx\.run, entry\.paneId\)/, "the helper is what closes the pane");
+  assert.match(closeHelper, /closeSessionWindow\(ctx\.run, \{ ownSession: entry\.tmuxSession, windowId: entry\.windowId \}\)/, "the helper is what closes the window");
   assert.doesNotMatch(closeHelper, /setw|-u |hideLabelsVia/,
     "…and writes no window option: the bar is never released (user decision 2026-09-17)");
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
@@ -3078,6 +3078,128 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   );
   assert.match(judgeToolsWiring(), /findChild: \(root, role, judgeId\) => \{/,
     "…and the wiring answers it from the extension's own registry");
+  // ONE PROJECTION, and it is the registry module's (2026-09-25, quality P1).
+  // The extension used to build this record by hand in three places; when the
+  // window coordinates were added to the entry, all three were missed and the
+  // tools' close path silently stopped working — the unit tests inject their own
+  // `findChild`, so the hand-written projection was the one link nothing
+  // reached. Asserting the SHAPE here (no `sessionDir: c.sessionDir` literal,
+  // one call per seam) is what keeps a fourth copy from appearing.
+  const wiring = judgeToolsWiring();
+  assert.equal((SRC.match(/judgeChildRecordOf\(/g) ?? []).length >= 3, true,
+    "every entry→record seam goes through lib/hierarchy.ts `judgeChildRecordOf`");
+  assert.doesNotMatch(SRC, /sessionDir: c\.sessionDir/,
+    "no hand-written copy of the projection may come back");
+  assert.match(wiring, /judgeChildRecordOf\(c, root\)/,
+    "…including the by-role lookup, which supplies the repo it resolved");
+  // AND THE RUNNER CARRIES THE DECLARATION (2026-09-25). `runTmux` refuses the
+  // four session commands unless its caller declares the session it owns, so the
+  // extension must never call the RAW runner: one guarded wrapper, used by every
+  // tmux seam in the file, is what makes "only my own session" true at the
+  // executor as well as in the builders. A second `runTmux` definition (or a
+  // direct `rawTmux` call) would be a path with no declaration at all.
+  assert.match(SRC, /import \{ runTmux as rawTmux \} from "\.\.\/lib\/orchestrator-wiring\.ts"/,
+    "the raw runner is imported under a name nothing can call by accident");
+  assert.equal((SRC.match(/const runTmux = /g) ?? []).length, 1,
+    "exactly ONE wrapper defines this session's runTmux");
+  assert.match(SRC, /const runTmux = \(argv: readonly string\[\], env\?: NodeJS\.ProcessEnv, extraSessions\?: readonly string\[\]\) =>[\s\S]{0,200}rawTmux\(argv, env \?\? process\.env, \{[\s\S]{0,400}ownSessions: addressableSessions\(\s*tmuxScope,[\s\S]{0,400}sessionOwnership,/, "…and it attaches the sessions lib/session-tmux-scope.ts derived for this process");
+  // AND EVERY ONE OF THEM IS EARNED, NOT READ (2026-09-25, t4 whole-branch
+  // review P1). A registry row is only a CANDIDATE: `createOwnershipProbe`
+  // reads each candidate's `@rg_scope_owner` marker and declares it only when
+  // the name is the one THAT owner derives. Without it the declaration was a
+  // shape test, so any writable registry naming an `rg-…` string widened it and
+  // a `kill-window` could be aimed at another session's window.
+  assert.equal((SRC.match(/createOwnershipProbe\(/g) ?? []).length, 1,
+    "one ownership probe per process");
+  assert.match(SRC, /const sessionOwnership = createOwnershipProbe\(tmuxScope, \(argv\) => rawTmux\(argv\)\)/,
+    "…reading markers through the RAW runner, so it cannot recurse into the wrapper it feeds");
+  // THE FOURTH PARAMETER IS THE ONLY WIDENING, AND IT ARRIVES ALREADY PROVEN
+  // (2026-09-25, t2): the orphan sweep kills the dedicated session of a session
+  // that is GONE — nobody alive holds that name, so it cannot come from a
+  // registry row. lib/session-registry.ts reads its `@rg_scope_owner` marker
+  // and compares it with the dead entry's session id before the kill is built,
+  // and it is passed as PROVEN rather than as a candidate (t4 review P1), so
+  // the widening is one verified name at a time and never a caller-supplied
+  // session.
+  assert.match(SRC, /sessionNaming = createSessionNaming\(\{\s*runTmux: \(argv, ownSessions\) => runTmux\(argv, undefined, ownSessions\)/, "the naming module's runner is the same guarded wrapper");
+  // THE FOUR MOMENTS THE SESSION'S NAME LIVES IN (2026-09-25, t2). All the
+  // judgement is in lib/session-registry.ts + lib/session-name-tools.ts; the
+  // extension only connects the lifecycle, and a connection that is DROPPED is
+  // exactly the kind of defect no unit test can see (the modules are fine on
+  // their own). One registered tool, one adoption+sweep at start, one renewal
+  // clock, one release at the exit contract and one at process death.
+  assert.equal((SRC.match(/sessionNaming\.register\(pi\)/g) ?? []).length, 1,
+    "name_session is registered exactly once, for every kind of session");
+  assert.match(SRC, /const namingStart = sessionNaming\.onSessionStart\(\);/,
+    "session start adopts its own registration and sweeps the orphans");
+  assert.match(SRC, /const namingRelease = sessionNaming\.release\(\);/,
+    "declare_done gives the name back");
+  assert.match(SRC, /namingRelease\.released \? "" : `\\n（会话名字未腾出：\$\{namingRelease\.error \?\? "未知原因"\}）`/,
+    "…and reports it when it could not, instead of claiming a clean exit");
+  assert.match(SRC, /sessionNamingTimer = setInterval\(\(\) => \{\s*try \{ sessionNaming\.tick\(\); \} catch/, 
+    "the renewal rides a timer of the extension, not an agent event");
+  assert.match(SRC, /\}, sessionNaming\.heartbeatMs\);/,
+    "…on the interval the registry module owns");
+  assert.match(SRC, /process\.on\("exit", \(\) => \{\s*try \{ sessionNamingAtExit\?\.release\(\); \} catch/,
+    "a dying process releases its name rather than leaving it for the sweep");
+  // AND THAT HANDLER IS REGISTERED ONCE PER PROCESS, at module scope (quality
+  // round 2 P2): pi rebuilds the extension runner on /new, /resume, /fork and
+  // /reload, so a registration inside the factory accumulates one listener per
+  // session and every stale instance runs its own release at exit. It reads the
+  // CURRENT session's runtime through one module-level slot, which the factory
+  // re-points.
+  assert.equal((SRC.match(/^process\.on\("exit", \(\) => \{$/gm) ?? []).length, 1,
+    "exactly ONE process-exit handler, whatever the number of sessions this process runs");
+  assert.match(SRC, /^let sessionNamingAtExit: \{ release\(\): unknown \} \| undefined;\nprocess\.on\("exit"/m,
+    "…and it is declared at module scope, above the extension factory");
+  assert.equal((SRC.match(/sessionNamingAtExit = sessionNaming;/g) ?? []).length, 1,
+    "the factory points that one handler at this session's runtime");
+  // A SHUTDOWN IS NOT ALWAYS A DEATH (quality round 2 P1). Only `reload` keeps
+  // the same session id, so only `reload` may leave the registration in place
+  // for the next instance to adopt; `/new`, `/resume` and `/fork` replace the
+  // session (new id, new instance, `held` gone) while the pane and the pid stay
+  // — without the release the old registration keeps looking LIVE and the name
+  // can never be taken again in that window.
+  assert.match(SRC, /stopSessionNamingHeartbeat\(\);\s*\n    if \(event\.reason !== "reload"\) sessionNaming\.release\(\);/,
+    "session_shutdown stops the clock and gives the name back for every reason but a reload");
+  // BOTH HALVES OF THE CLOCK, EACH EXACTLY ONCE: the Nit of quality round 2 was
+  // a second, redundant stop in the same handler (harmless — `clearInterval` is
+  // idempotent — but it read like two different moments).
+  assert.equal((SRC.match(/stopSessionNamingHeartbeat\(\);/g) ?? []).length, 1,
+    "the clock is stopped once, at shutdown");
+  assert.equal((SRC.match(/startSessionNamingHeartbeat\(\);/g) ?? []).length, 1,
+    "and started once, when the session starts");
+  // THE LIST HAS TWO HALVES THAT ARE EASY TO GET WRONG IN OPPOSITE DIRECTIONS
+  // (2026-09-25, quality round P2):
+  //  - TOO WIDE: the judge registry FILE is shared with other sessions in this
+  //    repo, so reading it whole would put THEIR scope sessions in my
+  //    declaration. Only `ownJudges()` — my rows and the lineage's — may widen it.
+  //  - TOO NARROW: the worker registry names sessions no in-memory row does (a
+  //    relay successor closes the predecessor's worker windows without ever
+  //    having dispatched one), so it has to be read too.
+  assert.match(SRC, /ownJudges\(\)\.map\(\(entry\) => entry\.tmuxSession\)/,
+    "the judge half is MY rows, not the whole shared table");
+  assert.doesNotMatch(SRC, /Object\.values\(judgeHierarchy\)\.map\(\(entry\) => entry\.tmuxSession\)/,
+    "…and never the raw table");
+  assert.match(SRC, /\.\.\.workerRegistrySessions\(\),/, "the worker registry's sessions are in the list");
+  // The wrapper's body is the ONLY call that can CARRY a session command:
+  // anything else calling the raw runner directly would be a path with no
+  // declaration at all. The ownership probe is the one exception, and its
+  // safety is STRUCTURAL rather than granted (2026-09-25, t4 review P1): it
+  // reads `show-options` — never one of the four session subcommands the guard
+  // gates — and it must NOT go through the wrapper, which would recurse into
+  // the very declaration the probe is building.
+  assert.equal((SRC.match(/rawTmux\(/g) ?? []).length, 2, "only the wrapper and the ownership probe call the raw runner");
+  assert.match(SRC, /createOwnershipProbe\(tmuxScope, \(argv\) => rawTmux\(argv\)\)/,
+    "…and the probe's call is the marker read, through the raw runner on purpose");
+  // AND THE OTHER DIRECTION: an entry that is RE-registered (a new round queued
+  // into a live pane, a rotated lane) must carry the whole pane forward. Copying
+  // `paneId` by hand and forgetting the window pair was the second instance of
+  // the P1 above — the pane stays on screen and nothing can close it.
+  assert.equal((SRC.match(/paneCoordsOf\(/g) ?? []).length >= 1, true,
+    "a re-registration spreads lib/hierarchy.ts `paneCoordsOf`, never a hand-picked field");
+  assert.match(SRC, /\.\.\.paneCoordsOf\(live\)/,
+    "…and the reuse path takes it from the LIVE entry, which is the one that has the coordinates")
   assert.match(JUDGE_TOOLS_SRC, /function checkOpener\(/, "the opener check is one shared helper");
   assert.equal(
     (JUDGE_TOOLS_SRC.match(/checkOpener\(deps, /g) ?? []).length,
@@ -3671,7 +3793,7 @@ test("the verdict recorder actually runs the cwd check it demands", () => {
   assert.match(body, /CWD CHECK FAILED/, "and the agent is told why");
 });
 
-test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is the carrier", () => {
+test("user ask 2026-08-28: the judge SESSION is the managed entity, the window is the carrier", () => {
   // The dispatcher must RECORD the session-side paths at spawn time (the
   // transcript dir and the pane), plus WHO opened it.
   const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
@@ -3706,9 +3828,13 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
   assert.match(SRC.slice(helperAt, helperAt + 600), /judgeChannelTarget\(judge\.openerId, judge\.judgeId\)/,
     "…from THAT judge's own channel file");
 
-  // judge_close: kill the PANE, then drop the registry. Idempotent.
+  // judge_close: kill the WINDOW, then drop the registry. Idempotent.
   const close = toolBodyOf("judge_close");
-  assert.match(close, /closeSessionPane\(deps\.tmux, child\.paneId\)/, "the pane is killed, not a process");
+  assert.match(
+    close,
+    /closeSessionWindow\(deps\.tmux, \{ ownSession: child\.tmuxSession, windowId: child\.windowId \}\)/,
+    "the child's window is closed, not a process",
+  );
   // …and NOTHING else: the window's label bar used to come down with the last
   // decorated pane, and that write resizes every pane in the window (measured:
   // SIGWINCH, rows 84 ↔ 83). The release is deleted (2026-09-17, user decision).
@@ -7183,7 +7309,7 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   const dispatch = windowOf("async function dispatchAcceptanceRound", "\n  /**", "dispatchAcceptanceRound");
   assert.match(dispatch, /dispatchJudgeRound\(\{/);
   assert.match(dispatch, /role: "acceptance",/);
-  assert.doesNotMatch(dispatch, /openSessionPane|runTmux\(|appendRecord\(/,
+  assert.doesNotMatch(dispatch, /openSessionWindow|runTmux\(|appendRecord\(/,
     "a second pane/dispatch path is exactly what the third philosophy forbids");
   assert.match(SRC, /recordAcceptance: async \(\{ root, concluded \}\) =>/, "the recorder is wired beside recordQuality's");
   const arm = windowOf("async function armAcceptanceRound", "\n  /**", "armAcceptanceRound");

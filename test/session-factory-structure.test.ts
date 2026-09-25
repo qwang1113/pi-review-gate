@@ -16,8 +16,12 @@
  *       builder that constructs it, and the bash guard's forbidden-alias table
  *       (which is not an execution point — it is the list of commands the agent
  *       may not type);
- *   (b) the spawn argv builders are imported and called in exactly one place:
- *       lib/session-factory.ts.
+ *   (b) the argv builders are imported and called in exactly the places their
+ *       job allows: OPENING has one path (lib/session-factory.ts for a child's
+ *       window and the relay's split, lib/session-tmux-scope.ts for the session
+ *       itself), while reading a session's marker and killing one also has the
+ *       orphan sweep — which reclaims a holder that is provably gone and never
+ *       opens anything;
  *
  * Plus: the six call sites that open a pi session all go through the factory.
  */
@@ -61,18 +65,49 @@ test("(a) the split-window literal lives in exactly two files, and neither is a 
     "(that file is a deny-list, not an execution point)");
 });
 
-test("(b) the spawn argv builders have exactly one consumer: the session factory", () => {
-  for (const builder of ["buildSpawnPaneArgv", "buildHandoffPaneArgv"]) {
-    const users = sourceFiles()
-      .filter((f) => f.text.includes(builder))
-      .map((f) => f.rel)
-      .sort();
-    assert.deepEqual(users, ["lib/orchestrator-tmux.ts", "lib/session-factory.ts"],
-      `${builder} is defined in orchestrator-tmux.ts and used ONLY by the factory`);
+test("(b) the argv builders have exactly the consumers their job allows — and opening has ONE path", () => {
+  // The window/session builders live in the tmux module. The claim that matters
+  // is about OPENING: exactly one file may create the session and one may open
+  // a child in it, because a third consumer is how a second opening path
+  // starts. Reading a session's marker and KILLING one is a different job with
+  // a second, argued consumer (2026-09-25, t2): the orphan sweep reclaims the
+  // session of a holder that is PROVABLY gone, after reading that session's own
+  // `@rg_scope_owner` marker and finding the dead holder's id in it — it never
+  // creates anything, and its kill goes through the same builder (and the same
+  // shape check) as the owner's own `closeOwnSession`.
+  const openingBuilders = [
+    "buildNewSessionArgv",
+    "buildNewWindowArgv",
+    "buildSetSessionOwnerArgv",
+  ];
+  const readOrKillBuilders = ["buildKillSessionArgv", "buildReadSessionOwnerArgv", "buildListSessionsArgv"];
+  const factoryDefined = ["buildHandoffPaneArgv", "buildKillWindowArgv", "buildKillPaneArgv"];
+  const claims: Array<[readonly string[], string[]]> = [
+    [openingBuilders, ["lib/orchestrator-tmux.ts", "lib/session-tmux-scope.ts"]],
+    [readOrKillBuilders, ["lib/orchestrator-tmux.ts", "lib/session-tmux-scope.ts", "lib/session-orphan-sweep.ts"]],
+    [factoryDefined, ["lib/orchestrator-tmux.ts", "lib/session-factory.ts"]],
+  ];
+  for (const [builders, consumers] of claims) {
+    for (const builder of builders) {
+      const users = sourceFiles()
+        .filter((f) => f.text.includes(builder))
+        .map((f) => f.rel)
+        .sort();
+      assert.deepEqual(users, [...consumers].sort(),
+        `${builder} is defined in orchestrator-tmux.ts and used only by ${consumers.slice(1).join(" / ")}`);
+    }
+  }
+  // …and NEITHER the factory NOR the sweep is a second caller of the OPENING
+  // builders: the session is the scope module's, and only the scope module's.
+  const factoryText = sourceFiles().find((f) => f.rel === "lib/session-factory.ts")!.text;
+  const sweepText = sourceFiles().find((f) => f.rel === "lib/session-orphan-sweep.ts")!.text;
+  for (const builder of openingBuilders) {
+    assert.ok(!factoryText.includes(builder), `the factory must not call ${builder} itself`);
+    assert.ok(!sweepText.includes(builder), `the sweep reclaims, it never opens: ${builder} is not its business`);
   }
 });
 
-test("all six pane-opening call sites go through openSessionPane", () => {
+test("all six pane-opening call sites go through the factory", () => {
   // Six anchors, and the window for each ends where the NEXT function starts —
   // never at a guessed brace. A window that ran past its function would find a
   // neighbour's call and report success for a caller that opens panes its own
@@ -103,15 +138,15 @@ test("all six pane-opening call sites go through openSessionPane", () => {
       if (other === site || other.file !== site.file) continue;
       assert.ok(!body.includes(other.anchor), `${site.anchor}'s window must stop before ${other.anchor}`);
     }
-    const opens = [...body.matchAll(/openSessionPane\(/g)].length;
-    assert.equal(opens, 1, `${site.file} ${site.anchor} opens its pane through the factory, exactly once`);
+    const opens = [...body.matchAll(/openSessionWindow\(/g)].length;
+    assert.equal(opens, 1, `${site.file} ${site.anchor} opens its child through the factory, exactly once`);
   }
 });
 
-test("nothing opens a pane behind the factory's back", () => {
+test("nothing opens a child behind the factory's back", () => {
   const stragglers = sourceFiles()
-    .filter((f) => f.rel !== "lib/session-factory.ts")
-    .filter((f) => /\b(openJudgePane|buildSpawnPaneArgv\(|buildHandoffPaneArgv\()/.test(f.text))
+    .filter((f) => f.rel !== "lib/session-factory.ts" && f.rel !== "lib/session-tmux-scope.ts")
+    .filter((f) => /\b(openJudgePane|buildSpawnPaneArgv\(|buildNewSessionArgv\(|buildNewWindowArgv\()/.test(f.text))
     .filter((f) => f.rel !== "lib/orchestrator-tmux.ts")
     .map((f) => f.rel);
   assert.deepEqual(stragglers, [],

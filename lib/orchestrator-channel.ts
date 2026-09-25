@@ -688,8 +688,18 @@ function spillIfLarge(io: ChannelIO, target: ChannelTarget, record: ChannelRecor
   return record;
 }
 
-/** Resolve a spilled payload back into text. `undefined` when unreadable. */
-export function resolvePayload(io: ChannelIO, ref: ChannelPayloadRef | undefined): string | undefined {
+/**
+ * Resolve a spilled payload back into text. `undefined` when unreadable.
+ *
+ * Takes the READ half of the IO seam rather than all of it: resolving a spill
+ * is a read, and the inbox (lib/session-message-tools.ts) shares this helper
+ * without being a {@link ChannelIO} — it has no reason to grow a `now` it never
+ * calls just to be allowed to read a file.
+ */
+export function resolvePayload(
+  io: Pick<ChannelIO, "readText">,
+  ref: ChannelPayloadRef | undefined,
+): string | undefined {
   if (!ref) return undefined;
   return io.readText(ref.path);
 }

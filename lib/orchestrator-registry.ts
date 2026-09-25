@@ -33,7 +33,7 @@ import {
 } from "./orchestrator-plan-approval.ts";
 import { isPlanHash } from "./orchestrator-plan.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
-import { isPaneId } from "./orchestrator-tmux.ts";
+import { isPaneId, parseWindowCoords } from "./orchestrator-tmux.ts";
 
 
 /** One child session, as the orchestration knows it. */
@@ -42,8 +42,20 @@ export interface ChildSession {
   id: string;
   /** The plan task this child was spawned for. */
   taskId: string;
-  /** tmux pane it runs in (the only pane the gate may kill for it). */
+  /** tmux pane it runs in (what liveness is read from, never what is killed). */
   paneId: string;
+  /**
+   * The WINDOW the child runs in, and the session that owns it (2026-09-25).
+   *
+   * A child is a window of the MANAGER's own tmux session
+   * (lib/session-tmux-scope.ts), so closing it is `kill-window -t
+   * <tmuxSession>:<windowId>` — and the session half is what keeps a stale
+   * window id from reaching a window the user owns. Both are optional in the
+   * type because a sidecar written by an older build has neither; an entry
+   * without them is never closed by a guess.
+   */
+  windowId?: string;
+  tmuxSession?: string;
   /** Working directory it was started in (the repo root, or an isolated worktree). */
   cwd: string;
   /**
@@ -528,6 +540,12 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     // handed to a path join.
     const stateVariant = str(c.stateVariant)?.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 64);
     const taskFile = str(c.taskFile);
+    // The window/session coordinates are sanitized by SHAPE through the shared
+    // parser, not merely by "is a string": they become a tmux target, and the
+    // sidecar is untrusted input. Either half being wrong drops BOTH — the entry
+    // then reads as "predates the window topology", which is the fail-closed
+    // direction (it simply cannot be closed by id).
+    const coords = parseWindowCoords({ windowId: c.windowId, tmuxSession: c.tmuxSession });
     // The isolated checkout, sanitized like everything else that becomes a
     // PATH: the sidecar is untrusted input, and this one is handed to git.
     // Both halves must be present — a path without its branch cannot be
@@ -538,6 +556,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     children.push({
       id, taskId, cwd, createdAt,
       paneId: c.paneId,
+      ...(coords === undefined ? {} : coords),
       ...(stateVariant ? { stateVariant } : {}),
       ...(taskFile ? { taskFile } : {}),
       ...(worktree ? { worktree } : {}),

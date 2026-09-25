@@ -7,6 +7,9 @@
  *   - lib/blocked-marker.ts     — is a RECORD ON DISK still somebody's?
  *   - lib/session-exclusivity.ts — is a HEARTBEAT still fresh?
  *   - lib/judge-pane.ts          — is a tmux PANE still listed?
+ *   - lib/session-registry.ts    — is the HOLDER OF A NAME gone? (2026-09-25:
+ *     the only criterion that MIXES the others: heartbeat stale AND pid gone
+ *     AND pane gone, anything unreadable meaning unknown; argued in its header)
  *
  * They were reviewed together on 2026-09-06 under philosophy three ("never two
  * implementations of one thing") and found to be THREE questions, not one: they
@@ -19,7 +22,9 @@
  * lib/judge-session.ts) was deleted the same day. That one really WAS a
  * philosophy-three violation: a second implementation with no production caller
  * left. The distinction this file exists to make is exactly that one — an
- * unused duplicate is deleted, three differently-argued rules are not.
+ * unused duplicate is deleted, differently-argued rules are not. (The plain pid
+ * probe returned in 2026-09-25 as ONE fact among three for the registry's name
+ * release; the ratchet at the bottom of this file pins it to that one home.)
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -84,14 +89,14 @@ test("a FUTURE timestamp (clock skew on a shared checkout) is kept by one and ig
 test("the pane criterion answers a THIRD way: missing information, neither alive nor dead", () => {
   const blindRunner: JudgePaneRunner = () => ({ ok: false, stdout: "", stderr: "no server" });
   assert.equal(
-    judgePaneAlive(blindRunner, "%0", "%1"),
+    judgePaneAlive(blindRunner, "%1"),
     undefined,
     "an unreadable pane list is missing information — never a dead judge",
   );
 
   const seeing: JudgePaneRunner = () => ({ ok: true, stdout: "%0\n%1\n", stderr: "" });
-  assert.equal(judgePaneAlive(seeing, "%0", "%1"), true);
-  assert.equal(judgePaneAlive(seeing, "%0", "%7"), false);
+  assert.equal(judgePaneAlive(seeing, "%1"), true);
+  assert.equal(judgePaneAlive(seeing, "%7"), false);
 });
 
 test("the two time windows are different quantities on purpose (a session vs a heartbeat)", () => {
@@ -107,12 +112,24 @@ test("the two time windows are different quantities on purpose (a session vs a h
   );
 });
 
-test("the deleted fourth criterion stays deleted: no module probes a pid for liveness", async () => {
+test("pid liveness lives in EXACTLY ONE place, and it is the weakest of three facts", async () => {
+  // IT WAS DELETED ONCE (2026-09-06, "no production caller") AND IT CAME BACK
+  // WITH ONE (2026-09-25, user decision, the session registry): a NAME is
+  // released only when the holder is provably gone, and "provably" is three
+  // facts — a stale heartbeat AND no process with that pid AND no pane in tmux
+  // — with anything unreadable meaning `unknown`, which releases nothing. The
+  // pid is the WEAKEST of the three (pids are recycled, so a live pid never
+  // proves the session is alive; only a dead one adds evidence), and that is
+  // exactly why the ratchet below is now an ALLOW-LIST rather than a
+  // prohibition: one module may probe, nobody else may, and the day a second
+  // one starts it fails here instead of becoming a second answer to "is that
+  // session still alive".
   const { readdirSync, readFileSync } = await import("node:fs");
   const libDir = new URL("../lib/", import.meta.url);
   const offenders: string[] = [];
   for (const name of readdirSync(libDir)) {
     if (!name.endsWith(".ts")) continue;
+    if (name === "session-registry.ts") continue; // the one home, argued in its header
     const src = readFileSync(new URL(name, libDir), "utf8");
     // CODE only. blocked-marker.ts's own header argues AGAINST pid probing by
     // naming the call, and a test that cannot tell the warning from the deed
@@ -129,6 +146,12 @@ test("the deleted fourth criterion stays deleted: no module probes a pid for liv
   assert.deepEqual(
     offenders,
     [],
-    "pid-identity liveness came back — it was deleted 2026-09-06 for having no production caller",
+    "pid liveness escaped its one home (lib/session-registry.ts `pidAlive`) — " +
+      "a second implementation is a second answer to whether a session is alive",
   );
+  // AND THE ONE HOME IS THE WEAKEST LINK ON PURPOSE: a live pid alone is not
+  // enough to call a holder alive in the tool's own refusals/takeovers — the
+  // classification reads the heartbeat first and the pane list before the pid
+  // (lib/session-registry.ts `classifyEntry`), which the registry's own tests
+  // pin branch by branch.
 });

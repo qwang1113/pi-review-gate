@@ -20,6 +20,7 @@
  */
 
 import type { PaneRunResult } from "./session-factory.ts";
+import { parseWindowCoords } from "./orchestrator-tmux.ts";
 
 /** The job a worker pane runs — the argv a runner executes. */
 export type WorkerPaneRunner = (argv: readonly string[]) => PaneRunResult;
@@ -67,6 +68,16 @@ export interface WorkerEntry {
    * instead of forking a new one on a new channel.
    */
   paneId?: string;
+  /**
+   * The WINDOW this worker runs in and the session that owns it (2026-09-25).
+   *
+   * A worker is a window of its opener's own tmux session now, so `worker_close`
+   * kills `kill-window -t <tmuxSession>:<windowId>`: the session half is what
+   * keeps a stale window id from reaching a window the user owns. Dropped
+   * together with `paneId` when the worker is closed.
+   */
+  windowId?: string;
+  tmuxSession?: string;
   /**
    * The tmux SERVER this pane id came from, when the caller knows it.
    *
@@ -131,11 +142,18 @@ export function parseWorkerRegistry(raw: unknown): WorkerRegistry {
     // (channel owner, session id, report cursor) with no pane.
     if (!openerId || !role || !model || !sessionId || !repoRoot || !createdAt) continue;
     const paneId = str(e.paneId);
+    // The window/session pair is sanitized by SHAPE through the shared parser —
+    // it becomes a tmux target, and this file is on disk. Either half being
+    // wrong drops BOTH: a half-record that "looks recorded" is worse than no
+    // record at all (2026-09-25, quality round P2 — the same rule as the
+    // orchestration sidecar, one implementation).
+    const coords = parseWindowCoords({ windowId: e.windowId, tmuxSession: e.tmuxSession });
     const reportedAt = str(e.reportedAt);
     const tmuxServer = str(e.tmuxServer);
     out[id] = {
       workerId: id, openerId, role, model, sessionId, repoRoot, createdAt,
       ...(paneId === undefined ? {} : { paneId }),
+      ...(coords === undefined ? {} : coords),
       ...(reportedAt === undefined ? {} : { reportedAt }),
       ...(tmuxServer === undefined ? {} : { tmuxServer }),
     };

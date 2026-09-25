@@ -198,6 +198,36 @@ test("SECURITY: a malformed blob loses the user's APPROVAL, not the live childre
     "the unaddressable child is dropped — it could not be closed or waited on anyway");
 });
 
+test("SECURITY: the window pair is sanitized by shape, and a half-record is no record", () => {
+  // Same rule as the judge registry and the worker registry, one implementation
+  // (`lib/orchestrator-tmux.ts parseWindowCoords`, 2026-09-25 quality round P2):
+  // these two fields become a tmux target, so a value that is not a window id /
+  // a gate session name is not carried — and because the pair is what a close
+  // is ADDRESSED by, losing one half drops both.
+  const child = (extra: Record<string, unknown>) => ({
+    id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW, ...extra,
+  });
+  const cleaned = normalizeRuntime({
+    children: [
+      child({ windowId: "@2", tmuxSession: "rg-repo-abcdef1234" }),
+      child({ id: "b-1", windowId: "%2", tmuxSession: "rg-repo-abcdef1234" }),
+      child({ id: "c-1", windowId: "@2", tmuxSession: "my-work" }),
+      child({ id: "d-1", windowId: "@2", tmuxSession: "rg-repo-abcdef1234:@2" }),
+      child({ id: "e-1", windowId: "@2" }),
+    ],
+  }, "orch-abc-1");
+  const byId = new Map(cleaned!.children.map((c) => [c.id, c]));
+  assert.deepEqual(
+    { windowId: byId.get("a-1")!.windowId, tmuxSession: byId.get("a-1")!.tmuxSession },
+    { windowId: "@2", tmuxSession: "rg-repo-abcdef1234" },
+  );
+  for (const id of ["b-1", "c-1", "d-1", "e-1"]) {
+    assert.equal(byId.get(id)!.windowId, undefined, `${id}: nothing half-recorded is carried`);
+    assert.equal(byId.get(id)!.tmuxSession, undefined, `${id}: neither half survives on its own`);
+    assert.equal(byId.get(id)!.paneId, "%2", "…and the child itself is kept (liveness still reads its pane)");
+  }
+});
+
 test("SECURITY: a forged approval hash is refused on shape alone", () => {
   for (const hash of ["not-a-hash", "", "a".repeat(63), "A".repeat(64), "../../etc"]) {
     const cleaned = normalizeRuntime({ approvedPlanHash: hash, children: [] }, "orch-abc-1");
