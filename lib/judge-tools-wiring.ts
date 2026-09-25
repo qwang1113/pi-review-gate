@@ -27,6 +27,7 @@ import { formatPlanSummary } from "./orchestrator-plan.ts";
 import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import { readPlanFile } from "./orchestrator-wiring.ts";
 import type { createRoundCancel } from "./round-cancel-host.ts";
+import type { RoundCancelLedger } from "./round-cancel-ledger.ts";
 import type { SessionCells } from "./session-cells.ts";
 import { sessionDirForCwd } from "./session-dir.ts";
 import type { SessionRepos } from "./session-repos-host.ts";
@@ -42,6 +43,7 @@ export interface JudgeToolsWiringDeps {
   auditRoundDeps: ReturnType<typeof createAuditRoundHost>["auditRoundDeps"];
   buildGoalAuditRound: ReturnType<typeof createAuditRoundHost>["buildGoalAuditRound"];
   applyRoundCancel: ReturnType<typeof createRoundCancel>["applyRoundCancel"];
+  cancelLedger: RoundCancelLedger;
   resolveJudgeLane: ReturnType<typeof createJudgeLanes>["resolveJudgeLane"];
   resolveJudgeLaunch: ReturnType<typeof createJudgeLaunch>["resolveJudgeLaunch"];
   cancelChildWaitTimer(): void;
@@ -76,6 +78,7 @@ export function buildJudgeSessionDeps(cells: SessionCells, deps: JudgeToolsWirin
       // `<session>:<@window>` is a judge window nothing can close.
       return c ? judgeChildRecordOf(c) : undefined;
     },
+    roundCancellation: (root, role, judgeId) => deps.cancelLedger.read(root, role, judgeId),
     findChild: (root, role, judgeId) => {
       const c = settle.findJudgeChild(root, role, judgeId);
       return c ? judgeChildRecordOf(c, root) : undefined;

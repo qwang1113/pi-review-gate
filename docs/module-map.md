@@ -739,6 +739,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `review-scope.ts` | 增量审查定档（只决策、不出文案）：**两类前置** —— 关于增量的（多大就升级成整轮深审、是否触及未审过的文件），以及关于**读者**的（2026-09-06）：只有 transcript 确实续用的 judge 才配拿增量任务书，判定由 `judge-rotation.ts` 的 `judgeRemembersPreviousRound` 给，本模块只消费。缺任何一项即 `full`，增量从不靠推断 |
 | `review-stream.ts` | findings 流：reviewer 边审边发，主会话边修 |
 | `round-cancel-host.ts` | **取消矩阵的执行面与挂起 READY 的重问**（t7 从扩展拆出）：`cancelJudgeRound`（真杀 pane + 删登记 + 回收 scratch）、`applyCancelPlan`（矩阵三行共用的唯一执行点）、`applyRoundCancel`（judge 结算那一行，挂起的结论不取消任何东西）、`resumeParkedReady`（按两个前提的状态决定 clear / replay）；表与判定在 `quality-round.ts` / `review-adjudicate.ts` |
+| `round-cancel-ledger.ts` | **每个 repo+role 最近一次被取消的轮次（墓碑，只在进程内）**：`cancelJudgeRound` 写、dispatch 开始时清；`judge_wait` 找不到登记行时、dispatch 的 boot 校验失败时读它 —— 两处对「本轮被取消」说同一句话（原因 + 下一步） |
 | `review-target-host.ts` | 一轮 reviewer 的 **review target**（t6 从扩展拆出）：`ReviewTarget`（`baseline..HEAD` + tree + 派发范围 + 改动文件 + 本轮派出的质量 judge）、`noteQualityRoundDispatched`、`qualityRoundInFlight`（本轮质量 judge 还能不能交卷：本轮派过 + pane 活着 + 没有非 SKIP 的裁决站在这个 head 上）；活性读 `judge-registry-host.ts` 的 `ownLiveJudges` |
 | `sensitive-grant.ts` | 敏感文件的一次性用户授权：限定路径、限时、用后即焚 |
 | `session-handoff.ts` | **唯一的会话交接策略**（2026-09-14，用户决定）：阈值 `HANDOFF_PERCENT = 70`（orchestrator 的 80/90 与 judge 的 60 三个数字合并成一个）、`handoffDue`（读数缺失**不提醒**——用缺失信息报警会训练读者忽略它）、`buildHandoffDoc`（骨架：契约 / 未完成工作 / transcript 指针 + 明确标为「自述」的 agent 补充段）、`handoffAccepted`（接手判据：**读过交接文档 且** 有过一次成功工具调用，两条同时成立——只跑命令不算，这正是用户同意的形状）。纯函数 |

@@ -30,6 +30,7 @@ import {
 } from "./quality-round.ts";
 import { parkedLaneHalf, parkedReadyFate } from "./review-adjudicate.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
+import type { RoundCancelLedger } from "./round-cancel-ledger.ts";
 import type { SessionHost } from "./session-host.ts";
 
 export function createRoundCancel(
@@ -38,6 +39,8 @@ export function createRoundCancel(
     pi: ExtensionAPI;
     registry: Pick<JudgeRegistry, "judgeHierarchy" | "setHierarchy" | "absorbJudgeModelEvents">;
     runTmux: TmuxRunner;
+    /** lib/round-cancel-ledger.ts — what judge_submit / judge_wait read once the row is gone. */
+    cancelLedger: RoundCancelLedger;
     reviewTargets: Map<string, ReviewTarget>;
     stageIsOn(stage: LoopStage, root?: string): boolean;
     laneVerificationWaived(root: string, st?: GateState): boolean;
@@ -57,7 +60,7 @@ export function createRoundCancel(
 ) {
   const { judgeHierarchy, setHierarchy, absorbJudgeModelEvents } = deps.registry;
   const {
-    pi, runTmux, reviewTargets, stageIsOn, laneVerificationWaived, judgeChildByRole,
+    pi, runTmux, cancelLedger, reviewTargets, stageIsOn, laneVerificationWaived, judgeChildByRole,
     closeJudgePaneOf, reapReviewScratch, precommitLaneRunning, abortPrecommitLane,
     qualityRoundInFlight, recordReviewVerdict,
   } = deps;
@@ -107,6 +110,7 @@ export function createRoundCancel(
       : undefined;
     if (alive === true) closeJudgePaneOf(entry, { ownPane, tmuxServer, run });
     setHierarchy(removeJudge(judgeHierarchy(), entry.judgeId));
+    cancelLedger.note(root, { role, judgeId: entry.judgeId, why });
     reapReviewScratch(entry.judgeId);
     log(`review-gate: cancelled the ${role} round of ${root} — ${why}`);
     return `已终止 ${role} 的这一轮（${why}）。`;
@@ -223,11 +227,14 @@ export function createRoundCancel(
    * submission would wait for a quiet lane before starting the one that
    * matters (`waitForQuietLane`) — the abort buys back the wait, not just the
    * CPU.
+   *
+   * `why` is the landing's own reason when it has one: the lane's row is not
+   * "a judge said non-READY", and the tombstone repeats this text to the agent.
    */
-  function applyCancelPlan(plan: RoundCancelPlan, root: string): string[] {
+  function applyCancelPlan(plan: RoundCancelPlan, root: string, why?: string): string[] {
     const notes: string[] = [];
     if (plan.cancelReviewer) {
-      const stopped = cancelJudgeRound(root, "reviewer", "这一轮已经判不过了 —— 内容要改，功能轮不必再过");
+      const stopped = cancelJudgeRound(root, "reviewer", why ?? "这一轮已经判不过了 —— 内容要改，功能轮不必再过");
       if (stopped) notes.push(stopped);
     }
     if (plan.cancelQuality) {

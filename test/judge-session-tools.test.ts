@@ -29,6 +29,10 @@ import { appendRecord, judgeChannelTarget, type ChannelIO } from "../lib/channel
 import type { ReviewScopeStamp } from "../lib/channel-records.ts";
 import type { RoundBinding } from "../lib/audit-round-report.ts";
 import { REVIEW_ROUND_SPEC } from "../lib/audit-round-specs.ts";
+import { createRoundCancel } from "../lib/round-cancel-host.ts";
+import { createRoundCancelLedger } from "../lib/round-cancel-ledger.ts";
+import { roundCancelPlan } from "../lib/quality-round.ts";
+import type { SessionHost } from "../lib/session-host.ts";
 
 const ROOT = "/repo";
 const HOME = "/home/test";
@@ -1111,4 +1115,61 @@ test("REGRESSION (2026-09-08): the gate's self-audit bypasses the repo check —
   const closeDirect = await doClose(f.deps, { sessionId: c.judgeId }, true);
   assert.notEqual(closeDirect.isError, true, `gate self-close must bypass the repo check: ${textOf(closeDirect)}`);
   assert.equal(closeDirect.details?.closed, true);
+});
+
+test("judge_wait after a FAILED LANE cancelled the reviewer: says cancelled, why, and what next (t3)", async () => {
+  // Measured 2026-09-27: the lane failed on NO_CHECKS_RUN, the cancel matrix
+  // killed the reviewer and dropped its row, and the next judge_wait answered
+  // "no judge on record — submit a round first" for a round just submitted.
+  // The lane's real row runs here (createRoundCancel → cancelJudgeRound).
+  const f = fake();
+  const c = seed(f, { paneId: "%84" });
+  const ledger = createRoundCancelLedger();
+  f.deps.roundCancellation = (root, role, judgeId) => ledger.read(root, role, judgeId);
+  const logs: string[] = [];
+  const host = { log: (m: string) => logs.push(m), stateFor: () => ({}), persistRepo: () => {}, ctx: () => undefined };
+  const { applyCancelPlan } = createRoundCancel(host as unknown as SessionHost, {
+    pi: {} as never,
+    registry: {
+      judgeHierarchy: () => f.table.current,
+      setHierarchy: (next) => { f.table.current = next; f.children = f.children.filter((x) => next[x.judgeId]); },
+      absorbJudgeModelEvents: () => {},
+    },
+    runTmux: () => ({ ok: true, stdout: "", stderr: "" }),
+    cancelLedger: ledger,
+    reviewTargets: new Map(),
+    stageIsOn: () => true,
+    laneVerificationWaived: () => false,
+    judgeChildByRole: (_root, role) => Object.values(f.table.current).find((e) => e.role === role),
+    closeJudgePaneOf: () => {},
+    reapReviewScratch: () => {},
+    precommitLaneRunning: () => false,
+    abortPrecommitLane: () => false,
+    qualityRoundInFlight: () => false,
+    recordReviewVerdict: async () => "",
+  });
+  const notes = applyCancelPlan(roundCancelPlan({ party: "lane", verdict: "NO_CHECKS_RUN" }), ROOT, "全量 precommit 没过（NO_CHECKS_RUN）");
+  assert.equal(notes.length, 1, "the lane row stops the reviewer");
+  assert.equal(f.children.length, 0, "…and drops its row");
+
+  const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 0 });
+  const text = textOf(reply);
+  assert.notEqual(reply.isError, true, text);
+  assert.doesNotMatch(text, /no judge on record/);
+  assert.match(text, /本轮已被门禁终止/);
+  assert.match(text, /取消原因：全量 precommit 没过（NO_CHECKS_RUN）/);
+  assert.match(text, /不要 judge_recover/);
+  assert.match(text, /precommit 没过就先修 precommit/);
+  assert.equal((reply.details as { reason?: string }).reason, "cancelled");
+  assert.match(text, new RegExp(c.judgeId));
+});
+
+test("judge_wait with no row and no tombstone still says there is nothing on record", async () => {
+  const f = fake();
+  const ledger = createRoundCancelLedger();
+  f.deps.roundCancellation = (root, role, judgeId) => ledger.read(root, role, judgeId);
+  ledger.note(ROOT, { role: "quality-auditor", judgeId: "rg-q", why: "x" });
+  const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 0 });
+  assert.equal(reply.isError, true);
+  assert.match(textOf(reply), /no judge on record for reviewer/);
 });

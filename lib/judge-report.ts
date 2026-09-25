@@ -20,6 +20,7 @@
 import { WAIT_DISCIPLINE_HINT } from "./agent-directives.ts";
 import type { ReviewScopeStamp } from "./channel-records.ts";
 import type { ModelEvent } from "./model-health.ts";
+import { CANCELLED_NEXT_STEP } from "./round-cancel-ledger.ts";
 
 
 
@@ -117,6 +118,8 @@ export interface StandardReportInput {
    * reviewer never saw (2026-09-05).
    */
   notThisRound?: { reportId: string; round?: number; at?: string; detail: string } | undefined;
+  /** Why the gate cancelled this round (lib/round-cancel-ledger.ts), when it knows. */
+  cancelReason?: string | undefined;
   /** The judge's own last self-reported state, e.g. `working（自 …）`. */
   stateLine?: string | undefined;
   /** How long a blocking wait actually waited, in seconds. */
@@ -214,6 +217,9 @@ export function buildStandardReport(input: StandardReportInput): string {
       "**没有**记为本轮裁决，本轮仍在等自己的 report。",
     );
   }
+  if (input.cancelReason !== undefined && input.cancelReason.trim().length > 0) {
+    lines.push(`- 取消原因：${input.cancelReason.trim()}`);
+  }
   if (input.stateLine !== undefined && input.stateLine.trim().length > 0) {
     lines.push(`- 当前状态：${input.stateLine.trim()}`);
   }
@@ -272,7 +278,7 @@ function nextStep(input: StandardReportInput, reason: StandardReportReason): str
     case "cancelled":
       return [
         "下一步：这一轮已经结束（另一路裁决先到，门禁按取消矩阵终止了它），它的 pane 与登记行都已收回 —— **不要 judge_recover**（没有 pane 可重开，登记表里也不再是这一轮）。",
-        "按已知的 findings 修完，再用 judge_submit 重新派一轮。",
+        CANCELLED_NEXT_STEP,
       ];
     case "model-exhausted":
       return ["下一步：本轮**没有**任何结论（不是被审对象的问题）。先修模型可达性（~/.pi/review-gate.json 的 agents 链 / provider 认证），再重新派发本轮；冷却期只是个缓冲，不是修复。"];

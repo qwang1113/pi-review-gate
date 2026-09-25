@@ -55,6 +55,7 @@ import type { TmuxRunResult } from "./orchestrator-tmux.ts";
 import { closeSessionWindow } from "./session-factory.ts";
 import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "./judge-lifecycle.ts";
 import type { RoundBinding } from "./audit-round-report.ts";
+import type { RoundCancellation } from "./round-cancel-ledger.ts";
 import {
   ADDRESSABLE_JUDGE_ROLES,
   addressJudge,
@@ -166,6 +167,12 @@ export interface JudgeSessionToolDeps {
    * `doClose` for both paths.
    */
   findChildById?(judgeId: string): JudgeChildRecord | undefined;
+  /**
+   * The round the cancel matrix ended for this role, when it was the last
+   * thing that happened to it (lib/round-cancel-ledger.ts) — what `judge_wait`
+   * says instead of "no judge on record" once the row is gone.
+   */
+  roundCancellation?(root: string, role: string | undefined, judgeId: string | undefined): RoundCancellation | undefined;
   /** Channel filesystem seam and its home override. */
   channelIO(): ChannelIO;
   channelHome(): string | undefined;

@@ -24,6 +24,7 @@ import { channelRecordCount, verifyJudgeBoot } from "./orchestrator-tool-kit.ts"
 import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import { qualityStandingFor } from "./quality-round.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
+import { cancelledDuringBootText, type RoundCancelLedger } from "./round-cancel-ledger.ts";
 import { buildJudgePaneCommand, judgePaneDecor, openSessionWindow } from "./session-factory.ts";
 import type { SessionHost } from "./session-host.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
@@ -88,6 +89,7 @@ export function createJudgeRoundDispatch(
     runTmux: TmuxRunner;
     channelIO: ChannelIO;
     tmuxScope: TmuxScope;
+    cancelLedger: RoundCancelLedger;
     resolveJudgeLaunch(root: string, role: string, workDir: string, title: string, judgeId: string): JudgeLaunch;
     sweepStaleJudgeSessionDirs(root: string): void;
   },
@@ -98,7 +100,7 @@ export function createJudgeRoundDispatch(
   } = deps.registry;
   const { resolveJudgeLane, rotationCarryoverFacts, closeJudgePaneOf, reapReviewScratch } = deps.lanes;
   const {
-    reviewTargets, stageIsOn, runTmux, channelIO, tmuxScope, resolveJudgeLaunch, sweepStaleJudgeSessionDirs,
+    reviewTargets, stageIsOn, runTmux, channelIO, tmuxScope, cancelLedger, resolveJudgeLaunch, sweepStaleJudgeSessionDirs,
   } = deps;
   const stateForRepo = (root: string) => host.stateFor(root);
 
@@ -136,6 +138,9 @@ export function createJudgeRoundDispatch(
     qualityRoundDispatched?: boolean;
   }): Promise<JudgeDispatch> {
     const { root, role } = opts;
+    // A new round of the role: whatever cancelled the previous one is history,
+    // and a tombstone present after this line was written DURING this dispatch.
+    cancelLedger.forget(root, role);
     dropDeadForeignJudges();
     // THE QUALITY PRECONDITION (2026-09-15). This is the mechanical fact that
     // makes the quality round unbypassable rather than a convention: no
@@ -457,7 +462,13 @@ export function createJudgeRoundDispatch(
         // A delivery failure KEEPS the pane and the registration (it may only
         // be slow), so the opener can still wait on it; anything else means no
         // pane exists at all.
-        const detail = opened.deliveryFailed
+        // CANCELLED WHILE BOOTING (2026-09-27, t3): a lane that failed fast can
+        // kill this pane and drop its row before it reports in, so "kept, wait
+        // on it" would be false twice over.
+        const cancelled = opened.deliveryFailed ? cancelLedger.read(root, role, undefined) : undefined;
+        const detail = cancelled
+          ? cancelledDuringBootText(opened.paneId, cancelled.why)
+          : opened.deliveryFailed
           ? `review pane 开出来了（${opened.paneId}）但一直没在通道上报状态 —— ${opened.error}；` +
             "pane 与登记都保留着，可以先 judge_wait 看它有没有动静，确认没起来再用 fresh:true 重来。"
           : opened.error;

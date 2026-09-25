@@ -40,6 +40,16 @@ export async function doWait(
   if (!addressed.ok) return fail(addressed.text, waitFailDetails());
   const child = deps.findChild(addressed.root, addressed.role, addressed.judgeId);
   if (!child) {
+    // NO ROW BECAUSE THE GATE CANCELLED IT (2026-09-27, t3): the cancel matrix
+    // drops the row it kills, so "submit a round first" would deny a round the
+    // agent just submitted. The tombstone says what `judge_submit` says.
+    const cancelled = deps.roundCancellation?.(addressed.root, addressed.role, addressed.judgeId);
+    if (cancelled) {
+      return reply(
+        buildStandardReport({ role: cancelled.role, judgeId: cancelled.judgeId, reason: "cancelled", cancelReason: cancelled.why }),
+        { done: true, reason: "cancelled", role: cancelled.role, hasVerdict: false },
+      );
+    }
     return fail(
       `review-gate: no judge on record for ${addressed.role ?? addressed.judgeId} — submit a round first (judge_submit).`,
       waitFailDetails(),
@@ -149,8 +159,9 @@ export async function doWait(
     // dead end). The registry decides which of the two it is — the same fact
     // the recovery path reads, so the two halves cannot disagree.
     if (!deps.findChild(addressed.root, addressed.role, addressed.judgeId)) {
+      const why = deps.roundCancellation?.(addressed.root, addressed.role, addressed.judgeId)?.why;
       return reply(
-        buildStandardReport({ ...base, reason: "cancelled", waitedSeconds }),
+        buildStandardReport({ ...base, reason: "cancelled", ...(why === undefined ? {} : { cancelReason: why }), waitedSeconds }),
         { done: true, reason: "cancelled", role: child.role, hasVerdict: false },
       );
     }

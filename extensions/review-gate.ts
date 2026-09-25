@@ -128,6 +128,7 @@ import { createAuditRoundHost } from "../lib/audit-round-host.ts";
 import { createReviewVerdictRecorder } from "../lib/verdict-host.ts";
 import { createSiblingVerdictRecorders } from "../lib/sibling-verdict-host.ts";
 import { createRoundCancel } from "../lib/round-cancel-host.ts";
+import { createRoundCancelLedger } from "../lib/round-cancel-ledger.ts";
 import { createAcceptanceHost } from "../lib/acceptance-host.ts";
 import { createWorktreePresence } from "../lib/worktree-presence-host.ts";
 import { asChoiceHost, createGateDialogs, showToUser } from "../lib/gate-dialogs.ts";
@@ -963,7 +964,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     previousRoundFindings,
   });
   const { resolveJudgeLane, reapReviewScratch } = judgeLanes;
+  const cancelLedger = createRoundCancelLedger();
   const { dispatchJudgeRound } = createJudgeRoundDispatch(host, {
+    cancelLedger,
     registry: {
       judgeHierarchy, setHierarchy, dropAudits, callerIdentity, paneOwnerIdentity,
       absorbJudgeModelEvents, nextJudgeRound, dropDeadForeignJudges,
@@ -996,7 +999,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       pi,
       callTool,
       toolText,
-      applyCancelPlan: (plan, root) => applyCancelPlan(plan, root),
+      applyCancelPlan: (plan, root, why) => applyCancelPlan(plan, root, why),
       resumeParkedReady: (root, ctx, landing) => resumeParkedReady(root, ctx, landing),
     });
   const { recordReviewVerdict } = createReviewVerdictRecorder(host, {
@@ -1020,6 +1023,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
   const { cancelJudgeRound, resumeParkedReady, applyCancelPlan, applyRoundCancel } = createRoundCancel(host, {
     pi,
+    cancelLedger,
     registry: { judgeHierarchy, setHierarchy, absorbJudgeModelEvents },
     runTmux: (argv) => runTmux(argv),
     reviewTargets,
@@ -1092,6 +1096,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     auditRoundDeps,
     buildGoalAuditRound,
     applyRoundCancel,
+    cancelLedger,
     resolveJudgeLane,
     resolveJudgeLaunch,
     cancelChildWaitTimer: () => l2.cancelChildWaitTimer(),
