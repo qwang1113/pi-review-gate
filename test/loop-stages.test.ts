@@ -688,15 +688,20 @@ test("a proxy may not answer the stage checklist (quality round P1, 2026-09-22)"
   assert.ok(start > 0, "the stage deps exist");
   const wiring = SRC.slice(start, SRC.indexOf("\n  };", start));
   assert.match(wiring, /proxy: false/, "the stage checklist must not be handed to the arbiter proxy");
-  assert.match(SRC, /options: opts\.proxy === false \? \[\] : spec\.options/,
+  // The dialog body lives in lib/gate-dialogs.ts since the t5 split.
+  const DIALOGS_SRC = readFileSync(
+    join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "lib", "gate-dialogs.ts"),
+    "utf8",
+  );
+  assert.match(DIALOGS_SRC, /options: opts\.proxy === false \? \[\] : spec\.options/,
     "…and the dialog turns that request into the race's own no-proxy signal");
   // AND IT MUST NOT BLAME THE ARBITER (quality round P2): the timeout notice
   // is the user's only clue that a decision is still owed, and “arbiter 无法代答”
   // would read as a broken machine rather than a deliberate policy. Both copies
   // live in the same dialog body, which is where the branch is read from.
-  const raceAt = SRC.indexOf("options: opts.proxy === false ? [] : spec.options");
+  const raceAt = DIALOGS_SRC.indexOf("options: opts.proxy === false ? [] : spec.options");
   assert.ok(raceAt > 0, "the dialog knows the no-proxy request");
-  const notice = SRC.slice(raceAt, raceAt + 2500);
+  const notice = DIALOGS_SRC.slice(raceAt, raceAt + 2500);
   assert.match(notice, /opts\.proxy === false/, "the timeout notice branches on it");
   assert.match(notice, /不问 arbiter 代答/, "…and does not report a deliberate policy as a broken arbiter");
   assert.match(notice, /arbiter 无法代答/, "the other dialogs' wording is left alone");
