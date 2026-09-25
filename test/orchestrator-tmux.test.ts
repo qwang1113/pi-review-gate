@@ -83,15 +83,23 @@ test("a global flag where the subcommand belongs is refused — it would hide th
   assert.throws(() => assertSafeTmuxArgv(["-L", "sock", "kill-server"]), UnsafeTmuxCommand);
 });
 
-test("the four session commands need a declaration AND a target that names one of them", () => {
+test("every session-scoped command needs a declaration AND a target that names one of them", () => {
   const own = { ownSessions: [SESSION] };
   assert.deepEqual(
     [...OWN_SESSION_TMUX_SUBCOMMANDS].sort(),
-    ["kill-session", "kill-window", "killw", "new", "new-session", "new-window", "neww"],
+    [
+      "kill-session", "kill-window", "killw", "new", "new-session", "new-window", "neww",
+      // The SESSION ENVIRONMENT is a session-scoped thing the gate may write
+      // (it removes an earlier build's polluted variables), so it is held to
+      // the same rule as the four that create and destroy.
+      "set-environment", "show-environment",
+    ],
   );
   // With a declared scope, but pointing somewhere else: refused.
   assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "lab"], own), UnsafeTmuxCommand);
   assert.throws(() => assertSafeTmuxArgv(["new-window", "-t", "lab"], own), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["set-environment", "-t", "lab", "-u", "RG_WORKER_ID"], own), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["show-environment", "-t", "lab"], own), UnsafeTmuxCommand);
   // …including at ANOTHER gate-looking session: "mine" is an exact match, not
   // "a name of my shape".
   assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "rg-other-repo-abcdef1234"], own), UnsafeTmuxCommand);
@@ -110,6 +118,8 @@ test("the four session commands need a declaration AND a target that names one o
   assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-session", "-t", SESSION], own));
   assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-window", "-t", `${SESSION}:@12`], own));
   assert.doesNotThrow(() => assertSafeTmuxArgv(["new-window", "-t", SESSION], own));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["set-environment", "-t", SESSION, "-u", "RG_WORKER_ID"], own));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["show-environment", "-t", SESSION], own));
   // A LIST, not one name: a relay successor holds the previous seat's windows
   // too, and those live in the predecessor's session (quality round P1).
   const lineage = { ownSessions: [SESSION, "rg-other-repo-abcdef1234"] };

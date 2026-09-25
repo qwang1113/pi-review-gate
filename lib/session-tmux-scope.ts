@@ -63,11 +63,13 @@
 
 import {
   buildKillSessionArgv,
+  buildListSessionEnvArgv,
   buildListSessionsArgv,
   buildNewSessionArgv,
   buildNewWindowArgv,
   buildReadSessionOwnerArgv,
   buildSetSessionOwnerArgv,
+  buildUnsetSessionEnvArgv,
   isOwnSessionName,
   parseSessionNames,
   parseSpawnedWindow,
@@ -177,6 +179,68 @@ function readOwner(run: ScopeRunner, session: string): { ok: true; owner: string
   } catch (error) {
     return { ok: false, error: (error as Error).message };
   }
+}
+
+/**
+ * THE GATE'S OWN VARIABLES DO NOT SURVIVE IN A SESSION'S ENVIRONMENT.
+ *
+ * WHY THIS EXISTS AT ALL (quality round P1, 2026-09-25): passing a child's
+ * environment THROUGH tmux (`-e`) let the FIRST child write its identity into
+ * the session's own environment, and every window opened later in that session
+ * inherited it — a judge opened after a worker came up wearing `RG_WORKER_ID`
+ * and reported its state into the WORKER's channel, so its opener's boot
+ * verification timed out and the round could never complete.
+ *
+ * `lib/orchestrator-tmux.ts` no longer uses `-e` at all (`envCommand`), but a
+ * session created by the OLD build still carries those variables, and a session
+ * lives until its last window closes. So a session that is about to be REUSED is
+ * cleaned first: every `RG_`-prefixed variable in its environment is removed —
+ * that is the gate's own namespace, and the cleaning only ever touches the
+ * session this process created.
+ *
+ * FAIL CLOSED, and that is the other half of the P1: a child that would inherit
+ * somebody else's identity is worse than a refused spawn — it reports into the
+ * wrong channel and the opener waits for a round that can never arrive. So a
+ * removal tmux refuses REFUSES the spawn, naming what could not be cleared.
+ * Nothing to clear is the common case and costs one read.
+ */
+export function healSessionEnv(
+  run: ScopeRunner,
+  session: string,
+): { ok: true; cleared: string[] } | { ok: false; error: string } {
+  let listed: ScopeRunResult;
+  try {
+    listed = run(buildListSessionEnvArgv(session));
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
+  if (!listed.ok) {
+    return { ok: false, error: `读不到 ${session} 的 session 环境：${listed.stderr || "tmux 拒绝"}` };
+  }
+  const stale = listed.stdout
+    .split("\n")
+    .map((line) => {
+      const at = line.indexOf("=");
+      return (at < 0 ? line : line.slice(0, at)).trim();
+    })
+    .filter((key) => key.startsWith("RG_"));
+  const cleared: string[] = [];
+  for (const key of stale) {
+    let unset: ScopeRunResult;
+    try {
+      unset = run(buildUnsetSessionEnvArgv(session, key));
+    } catch (error) {
+      return { ok: false, error: `${session} 的 session 环境里有 ${key}（旧版门禁留下的），清除失败：${(error as Error).message}` };
+    }
+    if (!unset.ok) {
+      return {
+        ok: false,
+        error: `${session} 的 session 环境里有 ${key}（旧版门禁留下的），tmux 拒绝清除：${unset.stderr || "未知原因"}`,
+      };
+    }
+    cleared.push(key);
+  }
+  return { ok: true, cleared };
 }
 
 /** Which session a call is about, and who owns it. */
@@ -411,6 +475,14 @@ export function openScopeWindow(
           "拒绝复用、拒绝改它；确认它的归属后人工处理（`tmux kill-session -t " + name + "`）",
       };
     }
+  }
+  // A SESSION ABOUT TO BE REUSED IS CLEANED FIRST (healSessionEnv): a session
+  // an earlier build polluted carries its first child's identity in its own
+  // environment, and THIS child would inherit it — reporting into somebody
+  // else's channel while its own stays empty.
+  if (exists) {
+    const healed = healSessionEnv(run, name);
+    if (!healed.ok) return { ok: false, error: healed.error };
   }
   const spec = {
     ownSession: name,

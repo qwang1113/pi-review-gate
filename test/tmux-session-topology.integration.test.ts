@@ -333,6 +333,15 @@ test("a child's environment rides its own command, never the tmux session", { sk
     // …and the child itself really did get the variable.
     assert.equal(await waitForFile(firstOut), "worker-1");
 
+    // A SESSION ALREADY POLLUTED IS HEALED BEFORE IT IS REUSED (quality round
+    // P1, 2026-09-25): this is the t5 incident scene — the old build left the
+    // first child's identity in the session's OWN environment, and a judge
+    // opened afterwards inherited it and reported into the worker's channel.
+    tmux(["set-environment", "-t", OWN_SESSION, "RG_WORKER_ID", "worker-5"]);
+    tmux(["set-environment", "-t", OWN_SESSION, "RG_GATE_MODE", "explore"]);
+    assert.match(tmux(["show-environment", "-t", OWN_SESSION]), /RG_WORKER_ID=worker-5/,
+      "the pollution this half of the test is about must really be there");
+
     // A SECOND CHILD DOES NOT INHERIT THE FIRST ONE'S IDENTITY.
     const second = await openSessionWindow(runner, {
       scope,

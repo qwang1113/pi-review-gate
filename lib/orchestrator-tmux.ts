@@ -90,6 +90,10 @@ export const OWN_SESSION_TMUX_SUBCOMMANDS: readonly string[] = Object.freeze([
   "new-session",
   "new-window",
   "neww",
+  // The ENVIRONMENT of a session is the other thing a gate session owns about
+  // ITS OWN session — and the only other one that can be aimed wrong (2026-09-25).
+  "set-environment",
+  "show-environment",
 ]);
 
 const SUBCOMMAND_ALIASES: Readonly<Record<string, string>> = Object.freeze({
@@ -380,6 +384,35 @@ export function buildNewWindowArgv(opts: ScopeWindowOptions): readonly string[] 
  */
 export function buildListSessionsArgv(): readonly string[] {
   return assertSafeTmuxArgv(["list-sessions", "-F", "#{session_name}"]);
+}
+
+/**
+ * Read a SESSION's own environment — one `KEY=VALUE` per line.
+ *
+ * The reading exists for one job: finding the gate's own variables that an
+ * earlier build left in a session's environment, so they can be removed before
+ * they are inherited by a child of another kind (`healSessionEnv`,
+ * lib/session-tmux-scope.ts).
+ */
+export function buildListSessionEnvArgv(ownSession: string): readonly string[] {
+  const session = requireOwnSession(ownSession, "ownSession");
+  return assertSafeTmuxArgv(["show-environment", "-t", session], { ownSessions: [session] });
+}
+
+/**
+ * Remove ONE variable from a session's environment.
+ *
+ * The name is validated rather than escaped: an environment variable has one
+ * shape, and a caller that wants to unset something else is a caller with a
+ * bug.
+ */
+export function buildUnsetSessionEnvArgv(ownSession: string, key: string): readonly string[] {
+  const session = requireOwnSession(ownSession, "ownSession");
+  const name = String(key ?? "");
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new UnsafeTmuxCommand(`环境变量名不合法：${JSON.stringify(key)}`);
+  }
+  return assertSafeTmuxArgv(["set-environment", "-t", session, "-u", name], { ownSessions: [session] });
 }
 
 /**
