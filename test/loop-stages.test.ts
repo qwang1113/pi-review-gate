@@ -608,8 +608,8 @@ test("an acceptance round the USER switched off records that reason, not the orc
   // Reviewer P2: `acceptanceDecision` writes DISABLED for both causes and its
   // copy names the orchestration rule; the status stays the module's, the
   // recorded reason is composed where the switch is known.
-  assert.match(SRC, /const skippedReason = !stageIsOn\("acceptance", root\)/);
-  assert.match(SRC, /reason: skippedReason,/);
+  assert.match(ACCEPTANCE_HOST_SRC, /const skippedReason = !stageIsOn\("acceptance", root\)/);
+  assert.match(ACCEPTANCE_HOST_SRC, /reason: skippedReason,/);
 });
 
 // ---------------------------------------------------------------------------
@@ -620,6 +620,13 @@ const SRC = readFileSync(
   join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "extensions", "review-gate.ts"),
   "utf8",
 );
+/** The review loop's host modules carved out of the extension (t7) — same wiring, new home. */
+const libSrc = (file: string): string =>
+  readFileSync(join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "lib", file), "utf8");
+const CHAIN_SRC = libSrc("review-chain.ts");
+const ACCEPTANCE_HOST_SRC = libSrc("acceptance-host.ts");
+const VERDICT_SRC = libSrc("verdict-host.ts");
+const CANCEL_SRC = libSrc("round-cancel-host.ts");
 
 test("the goal stage releases the edit gate and the ship block through goalStageSatisfied", () => {
   assert.match(SRC, /goalConfirmed: goalStageSatisfied\(goalRoot, goalSt\)/,
@@ -633,10 +640,10 @@ test("the goal stage releases the edit gate and the ship block through goalStage
 });
 
 test("the five checkpoints read the ONE query, not a second rule", () => {
-  assert.match(SRC, /const reviewOn = stageIsOn\("review", input\.root\)/);
-  assert.match(SRC, /const qualityOn = stageIsOn\("quality", input\.root\)/);
-  assert.match(SRC, /const precommitOn = stageIsOn\("precommit", input\.root\)/);
-  assert.match(SRC, /gateOpen: acceptanceGateOpen\(process\.env\) && stageIsOn\("acceptance", root\)/);
+  assert.match(CHAIN_SRC, /const reviewOn = stageIsOn\("review", input\.root\)/);
+  assert.match(CHAIN_SRC, /const qualityOn = stageIsOn\("quality", input\.root\)/);
+  assert.match(CHAIN_SRC, /const precommitOn = stageIsOn\("precommit", input\.root\)/);
+  assert.match(ACCEPTANCE_HOST_SRC, /gateOpen: acceptanceGateOpen\(process\.env\) && stageIsOn\("acceptance", root\)/);
   assert.match(SRC, /registerLoopStageTools\(pi, loopStageDeps\)/, "the tool is registered");
   assert.match(SRC, /ensureLoopStages: \(ctx\) => ensureLoopStagesFor\(ctx\)/,
     "the fallback is wired into the L1 hook for the first edit / restatement");
@@ -658,11 +665,11 @@ test("precommit off owes no lane: the verification binding never withholds that 
   assert.match(body, /st\.bypass\.active \|\| !stageIsOn\("precommit", root\)/,
     "the user's bypass and the switched-off stage are ONE fact");
   assert.equal(
-    (SRC.match(/bypassActive: laneVerificationWaived\(/g) ?? []).length,
+    ([VERDICT_SRC, CANCEL_SRC].join("\n").match(/bypassActive: laneVerificationWaived\(/g) ?? []).length,
     2,
     "the recorder and the parked-READY re-ask both read the composition",
   );
-  assert.doesNotMatch(SRC, /bypassActive: st\.bypass\.active,/,
+  assert.doesNotMatch([SRC, VERDICT_SRC, CANCEL_SRC].join("\n"), /bypassActive: st\.bypass\.active,/,
     "no site reads the bypass alone — that is how the two halves drift");
   // …and the flag it feeds means “no lane is owed”: a round nobody has to
   // verify is NOT withheld as unverified.
@@ -713,9 +720,9 @@ test("a skipped quality round carries the tree the ship gate verifies (quality r
   // write exactly that shape (lib/quality-round.ts's `skippedQualityRecord`
   // takes an OPTIONAL tree), so the next ship would have failed closed on a
   // tree nobody recorded.
-  const at = SRC.indexOf("st.quality = skippedQualityRecord({");
+  const at = CHAIN_SRC.indexOf("st.quality = skippedQualityRecord({");
   assert.ok(at > 0, "the chain records the skipped quality round");
-  assert.match(SRC.slice(at, at + 700), /tree: skipTarget\.tree/,
+  assert.match(CHAIN_SRC.slice(at, at + 700), /tree: skipTarget\.tree/,
     "the skip binds to the prepared tree, the same source the verdict recorder reads");
 });
 
@@ -728,9 +735,9 @@ test("the no-acceptance declaration is only read from a goal that is in force", 
   // and the PLAN handed to the judge are the same question, so the guard lives
   // in `acceptanceGoalText` and both halves go through it — the plan side used
   // to re-read `readSessionLoopGoal` unguarded.
-  const goalRead = SRC.indexOf("function acceptanceGoalText(");
+  const goalRead = ACCEPTANCE_HOST_SRC.indexOf("function acceptanceGoalText(");
   assert.ok(goalRead > 0, "the one read of the governing goal exists");
-  const guard = SRC.slice(goalRead, SRC.indexOf("\n  }", goalRead));
+  const guard = ACCEPTANCE_HOST_SRC.slice(goalRead, ACCEPTANCE_HOST_SRC.indexOf("\n  }", goalRead));
   // The guard's SHAPE is not the rule — `goal.present && loopGoalConfirmed(…)`
   // and its De Morgan form (`if (!goal.present || !loopGoalConfirmed(…)) return
   // undefined`) say the same thing, and pinning one spelling made an unrelated
@@ -742,14 +749,15 @@ test("the no-acceptance declaration is only read from a goal that is in force", 
   assert.match(guard, /loopGoalConfirmed\(root, st\)/,
     "only a goal this session actually had approved is in force");
   assert.match(guard, /return undefined/, "…and anything else is no contract (fail-closed)");
-  const at = SRC.indexOf("const declared = ");
+  const at = ACCEPTANCE_HOST_SRC.indexOf("const declared = ");
   assert.ok(at > 0, "armAcceptanceRound reads the declaration");
-  const read = SRC.slice(at - 300, at + 400);
+  const read = ACCEPTANCE_HOST_SRC.slice(at - 300, at + 400);
   assert.match(read, /acceptanceGoalText\(root, st\)/, "…through that one read");
   assert.match(read, /parseNoAcceptanceDeclaration\(goalText\)/);
   assert.match(read, /extractAcceptancePlan\(goalText\)/, "the plan comes from the same text");
-  const dispatchAt = SRC.indexOf("async function dispatchAcceptanceRound(");
-  const dispatch = SRC.slice(dispatchAt, dispatchAt + 900);
+  const dispatchAt = ACCEPTANCE_HOST_SRC.indexOf("async function dispatchAcceptanceRound(");
+  assert.ok(dispatchAt > 0, "the acceptance dispatch exists");
+  const dispatch = ACCEPTANCE_HOST_SRC.slice(dispatchAt, dispatchAt + 900);
   assert.doesNotMatch(dispatch, /readSessionLoopGoal\(/,
     "the plan side re-reads nothing — the text is handed in");
 });

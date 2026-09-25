@@ -113,7 +113,7 @@ test("all six pane-opening call sites go through the factory", () => {
   // neighbour's call and report success for a caller that opens panes its own
   // way, so the disjointness is asserted below rather than assumed.
   const sites: Array<{ file: string; anchor: string }> = [
-    { file: "extensions/review-gate.ts", anchor: "async function dispatchJudgeRound(" },
+    { file: "lib/judge-round-dispatch.ts", anchor: "async function dispatchJudgeRound(" },
     { file: "lib/judge-spawn-tools.ts", anchor: "async function doSpawn(" },
     { file: "lib/judge-spawn-tools.ts", anchor: "async function doRecover(" },
     { file: "lib/orchestrator-dispatch.ts", anchor: "export async function dispatchSpawn(" },

@@ -20,11 +20,28 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { GateState } from "./gate-state.ts";
+import type { ToolUpdate } from "./progress-stream.ts";
 
 /** One mutable cell shared by the extension and a carved-out module. */
 export interface Ref<T> {
   current: T;
 }
+
+/** What one of the gate's own tools returns when the chain calls it internally. */
+export interface GateToolResult {
+  content?: { type: string; text: string }[];
+  details?: Record<string, unknown>;
+  isError?: boolean;
+}
+
+/** The extension's `callTool`: run another gate tool's own `execute` (t7). */
+export type CallTool = (
+  name: string,
+  params: Record<string, unknown>,
+  ctx: unknown,
+  onUpdate?: ToolUpdate,
+  signal?: AbortSignal | undefined,
+) => Promise<GateToolResult>;
 
 /** Where this session works, read fresh on every call. */
 export interface SessionRepos {

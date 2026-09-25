@@ -80,6 +80,26 @@ const REVIEW_TARGET_SRC = readFileSync(join(ROOT, "lib", "review-target-host.ts"
 const LAUNCH_SRC = readFileSync(join(ROOT, "lib", "judge-launch-host.ts"), "utf8");
 /** The runtime clocks: exit criterion, revival, supervision, naming heartbeat (moved out, t6). */
 const RUNTIME_SRC = readFileSync(join(ROOT, "lib", "orchestrator-runtime-host.ts"), "utf8");
+/** The full precommit lane beside a review round (moved out, t7). */
+const LANE_SRC = readFileSync(join(ROOT, "lib", "precommit-lane.ts"), "utf8");
+/** The submission chain + the two blocking audits (moved out, t7). */
+const CHAIN_SRC = readFileSync(join(ROOT, "lib", "review-chain.ts"), "utf8");
+/** Which lane a judge round runs in, and how a retired lane is closed (moved out, t7). */
+const JUDGE_LANES_SRC = readFileSync(join(ROOT, "lib", "judge-lane-host.ts"), "utf8");
+/** The one judge dispatch (moved out, t7). */
+const DISPATCH_SRC = readFileSync(join(ROOT, "lib", "judge-round-dispatch.ts"), "utf8");
+/** Where a judge round ends: lookup, binding, record, settle sweep (moved out, t7). */
+const SETTLE_SRC = readFileSync(join(ROOT, "lib", "judge-round-settle.ts"), "utf8");
+/** The audit-round engine's session deps (moved out, t7). */
+const AUDIT_HOST_SRC = readFileSync(join(ROOT, "lib", "audit-round-host.ts"), "utf8");
+/** The reviewer verdict recorder (moved out, t7). */
+const VERDICT_SRC = readFileSync(join(ROOT, "lib", "verdict-host.ts"), "utf8");
+/** The quality + acceptance recorders (moved out, t7). */
+const SIBLING_VERDICT_SRC = readFileSync(join(ROOT, "lib", "sibling-verdict-host.ts"), "utf8");
+/** The cancel matrix's effects + the parked READY's re-ask (moved out, t7). */
+const CANCEL_SRC = readFileSync(join(ROOT, "lib", "round-cancel-host.ts"), "utf8");
+/** The acceptance round armed at completion (moved out, t7). */
+const ACCEPTANCE_HOST_SRC = readFileSync(join(ROOT, "lib", "acceptance-host.ts"), "utf8");
 const JUDGE_SESSION_TOOLS = new Set(["judge_close", "judge_wait"]);
 
 /**
@@ -380,9 +400,10 @@ function GOAL_WIRING(): string {
  * STALE check, the cwd check, the tree binding, the round record.
  */
 function recordVerdictBody(): string {
-  return windowOf(
+  return windowIn(
+    VERDICT_SRC,
     "async function recordReviewVerdict(",
-    "\n  // ---------- review tooling",
+    "\n  return { recordReviewVerdict };",
     "recordReviewVerdict",
   );
 }
@@ -833,8 +854,9 @@ test("MODEL LAUNCH: every judge dispatch re-reads the config and picks a slot th
   // ONE resolver for both dispatch surfaces — a second one is the drift this
   // whole change exists to end.
   assert.equal((LAUNCH_SRC.match(/function resolveJudgeLaunch\(/g) ?? []).length, 1, "one definition");
-  assert.equal((SRC.match(/resolveJudgeLaunch\(/g) ?? []).length, 2, "judge_submit's chain + judge_spawn's launchConfig");
-  assert.match(SRC, /const launch = resolveJudgeLaunch\(root, role, workDir, title, judgeId\)/);
+  assert.equal((SRC.match(/resolveJudgeLaunch\(/g) ?? []).length, 1, "judge_spawn's launchConfig");
+  assert.equal((DISPATCH_SRC.match(/resolveJudgeLaunch\(/g) ?? []).length, 2, "judge_submit's chain (the dep type + the call)");
+  assert.match(DISPATCH_SRC, /const launch = resolveJudgeLaunch\(root, role, workDir, title, judgeId\)/);
   assert.match(SRC, /const launch = resolveJudgeLaunch\(root, role, workDir, role, judgeId\)/);
 });
 
@@ -876,14 +898,14 @@ test("MODEL EVENTS: the cursor never moves past an event the opener did not act 
   // entry, so the cursor must be carried (reuse) or seeded from the channel
   // watermark (fresh open) — the channel is append-only, and a replay of an
   // old `exhausted` event would end a healthy round on its first probe.
-  const reuse = SRC.slice(SRC.indexOf("const keptCursor = existing.lastReportId;"), SRC.indexOf("const keptCursor = existing.lastReportId;") + 3000);
+  const reuse = DISPATCH_SRC.slice(DISPATCH_SRC.indexOf("const keptCursor = existing.lastReportId;"), DISPATCH_SRC.indexOf("const keptCursor = existing.lastReportId;") + 3000);
   assert.match(reuse, /const live = judgeHierarchy\(\)\[judgeId\] \?\? existing;/,
     "the reuse registration reads the entry AGAIN — `existing` predates this dispatch's absorb");
   assert.match(reuse, /lastModelEventCount: live\.lastModelEventCount/, "reuse carries the live cursor");
-  const fresh = SRC.slice(SRC.indexOf("let freshCursor: string | undefined;"), SRC.indexOf("let freshCursor: string | undefined;") + 900);
+  const fresh = DISPATCH_SRC.slice(DISPATCH_SRC.indexOf("let freshCursor: string | undefined;"), DISPATCH_SRC.indexOf("let freshCursor: string | undefined;") + 900);
   assert.match(fresh, /freshModelEventCount = freshProjection\.modelEvents\.length/,
     "a fresh open seeds it at the channel watermark (the same rule as the report cursor)");
-  assert.match(SRC, /lastModelEventCount: freshModelEventCount/, "…and the registration carries it");
+  assert.match(DISPATCH_SRC, /lastModelEventCount: freshModelEventCount/, "…and the registration carries it");
   // The OTHER dispatch surface (judge_spawn: goal/plan audits) has its own
   // registration and needs the same watermark — a stale `exhausted` event there
   // ends the first probe of every later audit (P1, reviewer round 2).
@@ -894,8 +916,8 @@ test("MODEL EVENTS: the cursor never moves past an event the opener did not act 
     "both spawn registrations (pre-open and inside the open) carry it");
   // Absorbing at dispatch is what covers the round that ends WITHOUT a report
   // (an exhausted chain) — before the entry it reads the cursor from is gone.
-  const dispatchAt = SRC.indexOf("const existing = judgeHierarchy()[judgeId];");
-  assert.match(SRC.slice(dispatchAt, dispatchAt + 450), /absorbJudgeModelEvents\(root, judgeId\)/,
+  const dispatchAt = DISPATCH_SRC.indexOf("const existing = judgeHierarchy()[judgeId];");
+  assert.match(DISPATCH_SRC.slice(dispatchAt, dispatchAt + 450), /absorbJudgeModelEvents\(root, judgeId\)/,
     "the dispatch absorbs before it rewrites the entry");
   // …and WITHOUT an entry there is nothing to absorb against: "read the whole
   // channel" would re-record a historical failure with a fresh timestamp on
@@ -1331,12 +1353,13 @@ test("stale pause liveness: cleared when the agent proves it is not waiting", ()
   // supersedes it).
   // P-multi: the recorder / run_precommit clear the ACTIVE repo's state via a
   // local `st` (no global swap), so both spellings count.
-  const clears = SRC.match(/delete (?:state|st)\.pausedQuestion/g) ?? [];
+  // The three recorders moved to lib/ (t7) and still clear it there.
+  const clears = [SRC, VERDICT_SRC, SIBLING_VERDICT_SRC]
+    .flatMap((src) => src.match(/delete (?:state|st)\.pausedQuestion/g) ?? []);
   assert.ok(clears.length >= 5, `expected >=5 clear sites, found ${clears.length}`);
-  const recordStart = SRC.indexOf("async function recordReviewVerdict(");
+  const recordStart = VERDICT_SRC.indexOf("async function recordReviewVerdict(");
   assert.ok(recordStart > 0, "the reviewer verdict recorder must exist");
-  const recordEnd = SRC.indexOf("// ---------- review tooling", recordStart);
-  assert.ok(SRC.slice(recordStart, recordEnd).includes(".pausedQuestion"), "recording a verdict must clear the pause");
+  assert.ok(VERDICT_SRC.slice(recordStart).includes(".pausedQuestion"), "recording a verdict must clear the pause");
   const precommitStart = SRC.indexOf('name: "run_precommit"');
   const precommitEnd = SRC.indexOf('name: "declare_done"');
   assert.ok(SRC.slice(precommitStart, precommitEnd).includes(".pausedQuestion"), "run_precommit must clear the pause");
@@ -2107,9 +2130,10 @@ test("the reviewer verdict is recorded from the structured conclusion, and `reco
   // 2026-09-04 (user decision D4): the recorder is a plain function taking the
   // judge's own structured conclusion. Its only reason to be a tool was that a
   // verdict had to be parsed back out of text the gate itself serialised.
-  assert.match(SRC, /async function recordReviewVerdict\(/);
-  assert.match(SRC, /adjudicateReviewConclusion\(/, "one adjudication decides the recorded verdict");
+  assert.match(VERDICT_SRC, /async function recordReviewVerdict\(/);
+  assert.match(VERDICT_SRC, /adjudicateReviewConclusion\(/, "one adjudication decides the recorded verdict");
   assert.doesNotMatch(SRC, /name:\s*["']record_review["']/, "no tool surface may carry it back");
+  assert.doesNotMatch(VERDICT_SRC, /name:\s*["']record_review["']/, "…nor its new home");
 });
 
 test("no fence is synthesised and none is parsed — anywhere in lib/ or the extension", () => {
@@ -2359,11 +2383,12 @@ test("the checkpoint message is delegated to the pure, unit-tested lib module", 
   // the scope is GONE (user decision, 2026-09-16). The extension only names
   // the call site — pin the delegation so the logic cannot silently move back
   // inline.
-  assert.match(SRC, /import \{ buildCheckpointMessage \} from "\.\.\/lib\/checkpoint-message\.ts"/,
-    "the extension imports the pure builder");
-  assert.doesNotMatch(SRC, /function checkpointMessage\(/,
+  // The chain that calls it moved to lib/review-chain.ts (t7).
+  assert.match(CHAIN_SRC, /import \{ buildCheckpointMessage \} from "\.\/checkpoint-message\.ts"/,
+    "the chain imports the pure builder");
+  assert.doesNotMatch(SRC + CHAIN_SRC, /function checkpointMessage\(/,
     "no wrapper: the call site calls the pure builder directly");
-  assert.match(SRC, /const message = buildCheckpointMessage\(input\.message \?\? input\.note\);/,
+  assert.match(CHAIN_SRC, /const message = buildCheckpointMessage\(input\.message \?\? input\.note\);/,
     "the checkpoint delegates, it does not re-implement the rule");
 });
 
@@ -2897,12 +2922,12 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // session factory landed the env is ASSEMBLED there (one place for a
   // cross-process contract), so the dispatch names the opener as the judge
   // role's `openerId` and lib/session-factory.ts turns it into RG_JUDGE_OPENER.
-  const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
+  const spawnAt = DISPATCH_SRC.indexOf("function dispatchJudgeRound(");
   // Sized to the whole function (it grew when the spawn learned to verify its
   // delivery, and again when the reuse branch started stamping the round number
   // into the instruction record); a window that stopped short would silently
   // assert about half a function and pass for the wrong reason.
-  const spawn = SRC.slice(spawnAt, spawnAt + 19000);
+  const spawn = DISPATCH_SRC.slice(spawnAt, spawnAt + 19000);
   assert.match(spawn, /kind: "judge",\s*\n\s*openerId: opener,/, "the pane is told who opened it");
   assert.match(
     readFileSync(new URL("../lib/session-factory.ts", import.meta.url), "utf8"),
@@ -3037,13 +3062,14 @@ test("judge_submit is the agent's single judge entry and hides every process det
 });
 
 test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane reuse, fresh-kill", () => {
-  const at = SRC.indexOf("function dispatchJudgeRound(");
+  const at = DISPATCH_SRC.indexOf("function dispatchJudgeRound(");
   assert.ok(at > 0, "the single dispatch owner must exist");
+  assert.equal(SRC.indexOf("function dispatchJudgeRound("), -1, "…and it is not also in the extension");
   // BOTH ENDS ASSERTED, no fixed slice length. This window used to be
   // `SRC.slice(at, at + 14000)`, and the function outgrew it — a truncated
   // window does not fail, it just quietly stops covering the tail, so every
   // `doesNotMatch` below would pass on text nobody read.
-  const body = windowOf("function dispatchJudgeRound(", "\n  function readRoundStdout(", "dispatchJudgeRound body");
+  const body = windowIn(DISPATCH_SRC, "function dispatchJudgeRound(", "\n  return { dispatchJudgeRound };", "dispatchJudgeRound body");
   // B5: the work dir is derived from role+repo+opener+lane — NEVER from the round's title,
   // which gave pi a new --session-dir every round and restarted the session.
   assert.match(body, /judgeWorkDirFor\(role, shortRepoHash\(root\), opener, lane\)/,
@@ -3096,7 +3122,7 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
     "fresh kills the pane through the shared close helper");
   assert.doesNotMatch(body, /releasesWindowLabels\(\{/,
     "…and does not re-inline the label-bar rule");
-  const closeHelper = windowOf("function closeJudgePaneOf(", "\n  /**\n   * Retire a lane the gate has stopped using",
+  const closeHelper = windowIn(JUDGE_LANES_SRC, "function closeJudgePaneOf(", "\n  /**\n   * Retire a lane the gate has stopped using",
     "closeJudgePaneOf body");
   assert.match(closeHelper, /closeSessionWindow\(ctx\.run, \{ ownSession: entry\.tmuxSession, windowId: entry\.windowId \}\)/, "the helper is what closes the window");
   assert.doesNotMatch(closeHelper, /setw|-u |hideLabelsVia/,
@@ -3151,9 +3177,10 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // reached. Asserting the SHAPE here (no `sessionDir: c.sessionDir` literal,
   // one call per seam) is what keeps a fourth copy from appearing.
   const wiring = judgeToolsWiring();
-  assert.equal((SRC.match(/judgeChildRecordOf\(/g) ?? []).length >= 3, true,
+  // The settle sweep's seam moved to lib/judge-round-settle.ts (t7).
+  assert.equal(((SRC + SETTLE_SRC).match(/judgeChildRecordOf\(/g) ?? []).length >= 3, true,
     "every entry→record seam goes through lib/hierarchy.ts `judgeChildRecordOf`");
-  assert.doesNotMatch(SRC, /sessionDir: c\.sessionDir/,
+  assert.doesNotMatch(SRC + SETTLE_SRC, /sessionDir: c\.sessionDir/,
     "no hand-written copy of the projection may come back");
   assert.match(wiring, /judgeChildRecordOf\(c, root\)/,
     "…including the by-role lookup, which supplies the repo it resolved");
@@ -3261,9 +3288,10 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // into a live pane, a rotated lane) must carry the whole pane forward. Copying
   // `paneId` by hand and forgetting the window pair was the second instance of
   // the P1 above — the pane stays on screen and nothing can close it.
-  assert.equal((SRC.match(/paneCoordsOf\(/g) ?? []).length >= 1, true,
+  // The re-registration lives with the dispatch in lib/judge-round-dispatch.ts (t7).
+  assert.equal((DISPATCH_SRC.match(/paneCoordsOf\(/g) ?? []).length >= 1, true,
     "a re-registration spreads lib/hierarchy.ts `paneCoordsOf`, never a hand-picked field");
-  assert.match(SRC, /\.\.\.paneCoordsOf\(live\)/,
+  assert.match(DISPATCH_SRC, /\.\.\.paneCoordsOf\(live\)/,
     "…and the reuse path takes it from the LIVE entry, which is the one that has the coordinates")
   assert.match(JUDGE_TOOLS_SRC, /function checkOpener\(/, "the opener check is one shared helper");
   assert.equal(
@@ -3531,7 +3559,17 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // 2026-09-08: 17 → 18。submitForReview 把 round note 传给 review_checkpoint
     // (`{ message, note: input.note, ... }`)——依赖论证门禁从 agent 自己的话里读
     // 论证。接线引用，不是调用指令。
-    "review-gate.ts": 18,
+    // 2026-09-26 (t7): 18 → 12。送审链 / lane / 审计依赖 / reviewer 记录器搬进 lib/，
+    // 它们的 6 处接线引用原样跟着搬走（下面四行），总数不变。
+    "review-gate.ts": 12,
+    // callTool("review_checkpoint" / "prepare_review") + the refusal texts naming them.
+    "review-chain.ts": 3,
+    // callTool("run_precommit", …) — the lane's own run.
+    "precommit-lane.ts": 1,
+    // callTool("prepare_goal_audit", …) — the goal-auditor's task builder.
+    "audit-round-host.ts": 1,
+    // The STALE TARGET note names the step after which the checkpoint landed.
+    "verdict-host.ts": 1,
   };
 
   const sources = [
@@ -3721,7 +3759,7 @@ test("judge_wait applies the MESSAGE-DRIVEN criteria and returns the standard re
   // …and the OTHER wake-up path — the gate noticing a finished round on its
   // own at settle time — speaks through the same builder. Two formats would be
   // two things to keep truthful, and the opener would have to learn both.
-  const settle = windowOf("async function settleFinishedRounds(", "\n  /**", "settleFinishedRounds");
+  const settle = windowIn(SETTLE_SRC, "async function settleFinishedRounds(", "\n  return {", "settleFinishedRounds");
   assert.match(settle, /buildStandardReport\(\{/, "the settle wake-up uses the same builder");
 });
 
@@ -3740,7 +3778,7 @@ test("ONE report is recorded ONCE — the wait and the settle share a single cur
   // Since 2026-09-05 NEITHER path selects the report: both hand the round to
   // the engine, which selects, records and consumes it. "Recorded once" is
   // therefore structural — there is one cursor write, in one function.
-  const recorder = windowOf("async function recordJudgeConclusion(", "\n  /**", "recordJudgeConclusion");
+  const recorder = windowIn(SETTLE_SRC, "async function recordJudgeConclusion(", "\n  /**", "recordJudgeConclusion");
   assert.match(recorder, /settleAuditRound\(auditRoundDeps\(ctx\), \{ judgeId: sessionId, root: childRoot \}\)/,
     "the settle path closes the round through the engine");
   assert.doesNotMatch(recorder, /last\.reportId === entry\?\.lastReportId/,
@@ -3756,7 +3794,7 @@ test("ONE report is recorded ONCE — the wait and the settle share a single cur
   const unrecordedAt = settleFn.indexOf('status: "unrecorded"');
   assert.ok(advanceAt > 0 && unrecordedAt > 0 && unrecordedAt < advanceAt,
     "the unrecorded return must come BEFORE the cursor advance");
-  const advance = windowOf("function advanceReportCursor(", "\n  }", "advanceReportCursor");
+  const advance = windowIn(AUDIT_HOST_SRC, "function advanceReportCursor(", "\n  }", "advanceReportCursor");
   assert.match(advance, /lastReportId: reportId/, "the settle cursor IS JudgeEntry.lastReportId");
   // The wait writes the same field, through its own small helper — still used
   // for the FINDING cursor, which is not the engine's business.
@@ -3861,8 +3899,8 @@ test("the verdict recorder actually runs the cwd check it demands", () => {
 test("user ask 2026-08-28: the judge SESSION is the managed entity, the window is the carrier", () => {
   // The dispatcher must RECORD the session-side paths at spawn time (the
   // transcript dir and the pane), plus WHO opened it.
-  const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
-  const spawn = SRC.slice(spawnAt, spawnAt + 11000);
+  const spawnAt = DISPATCH_SRC.indexOf("function dispatchJudgeRound(");
+  const spawn = DISPATCH_SRC.slice(spawnAt, spawnAt + 11000);
   for (const field of ["sessionDir", "paneId", "openerId"]) {
     assert.ok(spawn.includes(field), `a dispatched round must record ${field} at spawn time`);
   }
@@ -4089,9 +4127,11 @@ test("completion arrives as a channel report consumed by the wait — no process
   assert.doesNotMatch(SRC, /registerWatch\(|watchRegistry\.|createProcessWatchRegistry\(|waitForProcessExit\(|rememberChildProcess\(|forgetChildProcess\(/,
     "no process watcher may come back");
   assert.ok(!existsSync(join(ROOT, "lib", "judge-watch.ts")), "the watcher module stays deleted");
-  const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
+  assert.doesNotMatch(DISPATCH_SRC, /registerWatch\(|watchRegistry\.|createProcessWatchRegistry\(|waitForProcessExit\(|rememberChildProcess\(|forgetChildProcess\(/,
+    "…nor in the dispatch's new home");
+  const dispatchAt = DISPATCH_SRC.indexOf("function dispatchJudgeRound(");
   assert.ok(dispatchAt > 0);
-  assert.match(SRC.slice(dispatchAt, dispatchAt + 9000), /judgeChannelTarget\(opener, judgeId\)/,
+  assert.match(DISPATCH_SRC.slice(dispatchAt, dispatchAt + 9000), /judgeChannelTarget\(opener, judgeId\)/,
     "reuse delivers the round into the channel the wait consumes");
   // The wait still ENDS on a channel report — it just no longer reads the
   // channel twice: the probe observes the report, the engine records it.
@@ -4419,7 +4459,6 @@ test("every enforcement path computes a FRESH fingerprint", () => {
     // merge-waiver dialog sit between the tool name and its first fingerprint
     // call — bounded by the check that FOLLOWS the loop, not by a byte count.
     ['name: "declare_done"', "// L7/L8 — completion-only requirements"],
-    ["async function recordReviewVerdict(", "// ---------- review tooling"],
     // END ANCHOR, not a byte window (2026-09-06): the station-block deny added
     // above the quota check pushed the fingerprint call past 4000 bytes, which
     // is precisely the vacuous-coverage failure this comment warns about. The
@@ -4433,8 +4472,13 @@ test("every enforcement path computes a FRESH fingerprint", () => {
 
     // (The ship path's own per-repo fingerprint loop moved to
     // lib/ship-gate-bash.ts and is asserted separately below — it is the same
-    // rule, against the module that now owns the code.)
+    // rule, against the module that now owns the code. So did the reviewer
+    // verdict recorder, to lib/verdict-host.ts, t7 — also asserted below.)
   ];
+  assert.match(recordVerdictBody(), /computeFingerprint\(/,
+    "recordReviewVerdict must call computeFingerprint() directly");
+  assert.ok(!recordVerdictBody().includes("advisoryFingerprint()"),
+    "recordReviewVerdict must NOT use the advisory memo");
   for (const [anchor, extent] of anchors) {
     const at = SRC.indexOf(anchor);
     assert.ok(at >= 0, `anchor not found: ${anchor}`);
@@ -4891,9 +4935,9 @@ test("the incremental baseline records only what the review actually covered", (
   // Under a user-granted scope limit the review only read the session's own
   // files; recording the whole branch diff would later let the scoper call
   // never-reviewed files "already reviewed" and skip escalating to full.
-  const at = SRC.indexOf("st.lastReviewedTree = {");
+  const at = VERDICT_SRC.indexOf("st.lastReviewedTree = {");
   assert.ok(at > 0, "the verdict recorder must set the baseline");
-  const before = SRC.slice(at - 900, at);
+  const before = VERDICT_SRC.slice(at - 900, at);
   assert.match(before, /st\.scopeLimit\s*\n?\s*\?\s*st\.scopeLimit\.sessionFiles/,
     "a scope-limited review must record sessionFiles, not the whole branch diff");
 });
@@ -4906,14 +4950,14 @@ test("the incremental DEPTH baseline moves on any concluded round; the RANGE bas
   // is what made a session whose first round concluded BLOCKED re-review the
   // whole branch, three times over one diff in prime. The write must therefore
   // NOT sit inside a READY guard any more.
-  const depthAt = SRC.indexOf("st.lastReviewedTree = {");
-  const depthGuard = SRC.lastIndexOf('parsed.verdict === "READY"', depthAt);
+  const depthAt = VERDICT_SRC.indexOf("st.lastReviewedTree = {");
+  const depthGuard = VERDICT_SRC.lastIndexOf('parsed.verdict === "READY"', depthAt);
   assert.ok(
     depthGuard === -1 || depthAt - depthGuard > 900,
     "a BLOCKED round read those files too — the depth baseline must not be READY-gated",
   );
   assert.match(
-    SRC.slice(depthAt, depthAt + 400),
+    VERDICT_SRC.slice(depthAt, depthAt + 400),
     /verdict: parsed\.verdict/,
     "…and it records WHICH verdict, so the settled-conclusion rule can still demand a READY",
   );
@@ -4922,16 +4966,16 @@ test("the incremental DEPTH baseline moves on any concluded round; the RANGE bas
   // only when the QUALITY half concluded. A round whose quality judge was
   // cancelled has content that never entered a quality round; letting the range
   // step past it would ship it on a later READY (2026-09-17 quality P1).
-  const rangeAt = SRC.indexOf("const concludedCommit = (qualityHalfConcluded");
+  const rangeAt = VERDICT_SRC.indexOf("const concludedCommit = (qualityHalfConcluded");
   assert.ok(rangeAt > 0, "the range baseline must be derived from the quality standing");
   // `qualityStandingFor` answers the question ABOVE the write, and the carried
   // value IS the write — so the window spans both.
   assert.match(
-    SRC.slice(Math.max(0, rangeAt - 500), rangeAt + 320),
+    VERDICT_SRC.slice(Math.max(0, rangeAt - 500), rangeAt + 320),
     /qualityStandingFor\(/,
     "…which is what qualityStandingFor answers",
   );
-  assert.match(SRC.slice(rangeAt, rangeAt + 320), /\?\? st\.review\.commitSha/, "…and otherwise the previous value is carried forward");
+  assert.match(VERDICT_SRC.slice(rangeAt, rangeAt + 320), /\?\? st\.review\.commitSha/, "…and otherwise the previous value is carried forward");
 });
 
 test("timings are appended, never read back into a decision", () => {
@@ -5084,23 +5128,23 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
     "nothing before the finally closes the judge");
 
 
-  const goalAt = SRC.indexOf("async function runGoalAudit(");
-  const goal = SRC.slice(goalAt, SRC.indexOf("async function runPlanAudit("));
+  const goalAt = CHAIN_SRC.indexOf("async function runGoalAudit(");
+  const goal = CHAIN_SRC.slice(goalAt, CHAIN_SRC.indexOf("async function runPlanAudit("));
   assert.ok(goalAt > 0 && goal.length > 0, "the goal-audit function exists");
   assert.match(goal, /runAuditRound\(auditRunDeps\(ctx, input\.progress, input\.signal\), \{/,
     "the goal audit runs the engine");
   assert.match(goal, /spec: GOAL_AUDIT_SPEC/, "…with its own spec");
 
-  const planAt = SRC.indexOf("async function auditPlanRound(");
-  const plan = SRC.slice(planAt, planAt + 3500);
+  const planAt = CHAIN_SRC.indexOf("async function auditPlanRound(");
+  const plan = CHAIN_SRC.slice(planAt, planAt + 3500);
   assert.ok(planAt > 0, "the plan-audit function exists");
-  assert.match(plan, /runAuditRound\(auditRunDeps\(latestCtx, onUpdate, signal\), \{/,
+  assert.match(plan, /runAuditRound\(auditRunDeps\(host\.ctx\(\), onUpdate, signal\), \{/,
     "the plan audit runs the SAME engine");
   assert.match(plan, /spec: PLAN_AUDIT_SPEC/, "…differing only in its spec");
 
   // Exactly ONE gate-internal close wiring exists — a second one would be a
   // second, unaccounted-for path out of a round.
-  const internalCloses = [...SRC.matchAll(/callTool\("judge_close"/g)];
+  const internalCloses = [...(SRC + AUDIT_HOST_SRC).matchAll(/callTool\("judge_close"/g)];
   assert.equal(internalCloses.length, 1, "one close wiring, injected into the engine");
 
   // ENGINE MERGED, WORDING NOT. The four specs live in their own module, so a
@@ -5161,7 +5205,7 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   // draft do it. And it must stay blind to the verdict: a recorded FAIL closes
   // the round too, and reading it as "not recorded" is what swallowed the
   // auditor's findings whole.
-  const evidence = windowIn(SRC, "      recordedThisRound: (root, pending) => {", "\n      },", "recordedThisRound");
+  const evidence = windowIn(AUDIT_HOST_SRC, "      recordedThisRound: (root, pending) => {", "\n      },", "recordedThisRound");
   assert.match(evidence, /st\.goalPrereview\?\.hash === goalTextHash\(pending\.draft\)/,
     "a goal's record is bound to the draft this round dispatched");
   assert.match(evidence, /st\.planAudit\?\.hash === pending\.hash/,
@@ -5173,7 +5217,7 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   assert.match(engineRun, /if \(settled\.status !== "recorded"\)/,
     "…and anything the engine itself did not record fails closed");
   // The done/reason judgement itself is wired ONCE, in the run deps.
-  const doneChecks = [...SRC.matchAll(/details\.reason === "report"/g)];
+  const doneChecks = [...(SRC + AUDIT_HOST_SRC).matchAll(/details\.reason === "report"/g)];
   assert.equal(doneChecks.length, 1, "one place decides that a wait ended on a report");
   // …and the waiter they share must keep calling until the round really ends.
   // `judge_wait` is message-driven for the agent (2026-09-05), so a single call
@@ -5252,14 +5296,14 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   // copies of it were the whole point of the 2026-09-05 convergence).
   assert.match(body, /buildGoalAuditRound\(task, root, ctx\)/);
   assert.match(body, /callTool\("prepare_adviser", \{ repo: root \}/);
-  const assembler = windowOf("async function buildGoalAuditRound(", "\n  /**", "buildGoalAuditRound");
+  const assembler = windowIn(AUDIT_HOST_SRC, "async function buildGoalAuditRound(", "\n  /**", "buildGoalAuditRound");
   assert.match(assembler, /callTool\("prepare_goal_audit", \{ goal: draft, repo: root \}/);
   assert.match(assembler, /extractTaskText\(toolText\(prepared\)\)/);
   // Criterion 2: a goal audit streams findings, so the draft can be fixed
   // while the auditor is still working.
   assert.match(assembler, /buildStreamDirective\(streamPath\)/);
   assert.match(assembler, /review-stream", `goal-\$\{goalTextHash\(draft\)/);
-  const assemblers = [...SRC.matchAll(/callTool\("prepare_goal_audit"/g)];
+  const assemblers = [...(SRC + AUDIT_HOST_SRC).matchAll(/callTool\("prepare_goal_audit"/g)];
   assert.equal(assemblers.length, 1, "ONE assembler — the three verbatim copies are gone");
   // The audited DRAFT is remembered: the verdict binds to its content, and
   // the auditor's output alone cannot say what it judged.
@@ -5275,7 +5319,7 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   assert.ok(acceptedAt > 0 && setAt > acceptedAt, "the draft is recorded after the dispatch is accepted");
   // …and the recording side closes the loop with that same draft, through the
   // engine's goal recorder — the pending entry IS what it records against.
-  const goalRecorder = windowOf("      recordGoal: async ({ root, pending, concluded }) => {", "\n      }", "recordGoal dep");
+  const goalRecorder = windowIn(AUDIT_HOST_SRC, "      recordGoal: async ({ root, pending, concluded }) => {", "\n      }", "recordGoal dep");
   assert.match(goalRecorder, /recordGoalPrereview\(goalPrereviewDeps, \{/, "recording routes through the ONE audit recorder");
   assert.match(goalRecorder, /goal: pending\.draft/, "the recorded draft is the pending one");
   assert.match(goalRecorder, /auditStartedAt: pending\.startedAt/);
@@ -5317,7 +5361,7 @@ test("a parallel round's receipt carries BOTH findings streams (B1, 2026-09-18)"
 });
 
 test("judge_submit runs the whole submission chain, and cannot dead-end on it", () => {
-  const body = windowOf("async function submitForReview(", "\n  /**", "submitForReview");
+  const body = windowIn(CHAIN_SRC, "async function submitForReview(", "\n  /**", "submitForReview");
   // Each step is the TOOL's own execute — one implementation, one set of
   // mechanical checks. Since B1 (2026-09-10) the precommit runs BESIDE the
   // chain instead of in front of it, so it is started through
@@ -5350,7 +5394,7 @@ test("judge_submit runs the whole submission chain, and cannot dead-end on it", 
 });
 
 test("a judge's verdict is recorded from THIS round's report, never an older one", () => {
-  const body = windowOf("async function recordJudgeConclusion(", "\n  /**", "recordJudgeConclusion");
+  const body = windowIn(SETTLE_SRC, "async function recordJudgeConclusion(", "\n  /**", "recordJudgeConclusion");
   // The channel accumulates every round, so its newest report can belong to
   // a PREVIOUS one — recording that would bind a verdict to work nobody
   // judged. Since 2026-09-05 that decision is the ENGINE's, in one place, and
@@ -5366,7 +5410,7 @@ test("a judge's verdict is recorded from THIS round's report, never an older one
     "a review verdict goes to the review recorder, on the STRUCTURED conclusion");
   // The record writers stay where they were — the engine calls them, and the
   // review one still names its repo explicitly.
-  const reviewRecorder = windowOf("      recordReview: async ({ root, concluded }) => {", "\n      }", "recordReview dep");
+  const reviewRecorder = windowIn(AUDIT_HOST_SRC, "      recordReview: async ({ root, concluded }) => {", "\n      }", "recordReview dep");
   assert.match(reviewRecorder, /recordReviewVerdict\(concluded, root, recordCtx\)/,
     "the record names its repo explicitly");
   // Advice is not a verdict: an adviser's report is surfaced, never recorded —
@@ -5381,7 +5425,7 @@ test("a judge's PROSE never reaches the opener's context, except from the advise
   // OTHER half: even if one somehow did, the opener would not quote it — the
   // excerpt is passed for exactly one role, and the wake-up is otherwise built
   // from structured fields plus the gate's own recorded note.
-  const body = windowOf("async function settleFinishedRounds(", "\n  /**", "settleFinishedRounds");
+  const body = windowIn(SETTLE_SRC, "async function settleFinishedRounds(", "\n  return {", "settleFinishedRounds");
   assert.match(body, /conclusionExcerpt: entry\.role === "adviser" \? conclusion\.text : undefined/,
     "only an adviser's conclusion is quoted back");
   assert.match(body, /verdict: obs\.verdict/, "the verdict travels structured");
@@ -5978,8 +6022,8 @@ test("restart does not deadlock on a dead opener: dead foreign entries are dropp
   // …and it runs on every hierarchy read, so no tool path can deadlock.
   const reads = [...SRC.matchAll(/hierarchy: \(\) => \{ dropDeadForeignJudges\(\); return judgeHierarchy\(\); \},/g)];
   assert.equal(reads.length, 2, "both judge tool families drop on read");
-  const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
-  assert.match(SRC.slice(dispatchAt, dispatchAt + 800), /dropDeadForeignJudges\(\);/,
+  const dispatchAt = DISPATCH_SRC.indexOf("function dispatchJudgeRound(");
+  assert.match(DISPATCH_SRC.slice(dispatchAt, dispatchAt + 800), /dropDeadForeignJudges\(\);/,
     "dispatch drops before deriving its own id");
 });
 
@@ -6039,7 +6083,7 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
   // since the id lookup used to run against a Map that was own-only by
   // construction.
   for (const name of ["judgeChildByRole", "findJudgeChild"]) {
-    assert.match(judgeReaderBody(name), /ownJudges\(\)/,
+    assert.match(judgeReaderBody(name, SETTLE_SRC), /ownJudges\(\)/,
       `${name} must not hand back another opener's review`);
   }
   // declare_done's cascade-close deliberately uses the WIDER scope: a dead
@@ -6116,7 +6160,7 @@ test("the audit chain's close path reports what the reclaim achieved", () => {
   // agent-dispatched review pane both call `closeOwnedJudge`, because "read
   // hadPane before the close, close by judgeId, map the reply" is exactly the
   // sequence whose two copies drift.
-  const dep = windowOf("async function closeOwnedJudge(", /\n  \}\n/, "closeOwnedJudge helper");
+  const dep = windowIn(AUDIT_HOST_SRC, "async function closeOwnedJudge(", /\n  \}\n/, "closeOwnedJudge helper");
   assert.match(dep, /return \{/, "the outcome is returned, never discarded");
   // 2026-09-08: the close goes through `doClose` directly (gate-self bypass
   // of the repo check) — the terminated reading is a cast-guarded property
@@ -6132,10 +6176,10 @@ test("the audit chain's close path reports what the reclaim achieved", () => {
   assert.ok(hadPaneAt < callAt, "hadPane must be read before the row is dropped");
   // …and BOTH callers go through it, so a reclaim cannot report an outcome
   // the close never produced.
-  assert.match(SRC,
+  assert.match(AUDIT_HOST_SRC,
     /closeJudge: async \(root, role\) => closeOwnedJudge\(/,
     "the gate's own chains use the shared close path");
-  assert.match(SRC,
+  assert.match(AUDIT_HOST_SRC,
     /reclaimJudgePane: async \(root, judgeId, role\) => \{[\s\S]*?closeOwnedJudge\(root, judgeId, role\)/,
     "…and so does the round-end reclaim");
 });
@@ -6311,9 +6355,13 @@ test("ONE gate session per worktree: refuse, hold, release — and only ONE live
  * call sites still use it, which is exactly how the old shape would come back.
  */
 test("round 5: both inline judge-task assemblies go through the untrusted-data seam", () => {
-  const code = codeOnly(SRC);
+  // The reviewer note is assembled by the chain (lib/review-chain.ts, t7); the
+  // adviser question is still assembled in the extension.
+  const code = codeOnly(SRC) + "\n" + codeOnly(CHAIN_SRC);
   assert.match(SRC, /import \{ composeWithUntrustedData \} from "\.\.\/lib\/untrusted-data\.ts"/,
     "the extension imports the seam");
+  assert.match(CHAIN_SRC, /import \{ composeWithUntrustedData \} from "\.\/untrusted-data\.ts"/,
+    "…and so does the chain");
   // Derivation self-proof: the pattern finds the call sites at all before its
   // count means anything.
   const calls = [...code.matchAll(/composeWithUntrustedData\(/g)];
@@ -6340,7 +6388,7 @@ test("round 5: both inline judge-task assemblies go through the untrusted-data s
  * only the source can show that the decision is acted on.
  */
 test("rotation retires the lane it replaces: pane closed, scratch reaped, row dropped", () => {
-  const resolver = windowOf("function resolveJudgeLane(", "\n  /**\n   * The facts a rotated REVIEWER round",
+  const resolver = windowIn(JUDGE_LANES_SRC, "function resolveJudgeLane(", "\n  /**\n   * The facts a rotated REVIEWER round",
     "resolveJudgeLane body");
   assert.match(resolver, /findJudgeLane\(judgeHierarchy\(\), \{ role, repoRoot: root, openerId: opener \}\)/,
     "the previous lane is looked up in the ONE registry");
@@ -6365,7 +6413,7 @@ test("rotation retires the lane it replaces: pane closed, scratch reaped, row dr
     "the retire is handed to the caller, not performed here");
   assert.match(resolver, /if \(retired \|\| !previous \|\| previous\.judgeId === nextId\) return;/,
     "…idempotent, and a no-op when the lane did not change");
-  const dispatchBody = windowOf("function dispatchJudgeRound(", "\n  function readRoundStdout(",
+  const dispatchBody = windowIn(DISPATCH_SRC, "function dispatchJudgeRound(", "\n  return { dispatchJudgeRound };",
     "dispatchJudgeRound body");
   const retireCalls = dispatchBody.match(/rotation\.retirePrevious\(\)/g) ?? [];
   assert.equal(retireCalls.length, 3,
@@ -6374,7 +6422,7 @@ test("rotation retires the lane it replaces: pane closed, scratch reaped, row dr
     "a pane that exists but never reported still replaced the old lane");
 
 
-  const retire = windowOf("function retireJudgeLane(", "\n  /**\n   * Dispatch ONE round to a judge role",
+  const retire = windowIn(JUDGE_LANES_SRC, "function retireJudgeLane(", "\n  /**\n   * Reclaim the review worktrees",
     "retireJudgeLane body");
   assert.match(retire, /judgePaneAlive\(/, "a pane is probed before it is closed");
   assert.match(retire, /if \(alive === true\) closeJudgePaneOf\(entry, ctx\)/,
@@ -6396,9 +6444,9 @@ test("the judge's context reading travels report → registry → next dispatch"
   const code = codeOnly(SRC);
   assert.match(code, /contextPercent: \(\) => contextPercentOf\(latestCtx/,
     "the judge side reports its own usage at the conclusion");
-  assert.match(code, /noteJudgeContextFrom\(entry\.judgeId, records\)/,
+  assert.match(codeOnly(AUDIT_HOST_SRC), /noteJudgeContextFrom\(entry\.judgeId, records\)/,
     "the opener records it when it reads the round's channel");
-  const noting = windowOf("function noteJudgeContextFrom(", "\n  /**\n   * Close one judge's round",
+  const noting = windowIn(AUDIT_HOST_SRC, "function noteJudgeContextFrom(", "\n  /**\n   * WHAT THE AUDIT-ROUND ENGINE NEEDS",
     "noteJudgeContextFrom body");
   assert.match(noting, /sanitizeContextPercent\(/, "an unusable reading is dropped, never rounded into one");
   assert.match(noting, /if \(reading !== undefined\) percent = reading;/,
@@ -6615,7 +6663,7 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
   // the chain pushed the very calls these assertions name out of view and the
   // test failed for a reason that has nothing to do with the rule it pins —
   // exactly the failure mode `windowIn`'s own docblock describes.
-  const submit = windowIn(SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
+  const submit = windowIn(CHAIN_SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
   assert.match(submit, /void startPrecommitBeside\(input\.root, input\.ctx\)/,
     "the long lane starts and the chain runs beside it — awaiting here is exactly the 33s the agent used to lose");
   assert.doesNotMatch(submit, /await callTool\(\s*"run_precommit"/,
@@ -6626,7 +6674,7 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
   const gate = SRC.slice(gateAt, gateAt + 3000);
   assert.match(
     gate,
-    /const verifyingNow =[\s\S]{0,120}?inFlightPrecommit\?\.root === root[\s\S]{0,80}?st\.precommit\.verdict === "NOT_RUN"/,
+    /const verifyingNow =[\s\S]{0,120}?precommitLaneRunning\(root\)[\s\S]{0,80}?st\.precommit\.verdict === "NOT_RUN"/,
     "the receipt for a pending checkpoint is the LIVE promise in THIS process AND a verdict that has not landed yet — the promise is cleared in a microtask, so the verdict is what makes the test exact",
   );
   assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && st\.precommit\.verdict !== "PASS"\)/,
@@ -6636,23 +6684,23 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
 });
 
 test("a FAIL that arrives after dispatch is reported, and it withholds the READY", () => {
-  assert.match(SRC, /function reportAsyncPrecommit\(/,
+  assert.match(LANE_SRC, /function reportAsyncPrecommit\(/,
     "the failure has a channel of its own — the round was dispatched before this verdict existed, so returning early is no longer available");
   // BOTH verdicts reach the agent (2026-09-16): a silent PASS is what stranded a
   // `judge_wait` for 6 minutes 47 seconds — the event had no delivery, and the
   // wait's own sources are the JUDGE's.
-  assert.match(SRC, /function reportAsyncPrecommitPass\(/, "a PASS lands too, and something has to say so");
+  assert.match(LANE_SRC, /function reportAsyncPrecommitPass\(/, "a PASS lands too, and something has to say so");
   assert.match(
-    SRC,
+    LANE_SRC,
     /if \(verdict === "PASS"\) \{\s*\n\s*reportAsyncPrecommitPass\([\s\S]{0,900}?\} else \{[\s\S]{0,400}?reportAsyncPrecommit\(\{/,
     "PASS through the short notice, every other verdict through the failure one — including a thrown runner (the parked-READY handling above runs first and must not swallow it)",
   );
   assert.match(
-    SRC,
+    VERDICT_SRC,
     /readyLacksVerification\(\{\s*precommitVerdict: st\.precommit\.verdict,[\s\S]{0,500}?lastFullPassTree: st\.precommit\.lastFullPassTree,[\s\S]{0,80}?reviewedTree: reviewTargets\.get\(targetRoot\)\?\.tree,[\s\S]{0,400}?bypassActive: laneVerificationWaived\(targetRoot, st\),\s*\}\)/,
     "the verdict recorder refuses a READY on content that never passed the full lane — and answers it from the round's OWN tree, not from the live binding the next edit resets",
   );
-  assert.match(SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
+  assert.match(VERDICT_SRC, /unverified = true;/, "…and names the reason in the reply the agent reads");
 });
 
 test("a parked READY is replayed by the lane that lands on its tree, and retired by one that does not", () => {
@@ -6667,28 +6715,30 @@ test("a parked READY is replayed by the lane that lands on its tree, and retired
   // lane in flight, parking the conclusion would stop the round forever while
   // the reply told the agent not to re-submit — the caller passes that fact in
   // and `classifyReadyWithholding` answers `unverified-idle` (a REFUSAL).
-  assert.match(SRC, /laneStillRunning: inFlightPrecommit\?\.root === targetRoot/);
+  assert.match(VERDICT_SRC, /laneStillRunning: precommitLaneRunning\(targetRoot\)/);
+  assert.match(LANE_SRC, /return inFlightPrecommit\?\.root === root;/,
+    "…which is the ONE read of the in-flight lane (lib/precommit-lane.ts)");
   // …and the refusal tells the agent WHICH way it went, because the two cases
   // need opposite advice (round-8): a running lane will replay this very
   // conclusion, an absent one never will.
-  assert.match(SRC, /withholding === "unverified-idle"/,
+  assert.match(VERDICT_SRC, /withholding === "unverified-idle"/,
     "the UNVERIFIED reply distinguishes 'a lane is still running' from 'nothing is coming'");
-  assert.match(SRC, /const fate = parkedReadyFate\(\{/);
+  assert.match(CANCEL_SRC, /const fate = parkedReadyFate\(\{/);
   // …AND THE RE-ASK IS ONE PLACE, CALLED FROM EVERY LANDING (2026-09-16): the
   // lane's landing, the quality round's settlement, and the settle sweep. The
   // first version decided the fate at the lane's landing alone, which was
   // right while the lane was the only thing a hold could wait for — with two
   // preconditions landing in either order it would strand half of them.
-  assert.match(SRC, /async function resumeParkedReady\(\s*\n\s*root: string,/, "ONE re-ask of the parked conclusion's two preconditions");
+  assert.match(CANCEL_SRC, /async function resumeParkedReady\(\s*\n\s*root: string,/, "ONE re-ask of the parked conclusion's two preconditions");
   // …and the lane's own callback hands it what it MEASURED: the recorded tree
   // cannot say "that lane failed", and leaving a parked record behind after
   // the lane it was waiting for has landed is exactly what round-2 P2 banned.
-  assert.match(SRC, /await resumeParkedReady\(root, ctx, \{ laneVerdict: verdict, coveredTree \}\)/,
+  assert.match(LANE_SRC, /await resumeParkedReady\(root, ctx, \{ laneVerdict: verdict, coveredTree \}\)/,
     "the lane's landing passes its own verdict through");
-  assert.match(SRC, /lane: parkedLaneHalf\(\{/, "the lane's half is computed by the pure rule");
-  assert.match(SRC, /quality: qualityPrecondition\(\{/, "…and so is the quality round's");
-  const resumeAt = SRC.indexOf("async function resumeParkedReady(");
-  const resume = SRC.slice(resumeAt, SRC.indexOf("async function applyRoundCancel(", resumeAt));
+  assert.match(CANCEL_SRC, /lane: parkedLaneHalf\(\{/, "the lane's half is computed by the pure rule");
+  assert.match(CANCEL_SRC, /quality: qualityPrecondition\(\{/, "…and so is the quality round's");
+  const resumeAt = CANCEL_SRC.indexOf("async function resumeParkedReady(");
+  const resume = CANCEL_SRC.slice(resumeAt, CANCEL_SRC.indexOf("async function applyRoundCancel(", resumeAt));
   assert.match(resume, /if \(fate === "none" \|\| fate === "hold"\) return \[\];/, "a hold leaves the record where it is");
   // THE CTX GUARD COMES FIRST (quality round P1, 2026-09-16): deleting the
   // pending record without a context to persist the delete loses a READY the
@@ -6706,13 +6756,13 @@ test("a parked READY is replayed by the lane that lands on its tree, and retired
   // The BACKSTOP: a hold whose second precondition can never land (the quality
   // pane died after the record was parked) must be retired by the settle sweep,
   // not left to rot while the reply says "do not re-submit".
-  const sweepAt = SRC.indexOf("async function settleFinishedRounds(");
-  assert.match(SRC.slice(sweepAt, sweepAt + 2000), /for \(const root of sessionRepos\) await resumeParkedReady\(root, ctx\);/,
+  const sweepAt = SETTLE_SRC.indexOf("async function settleFinishedRounds(");
+  assert.match(SETTLE_SRC.slice(sweepAt, sweepAt + 2000), /for \(const root of host\.repos\(\)\.all\) await resumeParkedReady\(root, ctx\);/,
     "every settle re-asks a parked conclusion");
   // The parked record must carry the judge's own SCOPE (round-1 P2): the
   // recorder pairs it with the dispatched half, so a replay that lost it would
   // write a different audit pair than a straight record of the same round.
-  assert.match(SRC, /concluded\.scope === undefined \? \{\} : \{ scope: concluded\.scope \}/);
+  assert.match(VERDICT_SRC, /concluded\.scope === undefined \? \{\} : \{ scope: concluded\.scope \}/);
 });
 
 test("the pass-coverage record cites the tree the lane STARTED on, never the post-run one", () => {
@@ -6721,11 +6771,11 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   // says so itself — writing THAT into a record that never expires would mark a
   // tree no lane ever ran on as verified. The tree captured before the run is
   // the one the lane actually judged.
-  const laneAt = SRC.indexOf("function startPrecommitBeside(");
+  const laneAt = LANE_SRC.indexOf("function startPrecommitBeside(");
   assert.ok(laneAt > 0, "the lane starter is here");
   // The window covers the whole lane (it grew with the abort path below, and a
   // truncated window does not fail — it silently stops covering the tail).
-  const lane = SRC.slice(laneAt, laneAt + 8000);
+  const lane = LANE_SRC.slice(laneAt, laneAt + 8000);
   assert.match(lane, /const verified = worktreeTree\(root\) \?\? ""/,
     "the pre-run tree is captured before the run (it is also what the FAIL notice names)");
   assert.match(lane, /nextFullPassTree\(\{[\s\S]{0,200}?startedTree: verified,/,
@@ -6733,7 +6783,7 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   assert.doesNotMatch(lane, /lastFullPassTree\s*=\s*outcome\.fingerprint/,
     "the post-run fingerprint must never become the record");
   // The rule itself is pure and lives in one place.
-  assert.match(SRC, /^\s*invalidateBindings,\n(?:\s*\w+,\n)*\s*nextFullPassTree,\n\} from "\.\.\/lib\/gate-state-transitions\.ts";/m,
+  assert.match(LANE_SRC, /^import \{ nextFullPassTree \} from "\.\/gate-state-transitions\.ts";/m,
     "one imported rule, not a second copy of the branches here");
   // AND THE THIRD INPUT: what the lane COVERED has to reach the rule.
   // The first attempt read it off the tool's reply (`pre.details?.testScope`)
@@ -6757,9 +6807,9 @@ test("the async FAIL notice never waits for the agent to stop, and names what it
   // turn and were delivered at 05:14/05:21/05:24 for failures from 03:01/03:15/
   // 03:23, when the gate's own records already said PASS + READY. The agent read
   // that as the gate contradicting itself and spent ten minutes on forensics.
-  const reportAt = SRC.indexOf("function reportAsyncPrecommit(");
+  const reportAt = LANE_SRC.indexOf("function reportAsyncPrecommit(");
   assert.ok(reportAt > 0, "the reporter is here");
-  const report = SRC.slice(reportAt, reportAt + 1400);
+  const report = LANE_SRC.slice(reportAt, reportAt + 1400);
   assert.match(report, /deliverAs: "steer"/,
     "steer lands at the next tool-batch boundary — a time-sensitive verdict cannot ride the stop-driven queue");
   assert.doesNotMatch(report, /deliverAs: "followUp"/,
@@ -6770,13 +6820,13 @@ test("the async FAIL notice never waits for the agent to stop, and names what it
   // Identity is read BEFORE the runner starts: the outcome's own fingerprint is
   // recomputed after it (lint:fix may have edited files), i.e. by then it can
   // already be the NEXT round's content.
-  const besideAt = SRC.indexOf("function startPrecommitBeside(");
+  const besideAt = LANE_SRC.indexOf("function startPrecommitBeside(");
   // The lane's whole body, bounded by the next declaration rather than by a
   // magic character count: every rule below is about THIS function, and a
   // window that has to grow with the comments fails for the wrong reason
   // (round-2: a comment added INSIDE the lane pushed the notice's own call out
   // of the 6400-character window and turned this red).
-  const beside = SRC.slice(besideAt, SRC.indexOf("function reportAsyncPrecommit(", besideAt));
+  const beside = LANE_SRC.slice(besideAt, LANE_SRC.indexOf("function reportAsyncPrecommit(", besideAt));
   const verifiedAt = beside.indexOf("const verified = worktreeTree(root)");
   const runAt = beside.indexOf('callTool("run_precommit"');
   assert.ok(verifiedAt > 0 && runAt > verifiedAt,
@@ -6794,21 +6844,21 @@ test("ONE full lane per repo: a second round waits for a quiet lane, and NEVER j
   // running lane verifies an EARLIER content, and its PASS would then satisfy
   // the verification binding for a round whose checkpoint holds something
   // else.
-  const startAt = SRC.indexOf("async function waitForQuietLane(");
+  const startAt = LANE_SRC.indexOf("async function waitForQuietLane(");
   assert.ok(startAt > 0, "the waiting is its own named act");
   // Same anchor-bounded window as the sibling test above, and for the same
   // reason: the rule is about THIS function, so the window must end where the
   // function does rather than at a byte count that rots.
-  const submit = windowIn(SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
+  const submit = windowIn(CHAIN_SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
   const waitAt = submit.indexOf("await waitForQuietLane(input.root)");
   const startLaneAt = submit.indexOf("void startPrecommitBeside(input.root, input.ctx)");
   assert.ok(waitAt > 0 && startLaneAt > waitAt,
     "the round waits for the older lane to finish BEFORE starting its own");
-  const besideAt = SRC.indexOf("function startPrecommitBeside(");
+  const besideAt = LANE_SRC.indexOf("function startPrecommitBeside(");
   // The lane's whole body, bounded by the next declaration instead of a magic
   // character count: every rule below is about THIS function, and a window that
   // has to grow with the comments would fail for the wrong reason.
-  const body = SRC.slice(besideAt, SRC.indexOf("function reportAsyncPrecommit(", besideAt));
+  const body = LANE_SRC.slice(besideAt, LANE_SRC.indexOf("function reportAsyncPrecommit(", besideAt));
   assert.doesNotMatch(body, /return running\.settled;/,
     "no joining: a PASS written by someone else's lane is not this round's proof");
   assert.match(body, /if \(inFlightPrecommit\?\.settled === settled\) inFlightPrecommit = undefined;/,
@@ -6865,9 +6915,9 @@ test("a settle publishes its stop proof only at the exits that MEAN it", () => {
 
 test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel matrix, precondition", () => {
   // ── 1. ROUTING: inside the ONE submission chain, after prepare ──────────
-  const submitAt = SRC.indexOf("async function submitForReview(");
+  const submitAt = CHAIN_SRC.indexOf("async function submitForReview(");
   assert.ok(submitAt > 0, "the submission chain exists");
-  const submit = SRC.slice(submitAt, SRC.indexOf("\n  async function ", submitAt + 10));
+  const submit = CHAIN_SRC.slice(submitAt, CHAIN_SRC.indexOf("\n  async function ", submitAt + 10));
   // The file list comes off prepare's own numstat (carried on the review
   // target) — never a second `git diff` at dispatch time.
   assert.match(submit, /Array\.isArray\(prepared\.details\?\.files\)/, "the chain takes the changed files from prepare");
@@ -6878,8 +6928,8 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // quality one, so the two judges start from one submission instead of the
   // reviewer waiting out the whole quality round.
   assert.match(submit, /parallelReviewer: \{/, "the functional brief ships with it — the two judges start together");
-  assert.doesNotMatch(SRC, /pendingReviewAfterQuality/, "the serial hold is DELETED, not left beside the parallel path (哲学三)");
-  assert.doesNotMatch(SRC, /handOffAfterQuality|handOffQualityIfAny/, "…and so is the second dispatcher it existed for");
+  assert.doesNotMatch(SRC + CHAIN_SRC, /pendingReviewAfterQuality/, "the serial hold is DELETED, not left beside the parallel path (哲学三)");
+  assert.doesNotMatch(SRC + CHAIN_SRC, /handOffAfterQuality|handOffQualityIfAny/, "…and so is the second dispatcher it existed for");
   assert.match(submit, /skippedQualityRecord\(\{/, "a code-free round records the skip, never silently");
   assert.match(submit, /if \(skip\.skip\) \{/, "the skip branch is the pure rule's own answer, not a re-derived one");
   assert.doesNotMatch(submit, /isSourceFile\(/, "the file classification is NOT re-implemented in the extension");
@@ -6918,8 +6968,8 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
     "only a round whose task was NOT delivered abandons its siblings");
   assert.doesNotMatch(judges, /if \(!d\.paneId\) \{/, "a kept pane is not the test — the two failures mean opposite things");
   // …and the fact is set by each failure site, never inferred by the caller.
-  assert.match(SRC, /delivered: opened\.deliveryFailed === true/, "the boot-check timeout DID deliver the round (the task rode in on argv)");
-  assert.match(SRC, /delivered: false, sessionId, sessionDir, paneId: existing\.paneId/, "a failed channel write did NOT");
+  assert.match(DISPATCH_SRC, /delivered: opened\.deliveryFailed === true/, "the boot-check timeout DID deliver the round (the task rode in on argv)");
+  assert.match(DISPATCH_SRC, /delivered: false, sessionId, sessionDir, paneId: existing\.paneId/, "a failed channel write did NOT");
   // …AND THE DRAFT RECORD FOLLOWS THE SAME FACT (quality round P2, 2026-09-16):
   // `paneId` was still the test one line below the comment explaining why it
   // cannot be — an audited draft would go on record for a task the auditor
@@ -6928,9 +6978,9 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   assert.doesNotMatch(SRC, /if \(d\.paneId && role === "goal-auditor"\)/, "…and paneId never returns as that test");
 
   // ── 3. THE PRECONDITION: dispatch keeps it, RECORDING enforces it ───────
-  const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
+  const dispatchAt = DISPATCH_SRC.indexOf("function dispatchJudgeRound(");
   assert.ok(dispatchAt > 0, "the one dispatch owner exists");
-  const dispatch = SRC.slice(dispatchAt, dispatchAt + 3000);
+  const dispatch = DISPATCH_SRC.slice(dispatchAt, dispatchAt + 3000);
   assert.match(
     dispatch,
     /if \(role === "reviewer" && opts\.qualityRoundDispatched !== true\) \{[\s\S]{0,900}?qualityStandingFor\(/,
@@ -6943,9 +6993,12 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // THE PARALLEL PATH IS THE ONLY CALLER that may pass it.
   assert.equal((SRC.match(/qualityRoundDispatched:\s*true/g) ?? []).length, 1,
     "exactly one call site grants it");
-  const recordAt = SRC.indexOf("async function recordReviewVerdict(");
+  assert.equal(([DISPATCH_SRC, CHAIN_SRC, VERDICT_SRC, CANCEL_SRC, SETTLE_SRC, AUDIT_HOST_SRC, ACCEPTANCE_HOST_SRC]
+    .join("\n").match(/qualityRoundDispatched:\s*true/g) ?? []).length, 0,
+    "…and no carved-out module grants it");
+  const recordAt = VERDICT_SRC.indexOf("async function recordReviewVerdict(");
   assert.ok(recordAt > 0, "the recorder exists");
-  const record = SRC.slice(recordAt, SRC.indexOf("    st.review = {", recordAt));
+  const record = VERDICT_SRC.slice(recordAt, VERDICT_SRC.indexOf("    st.review = {", recordAt));
   assert.match(record, /decideQualityHold\(\{/, "the READY is answered against the quality standing at RECORD time");
   assert.match(record, /qualityRoundInFlight: qualityRoundInFlight\(targetRoot\)/,
     "…with THIS round's dispatched judge as the in-flight fact");
@@ -6967,9 +7020,9 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // 2026-09-17): special-casing the recorder's own `refuse` left the OTHER door
   // to the same state open — a non-READY functional verdict, whose row in the
   // cancel matrix kills the quality round. One reading answers both.
-  const concludedAt = SRC.indexOf("const qualityHalfConcluded = ", recordAt);
+  const concludedAt = VERDICT_SRC.indexOf("const qualityHalfConcluded = ", recordAt);
   assert.ok(concludedAt > 0, "the commit the baseline stops at is decided in one place");
-  const concluded = SRC.slice(concludedAt, SRC.indexOf('if (parsed.verdict === "READY")', concludedAt));
+  const concluded = VERDICT_SRC.slice(concludedAt, VERDICT_SRC.indexOf('if (parsed.verdict === "READY")', concludedAt));
   assert.match(concluded, /qualityStandingFor\(\{/,
     "the baseline advances only when a quality conclusion STANDS for this head");
   assert.match(concluded, /\?\? st\.review\.commitSha/,
@@ -6994,9 +7047,9 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   assert.match(note, /target\.qualityRound = \{ judgeId, head: target\.head \}/, "the round owns the pair (judge, head)");
 
   // ── 4. THE CANCEL MATRIX: applied on the settle path, from ONE decision ──
-  const applyAt = SRC.indexOf("async function applyRoundCancel(");
+  const applyAt = CANCEL_SRC.indexOf("async function applyRoundCancel(");
   assert.ok(applyAt > 0, "one place applies the matrix");
-  const apply = SRC.slice(applyAt, SRC.indexOf("\n  /**", applyAt));
+  const apply = CANCEL_SRC.slice(applyAt, CANCEL_SRC.indexOf("\n  return {", applyAt));
   assert.match(apply, /const party = roundCancelParty\(kind\)/, "the audit KIND is translated, never compared to a role (functional round P1, 2026-09-16: `kind === \"reviewer\"` was dead — the kind is `review`)");
   assert.doesNotMatch(apply, /kind === "reviewer"/, "the unreachable comparison may not come back");
   assert.match(apply, /roundCancelPlan\(landing\)/, "the decision comes from the pure table, not from branches here");
@@ -7007,9 +7060,9 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // fact the matrix read that as a non-READY verdict and cancelled the quality
   // round the hold was waiting for.
   assert.match(apply, /held: reviewVerdictIsParked\(root\)/, "the parked fact is part of the decision");
-  const parkedAt = SRC.indexOf("function reviewVerdictIsParked(");
+  const parkedAt = CANCEL_SRC.indexOf("function reviewVerdictIsParked(");
   assert.ok(parkedAt > 0, "the parked predicate exists");
-  const parked = SRC.slice(parkedAt, parkedAt + 900);
+  const parked = CANCEL_SRC.slice(parkedAt, parkedAt + 900);
   assert.match(parked, /st\.pendingReady\.tree === target\.tree/,
     "matched to THIS round by tree — a leftover record from an earlier round must not excuse a real non-READY verdict");
   assert.match(apply, /applyCancelPlan\(/, "the effect comes from the ONE applier");
@@ -7017,28 +7070,28 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // PASS case, which the table answers with "nothing" (quality round P1,
   // 2026-09-16: a hand-written `if (verdict !== "PASS")` at the landing was
   // the lane's row implemented a second time).
-  assert.match(SRC, /applyCancelPlan\(roundCancelPlan\(\{ party: "lane", verdict \}\), root\)/,
+  assert.match(LANE_SRC, /applyCancelPlan\(roundCancelPlan\(\{ party: "lane", verdict \}\), root\)/,
     "the lane's row is the table's, not a branch beside it");
-  const applierAt = SRC.indexOf("function applyCancelPlan(");
-  const applier = SRC.slice(applierAt, SRC.indexOf("async function applyRoundCancel(", applierAt));
+  const applierAt = CANCEL_SRC.indexOf("function applyCancelPlan(");
+  const applier = CANCEL_SRC.slice(applierAt, CANCEL_SRC.indexOf("async function applyRoundCancel(", applierAt));
   assert.match(applier, /plan\.cancelReviewer[\s\S]{0,200}?cancelJudgeRound\(root, "reviewer"/, "a plan's reviewer row terminates the pane");
   assert.match(applier, /plan\.cancelQuality[\s\S]{0,200}?cancelJudgeRound\(root, QUALITY_ROLE/, "…and its quality row does too");
   assert.match(applier, /plan\.abortLane[\s\S]{0,200}?abortPrecommitLane\(root,/, "…and its lane row aborts the lane");
   // The hand-written lane copy may not come back.
-  assert.doesNotMatch(SRC, /if \(verdict !== "PASS"\) \{\s*cancelJudgeRound\(root, "reviewer"/,
+  assert.doesNotMatch(SRC + LANE_SRC, /if \(verdict !== "PASS"\) \{\s*cancelJudgeRound\(root, "reviewer"/,
     "the lane's row lives in the table alone");
   assert.match(apply, /await resumeParkedReady\(root, ctx\)/, "every landing re-asks any parked conclusion");
   // BOTH record paths apply it, through the one wrapper (reviewer P1,
   // 2026-09-15: wired into the sweep alone, a round closed by a `judge_wait`
   // never stopped anything).
-  assert.equal((SRC.match(/await applyRoundCancel\(settled\.kind,/g) ?? []).length, 2,
+  assert.equal(((SRC + SETTLE_SRC).match(/await applyRoundCancel\(settled\.kind,/g) ?? []).length, 2,
     "the settle sweep AND judge_wait's settleRound both apply it");
-  assert.doesNotMatch(SRC, /settled\.kind === "quality" \? await/, "no second copy of the kind test");
+  assert.doesNotMatch(SRC + SETTLE_SRC, /settled\.kind === "quality" \? await/, "no second copy of the kind test");
   // THE KILL IS REAL (user requirement): closing the pane is the existing
   // close path, and dropping the row is what keeps the watchdog from
   // announcing the cancelled round as a judge that DIED.
-  const cancelAt = SRC.indexOf("function cancelJudgeRound(");
-  const cancel = SRC.slice(cancelAt, cancelAt + 2000);
+  const cancelAt = CANCEL_SRC.indexOf("function cancelJudgeRound(");
+  const cancel = CANCEL_SRC.slice(cancelAt, cancelAt + 2000);
   assert.match(cancel, /closeJudgePaneOf\(entry, \{/, "the pane's process is terminated through the one close path");
   assert.match(cancel, /setHierarchy\(removeJudge\(judgeHierarchy\(\), entry\.judgeId\)\)/,
     "…and the registry row goes, so the death is never announced and `judge_recover` cannot revive it");
@@ -7049,13 +7102,13 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // travels as its OWN field: the standard report prints the recorded note
   // first-line-only, so a note appended there is invisible to the one reader it
   // exists for.
-  assert.match(SRC, /handOffNote: conclusion\.handOffNote,/, "the settle sweep prints it");
+  assert.match(SETTLE_SRC, /handOffNote: conclusion\.handOffNote,/, "the settle sweep prints it");
 
   // ── 5. THE LANE ABORT: a stopped lane is not a result ──────────────────
-  const laneAt = SRC.indexOf("function startPrecommitBeside(");
+  const laneAt = LANE_SRC.indexOf("function startPrecommitBeside(");
   // Wide enough to reach the failure notice at the END of the lane — a
   // truncated window does not fail, it silently stops covering the tail.
-  const lane = SRC.slice(laneAt, laneAt + 12000);
+  const lane = LANE_SRC.slice(laneAt, laneAt + 12000);
   assert.match(lane, /new AbortController\(\)/, "the lane owns a kill switch");
   assert.match(lane, /undefined, controller\.signal\)/, "…and hands it to the runner (AbortSignal reaches the process)");
   assert.match(lane, /if \(controller\.signal\.aborted\) \{/, "an aborted lane is recognized before anything is recorded");
@@ -7277,7 +7330,7 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
 
 test("F4: the round's receipt names the checkpoint and the files in it", () => {
   assert.match(
-    SRC,
+    CHAIN_SRC,
     /checkpoint\?: \{ sha: string; files: string\[\]; leftOut: string\[\] \}/,
     "the chain carries the checkpoint facts out to the caller",
   );
@@ -7383,22 +7436,23 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
     /taskMode\s*===\s*"loop"/,
     "the loop question has ONE home: isEnforcedMode",
   );
-  assert.match(code, /acceptanceDecision\(\{/, "the decision comes from the module, not from a branch here");
+  assert.match(codeOnly(ACCEPTANCE_HOST_SRC), /acceptanceDecision\(\{/, "the decision comes from the module, not from a branch here");
+  assert.doesNotMatch(code, /acceptanceDecision\(\{/, "…and the extension no longer decides it at all (t7)");
   // 2. ONE ROUND ENGINE (哲学三): the dispatch goes through dispatchJudgeRound
   // and the round closes through the settle engine's recorder seam — neither is
   // re-implemented for this round.
-  const dispatch = windowOf("async function dispatchAcceptanceRound", "\n  /**", "dispatchAcceptanceRound");
+  const dispatch = windowIn(ACCEPTANCE_HOST_SRC, "async function dispatchAcceptanceRound", "\n  /**", "dispatchAcceptanceRound");
   assert.match(dispatch, /dispatchJudgeRound\(\{/);
   assert.match(dispatch, /role: "acceptance",/);
   assert.doesNotMatch(dispatch, /openSessionWindow|runTmux\(|appendRecord\(/,
     "a second pane/dispatch path is exactly what the third philosophy forbids");
-  assert.match(SRC, /recordAcceptance: async \(\{ root, concluded \}\) =>/, "the recorder is wired beside recordQuality's");
-  const arm = windowOf("async function armAcceptanceRound", "\n  /**", "armAcceptanceRound");
+  assert.match(AUDIT_HOST_SRC, /recordAcceptance: async \(\{ root, concluded \}\) =>/, "the recorder is wired beside recordQuality's");
+  const arm = windowIn(ACCEPTANCE_HOST_SRC, "async function armAcceptanceRound", "\n  /**", "armAcceptanceRound");
   assert.match(arm, /for \(const root of \[\.\.\.sessionRepos\]\)/,
     "PER REPO (2026-09-22): every repo this session edited is walked, not just the primary");
   assert.match(arm, /await acceptanceStepForRepo\(ctx, root, progress, notes\)/);
   assert.match(arm, /const judgeId = results\.find/, "one refusal carries every repo's outcome");
-  const step = windowOf("async function acceptanceStepForRepo", "\n  // ---------- declare_done tool", "acceptanceStepForRepo");
+  const step = windowIn(ACCEPTANCE_HOST_SRC, "async function acceptanceStepForRepo", "\n  return { armAcceptanceRound };", "acceptanceStepForRepo");
   assert.match(step, /acceptanceProblems\(decision\)/, "what blocks is the module's projection, not a second reading");
   assert.match(step, /dispatchAcceptanceRound\(ctx, root, fingerprint, goalText \?\? ""\)/,
     "the goal text is handed to the dispatch (one read for both halves, 2026-09-22) — dispatched in ITS repo");
@@ -7422,7 +7476,7 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   //     3130-character goal put「真实验收方案」at offset 2164, so the capped copy
   //     ended before it, the plan read as absent, and a SIZE LIMIT silently
   //     released the stricter gate.
-  const goalTextRead = windowOf("function acceptanceGoalText", "\n  /**", "acceptanceGoalText");
+  const goalTextRead = windowIn(ACCEPTANCE_HOST_SRC, "function acceptanceGoalText", "\n  /**", "acceptanceGoalText");
   assert.match(goalTextRead, /readFileSync\(loopGoalPathIn\(root\), "utf8"\)/,
     "the approved file is read whole; the capped prompt copy cannot carry the plan");
   // 5. A SKIP THE USER HAS TO ACT ON IS NOT LEFT IN THE SIDECAR (quality round
