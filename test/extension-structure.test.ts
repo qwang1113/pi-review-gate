@@ -28,6 +28,11 @@ const SRC = [ENTRY_SRC, ...T8_MODULES.map((f) => readFileSync(join(ROOT, "lib", 
 const JUDGE_WIRING_SRC = readFileSync(join(ROOT, "lib", "judge-tools-wiring.ts"), "utf8");
 const PREPARE_WIRING_SRC = readFileSync(join(ROOT, "lib", "review-prepare-wiring.ts"), "utf8");
 const JUDGE_SUBMIT_SRC = readFileSync(join(ROOT, "lib", "judge-submit-tool.ts"), "utf8");
+const PRECOMMIT_TOOL_SRC = readFileSync(join(ROOT, "lib", "precommit-tool.ts"), "utf8");
+/** run_precommit's registration + body: its own module's register function (t8). */
+function precommitToolBody(): string {
+  return windowIn(PRECOMMIT_TOOL_SRC, 'name: "run_precommit"', "\n}", "run_precommit body");
+}
 /** judge_submit's registration + body: the whole of its own module's register function. */
 function judgeSubmitBody(): string {
   return windowIn(JUDGE_SUBMIT_SRC, 'name: "judge_submit"', "\n}", "judge_submit body");
@@ -1404,15 +1409,11 @@ test("stale pause liveness: cleared when the agent proves it is not waiting", ()
   const recordStart = VERDICT_SRC.indexOf("async function recordReviewVerdict(");
   assert.ok(recordStart > 0, "the reviewer verdict recorder must exist");
   assert.ok(VERDICT_SRC.slice(recordStart).includes(".pausedQuestion"), "recording a verdict must clear the pause");
-  const precommitStart = SRC.indexOf('name: "run_precommit"');
-  const precommitEnd = SRC.indexOf('name: "declare_done"');
-  assert.ok(SRC.slice(precommitStart, precommitEnd).includes(".pausedQuestion"), "run_precommit must clear the pause");
+  assert.ok(precommitToolBody().includes(".pausedQuestion"), "run_precommit must clear the pause");
 });
 
 test("session_compact while paused re-injects the WAITING state, never a resume nudge", () => {
-  const start = SRC.indexOf(SESSION_COMPACT);
-  assert.ok(start >= 0);
-  const body = SRC.slice(start, SRC.indexOf("pi.on", start + 10));
+  const body = windowOf(SESSION_COMPACT, "\n  }", "session_compact handler");
   assert.match(body, /REVIEW_GATE_PAUSED/);
 });
 
@@ -2575,9 +2576,7 @@ test("precommit replies POINT AT the log; they never inline the runner's output"
   // A failing suite can emit megabytes, and only the agent knows how much of
   // it it needs — so the reply carries the path plus the failed check NAMES,
   // and the agent reads the file itself.
-  const start = SRC.indexOf('name: "run_precommit"');
-  assert.ok(start > 0);
-  const body = SRC.slice(start, SRC.indexOf('name: "declare_done"'));
+  const body = precommitToolBody();
   assert.match(body, /Full output: \$\{outcome\.logPath\}/, "every reply names the log");
   assert.match(body, /outcome\.failedSteps/, "failed check names help locate the section");
   // The runner's output goes to the LIVE channel (progress.tail → onUpdate)
@@ -4929,9 +4928,7 @@ test("REGRESSION (P0b): the no-tests-warning is wired into the tool result and /
   // The runner prints its own warning; the EXTENSION must carry the same
   // message into the run_precommit tool result and /gate-status, or the
   // agent would see a bare PASS. Structural assertions pin the strings.
-  const precommitAt = SRC.indexOf('name: "run_precommit"');
-  assert.ok(precommitAt > 0, "run_precommit must exist");
-  const toolBody = SRC.slice(precommitAt, SRC.indexOf("pi.registerTool({", precommitAt + 1));
+  const toolBody = precommitToolBody();
   assert.match(toolBody, /skippedNote = outcome\.verdict === "PASS" && outcome\.testScope === "skipped"/,
     "the tool result must build a skipped warning");
   assert.match(toolBody, /NO tests ran in this lane/,
@@ -6551,9 +6548,7 @@ test("thinking-loop guard: the extension forwards the assistant stream, the stat
   // 2026-09-09 (goal criteria 1–3): the DECISION lives in
   // lib/thinking-loop-guard.ts and the ACTIONS in lib/thinking-loop-controller.ts;
   // the extension is only allowed to forward. Both halves are pinned here.
-  const start = SRC.indexOf('pi.on("message_update"');
-  assert.ok(start > 0, "message_update must be wired");
-  const body = SRC.slice(start, SRC.indexOf('pi.on("', start + 10));
+  const body = windowOf('pi.on("message_update"', "\n  });", "message_update handler");
   for (const kind of ["thinking", "text", "toolcall"]) {
     assert.match(body, new RegExp(`observe\\("${kind}"`), `${kind} deltas must reach the detector`);
   }
