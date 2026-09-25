@@ -164,6 +164,21 @@ export function sweepOrphans(deps: RegistryDeps, self?: { sessionId?: string; na
       report.kept.push({ name: entry.name, reason: "登记已被另一个回收者处理" });
       continue;
     }
+    // THE CAS (reviewer P1 on t3, 2026-09-25). Between “the dead holder's
+    // registration was removed” and “its mail is deleted” the name can be
+    // TAKEN: a fresh session claims it, is live, is sent a message — and this
+    // removal would destroy that message. So the name is re-read first: if
+    // somebody holds it NOW, nothing here is ours to delete. The window
+    // between this read and the removal is not zero (only name and mail
+    // sharing one atomic unit would make it so), but it is the narrowest this
+    // layering allows, and it is the difference between “deleting a new
+    // holder's mail” and “deleting mail nobody can be sent”.
+    const reclaimed = parseEntryText(deps.io.readText(sessionEntryPath(deps.root, entry.name)));
+    if (reclaimed !== undefined) {
+      report.kept.push({ name: entry.name, reason: "名字在回收过程中被新会话接管 —— 属于新持有者的邮件不动" });
+      report.notes.push(`${entry.name}: 名字已被新会话接管，跳过 mail 清理`);
+      continue;
+    }
     // The inbox, the parked copy a half-consumed one leaves behind, and any
     // spilled body (t3): all of it belongs to the name this dead session held.
     const inboxRemoved = removeNameMail(deps, entry.name);

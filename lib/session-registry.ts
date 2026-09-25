@@ -560,15 +560,19 @@ export function releaseName(
     return { ok: false, released: false, error: `名字 ${name} 已不归本会话（${existing.sessionId}），拒绝删除` };
   }
   if (!deps.io.remove(path)) return { ok: false, released: false, error: `名字 ${name} 的登记删除失败（${path}）` };
-  // THE ADDRESS GOES WITH THE NAME (2026-09-25, t3). A name's inbox is that
-  // name's mail, and this session just gave the name up: nobody holds the
-  // address any more, so nobody will ever read what is in it — the sender-side
-  // rule is "the recipient has to be alive", and leaving the file behind is how
-  // a LATER holder of the same name would be handed somebody else's mail (or,
-  // with nobody taking the name again, how an unreadable orphan accumulates in
-  // the registry directory forever). The parked copy and any spilled body go
-  // with it: they are the same inbox.
-  removeNameMail(deps, name);
+  // THE MAIL IS NOT TOUCHED HERE (reviewer P1, 2026-09-25 — this used to call
+  // `removeNameMail`, and that was a cross-session message killer).
+  //
+  // Removing the registration frees the name ATOMICALLY, and a fresh session
+  // can claim it — and be SENT a message — before any cleanup this function
+  // could run. That cleanup would then delete the NEW holder's mail. The
+  // opposite error is the cheaper one: the sender-side rule is “the recipient
+  // has to be alive”, so a name nobody holds cannot accumulate new mail at all,
+  // and whatever is left behind can only be read by whoever takes the name
+  // next — a name is an address, and taking it means inheriting what was
+  // mailed to it. (A DEAD holder's leftovers are still reclaimed, by the orphan
+  // sweep, and only after re-reading that nobody has claimed the name — see
+  // lib/session-orphan-sweep.ts.)
   return { ok: true, released: true };
 }
 

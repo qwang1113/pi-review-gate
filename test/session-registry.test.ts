@@ -28,6 +28,7 @@ import {
   parseEntryText,
   parseRegistryEntry,
   releaseName,
+  removeNameMail,
   renewName,
   sessionEntryPath,
   sessionInboxPath,
@@ -292,38 +293,40 @@ test("a release deletes only the release's own name, and a missing file is succe
   assert.deepEqual(releaseName(mine, "t2-registry", MINE), { ok: true, released: false }, "idempotent");
 });
 
-test("a release takes the name's inbox with it — the address is gone, so is its mail", () => {
-  // 2026-09-25 (t3): a name's inbox belongs to that name. Releasing the name
-  // without the inbox would leave mail nobody can read — and hand it to whoever
-  // takes the same name next, which is somebody else's correspondence.
+test("a release never touches the mail — freeing the name and cleaning its inbox cannot be one atomic step", () => {
+  // REVIEWER P1, 2026-09-25. An earlier version removed the inbox here, right
+  // after the registration. The registration removal is what FREES the name, so
+  // a fresh session can claim it — and be sent a message — between the two
+  // steps, and the cleanup then deleted the NEW holder's mail. Leaving it is
+  // the cheaper error: a name nobody holds cannot be sent anything (the sender
+  // requires a live recipient), so the leftovers are read by whoever takes the
+  // name next, if anyone does.
   const files = new Map([
     [sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry({ sessionId: MINE }))],
     [sessionInboxPath(ROOT, "t2-registry"), '{"kind":"session-message"}\n'],
     [sessionInboxTakenPath(ROOT, "t2-registry"), '{"kind":"session-message"}\n'],
     [`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`, "一大段正文"],
-    // A DIFFERENT name's spilled body must survive both calls (the removal is by
-    // this name's prefix, not by "anything that looks like mail").
-    [`${sessionInboxPath(ROOT, "t9-pm")}.msg-2.payload`, "别人的正文"],
   ]);
   const d = deps({ files });
   assert.deepEqual(releaseName(d, "t2-registry", MINE), { ok: true, released: true });
-  assert.equal(d.io.files.has(sessionInboxPath(ROOT, "t2-registry")), false, "the inbox goes with the name");
-  assert.equal(d.io.files.has(sessionInboxTakenPath(ROOT, "t2-registry")), false, "and so does the parked copy");
-  assert.equal(
-    d.io.files.has(`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`),
-    false,
-    "and so does the spilled body — a side file is not a second inbox",
-  );
-  assert.equal(d.io.files.has(`${sessionInboxPath(ROOT, "t9-pm")}.msg-2.payload`), true, "not somebody else's");
+  assert.equal(d.io.files.has(sessionEntryPath(ROOT, "t2-registry")), false, "the name is given back");
+  assert.equal(d.io.files.has(sessionInboxPath(ROOT, "t2-registry")), true, "its mail stays where it is");
+  assert.equal(d.io.files.has(sessionInboxTakenPath(ROOT, "t2-registry")), true);
+  assert.equal(d.io.files.has(`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`), true);
+});
 
-  // A refused release is NOT a reason to destroy somebody else's mail.
-  const other = new Map([
-    [sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry({ sessionId: THEIRS }))],
+test("removeNameMail is the sweep's tool: it takes the inbox, the parked copy and spilled bodies — and only this name's", () => {
+  const withMail = deps({ files: new Map([
     [sessionInboxPath(ROOT, "t2-registry"), '{"kind":"session-message"}\n'],
-  ]);
-  const refused = deps({ files: other });
-  assert.equal(releaseName(refused, "t2-registry", MINE).ok, false);
-  assert.equal(refused.io.files.has(sessionInboxPath(ROOT, "t2-registry")), true, "not ours to delete");
+    [sessionInboxTakenPath(ROOT, "t2-registry"), '{"kind":"session-message"}\n'],
+    [`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`, "一大段正文"],
+    [`${sessionInboxPath(ROOT, "t9-pm")}.msg-2.payload`, "别人的正文"],
+  ]) });
+  assert.equal(removeNameMail(withMail, "t2-registry"), true, "the inbox was there");
+  assert.equal(withMail.io.files.has(sessionInboxPath(ROOT, "t2-registry")), false);
+  assert.equal(withMail.io.files.has(sessionInboxTakenPath(ROOT, "t2-registry")), false);
+  assert.equal(withMail.io.files.has(`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`), false);
+  assert.equal(withMail.io.files.has(`${sessionInboxPath(ROOT, "t9-pm")}.msg-2.payload`), true, "not somebody else's");
 });
 
 test("an entry is found by the session that owns it — that is how a restart keeps its name", () => {
@@ -456,6 +459,38 @@ test("a registration taken over during the sweep is put back, not deleted", () =
   assert.deepEqual(report.reaped, []);
   assert.match(report.kept[0]?.reason ?? "", /重新登记/);
   assert.equal(d.io.files.has(sessionEntryPath(ROOT, "t2-registry")), true, "the new holder keeps its registration");
+});
+
+test("the sweep does NOT delete the mail of a name claimed while it was reclaiming it (reviewer P1)", () => {
+  // THE WINDOW THE CAS EXISTS FOR (2026-09-25, reviewer P1). The dead holder's
+  // registration is gone and the name is free; a fresh session claims it, is
+  // live, and is sent a message. Deleting the inbox then would destroy mail the
+  // sender was told had been delivered.
+  const d = deps({
+    files: new Map([
+      [sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry())],
+      [sessionInboxPath(ROOT, "t2-registry"), '{"kind":"session-message","from":"old"}\n'],
+    ]),
+    tmux: fakeTmux({ panes: [] }),
+  });
+  const originalRemove = d.io.remove;
+  d.io.remove = (path) => {
+    if (path.startsWith(`${sessionEntryPath(ROOT, "t2-registry")}.swept-`)) {
+      // The new holder appears, and a message for IT is written.
+      d.io.files.set(sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry({ sessionId: MINE, heartbeatAt: new Date(NOW).toISOString() })));
+      d.io.files.set(sessionInboxPath(ROOT, "t2-registry"), '{"kind":"session-message","from":"fresh"}\n');
+    }
+    return originalRemove(path);
+  };
+  const report = sweepOrphans(d, {});
+  assert.deepEqual(report.reaped, [], "the name was taken over mid-sweep — nothing here is ours to collect");
+  assert.match(report.kept.at(-1)?.reason ?? "", /被新会话接管/);
+  assert.equal(d.io.files.has(sessionEntryPath(ROOT, "t2-registry")), true, "the new holder keeps its registration");
+  assert.match(
+    d.io.files.get(sessionInboxPath(ROOT, "t2-registry")) ?? "",
+    /fresh/,
+    "…and its mail is still there",
+  );
 });
 
 test("the REAL io creates the registry directory on the first claim — an absent directory is not an occupant", () => {
