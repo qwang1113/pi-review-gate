@@ -331,7 +331,13 @@ import {
 // the heartbeat that renews it, the sweep that reclaims what dead sessions left
 // behind, and the release `declare_done` / process exit owe. Everything but the
 // wiring lives in these two modules.
-import { createSessionNaming } from "../lib/session-name-tools.ts";
+import { createSessionNaming, liveSessionNames } from "../lib/session-name-tools.ts";
+// WHAT A NAME IS FOR (2026-09-25, t3): the message one session sends another by
+// name. The sender's judgement and the recipient's inbox consumption live in
+// `lib/session-message-tools.ts`; here is only the two lines of wiring — the
+// tool, and the poll that rides the name's own heartbeat below.
+import { createSessionMessaging, nodeInboxIO } from "../lib/session-message-tools.ts";
+import { nodeRegistryIO, pidAlive, sessionRegistryRoot } from "../lib/session-registry.ts";
 import {
   buildPlanAuditTask,
   formatPlanAuditCarryover,
@@ -3904,6 +3910,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     });
 
   /**
+   * WHAT KIND OF SESSION THIS IS — the same sources handoffKind() reads, plus
+   * the worker pane (which is a reporting shell of its own kind). Shared by the
+   * registry entry (t2) and the message sender's self-description (t3): one
+   * answer, so a registration and a receipt can never disagree about it.
+   */
+  function ownSessionMode(): string {
+    if (readJudgeSideEnv(process.env)) return "judge";
+    if (readWorkerSideEnv(process.env)) return "worker";
+    if (state.taskMode === "orchestrator") return "orchestrator";
+    if ((process.env[STATE_VARIANT_ENV] ?? "").trim()) return "child";
+    return state.taskMode ?? "loop";
+  }
+
+  /**
    * THE SESSION'S OWN NAME (2026-09-25, t2) — the tool, the registry, the
    * heartbeat and the sweep, built once and wired at the moments below.
    *
@@ -3920,15 +3940,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     repoRoot: () => primaryRepoRoot,
     cwd: () => cwd,
-    // WHAT KIND OF SESSION THIS IS — the same sources handoffKind() reads, plus
-    // the worker pane (which is a reporting shell of its own kind).
-    mode: () => {
-      if (readJudgeSideEnv(process.env)) return "judge";
-      if (readWorkerSideEnv(process.env)) return "worker";
-      if (state.taskMode === "orchestrator") return "orchestrator";
-      if ((process.env[STATE_VARIANT_ENV] ?? "").trim()) return "child";
-      return state.taskMode ?? "loop";
-    },
+    mode: () => ownSessionMode(),
     // A COARSE READING IS ENOUGH FOR THE REGISTRY: the question it answers is
     // "is anybody there", and the heartbeat is what proves that.
     state: () => (latestCtx?.isIdle?.() ? "idle" : "working"),
@@ -3941,6 +3953,42 @@ export default function reviewGate(pi: ExtensionAPI) {
       log(`review-gate[session-name] ${reason}`);
       try { latestCtx?.ui?.notify?.(`review-gate: ${reason}`, "warning"); } catch { /* headless */ }
     },
+  });
+
+  /**
+   * ONE SESSION MESSAGING ANOTHER (2026-09-25, t3) — the sender's judgement and
+   * the recipient's inbox, built once right beside the name that addresses it.
+   *
+   * The two share the registry root on purpose: a name IS the address, so the
+   * module that answers “who holds this name” and the module that writes TO it
+   * must look at the same directory, and the path rule stays t2's
+   * (`sessionInboxPath`). The inbox IO is its own seam because consuming needs
+   * two primitives the channel never did (rename, remove) — see
+   * lib/session-message-tools.ts.
+   */
+  const sessionRegistryRootDir = sessionRegistryRoot();
+  const sessionRegistryFiles = nodeRegistryIO(sessionRegistryRootDir);
+  const sessionMessaging = createSessionMessaging({
+    root: sessionRegistryRootDir,
+    io: nodeInboxIO(),
+    // WHO IS STILL A SESSION is the registry's own answer (t2): the sender PICKS a
+    // name, it never re-decides liveness here.
+    liveSessions: () => liveSessionNames({
+      root: sessionRegistryRootDir,
+      io: sessionRegistryFiles,
+      runTmux: (argv) => runTmux(argv, undefined),
+      alive: pidAlive,
+    }),
+    self: () => ({
+      name: sessionNaming.currentName(),
+      sessionId: state.sessionId ?? "",
+      repo: primaryRepoRoot,
+      mode: ownSessionMode(),
+    }),
+    // THE INJECTION IS A STEER: the recipient finishes the tool call it is in
+    // the middle of and then reads this — it never aborts somebody's turn.
+    inject: (text) => { pi.sendUserMessage(text, { deliverAs: "steer" }); },
+    log: (message) => log(`review-gate[session-message] ${message}`),
   });
 
   /**
@@ -3957,6 +4005,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (sessionNamingTimer) return;
     sessionNamingTimer = setInterval(() => {
       try { sessionNaming.tick(); } catch { /* a heartbeat must never break its session */ }
+      // THE INBOX RIDES THE SAME CLOCK (t3, user decision): one timer keeps two
+      // things true — the name's liveness and the messages addressed to it.
+      // A second heartbeat would be a second thing to get wrong, and the poll
+      // has nowhere faster to be: a message is INJECTED, never interrupting
+      // whatever the session is in the middle of.
+      try { sessionMessaging.drain(); } catch { /* a poll must never break its session */ }
     }, sessionNaming.heartbeatMs);
     // Never the reason the process stays alive.
     (sessionNamingTimer as unknown as { unref?: () => void }).unref?.();
@@ -3977,6 +4031,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   // of the things a reporting shell may not do (`JUDGE_DENIED_TOOLS` is that
   // list, and this tool is not on it).
   sessionNaming.register(pi);
+
+  // `send_message()` — ONE SESSION ADDRESSING ANOTHER BY NAME (2026-09-25, t3).
+  // Registered for EVERY kind of session (user decision), exactly like the name
+  // above: a judge pane or a worker is reachable the same way a loop session is,
+  // and its inbox poll rides the same heartbeat. Receiving is unconditional;
+  // SENDING requires a name of one's own, which the tool itself enforces.
+  sessionMessaging.register(pi);
 
   /**
    * WHICH MODEL SLOTS ARE BAD, per repo (lib/model-health.ts).

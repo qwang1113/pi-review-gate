@@ -33,7 +33,10 @@
  *      from the one we classified, so it is put straight back instead of
  *      deleted;
  *   4. remove that name's inbox file (`<名字>.inbox.jsonl`, the convention
- *      lib/session-registry.ts defines for t3's `@名字` messages).
+ *      lib/session-registry.ts defines for t3's `@名字` messages) together with
+ *      the parked copy a half-consumed one leaves behind (`<inbox>.taken`,
+ *      derived by lib/session-message-tools.ts — a message nobody will read
+ *      belongs to the dead session like everything else it left).
  *
  * A scope session that is ALREADY GONE is neither an error nor a reason to keep
  * the registration: step 2 says so through the server's own name list, and the
@@ -62,6 +65,7 @@ import {
   sessionInboxPath,
   type RegistryDeps,
 } from "./session-registry.ts";
+import { inboxTakenPath } from "./session-message-tools.ts";
 
 /** What the orphan sweep did, per name — reported, never silently swallowed. */
 export interface SweepReport {
@@ -161,7 +165,11 @@ export function sweepOrphans(deps: RegistryDeps, self?: { sessionId?: string; na
       report.kept.push({ name: entry.name, reason: "登记已被另一个回收者处理" });
       continue;
     }
-    const inboxRemoved = deps.io.remove(sessionInboxPath(deps.root, entry.name));
+    const inbox = sessionInboxPath(deps.root, entry.name);
+    const inboxRemoved = deps.io.remove(inbox);
+    // The parked copy goes with it (t3): a `.taken` file is the inbox
+    // mid-consumption, and the session that owned it is gone.
+    deps.io.remove(inboxTakenPath(inbox));
     report.reaped.push({ name: entry.name, sessionId: entry.sessionId, sessionKilled, inboxRemoved });
   }
   return report;

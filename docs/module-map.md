@@ -95,8 +95,15 @@
     **注册表、唯一性在 `lib/session-registry.ts`，回收在 `lib/session-orphan-sweep.ts`**，
     扩展只接线五件事：注册工具、`session_start` 的接管+扫孤儿+装定时器、`declare_done` 的释放、
     `session_shutdown` 在**非 `reload`** 时的释放、以及模块作用域那一个进程 `exit` 钩子的释放。
+  - `lib/session-message-tools.ts`：`send_message({to, text})`（按 `@名字` 给另一个会话
+    发消息 —— 名字就是地址，来自 t2 的注册表）。发送侧判定与工具注册、inbox 记录的组装与
+    写入、收件侧消费（取件 → 注入 → 成功即删 / 失败留原地下次重试）都在这里；文件原语
+    （单次 `O_APPEND` 一行 + 超长 spill 到 side file）复用 `lib/orchestrator-channel.ts` 的同一
+    约定，路径走 `session-registry.ts` 的 `sessionInboxPath`（取件名从它派生，不另立规则）。
+    扩展只接线两处：注册工具、把 `drain()` 挂在 t2 已有的命名心跳定时器上。它与**结构化
+    通道**（PM 指派 / 子会话回报 / judge 结论 / ask_user 代答）是两回事，后者一行不动。
   核对：`grep -rh 'name: "' lib/*.ts | grep -oE 'name: "[a-z_]+"' | sort -u | wc -l`
-  → 32（2026-09-25 实测；这个数只随文件漂，写在这里是告诉你**怎么数**，
+  → 33（2026-09-25 实测；这个数只随文件漂，写在这里是告诉你**怎么数**，
   不是让你记住它），其中 3 个是下面说的**内部实现**（`prepare_review` / `prepare_adviser` /
   `prepare_goal_audit`，注册在 internalHost），不注册给 pi。
 
@@ -658,6 +665,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `session-inheritance.ts` | 后继者继承什么：`successorEnv`（前任 pane / 交接文档 / 前任 transcript / **前任 session id**（接管 worktree 占用的继任凭据）/ kind）、`readInheritance`、`formatInheritanceBrief`（明说「门禁会自动关掉前任」——旧 brief 让新会话自己调 `orchestrator_close`，那正是两个会话互相干等的根因）、`successorSessionId` / `handoffGeneration`（`-h1`/`-h2` 链式派生，接力历史写在 id 里） |
 | `session-name-tools.ts` | **`name_session` 与命名的四步生命周期**（2026-09-25 用户决定）：取一个全局唯一的名字 → 写 window title + window 级 user option `@rg_session_name` → 心跳续期 → 释放。工具与生命周期本体都在这里（判定与分类全在 `session-registry.ts`），扩展只接线：`register(pi)`、`session_start` 的 `onSessionStart()`（接管自己的登记 + 扫孤儿）、按 `heartbeatMs` 装定时器调 `tick()`、`declare_done` 与 `session_shutdown`（**非 `reload`** 时）与模块作用域那一个进程 `exit` 钩子调 `release()`（`/new`、`/resume`、`/fork` 会换 session id 而 pane/pid 不变，不释放就会留下永远被判 `live` 的登记）。改名是「先腾旧名、再占新名」，旧名腾不出来就**拒绝改名**（否则同一个 session id 会留下两份登记，而它看起来永远是活的）。`liveSessionNames()` 给 t3 的发送侧用：只列活着的，读不出的单独报出来 |
 | `session-orphan-sweep.ts` | **回收死会话留下的东西**（2026-09-25，t2）：会话启动时扫一遍注册表，只对「心跳过期 + pid 不在 + pane 不在」的条目动手 —— 先比对它自己那份 `scopeSession` 的 `@rg_scope_owner` 标记等于该条目的 sessionId（**标记读与 kill 走同一条 tmux 名字解析**；tmux 3.7c 实测无精确命中时 `-t` 会回落成前缀匹配，所以杀的前提是「刚读到「标记是死者的」，而不是名字长得像），然后把登记**先改名移开再删**（期间被重新登记的会被识别出来并放回去），最后清掉 `<名字>.inbox.jsonl`。专属 session 已经不在了不是错误：靠 server 自己的名字列表区分「已消失」与「读不到」，前者照样清登记。与注册表分居两个模块：注册表只读一个名字，回收要杀别人留下的 session。任一事实读不到一律 fail-closed（`SweepReport.kept` 里点名理由） |
+| `session-message-tools.ts` | **会话间的 `@名字` 消息**（2026-09-25，t3）：`send_message({to, text})` 按 t2 的注册表找到活会话，把消息写进对方的 inbox（`~/.pi/agent/rg-sessions/<名字>.inbox.jsonl`），对方门禁在自己的轮询里读到后用 `pi.sendUserMessage(text, {deliverAs:"steer"})` 注入成一条标明「来自 @谁」的 user 消息 —— **不中止对方当前的 turn**（`steer` 在 streaming 时排队到当前助手回合的工具调用之后，idle 时开新 turn；`followUp` 不用，那个队列只在会话停下来时才排空，而 loop 会话不被允许停）。发送侧判定全在这里：`@` 前缀可省、未命名会话**不能发**（回执教它 `name_session`）、名字非法 / 不存在 / 对方 dead 或 unknown / 发给自己一律拒绝并把**当前活着的会话名**列进回执（“谁还活着”的判定唯一出处是 t2 的 `liveSessionNames()`，这里不写第二份）。写盘复用 `orchestrator-channel.ts` 的同一约定（单次 `O_APPEND` 一行、超 `MAX_INLINE_RECORD_BYTES` 先 spill 到 side file 再写引用），路径复用 `session-registry.ts` 的 `sessionInboxPath`（取件名 `<inbox>.taken` 从它派生）。消费是**取件（rename）而不是读后清空**：读-清空之间的窗口会把并发 append 的消息抹掉，而 rename 之后新消息只会落到新文件上；注入失败时未注入的尾部（含失败那条）写回取件文件，下次 tick 继续，已注入的不重放。所有会话（loop / PM / 子会话 / judge / worker）都注册这个工具、都收消息；扩展只接线两处（`register(pi)` + 把 `drain()` 挂在 t2 已有的命名心跳定时器里，不新增第二个心跳）。它替换的是“会话之间只能靠人转述 / 手写 tmux”，**结构化通道一行不动** |
 | `session-registry.ts` | **全局会话注册表**（2026-09-25 用户决定）：`~/.pi/agent/rg-sessions/<名字>.json`，每名字一个文件（并发写落不同文件，一个名字的写坏了不牵连别人；唯一性由文件系统回答）。名字形状（kebab-case、2–32）、原子占用（**空位靠 `O_EXCL` 创建、接管靠 `rename(2)` 把死条目移开** —— 两个进程同时看到同一个空位/同一个死名字时只能一个赢）、占用者三分类 `live`/`dead`/`unknown`（心跳 30s 续、>180s 算陈旧，且必须 pid 不在 **且** pane 不在才判 dead；任一事实读不到即 unknown）、续期/释放（只删自己的），以及 inbox 路径约定 `<名字>.inbox.jsonl`（t3 用）。tmux/文件系统/pid 都从注入的 seam 进，所以竞态与 fail-closed 分支都能单测。**回收死在另一个模块**：`session-orphan-sweep.ts` |
 | `session-revival.ts` | 存活不变量（2026-08-30）：会话在退出契约未满足时停下，门禁就周期性唤醒它。纯判定：看不见续跑预算与 loop-stall 断路器（它们管注入路径，管不了「停下」），但尊重人的叫停（ESC / ask_user / bypass / 仲裁 pause）、handoff 交接，以及**已记录完成**（`state.completion`：`declare_done` 写、**任何 project 文件被编辑就删**（2026-09-22 把删除移出 code/doc 分支 —— 之前改 `.json`/`.yaml` 既不清它也不 armLoop，会话就卡在「不叫醒」与「ship 仍拦」之间），所以它一条就同时表示「契约已兑」与「此后没动过」；2026-09-22 加，此前人在同一 checkout 里的 merge / pull / checkout 会把已交付的会话叫回来复审） |
 | `session-dir.ts` | pi 的 session-dir 编码约定，fresh-context 角色据此找到主会话 transcript |
