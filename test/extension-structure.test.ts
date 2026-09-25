@@ -3103,6 +3103,19 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   assert.equal((SRC.match(/const runTmux = /g) ?? []).length, 1,
     "exactly ONE wrapper defines this session's runTmux");
   assert.match(SRC, /const runTmux = \(argv: readonly string\[\], env\?: NodeJS\.ProcessEnv\) =>[\s\S]{0,200}rawTmux\(argv, env \?\? process\.env, \{[\s\S]{0,200}ownSessions: addressableSessions\(tmuxScope,/, "…and it attaches the sessions lib/session-tmux-scope.ts derived for this process");
+  // THE LIST HAS TWO HALVES THAT ARE EASY TO GET WRONG IN OPPOSITE DIRECTIONS
+  // (2026-09-25, quality round P2):
+  //  - TOO WIDE: the judge registry FILE is shared with other sessions in this
+  //    repo, so reading it whole would put THEIR scope sessions in my
+  //    declaration. Only `ownJudges()` — my rows and the lineage's — may widen it.
+  //  - TOO NARROW: the worker registry names sessions no in-memory row does (a
+  //    relay successor closes the predecessor's worker windows without ever
+  //    having dispatched one), so it has to be read too.
+  assert.match(SRC, /ownJudges\(\)\.map\(\(entry\) => entry\.tmuxSession\)/,
+    "the judge half is MY rows, not the whole shared table");
+  assert.doesNotMatch(SRC, /Object\.values\(judgeHierarchy\)\.map\(\(entry\) => entry\.tmuxSession\)/,
+    "…and never the raw table");
+  assert.match(SRC, /\.\.\.workerRegistrySessions\(\),/, "the worker registry's sessions are in the list");
   // The wrapper's body is the ONLY call: anything else calling the raw runner
   // directly is a path with no declaration at all.
   assert.equal((SRC.match(/rawTmux\(/g) ?? []).length, 1, "only the wrapper calls the raw runner");

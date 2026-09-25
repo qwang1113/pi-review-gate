@@ -200,6 +200,10 @@ export function assertSafeTmuxArgv(
     // with `-t`. `-t` on new-session means "group with", which is a different
     // session's business — refuse it rather than interpret it.
     const target = canonical === "new-session" ? flagValue(argv, "-s") : flagValue(argv, "-t");
+    // THE TARGET MUST NAME ONE OF THE DECLARED SESSIONS — `<name>` or
+    // `<name>:@window`, compared on the session half. A bare `@12` / `%3` never
+    // matches (tmux would resolve it against whatever now holds that id), and
+    // neither does another gate session's name.
     if (target === undefined || !allowed.includes(sessionPartOf(target))) {
       throw new UnsafeTmuxCommand(
         `tmux ${canonical} 的目标必须是本会话自己的 session 之一（${allowed.join("、")}）：${JSON.stringify(target)}`,
@@ -223,18 +227,6 @@ export function assertSafeTmuxArgv(
 function sessionPartOf(target: string): string {
   const at = target.indexOf(":");
   return at < 0 ? target : target.slice(0, at);
-}
-
-/**
- * Does this tmux target stay inside the session the caller DECLARED?
- *
- * `<name>` (the session itself) and `<name>:…` (a window or pane inside it) are
- * inside. Anything else is not — including a bare `@12` / `%3`, which tmux
- * would happily resolve to whatever now holds that id, and including ANOTHER
- * gate session's name.
- */
-function targetNamesOwnSession(target: string, own: string): boolean {
-  return target === own || target.startsWith(`${own}:`);
 }
 
 /** `-e K=V` pairs, in a stable order so the argv is testable. */

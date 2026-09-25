@@ -3816,6 +3816,29 @@ export default function reviewGate(pi: ExtensionAPI) {
   let judgeHierarchy: HierarchyTable = emptyHierarchy();
 
   /**
+   * The tmux sessions the WORKER registry names, read on demand.
+   *
+   * WHY IT IS READ RATHER THAN REMEMBERED: the declaration has to include them,
+   * and a relay successor or a takeover closes the PREVIOUS seat's worker windows
+   * without ever having dispatched one — nothing in memory names them, and a list
+   * built only from memory would refuse exactly those closes (quality round P2).
+   * It is one small local file read next to a tmux subprocess; the cost is not the
+   * read.
+   */
+  const workerRegistrySessions = (): Array<string | undefined> => {
+    try {
+      const registry = parseWorkerRegistry(
+        JSON.parse(readFileSync(pathJoin(activeRepoRoot.current, WORKER_REGISTRY_RELPATH), "utf8")),
+      );
+      return Object.values(registry).map((entry) => entry.tmuxSession);
+    } catch {
+      // No registry yet, or an unreadable one: both mean "nothing recorded",
+      // which only ever narrows the list.
+      return [];
+    }
+  };
+
+  /**
    * THE RUNNER, and the only one this file uses (2026-09-25).
    *
    * It carries THIS session's declaration on every call, which is what makes
@@ -3828,8 +3851,10 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the previous seat's windows (`callerIdentities()` counts them as its own),
    * and those live in the PREDECESSOR's session — a successor that could only
    * declare its own name could never close the windows it exists to reclaim
-   * (quality round P1, 2026-09-25). Every name in the list comes from a registry
-   * row, which is where the scope module put it.
+   * (quality round P1, 2026-09-25). It is also NARROWER than "every row in the
+   * file": the judge table is shared with other sessions in this repo, so only
+   * `ownJudges()` — my own rows and the lineage's — may widen it (quality round
+   * P2).
    *
    * IT IS DECLARED HERE, AFTER `judgeHierarchy`, and not beside `tmuxScope`: the
    * wrapper closes over both registries, and a `let` read before its own
@@ -3845,8 +3870,9 @@ export default function reviewGate(pi: ExtensionAPI) {
   const runTmux = (argv: readonly string[], env?: NodeJS.ProcessEnv) =>
     rawTmux(argv, env ?? process.env, {
       ownSessions: addressableSessions(tmuxScope, [
-        ...Object.values(judgeHierarchy).map((entry) => entry.tmuxSession),
+        ...ownJudges().map((entry) => entry.tmuxSession),
         ...(state.orchestrator?.children ?? []).map((child) => child.tmuxSession),
+        ...workerRegistrySessions(),
       ]),
     });
   /**
