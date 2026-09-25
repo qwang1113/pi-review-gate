@@ -170,6 +170,8 @@ export interface ChildChannelBinding {
   target: ChannelTarget;
   /** The child's own pi session id — what a recovery re-opens. */
   sessionId?: string;
+  /** The pane this session runs in, stamped on every state report. */
+  paneId?: string;
   /** Injected timer, so tests advance time instead of spending it. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   pollMs?: number;
@@ -200,6 +202,7 @@ export function reportState(
       at: stamp(binding.io),
       state,
       sessionId: binding.sessionId,
+      ...(binding.paneId ? { paneId: binding.paneId } : {}),
       ...extra,
     });
   } catch {

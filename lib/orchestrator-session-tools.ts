@@ -49,6 +49,7 @@ import {
   closableChild,
   findChild,
   markChildClosed,
+  repointChildPanes,
 } from "./orchestrator-registry.ts";
 import {
   formatInheritanceBrief,
@@ -186,6 +187,9 @@ async function doWait(
       at: deps.now(),
       assetsFor: (child) => childAssets(deps, child),
     });
+    // A child that handed over lives in a new pane: remember it, so close /
+    // recover / the exit check stop aiming at the predecessor's corpse.
+    if (snapshot.relayed.length > 0) deps.saveRuntime(repointChildPanes(deps.runtime(), snapshot.relayed));
     // The border labels are repainted from the health that was just measured
     // — the probe is already here, so the screen never lags the receipt.
     refreshPaneLabels(deps, snapshot);
@@ -370,7 +374,7 @@ function keepOutOfScope(
 
 /** The receipt still renders when supervision never ran (an empty snapshot). */
 function emptySnapshot(): SupervisionSnapshot {
-  return { children: [], health: [], requests: [], troubled: [], malformed: 0 };
+  return { children: [], health: [], requests: [], troubled: [], malformed: 0, relayed: [] };
 }
 
 /**

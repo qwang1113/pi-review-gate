@@ -54,6 +54,7 @@
  */
 
 import { isProtectedBranch } from "./workspace-branch.ts";
+import { isHandoffChainOf } from "./session-inheritance.ts";
 
 /** Subdirectory of the gate-owned `.pi/` scope that holds task files. */
 export const TASK_FILE_DIRNAME = "tasks";
@@ -241,10 +242,14 @@ export function childSessionId(childId: string): string {
  *
  * `sessionId` unknown (the extension has not learned its own id yet) keeps
  * the pre-check behaviour: the env alone decides.
+ *
+ * A `session_handoff` successor of that pane (`rg-child-<childId>-hN`) IS the
+ * same child (2026-09-26): refusing it left the successor silent on its
+ * channel — no heartbeat, no `done`, no instruct ack.
  */
 export function isOwnedChildPane(childId: string, sessionId: string | null | undefined): boolean {
   if (sessionId === null || sessionId === undefined) return true;
-  return sessionId === childSessionId(childId);
+  return isHandoffChainOf(childSessionId(childId), sessionId);
 }
 
 /**

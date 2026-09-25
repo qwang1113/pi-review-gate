@@ -10,6 +10,7 @@
 import { isDeliveryStation, type DeliveryStation } from "./delivery-station.ts";
 import type { ModelEvent } from "./model-health.ts";
 import { resolvePayload, type ChannelIO } from "./channel-io.ts";
+import { isHandoffChainOf } from "./session-inheritance.ts";
 import type {
   ChannelAnswerRecord,
   ChannelInstructRecord,
@@ -332,7 +333,8 @@ export function projectChannel(records: readonly ChannelRecord[]): ChannelProjec
     // DIFFERENT named session (the pollution this filter exists to drop:
     // a spawned subagent inherits the env vars, binds the same channel and
     // appends its own idle heartbeats over the owner's reports).
-    : records.filter((r) => r.kind !== "state" || r.sessionId === undefined || r.sessionId === owner);
+    // A `session_handoff` successor of the owner is the owner (2026-09-26).
+    : records.filter((r) => r.kind !== "state" || r.sessionId === undefined || isHandoffChainOf(owner, r.sessionId));
   return projectOwnedRecords(own);
 }
 

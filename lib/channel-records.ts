@@ -77,6 +77,12 @@ export interface ChannelStateRecord extends ChannelRecordBase {
   state: ChildReportedState;
   /** The child's own pi session id, so a recovery can re-open it. */
   sessionId?: string;
+  /**
+   * The tmux pane this report came from (`TMUX_PANE`). A `session_handoff`
+   * successor runs in a NEW pane the manager never registered; this is how the
+   * manager learns where the child lives now (2026-09-26).
+   */
+  paneId?: string;
   /** Percent of the context window used, when the host reports it. */
   contextPercent?: number;
   /** Title of the dialog currently open (only when `waiting-input`). */

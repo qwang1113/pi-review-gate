@@ -77,10 +77,12 @@ export function createChildSide(host: SessionHost, deps: ChildSideDeps) {
       if (!isOwnedChildPane(childId, state.sessionId)) {
         return undefined;
       }
+      const paneId = process.env.TMUX_PANE?.trim();
       return {
         io: channelIO,
         target: { orchestrationId, childId },
         ...(state.sessionId ? { sessionId: state.sessionId } : {}),
+        ...(paneId ? { paneId } : {}),
       };
     }
     // Judge panes talk through the SAME file shape under their opener id:
