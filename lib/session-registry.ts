@@ -538,8 +538,9 @@ export function releaseName(
     return { ok: false, released: false, error: `名字 ${name} 已不归本会话（${existing.sessionId}），拒绝删除` };
   }
   if (!deps.io.remove(path)) return { ok: false, released: false, error: `名字 ${name} 的登记删除失败（${path}）` };
-  // THE MAIL IS NOT TOUCHED HERE (reviewer P1, 2026-09-25 — this used to call
-  // `removeNameMail`, and that was a cross-session message killer).
+  // THE MAIL IS NOT TOUCHED HERE (reviewer P1, 2026-09-25 — an earlier version
+  // deleted the inbox right after this line, and that was a cross-session
+  // message killer).
   //
   // Removing the registration frees the name ATOMICALLY, and a fresh session
   // can claim it — and be SENT a message — before any cleanup this function

@@ -209,6 +209,18 @@ export function nodeInboxIO(): InboxIO {
   };
 }
 
+/**
+ * Where a message's spilled body lives: `<inbox>.<messageId>.payload`.
+ *
+ * Derived from the inbox path, so the rule stays in one place — the sender
+ * writes here, the consumer removes what it has read, and the send path can
+ * clean up after itself when the append that would have pointed at this file
+ * never happened.
+ */
+export function inboxPayloadPath(inboxPath: string, messageId: string): string {
+  return `${inboxPath}.${messageId}.payload`;
+}
+
 /** `@名字` and `名字` are the same address — the prefix is courtesy, not syntax. */
 export function normalizeRecipient(to: unknown): string {
   const raw = typeof to === "string" ? to.trim() : "";
@@ -360,7 +372,7 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
   function withSpill(record: SessionInboxRecord, inboxPath: string): SessionInboxRecord {
     if (record.text === undefined) return record;
     if (Buffer.byteLength(JSON.stringify(record), "utf8") <= MAX_INLINE_RECORD_BYTES) return record;
-    const path = `${inboxPath}.${record.messageId}.payload`;
+    const path = inboxPayloadPath(inboxPath, record.messageId);
     io.writeText(path, record.text);
     const { text, ...rest } = record;
     return { ...rest, textRef: { path, chars: text.length } };
@@ -370,6 +382,7 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
   function deliver(target: SessionRegistryEntry, sender: SessionMessageSelf, text: string): ToolReply {
     const inbox = sessionInboxPath(root, target.name);
     const at = new Date(now()).toISOString();
+    const messageId = newChannelId("msg", now());
     let record: SessionInboxRecord;
     try {
       io.ensureDir(dirname(inbox));
@@ -379,7 +392,7 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
       record = withSpill(
         {
           kind: SESSION_MESSAGE_KIND,
-          messageId: newChannelId("msg", now()),
+          messageId,
           from: sender.name ?? "",
           fromSessionId: sender.sessionId,
           fromRepo: sender.repo,
@@ -397,6 +410,12 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
       );
       io.appendLine(inbox, `${JSON.stringify(record)}\n`);
     } catch (error) {
+      // A HALF-WRITTEN MESSAGE LEAVES NOTHING BEHIND: the body may already be
+      // in its side file while the line that points at it never landed. The
+      // removal is by THIS message's own id, so it can only ever hit the file
+      // this call just wrote (and removing a file that was never written is a
+      // no-op).
+      io.remove(inboxPayloadPath(inbox, messageId));
       return fail(
         `review-gate: 消息没写进 @${target.name} 的 inbox —— ${(error as Error).message}\n` +
         `inbox：${inbox}`,
@@ -504,6 +523,10 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
     for (; index < lines.length; index += 1) {
       const record = parseInboxRecord(lines[index]);
       if (record === undefined) {
+        // A MALFORMED LINE TAKES NO SIDE FILE WITH IT, and cannot: the id that
+        // names that file is exactly what failed to parse. The line is reported
+        // and skipped, and a body it may have had stays as a dead file — a torn
+        // line is the only way to produce one, and nothing can locate it later.
         log(`inbox 有一行读不出来，已跳过：${lines[index].slice(0, 120)}`);
         continue;
       }
@@ -514,6 +537,11 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
       // place these leftovers are ever reclaimed.
       if (record.toSessionId !== undefined && mySessionId !== "" && record.toSessionId !== mySessionId) {
         log(`来自 @${record.from} 的消息是发给上一个持有这个名字的会话的（${record.toSessionId}），已丢弃`);
+        // ITS SPILLED BODY GOES WITH IT (reviewer P2, 2026-09-25): the message is
+        // dropped, and the side file held only a body nobody is going to read.
+        // Deleting by the record's OWN id is safe — it is inside the parked file
+        // this session alone holds, so no sender can still be writing it.
+        if (record.textRef !== undefined) io.remove(record.textRef.path);
         continue;
       }
       const text = record.text ?? resolvePayload(io, record.textRef);

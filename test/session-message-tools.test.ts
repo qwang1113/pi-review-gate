@@ -211,6 +211,15 @@ test("a failed write is reported, never claimed as delivered", async () => {
   assert.equal(reply.isError, true);
   assert.match(textOf(reply), /消息没写进 @t9-pm 的 inbox/);
   assert.match(textOf(reply), /disk full/);
+
+  // A HALF-WRITTEN MESSAGE LEAVES NOTHING BEHIND: with a body big enough to
+  // spill, the side file is written BEFORE the append that then fails, and the
+  // receipt must not leave a body nothing points at.
+  const files = new Map<string, string>();
+  const spilling = makeLab({ files, appendFails: true });
+  const spilled = await spilling.tool.execute("1", { to: THEIRS, text: "改".repeat(2000) });
+  assert.equal(spilled.isError, true);
+  assert.deepEqual([...files.keys()], [], "no side file survives a refused append");
 });
 
 test("a long body spills to a side file and the appended line stays under the byte budget", async () => {
@@ -248,6 +257,11 @@ test("mail addressed to the PREVIOUS holder of a name is dropped, not handed to 
   // predecessor's correspondence.
   const files = new Map<string, string>();
   await seedMessage(files, "这是发给现在这位的");
+  // The predecessor's message has a SPILLED body, so the drop has to take the
+  // side file with it (reviewer P2, same round): a body nobody will read must
+  // not outlive the message.
+  const side = `${inbox(ME)}.msg-old.payload`;
+  files.set(side, "上一位持有者的长正文");
   const previous = {
     kind: "session-message",
     messageId: "msg-old",
@@ -257,7 +271,7 @@ test("mail addressed to the PREVIOUS holder of a name is dropped, not handed to 
     fromMode: "loop",
     toSessionId: "019fbb1d-9e78-7ebf-88bf-thepreviousone",
     at: new Date(NOW).toISOString(),
-    text: "这是发给上一位持有者的",
+    textRef: { path: side, chars: 9 },
   };
   files.set(inbox(ME), `${
     [files.get(inbox(ME)) ?? "", `${JSON.stringify(previous)}\n`].filter((line) => line !== "").join("").split("\n").filter((l) => l !== "").reverse().join("\n")
@@ -268,6 +282,7 @@ test("mail addressed to the PREVIOUS holder of a name is dropped, not handed to 
   assert.equal(at.injected.length, 1, "only the one addressed to this session is delivered");
   assert.match(at.injected[0], /这是发给现在这位的/);
   assert.equal(files.get(inbox(ME)), undefined, "and the parked file — the predecessor's mail included — is reclaimed");
+  assert.equal(files.has(side), false, "the dropped message's spilled body goes with it");
 });
 
 test("a record with no toSessionId (written before the field existed) is still delivered", async () => {
