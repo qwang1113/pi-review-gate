@@ -10,18 +10,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { runAuditRound, type RunAuditRoundDeps } from "../lib/audit-round.ts";
+import {
+  settleAuditRound,
+  type AuditRoundEntry,
+  type SettleAuditRoundDeps,
+} from "../lib/audit-round-settle.ts";
 import {
   describeRoundMiss,
-  runAuditRound,
   roundBindingFor,
   roundHasReported,
   type RoundBinding,
   selectRoundReport,
-  settleAuditRound,
-  type AuditRoundEntry,
-  type RunAuditRoundDeps,
-  type SettleAuditRoundDeps,
-} from "../lib/audit-round.ts";
+} from "../lib/audit-round-report.ts";
 import {
   ADVICE_ROUND_SPEC,
   ACCEPTANCE_ROUND_SPEC,

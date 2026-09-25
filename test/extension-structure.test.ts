@@ -26,9 +26,26 @@ const LOOP_SETTLED = 'pi.on("agent_settled", async (_event, ctx) => {';
  */
 /** The mode registry owns the static prompt sections the extension used to inline. */
 const GATE_MODES_SRC = readFileSync(join(ROOT, "lib", "gate-modes.ts"), "utf8");
-const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
-/** The audit-round engine: one round, four kinds, one cursor write. */
-const AUDIT_ROUND_SRC = readFileSync(join(ROOT, "lib", "audit-round.ts"), "utf8");
+/**
+ * The judge-session family is split by responsibility (registration,
+ * addressing, wait criteria, the wait loop); its rules are about the family
+ * as a whole, so they read the modules together.
+ */
+const JUDGE_TOOLS_SRC = [
+  "judge-session-tools.ts",
+  "judge-session-addressing.ts",
+  "judge-wait-criteria.ts",
+  "judge-wait-tool.ts",
+].map((f) => readFileSync(join(ROOT, "lib", f), "utf8")).join("\n");
+/**
+ * The audit-round engine: one round, four kinds, one cursor write — the
+ * synchronous round, its conclusion half and the one report selector.
+ */
+const AUDIT_ROUND_SRC = [
+  "audit-round.ts",
+  "audit-round-settle.ts",
+  "audit-round-report.ts",
+].map((f) => readFileSync(join(ROOT, "lib", f), "utf8")).join("\n");
 /** The child side of the channel — where the state derivation lives (2026-09-09). */
 const CHILD_CHANNEL_SRC = readFileSync(join(ROOT, "lib", "orchestrator-child-channel.ts"), "utf8");
 /** The gate state's shape (it owns `updatedAt`). */
@@ -68,6 +85,12 @@ const ADVISORY_PREPARE_TOOLS = new Set(["prepare_adviser", "prepare_goal_audit"]
  * rule about what a TOOL does against the module that owns the tool.
  */
 const COPILOT_TOOLS_SRC = readFileSync(join(ROOT, "lib", "copilot-review-tools.ts"), "utf8");
+/** The tool's own parts, split out of the tool module by responsibility. */
+const COPILOT_REQUEST_SRC = readFileSync(join(ROOT, "lib", "copilot-request-phase.ts"), "utf8");
+const COPILOT_QUEUE_SRC = readFileSync(join(ROOT, "lib", "copilot-queue-probe.ts"), "utf8");
+const COPILOT_REPLIES_SRC = readFileSync(join(ROOT, "lib", "copilot-review-replies.ts"), "utf8");
+/** The whole tool, for rules about the tool AS A WHOLE (the replies module last). */
+const COPILOT_TOOL_FAMILY_SRC = [COPILOT_TOOLS_SRC, COPILOT_REQUEST_SRC, COPILOT_QUEUE_SRC, COPILOT_REPLIES_SRC].join("\n");
 const COPILOT_TOOLS = new Set(["copilot_review"]);
 const COPILOT_GH_SRC = readFileSync(join(ROOT, "lib", "copilot-gh.ts"), "utf8");
 /**
@@ -4584,14 +4607,14 @@ test("availability is judged by evidence, never by surfaces that cannot see a dr
     // The Copilot family lives in three files now (the extension's arming
     // site, the tools, the gh access) — a disproven surface must be gone from
     // ALL of them, not just from the one it used to sit in.
-    for (const [label, src] of [["the extension", SRC], ["the tools module", COPILOT_TOOLS_SRC], ["the gh module", COPILOT_GH_SRC]] as const) {
+    for (const [label, src] of [["the extension", SRC], ["the tools modules", COPILOT_TOOL_FAMILY_SRC], ["the gh module", COPILOT_GH_SRC]] as const) {
       assert.equal(src.includes(gone), false, `${gone} was disproven by measurement and must stay gone (${label})`);
     }
   }
 
   const supportAt = COPILOT_TOOLS_SRC.indexOf(
     "deps.gh.resolveCopilotSupport(dir, slug, st.copilot?.supportConfirmed === true, { signal })");
-  const recordAt = COPILOT_TOOLS_SRC.indexOf("recordCopilotRequest(st.copilot, {");
+  const recordAt = COPILOT_REQUEST_SRC.indexOf("recordCopilotRequest(st.copilot, {");
   assert.ok(supportAt > 0, "availability must be resolved before the request");
   const requestCallAt = COPILOT_TOOLS_SRC.indexOf("return await doRequestPhase({");
   assert.ok(requestCallAt > 0, "the tool must call the request phase");
@@ -4601,17 +4624,18 @@ test("availability is judged by evidence, never by surfaces that cannot see a dr
   // availability verdict, the round is recorded and the wait length is what
   // changes. What a MISSING queue flag buys is one more attempt (2026-09-14:
   // the user's decision) — and only after that does the gate release.
-  const phaseAt = COPILOT_TOOLS_SRC.indexOf("async function doRequestPhase(");
-  const phaseEnd = COPILOT_TOOLS_SRC.indexOf("\nasync function doCopilotReview(", phaseAt);
-  assert.ok(phaseAt > 0 && phaseEnd > phaseAt, "the request phase must be its own function");
-  const phase = COPILOT_TOOLS_SRC.slice(phaseAt, phaseEnd);
+  // The request phase is its own module (lib/copilot-request-phase.ts), and
+  // doRequestPhase is its last function: the window runs to the end of it.
+  const phaseAt = COPILOT_REQUEST_SRC.indexOf("export async function doRequestPhase(");
+  assert.ok(phaseAt > 0, "the request phase must be its own function");
+  const phase = COPILOT_REQUEST_SRC.slice(phaseAt);
   const firstRequest = phase.indexOf("const requested = await deps.gh.requestCopilotReviewer(");
   const retryRequest = phase.indexOf("const again = await deps.gh.requestCopilotReviewer(");
   const notLandedRelease = phase.indexOf('verdict.state === "not-landed"');
   assert.ok(firstRequest > 0, "the request path must exist");
   assert.ok(retryRequest > firstRequest, "a request GitHub never queued is re-sent once");
   assert.ok(notLandedRelease > retryRequest, "and released only after that retry also fails");
-  assert.match(COPILOT_TOOLS_SRC.slice(recordAt, recordAt + 400), /supportConfirmed: support\.confirmed/,
+  assert.match(COPILOT_REQUEST_SRC.slice(recordAt, recordAt + 400), /supportConfirmed: support\.confirmed/,
     "confirmed evidence must be remembered in the sidecar");
 });
 
@@ -4645,8 +4669,8 @@ test("an abort proves nothing about Copilot: it can never release the requiremen
   assert.ok(guardAt > 0 && guardAt < spawnAt,
     "an already-aborted signal must short-circuit BEFORE spawning (its listener never fires)");
 
-  const requestAt = COPILOT_TOOLS_SRC.indexOf("const requested = await deps.gh.requestCopilotReviewer(");
-  const body = COPILOT_TOOLS_SRC.slice(requestAt, requestAt + 3500);
+  const requestAt = COPILOT_REQUEST_SRC.indexOf("const requested = await deps.gh.requestCopilotReviewer(");
+  const body = COPILOT_REQUEST_SRC.slice(requestAt, requestAt + 3500);
   assert.match(body, /if \(!requested\.ok\)[\s\S]{0,200}if \(signal\?\.aborted\)[\s\S]{0,400}return \{/,
     "a failed request that was merely aborted must return without releasing");
 });
@@ -4654,9 +4678,9 @@ test("an abort proves nothing about Copilot: it can never release the requiremen
 test("a released Copilot cycle still has to report what it left unhandled", () => {
   // Releasing stops the GATE from blocking; it does not make open findings
   // disappear. The user must hear about them.
-  assert.ok(COPILOT_TOOLS_SRC.indexOf("export function copilotUnhandledText(") > 0,
+  assert.ok(COPILOT_REPLIES_SRC.indexOf("export function copilotUnhandledText(") > 0,
     "the unhandled-thread reporter must exist");
-  assert.ok(COPILOT_TOOLS_SRC.indexOf("export function copilotAbandonedText(") > 0,
+  assert.ok(COPILOT_REPLIES_SRC.indexOf("export function copilotAbandonedText(") > 0,
     "the payload-less paths need their own reporter (they have only the count)");
   const checkBody = toolBodyOf("copilot_review");
   assert.match(checkBody, /copilotUnhandledText\(analysis\.actionable\)/,
@@ -4669,7 +4693,7 @@ test("a released Copilot cycle still has to report what it left unhandled", () =
   // `releaseReply`, which is the ONE place the abandoned-findings notice is
   // attached — so a new release path cannot be added without it, which is what
   // the old per-call count was approximating.
-  const toolsBody = COPILOT_TOOLS_SRC;
+  const toolsBody = COPILOT_TOOL_FAMILY_SRC;
   const funnelAt = toolsBody.indexOf("function releaseReply(");
   assert.ok(funnelAt > 0, "the release funnel must exist");
   assert.ok(toolsBody.indexOf("const abandoned = copilotAbandonedText(args.st.copilot)", funnelAt) > funnelAt,
@@ -5144,8 +5168,9 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   assert.doesNotMatch(SRC, /staleAuditGuard/,
     "the second stale-report entry point may not come back");
   const SELECTOR_SITES = new Set([
-    join("lib", "audit-round.ts"),          // where it lives
-    join("lib", "judge-session-tools.ts"),  // the probe, which must agree with it
+    join("lib", "audit-round-report.ts"),   // where it lives
+    join("lib", "audit-round-settle.ts"),   // the recorder, its one engine caller
+    join("lib", "judge-wait-criteria.ts"),  // the probe, which must agree with it
   ]);
   for (const rel of [
     ...readdirSync(join(ROOT, "lib")).filter((f) => f.endsWith(".ts")).map((f) => join("lib", f)),
@@ -5158,7 +5183,7 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   // The probe CALLS it and does not re-derive it: no second "newest report vs
   // the cursor" comparison may live in the waiting module.
   assert.doesNotMatch(JUDGE_TOOLS_SRC, /projection\.lastReport/,
-    "lib/judge-session-tools.ts may not pick a round's report on its own");
+    "the judge wait modules may not pick a round's report on its own");
 });
 
 

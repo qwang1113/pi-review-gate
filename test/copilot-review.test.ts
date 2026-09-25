@@ -8,17 +8,22 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { analyzeCopilot, evaluateCopilot } from "../lib/copilot-review.ts";
 import {
   COPILOT_AWAIT_TIMEOUT_MS,
+  armCopilotReview,
+  copilotProblems,
+  isCopilotOutstanding,
+  recordCopilotRequest,
+  releaseCopilotReview,
+  sanitizeCopilotState,
+  type CopilotReviewState,
+} from "../lib/copilot-review-state.ts";
+import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_REVIEWER_LOGIN,
   COPILOT_THREADS_QUERY,
-  analyzeCopilot,
-  armCopilotReview,
-  copilotProblems,
-  evaluateCopilot,
   isCopilotAuthor,
-  isCopilotOutstanding,
   isUnknownJsonFieldError,
   lastPageFromLink,
   PR_VIEW_JSON_FIELDS,
@@ -31,14 +36,10 @@ import {
   isCopilotOwnerAllowed,
   parseNameWithOwner,
   parsePrView,
-  recordCopilotRequest,
-  releaseCopilotReview,
-  sanitizeCopilotState,
   slugFromPrUrl,
   splitHttpResponse,
   type CopilotPayload,
-  type CopilotReviewState,
-} from "../lib/copilot-review.ts";
+} from "../lib/copilot-probe-parse.ts";
 // The wait's verdict and its grace window live with the watcher — one module
 // owns the wait.
 import {

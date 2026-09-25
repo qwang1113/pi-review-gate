@@ -162,7 +162,7 @@ test("both recover tools reach the same recovery judgement", () => {
 });
 
 test("the judge probe repaints the border from the channel projection (C2)", () => {
-  const text = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
+  const text = readFileSync(join(ROOT, "lib", "judge-wait-criteria.ts"), "utf8");
   const at = text.indexOf("export function probeJudgeRound(");
   assert.ok(at > 0, "the probe must exist");
   const body = text.slice(at, text.indexOf("\n}", at));

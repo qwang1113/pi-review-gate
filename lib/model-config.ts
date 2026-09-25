@@ -235,7 +235,7 @@ export function applyAgentConfigLayer(opts: ApplyAgentLayerOptions): ApplyAgentL
   // WORKER PRESETS ARE NOT RENDERED (2026-09-21, reviewer P1). The render layer
   // exists so a role's MODEL CHAIN can be read back out of `agents/<role>.md`;
   // a worker's chain is read straight from the config section
-  // (`lib/worker-tools.ts` `resolveWorkerRole`) and it has no prompt file to
+  // (`lib/worker-channel.ts` `resolveWorkerRole`) and it has no prompt file to
   // render into. Passing one through here is not harmless: with an `agents.worker`
   // entry in the config (which the installer now writes for every user) the
   // renderer looked for `agents/worker.md`, which the package does not ship and

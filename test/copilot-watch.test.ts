@@ -25,9 +25,9 @@ import {
 import {
   armCopilotReview,
   COPILOT_AWAIT_TIMEOUT_MS,
-  type CopilotProbe,
   type CopilotReviewState,
-} from "../lib/copilot-review.ts";
+} from "../lib/copilot-review-state.ts";
+import type { CopilotProbe } from "../lib/copilot-probe-parse.ts";
 
 const NOW_ISO = "2026-08-07T10:00:00.000Z";
 const NOW = Date.parse(NOW_ISO);

@@ -33,31 +33,34 @@
  *
  * PURE-ISH: tmux, the file system, the clock and the channel all enter through
  * {@link WorkerToolDeps}, so the whole protocol is drivable from a test.
+ *
+ * WHERE THE PARTS LIVE: `worker_submit`'s implementation is
+ * lib/worker-submit.ts, and the channel / pane-ownership / role facts every
+ * tool reads are lib/worker-channel.ts.
  */
 
 import { Type } from "typebox";
 import type { ToolHost } from "./tool-host.ts";
 import type { ToolReply } from "./tool-host.ts";
 import type { SessionPaneCoords, SessionPaneDecor, SessionPaneRole } from "./session-factory.ts";
-import { windowAlreadyGone, workerPaneDecor } from "./session-factory.ts";
-import type { ChannelIO, ChannelTarget, ChannelRecord, ChannelRequestRecord, ChannelReportRecord } from "./orchestrator-channel.ts";
-import { appendRecord, channelPathFor, newChannelId, readChannel, reportText, requestPayload } from "./orchestrator-channel.ts";
+import { windowAlreadyGone } from "./session-factory.ts";
+import type { ChannelIO } from "./orchestrator-channel.ts";
+import { appendRecord } from "./orchestrator-channel.ts";
 import type { AgentsConfigMap } from "./agents-config.ts";
-import {
-  buildWorkerPaneCommand,
-  isWorkerId,
-  withWorker,
-  workerSessionId,
-  type WorkerEntry,
-  type WorkerRegistry,
-} from "./worker-pane.ts";
-import { buildWorkerSystemPrompt, buildWorkerTaskDocument } from "./worker-side.ts";
+import { isWorkerId, withWorker, type WorkerRegistry } from "./worker-pane.ts";
 import { pollUntil } from "./poll-wait.ts";
+import {
+  WORKER_WAIT_POLL_MS,
+  ownedPaneAlive,
+  paneIsOurs,
+  readWorkerChannel,
+  workerTargetFor,
+  type WorkerProjection,
+} from "./worker-channel.ts";
+import { submitWorker } from "./worker-submit.ts";
 
 /** How long `worker_wait` polls before reporting the state it found. */
 export const WORKER_WAIT_DEFAULT_MS = 300_000;
-/** Poll interval. The worker's channel is a file on the same machine. */
-export const WORKER_WAIT_POLL_MS = 500;
 
 export interface WorkerToolDeps {
   /** This session's own pane — the layout anchor and the opener identity. */
@@ -131,206 +134,6 @@ function reply(text: string, details?: Record<string, unknown>): ToolReply {
 
 function fail(text: string, details?: Record<string, unknown>): ToolReply {
   return { content: [{ type: "text", text }], details, isError: true };
-}
-
-/** The channel one worker talks on — opener + worker id, like a judge's. */
-export function workerChannelTarget(openerId: string, workerId: string, home?: string): ChannelTarget {
-  return { orchestrationId: openerId, childId: `worker-${workerId}`, ...(home === undefined ? {} : { home }) };
-}
-
-/**
- * WHERE AN EXISTING WORKER'S CHANNEL IS — read from its registry entry, never
- * re-derived from this session's environment (reviewer P1, 2026-09-21).
- *
- * The opener's pane id changes on every restart, re-attach and handover, so a
- * re-derived target points at a channel the worker never wrote to: its report
- * lands where nobody looks and the caller waits on an empty file forever. The
- * entry is the record of who opened it, so the entry is what answers.
- */
-function workerTargetFor(deps: WorkerToolDeps, registry: WorkerRegistry, workerId: string): ChannelTarget {
-  const recorded = registry[workerId]?.openerId;
-  return workerChannelTarget(recorded ?? deps.openerId(), workerId, deps.channelHome());
-}
-
-/** Everything a worker has said that the opener has not consumed yet. */
-export interface WorkerProjection {
-  /** The newest report on the channel, with the id used to dedupe it. */
-  report?: { reportId: string; text: string; at: string };
-  /** The oldest question still waiting for an answer. */
-  question?: { requestId: string; title: string; options: string[]; payload?: string; at: string };
-  /** How many records the channel holds — the boot watermark. */
-  records: number;
-}
-
-/**
- * Project one worker channel into the two things a caller can act on.
- *
- * A question stays in the projection until an ANSWER for its requestId exists:
- * that is what makes `worker_wait` idempotent — polling it twice shows the same
- * question rather than losing it, and the caller's `worker_answer` is the only
- * thing that retires it.
- */
-export function projectWorkerChannel(io: ChannelIO, records: readonly ChannelRecord[]): WorkerProjection {
-  const answered = new Set<string>();
-  for (const r of records) if (r.kind === "answer") answered.add(r.requestId);
-  let report: WorkerProjection["report"];
-  let question: WorkerProjection["question"];
-  for (const r of records) {
-    if (r.kind === "report") {
-      const record = r as ChannelReportRecord;
-      // THE REPORT IS NOT ALWAYS INLINE (P0, 2026-09-22). A report past the
-      // inline budget is spilled to a side file and the record keeps only
-      // `summaryRef` — reading `summary` alone made `worker_wait` answer
-      // 「没有新消息」 forever for every long report (measured on a real one:
-      // `{"kind":"report",…,"summaryRef":{…,"chars":19657}}`). `reportText`
-      // is the ONE reader that knows both shapes; the request records below
-      // already went through its twin (`requestPayload`).
-      const text = reportText(io, record)?.trim();
-      report = {
-        reportId: record.reportId,
-        // A SPILL NOBODY CAN READ IS REPORTED, NOT SWALLOWED: dropping it
-        // silently is indistinguishable, to the caller, from a worker that
-        // never reported at all.
-        text: text || unreadableReport(record),
-        at: r.at,
-      };
-      continue;
-    }
-    if (r.kind === "request") {
-      const req = r as ChannelRequestRecord;
-      if (answered.has(req.requestId)) continue;
-      // OLDEST first: a worker blocked on question one must not be answered out
-      // of order by a later one.
-      if (!question) {
-        const payload = requestPayload(io, req);
-        question = {
-          requestId: req.requestId,
-          title: req.title,
-          options: req.options ?? [],
-          at: req.at,
-          ...(payload === undefined ? {} : { payload }),
-        };
-      }
-    }
-  }
-  return { ...(report === undefined ? {} : { report }), ...(question === undefined ? {} : { question }), records: records.length };
-}
-
-/**
- * WHAT A REPORT SAYS WHEN ITS TEXT CANNOT BE READ — a fact, not silence.
- *
- * Two shapes: a `summaryRef` that points at nothing readable (the side file
- * was pruned, the path is stale), and a record that carried neither an inline
- * summary nor a reference. Both used to vanish into “no new message”, which is
- * the one answer a caller can never act on.
- */
-function unreadableReport(record: ChannelReportRecord): string {
-  const ref = record.summaryRef;
-  return ref
-    ? `（报告读不到：${ref.path} 不存在或为空；记录声明 ${ref.chars} 字符）`
-    : "（报告没有内容：既没有内联 summary 也没有 summaryRef）";
-}
-
-/** Read one worker's channel, tolerating a channel that does not exist yet. */
-function readWorkerChannel(deps: WorkerToolDeps, registry: WorkerRegistry, workerId: string): WorkerProjection {
-  try {
-    const path = channelPathFor(...targetParts(deps, registry, workerId));
-    return projectWorkerChannel(deps.channelIO, readChannel(deps.channelIO, path).records);
-  } catch {
-    return { records: 0 };
-  }
-}
-
-function targetParts(
-  deps: WorkerToolDeps,
-  registry: WorkerRegistry,
-  workerId: string,
-): [string, string, string | undefined] {
-  const target = workerTargetFor(deps, registry, workerId);
-  return [target.orchestrationId, target.childId, target.home];
-}
-
-/**
- * May we treat this pane id as OURS?
- *
- * ONE implementation, because FOUR places ask the same question (reviewer P1,
- * 2026-09-21): `worker_close` before it kills, and submit / wait / the
- * default-worker pick before they trust liveness. Two copies of "the recorded
- * server must match, and a recorded server we cannot RE-READ is not a match"
- * is exactly how one of them drifts back to trusting a stranger's pane — the
- * pane id a tmux server mints can be re-issued to somebody else after a
- * restart.
- *
- * An entry with NO recorded server (written before the field existed) skips
- * the check: there is nothing to disagree with.
- */
-export function paneIsOurs(entry: WorkerEntry | undefined, currentServer: string | undefined): boolean {
-  if (!entry || entry.paneId === undefined) return false;
-  return entry.tmuxServer === undefined || entry.tmuxServer === currentServer;
-}
-
-/**
- * Is this worker's pane still alive AND ours? — the liveness question, asked
- * by submit / wait / the default-worker pick; `paneIsOurs` is shared with the
- * kill path so all four give the same answer.
- */
-function ownedPaneAlive(deps: WorkerToolDeps, entry: WorkerEntry | undefined): boolean {
-  if (!paneIsOurs(entry, deps.tmuxServer?.())) return false;
-  return deps.paneAlive(entry!.paneId!);
-}
-
-/** Mint the next free worker id (`worker-1`, `worker-2`, …). */
-export function nextWorkerId(registry: WorkerRegistry): string {
-  for (let i = 1; ; i += 1) {
-    const candidate = `worker-${i}`;
-    if (!registry[candidate]) return candidate;
-  }
-}
-
-/** The role's resolved launch: the model to run and the prompt it carries. */
-export function resolveWorkerRole(
-  agents: AgentsConfigMap,
-  role: string,
-  overrideModel?: string,
-  /**
-   * Registry check for the spec, injected (quality round P2, 2026-09-21).
-   *
-   * A worker preset's chain is read straight from the config section, so it
-   * never passes through `applyAgentConfigLayer` — which is where every OTHER
-   * role's slots get validated. Without this, a typo (`agents.worker.slots[0]
-   * = "onekey/gpt-6-astr:max"`) is discovered only when pi refuses to start the
-   * pane. Fail-closed like the missing-preset case: an unresolvable spec is a
-   * configuration error, not something to paper over.
-   */
-  validate?: (spec: string) => { ok: boolean; reason?: string },
-): { ok: true; model: string; prompt?: string } | { ok: false; reason: string } {
-  const entry = agents[role];
-  if (!entry || entry.source === "default") {
-    return {
-      ok: false,
-      reason:
-        `worker 角色 \`${role}\` 没有配置 —— 在 ~/.pi/review-gate.json 的 agents 段里加上它` +
-        `（\`{ "auto": false, "slots": ["<provider>/<model>:<thinking>"], "prompt": "…" }\`）。` +
-        "没有配置就派活等于用一个没人选过的模型跑，所以这里直接拒绝。",
-    };
-  }
-  if (entry.malformed) return { ok: false, reason: `worker 角色 \`${role}\` 的配置字段非法（malformed）` };
-  const override = overrideModel?.trim();
-  const model = override || entry.slots[0];
-  if (!model) {
-    return { ok: false, reason: `worker 角色 \`${role}\` 的 slots 是空的 —— 没有可派发的模型` };
-  }
-  const checked = validate?.(model);
-  if (checked && !checked.ok) {
-    return {
-      ok: false,
-      reason:
-        `worker 角色 \`${role}\` 的模型 spec \`${model}\` 不可解析（${checked.reason ?? "原因未知"}）—— ` +
-        `改 ~/.pi/review-gate.json 里的 agents.${role}.slots${override ? "，或换掉本次的 model 覆盖" : ""}；` +
-        "派一个起不来的 pane 等于把任务丢进黑洞。",
-    };
-  }
-  return { ok: true, model, ...(entry.prompt === undefined ? {} : { prompt: entry.prompt }) };
 }
 
 /** Register the four worker tools on ONE host. */
@@ -408,219 +211,8 @@ export function registerWorkerTools(host: ToolHost, deps: WorkerToolDeps): void 
 }
 
 // ---------------------------------------------------------------------------
-// the four implementations
+// the three implementations that read a worker (submit: lib/worker-submit.ts)
 // ---------------------------------------------------------------------------
-
-/** How long `worker_submit` waits for the pane's gate to confirm an append. */
-export const WORKER_ACK_WAIT_MS = 8_000;
-
-/**
- * Wait for the pane's own gate to say it injected this instruction.
- *
- * The ack (`instruct-ack`, stage `injected`) is written by the CHILD's gate —
- * the only party that knows whether the text reached the agent. Absent budget
- * ⇒ a plain report of what was seen: `injected: false` means NOT CONFIRMED,
- * never "failed" (the message is in the channel either way).
- */
-async function waitForInstructAck(
-  deps: WorkerToolDeps,
-  registry: WorkerRegistry,
-  workerId: string,
-  instructId: string,
-  budgetMs = WORKER_ACK_WAIT_MS,
-): Promise<{ injected: boolean }> {
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => { setTimeout(r, ms); }));
-  const started = deps.now();
-  for (;;) {
-    try {
-      const path = channelPathFor(...targetParts(deps, registry, workerId));
-      // THE LAST ACK, NOT THE FIRST (quality round P1, 6th report, 2026-09-21):
-      // the handshake always writes `received` first and only writes `injected`
-      // once the instruction was actually applied — so `.find` always returned
-      // the `received` record and this predicate could never be true. Every
-      // "injected" the caller was ever told about came from... nowhere; the
-      // helper simply always answered "not confirmed".
-      //
-      // Written as filter + index rather than `findLast`/`at(-1)` on purpose
-      // (reviewer P2): those are recent additions, and this path runs on
-      // whatever Node the user's pi started with.
-      const acks = readChannel(deps.channelIO, path).records.filter(
-        (r) => r.kind === "instruct-ack" && (r as { instructId?: unknown }).instructId === instructId,
-      );
-      const ack = acks.length > 0 ? (acks[acks.length - 1] as { delivered?: unknown; stage?: unknown }) : undefined;
-      if (ack) {
-        return { injected: ack.delivered === true && (ack.stage === undefined || ack.stage === "injected") };
-      }
-    } catch {
-      // Unreadable channel this tick — keep waiting; the budget is the verdict.
-    }
-    if (deps.now() - started >= budgetMs) return { injected: false };
-    await sleep(WORKER_WAIT_POLL_MS);
-  }
-}
-
-async function submitWorker(deps: WorkerToolDeps, params: Record<string, unknown>): Promise<ToolReply> {
-  const task = String(params.task ?? "").trim();
-  if (!task) return fail("review-gate: `task` 不能为空 —— worker 看不到你的上下文，任务书就是它的全部输入。");
-  const role = String(params.role ?? "worker").trim() || "worker";
-  const resolved = resolveWorkerRole(
-    deps.agents(),
-    role,
-    typeof params.model === "string" ? params.model : undefined,
-    deps.validateModel,
-  );
-  if (!resolved.ok) return fail(`review-gate: ${resolved.reason}`);
-
-  const registry = deps.readRegistry();
-  const asked = typeof params.workerId === "string" ? params.workerId.trim() : "";
-  if (asked && !isWorkerId(asked)) {
-    return fail(
-      `review-gate: workerId "${asked}" 不合法 —— 它同时是 pane 标题、通道文件名和 pi session id 的一部分，` +
-      "只接受 `[a-z0-9][a-z0-9-]{0,40}`。",
-    );
-  }
-  const workerId = asked || nextWorkerId(registry);
-  const existing = registry[workerId];
-
-  // A LIVING PANE IS A CONVERSATION IN PROGRESS (2026-09-21): the text goes to
-  // the worker as a message, through the same instruct channel an orchestration
-  // child uses, so it is read by the pane's own gate and cannot be truncated,
-  // reordered or read as a dialog keypress.
-  if (ownedPaneAlive(deps, existing)) {
-    const target = workerTargetFor(deps, registry, workerId);
-    const instructId = newChannelId("wi", deps.now());
-    appendRecord(deps.channelIO, target, {
-      kind: "instruct",
-      from: "orchestrator",
-      at: new Date(deps.now()).toISOString(),
-      instructId,
-      mode: "interrupt",
-      text: task,
-    });
-    // EARN THE RECEIPT (reviewer P2, 2026-09-21). Appending a record proves
-    // nothing: the pane's own gate is what reads it, and its ack is the only
-    // evidence the text was injected. `orchestrator_instruct` verifies for the
-    // same reason ("一条没人读的消息不算投递"), and without it a worker whose
-    // pane is alive but whose gate never drains leaves the caller waiting on an
-    // answer nobody was ever asked for. Bounded, because a worker deep in a
-    // tool call takes as long as it takes — and the honest answer then is
-    // "written, not yet confirmed".
-    const ack = await waitForInstructAck(deps, registry, workerId, instructId);
-    deps.log(`worker ${workerId}: 追加任务${ack.injected ? "已注入" : "已写入通道（未确认注入）"}（pane ${existing.paneId} 存活）`);
-    return reply(
-      `review-gate: worker ${workerId} 仍在 pane ${existing.paneId} 上跑 —— 追加任务` +
-      (ack.injected
-        ? "它自己的门禁已确认注入（同一会话，不是新 worker）。"
-        : `已写进它的通道，但 ${Math.round(WORKER_ACK_WAIT_MS / 1000)}s 内没等到注入确认（它可能正忙）。`) +
-      "\n用 `worker_wait({workerId: …})` 收它的回复；若一直没动静，`worker_close` 后重新 `worker_submit` 会在同一 session 上重开。",
-      { workerId, paneId: existing.paneId, mode: "instruct", injected: ack.injected },
-    );
-  }
-
-  const open = await openWorkerPane(deps, {
-    workerId,
-    // An EXISTING worker keeps its channel; a new one is born on this
-    // session's identity.
-    openerId: existing?.openerId ?? deps.openerId(),
-    role,
-    task,
-    model: resolved.model,
-    ...(resolved.prompt === undefined ? {} : { prompt: resolved.prompt }),
-  });
-  if (!open.ok) return fail(`review-gate: worker ${workerId} 没能启动 —— ${open.error}`);
-  return reply(
-    `review-gate: worker ${workerId}（角色 ${role}，模型 ${resolved.model}）已在 window ${open.windowId ?? open.paneId} 启动。\n` +
-    (existing
-      ? "它上一次的会话被**接着用**了（同一 session id）—— 它还记得之前读过的东西。\n"
-      : "") +
-    `任务：${task.slice(0, 200)}${task.length > 200 ? "…" : ""}\n` +
-    "用 `worker_wait({workerId})` 收结果。",
-    { workerId, paneId: open.paneId, role, model: resolved.model, resumed: Boolean(existing) },
-  );
-}
-
-async function openWorkerPane(
-  deps: WorkerToolDeps,
-  opts: { workerId: string; openerId: string; role: string; task: string; model: string; prompt?: string },
-): Promise<{ ok: true; paneId: string; windowId?: string } | { ok: false; error: string }> {
-  const ownPane = deps.ownPane();
-  if (!ownPane) {
-    return { ok: false, error: "读不到自己的 tmux pane（$TMUX_PANE）—— 门禁必须在 tmux 里跑，才能开子会话。" };
-  }
-  let windowId: string | undefined;
-  const workDir = deps.workDirFor(opts.workerId);
-  const sysPromptPath = `${workDir}/system-prompt.md`;
-  const taskPath = `${workDir}/task.md`;
-  const prompt = deps.writeFile(
-    sysPromptPath,
-    buildWorkerSystemPrompt({
-      repoRoot: deps.repoRoot(),
-      role: opts.role,
-      ...(opts.prompt === undefined ? {} : { prompt: opts.prompt }),
-    }),
-  );
-  if (!prompt.ok) return { ok: false, error: `系统提示词写不出来（${prompt.error}）` };
-  const task = deps.writeFile(taskPath, buildWorkerTaskDocument({ workerId: opts.workerId, role: opts.role, task: opts.task }));
-  if (!task.ok) return { ok: false, error: `任务书写不出来（${task.error}）` };
-
-  const sessionId = workerSessionId(opts.workerId);
-  const command = buildWorkerPaneCommand({
-    sessionId,
-    taskPath,
-    sessionDir: deps.sessionDirFor(opts.workerId),
-    sysPromptPath,
-    model: opts.model,
-  });
-  // The pane is opened by the ONE factory every other pane goes through; what
-  // this function adds is only WHAT to open (lib/session-factory.ts owns how).
-  //
-  // RESUME KEEPS THE CHANNEL THE WORKER ALREADY HAS (reviewer P1, 2026-09-21).
-  // `opts.openerId` is fixed when the WORKER IS BORN and never re-stamped: a
-  // worker that already exists owns a channel under the opener that first
-  // opened it, so stamping this session's identity on a resume would move the
-  // address while everything the worker ever said stayed behind — including
-  // the report the caller is waiting for.
-  const openerId = opts.openerId;
-  const opened = await deps.openPane({
-    cwd: deps.repoRoot(),
-    command,
-    role: { kind: "worker", openerId, workerId: opts.workerId, role: opts.role },
-    decor: workerPaneDecor(opts.workerId, deps.paneOwner()),
-    register: (coords) => {
-      windowId = coords.windowId;
-      const registry = deps.readRegistry();
-      // THE CURSOR SURVIVES A REOPEN (reviewer P1, 2026-09-21): `reportedAt` is
-      // the ONLY thing that says "this report has been consumed", and
-      // `withWorker` replaces the whole entry — so rebuilding it without the
-      // cursor meant every reopen (a dead pane resumed, an id reused after
-      // close) re-delivered the newest report as if it had just landed.
-      const prior = registry[opts.workerId];
-      // THE SERVER READING SURVIVES TOO (reviewer P1, 2026-09-21): a fresh
-      // reading wins, but an UNREADABLE one must not erase what is recorded —
-      // `worker_close` refuses to kill when the recorded server disagrees with
-      // the current one, and a dropped field silently removes that check. The
-      // stale-forever risk is the safe direction here: a server that really
-      // changed makes the next close refuse, which is a human's call.
-      const tmuxServer = deps.tmuxServer?.() ?? prior?.tmuxServer;
-      deps.saveRegistry(withWorker(registry, {
-        workerId: opts.workerId,
-        openerId,
-        role: opts.role,
-        model: opts.model,
-        paneId: coords.paneId,
-        ...(coords.windowId === undefined ? {} : { windowId: coords.windowId }),
-        ...(coords.sessionName === undefined ? {} : { tmuxSession: coords.sessionName }),
-        sessionId,
-        repoRoot: deps.repoRoot(),
-        createdAt: new Date(deps.now()).toISOString(),
-        ...(prior?.reportedAt === undefined ? {} : { reportedAt: prior.reportedAt }),
-        ...(tmuxServer === undefined ? {} : { tmuxServer }),
-      }));
-    },
-  });
-  if (!opened.ok) return { ok: false, error: opened.error };
-  return { ok: true, paneId: opened.paneId, ...(windowId === undefined ? {} : { windowId }) };
-}
 
 /**
  * What one probe of a worker's channel found. `kind: "pending"` is the only

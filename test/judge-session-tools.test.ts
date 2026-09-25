@@ -13,14 +13,16 @@ import { fileURLToPath } from "node:url";
 import {
   registerJudgeSessionTools,
   registerJudgeWaitTool,
-  doWait,
   doClose,
-  probeJudgeRound,
-  probeJudgeWait,
-  recentStreamFindings,
   type JudgeChildRecord,
   type JudgeSessionToolDeps,
 } from "../lib/judge-session-tools.ts";
+import { doWait } from "../lib/judge-wait-tool.ts";
+import {
+  probeJudgeRound,
+  probeJudgeWait,
+  recentStreamFindings,
+} from "../lib/judge-wait-criteria.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import { emptyHierarchy, type HierarchyTable } from "../lib/hierarchy.ts";
 import {
@@ -29,7 +31,7 @@ import {
   type ChannelIO,
   type ReviewScopeStamp,
 } from "../lib/orchestrator-channel.ts";
-import type { RoundBinding } from "../lib/audit-round.ts";
+import type { RoundBinding } from "../lib/audit-round-report.ts";
 import { REVIEW_ROUND_SPEC } from "../lib/audit-round-specs.ts";
 
 const ROOT = "/repo";

@@ -46,14 +46,14 @@
  */
 
 import { pollUntil, type AbortLike } from "./poll-wait.ts";
+import { analyzeCopilot } from "./copilot-review.ts";
 import {
-  analyzeCopilot,
   COPILOT_AWAIT_TIMEOUT_MS,
   COPILOT_CLOCK_SKEW_MS,
-  type CopilotProbe,
   type CopilotReviewState,
   type CopilotWaitState,
-} from "./copilot-review.ts";
+} from "./copilot-review-state.ts";
+import type { CopilotProbe } from "./copilot-probe-parse.ts";
 
 /**
  * How long a request may go with NO evidence that GitHub took it before the

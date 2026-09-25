@@ -18,7 +18,7 @@
 
 import type { TaskMode, TaskModeSource } from "./task-mode.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
-import type { CopilotReviewState } from "./copilot-review.ts";
+import type { CopilotReviewState } from "./copilot-review-state.ts";
 import type { AcceptanceRecord } from "./acceptance-round.ts";
 import type { LoopStagesRecord } from "./loop-stages.ts";
 import type { RestatementRecord } from "./restatement.ts";

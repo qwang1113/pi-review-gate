@@ -29,7 +29,7 @@ import {
   probeOpenPr,
   type OpenPrLookup,
 } from "../lib/station-pr-evidence.ts";
-import type { PrSummary } from "../lib/copilot-review.ts";
+import type { PrSummary } from "../lib/copilot-probe-parse.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
 
 // Hermetic env on EVERY spawn: these fixtures run real `git commit`, and a

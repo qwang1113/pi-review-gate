@@ -261,7 +261,7 @@ test("the timeoutMs: 0 snapshot is untouched by all of this", async () => {
 // ---------------------------------------------------------------------------
 
 const EXTENSION_SRC = fs.readFileSync(new URL("../extensions/review-gate.ts", import.meta.url), "utf8");
-const JUDGE_TOOLS_SRC = fs.readFileSync(new URL("../lib/judge-session-tools.ts", import.meta.url), "utf8");
+const JUDGE_TOOLS_SRC = fs.readFileSync(new URL("../lib/judge-wait-tool.ts", import.meta.url), "utf8");
 
 test("the trigger is the EXISTING input handler, and the gate's own injections never pull it", () => {
   const start = EXTENSION_SRC.indexOf('pi.on("input"');

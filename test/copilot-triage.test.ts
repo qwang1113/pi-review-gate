@@ -21,7 +21,7 @@ import {
   type CopilotTriageState,
 } from "../lib/copilot-triage.ts";
 import { DECLINE_ROW } from "../lib/choice-dialog.ts";
-import type { CopilotThread } from "../lib/copilot-review.ts";
+import type { CopilotThread } from "../lib/copilot-probe-parse.ts";
 
 /**
  * The triage rules are pure, so they are tested as rules: no session, no

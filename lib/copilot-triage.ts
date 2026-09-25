@@ -25,7 +25,7 @@
  * a `gh` or a session.
  */
 
-import type { CopilotThread } from "./copilot-review.ts";
+import type { CopilotThread } from "./copilot-probe-parse.ts";
 import { parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 // The interview's typed escape, imported rather than re-spelled: "answer in
 // chat" is one convention in this gate, and a second constant would be a

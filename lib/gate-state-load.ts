@@ -12,7 +12,7 @@ import { normalizeRuntime } from "./orchestrator-registry.ts";
 import { normalizeNotifyHistory } from "./user-notify.ts";
 import { normalizeOrchestrationId } from "./orchestration-id.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
-import { sanitizeCopilotState } from "./copilot-review.ts";
+import { sanitizeCopilotState } from "./copilot-review-state.ts";
 import { sanitizeAcceptanceRecord } from "./acceptance-round.ts";
 import { sanitizeLoopStages } from "./loop-stages.ts";
 import { restatementHash, type RestatementRecord } from "./restatement.ts";

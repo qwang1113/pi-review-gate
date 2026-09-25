@@ -55,7 +55,7 @@ import {
   type CopilotSupport,
   type CopilotTimeline,
   type PrSummary,
-} from "./copilot-review.ts";
+} from "./copilot-probe-parse.ts";
 
 /** One `gh` invocation's outcome — never an exception. */
 export interface GhResult { ok: boolean; stdout: string; stderr: string }

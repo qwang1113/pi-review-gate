@@ -346,15 +346,13 @@ import {
   planAuditHash,
 } from "../lib/orchestrator-plan-audit.ts";
 import { composeWithUntrustedData } from "../lib/untrusted-data.ts";
+import { runAuditRound, type RunAuditRoundDeps } from "../lib/audit-round.ts";
+import { settleAuditRound, type SettleAuditRoundDeps } from "../lib/audit-round-settle.ts";
 import {
   roundBindingFor,
   roundHasReported,
-  runAuditRound,
-  settleAuditRound,
   type RoundBinding,
-  type RunAuditRoundDeps,
-  type SettleAuditRoundDeps,
-} from "../lib/audit-round.ts";
+} from "../lib/audit-round-report.ts";
 import {
   GOAL_AUDIT_SPEC,
   PLAN_AUDIT_SPEC,
@@ -411,11 +409,11 @@ import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../l
 import {
   registerJudgeSessionTools,
   registerJudgeWaitTool,
-  probeJudgeRound,
-  doWait,
   doClose,
   type JudgeSessionToolDeps,
 } from "../lib/judge-session-tools.ts";
+import { doWait } from "../lib/judge-wait-tool.ts";
+import { probeJudgeRound } from "../lib/judge-wait-criteria.ts";
 
 import { registerJudgeSpawnTools } from "../lib/judge-spawn-tools.ts";
 import { AUDIT_SELF_WAIT_BUDGET_MS, awaitRoundReport } from "../lib/judge-lifecycle.ts";
@@ -739,11 +737,8 @@ import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/revie
 // The Copilot TOOLS and the `gh` access they run on moved out of this file
 // (lib/copilot-review-tools.ts + lib/copilot-gh.ts); what is left here is the
 // arming site and the completion-only problem list.
-import {
-  armCopilotReview,
-  copilotProblems,
-  parsePrView,
-} from "../lib/copilot-review.ts";
+import { armCopilotReview, copilotProblems } from "../lib/copilot-review-state.ts";
+import { parsePrView } from "../lib/copilot-probe-parse.ts";
 import {
   fetchCopilotPayload,
   fetchCopilotProbe,

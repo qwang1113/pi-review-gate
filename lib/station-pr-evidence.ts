@@ -34,7 +34,7 @@
 import { gitText } from "./git-exec.ts";
 
 import { resolveOpenPr } from "./copilot-gh.ts";
-import type { PrSummary } from "./copilot-review.ts";
+import type { PrSummary } from "./copilot-probe-parse.ts";
 
 /**
  * What one probe learned about this repo.
