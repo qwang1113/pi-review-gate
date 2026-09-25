@@ -25,7 +25,7 @@
  * the cooldown rule testable.
  */
 
-import { splitThinkingSuffix } from "./model-config.ts";
+import { splitThinkingSuffix } from "./model-spec.ts";
 
 /** How long a failed model stays out of the dispatch's first choice. */
 export const MODEL_FAILURE_TTL_MS = 10 * 60 * 1000;

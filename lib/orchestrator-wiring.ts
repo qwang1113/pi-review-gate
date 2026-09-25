@@ -35,7 +35,7 @@ import { readJsonIfExists } from "./json-file.ts";
 import { assertSafeTmuxArgv, type SafeTmuxOptions } from "./orchestrator-tmux.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
-import { sidecarPath } from "./gate-state.ts";
+import { sidecarPath } from "./gate-state-io.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
 import { addressableSessions, createOwnershipProbe } from "./session-tmux-scope.ts";

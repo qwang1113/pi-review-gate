@@ -42,7 +42,8 @@ import { gitText } from "./git-exec.ts";
 
 import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "./model-diagnose.ts";
 import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "./gate-doctor.ts";
-import { KNOWN_AGENTS, projectAgentIdentity } from "./model-config.ts";
+import { KNOWN_AGENTS } from "./model-config.ts";
+import { projectAgentIdentity } from "./agent-frontmatter.ts";
 import { judgeEnglish } from "./lang-detect.ts";
 import { globalConfigPath } from "./project-config.ts";
 import { WORKFLOW_COMMANDS } from "./workflow-commands.ts";

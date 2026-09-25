@@ -42,7 +42,7 @@ import type { SessionPaneCoords, SessionPaneDecor, SessionPaneRole } from "./ses
 import { windowAlreadyGone, workerPaneDecor } from "./session-factory.ts";
 import type { ChannelIO, ChannelTarget, ChannelRecord, ChannelRequestRecord, ChannelReportRecord } from "./orchestrator-channel.ts";
 import { appendRecord, channelPathFor, newChannelId, readChannel, reportText, requestPayload } from "./orchestrator-channel.ts";
-import type { AgentsConfigMap } from "./model-config.ts";
+import type { AgentsConfigMap } from "./agents-config.ts";
 import {
   buildWorkerPaneCommand,
   isWorkerId,

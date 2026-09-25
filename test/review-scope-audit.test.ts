@@ -33,14 +33,16 @@ import {
   type ChannelIO,
   type ChannelReportRecord,
 } from "../lib/orchestrator-channel.ts";
+import { emptyState } from "../lib/gate-state.ts";
 import {
-  emptyState,
-  loadSidecar,
-  sanitizeRoundScope,
   saveSidecar,
   sidecarPath,
+} from "../lib/gate-state-io.ts";
+import { loadSidecar } from "../lib/gate-state-load.ts";
+import {
+  sanitizeRoundScope,
   type RoundRecord,
-} from "../lib/gate-state.ts";
+} from "../lib/gate-state-records.ts";
 import { buildStandardReport } from "../lib/judge-report.ts";
 
 const tempDirs: string[] = [];

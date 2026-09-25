@@ -24,7 +24,7 @@ neutraliseGateEnv();
 
 import { memoryChannelIO } from "./helpers/fake-orchestration.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
-import type { AgentsConfigMap } from "../lib/model-config.ts";
+import type { AgentsConfigMap } from "../lib/agents-config.ts";
 import { appendRecord, channelPathFor, readChannel, type ChannelRecord } from "../lib/orchestrator-channel.ts";
 import {
   nextWorkerId,

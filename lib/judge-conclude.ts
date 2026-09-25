@@ -59,7 +59,7 @@ import {
   type ChannelRecord,
   type ReviewScopeStamp,
 } from "./orchestrator-channel.ts";
-import { DOC_SYNC_ATTESTATIONS } from "./gate-state.ts";
+import { DOC_SYNC_ATTESTATIONS } from "./gate-state-records.ts";
 import { JUDGE_STREAM_ENV, readJudgeSideEnv } from "./judge-side.ts";
 import {
   decideInspection,

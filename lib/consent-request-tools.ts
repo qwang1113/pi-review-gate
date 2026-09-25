@@ -38,7 +38,7 @@ import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import { isCodeFile, isDocFile, isSensitiveFile } from "./constants.ts";
 import { choiceRows, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
-import { changedFiles } from "./fingerprint.ts";
+import { changedFiles } from "./worktree-changes.ts";
 import {
   SENSITIVE_GRANT_TTL_MS,
   addGrant,

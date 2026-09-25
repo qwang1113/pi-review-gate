@@ -19,7 +19,7 @@ import {
   successorOpeningMessage,
   type SessionHandoffDeps,
 } from "../lib/session-handoff-tools.ts";
-import { STATE_VARIANT_ENV } from "../lib/gate-state.ts";
+import { STATE_VARIANT_ENV } from "../lib/gate-state-io.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";

@@ -7,7 +7,8 @@
  */
 import { dirname, join } from "node:path";
 import { diagnoseChain, type ModelChainEntry, type RegistryFacts } from "./model-diagnose.ts";
-import { projectAgentIdentity, frontmatterBlock, resolvePackageAgentsDir } from "./model-config.ts";
+import { resolvePackageAgentsDir } from "./model-config.ts";
+import { projectAgentIdentity, frontmatterBlock } from "./agent-frontmatter.ts";
 
 export type DoctorStatus = "PASS" | "FAIL" | "WARN";
 

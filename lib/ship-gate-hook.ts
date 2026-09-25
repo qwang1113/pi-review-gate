@@ -39,10 +39,11 @@ import {
   type EditGuardDeps,
   type ToolCallBlock,
 } from "./ship-gate-edit-guard.ts";
-import { evaluateShipCommand, type ShipGateBashDeps } from "./ship-gate-bash.ts";
+import { evaluateShipCommand } from "./ship-gate-bash.ts";
+import { type ShipGateBashDeps } from "./ship-gate-bash-deps.ts";
 import { judgeDeniedReason } from "./judge-side.ts";
 export type { ToolCallBlock } from "./ship-gate-edit-guard.ts";
-export type { BlockedShipRecord } from "./ship-gate-bash.ts";
+export type { BlockedShipRecord } from "./ship-gate-bash-deps.ts";
 
 /**
  * The structural minimum of pi's `ToolCallEvent`.

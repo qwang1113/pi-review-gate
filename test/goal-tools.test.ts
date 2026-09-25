@@ -8,7 +8,7 @@ import {
   UNTRUSTED_LINE_MAX_CHARS,
   type GoalToolDeps,
 } from "../lib/goal-tools.ts";
-import { buildGoalConfirmMessage } from "../lib/loop-goal.ts";
+import { buildGoalConfirmMessage } from "../lib/goal-confirm-copy.ts";
 import {
   checkGoalDraft,
   buildGoalRecordReply,

@@ -15,18 +15,22 @@ const requireCjs = createRequire(import.meta.url);
 
 const {
   computeFingerprint,
-  changedFiles,
-  advisoryChangeToken,
   isGateOwnedPath,
   mayBeGateOwned,
   GATE_EXCLUDE_DIRS,
   GATE_EXCLUDE_PATHSPECS,
   worktreeTreeOid,
-  incrementSinceTree,
-  reviewCoverageFiles,
   FINGERPRINT_VERSION,
 } = await import(
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "fingerprint.ts")
+);
+const {
+  changedFiles,
+  advisoryChangeToken,
+  incrementSinceTree,
+  reviewCoverageFiles,
+} = await import(
+  join(resolve(import.meta.dirname ?? "."), "..", "lib", "worktree-changes.ts")
 );
 
 // The stat-cache race regressions (racily-clean 4×75-round groups, clock-skew,

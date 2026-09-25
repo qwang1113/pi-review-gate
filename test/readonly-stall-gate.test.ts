@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { hermeticGitEnv } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
-import { loadSidecar } from "../lib/gate-state.ts";
+import { loadSidecar } from "../lib/gate-state-load.ts";
 // The threshold itself is pinned in test/readonly-stall.test.ts; these tests
 // drive the REAL extension, so they read the constant instead of hard-coding a
 // count that a retune would silently turn into "no nudge at all".

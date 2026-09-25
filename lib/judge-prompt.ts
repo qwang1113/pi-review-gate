@@ -44,8 +44,9 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import type { AgentsConfigMap } from "./model-config.ts";
-import { defaultSlotsFromRoleText, resolvePackageAgentsDir } from "./model-config.ts";
+import type { AgentsConfigMap } from "./agents-config.ts";
+import { resolvePackageAgentsDir } from "./model-config.ts";
+import { defaultSlotsFromRoleText } from "./agents-startup.ts";
 import { UNTRUSTED_DATA_RULE } from "./untrusted-data.ts";
 /**
  * The shared judge protocol — THE embedded copy (see F5 above; test

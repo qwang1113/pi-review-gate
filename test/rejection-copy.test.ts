@@ -87,7 +87,7 @@ test("every high-frequency refusal path renders through buildRejection", () => {
     ["declare_done refused", "extensions/review-gate.ts",
       "// ---------- declare_done tool ----------", 'progress.done("全部满足")'],
     ["goal refused (audit or hash)", "lib/loop-goal.ts",
-      "export function buildGoalPrereviewRefusal", "export const GOAL_CONFIRM_TITLE"],
+      "export function buildGoalPrereviewRefusal", "export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK"],
     ["goal refused (loop goal not approved: L8 edit block)", "lib/loop-goal.ts",
       "export function loopGoalUnconfirmedEditBlock", "Pure decision behind the L8 edit gate"],
     ["goal / plan refused (no restatement)", "lib/restatement.ts",
@@ -101,8 +101,8 @@ test("every high-frequency refusal path renders through buildRejection", () => {
     // the L8 edit-block reason (extensions/review-gate.ts).
     ["session start refused (worktree held by a peer)", "lib/session-exclusivity.ts",
       "function refusalText", "Last path segment"],
-    ["ship command blocked", "lib/ship-gate-bash.ts",
-      "export function buildShipBlockReason", "export async function evaluateShipCommand"],
+    ["ship command blocked", "lib/ship-gate-copy.ts",
+      "export function buildShipBlockReason", "return { recorded, shown };"],
   ];
   for (const [label, file, from, to] of cases) {
     const src = readFileSync(join(ROOT, file), "utf8");

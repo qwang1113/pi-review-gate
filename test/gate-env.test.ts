@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { gateEnvKeys, neutraliseGateEnv, GATE_ENV_PREFIXES } from "./helpers/gate-env.ts";
-import { STATE_VARIANT_ENV } from "../lib/gate-state.ts";
+import { STATE_VARIANT_ENV } from "../lib/gate-state-io.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { PARENT_SESSION_ENV } from "../lib/orchestration-id.ts";

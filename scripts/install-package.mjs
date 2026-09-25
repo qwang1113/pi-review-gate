@@ -342,15 +342,24 @@ async function applyGlobalModelConfig() {
     const stage = mkdtempSync(join(tmpdir(), "pi-review-gate-lib-"));
     let lib;
     try {
-      const source = readFileSync(join(ROOT, "lib", "model-config.ts"), "utf8");
-      // ONE LEVEL OF RELATIVE IMPORTS IS ENOUGH TODAY (`atomic-write` pulls in
-      // nothing but `node:fs`); a staged module that ever grows a relative
-      // dependency of its own needs this walk to recurse.
-      const deps = [...source.matchAll(/from "\.\/([\w.-]+)\.ts"/g)].map((m) => m[1]);
-      for (const name of ["model-config", ...deps]) {
+      // The three entry points live in three modules (lib/model-config.ts was
+      // split), and those import each other, so the walk RECURSES over every
+      // relative `./x.ts` import until the staged set is closed.
+      const entries = ["model-config", "agents-config", "model-spec"];
+      const staged = new Set();
+      const pending = [...entries];
+      while (pending.length > 0) {
+        const name = pending.pop();
+        if (staged.has(name)) continue;
+        staged.add(name);
+        const source = readFileSync(join(ROOT, "lib", `${name}.ts`), "utf8");
         copyFileSync(join(ROOT, "lib", `${name}.ts`), join(stage, `${name}.ts`));
+        for (const m of source.matchAll(/from "\.\/([\w.-]+)\.ts"/g)) pending.push(m[1]);
       }
-      lib = await import(pathToFileURL(join(stage, "model-config.ts")).href);
+      lib = {};
+      for (const name of entries) {
+        Object.assign(lib, await import(pathToFileURL(join(stage, `${name}.ts`)).href));
+      }
     } finally {
       // THE COPIES ARE DISPOSABLE once imported (the modules live in memory),
       // and a postinstall that leaked a directory per run slowly filled $TMPDIR

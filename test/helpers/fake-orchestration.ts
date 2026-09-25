@@ -56,7 +56,7 @@ import {
 import type { SupervisionMemory } from "../../lib/orchestrator-supervisor.ts";
 import type { AnnouncedRequest } from "../../lib/orchestrator-wait.ts";
 import type { TaskMode } from "../../lib/task-mode.ts";
-import { STATE_VARIANT_ENV } from "../../lib/gate-state.ts";
+import { STATE_VARIANT_ENV } from "../../lib/gate-state-io.ts";
 import { PREDECESSOR_PANE_ENV } from "../../lib/session-inheritance.ts";
 
 /** Fixed clock so ids and timestamps are reproducible. */

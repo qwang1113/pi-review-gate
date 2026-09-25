@@ -534,15 +534,8 @@ import {
   formatReviewScopeDirective,
   type SettledConclusion,
 } from "../lib/review-carryover.ts";
-import {
-  advisoryChangeToken,
-  changedFiles,
-  computeFingerprint,
-  incrementSinceTree,
-  isGateOwnedPath,
-  reviewCoverageFiles,
-  worktreeTreeOid,
-} from "../lib/fingerprint.ts";
+import { computeFingerprint, isGateOwnedPath, worktreeTreeOid } from "../lib/fingerprint.ts";
+import { advisoryChangeToken, changedFiles, incrementSinceTree, reviewCoverageFiles } from "../lib/worktree-changes.ts";
 import type { Fingerprint } from "../lib/fingerprint.ts";
 import { gitBaseEnv, gitOrNull, gitRaw, gitText } from "../lib/git-exec.ts";
 import { writeFileAtomic } from "../lib/atomic-write.ts";
@@ -550,28 +543,37 @@ import { readJsonIfExists } from "../lib/json-file.ts";
 import { sha256 } from "../lib/hash.ts";
 import {
   emptyState,
+  type GateState,
+} from "../lib/gate-state.ts";
+import {
   isPlateaued,
   isOscillating,
   countOscillations,
+  shouldStrategicReset,
+  unmetRequirements,
+} from "../lib/gate-state-requirements.ts";
+import {
+  saveSidecarPreservingConcurrent,
+  sidecarPath,
+  stateVariantFrom,
+  STATE_VARIANT_ENV,
+  mergeProxyDecisions,
+} from "../lib/gate-state-io.ts";
+import {
   loadSidecar,
   migrateFingerprintVersion,
   FINGERPRINT_MIGRATION_NOTICE,
-  saveSidecarPreservingConcurrent,
-  shouldStrategicReset,
-  sidecarPath as sidecarPathIn,
-  stateVariantFrom,
-  STATE_VARIANT_ENV,
-
-  unmetRequirements,
-  sanitizeRoundScope,
-  type GateState,
-  type RoundScopeRecord,
-  type ScopeStampRecord,
+} from "../lib/gate-state-load.ts";
+import {
   invalidateBindings,
   inheritGoalContract,
-  mergeProxyDecisions,
   nextFullPassTree,
-} from "../lib/gate-state.ts";
+} from "../lib/gate-state-transitions.ts";
+import {
+  sanitizeRoundScope,
+  type RoundScopeRecord,
+  type ScopeStampRecord,
+} from "../lib/gate-state-records.ts";
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
 import {
   adjudicateReviewConclusion,
@@ -620,8 +622,6 @@ import {
   LOOP_GOAL_RELPATH,
   loopGoalRelPath,
 
-  buildLoopGoalDirective,
-  buildGoalStageOffDirective,
   goalTextHash,
   isLoopGoalConfirmed,
   readLoopGoal,
@@ -633,12 +633,16 @@ import {
   loopGoalUnconfirmedEditBlock,
   loopGoalEditGate,
   goalPrereviewPassed,
+} from "../lib/loop-goal.ts";
+import {
+  buildLoopGoalDirective,
+  buildGoalStageOffDirective,
   goalReminderDue,
   GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
   buildGoalForceNegotiateDirective,
   goalNegotiationOverdue,
   parseGoalCriteria,
-} from "../lib/loop-goal.ts";
+} from "../lib/loop-goal-directives.ts";
 import type { LoopGoal } from "../lib/loop-goal.ts";
 // The delivery station (where THIS round stops) is a pure contract module;
 // the extension only supplies the facts (which goal / plan the user approved,
@@ -699,20 +703,24 @@ import {
   REVIVAL_INTERVAL_MS,
 } from "../lib/session-revival.ts";
 import {
-  effectiveAgentsConfig,
   applyAgentConfigLayer,
-  loadRegistry,
-  validateSpec,
   KNOWN_AGENTS,
-  KNOWN_THINKING_LEVELS,
-  projectAgentIdentity,
-  frontmatterBlock,
-  parseModelSpec,
   resolvePackageAgentsDir,
   ensureAgentFilesPresent,
-  startupAgentsCheck,
 } from "../lib/model-config.ts";
-import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
+import {
+  loadRegistry,
+  validateSpec,
+  KNOWN_THINKING_LEVELS,
+  parseModelSpec,
+} from "../lib/model-spec.ts";
+import { startupAgentsCheck } from "../lib/agents-startup.ts";
+import { effectiveAgentsConfig } from "../lib/agents-config.ts";
+import {
+  projectAgentIdentity,
+  frontmatterBlock,
+} from "../lib/agent-frontmatter.ts";
+import type { ModelRegistry, RegistryModelInfo } from "../lib/model-spec.ts";
 import {
   clearModelFailure,
   describeCoolingSlot,
@@ -805,8 +813,8 @@ import {
 const SESSION_STATE_VARIANT = stateVariantFrom(process.env);
 
 /** The sidecar this process owns, for any repo it touches. */
-function sidecarPath(root: string): string {
-  return sidecarPathIn(root, ".pi", SESSION_STATE_VARIANT);
+function sessionSidecarPath(root: string): string {
+  return sidecarPath(root, ".pi", SESSION_STATE_VARIANT);
 }
 
 /**
@@ -1343,7 +1351,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (root === primaryRepoRoot) return state;
     let s = repoStateCache.get(root);
     if (!s) {
-      const existing = loadSidecar(sidecarPath(root));
+      const existing = loadSidecar(sessionSidecarPath(root));
       const owner = stateOwnership(process.env, state.sessionId, existing?.sessionId);
       if (owner === "mine" && existing) {
         s = existing;
@@ -1429,10 +1437,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (noteGateStatePersistSkip(ctx)) return;
     const s = stateForRepo(root);
     try {
-      saveSidecarPreservingConcurrent(sidecarPath(root), s, () => digestForMerge(root));
-      reconcileBlockedMarker(blockedMarkerPath(sidecarPath(root)), { sessionId: s.sessionId });
+      saveSidecarPreservingConcurrent(sessionSidecarPath(root), s, () => digestForMerge(root));
+      reconcileBlockedMarker(blockedMarkerPath(sessionSidecarPath(root)), { sessionId: s.sessionId });
     } catch {
-      recordBlockedMarker(blockedMarkerPath(sidecarPath(root)), { sessionId: s.sessionId });
+      recordBlockedMarker(blockedMarkerPath(sessionSidecarPath(root)), { sessionId: s.sessionId });
     }
   }
 
@@ -1595,7 +1603,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // primary repo is (a fresh state with the user's contracts on it, never the
     // predecessor's verdicts — which is why the raw sidecar must never be
     // handed out here).
-    const onDisk = loadSidecar(sidecarPath(root));
+    const onDisk = loadSidecar(sessionSidecarPath(root));
     if (stateOwnership(process.env, state.sessionId, onDisk?.sessionId) === "foreign") return undefined;
     return stateForRepo(root);
   }
@@ -4841,13 +4849,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
     try {
-      saveSidecarPreservingConcurrent(sidecarPath(cwd), state, () => digestForMerge(cwd));
+      saveSidecarPreservingConcurrent(sessionSidecarPath(cwd), state, () => digestForMerge(cwd));
       // Our own earlier write failure (if any) is resolved: reclaim OUR owner
       // entry — and any owner whose session has been silent past the
       // concurrent-session window — but never a live foreign one.
-      reconcileBlockedMarker(blockedMarkerPath(sidecarPath(cwd)), { sessionId: state.sessionId });
+      reconcileBlockedMarker(blockedMarkerPath(sessionSidecarPath(cwd)), { sessionId: state.sessionId });
     } catch {
-      recordBlockedMarker(blockedMarkerPath(sidecarPath(cwd)), { sessionId: state.sessionId });
+      recordBlockedMarker(blockedMarkerPath(sessionSidecarPath(cwd)), { sessionId: state.sessionId });
     }
     try {
       // Store continuation count alongside state so it survives restarts.
@@ -4883,11 +4891,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // and the user would watch READY become PENDING with no explanation.
     const sidecarMigration = { migrated: false };
     if (!restored) {
-      restored = loadSidecar(sidecarPath(cwd), sidecarMigration);
+      restored = loadSidecar(sessionSidecarPath(cwd), sidecarMigration);
     }
 
     // Sidecar corruption detection: file exists but couldn't parse → fail-closed.
-    const sidecarFile = sidecarPath(cwd);
+    const sidecarFile = sessionSidecarPath(cwd);
     let sidecarCorrupt = false;
     try {
       if (existsSync(sidecarFile) && statSync(sidecarFile).isFile() && !restored) {
@@ -14072,7 +14080,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // `setTaskMode` persists) — so an inherited list re-armed any later was
     // erased before anything could read it, and the inheritance was dead code.
     for (const r of state.sessionReposPaths ?? []) {
-      if (r !== primaryRepoRoot && existsSync(sidecarPath(r))) sessionRepos.add(r);
+      if (r !== primaryRepoRoot && existsSync(sessionSidecarPath(r))) sessionRepos.add(r);
     }
     // Take over previous sessions' pane judges: merge their registry + pendings
     // so live panes stay addressable and no second pi is forked onto one
@@ -14281,7 +14289,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // the session it is reviewing, and a refused session would be doing it to
     // the session that holds this worktree (reviewer P1, 2026-09-05).
     if (!gateStateWriteSkip(process.env) && !state.exclusivityRefusal) {
-      reconcileBlockedMarker(blockedMarkerPath(sidecarPath(cwd)), { sessionId: state.sessionId });
+      reconcileBlockedMarker(blockedMarkerPath(sessionSidecarPath(cwd)), { sessionId: state.sessionId });
     }
 
     // Explain an invalidated binding instead of letting READY silently become

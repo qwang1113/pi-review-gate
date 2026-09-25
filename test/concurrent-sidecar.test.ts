@@ -19,11 +19,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   emptyState,
-  loadSidecar,
-  mergeConcurrentBindings,
-  saveSidecarPreservingConcurrent,
   type GateState,
 } from "../lib/gate-state.ts";
+import {
+  mergeConcurrentBindings,
+  saveSidecarPreservingConcurrent,
+} from "../lib/gate-state-io.ts";
+import { loadSidecar } from "../lib/gate-state-load.ts";
 import { DEFAULT_MAX_ROUNDS } from "../lib/constants.ts";
 
 const DIGEST = "a".repeat(40);

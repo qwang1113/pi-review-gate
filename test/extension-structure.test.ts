@@ -31,8 +31,12 @@ const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts")
 const AUDIT_ROUND_SRC = readFileSync(join(ROOT, "lib", "audit-round.ts"), "utf8");
 /** The child side of the channel — where the state derivation lives (2026-09-09). */
 const CHILD_CHANNEL_SRC = readFileSync(join(ROOT, "lib", "orchestrator-child-channel.ts"), "utf8");
-/** The ship authority every ship path shares, and the sidecar writer. */
+/** The gate state's shape (it owns `updatedAt`). */
 const GATE_STATE_SRC = readFileSync(join(ROOT, "lib", "gate-state.ts"), "utf8");
+/** The ship authority every ship path shares. */
+const GATE_STATE_REQ_SRC = readFileSync(join(ROOT, "lib", "gate-state-requirements.ts"), "utf8");
+/** The sidecar writer. */
+const GATE_STATE_IO_SRC = readFileSync(join(ROOT, "lib", "gate-state-io.ts"), "utf8");
 const JUDGE_SESSION_TOOLS = new Set(["judge_close", "judge_wait"]);
 
 /**
@@ -433,7 +437,7 @@ test("the loop goal gates SHIP at L1 only — hooks and verdict logic stay blind
   // gate-state may STORE the approval, but unmetRequirements() — the single
   // ship authority the hooks share — must never read it: a hook that failed on
   // an unapproved goal would block commits it can never unblock.
-  const gateState = readFileSync(join(ROOT, "lib", "gate-state.ts"), "utf8");
+  const gateState = readFileSync(join(ROOT, "lib", "gate-state-requirements.ts"), "utf8");
   const reqAt = gateState.indexOf("export function unmetRequirements");
   assert.ok(reqAt > 0, "unmetRequirements must exist");
   const reqBody = gateState.slice(reqAt, gateState.indexOf("\nexport ", reqAt + 10));
@@ -4433,7 +4437,7 @@ test("restore() collects the migration result from loadSidecar, not from a secon
   const end = nextFunctionAt > restoreAt ? nextFunctionAt : SRC.length;
   const body = SRC.slice(restoreAt, end);
 
-  assert.match(body, /loadSidecar\(sidecarPath\(cwd\),\s*\w+\)/,
+  assert.match(body, /loadSidecar\(sessionSidecarPath\(cwd\),\s*\w+\)/,
     "loadSidecar must be given an out-parameter to report the migration");
   assert.match(body, /fingerprintMigrated\s*=\s*migrateFingerprintVersion\(state\)\s*\|\|\s*\w+\.migrated/,
     "the sidecar's migration result must be OR'd into the reported flag");
@@ -4965,7 +4969,7 @@ test("P2: checkpoint carries prevSha so the documented checkpoint→prepare flow
   // Round-8 P1-1: if review_checkpoint records its OWN commit as the baseline
   // start, prepare_review computes an empty baseline..HEAD and rejects the
   // documented flow. The recorded checkpoint must point at HEAD^ as prevSha.
-  const gateState = readFileSync(join(ROOT, "lib", "gate-state.ts"), "utf8");
+  const gateState = readFileSync(join(ROOT, "lib", "gate-state-records.ts"), "utf8");
   assert.match(gateState, /prevSha/);
   const ext = SRC.slice(SRC.indexOf('name: "review_checkpoint"'));
   assert.match(ext, /prevSha/);
@@ -6139,14 +6143,14 @@ test("ONE gate session per worktree: refuse, hold, release — and only ONE live
   const exploreAt = editHook.indexOf('taskMode === "explore"');
   assert.ok(exploreAt > 0, "window sanity: the explore short-circuit is in this window");
   assert.ok(refusalAt < exploreAt, "the worktree check must come before the mode branches");
-  assert.match(GATE_STATE_SRC, /if \(state\.exclusivityRefusal\) return \[state\.exclusivityRefusal\]/,
+  assert.match(GATE_STATE_REQ_SRC, /if \(state\.exclusivityRefusal\) return \[state\.exclusivityRefusal\]/,
     "…and the ship authority refuses on the same fact");
 
   // A refused session must not write the HOLDER's sidecar — that file is the
   // holder's, and the refusal is memory-only in both directions.
   const persistBody = codeOnly(windowOf("function persist(", /\n  \}\n/, "persist body"));
   assert.match(persistBody, /if \(state\.exclusivityRefusal\) return;/, "refused ⇒ persist nothing");
-  assert.match(GATE_STATE_SRC, /const \{ exclusivityRefusal: _refusal, \.\.\.persisted \} = state;/,
+  assert.match(GATE_STATE_IO_SRC, /const \{ exclusivityRefusal: _refusal, \.\.\.persisted \} = state;/,
     "…and saveSidecar strips it even if something reaches it");
 
   // The claim: written only by a session that PASSED and actually claims the
@@ -6654,7 +6658,7 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   assert.doesNotMatch(lane, /lastFullPassTree\s*=\s*outcome\.fingerprint/,
     "the post-run fingerprint must never become the record");
   // The rule itself is pure and lives in one place.
-  assert.match(SRC, /^\s*invalidateBindings,\n(?:\s*\w+,\n)*\s*nextFullPassTree,\n\} from "\.\.\/lib\/gate-state\.ts";/m,
+  assert.match(SRC, /^\s*invalidateBindings,\n(?:\s*\w+,\n)*\s*nextFullPassTree,\n\} from "\.\.\/lib\/gate-state-transitions\.ts";/m,
     "one imported rule, not a second copy of the branches here");
   // AND THE THIRD INPUT: what the lane COVERED has to reach the rule.
   // The first attempt read it off the tool's reply (`pre.details?.testScope`)
@@ -7354,9 +7358,9 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   assert.match(statusCmd, /acceptanceStatusLine\(state\.acceptance\)/, "…and /gate-status renders the record");
   // 3. NEVER IN THE SHIP AUTHORITY: fixing an acceptance finding requires a
   // commit, so a requirement in `unmetRequirements` would block its own remedy.
-  const unmet = GATE_STATE_SRC.slice(GATE_STATE_SRC.indexOf("export function unmetRequirements("));
+  const unmet = GATE_STATE_REQ_SRC.slice(GATE_STATE_REQ_SRC.indexOf("export function unmetRequirements("));
   const unmetBody = unmet.slice(0, unmet.indexOf("\nexport function", 10));
-  assert.ok(unmetBody.length > 0, "the ship authority is in gate-state.ts");
+  assert.ok(unmetBody.length > 0, "the ship authority is in gate-state-requirements.ts");
   assert.doesNotMatch(unmetBody, /acceptance/i, "the acceptance round answers completion, never shipping");
   // 4. A SECOND declare_done MUST REACH THE WAIT BRANCH (reviewer P1,
   //    2026-09-22). The cascade-close that abandons unrecorded rounds must not

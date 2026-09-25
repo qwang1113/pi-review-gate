@@ -8,7 +8,8 @@
  * (The provider allowlist was retired 2026-09-06 with the
  * pi-opencode-bridge companion.)
  */
-import { KNOWN_THINKING_LEVELS, frontmatterBlock } from "./model-config.ts";
+import { KNOWN_THINKING_LEVELS } from "./model-spec.ts";
+import { frontmatterBlock } from "./agent-frontmatter.ts";
 export interface ModelChainEntry {
   /** Agent role — the agents/*.md basename (reviewer, adviser, ...). */
   role: string;

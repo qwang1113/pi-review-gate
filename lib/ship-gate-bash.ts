@@ -14,7 +14,7 @@
  *
  * WHAT IS AND IS NOT INJECTED. The pure decisions are imported directly
  * (lib/ship-detect.ts, lib/lang-detect.ts, lib/git-rewrite.ts,
- * lib/gate-state.ts's `unmetRequirements`, lib/arbitration.ts,
+ * lib/gate-state-requirements.ts's `unmetRequirements`, lib/arbitration.ts,
  * lib/orchestrator-guard.ts): they are already testable on their own. What IS
  * injected is everything this module cannot own — the gate state per repo, the
  * git measurements, the LLM classifier, the appeal recorder and the arbiter
@@ -43,310 +43,34 @@ import {
 } from "./lang-detect.ts";
 import { detectForbiddenTmux } from "./orchestrator-guard.ts";
 import { hasAmendFlag, isMessageOnlyRewrite } from "./git-rewrite.ts";
-import { changedFiles, computeFingerprint, type Fingerprint } from "./fingerprint.ts";
+import { computeFingerprint, type Fingerprint } from "./fingerprint.ts";
+import { changedFiles } from "./worktree-changes.ts";
 import { isProtectedBranch } from "./workspace-branch.ts";
-import { unmetRequirements, type GateState } from "./gate-state.ts";
+import { unmetRequirements } from "./gate-state-requirements.ts";
 import {
   deliveryStationRank,
   shipKindAllowedAtStation,
-  STATION_SHIP_NEXT_STEPS,
   stationShipProblem,
   type DeliveryStation,
 } from "./delivery-station.ts";
 
 import { LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK } from "./loop-goal.ts";
-import { buildRejection } from "./rejection-copy.ts";
-import {
-  parseArbitrableAction,
-  tokenAuthorizes,
-  type ArbitrableAction,
-  type BypassToken,
-  type TokenBindings,
-} from "./arbitration.ts";
+import { parseArbitrableAction, tokenAuthorizes } from "./arbitration.ts";
 import {
   classifyAiAttribution,
   classifyNonEnglish,
   classifyShipCommand,
   isSuspiciousShipCandidate,
-  type LlmClassifier,
 } from "./llm-classify.ts";
-import { withSlowNotice, type SlowNoticeSink } from "./progress-stream.ts";
-import { lexSegmentTokens } from "./shell-lex.ts";
+import { withSlowNotice } from "./progress-stream.ts";
+import type { ShipGateBashDeps } from "./ship-gate-bash-deps.ts";
+import { buildShipBlockReason, describeShips, detectHandRolledWaitPolling } from "./ship-gate-copy.ts";
 
-import type { ProjectConfig } from "./project-config.ts";
-import type { TaskMode } from "./task-mode.ts";
-import type { AppealKind } from "./text-appeal.ts";
 import type { ToolCallBlock } from "./ship-gate-edit-guard.ts";
 
 // (The ship-operation shape is lib/ship-detect.ts's own `ShipDetection` — the
 // LLM guard below pushes into the SAME array the static parser filled, so a
 // locally widened copy would quietly stop type-checking what goes in.)
-
-/** The record `request_arbitration` contests — a REAL block, never a guess. */
-export interface BlockedShipRecord {
-  command: string;
-  problems: string[];
-  blockReason: string;
-  at: number;
-  /**
-   * Was any part of this block a DELIVERY STATION refusal?
-   *
-   * The arbiter rules on whether a QUALITY block is circular; it was never
-   * asked how far a round may travel, and no token it could issue would be
-   * consulted here (the station check runs above the token path). Without
-   * this flag `request_arbitration` would accept the appeal, spend one of the
-   * session's three, possibly rule AGENT_WINS — and the command would stay
-   * blocked with no explanation (round-1 reviewer P2, 2026-09-06).
-   */
-  stationBlocked?: boolean;
-
-}
-
-/**
- * Everything the bash arm needs from the outside world.
- *
- * Deliberately narrow and side-effect-explicit: every member is a thing a
- * test replaces with three lines.
- */
-export interface ShipGateBashDeps {
-  /** The session cwd — a getter (pi hands the real one only at session_start). */
-  cwd(): string;
-  /** The session's own repo root — a getter, same reason. */
-  primaryRepoRoot(): string;
-  /**
-   * This session's gate mode, read fresh on every command.
-   *
-   * `undefined` is the UNDECIDED state and is deliberately part of the type:
-   * every branch below is an equality test against a named mode, so undecided
-   * never takes the `normal` early return.
-   */
-  taskMode(): TaskMode | undefined;
-  /** Is `/gate-bypass` active for the rest of the session? */
-  bypassActive(): boolean;
-  /** The effective project config (LLM guard switches, doc sync, arbiter). */
-  projectConfig(): ProjectConfig;
-  /** Every repo this session has touched (the ambiguous-resolution fallback). */
-  sessionRepos(): Iterable<string>;
-  /** Every repo the session knows about — decides whether to label problems. */
-  knownRepoRoots(): string[];
-  /** One repo's gate state, or undefined when it has no sidecar. */
-  enforcementStateFor(root: string): GateState | undefined;
-  /** One repo's state, materializing it (the primary repo's IS the session's). */
-  stateForRepo(root: string): GateState;
-  /** How a repo is named in a multi-repo problem line. */
-  repoLabel(root: string): string;
-  /** The branch a repo currently has checked out (rebase-aware). */
-  currentBranch(root: string): string | undefined;
-  /** The repo's worktree tree oid — half of the message-only-rewrite proof. */
-  worktreeTree(root: string): string | undefined;
-  /** HEAD's tree oid. */
-  headCommitTree(root: string): string;
-  /** Whether the index holds a staged change (the other half). */
-  hasStagedChanges(root: string): boolean | undefined;
-  /** Trees of commits made since the last REVIEWED one. */
-  unreviewedTreesSince(root: string, review: GateState["review"]): string[] | undefined;
-  /** Has the USER approved this session's loop goal (primary repo)? */
-  loopGoalConfirmed(): boolean;
-  /**
-   * WHERE THIS ROUND STOPS, for one repo — or `undefined` when no delivery
-   * contract applies to this session at all.
-   *
-   * `undefined` is not "precommit". The two are different facts and the gate
-   * must not confuse them: a loop session's contract is its approved goal and
-   * an orchestration's is its approved plan, but an EXPLORE session has no
-   * contract of any kind, and reading its missing station as the strictest one
-   * would invent a ship block it never had (the user ruled on exactly this,
-   * 2026-09-06: explore and normal keep their current behaviour).
-   */
-  deliveryStation(root: string): DeliveryStation | undefined;
-
-  /** "your READY is on another repo" — the cross-repo hint for a block. */
-  crossRepoVerdictHint(blockedRoots: string[]): string;
-  /** The flash classifier the three LLM guards run on. */
-  classifier(): LlmClassifier;
-  /** The status-bar sink the slow LLM guards report through. */
-  notice(ctx: unknown): SlowNoticeSink | undefined;
-  /**
-   * Record an A-class TEXT block and return its refusal, or `undefined` when a
-   * granted appeal pass authorizes this exact content once.
-   */
-  refuseText(kind: AppealKind, text: string, message: string, ctx: unknown): string | undefined;
-  /** Append one line to the gate's lesson log. */
-  appendLesson(text: string): void;
-  /**
-   * Say something to the agent WITHOUT refusing the command.
-   *
-   * The hook itself can only block or stay silent, so a hint needs its own
-   * seam. WHERE IT LANDS MATTERS, and it is the CALLER's result (user
-   * decision, 2026-09-14): the extension appends it to the tool result the
-   * very call that earned it returns, so the advice sits beside the command it
-   * is about. Delivering it as a separate follow-up message was measured
-   * wrong — it arrives after the fact, out of context, and reads as an
-   * interruption from nowhere. De-duplicated per session; a test replaces this
-   * seam with a push into an array.
-   */
-  hint(message: string): void;
-
-  /**
-   * The user's tmux authorization, if any (lib/gate-state.ts `tmuxAccess`).
-   *
-   * Callbacks rather than values: the grant is minted by a dialog DURING the
-   * session, and a captured snapshot would leave the first command after the
-   * grant still refused.
-   */
-  tmuxAccess(): { at: string; scope: "session" | "once" } | undefined;
-  /** Spend a one-shot grant. Called only once the command is about to run. */
-  consumeTmuxAccess(): void;
-  /** The standing single-use arbiter bypass token, if one was issued. */
-  bypassToken(): BypassToken | null;
-  /** Replace it (used to mark it consumed on attempt). */
-  setBypassToken(token: BypassToken | null): void;
-  /** Drop it entirely. */
-  clearBypassToken(): void;
-  /** The current binding material a token is checked against. */
-  computeTokenBindings(action: ArbitrableAction, fingerprint: string): Promise<TokenBindings>;
-  /** Remember THIS block so `request_arbitration` can only contest a real one. */
-  setLastBlockedShip(record: BlockedShipRecord): void;
-}
-
-/**
- * P0-5: describe compound vs single ship for block/lesson messages.
- *
- * Pure, and the reason a compound command reads as one thing in every message
- * that names it (the block reason and the arbiter lesson alike).
- */
-export function describeShips(_command: string, ships: Array<{ kind: string }>): string {
-  return ships.length > 1
-    ? `compound command with ${ships.map((s) => s.kind).join(" + ")}`
-    : ships[0].kind;
-}
-
-/**
- * A `sleep` long enough to be a WAIT rather than a pause. 30s is the smallest
- * gap that cannot be anything else: a settle delay is a second or two.
- */
-const POLLING_SLEEP_SECONDS = 30;
-
-/** File shapes a hand-rolled waiter reads: a channel file or a findings stream. */
-const WAIT_EVIDENCE = /rg-channels|review-stream|\.pi\/judge-sessions|RG_JUDGE_STREAM/;
-
-/**
- * Is this command a hand-written wait for a judge — a long `sleep` next to a
- * read of the gate's own channel or findings stream?
- *
- * WHY THE GATE SAYS SOMETHING (2026-09-05, user decision D6). This exact
- * command shape cost a measured nine minutes: `sleep 280` inside one bash call
- * while grepping the channel file. The turn never ends inside a bash call, so
- * the session never settles, so the wake-up that was supposed to deliver the
- * finished review never fires — the agent was waiting for something that could
- * only arrive after it stopped waiting. `judge_wait` is the same wait done
- * right, and it returns on the first message.
- *
- * It is a HINT, never a block, and that is deliberate: this is the opposite
- * of an appeal route. An agent with a diagnostic reason to sleep and read a
- * channel keeps doing exactly that; it just gets told there is a tool.
- *
- * Pure and exported, so the shape is unit-testable without a shell.
- *
- * `sleep` takes a suffix on both GNU and BSD (`5m`, `1h`), so the argument is
- * read as a duration rather than as a bare number — `sleep 5m` is the same
- * wait as `sleep 300`, and reading it as NaN would let the loudest case
- * through.
- */
-export function detectHandRolledWaitPolling(command: string): { reason: string } | undefined {
-  if (!WAIT_EVIDENCE.test(command)) return undefined;
-  let longSleep = false;
-  for (const tokens of lexSegmentTokens(command)) {
-    for (let i = 0; i < tokens.length; i++) {
-      if (tokens[i] !== "sleep") continue;
-      if (sleepSeconds(tokens[i + 1]) >= POLLING_SLEEP_SECONDS) longSleep = true;
-    }
-  }
-  if (!longSleep) return undefined;
-  return {
-    reason:
-      `review-gate 提示（不拦截）：这条命令看起来是手写的等待轮询（sleep ≥ ${POLLING_SLEEP_SECONDS}s + 读通道/findings 流）。` +
-      "在一次 bash 里等，turn 不会结束，门禁的唤醒也就不会发生 —— 实测这样丢过九分钟。" +
-      "改用 `judge_wait({role})`：新 finding、judge 提问、本轮结论、pane 消失，任一到达即返回，正文直接带回来。",
-  };
-}
-
-/** `sleep` accepts a suffix (`30`, `5m`, `1h`); anything else is not a duration. */
-function sleepSeconds(token: string | undefined): number {
-  const matched = /^(\d+(?:\.\d+)?)([smhd])?$/.exec(token ?? "");
-  if (!matched) return Number.NaN;
-  const unit = matched[2];
-  const multiplier = unit === "m" ? 60 : unit === "h" ? 3_600 : unit === "d" ? 86_400 : 1;
-  return Number(matched[1]) * multiplier;
-}
-
-
-
-/**
- * The refusal text a blocked ship carries, as a pure decision.
- *
- * O13: ONE next-step line. The problems already say what is unmet; the
- * arbitration sentence is added only where it can apply at all (a lone
- * `gh pr edit`), because a ship gate is a FACT — satisfy it, do not argue
- * with it.
- *
- * TWO KINDS OF BLOCK, TWO NEXT STEPS (2026-09-06). Unmet quality is cleared
- * by working (review → precommit → done); a DELIVERY STATION is not — it is
- * the contract for how far this round travels, and only the user can move it.
- * Telling a station-blocked session to "run the review loop" would be a loop
- * with no exit, so a station block replaces that line with
- * {@link STATION_SHIP_NEXT_STEPS} and never offers the arbitration route (the
- * arbiter hears a lone `gh pr edit` only, so it is a dead end that also costs
- * one of three appeals).
- */
-export function buildShipBlockReason(input: {
-  command: string;
-  ships: Array<{ kind: string }>;
-  problems: string[];
-  crossRepoHint: string;
-  /** Ship commands refused because they travel past this round's station. */
-  stationProblems?: string[];
-}): { recorded: string; shown: string } {
-  const stationProblems = input.stationProblems ?? [];
-  const allProblems = [...input.problems, ...stationProblems];
-  const stationOnly = stationProblems.length > 0 && input.problems.length === 0;
-  // ONE rendering per fact: `recorded` and `shown` are two surfaces of the same
-  // refusal (the arbiter reads the first, the agent the second), so the list
-  // and the compound-command warning are built once and composed twice.
-  const problemList = allProblems.map((p) => `  - ${p}`).join("\n");
-  const compoundWarning =
-    input.ships.length > 1
-      ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them."
-      : "";
-  const recorded =
-    `review-gate: ${describeShips(input.command, input.ships)} blocked — ` +
-    (stationOnly ? "beyond this round's delivery station:\n" : "quality gates unmet:\n") +
-    problemList +
-    compoundWarning +
-    input.crossRepoHint;
-  const nextStep = stationProblems.length > 0
-    ? STATION_SHIP_NEXT_STEPS +
-      (input.problems.length > 0
-        ? "\n上面那些质量门禁项则照常用审查循环清掉（judge_submit → declare_done）。"
-        : "")
-    : (input.ships.length === 1 && input.ships[0].kind === "pr-edit"
-      ? "跑完审查循环清掉门禁（judge_submit → declare_done）；若这条拦截确实是循环死结（唯一的修法就是这条 gh pr edit），可 request_arbitration。"
-      : "跑完审查循环清掉门禁（judge_submit → declare_done）。");
-  // The agent-facing message is the three-part shape; `recorded` stays the
-  // flat text the arbiter and the sidecar read (its exact bytes are pinned).
-  const shown = buildRejection({
-    what: `${describeShips(input.command, input.ships)} 被拦 —— ` +
-      (stationOnly ? "超出本轮的交付站点" : "质量门禁未满足"),
-    why: "\n" + problemList + compoundWarning + input.crossRepoHint,
-    // Unmet quality is the agent's to clear; a station is the USER's to move.
-    // A mixed refusal is labelled for the agent — it has work to do either
-    // way (the station half is spelled out in `next`, which asks the user).
-    by: stationOnly ? "user" : "agent",
-    next: nextStep,
-  });
-  return { recorded, shown };
-}
-
 
 /**
  * The bash arm of the L1 `tool_call` hook — the ship gate.

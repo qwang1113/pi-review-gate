@@ -43,7 +43,7 @@ import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-regi
 
 import { nextDecisionId, parsePlan } from "../lib/orchestrator-plan.ts";
 import { buildOrchestratorExitBlock } from "../lib/orchestrator-directives.ts";
-import { sidecarPath, stateVariantFrom, STATE_VARIANT_ENV } from "../lib/gate-state.ts";
+import { sidecarPath, stateVariantFrom, STATE_VARIANT_ENV } from "../lib/gate-state-io.ts";
 
 // ---------------------------------------------------------------------------
 // F7 / F8 — delivery, and the receipt that has to be earned

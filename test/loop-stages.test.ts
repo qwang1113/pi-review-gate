@@ -6,7 +6,7 @@
  *
  *  1. the module's own rules — defaults, the record's validator, the ONE
  *     `stageOpen`, the dialog's spec and every outcome it can produce;
- *  2. the SHARED ship authority (`lib/gate-state.ts`'s `unmetRequirements`)
+ *  2. the SHARED ship authority (`lib/gate-state-requirements.ts`'s `unmetRequirements`)
  *     with each switch off in turn, which is also what the L3 git hook reads —
  *     and the REAL hook checker (`scripts/pre-commit-check.cjs`) driven
  *     in-process with real exit codes;
@@ -47,7 +47,8 @@ import {
 import { MULTI_UNAVAILABLE } from "../lib/multi-choice-dialog.ts";
 import { doProposeRestatement, type RestatementToolDeps } from "../lib/restatement.ts";
 import { doProposeLoopGoal, type GoalToolDeps } from "../lib/goal-tools.ts";
-import { emptyState, unmetRequirements, type GateState } from "../lib/gate-state.ts";
+import { emptyState, type GateState } from "../lib/gate-state.ts";
+import { unmetRequirements } from "../lib/gate-state-requirements.ts";
 import { acceptanceDecision, acceptanceGateOpen } from "../lib/acceptance-round.ts";
 import { readyLacksVerification } from "../lib/review-adjudicate.ts";
 import { buildGateWidget } from "../lib/ui-widget.ts";

@@ -25,7 +25,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 
 import type { GateState } from "./gate-state.ts";
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
+import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 // The pane-id shape has ONE implementation (quality round P2, 2026-09-18):
 // lib/orchestrator-tmux.ts's canonical predicate, not a fourth local regex.
 import { isPaneId } from "./orchestrator-tmux.ts";

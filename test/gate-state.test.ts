@@ -6,24 +6,34 @@ import { tmpdir } from "node:os";
 
 import {
   emptyState,
-  inheritGoalContract,
-  isPendingReadyReview,
+  type GateState,
+} from "../lib/gate-state.ts";
+import {
   isPlateaued,
   isOscillating,
   countOscillations,
+  shouldStrategicReset,
+  unmetRequirements,
+} from "../lib/gate-state-requirements.ts";
+import {
+  saveSidecar,
+  sidecarPath,
+} from "../lib/gate-state-io.ts";
+import {
   loadSidecar,
   migrateFingerprintVersion,
+  FINGERPRINT_MIGRATION_NOTICE,
+} from "../lib/gate-state-load.ts";
+import {
+  inheritGoalContract,
   invalidateBindings,
   nextFullPassTree,
-  FINGERPRINT_MIGRATION_NOTICE,
-  saveSidecar,
-  shouldStrategicReset,
-  sidecarPath,
-  unmetRequirements,
-  type GateState,
+} from "../lib/gate-state-transitions.ts";
+import {
+  isPendingReadyReview,
   type RoundRecord,
   type GateVerdict,
-} from "../lib/gate-state.ts";
+} from "../lib/gate-state-records.ts";
 import { FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
 import { restatementConfirmed, restatementHash } from "../lib/restatement.ts";
 import { goalTextHash, isLoopGoalConfirmed, type LoopGoal } from "../lib/loop-goal.ts";

@@ -5,35 +5,43 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  applyAgentConfigLayer,
+  KNOWN_AGENTS,
+  resolvePackageAgentsDir,
+  ensureAgentFilesPresent,
+} from "../lib/model-config.ts";
+import {
   parseModelSpec,
   splitThinkingSuffix,
   bareModelId,
   formatSpec,
   validateSpec,
   validateSlots,
-  parseAgentsSection,
-  effectiveAgentsConfig,
-  replaceFrontmatterModels,
-  extractFrontmatterChain,
-  frontmatterBlock,
-  isGeneratedAgentFile,
-  applyAgentConfigLayer,
   supportedThinkingOptions,
   loadRegistry,
-  GENERATED_MARKER,
-  MAX_SLOTS,
-  KNOWN_AGENTS,
   type ModelRegistry,
-  type AgentsConfigMap,
-  parseAgentFrontmatterFields,
-  projectAgentIdentity,
-  resolvePackageAgentsDir,
-  ensureAgentFilesPresent,
+} from "../lib/model-spec.ts";
+import {
   healMissingAgentSlots,
   defaultSlotsFromRoleText,
   startupAgentsCheck,
   validateAgentsForStartup,
-} from "../lib/model-config.ts";
+} from "../lib/agents-startup.ts";
+import {
+  parseAgentsSection,
+  effectiveAgentsConfig,
+  MAX_SLOTS,
+  type AgentsConfigMap,
+} from "../lib/agents-config.ts";
+import {
+  replaceFrontmatterModels,
+  extractFrontmatterChain,
+  frontmatterBlock,
+  isGeneratedAgentFile,
+  GENERATED_MARKER,
+  parseAgentFrontmatterFields,
+  projectAgentIdentity,
+} from "../lib/agent-frontmatter.ts";
 
 const REG: ModelRegistry = {
   anthropic: [
@@ -1489,7 +1497,7 @@ test("the self-heal replaces the config ATOMICALLY — a reader never sees a hal
   // bare `writeFileSync` (it lands the same bytes), so the call site is
   // asserted where it lives — the same shape `lib/file-size-gate.ts` and the
   // structural tests use for “one implementation, no second path”.
-  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "model-config.ts"), "utf8");
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "agents-startup.ts"), "utf8");
   const healBody = source.slice(
     source.indexOf("export function healMissingAgentSlots"),
     source.indexOf("export interface StartupAgentsResult"),

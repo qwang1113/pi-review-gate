@@ -92,7 +92,7 @@ import { JUDGE_ID_ENV, JUDGE_OPENER_ENV, JUDGE_ROLE_ENV } from "./judge-pane.ts"
 import { judgeScratchDir } from "./judge-process.ts";
 import { JUDGE_STREAM_ENV, JUDGE_TASK_ENV } from "./judge-side.ts";
 import { WORKER_ID_ENV, WORKER_OPENER_ENV, WORKER_ROLE_ENV } from "./worker-side.ts";
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
+import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
 import { ACCEPTANCE_GATE_ENV } from "./acceptance-round.ts";
