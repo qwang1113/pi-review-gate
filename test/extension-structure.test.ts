@@ -7142,7 +7142,7 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // PASS case, which the table answers with "nothing" (quality round P1,
   // 2026-09-16: a hand-written `if (verdict !== "PASS")` at the landing was
   // the lane's row implemented a second time).
-  assert.match(LANE_SRC, /applyCancelPlan\(roundCancelPlan\(\{ party: "lane", verdict \}\), root\)/,
+  assert.match(LANE_SRC, /applyCancelPlan\(roundCancelPlan\(\{ party: "lane", verdict \}\), root, laneWhy\)/,
     "the lane's row is the table's, not a branch beside it");
   const applierAt = CANCEL_SRC.indexOf("function applyCancelPlan(");
   const applier = CANCEL_SRC.slice(applierAt, CANCEL_SRC.indexOf("async function applyRoundCancel(", applierAt));

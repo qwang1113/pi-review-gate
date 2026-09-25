@@ -234,11 +234,8 @@ export function createPrecommitLane(
       // judge 判了非 READY，正在跑的全量 precommit 已终止」 reached nobody, and
       // the agent only saw "precommit failed" with no trace of why. The FAIL
       // notice below IS this row's delivery.
-      const laneCancelNotes = applyCancelPlan(
-        roundCancelPlan({ party: "lane", verdict }),
-        root,
-        `全量 precommit 没过（${verdict}）—— 这份内容 ship 不了，功能轮不必再审`,
-      );
+      const laneWhy = `全量 precommit 没过（${verdict}）—— 这份内容 ship 不了，功能轮不必再审`;
+      const laneCancelNotes = applyCancelPlan(roundCancelPlan({ party: "lane", verdict }), root, laneWhy);
       // THEN the parked conclusion, re-asked from BOTH halves (`resumeParkedReady`
       // consults the trees, what THIS landing measured and the quality standing):
       // a non-PASS lane retires the parked round, a PASS on exactly that tree

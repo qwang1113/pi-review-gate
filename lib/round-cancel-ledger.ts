@@ -52,7 +52,6 @@ export const CANCELLED_NEXT_STEP =
 export function cancelledDuringBootText(paneId: string | undefined, why: string): string {
   return (
     `review pane 开出来了（${paneId ?? "未知 pane"}），但它报到之前本轮就被门禁取消了 —— 原因：${why}\n` +
-    "pane 与登记都已收回：不要 judge_wait / judge_recover 这一轮（没有可等、可重开的东西）。\n" +
-    `下一步：${CANCELLED_NEXT_STEP}`
+    `pane 与登记都已收回：不要 judge_wait / judge_recover 这一轮（没有可等、可重开的东西）。下一步：${CANCELLED_NEXT_STEP}`
   );
 }

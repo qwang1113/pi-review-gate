@@ -138,10 +138,10 @@ export function createJudgeRoundDispatch(
     qualityRoundDispatched?: boolean;
   }): Promise<JudgeDispatch> {
     const { root, role } = opts;
+    dropDeadForeignJudges();
     // A new round of the role: whatever cancelled the previous one is history,
     // and a tombstone present after this line was written DURING this dispatch.
     cancelLedger.forget(root, role);
-    dropDeadForeignJudges();
     // THE QUALITY PRECONDITION (2026-09-15). This is the mechanical fact that
     // makes the quality round unbypassable rather than a convention: no
     // registered target, or no quality standing bound to its head, and the
