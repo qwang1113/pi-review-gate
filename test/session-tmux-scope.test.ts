@@ -336,19 +336,23 @@ test("a polluted session is healed before it is reused — and a heal that FAILS
   const windowAt = polluted.calls.findIndex((a) => a[0] === "new-window");
   assert.ok(unsetAt >= 0 && windowAt > unsetAt, "the clean-up precedes the child that would inherit it");
 
-  // 3) A NAME THAT IS ODD BUT REAL IS STILL REMOVABLE (quality round P2): a
-  // strict identifier rule here would brick the session — the key could never
-  // be cleared, and the fail-closed heal would then refuse every later spawn.
+  // 3) A NAME THAT IS ODD BUT REAL IS STILL REMOVABLE (quality round P2, then
+  // acceptance round P2): a strict identifier rule here would brick the session
+  // — the key could never be cleared, and the fail-closed heal would then
+  // refuse every later spawn. A SPACE counts as real: tmux accepts it and an
+  // argv element carries it verbatim.
   const odd = fakeServer({
     existing: { name: NAME, owner: SESSION_ID },
-    env: { "RG_A-B": "junk" },
+    env: { "RG_A-B": "junk", "RG_A B": "junk" },
   });
   const oddOpened = openScopeWindow(odd.run, fakeScope(), { cwd: "/repo", command: ["pi"] });
   assert.equal(oddOpened.ok, true, oddOpened.ok ? "" : oddOpened.error);
   assert.equal(odd.env["RG_A-B"], undefined, "an odd-but-removable name does not brick the session");
+  assert.equal(odd.env["RG_A B"], undefined, "and neither does one with a space in it");
   // What cannot ride an argv is still refused: a leading `-` would be read as a
-  // flag by tmux.
+  // flag by tmux, and a `=` in a name is really two arguments.
   assert.throws(() => buildUnsetSessionEnvArgv(NAME, "-g"), UnsafeTmuxCommand);
+  assert.throws(() => buildUnsetSessionEnvArgv(NAME, "A=B"), UnsafeTmuxCommand);
 
   // 4) THE READ FAILS ⇒ the spawn is refused: an unknown is never acted on.
   const blindEnv = fakeServer({ existing: { name: NAME, owner: SESSION_ID }, envReadFails: true });

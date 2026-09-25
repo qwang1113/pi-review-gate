@@ -417,19 +417,20 @@ export function buildListSessionEnvArgv(ownSession: string): readonly string[] {
  * Remove ONE variable from a session's environment.
  *
  * The name is checked for the two things an ARGV cannot survive, not for
- * looking like an identifier (quality round P2, 2026-09-25): there is no shell
- * here, so an odd-but-real name like `RG_A-B` is perfectly removable, and
- * refusing it would BRICK the session — `healSessionEnv` selects by the `RG_`
- * prefix, so a key it cannot remove is a key that stays inherited, and (because
- * the heal fails closed) every later spawn of that session would be refused
- * with no way out. What is still refused is what would change the meaning of
- * the argv: a leading `-` (tmux would read it as a flag) and anything carrying
- * whitespace or `=` (a name that is really two arguments, or none).
+ * looking like an identifier (quality round P2, then acceptance round P2,
+ * 2026-09-25): there is no shell here, so an odd-but-real name is perfectly
+ * removable — including one with a SPACE in it, which tmux accepts and an argv
+ * element carries verbatim. Refusing such a name would BRICK the session:
+ * `healSessionEnv` selects by the `RG_` prefix, so a key it cannot remove is a
+ * key that stays inherited, and (because the heal fails closed) every later
+ * spawn of that session would be refused with no way out. What is still refused
+ * is what would change the meaning of the argv: a leading `-` (tmux would read
+ * it as a flag) and a name carrying `=` (which is really two arguments).
  */
 export function buildUnsetSessionEnvArgv(ownSession: string, key: string): readonly string[] {
   const session = requireOwnSession(ownSession, "ownSession");
   const name = String(key ?? "");
-  if (name.length === 0 || name.startsWith("-") || /[\s=]/.test(name)) {
+  if (name.length === 0 || name.startsWith("-") || name.includes("=")) {
     throw new UnsafeTmuxCommand(`环境变量名不能作为 argv 传递：${JSON.stringify(key)}`);
   }
   return assertSafeTmuxArgv(["set-environment", "-t", session, "-u", name], { ownSessions: [session] });
