@@ -61,11 +61,20 @@
   门禁开子会话 pane 时用确定性的 `--session-id rg-child-<childId>`，而 subagent 跑在 pi
   现生成的随机 uuid 下；两者不一致就不绑定：不写通道、不读指令。
 
+**交接链是同一个主人**（2026-09-26，t8 实测）：子会话 `session_handoff` 后，继任者跑在
+`rg-child-<childId>-hN`（`successorSessionId`）下。两道闸原先只认 `rg-child-<childId>`，
+继任者因此不绑定通道（0 条记录、instruct 无回执），它的记录也会被读侧当外来污染丢掉。
+现在两道闸都用 `isHandoffChainOf`（`lib/session-inheritance.ts`，按铸 id 的同一规则判定；
+随机 uuid 与别的子会话的 `-hN` 仍被拒）。继任者还换了 pane：子会话的 `state` 记录带
+`paneId`（`TMUX_PANE`），`superviseChildren` 在登记 pane 已消失而自报 pane 活着时按新 pane
+判定（`relayedPane`，tmux 读不到则什么都不改），`orchestrator_wait` 的探测把它写回登记表
+（`repointChildPanes`），close / recover / 退出判据从此指向新 pane。
+
 ### 1.2 记录种类
 
 | kind | 方向 | 说明 |
 | --- | --- | --- |
-| `state` | 子 → 编排 | 我现在是 working / waiting-input / idle / done；带上下文用量、session id |
+| `state` | 子 → 编排 | 我现在是 working / waiting-input / idle / done；带上下文用量、session id、所在 pane（`paneId`） |
 | `request` | 子 → 编排 | 我弹了一个框：标题、**全部选项（原文、按序）**、正文 payload、topic |
 | `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / orchestrator / dismissed / **interrupted**（instruct 打断时解除的框，不是拒绝） |
 | `answer` | 编排 → 子 | 这个请求的答案 |
