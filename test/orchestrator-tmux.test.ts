@@ -8,10 +8,11 @@
  * lets them through requires a session name and that the argv's own target
  * names it — including through the short aliases.
  *
- * The three-column layout it replaced (`planPanePlacement`,
- * `buildWindowLayoutArgv`, `parseWindowLayout`, `buildEvenLayoutArgv`) has no
- * test left because it has no code left; the last test in this file asserts
- * exactly that, so a resurrected copy cannot pass unnoticed.
+ * The three-column layout it replaced has no test left because it has no code
+ * left; the last test in this file asserts that absence by SHAPE (no exported
+ * symbol of that kind, no builder emitting the equaliser), so a resurrected
+ * copy cannot pass unnoticed without the assertion naming it — the round's exit
+ * criterion is that those identifiers appear nowhere in the tree.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -278,19 +279,21 @@ test("a window coordinate read back from disk is BOTH halves or nothing", () => 
  */
 test("the window-layout machinery is gone from the module AND from its tests", async () => {
   const mod = await import("../lib/orchestrator-tmux.ts");
-  for (const gone of [
-    "planPanePlacement",
-    "buildWindowLayoutArgv",
-    "parseWindowLayout",
-    "buildEvenLayoutArgv",
-    "buildSpawnPaneArgv",
-  ]) {
-    assert.ok(!(gone in mod), `${gone} must not come back`);
-  }
-  // …and no surviving builder may emit the equaliser, which is what the
-  // lay-out used to run after every spawn and every close.
+  // BY SHAPE, not by a list of names: an assertion that spells a deleted
+  // function out is itself a place that name lives, and the round's exit
+  // criterion is that the identifiers are gone from the tree. A pattern can
+  // only be satisfied by a module that really has none of them.
+  const suspicious = Object.keys(mod).filter((name) => /Layout|Placement|SpawnPane/.test(name));
+  assert.deepEqual(suspicious, [], "no layout/placement/legacy-spawn export may come back");
+  // …and no surviving builder may emit the equaliser, which is what the layout
+  // used to run after every spawn and every close.
   const source = readFileSync(new URL("../lib/orchestrator-tmux.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /"select-layout"/);
+  // The other half of the topology is in session-factory: its layout values are
+  // exactly the two that exist today, and neither is the old one.
+  const factory = readFileSync(new URL("../lib/session-factory.ts", import.meta.url), "utf8");
+  const declared = factory.match(/export type SessionPaneLayout =([\s\S]*?);/)?.[1] ?? "";
+  assert.deepEqual([...declared.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]).sort(), ["beside-opener", "own-session-window"]);
 });
 
 /**

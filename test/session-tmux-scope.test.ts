@@ -119,6 +119,8 @@ function fakeServer(opts: {
 interface FakeScope extends TmuxScope {
   record: TmuxScopeRecord | undefined;
   writes: number;
+  /** Replaced by tests that need an identity-less session. */
+  sessionId: () => string | undefined;
 }
 
 function fakeScope(sessionId: string = SESSION_ID): FakeScope {
@@ -189,6 +191,49 @@ test("the addressable set is MINE plus the sessions I hold coordinates for", () 
   // session name) is dropped — the user's sessions are as unreachable through a
   // record as through a parameter.
   assert.deepEqual(addressableSessions(scope, ["my-work", "lab", "", undefined]), [NAME]);
+});
+
+test("a sidecar record is NOT a licence to kill another session (reviewer P1)", () => {
+  // The shape of the attack: write a record naming ANOTHER gate session, with
+  // that session's own marker as the owner, and the gate kills it on your
+  // behalf. The name looked right and the marker matched — so the record itself
+  // has to be bound to THIS process's identity before anything acts on it.
+  const server = fakeServer();
+  const scope = fakeScope();
+  const victim = "rg-other-repo-abcdef1234";
+  server.sessions.set(victim, "the-other-sessions-id");
+  scope.record = { name: victim, owner: "the-other-sessions-id", createdAt: "2026-09-25T00:00:00.000Z" };
+
+  const killed = closeOwnSession(server.run, scope);
+  assert.equal(killed.ok, true);
+  assert.equal(killed.ok ? killed.killed : true, false, "nothing is killed on an unbound record");
+  assert.equal(server.sessions.has(victim), true, "the other session is still standing");
+  assert.equal(server.calls.some((a) => a[0] === "kill-session"), false, "no kill was even attempted");
+
+  // …and it cannot widen the EXECUTOR's declaration either: the addressable
+  // list is derived from this process's identity, not from the file.
+  assert.deepEqual(addressableSessions(scope, []), [NAME], "a tampered record adds nothing");
+
+  // The same record pointing at OUR OWN name is honoured again — the fix is
+  // about binding, not about distrusting the sidecar.
+  scope.record = { name: NAME, owner: SESSION_ID, createdAt: "2026-09-25T00:00:00.000Z" };
+  server.sessions.set(NAME, SESSION_ID);
+  const ours = closeOwnSession(server.run, scope);
+  assert.equal(ours.ok, true);
+  assert.equal(ours.ok ? ours.killed : false, true, "our own session is still closed as before");
+});
+
+test("a session with no id cannot act through a record at all", () => {
+  const server = fakeServer();
+  const scope = fakeScope();
+  scope.record = { name: NAME, owner: SESSION_ID, createdAt: "2026-09-25T00:00:00.000Z" };
+  scope.sessionId = () => undefined;
+  server.sessions.set(NAME, SESSION_ID);
+  assert.deepEqual(addressableSessions(scope, []), [], "nothing to declare without an identity");
+  const killed = closeOwnSession(server.run, scope);
+  assert.equal(killed.ok, true);
+  assert.equal(killed.ok ? killed.killed : true, false);
+  assert.equal(server.sessions.has(NAME), true, "a name with no identity behind it is never killed");
 });
 
 test("the first child creates the session WITH it; a later one joins", () => {

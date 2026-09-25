@@ -175,25 +175,57 @@ type ResolvedScope =
   | { ok: false; error: string };
 
 /**
- * Resolve the session this process owns: the recorded one when there is a
- * record, otherwise one derived from this session's own identity.
+ * Resolve the session this process owns — and BIND it to this process's own
+ * identity (2026-09-25, reviewer P1).
  *
- * A record wins over derivation because it is the only place a name that was
- * already created can be found again — and because a session whose id changed
- * under it (a resume, a relay) must not start a second session beside the first.
+ * A record in the sidecar is NOT permission. Its only job is to remember the name
+ * this session created, and that name is DERIVED from the session's own id and
+ * its repo — so a record is honoured only when it says exactly what this session
+ * would derive for itself, with this session as its owner. Anything else is
+ * ignored, and the name is re-derived from our own identity instead.
+ *
+ * WHAT THAT CLOSES: the first version returned the record as-is, so a sidecar
+ * naming ANOTHER gate session (paired with that session's marker) made
+ * `closeOwnSession` kill it and put its name into `addressableSessions` — a
+ * writable file could authorise a kill. A record can no longer widen anything: at
+ * most it can confirm the name this process already had.
+ *
+ * An unusable record is NOT an error: naming our own session needs no record, and
+ * a leftover from another session is simply not ours to use.
  */
 function resolveScope(scope: TmuxScope): ResolvedScope {
-  const recorded = sanitizeScopeRecord(scope.read());
-  if (recorded) return { ok: true, name: recorded.name, owner: recorded.owner };
   const sessionId = scope.sessionId()?.trim();
-  if (!sessionId) {
+  if (sessionId === undefined || sessionId.length === 0) {
     return { ok: false, error: "本会话没有 session id（pi 没给出），无法派生专属 tmux session 名" };
   }
-  const name = deriveSessionName(scope.repoRoot(), sessionId);
-  if (!name) {
+  const own = deriveSessionName(scope.repoRoot(), sessionId);
+  if (own === undefined) {
     return { ok: false, error: `无法从 session id 派生专属 tmux session 名：${sessionId}` };
   }
-  return { ok: true, name, owner: sessionId };
+  // THE NAME IS DERIVED, ALWAYS (2026-09-25, reviewer P1): the record is not a
+  // source of names, so no file can point this process at a session it did not
+  // create. What a record CAN do is confirm what we would have derived anyway —
+  // and that is exactly what {@link recordedSession} checks before anything acts
+  // on it.
+  return { ok: true, name: own, owner: sessionId };
+}
+
+/**
+ * The sidecar record, but ONLY when it is bound to this process's identity:
+ * the name this session derives for itself, owned by this session's own id.
+ *
+ * Anything else is not ours to act on — a hand-edited sidecar naming another
+ * gate session (with that session's marker written to match) is the shape a
+ * kill would otherwise be aimed by, and a file is not permission. It is not an
+ * error either: this session simply has no created session to speak of.
+ */
+function recordedSession(
+  scope: TmuxScope,
+  identity: { ok: true; name: string; owner: string },
+): TmuxScopeRecord | undefined {
+  const recorded = sanitizeScopeRecord(scope.read());
+  if (!recorded) return undefined;
+  return recorded.name === identity.name && recorded.owner === identity.owner ? recorded : undefined;
 }
 
 /**
@@ -364,9 +396,18 @@ export type CloseOwnSessionResult =
  * stranger's session wearing our name is left completely alone.
  */
 export function closeOwnSession(run: ScopeRunner, scope: TmuxScope): CloseOwnSessionResult {
-  const record = sanitizeScopeRecord(scope.read());
+  const identity = resolveScope(scope);
+  if (!identity.ok) {
+    // No identity ⇒ nothing could ever have been created, so there is nothing
+    // to close: a no-op, not a failure (closeOwnSession is idempotent by
+    // contract, and an unnameable session is indistinguishable from none).
+    return { ok: true, killed: false, note: `本会话没有可关的专属 tmux session（${identity.error}）` };
+  }
+  // ONLY a record bound to this identity is acted on: a name in a file is not a
+  // licence to kill a session (reviewer P1, 2026-09-25).
+  const record = recordedSession(scope, identity);
   if (!record) {
-    return { ok: true, killed: false, note: "本会话没有专属 tmux session（从未派过子会话）" };
+    return { ok: true, killed: false, note: "本会话没有专属 tmux session（从未派过子会话，或 sidecar 里的记录不属于本会话）" };
   }
   const sessions = listSessions(run);
   if (sessions === undefined) {

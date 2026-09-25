@@ -24,14 +24,15 @@
  * minute shares): one child per window, created lazily the first
  * time a child is needed, closed by `kill-window` when it is done.
  *
- * WHAT THAT REPLACED, and why nothing of it is left: three-column layout
- * planning (`planPanePlacement`), window-geometry probing
- * (`buildWindowLayoutArgv` / `parseWindowLayout`) and its equaliser
- * (`buildEvenLayoutArgv`). They existed to squeeze every child into the user's
- * window without nesting panes. They are DELETED, not kept "for the relay":
- * with one child per window there is no geometry to plan, and a second
- * implementation of "where does a session go" is exactly the drift this
- * repository refuses (哲学三).
+ * WHAT THAT REPLACED, and why nothing of it is left: the three-column layout
+ * planner, the window-geometry probe and the equaliser that spread a column's
+ * space. They existed to squeeze every child into the user's window without
+ * nesting panes. They are DELETED, not kept "for the relay": with one child per
+ * window there is no geometry to plan, and a second implementation of "where
+ * does a session go" would be the drift this repository refuses (哲学三).
+ * (They are not named here on purpose — the round's exit criterion is that the
+ * identifiers are gone from the tree, and a mention kept "for history" is
+ * exactly how a removed name comes back as a search hit somebody trusts.)
  *
  * THE ONE PATH THAT STILL SPLITS THE USER'S WINDOW is the RELAY
  * ({@link buildHandoffPaneArgv}): a successor orchestrator opens beside its
