@@ -230,12 +230,35 @@ function sessionPartOf(target: string): string {
   return at < 0 ? target : target.slice(0, at);
 }
 
-/** `-e K=V` pairs, in a stable order so the argv is testable. */
-function envArgs(env: Readonly<Record<string, string>> | undefined): string[] {
-  if (!env) return [];
-  return Object.keys(env)
-    .sort()
-    .flatMap((key) => ["-e", `${key}=${env[key]}`]);
+/**
+ * The child's environment, carried BY ITS OWN COMMAND instead of by tmux.
+ *
+ * WHY NOT `-e` (2026-09-25, measured in the t5 acceptance round):
+ * `new-session -e K=V` writes K=V into the tmux SESSION's environment, and
+ * every window opened in that session afterwards inherits it. The FIRST
+ * child's identity — a worker's `RG_WORKER_ID`, its `RG_GATE_MODE=explore` —
+ * was therefore stamped onto the whole session, and a judge opened later came
+ * up carrying BOTH identities: it reported its state into the WORKER's channel
+ * file, its own channel stayed empty, and the opener's boot verification timed
+ * out — the round could never complete. (`new-window -e` does not write the
+ * session environment, but it INHERITS whatever is already in it, so one leak
+ * is forever.) The user's own window was never affected: a relay successor is
+ * `split-window`, whose `-e` stays on the pane.
+ *
+ * `env K=V … <command>` puts the variables in the one place they belong — the
+ * process of THIS window — and leaves tmux's own environment untouched.
+ * `env(1)` execs the command, so the pane still runs the child itself.
+ */
+function envCommand(
+  env: Readonly<Record<string, string>> | undefined,
+  command: readonly string[] | undefined,
+): string[] {
+  const cmd = [...(command ?? ["pi"])];
+  const pairs = env === undefined
+    ? []
+    : Object.keys(env).sort().map((key) => `${key}=${env[key]}`);
+  // Sorted, so the argv stays testable.
+  return pairs.length === 0 ? cmd : ["env", ...pairs, ...cmd];
 }
 
 /**
@@ -285,7 +308,11 @@ export interface ScopeWindowOptions {
   ownSession: string;
   /** Working directory for the new window (a repo root or a worktree). */
   cwd: string;
-  /** Environment injected into the window (orchestration id, gate mode…). */
+  /**
+   * Environment injected into the window (orchestration id, gate mode…),
+   * injected through the child's OWN command (`envCommand`) — never through
+   * tmux, which would keep it for the whole session.
+   */
   env?: Readonly<Record<string, string>>;
   /** The command the window runs. Defaults to an interactive `pi`. */
   command?: readonly string[];
@@ -318,11 +345,10 @@ export function buildNewSessionArgv(opts: ScopeWindowOptions): readonly string[]
     "-c",
     opts.cwd,
     ...(opts.windowName === undefined ? [] : ["-n", opts.windowName]),
-    ...envArgs(opts.env),
     "-P",
     "-F",
     "#{window_id} #{pane_id}",
-    ...(opts.command ?? ["pi"]),
+    ...envCommand(opts.env, opts.command),
   ], { ownSessions: [session] });
 }
 
@@ -336,11 +362,10 @@ export function buildNewWindowArgv(opts: ScopeWindowOptions): readonly string[] 
     "-c",
     opts.cwd,
     ...(opts.windowName === undefined ? [] : ["-n", opts.windowName]),
-    ...envArgs(opts.env),
     "-P",
     "-F",
     "#{window_id} #{pane_id}",
-    ...(opts.command ?? ["pi"]),
+    ...envCommand(opts.env, opts.command),
   ], { ownSessions: [session] });
 }
 
@@ -527,11 +552,10 @@ export function buildHandoffPaneArgv(opts: {
     self,
     "-c",
     opts.cwd,
-    ...envArgs(opts.env),
     "-P",
     "-F",
     "#{pane_id}",
-    ...(opts.command ?? ["pi"]),
+    ...envCommand(opts.env, opts.command),
   ]);
 }
 

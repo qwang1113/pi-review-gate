@@ -27,6 +27,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   closeSessionWindow,
@@ -266,4 +269,87 @@ test("an unreadable tmux is 'I do not know' — never a licence to create or kil
     assert.equal(killed.ok, false, "and nothing is killed on an unknown");
     // `judgePaneAlive` answers the same way: undefined, never "dead".
     assert.equal(judgePaneAlive(blind, "%1"), undefined);
+});
+
+/** Read a file the child wrote, once it exists. */
+async function waitForFile(path: string): Promise<string> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return readFileSync(path, "utf8").trim();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
+
+/**
+ * A CHILD'S IDENTITY NEVER ENTERS THE TMUX SESSION ENVIRONMENT (2026-09-25).
+ *
+ * THE DEFECT THIS PINS, measured in the t5 acceptance round: `new-session -e`
+ * writes the child's variables into the SESSION's own environment, so the FIRST
+ * child stamped its identity onto the whole session — and every window opened
+ * afterwards inherited it. A quality-auditor opened after a worker came up
+ * carrying `RG_WORKER_ID`, reported its state into the WORKER's channel file,
+ * left its own channel empty, and the opener's boot verification timed out:
+ * the round could never complete.
+ *
+ * Both directions are asserted, because "the environment does not leak" alone
+ * would pass just as well if the child never got its environment at all.
+ */
+test("a child's environment rides its own command, never the tmux session", { skip: SKIP }, async () => {
+  const scope = labScope();
+  const dir = mkdtempSync(join(tmpdir(), "rg-scope-env-"));
+  const dump = join(dir, "dump.mjs");
+  // A shell-free probe: tmux joins a multi-element command with spaces, so the
+  // quotes of a `sh -c "…"` would be lost. The child writes the variable it was
+  // given to the path it was given.
+  writeFileSync(
+    dump,
+    'import { writeFileSync } from "node:fs";\n' +
+      'writeFileSync(process.argv[3], String(process.env[process.argv[2]] ?? "<unset>"));\n' +
+      // STAY ALIVE: a window whose command exits takes itself (and, as the only
+      // window, the whole session) with it, and the second child of this test
+      // needs the session to still be there.
+      'setTimeout(() => {}, 600000);\n',
+    "utf8",
+  );
+  const firstOut = join(dir, "first.txt");
+  const secondOut = join(dir, "second.txt");
+  try {
+    startLab();
+    const first = await openSessionWindow(runner, {
+      scope,
+      cwd: "/tmp",
+      layout: "own-session-window",
+      role: { kind: "worker", openerId: "lab", workerId: "worker-1", role: "worker" },
+      command: ["node", dump, "RG_WORKER_ID", firstOut],
+    });
+    assert.equal(first.ok, true, first.ok ? "" : first.error);
+
+    const sessionEnv = tmux(["show-environment", "-t", OWN_SESSION]);
+    assert.ok(
+      !/RG_WORKER_ID|RG_WORKER_OPENER|RG_GATE_MODE/.test(sessionEnv),
+      `the session environment must stay clean — every later window inherits it:\n${sessionEnv}`,
+    );
+    // …and the child itself really did get the variable.
+    assert.equal(await waitForFile(firstOut), "worker-1");
+
+    // A SECOND CHILD DOES NOT INHERIT THE FIRST ONE'S IDENTITY.
+    const second = await openSessionWindow(runner, {
+      scope,
+      cwd: "/tmp",
+      layout: "own-session-window",
+      role: { kind: "judge", openerId: "lab", judgeId: "reviewer-1", role: "reviewer" },
+      command: ["node", dump, "RG_WORKER_ID", secondOut],
+    });
+    assert.equal(second.ok, true, second.ok ? "" : second.error);
+    assert.equal(await waitForFile(secondOut), "<unset>",
+      "a judge must not come up wearing the worker's identity");
+    assert.ok(
+      !/RG_WORKER_ID|RG_WORKER_OPENER|RG_GATE_MODE/.test(tmux(["show-environment", "-t", OWN_SESSION])),
+      "and the second child did not put one there either",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    try { tmux(["kill-server"]); } catch { /* already gone */ }
+  }
 });

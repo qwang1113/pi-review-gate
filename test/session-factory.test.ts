@@ -74,12 +74,19 @@ function happyRunner(seen: string[][] = []): PaneRunner {
   };
 }
 
-/** `-e K=V` pairs back out of a spawn argv, as a map. */
+/**
+ * The child's environment, read back out of its OWN command — the `env K=V …`
+ * prefix `lib/orchestrator-tmux.ts` builds. Never tmux's `-e`: that one writes
+ * the SESSION environment, which every later window of the session inherits
+ * (measured 2026-09-25).
+ */
 function envOf(argv: readonly string[]): Record<string, string> {
   const env: Record<string, string> = {};
-  for (let i = 0; i < argv.length - 1; i++) {
-    if (argv[i] !== "-e") continue;
-    const [key, ...rest] = argv[i + 1]!.split("=");
+  const envAt = argv.indexOf("env");
+  if (envAt < 0) return env;
+  for (const token of argv.slice(envAt + 1)) {
+    if (!token.includes("=")) break;
+    const [key, ...rest] = token.split("=");
     env[key!] = rest.join("=");
   }
   return env;

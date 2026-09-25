@@ -87,16 +87,23 @@ function setup(over: Partial<{
   /**
    * The boot report a freshly opened judge pane writes on its own channel.
    *
-   * Who it is comes out of the spawn argv itself (`-e RG_JUDGE_ID=…`), the
-   * same way the real pane learns it — so this fake cannot drift from the
-   * env contract the factory builds.
+   * Who it is comes out of the spawn argv itself (`env RG_JUDGE_ID=…`, the
+   * child's own command prefix), the same way the real pane learns it — so
+   * this fake cannot drift from the env contract the factory builds.
    */
   const reportBooted = (argv: readonly string[]): void => {
     const env = new Map<string, string>();
-    for (let i = 0; i < argv.length - 1; i++) {
-      if (argv[i] !== "-e") continue;
-      const [key, ...rest] = argv[i + 1]!.split("=");
-      env.set(key!, rest.join("="));
+    // NEVER tmux `-e` (2026-09-25, measured): it writes the SESSION environment,
+    // so the first child's identity was inherited by every later window of the
+    // session — a judge ended up reporting into the worker's channel. The
+    // factory prefixes the child's own command with `env K=V …` instead.
+    const envAt = argv.indexOf("env");
+    if (envAt >= 0) {
+      for (const token of argv.slice(envAt + 1)) {
+        if (!token.includes("=")) break;
+        const [key, ...rest] = token.split("=");
+        env.set(key!, rest.join("="));
+      }
     }
     const judgeId = env.get("RG_JUDGE_ID");
     const openerId = env.get("RG_JUDGE_OPENER");

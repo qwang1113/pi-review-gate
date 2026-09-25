@@ -205,8 +205,18 @@ test("a new session opens WITH its first child — no stray shell window", () =>
   assert.equal(argv[3], SESSION);
   assert.deepEqual(argv.slice(argv.indexOf("-c"), argv.indexOf("-c") + 2), ["-c", "/repo"]);
   assert.deepEqual(argv.slice(argv.indexOf("-n"), argv.indexOf("-n") + 2), ["-n", "t1@pm"]);
-  const pairs = argv.filter((_, i) => argv[i - 1] === "-e");
-  assert.deepEqual(pairs, ["RG_GATE_MODE=loop", "RG_STATE_VARIANT=t1-abc"], "sorted, so the argv is testable");
+  // THE ENVIRONMENT RIDES THE CHILD'S OWN COMMAND (2026-09-25): tmux `-e`
+  // writes the SESSION's environment, so the first child's identity was
+  // inherited by every later window of that session (measured in the t5
+  // acceptance round — a judge reported into the worker's channel).
+  assert.ok(!argv.includes("-e"), "never tmux -e: it would write the SESSION environment");
+  const envAt = argv.indexOf("env");
+  assert.ok(envAt > 0, "the child's environment is its own command's prefix");
+  assert.deepEqual(
+    argv.slice(envAt, envAt + 3),
+    ["env", "RG_GATE_MODE=loop", "RG_STATE_VARIANT=t1-abc"],
+    "sorted, so the argv is testable",
+  );
   assert.ok(argv.includes("-P") && argv.includes("-F"), "tmux prints what it created");
   assert.equal(argv[argv.indexOf("#{window_id} #{pane_id}") - 1], "-F");
   assert.deepEqual(argv.slice(-2), ["pi", "@.pi/tasks/t1.md"], "the child's own command IS the first window");
