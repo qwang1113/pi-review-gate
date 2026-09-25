@@ -19,6 +19,7 @@ import {
   judgeLive,
   windowClosable,
   judgeChildRecordOf,
+  paneCoordsOf,
   type JudgeEntry,
 } from "../lib/hierarchy.ts";
 
@@ -164,6 +165,30 @@ test("windowClosable: the OPPOSITE default — unverifiable means do not kill", 
     "a pane id is not a window id — a leftover record is not closable");
   assert.equal(windowClosable({ paneId: "%7", windowId: "@7", tmuxSession: "not-a-gate-session", tmuxServer: "sock,1" }, "sock,1"), false,
     "a session name the gate could not have derived is refused before it becomes a tmux target");
+});
+
+test("paneCoordsOf carries the WHOLE pane, so a re-registration cannot lose half of it", () => {
+  // THE SECOND INSTANCE OF THE SAME DEFECT (2026-09-25, quality round P1). A
+  // re-registration — a new round queued into a LIVE judge pane, a rotated lane
+  // — is written as a fresh object literal, and each coordinate has to be copied
+  // across by hand. The reuse path copied `paneId` and forgot `windowId` /
+  // `tmuxSession`, so every round after the first left an entry its own close
+  // path must refuse: a pane alive on screen that nothing can close.
+  const live = entry({
+    paneId: "%7", windowId: "@7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1",
+  });
+  assert.deepEqual(paneCoordsOf(live), {
+    paneId: "%7", windowId: "@7", tmuxSession: "rg-repo-abcdef1234", tmuxServer: "sock,1",
+  });
+  // The property the callers rely on: whatever comes out must still satisfy the
+  // rule their own closers apply.
+  const reregistered: JudgeEntry = { ...entry({ roundSeq: 2 }), ...paneCoordsOf(live) };
+  assert.equal(windowClosable(reregistered, "sock,1"), true,
+    "a re-registered entry stays closable — otherwise the pane is stranded");
+  // And the fail-closed direction survives: nothing recorded stays nothing.
+  assert.deepEqual(paneCoordsOf(entry()), {});
+  assert.deepEqual(paneCoordsOf(entry({ paneId: "%7" })), { paneId: "%7" },
+    "a half-coordinate is carried as the half it is, and the closer still refuses it");
 });
 
 test("judgeChildRecordOf carries EVERY coordinate a reader acts on (2026-09-25, quality P1)", () => {

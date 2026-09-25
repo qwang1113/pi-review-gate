@@ -313,6 +313,37 @@ function paneIdComparable(
 }
 
 /**
+ * THE PANE COORDINATES an entry already carries — the four fields that address
+ * the child it runs in (its pane, its window, the session that owns the window,
+ * and the tmux server that minted the ids). Spread into a RE-registration.
+ *
+ * WHY THIS EXISTS (2026-09-25, quality round P1 and its second instance). A
+ * re-registration is written as a fresh object literal — a new round queued
+ * into a live pane, or a rotated lane — and every coordinate has to be copied
+ * across by hand. Naming them once, as one value, is what makes the next
+ * coordinate a one-line change here instead of a silent hole in whichever
+ * literal somebody forgot: an entry that loses its window pair can no longer be
+ * closed at all (`windowClosable` requires both halves), and the loss is
+ * invisible until somebody looks at a screen that never empties.
+ *
+ * Absent fields stay ABSENT rather than becoming `undefined` keys: the
+ * fail-closed readers distinguish "not recorded" from "recorded as nothing".
+ */
+export function paneCoordsOf(entry: JudgeEntry): {
+  paneId?: string;
+  windowId?: string;
+  tmuxSession?: string;
+  tmuxServer?: string;
+} {
+  return {
+    ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
+    ...(entry.windowId === undefined ? {} : { windowId: entry.windowId }),
+    ...(entry.tmuxSession === undefined ? {} : { tmuxSession: entry.tmuxSession }),
+    ...(entry.tmuxServer === undefined ? {} : { tmuxServer: entry.tmuxServer }),
+  };
+}
+
+/**
  * THE ONE PROJECTION from a registry entry to what the judge tools operate on.
  *
  * WHY IT IS A FUNCTION AND NOT THREE OBJECT LITERALS (2026-09-25, quality round

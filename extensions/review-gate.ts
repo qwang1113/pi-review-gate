@@ -200,7 +200,7 @@ import {
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
 import { supervisionTarget } from "../lib/orchestration-id.ts";
-import { emptyHierarchy, findJudgeLane, judgeChildRecordOf, judgeLive, listByOpener, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
+import { emptyHierarchy, findJudgeLane, judgeChildRecordOf, judgeLive, listByOpener, paneCoordsOf, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
   decideJudgeRotation,
   judgeObjectId,
@@ -8745,8 +8745,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       const live = judgeHierarchy[judgeId] ?? existing;
       const reg = registerJudge(judgeHierarchy, {
         judgeId, openerId: opener, role, repoRoot: root, title, sessionDir,
-        paneId: existing.paneId, roundSeq,
-        ...(tmuxServer === undefined ? {} : { tmuxServer }),
+        // WHERE THE LIVE PANE IS, carried forward as one value (`paneCoordsOf`):
+        // a re-registration that copies only some of these fields leaves an
+        // entry its own close path must then refuse — the pane is alive, on
+        // screen, and unaddressable (2026-09-25, quality round P1).
+        ...paneCoordsOf(live),
+        roundSeq,
         // The pane's model does not change because a new round was queued into
         // it — the entry keeps saying what the RUNNING pane was launched on.
         ...(live.modelSpec === undefined ? {} : { modelSpec: live.modelSpec }),

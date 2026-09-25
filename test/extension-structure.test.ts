@@ -3091,7 +3091,15 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   assert.doesNotMatch(SRC, /sessionDir: c\.sessionDir/,
     "no hand-written copy of the projection may come back");
   assert.match(wiring, /judgeChildRecordOf\(c, root\)/,
-    "…including the by-role lookup, which supplies the repo it resolved")
+    "…including the by-role lookup, which supplies the repo it resolved");
+  // AND THE OTHER DIRECTION: an entry that is RE-registered (a new round queued
+  // into a live pane, a rotated lane) must carry the whole pane forward. Copying
+  // `paneId` by hand and forgetting the window pair was the second instance of
+  // the P1 above — the pane stays on screen and nothing can close it.
+  assert.equal((SRC.match(/paneCoordsOf\(/g) ?? []).length >= 1, true,
+    "a re-registration spreads lib/hierarchy.ts `paneCoordsOf`, never a hand-picked field");
+  assert.match(SRC, /\.\.\.paneCoordsOf\(live\)/,
+    "…and the reuse path takes it from the LIVE entry, which is the one that has the coordinates")
   assert.match(JUDGE_TOOLS_SRC, /function checkOpener\(/, "the opener check is one shared helper");
   assert.equal(
     (JUDGE_TOOLS_SRC.match(/checkOpener\(deps, /g) ?? []).length,
