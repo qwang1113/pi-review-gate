@@ -120,28 +120,6 @@ export function sessionInboxTakenPath(root: string, name: string): string {
 }
 
 /**
- * Remove everything a name owns BESIDES its registration: the inbox, the parked
- * copy, and the side files a spilled body lives in.
- *
- * ONE PLACE, because there are two moments that owe it — the release below, and
- * the orphan sweep in its own module — and because "what belongs to a name" is
- * this module's question to answer. The inbox files are found by PREFIX rather
- * than by name, which is what covers the spilled `<inbox>.<messageId>.payload`
- * files that no caller could enumerate (the id is the sender's). Returns whether
- * the inbox itself was there; a leftover that could not be removed is reported
- * by the caller's own log/report, never silently assumed gone.
- */
-export function removeNameMail(deps: Pick<RegistryDeps, "root" | "io">, name: string): boolean {
-  const inbox = sessionInboxPath(deps.root, name);
-  const removed = deps.io.remove(inbox);
-  const prefix = `${name}.inbox.jsonl.`;
-  for (const file of deps.io.listFiles() ?? []) {
-    if (file.startsWith(prefix)) deps.io.remove(join(deps.root, file));
-  }
-  return removed;
-}
-
-/**
  * Kebab-case, 2–32 characters: lowercase letters, digits and single dashes,
  * starting and ending with a letter or a digit. `undefined` means legal.
  */
@@ -570,8 +548,8 @@ export function releaseName(
   // has to be alive”, so a name nobody holds cannot accumulate new mail at all,
   // and whatever is left behind can only be read by whoever takes the name
   // next — a name is an address, and taking it means inheriting what was
-  // mailed to it. (A DEAD holder's leftovers are still reclaimed, by the orphan
-  // sweep, and only after re-reading that nobody has claimed the name — see
+  // mailed to it. (A DEAD holder's leftovers are NOT collected either, for
+  // exactly the same reason — see the removal site in
   // lib/session-orphan-sweep.ts.)
   return { ok: true, released: true };
 }

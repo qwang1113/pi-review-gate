@@ -28,7 +28,6 @@ import {
   parseEntryText,
   parseRegistryEntry,
   releaseName,
-  removeNameMail,
   renewName,
   sessionEntryPath,
   sessionInboxPath,
@@ -315,20 +314,6 @@ test("a release never touches the mail — freeing the name and cleaning its inb
   assert.equal(d.io.files.has(`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`), true);
 });
 
-test("removeNameMail is the sweep's tool: it takes the inbox, the parked copy and spilled bodies — and only this name's", () => {
-  const withMail = deps({ files: new Map([
-    [sessionInboxPath(ROOT, "t2-registry"), '{"kind":"session-message"}\n'],
-    [sessionInboxTakenPath(ROOT, "t2-registry"), '{"kind":"session-message"}\n'],
-    [`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`, "一大段正文"],
-    [`${sessionInboxPath(ROOT, "t9-pm")}.msg-2.payload`, "别人的正文"],
-  ]) });
-  assert.equal(removeNameMail(withMail, "t2-registry"), true, "the inbox was there");
-  assert.equal(withMail.io.files.has(sessionInboxPath(ROOT, "t2-registry")), false);
-  assert.equal(withMail.io.files.has(sessionInboxTakenPath(ROOT, "t2-registry")), false);
-  assert.equal(withMail.io.files.has(`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`), false);
-  assert.equal(withMail.io.files.has(`${sessionInboxPath(ROOT, "t9-pm")}.msg-2.payload`), true, "not somebody else's");
-});
-
 test("an entry is found by the session that owns it — that is how a restart keeps its name", () => {
   const d = deps({ files: new Map([
     [sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry({ sessionId: MINE }))],
@@ -345,7 +330,7 @@ test("an entry is found by the session that owns it — that is how a restart ke
 // the orphan sweep
 // ---------------------------------------------------------------------------
 
-test("the sweep reclaims a dead session's tmux session, registration and inbox — marker first", () => {
+test("the sweep reclaims a dead session's tmux session and registration — and deliberately NOT its inbox", () => {
   const scope = "rg-pi-review-gate-ffee000000";
   const d = deps({
     files: new Map([
@@ -355,10 +340,14 @@ test("the sweep reclaims a dead session's tmux session, registration and inbox �
     tmux: fakeTmux({ panes: [], sessions: [scope], markers: { [scope]: THEIRS } }),
   });
   const report = sweepOrphans(d, { sessionId: MINE });
-  assert.deepEqual(report.reaped, [{ name: "t2-registry", sessionId: THEIRS, sessionKilled: true, inboxRemoved: true }]);
+  assert.deepEqual(report.reaped, [{ name: "t2-registry", sessionId: THEIRS, sessionKilled: true }]);
   assert.deepEqual(d.tmux.killed, [scope]);
   assert.equal(d.io.files.has(sessionEntryPath(ROOT, "t2-registry")), false);
-  assert.equal(d.io.files.has(sessionInboxPath(ROOT, "t2-registry")), false);
+  // NOT DELETED (reviewer P1 twice, 2026-09-25): the name is freed by the move
+  // above, and a fresh session can claim it and be sent a message before any
+  // cleanup here could run — so there is none. See the removal site's comment.
+  assert.equal(d.io.files.has(sessionInboxPath(ROOT, "t2-registry")), true, "the mail stays where it is");
+  assert.match(report.notes.join("\n"), /inbox 留在原地/);
   const markerReads = d.tmux.calls.filter((argv) => argv[0] === "show-options").map((argv) => argv.at(-1));
   assert.deepEqual(markerReads, [SESSION_OWNER_OPTION], "the marker is read before the kill");
 });
@@ -416,7 +405,7 @@ test("a scope session that is already gone is cleaned up, not kept: there is not
     tmux: fakeTmux({ panes: [], sessions: ["rg-someone-else-0000000000"], markerUnreadable: true }),
   });
   const report = sweepOrphans(d, {});
-  assert.deepEqual(report.reaped, [{ name: "t2-registry", sessionId: THEIRS, sessionKilled: false, inboxRemoved: true }]);
+  assert.deepEqual(report.reaped, [{ name: "t2-registry", sessionId: THEIRS, sessionKilled: false }]);
   assert.deepEqual(d.tmux.killed, []);
   assert.equal(d.io.files.has(sessionEntryPath(ROOT, "t2-registry")), false);
 });
@@ -461,11 +450,12 @@ test("a registration taken over during the sweep is put back, not deleted", () =
   assert.equal(d.io.files.has(sessionEntryPath(ROOT, "t2-registry")), true, "the new holder keeps its registration");
 });
 
-test("the sweep does NOT delete the mail of a name claimed while it was reclaiming it (reviewer P1)", () => {
-  // THE WINDOW THE CAS EXISTS FOR (2026-09-25, reviewer P1). The dead holder's
-  // registration is gone and the name is free; a fresh session claims it, is
-  // live, and is sent a message. Deleting the inbox then would destroy mail the
-  // sender was told had been delivered.
+test("the sweep does NOT delete a dead holder's mail — the name it frees may be claimed and sent to at any moment", () => {
+  // REVIEWER P1, twice (2026-09-25). The first fix deleted the mail right after
+  // the registration; the second re-read the registration first and only then
+  // deleted — which narrows the window without closing it. The name is freed by
+  // the registration move, so a fresh session can claim it and be SENT a message
+  // between ANY read and ANY delete. Mail therefore stays.
   const d = deps({
     files: new Map([
       [sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry())],
@@ -483,13 +473,12 @@ test("the sweep does NOT delete the mail of a name claimed while it was reclaimi
     return originalRemove(path);
   };
   const report = sweepOrphans(d, {});
-  assert.deepEqual(report.reaped, [], "the name was taken over mid-sweep — nothing here is ours to collect");
-  assert.match(report.kept.at(-1)?.reason ?? "", /被新会话接管/);
+  assert.deepEqual(report.reaped.map((r) => r.name), ["t2-registry"], "the dead registration is collected");
   assert.equal(d.io.files.has(sessionEntryPath(ROOT, "t2-registry")), true, "the new holder keeps its registration");
   assert.match(
     d.io.files.get(sessionInboxPath(ROOT, "t2-registry")) ?? "",
     /fresh/,
-    "…and its mail is still there",
+    "and its mail is still there — nothing in the sweep touches an inbox",
   );
 });
 

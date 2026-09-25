@@ -32,11 +32,12 @@
  *      registration somebody re-created in the meantime: its session id differs
  *      from the one we classified, so it is put straight back instead of
  *      deleted;
- *   4. remove everything else that name owned: its inbox (`<名字>.inbox.jsonl`,
- *      the convention lib/session-registry.ts defines for t3's `@名字`
- *      messages), the parked copy a half-consumed one leaves behind, and any
- *      spilled body. `removeNameMail` is that one place — a message nobody will
- *      read belongs to the dead session like everything else it left.
+ *   4. and NO INBOX DELETION (2026-09-25, reviewer P1 twice): the registration
+ *      move above is what frees the name, and a fresh session can claim it and
+ *      be sent a message before any cleanup here could run. Mail left by the
+ *      dead holder stays; the next session to take the name reads it (skipping
+ *      what was addressed to the previous holder) and reclaims the space. The
+ *      reasoning is in full at the removal site below.
  *
  * A scope session that is ALREADY GONE is neither an error nor a reason to keep
  * the registration: step 2 says so through the server's own name list, and the
@@ -61,7 +62,6 @@ import {
   classifyEntry,
   listEntries,
   parseEntryText,
-  removeNameMail,
   sessionEntryPath,
   type RegistryDeps,
 } from "./session-registry.ts";
@@ -69,7 +69,7 @@ import {
 /** What the orphan sweep did, per name — reported, never silently swallowed. */
 export interface SweepReport {
   examined: number;
-  reaped: { name: string; sessionId: string; sessionKilled: boolean; inboxRemoved: boolean }[];
+  reaped: { name: string; sessionId: string; sessionKilled: boolean }[];
   kept: { name: string; reason: string }[];
   notes: string[];
 }
@@ -164,25 +164,25 @@ export function sweepOrphans(deps: RegistryDeps, self?: { sessionId?: string; na
       report.kept.push({ name: entry.name, reason: "登记已被另一个回收者处理" });
       continue;
     }
-    // THE CAS (reviewer P1 on t3, 2026-09-25). Between “the dead holder's
-    // registration was removed” and “its mail is deleted” the name can be
-    // TAKEN: a fresh session claims it, is live, is sent a message — and this
-    // removal would destroy that message. So the name is re-read first: if
-    // somebody holds it NOW, nothing here is ours to delete. The window
-    // between this read and the removal is not zero (only name and mail
-    // sharing one atomic unit would make it so), but it is the narrowest this
-    // layering allows, and it is the difference between “deleting a new
-    // holder's mail” and “deleting mail nobody can be sent”.
-    const reclaimed = parseEntryText(deps.io.readText(sessionEntryPath(deps.root, entry.name)));
-    if (reclaimed !== undefined) {
-      report.kept.push({ name: entry.name, reason: "名字在回收过程中被新会话接管 —— 属于新持有者的邮件不动" });
-      report.notes.push(`${entry.name}: 名字已被新会话接管，跳过 mail 清理`);
-      continue;
-    }
-    // The inbox, the parked copy a half-consumed one leaves behind, and any
-    // spilled body (t3): all of it belongs to the name this dead session held.
-    const inboxRemoved = removeNameMail(deps, entry.name);
-    report.reaped.push({ name: entry.name, sessionId: entry.sessionId, sessionKilled, inboxRemoved });
+    // THE INBOX IS NOT TOUCHED (reviewer P1 twice, 2026-09-25).
+    //
+    // “The holder is dead, so delete its mail” reads safe and is not. Removing
+    // the registration — the move above already did it — is what FREES the
+    // name, and a fresh session can claim it and be SENT a message between that
+    // moment and any deletion here. That message would be destroyed after its
+    // sender was told it had been delivered. Re-reading the registration first
+    // only narrows the window (the reviewer said so, correctly); the only thing
+    // that would close it is making a name and its mail ONE atomic unit, which
+    // would rewrite t2's path contract for a race whose loser is somebody's
+    // message.
+    //
+    // So the mail stays where it is. A name nobody holds cannot be sent
+    // anything (the sender requires a live recipient), so the leftovers cannot
+    // grow; whoever takes the name next reads them and skips what was addressed
+    // to the previous holder (lib/session-message-tools.ts), which is also where
+    // the file's space is finally reclaimed.
+    report.notes.push(`${entry.name}: inbox 留在原地（名字与邮件无法原子清理，删它会丢新持有者的信）`);
+    report.reaped.push({ name: entry.name, sessionId: entry.sessionId, sessionKilled });
   }
   return report;
 }

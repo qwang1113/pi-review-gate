@@ -225,14 +225,16 @@ test("the sweep really kills what a dead holder left, and never what it cannot p
     const report = sweepOrphans(sweepDeps(root));
     assert.deepEqual(report.reaped.map((r) => r.name), ["dead-session"]);
     assert.equal(report.reaped[0]?.sessionKilled, true);
-    assert.equal(report.reaped[0]?.inboxRemoved, true);
+    // NOT DELETED (2026-09-25, reviewer P1 twice): the sweep frees the name and
+    // deliberately leaves the mail — a fresh session may claim the name and be
+    // sent a message before any cleanup could run.
     // tmux's own answer: the dead session is gone, the foreign one is untouched.
     // Read as a LIST, not with `has-session -t <name>`: tmux resolves a session
     // target by prefix when the exact name is absent (measured on 3.7c: with only
     // `…dead000000x` left, `has-session -t …dead000000` answers YES), so the
     // question "is this exact session still there" has to be asked of the list.
     assert.deepEqual(tmux(["list-sessions", "-F", "#{session_name}"]).split("\n"), [foreign]);
-    assert.equal(existsSync(sessionInboxPath(root, "dead-session")), false);
+    assert.equal(existsSync(sessionInboxPath(root, "dead-session")), true, "its mail stays — nobody deletes another session's inbox");
     assert.match(report.kept.find((k) => k.name === "not-ours")?.reason ?? "", /归属标记是 someone-else/);
   } finally {
     rmSync(root, { recursive: true, force: true });

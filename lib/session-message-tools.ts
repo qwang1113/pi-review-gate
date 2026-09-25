@@ -39,10 +39,37 @@
  * ── ONE RECIPIENT, ONE NAME, AND NO SECOND LIVENESS ANSWER ──
  *
  * The sender picks a NAME; `liveSessionNames()` (lib/session-name-tools.ts) is
- * what turns the registry into "which of these are still sessions", and this
+ * what turns the registry into “which of these are still sessions”, and this
  * module never writes a second answer to that question. A name that is not live
  * fails with the list of names that ARE — a sender that guessed wrong should
  * have the actual addresses in the receipt, not just a refusal.
+ *
+ * A MESSAGE IS ADDRESSED TO A NAME *AND* TO THE SESSION THAT HELD IT THEN
+ * ({@link SessionInboxRecord.toSessionId}). A name is an address and addresses
+ * get reused; without that field a session that took a name over would read
+ * mail meant for its predecessor. The consumer skips what was not addressed to
+ * it, which is also why NOTHING EVER DELETES MAIL ON SOMEBODY ELSE'S BEHALF:
+ *
+ *   - a released name keeps whatever is in it (lib/session-registry.ts
+ *     `releaseName`), and the orphan sweep does not collect a dead holder's
+ *     inbox either;
+ *   - whoever takes the name over reads it (skipping what was not theirs), so
+ *     the leftovers are reclaimed the next time the name is used — and if it is
+ *     never used again they simply stay, which is a bounded amount of dead file
+ *     nobody can be hurt by;
+ *   - the consumer deletes what IT has read, which is the only deletion in this
+ *     module and races with nobody.
+ *
+ * THAT IS A DELIBERATE REVERSAL (reviewer P1 twice, 2026-09-25). The tempting
+ * cleanup — “the holder is gone, delete its inbox” — cannot be made safe at this
+ * layering: freeing a name and deleting its mail are two operations, and a fresh
+ * session can claim the name and be sent a message in between. Trying to close
+ * that with a re-read (a CAS) only narrows the window; the only remaining
+ * alternative would be to make the name and its mail ONE atomic unit (a
+ * directory per name, moved aside in a single `rename`), which would rewrite
+ * t2's path contract for a race whose loser is somebody's message. Leaving the
+ * file is the cheap failure; a message deleted after its sender was told it was
+ * delivered is not.
  *
  * ── TAKING THE INBOX IS A RENAME, NOT A READ-AND-CLEAR ──
  *
@@ -118,6 +145,14 @@ export interface SessionInboxRecord {
   messageId: string;
   /** The sender's name, without the `@`. */
   from: string;
+  /**
+   * WHO the message was addressed to: the pi session id of the session that
+   * held `name` at the moment it was sent.
+   *
+   * Optional, and absent on records written before this field existed — those
+   * are delivered to whoever holds the name (the only reading available).
+   */
+  toSessionId?: string;
   fromSessionId: string;
   fromRepo: string;
   fromMode: string;
@@ -195,6 +230,9 @@ export function parseInboxRecord(line: string): SessionInboxRecord | undefined {
   const hasRef = !!textRef && typeof textRef.path === "string" && textRef.path.trim() !== "";
   const text = typeof value.text === "string" ? value.text : undefined;
   if (text === undefined && !hasRef) return undefined;
+  const toSessionId = typeof value.toSessionId === "string" && value.toSessionId.trim() !== ""
+    ? value.toSessionId.trim()
+    : undefined;
   return {
     kind: SESSION_MESSAGE_KIND,
     messageId,
@@ -205,6 +243,7 @@ export function parseInboxRecord(line: string): SessionInboxRecord | undefined {
     at,
     ...(text === undefined ? {} : { text }),
     ...(hasRef ? { textRef } : {}),
+    ...(toSessionId === undefined ? {} : { toSessionId }),
   };
 }
 
@@ -345,6 +384,12 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
           fromSessionId: sender.sessionId,
           fromRepo: sender.repo,
           fromMode: sender.mode,
+          // WHO IS BEING ADDRESSED: the name plus the session holding it right
+          // now. A name can change hands before the message is read, and the
+          // next holder must not be handed this one's mail.
+          ...(target.sessionId === undefined || target.sessionId === ""
+            ? {}
+            : { toSessionId: target.sessionId }),
           at,
           text,
         },
@@ -436,8 +481,10 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
    * leaves the untouched tail exactly where the next tick will find it.
    */
   function drain(): void {
-    const name = deps.self().name?.trim();
+    const self = deps.self();
+    const name = self.name?.trim();
     if (name === undefined || name === "") return;
+    const mySessionId = self.sessionId.trim();
     const inbox = sessionInboxPath(root, name);
     const taken = sessionInboxTakenPath(root, name);
     // A parked copy from a previous tick is finished FIRST, and the live inbox
@@ -458,6 +505,15 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
       const record = parseInboxRecord(lines[index]);
       if (record === undefined) {
         log(`inbox 有一行读不出来，已跳过：${lines[index].slice(0, 120)}`);
+        continue;
+      }
+      // NOT ADDRESSED TO ME (reviewer P1, 2026-09-25): the message names the
+      // session that held this name when it was sent, and this session took the
+      // name over afterwards. Reading it would hand a new holder somebody
+      // else's mail; it is dropped here, with the parked file, which is the only
+      // place these leftovers are ever reclaimed.
+      if (record.toSessionId !== undefined && mySessionId !== "" && record.toSessionId !== mySessionId) {
+        log(`来自 @${record.from} 的消息是发给上一个持有这个名字的会话的（${record.toSessionId}），已丢弃`);
         continue;
       }
       const text = record.text ?? resolvePayload(io, record.textRef);

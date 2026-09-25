@@ -142,6 +142,7 @@ test("send_message delivers to a live name, with or without the @ prefix", async
   assert.equal(stored?.from, ME);
   assert.equal(stored?.text, "把 lib/foo.ts 的导出改名");
   assert.equal(stored?.fromSessionId, MY_SESSION);
+  assert.equal(stored?.toSessionId, THEIR_SESSION, "a message names the session that held the name when it was sent");
 
   // The prefix is courtesy, not syntax: the bare name is the same address.
   const second = await at.tool.execute("2", { to: THEIRS, text: "第二条" });
@@ -239,6 +240,54 @@ test("a spilled body is removed once it has been injected — the side file is n
   receiver.messaging.drain();
   assert.equal(receiver.injected.length, 1);
   assert.equal(files.has(side), false, "once injected, the side file is dead weight");
+});
+
+test("mail addressed to the PREVIOUS holder of a name is dropped, not handed to the new one", async () => {
+  // REVIEWER P1, 2026-09-25. A name can change hands between the send and the
+  // read, and a session that took a name over must not be handed its
+  // predecessor's correspondence.
+  const files = new Map<string, string>();
+  await seedMessage(files, "这是发给现在这位的");
+  const previous = {
+    kind: "session-message",
+    messageId: "msg-old",
+    from: "seeder",
+    fromSessionId: "sess-someone-else",
+    fromRepo: "/repo/pi-review-gate",
+    fromMode: "loop",
+    toSessionId: "019fbb1d-9e78-7ebf-88bf-thepreviousone",
+    at: new Date(NOW).toISOString(),
+    text: "这是发给上一位持有者的",
+  };
+  files.set(inbox(ME), `${
+    [files.get(inbox(ME)) ?? "", `${JSON.stringify(previous)}\n`].filter((line) => line !== "").join("").split("\n").filter((l) => l !== "").reverse().join("\n")
+  }\n`);
+
+  const at = makeLab({ files });
+  at.messaging.drain();
+  assert.equal(at.injected.length, 1, "only the one addressed to this session is delivered");
+  assert.match(at.injected[0], /这是发给现在这位的/);
+  assert.equal(files.get(inbox(ME)), undefined, "and the parked file — the predecessor's mail included — is reclaimed");
+});
+
+test("a record with no toSessionId (written before the field existed) is still delivered", async () => {
+  const files = new Map<string, string>();
+  const legacy = {
+    kind: "session-message",
+    messageId: "msg-legacy",
+    from: "seeder",
+    fromSessionId: "sess-old",
+    fromRepo: "/repo/pi-review-gate",
+    fromMode: "loop",
+    at: new Date(NOW).toISOString(),
+    text: "没有 toSessionId 的老记录",
+  };
+  files.set(inbox(ME), `${JSON.stringify(legacy)}\n`);
+
+  const at = makeLab({ files });
+  at.messaging.drain();
+  assert.equal(at.injected.length, 1, "no field ⇒ the only reading available: whoever holds the name");
+  assert.match(at.injected[0], /没有 toSessionId 的老记录/);
 });
 
 // ---------------------------------------------------------------------------

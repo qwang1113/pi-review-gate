@@ -14352,7 +14352,11 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     for (const reaped of namingStart.sweep.reaped) {
       log(
         `review-gate[session-name] 回收孤儿：${reaped.name}（${reaped.sessionId}）` +
-        `${reaped.sessionKilled ? "，已 kill 它的专属 tmux session" : ""}${reaped.inboxRemoved ? "，已清 inbox" : ""}`,
+        `${reaped.sessionKilled ? "，已 kill 它的专属 tmux session" : ""}`,
+        // NO “已清 inbox” HERE (2026-09-25, reviewer P1 twice): the sweep does
+        // not delete a dead holder's mail — the name it leaves behind may be
+        // claimed by a new session before any cleanup could run. The reason is
+        // written in full at the removal site in lib/session-orphan-sweep.ts.
       );
     }
     startSessionNamingHeartbeat();

@@ -57,7 +57,11 @@ function runtime(root: string, opts: { name?: string; inject?: (text: string) =>
     liveSessions: () => ({ live: [entry(ME)], unknown: [] }),
     self: () => ({
       ...(opts.name === undefined ? {} : { name: opts.name }),
-      sessionId: "sess-sender",
+      // THE SESSION ID IS THE REAL RECIPIENT IDENTITY: a message names the
+      // session that held the name when it was sent, and a holder whose id does
+      // not match drops it. `entry()` derives ids the same way, so a runtime
+      // built for a name receives what was sent to that name.
+      sessionId: `sess-${opts.name ?? "sender"}`,
       repo: "/repo/pi-review-gate",
       mode: "loop",
     }),
