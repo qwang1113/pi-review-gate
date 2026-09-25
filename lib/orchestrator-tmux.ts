@@ -294,8 +294,10 @@ function envCommand(
 
 /**
  * Every environment variable through which the gate tells a process WHO it is
- * (its role, its opener, its channel, its sidecar). Kept in step with the
- * `*_ENV = "RG_…"` constants across lib/ by a test.
+ * (its role, its opener, its channel, its sidecar) or how it behaves. Kept in
+ * step with every `*_ENV = "RG_…"` constant and `env.RG_…` read across lib/
+ * by a test. `REVIEW_GATE_BYPASS` is deliberately not here: it is the USER's
+ * switch for the git hooks, not a variable the gate hands a child.
  */
 export const GATE_ENV_NAMES: readonly string[] = Object.freeze([
   "RG_ACCEPTANCE_GATE",
@@ -310,6 +312,7 @@ export const GATE_ENV_NAMES: readonly string[] = Object.freeze([
   "RG_JUDGE_ROLE",
   "RG_JUDGE_STREAM",
   "RG_JUDGE_TASK",
+  "RG_NO_SIDE_EFFECTS",
   "RG_ORCHESTRATION_ID",
   "RG_PARENT_SESSION",
   "RG_STATE_VARIANT",

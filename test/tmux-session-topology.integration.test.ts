@@ -283,7 +283,6 @@ test("an unreadable tmux is 'I do not know' — never a licence to create or kil
     assert.equal(judgePaneAlive(blind, "%1"), undefined);
 });
 
-/** Read a file the child wrote, once it exists. */
 /** A shell-free probe child: writes env[argv[2]] to argv[3], then stays alive. */
 function envProbe(dir: string): string {
   const dump = join(dir, "dump.mjs");
@@ -297,6 +296,7 @@ function envProbe(dir: string): string {
   return dump;
 }
 
+/** Read a file the child wrote, once it exists. */
 async function waitForFile(path: string): Promise<string> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {

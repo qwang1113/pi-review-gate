@@ -6514,8 +6514,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     return parts.join("\n\n");
   }
 
-  function gatherGitLog(_cwd: string): string {
-    return gitOrNull(cwd, ["log", "--oneline", "-15"], { timeout: 15000 }) ?? "(git log unavailable)";
+  function gatherGitLog(dir: string): string {
+    return gitOrNull(dir, ["log", "--oneline", "-15"], { timeout: 15000 }) ?? "(git log unavailable)";
   }
 
   // ---------- L7: post-PR Copilot code-review loop ----------

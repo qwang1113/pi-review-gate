@@ -378,12 +378,12 @@ test("nothing in the tmux module reads the passthrough option any more", () => {
     "the option belongs to the user's config; with OSC gone the gate has no business reading it");
 });
 
-test("GATE_ENV_NAMES lists every `*_ENV = \"RG_…\"` constant in lib/", () => {
+test("GATE_ENV_NAMES lists every `*_ENV = \"RG_…\"` constant and `env.RG_…` read in lib/", () => {
   const libDir = join(import.meta.dirname ?? ".", "..", "lib");
   const declared = new Set<string>();
   for (const file of readdirSync(libDir).filter((f) => f.endsWith(".ts"))) {
-    for (const m of readFileSync(join(libDir, file), "utf8").matchAll(/const \w+_ENV\s*=\s*"(RG_[A-Z_]+)"/g)) {
-      declared.add(m[1]!);
+    for (const m of readFileSync(join(libDir, file), "utf8").matchAll(/const \w+_ENV\s*=\s*"(RG_[A-Z_]+)"|env(?:\.|\[")(RG_[A-Z_]+)/g)) {
+      declared.add((m[1] ?? m[2])!);
     }
   }
   assert.deepEqual([...GATE_ENV_NAMES].sort(), [...declared].sort(),
