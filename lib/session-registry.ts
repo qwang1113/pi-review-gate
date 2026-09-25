@@ -58,11 +58,8 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import {
-  buildListServerPanesArgv,
-  isOwnSessionName,
-  parsePaneIds,
-} from "./orchestrator-tmux.ts";
+import { isOwnSessionName } from "./orchestrator-tmux.ts";
+import { listServerPanes } from "./judge-pane.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 
 /** Directory holding one JSON file per named session, under the agent home. */
@@ -365,15 +362,10 @@ export function classifyEntry(deps: RegistryDeps, entry: SessionRegistryEntry): 
   if (age === undefined) return "unknown";
   if (age < SESSION_STALE_MS) return "live";
   // Stale — now ask the two questions that separate "blocked" from "gone".
-  const panes = ((): string[] | undefined => {
-    try {
-      const result = deps.runTmux(buildListServerPanesArgv());
-      if (!result.ok) return undefined;
-      return parsePaneIds(result.stdout);
-    } catch {
-      return undefined;
-    }
-  })();
+  // The pane list comes from the ONE reader of it (lib/judge-pane.ts), so this
+  // classification and the judge probe cannot disagree about what an
+  // unreadable list means (2026-09-25, quality round P2).
+  const panes = listServerPanes((argv) => deps.runTmux(argv));
   if (panes === undefined) return "unknown";
   // A heartbeat that stopped while the pane lives is a session that is stuck or
   // suspended, not one that exited: it keeps its name.

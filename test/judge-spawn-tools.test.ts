@@ -228,7 +228,7 @@ test("spawn plan opens a pane, registers the opener, and names the judge", async
   const entry = store.table[ids[0]!]!;
   assert.equal(entry.openerId, "session-child-1");
   assert.equal(entry.paneId, "%7");
-  // Recorded WITH the pane id. Without it `paneClosable` refuses forever, so
+  // Recorded WITH the pane id. Without it `windowClosable` refuses forever, so
   // declare_done's cascade would delete the entry and leave the pane running
   // with nobody able to address it (reviewer P1, 2026-09-05).
   assert.equal(entry.tmuxServer, "sock,1", "the pane id is useless without the server that minted it");

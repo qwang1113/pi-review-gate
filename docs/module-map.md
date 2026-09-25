@@ -272,7 +272,7 @@ judge 的**唯一**注册表：扩展里那份内存 `childSessions` Map 已于 
 根因）。合并后条目自带 `title` / `sessionDir` / `spawnedAt`，读点分两类：问「还在
 跑吗」的走 `judgeLive`（缺信息判活，绝不误终结等待），问「我拥有什么」的走
 `listByOpener`（联关要连死 pane 的条目一起回收）；按 pane id 关 pane 前另有
-`paneClosable`（tmux server 重启后 id 会重排，缺信息一律不动手）。
+`windowClosable` / `paneIdUsable`（tmux server 重启后 id 会重排，缺信息一律不动手）。
 `judge-side.ts` 是 pane 内门禁的 reporting
 shell（heartbeat、对话框竞态，复用子会话通道原语，不另起通道；它**不写**主仓库
 门禁状态——判定在 `session-exclusivity.ts` 的 `gateStateWriteSkip`，2026-09-05 判 judge，

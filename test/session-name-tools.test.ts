@@ -12,7 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
-import { createSessionNaming, type SessionNamingDeps } from "../lib/session-name-tools.ts";
+import { createSessionNaming, liveSessionNames, type SessionNamingDeps } from "../lib/session-name-tools.ts";
 import {
   parseEntryText,
   sessionEntryPath,
@@ -49,7 +49,7 @@ function fakeIO(files: Map<string, string> = new Map()): RegistryIO {
  * A tmux server that REMEMBERS the three things this layer writes: the window
  * title, the window option, and which panes exist.
  */
-function fakeTmux(opts: { windowName?: string; option?: string; panes?: string[]; markers?: Record<string, string> } = {}) {
+function fakeTmux(opts: { windowName?: string; option?: string; panes?: string[]; markers?: Record<string, string>; blind?: boolean } = {}) {
   const state = {
     windowName: opts.windowName ?? "node",
     option: opts.option ?? "",
@@ -59,6 +59,7 @@ function fakeTmux(opts: { windowName?: string; option?: string; panes?: string[]
   };
   const run = (argv: readonly string[]) => {
     state.calls.push([...argv]);
+    if (opts.blind) return { ok: false, stdout: "", stderr: "no server" };
     switch (argv[0]) {
       case "display-message":
         return {
@@ -125,6 +126,15 @@ function makeNaming(opts: {
 }
 
 const textOf = (reply: ToolReply): string => reply.content.map((part) => part.text).join("\n");
+
+/** A registry entry in the shape this module writes, for the listing tests. */
+function entryForTest(name: string, sessionId: string, at: number) {
+  return {
+    schema: 1, name, sessionId, pid: 4242, repo: "/repo/pi-review-gate", cwd: "/repo/pi-review-gate",
+    mode: "loop", state: "working", tmux: { session: "0", window: "@45", pane: PANE },
+    registeredAt: new Date(at - 60_000).toISOString(), heartbeatAt: new Date(at).toISOString(),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // the tool
@@ -308,6 +318,45 @@ test("the entry carries the session's scope session once it has one, so the swee
   naming.tick();
   assert.equal(parseEntryText(files.get(sessionEntryPath(ROOT, "t2-registry")))?.scopeSession, scope,
     "the dedicated session is recorded by the next heartbeat");
+});
+
+test("a release that could not give the name back keeps it — the registry and the screen never disagree", async () => {
+  // QUALITY ROUND P2 (2026-09-25): `held` used to be cleared BEFORE the failure
+  // was looked at, so a failed release left the session believing it had no
+  // name (nothing renews, nothing retries) while the entry — owned by this
+  // very process — still looked live to every other reader. The window must not
+  // be put back either: a registry that still says "mine" and a screen that
+  // says nothing is the other half of the same lie.
+  const { files, tmux, run, naming } = makeNaming();
+  await run("t2-registry");
+  // Somebody else's entry, as if the name had been taken over under us.
+  files.set(sessionEntryPath(ROOT, "t2-registry"), JSON.stringify({
+    ...JSON.parse(String(files.get(sessionEntryPath(ROOT, "t2-registry")))),
+    sessionId: THEIRS,
+  }));
+  const released = naming.release();
+  assert.equal(released.released, false);
+  assert.match(released.error ?? "", /已不归本会话/);
+  assert.equal(naming.currentName(), "t2-registry", "the session still holds what the registry did not confirm it lost");
+  assert.equal(tmux.state.option, "t2-registry", "…and the window is not put back behind the registry's back");
+  assert.equal(tmux.state.windowName, "t2-registry");
+});
+
+test("listing the addressable names reports WHO IS ALIVE and never drops the ones it cannot judge", async () => {
+  const stale = new Date(NOW - SESSION_STALE_MS - 1000).toISOString();
+  const files = new Map<string, string>([
+    [sessionEntryPath(ROOT, "alive-one"), JSON.stringify(entryForTest("alive-one", MINE, NOW))],
+    [sessionEntryPath(ROOT, "dead-one"), JSON.stringify(entryForTest("dead-one", THEIRS, Date.parse(stale)))],
+  ]);
+  const { naming } = makeNaming({ files });
+  void naming;
+  const live = liveSessionNames({ root: ROOT, io: fakeIO(files), runTmux: fakeTmux({ panes: [] }).run, now: () => NOW, alive: () => false });
+  assert.deepEqual(live.live.map((e) => e.name), ["alive-one"]);
+  assert.deepEqual(live.unknown, [], "a provably dead holder is not \"unknown\"");
+  // An unreadable tmux is missing information: the stale one is reported as
+  // unknown rather than silently dropped from the list a caller picks from.
+  const blind = liveSessionNames({ root: ROOT, io: fakeIO(files), runTmux: fakeTmux({ blind: true }).run, now: () => NOW, alive: () => false });  assert.deepEqual(blind.live.map((e) => e.name), ["alive-one"]);
+  assert.deepEqual(blind.unknown.map((e) => e.name), ["dead-one"]);
 });
 
 test("the registry root defaults to the agent home, and the inbox sits beside the entry", () => {

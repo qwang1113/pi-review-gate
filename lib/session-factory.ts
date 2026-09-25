@@ -561,13 +561,13 @@ export async function openSessionWindow(
         ...(spec.decor === undefined ? {} : { windowName: spec.decor.label }),
       });
   if (!coords.ok) {
-    // A child that came up but whose DELIVERY check failed is KEPT, so its
-    // coordinates travel with the failure: the caller can address, decorate
-    // and later close exactly what was opened.
-    const kept: Partial<SessionPaneCoords> = "paneId" in coords && typeof coords.paneId === "string"
-      ? { paneId: coords.paneId }
-      : {};
-    return { ok: false, error: coords.error, ...kept };
+    // A FAILED OPEN YIELDS NO COORDINATES, and there is nothing to keep
+    // (2026-09-25, quality round P2): both openers return `{ok:false; error}`
+    // and nothing else, so the `"paneId" in coords` carry-forward that used to
+    // sit here could only ever produce `{}`. The case it LOOKED like it handled
+    // — opened, but the delivery check failed — is the `deliveryFailed` branch
+    // below, which has real coordinates to keep.
+    return { ok: false, error: coords.error };
   }
   // EXPLICIT FIELDS, never a spread of the scope's own result (2026-09-25):
   // that result carries an `ok` of its own, and spreading it here silently

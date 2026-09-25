@@ -7269,7 +7269,7 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   const dispatch = windowOf("async function dispatchAcceptanceRound", "\n  /**", "dispatchAcceptanceRound");
   assert.match(dispatch, /dispatchJudgeRound\(\{/);
   assert.match(dispatch, /role: "acceptance",/);
-  assert.doesNotMatch(dispatch, /openSessionPane|runTmux\(|appendRecord\(/,
+  assert.doesNotMatch(dispatch, /openSessionWindow|runTmux\(|appendRecord\(/,
     "a second pane/dispatch path is exactly what the third philosophy forbids");
   assert.match(SRC, /recordAcceptance: async \(\{ root, concluded \}\) =>/, "the recorder is wired beside recordQuality's");
   const arm = windowOf("async function armAcceptanceRound", "\n  /**", "armAcceptanceRound");

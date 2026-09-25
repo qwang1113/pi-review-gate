@@ -548,11 +548,13 @@ export function probeJudgeRound(
    * The state comes from the CHANNEL projection, never from the screen, and
    * the paint is throttled and failure-swallowed inside the shared function.
    *
-   * `paneClosable` FIRST, for the same reason the kill path checks it: the
-   * registry is persisted, so an entry restored after a tmux server restart
-   * carries a pane id that server has since handed to somebody else. Writing a
-   * title through it would rename a stranger's pane — cosmetic, but in the
-   * user's own window, and unverifiable ids are never acted on here.
+   * `paneIdUsable` FIRST, and it is a slightly different question from the
+   * kill path's: the registry is persisted, so an entry restored after a tmux
+   * server restart carries a pane id that server has since handed to somebody
+   * else. Writing a title through it would rename a stranger's pane —
+   * cosmetic, but in the user's own window. (A repaint needs only the pane id
+   * to be usable; a close also needs the window and session it was recorded
+   * with, which is `windowClosable`.)
    */
   const paintTitle = (state: ChildState | undefined, since?: string): void => {
     if (!child.paneId || !child.role || state === undefined) return;

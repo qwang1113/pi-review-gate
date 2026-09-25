@@ -541,7 +541,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   （状态栏据它显示「目录名 · 会话名」，没命名的 window 逐字不变），并登记到
   `~/.pi/agent/rg-sessions/<名字>.json`。撞上活着的占用者**直接拒绝并点名占用者**（repo/状态/登记时间），
   绝不加后缀、不覆盖、不踢人；只有心跳陈旧 **且** pid 不在 **且** pane 不在才能接管；会话启动时扫一遍
-  回收死者留下的 tmux session/登记/inbox（先比对 `@rg_scope_owner` 标记），`declare_done` 与进程退出腾出名字。
+  回收死者留下的 tmux session/登记/inbox（先比对 `@rg_scope_owner` 标记），`declare_done` 与进程 `exit` 时腾出名字。
   **判定全在 `lib/session-registry.ts`（名字与占用判定）、`lib/session-orphan-sweep.ts`（回收）与
   `lib/session-name-tools.ts`（工具 + 生命周期）**，扩展只接线四件事（注册工具、
   session_start 接管+扫孤儿+装定时器、declare_done 释放、进程 exit 释放）；`@名字` 发消息是 t3 的活。

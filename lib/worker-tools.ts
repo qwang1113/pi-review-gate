@@ -888,6 +888,16 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
   const killed = entry.windowId && entry.tmuxSession
     ? deps.closeWindow({ ownSession: entry.tmuxSession, windowId: entry.windowId })
     : false;
+  // WHAT THIS CALL ACTUALLY KNOWS, said honestly (2026-09-25, quality round
+  // P2). "已不在（视为关闭）" was one sentence for two different facts: tmux
+  // REFUSED the close (the window may well still be on screen, and a caller
+  // told it was closed stops looking), or the entry carried no window
+  // coordinates at all (an older row — this tool has nothing to close and
+  // cannot tell whether it is still open). Neither is "closed", so neither
+  // claims it.
+  const closeNote = entry.windowId && entry.tmuxSession
+    ? (killed ? "已关闭" : "关闭失败（tmux 拒绝）—— 那个 window 可能还开着")
+    : "登记里没有 window 坐标（可能已经关过，也可能是旧版本留下的）—— 它是否还开着无法确认，请人工确认后清理";
   // THE ENTRY STAYS (reviewer P1, 2026-09-21). Closing a window releases
   // SCREEN SPACE, not the conversation: the channel owner, the session id and
   // the report cursor are exactly what a later `worker_submit` needs to resume
@@ -897,8 +907,8 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
   const { paneId: _closedPane, windowId: _closedWindow, tmuxSession: _closedSession, ...kept } = entry;
   deps.saveRegistry(withWorker(registry, kept));
   return reply(
-    `review-gate: worker ${workerId} 的 window ${entry.windowId ?? entry.paneId} ${killed ? "已关闭" : "已不在（视为关闭）"}。\n` +
+    `review-gate: worker ${workerId} 的 window ${entry.windowId ?? entry.paneId} ${closeNote}。\n` +
     "它的 transcript 留在磁盘上：再用同一个 `workerId` 派活会接着同一会话（`" + entry.sessionId + "`）。",
-    { workerId, closed: true, paneId: entry.paneId },
+    { workerId, closed: killed, paneId: entry.paneId },
   );
 }

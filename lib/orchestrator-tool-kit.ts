@@ -14,7 +14,7 @@
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
 import { basename } from "node:path";
-import { buildListServerPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
+import { listServerPanes } from "./judge-pane.ts";
 import { childPaneLabel, pmPaneLabel } from "./orchestrator-pane-decor.ts";
 import { paintPaneTitle, refreshSessionPaneTitle, type PaneTitleMemory } from "./session-factory.ts";
 import { channelPathFor, projectChannel, readChannel, type ChannelIO } from "./orchestrator-channel.ts";
@@ -87,13 +87,12 @@ export function requireOrchestratorMode(deps: OrchestratorDeps): ToolReply | und
  * every healthy child would read as gone.
  */
 export function alivePanes(deps: OrchestratorDeps): { panes: string[]; ok: boolean } {
-  try {
-    const result = deps.tmux(buildListServerPanesArgv());
-    if (!result.ok) return { panes: [], ok: false };
-    return { panes: parsePaneIds(result.stdout), ok: true };
-  } catch {
-    return { panes: [], ok: false };
-  }
+  // ONE reading of the server's pane list (lib/judge-pane.ts `listServerPanes`,
+  // 2026-09-25 quality round P2): the judge probe, this check and the session
+  // registry all ask the same question, and an unreadable list is the same
+  // missing information in all three.
+  const panes = listServerPanes((argv) => deps.tmux(argv));
+  return panes === undefined ? { panes: [], ok: false } : { panes, ok: true };
 }
 
 /**

@@ -100,7 +100,7 @@ export interface JudgeSpawnToolDeps {
    * The tmux server this process talks to (lib/hierarchy.ts `tmuxServerFrom`).
    *
    * Recorded WITH the pane id: an entry that has one without the other can
-   * never be closed by it again (`paneClosable` refuses), which would strand
+   * never be closed by it again (`windowClosable` refuses), which would strand
    * the pane instead of protecting it.
    */
   tmuxServer(): string | undefined;

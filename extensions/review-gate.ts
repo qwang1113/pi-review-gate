@@ -214,7 +214,7 @@ import {
   JUDGE_OPENER_ENV,
   JUDGE_ROLE_ENV,
   judgePaneAlive,
-  listJudgePanes,
+  listServerPanes,
   type JudgePaneRunner,
 } from "../lib/judge-pane.ts";
 import {
@@ -4053,10 +4053,12 @@ export default function reviewGate(pi: ExtensionAPI) {
    * The panes this session's tmux SERVER has, or undefined when unreadable.
    *
    * SERVER-WIDE since 2026-09-25: a judge is no longer a pane of this window,
-   * and asking about the window would answer "none" for every live one.
+   * and asking about the window would answer "none" for every live one — the
+   * name says SERVER precisely because the old name (`listOwnWindowPanes`) read
+   * as the question it no longer asks (quality round P2).
    */
-  function listOwnWindowPanes(): string[] | undefined {
-    try { return listJudgePanes((argv) => runTmux(argv)); }
+  function listServerPanesForThisSession(): string[] | undefined {
+    try { return listServerPanes((argv) => runTmux(argv)); }
     catch { return undefined; }
   }
 
@@ -4078,7 +4080,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * server is not comparable at all.
    */
   function ownLiveJudges(): JudgeEntry[] {
-    const panes = listOwnWindowPanes();
+    const panes = listServerPanesForThisSession();
     const server = tmuxServerFrom(process.env);
     return ownJudges().filter((e) => judgeLive(e, panes, server));
   }
@@ -4337,7 +4339,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   function dropDeadForeignJudges(): void {
     const caller = callerIdentity();
     if (!caller) return;
-    const panes = listOwnWindowPanes();
+    const panes = listServerPanesForThisSession();
     let changed = false;
     for (const [id, e] of Object.entries(judgeHierarchy)) {
       if (e.openerId === caller) continue;
@@ -8793,7 +8795,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const ownPane = process.env.TMUX_PANE?.trim() || undefined;
     const run = (argv: readonly string[]) => runTmux(argv);
     // Stamped on every entry that records a pane, and checked before any use
-    // of a recorded one (see lib/hierarchy.ts `paneClosable`).
+    // of a recorded one (lib/hierarchy.ts `windowClosable` for a close,
+    // `paneIdUsable` for a repaint — the two ask slightly different questions
+    // on purpose).
     const tmuxServer = tmuxServerFrom(process.env);
 
 
@@ -13770,7 +13774,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // they produced and carry on), live fresh ones are HOSTED (the agent
     // keeps doing deterministic work or blocks in bash on the three
     // criteria) — never idle.
-    const paneList = listOwnWindowPanes();
+    const paneList = listServerPanesForThisSession();
     const tmuxServer = tmuxServerFrom(process.env);
     const childSnapshots: ChildSnapshot[] = [];
     const sessionIdsBySession = new Map<string, string>();

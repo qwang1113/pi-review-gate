@@ -275,21 +275,33 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
     );
   }
 
-  /** The shared release path: registry first, then the window. */
+  /**
+   * The shared release path: registry first, then the window.
+   *
+   * ALL OR NOTHING, and that is why the order is this one (quality round P2,
+   * 2026-09-25): the registration is given back FIRST, and only when that
+   * succeeded is the window put back. A registry delete that failed leaves the
+   * entry ours — clearing the title/option anyway would leave the registry
+   * saying "this session holds X" while the screen says nothing of the sort,
+   * and (worse) `held` would have been dropped, so nothing would renew or
+   * retry: the entry would sit there looking LIVE (its pid is this very
+   * process) until the process ended. So a failure keeps the name, keeps the
+   * display, and reports.
+   */
   function releaseInternal(): { ok: boolean; error?: string } {
     const current = held;
     if (current === undefined) return { ok: true };
     const sessionId = deps.sessionId()?.trim() ?? "";
     const released = releaseName(registry, current.name, sessionId);
-    const pane = current.pane;
-    const notes = pane === undefined ? [] : clearDisplay(current.name, pane, current.originalWindowName);
-    for (const note of notes) deps.log?.(note);
-    held = undefined;
     if (!released.ok) {
       const error = released.error ?? `名字 ${current.name} 释放失败`;
       deps.log?.(error);
       return { ok: false, error };
     }
+    const pane = current.pane;
+    const notes = pane === undefined ? [] : clearDisplay(current.name, pane, current.originalWindowName);
+    for (const note of notes) deps.log?.(note);
+    held = undefined;
     return { ok: true };
   }
 

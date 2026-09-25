@@ -19,7 +19,12 @@
  *     accidentally rename one.
  *  2. PANE LIVENESS. "Is that pane still there" is a question every lifecycle
  *     tool asks (wait, close, recover) and no spawner asks; an unreadable list
- *     is missing INFORMATION, never evidence of death.
+ *     is missing INFORMATION, never evidence of death. `listServerPanes` is the
+ *     ONE reading of that list (2026-09-25, quality round P2): the judge probe,
+ *     the orchestrator's "nothing is provably alive" check and the session
+ *     registry's holder classification all ask tmux the same question, and a
+ *     second copy of the argv plus its fail-closed catch is a second answer to
+ *     it.
  *
  * Pure-ish: tmux enters through the injected {@link JudgePaneRunner}, so every
  * branch runs with a fake instead of a terminal.
@@ -57,7 +62,7 @@ export type JudgePaneRunner = (argv: readonly string[]) => JudgePaneRunResult;
  * live child as DEAD — and an opener told its judge is gone goes and re-does
  * the round.
  */
-export function listJudgePanes(run: JudgePaneRunner): string[] | undefined {
+export function listServerPanes(run: JudgePaneRunner): string[] | undefined {
   try {
     const result = run(buildListServerPanesArgv());
     if (!result.ok) return undefined;
@@ -72,7 +77,7 @@ export function judgePaneAlive(
   run: JudgePaneRunner,
   paneId: string,
 ): boolean | undefined {
-  const panes = listJudgePanes(run);
+  const panes = listServerPanes(run);
   if (panes === undefined) return undefined;
   return panes.includes(paneId);
 }

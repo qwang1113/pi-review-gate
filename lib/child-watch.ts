@@ -23,7 +23,7 @@
  *       (after a server restart that id names somebody else's pane, so it is
  *       not this judge under any reading). An UNREADABLE pane list is none of
  *       those and counts as ALIVE — and so does an entry whose server is
- *       simply unknown on either side, which `paneIdComparable` treats as
+ *       simply unknown on either side, which `paneIdUsable` treats as
  *       comparable rather than as a mismatch.
  *
  *       This used to be a process probe — the child's own `exitCode`, backed

@@ -104,7 +104,7 @@ function schedulingVerdict(
  * step the orchestrator takes after `orchestrator_spawn` returns — it is one
  * of the atomic things a spawn already does, exactly like writing the task
  * file. Since 2026-09-05 that atomicity is structural: the decoration happens
- * inside `openSessionPane` (lib/session-factory.ts) for EVERY kind of pane, so
+ * inside `openSessionWindow` (lib/session-factory.ts) for EVERY kind of pane, so
  * this function only says what to write.
  *
  * FAILURE IS COSMETIC, ALWAYS — the factory downgrades every tmux failure here

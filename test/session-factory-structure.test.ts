@@ -16,9 +16,12 @@
  *       builder that constructs it, and the bash guard's forbidden-alias table
  *       (which is not an execution point — it is the list of commands the agent
  *       may not type);
- *   (b) the argv builders are imported and called in exactly two places, both
- *       inside the one opening path: lib/session-factory.ts (a child's window,
- *       the relay's split) and lib/session-tmux-scope.ts (the session itself);
+ *   (b) the argv builders are imported and called in exactly the places their
+ *       job allows: OPENING has one path (lib/session-factory.ts for a child's
+ *       window and the relay's split, lib/session-tmux-scope.ts for the session
+ *       itself), while reading a session's marker and killing one also has the
+ *       orphan sweep — which reclaims a holder that is provably gone and never
+ *       opens anything;
  *
  * Plus: the six call sites that open a pi session all go through the factory.
  */
@@ -62,35 +65,45 @@ test("(a) the split-window literal lives in exactly two files, and neither is a 
     "(that file is a deny-list, not an execution point)");
 });
 
-test("(b) the argv builders have exactly two consumers — one per half of the opening path", () => {
-  // The window/session builders live in the tmux module and are called from
-  // ONE of two adjacent places: the scope module creates and kills the SESSION,
-  // the factory opens and closes a CHILD in it. A third consumer is how a
-  // second opening path starts.
-  const scopeDefined = [
+test("(b) the argv builders have exactly the consumers their job allows — and opening has ONE path", () => {
+  // The window/session builders live in the tmux module. The claim that matters
+  // is about OPENING: exactly one file may create the session and one may open
+  // a child in it, because a third consumer is how a second opening path
+  // starts. Reading a session's marker and KILLING one is a different job with
+  // a second, argued consumer (2026-09-25, t2): the orphan sweep reclaims the
+  // session of a holder that is PROVABLY gone, after reading that session's own
+  // `@rg_scope_owner` marker and finding the dead holder's id in it — it never
+  // creates anything, and its kill goes through the same builder (and the same
+  // shape check) as the owner's own `closeOwnSession`.
+  const openingBuilders = [
     "buildNewSessionArgv",
     "buildNewWindowArgv",
-    "buildKillSessionArgv",
     "buildSetSessionOwnerArgv",
-    "buildReadSessionOwnerArgv",
-    "buildListSessionsArgv",
   ];
+  const readOrKillBuilders = ["buildKillSessionArgv", "buildReadSessionOwnerArgv", "buildListSessionsArgv"];
   const factoryDefined = ["buildHandoffPaneArgv", "buildKillWindowArgv", "buildKillPaneArgv"];
-  for (const [builders, consumer] of [[scopeDefined, "lib/session-tmux-scope.ts"], [factoryDefined, "lib/session-factory.ts"]] as const) {
+  const claims: Array<[readonly string[], string[]]> = [
+    [openingBuilders, ["lib/orchestrator-tmux.ts", "lib/session-tmux-scope.ts"]],
+    [readOrKillBuilders, ["lib/orchestrator-tmux.ts", "lib/session-tmux-scope.ts", "lib/session-orphan-sweep.ts"]],
+    [factoryDefined, ["lib/orchestrator-tmux.ts", "lib/session-factory.ts"]],
+  ];
+  for (const [builders, consumers] of claims) {
     for (const builder of builders) {
       const users = sourceFiles()
         .filter((f) => f.text.includes(builder))
         .map((f) => f.rel)
         .sort();
-      assert.deepEqual(users, ["lib/orchestrator-tmux.ts", consumer].sort(),
-        `${builder} is defined in orchestrator-tmux.ts and used only by ${consumer}`);
+      assert.deepEqual(users, [...consumers].sort(),
+        `${builder} is defined in orchestrator-tmux.ts and used only by ${consumers.slice(1).join(" / ")}`);
     }
   }
-  // …and the factory is NOT a second caller of the session builders: the
-  // session is the scope module's, and only the scope module's.
+  // …and NEITHER the factory NOR the sweep is a second caller of the OPENING
+  // builders: the session is the scope module's, and only the scope module's.
   const factoryText = sourceFiles().find((f) => f.rel === "lib/session-factory.ts")!.text;
-  for (const builder of scopeDefined) {
+  const sweepText = sourceFiles().find((f) => f.rel === "lib/session-orphan-sweep.ts")!.text;
+  for (const builder of openingBuilders) {
     assert.ok(!factoryText.includes(builder), `the factory must not call ${builder} itself`);
+    assert.ok(!sweepText.includes(builder), `the sweep reclaims, it never opens: ${builder} is not its business`);
   }
 });
 
