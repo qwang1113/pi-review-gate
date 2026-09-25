@@ -162,7 +162,7 @@ import {
   sanitizeContextPercent,
   type ReportConclusion,
 } from "../lib/channel-projection.ts";
-import type { ChannelRecord, ChannelReportRecord, ChildReportedState } from "../lib/channel-records.ts";
+import type { ChannelRecord, ChannelReportRecord } from "../lib/channel-records.ts";
 import { describeToolActivity, reportState } from "../lib/orchestrator-child-channel.ts";
 import { findJudgeLane, judgeChildRecordOf, judgeLive, paneCoordsOf, paneIdUsable, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
