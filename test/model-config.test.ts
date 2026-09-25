@@ -1603,3 +1603,38 @@ test("startupAgentsCheck re-checks against the config FILE, not the caller's sta
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("startupAgentsCheck checks every DECLARED worker preset, names the bad spec, and never heals one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "startup-workers-"));
+  try {
+    const cfg = join(dir, "review-gate.json");
+    const reviewer = { auto: false, slots: ["onekey/gpt-5.6-sol:high"] };
+    const run = (agentsGlobal: unknown, agentsProject?: unknown) =>
+      startupAgentsCheck({ agentsGlobal, agentsProject, registry: REG, configPath: cfg, agentsDir: null, validNames: ["reviewer"] });
+
+    // Every slot resolves → pass.
+    const good = run({ reviewer, worker: { auto: false, slots: ["anthropic/claude-fable-5:max"] } });
+    assert.equal(good.checks.worker?.ok, true);
+
+    // One unresolvable slot → refused, naming the preset and the spec.
+    const bad = run({ reviewer }, { "worker-x": { auto: false, slots: ["anthropic/claude-fable-5:max", "nope/no-such-model"] } });
+    assert.equal(bad.checks["worker-x"]?.ok, false);
+    assert.match(bad.checks["worker-x"]!.reason!, /worker 预设 worker-x/);
+    assert.match(bad.checks["worker-x"]!.reason!, /nope\/no-such-model/);
+    assert.deepEqual(bad.healed, []);
+    assert.equal(existsSync(cfg), false, "a worker preset is never healed into the config");
+
+    // A preset with a prompt but no slots is not dispatchable → refused.
+    assert.equal(run({ reviewer, worker: { prompt: "read" } }).checks.worker?.ok, false);
+
+    // No preset at all, or one that configures nothing → not an error.
+    for (const agents of [{ reviewer }, { reviewer, worker: {} }]) {
+      const res = run(agents);
+      assert.equal(res.checks.worker, undefined);
+      assert.equal(Object.values(res.checks).every((c) => c.ok), true);
+    }
+    assert.equal(existsSync(cfg), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

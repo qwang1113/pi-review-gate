@@ -75,9 +75,10 @@ export const KNOWN_AGENTS: readonly string[] = Object.freeze([
  * reports itself instead of quietly becoming an unreachable worker.
  *
  * NOT in {@link KNOWN_AGENTS}, deliberately: that list is what the session-start
- * check hard-fails on, and a session that never dispatches a worker must not
- * refuse to open because no worker preset is configured. The worker path fails
- * closed at CALL time instead.
+ * check REQUIRES, and a session that never dispatches a worker must not refuse
+ * to open because no worker preset is configured. A preset that IS configured
+ * is checked at session start all the same (`startupAgentsCheck`,
+ * 2026-09-26): a slot that does not resolve stops the session and names it.
  */
 export const WORKER_ROLE_PREFIX = "worker";
 

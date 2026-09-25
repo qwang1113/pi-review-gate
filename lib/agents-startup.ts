@@ -9,8 +9,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
-import { KNOWN_AGENTS } from "./model-config.ts";
-import { effectiveAgentsConfig, type AgentsConfigMap } from "./agents-config.ts";
+import { isWorkerRoleName, KNOWN_AGENTS } from "./model-config.ts";
+import { collectWorkerRoleNames, effectiveAgentsConfig, type AgentsConfigMap } from "./agents-config.ts";
 import { extractFrontmatterChain } from "./agent-frontmatter.ts";
 import { splitThinkingSuffix, validateSlots, validateSpec, type ModelRegistry } from "./model-spec.ts";
 
@@ -52,12 +52,13 @@ export function validateAgentsForStartup(
   const checks: Record<string, AgentStartupCheck> = {};
   for (const name of validNames) {
     const e = map[name];
+    const who = isWorkerRoleName(name) ? `worker 预设 ${name}` : `角色 ${name}`;
     if (!e) {
-      checks[name] = { ok: false, reason: `角色 ${name} 没有任何配置（不在 agents 配置层里）` };
+      checks[name] = { ok: false, reason: `${who} 没有任何配置（不在 agents 配置层里）` };
       continue;
     }
     if (e.malformed) {
-      checks[name] = { ok: false, reason: `角色 ${name} 的配置字段非法（malformed）` };
+      checks[name] = { ok: false, reason: `${who} 的配置字段非法（malformed）` };
       continue;
     }
     if (e.auto !== false || e.slots.length === 0) {
@@ -69,7 +70,7 @@ export function validateAgentsForStartup(
       checks[name] = {
         ok: false,
         reason:
-          `角色 ${name} 未配置模型链（auto:${String(e.auto)}，slots 为空）——` +
+          `${who} 未配置模型链（auto:${String(e.auto)}，slots 为空）——` +
           `把它写成 auto:false + slots，或删掉该键让启动自愈补上包内默认链`,
       };
       continue;
@@ -78,7 +79,7 @@ export function validateAgentsForStartup(
     if (invalid) {
       checks[name] = {
         ok: false,
-        reason: `角色 ${name} 的 spec 非法或不可解析："${invalid}"（${validateSpec(registry, invalid).reason}）`,
+        reason: `${who} 的 spec 非法或不可解析："${invalid}"（${validateSpec(registry, invalid).reason}）`,
       };
       continue;
     }
@@ -301,8 +302,16 @@ export function startupAgentsCheck(opts: {
   agentsDir: string | null;
   validNames?: readonly string[];
 }): StartupAgentsResult {
-  const validNames = opts.validNames ?? KNOWN_AGENTS;
-  const { map } = effectiveAgentsConfig(opts.agentsGlobal, opts.agentsProject, validNames);
+  const judgeNames = opts.validNames ?? KNOWN_AGENTS;
+  const { map } = effectiveAgentsConfig(opts.agentsGlobal, opts.agentsProject, judgeNames);
+  // WORKER PRESETS a layer actually declares are checked too (2026-09-26): a
+  // typo'd spec used to surface only at the first `worker_submit`. A key whose
+  // value configures nothing (`worker: {}`) stays at source "default" and is
+  // not a preset — no worker at all is never an error. Workers have no package
+  // default, so they are never handed to the heal below (it keys on judges).
+  const workers = collectWorkerRoleNames(opts.agentsGlobal, opts.agentsProject)
+    .filter((name) => map[name]?.source !== "default");
+  const validNames = [...judgeNames, ...workers];
   const failing = (checks: Record<string, AgentStartupCheck>): string[] =>
     Object.entries(checks).filter(([, c]) => c && !c.ok).map(([name]) => name);
 
@@ -314,7 +323,7 @@ export function startupAgentsCheck(opts: {
   if (bad.length > 0) {
     // GAPS ONLY: a role no layer declares. One the user pinned (even badly) is
     // their config to fix — overwriting it would silently discard their choice.
-    const unconfigured = bad.filter((name) => map[name]?.source === "default");
+    const unconfigured = bad.filter((name) => map[name]?.source === "default" && !isWorkerRoleName(name));
     const heal = healMissingAgentSlots({
       configPath: opts.configPath,
       agentsDir: opts.agentsDir,
@@ -334,7 +343,7 @@ export function startupAgentsCheck(opts: {
     // (quality-auditor P1, 2026-09-22). `agentsSection` is the file's section
     // as the heal left it, written or not.
     if (heal.agentsSection !== undefined) {
-      const merged = effectiveAgentsConfig(heal.agentsSection, opts.agentsProject, validNames);
+      const merged = effectiveAgentsConfig(heal.agentsSection, opts.agentsProject, judgeNames);
       checks = validateAgentsForStartup(merged.map, opts.registry, validNames);
     }
   }

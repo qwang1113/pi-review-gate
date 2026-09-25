@@ -341,9 +341,13 @@ frontmatter in `agents/*.md` is the single source of truth and
   role; `judge_submit` never accepts the name.
   The L1/L2 execution tiers (`recon` / `fixer`) were retired — the gate
   ships the six judging roles only. Read-only WORK roles are the other kind
-  (`agents.worker*`, 2026-09-21): NOT in `KNOWN_AGENTS`, not part of the
-  session-start hard check, and an unconfigured one fails at DISPATCH time
-  instead — see §Read-only exploration.
+  (`agents.worker*`, 2026-09-21): NOT in `KNOWN_AGENTS`, so having none is
+  never an error — but every preset a layer DOES declare is part of the
+  session-start hard check (2026-09-26): a slot that does not resolve stops
+  the session and names the preset and the spec. Presets are never self-healed
+  (there is no package default for them) — see §Read-only exploration.
+  `/gate-status` lists the six judge roles and the configured worker presets
+  only; any other `.md` in the agent directories is not a gate role.
 
 > **Why the chains are short.** every fallback in the
 > (a provider that is not configured) fails the whole agent launch. The
