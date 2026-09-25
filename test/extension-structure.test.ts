@@ -6098,6 +6098,10 @@ test("restart does not deadlock on a dead opener: dead foreign entries are dropp
   const dispatchAt = DISPATCH_SRC.indexOf("function dispatchJudgeRound(");
   assert.match(DISPATCH_SRC.slice(dispatchAt, dispatchAt + 800), /dropDeadForeignJudges\(\);/,
     "dispatch drops before deriving its own id");
+  // t3 (2026-09-27): a new round forgets the role's last cancellation, so the
+  // boot-failure copy only ever reports a cancellation of THIS dispatch.
+  assert.match(DISPATCH_SRC.slice(dispatchAt, dispatchAt + 1200), /cancelLedger\.forget\(root, role\);/,
+    "dispatch forgets the previous round's tombstone at its start");
 });
 
 /**
