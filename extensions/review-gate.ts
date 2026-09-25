@@ -14293,7 +14293,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // The flag is what the runtime's process-exit handler consults; without it
     // a crash and a `/quit` would look identical from there.
     notifyRuntime.markCleanShutdown();
-    void event;
+    // (`event.reason` is read at the BOTTOM of this handler — it decides whether
+    // the session's name goes back — so there is no `void event;` here.)
     // Round-18: stop the referenced child-wait watchdog with the session.
     cancelChildWaitTimer();
     // The old session runtime is being torn down (reason: quit | reload |

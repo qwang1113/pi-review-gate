@@ -904,8 +904,17 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
   // the same session. Dropping the entry meant a resume opened a NEW channel
   // under the current session's identity (the old reports unreachable) with the
   // consumed-report cursor reset (the newest one re-delivered).
-  const { paneId: _closedPane, windowId: _closedWindow, tmuxSession: _closedSession, ...kept } = entry;
-  deps.saveRegistry(withWorker(registry, kept));
+  //
+  // AND THE COORDINATES ONLY GO WHEN THE WINDOW REALLY WENT (reviewer P1,
+  // round 1): a refused close or an entry that never carried coordinates leaves
+  // the window possibly ON SCREEN, and a registry that no longer says where it
+  // was makes the next `worker_submit` open a SECOND window beside it — a
+  // duplicate worker and a leaked pane. Keeping them is what lets the next
+  // close retry and say the same true thing again.
+  if (killed) {
+    const { paneId: _closedPane, windowId: _closedWindow, tmuxSession: _closedSession, ...kept } = entry;
+    deps.saveRegistry(withWorker(registry, kept));
+  }
   return reply(
     `review-gate: worker ${workerId} 的 window ${entry.windowId ?? entry.paneId} ${closeNote}。\n` +
     "它的 transcript 留在磁盘上：再用同一个 `workerId` 派活会接着同一会话（`" + entry.sessionId + "`）。",

@@ -404,7 +404,9 @@ export function describeOccupant(entry: SessionRegistryEntry, now: number): stri
  *
  * THE EXCLUSIVE CREATE IS THE RACE BREAKER on the free path: two sessions that
  * both see "no file" cannot both win, because `O_EXCL` lets exactly one of them
- * create it. A loser reads the winner's entry and finds it live.
+ * create it. The loser then RE-READS and finds the winner's entry — deciding
+ * against the `undefined` it saw a moment earlier would report a registration
+ * as unreadable that it had simply not looked at yet (reviewer P1, round 1).
  *
  * THE TAKEOVER USES rename(2) for the same reason. Moving the DEAD entry out of
  * the way is atomic, and it fails when the source is already gone — so two
@@ -416,20 +418,21 @@ export function describeOccupant(entry: SessionRegistryEntry, now: number): stri
 export function claimName(deps: RegistryDeps, entry: SessionRegistryEntry): ClaimOutcome {
   const path = sessionEntryPath(deps.root, entry.name);
   const text = serializeRegistryEntry(entry);
-  const existingText = deps.io.readText(path);
-  if (existingText === undefined) {
-    if (deps.io.createExclusive(path, text)) {
-      return { ok: true, outcome: "claimed", note: `名字 ${entry.name} 已登记` };
-    }
-    // Somebody created it between the read and the create: fall through to the
-    // ordinary "there is an occupant" road rather than forcing our way in.
+  const first = deps.io.readText(path);
+  if (first === undefined && deps.io.createExclusive(path, text)) {
+    return { ok: true, outcome: "claimed", note: `名字 ${entry.name} 已登记` };
   }
-  const existing = parseEntryText(existingText);
+  // THE OCCUPANT IS READ AGAIN when the create lost the race (reviewer P1,
+  // round 1): `first` is `undefined` in exactly that branch, and deciding
+  // against it would answer "its registration file cannot be read" about a file
+  // we never opened — refusing a claim that the winner's entry may well allow
+  // (it could be ours, already renewed, from a previous process).
+  const existing = parseEntryText(first !== undefined ? first : deps.io.readText(path));
   if (existing === undefined) {
     return {
       ok: false,
       error:
-        `名字 ${entry.name} 已被占用，但它的登记文件读不出来（${path}）。` +
+        `名字 ${entry.name} 占不下来：登记文件读不出来（${path}）。` +
         "按 fail-closed 处理：不接管、不覆盖。请另选一个名字，或人工检查那个文件。",
     };
   }

@@ -348,8 +348,6 @@ test("listing the addressable names reports WHO IS ALIVE and never drops the one
     [sessionEntryPath(ROOT, "alive-one"), JSON.stringify(entryForTest("alive-one", MINE, NOW))],
     [sessionEntryPath(ROOT, "dead-one"), JSON.stringify(entryForTest("dead-one", THEIRS, Date.parse(stale)))],
   ]);
-  const { naming } = makeNaming({ files });
-  void naming;
   const live = liveSessionNames({ root: ROOT, io: fakeIO(files), runTmux: fakeTmux({ panes: [] }).run, now: () => NOW, alive: () => false });
   assert.deepEqual(live.live.map((e) => e.name), ["alive-one"]);
   assert.deepEqual(live.unknown, [], "a provably dead holder is not \"unknown\"");

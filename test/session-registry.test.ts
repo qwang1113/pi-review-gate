@@ -447,6 +447,47 @@ test("the REAL io creates the registry directory on the first claim — an absen
   }
 });
 
+test("losing the exclusive-create race RE-READS the winner instead of answering about a file it never opened", () => {
+  // REVIEWER P1 (round 1). `existingText` is `undefined` in exactly the branch
+  // where the create lost the race (the winner wrote between our read and our
+  // create), and the code used to decide against that stale `undefined` — so a
+  // name that was created a microsecond ago was reported as "its registration
+  // file cannot be read", refusing a claim the winner's entry may well allow.
+  const winner = JSON.stringify(entry({ sessionId: THEIRS, heartbeatAt: new Date(NOW).toISOString() }));
+  const raceIO = () => {
+    const files = new Map<string, string>();
+    const io = fakeIO(files);
+    const create = io.createExclusive;
+    io.createExclusive = (path, text) => {
+      files.set(path, winner); // the winner lands first…
+      return create(path, text); // …so this create reports "exists", not "created"
+    };
+    return { io, files };
+  };
+
+  const live = raceIO();
+  const refused = claimName({ root: ROOT, io: live.io, runTmux: fakeTmux({ panes: [] }).run, alive: () => false, now: () => NOW }, entry({ sessionId: MINE }));
+  assert.equal(refused.ok, false);
+  assert.match(refused.ok ? "" : refused.error, /已被别的活会话占用/, "the WINNER is what the claim is decided against");
+  assert.doesNotMatch(refused.ok ? "" : refused.error, /读不出来/);
+  assert.equal(live.files.get(sessionEntryPath(ROOT, "t2-registry")), winner, "and the winner's bytes are untouched");
+
+  // The winner may also be US (a previous process of this same session).
+  const mine = raceIO();
+  mine.files.set(sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry({ sessionId: MINE })));
+  mine.io.createExclusive = () => false;
+  const renewed = claimName({ root: ROOT, io: mine.io, runTmux: fakeTmux().run, alive: () => false, now: () => NOW }, entry({ sessionId: MINE }));
+  assert.equal(renewed.ok && renewed.outcome, "renewed", "losing to ourselves is a renewal, not a refusal");
+
+  // And when the re-read really cannot read anything, the refusal says so.
+  const blind = fakeIO(new Map());
+  blind.readText = () => undefined;
+  blind.createExclusive = () => false;
+  const unreachable = claimName({ root: ROOT, io: blind, runTmux: fakeTmux().run, alive: () => false, now: () => NOW }, entry({ sessionId: MINE }));
+  assert.equal(unreachable.ok, false);
+  assert.match(unreachable.ok ? "" : unreachable.error, /占不下来：登记文件读不出来/);
+});
+
 test("stale is six missed beats, not one: a long-blocked session is not a dead one", () => {
   assert.equal(SESSION_STALE_MS, 180_000);
   const d = deps({ tmux: fakeTmux({ panes: [] }) });

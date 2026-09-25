@@ -118,6 +118,31 @@ test("the four session commands need a declaration AND a target that names one o
   assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "rg-third-repo-99999999"], lineage), UnsafeTmuxCommand);
 });
 
+test("only the four session-scoped commands need a declaration: reading a marker does NOT, killing it does", () => {
+  // THE SWEEP'S TWO CALLS (2026-09-25, t2), and why they differ. Before killing
+  // another session's dedicated session the sweep READS its `@rg_scope_owner`
+  // marker — that read is not one of the guarded commands (the guard's list is
+  // about creating and destroying surface), so it needs no declaration and
+  // cannot be refused for one. The KILL that follows is guarded, and it carries
+  // the declaration the marker check just earned.
+  const guard = { ownSessions: ["rg-mine-0000000000"] };
+  assert.doesNotThrow(
+    () => assertSafeTmuxArgv(buildReadSessionOwnerArgv("rg-dead-0000000000"), guard),
+    "a marker read is unguarded by design — and it is what makes the kill below safe",
+  );
+  assert.throws(
+    () => assertSafeTmuxArgv(buildKillSessionArgv("rg-dead-0000000000"), guard),
+    UnsafeTmuxCommand,
+    "a kill of a session nobody declared is refused",
+  );
+  assert.doesNotThrow(
+    () => assertSafeTmuxArgv(buildKillSessionArgv("rg-dead-0000000000"), {
+      ownSessions: [...guard.ownSessions, "rg-dead-0000000000"],
+    }),
+    "…and passes exactly when the verified name is declared (what the sweep passes)",
+  );
+});
+
 test("a caller that declares NOTHING cannot run the four — looking like ours is not being ours", () => {
   // THE EXECUTOR'S HALF OF THE SAME RULE (2026-09-25). The runner that spawns
   // tmux knows no session of its own, so it is handed the declaration by its

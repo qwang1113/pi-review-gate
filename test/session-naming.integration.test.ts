@@ -36,7 +36,7 @@ import {
   type RegistryTmuxResult,
 } from "../lib/session-registry.ts";
 import { sweepOrphans } from "../lib/session-orphan-sweep.ts";
-import { SESSION_OWNER_OPTION } from "../lib/orchestrator-tmux.ts";
+import { SESSION_OWNER_OPTION, assertSafeTmuxArgv } from "../lib/orchestrator-tmux.ts";
 import { installTmuxStatusFormat, TMUX_STATUS_CONDITIONAL } from "../scripts/tmux-status-format.mjs";
 
 const SOCKET = `rg-name-lab-${process.pid}`;
@@ -83,8 +83,29 @@ function runner(argv: readonly string[]): RegistryTmuxResult {
   }
 }
 
+/**
+ * The runner the EXTENSION would give the sweep: the same guard, applied before
+ * tmux ever sees the argv (`ownSessions` = this session's own, plus whatever the
+ * caller proved — the dead session's name, for the kill). WITHOUT this the
+ * integration test would prove the sweep works only for an unguarded executor,
+ * which is not the one it runs under (reviewer round 1 asked exactly that).
+ */
+function guardedRunner(own: readonly string[]) {
+  return (argv: readonly string[], extra?: readonly string[]): RegistryTmuxResult => {
+    try {
+      assertSafeTmuxArgv(argv, { ownSessions: [...own, ...(extra ?? [])] });
+    } catch (error) {
+      return { ok: false, stdout: "", stderr: (error as Error).message };
+    }
+    return runner(argv);
+  };
+}
+
 function sweepDeps(root: string): RegistryDeps {
-  return { root, io: nodeRegistryIO(root), runTmux: runner, alive: () => false, now: () => Date.now() };
+  // `rg-my-own-session-00000000` stands in for the SWEEPING session's own
+  // dedicated session: the marker read needs no declaration, and the kill of the
+  // dead one carries its own name through the sweep's second argument.
+  return { root, io: nodeRegistryIO(root), runTmux: guardedRunner(["rg-my-own-session-00000000"]), alive: () => false, now: () => Date.now() };
 }
 
 /** The tool the runtime registered, so the test calls what an agent calls. */
@@ -174,6 +195,9 @@ test("the installed conf line is what the user's tmux will render, on a real ser
 test("the sweep really kills what a dead holder left, and never what it cannot prove", { skip }, () => {
   const root = mkdtempSync(join(tmpdir(), "rg-name-sweep-"));
   try {
+    // THIS RUNS UNDER THE PRODUCTION GUARD (see `guardedRunner`): the marker
+    // read is unguarded by design, the kill is guarded and declares the name it
+    // verified — which is the pair reviewer round 1 doubted.
     // A session the gate would have created for a child, marked as the DEAD
     // session's own, plus a registration that has gone stale with no pid and no
     // pane behind it.

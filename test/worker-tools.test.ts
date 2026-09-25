@@ -60,6 +60,8 @@ function makeWorld(opts: {
   io?: ReturnType<typeof memoryChannelIO>;
   /** The tmux server this session can read — omitted ⇒ it cannot be read. */
   tmuxServer?: string;
+  /** `closeWindow` refuses (tmux rejected the kill) — the window may still exist. */
+  closeFails?: boolean;
   /** Runs inside every fake `sleep` — how a test writes a mid-wait ack. */
   onSleep?: () => void;
 } = {}) {
@@ -87,7 +89,7 @@ function makeWorld(opts: {
       spec.register({ paneId: "%42", windowId: "@42", sessionName: "rg-repo-abcdef1234" });
       return { ok: true, paneId: "%42" };
     },
-    closeWindow: (coords) => { killed.push(coords.windowId); return true; },
+    closeWindow: (coords) => { killed.push(coords.windowId); return opts.closeFails !== true; },
     openerId: () => opts.openerId ?? "%1",
     paneOwner: () => "self",
     repoRoot: () => "/repo",
@@ -408,6 +410,31 @@ test("close frees the WINDOW, and the next submit RESUMES the same session", asy
       "both dispatches ran the SAME session id — the worker keeps its context");
   }
   assert.match(world2.text(resumed), /接着用/, "and the receipt says the context carried over");
+});
+
+test("a close tmux REFUSED keeps the coordinates — the window may still be there, and a resume must not open a second one", async () => {
+  // REVIEWER P1 (round 1): the receipt was made honest about a refused close
+  // while the entry still lost its `windowId`/`tmuxSession` — so the next
+  // `worker_submit` found no window to ride on and opened a SECOND one beside a
+  // window that may well still be on screen (two workers, one leaked pane).
+  const world = makeWorld({ closeFails: true });
+  await world.call("worker_submit", { task: "第一次" });
+  const refused = await world.call("worker_close", { workerId: "worker-1" });
+  assert.equal(refused.isError, undefined, world.text(refused));
+  assert.match(world.text(refused), /关闭失败/);
+  assert.equal((refused.details as { closed?: boolean })?.closed, false, "nothing claims it was closed");
+  assert.equal(world.registry()["worker-1"]?.windowId, "@42", "the window is still recorded — it may still be on screen");
+  assert.equal(world.registry()["worker-1"]?.tmuxSession, "rg-repo-abcdef1234");
+
+  // THE POINT: the unclosed window is still addressable, so a resume rides it
+  // instead of opening a second one.
+  await world.call("worker_submit", { task: "追加", workerId: "worker-1" });
+  assert.equal(world.opened.length, 1, "no second window was opened while the first may still be there");
+  // …and a retry of the close reports the same true thing (idempotent, no lie).
+  const retried = await world.call("worker_close", { workerId: "worker-1" });
+  assert.equal(retried.isError, undefined);
+  assert.match(world.text(retried), /关闭失败/);
+  assert.deepEqual(world.killed, ["@42", "@42"], "the retry tried the recorded window again");
 });
 
 test("a resume after close keeps the channel AND the consumed-report cursor", async () => {
