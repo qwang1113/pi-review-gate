@@ -111,6 +111,18 @@ export interface AcceptanceTiming {
 }
 
 export type GateTiming = PrecommitTiming | ReviewTiming | QualityTiming | AcceptanceTiming;
+
+/**
+ * Every kind `readTimings` accepts. A Record keyed by the union makes a new
+ * kind a compile error here instead of a record that is written but silently
+ * dropped on read (which is what happened to `acceptance`).
+ */
+const TIMING_KINDS: Readonly<Record<GateTiming["kind"], true>> = {
+  precommit: true,
+  review: true,
+  quality: true,
+  acceptance: true,
+};
 function timingsPath(repoRoot: string): string {
   return join(repoRoot, TIMINGS_RELPATH);
 }
@@ -164,7 +176,7 @@ export function readTimings(repoRoot: string, limit = TIMINGS_MAX_RECORDS): Gate
     if (line.trim() === "") continue;
     try {
       const parsed = JSON.parse(line);
-      if (parsed && (parsed.kind === "precommit" || parsed.kind === "review" || parsed.kind === "quality")) {
+      if (parsed && Object.hasOwn(TIMING_KINDS, parsed.kind)) {
         out.push(parsed as GateTiming);
       }
     } catch {

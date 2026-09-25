@@ -5,7 +5,6 @@ import {
   parseArbiterVerdict,
   parseArbitrableAction,
   canonicalCommand,
-  sha256,
   tokenAuthorizes,
   buildArbiterPrompt,
   runArbiter,
@@ -16,6 +15,7 @@ import {
   type BypassToken,
   type TokenBindings,
 } from "../lib/arbitration.ts";
+import { sha256 } from "../lib/hash.ts";
 
 // --- parseArbiterVerdict ----------------------------------------------------
 

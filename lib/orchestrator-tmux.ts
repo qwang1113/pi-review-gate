@@ -266,18 +266,58 @@ function sessionPartOf(target: string): string {
  * `env K=V … <command>` puts the variables in the one place they belong — the
  * process of THIS window — and leaves tmux's own environment untouched.
  * `env(1)` execs the command, so the pane still runs the child itself.
+ *
+ * EVERY GATE VARIABLE THE CHILD IS NOT GIVEN IS UNSET (`env -u`, t1
+ * 2026-09-25). A window inherits the server's GLOBAL environment too, and a
+ * server started by a process that carried `RG_*` keeps them there. Measured
+ * on a lab server started with `RG_WORKER_ID=leaked`
+ * (test/tmux-session-topology.integration.test.ts): a plain new window saw
+ * `leaked`; after a session-level `set-environment -u` it STILL saw `leaked`
+ * (that only drops the session's own copy); after `set-environment -r` it saw
+ * nothing. `-r` is still not the fix: it needs a live session to be set on, so
+ * the window `new-session` itself starts — the session's first child — is
+ * never covered, and it needs the names, which would mean reading the global
+ * environment the gate deliberately never reads. Stripping them in the child's
+ * own command covers every window, first one included.
  */
 function envCommand(
   env: Readonly<Record<string, string>> | undefined,
   command: readonly string[] | undefined,
 ): string[] {
   const cmd = [...(command ?? ["pi"])];
-  const pairs = env === undefined
-    ? []
-    : Object.keys(env).sort().map((key) => `${key}=${env[key]}`);
+  const given = env ?? {};
+  const unset = GATE_ENV_NAMES.filter((key) => !Object.hasOwn(given, key)).flatMap((key) => ["-u", key]);
   // Sorted, so the argv stays testable.
-  return pairs.length === 0 ? cmd : ["env", ...pairs, ...cmd];
+  const pairs = Object.keys(given).sort().map((key) => `${key}=${given[key]}`);
+  return ["env", ...unset, ...pairs, ...cmd];
 }
+
+/**
+ * Every environment variable through which the gate tells a process WHO it is
+ * (its role, its opener, its channel, its sidecar). Kept in step with the
+ * `*_ENV = "RG_…"` constants across lib/ by a test.
+ */
+export const GATE_ENV_NAMES: readonly string[] = Object.freeze([
+  "RG_ACCEPTANCE_GATE",
+  "RG_GATE_MODE",
+  "RG_HANDOFF_DOC",
+  "RG_HANDOFF_KIND",
+  "RG_HANDOFF_PREDECESSOR_PANE",
+  "RG_HANDOFF_PREDECESSOR_SESSION",
+  "RG_HANDOFF_PREDECESSOR_TRANSCRIPT",
+  "RG_JUDGE_ID",
+  "RG_JUDGE_OPENER",
+  "RG_JUDGE_ROLE",
+  "RG_JUDGE_STREAM",
+  "RG_JUDGE_TASK",
+  "RG_ORCHESTRATION_ID",
+  "RG_PARENT_SESSION",
+  "RG_STATE_VARIANT",
+  "RG_STATION_CAP",
+  "RG_WORKER_ID",
+  "RG_WORKER_OPENER",
+  "RG_WORKER_ROLE",
+]);
 
 /**
  * The session-level user option that says WHO created a session.

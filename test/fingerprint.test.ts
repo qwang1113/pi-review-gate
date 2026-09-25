@@ -721,6 +721,20 @@ test("a resolver is used for the top-level repo even without submodules", () => 
   assert.deepEqual(calls, [realpathSync(dir)], "exactly one materialization, for the requested repo");
 });
 
+// The precommit PASS path needs the digest AND the bare tree: the TS
+// computeFingerprint takes the same resolver so the tree is built only once.
+test("computeFingerprint (TS) routes the tree through an injected resolver", () => {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "a.ts"), "// content");
+  const calls: string[] = [];
+  const fp = computeFingerprint(dir, {
+    treeOidForCwd: (d: string) => { calls.push(d); return worktreeTreeOid(d); },
+  });
+  assert.equal(fp.unavailable, false);
+  assert.deepEqual(calls, [dir], "exactly one materialization");
+  assert.equal(fp.digest, computeFingerprint(dir).digest, "sharing must not change the digest");
+});
+
 // ---------------------------------------------------------------------------
 // worktreeTreeOid — the bare tree OID (no submodule mixing)
 // ---------------------------------------------------------------------------

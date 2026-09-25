@@ -38,6 +38,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join as pathJoin, resolve as pathResolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { gitText } from "./git-exec.ts";
 
 import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "./model-diagnose.ts";
 import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "./gate-doctor.ts";
@@ -217,9 +218,7 @@ export async function runGateDoctorCommand(deps: GateDiagnosisDeps, ctx: Command
   // core.hooksPath); unavailable → the hooks check degrades to WARN.
   let hooksDir: string | undefined;
   try {
-    const out = execFileSync("git", ["rev-parse", "--git-path", "hooks"], {
-      cwd, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    const out = gitText(cwd, ["rev-parse", "--git-path", "hooks"], { timeout: 5000 });
     if (out.length > 0) hooksDir = pathResolve(cwd, out);
   } catch { /* git unavailable — hooks unverifiable */ }
   const checks = await runGateDoctor({

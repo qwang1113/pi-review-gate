@@ -253,6 +253,20 @@ test("loadRegistry merges models.json and models-store.json from a fake home", (
   rmSync(home, { recursive: true, force: true });
 });
 
+test("loadRegistry is cached by the sources' mtime+size: unchanged files are not re-read, a rewrite is", () => {
+  const home = mkdtempSync(join(tmpdir(), "rg-reg-cache-"));
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  const store = join(home, ".pi", "agent", "models-store.json");
+  writeFileSync(store, JSON.stringify({ providers: { a: { models: [{ id: "m1" }] } } }), "utf8");
+  const first = loadRegistry(home);
+  assert.equal(loadRegistry(home), first, "same stamps ⇒ the cached object");
+  writeFileSync(store, JSON.stringify({ providers: { a: { models: [{ id: "m1" }, { id: "m2" }] } } }), "utf8");
+  const second = loadRegistry(home);
+  assert.notEqual(second, first);
+  assert.deepEqual(second.a.map((m) => m.id), ["m1", "m2"]);
+  rmSync(home, { recursive: true, force: true });
+});
+
 test("loadRegistry: a metadata-less duplicate does not shadow the other source's metadata (round-12 Nit)", () => {
   // models.json is ingested FIRST, so an entry there without a
   // thinkingLevelMap used to make the same id in models-store.json be skipped

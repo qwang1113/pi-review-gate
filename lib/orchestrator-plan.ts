@@ -35,7 +35,7 @@
  */
 
 import { isAbsolute } from "node:path";
-import { createHash } from "node:crypto";
+import { sha256 } from "./hash.ts";
 import {
   deliveryStationLine,
   parseDeliveryStation,
@@ -650,7 +650,7 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
 
 /** sha256 of the canonical text — what the sidecar approval record binds to. */
 export function planHash(plan: OrchestratorPlan): string {
-  return createHash("sha256").update(canonicalPlanText(plan), "utf8").digest("hex");
+  return sha256(canonicalPlanText(plan));
 }
 
 /**

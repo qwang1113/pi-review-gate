@@ -33,8 +33,8 @@
  * tree and still correctly invalidates the pass.
  */
 
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { gitBaseEnv, gitText as git, gitOrNull, gitRawOrNull } from "./git-exec.ts";
+import { sha256 } from "./hash.ts";
 import { copyFileSync, mkdtempSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
@@ -198,120 +198,6 @@ const UNAVAILABLE: Fingerprint = Object.freeze({
   head: "__UNAVAILABLE__",
   unavailable: true,
 });
-
-/**
- * Git environment variables that RELOCATE the repository, the worktree, the
- * index or the object store. They must never be inherited.
- *
- * Reproduced fail-open: with `GIT_DIR`/`GIT_WORK_TREE` pointing at another
- * repository, `computeFingerprint(A)` returned a digest describing repo B — so
- * a real edit in A left "its" fingerprint unchanged and a stale READY binding
- * stayed valid. The gate must describe the repository it was asked about, not
- * whatever an ambient variable points at. Discovery falls back to the cwd,
- * which is what every caller means (and what git hooks already run in).
- *
- * `GIT_INDEX_FILE` is included because the shadow-index passes below set it
- * explicitly; inheriting an outer value would let a caller substitute the
- * index the digest is built from.
- */
-export const GIT_LOCATION_ENV: readonly string[] = Object.freeze([
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_CEILING_DIRECTORIES",
-  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-]);
-
-/**
- * Any variable matching this prefix injects CONFIG into the git invocation:
- * `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>`,
- * `GIT_CONFIG_PARAMETERS`, and the `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` /
- * `GIT_CONFIG_NOSYSTEM` source overrides.
- *
- * This is a second, independent way to reach the same fail-open as GIT_DIR:
- * `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile
- * GIT_CONFIG_VALUE_0=/tmp/patterns` makes the named files invisible to
- * `git add`, so a real untracked edit never enters the digest and a stale
- * READY binding stays valid — with no GIT_DIR involved. Matched by PREFIX
- * because the numbered forms are unbounded.
- */
-const GIT_CONFIG_ENV_PREFIX = /^GIT_CONFIG(_|$)/;
-
-/**
- * process.env minus every variable that can relocate the repository or inject
- * configuration. The user's real `~/.gitconfig` still applies (that is the
- * user's own, deliberate configuration); what is removed is the ability of an
- * AMBIENT variable to substitute or add to it for this process only.
- */
-export function gitBaseEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of GIT_LOCATION_ENV) delete env[key];
-  for (const key of Object.keys(env)) {
-    if (GIT_CONFIG_ENV_PREFIX.test(key)) delete env[key];
-  }
-  return env;
-}
-
-function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    timeout: 30_000,
-    maxBuffer: 32 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: env ?? gitBaseEnv(),
-  }).trim();
-}
-
-/**
- * `env` is NOT optional decoration: the shadow-index passes must reach git
- * through GIT_INDEX_FILE. An earlier version of this helper silently dropped
- * the argument, so `update-index --no-skip-worktree` ran against the USER'S
- * REAL INDEX and wiped their skip-worktree / assume-unchanged bits (verified:
- * `S a.ts` / `h b.ts` became `H a.ts` / `H b.ts` after one fingerprint).
- */
-function gitOrNull(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string | null {
-  try {
-    return git(cwd, args, env);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Like gitOrNull(), but WITHOUT the trailing/leading trim.
- *
- * Required for `--porcelain -z` output: a porcelain entry is `XY <path>`, and
- * for an unstaged modification X is a SPACE (" M f.ts"). Trimming ate that
- * leading space on the FIRST entry only, so `entries[0].slice(3)` returned
- * ".ts" instead of "f.ts" — a silently corrupted path. It stayed invisible
- * because the existing consumers only test the extension (".ts" still looks
- * like a code file) and the existing test happened to use untracked files
- * ("?? x.ts", no leading space). It is a real defect for anything that must
- * open the path, such as the advisory token's stat probe.
- */
-function gitRawOrNull(cwd: string, args: string[]): string | null {
-  try {
-    return execFileSync("git", args, {
-      cwd,
-      encoding: "utf8",
-      timeout: 30_000,
-      maxBuffer: 32 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: gitBaseEnv(),
-    });
-  } catch {
-    return null;
-  }
-}
-
-function sha256(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
-}
 
 /** Thrown to force the whole fingerprint to fail CLOSED. */
 class FingerprintUnavailable extends Error {}
@@ -518,7 +404,7 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     // user's real staging area is never touched.
     // gitBaseEnv() first: an inherited GIT_DIR/GIT_WORK_TREE would otherwise
     // build this tree from a DIFFERENT repository than the caller asked about.
-    const env: NodeJS.ProcessEnv = { ...gitBaseEnv(), GIT_INDEX_FILE: shadowIndex };
+    const shadow = { env: { ...gitBaseEnv(), GIT_INDEX_FILE: shadowIndex } };
 
     // Stage the whole worktree, THEN drop the gate-owned paths. Removing them
     // afterwards — rather than passing `:(exclude)` pathspecs to `git add` —
@@ -567,7 +453,7 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     // the only repositories whose result differs are those that previously
     // produced no usable digest at all, so no existing binding can be
     // reinterpreted.
-    const tracked = git(cwd, ["ls-files", "-z", "--full-name", "--", REPO_ROOT_PATHSPEC], env)
+    const tracked = git(cwd, ["ls-files", "-z", "--full-name", "--", REPO_ROOT_PATHSPEC], shadow)
       .split("\0")
       .filter(Boolean);
     for (let i = 0; i < tracked.length; i += UPDATE_INDEX_CHUNK) {
@@ -575,12 +461,12 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
       // Best-effort: a path that cannot be unmarked still gets re-read by the
       // `--renormalize` pass below, and a hard failure here would fail closed
       // on repositories that merely use an unusual bit combination.
-      gitOrNull(cwd, ["update-index", "--no-assume-unchanged", "--", ...chunk], env);
-      gitOrNull(cwd, ["update-index", "--no-skip-worktree", "--", ...chunk], env);
+      gitOrNull(cwd, ["update-index", "--no-assume-unchanged", "--", ...chunk], shadow);
+      gitOrNull(cwd, ["update-index", "--no-skip-worktree", "--", ...chunk], shadow);
     }
 
-    git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
-    git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
+    git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], shadow);
+    git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], shadow);
     // `-f` is REQUIRED, not defensive. A legacy review snapshot (older
     // installs; the 2026-08-27 model creates none) is a linked worktree under
     // `~/.pi/review-snapshots/<repo-key>/` (repo-`.pi` or tmpdir on fallback),
@@ -593,9 +479,9 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     // downgraded to BLOCKED with "STALE TREE: current tree unreadable".
     // `--cached` keeps this inside the throwaway shadow index: no working-tree
     // file is ever removed.
-    git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS, ...extraExcludePathspecs], env);
+    git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS, ...extraExcludePathspecs], shadow);
 
-    const tree = git(cwd, ["write-tree"], env);
+    const tree = git(cwd, ["write-tree"], shadow);
     // Guard against a future git printing warnings on stdout: only a bare
     // object id is a usable tree id (sha1 = 40 hex, sha256 = 64).
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) {
@@ -653,9 +539,10 @@ function worktreeDigest(cwd: string, depth: number, opts?: WorktreeDigestOptions
   return submodules === "" ? tree : sha256(`${tree}\0${submodules}`);
 }
 
-export function computeFingerprint(cwd: string): Fingerprint {
+/** `opts.treeOidForCwd` lets a caller that also needs the bare tree OID capture it instead of materializing it twice. */
+export function computeFingerprint(cwd: string, opts?: WorktreeDigestOptions): Fingerprint {
   try {
-    const digest = worktreeDigest(cwd, 0);
+    const digest = worktreeDigest(cwd, 0, opts);
     const head = gitOrNull(cwd, ["rev-parse", "HEAD"]) ?? "NO_HEAD";
     return { digest, head, unavailable: false };
   } catch {

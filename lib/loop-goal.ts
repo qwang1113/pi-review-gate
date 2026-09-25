@@ -29,7 +29,8 @@
  *    prompt budget.
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { sha256 } from "./hash.ts";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TaskMode } from "./task-mode.ts";
@@ -331,7 +332,7 @@ export function normalizeGoalText(raw: string): string {
 }
 
 export function goalTextHash(raw: string): string {
-  return createHash("sha256").update(normalizeGoalText(raw), "utf8").digest("hex");
+  return sha256(normalizeGoalText(raw));
 }
 
 /**

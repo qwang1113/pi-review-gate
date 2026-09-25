@@ -30,6 +30,8 @@ import { channelRoot, nodeChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
+import { gitOrNull } from "./git-exec.ts";
+import { readJsonIfExists } from "./json-file.ts";
 import { assertSafeTmuxArgv, type SafeTmuxOptions } from "./orchestrator-tmux.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
@@ -223,16 +225,10 @@ export function readChildGateState(
   childCwd: string,
   variant?: string,
 ): Record<string, unknown> | undefined {
-  try {
-    const path = sidecarPath(childCwd, ".pi", variant);
-    if (!existsSync(path)) return undefined;
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  const parsed = readJsonIfExists(sidecarPath(childCwd, ".pi", variant));
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : undefined;
 }
 
 
@@ -288,17 +284,8 @@ const GATE_HOOKS: readonly string[] = Object.freeze(["pre-commit", "pre-push", "
 
 /** Where THIS repository's hooks live (shared by every linked worktree). */
 export function hooksDirFor(repoRoot: string): string | undefined {
-  try {
-    const out = execFileSync("git", ["-C", repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
-      encoding: "utf8",
-      timeout: 10_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const commonDir = String(out ?? "").trim();
-    return commonDir ? join(commonDir, "hooks") : undefined;
-  } catch {
-    return undefined;
-  }
+  const commonDir = gitOrNull(repoRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"], { timeout: 10_000 });
+  return commonDir ? join(commonDir, "hooks") : undefined;
 }
 
 

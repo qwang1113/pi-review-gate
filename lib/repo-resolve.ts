@@ -27,8 +27,7 @@
 
 import { join as pathJoin } from "node:path";
 import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { gitBaseEnv } from "./fingerprint.ts";
+import { gitOrNull } from "./git-exec.ts";
 import { detectShipCommands, segments, normalizedTokens } from "./ship-detect.ts";
 
 export interface ShipRepoResolution {
@@ -50,18 +49,7 @@ export interface ShipRepoResolution {
  *  GIT_DIR/GIT_CONFIG stripping the fingerprint uses, so an ambient variable
  *  cannot relocate the answer). Returns null when `dir` is not in a repo. */
 export function gitRootOfDir(dir: string): string | null {
-  try {
-    const out = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd: dir,
-      encoding: "utf8",
-      timeout: 15_000,
-      stdio: ["ignore", "pipe", "ignore"],
-      env: gitBaseEnv(),
-    }).trim();
-    return out || null;
-  } catch {
-    return null;
-  }
+  return gitOrNull(dir, ["rev-parse", "--show-toplevel"], { timeout: 15_000 }) || null;
 }
 
 interface ResolvedSegment {

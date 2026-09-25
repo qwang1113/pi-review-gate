@@ -5750,7 +5750,7 @@ test("the file-size gate runs at the CHECKPOINT, and only new files can block it
     "the HEAD-only reading is the bug this replaced");
   const blockAt = body.indexOf("sizeCheck.blocking.length > 0");
   assert.ok(blockAt > 0, "an oversized NEW file must refuse the checkpoint");
-  assert.ok(body.indexOf("git\", [\"add\", \"-A\"") > blockAt,
+  assert.ok(body.indexOf("[\"add\", \"-A\"]") > blockAt,
     "the refusal has to happen BEFORE anything is staged");
   assert.match(body, /sizeCheck\.advisory\.length \? "\\n\\n" \+ formatFileSizeVerdict/,
     "an existing oversized file is a reminder carried on the SUCCESS reply, never a block");
@@ -7116,7 +7116,7 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
   );
   assert.equal(
     SRC.match(/"rev-list", "--count"/g)?.length,
-    3,
+    1,
     "'how far ahead is this branch' has ONE implementation — the async dep seam wraps the sync one",
   );
   assert.match(

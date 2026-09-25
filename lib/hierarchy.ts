@@ -520,3 +520,21 @@ export function parseHierarchySnapshot(raw: unknown): HierarchySnapshot | undefi
     return undefined;
   }
 }
+
+/**
+ * Load one repo's persisted slice ONCE per session: the root is marked loaded
+ * only when the file parsed. Marking it before the read turned one missing or
+ * half-written file into "never load this repo again", stranding every judge
+ * the file named for the rest of the session.
+ */
+export function loadHierarchySliceOnce(
+  loaded: Set<string>,
+  root: string,
+  readText: () => string | undefined,
+): HierarchySnapshot | undefined {
+  if (loaded.has(root)) return undefined;
+  const raw = readText();
+  const snap = raw === undefined ? undefined : parseHierarchySnapshot(raw);
+  if (snap) loaded.add(root);
+  return snap;
+}

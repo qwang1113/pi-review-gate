@@ -10,7 +10,7 @@
  * the three outcomes are pinned by tests (round-12 P2).
  */
 
-import { execFileSync } from "node:child_process";
+import { gitText } from "./git-exec.ts";
 
 /**
  * Walk the parent chain starting at `startSha` and return the NEWEST commit
@@ -31,9 +31,9 @@ export function squashPointBaseline(
   let cur = startSha;
   for (let i = 0; i < maxSteps && cur; i++) {
     try {
-      const tree = execFileSync("git", ["rev-parse", `${cur}^{tree}`], { cwd: root, encoding: "utf8" }).trim();
+      const tree = gitText(root, ["rev-parse", `${cur}^{tree}`]);
       if (tree === reviewedTree) return cur;
-      cur = execFileSync("git", ["rev-parse", `${cur}^`], { cwd: root, encoding: "utf8" }).trim();
+      cur = gitText(root, ["rev-parse", `${cur}^`]);
     } catch {
       return undefined; // chain ended (root commit) or unreadable — clean miss
     }
@@ -51,7 +51,7 @@ export function branchBaseBaseline(root: string): string | undefined {
   const candidates = ["origin/HEAD", "main", "origin/main", "master", "origin/master"];
   for (const base of candidates) {
     try {
-      const mb = execFileSync("git", ["merge-base", base, "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+      const mb = gitText(root, ["merge-base", base, "HEAD"]);
       if (mb) return mb;
     } catch { /* try the next candidate */ }
   }

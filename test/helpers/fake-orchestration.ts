@@ -671,6 +671,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
         let i = 1;
         for (; i < raw.length; i++) {
           const token = raw[i]!;
+          if (token === "-u") { i++; continue; } // a gate variable the child is NOT given
           if (!token.includes("=")) break;
           const [key, ...rest] = token.split("=");
           paneEnv[key!] = rest.join("=");

@@ -99,7 +99,10 @@ function setup(over: Partial<{
     // factory prefixes the child's own command with `env K=V …` instead.
     const envAt = argv.indexOf("env");
     if (envAt >= 0) {
-      for (const token of argv.slice(envAt + 1)) {
+      const tokens = argv.slice(envAt + 1);
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i]!;
+        if (token === "-u") { i++; continue; } // a gate variable the child is NOT given
         if (!token.includes("=")) break;
         const [key, ...rest] = token.split("=");
         env.set(key!, rest.join("="));

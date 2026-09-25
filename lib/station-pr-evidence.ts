@@ -31,7 +31,7 @@
  * A probe that cannot tell is never evidence.
  */
 
-import { execFileSync } from "node:child_process";
+import { gitText } from "./git-exec.ts";
 
 import { resolveOpenPr } from "./copilot-gh.ts";
 import type { PrSummary } from "./copilot-review.ts";
@@ -111,12 +111,7 @@ export async function probeOpenPr(
  */
 export function hasUnpushedCommits(dir: string): boolean {
   try {
-    const out = execFileSync("git", ["rev-list", "--count", "@{upstream}..HEAD"], {
-      cwd: dir,
-      encoding: "utf8",
-      timeout: GIT_TIMEOUT_MS,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    const out = gitText(dir, ["rev-list", "--count", "@{upstream}..HEAD"], { timeout: GIT_TIMEOUT_MS });
     const ahead = Number.parseInt(out, 10);
     return !Number.isFinite(ahead) || ahead > 0;
   } catch {

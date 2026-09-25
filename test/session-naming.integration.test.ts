@@ -38,6 +38,11 @@ import {
 import { sweepOrphans } from "../lib/session-orphan-sweep.ts";
 import { SESSION_OWNER_OPTION, assertSafeTmuxArgv } from "../lib/orchestrator-tmux.ts";
 import { installTmuxStatusFormat, TMUX_STATUS_CONDITIONAL } from "../scripts/tmux-status-format.mjs";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
+
+// A real tmux server inherits this process's env: an RG_* the host session
+// carries would otherwise reach the fixture.
+neutraliseGateEnv();
 
 const SOCKET = `rg-name-lab-${process.pid}`;
 const MINE = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";

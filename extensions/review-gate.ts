@@ -200,7 +200,7 @@ import {
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
 import { supervisionTarget } from "../lib/orchestration-id.ts";
-import { emptyHierarchy, findJudgeLane, judgeChildRecordOf, judgeLive, listByOpener, paneCoordsOf, paneIdUsable, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
+import { emptyHierarchy, findJudgeLane, judgeChildRecordOf, judgeLive, listByOpener, loadHierarchySliceOnce, paneCoordsOf, paneIdUsable, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
   decideJudgeRotation,
   judgeObjectId,
@@ -544,6 +544,10 @@ import {
   worktreeTreeOid,
 } from "../lib/fingerprint.ts";
 import type { Fingerprint } from "../lib/fingerprint.ts";
+import { gitBaseEnv, gitOrNull, gitRaw, gitText } from "../lib/git-exec.ts";
+import { writeFileAtomic } from "../lib/atomic-write.ts";
+import { readJsonIfExists } from "../lib/json-file.ts";
+import { sha256 } from "../lib/hash.ts";
 import {
   emptyState,
   isPlateaued,
@@ -765,7 +769,6 @@ import {
   runArbiter,
   runArbiterProcess,
   PROXY_ISOLATION_FLAGS,
-  sha256,
   BYPASS_TOKEN_TTL_MS,
   type ArbitrableAction,
   type BypassToken,
@@ -901,38 +904,14 @@ function findProjectAgentText(projectAgentsDir: string, name: string): string | 
     already committed must not read as "nothing to review" to the ship gate,
     which is exactly the fail-open F1 closed for the primary repo. */
 function commitsAheadOfBaseSync(cwd: string): number {
-  try {
-    // Priority 1: upstream tracking branch (catches local ahead of remote on any branch)
-    try {
-      const out = execFileSync("git", ["rev-list", "--count", "@{upstream}..HEAD"], {
-        cwd, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      const n = parseInt(out, 10);
-      if (!isNaN(n) && n > 0) return n;
-    } catch { /* no upstream configured */ }
-    // Priority 2: main/master (catches when upstream tracking isn't set)
-    for (const base of ["main", "master"]) {
-      try {
-        const out = execFileSync("git", ["rev-list", "--count", `${base}..HEAD`], {
-          cwd, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-        const n = parseInt(out, 10);
-        // When on main, main..HEAD is 0 even if ahead of origin/main.
-        // Check origin/main too.
-        if (!isNaN(n) && n > 0) return n;
-      } catch { /* base branch doesn't exist locally */ }
-    }
-    // Priority 3: origin/main, origin/master
-    for (const base of ["origin/main", "origin/master"]) {
-      try {
-        const out = execFileSync("git", ["rev-list", "--count", `${base}..HEAD`], {
-          cwd, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-        const n = parseInt(out, 10);
-        if (!isNaN(n) && n > 0) return n;
-      } catch { /* remote not fetched */ }
-    }
-  } catch { /* git unavailable */ }
+  // Priority: the upstream tracking branch (local ahead of remote on any
+  // branch), then main/master (no upstream set), then origin/main|master
+  // (on main, main..HEAD is 0 even when ahead of origin/main). A base that
+  // does not resolve is skipped.
+  for (const base of ["@{upstream}", "main", "master", "origin/main", "origin/master"]) {
+    const n = parseInt(gitOrNull(cwd, ["rev-list", "--count", `${base}..HEAD`], { timeout: 5000 }) ?? "", 10);
+    if (!isNaN(n) && n > 0) return n;
+  }
   return 0;
 }
 
@@ -2421,12 +2400,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const sessionId = state.sessionId;
       if (!sessionId) return;
       try {
-        mkdirSync(pathJoin(cwd, ".pi"), { recursive: true });
-        writeFileSync(
-          presencePath(cwd),
-          JSON.stringify(presenceFor(sessionId, process.pid, hostname(), Date.now())),
-          "utf8",
-        );
+        writeFileAtomic(presencePath(cwd), JSON.stringify(presenceFor(sessionId, process.pid, hostname(), Date.now())));
       } catch { /* best effort: a missed heartbeat lapses, it never blocks work */ }
     };
     write();
@@ -2878,7 +2852,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const path = childWorktreePath(repoRoot, childId);
       const branch = childWorktreeBranch(childId);
       try {
-        execFileSync("git", [...createWorktreeArgv(repoRoot, childId)], { cwd: repoRoot, encoding: "utf8" });
+        gitText(repoRoot, createWorktreeArgv(repoRoot, childId), { timeout: 0 });
       } catch (error) {
         const detail = (error as { stderr?: Buffer | string }).stderr;
         return {
@@ -2942,7 +2916,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         : plan.steps.filter((step) => step[1] !== worktreePath);
       const run = (argv: readonly string[]): { ok: boolean; output: string } => {
         try {
-          return { ok: true, output: execFileSync("git", [...argv], { cwd: repoRoot, encoding: "utf8" }).trim() };
+          // No timeout: a merge or commit step may run the user's hooks.
+          return { ok: true, output: gitText(repoRoot, argv, { timeout: 0 }) };
         } catch (error) {
           // BOTH STREAMS (round-5 P1): git writes the merge-conflict text and
           // "nothing to commit" to STDOUT and exits non-zero. Reading only
@@ -3875,9 +3850,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   const workerRegistrySessions = (): Array<string | undefined> => {
     try {
-      const registry = parseWorkerRegistry(
-        JSON.parse(readFileSync(pathJoin(activeRepoRoot.current, WORKER_REGISTRY_RELPATH), "utf8")),
-      );
+      const registry = parseWorkerRegistry(readJsonIfExists(pathJoin(activeRepoRoot.current, WORKER_REGISTRY_RELPATH)));
       // ONLY THE ROWS OF THIS SESSION'S LINE (2026-09-25, t4 whole-branch
       // review P1). This file is per REPO, not per session, so a second gate
       // session working here keeps ITS workers in it too — and every one of
@@ -4263,8 +4236,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         const file = pathJoin(root, ".pi", HIERARCHY_FILENAME);
         const empty = Object.keys(s.judges).length === 0 && !s.audit && !s.modelHealth;
         if (empty) { try { rmSync(file, { force: true }); } catch { /* best effort */ } continue; }
-        try { mkdirSync(pathJoin(root, ".pi"), { recursive: true }); } catch { /* best effort */ }
-        writeFileSync(file, JSON.stringify({ version: 1, ...s }), "utf8");
+        writeFileAtomic(file, JSON.stringify({ version: 1, ...s }));
       }
     } catch { /* persistence never breaks the gate */ }
   }
@@ -4274,11 +4246,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    * wins on conflict; a corrupt file is ignored. Idempotent per root.
    */
   function ensureHierarchyLoaded(root: string): void {
-    if (hierarchyLoadedRoots.has(root)) return;
-    hierarchyLoadedRoots.add(root);
-    let raw: string;
-    try { raw = readFileSync(pathJoin(root, ".pi", HIERARCHY_FILENAME), "utf8"); } catch { return; }
-    const snap = parseHierarchySnapshot(raw);
+    const snap = loadHierarchySliceOnce(hierarchyLoadedRoots, root, () => {
+      try { return readFileSync(pathJoin(root, ".pi", HIERARCHY_FILENAME), "utf8"); } catch { return undefined; }
+    });
     if (!snap) return;
     hierarchyFileRoots.add(root);
     for (const [id, e] of Object.entries(snap.judges)) {
@@ -4641,11 +4611,8 @@ export default function reviewGate(pi: ExtensionAPI) {
    * refuses.
    */
   function currentBranch(root: string): string | undefined {
-    try {
-      const name = execFileSync("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-      if (name) return name;
-    } catch { /* detached — maybe a rebase; ask git where it came from */ }
-    return rebaseBranch(root);
+    // Failure = detached — maybe a rebase; ask git where it came from.
+    return gitOrNull(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]) || rebaseBranch(root);
   }
 
   /**
@@ -4664,11 +4631,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function listedWorktreeBranch(repoRoot: string, worktreePath: string): string | undefined {
     try {
-      const out = String(execFileSync("git", ["-C", repoRoot, "worktree", "list", "--porcelain"], {
-        cwd: repoRoot,
-        encoding: "utf8",
-        timeout: 10_000,
-      }) ?? "");
+      const out = gitRaw(repoRoot, ["worktree", "list", "--porcelain"], { timeout: 10_000 });
       // TWO SPELLINGS, ONE CHECKOUT. git records a worktree under the path it
       // was CREATED with, symlinks resolved — measured on this repository's own
       // list, where `/tmp/...` reads back as `/private/tmp/...`. The gate
@@ -4692,9 +4655,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   function rebaseBranch(root: string): string | undefined {
     for (const dir of ["rebase-merge", "rebase-apply"]) {
       try {
-        const gitPath = execFileSync("git", ["rev-parse", "--git-path", `${dir}/head-name`], {
-          cwd: root, encoding: "utf8",
-        }).trim();
+        const gitPath = gitText(root, ["rev-parse", "--git-path", `${dir}/head-name`]);
         if (!gitPath || !existsSync(pathResolve(root, gitPath))) continue;
         const name = rebaseBranchName(readFileSync(pathResolve(root, gitPath), "utf8"));
         if (name) return name;
@@ -4707,11 +4668,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** HEAD commit tree OID — the content-boundary every ship binding compares against (round-8 P1). */
   function headCommitTree(root: string): string {
-    try {
-      return execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
-    } catch {
-      return "";
-    }
+    return gitOrNull(root, ["rev-parse", "HEAD^{tree}"]) ?? "";
   }
 
   /**
@@ -4735,9 +4692,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function hasStagedChanges(root: string): boolean | undefined {
     try {
-      execFileSync("git", ["diff", "--cached", "--quiet", "HEAD"], {
-        cwd: root, encoding: "utf8", stdio: "ignore",
-      });
+      gitText(root, ["diff", "--cached", "--quiet", "HEAD"]);
       return false;
     } catch (err) {
       // Exit 1 is the documented "there are differences" answer; anything else
@@ -4762,7 +4717,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   function unreviewedTreesSince(root: string, review: GateState["review"]): string[] | undefined {
     if (!review?.commitSha || !review.fingerprint) return undefined;
     try {
-      const out = execFileSync("git", ["rev-list", "--format=%T", `${review.commitSha}..HEAD`], { cwd: root, encoding: "utf8" });
+      const out = gitRaw(root, ["rev-list", "--format=%T", `${review.commitSha}..HEAD`]);
       return out
         .split("\n")
         .filter((l) => l && !l.startsWith("commit ") && l.trim() !== review.fingerprint)
@@ -6560,7 +6515,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   }
 
   function gatherGitLog(_cwd: string): string {
-    return runReadOnly(["git", "log", "--oneline", "-15"]) ?? "(git log unavailable)";
+    return gitOrNull(cwd, ["log", "--oneline", "-15"], { timeout: 15000 }) ?? "(git log unavailable)";
   }
 
   // ---------- L7: post-PR Copilot code-review loop ----------
@@ -7635,7 +7590,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // + AI-attribution above — the checks the hooks perform — so
         // REVIEW_GATE_BYPASS=1 for the hook layer is the mechanism, not a
         // loophole.
-        const status = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
+        const status = gitRaw(root, ["status", "--porcelain"]);
         if (status.trim() === "") {
           return {
             content: [{ type: "text", text: "review-gate: review_checkpoint — nothing to commit (worktree is clean)." }],
@@ -7740,7 +7695,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           let baseText: string | undefined;
           if (manifestBase) {
             try {
-              const out = execFileSync("git", ["show", `${manifestBase}:package.json`], { cwd: root, encoding: "utf8" }) as string;
+              const out = gitRaw(root, ["show", `${manifestBase}:package.json`]);
               baseText = out;
             } catch {
               baseText = undefined; // unreadable ⇒ no facts, never a block
@@ -7794,43 +7749,36 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // The leftover list comes from `ls-files -z`, NOT from the porcelain
         // lines above: git QUOTES and escapes unusual names in `status`, and
         // handing that form back as a pathspec matches nothing.
-        const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z"], {
-          cwd: root,
-          encoding: "utf8",
-        }).split("\0").filter((p) => p.length > 0);
+        const untracked = gitRaw(root, ["ls-files", "--others", "--exclude-standard", "-z"])
+          .split("\0").filter((p) => p.length > 0);
         const leftOut = planCheckpointSweep({ untracked, own: st.sessionEditedFiles ?? [] }).leftOut;
-        execFileSync("git", ["add", "-A"], { cwd: root, encoding: "utf8" });
+        gitText(root, ["add", "-A"], { timeout: 0 });
         if (leftOut.length > 0) {
           // Unstage, do not skip: `add -A` is still the right primitive for
           // the tracked half (deletes and renames included), and `reset`
           // leaves the leftover files exactly where they were — untracked, in
           // the worktree, and named in the receipt.
-          execFileSync("git", ["reset", "-q", "--", ...leftOut], { cwd: root, encoding: "utf8" });
+          gitText(root, ["reset", "-q", "--", ...leftOut]);
         }
-        execFileSync("git", ["commit", "-m", message], {
-          cwd: root,
-          encoding: "utf8",
-          env: { ...process.env, REVIEW_GATE_BYPASS: "1" },
+        // No timeout: the commit runs the repo's own hooks.
+        gitText(root, ["commit", "-m", message], {
+          timeout: 0,
+          env: { ...gitBaseEnv(), REVIEW_GATE_BYPASS: "1" },
         });
-        const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+        const sha = gitText(root, ["rev-parse", "HEAD"]);
         // THE COMMITTED FILES, READ FROM THE COMMIT (drill F4). The receipt
         // used to describe the WORKTREE — which is how the symlink above could
         // be committed without ever appearing in it — so it now reports what
         // the commit actually carries.
-        const sweptIn = execFileSync(
-          "git",
-          ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", sha],
-          { cwd: root, encoding: "utf8" },
-        ).split("\0").filter((p) => p.length > 0);
+        const sweptIn = gitRaw(root, ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", sha])
+          .split("\0").filter((p) => p.length > 0);
         // Round-4 P2: the sha is persisted so prepare_review can compute
         // baseline..HEAD against it. Round-8 P1: record HEAD^ as prevSha —
         // the baseline start for the NEXT prepare — so the documented
         // checkpoint → prepare flow does not self-lock (baseline..HEAD would
         // be empty if the baseline were the checkpoint itself).
-        let prevSha = "";
-        try {
-          prevSha = execFileSync("git", ["rev-parse", "HEAD^"], { cwd: root, encoding: "utf8" }).trim();
-        } catch { /* root commit: no parent — prepare falls back to <sha>^ */ }
+        // Root commit: no parent — prepare falls back to <sha>^.
+        const prevSha = gitOrNull(root, ["rev-parse", "HEAD^"]) ?? "";
         st.checkpoint = {
           sha,
           prevSha,
@@ -9766,12 +9714,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   function reapReviewScratch(sessionId: string): void {
     const scratch = judgeScratchDir(sessionId);
     try {
-      const list = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: primaryRepoRoot, encoding: "utf8" });
+      const list = gitRaw(primaryRepoRoot, ["worktree", "list", "--porcelain"]);
       for (const wt of reviewScratchWorktrees(list, scratch)) {
-        try { execFileSync("git", ["worktree", "remove", "--force", wt], { cwd: primaryRepoRoot, encoding: "utf8" }); }
+        try { gitText(primaryRepoRoot, ["worktree", "remove", "--force", wt], { timeout: 0 }); }
         catch { /* already gone / not a registered worktree — the prune below still runs */ }
       }
-      try { execFileSync("git", ["worktree", "prune"], { cwd: primaryRepoRoot, encoding: "utf8" }); } catch { /* best effort */ }
+      gitOrNull(primaryRepoRoot, ["worktree", "prune"]); // best effort
     } catch { /* worktree list unreadable — leave the dir for a later reap */ }
     try { rmSync(scratch, { recursive: true, force: true }); } catch { /* best effort */ }
   }
@@ -10613,20 +10561,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           return { ok: false, error: error instanceof Error ? error.message : String(error) };
         }
       },
-      readRegistry: () => {
-        try {
-          return parseWorkerRegistry(JSON.parse(readFileSync(workerRegistryPath(), "utf8")));
-        } catch {
-          // No file yet, or an unreadable one: both mean "no workers", and a
-          // registry that cannot be read must never be repaired into a guess
-          // (lib/worker-pane.ts drops malformed ENTRIES for the same reason).
-          return {};
-        }
-      },
+      // No file yet, or an unreadable one: both mean "no workers", and a
+      // registry that cannot be read must never be repaired into a guess
+      // (lib/worker-pane.ts drops malformed ENTRIES for the same reason).
+      readRegistry: () => parseWorkerRegistry(readJsonIfExists(workerRegistryPath())),
       saveRegistry: (registry) => {
         try {
-          mkdirSync(pathDirname(workerRegistryPath()), { recursive: true });
-          writeFileSync(workerRegistryPath(), serializeWorkerRegistry(registry), "utf8");
+          writeFileAtomic(workerRegistryPath(), serializeWorkerRegistry(registry));
         } catch (error) {
           log(`worker registry write failed: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -10952,15 +10893,9 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // valid object name" reach the USER's stderr. prepare_review has always
       // silenced this probe (a rewritten chain is an expected outcome here,
       // not an error), so the `stdio: "ignore"` is carried over verbatim.
-      isAncestor: (root, maybeAncestor, branch) => {
-        try {
-          execFileSync("git", ["merge-base", "--is-ancestor", maybeAncestor, branch], { cwd: root, stdio: "ignore" });
-          return true;
-        } catch {
-          return false;
-        }
-      },
-      revParse: (root, rev) => execFileSync("git", ["rev-parse", rev], { cwd: root, encoding: "utf8" }).trim(),
+      isAncestor: (root, maybeAncestor, branch) =>
+        gitOrNull(root, ["merge-base", "--is-ancestor", maybeAncestor, branch]) !== null,
+      revParse: (root, rev) => gitText(root, ["rev-parse", rev]),
       // The FALLBACK read, and it carries the same two flags as the numstat
       // probe so the two can never disagree about which files moved: without
       // `--no-renames` name-only reports a rename as the NEW path alone (the
@@ -10968,11 +10903,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // `core.quotePath=false` a non-ASCII path comes back as an escaped C
       // string no shell would resolve.
       changedFilesInRange: (root, baseline, head) =>
-        execFileSync(
-          "git",
-          ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", `${baseline}..${head}`],
-          { cwd: root, encoding: "utf8" },
-        ).trim().split("\n").filter(Boolean),
+        gitText(root, ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", `${baseline}..${head}`])
+          .split("\n").filter(Boolean),
       // The reviewer's read plan is built from this (lib/parallel-review.ts's
       // formatChangeIndex): one call gives both the file list and the sizes.
       //
@@ -10993,12 +10925,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // counts", which reads as 0 here so a binary file still appears in the
       // index (a missing row would drop it from the plan entirely).
       numstatInRange: (root, baseline, head) =>
-        execFileSync(
-          "git",
-          ["-c", "core.quotePath=false", "diff", "--numstat", "--no-renames", `${baseline}..${head}`],
-          { cwd: root, encoding: "utf8" },
-        )
-          .trim().split("\n").filter(Boolean)
+        gitText(root, ["-c", "core.quotePath=false", "diff", "--numstat", "--no-renames", `${baseline}..${head}`])
+          .split("\n").filter(Boolean)
           .map((line) => {
             const [added, deleted, ...rest] = line.split("\t");
             return {
@@ -11017,7 +10945,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       squashPointBaseline: (root, reviewedTree, startSha) =>
         squashPointBaseline(root, reviewedTree, startSha),
       worktreeClean: (root) =>
-        execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }).trim() === "",
+        gitText(root, ["status", "--porcelain"]) === "",
     },
     readText: (path) => {
       try { return readFileSync(path, "utf8"); } catch { return undefined; }
@@ -11119,7 +11047,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       stale = true;
     } else {
       try {
-        stale = execFileSync("git", ["rev-parse", "HEAD"], { cwd: targetRoot, encoding: "utf8" }).trim() !== targetNow.head;
+        stale = gitText(targetRoot, ["rev-parse", "HEAD"]) !== targetNow.head;
       } catch { stale = true; }
     }
     let cwdMismatch: string | undefined;
@@ -11631,7 +11559,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         staleTarget = true;
       } else {
         try {
-          const headNow = execFileSync("git", ["rev-parse", "HEAD"], { cwd: targetRoot, encoding: "utf8" }).trim();
+          const headNow = gitText(targetRoot, ["rev-parse", "HEAD"]);
           staleTarget = headNow !== target_.head;
         } catch { staleTarget = true; }
       }
@@ -12036,7 +11964,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     const { execFile } = await import("node:child_process");
     const run = (args: string[]): Promise<{ ok: true; lines: string[] } | { ok: false; error: string }> =>
       new Promise((resolve) => {
-        execFile("git", args, { cwd }, (err, stdout) => {
+        execFile("git", args, { cwd, env: gitBaseEnv() }, (err, stdout) => {
           if (err) {
             resolve({ ok: false, error: String(err.message ?? err).split("\n")[0] });
           } else {
@@ -15382,8 +15310,17 @@ async function runTrustedPrecommit(
     // checkpoint will commit — equal to the reviewed tree at ship time),
     // NOT the worktree digest: review.fingerprint already holds a tree OID,
     // and comparing a digest against it would mismatch every single PASS.
-    const fp = computeFingerprint(cwd);
-    const fingerprint = fp.unavailable ? "" : worktreeTreeOid(cwd);
+    // ONE materialization: the digest's own top-level tree pass is captured
+    // rather than run a second time (each pass is a full shadow-index build).
+    let tree = "";
+    const fp = computeFingerprint(cwd, {
+      treeOidForCwd: (dir) => {
+        const oid = worktreeTreeOid(dir);
+        if (dir === cwd) tree = oid;
+        return oid;
+      },
+    });
+    const fingerprint = fp.unavailable ? "" : tree;
 
     // Read the receipt (trusted channel): regular file, size-bounded, parseable.
     let parsed: unknown;

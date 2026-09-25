@@ -45,6 +45,11 @@ import {
 } from "../lib/session-tmux-scope.ts";
 import { isOwnSessionName, SESSION_OWNER_OPTION } from "../lib/orchestrator-tmux.ts";
 import { judgePaneAlive } from "../lib/judge-pane.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
+
+// A real tmux server inherits this process's env: an RG_* the host session
+// carries (RG_WORKER_ID in a worker pane) would otherwise reach the fixture.
+neutraliseGateEnv();
 
 const SOCKET = `rg-scope-lab-${process.pid}`;
 const SESSION_ID = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
@@ -103,10 +108,17 @@ function labScope(): LabScope {
   return scope;
 }
 
-/** Start the lab server with ONE window — "the user's own", which must not move. */
-function startLab(): void {
+/**
+ * Start the lab server with ONE window — "the user's own", which must not move.
+ * `serverEnv` is extra environment for the process that STARTS the server,
+ * i.e. what lands in the server's GLOBAL environment.
+ */
+function startLab(serverEnv: NodeJS.ProcessEnv = {}): void {
   try { tmux(["kill-server"]); } catch { /* no server yet */ }
-  tmux(["new-session", "-d", "-x", "200", "-y", "50", "-s", "lab", "-c", "/tmp", "sleep", "600"]);
+  execFileSync("tmux", ["-L", SOCKET, "new-session", "-d", "-x", "200", "-y", "50", "-s", "lab", "-c", "/tmp", "sleep", "600"], {
+    stdio: "ignore",
+    env: { ...process.env, ...serverEnv },
+  });
 }
 
 function windowLines(session: string): string[] {
@@ -272,6 +284,19 @@ test("an unreadable tmux is 'I do not know' — never a licence to create or kil
 });
 
 /** Read a file the child wrote, once it exists. */
+/** A shell-free probe child: writes env[argv[2]] to argv[3], then stays alive. */
+function envProbe(dir: string): string {
+  const dump = join(dir, "dump.mjs");
+  writeFileSync(
+    dump,
+    'import { writeFileSync } from "node:fs";\n' +
+      'writeFileSync(process.argv[3], String(process.env[process.argv[2]] ?? "<unset>"));\n' +
+      "setTimeout(() => {}, 600000);\n",
+    "utf8",
+  );
+  return dump;
+}
+
 async function waitForFile(path: string): Promise<string> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -357,6 +382,38 @@ test("a child's environment rides its own command, never the tmux session", { sk
       !/RG_WORKER_ID|RG_WORKER_OPENER|RG_GATE_MODE/.test(tmux(["show-environment", "-t", OWN_SESSION])),
       "and the second child did not put one there either",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    try { tmux(["kill-server"]); } catch { /* already gone */ }
+  }
+});
+
+// A server STARTED by a process that carried RG_* keeps them in its GLOBAL
+// environment, and every window inherits global + session — a session-level
+// `set-environment -u` does not hide a global variable (measured, see
+// lib/orchestrator-tmux.ts envCommand). The child's own command strips them.
+test("a gate variable in the server's GLOBAL environment does not reach a child", { skip: SKIP }, async () => {
+  const scope = labScope();
+  const dir = mkdtempSync(join(tmpdir(), "rg-scope-global-"));
+  const dump = envProbe(dir);
+  try {
+    startLab({ RG_WORKER_ID: "leaked" });
+    // The leak is real: a window tmux opens on its own inherits it.
+    tmux(["new-window", "-t", "lab", "node", dump, "RG_WORKER_ID", join(dir, "plain.txt")]);
+    assert.equal(await waitForFile(join(dir, "plain.txt")), "leaked");
+    // The session's FIRST window (new-session) and a later one (new-window).
+    for (const name of ["first", "second"]) {
+      const opened = await openSessionWindow(runner, {
+        scope,
+        cwd: "/tmp",
+        layout: "own-session-window",
+        role: { kind: "judge", openerId: "lab", judgeId: `reviewer-${name}`, role: "reviewer" },
+        command: ["node", dump, "RG_WORKER_ID", join(dir, `${name}.txt`)],
+      });
+      assert.equal(opened.ok, true, opened.ok ? "" : opened.error);
+      assert.equal(await waitForFile(join(dir, `${name}.txt`)), "<unset>",
+        `${name} child must not inherit the server's RG_WORKER_ID`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
     try { tmux(["kill-server"]); } catch { /* already gone */ }

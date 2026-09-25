@@ -44,6 +44,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomic } from "./atomic-write.ts";
+import { readJsonIfExists } from "./json-file.ts";
 
 /** Max slots an agent may configure; longer lists are truncated with a diagnostic. */
 export const MAX_SLOTS = 4;
@@ -519,16 +520,32 @@ export interface RegistryModelInfo {
 
 export type ModelRegistry = Record<string, RegistryModelInfo[]>;
 
-function readJsonIfExists(path: string): unknown {
-  try {
-    return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : undefined;
-  } catch {
-    return undefined; // corrupt — registry degrades gracefully
-  }
+/** The last registry built, and the source stamps it was built from. */
+let registryCache: { key: string; registry: ModelRegistry } | undefined;
+
+/** mtime+size of each source file ("-" when absent): changes whenever either file is rewritten. */
+function registryStamp(paths: readonly string[]): string {
+  return paths.map((p) => {
+    try {
+      const st = statSync(p);
+      return `${p}@${st.mtimeMs}:${st.size}`;
+    } catch {
+      return `${p}@-`;
+    }
+  }).join("|");
 }
 
-/** Merge models.json (hand-written) and models-store.json (provider cache). */
+/**
+ * Merge models.json (hand-written) and models-store.json (provider cache).
+ *
+ * Cached by the two files' mtime+size: models-store.json is ~1MB and the
+ * session start path used to parse it on every turn. The returned object is
+ * SHARED between calls — treat it as read-only.
+ */
 export function loadRegistry(home = homedir()): ModelRegistry {
+  const sources = [join(home, ".pi", "agent", "models.json"), join(home, ".pi", "agent", "models-store.json")];
+  const key = registryStamp(sources);
+  if (registryCache?.key === key) return registryCache.registry;
   const registry: ModelRegistry = {};
   const ingest = (root: unknown) => {
     if (typeof root !== "object" || root === null) return;
@@ -571,8 +588,8 @@ export function loadRegistry(home = homedir()): ModelRegistry {
       }
     }
   };
-  ingest(readJsonIfExists(join(home, ".pi", "agent", "models.json")));
-  ingest(readJsonIfExists(join(home, ".pi", "agent", "models-store.json")));
+  for (const path of sources) ingest(readJsonIfExists(path));
+  registryCache = { key, registry };
   return registry;
 }
 

@@ -15,7 +15,8 @@ import {
   coalesceToolPath,
   COMMIT_MSG_FORBIDDEN,
 } from "../lib/constants.ts";
-import { computeFingerprint, FINGERPRINT_VERSION, GIT_LOCATION_ENV, gitBaseEnv } from "../lib/fingerprint.ts";
+import { computeFingerprint, FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
+import { GIT_LOCATION_ENV, gitBaseEnv } from "../lib/git-exec.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");

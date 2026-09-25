@@ -523,7 +523,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（155 个模块）
+## 五、`lib/` 全量速查表（158 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -585,6 +585,9 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `gate-timings.ts` | `.pi/gate-timings.jsonl` 可观测日志，每个门禁事件一行 |
 | `git-memory.ts` | 上下文压缩后重新注入过滤、截断过的 git 状态快照 |
 | `git-rewrite.ts` | 识别「只改 message」的历史重写，解开 L5 与门禁互锁的死结 |
+| `git-exec.ts` | **门禁同步跑 git 的唯一入口**（2026-09-25，t1）：`gitText` / `gitRaw` / `gitOrNull` / `gitRawOrNull`，缺省 env 是 `gitBaseEnv()`（剥掉会把仓库挪走的 `GIT_DIR` / `GIT_WORK_TREE` 等与 `GIT_CONFIG*` 注入；`GIT_LOCATION_ENV` 由 `scripts/*.cjs` 镜像、parity 测试守着），stderr 一律 pipe |
+| `hash.ts` | 唯一的内容哈希 `sha256`（goal / plan / restatement / arbitration / fingerprint 共用） |
+| `json-file.ts` | `readJsonIfExists`：尽力而为的 JSON 读取（缺失 / 读不了 / 坏 JSON 一律 `undefined`）；要区分「缺失」与「损坏」并报告的调用方自己读 |
 | `goal-prereview-tools.ts` | **普通函数，不是工具**：`recordGoalPrereview`——把 goal-auditor 交上来的结构化结论落成绑定草稿 sha256 的记录；外加 goal 提交检查（空稿、长度上限、goal 绑定哪个 repo） |
 | `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：一个 host，一个工具 |
 | `gate-modes.ts` | 门禁模式注册表（唯一实现）：八种模式各有提示词模板加工具集加流程规则（plan/goal/review 仅内部置入）；`resolveGateMode` 单派发；禁跑工具表与完成纪律的 single source（`judge-side.ts` 只 re-export，各任务 builder 只引用） |

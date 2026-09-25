@@ -16,7 +16,7 @@
  *  - any git failure → empty string (this is a convenience, never a gate).
  */
 
-import { execFileSync } from "node:child_process";
+import { gitRawOrNull } from "./git-exec.ts";
 
 /** Lines matching any of these never enter the injected context. */
 const SECRET_LINE = /\.(env|pem|key|secret)\b|credential|token/i;
@@ -24,21 +24,10 @@ const SECRET_LINE = /\.(env|pem|key|secret)\b|credential|token/i;
 export const GIT_MEMORY_MAX_LINES = 40;
 
 function gitLines(cwd: string, args: string[], cap: number): string[] {
-  try {
-    const out = execFileSync("git", args, {
-      cwd,
-      encoding: "utf8",
-      timeout: 5000,
-      maxBuffer: 4 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return out
-      .split("\n")
-      .filter((l) => l.trim().length > 0 && !SECRET_LINE.test(l))
-      .slice(0, cap);
-  } catch {
-    return [];
-  }
+  return (gitRawOrNull(cwd, args, { timeout: 5000 }) ?? "")
+    .split("\n")
+    .filter((l) => l.trim().length > 0 && !SECRET_LINE.test(l))
+    .slice(0, cap);
 }
 
 /**
