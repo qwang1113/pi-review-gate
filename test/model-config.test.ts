@@ -1625,7 +1625,9 @@ test("startupAgentsCheck checks every DECLARED worker preset, names the bad spec
     assert.equal(existsSync(cfg), false, "a worker preset is never healed into the config");
 
     // A preset with a prompt but no slots is not dispatchable → refused.
-    assert.equal(run({ reviewer, worker: { prompt: "read" } }).checks.worker?.ok, false);
+    const promptOnly = run({ reviewer, worker: { prompt: "read" } }).checks.worker;
+    assert.equal(promptOnly?.ok, false);
+    assert.match(promptOnly!.reason!, /不会自愈/);
 
     // No preset at all, or one that configures nothing → not an error.
     for (const agents of [{ reviewer }, { reviewer, worker: {} }]) {

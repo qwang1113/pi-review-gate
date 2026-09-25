@@ -71,7 +71,9 @@ export function validateAgentsForStartup(
         ok: false,
         reason:
           `${who} 未配置模型链（auto:${String(e.auto)}，slots 为空）——` +
-          `把它写成 auto:false + slots，或删掉该键让启动自愈补上包内默认链`,
+          (isWorkerRoleName(name)
+            ? `把它写成 auto:false + slots，或删掉这个预设（worker 预设没有包内默认链，不会自愈）`
+            : `把它写成 auto:false + slots，或删掉该键让启动自愈补上包内默认链`),
       };
       continue;
     }

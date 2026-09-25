@@ -18,7 +18,7 @@ test("/gate-status model chains list only the judge roles and configured worker 
     writeFileSync(join(agents, "fable.md"), "---\nname: fable\nmodel: gone/nothing\n---\n");
     writeFileSync(
       join(home, ".pi", "review-gate.json"),
-      JSON.stringify({ agents: { worker: { auto: false, slots: ["deepseek/deepseek-flash:max"] } } }),
+      JSON.stringify({ agents: { worker: { auto: false, slots: ["deepseek/deepseek-flash:max"] }, "worker-empty": { prompt: "x" } } }),
     );
     const repo = join(home, "repo");
     mkdirSync(repo);
@@ -35,7 +35,9 @@ test("/gate-status model chains list only the judge roles and configured worker 
     assert.match(text, /reviewer: → anthropic\/claude-fable-5/);
     assert.match(text, /worker: → deepseek\/deepseek-flash/);
     assert.doesNotMatch(text, /fable:/);
-    assert.doesNotMatch(text, /BLOCKED/);
+    // A declared preset with no slots refuses startup, so it must show as BLOCKED, not vanish.
+    assert.match(text, /worker-empty: ⚠️ BLOCKED/);
+    assert.equal(text.match(/BLOCKED/g)?.length, 1);
   } finally {
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
