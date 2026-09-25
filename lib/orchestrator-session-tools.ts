@@ -79,10 +79,9 @@ import {
   childAssets,
   currentPlan,
   refreshPaneLabels,
-  toolFail as fail,
-  toolReply as reply,
   requireOrchestratorMode,
 } from "./orchestrator-tool-kit.ts";
+import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 
 /**

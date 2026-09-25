@@ -50,12 +50,8 @@ import {
 // Aliased to the short local names: inside a tool module `reply`/`fail` are
 // unambiguous, while the EXPORTED names stay specific enough not to collide
 // with ordinary prose elsewhere in the repo.
-import {
-  alivePanes,
-  currentPlan,
-  toolFail as fail,
-  toolReply as reply,
-} from "./orchestrator-tool-kit.ts";
+import { alivePanes, currentPlan } from "./orchestrator-tool-kit.ts";
+import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 /** The actions the tool's `action` enum accepts — one spelling for schema and dispatch. */
 export const PLAN_ACTIONS = {

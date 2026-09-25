@@ -34,24 +34,8 @@ import {
 
 import type { ChildSession } from "./orchestrator-registry.ts";
 import type { OrchestratorPlan } from "./orchestrator-plan.ts";
+import { toolFail } from "./tool-host.ts";
 
-
-/**
- * The two result builders.
- *
- * Named `toolReply` / `toolFail` rather than `reply` / `fail` deliberately:
- * a shared helper with a one-word generic name collides with ordinary prose
- * everywhere else in the repository, including the structural test that scans
- * for lib exports referenced without an import. A slightly longer name buys a
- * name that only ever means one thing.
- */
-export function toolReply(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details };
-}
-
-export function toolFail(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details, isError: true };
-}
 
 /**
  * The orchestration tools exist only in orchestrator mode. A loop session

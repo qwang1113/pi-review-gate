@@ -8,7 +8,7 @@
  * opener check it passes first are lib/judge-session-addressing.ts, and this
  * file owns only the loop, the cursors it advances and the reply it builds.
  */
-import type { ToolReply } from "./tool-host.ts";
+import { toolFail as fail, toolReply as reply, type ToolReply } from "./tool-host.ts";
 import { clampWaitTimeout } from "./judge-lifecycle.ts";
 import { buildStandardReport } from "./judge-report.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
@@ -22,16 +22,6 @@ import {
   type PaneJudgeWaitObservation,
 } from "./judge-wait-criteria.ts";
 import type { JudgeSessionToolDeps } from "./judge-session-tools.ts";
-
-// ---------- reply builders ----------
-
-function reply(text: string, details: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details };
-}
-
-function fail(text: string, details: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details, isError: true };
-}
 
 // ---------- judge_wait ----------
 

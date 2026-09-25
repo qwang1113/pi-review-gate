@@ -61,10 +61,9 @@ import {
   alivePanes,
   childChannelProjection,
   currentPlan,
-  toolFail as fail,
-  toolReply as reply,
   verifyDelivery,
 } from "./orchestrator-tool-kit.ts";
+import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 
 

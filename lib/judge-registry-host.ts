@@ -38,7 +38,7 @@ import { readJudgeSideEnv } from "./judge-side.ts";
 import { nextRoundSeq } from "./judge-conclude.ts";
 import { roundHasReported, type RoundBinding } from "./audit-round-report.ts";
 import type { PendingAudit } from "./audit-round-specs.ts";
-import { stateVariantFrom } from "./gate-state-io.ts";
+import { SESSION_STATE_VARIANT } from "./loop-goal-host.ts";
 import {
   clearModelFailure,
   modelKeyOf,
@@ -57,9 +57,6 @@ export const HIERARCHY_FILENAME = "judge-hierarchy.json";
 
 /** A pane-less foreign entry older than this is not a concurrent spawn. */
 const FOREIGN_SPAWN_GRACE_MS = 10 * 60 * 1000;
-
-/** Read once, at load — the child id this process was spawned with. */
-const SESSION_STATE_VARIANT = stateVariantFrom(process.env);
 
 /** What the registry needs from the session beyond the shared host — fixed. */
 export interface JudgeRegistryDeps {

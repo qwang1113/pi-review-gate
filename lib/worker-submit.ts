@@ -7,7 +7,7 @@
  * tools that READ a worker (wait / answer / close); the channel and ownership
  * facts both sides need are lib/worker-channel.ts.
  */
-import type { ToolReply } from "./tool-host.ts";
+import { toolFail as fail, toolReply as reply, type ToolReply } from "./tool-host.ts";
 import { workerPaneDecor } from "./session-factory.ts";
 import { appendRecord, channelPathFor, newChannelId } from "./channel-io.ts";
 import { readChannel } from "./channel-projection.ts";
@@ -28,14 +28,6 @@ import {
   workerTargetFor,
 } from "./worker-channel.ts";
 import type { WorkerToolDeps } from "./worker-tools.ts";
-
-function reply(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details };
-}
-
-function fail(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details, isError: true };
-}
 
 /** How long `worker_submit` waits for the pane's gate to confirm an append. */
 export const WORKER_ACK_WAIT_MS = 8_000;

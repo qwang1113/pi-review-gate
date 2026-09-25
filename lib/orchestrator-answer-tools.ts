@@ -65,9 +65,8 @@ import {
   childGateFacts,
   currentPlan,
   requireOrchestratorMode,
-  toolFail as fail,
-  toolReply as reply,
 } from "./orchestrator-tool-kit.ts";
+import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 /**
  * What one proxy scope is called when the USER is asked about it.

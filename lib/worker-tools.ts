@@ -40,8 +40,7 @@
  */
 
 import { Type } from "typebox";
-import type { ToolHost } from "./tool-host.ts";
-import type { ToolReply } from "./tool-host.ts";
+import { toolFail as fail, toolReply as reply, type ToolHost, type ToolReply } from "./tool-host.ts";
 import type { SessionPaneCoords, SessionPaneDecor, SessionPaneRole } from "./session-factory.ts";
 import { windowAlreadyGone } from "./session-factory.ts";
 import { appendRecord, type ChannelIO } from "./channel-io.ts";
@@ -125,14 +124,6 @@ export interface WorkerToolDeps {
   now(): number;
   sleep?(ms: number): Promise<void>;
   log(message: string): void;
-}
-
-function reply(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details };
-}
-
-function fail(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details, isError: true };
 }
 
 /** Register the four worker tools on ONE host. */

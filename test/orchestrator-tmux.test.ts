@@ -21,6 +21,7 @@ import { join } from "node:path";
 
 import {
   GATE_ENV_NAMES,
+  INHERITED_GATE_ENV_NAMES,
   NEVER_ALLOWED_TMUX_SUBCOMMANDS,
   OWN_SESSION_TMUX_SUBCOMMANDS,
   UnsafeTmuxCommand,
@@ -247,9 +248,13 @@ test("a new session opens WITH its first child — no stray shell window", () =>
     "sorted, so the argv is testable",
   );
   // Every OTHER gate variable is unset, so nothing the tmux server's global
-  // environment carries can dress the child up as somebody else.
+  // environment carries can dress the child up as somebody else — except the
+  // silence switch, which a silenced parent must hand on (it fails open when
+  // stripped).
   const unset = argv.slice(envAt + 1, pairsAt).filter((arg) => arg !== "-u");
-  assert.deepEqual(unset, GATE_ENV_NAMES.filter((k) => k !== "RG_GATE_MODE" && k !== "RG_STATE_VARIANT"));
+  assert.deepEqual(unset, GATE_ENV_NAMES.filter((k) =>
+    k !== "RG_GATE_MODE" && k !== "RG_STATE_VARIANT" && !INHERITED_GATE_ENV_NAMES.includes(k)));
+  assert.ok(!unset.includes("RG_NO_SIDE_EFFECTS"), "a silenced parent's children stay silenced");
   assert.ok(argv.slice(envAt + 1, pairsAt).every((arg, i) => (i % 2 === 0 ? arg === "-u" : true)));
   assert.ok(argv.includes("-P") && argv.includes("-F"), "tmux prints what it created");
   assert.equal(argv[argv.indexOf("#{window_id} #{pane_id}") - 1], "-F");

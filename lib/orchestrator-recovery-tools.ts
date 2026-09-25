@@ -62,9 +62,8 @@ import {
   childAssets,
   currentPlan,
   requireOrchestratorMode,
-  toolFail as fail,
-  toolReply as reply,
 } from "./orchestrator-tool-kit.ts";
+import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 /** A task the plan believes is running while nothing is. */
 export interface OrphanTask {

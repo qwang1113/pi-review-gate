@@ -35,6 +35,7 @@ import {
   foldBackgroundWaits,
   hasBackgroundWaits,
   NO_BACKGROUND_WAITS,
+  type BackgroundWaitEvent,
   type BackgroundWaits,
 } from "./background-wait.ts";
 import { deliverInterrupt } from "./interrupt-delivery.ts";
@@ -57,8 +58,6 @@ export interface ChildSideDeps {
   noteJudgeTaskText(text: string | undefined, roundSeq?: number): void;
 }
 
-/** One background-wait fold input the extension's event handlers feed in. */
-export type BackgroundWaitEvent = Parameters<typeof foldBackgroundWaits>[1];
 
 export function createChildSide(host: SessionHost, deps: ChildSideDeps) {
   const { pi, channelIO, activeJudgeWait, isJudgePane, noteJudgeTaskText } = deps;

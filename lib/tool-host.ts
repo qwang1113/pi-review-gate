@@ -25,6 +25,25 @@ export interface ToolReply {
 }
 
 /**
+ * The two result builders every tool module shares (one copy, 2026-09-26 —
+ * seven modules used to carry their own).
+ *
+ * Named `toolReply` / `toolFail` rather than `reply` / `fail` deliberately:
+ * a shared helper with a one-word generic name collides with ordinary prose
+ * everywhere else in the repository, including the structural test that scans
+ * for lib exports referenced without an import. A slightly longer name buys a
+ * name that only ever means one thing. (Callers may still import them `as
+ * reply` / `as fail` locally.)
+ */
+export function toolReply(text: string, details?: Record<string, unknown>): ToolReply {
+  return { content: [{ type: "text", text }], details };
+}
+
+export function toolFail(text: string, details?: Record<string, unknown>): ToolReply {
+  return { content: [{ type: "text", text }], details, isError: true };
+}
+
+/**
  * Just enough of the pi extension API to register a tool.
  *
  * `parameters` is typed as typebox's `TSchema` (rather than `unknown`) so the

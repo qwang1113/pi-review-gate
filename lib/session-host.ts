@@ -44,7 +44,7 @@ export type CallTool = (
 ) => Promise<GateToolResult>;
 
 /** Where this session works, read fresh on every call. */
-export interface SessionRepos {
+export interface SessionRepoView {
   /** The session repo (cwd's git root, or cwd outside git). */
   primary: string;
   /** The repo the agent most recently edited. */
@@ -67,7 +67,7 @@ export interface SessionHost {
   persist(ctx?: ExtensionContext): void;
   /** Persist one repo's state to its own sidecar. */
   persistRepo(ctx: ExtensionContext, root: string): void;
-  repos(): SessionRepos;
+  repos(): SessionRepoView;
   /** The most recent live extension context, when there is one. */
   ctx(): ExtensionContext | undefined;
   /** One line into the repo root's gate-owned audit log. */

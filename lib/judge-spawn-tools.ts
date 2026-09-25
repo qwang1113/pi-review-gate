@@ -21,7 +21,7 @@
  */
 import { Type } from "typebox";
 
-import type { ToolHost, ToolReply } from "./tool-host.ts";
+import { toolFail as fail, toolReply as reply, type ToolHost, type ToolReply } from "./tool-host.ts";
 import {
   checkCaller,
   findJudgeLane,
@@ -150,14 +150,6 @@ export interface JudgeSpawnToolDeps {
   rememberPlanAudit(root: string): { ok: true } | { ok: false; error: string };
   /** Forget both pendings (rollback, close, fresh-kill). */
   forgetAudit(root: string): void;
-}
-
-function reply(text: string): ToolReply {
-  return { content: [{ type: "text", text }], details: undefined };
-}
-
-function fail(text: string): ToolReply {
-  return { content: [{ type: "text", text }], details: undefined, isError: true };
 }
 
 /** Resolve a judge by explicit id, or deterministically by role+repo+opener. */

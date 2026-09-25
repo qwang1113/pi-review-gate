@@ -303,6 +303,11 @@ function sessionPartOf(target: string): string {
  * never covered, and it needs the names, which would mean reading the global
  * environment the gate deliberately never reads. Stripping them in the child's
  * own command covers every window, first one included.
+ *
+ * {@link INHERITED_GATE_ENV_NAMES} are the exception: they say how a process
+ * BEHAVES, not who it is, and a silenced parent must stay silenced in every
+ * child it opens (quality round P2, 2026-09-26 — unsetting `RG_NO_SIDE_EFFECTS`
+ * failed OPEN).
  */
 export function envCommand(
   env: Readonly<Record<string, string>> | undefined,
@@ -310,11 +315,20 @@ export function envCommand(
 ): string[] {
   const cmd = [...(command ?? ["pi"])];
   const given = env ?? {};
-  const unset = GATE_ENV_NAMES.filter((key) => !Object.hasOwn(given, key)).flatMap((key) => ["-u", key]);
+  const unset = GATE_ENV_NAMES
+    .filter((key) => !Object.hasOwn(given, key) && !INHERITED_GATE_ENV_NAMES.includes(key))
+    .flatMap((key) => ["-u", key]);
   // Sorted, so the argv stays testable.
   const pairs = Object.keys(given).sort().map((key) => `${key}=${given[key]}`);
   return ["env", ...unset, ...pairs, ...cmd];
 }
+
+/**
+ * The gate variables a child KEEPS from its parent instead of having them
+ * stripped: switches that only ever make a process do LESS, so inheriting one
+ * can never dress the child up as somebody else.
+ */
+export const INHERITED_GATE_ENV_NAMES: readonly string[] = Object.freeze(["RG_NO_SIDE_EFFECTS"]);
 
 /**
  * Every environment variable through which the gate tells a process WHO it is

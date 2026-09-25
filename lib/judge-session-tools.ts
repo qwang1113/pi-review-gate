@@ -43,7 +43,7 @@
  */
 import { Type } from "typebox";
 
-import type { ToolHost, ToolReply } from "./tool-host.ts";
+import { toolFail as fail, toolReply as reply, type ToolHost, type ToolReply } from "./tool-host.ts";
 import {
   removeJudge,
   windowClosable,
@@ -290,16 +290,6 @@ const SESSION_ID_PARAM = Type.Optional(Type.String({ description: "Judge id (its
 const REPO_PARAM = Type.Optional(Type.String({
   description: "Absolute repo path (required once the session edited several repos)",
 }));
-
-// ---------- reply builders ----------
-
-function reply(text: string, details: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details };
-}
-
-function fail(text: string, details: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details, isError: true };
-}
 
 
 // (`judge_read` is GONE, implementation and all — 2026-09-05, user decision

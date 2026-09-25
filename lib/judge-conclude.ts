@@ -47,7 +47,7 @@
  */
 import { Type } from "typebox";
 
-import type { ToolHost, ToolReply } from "./tool-host.ts";
+import { toolFail as fail, toolReply as reply, type ToolHost, type ToolReply } from "./tool-host.ts";
 import {
   appendRecord,
   channelPathFor,
@@ -107,14 +107,6 @@ export interface ConcludedInput {
   docSync?: string | undefined;
   /** Prose — ADVISER ONLY; absent for every other role. */
   notes?: string | undefined;
-}
-
-function fail(text: string): ToolReply {
-  return { content: [{ type: "text", text }], details: undefined, isError: true };
-}
-
-function reply(text: string, details: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details };
 }
 
 /**
