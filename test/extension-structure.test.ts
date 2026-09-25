@@ -1524,9 +1524,9 @@ test("gate mode is decided by the agent itself in set_gate_mode — no LLM class
 });
 
 test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' parameter, decline locks downgrades", () => {
-  const at = SRC.indexOf('name: "set_gate_mode"');
-  assert.ok(at >= 0, "set_gate_mode tool must exist");
-  const region = SRC.slice(at, SRC.indexOf("registerTool", at + 10));
+  // (t8) The tool is its own module: the window ends where its register
+  // function does, both anchors asserted.
+  const region = windowOf('name: "set_gate_mode"', "\n}", "set_gate_mode body");
   // The tool's parameters must be exactly mode + reason — a caller-supplied
   // consent flag would let the model approve its own downgrade.
   const paramsAt = region.indexOf("parameters: Type.Object(");
@@ -1562,8 +1562,7 @@ test("set_gate_mode(orchestrator) no longer refuses because somebody else's plan
   // (`orchestrator_attach`, `orchestrator_plan({action:"archive"})`) behind
   // the door being held shut. The only executable advice left was `rm` on the
   // gate's own plan file, and three sessions took it.
-  const at = SRC.indexOf('name: "set_gate_mode"');
-  const region = SRC.slice(at, SRC.indexOf("registerTool", at + 10));
+  const region = windowOf('name: "set_gate_mode"', "\n}", "set_gate_mode body");
   assert.doesNotMatch(region, /不接管旧编排/,
     "the mode-level plan refusal must be gone, not merely reworded");
   assert.doesNotMatch(region, /先清掉旧 plan/,
@@ -2008,9 +2007,7 @@ test("declare_done validates server-side and rejects on unmet gates", () => {
 test("declare_done resets BOTH per-task loop budgets (rounds AND continuationsInjected)", () => {
   // P1 regression: rounds was reset but the L2 continuation budget was not,
   // so task B in a session inherited task A's exhausted auto-continuation cap.
-  const at = SRC.indexOf('name: "declare_done"');
-  assert.ok(at >= 0);
-  const region = SRC.slice(at, SRC.indexOf("registerTool", at + 10));
+  const region = windowOf('name: "declare_done"', "\n}", "declare_done body");
   assert.match(region, /state\.rounds = \[\]/);
   assert.match(region, /resetLoopBudget\(cells\)/);
 });
