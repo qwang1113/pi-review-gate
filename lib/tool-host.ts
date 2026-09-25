@@ -11,7 +11,8 @@
  * lib/orchestrator-deps.ts re-exports both names, so every existing import
  * keeps working; this file is now where they are defined.
  *
- * Types only: no behavior at all.
+ * Types plus the two shared result builders (`toolReply` / `toolFail`); no
+ * other behavior.
  */
 
 import type { TSchema } from "typebox";
