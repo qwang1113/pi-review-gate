@@ -5,7 +5,33 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
+/** The extension entry alone — wiring only since t8 (2026-09-26). */
+const ENTRY_SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
+/**
+ * THE EXTENSION'S OWN SOURCE, as the rules below read it: the entry PLUS the
+ * modules t8 (wave 4) carved out of its closure — the session cells, the tool
+ * bodies and the lifecycle handlers. They are the extension's behaviour moved
+ * one file over, not independent libraries, so a rule about "what the
+ * extension does" is asserted against all of them together; rules about the
+ * ENTRY itself read `ENTRY_SRC`.
+ */
+const T8_MODULES = [
+  "session-cells.ts", "session-restore-host.ts", "session-repos-host.ts", "loop-goal-host.ts",
+  "judge-pane-self.ts", "model-layers-host.ts", "handoff-host.ts", "orchestrator-worktree-host.ts",
+  "arbitration-tool.ts", "l2-continuation.ts", "edit-tracking-hook.ts", "tool-event-hooks.ts",
+  "checkpoint-tool.ts", "precommit-tool.ts", "judge-submit-tool.ts", "judge-submit-receipt.ts",
+  "judge-tools-wiring.ts", "review-prepare-wiring.ts", "worker-wiring.ts", "declare-done-tool.ts",
+  "gate-mode-tool.ts", "session-lifecycle.ts", "turn-directive.ts",
+];
+const SRC = [ENTRY_SRC, ...T8_MODULES.map((f) => readFileSync(join(ROOT, "lib", f), "utf8"))].join("\n");
+/** Two of them, read alone where a window must not run into a neighbour. */
+const JUDGE_WIRING_SRC = readFileSync(join(ROOT, "lib", "judge-tools-wiring.ts"), "utf8");
+const PREPARE_WIRING_SRC = readFileSync(join(ROOT, "lib", "review-prepare-wiring.ts"), "utf8");
+const JUDGE_SUBMIT_SRC = readFileSync(join(ROOT, "lib", "judge-submit-tool.ts"), "utf8");
+/** judge_submit's registration + body: the whole of its own module's register function. */
+function judgeSubmitBody(): string {
+  return windowIn(JUDGE_SUBMIT_SRC, 'name: "judge_submit"', "\n}", "judge_submit body");
+}
 /**
  * THE LOOP'S `agent_settled` HANDLER — the anchor every window in this file
  * scans from.
@@ -17,7 +43,21 @@ const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
  * loop's handler" the moment that landed — this signature is the loop's alone
  * (async, with the ctx parameter), and every window below is about the loop.
  */
-const LOOP_SETTLED = 'pi.on("agent_settled", async (_event, ctx) => {';
+const LOOP_SETTLED = "async function onAgentSettled(ctx: ExtensionContext)";
+/** Where that handler ends in lib/l2-continuation.ts: the factory's return follows it. */
+const LOOP_SETTLED_END = "\n  }\n\n  return {";
+/**
+ * THE HANDLER BODIES, by event (t8, 2026-09-26): the entry registers each one
+ * with a one-line `pi.on(...)`, and the body is a named function in lib/. A
+ * window about what a handler DOES starts at the function, not at the wiring.
+ */
+const BEFORE_AGENT_START = "function onBeforeAgentStart(";
+const SESSION_START = "async function onSessionStart(";
+const SESSION_SHUTDOWN = "function onSessionShutdown(";
+const SESSION_COMPACT = "async function onSessionCompact(";
+const TURN_END = "return function onTurnEnd(";
+const INPUT_HOOK = "return function onInput(";
+const EDIT_TRACKING = "return function onEditResult(";
 /**
  * The judge tools that observe/end a session moved to lib/ (they are wired
  * from the extension, not written in it). Their structural rules did not
@@ -270,7 +310,7 @@ function windowOf(start: string, end: string | RegExp, label: string, from = 0):
  * and every assertion below it was reading the wrong body.
  */
 function loopSettledWindow(end: string | RegExp, label = "agent_settled"): string {
-  return windowOf('pi.on("agent_settled"', end, label, SRC.indexOf(LOOP_SETTLED));
+  return windowOf(LOOP_SETTLED, end, label);
 }
 
 /**
@@ -342,7 +382,7 @@ function toolBodyOf(tool: string): string {
 
 /** The extension's wiring of the judge session tools — deps, nothing else. */
 function judgeToolsWiring(): string {
-  return windowOf("const judgeSessionDeps: JudgeSessionToolDeps = {", "\n  };", "judge tools wiring");
+  return windowIn(JUDGE_WIRING_SRC, "export function buildJudgeSessionDeps(", "\n}", "judge tools wiring");
 
 }
 
@@ -366,12 +406,12 @@ const DELETED_TOOL_ENTRIES = [
 
 /** The extension's wiring of `prepare_review` — deps, nothing else. */
 function REVIEW_PREPARE_WIRING(): string {
-  return windowOf("registerReviewPrepareTools(internalHost, {", "\n  });", "review prepare tools wiring");
+  return windowIn(PREPARE_WIRING_SRC, "export function buildReviewPrepareDeps(", "\n}", "review prepare tools wiring");
 }
 
 /** The extension's wiring of the two advisory prepare tools — deps, nothing else. */
 function ADVISORY_WIRING(): string {
-  return windowOf("registerAdvisoryPrepareTools(internalHost, {", "\n  });", "advisory prepare tools wiring");
+  return windowIn(PREPARE_WIRING_SRC, "export function buildAdvisoryPrepareDeps(", "\n}", "advisory prepare tools wiring");
 }
 
 /** The extension's wiring of the two Copilot review tools — deps, nothing else. */
@@ -417,7 +457,7 @@ test("loop goal: injected ONLY in loop mode, before the unarmed early-return", (
   // Anchor on the REGISTRATION, not the bare word: "before_agent_start" also
   // appears in the file header comment, which would put the explore anchor
   // above the whole handler and make the ordering assertion vacuous.
-  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  const handlerAt = SRC.indexOf(BEFORE_AGENT_START);
   assert.ok(handlerAt > 0, "handler registration must exist");
   // Anchored on the call, not on its argument expression: the goal is now read
   // into a local (the oversized-requirement checkpoint reads the same value),
@@ -443,7 +483,7 @@ test("loop goal: set_gate_mode(loop) delivers Step 0 in the same turn it decides
   // before_agent_start only injects on the NEXT turn, and the mode is decided
   // as the session's first action — without this the agent could edit for a
   // whole turn before ever seeing the exit contract.
-  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  const handlerAt = SRC.indexOf(BEFORE_AGENT_START);
   const toolInjectAt = SRC.indexOf('const goalNote = effective === "loop"');
 
   assert.ok(toolInjectAt > 0 && toolInjectAt < handlerAt, "set_gate_mode must inject the goal too");
@@ -477,7 +517,7 @@ test("loop goal: the force-negotiate directive is injected in before_agent_start
   // turns, the EVERY-TURN prompt (not only the RESUME injection) must escalate
   // the goal directive — the agent cannot miss that negotiation is the only
   // acceptable next action.
-  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  const handlerAt = SRC.indexOf(BEFORE_AGENT_START);
   assert.ok(handlerAt > 0, "handler must exist");
   const injectAt = SRC.indexOf("buildGoalForceNegotiateDirective(", handlerAt);
   assert.ok(injectAt > 0, "the force-negotiate directive must be injected in before_agent_start");
@@ -527,7 +567,7 @@ test("blocked marker: every call site reclaims by ownership, none unlinks uncond
   // well-formed sidecar — fail-closed degraded to fail-open.
   assert.doesNotMatch(SRC, /unlinkSync/, "the extension must not delete the marker directly");
   assert.doesNotMatch(SRC, /FAILED_WRITE/, "the legacy content-free marker must be gone");
-  assert.match(SRC, /from "\.\.\/lib\/blocked-marker\.ts"/);
+  assert.match(SRC, /from "\.\/blocked-marker\.ts"/);
 
   const reclaims = SRC.match(/reconcileBlockedMarker\(/g) ?? [];
   assert.equal(reclaims.length, 3,
@@ -537,7 +577,7 @@ test("blocked marker: every call site reclaims by ownership, none unlinks uncond
 
   // Session start must reclaim on its own: an early return (explore/normal) or
   // a throw can mean persist() never runs that turn.
-  const sessionStartAt = SRC.indexOf('pi.on("session_start"');
+  const sessionStartAt = SRC.indexOf(SESSION_START);
   assert.ok(sessionStartAt > 0, "session_start handler must exist");
   assert.ok(SRC.indexOf("reconcileBlockedMarker(", sessionStartAt) > 0,
     "session_start must reclaim orphan owners");
@@ -547,7 +587,7 @@ test("edits under gate-owned dirs do NOT arm the gate (writing a loop goal must 
   // The fingerprint already excludes .pi/; edit tracking must skip the same
   // scope, or writing .pi/loop-goal.md sets hasDocChange and demotes
   // READY→PENDING over a file no reviewer can even see.
-  const toolResultAt = SRC.indexOf('pi.on("tool_result", async (event, ctx)');
+  const toolResultAt = SRC.indexOf(EDIT_TRACKING);
   assert.ok(toolResultAt > 0, "the edit-tracking tool_result handler must exist");
   const skipAt = SRC.indexOf("isGateOwnedPath(absEditPath", toolResultAt);
   assert.ok(skipAt > 0, "edit tracking must skip gate-owned paths");
@@ -567,12 +607,12 @@ test("edits under gate-owned dirs do NOT arm the gate (writing a loop goal must 
     "the skip must return, not fall through");
   // …and the extension may no longer set the flag itself: it is a dep now, so
   // a second copy of the attribution cannot drift back in.
-  assert.match(shipHookWiring(), /markSessionEdited: \(\) => \{ sessionEdited = true; \}/,
+  assert.match(shipHookWiring(), /markSessionEdited: \(\) => \{ cells\.sessionEdited = true; \}/,
     "the session-edit attribution reaches the arm through the injected dep");
 });
 
 test("extension imports from local lib/ (single source of truth)", () => {
-  assert.ok(SRC.includes('../lib/constants.ts'), "should import from ../lib/constants.ts (package-root lib/)");
+  assert.ok(ENTRY_SRC.includes('../lib/constants.ts'), "should import from ../lib/constants.ts (package-root lib/)");
   assert.match(SRC, /\bisCodeFile\b/);
   assert.match(SRC, /\bisDocFile\b/);
   assert.match(SRC, /\bcoalesceToolPath\b/);
@@ -586,7 +626,7 @@ test("extension declares no inline extension alternation", () => {
 });
 
 test("NotebookEdit is in the edit-tool set", () => {
-  assert.match(SRC, /EDIT_TOOL_NAMES.*NotebookEdit/);
+  assert.match(SRC, /EDIT_TOOL_NAMES = .*NotebookEdit/);
 });
 
 test("L1: tool_call handler exists and can block", () => {
@@ -627,7 +667,10 @@ test("L2 STALL BREAKER: no-progress circuit breaker precedes every continuation 
   assert.doesNotMatch(body, /bypass\.active\s*=\s*true/, "the breaker must never open the ship gate");
   assert.match(body, /buildStallNotice\(/, "the user must be told why the loop stopped");
   // Real progress must re-arm it: every reset site clears the stall state.
-  const clears = SRC.match(/loopStall = undefined/g) ?? [];
+  // ONE reset (t8): `resetLoopBudget` clears the stall state, and every
+  // progress site — a mode decision, a completed task, /gate-reset — calls it.
+  assert.match(windowIn(SRC, "export function resetLoopBudget(", "\n}", "resetLoopBudget"), /cells\.loopStall = undefined/);
+  const clears = SRC.match(/resetLoopBudget\(cells\)/g) ?? [];
   assert.ok(clears.length >= 3, `stall state must be cleared at every progress site (found ${clears.length})`);
 });
 
@@ -687,10 +730,10 @@ test("L2 STALL BREAKER: an answered gate dialog is motion — a live negotiation
   const start = SRC.indexOf(LOOP_SETTLED);
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const facts = SRC.slice(SRC.indexOf("const motion = {", start), breakerAt);
-  assert.match(facts, /lastUserInteractionAt: lastUserInteractionAt\.current,/, "the stamp must reach the motion facts");
-  assert.match(SRC, /createGateDialogs\(host, \{[\s\S]{0,120}?lastUserInteractionAt,/,
+  assert.match(facts, /lastUserInteractionAt: cells\.lastUserInteractionAt\.current,/, "the stamp must reach the motion facts");
+  assert.match(SRC, /createGateDialogs\(host, \{[\s\S]{0,120}?lastUserInteractionAt: cells\.lastUserInteractionAt,/,
     "…and the dialog module writes the SAME cell the breaker reads");
-  assert.match(facts, /previousObservationAt:\s*lastStallObservedAt/, "the EVENT boundary is the previous observation");
+  assert.match(facts, /previousObservationAt:\s*cells\.lastStallObservedAt/, "the EVENT boundary is the previous observation");
   assert.match(facts, /pausedForUser:\s*state\.pausedQuestion !== undefined/,
     "a parked dialog is waiting on a person, not spinning");
   // The NOTICE's attribution needs the clock too: "we talked to the user" is
@@ -702,7 +745,7 @@ test("L2 STALL BREAKER: an answered gate dialog is motion — a live negotiation
   // The observation stamp is written after the decision, so an interaction that
   // lands later belongs to the NEXT observation (that is what makes it an event).
   assert.match(SRC.slice(breakerAt, SRC.indexOf("REVIEW_GATE_RESUME", start)),
-    /lastStallObservedAt = new Date\(\)\.toISOString\(\)/);
+    /cells\.lastStallObservedAt = new Date\(\)\.toISOString\(\)/);
 });
 
 
@@ -798,7 +841,7 @@ test("GLOBAL LAYER: the extension re-applies model config (both layers) at sessi
   assert.match(fn, /const probedAgentsDir = resolvePackageAgentsDir\(\);/, "the probe runs once");
   assert.match(fn, /const packageAgentsDir = probedAgentsDir \?\?/, "and both consumers share its result");
   assert.equal((fn.match(/resolvePackageAgentsDir\(\)/g) ?? []).length, 1, "the probe must not be called twice");
-  const sessionAt = SRC.indexOf("pi.on(\"session_start\"");
+  const sessionAt = SRC.indexOf(SESSION_START);
   assert.ok(sessionAt > 0);
   // The call sits a few thousand chars past the handler head, so the window
   // must be wide enough to cover it (round-2 P1: deleting the assertion
@@ -857,19 +900,20 @@ test("MODEL LAUNCH: every judge dispatch re-reads the config and picks a slot th
   assert.equal((SRC.match(/resolveJudgeLaunch\(/g) ?? []).length, 1, "judge_spawn's launchConfig");
   assert.equal((DISPATCH_SRC.match(/resolveJudgeLaunch\(/g) ?? []).length, 2, "judge_submit's chain (the dep type + the call)");
   assert.match(DISPATCH_SRC, /const launch = resolveJudgeLaunch\(root, role, workDir, title, judgeId\)/);
-  assert.match(SRC, /const launch = resolveJudgeLaunch\(root, role, workDir, role, judgeId\)/);
+  assert.match(SRC, /const launch = deps\.resolveJudgeLaunch\(root, role, workDir, role, judgeId\)/);
 });
 
 test("MODEL FALLBACK: only a judge pane installs the pane-side rotation", () => {
   // The pane is the only party that sees its own provider errors, and a
   // reporting shell must not grow an enforcing surface: the handler is
   // registered inside the judge-side branch, nowhere else.
-  const call = SRC.indexOf("installJudgeModelRotation(readJudgeSideEnv(process.env)!.role)");
+  const call = SRC.indexOf("installJudgeModelRotation(pi, cells, side.role, deps)");
   assert.ok(call > 0, "the judge side installs it");
-  const judgeBlock = SRC.lastIndexOf("if (readJudgeSideEnv(process.env)) {", call);
+  const judgeBlock = SRC.lastIndexOf("if (!side) return;", call);
   assert.ok(judgeBlock > 0 && judgeBlock < call, "…and it is inside the judge-side block");
-  assert.ok(SRC.indexOf("registerJudgeSpawnTools(pi,") > call, "which ends after it");
-  const install = windowOf("function installJudgeModelRotation(", "\n  }", "installJudgeModelRotation");
+  assert.ok(ENTRY_SRC.indexOf("registerJudgeSpawnTools(pi,") > ENTRY_SRC.indexOf("registerJudgeSide(pi, cells, judgeSelf,"),
+    "which the entry registers right before the spawn tools");
+  const install = windowOf("function installJudgeModelRotation(", "\n}", "installJudgeModelRotation");
   assert.match(install, /pi\.on\("agent_end"/, "the run's terminal error is read from agent_end");
   assert.match(install, /pi\.on\("agent_settled"/, "and acted on once pi has nothing left to retry");
   assert.match(install, /createModelRotation\(/, "the policy lives in lib/judge-model-rotation.ts");
@@ -882,8 +926,8 @@ test("MODEL EVENTS: the cursor never moves past an event the opener did not act 
   // P1 (reviewer, 2026-09-10): the wait advanced the cursor while the side
   // effect ran later (or never), so the cooldown was silently never written.
   // The absorber is now the wait's own dep, called BEFORE the cursor write.
-  const deps = windowOf("const judgeSessionDeps: JudgeSessionToolDeps = {", "\n  };", "judgeSessionDeps");
-  assert.match(deps, /absorbModelEvents: \(root, judgeId\) => absorbJudgeModelEvents\(root, judgeId\)/,
+  const deps = judgeToolsWiring();
+  assert.match(deps, /absorbModelEvents: \(root, judgeId\) => registry\.absorbJudgeModelEvents\(root, judgeId\)/,
     "the wait's absorber is wired to the one implementation");
   // ONE implementation, whichever trigger calls it (the wait, the settle
   // sweep, the dispatch). NOTE: the assertion must be able to FAIL — an
@@ -929,7 +973,7 @@ test("MODEL EVENTS: the cursor never moves past an event the opener did not act 
 test("INCREMENTAL: the settled conclusion of the previous round is handed to the reviewer", () => {
   // A re-review that starts from zero pays full price for questions already
   // answered. The gate must state what the last READY verdict settled.
-  const at = SRC.indexOf("formatReviewScopeDirective(reviewScopeFor(");
+  const at = SRC.indexOf("formatReviewScopeDirective(deps.reviewScopeFor(");
   assert.ok(at > 0, "the scope directive must be injected");
   assert.match(
     SRC.slice(at, at + 240),
@@ -952,7 +996,7 @@ test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits
   // two checks, not the distance.
   const body = SRC.slice(start, start + 2800);
   const exploreAt = body.indexOf('state.taskMode === "explore"');
-  const loopArmedAt = body.indexOf("!loopArmed");
+  const loopArmedAt = body.indexOf("!cells.loopArmed");
   assert.ok(exploreAt >= 0 && loopArmedAt >= 0, "both checks must exist");
   assert.ok(exploreAt < loopArmedAt, "explore early-return must precede the loopArmed check");
 });
@@ -982,7 +1026,7 @@ test("ask_user is the ONE way to reach the user, and pause_for_question is gone"
   assert.match(toolBody, /const state = deps\.state\(\);/,
     "the gate state is read through the injected getter, per call");
   assert.match(windowOf("registerUserInteractionTools(pi, {", "\n  });", "user-interaction wiring"),
-    /state: \(\) => state,/, "and the extension hands over its LIVE state, not a snapshot");
+    /state: \(\) => cells\.state,/, "and the extension hands over its LIVE state, not a snapshot");
   // …but it must NEVER touch the ship authority: unmetRequirements takes no
   // pause input, and no call site filters its problems on pausedQuestion.
   assert.doesNotMatch(SRC, /unmetRequirements\([^)]*pausedQuestion/);
@@ -1296,7 +1340,7 @@ test("declare_done prints the proxy's decisions itself, and the audit wait has i
   const doneBody = toolBodyOf("declare_done");
   assert.match(
     doneBody,
-    /formatProxyDecisionReport\(\s*sessionProxyDecisions\(dialogProxy\.all\(\), \[state\.sessionId \?\? undefined, readInheritance\(\)\.predecessorSession\]\),\s*\)/,
+    /formatProxyDecisionReport\(\s*sessionProxyDecisions\(deps\.proxyDecisions\(\), \[state\.sessionId \?\? undefined, readInheritance\(\)\.predecessorSession\]\),\s*\)/,
     "the completion report prints the proxy's decisions from the state — only this session's and its handoff predecessor's (2026-09-23)",
   );
   assert.match(DIALOG_PROXY_SRC, /\.\.\.\(sessionId \? \{ sessionId \} : \{\}\)/,
@@ -1341,7 +1385,7 @@ test("pause resume: any non-extension input clears the pause (interactive AND rp
   // The window is ANCHORED at the handler's closing brace, not 1400 bytes
   // wide: the fixed window rotted the moment the handler grew (B5 added the
   // wait interrupt to it) and pushed the very line below out of range.
-  const body = windowOf('pi.on("input"', "\n  });", "input handler");
+  const body = windowOf(INPUT_HOOK, "\n  };", "input handler");
   assert.match(body, /event\.source !== "extension"/);
   assert.match(body, /delete state\.pausedQuestion/);
 });
@@ -1366,7 +1410,7 @@ test("stale pause liveness: cleared when the agent proves it is not waiting", ()
 });
 
 test("session_compact while paused re-injects the WAITING state, never a resume nudge", () => {
-  const start = SRC.indexOf('pi.on("session_compact"');
+  const start = SRC.indexOf(SESSION_COMPACT);
   assert.ok(start >= 0);
   const body = SRC.slice(start, SRC.indexOf("pi.on", start + 10));
   assert.match(body, /REVIEW_GATE_PAUSED/);
@@ -1384,7 +1428,7 @@ test("ESC abort (Operation aborted) pauses auto-continuation until the next real
   assert.ok(injectAt > start, "agent_settled must contain the RESUME injection");
   assert.ok(SRC.slice(start, injectAt).includes("lastRunAborted"), "abort check must precede the RESUME injection");
   // …and any non-extension user input clears the pause again.
-  const inputBody = windowOf('pi.on("input"', "\n  });", "input handler");
+  const inputBody = windowOf(INPUT_HOOK, "\n  };", "input handler");
   assert.match(inputBody, /lastRunAborted = false/);
 });
 
@@ -1409,7 +1453,7 @@ test("request_scope_limit: extension-driven user consent, no 'confirmed' paramet
   assert.match(body, /deps\.declineScopeLimit\(\)/);
   // …and the lock is the EXTENSION's session flag, set through that seam.
   assert.match(windowOf("registerUserInteractionTools(pi, {", "\n  });", "user-interaction wiring"),
-    /declineScopeLimit: \(\) => \{ scopeLimitDeclined = true; \}/,
+    /declineScopeLimit: \(\) => \{ cells\.scopeLimitDeclined = true; \}/,
     "the decline must land on the session lock the gate actually reads");
   assert.match(body, /unshowable/, "a dialog that could not be shown is not a decline");
   assert.match(body, /state\.scopeLimit = \{/);
@@ -1419,16 +1463,13 @@ test("a session edit RECLAIMS an exempt file — the grant never covers the sess
   // P1 regression guard: without the reclaim, a session that edits ONLY
   // pre-existing dirty files would see turn_end filter them all out, disarm
   // the gate, and ship its own edits unreviewed.
-  const start = SRC.indexOf('pi.on("tool_result"');
-  assert.ok(start >= 0, "tool_result handler must exist");
-  const body = SRC.slice(start, SRC.indexOf("pi.registerTool", start));
+  const body = windowOf(EDIT_TRACKING, "\n  };", "edit tracking");
   assert.match(body, /preexistingFiles\.indexOf/);
   assert.match(body, /preexistingFiles\.splice/);
   // Session edit attribution is persisted (restart cannot re-label the
   // session's own edits as pre-existing) and re-seeded at session_start.
   assert.match(body, /state\.sessionEditedFiles/);
-  const sessionStart = SRC.indexOf('pi.on("session_start"');
-  const startBody = SRC.slice(sessionStart, SRC.indexOf('pi.on("session_compact"', sessionStart));
+  const startBody = windowOf(SESSION_START, SESSION_SHUTDOWN, "session_start");
   assert.match(startBody, /state\.sessionEditedFiles/);
 });
 
@@ -1457,7 +1498,7 @@ test("gate mode is decided by the agent itself in set_gate_mode — no LLM class
   assert.match(SRC, /let effective = requested;/,
     "the agent's requested mode must be the starting point of the decision");
   // The cache-only input capture must never decide anything itself.
-  const inputBody = windowOf('pi.on("input"', "\n  });", "first-input capture handler");
+  const inputBody = windowOf(INPUT_HOOK, "\n  };", "first-input capture handler");
   assert.doesNotMatch(inputBody, /classify|evaluateModeChange|setTaskMode/,
     "the input handler must cache only — decisions stay in set_gate_mode");
   // 2026-09-08: the nudge window NO LONGER closes on new user input — it
@@ -1469,10 +1510,10 @@ test("gate mode is decided by the agent itself in set_gate_mode — no LLM class
   // USER REQUIREMENT: "no changes" means THIS session's own edits
   // (sessionEdited), NOT pre-existing worktree/branch changes — a new session
   // on a dirty worktree still gets the consent-free first classification.
-  assert.match(SRC, /!sessionEdited/);
+  assert.match(SRC, /!cells\.sessionEdited/);
   assert.match(SRC, /sessionEdited = false/); // session_start reset
   // …set from the L1 edit arm through the injected markSessionEdited dep.
-  assert.match(shipHookWiring(), /markSessionEdited: \(\) => \{ sessionEdited = true; \}/);
+  assert.match(shipHookWiring(), /markSessionEdited: \(\) => \{ cells\.sessionEdited = true; \}/);
   // The tool must delegate to the pure, unit-tested rule engine and inject
   // the undecided directive from the same module.
   assert.match(SRC, /evaluateModeChange\(\{/);
@@ -1497,7 +1538,7 @@ test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' par
     "set_gate_mode parameters must be exactly {mode, reason}");
   // Consent comes from ctx.ui.confirm rendered by the EXTENSION, with the
   // fixed-copy dialog builder; only that branch may mint source "user".
-  assert.match(region, /await askChoice\(\s*asChoiceHost\(ctx\),\s*spec,\s*\{ body: buildModeConfirmMessage\(/);
+  assert.match(region, /await deps\.askChoice\(\s*asChoiceHost\(ctx\),\s*spec,\s*\{ body: buildModeConfirmMessage\(/);
   const confirmAt = region.indexOf("askChoice(");
   const userMint = region.indexOf('setTaskMode(effective, "user"');
   assert.ok(userMint > confirmAt, 'source "user" may only be set after the confirm dialog');
@@ -1549,7 +1590,7 @@ test("USER REQUIREMENT: Temp dirs are nudged, never clamped; only non-git clamps
   // Agent path: /tmp sessions are NOT rewritten — the gate only nudges via the
   // classification directive. The engine exemption covers non-git dirs alone.
   assert.doesNotMatch(SRC, /scratchFirstMode\(/);
-  assert.match(SRC, /piSelfTask: !sessionInGit/);
+  assert.match(SRC, /piSelfTask: !cells\.sessionInGit/);
   // setTaskMode must not be able to receive loop on a /tmp first classification
   // setTaskMode receives the agent's pick unrewritten in /tmp; only the non-git
   // short-circuit may still rewrite loop/orchestrator to normal.
@@ -1580,8 +1621,8 @@ test("USER REQUIREMENT: Temp dirs are nudged, never clamped; only non-git clamps
   // Only the HEADLESS normal force skips arming. An interactive normal session
   // still arms, so pre-existing changes stay inside the fence if the user later
   // switches the session to loop via /gate-mode.
-  assert.match(SRC, /const headlessNormal = state\.taskMode === "normal" && !ctx\.hasUI;/);
-  assert.match(SRC, /!headlessNormal && !state\.hasCodeChange && !state\.hasDocChange && !state\.bypass\.active/);
+  assert.match(SRC, /const headlessNormal = (?:st|state)\.taskMode === "normal" && !ctx\.hasUI;/);
+  assert.match(SRC, /!headlessNormal && !(st|state)\.hasCodeChange && !\1\.hasDocChange && !\1\.bypass\.active/);
   assert.doesNotMatch(SRC, /taskMode !== "normal" && !state\.hasCodeChange/,
     "a blanket normal exemption would strand pre-existing changes outside the gate");
   // No user-facing text may still claim an external model decides the mode.
@@ -1644,7 +1685,7 @@ test("loop directives: decision table injects on every turn, incl. unarmed first
   // no longer sit inside the gateArmed-only return branch.
   // Since the mode registry, the static sections live in lib/gate-modes.ts
   // and the extension references them by registry key: assert both halves.
-  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  const handlerAt = SRC.indexOf(BEFORE_AGENT_START);
   assert.ok(handlerAt > 0);
   const loopAt = SRC.indexOf("MODE_REGISTRY.loop.prompt", handlerAt);
   assert.ok(loopAt > 0, "loop branch must inject the registry loop prompt");
@@ -1677,7 +1718,7 @@ test("loop directives: all-gates-green block names the completion steps", () => 
   // When problems.length === 0 the injected text must point at the remaining
   // completion work (declare_done + the Copilot cycle) instead of a bare
   // "you may ship".
-  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  const handlerAt = SRC.indexOf(BEFORE_AGENT_START);
   const greenAt = SRC.indexOf("All gates satisfied", handlerAt);
   assert.ok(greenAt > 0, "all-green branch must exist");
   const greenLine = SRC.slice(greenAt, greenAt + 220);
@@ -1821,7 +1862,7 @@ test("SECURITY: the sensitive-file guard runs BEFORE the normal-mode edit return
 test("normal mode: prompt-transparent except the language directive; loop resume paths skip it", () => {
   // before_agent_start returns the language-directive-only prompt for normal
   // BEFORE any gate text is appended.
-  const promptAt = SRC.indexOf('pi.on("before_agent_start"');
+  const promptAt = SRC.indexOf(BEFORE_AGENT_START);
   assert.ok(promptAt >= 0);
   // The handler's REAL end, not a fixed-width window: the check is an order
   // inside THIS handler, so the slice must cover the handler and nothing else.
@@ -1836,7 +1877,7 @@ test("normal mode: prompt-transparent except the language directive; loop resume
   assert.ok(directiveAt > normalAt, "the undecided directive must not be injected in normal mode");
   // agent_settled and session_compact both skip normal (no auto-continuation,
   // no loop-resume nudge).
-  for (const [anchor, window, from] of [['pi.on("agent_settled"', 2800, SRC.indexOf(LOOP_SETTLED)], ['pi.on("session_compact"', 1000, 0]] as const) {
+  for (const [anchor, window, from] of [['pi.on("agent_settled"', 2800, SRC.indexOf(LOOP_SETTLED)], [SESSION_COMPACT, 1000, 0]] as const) {
     const at = from === 0 ? SRC.indexOf(anchor) : from;
     assert.ok(at >= 0, anchor);
     // agent_settled's window covers the child-state hooks and the
@@ -1855,7 +1896,7 @@ test("startup self-heal reports the roles it merged, from the same handler that 
   // say so — a silent rewrite is the one outcome nobody could debug. The
   // behavior face (which roles, gaps only) is asserted in
   // test/model-config.test.ts; this pins the wiring that reports it.
-  const promptAt = SRC.indexOf('pi.on("before_agent_start"');
+  const promptAt = SRC.indexOf("function agentsStartupRefusal(");
   const promptEnd = SRC.indexOf('\n  pi.on("', promptAt + 10);
   const handler = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
   assert.match(handler, /startupAgentsCheck\(\{/, "the startup check is the healing entry point");
@@ -1869,7 +1910,7 @@ test("startup self-heal reports the roles it merged, from the same handler that 
   assert.match(handler, /const healNote = healProblems\.length > 0/, "a failed heal is surfaced with the refusal");
   // …and the session's own snapshot follows the file, or every downstream
   // reader keeps the pre-heal state while the check reports a pass.
-  assert.match(handler, /projectConfig = \{ \.\.\.projectConfig, agentsGlobal: agentsSection \}/,
+  assert.match(handler, /cells\.projectConfig = \{ \.\.\.cells\.projectConfig, agentsGlobal: agentsSection \}/,
     "the healed section is adopted by the session (arbiter resolution, dispatch)");
 });
 
@@ -1878,7 +1919,7 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   // recurring "edit failed → bash edits the file" workaround. Three sites:
   // 1. before_agent_start injects the discipline paragraph in every
   //    non-normal mode (after the normal early return).
-  const promptAt = SRC.indexOf('pi.on("before_agent_start"');
+  const promptAt = SRC.indexOf(BEFORE_AGENT_START);
   const promptEnd = SRC.indexOf('\n  pi.on("', promptAt + 10);
   const promptBody = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
   const normalAt = promptBody.indexOf('state.taskMode === "normal"');
@@ -1888,16 +1929,17 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   // tool must not cross turns into silent bash edits), so the declaration
   // comment and the two clear sites must both state the NEW semantics —
   // clearing lives ONLY at a successful edit and after a nudge.
-  const decl = SRC.slice(SRC.indexOf("let editFailurePending = false;") - 600, SRC.indexOf("let editFailurePending = false;"));
+  const decl = SRC.slice(SRC.indexOf("editFailurePending: boolean;") - 600, SRC.indexOf("editFailurePending: boolean;"));
   assert.match(decl, /cleared ONLY on a successful edit|cleared only on a successful edit/,
     "the declaration comment must state the new close-on-edit/nudge semantics");
   const beforeAgent = SRC.slice(promptAt, promptEnd > 0 ? promptEnd : undefined);
   assert.doesNotMatch(beforeAgent, /editFailurePending = false/,
     "before_agent_start must NOT clear the window any more");
   // 2. tool_result: a FAILED edit arms the window and appends the nudge.
-  const resultAt = SRC.indexOf('pi.on("tool_result"');
-  const resultEnd = SRC.indexOf('pi.on("session_start"', resultAt);
-  const resultBody = SRC.slice(resultAt, resultEnd);
+  // (t8) The tool_result hook is lib/tool-event-hooks.ts, its edit branch
+  // lib/edit-tracking-hook.ts — together they are the whole handler.
+  const resultBody = ["tool-event-hooks.ts", "edit-tracking-hook.ts"]
+    .map((f) => readFileSync(join(ROOT, "lib", f), "utf8")).join("\n");
   assert.match(resultBody, /EDIT_FAILURE_NUDGE/);
   assert.match(resultBody, /editFailurePending = true/);
   // 3. tool_result bash: a write-looking command while the window is armed
@@ -1906,7 +1948,7 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   assert.match(resultBody, /editFailurePending = false/);
   // Both nudge sites are skipped in normal mode (the step-aside must not
   // add extension text to tool results).
-  const normalGuards = (resultBody.match(/state\.taskMode === "normal"/g) ?? []).length;
+  const normalGuards = (resultBody.match(/state\.taskMode [=!]== "normal"/g) ?? []).length;
   assert.ok(normalGuards >= 2, "both nudge sites must carry a normal-mode guard");
 });
 
@@ -1916,40 +1958,35 @@ test("readonly-drill stall guard: in-memory nudge wired at the read-family and b
   // anything, and neither the L2 stall breaker (turn-boundary only) nor the
   // child-health progress reading (counts ANY tool call) trips. The guard
   // counts consecutive successful read-only calls and nudges at the limit.
-  const resultAt = SRC.indexOf('pi.on("tool_result"');
-  const resultEnd = SRC.indexOf('pi.on("session_start"', resultAt);
-  const resultBody = SRC.slice(resultAt, resultEnd);
-  // 1. The read-family branch (1.5 D) carries the counter + nudge.
-  const readAt = resultBody.indexOf("READ_ONLY_TOOL_NAMES.has(event.toolName)");
-  assert.ok(readAt >= 0);
-  assert.ok(resultBody.indexOf("evaluateReadonlyStall", readAt) > readAt, "read-family branch must fold the counter");
-  // The nudge TEXT comes from readonlyStallNudgeFor(state.taskMode) — the
-  // module decides who hears it (normal + orchestrator hear nothing), so the
-  // extension must never inline the constant at a call site again.
-  assert.ok(
-    resultBody.indexOf("readonlyStallNudgeFor(state.taskMode)", readAt) > readAt,
-    "read-family branch must take the nudge text from the mode-aware selector",
-  );
-  // 2. The bash branch carries the counter + nudge too (drill workhorse).
-  assert.ok(resultBody.indexOf('event.toolName === "bash"') > readAt);
-  const bashAt = resultBody.indexOf('event.toolName === "bash"');
-  assert.ok(resultBody.indexOf("evaluateReadonlyStall", bashAt) > bashAt, "bash branch must fold the counter");
-  assert.ok(
-    resultBody.indexOf("readonlyStallNudgeFor(state.taskMode)", bashAt) > bashAt,
-    "bash branch must take the nudge text from the mode-aware selector",
-  );
-  assert.equal(
-    (resultBody.match(/READONLY_STALL_NUDGE/g) ?? []).length,
-    0,
-    "no call site may inline the constant — the selector is the only source of the text",
-  );
-  // 3. Three fold sites total: edit-success reset, read-family count, bash count.
-  const stallSites = resultBody.split("evaluateReadonlyStall").length - 1;
-  assert.equal(stallSites, 3, "counter must be folded at exactly three sites (edit reset + read + bash)");
-  const normalGuards = (resultBody.match(/state\.taskMode === "normal"/g) ?? []).length;
-  assert.ok(normalGuards >= 4, "both new sites plus the two nudge sites carry a normal-mode guard");
-  // 4. The counter state is a plain in-memory `let`, not a persisted field.
-  assert.match(SRC, /let readonlyStallState: ReadonlyStallState \| undefined;/);
+  // (t8) The tool_result hook is lib/tool-event-hooks.ts, and its edit branch
+  // lib/edit-tracking-hook.ts. ONE helper folds the counter for the read
+  // family and bash alike, so the two sites cannot drift apart.
+  const hooks = readFileSync(join(ROOT, "lib", "tool-event-hooks.ts"), "utf8");
+  const edits = readFileSync(join(ROOT, "lib", "edit-tracking-hook.ts"), "utf8");
+  const helper = windowIn(hooks, "function readonlyNudge(", "\n  }", "readonlyNudge");
+  assert.match(helper, /evaluateReadonlyStall\(/, "the helper folds the counter");
+  // The nudge TEXT comes from readonlyStallNudgeFor(…taskMode) — the module
+  // decides who hears it (normal + orchestrator hear nothing), so no call
+  // site may inline the constant.
+  assert.match(helper, /readonlyStallNudgeFor\(cells\.state\.taskMode\)/,
+    "the nudge text comes from the mode-aware selector");
+  // 1. The read-family branch (1.5 D) and 2. the bash branch (drill workhorse)
+  // both end in it — bash deliberately LAST, after every safety net.
+  const readBranch = windowIn(hooks, "function onReadOnlyResult(", "\n  }", "read-family branch");
+  assert.match(readBranch, /return readonlyNudge\(event\);/, "read-family branch must fold the counter");
+  const bashBranch = windowIn(hooks, "async function onBashResult(", "\n  }", "bash branch");
+  assert.match(bashBranch, /return readonlyNudge\(event\);\s*$/, "bash branch must fold the counter, last");
+  assert.match(hooks, /READ_ONLY_TOOL_NAMES\.has\(event\.toolName\)\) return onReadOnlyResult\(event\)/);
+  assert.match(hooks, /event\.toolName === "bash"\) return onBashResult\(event, ctx\)/);
+  assert.equal((hooks + edits).match(/READONLY_STALL_NUDGE/g)?.length ?? 0, 0,
+    "no call site may inline the constant — the selector is the only source of the text");
+  // 3. Two fold sites total: the edit-success reset and the shared helper.
+  assert.equal(edits.split("evaluateReadonlyStall(").length - 1, 1, "the landed edit resets the counter");
+  assert.equal(hooks.split("evaluateReadonlyStall(").length - 1, 1, "one shared fold for read + bash");
+  const normalGuards = (edits.match(/state\.taskMode === "normal"/g) ?? []).length;
+  assert.ok(normalGuards >= 2, "the edit branch's two nudge/arming sites step aside in normal mode");
+  // 4. The counter state is a plain in-memory cell, not a persisted field.
+  assert.match(SRC, /readonlyStallState: ReadonlyStallState \| undefined;/);
 });
 
 test("compaction recovery: session_compact re-injects state", () => {
@@ -1975,7 +2012,7 @@ test("declare_done resets BOTH per-task loop budgets (rounds AND continuationsIn
   assert.ok(at >= 0);
   const region = SRC.slice(at, SRC.indexOf("registerTool", at + 10));
   assert.match(region, /state\.rounds = \[\]/);
-  assert.match(region, /continuationsInjected = 0/);
+  assert.match(region, /resetLoopBudget\(cells\)/);
 });
 
 test("declare_done asks whether the round ARRIVED at its delivery station", () => {
@@ -1988,7 +2025,7 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   assert.equal(calls, 1, "exactly one call site — a second reading would be a second contract");
   const body = toolBodyOf("declare_done");
   assert.match(body, /stationArrivalProblems\(/, "…and it is inside declare_done");
-  assert.match(body, /isEnforcedMode\(state\.taskMode\) && goalStageSatisfied\(\)/,
+  assert.match(body, /isEnforcedMode\(state\.taskMode\) && deps\.goalStageSatisfied\(\)/,
     "the station is only known once the user approved a goal that carries one — or switched the goal stage off; " +
     "the loop question is isEnforcedMode's, so an UNDECIDED session is judged too (real-session P1, 2026-09-22)");
   assert.match(body, /changedFiles\(root\)/, "committed-ness is measured, not asserted by the agent");
@@ -2000,7 +2037,7 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   // open and this round only appended to it — gh calls "already exists" an
   // error, and `copilotReview: false` resolves no number — so the gate asks
   // GitHub itself. The question runs ONLY when the two free facts are silent.
-  assert.match(body, /probeOpenPr\(repoDirFor\(root\)\)/,
+  assert.match(body, /probeOpenPr\(deps\.repoDirFor\(root\)\)/,
     "the third evidence is a question the GATE asks, never one the agent answers");
   // …and WHETHER it still has to ask, and whether the round arrived at all,
   // are the MODULE's two rules rather than a second expression written here
@@ -2014,7 +2051,7 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   // The push reading is asked of EVERY `pr` round, not of one evidence
   // (round-1 quality P1, 2026-09-16): a checkpoint commit the gate lands after
   // the PR was opened is invisible to all three evidences alike.
-  assert.match(body, /unpushed = hasUnpushedCommits\(repoDirFor\(root\)\)/,
+  assert.match(body, /unpushed = hasUnpushedCommits\(deps\.repoDirFor\(root\)\)/,
     "every `pr` round reads the local upstream — no evidence stands in for it");
   assert.match(body, /^\s+unpushed,$/m, "…and that reading is what the judgement receives");
 });
@@ -2027,7 +2064,7 @@ test("a FAILED `gh pr create` gets the answer the gate can look up itself", () =
   // reopened under a new number — so the gate asks GitHub and says the answer.
   const window = windowOf(
     "// A FAILED `gh pr create`",
-    "const bashReadonlyNudgeText",
+    "// Read-only drill stall guard: bash is the drill workhorse",
     "failed pr create",
   );
   assert.match(window, /event\.isError === true/,
@@ -2185,7 +2222,7 @@ test("request_arbitration is registered and is a NARROW, fail-closed capability"
   assert.match(SRC, /!ctx\.hasUI[\s\S]{0,200}GATE_WINS/);
   // Criterion 1: an unconfigured arbiter (no agents.arbiter.slots[0]) is
   // refused BEFORE any spawn — no hard-coded default model.
-  assert.match(SRC, /if \(!resolveArbiterModel\(\)\)/, "an unconfigured arbiter fails closed");
+  assert.match(SRC, /if \(!arb\.resolveArbiterModel\(\)\)/, "an unconfigured arbiter fails closed");
   assert.match(SRC, /仲裁者未配置模型链/, "the refusal names the missing config");
   // The template's decline row is NOT one of the three rulings (reviewer P1):
   // the human's own objection is carried back to the caller instead of being
@@ -2230,11 +2267,11 @@ test("re-roll is blocked for ANY prior decision (including AGENT_WINS)", () => {
   const region = SRC.slice(at, at + 300);
   assert.match(region, /if \(cached\) \{/);
   // The decision key binds command digest + round + body-file content.
-  assert.match(SRC, /decisionKey = `\$\{parsed\.action\.commandDigest\}#\$\{state\.rounds\.length\}#\$\{bodyDigest\}`/);
+  assert.match(SRC, /decisionKey = `\$\{parsed\.action\.commandDigest\}#\$\{cells\.state\.rounds\.length\}#\$\{bodyDigest\}`/);
 });
 
 test("a standing arbiter token is cleared on any edit / new round / gate-reset", () => {
-  assert.match(SRC, /clearBypassToken\(\);\s*\/\/ any edit invalidates/);
+  assert.match(SRC, /clearBypassToken\(cells\);\s*\/\/ any edit invalidates/);
   // gate-reset clears it and the arbitration bookkeeping.
 
   // /gate-reset moved to lib/gate-command-tools.ts, but everything it clears
@@ -2244,10 +2281,10 @@ test("a standing arbiter token is cleared on any edit / new round / gate-reset",
   assert.match(commandBodyOf(CMD_SRC, "gate-reset"), /deps\.resetSession\(\)/,
     "/gate-reset must go through the extension's session reset");
   const resetRegion = windowOf("function resetSessionState(", "\n  }", "resetSessionState");
-  assert.match(resetRegion, /clearBypassToken\(\)/);
+  assert.match(resetRegion, /clearBypassToken\(cells\)/);
   // The appeal ledger (quota + decided contents + live pass) is persisted, so
   // the reset must delete it rather than zero an in-memory counter.
-  assert.match(resetRegion, /delete state\.appeals/);
+  assert.match(resetRegion, /delete cells\.state\.appeals/);
   assert.match(resetRegion, /lastBlockedText = null/);
   assert.match(resetRegion, /arbitrationDecisions\.clear\(\)/);
 });
@@ -2360,7 +2397,7 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
   const refuse = windowOf("function refuseText(", "\n  }", "refuseText");
   assert.match(refuse, /APPEAL_HINT/, "the reason carries the appeal route");
   assert.match(refuse, /lastBlockedText = \{/, "the block is recorded for the appeal");
-  assert.match(refuse, /appealPassAuthorizes\(state\.appeals, digest\)/, "a granted pass is honoured");
+  assert.match(refuse, /appealPassAuthorizes\(cells\.state\.appeals, digest\)/, "a granted pass is honoured");
   assert.match(refuse, /consumeAppealPass\(/, "…exactly once");
   // B-class: these reasons state the correct next step and must not offer an
   // appeal instead.
@@ -2479,10 +2516,11 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   assert.match(runtimeSrc, /spawnSync\(bin!, args, \{ stdio: "ignore", timeout: 10_000 \}\)/,
     "bounded — a stuck notifier must not hold the process open");
   assert.match(SRC, /notifyRuntime\.armExitHandler\(\)/, "the extension registers it once, for the process");
-  const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
+  const shutdownAt = SRC.indexOf(SESSION_SHUTDOWN);
   assert.ok(shutdownAt >= 0, "the shutdown handler must still exist");
-  assert.match(SRC.slice(shutdownAt, shutdownAt + 700), /notifyRuntime\.markCleanShutdown\(\)/,
+  assert.match(SRC.slice(shutdownAt, shutdownAt + 700), /deps\.notify\.markCleanShutdown\(\)/,
     "every clean shutdown reason (quit | reload | new | resume | fork) records itself, and the handler reads that");
+  assert.match(ENTRY_SRC, /notify: notifyRuntime,/, "…and the lifecycle's notify dep IS the notify runtime");
   assert.match(RUNNER_SRC, /async function runTrustedPrecommit/);
   assert.match(RUNNER_SRC, /abortSignal\?\.addEventListener\("abort"/);
   assert.match(RUNNER_SRC, /detached:\s*true/);
@@ -2572,12 +2610,12 @@ test("the audit log anchors on the REPO ROOT, not the session cwd", () => {
   assert.match(ARB_HOST_SRC, /pathJoin\(repoRoot, "\.pi", "review-gate-audit\.log"\)/,
     "the audit log must live in the repo root's .pi/");
   assert.doesNotMatch(ARB_HOST_SRC, /pathJoin\([^)]*cwd, "\.pi", "review-gate-audit\.log"\)/);
-  assert.match(SRC, /log: \(text\) => appendAuditLog\(primaryRepoRoot, state\.sessionId, text\)/,
+  assert.match(SRC, /log: \(text\) => appendAuditLog\(cells\.primaryRepoRoot, cells\.state\.sessionId, text\)/,
     "the session's audit log is handed the PRIMARY repo root, never the cwd");
 });
 
 test("stale-state reconciliation is one-way", () => {
-  assert.match(SRC, /git-clean can clear.*only edits/i);
+  assert.match(SRC, /git-clean can\s+(?:\*\s+)?clear.*only edits/i);
 });
 
 test("sensitive-file guard wired into tool_call", () => {
@@ -2589,9 +2627,9 @@ test("sensitive-file guard wired into tool_call", () => {
     "the L1 edit arm matches the NORMALIZED path against the patterns");
   assert.match(SHIP_EDIT_SRC, /return sensitiveEditBlock\(\{ rawPath: path, askable \}\)/,
     "…and refuses through the pure decision");
-  assert.match(shipHookWiring(), /sensitiveGrants: \(\) => sensitiveGrants/,
+  assert.match(shipHookWiring(), /sensitiveGrants: \(\) => cells\.sensitiveGrants/,
     "the live grants reach the arm from the extension, never a copy");
-  assert.match(shipHookWiring(), /sensitiveDeclined: \(absPath\) => sensitiveDeclinedPaths\.has\(absPath\)/,
+  assert.match(shipHookWiring(), /sensitiveDeclined: \(absPath\) => cells\.sensitiveDeclinedPaths\.has\(absPath\)/,
     "…and so does the declined-path lock");
 });
 
@@ -2624,7 +2662,7 @@ test("SECURITY: a declined sensitive path is locked, and grants never reach the 
   // The lock is ONE set, the extension's own: a copy handed to the tool would
   // forget the decline the moment the tool returned.
   assert.match(windowOf("registerUserInteractionTools(pi, {", "\n  });", "user-interaction wiring"),
-    /\n    sensitiveDeclinedPaths,/, "the extension shares its set, it does not copy it");
+    /\n    sensitiveDeclinedPaths: cells\.sensitiveDeclinedPaths,/, "the extension shares its set, it does not copy it");
   // In-memory only: persisting a grant would let a write authorization survive
   // a crash/resume, i.e. outlive the conversation the user consented in.
   assert.doesNotMatch(SRC, /state\.sensitiveGrants/,
@@ -2668,7 +2706,7 @@ test("L8b: the goal audit recorder is TRUSTED — the extension reads the verdic
   // the next goal's first audit is round 1.
   const propose = toolBodyOf("propose_loop_goal");
   assert.match(propose, /delete goalSt\.goalAuditRound/, "approval ends this goal's audit count");
-  const sessionStartAt = SRC.indexOf('pi.on("session_start"');
+  const sessionStartAt = SRC.indexOf(SESSION_START);
   const sessionStart = SRC.slice(sessionStartAt, sessionStartAt + 4000);
   assert.match(sessionStart, /delete state\.goalAuditRound/, "a new session starts its own count");
   assert.match(body, /goalTextHash\(goalText\)/, "the extension must hash the submitted text itself");
@@ -2873,15 +2911,15 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   assert.match(heartbeat, /drainChildInstructions\(live\)/,
     "and applies the orchestrator's messages, which is what makes followUp reach a BUSY child");
   assert.match(CHILD_SIDE_SRC, /function stopChildHeartbeat\(\)/, "and a session shutdown must be able to stop it");
-  const shutdown = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown");
+  const shutdown = windowOf(SESSION_SHUTDOWN, "\n  }", "session_shutdown");
   assert.match(shutdown, /stopChildHeartbeat\(\)/, "a leaked heartbeat would report for a session that is gone");
 
 
   // It is called from pi's OWN events, unconditionally and first.
-  const settled = loopSettledWindow("\n  });");
+  const settled = loopSettledWindow(LOOP_SETTLED_END);
   assert.match(settled, /reportChildState\(ctx\)/);
   assert.match(settled, /drainChildInstructions\(ctx\)/, "and the orchestrator's messages are applied there");
-  const turnEnd = windowOf('pi.on("turn_end"', "\n  });", "turn_end");
+  const turnEnd = windowOf(TURN_END, "\n  };", "turn_end");
   assert.match(turnEnd, /reportChildState\(ctx\)/, "turn_end still reports — the timer is a floor, not a replacement");
 
   // Delivery is pi's API, never a keyboard.
@@ -2985,7 +3023,7 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
   assert.match(schedule, /state\.pausedQuestion/, "watchdog respects pause_for_question");
   assert.match(schedule, /state\.taskMode === "explore" \|\| state\.taskMode === "normal"/, "watchdog respects explore/normal mode");
   assert.match(schedule, /lastRunAborted/, "watchdog respects ESC abort");
-  assert.match(schedule, /!loopArmed/, "watchdog respects the loop latch");
+  assert.match(schedule, /!cells\.loopArmed/, "watchdog respects the loop latch");
   assert.match(schedule, /state\.bypass\.active/, "watchdog respects bypass state");
   // The recheck itself is what this protects; the registry it reads is now the
   // merged table, scoped to this opener (the `childSessions` Map is deleted).
@@ -3004,9 +3042,11 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
   // become a no-op.
   const closeBody = toolBodyOf("judge_close");
   assert.match(closeBody, /deps\.cancelWaitTimer\(\)/, "judge_close cancels the watchdog");
-  assert.match(judgeToolsWiring(), /cancelWaitTimer: \(\) => cancelChildWaitTimer\(\)/,
+  assert.match(judgeToolsWiring(), /cancelWaitTimer: \(\) => deps\.cancelChildWaitTimer\(\)/,
     "…and the wiring binds that dep to the gate's own timer");
-  const shutdownBody = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown handler");
+  assert.equal((ENTRY_SRC.match(/cancelChildWaitTimer: \(\) => l2\.cancelChildWaitTimer\(\)/g) ?? []).length, 2,
+    "…which the entry hands both the judge tools and the lifecycle from the L2 continuation");
+  const shutdownBody = windowOf(SESSION_SHUTDOWN, "\n  }", "session_shutdown handler");
   assert.match(shutdownBody, /cancelChildWaitTimer\(\)/, "session_shutdown cancels the watchdog");
 });
 
@@ -3037,12 +3077,9 @@ test("round-18: agent_settled HOSTS the judge-child wait — never returns to id
 
 test("judge_submit is the agent's single judge entry and hides every process detail", () => {
   assert.ok(SRC.includes('name: "judge_submit"'), "judge_submit must be registered");
-  // The window ends where the relay tools' WIRING begins. The old end anchor
-  // was `name: "review_spawn"` — it left this file with the tools it named,
-  // and a bare indexOf of a vanished anchor returns -1, which silently widens
-  // the slice to the rest of the file instead of failing. windowOf asserts
-  // both ends.
-  const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
+  // (t8) The tool is its own module now: the window is its register
+  // function, closed by that function's end — both anchors asserted.
+  const body = judgeSubmitBody();
   // The agent says WHO and WHAT. Anything procedural is the gate's business.
   assert.match(body, /role: Type\.Enum\(SUBMITTABLE_JUDGE_ROLES\)/, "the role is the addressing key");
   assert.match(body, /task: Type\.String\(/, "the task text is the other input");
@@ -3190,7 +3227,7 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // tmux seam in the file, is what makes "only my own session" true at the
   // executor as well as in the builders. A second `runTmux` definition (or a
   // direct `rawTmux` call) would be a path with no declaration at all.
-  assert.match(SRC, /import \{ runTmux as rawTmux \} from "\.\.\/lib\/orchestrator-wiring\.ts"/,
+  assert.match(SRC, /import \{ (?:createOrchestratorDeps, )?runTmux as rawTmux \} from "\.\.\/lib\/orchestrator-wiring\.ts"/,
     "the raw runner is imported under a name nothing can call by accident");
   assert.equal((SRC.match(/const runTmux = /g) ?? []).length, 1,
     "exactly ONE wrapper defines this session's runTmux");
@@ -3222,10 +3259,15 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // clock, one release at the exit contract and one at process death.
   assert.equal((SRC.match(/sessionNaming\.register\(pi\)/g) ?? []).length, 1,
     "name_session is registered exactly once, for every kind of session");
-  assert.match(SRC, /const namingStart = sessionNaming\.onSessionStart\(\);/,
+  // (t8) The lifecycle and declare_done live in lib/ and reach the ONE
+  // naming runtime through deps the entry binds to it.
+  assert.match(SRC, /const namingStart = deps\.naming\.onSessionStart\(\);/,
     "session start adopts its own registration and sweeps the orphans");
-  assert.match(SRC, /const namingRelease = sessionNaming\.release\(\);/,
+  assert.match(ENTRY_SRC, /naming: sessionNaming,/, "…through the session's naming runtime");
+  assert.match(SRC, /const namingRelease = deps\.releaseSessionName\(\);/,
     "declare_done gives the name back");
+  assert.match(ENTRY_SRC, /releaseSessionName: \(\) => sessionNaming\.release\(\),/,
+    "…through the same runtime");
   assert.match(SRC, /namingRelease\.released \? "" : `\\n（会话名字未腾出：\$\{namingRelease\.error \?\? "未知原因"\}）`/,
     "…and reports it when it could not, instead of claiming a clean exit");
   assert.match(RUNTIME_SRC, /sessionNamingTimer = setInterval\(\(\) => \{\s*try \{ sessionNaming\.tick\(\); \} catch/, 
@@ -3252,7 +3294,7 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // session (new id, new instance, `held` gone) while the pane and the pid stay
   // — without the release the old registration keeps looking LIVE and the name
   // can never be taken again in that window.
-  assert.match(SRC, /stopSessionNamingHeartbeat\(\);\s*\n    if \(event\.reason !== "reload"\) sessionNaming\.release\(\);/,
+  assert.match(SRC, /stopSessionNamingHeartbeat\(\);\s*\n    if \(event\.reason !== "reload"\) deps\.naming\.release\(\);/,
     "session_shutdown stops the clock and gives the name back for every reason but a reload");
   // BOTH HALVES OF THE CLOCK, EACH EXACTLY ONCE: the Nit of quality round 2 was
   // a second, redundant stop in the same handler (harmless — `clearInterval` is
@@ -3385,8 +3427,10 @@ test("judge_close stays gate-internal; judge_wait is ONE implementation on BOTH 
 
   // …while the intent entries stay visible: submit spawns rounds, spawn opens
   // goal/plan audits, answer replies through the gate.
-  assert.ok(SRC.includes(`pi.registerTool({\n    name: "judge_submit"`),
-    "judge_submit stays agent-visible");
+  assert.ok(JUDGE_SUBMIT_SRC.includes(`host.registerTool({\n    name: "judge_submit"`),
+    "judge_submit is registered by its module…");
+  assert.match(ENTRY_SRC, /registerJudgeSubmitTool\(pi, cells,/,
+    "…on pi: judge_submit stays agent-visible");
   assert.match(SRC, /registerJudgeSpawnTools\(pi,/,
     "the spawn family (spawn/answer/recover) stays agent-visible");
 });
@@ -3561,7 +3605,14 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // 论证。接线引用，不是调用指令。
     // 2026-09-26 (t7): 18 → 12。送审链 / lane / 审计依赖 / reviewer 记录器搬进 lib/，
     // 它们的 6 处接线引用原样跟着搬走（下面四行），总数不变。
-    "review-gate.ts": 12,
+    // 2026-09-26 (t8): 12 → 0。两个内部步骤的工具体与 judge_submit 搬进 lib/，
+    // 它们的 12 处引用原样跟着搬走（下面三行，9 + 2 + 1），总数不变。
+    // review_checkpoint 自己的注册名、拒绝文案与接线引用。
+    "checkpoint-tool.ts": 9,
+    // run_precommit 自己的注册名与拒绝文案。
+    "precommit-tool.ts": 2,
+    // judge_submit 的 adviser 分支 callTool("prepare_adviser", …) 接线。
+    "judge-submit-tool.ts": 1,
     // callTool("review_checkpoint" / "prepare_review") + the refusal texts naming them.
     "review-chain.ts": 3,
     // callTool("run_precommit", …) — the lane's own run.
@@ -3911,8 +3962,10 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the window i
   const wait = toolBodyOf("judge_wait");
   const wiring = judgeToolsWiring();
   assert.match(JUDGE_TOOLS_SRC, /projection\.lastState\?\.state/, "liveness comes from the channel state");
-  assert.match(wiring, /announcedQuestions: \(\) => announcedRequestIds/,
+  assert.match(wiring, /announcedQuestions: \(\) => cells\.announcedRequestIds/,
     "the announced-question cursor is the SESSION's, so a wait and a settle never double-announce");
+  assert.match(ENTRY_SRC, /announcedRequestIds: \(\) => cells\.announcedRequestIds/,
+    "…the same cell the settle path announces into");
   assert.match(JUDGE_TOOLS_SRC, /judgePaneAlive\(deps\.tmux/, "pane death is probed from tmux, not inferred");
   assert.match(wait, /probeJudgeWait\(deps, child, cursors\)/, "the wait polls the message-driven criteria");
 
@@ -3922,7 +3975,7 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the window i
   const settledAt = SRC.indexOf("const childSnapshots: ChildSnapshot[] = []");
   assert.ok(settledAt > 0, "the snapshot construction must exist");
   const snapshots = SRC.slice(settledAt, settledAt + 2200);
-  assert.match(snapshots, /lastActivityAt: channelLastActivity\(c\)/,
+  assert.match(snapshots, /lastActivityAt: registry\.channelLastActivity\(c\)/,
     "activity is read from the channel, not left undefined");
   const helperAt = REGISTRY_SRC.indexOf("function channelLastActivity(");
   assert.ok(helperAt > 0, "the channel-activity helper must exist");
@@ -4144,7 +4197,7 @@ test("completion arrives as a channel report consumed by the wait — no process
 test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", () => {
   // If the check were "a confirmation exists", the agent could approve a
   // one-line goal and then rewrite the file into whatever it wanted to ship.
-  assert.match(SRC, /function loopGoalConfirmed\(root: string = primaryRepoRoot, st: GateState = state\)/);
+  assert.match(SRC, /function loopGoalConfirmed\(root: string = cells\.primaryRepoRoot, st: GateState = cells\.state\)/);
   assert.match(SRC, /isLoopGoalConfirmed\(goal, st\.loopGoal, raw\)/);
   assert.match(SRC, /return false; \/\/ unreadable/, "an unreadable goal file must fail closed");
 });
@@ -4205,9 +4258,14 @@ test("SECURITY: the Copilot requirement never touches the SHIP gate (it would de
   const doneBody = toolBodyOf("declare_done");
   assert.match(doneBody, /summary: Type\.String/, "window sanity: this really is declare_done's body");
   assert.doesNotMatch(doneBody, /name: "request_arbitration"/, "…and it stopped at the end of that body");
-  assert.match(doneBody, /copilotProblemsFor\(/);
-  const settledStart = SRC.indexOf(LOOP_SETTLED);
-  assert.match(SRC.slice(settledStart, settledStart + 6400), /copilotProblemsFor\(/); // +1200 for the settle-wake and judge-pane blocks, +1200 for the stop-proof block at the handler's top
+  assert.match(doneBody, /copilotProblemsAcrossRepos\(\)/);
+  // (t8) Both surfaces read ONE per-repo list (lib/session-repos-host.ts),
+  // which is built from the per-state fact.
+  assert.match(loopSettledWindow(LOOP_SETTLED_END), /deps\.copilotProblemsAcrossRepos\(\)/);
+  assert.match(
+    windowOf("function copilotProblemsAcrossRepos(", "\n  }", "copilotProblemsAcrossRepos"),
+    /copilotProblemsFor\(st\)/,
+  );
 });
 
 test("a FAILED ship arms nothing; a successful PR ship arms the repo it ran in", () => {
@@ -4224,20 +4282,20 @@ test("a FAILED ship arms nothing; a successful PR ship arms the repo it ran in",
 test("waiting for Copilot spends its OWN continuation budget, not the review loop's", () => {
   // Otherwise a slow Copilot would burn the rounds the fix→review loop needs,
   // and the session would run out of continuations before fixing anything.
-  assert.match(SRC, /let completionContinuations = 0/);
+  assert.match(SRC, /completionContinuations: 0,/);
   assert.match(SRC, /COMPLETION_CONTINUATION_CAP/);
   // Anchored to the NEXT handler registration, not a character count: the old
   // `+ 11000` had to be re-tuned by every edit inside the settle path, and it
   // fails for a reason that has nothing to do with this rule (the same trap
   // the declare_done window fell into, 2026-09-05).
-  const body = loopSettledWindow(/\n  pi\.on\(/, "agent_settled handler");
+  const body = loopSettledWindow(LOOP_SETTLED_END, "agent_settled handler");
   assert.match(body, /unmetRequirements\(/, "window sanity: the settle body really is in this window");
-  assert.doesNotMatch(body, /pi\.on\("session_start"/, "…and it stopped at the next handler");
-  assert.match(body, /problems\.length > 0 && continuationsInjected >= state\.maxRounds/);
-  assert.match(body, /problems\.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP/);
+  assert.doesNotMatch(body, /function onAgentEnd\(|cancelChildWaitTimer,\n/, "…and it stopped at the handler's end");
+  assert.match(body, /problems\.length > 0 && cells\.continuationsInjected >= state\.maxRounds/);
+  assert.match(body, /problems\.length === 0 && cells\.completionContinuations >= COMPLETION_CONTINUATION_CAP/);
 });
 test("SECURITY: a sensitive-file grant is consumed on the RESULT, not at tool_call", () => {
-  const resultStart = SRC.indexOf('pi.on("tool_result"');
+  const resultStart = SRC.indexOf(EDIT_TRACKING);
   assert.ok(resultStart > 0);
   // The two halves now live in different files: the CHECK is the L1 edit arm,
   // the CONSUMPTION is still the extension's tool_result handler.
@@ -4287,13 +4345,13 @@ test("P1: turn_end reads commitsAheadOfBase as a number, never an un-awaited pro
   // The ONE implementation is synchronous now (lib/repo-facts.ts), so the
   // turn_end site reads the count itself — there is no promise left to forget.
   assert.match(REPO_FACTS_SRC, /export function commitsAheadOfBase\(cwd: string\): number \{/);
-  assert.match(SRC, /commitsAhead: state\.scopeLimit \? 0 : commitsAheadOfBase\(cwd\)/);
+  assert.match(SRC, /commitsAhead: state\.scopeLimit \? 0 : commitsAheadOfBase\(cells\.cwd\)/);
 });
 
 test("R6/R9/R10: project config, git memory, strategic reset wired in", () => {
   // R6 — per-project maxRounds loaded (clamped in lib/project-config.ts).
   assert.match(SRC, /loadProjectConfig/);
-  assert.match(SRC, /state\.maxRounds = projectConfig\.maxRounds/);
+  assert.match(SRC, /state\.maxRounds = cells\.projectConfig\.maxRounds/);
   // R9 — git memory appended to the compaction resume message (default on,
   // knob-guarded so an explicit "gitMemory": false still disables it).
   assert.match(SRC, /projectConfig\.gitMemory \? buildGitMemory/);
@@ -4440,7 +4498,7 @@ test("the advisory fingerprint memo has exactly one caller: the prompt renderer"
   const invocations = calls.filter((i) => !/function\s+$/.test(SRC.slice(Math.max(0, i - 20), i)));
   assert.equal(invocations.length, 1,
     `advisoryFingerprint() must have exactly ONE call site (found ${invocations.length})`);
-  const promptRenderer = SRC.indexOf('pi.on("before_agent_start"');
+  const promptRenderer = SRC.indexOf(BEFORE_AGENT_START);
   assert.ok(promptRenderer >= 0, "prompt renderer must exist");
   assert.ok(invocations[0] > promptRenderer,
     "the only call site must be inside the before_agent_start prompt renderer");
@@ -4458,7 +4516,9 @@ test("every enforcement path computes a FRESH fingerprint", () => {
     // declare_done's own description, the orchestrator branch (R-30) and the
     // merge-waiver dialog sit between the tool name and its first fingerprint
     // call — bounded by the check that FOLLOWS the loop, not by a byte count.
-    ['name: "declare_done"', "// L7/L8 — completion-only requirements"],
+    // (declare_done is asserted below the loop: its per-repo check binds to
+    // the COMMITTED tree, and the worktree fingerprint it used to compute
+    // beside that was never read — t8 dropped the dead call.)
     // END ANCHOR, not a byte window (2026-09-06): the station-block deny added
     // above the quota check pushed the fingerprint call past 4000 bytes, which
     // is precisely the vacuous-coverage failure this comment warns about. The
@@ -4468,7 +4528,7 @@ test("every enforcement path computes a FRESH fingerprint", () => {
 
     // Same reason: R-3's orchestrator branch returns before the loop's own
     // fingerprint, so the window is closed by the block after it.
-    ['pi.on("agent_settled"', "// L7/L8 — completion-only requirements"],
+    [LOOP_SETTLED, "// L7/L8 — completion-only requirements"],
 
     // (The ship path's own per-repo fingerprint loop moved to
     // lib/ship-gate-bash.ts and is asserted separately below — it is the same
@@ -4499,6 +4559,12 @@ test("every enforcement path computes a FRESH fingerprint", () => {
     assert.ok(!body.includes("advisoryFingerprint()"),
       `${anchor} must NOT use the advisory memo`);
   }
+  // declare_done: every repo is judged against a FRESH read of what is
+  // committed (`headCommitTree(root)`), never against the advisory memo.
+  const done = windowOf('name: "declare_done"', "// L7/L8 — completion-only requirements", "declare_done gates");
+  assert.match(done, /unmetRequirements\(st, headCommitTree\(root\), false,/,
+    "declare_done binds each repo to its committed tree, read fresh");
+  assert.ok(!done.includes("advisoryFingerprint()"), "declare_done must NOT use the advisory memo");
   // The L1 ship path, same rule, against the module that now owns it: the
   // P-multi per-repo loop sits far below the ship-detection anchor, so the
   // window is bounded by the loop itself, not by a byte count that every
@@ -4548,7 +4614,7 @@ test("restore() collects the migration result from loadSidecar, not from a secon
 
   assert.match(body, /loadSidecar\(sessionSidecarPath\(cwd\),\s*\w+\)/,
     "loadSidecar must be given an out-parameter to report the migration");
-  assert.match(body, /fingerprintMigrated\s*=\s*migrateFingerprintVersion\(state\)\s*\|\|\s*\w+\.migrated/,
+  assert.match(body, /cells\.fingerprintMigrated\s*=\s*migrateFingerprintVersion\(cells\.state\)\s*\|\|\s*\w+\.migrated/,
     "the sidecar's migration result must be OR'd into the reported flag");
 });
 
@@ -4575,9 +4641,9 @@ test("a NEW session keeps the orchestration registry but never its approval (B1)
 
   assert.match(branch, /const relaySuccessor = isHandoffSuccessorOf\(process\.env, restored\.sessionId\)/,
     "the heir check overlays the marker on the sidecar's owner — one call, both facts");
-  assert.match(branch, /state\.orchestrator = successorRuntime\(restored\.orchestrator, relaySuccessor\)/,
+  assert.match(branch, /cells\.state\.orchestrator = successorRuntime\(restored\.orchestrator, relaySuccessor\)/,
     "the orchestration runtime must be carried into the fresh state, minus the permission");
-  assert.match(branch, /if \(relaySuccessor\) state = inheritGoalContract\(state, restored\)/,
+  assert.match(branch, /if \(relaySuccessor\) cells\.state = inheritGoalContract\(cells\.state, restored\)/,
     "a handoff successor also carries the user's contracts and the round budget");
   // WHICH fields grant power is the registry module's to know. Spelled out
   // here as a destructure, the list went stale the moment the approval grew a
@@ -4635,9 +4701,8 @@ test("repo-state ownership is ONE rule for the loader AND the enforcement reader
   // repo through on a warm cache while a cold one refused it.
   const enforceAt = SRC.indexOf("function enforcementStateFor(");
   assert.ok(enforceAt > 0, "the enforcement reader must exist");
-  const enforce = SRC.slice(enforceAt, SRC.indexOf("/** Normalize a tool/git path", enforceAt));
-  assert.ok(enforce.length > 0, "the window must cover the function");
-  assert.match(enforce, /stateOwnership\(process\.env, state\.sessionId, onDisk\?\.sessionId\)/,
+  const enforce = windowOf("function enforcementStateFor(", "\n  }", "enforcementStateFor");
+  assert.match(enforce, /stateOwnership\(process\.env, cells\.state\.sessionId, onDisk\?\.sessionId\)/,
     "ownership comes from the DISK, through the shared rule");
   assert.doesNotMatch(enforce, /if \(cached\) return cached/,
     "the cache must not answer the ownership question — that is what made the answer order-dependent");
@@ -4655,7 +4720,7 @@ test("repo-state ownership is ONE rule for the loader AND the enforcement reader
 });
 
 test("session_start surfaces the migration notice and clears the flag", () => {
-  const at = SRC.indexOf('pi.on("session_start"');
+  const at = SRC.indexOf(SESSION_START);
   assert.ok(at >= 0, "session_start handler must exist");
   // The window is a reading heuristic, not a contract: the P-multi reset
   // block, no-UI mode forcing, the normal-mode no-arm comment and the
@@ -4666,13 +4731,13 @@ test("session_start surfaces the migration notice and clears the flag", () => {
   // handler head keep pushing the notice section down. Anchor on the
   // NOTICE itself instead of a fixed slice so a growing handler head
   // cannot push the assertion out of the window.
-  const noticeAt = SRC.indexOf("if (fingerprintMigrated) {", at);
+  const noticeAt = SRC.indexOf("if (cells.fingerprintMigrated) {", at);
   assert.ok(noticeAt > at && noticeAt < at + 20000, "the migration notice must live inside session_start");
   const body = SRC.slice(noticeAt, noticeAt + 600);
-  assert.match(body, /if \(fingerprintMigrated\)/,
+  assert.match(body, /if \(cells\.fingerprintMigrated\)/,
     "an invalidated binding must be explained, not silently applied");
   assert.match(body, /FINGERPRINT_MIGRATION_NOTICE/);
-  assert.match(body, /fingerprintMigrated = false/,
+  assert.match(body, /cells\.fingerprintMigrated = false/,
     "the flag must be cleared so the notice is not repeated");
 });
 
@@ -4859,7 +4924,7 @@ test("REGRESSION: /gate-bypass actually disarms the L1 ship gate in-session", ()
   assert.match(callBody.slice(bypassAt, bypassAt + 120), /return undefined;/,
     "bypass must early-return the bash branch");
   // …and the flag it reads is the gate's own `state.bypass.active`, injected.
-  assert.match(shipHookWiring(), /bypassActive: \(\) => state\.bypass\.active/,
+  assert.match(shipHookWiring(), /bypassActive: \(\) => cells\.state\.bypass\.active/,
     "the bypass dep must be bound to the state /gate-bypass writes");
 });
 
@@ -4894,8 +4959,8 @@ test("the Copilot wait blocks inside copilot_review and reads as a gate-owned wa
   // The blocking call is reported on the child heartbeat as a gate-owned wait,
   // so a supervising manager is not woken by it.
   assert.match(REGISTRY_SRC, /if \(copilotWaitSince !== undefined\) return \{ role: "copilot", since: copilotWaitSince \}/);
-  assert.match(SRC, /copilotWaitSince: \(\) => copilotWaitSince,/, "the registry reads the extension's live wait stamp");
-  assert.match(SRC, /onWaiting: \(active\) => \{\n\s+copilotWaitSince = active \? Date\.now\(\) : undefined;/);
+  assert.match(SRC, /copilotWaitSince: \(\) => cells\.copilotWaitSince,/, "the registry reads the extension's live wait stamp");
+  assert.match(SRC, /onWaiting: \(active\) => \{\n\s+cells\.copilotWaitSince = active \? Date\.now\(\) : undefined;/);
 });
 
 test("copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {
@@ -5002,7 +5067,10 @@ test("the extension never calls require() (ESM type-stripped runtime)", () => {
   // that line runs (a small-diff single-shard prompt did exactly this until
   // the constants were imported instead). The extension must import statically.
   assert.doesNotMatch(SRC, /require\(/);
-  assert.match(SRC, /REVIEW_VERDICT_SCHEMA/);
+  // (t8) The entry used to import REVIEW_VERDICT_SCHEMA as the witness of a
+  // static import; nothing read it, so the dead import went. The witness is
+  // now the import that the constants moved to in the first place.
+  assert.match(ENTRY_SRC, /^import \{ TASK_TEXT_MARKER \} from "\.\.\/lib\/constants\.ts";$/m);
 });
 
 test("extension entry's relative imports resolve to existing files (package layout)", () => {
@@ -5051,7 +5119,7 @@ test("P2: prepare_review registers the commit target (baseline/head/tree) for re
   );
   assert.match(
     REVIEW_PREPARE_WIRING(),
-    /registerReviewTarget: \(root, target, ctx\) => \{\s*reviewTargets\.set\(root, target\);\s*\/\/[^\n]*\n(?:[^\n]*\n)*?\s*const st = stateForRepo\(root\);/,
+    /registerReviewTarget: \(root, target, ctx\) => \{\s*deps\.reviewTargets\.set\(root, target\);\s*\/\/[^\n]*\n(?:[^\n]*\n)*?\s*const st = repos\.stateForRepo\(root\);/,
     "and the wiring clears the parked conclusion it did not dispatch",
   );
   // And the map must be consulted inside the recorder, not just written.
@@ -5288,8 +5356,8 @@ test("review_checkpoint REFUSES outright on a PROTECTED branch — no dialog, fa
 
 
 test("judge_submit builds the task for EVERY role, and a goal audit streams its findings", () => {
-  // Same asserted window as the entry test above: the relay wiring closes it.
-  const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
+  // Same asserted window as the entry test above.
+  const body = judgeSubmitBody();
   // The agent hands over a draft or a question; the gate builds what the
   // judge actually receives.
   // The goal-auditor's task comes from the ONE assembler (three verbatim
@@ -5311,7 +5379,9 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   // Criterion 1: the stream path comes BACK to the agent — a channel written
   // but never read is not a channel.
   assert.match(body, /streamPath,/, "the reply carries the stream path");
-  assert.match(body, /findings 流（边审边修）/, "and names it in the text too");
+  // (t8) The text is built by lib/judge-submit-receipt.ts from those judges.
+  assert.match(readFileSync(join(ROOT, "lib", "judge-submit-receipt.ts"), "utf8"), /findings 流（边审边修）/,
+    "and names it in the text too");
   // The audited draft is remembered only after the dispatch is ACCEPTED: a
   // refused submission must not overwrite what a running audit is judging.
   const acceptedAt = body.indexOf("if (!d.ok)");
@@ -5330,7 +5400,8 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
 
 
 test("settlement reads the branch the checkout is on, and REMEMBERS it for the next call (reviewer P2, 2026-09-18)", () => {
-  const body = windowOf("settleWorktree: ({ childId, taskId, repoRoot, settlement }) => {", "\n    knownRepoRoots:", "settleWorktree");
+  const body = windowOf("function settleWorktree({ childId, taskId, repoRoot, settlement }", "\n  return { createWorktree, settleWorktree };", "settleWorktree");
+  assert.match(ENTRY_SRC, /settleWorktree: worktrees\.settleWorktree,/, "the orchestration deps are handed that one settlement");
   // Three sources, in order: what the REPOSITORY lists for that checkout, what
   // this session recorded when it last read one, and the name the gate derived.
   // The first is the repository's own registry (asking the DIRECTORY would let
@@ -5350,13 +5421,16 @@ test("settlement reads the branch the checkout is on, and REMEMBERS it for the n
 });
 
 test("a parallel round's receipt carries BOTH findings streams (B1, 2026-09-18)", () => {
-  const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
+  const body = judgeSubmitBody();
   // The text used to name only the ROUTED judge's stream, so a parallel round's
   // functional findings — the ones the agent fixes WHILE both judges work — had
   // no path on the reply, nor in `details`.
   assert.match(body, /streamPath: judge\.streamPath/,
     "every accepted judge keeps its own stream");
-  assert.match(body, /\[`- \$\{a\.role\} 的 findings 流（边审边修）: \$\{a\.streamPath\}`\]/,
+  // (t8) The receipt text is lib/judge-submit-receipt.ts, built from those judges.
+  assert.match(body, /acceptedReceipt\(\{/, "the receipt is built by the receipt module");
+  const receipt = readFileSync(join(ROOT, "lib", "judge-submit-receipt.ts"), "utf8");
+  assert.match(receipt, /\[`- \$\{a\.role\} 的 findings 流（边审边修）: \$\{a\.streamPath\}`\]/,
     "and the receipt prints one line per judge, matched by role");
 });
 
@@ -5492,8 +5566,8 @@ test("the orchestration layer is wired in, and its logic did NOT land in this fi
 
 test("the orchestration deps hand over only what the EXTENSION owns", () => {
   const deps = windowOf("createOrchestratorDeps({", "});", "orchestrator deps");
-  assert.match(deps, /taskMode: \(\) => state\.taskMode/);
-  assert.match(deps, /loadRuntime: \(\) => state\.orchestrator/);
+  assert.match(deps, /taskMode: \(\) => cells\.state\.taskMode/);
+  assert.match(deps, /loadRuntime: \(\) => cells\.state\.orchestrator/);
   assert.match(deps, /orchestrationId: currentOrchestrationId/);
   // Constraint 10 is gone (2026-09-07): no work-branch landing to settle.
 });
@@ -5506,7 +5580,7 @@ test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets o
     'if (state.taskMode === "orchestrator") {',
     "\n    }\n",
     "orchestration prompt",
-    SRC.indexOf('pi.on("before_agent_start"'),
+    SRC.indexOf(BEFORE_AGENT_START),
   );
 
   assert.match(block, /ORCHESTRATOR_DIRECTIVE/);
@@ -5515,7 +5589,7 @@ test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets o
   // ordinary case — and it is injected at the top of `before_agent_start` so
   // no mode branch or early return can drop it.
   assert.doesNotMatch(block, /formatInheritanceBrief/, "the brief is no longer orchestrator-only");
-  const beforeStartAt = SRC.indexOf('pi.on("before_agent_start"');
+  const beforeStartAt = SRC.indexOf(BEFORE_AGENT_START);
   const briefAt = SRC.indexOf('formatInheritanceBrief(readInheritance(), orchestrationIdFromEnv())', beforeStartAt);
   const orchAt = SRC.indexOf('if (state.taskMode === "orchestrator") {', beforeStartAt);
   assert.ok(briefAt > 0 && briefAt < orchAt,
@@ -5524,7 +5598,7 @@ test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets o
   // block ("negotiate a loop goal → judge_submit reviewer → declare_done"),
   // which contradicts constraint 2 clause by clause and quoted the CHILD's
   // unmet gates out of a shared sidecar. Its contract is the plan.
-  assert.match(block, /buildOrchestratorExitBlock\(orchestrationDoneProblems\(\)\)/,
+  assert.match(block, /buildOrchestratorExitBlock\(deps\.orchestrationDoneProblems\(\)\)/,
     "an orchestrator is told the PLAN's exit contract, not the loop's");
   assert.match(block, /return \{ systemPrompt \};/,
     "and it returns before the loop block can be appended");
@@ -5536,7 +5610,7 @@ test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets o
   // the wrong occurrence would make this assertion vacuous.
   const promptAt = SRC.indexOf('if (state.taskMode === "orchestrator") {\n      systemPrompt +=');
   assert.ok(promptAt > 0, "the orchestration prompt block must be findable");
-  const childAt = SRC.indexOf("if (isOrchestrationChild()) {", promptAt);
+  const childAt = SRC.indexOf("if (deps.isOrchestrationChild()) {", promptAt);
   assert.ok(childAt > promptAt, "the child branch is its own statement now that the orchestrator returns");
   const childBranch = SRC.slice(childAt, childAt + 200);
 
@@ -5549,7 +5623,7 @@ test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets o
 
 test("declare_done consults the ORCHESTRATION's exit contract, not just this session's gates", () => {
   const body = toolBodyOf("declare_done");
-  assert.match(body, /completionProblems\.push\(\.\.\.orchestrationDoneProblems\(\)\)/,
+  assert.match(body, /completionProblems\.push\(\.\.\.deps\.orchestrationDoneProblems\(\)\)/,
     "an orchestrator writes no code, so every ordinary gate would pass with its plan half-run");
   const helper = windowIn(RUNTIME_SRC, "function orchestrationDoneProblems()", "\n  }", "orchestrationDoneProblems");
   assert.match(helper, /if \(state\.taskMode !== "orchestrator"\) return \[\]/,
@@ -5587,7 +5661,7 @@ test("R-30: declare_done and orchestrator_status answer with the SAME function, 
   // answers to one question; here it was a functional deadlock.
   const body = toolBodyOf("declare_done");
   assert.match(body, /const orchestratorMode = state\.taskMode === "orchestrator"/);
-  assert.match(body, /if \(orchestratorMode\) \{[\s\S]{0,600}?problems\.push\(\.\.\.orchestrationDoneProblems\(\)\);/,
+  assert.match(body, /if \(orchestratorMode\) \{[\s\S]{0,600}?problems\.push\(\.\.\.deps\.orchestrationDoneProblems\(\)\);/,
 
     "in orchestrator mode the PLAN is the whole criterion");
   assert.match(body, /orchestrator_status/,
@@ -5603,7 +5677,7 @@ test("R-3: an orchestrator never receives the LOOP's continuation — its criter
   // a review and a precommit it will never have. The nudge could never be
   // satisfied, so it would have kept firing to the end of the session.
   const settled = loopSettledWindow("// L7/L8 — completion-only requirements");
-  assert.match(settled, /if \(state\.taskMode === "orchestrator"\) \{\s*\n\s*orchestratorSettled\(ctx\);\s*\n\s*return;/,
+  assert.match(settled, /if \(state\.taskMode === "orchestrator"\) \{\s*\n\s*runtime\.orchestratorSettled\(ctx\);\s*\n\s*return;/,
     "it branches BEFORE the loop's own unmet-requirement computation");
   const own = windowIn(RUNTIME_SRC, "function orchestratorSettled(", "\n  }", "orchestratorSettled");
   assert.match(own, /buildOrchestratorResume\(/, "and it has a continuation of its own");
@@ -5631,30 +5705,34 @@ test("judge_conclude is registered judge-side only (anti-forgery by surface)", (
   // self-certify a verdict breaks the gate. The guard is the registration.
   const calls = [...SRC.matchAll(/registerJudgeConcludeTool\(pi,/g)];
   assert.equal(calls.length, 1, "exactly one registration, on the agent-visible host");
-  const at = calls[0]!.index!;
-  const window = SRC.slice(Math.max(0, at - 900), at);
-  assert.match(window, /if \(readJudgeSideEnv\(process\.env\)\) \{/,
-    "the registration sits inside the judge-side branch");
+  // (t8) The judge-only surface is lib/judge-pane-self.ts's registerJudgeSide:
+  // it returns before registering anything unless this process IS a judge pane.
+  const side = windowOf("export function registerJudgeSide(", "registerJudgeConcludeTool(pi,", "registerJudgeSide");
+  assert.match(side, /const side = readJudgeSideEnv\(process\.env\);\n\s*if \(!side\) return;/,
+    "the registration sits behind the judge-side guard");
+  assert.equal((ENTRY_SRC.match(/registerJudgeSide\(pi,/g) ?? []).length, 1, "…which the entry wires once");
 });
 
 test("the inspection observer is fed IN PROCESS, from successful judge tool results", () => {
   // The evidence must be gathered where the round happens (a judge pane runs
   // THIS extension), not scraped from a transcript afterwards — a transcript
   // is written by the very session being checked.
-  const handler = windowOf('pi.on("tool_result"', "// 1. Edits: only arm gate on success.", "tool_result observer");
-  assert.match(handler, /isJudgePane\(\) && event\.isError !== true/,
+  const handler = windowOf("return async function onToolResult(", "// 1. Edits: only arm gate on success.", "tool_result observer");
+  assert.match(handler, /deps\.isJudgePane\(\) && event\.isError !== true/,
     "judge panes only, successful calls only — a failed read inspected nothing");
-  assert.match(handler, /judgeInspection = observeInspection\(/,
+  assert.match(handler, /cells\.judgeInspection = observeInspection\(/,
     "the fold itself lives in lib/judge-inspection.ts");
   // It must sit BEFORE the branches, all of which return early.
-  const feedAt = SRC.indexOf("judgeInspection = observeInspection(");
-  const firstBranchAt = SRC.indexOf("if (EDIT_TOOL_NAMES.has(event.toolName)) {");
+  const whole = windowOf("return async function onToolResult(", "\n  };", "tool_result handler");
+  const feedAt = whole.indexOf("judgeInspection = observeInspection(");
+  const firstBranchAt = whole.indexOf("if (EDIT_TOOL_NAMES.has(event.toolName))");
   assert.ok(feedAt >= 0 && firstBranchAt >= 0 && feedAt < firstBranchAt,
     "an early-returning branch must not be able to skip the observation");
+  assert.match(ENTRY_SRC, /const \{ isJudgePane, noteJudgeTaskText \} = judgeSelf;/, "…and the dep is the pane's own answer");
 
   // Every action is stamped with the round it belongs to: a pane outlives its
   // rounds, and an abandoned one would otherwise lend its reads to the next.
-  assert.match(handler, /judgeCurrentRound\(\)/, "the fold carries the round");
+  assert.match(handler, /deps\.judgeCurrentRound\(\)/, "the fold carries the round");
   const roundReader = windowIn(REGISTRY_SRC, "function judgeCurrentRound(", "\n  }", "judgeCurrentRound");
   assert.match(roundReader, /readFileSync\(pathJoin\(cwd, "\.pi", HIERARCHY_FILENAME\)/,
     "the round comes from the registry FILE — the in-memory copy is loaded once and would go stale");
@@ -5663,7 +5741,8 @@ test("the inspection observer is fed IN PROCESS, from successful judge tool resu
   // The round's OWN paperwork must be excluded, or the gate is decorative: the
   // probe says "conclude READY and do nothing else", and a judge reads its own
   // task regardless — crediting that read would clear the gate for free.
-  assert.match(handler, /ownPaths: judgeOwnPaths\(\)/, "the fold knows the round's own files");
+  assert.match(handler, /ownPaths: deps\.judgeOwnPaths\(\)/, "the fold knows the round's own files");
+  assert.match(ENTRY_SRC, /judgeOwnPaths: judgeSelf\.judgeOwnPaths,/, "…bound to the pane's own list");
   const ownPaths = windowOf("function judgeOwnPaths(", "\n  }", "judgeOwnPaths");
   assert.match(ownPaths, /JUDGE_TASK_ENV/, "the task file this round was opened with");
   assert.match(ownPaths, /JUDGE_STREAM_ENV/, "the findings stream this round publishes to");
@@ -5671,11 +5750,11 @@ test("the inspection observer is fed IN PROCESS, from successful judge tool resu
 
   // The judge_conclude wiring must actually pass the evidence in: an unwired
   // host would leave the rule asserting nothing.
-  const wiring = windowOf("registerJudgeConcludeTool(pi, {", "\n    });", "judge_conclude deps");
-  for (const dep of ["inspection: () => judgeInspection", "inspectionPass:", "noteInspectionRefusal:", "noteConcluded:"]) {
+  const wiring = windowOf("registerJudgeConcludeTool(pi, {", "\n  });", "judge_conclude deps");
+  for (const dep of ["inspection: () => cells.judgeInspection", "inspectionPass:", "noteInspectionRefusal:", "noteConcluded:"]) {
     assert.ok(wiring.includes(dep), `judge_conclude is wired with ${dep}`);
   }
-  assert.match(wiring, /judgeInspection = emptyInspection\(\)/,
+  assert.match(wiring, /cells\.judgeInspection = emptyInspection\(\)/,
     "a round's evidence must not carry into the next round");
 });
 
@@ -5687,8 +5766,8 @@ test("the zero-inspection refusal has an appeal, and it grants only that round",
     "const parsed = parseArbitrableAction(",
     "request_arbitration dispatch",
   );
-  assert.match(dispatch, /lastBlockedInspection && lastBlockedInspection\.at === newest/);
-  assert.match(dispatch, /return arbitrateInspection\(/);
+  assert.match(dispatch, /cells\.lastBlockedInspection && cells\.lastBlockedInspection\.at === newest/);
+  assert.match(dispatch, /return arb\.arbitrateInspection\(/);
 
   const appeal = windowIn(ARB_HOST_SRC, "async function arbitrateInspection(", "\n  }\n", "arbitrateInspection");
   assert.match(appeal, /admitInspectionAppeal\(/, "quota and no-re-rolling come from the pure module");
@@ -5696,7 +5775,7 @@ test("the zero-inspection refusal has an appeal, and it grants only that round",
   assert.match(appeal, /INSPECTION_APPEAL_SYSTEM_PROMPT/, "its own standing instructions");
   assert.match(appeal, /verdict\?\.decision \?\? "GATE_WINS"/, "fail-closed on any arbiter failure");
   assert.match(appeal, /deps\.grantInspectionPass\(issueInspectionPass\(/, "AGENT_WINS mints the round-bound pass");
-  assert.match(SRC, /grantInspectionPass: \(pass\) => \{ inspectionPass = pass; \}/, "…into the session's one pass slot");
+  assert.match(SRC, /grantInspectionPass: \(pass\) => \{ cells\.inspectionPass = pass; \}/, "…into the session's one pass slot");
   // What it can NEVER do: mint a ship bypass token.
   assert.doesNotMatch(appeal, /bypassToken/, "no appeal class may authorize a ship command");
 
@@ -5739,7 +5818,7 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   const panes = windowIn(RUNTIME_SRC, "function alivePaneIdsForSupervision(", "\n  }", "alivePaneIdsForSupervision");
   assert.match(panes, /alivePanes\(orchestratorDeps\)/, "one pane measurement, shared with the wait");
   assert.doesNotMatch(panes, /orchestratorDeps\.tmux\(/, "the duplicated argv is gone");
-  const shutdown = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown");
+  const shutdown = windowOf(SESSION_SHUTDOWN, "\n  }", "session_shutdown");
   assert.match(shutdown, /stopSupervisionTimer\(\)/, "a leaked timer would keep waking a session that is gone");
 });
 
@@ -5781,7 +5860,7 @@ test("R3-5: an accepted declare_done WRITES the completion record, before the lo
   // The gate knew the task was finished and wrote that nowhere, so a
   // supervising orchestrator was reduced to reading the child's terminal —
   // and read "working" for 725 seconds on a child that had finished.
-  const done = windowOf('name: "declare_done"', "registerGoalTools(", "declare_done");
+  const done = windowOf('name: "declare_done"', "\n}", "declare_done");
   const write = done.indexOf("state.completion = {");
   assert.ok(write > 0, "declare_done must record its own acceptance");
   assert.match(done.slice(write, write + 200), /merge: "none"/,
@@ -5836,7 +5915,7 @@ test("set_gate_mode refuses orchestrator where the role is impossible or unsafe"
 
 test("a spawner's requested mode applies only to a clean, undecided, interactive session", () => {
   const block = windowOf("const requestedBySpawner = requestedModeFromEnv()", "\n    }\n", "spawner mode");
-  assert.match(SRC, /if \(ctx\.hasUI && state\.taskMode === undefined\) \{\n\s*const requestedBySpawner/,
+  assert.match(SRC, /if \(ctx\.hasUI && cells\.state\.taskMode === undefined\) \{\n\s*const requestedBySpawner/,
     "it is a FIRST classification only — never a way to re-decide a session");
   assert.match(block, /isEnforcedMode\(requestedBySpawner\)/,
     "a spawner may hand over a tighter starting point, never a looser one");
@@ -5848,7 +5927,7 @@ test("a spawner's requested mode applies only to a clean, undecided, interactive
   // sets RG_GATE_MODE=explore in its own environment is still ignored.
   assert.match(block, /requestedBySpawner === "explore" && readWorkerSideEnv\(process\.env\)/,
     "a worker pane's explore is honoured — and only a worker pane's");
-  assert.match(block, /setTaskMode\("explore", "auto", ctx\)/);
+  assert.match(block, /deps\.setTaskMode\("explore", "auto", ctx\)/);
 });
 
 test("the file-size gate runs at the CHECKPOINT, and only new files can block it", () => {
@@ -5905,8 +5984,8 @@ test("REVIVAL TIMER: the human stops it respects are real bindings, not literals
   // Every human-stop field the revival timer passes must read REAL state.
   const revival = windowIn(RUNTIME_SRC, "function startRevivalTimer(", "function stopRevivalTimer", "startRevivalTimer");
   assert.match(revival, /aborted: deps\.lastRunAborted\(\)/, "ESC pause reads the real abort flag");
-  assert.match(SRC, /lastRunAborted: \(\) => lastRunAborted,/, "…wired to the extension's live flag");
-  assert.match(SRC, /arbitrationPaused: \(\) => arbitrationPaused,/, "…and so is the arbitration pause");
+  assert.match(SRC, /lastRunAborted: \(\) => cells\.lastRunAborted,/, "…wired to the extension's live flag");
+  assert.match(SRC, /arbitrationPaused: \(\) => cells\.arbitrationPaused,/, "…and so is the arbitration pause");
   assert.match(revival, /awaitingAnswer: !!state\.pausedQuestion/, "ask_user pause reads the real paused question");
   assert.match(revival, /bypassed: state\.bypass\.active/, "bypass reads the real bypass state");
   assert.match(revival, /arbitrationPaused: deps\.arbitrationPaused\(\),/, "arbitration pause reads the real flag, not a literal false");
@@ -5915,8 +5994,8 @@ test("REVIVAL TIMER: the human stops it respects are real bindings, not literals
   // resumes — armLoop() is the single re-arm path that clears it.
   assert.match(SRC, /if \(choice === "Pause gate and wait"\) \{[\s\S]{0,200}?arbitrationPaused = true;/,
     "the arbitration pause branch sets the flag");
-  const armLoop = windowOf("function armLoop()", "let arbitrationPaused", "armLoop");
-  assert.match(armLoop, /arbitrationPaused = false;/, "armLoop clears the arbitration pause");
+  const armLoop = windowOf("export function armLoop(cells: SessionCells): void {", "\n}", "armLoop");
+  assert.match(armLoop, /cells\.arbitrationPaused = false;/, "armLoop clears the arbitration pause");
 });
 
 
@@ -5946,9 +6025,9 @@ test("non-git directory: the gate short-circuits entirely (user decision 2026-09
   // sessionInGit is derived ONCE from gitRootOfDir(cwd) (which itself
   // silences stderr), so the probe never leaks; every git-backed path
   // then branches on it BEFORE any git call.
-  assert.match(SRC, /let sessionInGit = gitRootOfDir\(cwd\) !== null;/,
+  assert.match(SRC, /sessionInGit: root !== null,/,
     "sessionInGit must be derived from gitRootOfDir (the stderr-silenced probe)");
-  assert.match(SRC, /sessionInGit = gitRootOfDir\(cwd\) !== null;/,
+  assert.match(SRC, /cells\.sessionInGit = gitRootOfDir\(cwd\) !== null;/,
     "session_start re-derives sessionInGit for a switched session");
   // The widget must not call currentBranch (the fatal source) outside a repo.
   const widget = windowIn(STRIP_SRC, "function gateWidgetFacts()", "function contractFacts", "gateWidgetFacts");
@@ -5966,12 +6045,12 @@ test("non-git directory: the gate short-circuits entirely (user decision 2026-09
   // replacing it with `clampReason: undefined` would silently regress the
   // reject wording to the /tmp lie while every test stays green.
   const modeChange = windowOf("const decision = evaluateModeChange({", "      });", "set_gate_mode decision");
-  assert.match(modeChange, /clampReason: !sessionInGit/,
+  assert.match(modeChange, /clampReason: !cells\.sessionInGit/,
     "the non-git clamp reason must be passed to evaluateModeChange");
   // session_start forces normal mode and returns before any git-backed step.
-  const start = windowOf("pi.on(\"session_start\"", "pi.on(\"session_shutdown\"", "session_start");
-  assert.match(start, /if \(!sessionInGit\) \{/, "session_start must branch on sessionInGit");
-  assert.match(start, /setTaskMode\(\"normal\", \"auto\", ctx\)/,
+  const start = windowOf(SESSION_START, SESSION_SHUTDOWN, "session_start");
+  assert.match(start, /if \(!cells\.sessionInGit\) \{/, "session_start must branch on sessionInGit");
+  assert.match(start, /deps\.setTaskMode\(\"normal\", \"auto\", ctx\)/,
     "a non-git session is forced to normal mode");
   // The review/checkpoint/precommit tools refuse outside a repository.
   for (const tool of ["checkpoint", "judge_submit", "run_precommit", "record_review", "declare_done"]) {
@@ -6000,7 +6079,7 @@ test("restart does not strand pane judges: registry + pendings persist per repo"
   // every time a comment above the merge grows (it did, twice, in one round) —
   // what the rule actually says is "inside session_start, before any tool can
   // run", so that is what is asserted.
-  const startAt = SRC.indexOf('pi.on("session_start"');
+  const startAt = SRC.indexOf(SESSION_START);
   const mergeAt = SRC.indexOf("ensureHierarchyLoaded(root)", startAt);
   assert.ok(mergeAt > startAt, "a restarted session merges previous slices");
   assert.ok(mergeAt - startAt < 8000, "…early in session_start, before any tool can run");
@@ -6020,7 +6099,7 @@ test("restart does not deadlock on a dead opener: dead foreign entries are dropp
   assert.match(REGISTRY_SRC, /delete judgeHierarchy\[id\];/, "the dead entry is dropped, never adopted");
   assert.doesNotMatch(SRC + REGISTRY_SRC, /openerId: caller \};/, "no adoption may come back");
   // …and it runs on every hierarchy read, so no tool path can deadlock.
-  const reads = [...SRC.matchAll(/hierarchy: \(\) => \{ dropDeadForeignJudges\(\); return judgeHierarchy\(\); \},/g)];
+  const reads = [...SRC.matchAll(/hierarchy: \(\) => \{ registry\.dropDeadForeignJudges\(\); return registry\.judgeHierarchy\(\); \},/g)];
   assert.equal(reads.length, 2, "both judge tool families drop on read");
   const dispatchAt = DISPATCH_SRC.indexOf("function dispatchJudgeRound(");
   assert.match(DISPATCH_SRC.slice(dispatchAt, dispatchAt + 800), /dropDeadForeignJudges\(\);/,
@@ -6089,9 +6168,9 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
   // declare_done's cascade-close deliberately uses the WIDER scope: a dead
   // pane still leaves an entry, a scratch worktree and a pending audit to
   // reclaim. What must never widen is the opener.
-  assert.match(SRC, /const ownedJudges = ownJudges\(\)\.filter\(\(child\) =>/, "cascade-close is opener-scoped");
+  assert.match(SRC, /const ownedJudges = registry\.ownJudges\(\)\.filter\(\(child\) =>/, "cascade-close is opener-scoped");
   // The health snapshot the hosted wait is built from.
-  assert.match(SRC, /for \(const c of ownJudges\(\)\) \{/, "the child snapshot lists own judges only");
+  assert.match(SRC, /for \(const c of registry\.ownJudges\(\)\) \{/, "the child snapshot lists own judges only");
 });
 
 /**
@@ -6123,7 +6202,7 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
  * whose round never concluded”; an in-flight round has a terminus of its own.
  */
 test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by dispatcher", () => {
-  const sweep = windowOf("const ownedJudges = ownJudges()", "progress.step(`联关", "declare_done cascade");
+  const sweep = windowOf("const ownedJudges = registry.ownJudges()", "progress.step(`联关", "declare_done cascade");
   // It closes what it owns, one by one, with no question about provenance.
   assert.match(sweep, /for \(const child of ownedJudges\) \{/, "every owned judge is visited");
   for (const dispatcherish of ["judgePaneReclaim", "dispatchedBy", "atRoundEnd", "judge-pane-policy"]) {
@@ -6139,9 +6218,8 @@ test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by disp
   // THE OTHER HALF OF THE TOPOLOGY: the agent has no way to close a pane, so
   // there is nothing for it to get wrong. `judge_close` is registered on the
   // internal host only.
-  const registration = windowOf("judge_close", "judge_wait", "judge tool host split",
-    SRC.indexOf("// WHERE EACH ONE LIVES."));
-  assert.match(registration, /INTERNAL host/,
+  const registration = windowIn(ENTRY_SRC, "// `judge_close` stays INTERNAL", "registerJudgeWaitTool(pi,", "judge tool host split");
+  assert.match(registration, /registerJudgeSessionTools\(internalHost, judgeSessionDeps\);/,
     "judge_close stays off the agent's tool surface — that IS policy (b)");
 });
 
@@ -6240,7 +6318,7 @@ test("a judge session writes NO gate state, and says so outside the repo", () =>
     const window = codeOnly(SRC).slice(Math.max(0, call.index! - 700), call.index);
     assert.match(window, /gateStateWriteSkip\(process\.env\)/,
       `a gate-state write at offset ${call.index} is not behind the reporting-shell guard`);
-    assert.match(window, /state\.exclusivityRefusal/,
+    assert.match(window, /(?:st|state)\.exclusivityRefusal/,
       `a gate-state write at offset ${call.index} is not behind the worktree guard`);
   }
 });
@@ -6356,10 +6434,10 @@ test("ONE gate session per worktree: refuse, hold, release — and only ONE live
  */
 test("round 5: both inline judge-task assemblies go through the untrusted-data seam", () => {
   // The reviewer note is assembled by the chain (lib/review-chain.ts, t7); the
-  // adviser question is still assembled in the extension.
+  // adviser question is assembled by judge_submit (lib/judge-submit-tool.ts, t8).
   const code = codeOnly(SRC) + "\n" + codeOnly(CHAIN_SRC);
-  assert.match(SRC, /import \{ composeWithUntrustedData \} from "\.\.\/lib\/untrusted-data\.ts"/,
-    "the extension imports the seam");
+  assert.match(JUDGE_SUBMIT_SRC, /import \{ composeWithUntrustedData \} from "\.\/untrusted-data\.ts"/,
+    "judge_submit imports the seam");
   assert.match(CHAIN_SRC, /import \{ composeWithUntrustedData \} from "\.\/untrusted-data\.ts"/,
     "…and so does the chain");
   // Derivation self-proof: the pattern finds the call sites at all before its
@@ -6442,7 +6520,7 @@ test("rotation retires the lane it replaces: pane closed, scratch reaped, row dr
  */
 test("the judge's context reading travels report → registry → next dispatch", () => {
   const code = codeOnly(SRC);
-  assert.match(code, /contextPercent: \(\) => contextPercentOf\(latestCtx/,
+  assert.match(code, /contextPercent: \(\) => contextPercentOf\(cells\.latestCtx/,
     "the judge side reports its own usage at the conclusion");
   assert.match(codeOnly(AUDIT_HOST_SRC), /noteJudgeContextFrom\(entry\.judgeId, records\)/,
     "the opener records it when it reads the round's channel");
@@ -6460,7 +6538,9 @@ test("test-run discipline nudge: wired into the bash branch, judge panes exempt"
   // session gets the nudge; a judge pane's full run is its job and stays
   // silent. Both halves must be structurally pinned.
   assert.match(SRC, /looksLikeFullLaneRun\(cmd\)/, "the bash branch consults the recogniser");
-  assert.match(SRC, /text: FULL_LANE_NUDGE/, "…and appends the nudge when it hits");
+  assert.match(SRC, /withNudge\(event, FULL_LANE_NUDGE, event\.isError === true\)/, "…and appends the nudge when it hits");
+  assert.match(SRC, /function withNudge\([^)]*\): ToolResultPatch \{\n\s*return \{ content: \[\.\.\.\(event\.content \?\? \[\]\), \{ type: "text", text \}\], isError \};/,
+    "…as one more text block on that very result");
   // Judge exemption sits in the same condition — readJudgeSideEnv(process.env)
   // === undefined means "main session, not a judge pane".
   const bashSite = SRC.slice(SRC.indexOf("Test-run discipline nudge"), SRC.indexOf("Test-run discipline nudge") + 700);
@@ -6539,7 +6619,7 @@ test("retiring is TWO phases, and the split is what makes each half safe", () =>
   assert.match(committed, /stopChildHeartbeat\(\)/, "and the child heartbeat a loop session may own");
   // And a rollback therefore has exactly ONE thing to undo.
   const rolled = site.slice(site.indexOf("rolledBack:"));
-  assert.match(rolled, /if \(claimsMainSidecar\(process\.env\)\) holdWorktree\(\)/,
+  assert.match(rolled, /if \(claimsMainSidecar\(process\.env\)\) deps\.holdWorktree\(\)/,
     "the rollback re-takes the claim — and only a session that claims one may write a heartbeat");
   assert.doesNotMatch(rolled, /stopSupervisionTimer|markHandedOff|handedOffSession = false/,
     "phase two never ran on this path, so there is nothing else to undo (the old single-phase rollback could not re-arm a stopped timer)");
@@ -6588,7 +6668,7 @@ test("every wake-up path respects a retired session", () => {
   const settleStart = SRC.indexOf(LOOP_SETTLED);
   assert.ok(settleStart > 0);
   assert.match(SRC.slice(settleStart, settleStart + 3400),
-    /if \(state\.taskMode !== "normal" && !handedOff\(\) && \(await settleFinishedRounds\(ctx\)\)\)/,
+    /if \(state\.taskMode !== "normal" && !runtime\.handedOff\(\) && \(await deps\.settleFinishedRounds\(ctx\)\)\)/,
     "settleFinishedRounds must not wake a retired session either");
 
   // The sidecar writer too: two sessions writing one sidecar is what the
@@ -6596,7 +6676,7 @@ test("every wake-up path respects a retired session", () => {
   // this worktree ON PURPOSE — so the predecessor stops writing.
   const persistAt = SRC.indexOf("function persist(ctx?: ExtensionContext)");
   assert.ok(persistAt > 0);
-  assert.match(SRC.slice(persistAt, persistAt + 2500), /if \(handedOff\(\)\) return;/,
+  assert.match(SRC.slice(persistAt, persistAt + 2500), /if \(deps\.handedOff\(\)\) return;/,
     "a retired session stops writing the sidecar the successor now owns");
 });
 
@@ -6605,7 +6685,7 @@ test("the successor's heirship is read from its own environment, and the guard h
     "the takeover claim is read from the successor's own environment");
   assert.match(PRESENCE_SRC, /\.\.\.\(successorOf \? \{ successorOf \} : \{\}\)/,
     "and handed to the decision as the heirship relation");
-  assert.match(SRC, /ownSessionId: \(\) => state\.sessionId \?\? undefined/,
+  assert.match(SRC, /ownSessionId: \(\) => cells\.state\.sessionId \?\? undefined/,
     "the predecessor's OWN id is what travels (state.sessionId is string|null, the contract is string|undefined)");
   assert.match(EXCLUSIVITY_SRC, /if \(heir && holder\.sessionId === heir\) return \{ ok: true \}/,
     "the decision itself lives in lib/session-exclusivity.ts, unit-tested there");
@@ -6880,7 +6960,7 @@ test("a settle publishes its stop proof only at the exits that MEAN it", () => {
   assert.ok(start > 0, "the L2 settle handler is the anchor, not the first agent_settled registration");
   // The whole handler: it is long, and the stops it must publish are spread
   // from its top (the empty-problems exit) to its bottom (the stall breaker).
-  const body = SRC.slice(start, SRC.indexOf("// ---------- persistence", start));
+  const body = loopSettledWindow(LOOP_SETTLED_END);
   const confirmAt = body.indexOf("const confirmStop");
   assert.ok(confirmAt > 0, "the proof has one issuing site, named");
   assert.match(body.slice(confirmAt, confirmAt + 200), /noteChildProgress\("settled"\)/);
@@ -6896,7 +6976,7 @@ test("a settle publishes its stop proof only at the exits that MEAN it", () => {
   for (const exit of [
     /if \(state\.taskMode === "explore" \|\| state\.taskMode === "normal"\) \{ confirmStop\(\); return; \}/,
     /if \(state\.pausedQuestion\) \{ confirmStop\(\); return; \}/,
-    /if \(!loopArmed\) \{ confirmStop\(\); return; \}/,
+    /if \(!cells\.loopArmed\) \{ confirmStop\(\); return; \}/,
     /if \(state\.bypass\.active\) \{ confirmStop\(\); return; \}/,
   ]) {
     assert.match(body, exit, "a settle that continues nothing says so");
@@ -6949,14 +7029,14 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   assert.ok(judgesEnd > judgesAt,
     "the end anchor is gone — an unchecked indexOf would widen this window to EOF and every assertion below it would read the wrong body");
   const judges = SRC.slice(judgesAt, judgesEnd);
-  assert.match(judges, /await dispatchJudgeRound\(\{/, "the dispatch owner is reused, not bypassed");
+  assert.match(judges, /await deps\.dispatchJudgeRound\(\{/, "the dispatch owner is reused, not bypassed");
   // A round never starts HALF: if the quality spawn fails, its error returns
   // before the reviewer is dispatched (a reviewer whose quality half never
   // started could only ever be refused at recording time).
   const failAt = judges.indexOf("if (!d.ok) {");
-  const qualityNoteAt = judges.indexOf("noteQualityRoundDispatched(root, d.judgeId)");
+  const qualityNoteAt = judges.indexOf("deps.noteQualityRoundDispatched(root, d.judgeId)");
   assert.ok(failAt > 0 && qualityNoteAt > failAt, "a failed spawn returns before the next judge is started");
-  assert.match(judges, /noteQualityRoundDispatched\(root, d\.judgeId\)/,
+  assert.match(judges, /deps\.noteQualityRoundDispatched\(root, d\.judgeId\)/,
     "the round records WHICH quality judge it dispatched — the fact the hold reads");
   // …AND IN EITHER DIRECTION (functional round P2, 2026-09-16): a round whose
   // SECOND judge cannot start must not leave the first one judging a head the
@@ -6964,7 +7044,7 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // (quality round P2, same day): both failure paths keep a pane, but a
   // boot-check timeout delivered the task on the argv while a failed channel
   // write into a REUSED pane delivered nothing.
-  assert.match(judges, /if \(d\.delivered !== true\) \{\s*for \(const already of accepted\) \{\s*cancelJudgeRound\(root, already\.role,/,
+  assert.match(judges, /if \(d\.delivered !== true\) \{\s*for \(const already of accepted\) \{\s*deps\.cancelJudgeRound\(root, already\.role,/,
     "only a round whose task was NOT delivered abandons its siblings");
   assert.doesNotMatch(judges, /if \(!d\.paneId\) \{/, "a kept pane is not the test — the two failures mean opposite things");
   // …and the fact is set by each failure site, never inferred by the caller.
@@ -7084,7 +7164,7 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // BOTH record paths apply it, through the one wrapper (reviewer P1,
   // 2026-09-15: wired into the sweep alone, a round closed by a `judge_wait`
   // never stopped anything).
-  assert.equal(((SRC + SETTLE_SRC).match(/await applyRoundCancel\(settled\.kind,/g) ?? []).length, 2,
+  assert.equal(((SRC + SETTLE_SRC).match(/await (?:deps\.)?applyRoundCancel\(settled\.kind,/g) ?? []).length, 2,
     "the settle sweep AND judge_wait's settleRound both apply it");
   assert.doesNotMatch(SRC + SETTLE_SRC, /settled\.kind === "quality" \? await/, "no second copy of the kind test");
   // THE KILL IS REAL (user requirement): closing the pane is the existing
@@ -7196,11 +7276,12 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
   // only the first. One untracked non-code file (the seeded `node_modules`
   // symlink) cleared `hasCodeChange` while eight unreviewed commits sat on the
   // branch, and the ship gate let everything through.
-  assert.match(
-    SRC,
-    /import \{ armingFromFacts, couldReconcile, reconcileArming \} from "\.\.\/lib\/gate-arming\.ts"/,
-    "the rule lives in lib/gate-arming.ts and both sites import it — 哲学三: no second copy",
-  );
+  // (t8) The arming sites and the reconciliation live in lib/ modules now;
+  // each imports the rule from its one home.
+  assert.match(SRC, /import \{ armingFromFacts \} from "\.\/gate-arming\.ts"/,
+    "the rule lives in lib/gate-arming.ts and the arming sites import it — 哲学三: no second copy");
+  assert.match(SRC, /import \{ couldReconcile, reconcileArming \} from "\.\/gate-arming\.ts"/,
+    "…and so does the reconciliation");
 
   const armAt = SRC.indexOf("const armed = armingFromFacts({");
   assert.ok(armAt > 0, "the ARMING sites ask the shared rule");
@@ -7210,22 +7291,22 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
     "three arming sites (session_start, the git re-arm, a secondary repo) — one rule, one implementation",
   );
   assert.equal(
-    SRC.match(/commitsAhead: state\.scopeLimit \? 0 : commitsAheadOfBase\(cwd\)/g)?.length,
+    SRC.match(/commitsAhead: (?:st|state)\.scopeLimit \? 0 : commitsAheadOfBase\((?:cells\.)?cwd\)/g)?.length,
     2,
     "…and the branch-commit fact is read at the two sites that can see it: arm and reconcile",
   );
 
-  const turnEnd = windowOf('pi.on("turn_end", async (_event, ctx) => {', "\n  });", "turn_end handler");
+  const turnEnd = windowOf(TURN_END, "\n  };", "turn_end handler");
   assert.match(turnEnd, /reconcileArming\(current, \{/, "the reconciliation asks the same rule");
   assert.match(
     turnEnd,
-    /commitsAhead: state\.scopeLimit \? 0 : commitsAheadOfBase\(cwd\)/,
+    /commitsAhead: state\.scopeLimit \? 0 : commitsAheadOfBase\(cells\.cwd\)/,
     "…and pays for the git call the old kind-only clearing never made",
   );
   assert.match(turnEnd, /couldReconcile\(current, files\)/, "…skipped when nothing could be cleared");
   assert.match(
     turnEnd,
-    /for \(const root of sessionRepos\) \{\n      if \(root === primaryRepoRoot\) continue;/,
+    /for \(const root of cells\.sessionRepos\) \{\n      if \(root === cells\.primaryRepoRoot\) continue;/,
     "…and every OTHER repo the session worked in is reconciled by the same rule (quality round 2 P2): a secondary repo's flags had no clearing path at all",
   );
   assert.match(turnEnd, /reconcileArming\(repoCurrent, \{/, "…with the same two facts");
@@ -7255,7 +7336,7 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
   assert.doesNotMatch(SRC, /"rev-list", "--count"/, "…and the extension keeps no second copy");
   assert.match(
     SRC,
-    /commitsAheadOfBase: async \(\) => commitsAheadOfBase\(cwd\),/,
+    /commitsAheadOfBase: async \(\) => commitsAheadOfBase\(cells\.cwd\),/,
     "…and the async seam only delegates",
   );
   assert.equal(
@@ -7291,7 +7372,7 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
     /EVERY PATH THIS SESSION WROTE IS RECORDED, code\/doc or not/,
     "the rule says what it is for",
   );
-  const at = SRC.indexOf("const rel = repoRelative(path);\n      sessionEditedPaths.add(rel);");
+  const at = SRC.indexOf("const rel = deps.repoRelative(path);\n    cells.sessionEditedPaths.add(rel);");
   assert.ok(at > 0, "recording happens for every edit, before the code/doc branch");
   const before = SRC.slice(Math.max(0, at - 900), at);
   assert.match(before, /if \(isCodeFile\(path\) && !state\.hasCodeChange\)/, "…after the ARMED flags, which stay code/doc-only");
@@ -7303,11 +7384,10 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
   );
   // …and the SAME is true of a SECONDARY repo (review round 1 P1): its new
   // `.json`/`.yaml` files were recorded only when they were project files.
-  const otherRepo = SRC.slice(
-    SRC.indexOf('if (editScope.scope === "other-repo")'),
-    SRC.indexOf("// P-multi: an edit in the PRIMARY repo makes it the active repo again"),
-  );
-  assert.ok(otherRepo.length > 0, "the other-repo branch exists");
+  // (t8) The other-repo branch is its own function in lib/edit-tracking-hook.ts.
+  assert.match(SRC, /if \(editScope\.scope === "other-repo"\) \{\n\s*trackOtherRepoEdit\(editScope\.root, path, absEditPath, ctx\);/,
+    "the other-repo branch hands the edit to its tracker");
+  const otherRepo = windowOf("function trackOtherRepoEdit(", "\n  }\n", "the other-repo branch");
   assert.ok(
     otherRepo.indexOf("s.sessionEditedFiles.push(rel)") < otherRepo.lastIndexOf("if (isProjectFile) {"),
     "a secondary repo records EVERY path this session wrote, not only its project files",
@@ -7323,7 +7403,7 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
   // violation.
   assert.match(
     SRC,
-    /return abs\.startsWith\(primaryRepoRoot \+ "\/"\) \? abs\.slice\(primaryRepoRoot\.length \+ 1\) : abs;/,
+    /const root = cells\.primaryRepoRoot;\n\s*return abs\.startsWith\(root \+ "\/"\) \? abs\.slice\(root\.length \+ 1\) : abs;/,
     "recorded paths are REPO-root-relative, never cwd-relative",
   );
 });
@@ -7401,13 +7481,13 @@ test("editing ANY project file un-finishes the task — completion does not surv
     "…and it clears the SESSION's record — `declare_done` writes completion on the PRIMARY state " +
       "only, so clearing a per-repo one left the session looking finished while this repo's " +
       "bindings had just been invalidated (quality round P1, 2026-09-22)");
-  assert.match(SRC.slice(crossDelete, crossDelete + 1600), /if \(sessionUnfinished\) persist\(ctx/,
+  assert.match(SRC.slice(crossDelete, crossDelete + 1600), /if \(sessionUnfinished\) deps\.persist\(ctx/,
     "…and the PRIMARY sidecar is written, or a restart would resurrect the record");
 
   // WHAT DID NOT CHANGE: the ARMING is still code/doc-only ("is there anything to
   // review?" is a different question, and its answer did not change).
-  assert.match(SRC.slice(primaryBranch, primaryBranch + 1200), /armLoop\(\)/);
-  assert.match(SRC.slice(crossBranch, crossBranch + 800), /armLoop\(\)/);
+  assert.match(SRC.slice(primaryBranch, primaryBranch + 1200), /armLoop\(cells\)/);
+  assert.match(SRC.slice(crossBranch, crossBranch + 800), /armLoop\(cells\)/);
 });
 
 test("the acceptance round is armed from declare_done, on the EXISTING engine, and never ships (2026-09-22)", () => {
@@ -7421,7 +7501,7 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   // comparing to "loop".
   assert.match(
     code,
-    /if \(isEnforcedMode\(state\.taskMode\) && !orchestratorMode\) \{\s*progress\.step\("真实验收"\);\s*const acceptance = await armAcceptanceRound\(ctx, progress, acceptanceNotes\);/,
+    /if \(isEnforcedMode\(state\.taskMode\) && !orchestratorMode\) \{\s*progress\.step\("真实验收"\);\s*const acceptance = await deps\.armAcceptanceRound\(ctx, progress, acceptanceNotes\);/,
     "the step is wired into declare_done's own body, for loop semantics (undecided included)",
   );
   // …AND THE MODE IS NOT RE-DERIVED HERE — a second spelling of “is this the
@@ -7500,13 +7580,13 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   //    `roundAlive === false` rule then dispatched a second round on top of a
   //    working judge — the first one killed and paid for twice.
   const cascade = windowOf(
-    "const ownedJudges = ownJudges()",
+    "const ownedJudges = registry.ownJudges()",
     "progress.step(`联关",
     "acceptance cascade-close",
   );
   assert.match(
     cascade,
-    /child\.role === "acceptance" && acceptanceRoundInFlight\(stateForRepo\(child\.repoRoot\)\.acceptance\)/,
+    /child\.role === "acceptance" && acceptanceRoundInFlight\(deps\.stateForRepo\(child\.repoRoot\)\.acceptance\)/,
     "an IN-FLIGHT acceptance round is filtered out of the cascade-close",
   );
   // ..and the reading itself stays in the module (哲学二): a literal

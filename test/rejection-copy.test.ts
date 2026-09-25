@@ -82,10 +82,10 @@ test("every high-frequency refusal path renders through buildRejection", () => {
   const cases: Array<[string, string, string, string]> = [
     ["ask_user batch not conforming", "lib/user-interaction-tools.ts",
       "export async function doAskUser", "const { questions, trimmedOptions } = checked;"],
-    ["judge_submit submission refused", "extensions/review-gate.ts",
+    ["judge_submit submission refused", "lib/judge-submit-tool.ts",
       'name: "judge_submit"', "const progress = createProgressReporter("],
-    ["declare_done refused", "extensions/review-gate.ts",
-      "// ---------- declare_done tool ----------", 'progress.done("全部满足")'],
+    ["declare_done refused", "lib/declare-done-tool.ts",
+      'name: "declare_done"', 'progress.done("全部满足")'],
     ["goal refused (audit or hash)", "lib/loop-goal.ts",
       "export function buildGoalPrereviewRefusal", "export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK"],
     ["goal refused (loop goal not approved: L8 edit block)", "lib/loop-goal.ts",
@@ -98,7 +98,7 @@ test("every high-frequency refusal path renders through buildRejection", () => {
       "export async function evaluateEditCall", "const absPath = path ? normalizeSensitivePath"],
     // Not one of the six goal-named refusal paths: this is the worktree
     // occupancy refusal raised at session start, and the same text doubles as
-    // the L8 edit-block reason (extensions/review-gate.ts).
+    // the L8 edit-block reason (lib/loop-goal-host.ts).
     ["session start refused (worktree held by a peer)", "lib/session-exclusivity.ts",
       "function refusalText", "Last path segment"],
     ["ship command blocked", "lib/ship-gate-copy.ts",

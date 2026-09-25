@@ -260,13 +260,17 @@ test("the timeoutMs: 0 snapshot is untouched by all of this", async () => {
 // The trigger and the reach — structural, with self-verified windows
 // ---------------------------------------------------------------------------
 
-const EXTENSION_SRC = fs.readFileSync(new URL("../extensions/review-gate.ts", import.meta.url), "utf8");
+const ENTRY_SRC = fs.readFileSync(new URL("../extensions/review-gate.ts", import.meta.url), "utf8");
+/** The input handler's body (lib/tool-event-hooks.ts since t8). */
+const EXTENSION_SRC = fs.readFileSync(new URL("../lib/tool-event-hooks.ts", import.meta.url), "utf8");
 const JUDGE_TOOLS_SRC = fs.readFileSync(new URL("../lib/judge-wait-tool.ts", import.meta.url), "utf8");
 
 test("the trigger is the EXISTING input handler, and the gate's own injections never pull it", () => {
-  const start = EXTENSION_SRC.indexOf('pi.on("input"');
+  assert.match(ENTRY_SRC, /pi\.on\("input", createInputHook\(cells, \{ persist \}\)\);/,
+    "the entry registers the one input hook");
+  const start = EXTENSION_SRC.indexOf("return function onInput(");
   assert.ok(start >= 0, "the input handler must exist");
-  const end = EXTENSION_SRC.indexOf("\n  });", start);
+  const end = EXTENSION_SRC.indexOf("\n  };", start);
   assert.ok(end > start, "the window must find the handler's closing brace — otherwise it proves nothing");
   const body = EXTENSION_SRC.slice(start, end);
   assert.ok(body.includes("notifyUserInput()"), "the window must actually CONTAIN the call it is asserting about");
@@ -279,7 +283,7 @@ test("the trigger is the EXISTING input handler, and the gate's own injections n
     "exactly one call site — a second, unguarded one is the whole risk here");
 
   // No new entry point: nothing else in the extension may pull the interrupt.
-  assert.equal((EXTENSION_SRC.match(/notifyUserInput\(\)/g) ?? []).length, 1,
+  assert.equal(((ENTRY_SRC + EXTENSION_SRC).match(/notifyUserInput\(\)/g) ?? []).length, 1,
     "the human's own keyboard is the ONLY thing that ends a wait — never a tool, never a channel");
 });
 

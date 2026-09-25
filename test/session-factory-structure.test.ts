@@ -118,7 +118,7 @@ test("all six pane-opening call sites go through the factory", () => {
     { file: "lib/judge-spawn-tools.ts", anchor: "async function doRecover(" },
     { file: "lib/orchestrator-dispatch.ts", anchor: "export async function dispatchSpawn(" },
     { file: "lib/orchestrator-recovery-tools.ts", anchor: "async function doRecover(" },
-    { file: "extensions/review-gate.ts", anchor: "openSuccessor: async (spec) => {" },
+    { file: "lib/handoff-host.ts", anchor: "openSuccessor: async (spec) => {" },
   ];
   /** From this function's start to wherever the next function begins. */
   const windowOf = (text: string, at: number): string => {

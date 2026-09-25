@@ -7,7 +7,10 @@ import { fileURLToPath } from "node:url";
 import { LANGUAGE_DIRECTIVE } from "../lib/constants.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXT = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
+const ENTRY = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
+/** The before_agent_start handler body (lib/turn-directive.ts since t8). */
+const EXT = readFileSync(join(ROOT, "lib", "turn-directive.ts"), "utf8");
+const HANDLER = "function onBeforeAgentStart(";
 
 // ---------------------------------------------------------------------------
 // The directive content itself.
@@ -42,13 +45,13 @@ test("LANGUAGE_DIRECTIVE exempts protocol-fixed English tokens (fail-safe for th
 test("extension imports the directive from lib/constants (single source of truth)", () => {
   assert.match(EXT, /LANGUAGE_DIRECTIVE/);
   // It must be a named import from constants, not an inline re-declaration.
-  assert.match(EXT, /import\s*\{[\s\S]*LANGUAGE_DIRECTIVE[\s\S]*\}\s*from\s*["']\.\.\/lib\/constants\.ts["']/);
+  assert.match(EXT, /import\s*\{[\s\S]*LANGUAGE_DIRECTIVE[\s\S]*\}\s*from\s*["']\.\/constants\.ts["']/);
   // No second declaration of the directive anywhere in the extension.
   assert.doesNotMatch(EXT, /const\s+LANGUAGE_DIRECTIVE\s*=/);
 });
 
 test("language gate is injected in before_agent_start", () => {
-  assert.match(EXT, /before_agent_start/);
+  assert.match(ENTRY, /pi\.on\("before_agent_start", \(event\) => onBeforeAgentStart\(event\)\);/);
   assert.match(EXT, /event\.systemPrompt\s*\+\s*"\\n\\n"\s*\+\s*LANGUAGE_DIRECTIVE/);
 });
 
@@ -76,7 +79,7 @@ const HANDLER_WINDOW = 9000;
 
 test("language gate is UNCONDITIONAL — injected at the top of before_agent_start", () => {
   // Locate the handler body.
-  const start = EXT.indexOf('pi.on("before_agent_start"');
+  const start = EXT.indexOf(HANDLER);
   assert.ok(start >= 0, "handler must exist");
   const body = EXT.slice(start, start + HANDLER_WINDOW);
   const injectAt = body.indexOf("LANGUAGE_DIRECTIVE");
@@ -95,7 +98,7 @@ test("language gate is UNCONDITIONAL — injected at the top of before_agent_sta
 });
 
 test("the handler always returns a systemPrompt (never undefined)", () => {
-  const start = EXT.indexOf('pi.on("before_agent_start"');
+  const start = EXT.indexOf(HANDLER);
   const body = EXT.slice(start, start + HANDLER_WINDOW);
   // The handler ends with a single `return { systemPrompt: ... }` — the
   // explore/orchestrator branches return early, but the fall-through path

@@ -12,7 +12,8 @@
 `lib/` 全量模块的速查表，让你在动手前 30 秒内找到落点。
 
 写新功能时先想清楚它落在哪个模块，而不是落在「我正好打开的那个文件」——
-`extensions/review-gate.ts` 的七千余行就是几十次「只加 100 行」累积出来的。
+`extensions/review-gate.ts` 曾经的七千余行（顶峰近 9000 行）就是几十次「只加 100 行」
+累积出来的；t1–t8 四波搬迁（2026-09-26 收尾）之后它只剩约 1400 行接线。
 
 改**已有**口径（一条规则、一份清单、一个数字）而不是加新代码时，先看 §七
 「口径副本地图」：同一段话在这个仓库里往往有好几份手抄，它告诉你还有哪几处
@@ -22,11 +23,21 @@
 
 ## 一、`extensions/review-gate.ts` 是什么
 
-它是**扩展入口**：pi 的生命周期事件在这里接线，绝大多数 gate 工具在这里注册。
-它**不是**「所有关卡与所有工具的唯一入口」——这个误解会直接把新代码引到错误
-的文件里。
+它是**扩展入口，只剩接线**（t8，2026-09-26）：会话的可变状态建成一个
+`SessionCells`（`lib/session-cells.ts`），再把它和各 host 的 deps 交给 `lib/` 里的
+工具注册函数与事件处理函数。**工具体、事件处理体、会话状态的闭包函数都不在
+这里** —— 往这个文件里加一段逻辑，就是在重新长回那九千行。
 
 ### 1.1 它接线的生命周期事件
+
+每个 `pi.on(...)` 都是一行（最长不过几行）接线，处理体在右列写的 lib/ 模块里：
+`session_start` / `session_shutdown` / `session_compact` → `lib/session-lifecycle.ts`；
+`before_agent_start` / `turn_end` / 思考空转熔断的 `agent_settled` 与 `message_*` →
+`lib/turn-directive.ts`；L2 的 `agent_end` / `agent_settled` → `lib/l2-continuation.ts`；
+`tool_result` / `input` / 后台 agent 的 `message_end` → `lib/tool-event-hooks.ts`（编辑分支在
+`lib/edit-tracking-hook.ts`）；judge pane 自己的 `agent_end` / `agent_settled` →
+`lib/judge-pane-self.ts`；`tool_call` → `lib/ship-gate-hook.ts`。**注册的相对顺序与搬迁前
+一致**（handler 在同一事件上按注册顺序跑，顺序本身就是行为）。
 
 | 事件 | 门禁在这里做什么 |
 | --- | --- |
@@ -42,14 +53,20 @@
 | `session_shutdown` | 收尾清理（watcher、临时资源）；停掉名字续期定时器，并且**除 `reload` 外都把名字腾出**（`/new`、`/resume`、`/fork` 会换 session id 并重建扩展实例，而 pane 与 pid 不变 —— 不释放就会留下一个永远被判 `live` 的登记；`reload` 复用同一个 session id，下一次 `session_start` 接管同一登记）；进程 `exit` 钩子是所有路径的兵底 |
 | `session_compact` | 压缩后重新注入门禁状态与 git 记忆 |
 
-核对（这张表的完整判据）：`grep -n 'pi\.on("' extensions/review-gate.ts` —— 当前 14 个。
+核对（这张表的完整判据）：`grep -rn 'pi\.on("' extensions/review-gate.ts lib/` —— 入口里 12 行
+接线，另有 7 个注册在 lib/ 的注册函数里（`judge-pane-self.ts` 2 个、`turn-directive.ts` 4 个、
+`tool-event-hooks.ts` 1 个）。
 
 ### 1.2 工具注册分两处（重要）
 
-- **扩展直接注册 4 个** gate 工具：`judge_submit`、
-  `declare_done`、`set_gate_mode`、`request_arbitration`（`setup_workspace` 于
-  2026-09-07 退役）。
-  核对：`grep -c '^  pi.registerTool({' extensions/review-gate.ts` → 当前 4。
+- **扩展一个工具都不直接注册了**（t8，2026-09-26）。原先直接注册的 4 个也搬进了
+  `lib/`，扩展里各只剩一次 `register…Tool(pi, cells, deps)` 接线：
+  `judge_submit` → `lib/judge-submit-tool.ts`（回执文案在 `lib/judge-submit-receipt.ts`）、
+  `declare_done` → `lib/declare-done-tool.ts`、`set_gate_mode` → `lib/gate-mode-tool.ts`、
+  `request_arbitration` → `lib/arbitration-tool.ts`（`setup_workspace` 于 2026-09-07 退役）。
+  两个内部步骤 `review_checkpoint` / `run_precommit` 同样搬走
+  （`lib/checkpoint-tool.ts` / `lib/precommit-tool.ts`，仍注册在 internalHost）。
+  核对：`grep -c 'pi.registerTool({' extensions/review-gate.ts` → 0。
 
 - **20 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
   - `lib/goal-tools.ts`：`propose_loop_goal`（L8：跑 goal 审计 → 问用户 →
@@ -167,9 +184,9 @@
   `/load-pr-review`、`/watch-ci`、`/gate-init`）的**定义与提示词**在
   `lib/workflow-commands.ts`，`gate-command-tools.ts` 只是循环注册它们。
   → 加一条工作流命令：改 `lib/workflow-commands.ts`，命令层与扩展都不必碰。
-- `/gate-reset` 清掉的那一堆会话可变量仍然留在扩展里（它们本来就是扩展闭包的
-  绑定），聚成一个 `resetSessionState()`，命令经 `deps.resetSession()` 一个口子
-  调用它 —— 命令模块只拥有「reset → persist → notify」这个顺序。
+- `/gate-reset` 清掉的那一堆会话可变量都是 `SessionCells` 的格子（`lib/session-cells.ts`），
+  聚成 `lib/session-restore-host.ts` 的一个 `resetSessionState()`，命令经
+  `deps.resetSession()` 一个口子调用它 —— 命令模块只拥有「reset → persist → notify」这个顺序。
 
 ### 1.4 L1 `tool_call` 钩子：三个模块
 
@@ -207,9 +224,9 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 | 层 | 是什么 | 接线/执行在哪 | 判定逻辑在哪 |
 | --- | --- | --- | --- |
 | **L1** ship gate（硬拦） | 未过门禁前拦下 `git commit` / `git push` / `gh pr create` / `gh pr edit` | `lib/ship-gate-hook.ts`（`evaluateToolCall`），扩展只留一行 `pi.on("tool_call", …)` 接线 | `lib/ship-gate-bash.ts`（ship 臂）、`lib/ship-gate-edit-guard.ts`（edit 臂）、`lib/ship-detect.ts`、`lib/shell-lex.ts`、`lib/constants.ts`、`lib/repo-resolve.ts`、`lib/fingerprint.ts` |
-| **L2** 自动续跑 | 门禁未满足时重新触发一轮；事件链断掉时由存活不变量兜底（60s 周期唤醒） | 扩展 `agent_settled` + `lib/session-revival.ts` 驱动的独立定时器 | `lib/gate-state-requirements.ts`（未满足项）、`lib/loop-stall.ts`（断路器，只管事件注入路径）、`lib/session-revival.ts`（兜底唤醒，无视预算与断路器、尊重人的叫停） |
+| **L2** 自动续跑 | 门禁未满足时重新触发一轮；事件链断掉时由存活不变量兜底（60s 周期唤醒） | `lib/l2-continuation.ts` 的 `onAgentSettled`（扩展只留一行 `agent_settled` 接线）+ `lib/session-revival.ts` 驱动的独立定时器 | `lib/gate-state-requirements.ts`（未满足项）、`lib/loop-stall.ts`（断路器，只管事件注入路径）、`lib/session-revival.ts`（兜底唤醒，无视预算与断路器、尊重人的叫停） |
 | **L3** git 钩子 | 离开 pi 也有效的纵深防御 | `hooks/pre-commit`（薄壳，2026-09-08 起单次 exec）、`hooks/pre-push`、`hooks/commit-msg` | `scripts/pre-commit-check.cjs`（全链单进程：schema/bypass → L6 → divergence+fingerprint → verdict）、`scripts/compute-fingerprint.cjs`、`scripts/check-staged-divergence.cjs`（钩子不依赖 TypeScript） |
-| **L4** 输出语言 | 每轮无条件注入简体中文指令 | 扩展 `before_agent_start` | `lib/constants.ts` 的 `LANGUAGE_DIRECTIVE` |
+| **L4** 输出语言 | 每轮无条件注入简体中文指令 | `lib/turn-directive.ts` 的 `onBeforeAgentStart`（扩展只留一行 `before_agent_start` 接线） | `lib/constants.ts` 的 `LANGUAGE_DIRECTIVE` |
 | **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | `lib/ship-gate-bash.ts`（ship 命令上的 commit message / PR 文案）+ 扩展的 checkpoint 路径 + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
 | **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/pre-commit-check.cjs` → 进程内 `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
 | **L7** Copilot 审查 | PR 之后的审查闭环：请求、有证据的等待、逐 thread 消账；第 4 轮起每条问题先经用户逐条审批 | `lib/copilot-review-tools.ts`（工具 `copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线（弹框经 `askFinding` 注入、等待是工具内的阻塞调用 `lib/copilot-watch.ts` `awaitCopilotNews`） | `lib/copilot-review.ts`、`lib/copilot-watch.ts`、`lib/copilot-triage.ts` |
@@ -533,7 +550,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 
 ---
 
-## 五、`lib/` 全量速查表（214 个模块）
+## 五、`lib/` 全量速查表（237 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -600,7 +617,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `fingerprint.ts` | 工作区指纹：内容寻址、暂存无关，门禁裁决与它绑定 |
 | `gate-dialogs.ts` | 门禁**唯一的对话框渲染入口**与 transcript 通知（t5 从扩展拆出）：`showToUser`（同步 `ui.notify`、不截断）、`asChoiceHost`、按需加载 pi 的多行编辑器组件接出理由框与复选框、每会话一个对话框队列；`askChoice` / `askMultiChoice` 共用同一个 `askDialog`（横幅、实际展示才起算的 30 分钟代答赛跑、用户交互时间戳写进共享 `Ref`） |
 | `dialog-proxy.ts` | 30 分钟无人作答时 arbiter 代答的 **I/O**（t5 随对话框拆出）：带 transcript 指针的只读代答请求、把代答决定写进对应 repo 的 sidecar 并通知、跨 repo 汇总给 `declare_done` 的完成报告；赛跑规则本身在 `user-proxy.ts` |
-| `gate-arming.ts` | **「本会话有没有需要审的东西」的唯一判据**（2026-09-20，演练 F1 的 fail-open）：arming 有两条来源 —— 工作区里脏的 code/doc 文件、分支领先 base 的 commit —— 而这条规则以前被抄成了两份（`session_start` 的 arming 与 `turn_end` 的对账），对账那份只看工作区文件类型，于是一个未跟踪的非 code 文件（实测：隔离 checkout 的 `node_modules` 软链）就能把「分支上还压着 8 个未审 commit」造成的 arming 清掉，而 `lib/ship-gate-bash.ts` 读到「本会话没有改动」后整个 ship 门禁放行（`git commit` / `git push` / `gh pr create` 都不再过门禁）。现在 `armingFromFacts`（事实 → 该 arm 什么）/ `reconcileArming`（clear-only，两个来源都问）/ `couldReconcile`（不值得付 git 调用时提前返回）是**唯一实现**，三个 arming 点（`session_start`、git 命令 re-arm、次级 repo 首个 sidecar）与 `turn_end` 对账共用；`files` 已由调用方按 scope limit 豁免表过滤、`commitsAhead` 在 scope limit 下由调用方置 0。**单路径的 edit 事件不走这里**（它问的是「这一次编辑算不算 code 编辑」，答案只看那个路径自己的扩展名，`extensions/review-gate.ts` 的 edit handler 直接问 `isCodeFile` / `isDocFile`） |
+| `gate-arming.ts` | **「本会话有没有需要审的东西」的唯一判据**（2026-09-20，演练 F1 的 fail-open）：arming 有两条来源 —— 工作区里脏的 code/doc 文件、分支领先 base 的 commit —— 而这条规则以前被抄成了两份（`session_start` 的 arming 与 `turn_end` 的对账），对账那份只看工作区文件类型，于是一个未跟踪的非 code 文件（实测：隔离 checkout 的 `node_modules` 软链）就能把「分支上还压着 8 个未审 commit」造成的 arming 清掉，而 `lib/ship-gate-bash.ts` 读到「本会话没有改动」后整个 ship 门禁放行（`git commit` / `git push` / `gh pr create` 都不再过门禁）。现在 `armingFromFacts`（事实 → 该 arm 什么）/ `reconcileArming`（clear-only，两个来源都问）/ `couldReconcile`（不值得付 git 调用时提前返回）是**唯一实现**，三个 arming 点（`session_start`、git 命令 re-arm、次级 repo 首个 sidecar）与 `turn_end` 对账共用；`files` 已由调用方按 scope limit 豁免表过滤、`commitsAhead` 在 scope limit 下由调用方置 0。**单路径的 edit 事件不走这里**（它问的是「这一次编辑算不算 code 编辑」，答案只看那个路径自己的扩展名，`lib/edit-tracking-hook.ts` 的 edit handler 直接问 `isCodeFile` / `isDocFile`） |
 | `gate-command-tools.ts` | 命令层的**唯一注册入口**：工作流命令的注册包装、`/precommit` lane，以及 `/gate-status` / `/gate-contract` / `/gate-bypass` / `/gate-mode` / `/gate-reset` / `/gate-lesson` 六个命令正文；命令 host 的 seam（`CommandHost` / `CommandContext`）也在这里；自己转注册 `gate-diagnosis-commands.ts`。**`/gate-contract`（2026-09-18，用户决定「不常驻展示, 而是通过某个命令」）**：只读地把本会话那份契约（项目经理 = plan 任务全列；loop 会话与编排子会话 = 已批准 goal 的退出标准全文）打进一个多行 `notify` 块，与 `/gate-status` 同一条显示路、零新 UI 组件；行本身由 `lib/ui-widget.ts` 的 `buildContractLines` 构造，命令只有一个纯判定 `contractNotice`（有行 ⇒ 行；没行 ⇒ 「没有可显示的契约 —— **为什么**」，因为 judge pane / 未批准 goal / 无 plan / 非 git 目录 / 解析不出小节 五者都塌成同一个空数组，不写为什么读者只能当成 bug），`GateCommandDeps` 上只多一个 `contract()` seam。快捷键**刻意不绑**（用户决定：要时自己在 `/settings` 里绑） |
 | `gate-diagnosis-commands.ts` | 两个只读诊断命令面：`/gate-status` 内嵌的模型链读数（`modelDiagnosisLines`）与 `/gate-doctor` 正文；只做环境探测，不写状态、不喂裁决；由 `gate-command-tools.ts` 转注册 |
 | `gate-doctor.ts` | `/gate-doctor` 的只读体检：模型链、provider 允许名单、precommit runner、git 钩子、命令注册表 |
@@ -686,7 +703,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
 | `orchestrator-runtime-host.ts` | 会话的**运行期时钟**（t6 从扩展拆出）：统一退出判据 `sessionExitProblems` / `orchestrationDoneProblems`、revival 定时器、后台 supervision 定时器（同一份 `superviseNow` 读数）、项目经理的 settle 续跑（`orchestratorSettled` 与续跑预算）、会话名字心跳（顺带 drain 收件箱），以及它们共同遵守的退位标记（`handedOff` / `markHandedOff`）；判定在 `session-revival.ts` / `orchestrator-supervisor.ts` / `orchestrator-gate.ts` |
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西。也是 sidecar 里那份 runtime 的**唯一净化处**：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；`successorRuntime(runtime, fromHandoff)` 是「换了个会话能继承什么」的唯一出处 —— 登记表与 grants 照旧留下；许可只在 `fromHandoff` 为真（前任自己交棒的继任者，判定在 `lib/session-inheritance.ts`）时留下，其余情形全部剥离（写在调用点上的字段清单迟早漏掉新字段）。runtime 还带一个 `ownerSessionId`（2026-09-17）：**哪个会话持有这个编排** —— 它是「reload 后能不能恢复」的唯一依据（`storedRuntimeIsMine`），只有铸出、继承或接管了该地址的会话会写它。child 记录上的 `worktree`（路径 + 分支）也是在这里净化的：它会被交给 git，所以与其它路径同等强度 |
-| `orchestrator-worktree.ts` | **一个写者一个 checkout**（2026-09-10，用户决定）：纯逻辑模块——路径/分支的**派生与反推**（`childWorktreePath` / `repoRootOfWorktree`，后者反推不出来就**拒绝**而不是猜）、创建 argv（`-b <branch> <path> HEAD`，钉在 HEAD 上而不是分支名）、三种结算（`keep` / `merge`（先 `add -A` + `commit` 提交遗留改动，再 `--no-commit --no-ff` 合入并 staged，**最后回收 checkout 目录**——2026-09-15 用户决定：四个结算完的子会话就会在仓库旁边留下四个死目录，而分支留着（它是 `merge --abort` 的唯一回退锚，且不占磁盘）/ `discard`（目录 + 分支，对已回收的 checkout 幂等））的**完整计划**（`planSettlement`，冲突路径在跑之前就定好，且冲突时序列在 merge 那一步就断了、**绝不会**走到回收）、以及未结算 checkout 的识别（`findOrphanWorktrees`：pane 列表读不到就**不下断言**）。git 调用在 `extensions/review-gate.ts` 侧执行 |
+| `orchestrator-worktree.ts` | **一个写者一个 checkout**（2026-09-10，用户决定）：纯逻辑模块——路径/分支的**派生与反推**（`childWorktreePath` / `repoRootOfWorktree`，后者反推不出来就**拒绝**而不是猜）、创建 argv（`-b <branch> <path> HEAD`，钉在 HEAD 上而不是分支名）、三种结算（`keep` / `merge`（先 `add -A` + `commit` 提交遗留改动，再 `--no-commit --no-ff` 合入并 staged，**最后回收 checkout 目录**——2026-09-15 用户决定：四个结算完的子会话就会在仓库旁边留下四个死目录，而分支留着（它是 `merge --abort` 的唯一回退锚，且不占磁盘）/ `discard`（目录 + 分支，对已回收的 checkout 幂等））的**完整计划**（`planSettlement`，冲突路径在跑之前就定好，且冲突时序列在 merge 那一步就断了、**绝不会**走到回收）、以及未结算 checkout 的识别（`findOrphanWorktrees`：pane 列表读不到就**不下断言**）。git 调用在 `lib/orchestrator-worktree-host.ts` 侧执行 |
 | `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close）并注册编排会话工具——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，answer 与 recover/attach 在各自的 `*-tools.ts`；交接工具从 2026-09-14 起**不在这里**（全会话共用的 `session_handoff`，见 `session-handoff-tools.ts`） |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块 |
 | `orchestrator-takeover.ts` | 「仓库里有别人的 plan」时的两个意图：**接管**（从盘上发现本仓库的候选 orchestration id —— sidecar 记录优先、`rg-channels/` 目录名兜底，再判定这个 id 能否被本会话采用）与**归档**（归档文件名、归档载荷、确认框文案）。两条拒绝路径（`orchestrator_plan` 的 write/submit、`orchestrator_spawn`）与两个入口（`orchestrator_attach`、`orchestrator_plan action:archive`）共用同一份判定；纯函数 + 注入式读盘 |
@@ -767,6 +784,29 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
 | `worktree-presence-host.ts` | 一个 worktree 一个门禁会话的**会话侧**（t6 从扩展拆出）：presence 文件的心跳（`holdWorktree`）与退出时只删自己的凭据（`releaseWorktree`）、`applySessionExclusivity`（拒绝写进 state、按占用者去重告知、被拒会话的复查定时器）；判定在 `session-exclusivity.ts` |
 | `worktree-changes.ts` | 工作区变更探测（列出「动了哪些路径、动了多少」，从不判门禁）：提示词用的廉价变更令牌 `advisoryChangeToken`、`changedFiles`、`incrementSinceTree`、`reviewCoverageFiles`；指纹本身在 `fingerprint.ts` |
 | `worktree-seed.ts` | **隔离 checkout 的本地资源同步**（2026-09-15，onchain）：`git worktree add` 只复制 commit，`.pi/review-gate.json`、`.env`、`node_modules` 这些被 gitignore 的东西一律不在 —— 实测子会话读不到本仓 precommit 配置，test 步骤退化成包默认的 `yarn test`（midway 全量、143 文件失败，而改动只有 5 个文件）。清单分**复制**（`.pi/*.json` 配置与 `.pi/agents`，副本改不回主 checkout）与 **symlink**（`.env`、`.env.local`、`node_modules`，单一来源 + 不复制 GB 级目录），**每一条都要求 `git check-ignore` 确认被忽略**，否则跳过（未被忽略的路径带过去会污染 checkout 的 git status，而指纹、precommit 缓存与审查范围都读那棵树）；`.pi/` 运行态文件（state / cache / plan / tasks / judge-sessions）一律不带。`planWorktreeSeed`（纯）+ `seedWorktree`（IO，绝不抛，结果进 spawn 回执） |
+| `session-cells.ts` | **会话的全部可变格子**（t8，2026-09-26）：扩展闭包里原来的几十个 `let` 聚成一个 `SessionCells` 对象（`createSessionCells`），外加三个跨模块共用的小动作 `armLoop`（重新武装并清掉仲裁暂停）/ `clearBypassToken` / `resetLoopBudget`。一个对象而不是每个变量一个 `Ref`：搬出去的工具体与生命周期处理体读写的是同一批格子，每个 deps 再列一遍就是第二份「共享哪个格子」的说法 |
+| `session-restore-host.ts` | 会话的**持久化漏斗**（t8）：`persist`（每一次门禁状态写入都走它；judge / worker pane 与被拒会话不写、交棒后不写）、`restore`（新 session id 只继承编排注册表、接力后继者再继承 goal 契约，指纹迁移结果从 `loadSidecar` 收集）、`setTaskMode` 与 `/gate-reset` 的 `resetSessionState` |
+| `session-repos-host.ts` | 会话的**多 repo 状态与审查范围**（t8）：`stateForRepo`（按 `stateOwnership` 加载次级 repo 的 sidecar）、`enforcementStateFor`（执行路径只信自己或前任的 sidecar）、`persistRepo`、`resolveToolRepo`、`repoRelative`（记录 repo 根相对路径）、`reviewScopeFor` / `settledConclusion`，以及 `copilotProblemsAcrossRepos`（`declare_done` 与 L2 读同一份按 repo 标注的 Copilot 清单） |
+| `loop-goal-host.ts` | 会话对**契约**的读法（t8）：loop goal（按会话变体文件、`loopGoalConfirmed` / `goalStageSatisfied`、L8 编辑门 `loopGoalEditBlockFor`、给审查者的 goal 正文）、五个环节开关（`stageIsOn`、`ensureLoopStagesFor` 兜底弹框、`loopStageDeps` —— 清单框 `proxy: false`）与交付站点；规则都还在 `loop-goal.ts` / `loop-stages.ts` / `delivery-station.ts` |
+| `judge-pane-self.ts` | **本进程作为 judge pane**（t8）：从任务文本里读回本轮范围 / 轮号 / 自有路径（`isJudgePane` / `judgeReviewScope` / `judgeOwnPaths`），以及只在 judge 面注册的 `judge_conclude` 与 pane 自己的模型自愈（`registerJudgeSide`，不是 judge pane 就什么都不注册） |
+| `model-layers-host.ts` | 模型配置两层的**会话侧**（t8）：派发时读配置、每会话渲染一次两层 agent 文件（`ensureModelLayersRendered`）；规则在 `model-config.ts` |
+| `handoff-host.ts` | `session_handoff` 的**会话侧接线**（t8）：两段式退休 `handoffRetirement`（先释放 worktree、落盘后才静默）、继任者环境 `handoffExtraEnv`、judge 接力请求、每轮交接提醒、`openSuccessor`；机械半边在 `session-handoff-tools.ts` |
+| `orchestrator-worktree-host.ts` | 一个写者一个 checkout 的**执行侧**（t8）：`createWorktree`（带播种）与 `settleWorktree`（keep / merge / discard，分支按仓库自己的 worktree 列表 → 已记录 → 派生名依次取）；派生与计划在 `orchestrator-worktree.ts` |
+| `arbitration-tool.ts` | `request_arbitration` 工具体与 **A 类文案拒绝的申诉账本**（`refuseText` 是附加申诉路径的唯一一处）（t8）；I/O 在 `arbitration-host.ts`，规则在 `arbitration.ts` / `text-appeal.ts` |
+| `l2-continuation.ts` | **L2 自动续跑**（t8）：`onAgentSettled`（停止证明只在真正停下的出口发、托管 judge 等待、预算与断路器、RESUME 注入）、`onAgentEnd`（ESC 检测）、托管等待看门狗、战略重置清单 |
+| `edit-tracking-hook.ts` | `tool_result` 的**编辑分支**（t8）：落地的编辑武装它所属 repo、记录本会话写过的每条路径、消耗敏感文件授权、任何文件都撤销完成记录；失败的编辑打开编辑纪律窗口并附 nudge |
+| `tool-event-hooks.ts` | **工具事件钩子**（t8）：`tool_result` 分派（judge 检查证据先折叠 → 编辑 → 只读钻孔计数 → bash 分支的 re-arm / nudge / L7 武装）、`input`（用户真的说话了：解除 ESC 暂停、打断长等待、清掉 ask_user 暂停）、后台 agent 的两个终态信号、附在结果上的提示 |
+| `checkpoint-tool.ts` | **内部实现** `review_checkpoint`（t8）：送审前的 checkpoint 提交 —— 保护分支拒、600 行新文件硬拦（merge 感知）、依赖论证、L5 英文、敏感路径、只提交本会话自己的新文件 |
+| `precommit-tool.ts` | **内部实现** `run_precommit`（t8）：precommit PASS 的唯一来源，异步、可中止、按输入缓存；runner 在 `precommit-runner.ts` |
+| `judge-submit-tool.ts` | `judge_submit` 的**注册与工具体**（t8）：角色校验（与枚举同源）、adviser / goal-auditor 任务组装、reviewer 走 `submitForReview` 链、并行两位 judge 的派发与「半轮不起」规则 |
+| `judge-submit-receipt.ts` | `judge_submit` 的**两份回执文案**（t8）：没派任何 judge（环节全关）与逐个列出派出的 judge（每位一条 findings 流） |
+| `judge-tools-wiring.ts` | 面向 agent 的 judge 工具（`judge_wait` / `judge_close` / `judge_spawn` …）的 **deps 装配**（t8）：从会话的注册表、lane 与 settle 路径建出来；读表时先丢死掉的外来条目 |
+| `review-prepare-wiring.ts` | 三个内部 prepare 步骤的 **deps 装配**（t8）：`prepare_review` 的审查目标登记（登记即退掉上一轮扫下的 READY）与两个 advisory builder |
+| `worker-wiring.ts` | worker 工具族的**会话侧接线**（t8）：哪个面注册哪些工具（派活工具只在 agent 面、`worker_report` 只在 worker 面）与会话的管道 |
+| `declare-done-tool.ts` | `declare_done` 的**注册与工具体**（t8）：逐 repo 复检（编排模式只看 plan）、联关本 opener 的 judge（在飞的验收轮除外）、完成条件层（Copilot / goal / 站点）、真实验收、完成记录与收尾 |
+| `gate-mode-tool.ts` | `set_gate_mode` 的**注册与工具体**（t8）：把事实交给 `task-mode.ts` 的 `evaluateModeChange`、降级确认框、orchestrator 前提（tmux、不是子会话）、同轮送达 goal 指令 |
+| `session-lifecycle.ts` | **会话生命周期**（t8）：`session_start`（重导工作区、restore、非 git 短路、spawner 模式、arming、迁移提示、独占、名字接管）、`session_shutdown`（停掉本实例的每个时钟，非 reload 腾出名字）、`session_compact` |
+| `turn-directive.ts` | **每轮的表面**（t8）：`before_agent_start`（L4 语言指令最先、各模式分支、环节开关块、goal 指令、编排提示、常驻决策表）、`turn_end`（心跳 + 单向对账）、思考空转熔断的消息钩子 |
 
 ---
 
@@ -778,7 +818,7 @@ spec 非法即停会话），`judge-prompt.ts` 的 `modelChainFor` 对未配置�
    MJS，不能 import TypeScript）；不必须 → `lib/`。
 3. **它是新工具族吗？** 是 → 照 `lib/judge-session-tools.ts` 与
    `lib/orchestrator-*-tools.ts` 的形状：判定与工具注册都在 `lib/`，经
-   `lib/tool-host.ts` 那道 seam 拿依赖，别再往那个七千余行的文件里加。命令族
+   `lib/tool-host.ts` 那道 seam 拿依赖，别再往扩展入口里加（它曾经就是这样长到七千余行的）。命令族
    同理，形状见 `lib/gate-command-tools.ts`（seam 是它自己的 `CommandHost`）。
 4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态；其余多数并进相邻的分组
    测试（`test/orchestrator-atoms.test.ts`、`test/orchestrator-tools.test.ts`、
@@ -835,8 +875,8 @@ test 名称，同一个文件后面跟着的名称都归它。零个是正常情
 | judge 握手口径（完成信号是通道报告，不是进程退出 / `tmux wait-for`）：`AGENTS.md`、`skills/review-loop/SKILL.md`、`docs/execution-model.md`、`docs/judge-protocol.md`、`lib/judge-prompt.ts`、`lib/parallel-review.ts`、`lib/loop-goal.ts`、`lib/loop-goal-directives.ts`、`lib/goal-audit-task.ts`、`lib/adviser-brief.ts` | `test/workflow-commands.test.ts` · `"the judge handshake never teaches tmux wait-for (process exit is the completion signal)"` | 八处一起负向扫描 + 正向要求出现「标准报告」「通道」 |
 | 最小化准则四条：权威 `docs/coding-standards.md` §5；`docs/code-quality-rules.md`（2026-09-15 起 diff 级最小化判定的入口，只引用不复制）、`agents/goal-auditor.md`、`lib/goal-audit-task.ts` 的 goal 审计任务、`lib/orchestrator-plan-audit.ts` 的 plan 审计任务、`lib/agent-directives.ts` 的 `WRITE_TIME_REMINDERS`（2026-09-16 起是**一组**写作前提醒，§5 只是其中一行）只许引用 + 各自严重度映射 | `test/agents-structure.test.ts` · `"minimalism keeps ONE substantive home (§5), and the code-quality round defers to it"` · `test/agent-directives.test.ts` · `"the standing block carries the write-time reminders (cite, never quote)"` · `test/loop-goal.test.ts` · `"buildGoalAuditTask: the audit task carries the minimalism check (cite §5, P1 for out-of-scope work)"` · `test/orchestrator-plan-audit.test.ts` · `"the audit task carries the 7th check: minimalism (inside the checklist, mergeable tasks are P1)"` | 引用面出现四条中任一条实质表述即判失败（禁止第二份副本）；§6 那几条（安全 / 落点 / 注释嵌套 / 依赖判断提示）同属这一行的第二半 —— 同样只引用 |
 | 写作时规范：权威 `docs/coding-standards.md` §6（安全、模块落点与规模、注释、嵌套、依赖与开源的判断提示）；引用面 `lib/agent-directives.ts` 的 `WRITE_TIME_REMINDERS` 只许「§号 + 一个动作」 | `test/agent-directives.test.ts` · `"the standing block carries the write-time reminders (cite, never quote)"` | 每条提醒必须自带 `§号`（没节号的提醒就是回抄的序级），条数 ≥3，且 §5 四条小标题原文一律不得出现 |
-| 拒绝文案三件套（现象 / 原因 / 下一步 + 谁能解）：权威 `docs/coding-standards.md` §7；**唯一渲染器** `lib/rejection-copy.ts`（`buildRejection` / `RejectionParts` / `RejectionActor`）；调用面是本轮接入的高频路径 —— `lib/user-interaction-tools.ts`（ask_user）、`lib/loop-goal.ts`（goal 打回 + L8 编辑拦截）、`lib/restatement.ts`（goal/plan 缺反述）、`lib/ship-gate-edit-guard.ts`（edit/write）、`lib/ship-gate-copy.ts`（ship）、`extensions/review-gate.ts`（judge_submit 与 declare_done）；**另加** `lib/session-exclusivity.ts`（会话启动时的 worktree 占用拒绝 —— 它不属于 goal 点名的六条路径，同一段文本也被 L8 编辑门当拦截理由用） | `test/rejection-copy.test.ts` · `"buildRejection renders the phenomenon, the reason and the next step — in that order"` · `"every actor renders, and renders differently (agent / user / gate)"` · `"every high-frequency refusal path renders through buildRejection"` | 三行模板按字面钉在渲染器里（第二条断言）；调用面按**调用点切窗**钉住（起点锚必须唯一，否则会切到错误的窗口 —— 第 2 轮质量轮实测过）—— 从渲染器退回手写文案会红。**未接入的拒绝点不在这条 pin 的范围**，它们随日后改动收敛 |
-| 送审说明写作提示：`lib/agent-directives.ts` 的 `ROUND_NOTE_HINT` 是唯一出处，渲染到两处 —— 常驻块 `TOOL_DECISION_TABLE` 的 judge_submit 行，与 `extensions/review-gate.ts` 里 `judge_submit` 的 `task` 参数描述 | `test/agent-directives.test.ts` · `"the round-note hint reaches both surfaces from ONE constant"` | 常驻块那一行必须**渲染**这个常量（不是摘要）；另一处必须 import 同一个常量 |
+| 拒绝文案三件套（现象 / 原因 / 下一步 + 谁能解）：权威 `docs/coding-standards.md` §7；**唯一渲染器** `lib/rejection-copy.ts`（`buildRejection` / `RejectionParts` / `RejectionActor`）；调用面是本轮接入的高频路径 —— `lib/user-interaction-tools.ts`（ask_user）、`lib/loop-goal.ts`（goal 打回 + L8 编辑拦截）、`lib/restatement.ts`（goal/plan 缺反述）、`lib/ship-gate-edit-guard.ts`（edit/write）、`lib/ship-gate-copy.ts`（ship）、`lib/judge-submit-tool.ts` 与 `lib/declare-done-tool.ts`（judge_submit 与 declare_done）；**另加** `lib/session-exclusivity.ts`（会话启动时的 worktree 占用拒绝 —— 它不属于 goal 点名的六条路径，同一段文本也被 L8 编辑门当拦截理由用） | `test/rejection-copy.test.ts` · `"buildRejection renders the phenomenon, the reason and the next step — in that order"` · `"every actor renders, and renders differently (agent / user / gate)"` · `"every high-frequency refusal path renders through buildRejection"` | 三行模板按字面钉在渲染器里（第二条断言）；调用面按**调用点切窗**钉住（起点锚必须唯一，否则会切到错误的窗口 —— 第 2 轮质量轮实测过）—— 从渲染器退回手写文案会红。**未接入的拒绝点不在这条 pin 的范围**，它们随日后改动收敛 |
+| 送审说明写作提示：`lib/agent-directives.ts` 的 `ROUND_NOTE_HINT` 是唯一出处，渲染到两处 —— 常驻块 `TOOL_DECISION_TABLE` 的 judge_submit 行，与 `lib/judge-submit-tool.ts` 里 `judge_submit` 的 `task` 参数描述 | `test/agent-directives.test.ts` · `"the round-note hint reaches both surfaces from ONE constant"` | 常驻块那一行必须**渲染**这个常量（不是摘要）；另一处必须 import 同一个常量 |
 | 等待纪律三句话：主会话版 ↔ 项目经理版，权威是 `lib/agent-directives.ts` 的 `buildWaitDiscipline` | `test/agent-directives.test.ts` · `"both renderings come from ONE builder — no second copy of the wording"` | 两处渲染必须出自同一个 builder（**结构上**杜绝手抄，不是比对文本） |
 | 「wave 机制已删除」：`AGENTS.md` ↔ `skills/review-loop/SKILL.md` | `test/agents-structure.test.ts` · `"AGENTS.md states read-only parallel exploration and NO wave protocol"` · `"SKILL.md states read-only exploration rules and NO wave protocol"` | 正向要求写明已删除 + 负向禁止指令式提及 |
 | 单 reviewer / 再审携带上轮结论 / findings 只带 blockers：散在 `agents/*.md`、`docs/judge-protocol.md`、`lib/judge-prompt.ts`、`skills/review-loop/SKILL.md` | `test/agents-structure.test.ts` · `"REGRESSION: the single-review protocol states ONE reviewer per round"` · `"REGRESSION: every re-review must carry the previous round's conclusion"` · `"every judge role is told that findings carry BLOCKERS ONLY"` | 多文件循环断言：每一处都必须出现这句 |

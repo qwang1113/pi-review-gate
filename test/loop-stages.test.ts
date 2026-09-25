@@ -305,7 +305,8 @@ test("acceptance off says what to write INSTEAD, and names the way back", () => 
 });
 
 test("the switches ride the loop prompt — and reach an UNDECIDED session too", () => {
-  assert.match(SRC, /buildStagesDirective\(loopStagesRecord\(\)\)/, "the extension renders the session's own record");
+  assert.match(SRC, /buildStagesDirective\(deps\.loopStagesRecord\(\)\)/, "the extension renders the session's own record");
+  assert.match(ENTRY_SRC, /loopStagesRecord: \(\) => loopGoal\.loopStagesRecord\(\),/, "…which is the session's goal host's");
   // ONE injection, shared by both cases: loop, and a session that has not
   // classified its mode yet (isEnforcedMode treats it as the loop, and the
   // checklist can already have been answered).
@@ -318,7 +319,7 @@ test("the switches ride the loop prompt — and reach an UNDECIDED session too",
   // …AND THE BLOCK'S POINTER MUST NOT DANGLE (quality round P2, 2026-09-22):
   // with the goal stage OFF the block says “see the goal paragraph above”, and
   // in an undecided session the loop branch below does not inject it.
-  const undecidedGoal = SRC.indexOf('if (state.taskMode === undefined && !stageIsOn("goal")) {');
+  const undecidedGoal = SRC.indexOf('if (state.taskMode === undefined && !deps.stageIsOn("goal")) {');
   assert.ok(undecidedGoal > at && undecidedGoal < at + 1200,
     "an undecided session whose goal stage is off gets that paragraph injected too");
   assert.match(SRC.slice(undecidedGoal, undecidedGoal + 220), /buildGoalStageOffDirective\(\)/,
@@ -616,13 +617,18 @@ test("an acceptance round the USER switched off records that reason, not the orc
 // 3. The extension's wiring (the four places a pure module cannot reach)
 // ---------------------------------------------------------------------------
 
-const SRC = readFileSync(
-  join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "extensions", "review-gate.ts"),
-  "utf8",
-);
 /** The review loop's host modules carved out of the extension (t7) — same wiring, new home. */
 const libSrc = (file: string): string =>
   readFileSync(join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "lib", file), "utf8");
+const ENTRY_SRC = readFileSync(
+  join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "extensions", "review-gate.ts"),
+  "utf8",
+);
+/** The session's own wiring (t8): goal/stage host, prompt, L2 settle. */
+const LOOP_GOAL_HOST_SRC = libSrc("loop-goal-host.ts");
+const TURN_SRC = libSrc("turn-directive.ts");
+const L2_SRC = libSrc("l2-continuation.ts");
+const SRC = [ENTRY_SRC, LOOP_GOAL_HOST_SRC, TURN_SRC, L2_SRC].join("\n");
 const CHAIN_SRC = libSrc("review-chain.ts");
 const ACCEPTANCE_HOST_SRC = libSrc("acceptance-host.ts");
 const VERDICT_SRC = libSrc("verdict-host.ts");
@@ -633,7 +639,7 @@ test("the goal stage releases the edit gate and the ship block through goalStage
     "the L8 edit gate asks the stage-aware question");
   assert.match(SRC, /loopGoalConfirmed: \(\) => goalStageSatisfied\(\)/,
     "the L1 ship gate asks the stage-aware question");
-  assert.match(SRC, /if \(!goalStageSatisfied\(\)\) completion\.push\(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK\)/,
+  assert.match(SRC, /if \(!deps\.goalStageSatisfied\(\)\) completion\.push\(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK\)/,
     "the completion/continuation path asks the stage-aware question");
   assert.match(SRC, /if \(!stageIsOn\("goal", root\)\) return undefined;/,
     "a released goal stage has no delivery station to read");
@@ -644,7 +650,7 @@ test("the five checkpoints read the ONE query, not a second rule", () => {
   assert.match(CHAIN_SRC, /const qualityOn = stageIsOn\("quality", input\.root\)/);
   assert.match(CHAIN_SRC, /const precommitOn = stageIsOn\("precommit", input\.root\)/);
   assert.match(ACCEPTANCE_HOST_SRC, /gateOpen: acceptanceGateOpen\(process\.env\) && stageIsOn\("acceptance", root\)/);
-  assert.match(SRC, /registerLoopStageTools\(pi, loopStageDeps\)/, "the tool is registered");
+  assert.match(SRC, /registerLoopStageTools\(pi, loopGoal\.loopStageDeps\)/, "the tool is registered");
   assert.match(SRC, /ensureLoopStages: \(ctx\) => ensureLoopStagesFor\(ctx\)/,
     "the fallback is wired into the L1 hook for the first edit / restatement");
 });
