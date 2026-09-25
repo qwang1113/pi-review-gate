@@ -368,7 +368,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
    * and `kill-session` takes the lot. A window records the pane it holds, so a
    * test can assert the user's own window gained nothing.
    */
-  const sessions = new Map<string, { owner: string; windows: Set<string> }>();
+  const sessions = new Map<string, { owner: string; windows: Set<string>; env: Record<string, string> }>();
   const windows = new Map<string, { id: string; session: string; paneId: string; name?: string }>();
   let windowSeq = 0;
   const scopeRecord: { value: TmuxScopeRecord | undefined } = { value: undefined };
@@ -609,6 +609,32 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       session.owner = String(argv[argv.length - 1]);
       return { ok: true, stdout: "", stderr: "" };
     }
+    // THE SESSION'S OWN ENVIRONMENT (2026-09-25). The gate reads it before it
+    // REUSES a session and removes anything a previous build left there
+    // (`healSessionEnv`): passing a child's environment through tmux `-e` put
+    // the first child's identity in the session, every later window inherited
+    // it, and a judge reported into the worker's channel. The fake models the
+    // two calls so a test can drive that heal for real.
+    if (sub === "show-environment") {
+      const target = String(argv[argv.indexOf("-t") + 1]);
+      const session = sessions.get(target);
+      if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
+      return {
+        ok: true,
+        stdout: Object.entries(session.env).map(([key, value]) => `${key}=${value}`).join("\n"),
+        stderr: "",
+      };
+    }
+    if (sub === "set-environment") {
+      const target = String(argv[argv.indexOf("-t") + 1]);
+      const session = sessions.get(target);
+      if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
+      const unset = argv.includes("-u");
+      const key = String(argv[argv.length - (unset ? 1 : 2)]);
+      if (unset) delete session.env[key];
+      else session.env[key] = String(argv[argv.length - 1]);
+      return { ok: true, stdout: "", stderr: "" };
+    }
     if (sub === "show-options") {
       const target = String(argv[argv.indexOf("-t") + 1]);
       const session = sessions.get(target);
@@ -675,7 +701,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
           panes.get(id)!.alive = false;
           return { ok: false, stdout: "", stderr: `duplicate session: ${sessionName}` };
         }
-        sessions.set(sessionName, { owner: "", windows: new Set() });
+        sessions.set(sessionName, { owner: "", windows: new Set(), env: {} });
       } else if (!sessions.has(sessionName)) {
         panes.get(id)!.alive = false;
         return { ok: false, stdout: "", stderr: `can't find session: ${sessionName}` };
