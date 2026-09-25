@@ -57,7 +57,7 @@ import {
   buildListSessionsArgv,
   buildReadSessionOwnerArgv,
   parseSessionNames,
-} from "./orchestrator-tmux.ts";
+} from "./tmux-session-argv.ts";
 import {
   classifyEntry,
   listEntries,

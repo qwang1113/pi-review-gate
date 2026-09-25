@@ -42,7 +42,8 @@ import {
   type TmuxScope,
   type TmuxScopeRecord,
 } from "../lib/session-tmux-scope.ts";
-import { isOwnSessionName, SESSION_OWNER_OPTION, type TmuxRunner } from "../lib/orchestrator-tmux.ts";
+import { isOwnSessionName, type TmuxRunner } from "../lib/orchestrator-tmux.ts";
+import { SESSION_OWNER_OPTION } from "../lib/tmux-session-argv.ts";
 import { judgePaneAlive } from "../lib/judge-pane.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 

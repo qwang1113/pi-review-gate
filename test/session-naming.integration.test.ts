@@ -35,7 +35,8 @@ import {
   type RegistryDeps,
 } from "../lib/session-registry.ts";
 import { sweepOrphans } from "../lib/session-orphan-sweep.ts";
-import { SESSION_OWNER_OPTION, assertSafeTmuxArgv, type TmuxRunner, type TmuxRunResult } from "../lib/orchestrator-tmux.ts";
+import { assertSafeTmuxArgv, type TmuxRunner, type TmuxRunResult } from "../lib/orchestrator-tmux.ts";
+import { SESSION_OWNER_OPTION } from "../lib/tmux-session-argv.ts";
 import { installTmuxStatusFormat, TMUX_STATUS_CONDITIONAL } from "../scripts/tmux-status-format.mjs";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 

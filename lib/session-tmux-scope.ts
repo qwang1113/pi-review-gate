@@ -70,14 +70,12 @@ import {
   buildReadSessionOwnerArgv,
   buildSetSessionOwnerArgv,
   buildUnsetSessionEnvArgv,
-  isOwnSessionName,
   parseSessionNames,
   parseSpawnedWindow,
   SESSION_OWNER_OPTION,
   type SessionWindowCoords,
-  type TmuxRunner,
-  type TmuxRunResult,
-} from "./orchestrator-tmux.ts";
+} from "./tmux-session-argv.ts";
+import { isOwnSessionName, type TmuxRunner, type TmuxRunResult } from "./orchestrator-tmux.ts";
 
 /**
  * What the sidecar remembers about the session this process created.

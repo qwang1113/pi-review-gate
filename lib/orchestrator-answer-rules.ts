@@ -1,7 +1,8 @@
 /**
  * THE RULES BEHIND `orchestrator_answer` — pure decisions, no tool surface.
  *
- * Two families live here: how a project manager's answer text is read against
+ * Two families live here (plus the reading of the batch form's raw `answers`,
+ * {@link normalizeAnswerItems}): how a project manager's answer text is read against
  * the rows a child offered ({@link resolveAnswer}), and what a proxy approval
  * must carry before the gate writes it (the crosscheck and the station
  * widening refusal). The tool that applies them — pending lookup, the grant
@@ -15,6 +16,48 @@ import { looksLikeDeclineRow, rowIndexOf } from "./choice-dialog.ts";
 // so a second literal here is a second dialect waiting to drift.
 import { MULTI_ANSWER_SEPARATOR } from "./multi-choice-dialog.ts";
 import type { PendingRequest } from "./orchestrator-supervisor.ts";
+
+/**
+ * ONE item of an answering round: which question, and what to say to it.
+ *
+ * The single form (`answer` + optional `requestId`) and one element of the
+ * batch form (`answers`) normalize into the SAME shape and go through the
+ * same `answerOneRequest` (lib/orchestrator-answer-tools.ts) — which is the
+ * whole design rule there. The crosscheck, the constraint-8 sensitive-path
+ * check and the sensitive-edit grant door are enforcement, and a second copy
+ * of enforcement is a copy that eventually disagrees with the first (哲学三).
+ * Batching adds a loop, never a ruleset.
+ */
+export interface AnswerItem {
+  requestId?: string;
+  answer: string;
+  reason?: string;
+  crosscheck?: unknown;
+}
+
+/**
+ * Read the `answers` array into items.
+ *
+ * A malformed element is KEPT (as an empty answer) rather than dropped: it
+ * then fails its own adjudication and is reported on its own line. Dropping
+ * it would answer fewer questions than the caller asked for and say nothing
+ * about which one went missing.
+ */
+export function normalizeAnswerItems(raw: unknown): AnswerItem[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.map((entry) => {
+    if (!entry || typeof entry !== "object") return { answer: "" };
+    const e = entry as Record<string, unknown>;
+    const requestId = typeof e.requestId === "string" ? e.requestId.trim() : "";
+    const reason = typeof e.reason === "string" && e.reason.trim() ? e.reason.trim() : undefined;
+    return {
+      answer: typeof e.answer === "string" ? e.answer : "",
+      ...(requestId ? { requestId } : {}),
+      ...(reason === undefined ? {} : { reason }),
+      ...(e.crosscheck === undefined ? {} : { crosscheck: e.crosscheck }),
+    };
+  });
+}
 
 /**
  * The separators a project manager may use to quote several rows at once

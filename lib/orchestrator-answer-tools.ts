@@ -52,7 +52,9 @@ import {
   buildStationWideningRefusal,
   checkProxyCrosscheck,
   isDecliningProxyAnswer,
+  normalizeAnswerItems,
   resolveAnswer,
+  type AnswerItem,
 } from "./orchestrator-answer-rules.ts";
 import { isGrantableScope } from "./ask-user.ts";
 import { addGrant, findChild, hasGrant, type ChildSession } from "./orchestrator-registry.ts";
@@ -98,51 +100,10 @@ function pendingFor(deps: OrchestratorDeps, childId: string): PendingRequest[] {
   return snapshot.requests;
 }
 
-/**
- * ONE item of an answering round: which question, and what to say to it.
- *
- * The single form (`answer` + optional `requestId`) and one element of the
- * batch form (`answers`) normalize into the SAME shape and go through the
- * same {@link answerOneRequest} — which is the whole design rule here. The
- * crosscheck, the constraint-8 sensitive-path check and the sensitive-edit grant door are
- * enforcement, and a second copy of enforcement is a copy that eventually
- * disagrees with the first (哲学三). Batching adds a loop, never a ruleset.
- */
-interface AnswerItem {
-  requestId?: string;
-  answer: string;
-  reason?: string;
-  crosscheck?: unknown;
-}
-
 /** What one item did. */
 type AnswerOutcome =
   | { ok: true; requestId: string; title: string; answer: string; reason?: string }
   | { ok: false; requestId?: string; refusal: ToolReply };
-
-/**
- * Read the `answers` array into items.
- *
- * A malformed element is KEPT (as an empty answer) rather than dropped: it
- * then fails its own adjudication and is reported on its own line. Dropping
- * it would answer fewer questions than the caller asked for and say nothing
- * about which one went missing.
- */
-export function normalizeAnswerItems(raw: unknown): AnswerItem[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  return raw.map((entry) => {
-    if (!entry || typeof entry !== "object") return { answer: "" };
-    const e = entry as Record<string, unknown>;
-    const requestId = typeof e.requestId === "string" ? e.requestId.trim() : "";
-    const reason = typeof e.reason === "string" && e.reason.trim() ? e.reason.trim() : undefined;
-    return {
-      answer: typeof e.answer === "string" ? e.answer : "",
-      ...(requestId ? { requestId } : {}),
-      ...(reason === undefined ? {} : { reason }),
-      ...(e.crosscheck === undefined ? {} : { crosscheck: e.crosscheck }),
-    };
-  });
-}
 
 /**
  * WHICH open question this item is for.

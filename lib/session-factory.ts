@@ -66,15 +66,14 @@
 import {
   buildHandoffPaneArgv,
   buildKillPaneArgv,
-  buildKillWindowArgv,
   buildPaneLabelArgv,
   buildPaneStyleArgv,
   buildShowPaneLabelsArgv,
   parseSpawnedPaneId,
-  type SessionWindowCoords,
   type TmuxRunner,
   type TmuxRunResult,
 } from "./orchestrator-tmux.ts";
+import { buildKillWindowArgv, type SessionWindowCoords } from "./tmux-session-argv.ts";
 import {
   openScopeWindow,
   type TmuxScope,

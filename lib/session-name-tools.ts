@@ -57,8 +57,8 @@ import {
   buildSetSessionNameOptionArgv,
   buildUnsetSessionNameOptionArgv,
   parseOwnCoords,
-  type TmuxRunner,
-} from "./orchestrator-tmux.ts";
+} from "./tmux-session-argv.ts";
+import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import {
   claimName,
   classifyEntry,

@@ -81,11 +81,12 @@ test("(b) the argv builders have exactly the consumers their job allows — and 
     "buildSetSessionOwnerArgv",
   ];
   const readOrKillBuilders = ["buildKillSessionArgv", "buildReadSessionOwnerArgv", "buildListSessionsArgv"];
-  const factoryDefined = ["buildHandoffPaneArgv", "buildKillWindowArgv", "buildKillPaneArgv"];
+  const factoryPaneBuilders = ["buildHandoffPaneArgv", "buildKillPaneArgv"];
   const claims: Array<[readonly string[], string[]]> = [
-    [openingBuilders, ["lib/orchestrator-tmux.ts", "lib/session-tmux-scope.ts"]],
-    [readOrKillBuilders, ["lib/orchestrator-tmux.ts", "lib/session-tmux-scope.ts", "lib/session-orphan-sweep.ts"]],
-    [factoryDefined, ["lib/orchestrator-tmux.ts", "lib/session-factory.ts"]],
+    [openingBuilders, ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts"]],
+    [readOrKillBuilders, ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts", "lib/session-orphan-sweep.ts"]],
+    [["buildKillWindowArgv"], ["lib/tmux-session-argv.ts", "lib/session-factory.ts"]],
+    [factoryPaneBuilders, ["lib/orchestrator-tmux.ts", "lib/session-factory.ts"]],
   ];
   for (const [builders, consumers] of claims) {
     for (const builder of builders) {
@@ -94,7 +95,7 @@ test("(b) the argv builders have exactly the consumers their job allows — and 
         .map((f) => f.rel)
         .sort();
       assert.deepEqual(users, [...consumers].sort(),
-        `${builder} is defined in orchestrator-tmux.ts and used only by ${consumers.slice(1).join(" / ")}`);
+        `${builder} is defined in ${consumers[0]} and used only by ${consumers.slice(1).join(" / ")}`);
     }
   }
   // …and NEITHER the factory NOR the sweep is a second caller of the OPENING
@@ -147,7 +148,7 @@ test("nothing opens a child behind the factory's back", () => {
   const stragglers = sourceFiles()
     .filter((f) => f.rel !== "lib/session-factory.ts" && f.rel !== "lib/session-tmux-scope.ts")
     .filter((f) => /\b(openJudgePane|buildSpawnPaneArgv\(|buildNewSessionArgv\(|buildNewWindowArgv\()/.test(f.text))
-    .filter((f) => f.rel !== "lib/orchestrator-tmux.ts")
+    .filter((f) => f.rel !== "lib/tmux-session-argv.ts")
     .map((f) => f.rel);
   assert.deepEqual(stragglers, [],
     "the old openJudgePane is gone and no second caller assembles a spawn argv");

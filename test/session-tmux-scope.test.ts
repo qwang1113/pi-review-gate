@@ -17,13 +17,11 @@ import assert from "node:assert/strict";
 import {
   UnsafeTmuxCommand,
   assertSafeTmuxArgv,
-  buildKillWindowArgv,
-  buildUnsetSessionEnvArgv,
   isOwnSessionName,
-  SESSION_OWNER_OPTION,
   type TmuxRunner,
   type TmuxRunResult,
 } from "../lib/orchestrator-tmux.ts";
+import { buildKillWindowArgv, buildUnsetSessionEnvArgv, SESSION_OWNER_OPTION } from "../lib/tmux-session-argv.ts";
 import {
   addressableSessions,
   closeOwnSession,

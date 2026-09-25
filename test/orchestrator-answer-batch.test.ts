@@ -32,7 +32,7 @@ import {
   replyText,
   twoTaskPlan,
 } from "./helpers/fake-orchestration.ts";
-import { normalizeAnswerItems } from "../lib/orchestrator-answer-tools.ts";
+import { normalizeAnswerItems } from "../lib/orchestrator-answer-rules.ts";
 import type { FakeWorld } from "./helpers/fake-orchestration.ts";
 import type { ChannelRecord } from "../lib/channel-records.ts";
 

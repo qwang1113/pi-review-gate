@@ -43,7 +43,7 @@ import {
 // OTHER sessions' leftovers and its act is destructive, while the registry only
 // ever reads one name.
 import { sweepOrphans } from "../lib/session-orphan-sweep.ts";
-import { SESSION_OWNER_OPTION } from "../lib/orchestrator-tmux.ts";
+import { SESSION_OWNER_OPTION } from "../lib/tmux-session-argv.ts";
 
 const ROOT = "/home/agent/.pi/agent/rg-sessions";
 const MINE = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
