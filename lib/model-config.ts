@@ -90,8 +90,8 @@ export function isWorkerRoleName(name: string): boolean {
  * Locate the `agents/` directory INSIDE this package.
  *
  * We PROBE the layouts the package really ships under instead of trusting one
- * relative path — the same lesson `resolveTrustedRunner` (extensions/
- * review-gate.ts) had to learn: `<here>/../agents` resolves in the dev repo
+ * relative path — the same lesson `resolveTrustedRunner` (lib/
+ * precommit-runner.ts) had to learn: `<here>/../agents` resolves in the dev repo
  * but not in every install layout, and a self-heal riding an unresolvable
  * path fails SILENTLY, which is precisely how a bootstrap deadlock survives.
  *

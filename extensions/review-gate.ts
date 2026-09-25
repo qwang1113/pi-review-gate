@@ -47,16 +47,15 @@
  */
 
 import {
-  existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
-  mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync, writeSync,
+  existsSync, statSync, readFileSync, writeFileSync, rmSync,
+  mkdirSync, readdirSync, writeSync,
   watch as fsWatch, type FSWatcher,
 } from "node:fs";
-import { tmpdir, homedir, hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve, basename as pathBasename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import {
@@ -85,11 +84,9 @@ import { armingFromFacts, couldReconcile, reconcileArming } from "../lib/gate-ar
 import { planCheckpointSweep } from "../lib/checkpoint-sweep.ts";
 import { defaultProjectConfig, globalConfigPath, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { hostEditorFallback, hostReasonEditor, editorTextOf, REASON_EDITOR_BACK, type CustomDialogHost } from "../lib/reason-editor.ts";
 import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
 
 
-import { buildContractReadout, buildGateWidget, planContractRows, showsRoundReading, type ContractFacts, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -107,10 +104,6 @@ import {
   appealPassAuthorizes,
   consumeAppealPass,
   emptyAppealRecord,
-  admitAppeal,
-  recordAppealDecision,
-  buildTextAppealPrompt,
-  TEXT_APPEAL_SYSTEM_PROMPT,
   type AppealKind,
   type AppealableBlock,
 } from "../lib/text-appeal.ts";
@@ -122,13 +115,6 @@ import {
   type InspectionEvidence,
 } from "../lib/judge-inspection.ts";
 import {
-  admitInspectionAppeal,
-  buildInspectionAppealPrompt,
-  inspectionDecisionKey,
-  inspectionDeniedText,
-  inspectionGrantedText,
-  issueInspectionPass,
-  INSPECTION_APPEAL_SYSTEM_PROMPT,
   type InspectionBlock,
   type InspectionPass,
 } from "../lib/inspection-appeal.ts";
@@ -149,12 +135,8 @@ import {
 import {
   createProgressReporter,
   type ProgressReporter,
-  withSlowNotice,
-  statusNotice,
-  type SlowNoticeSink,
   type ToolUpdate,
 } from "../lib/progress-stream.ts";
-import { rebaseBranchName } from "../lib/git-rewrite.ts";
 // The interview's pure functions are no longer reached from here: `ask_user`
 // lives in lib/user-interaction-tools.ts and imports them itself.
 import { registerUserInteractionTools } from "../lib/user-interaction-tools.ts";
@@ -311,7 +293,7 @@ import {
 import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
 import { formatPlanSummary, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
 import {
-  contextPercentFromUsage,
+  contextPercentOf,
   handoffAccepted,
   handoffDocFilled,
   handoffDue,
@@ -381,7 +363,6 @@ import { notifyUserInput } from "../lib/poll-wait.ts";
 
 import { formatInheritanceBrief, handoffGeneration, isHandoffSuccessorOf, PREDECESSOR_SESSION_ENV, readInheritance, stateOwnership, successorEnv, successorSessionId } from "../lib/session-inheritance.ts";
 import {
-  branchOfListedWorktree,
   childWorktreeBranch,
   childWorktreePath,
   createWorktreeArgv,
@@ -460,9 +441,7 @@ import {
   ensureLoopStages,
   registerLoopStageTools,
   stageOpen,
-  stagesOff,
   stagesOffered,
-  stagesSummary,
   type LoopStage,
   type LoopStagesDeps,
   type LoopStagesRecord,
@@ -510,16 +489,26 @@ import {
   JUDGE_ROLES,
   SUBMITTABLE_JUDGE_ROLES,
 } from "../lib/judge-prompt.ts";
+import { runTrustedPrecommit } from "../lib/precommit-runner.ts";
+import type { Ref, SessionHost } from "../lib/session-host.ts";
+import { createStatusStrip } from "../lib/status-strip.ts";
+import { createEditTimeChecks } from "../lib/edit-time-checks.ts";
+import { appendAuditLog, createArbitrationHost } from "../lib/arbitration-host.ts";
+import { asChoiceHost, createGateDialogs, showToUser } from "../lib/gate-dialogs.ts";
+import { createDialogProxy } from "../lib/dialog-proxy.ts";
 import {
-  failedStepNames,
-  receiptTotalMs,
-  stepTimings,
-  validatePrecommitReceipt,
-  type StepTiming,
-  type TestScope,
-} from "../lib/precommit-receipt.ts";
+  canonicalPath,
+  commitsAheadOfBase,
+  currentBranch,
+  digestForMerge,
+  hasStagedChanges,
+  headCommitTree,
+  listedWorktreeBranch,
+  samePlace,
+  unreviewedTreesSince,
+  worktreeTree,
+} from "../lib/repo-facts.ts";
 import { appendTiming } from "../lib/gate-timings.ts";
-import { tailLogFile } from "../lib/precommit-tail.ts";
 // The background lane's failure notice: wording + the "is this still the
 // content under the agent's hands" rule, both pure and unit-tested there.
 import { buildAsyncPrecommitReport, buildAsyncPrecommitPass, buildParkedReadyReplayNotice, type AsyncPrecommitPass, type AsyncPrecommitReport } from "../lib/async-precommit-report.ts";
@@ -532,13 +521,12 @@ import {
   formatReviewScopeDirective,
   type SettledConclusion,
 } from "../lib/review-carryover.ts";
-import { computeFingerprint, isGateOwnedPath, worktreeTreeOid } from "../lib/fingerprint.ts";
+import { computeFingerprint, isGateOwnedPath } from "../lib/fingerprint.ts";
 import { advisoryChangeToken, changedFiles, incrementSinceTree, reviewCoverageFiles } from "../lib/worktree-changes.ts";
 import type { Fingerprint } from "../lib/fingerprint.ts";
 import { gitBaseEnv, gitOrNull, gitRaw, gitText } from "../lib/git-exec.ts";
 import { writeFileAtomic } from "../lib/atomic-write.ts";
 import { readJsonIfExists } from "../lib/json-file.ts";
-import { sha256 } from "../lib/hash.ts";
 import {
   emptyState,
   type GateState,
@@ -555,7 +543,6 @@ import {
   sidecarPath,
   stateVariantFrom,
   STATE_VARIANT_ENV,
-  mergeProxyDecisions,
 } from "../lib/gate-state-io.ts";
 import {
   loadSidecar,
@@ -598,8 +585,6 @@ import {
 } from "../lib/task-mode.ts";
 import {
   createLlmClassifier,
-  classifyNonEnglish,
-  createVerdictMemo,
   type LlmClassifier,
 } from "../lib/llm-classify.ts";
 import {
@@ -610,7 +595,6 @@ import {
 } from "../lib/edit-discipline.ts";
 import { FULL_LANE_NUDGE, looksLikeFullLaneRun } from "../lib/test-run-discipline.ts";
 import { createThinkingLoopController } from "../lib/thinking-loop-controller.ts";
-import { projectEditedContent } from "../lib/edit-projection.ts";
 import {
   evaluateReadonlyStall,
   readonlyStallNudgeFor,
@@ -639,7 +623,6 @@ import {
   GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
   buildGoalForceNegotiateDirective,
   goalNegotiationOverdue,
-  parseGoalCriteria,
 } from "../lib/loop-goal-directives.ts";
 import type { LoopGoal } from "../lib/loop-goal.ts";
 // The delivery station (where THIS round stops) is a pure contract module;
@@ -660,27 +643,12 @@ import {
 import { existingPrNotice, hasUnpushedCommits, probeOpenPr, type OpenPrArrival } from "../lib/station-pr-evidence.ts";
 
 
-import { rendererModeNoticeDue, RENDERER_MODE_NOTICE, type RendererMode } from "../lib/renderer-mode.ts";
 import {
   choiceRows,
-  createDialogQueue,
-  dialogNotifyDetail,
-  dialogSignal,
   parseChoice,
-  renderChoice,
   type ChoiceSpec,
   type ChoiceUi,
 } from "../lib/choice-dialog.ts";
-import {
-  MULTI_UNAVAILABLE,
-  buildMultiChoiceBox,
-  defaultMultiChoiceKey,
-  renderMultiChoice,
-  type MultiChoiceHost,
-  type MultiChoiceKeyReader,
-  type MultiChoiceTheme,
-  type MultiSelectOutcome,
-} from "../lib/multi-choice-dialog.ts";
 // The model-chain diagnosis and the /gate-doctor checks are reached only
 // through lib/gate-diagnosis-commands.ts now — this file wires that module,
 // it no longer runs either diagnosis itself.
@@ -770,25 +738,15 @@ import {
   parseArbitrableAction,
   buildArbiterPrompt,
   runArbiter,
-  runArbiterProcess,
-  PROXY_ISOLATION_FLAGS,
   BYPASS_TOKEN_TTL_MS,
-  type ArbitrableAction,
   type BypassToken,
-  type TokenBindings,
 } from "../lib/arbitration.ts";
-// THE PROXY HALF OF EVERY DIALOG (2026-09-19): the timing, the race and the
-// prompt live in lib/user-proxy.ts, because `askChoice` below is the ONE place
-// all twelve dialogs are rendered and it must stay wiring only.
+// THE PROXY HALF OF EVERY DIALOG (2026-09-19): the race lives in
+// lib/user-proxy.ts, its I/O in lib/dialog-proxy.ts, and the one place all
+// twelve dialogs are rendered is lib/gate-dialogs.ts.
 import {
-  PROXY_ARBITER_TIMEOUT_MS,
-  PROXY_SYSTEM_PROMPT,
-  buildProxyPrompt,
   formatProxyDecisionReport,
-  parseProxyDecision,
-  raceWithUserProxy,
   sessionProxyDecisions,
-  type ProxyChoice,
 } from "../lib/user-proxy.ts";
 
 // TASK_TEXT_MARKER now lives in lib/constants.ts: the two prepare modules
@@ -896,31 +854,6 @@ function findProjectAgentText(projectAgentsDir: string, name: string): string | 
     }
   } catch { /* dir missing/unreadable — no project layer */ }
   return found;
-}
-
-/** Detect commits ahead of the upstream tracking branch or main/master. P0: also
-    checks @{upstream} so local commits ahead of remote on any branch are caught.
-
-    SYNC ON PURPOSE (review round 1 P1, drill F1 follow-up): the secondary-repo
-    arming site (`stateForRepo`) is a synchronous state factory, and a branch
-    ahead of its base arms the gate THERE as well — a repo whose only work is
-    already committed must not read as "nothing to review" to the ship gate,
-    which is exactly the fail-open F1 closed for the primary repo. */
-function commitsAheadOfBaseSync(cwd: string): number {
-  // Priority: the upstream tracking branch (local ahead of remote on any
-  // branch), then main/master (no upstream set), then origin/main|master
-  // (on main, main..HEAD is 0 even when ahead of origin/main). A base that
-  // does not resolve is skipped.
-  for (const base of ["@{upstream}", "main", "master", "origin/main", "origin/master"]) {
-    const n = parseInt(gitOrNull(cwd, ["rev-list", "--count", `${base}..HEAD`], { timeout: 5000 }) ?? "", 10);
-    if (!isNaN(n) && n > 0) return n;
-  }
-  return 0;
-}
-
-/** The async spelling the injectable dep seam declares. ONE implementation. */
-async function commitsAheadOfBase(cwd: string): Promise<number> {
-  return commitsAheadOfBaseSync(cwd);
 }
 
 /**
@@ -1175,7 +1108,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * is in memory too, so a restart starts the breaker from zero either way, and
    * a persisted stamp could only excuse a turn it knows nothing about.
    */
-  let lastUserInteractionAt: string | undefined;
+  const lastUserInteractionAt: Ref<string | undefined> = { current: undefined };
   /** ISO of the previous stall observation — what `stallInMotion` compares against. */
   let lastStallObservedAt: string | undefined;
   /**
@@ -1359,7 +1292,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // read as "nothing to review" to that repo's ship gate, which is the
         // fail-open F1 closed for the primary repo. The sync helper exists for
         // this call site (it is a synchronous state factory).
-        const armed = armingFromFacts({ files: files ?? [], commitsAhead: commitsAheadOfBaseSync(root) });
+        const armed = armingFromFacts({ files: files ?? [], commitsAhead: commitsAheadOfBase(root) });
         if (armed.hasCodeChange || armed.hasDocChange) {
           s.hasCodeChange = armed.hasCodeChange;
           s.hasDocChange = armed.hasDocChange;
@@ -1386,38 +1319,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     return s;
   }
 
-  /**
-   * Worktree digest for the concurrent-sidecar merge, or null when it cannot
-   * be computed (fail-closed: an unverifiable foreign binding is dropped).
-   *
-   * Only reached when another session's sidecar holds a verdict this session
-   * lacks, so the hashing cost stays off the normal persist path.
-   */
-  function digestForMerge(dir: string): string | null {
-    const fp = computeFingerprint(dir);
-    return fp.unavailable || !fp.digest ? null : fp.digest;
-  }
-
-  /** Do two paths name the same directory? Compared through realpath: a Pi
-   *  launched via a symlinked path has a logical cwd that never string-matches
-   *  git's physical repo root. Unresolvable paths fall back to string
-   *  equality (this only ever decides whether a message says "ran in …"). */
-  function samePlace(a: string, b: string): boolean {
-    if (a === b) return true;
-    try { return realpathSync(a) === realpathSync(b); } catch { return false; }
-  }
-  /** Resolve a path through symlinks, or return it unchanged when it cannot be
-   *  resolved (a path that does not exist is not an error here — the caller is
-   *  comparing strings, not opening files).
-   *
-   *  Load-bearing for the snapshot pin on macOS: `snapshotBaseDir` falls back to
-   *  the system temp dir, where `prepare_review` prints `/var/folders/…` while a
-   *  reviewer's own `pwd` prints `/private/var/folders/…`. Comparing the raw
-   *  strings would silently lose the reviewer's self-reported evidence and
-   *  could withhold an honest READY. */
-  function canonicalPath(p: string): string {
-    try { return realpathSync(p); } catch { return p; }
-  }
   /** Persist a repo's state: the primary repo goes through persist() (session
    *  entry + widget + .blocked handling); other repos write their own sidecar
    *  (the same fail-closed .blocked marker on write failure). Each repo's
@@ -1438,6 +1339,42 @@ export default function reviewGate(pi: ExtensionAPI) {
       recordBlockedMarker(blockedMarkerPath(sessionSidecarPath(root)), { sessionId: s.sessionId });
     }
   }
+
+  /**
+   * THE SESSION HOST — what every module carved out of this closure reads the
+   * session through (lib/session-host.ts). Accessors, never values: `state`,
+   * the repo roots and `latestCtx` are all reassigned while the session lives.
+   */
+  const host: SessionHost = {
+    state: () => state,
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx) => persist(ctx),
+    persistRepo: (ctx, root) => persistRepo(ctx, root),
+    repos: () => ({
+      primary: primaryRepoRoot,
+      active: activeRepoRoot.current,
+      all: sessionRepos,
+      cwd,
+      inGit: sessionInGit,
+    }),
+    ctx: () => latestCtx,
+    log: (text) => appendAuditLog(primaryRepoRoot, state.sessionId, text),
+  };
+  const { log } = host;
+
+  // ---- TUI widgets (display-only; never throw, never block the gate) ----
+  /** The last UI context a widget render reached — the refresh timer's target. */
+  const lastUiCtx: Ref<ExtensionContext | undefined> = { current: undefined };
+  const { contractReadout, updateWidget, armUiRefreshTimer, disarmUiRefreshTimer } = createStatusStrip(host, {
+    goalStageSatisfied: () => goalStageSatisfied(),
+    goalStageOn: () => stageIsOn("goal"),
+    isJudgePane: () => isJudgePane(),
+    judgeTaskRound: () => judgeTaskRound,
+    sessionEdited: () => sessionEdited || sessionEditedPaths.size > 0,
+    loopGoalPresent: (root) => readSessionLoopGoal(root).present,
+    loopGoalPath: (root) => loopGoalPathIn(root),
+    lastUiCtx,
+  });
 
   /** Human label for a repo in messages. The primary repo has no distinctive
    *  name of its own in a single-repo session, but in a MULTI-repo session an
@@ -1970,24 +1907,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     };
   }
 
-  /**
-   * Percent of this session's context window in use, when the host says.
-   *
-   * The ARITHMETIC lives in lib/orchestrator-handoff-advice.ts, and it moved
-   * there because the version written here was wrong in a way nothing could
-   * catch: it read `usage.used / usage.max`, while pi returns
-   * `{ tokens, contextWindow, percent }`. The fallback for "percent is null
-   * right after a compaction" therefore could never fire, and its absence is
-   * indistinguishable from its presence — both render the same honest "no
-   * reading" line. A pure function has a test per shape instead.
-   */
-  function contextPercentOf(ctx: { getContextUsage?: () => unknown } | undefined): number | undefined {
-    try {
-      return contextPercentFromUsage(ctx?.getContextUsage?.());
-    } catch {
-      return undefined;
-    }
-  }
 
 
   /**
@@ -2502,7 +2421,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   function startExclusivityRecheck(): void {
     if (exclusivityRecheckTimer) return;
     exclusivityRecheckTimer = setInterval(
-      () => { try { applySessionExclusivity(lastUiCtx); } catch { /* next tick retries */ } },
+      () => { try { applySessionExclusivity(lastUiCtx.current); } catch { /* next tick retries */ } },
       PRESENCE_HEARTBEAT_MS,
     );
     // Never hold the process open just to watch somebody else's heartbeat.
@@ -2792,7 +2711,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     read: () => sanitizeScopeRecord(state.tmuxScope),
     write: (record) => {
       state.tmuxScope = record;
-      persist(latestCtx ?? lastUiCtx);
+      persist(latestCtx ?? lastUiCtx.current);
     },
     now: () => new Date().toISOString(),
   };
@@ -4602,135 +4521,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     return ownLiveJudges().some((e) => e.judgeId === round.judgeId);
   }
 
-  /**
-   * The branch this repo is working on.
-   *
-   * A rebase in progress is NOT a detached head in any meaningful sense: git
-   * remembers the branch it will land back on, and every commit the rebase
-   * makes belongs to that branch. Reading it is what keeps the branch rule
-   * from blocking `git rebase -i` reword — the very operation an agent needs
-   * to fix a non-English commit message (observed deadlock, 2026-08-29).
-   * A genuine detached HEAD still reports undefined, and the rule still
-   * refuses.
-   */
-  function currentBranch(root: string): string | undefined {
-    // Failure = detached — maybe a rebase; ask git where it came from.
-    return gitOrNull(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]) || rebaseBranch(root);
-  }
-
-  /**
-   * WHICH BRANCH THIS REPOSITORY LISTS FOR ONE OF ITS OWN CHECKOUTS.
-   *
-   * ASKED OF THE REPOSITORY, NEVER OF THE CHECKOUT DIRECTORY (quality round
-   * P1, 2026-09-18). `currentBranch(worktreePath)` is the obvious read and it is
-   * a trap in the one place settlement uses a branch name: when that directory
-   * is not a repository — a `git worktree add` that failed halfway, an emptied
-   * shell left by a failed removal — git walks UP to the enclosing repository
-   * and answers with ITS branch, and that answer then goes to
-   * `git -C <repoRoot> branch -D`, which is destructive. `worktree list` is the
-   * repository's own registry of the checkouts it owns: a path it does not list
-   * yields nothing, so the caller falls through to the name this session
-   * recorded or to the one it derived.
-   */
-  function listedWorktreeBranch(repoRoot: string, worktreePath: string): string | undefined {
-    try {
-      const out = gitRaw(repoRoot, ["worktree", "list", "--porcelain"], { timeout: 10_000 });
-      // TWO SPELLINGS, ONE CHECKOUT. git records a worktree under the path it
-      // was CREATED with, symlinks resolved — measured on this repository's own
-      // list, where `/tmp/...` reads back as `/private/tmp/...`. The gate
-      // derives the path from the repo root it was handed, so the two differ
-      // whenever a repository lives behind a symlink; a miss would fall through
-      // to the derived name, which is exactly the name a renamed child no
-      // longer has. Both spellings are tried and neither is invented: a path
-      // that cannot be resolved is simply not a match.
-      const resolved = realpathOrUndefined(worktreePath);
-      return branchOfListedWorktree(out, worktreePath)
-        ?? (resolved === undefined ? undefined : branchOfListedWorktree(out, resolved));
-    } catch { return undefined; }
-  }
-
-  /** `realpathSync`, or undefined when the path cannot be resolved (it may be gone). */
-  function realpathOrUndefined(target: string): string | undefined {
-    try { return realpathSync(target); } catch { return undefined; }
-  }
-
-  /** The branch a rebase in progress will return to, read from the git dir. */
-  function rebaseBranch(root: string): string | undefined {
-    for (const dir of ["rebase-merge", "rebase-apply"]) {
-      try {
-        const gitPath = gitText(root, ["rev-parse", "--git-path", `${dir}/head-name`]);
-        if (!gitPath || !existsSync(pathResolve(root, gitPath))) continue;
-        const name = rebaseBranchName(readFileSync(pathResolve(root, gitPath), "utf8"));
-        if (name) return name;
-      } catch { /* no rebase in progress, or an unreadable git dir */ }
-    }
-    return undefined;
-  }
-
-
-
-  /** HEAD commit tree OID — the content-boundary every ship binding compares against (round-8 P1). */
-  function headCommitTree(root: string): string {
-    return gitOrNull(root, ["rev-parse", "HEAD^{tree}"]) ?? "";
-  }
-
-  /**
-   * The tree the NEXT commit would publish — the worktree tree, computed the
-   * same way the ship bindings are (lib/fingerprint.ts). Empty when it cannot
-   * be read, which every caller must treat as "unknown" rather than "equal".
-   */
-  function worktreeTree(root: string): string | undefined {
-    try {
-      return worktreeTreeOid(root) || undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * Does the INDEX differ from HEAD? `git diff --cached --quiet HEAD` exits 1
-   * when it does, so a throw means "staged content" — and so does any error,
-   * which is the fail-closed reading: `undefined` (unknown) never authorizes
-   * the message-only exemption.
-   */
-  function hasStagedChanges(root: string): boolean | undefined {
-    try {
-      gitText(root, ["diff", "--cached", "--quiet", "HEAD"]);
-      return false;
-    } catch (err) {
-      // Exit 1 is the documented "there are differences" answer; anything else
-      // (no HEAD, not a repo, git missing) is unknown, not "clean".
-      return (err as { status?: number }).status === 1 ? true : undefined;
-    }
-  }
-
-  /**
-   * Round-9 P1: trees of the commits between the last READY's reviewed
-   * commit and HEAD that DIFFER from the reviewed tree. Non-empty ⇒ content
-   * no reviewer saw entered the branch since the READY (a checkpoint never
-   * re-reviewed, a change-and-revert, or a rebase that moved the reviewed
-   * point) — HEAD's tree matching is not enough. Returns undefined when there
-   * is nothing to compare against (older sidecar). When the range cannot be
-   * computed (the reviewed commit was squashed/rebase away), the HEAD-tree
-   * match is the content proof and the check is skipped — a squash that
-   * preserves the tree must keep the READY alive (goal criterion 4), and a
-   * rebase that CHANGED content already fails the fingerprint match before
-   * this check runs.
-   */
-  function unreviewedTreesSince(root: string, review: GateState["review"]): string[] | undefined {
-    if (!review?.commitSha || !review.fingerprint) return undefined;
-    try {
-      const out = gitRaw(root, ["rev-list", "--format=%T", `${review.commitSha}..HEAD`]);
-      return out
-        .split("\n")
-        .filter((l) => l && !l.startsWith("commit ") && l.trim() !== review.fingerprint)
-        .map((l) => l.trim())
-        .filter(Boolean);
-    } catch {
-      return []; // reviewed commit gone (squash) — tree match is the proof
-    }
-  }
-
   function classifier(): LlmClassifier {
     if (!llmClassifier || llmClassifierModel !== projectConfig.llmGuards.model) {
       llmClassifier = createLlmClassifier(projectConfig.llmGuards.model);
@@ -4974,41 +4764,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // definitions of "another session is alive" is one too many — 哲学三.)
   }
 
-  // ---- TUI widgets (display-only; never throw, never block the gate) ----
-  // Content is built by pure functions in lib/ui-widget.ts and only pushed to
-  // the TUI when it actually changed (pi re-renders on every setWidget call).
-  let lastUiCtx: ExtensionContext | undefined;
-  let lastAgentsWidget = "";
-
-  /**
-   * Has this session been told about its renderer? At most once per session.
-   * In-memory on purpose: a restart is a new session with a new terminal, and
-   * the answer can differ.
-   */
-  let rendererModeNoticeShown = false;
-
-  /**
-   * Say something when this session is on the renderer that CANNOT scroll a
-   * tall dialog, and stay silent otherwise.
-   *
-   * The value comes from `TUI.mode` (see `lib/renderer-mode.ts` for why a
-   * re-derivation from `--tui-mode` + settings files would be a copy that gets
-   * the corners wrong).
-   *
-   * THE FLAG IS SET ONLY AFTER THE NOTICE IS OUT (round-1 quality P1,
-   * 2026-09-16): the first version marked the session as told and then called
-   * `latestCtx?.ui.notify`, which at probe time is not set yet — so the notice
-   * could never reach anybody. A host that cannot notify must not consume the
-   * session's one chance to say it.
-   */
-  function noteRendererMode(mode: RendererMode | undefined, ctx: ExtensionContext): void {
-    if (!rendererModeNoticeDue(mode, rendererModeNoticeShown)) return;
-    try {
-      ctx.ui.notify(RENDERER_MODE_NOTICE, "warning");
-      rendererModeNoticeShown = true;
-    } catch { /* headless — a later probe may still succeed */ }
-  }
-
   let lastLayerNotifyText = "";
   /**
    * The agents-layer key of the config the model layers were last rendered
@@ -5204,205 +4959,6 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
   /**
-   * The gate facts the belowEditor widget renders: mode, branch, edited flag,
-   * and whether the loop goal is confirmed.
-   *
-   * 2026-09-16 — DELIBERATELY CHEAP (input-lag fix): this used to call
-   * `computeFingerprint()` on every 5s tick — a full shadow-index materialize
-   * + two `git add` passes that took ~3.2s in a 13k-file repo and ran on
-   * pi's main event loop, freezing the editor while typing. The widget now
-   * shows ONLY state that needs no git work: the in-memory gate state, the
-   * branch (one `symbolic-ref`), and the loop-goal confirmation. The unmet-
-   * requirements count is gone from the strip; it lives in `/gate-status`.
-   * Display-only: this never feeds an enforcement path.
-   */
-  function gateWidgetFacts(): GateWidgetFacts {
-    const completion: string[] = [];
-    // NON-GIT SHORT-CIRCUIT: the loop goal is a per-REPO contract — outside
-    // a repository there is no repo to bind it to, so it must not surface
-    // as an unmet requirement either (2026-09-02, user decision).
-    if (sessionInGit && !goalStageSatisfied()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
-    // ROUND READING (2026-09-17, user decision): how many rounds THIS session
-    // SENT OUT — a loop session's own submissions, a judge pane's own round
-    // number. Both are already in memory (no git, no fingerprint, so the
-    // cheap-by-contract rule above holds). Sessions that never send anything
-    // (orchestrator / explore / normal) do not show the segment at all —
-    // `showsRoundReading` is the one place that rule lives, and a judge pane
-    // whose task never named a round shows nothing rather than a 0 it cannot
-    // back up.
-    const judgePane = isJudgePane();
-    const roundReading = judgePane ? judgeTaskRound : (state.sentReviewRounds ?? 0);
-    return {
-      mode: state.taskMode,
-      nonGit: !sessionInGit,
-      // NON-GIT SHORT-CIRCUIT: `currentBranch` would run git and, outside a
-      // repository, leak "fatal: not a git repository" to the terminal.
-      // The user decision (2026-09-02): in a non-git directory, do not call
-      // git at all — no branch is shown.
-      branch: sessionInGit ? currentBranch(primaryRepoRoot) ?? "(detached)" : undefined,
-      edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
-      ...(sessionInGit && roundReading !== undefined &&
-          showsRoundReading({ mode: state.taskMode, judge: judgePane })
-        ? { rounds: roundReading }
-        : {}),
-      // THE STAGE SWITCHES, visible on the strip whenever anything is OFF
-      // (2026-09-22, user decision: a released checkpoint must be readable at a
-      // glance). All-on renders nothing, which keeps today's strip unchanged;
-      // this is in-memory state, so the cheap-by-contract rule above holds.
-      ...(stagesOff(state.stages).length > 0 ? { stages: stagesSummary(state.stages) } : {}),
-      unmet: completion,
-    };
-  }
-
-  /**
-   * The CONTRACT the `/gate-contract` command shows (2026-09-18): a project
-   * manager shows its plan, a loop session (standalone or an orchestrated
-   * child) shows the exit criteria of ITS OWN approved goal.
-   *
-   * On demand, so this runs when the user asks, not on a tick. It is still
-   * CHEAP BY CONTRACT in the same sense as the status strip: one plan file read
-   * or one goal file read, no git, no fingerprint, and nothing here is an
-   * enforcement input.
-   *
-   * ONE PLACE DECIDES BOTH HALVES (quality round P2, 2026-09-19). The empty
-   * cases and their explanations used to be written TWICE — a chain of bare
-   * `return { rows: [] }` here and a mirrored chain of `absent(...)` in
-   * `contractReadout` — so a new empty case could be added to one half and
-   * silently not the other, and the command would then print a reason that
-   * sounds right and is wrong (the mirroring was mechanical: 4 returns against
-   * 6 branches, and the test only fed a fake readout). `absent` now travels
-   * WITH the facts; the readout's job is to print what it is handed.
-   */
-  function contractFacts(): { facts: ContractFacts; absent?: string } {
-    const none = (absent: string): { facts: ContractFacts; absent: string } => ({
-      facts: { rows: [] },
-      absent,
-    });
-    if (!sessionInGit) return none("这里不是 git 仓库 —— 契约（goal / plan）都是按仓库谈的");
-    if (isJudgePane()) return none("judge 会话审的是别人的契约，自己不持有一份");
-    if (state.taskMode === "orchestrator") {
-      // Absent file, unreadable JSON and an archived plan all answer the same
-      // way here: no plan ⇒ no rows.
-      const rows = planContractRows(readPlanFile(primaryRepoRoot).plan?.tasks);
-      return rows.length > 0
-        ? { facts: { kind: "plan", rows } }
-        : none("没有可显示的 plan：.pi/orchestrator-plan.json 不在、不是合法 JSON，或已被归档");
-    }
-    if (!isEnforcedMode(state.taskMode)) {
-      return none(`本会话模式是 ${state.taskMode ?? "未初始化"}，它不持有 plan/goal 契约`);
-    }
-    if (!goalStageSatisfied()) {
-      return none(
-        stageIsOn("goal")
-          ? (readSessionLoopGoal(primaryRepoRoot).present
-            ? "goal 还是一份草稿：用户没批准过这段文本（批准了才有退出标准可看）"
-            : "还没有 goal 文件 —— 先反述需求、让用户批准一份退出契约")
-          : "goal 环节已关闭（用户设定的环节开关）—— 本会话不持有 goal 契约",
-      );
-    }
-    const rows = goalCriteriaRows();
-    return rows.length > 0
-      ? { facts: { kind: "goal", rows } }
-      : none("已批准的 goal 里解析不出「退出标准」小节的条目");
-  }
-
-  /**
-   * The approved goal's criteria as contract rows, read from the RAW FILE.
-   *
-   * NOT `LoopGoal.text`: that copy is capped at LOOP_GOAL_MAX_CHARS for the
-   * prompt, and 15 of this repo's 48 goal files have criteria running past the
-   * cut (measured while writing this). A file that cannot be read is no rows —
-   * the same answer as a goal whose criteria section is empty, which is the
-   * case `contractFacts` explains.
-   */
-  function goalCriteriaRows(): ContractFacts["rows"] {
-    try {
-      return parseGoalCriteria(readFileSync(loopGoalPathIn(primaryRepoRoot), "utf8"))
-        .map((text) => ({ text, state: "pending" }));
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * What `/gate-contract` prints: the contract lines, and — when there are none
-   * — WHY, in the gate's own words.
-   *
-   * Which situation this is, and what it is called, is `contractFacts`' own
-   * answer; the pairing of an empty list with its reason is
-   * `buildContractReadout`'s (lib/ui-widget.ts) — an empty list can never
-   * reach the command unexplained.
-   */
-  function contractReadout(): { lines: string[]; absent?: string } {
-    const { facts, absent } = contractFacts();
-    return buildContractReadout(facts, absent);
-  }
-
-  function updateWidget(ctx: ExtensionContext) {
-    // Idempotent re-arm (round-2 P2: the session_shutdown comment promised
-    // this and it did not exist): every widget-refresh path — the 5s timer
-    // tick, session_start, an explicit updateWidget call — guarantees the
-    // timer is running, so a later session_shutdown cannot leave the widget
-    // frozen. The tick calls updateWidget, which calls armUiRefreshTimer,
-    // which no-ops when the timer already exists — no recursion hazard.
-    armUiRefreshTimer();
-    lastUiCtx = ctx;
-    let hasUI: boolean;
-    try {
-      hasUI = ctx.hasUI;
-    } catch {
-      // Stale ctx: the session was replaced or reloaded (resume / switch /
-      // fork) and this captured ctx now THROWS on any access (pi hard-
-      // asserts). Drop it — the next session_start installs a fresh one.
-      // This must never escape as an uncaught exception: the 5s refresh
-      // timer ticked a stale ctx right after resume, threw inside the timer,
-      // and killed the whole pi process — the resumed session died before
-      // it could come back.
-      lastUiCtx = undefined;
-      return;
-    }
-    if (!hasUI) return;
-    // belowEditor — the gate status strip. Content-compared so pi only
-    // re-renders when something actually changed.
-    try {
-      const lines = buildGateWidget(gateWidgetFacts());
-      const key = lines.join("\n");
-      // THE RENDERER PROBE — invisible, and removed the moment it has
-      // answered. The `setWidget` FACTORY form is the only place the host hands
-      // an extension the real TUI, and `tui.mode` is the only honest answer to
-      // "is this session on the renderer that can scroll a tall dialog?" (a
-      // config re-derivation would be a copy that gets the corners wrong —
-      // lib/renderer-mode.ts).
-      //
-      // A PROBE, and not the widget itself (round-1 quality P0/P2,
-      // 2026-09-16): a factory component must wrap its own lines (`render(width)`),
-      // while the string[] form is what wraps each line through pi-tui's
-      // `Text` — and pi's RPC host ignores component factories entirely, so
-      // making the status strip a factory would delete it there.
-      //
-      // RE-PROBED when the status strip changes (round-2/3 P2, same day): the
-      // mode can change mid-session — `/settings` applies immediately — and the
-      // probe is the only place that reads it. It used to run on EVERY widget
-      // update, which is every 5s from the refresh timer plus every persist
-      // (round-3 P1); moving it inside the content-changed branch keeps the
-      // reading while making its cost follow real changes. The residual corner
-      // is named: a mode flipped while the strip's content stays identical
-      // mid-session is not noticed until that content moves. The NOTICE stays
-      // once-per-session (`rendererModeNoticeShown`).
-      if (key !== lastAgentsWidget) {
-        lastAgentsWidget = key;
-        ctx.ui.setWidget("review-gate-renderer-probe", (tui) => {
-          noteRendererMode(tui.mode, ctx);
-          return { render: () => [], invalidate: () => {} };
-        }, { placement: "belowEditor" });
-        ctx.ui.setWidget("review-gate-renderer-probe", undefined);
-        ctx.ui.setWidget("review-gate-agents", lines, { placement: "belowEditor" });
-      }
-    } catch { /* display-only */ }
-  }
-
-
-  /**
    * Is a judge child process (reviewer / quality-auditor / adviser /
    * goal-auditor) still in
    * flight? The stall breaker must not cut the loop off while a judge is
@@ -5431,591 +4987,19 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- user-visible output channels ----------
   //
-  // Two rules, both learned the hard way (the measurements live in
-  // lib/renderer-mode.ts now):
-  //
-  //  1. LONG TEXT GOES TO THE TRANSCRIPT. A tall dialog used to make pi's
-  //     DEFAULT renderer clear the screen and the scrollback every frame
-  //     (measured: 29 of 30 frames) — that is why the session on that renderer
-  //     is told to switch, and why anything long belongs in the transcript
-  //     anyway: it scrolls, and the box does not.
-  //  2. A DIALOG ONLY CARRIES THE DECISION. Every dialog in this file goes
-  //     through askChoice, which renders the gate's one question template
-  //     (lib/choice-dialog.ts) — whole, no fitting (2026-09-16).
-
-  // (There is deliberately NO cap on a transcript notice any more — see
-  // showToUser below. The sensitive-path DIALOG cap moved to
-  // lib/consent-request-tools.ts with the tool that echoes the path —
-  // SENSITIVE_PATH_DIALOG_MAX_CHARS.)
-
-  /**
-   * Put text in front of the USER, in the transcript, RIGHT NOW.
-   *
-   * WHY notify AND NOT pi.sendMessage: inside a tool the session is streaming,
-   * so `sendMessage` is queued rather than rendered — `deliverAs: "followUp"`
-   * lands in the follow-up queue, which agent-loop.ts drains when the agent
-   * would otherwise STOP, i.e. it silently buys another LLM turn (fatal for a
-   * tool whose whole job is to pause the loop) and still shows nothing until
-   * the turn ends. `ui.notify` is synchronous: interactive mode appends a Text
-   * to the chat container and requests a render, so the user sees it before
-   * the confirm dialog that follows.
-   *
-   * NO CHARACTER CAP (user decision, 2026-09-14). This used to cut every notice
-   * at 4000 characters with a `…（已截断）` tail — including the restatement,
-   * goal and plan the user is being asked to APPROVE, i.e. exactly the text
-   * they have to read. The cap was there for a geometry fear that does not
-   * apply to the transcript: the chat container scrolls, and appending 400
-   * rows in one shot triggers 0 full clears on the real renderer (measured,
-   * see lib/renderer-mode.ts). The dialog is the constrained
-   * surface, and it already keeps only the decision — the full text belongs
-   * here, whole.
-   *
-   * Returns false when there is no UI to render into (headless): callers must
-   * report that honestly instead of claiming the user saw something.
-   */
-  function showToUser(
-    uiCtx: { ui?: { notify?: (message: string, type?: "info" | "warning" | "error") => void } },
-    lead: string,
-    body: string,
-  ): boolean {
-    try {
-      const notify = uiCtx.ui?.notify;
-      if (!notify) return false;
-      notify(`${lead}\n${body}`, "warning");
-      return true;
-    } catch {
-      return false; // headless / no UI
-    }
-  }
-
-  /**
-   * A host context as the template's narrow `ui` seam.
-   *
-   * THE CAST IS LOAD-BEARING (2026-09-17): pi's `ExtensionContext.ui` no longer
-   * SATISFIES `ChoiceUi` structurally, because the reason box's `editor` takes
-   * a `signal` where pi's takes a prefill (see `reasonBoxUi` below for why).
-   * Everything else on the seam is pi's own, unchanged. One named cast beats a
-   * bare `as` at every call site, which is where it would drift.
-   */
-  function asChoiceHost(ctx: unknown): { ui?: ChoiceUi; signal?: AbortSignal } {
-    return ctx as { ui?: ChoiceUi; signal?: AbortSignal };
-  }
-
-/** pi's editor component CLASS, as a type — see `loadEditorComponent`. */
-type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["ExtensionEditorComponent"];
-
-  /**
-   * pi's own multi-line editor component, resolved ON DEMAND.
-   *
-   * IT USED TO BE A MODULE-SCOPE VALUE IMPORT, and that broke the one case the
-   * loader alias cannot cover: a host that loads this file OUTSIDE pi (the
-   * install fixtures in test/, any tool that imports the extension to inspect
-   * it) has no `@earendil-works/pi-coding-agent` to resolve, so a static import
-   * fails at LOAD time — the whole extension refuses to load, to draw one
-   * dialog. Resolved lazily it degrades instead: no component ⇒ the reason box
-   * stays whatever the host's own `ui.editor` is (multi-line, no signal), and
-   * nothing else changes.
-   *
-   * Inside pi the resolve always succeeds: the extension loader aliases this
-   * specifier to pi's own entry (dist/core/extensions/loader.js `_aliases`,
-   * `piCodingAgentEntry = packageIndex`), so no second copy is involved.
-   */
-  let editorComponent: Promise<EditorComponentCtor | undefined> | undefined;
-  function loadEditorComponent(): Promise<EditorComponentCtor | undefined> {
-    editorComponent ??= import("@earendil-works/pi-coding-agent")
-      .then((pi) => pi.ExtensionEditorComponent)
-      .catch(() => undefined);
-    return editorComponent;
-  }
-
-  /**
-   * The template's `ui` seam, with the reason box wired to pi's own editor.
-   *
-   * WHY NOT `ui.editor()` DIRECTLY (2026-09-17): pi's signature is
-   * `editor(title, prefill?)` — no `signal`. This gate's dialog model rests on
-   * a box being taken OFF THE SCREEN the moment the other side answers first
-   * (lib/orchestrator-child-channel.ts), and a box that outlives its answer
-   * collects typing nobody will ever read. The RULES for that — how the two
-   * kinds of `undefined` are told apart, which host falls back to what, and how
-   * the signal-less fallback still stops being waited on — live in
-   * lib/reason-editor.ts; what is here is only the wiring.
-   */
-  async function reasonBoxUi(host: ChoiceUi | undefined): Promise<(ChoiceUi & MultiChoiceHost) | undefined> {
-    const pi = host as (ChoiceUi & {
-      custom?: ExtensionUIContext["custom"];
-      editor?: ExtensionUIContext["editor"];
-    }) | undefined;
-    // `hostEditorFallback` reads the signal ITSELF and never forwards our opts
-    // into pi's prefill slot (lib/reason-editor.ts states the trap).
-    const own = pi?.editor ? hostEditorFallback(pi.editor.bind(pi)) : undefined;
-    const custom = pi?.custom;
-    const Component = custom ? await loadEditorComponent() : undefined;
-    // THE CHECKBOX SHAPE NEEDS NO PI COMPONENT CLASS (2026-09-22): it renders
-    // its own lines and only borrows `ui.custom` to get on screen. So it is
-    // wired off the SAME `custom` the reason box uses, before the branch below.
-    const multiSelect: MultiChoiceHost["multiSelect"] = custom
-      ? (title, spec, opts = {}) => mountMultiChoice(custom.bind(pi) as CustomDialogHost, title, spec, opts)
-      : undefined;
-    // No pi package to resolve, or no custom components on this host (RPC):
-    // the host's own editor — ADAPTED, never handed our options.
-    if (!custom || !Component) {
-      const ui = own ? { ...host, editor: own } : host;
-      return multiSelect ? { ...ui, multiSelect } : ui;
-    }
-    return {
-      ...host,
-      ...(multiSelect ? { multiSelect } : {}),
-      editor: hostReasonEditor({
-        custom: custom.bind(pi) as CustomDialogHost,
-        ...(own ? { fallback: own } : {}),
-        // THE BOX HAS TWO WAYS OUT (user decision, 2026-09-19): ESC hands the
-        // question BACK to its own list — carrying whatever was typed so far,
-        // so backing out costs nothing — while the LIST's ESC stays what it
-        // always was, closing the question (and, in an interview, stopping the
-        // rest). The component's own text is read defensively; see
-        // `editorTextOf` (lib/reason-editor.ts).
-        build: (tui, keybindings, title, done, prefill) => {
-          const component = new Component(
-            tui as ConstructorParameters<EditorComponentCtor>[0],
-            keybindings as ConstructorParameters<EditorComponentCtor>[1],
-            title,
-            prefill,
-            done,
-            () => done(`${REASON_EDITOR_BACK}${editorTextOf(component)}`),
-          );
-          return component;
-        },
-      }),
-    };
-  }
-
-  /**
-   * MOUNT THE CHECKBOX BOX onto pi's `ui.custom` — the same abort discipline
-   * the reason box has (lib/reason-editor.ts), for the same reason: this
-   * gate's dialogs are raced against a project manager's answer, and a box
-   * that cannot be taken down collects ticks nobody will ever read.
-   *
-   * A HOST THAT CANNOT MOUNT IT SAYS SO (RPC resolves `undefined` WITHOUT
-   * running the factory). That `undefined` is then the caller's own “nothing
-   * was shown”, never an invented empty answer.
-   */
-  function mountMultiChoice(
-    custom: CustomDialogHost,
-    title: string,
-    spec: ChoiceSpec,
-    opts: { signal?: AbortSignal; back?: boolean } = {},
-  ): Promise<MultiSelectOutcome | undefined> {
-    if (opts.signal?.aborted) return Promise.resolve({ kind: "dismissed" });
-    let ran = false;
-    return custom<MultiSelectOutcome | undefined>((tui, theme, keybindings, done) => {
-      ran = true;
-      let settled = false;
-      const finish = (value: MultiSelectOutcome | undefined) => {
-        if (settled) return;
-        settled = true;
-        done(value);
-      };
-      opts.signal?.addEventListener("abort", () => finish({ kind: "dismissed" }), { once: true });
-      if (opts.signal?.aborted) queueMicrotask(() => finish({ kind: "dismissed" }));
-      return buildMultiChoiceBox({
-        title,
-        spec,
-        ...(opts.back ? { back: true } : {}),
-        theme: theme as unknown as MultiChoiceTheme,
-        readKey: multiChoiceKeyReader(keybindings),
-        done: finish,
-        requestRender: () => (tui as { requestRender?: () => void } | undefined)?.requestRender?.(),
-      });
-    }).then((outcome) =>
-      // THE FACTORY NEVER RUNNING IS NOT A CLOSED BOX (reviewer P2, 2026-09-22):
-      // RPC resolves `undefined` WITHOUT mounting anything, and reading that as
-      // "the user dismissed it" stopped the whole interview over a question
-      // nobody was ever shown.
-      (ran ? outcome : { kind: "unavailable" as const }));
-  }
-
-  /**
-   * THE HOST'S OWN KEY READER — pi's keybindings, so the checkbox box follows
-   * whatever protocol the terminal negotiated and whatever the user rebound
-   * `tui.select.*` to (reviewer P1, 2026-09-22: a terminal on the Kitty
-   * keyboard protocol sends ESC as `\u001b[27u`, which a raw-byte table missed
-   * entirely — the box could not be closed at all). Space is not one of pi's
-   * select keybindings, so it falls through to the shape's own reader.
-   */
-  function multiChoiceKeyReader(keybindings: unknown): MultiChoiceKeyReader {
-    const kb = keybindings as { matches?: (data: string, keybinding: string) => boolean } | undefined;
-    return (data) => {
-      if (kb?.matches) {
-        if (kb.matches(data, "tui.select.up")) return "up";
-        if (kb.matches(data, "tui.select.down")) return "down";
-        if (kb.matches(data, "tui.select.confirm")) return "enter";
-        if (kb.matches(data, "tui.select.cancel")) return "escape";
-      }
-      return defaultMultiChoiceKey(data);
-    };
-  }
-
-  /**
-   * ONE BOX AT A TIME, PER SESSION (2026-09-18).
-   *
-   * pi executes the tool calls of one assistant message in parallel, and the
-   * host has one dialog slot: a second box REPLACES the first and the replaced
-   * one's promise is never settled again — which hangs the first tool, the
-   * batch, and the turn (lib/choice-dialog.ts `createDialogQueue` states the
-   * measurement). Every dialog goes through `askChoice`, so the queue lives
-   * here and covers all of them at once.
-   */
-  const scheduleDialog = createDialogQueue();
-
-  /**
-   * ASK THE PROXY (2026-09-19) — what happens when a dialog waits thirty
-   * minutes with nobody at the terminal.
-   *
-   * NO ARBITER, NO PROXY: an unconfigured arbiter resolves to no model, and
-   * this returns `undefined` — which the dialog reads exactly as it reads a
-   * closed box, so a gate with no arbiter still cannot grant anything by
-   * omission. Same fail-closed shape the arbitration paths use.
-   *
-   * The prompt carries a TRANSCRIPT POINTER, not the transcript: the proxy is a
-   * one-shot process (lib/arbitration.ts) and is told where to read the
-   * conversation rather than handed it — the choice `lib/adviser-brief.ts` makes
-   * too, for the same reason (a session log dwarfs the question).
-   */
-  async function proxyAnswerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyChoice | undefined> {
-    const model = resolveArbiterModel();
-    if (!model) return undefined;
-    const transcript = ownTranscriptPath();
-    const prompt = buildProxyPrompt({
-      title: spec.title,
-      // THE ROWS THE USER WOULD HAVE SEEN, verbatim, and the ONLY values the
-      // answer may take: `raceWithUserProxy` refuses anything else, which is what
-      // makes a proxied answer indistinguishable downstream.
-      options: spec.options,
-      // A CHECKBOX QUESTION TAKES SEVERAL (2026-09-22): the proxy may name
-      // several rows, and the check that accepts them widens by SHAPE only.
-      ...(spec.defaultChecked === undefined ? {} : { multiple: true }),
-      ...(body === undefined ? {} : { body }),
-      ...(transcript === undefined ? {} : { transcript }),
-      // WHICH REPO THE PROXY IS ASKED ABOUT (review round 3 P1): the same one
-      // its decision will be filed under. Reading it twice would let the prompt
-      // and the sidecar disagree.
-      repoRoot: root,
-    });
-    const raw = await runArbiterProcess(
-      model, prompt, undefined, PROXY_ARBITER_TIMEOUT_MS, PROXY_SYSTEM_PROMPT,
-      // THE READ-ONLY SET, NOT `--no-tools` (review round 2 P1). The appeal
-      // arbiter's isolation is text-in/JSON-out; this one is asked to READ the
-      // session, and a prompt carrying a transcript pointer is worthless to a
-      // process that cannot open a file.
-      PROXY_ISOLATION_FLAGS,
-    );
-    return parseProxyDecision(raw);
-  }
-
-  /**
-   * WRITE THE DECISION WHERE THE USER WILL SEE IT (2026-09-19).
-   *
-   * This is the whole safety story of the proxy: downstream its answer is
-   * indistinguishable from the user's own — it opens the same doors. The only
-   * thing that keeps that honest is that it is VISIBLE, in three places: this
-   * state record, a notice in the session, and the completion report
-   * `declare_done` prints. A proxy decision that left no trace would be an
-   * authorization the user never gave and cannot discover.
-   */
-  function recordProxyDecision(
-    spec: ChoiceSpec,
-    choice: string,
-    byProxy: { rationale: string; at: string },
-    /**
-     * WHICH REPO'S SIDE CAR (review round 2 P1). The dialog does not know, and
-     * `askChoice` is ONE function for all twelve sites — so the caller resolves
-     * it. A decision recorded under the primary repo while its question belonged
-     * to a secondary one lands in the wrong sidecar AND is missing from that
-     * repo's completion report.
-     */
-    root: string,
-  ): void {
-    const st = stateForRepo(root);
-    st.proxyDecisions = [
-      ...(st.proxyDecisions ?? []),
-      {
-        at: byProxy.at,
-        question: spec.title,
-        options: [...spec.options],
-        choice,
-        rationale: byProxy.rationale,
-        ...(state.sessionId ? { sessionId: state.sessionId } : {}),
-      },
-    ];
-    // `persistRepo`, not `persist`: the latter writes the CURRENT repo's
-    // sidecar, and the decision belongs to `root` (review round 2 P1).
-    if (latestCtx) persistRepo(latestCtx, root);
-    try {
-      latestCtx?.ui.notify(
-        `review-gate: 对话框等了 30 分钟无人作答，已由 arbiter 代为决定 —— 「${spec.title}」→ ${choice}` +
-          (byProxy.rationale ? `\n依据：${byProxy.rationale}` : "") +
-          "\n这条会记入 declare_done 的完成报告；你回来可以推翻它（重新走一遍对应的步骤即可）。",
-        "warning",
-      );
-    } catch { /* headless */ }
-  }
-
-  /**
-   * EVERY PROXY DECISION OF THIS SESSION, ACROSS EVERY REPO IT TOUCHED
-   * (review round 2 P1). `declare_done` runs ONCE for the session, while each
-   * decision belongs to whichever repo its dialog was about — reading only the
-   * primary repo's sidecar would silently omit the rest, and an incomplete list
-   * reads as "that was all of them", which is the one thing this record cannot
-   * get wrong.
-   *
-   * Deduped by (time, question, choice): a session that touched the same repo
-   * twice must not print the same decision twice either.
-   */
-  function allProxyDecisions(): NonNullable<GateState["proxyDecisions"]> {
-    // The dedupe lives in `mergeProxyDecisions` (哲学三: one implementation) —
-    // this is the same union, folded over more than two sessions.
-    let out: NonNullable<GateState["proxyDecisions"]> = [];
-    for (const root of sessionRepos) {
-      out = mergeProxyDecisions(out, stateForRepo(root).proxyDecisions);
-    }
-    return out;
-  }
-
-  /**
-   * THE one dialog renderer (user decision, 2026-09-08): the gate's question
-   * template, whole. Every dialog in this file — and
-   * every dialog in the tool modules that inject this function — comes
-   * through here, so exactly one shape ever reaches the screen: 2–4 options
-   * (the recommended one marked), the `✎ 不选，我说明原因` row, and a text
-   * box when that row is picked. A yes/no box is not a thing any more.
-   *
-   * NOTHING IS FITTED, NOTHING IS CUT (user decision, 2026-09-16). Both halves
-   * used to be budgeted against the real terminal — a five-row dialog spends
-   * rows the old two-row confirm never did — because an oversized dialog pushed
-   * the animating spinner out of the viewport and made pi's DEFAULT renderer
-   * clear the screen and the scrollback every frame (measured: 29 of 30 frames).
-   * That cost landed on the lines the user is CONFIRMING, and the renderer the
-   * user runs (fullscreen: the host owns the screen and scrolls) never had the
-   * problem — so the budget is gone and a session that is NOT on it is told
-   * once instead (lib/renderer-mode.ts).
-   *
-   * WHAT STILL MATTERS HERE IS ORDER. Callers put the facts being confirmed
-   * BEFORE the agent's own text, because the box is read top-down and the
-   * thing being approved should not come after the label of the thing it is
-   * about (lib/loop-goal.ts states the policy for the goal dialog).
-   *
-   * `signal` is what lets an ORCHESTRATOR's answer take the box off the
-   * user's screen: pi dismisses the dialog when it aborts, and the resolved
-   * `undefined` is then read as "somebody else settled this", not as a
-   * refusal (lib/orchestrator-child-channel.ts owns that distinction).
-   */
-  async function askDialog(
-    uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
-    spec: ChoiceSpec,
-    opts: {
-      body?: string;
-      signal?: AbortSignal;
-      back?: boolean;
-      repo?: string;
-      onUndecided?: () => void;
-      /**
-       * MAY THE ARBITER STAND IN FOR THE USER on this question?
-       *
-       * Default true — every dialog carries the thirty-minute hand-off
-       * (lib/user-proxy.ts, user decision 2026-09-19). `false` is for the one
-       * question a machine has no business answering: the stage checklist,
-       * where a partial stand-in answer would switch gates OFF. The window
-       * still runs; its expiry is the ordinary “nobody decided” landing.
-       */
-      proxy?: boolean;
-    } = {},
-    /**
-     * WHICH OF THE TWO SHAPES IS DRAWN (2026-09-22). Everything else about a
-     * dialog is shape-free — the queue, the banner, the thirty-minute proxy
-     * race and the record all belong to the WORDS being asked, not to how the
-     * rows are drawn — so the shape travels as this one flag rather than as a
-     * second copy of a five-hundred-line function.
-     */
-    checkbox = false,
-  ): Promise<string | undefined> {
-    // THE HOST'S SIGNAL IS READ HERE, BEFORE QUEUEING: `ExtensionContext.signal`
-    // is a getter that asserts the context is still alive, and a dialog can wait
-    // a long time for its turn. Read once and captured, not read again inside.
-    //
-    // THE RACE'S OWN SIGNAL IS MERGED IN HERE (2026-09-19), not at the queue
-    // call alone: the queue slot and the box on screen are the SAME dialog, and
-    // both have to end when the race settles. A proxy answer that released the
-    // queue wait while leaving `renderChoice` on screen would be a dialog the
-    // user can still type into and nobody will ever read.
-    const settledBy = new AbortController();
-    const signal = dialogSignal(uiCtx.signal, opts.signal, settledBy.signal);
-    // A BOX THAT IS ALREADY SETTLED IS NOT RAISED, AND NOT ANNOUNCED: the queue
-    // drops a waiter whose signal aborts (before OR during its turn) without
-    // raising anything or ringing a banner — telling the user to come answer
-    // something nobody is asking any more is the same mistake.
-    // THE WINDOW STARTS WHEN THE BOX DOES (2026-09-19). `askChoice` may be one
-    // of several calls in a single assistant message, and the dialog queue shows
-    // ONE box at a time — so a queued question could reach its thirty minutes
-    // before the user ever saw it (review round 1). `displayed` resolves inside
-    // the queue work below, which is the moment this dialog owns the screen.
-    let markDisplayed: (() => void) | undefined;
-    const displayed = new Promise<void>((resolve) => { markDisplayed = resolve; });
-    // WHICH REPO, BOUND WHEN THE BOX APPEARS (review round 3 P1). The answer
-    // belongs to the work this session was doing when the user would have SEEN
-    // the question — and `activeRepoRoot.current` follows the edits, so a dialog
-    // queued behind another one, or a thirty-minute wait, can move it. Bound on
-    // the queue's own turn and never re-read: fixing the sidecar's repo while
-    // the proxy reads a different one is the same defect from the other end.
-    //
-    // AN EXPLICIT `opts.repo` OUTRANKS IT AND NEVER DRIFTS (review round 4 P1):
-    // callers that KNOW which repo their question is about (a goal, a
-    // restatement) must say so — a secondary repo's question can be raised
-    // without that repo ever having been the active one, and then the fallback
-    // would file a stand-in's answer under the wrong sidecar AND point the proxy
-    // at the wrong repository.
-    const dialogRootNow = (): string => opts.repo ?? activeRepoRoot.current ?? primaryRepoRoot;
-    let dialogRoot = dialogRootNow();
-    const asked = scheduleDialog(async () => {
-      markDisplayed?.();
-      dialogRoot = dialogRootNow();
-      // KIND THREE of three, and this is the whole wiring for it: EVERY dialog
-      // any session shows comes through this function, so "the gate has stopped
-      // and is waiting for the human" needs no second detector. The policy
-      // decides who may be told (a child session's questions belong to its
-      // manager, and the manager answers them) and the throttle keeps a
-      // re-opened dialog from ringing again.
-      //
-      // WAITING, NOT ANSWERING: the banner goes out as the box appears, which
-      // is the moment somebody who is NOT at the terminal needs to know. The
-      // phrase being asked for rides along (body included) — a banner whose
-      // whole text is "问题 1 / 4" tells the user nothing about what they are
-      // being asked (user report, 2026-09-18).
-      raiseBanner({
-        kind: "needs-user",
-        detail: dialogNotifyDetail(spec, opts.body),
-      });
-      // NO BUDGET, NO TRUNCATION (user decision, 2026-09-16). This used to fit
-      // the title and the body into a rendered-row budget, because a dialog tall
-      // enough to push the spinner out of the viewport made pi's DEFAULT renderer
-      // clear the screen and the scrollback every frame. That cost landed on the
-      // lines the user is confirming — a long repo path could take the station
-      // line and the audit line with it while the dialog went on asking for
-      // approval — and the renderer the user runs (`fullscreen`, the host owns
-      // the screen and scrolls) never had the problem. A session that is NOT on
-      // it is told once instead: see lib/renderer-mode.ts.
-      //
-      // THE HOST'S ABORT SIGNAL TRAVELS WITH IT (2026-09-18): `uiCtx.signal` is
-      // `ExtensionContext.signal`, which is what an ESC aborts. Passing only the
-      // caller's own signal left a box on screen after the user cancelled the
-      // run, and the tool waiting on it never came back.
-      const answerBox = await reasonBoxUi(uiCtx.ui);
-      const answer = checkbox
-        ? await renderMultiChoice(answerBox, spec, {
-          ...(opts.body === undefined ? {} : { body: opts.body }),
-          ...(opts.back ? { back: true } : {}),
-          ...(signal ? { signal } : {}),
-        })
-        : await renderChoice(answerBox, spec, {
-          ...(opts.body === undefined ? {} : { body: opts.body }),
-          ...(opts.back ? { back: true } : {}),
-          ...(signal ? { signal } : {}),
-        });
-      // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
-      // dialog the gate shows — ask_user's interview, the restatement / goal /
-      // plan approvals, the consent boxes for sensitive edits and scope limits —
-      // reaches the user through this function, so this is where "the user
-      // answered" becomes a fact. Its one reader is the stall breaker
-      // (`stallInMotion`): a live negotiation must not be mistaken for a session
-      // that has stopped moving (measured: 80 minutes of goal negotiation
-      // tripped the breaker and was reported as a provider failure).
-      //
-      // Only a REAL answer counts: a dismissed box (undefined) is not the user
-      // engaging with the gate — and neither is the checklist sentinel, which
-      // says the opposite of “the user did something”: NO host could draw that
-      // question (quality round P2, 2026-09-22).
-      if (answer !== undefined && answer !== MULTI_UNAVAILABLE) {
-        lastUserInteractionAt = new Date().toISOString();
-      }
-      return answer;
-    }, signal);
-
-    // THE THIRTY-MINUTE HAND-OFF (2026-09-19, user decision). The box above is
-    // unchanged — not closed, not shortened, and a user who answers at minute 29
-    // wins outright. What is new is that minute 30 no longer means "nobody will
-    // ever answer": `arbiter` reads this session's own context and takes the
-    // user's place, and what it answers is recorded as a proxy decision (see
-    // `recordProxyDecision`) so the user can find it afterwards.
-    //
-    // THE RACE IS NOT WRITTEN HERE. Timing, the row check and the
-    // human-always-wins rule live in lib/user-proxy.ts, the only arrangement
-    // that makes them testable without waiting half an hour — this function is
-    // the single render point for all twelve dialogs and stays wiring.
-    const decided = await raceWithUserProxy<string>({
-      direct: asked,
-      displayed,
-      // NO PROXY FOR A QUESTION A MACHINE MUST NOT ANSWER (quality round P1,
-      // 2026-09-22). An empty option list IS how lib/user-proxy.ts turns the
-      // arbiter off: the window still runs and its expiry still settles as
-      // “nobody answered”, so an unattended session unblocks exactly as before —
-      // it just does not get a machine-made decision. The one caller that asks
-      // for this is the stage checklist (`choose_loop_stages`): a stand-in that
-      // ticks a SUBSET of its rows would silently switch OFF the unticked
-      // gates, which is the opposite of what that dialog is for.
-      options: opts.proxy === false ? [] : spec.options,
-      ...(spec.defaultChecked === undefined ? {} : { multiple: true }),
-      startProxy: () => proxyAnswerFor(spec, opts.body, dialogRoot),
-    });
-    // Whatever settled it, the box is done — see `settledBy` above.
-    settledBy.abort();
-    if (decided.byProxy !== undefined && decided.answer !== undefined) {
-      recordProxyDecision(spec, decided.answer, decided.byProxy, dialogRoot);
-    } else if (decided.proxyFailed === true) {
-      // NOBODY DECIDED, AND THE USER IS NOT HERE. Say so: a dialog that times
-      // out silently is indistinguishable, to the user, from one that was
-      // answered — and this is the only moment the fact exists. The gate does
-      // NOT invent an answer here; the conservative landing is the absence of
-      // one, which every caller already reads correctly.
-      //
-      // THE CALLER IS TOLD TOO (review round 3 P1): `undefined` alone cannot
-      // distinguish this from a dismissed box, and for a consent request those
-      // two must not have the same consequence — a decline LOCKS the request
-      // for the session, and a timeout is not a decline.
-      try {
-        // THE NOTICE MUST NOT BLAME THE ARBITER FOR A CHOICE WE MADE (quality
-        // round P2, 2026-09-22): with `proxy: false` the stand-in was switched
-        // off on purpose, and the generic “arbiter 无法代答（未配置 / 失败 / 输出
-        // 不可解析）” would tell the user their machine is broken.
-        latestCtx?.ui.notify(
-          opts.proxy === false
-            ? `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答 —— 这一题**不问 arbiter 代答**` +
-              "（机器不替用户决定这一类问题），所以还没有任何决定，等你回来处理。"
-            : `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答，且 arbiter 无法代答` +
-              "（未配置 / 失败 / 输出不可解析）—— 这一项**还没有任何决定**，等你回来处理。",
-          "warning",
-        );
-      } catch { /* headless */ }
-      try { opts.onUndecided?.(); } catch { /* the caller's own bookkeeping */ }
-    }
-    return decided.answer;
-  }
-
-  /** The radio shape — one answer (lib/choice-dialog.ts). */
-  async function askChoice(
-    uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
-    spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; back?: boolean; repo?: string; onUndecided?: () => void } = {},
-  ): Promise<string | undefined> {
-    return askDialog(uiCtx, spec, opts, false);
-  }
-
-  /** The checkbox shape — several answers (lib/multi-choice-dialog.ts). */
-  async function askMultiChoice(
-    uiCtx: { ui?: ChoiceUi; signal?: AbortSignal },
-    spec: ChoiceSpec,
-    opts: { body?: string; signal?: AbortSignal; back?: boolean; repo?: string; onUndecided?: () => void; proxy?: boolean } = {},
-  ): Promise<string | undefined> {
-    return askDialog(uiCtx, spec, opts, true);
-  }
+  // The transcript notice (`showToUser`) and the ONE dialog renderer live in
+  // lib/gate-dialogs.ts; the thirty-minute stand-in's I/O in
+  // lib/dialog-proxy.ts. Created here, before any tool module below captures
+  // `askChoice` by value.
+  const dialogProxy = createDialogProxy(host, {
+    resolveArbiterModel: () => resolveArbiterModel(),
+    ownTranscriptPath: () => ownTranscriptPath(),
+  });
+  const { askChoice, askMultiChoice } = createGateDialogs(host, {
+    proxy: dialogProxy,
+    raiseBanner: (opts) => raiseBanner(opts),
+    lastUserInteractionAt,
+  });
 
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
   // user-chosen explore/normal (advisory hook) from an agent selection
@@ -6056,116 +5040,31 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
 
   // ---------- L6 (extension side): test-label language, checked at edit time ----------
 
-  /**
-   * Full post-edit file projection (lib/edit-projection.ts). Scanning the
-   * complete projected file — not newText fragments — closes the reviewer's
-   * P1 bypass: an edit replacing just a label STRING (`'old label'` →
-   * `'ceshi denglu'`) still yields a file where the lexer sees the
-   * surrounding `it(...)` call.
-   */
-  function editedTestContent(input: Record<string, unknown>, path: string): string {
-    return projectEditedContent(input, () => {
-      // P2 fix: resolve relative tool paths against the SESSION cwd, not the
-      // extension host's process.cwd() (they can differ under pi --cwd).
-      const abs = path.startsWith("/") ? path : pathJoin(cwd, path);
-      try { return readFileSync(abs, "utf8"); } catch { return undefined; }
-    });
-  }
-
-  /**
-   * L6 moved LEFT: the git-hook scanner (scripts/scan-test-labels.cjs) stays
-   * the deterministic, zero-dependency backstop at commit time; here the SAME
-   * lexer runs at edit time for immediate feedback, plus the flash semantic
-   * layer for the Unicode blind spot (romanized non-English labels). Both are
-   * tighten-only; scanner load/parse failure → pass (hook still enforces).
-   */
-  /** Cache of romanized-non-English verdicts, keyed by the exact label set
-   *  (lib/llm-classify.ts documents why a failed call is never remembered). */
-  const labelCheckMemo = createVerdictMemo();
-
-  /** Status-bar line the gate owns for its LLM-guard notices. */
-  const LLM_STATUS_KEY = "review-gate-llm";
-  /**
-   * The status bar of a HOOK's context.
-   *
-   * A `tool_call` handler has no `onUpdate` (that is a tool's channel), so a
-   * multi-second classification would look like a frozen editor. The status
-   * line is the one surface a hook has, and `withSlowNotice` only ever uses
-   * it when the call is actually slow.
-   */
-  function llmNoticeUi(ctx: unknown): { setStatus?: (key: string, text: string | undefined) => void } | undefined {
-    return (ctx as { ui?: { setStatus?: (key: string, text: string | undefined) => void } } | undefined)?.ui;
-  }
-
-  async function checkTestLabels(
-    path: string,
-    content: string,
-    /** The hook's context: status-bar notices, and persisting a spent appeal pass. */
-    ctx: unknown,
-    /** Status-bar sink: an L6 classification slower than ~3s says so. */
-    notice?: SlowNoticeSink,
-  ): Promise<string | undefined> {
-    if (!content) return undefined;
-    let analyze: ((p: string, src: string) => { violations: Array<{ line: number; label: string }>; latinLabels: Array<{ line: number; label: string }> }) | undefined;
-    let isTest: ((p: string) => boolean) | undefined;
-    try {
-      const { createRequire } = await import("node:module");
-      const req = createRequire(import.meta.url);
-      // P1 fix: probe every install layout, mirroring resolveTrustedRunner().
-      // The old single "../scripts/…" path only resolved in the dev repo
-      // (extensions/ sibling); global installs put the extension in
-      // extensions/pi-review-gate/ with scripts/ TWO levels up, so the
-      // edit-time L6 check silently never ran in any installed layout.
-      let mod: { analyzeFile?: typeof analyze; isTestFile?: typeof isTest } | undefined;
-      for (const rel of [
-        "../scripts/scan-test-labels.cjs",       // dev repo: extensions/ sibling
-        "../../scripts/scan-test-labels.cjs",    // global/project: extensions/pi-review-gate/
-        "./scripts/scan-test-labels.cjs",        // flat layout
-      ]) {
-        try { mod = req(rel); break; } catch { /* keep probing */ }
-      }
-      if (!mod) return undefined; /* scanner unavailable — hook backstop remains */
-      analyze = mod.analyzeFile; isTest = mod.isTestFile;
-    } catch { return undefined; /* scanner unavailable — hook backstop remains */ }
-    // Classify on the RESOLVED path, for the same reason the sensitive-file
-    // guard does: `foo.test.ts/x/..` names a test file that a segment-based
-    // matcher would miss. (Such a spelling also fails at the fs layer and the
-    // L3 hook scans the real committed paths, so this is consistency rather
-    // than a hole being closed.) Messages keep the caller's spelling — that is
-    // what the agent typed and can act on.
-    if (!analyze || !isTest || !isTest(normalizeSensitivePath(path, cwd))) return undefined;
-    let res: ReturnType<typeof analyze>;
-    try { res = analyze(path, content); } catch { return undefined; }
-    if (res.violations.length > 0) {
-      const v = res.violations[0];
-      return refuseText("test-label", v.label,
-        `${l5BlockReason({ kind: "test-label", text: v.label })} 位置 ${path}:${v.line}。` +
-        "测试描述必须是英文；确属特例时在上一行加 `// review-gate: allow-non-english`。", ctx);
-    }
-    // Unicode check passed — flash semantic layer for romanized non-English.
-    if (projectConfig.llmGuards.englishCheck && res.latinLabels.length > 0) {
-      const labels = res.latinLabels.map((l) => l.label);
-      // Memoized on the exact label SET: an agent editing the same test file
-      // repeatedly re-sent an identical label list and blocked each edit on a
-      // ~2s model round-trip for an answer that cannot have changed.
-      const key = labelCheckMemo.key(labels);
-      let verdict = labelCheckMemo.get(key);
-      if (verdict === undefined) {
-        verdict = await withSlowNotice(
-          notice,
-          "review-gate: 正在做 L6 测试标签分类（语义判定）…",
-          () => classifyNonEnglish(classifier(), labels),
-        );
-        labelCheckMemo.remember(key, verdict);
-      }
-      if (verdict === true) {
-        return refuseText("test-label", labels.join("\n"),
-          `test label reads as romanized non-English (L6, semantic check) in ${path}. ` +
-          "测试描述必须是英文；确属特例时用 `// review-gate: allow-non-english` 豁免。", ctx);
-      }
-    }
-    return undefined;
-  }
+  // The check itself lives in lib/edit-time-checks.ts; the arbitration I/O it
+  // shares a quota with lives in lib/arbitration-host.ts. Both are created
+  // HERE, before `shipGateHookDeps` below captures their functions by value.
+  const { editedTestContent, checkTestLabels, llmNotice } = createEditTimeChecks(host, {
+    projectConfig: () => projectConfig,
+    classifier: () => classifier(),
+    refuseText: (kind, text, reason, ctx) => refuseText(kind, text, reason, ctx),
+  });
+  const {
+    computeTokenBindings,
+    resolveArbiterModel,
+    arbitrateText,
+    arbitrateInspection,
+    bodyFileDigest,
+    appendLesson,
+    gatherPrText,
+    gatherProposedText,
+    gatherGitLog,
+  } = createArbitrationHost(host, {
+    projectConfig: () => projectConfig,
+    appealsUsed: () => appealsUsed(),
+    spendArbitration: (ctx) => spendArbitration(ctx),
+    arbitrationDecisions,
+    grantInspectionPass: (pass) => { inspectionPass = pass; },
+  });
 
   // ---------- L1: tool_call — sensitive files + ship gate ----------
   //
@@ -6209,7 +5108,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       path,
       editedTestContent(input, path),
       ctx,
-      statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
+      llmNotice(ctx),
     ),
     markSessionEdited: () => { sessionEdited = true; },
     bypassActive: () => state.bypass.active,
@@ -6229,7 +5128,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
 
     crossRepoVerdictHint,
     classifier,
-    notice: (ctx) => statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
+    notice: (ctx) => llmNotice(ctx),
     refuseText,
     appendLesson,
     bypassToken: () => bypassToken,
@@ -6281,245 +5180,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       return { content: [...event.content, { type: "text" as const, text: "\n\n" + text }] };
     } catch { /* an unreadable result shape: drop the hint, never the result */ }
   });
-
-  // Compute the current binding material for a parsed arbitrable action: hash
-  // each --body-file's (path + content) so replacing the file after issue
-  // invalidates the token.
-  async function computeTokenBindings(action: ArbitrableAction, fingerprint: string): Promise<TokenBindings> {
-    return {
-      sessionId: state.sessionId,
-      kind: action.kind,
-      fingerprint,
-      round: state.rounds.length,
-      commandDigest: action.commandDigest,
-      bodyFileDigest: bodyFileDigest(action.bodyFilePaths),
-    };
-  }
-
-
-  /**
-   * The arbiter model, resolved from the agents config layer (arbiter role).
-   *
-   * The arbiter USED to be a hard-coded constant (project-config's
-   * DEFAULT_ARBITER_MODEL). Per the all-roles-through-config requirement it
-   * now comes from agents.arbiter.slots[0]. Absent/unconfigured → undefined,
-   * which callers treat as fail-closed (no arbiter, GATE_WINS).
-   */
-  function resolveArbiterModel(): string | undefined {
-    try {
-      const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-      const arbiter = map.arbiter;
-      if (arbiter && arbiter.auto === false && arbiter.slots.length > 0) return arbiter.slots[0]!;
-      // NO BUILT-IN DEFAULT (criterion 1): an unconfigured arbiter returns
-      // undefined and the caller fails closed (GATE_WINS). The legacy
-      // projectConfig.arbiter.model field is NOT a fallback — its default
-      // value is the hard-coded DEFAULT_ARBITER_MODEL, which this
-      // requirement removes.
-      return undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * Hear an appeal against an A-class TEXT block (lib/text-appeal.ts).
-   *
-   * Same shape as the `gh pr edit` arbitration below it — an independent
-   * arbiter process, fail-closed on any failure — but what it may grant is a
-   * CONTENT-bound single-use pass, never a command. The four brakes live in
-   * the pure module; this function only does the I/O around them.
-   */
-  async function arbitrateText(
-    block: AppealableBlock,
-    argument: string,
-    ctx: unknown,
-  ): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError?: boolean }> {
-    const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
-    const digest = appealDigest(block.kind, block.text);
-    const admission = admitAppeal(state.appeals, digest, projectConfig.arbiter.maxPerSession);
-    if (!admission.ok) return deny(`review-gate: ${admission.reason}`);
-
-    const verdict = await runArbiter(
-      resolveArbiterModel() ?? "",
-      buildTextAppealPrompt(block, argument),
-      undefined,
-      undefined,
-      TEXT_APPEAL_SYSTEM_PROMPT,
-    );
-    // Fail-closed: a spawn failure, a timeout or an unparseable answer is a
-    // GATE_WINS — and it still SPENDS the quota, so a broken arbiter cannot be
-    // retried into a grant.
-    const decision = verdict?.decision ?? "GATE_WINS";
-    state.appeals = recordAppealDecision(state.appeals, digest, block.kind, decision, new Date().toISOString());
-    persist(ctx as unknown as ExtensionContext);
-    appendLesson(`text appeal (${block.kind}) decision=${decision} reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} text=${block.text.slice(0, 120)}`);
-    if (decision === "AGENT_WINS") {
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: 仲裁者判定 AGENT_WINS — ${verdict?.reason ?? ""}\n` +
-            "已对这段内容发放一次性通行证：把**完全相同**的文本再提交一次即可通过（改一个字就失效）。" +
-            "它只放行这段文本，不影响代码审查与 precommit 门禁。",
-        }],
-        details: { decision, kind: block.kind, used: appealsUsed() },
-      };
-    }
-    if (decision === "HUMAN") {
-      return deny(
-        `review-gate: 仲裁者把判断交给人 — ${verdict?.reason ?? ""}\n` +
-        "本次不放行。要么改文案，要么请用户直接定夺（这条已计入配额）。",
-      );
-    }
-    return deny(
-      `review-gate: 仲裁者判定 GATE_WINS — ${verdict?.reason ?? "无有效裁决（fail-closed）"}。` +
-      "按门禁要求改文案；同一段内容不能再申诉。",
-    );
-  }
-
-  /**
-   * Hear an appeal against a ZERO-INSPECTION READY refusal (the judge-side
-   * class, lib/inspection-appeal.ts).
-   *
-   * Same three-part shape as the two appeals above — admission in the pure
-   * module, an independent arbiter process, fail-closed on every failure —
-   * and what it may grant is the narrowest thing in the gate: this judge's
-   * THIS round may conclude READY once despite having inspected nothing. It
-   * issues no bypass token, touches no verdict, and cannot reach a ship
-   * command. The pass lives in memory because the round does.
-   */
-  async function arbitrateInspection(
-    block: InspectionBlock,
-    argument: string,
-    ctx: unknown,
-  ): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError?: boolean }> {
-    const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
-    const key = inspectionDecisionKey(block.judgeId, block.round);
-    const admission = admitInspectionAppeal({
-      decided: arbitrationDecisions.get(key),
-      used: appealsUsed(),
-      maxPerSession: projectConfig.arbiter.maxPerSession,
-    });
-    if (!admission.ok) return deny(`review-gate: ${admission.reason}`);
-
-    // The quota is SHARED with the two other classes, and it is spent BEFORE
-    // the arbiter runs: a spawn that dies must not be retried into a grant.
-    spendArbitration(ctx);
-    const verdict = await runArbiter(
-      resolveArbiterModel() ?? "",
-      buildInspectionAppealPrompt(block, argument),
-      undefined,
-      undefined,
-      INSPECTION_APPEAL_SYSTEM_PROMPT,
-    );
-    // Fail-closed, and the quota is spent either way: a broken arbiter cannot
-    // be retried into a grant.
-    const decision = verdict?.decision ?? "GATE_WINS";
-    arbitrationDecisions.set(key, decision);
-    appendLesson(
-      `inspection appeal (${block.role} round ${block.round}) decision=${decision} ` +
-      `reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} arg=${argument.slice(0, 200)}`,
-    );
-    if (decision === "AGENT_WINS") {
-      inspectionPass = issueInspectionPass(block, Date.now());
-      return {
-        content: [{ type: "text", text: inspectionGrantedText(verdict?.reason ?? "") }],
-        details: { decision, round: block.round, used: appealsUsed() },
-      };
-    }
-    return deny(inspectionDeniedText(decision, verdict?.reason ?? ""));
-  }
-
-
-  function bodyFileDigest(paths: readonly string[]): string {
-    if (paths.length === 0) return "";
-    const parts: string[] = [];
-    for (const p of paths) {
-      let content = "";
-      try { content = readFileSync(p.startsWith("/") ? p : pathJoin(cwd, p), "utf8"); } catch { content = "\0MISSING"; }
-      parts.push(sha256(p + "\0" + content));
-    }
-    return sha256(parts.join("\0"));
-  }
-
-  function appendLesson(text: string) {
-    try {
-      const logPath = pathJoin(cwd, ".pi", "review-gate-arbitration.log");
-      mkdirSync(pathDirname(logPath), { recursive: true });
-      appendFileSync(logPath, `${new Date().toISOString()} ${text}\n`);
-    } catch { /* best effort audit log */ }
-  }
-
-  /**
-   * Best-effort audit line for gate decisions the transcript alone cannot be
-   * trusted to preserve: sensitive-file grants (issued/consumed) and loop-goal
-   * approvals. All three are USER consent events — the one class of fact that
-   * must stay checkable after a compaction, a crash, or a session the agent
-   * later summarizes in its own words.
-   *
-   * This function was CALLED from three places before it existed: ESM only
-   * throws `log is not defined` when the line finally runs, so every
-   * propose_loop_goal / request_sensitive_edit approval crashed in front of the
-   * user. `npm run typecheck` (TS2304) now catches that class before shipping.
-   *
-   * Writes under the REPO ROOT's `.pi/` — gate-owned, so it is excluded from
-   * the fingerprint and from edit tracking: auditing a decision must never
-   * invalidate the review binding the decision belongs to. Anchoring on the
-   * session `cwd` instead would break exactly that when Pi runs in a
-   * subdirectory of the repo, because `:/.pi` only excludes the ROOT one —
-   * `<root>/sub/.pi/audit.log` is an ordinary worktree file, and appending to
-   * it would move the digest under a recorded READY.
-   */
-  function log(text: string): void {
-    try {
-      const logPath = pathJoin(primaryRepoRoot, ".pi", "review-gate-audit.log");
-      mkdirSync(pathDirname(logPath), { recursive: true });
-      appendFileSync(logPath, `${new Date().toISOString()} [${state.sessionId ?? "no-session"}] ${text}\n`);
-    } catch { /* best effort audit log */ }
-  }
-
-  // Evidence gatherers for the arbiter (the arbiter is tool-less; the extension
-  // fetches trusted ground truth). All are best-effort read-only and degrade to
-  // an explicit "unavailable" note rather than throwing.
-  function runReadOnly(argv: string[], extraEnv?: Record<string, string>): string | undefined {
-    try {
-      return execFileSync(argv[0], argv.slice(1), {
-        cwd, encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"], maxBuffer: 4 * 1024 * 1024,
-        ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
-      }).trim();
-    } catch { return undefined; }
-  }
-
-  function gatherPrText(action: ArbitrableAction): string {
-    // Query the SAME PR the blocked command targets: mirror its selector, repo,
-    // and hostname so the arbiter's ground truth matches the action under
-    // review (not the current branch's default PR). All values come from the
-    // parsed, validated action (argv, never a shell).
-    const argv = ["gh", "pr", "view"];
-    if (action.selector) argv.push(action.selector);
-    if (action.repo) argv.push("--repo", action.repo);
-    argv.push("--json", "number,title,body,url");
-    // P1 fix: `gh pr view` has NO --hostname flag (that spelling would make gh
-    // exit with a usage error and the evidence degrade to "unavailable").
-    // gh selects the host via the GH_HOST environment variable instead.
-    const out = runReadOnly(argv, action.hostname ? { GH_HOST: action.hostname } : undefined);
-    return out ?? "(current PR text unavailable — `gh pr view` failed; arbiter should weigh this as missing evidence)";
-  }
-
-  function gatherProposedText(action: ArbitrableAction): string {
-    if (action.bodyFilePaths.length === 0) return "(no --body-file; inline --title/--body is inside the blocked command shown above)";
-    const parts: string[] = [];
-    for (const p of action.bodyFilePaths) {
-      try {
-        const abs = p.startsWith("/") ? p : pathJoin(cwd, p);
-        parts.push(`--- ${p} ---\n${readFileSync(abs, "utf8")}`);
-      } catch { parts.push(`--- ${p} ---\n(unreadable)`); }
-    }
-    return parts.join("\n\n");
-  }
-
-  function gatherGitLog(dir: string): string {
-    return gitOrNull(dir, ["log", "--oneline", "-15"], { timeout: 15000 }) ?? "(git log unavailable)";
-  }
 
   // ---------- L7: post-PR Copilot code-review loop ----------
   //
@@ -7710,7 +6370,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           if (added.length === 0) return { blocking: [] as string[] };
           // The justification rides the agent's own words: the round note that
           // built this message, or the message itself. submitForReview derives
-          // the message from the note via checkpointMessage(note) — so pass
+          // the message from the note via buildCheckpointMessage(note) — so pass
           // both, exactly as the goal's acceptance criterion 6 requires.
           return dependencyJustificationVerdict(
             added.map((name) => ({ name })),
@@ -8223,7 +6883,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     //    a single refused prepare into a permanent dead end — the commit was
     //    already in, so every retry died at this step. Only a REFUSAL
     //    (isError) stops the chain.
-    const message = checkpointMessage(input.message ?? input.note);
+    const message = buildCheckpointMessage(input.message ?? input.note);
     input.progress?.step("checkpoint 提交");
     const commit = await callTool("review_checkpoint", { message, note: input.note, repo: input.root }, input.ctx);
     if (commit.isError) {
@@ -8549,15 +7209,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
 
 
 
-  /**
-   * The checkpoint's commit message — the whole rule (a legal Conventional
-   * Commit for every note, plus the L5 non-English fallback) lives in
-   * lib/checkpoint-message.ts, unit-tested there. This wrapper only names the
-   * call site.
-   */
-  function checkpointMessage(raw: string): string {
-    return buildCheckpointMessage(raw);
-  }
 
 
   /** What one dispatch of a judge round produced (or why it could not). */
@@ -9536,13 +8187,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // lib/audit-round.ts itself, through the `log` binding below — the
         // record and its trail are decided in one place, not two.)
         try {
-          const persistCtx = latestCtx ?? lastUiCtx;
+          const persistCtx = latestCtx ?? lastUiCtx.current;
           if (persistCtx) persistRepo(persistCtx, root); else persist(undefined);
         } catch { /* best effort */ }
       },
       log: (message) => { log(message); },
       recordGoal: async ({ root, pending, concluded }) => {
-        const recordCtx = ctx ?? lastUiCtx;
+        const recordCtx = ctx ?? lastUiCtx.current;
         if (!recordCtx) return undefined;
         return recordGoalPrereview(goalPrereviewDeps, {
           goal: pending.draft,
@@ -9555,12 +8206,12 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // unqualified record, and a verdict must never depend on which repo was
       // edited last.
       recordReview: async ({ root, concluded }) => {
-        const recordCtx = ctx ?? lastUiCtx;
+        const recordCtx = ctx ?? lastUiCtx.current;
         if (!recordCtx) return undefined;
         return recordReviewVerdict(concluded, root, recordCtx);
       },
       recordQuality: async ({ root, concluded }) => {
-        const recordCtx = ctx ?? lastUiCtx;
+        const recordCtx = ctx ?? lastUiCtx.current;
         if (!recordCtx) return undefined;
         return recordQualityVerdict(concluded, root, recordCtx);
       },
@@ -9568,7 +8219,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // quality one: the round ENDS when its report lands, and what the report
       // says is adjudicated here, never by the agent.
       recordAcceptance: async ({ root, concluded }) => {
-        const recordCtx = ctx ?? lastUiCtx;
+        const recordCtx = ctx ?? lastUiCtx.current;
         if (!recordCtx) return undefined;
         return recordAcceptanceVerdict(concluded, root, recordCtx);
       },
@@ -12917,7 +11568,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
             // list is a union across sessions and would otherwise replay
             // earlier tasks' decisions in every later report.
             formatProxyDecisionReport(
-              sessionProxyDecisions(allProxyDecisions(), [state.sessionId ?? undefined, readInheritance().predecessorSession]),
+              sessionProxyDecisions(dialogProxy.all(), [state.sessionId ?? undefined, readInheritance().predecessorSession]),
             ),
         }],
         details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
@@ -13152,7 +11803,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     },
     cwd,
     sessionEditedPaths: () => [...sessionEditedPaths],
-    commitsAheadOfBase: () => commitsAheadOfBase(cwd),
+    commitsAheadOfBase: async () => commitsAheadOfBase(cwd),
     scopeLimitDeclined: () => scopeLimitDeclined,
     declineScopeLimit: () => { scopeLimitDeclined = true; },
     tmuxAccessDeclined: () => tmuxAccessDeclined,
@@ -13940,7 +12591,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       judgeInFlight: judgeChildInMotion(),
       forceNegotiate,
       pausedForUser: state.pausedQuestion !== undefined,
-      lastUserInteractionAt,
+      lastUserInteractionAt: lastUserInteractionAt.current,
       previousObservationAt: lastStallObservedAt,
     };
     const stall = evaluateStall(
@@ -13978,7 +12629,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
           goalConfirmed: goalStageSatisfied(),
           hasUnreviewedChanges:
             (state.hasCodeChange || state.hasDocChange) && state.review.verdict !== "READY",
-          lastUserInteractionAt,
+          lastUserInteractionAt: lastUserInteractionAt.current,
           nowMs: Date.now(),
         });
         try { ctx.ui.notify(buildStallNotice(stall.repeats, cause), "warning"); } catch { /* headless */ }
@@ -14254,7 +12905,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // question of the same facts, and the two copies of it had drifted.
       const armed = armingFromFacts({
         files: files ?? [],
-        commitsAhead: state.scopeLimit ? 0 : await commitsAheadOfBase(cwd),
+        commitsAhead: state.scopeLimit ? 0 : commitsAheadOfBase(cwd),
       });
 
       if (armed.hasCodeChange || armed.hasDocChange) {
@@ -14350,7 +13001,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // why the resumed session could not come back. session_start re-arms
     // the timer with the fresh ctx (updateWidget also re-arms, idempotently,
     // so a later subagent-session shutdown cannot leave the widget frozen).
-    lastUiCtx = undefined;
+    lastUiCtx.current = undefined;
     disarmUiRefreshTimer();
     // The supervision probe is a timer this session owns; a leaked one would
     // keep waking a session that is gone.
@@ -14466,7 +13117,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       if (!couldReconcile(repoCurrent, repoFiles)) continue;
       const repoNext = reconcileArming(repoCurrent, {
         files: repoFiles,
-        commitsAhead: commitsAheadOfBaseSync(root),
+        commitsAhead: commitsAheadOfBase(root),
       });
       if (!repoNext.changed) continue;
       st.hasCodeChange = repoNext.hasCodeChange;
@@ -14495,7 +13146,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     if (!couldReconcile(current, files)) return;
     const next = reconcileArming(current, {
       files,
-      commitsAhead: state.scopeLimit ? 0 : await commitsAheadOfBase(cwd),
+      commitsAhead: state.scopeLimit ? 0 : commitsAheadOfBase(cwd),
     });
     if (!next.changed) return;
     state.hasCodeChange = next.hasCodeChange;
@@ -15041,40 +13692,8 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     };
   });
 
-  // Refresh the TUI widgets periodically while sub-agents run: agent_settled
-  // only fires for the MAIN session, so a turn spent waiting on a sub-agent
-  // would otherwise freeze the running-agents list. One cheap dir scan + a few
-  // small file reads every 5s, content-compared inside updateWidget; .unref()
-  // so the timer never keeps the process alive. Display-only — no gate reads
-  // this state.
-  //
-  // The timer is owned by the CURRENT session instance: session_shutdown
-  // disarms it, session_start (and updateWidget, idempotently) re-arms it.
-  // A tick against a captured ctx from a replaced/reloaded session throws on
-  // `ctx.hasUI`; before this guard that uncaught exception killed pi right
-  // after every resume. The body is additionally crash-proofed: a stale ctx
-  // is dropped, never re-thrown.
-  let uiRefreshTimer: ReturnType<typeof setInterval> | undefined;
-  function armUiRefreshTimer(): void {
-    if (uiRefreshTimer) return;
-    uiRefreshTimer = setInterval(() => {
-      try {
-        if (lastUiCtx) updateWidget(lastUiCtx);
-      } catch {
-        // Display-only — a widget refresh must never take the process down.
-        // A stale ctx is dropped here and reinstalled by the next
-        // updateWidget with a fresh one.
-        lastUiCtx = undefined;
-      }
-    }, 5000);
-    uiRefreshTimer.unref();
-  }
-  function disarmUiRefreshTimer(): void {
-    if (uiRefreshTimer) {
-      clearInterval(uiRefreshTimer);
-      uiRefreshTimer = undefined;
-    }
-  }
+  // The 5s widget refresh (lib/status-strip.ts) — armed once the whole
+  // factory has run; session_shutdown disarms it, session_start re-arms it.
   armUiRefreshTimer();
 }
 
@@ -15088,282 +13707,4 @@ function contentText(content: unknown): string {
     }).join("\n");
   }
   return "";
-}
-
-interface PrecommitOutcome {
-  verdict: "PASS" | "FAIL" | "NO_CHECKS_RUN" | "ERROR";
-  checksRun: number;
-  checksFailed: number;
-  fingerprint: string;
-  error?: string;
-  /** Absolute path of the full run log, or "" when it could not be kept. */
-  logPath: string;
-  /** Names of the checks that failed, for pointing the agent at the log. */
-  failedSteps: string[];
-  /**
-   * How much of the runnable suite the run covered. Absent for ERROR: a run
-   * the extension could not trust reports no coverage claim either.
-   */
-  testScope?: TestScope;
-  /**
-   * Where the step commands came from: "project" (`.pi/review-gate.json`
-   * `precommit` section) or "default" (package.json / ecosystem detection).
-   * Diagnostics only — never part of the verdict. Absent for ERROR.
-   */
-  configSource?: "project" | "default";
-  /** Per-step timings for `.pi/gate-timings.jsonl` (diagnostics only). */
-  timings?: StepTiming[];
-  /** Runner-measured wall clock for the whole run. */
-  totalMs?: number;
-}
-
-/**
- * Resolve the runner path bundled alongside THIS extension (the installed
- * control-plane copy, not one named by the model at call time). We probe the
- * known install/dev layouts and require the file to exist.
- *
- * THREAT MODEL (see README): this is a control-plane component the extension
- * configures and launches; it does not accept a model-supplied command string,
- * and plain bash stdout can never grant a PASS. It does NOT defend against a
- * principal with write access to the current user's files (extension, runner,
- * hooks, or gate sidecar) — such a principal could tamper with any of them, so
- * a content hash here would add complexity without a real trust root. In
- * development the runner IS the editable repo copy, by design.
- */
-function resolveTrustedRunner(): string | null {
-  let here: string;
-  try { here = pathDirname(fileURLToPath(import.meta.url)); } catch { return null; }
-  const candidates = [
-    pathJoin(here, "scripts", "precommit-runner.mjs"),           // repo layout
-    pathJoin(here, "..", "scripts", "precommit-runner.mjs"),     // extensions/ sibling
-    pathJoin(here, "..", "..", "scripts", "pi-review-gate-precommit.mjs"), // global install
-  ];
-  for (const c of candidates) {
-    try { if (existsSync(c) && statSync(c).isFile()) return c; } catch { /* keep probing */ }
-  }
-  return null;
-}
-
-/**
- * Run the precommit runner and return a verified outcome. The extension — not
- * the model — spawns the runner with argv (never via a shell), hands it a
- * PRIVATE nonce + receipt path in an OS temp dir (never in the repo, never in a
- * tool parameter the model can see), then trusts ONLY a receipt the runner
- * atomically wrote that carries the exact nonce. This closes the stdout-forgery
- * class (a `## Overall: PASS` printed by any bash command). It is not a defense
- * against same-user tampering with the runner itself (see threat model above).
- *
- * Runs ASYNC (never spawnSync): a synchronous 20-minute spawn would block the
- * extension host's event loop, freezing the UI and making ESC/abort dead. The
- * runner is spawned detached in its own process group so an abort or timeout
- * kills the whole tree (runner + bash + npm test grandchildren).
- */
-function killProcessTree(child: ChildProcess): void {
-  try {
-    if (child.pid) process.kill(-child.pid, "SIGKILL"); // negative pid = process group
-    else child.kill("SIGKILL");
-  } catch {
-    try { child.kill("SIGKILL"); } catch { /* already gone */ }
-  }
-}
-
-interface SpawnOutcome {
-  status: number | null;
-  signal: NodeJS.Signals | null;
-  spawnError: boolean;
-  aborted: boolean;
-  timedOut: boolean;
-}
-
-/** Repo-root-relative run log. Under `.pi/` — gate-owned, see keepRunLog(). */
-const PRECOMMIT_LOG_RELPATH = ".pi/precommit-last.log";
-/** Only the last slice of a run log is kept: `npm test` can emit megabytes. */
-const PRECOMMIT_LOG_MAX_BYTES = 4 * 1024 * 1024;
-
-/**
- * Move the temp run log to `<repoRoot>/.pi/precommit-last.log`, tail-truncated.
- * Returns the kept path, or "" when nothing could be kept.
- *
- * `repoRoot` — NOT the run directory. `.pi/` is only gate-owned at the REPO
- * ROOT (GATE_EXCLUDE_PATHSPECS uses `:/.pi`), and the primary repo's precommit
- * may run in a subdirectory of it. A log written to `<root>/sub/.pi/` would be
- * an ordinary worktree file: every run would change the fingerprint and
- * invalidate the PASS it just produced.
- *
- * One file per repo, overwritten every run: "the last precommit" is the only
- * question this answers, and an accumulating log directory would be litter the
- * gate never cleans up. Two concurrent run_precommit calls on one repo are
- * therefore last-writer-wins, and a reader racing the copy can see a partial
- * file — acceptable for a diagnostics artifact that no decision depends on.
- */
-function keepRunLog(repoRoot: string, tmpLog: string): string {
-  const dest = pathJoin(repoRoot, PRECOMMIT_LOG_RELPATH);
-  try {
-    mkdirSync(pathDirname(dest), { recursive: true });
-    const size = statSync(tmpLog).size;
-    if (size <= PRECOMMIT_LOG_MAX_BYTES) {
-      copyFileSync(tmpLog, dest);
-      return dest;
-    }
-    // Tail-truncate: the interesting part of a failed run is its end.
-    const fd = openSync(tmpLog, "r");
-    try {
-      const buf = Buffer.allocUnsafe(PRECOMMIT_LOG_MAX_BYTES);
-      const read = readSync(fd, buf, 0, PRECOMMIT_LOG_MAX_BYTES, size - PRECOMMIT_LOG_MAX_BYTES);
-      writeFileSync(
-        dest,
-        `[pi-review-gate] log truncated — ${size} bytes produced, last ${read} kept\n` +
-          buf.subarray(0, read).toString("utf8"),
-      );
-    } finally {
-      try { closeSync(fd); } catch { /* best effort */ }
-    }
-    return dest;
-  } catch {
-    return "";
-  }
-}
-
-async function runTrustedPrecommit(
-  cwd: string,
-  repoRoot: string,
-  mode: "fast" | "full",
-  abortSignal?: AbortSignal,
-  /** Live-output sink: the tool's `onUpdate`, when the caller wants streaming. */
-  onUpdate?: (partial: { content: { type: "text"; text: string }[]; details: undefined }) => void,
-): Promise<PrecommitOutcome> {
-  // `logPath` is filled in as soon as the run log has been kept, so every
-  // failure path below still tells the agent where to look.
-  let logPath = "";
-  const fail = (error: string): PrecommitOutcome =>
-    ({ verdict: "ERROR", checksRun: 0, checksFailed: 0, fingerprint: "", error, logPath, failedSteps: [] });
-
-  const runner = resolveTrustedRunner();
-  if (!runner) return fail("trusted precommit runner not found");
-  if (abortSignal?.aborted) return fail("aborted before start");
-
-  let dir: string;
-  try { dir = mkdtempSync(pathJoin(tmpdir(), "rg-precommit-")); } catch { return fail("cannot create temp dir"); }
-  const receipt = pathJoin(dir, "receipt.json");
-  const tmpLog = pathJoin(dir, "output.log");
-  const nonce = randomBytes(24).toString("hex");
-
-  try {
-    const res = await new Promise<SpawnOutcome>((resolve) => {
-      let aborted = false;
-      let timedOut = false;
-      // Capture the runner's output into a FILE DESCRIPTOR, not a pipe. The
-      // runner is detached and long-lived; with a pipe, anything that stops
-      // draining it (an abort, a busy host) fills the 64KB buffer and blocks
-      // the runner's next write forever. A file has no backpressure. It used
-      // to be "ignore" outright, which is why a FAIL told the agent only
-      // "1/3 checks failed" and nothing about which one or why.
-      let logFd: number | undefined;
-      try { logFd = openSync(tmpLog, "a"); } catch { logFd = undefined; }
-      const child = spawn(
-        process.execPath,
-        [runner, "--mode", mode, "--cwd", cwd, "--receipt", receipt, "--nonce", nonce],
-        { cwd, shell: false, detached: true,
-          stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
-          // The nonce travels ONLY via the runner's argv (not env), so the
-          // runner's lint/test grandchildren never inherit it. A same-UID
-          // observer could still read the runner argv via ps — accepted: that
-          // principal is outside the threat model (see README).
-          env: { ...process.env } },
-      );
-      // Live output: TAIL the log the runner is writing (see lib/precommit-tail.ts
-      // for why this is a poll and not a pipe). The runner writes its plan
-      // preamble before the first check, so the agent sees what is about to run
-      // instead of a silent tool call for minutes.
-      const tail = onUpdate
-        ? tailLogFile(tmpLog, (text) => {
-            onUpdate({ content: [{ type: "text", text }], details: undefined });
-          })
-        : undefined;
-      const timer = setTimeout(() => { timedOut = true; killProcessTree(child); }, 20 * 60 * 1000);
-      const onAbort = () => { aborted = true; killProcessTree(child); };
-      abortSignal?.addEventListener("abort", onAbort, { once: true });
-      let settled = false;
-      const finish = (out: SpawnOutcome) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        // Stop BEFORE the log is kept: stop() does a final read, so the last
-        // lines a killed runner wrote between two ticks still reach the agent.
-        tail?.stop();
-        abortSignal?.removeEventListener("abort", onAbort);
-        // The child holds its own duplicate of this descriptor; closing ours
-        // once it is gone just releases our handle.
-        if (logFd !== undefined) { try { closeSync(logFd); } catch { /* already closed */ } }
-        resolve(out);
-      };
-      child.on("error", () => finish({ status: null, signal: null, spawnError: true, aborted, timedOut }));
-      child.on("close", (status, signal) => finish({ status, signal, spawnError: false, aborted, timedOut }));
-    });
-
-    // Keep the log BEFORE any early return: a timed-out or aborted run is
-    // exactly when the agent most needs to see how far the checks got.
-    logPath = keepRunLog(repoRoot, tmpLog);
-
-    if (res.aborted) return fail("aborted by user — precommit run cancelled, no verdict recorded as PASS");
-    if (res.timedOut) return fail("runner timed out after 20 minutes");
-
-    // Recompute the fingerprint AFTER the runner (lint:fix may have edited files).
-    // Round-8 P1: the binding is the WORKTREE TREE OID (the exact content the
-    // checkpoint will commit — equal to the reviewed tree at ship time),
-    // NOT the worktree digest: review.fingerprint already holds a tree OID,
-    // and comparing a digest against it would mismatch every single PASS.
-    // ONE materialization: the digest's own top-level tree pass is captured
-    // rather than run a second time (each pass is a full shadow-index build).
-    let tree = "";
-    const fp = computeFingerprint(cwd, {
-      treeOidForCwd: (dir) => {
-        const oid = worktreeTreeOid(dir);
-        if (dir === cwd) tree = oid;
-        return oid;
-      },
-    });
-    const fingerprint = fp.unavailable ? "" : tree;
-
-    // Read the receipt (trusted channel): regular file, size-bounded, parseable.
-    let parsed: unknown;
-    try {
-      const st = statSync(receipt);
-      if (!st.isFile() || st.size > 1024 * 1024) return fail("receipt missing or oversized");
-      parsed = JSON.parse(readFileSync(receipt, "utf8"));
-    } catch { return fail("no/unparseable receipt — runner did not complete"); }
-
-    // Full protocol validation (pure, unit-tested): every exit/verdict/count
-    // contradiction becomes ERROR, never a silent business verdict.
-    const v = validatePrecommitReceipt(parsed, {
-      nonce, cwd, mode,
-      exitStatus: res.status, signal: res.signal, spawnError: res.spawnError,
-    });
-    // Diagnostics only — read AFTER the verdict is decided, and never fed back
-    // into it (see failedStepNames' docstring). The timings travel with the
-    // outcome so the caller can append one observability record per run.
-    const failedSteps = failedStepNames(parsed);
-    const timings = stepTimings(parsed);
-    const totalMs = receiptTotalMs(parsed);
-    const cfg = (parsed as Record<string, unknown>).config as { source?: unknown } | undefined;
-    const configSource: "project" | "default" | undefined =
-      cfg && cfg.source === "project" ? "project" : "default";
-    if (v.verdict === "PASS") {
-      if (!fingerprint) return fail("worktree fingerprint unavailable post-run");
-      return {
-        verdict: "PASS", checksRun: v.checksRun, checksFailed: v.checksFailed,
-        testScope: v.testScope, configSource, fingerprint, logPath, failedSteps, timings, totalMs,
-      };
-    }
-    return {
-      verdict: v.verdict, checksRun: v.checksRun, checksFailed: v.checksFailed,
-      testScope: v.testScope, configSource, fingerprint, error: v.error, logPath, failedSteps, timings, totalMs,
-    };
-  } catch (e) {
-    return fail(`runner spawn failed: ${(e as Error).message}`);
-  } finally {
-    // Single-use: destroy the receipt dir no matter what. The log has already
-    // been copied out to the repo by then.
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-  }
 }

@@ -283,7 +283,7 @@ export interface DoctorDeps {
 }
 
 /** Candidate runner paths across the known install layouts (mirrors
- *  resolveTrustedRunner in the extension). */
+ *  resolveTrustedRunner in lib/precommit-runner.ts). */
 export function runnerCandidates(packageRoot: string): string[] {
   return [
     join(packageRoot, "scripts", "precommit-runner.mjs"), // repo layout
