@@ -210,6 +210,18 @@ export function nodeInboxIO(): InboxIO {
 }
 
 /**
+ * The shape a message id must have: ONE safe path segment.
+ *
+ * WHY IT IS ENFORCED AT PARSE TIME (quality round P1, 2026-09-25): the id is
+ * what {@link inboxPayloadPath} builds a path from, and the record it travels in
+ * comes off a file that anything on the machine may append to. Without this, a
+ * crafted `messageId` of `../../src/important` would build a path OUTSIDE the
+ * inbox, and the equality check that guards the side file would be checking the
+ * attacker's own arithmetic.
+ */
+export const MESSAGE_ID_PATTERN = /^(?!.*\.\.)[A-Za-z0-9._-]{1,64}$/;
+
+/**
  * Where a message's spilled body lives: `<inbox>.<messageId>.payload`.
  *
  * Derived from the inbox path, so the rule stays in one place — the sender
@@ -237,7 +249,9 @@ export function parseInboxRecord(line: string): SessionInboxRecord | undefined {
   const messageId = typeof value.messageId === "string" ? value.messageId.trim() : "";
   const from = typeof value.from === "string" ? value.from.trim() : "";
   const at = typeof value.at === "string" ? value.at.trim() : "";
-  if (!messageId || !from || !at) return undefined;
+  // AN ID THAT COULD BE A PATH IS NOT AN ID (see {@link MESSAGE_ID_PATTERN}).
+  // Rejected here, where the file is read, so no consumer has to remember.
+  if (!messageId || !MESSAGE_ID_PATTERN.test(messageId) || !from || !at) return undefined;
   const textRef = value.textRef as ChannelPayloadRef | undefined;
   const hasRef = !!textRef && typeof textRef.path === "string" && textRef.path.trim() !== "";
   const text = typeof value.text === "string" ? value.text : undefined;
@@ -530,6 +544,20 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
         log(`inbox 有一行读不出来，已跳过：${lines[index].slice(0, 120)}`);
         continue;
       }
+      // A SIDE FILE MAY ONLY BE THE ONE THIS INBOX OWNS (quality round P1,
+      // 2026-09-25). The record comes off a file anything on this machine can
+      // append to, and its `textRef.path` is used to READ (into the recipient's
+      // transcript) and to DELETE. Following it blindly is a crafted record
+      // that reads `~/.ssh/id_rsa` into a session or deletes a source file. So
+      // the path is never trusted — it is re-derived from THIS inbox and THIS
+      // message id (itself shape-checked at parse time) and must match exactly.
+      // Anything else is “no body”: reported, never followed.
+      const own = record.textRef !== undefined && record.textRef.path === inboxPayloadPath(inbox, record.messageId)
+        ? record.textRef
+        : undefined;
+      if (record.textRef !== undefined && own === undefined) {
+        log(`来自 @${record.from} 的消息带了一个不属于它的 side file（${record.textRef.path}），已忽略`);
+      }
       // NOT ADDRESSED TO ME (reviewer P1, 2026-09-25): the message names the
       // session that held this name when it was sent, and this session took the
       // name over afterwards. Reading it would hand a new holder somebody
@@ -539,12 +567,10 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
         log(`来自 @${record.from} 的消息是发给上一个持有这个名字的会话的（${record.toSessionId}），已丢弃`);
         // ITS SPILLED BODY GOES WITH IT (reviewer P2, 2026-09-25): the message is
         // dropped, and the side file held only a body nobody is going to read.
-        // Deleting by the record's OWN id is safe — it is inside the parked file
-        // this session alone holds, so no sender can still be writing it.
-        if (record.textRef !== undefined) io.remove(record.textRef.path);
+        if (own !== undefined) io.remove(own.path);
         continue;
       }
-      const text = record.text ?? resolvePayload(io, record.textRef);
+      const text = record.text ?? (own === undefined ? undefined : resolvePayload(io, own));
       if (text === undefined) {
         log(`来自 @${record.from} 的消息（${record.messageId}）正文读不出来（溢出文件丢失），已跳过`);
         continue;
@@ -561,7 +587,7 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
       // THE SPILLED BODY GOES WITH THE MESSAGE (quality round P2): a side file
       // exists only to keep the JSONL line short, and once the text is in the
       // recipient's hands it is dead weight in the registry directory.
-      if (record.textRef !== undefined) io.remove(record.textRef.path);
+      if (own !== undefined) io.remove(own.path);
     }
     if (index >= lines.length) {
       io.remove(taken);

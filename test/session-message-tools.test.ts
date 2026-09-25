@@ -305,6 +305,47 @@ test("a record with no toSessionId (written before the field existed) is still d
   assert.match(at.injected[0], /没有 toSessionId 的老记录/);
 });
 
+test("a record may not name its own side file — a forged path is neither read nor deleted", async () => {
+  // QUALITY ROUND P1, 2026-09-25: `textRef.path` comes off a file anything on
+  // the machine can append to, and it was used to READ (into the recipient's
+  // transcript) and to DELETE. A crafted record could therefore reach any file
+  // this process can — `~/.ssh/id_rsa` in, a source file out.
+  const files = new Map<string, string>();
+  files.set("/repo/src/important.ts", "export const secret = 1;\n");
+  const forged = {
+    kind: "session-message",
+    messageId: "msg-forged",
+    from: "attacker",
+    fromSessionId: "sess-x",
+    fromRepo: "/repo",
+    fromMode: "loop",
+    at: new Date(NOW).toISOString(),
+    textRef: { path: "/repo/src/important.ts", chars: 27 },
+  };
+  files.set(inbox(ME), `${JSON.stringify(forged)}\n`);
+
+  const at = makeLab({ files });
+  at.messaging.drain();
+  assert.equal(at.injected.length, 0, "a body that is not this inbox's own is not read");
+  assert.equal(files.has("/repo/src/important.ts"), true, "and it is certainly not deleted");
+});
+
+test("a messageId that could be a path is not an id — refused where the file is read", () => {
+  const evil = {
+    kind: "session-message",
+    messageId: "../../src/important",
+    from: "attacker",
+    at: new Date(NOW).toISOString(),
+    text: "hi",
+  };
+  assert.equal(
+    parseInboxRecord(JSON.stringify(evil)),
+    undefined,
+    "an id is ONE safe path segment — otherwise it builds a path outside the inbox",
+  );
+  assert.equal(parseInboxRecord(JSON.stringify({ ...evil, messageId: "msg-ok-1" }))?.messageId, "msg-ok-1");
+});
+
 // ---------------------------------------------------------------------------
 // Receiving
 // ---------------------------------------------------------------------------
