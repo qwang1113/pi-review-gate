@@ -621,18 +621,28 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       const id = `%${paneSeq++}`;
       const cwdAt = argv.indexOf("-c");
       const nameAt = argv.indexOf("-n");
-      const paneEnv: Record<string, string> = {};
-      for (let i = 0; i < argv.length - 1; i++) {
-        if (argv[i] === "-e") {
-          const [key, ...rest] = String(argv[i + 1]).split("=");
-          paneEnv[key!] = rest.join("=");
-        }
-      }
       // The format element is searched by CONTAINS: the window builders print
       // `#{window_id} #{pane_id}` in one argv element, the relay prints
       // `#{pane_id}` alone. The command starts after whichever one it was.
       const marker = argv.findIndex((arg) => arg.includes("#{pane_id}"));
-      const command = marker >= 0 ? argv.slice(marker + 1).map(String) : [];
+      const raw = marker >= 0 ? argv.slice(marker + 1).map(String) : [];
+      // THE CHILD'S ENVIRONMENT RIDES ITS OWN COMMAND (`env K=V … pi`), never
+      // tmux `-e` (2026-09-25): `new-session -e` writes the SESSION environment,
+      // and every window opened later in that session inherited it — a judge
+      // came up wearing the worker's identity and reported into the worker's
+      // channel. The fake reads the shape the builders really send.
+      const paneEnv: Record<string, string> = {};
+      let command = raw;
+      if (raw[0] === "env") {
+        let i = 1;
+        for (; i < raw.length; i++) {
+          const token = raw[i]!;
+          if (!token.includes("=")) break;
+          const [key, ...rest] = token.split("=");
+          paneEnv[key!] = rest.join("=");
+        }
+        command = raw.slice(i);
+      }
       panes.set(id, {
         id,
         command,
