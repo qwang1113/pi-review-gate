@@ -539,13 +539,14 @@ function registryStamp(paths: readonly string[]): string {
  * Merge models.json (hand-written) and models-store.json (provider cache).
  *
  * Cached by the two files' mtime+size: models-store.json is ~1MB and the
- * session start path used to parse it on every turn. The returned object is
- * SHARED between calls — treat it as read-only.
+ * session start path used to parse it on every turn. Every call gets its OWN
+ * copy: callers merge runtime models into it in place, and a shared object
+ * would carry those edits into every later registry.
  */
 export function loadRegistry(home = homedir()): ModelRegistry {
   const sources = [join(home, ".pi", "agent", "models.json"), join(home, ".pi", "agent", "models-store.json")];
   const key = registryStamp(sources);
-  if (registryCache?.key === key) return registryCache.registry;
+  if (registryCache?.key === key) return structuredClone(registryCache.registry);
   const registry: ModelRegistry = {};
   const ingest = (root: unknown) => {
     if (typeof root !== "object" || root === null) return;
@@ -589,7 +590,7 @@ export function loadRegistry(home = homedir()): ModelRegistry {
     }
   };
   for (const path of sources) ingest(readJsonIfExists(path));
-  registryCache = { key, registry };
+  registryCache = { key, registry: structuredClone(registry) };
   return registry;
 }
 

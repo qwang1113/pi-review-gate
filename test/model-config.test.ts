@@ -259,10 +259,14 @@ test("loadRegistry is cached by the sources' mtime+size: unchanged files are not
   const store = join(home, ".pi", "agent", "models-store.json");
   writeFileSync(store, JSON.stringify({ providers: { a: { models: [{ id: "m1" }] } } }), "utf8");
   const first = loadRegistry(home);
-  assert.equal(loadRegistry(home), first, "same stamps ⇒ the cached object");
+  // Callers merge runtime models in place; that must not leak into the cache.
+  first.a.push({ id: "runtime-only", thinkingLevelMap: undefined });
+  first.b = [];
+  const again = loadRegistry(home);
+  assert.deepEqual(again, { a: [{ id: "m1", reasoning: undefined, thinkingLevelMap: undefined }] },
+    "same stamps ⇒ the cached content, untouched by the previous caller's edits");
   writeFileSync(store, JSON.stringify({ providers: { a: { models: [{ id: "m1" }, { id: "m2" }] } } }), "utf8");
   const second = loadRegistry(home);
-  assert.notEqual(second, first);
   assert.deepEqual(second.a.map((m) => m.id), ["m1", "m2"]);
   rmSync(home, { recursive: true, force: true });
 });
