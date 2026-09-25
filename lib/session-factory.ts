@@ -408,6 +408,20 @@ export function closeSessionWindow(
 }
 
 /**
+ * Did this close failure mean “it is already gone” rather than “tmux refused”?
+ *
+ * ONE READING FOR EVERY CLOSE PATH (2026-09-25, quality round P2).
+ * `orchestrator_close` had this regex inline and `worker_close` had nothing at
+ * all, so the same fact was reported two different ways — and the worker path's
+ * version told a caller a window might still be on screen when it had simply
+ * been closed already, while leaving the coordinates in the registry forever.
+ * The distinction belongs beside the close it describes.
+ */
+export function windowAlreadyGone(error: string | undefined): boolean {
+  return /can't find window|no such window|no server running/i.test(error ?? "");
+}
+
+/**
  * Close ONE PANE — the RELAY path, and after 2026-09-25 the only one.
  *
  * The predecessor's own pane is not a session window: it is the rectangle in

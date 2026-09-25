@@ -62,6 +62,8 @@ function makeWorld(opts: {
   tmuxServer?: string;
   /** `closeWindow` refuses (tmux rejected the kill) — the window may still exist. */
   closeFails?: boolean;
+  /** `closeWindow` says the window is already gone (`can't find window`). */
+  closeGone?: boolean;
   /** Runs inside every fake `sleep` — how a test writes a mid-wait ack. */
   onSleep?: () => void;
 } = {}) {
@@ -89,7 +91,16 @@ function makeWorld(opts: {
       spec.register({ paneId: "%42", windowId: "@42", sessionName: "rg-repo-abcdef1234" });
       return { ok: true, paneId: "%42" };
     },
-    closeWindow: (coords) => { killed.push(coords.windowId); return opts.closeFails !== true; },
+    closeWindow: (coords) => {
+      killed.push(coords.windowId);
+      // TWO DIFFERENT FAILURES (2026-09-25, quality round P2): a refusal leaves
+      // the window possibly on screen, while "it is already gone" means the
+      // close DID happen (somebody else closed it, or a restart took the
+      // server). A fake that can only say one of them cannot drive both paths.
+      if (opts.closeGone === true) return { ok: false, error: "can't find window: @42" };
+      if (opts.closeFails === true) return { ok: false, error: "tmux 拒绝" };
+      return { ok: true };
+    },
     openerId: () => opts.openerId ?? "%1",
     paneOwner: () => "self",
     repoRoot: () => "/repo",
@@ -410,6 +421,25 @@ test("close frees the WINDOW, and the next submit RESUMES the same session", asy
       "both dispatches ran the SAME session id — the worker keeps its context");
   }
   assert.match(world2.text(resumed), /接着用/, "and the receipt says the context carried over");
+});
+
+test("a window that is ALREADY GONE counts as closed — only a refusal keeps the coordinates", async () => {
+  // 2026-09-25 (quality round P2): the two failures were one boolean, so a
+  // worker whose window had already been closed was reported as a FAILED close
+  // and kept its coordinates forever — the same reading `orchestrator_close`
+  // had already got right.
+  const world = makeWorld({ closeGone: true });
+  await world.call("worker_submit", { task: "第一次" });
+  const closed = await world.call("worker_close", { workerId: "worker-1" });
+  assert.equal(closed.isError, undefined, world.text(closed));
+  assert.equal((closed.details as { closed?: boolean })?.closed, true, "gone is closed, not failed");
+  assert.match(world.text(closed), /已经不在了/);
+  assert.equal(world.registry()["worker-1"]?.windowId, undefined, "the coordinates go — there is nothing left to address");
+  assert.equal(
+    world.registry()["worker-1"]?.sessionId,
+    workerSessionId("worker-1"),
+    "…while the conversation is kept, exactly as a refused close keeps it",
+  );
 });
 
 test("a close tmux REFUSED keeps the coordinates — the window may still be there, and a resume must not open a second one", async () => {

@@ -38,7 +38,7 @@ import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
  * lib/session-factory.ts.
  */
 export type OrchestratorSessionDeps = OrchestratorDeps;
-import { closeSessionWindow } from "./session-factory.ts";
+import { closeSessionWindow, windowAlreadyGone } from "./session-factory.ts";
 
 import {
   WORKTREE_SETTLEMENTS,
@@ -527,7 +527,7 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
   let killNote: string | undefined;
   if (child.windowId && child.tmuxSession) {
     const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
-    if (!killed.ok && !/can't find window|no such window|no server running/i.test(killed.error)) {
+    if (!killed.ok && !windowAlreadyGone(killed.error)) {
       return fail(`review-gate: 关闭 window 失败 —— ${killed.error}`);
     }
     if (!killed.ok) killNote = "（它的 window 已经不在了）";

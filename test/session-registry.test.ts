@@ -31,6 +31,7 @@ import {
   renewName,
   sessionEntryPath,
   sessionInboxPath,
+  sessionInboxTakenPath,
   sessionNameProblem,
   SESSION_STALE_MS,
   type RegistryDeps,
@@ -289,6 +290,40 @@ test("a release deletes only the release's own name, and a missing file is succe
   assert.deepEqual(releaseName(mine, "t2-registry", MINE), { ok: true, released: true });
   assert.equal(mine.io.files.has(sessionEntryPath(ROOT, "t2-registry")), false);
   assert.deepEqual(releaseName(mine, "t2-registry", MINE), { ok: true, released: false }, "idempotent");
+});
+
+test("a release takes the name's inbox with it — the address is gone, so is its mail", () => {
+  // 2026-09-25 (t3): a name's inbox belongs to that name. Releasing the name
+  // without the inbox would leave mail nobody can read — and hand it to whoever
+  // takes the same name next, which is somebody else's correspondence.
+  const files = new Map([
+    [sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry({ sessionId: MINE }))],
+    [sessionInboxPath(ROOT, "t2-registry"), '{"kind":"session-message"}\n'],
+    [sessionInboxTakenPath(ROOT, "t2-registry"), '{"kind":"session-message"}\n'],
+    [`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`, "一大段正文"],
+    // A DIFFERENT name's spilled body must survive both calls (the removal is by
+    // this name's prefix, not by "anything that looks like mail").
+    [`${sessionInboxPath(ROOT, "t9-pm")}.msg-2.payload`, "别人的正文"],
+  ]);
+  const d = deps({ files });
+  assert.deepEqual(releaseName(d, "t2-registry", MINE), { ok: true, released: true });
+  assert.equal(d.io.files.has(sessionInboxPath(ROOT, "t2-registry")), false, "the inbox goes with the name");
+  assert.equal(d.io.files.has(sessionInboxTakenPath(ROOT, "t2-registry")), false, "and so does the parked copy");
+  assert.equal(
+    d.io.files.has(`${sessionInboxPath(ROOT, "t2-registry")}.msg-1.payload`),
+    false,
+    "and so does the spilled body — a side file is not a second inbox",
+  );
+  assert.equal(d.io.files.has(`${sessionInboxPath(ROOT, "t9-pm")}.msg-2.payload`), true, "not somebody else's");
+
+  // A refused release is NOT a reason to destroy somebody else's mail.
+  const other = new Map([
+    [sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry({ sessionId: THEIRS }))],
+    [sessionInboxPath(ROOT, "t2-registry"), '{"kind":"session-message"}\n'],
+  ]);
+  const refused = deps({ files: other });
+  assert.equal(releaseName(refused, "t2-registry", MINE).ok, false);
+  assert.equal(refused.io.files.has(sessionInboxPath(ROOT, "t2-registry")), true, "not ours to delete");
 });
 
 test("an entry is found by the session that owns it — that is how a restart keeps its name", () => {

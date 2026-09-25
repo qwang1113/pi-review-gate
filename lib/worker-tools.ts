@@ -39,7 +39,7 @@ import { Type } from "typebox";
 import type { ToolHost } from "./tool-host.ts";
 import type { ToolReply } from "./tool-host.ts";
 import type { SessionPaneCoords, SessionPaneDecor, SessionPaneRole } from "./session-factory.ts";
-import { workerPaneDecor } from "./session-factory.ts";
+import { windowAlreadyGone, workerPaneDecor } from "./session-factory.ts";
 import type { ChannelIO, ChannelTarget, ChannelRecord, ChannelRequestRecord, ChannelReportRecord } from "./orchestrator-channel.ts";
 import { appendRecord, channelPathFor, newChannelId, readChannel, reportText, requestPayload } from "./orchestrator-channel.ts";
 import type { AgentsConfigMap } from "./model-config.ts";
@@ -79,13 +79,14 @@ export interface WorkerToolDeps {
     register: (coords: SessionPaneCoords) => void;
   }): Promise<{ ok: true; paneId: string } | { ok: false; error: string }>;
   /**
-   * Close a worker's WINDOW (2026-09-25). `ok: false` is tolerated (already
-   * gone ⇒ still closed).
+   * Close a worker's WINDOW (2026-09-25). The failure is REPORTED, not collapsed
+   * into `false`: "tmux refused" and "it is already gone" are different facts,
+   * and only one of them means the window may still be on screen.
    *
    * A window rather than a pane because that is what a worker is: a window of
    * its opener's own tmux session, addressed `<ownSession>:<@id>`.
    */
-  closeWindow(coords: { ownSession: string; windowId: string }): boolean;
+  closeWindow(coords: { ownSession: string; windowId: string }): { ok: boolean; error?: string };
   /** The opener id this session dispatches under (its own pane, normally). */
   openerId(): string;
   /**
@@ -885,19 +886,32 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
       { workerId, closed: false },
     );
   }
-  const killed = entry.windowId && entry.tmuxSession
+  const closed = entry.windowId && entry.tmuxSession
     ? deps.closeWindow({ ownSession: entry.tmuxSession, windowId: entry.windowId })
-    : false;
+    : undefined;
+  const killed = closed?.ok === true;
+  // “IT IS ALREADY GONE” IS NOT “TMUX REFUSED” (2026-09-25, quality round P2).
+  // This path used to read the seam's boolean, so a worker whose window had
+  // already been closed was reported as a FAILED close, kept its coordinates in
+  // the registry forever (making the next dispatch open a second window beside
+  // a ghost), and told the caller a window might still be on screen. The
+  // reading is now the same one `orchestrator_close` uses
+  // (lib/session-factory.ts `windowAlreadyGone`).
+  const gone = closed !== undefined && !closed.ok && windowAlreadyGone(closed.error);
   // WHAT THIS CALL ACTUALLY KNOWS, said honestly (2026-09-25, quality round
   // P2). "已不在（视为关闭）" was one sentence for two different facts: tmux
   // REFUSED the close (the window may well still be on screen, and a caller
   // told it was closed stops looking), or the entry carried no window
   // coordinates at all (an older row — this tool has nothing to close and
   // cannot tell whether it is still open). Neither is "closed", so neither
-  // claims it.
-  const closeNote = entry.windowId && entry.tmuxSession
-    ? (killed ? "已关闭" : "关闭失败（tmux 拒绝）—— 那个 window 可能还开着")
-    : "登记里没有 window 坐标（可能已经关过，也可能是旧版本留下的）—— 它是否还开着无法确认，请人工确认后清理";
+  // claims it — but an ALREADY GONE window is, and saying otherwise was the bug.
+  const closeNote = closed === undefined
+    ? "登记里没有 window 坐标（可能已经关过，也可能是旧版本留下的）—— 它是否还开着无法确认，请人工确认后清理"
+    : killed
+      ? "已关闭"
+      : gone
+        ? "它的 window 已经不在了（视为已关闭）"
+        : "关闭失败（tmux 拒绝）—— 那个 window 可能还开着";
   // THE ENTRY STAYS (reviewer P1, 2026-09-21). Closing a window releases
   // SCREEN SPACE, not the conversation: the channel owner, the session id and
   // the report cursor are exactly what a later `worker_submit` needs to resume
@@ -911,13 +925,13 @@ async function closeWorker(deps: WorkerToolDeps, params: Record<string, unknown>
   // was makes the next `worker_submit` open a SECOND window beside it — a
   // duplicate worker and a leaked pane. Keeping them is what lets the next
   // close retry and say the same true thing again.
-  if (killed) {
+  if (killed || gone) {
     const { paneId: _closedPane, windowId: _closedWindow, tmuxSession: _closedSession, ...kept } = entry;
     deps.saveRegistry(withWorker(registry, kept));
   }
   return reply(
     `review-gate: worker ${workerId} 的 window ${entry.windowId ?? entry.paneId} ${closeNote}。\n` +
     "它的 transcript 留在磁盘上：再用同一个 `workerId` 派活会接着同一会话（`" + entry.sessionId + "`）。",
-    { workerId, closed: killed, paneId: entry.paneId },
+    { workerId, closed: killed || gone, paneId: entry.paneId },
   );
 }

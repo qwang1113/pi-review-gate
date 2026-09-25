@@ -20,11 +20,14 @@ import { join } from "node:path";
 
 import {
   createSessionMessaging,
-  inboxTakenPath,
   nodeInboxIO,
   parseInboxRecord,
 } from "../lib/session-message-tools.ts";
-import { sessionInboxPath, type SessionRegistryEntry } from "../lib/session-registry.ts";
+import {
+  sessionInboxPath,
+  sessionInboxTakenPath,
+  type SessionRegistryEntry,
+} from "../lib/session-registry.ts";
 import { MAX_INLINE_RECORD_BYTES } from "../lib/orchestrator-channel.ts";
 
 const ME = "t3-lane";
@@ -93,7 +96,7 @@ test("a message written by one session is injected by the other, and the inbox i
     assert.match(receiver.injected[0], /来自 @t9-pm 的会话消息/);
     assert.ok(receiver.injected[0].includes("把 lib/foo.ts 的导出改名"));
     assert.equal(existsSync(inbox), false, "consumed: the inbox is taken away");
-    assert.equal(existsSync(inboxTakenPath(inbox)), false, "and so is the parked copy");
+    assert.equal(existsSync(sessionInboxTakenPath(root, ME)), false, "and so is the parked copy");
 
     // A second drain has nothing left to replay.
     receiver.messaging.drain();
@@ -156,7 +159,7 @@ test("an injection that fails leaves the message on disk for the next tick", asy
     });
     failing.messaging.drain();
     assert.equal(calls, 1);
-    const parked = inboxTakenPath(inbox);
+    const parked = sessionInboxTakenPath(root, ME);
     assert.ok(existsSync(parked), "the failed message is parked, not lost");
     const lines = readFileSync(parked, "utf8").split("\n").filter((line) => line.trim() !== "");
     assert.equal(lines.length, 2, "it and the one behind it stay");

@@ -107,6 +107,41 @@ export function sessionInboxPath(root: string, name: string): string {
 }
 
 /**
+ * Where a name's inbox sits WHILE IT IS BEING CONSUMED: `<inbox>.taken`.
+ *
+ * Here, beside the inbox itself, because it is the same path rule rather than
+ * t3's private convention: whoever removes a name's inbox has to remove this
+ * with it, and there are two such places (the release below, and the orphan
+ * sweep). t3 only PARK the file under this name — how a message is consumed is
+ * lib/session-message-tools.ts's business.
+ */
+export function sessionInboxTakenPath(root: string, name: string): string {
+  return `${sessionInboxPath(root, name)}.taken`;
+}
+
+/**
+ * Remove everything a name owns BESIDES its registration: the inbox, the parked
+ * copy, and the side files a spilled body lives in.
+ *
+ * ONE PLACE, because there are two moments that owe it — the release below, and
+ * the orphan sweep in its own module — and because "what belongs to a name" is
+ * this module's question to answer. The inbox files are found by PREFIX rather
+ * than by name, which is what covers the spilled `<inbox>.<messageId>.payload`
+ * files that no caller could enumerate (the id is the sender's). Returns whether
+ * the inbox itself was there; a leftover that could not be removed is reported
+ * by the caller's own log/report, never silently assumed gone.
+ */
+export function removeNameMail(deps: Pick<RegistryDeps, "root" | "io">, name: string): boolean {
+  const inbox = sessionInboxPath(deps.root, name);
+  const removed = deps.io.remove(inbox);
+  const prefix = `${name}.inbox.jsonl.`;
+  for (const file of deps.io.listFiles() ?? []) {
+    if (file.startsWith(prefix)) deps.io.remove(join(deps.root, file));
+  }
+  return removed;
+}
+
+/**
  * Kebab-case, 2–32 characters: lowercase letters, digits and single dashes,
  * starting and ending with a letter or a digit. `undefined` means legal.
  */
@@ -525,6 +560,15 @@ export function releaseName(
     return { ok: false, released: false, error: `名字 ${name} 已不归本会话（${existing.sessionId}），拒绝删除` };
   }
   if (!deps.io.remove(path)) return { ok: false, released: false, error: `名字 ${name} 的登记删除失败（${path}）` };
+  // THE ADDRESS GOES WITH THE NAME (2026-09-25, t3). A name's inbox is that
+  // name's mail, and this session just gave the name up: nobody holds the
+  // address any more, so nobody will ever read what is in it — the sender-side
+  // rule is "the recipient has to be alive", and leaving the file behind is how
+  // a LATER holder of the same name would be handed somebody else's mail (or,
+  // with nobody taking the name again, how an unreadable orphan accumulates in
+  // the registry directory forever). The parked copy and any spilled body go
+  // with it: they are the same inbox.
+  removeNameMail(deps, name);
   return { ok: true, released: true };
 }
 

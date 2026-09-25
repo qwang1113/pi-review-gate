@@ -17,13 +17,16 @@ import assert from "node:assert/strict";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import {
   createSessionMessaging,
-  inboxTakenPath,
   normalizeRecipient,
   parseInboxRecord,
   type InboxIO,
   type SessionInboxRecord,
 } from "../lib/session-message-tools.ts";
-import { sessionInboxPath, type SessionRegistryEntry } from "../lib/session-registry.ts";
+import {
+  sessionInboxPath,
+  sessionInboxTakenPath,
+  type SessionRegistryEntry,
+} from "../lib/session-registry.ts";
 import { MAX_INLINE_RECORD_BYTES } from "../lib/orchestrator-channel.ts";
 
 const ROOT = "/home/agent/.pi/agent/rg-sessions";
@@ -47,7 +50,6 @@ function fakeIO(files: Map<string, string> = new Map()): InboxIO {
       return true;
     },
     remove: (path) => (files.delete(path), true),
-    now: () => NOW,
   };
 }
 
@@ -116,6 +118,7 @@ function textOf(reply: ToolReply): string {
 }
 
 const inbox = (name: string) => sessionInboxPath(ROOT, name);
+const taken = (name: string) => sessionInboxTakenPath(ROOT, name);
 
 /** Put a message into @t3-lane's inbox the way a real sender would — through the tool. */
 async function seedMessage(files: Map<string, string>, text: string, from = "seeder"): Promise<void> {
@@ -223,6 +226,21 @@ test("a long body spills to a side file and the appended line stays under the by
   assert.equal(at.files.get(stored.textRef?.path ?? ""), body);
 });
 
+test("a spilled body is removed once it has been injected — the side file is not a second inbox", async () => {
+  const files = new Map<string, string>();
+  const sender = makeLab({ files, ownName: "seeder", live: [entry(ME)] });
+  const body = "改".repeat(2000);
+  await sender.tool.execute("1", { to: ME, text: body });
+  const record = parseInboxRecord((files.get(inbox(ME)) ?? "").trim());
+  const side = record?.textRef?.path ?? "";
+  assert.equal(files.get(side), body, "the body really is in a side file first");
+
+  const receiver = makeLab({ files });
+  receiver.messaging.drain();
+  assert.equal(receiver.injected.length, 1);
+  assert.equal(files.has(side), false, "once injected, the side file is dead weight");
+});
+
 // ---------------------------------------------------------------------------
 // Receiving
 // ---------------------------------------------------------------------------
@@ -238,7 +256,7 @@ test("drain injects what is waiting, then takes it away — and never replays it
   assert.match(at.injected[0], /^\[来自 @seeder 的会话消息 · 2026-09-25T10:00:00.000Z\]\n第一条\n/);
   assert.match(at.injected[0], /send_message\(\{to:"@seeder"/);
   assert.equal(files.get(inbox(ME)), undefined);
-  assert.equal(files.get(inboxTakenPath(inbox(ME))), undefined);
+  assert.equal(files.get(taken(ME)), undefined);
 
   at.messaging.drain();
   assert.equal(at.injected.length, 2, "a second drain must not re-inject");
@@ -260,14 +278,14 @@ test("an injection that fails keeps the message for the next tick, without repla
   });
   at.messaging.drain();
   assert.equal(calls, 2, "the round stops at the message that could not be injected");
-  const parked = files.get(inboxTakenPath(inbox(ME))) ?? "";
+  const parked = files.get(taken(ME)) ?? "";
   assert.equal((parked.trim().split("\n").length), 2, "the failed message and the one behind it stay parked");
   assert.match(parked, /第二条/);
   assert.match(parked, /第三条/);
 
   at.messaging.drain();
   assert.equal(calls, 4, "the retry injects exactly the two that were left");
-  assert.equal(files.get(inboxTakenPath(inbox(ME))), undefined);
+  assert.equal(files.get(taken(ME)), undefined);
 });
 
 test("a malformed line is skipped and never blocks the messages behind it", async () => {
@@ -280,7 +298,7 @@ test("a malformed line is skipped and never blocks the messages behind it", asyn
   assert.equal(at.injected.length, 1);
   assert.match(at.injected[0], /好的那条/);
   assert.equal(files.get(inbox(ME)), undefined);
-  assert.equal(files.get(inboxTakenPath(inbox(ME))), undefined);
+  assert.equal(files.get(taken(ME)), undefined);
 });
 
 test("drain does nothing without a name, or with an empty inbox", async () => {
@@ -310,13 +328,13 @@ test("a parked inbox left by a previous tick is finished before a fresh one is t
     at: new Date(NOW).toISOString(),
     text: "上次没投出去的",
   };
-  files.set(inboxTakenPath(inbox(ME)), `${JSON.stringify(record)}\n`);
+  files.set(taken(ME), `${JSON.stringify(record)}\n`);
 
   const at = makeLab({ files });
   at.messaging.drain();
   assert.equal(at.injected.length, 1);
   assert.match(at.injected[0], /上次没投出去的/);
-  assert.equal(files.get(inboxTakenPath(inbox(ME))), undefined, "the parked copy is gone");
+  assert.equal(files.get(taken(ME)), undefined, "the parked copy is gone");
   assert.ok((files.get(inbox(ME)) ?? "").includes("新到的"), "the fresh inbox is untouched");
 
   at.messaging.drain();

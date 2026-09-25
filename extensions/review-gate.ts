@@ -3080,12 +3080,34 @@ export default function reviewGate(pi: ExtensionAPI) {
   // opened until `session_handoff()` is called, because only the session
   // itself knows the work is at a stopping point.
 
-  /** Which of the four kinds of session is running here. */
-  function handoffKind(): HandoffSessionKind {
+  /**
+   * WHAT KIND OF SESSION THIS IS — the ONE reading of that fact (2026-09-25).
+   *
+   * THREE callers branch on it: the registry entry (t2, `mode`), the message
+   * sender's self-description (t3), and the handover below. They used to read it
+   * in two places with two shapes, which is how two answers to one question
+   * drift apart — a worker pane was the fact they had already started to
+   * disagree about.
+   */
+  function ownSessionKind(): string {
     if (readJudgeSideEnv(process.env)) return "judge";
+    if (readWorkerSideEnv(process.env)) return "worker";
     if (state.taskMode === "orchestrator") return "orchestrator";
     if ((process.env[STATE_VARIANT_ENV] ?? "").trim()) return "child";
-    return "loop";
+    return state.taskMode ?? "loop";
+  }
+
+  /**
+   * Which of the FOUR kinds of session is running here, for the handover.
+   *
+   * A worker pane is not one of them — it is handed work by its opener and never
+   * hands over — so it reads as the ordinary loop, exactly as the separate
+   * reading it replaced did. Nothing else is invented: `normal` / `explore` are
+   * loop sessions too, and the handover document says so.
+   */
+  function handoffKind(): HandoffSessionKind {
+    const kind = ownSessionKind();
+    return kind === "orchestrator" || kind === "child" || kind === "judge" ? kind : "loop";
   }
 
   /** This session's transcript — the raw record a successor may dig through. */
@@ -3910,20 +3932,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     });
 
   /**
-   * WHAT KIND OF SESSION THIS IS — the same sources handoffKind() reads, plus
-   * the worker pane (which is a reporting shell of its own kind). Shared by the
-   * registry entry (t2) and the message sender's self-description (t3): one
-   * answer, so a registration and a receipt can never disagree about it.
-   */
-  function ownSessionMode(): string {
-    if (readJudgeSideEnv(process.env)) return "judge";
-    if (readWorkerSideEnv(process.env)) return "worker";
-    if (state.taskMode === "orchestrator") return "orchestrator";
-    if ((process.env[STATE_VARIANT_ENV] ?? "").trim()) return "child";
-    return state.taskMode ?? "loop";
-  }
-
-  /**
    * THE SESSION'S OWN NAME (2026-09-25, t2) — the tool, the registry, the
    * heartbeat and the sweep, built once and wired at the moments below.
    *
@@ -3940,7 +3948,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     repoRoot: () => primaryRepoRoot,
     cwd: () => cwd,
-    mode: () => ownSessionMode(),
+    mode: () => ownSessionKind(),
     // A COARSE READING IS ENOUGH FOR THE REGISTRY: the question it answers is
     // "is anybody there", and the heartbeat is what proves that.
     state: () => (latestCtx?.isIdle?.() ? "idle" : "working"),
@@ -3983,7 +3991,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       name: sessionNaming.currentName(),
       sessionId: state.sessionId ?? "",
       repo: primaryRepoRoot,
-      mode: ownSessionMode(),
+      mode: ownSessionKind(),
     }),
     // THE INJECTION IS A STEER: the recipient finishes the tool call it is in
     // the middle of and then reads this — it never aborts somebody's turn.
@@ -10528,10 +10536,13 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         try {
           // The factory's own close: `kill-window -t <session>:<@id>`, so a
           // stale id can only reach a window of this session's own tmux
-          // session.
-          return closeSessionWindow(runTmux, coords).ok;
-        } catch {
-          return false;
+          // session. The ERROR travels with the failure (2026-09-25, quality
+          // round P2): `worker_close` has to tell “it is already gone” from
+          // “tmux refused”, and a boolean cannot carry that.
+          const closed = closeSessionWindow(runTmux, coords);
+          return closed.ok ? { ok: true } : { ok: false, error: closed.error };
+        } catch (error) {
+          return { ok: false, error: (error as Error).message };
         }
       },
       // STABLE OPENER IDENTITY, not the pane (reviewer P1, 2026-09-21):

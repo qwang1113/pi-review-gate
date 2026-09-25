@@ -53,7 +53,18 @@
  * inbox is MOVED ASIDE first (`<inbox>.taken`, one `rename(2)`, atomic), and
  * read from there: a concurrent append either lands in the file before the
  * rename (so it is in the taken copy) or creates a fresh inbox afterwards (so
- * it is read next tick). Nothing is ever both read and deleted.
+ * it is read next tick). A message is never both read and deleted.
+ *
+ * ONE WINDOW, RECORDED RATHER THAN HIDDEN (quality round P2, 2026-09-25).
+ * `appendFileSync` is open→write→close: three system calls, not one atomic one.
+ * A sender that opens the OLD inode before the rename and is preempted until
+ * after the parked copy has been read writes into the parked file, and the
+ * removal that follows takes that line with it. Closing the window would mean
+ * re-checking the inode after every append (`fstat` against `stat`, retry on
+ * mismatch) — a real cost on the one path that is supposed to be a single
+ * write, for a race that needs a microsecond-scale preemption to happen at all.
+ * The trade is taken deliberately: the window is this narrow, and this is where
+ * it is written down.
  *
  * WHAT A FAILED INJECTION DOES. A round stops at the first message that could
  * not be injected, and the messages it had not reached yet — that one included
@@ -81,6 +92,7 @@ import {
 import {
   heartbeatAgeMs,
   sessionInboxPath,
+  sessionInboxTakenPath,
   sessionNameProblem,
   sessionRegistryRoot,
   type SessionRegistryEntry,
@@ -136,7 +148,6 @@ export interface InboxIO {
   /** `rename(2)`: false when the source is gone. */
   rename(from: string, to: string): boolean;
   remove(path: string): boolean;
-  now(): number;
 }
 
 /** The real file system. */
@@ -160,20 +171,7 @@ export function nodeInboxIO(): InboxIO {
     remove(path) {
       try { rmSync(path, { force: true }); return true; } catch { return false; }
     },
-    now: () => Date.now(),
   };
-}
-
-/**
- * Where a pending inbox is parked while it is being consumed.
- *
- * DERIVED FROM THE INBOX PATH, never a second path rule: the registry defines
- * where a name's inbox is ({@link sessionInboxPath}) and this only says which
- * name the same file gets while it is in flight. The orphan sweep uses the same
- * derivation, so a dead session's leftovers are reclaimed together.
- */
-export function inboxTakenPath(inboxPath: string): string {
-  return `${inboxPath}.taken`;
 }
 
 /** `@名字` and `名字` are the same address — the prefix is courtesy, not syntax. */
@@ -333,21 +331,25 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
   function deliver(target: SessionRegistryEntry, sender: SessionMessageSelf, text: string): ToolReply {
     const inbox = sessionInboxPath(root, target.name);
     const at = new Date(now()).toISOString();
-    const record = withSpill(
-      {
-        kind: SESSION_MESSAGE_KIND,
-        messageId: newChannelId("msg", now()),
-        from: sender.name ?? "",
-        fromSessionId: sender.sessionId,
-        fromRepo: sender.repo,
-        fromMode: sender.mode,
-        at,
-        text,
-      },
-      inbox,
-    );
+    let record: SessionInboxRecord;
     try {
       io.ensureDir(dirname(inbox));
+      // SPILLING IS INSIDE THE GUARD TOO (quality round P2): writing the side
+      // file can fail for the same reasons the append can (a full or read-only
+      // disk), and this function promises a receipt rather than a throw.
+      record = withSpill(
+        {
+          kind: SESSION_MESSAGE_KIND,
+          messageId: newChannelId("msg", now()),
+          from: sender.name ?? "",
+          fromSessionId: sender.sessionId,
+          fromRepo: sender.repo,
+          fromMode: sender.mode,
+          at,
+          text,
+        },
+        inbox,
+      );
       io.appendLine(inbox, `${JSON.stringify(record)}\n`);
     } catch (error) {
       return fail(
@@ -437,7 +439,7 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
     const name = deps.self().name?.trim();
     if (name === undefined || name === "") return;
     const inbox = sessionInboxPath(root, name);
-    const taken = inboxTakenPath(inbox);
+    const taken = sessionInboxTakenPath(root, name);
     // A parked copy from a previous tick is finished FIRST, and the live inbox
     // is not touched until it is gone: parking over it would overwrite the very
     // messages the last tick failed to inject.
@@ -472,6 +474,10 @@ export function createSessionMessaging(deps: SessionMessagingDeps): SessionMessa
         );
         break;
       }
+      // THE SPILLED BODY GOES WITH THE MESSAGE (quality round P2): a side file
+      // exists only to keep the JSONL line short, and once the text is in the
+      // recipient's hands it is dead weight in the registry directory.
+      if (record.textRef !== undefined) io.remove(record.textRef.path);
     }
     if (index >= lines.length) {
       io.remove(taken);

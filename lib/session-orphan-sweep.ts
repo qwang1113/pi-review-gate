@@ -32,11 +32,11 @@
  *      registration somebody re-created in the meantime: its session id differs
  *      from the one we classified, so it is put straight back instead of
  *      deleted;
- *   4. remove that name's inbox file (`<名字>.inbox.jsonl`, the convention
- *      lib/session-registry.ts defines for t3's `@名字` messages) together with
- *      the parked copy a half-consumed one leaves behind (`<inbox>.taken`,
- *      derived by lib/session-message-tools.ts — a message nobody will read
- *      belongs to the dead session like everything else it left).
+ *   4. remove everything else that name owned: its inbox (`<名字>.inbox.jsonl`,
+ *      the convention lib/session-registry.ts defines for t3's `@名字`
+ *      messages), the parked copy a half-consumed one leaves behind, and any
+ *      spilled body. `removeNameMail` is that one place — a message nobody will
+ *      read belongs to the dead session like everything else it left.
  *
  * A scope session that is ALREADY GONE is neither an error nor a reason to keep
  * the registration: step 2 says so through the server's own name list, and the
@@ -61,11 +61,10 @@ import {
   classifyEntry,
   listEntries,
   parseEntryText,
+  removeNameMail,
   sessionEntryPath,
-  sessionInboxPath,
   type RegistryDeps,
 } from "./session-registry.ts";
-import { inboxTakenPath } from "./session-message-tools.ts";
 
 /** What the orphan sweep did, per name — reported, never silently swallowed. */
 export interface SweepReport {
@@ -165,11 +164,9 @@ export function sweepOrphans(deps: RegistryDeps, self?: { sessionId?: string; na
       report.kept.push({ name: entry.name, reason: "登记已被另一个回收者处理" });
       continue;
     }
-    const inbox = sessionInboxPath(deps.root, entry.name);
-    const inboxRemoved = deps.io.remove(inbox);
-    // The parked copy goes with it (t3): a `.taken` file is the inbox
-    // mid-consumption, and the session that owned it is gone.
-    deps.io.remove(inboxTakenPath(inbox));
+    // The inbox, the parked copy a half-consumed one leaves behind, and any
+    // spilled body (t3): all of it belongs to the name this dead session held.
+    const inboxRemoved = removeNameMail(deps, entry.name);
     report.reaped.push({ name: entry.name, sessionId: entry.sessionId, sessionKilled, inboxRemoved });
   }
   return report;
