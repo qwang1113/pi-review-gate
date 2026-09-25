@@ -91,6 +91,13 @@ export interface SessionNamingDeps {
   sessionId(): string | undefined;
   /** THIS session's own tmux pane (`$TMUX_PANE`), when it runs inside tmux. */
   ownPane(): string | undefined;
+  /**
+   * The tmux SERVER this process talks to (`<socket>,<server pid>` from
+   * `$TMUX`), recorded with the coordinates so a stale registration's pane id
+   * is never read against a DIFFERENT server (t4 review P1). Undefined when
+   * outside tmux or unreadable — both leave the pane comparison as it was.
+   */
+  tmuxServer?(): string | undefined;
   /** Primary repo root (what a human reads as "which project"). */
   repoRoot(): string;
   /** Working directory. */
@@ -139,6 +146,7 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
     runTmux: (argv: readonly string[], ownSessions?: readonly string[]) => deps.runTmux(argv, ownSessions),
     alive,
     now,
+    ...(deps.tmuxServer === undefined ? {} : { currentServer: deps.tmuxServer }),
   };
   let held: HeldName | undefined;
 
@@ -160,6 +168,10 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
     const coords = readOwn();
     const pane = deps.ownPane();
     const scopeSession = deps.scopeSession();
+    // THE SERVER RIDES WITH THE COORDINATES: a pane id is only an id within one
+    // tmux server, so a stamp without this half would be read against whatever
+    // server happens to be running later (t4 review P1).
+    const server = deps.tmuxServer?.();
     return {
       schema: 1,
       name,
@@ -171,7 +183,7 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
       state: deps.state(),
       ...(coords === undefined || pane === undefined
         ? {}
-        : { tmux: { session: coords.session, window: coords.window, pane } }),
+        : { tmux: { session: coords.session, window: coords.window, pane, ...(server === undefined ? {} : { server }) } }),
       ...(scopeSession === undefined ? {} : { scopeSession }),
       registeredAt,
       heartbeatAt: new Date(now()).toISOString(),

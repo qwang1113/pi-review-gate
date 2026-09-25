@@ -230,6 +230,7 @@ import {
 import {
   addressableSessions,
   closeOwnSession,
+  createOwnershipProbe,
   sanitizeScopeRecord,
   type TmuxScope,
 } from "../lib/session-tmux-scope.ts";
@@ -3877,13 +3878,38 @@ export default function reviewGate(pi: ExtensionAPI) {
       const registry = parseWorkerRegistry(
         JSON.parse(readFileSync(pathJoin(activeRepoRoot.current, WORKER_REGISTRY_RELPATH), "utf8")),
       );
-      return Object.values(registry).map((entry) => entry.tmuxSession);
+      // ONLY THE ROWS OF THIS SESSION'S LINE (2026-09-25, t4 whole-branch
+      // review P1). This file is per REPO, not per session, so a second gate
+      // session working here keeps ITS workers in it too — and every one of
+      // those names would widen OUR executor declaration: another session's
+      // session is still somebody else's, and its marker is a real one, so the
+      // ownership probe below has nothing to refuse. `ownJudges()` does this
+      // job for the judge table; this is the worker half of the same rule.
+      //
+      // BOTH ID FLAVOURS ARE THE LINE: a judge row records `callerIdentity()`
+      // (the ORCHESTRATION id in project-manager mode), a worker row records
+      // the plain `sessionId` (worker-tools.ts `openerId`). A filter that knew
+      // only one of them would drop the project manager's own workers.
+      const line = new Set<string>(callerIdentities());
+      const own = state.sessionId?.trim();
+      if (own) line.add(own);
+      return Object.values(registry)
+        .filter((entry) => line.has(entry.openerId))
+        .map((entry) => entry.tmuxSession);
     } catch {
       // No registry yet, or an unreadable one: both mean "nothing recorded",
       // which only ever narrows the list.
       return [];
     }
   };
+
+  /**
+   * THE OWNERSHIP PROBE — the marker read that turns a name some registry
+   * mentions into a session this process may actually DECLARE (2026-09-25, t4
+   * whole-branch review P1). It rides the raw runner rather than the wrapper
+   * below, so the probe cannot recurse into the declaration it is building.
+   */
+  const sessionOwnership = createOwnershipProbe(tmuxScope, (argv) => rawTmux(argv));
 
   /**
    * THE RUNNER, and the only one this file uses (2026-09-25).
@@ -3916,19 +3942,24 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   const runTmux = (argv: readonly string[], env?: NodeJS.ProcessEnv, extraSessions?: readonly string[]) =>
     rawTmux(argv, env ?? process.env, {
-      ownSessions: addressableSessions(tmuxScope, [
-        ...ownJudges().map((entry) => entry.tmuxSession),
-        ...(state.orchestrator?.children ?? []).map((child) => child.tmuxSession),
-        ...workerRegistrySessions(),
+      ownSessions: addressableSessions(
+        tmuxScope,
+        [
+          ...ownJudges().map((entry) => entry.tmuxSession),
+          ...(state.orchestrator?.children ?? []).map((child) => child.tmuxSession),
+          ...workerRegistrySessions(),
+        ],
+        sessionOwnership,
         // SESSIONS THIS CALL PROVED ARE GATE SESSIONS ANYWAY (2026-09-25, t2).
         // The orphan sweep kills the dedicated session of a session that is
         // GONE — nobody alive can declare that name, so it arrives here already
         // marker-verified (lib/session-registry.ts reads `@rg_scope_owner` and
         // compares it with the dead entry's session id before building the
-        // kill). Shape-checked again by `addressableSessions`, so only names
-        // this gate could have derived are ever accepted.
-        ...(extraSessions ?? []),
-      ]),
+        // kill). It passes as PROVEN rather than as a candidate: a sweep's
+        // target belongs to a dead session, so no marker of OURS vouches for it
+        // and the probe would refuse it (t4 review P1).
+        extraSessions,
+      ),
     });
 
   /**
@@ -3946,6 +3977,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     runTmux: (argv, ownSessions) => runTmux(argv, undefined, ownSessions),
     sessionId: () => state.sessionId?.trim() || undefined,
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
+    // THE SERVER HALF OF THE COORDINATES (t4 review P1): recorded so a later
+    // reader never compares a pane id against a different tmux server's ids.
+    tmuxServer: () => tmuxServerFrom(process.env),
     repoRoot: () => primaryRepoRoot,
     cwd: () => cwd,
     mode: () => ownSessionKind(),

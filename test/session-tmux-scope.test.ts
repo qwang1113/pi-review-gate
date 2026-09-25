@@ -24,6 +24,7 @@ import {
 import {
   addressableSessions,
   closeOwnSession,
+  createOwnershipProbe,
   deriveSessionName,
   openScopeWindow,
   sanitizeScopeRecord,
@@ -50,8 +51,12 @@ const SUCCESSOR_NAME = deriveSessionName("/repo", SUCCESSOR_ID)!;
  */
 test("a successor may close a window in the session its predecessor's rows name", () => {
   const scope = fakeScope(SUCCESSOR_ID);
+  // The predecessor's session IS on the server, marked with the id its own name
+  // derives from — the fact the ownership probe reads (t4 review P1).
+  const server = fakeServer({ existing: { name: NAME, owner: SESSION_ID } });
+  const probe = createOwnershipProbe(scope, server.run);
   const guard = {
-    ownSessions: addressableSessions(scope, [NAME]),
+    ownSessions: addressableSessions(scope, [NAME], probe),
   };
   assert.deepEqual(guard.ownSessions, [SUCCESSOR_NAME, NAME], "mine plus the one my rows name");
   assert.doesNotThrow(() => assertSafeTmuxArgv(buildKillWindowArgv(NAME, "@7"), guard),
@@ -64,7 +69,7 @@ test("a successor may close a window in the session its predecessor's rows name"
   // And with NO such row, the predecessor's session is out of reach too: the
   // wider list is the registries' doing, not a blanket permission.
   assert.throws(
-    () => assertSafeTmuxArgv(buildKillWindowArgv(NAME, "@7"), { ownSessions: addressableSessions(scope, []) }),
+    () => assertSafeTmuxArgv(buildKillWindowArgv(NAME, "@7"), { ownSessions: addressableSessions(scope, [], probe) }),
     UnsafeTmuxCommand,
   );
 });
@@ -175,22 +180,55 @@ test("a persisted record is trusted only when it is complete", () => {
   }
 });
 
-test("the addressable set is MINE plus the sessions I hold coordinates for", () => {
+test("the addressable set is MINE plus every session a MARKER proves", () => {
   // "Mine" is not one name (2026-09-25, quality round P1): a relay successor
   // owns the previous seat's judges, whose windows live in the PREDECESSOR's
   // session — a declaration of one name made every one of those closes
   // impossible, and those windows are exactly what a successor is for.
+  //
+  // AND A RECORD IS NOT PROOF (2026-09-25, t4 whole-branch review P1). The
+  // first version kept every held name that LOOKED like one of ours, so a
+  // tampered registry widened the executor's declaration and a `kill-window`
+  // could be aimed at another session. A candidate now has to be vouched for by
+  // the session itself: its `@rg_scope_owner` marker must name the id its own
+  // name derives from.
   const scope = fakeScope();
-  const other = "rg-other-repo-abcdef1234";
-  assert.deepEqual(addressableSessions(scope, []), [NAME], "just my own, when I hold nothing else");
-  assert.deepEqual(addressableSessions(scope, [other]), [NAME, other], "…plus every session a row names");
-  // Deduplicated, and an id-less session contributes nothing.
-  assert.deepEqual(addressableSessions(scope, [NAME, other, NAME]), [NAME, other]);
-  // THE LIST CANNOT WIDEN THROUGH A REGISTRY: a row whose session name is not
-  // something the gate could have derived (a hand-edited file, a user's own
-  // session name) is dropped — the user's sessions are as unreachable through a
-  // record as through a parameter.
-  assert.deepEqual(addressableSessions(scope, ["my-work", "lab", "", undefined]), [NAME]);
+  const otherId = "019fbb1d-9e78-7ebf-88bf-00000000ffee";
+  const other = deriveSessionName("/repo", otherId)!;
+  const server = fakeServer();
+  server.sessions.set(other, otherId);
+  const probe = createOwnershipProbe(scope, server.run);
+
+  assert.deepEqual(addressableSessions(scope, [], probe), [NAME], "just my own, when I hold nothing else");
+  assert.deepEqual(addressableSessions(scope, [other], probe), [NAME, other],
+    "…plus a session whose marker says the name is its own");
+  assert.deepEqual(addressableSessions(scope, [NAME, other, NAME], probe), [NAME, other], "deduplicated");
+
+  // THE LIST CANNOT WIDEN THROUGH A REGISTRY. Three ways a row fails now:
+  //  - not a name this module could have derived (a user's own session, junk);
+  assert.deepEqual(addressableSessions(scope, ["my-work", "lab", "", undefined], probe), [NAME]);
+  //  - a name that looks right but that NO session on the server carries;
+  const absent = deriveSessionName("/repo", "019fbb1d-9e78-7ebf-88bf-11111111aaaa")!;
+  assert.deepEqual(addressableSessions(scope, [absent], probe), [NAME], "nothing on the server vouches for it");
+  //  - and a session that exists and even carries a marker, whose marker names
+  //    an id its own name does NOT derive from — the tampered-registry shape.
+  const liar = deriveSessionName("/repo", "019fbb1d-9e78-7ebf-88bf-22222222bbbb")!;
+  server.sessions.set(liar, "some-other-sessions-id");
+  assert.deepEqual(addressableSessions(scope, [liar], probe), [NAME], "a name its own marker disagrees with is dropped");
+});
+
+test("a PROVEN name rides along without a marker read", () => {
+  // The orphan sweep kills the dedicated session of a session that is GONE
+  // (lib/session-orphan-sweep.ts): it reads the dead holder's own marker and
+  // compares it with that holder's id BEFORE it gets here, so the name arrives
+  // proven — a licence earn by READING, not a name a file mentioned.
+  const scope = fakeScope();
+  const deadId = "019fbb1d-9e78-7ebf-88bf-00000000dead";
+  const dead = deriveSessionName("/repo", deadId)!;
+  const alwaysNo = (): boolean => false;
+  assert.deepEqual(addressableSessions(scope, [dead], alwaysNo), [NAME], "not a candidate without a proof");
+  assert.deepEqual(addressableSessions(scope, [dead], alwaysNo, [dead]), [NAME, dead],
+    "…and declarable the moment the caller proves it");
 });
 
 test("a sidecar record is NOT a licence to kill another session (reviewer P1)", () => {
@@ -212,7 +250,10 @@ test("a sidecar record is NOT a licence to kill another session (reviewer P1)", 
 
   // …and it cannot widen the EXECUTOR's declaration either: the addressable
   // list is derived from this process's identity, not from the file.
-  assert.deepEqual(addressableSessions(scope, []), [NAME], "a tampered record adds nothing");
+  const probe = createOwnershipProbe(scope, server.run);
+  assert.deepEqual(addressableSessions(scope, [], probe), [NAME], "a tampered record adds nothing");
+  assert.deepEqual(addressableSessions(scope, [victim], probe), [NAME],
+    "and the name it points at is vouched for by nobody: its marker belongs to the victim's own id");
 
   // The same record pointing at OUR OWN name is honoured again — the fix is
   // about binding, not about distrusting the sidecar.
@@ -229,7 +270,8 @@ test("a session with no id cannot act through a record at all", () => {
   scope.record = { name: NAME, owner: SESSION_ID, createdAt: "2026-09-25T00:00:00.000Z" };
   scope.sessionId = () => undefined;
   server.sessions.set(NAME, SESSION_ID);
-  assert.deepEqual(addressableSessions(scope, []), [], "nothing to declare without an identity");
+  assert.deepEqual(addressableSessions(scope, [], createOwnershipProbe(scope, server.run)), [],
+    "nothing to declare without an identity");
   const killed = closeOwnSession(server.run, scope);
   assert.equal(killed.ok, true);
   assert.equal(killed.ok ? killed.killed : true, false);

@@ -60,6 +60,7 @@ import { dirname, join } from "node:path";
 
 import { isOwnSessionName } from "./orchestrator-tmux.ts";
 import { listServerPanes } from "./judge-pane.ts";
+import { paneIdUsable } from "./hierarchy.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 
 /** Directory holding one JSON file per named session, under the agent home. */
@@ -147,6 +148,25 @@ export interface SessionTmuxCoords {
   window: string;
   /** Its pane id (`%3`). */
   pane: string;
+  /**
+   * WHICH tmux server minted those ids (`<socket>,<server pid>`, from `$TMUX`).
+   *
+   * A pane id is an id WITHIN ONE SERVER and nothing more: after a `tmux
+   * kill-server` or a reboot the next server hands out the same small numbers
+   * again, so a `%3` recorded before the restart names a stranger's pane
+   * afterwards. Read without this field, a stale registration whose heartbeat
+   * stopped would look "still occupied" forever — the name could never be
+   * reclaimed or taken over (2026-09-25, t4 whole-branch review P1).
+   *
+   * Same field, same reading as the judge and worker registries: the comparison
+   * itself is lib/hierarchy.ts `paneIdUsable`, the one place that answers "is
+   * this pane id even comparable".
+   *
+   * Absent on an entry written before the field existed, and absent when the
+   * session runs outside tmux — both stay comparable, exactly like a judge
+   * entry that predates it (never reclaim on missing information).
+   */
+  server?: string;
 }
 
 /** One name's registration, as it is stored. */
@@ -199,7 +219,8 @@ export function parseRegistryEntry(raw: unknown): SessionRegistryEntry | undefin
     const session = typeof t.session === "string" ? t.session.trim() : "";
     const window = typeof t.window === "string" ? t.window.trim() : "";
     const pane = typeof t.pane === "string" ? t.pane.trim() : "";
-    if (session && window && pane) coords = { session, window, pane };
+    const server = typeof t.server === "string" ? t.server.trim() : "";
+    if (session && window && pane) coords = { session, window, pane, ...(server === "" ? {} : { server }) };
   }
   const scopeSession = isOwnSessionName(value.scopeSession) ? value.scopeSession : undefined;
   const repo = typeof value.repo === "string" ? value.repo.trim() : "";
@@ -296,6 +317,16 @@ export interface RegistryDeps {
    * carries session names the CALLER has just proven are gate sessions — a dead
    * session's own dedicated session, which no live process can declare. */
   runTmux(argv: readonly string[], ownSessions?: readonly string[]): RegistryTmuxResult;
+  /**
+   * WHICH tmux server this process talks to (`<socket>,<server pid>` from
+   * `$TMUX`), or undefined when it runs outside tmux or cannot read it.
+   *
+   * Optional so an older caller keeps compiling: absent means "unknown", and an
+   * unknown server leaves the pane comparison exactly as it was (missing
+   * information never reclaims a name). `lib/hierarchy.ts tmuxServerFrom` is the
+   * only reader of `$TMUX`.
+   */
+  currentServer?(): string | undefined;
   /** Is a process with this pid running? */
   alive(pid: number): boolean;
   /** Epoch ms. */
@@ -382,7 +413,22 @@ export function classifyEntry(deps: RegistryDeps, entry: SessionRegistryEntry): 
   if (panes === undefined) return "unknown";
   // A heartbeat that stopped while the pane lives is a session that is stuck or
   // suspended, not one that exited: it keeps its name.
-  if (entry.tmux?.pane !== undefined && panes.includes(entry.tmux.pane)) return "live";
+  //
+  // THE PANE ID ONLY MEANS SOMETHING ON THE SERVER THAT MINTED IT (2026-09-25,
+  // t4 whole-branch review P1). `paneIdUsable` is the ONE reading of that
+  // question (lib/hierarchy.ts, shared with the judge probe): it answers `true`
+  // when either side is unknown — which preserves the never-reclaim-on-missing-
+  // information default — and `false` when both are known and DIFFERENT, which
+  // is the case this branch used to get wrong: after a `kill-server` the
+  // recorded `%3` can be a stranger's pane, and reading it as the holder would
+  // keep the name occupied forever.
+  if (
+    entry.tmux?.pane !== undefined &&
+    paneIdUsable({ tmuxServer: entry.tmux.server }, deps.currentServer?.()) &&
+    panes.includes(entry.tmux.pane)
+  ) {
+    return "live";
+  }
   try {
     if (deps.alive(entry.pid)) return "live";
   } catch {

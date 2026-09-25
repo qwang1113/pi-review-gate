@@ -261,7 +261,7 @@ export function ownSessionName(scope: TmuxScope): string | undefined {
 
 /**
  * THE SESSIONS THIS PROCESS MAY ADDRESS — its own, plus every session it holds
- * coordinates for.
+ * coordinates for AND CAN PROVE.
  *
  * WHY IT IS NOT JUST "MY OWN NAME" (2026-09-25, quality round P1). A RELAY
  * SUCCESSOR owns the previous seat's work: `callerIdentities()` counts the
@@ -273,23 +273,94 @@ export function ownSessionName(scope: TmuxScope): string | undefined {
  * holder's session).
  *
  * `held` is whatever recorded session names the caller's registries carry
- * (`TmuxSession` in a judge entry, a child row, a worker row). Each one was
- * shape-validated when it was WRITTEN and is validated again here, so a name
- * that could not have come from this module never widens the list — the user's
- * own sessions can no more enter it through a registry than through a
- * parameter.
+ * (`TmuxSession` in a judge entry, a child row, a worker row) — and A RECORD IS
+ * NOT PROOF (2026-09-25, t4 whole-branch review P1). The first version of this
+ * function answered with a SHAPE test alone, so any writable registry that
+ * mentioned a string shaped like `rg-…` widened the executor's declaration and
+ * a `kill-window` could be aimed at another session's window: exactly the
+ * "a file is not permission" property `closeOwnSession` had been fixed for,
+ * lost one layer up. Membership in a record now only SELECTS a candidate; the
+ * tmux session itself has to confirm it. So `verify` reads the
+ * `@rg_scope_owner` marker and demands the name be the one THAT owner derives
+ * (see {@link createOwnershipProbe}) — an id no file can invent, because the
+ * marker lives in tmux and only this gate writes it.
+ *
+ * `proven` is the one exception, and it is not a loosening: the orphan sweep
+ * reads a DEAD session's marker and compares it with that session's own id
+ * before it gets here, so those names arrive already verified (see
+ * lib/session-orphan-sweep.ts). Membership in a registry is not proof of
+ * anything; a marker read is.
+ *
+ * THE OWN NAME NEEDS NO MARKER: it is DERIVED from this process's own identity,
+ * so no file can name it, and `new-session` has to be able to declare the
+ * session it is about to create (there is no marker to read yet —
+ * {@link openScopeWindow} writes it right after).
+ *
+ * WHAT THIS STILL ALLOWS, SAID PLAINLY: a tampered record can point at a session
+ * that is REAL — another live gate session's `rg-…` name passes, because the
+ * name and its marker agree about who built it. Closing that last gap would
+ * need a whitelist of session IDS, and the honest ones are not available: after
+ * an `orchestrator_attach` the previous holder's full id is gone
+ * (`runtime.ownerSessionId` is overwritten by the adopter while only the 10-char
+ * name tail survives in the rows), and a whitelist would leave a successor
+ * unable to close precisely the windows it exists to reclaim. The record side
+ * carries the other half of the answer: `ownJudges()` filters by opener and the
+ * worker rows are filtered the same way, so another session's names have to be
+ * tampered INTO a file before they can even become candidates.
  */
 export function addressableSessions(
   scope: TmuxScope,
   held: Iterable<string | undefined>,
+  verify: (name: string) => boolean,
+  proven: Iterable<string | undefined> = [],
 ): string[] {
   const names = new Set<string>();
   const own = ownSessionName(scope);
   if (own !== undefined) names.add(own);
-  for (const name of held) {
+  for (const name of proven) {
     if (isOwnSessionName(name)) names.add(name);
   }
+  for (const name of held) {
+    if (!isOwnSessionName(name) || names.has(name)) continue;
+    if (verify(name)) names.add(name);
+  }
   return [...names];
+}
+
+/**
+ * THE MARKER READER — "is this session really the one its NAME says it is?".
+ *
+ * The question a registry cannot answer and tmux can. A name is
+ * `rg-<slug>-<id tail>`, so a session whose `@rg_scope_owner` marker carries an
+ * id that derives THAT name was created by the session the name is about; one
+ * whose marker says something else (or says nothing) is somebody else's, and no
+ * string in a file can change either fact.
+ *
+ * WHY THE OWNER IS NOT CHECKED AGAINST "MY LINE" HERE: see
+ * {@link addressableSessions} — the full id of a predecessor is not always
+ * available, and demanding it would refuse the closes a successor exists to
+ * perform. What this DOES close is the P1: the name must have been minted by a
+ * real gate session, so a record can no longer invent one.
+ *
+ * ONE READ PER NAME PER PROCESS: a session's marker is written once, at
+ * creation, and never re-pointed (a second session deriving the same name is
+ * refused by {@link openScopeWindow}), so the answer cannot change under a
+ * running process. A FAILED read is NOT cached — the session may simply not
+ * exist yet, and a `new-session` a moment later must still be declarable.
+ */
+export function createOwnershipProbe(scope: TmuxScope, run: ScopeRunner): (name: string) => boolean {
+  const cache = new Map<string, boolean>();
+  return (name: string): boolean => {
+    const cached = cache.get(name);
+    if (cached !== undefined) return cached;
+    const marker = readOwner(run, name);
+    if (!marker.ok) return false;
+    const owner = marker.owner.trim();
+    if (owner.length === 0) return false;
+    const verdict = deriveSessionName(scope.repoRoot(), owner) === name;
+    cache.set(name, verdict);
+    return verdict;
+  };
 }
 
 /** What a child window needs from its opener. */

@@ -3102,14 +3102,25 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
     "the raw runner is imported under a name nothing can call by accident");
   assert.equal((SRC.match(/const runTmux = /g) ?? []).length, 1,
     "exactly ONE wrapper defines this session's runTmux");
-  assert.match(SRC, /const runTmux = \(argv: readonly string\[\], env\?: NodeJS\.ProcessEnv, extraSessions\?: readonly string\[\]\) =>[\s\S]{0,200}rawTmux\(argv, env \?\? process\.env, \{[\s\S]{0,200}ownSessions: addressableSessions\(tmuxScope,/, "…and it attaches the sessions lib/session-tmux-scope.ts derived for this process");
-  // THE THIRD PARAMETER IS THE ONLY WIDENING, AND IT ARRIVES ALREADY PROVEN
+  assert.match(SRC, /const runTmux = \(argv: readonly string\[\], env\?: NodeJS\.ProcessEnv, extraSessions\?: readonly string\[\]\) =>[\s\S]{0,200}rawTmux\(argv, env \?\? process\.env, \{[\s\S]{0,400}ownSessions: addressableSessions\(\s*tmuxScope,[\s\S]{0,400}sessionOwnership,/, "…and it attaches the sessions lib/session-tmux-scope.ts derived for this process");
+  // AND EVERY ONE OF THEM IS EARNED, NOT READ (2026-09-25, t4 whole-branch
+  // review P1). A registry row is only a CANDIDATE: `createOwnershipProbe`
+  // reads each candidate's `@rg_scope_owner` marker and declares it only when
+  // the name is the one THAT owner derives. Without it the declaration was a
+  // shape test, so any writable registry naming an `rg-…` string widened it and
+  // a `kill-window` could be aimed at another session's window.
+  assert.equal((SRC.match(/createOwnershipProbe\(/g) ?? []).length, 1,
+    "one ownership probe per process");
+  assert.match(SRC, /const sessionOwnership = createOwnershipProbe\(tmuxScope, \(argv\) => rawTmux\(argv\)\)/,
+    "…reading markers through the RAW runner, so it cannot recurse into the wrapper it feeds");
+  // THE FOURTH PARAMETER IS THE ONLY WIDENING, AND IT ARRIVES ALREADY PROVEN
   // (2026-09-25, t2): the orphan sweep kills the dedicated session of a session
   // that is GONE — nobody alive holds that name, so it cannot come from a
   // registry row. lib/session-registry.ts reads its `@rg_scope_owner` marker
   // and compares it with the dead entry's session id before the kill is built,
-  // and `addressableSessions` shape-checks the name again here, so the widening
-  // is one verified name at a time and never a caller-supplied session.
+  // and it is passed as PROVEN rather than as a candidate (t4 review P1), so
+  // the widening is one verified name at a time and never a caller-supplied
+  // session.
   assert.match(SRC, /sessionNaming = createSessionNaming\(\{\s*runTmux: \(argv, ownSessions\) => runTmux\(argv, undefined, ownSessions\)/, "the naming module's runner is the same guarded wrapper");
   // THE FOUR MOMENTS THE SESSION'S NAME LIVES IN (2026-09-25, t2). All the
   // judgement is in lib/session-registry.ts + lib/session-name-tools.ts; the
@@ -3171,9 +3182,16 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   assert.doesNotMatch(SRC, /Object\.values\(judgeHierarchy\)\.map\(\(entry\) => entry\.tmuxSession\)/,
     "…and never the raw table");
   assert.match(SRC, /\.\.\.workerRegistrySessions\(\),/, "the worker registry's sessions are in the list");
-  // The wrapper's body is the ONLY call: anything else calling the raw runner
-  // directly is a path with no declaration at all.
-  assert.equal((SRC.match(/rawTmux\(/g) ?? []).length, 1, "only the wrapper calls the raw runner");
+  // The wrapper's body is the ONLY call that can CARRY a session command:
+  // anything else calling the raw runner directly would be a path with no
+  // declaration at all. The ownership probe is the one exception, and its
+  // safety is STRUCTURAL rather than granted (2026-09-25, t4 review P1): it
+  // reads `show-options` — never one of the four session subcommands the guard
+  // gates — and it must NOT go through the wrapper, which would recurse into
+  // the very declaration the probe is building.
+  assert.equal((SRC.match(/rawTmux\(/g) ?? []).length, 2, "only the wrapper and the ownership probe call the raw runner");
+  assert.match(SRC, /createOwnershipProbe\(tmuxScope, \(argv\) => rawTmux\(argv\)\)/,
+    "…and the probe's call is the marker read, through the raw runner on purpose");
   // AND THE OTHER DIRECTION: an entry that is RE-registered (a new round queued
   // into a live pane, a rotated lane) must carry the whole pane forward. Copying
   // `paneId` by hand and forgetting the window pair was the second instance of

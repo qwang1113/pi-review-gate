@@ -36,7 +36,7 @@ import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
-import { addressableSessions } from "./session-tmux-scope.ts";
+import { addressableSessions, createOwnershipProbe } from "./session-tmux-scope.ts";
 
 
 
@@ -449,6 +449,11 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
   // the border-repaint throttle cannot leak between orchestrations (or, in a
   // test process, between worlds).
   const paneDecor = new Map<string, { title: string; at: number }>();
+  // ONE ownership probe per orchestration: it remembers one `@rg_scope_owner`
+  // read per session name for the life of this process, so the declaration on
+  // every tmux call stays a map lookup instead of a subprocess
+  // (lib/session-tmux-scope.ts `createOwnershipProbe`).
+  const ownershipProbe = createOwnershipProbe(host.scope, (argv) => runTmux(argv));
 
 
   const deps: OrchestratorDeps = {
@@ -504,7 +509,14 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     },
     readPlan: () => readPlanFile(host.repoRoot),
     savePlan: (plan) => writePlanFile(host.repoRoot, plan),
-    tmux: (argv) => runTmux(argv, env(), { ownSessions: addressableSessions(host.scope, deps.runtime().children.map((c) => c.tmuxSession)) }),
+    tmux: (argv) =>
+      runTmux(argv, env(), {
+        ownSessions: addressableSessions(
+          host.scope,
+          deps.runtime().children.map((c) => c.tmuxSession),
+          ownershipProbe,
+        ),
+      }),
     scope: host.scope,
     ownPane: () => {
       const pane = env().TMUX_PANE?.trim();

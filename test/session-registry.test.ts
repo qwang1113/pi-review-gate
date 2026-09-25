@@ -29,6 +29,7 @@ import {
   parseRegistryEntry,
   releaseName,
   renewName,
+  serializeRegistryEntry,
   sessionEntryPath,
   sessionInboxPath,
   sessionInboxTakenPath,
@@ -112,6 +113,7 @@ function deps(opts: {
   files?: Map<string, string>;
   tmux?: ReturnType<typeof fakeTmux>;
   alive?: (pid: number) => boolean;
+  currentServer?: () => string | undefined;
 } = {}): RegistryDeps & { io: ReturnType<typeof fakeIO>; tmux: ReturnType<typeof fakeTmux> } {
   const io = fakeIO(opts.files);
   const tmux = opts.tmux ?? fakeTmux();
@@ -122,6 +124,7 @@ function deps(opts: {
     runTmux: tmux.run,
     alive: opts.alive ?? (() => false),
     now: () => NOW,
+    ...(opts.currentServer === undefined ? {} : { currentServer: opts.currentServer }),
   };
 }
 
@@ -192,6 +195,49 @@ test("liveness needs the heartbeat to be stale AND the pid and the pane to be go
   assert.equal(classifyEntry(deps({ tmux: fakeTmux({ blind: true }) }), entry()), "unknown",
     "tmux unreadable ⇒ unknown, never dead");
   assert.equal(classifyEntry(deps(), entry({ heartbeatAt: "whenever" })), "unknown", "an unparsable stamp is unknown");
+});
+
+test("a pane id from ANOTHER tmux server is not this holder (t4 review P1)", () => {
+  // A pane id is only an id WITHIN one server: after a `tmux kill-server` (or a
+  // reboot) the next server hands out `%1`, `%2`, … again, so a recorded `%42`
+  // names a stranger's pane. Read as "the holder is still there", the name can
+  // never be reclaimed or taken over — the registration is stuck forever.
+  const coords = { session: "rg-pi-review-gate-ffee000000", window: "@7", pane: "%42" };
+  const stamped = entry({ tmux: { ...coords, server: "sock,111" } });
+  assert.equal(
+    classifyEntry(deps({ currentServer: () => "sock,999", tmux: fakeTmux({ panes: ["%42"] }) }), stamped),
+    "dead",
+    "a `%42` minted by another server does not keep the name",
+  );
+  assert.equal(
+    classifyEntry(deps({ currentServer: () => "sock,111", tmux: fakeTmux({ panes: ["%42"] }) }), stamped),
+    "live",
+    "the same pane id on the server that minted it still does",
+  );
+  // STILL NEVER A DEATH ON MISSING INFORMATION: an entry written before the
+  // field existed, and a process that cannot read the server it is on, both keep
+  // the older reading (never reclaim a name on a fact we do not have).
+  assert.equal(
+    classifyEntry(deps({ currentServer: () => "sock,999", tmux: fakeTmux({ panes: ["%42"] }) }), entry({ tmux: coords })),
+    "live",
+    "an entry with no server stays comparable",
+  );
+  assert.equal(
+    classifyEntry(deps({ tmux: fakeTmux({ panes: ["%42"] }) }), stamped),
+    "live",
+    "an unknown current server stays comparable",
+  );
+});
+
+test("the server half of the coordinates survives a write/read round trip", () => {
+  // The field is useless if it does not survive the store — `parseRegistryEntry`
+  // is what every reader of a registration goes through.
+  const coords = { session: "rg-pi-review-gate-ffee000000", window: "@7", pane: "%42" };
+  const stamped = entry({ tmux: { ...coords, server: "sock,111" } });
+  assert.deepEqual(parseRegistryEntry(JSON.parse(serializeRegistryEntry(stamped))), stamped);
+  const unstamped = entry({ tmux: coords });
+  assert.deepEqual(parseRegistryEntry(JSON.parse(serializeRegistryEntry(unstamped))), unstamped,
+    "an entry without one round-trips unchanged");
 });
 
 // ---------------------------------------------------------------------------
