@@ -534,7 +534,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 - **子会话住哪**（2026-09-25 用户决定）：opener 第一次要开子会话时懒建一个自己的
   tmux session（`rg-<repo>-<session id 尾>`，`lib/session-tmux-scope.ts`），每个子会话
   一个 window；opener 自己的窗口**一个 pane 都不多**。`declare_done` 关掉自己那一个
-  session（名字只从 sidecar 读、并比对 owner 标记）。**接力后继者是唯一例外**：它仍
+  session（名字由本会话身份派生；sidecar 记录只用于确认「是我建的」，且必须与派生结果逐字段相符才被采信）。**接力后继者是唯一例外**：它仍
   split 在 opener 原窗口里（用户选的），专属 session 只收 judge / worker / PM 子会话。
 - **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：门禁内部等待、
   full precommit、任何长命令都发生在**同一个 turn 内部**，agent 既不 settle 也不

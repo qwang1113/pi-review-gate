@@ -30,19 +30,29 @@
  *    (`openScopeWindow`), and the child's own command is the session's first
  *    window, so there is never a stray shell window to clean up. A round with
  *    no children creates no session at all.
- * 3. THE DEATH, `closeOwnSession`: the one session this process created, by
- *    name READ FROM ITS OWN SIDECAR. There is no parameter to pass one in.
+ * 3. THE DEATH, `closeOwnSession`: the one session this process created, and
+ *    only when the sidecar's record CONFIRMS it is ours (see below). There is no
+ *    parameter to pass a name in.
  *
  * ── WHY "MINE" IS A FACT AND NOT A GUESS ──
  *
- * The name looks like the gate's, which is not the same as being the gate's:
- * a leftover from a run that died between creating the session and recording
- * it, or two sessions whose id tails collide, both wear a name this module
- * would derive. So the session carries a marker (`@rg_scope_owner`, a tmux
- * session user option) written once at creation, and every reuse AND the kill
- * compare it with the owner recorded in the sidecar. A mismatch is refused —
- * never inherited, never killed — and the refusal names both owners so a human
- * can settle it.
+ * THE NAME IS ALWAYS DERIVED FROM THIS SESSION'S OWN IDENTITY (2026-09-25,
+ * reviewer P1): `rg-<repo slug>-<session id tail>`. The sidecar record is a
+ * FACT, never a source of names — it says "this session created that one" — and
+ * it is acted on only when it matches the derivation field by field (the name
+ * this session would derive, owned by this session's own id). Anything else is
+ * inert: a hand-edited or foreign record can therefore neither widen the
+ * executor's declaration nor aim a kill at another session, while a record the
+ * gate itself wrote is honoured as before.
+ *
+ * AND THE NAME LOOKING LIKE OURS IS NOT ENOUGH EITHER: a leftover from a run
+ * that died between creating the session and recording it, or two sessions
+ * whose id tails collide, both wear a name this module would derive. So the
+ * session itself carries a marker (`@rg_scope_owner`, a tmux session user
+ * option) written once at creation, and every reuse AND the kill compare it with
+ * the owner this process derives for itself. A mismatch is refused — never
+ * inherited, never killed — and the refusal names both owners so a human can
+ * settle it.
  *
  * Failure direction throughout: an unreadable tmux (`list-sessions` failed) is
  * "I do not know", and nothing is created or killed on an unknown.
