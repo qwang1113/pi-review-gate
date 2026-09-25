@@ -69,36 +69,52 @@ test("a session name is only one the GATE could have derived", () => {
 test("kill-server is refused in EVERY case — no session name makes it safe", () => {
   assert.deepEqual([...NEVER_ALLOWED_TMUX_SUBCOMMANDS], ["kill-server"]);
   assert.throws(() => assertSafeTmuxArgv(["kill-server"]), UnsafeTmuxCommand);
-  assert.throws(() => assertSafeTmuxArgv(["kill-server"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-server"], { ownSessions: [SESSION] }), UnsafeTmuxCommand);
   assert.throws(() => assertSafeTmuxArgv([]), UnsafeTmuxCommand);
 });
 
-test("the four session commands need the session name AND a target that names it", () => {
+test("a global flag where the subcommand belongs is refused — it would hide the subcommand", () => {
+  // `tmux -L sock kill-session -t x` puts `-L` in the position this module reads
+  // as the subcommand, so the whole check (including `kill-server`) would be
+  // skipped. The gate never passes a leading flag (its socket comes from the
+  // environment), so refusing costs nothing.
+  assert.throws(() => assertSafeTmuxArgv(["-L", "sock", "kill-session", "-t", SESSION]), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["-L", "sock", "kill-server"]), UnsafeTmuxCommand);
+});
+
+test("the four session commands need a declaration AND a target that names one of them", () => {
+  const own = { ownSessions: [SESSION] };
   assert.deepEqual(
     [...OWN_SESSION_TMUX_SUBCOMMANDS].sort(),
     ["kill-session", "kill-window", "killw", "new", "new-session", "new-window", "neww"],
   );
   // With a declared scope, but pointing somewhere else: refused.
-  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "lab"], { ownSession: SESSION }), UnsafeTmuxCommand);
-  assert.throws(() => assertSafeTmuxArgv(["new-window", "-t", "lab"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "lab"], own), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["new-window", "-t", "lab"], own), UnsafeTmuxCommand);
   // …including at ANOTHER gate-looking session: "mine" is an exact match, not
   // "a name of my shape".
-  assert.throws(
-    () => assertSafeTmuxArgv(["kill-session", "-t", "rg-other-repo-abcdef1234"], { ownSession: SESSION }),
-    UnsafeTmuxCommand,
-  );
-  // A window target must stay inside the session — a bare `@id` would resolve
-  // against whatever now owns that number.
-  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "@12"], { ownSession: SESSION }), UnsafeTmuxCommand);
-  // And the scope itself must be a name the gate could have derived.
-  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "lab"], { ownSession: "lab" }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "rg-other-repo-abcdef1234"], own), UnsafeTmuxCommand);
+  // A window target must stay inside a declared session — a bare `@id` would
+  // resolve against whatever now owns that number.
+  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "@12"], own), UnsafeTmuxCommand);
+  // A declared name that the gate could not have derived (an empty list, or one
+  // holding junk) is not a declaration at all.
+  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "lab"], { ownSessions: ["lab"] }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", SESSION], { ownSessions: [] }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", SESSION], { ownSessions: ["lab"] }), UnsafeTmuxCommand);
   // The aliases are held to the same rule, not to a second one.
-  assert.throws(() => assertSafeTmuxArgv(["new", "-s", "lab"], { ownSession: SESSION }), UnsafeTmuxCommand);
-  assert.throws(() => assertSafeTmuxArgv(["killw", "-t", `lab:@1`], { ownSession: SESSION }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["new", "-s", "lab"], own), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["killw", "-t", `lab:@1`], own), UnsafeTmuxCommand);
   // The in-session forms pass.
-  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-session", "-t", SESSION], { ownSession: SESSION }));
-  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-window", "-t", `${SESSION}:@12`], { ownSession: SESSION }));
-  assert.doesNotThrow(() => assertSafeTmuxArgv(["new-window", "-t", SESSION], { ownSession: SESSION }));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-session", "-t", SESSION], own));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-window", "-t", `${SESSION}:@12`], own));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["new-window", "-t", SESSION], own));
+  // A LIST, not one name: a relay successor holds the previous seat's windows
+  // too, and those live in the predecessor's session (quality round P1).
+  const lineage = { ownSessions: [SESSION, "rg-other-repo-abcdef1234"] };
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-window", "-t", "rg-other-repo-abcdef1234:@3"], lineage));
+  assert.doesNotThrow(() => assertSafeTmuxArgv(["kill-session", "-t", "rg-other-repo-abcdef1234"], lineage));
+  assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "rg-third-repo-99999999"], lineage), UnsafeTmuxCommand);
 });
 
 test("a caller that declares NOTHING cannot run the four — looking like ours is not being ours", () => {
@@ -109,35 +125,28 @@ test("a caller that declares NOTHING cannot run the four — looking like ours i
   // gate-shaped target is still refused: shape is not ownership, and the cost of
   // refusing is one clear message while the cost of accepting is somebody else's
   // screen.
-  for (const argv of [
+  const sessionCommands = [
     ["new-session", "-d", "-s", SESSION],
     ["new-window", "-t", SESSION],
     ["kill-window", "-t", `${SESSION}:@12`],
     ["kill-session", "-t", SESSION],
-  ]) {
+  ];
+  for (const argv of sessionCommands) {
     assert.throws(() => assertSafeTmuxArgv(argv), UnsafeTmuxCommand, `${argv.join(" ")} without a declaration`);
-  }
-  // …and WITH the declaration they pass, which is what the gate's own path does.
-  for (const argv of [
-    ["new-session", "-d", "-s", SESSION],
-    ["new-window", "-t", SESSION],
-    ["kill-window", "-t", `${SESSION}:@12`],
-    ["kill-session", "-t", SESSION],
-  ]) {
-    assert.doesNotThrow(() => assertSafeTmuxArgv(argv, { ownSession: SESSION }), `${argv.join(" ")} declared`);
+    assert.doesNotThrow(() => assertSafeTmuxArgv(argv, { ownSessions: [SESSION] }), `${argv.join(" ")} declared`);
   }
   // The user's own session can never be addressed, declared or not.
   assert.throws(() => assertSafeTmuxArgv(["kill-session", "-t", "my-work"]), UnsafeTmuxCommand);
-  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "my-work:@3"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-window", "-t", "my-work:@3"], { ownSessions: [SESSION] }), UnsafeTmuxCommand);
   // …and `kill-server` is refused in every case.
-  assert.throws(() => assertSafeTmuxArgv(["kill-server"], { ownSession: SESSION }), UnsafeTmuxCommand);
+  assert.throws(() => assertSafeTmuxArgv(["kill-server"], { ownSessions: [SESSION] }), UnsafeTmuxCommand);
 });
 
 test("new-session may not be grouped into another session", () => {
   // `-t` on new-session means "join this session's group", which is another
   // session's business entirely — refused rather than interpreted.
   assert.throws(
-    () => assertSafeTmuxArgv(["new-session", "-d", "-s", SESSION, "-t", SESSION], { ownSession: SESSION }),
+    () => assertSafeTmuxArgv(["new-session", "-d", "-s", SESSION, "-t", SESSION], { ownSessions: [SESSION] }),
     UnsafeTmuxCommand,
   );
 });

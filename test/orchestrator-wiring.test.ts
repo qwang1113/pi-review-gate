@@ -83,29 +83,31 @@ test("a child with no judge sessions at all answers false, and never throws", ()
  * (2026-09-25).
  *
  * `runTmux` re-validates every argv on its way out, so the gate's own session
- * commands must arrive WITH the declaration that names the session they own —
- * otherwise they are refused here even though the builder that made them
- * checked the scope a moment earlier. That is what the guard parameter is for,
- * and this is the test that says so: the same argv is refused with no guard and
- * passes the guard (then fails on tmux's own terms, which is a DIFFERENT
- * message — the distinction is the assertion).
+ * commands must arrive WITH the declaration naming the sessions they may
+ * address — otherwise they are refused here even though the builder that made
+ * them checked the scope a moment earlier. That is what the guard parameter is
+ * for, and this is the test that says so. NOTHING HERE RUNS TMUX: every case is
+ * either refused by the guard (no process spawns) or measured by the DIFFERENT
+ * message a real tmux would produce — a test that killed a session on the user's
+ * server would be the defect it is meant to prevent (quality round P1: this test
+ * used to do exactly that).
  */
 test("runTmux: the four session commands need the caller's declaration", () => {
   const session = "rg-repo-abcdef1234";
-  const blind = runTmux(["kill-session", "-t", session]);
+  const blind = runTmux(["kill-session", "-t", session], undefined, { ownSessions: [] });
   assert.equal(blind.ok, false);
-  assert.match(blind.stderr, /ownSession/, "no declaration ⇒ refused before tmux ever runs");
+  assert.match(blind.stderr, /ownSessions/, "no declaration ⇒ refused before tmux ever runs");
 
-  const declared = runTmux(["kill-session", "-t", session], process.env, { ownSession: session });
-  assert.equal(declared.ok, false, "nothing by that name exists here…");
-  assert.doesNotMatch(declared.stderr, /ownSession/, "…but the refusal is no longer OURS: the guard let it through");
-
-  // A kill aimed at anything but the declared session never reaches tmux.
-  const elsewhere = runTmux(["kill-session", "-t", "my-work"], process.env, { ownSession: session });
+  // A kill aimed at anything but a declared session never reaches tmux.
+  const elsewhere = runTmux(["kill-session", "-t", "my-work"], undefined, { ownSessions: [session] });
   assert.equal(elsewhere.ok, false);
-  assert.match(elsewhere.stderr, /目标必须是本会话自己的 session/);
+  assert.match(elsewhere.stderr, /目标必须是本会话自己的 session 之一/);
+  // A leading global flag cannot hide the subcommand either.
+  const flagged = runTmux(["-L", "some-socket", "kill-server"], undefined, { ownSessions: [session] });
+  assert.equal(flagged.ok, false);
+  assert.match(flagged.stderr, /必须以子命令开头/);
   // And `kill-server` is refused whatever is declared.
-  const server = runTmux(["kill-server"], process.env, { ownSession: session });
+  const server = runTmux(["kill-server"], undefined, { ownSessions: [session] });
   assert.equal(server.ok, false);
   assert.match(server.stderr, /任何情况都禁止/);
 });

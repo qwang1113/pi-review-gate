@@ -228,8 +228,8 @@ import {
 // MY OWN TMUX SESSION (2026-09-25): the name, the lazy creation, the ownership
 // record and the one session `declare_done` closes.
 import {
+  addressableSessions,
   closeOwnSession,
-  ownSessionName,
   sanitizeScopeRecord,
   type TmuxScope,
 } from "../lib/session-tmux-scope.ts";
@@ -2794,24 +2794,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     now: () => new Date().toISOString(),
   };
 
-  /**
-   * THE RUNNER, and the only one this file uses (2026-09-25).
-   *
-   * It carries THIS session's declaration on every call, which is what makes
-   * "the gate may only touch its own tmux session" true at the executor too: the
-   * four session commands (`new-session` / `new-window` / `kill-window` /
-   * `kill-session`) are refused unless their target is the session
-   * `lib/session-tmux-scope.ts` derived for this process.
-   *
-   * WHY A WRAPPER INSTEAD OF PASSING THE DECLARATION AT EACH CALL SITE: there
-   * are a dozen of them (every tool's deps, the judge close helpers, the
-   * declare_done cascade), and a rule one caller can forget is a rule that is
-   * already broken. The raw runner is imported under a different name so that
-   * forgetting is not expressible: there is no unguarded `runTmux` in scope.
-   */
-  const runTmux = (argv: readonly string[], env?: NodeJS.ProcessEnv) =>
-    rawTmux(argv, env ?? process.env, { ownSession: ownSessionName(tmuxScope) });
-
   const orchestratorDeps = createOrchestratorDeps({
     repoRoot: primaryRepoRoot,
     scope: tmuxScope,
@@ -3832,6 +3814,41 @@ export default function reviewGate(pi: ExtensionAPI) {
    * decoration, it is the Map's old scope made mechanical.
    */
   let judgeHierarchy: HierarchyTable = emptyHierarchy();
+
+  /**
+   * THE RUNNER, and the only one this file uses (2026-09-25).
+   *
+   * It carries THIS session's declaration on every call, which is what makes
+   * "the gate may only touch sessions of its own" true at the executor too: the
+   * four session commands (`new-session` / `new-window` / `kill-window` /
+   * `kill-session`) are refused unless their target is one of the sessions this
+   * process holds coordinates for.
+   *
+   * THE LIST IS WIDER THAN ONE NAME, and deliberately: a relay successor owns
+   * the previous seat's windows (`callerIdentities()` counts them as its own),
+   * and those live in the PREDECESSOR's session — a successor that could only
+   * declare its own name could never close the windows it exists to reclaim
+   * (quality round P1, 2026-09-25). Every name in the list comes from a registry
+   * row, which is where the scope module put it.
+   *
+   * IT IS DECLARED HERE, AFTER `judgeHierarchy`, and not beside `tmuxScope`: the
+   * wrapper closes over both registries, and a `let` read before its own
+   * declaration has executed is a TDZ error — a call during startup would throw
+   * instead of merely being refused.
+   *
+   * WHY A WRAPPER INSTEAD OF PASSING THE DECLARATION AT EACH CALL SITE: there
+   * are a dozen of them (every tool's deps, the judge close helpers, the
+   * declare_done cascade), and a rule one caller can forget is a rule that is
+   * already broken. The raw runner is imported under a different name so that
+   * forgetting is not expressible: there is no unguarded `runTmux` in scope.
+   */
+  const runTmux = (argv: readonly string[], env?: NodeJS.ProcessEnv) =>
+    rawTmux(argv, env ?? process.env, {
+      ownSessions: addressableSessions(tmuxScope, [
+        ...Object.values(judgeHierarchy).map((entry) => entry.tmuxSession),
+        ...(state.orchestrator?.children ?? []).map((child) => child.tmuxSession),
+      ]),
+    });
   /**
    * WHICH MODEL SLOTS ARE BAD, per repo (lib/model-health.ts).
    *

@@ -217,6 +217,39 @@ export function ownSessionName(scope: TmuxScope): string | undefined {
   return resolved.ok ? resolved.name : undefined;
 }
 
+/**
+ * THE SESSIONS THIS PROCESS MAY ADDRESS — its own, plus every session it holds
+ * coordinates for.
+ *
+ * WHY IT IS NOT JUST "MY OWN NAME" (2026-09-25, quality round P1). A RELAY
+ * SUCCESSOR owns the previous seat's work: `callerIdentities()` counts the
+ * predecessor's judges as its own, so the successor closes their windows — and
+ * those windows live in the PREDECESSOR's session. A declaration of one name
+ * made every one of those closes impossible, which is a P1 because those
+ * windows are exactly what the successor exists to reclaim (a takeover after a
+ * crash has the same shape: the adopted registry's rows carry the previous
+ * holder's session).
+ *
+ * `held` is whatever recorded session names the caller's registries carry
+ * (`TmuxSession` in a judge entry, a child row, a worker row). Each one was
+ * shape-validated when it was WRITTEN and is validated again here, so a name
+ * that could not have come from this module never widens the list — the user's
+ * own sessions can no more enter it through a registry than through a
+ * parameter.
+ */
+export function addressableSessions(
+  scope: TmuxScope,
+  held: Iterable<string | undefined>,
+): string[] {
+  const names = new Set<string>();
+  const own = ownSessionName(scope);
+  if (own !== undefined) names.add(own);
+  for (const name of held) {
+    if (isOwnSessionName(name)) names.add(name);
+  }
+  return [...names];
+}
+
 /** What a child window needs from its opener. */
 export interface OpenScopeWindowOptions {
   /** Working directory for the new window (the child's repo or worktree). */

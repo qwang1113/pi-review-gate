@@ -36,7 +36,7 @@ import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
-import { ownSessionName } from "./session-tmux-scope.ts";
+import { addressableSessions } from "./session-tmux-scope.ts";
 
 
 
@@ -49,11 +49,11 @@ import type { RestatementRecord } from "./restatement.ts";
 /**
  * Run one tmux command with no shell in between.
  *
- * `guard` is the DECLARATION that makes "only my own session" true on this side
- * of the seam too (2026-09-25): every caller passes the name its own scope
- * derived, so `new-session` / `new-window` / `kill-window` / `kill-session` are
- * refused here unless their target IS this session. `kill-server` is refused
- * regardless.
+ * `guard` is the DECLARATION that makes "only sessions of mine" true on this side
+ * of the seam too (2026-09-25): every caller passes the sessions it may address
+ * (`lib/session-tmux-scope.ts addressableSessions`), so `new-session` /
+ * `new-window` / `kill-window` / `kill-session` are refused here unless their
+ * target IS one of them. `kill-server` is refused regardless.
  */
 export function runTmux(
   argv: readonly string[],
@@ -504,7 +504,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     },
     readPlan: () => readPlanFile(host.repoRoot),
     savePlan: (plan) => writePlanFile(host.repoRoot, plan),
-    tmux: (argv) => runTmux(argv, env(), { ownSession: ownSessionName(host.scope) }),
+    tmux: (argv) => runTmux(argv, env(), { ownSessions: addressableSessions(host.scope, deps.runtime().children.map((c) => c.tmuxSession)) }),
     scope: host.scope,
     ownPane: () => {
       const pane = env().TMUX_PANE?.trim();

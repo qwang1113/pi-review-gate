@@ -14,8 +14,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { isOwnSessionName, SESSION_OWNER_OPTION } from "../lib/orchestrator-tmux.ts";
 import {
+  UnsafeTmuxCommand,
+  assertSafeTmuxArgv,
+  buildKillWindowArgv,
+  isOwnSessionName,
+  SESSION_OWNER_OPTION,
+} from "../lib/orchestrator-tmux.ts";
+import {
+  addressableSessions,
   closeOwnSession,
   deriveSessionName,
   openScopeWindow,
@@ -28,6 +35,39 @@ import {
 
 const SESSION_ID = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
 const NAME = deriveSessionName("/repo", SESSION_ID)!;
+/** A DIFFERENT session (the same repo, another seat) — the successor's own. */
+const SUCCESSOR_ID = "019fbb1d-9e78-7ebf-88bf-ffee00000011";
+const SUCCESSOR_NAME = deriveSessionName("/repo", SUCCESSOR_ID)!;
+
+/**
+ * THE PREDECESSOR'S WINDOWS ARE STILL THE SUCCESSOR'S TO CLOSE (P1).
+ *
+ * A relay successor owns the previous seat's judges (`callerIdentities()`
+ * counts them as its own), so it closes their windows — and those windows live
+ * in the PREDECESSOR'S session. The declaration is therefore the set this
+ * process holds coordinates for, not one name; this test runs the REAL builder
+ * through the REAL guard, which is exactly the call `judge_close` makes.
+ */
+test("a successor may close a window in the session its predecessor's rows name", () => {
+  const scope = fakeScope(SUCCESSOR_ID);
+  const guard = {
+    ownSessions: addressableSessions(scope, [NAME]),
+  };
+  assert.deepEqual(guard.ownSessions, [SUCCESSOR_NAME, NAME], "mine plus the one my rows name");
+  assert.doesNotThrow(() => assertSafeTmuxArgv(buildKillWindowArgv(NAME, "@7"), guard),
+    "the inherited judge's window is closable");
+  assert.doesNotThrow(() => assertSafeTmuxArgv(buildKillWindowArgv(SUCCESSOR_NAME, "@7"), guard),
+    "and so are the successor's own children");
+  const third = deriveSessionName("/repo", "019fbb1d-9e78-7ebf-88bf-00000000ffee")!;
+  assert.throws(() => assertSafeTmuxArgv(buildKillWindowArgv(third, "@7"), guard), UnsafeTmuxCommand,
+    "a session nothing of mine names is still out of reach");
+  // And with NO such row, the predecessor's session is out of reach too: the
+  // wider list is the registries' doing, not a blanket permission.
+  assert.throws(
+    () => assertSafeTmuxArgv(buildKillWindowArgv(NAME, "@7"), { ownSessions: addressableSessions(scope, []) }),
+    UnsafeTmuxCommand,
+  );
+});
 
 /** A tmux server in a Map: sessions by name, each with its owner marker. */
 function fakeServer(opts: {
@@ -81,11 +121,11 @@ interface FakeScope extends TmuxScope {
   writes: number;
 }
 
-function fakeScope(): FakeScope {
+function fakeScope(sessionId: string = SESSION_ID): FakeScope {
   const scope: FakeScope = {
     record: undefined,
     writes: 0,
-    sessionId: () => SESSION_ID,
+    sessionId: () => sessionId,
     repoRoot: () => "/repo",
     read: () => scope.record,
     write: (record) => { scope.record = record; scope.writes += 1; },
@@ -131,6 +171,24 @@ test("a persisted record is trusted only when it is complete", () => {
   ]) {
     assert.equal(sanitizeScopeRecord(bad), undefined, `${JSON.stringify(bad)} is not a usable record`);
   }
+});
+
+test("the addressable set is MINE plus the sessions I hold coordinates for", () => {
+  // "Mine" is not one name (2026-09-25, quality round P1): a relay successor
+  // owns the previous seat's judges, whose windows live in the PREDECESSOR's
+  // session — a declaration of one name made every one of those closes
+  // impossible, and those windows are exactly what a successor is for.
+  const scope = fakeScope();
+  const other = "rg-other-repo-abcdef1234";
+  assert.deepEqual(addressableSessions(scope, []), [NAME], "just my own, when I hold nothing else");
+  assert.deepEqual(addressableSessions(scope, [other]), [NAME, other], "…plus every session a row names");
+  // Deduplicated, and an id-less session contributes nothing.
+  assert.deepEqual(addressableSessions(scope, [NAME, other, NAME]), [NAME, other]);
+  // THE LIST CANNOT WIDEN THROUGH A REGISTRY: a row whose session name is not
+  // something the gate could have derived (a hand-edited file, a user's own
+  // session name) is dropped — the user's sessions are as unreachable through a
+  // record as through a parameter.
+  assert.deepEqual(addressableSessions(scope, ["my-work", "lab", "", undefined]), [NAME]);
 });
 
 test("the first child creates the session WITH it; a later one joins", () => {

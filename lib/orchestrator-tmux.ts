@@ -142,27 +142,34 @@ function flagValue(argv: readonly string[], flag: string): string | undefined {
 
 export interface SafeTmuxOptions {
   /**
-   * The ONE tmux session this process owns — the name
-   * lib/session-tmux-scope.ts derived from its own sidecar. Required for every
-   * {@link OWN_SESSION_TMUX_SUBCOMMANDS} call, and its target must name it.
+   * The tmux sessions this caller MAY ADDRESS — its own, plus any it holds
+   * coordinates for.
+   *
+   * A list rather than one name because "mine" is not one thing (2026-09-25,
+   * quality round P1): a RELAY SUCCESSOR keeps the previous seat's windows in
+   * its registries (`callerIdentities()` counts the predecessor's judges as its
+   * own), and those windows live in the PREDECESSOR'S session — a successor
+   * that could only declare its own name could never close them. A builder
+   * always passes exactly ONE name; the runner passes
+   * `lib/session-tmux-scope.ts addressableSessions(...)`.
    */
-  ownSession?: string;
+  ownSessions?: readonly string[];
 }
 
 /**
  * Last line of defense before the gate spawns tmux: the argv must not name a
  * destructive subcommand, must not write a global option, and — for the four
- * session-scoped ones — may only address the session the caller declares as its
- * own.
+ * session-scoped ones — may only address a session the caller declares.
  *
  * EVERY CALLER DECLARES, including the executor (2026-09-25).
- * {@link SafeTmuxOptions.ownSession} is not optional in practice: a BUILDER
- * passes the name it was given, and the runner that spawns tmux passes the name
- * its own scope derived (`lib/session-tmux-scope.ts` `ownSessionName`), so "only
- * my own session" holds on both sides of the seam. An argv naming one of the
- * four WITHOUT a declaration is refused even when its target looks like a gate
- * session — looking like ours is not being ours, and a refusal here costs one
- * clear message while accepting it costs somebody else's screen.
+ * {@link SafeTmuxOptions.ownSessions} is not optional in practice: a BUILDER
+ * passes the single name it was given, and the runner that spawns tmux passes
+ * every session it holds coordinates for
+ * (`lib/session-tmux-scope.ts` `addressableSessions`), so "only sessions of
+ * mine" holds on both sides of the seam. An argv naming one of the four WITHOUT
+ * a declaration is refused even when its target looks like a gate session —
+ * looking like ours is not being ours, and a refusal here costs one clear
+ * message while accepting it costs somebody else's screen.
  *
  * `kill-server` is refused unconditionally: no declaration makes it safe.
  */
@@ -170,38 +177,52 @@ export function assertSafeTmuxArgv(
   argv: readonly string[],
   opts: SafeTmuxOptions = {},
 ): readonly string[] {
-  const sub = canonicalSubcommand(String(argv[0] ?? ""));
-  if (!sub) {
-    throw new UnsafeTmuxCommand("tmux 命令缺少子命令");
+  const sub = String(argv[0] ?? "");
+  if (!sub || sub.startsWith("-")) {
+    // A LEADING GLOBAL FLAG is not the gate's business (2026-09-25): `-L sock
+    // kill-session …` would otherwise put `-L` where the subcommand belongs and
+    // slip the whole check — including `kill-server`. The gate never passes one
+    // (its socket comes from the environment), so refusing is free.
+    throw new UnsafeTmuxCommand(`tmux 命令必须以子命令开头，不接受全局 flag（实际：${JSON.stringify(sub)}）`);
   }
-  if (NEVER_ALLOWED_TMUX_SUBCOMMANDS.includes(sub)) {
-    throw new UnsafeTmuxCommand(`tmux ${sub} 会带走用户的整个 tmux server，任何情况都禁止`);
+  const canonical = canonicalSubcommand(sub);
+  if (NEVER_ALLOWED_TMUX_SUBCOMMANDS.includes(canonical)) {
+    throw new UnsafeTmuxCommand(`tmux ${canonical} 会带走用户的整个 tmux server，任何情况都禁止`);
   }
-  if (OWN_SESSION_TMUX_SUBCOMMANDS.includes(sub)) {
-    const own = opts.ownSession;
-    if (own === undefined || !isOwnSessionName(own)) {
+  if (OWN_SESSION_TMUX_SUBCOMMANDS.includes(canonical)) {
+    const allowed = (opts.ownSessions ?? []).filter((name) => isOwnSessionName(name));
+    if (allowed.length === 0) {
       throw new UnsafeTmuxCommand(
-        `tmux ${sub} 只允许作用于本会话自己的专属 session（缺少或非法的 ownSession 声明）：${JSON.stringify(argv)}`,
+        `tmux ${canonical} 只允许作用于本会话自己的专属 session（缺少或非法的 ownSessions 声明）：${JSON.stringify(argv)}`,
       );
     }
     // `new-session` NAMES its session with `-s`; everything else ADDRESSES one
     // with `-t`. `-t` on new-session means "group with", which is a different
     // session's business — refuse it rather than interpret it.
-    const target = sub === "new-session" ? flagValue(argv, "-s") : flagValue(argv, "-t");
-    if (target === undefined || !targetNamesOwnSession(target, own)) {
+    const target = canonical === "new-session" ? flagValue(argv, "-s") : flagValue(argv, "-t");
+    if (target === undefined || !allowed.includes(sessionPartOf(target))) {
       throw new UnsafeTmuxCommand(
-        `tmux ${sub} 的目标必须是本会话自己的 session ${own}（实际：${JSON.stringify(target)}）`,
+        `tmux ${canonical} 的目标必须是本会话自己的 session 之一（${allowed.join("、")}）：${JSON.stringify(target)}`,
       );
     }
-    if (sub === "new-session" && argv.includes("-t")) {
+    if (canonical === "new-session" && argv.includes("-t")) {
       throw new UnsafeTmuxCommand("tmux new-session -t 是「加入别的 session 组」，门禁不做");
     }
   }
   // A global option write would change the user's own configuration.
-  if ((sub === "set" || sub === "set-option" || sub === "setw" || sub === "set-window-option") && argv.includes("-g")) {
-    throw new UnsafeTmuxCommand(`tmux ${sub} -g 会改用户全局配置，禁止`);
+  if ((canonical === "set" || canonical === "set-option" || canonical === "setw" || canonical === "set-window-option") && argv.includes("-g")) {
+    throw new UnsafeTmuxCommand(`tmux ${canonical} -g 会改用户全局配置，禁止`);
   }
   return argv;
+}
+
+/**
+ * The session a tmux target names: `<name>`, `<name>:@id` and `<name>:%id` all
+ * name the same session, and that is the field the scope check compares.
+ */
+function sessionPartOf(target: string): string {
+  const at = target.indexOf(":");
+  return at < 0 ? target : target.slice(0, at);
 }
 
 /**
@@ -309,7 +330,7 @@ export function buildNewSessionArgv(opts: ScopeWindowOptions): readonly string[]
     "-F",
     "#{window_id} #{pane_id}",
     ...(opts.command ?? ["pi"]),
-  ], { ownSession: session });
+  ], { ownSessions: [session] });
 }
 
 /** Open ONE MORE window (`@id`) in the session the caller owns. */
@@ -327,7 +348,7 @@ export function buildNewWindowArgv(opts: ScopeWindowOptions): readonly string[] 
     "-F",
     "#{window_id} #{pane_id}",
     ...(opts.command ?? ["pi"]),
-  ], { ownSession: session });
+  ], { ownSessions: [session] });
 }
 
 /**
@@ -355,7 +376,7 @@ export function buildSetSessionOwnerArgv(ownSession: string, owner: string): rea
   const session = requireOwnSession(ownSession, "ownSession");
   return assertSafeTmuxArgv(
     ["set", "-t", session, SESSION_OWNER_OPTION, owner],
-    { ownSession: session },
+    { ownSessions: [session] },
   );
 }
 
@@ -365,7 +386,7 @@ export function buildSetSessionOwnerArgv(ownSession: string, owner: string): rea
  */
 export function buildReadSessionOwnerArgv(ownSession: string): readonly string[] {
   const session = requireOwnSession(ownSession, "ownSession");
-  return assertSafeTmuxArgv(["show-options", "-t", session, "-qv", SESSION_OWNER_OPTION], { ownSession: session });
+  return assertSafeTmuxArgv(["show-options", "-t", session, "-qv", SESSION_OWNER_OPTION], { ownSessions: [session] });
 }
 
 /**
@@ -381,7 +402,7 @@ export function buildKillWindowArgv(ownSession: string, windowId: string): reado
   if (!isWindowId(windowId)) {
     throw new UnsafeTmuxCommand(`不是合法的 tmux window id（形如 @12）：${JSON.stringify(windowId)}`);
   }
-  return assertSafeTmuxArgv(["kill-window", "-t", `${session}:${windowId}`], { ownSession: session });
+  return assertSafeTmuxArgv(["kill-window", "-t", `${session}:${windowId}`], { ownSessions: [session] });
 }
 
 /**
@@ -395,7 +416,7 @@ export function buildKillWindowArgv(ownSession: string, windowId: string): reado
  */
 export function buildKillSessionArgv(ownSession: string): readonly string[] {
   const session = requireOwnSession(ownSession, "ownSession");
-  return assertSafeTmuxArgv(["kill-session", "-t", session], { ownSession: session });
+  return assertSafeTmuxArgv(["kill-session", "-t", session], { ownSessions: [session] });
 }
 
 /**

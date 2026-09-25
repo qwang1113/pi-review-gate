@@ -3102,8 +3102,7 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
     "the raw runner is imported under a name nothing can call by accident");
   assert.equal((SRC.match(/const runTmux = /g) ?? []).length, 1,
     "exactly ONE wrapper defines this session's runTmux");
-  assert.match(SRC, /rawTmux\(argv, env \?\? process\.env, \{ ownSession: ownSessionName\(tmuxScope\) \}\)/,
-    "…and it attaches the declaration lib/session-tmux-scope.ts derived for this process");
+  assert.match(SRC, /const runTmux = \(argv: readonly string\[\], env\?: NodeJS\.ProcessEnv\) =>[\s\S]{0,200}rawTmux\(argv, env \?\? process\.env, \{[\s\S]{0,200}ownSessions: addressableSessions\(tmuxScope,/, "…and it attaches the sessions lib/session-tmux-scope.ts derived for this process");
   // The wrapper's body is the ONLY call: anything else calling the raw runner
   // directly is a path with no declaration at all.
   assert.equal((SRC.match(/rawTmux\(/g) ?? []).length, 1, "only the wrapper calls the raw runner");
