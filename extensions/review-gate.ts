@@ -49,9 +49,8 @@
 import {
   existsSync, statSync, readFileSync, writeFileSync, rmSync,
   mkdirSync, readdirSync, writeSync,
-  watch as fsWatch, type FSWatcher,
 } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve, basename as pathBasename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -126,11 +125,7 @@ import {
 } from "../lib/judge-process.ts";
 import {
   judgeWorkDirFor,
-  judgeWorkDirBasename,
-  legacyJudgeWorkDirBasename,
-  selectStaleJudgeSessionDirs,
   isBlockingSeverity,
-  JUDGE_SESSIONS_RELDIR,
 } from "../lib/judge-lifecycle.ts";
 import {
   createProgressReporter,
@@ -161,7 +156,6 @@ import {
 } from "../lib/channel-io.ts";
 import {
   isStalled,
-  HEARTBEAT_STALE_MS,
   projectChannel,
   readChannel,
   reportConclusion,
@@ -169,25 +163,12 @@ import {
   type ReportConclusion,
 } from "../lib/channel-projection.ts";
 import type { ChannelRecord, ChannelReportRecord, ChildReportedState } from "../lib/channel-records.ts";
-import {
-  acknowledgeInstruct,
-  askThroughChannel,
-  bindingPath,
-  decideReportedChildState,
-  describeToolActivity,
-  pendingInstructions,
-  reportState,
-  type ChannelDialogOutcome,
-  type ChannelDialogRequest,
-  type ChildChannelBinding,
-} from "../lib/orchestrator-child-channel.ts";
-import { supervisionTarget } from "../lib/orchestration-id.ts";
-import { emptyHierarchy, findJudgeLane, judgeChildRecordOf, judgeLive, listByOpener, loadHierarchySliceOnce, paneCoordsOf, paneIdUsable, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
+import { describeToolActivity, reportState } from "../lib/orchestrator-child-channel.ts";
+import { findJudgeLane, judgeChildRecordOf, judgeLive, paneCoordsOf, paneIdUsable, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
   decideJudgeRotation,
   judgeObjectId,
   judgeRemembersPreviousRound,
-  laneOfEntry,
   rotationHandoffTask,
   type JudgeRotationDecision,
 } from "../lib/judge-rotation.ts";
@@ -196,7 +177,6 @@ import {
   JUDGE_OPENER_ENV,
   JUDGE_ROLE_ENV,
   judgePaneAlive,
-  listServerPanes,
 } from "../lib/judge-pane.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import {
@@ -216,27 +196,14 @@ import {
   sanitizeScopeRecord,
   type TmuxScope,
 } from "../lib/session-tmux-scope.ts";
-// The ONE pane-identity renderer (2026-09-18): what a pane border calls THIS
-// session when it opens a judge.
-import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import {
   readJudgeSideEnv,
   JUDGE_TASK_ENV,
   JUDGE_STREAM_ENV,
 } from "../lib/judge-side.ts";
-import {
-  PRESENCE_FILENAME,
-  PRESENCE_HEARTBEAT_MS,
-  checkSessionExclusivity,
-  claimsMainSidecar,
-  gateStateWriteSkip,
-  parsePresence,
-  presenceFor,
-  presenceIsOurs,
-  type PresenceRecord,
-} from "../lib/session-exclusivity.ts";
+import { claimsMainSidecar, gateStateWriteSkip } from "../lib/session-exclusivity.ts";
 import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
-import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
+import { registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
 import { runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
 import {
@@ -246,20 +213,9 @@ import {
   type UserNotifyOutcome,
 } from "../lib/user-notify.ts";
 import { createUserNotifyRuntime } from "../lib/user-notify-runtime.ts";
-import { isOwnedChildPane } from "../lib/orchestrator-delivery.ts";
-import {
-  foldBackgroundWaits,
-  hasBackgroundWaits,
-  NO_BACKGROUND_WAITS,
-  type BackgroundWaits,
-} from "../lib/background-wait.ts";
 // The delivery probe a judge spawn shares with an orchestration spawn: same
 // polling, same evidence, same verdict — only the channel path differs.
-import { alivePanes, channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-kit.ts";
-// STOP-FIRST, THEN SPEAK (2026-09-21): the two-step an `interrupt` has to be,
-// and the reason it is a module rather than four lines here — the ordering is
-// the whole fix (lib/interrupt-delivery.ts carries the measured deadlock).
-import { deliverInterrupt } from "../lib/interrupt-delivery.ts";
+import { channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-kit.ts";
 // WORKER PANES (2026-09-21): the tmux-pane replacement for the pi-subagents
 // `Agent` tool. Four tools on the agent surface, one on the worker surface,
 // and the pane factory they both go through.
@@ -288,7 +244,6 @@ import {
   CHILD_OF_ORCHESTRATOR_DIRECTIVE,
   ORCHESTRATOR_NEEDS_TMUX,
   buildOrchestratorExitBlock,
-  buildOrchestratorResume,
 } from "../lib/orchestrator-directives.ts";
 import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
 import { formatPlanSummary, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
@@ -332,23 +287,13 @@ import { runAuditRound, type RunAuditRoundDeps } from "../lib/audit-round.ts";
 import { settleAuditRound, type SettleAuditRoundDeps } from "../lib/audit-round-settle.ts";
 import {
   roundBindingFor,
-  roundHasReported,
   type RoundBinding,
 } from "../lib/audit-round-report.ts";
 import {
   GOAL_AUDIT_SPEC,
   PLAN_AUDIT_SPEC,
-  type PendingAudit,
 } from "../lib/audit-round-specs.ts";
 
-import {
-  decideSupervisionEvents,
-  reportedDoneIds,
-  superviseChildren,
-  type SupervisionMemory,
-  type SupervisionSnapshot,
-} from "../lib/orchestrator-supervisor.ts";
-import { formatChildHealth } from "../lib/orchestrator-child-state.ts";
 
 import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
 import {
@@ -361,7 +306,7 @@ import {
 // long block (orchestrator_wait / judge_wait) instead of being queued behind it.
 import { notifyUserInput } from "../lib/poll-wait.ts";
 
-import { formatInheritanceBrief, handoffGeneration, isHandoffSuccessorOf, PREDECESSOR_SESSION_ENV, readInheritance, stateOwnership, successorEnv, successorSessionId } from "../lib/session-inheritance.ts";
+import { formatInheritanceBrief, handoffGeneration, isHandoffSuccessorOf, readInheritance, stateOwnership, successorEnv, successorSessionId } from "../lib/session-inheritance.ts";
 import {
   childWorktreeBranch,
   childWorktreePath,
@@ -459,7 +404,6 @@ import {
 import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   decideQualityHold,
-  isSkippedQualityRecord,
   QUALITY_ROLE,
   qualityPrecondition,
   qualityRoundSkip,
@@ -485,7 +429,6 @@ import {
 } from "../lib/acceptance-round.ts";
 import {
   modelChainFor,
-  writeJudgeSpawnFiles,
   JUDGE_ROLES,
   SUBMITTABLE_JUDGE_ROLES,
 } from "../lib/judge-prompt.ts";
@@ -494,6 +437,12 @@ import type { Ref, SessionHost } from "../lib/session-host.ts";
 import { createStatusStrip } from "../lib/status-strip.ts";
 import { createEditTimeChecks } from "../lib/edit-time-checks.ts";
 import { appendAuditLog, createArbitrationHost } from "../lib/arbitration-host.ts";
+import { createChildSide } from "../lib/child-side-host.ts";
+import { createOrchestratorRuntime } from "../lib/orchestrator-runtime-host.ts";
+import { createJudgeRegistry, HIERARCHY_FILENAME } from "../lib/judge-registry-host.ts";
+import { createReviewTargets } from "../lib/review-target-host.ts";
+import { createJudgeLaunch } from "../lib/judge-launch-host.ts";
+import { createWorktreePresence } from "../lib/worktree-presence-host.ts";
 import { asChoiceHost, createGateDialogs, showToUser } from "../lib/gate-dialogs.ts";
 import { createDialogProxy } from "../lib/dialog-proxy.ts";
 import {
@@ -664,11 +613,6 @@ import {
   type StallState,
 } from "../lib/loop-stall.ts";
 import {
-  decideRevival,
-  buildRevivalMessage,
-  REVIVAL_INTERVAL_MS,
-} from "../lib/session-revival.ts";
-import {
   applyAgentConfigLayer,
   KNOWN_AGENTS,
   resolvePackageAgentsDir,
@@ -687,17 +631,6 @@ import {
   frontmatterBlock,
 } from "../lib/agent-frontmatter.ts";
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-spec.ts";
-import {
-  clearModelFailure,
-  describeCoolingSlot,
-  modelKeyOf,
-  pruneModelHealth,
-  recordModelFailure,
-  selectHealthySlot,
-  type ModelEvent,
-  type ModelHealth,
-  type SlotChoice,
-} from "../lib/model-health.ts";
 import { createModelRotation } from "../lib/judge-model-rotation.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
 // The model allowlist is consulted by the diagnosis module, not here.
@@ -1849,131 +1782,30 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- the CHILD side of the supervision channel ----------
   //
-  // A session spawned by an orchestrator reports on ONE file that belongs to
-  // it alone, and reads its instructions from the same file. The agent in
-  // this session knows nothing about any of it: everything below is done by
-  // the gate, on pi's own events, which is the whole reason it can be
-  // trusted. (The ORCHESTRATOR side is lib/orchestrator-supervisor.ts.)
-  //
-  // A session with no orchestration address has no binding at all and every
-  // function here is a silent no-op — a standalone session reports nowhere.
+  // The heartbeat, the channel watcher, the instruction drain and the dialog
+  // race live in lib/child-side-host.ts; this is only the wiring.
 
   const channelIO: ChannelIO = nodeChannelIO();
 
-  /** This session's channel, or undefined when it is not somebody's child. */
-  function childBinding(): ChildChannelBinding | undefined {
-    const orchestrationId = supervisionTarget();
-    const childId = process.env[STATE_VARIANT_ENV]?.trim();
-    if (orchestrationId && childId) {
-      // Only the pane the gate itself opened may call itself this child. A
-      // background subagent inherits the env vars but runs under a random pi
-      // session id, not the deterministic rg-child-<childId> — the check is
-      // in lib/orchestrator-delivery.ts (isOwnedChildPane) and it is what
-      // keeps the subagent's gate from binding its parent's channel and
-      // overwriting the parent's reports with idle heartbeats (2026-09-09).
-      if (!isOwnedChildPane(childId, state.sessionId)) {
-        return undefined;
-      }
-      return {
-        io: channelIO,
-        target: { orchestrationId, childId },
-        ...(state.sessionId ? { sessionId: state.sessionId } : {}),
-      };
-    }
-    // Judge panes talk through the SAME file shape under their opener id:
-    // a judge pane is a child process with a gate, not a second channel.
-    // (Heartbeat, dialog race and round-task drain all funnel through this
-    // binding, so they work for judges with no further wiring.)
-    //
-    // A WORKER PANE JOINS THE SAME LIST (2026-09-21), and this one branch is
-    // the whole of its channel story: `ask_user` inside the worker reaches the
-    // opener through the dialog race, and `worker_submit`'s message to a live
-    // worker is injected by the child-side drain — both without a line of
-    // worker-specific transport.
-    const workerSide = readWorkerSideEnv(process.env);
-    if (workerSide) {
-      return {
-        io: channelIO,
-        target: { orchestrationId: workerSide.openerId, childId: `worker-${workerSide.workerId}` },
-        ...(state.sessionId ? { sessionId: state.sessionId } : {}),
-      };
-    }
-    const judgeSide = readJudgeSideEnv(process.env);
-    if (!judgeSide) return undefined;
-    return {
-      io: channelIO,
-      target: judgeChannelTarget(judgeSide.openerId, judgeSide.judgeId),
-      ...(state.sessionId ? { sessionId: state.sessionId } : {}),
-    };
-  }
+  const {
+    childBinding,
+    reportChildState,
+    noteChildProgress,
+    noteToolActivity,
+    foldBackgroundWait,
+    observeBackgroundToolResult,
+    startChildHeartbeat,
+    stopChildHeartbeat,
+    drainChildInstructions,
+    askEitherSide,
+  } = createChildSide(host, {
+    pi,
+    channelIO,
+    activeJudgeWait: () => activeJudgeWait(),
+    isJudgePane: () => isJudgePane(),
+    noteJudgeTaskText: (text, roundSeq) => noteJudgeTaskText(text, roundSeq),
+  });
 
-
-
-  /**
-   * Is a JUDGE this session dispatched still running, and since when?
-   *
-   * This is the fact that turns silence into a statement. The gate is the one
-   * that opened the judge, so it does not have to infer anything: the pane
-   * is in its own registry, and a listed pane id is liveness (probed from
-   * its window when it matters).
-   *
-   * `ownLiveJudges()` and not `ownJudges()`: the registry is now the PERSISTED
-   * table, so it also offers back this opener's judges from a previous
-   * process, whose panes died with it. Reporting one of those as "a judge is
-   * running" would leave the session waiting forever on a pane nobody can
-   * answer from — the Map this replaced could not say that because a restart
-   * emptied it.
-   */
-  function activeJudgeWait(): { role: string; since: number } | undefined {
-    for (const judge of ownLiveJudges()) {
-      // A pane id on record is intent, not liveness: a dead pane stays
-      // listed until it is recovered or closed. The channel decides — a
-      // report newer than the spawn means this round is over.
-      if (judgeRoundReported(judge)) continue;
-      const since = Date.parse(judge.spawnedAt);
-      return { role: judge.role, since: Number.isFinite(since) ? since : Date.now() };
-    }
-    // A `copilot_review` call blocking on GitHub is the same kind of fact: a
-    // wait the gate itself owns, not a stop.
-    if (copilotWaitSince !== undefined) return { role: "copilot", since: copilotWaitSince };
-    return undefined;
-  }
-
-
-  /**
-   * Has this judge answered the round it is CURRENTLY on?
-   *
-   * It used to be "a report newer than the pane's spawn", which is the second
-   * timestamp comparison the round binding exists to delete — and it was wrong
-   * in the ordinary case: the pane outlives the round, so round 1's leftover
-   * report is newer than the spawn and made a judge that had just been handed
-   * round 2 read as finished (reviewer P2, 2026-09-05). The question is the
-   * engine's, so the answer is too.
-   */
-  function judgeRoundReported(judge: JudgeEntry): boolean {
-    try {
-      const target = judgeChannelTarget(judge.openerId, judge.judgeId);
-      const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-      return roundHasReported(
-        read.records,
-        roundBindingOf({ judgeId: judge.judgeId, role: judge.role, repoRoot: judge.repoRoot }),
-        judge.lastReportId,
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  /** Newest channel activity for one judge, or undefined when unreadable. */
-  function channelLastActivity(judge: JudgeEntry): string | undefined {
-    try {
-      const target = judgeChannelTarget(judge.openerId, judge.judgeId);
-      const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-      return projectChannel(read.records).lastActivityAt;
-    } catch {
-      return undefined;
-    }
-  }
 
 
   /** Open question ids already announced (in-memory; a restart re-announces — desired). */
@@ -2005,606 +1837,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ends exactly one way — the judge calls judge_conclude (judge-side-only tool), which
   // appends the channel report itself. See lib/judge-conclude.ts.
 
-  /**
-   * Tell the orchestration what this session is doing.
-   *
-   * Called from `agent_settled`, `turn_end` AND the independent heartbeat
-   * timer — pi's own truth, never a heuristic about a terminal.
-   * `ctx.isIdle()` separates "still streaming" from "stopped", and the gate's
-   * own completion record separates "stopped" from "finished": a child that
-   * ran `declare_done` is `done`, and one that merely went quiet is `idle`.
-   * That distinction is the entire fix for R3-5, where a finished child was
-   * classified `working` and produced no event for 725 seconds.
-   *
-   * ── WAITING-JUDGE (round-4 P0) ──
-   *
-   * A judge round of its own outranks both `working` and `idle`, and it has
-   * to, because BOTH readings were wrong while one was running: streaming
-   * inside `judge_wait` reported `working` while the heartbeat died with it
-   * (⇒ `stalled` ⇒ an `interrupt` suggestion aimed at a live review round),
-   * and a child that dispatched a judge and settled reported `idle` — "it
-   * stopped" — about a session doing exactly what it should. The gate knows
-   * which judge and since when, so it says so.
-   *
-   * THROTTLED, because the heartbeat calls it every tick: a record is written
-   * when the state CHANGES or when the last one is old enough to be worth
-   * refreshing. Without that the channel would grow a line every few seconds
-   * for no new information — and `lastStateSince` (how long a state has held)
-   * is computed from an unbroken run of identical states, so re-reporting is
-   * cheap but not free.
-   */
-  function reportChildState(
-    ctx: ExtensionContext,
-    note?: string,
-    opts: { force?: boolean; state?: ChildReportedState } = {},
-  ): void {
-    const binding = childBinding();
-    if (!binding) return;
-    const streaming = ctx.isIdle?.() === false || ctx.hasPendingMessages?.() === true;
-    const percent = contextPercentOf(ctx as unknown as { getContextUsage?: () => unknown });
-    const judging = activeJudgeWait();
-    // Waiting on a background agent the child itself spawned is work, not a
-    // stop (lib/background-wait.ts): without it, a child whose turn ended
-    // while its subagent ran reported `idle` and the orchestrator read
-    // "停下了（没有 declare_done）" for a wait it started itself.
-    const waitingOnBackground = hasBackgroundWaits(backgroundWaits);
-    const reported = decideReportedChildState({
-      forced: opts.state,
-      judging: judging !== undefined,
-      streaming,
-      waitingOnBackground,
-      completedAt: state.completion?.at,
-    });
-    const now = Date.now();
-    const changed = reported !== lastReportedChildState || lastToolActivity !== lastReportedActivity;
-    if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
-    lastReportedChildState = reported;
-    lastReportedActivity = lastToolActivity;
-    lastChildReportAt = now;
-    const settledSince = lastSettledAt !== undefined && toolCallsSinceSettle === 0 ? lastSettledAt : undefined;
-    reportState(
-      binding,
-      reported,
-      {
-        ...(percent === undefined ? {} : { contextPercent: Math.round(percent) }),
-        ...(judging ? { waitingFor: judging.role } : {}),
-        ...(note === undefined ? {} : { note }),
-        // E — the progress stamp rides on EVERY report (heartbeat included), so
-        // a `working` child re-reported on a timer keeps its last real-progress
-        // time. It only advances on a genuine agent event (see noteChildProgress).
-        ...(lastChildProgressAt === undefined ? {} : { lastProgressAt: new Date(lastChildProgressAt).toISOString() }),
-        // …and the STRUCTURAL half: present only while the child's last turn
-        // has ENDED and nothing has run since (user decision, 2026-09-10).
-        // A supervisor may act on `idle` the moment it sees this, without
-        // waiting out the confirmation window.
-        ...(settledSince === undefined ? {} : { settledSince }),
-        // WHAT it is doing, for a manager that has only the state word to go on
-        // (2026-09-17, user decision): `working · 自上次推进 3200s` cannot tell
-        // "reading a large tree" from "spinning on the same search".
-        ...(lastToolActivity === undefined ? {} : { activity: lastToolActivity }),
-      },
-    );
-  }
-
-  /** How often the heartbeat ticks (drain + a state refresh when it is due). */
-  const CHILD_HEARTBEAT_MS = 10_000;
-  /** How stale an unchanged state report may get before it is rewritten. */
-  const CHILD_STATE_REFRESH_MS = 60_000;
-  let childHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
-  /**
-   * The fast path for incoming instructions: a watch on this child's OWN
-   * channel file (see {@link watchOwnChannel}).
-   */
-  let childChannelWatcher: FSWatcher | undefined;
-  /** True while a drain is mid-flight — the re-entrancy guard. */
-  let drainingInstructions = false;
-  /**
-   * The child-side interrupt source: an instruct (interrupt/steer) fires it
-   * to dismiss an OPEN dialog as INTERRUPTED before the message is injected.
-   * Wired into askThroughChannel's `interruptSignal`, so the box comes down
-   * and the waiting request settles by:"interrupted" — never read as a user
-   * rejection, never as consent.
-   */
-  let gateInterruptController: AbortController = new AbortController();
-  /**
-   * The signal a dialog currently open listens to for an instruct interrupt.
-   * Every dialog gets the CURRENT controller's signal; drain aborts that
-   * controller and installs a fresh one, so one interrupt dismisses the dialog
-   * open AT THAT MOMENT and never a later one.
-   */
-  function currentInterruptSignal(): AbortSignal {
-    return gateInterruptController.signal;
-  }
-  let lastChildReportAt = 0;
-  let lastReportedChildState: ChildReportedState | undefined;
-  /**
-   * The activity line last written to the channel.
-   *
-   * Tracked so a NEW tool call republishes the state at once instead of
-   * waiting out `CHILD_STATE_REFRESH_MS` — a receipt that says "working · 最近
-   * read(x)" while the child has been running `make test` for a minute is
-   * exactly the staleness this field exists to remove.
-   */
-  let lastReportedActivity: string | undefined;
-  /**
-   * Epoch ms of the child's last FORWARD PROGRESS (E). Advanced ONLY by a real
-   * agent event — a tool result or a turn boundary — never by the heartbeat, so
-   * a `working` child that keeps turning the crank shows a small "no progress"
-   * reading while one wedged in place shows a growing one. Undefined until the
-   * first event, so a booting session is not reported as stuck.
-   */
-  let lastChildProgressAt: number | undefined;
-  /** Stamp forward progress. Called from the agent-event handlers, not the heartbeat. */
-  function noteChildProgress(kind: "tool" | "settled" = "tool"): void {
-    if (!childBinding()) return;
-    lastChildProgressAt = Date.now();
-    if (kind === "settled") {
-      lastSettledAt = new Date(lastChildProgressAt).toISOString();
-      toolCallsSinceSettle = 0;
-      return;
-    }
-    // A tool result (or a turn boundary that may still be followed by more
-    // work) means the child is AT WORK: whatever settle we were holding is no
-    // longer its current state, and the stamp is dropped.
-    toolCallsSinceSettle += 1;
-    lastSettledAt = undefined;
-  }
-
-  /**
-   * THE CHILD'S OWN "I STOPPED" EVIDENCE (2026-09-10, user decision).
-   *
-   * `agent_settled` is the one event that says a turn is OVER rather than
-   * paused — pi will not continue on its own — and anything that runs after it
-   * (a tool result, the next turn's boundary) is work RESUMED, which clears
-   * the stamp. The pair is what the supervisor reads as `settledSince`, and it
-   * is why `idle` no longer has to be confirmed by a 120s silence window:
-   * "settled with nothing run since" cannot be true in the middle of a
-   * bash → read → bash investigation, which is exactly the measurement that
-   * window was introduced for (2026-09-04).
-   */
-  let lastSettledAt: string | undefined;
-  let toolCallsSinceSettle = 0;
-  /**
-   * Background agents this session spawned that have not reported a terminal
-   * state yet (lib/background-wait.ts owns the start/end contract). While
-   * non-empty the child reports `working` even when its own turn has ended —
-   * waiting on its own subagent is work, not a stop.
-   */
-  let backgroundWaits: BackgroundWaits = NO_BACKGROUND_WAITS;
-  /**
-   * The most recent tool call this session made, rendered for the receipt.
-   *
-   * WHY IT RIDES ON `tool_call` AND NOT `tool_result`: the question the
-   * manager is asking is "what is it doing RIGHT NOW", and the call is placed
-   * before the work starts — the result can be minutes later, and a child
-   * whose tool has been running for ten minutes should read as "running
-   * `bash(make test)`", not as the last thing that already finished.
-   * (lib/orchestrator-child-channel.ts `describeToolActivity` renders it.)
-   */
-  let lastToolActivity: string | undefined;
-  /** Feed one tool result into the background-wait fold (see the module). */
-  function observeBackgroundToolResult(event: {
-    toolName: string;
-    isError: boolean;
-    content: readonly { type?: string; text?: string }[];
-    input?: Record<string, unknown>;
-  }): void {
-    const text = event.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
-    // pi-subagents' `run_in_background` defaults to true; only an explicit
-    // false is a foreground call, whose result can never start a wait.
-    const raw = event.input?.run_in_background;
-    const runInBackground = raw === true ? true : raw === false ? false : undefined;
-    backgroundWaits = foldBackgroundWaits(backgroundWaits, {
-      kind: "tool_result",
-      tool: { toolName: event.toolName, isError: event.isError === true, text, runInBackground },
-    });
-  }
-  /**
-   * Instructions this session has already acknowledged as RECEIVED.
-   *
-   * In memory rather than derived from the channel because the receipt is
-   * written once per instruction: the projection deliberately keeps an
-   * instruction pending until it is INJECTED, so re-reading it would make the
-   * heartbeat append a duplicate `received` on every tick.
-   */
-  const acknowledgedReceipts = new Set<string>();
-
-
-  /**
-   * THE HEARTBEAT — an independent timer, and the whole point is what it does
-   * NOT depend on.
-   *
-   * Reporting used to ride on `agent_settled` and `turn_end`, which are AGENT
-   * events: they do not fire during a `judge_wait`, a full precommit, or any
-   * long tool call, because all of those happen inside one turn. So the
-   * channel went silent for minutes at a time while the process was perfectly
-   * healthy, the supervisor's 180-second budget expired, and a working child
-   * was reported as lost — twice in one run, ~14 minutes, with `interrupt`
-   * offered as the remedy (round-4 P0, the one defect where following the
-   * gate's own advice made things worse).
-   *
-   * A timer owned by the extension cannot have that failure mode: it ticks
-   * while the agent is blocked, so `stalled` goes back to meaning what it
-   * says — the extension itself is gone.
-   *
-   * It also drains instructions, which is what makes `followUp` deliverable
-   * to a BUSY child: the orchestrator's message is acknowledged within one
-   * tick instead of waiting for the agent to settle (round-4 P1 — a message
-   * that was written, never acknowledged, and silently lost).
-   */
-  function startChildHeartbeat(ctx: ExtensionContext): void {
-    if (childHeartbeatTimer || !childBinding()) return;
-    childHeartbeatTimer = setInterval(() => {
-      const live = latestCtx ?? ctx;
-      try {
-        reportChildState(live);
-      } catch { /* a heartbeat must never break the session it reports on */ }
-      void drainChildInstructions(live).catch(() => { /* best effort */ });
-      // Self-heal: the channel file may not have existed when this session
-      // started, and a watcher that could not be installed then can be now.
-      watchOwnChannel(live);
-    }, CHILD_HEARTBEAT_MS);
-    watchOwnChannel(ctx);
-  }
-
-  /**
-   * DRAIN ON WRITE, NOT ON THE NEXT TICK (2026-09-10).
-   *
-   * MEASURED (this repo's own channels): an `orchestrator_instruct` reached
-   * its child in p50 4.79s / p90 9.11s, because the ONLY thing that read a
-   * child's channel was the 10s heartbeat — a message written just after a
-   * tick waited almost a whole interval. That latency sits on the one path
-   * the orchestrator uses to talk to its children, and it is pure waiting:
-   * the orchestrator has already written the file by the time this fires.
-   *
-   * THE TICK STAYS, and not out of tradition: a watcher may fail to install
-   * (no channel file yet), may miss (a file REPLACED rather than appended to
-   * leaves the watch on a dead inode), and is not available everywhere. The
-   * 10s tick is what makes every one of those harmless, and the re-entrancy
-   * guard in `drainChildInstructions` what makes a watcher firing beside it
-   * safe. The watcher is the fast path, never the only path.
-   */
-  function watchOwnChannel(ctx: ExtensionContext): void {
-    if (childChannelWatcher) return;
-    const binding = childBinding();
-    if (!binding) return;
-    let path: string;
-    try { path = bindingPath(binding); } catch { return; }
-    try {
-      const watcher = fsWatch(path, () => {
-        void drainChildInstructions(latestCtx ?? ctx).catch(() => { /* best effort */ });
-      });
-      // A watcher must never be the reason the process stays alive, and a
-      // watcher that errors is dropped so the next tick reinstalls it.
-      watcher.unref?.();
-      watcher.on("error", () => { stopChildChannelWatcher(); });
-      childChannelWatcher = watcher;
-    } catch { /* no file yet, or no watch support ⇒ the tick still covers it */ }
-  }
-
-  function stopChildChannelWatcher(): void {
-    if (childChannelWatcher) {
-      try { childChannelWatcher.close(); } catch { /* already gone */ }
-    }
-    childChannelWatcher = undefined;
-  }
-
-  function stopChildHeartbeat(): void {
-    if (childHeartbeatTimer) clearInterval(childHeartbeatTimer);
-    childHeartbeatTimer = undefined;
-    stopChildChannelWatcher();
-  }
-
   // ---------- ONE gate session per worktree (lib/session-exclusivity.ts) ----------
-
-  /** This worktree's presence file — beside the sidecar it protects. */
-  function presencePath(root: string): string {
-    return pathJoin(root, ".pi", PRESENCE_FILENAME);
-  }
-
-  /** The record on disk, or undefined when absent/unreadable/corrupt. */
-  function readPresence(root: string): PresenceRecord | undefined {
-    try { return parsePresence(readFileSync(presencePath(root), "utf8")); }
-    catch { return undefined; }
-  }
-
-  let presenceTimer: ReturnType<typeof setInterval> | undefined;
-
-  /**
-   * Hold this worktree: write the heartbeat now, then keep it fresh.
-   *
-   * Only a session that PASSED the check calls this. A refused one must never
-   * write the file — that would take the claim away from the session that
-   * actually holds it.
-   */
-  function holdWorktree(): void {
-    const write = () => {
-      const sessionId = state.sessionId;
-      if (!sessionId) return;
-      try {
-        writeFileAtomic(presencePath(cwd), JSON.stringify(presenceFor(sessionId, process.pid, hostname(), Date.now())));
-      } catch { /* best effort: a missed heartbeat lapses, it never blocks work */ }
-    };
-    write();
-    if (presenceTimer) clearInterval(presenceTimer);
-    presenceTimer = setInterval(write, PRESENCE_HEARTBEAT_MS);
-    // The heartbeat must not hold the process open on its own.
-    presenceTimer.unref?.();
-  }
-
-  /** Stop holding, and drop the claim if it is OURS (never somebody else's). */
-  function releaseWorktree(): void {
-    if (presenceTimer) clearInterval(presenceTimer);
-    presenceTimer = undefined;
-    if (!presenceIsOurs(readPresence(cwd), state.sessionId)) return;
-    try { rmSync(presencePath(cwd), { force: true }); } catch { /* the window lapses anyway */ }
-  }
-
-  /**
-   * Decide whether this session may work in this worktree, and act on it.
-   *
-   * Refused ⇒ the refusal is put on the state, where `unmetRequirements`
-   * (the authority every ship path shares) turns it into a block, and where
-   * the edit gate reads it. Allowed ⇒ this session takes the claim.
-   */
-  function applySessionExclusivity(ctx?: ExtensionContext): void {
-    // The HEIR of the current holder takes over (2026-09-10): a successor
-    // started by `orchestrator_handoff` runs in this same worktree ON PURPOSE
-    // — that is how one orchestration keeps reaching its children — so
-    // refusing it would kill the very handoff it exists to complete. It says
-    // so by naming the session it replaces, which it carries in its own
-    // environment.
-    const successorOf = (process.env[PREDECESSOR_SESSION_ENV] ?? "").trim() || undefined;
-    const verdict = checkSessionExclusivity({
-      env: process.env,
-      sessionId: state.sessionId,
-      existing: readPresence(cwd),
-      ...(successorOf ? { successorOf } : {}),
-      repoRoot: cwd,
-      now: Date.now(),
-    });
-    if (!verdict.ok) {
-      // `normal` is the mode whose DEFINING behavior is that the gate is off:
-      // both the edit guard and the bash ship gate return before any of this
-      // could bite (lib/ship-gate-edit-guard.ts, lib/ship-gate-bash.ts). So no
-      // refusal is raised here — it would be a message naming a rule the
-      // session is not subject to.
-      //
-      // But it does NOT take the claim either: the record belongs to the
-      // session that holds this worktree, and overwriting it with our own id
-      // would both steal the holder's protection and make our own exit delete
-      // it (`presenceIsOurs` would say yes) — reviewer P2, 2026-09-05.
-      if (state.taskMode === "normal") {
-        delete state.exclusivityRefusal;
-        stopExclusivityRecheck();
-        return;
-      }
-      // Announce it once PER HOLDER, then keep watching: the refusal PROMISES
-      // that closing the other session is enough, so it has to be able to come
-      // back on its own. Deduped on WHO holds it, not on the text: the text
-      // carries the holder's heartbeat, which is rewritten every few seconds,
-      // so comparing the message would re-notify on every re-check tick
-      // (reviewer P2, 2026-09-05).
-      if (refusedHolderId !== verdict.holder.sessionId) {
-        refusedHolderId = verdict.holder.sessionId;
-        try { ctx?.ui.notify(verdict.reason, "error"); } catch { /* headless */ }
-      }
-      state.exclusivityRefusal = verdict.reason;
-      startExclusivityRecheck();
-      return;
-    }
-    const wasRefused = state.exclusivityRefusal !== undefined;
-    delete state.exclusivityRefusal;
-    refusedHolderId = undefined;
-    stopExclusivityRecheck();
-    if (wasRefused) {
-      try { ctx?.ui.notify("review-gate: 占用这个 worktree 的会话已消失，门禁正常启动，本会话接管这个 worktree。", "info"); }
-      catch { /* headless */ }
-    }
-    // A judge / orchestration child does not claim the worktree, so it must
-    // not write a heartbeat either — its own presence would refuse the very
-    // session that opened it.
-    if (claimsMainSidecar(process.env)) holdWorktree();
-  }
-
-  /** The refused session's own watch — the only way its refusal can lift. */
-  let exclusivityRecheckTimer: ReturnType<typeof setInterval> | undefined;
-  /**
-   * WHICH holder this session has already complained about.
-   *
-   * The dedupe key is the holder's session id, not the refusal text: the text
-   * quotes the holder's heartbeat, which is rewritten every few seconds, so a
-   * text comparison would fire a fresh error box on every re-check tick.
-   */
-  let refusedHolderId: string | undefined;
-
-  function startExclusivityRecheck(): void {
-    if (exclusivityRecheckTimer) return;
-    exclusivityRecheckTimer = setInterval(
-      () => { try { applySessionExclusivity(lastUiCtx.current); } catch { /* next tick retries */ } },
-      PRESENCE_HEARTBEAT_MS,
-    );
-    // Never hold the process open just to watch somebody else's heartbeat.
-    exclusivityRecheckTimer.unref?.();
-  }
-
-  function stopExclusivityRecheck(): void {
-    if (exclusivityRecheckTimer) clearInterval(exclusivityRecheckTimer);
-    exclusivityRecheckTimer = undefined;
-  }
-
-
-  /**
-   * Apply whatever the orchestrator has sent, through pi's OWN delivery API.
-   *
-   * `steer` / `followUp` are `sendUserMessage`'s own modes and `interrupt` is
-   * `ctx.abort()`; nothing is typed at a terminal, so nothing can be
-   * truncated, split by a newline, or read by an open dialog as a menu
-   * selection. Every one of those was measured on the `send-keys` path this
-   * replaces (F7, F8, R-20, R-13).
-   *
-   * The acknowledgement is what the orchestrator's receipt is built on, so it
-   * is written from what ACTUALLY happened — a failure is acknowledged as a
-   * failure, never omitted.
-   */
-  async function drainChildInstructions(ctx: ExtensionContext): Promise<void> {
-    const binding = childBinding();
-    if (!binding) return;
-    // RE-ENTRANCY GUARD: the heartbeat and agent_settled both drain; an
-    // `await pi.sendUserMessage()` inside one drain would let the OTHER fire
-    // while the first is still mid-flight, and the instruction would be
-    // injected twice (round-4: a message that was written, never acknowledged,
-    // and silently lost — the inverse: acknowledged twice, then acted on twice).
-    if (drainingInstructions) return;
-    drainingInstructions = true;
-    try {
-      await drainInstructionsInner(binding, ctx);
-    } finally {
-      drainingInstructions = false;
-    }
-  }
-
-  async function drainInstructionsInner(binding: ChildChannelBinding, ctx: ExtensionContext): Promise<void> {
-    for (const instruction of pendingInstructions(binding)) {
-      // STAGE ONE — "I have it". Written BEFORE anything is attempted, and
-      // exactly once per instruction, because it answers a different question
-      // than the injection does: it proves this child's gate is alive and has
-      // the message. That is the only honest bar for a `followUp`, whose whole
-      // definition is "read this when you are done" — demanding an injection
-      // from a busy child made the orchestrator's tool fail on a message that
-      // had in fact arrived, and the message was then dropped (round-4 P1).
-      if (!acknowledgedReceipts.has(instruction.instructId)) {
-        acknowledgedReceipts.add(instruction.instructId);
-        acknowledgeInstruct(
-          binding,
-          instruction.instructId,
-          true,
-          `已入队（mode=${instruction.mode}）`,
-          "received",
-        );
-      }
-      try {
-        if (instruction.mode === "interrupt") {
-          // Highest priority (2026-08-31): abort the current turn AND carry
-          // the new message, so the child stops what it was doing and reads
-          // this immediately. A bare interrupt (no text) stays a plain abort.
-          const interruptText = instructText(channelIO, instruction);
-          // Same as the steer/followUp path below: a round delivered as an
-          // interrupt still carries the range the observer records against.
-          if (isJudgePane()) noteJudgeTaskText(interruptText, instruction.roundSeq);
-          // STOP-FIRST (user decision 2026-09-01): any OPEN dialog is
-          // dismissed as INTERRUPTED before the message is injected — a
-          // goal box, a question, a consent. The controller is swapped so
-          // the NEXT dialog starts clean; the abort below additionally
-          // stops the current turn if one is running.
-          gateInterruptController.abort();
-          gateInterruptController = new AbortController();
-          if (interruptText) {
-            // STOP FIRST, THEN SPEAK — AND WAIT FOR THE STOP TO LAND
-            // (2026-09-21). `ctx.abort()` is SYNCHRONOUS on this side and does
-            // not wait for the turn to end, so handing the text to pi while the
-            // agent was still streaming queued it as `steer` — and the abort's
-            // own end-of-run skipped the drain those queued messages wait for.
-            // Measured: two judges of one round froze for 552s with the
-            // dispatch sitting unread, and the same drain serves orchestration
-            // children. lib/interrupt-delivery.ts owns the contract; this is
-            // only the pi surface.
-            const delivered = await deliverInterrupt(interruptText, {
-              abort: () => ctx.abort?.(),
-              isIdle: () => ctx.isIdle?.() === true,
-              // NO `deliverAs`: by pi's own contract that is the form which
-              // "sends immediately and triggers a new turn".
-              sendNow: (text) => pi.sendUserMessage(text),
-            });
-            // A DEFERRED DELIVERY IS NOT AN INJECTION (2026-09-21): the text is
-            // still in the channel, and the next drain retries it. Acknowledging
-            // it as `injected` is how the opener was told "delivered" about a
-            // message nobody had read — the ack says which stage was ACTUALLY
-            // reached, which is the whole point of the two-stage handshake.
-            acknowledgeInstruct(
-              binding,
-              instruction.instructId,
-              true,
-              delivered.delivered === "turn"
-                ? `已中止当前 turn，等 pane 空闲（${delivered.waitedMs}ms）后作为新一轮投递`
-                : `pane 仍在忙（已等 ${delivered.waitedMs}ms）—— 正文留在通道里，下一次 drain 再投`,
-              delivered.delivered === "turn" ? "injected" : "received",
-            );
-          } else {
-            ctx.abort?.();
-            acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
-          }
-          continue;
-        }
-        const text = instructText(channelIO, instruction);
-        // A judge pane's instructions ARE its rounds: the next round's task
-        // text is where its `baseline..HEAD` is written, so the inspection
-        // observer learns the range from the same message the judge reads.
-        if (isJudgePane()) noteJudgeTaskText(text, instruction.roundSeq);
-        if (!text) {
-          acknowledgeInstruct(
-            binding,
-            instruction.instructId,
-            false,
-            "指令没有正文（也没有可读的溢出文件）",
-            "injected",
-          );
-          continue;
-        }
-        // STOP-FIRST for steer too: it cuts INTO the current turn, so an
-        // open dialog (goal box / question / consent) must come down first —
-        // otherwise the message is injected while the child stays wedged on
-        // the box (the measured deadlock). followUp is the one mode that
-        // does NOT stop: its whole meaning is "read this when you are done".
-        if (instruction.mode === "steer") {
-          gateInterruptController.abort();
-          gateInterruptController = new AbortController();
-        }
-        pi.sendUserMessage(text, { deliverAs: instruction.mode });
-        acknowledgeInstruct(
-          binding,
-          instruction.instructId,
-          true,
-          instruction.mode === "steer"
-            ? `已解除等待并投递 (deliverAs:${instruction.mode})`
-            : `pi.sendUserMessage(deliverAs:${instruction.mode})`,
-          "injected",
-        );
-      } catch (error) {
-        acknowledgeInstruct(binding, instruction.instructId, false, (error as Error).message, "injected");
-
-      }
-    }
-  }
-
-  /**
-   * Raise a gate dialog that EITHER the human or the orchestrator may answer.
-   *
-   * This is the single funnel every gate question goes through, and it is why
-   * the orchestrator never needs to read a screen: the request — title, every
-   * option in order, and the full payload (a goal draft, a plan) — is written
-   * into the channel as data. Whoever answers first wins; the other side is
-   * cancelled, so a box the orchestrator answered DISAPPEARS from the user's
-   * screen instead of asking a question that is already settled.
-   *
-   * A session with no orchestration simply renders the dialog, exactly as it
-   * always did.
-   */
-  async function askEitherSide(
-    request: Omit<ChannelDialogRequest, "hasUI">,
-    hasUI: boolean,
-    render: (signal: AbortSignal) => Promise<string | undefined>,
-  ): Promise<ChannelDialogOutcome> {
-    const binding = childBinding();
-    if (!binding) {
-      const answer = hasUI ? await render(new AbortController().signal) : undefined;
-      return { answer, by: "human", requestId: "" };
-    }
-    // The dialog listens to the gate's interrupt source as well as its own
-    // abort: an instruct fired while it is open dismisses it as INTERRUPTED
-    // so the child can process the message instead of staying wedged on the box.
-    return askThroughChannel(binding, { ...request, hasUI }, render, currentInterruptSignal());
-  }
+  // The presence heartbeat and the refusal watch: lib/worktree-presence-host.ts.
+  const { holdWorktree, releaseWorktree, applySessionExclusivity, stopExclusivityRecheck } =
+    createWorktreePresence(host, { lastUiCtx });
 
 
   // ---------- orchestration layer (the project-manager role) ----------
@@ -3026,7 +2262,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     releaseWorktree();
     return {
       committed: () => {
-        handedOffSession = true;
+        markHandedOff();
         stopSupervisionTimer();
         stopRevivalTimer();
         stopChildHeartbeat();
@@ -3158,28 +2394,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     now: () => Date.now(),
   };
   /**
-   * Re-read the persisted judge table, MERGING IN IDS THIS SESSION HAS NEVER
-   * SEEN — the one thing a judge's handover changes under its opener's feet.
-   *
-   * A judge that runs out of room opens the next generation ITSELF (it owns no
-   * registry, but the table is a file in the repo it is already reviewing), and
-   * the new session's channel is keyed by the NEW id: without this merge the
-   * opener would keep reading the retired session's channel and never see the
-   * round's conclusion. Known ids are never overwritten — this session's own
-   * rows are newer for every judge IT opened.
-   */
-  function reloadJudgeHierarchy(root: string): void {
-    try {
-      const snap = parseHierarchySnapshot(readFileSync(pathJoin(root, ".pi", HIERARCHY_FILENAME), "utf8"));
-      if (!snap) return;
-      for (const [id, e] of Object.entries(snap.judges)) {
-        if (!judgeHierarchy[id]) judgeHierarchy[id] = e;
-      }
-      hierarchyFileRoots.add(root);
-    } catch { /* unreadable ⇒ keep what we have */ }
-  }
-
-  /**
    * THE JUDGE'S HANDOVER — a judge that ran out of room opens the next
    * generation itself, because the round is ITS to finish.
    *
@@ -3208,7 +2422,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the opener pointing at a session that no longer exists. The load is
     // idempotent, so the ordinary (already-loaded) path costs a Set lookup.
     ensureHierarchyLoaded(cwd);
-    const entry = judgeHierarchy[side.judgeId];
+    const entry = judgeHierarchy()[side.judgeId];
     const successorId = successorSessionId(side.judgeId, handoffGeneration(side.judgeId) + 1);
     const opened = await openSessionWindow(runTmux, {
       scope: tmuxScope,
@@ -3234,7 +2448,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     });
     if (!opened.ok) return { ok: false, reason: opened.error };
     if (entry) {
-      const next: HierarchyTable = { ...judgeHierarchy };
+      const next: HierarchyTable = { ...judgeHierarchy() };
       delete next[side.judgeId];
       next[successorId] = { ...entry, judgeId: successorId, paneId: opened.paneId };
       setHierarchy(next);
@@ -3277,7 +2491,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * cannot report usage is one its reader learns to ignore.
    */
   function handoffReminderBlock(): string {
-    if (handedOffSession || !state.sessionId) return "";
+    if (handedOff() || !state.sessionId) return "";
     let due: { due: boolean; percent?: number };
     try {
       due = handoffDue(latestCtx?.getContextUsage?.());
@@ -3343,105 +2557,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* headless */ }
   });
 
-  /**
-   * Constraints 3, 4 and 11 — the orchestration's own exit contract.
-   *
-   * WHY THERE IS NO DELIVERY-STATION CHECK HERE, and why adding one would be a
-   * regression rather than the missing piece it looks like (user decision,
-   * 2026-09-06). The plan carries a `deliveryStation`, so "the orchestrator's
-   * done should verify the plan reached it" reads like an obvious gap. It is
-   * not, for a reason this repo has already paid for once:
-   *
-   *  - a project manager DOES have a repo (`sessionRepos` always holds the
-   *    primary one) — but it is the ORCHESTRATION repo, where constraint 2
-   *    lets it write nothing except the plan and its handoff docs. Whether
-   *    THAT worktree is clean says nothing about whether the orchestration
-   *    reached its station; a couple of uncommitted plan notes would read as
-   *    "did not arrive", which is a fact about the wrong repo;
-   *  - the arrival evidence — a `gh pr create` the gate watched succeed
-   *    (`shippedKinds`), or a Copilot-resolved PR number — is written in the
-   *    sidecar of the repo the ship ran in, i.e. a CHILD's repo. This function
-   *    walks the MANAGER's own repos, so it can never see it.
-
-   *
-   * So an orchestration with `deliveryStation: "pr"` would be held at
-   * `declare_done` by a condition it can NEVER satisfy, while the receipt
-   * earnestly told the manager to "go open a PR". That is the worst defect
-   * class this gate can produce — following the gate's own instruction makes
-   * things worse — and it is exactly what round 4 cost when the heartbeat hung
-   * off agent events: healthy children were reported lost, and the advised
-   * `interrupt` cut a live review in half.
-   *
-   * THE DIVISION OF LABOUR, stated so nobody has to re-derive it: the plan's
-   * station is honoured by each CHILD's ship gate, at the moment a ship
-   * command runs in the repo that owns the work. At the orchestration layer a
-   * station is an AUTHORIZATION SURFACE (it bounds what a child may be given,
-   * and `orchestrator_answer` refuses a proxy confirmation looser than it); at
-   * the execution layer it is a BLOCK. The manager's exit contract stays the
-   * plan itself — every task done, no live children, no un-notified decision.
-   */
-
-  function orchestrationDoneProblems(): string[] {
-    if (state.taskMode !== "orchestrator") return [];
-    const runtime = state.orchestrator ?? emptyRuntime(currentOrchestrationId());
-    // F14 — `undefined` is UNKNOWN liveness, and it is NOT an empty pane list.
-    // This used to swallow every tmux failure into `[]`, which means "every
-    // registered pane is gone": one unreadable `list-panes` told the manager
-    // that all of its children had died. The reading itself is the SAME one
-    // the background supervisor uses — one implementation, one answer.
-    const panes = alivePaneIdsForSupervision();
-    // Completion is a CHANNEL fact, read from the same supervision snapshot the
-    // health block is rendered from (B4). Asking a registry field instead is
-    // what let one receipt call a child finished and alive in the same breath.
-    const snapshot = superviseNow(runtime, panes);
-    const reportedDone = snapshot ? reportedDoneIds(snapshot) : [];
-    return orchestratorDoneProblems({
-      plan: readPlanFile(primaryRepoRoot).plan,
-      runtime,
-      alivePaneIds: panes === undefined ? [] : [...panes],
-      ...(reportedDone.length > 0 ? { reportedDone } : {}),
-      ...(panes === undefined ? { livenessUnknown: true } : {}),
-    });
-  }
-
-  // ---- the state probe: the gate's own eyes on the children (R-16/R-23) ----
-  //
-  // The second orchestration run worked only because a HUMAN ran a
-  // `capture-pane` loop all night: three of the four situations that matter
-  // (a dialog nobody answered, a child that quietly stopped, a vanished pane)
-  // produce no event at all, so an orchestrator that waits for events waits
-  // forever. The probe manufactures those events, and this timer is what
-  // makes it fire even when the supervisor is NOT sitting inside
-  // `orchestrator_wait`.
-  // ---- THE REVIVAL TIMER (2026-08-30, survival invariant) ----
-  //
-  // The one clock the invariant rides on. `agent_settled` fires once per
-  // turn and the NEXT turn comes from THIS turn's injection, so a turn that
-  // ends under any of the six guards never gets a second chance — the
-  // event chain is broken and nothing will ever re-trigger it. The loop
-  // session heals because edits re-arm `loopArmed`; an orchestrator writes
-  // no code (constraint 2) and cannot. So the gate keeps its own minute-
-  // level clock, independent of everything the agent did.
-  let revivalTimer: ReturnType<typeof setInterval> | undefined;
-  /** When this session last injected a revival (ms epoch). */
-  let lastRevivalAt: number | undefined;
-  /**
-   * A session that HANDED OFF must not be revived, supervised or reported on
-   * again — its successor owns all of that now.
-   *
-   * Named for the act, not for the role: since 2026-09-14 every kind of
-   * session can hand over (lib/session-handoff-tools.ts), and the old
-   * `handedOffOrchestration` name was the reason three of the four guards
-   * below were written as if a loop session could never retire.
-   */
-  let handedOffSession = false;
-  let supervisionTimer: ReturnType<typeof setInterval> | undefined;
-  let orchestratorContinuations = 0;
-  /** The supervisor's own last health read, for the continuation message. */
-  let lastSupervisionHealth: ReturnType<typeof formatChildHealth> = "";
-
-  /** How often the background supervisor re-reads every child's channel. */
-  const SUPERVISION_INTERVAL_MS = 10_000;
+  // The orchestration's exit contract, the revival / supervision clocks and the
+  // orchestrator's settle continuation live in lib/orchestrator-runtime-host.ts
+  // (wired below, beside the session name whose heartbeat it also owns).
 
   /**
    * How many DECORATED child panes this session still owns — the number the
@@ -3463,302 +2581,54 @@ export default function reviewGate(pi: ExtensionAPI) {
    * and its guest test was wrong in both directions across sessions.
    */
 
-  /**
-   * What the children need from the supervisor RIGHT NOW, as text lines.
-   *
-   * The whole read is the channels — no pane is captured, no text is matched.
-   * The event memory lives in the deps (one per orchestration), so the
-   * background timer and `orchestrator_wait` share it and neither re-rings
-   * what the other has already reported.
-   */
-  function drainSupervisionNews(): string[] {
-    if (state.taskMode !== "orchestrator") return [];
-    try {
-      const runtime = orchestratorDeps.runtime();
-      const snapshot = superviseNow(runtime, alivePaneIdsForSupervision());
-      if (!snapshot) return [];
-      lastSupervisionHealth = formatChildHealth(snapshot.health);
-      const decided: { events: { summary: string }[]; memory: SupervisionMemory } =
-        decideSupervisionEvents(snapshot, orchestratorDeps.supervisionMemory(), Date.now());
-      orchestratorDeps.saveSupervisionMemory(decided.memory);
-      return decided.events.map((event) => event.summary);
-    } catch {
-      return []; // supervision is a convenience for the timer, never a gate
-    }
-  }
-
-  /**
-   * ONE supervision read — the snapshot BOTH the background timer and the
-   * injected wrap-up block are built from (B4).
-   *
-   * It is a function rather than two similar blocks because two readings of
-   * the same channels, taken in two places, is precisely the shape that let
-   * one receipt call a child finished and still-to-be-waited-for. Returns
-   * `undefined` when there is nothing to supervise (no open child).
-   */
-  function superviseNow(
-    runtime: OrchestratorRuntime,
-    livePanes: Set<string> | undefined,
-  ): SupervisionSnapshot | undefined {
-    const open = runtime.children.filter((c) => !c.closedAt);
-    if (open.length === 0) return undefined;
-    return superviseChildren({
-      orchestrationId: runtime.orchestrationId,
-      children: open,
-      livePanes,
-      io: channelIO,
-      // THE SAME CHANNEL ROOT `orchestrator_wait` READS (2026-09-22). The two
-      // agree today only because this host happens to provide no channel home,
-      // so both fall back to the agent home — a coincidence, not a guarantee:
-      // the wait passes `deps.channelHome()` and this read did not, so the
-      // moment a host binds one, the timer's 「子会话需要你」 injection and the
-      // receipt the manager checks it against would read different directories.
-      ...(orchestratorDeps.channelHome() === undefined ? {} : { home: orchestratorDeps.channelHome()! }),
-      at: Date.now(),
-    });
-  }
-
-
-  /**
-   * Pane ids that exist right now; `undefined` when tmux cannot be read.
-   *
-   * THE ONE pane reading this session takes for supervision — the wrap-up
-   * block used to take its own, which is how it ended up passing `[]` (every
-   * pane vanished) where this one says `undefined` (nothing was measured).
-   * It goes through the orchestration deps, so it carries the tmux server the
-   * rest of the gate addresses and a test can drive it.
-   */
-  function alivePaneIdsForSupervision(): Set<string> | undefined {
-    // `alivePanes` is the reading `orchestrator_wait` itself takes (argv built
-    // by lib/orchestrator-tmux.ts, output filtered by `parsePaneIds`). This
-    // used to hand-assemble the same `list-panes` call and keep every non-
-    // empty line as a pane id — a second implementation of one measurement.
-    const read = alivePanes(orchestratorDeps);
-    return read.ok ? new Set(read.panes) : undefined;
-  }
-
-  function stopSupervisionTimer(): void {
-    if (supervisionTimer) clearInterval(supervisionTimer);
-    supervisionTimer = undefined;
-  }
-
-  /**
-   * Arm the REVIVAL timer — the survival invariant for BOTH modes,
-   * every 60s. It exists to catch a session that stopped with its exit
-   * contract unmet (provider error, agent that decided it was done early).
-   *
-   * Deliberately independent of the event chain: it does not consume the
-   * continuation budget (`maxRounds`) and ignores the `loop-stall` circuit
-   * breaker — both are right for the INJECTION path they guard, and both
-   * are wrong here, where a stopped session costs nothing per minute and a
-   * silently abandoned task costs the whole run. Human stops (ESC, ask_user,
-   * bypass, arbitration pause) DO stop it — the invariant never overrides a
-   * person.
-   */
-  function startRevivalTimer(ctx: ExtensionContext): void {
-    if (revivalTimer) return;
-    revivalTimer = setInterval(() => {
-      // Same freshness rule as the child heartbeat: `latestCtx` is
-      // refreshed on every tool_call, so a stale captured ctx must never
-      // silently kill the check (a throwing isIdle would be swallowed by
-      // the catch below and the session would never be revived).
-      const live = latestCtx ?? ctx;
-      try {
-        if (state.taskMode === "explore" || state.taskMode === "normal") {
-          stopRevivalTimer();
-          return;
-        }
-        const mode = state.taskMode as "loop" | "orchestrator";
-        // P2: the problems assembly costs a fingerprint (~180ms) — pass it
-        // LAZY so the cheap guards (mode, consent, idle, throttle) run
-        // first, and only a session that might actually be revived pays.
-        let problemsCache: string[] | undefined;
-        const decision = decideRevival({
-          mode,
-          exitProblems: () => (problemsCache ??= sessionExitProblems()),
-          idle: !!live.isIdle?.(),
-          humanStop: {
-            aborted: lastRunAborted,
-            awaitingAnswer: !!state.pausedQuestion,
-            bypassed: state.bypass.active,
-            arbitrationPaused,
-          },
-          handedOff: handedOffSession,
-          // DONE by its own account: `declare_done` recorded the completion
-          // and no edit has deleted it since (an edit deletes it). Checked
-          // BEFORE the problem thunk on purpose — a finished session must not
-          // pay a worktree fingerprint every tick to be told it is finished,
-          // and the human's own merge / pull / checkout in this worktree must
-          // not re-open a contract this session already met.
-          completed: !!state.completion,
-          lastRevivalAt,
-          now: Date.now(),
-          intervalMs: REVIVAL_INTERVAL_MS,
-        });
-        if (!decision.revive) return;
-        lastRevivalAt = Date.now();
-        pi.sendUserMessage(buildRevivalMessage(mode, problemsCache ?? []), { deliverAs: "followUp" });
-      } catch { /* a revival must never break the session it revives */ }
-    }, REVIVAL_INTERVAL_MS);
-    (revivalTimer as unknown as { unref?: () => void }).unref?.();
-  }
-  function stopRevivalTimer(): void {
-    if (revivalTimer) clearInterval(revivalTimer);
-    revivalTimer = undefined;
-  }
-
-
-  /**
-   * Arm the background supervisor (default-on in orchestrator mode, 10s).
-   *
-   * It only WAKES the session when there is something a supervisor has to act
-   * on. It used to demand an IDLE project manager as well — "a wake-up
-   * delivered mid-turn would just be noise" — and that assumption was the bug
-   * the user reported (2026-09-14): a manager that is busy (writing a plan,
-   * running an audit, reading a child's delivery) simply never heard about a
-   * child that had asked a question, so the child waited until the manager
-   * happened to call `orchestrator_wait`. A child blocked on a question is
-   * time the whole orchestration loses, and the manager's own pending work is
-   * not more urgent than that — so EVERY child event goes through now, busy or
-   * idle alike.
-   *
-   * THE DELIVERY IS A `steer`, deliberately: pi delivers it after the current
-   * batch of tool calls finishes and before the next LLM call, so the manager
-   * reads it on its very next turn WITHOUT the gate aborting work in flight
-   * (user decision: an aborted minute-long plan audit is a worse trade than a
-   * turn of latency). Dedup is unchanged — the event memory is shared with
-   * `orchestrator_wait`, so neither re-rings what the other already reported,
-   * and the 10s→30s→60s backoff still bounds the repeats.
-   */
-  function startSupervisionTimer(): void {
-    if (supervisionTimer || state.taskMode !== "orchestrator") return;
-    supervisionTimer = setInterval(() => {
-      try {
-        if (state.taskMode !== "orchestrator") { stopSupervisionTimer(); return; }
-        // RETIRED: this session handed the orchestration to a successor.
-        // Supervision exists to push the plan forward, and pushing it is now
-        // somebody else's job — a wake-up here would put two project managers
-        // on one orchestration (the exact defect the revival path already
-        // guards against at lib/session-revival.ts).
-        if (handedOffSession) { stopSupervisionTimer(); return; }
-        // NO idle requirement (2026-09-14): busy is exactly when a child's
-        // question has to reach the manager. `steer` does not abort the tool
-        // calls already running, so the interruption costs a turn at most.
-        const news = drainSupervisionNews();
-        if (news.length === 0) return;
-        pi.sendMessage({
-          customType: "review-gate",
-          content:
-            "[ORCHESTRATION] 子会话需要你：\n" +
-            news.map((n) => `- ${n}`).join("\n") +
-            "\n调 `orchestrator_wait({ timeoutMs: 0 })` 拿完整回执（问题正文与选项都在里面），" +
-            "再用 `orchestrator_answer` 回；别让它就这么等着。" +
-            "\n（这条会打断你手上的事：子会话在等回答，优先级高于你正在做的其他事。）",
-          display: true,
-        }, { triggerTurn: true, deliverAs: "steer" });
-      } catch { /* supervision is a convenience, never a gate */ }
-    }, SUPERVISION_INTERVAL_MS);
-    // Never hold the process open for a supervision timer.
-    (supervisionTimer as unknown as { unref?: () => void }).unref?.();
-  }
-
-  /**
-   * THE UNIFIED EXIT CRITERION (2026-08-30).
-   *
-   * Every place that asks "is this session done?" reads this one function:
-   * `agent_settled` continuation, the revival timer, and `declare_done`.
-   * It used to be two separately-assembled answers — the loop's gate
-   * problems plus completion items, and the orchestration's plan/children/
-   * decisions — which is how one mode could end up with a revival clock
-   * and the other without one. One function, one answer.
-   */
-  function sessionExitProblems(): string[] {
-    if (state.taskMode === "orchestrator") {
-      return orchestrationDoneProblems();
-    }
-    const fp = computeFingerprint(cwd);
-    const problems = (state.hasCodeChange || state.hasDocChange)
-      ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
-      : [];
-    const completion: string[] = [];
-    for (const root of sessionRepos) {
-      const st = root === primaryRepoRoot ? state : stateForRepo(root);
-      for (const p of copilotProblemsFor(st)) {
-        completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
-      }
-    }
-    if (!goalStageSatisfied()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
-    return [...problems, ...completion];
-  }
-
-  /**
-   * The orchestrator's own `agent_settled` continuation (R-3).
-   *
-   * Same shape as the loop's, entirely different criteria: the plan, the
-   * children, and the decisions — never a review or a precommit this session
-   * will never have.
-   */
-  function orchestratorSettled(ctx: ExtensionContext): void {
-    // RETIRED: this session handed its orchestration to a successor.
-    //
-    // MEASURED (2026-09-10, rebate): without this guard the predecessor was
-    // revived TWO SECONDS after a successful `orchestrator_handoff` —
-    // `agent_settled` fired as its turn ended, `sessionExitProblems()` still
-    // reported the plan's unfinished tasks, and `[ORCHESTRATION_RESUME]` put
-    // it back into `orchestrator_wait` beside the successor it had just
-    // started. Both timers are left unarmed for the same reason: the plan is
-    // no longer this session's to push.
-    //
-    // This is the same judgement `decideRevival` already makes on its own
-    // path (`handedOff: handedOffSession`); this path simply lacked it.
-    if (handedOffSession) return;
-    startSupervisionTimer();
-    startRevivalTimer(ctx);
-    // USER REQUIREMENT (shared with the loop path): the user aborted this
-    // run with ESC — do not override an explicit human stop. The user's
-    // next message clears the flag and the loop resumes.
-    if (lastRunAborted) {
-      try { ctx.ui.notify("review-gate: 检测到手动中止（ESC）— 编排自动续跑已暂停；你的下一条消息会恢复。", "warning"); } catch { /* headless */ }
-      updateWidget(ctx);
-      return;
-    }
-    const problems = sessionExitProblems();
-    const news = drainSupervisionNews();
-    if (problems.length === 0 && news.length === 0) return;
-    if (orchestratorContinuations >= state.maxRounds) return;
-    orchestratorContinuations += 1;
-    pi.sendUserMessage(
-      buildOrchestratorResume({
-        problems,
-        news,
-        health: lastSupervisionHealth,
-      }) + `\n(编排续跑 ${orchestratorContinuations}/${state.maxRounds})`,
-      { deliverAs: "followUp" },
-    );
-  }
 
 
   // (Process-era completion watcher deleted with the pane migration: a pane
   // has no exit event to listen on. Completion arrives as a channel report
   // consumed by judge_wait — the wait is the completion path.)
   /**
-   * THE registry of pane judges — one table, `judgeHierarchy` (lib/hierarchy.ts).
-   *
-   * There used to be two. An in-memory `childSessions` Map held the same facts
-   * (id, role, pane, opener, stream) for THIS session's own judges, and every
-   * dispatch hand-wrote both; `judgeChildByRole` read the Map while
-   * `settleFinishedRounds` read the table, and the audit chain carried a
-   * "the registry does not know the judge I just spawned" branch that was
-   * nothing but the drift confessing itself. The Map is deleted (哲学三: the
-   * new path replaces the old one, no toggle, no compatibility layer).
-   *
-   * WHAT THE MERGE CHANGED FOR READERS. The Map only ever held judges THIS
-   * process opened; the table also holds entries restored from disk and
-   * entries belonging to OTHER openers. So every reader that meant "my own
-   * judges" now says so explicitly through `ownJudges()` — the filter is not
-   * decoration, it is the Map's old scope made mechanical.
+   * THE registry of pane judges, its persistence, identity and model health
+   * (lib/judge-registry-host.ts), the round's review target
+   * (lib/review-target-host.ts) and what a round launches on
+   * (lib/judge-launch-host.ts). `judgeHierarchy()` is an ACCESSOR: the table
+   * is reassigned on every write, so it is read fresh at every use.
    */
-  let judgeHierarchy: HierarchyTable = emptyHierarchy();
+  const {
+    judgeHierarchy,
+    pendingAudits,
+    setHierarchy,
+    dropAudits,
+    persistJudgeHierarchy,
+    ensureHierarchyLoaded,
+    reloadJudgeHierarchy,
+    callerIdentity,
+    callerIdentities,
+    paneOwnerIdentity,
+    ownJudges,
+    ownLiveJudges,
+    listServerPanesForThisSession,
+    activeJudgeWait,
+    judgeRoundReported,
+    channelLastActivity,
+    judgeModelHealth,
+    absorbJudgeModelEvents,
+    judgeCurrentRound,
+    dropDeadForeignJudges,
+    nextJudgeRound,
+  } = createJudgeRegistry(host, {
+    runTmux: (argv) => runTmux(argv),
+    channelIO,
+    roundBindingOf: (judge) => roundBindingOf(judge),
+    copilotWaitSince: () => copilotWaitSince,
+  });
+  const { reviewTargets, noteQualityRoundDispatched, qualityRoundInFlight } =
+    createReviewTargets(host, { ownLiveJudges });
+  const { resolveJudgeLaunch, sweepStaleJudgeSessionDirs } = createJudgeLaunch(host, {
+    freshProjectConfig: (root) => freshProjectConfig(root),
+    ensureModelLayersRendered: (ctx, cfg, root) => ensureModelLayersRendered(ctx, cfg, root),
+    judgeModelHealth,
+    judgeHierarchy,
+  });
 
   /**
    * The tmux sessions the WORKER registry names, read on demand.
@@ -3933,33 +2803,38 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   /**
-   * THE NAME'S CLOCK — a timer of the extension, not of the agent.
-   * Same reason the child heartbeat is a timer (round-4 P0): a session blocked
-   * in a `judge_wait`, a full precommit or any long tool call is INSIDE one
-   * turn, so nothing agent-driven fires — and a registration that stops being
-   * renewed starts looking like a dead holder, which is the one thing that must
-   * never happen to a session that is alive. It runs for the whole session and
-   * does nothing while no name is held (lib/session-name-tools.ts `tick`).
+   * THE SESSION'S RUNTIME CLOCKS (lib/orchestrator-runtime-host.ts): the
+   * unified exit criterion, the revival and supervision timers, the
+   * orchestrator's settle continuation, the retirement flag they all honour,
+   * and the name's heartbeat (which also drains the inbox).
    */
-  let sessionNamingTimer: ReturnType<typeof setInterval> | undefined;
-  function startSessionNamingHeartbeat(): void {
-    if (sessionNamingTimer) return;
-    sessionNamingTimer = setInterval(() => {
-      try { sessionNaming.tick(); } catch { /* a heartbeat must never break its session */ }
-      // THE INBOX RIDES THE SAME CLOCK (t3, user decision): one timer keeps two
-      // things true — the name's liveness and the messages addressed to it.
-      // A second heartbeat would be a second thing to get wrong, and the poll
-      // has nowhere faster to be: a message is INJECTED, never interrupting
-      // whatever the session is in the middle of.
-      try { sessionMessaging.drain(); } catch { /* a poll must never break its session */ }
-    }, sessionNaming.heartbeatMs);
-    // Never the reason the process stays alive.
-    (sessionNamingTimer as unknown as { unref?: () => void }).unref?.();
-  }
-  function stopSessionNamingHeartbeat(): void {
-    if (sessionNamingTimer) clearInterval(sessionNamingTimer);
-    sessionNamingTimer = undefined;
-  }
+  const {
+    orchestrationDoneProblems,
+    sessionExitProblems,
+    orchestratorSettled,
+    startRevivalTimer,
+    stopRevivalTimer,
+    stopSupervisionTimer,
+    startSessionNamingHeartbeat,
+    stopSessionNamingHeartbeat,
+    handedOff,
+    markHandedOff,
+    resetOrchestratorContinuations,
+  } = createOrchestratorRuntime(host, {
+    pi,
+    orchestratorDeps,
+    channelIO,
+    currentOrchestrationId: () => currentOrchestrationId(),
+    lastRunAborted: () => lastRunAborted,
+    arbitrationPaused: () => arbitrationPaused,
+    updateWidget: (ctx) => updateWidget(ctx),
+    goalStageSatisfied: () => goalStageSatisfied(),
+    copilotProblemsFor: (st) => copilotProblemsFor(st),
+    repoLabel: (root) => repoLabel(root),
+    projectConfig: () => projectConfig,
+    sessionNaming,
+    sessionMessaging,
+  });
   // THE NAME GOES BACK WHEN THE PROCESS DIES, however it dies (t2): the ONE
   // handler for that lives at module scope (it must survive session
   // replacement), and this line points it at THIS session's runtime.
@@ -3979,547 +2854,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   // and its inbox poll rides the same heartbeat. Receiving is unconditional;
   // SENDING requires a name of one's own, which the tool itself enforces.
   sessionMessaging.register(pi);
-
-  /**
-   * WHICH MODEL SLOTS ARE BAD, per repo (lib/model-health.ts).
-   *
-   * Read at every dispatch (the chain head is skipped while it cools down),
-   * written when a judge pane reports that its model failed. Persisted in the
-   * repo's hierarchy snapshot — the same file that already records which
-   * judges exist, and the one file EVERY opener in the repo shares.
-   */
-  const modelHealthByRoot = new Map<string, ModelHealth>();
-  /**
-   * Who THIS session is for opener checks: the orchestration id when this
-   * session manages one, else its own session id. Unknown ⇒ fail-closed.
-   */
-  function callerIdentity(): string | undefined {
-    const orch = process.env[ORCHESTRATION_ID_ENV]?.trim();
-    if (state.taskMode === "orchestrator" && orch) return orch;
-    return state.sessionId ?? undefined;
-  }
-
-  /**
-   * WHO THIS SESSION IS on a pane border — the `@<owner>` half of every judge
-   * pane this session opens (2026-09-18).
-   *
-   * Read from the session's own facts and never from a tool parameter: the
-   * child id it was spawned with (`RG_STATE_VARIANT`), the mode it runs in, and
-   * nothing else. It is NOT `callerIdentity()` — that one answers "may I touch
-   * this judge" and is an opaque session/orchestration id; this one answers
-   * "what should a human read", and an opaque id is exactly what the border
-   * must not print.
-   */
-  function paneOwnerIdentity(): string {
-    return selfPaneOwner({
-      stateVariant: SESSION_STATE_VARIANT,
-      orchestrator: state.taskMode === "orchestrator",
-    });
-  }
-  /**
-   * The judges THIS session owns — the deleted `childSessions` Map's scope.
-   *
-   * The merged table is wider than the Map was in two directions, and the two
-   * are NOT the same problem:
-   *
-   *  - OTHER openers' entries (loaded from the shared file). Reading one as
-   *    "mine" would let this session cascade-close a live peer's review, so
-   *    the opener filter is mandatory, never an optimization.
-   *  - MY OWN entries restored from a previous process. Those really are this
-   *    opener's judges — but their panes usually died with that process, so
-   *    the callers that ask "is a judge RUNNING" filter further through
-   *    `ownLiveJudges()`; the ones that ask "what do I own" (cascade-close)
-   *    want them, which is how a restart stops stranding panes.
-   *
-   * Unknown identity yields NOTHING (fail-closed): an unidentifiable session
-   * owns no judge, and must not act on one.
-   */
-  /**
-   * EVERY identity whose judges this session is responsible for.
-   *
-   * Normally one — the orchestration id, or its own session id. A SUCCESSOR
-   * adds the identity it replaces (2026-09-14, measured on the loop path): a
-   * judge's channel is keyed by `<openerId>/<judgeId>`, so a handover that
-   * changes the opener's session id would otherwise strand every judge the
-   * predecessor had already dispatched — the round's verdict would land in a
-   * channel nobody reads, and the successor would wait forever on a review
-   * that had already concluded.
-   *
-   * Uncertain identity still yields NOTHING (fail-closed): an unidentifiable
-   * session owns no judge, and must not act on one.
-   */
-  function callerIdentities(): string[] {
-    const ids: string[] = [];
-    const own = callerIdentity();
-    if (own) ids.push(own);
-    const inherited = readInheritance().predecessorSession;
-    if (inherited && !ids.includes(inherited)) ids.push(inherited);
-    return ids;
-  }
-
-  function ownJudges(): JudgeEntry[] {
-    const mine: JudgeEntry[] = [];
-    for (const id of callerIdentities()) mine.push(...listByOpener(judgeHierarchy, id));
-    return mine;
-  }
-
-  /**
-   * The panes this session's tmux SERVER has, or undefined when unreadable.
-   *
-   * SERVER-WIDE since 2026-09-25: a judge is no longer a pane of this window,
-   * and asking about the window would answer "none" for every live one — the
-   * name says SERVER precisely because the old name (`listOwnWindowPanes`) read
-   * as the question it no longer asks (quality round P2).
-   */
-  function listServerPanesForThisSession(): string[] | undefined {
-    try { return listServerPanes((argv) => runTmux(argv)); }
-    catch { return undefined; }
-  }
-
-  /**
-   * How many JUDGE panes of this session are decorated and still on screen.
-   *
-   * DELETED WITH ITS ONLY CALLER (2026-09-17, user decision): it existed for
-   * the label-bar release, which is gone — see lib/session-factory.ts
-   * `closeSessionPane` for the measurement that decided it.
-   */
-
-
-  /**
-   * Own judges whose pane is not KNOWN to be gone — "is one still running?".
-   *
-   * The predicate itself is lib/hierarchy.ts's `judgeLive`, shared with the
-   * health snapshot so there is ONE answer to that question (哲学二): missing
-   * information keeps an entry alive, and a pane id minted by a DIFFERENT tmux
-   * server is not comparable at all.
-   */
-  function ownLiveJudges(): JudgeEntry[] {
-    const panes = listServerPanesForThisSession();
-    const server = tmuxServerFrom(process.env);
-    return ownJudges().filter((e) => judgeLive(e, panes, server));
-  }
-
-  /**
-   * THE audit this repo dispatched and has not recorded yet — one per repo.
-   *
-   * A verdict binds to the CONTENT it judged (a goal to its draft's sha256, a
-   * plan to its canonical hash), so the gate has to remember what it sent; the
-   * auditor's output alone cannot say what it audited. Goal and plan share one
-   * `goal-auditor` judge per repo, so at most one of them can be in flight —
-   * which is why this is ONE map and not two (2026-09-05, user decision). The
-   * two-map shape could represent a state the system cannot be in, and paid
-   * for it with a self-heal branch that guessed which pending to drop.
-   */
-  const pendingAudits = new Map<string, PendingAudit>();
-  /** File holding one repo's judges + pendings (under `.pi/`, git-ignored like all gate state). */
-  const HIERARCHY_FILENAME = "judge-hierarchy.json";
-  /** Repos whose hierarchy slice is already merged this session. */
-  const hierarchyLoadedRoots = new Set<string>();
-  /** Repos with a hierarchy file on disk (for pruning emptied slices). */
-  const hierarchyFileRoots = new Set<string>();
-
-  /** Assign the opener table and persist it — the single funnel for table writes. */
-  function setHierarchy(next: HierarchyTable): void {
-    judgeHierarchy = next;
-    persistJudgeHierarchy();
-  }
-
-  /** Forget this repo's pending audit and persist. */
-  function dropAudits(root: string): void {
-    pendingAudits.delete(root);
-    persistJudgeHierarchy();
-  }
-
-  /**
-   * Persist judges + pendings, sliced per repo. Restarting must not strand
-   * live panes (unaddressable judges) nor fork a second pi onto one session
-   * id — the process era's pid-file takeover, reborn as a file per repo.
-   */
-  function persistJudgeHierarchy(): void {
-    try {
-      const slices = new Map<string, { judges: Record<string, JudgeEntry>; audit?: PendingAudit; modelHealth?: ModelHealth }>();
-      const slice = (root: string) => {
-        let s = slices.get(root);
-        if (!s) { s = { judges: {} }; slices.set(root, s); }
-        return s;
-      };
-      for (const [id, e] of Object.entries(judgeHierarchy)) slice(e.repoRoot).judges[id] = e;
-      for (const [root, v] of pendingAudits) slice(root).audit = v;
-      // Pruned on the way out, so a dead model id can never be immortal in a file.
-      const now = Date.now();
-      for (const [root, health] of modelHealthByRoot) {
-        const live = pruneModelHealth(health, now);
-        if (Object.keys(live).length === 0) modelHealthByRoot.delete(root);
-        else slice(root).modelHealth = live;
-      }
-      for (const root of hierarchyFileRoots) slice(root);
-      for (const [root, s] of slices) {
-        hierarchyFileRoots.add(root);
-        const file = pathJoin(root, ".pi", HIERARCHY_FILENAME);
-        const empty = Object.keys(s.judges).length === 0 && !s.audit && !s.modelHealth;
-        if (empty) { try { rmSync(file, { force: true }); } catch { /* best effort */ } continue; }
-        writeFileAtomic(file, JSON.stringify({ version: 1, ...s }));
-      }
-    } catch { /* persistence never breaks the gate */ }
-  }
-
-  /**
-   * Merge one repo's durable slice into this session. Memory (this session)
-   * wins on conflict; a corrupt file is ignored. Idempotent per root.
-   */
-  function ensureHierarchyLoaded(root: string): void {
-    const snap = loadHierarchySliceOnce(hierarchyLoadedRoots, root, () => {
-      try { return readFileSync(pathJoin(root, ".pi", HIERARCHY_FILENAME), "utf8"); } catch { return undefined; }
-    });
-    if (!snap) return;
-    hierarchyFileRoots.add(root);
-    for (const [id, e] of Object.entries(snap.judges)) {
-      if (!judgeHierarchy[id]) judgeHierarchy[id] = e;
-    }
-    if (!pendingAudits.has(root) && snap.audit) pendingAudits.set(root, snap.audit);
-    // Model health is the one thing that must SURVIVE this session: the next
-    // dispatch (by this opener or the next session) skips a slot that just
-    // failed, which is what makes an in-round rotation stick.
-    if (!modelHealthByRoot.has(root) && snap.modelHealth) modelHealthByRoot.set(root, snap.modelHealth);
-  }
-
-  /** The live (pruned) model health of one repo. */
-  function judgeModelHealth(root: string): ModelHealth {
-    return pruneModelHealth(modelHealthByRoot.get(root) ?? {}, Date.now());
-  }
-
-  /**
-   * Remember that one model slot failed in this repo, and persist it.
-   *
-   * Called when a judge pane reports its own model failure and when the
-   * opener's wait ends a round with an exhausted chain — the two facts that
-   * decide which slot the NEXT round starts on.
-   */
-  function recordJudgeModelFailure(root: string, spec: string, error?: string): void {
-    modelHealthByRoot.set(root, recordModelFailure(modelHealthByRoot.get(root) ?? {}, spec, Date.now(), error));
-    persistJudgeHierarchy();
-  }
-
-  /** One model proved itself again (a rotation moved onto it and it ran). */
-  function clearJudgeModelFailure(root: string, spec: string): void {
-    const next = clearModelFailure(modelHealthByRoot.get(root) ?? {}, spec, Date.now());
-    if (Object.keys(next).length === 0) modelHealthByRoot.delete(root);
-    else modelHealthByRoot.set(root, next);
-    persistJudgeHierarchy();
-  }
-
-  /**
-   * Read what a pane said about its own models and act on it.
-   *
-   * The pane cannot write repo state (judge panes report, they do not
-   * enforce), so the opener is the one that turns its channel records into a
-   * cooldown, a warning and a cursor advance. Called at settle (a round ended)
-   * and at dispatch (a round ended badly and nobody settled it — an exhausted
-   * chain never produces a report).
-   */
-  function absorbJudgeModelEvents(root: string, judgeId: string): void {
-    const entry = judgeHierarchy[judgeId];
-    // NO ENTRY, NO ABSORB (reviewer round 1, 2026-09-10). Without a registry
-    // row there is no cursor, and "read the whole channel" would re-record a
-    // HISTORICAL failure with a fresh timestamp every time this runs — a
-    // cooldown that can never expire. The channel outlives its entries (a close
-    // removes the row, the records stay), so the cursor is the only thing that
-    // says what has already been acted on; the dispatch seeds it at the
-    // channel watermark when it registers a fresh entry.
-    if (!entry) return;
-    let events: readonly ModelEvent[];
-    try {
-      const target = judgeChannelTarget(entry.openerId, judgeId);
-      events = projectChannel(readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records).modelEvents;
-    } catch { return; }
-    const fresh = events.slice(entry.lastModelEventCount ?? 0);
-    if (fresh.length === 0) return;
-    for (const event of fresh) {
-      recordJudgeModelFailure(root, event.spec, event.error);
-      // A successful switch is proof the destination works; keeping an older
-      // failure on record would bench a healthy model for the rest of the TTL.
-      if (event.to) clearJudgeModelFailure(root, event.to);
-    }
-    setHierarchy({ ...judgeHierarchy, [judgeId]: { ...entry, lastModelEventCount: events.length } });
-    const lines = fresh.map((event) => {
-      const why = event.error ? `（${event.error}）` : "";
-      if (!event.exhausted) {
-        return `${modelKeyOf(event.spec)} 失败${why} → 切到 ${event.to ? modelKeyOf(event.to) : "?"}`;
-      }
-      // The per-slot reasons are what make this line actionable — a banner that
-      // says only "链上已无可用槽" cannot tell a rate limit from a bad model id.
-      const tried = event.tried ?? [];
-      const detail = tried.length === 0
-        ? ""
-        : "：" + tried.map((t) => `${modelKeyOf(t.spec)}（${t.reason}）`).join("、");
-      return `${modelKeyOf(event.spec)} 失败${why}，链上已无可用槽${detail}`;
-    });
-    try { latestCtx?.ui.notify(`review-gate: judge 模型 fallback —— ${lines.join("；")}`, "warning"); } catch { /* headless */ }
-  }
-
-  /** What one judge round launches on: the chain, the pick, and why. */
-  type JudgeLaunch =
-    | { ok: true; sysPromptPath: string; spec: string; chain: string[]; choice: SlotChoice }
-    | { ok: false; error: string };
-
-  /**
-   * Resolve what THIS round launches on — read fresh, picked by health.
-   *
-   * THREE THINGS HAPPEN HERE, and they are one function because a dispatch
-   * that did only two of them is exactly the defect this fixes (2026-09-10):
-   *   1. the agents config is re-READ from disk (a session that started before
-   *      the user's edit used to keep launching the old chain for hours);
-   *   2. the model layers are re-rendered when the config changed, so the
-   *      `.pi/agents/*.md` chain on disk matches the model actually launched;
-   *   3. the slot is picked from the WHOLE chain, skipping the ones cooling
-   *      down (lib/model-health.ts), instead of always taking `slots[0]`.
-   */
-  function resolveJudgeLaunch(root: string, role: string, workDir: string, title: string, judgeId: string): JudgeLaunch {
-    const cfg = freshProjectConfig(root);
-    // Rendering writes files; it is idempotent and guarded by the config key,
-    // so the dispatch-time call is a no-op until the config actually changes.
-    if (latestCtx) ensureModelLayersRendered(latestCtx, cfg, root);
-    const { map: agents } = effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject);
-    const files = writeJudgeSpawnFiles({ repoRoot: root, role, agents, workDir, title });
-    if (files.chain.length === 0) {
-      // NO BUILT-IN DEFAULT (user requirement 2026-08-30): a role with no
-      // resolvable chain cannot be dispatched. Fail closed with the reason.
-      return { ok: false, error: `角色 ${role} 没有可派发的模型链（agents 配置缺失或不可解析）——请修复 ~/.pi/review-gate.json 后重试` };
-    }
-    const choice = selectHealthySlot(files.chain, judgeModelHealth(root), Date.now());
-    if (!choice) return { ok: false, error: `角色 ${role} 的模型链为空（不可达）` };
-    announceSlotSkip(role, choice);
-    return { ok: true, sysPromptPath: files.sysPromptPath, spec: choice.spec, chain: files.chain, choice };
-  }
-
-  /**
-   * Say which slots the pick stepped over — a silent skip is the same
-   * blindness as never skipping at all.
-   */
-  function announceSlotSkip(role: string, choice: SlotChoice): void {
-    if (choice.skipped.length === 0) return;
-    const now = Date.now();
-    const skipped = choice.skipped.map((s) => describeCoolingSlot(s, now)).join("、");
-    const head = choice.allCooling
-      ? `review-gate: ${role} 的全部模型槽都在冷却期（${skipped}）——本轮仍按链头 ${modelKeyOf(choice.spec)} 派发，失败会立刻上报。`
-      : `review-gate: ${role} 跳过冷却中的模型槽 ${skipped} → 本轮用 ${modelKeyOf(choice.spec)}。`;
-    try { latestCtx?.ui.notify(head, "warning"); } catch { /* headless */ }
-  }
-
-  /**
-   * THIS pane's current round number, read from the registry FILE.
-   *
-   * Deliberately not `judgeHierarchy`: this session's in-memory copy is loaded
-   * once and "memory wins on conflict", so it would keep reporting the round
-   * the pane opened with while the opener bumps the real one on every
-   * dispatch. The inspection observer stamps each action with this, and
-   * `judge_conclude` compares it against the round it is concluding — that is
-   * what keeps an ABANDONED round's reads from being credited to the next one.
-   * Undefined when the file is missing or unreadable (the evidence then
-   * carries no round and the comparison cannot refuse anything).
-   */
-  function judgeCurrentRound(): number | undefined {
-    const judgeId = readJudgeSideEnv(process.env)?.judgeId;
-    if (!judgeId) return undefined;
-    try {
-      const raw = readFileSync(pathJoin(cwd, ".pi", HIERARCHY_FILENAME), "utf8");
-      const snap = JSON.parse(raw) as { judges?: Record<string, { roundSeq?: unknown }> };
-      const seq = snap?.judges?.[judgeId]?.roundSeq;
-      return typeof seq === "number" && Number.isFinite(seq) ? Math.floor(seq) : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /** A pane-less foreign entry older than this is not a concurrent spawn. */
-  const FOREIGN_SPAWN_GRACE_MS = 10 * 60 * 1000;
-  /**
-   * Drop foreign entries nobody can still be driving: pane dead (or never
-   * recorded) AND channel silent past the heartbeat budget. A live pane or a
-   * fresh heartbeat keeps the strict refusal — that is a possibly-live peer,
-   * which is what the cross-level rule protects. Own entries are never
-   * touched; an unreadable pane list touches nothing (missing info never
-   * kills). A pane-less entry younger than the spawn grace is kept: it may be
-   * a concurrent spawn that has not recorded its pane yet.
-   *
-   * WHY DROP, NOT ADOPT: judge ids are opener-scoped, so a new opener never
-   * shares an id with a dead entry — adopting it would only resurrect a review
-   * whose transcript the new session must never read. Dropped entries lose
-   * registry protection and their dirs fall to the TTL/legacy reclaim.
-   */
-  function dropDeadForeignJudges(): void {
-    const caller = callerIdentity();
-    if (!caller) return;
-    const panes = listServerPanesForThisSession();
-    let changed = false;
-    for (const [id, e] of Object.entries(judgeHierarchy)) {
-      if (e.openerId === caller) continue;
-      if (e.paneId !== undefined) {
-        if (panes === undefined) continue;
-        if (panes.includes(e.paneId)) continue;
-        if (channelFresh(e)) continue;
-      } else if (!foreignSpawnSettled(e)) continue;
-      delete judgeHierarchy[id];
-      changed = true;
-    }
-    if (changed) persistJudgeHierarchy();
-  }
-
-  /** A pane-less foreign entry counts as settled once older than the grace. */
-  function foreignSpawnSettled(e: JudgeEntry): boolean {
-    const at = Date.parse(e.spawnedAt ?? "");
-    return Number.isFinite(at) && Date.now() - at > FOREIGN_SPAWN_GRACE_MS;
-  }
-
-  /**
-   * Best-effort reclaim of judge session dirs nobody owns. Registry-referenced
-   * dirs (either format — a live peer's, whatever code it runs) are protected;
-   * unreferenced legacy dirs go immediately, anything else past the TTL
-   * (lib/judge-lifecycle.ts decides, this only lists and deletes).
-   * Never throws: the sweep must not break a dispatch.
-   */
-  function sweepStaleJudgeSessionDirs(root: string): void {
-    try {
-      const base = pathJoin(root, JUDGE_SESSIONS_RELDIR);
-      const known = new Set<string>();
-      for (const e of Object.values(judgeHierarchy)) {
-        if (e.repoRoot !== root) continue;
-        // A LIVE lane is protected by its identity, not by its mtime: an entry
-        // that records a lane names a dir with the lane suffix, and that is the
-        // dir this judge is writing into right now. Both shapes are added — an
-        // entry written by an older build has no lane at all, and its dir is
-        // the un-suffixed one.
-        known.add(judgeWorkDirBasename(e.role, shortRepoHash(e.repoRoot), e.openerId, laneOfEntry(e)));
-        known.add(judgeWorkDirBasename(e.role, shortRepoHash(e.repoRoot), e.openerId));
-        known.add(legacyJudgeWorkDirBasename(e.role, shortRepoHash(e.repoRoot)));
-      }
-      const names = readdirSync(base, { withFileTypes: true })
-        .filter((d) => d.isDirectory())
-        .map((d) => d.name);
-      const entries = names.map((name) => {
-        let mtimeMs = Number.NaN;
-        try { mtimeMs = statSync(pathJoin(base, name)).mtimeMs; } catch { /* age unknown */ }
-        return { name, mtimeMs };
-      });
-      for (const stale of selectStaleJudgeSessionDirs(entries, known, Date.now())) {
-        try { rmSync(pathJoin(base, stale), { recursive: true, force: true }); } catch { /* best effort */ }
-      }
-    } catch { /* sweep never breaks the caller */ }
-  }
-
-  /**
-   * Number this judge's next round: above both the persisted entry and every
-   * report already in the channel (a close→spawn keeps the old reports, so the
-   * entry alone would restart at 1 and collide with them). Best-effort: an
-   * unreadable channel still numbers above the entry.
-   */
-  function nextJudgeRound(openerId: string, judgeId: string): number {
-    let records: ChannelRecord[] = [];
-    try {
-      const target = judgeChannelTarget(openerId, judgeId);
-      records = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
-    } catch { /* the entry alone still numbers above */ }
-    return nextRoundSeq(judgeHierarchy[judgeId]?.roundSeq, records);
-  }
-
-  /** Fresh heartbeat within budget ⇒ someone may still drive this judge. */
-  function channelFresh(e: JudgeEntry): boolean {
-    try {
-      const target = judgeChannelTarget(e.openerId, e.judgeId);
-      const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-      const last = projectChannel(read.records).lastActivityAt;
-      if (!last) return false;
-      const at = Date.parse(last);
-      return Number.isFinite(at) && Date.now() - at <= HEARTBEAT_STALE_MS;
-    } catch {
-      return false;
-    }
-  }
-  /**
-   * Review targets registered by prepare_review (commit mode): repo root →
-   * the reviewed baseline..HEAD plus HEAD's tree. The verdict recorder consumes it:
-   * a READY binds to the reviewed tree, and a HEAD that moved past the
-   * registered head (a new checkpoint after prepare) is STALE ⇒ BLOCKED.
-   */
-  interface ReviewTarget {
-    baseline: string;
-    head: string;
-    tree: string;
-    /** What this round was DISPATCHED to review (the audit pair's gate half). */
-    scope?: ScopeStampRecord;
-    /**
-     * The files this round changed — carried so the QUALITY PRECONDITION can
-     * be evaluated from the target alone (`lib/quality-round.ts`'s
-     * `qualityStandingFor`), without a second `git diff` at dispatch time.
-     * Absent for targets registered before this field existed: absent ⇒ the
-     * guard treats the round as code-bearing (fail-closed).
-     */
-    files?: readonly string[];
-    /**
-     * THE QUALITY ROUND THIS TARGET DISPATCHED (2026-09-16).
-     *
-     * It is written the moment the quality judge of THIS round is dispatched,
-     * and it is what makes "is the quality round still owed?" a per-ROUND fact
-     * instead of a registry lookup. The quality pane is REUSED across rounds
-     * and outlives its own verdict (it is only closed on `fresh`, on rotation
-     * or when it dies), so "a quality judge exists and is alive" is true for
-     * the rest of the session — a hold predicate built on it would park a
-     * conclusion nothing would ever release.
-     *
-     * `head` is the round it belongs to: a target re-registered by the next
-     * `prepare_review` replaces the whole object, so a stale record cannot
-     * survive into a round it did not dispatch.
-     */
-    qualityRound?: { judgeId: string; head: string };
-  }
-  const reviewTargets = new Map<string, ReviewTarget>();
-
-  /**
-   * THE QUALITY JUDGE THIS ROUND DISPATCHED — recorded on the round's target.
-   *
-   * Called only after the dispatch was ACCEPTED (a refused spawn must not make
-   * the round believe a quality verdict is coming).
-   */
-  function noteQualityRoundDispatched(root: string, judgeId: string): void {
-    const target = reviewTargets.get(root);
-    if (!target) return; // no target ⇒ nothing to bind the round to (fail-closed elsewhere)
-    target.qualityRound = { judgeId, head: target.head };
-  }
-
-  /**
-   * IS THIS ROUND'S QUALITY JUDGE STILL ABLE TO CONCLUDE? — the fact
-   * `decideQualityHold` (lib/quality-round.ts) needs before it may HOLD a
-   * functional verdict instead of refusing it.
-   *
-   * Three conditions, and each one is here for a measured reason:
-   *  - the ROUND must have dispatched one (a live quality pane somewhere in
-   *    the registry is not the same thing — the pane is reused across rounds
-   *    and outlives its own verdict);
-   *  - its pane must still be alive (`ownLiveJudges`: a persisted entry from a
-   *    previous process has no pane, and a judge that died can never land a
-   *    verdict — holding there parks the round forever);
-   *  - NO verdict may already stand for this head: once one is recorded, the
-   *    standing answers the question and this must not keep a hold alive. A
-   *    SKIP record is NOT such a verdict (2026-09-22) — it is a permission the
-   *    quality judge was never owed, so with the stage back ON the judge
-   *    dispatched for this head is still the one that can conclude it.
-   */
-  function qualityRoundInFlight(root: string): boolean {
-    const target = reviewTargets.get(root);
-    const round = target?.qualityRound;
-    if (!target || !round || round.head !== target.head) return false;
-    // THE RECORD MUST BE A JUDGE'S ANSWER, NOT A SKIP (functional P1,
-    // 2026-09-22): with the stage back ON a skip bound to this head does not
-    // stand for it (`lib/quality-round.ts`'s `qualityStandingFor`), so reading
-    // `commitSha` alone said "nobody is coming back" on a round whose quality
-    // judge was running — the functional READY was refused and recorded
-    // BLOCKED, and that BLOCKED ran the cancel matrix and killed the live
-    // quality pane. `isSkippedQualityRecord` is the ONE reading of the brand
-    // (a second `skipped` test here is how the two rules drift).
-    const quality = stateForRepo(root).quality;
-    if (quality?.commitSha === target.head && !isSkippedQualityRecord(quality)) return false;
-    return ownLiveJudges().some((e) => e.judgeId === round.judgeId);
-  }
 
   function classifier(): LlmClassifier {
     if (!llmClassifier || llmClassifierModel !== projectConfig.llmGuards.model) {
@@ -4629,7 +2963,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // is the one that has to stop writing. Without this, a wake-up that
     // slipped past the retirement guards would rewrite the plan and child
     // registry the successor is working from.
-    if (handedOffSession) return;
+    if (handedOff()) return;
     // P-multi: persist the session's repo set so a same-session resume (or
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
@@ -5023,7 +3357,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // end its turn with children still running and gates unmet.
     loopArmed = isEnforcedMode(mode);
     continuationsInjected = 0;
-    orchestratorContinuations = 0; // goal 6 — reset with the loop budget
+    resetOrchestratorContinuations(); // goal 6 — reset with the loop budget
     completionContinuations = 0;
     loopStall = undefined; // a mode decision is a change of circumstances
     stallNoticeShown = false;
@@ -5158,10 +3492,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   // a SECOND handler here would be a second path, and the vendored hosts
   // (test fixtures) keep exactly one handler per event.
   pi.on("tool_call", (event, ctx) => {
-    lastToolActivity = describeToolActivity(
+    noteToolActivity(describeToolActivity(
       String((event as { toolName?: unknown }).toolName ?? ""),
       (event as { input?: unknown }).input,
-    );
+    ));
     return evaluateToolCall(shipGateHookDeps, event, ctx);
   });
 
@@ -7295,7 +5629,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     previous?: JudgeEntry;
     retirePrevious(): void;
   } {
-    const previous = findJudgeLane(judgeHierarchy, { role, repoRoot: root, openerId: opener });
+    const previous = findJudgeLane(judgeHierarchy(), { role, repoRoot: root, openerId: opener });
     const decision = decideJudgeRotation({
       objectId: judgeObjectIdFor(root),
       ...(previous === undefined ? {} : { previous }),
@@ -7420,7 +5754,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The retired lane's scratch worktrees can never be used again — whether
     // its pane was closed here or had already died.
     reapReviewScratch(entry.judgeId);
-    setHierarchy(removeJudge(judgeHierarchy, entry.judgeId));
+    setHierarchy(removeJudge(judgeHierarchy(), entry.judgeId));
     // An audit pending against the retired lane dies with it: a report from
     // the NEW lane must never be recorded against a draft it never judged.
     if (entry.role === "goal-auditor") dropAudits(ctx.root);
@@ -7537,7 +5871,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // still lives in lib/hierarchy.ts (registration refuses two parents for one id).
     // The lookup IS that derivation: the registry is keyed by judge id, so
     // "same role, same session id in this repo" needs no scan of a second table.
-    const existing = judgeHierarchy[judgeId];
+    const existing = judgeHierarchy()[judgeId];
     // FIRST, before the entry below is replaced: what the pane said about its
     // own model belongs to THIS decision (an exhausted chain never settles, so
     // a dispatch is the only reader such events ever get), and the cursor they
@@ -7626,8 +5960,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       // rolled back by this registration (P1, reviewer round 2): a rolled-back
       // cursor hands the SAME events to the next round, and re-recording them
       // with `Date.now()` makes the cooldown永不过期.
-      const live = judgeHierarchy[judgeId] ?? existing;
-      const reg = registerJudge(judgeHierarchy, {
+      const live = judgeHierarchy()[judgeId] ?? existing;
+      const reg = registerJudge(judgeHierarchy(), {
         judgeId, openerId: opener, role, repoRoot: root, title, sessionDir,
         // WHERE THE LIVE PANE IS, carried forward as one value (`paneCoordsOf`):
         // a re-registration that copies only some of these fields leaves an
@@ -7673,7 +6007,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       if (paneAlive === false) reapReviewScratch(sessionId);
       // One removal, one table.
-      setHierarchy(removeJudge(judgeHierarchy, judgeId));
+      setHierarchy(removeJudge(judgeHierarchy(), judgeId));
       // The killed round's audited draft dies with it: leaving it behind
       // would let a LATER report record a verdict against a draft that round
       // never judged.
@@ -7738,7 +6072,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // to be built here and mutated a second time, which is exactly how the
         // two drifted apart.
         register: (coords) => {
-          const reg = registerJudge(judgeHierarchy, {
+          const reg = registerJudge(judgeHierarchy(), {
             judgeId,
             openerId: opener,
             role,
@@ -7761,9 +6095,9 @@ export default function reviewGate(pi: ExtensionAPI) {
             modelSpec: launch.spec,
             // Same rule as the reuse path: a re-run over the SAME stream file keeps
             // its finding cursor, so nothing already shown is shown again.
-            ...(judgeHierarchy[judgeId]?.streamPath === opts.streamPath
-              && judgeHierarchy[judgeId]?.lastFindingCount !== undefined
-              ? { lastFindingCount: judgeHierarchy[judgeId]!.lastFindingCount }
+            ...(judgeHierarchy()[judgeId]?.streamPath === opts.streamPath
+              && judgeHierarchy()[judgeId]?.lastFindingCount !== undefined
+              ? { lastFindingCount: judgeHierarchy()[judgeId]!.lastFindingCount }
               : {}),
             ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
             ...laneFields,
@@ -7837,9 +6171,9 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** Advance the consumed cursor so a surfaced-but-unrecorded report is not re-announced. */
   function advanceReportCursor(sessionId: string, reportId: string): void {
-    const entry = judgeHierarchy[sessionId];
+    const entry = judgeHierarchy()[sessionId];
     if (!entry || entry.lastReportId === reportId) return;
-    const reg = registerJudge(judgeHierarchy, { ...entry, lastReportId: reportId });
+    const reg = registerJudge(judgeHierarchy(), { ...entry, lastReportId: reportId });
     if (reg.ok) setHierarchy(reg.table);
   }
 
@@ -7853,7 +6187,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * "none" must leave the previous reading alone rather than erase it.
    */
   function noteJudgeContextFrom(judgeId: string, records: readonly ChannelRecord[]): void {
-    const entry = judgeHierarchy[judgeId];
+    const entry = judgeHierarchy()[judgeId];
     if (!entry) return;
     let percent: number | undefined;
     for (const record of records) {
@@ -7862,7 +6196,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (reading !== undefined) percent = reading;
     }
     if (percent === undefined || percent === entry.contextPercent) return;
-    const reg = registerJudge(judgeHierarchy, { ...entry, contextPercent: percent });
+    const reg = registerJudge(judgeHierarchy(), { ...entry, contextPercent: percent });
     if (reg.ok) setHierarchy(reg.table);
   }
 
@@ -7878,7 +6212,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean; bindingNote?: string; handOffNote?: string; scope?: ScopeStampRecord } | undefined> {
     try {
-      const entry = judgeHierarchy[sessionId];
+      const entry = judgeHierarchy()[sessionId];
       if (!entry?.role) return undefined;
       const childRoot = entry.repoRoot || primaryRepoRoot;
       // The pane's own model report is a fact about the round that is ending
@@ -7961,7 +6295,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       paneOwner: () => paneOwnerIdentity(),
     };
     const notices: string[] = [];
-    for (const [judgeId, entry] of Object.entries(judgeHierarchy)) {
+    for (const [judgeId, entry] of Object.entries(judgeHierarchy())) {
       if (!mine.has(entry.openerId)) continue;
       const target = judgeChannelTarget(entry.openerId, judgeId);
       const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
@@ -8066,7 +6400,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * this dispatch registered, and the repo's checkpoint stamp.
    */
   function roundBindingOf(judge: { judgeId: string; role: string; repoRoot: string }): RoundBinding {
-    const roundSeq = judgeHierarchy[judge.judgeId]?.roundSeq;
+    const roundSeq = judgeHierarchy()[judge.judgeId]?.roundSeq;
     const pendingKind = pendingAudits.get(judge.repoRoot)?.kind;
     const checkpointAt = checkpointAtFor(judge.repoRoot);
     return roundBindingFor({
@@ -8133,7 +6467,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   function auditRoundDeps(ctx?: unknown): SettleAuditRoundDeps {
     return {
       judgeEntry: (judgeId) => {
-        const e = judgeHierarchy[judgeId];
+        const e = judgeHierarchy()[judgeId];
         if (!e) return undefined;
         return {
           judgeId: e.judgeId,
@@ -9003,7 +7337,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // …and the identity a successor REPLACED, so a handover does not orphan the
     // reviewers its predecessor had already dispatched (2026-09-14).
     callerIds: () => callerIdentities(),
-    hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy; },
+    hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy(); },
     saveHierarchy: (next) => setHierarchy(next),
     findChildById: (judgeId) => {
       const c = ownJudges().find((e) => e.judgeId === judgeId);
@@ -9049,7 +7383,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // exists for. `JudgeEntry.spawnedAt` is stamped on EVERY dispatch and is
     // already the registry's own answer to "when did this round start".
     roundDispatchedAt: (child) => {
-      const at = judgeHierarchy[child.judgeId]?.spawnedAt;
+      const at = judgeHierarchy()[child.judgeId]?.spawnedAt;
       if (at === undefined) return undefined;
       const ms = Date.parse(at);
       return Number.isFinite(ms) ? ms : undefined;
@@ -9395,7 +7729,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   registerJudgeSpawnTools(pi, {
     callerId: () => callerIdentity(),
     paneOwner: () => paneOwnerIdentity(),
-    hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy; },
+    hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy(); },
     saveHierarchy: (next) => setHierarchy(next),
     channelIO: () => channelIO,
     channelHome: () => undefined,
@@ -9903,7 +8237,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       ? judgePaneAlive(run, entry.paneId)
       : undefined;
     if (alive === true) closeJudgePaneOf(entry, { ownPane, tmuxServer, run });
-    setHierarchy(removeJudge(judgeHierarchy, entry.judgeId));
+    setHierarchy(removeJudge(judgeHierarchy(), entry.judgeId));
     reapReviewScratch(entry.judgeId);
     log(`review-gate: cancelled the ${role} round of ${root} — ${why}`);
     return `已终止 ${role} 的这一轮（${why}）。`;
@@ -11266,7 +9600,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             } catch { /* best effort */ }
           }
           try { reapReviewScratch(child.judgeId); } catch { /* best effort */ }
-          setHierarchy(removeJudge(judgeHierarchy, child.judgeId));
+          setHierarchy(removeJudge(judgeHierarchy(), child.judgeId));
           if (child.role === "goal-auditor") dropAudits(child.repoRoot);
         }
         progress.step(`联关 ${ownedJudges.length} 个 review window${closed.length ? `（已关 ${closed.join("、")}）` : ""}`);
@@ -11496,7 +9830,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // auto-continuations. Like rounds above, this only clears satisfied
       // history — it cannot loosen the ship gate.
       continuationsInjected = 0;
-      orchestratorContinuations = 0; // goal 6 — reset with the loop budget
+      resetOrchestratorContinuations(); // goal 6 — reset with the loop budget
       completionContinuations = 0;
       loopStall = undefined; // a completed task is real progress
       stallNoticeShown = false;
@@ -12359,7 +10693,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // there is no settle-time verdict scraping, so nothing to do here.
     // Finished rounds wake in every mode except normal (gate fully off): explore
     // is advisory on enforcement, not deaf — its reports still land and record.
-    if (state.taskMode !== "normal" && !handedOffSession && (await settleFinishedRounds(ctx))) {
+    if (state.taskMode !== "normal" && !handedOff() && (await settleFinishedRounds(ctx))) {
       // …and this exit may have handed the session a round's report, so it is
       // NOT a stop: nothing is published here (see `confirmStop`).
       return;
@@ -13228,7 +11562,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   pi.on("message_end", (event) => {
     const custom = event.message as { customType?: string; details?: unknown };
     if (custom.customType !== "subagent-notification") return;
-    backgroundWaits = foldBackgroundWaits(backgroundWaits, {
+    foldBackgroundWait({
       kind: "message",
       message: { customType: custom.customType, details: custom.details },
     });
@@ -13249,14 +11583,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   // the two signals it always had rather than refusing to load.
   for (const channel of ["subagents:completed", "subagents:failed"] as const) {
     pi.events?.on?.(channel, (payload) => {
-      const next = foldBackgroundWaits(backgroundWaits, {
+      const changed = foldBackgroundWait({
         kind: "finished",
         id: (payload as { id?: unknown } | null | undefined)?.id,
       });
       // Nothing was waiting on that agent ⇒ nothing to say. Reporting anyway
       // would write a channel record per finished agent of every session.
-      if (next === backgroundWaits) return;
-      backgroundWaits = next;
+      if (!changed) return;
       // The state may be changing from `working` to `idle`/`done` RIGHT NOW,
       // and a manager may be sitting in a wait: publish it on this event
       // instead of making it wait out the heartbeat.
@@ -13308,7 +11641,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (stages) state.stages = stages;
     armLoop();
     continuationsInjected = 0;
-    orchestratorContinuations = 0; // goal 6 — reset with the loop budget
+    resetOrchestratorContinuations(); // goal 6 — reset with the loop budget
     completionContinuations = 0;
     loopStall = undefined;
     stallNoticeShown = false;
