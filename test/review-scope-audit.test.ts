@@ -27,12 +27,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import {
-  reportConclusion,
-  sanitizeScopeStamp,
-  type ChannelIO,
-  type ChannelReportRecord,
-} from "../lib/orchestrator-channel.ts";
+import type { ChannelIO } from "../lib/channel-io.ts";
+import { reportConclusion, sanitizeScopeStamp } from "../lib/channel-projection.ts";
+import type { ChannelReportRecord } from "../lib/channel-records.ts";
 import { emptyState } from "../lib/gate-state.ts";
 import {
   saveSidecar,

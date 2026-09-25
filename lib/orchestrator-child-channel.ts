@@ -46,17 +46,17 @@
 import {
   appendRecord,
   newChannelId,
-  projectChannel,
-  readChannel,
   channelPathFor,
   type ChannelIO,
-  type ChannelInstructRecord,
-  type ChannelRequestRecord,
   type ChannelTarget,
-  type ChildReportedState,
-  type InstructAckStage,
-
-} from "./orchestrator-channel.ts";
+} from "./channel-io.ts";
+import { projectChannel, readChannel } from "./channel-projection.ts";
+import type {
+  ChannelInstructRecord,
+  ChannelRequestRecord,
+  ChildReportedState,
+  InstructAckStage,
+} from "./channel-records.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
 import type { ModelEvent } from "./model-health.ts";
 

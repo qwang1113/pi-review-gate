@@ -31,9 +31,9 @@ import {
   paneRecoverability,
   refreshSessionPaneTitle,
   PANE_REPAINT_MIN_MS,
-  type PaneRunner,
   type PaneTitleMemory,
 } from "../lib/session-factory.ts";
+import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 // The label grammar's ONE home — imported from there, not re-exported by the
 // pane plumbing that writes what it renders (2026-09-18).
 import { judgePaneLabel, pmPaneLabel } from "../lib/orchestrator-pane-decor.ts";
@@ -52,7 +52,7 @@ const OWN_SESSION = deriveSessionName("/repo", SESSION_ID)!;
  * every later one joins it, and each creation prints `@id %id` the way the real
  * `-P -F '#{window_id} #{pane_id}'` does.
  */
-function happyRunner(seen: string[][] = []): PaneRunner {
+function happyRunner(seen: string[][] = []): TmuxRunner {
   let windowSeq = 7;
   let created = false;
   let owner = "";
@@ -305,7 +305,7 @@ test("a relay with no opener pane is refused, not guessed", async () => {
 // ---------------------------------------------------------------------------
 
 test("a failed creation is a failed open — never a guessed id", async () => {
-  const run: PaneRunner = (argv) => argv[0] === "list-sessions"
+  const run: TmuxRunner = (argv) => argv[0] === "list-sessions"
     ? { ok: true, stdout: "", stderr: "" }
     : { ok: false, stdout: "", stderr: "no server" };
   const outcome = await openSessionWindow(run, {
@@ -329,7 +329,7 @@ test("an empty creation print is a failed open — a half coordinate is not one"
 });
 
 test("a thrown tmux call is a failed open, not an exception the caller must catch", async () => {
-  const run: PaneRunner = (argv) => {
+  const run: TmuxRunner = (argv) => {
     if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
     throw new Error("tmux exploded");
   };
@@ -344,7 +344,7 @@ test("a thrown tmux call is a failed open, not an exception the caller must catc
 });
 
 test("decor failure degrades to a warning, never to a failed open", async () => {
-  const run: PaneRunner = (argv) => {
+  const run: TmuxRunner = (argv) => {
     if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
     if (argv[0] === "new-session" || argv[0] === "new-window") return { ok: true, stdout: "@7 %8\n", stderr: "" };
     // The OWNERSHIP MARKER is not cosmetic: a tmux that refuses `set -t <session>
@@ -422,7 +422,7 @@ test("the repaint is throttled, skips an unchanged title, and swallows tmux fail
   assert.equal(seen.length, 2, "exactly two tmux calls for four requests");
   assert.ok(seen[1]!.join(" ").includes("waiting-input 9s"), "the state and its age are what the border shows");
 
-  const exploding: PaneRunner = () => { throw new Error("tmux gone"); };
+  const exploding: TmuxRunner = () => { throw new Error("tmux gone"); };
   assert.doesNotThrow(() => refreshSessionPaneTitle(exploding, {
     paneId: "%9", label: "reviewer@t6", state: "done", now: 5_000, memory,
   }), "a cosmetic write never breaks supervision");
@@ -444,7 +444,7 @@ test("the manager's own border is `pm:<dir>`, and painting it is unconditional",
   assert.equal(pmPaneLabel("pi-review-gate"), "pm:pi-review-gate");
   assert.equal(pmPaneLabel("My Repo.Dir"), "pm:my-repo-dir", "a raw directory name is slugged, never printed as-is");
   const seen: string[][] = [];
-  const run: PaneRunner = (argv) => { seen.push([...argv]); return { ok: true, stdout: "", stderr: "" }; };
+  const run: TmuxRunner = (argv) => { seen.push([...argv]); return { ok: true, stdout: "", stderr: "" }; };
   paintPaneTitle(run, "%3", pmPaneLabel("repo"));
   paintPaneTitle(run, "%3", pmPaneLabel("repo"));
   assert.equal(seen.length, 2, "no memory and no throttle: pi may have rewritten it in between, so it is repainted every probe");

@@ -68,7 +68,7 @@ import { choiceRows, MAX_CHOICE_OPTIONS } from "./choice-dialog.ts";
 import { MULTI_UNAVAILABLE, multiSelectionLabel } from "./multi-choice-dialog.ts";
 // The batch id is minted with the same collision-resistant helper the channel
 // uses for its own record ids — one generator, not a second convention.
-import { newChannelId } from "./orchestrator-channel.ts";
+import { newChannelId } from "./channel-io.ts";
 
 /** Just enough of pi's tool context for a dialog and a transcript notice. */
 export interface UiContext {

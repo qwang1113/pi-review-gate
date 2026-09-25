@@ -33,10 +33,9 @@ import {
   sessionEntryPath,
   sessionInboxPath,
   type RegistryDeps,
-  type RegistryTmuxResult,
 } from "../lib/session-registry.ts";
 import { sweepOrphans } from "../lib/session-orphan-sweep.ts";
-import { SESSION_OWNER_OPTION, assertSafeTmuxArgv } from "../lib/orchestrator-tmux.ts";
+import { SESSION_OWNER_OPTION, assertSafeTmuxArgv, type TmuxRunner, type TmuxRunResult } from "../lib/orchestrator-tmux.ts";
 import { installTmuxStatusFormat, TMUX_STATUS_CONDITIONAL } from "../scripts/tmux-status-format.mjs";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 
@@ -75,7 +74,7 @@ function tmuxOk(args: readonly string[]): boolean {
 }
 
 /** The runner the modules get: every argv executed on the throwaway server. */
-function runner(argv: readonly string[]): RegistryTmuxResult {
+function runner(argv: readonly string[]): TmuxRunResult {
   try {
     const stdout = execFileSync("tmux", ["-L", SOCKET, ...argv], {
       encoding: "utf8",
@@ -96,7 +95,7 @@ function runner(argv: readonly string[]): RegistryTmuxResult {
  * which is not the one it runs under (reviewer round 1 asked exactly that).
  */
 function guardedRunner(own: readonly string[]) {
-  return (argv: readonly string[], extra?: readonly string[]): RegistryTmuxResult => {
+  const run: TmuxRunner = (argv, _env, extra) => {
     try {
       assertSafeTmuxArgv(argv, { ownSessions: [...own, ...(extra ?? [])] });
     } catch (error) {
@@ -104,6 +103,7 @@ function guardedRunner(own: readonly string[]) {
     }
     return runner(argv);
   };
+  return run;
 }
 
 function sweepDeps(root: string): RegistryDeps {

@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 
 import {
   type ChannelIO,
-} from "../lib/orchestrator-channel.ts";
+} from "../lib/channel-io.ts";
 import {
   judgeDeniedReason,
   judgeSideBinding,

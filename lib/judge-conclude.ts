@@ -53,12 +53,10 @@ import {
   channelPathFor,
   judgeChannelTarget,
   newChannelId,
-  readChannel,
-  sanitizeContextPercent,
   type ChannelIO,
-  type ChannelRecord,
-  type ReviewScopeStamp,
-} from "./orchestrator-channel.ts";
+} from "./channel-io.ts";
+import { readChannel, sanitizeContextPercent } from "./channel-projection.ts";
+import type { ChannelRecord, ReviewScopeStamp } from "./channel-records.ts";
 import { DOC_SYNC_ATTESTATIONS } from "./gate-state-records.ts";
 import { JUDGE_STREAM_ENV, readJudgeSideEnv } from "./judge-side.ts";
 import {

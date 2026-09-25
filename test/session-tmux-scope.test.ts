@@ -21,6 +21,8 @@ import {
   buildUnsetSessionEnvArgv,
   isOwnSessionName,
   SESSION_OWNER_OPTION,
+  type TmuxRunner,
+  type TmuxRunResult,
 } from "../lib/orchestrator-tmux.ts";
 import {
   addressableSessions,
@@ -29,8 +31,6 @@ import {
   deriveSessionName,
   openScopeWindow,
   sanitizeScopeRecord,
-  type ScopeRunResult,
-  type ScopeRunner,
   type TmuxScope,
   type TmuxScopeRecord,
 } from "../lib/session-tmux-scope.ts";
@@ -93,12 +93,12 @@ function fakeServer(opts: {
   envUnsetFails?: boolean;
   /** …or throws while trying. */
   envUnsetThrows?: boolean;
-} = {}): { run: ScopeRunner; calls: string[][]; sessions: Map<string, string>; env: Record<string, string> } {
+} = {}): { run: TmuxRunner; calls: string[][]; sessions: Map<string, string>; env: Record<string, string> } {
   const sessions = new Map<string, string>();
   if (opts.existing) sessions.set(opts.existing.name, opts.existing.owner);
   const env: Record<string, string> = { ...(opts.env ?? {}) };
   const calls: string[][] = [];
-  const run: ScopeRunner = (argv) => {
+  const run: TmuxRunner = (argv) => {
     calls.push([...argv]);
     const sub = argv[0];
     const target = String(argv[argv.indexOf("-t") + 1] ?? "");
@@ -136,7 +136,7 @@ function fakeServer(opts: {
       sessions.delete(target);
       return { ok: true, stdout: "", stderr: "" };
     }
-    return { ok: true, stdout: "", stderr: "" } satisfies ScopeRunResult;
+    return { ok: true, stdout: "", stderr: "" } satisfies TmuxRunResult;
   };
   return { run, calls, sessions, env };
 }

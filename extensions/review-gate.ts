@@ -171,22 +171,22 @@ import {
   appendRecord,
   channelPathFor,
   instructText,
-  isStalled,
-  HEARTBEAT_STALE_MS,
   judgeChannelTarget,
   newChannelId,
   nodeChannelIO,
+  reportText,
+  type ChannelIO,
+} from "../lib/channel-io.ts";
+import {
+  isStalled,
+  HEARTBEAT_STALE_MS,
   projectChannel,
   readChannel,
   reportConclusion,
-  reportText,
   sanitizeContextPercent,
-  type ChannelIO,
-  type ChannelRecord,
-  type ChannelReportRecord,
   type ReportConclusion,
-  type ChildReportedState,
-} from "../lib/orchestrator-channel.ts";
+} from "../lib/channel-projection.ts";
+import type { ChannelRecord, ChannelReportRecord, ChildReportedState } from "../lib/channel-records.ts";
 import {
   acknowledgeInstruct,
   askThroughChannel,
@@ -215,8 +215,8 @@ import {
   JUDGE_ROLE_ENV,
   judgePaneAlive,
   listServerPanes,
-  type JudgePaneRunner,
 } from "../lib/judge-pane.ts";
+import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
@@ -3950,7 +3950,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * holder is never evicted).
    */
   const sessionNaming = createSessionNaming({
-    runTmux: (argv, ownSessions) => runTmux(argv, undefined, ownSessions),
+    runTmux,
     sessionId: () => state.sessionId?.trim() || undefined,
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     // THE SERVER HALF OF THE COORDINATES (t4 review P1): recorded so a later
@@ -8716,7 +8716,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
   interface JudgeCloseCtx {
     ownPane: string | undefined;
     tmuxServer: string | undefined;
-    run: JudgePaneRunner;
+    run: TmuxRunner;
   }
 
   /**
@@ -9196,7 +9196,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
    * Record what a judge last said about its OWN context usage.
    *
    * The reading only exists inside the judge's process, so it rides its report
-   * (lib/orchestrator-channel.ts) and lands here — the opener's registry —
+   * (lib/channel-records.ts) and lands here — the opener's registry —
    * where the next dispatch's rotation policy reads it. Taken from the NEWEST
    * report that carries one: a report from an older build carries none, and
    * "none" must leave the previous reading alone rather than erase it.
@@ -13270,7 +13270,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
         // The rule it enforced is right and is still enforced; the PLACE was
         // wrong. Entering the role grants nothing on its own: what needs an
         // identity is writing/submitting a plan and spawning a child, and all
-        // three refuse on `runtimeConflict` (lib/orchestrator-tools.ts,
+        // three refuse on `runtimeConflict` (lib/orchestrator-plan-action.ts,
         // lib/orchestrator-dispatch.ts). Refusing the mode itself put the two
         // tools that RESOLVE the situation — `orchestrator_attach` and
         // `orchestrator_plan({action:"archive"})` — behind the very door it

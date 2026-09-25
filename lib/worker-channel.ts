@@ -8,14 +8,15 @@
  * pane-ownership check in particular is asked in four places, and two copies
  * of it is how one drifts back to trusting a stranger's pane.
  */
-import type {
-  ChannelIO,
-  ChannelTarget,
-  ChannelRecord,
-  ChannelRequestRecord,
-  ChannelReportRecord,
-} from "./orchestrator-channel.ts";
-import { channelPathFor, readChannel, reportText, requestPayload } from "./orchestrator-channel.ts";
+import type { ChannelRecord, ChannelRequestRecord, ChannelReportRecord } from "./channel-records.ts";
+import {
+  channelPathFor,
+  reportText,
+  requestPayload,
+  type ChannelIO,
+  type ChannelTarget,
+} from "./channel-io.ts";
+import { readChannel } from "./channel-projection.ts";
 import type { AgentsConfigMap } from "./agents-config.ts";
 import type { WorkerEntry, WorkerRegistry } from "./worker-pane.ts";
 import type { WorkerToolDeps } from "./worker-tools.ts";

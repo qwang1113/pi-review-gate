@@ -9,7 +9,8 @@
  */
 import type { ToolReply } from "./tool-host.ts";
 import { workerPaneDecor } from "./session-factory.ts";
-import { appendRecord, channelPathFor, newChannelId, readChannel } from "./orchestrator-channel.ts";
+import { appendRecord, channelPathFor, newChannelId } from "./channel-io.ts";
+import { readChannel } from "./channel-projection.ts";
 import {
   buildWorkerPaneCommand,
   isWorkerId,

@@ -16,7 +16,7 @@
  * lib/orchestrator-tmux.ts, every pane it may touch is one the registry
  * created, and the blast radius is one window.
  *
- * Read this alongside lib/orchestrator-tools.ts (plan / status / notify),
+ * Read this alongside lib/orchestrator-tools.ts (the plan tool),
  * which is the half that never leaves the sidecar.
 
  */
@@ -73,7 +73,7 @@ import {
 import { dispatchInstruct, dispatchSpawn } from "./orchestrator-dispatch.ts";
 import { registerOrchestratorAnswerTool } from "./orchestrator-answer-tools.ts";
 import { registerOrchestratorRecoveryTools } from "./orchestrator-recovery-tools.ts";
-// Short local aliases; see the note in lib/orchestrator-tools.ts.
+// Short local aliases; see the note in lib/orchestrator-plan-action.ts.
 import {
   alivePanes,
   childAssets,

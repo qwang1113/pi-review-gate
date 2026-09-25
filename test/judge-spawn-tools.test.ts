@@ -16,8 +16,8 @@ import {
   appendRecord,
   judgeChannelTarget,
   type ChannelIO,
-} from "../lib/orchestrator-channel.ts";
-import type { JudgePaneRunResult } from "../lib/judge-pane.ts";
+} from "../lib/channel-io.ts";
+import type { TmuxRunResult } from "../lib/orchestrator-tmux.ts";
 
 type Exec = (params: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
 
@@ -44,7 +44,7 @@ function setup(over: Partial<{
   caller: string | null | undefined;
   ownPane: string | null | undefined;
   tmuxServer: string | null | undefined;
-  tmux: (argv: readonly string[]) => JudgePaneRunResult;
+  tmux: (argv: readonly string[]) => TmuxRunResult;
   panes: string[];
   table: HierarchyTable;
   pending?: "goal" | "plan";

@@ -19,11 +19,7 @@
  * written to.
  */
 
-import type { PaneRunResult } from "./session-factory.ts";
 import { parseWindowCoords } from "./orchestrator-tmux.ts";
-
-/** The job a worker pane runs — the argv a runner executes. */
-export type WorkerPaneRunner = (argv: readonly string[]) => PaneRunResult;
 
 /** Repo-root-relative location of the worker registry (gate-excluded via `.pi/`). */
 export const WORKER_REGISTRY_RELPATH = ".pi/worker-sessions.json";

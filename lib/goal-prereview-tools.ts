@@ -38,7 +38,7 @@ import type { GateState } from "./gate-state.ts";
 import { LOOP_GOAL_MAX_WRITE_CHARS, goalTextHash, normalizeGoalText, type GoalPrereviewRecord } from "./loop-goal.ts";
 import { formatGoalPrereviewCarryover } from "./goal-audit-task.ts";
 import { normalizeConcludedVerdict, severityFindingsFrom } from "./review-adjudicate.ts";
-import type { ReportConclusion } from "./orchestrator-channel.ts";
+import type { ReportConclusion } from "./channel-projection.ts";
 import { adjudicateGoalAudit } from "./judge-lifecycle.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 

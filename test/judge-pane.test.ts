@@ -13,11 +13,11 @@ import {
   JUDGE_ID_ENV,
   JUDGE_OPENER_ENV,
   JUDGE_ROLE_ENV,
-  type JudgePaneRunner,
 } from "../lib/judge-pane.ts";
+import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 
 /** Fake tmux: list shows %1 and %7, everything ok. */
-function happyRunner(seen: string[][] = []): JudgePaneRunner {
+function happyRunner(seen: string[][] = []): TmuxRunner {
   return (argv) => {
     seen.push([...argv]);
     if (argv[0] === "list-panes") return { ok: true, stdout: "%1\n%7\n", stderr: "" };
@@ -44,7 +44,7 @@ test("the pane list is asked SERVER-WIDE, not about the opener's window", () => 
 });
 
 test("a thrown tmux call is missing information too, never death", () => {
-  const throwing: JudgePaneRunner = () => { throw new Error("no server"); };
+  const throwing: TmuxRunner = () => { throw new Error("no server"); };
   assert.equal(listServerPanes(throwing), undefined);
   assert.equal(judgePaneAlive(throwing, "%7"), undefined);
 });

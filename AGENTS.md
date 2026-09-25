@@ -514,7 +514,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 **2026-08-30 通道重构：tmux 退回显示器。** 前三轮端到端验证的 40+ 条缺陷里约
 三分之二源于同一个根因 —— 拿 tmux 屏幕当 API。已全部换成 pi 官方结构化通道：
 
-- **点对点通道**（`lib/orchestrator-channel.ts`）：每个子会话一条专属文件
+- **点对点通道**（`lib/channel-records.ts` / `channel-io.ts` / `channel-projection.ts`）：每个子会话一条专属文件
   `<orch-id>/<child-id>.jsonl`，物理隔离，因此没有收件人过滤这回事。通道是
   **文件路径、不属于任何进程** —— 项目经理换人时打开同一批路径即可，子会话
   完全无感。旧的全局广播队列已删除。
@@ -632,7 +632,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    判断；缺任一项即退回，并把 plan 里那个任务与子会话提交的正文**并排**贴回。
    拒绝不需要对照（说不永远是自由的）。子会话请求确认的站点若**宽于**已批准
    plan 的 `deliveryStation`，代答一律被拒 —— 放宽站点只有用户能决定。判定与
-   词表在 `lib/orchestrator-answer-tools.ts`（`PROXY_CROSSCHECK_TOKENS`）。
+   词表在 `lib/orchestrator-answer-rules.ts`（`PROXY_CROSSCHECK_TOKENS`）。
 
 
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，

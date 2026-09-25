@@ -34,7 +34,7 @@ import {
 } from "./helpers/fake-orchestration.ts";
 import { normalizeAnswerItems } from "../lib/orchestrator-answer-tools.ts";
 import type { FakeWorld } from "./helpers/fake-orchestration.ts";
-import type { ChannelRecord } from "../lib/orchestrator-channel.ts";
+import type { ChannelRecord } from "../lib/channel-records.ts";
 
 const BATCH = "ask-batch-1";
 

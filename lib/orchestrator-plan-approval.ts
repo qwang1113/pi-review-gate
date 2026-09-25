@@ -46,7 +46,7 @@
  *
  * Pure module: two plans in, a verdict and human-readable reasons out. It
  * reads nothing, writes nothing, and never decides on its own whether to show
- * a dialog — lib/orchestrator-tools.ts does that with this verdict in hand.
+ * a dialog — lib/orchestrator-plan-action.ts does that with this verdict in hand.
  */
 
 import { isPlanHash, type OrchestratorPlan, type TaskExecution } from "./orchestrator-plan.ts";

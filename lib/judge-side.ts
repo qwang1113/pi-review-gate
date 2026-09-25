@@ -22,7 +22,7 @@
 import {
   judgeChannelTarget,
   type ChannelIO,
-} from "./orchestrator-channel.ts";
+} from "./channel-io.ts";
 import type { ChildChannelBinding } from "./orchestrator-child-channel.ts";
 import {
   JUDGE_ID_ENV,

@@ -57,7 +57,7 @@
  * Failure direction throughout: an unreadable tmux (`list-sessions` failed) is
  * "I do not know", and nothing is created or killed on an unknown.
  *
- * Pure-ish: tmux enters through {@link ScopeRunner} and the sidecar through
+ * Pure-ish: tmux enters through {@link TmuxRunner} and the sidecar through
  * {@link TmuxScope}, so every branch runs with fakes.
  */
 
@@ -75,17 +75,9 @@ import {
   parseSpawnedWindow,
   SESSION_OWNER_OPTION,
   type SessionWindowCoords,
+  type TmuxRunner,
+  type TmuxRunResult,
 } from "./orchestrator-tmux.ts";
-
-/** One tmux invocation through the injected runner. */
-export interface ScopeRunResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-}
-
-/** Run one tmux argv; never a shell string. */
-export type ScopeRunner = (argv: readonly string[]) => ScopeRunResult;
 
 /**
  * What the sidecar remembers about the session this process created.
@@ -156,7 +148,7 @@ export function sanitizeScopeRecord(raw: unknown): TmuxScopeRecord | undefined {
 }
 
 /** Every session on the server, or undefined when tmux could not be read. */
-function listSessions(run: ScopeRunner): string[] | undefined {
+function listSessions(run: TmuxRunner): string[] | undefined {
   try {
     const result = run(buildListSessionsArgv());
     if (!result.ok) return undefined;
@@ -171,7 +163,7 @@ function listSessions(run: ScopeRunner): string[] | undefined {
  * 0, so an empty reading is a real answer ("nobody claimed it") while a failed
  * call is not.
  */
-function readOwner(run: ScopeRunner, session: string): { ok: true; owner: string } | { ok: false; error: string } {
+function readOwner(run: TmuxRunner, session: string): { ok: true; owner: string } | { ok: false; error: string } {
   try {
     const result = run(buildReadSessionOwnerArgv(session));
     if (!result.ok) return { ok: false, error: result.stderr || `tmux show-options ${SESSION_OWNER_OPTION} 失败` };
@@ -205,10 +197,10 @@ function readOwner(run: ScopeRunner, session: string): { ok: true; owner: string
  * Nothing to clear is the common case and costs one read.
  */
 export function healSessionEnv(
-  run: ScopeRunner,
+  run: TmuxRunner,
   session: string,
 ): { ok: true; cleared: string[] } | { ok: false; error: string } {
-  let listed: ScopeRunResult;
+  let listed: TmuxRunResult;
   try {
     listed = run(buildListSessionEnvArgv(session));
   } catch (error) {
@@ -226,7 +218,7 @@ export function healSessionEnv(
     .filter((key) => key.startsWith("RG_"));
   const cleared: string[] = [];
   for (const key of stale) {
-    let unset: ScopeRunResult;
+    let unset: TmuxRunResult;
     try {
       unset = run(buildUnsetSessionEnvArgv(session, key));
     } catch (error) {
@@ -412,7 +404,7 @@ export function addressableSessions(
  * running process. A FAILED read is NOT cached — the session may simply not
  * exist yet, and a `new-session` a moment later must still be declarable.
  */
-export function createOwnershipProbe(scope: TmuxScope, run: ScopeRunner): (name: string) => boolean {
+export function createOwnershipProbe(scope: TmuxScope, run: TmuxRunner): (name: string) => boolean {
   const cache = new Map<string, boolean>();
   return (name: string): boolean => {
     const cached = cache.get(name);
@@ -450,7 +442,7 @@ export type OpenScopeWindowResult =
  * and leaves nothing behind.
  */
 export function openScopeWindow(
-  run: ScopeRunner,
+  run: TmuxRunner,
   scope: TmuxScope,
   opts: OpenScopeWindowOptions,
 ): OpenScopeWindowResult {
@@ -492,7 +484,7 @@ export function openScopeWindow(
     ...(opts.windowName === undefined ? {} : { windowName: opts.windowName }),
   };
   const argv = exists ? buildNewWindowArgv(spec) : buildNewSessionArgv(spec);
-  let result: ScopeRunResult;
+  let result: TmuxRunResult;
   try {
     result = run(argv);
   } catch (error) {
@@ -513,7 +505,7 @@ export function openScopeWindow(
     // failed `set` would leave a session that blocks every future child of this
     // session. It is safe to clean up right here because the session is
     // UNAMBIGUOUSLY ours: this call created it a moment ago.
-    const marked = ((): ScopeRunResult | { ok: false; stderr: string } => {
+    const marked = ((): TmuxRunResult | { ok: false; stderr: string } => {
       try { return run(buildSetSessionOwnerArgv(name, owner)); } catch (error) { return { ok: false, stderr: (error as Error).message }; }
     })();
     if (!marked.ok) {
@@ -548,7 +540,7 @@ export type CloseOwnSessionResult =
  * killed after its marker matched the recorded owner — so a collision or a
  * stranger's session wearing our name is left completely alone.
  */
-export function closeOwnSession(run: ScopeRunner, scope: TmuxScope): CloseOwnSessionResult {
+export function closeOwnSession(run: TmuxRunner, scope: TmuxScope): CloseOwnSessionResult {
   const identity = resolveScope(scope);
   if (!identity.ok) {
     // No identity ⇒ nothing could ever have been created, so there is nothing

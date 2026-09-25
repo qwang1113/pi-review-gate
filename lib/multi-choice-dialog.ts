@@ -44,7 +44,7 @@ export const MULTI_UNCHECKED_MARK = "[ ]";
  * THE SEPARATOR BETWEEN TWO PICKED OPTIONS — `A. 甲 / C. 丙` (2026-09-22).
  *
  * It is the WIRE format as well as the on-screen one: the component, the
- * channel answer (`lib/orchestrator-answer-tools.ts` normalizes a project
+ * channel answer (`lib/orchestrator-answer-rules.ts` normalizes a project
  * manager's `A, C` into this) and the record all speak one string, so nothing
  * has to parse a second dialect. The spaces are load-bearing — a `/` inside an
  * option's own text is not a separator.
@@ -120,7 +120,7 @@ const ROW_MARK = /^\[[ xX]\]\s+/;
  * (with or without a reason), and `A. text` segments joined by
  * {@link MULTI_ANSWER_SEPARATOR}. A project manager's own loose spelling
  * (`A, C`) is made canonical BEFORE it gets here, by
- * `lib/orchestrator-answer-tools.ts`'s `resolveAnswer`.
+ * `lib/orchestrator-answer-rules.ts`'s `resolveAnswer`.
  *
  * A QUOTED ROW MAY CARRY ITS CHECKBOX (2026-09-22): the rows a checklist puts
  * on the channel are the ones the user sees (`[ ] A. 预检`), so a manager that

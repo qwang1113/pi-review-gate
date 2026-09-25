@@ -18,7 +18,7 @@
  */
 
 import { WAIT_DISCIPLINE_HINT } from "./agent-directives.ts";
-import type { ReviewScopeStamp } from "./orchestrator-channel.ts";
+import type { ReviewScopeStamp } from "./channel-records.ts";
 import type { ModelEvent } from "./model-health.ts";
 
 

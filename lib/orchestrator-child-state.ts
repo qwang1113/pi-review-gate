@@ -37,12 +37,8 @@
  * of its own.
  */
 
-import {
-  isStalled,
-  type ChannelProjection,
-  type ChannelStateRecord,
-  HEARTBEAT_STALE_MS,
-} from "./orchestrator-channel.ts";
+import { isStalled, type ChannelProjection, HEARTBEAT_STALE_MS } from "./channel-projection.ts";
+import type { ChannelStateRecord } from "./channel-records.ts";
 
 /** The states a registered child can be in — enumerated in {@link CHILD_STATES}. */
 export type ChildState =
@@ -315,7 +311,7 @@ function idleReportIsBelievable(observation: ChildObservation): boolean {
  * Did the child PROVE it stopped?
  *
  * `settledSince` is written only while the child's last turn has ENDED and
- * nothing has run since (lib/orchestrator-channel.ts), so its presence is a
+ * nothing has run since (lib/channel-records.ts), so its presence is a
  * statement about structure, not about elapsed time. A child that cannot
  * report it leaves it absent — which is why the 120s rule below stays: the
  * structural evidence is PREFERRED, never required.

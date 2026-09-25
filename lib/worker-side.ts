@@ -39,8 +39,7 @@
  */
 
 import { Type } from "typebox";
-import type { ChannelIO, ChannelTarget } from "./orchestrator-channel.ts";
-import { appendRecord, newChannelId } from "./orchestrator-channel.ts";
+import { appendRecord, newChannelId, type ChannelIO, type ChannelTarget } from "./channel-io.ts";
 import type { ToolHost } from "./tool-host.ts";
 import type { ToolReply } from "./tool-host.ts";
 

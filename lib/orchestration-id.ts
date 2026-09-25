@@ -19,7 +19,7 @@
  * environment.
  *
  * TODAY THAT ADDRESS IS A DIRECTORY. The id names the channel directory
- * (lib/orchestrator-channel.ts), which is what makes the indirection
+ * (lib/channel-io.ts), which is what makes the indirection
  * physical rather than a filter somebody has to remember to apply: a
  * successor opens the same paths, and the traffic of a different
  * orchestration is not merely ignored, it is somewhere else entirely.

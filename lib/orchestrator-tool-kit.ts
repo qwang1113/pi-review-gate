@@ -17,7 +17,8 @@ import { basename } from "node:path";
 import { listServerPanes } from "./judge-pane.ts";
 import { childPaneLabel, pmPaneLabel } from "./orchestrator-pane-decor.ts";
 import { paintPaneTitle, refreshSessionPaneTitle, type PaneTitleMemory } from "./session-factory.ts";
-import { channelPathFor, projectChannel, readChannel, type ChannelIO } from "./orchestrator-channel.ts";
+import { channelPathFor, type ChannelIO } from "./channel-io.ts";
+import { projectChannel, readChannel } from "./channel-projection.ts";
 import type { ChildAssets, SupervisionSnapshot } from "./orchestrator-supervisor.ts";
 
 import {

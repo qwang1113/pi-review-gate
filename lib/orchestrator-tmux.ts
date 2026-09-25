@@ -104,6 +104,27 @@ const SUBCOMMAND_ALIASES: Readonly<Record<string, string>> = Object.freeze({
 
 export class UnsafeTmuxCommand extends Error {}
 
+/** One tmux invocation's outcome. */
+export interface TmuxRunResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Run one tmux argv — never a shell string. THE one runner contract every
+ * module injects: the host binds it once (extensions/review-gate.ts over
+ * lib/orchestrator-wiring.ts `runTmux`); `env` overrides the process env and
+ * `ownSessions` declares gate sessions the caller has just PROVEN are its own
+ * (a dead session's, which the host's own list cannot know). Callers that need
+ * neither simply pass `argv`.
+ */
+export type TmuxRunner = (
+  argv: readonly string[],
+  env?: NodeJS.ProcessEnv,
+  ownSessions?: readonly string[],
+) => TmuxRunResult;
+
 function canonicalSubcommand(sub: string): string {
   return SUBCOMMAND_ALIASES[sub] ?? sub;
 }

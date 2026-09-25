@@ -36,7 +36,8 @@ import {
   checkSessionExclusivity,
   parsePresence,
 } from "../lib/session-exclusivity.ts";
-import { judgePaneAlive, type JudgePaneRunner } from "../lib/judge-pane.ts";
+import { judgePaneAlive } from "../lib/judge-pane.ts";
+import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 
 const NOW = 1_700_000_000_000;
 
@@ -87,14 +88,14 @@ test("a FUTURE timestamp (clock skew on a shared checkout) is kept by one and ig
 });
 
 test("the pane criterion answers a THIRD way: missing information, neither alive nor dead", () => {
-  const blindRunner: JudgePaneRunner = () => ({ ok: false, stdout: "", stderr: "no server" });
+  const blindRunner: TmuxRunner = () => ({ ok: false, stdout: "", stderr: "no server" });
   assert.equal(
     judgePaneAlive(blindRunner, "%1"),
     undefined,
     "an unreadable pane list is missing information — never a dead judge",
   );
 
-  const seeing: JudgePaneRunner = () => ({ ok: true, stdout: "%0\n%1\n", stderr: "" });
+  const seeing: TmuxRunner = () => ({ ok: true, stdout: "%0\n%1\n", stderr: "" });
   assert.equal(judgePaneAlive(seeing, "%1"), true);
   assert.equal(judgePaneAlive(seeing, "%7"), false);
 });

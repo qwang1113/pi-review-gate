@@ -28,7 +28,7 @@ import {
   sessionInboxTakenPath,
   type SessionRegistryEntry,
 } from "../lib/session-registry.ts";
-import { MAX_INLINE_RECORD_BYTES } from "../lib/orchestrator-channel.ts";
+import { MAX_INLINE_RECORD_BYTES } from "../lib/channel-io.ts";
 
 const ME = "t3-lane";
 const THEIRS = "t9-pm";

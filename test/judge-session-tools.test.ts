@@ -25,12 +25,8 @@ import {
 } from "../lib/judge-wait-criteria.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import { emptyHierarchy, type HierarchyTable } from "../lib/hierarchy.ts";
-import {
-  appendRecord,
-  judgeChannelTarget,
-  type ChannelIO,
-  type ReviewScopeStamp,
-} from "../lib/orchestrator-channel.ts";
+import { appendRecord, judgeChannelTarget, type ChannelIO } from "../lib/channel-io.ts";
+import type { ReviewScopeStamp } from "../lib/channel-records.ts";
 import type { RoundBinding } from "../lib/audit-round-report.ts";
 import { REVIEW_ROUND_SPEC } from "../lib/audit-round-specs.ts";
 

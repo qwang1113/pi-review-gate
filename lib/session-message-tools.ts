@@ -10,7 +10,7 @@
  * RECIPIENT's own gate injecting it as a user message.
  *
  * It deliberately does NOT touch the structured channel
- * (lib/orchestrator-channel.ts): a project manager's instruction, a child's
+ * (lib/channel-*.ts): a project manager's instruction, a child's
  * state report, a judge's verdict and an ask_user proxy answer each have a
  * schema, a lifecycle and an answer path of their own, and handing them a
  * second transport would be exactly the redundancy this project deletes. What
@@ -114,8 +114,8 @@ import {
   MAX_INLINE_RECORD_BYTES,
   newChannelId,
   resolvePayload,
-  type ChannelPayloadRef,
-} from "./orchestrator-channel.ts";
+} from "./channel-io.ts";
+import type { ChannelPayloadRef } from "./channel-records.ts";
 import {
   heartbeatAgeMs,
   sessionInboxPath,

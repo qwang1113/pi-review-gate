@@ -165,7 +165,7 @@ const ROW_PREFIX = /^([A-Za-z])\.\s+/;
  * ONE DEFINITION FOR TWO PARSERS (quality round P2, both halves, 2026-09-19).
  * The human's dialog answer goes through `parseChoice` below and the project
  * manager's channel answer goes through `resolveAnswer`
- * (lib/orchestrator-answer-tools.ts); both read a bare letter AND a bare number
+ * (lib/orchestrator-answer-rules.ts); both read a bare letter AND a bare number
  * the same way BY CONSTRUCTION rather than by four copies of two regexes that
  * drift apart the first time one of them is touched (AGENTS.md 哲学二: one
  * thing, one implementation). The two shorthands are one function because they

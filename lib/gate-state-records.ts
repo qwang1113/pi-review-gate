@@ -8,7 +8,8 @@
 
 import type { TestScope } from "./precommit-receipt.ts";
 // The round's audit stamp is the CHANNEL's stamp: one shape, one validator.
-import { sanitizeScopeStamp, type ReviewScopeStamp } from "./orchestrator-channel.ts";
+import { sanitizeScopeStamp } from "./channel-projection.ts";
+import type { ReviewScopeStamp } from "./channel-records.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
 export type PrecommitVerdict = "PASS" | "FAIL" | "NO_CHECKS_RUN" | "NOT_RUN";

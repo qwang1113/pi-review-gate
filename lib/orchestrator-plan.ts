@@ -86,7 +86,7 @@ export interface PlanTask {
    * on 2026-09-17 (when file boundaries left the plan and the landing place
    * moved here as free text) while the old comment and a second writer stayed
    * behind: `set-status` wrote its reason onto this very field, overwriting the
-   * assignment. The status writer is gone now (`lib/orchestrator-tools.ts`);
+   * assignment. The status writer is gone now (`lib/orchestrator-plan-action.ts`);
    * status reasons go to the gate log.
    *
    * Deliberately NOT part of {@link canonicalPlanText}: it grants nothing (no

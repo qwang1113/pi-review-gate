@@ -11,12 +11,8 @@
  * synchronous round never sees. Which report closes a round is
  * lib/audit-round-report.ts.
  */
-import type {
-  ChannelRecord,
-  ChannelReportRecord,
-  ReportConclusion,
-  ReviewScopeStamp,
-} from "./orchestrator-channel.ts";
+import type { ChannelRecord, ChannelReportRecord, ReviewScopeStamp } from "./channel-records.ts";
+import type { ReportConclusion } from "./channel-projection.ts";
 import {
   adjudicatePlanAudit,
   formatPlanAuditRefusal,

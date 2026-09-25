@@ -34,7 +34,6 @@ import { join } from "node:path";
 import {
   closeSessionWindow,
   openSessionWindow,
-  type PaneRunner,
 } from "../lib/session-factory.ts";
 import {
   closeOwnSession,
@@ -43,7 +42,7 @@ import {
   type TmuxScope,
   type TmuxScopeRecord,
 } from "../lib/session-tmux-scope.ts";
-import { isOwnSessionName, SESSION_OWNER_OPTION } from "../lib/orchestrator-tmux.ts";
+import { isOwnSessionName, SESSION_OWNER_OPTION, type TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import { judgePaneAlive } from "../lib/judge-pane.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 
@@ -83,7 +82,7 @@ function tmuxInstalled(): boolean {
 const SKIP = tmuxInstalled() ? false : "tmux is not installed";
 
 /** The gate's own runner, backed by the lab server. */
-const runner: PaneRunner = (argv) => {
+const runner: TmuxRunner = (argv) => {
   try {
     return { ok: true, stdout: tmux([...argv]), stderr: "" };
   } catch (error) {
@@ -274,7 +273,7 @@ test("an unreadable tmux is 'I do not know' — never a licence to create or kil
   { skip: SKIP }, async () => {
     const scope = labScope();
     scope.record = { name: OWN_SESSION, owner: SESSION_ID, createdAt: new Date().toISOString() };
-    const blind: PaneRunner = () => ({ ok: false, stdout: "", stderr: "no server running on /tmp/tmux-0/default" });
+    const blind: TmuxRunner = () => ({ ok: false, stdout: "", stderr: "no server running on /tmp/tmux-0/default" });
     const opened = await openScopeWindow(blind, scope, { cwd: "/tmp", command: ["sleep", "600"] });
     assert.equal(opened.ok, false, "no server ⇒ no session is created");
     const killed = closeOwnSession(blind, scope);

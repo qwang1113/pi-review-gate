@@ -27,7 +27,7 @@ import {
   sessionInboxTakenPath,
   type SessionRegistryEntry,
 } from "../lib/session-registry.ts";
-import { MAX_INLINE_RECORD_BYTES } from "../lib/orchestrator-channel.ts";
+import { MAX_INLINE_RECORD_BYTES } from "../lib/channel-io.ts";
 
 const ROOT = "/home/agent/.pi/agent/rg-sessions";
 const NOW = Date.parse("2026-09-25T10:00:00.000Z");

@@ -26,13 +26,13 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync 
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import type { ChoiceSpec } from "./choice-dialog.ts";
-import { channelRoot, nodeChannelIO } from "./orchestrator-channel.ts";
+import { channelRoot, nodeChannelIO } from "./channel-io.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { gitOrNull } from "./git-exec.ts";
 import { readJsonIfExists } from "./json-file.ts";
-import { assertSafeTmuxArgv, type SafeTmuxOptions } from "./orchestrator-tmux.ts";
+import { assertSafeTmuxArgv, type SafeTmuxOptions, type TmuxRunResult } from "./orchestrator-tmux.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state-io.ts";
@@ -44,7 +44,7 @@ import { addressableSessions, createOwnershipProbe } from "./session-tmux-scope.
 
 import { parsePlan, PLAN_RELPATH, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
-import type { HandoffRetirement, OrchestratorDeps, PlanRead, TmuxRunResult } from "./orchestrator-deps.ts";
+import type { HandoffRetirement, OrchestratorDeps, PlanRead } from "./orchestrator-deps.ts";
 import type { TaskMode } from "./task-mode.ts";
 import type { RestatementRecord } from "./restatement.ts";
 

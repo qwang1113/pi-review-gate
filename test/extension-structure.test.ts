@@ -1475,7 +1475,7 @@ test("set_gate_mode(orchestrator) no longer refuses because somebody else's plan
   assert.match(region, /isOrchestrationChild\(\)/, "an orchestration child still may not become a manager");
 
   // And the rule now lives on the acts that need an identity.
-  const planTools = readFileSync(join(ROOT, "lib/orchestrator-tools.ts"), "utf8");
+  const planTools = readFileSync(join(ROOT, "lib/orchestrator-plan-action.ts"), "utf8");
   assert.match(planTools, /runtimeConflict\?\.\(\)/,
     "orchestrator_plan must refuse write/submit while the repo records another orchestration");
   assert.match(planTools, /PLAN_ACTIONS\.write \|\| action === PLAN_ACTIONS\.submit/,
@@ -3148,7 +3148,7 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   // and it is passed as PROVEN rather than as a candidate (t4 review P1), so
   // the widening is one verified name at a time and never a caller-supplied
   // session.
-  assert.match(SRC, /sessionNaming = createSessionNaming\(\{\s*runTmux: \(argv, ownSessions\) => runTmux\(argv, undefined, ownSessions\)/, "the naming module's runner is the same guarded wrapper");
+  assert.match(SRC, /sessionNaming = createSessionNaming\(\{\s*runTmux,/, "the naming module's runner is the same guarded wrapper");
   // THE FOUR MOMENTS THE SESSION'S NAME LIVES IN (2026-09-25, t2). All the
   // judgement is in lib/session-registry.ts + lib/session-name-tools.ts; the
   // extension only connects the lifecycle, and a connection that is DROPPED is
@@ -7074,7 +7074,7 @@ test("the row-position rule has ONE implementation — the channel parser import
   // pane's `parseChoice` and the channel's `resolveAnswer` read `A` and `1`
   // through the same two regexes, written twice. Two copies of one rule drift
   // apart the first time one of them is touched.
-  const answerTools = readFileSync(join(ROOT, "lib", "orchestrator-answer-tools.ts"), "utf8");
+  const answerTools = readFileSync(join(ROOT, "lib", "orchestrator-answer-rules.ts"), "utf8");
   assert.doesNotMatch(answerTools, /charCodeAt\(0\) - 65/,
     "the letter index is computed in lib/choice-dialog.ts (`rowIndexOf`) and imported, never re-derived");
   assert.doesNotMatch(answerTools, /Number\(text\) - 1/,

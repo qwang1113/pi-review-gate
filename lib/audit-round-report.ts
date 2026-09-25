@@ -9,7 +9,7 @@
  * `judge_wait` asks "did this round end?", and the two answers drifting apart
  * is how a wait announced a verdict the recorder then refused (2026-09-05).
  */
-import type { ChannelRecord, ChannelReportRecord } from "./orchestrator-channel.ts";
+import type { ChannelRecord, ChannelReportRecord } from "./channel-records.ts";
 import { specForRound, type AuditKind, type ReportBinding } from "./audit-round-specs.ts";
 
 /** Why the channel held no report this round may be adjudicated against. */

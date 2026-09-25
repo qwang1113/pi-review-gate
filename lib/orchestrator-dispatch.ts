@@ -56,7 +56,7 @@ import {
 import {
   appendRecord,
   newChannelId,
-} from "./orchestrator-channel.ts";
+} from "./channel-io.ts";
 import {
   alivePanes,
   childChannelProjection,
@@ -508,7 +508,7 @@ const INSTRUCT_MODES = new Set(["interrupt", "steer"]);
  *
  * It stays in the channel enum and on the child's side on purpose: a child
  * running an older gate build must keep being able to read one, and
- * `lib/orchestrator-channel.ts` still carries the value. The judge lane USED to
+ * `lib/channel-records.ts` still carries the value. The judge lane USED to
  * dispatch its next round this way ("a round IS read this when you are free"),
  * and that is what the 2026-09-16 fix retired: the queued delivery left the
  * task on the wire while the opener's table already held the next round's

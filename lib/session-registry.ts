@@ -58,7 +58,7 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { isOwnSessionName } from "./orchestrator-tmux.ts";
+import { isOwnSessionName, type TmuxRunner } from "./orchestrator-tmux.ts";
 import { listServerPanes } from "./judge-pane.ts";
 import { paneIdUsable } from "./hierarchy.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -84,7 +84,7 @@ export const SESSION_STALE_MS = 180_000;
  *
  * GLOBAL, not repo-local: a session may sit in a worktree or in another
  * repository entirely, and a name is how you reach it from anywhere (the same
- * reason lib/orchestrator-channel.ts's channels live under the agent home).
+ * reason lib/channel-io.ts's channels live under the agent home).
  */
 export function sessionRegistryRoot(home: string = homedir()): string {
   return join(home, ".pi", "agent", SESSION_REGISTRY_DIRNAME);
@@ -301,13 +301,6 @@ export function nodeRegistryIO(root: string = sessionRegistryRoot()): RegistryIO
   };
 }
 
-/** One tmux invocation, as this module uses it. */
-export interface RegistryTmuxResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-}
-
 /** What this module needs from the outside world. */
 export interface RegistryDeps {
   /** `sessionRegistryRoot()` in production. */
@@ -316,7 +309,7 @@ export interface RegistryDeps {
   /** Runs one tmux argv (the extension's own declared runner). `ownSessions`
    * carries session names the CALLER has just proven are gate sessions — a dead
    * session's own dedicated session, which no live process can declare. */
-  runTmux(argv: readonly string[], ownSessions?: readonly string[]): RegistryTmuxResult;
+  runTmux: TmuxRunner;
   /**
    * WHICH tmux server this process talks to (`<socket>,<server pid>` from
    * `$TMUX`), or undefined when it runs outside tmux or cannot read it.

@@ -34,7 +34,8 @@ import {
   type AuditRoundSpec,
   type PendingAudit,
 } from "../lib/audit-round-specs.ts";
-import type { ChannelRecord, ChannelReportRecord, ReportConclusion } from "../lib/orchestrator-channel.ts";
+import type { ChannelRecord, ChannelReportRecord } from "../lib/channel-records.ts";
+import type { ReportConclusion } from "../lib/channel-projection.ts";
 import type { PlanAuditRecord } from "../lib/orchestrator-plan-audit.ts";
 import { JUDGE_PANE_RECLAIM, type JudgePaneReclaimOutcome } from "../lib/judge-pane-policy.ts";
 

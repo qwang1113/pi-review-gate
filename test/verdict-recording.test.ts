@@ -95,7 +95,7 @@ after(() => {
 });
 
 const { default: reviewGate } = await import(join(INSTALL, "extensions", "review-gate.ts"));
-const { reportConclusion } = await import(join(INSTALL, "lib", "orchestrator-channel.ts"));
+const { reportConclusion } = await import(join(INSTALL, "lib", "channel-projection.ts"));
 
 function git(dir: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: hermeticGitEnv() }).trim();

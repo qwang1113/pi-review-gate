@@ -31,7 +31,7 @@
  *
  * Shape (unchanged): `registerJudgeSessionTools(host, deps)`, effects
  * through `deps` only. Pure decisions live in lib/hierarchy.ts,
- * lib/orchestrator-channel.ts and lib/judge-pane.ts and are imported
+ * lib/channel-*.ts and lib/judge-pane.ts and are imported
  * directly; what IS injected is everything the tools cannot own — identity,
  * the registries, tmux, the channel filesystem and the verdict recorder.
  *
@@ -49,8 +49,9 @@ import {
   windowClosable,
   type HierarchyTable,
 } from "./hierarchy.ts";
-import type { ChannelIO, ReviewScopeStamp } from "./orchestrator-channel.ts";
-import type { JudgePaneRunResult } from "./judge-pane.ts";
+import type { ChannelIO } from "./channel-io.ts";
+import type { ReviewScopeStamp } from "./channel-records.ts";
+import type { TmuxRunResult } from "./orchestrator-tmux.ts";
 import { closeSessionWindow } from "./session-factory.ts";
 import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "./judge-lifecycle.ts";
 import type { RoundBinding } from "./audit-round-report.ts";
@@ -169,7 +170,7 @@ export interface JudgeSessionToolDeps {
   channelIO(): ChannelIO;
   channelHome(): string | undefined;
   /** One tmux invocation (argv, never a shell string). */
-  tmux(argv: readonly string[]): JudgePaneRunResult;
+  tmux(argv: readonly string[]): TmuxRunResult;
   /**
    * WHO THIS SESSION IS on a border — the `@<owner>` half of every judge pane
    * it opens (lib/orchestrator-pane-decor.ts `selfPaneOwner`). Derived from the

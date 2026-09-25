@@ -25,11 +25,8 @@ import {
   IDLE_PROGRESS_GRACE_MS,
   type ChildObservation,
 } from "../lib/orchestrator-child-state.ts";
-import {
-  projectChannel,
-  HEARTBEAT_STALE_MS,
-  type ChannelRecord,
-} from "../lib/orchestrator-channel.ts";
+import { projectChannel, HEARTBEAT_STALE_MS } from "../lib/channel-projection.ts";
+import type { ChannelRecord } from "../lib/channel-records.ts";
 
 const T0 = 1_700_000_000_000;
 const iso = (offsetMs = 0) => new Date(T0 + offsetMs).toISOString();

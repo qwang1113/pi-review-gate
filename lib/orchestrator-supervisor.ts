@@ -41,18 +41,15 @@
  * liveness is passed in as a set, and the clock is an argument.
  */
 
+import { channelPathFor, requestPayload, type ChannelIO } from "./channel-io.ts";
 import {
-  channelPathFor,
   projectChannel,
   readChannel,
-  requestPayload,
   sanitizeDeliveryStation,
   sanitizeBatchStamp,
-
-  type ChannelIO,
   type ChannelProjection,
-  type ChannelRequestRecord,
-} from "./orchestrator-channel.ts";
+} from "./channel-projection.ts";
+import type { ChannelRequestRecord } from "./channel-records.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
 
 import {

@@ -31,11 +31,8 @@ import {
   isNewsworthy,
   type ChildObservation,
 } from "../lib/orchestrator-child-state.ts";
-import {
-  projectChannel,
-  HEARTBEAT_STALE_MS,
-  type ChannelRecord,
-} from "../lib/orchestrator-channel.ts";
+import { projectChannel, HEARTBEAT_STALE_MS } from "../lib/channel-projection.ts";
+import type { ChannelRecord } from "../lib/channel-records.ts";
 import { decideSupervisionEvents, formatSupervisionReceipt, superviseChildren } from "../lib/orchestrator-supervisor.ts";
 import { makeFakeWorld, memoryChannelIO, replyText, twoTaskPlan } from "./helpers/fake-orchestration.ts";
 
