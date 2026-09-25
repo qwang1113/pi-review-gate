@@ -3129,13 +3129,35 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
     "the renewal rides a timer of the extension, not an agent event");
   assert.match(SRC, /\}, sessionNaming\.heartbeatMs\);/,
     "…on the interval the registry module owns");
-  assert.match(SRC, /process\.on\("exit", \(\) => \{\s*try \{ sessionNaming\.release\(\); \} catch/,
+  assert.match(SRC, /process\.on\("exit", \(\) => \{\s*try \{ sessionNamingAtExit\?\.release\(\); \} catch/,
     "a dying process releases its name rather than leaving it for the sweep");
-  // A SHUTDOWN IS NOT A DEATH: quit | reload | new | resume | fork all keep the
-  // same session id, so the clock stops and the NEXT session_start adopts the
-  // same registration. Releasing here would rename a session that never died.
-  assert.match(SRC, /stopSessionNamingHeartbeat\(\);\s*\n  \}\);/,
-    "session_shutdown stops the clock without giving the name away");
+  // AND THAT HANDLER IS REGISTERED ONCE PER PROCESS, at module scope (quality
+  // round 2 P2): pi rebuilds the extension runner on /new, /resume, /fork and
+  // /reload, so a registration inside the factory accumulates one listener per
+  // session and every stale instance runs its own release at exit. It reads the
+  // CURRENT session's runtime through one module-level slot, which the factory
+  // re-points.
+  assert.equal((SRC.match(/^process\.on\("exit", \(\) => \{$/gm) ?? []).length, 1,
+    "exactly ONE process-exit handler, whatever the number of sessions this process runs");
+  assert.match(SRC, /^let sessionNamingAtExit: \{ release\(\): unknown \} \| undefined;\nprocess\.on\("exit"/m,
+    "…and it is declared at module scope, above the extension factory");
+  assert.equal((SRC.match(/sessionNamingAtExit = sessionNaming;/g) ?? []).length, 1,
+    "the factory points that one handler at this session's runtime");
+  // A SHUTDOWN IS NOT ALWAYS A DEATH (quality round 2 P1). Only `reload` keeps
+  // the same session id, so only `reload` may leave the registration in place
+  // for the next instance to adopt; `/new`, `/resume` and `/fork` replace the
+  // session (new id, new instance, `held` gone) while the pane and the pid stay
+  // — without the release the old registration keeps looking LIVE and the name
+  // can never be taken again in that window.
+  assert.match(SRC, /stopSessionNamingHeartbeat\(\);\s*\n    if \(event\.reason !== "reload"\) sessionNaming\.release\(\);/,
+    "session_shutdown stops the clock and gives the name back for every reason but a reload");
+  // BOTH HALVES OF THE CLOCK, EACH EXACTLY ONCE: the Nit of quality round 2 was
+  // a second, redundant stop in the same handler (harmless — `clearInterval` is
+  // idempotent — but it read like two different moments).
+  assert.equal((SRC.match(/stopSessionNamingHeartbeat\(\);/g) ?? []).length, 1,
+    "the clock is stopped once, at shutdown");
+  assert.equal((SRC.match(/startSessionNamingHeartbeat\(\);/g) ?? []).length, 1,
+    "and started once, when the session starts");
   // THE LIST HAS TWO HALVES THAT ARE EASY TO GET WRONG IN OPPOSITE DIRECTIONS
   // (2026-09-25, quality round P2):
   //  - TOO WIDE: the judge registry FILE is shared with other sessions in this

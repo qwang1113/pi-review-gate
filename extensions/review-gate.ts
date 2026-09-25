@@ -934,6 +934,21 @@ async function commitsAheadOfBase(cwd: string): Promise<number> {
   return commitsAheadOfBaseSync(cwd);
 }
 
+/**
+ * THE ONE PROCESS-EXIT HANDLER FOR THIS SESSION'S NAME (t2; quality round 2 P2).
+ *
+ * Registered at MODULE scope and pointed at the CURRENT session's runtime. pi
+ * rebuilds the extension runner on every `/new`, `/resume`, `/fork` and
+ * `/reload` — each of which re-runs the factory below — so a `process.on("exit")`
+ * registered inside it would accumulate one listener per session (Node warns at
+ * eleven) and every stale instance would run its own release at exit. One
+ * listener per PROCESS, re-pointed by the factory, is the whole fix.
+ */
+let sessionNamingAtExit: { release(): unknown } | undefined;
+process.on("exit", () => {
+  try { sessionNamingAtExit?.release(); } catch { /* the process is already going */ }
+});
+
 export default function reviewGate(pi: ExtensionAPI) {
   /**
    * Every tool's own `execute`, captured as it is registered.
@@ -3950,13 +3965,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (sessionNamingTimer) clearInterval(sessionNamingTimer);
     sessionNamingTimer = undefined;
   }
-  // THE NAME GOES BACK WHEN THE PROCESS DIES, however it dies (t2). Registered
-  // once per process: a name left behind by a crash is exactly what the next
-  // session's sweep has to clean up, so the honest exit releases it and the
-  // sweep stays the backstop.
-  process.on("exit", () => {
-    try { sessionNaming.release(); } catch { /* the process is already going */ }
-  });
+  // THE NAME GOES BACK WHEN THE PROCESS DIES, however it dies (t2): the ONE
+  // handler for that lives at module scope (it must survive session
+  // replacement), and this line points it at THIS session's runtime.
+  sessionNamingAtExit = sessionNaming;
 
   // `name_session()` — THE SESSION'S OWN NAME (2026-09-25, t2). Registered for
   // EVERY kind of session (user decision): a window title and a status line are
@@ -14294,11 +14306,6 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // so a later subagent-session shutdown cannot leave the widget frozen).
     lastUiCtx = undefined;
     disarmUiRefreshTimer();
-    // The name's renewal clock is this session's too, and a reload keeps the
-    // NAME: the new instance adopts its own registration by session id at
-    // session_start, so nothing is released here — only the timer stops, and
-    // the process-exit handler is what gives the name back.
-    stopSessionNamingHeartbeat();
     // The supervision probe is a timer this session owns; a leaked one would
     // keep waking a session that is gone.
     stopSupervisionTimer();
@@ -14322,11 +14329,27 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     // persisted table, and dropping it on shutdown is precisely what used to
     // strand a live pane nobody could address after a restart.
 
-    // The name's renewal clock: stopped, NOT released — a reload/new/resume
-    // keeps the same session id and adopts the same registration at
-    // session_start, while a real shutdown releases it through the process-exit
-    // handler registered beside the runtime.
+    // ── THE NAME AT SHUTDOWN (t2; quality round 2 P1) ──
+    //
+    // The renewal clock always stops. Whether the NAME goes back depends on
+    // where this session is going, and the reason is the whole difference:
+    //
+    //   - `reload` keeps the SAME session id, so the instance that comes back
+    //     adopts the same registration in its own `session_start` — releasing
+    //     here would rename a session that never went away;
+    //   - `new` / `resume` / `fork` REPLACE the session: pi builds a new session
+    //     (new id) and a new extension instance, while the tmux pane and the pid
+    //     are unchanged. `held` dies with this instance, so without this release
+    //     the old registration keeps looking LIVE to every other reader (its pid
+    //     is this very process, its pane is on screen) and the name could never
+    //     be taken again in that window;
+    //   - `quit` is the ordinary exit, and the process-exit handler is the
+    //     backstop for every path that never gets here.
+    //
+    // `release()` is idempotent and all-or-nothing (lib/session-name-tools.ts),
+    // so a reload that raced into a replacement still gives the name back.
     stopSessionNamingHeartbeat();
+    if (event.reason !== "reload") sessionNaming.release();
   });
 
   pi.on("session_compact", async (_event, ctx) => {
