@@ -357,6 +357,38 @@ test("listing the addressable names reports WHO IS ALIVE and never drops the one
   assert.deepEqual(blind.unknown.map((e) => e.name), ["dead-one"]);
 });
 
+test("a recorded pane id from ANOTHER tmux server does not make a holder live (t4 review P1)", () => {
+  // The SENDER's half of the rule the classification applies (lib/session-
+  // registry.ts): after a `kill-server` the recorded pane id is a stranger's,
+  // and reading it as the holder sends mail to a session that is gone. The
+  // sender asks THIS module which names are live, so the server has to travel
+  // with the question — a caller that does not say keeps the older reading.
+  const stale = new Date(NOW - SESSION_STALE_MS - 1000).toISOString();
+  const stamped = {
+    ...entryForTest("mine", THEIRS, Date.parse(stale)),
+    tmux: { session: "0", window: "@45", pane: PANE, server: "sock,111" },
+  };
+  const files = new Map([[sessionEntryPath(ROOT, "mine"), JSON.stringify(stamped)]]);
+  const base = { root: ROOT, io: fakeIO(files), now: () => NOW, alive: () => false };
+  const panes = () => fakeTmux({ panes: [PANE] }).run;
+
+  assert.deepEqual(
+    liveSessionNames({ ...base, runTmux: panes(), tmuxServer: () => "sock,999" }).live,
+    [],
+    "another server's pane id is not this holder",
+  );
+  assert.deepEqual(
+    liveSessionNames({ ...base, runTmux: panes(), tmuxServer: () => "sock,111" }).live.map((e) => e.name),
+    ["mine"],
+    "the same pane id on the server that minted it still is",
+  );
+  assert.deepEqual(
+    liveSessionNames({ ...base, runTmux: panes() }).live.map((e) => e.name),
+    ["mine"],
+    "and a caller that does not say which server it is on keeps the older reading",
+  );
+});
+
 test("the registry root defaults to the agent home, and the inbox sits beside the entry", () => {
   assert.match(sessionRegistryRoot("/home/agent"), /rg-sessions$/);
   assert.equal(sessionEntryPath(ROOT, "t2-registry"), `${ROOT}/t2-registry.json`);

@@ -393,9 +393,15 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
  * It lives here rather than in t3's sender because "which of these entries is
  * still a session" is this module's question — the sender picks a name, it does
  * not get to invent a second answer to liveness.
+ *
+ * `tmuxServer` IS PART OF THE ANSWER, not decoration (2026-09-25, t4 review
+ * P1): the liveness rule compares a recorded pane id against the panes of the
+ * CURRENT server, so a caller that does not say which server it is on gets the
+ * older reading back — and after a `kill-server` that reading is wrong in the
+ * dangerous direction, calling a dead holder live and sending it mail.
  */
 export function liveSessionNames(
-  deps: Pick<SessionNamingDeps, "runTmux" | "now" | "alive" | "root" | "io">,
+  deps: Pick<SessionNamingDeps, "runTmux" | "now" | "alive" | "root" | "io" | "tmuxServer">,
 ): { live: SessionRegistryEntry[]; unknown: SessionRegistryEntry[] } {
   const root = deps.root ?? sessionRegistryRoot();
   const registry = {
@@ -404,6 +410,7 @@ export function liveSessionNames(
     runTmux: (argv: readonly string[]) => deps.runTmux(argv),
     alive: deps.alive ?? pidAlive,
     now: deps.now ?? (() => Date.now()),
+    ...(deps.tmuxServer === undefined ? {} : { currentServer: deps.tmuxServer }),
   };
   const live: SessionRegistryEntry[] = [];
   const unknown: SessionRegistryEntry[] = [];

@@ -4020,6 +4020,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       io: sessionRegistryFiles,
       runTmux: (argv) => runTmux(argv, undefined),
       alive: pidAlive,
+      // WHICH SERVER THIS PROCESS IS ON (t4 review P1): without it the liveness
+      // rule cannot tell a recorded pane id from a stranger's after a restart,
+      // and the sender would write mail to a holder that is gone.
+      tmuxServer: () => tmuxServerFrom(process.env),
     }),
     self: () => ({
       name: sessionNaming.currentName(),
