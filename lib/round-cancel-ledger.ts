@@ -46,6 +46,26 @@ export const CANCELLED_NEXT_STEP =
   "先处理取消原因（precommit 没过就先修 precommit；另一个 judge 判了非 READY 就按它的 findings 修），再用 judge_submit 重新派一轮。";
 
 /**
+ * WHAT A FAILED DISPATCH SAYS — the dispatch's whole failure copy, read against
+ * the ledger. The caller `forget`s the role when the dispatch starts, so a
+ * tombstone present here was written WHILE the pane was booting: a lane that
+ * failed fast killed it and dropped its row, and "kept, wait on it" would be
+ * false twice over.
+ */
+export function dispatchFailureDetail(
+  ledger: RoundCancelLedger,
+  root: string,
+  role: string,
+  opened: { deliveryFailed?: boolean | undefined; paneId?: string | undefined; error?: string | undefined },
+): string | undefined {
+  if (!opened.deliveryFailed) return opened.error;
+  const cancelled = ledger.read(root, role, undefined);
+  if (cancelled) return cancelledDuringBootText(opened.paneId, cancelled.why);
+  return `review pane 开出来了（${opened.paneId}）但一直没在通道上报状态 —— ${opened.error}；` +
+    "pane 与登记都保留着，可以先 judge_wait 看它有没有动静，确认没起来再用 fresh:true 重来。";
+}
+
+/**
  * `judge_submit`'s side: the pane came up, and the round was cancelled before
  * it reported in — so nothing is "kept", and there is nothing to wait on.
  */

@@ -24,7 +24,7 @@ import { channelRecordCount, verifyJudgeBoot } from "./orchestrator-tool-kit.ts"
 import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import { qualityStandingFor } from "./quality-round.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
-import { cancelledDuringBootText, type RoundCancelLedger } from "./round-cancel-ledger.ts";
+import { dispatchFailureDetail, type RoundCancelLedger } from "./round-cancel-ledger.ts";
 import { buildJudgePaneCommand, judgePaneDecor, openSessionWindow } from "./session-factory.ts";
 import type { SessionHost } from "./session-host.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
@@ -462,16 +462,7 @@ export function createJudgeRoundDispatch(
         // A delivery failure KEEPS the pane and the registration (it may only
         // be slow), so the opener can still wait on it; anything else means no
         // pane exists at all.
-        // CANCELLED WHILE BOOTING (2026-09-27, t3): a lane that failed fast can
-        // kill this pane and drop its row before it reports in, so "kept, wait
-        // on it" would be false twice over.
-        const cancelled = opened.deliveryFailed ? cancelLedger.read(root, role, undefined) : undefined;
-        const detail = cancelled
-          ? cancelledDuringBootText(opened.paneId, cancelled.why)
-          : opened.deliveryFailed
-          ? `review pane 开出来了（${opened.paneId}）但一直没在通道上报状态 —— ${opened.error}；` +
-            "pane 与登记都保留着，可以先 judge_wait 看它有没有动静，确认没起来再用 fresh:true 重来。"
-          : opened.error;
+        const detail = dispatchFailureDetail(cancelLedger, root, role, opened);
         // A pane that EXISTS (delivery failure) is a registered replacement
         // lane, so the old one is finished either way; a pane that never
         // opened leaves the previous lane alone, and the next dispatch decides
