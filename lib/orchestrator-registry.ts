@@ -33,7 +33,7 @@ import {
 } from "./orchestrator-plan-approval.ts";
 import { isPlanHash } from "./orchestrator-plan.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
-import { isOwnSessionName, isPaneId, isWindowId } from "./orchestrator-tmux.ts";
+import { isPaneId, parseWindowCoords } from "./orchestrator-tmux.ts";
 
 
 /** One child session, as the orchestration knows it. */
@@ -540,12 +540,12 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     // handed to a path join.
     const stateVariant = str(c.stateVariant)?.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 64);
     const taskFile = str(c.taskFile);
-    // The window/session coordinates are sanitized by SHAPE, not merely by
-    // "is a string": they become a tmux target, and the sidecar is untrusted
-    // input. A pair that does not validate is left off entirely — the entry
-    // then cannot be closed by id, which is the fail-closed direction.
-    const windowId = isWindowId(c.windowId) ? c.windowId : undefined;
-    const tmuxSession = isOwnSessionName(c.tmuxSession) ? c.tmuxSession : undefined;
+    // The window/session coordinates are sanitized by SHAPE through the shared
+    // parser, not merely by "is a string": they become a tmux target, and the
+    // sidecar is untrusted input. Either half being wrong drops BOTH — the entry
+    // then reads as "predates the window topology", which is the fail-closed
+    // direction (it simply cannot be closed by id).
+    const coords = parseWindowCoords({ windowId: c.windowId, tmuxSession: c.tmuxSession });
     // The isolated checkout, sanitized like everything else that becomes a
     // PATH: the sidecar is untrusted input, and this one is handed to git.
     // Both halves must be present — a path without its branch cannot be
@@ -556,8 +556,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     children.push({
       id, taskId, cwd, createdAt,
       paneId: c.paneId,
-      ...(windowId ? { windowId } : {}),
-      ...(tmuxSession ? { tmuxSession } : {}),
+      ...(coords === undefined ? {} : coords),
       ...(stateVariant ? { stateVariant } : {}),
       ...(taskFile ? { taskFile } : {}),
       ...(worktree ? { worktree } : {}),

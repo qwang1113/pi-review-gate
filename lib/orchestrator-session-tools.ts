@@ -515,16 +515,24 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
   // A child is closed by WINDOW, not by pane (2026-09-25), and only when the
   // registry can prove the window is one the gate owns: the target is written
   // `<tmuxSession>:<windowId>` from the SAME record, so a stale id can only
-  // reach a window of the gate's own session. An entry that lost either half
-  // (an older sidecar) is left alone and only its registration is cleared.
-  let killed: { ok: true } | { ok: false; error: string };
+  // reach a window of the gate's own session.
+  //
+  // A RECORD WITH NO COORDINATES IS NOT A DEAD END (2026-09-25, quality round
+  // P2). A row written by an older build has neither half — it cannot be
+  // addressed at all — and the first version of this code FAILED the whole
+  // close there, leaving the child `running` forever and contradicting the
+  // sentence above it. It takes the same direction as the judge path: the
+  // window is LEFT ALONE (nothing is killed by a guess), the registration is
+  // cleared, and the reply says which of the two happened.
+  let killNote: string | undefined;
   if (child.windowId && child.tmuxSession) {
-    killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
+    const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
+    if (!killed.ok && !/can't find window|no such window|no server running/i.test(killed.error)) {
+      return fail(`review-gate: 关闭 window 失败 —— ${killed.error}`);
+    }
+    if (!killed.ok) killNote = "（它的 window 已经不在了）";
   } else {
-    killed = { ok: false, error: "记录里没有 window/session 坐标" };
-  }
-  if (!killed.ok && !/can't find window|no such window|no server running/i.test(killed.error)) {
-    return fail(`review-gate: 关闭 window 失败 —— ${killed.error}`);
+    killNote = "（登记里没有 window/session 坐标 —— 旧版登记，只清登记，没去关窗）";
   }
 
   deps.saveRuntime(markChildClosed(deps.runtime(), child.id, new Date(deps.now()).toISOString()));
@@ -541,7 +549,7 @@ async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unk
     ? "。别忘了把它的任务状态置为 done 或 pending（`orchestrator_plan`）。"
     : `。任务 ${child.taskId} 当前是 ${closedTask.status}，无需再动。`;
   return reply(
-    `review-gate: 子会话 ${child.id}（window ${child.windowId ?? "（无记录）"}）已关闭` + statusNudge + settlementNote,
+    `review-gate: 子会话 ${child.id}（window ${child.windowId ?? "（无记录）"}）已关闭${killNote ?? ""}` + statusNudge + settlementNote,
     { childId: child.id },
   );
 

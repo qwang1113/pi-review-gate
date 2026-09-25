@@ -18,6 +18,7 @@ import {
   tmuxServerFrom,
   judgeLive,
   windowClosable,
+  judgeChildRecordOf,
   type JudgeEntry,
 } from "../lib/hierarchy.ts";
 
@@ -163,6 +164,50 @@ test("windowClosable: the OPPOSITE default — unverifiable means do not kill", 
     "a pane id is not a window id — a leftover record is not closable");
   assert.equal(windowClosable({ paneId: "%7", windowId: "@7", tmuxSession: "not-a-gate-session", tmuxServer: "sock,1" }, "sock,1"), false,
     "a session name the gate could not have derived is refused before it becomes a tmux target");
+});
+
+test("judgeChildRecordOf carries EVERY coordinate a reader acts on (2026-09-25, quality P1)", () => {
+  // THE REGRESSION THIS EXISTS FOR. The extension used to write this mapping by
+  // hand in three places; when the window topology added `windowId` and
+  // `tmuxSession` to the entry, all three were missed — and because
+  // `windowClosable` needs BOTH halves, `judge_close` and the round-end reclaim
+  // could no longer close a judge's window at all. Nothing caught it: the unit
+  // tests of those tools inject their own `findChild`, so the hand-written
+  // projection was the one link no test reached.
+  const full = judgeChildRecordOf(entry({
+    paneId: "%7",
+    windowId: "@7",
+    tmuxSession: "rg-repo-abcdef1234",
+    tmuxServer: "sock,1",
+    streamPath: "/repo/.pi/review-stream/r.jsonl",
+    modelSpec: "anthropic/claude-fable-5:max",
+  }));
+  assert.deepEqual(full, {
+    judgeId: "rg-reviewer-abc123",
+    role: "reviewer",
+    repoRoot: "/repo",
+    openerId: "session-child-1",
+    sessionDir: "/repo/.pi/judge-sessions/reviewer-abc-def/sessions",
+    paneId: "%7",
+    windowId: "@7",
+    tmuxSession: "rg-repo-abcdef1234",
+    tmuxServer: "sock,1",
+    streamPath: "/repo/.pi/review-stream/r.jsonl",
+    modelSpec: "anthropic/claude-fable-5:max",
+  });
+  // THE POINT OF THE TEST, stated as the caller's own question: whatever the
+  // projection produces must satisfy the rule the CLOSER applies to it. A
+  // projection that drops a coordinate fails here, not in production.
+  assert.equal(windowClosable(full, "sock,1"), true,
+    "a fully recorded judge must be closable through its own projection");
+  // And the repo override: the settle sweep probes an entry whose repoRoot may
+  // be absent, so the caller supplies the repo it resolved.
+  assert.equal(judgeChildRecordOf(entry({ repoRoot: "/somewhere-else" }), "/resolved").repoRoot, "/resolved");
+  // Absent coordinates stay ABSENT rather than becoming `undefined` keys: the
+  // distinction is what the fail-closed readers depend on.
+  assert.equal("windowId" in judgeChildRecordOf(entry()), false);
+  assert.equal(windowClosable(judgeChildRecordOf(entry({ paneId: "%7" })), "sock,1"), false,
+    "a judge from an older build is not closed by a guess");
 });
 
 test("listByOpener returns exactly the opener's judges for cascade-close", () => {

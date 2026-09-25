@@ -18,8 +18,10 @@
  * A session's children no longer share the user's window. The opener keeps the
  * pane it already had — the one the human is watching — and every child it
  * opens lives as a WINDOW of the opener's own dedicated tmux session
- * (`rg-<repo>-<sessionId 前 8 位>`, derived and owned by
- * lib/session-tmux-scope.ts): one child per window, created lazily the first
+ * (`rg-<repo>-<session id 尾 10 位>`, derived and owned by
+ * lib/session-tmux-scope.ts — the TAIL, not the head: pi's ids are UUIDv7, so
+ * their leading bits are a millisecond timestamp every session of the same
+ * minute shares): one child per window, created lazily the first
  * time a child is needed, closed by `kill-window` when it is done.
  *
  * WHAT THAT REPLACED, and why nothing of it is left: three-column layout
@@ -126,7 +128,7 @@ function requirePane(value: string, what: string): string {
 function requireOwnSession(value: string, what: string): string {
   if (!isOwnSessionName(value)) {
     throw new UnsafeTmuxCommand(
-      `${what} 不是门禁自己派生的 session 名（形如 rg-<repo>-<id8>）：${JSON.stringify(value)}`,
+      `${what} 不是门禁自己派生的 session 名（形如 rg-<repo>-<id 尾>）：${JSON.stringify(value)}`,
     );
   }
   return value;
@@ -241,6 +243,29 @@ function envArgs(env: Readonly<Record<string, string>> | undefined): string[] {
  */
 export const SESSION_OWNER_OPTION = "@rg_scope_owner";
 
+/**
+ * A WINDOW COORDINATE read back from disk — both halves or nothing.
+ *
+ * The pair (which window, in which session) is what a close is addressed by, and
+ * the halves are meaningless apart: a window id without its session cannot be
+ * scoped (`windowClosable` refuses it), and a session name without a window
+ * names nothing to close. So a record where either half is missing or malformed
+ * yields `undefined` — the registries then leave BOTH off, and the entry reads
+ * as "this child predates the window topology" instead of half-recorded.
+ *
+ * It lives here because the SHAPES live here, and because two disk boundaries
+ * (the orchestration sidecar and the worker registry) ask the same question:
+ * one implementation, so their answers cannot drift apart (2026-09-25, quality
+ * round P2 — the same fields had been shape-checked on one side only).
+ */
+export function parseWindowCoords(
+  raw: { windowId?: unknown; tmuxSession?: unknown },
+): { windowId: string; tmuxSession: string } | undefined {
+  const windowId = isWindowId(raw?.windowId) ? raw.windowId : undefined;
+  const tmuxSession = isOwnSessionName(raw?.tmuxSession) ? raw.tmuxSession : undefined;
+  return windowId === undefined || tmuxSession === undefined ? undefined : { windowId, tmuxSession };
+}
+
 /** How many ids or windows tmux prints for one creation. */
 export interface SessionWindowCoords {
   windowId: string;
@@ -329,7 +354,7 @@ export function buildListSessionsArgv(): readonly string[] {
  *
  * Cosmetic-looking, load-bearing in fact: it is what makes "is this session
  * mine?" a READ rather than a guess, both when the session is reused
- * (`rg-<repo>-<id8>` colliding across two processes) and before the one
+ * (`rg-<repo>-<id 尾>` colliding across two processes) and before the one
  * destructive act the gate performs on it.
  */
 export function buildSetSessionOwnerArgv(ownSession: string, owner: string): readonly string[] {

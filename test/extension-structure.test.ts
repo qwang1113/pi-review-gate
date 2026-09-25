@@ -3078,6 +3078,20 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   );
   assert.match(judgeToolsWiring(), /findChild: \(root, role, judgeId\) => \{/,
     "…and the wiring answers it from the extension's own registry");
+  // ONE PROJECTION, and it is the registry module's (2026-09-25, quality P1).
+  // The extension used to build this record by hand in three places; when the
+  // window coordinates were added to the entry, all three were missed and the
+  // tools' close path silently stopped working — the unit tests inject their own
+  // `findChild`, so the hand-written projection was the one link nothing
+  // reached. Asserting the SHAPE here (no `sessionDir: c.sessionDir` literal,
+  // one call per seam) is what keeps a fourth copy from appearing.
+  const wiring = judgeToolsWiring();
+  assert.equal((SRC.match(/judgeChildRecordOf\(/g) ?? []).length >= 3, true,
+    "every entry→record seam goes through lib/hierarchy.ts `judgeChildRecordOf`");
+  assert.doesNotMatch(SRC, /sessionDir: c\.sessionDir/,
+    "no hand-written copy of the projection may come back");
+  assert.match(wiring, /judgeChildRecordOf\(c, root\)/,
+    "…including the by-role lookup, which supplies the repo it resolved")
   assert.match(JUDGE_TOOLS_SRC, /function checkOpener\(/, "the opener check is one shared helper");
   assert.equal(
     (JUDGE_TOOLS_SRC.match(/checkOpener\(deps, /g) ?? []).length,

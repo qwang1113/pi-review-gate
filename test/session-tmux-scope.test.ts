@@ -1,0 +1,249 @@
+/**
+ * MY OWN TMUX SESSION — the unit-level half of the window topology.
+ *
+ * The integration test (`test/tmux-session-topology.integration.test.ts`) proves
+ * what tmux DOES with these argv on a real server. This file drives the same
+ * module against a fake server so the paths a real one is hard to put into can
+ * be asserted at all: an unreadable tmux, a session wearing our name that is not
+ * ours, a marker write that failed, a session tmux has already reclaimed.
+ *
+ * The rule they all share, and the reason they are asserted here rather than
+ * left to the integration test: an unknown is NEVER acted on. Nothing is
+ * created, reused or killed unless the reading says it is ours.
+ */
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { isOwnSessionName, SESSION_OWNER_OPTION } from "../lib/orchestrator-tmux.ts";
+import {
+  closeOwnSession,
+  deriveSessionName,
+  openScopeWindow,
+  sanitizeScopeRecord,
+  type ScopeRunResult,
+  type ScopeRunner,
+  type TmuxScope,
+  type TmuxScopeRecord,
+} from "../lib/session-tmux-scope.ts";
+
+const SESSION_ID = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
+const NAME = deriveSessionName("/repo", SESSION_ID)!;
+
+/** A tmux server in a Map: sessions by name, each with its owner marker. */
+function fakeServer(opts: {
+  /** Start with this session already there, owned by `owner`. */
+  existing?: { name: string; owner: string };
+  /** `list-sessions` itself fails — tmux is unreachable. */
+  blind?: boolean;
+  /** The marker write fails. */
+  markerFails?: boolean;
+  /** The kill fails. */
+  killFails?: boolean;
+} = {}): { run: ScopeRunner; calls: string[][]; sessions: Map<string, string> } {
+  const sessions = new Map<string, string>();
+  if (opts.existing) sessions.set(opts.existing.name, opts.existing.owner);
+  const calls: string[][] = [];
+  const run: ScopeRunner = (argv) => {
+    calls.push([...argv]);
+    const sub = argv[0];
+    const target = String(argv[argv.indexOf("-t") + 1] ?? "");
+    if (sub === "list-sessions") {
+      return opts.blind
+        ? { ok: false, stdout: "", stderr: "no server running" }
+        : { ok: true, stdout: [...sessions.keys()].join("\n"), stderr: "" };
+    }
+    if (sub === "new-session") {
+      const name = String(argv[argv.indexOf("-s") + 1]);
+      sessions.set(name, "");
+      return { ok: true, stdout: "@7 %8\n", stderr: "" };
+    }
+    if (sub === "new-window") return { ok: true, stdout: "@9 %10\n", stderr: "" };
+    if (sub === "set") {
+      if (opts.markerFails) return { ok: false, stdout: "", stderr: "tmux refused the option" };
+      const value = String(argv[argv.length - 1]);
+      const session = target.slice(0, target.indexOf(":") < 0 ? undefined : target.indexOf(":"));
+      sessions.set(session, value);
+      return { ok: true, stdout: "", stderr: "" };
+    }
+    if (sub === "show-options") return { ok: true, stdout: `${sessions.get(target) ?? ""}\n`, stderr: "" };
+    if (sub === "kill-session") {
+      if (opts.killFails) return { ok: false, stdout: "", stderr: "tmux refused the kill" };
+      sessions.delete(target);
+      return { ok: true, stdout: "", stderr: "" };
+    }
+    return { ok: true, stdout: "", stderr: "" } satisfies ScopeRunResult;
+  };
+  return { run, calls, sessions };
+}
+
+interface FakeScope extends TmuxScope {
+  record: TmuxScopeRecord | undefined;
+  writes: number;
+}
+
+function fakeScope(): FakeScope {
+  const scope: FakeScope = {
+    record: undefined,
+    writes: 0,
+    sessionId: () => SESSION_ID,
+    repoRoot: () => "/repo",
+    read: () => scope.record,
+    write: (record) => { scope.record = record; scope.writes += 1; },
+    now: () => "2026-09-25T00:00:00.000Z",
+  };
+  return scope;
+}
+
+test("the name is derived from the id's TAIL — the head is a timestamp", () => {
+  // pi's session ids are UUIDv7: their leading bits are the millisecond the
+  // session started, so two sessions in the same minute share their first eight
+  // hex characters (measured on this machine). A head-based name would collide
+  // exactly among the sessions most likely to run at once.
+  const later = `${SESSION_ID.slice(0, -6)}ffee00`;
+  assert.equal(deriveSessionName("/repo", SESSION_ID), NAME);
+  assert.notEqual(deriveSessionName("/repo", later), NAME, "same-millisecond ids must not share a name");
+  assert.equal(NAME, "rg-repo-04b8a270ed");
+  // The slug: a directory name is not a tmux session name until it is stripped.
+  assert.equal(deriveSessionName("/Users/a/My Repo.Dir", SESSION_ID), "rg-my-repo-dir-04b8a270ed");
+  assert.equal(deriveSessionName("/x/目录名", SESSION_ID), "rg-repo-04b8a270ed", "a non-ASCII slug falls back");
+  assert.equal(deriveSessionName("/", SESSION_ID), "rg-repo-04b8a270ed", "and so does no slug at all");
+  for (const id of ["/repo", "/x/My Repo"]) {
+    assert.equal(isOwnSessionName(deriveSessionName(id, SESSION_ID)), true,
+      "every derived name must pass the validator the guard applies");
+  }
+  // Too little entropy to name anything after: refuse rather than emit `rg-repo-`.
+  assert.equal(deriveSessionName("/repo", "a1"), undefined);
+  assert.equal(deriveSessionName("/repo", ""), undefined);
+});
+
+test("a persisted record is trusted only when it is complete", () => {
+  const good = { name: NAME, owner: SESSION_ID, createdAt: "2026-09-25T00:00:00.000Z" };
+  assert.deepEqual(sanitizeScopeRecord(good), good);
+  for (const bad of [
+    undefined,
+    null,
+    "rg-repo-04b8a270ed",
+    { ...good, name: "my-work" },
+    { ...good, name: "%1" },
+    { ...good, owner: "   " },
+    { ...good, owner: undefined },
+    { ...good, createdAt: undefined },
+  ]) {
+    assert.equal(sanitizeScopeRecord(bad), undefined, `${JSON.stringify(bad)} is not a usable record`);
+  }
+});
+
+test("the first child creates the session WITH it; a later one joins", () => {
+  const server = fakeServer();
+  const scope = fakeScope();
+  const first = openScopeWindow(server.run, scope, { cwd: "/repo", command: ["pi"], windowName: "reviewer@self" });
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  assert.deepEqual({ created: first.created, name: first.sessionName, coords: [first.windowId, first.paneId] },
+    { created: true, name: NAME, coords: ["@7", "%8"] });
+  // The marker is written on the session we just made, and the record follows.
+  assert.equal(server.sessions.get(NAME), SESSION_ID, "the session says who created it");
+  assert.equal(scope.record?.name, NAME);
+  assert.equal(scope.record?.owner, SESSION_ID);
+  assert.equal(scope.writes, 1, "one write, on creation only");
+  assert.ok(server.calls.some((a) => a[0] === "set" && a.includes(SESSION_OWNER_OPTION)));
+
+  const second = openScopeWindow(server.run, scope, { cwd: "/repo", command: ["pi"] });
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.equal(second.created, false, "the second child joins the session");
+  assert.deepEqual([second.windowId, second.paneId], ["@9", "%10"]);
+  assert.equal(scope.writes, 1, "and writes no second record");
+  assert.equal(server.calls.filter((a) => a[0] === "new-session").length, 1);
+});
+
+test("a session wearing OUR name that is not ours is neither reused nor killed", () => {
+  const server = fakeServer({ existing: { name: NAME, owner: "some-other-session-id" } });
+  const scope = fakeScope();
+  scope.record = { name: NAME, owner: SESSION_ID, createdAt: "2026-09-25T00:00:00.000Z" };
+  const opened = openScopeWindow(server.run, scope, { cwd: "/repo", command: ["pi"] });
+  assert.equal(opened.ok, false, "creation is refused");
+  if (!opened.ok) assert.match(opened.error, /归属标记/);
+  const killed = closeOwnSession(server.run, scope);
+  assert.equal(killed.ok, false, "and so is the kill");
+  if (!killed.ok) assert.match(killed.error, /归属标记/);
+  assert.equal(server.sessions.get(NAME), "some-other-session-id", "the stranger's session is untouched");
+  assert.equal(server.calls.some((a) => a[0] === "new-window"), false, "nothing was added to it");
+  assert.equal(server.calls.some((a) => a[0] === "kill-session"), false, "and nothing was taken from it");
+});
+
+test("a session we own is reused even when the record was lost", () => {
+  // The marker — not the sidecar — is what proves ownership: losing the record
+  // costs a re-derivation (same name, same owner), never a refusal.
+  const server = fakeServer({ existing: { name: NAME, owner: SESSION_ID } });
+  const scope = fakeScope();
+  const opened = openScopeWindow(server.run, scope, { cwd: "/repo", command: ["pi"] });
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  assert.equal(opened.created, false);
+  assert.equal(scope.writes, 0, "nothing was created, so nothing is recorded");
+});
+
+test("a marker that failed to write takes the session with it (quality round P2)", () => {
+  // The failure mode this pins: without the marker the session can neither be
+  // reused (the next spawn reads an empty owner and refuses) nor killed
+  // (`closeOwnSession` refuses a marker that is not ours) — one failed `set`
+  // would block every future child of this session. The session is ours (this
+  // call created it), so it is reclaimed on the spot.
+  const server = fakeServer({ markerFails: true });
+  const scope = fakeScope();
+  const opened = openScopeWindow(server.run, scope, { cwd: "/repo", command: ["pi"] });
+  assert.equal(opened.ok, false);
+  if (!opened.ok) assert.match(opened.error, /归属标记失败/);
+  assert.equal(server.sessions.has(NAME), false, "the half-made session is gone");
+  assert.deepEqual(server.calls.filter((a) => a[0] === "kill-session").length, 1);
+  assert.equal(scope.record, undefined, "and nothing was recorded for it");
+});
+
+test("an unreadable tmux is 'I do not know' — nothing is created and nothing is killed", () => {
+  const server = fakeServer({ blind: true });
+  const scope = fakeScope();
+  scope.record = { name: NAME, owner: SESSION_ID, createdAt: "2026-09-25T00:00:00.000Z" };
+  const opened = openScopeWindow(server.run, scope, { cwd: "/repo", command: ["pi"] });
+  assert.equal(opened.ok, false);
+  if (!opened.ok) assert.match(opened.error, /读不到 tmux server/);
+  assert.equal(server.calls.some((a) => a[0] === "new-session"), false, "no session is created in the dark");
+  const killed = closeOwnSession(server.run, scope);
+  assert.equal(killed.ok, false);
+  assert.equal(server.calls.some((a) => a[0] === "kill-session"), false, "and nothing is killed on a guess");
+});
+
+test("closing is scoped, idempotent and honest about what it did", () => {
+  const server = fakeServer();
+  const scope = fakeScope();
+  // Never opened a child: nothing to close, and no tmux call is even made.
+  const empty = closeOwnSession(server.run, scope);
+  assert.equal(empty.ok, true);
+  assert.equal(empty.ok ? empty.killed : true, false);
+  assert.deepEqual(server.calls, [], "a session that was never created costs no tmux call");
+
+  openScopeWindow(server.run, scope, { cwd: "/repo", command: ["pi"] });
+  const killed = closeOwnSession(server.run, scope);
+  assert.equal(killed.ok, true);
+  assert.equal(killed.ok ? killed.killed : false, true);
+  assert.deepEqual(server.calls.filter((a) => a[0] === "kill-session").length, 1);
+  assert.equal(server.sessions.has(NAME), false);
+
+  // tmux reclaims a session whose last window closed, so the second close finds
+  // nothing — a normal end, reported as such rather than as an error.
+  const again = closeOwnSession(server.run, scope);
+  assert.equal(again.ok, true);
+  assert.equal(again.ok ? again.killed : true, false);
+  if (again.ok) assert.match(again.note, /已不在/);
+  assert.deepEqual(server.calls.filter((a) => a[0] === "kill-session").length, 1, "no second kill");
+});
+
+test("a kill that tmux refuses is REPORTED, never swallowed", () => {
+  const server = fakeServer({ killFails: true });
+  const scope = fakeScope();
+  scope.record = { name: NAME, owner: SESSION_ID, createdAt: "2026-09-25T00:00:00.000Z" };
+  server.sessions.set(NAME, SESSION_ID);
+  const killed = closeOwnSession(server.run, scope);
+  assert.equal(killed.ok, false);
+  if (!killed.ok) assert.match(killed.error, /refused the kill/);
+});

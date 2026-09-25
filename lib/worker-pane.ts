@@ -20,6 +20,7 @@
  */
 
 import type { PaneRunResult } from "./session-factory.ts";
+import { parseWindowCoords } from "./orchestrator-tmux.ts";
 
 /** The job a worker pane runs — the argv a runner executes. */
 export type WorkerPaneRunner = (argv: readonly string[]) => PaneRunResult;
@@ -141,15 +142,18 @@ export function parseWorkerRegistry(raw: unknown): WorkerRegistry {
     // (channel owner, session id, report cursor) with no pane.
     if (!openerId || !role || !model || !sessionId || !repoRoot || !createdAt) continue;
     const paneId = str(e.paneId);
-    const windowId = str(e.windowId);
-    const tmuxSession = str(e.tmuxSession);
+    // The window/session pair is sanitized by SHAPE through the shared parser —
+    // it becomes a tmux target, and this file is on disk. Either half being
+    // wrong drops BOTH: a half-record that "looks recorded" is worse than no
+    // record at all (2026-09-25, quality round P2 — the same rule as the
+    // orchestration sidecar, one implementation).
+    const coords = parseWindowCoords({ windowId: e.windowId, tmuxSession: e.tmuxSession });
     const reportedAt = str(e.reportedAt);
     const tmuxServer = str(e.tmuxServer);
     out[id] = {
       workerId: id, openerId, role, model, sessionId, repoRoot, createdAt,
       ...(paneId === undefined ? {} : { paneId }),
-      ...(windowId === undefined ? {} : { windowId }),
-      ...(tmuxSession === undefined ? {} : { tmuxSession }),
+      ...(coords === undefined ? {} : coords),
       ...(reportedAt === undefined ? {} : { reportedAt }),
       ...(tmuxServer === undefined ? {} : { tmuxServer }),
     };

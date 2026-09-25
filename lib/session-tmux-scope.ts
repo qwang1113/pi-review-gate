@@ -267,13 +267,26 @@ export function openScopeWindow(
     return { ok: false, error: "tmux 没有返回新 window/pane id" };
   }
   if (!exists) {
-    // The marker is what makes the NEXT reuse of this name safe, so it is
-    // written the moment the session is ours. Both writes are best effort: by
-    // now the child is already running, and a cosmetic-record failure must not
-    // turn a working spawn into an error. A marker that did not land costs a
-    // REUSE, not correctness — `openScopeWindow` refuses a name it cannot
-    // prove it owns, and nothing is ever killed on a name it did not write.
-    try { run(buildSetSessionOwnerArgv(name, owner)); } catch { /* see above */ }
+    // THE MARKER IS WRITTEN BEFORE THE RECORD, and a failure to write it UNDOES
+    // the creation (2026-09-25, quality round P2). A session without the marker
+    // can neither be reused (the next spawn reads an empty owner and refuses)
+    // nor killed (`closeOwnSession` refuses a marker that is not ours) — one
+    // failed `set` would leave a session that blocks every future child of this
+    // session. It is safe to clean up right here because the session is
+    // UNAMBIGUOUSLY ours: this call created it a moment ago.
+    const marked = ((): ScopeRunResult | { ok: false; stderr: string } => {
+      try { return run(buildSetSessionOwnerArgv(name, owner)); } catch (error) { return { ok: false, stderr: (error as Error).message }; }
+    })();
+    if (!marked.ok) {
+      try { run(buildKillSessionArgv(name)); } catch { /* best effort: nothing else can be done about it here */ }
+      return {
+        ok: false,
+        error: `新建的 session ${name} 写归属标记失败（${marked.stderr || "tmux 拒绝"}）—— 已就地回收，未留下无法复用也无法关闭的 session`,
+      };
+    }
+    // The RECORD is best effort: the marker is what makes the name ours, and a
+    // record that did not land only costs a re-derivation (same name, same
+    // owner, marker matches ⇒ reuse works).
     try { scope.write({ name, owner, createdAt: scope.now() }); } catch { /* see above */ }
   }
   return { ok: true, sessionName: name, created: !exists, ...coords };

@@ -237,6 +237,30 @@ test("close kills its WINDOW and writes NO WINDOW OPTION (2026-09-17)", async ()
   );
 });
 
+test("a child recorded before the window topology is closed by clearing its registration, not by a guess", async () => {
+  // A sidecar row from an older build has no window coordinates at all, so the
+  // window cannot be addressed. The first version of this code FAILED the whole
+  // close there ("记录里没有 window/session 坐标"), which left the child `running`
+  // forever and contradicted its own comment; the judge path takes the opposite
+  // direction — leave the pane alone, clear the registration, say which
+  // happened. Same rule now, and this is the test that holds it (2026-09-25,
+  // quality round P2).
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const spawned = world.runtime().children[0]!;
+  world.saveRuntime({
+    ...world.runtime(),
+    children: [{ ...spawned, windowId: undefined, tmuxSession: undefined }],
+  });
+
+  const reply = await world.call("orchestrator_close", { childId: spawned.id });
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.ok(world.runtime().children[0]!.closedAt !== undefined, "the registration is cleared either way");
+  assert.match(replyText(reply), /没有 window\/session 坐标/, "…and the reply says the window was left alone");
+  assert.equal(tmuxLog(world).some((line) => line.startsWith("kill-window")), false,
+    "nothing was addressed by an id the record does not have");
+});
+
 test("close leaves every other pane's border alone, sibling or review pane", async () => {
   // ONE TEST FOR WHAT USED TO BE TWO (2026-09-17). The old pair pinned the
   // label-bar release's two halves — "a sibling child is still on screen" and

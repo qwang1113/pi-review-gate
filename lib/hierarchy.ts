@@ -312,6 +312,58 @@ function paneIdComparable(
   return entry.tmuxServer === currentServer;
 }
 
+/**
+ * THE ONE PROJECTION from a registry entry to what the judge tools operate on.
+ *
+ * WHY IT IS A FUNCTION AND NOT THREE OBJECT LITERALS (2026-09-25, quality round
+ * P1). The extension wrote this mapping by hand in three places (the two
+ * `findChild*` seams and the settle sweep's inline probe record), and when the
+ * window topology added `windowId` + `tmuxSession` to the entry, all three were
+ * missed: `windowClosable` requires BOTH halves, so `judge_close` and the
+ * round-end reclaim silently stopped being able to close a judge's window —
+ * they reported "cannot close by record" forever while every unit test passed
+ * (those inject their own `findChild`, so the hand-written projection was the
+ * one thing no test reached).
+ *
+ * It lives HERE, where {@link JudgeEntry} is defined: the set of fields a reader
+ * needs is a fact about the entry, and the next field added to the entry has
+ * exactly one place to be carried to. The return type is structural — the
+ * session tools' own `JudgeChildRecord` — so no module has to import the other.
+ *
+ * `repoRoot` may be overridden by the caller: resolving a judge by role searches
+ * per repo, and the sweep probes an entry whose `repoRoot` is optional.
+ */
+export function judgeChildRecordOf(entry: JudgeEntry, repoRoot?: string): {
+  judgeId: string;
+  role: string;
+  repoRoot: string;
+  openerId: string;
+  paneId?: string;
+  windowId?: string;
+  tmuxSession?: string;
+  tmuxServer?: string;
+  sessionDir: string;
+  streamPath?: string;
+  modelSpec?: string;
+} {
+  return {
+    judgeId: entry.judgeId,
+    role: entry.role,
+    repoRoot: repoRoot ?? entry.repoRoot,
+    openerId: entry.openerId,
+    sessionDir: entry.sessionDir,
+    ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
+    // The WINDOW and the session that owns it travel with the pane id: they
+    // are what `closeSessionWindow` addresses (`<session>:<@window>`), and an
+    // entry missing either half is deliberately not closable.
+    ...(entry.windowId === undefined ? {} : { windowId: entry.windowId }),
+    ...(entry.tmuxSession === undefined ? {} : { tmuxSession: entry.tmuxSession }),
+    ...(entry.tmuxServer === undefined ? {} : { tmuxServer: entry.tmuxServer }),
+    ...(entry.streamPath === undefined ? {} : { streamPath: entry.streamPath }),
+    ...(entry.modelSpec === undefined ? {} : { modelSpec: entry.modelSpec }),
+  };
+}
+
 /** Every judge one opener owns — what `declare_done` cascade-closes. */
 export function listByOpener(table: HierarchyTable, openerId: string): JudgeEntry[] {
   const opener = (openerId ?? "").trim();

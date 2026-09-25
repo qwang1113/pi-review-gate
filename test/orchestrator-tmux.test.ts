@@ -40,6 +40,7 @@ import {
   parseSessionNames,
   parseSpawnedPaneId,
   parseSpawnedWindow,
+  parseWindowCoords,
 } from "../lib/orchestrator-tmux.ts";
 
 const SESSION = "rg-pi-review-gate-d104b8a270";
@@ -226,6 +227,24 @@ test("tmux output is parsed strictly", () => {
   assert.equal(parseSpawnedWindow("%7\n"), undefined);
   assert.equal(parseSpawnedWindow("no server running"), undefined);
   assert.equal(parseSpawnedWindow(""), undefined);
+});
+
+test("a window coordinate read back from disk is BOTH halves or nothing", () => {
+  // The pair is what a close is addressed by, so a half-record is not a record:
+  // the registries leave both off and the entry reads as "predates the window
+  // topology" (lib/orchestrator-registry.ts / lib/worker-pane.ts both use this
+  // one parser, so their answers cannot drift apart).
+  const good = { windowId: "@7", tmuxSession: SESSION };
+  assert.deepEqual(parseWindowCoords(good), good);
+  assert.deepEqual(parseWindowCoords({ tmuxSession: SESSION }), undefined, "no window id ⇒ nothing to close");
+  assert.deepEqual(parseWindowCoords({ windowId: "@7" }), undefined, "no session ⇒ the kill cannot be scoped");
+  assert.deepEqual(parseWindowCoords({ windowId: "%7", tmuxSession: SESSION }), undefined,
+    "a pane id is not a window id");
+  assert.deepEqual(parseWindowCoords({ windowId: "@7", tmuxSession: "my-work" }), undefined,
+    "a session name the gate could not have derived is not a target");
+  assert.deepEqual(parseWindowCoords({ windowId: "@7", tmuxSession: `${SESSION}:@7` }), undefined,
+    "and neither is one carrying tmux's own separator");
+  assert.deepEqual(parseWindowCoords({}), undefined);
 });
 
 /**

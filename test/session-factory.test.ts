@@ -336,8 +336,13 @@ test("a thrown tmux call is a failed open, not an exception the caller must catc
 test("decor failure degrades to a warning, never to a failed open", async () => {
   const run: PaneRunner = (argv) => {
     if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
-    if (argv[0] === "new-session") return { ok: true, stdout: "@7 %8\n", stderr: "" };
-    if (argv[0] === "new-window") return { ok: true, stdout: "@7 %8\n", stderr: "" };
+    if (argv[0] === "new-session" || argv[0] === "new-window") return { ok: true, stdout: "@7 %8\n", stderr: "" };
+    // The OWNERSHIP MARKER is not cosmetic: a tmux that refuses `set -t <session>
+    // @rg_scope_owner` leaves a session nothing can reuse or kill, so
+    // `openScopeWindow` drops the whole session there — asserted in
+    // test/session-tmux-scope.test.ts. Only the DISPLAY writes are refused
+    // here, which is what this test is about.
+    if (argv[0] === "set" && !argv.includes("-p")) return { ok: true, stdout: "", stderr: "" };
     return { ok: false, stdout: "", stderr: "select failed" };
   };
   const outcome = await openSessionWindow(run, {

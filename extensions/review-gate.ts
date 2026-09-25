@@ -200,7 +200,7 @@ import {
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
 import { supervisionTarget } from "../lib/orchestration-id.ts";
-import { emptyHierarchy, findJudgeLane, judgeLive, listByOpener, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
+import { emptyHierarchy, findJudgeLane, judgeChildRecordOf, judgeLive, listByOpener, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, windowClosable, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
   decideJudgeRotation,
   judgeObjectId,
@@ -9086,15 +9086,7 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
       // close (2026-09-05).
       const obs = probeJudgeRound(
         deps,
-        {
-          openerId: entry.openerId,
-          judgeId,
-          role: entry.role,
-          ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
-          // Carried so the border repaint can refuse an id minted by a tmux
-          // server that has since restarted (it would be a stranger's pane).
-          ...(entry.tmuxServer === undefined ? {} : { tmuxServer: entry.tmuxServer }),
-        },
+        judgeChildRecordOf(entry, entry.repoRoot ?? primaryRepoRoot),
         entry.lastReportId,
         roundBindingOf({ judgeId, role: entry.role, repoRoot: entry.repoRoot ?? primaryRepoRoot }),
       );
@@ -10129,37 +10121,16 @@ type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["E
     saveHierarchy: (next) => setHierarchy(next),
     findChildById: (judgeId) => {
       const c = ownJudges().find((e) => e.judgeId === judgeId);
-      if (!c) return undefined;
-      return {
-        judgeId: c.judgeId,
-        role: c.role,
-        repoRoot: c.repoRoot,
-        openerId: c.openerId,
-        ...(c.paneId === undefined ? {} : { paneId: c.paneId }),
-        ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
-        sessionDir: c.sessionDir,
-        ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
-        // Which model this pane was launched on: the receipt's answer to "who
-        // actually ran this round" (a rotation mid-round reports itself).
-        ...(c.modelSpec === undefined ? {} : { modelSpec: c.modelSpec }),
-      };
+      // ONE projection, in the registry module (lib/hierarchy.ts
+      // `judgeChildRecordOf`): the two hand-written copies this used to be
+      // dropped the window coordinates the moment they were added to the
+      // entry, and a judge window that cannot be addressed as
+      // `<session>:<@window>` is a judge window nothing can close.
+      return c ? judgeChildRecordOf(c) : undefined;
     },
     findChild: (root, role, judgeId) => {
       const c = findJudgeChild(root, role, judgeId);
-      if (!c) return undefined;
-      return {
-        judgeId: c.judgeId,
-        role: c.role,
-        repoRoot: root,
-        openerId: c.openerId,
-        ...(c.paneId === undefined ? {} : { paneId: c.paneId }),
-        // Carried, not dropped: judge_close decides whether it may kill by
-        // that pane id, and it can only do so if it knows which server minted it.
-        ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
-        sessionDir: c.sessionDir,
-        ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
-        ...(c.modelSpec === undefined ? {} : { modelSpec: c.modelSpec }),
-      };
+      return c ? judgeChildRecordOf(c, root) : undefined;
     },
     channelIO: () => channelIO,
     channelHome: () => undefined,

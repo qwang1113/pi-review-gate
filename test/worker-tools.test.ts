@@ -563,6 +563,38 @@ test("the registry drops a malformed entry instead of guessing a pane", () => {
   assert.deepEqual(parseWorkerRegistry("not an object"), {});
 });
 
+test("the registry sanitizes the WINDOW pair by SHAPE, like the orchestration sidecar does", () => {
+  // Both halves become a tmux target (`<session>:<@window>`), and this file is
+  // on disk — so they are validated exactly as lib/orchestrator-registry.ts
+  // validates the same fields on the orchestration side (2026-09-25, quality
+  // round P2: the two disk boundaries had two answers to one question).
+  const good = {
+    openerId: "s1", role: "worker", model: "m", paneId: "%9", windowId: "@9",
+    tmuxSession: "rg-repo-abcdef1234", sessionId: "s", repoRoot: "/repo", createdAt: "t",
+  };
+  const parsed = parseWorkerRegistry({
+    workers: {
+      good,
+      // A window id that is really a pane id, a session name the gate could not
+      // have derived, and a target carrying tmux syntax of its own.
+      badwindow: { ...good, windowId: "%9" },
+      badsession: { ...good, tmuxSession: "my-work" },
+      injected: { ...good, tmuxSession: "rg-repo-abcdef1234:@9" },
+      missingwindow: { ...good, windowId: undefined },
+    },
+  });
+  assert.deepEqual(parsed.good, { workerId: "good", ...good }, "a well-formed record round-trips untouched");
+  for (const id of ["badwindow", "badsession", "injected"]) {
+    assert.equal(parsed[id]?.windowId, undefined, `${id}: nothing half-recorded is carried`);
+    assert.equal(parsed[id]?.tmuxSession, undefined, `${id}: neither half survives on its own`);
+    assert.equal(parsed[id]?.paneId, "%9", "…while the rest of the entry is kept (liveness still reads it)");
+  }
+  // A record from before the window topology has neither half: that is a
+  // legitimate entry (it just cannot be closed by window), not a malformed one.
+  assert.equal(parsed.missingwindow?.paneId, "%9");
+  assert.equal(parsed.missingwindow?.windowId, undefined);
+});
+
 // The opener id in an entry is what locates the worker's CHANNEL, and it is
 // read back from the entry rather than re-derived from this session — deriving
 // it from `TMUX_PANE` meant every restart/re-attach/handover silently moved the
