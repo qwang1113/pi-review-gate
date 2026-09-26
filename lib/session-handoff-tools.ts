@@ -82,7 +82,13 @@ export interface SessionHandoffDeps {
   /** The mechanical facts the document states (contract, outstanding work). */
   docFacts(): { contract?: string; outstanding?: string[] };
   /** The session's last user messages, verbatim (lib/session-handoff.ts `lastUserMessages`). */
-  recentUserMessages?(): string[];
+  recentUserMessages?(): string[] | undefined;
+  /**
+   * Can THIS pane write the agent's paragraph? A judge or a worker runs without
+   * edit/write, so refusing it a blank handover would be a refusal it can
+   * never satisfy.
+   */
+  canFillDoc(): boolean;
   writeText(path: string, text: string): void;
   readText(path: string): string | undefined;
   openSuccessor(spec: SuccessorPaneSpec): Promise<{ ok: true; paneId: string } | { ok: false; error: string }>;
@@ -156,6 +162,7 @@ export function ensureHandoffDoc(deps: SessionHandoffDeps, sessionId: string, do
   const existing = deps.readText(docPath);
   if (existing === undefined || existing.trim().length === 0) {
     const facts = deps.docFacts();
+    const recent = deps.recentUserMessages?.();
     deps.writeText(docPath, buildHandoffDoc({
       kind: deps.kind(),
       sessionId,
@@ -163,7 +170,7 @@ export function ensureHandoffDoc(deps: SessionHandoffDeps, sessionId: string, do
       ...(facts.contract === undefined ? {} : { contract: facts.contract }),
       ...(facts.outstanding === undefined ? {} : { outstanding: facts.outstanding }),
       ...(deps.transcriptPath() === undefined ? {} : { transcriptPath: deps.transcriptPath() }),
-      recentUserMessages: deps.recentUserMessages?.() ?? [],
+      ...(recent === undefined ? {} : { recentUserMessages: recent }),
       firstAction: firstActionFor(deps.kind()),
       now: new Date(deps.now()).toISOString(),
     }));
@@ -189,17 +196,21 @@ export async function runSessionHandoff(deps: SessionHandoffDeps): Promise<ToolR
     doc = ensureHandoffDoc(deps, sessionId, docPath);
     // A document written at the 70% reminder predates whatever the user said
     // since — refresh the user's own words on every call.
-    if (!doc.created && deps.recentUserMessages) {
-      deps.writeText(docPath, withRecentUserMessages(deps.readText(docPath) ?? "", deps.recentUserMessages()));
+    // A reading that failed is not "no messages", and a document that cannot be
+    // read is not empty: either way nothing is overwritten.
+    const existing = doc.created ? undefined : deps.readText(docPath);
+    const messages = existing === undefined ? undefined : deps.recentUserMessages?.();
+    if (existing !== undefined && messages !== undefined) {
+      deps.writeText(docPath, withRecentUserMessages(existing, messages));
     }
   } catch (error) {
     return fail(`review-gate: 写交接文档失败 —— ${(error as Error).message}`);
   }
 
   // NO BLANK HANDOVERS (2026-09-26, measured): a successor that got only the
-  // mechanical frame lost the user's newest requirement and stopped. A judge is
-  // exempt — it runs without edit/write and could never fill the paragraph.
-  if (kind !== "judge" && doc.pendingFill) {
+  // mechanical frame lost the user's newest requirement and stopped. A pane
+  // that cannot write (judge, worker) is exempt — see `canFillDoc`.
+  if (deps.canFillDoc() && doc.pendingFill) {
     return fail(
       buildRejection({
         what: "交接被拒 —— 没有开任何 pane，你仍然是持有者",

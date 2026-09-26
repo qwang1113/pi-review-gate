@@ -92,7 +92,8 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
       }
       const state = cells.state;
       // A SUCCESSOR CHECKS ITS PREDECESSOR'S LAST USER MESSAGES FIRST (2026-09-26).
-      if (state.taskMode !== "normal") {
+      // Enforced modes only: explore/normal completions are advisory in this file.
+      if (isEnforcedMode(state.taskMode)) {
         const inherited = readInheritance();
         const docPath = inherited.handoffDoc;
         let doc: string | undefined;

@@ -206,8 +206,10 @@ test("the document carries the user's last words, or says there were none", () =
   const doc = buildHandoffDoc({ kind: "orchestrator", sessionId: "s1", repoRoot: "/repo", recentUserMessages: ["再加一个任务：修 X"] });
   assert.ok(doc.indexOf(RECENT_USER_HEADING) < doc.indexOf(HANDOFF_FILL_HEADING));
   assert.match(recentUserSection(doc)!, /> 再加一个任务：修 X/);
-  const empty = buildHandoffDoc({ kind: "loop", sessionId: "s1", repoRoot: "/repo" });
+  const empty = buildHandoffDoc({ kind: "loop", sessionId: "s1", repoRoot: "/repo", recentUserMessages: [] });
   assert.match(recentUserSection(empty)!, /没有记录到用户消息/);
+  const unread = buildHandoffDoc({ kind: "loop", sessionId: "s1", repoRoot: "/repo" });
+  assert.match(recentUserSection(unread)!, /读不到会话记录/, "a missing reading is not 'none'");
 });
 
 test("refreshing the user section keeps the agent's paragraph — even when a message holds a heading", () => {

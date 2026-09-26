@@ -219,7 +219,7 @@ export interface HandoffDocFacts {
   firstAction?: string;
   /** ISO timestamp, injected (this module has no clock). */
   now?: string;
-  /** The predecessor's last user messages, verbatim (see `lastUserMessages`). */
+  /** The predecessor's last user messages, verbatim (see `lastUserMessages`); absent = unreadable. */
   recentUserMessages?: string[];
 }
 
@@ -266,7 +266,7 @@ export function buildHandoffDoc(facts: HandoffDocFacts): string {
     "",
     RECENT_USER_HEADING,
     "",
-    recentUserBlock(facts.recentUserMessages ?? []),
+    recentUserBlock(facts.recentUserMessages),
     "",
     HANDOFF_FILL_HEADING,
     "",
@@ -304,6 +304,8 @@ export const RECENT_USER_COUNT = 3;
 export const RECENT_USER_MAX_CHARS = 2000;
 
 const NO_RECENT_USER = "（没有记录到用户消息）";
+/** Missing reading ≠ no messages (the direction `handoffDue` takes too). */
+const UNREAD_RECENT_USER = "（门禁读不到会话记录 —— 最后的用户消息去前任 transcript 里看）";
 
 /**
  * The section is fenced by line-start markers, NOT found by its heading: the
@@ -350,8 +352,10 @@ export function lastUserMessages(entries: readonly unknown[], n: number): string
  * The fenced body. Every message line is quoted (`> `), so a message can never
  * put a marker at the start of a line and end the fence early.
  */
-function recentUserBlock(messages: readonly string[]): string {
-  const body = messages.length === 0
+function recentUserBlock(messages: readonly string[] | undefined): string {
+  const body = messages === undefined
+    ? UNREAD_RECENT_USER
+    : messages.length === 0
     ? NO_RECENT_USER
     : messages
       .map((text, i) => [`### ${i + 1} / ${messages.length}`, "", ...text.split("\n").map((line) => `> ${line}`)].join("\n"))

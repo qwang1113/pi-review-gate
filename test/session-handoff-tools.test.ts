@@ -49,6 +49,7 @@ function fakeDeps(overrides: Partial<SessionHandoffDeps> = {}): {
     transcriptPath: () => "/sessions/session-1.jsonl",
     docPath: (id) => handoffDocPath("/repo", id),
     docFacts: () => ({ contract: "goal: 修好交接", outstanding: ["未提交改动：lib/x.ts"] }),
+    canFillDoc: () => true,
     writeText: (path, text) => { files.set(path, text); },
     readText: (path) => files.get(path),
     openSuccessor: async () => { events.push("open"); return { ok: true, paneId: "%9" }; },
@@ -89,6 +90,26 @@ test("a filled handover opens the successor, then goes silent — in that order"
   assert.match(receipt.content[0]!.text, /session-1-h1/, "the successor id is derived from ours");
   assert.match(receipt.content[0]!.text, /只读静默/);
   assert.match(receipt.content[0]!.text, /补充段已写/);
+});
+
+test("a pane that cannot write (worker) is not refused a blank handover it could never fill", async () => {
+  const { deps, events } = fakeDeps({ canFillDoc: () => false });
+  const receipt = await runSessionHandoff(deps);
+  assert.equal(receipt.isError, undefined, receipt.content[0]!.text);
+  assert.deepEqual(events, ["open", "committed"]);
+});
+
+test("an unreadable session is never written down as 'no messages', and never overwrites the document", async () => {
+  let said: string[] | undefined;
+  const { deps, files } = fakeDeps({ recentUserMessages: () => said });
+  await runSessionHandoff(deps);
+  const docPath = handoffDocPath("/repo", "session-1");
+  assert.match(recentUserSection(files.get(docPath)!)!, /读不到会话记录/);
+  said = ["要求"];
+  await fillDoc(deps, files);
+  said = undefined;
+  await runSessionHandoff(deps);
+  assert.match(recentUserSection(files.get(docPath)!)!, /> 要求/, "a failed reading leaves the last good one");
 });
 
 test("the user section is refreshed at the call — what they said after the skeleton was written", async () => {
@@ -258,6 +279,7 @@ test("handoffExtraEnvFor: the successor keeps the mode, the address and its own 
 test("a judge delegates the pane work through `requestSuccession`, and opens nothing itself", async () => {
   const { deps, events } = fakeDeps({
     kind: () => "judge",
+    canFillDoc: () => false,
     requestSuccession: (docPath, pendingFill) => {
       events.push(`request:${pendingFill}`);
       return { ok: true, detail: `已请 opener 开下一代（${docPath}）` };

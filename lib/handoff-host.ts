@@ -295,9 +295,11 @@ export function createHandoffHost(
     docFacts: handoffDocFacts,
     recentUserMessages: () => {
       try {
-        return lastUserMessages(cells.latestCtx?.sessionManager?.getBranch?.() ?? [], RECENT_USER_COUNT);
-      } catch { return []; }
+        const entries = cells.latestCtx?.sessionManager?.getBranch?.();
+        return entries === undefined ? undefined : lastUserMessages(entries, RECENT_USER_COUNT);
+      } catch { return undefined; }
     },
+    canFillDoc: () => !readJudgeSideEnv(process.env) && !readWorkerSideEnv(process.env),
     writeText: (path, text) => {
       mkdirSync(pathJoin(path, ".."), { recursive: true });
       writeFileSync(path, text, "utf8");
