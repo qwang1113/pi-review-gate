@@ -1,11 +1,11 @@
 /**
  * WHAT THE AUDIT-ROUND ENGINE NEEDS FROM THIS SESSION, moved out of
  * `extensions/review-gate.ts` (t7, wave 3 of the split): the conclusion
- * half (`auditRoundDeps` — the channel read, the cursor, the recorders, the
- * round-end pane reclaim) and the synchronous half (`auditRunDeps` —
- * dispatch, the gate's own wait, the O-6 close, the content-bound "did it
- * pass?"), plus the goal-auditor's task builder and the one close path for a
- * judge this session opened.
+ * half (`auditRoundDeps` — the channel read, the cursor, the recorders) and
+ * the synchronous half (`auditRunDeps` — dispatch, the gate's own wait, the
+ * content-bound "did it pass?"), plus the goal-auditor's task builder. No
+ * pane is closed here: a judge window outlives its round and `declare_done`
+ * reclaims it (2026-09-27).
  *
  * The DECISIONS are lib/audit-round.ts's; this module only supplies facts and
  * effects. The recorders themselves are lib/verdict-host.ts's.
@@ -23,10 +23,8 @@ import { readChannel, reportConclusion, sanitizeContextPercent, type ReportConcl
 import type { ChannelRecord, ChannelReportRecord } from "./channel-records.ts";
 import { recordGoalPrereview, type GoalPrereviewDeps } from "./goal-prereview-tools.ts";
 import { registerJudge, type JudgeEntry } from "./hierarchy.ts";
-import { JUDGE_PANE_RECLAIM, reclaimAuditLine, type JudgePaneReclaimOutcome } from "./judge-pane-policy.ts";
 import type { JudgeRegistry } from "./judge-registry-host.ts";
 import type { JudgeDispatch } from "./judge-round-dispatch.ts";
-import { doClose, type JudgeSessionToolDeps } from "./judge-session-tools.ts";
 import { goalPrereviewPassed, goalTextHash } from "./loop-goal.ts";
 import { formatPlanAuditRefusal } from "./orchestrator-plan-audit.ts";
 import type { ToolUpdate } from "./progress-stream.ts";
@@ -63,10 +61,9 @@ export function createAuditRoundHost(
     recordReviewVerdict(concluded: ReportConclusion, repo: string, ctx: unknown): Promise<string>;
     recordQualityVerdict(concluded: ReportConclusion, repo: string, ctx: unknown): Promise<string | undefined>;
     recordAcceptanceVerdict(concluded: ReportConclusion, repo: string, ctx: unknown): Promise<string | undefined>;
-    /** The gate's own wait and close (the extension's judge-session wiring). */
+    /** The gate's own wait (the extension's judge-session wiring). */
     selfAuditWait(root: string, ctx: unknown, onUpdate: ToolUpdate | undefined, signal: AbortSignal | undefined): Promise<GateToolResult>;
     forwardWaitUpdates(progress: { tail?(text: string): void; step?(t: string): void } | undefined): ToolUpdate | undefined;
-    selfSessionDeps(): JudgeSessionToolDeps;
     /** The gate's own dialog — how an auditor's question reaches the user while the gate waits. */
     askUser(spec: ChoiceSpec, signal: AbortSignal): Promise<string | undefined>;
   },
@@ -76,7 +73,7 @@ export function createAuditRoundHost(
     channelIO, lastUiCtx, callTool, toolText, extractTaskText, goalPrereviewDeps,
     judgeChildByRole, checkpointAtFor, dispatchJudgeRound,
     recordReviewVerdict, recordQualityVerdict, recordAcceptanceVerdict,
-    selfAuditWait, forwardWaitUpdates, selfSessionDeps, askUser,
+    selfAuditWait, forwardWaitUpdates, askUser,
   } = deps;
   const { log } = host;
   const stateForRepo = (root: string) => host.stateFor(root);
@@ -129,43 +126,6 @@ export function createAuditRoundHost(
    * fall back to the last UI context, and with neither they record NOTHING and
    * say so, which the engine turns into "stay armed, retry next settle".
    */
-  /**
-   * THE ONE CLOSE PATH for a judge THIS session opened.
-   *
-   * Two callers, one implementation (2026-09-21): the gate's synchronous
-   * chains (`auditRunDeps.closeJudge`) and the round-end reclaim that now
-   * frees an AGENT-dispatched review pane too
-   * (`auditRoundDeps.reclaimJudgePane`). They are one function on purpose —
-   * "read hadPane BEFORE the close, close by judgeId, map the reply's outcome"
-   * is exactly the sequence whose two copies drift, and a reclaim that reports
-   * the wrong outcome is a leftover pane nobody can find again (`judge_close`
-   * drops the registry row even when the kill fails).
-   *
-   * SAME BYPASS AS THE WAIT (2026-09-08): the gate reclaims a judge it opened
-   * itself — `callTool("judge_close", { repo: root })` would refuse on an
-   * unedited repo and leak the pane (measured: five "judge pane 回收失败…is not
-   * one of the repositories" in the audit log). `doClose` by judgeId keeps the
-   * opener check and skips only the repo-addressing.
-   */
-  async function closeOwnedJudge(
-    root: string,
-    judgeId: string | undefined,
-    role: string,
-  ): Promise<JudgePaneReclaimOutcome> {
-    // `hadPane` is read HERE, before the close, because it is the only moment
-    // it is still knowable.
-    const hadPane = judgeChildByRole(root, role)?.paneId !== undefined;
-    if (judgeId === undefined) {
-      return { ok: true, hadPane: false, terminated: false, note: "no judge on record — nothing to close." };
-    }
-    const closed = await doClose(selfSessionDeps(), { role, sessionId: judgeId }, true); // gateSelf: this session opened it
-    return {
-      ok: closed.isError !== true && (closed.details as { closed?: unknown } | undefined)?.closed === true,
-      hadPane,
-      terminated: (closed.details as { terminated?: unknown } | undefined)?.terminated === true,
-      note: toolText(closed as { content: { type: string; text: string }[] }).split("\n")[0]?.trim() || undefined,
-    };
-  }
 
   function auditRoundDeps(ctx?: unknown): SettleAuditRoundDeps {
     return {
@@ -196,23 +156,6 @@ export function createAuditRoundHost(
       conclusionOf: (report) => reportConclusion(channelIO, report),
       proseOf: (report) => reportText(channelIO, report),
       advanceCursor: (judgeId, reportId) => advanceReportCursor(judgeId, reportId),
-      // ROUND END FREES THE PANE (2026-09-21, user decision): a review pane no
-      // longer waits for declare_done. The verdict is already on record — what
-      // the judge produced is the opener's — so the pane is screen space, and
-      // closing it costs no context: the next `judge_submit` for this role
-      // finds a dead pane and re-opens the SAME session id, transcript and all.
-      reclaimJudgePane: async (root, judgeId, role) => {
-        const outcome = await closeOwnedJudge(root, judgeId, role);
-        // SILENCE IS THE NORMAL CASE (lib/judge-pane-policy.ts): a reclaim that
-        // did what the policy promises is not news, and a log that records every
-        // success is a log nobody greps. A line appears only when the pane's fate
-        // is NOT what the policy promises — which is the one moment the leftover
-        // pane would otherwise become unfindable (the registry row is dropped
-        // even when the kill failed).
-        const line = reclaimAuditLine({ role, policy: JUDGE_PANE_RECLAIM, outcome });
-        if (line !== undefined) log(line);
-        return outcome;
-      },
       pendingAudit: (root) => pendingAudits.get(root),
       forgetPending: (root) => dropAudits(root),
       nowIso: () => new Date().toISOString(),
@@ -288,7 +231,7 @@ export function createAuditRoundHost(
   /**
    * The engine's deps for a SYNCHRONOUS round (goal / plan): the conclusion
    * half above, plus the four things only a blocking round needs — dispatch,
-   * the wait, the O-6 close, and the content-bound "did it pass?".
+   * the wait, and the content-bound "did it pass?".
    */
   function auditRunDeps(
     ctx: unknown,
@@ -304,7 +247,10 @@ export function createAuditRoundHost(
           role,
           title,
           task,
-          fresh: true,
+          // NOT fresh (2026-09-27): the auditor's window outlives its round, so
+          // a living one takes this round through its channel — an interrupt
+          // carrying the new roundSeq — instead of being killed and re-opened.
+          // The round binding keeps a late report from the old round out.
           ...(streamPath === undefined ? {} : { streamPath }),
         });
         if (!dispatched.ok) {
@@ -386,13 +332,6 @@ export function createAuditRoundHost(
         const where = judge ? `（${judge.role} 在 ${judgePlace(judge).tmuxSession ?? "?"}:${judgePlace(judge).windowId ?? "?"}）` : "";
         return { ok: false, detail: `${why.text}${where}` };
       },
-      // THE RECLAIM, AND WHAT IT ACHIEVED. The reply used to be awaited and
-      // thrown away, which is where a half-done reclaim went to die:
-      // `judge_close` drops the registry row even when the kill FAILS, so
-      // after that reply is discarded the leftover pane is unreachable — the
-      // row it would be found by no longer exists. `hadPane` is read HERE,
-      // before the close, because it is the only moment it is still knowable.
-      closeJudge: async (root, role) => closeOwnedJudge(root, judgeChildByRole(root, role)?.judgeId, role),
       auditPassed: (root, pending) => {
         const st = stateOf(root);
         if (pending.kind === "goal") return goalPrereviewPassed(st.goalPrereview, pending.draft);
@@ -434,5 +373,5 @@ export function createAuditRoundHost(
     };
   }
 
-  return { auditRoundDeps, auditRunDeps, buildGoalAuditRound, closeOwnedJudge };
+  return { auditRoundDeps, auditRunDeps, buildGoalAuditRound };
 }

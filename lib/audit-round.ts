@@ -1,6 +1,6 @@
 /**
  * THE AUDIT ROUND ENGINE — one implementation of "dispatch a judge, wait for
- * THIS round, pick its report, adjudicate it, record it, reclaim the pane".
+ * THIS round, pick its report, adjudicate it, record it".
  *
  * ── WHY THIS MODULE EXISTS (2026-09-05) ──
  *
@@ -18,12 +18,13 @@
  * What differs per kind is a small `AuditRoundSpec` — the role it dispatches,
  * how its report is bound to a round, and the sentences the caller reads when
  * the round fails closed. What is shared is everything mechanical: which
- * report belongs to this round, the fail-closed rule, the pending bookkeeping,
- * and the ONE `judge_close` that reclaims a pane the gate opened itself. That
- * reclaim is the single execution point of the pane-lifecycle policy — WHY the
- * gate's own auditor dies with its round while the agent's review pane lives
- * until `declare_done`, and why there is no second call site, is written in
- * lib/judge-pane-policy.ts and is not restated here.
+ * report belongs to this round, the fail-closed rule, the pending bookkeeping.
+ *
+ * NOTHING HERE CLOSES A PANE (2026-09-27, user decision). A judge window
+ * outlives its round — the user wants to read a finished audit, and a window
+ * that lived 26 seconds was never seen — and the next round of the same role
+ * reuses it through the channel. The one reclaim point is `declare_done`'s
+ * cascade (and `closeOwnSession` on exit), for every judge alike.
  *
  * ── THE TWO HALVES, AND WHY THEY ARE TWO ──
  *
@@ -63,17 +64,6 @@
 // its own module because merging the mechanics was the point of this one and
 // merging the sentences would have been a mistake.
 import type { AuditRoundSpec, PendingAudit } from "./audit-round-specs.ts";
-// WHEN THE PANE THIS CHAIN OPENED GOES AWAY — and what a half-done reclaim
-// has to say out loud. ONE policy (round end, 2026-09-21), executed in two
-// places that are the same rule rather than two rules: this file's
-// `runAuditRound` reclaim step (the gate's own synchronous chains) and
-// `settleAuditRound`'s (the agent's review rounds, which conclude
-// asynchronously through the channel).
-import {
-  JUDGE_PANE_RECLAIM,
-  reclaimAuditLine,
-  type JudgePaneReclaimOutcome,
-} from "./judge-pane-policy.ts";
 import { settleAuditRound, type SettleAuditRoundDeps } from "./audit-round-settle.ts";
 
 /* ─────────────────────────── the synchronous round ───────────────────────── */
@@ -96,20 +86,6 @@ export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
   /** Wait for the END of the round (a report), not for its first message. */
   awaitRoundEnd(root: string): Promise<{ ok: boolean; detail: string }>;
   /**
-   * Close the pane this chain opened, and REPORT WHAT THAT ACHIEVED.
-   *
-   * The rule it serves is policy (a) in lib/judge-pane-policy.ts ("谁派谁收",
-   * O-6) — see that module for why the gate's own auditor is reclaimed here
-   * and the agent's review pane is not.
-   *
-   * The outcome is a RETURN VALUE and not `void` because the interesting case
-   * is the half-done one: `judge_close` drops the registry row even when the
-   * kill fails, so a discarded reply is a pane left on the user's screen that
-   * nothing downstream can find any more (the row it would be found by is
-   * gone). This chain writes that into the audit log instead of dropping it.
-   */
-  closeJudge(root: string, role: string): Promise<JudgePaneReclaimOutcome>;
-  /**
    * Did the recorded verdict actually pass — for the CONTENT this round
    * judged? The pending entry is passed in rather than re-read, because the
    * record is content-bound (a goal to its draft, a plan to its hash) and the
@@ -117,12 +93,12 @@ export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
    */
   auditPassed(root: string, pending: PendingAudit): boolean;
   /**
-   * DID A RECORD FOR **THIS** ROUND LAND — evidence that survives the reclaim.
+   * DID A RECORD FOR **THIS** ROUND LAND — evidence that survives a lost row.
    *
    * The pair of writes a record makes (pending forgotten, cursor advanced) is
-   * the older evidence, and half of it lives in the JUDGE REGISTRY — which the
-   * round-end reclaim deletes (`judge_close` drops the row even when the kill
-   * fails). So from 2026-09-21 a round the WAIT recorded came back to this
+   * the older evidence, and half of it lives in the JUDGE REGISTRY — which a
+   * close deletes (`judge_close` drops the row even when the kill fails; the
+   * 2026-09-21 round-end reclaim did exactly that until 2026-09-27). So from 2026-09-21 a round the WAIT recorded came back to this
    * chain looking like a round nobody recorded: three consecutive plan audits
    * PASSed, were written to the gate's state and its audit log, and were each
    * reported to the project manager as `fail-closed` with no approval dialog
@@ -174,9 +150,9 @@ export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
  * consumes, so a settled round comes back as `unknown` — indistinguishable
  * from "nothing was ever dispatched" (reviewer P0, 2026-09-05).
  *
- * AND THE CURSOR IS NO LONGER THERE TO READ (2026-09-21): recording a round
- * now frees the judge's pane, and that close drops the registry row the cursor
- * lives in — so a round the wait recorded arrives here with no entry at all,
+ * AND THE CURSOR MAY NOT BE THERE TO READ (2026-09-21): a close — the round-end
+ * reclaim then, a user or a `fresh` dispatch now — drops the registry row the
+ * cursor lives in, so a round the wait recorded can arrive here with no entry,
  * and the cursor half answers "nothing was recorded" for the one case it was
  * written to detect. `recordedThisRound` is the same question asked of the
  * RECORD, which no reclaim touches; the cursor stays as the cheaper check for
@@ -195,7 +171,7 @@ function roundClosedDuringWait(
 
 
 /**
- * ONE SYNCHRONOUS AUDIT ROUND — dispatch, wait, conclude, reclaim.
+ * ONE SYNCHRONOUS AUDIT ROUND — dispatch, wait, conclude.
  *
  * The goal and plan audits are this function, twice, differing only in their
  * spec. It blocks for minutes on purpose: the alternative is handing the agent
@@ -205,9 +181,8 @@ function roundClosedDuringWait(
  * FAIL-CLOSED IS WRITTEN ONCE, HERE. Any outcome that is not "this round's
  * report was recorded and it passed" records nothing and says so — a wait that
  * timed out, a pane that died, a report from another round, a verdict that
- * could not be parsed. And the close runs on EVERY path (the `finally`),
- * because the previous shape — one close call per return branch — is precisely
- * how a branch ends up leaking a pane.
+ * could not be parsed. No path closes the pane: it stays for the user to read
+ * and for the next round of this role to reuse (`declare_done` reclaims it).
  */
 export async function runAuditRound(
   deps: RunAuditRoundDeps,
@@ -240,69 +215,41 @@ export async function runAuditRound(
   // refused submission must never replace the draft a running audit is
   // judging: its verdict would be recorded against text no auditor ever read.
   deps.rememberPending(root, input.pending);
-  // EVERYTHING PAST THE ACCEPTED DISPATCH IS INSIDE THE `try`, including the
-  // registry lookup: a pane is open from here on, so every exit — even
-  // "the registry cannot address what we just opened" — has to run the close.
-  // A `return` placed one line above it leaks exactly that pane.
-  try {
-    const judgeId = deps.judgeIdOf(root, spec.role);
-    if (!judgeId) return { ok: false, text: spec.unaddressable() };
-    // The cursor BEFORE the wait. It is half the evidence that tells "the wait
-    // already closed this round" from "nothing was recorded at all" — see
-    // `roundClosedDuringWait`.
-    const cursorBefore = deps.judgeEntry(judgeId)?.lastReportId;
-    const waited = await deps.awaitRoundEnd(root);
-    if (!waited.ok) return { ok: false, text: spec.unfinished(waited.detail) };
-    // Only a round recorded HERE carries its note; one the wait recorded left
-    // its verdict in the gate's state, which `auditPassed` / `verdictLabel`
-    // read. (That was already true before this engine existed: the goal chain
-    // recorded inside its wait and always fell back to the label.)
-    let note: string | undefined;
-    if (!roundClosedDuringWait(deps, { judgeId, root, cursorBefore, pending: input.pending })) {
-      const settled = await settleAuditRound(deps, { judgeId, root });
-      if (settled.status !== "recorded") {
-        // A miss already carries the kind's own fail-closed sentence, naming
-        // the round it actually saw — re-deriving it here would lose that.
-        const text = settled.status === "miss" && settled.text
-          ? settled.text
-          : spec.unfinished("本轮裁决没能记录下来");
-        return { ok: false, text };
-      }
-      note = settled.text;
+  const judgeId = deps.judgeIdOf(root, spec.role);
+  if (!judgeId) return { ok: false, text: spec.unaddressable() };
+  // The cursor BEFORE the wait. It is half the evidence that tells "the wait
+  // already closed this round" from "nothing was recorded at all" — see
+  // `roundClosedDuringWait`.
+  const cursorBefore = deps.judgeEntry(judgeId)?.lastReportId;
+  const waited = await deps.awaitRoundEnd(root);
+  if (!waited.ok) return { ok: false, text: spec.unfinished(waited.detail) };
+  // Only a round recorded HERE carries its note; one the wait recorded left
+  // its verdict in the gate's state, which `auditPassed` / `verdictLabel`
+  // read. (That was already true before this engine existed: the goal chain
+  // recorded inside its wait and always fell back to the label.)
+  let note: string | undefined;
+  if (!roundClosedDuringWait(deps, { judgeId, root, cursorBefore, pending: input.pending })) {
+    const settled = await settleAuditRound(deps, { judgeId, root });
+    if (settled.status !== "recorded") {
+      // A miss already carries the kind's own fail-closed sentence, naming
+      // the round it actually saw — re-deriving it here would lose that.
+      const text = settled.status === "miss" && settled.text
+        ? settled.text
+        : spec.unfinished("本轮裁决没能记录下来");
+      return { ok: false, text };
     }
-    if (deps.auditPassed(root, input.pending)) return { ok: true };
-    // WHAT THE CALLER IS TOLD TO FIX. Preference order, and the order matters:
-    // this round's own note if it recorded here, else the refusal rebuilt from
-    // the RECORD (which still holds the findings even when the wait did the
-    // recording), else the bare verdict label.
-    const refusal = note ?? deps.recordedRefusal(root, input.pending);
-    return {
-      ok: false,
-      text: spec.rejected(refusal || `审计记录：${deps.verdictLabel(root, input.pending)}`, {
-        ...(input.streamPath === undefined ? {} : { streamPath: input.streamPath }),
-      }),
-    };
-  } finally {
-    // ─────────── THE ONE EXECUTION POINT of the pane-lifecycle policy ────────
-    //
-    // ONE policy for every judge pane (2026-09-21): the round that concludes
-    // on it frees it, whoever dispatched it.
-    const policy = JUDGE_PANE_RECLAIM;
-    if (policy.atRoundEnd) {
-      // Best effort, and LOUD when it is not enough. A throw here would
-      // replace the round's real answer with an exception raised by its
-      // cleanup, so it is caught — but caught into the same audit line a
-      // failed close produces, never into silence.
-      let outcome: JudgePaneReclaimOutcome;
-      try {
-        outcome = await deps.closeJudge(root, spec.role);
-      } catch (err) {
-        outcome = { ok: false, hadPane: false, terminated: false, note: (err as Error).message };
-      }
-      const line = reclaimAuditLine({ role: spec.role, policy, outcome });
-      if (line !== undefined) {
-        try { deps.log(line); } catch { /* the log is the last thing that may break a round */ }
-      }
-    }
+    note = settled.text;
   }
+  if (deps.auditPassed(root, input.pending)) return { ok: true };
+  // WHAT THE CALLER IS TOLD TO FIX. Preference order, and the order matters:
+  // this round's own note if it recorded here, else the refusal rebuilt from
+  // the RECORD (which still holds the findings even when the wait did the
+  // recording), else the bare verdict label.
+  const refusal = note ?? deps.recordedRefusal(root, input.pending);
+  return {
+    ok: false,
+    text: spec.rejected(refusal || `审计记录：${deps.verdictLabel(root, input.pending)}`, {
+      ...(input.streamPath === undefined ? {} : { streamPath: input.streamPath }),
+    }),
+  };
 }

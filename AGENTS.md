@@ -791,10 +791,20 @@ its own `prompt`); a preset that is not configured FAILS the dispatch rather
 than running on some default model, and a `model` argument overrides the first
 slot for one dispatch.
 
-**Judges and workers both free their pane at round end** (2026-09-21): a
-recorded verdict is the deliverable, a pane is screen space. The next dispatch
-of the same role re-opens the SAME session id, so nothing is lost when one
-goes away.
+**Finished windows stay until `declare_done`** (2026-09-27, user decision —
+replaces 2026-09-21's "free the pane at round end"): a judge window (reviewer,
+quality-auditor, goal-auditor incl. the gate's own goal/plan audits,
+acceptance, adviser) and a worker window stay open after they report, idle,
+so the user can still read them — a plan audit that lived 26 seconds was
+never seen. The next round of the same role REUSES that window through its
+channel (same session id, an interrupt carrying the new round number); the
+gate's own audits no longer dispatch `fresh`. `orchestrator_close` SETTLES a
+child (`closedAt`, worktree keep/merge/discard) without killing its window, and
+a settled child is neither supervised nor counted as a live child. Everything
+is reclaimed in one place: `declare_done`'s judge cascade plus
+`closeOwnSession` (and the same session close on process exit). The cancel
+matrix still kills a CANCELLED sibling's pane — that is an abort, not a
+finish.
 
 ### Wave daily — removed
 

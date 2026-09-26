@@ -1,6 +1,12 @@
 /**
- * `orchestrator_close` — the tool body that closes a child's window and
- * settles the isolated checkout it may have left behind.
+ * `orchestrator_close` — the tool body that SETTLES a child: it records the
+ * child as closed (no longer supervised, no longer blocking `declare_done`)
+ * and settles the isolated checkout it may have left behind.
+ *
+ * It does NOT kill the child's window (2026-09-27, user decision): a finished
+ * child stays on screen for the user to read, and the orchestrator's own
+ * `declare_done` (or process exit) reclaims it with the rest of its tmux
+ * session (`closeOwnSession`).
  *
  * Split from lib/orchestrator-session-tools.ts, which keeps the registration
  * of every orchestration session tool; the git half of a settlement lives in
@@ -13,7 +19,6 @@ import {
   markChildClosed,
   type OrchestratorRuntime,
 } from "./orchestrator-registry.ts";
-import { closeSessionWindow, windowAlreadyGone } from "./session-factory.ts";
 import {
   WORKTREE_SETTLEMENTS,
   repoRootOfWorktree,
@@ -104,41 +109,15 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
     }
   }
   if (settlementOnly) {
-    // Nothing else is owed: the pane is already gone and the registry already
+    // Nothing else is owed: the child was already settled and the registry already
     // says so. The caller gets the settlement and no close narrative.
-    return reply(`review-gate: 子会话 ${child.id} 早已关闭 —— 本次只结算它的 worktree。` + settlementNote, { childId: child.id });
+    return reply(`review-gate: 子会话 ${child.id} 早已结算 —— 本次只结算它的 worktree。` + settlementNote, { childId: child.id });
   }
-  // THE LABEL BAR IS NOT TOUCHED HERE ANY MORE (2026-09-17, user decision).
-  // This used to be the fourth of five close paths asking one shared
-  // question ("is this the last decorated pane I can see"), and every answer
-  // it could give toggled `pane-border-status` — which resizes EVERY pane in
-  // the window (measured: SIGWINCH, rows 84 ↔ 83) and was measured to be
-  // wrong across sessions besides. Under the window topology a child's bar
-  // belongs to the child's own window and disappears with it.
-  //
-  // A child is closed by WINDOW, not by pane (2026-09-25), and only when the
-  // registry can prove the window is one the gate owns: the target is written
-  // `<tmuxSession>:<windowId>` from the SAME record, so a stale id can only
-  // reach a window of the gate's own session.
-  //
-  // A RECORD WITH NO COORDINATES IS NOT A DEAD END (2026-09-25, quality round
-  // P2). A row written by an older build has neither half — it cannot be
-  // addressed at all — and the first version of this code FAILED the whole
-  // close there, leaving the child `running` forever and contradicting the
-  // sentence above it. It takes the same direction as the judge path: the
-  // window is LEFT ALONE (nothing is killed by a guess), the registration is
-  // cleared, and the reply says which of the two happened.
-  let killNote: string | undefined;
-  if (child.windowId && child.tmuxSession) {
-    const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
-    if (!killed.ok && !windowAlreadyGone(killed.error)) {
-      return fail(`review-gate: 关闭 window 失败 —— ${killed.error}`);
-    }
-    if (!killed.ok) killNote = "（它的 window 已经不在了）";
-  } else {
-    killNote = "（登记里没有 window/session 坐标 —— 旧版登记，只清登记，没去关窗）";
-  }
-
+  // THE WINDOW IS LEFT WHERE IT IS (2026-09-27). `closedAt` is what every
+  // "is this child still open" reading keys on — supervision, the
+  // `declare_done` live-children check, the exit-time `openChildren` count —
+  // so recording it is the whole settlement; the window itself goes with the
+  // orchestrator's tmux session when `declare_done` closes it.
   deps.saveRuntime(markChildClosed(deps.runtime(), child.id, new Date(deps.now()).toISOString()));
   // O-2 — only remind about the task status when it still NEEDS moving. The
   // orchestrator usually sets the task `done` before closing; repeating the
@@ -153,7 +132,9 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
     ? "。别忘了把它的任务状态置为 done 或 pending（`orchestrator_plan`）。"
     : `。任务 ${child.taskId} 当前是 ${closedTask.status}，无需再动。`;
   return reply(
-    `review-gate: 子会话 ${child.id}（window ${child.windowId ?? "（无记录）"}）已关闭${killNote ?? ""}` + statusNudge + settlementNote,
+    `review-gate: 子会话 ${child.id} 已结算（不再监督、不再阻挡 declare_done）；` +
+      `它的 window ${child.windowId ?? "（无记录）"} 保留在屏幕上，由你的 declare_done 统一回收` +
+      statusNudge + settlementNote,
     { childId: child.id },
   );
 

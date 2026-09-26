@@ -30,7 +30,8 @@ import {
 } from "./helpers/fake-orchestration.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
 import { decideNotify, emptyNotifyHistory, notifyKey, recordNotify } from "../lib/user-notify.ts";
-import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
+import { addGrant, hasGrant, liveChildren } from "../lib/orchestrator-registry.ts";
+import { orchestratorDoneProblems } from "../lib/orchestrator-gate.ts";
 import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
@@ -1510,7 +1511,7 @@ test("the archive reply reports what it actually moved, on both paths", async ()
 
 
 
-test("closing is limited to registered panes and returns the task to pending", async () => {
+test("orchestrator_close SETTLES a child: its window stays, and it no longer blocks declare_done (2026-09-27)", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);
   readyChild(world, childId);
@@ -1518,8 +1519,14 @@ test("closing is limited to registered panes and returns the task to pending", a
 
   const reply = await world.call("orchestrator_close", { childId });
   assert.equal(reply.isError, undefined, replyText(reply));
-  assert.equal(world.panes.get(paneId)!.alive, false);
-  assert.ok(world.runtime().children[0]!.closedAt, "the registry records the close");
+  assert.equal(world.panes.get(paneId)!.alive, true, "the child's window is kept for the user to read");
+  assert.match(replyText(reply), /已结算[\s\S]*declare_done 统一回收/, "…and the reply says so");
+  assert.ok(world.runtime().children[0]!.closedAt, "the registry records the settlement");
+  // The pane is ALIVE and still not a live child: every open-child reading keys
+  // on `closedAt`, so the orchestrator's own declare_done is not blocked by it.
+  assert.deepEqual(liveChildren(world.runtime(), [paneId]), []);
+  const problems = orchestratorDoneProblems({ runtime: world.runtime(), alivePaneIds: [paneId] });
+  assert.equal(problems.some((p) => p.includes(childId)), false, problems.join("\n"));
 });
 
 // THE HANDOVER TESTS THAT USED TO LIVE HERE went with the tool they tested

@@ -802,7 +802,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   const closeScopeOnExit = (): void => {
     const outcome = closeOwnSessionOnExit((argv) => runTmux(argv), tmuxScope, {
       handedOff: handedOff(),
-      openChildren: (cells.state.orchestrator?.children ?? []).filter((child) => !child.closedAt).length,
+      children: cells.state.orchestrator?.children ?? [],
     });
     log(`review-gate[session-scope] 退出时：${outcome.note}`);
   };
@@ -1091,7 +1091,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     recordAcceptanceVerdict,
     selfAuditWait,
     forwardWaitUpdates,
-    selfSessionDeps: () => selfSessionDeps(),
     askUser: (spec, signal) => askChoice(asChoiceHost(cells.latestCtx ?? {}), spec, { signal }),
   });
   const { submitForReview, runGoalAudit, runPlanAudit } = createReviewChain(host, {

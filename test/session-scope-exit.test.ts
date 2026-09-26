@@ -38,7 +38,7 @@ function server(owner = ID): { run: TmuxRunner; sessions: Set<string>; kills: nu
   return Object.assign(state, { run });
 }
 
-const plain = { handedOff: false, openChildren: 0 };
+const plain = { handedOff: false, children: [] };
 
 test("an ordinary exit kills the session it created, and a second call is a no-op", () => {
   const tmux = server();
@@ -50,9 +50,19 @@ test("an ordinary exit kills the session it created, and a second call is a no-o
 
 test("a handed-off session and a manager with open children keep the session", () => {
   const tmux = server();
-  assert.equal(closeOwnSessionOnExit(tmux.run, scope(), { handedOff: true, openChildren: 0 }).closed, false);
-  assert.equal(closeOwnSessionOnExit(tmux.run, scope(), { handedOff: false, openChildren: 2 }).closed, false);
+  assert.equal(closeOwnSessionOnExit(tmux.run, scope(), { handedOff: true, children: [] }).closed, false);
+  assert.equal(closeOwnSessionOnExit(tmux.run, scope(), { handedOff: false, children: [{}, { closedAt: "2026-09-27T00:00:00Z" }] }).closed, false);
   assert.equal(tmux.kills, 0);
+});
+
+test("a manager whose children are all SETTLED closes the session — and their kept windows with it (2026-09-27)", () => {
+  // `orchestrator_close` no longer kills a child's window; it only stamps
+  // `closedAt`. Exit is where those kept windows go, with the session.
+  const tmux = server();
+  const settled = [{ closedAt: "2026-09-27T00:00:00Z" }, { closedAt: "2026-09-27T00:01:00Z" }];
+  assert.equal(closeOwnSessionOnExit(tmux.run, scope(), { handedOff: false, children: settled }).closed, true);
+  assert.equal(tmux.kills, 1);
+  assert.equal(tmux.sessions.has(NAME), false);
 });
 
 test("no record, or a marker that is not ours, kills nothing", () => {

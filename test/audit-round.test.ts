@@ -37,7 +37,6 @@ import {
 import type { ChannelRecord, ChannelReportRecord } from "../lib/channel-records.ts";
 import type { ReportConclusion } from "../lib/channel-projection.ts";
 import type { PlanAuditRecord } from "../lib/orchestrator-plan-audit.ts";
-import { JUDGE_PANE_RECLAIM, type JudgePaneReclaimOutcome } from "../lib/judge-pane-policy.ts";
 
 const NOW = "2026-09-05T12:00:00.000Z";
 /** The checkpoint this round reviews — an hour BEFORE the reports above. */
@@ -546,8 +545,6 @@ interface FakeState {
   acceptanceRounds: number;
   /** undefined = "could not record right now" (no usable tool context). */
   recordResult: string | undefined;
-  /** Judge ids whose pane `settleAuditRound` reclaimed at round end. */
-  reclaimed: string[];
   /**
    * `checkpoint.at` of the repo — the content stamp a REVIEW verdict must be
    * newer than. Default: an hour before the reports, i.e. a healthy round.
@@ -569,7 +566,6 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     qualityRounds: 0,
     acceptanceRounds: 0,
     recordResult: "recorded",
-    reclaimed: [],
     checkpointAt: CHECKPOINT_AT,
     ...over,
   };
@@ -581,7 +577,12 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
       findings: [{ severity: "P1", issue: "边界没覆盖真实落点" }],
     }),
     proseOf: (report) => (report.reportId === "rep-empty" ? "" : "建议：先切分模块"),
-    advanceCursor: (_judgeId, reportId) => { state.cursors.push(reportId); },
+    // FAITHFUL: the extension's cursor lives ON the registry row, which now
+    // survives the round (the window is kept, 2026-09-27).
+    advanceCursor: (_judgeId, reportId) => {
+      state.cursors.push(reportId);
+      if (state.entry) state.entry = { ...state.entry, lastReportId: reportId };
+    },
     pendingAudit: () => state.pending,
     // FAITHFUL: the extension's dep really deletes the entry. A fake that only
     // records the call would let the engine keep seeing a pending audit that
@@ -608,17 +609,6 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
       state.acceptanceRounds += 1;
       return state.recordResult;
     },
-    // FAITHFUL, and this one had to be learned the hard way (2026-09-21): the
-    // extension's reclaim goes through `judge_close`, which DELETES the
-    // registry row. A fake that only recorded the call left the entry — and
-    // its cursor — alive, so the synchronous chain's "did the wait record this
-    // round?" detector kept passing in tests while it read `undefined` in
-    // production and fail-closed three PASSed plan audits in a row.
-    reclaimJudgePane: async (_root, judgeId) => {
-      state.reclaimed.push(judgeId);
-      state.entry = undefined;
-      return { ok: true, hadPane: true, terminated: true };
-    },
   };
   return { state, deps };
 }
@@ -637,10 +627,9 @@ test("settle/review: the round is recorded and its cursor consumed exactly once"
 
   // THE SAME REPORT, A SECOND PATH (the wait and the settle sweep both close
   // rounds). The cursor the first one wrote is what makes this a no-op — and
-  // the row carrying it is re-registered here because recording the round took
-  // the old one with the pane (2026-09-21); the next dispatch of this role
-  // re-registers the same judge id.
-  state.entry = { judgeId: "j-1", openerId: "o-1", role: "reviewer", roundSeq: 2, lastReportId: "rep-2" };
+  // it is still on the row, because recording a round no longer takes the
+  // judge's window (and its registry row) with it (2026-09-27).
+  assert.equal(state.entry?.lastReportId, "rep-2", "the judge's row outlives its round");
   const second = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
   assert.equal(second.status, "miss");
   assert.equal(second.status === "miss" && second.reason, "already-consumed");
@@ -936,17 +925,9 @@ test("settle: an unknown judge, and a goal-auditor with nothing pending, record 
 interface RunState extends FakeState {
   dispatched: Array<{ role: string; title: string; task: string; streamPath?: string }>;
   remembered: PendingAudit[];
-  closed: string[];
   waitOk: boolean;
   passed: boolean;
   dispatchOk: boolean;
-  /**
-   * What the reclaim reports back (t9d). `undefined` is the clean case: the
-   * pane was closed and confirmed gone, which the policy expects to be silent.
-   * Set it to make the reclaim half-done, or throw.
-   */
-  closeOutcome?: JudgePaneReclaimOutcome | undefined;
-  closeThrows?: boolean;
   /** What the kind can rebuild from its RECORD when the wait did the recording. */
   recordedRefusal: string | undefined;
   /** Did the registry hand back an addressable judge id? */
@@ -959,7 +940,6 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
     ...base.state,
     dispatched: [],
     remembered: [],
-    closed: [],
     waitOk: true,
     passed: true,
     dispatchOk: true,
@@ -975,13 +955,9 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
     readRoundRecords: () => state.records,
     pendingAudit: () => state.pending,
     forgetPending: (root) => { state.forgotten.push(root); state.pending = undefined; },
-    advanceCursor: (_judgeId, reportId) => { state.cursors.push(reportId); },
-    // Same reclaim as the settle fake, re-bound to THIS state object (the
-    // spread above cloned the settle fake's copy).
-    reclaimJudgePane: async (_root, judgeId) => {
-      state.reclaimed.push(judgeId);
-      state.entry = undefined;
-      return { ok: true, hadPane: true, terminated: true };
+    advanceCursor: (_judgeId, reportId) => {
+      state.cursors.push(reportId);
+      if (state.entry) state.entry = { ...state.entry, lastReportId: reportId };
     },
     // The RECORD is the evidence, content-bound exactly as the extension
     // binds it: a goal to its draft, a plan to its hash.
@@ -1007,11 +983,6 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
     },
     awaitRoundEnd: async () =>
       state.waitOk ? { ok: true, detail: "" } : { ok: false, detail: "pane 已消失" },
-    closeJudge: async (_root, role) => {
-      state.closed.push(role);
-      if (state.closeThrows) throw new Error("tmux 不见了");
-      return state.closeOutcome ?? { ok: true, hadPane: true, terminated: true };
-    },
     auditPassed: () => state.passed,
     recordedRefusal: () => state.recordedRefusal,
     verdictLabel: () => "FAIL",
@@ -1019,7 +990,7 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
   return { state, deps };
 }
 
-test("run/goal: dispatch → remember → wait → record → pass, and the pane is reclaimed", async () => {
+test("run/goal: dispatch → remember → wait → record → pass, and the window is KEPT", async () => {
   const { state, deps } = makeRunDeps({
     entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
     records: [childReport("rep-2", { round: 2, verdict: "READY" })],
@@ -1037,7 +1008,11 @@ test("run/goal: dispatch → remember → wait → record → pass, and the pane
   assert.match(state.dispatched[0]!.title, /^goal-auditor-\d{6}$/);
   assert.equal(state.dispatched[0]!.streamPath, "/tmp/goal.jsonl");
   assert.deepEqual(state.goalDrafts, ["# 目标草稿"]);
-  assert.deepEqual(state.closed, ["goal-auditor"], "O-6: whoever dispatched it closes it");
+  // 2026-09-27: the auditor's window outlives its round — the engine has no
+  // close seam at all, and the registry row the next round reuses is intact.
+  assert.equal(state.entry?.judgeId, "j-1", "the judge's row (and window) survives the recorded round");
+  assert.equal(state.entry?.lastReportId, "rep-2", "…with its cursor on this round's report");
+  assert.equal("closeJudge" in deps, false, "no close seam exists for the engine to call");
 });
 
 test("run/plan: a FAIL comes back as the refusal text, not as a passed audit", async () => {
@@ -1055,7 +1030,7 @@ test("run/plan: a FAIL comes back as the refusal text, not as a passed audit", a
   assert.equal(outcome.ok, false);
   assert.match(outcome.ok === false ? outcome.text : "", /审计\*\*没过\*\*/);
   assert.match(state.dispatched[0]!.title, /^plan-auditor-/, "the display label still tells the two apart");
-  assert.deepEqual(state.closed, ["goal-auditor"]);
+  assert.equal(state.entry?.judgeId, "j-1", "a FAILED audit keeps its window too");
 });
 
 // A REFUSAL MUST SAY WHAT TO FIX (reviewer P1). Under observer-records the
@@ -1087,11 +1062,8 @@ test("run/plan: a refusal recorded BY THE WAIT still carries its findings", asyn
   assert.doesNotMatch(text, /^审计记录：FAIL$/, "the bare label is the LAST resort, not the first");
 });
 
-// The pane is open from the accepted dispatch onward, so every exit past it
-// must reclaim it — including the one that says the registry cannot address
-// what was just opened (reviewer P2).
-test("run: an unaddressable judge still gets its pane reclaimed", async () => {
-  const { state, deps } = makeRunDeps({ addressable: false });
+test("run: an unaddressable judge fails closed", async () => {
+  const { deps } = makeRunDeps({ addressable: false });
   const outcome = await runAuditRound(deps, {
     spec: GOAL_AUDIT_SPEC,
     root: ROOT,
@@ -1100,7 +1072,6 @@ test("run: an unaddressable judge still gets its pane reclaimed", async () => {
   });
   assert.equal(outcome.ok, false);
   assert.match(outcome.ok === false ? outcome.text : "", /登记表里找不到它/);
-  assert.deepEqual(state.closed, ["goal-auditor"], "a dispatched pane is never leaked");
 });
 
 
@@ -1129,7 +1100,6 @@ test("run: a round the WAIT already recorded still passes (observer-records)", a
   assert.deepEqual(outcome, { ok: true }, "an already-settled round is the normal path, not a stale one");
   assert.deepEqual(state.goalDrafts, ["# 目标草稿"], "recorded exactly once, by the wait");
   assert.deepEqual(state.cursors, ["rep-2"], "…and consumed exactly once");
-  assert.deepEqual(state.closed, ["goal-auditor"]);
   // AND IT IS NOT DETECTED BY ASKING settleAuditRound AGAIN. A successful
   // record CONSUMES the pending entry, and the pending entry is what picks the
   // kind — so a second settle comes back `unknown`, indistinguishable from
@@ -1143,46 +1113,44 @@ test("run: a round the WAIT already recorded still passes (observer-records)", a
   );
 });
 
-// THE SAME EDGE, AFTER THE PANE STARTED DYING WITH ITS ROUND (2026-09-21).
-// Recording a round now frees the judge's pane, and that close DELETES the
-// registry row — so the cursor the detector above reads is gone, and a round
-// the wait just recorded looks to the chain like a round nobody recorded.
-// Measured in prime: three plan audits PASSed (state + audit log) and each one
-// came back as a fail-closed notice, with no approval dialog and no way to
-// converge; a goal audit's findings were swallowed the same way.
-async function runWithFaithfulReclaim(spec: AuditRoundSpec, pending: PendingAudit) {
+// THE SAME EDGE WITH THE REGISTRY ROW GONE (2026-09-21). The gate no longer
+// closes a judge at round end (2026-09-27), but the row can still vanish while
+// the wait runs — the user closes the window, a `fresh` dispatch replaces it —
+// and then the cursor the detector above reads is gone. Measured in prime when
+// the round-end reclaim did exactly that: three plan audits PASSed (state +
+// audit log) and each came back as a fail-closed notice. The RECORD is the
+// evidence that survives.
+async function runWithRowDropped(spec: AuditRoundSpec, pending: PendingAudit) {
   const { state, deps } = makeRunDeps({
     entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
     records: [childReport("rep-2", { round: 2, verdict: "READY" })],
   });
-  // Exactly what production does: judge_wait settles the round, and the
-  // record's own reclaim then drops the registry row.
+  // judge_wait settles the round, then the registry row disappears.
   deps.awaitRoundEnd = async () => {
     await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+    state.entry = undefined;
     return { ok: true, detail: "" };
   };
   const outcome = await runAuditRound(deps, { spec, root: ROOT, task: "审计", pending });
   return { state, outcome };
 }
 
-test("run/goal: the reclaim deletes the registry row, and the round STILL closes", async () => {
-  const { state, outcome } = await runWithFaithfulReclaim(
+test("run/goal: the registry row vanished during the wait, and the round STILL closes", async () => {
+  const { state, outcome } = await runWithRowDropped(
     GOAL_AUDIT_SPEC,
     { kind: "goal", draft: "# 目标草稿", startedAt: NOW },
   );
   assert.deepEqual(outcome, { ok: true }, "a recorded audit must reach the user, not a fail-closed notice");
-  assert.deepEqual(state.reclaimed, ["j-1"], "…and the pane was still freed at round end");
-  assert.equal(state.entry, undefined, "…leaving no registry row to read a cursor from");
+  assert.equal(state.entry, undefined, "…with no registry row to read a cursor from");
   assert.deepEqual(state.goalDrafts, ["# 目标草稿"], "recorded exactly once, by the wait");
 });
 
-test("run/plan: the reclaim deletes the registry row, and the round STILL closes", async () => {
-  const { state, outcome } = await runWithFaithfulReclaim(
+test("run/plan: the registry row vanished during the wait, and the round STILL closes", async () => {
+  const { state, outcome } = await runWithRowDropped(
     PLAN_AUDIT_SPEC,
     { kind: "plan", hash: "h-1", planText: "# plan", startedAt: NOW },
   );
   assert.deepEqual(outcome, { ok: true });
-  assert.deepEqual(state.reclaimed, ["j-1"]);
   assert.equal(state.planRecords.length, 1, "recorded exactly once, by the wait");
 });
 
@@ -1208,7 +1176,6 @@ test("run: a consumed pending with an unmoved cursor is NOT treated as recorded"
   assert.equal(outcome.ok, false, "no record landed, so the audit did not happen");
   assert.deepEqual(state.goalDrafts, []);
   assert.deepEqual(state.cursors, []);
-  assert.deepEqual(state.closed, ["goal-auditor"]);
 });
 
 // …AND THE MIRROR IMAGE. A cursor that moved while the pending entry is still
@@ -1235,7 +1202,6 @@ test("run: an advanced cursor with an ARMED pending is NOT treated as recorded",
   assert.equal(outcome.ok, false, "an armed pending means the verdict was never recorded");
   assert.match(outcome.ok === false ? outcome.text : "", /什么都没有记录/);
   assert.deepEqual(state.goalDrafts, [], "and settling again cannot record it either — the report is consumed");
-  assert.deepEqual(state.closed, ["goal-auditor"]);
 });
 
 
@@ -1260,7 +1226,7 @@ test("run: a round whose newest report belongs to ANOTHER round still fails clos
 });
 
 
-test("run: a wait that never saw this round's report records NOTHING and still closes", async () => {
+test("run: a wait that never saw this round's report records NOTHING and keeps the window", async () => {
   const { state, deps } = makeRunDeps({
     entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
     records: [childReport("rep-2", { round: 2, verdict: "READY" })],
@@ -1276,7 +1242,7 @@ test("run: a wait that never saw this round's report records NOTHING and still c
   assert.match(outcome.ok === false ? outcome.text : "", /pane 已消失/);
   assert.deepEqual(state.goalDrafts, [], "fail-closed: nothing recorded");
   assert.deepEqual(state.cursors, []);
-  assert.deepEqual(state.closed, ["goal-auditor"], "the finally-close runs on the failure path too");
+  assert.equal(state.entry?.judgeId, "j-1", "a failed wait leaves the window for declare_done to reclaim");
 });
 
 test("run: a refused dispatch never puts a draft on record", async () => {
@@ -1290,94 +1256,16 @@ test("run: a refused dispatch never puts a draft on record", async () => {
   assert.equal(outcome.ok, false);
   assert.match(outcome.ok === false ? outcome.text : "", /没能启动/);
   assert.deepEqual(state.remembered, [], "a verdict must never bind to text no auditor read");
-  assert.deepEqual(state.closed, [], "nothing was opened, so nothing is closed");
 });
 
-/*
- * ───── THE RECLAIM IS THE POLICY'S ONE EXECUTION POINT (t9d, 2026-09-06) ────
- *
- * `lib/judge-pane-policy.ts` says a pane the GATE opened dies with the round
- * that opened it, and it says so in exactly one place that acts: here. These
- * pin both halves — that the reclaim happens, and that a reclaim which did NOT
- * do what the policy promises stops being silent. The reply used to be awaited
- * and discarded, which is where a leftover pane went to die: `judge_close`
- * drops the registry row even when the kill fails, so once that text is gone
- * nothing downstream can find the pane at all.
- */
-
-/** Run one passing goal round with the reclaim outcome under test. */
-async function runWithReclaim(over: Partial<RunState>) {
-  const { state, deps } = makeRunDeps({
-    entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
-    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
-    ...over,
-  });
-  const outcome = await runAuditRound(deps, {
-    spec: GOAL_AUDIT_SPEC,
-    root: ROOT,
-    task: "审计这份草稿",
-    pending: { kind: "goal", draft: "# 目标草稿", startedAt: NOW },
-  });
-  const reclaimLines = state.auditLog.filter((l) => l.includes("judge pane 回收"));
-  return { state, outcome, reclaimLines };
-}
-
-test("reclaim: the policy decides it, and a clean reclaim stays out of the log", async () => {
-  // The rule is not inlined here — it is asked for. A policy that stopped
-  // saying "round-end" would stop this close from happening at all.
-  assert.equal(JUDGE_PANE_RECLAIM.atRoundEnd, true);
-  const { state, outcome, reclaimLines } = await runWithReclaim({});
-  assert.deepEqual(outcome, { ok: true });
-  assert.deepEqual(state.closed, ["goal-auditor"]);
-  assert.deepEqual(reclaimLines, [], "a reclaim that did what it promised is not news");
-});
-
-test("reclaim: a kill that failed is written down — the registry row is already gone", async () => {
-  const { outcome, reclaimLines } = await runWithReclaim({
-    closeOutcome: { ok: true, hadPane: true, terminated: false, note: "关 pane 失败（no such pane），登记照样清除" },
-  });
-  assert.deepEqual(outcome, { ok: true }, "the round's own answer is unaffected by its cleanup");
-  assert.equal(reclaimLines.length, 1);
-  assert.match(reclaimLines[0]!, /回收未确认/);
-  assert.match(reclaimLines[0]!, /登记照样清除/, "the closing tool's own words survive to the log");
-});
-
-test("reclaim: a pane that was never registered is silent — there is nothing to leak", async () => {
-  const { reclaimLines } = await runWithReclaim({
-    closeOutcome: { ok: true, hadPane: false, terminated: false, note: "没有登记 pane，无需动手" },
-  });
-  assert.deepEqual(reclaimLines, []);
-});
-
-test("reclaim: a close that failed outright is written down", async () => {
-  const { reclaimLines } = await runWithReclaim({
-    closeOutcome: { ok: false, hadPane: true, terminated: false, note: "judge_close 被拒" },
-  });
-  assert.equal(reclaimLines.length, 1);
-  assert.match(reclaimLines[0]!, /回收失败/);
-});
-
-test("reclaim: a throwing close neither loses the round nor goes unrecorded", async () => {
-  // A cleanup that raises must not replace the round's real answer with its
-  // own exception — and must not be swallowed into silence either.
-  const { state, outcome, reclaimLines } = await runWithReclaim({ closeThrows: true });
-  assert.deepEqual(outcome, { ok: true });
-  assert.deepEqual(state.closed, ["goal-auditor"], "the reclaim was attempted");
-  assert.equal(reclaimLines.length, 1);
-  assert.match(reclaimLines[0]!, /回收失败/);
-  assert.match(reclaimLines[0]!, /tmux 不见了/);
-});
-
-test("reclaim: a FAILED round reclaims and logs exactly like a passing one", async () => {
-  // The reclaim lives in `finally` for this reason; a refusal path that
-  // skipped it would leak the auditor precisely when something went wrong.
-  const { state, outcome, reclaimLines } = await runWithReclaim({
-    passed: false,
-    recordedRefusal: "P0：草稿没说新代码落在哪",
-    closeOutcome: { ok: true, hadPane: true, terminated: false, note: "关 pane 失败" },
-  });
-  assert.equal(outcome.ok, false);
-  assert.deepEqual(state.closed, ["goal-auditor"]);
-  assert.equal(reclaimLines.length, 1);
+test("settle: recording a round leaves the judge's row (and window) for the next round to reuse", async () => {
+  // 2026-09-27: round end frees nothing. The next dispatch of the role finds
+  // the same judge id alive and takes its round through the channel.
+  const { state, deps } = makeSettleDeps({ records: [childReport("rep-2", { round: 2, verdict: "READY" })] });
+  const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(settled.status, "recorded");
+  assert.equal(state.entry?.judgeId, "j-1");
+  assert.equal("reclaimJudgePane" in deps, false, "the conclusion half has no reclaim seam");
+  assert.deepEqual(state.auditLog.filter((l) => l.includes("回收")), [], "nothing was reclaimed");
 });
 

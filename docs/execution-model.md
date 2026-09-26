@@ -80,9 +80,13 @@ opener 凭它记录结论；
 
 ## 生命周期与 liveness
 
-- **完成 = `judge_conclude` 落 channel report**。pane 是承载体、轮是任务：verdict 为
-  BLOCKED（还有下一轮）时 pane 保留复用；终结（READY、opener 放弃、换 review 对象）
-  时门禁回收 pane，transcript 与裁决记录保留。
+- **完成 = `judge_conclude` 落 channel report**。pane 是承载体、轮是任务。**交卷后窗口保留**
+  （2026-09-27 用户决定，取代 2026-09-21 的「一轮记录即释放 pane」）：无论 READY 还是 BLOCKED、
+  无论 agent 派的 review 还是门禁自派的 goal/plan 审计，进程空闲着留在本会话的专属 tmux
+  session 里供用户查看；下一轮同一 role 走「活 pane 走通道」复用（interrupt + 新 roundSeq），
+  门禁自派审计不再 `fresh`。唯一回收点是 `declare_done` 的级联 + `closeOwnSession`（进程退出走同一
+  个 session 关闭）。取消矩阵杀被取消的兄弟 pane 不变——那是中止，不是完成。worker 同理
+  （只在 `worker_close` 或 `declare_done` 时关）。
 - **存活由 pane 名单判定**：opener 的运行期检查一次拉取本 window 的 pane 列表
   （`listJudgePanes`），记录在但名单里没有 ⇒ pane 死亡；名单读不出 ⇒ 按活着处理
   （缺信息永不结束等待，fail-closed）。心跳（channel state 记录）是第二信号。
@@ -194,7 +198,7 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 | 谁开的 | `judge_submit`（意图入口；生命周期归门禁） | `orchestrator_spawn`（唯一入口） |
 | 「有事了」 | 新 channel report 落盘（门禁以标准报告唤醒） | **`orchestrator_wait` 的回执**（它自己去读每条通道，把结果推给你） |
 | 状态从哪来 | pane 存活（window 名单）+ channel 心跳/state/report 记录 | 八态结构化真值（权威清单：`lib/orchestrator-child-state.ts` 的 `CHILD_STATES`）：`working` / `waiting-input` / **`waiting-judge`**（在等门禁自己派的 reviewer/precommit，附已等秒数，不叫醒项目经理）/ `idle` / `done` / `mode-changed`（它改了门禁模式）由子会话自报（心跳是扩展自己的定时器，与 agent 是否活跃无关），`dead`（pane 消失）与 `stalled`（心跳超时 ⇒ 扩展真的不在了）由编排侧从外面判 |
-| 正常终态 | verdict 落 channel report（pane 按终结规则回收复用） | `declare_done` 之后**仍然活着** |
+| 正常终态 | verdict 落 channel report（窗口保留、下轮复用，`declare_done` 回收） | `declare_done` 之后**仍然活着**；`orchestrator_close` 只结算（写 `closedAt`、不再监督、不挡 PM 的 `declare_done`），不杀窗口，窗口随 PM 的 `declare_done` 回收 |
 | 异常终态 | pane 消失但结论未落盘（本轮不算结束，`judge_recover` 同 id 续接） | pane 消失（`dead`）或心跳停摆（`stalled`），用 `orchestrator_recover` 复活 |
 | 等待 | `judge_wait`（消息驱动，确实没活可做时才调；没在等时新 report 落盘仍以标准报告唤醒） | `orchestrator_wait` |
 
