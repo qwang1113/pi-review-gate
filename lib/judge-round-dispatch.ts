@@ -457,10 +457,14 @@ export function createJudgeRoundDispatch(
         },
         // EARN the receipt for a judge too: a judge that never boots leaves its
         // opener waiting forever, which is the one silence nobody can break.
-        verify: () => verifyJudgeBoot(
-          { channelIO: () => channelIO, sleep: (ms: number) => new Promise((r) => setTimeout(r, ms)) },
-          { channelPath: judgeChannelPath, baselineRecordCount: baselineRecords },
-        ),
+        // An unregistered judge is not waited on to boot: the dispatch closes it
+        // right below, before it can get anywhere near a conclusion.
+        verify: () => registrationOnFile
+          ? verifyJudgeBoot(
+            { channelIO: () => channelIO, sleep: (ms: number) => new Promise((r) => setTimeout(r, ms)) },
+            { channelPath: judgeChannelPath, baselineRecordCount: baselineRecords },
+          )
+          : Promise.resolve({ ok: false, detail: "登记没写进登记表" }),
       });
       if (!registrationOnFile) {
         // A CRITICAL WRITE THAT DID NOT LAND ENDS THE DISPATCH: the pane is

@@ -354,7 +354,14 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
         host.log(`review-gate[judge-registry] ${root}/.pi/${HIERARCHY_FILENAME} 没写成（锁被占用或写盘失败）—— 本次改动留在内存里，下次写盘再合并`);
         continue;
       }
-      diskBase.set(root, merged);
+      // The audit slot is the one value NOT mirrored into memory below, so its
+      // base is what THIS session holds: a peer's audit on file is then "not
+      // changed by me" and survives the next unrelated persist (reviewer P1).
+      diskBase.set(root, {
+        judges: merged.judges,
+        ...(merged.modelHealth === undefined ? {} : { modelHealth: merged.modelHealth }),
+        ...(mine.audit === undefined ? {} : { audit: mine.audit }),
+      });
       // The table now mirrors the file for this repo: peers' entries arrive,
       // entries a peer removed leave. The pending audit is NOT adopted — it is
       // one slot per repo, and a peer's in-flight audit is not this session's.
@@ -411,6 +418,10 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
       const base = diskBase.get(root) ?? { judges: {} };
       for (const [id, e] of Object.entries(snap.judges)) {
         if (judgeHierarchy[id]) continue;
+        // On file before AND gone from memory = a removal of ours that has
+        // not reached the file yet (the lock was busy). Re-adopting it would
+        // erase the tombstone and the removal would never be written.
+        if (base.judges[id]) continue;
         judgeHierarchy[id] = e;
         // Adopted as-is from the file, so it is not a change of ours.
         base.judges = { ...base.judges, [id]: e };
