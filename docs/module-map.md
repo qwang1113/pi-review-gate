@@ -375,8 +375,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   叫醒项目经理），判据全部是结构化真值——纯函数，
   用一串通道记录就能单测）、
 
-  `orchestrator-wait.ts`（「有事发生」是什么，以及那份五块回执怎么装）、
+  `orchestrator-wait.ts`（「有事发生」是什么，以及那份五块回执怎么装 —— 纯函数，不读通道）、
   `orchestrator-registry.ts`（编排只能操作门禁替它创建的东西）、
+  `orchestrator-registry-normalize.ts`（sidecar 读回的编排运行态在被信任之前的唯一校验处）、
   `session-inheritance.ts`（后继者继承什么：前任 pane / 交接文档 / 前任 transcript / **前任 session id**——最后一项是它接管 worktree 占用的继任凭据）、
   `session-handoff.ts` + `session-handoff-tools.ts`（唯一的交接阈值（70%）与唯一的 `session_handoff()` 工具，四类会话共用）、
   `orchestration-id.ts`（编排的稳定地址，接力换人后子会话无感）。
@@ -715,7 +716,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `orchestrator-registry-normalize.ts` | sidecar 里那份 runtime 的**唯一净化处**（`normalizeRuntime`）：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；child 的 pane / window 坐标 / worktree / stateVariant 按形状净化，畸形 child 丢弃而合法 child 保留（fail-closed） |
 | `orchestrator-worktree.ts` | **一个写者一个 checkout**（2026-09-10，用户决定）：纯逻辑模块——路径/分支的**派生与反推**（`childWorktreePath` / `repoRootOfWorktree`，后者反推不出来就**拒绝**而不是猜）、创建 argv（`-b <branch> <path> HEAD`，钉在 HEAD 上而不是分支名）、三种结算（`keep` / `merge`（先 `add -A` + `commit` 提交遗留改动，再 `--no-commit --no-ff` 合入并 staged，**最后回收 checkout 目录**——2026-09-15 用户决定：四个结算完的子会话就会在仓库旁边留下四个死目录，而分支留着（它是 `merge --abort` 的唯一回退锚，且不占磁盘）/ `discard`（目录 + 分支，对已回收的 checkout 幂等））的**完整计划**（`planSettlement`，冲突路径在跑之前就定好，且冲突时序列在 merge 那一步就断了、**绝不会**走到回收）、以及未结算 checkout 的识别（`findOrphanWorktrees`：pane 列表读不到就**不下断言**）。git 调用在 `lib/orchestrator-worktree-host.ts` 侧执行 |
 | `orchestrator-session-tools.ts` | 注册编排会话工具（spawn / instruct / wait / close，并转注册 answer 与 recover/attach）——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，wait / close 的实现在 `orchestrator-wait-tool.ts` / `orchestrator-close-tool.ts`（2026-09-27 拆出），answer 与 recover/attach 在各自的 `*-tools.ts`；交接工具从 2026-09-14 起**不在这里**（全会话共用的 `session_handoff`，见 `session-handoff-tools.ts`） |
-| `orchestrator-wait-tool.ts` | `orchestrator_wait` 的实现 `doWait`：每次探针读遍通道、消费监督记忆、按请求判定待答问题，组装四块回执（含退出阻碍 `exitBlockers` 与继承简报）；纯回执规则在 `orchestrator-wait.ts` |
+| `orchestrator-wait-tool.ts` | **`orchestrator_wait` 这个工具的执行体** `doWait`（有 IO）：每次探针读遍通道、消费监督记忆、按请求判定待答问题，把观察喂给 `orchestrator-wait.ts` 的纯判据与回执装配，再补上只有它拿得到的两块（退出阻碍 `exitBlockers` 与继承简报）。区分口诀：`orchestrator-wait.ts` 回答「算不算有事、回执长什么样」，本模块负责「去读、去等、去拼」 |
 | `orchestrator-close-tool.ts` | `orchestrator_close` 的实现 `doClose`：关子会话的 window、结算其隔离 checkout（keep / merge / discard，已关闭子会话可只结算），git 动作经 `deps.settleWorktree` 注入 |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块；`relayedPane` 判定交接后的子会话搬到了哪个 pane（登记 pane 已死、自报 pane 活着），由 `orchestrator-registry.ts` 的 `repointChildPanes` 写回登记表 |
 | `orchestrator-takeover.ts` | 「仓库里有别人的 plan」时的两个意图：**接管**（从盘上发现本仓库的候选 orchestration id —— sidecar 记录优先、`rg-channels/` 目录名兜底，再判定这个 id 能否被本会话采用）与**归档**（归档文件名、归档载荷、确认框文案）。两条拒绝路径（`orchestrator_plan` 的 write/submit、`orchestrator_spawn`）与两个入口（`orchestrator_attach`、`orchestrator_plan action:archive`）共用同一份判定；纯函数 + 注入式读盘 |
@@ -724,7 +725,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `orchestrator-tools.ts` | `orchestrator_plan` 工具的注册（schema + 说明），不碰 tmux |
 | `orchestrator-plan-action.ts` | `orchestrator_plan` 各 action（read / write / submit / set-status / add- & resolve-decision / archive）的状态机：身份守卫、批准平移/撤销、审计+用户批准、归档 |
 | `orchestrator-plan-messages.ts` | plan 批准框的文案：标题、批准行、transcript 全文回显与对话框正文 |
-| `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据），以及那份五块回执的装配 |
+| `orchestrator-wait.ts` | **纯规则，无 IO**：「有事发生」对编排子会话意味着什么（`evaluateChildWait` 等待判据、`dueRequests` 重响退避、超时夹取），以及回执的装配（`buildWaitReceipt`）；谁去读通道、谁调它们，见 `orchestrator-wait-tool.ts` |
 | `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、持有本编排唯一的通道 IO 与监督记忆；`resolveTaskRepo` 默认实现用 git 的 `--show-toplevel` 把任务声明的 repo 解析成仓库根（子目录/符号链接路径都归一） |
 | `parallel-review.ts` | 审查契约：一轮一个 reviewer、判不可变的 `baseline..HEAD`，以及交给它的任务文本。2026-09-10 起任务文本里还带 **CHANGE INDEX**（`formatChangeIndex`）：逐文件 numstat + 门禁预先分好的读取批次（`planChangeBatches` 贪心装箱，大文件单独成批）—— 实测 reviewer 的 92.5% 往返只发 1 个工具调用、单轮 17–59 次往返，而工具执行只占那一轮的 6%，代价在**消息条数**不在读多少 |
 | `quality-round.ts` | **质量轮的判定半边**（2026-09-15 用户要求；2026-09-16 改为与功能轮**同一轮并行**）：`qualityRoundSkip` 回答「这轮有代码可审吗」（**排除法**——只列文档/数据/锁文件扩展名，未知即当代码，因为门禁装在 Node/前端/Rust/Shell/Python/midway 各类仓库上）；`qualityStandingFor` 回答「这个 HEAD 上有没有已成立的质量结论」（质量 READY **绑当前 HEAD**；跳过记录（`skipped`）只在质量环节此刻关着时或本轮无代码时成立 —— 开关一打开它就不再是结论（2026-09-22），其余一律 fail-closed）；`decideQualityHold` / `qualityPrecondition` 回答「功能轮的结论现在能记吗」（结论到位 ⇒ record，本轮质量 judge 还能交卷 ⇒ **扣下**，没人会再回来 ⇒ refuse——与 `unverified-idle` 同一条规矩）；`roundCancelPlan` 是**取消矩阵**的纯表（质量轮非 READY ⇒ 停 reviewer + lane；reviewer 非 READY ⇒ 停质量轮 + lane；lane FAIL ⇒ 只停 reviewer）。`buildQualityAuditTask` 是质量轮的任务书（**不是** `buildReviewPrompt`，那份属于功能轮）。判定表是 `docs/code-quality-rules.md`（唯一实质出处），本模块不复制其中任一条。**路由本身不是本模块的一个函数**：《本轮有没有代码》+《这个 HEAD 有没有已成立的质量结论》两个判定在 `lib/review-chain.ts` 的 `submitForReview` 里组合成三路（跳 / 已有 PASS / 两轮一起派），那里只有接线，判定一个字没重写 |

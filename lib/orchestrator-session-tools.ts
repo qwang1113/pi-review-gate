@@ -39,7 +39,6 @@ import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.
  */
 export type OrchestratorSessionDeps = OrchestratorDeps;
 
-import { readInheritance } from "./session-inheritance.ts";
 import { dispatchInstruct, dispatchSpawn } from "./orchestrator-dispatch.ts";
 import { doWait } from "./orchestrator-wait-tool.ts";
 import { doClose } from "./orchestrator-close-tool.ts";
@@ -189,8 +188,4 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     }),
     execute: guarded((params) => doClose(deps, params)),
   });
-
 }
-
-/** Re-exported for the extension's own child-session directive injection. */
-export { readInheritance };

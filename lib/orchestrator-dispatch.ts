@@ -2,8 +2,9 @@
  * DISPATCH — getting work INTO a child session: `orchestrator_spawn` and
  * `orchestrator_send`.
  *
- * Split from lib/orchestrator-session-tools.ts (which keeps the LIFECYCLE
- * half — wait, close, relay) after this round's fixes pushed that file past
+ * Split from lib/orchestrator-session-tools.ts (which keeps the tool
+ * registration; the LIFECYCLE half — wait, close — later moved on to
+ * lib/orchestrator-wait-tool.ts / lib/orchestrator-close-tool.ts) after this round's fixes pushed that file past
  * the 600-line standard the repository now holds itself to. The seam is a
  * real one rather than a size-driven cut: everything here answers "did the
  * other side actually receive this", which is the question the first real
