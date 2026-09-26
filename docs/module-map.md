@@ -103,8 +103,9 @@
     `lib/orchestrator-plan-action.ts`，批准框文案在 `lib/orchestrator-plan-messages.ts`
     （`orchestrator_notify` 已删除 —— 通知改由门禁自己发，见 `lib/user-notify.ts`）。
   - `lib/orchestrator-session-tools.ts`：`orchestrator_spawn`、
-    `orchestrator_instruct`、`orchestrator_wait`、`orchestrator_close`
-    （并从这里转注册下面两个模块，所以「有哪些编排工具」
+    `orchestrator_instruct`、`orchestrator_wait`、`orchestrator_close` 的注册
+    （wait / close 的实现在 `lib/orchestrator-wait-tool.ts` / `lib/orchestrator-close-tool.ts`；
+    并从这里转注册下面两个模块，所以「有哪些编排工具」
     只有一个地方回答）。交接工具 `session_handoff` **不在**这里：它属于每一类
     会话，注册在扩展侧（`lib/session-handoff-tools.ts`）。
   - `lib/orchestrator-answer-tools.ts`：`orchestrator_answer`（裁决规则在 `lib/orchestrator-answer-rules.ts`）。
@@ -402,8 +403,10 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   未授权拦，授权走 `request_tmux_access`）。
 - **工具与接线**：`orchestrator-tools.ts`（plan 工具注册）、`orchestrator-plan-action.ts`
   （plan 各 action 的实现）、`orchestrator-plan-messages.ts`（plan 批准框文案）、
-  `orchestrator-session-tools.ts`（spawn / instruct / wait / close / handoff 的
+  `orchestrator-session-tools.ts`（spawn / instruct / wait / close 的
   注册，并转注册下面两个模块，所以「有哪些编排工具」只有一个地方回答）、
+  `orchestrator-wait-tool.ts`（wait 的实现与回执的退出阻碍 / 继承块）、
+  `orchestrator-close-tool.ts`（close 的实现与 worktree 结算）、
   `orchestrator-answer-tools.ts`（answer，含约束 8 的仓库外敏感路径检查）、
   `orchestrator-answer-rules.ts`（答案解析与代批 crosscheck / 站点放宽拒绝）、
   `orchestrator-recovery-tools.ts`（recover / attach、孤儿检测）、
@@ -709,7 +712,9 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西（类型、登记表增删查、grants）。sidecar 读回的净化在 `orchestrator-registry-normalize.ts`；`successorRuntime(runtime, fromHandoff)` 是「换了个会话能继承什么」的唯一出处 —— 登记表与 grants 照旧留下；许可只在 `fromHandoff` 为真（前任自己交棒的继任者，判定在 `lib/session-inheritance.ts`）时留下，其余情形全部剥离（写在调用点上的字段清单迟早漏掉新字段）。runtime 还带一个 `ownerSessionId`（2026-09-17）：**哪个会话持有这个编排** —— 它是「reload 后能不能恢复」的唯一依据（`storedRuntimeIsMine`），只有铸出、继承或接管了该地址的会话会写它。child 记录上的 `worktree`（路径 + 分支）由净化模块按路径强度校验：它会被交给 git |
 | `orchestrator-registry-normalize.ts` | sidecar 里那份 runtime 的**唯一净化处**（`normalizeRuntime`）：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；child 的 pane / window 坐标 / worktree / stateVariant 按形状净化，畸形 child 丢弃而合法 child 保留（fail-closed） |
 | `orchestrator-worktree.ts` | **一个写者一个 checkout**（2026-09-10，用户决定）：纯逻辑模块——路径/分支的**派生与反推**（`childWorktreePath` / `repoRootOfWorktree`，后者反推不出来就**拒绝**而不是猜）、创建 argv（`-b <branch> <path> HEAD`，钉在 HEAD 上而不是分支名）、三种结算（`keep` / `merge`（先 `add -A` + `commit` 提交遗留改动，再 `--no-commit --no-ff` 合入并 staged，**最后回收 checkout 目录**——2026-09-15 用户决定：四个结算完的子会话就会在仓库旁边留下四个死目录，而分支留着（它是 `merge --abort` 的唯一回退锚，且不占磁盘）/ `discard`（目录 + 分支，对已回收的 checkout 幂等））的**完整计划**（`planSettlement`，冲突路径在跑之前就定好，且冲突时序列在 merge 那一步就断了、**绝不会**走到回收）、以及未结算 checkout 的识别（`findOrphanWorktrees`：pane 列表读不到就**不下断言**）。git 调用在 `lib/orchestrator-worktree-host.ts` 侧执行 |
-| `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close）并注册编排会话工具——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，answer 与 recover/attach 在各自的 `*-tools.ts`；交接工具从 2026-09-14 起**不在这里**（全会话共用的 `session_handoff`，见 `session-handoff-tools.ts`） |
+| `orchestrator-session-tools.ts` | 注册编排会话工具（spawn / instruct / wait / close，并转注册 answer 与 recover/attach）——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，wait / close 的实现在 `orchestrator-wait-tool.ts` / `orchestrator-close-tool.ts`（2026-09-27 拆出），answer 与 recover/attach 在各自的 `*-tools.ts`；交接工具从 2026-09-14 起**不在这里**（全会话共用的 `session_handoff`，见 `session-handoff-tools.ts`） |
+| `orchestrator-wait-tool.ts` | `orchestrator_wait` 的实现 `doWait`：每次探针读遍通道、消费监督记忆、按请求判定待答问题，组装四块回执（含退出阻碍 `exitBlockers` 与继承简报）；纯回执规则在 `orchestrator-wait.ts` |
+| `orchestrator-close-tool.ts` | `orchestrator_close` 的实现 `doClose`：关子会话的 window、结算其隔离 checkout（keep / merge / discard，已关闭子会话可只结算），git 动作经 `deps.settleWorktree` 注入 |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块；`relayedPane` 判定交接后的子会话搬到了哪个 pane（登记 pane 已死、自报 pane 活着），由 `orchestrator-registry.ts` 的 `repointChildPanes` 写回登记表 |
 | `orchestrator-takeover.ts` | 「仓库里有别人的 plan」时的两个意图：**接管**（从盘上发现本仓库的候选 orchestration id —— sidecar 记录优先、`rg-channels/` 目录名兜底，再判定这个 id 能否被本会话采用）与**归档**（归档文件名、归档载荷、确认框文案）。两条拒绝路径（`orchestrator_plan` 的 write/submit、`orchestrator_spawn`）与两个入口（`orchestrator_attach`、`orchestrator_plan action:archive`）共用同一份判定；纯函数 + 注入式读盘 |
 | `orchestrator-tmux.ts` | **全仓唯一的 tmux runner 契约** `TmuxRunner` / `TmuxRunResult`（各模块注入的都是它；宿主实现只有 `orchestrator-wiring.ts` 的 `runTmux`，扩展里的 `runTmux` 只是绑定声明的薄包装）。仅剩的 tmux 命令构造：开/关 pane（接力）、列 pane，加上 pane 装饰（颜色 `select-pane -P`、标题 `set -p -t <pane> @rg_label <标题>`——`PANE_LABEL_OPTION` 就拼在这里，pi 不写这个命名空间，所以写一次不会被覆盖；以及 window 级 `setw pane-border-*`，一律不带 `-g`）；子会话 env 的剥离（`envCommand` + `GATE_ENV_NAMES`）。门禁**自己那个 session** 的建/关/归属/env/展示名 argv 在 `tmux-session-argv.ts`（2026-09-26 按职责拆出，同样经本模块的安全闸门）。**没有 send-keys，没有 capture-pane，也没有窗口几何/等分**（三列布局的规划/探测/等分连同它们的标识符于 2026-09-25 整块删除，本仓不再出现）。**安全闸门**：`kill-server` 任何情况都拒；首位全局 flag 直接拒；`new-session` / `new-window` / `kill-window` / `kill-session` 只在调用方显式声明了自己可寻址的 session 集合、且 argv 自己的目标就在其中（`<name>` 或 `<name>:@id`，别名同样归一）时放行 |
