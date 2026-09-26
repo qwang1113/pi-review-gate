@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs";
 
 import { normalizeTaskMode } from "./task-mode.ts";
-import { normalizeRuntime } from "./orchestrator-registry.ts";
+import { normalizeRuntime } from "./orchestrator-registry-normalize.ts";
 import { normalizeNotifyHistory } from "./user-notify.ts";
 import { normalizeOrchestrationId } from "./orchestration-id.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";

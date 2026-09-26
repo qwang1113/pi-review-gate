@@ -18,7 +18,6 @@ import {
   noteWorktreeBranch,
   newChildId,
   removeGrant,
-  normalizeRuntime,
   registerChild,
   runningTaskIds,
   successorRuntime,
@@ -26,6 +25,7 @@ import {
   type ChildSession,
   type OrchestratorRuntime,
 } from "../lib/orchestrator-registry.ts";
+import { normalizeRuntime } from "../lib/orchestrator-registry-normalize.ts";
 
 const NOW = "2026-08-29T12:00:00.000Z";
 

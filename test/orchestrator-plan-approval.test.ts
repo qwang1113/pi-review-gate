@@ -32,7 +32,7 @@ import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-
 import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
 import { buildPlanConfirmMessage } from "../lib/orchestrator-plan-messages.ts";
 import { effectiveTaskStation } from "../lib/repo-pr-policy.ts";
-import { normalizeRuntime } from "../lib/orchestrator-registry.ts";
+import { normalizeRuntime } from "../lib/orchestrator-registry-normalize.ts";
 
 
 /** The plan shape the round-4 run actually used: one file per task. */
