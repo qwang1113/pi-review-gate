@@ -38,6 +38,7 @@ import {
   pinOwnSession,
   sanitizeScopeRecord,
   scopeNameOwnedBy,
+  sessionNameBelongsTo,
   type TmuxScope,
   type TmuxScopeRecord,
 } from "../lib/session-tmux-scope.ts";
@@ -582,4 +583,60 @@ test("a name belongs to an owner only when that owner derives it — from any re
   const cut = deriveSessionName("/r/abcdefghijklmnopqrstuvw-xyz", SESSION_ID)!;
   assert.match(cut, /w--/);
   assert.equal(scopeNameOwnedBy(cut, SESSION_ID), true);
+  // The readable shape (s1): the role rides in the middle, the tail still binds.
+  assert.equal(scopeNameOwnedBy(deriveSessionName("/r/abcdefghijklmnopqrstuvwxyz", SESSION_ID, "orchestrator")!, SESSION_ID), true);
+  assert.equal(scopeNameOwnedBy(deriveSessionName("/repo", SESSION_ID, "pm")!, SUCCESSOR_ID), false);
+});
+
+test("readable session names: rg-<repo>-<role>-<tail>, capped, still a legal own-session name", () => {
+  assert.equal(deriveSessionName("/w/pi-review-gate", SESSION_ID, "pm"), "rg-pi-review-gate-pm-04b8a270ed");
+  assert.equal(deriveSessionName("/w/pi-review-gate", SESSION_ID, "s1"), "rg-pi-review-gate-s1-04b8a270ed");
+  assert.equal(deriveSessionName("/w/pi-review-gate", SESSION_ID, ""), "rg-pi-review-gate-04b8a270ed", "no role ⇒ the older shape");
+  assert.equal(deriveSessionName("/w/r", SESSION_ID, "A.B:c#{x}"), "rg-r-a-b-c-x-04b8a270ed", "tmux separators never survive");
+  const longest = deriveSessionName("/w/abcdefghijklmnopqrstuvwxyz", SESSION_ID, "abcdefghijklmnopq")!;
+  assert.equal(isOwnSessionName(longest), true, longest);
+});
+
+test("sessionNameBelongsTo: this repo and this id, either shape — never another's", () => {
+  assert.equal(sessionNameBelongsTo("/repo", SESSION_ID, NAME), true, "the older shape");
+  assert.equal(sessionNameBelongsTo("/repo", SESSION_ID, deriveSessionName("/repo", SESSION_ID, "pm")!), true);
+  assert.equal(sessionNameBelongsTo("/repo", SESSION_ID, deriveSessionName("/repo", SUCCESSOR_ID, "pm")!), false, "another tail");
+  assert.equal(sessionNameBelongsTo("/repo", SESSION_ID, deriveSessionName("/other", SESSION_ID, "pm")!), false, "another repo");
+  assert.equal(sessionNameBelongsTo("/repo", SESSION_ID, `rg-repo--${NAME.split("-").pop()}`), false, "an empty role");
+});
+
+test("a role change mid-session keeps the session the sidecar recorded; a foreign record is ignored", () => {
+  let role = "self";
+  const scope = fakeScope();
+  scope.role = () => role;
+  const server = fakeServer();
+  const first = openScopeWindow(server.run, scope, { cwd: "/repo" });
+  assert.equal(first.ok && first.sessionName, deriveSessionName("/repo", SESSION_ID, "self"));
+  role = "pm"; // loop → project manager
+  const second = openScopeWindow(server.run, scope, { cwd: "/repo" });
+  assert.equal(second.ok && second.sessionName, deriveSessionName("/repo", SESSION_ID, "self"), "same session, no second one");
+  assert.equal(server.sessions.size, 1);
+  const closed = closeOwnSession(server.run, scope);
+  assert.equal(closed.ok && closed.killed, true, "and it is still ours to close");
+
+  // A record naming ANOTHER session's readable name is not ours to act on.
+  const liar = fakeScope();
+  liar.role = () => "pm";
+  const foreign = deriveSessionName("/repo", SUCCESSOR_ID, "pm")!;
+  liar.record = { name: foreign, owner: SESSION_ID, createdAt: "x" };
+  const other = fakeServer({ existing: { name: foreign, owner: SESSION_ID } });
+  const refused = closeOwnSession(other.run, liar);
+  assert.equal(refused.ok && refused.killed, false);
+  assert.equal(other.sessions.has(foreign), true);
+});
+
+test("an old-name session created by the previous build is still recognised and closed by its owner", () => {
+  const scope = fakeScope();
+  scope.role = () => "pm";
+  scope.record = { name: NAME, owner: SESSION_ID, createdAt: "x" };
+  const server = fakeServer({ existing: { name: NAME, owner: SESSION_ID } });
+  const reused = openScopeWindow(server.run, scope, { cwd: "/repo" });
+  assert.equal(reused.ok && reused.sessionName, NAME, "reused, not orphaned beside a new one");
+  const probe = createOwnershipProbe(scope, server.run);
+  assert.equal(probe(NAME), true);
 });

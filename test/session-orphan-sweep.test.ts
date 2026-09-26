@@ -126,6 +126,21 @@ test("any live or missing fact keeps the session", () => {
   }
 });
 
+test("readable names (rg-<repo>-<role>-<tail>) and the older shape are swept by the same rule", () => {
+  // s1, 2026-09-27: the role segment is new; a session the older build named
+  // must neither be killed while its owner lives nor escape once it is dead.
+  const oldLive = deriveSessionName("/repo/x", LIVE)!;
+  const newDead = deriveSessionName("/repo/other-repo", DEAD, "pm")!;
+  assert.match(newDead, /^rg-other-repo-pm-/);
+  const tmux = fakeTmux({
+    sessions: { [oldLive]: facts(LIVE, "777", "%7"), [newDead]: facts(DEAD), [DEAD_SCOPE]: facts(DEAD) },
+    panes: ["%7"],
+  });
+  sweepOrphans(deps(tmux, { alive: (pid) => pid === 777 }), { sessionId: MINE });
+  assert.deepEqual([...tmux.killed].sort(), [DEAD_SCOPE, newDead].sort(), "the dead owner's sessions, both shapes");
+  assert.equal(tmux.killed.includes(oldLive), false, "the live owner's old-name session survives");
+});
+
 test("a kill tmux refuses is reported, not thrown", () => {
   for (const throws of [false, true]) {
     const tmux = fakeTmux({ sessions: { [DEAD_SCOPE]: facts(DEAD) }, fail: "kill-session", throws });

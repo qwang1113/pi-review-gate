@@ -54,6 +54,7 @@ export interface SessionLifecycleDeps {
     stopRevivalTimer(): void;
     startSessionNamingHeartbeat(): void;
     stopSessionNamingHeartbeat(): void;
+    startPaneState(): void;
   };
   cancelChildWaitTimer(): void;
   notify: { startHint(): string; markCleanShutdown(): void };
@@ -131,6 +132,9 @@ export function createSessionLifecycle(cells: SessionCells, deps: SessionLifecyc
     // that has an orchestration address, independent of the agent.
     deps.startChildHeartbeat(ctx);
     deps.reportChildState(ctx, undefined, { force: true });
+    // THE TMUX SIDEBAR'S PANE STATE (s1): every pi session, git or not — so it
+    // starts BEFORE the non-git short-circuit below.
+    deps.runtime().startPaneState();
 
     // Reflect the precommit config source in the status bar right away.
     deps.updateWidget(ctx);

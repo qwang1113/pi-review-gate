@@ -39,5 +39,5 @@
     "noImplicitOverride": true,
     "resolveJsonModule": true
   },
-  "include": ["extensions/**/*.ts", "lib/**/*.ts", "test/**/*.ts"]
+  "include": ["extensions/**/*.ts", "lib/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"]
 }

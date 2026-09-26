@@ -298,6 +298,13 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
   const scheduleDialog = createDialogQueue();
 
   /**
+   * How many boxes are ON SCREEN right now — the one fact behind the pane's
+   * `waiting-input` (lib/tmux-pane-state.ts): every dialog comes through here,
+   * so no second detector is needed.
+   */
+  let dialogsOnScreen = 0;
+
+  /**
    * THE one dialog renderer (user decision, 2026-09-08): the gate's question
    * template, whole. Every dialog in the extension — and
    * every dialog in the tool modules that inject this function — comes
@@ -412,17 +419,18 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
       // caller's own signal left a box on screen after the user cancelled the
       // run, and the tool waiting on it never came back.
       const answerBox = await reasonBoxUi(uiCtx.ui);
-      const answer = checkbox
-        ? await renderMultiChoice(answerBox, spec, {
+      dialogsOnScreen += 1;
+      const answer = await (checkbox
+        ? renderMultiChoice(answerBox, spec, {
           ...(opts.body === undefined ? {} : { body: opts.body }),
           ...(opts.back ? { back: true } : {}),
           ...(signal ? { signal } : {}),
         })
-        : await renderChoice(answerBox, spec, {
+        : renderChoice(answerBox, spec, {
           ...(opts.body === undefined ? {} : { body: opts.body }),
           ...(opts.back ? { back: true } : {}),
           ...(signal ? { signal } : {}),
-        });
+        })).finally(() => { dialogsOnScreen -= 1; });
       // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
       // dialog the gate shows — ask_user's interview, the restatement / goal /
       // plan approvals, the consent boxes for sensitive edits and scope limits —
@@ -520,5 +528,5 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
     return askDialog(uiCtx, spec, opts, true);
   }
 
-  return { askChoice, askMultiChoice };
+  return { askChoice, askMultiChoice, dialogsOnScreen: (): number => dialogsOnScreen };
 }

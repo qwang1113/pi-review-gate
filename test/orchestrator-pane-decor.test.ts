@@ -27,6 +27,9 @@ neutraliseGateEnv();
 import { makeFakeWorld, replyText, twoTaskPlan } from "./helpers/fake-orchestration.ts";
 import {
   childPaneLabel,
+  childWindowName,
+  judgeWindowName,
+  workerWindowName,
   judgePaneLabel,
   paneColorFor,
   paneIdentity,
@@ -637,3 +640,15 @@ test("closing the last visible child still writes no window option", async () =>
   );
 });
 
+
+test("window names drop the owner half: reviewer / quality / worker-<id> / <task>-<title> (s1)", () => {
+  assert.equal(judgeWindowName("reviewer"), "reviewer");
+  assert.equal(judgeWindowName("quality-auditor"), "quality");
+  assert.equal(judgeWindowName("goal-auditor"), "goal-auditor");
+  assert.equal(workerWindowName("probe"), "worker-probe");
+  assert.equal(workerWindowName("worker-3"), "worker-3", "an id that already says worker is not doubled");
+  assert.equal(childWindowName("p2", "Session factory"), "p2-session-factory");
+  assert.equal(childWindowName("s1", "tmux 会话侧边栏（prefix+e）+ tmux session/window 的可读命名"), "s1-tmux-prefix-e-tmux-session-wi", "capped at 32");
+  assert.equal(childWindowName("t6", "会话"), "t6", "a title with nothing ASCII leaves the task id");
+  assert.ok(childWindowName("t1", "x".repeat(80)).length <= 32);
+});

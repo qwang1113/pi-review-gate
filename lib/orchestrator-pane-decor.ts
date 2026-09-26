@@ -254,6 +254,36 @@ export function judgePaneLabel(role: string, owner: string): string {
   return paneIdentity({ what: role, owner });
 }
 
+/**
+ * ── THE WINDOW NAME (2026-09-27, s1) ──
+ *
+ * A child's WINDOW lives in its opener's own session, whose name already says
+ * who opened it (`rg-<repo>-<role>-<tail>`, lib/session-tmux-scope.ts), so the
+ * `@owner` half of the border label is noise in `tmux ls`. The window name is
+ * the bare role or task: `reviewer`, `quality`, `worker-<id>`,
+ * `s1-tmux-sidebar`. The border label keeps its full grammar.
+ */
+const JUDGE_WINDOW_WORD: Readonly<Record<string, string>> = { "quality-auditor": "quality" };
+
+/** `reviewer`, `quality`, `adviser`… */
+export function judgeWindowName(role: string): string {
+  return JUDGE_WINDOW_WORD[role] ?? (segment(role, SEGMENT_MAX) || "judge");
+}
+
+/** `worker-<id>` (an id that already starts with `worker` is not doubled). */
+export function workerWindowName(workerId: string): string {
+  const id = segment(workerId, SEGMENT_MAX) || "x";
+  return id.startsWith("worker") ? id : `worker-${id}`;
+}
+
+/** `s1-tmux-sidebar`: the task id and the start of its title slug. */
+export function childWindowName(taskId: string, title: string): string {
+  const id = segment(taskId, SEGMENT_MAX) || "task";
+  const name = nameSlug(title);
+  const full = !name ? id : name.startsWith(`${id.toLowerCase()}-`) ? name : `${id}-${name}`;
+  return full.slice(0, 32).replace(/-+$/, "");
+}
+
 /** The project manager's own pane: `pm:pi-review-gate`. */
 export function pmPaneLabel(dirname: string): string {
   return paneIdentity({ what: PANE_OWNER_PM, name: dirname });

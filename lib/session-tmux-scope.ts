@@ -107,6 +107,13 @@ export interface TmuxScope {
   sessionId(): string | undefined;
   /** The directory the name's repo slug comes from (the session's own repo). */
   repoRoot(): string;
+  /**
+   * WHO opens the children, as a human reads it — `pm`, an orchestration task
+   * id (`s1`) or `self` (lib/orchestrator-pane-decor.ts `selfPaneOwner`). It is
+   * the readable middle of the name (2026-09-27, s1); absent ⇒ the older
+   * `rg-<repo>-<tail>` shape.
+   */
+  role?(): string | undefined;
   /** The record persisted for THIS session, parsed fail-closed. */
   read(): TmuxScopeRecord | undefined;
   /** Persist it — called only when the session was really created. */
@@ -169,7 +176,37 @@ export function scopeNameOwnedBy(name: string, owner: string): boolean {
   if (minted === undefined || !isOwnSessionName(name) || !name.startsWith("rg-")) return false;
   const tail = minted.slice("rg-repo".length);
   if (!name.endsWith(tail)) return false;
-  return /^[a-z0-9][a-z0-9-]{0,23}$/.test(name.slice("rg-".length, -tail.length));
+  // The middle is the slug (≤ 24) and, in the newer shape, `-<role>` (≤ 13):
+  // only its SHAPE is checked, the tail is what binds the name to the owner.
+  return /^[a-z0-9][a-z0-9-]{0,37}$/.test(name.slice("rg-".length, -tail.length));
+}
+
+/** The role segment's shape: what {@link roleSegment} can produce. */
+const ROLE_SEGMENT = /^[a-z0-9](?:[a-z0-9-]{0,10}[a-z0-9])?$/;
+
+/** `pm` / `s1` / `self`, made safe for a session name and capped at 12. */
+function roleSegment(role: string | undefined): string {
+  return String(role ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 12).replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Was `name` minted for THIS repo and THIS session id — in either shape,
+ * `rg-<slug>-<tail>` (before 2026-09-27) or `rg-<slug>-<role>-<tail>`?
+ *
+ * The role is only shape-checked: a session that switched from loop to
+ * project manager keeps the session it already created (its sidecar record
+ * names it), and a session created by the older build is still recognised as
+ * its own instead of being orphaned beside a second one.
+ */
+export function sessionNameBelongsTo(dir: string, sessionId: string, name: string): boolean {
+  const base = deriveSessionName(dir, sessionId);
+  if (base === undefined || !isOwnSessionName(name)) return false;
+  if (name === base) return true;
+  const frag = base.slice(base.lastIndexOf("-") + 1);
+  const prefix = base.slice(0, base.length - frag.length);
+  const suffix = `-${frag}`;
+  if (!name.startsWith(prefix) || !name.endsWith(suffix) || name.length <= prefix.length + suffix.length) return false;
+  return ROLE_SEGMENT.test(name.slice(prefix.length, name.length - suffix.length));
 }
 
 /**
@@ -182,7 +219,7 @@ export function scopeNameOwnedBy(name: string, owner: string): boolean {
  * one would make every later target ambiguous), and the rest of the class is
  * what {@link isOwnSessionName} validates before any argv is built.
  */
-export function deriveSessionName(dir: string, sessionId: string): string | undefined {
+export function deriveSessionName(dir: string, sessionId: string, role?: string): string | undefined {
   const slug = String(dir ?? "")
     .replace(/\/+$/, "")
     .split("/")
@@ -192,7 +229,10 @@ export function deriveSessionName(dir: string, sessionId: string): string | unde
   // Ten characters of the id's random end: enough that two sessions in one
   // repo cannot land on the same name, short enough to read in `tmux ls`.
   if (frag.length < 6) return undefined;
-  return `rg-${clean || "repo"}-${frag}`;
+  // THE ROLE MAKES `tmux ls` READABLE (2026-09-27, s1): `rg-pi-review-gate-pm-…`
+  // says who opened the children; the tail still binds the name to its owner.
+  const who = roleSegment(role);
+  return `rg-${clean || "repo"}-${who ? `${who}-` : ""}${frag}`;
 }
 
 /** The record as it must be before it is trusted: fail-closed on any doubt. */
@@ -323,9 +363,17 @@ function resolveScope(scope: TmuxScope): ResolvedScope {
   if (sessionId === undefined || sessionId.length === 0) {
     return { ok: false, error: "本会话没有 session id（pi 没给出），无法派生专属 tmux session 名" };
   }
-  const own = deriveSessionName(scope.repoRoot(), sessionId);
+  const own = deriveSessionName(scope.repoRoot(), sessionId, scope.role?.());
   if (own === undefined) {
     return { ok: false, error: `无法从 session id 派生专属 tmux session 名：${sessionId}` };
+  }
+  // A RECORD MAY CONFIRM A NAME THAT IS STILL OURS BY DERIVATION (2026-09-27):
+  // the role can change mid-session (loop → project manager) and an older build
+  // minted no role at all, but either way the name carries THIS repo's slug and
+  // THIS id's tail — a record can pick among our own names, never another's.
+  const recorded = sanitizeScopeRecord(scope.read());
+  if (recorded && recorded.owner === sessionId && sessionNameBelongsTo(scope.repoRoot(), sessionId, recorded.name)) {
+    return { ok: true, name: recorded.name, owner: sessionId };
   }
   // THE NAME IS DERIVED, ALWAYS (2026-09-25, reviewer P1): the record is not a
   // source of names, so no file can point this process at a session it did not
@@ -472,7 +520,7 @@ export function createOwnershipProbe(scope: TmuxScope, run: TmuxRunner): (name: 
     if (!marker.ok) return false;
     const owner = marker.owner.trim();
     if (owner.length === 0) return false;
-    const verdict = deriveSessionName(scope.repoRoot(), owner) === name;
+    const verdict = sessionNameBelongsTo(scope.repoRoot(), owner, name);
     cache.set(name, verdict);
     return verdict;
   };
