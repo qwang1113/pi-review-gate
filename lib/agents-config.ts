@@ -35,6 +35,12 @@ export interface AgentSlotSettings {
 
 export type AgentsConfigMap = Record<string, AgentSlotSettings>;
 
+/** No explicit chain (`auto` not false, or no slots) — the ONE test both the
+ * startup check and `/gate-status` apply; two copies had already drifted once. */
+export function lacksExplicitChain(e: AgentSlotSettings): boolean {
+  return e.auto !== false || e.slots.length === 0;
+}
+
 export interface ParseAgentsResult {
   /** Only the agents actually present in the section (auto-filled to defaults). */
   sections: Record<string, { auto?: boolean; slots?: string[]; prompt?: string; malformed?: boolean }>;

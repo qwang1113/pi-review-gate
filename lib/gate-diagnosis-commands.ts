@@ -43,7 +43,7 @@ import { gitText } from "./git-exec.ts";
 import { diagnoseChain, diagnoseSpecs, formatModelDiagnosis, type RegistryFacts } from "./model-diagnose.ts";
 import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "./gate-doctor.ts";
 import { isWorkerRoleName, KNOWN_AGENTS } from "./model-config.ts";
-import { effectiveAgentsConfig } from "./agents-config.ts";
+import { effectiveAgentsConfig, lacksExplicitChain } from "./agents-config.ts";
 import { judgeEnglish } from "./lang-detect.ts";
 import { globalConfigPath, loadProjectConfig } from "./project-config.ts";
 import { WORKFLOW_COMMANDS } from "./workflow-commands.ts";
@@ -175,10 +175,9 @@ export function modelDiagnosisLines(deps: GateDiagnosisDeps, registry?: unknown)
     const { map } = effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject);
     const workers = Object.entries(map)
       .filter(([name, e]) => isWorkerRoleName(name) && e.source !== "default")
-      // A declared preset without an explicit slot list (same test as the
-      // startup check: auto:false AND slots) refuses session start, so
-      // it is shown as BLOCKED here rather than dropped.
-      .map(([name, e]) => ({ ...diagnoseSpecs(name, e.slots, facts), ...(e.auto !== false || e.slots.length === 0 ? { blocked: true } : {}) }));
+      // A declared preset without an explicit chain refuses session start,
+      // so it is shown as BLOCKED here rather than dropped.
+      .map(([name, e]) => ({ ...diagnoseSpecs(name, e.slots, facts), ...(lacksExplicitChain(e) ? { blocked: true } : {}) }));
     const entries = [
       ...judges.filter((e): e is NonNullable<typeof e> => e !== null && e.chain.length > 0),
       ...workers,

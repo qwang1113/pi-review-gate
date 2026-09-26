@@ -10,7 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { isWorkerRoleName, KNOWN_AGENTS } from "./model-config.ts";
-import { collectWorkerRoleNames, effectiveAgentsConfig, type AgentsConfigMap } from "./agents-config.ts";
+import { collectWorkerRoleNames, effectiveAgentsConfig, lacksExplicitChain, type AgentsConfigMap } from "./agents-config.ts";
 import { extractFrontmatterChain } from "./agent-frontmatter.ts";
 import { splitThinkingSuffix, validateSlots, validateSpec, type ModelRegistry } from "./model-spec.ts";
 
@@ -61,7 +61,7 @@ export function validateAgentsForStartup(
       checks[name] = { ok: false, reason: `${who} 的配置字段非法（malformed）` };
       continue;
     }
-    if (e.auto !== false || e.slots.length === 0) {
+    if (lacksExplicitChain(e)) {
       // "auto:true" (or any state without an explicit slot list) means the
       // role would fall back to a built-in default. Per the no-defaults
       // requirement, an unconfigured role must STOP the session rather than
