@@ -79,7 +79,7 @@ test("registration not on file ⇒ no judge is started and the dispatch fails wi
 
 test("the entry is on file BEFORE the judge's window opens, and gains its pane afterwards", async () => {
   const { out, onFileWhenOpened, table } = await dispatchWith(true);
-  assert.equal(out.ok, true, out.error);
+  assert.equal(out.ok, true, out.error ?? "");
   assert.equal(onFileWhenOpened, true);
   const entry = Object.values(table)[0]!;
   assert.equal(entry.paneId, "%9");
