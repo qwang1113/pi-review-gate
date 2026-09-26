@@ -73,6 +73,9 @@ import {
   parseSessionNames,
   parseSpawnedWindow,
   SESSION_OWNER_OPTION,
+  SESSION_OWNER_PANE_OPTION,
+  SESSION_OWNER_PID_OPTION,
+  type SessionOwnerOption,
   type SessionWindowCoords,
 } from "./tmux-session-argv.ts";
 import { isOwnSessionName, type TmuxRunner, type TmuxRunResult } from "./orchestrator-tmux.ts";
@@ -109,6 +112,61 @@ export interface TmuxScope {
   write(record: TmuxScopeRecord): void;
   /** One timestamp, so the record's shape is testable. */
   now(): string;
+  /**
+   * This PROCESS's liveness facts (pid, own pane), written onto the session so
+   * a later session can tell a crashed owner from a live one
+   * (lib/session-orphan-sweep.ts). Absent ⇒ nothing is written, and a session
+   * without the facts is never reclaimed by anyone but its owner.
+   */
+  ownerProcess?(): OwnerProcess;
+}
+
+/** What the owner of a dedicated session looks like from outside: its pid and its pane. */
+export interface OwnerProcess {
+  pid: number;
+  pane: string | undefined;
+}
+
+/**
+ * Write this process's pid (and pane, when it has one) onto `session`, or say
+ * why not. The pid goes FIRST: it is the fact that protects a live owner, so a
+ * pane write that fails after it leaves a stale pane beside a fresh pid — still
+ * "alive" to any sweeper, and "dead" only once this process really is.
+ */
+export function writeOwnerFacts(
+  run: TmuxRunner,
+  session: string,
+  facts: OwnerProcess,
+  declared: readonly string[] = [],
+): string | undefined {
+  const writes: [SessionOwnerOption, string | undefined][] = [
+    [SESSION_OWNER_PID_OPTION, String(facts.pid)],
+    [SESSION_OWNER_PANE_OPTION, facts.pane],
+  ];
+  for (const [option, value] of writes) {
+    if (value === undefined || value.length === 0) continue;
+    try {
+      const result = run(buildSetSessionOwnerArgv(session, value, option), undefined, declared);
+      if (!result.ok) return `${session} 写 ${option} 失败：${result.stderr || "tmux 拒绝"}`;
+    } catch (error) {
+      return `${session} 写 ${option} 失败：${(error as Error).message}`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Was `name` minted for `owner` — by ANY repo? The same derivation as
+ * {@link deriveSessionName}, with the slug taken from the name itself: a
+ * sweeper in one repo meets the sessions of every other repo, so it cannot
+ * derive their slug from its own directory. A slug is already clean, so
+ * re-deriving it is the identity — and anything that is not exactly what
+ * `owner` would produce is not that owner's session.
+ */
+export function scopeNameOwnedBy(name: string, owner: string): boolean {
+  if (!name.startsWith("rg-") || owner.trim().length === 0) return false;
+  const slug = name.slice("rg-".length, name.lastIndexOf("-"));
+  return deriveSessionName(slug, owner.trim()) === name;
 }
 
 /**
@@ -473,6 +531,14 @@ export function openScopeWindow(
   if (exists) {
     const healed = healSessionEnv(run, name);
     if (!healed.ok) return { ok: false, error: healed.error };
+    // A REUSED SESSION CARRIES THE LIVENESS OF WHOEVER WROTE IT LAST — possibly
+    // an earlier process of this same session id that has since died. Left
+    // stale, a sweeper would read "pid gone, pane gone" and kill the session
+    // this process is about to put a child in, so a refresh that fails refuses
+    // the spawn instead.
+    const facts = scope.ownerProcess?.();
+    const stale = facts === undefined ? undefined : writeOwnerFacts(run, name, facts);
+    if (stale !== undefined) return { ok: false, error: `${stale} —— 不在带着旧存活事实的 session 里开新 window` };
   }
   const spec = {
     ownSession: name,
@@ -513,6 +579,10 @@ export function openScopeWindow(
         error: `新建的 session ${name} 写归属标记失败（${marked.stderr || "tmux 拒绝"}）—— 已就地回收，未留下无法复用也无法关闭的 session`,
       };
     }
+    // The LIVENESS FACTS are best effort too: without them the session is only
+    // ever closed by its owner, which is exactly what it was before they existed.
+    const facts = scope.ownerProcess?.();
+    if (facts !== undefined) writeOwnerFacts(run, name, facts);
     // The RECORD is best effort: the marker is what makes the name ours, and a
     // record that did not land only costs a re-derivation (same name, same
     // owner, marker matches ⇒ reuse works).

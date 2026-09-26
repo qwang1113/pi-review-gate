@@ -36,6 +36,22 @@ import {
  */
 export const SESSION_OWNER_OPTION = "@rg_scope_owner";
 
+/**
+ * The two LIVENESS facts written beside the marker: the owner process's pid and
+ * the tmux pane it runs in. The marker says WHO built a session; these say
+ * whether that builder can still be alive — which is what lets a later session
+ * reclaim the dedicated session of one that crashed without ever being named
+ * (lib/session-orphan-sweep.ts). A session without them is never reclaimed.
+ */
+export const SESSION_OWNER_PID_OPTION = "@rg_scope_owner_pid";
+export const SESSION_OWNER_PANE_OPTION = "@rg_scope_owner_pane";
+
+/** The session user options the gate writes about a session's owner. */
+export type SessionOwnerOption =
+  | typeof SESSION_OWNER_OPTION
+  | typeof SESSION_OWNER_PID_OPTION
+  | typeof SESSION_OWNER_PANE_OPTION;
+
 /** How many ids or windows tmux prints for one creation. */
 export interface SessionWindowCoords {
   windowId: string;
@@ -165,10 +181,14 @@ export function buildUnsetSessionEnvArgv(ownSession: string, key: string): reado
  * (`rg-<repo>-<id 尾>` colliding across two processes) and before the one
  * destructive act the gate performs on it.
  */
-export function buildSetSessionOwnerArgv(ownSession: string, owner: string): readonly string[] {
+export function buildSetSessionOwnerArgv(
+  ownSession: string,
+  owner: string,
+  option: SessionOwnerOption = SESSION_OWNER_OPTION,
+): readonly string[] {
   const session = requireOwnSession(ownSession, "ownSession");
   return assertSafeTmuxArgv(
-    ["set", "-t", session, SESSION_OWNER_OPTION, owner],
+    ["set", "-t", session, option, owner],
     { ownSessions: [session] },
   );
 }
@@ -177,9 +197,12 @@ export function buildSetSessionOwnerArgv(ownSession: string, owner: string): rea
  * Read the marker back. An unset option prints NOTHING and exits 0 (measured:
  * tmux 3.7c), so an empty reading is "no owner recorded", never a failed call.
  */
-export function buildReadSessionOwnerArgv(ownSession: string): readonly string[] {
+export function buildReadSessionOwnerArgv(
+  ownSession: string,
+  option: SessionOwnerOption = SESSION_OWNER_OPTION,
+): readonly string[] {
   const session = requireOwnSession(ownSession, "ownSession");
-  return assertSafeTmuxArgv(["show-options", "-t", session, "-qv", SESSION_OWNER_OPTION], { ownSessions: [session] });
+  return assertSafeTmuxArgv(["show-options", "-t", session, "-qv", option], { ownSessions: [session] });
 }
 
 /**

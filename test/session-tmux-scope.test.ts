@@ -21,7 +21,13 @@ import {
   type TmuxRunner,
   type TmuxRunResult,
 } from "../lib/orchestrator-tmux.ts";
-import { buildKillWindowArgv, buildUnsetSessionEnvArgv, SESSION_OWNER_OPTION } from "../lib/tmux-session-argv.ts";
+import {
+  buildKillWindowArgv,
+  buildUnsetSessionEnvArgv,
+  SESSION_OWNER_OPTION,
+  SESSION_OWNER_PANE_OPTION,
+  SESSION_OWNER_PID_OPTION,
+} from "../lib/tmux-session-argv.ts";
 import {
   addressableSessions,
   closeOwnSession,
@@ -29,6 +35,7 @@ import {
   deriveSessionName,
   openScopeWindow,
   sanitizeScopeRecord,
+  scopeNameOwnedBy,
   type TmuxScope,
   type TmuxScopeRecord,
 } from "../lib/session-tmux-scope.ts";
@@ -469,4 +476,72 @@ test("a kill that tmux refuses is REPORTED, never swallowed", () => {
   const killed = closeOwnSession(server.run, scope);
   assert.equal(killed.ok, false);
   if (!killed.ok) assert.match(killed.error, /refused the kill/);
+});
+
+// ---------------------------------------------------------------------------
+// the owner's liveness facts (what a crashed session's sweeper reads)
+// ---------------------------------------------------------------------------
+
+/** fakeServer, with the pid/pane options kept apart from the owner marker — and failable. */
+function factsServer(opts: Parameters<typeof fakeServer>[0] & { factFails?: string } = {}) {
+  const server = fakeServer(opts);
+  const facts = new Map<string, string>();
+  const run: TmuxRunner = (argv, env, declared) => {
+    const option = argv.find((a) => a === SESSION_OWNER_PID_OPTION || a === SESSION_OWNER_PANE_OPTION);
+    if (argv[0] === "set" && option !== undefined) {
+      server.calls.push([...argv]);
+      if (opts.factFails === option) return { ok: false, stdout: "", stderr: "tmux refused the fact" };
+      facts.set(`${argv[argv.indexOf("-t") + 1]} ${option}`, String(argv.at(-1)));
+      return { ok: true, stdout: "", stderr: "" };
+    }
+    return server.run(argv, env, declared);
+  };
+  return { ...server, run, facts };
+}
+
+function liveScope(pid = 4242, pane: string | undefined = "%3"): FakeScope {
+  return { ...fakeScope(), ownerProcess: () => ({ pid, pane }) };
+}
+
+test("a created session carries its owner's pid and pane, written after the marker", () => {
+  const server = factsServer();
+  const opened = openScopeWindow(server.run, liveScope(), { cwd: "/repo", command: ["pi"] });
+  assert.equal(opened.ok, true);
+  assert.equal(server.facts.get(`${NAME} ${SESSION_OWNER_PID_OPTION}`), "4242");
+  assert.equal(server.facts.get(`${NAME} ${SESSION_OWNER_PANE_OPTION}`), "%3");
+  const order = server.calls.filter((a) => a[0] === "set").map((a) => a[3]);
+  assert.deepEqual(order, [SESSION_OWNER_OPTION, SESSION_OWNER_PID_OPTION, SESSION_OWNER_PANE_OPTION]);
+});
+
+test("a failed fact write on CREATION still spawns — the session is merely never swept", () => {
+  const server = factsServer({ factFails: SESSION_OWNER_PID_OPTION });
+  const opened = openScopeWindow(server.run, liveScope(), { cwd: "/repo", command: ["pi"] });
+  assert.equal(opened.ok, true);
+  assert.equal(server.sessions.has(NAME), true);
+  assert.equal(server.facts.size, 0, "no pane without its pid: a lone stale-able fact is worse than none");
+});
+
+test("REUSE overwrites the facts an earlier process of this id left — and a failed overwrite refuses the spawn", () => {
+  const server = factsServer({ existing: { name: NAME, owner: SESSION_ID } });
+  server.facts.set(`${NAME} ${SESSION_OWNER_PID_OPTION}`, "1");
+  const opened = openScopeWindow(server.run, liveScope(5151, "%9"), { cwd: "/repo", command: ["pi"] });
+  assert.equal(opened.ok, true);
+  assert.equal(server.facts.get(`${NAME} ${SESSION_OWNER_PID_OPTION}`), "5151");
+  assert.equal(server.facts.get(`${NAME} ${SESSION_OWNER_PANE_OPTION}`), "%9");
+
+  for (const failing of [SESSION_OWNER_PID_OPTION, SESSION_OWNER_PANE_OPTION]) {
+    const stuck = factsServer({ existing: { name: NAME, owner: SESSION_ID }, factFails: failing });
+    const refused = openScopeWindow(stuck.run, liveScope(), { cwd: "/repo", command: ["pi"] });
+    assert.equal(refused.ok, false, `${failing} not refreshed ⇒ no window in a session a sweeper may read as dead`);
+    if (!refused.ok) assert.match(refused.error, /refused the fact/);
+    assert.equal(stuck.calls.some((a) => a[0] === "new-window"), false);
+  }
+});
+
+test("a name belongs to an owner only when that owner derives it — from any repo", () => {
+  assert.equal(scopeNameOwnedBy(NAME, SESSION_ID), true);
+  assert.equal(scopeNameOwnedBy(deriveSessionName("/elsewhere/Other.Repo", SESSION_ID)!, SESSION_ID), true);
+  assert.equal(scopeNameOwnedBy(NAME, SUCCESSOR_ID), false);
+  assert.equal(scopeNameOwnedBy(NAME, ""), false);
+  assert.equal(scopeNameOwnedBy("work", SESSION_ID), false);
 });
