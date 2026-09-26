@@ -481,6 +481,11 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
     （`handOffNote`），lane 行没有兄弟裁决，所以它的 note 由后台 full precommit 的失败
     通知携带（`AsyncPrecommitReport.laneNotes`）—— 在 2026-09-16 之前它被丢掉，agent
     只看到「precommit 没过」，看不到「这轮已经被终止」。
+  - **lane 比 reviewer 派发先落地 FAIL**（2026-09-27，t8）：lane 行只能杀**已登记**的
+    reviewer，而 0.2s 就失败的 test 往往在质量轮 pane 启动期间落地 —— 实测 reviewer 随后
+    照常派出、白跑约 40s。现在 `judge_submit` 在派 reviewer 前后各读一次**本轮这条 lane**
+    的失败读数（`startPrecommitBeside(...).failure`）：派发前已 FAIL ⇒ 不派，写同一条取消
+    墓碑；开窗期间落地 ⇒ 派发一返回就 `cancelJudgeRound`。谁杀谁不变。
 - **质量轮先 READY 不算收口**：reviewer 本来就在跑，本轮结论仍由 reviewer 的
   裁决收口（只有质量轮非 READY 才提前收口）。
 - **reviewer 先交卷 READY 而质量轮还没交卷**，是本设计里唯一的时序竞争，处置是
