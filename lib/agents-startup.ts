@@ -284,6 +284,13 @@ export interface StartupAgentsResult {
    * session that passed the check while still configuring nothing.
    */
   agentsSection?: Record<string, unknown>;
+  /** Failing role → the config file the user must fix for it: the layer that
+   *  DECLARES it (project wins, as in the merge), else the global file the
+   *  heal writes to. A refusal naming the global file for a project-layer
+   *  preset sent users to a file that does not mention it. */
+  configFiles: Record<string, string>;
+  /** The distinct files in {@link configFiles}, in first-failure order. */
+  fixFiles: string[];
 }
 
 /**
@@ -301,6 +308,8 @@ export function startupAgentsCheck(opts: {
   agentsProject: unknown;
   registry: ModelRegistry;
   configPath: string;
+  /** The project layer's file — named in the refusal for a role it declares. */
+  projectConfigPath: string;
   agentsDir: string | null;
   validNames?: readonly string[];
 }): StartupAgentsResult {
@@ -318,6 +327,7 @@ export function startupAgentsCheck(opts: {
     Object.entries(checks).filter(([, c]) => c && !c.ok).map(([name]) => name);
 
   let checks = validateAgentsForStartup(map, opts.registry, validNames);
+  let sources = map;
   const bad = failing(checks);
   const healProblems: string[] = [];
   let healed: string[] = [];
@@ -347,7 +357,13 @@ export function startupAgentsCheck(opts: {
     if (heal.agentsSection !== undefined) {
       const merged = effectiveAgentsConfig(heal.agentsSection, opts.agentsProject, judgeNames);
       checks = validateAgentsForStartup(merged.map, opts.registry, validNames);
+      sources = merged.map;
     }
   }
-  return { checks, healed, healProblems, ...(agentsSection === undefined ? {} : { agentsSection }) };
+  const configFiles: Record<string, string> = {};
+  for (const name of failing(checks)) {
+    configFiles[name] = sources[name]?.source === "project" ? opts.projectConfigPath : opts.configPath;
+  }
+  const fixFiles = [...new Set(Object.values(configFiles))];
+  return { checks, healed, healProblems, configFiles, fixFiles, ...(agentsSection === undefined ? {} : { agentsSection }) };
 }

@@ -1906,8 +1906,9 @@ test("startup self-heal reports the roles it merged, from the same handler that 
     /log\(`self-healed missing agent slots into \$\{globalConfigPath\(\)\}: \$\{healed\.join\(", "\)\}`\)/,
     "…with the roles it merged and the file it wrote",
   );
-  // The heal's own failures ride the refusal instead of disappearing.
-  assert.match(handler, /const healNote = healProblems\.length > 0/, "a failed heal is surfaced with the refusal");
+  // The refusal (heal failures included, asserted in
+  // test/agents-startup-copy.test.ts) renders from the check's own result.
+  assert.match(handler, /return formatAgentsStartupRefusal\(result\);/, "the refusal is rendered from the check result");
   // …and the session's own snapshot follows the file, or every downstream
   // reader keeps the pre-heal state while the check reports a pass.
   assert.match(handler, /cells\.projectConfig = \{ \.\.\.cells\.projectConfig, agentsGlobal: agentsSection \}/,

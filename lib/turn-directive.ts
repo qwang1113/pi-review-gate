@@ -12,6 +12,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SCOPE_ESCALATION_PROTOCOL } from "./agent-directives.ts";
 import { startupAgentsCheck } from "./agents-startup.ts";
+import { formatAgentsStartupRefusal } from "./agents-startup-copy.ts";
 import { LANGUAGE_DIRECTIVE } from "./constants.ts";
 import { EDIT_DISCIPLINE_DIRECTIVE } from "./edit-discipline.ts";
 import { computeFingerprint, type Fingerprint } from "./fingerprint.ts";
@@ -34,7 +35,7 @@ import {
   CHILD_OF_ORCHESTRATOR_DIRECTIVE,
   ORCHESTRATOR_DIRECTIVE,
 } from "./orchestrator-directives.ts";
-import { globalConfigPath } from "./project-config.ts";
+import { globalConfigPath, projectConfigPath } from "./project-config.ts";
 import { commitsAheadOfBase } from "./repo-facts.ts";
 import { formatReviewScopeDirective, type SettledConclusion } from "./review-carryover.ts";
 import type { ReviewScopeDecision } from "./review-scope.ts";
@@ -90,13 +91,15 @@ export function createTurnDirective(cells: SessionCells, deps: TurnDirectiveDeps
       // ONE call: validate every role, self-heal the roles NO layer declares
       // (merged into ~/.pi/review-gate.json, gaps only), validate again. The
       // ordering lives in lib/agents-startup.ts, where it is testable.
-      const { checks, healed, healProblems, agentsSection } = startupAgentsCheck({
+      const result = startupAgentsCheck({
         agentsGlobal: cells.projectConfig.agentsGlobal,
         agentsProject: cells.projectConfig.agentsProject,
         registry: loadRegistry(),
         configPath: globalConfigPath(),
+        projectConfigPath: projectConfigPath(cells.cwd),
         agentsDir: resolvePackageAgentsDir(),
       });
+      const { healed, agentsSection } = result;
       if (agentsSection !== undefined) {
         // The SESSION's snapshot follows the file it just healed: a session
         // reads its config ONCE (quality-auditor P2, 2026-09-22).
@@ -105,19 +108,7 @@ export function createTurnDirective(cells: SessionCells, deps: TurnDirectiveDeps
       if (healed.length > 0) {
         deps.log(`self-healed missing agent slots into ${globalConfigPath()}: ${healed.join(", ")}`);
       }
-      const bad = Object.entries(checks).filter(([, c]) => c && !c.ok);
-      if (bad.length === 0) return undefined;
-      const details = bad.map(([name, c]) => `- ${name}: ${c?.reason ?? "未知原因"}`).join("\n");
-      const healNote = healProblems.length > 0
-        ? `\n启动自愈也没能补上（原因如下）：\n${healProblems.map((p) => `- ${p}`).join("\n")}`
-        : "";
-      return `\n\n## REVIEW-GATE: 配置错误，会话无法启动\n` +
-        `角色模型配置不完整 —— 以下角色无法获得可派发的模型链：\n${details}${healNote}\n` +
-        `\n请修复 ~/.pi/review-gate.json 后重开会话：` +
-        `\n- 不在 agents 段里的角色（或值为空对象的）：启动时会自动补上包内默认链；` +
-        `\n- 已有条目但不可用的角色（auto:true / slots 为空 / spec 不可解析）：改成明确的 auto:false + slots，` +
-        `或删掉这个键让门禁补默认（worker 预设没有包内默认，删掉即不再有该预设）。` +
-        `\n在配置修复前，本会话拒绝执行任何工作（ship 命令仍被拦截）。`;
+      return formatAgentsStartupRefusal(result);
     } catch (e) {
       return `\n\n## REVIEW-GATE: 配置检查异常，会话无法启动\n` +
         `启动配置检查本身失败（${e instanceof Error ? e.message : String(e)}）。` +

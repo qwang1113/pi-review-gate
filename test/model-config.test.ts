@@ -1516,6 +1516,7 @@ test("startupAgentsCheck heals an unconfigured role and re-validates without tou
     writeFileSync(cfg, JSON.stringify({ agents: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } } }), "utf8");
 
     const res = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } },
       agentsProject: undefined,
       registry: REG,
@@ -1532,6 +1533,7 @@ test("startupAgentsCheck heals an unconfigured role and re-validates without tou
     // the heal is for gaps, and the refusal that follows is the user's to fix.
     const badCfg = join(dir, "bad.json");
     const bad = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: { reviewer: { auto: false, slots: ["anthropic/claude-nonexistent:max"] } },
       agentsProject: undefined,
       registry: REG,
@@ -1548,6 +1550,7 @@ test("startupAgentsCheck heals an unconfigured role and re-validates without tou
     const healthyText = JSON.stringify({ agents: { acceptance: { auto: false, slots: ["anthropic/claude-fable-5:max"] } } });
     writeFileSync(healthyCfg, healthyText, "utf8");
     const healthy = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: { acceptance: { auto: false, slots: ["anthropic/claude-fable-5:max"] } },
       agentsProject: undefined,
       registry: REG,
@@ -1578,6 +1581,7 @@ test("startupAgentsCheck re-checks against the config FILE, not the caller's sta
     const staleSnapshot = { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } };
 
     const first = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: staleSnapshot,
       agentsProject: undefined,
       registry: REG,
@@ -1590,6 +1594,7 @@ test("startupAgentsCheck re-checks against the config FILE, not the caller's sta
 
     // The SAME stale snapshot again — what a long-lived session keeps passing.
     const second = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: staleSnapshot,
       agentsProject: undefined,
       registry: REG,
@@ -1610,7 +1615,7 @@ test("startupAgentsCheck checks every DECLARED worker preset, names the bad spec
     const cfg = join(dir, "review-gate.json");
     const reviewer = { auto: false, slots: ["onekey/gpt-5.6-sol:high"] };
     const run = (agentsGlobal: unknown, agentsProject?: unknown) =>
-      startupAgentsCheck({ agentsGlobal, agentsProject, registry: REG, configPath: cfg, agentsDir: null, validNames: ["reviewer"] });
+      startupAgentsCheck({ agentsGlobal, agentsProject, registry: REG, configPath: cfg, projectConfigPath: join(dir, "project.json"), agentsDir: null, validNames: ["reviewer"] });
 
     // Every slot resolves → pass.
     const good = run({ reviewer, worker: { auto: false, slots: ["anthropic/claude-fable-5:max"] } });
