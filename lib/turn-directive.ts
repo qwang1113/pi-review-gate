@@ -96,7 +96,9 @@ export function createTurnDirective(cells: SessionCells, deps: TurnDirectiveDeps
         agentsProject: cells.projectConfig.agentsProject,
         registry: loadRegistry(),
         configPath: globalConfigPath(),
-        projectConfigPath: projectConfigPath(cells.cwd),
+        // The root the project layer was LOADED from (session-lifecycle), not
+        // cwd: a session started in a subdirectory reads the root's file.
+        projectConfigPath: projectConfigPath(cells.primaryRepoRoot),
         agentsDir: resolvePackageAgentsDir(),
       });
       const { healed, agentsSection } = result;
