@@ -25,7 +25,8 @@ import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import { qualityStandingFor } from "./quality-round.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
 import { dispatchFailureDetail, type RoundCancelLedger } from "./round-cancel-ledger.ts";
-import { buildJudgePaneCommand, judgePaneDecor, openSessionWindow } from "./session-factory.ts";
+import { openSessionWindow } from "./session-factory.ts";
+import { buildJudgePaneCommand, judgePaneDecor } from "./session-launch-specs.ts";
 import type { SessionHost } from "./session-host.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
 

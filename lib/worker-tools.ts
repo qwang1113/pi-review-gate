@@ -41,7 +41,8 @@
 
 import { Type } from "typebox";
 import { toolFail as fail, toolReply as reply, type ToolHost, type ToolReply } from "./tool-host.ts";
-import type { SessionPaneCoords, SessionPaneDecor, SessionPaneRole } from "./session-factory.ts";
+import type { SessionPaneCoords, SessionPaneDecor } from "./session-factory.ts";
+import type { SessionPaneRole } from "./session-env.ts";
 import { windowAlreadyGone } from "./session-factory.ts";
 import { appendRecord, type ChannelIO } from "./channel-io.ts";
 import type { AgentsConfigMap } from "./agents-config.ts";

@@ -287,7 +287,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // a narrowed repo would hand its child an unlimited station.
   //
   // COMPUTED HERE, ONCE: both this task book and the child's environment carry
-  // the same value (STATION_CAP_ENV, lib/session-factory.ts), so the goal
+  // the same value (STATION_CAP_ENV, lib/session-env.ts), so the goal
   // dialog inside the child cannot offer a station the plan already ruled out.
   const stationCap = effectiveTaskStation(plan!, task, deps.repoRoot);
   const stationCapReason = narrowingReasonFor(plan!, task, deps.repoRoot);
