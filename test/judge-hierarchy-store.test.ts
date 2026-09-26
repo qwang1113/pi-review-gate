@@ -148,6 +148,18 @@ test("two waiters breaking the same dead lock: the second never removes the firs
   assert.equal(existsSync(`${file}.lock.break`), false);
 });
 
+test("a dead lock whose breaker is busy is waited on within the deadline, not spun on forever", () => {
+  const root = mkdtempSync(join(tmpdir(), "rg-hier-"));
+  const file = fileOf(root);
+  writeHierarchySlice(file, undefined, { judges: {} });
+  writeFileSync(`${file}.lock`, "999999");
+  writeFileSync(`${file}.lock.break`, String(process.pid)); // a live breaker at work
+  const t0 = Date.now();
+  const out = writeHierarchySlice(file, undefined, { judges: { x: entry("x", "o", root) } }, { timeoutMs: 80, pidAlive: (pid) => pid !== 999999 });
+  assert.equal(out, undefined);
+  assert.ok(Date.now() - t0 < 2_000);
+});
+
 test("registry: a write that cannot take the lock returns false and lands on the next persist", () => {
   const root = mkdtempSync(join(tmpdir(), "rg-hier-"));
   const p = process_(root, "p");
@@ -167,8 +179,7 @@ test("registry: a removal that missed the lock is not undone by a reload", () =>
   const root = mkdtempSync(join(tmpdir(), "rg-hier-"));
   const p = process_(root, "p");
   p.add("x");
-  writeFileSync(`${fileOf(root)}.lock`, "999999999");
-  // A dead holder is broken at once, so hold it with a LIVE pid for the removal.
+  // A live holder makes the removal miss the file.
   writeFileSync(`${fileOf(root)}.lock`, String(process.pid));
   assert.equal(p.drop("x"), false);
   p.reg.reloadJudgeHierarchy(root);
