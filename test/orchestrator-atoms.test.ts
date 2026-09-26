@@ -41,7 +41,8 @@ import { childGateFacts } from "../lib/orchestrator-tool-kit.ts";
 import { detectOrphans } from "../lib/orchestrator-recovery-tools.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 
-import { nextDecisionId, parsePlan } from "../lib/orchestrator-plan.ts";
+import { parsePlan } from "../lib/orchestrator-plan.ts";
+import { nextDecisionId } from "../lib/orchestrator-plan-progress.ts";
 import { buildOrchestratorExitBlock } from "../lib/orchestrator-directives.ts";
 import { sidecarPath, stateVariantFrom, STATE_VARIANT_ENV } from "../lib/gate-state-io.ts";
 
