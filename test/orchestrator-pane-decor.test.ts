@@ -219,11 +219,12 @@ test("close KEEPS its window and writes NO WINDOW OPTION (2026-09-27 / 2026-09-1
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   const child = world.runtime().children[0]!;
+  world.childReports(child.id, "done");
 
   await world.call("orchestrator_close", { childId: child.id });
 
   const log = tmuxLog(world);
-  // 2026-09-27: settling a child does not kill its window — the orchestrator's
+  // 2026-09-27: settling a FINISHED child does not kill its window — the orchestrator's
   // declare_done reclaims it with the rest of its tmux session.
   assert.equal(log.some((line) => line.startsWith("kill-window") || line.startsWith("kill-pane")), false,
     `nothing is killed on close: ${log.join(" | ")}`);

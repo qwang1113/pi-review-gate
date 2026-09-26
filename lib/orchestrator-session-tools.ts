@@ -165,8 +165,9 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     label: "Close A Child Session",
     description:
       "Settle a registered child (`childId`): it stops being supervised and stops blocking your " +
-      "`declare_done`, and its isolated checkout is settled (see `worktree`). Its WINDOW IS KEPT so the " +
-      "user can still read it; your own `declare_done` reclaims it with the rest of your tmux session. " +
+      "`declare_done`, and its isolated checkout is settled (see `worktree`). A child that reported done/idle " +
+      "KEEPS its window so the user can still read it (your own `declare_done` reclaims it); one that has " +
+      "not finished is ABORTED — its window is killed. " +
       "Nothing else is addressable: the user's own panes and other orchestrations' panes are refused.",
     parameters: Type.Object({
       childId: Type.Optional(Type.String()),

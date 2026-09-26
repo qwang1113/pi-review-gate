@@ -799,8 +799,10 @@ so the user can still read them — a plan audit that lived 26 seconds was
 never seen. The next round of the same role REUSES that window through its
 channel (same session id, an interrupt carrying the new round number); the
 gate's own audits no longer dispatch `fresh`. `orchestrator_close` SETTLES a
-child (`closedAt`, worktree keep/merge/discard) without killing its window, and
-a settled child is neither supervised nor counted as a live child. Everything
+child (`closedAt`, worktree keep/merge/discard) and keeps its window when the
+child reported `done`/`idle`; an unfinished child is still a writer, so closing
+it is an abort and its window is killed. A settled child is neither supervised
+nor counted as a live child. Everything
 is reclaimed in one place: `declare_done`'s judge cascade plus
 `closeOwnSession` (and the same session close on process exit). The cancel
 matrix still kills a CANCELLED sibling's pane — that is an abort, not a
