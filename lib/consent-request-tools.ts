@@ -75,6 +75,61 @@ function deny(text: string): ToolReply {
  */
 type ConsentTopic = "scope-limit" | "sensitive-edit" | "tmux-access";
 
+/** What one consent dialog came to. */
+export type ConsentOutcome =
+  | { outcome: "granted"; option: string }
+  | { outcome: "declined"; declineReason?: string }
+  /**
+   * NOBODY DECIDED: the dialog waited out its window and the proxy could not
+   * answer either. Deliberately NOT folded into `declined`.
+   */
+  | { outcome: "undecided" }
+  /**
+   * An instruct took the box down before anyone answered (2026-09-27,
+   * measured lock-out): the user never refused, so nothing may be locked.
+   */
+  | { outcome: "interrupted" }
+  | { outcome: "unshowable" };
+
+/**
+ * Turn the dialog's raw result into a consent outcome — pure, so the three
+ * "who said what" cases are unit-testable without a channel.
+ *
+ * Only an explicit refusal is `declined` (and therefore locks). An interrupt
+ * with no answer is `interrupted`; an interrupt that found an answer already
+ * on the channel arrives here as that answer (see `askThroughChannel`).
+ */
+export function classifyConsent(
+  result: { answer: string | undefined; by: string },
+  undecided: boolean,
+  spec: ChoiceSpec,
+  grants: readonly string[],
+): Exclude<ConsentOutcome, { outcome: "unshowable" }> {
+  if (undecided) return { outcome: "undecided" };
+  if (result.by === "interrupted" && result.answer === undefined) return { outcome: "interrupted" };
+  const pick = parseChoice(result.answer, spec);
+  // WHITELIST: only a row THIS tool called a grant authorizes anything — an
+  // unrecognized answer is a refusal, not a consent.
+  if (pick.kind === "chose" && grants.includes(pick.option)) {
+    return { outcome: "granted", option: pick.option };
+  }
+  // A refusal typed into the template's reason box is an objection the agent
+  // can act on — dropping it would make the user repeat themselves.
+  return {
+    outcome: "declined",
+    ...(pick.kind === "declined" && pick.reason ? { declineReason: pick.reason } : {}),
+  };
+}
+
+/** The reply for an interrupted consent dialog — the same for all three tools. */
+function interruptedReply(what: string): ToolReply {
+  return deny(
+    `review-gate: the ${what} dialog was INTERRUPTED by an incoming instruction before anyone answered. ` +
+    "**Nothing was decided and nothing is locked**: handle the instruction first, then call this tool again " +
+    "if you still need it — the dialog will be shown again.",
+  );
+}
+
 /**
  * THE ONE CONSENT DIALOG (2026-09-17, user decision — quality round P1: the
  * third consent tool had just copied the same ~30 lines again, and the file
@@ -108,17 +163,7 @@ async function askConsent(
     /** The rows that mean YES for this tool — the caller's own labels. */
     grants: readonly string[];
   },
-): Promise<
-  | { outcome: "granted"; option: string }
-  | { outcome: "declined"; declineReason?: string }
-  /**
-   * NOBODY DECIDED: the dialog waited out its window and the proxy could not
-   * answer either. Deliberately NOT folded into `declined` — see the flag's
-   * comment at the `askEitherSide` call below.
-   */
-  | { outcome: "undecided" }
-  | { outcome: "unshowable" }
-> {
+): Promise<ConsentOutcome> {
   const spec = opts.spec;
   // NO GRANT NAMED ⇒ there is nothing this tool may read as consent: fail
   // closed without rendering a box whose every answer would be a refusal.
@@ -164,19 +209,7 @@ async function askConsent(
         repo: deps.repoRoot(),
       }),
     );
-    if (undecided) return { outcome: "undecided" };
-    const pick = parseChoice(outcome.answer, spec);
-    // WHITELIST: only a row THIS tool called a grant authorizes anything — an
-    // unrecognized answer is a refusal, not a consent.
-    if (pick.kind === "chose" && opts.grants.includes(pick.option)) {
-      return { outcome: "granted", option: pick.option };
-    }
-    // A refusal typed into the template's reason box is an objection the agent
-    // can act on — dropping it would make the user repeat themselves.
-    return {
-      outcome: "declined",
-      ...(pick.kind === "declined" && pick.reason ? { declineReason: pick.reason } : {}),
-    };
+    return classifyConsent(outcome, undecided, spec, opts.grants);
   } catch {
     return { outcome: "unshowable" };
   }
@@ -293,6 +326,7 @@ export async function doRequestScopeLimit(
       "(pre-existing changes included), and this request is NOT locked — ask again when the user is back.",
     );
   }
+  if (consent.outcome === "interrupted") return interruptedReply("scope-limit");
   if (consent.outcome === "declined") {
     deps.declineScopeLimit();
     return deny(
@@ -428,6 +462,7 @@ export async function doRequestTmuxAccess(
       "when the user is back.",
     );
   }
+  if (consent.outcome === "interrupted") return interruptedReply("tmux-access");
   if (consent.outcome === "declined") {
     deps.declineTmuxAccess();
     return deny(
@@ -586,6 +621,7 @@ export async function doRequestSensitiveEdit(
       "again when the user is back, or let them apply the change themselves.",
     );
   }
+  if (consent.outcome === "interrupted") return interruptedReply(`sensitive-edit ("${raw}")`);
   if (consent.outcome === "declined") {
     deps.sensitiveDeclinedPaths.add(absPath);
     return deny(

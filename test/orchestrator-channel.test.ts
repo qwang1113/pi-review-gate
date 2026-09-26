@@ -630,6 +630,33 @@ test("an instruct interrupt dismisses an open dialog as INTERRUPTED, not as a hu
     "no request is left open for the child to wedge on");
 });
 
+test("an interrupt that lands with an answer already on the channel settles WITH that answer", async () => {
+  const io = memoryIO(() => T0);
+  // A poll that never comes round again: only the interrupt's own read can
+  // see the answer — the measured race (answer + steer in one millisecond).
+  const bind = binding(io, "c1", {
+    sleep: (_ms, signal) => new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })),
+  });
+  const interrupt = new AbortController();
+  const render = (signal: AbortSignal) => new Promise<string | undefined>((resolve) => {
+    signal.addEventListener("abort", () => resolve(undefined), { once: true });
+  });
+  const asking = askThroughChannel(bind, {
+    dialogKind: "select", topic: "tmux-access", title: "授权 tmux？", options: ["A. 允许", "B. 拒绝"], hasUI: true,
+  }, render, interrupt.signal);
+  await Promise.resolve();
+  const requestId = projectChannel(readChannel(io, channelPathFor(ORCH, "c1", HOME)).records).openRequests[0]!.requestId;
+
+  appendRecord(io, bind.target, { kind: "answer", from: "orchestrator", at: new Date(T0).toISOString(), requestId, answer: "A. 允许" });
+  interrupt.abort();
+  const outcome = await asking;
+
+  assert.equal(outcome.answer, "A. 允许", "the answer written before the interrupt is not lost");
+  assert.equal(outcome.by, "orchestrator");
+  const settled = readChannel(io, channelPathFor(ORCH, "c1", HOME)).records.find((r) => r.kind === "request-settled");
+  assert.equal((settled as { by: string }).by, "orchestrator");
+});
+
 test("an interrupt fired BEFORE the dialog opened does not kill a later dialog", async () => {
   const io = memoryIO(() => T0);
   // The drain aborted the OLD controller and installed a FRESH one.

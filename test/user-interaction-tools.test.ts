@@ -9,6 +9,7 @@ import {
   type UserInteractionToolDeps,
 } from "../lib/user-interaction-tools.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
+import { classifyConsent } from "../lib/consent-request-tools.ts";
 import type { ChoiceSpec } from "../lib/choice-dialog.ts";
 import { BACK_ROW, DECLINE_ROW } from "../lib/choice-dialog.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
@@ -243,6 +244,41 @@ test("request_tmux_access: the recommendation is the NARROW grant", async () => 
   assert.equal(spec.recommended, TMUX_ONCE);
   assert.deepEqual(spec.options, [TMUX_SESSION, TMUX_ONCE, "拒绝"]);
   assert.ok(spec.options.includes(spec.recommended), "the recommendation must be one of the options");
+});
+
+test("classifyConsent: interrupt with an answer grants, interrupt without one is undecided, a refusal declines", () => {
+  const spec: ChoiceSpec = { title: "t", options: [TMUX_SESSION, TMUX_ONCE, "拒绝"], recommended: TMUX_ONCE };
+  const grants = [TMUX_SESSION, TMUX_ONCE];
+  // askThroughChannel reports an answer found at interrupt time as the manager's.
+  assert.deepEqual(classifyConsent({ answer: `A. ${TMUX_SESSION}`, by: "orchestrator" }, false, spec, grants),
+    { outcome: "granted", option: TMUX_SESSION });
+  assert.deepEqual(classifyConsent({ answer: undefined, by: "interrupted" }, false, spec, grants), { outcome: "interrupted" });
+  assert.equal(classifyConsent({ answer: "拒绝", by: "human" }, false, spec, grants).outcome, "declined");
+  assert.equal(classifyConsent({ answer: undefined, by: "dismissed" }, false, spec, grants).outcome, "declined");
+});
+
+test("consent tools: an INTERRUPTED dialog locks nothing, and asking again shows the dialog again", async () => {
+  const f = fake();
+  let interruptNext = true;
+  f.deps.askEitherSide = async (request) => {
+    f.asked.push(request.title);
+    if (interruptNext) return { answer: undefined, by: "interrupted", requestId: "r1" };
+    return { answer: request.options[0], by: "orchestrator", requestId: "r2" };
+  };
+  const stopped = await call(f, "request_tmux_access", { reason: "x" });
+  assert.equal(stopped.isError, true);
+  assert.match(stopped.content[0]!.text, /INTERRUPTED/);
+  assert.equal(f.tmuxDeclined, false, "an interrupt is not a refusal");
+  assert.equal(f.st.tmuxAccess, undefined, "and not a grant either");
+
+  const path = join("/tmp", ".env");
+  await call(f, "request_sensitive_edit", { path, reason: "x" });
+  assert.equal(f.declined.size, 0, "the sensitive path is not locked");
+
+  interruptNext = false;
+  const again = await call(f, "request_tmux_access", { reason: "x" });
+  assert.equal(f.asked.length, 3, "the re-request raised a dialog again");
+  assert.equal(again.details?.scope, "session");
 });
 
 test("request_tmux_access: 'once' is a different scope, and a refusal locks the session", async () => {
