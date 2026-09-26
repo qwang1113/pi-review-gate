@@ -24,6 +24,12 @@ import {
   HANDOFF_FILL_HEADING,
   HANDOFF_FILL_PLACEHOLDER,
   HANDOFF_PERCENT,
+  lastUserMessages,
+  recentUserSection,
+  successorDoneRefusal,
+  withRecentUserMessages,
+  RECENT_USER_HEADING,
+  RECENT_USER_MAX_CHARS,
 } from "../lib/session-handoff.ts";
 
 test("the reading prefers pi's percent, and falls back to tokens / window", () => {
@@ -170,4 +176,64 @@ test("the reminder names the document and the tool, and asks for the paragraph f
   });
   assert.match(written, /随时可以调/);
   assert.doesNotMatch(written, /先把你自己的那一段/);
+});
+
+const userMsg = (content: unknown) => ({ type: "message", message: { role: "user", content } });
+
+test("lastUserMessages: the last n user texts, oldest first; other roles and non-text skipped", () => {
+  const entries = [
+    userMsg("第一条"),
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "助手" }] } },
+    userMsg([{ type: "text", text: "第二条" }]),
+    userMsg([{ type: "image", data: "xx" }]),
+    { type: "compaction", summary: "s" },
+    userMsg([{ type: "text", text: "第三条" }, { type: "image" }, { type: "text", text: "续" }]),
+    userMsg("再加一个任务：修 X"),
+  ];
+  assert.deepEqual(lastUserMessages(entries, 3), ["第二条", "第三条\n续", "再加一个任务：修 X"]);
+  assert.deepEqual(lastUserMessages([], 3), []);
+});
+
+test("lastUserMessages: exactly the limit is kept whole, one more is cut and says so", () => {
+  const exact = "字".repeat(RECENT_USER_MAX_CHARS);
+  assert.equal(lastUserMessages([userMsg(exact)], 3)[0], exact);
+  const over = lastUserMessages([userMsg("字".repeat(RECENT_USER_MAX_CHARS + 1))], 3)[0]!;
+  assert.ok(over.startsWith(exact));
+  assert.match(over, new RegExp(`已截断，原文 ${RECENT_USER_MAX_CHARS + 1} 字`));
+});
+
+test("the document carries the user's last words, or says there were none", () => {
+  const doc = buildHandoffDoc({ kind: "orchestrator", sessionId: "s1", repoRoot: "/repo", recentUserMessages: ["再加一个任务：修 X"] });
+  assert.ok(doc.indexOf(RECENT_USER_HEADING) < doc.indexOf(HANDOFF_FILL_HEADING));
+  assert.match(recentUserSection(doc)!, /> 再加一个任务：修 X/);
+  const empty = buildHandoffDoc({ kind: "loop", sessionId: "s1", repoRoot: "/repo" });
+  assert.match(recentUserSection(empty)!, /没有记录到用户消息/);
+});
+
+test("refreshing the user section keeps the agent's paragraph — even when a message holds a heading", () => {
+  const filled = buildHandoffDoc({ kind: "loop", sessionId: "s1", repoRoot: "/repo", recentUserMessages: ["旧的"] })
+    .replace(HANDOFF_FILL_PLACEHOLDER, "我的补充");
+  const once = withRecentUserMessages(filled, ["## 不是标题\n新的"]);
+  const twice = withRecentUserMessages(once, ["最新"]);
+  assert.match(twice, /我的补充/);
+  assert.match(recentUserSection(twice)!, /> 最新/);
+  assert.doesNotMatch(twice, /旧的|新的/);
+  assert.equal(twice.split(RECENT_USER_HEADING).length, 2, "one section, never duplicated");
+  // A document from before this section existed gets it before the paragraph.
+  const legacy = `# x\n\n${HANDOFF_FILL_HEADING}\n\n我的补充\n`;
+  const upgraded = withRecentUserMessages(legacy, ["要求"]);
+  assert.ok(upgraded.indexOf(RECENT_USER_HEADING) < upgraded.indexOf(HANDOFF_FILL_HEADING));
+  assert.match(upgraded, /我的补充/);
+});
+
+test("a successor's first declare_done is refused once, pasting the user's last words", () => {
+  const doc = buildHandoffDoc({ kind: "orchestrator", sessionId: "s1", repoRoot: "/repo", recentUserMessages: ["再加一个任务：修 X"] });
+  const refusal = successorDoneRefusal({ isSuccessor: true, checked: false, docPath: "/repo/.pi/handoff/s1.md", doc });
+  assert.ok(refusal);
+  assert.match(refusal!, /再加一个任务：修 X/);
+  assert.match(refusal!, /\/repo\/\.pi\/handoff\/s1\.md/);
+  assert.equal(successorDoneRefusal({ isSuccessor: true, checked: true, doc }), undefined, "only once");
+  assert.equal(successorDoneRefusal({ isSuccessor: false, checked: false, doc }), undefined, "not a successor");
+  assert.match(successorDoneRefusal({ isSuccessor: true, checked: false })!, /transcript/,
+    "an unreadable document still refuses, pointing at the transcript");
 });

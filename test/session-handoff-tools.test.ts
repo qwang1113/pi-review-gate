@@ -24,7 +24,15 @@ import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 import { STATION_CAP_ENV } from "../lib/repo-pr-policy.ts";
 import { ACCEPTANCE_GATE_ENV } from "../lib/acceptance-round.ts";
-import { HANDOFF_FILL_PLACEHOLDER } from "../lib/session-handoff.ts";
+import { HANDOFF_FILL_PLACEHOLDER, recentUserSection } from "../lib/session-handoff.ts";
+
+/** Write the skeleton, then fill the agent's paragraph — what a proper handover looks like. */
+async function fillDoc(deps: SessionHandoffDeps, files: Map<string, string>): Promise<string> {
+  await runSessionHandoff(deps);
+  const docPath = handoffDocPath("/repo", "session-1");
+  files.set(docPath, files.get(docPath)!.replace(HANDOFF_FILL_PLACEHOLDER, "我自己写的补充"));
+  return docPath;
+}
 
 function fakeDeps(overrides: Partial<SessionHandoffDeps> = {}): {
   deps: SessionHandoffDeps;
@@ -54,27 +62,48 @@ function fakeDeps(overrides: Partial<SessionHandoffDeps> = {}): {
   return { deps: base, files, events };
 }
 
-test("a handover writes the document, opens the successor, then goes silent — in that order", async () => {
-  const { deps, files, events } = fakeDeps();
+test("a BLANK handover is refused: the skeleton is written, nothing is retired or opened", async () => {
+  const { deps, files, events } = fakeDeps({ recentUserMessages: () => ["再加一个任务：修 X"] });
   const receipt = await runSessionHandoff(deps);
-  assert.equal(receipt.isError, undefined, receipt.content[0]!.text);
+  assert.equal(receipt.isError, true);
+  assert.match(receipt.content[0]!.text, /交接被拒/);
+  assert.match(receipt.content[0]!.text, /\.pi\/handoff\/session-1\.md/, "it names the document to write");
+  assert.match(receipt.content[0]!.text, /用户最新提的/);
+  assert.deepEqual(events, [], "no retire, no pane");
 
-  const docPath = handoffDocPath("/repo", "session-1");
-  const doc = files.get(docPath);
-  assert.ok(doc, "the skeleton is written before the successor is told to read it");
+  const doc = files.get(handoffDocPath("/repo", "session-1"));
+  assert.ok(doc, "the skeleton is there for the agent to fill");
   assert.match(doc!, /goal: 修好交接/);
   assert.match(doc!, /- 未提交改动：lib\/x\.ts/);
   assert.match(doc!, /\/sessions\/session-1\.jsonl/);
+  assert.match(recentUserSection(doc!)!, /再加一个任务：修 X/);
+});
 
+test("a filled handover opens the successor, then goes silent — in that order", async () => {
+  const { deps, files, events } = fakeDeps();
+  await fillDoc(deps, files);
+  const receipt = await runSessionHandoff(deps);
+  assert.equal(receipt.isError, undefined, receipt.content[0]!.text);
   assert.deepEqual(events, ["open", "committed"], "retire happens before the open, silence only after it succeeded");
   assert.match(receipt.content[0]!.text, /%9/);
   assert.match(receipt.content[0]!.text, /session-1-h1/, "the successor id is derived from ours");
   assert.match(receipt.content[0]!.text, /只读静默/);
-  assert.match(receipt.content[0]!.text, /补充段还是占位/, "the receipt says the agent's half is still missing");
+  assert.match(receipt.content[0]!.text, /补充段已写/);
+});
+
+test("the user section is refreshed at the call — what they said after the skeleton was written", async () => {
+  let said = ["早先的要求"];
+  const { deps, files } = fakeDeps({ recentUserMessages: () => said });
+  const docPath = await fillDoc(deps, files);
+  said = ["早先的要求", "刚说的新需求"];
+  await runSessionHandoff(deps);
+  assert.match(recentUserSection(files.get(docPath)!)!, /刚说的新需求/);
+  assert.match(files.get(docPath)!, /我自己写的补充/, "the paragraph survives the refresh");
 });
 
 test("the successor's FIRST MESSAGE points at the document, and its ENV carries the mode", async () => {
-  const { deps } = fakeDeps();
+  const { deps, files } = fakeDeps();
+  await fillDoc(deps, files);
   let command: readonly string[] = [];
   let env: Readonly<Record<string, string>> = {};
   await runSessionHandoff({
@@ -100,9 +129,10 @@ test("the successor's FIRST MESSAGE points at the document, and its ENV carries 
 });
 
 test("a pane that cannot be opened rolls the retirement back and names the failure", async () => {
-  const { deps, events } = fakeDeps({
+  const { deps, events, files } = fakeDeps({
     openSuccessor: async () => { events.push("open"); return { ok: false, error: "no space for new pane" }; },
   });
+  await fillDoc(deps, files);
   const receipt = await runSessionHandoff(deps);
   assert.equal(receipt.isError, true);
   assert.match(receipt.content[0]!.text, /no space for new pane/);
@@ -111,9 +141,10 @@ test("a pane that cannot be opened rolls the retirement back and names the failu
 });
 
 test("a throw from the pane layer is a rollback too, not a half-retired session", async () => {
-  const { deps, events } = fakeDeps({
+  const { deps, events, files } = fakeDeps({
     openSuccessor: async () => { throw new Error("tmux runner exploded"); },
   });
+  await fillDoc(deps, files);
   const receipt = await runSessionHandoff(deps);
   assert.equal(receipt.isError, true);
   assert.match(receipt.content[0]!.text, /tmux runner exploded/);
@@ -125,7 +156,9 @@ test("no session id or no pane is a refusal, never a silent no-op", async () => 
   assert.equal(noId.isError, true);
   assert.match(noId.content[0]!.text, /没有 session id/);
 
-  const noPane = await runSessionHandoff(fakeDeps({ ownPane: () => undefined }).deps);
+  const paneless = fakeDeps({ ownPane: () => undefined });
+  await fillDoc(paneless.deps, paneless.files);
+  const noPane = await runSessionHandoff(paneless.deps);
   assert.equal(noPane.isError, true);
   assert.match(noPane.content[0]!.text, /tmux pane/);
 });
@@ -233,6 +266,7 @@ test("a judge delegates the pane work through `requestSuccession`, and opens not
   });
   const receipt = await runSessionHandoff(deps);
   assert.equal(receipt.isError, undefined);
-  assert.deepEqual(events, ["request:true"], "the judge opens nothing: the opener owns its pane");
+  assert.deepEqual(events, ["request:true"],
+    "the judge opens nothing: the opener owns its pane — and a blank paragraph does not stop it (no edit/write)");
   assert.match(receipt.content[0]!.text, /请停下/);
 });

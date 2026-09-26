@@ -24,6 +24,8 @@ import { headCommitTree, unreviewedTreesSince } from "./repo-facts.ts";
 import { resetLoopBudget, type SessionCells } from "./session-cells.ts";
 import { closeSessionWindow } from "./session-factory.ts";
 import { readInheritance } from "./session-inheritance.ts";
+import { successorDoneRefusal } from "./session-handoff.ts";
+import { existsSync, readFileSync } from "node:fs";
 import { closeOwnSession, type TmuxScope } from "./session-tmux-scope.ts";
 import { hasUnpushedCommits, probeOpenPr, type OpenPrArrival } from "./station-pr-evidence.ts";
 import { isEnforcedMode } from "./task-mode.ts";
@@ -56,6 +58,9 @@ export interface DeclareDoneToolDeps {
 }
 
 export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, deps: DeclareDoneToolDeps): void {
+  // This module's own once-flag (lib/session-cells.ts: single-owner state stays
+  // private). Not persisted — a restart refusing once more is the safe side.
+  let successorChecked = false;
   host.registerTool({
     name: "declare_done",
     label: "Declare Done",
@@ -86,6 +91,24 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
         };
       }
       const state = cells.state;
+      // A SUCCESSOR CHECKS ITS PREDECESSOR'S LAST USER MESSAGES FIRST (2026-09-26).
+      if (state.taskMode !== "normal") {
+        const inherited = readInheritance();
+        const docPath = inherited.handoffDoc;
+        let doc: string | undefined;
+        try { doc = docPath && existsSync(docPath) ? readFileSync(docPath, "utf8") : undefined; } catch { doc = undefined; }
+        const refusal = successorDoneRefusal({
+          isSuccessor: docPath !== undefined,
+          checked: successorChecked,
+          ...(docPath === undefined ? {} : { docPath }),
+          ...(doc === undefined ? {} : { doc }),
+        });
+        if (refusal) {
+          successorChecked = true;
+          progress.fail("接任者核对");
+          return { content: [{ type: "text", text: refusal }], details: { accepted: false, successorCheck: true }, isError: true };
+        }
+      }
       const primaryRepoRoot = cells.primaryRepoRoot;
       // R-30 — THE ORCHESTRATOR'S EXIT CONTRACT IS THE PLAN, and it is the
       // ONE the status tool already reports. Measured on 2026-08-30: with

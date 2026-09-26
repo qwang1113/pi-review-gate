@@ -33,7 +33,14 @@ import type { SessionCells } from "./session-cells.ts";
 import { sessionDirForCwd } from "./session-dir.ts";
 import { closeSessionPane, openSessionWindow } from "./session-factory.ts";
 import { claimsMainSidecar } from "./session-exclusivity.ts";
-import { handoffAccepted, handoffDue, handoffReminder, type HandoffSessionKind } from "./session-handoff.ts";
+import {
+  handoffAccepted,
+  handoffDue,
+  handoffReminder,
+  lastUserMessages,
+  RECENT_USER_COUNT,
+  type HandoffSessionKind,
+} from "./session-handoff.ts";
 import {
   ensureHandoffDoc,
   handoffDocPath,
@@ -286,6 +293,11 @@ export function createHandoffHost(
     transcriptPath: ownTranscriptPath,
     docPath: (sessionId) => handoffDocPath(cells.cwd, sessionId),
     docFacts: handoffDocFacts,
+    recentUserMessages: () => {
+      try {
+        return lastUserMessages(cells.latestCtx?.sessionManager?.getBranch?.() ?? [], RECENT_USER_COUNT);
+      } catch { return []; }
+    },
     writeText: (path, text) => {
       mkdirSync(pathJoin(path, ".."), { recursive: true });
       writeFileSync(path, text, "utf8");

@@ -51,11 +51,14 @@ import {
   buildHandoffDoc,
   formatContextStatus,
   handoffDocFilled,
+  HANDOFF_FILL_HEADING,
   HANDOFF_PERCENT,
   readContext,
+  withRecentUserMessages,
   type HandoffSessionKind,
 } from "./session-handoff.ts";
 import { handoffGeneration, successorEnv, successorSessionId } from "./session-inheritance.ts";
+import { buildRejection } from "./rejection-copy.ts";
 
 /** The pane a successor is started in — built by the caller, opened by the caller. */
 export interface SuccessorPaneSpec {
@@ -78,6 +81,8 @@ export interface SessionHandoffDeps {
   docPath(sessionId: string): string;
   /** The mechanical facts the document states (contract, outstanding work). */
   docFacts(): { contract?: string; outstanding?: string[] };
+  /** The session's last user messages, verbatim (lib/session-handoff.ts `lastUserMessages`). */
+  recentUserMessages?(): string[];
   writeText(path: string, text: string): void;
   readText(path: string): string | undefined;
   openSuccessor(spec: SuccessorPaneSpec): Promise<{ ok: true; paneId: string } | { ok: false; error: string }>;
@@ -158,6 +163,7 @@ export function ensureHandoffDoc(deps: SessionHandoffDeps, sessionId: string, do
       ...(facts.contract === undefined ? {} : { contract: facts.contract }),
       ...(facts.outstanding === undefined ? {} : { outstanding: facts.outstanding }),
       ...(deps.transcriptPath() === undefined ? {} : { transcriptPath: deps.transcriptPath() }),
+      recentUserMessages: deps.recentUserMessages?.() ?? [],
       firstAction: firstActionFor(deps.kind()),
       now: new Date(deps.now()).toISOString(),
     }));
@@ -181,8 +187,29 @@ export async function runSessionHandoff(deps: SessionHandoffDeps): Promise<ToolR
   let doc: { created: boolean; pendingFill: boolean };
   try {
     doc = ensureHandoffDoc(deps, sessionId, docPath);
+    // A document written at the 70% reminder predates whatever the user said
+    // since — refresh the user's own words on every call.
+    if (!doc.created && deps.recentUserMessages) {
+      deps.writeText(docPath, withRecentUserMessages(deps.readText(docPath) ?? "", deps.recentUserMessages()));
+    }
   } catch (error) {
     return fail(`review-gate: 写交接文档失败 —— ${(error as Error).message}`);
+  }
+
+  // NO BLANK HANDOVERS (2026-09-26, measured): a successor that got only the
+  // mechanical frame lost the user's newest requirement and stopped. A judge is
+  // exempt — it runs without edit/write and could never fill the paragraph.
+  if (kind !== "judge" && doc.pendingFill) {
+    return fail(
+      buildRejection({
+        what: "交接被拒 —— 没有开任何 pane，你仍然是持有者",
+        why: `交接文档 \`${docPath}\` 的「${HANDOFF_FILL_HEADING.replace(/^## /, "")}」段还是占位。`,
+        by: "agent",
+        next: "把占位文字替换成你自己的一段：为什么这么做、踩过哪些坑、下一步是什么 —— " +
+          "**尤其是用户最新提的、还没落进契约/plan 的要求**，再调 `session_handoff()`。",
+      }),
+      { docPath, kind, pendingFill: true },
+    );
   }
 
   if (kind === "judge") {
@@ -244,7 +271,7 @@ export async function runSessionHandoff(deps: SessionHandoffDeps): Promise<ToolR
     retirement?.committed();
     return reply(
       `review-gate: 接任会话已在 pane ${opened.paneId} 启动（session ${successorId}）。\n` +
-      `- 交接文档：\`${docPath}\`${doc.pendingFill ? `（**你的补充段还是占位** —— 现在补还来得及，补完继任者会再读一次）` : "（补充段已写）"}\n` +
+      `- 交接文档：\`${docPath}\`（补充段已写）\n` +
       `- 继任者拿到的第一条消息已经指向这份文档，它会先读它再动手。\n` +
       "**接下来你进入只读静默**：不要再动手。门禁确认它接手后会自动关掉你这个 pane。",
       { paneId: opened.paneId, successorId, docPath, kind },

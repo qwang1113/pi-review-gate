@@ -354,4 +354,8 @@ test("F13: an orchestrator's exit block is the PLAN, with no loop-goal or review
   assert.doesNotMatch(block, /改完就送审/, "the loop block's own imperative never reaches this role");
 
   assert.match(buildOrchestratorExitBlock([]), /没有未决项/);
+  // A successor read "plan done ⇒ declare_done" over an old plan and stopped
+  // while the user's newest requirement was never in it (2026-09-26).
+  assert.doesNotMatch(buildOrchestratorExitBlock([]), /plan 做完就可以/);
+  assert.match(buildOrchestratorExitBlock([]), /用户最新提的要求都已经进了 plan/);
 });

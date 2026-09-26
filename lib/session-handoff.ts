@@ -30,6 +30,8 @@
  * argument, which is what makes each rule unit-testable.
  */
 
+import { buildRejection } from "./rejection-copy.ts";
+
 /**
  * Context percentage at which a session is told to hand over.
  *
@@ -66,7 +68,8 @@ export interface ContextReadout {
   percent?: number;
 }
 
-export function readContext(usage: unknown): ContextReadout {  if (typeof usage !== "object" || usage === null) return {};
+export function readContext(usage: unknown): ContextReadout {
+  if (typeof usage !== "object" || usage === null) return {};
   const value = usage as { tokens?: unknown; contextWindow?: unknown; percent?: unknown };
   const tokens =
     typeof value.tokens === "number" && Number.isFinite(value.tokens) ? value.tokens : undefined;
@@ -216,6 +219,8 @@ export interface HandoffDocFacts {
   firstAction?: string;
   /** ISO timestamp, injected (this module has no clock). */
   now?: string;
+  /** The predecessor's last user messages, verbatim (see `lastUserMessages`). */
+  recentUserMessages?: string[];
 }
 
 /** The four kinds of session that can hand over. */
@@ -259,6 +264,10 @@ export function buildHandoffDoc(facts: HandoffDocFacts): string {
     "",
     ...(facts.outstanding?.length ? facts.outstanding.map((line) => `- ${line}`) : ["- （门禁没有记录到未完成项）"]),
     "",
+    RECENT_USER_HEADING,
+    "",
+    renderRecentUserMessages(facts.recentUserMessages ?? []),
+    "",
     HANDOFF_FILL_HEADING,
     "",
     HANDOFF_FILL_PLACEHOLDER,
@@ -277,6 +286,121 @@ export function buildHandoffDoc(facts: HandoffDocFacts): string {
  */
 export function handoffDocFilled(doc: string): boolean {
   return !String(doc ?? "").includes(HANDOFF_FILL_PLACEHOLDER);
+}
+
+/**
+ * THE USER'S OWN WORDS, carried across the handover (2026-09-26, measured).
+ *
+ * A project manager handed over without writing its paragraph; the document
+ * held only an old plan with every task done, and the requirement the user had
+ * JUST given never reached the successor, which read "plan done ⇒ declare_done"
+ * and stopped. The contract and outstanding list are what the gate recorded —
+ * a requirement spoken a minute ago is in neither. The last user messages are.
+ */
+export const RECENT_USER_HEADING = "## 前任最后的用户消息（原文）";
+
+/** How many user messages the document carries, and how long each may be. */
+export const RECENT_USER_COUNT = 3;
+export const RECENT_USER_MAX_CHARS = 2000;
+
+const NO_RECENT_USER = "（没有记录到用户消息）";
+
+/**
+ * The last `n` user messages in a session's entries, oldest first, as text.
+ *
+ * Entries are pi's session entries (`{type:"message", message:{role, content}}`,
+ * content a string or a block array). Non-text blocks are skipped; a message
+ * with no text at all is not counted. Over `RECENT_USER_MAX_CHARS` characters
+ * the text is cut and says so — the transcript keeps the rest.
+ */
+export function lastUserMessages(entries: readonly unknown[], n: number): string[] {
+  const texts: string[] = [];
+  for (const entry of entries ?? []) {
+    const message = (entry as { type?: unknown; message?: { role?: unknown; content?: unknown } } | null);
+    if (message?.type !== "message" || message.message?.role !== "user") continue;
+    const content = message.message.content;
+    const text = typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+          .filter((b): b is { type: "text"; text: string } => b?.type === "text" && typeof b.text === "string")
+          .map((b) => b.text)
+          .join("\n")
+        : "";
+    if (text.trim()) texts.push(text);
+  }
+  return texts.slice(Math.max(0, texts.length - n)).map((text) => {
+    const chars = [...text];
+    return chars.length <= RECENT_USER_MAX_CHARS
+      ? text
+      : chars.slice(0, RECENT_USER_MAX_CHARS).join("") + `\n（已截断，原文 ${chars.length} 字，全文见 transcript）`;
+  });
+}
+
+/**
+ * Quoted, so a message that itself contains a `## ` line cannot end the
+ * section early when `withRecentUserMessages` looks for the next heading.
+ */
+function renderRecentUserMessages(messages: readonly string[]): string {
+  if (messages.length === 0) return NO_RECENT_USER;
+  return messages
+    .map((text, i) => [`### ${i + 1} / ${messages.length}`, "", ...text.split("\n").map((line) => `> ${line}`)].join("\n"))
+    .join("\n\n");
+}
+
+/** The section's body, or undefined when the document has none. */
+export function recentUserSection(doc: string): string | undefined {
+  const start = doc.indexOf(RECENT_USER_HEADING);
+  if (start < 0) return undefined;
+  const bodyStart = start + RECENT_USER_HEADING.length;
+  const next = doc.indexOf("\n## ", bodyStart);
+  return doc.slice(bodyStart, next < 0 ? doc.length : next).trim();
+}
+
+/**
+ * Refresh the section in an EXISTING document without touching anything else.
+ *
+ * The skeleton is often written at the 70% reminder, well before the call —
+ * and the incident's requirement arrived in between. A document without the
+ * section gets it inserted before the agent's paragraph.
+ */
+export function withRecentUserMessages(doc: string, messages: readonly string[]): string {
+  const block = `${RECENT_USER_HEADING}\n\n${renderRecentUserMessages(messages)}\n`;
+  const start = doc.indexOf(RECENT_USER_HEADING);
+  if (start >= 0) {
+    const next = doc.indexOf("\n## ", start + RECENT_USER_HEADING.length);
+    return doc.slice(0, start) + block + (next < 0 ? "" : doc.slice(next));
+  }
+  const fill = doc.indexOf(HANDOFF_FILL_HEADING);
+  return fill < 0 ? `${doc.trimEnd()}\n\n${block}` : doc.slice(0, fill) + block + "\n" + doc.slice(fill);
+}
+
+/**
+ * A SUCCESSOR'S FIRST `declare_done` IS REFUSED ONCE (2026-09-26).
+ *
+ * The refusal IS the check: it pastes the predecessor's last user messages
+ * back and asks for each to be confirmed handled. Counting tool calls would
+ * not have caught the incident — that successor had read the document and
+ * attached before it stopped. `checked` is the caller's once-flag.
+ */
+export function successorDoneRefusal(input: {
+  isSuccessor: boolean;
+  checked: boolean;
+  docPath?: string;
+  doc?: string;
+}): string | undefined {
+  if (!input.isSuccessor || input.checked) return undefined;
+  const section = input.doc === undefined ? undefined : recentUserSection(input.doc);
+  const where = input.docPath ? ` \`${input.docPath}\`` : "";
+  return buildRejection({
+    what: "declare_done 被拒一次 —— 你是接任会话，收工前先核对前任最后的用户消息",
+    why: section
+      ? `交接文档${where}里记录的最后几条用户消息（原文）：\n\n${section}\n`
+      : `交接文档${where}里读不到「前任最后的用户消息」段 —— 去前任 transcript 里找最后几条用户消息。`,
+    by: "agent",
+    next: "逐条确认每条里的要求都已做完（或已进 plan、已派出），没有被旧契约漏掉；" +
+      "没做完就接着做，都处理了再调一次 `declare_done`（这条核对只拦一次）。",
+  });
 }
 
 /**

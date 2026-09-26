@@ -253,7 +253,12 @@ export function buildOrchestratorExitBlock(problems: readonly string[]): string 
     "收尾用 `declare_done` —— 门禁会重新校验：plan 无未完成任务、没有活着的子会话、" +
     "没有「登记了却从未通知用户」的决策。";
   if (problems.length === 0) {
-    return head + "\n\n现在没有未决项：plan 做完就可以 `declare_done`。";
+    // NOT "plan done ⇒ declare_done" (2026-09-26, measured): a successor read
+    // that over an old all-done plan and stopped while the user's newest
+    // requirement was never in the plan at all.
+    return head +
+      "\n\n门禁记录里没有未决项。但 plan 全 done 不等于用户要的都做了：" +
+      "先确认用户最新提的要求都已经进了 plan（没进就先加任务），再 `declare_done`。";
   }
   return (
     head +
