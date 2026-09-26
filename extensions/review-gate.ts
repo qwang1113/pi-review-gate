@@ -775,7 +775,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** THE SESSION'S RUNTIME CLOCKS (lib/orchestrator-runtime-host.ts). */
   const {
     orchestrationDoneProblems, orchestratorSettled, startRevivalTimer, stopRevivalTimer, stopSupervisionTimer,
-    startSessionNamingHeartbeat, stopSessionNamingHeartbeat, handedOff, markHandedOff,
+    startSessionNamingHeartbeat, stopSessionNamingHeartbeat, startPaneState, handedOff, markHandedOff,
     resetOrchestratorContinuations,
   } = createOrchestratorRuntime(host, {
     pi,
@@ -1361,7 +1361,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     applySessionExclusivity,
     releaseWorktree,
     stopExclusivityRecheck,
-    runtime: () => ({ stopSupervisionTimer, stopRevivalTimer, startSessionNamingHeartbeat, stopSessionNamingHeartbeat }),
+    runtime: () => ({ stopSupervisionTimer, stopRevivalTimer, startSessionNamingHeartbeat, stopSessionNamingHeartbeat, startPaneState }),
     cancelChildWaitTimer: () => l2.cancelChildWaitTimer(),
     notify: notifyRuntime,
     naming: sessionNaming,

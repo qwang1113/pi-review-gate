@@ -37,12 +37,16 @@ test("append: once, then already; a moved package updates our line in place", ()
 });
 
 test("a user binding of e is never overridden", () => {
-  for (const own of ["bind e split-window", "bind-key -r e resize-pane", "  bind e"]) {
+  for (const own of [
+    "bind e split-window", "bind-key -r e resize-pane", "  bind e",
+    "bind-key -T prefix e display-message mine", "bind -N \"my note\" e x", "bind -r -T prefix e x",
+  ]) {
     const result = appendSidebarBind(`${USER_CONF}${own}\n`, LINE);
     assert.equal(result.status, "conflict", own);
     assert.equal(result.text, `${USER_CONF}${own}\n`);
   }
   assert.equal(appendSidebarBind("bind enter x\n", LINE).status, "appended", "only the key e itself");
+  assert.equal(appendSidebarBind("bind -T prefix E x\n", LINE).status, "appended", "E is another key");
 });
 
 test("install: backup on the first change only, missing file, node_modules and quoted paths skipped", () => {

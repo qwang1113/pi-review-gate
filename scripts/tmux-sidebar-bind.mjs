@@ -21,8 +21,13 @@ import { join, resolve, sep } from "node:path";
 /** The comment that marks OUR line, so a rerun finds and refreshes it. */
 export const SIDEBAR_BIND_MARKER = "# pi-review-gate: tmux sidebar (prefix + e)";
 
-/** A user binding of `e` that is not ours: `bind e`, `bind-key -r e`, … */
-const USER_BIND_E = /^\s*bind(?:-key)?\s+(?:-\S+\s+)*e(?:\s|$)/;
+/**
+ * A user binding of `e` that is not ours: `bind e`, `bind-key -r e`,
+ * `bind -T prefix e`, `bind -N "note" e` — flags that take an argument
+ * (`-T table`, `-N note`) consume it. Any table counts: a conservative match
+ * only ever leaves the config alone.
+ */
+const USER_BIND_E = /^\s*bind(?:-key)?\s+(?:(?:-[TN]\s+(?:"[^"]*"|'[^']*'|\S+)|-[a-zA-Z]+)\s+)*e(?:\s|$)/;
 
 /** The line itself; formats (`#{pane_id}`) are expanded by run-shell. */
 export function sidebarBindLine(node, script) {

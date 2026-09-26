@@ -466,8 +466,15 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     }, sessionNaming.heartbeatMs);
     // Never the reason the process stays alive.
     (sessionNamingTimer as unknown as { unref?: () => void }).unref?.();
-    // THE PANE STATE HAS ITS OWN, FASTER CLOCK (s1): the name's 30s is too late
-    // for "waiting for your answer"; the reporter only writes on a change.
+  }
+  /**
+   * THE PANE STATE HAS ITS OWN, FASTER CLOCK (s1): the name's 30s is too late
+   * for "waiting for your answer", and it starts for EVERY session — a pi in a
+   * non-git directory never reaches the naming heartbeat, yet it is still a pi
+   * session the sidebar must show (reviewer P1). Stopped with the heartbeat.
+   */
+  function startPaneState(): void {
+    if (paneStateTimer) return;
     const tickPane = (): void => { try { deps.paneState.tick(); } catch { /* display only */ } };
     tickPane();
     paneStateTimer = setInterval(tickPane, PANE_STATE_TICK_MS);
@@ -489,6 +496,7 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     stopSupervisionTimer,
     startSessionNamingHeartbeat,
     stopSessionNamingHeartbeat,
+    startPaneState,
     /** Has this session handed its work to a successor? */
     handedOff: (): boolean => handedOffSession,
     /** Phase two of a handover: from here nothing revives, supervises or reports. */
