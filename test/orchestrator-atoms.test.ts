@@ -57,7 +57,7 @@ test("F7: the task rides in on the argv as pi's own @file reference, under a sta
 });
 
 test("a recovery re-opens the SAME session id, with a note instead of the task", () => {
-  const argv = buildRecoverCommand("a-1", ".pi/tasks/note.md");
+  const argv = buildRecoverCommand(childSessionId("a-1"), ".pi/tasks/note.md");
   assert.deepEqual(argv, ["pi", "--session-id", "rg-child-a-1", "@.pi/tasks/note.md"]);
   const note = buildRecoveryNote({ childId: "a-1", taskId: "t1", reason: "pane 消失" });
   assert.match(note, /上面的对话历史就是你自己的/, "the transcript continues — it did not restart");

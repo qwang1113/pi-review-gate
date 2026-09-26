@@ -45,7 +45,7 @@ import { findOrphanWorktrees } from "./orchestrator-worktree.ts";
 import {
   buildRecoverCommand,
   buildRecoveryNote,
-  childSessionId,
+  recoverSessionId,
   taskFileName,
   taskFileRelPath,
 } from "./orchestrator-delivery.ts";
@@ -60,6 +60,7 @@ import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supe
 import {
   alivePanes,
   childAssets,
+  childReportedSessionIds,
   currentPlan,
   requireOrchestratorMode,
 } from "./orchestrator-tool-kit.ts";
@@ -259,6 +260,8 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   );
   if (!note.ok) return fail(`review-gate: 恢复说明写不出来（${note.error}）—— 什么都没做。`);
 
+  // A child that handed over lives on as its newest `-hN` successor.
+  const sessionId = recoverSessionId(child.id, childReportedSessionIds(deps, child.id));
   const self = deps.ownPane();
   if (!self) return fail("review-gate: 读不到自己的 pane（$TMUX_PANE），无法开新 pane。");
   const now = new Date(deps.now()).toISOString();
@@ -283,7 +286,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
       stationCap,
       acceptanceGate,
     },
-    command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
+    command: buildRecoverCommand(sessionId, taskFileRelPath(noteName)),
     decor: {
       label: childPaneLabel(child.taskId, recoveredTaskTitle(deps, child.taskId)),
       colorSeed: child.id,
@@ -320,14 +323,14 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
 
   const assets = childAssets(deps, child);
   return reply(
-    `review-gate: 子会话 ${childId} 已用同一个 session id（\`${childSessionId(childId)}\`）在 pane ${paneId} 重开 —— ` +
+    `review-gate: 子会话 ${childId} 已用同一个 session id（\`${sessionId}\`）在 pane ${paneId} 重开 —— ` +
     "它的 transcript 是接着上次的，不是从头来。\n" +
     `任务 ${child.taskId} 保持 running（它本来就没有停止成立）；登记表已指向新 pane。\n` +
     "它死前留下的资产：" +
     `${assets?.reviewVerdict ? `review 裁决 ${assets.reviewVerdict}` : ""}` +
     `${assets?.checkpoint ? `、checkpoint \`${assets.checkpoint.slice(0, 12)}\`` : ""}。\n` +
     "接着用 `orchestrator_wait` 等它 —— 它重开后会自己在通道上报状态。",
-    { childId, paneId, recovered: true, sessionId: childSessionId(childId) },
+    { childId, paneId, recovered: true, sessionId },
   );
 }
 

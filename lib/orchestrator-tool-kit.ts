@@ -456,14 +456,23 @@ export async function verifyJudgeBoot(
 
 
 
-/** Everything still outstanding on one child's channel. */
-export function childChannelProjection(deps: OrchestratorDeps, childId: string) {
+function childChannelRecords(deps: OrchestratorDeps, childId: string) {
   try {
     const path = channelPathFor(deps.runtime().orchestrationId, childId, deps.channelHome());
-    return projectChannel(readChannel(deps.channelIO(), path).records);
+    return readChannel(deps.channelIO(), path).records;
   } catch {
-    return projectChannel([]);
+    return [];
   }
+}
+
+/** Everything still outstanding on one child's channel. */
+export function childChannelProjection(deps: OrchestratorDeps, childId: string) {
+  return projectChannel(childChannelRecords(deps, childId));
+}
+
+/** Every session id that ever reported state on one child's channel. */
+export function childReportedSessionIds(deps: OrchestratorDeps, childId: string): string[] {
+  return childChannelRecords(deps, childId).flatMap((r) => (r.kind === "state" && r.sessionId ? [r.sessionId] : []));
 }
 
 

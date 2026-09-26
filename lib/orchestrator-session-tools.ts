@@ -251,14 +251,18 @@ async function doWait(
     // F14 — an unreadable pane list is UNKNOWN liveness, never a death.
     if (!panes.ok) return { paneAlive: false, livenessUnknown: true };
 
+    // Re-read AFTER the repoint above: judging liveness on the registry this
+    // probe started with would call a relayed child dead in the headline while
+    // the health block of the same receipt shows its successor working.
+    const current = deps.runtime();
     if (!childId) {
-      const live = open.filter((c) => panes.panes.includes(c.paneId));
+      const live = current.children.filter((c) => !c.closedAt && panes.panes.includes(c.paneId));
       return {
         paneAlive: live.length > 0,
         note: `${live.length} 个子会话在跑`,
       };
     }
-    const child = findChild(runtime, childId)!;
+    const child = findChild(current, childId)!;
     return {
       paneAlive: !child.closedAt && panes.panes.includes(child.paneId),
       note: `子会话 ${child.id} 仍在 pane ${child.paneId}`,
