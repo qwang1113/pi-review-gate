@@ -29,7 +29,8 @@ import {
   paneColorFor,
 } from "./orchestrator-pane-decor.ts";
 
-import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
+import type { PlanTask } from "./orchestrator-plan.ts";
+import { applyTaskStatus, scheduleNextTasks } from "./orchestrator-plan-progress.ts";
 import { deliveryStationLine } from "./delivery-station.ts";
 import { effectiveTaskStation, narrowingReasonFor } from "./repo-pr-policy.ts";
 import { acceptanceGateValue } from "./acceptance-round.ts";

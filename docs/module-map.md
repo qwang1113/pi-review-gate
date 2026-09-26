@@ -362,6 +362,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   `out-of-repo-paths.ts`（**仓库外 + 敏感路径**的越界判定；2026-09-17 随文件边界一起
   从 `orchestrator-boundaries.ts` 里留下）、
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
+  `orchestrator-plan-progress.ts`（任务状态机、调度与退出判定）、
   `orchestrator-plan-approval.ts`（**这次改动扩权了吗**——删任务、加依赖、降并行度、
   写回此前已获授权内容（批准世系）都不重新惊动用户，扩权一律重批）、
   `orchestrator-plan-audit.ts`（plan 的前置审计：任务模板、裁决绑定 canonical
@@ -551,7 +552,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 
 ---
 
-## 五、`lib/` 全量速查表（244 个模块）
+## 五、`lib/` 全量速查表（245 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -701,7 +702,8 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `user-notify-runtime.ts` | 通知的运行时半边（2026-09-17 拆出）：解析 `terminal-notifier` 的路径（开一次，退出路径不能再查 PATH）、本会话的 tmux 地址（惰性，只有真要发时才查）、两个 spawn（活会话 detached；`exit` 里只能同步，且给 10s 超时）、以及注册进程退出 handler。拆出理由：那 60 行是新职责，而扩展已经 ~9000 行。**2026-09-18 起还负责「用户是否正看着这个 pane」的取证**：`list-clients` + 每个 client 的 `display-message -c` 得到各 client 的当前 pane，`lsappinfo front` 得到前台 app 的 bundle id —— 两条读数都只在否则真要发一条通知时才取（惰性 thunk），`lsappinfo` 带 2s 超时（同步跑在对话框路径与 exit handler 里），tmux 地址按 banner 重新解析（pane id 进程内固定、**window id 不固定**：join-pane/break-pane 会搬家，跨调用缓存会让点击跳去旧 window） |
 | `user-notify.ts` | 桌面通知：三种事件（完成 / 异常结束 / 停下来等用户回答）、只有没有上级的会话能发、`terminal-notifier` 的 argv 与「点回那个 pane」的纯函数、节流。旧的 `orchestrator-notify.ts`（OSC + tmux passthrough）整份删除。**2026-09-18 起**：标题是 `<类型> · <repo>`（等你回答 / 任务完成 / 异常结束）、`-group <sessionId>` 让同一会话的通知互相替换（不再堆叠）、`isWatchingPane` 在「用户正看着这个 pane 且终端在前台」时抑制整条通知（两个事实都成立才算，任一读不到一律照常发；pane id 形状复用 `orchestrator-tmux.ts` 的 `isPaneId`，不再自写正则；前台 app 与 `__CFBundleIdentifier` 的比较是**已知近似** —— 后者是 tmux server 启动时继承的 app，失配方向是多发一条而不是静默）。**取证排在节流之后**：被节流拦下的通知不付 3–5 个同步子进程；被抑制的通知不记额度，下一条照发 |
 | `user-proxy.ts` | **没人回答时谁来答**（2026-09-19，用户决定）：门禁的每个对话框等 30 分钟仍无人作答时，交给 `arbiter` 读本会话上下文代答。纯策略层 —— 窗口计时、先答者胜（用户与经通道作答的项目经理都算「人」，先到先得；arbiter 跑到一半用户答了就以用户为准）、代理答案必须是对话框给过的**候选行原文**（`raceWithUserProxy` 里那一次行校验是唯一一道闸）、提示词给的是 transcript **指针**而非正文（它跑在 `PROXY_ISOLATION_FLAGS` 的**只读**工具集下，不是 appeal arbiter 的 `--no-tools` —— 第 2 轮 P1 实测：拿不到工具时那个指针是废的，功能的核心行为根本跑不起来）、失败/超时/不可解析一律**无答案**，而「无答案」对十二个对话框恰好都是保守方向（授权即拒绝、`request_scope_limit` 保持完整门禁、提问即未作答）；`formatProxyDecisionReport` 渲染 `declare_done` 机械打印的那份清单 —— 用户必须能不费力地看出哪些决定不是自己做的。代答不产生任何额外权力：它只填对话框的答案本身。进程执行复用 `arbitration.ts` 的 `runArbiterProcess`（同一执行实现上的第三种问法，不是第二套实现） |
-| `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash。`planHash` 的**产出方**，因此「什么算一个 plan hash」也归它：`isPlanHash` 是那条形状规则的唯一实现，凡从 sidecar 读回授权记录的地方都用它（复制出去的授权校验只会朝放宽的方向漂移） |
+| `orchestrator-plan.ts` | plan **是什么**：编排层的退出契约——类型、`parsePlan` 校验、依赖成环检测、canonical 文本与 `planHash`（批准绑定内容 hash）、`formatPlanSummary` 渲染。`planHash` 的**产出方**，因此「什么算一个 plan hash」也归它：`isPlanHash` 是那条形状规则的唯一实现，凡从 sidecar 读回授权记录的地方都用它（复制出去的授权校验只会朝放宽的方向漂移） |
+| `orchestrator-plan-progress.ts` | plan **被执行时**产出什么（2026-09-27 从 `orchestrator-plan.ts` 拆出）：任务状态机（`isLegalTransition` / `applyTaskStatus`）、改写 plan 时保留执行记录（`mergeTaskProgress`）、调度（`scheduleNextTasks`）与退出判定（`unfinishedTasks` / `unreportedDecisions` / `openDecisions` / `nextDecisionId`）。都不属于批准内容，所以不和 hash 绑定住在一起 |
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
 | `orchestrator-runtime-host.ts` | 会话的**运行期时钟**（t6 从扩展拆出）：统一退出判据 `sessionExitProblems` / `orchestrationDoneProblems`、revival 定时器、后台 supervision 定时器（同一份 `superviseNow` 读数）、项目经理的 settle 续跑（`orchestratorSettled` 与续跑预算）、会话名字心跳（顺带 drain 收件箱），以及它们共同遵守的退位标记（`handedOff` / `markHandedOff`）；判定在 `session-revival.ts` / `orchestrator-supervisor.ts` / `orchestrator-gate.ts` |
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西（类型、登记表增删查、grants）。sidecar 读回的净化在 `orchestrator-registry-normalize.ts`；`successorRuntime(runtime, fromHandoff)` 是「换了个会话能继承什么」的唯一出处 —— 登记表与 grants 照旧留下；许可只在 `fromHandoff` 为真（前任自己交棒的继任者，判定在 `lib/session-inheritance.ts`）时留下，其余情形全部剥离（写在调用点上的字段清单迟早漏掉新字段）。runtime 还带一个 `ownerSessionId`（2026-09-17）：**哪个会话持有这个编排** —— 它是「reload 后能不能恢复」的唯一依据（`storedRuntimeIsMine`），只有铸出、继承或接管了该地址的会话会写它。child 记录上的 `worktree`（路径 + 分支）由净化模块按路径强度校验：它会被交给 git |
