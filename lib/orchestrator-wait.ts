@@ -48,6 +48,7 @@
 
 import { handoffDue, HANDOFF_PERCENT } from "./session-handoff.ts";
 import { nextRewakeDelayMs } from "./orchestrator-child-state.ts";
+import { describePendingRequest } from "./orchestration-notice.ts";
 import {
   formatSupervisionReceipt,
   type PendingRequest,
@@ -215,9 +216,7 @@ export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitD
       done: true,
       reason: "pending-request",
       childId: first.childId,
-      summary:
-        `${first.childId} 在等回答：「${first.title}」` +
-        `（${first.options.length} 个选项，requestId=${first.requestId}）${rest}`,
+      summary: `${describePendingRequest(first)}${rest}`,
     };
   }
 

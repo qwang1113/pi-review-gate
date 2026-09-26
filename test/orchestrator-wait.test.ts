@@ -24,6 +24,7 @@ import type { PendingRequest, SupervisionEvent } from "../lib/orchestrator-super
 function question(childId: string, requestId: string): PendingRequest {
   return {
     childId,
+    taskId: childId,
     requestId,
     dialogKind: "select",
     title: "pick",

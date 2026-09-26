@@ -409,6 +409,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   const adopted: string[] = [];
   const confirmAnswers: boolean[] = [];
   let memory: SupervisionMemory = {};
+  let activeWaits = 0;
   let announced: readonly AnnouncedRequest[] = [];
   const paneDecor = new Map<string, { title: string; at: number }>();
 
@@ -506,6 +507,11 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     channelHome: () => "/home/test",
     supervisionMemory: () => memory,
     saveSupervisionMemory: (next) => { memory = next; },
+    waitActive: () => activeWaits > 0,
+    beginWait: () => {
+      activeWaits += 1;
+      return () => { activeWaits -= 1; };
+    },
     announcedRequests: () => announced,
     saveAnnouncedRequests: (next) => { announced = next; },
     paneDecorMemory: () => paneDecor,

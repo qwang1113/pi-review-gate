@@ -557,7 +557,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 
 ---
 
-## 五、`lib/` 全量速查表（250 个模块）
+## 五、`lib/` 全量速查表（251 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -720,6 +720,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `orchestrator-session-tools.ts` | 注册编排会话工具（spawn / instruct / wait / close，并转注册 answer 与 recover/attach）——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，wait / close 的实现在 `orchestrator-wait-tool.ts` / `orchestrator-close-tool.ts`（2026-09-27 拆出），answer 与 recover/attach 在各自的 `*-tools.ts`；交接工具从 2026-09-14 起**不在这里**（全会话共用的 `session_handoff`，见 `session-handoff-tools.ts`） |
 | `orchestrator-wait-tool.ts` | **`orchestrator_wait` 这个工具的执行体** `doWait`（有 IO）：每次探针读遍通道、消费监督记忆、按请求判定待答问题，把观察喂给 `orchestrator-wait.ts` 的纯判据与回执装配，再补上只有它拿得到的两块（退出阻碍 `exitBlockers` 与继承简报）。区分口诀：`orchestrator-wait.ts` 回答「算不算有事、回执长什么样」，本模块负责「去读、去等、去拼」 |
 | `orchestrator-close-tool.ts` | `orchestrator_close` 的实现 `doClose`：关子会话的 window、结算其隔离 checkout（keep / merge / discard，已关闭子会话可只结算），git 动作经 `deps.settleWorktree` 注入 |
+| `orchestration-notice.ts` | 「[ORCHESTRATION] 子会话需要你」通知（2026-09-27）：子会话/请求的**可读名称**（「h1 的 tmux 授权请求」+ 备查 id，通知与 `orchestrator_wait` 回执共用）、通知事件的**新鲜度判定**（请求已销账 / 子会话已关 / 任务已 done / 状态已变 ⇒ 丢弃）与正文；投递时序（单条在途、wait 让位、`message_end` 送达前改写）在 `orchestrator-runtime-host.ts` |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块；`relayedPane` 判定交接后的子会话搬到了哪个 pane（登记 pane 已死、自报 pane 活着），由 `orchestrator-registry.ts` 的 `repointChildPanes` 写回登记表 |
 | `orchestrator-takeover.ts` | 「仓库里有别人的 plan」时的两个意图：**接管**（从盘上发现本仓库的候选 orchestration id —— sidecar 记录优先、`rg-channels/` 目录名兜底，再判定这个 id 能否被本会话采用）与**归档**（归档文件名、归档载荷、确认框文案）。两条拒绝路径（`orchestrator_plan` 的 write/submit、`orchestrator_spawn`）与两个入口（`orchestrator_attach`、`orchestrator_plan action:archive`）共用同一份判定；纯函数 + 注入式读盘 |
 | `orchestrator-tmux.ts` | **全仓唯一的 tmux runner 契约** `TmuxRunner` / `TmuxRunResult`（各模块注入的都是它；宿主实现只有 `orchestrator-wiring.ts` 的 `runTmux`，扩展里的 `runTmux` 只是绑定声明的薄包装）。仅剩的 tmux 命令构造：开/关 pane（接力）、列 pane，加上 pane 装饰（颜色 `select-pane -P`、标题 `set -p -t <pane> @rg_label <标题>`——`PANE_LABEL_OPTION` 就拼在这里，pi 不写这个命名空间，所以写一次不会被覆盖；以及 window 级 `setw pane-border-*`，一律不带 `-g`）；子会话 env 的剥离（`envCommand` + `GATE_ENV_NAMES`）。门禁**自己那个 session** 的建/关/归属/env/展示名 argv 在 `tmux-session-argv.ts`（2026-09-26 按职责拆出，同样经本模块的安全闸门）。**没有 send-keys，没有 capture-pane，也没有窗口几何/等分**（三列布局的规划/探测/等分连同它们的标识符于 2026-09-25 整块删除，本仓不再出现）。**安全闸门**：`kill-server` 任何情况都拒；首位全局 flag 直接拒；`new-session` / `new-window` / `kill-window` / `kill-session` 只在调用方显式声明了自己可寻址的 session 集合、且 argv 自己的目标就在其中（`<name>` 或 `<name>:@id`，别名同样归一）时放行 |
