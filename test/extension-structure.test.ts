@@ -6740,7 +6740,7 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
   // test failed for a reason that has nothing to do with the rule it pins —
   // exactly the failure mode `windowIn`'s own docblock describes.
   const submit = windowIn(CHAIN_SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
-  assert.match(submit, /void startPrecommitBeside\(input\.root, input\.ctx\)/,
+  assert.match(submit, /laneField = \{ laneFailure: startPrecommitBeside\(input\.root, input\.ctx\)\.failure \}/,
     "the long lane starts and the chain runs beside it — awaiting here is exactly the 33s the agent used to lose");
   assert.doesNotMatch(submit, /await callTool\(\s*"run_precommit"/,
     "the serial shape is GONE, not merely bypassed (philosophy three)");
@@ -6927,7 +6927,7 @@ test("ONE full lane per repo: a second round waits for a quiet lane, and NEVER j
   // function does rather than at a byte count that rots.
   const submit = windowIn(CHAIN_SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
   const waitAt = submit.indexOf("await waitForQuietLane(input.root)");
-  const startLaneAt = submit.indexOf("void startPrecommitBeside(input.root, input.ctx)");
+  const startLaneAt = submit.indexOf("startPrecommitBeside(input.root, input.ctx).failure");
   assert.ok(waitAt > 0 && startLaneAt > waitAt,
     "the round waits for the older lane to finish BEFORE starting its own");
   const besideAt = LANE_SRC.indexOf("function startPrecommitBeside(");

@@ -17,6 +17,7 @@ import { runAuditRound, type RunAuditRoundDeps } from "./audit-round.ts";
 import { GOAL_AUDIT_SPEC, PLAN_AUDIT_SPEC } from "./audit-round-specs.ts";
 import { buildCheckpointMessage } from "./checkpoint-message.ts";
 import type { LoopStage } from "./loop-stages.ts";
+import type { LaneHandle } from "./precommit-lane.ts";
 import { formatPlanSummary, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { buildPlanAuditTask, formatPlanAuditCarryover, planAuditHash } from "./orchestrator-plan-audit.ts";
 import type { ProgressReporter } from "./progress-stream.ts";
@@ -36,7 +37,7 @@ export function createReviewChain(
     reviewTargets: Map<string, ReviewTarget>;
     /** The lane (lib/precommit-lane.ts). */
     waitForQuietLane(root: string): Promise<void>;
-    startPrecommitBeside(root: string, ctx: unknown): Promise<void>;
+    startPrecommitBeside(root: string, ctx: unknown): LaneHandle;
     /** The goal-auditor's task for one draft (lib/audit-round-host.ts). */
     buildGoalAuditRound(draft: string, root: string, ctx: unknown):
       Promise<{ ok: true; task: string; streamPath: string } | { ok: false; error: string }>;
@@ -99,6 +100,12 @@ export function createReviewChain(
          */
         qualityStandingNote?: string;
         /**
+         * THIS ROUND'S LANE, once it landed non-PASS: why (t8). Absent when no
+         * lane was started (stage off / bypass). The caller reads it before
+         * and after starting the reviewer — see `judge_submit`.
+         */
+        laneFailure?: () => string | undefined;
+        /**
          * WHAT THIS CHAIN JUST FROZE (drill F4, 2026-09-20).
          *
          * `judge_submit` is the only surface the agent reads after a round is
@@ -133,6 +140,7 @@ export function createReviewChain(
     //    and the whole point of the bypass is that the user already decided
     //    this round ships without it. The fact is recorded on the checkpoint
     //    and repeated to the reviewer.
+    let laneField: { laneFailure?: () => string | undefined } = {};
     const precommitOn = stageIsOn("precommit", input.root);
     const bypassActive = stateForRepo(input.root).bypass.active;
     if (!precommitOn) {
@@ -153,7 +161,7 @@ export function createReviewChain(
       // it (round-4 P2 — a joined lane would verify the WRONG content).
       input.progress?.step("precommit (full，与审查并行)");
       await waitForQuietLane(input.root);
-      void startPrecommitBeside(input.root, input.ctx);
+      laneField = { laneFailure: startPrecommitBeside(input.root, input.ctx).failure };
     }
 
     // 2. Freeze it. The reviewed unit is a commit, and the message says so —
@@ -271,6 +279,7 @@ export function createReviewChain(
         ok: true,
         role: QUALITY_ROLE,
         taskText: withNote(qualityTaskText),
+        ...laneField,
         ...(qualityStream === undefined ? {} : { streamPath: qualityStream }),
         ...(checkpoint === undefined ? {} : { checkpoint }),
         // The functional brief travels WITH it: the two judges are dispatched
@@ -321,6 +330,7 @@ export function createReviewChain(
         ok: true,
         role: null,
         taskText: "",
+        ...laneField,
         ...(checkpoint === undefined ? {} : { checkpoint }),
         // REACHED TWO WAYS, AND THE RECEIPT MUST NOT CONFUSE THEM (quality
         // round P2, 2026-09-22): the quality stage is off (or the round is a
@@ -340,6 +350,7 @@ export function createReviewChain(
       ok: true,
       role: "reviewer",
       taskText: reviewerTask,
+      ...laneField,
       ...(checkpoint === undefined ? {} : { checkpoint }),
       // The findings stream is the agent's half of the round: it fixes what
       // the judge confirms WHILE the judge works. Dropping the path here would

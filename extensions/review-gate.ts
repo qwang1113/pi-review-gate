@@ -311,7 +311,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * EFFECT: starting a lane RESETS the recorded `precommit` entry to `NOT_RUN`.
    */
   (pi as unknown as { __reviewGateTestSeams?: Record<string, unknown> }).__reviewGateTestSeams = {
-    startFullLane: (root: string, ctx: unknown) => startPrecommitBeside(root, ctx),
+    startFullLane: (root: string, ctx: unknown) => startPrecommitBeside(root, ctx).settled,
   };
 
   /** Call another gate tool internally; a missing tool is a programming error. */
@@ -1096,7 +1096,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   registerJudgeSubmitTool(pi, cells, {
     resolveToolRepo, stateForRepo, persistRepo, stageIsOn, callTool, toolText, extractTaskText,
     submitForReview, buildGoalAuditRound, dispatchJudgeRound, cancelJudgeRound, noteQualityRoundDispatched,
-    registry,
+    registry, cancelLedger,
   });
 
   // ---------- judge_wait / judge_close / judge_spawn (lib/judge-tools-wiring.ts) ----------

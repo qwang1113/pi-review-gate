@@ -30,7 +30,14 @@ import type { SessionCells } from "./session-cells.ts";
 import type { SessionRepos } from "./session-repos-host.ts";
 import type { ToolHost } from "./tool-host.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
-import { acceptedReceipt, noJudgesReceipt, type AcceptedJudge, type CheckpointFacts } from "./judge-submit-receipt.ts";
+import {
+  acceptedReceipt,
+  laneCancelledReviewerLine,
+  noJudgesReceipt,
+  type AcceptedJudge,
+  type CheckpointFacts,
+} from "./judge-submit-receipt.ts";
+import type { RoundCancelLedger } from "./round-cancel-ledger.ts";
 
 export interface JudgeSubmitToolDeps {
   resolveToolRepo: SessionRepos["resolveToolRepo"];
@@ -44,6 +51,8 @@ export interface JudgeSubmitToolDeps {
   buildGoalAuditRound: ReturnType<typeof createAuditRoundHost>["buildGoalAuditRound"];
   dispatchJudgeRound: ReturnType<typeof createJudgeRoundDispatch>["dispatchJudgeRound"];
   cancelJudgeRound: ReturnType<typeof createRoundCancel>["cancelJudgeRound"];
+  /** The tombstone a never-dispatched reviewer leaves for `judge_wait` (t8). */
+  cancelLedger: Pick<RoundCancelLedger, "note">;
   noteQualityRoundDispatched: ReturnType<typeof createReviewTargets>["noteQualityRoundDispatched"];
   registry: Pick<JudgeRegistry, "pendingAudits" | "persistJudgeHierarchy">;
 }
@@ -229,6 +238,10 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
       let parallelReviewer: { taskText: string; streamPath?: string } | undefined;
       /** WHAT THE CHAIN FROZE, for the receipt (drill F4) — reviewer chain only. */
       let checkpointFacts: CheckpointFacts | undefined;
+      /** THIS round's lane, once it landed non-PASS: why (t8). */
+      let laneFailure: (() => string | undefined) | undefined;
+      /** Set when that lane ruled the reviewer out — before or right after its dispatch. */
+      let reviewerLaneCancelled: string | undefined;
       // Live progress for the whole submission: precommit → checkpoint →
       // prepare → dispatch, so a round that stalls shows WHERE it stalled.
       const progress = createProgressReporter({
@@ -260,6 +273,7 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
         qualityStandingNote = chain.qualityStandingNote;
         parallelReviewer = chain.parallelReviewer;
         checkpointFacts = chain.checkpoint;
+        laneFailure = chain.laneFailure;
       }
 
       // The other two roles are the same shape: the gate builds the task the
@@ -318,6 +332,17 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
       }
       const accepted: AcceptedJudge[] = [];
       for (const judge of judges) {
+        // THE LANE CAN LAND FIRST (t8, 2026-09-27). A suite that fails in 0.2s
+        // lands while the quality pane is still booting, and the matrix's lane
+        // row finds no reviewer to kill — measured: the reviewer then ran ~40s
+        // on content the gate already refuses. So it is not started at all,
+        // and the tombstone tells `judge_wait` what the lane row would have.
+        const laneWhy = judge.role === "reviewer" ? laneFailure?.() : undefined;
+        if (laneWhy !== undefined) {
+          deps.cancelLedger.note(root, { role: "reviewer", judgeId: "(未派发)", why: laneWhy });
+          reviewerLaneCancelled = laneWhy;
+          continue;
+        }
         // The title is a DISPLAY label the gate derives itself (B5: it must not
         // reach the session's directory, or every round starts a new session).
         const title = `${judge.role}-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
@@ -360,6 +385,15 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
             isError: true,
           };
         }
+        // …AND IT CAN LAND WHILE THE REVIEWER'S PANE WAS OPENING, before the row
+        // existed: nothing was there to kill then, so it is killed now.
+        const lateWhy = judge.role === "reviewer" ? laneFailure?.() : undefined;
+        if (lateWhy !== undefined) {
+          deps.cancelJudgeRound(root, "reviewer", lateWhy);
+          reviewerLaneCancelled = lateWhy;
+          progress.done("已取消（全量 precommit 没过）");
+          continue;
+        }
         // THE ROUND REMEMBERS ITS OWN QUALITY JUDGE, on the target it prepared
         // — what `qualityRoundInFlight` reads.
         if (judge.role === QUALITY_ROLE && d.judgeId) deps.noteQualityRoundDispatched(root, d.judgeId);
@@ -389,7 +423,19 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
         deps.registry.pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
         deps.registry.persistJudgeHierarchy();
       }
+      if (accepted.length === 0 && reviewerLaneCancelled !== undefined) {
+        // The reviewer was the round's only judge, and the lane ruled it out.
+        return {
+          content: [{
+            type: "text",
+            text: "review-gate: 本轮没有 judge 在跑 —— checkpoint 已冻结，但全量 precommit 先落地没过。\n" +
+              laneCancelledReviewerLine(reviewerLaneCancelled),
+          }],
+          details: { submitted: true, judges: [], laneFailed: true },
+        };
+      }
       return acceptedReceipt({
+        reviewerLaneCancelled,
         accepted,
         dispatchRole,
         parallelReviewerStarted: parallelReviewer !== undefined,

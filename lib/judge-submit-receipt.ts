@@ -6,6 +6,17 @@
  */
 
 import { QUALITY_ROLE } from "./quality-round.ts";
+import { CANCELLED_NEXT_STEP } from "./round-cancel-ledger.ts";
+
+/**
+ * THE REVIEWER THIS ROUND'S LANE ALREADY RULED OUT (t8, 2026-09-27): the full
+ * precommit landed non-PASS before (or while) the reviewer was started, so it
+ * was not dispatched, or was cancelled the moment it came up. Same story the
+ * tombstone tells `judge_wait`.
+ */
+export function laneCancelledReviewerLine(why: string): string {
+  return `- reviewer 未派（或派出即取消）：${why}。judge_wait({role:"reviewer"}) 会报 cancelled；下一步：${CANCELLED_NEXT_STEP}`;
+}
 
 export interface CheckpointFacts {
   sha: string;
@@ -86,8 +97,10 @@ export function acceptedReceipt(facts: {
   skipNote: string | undefined;
   checkpointFacts: CheckpointFacts | undefined;
   streamPath: string | undefined;
+  /** Why the lane ruled the parallel reviewer out (t8) — absent otherwise. */
+  reviewerLaneCancelled?: string | undefined;
 }) {
-  const { accepted, dispatchRole, parallelReviewerStarted, skipNote, checkpointFacts, streamPath } = facts;
+  const { accepted, dispatchRole, parallelReviewerStarted, skipNote, checkpointFacts, streamPath, reviewerLaneCancelled } = facts;
   const routed = accepted.find((a) => a.role === dispatchRole) ?? accepted[accepted.length - 1];
   const lines = [
     `review-gate: 已受理本轮任务 — ${accepted.map((a) => `${a.role}（judge ${a.judgeId}）`).join(" + ")}。`,
@@ -101,7 +114,8 @@ export function acceptedReceipt(facts: {
     // The routing is the gate's, so the gate says which way it went —
     // otherwise "the reviewer is running" and "the quality judge is
     // running beside it" look the same to the agent.
-    ...(dispatchRole === QUALITY_ROLE
+    ...(reviewerLaneCancelled === undefined ? [] : [laneCancelledReviewerLine(reviewerLaneCancelled)]),
+    ...(dispatchRole === QUALITY_ROLE && reviewerLaneCancelled === undefined
       ? [
           ...(!parallelReviewerStarted
             // QUALITY ALONE (2026-09-22): the user switched the functional

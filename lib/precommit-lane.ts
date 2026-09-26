@@ -20,6 +20,12 @@ import { roundCancelPlan, type RoundCancelPlan } from "./quality-round.ts";
 import { worktreeTree } from "./repo-facts.ts";
 import type { CallTool, GateToolResult, SessionHost } from "./session-host.ts";
 
+/** One started lane: its landing, and — once it landed non-PASS — why. */
+export interface LaneHandle {
+  settled: Promise<void>;
+  failure(): string | undefined;
+}
+
 export function createPrecommitLane(
   host: SessionHost,
   deps: {
@@ -128,8 +134,15 @@ export function createPrecommitLane(
    * would run two full suites side by side, fighting for the same cores and
    * the same cache file. The second round JOINS the first — that promise is
    * the same "this repo is being verified right now" receipt either way.
+   *
+   * `failure()` is THIS lane's own landing, read by the round that started it
+   * (t8, 2026-09-27): the matrix's lane row can only kill a reviewer that is
+   * already registered, and a lane that fails in 0.2s lands while the quality
+   * pane is still booting — so the dispatch asks before (and right after)
+   * starting the reviewer. Bound to this lane, so no earlier round leaks in.
    */
-  function startPrecommitBeside(root: string, ctx: unknown): Promise<void> {
+  function startPrecommitBeside(root: string, ctx: unknown): LaneHandle {
+    let failedWhy: string | undefined;
     // The lane's kill switch (see `abortPrecommitLane`). ONE controller per
     // lane, held with the promise so a blocking quality verdict can reach it.
     const controller = new AbortController();
@@ -235,6 +248,7 @@ export function createPrecommitLane(
       // the agent only saw "precommit failed" with no trace of why. The FAIL
       // notice below IS this row's delivery.
       const laneWhy = `全量 precommit 没过（${verdict}）—— 这份内容 ship 不了，功能轮不必再审`;
+      if (verdict !== "PASS") failedWhy = laneWhy;
       const laneCancelNotes = applyCancelPlan(roundCancelPlan({ party: "lane", verdict }), root, laneWhy);
       // THEN the parked conclusion, re-asked from BOTH halves (`resumeParkedReady`
       // consults the trees, what THIS landing measured and the quality standing):
@@ -276,7 +290,7 @@ export function createPrecommitLane(
     void settled.finally(() => {
       if (inFlightPrecommit?.settled === settled) inFlightPrecommit = undefined;
     });
-    return settled;
+    return { settled, failure: () => failedWhy };
   }
 
   /**
