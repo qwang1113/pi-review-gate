@@ -411,7 +411,7 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 
 ### 5.3 收尾块与健康快照读同一份真值（B4）
 
-`lib/orchestrator-gate.ts` 的 `orchestratorDoneProblems` + `lib/orchestrator-session-tools.ts` 的 `exitBlockers`
+`lib/orchestrator-gate.ts` 的 `orchestratorDoneProblems` + `lib/orchestrator-wait-tool.ts` 的 `exitBlockers`
 
 2026-09-04 实测，**同一份回执**里：第 1 块「t8a：**已完成**」，第 5 块「plan 还有 4 个
 任务未完成：t8a(**running**)」+「还有 **1 个子会话活着**：t8a@%238」。两块都没算错 ——
