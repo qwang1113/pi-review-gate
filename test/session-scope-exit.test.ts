@@ -63,6 +63,14 @@ test("no record, or a marker that is not ours, kills nothing", () => {
   assert.equal(unrecorded.kills + foreign.kills, 0);
 });
 
+test("the pane state starts before the non-git short-circuit, so every pi session reports (s1)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../lib/session-lifecycle.ts", import.meta.url), "utf8");
+  const start = src.indexOf("deps.runtime().startPaneState();");
+  const nonGit = src.indexOf("if (!cells.sessionInGit) {");
+  assert.ok(start > 0 && nonGit > 0 && start < nonGit);
+});
+
 test("session_shutdown closes the scope on quit, never on reload", () => {
   let closes = 0;
   const noop = () => {};
@@ -70,7 +78,7 @@ test("session_shutdown closes the scope on quit, never on reload", () => {
     notify: { startHint: () => "", markCleanShutdown: noop },
     cancelChildWaitTimer: noop,
     disarmUiRefreshTimer: noop,
-    runtime: () => ({ stopSupervisionTimer: noop, stopRevivalTimer: noop, startSessionNamingHeartbeat: noop, stopSessionNamingHeartbeat: noop }),
+    runtime: () => ({ stopSupervisionTimer: noop, stopRevivalTimer: noop, startSessionNamingHeartbeat: noop, stopSessionNamingHeartbeat: noop, startPaneState: noop }),
     stopChildHeartbeat: noop,
     releaseWorktree: noop,
     stopExclusivityRecheck: noop,

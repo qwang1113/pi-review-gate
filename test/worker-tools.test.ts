@@ -195,6 +195,7 @@ test("a worker pane is DECORATED like every other gate pane — identity on its 
   await world.call("worker_submit", { workerId: "probe", task: "看一眼" });
   assert.deepEqual(world.opened[0]!.decor, {
     label: "probe@self",
+    windowName: "worker-probe",
     colorSeed: "probe",
     state: "working",
   }, "the worker used to be the one gate-opened pane with a blank border");

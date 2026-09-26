@@ -8,7 +8,7 @@
  * env contract and pane-liveness probing.)
  */
 
-import { judgePaneLabel, paneIdentity } from "./orchestrator-pane-decor.ts";
+import { judgePaneLabel, judgeWindowName, paneIdentity, workerWindowName } from "./orchestrator-pane-decor.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import type { SessionPaneDecor } from "./session-factory.ts";
 
@@ -62,7 +62,7 @@ export function judgePaneDecor(
   owner: string,
   state: ChildState = "working",
 ): SessionPaneDecor {
-  return { label: judgePaneLabel(role, owner), colorSeed: judgeId, state };
+  return { label: judgePaneLabel(role, owner), windowName: judgeWindowName(role), colorSeed: judgeId, state };
 }
 
 /**
@@ -79,5 +79,5 @@ export function workerPaneDecor(
   owner: string,
   state: ChildState = "working",
 ): SessionPaneDecor {
-  return { label: paneIdentity({ what: workerId, owner }), colorSeed: workerId, state };
+  return { label: paneIdentity({ what: workerId, owner }), windowName: workerWindowName(workerId), colorSeed: workerId, state };
 }
