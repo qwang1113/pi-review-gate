@@ -36,6 +36,7 @@ import type { GateState } from "./gate-state.ts";
 import type { ProjectConfig } from "./project-config.ts";
 import type { SessionNaming } from "./session-name-tools.ts";
 import type { SessionMessaging } from "./session-message-tools.ts";
+import { PANE_STATE_TICK_MS, type PaneStateReporter } from "./tmux-pane-state.ts";
 import type { SessionHost } from "./session-host.ts";
 
 /** What the runtime clocks need from the session beyond the shared host. */
@@ -55,6 +56,8 @@ export interface OrchestratorRuntimeDeps {
   projectConfig(): ProjectConfig;
   sessionNaming: SessionNaming;
   sessionMessaging: SessionMessaging;
+  /** The pane options the tmux sidebar reads (lib/tmux-pane-state.ts). */
+  paneState: PaneStateReporter;
 }
 
 export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorRuntimeDeps) {
@@ -449,6 +452,7 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
    * does nothing while no name is held (lib/session-name-tools.ts `tick`).
    */
   let sessionNamingTimer: ReturnType<typeof setInterval> | undefined;
+  let paneStateTimer: ReturnType<typeof setInterval> | undefined;
   function startSessionNamingHeartbeat(): void {
     if (sessionNamingTimer) return;
     sessionNamingTimer = setInterval(() => {
@@ -462,10 +466,18 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     }, sessionNaming.heartbeatMs);
     // Never the reason the process stays alive.
     (sessionNamingTimer as unknown as { unref?: () => void }).unref?.();
+    // THE PANE STATE HAS ITS OWN, FASTER CLOCK (s1): the name's 30s is too late
+    // for "waiting for your answer"; the reporter only writes on a change.
+    const tickPane = (): void => { try { deps.paneState.tick(); } catch { /* display only */ } };
+    tickPane();
+    paneStateTimer = setInterval(tickPane, PANE_STATE_TICK_MS);
+    (paneStateTimer as unknown as { unref?: () => void }).unref?.();
   }
   function stopSessionNamingHeartbeat(): void {
     if (sessionNamingTimer) clearInterval(sessionNamingTimer);
     sessionNamingTimer = undefined;
+    if (paneStateTimer) clearInterval(paneStateTimer);
+    paneStateTimer = undefined;
   }
 
   return {

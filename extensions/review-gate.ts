@@ -70,6 +70,8 @@ import {
   sanitizeScopeRecord,
   type TmuxScope,
 } from "../lib/session-tmux-scope.ts";
+import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
+import { createPaneStateReporter } from "../lib/tmux-pane-state.ts";
 import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
 import { readJudgeSideEnv } from "../lib/judge-side.ts";
 import { createOrchestratorDeps, runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
@@ -233,7 +235,10 @@ let sessionNamingAtExit: { release(): unknown } | undefined;
 process.on("exit", () => {
   try { sessionNamingAtExit?.release(); } catch { /* the process is already going */ }
   try { sessionScopeAtExit?.(); } catch { /* the process is already going */ }
+  try { paneStateAtExit?.clear(); } catch { /* the process is already going */ }
 });
+/** Same shape, same reason: the CURRENT session's pane options (s1, lib/tmux-pane-state.ts). */
+let paneStateAtExit: { clear(): void } | undefined;
 
 export default function reviewGate(pi: ExtensionAPI) {
   /**
@@ -545,6 +550,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   const tmuxScope: TmuxScope = {
     sessionId: () => cells.state.sessionId?.trim() || undefined,
     repoRoot: () => cells.primaryRepoRoot,
+    // `pm` / `s1` / `self` — the readable middle of the session name.
+    role: () => selfPaneOwner({ stateVariant: SESSION_STATE_VARIANT, orchestrator: cells.state.taskMode === "orchestrator" }),
     read: () => sanitizeScopeRecord(cells.state.tmuxScope),
     write: (record) => {
       cells.state.tmuxScope = record;
@@ -752,6 +759,19 @@ export default function reviewGate(pi: ExtensionAPI) {
     log: (message) => log(`review-gate[session-message] ${message}`),
   });
 
+  /** WHAT THIS PANE IS DOING, for the tmux sidebar (lib/tmux-pane-state.ts). */
+  const paneState = createPaneStateReporter({
+    run: (argv) => runTmux(argv),
+    pane: () => process.env.TMUX_PANE?.trim() || undefined,
+    identity: () => ({ sessionId: cells.state.sessionId?.trim() || undefined, repo: cells.primaryRepoRoot, kind: handoff.ownSessionKind() }),
+    facts: () => ({
+      dialogOpen: dialogsOnScreen() > 0,
+      judging: activeJudgeWait() !== undefined,
+      streaming: cells.latestCtx?.isIdle?.() === false,
+      completed: cells.state.completion?.at !== undefined,
+    }),
+  });
+
   /** THE SESSION'S RUNTIME CLOCKS (lib/orchestrator-runtime-host.ts). */
   const {
     orchestrationDoneProblems, orchestratorSettled, startRevivalTimer, stopRevivalTimer, stopSupervisionTimer,
@@ -771,9 +791,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     projectConfig: () => cells.projectConfig,
     sessionNaming,
     sessionMessaging,
+    paneState,
   });
   // THE NAME GOES BACK WHEN THE PROCESS DIES, however it dies (t2).
   sessionNamingAtExit = sessionNaming;
+  // And the pane stops claiming a state nobody reports any more (s1).
+  paneStateAtExit = paneState;
   // AND THE SESSION'S OWN TMUX SESSION WITH IT (t4) — idempotent, so a /quit
   // that already closed it in session_shutdown finds nothing here.
   const closeScopeOnExit = (): void => {
@@ -838,7 +861,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     resolveArbiterModel: () => resolveArbiterModel(),
     ownTranscriptPath: () => handoff.ownTranscriptPath(),
   });
-  const { askChoice, askMultiChoice } = createGateDialogs(host, {
+  const { askChoice, askMultiChoice, dialogsOnScreen } = createGateDialogs(host, {
     proxy: dialogProxy,
     raiseBanner: (opts) => raiseBanner(opts),
     lastUserInteractionAt: cells.lastUserInteractionAt,
