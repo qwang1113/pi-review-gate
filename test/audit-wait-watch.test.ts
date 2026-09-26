@@ -127,7 +127,7 @@ test("answered in the auditor's own pane first: the forwarded box is taken down"
   const done = watchAuditRound(w.deps, { where, since: SINCE, startedAtMs: 0, stop: w.stop });
   await w.step(0);
   assert.equal(w.asked.length, 1);
-  records.push({ kind: "request-settled", from: "child", at: "2026-09-26T15:23:00.000Z", requestId: "req-1", by: "user" } as ChannelRecord);
+  records.push({ kind: "request-settled", from: "child", at: "2026-09-26T15:23:00.000Z", requestId: "req-1", by: "human" } as ChannelRecord);
   await w.step(2_000);
   assert.equal(w.asked[0]!.signal.aborted, true);
   assert.equal(w.answers.length, 0, "nothing written for a question somebody else answered");
