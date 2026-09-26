@@ -115,7 +115,7 @@ export const ARBITER_ISOLATION_FLAGS: readonly string[] = Object.freeze([
  * behaviour was unreachable).
  *
  * SO IT GETS THE READ-ONLY SET, the same one every reviewing role in this gate
- * gets (`--exclude-tools edit,write`, lib/session-factory.ts) plus bash
+ * gets (`--exclude-tools edit,write`, lib/session-launch-specs.ts) plus bash
  * excluded — reading is the whole job, and running things is not part of it.
  * Everything else stays sealed: no session, no extensions, no context files
  * (the repository must not push context in that the user's own question did not

@@ -471,7 +471,7 @@ export function createJudgeRoundDispatch(
         if (opened.deliveryFailed) rotation.retirePrevious();
         // `deliveryFailed` is NOT "the task was lost": the pane exists and
         // was KEPT, and what failed is the BOOT VERIFICATION — the judge task
-        // itself rode in on argv (lib/session-factory.ts). So a pane that
+        // itself rode in on argv (lib/session-launch-specs.ts). So a pane that
         // never acknowledged is still a delivered round the opener may wait
         // on, which is exactly what `delivered: true` means here (quality
         // round P2, 2026-09-16: the inverted-looking line needs to say so).

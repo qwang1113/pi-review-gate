@@ -140,7 +140,7 @@ export function sanitizeNotifyText(raw: string, max: number): string {
  *
  * Only a session with nobody above it: an orchestrator (project manager) or a
  * loop session running on its own. `RG_STATE_VARIANT` is what makes a session
- * an orchestration child (lib/session-factory.ts sets it to the child id), and
+ * an orchestration child (lib/session-env.ts sets it to the child id), and
  * a child's questions belong to its manager — the manager answers them through
  * the channel, and only IT decides that the human is needed.
  *
