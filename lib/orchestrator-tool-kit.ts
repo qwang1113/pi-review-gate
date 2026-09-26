@@ -470,9 +470,10 @@ export function childChannelProjection(deps: OrchestratorDeps, childId: string) 
   return projectChannel(childChannelRecords(deps, childId));
 }
 
-/** Every session id that ever reported state on one child's channel. */
-export function childReportedSessionIds(deps: OrchestratorDeps, childId: string): string[] {
-  return childChannelRecords(deps, childId).flatMap((r) => (r.kind === "state" && r.sessionId ? [r.sessionId] : []));
+/** Who reported state on one child's channel, and from which pane — every report, oldest first. */
+export function childStateReports(deps: OrchestratorDeps, childId: string): Array<{ sessionId?: string; paneId?: string }> {
+  return childChannelRecords(deps, childId).flatMap((r) =>
+    r.kind === "state" ? [{ ...(r.sessionId ? { sessionId: r.sessionId } : {}), ...(r.paneId ? { paneId: r.paneId } : {}) }] : []);
 }
 
 

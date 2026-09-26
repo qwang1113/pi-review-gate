@@ -45,6 +45,7 @@ import { findOrphanWorktrees } from "./orchestrator-worktree.ts";
 import {
   buildRecoverCommand,
   buildRecoveryNote,
+  isOwnedChildPane,
   recoverSessionId,
   taskFileName,
   taskFileRelPath,
@@ -56,12 +57,11 @@ import {
 import { DEFAULT_DELIVERY_STATION, type DeliveryStation } from "./delivery-station.ts";
 import { effectiveTaskStation } from "./repo-pr-policy.ts";
 import { acceptanceGateValue } from "./acceptance-round.ts";
-import { relayedPane, superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
+import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
 import {
   alivePanes,
   childAssets,
-  childChannelProjection,
-  childReportedSessionIds,
+  childStateReports,
   currentPlan,
   requireOrchestratorMode,
 } from "./orchestrator-tool-kit.ts";
@@ -198,10 +198,12 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   const child = findChild(runtime, childId);
   const panes = alivePanes(deps);
   // A handed-over child may not have been re-pointed yet (no wait since the
-  // handoff): its successor's live pane, as it reported it, counts as its
-  // pane — re-opening the chain beside a live successor is two writers.
+  // handoff), and a predecessor's late heartbeat can bury its successor's pane
+  // under an older one: ANY pane this child's chain ever reported that is
+  // still alive counts as its pane — re-opening beside it is two writers.
+  const reports = child ? childStateReports(deps, child.id).filter((r) => r.sessionId && isOwnedChildPane(child.id, r.sessionId)) : [];
   const livePaneId = child && panes.ok
-    ? relayedPane(child.paneId, childChannelProjection(deps, child.id).lastState?.paneId, new Set(panes.panes)) ?? child.paneId
+    ? [child.paneId, ...reports.map((r) => r.paneId)].find((p) => p !== undefined && panes.panes.includes(p)) ?? child.paneId
     : child?.paneId;
   // ONE recovery judgement, shared with `judge_recover`
   // (lib/session-factory.ts). Both tools refuse the same four situations — an
@@ -268,7 +270,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   if (!note.ok) return fail(`review-gate: 恢复说明写不出来（${note.error}）—— 什么都没做。`);
 
   // A child that handed over lives on as its newest `-hN` successor.
-  const sessionId = recoverSessionId(child.id, childReportedSessionIds(deps, child.id));
+  const sessionId = recoverSessionId(child.id, reports.map((r) => r.sessionId));
   const self = deps.ownPane();
   if (!self) return fail("review-gate: 读不到自己的 pane（$TMUX_PANE），无法开新 pane。");
   const now = new Date(deps.now()).toISOString();

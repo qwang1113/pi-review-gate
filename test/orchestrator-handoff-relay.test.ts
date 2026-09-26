@@ -70,6 +70,19 @@ test("recover refuses a relayed child whose successor is alive, even before any 
   assert.match(replyText(reply), /%77 还活着/);
 });
 
+test("recover still sees the live successor after the predecessor's late heartbeat", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  const predecessorPane = world.runtime().children[0]!.paneId;
+  handOver(world, childId, 1, "%77");
+  world.advance(1000);
+  world.childReports(childId, "working", { sessionId: childSessionId(childId), paneId: predecessorPane });
+
+  const reply = await world.call("orchestrator_recover", { childId });
+  assert.equal(reply.isError, true, replyText(reply));
+  assert.match(replyText(reply), /%77 还活着/);
+});
+
 test("recoverSessionId: highest generation of THIS chain, root when nothing handed over", () => {
   const root = childSessionId("c1");
   assert.equal(recoverSessionId("c1", []), root);
