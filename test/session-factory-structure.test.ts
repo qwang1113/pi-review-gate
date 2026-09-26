@@ -80,10 +80,12 @@ test("(b) the argv builders have exactly the consumers their job allows — and 
     "buildNewWindowArgv",
     "buildSetSessionOwnerArgv",
   ];
-  const readOrKillBuilders = ["buildKillSessionArgv", "buildReadSessionOwnerArgv", "buildListSessionsArgv"];
+  const readOrKillBuilders = ["buildKillSessionArgv", "buildReadSessionOwnerArgv"];
   const factoryPaneBuilders = ["buildHandoffPaneArgv", "buildKillPaneArgv"];
   const claims: Array<[readonly string[], string[]]> = [
     [openingBuilders, ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts"]],
+    // The name list has ONE reader (`readSessionNames`), which the sweep calls.
+    [["buildListSessionsArgv"], ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts"]],
     [readOrKillBuilders, ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts", "lib/session-orphan-sweep.ts"]],
     [["buildKillWindowArgv"], ["lib/tmux-session-argv.ts", "lib/session-factory.ts"]],
     [factoryPaneBuilders, ["lib/orchestrator-tmux.ts", "lib/session-factory.ts"]],

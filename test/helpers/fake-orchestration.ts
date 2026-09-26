@@ -600,7 +600,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       const target = String(argv[argv.indexOf("-t") + 1]);
       const session = sessions.get(target);
       if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
-      session.owner = String(argv[argv.length - 1]);
+      // Other session options (pin, pid, pane) are separate slots on a real server.
+      if (argv[argv.length - 2] === "@rg_scope_owner") session.owner = String(argv[argv.length - 1]);
       return { ok: true, stdout: "", stderr: "" };
     }
     // THE SESSION'S OWN ENVIRONMENT (2026-09-25). The gate reads it before it
@@ -641,7 +642,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       const target = String(argv[argv.indexOf("-t") + 1]);
       const session = sessions.get(target);
       if (!session) return { ok: false, stdout: "", stderr: `can't find session: ${target}` };
-      return { ok: true, stdout: session.owner ? `${session.owner}\n` : "", stderr: "" };
+      const owner = argv[argv.length - 1] === "@rg_scope_owner" ? session.owner : undefined;
+      return { ok: true, stdout: owner ? `${owner}\n` : "", stderr: "" };
     }
     if (sub === "new-session" || sub === "new-window" || sub === "split-window") {
       if (options.splitWindowThrows) throw new Error(`fake tmux: ${String(sub)} blew up`);
