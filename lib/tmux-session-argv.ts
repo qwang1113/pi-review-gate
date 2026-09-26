@@ -36,6 +36,32 @@ import {
  */
 export const SESSION_OWNER_OPTION = "@rg_scope_owner";
 
+/**
+ * The two LIVENESS facts written beside the marker: the owner process's pid and
+ * the tmux pane it runs in. The marker says WHO built a session; these say
+ * whether that builder can still be alive — which is what lets a later session
+ * reclaim the dedicated session of one that crashed without ever being named
+ * (lib/session-orphan-sweep.ts). A session without them is never reclaimed.
+ */
+export const SESSION_OWNER_PID_OPTION = "@rg_scope_owner_pid";
+export const SESSION_OWNER_PANE_OPTION = "@rg_scope_owner_pane";
+
+/**
+ * A session somebody ELSE is meant to inherit when its owner is gone — an
+ * orchestration child's window (`orchestrator_attach` adopts it) or a seat that
+ * was handed off (the successor adopts the judges). Its owner being dead is then
+ * the expected state, not a crash, so a pinned session is never swept; it is
+ * closed by whoever inherits it, exactly as before the sweep existed.
+ */
+export const SESSION_PINNED_OPTION = "@rg_scope_pinned";
+
+/** The session user options the gate writes about a session's owner. */
+export type SessionOwnerOption =
+  | typeof SESSION_OWNER_OPTION
+  | typeof SESSION_OWNER_PID_OPTION
+  | typeof SESSION_OWNER_PANE_OPTION
+  | typeof SESSION_PINNED_OPTION;
+
 /** How many ids or windows tmux prints for one creation. */
 export interface SessionWindowCoords {
   windowId: string;
@@ -164,22 +190,32 @@ export function buildUnsetSessionEnvArgv(ownSession: string, key: string): reado
  * mine?" a READ rather than a guess, both when the session is reused
  * (`rg-<repo>-<id 尾>` colliding across two processes) and before the one
  * destructive act the gate performs on it.
+ *
+ * `option` defaults to the marker (`value` = the owner's session id); the other
+ * {@link SessionOwnerOption}s carry the owner's pid / pane or the pin reason.
  */
-export function buildSetSessionOwnerArgv(ownSession: string, owner: string): readonly string[] {
+export function buildSetSessionOwnerArgv(
+  ownSession: string,
+  value: string,
+  option: SessionOwnerOption = SESSION_OWNER_OPTION,
+): readonly string[] {
   const session = requireOwnSession(ownSession, "ownSession");
   return assertSafeTmuxArgv(
-    ["set", "-t", session, SESSION_OWNER_OPTION, owner],
+    ["set", "-t", session, option, value],
     { ownSessions: [session] },
   );
 }
 
 /**
- * Read the marker back. An unset option prints NOTHING and exits 0 (measured:
+ * Read the marker (or another {@link SessionOwnerOption}) back. An unset option prints NOTHING and exits 0 (measured:
  * tmux 3.7c), so an empty reading is "no owner recorded", never a failed call.
  */
-export function buildReadSessionOwnerArgv(ownSession: string): readonly string[] {
+export function buildReadSessionOwnerArgv(
+  ownSession: string,
+  option: SessionOwnerOption = SESSION_OWNER_OPTION,
+): readonly string[] {
   const session = requireOwnSession(ownSession, "ownSession");
-  return assertSafeTmuxArgv(["show-options", "-t", session, "-qv", SESSION_OWNER_OPTION], { ownSessions: [session] });
+  return assertSafeTmuxArgv(["show-options", "-t", session, "-qv", option], { ownSessions: [session] });
 }
 
 /**

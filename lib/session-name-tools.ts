@@ -344,7 +344,12 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
       const sessionId = deps.sessionId()?.trim();
       // ADOPT BEFORE SWEEPING would be wrong: the sweep's job is other people's
       // leftovers, and it is told which entry is ours so it never touches it.
-      const sweep = sweepOrphans(registry, sessionId === undefined ? {} : { sessionId });
+      const pane = deps.ownPane();
+      const sweep = sweepOrphans(registry, {
+        ...(sessionId === undefined ? {} : { sessionId }),
+        pid: process.pid,
+        ...(pane === undefined ? {} : { pane }),
+      });
       for (const note of sweep.notes) deps.log?.(`孤儿回收：${note}`);
       if (sessionId === undefined || sessionId.length === 0) return { sweep };
       const mine = findEntryBySessionId(registry, sessionId);

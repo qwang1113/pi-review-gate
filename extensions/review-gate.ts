@@ -551,6 +551,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       persist(cells.latestCtx ?? cells.lastUiCtx.current);
     },
     now: () => new Date().toISOString(),
+    ownerProcess: () => ({ pid: process.pid, pane: process.env.TMUX_PANE?.trim() || undefined }),
   };
   const worktrees = createWorktreeSettlement(cells, { persistOrchestration });
 
