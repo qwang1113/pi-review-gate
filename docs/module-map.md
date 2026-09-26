@@ -75,8 +75,9 @@
     `lib/goal-prereview-tools.ts`（`recordGoalPrereview`：普通函数，2026-09-04
     起不再注册成任何工具，门禁在审计轮的 report 落盘时自己调；外加两个 goal
     入口共用的提交检查）。
-  - `lib/user-interaction-tools.ts`：`ask_user`（采访本身），并且是这一族的
-    **唯一注册入口**——它自己调 `lib/consent-request-tools.ts`，所以扩展里只有
+  - `lib/user-interaction-tools.ts`：`ask_user` 的工具面（名字、描述、schema）与这一族
+    的 deps 契约，并且是这一族的**唯一注册入口**（采访执行体 `doAskUser` 在
+    `lib/ask-user-interview.ts`）——它自己调 `lib/consent-request-tools.ts`，所以扩展里只有
     一次 `registerUserInteractionTools(pi, {...})` 接线。
   - `lib/consent-request-tools.ts`：`request_scope_limit`、
     `request_sensitive_edit`（两个「请用户放宽门禁」的工具；对话、门禁状态与
@@ -500,10 +501,10 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 `ask-user.ts` 是采访模型（逐题推进、**提问数量无上限**、关框即停与「在聊天里回答」
 的语义，以及 `resolveQuestion`：一题结算下来到底算什么 —— 竞速送达的答案一律作数，
 只有沉默才按「是什么中止了采访」解释），
-`user-interaction-tools.ts` 是它的执行侧（工具 `ask_user`：什么时候暂停循环、
+`ask-user-interview.ts` 是它的执行侧（工具 `ask_user` 的 `doAskUser`：什么时候暂停循环、
 每答一题就落盘、人与项目经理谁先答谁生效；2026-09-06 起**整批问题先一次性上送
 通道再逐题弹框** —— 上级第一份回执就看得到全部题，用户那边仍一次只有一个框），
-并且是这一族的唯一注册入口——
+`user-interaction-tools.ts` 是这一族的 deps 契约与唯一注册入口——
 它自己转注册 `consent-request-tools.ts` 的两个同意工具
 （`request_scope_limit` / `request_sensitive_edit`，见 §1.2）；
 **没人作答时谁来答**（2026-09-19，用户决定）：每个框弹出满 30 分钟仍无人作答，
@@ -595,6 +596,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `multi-choice-dialog.ts` | **第二种对话框形状：复选清单**（2026-09-22，用户决定）—— 与 `choice-dialog.ts` 共用同一套词汇（字母编号、`DECLINE_ROW`、推荐标记、位置读法 `parseChoice`），但自己持有行渲染（`multiChoiceRow(s)`：`[x] A. 文本（推荐）`）、纯状态机（`multiChoiceStart` / `multiChoiceKey`：空格勾选、↑↓ 与 j/k 移动并环绕、回车提交、ESC 关闭、导航行不可勾选）、解析（`parseMultiChoice`：`""` = 一项都不勾、`" / "` 连接的多项、✎ 行含原因、读不懂的段 ⇒ `unreadable` 而**不是**猜勾选）与 TUI 组件（`buildMultiChoiceBox`，自己渲染行、不依赖 pi 组件类，宽度按终端 cell 算）。`renderMultiChoice` 是那条与 `renderChoice` 同形的异步路径（defer 到 ✎ 行时走同一个 `declineReason`）。**形状标记是 `ChoiceSpec.defaultChecked`（存在即多选）**；不变量：直接回车 = 提交打开时勾好的那一组 |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
 | `constants.ts` | 全仓唯一的共享常量：代码/文档扩展名、敏感文件模式、ship 命令种类、语言指令、轮次上限 |
+| `ask-user-interview.ts` | 工具 `ask_user` 的执行体 `doAskUser`（采访的执行侧：暂停循环、逐题落盘、整批上送通道、双方抢答、往回退、授权的授予/收回）；2026-09-27 从 `user-interaction-tools.ts` 按职责拆出，由它注册 |
 | `consent-request-tools.ts` | 工具 `request_scope_limit` / `request_sensitive_edit`：两个「请用户放宽门禁」的同意口子，对话与门禁状态经注入的 deps；由 `user-interaction-tools.ts` 转注册 |
 | `copilot-gh.ts` | L7 的 gh 访问层：`gh` 以 argv 异步 spawn（超时 + abort），PR / 线程 payload / 轻量探针（head + reviewRequests + 最近 review）/ 时间线事件 / 可用性探测都在这里 |
 | `copilot-review-tools.ts` | 工具 `copilot_review`：L7 状态机的唯一驱动端（该请求就请求、该报排队状态就报、该报 findings 就报），gh 访问经注入的 seam；文件里只留 deps、工具体、阻塞等待外层循环与注册 |
@@ -787,7 +789,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它），以及全仓唯一一对工具返回值构造 `toolReply` / `toolFail`（2026-09-26 收拢：此前 7 个工具模块与 `orchestrator-tool-kit.ts` 各有一份拷贝） |
 | `ui-widget.ts` | 会话自我展示的两块文本的纯构造（**不是两个 widget**，见下）：① editor 下方那条**单行**状态条（详情在 `/gate-status`）—— mode / 分支 / 已编辑 / **送审轮次 `轮 N`**（2026-09-17 用户决定：N 是本会话**送出去**的 reviewer 轮次 —— 送审即 +1，不等 reviewer 交卷，`declare_done` 不清零；数据源 loop 侧是 `state.sentReviewRounds`、judge pane 侧是它自己的 `roundSeq`，**无分母**，那个 `/maxRounds` 是 auto-loop 刹车、与审查进度不同源；只有 loop 会话与 judge pane 显示，判定是 `showsRoundReading` 这一条纯函数；零 git 开销）/ 未满足项数；② `buildContractLines` + `planContractRows` —— **按需**的契约清单，由 `/gate-contract` 命令打印（2026-09-18 用户决定：不常驻）。项目经理一侧把 plan 任务渲染成四态（`○`pending `▸`running `✓`done `✕`blocked，blocked 后缀「等 tN」只列未完成的依赖）；loop 会话与编排子会话一侧显示已批准 goal 的退出标准（**永远 `○`**：findings 结构里没有 criterion 索引，任何 `✓` 都是假报进度）。条目**原样上屏**，唯一的机械处理是 `plainMarkdown` 剔掉终端渲染不了的 `**`/`__`（本仓 48 份 goal 的 310 条里 122 行带成对星号）。**没住过屏幕，所以不需要省屏**：不截断、不折叠、不上色（`notify` 只能给整块一色），40 条就出 41 行。上一版做过常驻 aboveEditor，连带 `fitToWidth`/`displayWidth`/`charColumns`/`CONTRACT_MAX_ROWS`/`ContractTheme` 与 `declare_done` 专用的 `contractDelivered` 标记一起整条删除（哲学三：不留旧路径、不留开关）。空清单只表示「这个会话不持有一份这种形状的契约」，**为什么**由扩展侧的 `contractFacts` 一处判定（它把「哪种空情形」与「叫什么」一起回答）；`buildContractReadout(facts, absent)`（2026-09-19）把「**空清单必带理由**」做成不变量 —— 调用方的理由优先，否则给「这份契约里没有可显示的内容（条目都是空白）」—— 于是 `/gate-contract` 的兜底文案再也不会把「有契约但渲染不出内容」说成「不持有一份契约」。与状态条同一条纪律：**display-only** —— 零 git、不算 fingerprint，任何判定都不看它 |
 | `untrusted-data.ts` | 主会话/编排层文本的**唯一**降级实现：`asUntrustedData` 包块（命名 tag、载荷内闭合标签中和、截断可见）+ `composeWithUntrustedData` 组装（门禁指令在前、不可信数据块在后），judge 四处任务书拼装点与仲裁/文本申诉/分类器提示词共用 |
-| `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
+| `user-interaction-tools.ts` | 「用户交互工具族」的 deps 契约（`UserInteractionToolDeps` / `UiContext` / `ConsentToolDeps`）与**唯一注册入口**：注册工具 `ask_user`（描述与 schema，执行体在 `ask-user-interview.ts`）并自己转注册 `consent-request-tools.ts` |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
 | `worker-pane.ts` | **worker 的注册表与 resume 键**（2026-09-21）：`workerSessionId(workerId)` 确定性派生 pi 的 `--session-id`（同名即同一会话，关掉再派就是续接），`.pi/worker-sessions.json` 记 `paneId`/`sessionId`/`role`/`model`/`reportedAt`（写与读各一份实现，逐条 fail-closed：畸形条目丢弃而不是修成一个「大概是这个 pane」的猜测——猜错会让 `worker_close` 去杀别人的会话）；`buildWorkerPaneCommand` 与 judge pane 同形：都是 `--exclude-tools edit,write`（2026-09-22 用户决定把 `bash` 从 deny list 拿掉 —— 跑不了 `git log`/`rg`/测试的 worker 取不了证；它能落笔这件事改由提示词的只读约束 + 门禁自己的 ship 硬拦守） | `test/worker-tools.test.ts` · `"a worker pane is READ-ONLY by its tool surface, and resumes by session id"` · `"close frees the pane and the next submit RESUMES the same session"` · `"the registry drops a malformed entry instead of guessing a pane"` | 会话 id 必须由 worker id 派生（换名字就换会话）；写工具靠工具面排掉（`--exclude-tools edit,write`），bash 的只读约束靠提示词 + ship 硬拦；关闭后再派必须用**同一个** session id（否则「省屏」变成「丢上下文」）；指令/任务书走 `@file` 与通道，不上命令行 |
 | `worker-side.ts` | **worker pane 自己那一侧**（2026-09-21）：`RG_WORKER_OPENER` / `RG_WORKER_ID` / `RG_WORKER_ROLE` 三个环境变量（缺任一即「不是 worker pane」——半配置的 pane 绝不能绑定别人的通道）；`buildWorkerSystemPrompt`（配置的 `prompt` 在前、不可协商的只读/自包含/证据/只交一次在后）与任务书；`worker_report` 是**只在 worker 面注册**的工具（主会话拿到它就能伪造 worker 的答案），一条 `kind:"report"` 记录、文本走 `summary` 字段（`appendRecord` 会按体积外溢到旁文件） | `test/worker-tools.test.ts` · `"the system prompt the pane runs carries the preset's own words"` · `test/worker-tools.test.ts` · `"worker_wait returns the report, and does not deliver the same one twice"` | 三个 env 缺一即不绑定通道；`worker_report` 只在 worker 面（注册即守卫）；报告只有一条记录、文本自包含；额外工具一律不等 |

@@ -213,7 +213,7 @@ export function reportState(
 /**
  * WHICH INTERVIEW A QUESTION BELONGS TO, and where in it.
  *
- * Set only by the `ask_user` interview (lib/user-interaction-tools.ts), the
+ * Set only by the `ask_user` interview (lib/ask-user-interview.ts), the
  * one caller that has more than one question at a time. Every other gate
  * dialog — a goal approval, a restatement, a consent — is a single question
  * by nature and carries no stamp at all.

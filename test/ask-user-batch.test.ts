@@ -30,7 +30,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { doAskUser, type UserInteractionToolDeps } from "../lib/user-interaction-tools.ts";
+import { doAskUser } from "../lib/ask-user-interview.ts";
+import type { UserInteractionToolDeps } from "../lib/user-interaction-tools.ts";
 import { askThroughChannel, type ChildChannelBinding } from "../lib/orchestrator-child-channel.ts";
 import type { ChoiceSpec } from "../lib/choice-dialog.ts";
 import { DECLINE_ROW } from "../lib/choice-dialog.ts";

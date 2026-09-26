@@ -44,7 +44,7 @@ export const REPLY_THREAD_CMD =
  * ONE DIALOG AT A TIME, in the order the findings came back, with the escape
  * row an interview has. The `ask_user` interview hands its whole batch to the
  * channel up front so a project manager can answer everything at once
- * (lib/user-interaction-tools.ts); this loop deliberately does NOT — a Copilot
+ * (lib/ask-user-interview.ts); this loop deliberately does NOT — a Copilot
  * round is a handful of questions, and a second batching convention is a
  * second thing to keep right. ponytail: sequential; batch the channel
  * requests here if a supervised child with 10 findings ever shows the cost.

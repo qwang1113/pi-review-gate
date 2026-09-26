@@ -80,7 +80,7 @@ test("every high-frequency refusal path renders through buildRejection", () => {
   // above the declare_done refusal and the case went green off judge_submit's
   // calls instead).
   const cases: Array<[string, string, string, string]> = [
-    ["ask_user batch not conforming", "lib/user-interaction-tools.ts",
+    ["ask_user batch not conforming", "lib/ask-user-interview.ts",
       "export async function doAskUser", "const { questions, trimmedOptions } = checked;"],
     ["judge_submit submission refused", "lib/judge-submit-tool.ts",
       'name: "judge_submit"', "const progress = createProgressReporter("],

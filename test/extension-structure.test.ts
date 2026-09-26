@@ -187,13 +187,18 @@ const COPILOT_GH_SRC = readFileSync(join(ROOT, "lib", "copilot-gh.ts"), "utf8");
 /**
  * The USER-INTERACTION family moved the same way, split by responsibility:
  * the interview (`ask_user`) in one module, the two tools that ask the user
- * to RELAX the gate in the other. lib/user-interaction-tools.ts is the
+ * to RELAX the gate in the other. The interview itself is split once more:
+ * its execution (`doAskUser`) is lib/ask-user-interview.ts, and `ASK_USER_SRC`
+ * is both files, the way the Copilot family is read as one. lib/user-interaction-tools.ts is the
  * family's single registration entry point — it registers `ask_user` and
  * calls the consent module itself — so the extension wires all three exactly
  * once. Their structural rules did not move with them: they are asserted
  * here, against the module that now owns each one.
  */
-const ASK_USER_SRC = readFileSync(join(ROOT, "lib", "user-interaction-tools.ts"), "utf8");
+const ASK_USER_SRC = [
+  readFileSync(join(ROOT, "lib", "user-interaction-tools.ts"), "utf8"),
+  readFileSync(join(ROOT, "lib", "ask-user-interview.ts"), "utf8"),
+].join("\n");
 const ASK_USER_TOOLS = new Set(["ask_user"]);
 const CONSENT_SRC = readFileSync(join(ROOT, "lib", "consent-request-tools.ts"), "utf8");
 const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit", "request_tmux_access"]);
