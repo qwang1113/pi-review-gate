@@ -60,6 +60,16 @@ test("recover re-opens the newest generation of a handed-over child", async () =
   assert.match(replyText(recovered), new RegExp(expected));
 });
 
+test("recover refuses a relayed child whose successor is alive, even before any wait re-pointed it", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  handOver(world, childId, 1, "%77");
+
+  const reply = await world.call("orchestrator_recover", { childId });
+  assert.equal(reply.isError, true, "a live successor is not a corpse");
+  assert.match(replyText(reply), /%77 还活着/);
+});
+
 test("recoverSessionId: highest generation of THIS chain, root when nothing handed over", () => {
   const root = childSessionId("c1");
   assert.equal(recoverSessionId("c1", []), root);

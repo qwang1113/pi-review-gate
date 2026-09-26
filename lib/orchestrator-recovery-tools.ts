@@ -56,10 +56,11 @@ import {
 import { DEFAULT_DELIVERY_STATION, type DeliveryStation } from "./delivery-station.ts";
 import { effectiveTaskStation } from "./repo-pr-policy.ts";
 import { acceptanceGateValue } from "./acceptance-round.ts";
-import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
+import { relayedPane, superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
 import {
   alivePanes,
   childAssets,
+  childChannelProjection,
   childReportedSessionIds,
   currentPlan,
   requireOrchestratorMode,
@@ -196,6 +197,12 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   const runtime = deps.runtime();
   const child = findChild(runtime, childId);
   const panes = alivePanes(deps);
+  // A handed-over child may not have been re-pointed yet (no wait since the
+  // handoff): its successor's live pane, as it reported it, counts as its
+  // pane — re-opening the chain beside a live successor is two writers.
+  const livePaneId = child && panes.ok
+    ? relayedPane(child.paneId, childChannelProjection(deps, child.id).lastState?.paneId, new Set(panes.panes)) ?? child.paneId
+    : child?.paneId;
   // ONE recovery judgement, shared with `judge_recover`
   // (lib/session-factory.ts). Both tools refuse the same four situations — an
   // unknown handle, a deliberately closed session, a pane that is still alive,
@@ -204,8 +211,8 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   const verdict = paneRecoverability({
     registered: Boolean(child),
     ...(child?.closedAt === undefined ? {} : { closedAt: child.closedAt }),
-    ...(child?.paneId === undefined ? {} : { paneId: child.paneId }),
-    paneAlive: child && panes.ok ? panes.panes.includes(child.paneId) : undefined,
+    ...(livePaneId === undefined ? {} : { paneId: livePaneId }),
+    paneAlive: livePaneId !== undefined && panes.ok ? panes.panes.includes(livePaneId) : undefined,
   });
   if (verdict === "unknown" || !child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
   if (verdict === "closed") {
@@ -237,7 +244,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     // is NEVER suggested here now: a live pane means there is nothing to
     // recover, and what to do about it is a question for the health snapshot.
     return fail(
-      `review-gate: 子会话 ${childId} 的 pane ${child.paneId} 还活着 —— 拒绝重开` +
+      `review-gate: 子会话 ${childId} 的 pane ${livePaneId} 还活着 —— 拒绝重开` +
       "（重开一个还活着的会话，会得到两个进程写同一个工作区）。\n" +
       "先看 `orchestrator_wait({timeoutMs:0})` 的健康快照：\n" +
       "  - `waiting-judge`：它在等自己派出去的 reviewer / precommit，**完全正常，不要打断**，等着就好；\n" +
