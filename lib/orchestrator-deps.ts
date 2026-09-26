@@ -248,6 +248,17 @@ export interface OrchestratorDeps {
   saveSupervisionMemory(next: SupervisionMemory): void;
 
   /**
+   * An `orchestrator_wait` is blocking right now (2026-09-27). The background
+   * supervisor stands aside while one is: the wait probes the same channels
+   * every 2s and returns with the news itself, whereas a notice the timer
+   * steers in would sit behind that very wait — and the event it drained from
+   * the shared memory would be one the wait never sees.
+   */
+  waitActive(): boolean;
+  /** Mark a blocking wait; call the returned function when it ends. */
+  beginWait(): () => void;
+
+  /**
    * requestIds a WAIT has already handed to the orchestrator — the
    * de-duplication of the `pending-request` criterion, and nothing else's.
    *

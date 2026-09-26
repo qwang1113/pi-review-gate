@@ -272,14 +272,22 @@ async function doWait(
   // Typed as the skeleton's own result on BOTH branches: the snapshot path is
   // "a wait that did not wait", not a different shape — so every field the
   // reply reads (`abortReason` included) exists on it too.
-  const waited: PollWaitResult<ChildWaitObservation> = budgetMs === 0
-    ? snapshotResult(probe())
-    : await pollUntil({
-        probe,
-        isDone: (observation) => evaluateChildWait(observation).done,
-        budgetMs,
-        signal,
-      });
+  // A blocking wait holds the background supervisor off (deps.waitActive):
+  // this loop reports the same news itself, and sooner.
+  const endWait = budgetMs === 0 ? undefined : deps.beginWait();
+  let waited: PollWaitResult<ChildWaitObservation>;
+  try {
+    waited = budgetMs === 0
+      ? snapshotResult(probe())
+      : await pollUntil({
+          probe,
+          isDone: (observation) => evaluateChildWait(observation).done,
+          budgetMs,
+          signal,
+        });
+  } finally {
+    endWait?.();
+  }
   const observation = waited.observation;
   const decision: ChildWaitDecision = observation
     ? evaluateChildWait(observation)

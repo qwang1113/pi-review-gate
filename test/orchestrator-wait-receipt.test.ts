@@ -105,7 +105,7 @@ test("B4: one receipt never says a child is finished AND still to be waited for"
   const text = replyText(await world.call("orchestrator_wait", { timeoutMs: 0 }));
 
   // Block 1 — the health snapshot, from the channel.
-  assert.match(text, new RegExp(`${childId}：已完成`));
+  assert.match(text, new RegExp(`t1（childId=${childId}）：已完成`));
   // Block 5 — the wrap-up, from the SAME reading.
   assert.match(text, /已报完成、pane 还开着/);
   assert.match(text, /待你复验后/, "the manager is told what is left to do, not just what is blocked");
