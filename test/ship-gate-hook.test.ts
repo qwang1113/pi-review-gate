@@ -25,11 +25,7 @@ import {
   type ShipGateHookDeps,
 } from "../lib/ship-gate-hook.ts";
 import { sensitiveEditBlock } from "../lib/ship-gate-edit-guard.ts";
-import {
-  buildShipBlockReason,
-  describeShips,
-  detectHandRolledWaitPolling,
-} from "../lib/ship-gate-bash.ts";
+import { buildShipBlockReason, describeShips, detectHandRolledWaitPolling } from "../lib/ship-gate-copy.ts";
 
 import { defaultProjectConfig } from "../lib/project-config.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";

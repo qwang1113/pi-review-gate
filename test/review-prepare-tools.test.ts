@@ -12,7 +12,8 @@ import {
 } from "../lib/review-prepare-tools.ts";
 import type { ChangeIndexRow } from "../lib/parallel-review.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
-import { emptyState, type GateState, type RoundRecord } from "../lib/gate-state.ts";
+import { emptyState, type GateState } from "../lib/gate-state.ts";
+import { type RoundRecord } from "../lib/gate-state-records.ts";
 import { decideReviewScope } from "../lib/review-scope.ts";
 
 /**

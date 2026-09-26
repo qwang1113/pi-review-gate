@@ -8,14 +8,14 @@ import {
   UNTRUSTED_LINE_MAX_CHARS,
   type GoalToolDeps,
 } from "../lib/goal-tools.ts";
-import { buildGoalConfirmMessage } from "../lib/loop-goal.ts";
+import { buildGoalConfirmMessage } from "../lib/goal-confirm-copy.ts";
 import {
   checkGoalDraft,
   buildGoalRecordReply,
   recordGoalPrereview,
 } from "../lib/goal-prereview-tools.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
-import type { ReportConclusion } from "../lib/orchestrator-channel.ts";
+import type { ReportConclusion } from "../lib/channel-projection.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { goalTextHash, LOOP_GOAL_MAX_WRITE_CHARS } from "../lib/loop-goal.ts";
 import { restatementHash, type RestatementRecord } from "../lib/restatement.ts";

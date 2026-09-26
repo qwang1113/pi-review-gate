@@ -45,7 +45,8 @@ import { findOrphanWorktrees } from "./orchestrator-worktree.ts";
 import {
   buildRecoverCommand,
   buildRecoveryNote,
-  childSessionId,
+  isOwnedChildPane,
+  recoverSessionId,
   taskFileName,
   taskFileRelPath,
 } from "./orchestrator-delivery.ts";
@@ -60,11 +61,11 @@ import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supe
 import {
   alivePanes,
   childAssets,
+  childStateReports,
   currentPlan,
   requireOrchestratorMode,
-  toolFail as fail,
-  toolReply as reply,
 } from "./orchestrator-tool-kit.ts";
+import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 /** A task the plan believes is running while nothing is. */
 export interface OrphanTask {
@@ -196,6 +197,14 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   const runtime = deps.runtime();
   const child = findChild(runtime, childId);
   const panes = alivePanes(deps);
+  // A handed-over child may not have been re-pointed yet (no wait since the
+  // handoff), and a predecessor's late heartbeat can bury its successor's pane
+  // under an older one: ANY pane this child's chain ever reported that is
+  // still alive counts as its pane — re-opening beside it is two writers.
+  const reports = child ? childStateReports(deps, child.id).filter((r) => r.sessionId && isOwnedChildPane(child.id, r.sessionId)) : [];
+  const livePaneId = child && panes.ok
+    ? [child.paneId, ...reports.map((r) => r.paneId)].find((p) => p !== undefined && panes.panes.includes(p)) ?? child.paneId
+    : child?.paneId;
   // ONE recovery judgement, shared with `judge_recover`
   // (lib/session-factory.ts). Both tools refuse the same four situations — an
   // unknown handle, a deliberately closed session, a pane that is still alive,
@@ -204,8 +213,8 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   const verdict = paneRecoverability({
     registered: Boolean(child),
     ...(child?.closedAt === undefined ? {} : { closedAt: child.closedAt }),
-    ...(child?.paneId === undefined ? {} : { paneId: child.paneId }),
-    paneAlive: child && panes.ok ? panes.panes.includes(child.paneId) : undefined,
+    ...(livePaneId === undefined ? {} : { paneId: livePaneId }),
+    paneAlive: livePaneId !== undefined && panes.ok ? panes.panes.includes(livePaneId) : undefined,
   });
   if (verdict === "unknown" || !child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
   if (verdict === "closed") {
@@ -237,7 +246,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     // is NEVER suggested here now: a live pane means there is nothing to
     // recover, and what to do about it is a question for the health snapshot.
     return fail(
-      `review-gate: 子会话 ${childId} 的 pane ${child.paneId} 还活着 —— 拒绝重开` +
+      `review-gate: 子会话 ${childId} 的 pane ${livePaneId} 还活着 —— 拒绝重开` +
       "（重开一个还活着的会话，会得到两个进程写同一个工作区）。\n" +
       "先看 `orchestrator_wait({timeoutMs:0})` 的健康快照：\n" +
       "  - `waiting-judge`：它在等自己派出去的 reviewer / precommit，**完全正常，不要打断**，等着就好；\n" +
@@ -260,6 +269,8 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   );
   if (!note.ok) return fail(`review-gate: 恢复说明写不出来（${note.error}）—— 什么都没做。`);
 
+  // A child that handed over lives on as its newest `-hN` successor.
+  const sessionId = recoverSessionId(child.id, reports.map((r) => r.sessionId));
   const self = deps.ownPane();
   if (!self) return fail("review-gate: 读不到自己的 pane（$TMUX_PANE），无法开新 pane。");
   const now = new Date(deps.now()).toISOString();
@@ -284,7 +295,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
       stationCap,
       acceptanceGate,
     },
-    command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
+    command: buildRecoverCommand(sessionId, taskFileRelPath(noteName)),
     decor: {
       label: childPaneLabel(child.taskId, recoveredTaskTitle(deps, child.taskId)),
       colorSeed: child.id,
@@ -321,14 +332,14 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
 
   const assets = childAssets(deps, child);
   return reply(
-    `review-gate: 子会话 ${childId} 已用同一个 session id（\`${childSessionId(childId)}\`）在 pane ${paneId} 重开 —— ` +
+    `review-gate: 子会话 ${childId} 已用同一个 session id（\`${sessionId}\`）在 pane ${paneId} 重开 —— ` +
     "它的 transcript 是接着上次的，不是从头来。\n" +
     `任务 ${child.taskId} 保持 running（它本来就没有停止成立）；登记表已指向新 pane。\n` +
     "它死前留下的资产：" +
     `${assets?.reviewVerdict ? `review 裁决 ${assets.reviewVerdict}` : ""}` +
     `${assets?.checkpoint ? `、checkpoint \`${assets.checkpoint.slice(0, 12)}\`` : ""}。\n` +
     "接着用 `orchestrator_wait` 等它 —— 它重开后会自己在通道上报状态。",
-    { childId, paneId, recovered: true, sessionId: childSessionId(childId) },
+    { childId, paneId, recovered: true, sessionId },
   );
 }
 

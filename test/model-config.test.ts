@@ -5,35 +5,43 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  applyAgentConfigLayer,
+  KNOWN_AGENTS,
+  resolvePackageAgentsDir,
+  ensureAgentFilesPresent,
+} from "../lib/model-config.ts";
+import {
   parseModelSpec,
   splitThinkingSuffix,
   bareModelId,
   formatSpec,
   validateSpec,
   validateSlots,
-  parseAgentsSection,
-  effectiveAgentsConfig,
-  replaceFrontmatterModels,
-  extractFrontmatterChain,
-  frontmatterBlock,
-  isGeneratedAgentFile,
-  applyAgentConfigLayer,
   supportedThinkingOptions,
   loadRegistry,
-  GENERATED_MARKER,
-  MAX_SLOTS,
-  KNOWN_AGENTS,
   type ModelRegistry,
-  type AgentsConfigMap,
-  parseAgentFrontmatterFields,
-  projectAgentIdentity,
-  resolvePackageAgentsDir,
-  ensureAgentFilesPresent,
+} from "../lib/model-spec.ts";
+import {
   healMissingAgentSlots,
   defaultSlotsFromRoleText,
   startupAgentsCheck,
   validateAgentsForStartup,
-} from "../lib/model-config.ts";
+} from "../lib/agents-startup.ts";
+import {
+  parseAgentsSection,
+  effectiveAgentsConfig,
+  MAX_SLOTS,
+  type AgentsConfigMap,
+} from "../lib/agents-config.ts";
+import {
+  replaceFrontmatterModels,
+  extractFrontmatterChain,
+  frontmatterBlock,
+  isGeneratedAgentFile,
+  GENERATED_MARKER,
+  parseAgentFrontmatterFields,
+  projectAgentIdentity,
+} from "../lib/agent-frontmatter.ts";
 
 const REG: ModelRegistry = {
   anthropic: [
@@ -250,6 +258,24 @@ test("loadRegistry merges models.json and models-store.json from a fake home", (
   writeFileSync(join(home, ".pi", "agent", "models.json"), "{bad", "utf8");
   const reg2 = loadRegistry(home);
   assert.ok(reg2.onekey.some((m) => m.id === "gpt-5.6-sol"), "corrupt models.json must not wipe models-store.json");
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("loadRegistry is cached by the sources' mtime+size: unchanged files are not re-read, a rewrite is", () => {
+  const home = mkdtempSync(join(tmpdir(), "rg-reg-cache-"));
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  const store = join(home, ".pi", "agent", "models-store.json");
+  writeFileSync(store, JSON.stringify({ providers: { a: { models: [{ id: "m1" }] } } }), "utf8");
+  const first = loadRegistry(home);
+  // Callers merge runtime models in place; that must not leak into the cache.
+  first.a.push({ id: "runtime-only", thinkingLevelMap: undefined });
+  first.b = [];
+  const again = loadRegistry(home);
+  assert.deepEqual(again, { a: [{ id: "m1", reasoning: undefined, thinkingLevelMap: undefined }] },
+    "same stamps ⇒ the cached content, untouched by the previous caller's edits");
+  writeFileSync(store, JSON.stringify({ providers: { a: { models: [{ id: "m1" }, { id: "m2" }] } } }), "utf8");
+  const second = loadRegistry(home);
+  assert.deepEqual(second.a.map((m) => m.id), ["m1", "m2"]);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -1471,7 +1497,7 @@ test("the self-heal replaces the config ATOMICALLY — a reader never sees a hal
   // bare `writeFileSync` (it lands the same bytes), so the call site is
   // asserted where it lives — the same shape `lib/file-size-gate.ts` and the
   // structural tests use for “one implementation, no second path”.
-  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "model-config.ts"), "utf8");
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "agents-startup.ts"), "utf8");
   const healBody = source.slice(
     source.indexOf("export function healMissingAgentSlots"),
     source.indexOf("export interface StartupAgentsResult"),
@@ -1490,6 +1516,7 @@ test("startupAgentsCheck heals an unconfigured role and re-validates without tou
     writeFileSync(cfg, JSON.stringify({ agents: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } } }), "utf8");
 
     const res = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } },
       agentsProject: undefined,
       registry: REG,
@@ -1506,6 +1533,7 @@ test("startupAgentsCheck heals an unconfigured role and re-validates without tou
     // the heal is for gaps, and the refusal that follows is the user's to fix.
     const badCfg = join(dir, "bad.json");
     const bad = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: { reviewer: { auto: false, slots: ["anthropic/claude-nonexistent:max"] } },
       agentsProject: undefined,
       registry: REG,
@@ -1522,6 +1550,7 @@ test("startupAgentsCheck heals an unconfigured role and re-validates without tou
     const healthyText = JSON.stringify({ agents: { acceptance: { auto: false, slots: ["anthropic/claude-fable-5:max"] } } });
     writeFileSync(healthyCfg, healthyText, "utf8");
     const healthy = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: { acceptance: { auto: false, slots: ["anthropic/claude-fable-5:max"] } },
       agentsProject: undefined,
       registry: REG,
@@ -1552,6 +1581,7 @@ test("startupAgentsCheck re-checks against the config FILE, not the caller's sta
     const staleSnapshot = { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } };
 
     const first = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: staleSnapshot,
       agentsProject: undefined,
       registry: REG,
@@ -1564,6 +1594,7 @@ test("startupAgentsCheck re-checks against the config FILE, not the caller's sta
 
     // The SAME stale snapshot again — what a long-lived session keeps passing.
     const second = startupAgentsCheck({
+      projectConfigPath: join(dir, "project.json"),
       agentsGlobal: staleSnapshot,
       agentsProject: undefined,
       registry: REG,
@@ -1573,6 +1604,43 @@ test("startupAgentsCheck re-checks against the config FILE, not the caller's sta
     });
     assert.deepEqual(second.healed, [], "the file is already healed — nothing left to write");
     assert.equal(second.checks.acceptance.ok, true, "the round must not report the pre-heal failure on a healed file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startupAgentsCheck checks every DECLARED worker preset, names the bad spec, and never heals one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "startup-workers-"));
+  try {
+    const cfg = join(dir, "review-gate.json");
+    const reviewer = { auto: false, slots: ["onekey/gpt-5.6-sol:high"] };
+    const run = (agentsGlobal: unknown, agentsProject?: unknown) =>
+      startupAgentsCheck({ agentsGlobal, agentsProject, registry: REG, configPath: cfg, projectConfigPath: join(dir, "project.json"), agentsDir: null, validNames: ["reviewer"] });
+
+    // Every slot resolves → pass.
+    const good = run({ reviewer, worker: { auto: false, slots: ["anthropic/claude-fable-5:max"] } });
+    assert.equal(good.checks.worker?.ok, true);
+
+    // One unresolvable slot → refused, naming the preset and the spec.
+    const bad = run({ reviewer }, { "worker-x": { auto: false, slots: ["anthropic/claude-fable-5:max", "nope/no-such-model"] } });
+    assert.equal(bad.checks["worker-x"]?.ok, false);
+    assert.match(bad.checks["worker-x"]!.reason!, /worker 预设 worker-x/);
+    assert.match(bad.checks["worker-x"]!.reason!, /nope\/no-such-model/);
+    assert.deepEqual(bad.healed, []);
+    assert.equal(existsSync(cfg), false, "a worker preset is never healed into the config");
+
+    // A preset with a prompt but no slots is not dispatchable → refused.
+    const promptOnly = run({ reviewer, worker: { prompt: "read" } }).checks.worker;
+    assert.equal(promptOnly?.ok, false);
+    assert.match(promptOnly!.reason!, /不会自愈/);
+
+    // No preset at all, or one that configures nothing → not an error.
+    for (const agents of [{ reviewer }, { reviewer, worker: {} }]) {
+      const res = run(agents);
+      assert.equal(res.checks.worker, undefined);
+      assert.equal(Object.values(res.checks).every((c) => c.ok), true);
+    }
+    assert.equal(existsSync(cfg), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

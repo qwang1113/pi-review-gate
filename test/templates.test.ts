@@ -36,7 +36,9 @@ import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 
 neutraliseGateEnv();
 
-import { LOOP_GOAL_SKELETON, buildGoalAuditTask, buildGoalConfirmMessage, buildGoalPrereviewRefusal } from "../lib/loop-goal.ts";
+import { LOOP_GOAL_SKELETON, buildGoalPrereviewRefusal } from "../lib/loop-goal.ts";
+import { buildGoalConfirmMessage } from "../lib/goal-confirm-copy.ts";
+import { buildGoalAuditTask } from "../lib/goal-audit-task.ts";
 import {
   ORCHESTRATOR_DIRECTIVE,
   PLAN_FINISH_TASK_BRIEF,

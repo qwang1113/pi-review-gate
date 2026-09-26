@@ -47,7 +47,7 @@
  * testable without a repository, and the io half is a loop over `fs`.
  */
 
-import { execFileSync } from "node:child_process";
+import { gitText } from "./git-exec.ts";
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -177,7 +177,7 @@ function isIgnored(root: string, relPath: string): boolean {
  */
 export function ignoreVerdict(root: string, relPath: string): "ignored" | "not-ignored" | "unknown" {
   try {
-    execFileSync("git", ["-C", root, "check-ignore", "-q", "--", relPath], { stdio: "ignore" });
+    gitText(root, ["check-ignore", "-q", "--", relPath]);
     return "ignored";
   } catch (error) {
     return (error as { status?: number }).status === 1 ? "not-ignored" : "unknown";

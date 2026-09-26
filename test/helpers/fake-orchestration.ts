@@ -18,7 +18,7 @@
  *    pane is just an id plus the argv it was started with, because that is
  *    genuinely all the orchestrator asks of it now;
  *  - the CHANNEL is an in-memory {@link ChannelIO} over a `Map`, driving the
- *    REAL `lib/orchestrator-channel.ts` — the records, the spill rule, the
+ *    REAL `lib/channel-*.ts` — the records, the spill rule, the
  *    projection and the classifier are all the production code;
  *  - a fake CHILD is a few lines that append real records to that channel, so
  *    a test says "the child reported waiting-input" instead of drawing a box.
@@ -44,19 +44,13 @@ import { restatementHash, type RestatementRecord } from "../../lib/restatement.t
 import type { DeliveryStation } from "../../lib/delivery-station.ts";
 
 import { emptyRuntime, type OrchestratorRuntime } from "../../lib/orchestrator-registry.ts";
-import {
-  appendRecord,
-  channelPathFor,
-  projectChannel,
-  readChannel,
-  type ChannelIO,
-  type ChannelRecord,
-  type ChildReportedState,
-} from "../../lib/orchestrator-channel.ts";
+import { appendRecord, channelPathFor, type ChannelIO } from "../../lib/channel-io.ts";
+import { projectChannel, readChannel } from "../../lib/channel-projection.ts";
+import type { ChannelRecord, ChildReportedState } from "../../lib/channel-records.ts";
 import type { SupervisionMemory } from "../../lib/orchestrator-supervisor.ts";
 import type { AnnouncedRequest } from "../../lib/orchestrator-wait.ts";
 import type { TaskMode } from "../../lib/task-mode.ts";
-import { STATE_VARIANT_ENV } from "../../lib/gate-state.ts";
+import { STATE_VARIANT_ENV } from "../../lib/gate-state-io.ts";
 import { PREDECESSOR_PANE_ENV } from "../../lib/session-inheritance.ts";
 
 /** Fixed clock so ids and timestamps are reproducible. */
@@ -671,6 +665,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
         let i = 1;
         for (; i < raw.length; i++) {
           const token = raw[i]!;
+          if (token === "-u") { i++; continue; } // a gate variable the child is NOT given
           if (!token.includes("=")) break;
           const [key, ...rest] = token.split("=");
           paneEnv[key!] = rest.join("=");

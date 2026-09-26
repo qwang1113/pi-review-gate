@@ -1,7 +1,7 @@
 /**
  * THE CHANNEL PROTOCOL — the medium the whole supervision layer now rests on.
  *
- * These tests drive the REAL implementation (`lib/orchestrator-channel.ts`,
+ * These tests drive the REAL implementation (`lib/channel-*.ts`,
  * `lib/orchestrator-child-channel.ts`, `lib/orchestrator-supervisor.ts`) with
  * an in-memory filesystem, a fake clock and a fake dialog. There is no tmux,
  * no pi process and no disk anywhere in this file — which is the acceptance
@@ -17,22 +17,27 @@ import assert from "node:assert/strict";
 import {
   appendRecord,
   channelDir,
-  channelOwnerId,
   channelPathFor,
+  requestPayload,
+  MAX_INLINE_RECORD_BYTES,
+  judgeChannelTarget,
+  nodeChannelIO,
+  reportText,
+  type ChannelIO,
+} from "../lib/channel-io.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  channelOwnerId,
   isStalled,
   projectChannel,
   readChannel,
-  requestPayload,
   sanitizeDeliveryStation,
   sanitizeBatchStamp,
-
-  MAX_INLINE_RECORD_BYTES,
-  judgeChannelTarget,
-  reportText,
   HEARTBEAT_STALE_MS,
-  type ChannelIO,
-  type ChannelRecord,
-} from "../lib/orchestrator-channel.ts";
+} from "../lib/channel-projection.ts";
+import type { ChannelRecord } from "../lib/channel-records.ts";
 import {
   acknowledgeInstruct,
   askThroughChannel,
@@ -114,7 +119,8 @@ test("records round-trip, and a malformed line is REPORTED rather than swallowed
   const read = readChannel(io, channelPathFor(ORCH, "c1", HOME));
   assert.equal(read.records.length, 2);
   assert.equal(read.malformed, 1, "a line the reader cannot parse is counted, never hidden");
-  assert.equal(read.cursor, 3, "the cursor counts LINES, so a rewrite cannot silently replay history");
+  assert.equal(read.cursor, Buffer.byteLength(io.files.get(channelPathFor(ORCH, "c1", HOME))!, "utf8"),
+    "the cursor is the byte offset past the last complete line");
 });
 
 test("a cursor reads only what is NEW", () => {
@@ -127,6 +133,56 @@ test("a cursor reads only what is NEW", () => {
   const second = readChannel(io, path, first.cursor);
   assert.equal(second.records.length, 1);
   assert.equal((second.records[0] as { state: string }).state, "idle");
+});
+
+test("a cursor past the end of a TRUNCATED file falls back to reading it whole", () => {
+  const io = memoryIO(() => T0);
+  const target = { orchestrationId: ORCH, childId: "c1", home: HOME };
+  const path = channelPathFor(ORCH, "c1", HOME);
+  for (let i = 0; i < 3; i += 1) {
+    appendRecord(io, target, { kind: "state", from: "child", at: new Date(T0 + i).toISOString(), state: "working" });
+  }
+  const first = readChannel(io, path);
+  io.files.set(path, "");
+  appendRecord(io, target, { kind: "state", from: "child", at: new Date(T0 + 9).toISOString(), state: "done" });
+  const second = readChannel(io, path, first.cursor);
+  assert.deepEqual(second.records.map((r) => (r as { state: string }).state), ["done"]);
+  assert.equal(second.cursor, Buffer.byteLength(io.files.get(path)!, "utf8"));
+});
+
+test("a half-written last line is left for the next read, not counted as malformed", () => {
+  const io = memoryIO(() => T0);
+  const path = channelPathFor(ORCH, "c1", HOME);
+  const line = JSON.stringify({ kind: "state", from: "child", at: new Date(T0).toISOString(), state: "idle" });
+  io.appendLine(path, line.slice(0, 10));
+  const first = readChannel(io, path);
+  assert.equal(first.records.length, 0);
+  assert.equal(first.malformed, 0);
+  assert.equal(first.cursor, 0);
+  io.files.set(path, `${line}\n`);
+  assert.equal(readChannel(io, path, first.cursor).records.length, 1);
+});
+
+test("nodeChannelIO reads incrementally from the byte offset, CJK included", () => {
+  const home = mkdtempSync(join(tmpdir(), "rg-channel-"));
+  try {
+    const io = nodeChannelIO();
+    const target = { orchestrationId: ORCH, childId: "c1", home };
+    const path = channelPathFor(ORCH, "c1", home);
+    appendRecord(io, target, { kind: "state", from: "child", at: new Date(T0).toISOString(), state: "working", note: "读代码" });
+    const first = readChannel(io, path);
+    assert.equal(first.records.length, 1);
+    appendRecord(io, target, { kind: "state", from: "child", at: new Date(T0 + 1).toISOString(), state: "idle", note: "停下" });
+    const second = readChannel(io, path, first.cursor);
+    assert.deepEqual(second.records.map((r) => (r as { note?: string }).note), ["停下"]);
+    assert.equal(readChannel(io, path, second.cursor).records.length, 0);
+    writeFileSync(path, "");
+    appendRecord(io, target, { kind: "state", from: "child", at: new Date(T0 + 2).toISOString(), state: "done" });
+    assert.deepEqual(readChannel(io, path, second.cursor).records.map((r) => (r as { state: string }).state), ["done"]);
+    assert.equal(readChannel(io, join(home, "missing.jsonl"), 7).cursor, 7);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("a bulky payload SPILLS to a side file so the JSONL line can never be torn", () => {

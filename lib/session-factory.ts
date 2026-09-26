@@ -59,20 +59,21 @@
  * a dropped variable does not degrade a feature — it kills the pane at boot.
  * Names and value semantics are frozen; tests pin the key set per role.
  *
- * Pure-ish: tmux enters through the injected {@link PaneRunner} and delivery
+ * Pure-ish: tmux enters through the injected {@link TmuxRunner} and delivery
  * evidence through an injected probe, so every branch runs with fakes.
  */
 
 import {
   buildHandoffPaneArgv,
   buildKillPaneArgv,
-  buildKillWindowArgv,
   buildPaneLabelArgv,
   buildPaneStyleArgv,
   buildShowPaneLabelsArgv,
   parseSpawnedPaneId,
-  type SessionWindowCoords,
+  type TmuxRunner,
+  type TmuxRunResult,
 } from "./orchestrator-tmux.ts";
+import { buildKillWindowArgv, type SessionWindowCoords } from "./tmux-session-argv.ts";
 import {
   openScopeWindow,
   type TmuxScope,
@@ -92,7 +93,7 @@ import { JUDGE_ID_ENV, JUDGE_OPENER_ENV, JUDGE_ROLE_ENV } from "./judge-pane.ts"
 import { judgeScratchDir } from "./judge-process.ts";
 import { JUDGE_STREAM_ENV, JUDGE_TASK_ENV } from "./judge-side.ts";
 import { WORKER_ID_ENV, WORKER_OPENER_ENV, WORKER_ROLE_ENV } from "./worker-side.ts";
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
+import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
 import { ACCEPTANCE_GATE_ENV } from "./acceptance-round.ts";
@@ -100,15 +101,6 @@ import type { DeliveryStation } from "./delivery-station.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import { mkdirSync } from "node:fs";
 
-/** One tmux invocation through the injected runner. */
-export interface PaneRunResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-}
-
-/** Run one tmux argv; never a shell string. */
-export type PaneRunner = (argv: readonly string[]) => PaneRunResult;
 
 // ---------------------------------------------------------------------------
 // Identity: what a pane IS, and the environment that tells it so
@@ -266,7 +258,7 @@ export interface SessionPaneDecor {
  * coloured border, so this returns a warning and never an error.
  */
 export function decorateSessionPane(
-  run: PaneRunner,
+  run: TmuxRunner,
   paneId: string,
   decor: SessionPaneDecor,
 ): string | undefined {
@@ -330,7 +322,7 @@ const DEFAULT_TITLE_MEMORY: PaneTitleMemory = new Map<string, { title: string; a
  * screen. Returns whether tmux was actually asked to paint.
  */
 export function refreshSessionPaneTitle(
-  run: PaneRunner,
+  run: TmuxRunner,
   opts: {
     paneId: string;
     label: string;
@@ -370,7 +362,7 @@ export function refreshSessionPaneTitle(
  * this is a cosmetic layer, and a pane that works is worth more than a border
  * that is right.
  */
-export function paintPaneTitle(run: PaneRunner, paneId: string, title: string): void {
+export function paintPaneTitle(run: TmuxRunner, paneId: string, title: string): void {
   try {
     run(buildPaneLabelArgv(paneId, title));
   } catch {
@@ -393,7 +385,7 @@ export function paintPaneTitle(run: PaneRunner, paneId: string, title: string): 
  * (lib/orchestrator-tmux.ts `buildKillWindowArgv`).
  */
 export function closeSessionWindow(
-  run: PaneRunner,
+  run: TmuxRunner,
   coords: { ownSession: string; windowId: string },
 ): { ok: true } | { ok: false; error: string } {
   try {
@@ -431,7 +423,7 @@ export function windowAlreadyGone(error: string | undefined): boolean {
  * successor with it.
  */
 export function closeSessionPane(
-  run: PaneRunner,
+  run: TmuxRunner,
   paneId: string,
 ): { ok: true } | { ok: false; error: string } {
   try {
@@ -545,7 +537,7 @@ export type SessionPaneOutcome =
  * never from listing-and-diffing.
  */
 export async function openSessionWindow(
-  run: PaneRunner,
+  run: TmuxRunner,
   spec: SessionPaneSpec,
 ): Promise<SessionPaneOutcome> {
   const env = buildSessionEnv(spec.role);
@@ -618,7 +610,7 @@ export async function openSessionWindow(
  * replaced by its own successor when it retires.
  */
 function openRelayPane(
-  run: PaneRunner,
+  run: TmuxRunner,
   spec: SessionPaneSpec,
   env: Readonly<Record<string, string>>,
 ): ({ ok: true } & SessionPaneCoords) | { ok: false; error: string } {
@@ -626,7 +618,7 @@ function openRelayPane(
   if (!ownPane) {
     return { ok: false, error: "接力后继者需要 opener 自己的 pane 作落点（ownPane 缺失）" };
   }
-  let spawned: PaneRunResult;
+  let spawned: TmuxRunResult;
   try {
     spawned = run(buildHandoffPaneArgv({ orchestratorPane: ownPane, cwd: spec.cwd, env, command: spec.command }));
   } catch (error) {

@@ -28,7 +28,7 @@
  * parsed findings, and it answers "must this round carry a reason?".
  */
 
-import type { RoundRecord } from "./gate-state.ts";
+import type { RoundRecord } from "./gate-state-records.ts";
 
 /** Consecutive READY rounds that arm the reason requirement. */
 export const READY_STREAK_TRIGGER = 2;

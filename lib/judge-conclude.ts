@@ -47,19 +47,17 @@
  */
 import { Type } from "typebox";
 
-import type { ToolHost, ToolReply } from "./tool-host.ts";
+import { toolFail as fail, toolReply as reply, type ToolHost, type ToolReply } from "./tool-host.ts";
 import {
   appendRecord,
   channelPathFor,
   judgeChannelTarget,
   newChannelId,
-  readChannel,
-  sanitizeContextPercent,
   type ChannelIO,
-  type ChannelRecord,
-  type ReviewScopeStamp,
-} from "./orchestrator-channel.ts";
-import { DOC_SYNC_ATTESTATIONS } from "./gate-state.ts";
+} from "./channel-io.ts";
+import { readChannel, sanitizeContextPercent } from "./channel-projection.ts";
+import type { ChannelRecord, ReviewScopeStamp } from "./channel-records.ts";
+import { DOC_SYNC_ATTESTATIONS } from "./gate-state-records.ts";
 import { JUDGE_STREAM_ENV, readJudgeSideEnv } from "./judge-side.ts";
 import {
   decideInspection,
@@ -109,14 +107,6 @@ export interface ConcludedInput {
   docSync?: string | undefined;
   /** Prose — ADVISER ONLY; absent for every other role. */
   notes?: string | undefined;
-}
-
-function fail(text: string): ToolReply {
-  return { content: [{ type: "text", text }], details: undefined, isError: true };
-}
-
-function reply(text: string, details: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details };
 }
 
 /**

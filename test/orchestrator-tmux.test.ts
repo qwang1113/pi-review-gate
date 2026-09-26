@@ -16,33 +16,38 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
+  GATE_ENV_NAMES,
+  INHERITED_GATE_ENV_NAMES,
   NEVER_ALLOWED_TMUX_SUBCOMMANDS,
   OWN_SESSION_TMUX_SUBCOMMANDS,
-  SESSION_OWNER_OPTION,
   UnsafeTmuxCommand,
   assertSafeTmuxArgv,
   buildHandoffPaneArgv,
   buildKillPaneArgv,
+  buildListServerPanesArgv,
+  isOwnSessionName,
+  isPaneId,
+  isWindowId,
+  parsePaneIds,
+  parseSpawnedPaneId,
+  parseWindowCoords,
+} from "../lib/orchestrator-tmux.ts";
+import {
+  SESSION_OWNER_OPTION,
   buildKillSessionArgv,
   buildKillWindowArgv,
-  buildListServerPanesArgv,
   buildListSessionsArgv,
   buildNewSessionArgv,
   buildNewWindowArgv,
   buildReadSessionOwnerArgv,
   buildSetSessionOwnerArgv,
-  isOwnSessionName,
-  isPaneId,
-  isWindowId,
-  parsePaneIds,
   parseSessionNames,
-  parseSpawnedPaneId,
   parseSpawnedWindow,
-  parseWindowCoords,
-} from "../lib/orchestrator-tmux.ts";
+} from "../lib/tmux-session-argv.ts";
 
 const SESSION = "rg-pi-review-gate-d104b8a270";
 
@@ -236,11 +241,21 @@ test("a new session opens WITH its first child — no stray shell window", () =>
   assert.ok(!argv.includes("-e"), "never tmux -e: it would write the SESSION environment");
   const envAt = argv.indexOf("env");
   assert.ok(envAt > 0, "the child's environment is its own command's prefix");
+  const pairsAt = argv.findIndex((arg, i) => i > envAt && arg.includes("="));
   assert.deepEqual(
-    argv.slice(envAt, envAt + 3),
-    ["env", "RG_GATE_MODE=loop", "RG_STATE_VARIANT=t1-abc"],
+    argv.slice(pairsAt, pairsAt + 2),
+    ["RG_GATE_MODE=loop", "RG_STATE_VARIANT=t1-abc"],
     "sorted, so the argv is testable",
   );
+  // Every OTHER gate variable is unset, so nothing the tmux server's global
+  // environment carries can dress the child up as somebody else — except the
+  // silence switch, which a silenced parent must hand on (it fails open when
+  // stripped).
+  const unset = argv.slice(envAt + 1, pairsAt).filter((arg) => arg !== "-u");
+  assert.deepEqual(unset, GATE_ENV_NAMES.filter((k) =>
+    k !== "RG_GATE_MODE" && k !== "RG_STATE_VARIANT" && !INHERITED_GATE_ENV_NAMES.includes(k)));
+  assert.ok(!unset.includes("RG_NO_SIDE_EFFECTS"), "a silenced parent's children stay silenced");
+  assert.ok(argv.slice(envAt + 1, pairsAt).every((arg, i) => (i % 2 === 0 ? arg === "-u" : true)));
   assert.ok(argv.includes("-P") && argv.includes("-F"), "tmux prints what it created");
   assert.equal(argv[argv.indexOf("#{window_id} #{pane_id}") - 1], "-F");
   assert.deepEqual(argv.slice(-2), ["pi", "@.pi/tasks/t1.md"], "the child's own command IS the first window");
@@ -368,4 +383,16 @@ test("nothing in the tmux module reads the passthrough option any more", () => {
   const source = readFileSync(new URL("../lib/orchestrator-tmux.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /allow-passthrough/,
     "the option belongs to the user's config; with OSC gone the gate has no business reading it");
+});
+
+test("GATE_ENV_NAMES lists every `*_ENV = \"RG_…\"` constant and `env.RG_…` read in lib/", () => {
+  const libDir = join(import.meta.dirname ?? ".", "..", "lib");
+  const declared = new Set<string>();
+  for (const file of readdirSync(libDir).filter((f) => f.endsWith(".ts"))) {
+    for (const m of readFileSync(join(libDir, file), "utf8").matchAll(/const \w+_ENV\s*=\s*"(RG_[A-Z_]+)"|env(?:\.|\[")(RG_[A-Z_]+)/g)) {
+      declared.add((m[1] ?? m[2])!);
+    }
+  }
+  assert.deepEqual([...GATE_ENV_NAMES].sort(), [...declared].sort(),
+    "a gate variable missing here would still leak into a child from the tmux server's global environment");
 });

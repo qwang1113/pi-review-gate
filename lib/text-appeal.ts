@@ -32,7 +32,8 @@
  * the sidecar, the arbiter spawn and the dialog.
  */
 
-import { sha256, type ArbiterDecision } from "./arbitration.ts";
+import type { ArbiterDecision } from "./arbitration.ts";
+import { sha256 } from "./hash.ts";
 import { asUntrustedData } from "./untrusted-data.ts";
 
 /** The heuristic checks whose blocks may be appealed (A-class). */

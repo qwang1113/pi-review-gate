@@ -33,8 +33,8 @@
  * tree and still correctly invalidates the pass.
  */
 
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { gitBaseEnv, gitText as git, gitOrNull } from "./git-exec.ts";
+import { sha256 } from "./hash.ts";
 import { copyFileSync, mkdtempSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
@@ -145,17 +145,6 @@ export function realFile(file: string): string {
 export const REPO_ROOT_PATHSPEC = ":/";
 
 /**
- * Status pathspecs for changedFiles(). `:(top,exclude)` = "exclude this path
- * measured from the repo root", the exclusion counterpart of `:/`.
- * (`git status` reports repo-root-relative paths already, so no `:/` include
- * spec is needed to widen its scope.)
- */
-const STATUS_EXCLUDE_PATHSPECS: readonly string[] = Object.freeze([
-  ":(top,exclude).pi",
-  ":(top,exclude).pi-subagents",
-]);
-
-/**
  * Algorithm version of the digest produced here.
  *
  * A verdict binding is only meaningful under the algorithm that produced it,
@@ -198,120 +187,6 @@ const UNAVAILABLE: Fingerprint = Object.freeze({
   head: "__UNAVAILABLE__",
   unavailable: true,
 });
-
-/**
- * Git environment variables that RELOCATE the repository, the worktree, the
- * index or the object store. They must never be inherited.
- *
- * Reproduced fail-open: with `GIT_DIR`/`GIT_WORK_TREE` pointing at another
- * repository, `computeFingerprint(A)` returned a digest describing repo B — so
- * a real edit in A left "its" fingerprint unchanged and a stale READY binding
- * stayed valid. The gate must describe the repository it was asked about, not
- * whatever an ambient variable points at. Discovery falls back to the cwd,
- * which is what every caller means (and what git hooks already run in).
- *
- * `GIT_INDEX_FILE` is included because the shadow-index passes below set it
- * explicitly; inheriting an outer value would let a caller substitute the
- * index the digest is built from.
- */
-export const GIT_LOCATION_ENV: readonly string[] = Object.freeze([
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_CEILING_DIRECTORIES",
-  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-]);
-
-/**
- * Any variable matching this prefix injects CONFIG into the git invocation:
- * `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>`,
- * `GIT_CONFIG_PARAMETERS`, and the `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` /
- * `GIT_CONFIG_NOSYSTEM` source overrides.
- *
- * This is a second, independent way to reach the same fail-open as GIT_DIR:
- * `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile
- * GIT_CONFIG_VALUE_0=/tmp/patterns` makes the named files invisible to
- * `git add`, so a real untracked edit never enters the digest and a stale
- * READY binding stays valid — with no GIT_DIR involved. Matched by PREFIX
- * because the numbered forms are unbounded.
- */
-const GIT_CONFIG_ENV_PREFIX = /^GIT_CONFIG(_|$)/;
-
-/**
- * process.env minus every variable that can relocate the repository or inject
- * configuration. The user's real `~/.gitconfig` still applies (that is the
- * user's own, deliberate configuration); what is removed is the ability of an
- * AMBIENT variable to substitute or add to it for this process only.
- */
-export function gitBaseEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of GIT_LOCATION_ENV) delete env[key];
-  for (const key of Object.keys(env)) {
-    if (GIT_CONFIG_ENV_PREFIX.test(key)) delete env[key];
-  }
-  return env;
-}
-
-function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    timeout: 30_000,
-    maxBuffer: 32 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: env ?? gitBaseEnv(),
-  }).trim();
-}
-
-/**
- * `env` is NOT optional decoration: the shadow-index passes must reach git
- * through GIT_INDEX_FILE. An earlier version of this helper silently dropped
- * the argument, so `update-index --no-skip-worktree` ran against the USER'S
- * REAL INDEX and wiped their skip-worktree / assume-unchanged bits (verified:
- * `S a.ts` / `h b.ts` became `H a.ts` / `H b.ts` after one fingerprint).
- */
-function gitOrNull(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string | null {
-  try {
-    return git(cwd, args, env);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Like gitOrNull(), but WITHOUT the trailing/leading trim.
- *
- * Required for `--porcelain -z` output: a porcelain entry is `XY <path>`, and
- * for an unstaged modification X is a SPACE (" M f.ts"). Trimming ate that
- * leading space on the FIRST entry only, so `entries[0].slice(3)` returned
- * ".ts" instead of "f.ts" — a silently corrupted path. It stayed invisible
- * because the existing consumers only test the extension (".ts" still looks
- * like a code file) and the existing test happened to use untracked files
- * ("?? x.ts", no leading space). It is a real defect for anything that must
- * open the path, such as the advisory token's stat probe.
- */
-function gitRawOrNull(cwd: string, args: string[]): string | null {
-  try {
-    return execFileSync("git", args, {
-      cwd,
-      encoding: "utf8",
-      timeout: 30_000,
-      maxBuffer: 32 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: gitBaseEnv(),
-    });
-  } catch {
-    return null;
-  }
-}
-
-function sha256(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
-}
 
 /** Thrown to force the whole fingerprint to fail CLOSED. */
 class FingerprintUnavailable extends Error {}
@@ -518,7 +393,7 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     // user's real staging area is never touched.
     // gitBaseEnv() first: an inherited GIT_DIR/GIT_WORK_TREE would otherwise
     // build this tree from a DIFFERENT repository than the caller asked about.
-    const env: NodeJS.ProcessEnv = { ...gitBaseEnv(), GIT_INDEX_FILE: shadowIndex };
+    const shadow = { env: { ...gitBaseEnv(), GIT_INDEX_FILE: shadowIndex } };
 
     // Stage the whole worktree, THEN drop the gate-owned paths. Removing them
     // afterwards — rather than passing `:(exclude)` pathspecs to `git add` —
@@ -567,7 +442,7 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     // the only repositories whose result differs are those that previously
     // produced no usable digest at all, so no existing binding can be
     // reinterpreted.
-    const tracked = git(cwd, ["ls-files", "-z", "--full-name", "--", REPO_ROOT_PATHSPEC], env)
+    const tracked = git(cwd, ["ls-files", "-z", "--full-name", "--", REPO_ROOT_PATHSPEC], shadow)
       .split("\0")
       .filter(Boolean);
     for (let i = 0; i < tracked.length; i += UPDATE_INDEX_CHUNK) {
@@ -575,12 +450,12 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
       // Best-effort: a path that cannot be unmarked still gets re-read by the
       // `--renormalize` pass below, and a hard failure here would fail closed
       // on repositories that merely use an unusual bit combination.
-      gitOrNull(cwd, ["update-index", "--no-assume-unchanged", "--", ...chunk], env);
-      gitOrNull(cwd, ["update-index", "--no-skip-worktree", "--", ...chunk], env);
+      gitOrNull(cwd, ["update-index", "--no-assume-unchanged", "--", ...chunk], shadow);
+      gitOrNull(cwd, ["update-index", "--no-skip-worktree", "--", ...chunk], shadow);
     }
 
-    git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
-    git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
+    git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], shadow);
+    git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], shadow);
     // `-f` is REQUIRED, not defensive. A legacy review snapshot (older
     // installs; the 2026-08-27 model creates none) is a linked worktree under
     // `~/.pi/review-snapshots/<repo-key>/` (repo-`.pi` or tmpdir on fallback),
@@ -593,9 +468,9 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     // downgraded to BLOCKED with "STALE TREE: current tree unreadable".
     // `--cached` keeps this inside the throwaway shadow index: no working-tree
     // file is ever removed.
-    git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS, ...extraExcludePathspecs], env);
+    git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS, ...extraExcludePathspecs], shadow);
 
-    const tree = git(cwd, ["write-tree"], env);
+    const tree = git(cwd, ["write-tree"], shadow);
     // Guard against a future git printing warnings on stdout: only a bare
     // object id is a usable tree id (sha1 = 40 hex, sha256 = 64).
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) {
@@ -653,9 +528,10 @@ function worktreeDigest(cwd: string, depth: number, opts?: WorktreeDigestOptions
   return submodules === "" ? tree : sha256(`${tree}\0${submodules}`);
 }
 
-export function computeFingerprint(cwd: string): Fingerprint {
+/** `opts.treeOidForCwd` lets a caller that also needs the bare tree OID capture it instead of materializing it twice. */
+export function computeFingerprint(cwd: string, opts?: WorktreeDigestOptions): Fingerprint {
   try {
-    const digest = worktreeDigest(cwd, 0);
+    const digest = worktreeDigest(cwd, 0, opts);
     const head = gitOrNull(cwd, ["rev-parse", "HEAD"]) ?? "NO_HEAD";
     return { digest, head, unavailable: false };
   } catch {
@@ -665,193 +541,3 @@ export function computeFingerprint(cwd: string): Fingerprint {
   }
 }
 
-/**
- * ADVISORY-ONLY change token — a ~10ms stand-in for "has the worktree moved
- * since the last fingerprint?", used SOLELY to skip a redundant recompute
- * when rendering the per-turn system prompt.
- *
- * ####################################################################
- * # NEVER use this to decide whether a gate is SATISFIED. It is not a #
- * # fingerprint and it is not staging-invariant. Enforcement paths    #
- * # (ship blocks, declare_done, verdict recording, arbitration, git   #
- * # hooks) MUST call computeFingerprint() directly, every time.       #
- * ####################################################################
- *
- * Why a token instead of caching computeFingerprint() behind edit events:
- * an event-driven cache keyed on "the extension saw no edit tool call" is
- * unsound — `sed -i` in bash, an external editor, format-on-save, or a
- * background process all change the worktree without any event, and this
- * gate's threat model explicitly includes an agent editing files through
- * arbitrary bash. This token instead observes the FILESYSTEM:
- *
- *   sha256( porcelain status of the whole repo  ||  size+mtime of every
- *           path that status reports as changed )
- *
- * so it moves for every change the gate can normally see, including repeated
- * edits to a file that was ALREADY dirty (whose status line does not change —
- * the case that would make a status-only token useless in practice).
- *
- * Residual blind spot, deliberately accepted: an edit that keeps the file's
- * size AND lands in the same filesystem mtime bucket can leave the token
- * unchanged (exactly the racily-clean window that computeFingerprint spends
- * its ~466ms/9k-files defeating). The consequence is bounded to a STALE
- * PROMPT — the agent may be told "all gates satisfied" one turn too long —
- * because every path that can actually ship, end the task, or record a
- * verdict recomputes the real fingerprint. It can never turn a stale READY
- * into a commit.
- *
- * Returns null when the token cannot be computed (git unreadable): callers
- * must then fall back to computing the real fingerprint, never to reusing a
- * previous one.
- */
-export function advisoryChangeToken(cwd: string): string | null {
-  // --no-optional-locks: never let this convenience probe write the user's
-  // index (a status refresh normally may). Keeps it read-only and cheap.
-  const porcelain = gitRawOrNull(cwd, [
-    "--no-optional-locks", "status", "--porcelain", "-uall", "-z", "--", ...STATUS_EXCLUDE_PATHSPECS,
-  ]);
-  if (porcelain === null) return null;
-
-  const files = parsePorcelain(porcelain);
-
-  // Stat every changed path so a SECOND edit to an already-dirty file (whose
-  // status line is unchanged) still moves the token. A vanished/unreadable
-  // path contributes a marker rather than being skipped, so deletes count too.
-  const parts: string[] = [porcelain];
-  for (const f of files.slice().sort()) {
-    let stamp = "missing";
-    try {
-      const st = statSync(join(cwd, f));
-      stamp = `${st.size}:${st.mtimeMs}`;
-    } catch { /* keep "missing" */ }
-    parts.push(`${f}\u0000${stamp}`);
-  }
-  return sha256(parts.join("\u0001"));
-}
-
-/**
- * Parse NUL-delimited porcelain into changed paths. Shared by changedFiles()
- * and advisoryChangeToken() so the token needs only ONE `git status` call.
- */
-function parsePorcelain(porcelain: string): string[] {
-  if (!porcelain) return [];
-  const entries = porcelain.split("\0").filter(Boolean);
-  const files: string[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    const status = entries[i].slice(0, 2);
-    const path = entries[i].slice(3);
-    if (!path) continue;
-    // P0-6: rename in -z format: "R  orig\0dest". Include BOTH paths
-    // so a code→doc rename arms both gates, not just the destination.
-    if (status.startsWith("R") && i + 1 < entries.length && entries[i + 1].length > 0 && !entries[i + 1].startsWith("?")) {
-      files.push(path);            // old path
-      files.push(entries[++i]);    // new path (destination)
-    } else {
-      files.push(path);
-    }
-  }
-  return files;
-}
-
-/** List changed file paths (repo-root-relative) from NUL-delimited porcelain. */
-export function changedFiles(cwd: string): string[] | undefined {
-  try {
-    const porcelain = gitRawOrNull(cwd, ["status", "--porcelain", "-uall", "-z", "--", ...STATUS_EXCLUDE_PATHSPECS]);
-    if (porcelain === null) return undefined;
-    return parsePorcelain(porcelain);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Files and changed-line count between two trees. */
-export interface TreeIncrement {
-  files: string[];
-  lines: number;
-}
-
-/**
- * Parse `git diff --numstat -z` output.
- *
- * The `-z` form emits `adds\tdels\tpath\0` for ordinary changes and
- * `adds\tdels\t\0old\0new\0` for renames — the trailing tab with an empty
- * path is the marker that two more records follow. Binary files report `-`
- * for both counts, which contributes 0 lines but still counts as a file.
- */
-function parseNumstatZ(out: string): TreeIncrement {
-  const parts = out.split("\0");
-  const files: string[] = [];
-  let lines = 0;
-  for (let i = 0; i < parts.length; i++) {
-    const rec = parts[i];
-    if (!rec) continue;
-    const fields = rec.split("\t");
-    if (fields.length < 3) continue;
-    const adds = parseInt(fields[0], 10);
-    const dels = parseInt(fields[1], 10);
-    if (Number.isFinite(adds)) lines += adds;
-    if (Number.isFinite(dels)) lines += dels;
-    if (fields[2] === "") {
-      // Rename: the next two records are the old and the new path. Only the
-      // destination is reported — that is the file a reviewer must read.
-      const dest = parts[i + 2];
-      i += 2;
-      if (dest) files.push(dest);
-      continue;
-    }
-    files.push(fields[2]);
-  }
-  return { files, lines };
-}
-
-/**
- * What changed between a previously recorded tree and the worktree as it
- * stands now.
- *
- * Used by the incremental-review scope: `baseTree` is the tree the last READY
- * review was bound to, so this is exactly "what the reviewer has not seen".
- * Returns undefined when it cannot be computed (unknown tree after a `git gc`,
- * unreadable repo) — callers must then fall back to a full review.
- *
- * `baseTree` is re-validated here even though loadSidecar already rejects a
- * malformed one: it ends up in an argv, so "it was checked upstream" is not a
- * property worth betting a `--upload-pack=…`-class injection on.
- */
-export function incrementSinceTree(cwd: string, baseTree: string): TreeIncrement | undefined {
-  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(baseTree)) return undefined;
-  try {
-    const current = worktreeTreeOid(cwd);
-    if (current === baseTree) return { files: [], lines: 0 };
-    const out = git(cwd, ["diff", "--numstat", "-z", baseTree, current]);
-    return parseNumstatZ(out);
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Every file the CURRENT change covers, relative to the branch's base: the
- * committed work on this branch plus the dirty worktree.
- *
- * This is the scope a full review reads, so recording it with a READY verdict
- * is what later lets the gate say "the increment only touches files that
- * review already covered". Returns undefined when no base can be resolved,
- * which makes the next round fall back to a full review.
- */
-export function reviewCoverageFiles(cwd: string): string[] | undefined {
-  const bases = ["@{upstream}", "main", "master", "origin/main", "origin/master"];
-  let current: string;
-  try {
-    current = worktreeTreeOid(cwd);
-  } catch {
-    return undefined;
-  }
-  for (const base of bases) {
-    const merge = gitOrNull(cwd, ["merge-base", base, "HEAD"]);
-    if (!merge) continue;
-    const out = gitRawOrNull(cwd, ["diff", "--name-only", "-z", merge, current]);
-    if (out === null) continue;
-    return out.split("\0").filter(Boolean);
-  }
-  return undefined;
-}

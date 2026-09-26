@@ -243,3 +243,20 @@ export function handoffGeneration(sessionId: string): number {
   const match = /-h(\d+)$/.exec((sessionId ?? "").trim());
   return match ? Number(match[1]) : 0;
 }
+
+/**
+ * Is `sessionId` the session `rootId` itself, or one of its handoff successors?
+ *
+ * WHY (2026-09-26, t8 measured): an orchestration child's identity checks —
+ * "is this pane the child the gate opened" and "whose state records own this
+ * channel" — compared the session id to the child's ONE deterministic id. A
+ * successor runs under `successorSessionId(root, n)`, so it failed both: it
+ * never bound its channel, and the manager would have dropped its records as
+ * foreign anyway. Derived by the same rule that minted the id, so a random
+ * uuid (a background subagent) or another child's `-h1` never matches.
+ */
+export function isHandoffChainOf(rootId: string, sessionId: string): boolean {
+  if (sessionId === rootId) return true;
+  const generation = handoffGeneration(sessionId);
+  return generation > 0 && successorSessionId(rootId, generation) === sessionId;
+}

@@ -8,7 +8,7 @@ import {
   polishStreaks,
   recordedFindingsFrom,
 } from "../lib/polish-gate.ts";
-import type { RoundRecord } from "../lib/gate-state.ts";
+import type { RoundRecord } from "../lib/gate-state-records.ts";
 
 const round = (over: Partial<RoundRecord> = {}): RoundRecord => ({
   round: 1,

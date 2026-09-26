@@ -21,7 +21,7 @@
  */
 import { Type } from "typebox";
 
-import type { ToolHost, ToolReply } from "./tool-host.ts";
+import { toolFail as fail, toolReply as reply, type ToolHost, type ToolReply } from "./tool-host.ts";
 import {
   checkCaller,
   findJudgeLane,
@@ -33,13 +33,12 @@ import {
   appendRecord,
   channelPathFor,
   judgeChannelTarget,
-  projectChannel,
-  readChannel,
   requestPayload,
   type ChannelIO,
-  type ChannelRecord,
-} from "./orchestrator-channel.ts";
-import { resolveAnswer } from "./orchestrator-answer-tools.ts";
+} from "./channel-io.ts";
+import { projectChannel, readChannel } from "./channel-projection.ts";
+import type { ChannelRecord } from "./channel-records.ts";
+import { resolveAnswer } from "./orchestrator-answer-rules.ts";
 import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
@@ -49,10 +48,8 @@ import {
   paneRecoverability,
 } from "./session-factory.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
-import {
-  judgePaneAlive,
-  type JudgePaneRunResult,
-} from "./judge-pane.ts";
+import { judgePaneAlive } from "./judge-pane.ts";
+import type { TmuxRunResult } from "./orchestrator-tmux.ts";
 import { verifyJudgeBoot, channelRecordCount } from "./orchestrator-tool-kit.ts";
 import { judgeSessionIdFor, shortRepoHash, type JudgeLane } from "./judge-process.ts";
 
@@ -83,7 +80,7 @@ export interface JudgeSpawnToolDeps {
   channelIO(): ChannelIO;
   channelHome(): string | undefined;
   /** One tmux invocation (argv, never a shell string). */
-  tmux(argv: readonly string[]): JudgePaneRunResult;
+  tmux(argv: readonly string[]): TmuxRunResult;
   /** This session's own pane — proves we are IN tmux before anything is opened. */
   ownPane(): string | undefined;
   /**
@@ -153,14 +150,6 @@ export interface JudgeSpawnToolDeps {
   rememberPlanAudit(root: string): { ok: true } | { ok: false; error: string };
   /** Forget both pendings (rollback, close, fresh-kill). */
   forgetAudit(root: string): void;
-}
-
-function reply(text: string): ToolReply {
-  return { content: [{ type: "text", text }], details: undefined };
-}
-
-function fail(text: string): ToolReply {
-  return { content: [{ type: "text", text }], details: undefined, isError: true };
 }
 
 /** Resolve a judge by explicit id, or deterministically by role+repo+opener. */

@@ -32,7 +32,7 @@ import {
   channelPathFor,
   type ChannelIO,
   type ChannelTarget,
-} from "../lib/orchestrator-channel.ts";
+} from "../lib/channel-io.ts";
 
 const TARGET: ChannelTarget = { orchestrationId: "opener-1", childId: "rg-reviewer-abc", home: "/home/test" };
 // Derived, never hand-written: the probe and the writer must agree on the path,

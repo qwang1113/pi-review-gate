@@ -42,8 +42,7 @@
  * waiting and the sidecar IO belong to the extension.
  */
 
-import { createHash } from "node:crypto";
-import { canonicalPlanText, formatPlanSummary, type OrchestratorPlan } from "./orchestrator-plan.ts";
+import { formatPlanSummary, planHash, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
 /** One objection, exactly as the auditor concluded it. */
@@ -71,9 +70,9 @@ export interface PlanAuditRecord {
   planText?: string;
 }
 
-/** sha256 of the authorizing content of a plan. */
+/** sha256 of the authorizing content of a plan — the same hash the approval binds to. */
 export function planAuditHash(plan: OrchestratorPlan): string {
-  return createHash("sha256").update(canonicalPlanText(plan), "utf8").digest("hex");
+  return planHash(plan);
 }
 
 /**

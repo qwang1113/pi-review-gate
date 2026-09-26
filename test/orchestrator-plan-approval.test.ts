@@ -29,7 +29,8 @@ import {
   snapshotApprovedPlan,
 } from "../lib/orchestrator-plan-approval.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
-import { buildPlanConfirmMessage, registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
+import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
+import { buildPlanConfirmMessage } from "../lib/orchestrator-plan-messages.ts";
 import { effectiveTaskStation } from "../lib/repo-pr-policy.ts";
 import { normalizeRuntime } from "../lib/orchestrator-registry.ts";
 

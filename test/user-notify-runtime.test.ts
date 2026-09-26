@@ -74,14 +74,14 @@ function harness(over: {
         // THE THREE QUESTIONS THE RUNTIME ASKS tmux: where is this session's
         // window, which clients are attached, and what is each one showing.
         if (argv[0] === "list-clients") {
-          return { ok: true, stdout: `${(over.clients ?? []).join("\n")}\n` };
+          return { ok: true, stdout: `${(over.clients ?? []).join("\n")}\n`, stderr: "" };
         }
         if (argv[0] === "display-message" && argv.includes("-c")) {
           const client = argv[argv.indexOf("-c") + 1] ?? "";
           const shown = over.clientPanes?.[client];
-          return shown ? { ok: true, stdout: `${shown}\n` } : { ok: false, stdout: "" };
+          return shown ? { ok: true, stdout: `${shown}\n`, stderr: "" } : { ok: false, stdout: "", stderr: "" };
         }
-        return { ok: true, stdout: `${over.windowId ?? "@3"}\n` };
+        return { ok: true, stdout: `${over.windowId ?? "@3"}\n`, stderr: "" };
       },
       // A DIFFERENT app by default: the session's own bundle is
       // `com.mitchellh.ghostty`, and a test that sends a banner must not trip

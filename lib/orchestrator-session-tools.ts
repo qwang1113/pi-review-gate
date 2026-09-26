@@ -16,7 +16,7 @@
  * lib/orchestrator-tmux.ts, every pane it may touch is one the registry
  * created, and the blast radius is one window.
  *
- * Read this alongside lib/orchestrator-tools.ts (plan / status / notify),
+ * Read this alongside lib/orchestrator-tools.ts (the plan tool),
  * which is the half that never leaves the sidecar.
 
  */
@@ -49,6 +49,7 @@ import {
   closableChild,
   findChild,
   markChildClosed,
+  repointChildPanes,
 } from "./orchestrator-registry.ts";
 import {
   formatInheritanceBrief,
@@ -73,16 +74,15 @@ import {
 import { dispatchInstruct, dispatchSpawn } from "./orchestrator-dispatch.ts";
 import { registerOrchestratorAnswerTool } from "./orchestrator-answer-tools.ts";
 import { registerOrchestratorRecoveryTools } from "./orchestrator-recovery-tools.ts";
-// Short local aliases; see the note in lib/orchestrator-tools.ts.
+// Short local aliases; see the note in lib/orchestrator-plan-action.ts.
 import {
   alivePanes,
   childAssets,
   currentPlan,
   refreshPaneLabels,
-  toolFail as fail,
-  toolReply as reply,
   requireOrchestratorMode,
 } from "./orchestrator-tool-kit.ts";
+import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 
 /**
@@ -187,6 +187,9 @@ async function doWait(
       at: deps.now(),
       assetsFor: (child) => childAssets(deps, child),
     });
+    // A child that handed over lives in a new pane: remember it, so close /
+    // recover / the exit check stop aiming at the predecessor's corpse.
+    if (snapshot.relayed.length > 0) deps.saveRuntime(repointChildPanes(deps.runtime(), snapshot.relayed));
     // The border labels are repainted from the health that was just measured
     // — the probe is already here, so the screen never lags the receipt.
     refreshPaneLabels(deps, snapshot);
@@ -248,14 +251,18 @@ async function doWait(
     // F14 — an unreadable pane list is UNKNOWN liveness, never a death.
     if (!panes.ok) return { paneAlive: false, livenessUnknown: true };
 
+    // Re-read AFTER the repoint above: judging liveness on the registry this
+    // probe started with would call a relayed child dead in the headline while
+    // the health block of the same receipt shows its successor working.
+    const current = deps.runtime();
     if (!childId) {
-      const live = open.filter((c) => panes.panes.includes(c.paneId));
+      const live = current.children.filter((c) => !c.closedAt && panes.panes.includes(c.paneId));
       return {
         paneAlive: live.length > 0,
         note: `${live.length} 个子会话在跑`,
       };
     }
-    const child = findChild(runtime, childId)!;
+    const child = findChild(current, childId)!;
     return {
       paneAlive: !child.closedAt && panes.panes.includes(child.paneId),
       note: `子会话 ${child.id} 仍在 pane ${child.paneId}`,
@@ -371,7 +378,7 @@ function keepOutOfScope(
 
 /** The receipt still renders when supervision never ran (an empty snapshot). */
 function emptySnapshot(): SupervisionSnapshot {
-  return { children: [], health: [], requests: [], troubled: [], malformed: 0 };
+  return { children: [], health: [], requests: [], troubled: [], malformed: 0, relayed: [] };
 }
 
 /**

@@ -46,15 +46,8 @@ import type { ToolHost, ToolReply } from "./tool-host.ts";
 import { stageOpen } from "./loop-stages.ts";
 import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
-import {
-  GOAL_CONFIRM_TITLE,
-  LOOP_GOAL_SKELETON,
-  buildGoalConfirmMessage,
-  buildGoalPrereviewRefusal,
-  buildGoalTranscriptMessage,
-  goalPrereviewPassed,
-  goalTextHash,
-} from "./loop-goal.ts";
+import { LOOP_GOAL_SKELETON, buildGoalPrereviewRefusal, goalPrereviewPassed, goalTextHash } from "./loop-goal.ts";
+import { GOAL_CONFIRM_TITLE, buildGoalConfirmMessage, buildGoalTranscriptMessage } from "./goal-confirm-copy.ts";
 import { resolvePackageAgentsDir } from "./model-config.ts";
 import { createProgressReporter, type ProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import {

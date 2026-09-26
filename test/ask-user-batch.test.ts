@@ -35,14 +35,9 @@ import { askThroughChannel, type ChildChannelBinding } from "../lib/orchestrator
 import type { ChoiceSpec } from "../lib/choice-dialog.ts";
 import { DECLINE_ROW } from "../lib/choice-dialog.ts";
 import { MULTI_UNAVAILABLE } from "../lib/multi-choice-dialog.ts";
-import {
-  appendRecord,
-  channelPathFor,
-  projectChannel,
-  readChannel,
-  type ChannelIO,
-  type ChannelRecord,
-} from "../lib/orchestrator-channel.ts";
+import { appendRecord, channelPathFor, type ChannelIO } from "../lib/channel-io.ts";
+import { projectChannel, readChannel } from "../lib/channel-projection.ts";
+import type { ChannelRecord } from "../lib/channel-records.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import type { SensitiveGrant } from "../lib/sensitive-grant.ts";
 

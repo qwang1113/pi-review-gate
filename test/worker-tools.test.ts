@@ -24,16 +24,17 @@ neutraliseGateEnv();
 
 import { memoryChannelIO } from "./helpers/fake-orchestration.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
-import type { AgentsConfigMap } from "../lib/model-config.ts";
-import { appendRecord, channelPathFor, readChannel, type ChannelRecord } from "../lib/orchestrator-channel.ts";
+import type { AgentsConfigMap } from "../lib/agents-config.ts";
+import { appendRecord, channelPathFor } from "../lib/channel-io.ts";
+import { readChannel } from "../lib/channel-projection.ts";
+import type { ChannelRecord } from "../lib/channel-records.ts";
+import { registerWorkerTools, type WorkerToolDeps } from "../lib/worker-tools.ts";
 import {
   nextWorkerId,
   projectWorkerChannel,
-  registerWorkerTools,
   resolveWorkerRole,
   workerChannelTarget,
-  type WorkerToolDeps,
-} from "../lib/worker-tools.ts";
+} from "../lib/worker-channel.ts";
 import { parseWorkerRegistry, serializeWorkerRegistry, workerSessionId, type WorkerRegistry } from "../lib/worker-pane.ts";
 import { appendWorkerReport } from "../lib/worker-side.ts";
 

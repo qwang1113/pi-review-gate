@@ -81,11 +81,12 @@ test("(b) the argv builders have exactly the consumers their job allows — and 
     "buildSetSessionOwnerArgv",
   ];
   const readOrKillBuilders = ["buildKillSessionArgv", "buildReadSessionOwnerArgv", "buildListSessionsArgv"];
-  const factoryDefined = ["buildHandoffPaneArgv", "buildKillWindowArgv", "buildKillPaneArgv"];
+  const factoryPaneBuilders = ["buildHandoffPaneArgv", "buildKillPaneArgv"];
   const claims: Array<[readonly string[], string[]]> = [
-    [openingBuilders, ["lib/orchestrator-tmux.ts", "lib/session-tmux-scope.ts"]],
-    [readOrKillBuilders, ["lib/orchestrator-tmux.ts", "lib/session-tmux-scope.ts", "lib/session-orphan-sweep.ts"]],
-    [factoryDefined, ["lib/orchestrator-tmux.ts", "lib/session-factory.ts"]],
+    [openingBuilders, ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts"]],
+    [readOrKillBuilders, ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts", "lib/session-orphan-sweep.ts"]],
+    [["buildKillWindowArgv"], ["lib/tmux-session-argv.ts", "lib/session-factory.ts"]],
+    [factoryPaneBuilders, ["lib/orchestrator-tmux.ts", "lib/session-factory.ts"]],
   ];
   for (const [builders, consumers] of claims) {
     for (const builder of builders) {
@@ -94,7 +95,7 @@ test("(b) the argv builders have exactly the consumers their job allows — and 
         .map((f) => f.rel)
         .sort();
       assert.deepEqual(users, [...consumers].sort(),
-        `${builder} is defined in orchestrator-tmux.ts and used only by ${consumers.slice(1).join(" / ")}`);
+        `${builder} is defined in ${consumers[0]} and used only by ${consumers.slice(1).join(" / ")}`);
     }
   }
   // …and NEITHER the factory NOR the sweep is a second caller of the OPENING
@@ -113,12 +114,12 @@ test("all six pane-opening call sites go through the factory", () => {
   // neighbour's call and report success for a caller that opens panes its own
   // way, so the disjointness is asserted below rather than assumed.
   const sites: Array<{ file: string; anchor: string }> = [
-    { file: "extensions/review-gate.ts", anchor: "async function dispatchJudgeRound(" },
+    { file: "lib/judge-round-dispatch.ts", anchor: "async function dispatchJudgeRound(" },
     { file: "lib/judge-spawn-tools.ts", anchor: "async function doSpawn(" },
     { file: "lib/judge-spawn-tools.ts", anchor: "async function doRecover(" },
     { file: "lib/orchestrator-dispatch.ts", anchor: "export async function dispatchSpawn(" },
     { file: "lib/orchestrator-recovery-tools.ts", anchor: "async function doRecover(" },
-    { file: "extensions/review-gate.ts", anchor: "openSuccessor: async (spec) => {" },
+    { file: "lib/handoff-host.ts", anchor: "openSuccessor: async (spec) => {" },
   ];
   /** From this function's start to wherever the next function begins. */
   const windowOf = (text: string, at: number): string => {
@@ -147,7 +148,7 @@ test("nothing opens a child behind the factory's back", () => {
   const stragglers = sourceFiles()
     .filter((f) => f.rel !== "lib/session-factory.ts" && f.rel !== "lib/session-tmux-scope.ts")
     .filter((f) => /\b(openJudgePane|buildSpawnPaneArgv\(|buildNewSessionArgv\(|buildNewWindowArgv\()/.test(f.text))
-    .filter((f) => f.rel !== "lib/orchestrator-tmux.ts")
+    .filter((f) => f.rel !== "lib/tmux-session-argv.ts")
     .map((f) => f.rel);
   assert.deepEqual(stragglers, [],
     "the old openJudgePane is gone and no second caller assembles a spawn argv");
@@ -162,7 +163,7 @@ test("both recover tools reach the same recovery judgement", () => {
 });
 
 test("the judge probe repaints the border from the channel projection (C2)", () => {
-  const text = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
+  const text = readFileSync(join(ROOT, "lib", "judge-wait-criteria.ts"), "utf8");
   const at = text.indexOf("export function probeJudgeRound(");
   assert.ok(at > 0, "the probe must exist");
   const body = text.slice(at, text.indexOf("\n}", at));

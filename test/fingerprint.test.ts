@@ -15,18 +15,22 @@ const requireCjs = createRequire(import.meta.url);
 
 const {
   computeFingerprint,
-  changedFiles,
-  advisoryChangeToken,
   isGateOwnedPath,
   mayBeGateOwned,
   GATE_EXCLUDE_DIRS,
   GATE_EXCLUDE_PATHSPECS,
   worktreeTreeOid,
-  incrementSinceTree,
-  reviewCoverageFiles,
   FINGERPRINT_VERSION,
 } = await import(
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "fingerprint.ts")
+);
+const {
+  changedFiles,
+  advisoryChangeToken,
+  incrementSinceTree,
+  reviewCoverageFiles,
+} = await import(
+  join(resolve(import.meta.dirname ?? "."), "..", "lib", "worktree-changes.ts")
 );
 
 // The stat-cache race regressions (racily-clean 4×75-round groups, clock-skew,
@@ -719,6 +723,20 @@ test("a resolver is used for the top-level repo even without submodules", () => 
   });
   assert.equal(result.unavailable, false);
   assert.deepEqual(calls, [realpathSync(dir)], "exactly one materialization, for the requested repo");
+});
+
+// The precommit PASS path needs the digest AND the bare tree: the TS
+// computeFingerprint takes the same resolver so the tree is built only once.
+test("computeFingerprint (TS) routes the tree through an injected resolver", () => {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "a.ts"), "// content");
+  const calls: string[] = [];
+  const fp = computeFingerprint(dir, {
+    treeOidForCwd: (d: string) => { calls.push(d); return worktreeTreeOid(d); },
+  });
+  assert.equal(fp.unavailable, false);
+  assert.deepEqual(calls, [dir], "exactly one materialization");
+  assert.equal(fp.digest, computeFingerprint(dir).digest, "sharing must not change the digest");
 });
 
 // ---------------------------------------------------------------------------

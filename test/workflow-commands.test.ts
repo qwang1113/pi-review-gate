@@ -215,6 +215,8 @@ const HANDSHAKE_SOURCES = [
   join("lib", "judge-prompt.ts"),
   join("lib", "parallel-review.ts"),
   join("lib", "loop-goal.ts"),
+  join("lib", "loop-goal-directives.ts"),
+  join("lib", "goal-audit-task.ts"),
   join("lib", "adviser-brief.ts"),
 ];
 

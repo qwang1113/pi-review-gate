@@ -93,7 +93,7 @@ function runCheck(statePath, repo, env = process.env) {
   // lib/loop-stages.ts's shape and of its ONE query. The switches are the
   // USER's: a stage that is off releases its whole block below, and the
   // extension's L1 ship gate reads the same record out of the same sidecar
-  // (lib/gate-state.ts's `unmetRequirements`), so the two can never disagree.
+  // (lib/gate-state-requirements.ts's `unmetRequirements`), so the two can never disagree.
   // ALL-OR-NOTHING on purpose: a partial record is invalid state, not five
   // switches with a missing one, because a record can only ever RELAX a gate.
   const LOOP_STAGES = ["goal", "review", "quality", "acceptance", "precommit"];

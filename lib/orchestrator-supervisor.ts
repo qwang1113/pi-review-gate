@@ -41,18 +41,15 @@
  * liveness is passed in as a set, and the clock is an argument.
  */
 
+import { channelPathFor, requestPayload, type ChannelIO } from "./channel-io.ts";
 import {
-  channelPathFor,
   projectChannel,
   readChannel,
-  requestPayload,
   sanitizeDeliveryStation,
   sanitizeBatchStamp,
-
-  type ChannelIO,
   type ChannelProjection,
-  type ChannelRequestRecord,
-} from "./orchestrator-channel.ts";
+} from "./channel-projection.ts";
+import type { ChannelRequestRecord } from "./channel-records.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
 
 import {
@@ -71,6 +68,7 @@ import {
 import { paneColorFor } from "./orchestrator-pane-decor.ts";
 
 import type { ChildSession } from "./orchestrator-registry.ts";
+import { isPaneId } from "./orchestrator-tmux.ts";
 
 /** What survived a child that died — the reason a death is not a disaster. */
 export interface ChildAssets {
@@ -155,6 +153,12 @@ export interface SupervisionSnapshot {
   troubled: ChildSupervision[];
   /** Channel lines that could not be parsed — surfaced, never swallowed. */
   malformed: number;
+  /**
+   * Children that moved to a new pane through `session_handoff` — their
+   * registry row still names the dead predecessor pane. Supervised under the
+   * new pane already; the caller persists it (`repointChildPanes`).
+   */
+  relayed: Array<{ childId: string; paneId: string }>;
 }
 
 /** What the supervisor needs from the outside world. */
@@ -181,7 +185,8 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
   const requests: PendingRequest[] = [];
   let malformed = 0;
 
-  for (const child of input.children) {
+  const relays: Array<{ childId: string; paneId: string }> = [];
+  for (let child of input.children) {
     const path = channelPathFor(input.orchestrationId, child.id, input.home);
     let projection: ChannelProjection;
     try {
@@ -190,6 +195,11 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
       projection = projectChannel(read.records);
     } catch {
       projection = { openRequests: [], pendingAnswers: [], pendingInstructs: [], modelEvents: [] };
+    }
+    const relayed = relayedPane(child.paneId, projection.lastState?.paneId, input.livePanes);
+    if (relayed) {
+      relays.push({ childId: child.id, paneId: relayed });
+      child = { ...child, paneId: relayed };
     }
     const paneAlive = input.livePanes === undefined ? undefined : input.livePanes.has(child.paneId);
     const observation = {
@@ -251,7 +261,26 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
     requests,
     troubled: children.filter((c) => c.state === "dead" || c.state === "stalled"),
     malformed,
+    relayed: relays,
   };
+}
+
+/**
+ * The pane a child moved to, when it moved (2026-09-26, t8 measured).
+ *
+ * A `session_handoff` successor opens a pane nobody registered, and the gate
+ * closes the predecessor's — so the registry pointed at a corpse and the child
+ * read `dead` while its successor worked and finished. Its own state report
+ * names its pane; adopt it only when the registered pane is GONE and the
+ * reported one is ALIVE. An unreadable pane list proves neither.
+ */
+export function relayedPane(
+  registered: string,
+  reported: string | undefined,
+  livePanes: ReadonlySet<string> | undefined,
+): string | undefined {
+  if (livePanes === undefined || !isPaneId(reported) || reported === registered) return undefined;
+  return !livePanes.has(registered) && livePanes.has(reported) ? reported : undefined;
 }
 
 /**

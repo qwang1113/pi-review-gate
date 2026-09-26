@@ -57,7 +57,8 @@ import {
   buildSetSessionNameOptionArgv,
   buildUnsetSessionNameOptionArgv,
   parseOwnCoords,
-} from "./orchestrator-tmux.ts";
+} from "./tmux-session-argv.ts";
+import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import {
   claimName,
   classifyEntry,
@@ -72,7 +73,6 @@ import {
   sessionRegistryRoot,
   SESSION_HEARTBEAT_MS,
   type RegistryIO,
-  type RegistryTmuxResult,
   type SessionRegistryEntry,
 } from "./session-registry.ts";
 import { sweepOrphans, type SweepReport } from "./session-orphan-sweep.ts";
@@ -86,7 +86,7 @@ export interface SessionNamingDeps {
   /** Runs one tmux argv through the extension's own declared runner. The second
    * argument declares gate sessions the caller has just PROVEN are gate
    * sessions (a dead session's own), which the runner's own list cannot know. */
-  runTmux(argv: readonly string[], ownSessions?: readonly string[]): RegistryTmuxResult;
+  runTmux: TmuxRunner;
   /** THIS session's pi session id. */
   sessionId(): string | undefined;
   /** THIS session's own tmux pane (`$TMUX_PANE`), when it runs inside tmux. */
@@ -143,7 +143,7 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
   const registry = {
     root,
     io,
-    runTmux: (argv: readonly string[], ownSessions?: readonly string[]) => deps.runTmux(argv, ownSessions),
+    runTmux: deps.runTmux,
     alive,
     now,
     ...(deps.tmuxServer === undefined ? {} : { currentServer: deps.tmuxServer }),
@@ -407,7 +407,7 @@ export function liveSessionNames(
   const registry = {
     root,
     io: deps.io ?? nodeRegistryIO(root),
-    runTmux: (argv: readonly string[]) => deps.runTmux(argv),
+    runTmux: deps.runTmux,
     alive: deps.alive ?? pidAlive,
     now: deps.now ?? (() => Date.now()),
     ...(deps.tmuxServer === undefined ? {} : { currentServer: deps.tmuxServer }),

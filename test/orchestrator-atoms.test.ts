@@ -43,7 +43,7 @@ import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-regi
 
 import { nextDecisionId, parsePlan } from "../lib/orchestrator-plan.ts";
 import { buildOrchestratorExitBlock } from "../lib/orchestrator-directives.ts";
-import { sidecarPath, stateVariantFrom, STATE_VARIANT_ENV } from "../lib/gate-state.ts";
+import { sidecarPath, stateVariantFrom, STATE_VARIANT_ENV } from "../lib/gate-state-io.ts";
 
 // ---------------------------------------------------------------------------
 // F7 / F8 — delivery, and the receipt that has to be earned
@@ -57,7 +57,7 @@ test("F7: the task rides in on the argv as pi's own @file reference, under a sta
 });
 
 test("a recovery re-opens the SAME session id, with a note instead of the task", () => {
-  const argv = buildRecoverCommand("a-1", ".pi/tasks/note.md");
+  const argv = buildRecoverCommand(childSessionId("a-1"), ".pi/tasks/note.md");
   assert.deepEqual(argv, ["pi", "--session-id", "rg-child-a-1", "@.pi/tasks/note.md"]);
   const note = buildRecoveryNote({ childId: "a-1", taskId: "t1", reason: "pane 消失" });
   assert.match(note, /上面的对话历史就是你自己的/, "the transcript continues — it did not restart");

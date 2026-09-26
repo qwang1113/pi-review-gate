@@ -50,7 +50,7 @@
  * branch is testable without a terminal.
  */
 
-import { createHash } from "node:crypto";
+import { sha256 } from "./hash.ts";
 import { resolve as pathResolve } from "node:path";
 
 import { Type } from "typebox";
@@ -124,7 +124,7 @@ export function normalizeRestatement(raw: string): string {
 
 /** sha256 over the normalized text. */
 export function restatementHash(raw: string): string {
-  return createHash("sha256").update(normalizeRestatement(raw), "utf8").digest("hex");
+  return sha256(normalizeRestatement(raw));
 }
 
 // ---------------------------------------------------------------------------

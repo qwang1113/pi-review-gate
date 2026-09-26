@@ -57,7 +57,7 @@ import {
   buildListSessionsArgv,
   buildReadSessionOwnerArgv,
   parseSessionNames,
-} from "./orchestrator-tmux.ts";
+} from "./tmux-session-argv.ts";
 import {
   classifyEntry,
   listEntries,
@@ -138,7 +138,7 @@ export function sweepOrphans(deps: RegistryDeps, self?: { sessionId?: string; na
         });
         continue;
       } else {
-        const killed = deps.runTmux(buildKillSessionArgv(scopeSession), [scopeSession]);
+        const killed = deps.runTmux(buildKillSessionArgv(scopeSession), undefined, [scopeSession]);
         if (!killed.ok) {
           report.kept.push({ name: entry.name, reason: `回收 ${scopeSession} 失败：${killed.stderr || "tmux 拒绝"}` });
           continue;

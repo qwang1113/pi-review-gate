@@ -47,12 +47,8 @@ import {
   parseAdviserConclusions,
   type AdviserConclusion,
 } from "./adviser-brief.ts";
-import {
-  buildGoalAuditTask,
-  formatGoalPrereviewCarryover,
-  goalTextHash,
-  normalizeGoalText,
-} from "./loop-goal.ts";
+import { goalTextHash, normalizeGoalText } from "./loop-goal.ts";
+import { buildGoalAuditTask, formatGoalPrereviewCarryover } from "./goal-audit-task.ts";
 import { TASK_TEXT_MARKER } from "./constants.ts";
 
 /**

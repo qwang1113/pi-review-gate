@@ -46,17 +46,17 @@
 import {
   appendRecord,
   newChannelId,
-  projectChannel,
-  readChannel,
   channelPathFor,
   type ChannelIO,
-  type ChannelInstructRecord,
-  type ChannelRequestRecord,
   type ChannelTarget,
-  type ChildReportedState,
-  type InstructAckStage,
-
-} from "./orchestrator-channel.ts";
+} from "./channel-io.ts";
+import { projectChannel, readChannel } from "./channel-projection.ts";
+import type {
+  ChannelInstructRecord,
+  ChannelRequestRecord,
+  ChildReportedState,
+  InstructAckStage,
+} from "./channel-records.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
 import type { ModelEvent } from "./model-health.ts";
 
@@ -170,6 +170,8 @@ export interface ChildChannelBinding {
   target: ChannelTarget;
   /** The child's own pi session id — what a recovery re-opens. */
   sessionId?: string;
+  /** The pane this session runs in, stamped on every state report. */
+  paneId?: string;
   /** Injected timer, so tests advance time instead of spending it. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   pollMs?: number;
@@ -200,6 +202,7 @@ export function reportState(
       at: stamp(binding.io),
       state,
       sessionId: binding.sessionId,
+      ...(binding.paneId ? { paneId: binding.paneId } : {}),
       ...extra,
     });
   } catch {

@@ -38,7 +38,7 @@ import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import { isCodeFile, isDocFile, isSensitiveFile } from "./constants.ts";
 import { choiceRows, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
-import { changedFiles } from "./fingerprint.ts";
+import { changedFiles } from "./worktree-changes.ts";
 import {
   SENSITIVE_GRANT_TTL_MS,
   addGrant,
@@ -68,7 +68,7 @@ function deny(text: string): ToolReply {
  * THE TOPICS THIS MODULE'S TOOLS ASK UNDER — deliberately NOT `string`.
  *
  * The channel's own topic union is the authority on which topics exist
- * (`lib/orchestrator-channel.ts`), and `askEitherSide` accepts only those; a
+ * (`lib/channel-records.ts`), and `askEitherSide` accepts only those; a
  * bare `string` here silently dropped that check (caught by the precommit
  * typecheck, not by the tests — node strips types without checking them).
  * This module asks under exactly these three, so it names exactly these.

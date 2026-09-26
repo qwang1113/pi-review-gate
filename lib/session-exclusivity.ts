@@ -75,7 +75,7 @@
  * `now`, and writes what `presenceFor` builds.
  */
 
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
+import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
 import { readWorkerSideEnv } from "./worker-side.ts";
 import { buildRejection } from "./rejection-copy.ts";

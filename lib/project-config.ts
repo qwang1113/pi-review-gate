@@ -232,7 +232,7 @@ export interface ProjectConfig {
   /**
    * Code↔doc sync enforcement (default ON): a code change requires the READY
    * review to carry a docSync attestation (UPDATED | NOT_NEEDED) — see
-   * lib/gate-state.ts unmetRequirements. "Docs" means the project's
+   * lib/gate-state-requirements.ts unmetRequirements. "Docs" means the project's
    * requirement / plan / feature documentation (docs/, README, …), NOT agent
    * memory files (CLAUDE.md, AGENTS.md, progress.md). Set `"docSync": false` in
    * .pi/review-gate.json to disable for a project.

@@ -22,10 +22,11 @@
  * WHAT LIVES HERE AND WHY. Only decisions, never effects: which rounds skip
  * the quality judge, whether the functional reviewer's verdict may be
  * recorded, who cancels whom, what a recorded quality verdict looks like.
- * `extensions/review-gate.ts` wires them (routing in `submitForReview`, the
- * kill on the settle path, killing the precommit lane) and decides nothing of
- * its own — that file is ~12k lines and got there one "just add the check
- * here" at a time.
+ * The review loop's host modules wire them (routing in lib/review-chain.ts's
+ * `submitForReview`, the kill on the settle path in lib/round-cancel-host.ts,
+ * killing the precommit lane in lib/precommit-lane.ts) and decide nothing of
+ * their own — they were carved out of `extensions/review-gate.ts` (t7), a file
+ * that got to ~12k lines one "just add the check here" at a time.
  *
  * THE TWO HALVES OF A QUALITY PASS, kept apart on purpose:
  *  - `qualityRoundSkip` answers "is there anything to judge at all?" — a

@@ -345,6 +345,24 @@ export function registerChild(
   return { ...runtime, children: [...runtime.children, child] };
 }
 
+/**
+ * Point children at the panes their `session_handoff` successors run in
+ * (lib/orchestrator-supervisor.ts `relayedPane` decides which). Never mutates
+ * its input; returns the SAME object when nothing moved, so a caller can skip
+ * the write.
+ */
+export function repointChildPanes(
+  runtime: OrchestratorRuntime,
+  moves: ReadonlyArray<{ childId: string; paneId: string }>,
+): OrchestratorRuntime {
+  if (moves.length === 0) return runtime;
+  const to = new Map(moves.map((m) => [m.childId, m.paneId]));
+  return {
+    ...runtime,
+    children: runtime.children.map((c) => (to.has(c.id) ? { ...c, paneId: to.get(c.id)! } : c)),
+  };
+}
+
 /** Look a child up by its handle. */
 export function findChild(runtime: OrchestratorRuntime, id: string): ChildSession | undefined {
   return runtime.children.find((c) => c.id === id);

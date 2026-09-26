@@ -15,7 +15,7 @@ import {
   startupOrchestrationId,
   storedRuntimeIsMine,
 } from "../lib/orchestration-id.ts";
-import { channelDir } from "../lib/orchestrator-channel.ts";
+import { channelDir } from "../lib/channel-io.ts";
 
 test("a minted id names its repo and its start time", () => {
   const id = newOrchestrationId("/repo/a", 1_700_000_000_000);

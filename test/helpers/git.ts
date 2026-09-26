@@ -19,7 +19,7 @@
  * fixture — `/dev/null` also removes `user.name` / `user.email` — either with
  * `-c user.name=…` arguments or the GIT_AUTHOR / GIT_COMMITTER variables.
  *
- * NOTE: the product's own `gitBaseEnv()` (lib/fingerprint.ts) deliberately
+ * NOTE: the product's own `gitBaseEnv()` (lib/git-exec.ts) deliberately
  * strips every `GIT_CONFIG*` variable before it shells out, so this env only
  * governs git processes the TESTS spawn themselves — which is exactly where
  * the fixture commits happen.

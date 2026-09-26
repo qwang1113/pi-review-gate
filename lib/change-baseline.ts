@@ -41,7 +41,7 @@
  * the rule itself is testable without a repository.
  */
 
-import { execFileSync } from "node:child_process";
+import { gitText } from "./git-exec.ts";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
@@ -84,10 +84,7 @@ export function readChangeBaseRefs(root: string): string[] {
     // the merge state is per-worktree, so the file does NOT live beside the
     // common `.git` we would otherwise guess. A relative answer is resolved
     // against `root`, which is what it is relative to.
-    const path = execFileSync("git", ["rev-parse", "--git-path", "MERGE_HEAD"], {
-      cwd: root,
-      encoding: "utf8",
-    }).trim();
+    const path = gitText(root, ["rev-parse", "--git-path", "MERGE_HEAD"]);
     if (path.length === 0) return changeBaseRefsFromMergeHeads(undefined);
     mergeHeads = readFileSync(isAbsolute(path) ? path : join(root, path), "utf8");
   } catch {
@@ -115,7 +112,7 @@ export function firstBaseContaining(
 ): string | undefined {
   for (const ref of refs) {
     try {
-      execFileSync("git", ["cat-file", "-e", `${ref}:${path}`], { cwd: root, stdio: "ignore" });
+      gitText(root, ["cat-file", "-e", `${ref}:${path}`]);
       return ref;
     } catch {
       // Not in this base — try the next one.

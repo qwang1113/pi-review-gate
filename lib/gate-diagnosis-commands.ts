@@ -38,12 +38,14 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join as pathJoin, resolve as pathResolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { gitText } from "./git-exec.ts";
 
-import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "./model-diagnose.ts";
+import { diagnoseChain, diagnoseSpecs, formatModelDiagnosis, type RegistryFacts } from "./model-diagnose.ts";
 import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "./gate-doctor.ts";
-import { KNOWN_AGENTS, projectAgentIdentity } from "./model-config.ts";
+import { isWorkerRoleName, KNOWN_AGENTS } from "./model-config.ts";
+import { effectiveAgentsConfig, lacksExplicitChain } from "./agents-config.ts";
 import { judgeEnglish } from "./lang-detect.ts";
-import { globalConfigPath } from "./project-config.ts";
+import { globalConfigPath, loadProjectConfig } from "./project-config.ts";
 import { WORKFLOW_COMMANDS } from "./workflow-commands.ts";
 // TYPE-ONLY, so the runtime dependency stays one-way (that module imports
 // this one to register /gate-doctor; a type import is erased at compile time).
@@ -160,43 +162,26 @@ export function modelDiagnosisLines(deps: GateDiagnosisDeps, registry?: unknown)
         for (const k of Object.keys(auth)) authedProviders.add(k);
       } catch { /* no auth — no provider looks usable */ }
     }
-    // Diagnose KNOWN agents first, then any user-built/third-party agent
-    // files found in either layer (project outranks global per readAgent).
-    const fileNames = (dir: string): string[] => {
-      try {
-        return readdirSync(dir).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, ""));
-      } catch {
-        return [];
-      }
-    };
-    // The PROJECT layer is enumerated by frontmatter IDENTITY, not basename:
-    // the loader registers a project file under its `name`, so a
-    // `custom.md` carrying `name: foo` is live as `foo`. Enumerating it as
-    // "custom" made readAgent (which resolves by identity) find nothing, and
-    // a project-ONLY agent whose basename differs from its name was invisible
-    // here while gate-doctor's union enumeration did see it.
-    const projectIdentityNames = (dir: string): string[] => {
-      try {
-        const out: string[] = [];
-        for (const f of readdirSync(dir)) {
-          if (!f.endsWith(".md")) continue;
-          try {
-            const id = projectAgentIdentity(readFileSync(pathJoin(dir, f), "utf8"));
-            if (id !== undefined) out.push(id);
-          } catch { /* unreadable file — not loadable either */ }
-        }
-        return out;
-      } catch {
-        return [];
-      }
-    };
-    const allNames = [...new Set([...KNOWN_AGENTS, ...fileNames(globalAgentsDir), ...projectIdentityNames(projectAgentsDir)])];
-    const entries = allNames
-      .map((name) => {
-        const text = readAgent(name);
-        return text ? diagnoseChain(name, text, facts) : null;
-      })
-      .filter((e): e is NonNullable<typeof e> => e !== null && e.chain.length > 0);
+    // ONLY THE GATE'S OWN ROLES (2026-09-26): the six judges, read from their
+    // rendered agent files, then every configured worker preset, read from its
+    // config slots (a worker has no agent file). Any other .md in the agent
+    // directories belongs to someone else — listing it as a gate role showed
+    // retired leftovers as BLOCKED.
+    const judges = KNOWN_AGENTS.map((name) => {
+      const text = readAgent(name);
+      return text ? diagnoseChain(name, text, facts) : null;
+    });
+    const cfg = loadProjectConfig(deps.primaryRepoRoot());
+    const { map } = effectiveAgentsConfig(cfg.agentsGlobal, cfg.agentsProject);
+    const workers = Object.entries(map)
+      .filter(([name, e]) => isWorkerRoleName(name) && e.source !== "default")
+      // A declared preset without an explicit chain refuses session start,
+      // so it is shown as BLOCKED here rather than dropped.
+      .map(([name, e]) => ({ ...diagnoseSpecs(name, e.slots, facts), ...(lacksExplicitChain(e) ? { blocked: true } : {}) }));
+    const entries = [
+      ...judges.filter((e): e is NonNullable<typeof e> => e !== null && e.chain.length > 0),
+      ...workers,
+    ];
     return entries.length === 0 ? [] : formatModelDiagnosis(entries).split("\n");
   } catch {
     return []; // diagnostics only — never block the status readout
@@ -217,9 +202,7 @@ export async function runGateDoctorCommand(deps: GateDiagnosisDeps, ctx: Command
   // core.hooksPath); unavailable → the hooks check degrades to WARN.
   let hooksDir: string | undefined;
   try {
-    const out = execFileSync("git", ["rev-parse", "--git-path", "hooks"], {
-      cwd, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    const out = gitText(cwd, ["rev-parse", "--git-path", "hooks"], { timeout: 5000 });
     if (out.length > 0) hooksDir = pathResolve(cwd, out);
   } catch { /* git unavailable — hooks unverifiable */ }
   const checks = await runGateDoctor({

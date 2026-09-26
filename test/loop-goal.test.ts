@@ -5,33 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildModeConfirmMessage } from "../lib/task-mode.ts";
-import {
-  GOAL_CONFIRM_TITLE,
-  buildGoalTranscriptMessage,
-  LOOP_GOAL_MAX_CHARS,
-  LOOP_GOAL_MISSING_DIRECTIVE,
-  LOOP_GOAL_RELPATH,
-  loopGoalRelPath,
-
-  LOOP_GOAL_STALE_MS,
-  buildGoalConfirmMessage,
-  buildLoopGoalDirective,
-  goalTextHash,
-  isLoopGoalConfirmed,
-  readLoopGoal,
-  loopGoalEditGate,
-  loopGoalUnconfirmedEditBlock,
-  LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
-  goalPrereviewPassed,
-  parseGoalCriteria,
-  buildGoalPrereviewRefusal,
-  formatGoalPrereviewCarryover,
-  buildGoalAuditTask,
-  diffDraftLines,
-  GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
-  buildGoalForceNegotiateDirective,
-  goalNegotiationOverdue,
-} from "../lib/loop-goal.ts";
+import { LOOP_GOAL_MAX_CHARS, LOOP_GOAL_RELPATH, loopGoalRelPath, LOOP_GOAL_STALE_MS, goalTextHash, isLoopGoalConfirmed, readLoopGoal, loopGoalEditGate, loopGoalUnconfirmedEditBlock, LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK, goalPrereviewPassed, buildGoalPrereviewRefusal } from "../lib/loop-goal.ts";
+import { LOOP_GOAL_MISSING_DIRECTIVE, buildLoopGoalDirective, parseGoalCriteria, GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD, buildGoalForceNegotiateDirective, goalNegotiationOverdue } from "../lib/loop-goal-directives.ts";
+import { GOAL_CONFIRM_TITLE, buildGoalTranscriptMessage, buildGoalConfirmMessage } from "../lib/goal-confirm-copy.ts";
+import { formatGoalPrereviewCarryover, buildGoalAuditTask, diffDraftLines } from "../lib/goal-audit-task.ts";
 import { UNTRUSTED_DATA_HEADER, UNTRUSTED_DATA_RULE } from "../lib/untrusted-data.ts";
 
 function repoWithGoal(content?: string, mtimeMs?: number): string {

@@ -16,8 +16,8 @@ import {
   appendRecord,
   judgeChannelTarget,
   type ChannelIO,
-} from "../lib/orchestrator-channel.ts";
-import type { JudgePaneRunResult } from "../lib/judge-pane.ts";
+} from "../lib/channel-io.ts";
+import type { TmuxRunResult } from "../lib/orchestrator-tmux.ts";
 
 type Exec = (params: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
 
@@ -44,7 +44,7 @@ function setup(over: Partial<{
   caller: string | null | undefined;
   ownPane: string | null | undefined;
   tmuxServer: string | null | undefined;
-  tmux: (argv: readonly string[]) => JudgePaneRunResult;
+  tmux: (argv: readonly string[]) => TmuxRunResult;
   panes: string[];
   table: HierarchyTable;
   pending?: "goal" | "plan";
@@ -99,7 +99,10 @@ function setup(over: Partial<{
     // factory prefixes the child's own command with `env K=V …` instead.
     const envAt = argv.indexOf("env");
     if (envAt >= 0) {
-      for (const token of argv.slice(envAt + 1)) {
+      const tokens = argv.slice(envAt + 1);
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i]!;
+        if (token === "-u") { i++; continue; } // a gate variable the child is NOT given
         if (!token.includes("=")) break;
         const [key, ...rest] = token.split("=");
         env.set(key!, rest.join("="));

@@ -137,9 +137,10 @@ test("a scoped dep is justified by naming either half", () => {
 // ---------------------------------------------------------------------------
 
 test("review_checkpoint wires the dependency-justification gate (both inputs collected)", () => {
-  const src = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
+  // (t8) review_checkpoint is registered by lib/checkpoint-tool.ts.
+  const src = readFileSync(join(ROOT, "lib", "checkpoint-tool.ts"), "utf8");
   // The module is imported (not re-implemented at the call site).
-  assert.match(src, /from "\.\.\/lib\/dependency-justification\.ts"/);
+  assert.match(src, /from "\.\/dependency-justification\.ts"/);
   assert.match(src, /dependencyJustificationVerdict/, "the verdict function must be called");
   // Input 1: the manifest diff against a BASE — a bare "package.json
   // changed" is not enough, or every version bump trips the gate.

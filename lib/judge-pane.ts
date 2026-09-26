@@ -26,12 +26,13 @@
  *     second copy of the argv plus its fail-closed catch is a second answer to
  *     it.
  *
- * Pure-ish: tmux enters through the injected {@link JudgePaneRunner}, so every
+ * Pure-ish: tmux enters through the injected {@link TmuxRunner}, so every
  * branch runs with a fake instead of a terminal.
  */
 import {
   buildListServerPanesArgv,
   parsePaneIds,
+  type TmuxRunner,
 } from "./orchestrator-tmux.ts";
 
 /** Who opened this judge — read by the judge-side gate from its own env. */
@@ -40,16 +41,6 @@ export const JUDGE_OPENER_ENV = "RG_JUDGE_OPENER";
 export const JUDGE_ID_ENV = "RG_JUDGE_ID";
 /** reviewer | adviser | goal-auditor. */
 export const JUDGE_ROLE_ENV = "RG_JUDGE_ROLE";
-
-/** One tmux invocation through the injected runner. */
-export interface JudgePaneRunResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-}
-
-/** Run one tmux argv; never a shell string. */
-export type JudgePaneRunner = (argv: readonly string[]) => JudgePaneRunResult;
 
 /**
  * Which panes exist right now — ON THE WHOLE SERVER. `undefined` means the
@@ -62,7 +53,7 @@ export type JudgePaneRunner = (argv: readonly string[]) => JudgePaneRunResult;
  * live child as DEAD — and an opener told its judge is gone goes and re-does
  * the round.
  */
-export function listServerPanes(run: JudgePaneRunner): string[] | undefined {
+export function listServerPanes(run: TmuxRunner): string[] | undefined {
   try {
     const result = run(buildListServerPanesArgv());
     if (!result.ok) return undefined;
@@ -74,7 +65,7 @@ export function listServerPanes(run: JudgePaneRunner): string[] | undefined {
 
 /** Is this pane still alive? Unreadable list ⇒ undefined (never "dead"). */
 export function judgePaneAlive(
-  run: JudgePaneRunner,
+  run: TmuxRunner,
   paneId: string,
 ): boolean | undefined {
   const panes = listServerPanes(run);

@@ -41,7 +41,7 @@ class FingerprintUnavailable extends Error {}
 // min(realIndexMtime, now). Mirror of lib/fingerprint.ts.
 const RACE_BACKDATE_MS = 5000;
 
-// Mirror of lib/fingerprint.ts GIT_LOCATION_ENV. Inheriting these lets an
+// Mirror of lib/git-exec.ts GIT_LOCATION_ENV. Inheriting these lets an
 // ambient GIT_DIR/GIT_WORK_TREE point the digest at a DIFFERENT repository
 // (reproduced: an edit in the real repo left "its" fingerprint unchanged), so
 // they are stripped and discovery falls back to the cwd. A parity test keeps

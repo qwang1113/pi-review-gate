@@ -105,6 +105,19 @@ export function contextPercentFromUsage(usage: unknown): number | undefined {
   return readContext(usage).percent;
 }
 
+/**
+ * The same reading, taken straight off a host context. `getContextUsage` is a
+ * host call that can throw (a replaced session's context asserts on access),
+ * and a throw here is "no reading", never a crash of whoever asked.
+ */
+export function contextPercentOf(ctx: { getContextUsage?: () => unknown } | undefined): number | undefined {
+  try {
+    return contextPercentFromUsage(ctx?.getContextUsage?.());
+  } catch {
+    return undefined;
+  }
+}
+
 /** A token count as a reader expects it: `358k`, `1.0M`, `950`. */
 export function formatTokens(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "?";

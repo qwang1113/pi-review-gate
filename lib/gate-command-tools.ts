@@ -42,7 +42,8 @@ import { readFileSync } from "node:fs";
 import { join as pathJoin, dirname as pathDirname } from "node:path";
 
 import { computeFingerprint } from "./fingerprint.ts";
-import { unmetRequirements, type GateState } from "./gate-state.ts";
+import { type GateState } from "./gate-state.ts";
+import { unmetRequirements } from "./gate-state-requirements.ts";
 // The one place the stage switches are decided (lib/loop-stages.ts); the
 // readout renders its summary rather than re-deriving "is this stage off".
 import { stageOpen, stagesSummary } from "./loop-stages.ts";

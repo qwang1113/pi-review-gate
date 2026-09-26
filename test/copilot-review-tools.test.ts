@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 
 import {
   registerCopilotReviewTools,
+  type CopilotReviewToolDeps,
+} from "../lib/copilot-review-tools.ts";
+import {
   COPILOT_CONFIRM_ATTEMPTS,
   COPILOT_CONFIRM_DELAY_MS,
   COPILOT_CONFIRM_RETRY_ATTEMPTS,
-  type CopilotReviewToolDeps,
-} from "../lib/copilot-review-tools.ts";
+} from "../lib/copilot-queue-probe.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import type { ChoiceSpec } from "../lib/choice-dialog.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
@@ -15,12 +17,14 @@ import {
   armCopilotReview,
   COPILOT_AWAIT_TIMEOUT_MS,
   releaseCopilotReview,
-  type CopilotPayload,
-  type CopilotProbe,
-  type CopilotThread,
-  type CopilotTimeline,
-  type PrSummary,
-} from "../lib/copilot-review.ts";
+} from "../lib/copilot-review-state.ts";
+import type {
+  CopilotPayload,
+  CopilotProbe,
+  CopilotThread,
+  CopilotTimeline,
+  PrSummary,
+} from "../lib/copilot-probe-parse.ts";
 import {
   DECLINE_CHOICE,
   FIX_CHOICE,

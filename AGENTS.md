@@ -341,9 +341,13 @@ frontmatter in `agents/*.md` is the single source of truth and
   role; `judge_submit` never accepts the name.
   The L1/L2 execution tiers (`recon` / `fixer`) were retired — the gate
   ships the six judging roles only. Read-only WORK roles are the other kind
-  (`agents.worker*`, 2026-09-21): NOT in `KNOWN_AGENTS`, not part of the
-  session-start hard check, and an unconfigured one fails at DISPATCH time
-  instead — see §Read-only exploration.
+  (`agents.worker*`, 2026-09-21): NOT in `KNOWN_AGENTS`, so having none is
+  never an error — but every preset a layer DOES declare is part of the
+  session-start hard check (2026-09-26): a slot that does not resolve stops
+  the session and names the preset and the spec. Presets are never self-healed
+  (there is no package default for them) — see §Read-only exploration.
+  `/gate-status` lists the six judge roles and the configured worker presets
+  only; any other `.md` in the agent directories is not a gate role.
 
 > **Why the chains are short.** every fallback in the
 > (a provider that is not configured) fails the whole agent launch. The
@@ -514,7 +518,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 **2026-08-30 通道重构：tmux 退回显示器。** 前三轮端到端验证的 40+ 条缺陷里约
 三分之二源于同一个根因 —— 拿 tmux 屏幕当 API。已全部换成 pi 官方结构化通道：
 
-- **点对点通道**（`lib/orchestrator-channel.ts`）：每个子会话一条专属文件
+- **点对点通道**（`lib/channel-records.ts` / `channel-io.ts` / `channel-projection.ts`）：每个子会话一条专属文件
   `<orch-id>/<child-id>.jsonl`，物理隔离，因此没有收件人过滤这回事。通道是
   **文件路径、不属于任何进程** —— 项目经理换人时打开同一批路径即可，子会话
   完全无感。旧的全局广播队列已删除。
@@ -632,7 +636,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    判断；缺任一项即退回，并把 plan 里那个任务与子会话提交的正文**并排**贴回。
    拒绝不需要对照（说不永远是自由的）。子会话请求确认的站点若**宽于**已批准
    plan 的 `deliveryStation`，代答一律被拒 —— 放宽站点只有用户能决定。判定与
-   词表在 `lib/orchestrator-answer-tools.ts`（`PROXY_CROSSCHECK_TOKENS`）。
+   词表在 `lib/orchestrator-answer-rules.ts`（`PROXY_CROSSCHECK_TOKENS`）。
 
 
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
@@ -743,8 +747,10 @@ review 循环的唯一入口 —— 一条门禁自己要求的提交被门禁�
 `lib/change-baseline.ts`。
 
 存量大文件只输出提醒 ——
-近 9000 行（截至 2026-08-29）的 `extensions/review-gate.ts` 不是一次写出来的，
-是几十次「只加 100 行」累积的；收尾时硬逼着拆只会拆得更烂。
+曾经近 9000 行（截至 2026-08-29）的 `extensions/review-gate.ts` 不是一次写出来的，
+是几十次「只加 100 行」累积的；收尾时硬逼着拆只会拆得更烂。它后来是分四波、
+按职责整块搬进 `lib/` 的（t1–t8，2026-09-26 收尾），入口只剩约 1400 行接线：
+工具体、事件处理体与会话状态的闭包函数都不在它里面了，别让它再长回去。
 
 配套的两道人审关卡：`goal-auditor` 在**目标阶段**就否掉会造成架构劣化的方案
 （往超大文件里堆新职责、复制门禁已有的规则、把逻辑埋在无法单测的入口里、

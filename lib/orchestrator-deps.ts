@@ -18,8 +18,9 @@
 import type { OrchestratorPlan } from "./orchestrator-plan.ts";
 import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
 import type { ChoiceSpec } from "./choice-dialog.ts";
-import type { ChannelIO } from "./orchestrator-channel.ts";
+import type { ChannelIO } from "./channel-io.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
+import type { TmuxRunResult } from "./orchestrator-tmux.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 
@@ -38,12 +39,6 @@ import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
  */
 export type { ToolHost, ToolReply } from "./tool-host.ts";
 
-/** One tmux invocation, already validated by lib/orchestrator-tmux.ts. */
-export interface TmuxRunResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-}
 
 /** Reading the plan can fail in a way the agent must be able to fix. */
 export interface PlanRead {
@@ -226,7 +221,7 @@ export interface OrchestratorDeps {
   childJudgeRunning(cwd: string): boolean;
 
   /**
-   * The SUPERVISION CHANNEL's filesystem seam (lib/orchestrator-channel.ts).
+   * The SUPERVISION CHANNEL's filesystem seam (lib/channel-io.ts).
    *
    * Injected rather than imported so a test drives the real protocol against
    * an in-memory map: no orchestration test needs a disk, and none needs a

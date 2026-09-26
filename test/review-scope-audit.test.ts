@@ -27,20 +27,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import type { ChannelIO } from "../lib/channel-io.ts";
+import { reportConclusion, sanitizeScopeStamp } from "../lib/channel-projection.ts";
+import type { ChannelReportRecord } from "../lib/channel-records.ts";
+import { emptyState } from "../lib/gate-state.ts";
 import {
-  reportConclusion,
-  sanitizeScopeStamp,
-  type ChannelIO,
-  type ChannelReportRecord,
-} from "../lib/orchestrator-channel.ts";
-import {
-  emptyState,
-  loadSidecar,
-  sanitizeRoundScope,
   saveSidecar,
   sidecarPath,
+} from "../lib/gate-state-io.ts";
+import { loadSidecar } from "../lib/gate-state-load.ts";
+import {
+  sanitizeRoundScope,
   type RoundRecord,
-} from "../lib/gate-state.ts";
+} from "../lib/gate-state-records.ts";
 import { buildStandardReport } from "../lib/judge-report.ts";
 
 const tempDirs: string[] = [];

@@ -6,7 +6,7 @@
  *
  *  1. the module's own rules — defaults, the record's validator, the ONE
  *     `stageOpen`, the dialog's spec and every outcome it can produce;
- *  2. the SHARED ship authority (`lib/gate-state.ts`'s `unmetRequirements`)
+ *  2. the SHARED ship authority (`lib/gate-state-requirements.ts`'s `unmetRequirements`)
  *     with each switch off in turn, which is also what the L3 git hook reads —
  *     and the REAL hook checker (`scripts/pre-commit-check.cjs`) driven
  *     in-process with real exit codes;
@@ -47,7 +47,8 @@ import {
 import { MULTI_UNAVAILABLE } from "../lib/multi-choice-dialog.ts";
 import { doProposeRestatement, type RestatementToolDeps } from "../lib/restatement.ts";
 import { doProposeLoopGoal, type GoalToolDeps } from "../lib/goal-tools.ts";
-import { emptyState, unmetRequirements, type GateState } from "../lib/gate-state.ts";
+import { emptyState, type GateState } from "../lib/gate-state.ts";
+import { unmetRequirements } from "../lib/gate-state-requirements.ts";
 import { acceptanceDecision, acceptanceGateOpen } from "../lib/acceptance-round.ts";
 import { readyLacksVerification } from "../lib/review-adjudicate.ts";
 import { buildGateWidget } from "../lib/ui-widget.ts";
@@ -304,7 +305,8 @@ test("acceptance off says what to write INSTEAD, and names the way back", () => 
 });
 
 test("the switches ride the loop prompt — and reach an UNDECIDED session too", () => {
-  assert.match(SRC, /buildStagesDirective\(loopStagesRecord\(\)\)/, "the extension renders the session's own record");
+  assert.match(SRC, /buildStagesDirective\(deps\.loopStagesRecord\(\)\)/, "the extension renders the session's own record");
+  assert.match(ENTRY_SRC, /loopStagesRecord: \(\) => loopGoal\.loopStagesRecord\(\),/, "…which is the session's goal host's");
   // ONE injection, shared by both cases: loop, and a session that has not
   // classified its mode yet (isEnforcedMode treats it as the loop, and the
   // checklist can already have been answered).
@@ -317,7 +319,7 @@ test("the switches ride the loop prompt — and reach an UNDECIDED session too",
   // …AND THE BLOCK'S POINTER MUST NOT DANGLE (quality round P2, 2026-09-22):
   // with the goal stage OFF the block says “see the goal paragraph above”, and
   // in an undecided session the loop branch below does not inject it.
-  const undecidedGoal = SRC.indexOf('if (state.taskMode === undefined && !stageIsOn("goal")) {');
+  const undecidedGoal = SRC.indexOf('if (state.taskMode === undefined && !deps.stageIsOn("goal")) {');
   assert.ok(undecidedGoal > at && undecidedGoal < at + 1200,
     "an undecided session whose goal stage is off gets that paragraph injected too");
   assert.match(SRC.slice(undecidedGoal, undecidedGoal + 220), /buildGoalStageOffDirective\(\)/,
@@ -607,36 +609,48 @@ test("an acceptance round the USER switched off records that reason, not the orc
   // Reviewer P2: `acceptanceDecision` writes DISABLED for both causes and its
   // copy names the orchestration rule; the status stays the module's, the
   // recorded reason is composed where the switch is known.
-  assert.match(SRC, /const skippedReason = !stageIsOn\("acceptance", root\)/);
-  assert.match(SRC, /reason: skippedReason,/);
+  assert.match(ACCEPTANCE_HOST_SRC, /const skippedReason = !stageIsOn\("acceptance", root\)/);
+  assert.match(ACCEPTANCE_HOST_SRC, /reason: skippedReason,/);
 });
 
 // ---------------------------------------------------------------------------
 // 3. The extension's wiring (the four places a pure module cannot reach)
 // ---------------------------------------------------------------------------
 
-const SRC = readFileSync(
+/** The review loop's host modules carved out of the extension (t7) — same wiring, new home. */
+const libSrc = (file: string): string =>
+  readFileSync(join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "lib", file), "utf8");
+const ENTRY_SRC = readFileSync(
   join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "extensions", "review-gate.ts"),
   "utf8",
 );
+/** The session's own wiring (t8): goal/stage host, prompt, L2 settle. */
+const LOOP_GOAL_HOST_SRC = libSrc("loop-goal-host.ts");
+const TURN_SRC = libSrc("turn-directive.ts");
+const L2_SRC = libSrc("l2-continuation.ts");
+const SRC = [ENTRY_SRC, LOOP_GOAL_HOST_SRC, TURN_SRC, L2_SRC].join("\n");
+const CHAIN_SRC = libSrc("review-chain.ts");
+const ACCEPTANCE_HOST_SRC = libSrc("acceptance-host.ts");
+const VERDICT_SRC = libSrc("verdict-host.ts");
+const CANCEL_SRC = libSrc("round-cancel-host.ts");
 
 test("the goal stage releases the edit gate and the ship block through goalStageSatisfied", () => {
   assert.match(SRC, /goalConfirmed: goalStageSatisfied\(goalRoot, goalSt\)/,
     "the L8 edit gate asks the stage-aware question");
   assert.match(SRC, /loopGoalConfirmed: \(\) => goalStageSatisfied\(\)/,
     "the L1 ship gate asks the stage-aware question");
-  assert.match(SRC, /if \(!goalStageSatisfied\(\)\) completion\.push\(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK\)/,
+  assert.match(SRC, /if \(!deps\.goalStageSatisfied\(\)\) completion\.push\(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK\)/,
     "the completion/continuation path asks the stage-aware question");
   assert.match(SRC, /if \(!stageIsOn\("goal", root\)\) return undefined;/,
     "a released goal stage has no delivery station to read");
 });
 
 test("the five checkpoints read the ONE query, not a second rule", () => {
-  assert.match(SRC, /const reviewOn = stageIsOn\("review", input\.root\)/);
-  assert.match(SRC, /const qualityOn = stageIsOn\("quality", input\.root\)/);
-  assert.match(SRC, /const precommitOn = stageIsOn\("precommit", input\.root\)/);
-  assert.match(SRC, /gateOpen: acceptanceGateOpen\(process\.env\) && stageIsOn\("acceptance", root\)/);
-  assert.match(SRC, /registerLoopStageTools\(pi, loopStageDeps\)/, "the tool is registered");
+  assert.match(CHAIN_SRC, /const reviewOn = stageIsOn\("review", input\.root\)/);
+  assert.match(CHAIN_SRC, /const qualityOn = stageIsOn\("quality", input\.root\)/);
+  assert.match(CHAIN_SRC, /const precommitOn = stageIsOn\("precommit", input\.root\)/);
+  assert.match(ACCEPTANCE_HOST_SRC, /gateOpen: acceptanceGateOpen\(process\.env\) && stageIsOn\("acceptance", root\)/);
+  assert.match(SRC, /registerLoopStageTools\(pi, loopGoal\.loopStageDeps\)/, "the tool is registered");
   assert.match(SRC, /ensureLoopStages: \(ctx\) => ensureLoopStagesFor\(ctx\)/,
     "the fallback is wired into the L1 hook for the first edit / restatement");
 });
@@ -657,11 +671,11 @@ test("precommit off owes no lane: the verification binding never withholds that 
   assert.match(body, /st\.bypass\.active \|\| !stageIsOn\("precommit", root\)/,
     "the user's bypass and the switched-off stage are ONE fact");
   assert.equal(
-    (SRC.match(/bypassActive: laneVerificationWaived\(/g) ?? []).length,
+    ([VERDICT_SRC, CANCEL_SRC].join("\n").match(/bypassActive: laneVerificationWaived\(/g) ?? []).length,
     2,
     "the recorder and the parked-READY re-ask both read the composition",
   );
-  assert.doesNotMatch(SRC, /bypassActive: st\.bypass\.active,/,
+  assert.doesNotMatch([SRC, VERDICT_SRC, CANCEL_SRC].join("\n"), /bypassActive: st\.bypass\.active,/,
     "no site reads the bypass alone — that is how the two halves drift");
   // …and the flag it feeds means “no lane is owed”: a round nobody has to
   // verify is NOT withheld as unverified.
@@ -687,15 +701,20 @@ test("a proxy may not answer the stage checklist (quality round P1, 2026-09-22)"
   assert.ok(start > 0, "the stage deps exist");
   const wiring = SRC.slice(start, SRC.indexOf("\n  };", start));
   assert.match(wiring, /proxy: false/, "the stage checklist must not be handed to the arbiter proxy");
-  assert.match(SRC, /options: opts\.proxy === false \? \[\] : spec\.options/,
+  // The dialog body lives in lib/gate-dialogs.ts since the t5 split.
+  const DIALOGS_SRC = readFileSync(
+    join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "lib", "gate-dialogs.ts"),
+    "utf8",
+  );
+  assert.match(DIALOGS_SRC, /options: opts\.proxy === false \? \[\] : spec\.options/,
     "…and the dialog turns that request into the race's own no-proxy signal");
   // AND IT MUST NOT BLAME THE ARBITER (quality round P2): the timeout notice
   // is the user's only clue that a decision is still owed, and “arbiter 无法代答”
   // would read as a broken machine rather than a deliberate policy. Both copies
   // live in the same dialog body, which is where the branch is read from.
-  const raceAt = SRC.indexOf("options: opts.proxy === false ? [] : spec.options");
+  const raceAt = DIALOGS_SRC.indexOf("options: opts.proxy === false ? [] : spec.options");
   assert.ok(raceAt > 0, "the dialog knows the no-proxy request");
-  const notice = SRC.slice(raceAt, raceAt + 2500);
+  const notice = DIALOGS_SRC.slice(raceAt, raceAt + 2500);
   assert.match(notice, /opts\.proxy === false/, "the timeout notice branches on it");
   assert.match(notice, /不问 arbiter 代答/, "…and does not report a deliberate policy as a broken arbiter");
   assert.match(notice, /arbiter 无法代答/, "the other dialogs' wording is left alone");
@@ -707,9 +726,9 @@ test("a skipped quality round carries the tree the ship gate verifies (quality r
   // write exactly that shape (lib/quality-round.ts's `skippedQualityRecord`
   // takes an OPTIONAL tree), so the next ship would have failed closed on a
   // tree nobody recorded.
-  const at = SRC.indexOf("st.quality = skippedQualityRecord({");
+  const at = CHAIN_SRC.indexOf("st.quality = skippedQualityRecord({");
   assert.ok(at > 0, "the chain records the skipped quality round");
-  assert.match(SRC.slice(at, at + 700), /tree: skipTarget\.tree/,
+  assert.match(CHAIN_SRC.slice(at, at + 700), /tree: skipTarget\.tree/,
     "the skip binds to the prepared tree, the same source the verdict recorder reads");
 });
 
@@ -722,9 +741,9 @@ test("the no-acceptance declaration is only read from a goal that is in force", 
   // and the PLAN handed to the judge are the same question, so the guard lives
   // in `acceptanceGoalText` and both halves go through it — the plan side used
   // to re-read `readSessionLoopGoal` unguarded.
-  const goalRead = SRC.indexOf("function acceptanceGoalText(");
+  const goalRead = ACCEPTANCE_HOST_SRC.indexOf("function acceptanceGoalText(");
   assert.ok(goalRead > 0, "the one read of the governing goal exists");
-  const guard = SRC.slice(goalRead, SRC.indexOf("\n  }", goalRead));
+  const guard = ACCEPTANCE_HOST_SRC.slice(goalRead, ACCEPTANCE_HOST_SRC.indexOf("\n  }", goalRead));
   // The guard's SHAPE is not the rule — `goal.present && loopGoalConfirmed(…)`
   // and its De Morgan form (`if (!goal.present || !loopGoalConfirmed(…)) return
   // undefined`) say the same thing, and pinning one spelling made an unrelated
@@ -736,14 +755,15 @@ test("the no-acceptance declaration is only read from a goal that is in force", 
   assert.match(guard, /loopGoalConfirmed\(root, st\)/,
     "only a goal this session actually had approved is in force");
   assert.match(guard, /return undefined/, "…and anything else is no contract (fail-closed)");
-  const at = SRC.indexOf("const declared = ");
+  const at = ACCEPTANCE_HOST_SRC.indexOf("const declared = ");
   assert.ok(at > 0, "armAcceptanceRound reads the declaration");
-  const read = SRC.slice(at - 300, at + 400);
+  const read = ACCEPTANCE_HOST_SRC.slice(at - 300, at + 400);
   assert.match(read, /acceptanceGoalText\(root, st\)/, "…through that one read");
   assert.match(read, /parseNoAcceptanceDeclaration\(goalText\)/);
   assert.match(read, /extractAcceptancePlan\(goalText\)/, "the plan comes from the same text");
-  const dispatchAt = SRC.indexOf("async function dispatchAcceptanceRound(");
-  const dispatch = SRC.slice(dispatchAt, dispatchAt + 900);
+  const dispatchAt = ACCEPTANCE_HOST_SRC.indexOf("async function dispatchAcceptanceRound(");
+  assert.ok(dispatchAt > 0, "the acceptance dispatch exists");
+  const dispatch = ACCEPTANCE_HOST_SRC.slice(dispatchAt, dispatchAt + 900);
   assert.doesNotMatch(dispatch, /readSessionLoopGoal\(/,
     "the plan side re-reads nothing — the text is handed in");
 });

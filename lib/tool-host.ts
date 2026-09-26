@@ -11,7 +11,8 @@
  * lib/orchestrator-deps.ts re-exports both names, so every existing import
  * keeps working; this file is now where they are defined.
  *
- * Types only: no behavior at all.
+ * Types plus the two shared result builders (`toolReply` / `toolFail`); no
+ * other behavior.
  */
 
 import type { TSchema } from "typebox";
@@ -22,6 +23,25 @@ export interface ToolReply {
   /** Present-but-undefined is required by the host's own result type. */
   details: Record<string, unknown> | undefined;
   isError?: boolean;
+}
+
+/**
+ * The two result builders every tool module shares (one copy, 2026-09-26 —
+ * seven modules used to carry their own).
+ *
+ * Named `toolReply` / `toolFail` rather than `reply` / `fail` deliberately:
+ * a shared helper with a one-word generic name collides with ordinary prose
+ * everywhere else in the repository, including the structural test that scans
+ * for lib exports referenced without an import. A slightly longer name buys a
+ * name that only ever means one thing. (Callers may still import them `as
+ * reply` / `as fail` locally.)
+ */
+export function toolReply(text: string, details?: Record<string, unknown>): ToolReply {
+  return { content: [{ type: "text", text }], details };
+}
+
+export function toolFail(text: string, details?: Record<string, unknown>): ToolReply {
+  return { content: [{ type: "text", text }], details, isError: true };
 }
 
 /**

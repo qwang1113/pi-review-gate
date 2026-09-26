@@ -39,7 +39,7 @@ import { join } from "node:path";
 export const TMUX_STATUS_CONDITIONAL =
   "#{?#{@rg_session_name},#{b:pane_current_path} · #{@rg_session_name},#{b:pane_current_path}}";
 
-/** The option a named session writes (lib/orchestrator-tmux.ts, same spelling). */
+/** The option a named session writes (lib/tmux-session-argv.ts, same spelling). */
 const SESSION_NAME_OPTION = "@rg_session_name";
 
 /**

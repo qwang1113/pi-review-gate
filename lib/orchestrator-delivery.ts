@@ -54,6 +54,7 @@
  */
 
 import { isProtectedBranch } from "./workspace-branch.ts";
+import { handoffGeneration, isHandoffChainOf } from "./session-inheritance.ts";
 
 /** Subdirectory of the gate-owned `.pi/` scope that holds task files. */
 export const TASK_FILE_DIRNAME = "tasks";
@@ -241,10 +242,14 @@ export function childSessionId(childId: string): string {
  *
  * `sessionId` unknown (the extension has not learned its own id yet) keeps
  * the pre-check behaviour: the env alone decides.
+ *
+ * A `session_handoff` successor of that pane (`rg-child-<childId>-hN`) IS the
+ * same child (2026-09-26): refusing it left the successor silent on its
+ * channel — no heartbeat, no `done`, no instruct ack.
  */
 export function isOwnedChildPane(childId: string, sessionId: string | null | undefined): boolean {
   if (sessionId === null || sessionId === undefined) return true;
-  return sessionId === childSessionId(childId);
+  return isHandoffChainOf(childSessionId(childId), sessionId);
 }
 
 /**
@@ -268,8 +273,27 @@ export function buildChildCommand(taskRef: string, childId: string, piBin = "pi"
  * recovered, because the one thing the transcript cannot contain is the fact
  * that the process it belonged to has been restarted.
  */
-export function buildRecoverCommand(childId: string, noteRef: string, piBin = "pi"): string[] {
-  return [piBin, "--session-id", childSessionId(childId), `@${noteRef}`];
+export function buildRecoverCommand(sessionId: string, noteRef: string, piBin = "pi"): string[] {
+  return [piBin, "--session-id", sessionId, `@${noteRef}`];
+}
+
+/**
+ * The session a recovery re-opens: the NEWEST generation of the child's
+ * handoff chain among the session ids its channel reported (2026-09-26).
+ *
+ * The root id alone re-opened the PREDECESSOR's transcript after a `-hN`
+ * successor crashed, dropping everything the successor did. The highest
+ * generation wins rather than the last report, because the predecessor may
+ * still heartbeat after its successor's first record. Ids outside the chain
+ * (a subagent's uuid, another child's successor) are ignored.
+ */
+export function recoverSessionId(childId: string, reportedSessionIds: Iterable<string | undefined>): string {
+  const root = childSessionId(childId);
+  let newest = root;
+  for (const id of reportedSessionIds) {
+    if (id && isHandoffChainOf(root, id) && handoffGeneration(id) > handoffGeneration(newest)) newest = id;
+  }
+  return newest;
 }
 
 /** The note a recovered child opens with. */

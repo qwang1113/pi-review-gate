@@ -19,7 +19,7 @@
 
 ## 一、通道：点对点，是文件，不属于任何进程
 
-`lib/orchestrator-channel.ts`
+`lib/channel-records.ts` + `lib/channel-io.ts` + `lib/channel-projection.ts`
 
 每个子会话有**一条专属通道文件**：
 
@@ -61,11 +61,20 @@
   门禁开子会话 pane 时用确定性的 `--session-id rg-child-<childId>`，而 subagent 跑在 pi
   现生成的随机 uuid 下；两者不一致就不绑定：不写通道、不读指令。
 
+**交接链是同一个主人**（2026-09-26，t8 实测）：子会话 `session_handoff` 后，继任者跑在
+`rg-child-<childId>-hN`（`successorSessionId`）下。两道闸原先只认 `rg-child-<childId>`，
+继任者因此不绑定通道（0 条记录、instruct 无回执），它的记录也会被读侧当外来污染丢掉。
+现在两道闸都用 `isHandoffChainOf`（`lib/session-inheritance.ts`，按铸 id 的同一规则判定；
+随机 uuid 与别的子会话的 `-hN` 仍被拒）。继任者还换了 pane：子会话的 `state` 记录带
+`paneId`（`TMUX_PANE`），`superviseChildren` 在登记 pane 已消失而自报 pane 活着时按新 pane
+判定（`relayedPane`，tmux 读不到则什么都不改），`orchestrator_wait` 的探测把它写回登记表
+（`repointChildPanes`），close / recover / 退出判据从此指向新 pane。
+
 ### 1.2 记录种类
 
 | kind | 方向 | 说明 |
 | --- | --- | --- |
-| `state` | 子 → 编排 | 我现在是 working / waiting-input / idle / done；带上下文用量、session id |
+| `state` | 子 → 编排 | 我现在是 working / waiting-input / idle / done；带上下文用量、session id、所在 pane（`paneId`） |
 | `request` | 子 → 编排 | 我弹了一个框：标题、**全部选项（原文、按序）**、正文 payload、topic |
 | `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / orchestrator / dismissed / **interrupted**（instruct 打断时解除的框，不是拒绝） |
 | `answer` | 编排 → 子 | 这个请求的答案 |
@@ -681,7 +690,7 @@ PM 的 transcript 里 ask_user/grillme 的 Q&A 段验证澄清结论真的落进
 **代批不是橡皮图章（2026-09-06，用户要求）**：代用户批准子会话的 goal、或代确认它的
 需求反述，`orchestrator_answer` 必须带 `crosscheck` —— 写出该 plan 任务 id，并对
 「任务目标 / 交付站点」两项各给一句判断（词表与判定在
-`lib/orchestrator-answer-tools.ts`，接受的写法逐条列在 `PROXY_CROSSCHECK_TOKENS`；
+`lib/orchestrator-answer-rules.ts`，接受的写法逐条列在 `PROXY_CROSSCHECK_TOKENS`；
 “文件边界”那一项已随文件边界一起删除，2026-09-17）。
 缺任一项即退回，并把 plan 里那个任务与子会话提交的正文**并排**贴回，附可照抄的骨架；
 门禁在这里不提供申诉出路（它不是 ship block，`request_arbitration` 受理不了），但**有一条真出路**并写在
@@ -1019,7 +1028,7 @@ tmux capture-pane -p -t <pane> | tail -20
 
 | 模块 | 职责 | 纯度 |
 | --- | --- | --- |
-| `lib/orchestrator-channel.ts` | 通道路径、记录 schema、追加/读取/游标、spill、投影、心跳判定 | IO 经注入的 seam |
+| `lib/channel-records.ts` / `lib/channel-io.ts` / `lib/channel-projection.ts` | 记录 schema；路径、追加、spill；按字节游标增量读取、投影、心跳判定 | IO 经注入的 seam |
 | `lib/orchestrator-child-channel.ts` | 子会话侧：上报、两方竞态提问、读取与确认指令 | IO/对话框/计时器全注入 |
 | `lib/orchestrator-child-state.ts` | 状态判定与 `CHILD_STATES` 清单（八态，含 `waiting-judge` / `mode-changed`）、健康行、退避常量 | 纯函数 |
 | `lib/orchestrator-supervisor.ts` | 编排侧：读所有通道、判定、决定什么算新闻、渲染回执 1–3 块 | 纯（IO 经 seam） |

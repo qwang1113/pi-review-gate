@@ -231,7 +231,8 @@ test("close kills its WINDOW and writes NO WINDOW OPTION (2026-09-17)", async ()
   // the window topology a child's bar lives in the CHILD's window and stops
   // existing with it, so a close writes no window option at all.
   assert.deepEqual(
-    log.filter((line) => line.includes("-u")),
+    // Option writes only: a spawn line carries `env -u …` for its own child.
+    log.filter((line) => line.startsWith("set") && line.includes(" -u")),
     [],
     "no window option is restored on close — the bar stays on (user decision 2026-09-17)",
   );

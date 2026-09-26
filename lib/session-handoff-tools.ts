@@ -41,8 +41,8 @@
  */
 
 import { Type } from "typebox";
-import type { ToolHost, ToolReply } from "./tool-host.ts";
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
+import { toolFail as fail, toolReply as reply, type ToolHost, type ToolReply } from "./tool-host.ts";
+import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
@@ -253,14 +253,6 @@ export async function runSessionHandoff(deps: SessionHandoffDeps): Promise<ToolR
     retirement?.rolledBack();
     return fail(`review-gate: 开接任会话时出错 —— ${(error as Error).message}（接力中止，你仍然是持有者）。`);
   }
-}
-
-function reply(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details };
-}
-
-function fail(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details, isError: true };
 }
 
 /**

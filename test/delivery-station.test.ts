@@ -48,7 +48,7 @@ import {
   buildRestatementTranscriptMessage,
 } from "../lib/restatement.ts";
 import { formatPlanSummary, parsePlan } from "../lib/orchestrator-plan.ts";
-import { buildPlanConfirmMessage, buildPlanTranscriptMessage } from "../lib/orchestrator-tools.ts";
+import { buildPlanConfirmMessage, buildPlanTranscriptMessage } from "../lib/orchestrator-plan-messages.ts";
 
 /** A minimal, VALID plan carrying one station — parsed, never hand-shaped. */
 function planWithStation(station: DeliveryStation) {

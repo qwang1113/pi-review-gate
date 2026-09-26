@@ -28,8 +28,8 @@
  * structured conclude call cannot repeat itself.
  */
 
-import type { DocSyncAttestation, GateVerdict } from "./gate-state.ts";
-import { DOC_SYNC_ATTESTATIONS } from "./gate-state.ts";
+import type { DocSyncAttestation, GateVerdict } from "./gate-state-records.ts";
+import { DOC_SYNC_ATTESTATIONS } from "./gate-state-records.ts";
 import { isBlockingSeverity } from "./judge-lifecycle.ts";
 
 /** One finding exactly as the judge concluded it — never a serialized string. */

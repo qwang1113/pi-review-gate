@@ -15,7 +15,8 @@ import {
   coalesceToolPath,
   COMMIT_MSG_FORBIDDEN,
 } from "../lib/constants.ts";
-import { computeFingerprint, FINGERPRINT_VERSION, GIT_LOCATION_ENV, gitBaseEnv } from "../lib/fingerprint.ts";
+import { computeFingerprint, FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
+import { GIT_LOCATION_ENV, gitBaseEnv } from "../lib/git-exec.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -374,7 +375,7 @@ test("TS and CJS strip the SAME git location variables", () => {
     assert.ok(block, "each script must declare GIT_LOCATION_ENV");
     const names = [...block![1].matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]).sort();
     assert.deepEqual(names, [...GIT_LOCATION_ENV].sort(),
-      "lib/fingerprint.ts and the CJS mirrors drifted on which variables are stripped");
+      "lib/git-exec.ts and the CJS mirrors drifted on which variables are stripped");
     // The config-injection family is matched by PREFIX (the numbered
     // GIT_CONFIG_KEY_<n>/VALUE_<n> forms are unbounded), so assert the pattern
     // itself is mirrored rather than a list.

@@ -15,7 +15,8 @@ function isScratchPath(p: string): boolean {
   return p === scratch || p.startsWith(scratch + "/");
 }
 import { fileURLToPath } from "node:url";
-import { goalTextHash, goalReminderDue } from "../lib/loop-goal.ts";
+import { goalTextHash } from "../lib/loop-goal.ts";
+import { goalReminderDue } from "../lib/loop-goal-directives.ts";
 import { capUntrustedLine } from "../lib/goal-tools.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";

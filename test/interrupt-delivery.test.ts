@@ -150,7 +150,8 @@ test("the gate's interrupt path goes through this module — the losing race can
   // The defect was an ORDER inside one call site, so the call site is what has
   // to be pinned: a future edit that re-inlines it would reintroduce the
   // deadlock while every unit test above stayed green.
-  const src = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
+  // The drain moved out of the extension with the rest of the child side (t6).
+  const src = readFileSync(join(ROOT, "lib", "child-side-host.ts"), "utf8");
   assert.match(src, /await deliverInterrupt\(/, "the drain must await the handoff");
   assert.doesNotMatch(
     src,

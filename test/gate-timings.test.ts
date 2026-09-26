@@ -148,3 +148,11 @@ test("the log lives under .pi/ so writing it cannot invalidate the run it descri
   appendTiming(dir, precommit());
   assert.ok(readFileSync(join(dir, TIMINGS_RELPATH), "utf8").includes("precommit"));
 });
+
+test("readTimings keeps acceptance records (they used to be written and then dropped)", () => {
+  const dir = makeTemp();
+  appendTiming(dir, {
+    kind: "acceptance", at: "t", repo: dir, verdict: "READY", approxMs: 1, approximate: true, findingsTotal: 0,
+  });
+  assert.deepEqual(readTimings(dir).map((t) => t.kind), ["acceptance"]);
+});

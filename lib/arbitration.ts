@@ -29,7 +29,7 @@
  * the I/O (reading --body-file contents, spawning the arbiter, the UI dialog).
  */
 
-import { createHash } from "node:crypto";
+import { sha256 } from "./hash.ts";
 import { execFile } from "node:child_process";
 import type { ShipCommandKind } from "./constants.ts";
 import { DEFAULT_ARBITER_MODEL } from "./project-config.ts";
@@ -352,10 +352,6 @@ export type ArbitrableResult =
  */
 export function canonicalCommand(command: string): string {
   return command;
-}
-
-export function sha256(s: string): string {
-  return createHash("sha256").update(s, "utf8").digest("hex");
 }
 
 /**

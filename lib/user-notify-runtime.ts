@@ -25,10 +25,10 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 
 import type { GateState } from "./gate-state.ts";
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
+import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 // The pane-id shape has ONE implementation (quality round P2, 2026-09-18):
 // lib/orchestrator-tmux.ts's canonical predicate, not a fourth local regex.
-import { isPaneId } from "./orchestrator-tmux.ts";
+import { isPaneId, type TmuxRunner } from "./orchestrator-tmux.ts";
 import type { TaskMode } from "./task-mode.ts";
 import {
   MISSING_NOTIFIER_HINT,
@@ -43,11 +43,6 @@ import {
   type UserNotifyKind,
   type UserNotifyOutcome,
 } from "./user-notify.ts";
-
-/** One tmux call, already resolved to argv (never a shell string). */
-export interface NotifyTmuxRunner {
-  (argv: readonly string[]): { ok: boolean; stdout: string };
-}
 
 /**
  * How long a synchronous `lsappinfo` call may take.
@@ -75,7 +70,7 @@ export interface UserNotifyRuntimeDeps {
   /** False in tests, CI and headless hosts — nothing may reach a screen. */
   interactive(): boolean;
   /** This session's tmux pane, or undefined outside tmux. */
-  runTmux: NotifyTmuxRunner;
+  runTmux: TmuxRunner;
   now?(): number;
   /** Injected so a test can count spawns instead of making them. */
   spawnDetached?(argv: readonly string[]): void;

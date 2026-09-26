@@ -8,7 +8,8 @@
  * (The provider allowlist was retired 2026-09-06 with the
  * pi-opencode-bridge companion.)
  */
-import { KNOWN_THINKING_LEVELS, frontmatterBlock } from "./model-config.ts";
+import { KNOWN_THINKING_LEVELS } from "./model-spec.ts";
+import { frontmatterBlock } from "./agent-frontmatter.ts";
 export interface ModelChainEntry {
   /** Agent role — the agents/*.md basename (reviewer, adviser, ...). */
   role: string;
@@ -199,6 +200,19 @@ export function diagnoseChain(
   const declaredThinking = parsed?.thinking ?? null;
   const implicitSuffix =
     declaredThinking !== null && KNOWN_THINKING_LEVELS.has(declaredThinking) ? declaredThinking : null;
+  return diagnoseSpecs(role, chain, facts, implicitSuffix);
+}
+
+/**
+ * Diagnose an explicit slot chain (a worker preset's config `slots`, which has
+ * no agent file). `implicitSuffix` is a chain-wide `thinking:` level. Pure.
+ */
+export function diagnoseSpecs(
+  role: string,
+  chain: string[],
+  facts: RegistryFacts,
+  implicitSuffix: string | null = null,
+): ModelChainEntry {
   const candidates = chain.map((spec) => {
     const suffix = specThinkingSuffix(spec) ?? implicitSuffix;
     const ok = candidateOk(resolveSpec(spec, facts), facts, suffix);

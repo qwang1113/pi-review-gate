@@ -23,19 +23,13 @@ import {
   type JudgeConcludeToolDeps,
 } from "../lib/judge-conclude.ts";
 import type { ToolHost } from "../lib/tool-host.ts";
-import {
-  judgeChannelTarget,
-  channelPathFor,
-  projectChannel,
-  readChannel,
-  reportConclusion,
-  type ChannelIO,
-  type ChannelRecord,
-} from "../lib/orchestrator-channel.ts";
+import { judgeChannelTarget, channelPathFor, type ChannelIO } from "../lib/channel-io.ts";
+import { projectChannel, readChannel, reportConclusion } from "../lib/channel-projection.ts";
+import type { ChannelRecord } from "../lib/channel-records.ts";
 import { JUDGE_ID_ENV, JUDGE_OPENER_ENV, JUDGE_ROLE_ENV } from "../lib/judge-pane.ts";
 import type { InspectionEvidence } from "../lib/judge-inspection.ts";
 import type { InspectionBlock, InspectionPass } from "../lib/inspection-appeal.ts";
-import type { ReviewScopeStamp } from "../lib/orchestrator-channel.ts";
+import type { ReviewScopeStamp } from "../lib/channel-records.ts";
 
 const NOW = 1_700_000_000_000;
 const OPENER = "session-child-1";

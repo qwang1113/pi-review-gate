@@ -68,7 +68,7 @@ const { copyFileSync, existsSync, lstatSync, mkdtempSync, realpathSync, rmSync, 
 const { dirname, join, resolve } = require("node:path");
 const { tmpdir } = require("node:os");
 
-// Mirror of lib/fingerprint.ts GIT_LOCATION_ENV — variables that relocate the
+// Mirror of lib/git-exec.ts GIT_LOCATION_ENV — variables that relocate the
 // repository, worktree, index or object store. Inheriting them let an ambient
 // GIT_DIR/GIT_WORK_TREE redirect this check at ANOTHER repository, so a real
 // staged/worktree divergence in the target repo went unreported (reproduced:
@@ -86,7 +86,7 @@ const GIT_LOCATION_ENV = [
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 ];
 
-// Mirror of lib/fingerprint.ts GIT_CONFIG_ENV_PREFIX: GIT_CONFIG_COUNT +
+// Mirror of lib/git-exec.ts GIT_CONFIG_ENV_PREFIX: GIT_CONFIG_COUNT +
 // GIT_CONFIG_KEY_<n>/VALUE_<n>, GIT_CONFIG_PARAMETERS and the
 // GLOBAL/SYSTEM/NOSYSTEM source overrides are a second route to the same
 // fail-open (e.g. injecting core.excludesFile hides untracked edits from the

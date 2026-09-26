@@ -15,6 +15,7 @@ import {
   listByOpener,
   judgeIdsByOpener,
   parseHierarchySnapshot,
+  loadHierarchySliceOnce,
   tmuxServerFrom,
   judgeLive,
   windowClosable,
@@ -430,4 +431,19 @@ test("an entry from an older build carries no lane, and is still found", () => {
   const found = findJudgeLane(table, { role: "reviewer", repoRoot: "/repo", openerId: "session-child-1" });
   assert.equal(found?.judgeId, "legacy");
   assert.equal(found?.objectId, undefined);
+});
+
+test("loadHierarchySliceOnce: a missing or torn file does not mark the repo loaded", () => {
+  const loaded = new Set<string>();
+  let file: string | undefined;
+  const read = () => file;
+  assert.equal(loadHierarchySliceOnce(loaded, "/repo", read), undefined);
+  file = '{"version":1,"judg'; // half-written
+  assert.equal(loadHierarchySliceOnce(loaded, "/repo", read), undefined);
+  assert.equal(loaded.has("/repo"), false);
+  file = JSON.stringify({ version: 1, judges: {} });
+  assert.deepEqual(loadHierarchySliceOnce(loaded, "/repo", read)?.judges, {});
+  assert.equal(loaded.has("/repo"), true);
+  // Loaded once: the file is not read again.
+  assert.equal(loadHierarchySliceOnce(loaded, "/repo", () => { throw new Error("re-read"); }), undefined);
 });

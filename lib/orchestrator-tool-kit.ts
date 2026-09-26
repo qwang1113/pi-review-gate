@@ -17,7 +17,8 @@ import { basename } from "node:path";
 import { listServerPanes } from "./judge-pane.ts";
 import { childPaneLabel, pmPaneLabel } from "./orchestrator-pane-decor.ts";
 import { paintPaneTitle, refreshSessionPaneTitle, type PaneTitleMemory } from "./session-factory.ts";
-import { channelPathFor, projectChannel, readChannel, type ChannelIO } from "./orchestrator-channel.ts";
+import { channelPathFor, type ChannelIO } from "./channel-io.ts";
+import { projectChannel, readChannel } from "./channel-projection.ts";
 import type { ChildAssets, SupervisionSnapshot } from "./orchestrator-supervisor.ts";
 
 import {
@@ -33,24 +34,8 @@ import {
 
 import type { ChildSession } from "./orchestrator-registry.ts";
 import type { OrchestratorPlan } from "./orchestrator-plan.ts";
+import { toolFail } from "./tool-host.ts";
 
-
-/**
- * The two result builders.
- *
- * Named `toolReply` / `toolFail` rather than `reply` / `fail` deliberately:
- * a shared helper with a one-word generic name collides with ordinary prose
- * everywhere else in the repository, including the structural test that scans
- * for lib exports referenced without an import. A slightly longer name buys a
- * name that only ever means one thing.
- */
-export function toolReply(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details };
-}
-
-export function toolFail(text: string, details?: Record<string, unknown>): ToolReply {
-  return { content: [{ type: "text", text }], details, isError: true };
-}
 
 /**
  * The orchestration tools exist only in orchestrator mode. A loop session
@@ -471,14 +456,24 @@ export async function verifyJudgeBoot(
 
 
 
-/** Everything still outstanding on one child's channel. */
-export function childChannelProjection(deps: OrchestratorDeps, childId: string) {
+function childChannelRecords(deps: OrchestratorDeps, childId: string) {
   try {
     const path = channelPathFor(deps.runtime().orchestrationId, childId, deps.channelHome());
-    return projectChannel(readChannel(deps.channelIO(), path).records);
+    return readChannel(deps.channelIO(), path).records;
   } catch {
-    return projectChannel([]);
+    return [];
   }
+}
+
+/** Everything still outstanding on one child's channel. */
+export function childChannelProjection(deps: OrchestratorDeps, childId: string) {
+  return projectChannel(childChannelRecords(deps, childId));
+}
+
+/** Who reported state on one child's channel, and from which pane — every report, oldest first. */
+export function childStateReports(deps: OrchestratorDeps, childId: string): Array<{ sessionId?: string; paneId?: string }> {
+  return childChannelRecords(deps, childId).flatMap((r) =>
+    r.kind === "state" ? [{ ...(r.sessionId ? { sessionId: r.sessionId } : {}), ...(r.paneId ? { paneId: r.paneId } : {}) }] : []);
 }
 
 

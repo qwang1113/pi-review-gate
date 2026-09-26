@@ -163,9 +163,10 @@ test("the round-note hint reaches both surfaces from ONE constant", () => {
   // constant rather than restate the ask (a second hand-written ask is the
   // copy that drifts).
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const extension = readFileSync(join(root, "extensions", "review-gate.ts"), "utf8");
-  assert.match(extension, /import \{[^}]*ROUND_NOTE_HINT[^}]*\} from "\.\.\/lib\/agent-directives\.ts"/,
-    "the extension imports the one constant");
+  // (t8) judge_submit is registered by lib/judge-submit-tool.ts.
+  const extension = readFileSync(join(root, "lib", "judge-submit-tool.ts"), "utf8");
+  assert.match(extension, /import \{[^}]*ROUND_NOTE_HINT[^}]*\} from "\.\/agent-directives\.ts"/,
+    "the judge_submit module imports the one constant");
   const taskParam = extension.slice(extension.indexOf('task: Type.String({'));
   assert.ok(taskParam.slice(0, 600).includes("ROUND_NOTE_HINT"),
     "judge_submit's task description renders it");
