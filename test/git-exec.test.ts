@@ -5,7 +5,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { gitOrNull, gitRawOrNull, gitText } from "../lib/git-exec.ts";
+import { gitFailureText, gitOrNull, gitRawOrNull, gitText } from "../lib/git-exec.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
 
 function repo(): string {
@@ -40,6 +40,20 @@ test("failures: gitText throws with the exit status, the OrNull forms return nul
     assert.equal(gitOrNull(dir, ["rev-parse", "--verify", "nope"]), null);
     assert.equal(gitRawOrNull(dir, ["rev-parse", "--verify", "nope"]), null);
     assert.equal(gitRawOrNull(dir, ["rev-parse", "--is-inside-work-tree"]), "true\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// t11: git commit writes "nothing to commit" to STDOUT; Node's message has stderr only.
+test("gitFailureText keeps the stdout a failing git wrote its reason to", () => {
+  const dir = repo();
+  try {
+    let caught: unknown;
+    try { gitText(dir, ["commit", "-m", "x"]); } catch (e) { caught = e; }
+    assert.ok(caught, "a commit on an empty repo must fail");
+    assert.match(gitFailureText(caught), /nothing to commit/);
+    assert.equal(gitFailureText(new Error("plain")), "plain", "no stdout ⇒ the message alone");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

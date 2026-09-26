@@ -19,7 +19,7 @@ import {
 } from "./dependency-justification.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "./file-size-gate.ts";
 import type { GateState } from "./gate-state.ts";
-import { gitBaseEnv, gitOrNull, gitRaw, gitText } from "./git-exec.ts";
+import { gitBaseEnv, gitFailureText, gitOrNull, gitRaw, gitText } from "./git-exec.ts";
 import { l5BlockReason, nonEnglishCommitMessage } from "./lang-detect.ts";
 import type { LoopStage } from "./loop-stages.ts";
 import { currentBranch } from "./repo-facts.ts";
@@ -401,7 +401,7 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
           details: { committed: true, sha, precommitBypassed, files: sweptIn, leftOut },
         };
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
+        const reason = gitFailureText(err);
         return {
           content: [{ type: "text", text: `review-gate: review_checkpoint failed — ${reason}` }],
           details: { committed: false },

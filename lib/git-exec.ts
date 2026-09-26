@@ -113,6 +113,17 @@ export function gitText(cwd: string, args: readonly string[], opts: GitOptions =
   return gitRaw(cwd, args, opts).trim();
 }
 
+/**
+ * A thrown git failure as text an agent can act on. Node's `message` carries
+ * stderr only, but git writes some refusals to STDOUT (`git commit` on a clean
+ * tree: "nothing to commit, working tree clean") — without it the reason is lost.
+ */
+export function gitFailureText(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const stdout = String((err as { stdout?: unknown }).stdout ?? "").trim();
+  return stdout ? `${err.message.trim()}\n${stdout}` : err.message;
+}
+
 /** Trimmed stdout, or null on any failure. */
 export function gitOrNull(cwd: string, args: readonly string[], opts: GitOptions = {}): string | null {
   try {
