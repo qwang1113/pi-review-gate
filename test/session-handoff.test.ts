@@ -226,6 +226,21 @@ test("refreshing the user section keeps the agent's paragraph — even when a me
   assert.match(upgraded, /我的补充/);
 });
 
+test("a contract that quotes the section heading is never mistaken for the section (reviewer P1)", () => {
+  const contract = `loop goal：\n${RECENT_USER_HEADING}\n契约里引用的标题\n${HANDOFF_FILL_HEADING}\n契约里引用的补充标题`;
+  const doc = buildHandoffDoc({ kind: "loop", sessionId: "s1", repoRoot: "/repo", contract, recentUserMessages: ["旧话"] });
+  assert.match(recentUserSection(doc)!, /> 旧话/);
+  const refreshed = withRecentUserMessages(doc, ["新话"]);
+  assert.ok(refreshed.includes(contract), "the contract is untouched");
+  assert.match(recentUserSection(refreshed)!, /> 新话/);
+  assert.doesNotMatch(refreshed, /旧话/);
+  // A legacy document (no fence) whose contract quotes the fill heading.
+  const legacy = `# x\n\n${contract}\n\n${HANDOFF_FILL_HEADING}\n\n我的补充\n`;
+  const upgraded = withRecentUserMessages(legacy, ["要求"]);
+  assert.ok(upgraded.includes(contract));
+  assert.ok(upgraded.indexOf("> 要求") > upgraded.indexOf("契约里引用的补充标题"));
+});
+
 test("a successor's first declare_done is refused once, pasting the user's last words", () => {
   const doc = buildHandoffDoc({ kind: "orchestrator", sessionId: "s1", repoRoot: "/repo", recentUserMessages: ["再加一个任务：修 X"] });
   const refusal = successorDoneRefusal({ isSuccessor: true, checked: false, docPath: "/repo/.pi/handoff/s1.md", doc });

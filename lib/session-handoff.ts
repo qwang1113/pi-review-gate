@@ -266,7 +266,7 @@ export function buildHandoffDoc(facts: HandoffDocFacts): string {
     "",
     RECENT_USER_HEADING,
     "",
-    renderRecentUserMessages(facts.recentUserMessages ?? []),
+    recentUserBlock(facts.recentUserMessages ?? []),
     "",
     HANDOFF_FILL_HEADING,
     "",
@@ -306,6 +306,15 @@ export const RECENT_USER_MAX_CHARS = 2000;
 const NO_RECENT_USER = "（没有记录到用户消息）";
 
 /**
+ * The section is fenced by line-start markers, NOT found by its heading: the
+ * contract above it is free text (a loop goal can quote this very heading), so
+ * a heading search could land in the contract and overwrite it (reviewer P1,
+ * 2026-09-26). The gate's section is always the LAST fence in the document.
+ */
+const RECENT_USER_START = "<!-- rg:recent-user-messages -->";
+const RECENT_USER_END = "<!-- /rg:recent-user-messages -->";
+
+/**
  * The last `n` user messages in a session's entries, oldest first, as text.
  *
  * Entries are pi's session entries (`{type:"message", message:{role, content}}`,
@@ -338,23 +347,32 @@ export function lastUserMessages(entries: readonly unknown[], n: number): string
 }
 
 /**
- * Quoted, so a message that itself contains a `## ` line cannot end the
- * section early when `withRecentUserMessages` looks for the next heading.
+ * The fenced body. Every message line is quoted (`> `), so a message can never
+ * put a marker at the start of a line and end the fence early.
  */
-function renderRecentUserMessages(messages: readonly string[]): string {
-  if (messages.length === 0) return NO_RECENT_USER;
-  return messages
-    .map((text, i) => [`### ${i + 1} / ${messages.length}`, "", ...text.split("\n").map((line) => `> ${line}`)].join("\n"))
-    .join("\n\n");
+function recentUserBlock(messages: readonly string[]): string {
+  const body = messages.length === 0
+    ? NO_RECENT_USER
+    : messages
+      .map((text, i) => [`### ${i + 1} / ${messages.length}`, "", ...text.split("\n").map((line) => `> ${line}`)].join("\n"))
+      .join("\n\n");
+  return `${RECENT_USER_START}\n\n${body}\n\n${RECENT_USER_END}`;
+}
+
+/** Where the gate's fence sits: [start of the start marker, end of the end marker). */
+function recentUserFence(doc: string): { start: number; end: number } | undefined {
+  const at = `\n${doc}`.lastIndexOf(`\n${RECENT_USER_START}\n`);
+  if (at < 0) return undefined;
+  const close = `\n${doc}`.indexOf(`\n${RECENT_USER_END}`, at + 1);
+  if (close < 0) return undefined;
+  return { start: at, end: close + RECENT_USER_END.length };
 }
 
 /** The section's body, or undefined when the document has none. */
 export function recentUserSection(doc: string): string | undefined {
-  const start = doc.indexOf(RECENT_USER_HEADING);
-  if (start < 0) return undefined;
-  const bodyStart = start + RECENT_USER_HEADING.length;
-  const next = doc.indexOf("\n## ", bodyStart);
-  return doc.slice(bodyStart, next < 0 ? doc.length : next).trim();
+  const fence = recentUserFence(doc);
+  if (!fence) return undefined;
+  return doc.slice(fence.start + RECENT_USER_START.length, fence.end - RECENT_USER_END.length).trim();
 }
 
 /**
@@ -365,14 +383,13 @@ export function recentUserSection(doc: string): string | undefined {
  * section gets it inserted before the agent's paragraph.
  */
 export function withRecentUserMessages(doc: string, messages: readonly string[]): string {
-  const block = `${RECENT_USER_HEADING}\n\n${renderRecentUserMessages(messages)}\n`;
-  const start = doc.indexOf(RECENT_USER_HEADING);
-  if (start >= 0) {
-    const next = doc.indexOf("\n## ", start + RECENT_USER_HEADING.length);
-    return doc.slice(0, start) + block + (next < 0 ? "" : doc.slice(next));
-  }
-  const fill = doc.indexOf(HANDOFF_FILL_HEADING);
-  return fill < 0 ? `${doc.trimEnd()}\n\n${block}` : doc.slice(0, fill) + block + "\n" + doc.slice(fill);
+  const fence = recentUserFence(doc);
+  if (fence) return doc.slice(0, fence.start) + recentUserBlock(messages) + doc.slice(fence.end);
+  const section = `${RECENT_USER_HEADING}\n\n${recentUserBlock(messages)}\n`;
+  // No fence yet: before the agent's paragraph — the LAST line-start heading,
+  // since the contract above it may quote the heading too.
+  const fill = `\n${doc}`.lastIndexOf(`\n${HANDOFF_FILL_HEADING}`);
+  return fill < 0 ? `${doc.trimEnd()}\n\n${section}` : doc.slice(0, fill) + section + "\n" + doc.slice(fill);
 }
 
 /**
