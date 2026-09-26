@@ -17,7 +17,7 @@
  *   5 (retired 2026-09-17: tasks no longer declare file boundaries — same-repo
  *      children are serialized, so a boundary prevented no collision and only
  *      made every newly discovered file revoke the plan approval)
- *   6 same-repo tasks never parallel ... lib/orchestrator-plan.ts (schedule)
+ *   6 same-repo tasks never parallel ... lib/orchestrator-plan-progress.ts (schedule)
  *   7 (retired 2026-09-07: no worktree isolation — cross-repo only)
  *   8 proxied goal touches no secret .... {@link proxyApprovalProblems}
  *   9 notification single entry+throttle. lib/user-notify.ts (the GATE sends,
@@ -33,14 +33,12 @@
 
 import { sensitiveOutOfRepoEdits } from "./out-of-repo-paths.ts";
 import {
-  openDecisions,
   planHash,
-  unfinishedTasks,
-  unreportedDecisions,
   type OrchestratorPlan,
   type PlanTask,
   type TaskExecution,
 } from "./orchestrator-plan.ts";
+import { openDecisions, unfinishedTasks, unreportedDecisions } from "./orchestrator-plan-progress.ts";
 import { liveChildren, vanishedChildren, type OrchestratorRuntime } from "./orchestrator-registry.ts";
 import type { TaskMode } from "./task-mode.ts";
 

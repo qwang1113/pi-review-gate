@@ -6,22 +6,24 @@ import {
   MAX_MAX_PARALLEL,
   PLAN_MAX_TASKS,
   PLAN_RELPATH,
-  applyTaskStatus,
   canonicalPlanText,
   clampMaxParallel,
   findDependencyCycle,
   formatPlanSummary,
-  mergeTaskProgress,
-  isLegalTransition,
   isPlanHash,
-  openDecisions,
   parsePlan,
   planHash,
+  type OrchestratorPlan,
+} from "../lib/orchestrator-plan.ts";
+import {
+  applyTaskStatus,
+  isLegalTransition,
+  mergeTaskProgress,
+  openDecisions,
   scheduleNextTasks,
   unfinishedTasks,
   unreportedDecisions,
-  type OrchestratorPlan,
-} from "../lib/orchestrator-plan.ts";
+} from "../lib/orchestrator-plan-progress.ts";
 
 const NOW = "2026-08-29T12:00:00.000Z";
 

@@ -17,15 +17,13 @@ import {
   buildPlanTranscriptMessage,
 } from "./orchestrator-plan-messages.ts";
 import {
-  applyTaskStatus,
   formatPlanSummary,
-  mergeTaskProgress,
-  nextDecisionId,
   parsePlan,
   planHash,
   PLAN_RELPATH,
   type TaskStatus,
 } from "./orchestrator-plan.ts";
+import { applyTaskStatus, mergeTaskProgress, nextDecisionId } from "./orchestrator-plan-progress.ts";
 import {
   beginApprovalLineage,
   decideApprovalCarry,

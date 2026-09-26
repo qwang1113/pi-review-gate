@@ -317,7 +317,7 @@ export function decideApprovalCarry(
 // Its trust boundary is the one `approvedPlanHash` already has, and no
 // stronger: both live in the gate sidecar, which is a file no agent may edit
 // (the gate refuses it and the refusal is not grantable). Shape validation on
-// the way back in (lib/orchestrator-registry.ts) drops a malformed list
+// the way back in (lib/orchestrator-registry-normalize.ts) drops a malformed list
 // WHOLE — it cannot recognize a well-formed forgery, and this module does not
 // pretend otherwise.
 

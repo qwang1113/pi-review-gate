@@ -1286,7 +1286,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!cells.state.orchestrator) return; // not an orchestration — nothing to grant
       persistOrchestration(addGrant(cells.state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
     },
-    // The same doorway, closing (lib/user-interaction-tools.ts `applyGrant`).
+    // The same doorway, closing (lib/ask-user-interview.ts `applyGrant`).
     revokeProxyScope: (scope) => {
       if (!cells.state.orchestrator) return; // not an orchestration — nothing to revoke
       persistOrchestration(removeGrant(cells.state.orchestrator, scope));

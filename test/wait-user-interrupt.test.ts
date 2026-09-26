@@ -196,7 +196,7 @@ test("an ESC abort with no user input keeps reporting itself as a signal abort",
 });
 
 // ---------------------------------------------------------------------------
-// The receipt (lib/orchestrator-session-tools.ts), end to end
+// The receipt (lib/orchestrator-wait-tool.ts), end to end
 // ---------------------------------------------------------------------------
 
 async function spawnT1(world: FakeWorld): Promise<string> {

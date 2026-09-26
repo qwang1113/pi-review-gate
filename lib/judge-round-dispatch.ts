@@ -25,7 +25,8 @@ import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import { qualityStandingFor } from "./quality-round.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
 import { dispatchFailureDetail, type RoundCancelLedger } from "./round-cancel-ledger.ts";
-import { buildJudgePaneCommand, judgePaneDecor, openSessionWindow } from "./session-factory.ts";
+import { openSessionWindow } from "./session-factory.ts";
+import { buildJudgePaneCommand, judgePaneDecor } from "./session-launch-specs.ts";
 import type { SessionHost } from "./session-host.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
 
@@ -470,7 +471,7 @@ export function createJudgeRoundDispatch(
         if (opened.deliveryFailed) rotation.retirePrevious();
         // `deliveryFailed` is NOT "the task was lost": the pane exists and
         // was KEPT, and what failed is the BOOT VERIFICATION — the judge task
-        // itself rode in on argv (lib/session-factory.ts). So a pane that
+        // itself rode in on argv (lib/session-launch-specs.ts). So a pane that
         // never acknowledged is still a delivered round the opener may wait
         // on, which is exactly what `delivered: true` means here (quality
         // round P2, 2026-09-16: the inverted-looking line needs to say so).

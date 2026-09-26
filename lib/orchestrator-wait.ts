@@ -88,7 +88,7 @@ export type ChildWaitReason =
    * So an open request ends the wait on its own evidence: the channel says a
    * question is unanswered. Nothing else has to agree, and nothing else can
    * take it away. The de-duplication moved WITH it — onto the requestId
-   * (lib/orchestrator-session-tools.ts), which is the thing being announced,
+   * (lib/orchestrator-wait-tool.ts), which is the thing being announced,
    * instead of onto a per-child STATE that three consumers share.
    */
   | "pending-request"
