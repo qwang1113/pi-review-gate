@@ -594,7 +594,7 @@ test("a NEW user approval resets the lineage — a version they moved away from 
 
 test("without a lineage on record there is nothing to restore — the user is asked", async () => {
   // This is the state a MALFORMED lineage leaves behind: normalizeRuntime
-  // drops the whole list (lib/orchestrator-registry.ts), so a forged record
+  // drops the whole list (lib/orchestrator-registry-normalize.ts), so a forged record
   // buys exactly what an absent one does — a dialog.
   const world = makeFakeWorld({ plan: fileGrainPlan(), approvePlan: true });
   world.deps.saveRuntime({

@@ -2967,7 +2967,7 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // identity in its environment, not as a parent session pointer. Since the
   // session factory landed the env is ASSEMBLED there (one place for a
   // cross-process contract), so the dispatch names the opener as the judge
-  // role's `openerId` and lib/session-factory.ts turns it into RG_JUDGE_OPENER.
+  // role's `openerId` and lib/session-env.ts turns it into RG_JUDGE_OPENER.
   const spawnAt = DISPATCH_SRC.indexOf("function dispatchJudgeRound(");
   // Sized to the whole function (it grew when the spawn learned to verify its
   // delivery, and again when the reuse branch started stamping the round number
