@@ -117,10 +117,9 @@ function acquireLock(lock: string, opts: LockOptions): boolean {
     }
     let holder = Number.NaN;
     try { holder = Number.parseInt(readFileSync(lock, "utf8"), 10); } catch { /* vanished: retry now */ continue; }
-    if (Number.isInteger(holder) && holder > 0 && !pidAlive(holder)) {
-      breakStaleLock(lock, holder, pidAlive);
-      continue;
-    }
+    // A removed dead lock is retried at once; one that could not be removed
+    // (another breaker is at it) waits like a live one, deadline included.
+    if (Number.isInteger(holder) && holder > 0 && !pidAlive(holder) && breakStaleLock(lock, holder, pidAlive)) continue;
     if (Date.now() >= deadline) return false;
     sleepSync(LOCK_POLL_MS);
   }
@@ -133,7 +132,7 @@ function acquireLock(lock: string, opts: LockOptions): boolean {
  * So breaking is serialized by `<lock>.break`, and the content is re-read
  * under it: a lock that is no longer the dead holder's is left alone.
  */
-function breakStaleLock(lock: string, deadHolder: number, pidAlive: (pid: number) => boolean): void {
+function breakStaleLock(lock: string, deadHolder: number, pidAlive: (pid: number) => boolean): boolean {
   const breaker = `${lock}.break`;
   try {
     writeFileSync(breaker, String(process.pid), { flag: "wx" });
@@ -146,11 +145,15 @@ function breakStaleLock(lock: string, deadHolder: number, pidAlive: (pid: number
       const other = Number.parseInt(readFileSync(breaker, "utf8"), 10);
       if (Number.isInteger(other) && other > 0 && !pidAlive(other)) rmSync(breaker, { force: true });
     } catch { /* gone already */ }
-    return;
+    return false;
   }
   try {
-    if (Number.parseInt(readFileSync(lock, "utf8"), 10) === deadHolder) rmSync(lock, { force: true });
-  } catch { /* already gone */ } finally {
+    if (Number.parseInt(readFileSync(lock, "utf8"), 10) !== deadHolder) return false;
+    rmSync(lock, { force: true });
+    return true;
+  } catch {
+    return true; // already gone: retry the take
+  } finally {
     rmSync(breaker, { force: true });
   }
 }
