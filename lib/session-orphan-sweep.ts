@@ -58,16 +58,15 @@
 
 import {
   buildKillSessionArgv,
-  buildListSessionsArgv,
   buildReadSessionOwnerArgv,
-  parseSessionNames,
   SESSION_OWNER_PANE_OPTION,
   SESSION_OWNER_PID_OPTION,
+  SESSION_PINNED_OPTION,
   type SessionOwnerOption,
 } from "./tmux-session-argv.ts";
 import { isOwnSessionName, isPaneId } from "./orchestrator-tmux.ts";
 import { listServerPanes } from "./judge-pane.ts";
-import { scopeNameOwnedBy, writeOwnerFacts } from "./session-tmux-scope.ts";
+import { readSessionNames, scopeNameOwnedBy, writeOwnerFacts } from "./session-tmux-scope.ts";
 import {
   classifyEntry,
   listEntries,
@@ -139,14 +138,7 @@ export function sweepOrphans(deps: RegistryDeps, self?: SweepSelf): SweepReport 
         // tmux's stderr, which this repository refuses to do. Absent from a
         // readable list ⇒ gone; anything else ⇒ unknown, and unknown does not
         // touch the registration.
-        const names = ((): string[] | undefined => {
-          try {
-            const list = deps.runTmux(buildListSessionsArgv());
-            return list.ok ? parseSessionNames(list.stdout) : undefined;
-          } catch {
-            return undefined;
-          }
-        })();
+        const names = readSessionNames(deps.runTmux);
         if (names === undefined || names.includes(scopeSession)) {
           report.kept.push({ name: entry.name, reason: `专属 session ${scopeSession} 的归属标记读不到 —— 不杀` });
           continue;
@@ -229,6 +221,9 @@ export function sweepOrphans(deps: RegistryDeps, self?: SweepSelf): SweepReport 
  *   - its name is exactly what its marker's owner derives (scopeNameOwnedBy) —
  *     a name that merely looks like ours is not ours;
  *   - the owner is neither this session nor a named one;
+ *   - the session is not PINNED (`@rg_scope_pinned`: a handed-off seat or an
+ *     orchestration manager's — somebody inherits it, so a dead owner is
+ *     expected there);
  *   - the recorded pid is not a running process AND the recorded pane is not on
  *     this server's pane list.
  *
@@ -256,14 +251,7 @@ export function sweepUnnamedScopes(
       return undefined;
     }
   };
-  const names = ((): string[] | undefined => {
-    try {
-      const list = run(buildListSessionsArgv());
-      return list.ok ? parseSessionNames(list.stdout) : undefined;
-    } catch {
-      return undefined;
-    }
-  })();
+  const names = readSessionNames(run);
   if (names === undefined) {
     report.notes.push("读不到 tmux session 列表 —— 未命名会话的专属 session 本次不回收");
     return;
@@ -286,6 +274,10 @@ export function sweepUnnamedScopes(
       continue;
     }
     if (named.owners.has(owner)) continue;
+    // PINNED ⇒ somebody inherits it (a handed-off seat's judges, a manager's
+    // children): its owner being dead is expected. Unreadable ⇒ unknown ⇒ kept.
+    const pinned = read(session, SESSION_PINNED_OPTION);
+    if (pinned === undefined || pinned.length > 0) { keep(session, pinned ? `已铉住（${pinned}），由继承者收尾` : "铉住标记读不到"); continue; }
     const pidText = read(session, SESSION_OWNER_PID_OPTION);
     const pane = read(session, SESSION_OWNER_PANE_OPTION);
     if (pidText === undefined || pane === undefined) { keep(session, "存活事实读不到"); continue; }
@@ -306,5 +298,6 @@ export function sweepUnnamedScopes(
     })();
     if (!killed.ok) { keep(session, `回收失败：${killed.stderr || "tmux 拒绝"}`); continue; }
     report.scopes.reaped.push({ session, owner });
+    report.notes.push(`已回收未命名会话 ${owner} 遗留的专属 session ${session}（owner pid ${pid} 与 pane ${pane} 都已不在）`);
   }
 }

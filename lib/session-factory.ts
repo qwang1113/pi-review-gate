@@ -76,6 +76,7 @@ import {
 import { buildKillWindowArgv, type SessionWindowCoords } from "./tmux-session-argv.ts";
 import {
   openScopeWindow,
+  pinOwnSession,
   type TmuxScope,
 } from "./session-tmux-scope.ts";
 import {
@@ -555,9 +556,18 @@ export async function openSessionWindow(
   if (scratch) {
     try { mkdirSync(scratch, { recursive: true }); } catch { /* best effort */ }
   }
+  // WHAT ANOTHER SESSION WILL INHERIT IS PINNED (2026-09-27): a successor adopts
+  // the judges in this session's dedicated session, and `orchestrator_attach`
+  // adopts a dead manager's children — in both cases the owner's death is
+  // expected, and the crash sweep must not read it as a crash.
+  if (spec.role.kind === "successor") {
+    const pinned = pinOwnSession(run, spec.scope, "handed-off");
+    if (!pinned.ok) return { ok: false, error: `交接前未能铉住专属 session：${pinned.error}` };
+  }
   const coords = spec.layout === "beside-opener"
     ? openRelayPane(run, spec, env)
     : openScopeWindow(run, spec.scope, {
+        ...(spec.role.kind === "orchestration-child" ? { pin: "orchestration-child" } : {}),
         cwd: spec.cwd,
         env,
         command: spec.command,

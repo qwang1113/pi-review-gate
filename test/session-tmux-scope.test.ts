@@ -27,6 +27,7 @@ import {
   SESSION_OWNER_OPTION,
   SESSION_OWNER_PANE_OPTION,
   SESSION_OWNER_PID_OPTION,
+  SESSION_PINNED_OPTION,
 } from "../lib/tmux-session-argv.ts";
 import {
   addressableSessions,
@@ -34,6 +35,7 @@ import {
   createOwnershipProbe,
   deriveSessionName,
   openScopeWindow,
+  pinOwnSession,
   sanitizeScopeRecord,
   scopeNameOwnedBy,
   type TmuxScope,
@@ -487,7 +489,7 @@ function factsServer(opts: Parameters<typeof fakeServer>[0] & { factFails?: stri
   const server = fakeServer(opts);
   const facts = new Map<string, string>();
   const run: TmuxRunner = (argv, env, declared) => {
-    const option = argv.find((a) => a === SESSION_OWNER_PID_OPTION || a === SESSION_OWNER_PANE_OPTION);
+    const option = argv.find((a) => a === SESSION_OWNER_PID_OPTION || a === SESSION_OWNER_PANE_OPTION || a === SESSION_PINNED_OPTION);
     if (argv[0] === "set" && option !== undefined) {
       server.calls.push([...argv]);
       if (opts.factFails === option) return { ok: false, stdout: "", stderr: "tmux refused the fact" };
@@ -538,10 +540,46 @@ test("REUSE overwrites the facts an earlier process of this id left — and a fa
   }
 });
 
+test("a PIN rides with the window it protects: written on create and reuse, and a failed pin refuses the window", () => {
+  const created = factsServer();
+  assert.equal(openScopeWindow(created.run, liveScope(), { cwd: "/repo", command: ["pi"], pin: "orchestration-child" }).ok, true);
+  assert.ok(created.calls.some((a) => a[0] === "set" && a[3] === SESSION_PINNED_OPTION && a[4] === "orchestration-child"));
+
+  const reused = factsServer({ existing: { name: NAME, owner: SESSION_ID } });
+  assert.equal(openScopeWindow(reused.run, liveScope(), { cwd: "/repo", command: ["pi"], pin: "orchestration-child" }).ok, true);
+  assert.ok(reused.calls.some((a) => a[0] === "set" && a[3] === SESSION_PINNED_OPTION));
+
+  const failing = factsServer({ factFails: SESSION_PINNED_OPTION });
+  const refused = openScopeWindow(failing.run, liveScope(), { cwd: "/repo", command: ["pi"], pin: "orchestration-child" });
+  assert.equal(refused.ok, false);
+  assert.equal(failing.sessions.has(NAME), false, "the unpinned session is reclaimed on the spot");
+});
+
+test("pinOwnSession pins only a session that is provably mine, and is a no-op when there is none", () => {
+  const none = factsServer();
+  assert.deepEqual(pinOwnSession(none.run, fakeScope(), "handed-off"), { ok: true });
+  assert.equal(none.calls.some((a) => a[0] === "set"), false);
+
+  const mine = factsServer({ existing: { name: NAME, owner: SESSION_ID } });
+  assert.deepEqual(pinOwnSession(mine.run, fakeScope(), "handed-off"), { ok: true });
+  assert.equal(mine.facts.get(`${NAME} ${SESSION_PINNED_OPTION}`), "handed-off");
+
+  const foreign = factsServer({ existing: { name: NAME, owner: SUCCESSOR_ID } });
+  assert.equal(pinOwnSession(foreign.run, fakeScope(), "handed-off").ok, false);
+  assert.equal(foreign.facts.size, 0);
+
+  assert.equal(pinOwnSession(factsServer({ blind: true }).run, fakeScope(), "handed-off").ok, false);
+  assert.equal(pinOwnSession(factsServer({ existing: { name: NAME, owner: SESSION_ID }, factFails: SESSION_PINNED_OPTION }).run, fakeScope(), "x").ok, false);
+});
+
 test("a name belongs to an owner only when that owner derives it — from any repo", () => {
   assert.equal(scopeNameOwnedBy(NAME, SESSION_ID), true);
   assert.equal(scopeNameOwnedBy(deriveSessionName("/elsewhere/Other.Repo", SESSION_ID)!, SESSION_ID), true);
   assert.equal(scopeNameOwnedBy(NAME, SUCCESSOR_ID), false);
   assert.equal(scopeNameOwnedBy(NAME, ""), false);
   assert.equal(scopeNameOwnedBy("work", SESSION_ID), false);
+  // A slug cut to 24 characters right after a separator keeps that trailing `-`.
+  const cut = deriveSessionName("/r/abcdefghijklmnopqrstuvw-xyz", SESSION_ID)!;
+  assert.match(cut, /w--/);
+  assert.equal(scopeNameOwnedBy(cut, SESSION_ID), true);
 });

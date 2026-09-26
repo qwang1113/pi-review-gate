@@ -13,7 +13,12 @@ import assert from "node:assert/strict";
 import { sweepOrphans } from "../lib/session-orphan-sweep.ts";
 import { sessionEntryPath, type RegistryDeps, type RegistryIO } from "../lib/session-registry.ts";
 import { deriveSessionName } from "../lib/session-tmux-scope.ts";
-import { SESSION_OWNER_OPTION, SESSION_OWNER_PANE_OPTION, SESSION_OWNER_PID_OPTION } from "../lib/tmux-session-argv.ts";
+import {
+  SESSION_OWNER_OPTION,
+  SESSION_OWNER_PANE_OPTION,
+  SESSION_OWNER_PID_OPTION,
+  SESSION_PINNED_OPTION,
+} from "../lib/tmux-session-argv.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 
 const ROOT = "/home/agent/.pi/agent/rg-sessions";
@@ -91,6 +96,7 @@ test("a crashed owner (pid gone, pane gone) loses its dedicated session; a live 
   const report = sweepOrphans(deps(tmux, { alive: (pid) => pid === 777 }), { sessionId: MINE });
   assert.deepEqual(tmux.killed, [DEAD_SCOPE]);
   assert.deepEqual(report.scopes.reaped, [{ session: DEAD_SCOPE, owner: DEAD }]);
+  assert.match(report.notes.join("\n"), new RegExp(`已回收.*${DEAD_SCOPE}`), "every kill reaches the log");
   assert.match(report.scopes.kept.find((k) => k.session === liveScope)?.reason ?? "", /pid 777 还在/);
 });
 
@@ -110,6 +116,7 @@ test("any live or missing fact keeps the session", () => {
     ["show-options throws", { sessions: { [DEAD_SCOPE]: facts(DEAD) }, fail: "show-options", throws: true }],
     ["list-panes fails", { sessions: { [DEAD_SCOPE]: facts(DEAD) }, fail: "list-panes" }],
     ["list-panes throws", { sessions: { [DEAD_SCOPE]: facts(DEAD) }, fail: "list-panes", throws: true }],
+    ["pinned (handed off / manager's children)", { sessions: { [DEAD_SCOPE]: { ...facts(DEAD), [SESSION_PINNED_OPTION]: "handed-off" } } }],
   ];
   for (const [label, server, alive] of cases) {
     const tmux = fakeTmux(server);
@@ -124,6 +131,7 @@ test("a kill tmux refuses is reported, not thrown", () => {
     const tmux = fakeTmux({ sessions: { [DEAD_SCOPE]: facts(DEAD) }, fail: "kill-session", throws });
     const report = sweepOrphans(deps(tmux), {});
     assert.deepEqual(report.scopes.reaped, []);
+    assert.doesNotMatch(report.notes.join("\n"), /已回收/);
     assert.match(report.scopes.kept[0]?.reason ?? "", /回收失败/);
   }
 });

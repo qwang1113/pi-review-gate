@@ -75,6 +75,7 @@ import {
   SESSION_OWNER_OPTION,
   SESSION_OWNER_PANE_OPTION,
   SESSION_OWNER_PID_OPTION,
+  SESSION_PINNED_OPTION,
   type SessionOwnerOption,
   type SessionWindowCoords,
 } from "./tmux-session-argv.ts";
@@ -156,17 +157,19 @@ export function writeOwnerFacts(
 }
 
 /**
- * Was `name` minted for `owner` — by ANY repo? The same derivation as
- * {@link deriveSessionName}, with the slug taken from the name itself: a
- * sweeper in one repo meets the sessions of every other repo, so it cannot
- * derive their slug from its own directory. A slug is already clean, so
- * re-deriving it is the identity — and anything that is not exactly what
- * `owner` would produce is not that owner's session.
+ * Was `name` minted for `owner` — by ANY repo? A sweeper in one repo meets the
+ * sessions of every other repo, so it cannot derive their slug from its own
+ * directory: the id TAIL comes from {@link deriveSessionName} (the one
+ * derivation), and the slug in front of it is only checked for the shape that
+ * derivation can produce. Re-deriving the slug instead would lose a slug that
+ * was cut to 24 characters right after a `-`.
  */
 export function scopeNameOwnedBy(name: string, owner: string): boolean {
-  if (!name.startsWith("rg-") || owner.trim().length === 0) return false;
-  const slug = name.slice("rg-".length, name.lastIndexOf("-"));
-  return deriveSessionName(slug, owner.trim()) === name;
+  const minted = deriveSessionName("repo", owner.trim());
+  if (minted === undefined || !isOwnSessionName(name) || !name.startsWith("rg-")) return false;
+  const tail = minted.slice("rg-repo".length);
+  if (!name.endsWith(tail)) return false;
+  return /^[a-z0-9][a-z0-9-]{0,23}$/.test(name.slice("rg-".length, -tail.length));
 }
 
 /**
@@ -204,7 +207,7 @@ export function sanitizeScopeRecord(raw: unknown): TmuxScopeRecord | undefined {
 }
 
 /** Every session on the server, or undefined when tmux could not be read. */
-function listSessions(run: TmuxRunner): string[] | undefined {
+export function readSessionNames(run: TmuxRunner): string[] | undefined {
   try {
     const result = run(buildListSessionsArgv());
     if (!result.ok) return undefined;
@@ -483,6 +486,41 @@ export interface OpenScopeWindowOptions {
   command?: readonly string[];
   /** Window name — the gate's label, so `tmux ls` says who is who. */
   windowName?: string;
+  /**
+   * Pin the session (why, in words): the window hosts something another
+   * session inherits when this one is gone, so the orphan sweep must never
+   * reclaim it. A pin that cannot be written refuses the window.
+   */
+  pin?: string;
+}
+
+/** Write the pin on a session this process just proved is its own. */
+function writePin(run: TmuxRunner, session: string, reason: string): string | undefined {
+  try {
+    const result = run(buildSetSessionOwnerArgv(session, reason, SESSION_PINNED_OPTION));
+    return result.ok ? undefined : `${session} 写 ${SESSION_PINNED_OPTION} 失败：${result.stderr || "tmux 拒绝"}`;
+  } catch (error) {
+    return `${session} 写 ${SESSION_PINNED_OPTION} 失败：${(error as Error).message}`;
+  }
+}
+
+/**
+ * Pin THIS session's own dedicated session, when it has one — called before a
+ * seat is handed off, because the successor adopts the judges that live in it
+ * and the owner's death is then expected, not a crash. No session yet ⇒
+ * nothing to pin; a session whose marker is not ours is refused, never written.
+ */
+export function pinOwnSession(run: TmuxRunner, scope: TmuxScope, reason: string): { ok: true } | { ok: false; error: string } {
+  const resolved = resolveScope(scope);
+  if (!resolved.ok) return { ok: true };
+  const sessions = readSessionNames(run);
+  if (sessions === undefined) return { ok: false, error: "读不到 tmux server，无法铉住专属 session" };
+  if (!sessions.includes(resolved.name)) return { ok: true };
+  const marker = readOwner(run, resolved.name);
+  if (!marker.ok) return { ok: false, error: `读不到 ${resolved.name} 的归属标记：${marker.error}` };
+  if (marker.owner !== resolved.owner) return { ok: false, error: `${resolved.name} 的归属标记不是本会话的 —— 不铉` };
+  const failed = writePin(run, resolved.name, reason);
+  return failed === undefined ? { ok: true } : { ok: false, error: failed };
 }
 
 export type OpenScopeWindowResult =
@@ -505,7 +543,7 @@ export function openScopeWindow(
   const resolved = resolveScope(scope);
   if (!resolved.ok) return resolved;
   const { name, owner } = resolved;
-  const sessions = listSessions(run);
+  const sessions = readSessionNames(run);
   if (sessions === undefined) {
     return { ok: false, error: "读不到 tmux server（list-sessions 失败）——不在此刻建 session" };
   }
@@ -539,6 +577,8 @@ export function openScopeWindow(
     const facts = scope.ownerProcess?.();
     const stale = facts === undefined ? undefined : writeOwnerFacts(run, name, facts);
     if (stale !== undefined) return { ok: false, error: `${stale} —— 不在带着旧存活事实的 session 里开新 window` };
+    const unpinned = opts.pin === undefined ? undefined : writePin(run, name, opts.pin);
+    if (unpinned !== undefined) return { ok: false, error: unpinned };
   }
   const spec = {
     ownSession: name,
@@ -572,11 +612,16 @@ export function openScopeWindow(
     const marked = ((): TmuxRunResult | { ok: false; stderr: string } => {
       try { return run(buildSetSessionOwnerArgv(name, owner)); } catch (error) { return { ok: false, stderr: (error as Error).message }; }
     })();
-    if (!marked.ok) {
+    // An unwritten PIN undoes the creation the same way: the window about to be
+    // handed out would otherwise sit in a session a sweeper may reclaim.
+    const unpinned = !marked.ok || opts.pin === undefined ? undefined : writePin(run, name, opts.pin);
+    if (!marked.ok || unpinned !== undefined) {
       try { run(buildKillSessionArgv(name)); } catch { /* best effort: nothing else can be done about it here */ }
       return {
         ok: false,
-        error: `新建的 session ${name} 写归属标记失败（${marked.stderr || "tmux 拒绝"}）—— 已就地回收，未留下无法复用也无法关闭的 session`,
+        error: marked.ok
+          ? `新建的 session ${name} 铉住失败（${unpinned}）—— 已就地回收`
+          : `新建的 session ${name} 写归属标记失败（${marked.stderr || "tmux 拒绝"}）—— 已就地回收，未留下无法复用也无法关闭的 session`,
       };
     }
     // The LIVENESS FACTS are best effort too: without them the session is only
@@ -622,7 +667,7 @@ export function closeOwnSession(run: TmuxRunner, scope: TmuxScope): CloseOwnSess
   if (!record) {
     return { ok: true, killed: false, note: "本会话没有专属 tmux session（从未派过子会话，或 sidecar 里的记录不属于本会话）" };
   }
-  const sessions = listSessions(run);
+  const sessions = readSessionNames(run);
   if (sessions === undefined) {
     return { ok: false, error: `读不到 tmux server，未能确认专属 session ${record.name} 是否还在` };
   }

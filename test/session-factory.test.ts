@@ -40,6 +40,7 @@ import { judgePaneLabel, pmPaneLabel } from "../lib/orchestrator-pane-decor.ts";
 import { judgeScratchDir } from "../lib/judge-process.ts";
 import type { TmuxScope, TmuxScopeRecord } from "../lib/session-tmux-scope.ts";
 import { deriveSessionName } from "../lib/session-tmux-scope.ts";
+import { SESSION_PINNED_OPTION } from "../lib/tmux-session-argv.ts";
 import * as sessionFactory from "../lib/session-factory.ts";
 
 const SESSION_ID = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
@@ -220,6 +221,8 @@ test("combination 3 — an orchestration SPAWN: orchestration env, a window WITH
   assert.deepEqual(spawn.slice(spawn.indexOf("-n"), spawn.indexOf("-n") + 2), ["-n", "@t1-thing"],
     "and the window carries the gate's label, so `tmux ls` says who is who");
   assert.equal(seen.some((argv) => argv[0] === "split-window"), false, "no column, no split, no resize");
+  assert.ok(seen.some((argv) => argv[0] === "set" && argv.includes(SESSION_PINNED_OPTION)),
+    "a manager's session is PINNED: orchestrator_attach inherits its children, the crash sweep must not");
 });
 
 test("a SECOND child joins the session instead of creating it", async () => {
@@ -286,6 +289,25 @@ test("combination 5 — a relay SUCCESSOR: beside the opener, its own env, no bo
     "and it creates no tmux session — a successor's own children get their own");
   assert.equal(seen.filter((a) => a[0] === "select-pane").length, 0, "no border: a successor is not a child");
   assert.equal(seen.filter((a) => a[0] === "setw").length, 0, "and no window option either");
+});
+
+test("a successor is opened only after the seat's own session is PINNED — and a failed pin refuses the handover", async () => {
+  const spec = { scope: fakeScope(), ownPane: "%1", cwd: "/repo", layout: "beside-opener" as const, role: { kind: "successor" as const, env: {} }, command: ["pi"] };
+  const withSession = (failPin: boolean, seen: string[][]): TmuxRunner => (argv, env, declared) => {
+    if (argv[0] === "list-sessions") { seen.push([...argv]); return { ok: true, stdout: `${OWN_SESSION}\n`, stderr: "" }; }
+    if (argv[0] === "show-options") { seen.push([...argv]); return { ok: true, stdout: `${SESSION_ID}\n`, stderr: "" }; }
+    if (argv[0] === "set" && failPin) { seen.push([...argv]); return { ok: false, stdout: "", stderr: "nope" }; }
+    return happyRunner(seen)(argv, env, declared);
+  };
+  const seen: string[][] = [];
+  assert.equal((await openSessionWindow(withSession(false, seen), spec)).ok, true);
+  const pin = seen.findIndex((a) => a[0] === "set" && a.includes(SESSION_PINNED_OPTION));
+  assert.ok(pin >= 0 && pin < seen.findIndex((a) => a[0] === "split-window"), "pinned BEFORE the successor exists");
+
+  const refusedSeen: string[][] = [];
+  const refused = await openSessionWindow(withSession(true, refusedSeen), spec);
+  assert.equal(refused.ok, false);
+  assert.equal(refusedSeen.some((a) => a[0] === "split-window"), false, "no successor next to an unpinned session");
 });
 
 test("a relay with no opener pane is refused, not guessed", async () => {
