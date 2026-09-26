@@ -31,6 +31,7 @@ import {
   RECENT_USER_HEADING,
   RECENT_USER_MAX_CHARS,
 } from "../lib/session-handoff.ts";
+import { THINKING_LOOP_INJECTION } from "../lib/thinking-loop-controller.ts";
 
 test("the reading prefers pi's percent, and falls back to tokens / window", () => {
   assert.equal(contextPercentFromUsage({ tokens: 700_000, contextWindow: 1_000_000, percent: 68 }), 68);
@@ -192,6 +193,22 @@ test("lastUserMessages: the last n user texts, oldest first; other roles and non
   ];
   assert.deepEqual(lastUserMessages(entries, 3), ["第二条", "第三条\n续", "再加一个任务：修 X"]);
   assert.deepEqual(lastUserMessages([], 3), []);
+});
+
+test("lastUserMessages: the gate's own injections never displace the user's words (measured 2026-09-26)", () => {
+  const entries = [
+    userMsg("用户甲"),
+    userMsg("[REVIEW_GATE_RESUME] The task is not finished yet:\n- loop goal not confirmed"),
+    userMsg("用户乙"),
+    userMsg([{ type: "text", text: "[REVIEW_GATE_REPORT] reviewer（x）本轮已有 channel report" }]),
+    userMsg("[ORCHESTRATION_RESUME] 编排还没结束"),
+    userMsg("用户丙"),
+    userMsg("[ORCHESTRATION] 子会话需要你："),
+    userMsg(THINKING_LOOP_INJECTION),
+  ];
+  assert.deepEqual(lastUserMessages(entries, 3), ["用户甲", "用户乙", "用户丙"]);
+  assert.deepEqual(lastUserMessages([userMsg("[bug] 用户自己写的标签")], 3), ["[bug] 用户自己写的标签"],
+    "only the gate's own tag families are skipped");
 });
 
 test("lastUserMessages: exactly the limit is kept whole, one more is cut and says so", () => {
