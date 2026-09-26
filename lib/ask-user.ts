@@ -519,7 +519,7 @@ export function resolveQuestion(
  *
  * It lives here, away from the dialogs, so every branch is drivable from a
  * test with three lines and no terminal — the interview's loop in
- * lib/user-interaction-tools.ts only carries the branches out.
+ * lib/ask-user-interview.ts only carries the branches out.
  */
 export interface InterviewCursor {
   /** The question the interview is blocked on — where an answer ends the wait. */
