@@ -67,7 +67,7 @@ export function addressJudge(
   }
   // Gate-self path (2026-09-08): ONLY when the direct caller passes
   // `gateSelf === true` as a FUNCTION ARGUMENT — i.e. the gate's own audit
-  // chains (`selfAuditWait` / `auditRunDeps.closeJudge`), which hold the
+  // chains (`selfAuditWait`), which hold the
   // judgeId from their own dispatch. It is keyed on the CALLER, never on the
   // parameter bag: `params` comes from the agent verbatim (unknown keys are
   // stripped nowhere), so a marker living in it would be settable by

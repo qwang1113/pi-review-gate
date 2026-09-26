@@ -5170,7 +5170,7 @@ test("BOTH audit paths run one engine, and that engine closes NO pane (2026-09-2
   // lived 26 seconds was never seen — and `declare_done`'s cascade reclaims
   // every owned judge (it never refuses on one, so O-6's original deadlock
   // cannot come back). Pinned here: no close seam exists in the engine.
-  for (const seam of ["closeJudge", "reclaimJudgePane", "JUDGE_PANE_RECLAIM", "judge-pane-policy", "} finally {"]) {
+  for (const seam of ["closeJudge", "reclaimJudgePane", "JUDGE_PANE_RECLAIM", "judge-pane-policy", "doClose("]) {
     assert.equal(AUDIT_ROUND_SRC.includes(seam), false, `the engine must not carry "${seam}"`);
   }
   assert.equal(AUDIT_HOST_SRC.includes("closeOwnedJudge"), false, "the host wires no round-end close either");
@@ -6156,20 +6156,16 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
 });
 
 /**
- * PANE LIFECYCLE: THE SECOND POLICY IS TOPOLOGY, NOT A BRANCH (t9d, 2026-09-06).
+ * PANE LIFECYCLE: THE ONE RECLAIM POINT IS TOPOLOGY, NOT A BRANCH.
  *
- * `lib/judge-pane-policy.ts` states both answers to "when does a judge pane go
- * away" and is EXECUTED in exactly one place — `runAuditRound`'s reclaim. The
- * other policy ("the agent's review pane lives until declare_done") has no
- * branch to test, because nothing decides it at runtime: the agent cannot call
- * `judge_close` at all, and `declare_done`'s sweep closes everything of this
- * opener without asking who dispatched it.
+ * Since 2026-09-27 a judge window outlives its round, whoever dispatched it,
+ * and `declare_done`'s sweep is the ONE place judge windows are reclaimed. It
+ * decides nothing at runtime: the agent cannot call `judge_close` at all, and
+ * the sweep closes everything of this opener without asking who dispatched it.
  *
  * That is a real invariant and it is what this test pins. A future round that
- * teaches the sweep to consult the policy and skip something would break the
- * guarantee that finishing a task can never strand a pane — and a round that
- * makes it consult the policy and then close everything anyway would add the
- * decorative call site the policy module explicitly argues against.
+ * teaches the sweep to consult a dispatcher or a policy and skip something
+ * would break the guarantee that finishing a task can never strand a pane.
  *
  * THE ONE EXEMPTION (2026-09-22, reviewer P1): the pane of the round the gate
  * is ITSELF waiting on is filtered out of the list — the acceptance round, and
@@ -6180,8 +6176,7 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
  * is untouched, and the reason is mechanical: while a record says AWAITING the
  * decision is `wait` and `declare_done` returns that refusal, so the
  * completion path — the only path the sweep runs on — is UNREACHABLE with an
- * exempted pane. The policy module calls the sweep “the terminus for a pane
- * whose round never concluded”; an in-flight round has a terminus of its own.
+ * exempted pane: an in-flight round has a terminus of its own.
  */
 test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by dispatcher", () => {
   const sweep = windowOf("const ownedJudges = registry.ownJudges()", "progress.step(`联关", "declare_done cascade");
