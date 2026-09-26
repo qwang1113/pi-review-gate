@@ -31,6 +31,7 @@
  */
 
 import { buildRejection } from "./rejection-copy.ts";
+import { THINKING_LOOP_INJECTION } from "./thinking-loop-controller.ts";
 
 /**
  * Context percentage at which a session is told to hand over.
@@ -304,6 +305,22 @@ export const RECENT_USER_COUNT = 3;
 export const RECENT_USER_MAX_CHARS = 2000;
 
 const NO_RECENT_USER = "（没有记录到用户消息）";
+
+/**
+ * The gate's OWN `sendUserMessage` injections land in the transcript as
+ * `role:"user"` with nothing else to tell them apart (measured 2026-09-26: two
+ * `[REVIEW_GATE_RESUME]` continuations pushed a real user message out of the
+ * three). Every continuation the gate writes opens with a tag from one of two
+ * families — `[REVIEW_GATE_<KIND>]` and `[ORCHESTRATION<_KIND>]` — so the
+ * family prefix is the seam; the thinking-loop notice is matched by its own
+ * constant.
+ */
+const GATE_INJECTION_TAG = /^\[(?:REVIEW_GATE_[A-Z_]+|ORCHESTRATION(?:_[A-Z_]+)?)\]/;
+
+function isGateInjection(text: string): boolean {
+  const head = text.trimStart();
+  return GATE_INJECTION_TAG.test(head) || head.startsWith(THINKING_LOOP_INJECTION);
+}
 /** Missing reading ≠ no messages (the direction `handoffDue` takes too). */
 const UNREAD_RECENT_USER = "（门禁读不到会话记录 —— 最后的用户消息去前任 transcript 里看）";
 
@@ -321,7 +338,8 @@ const RECENT_USER_END = "<!-- /rg:recent-user-messages -->";
  *
  * Entries are pi's session entries (`{type:"message", message:{role, content}}`,
  * content a string or a block array). Non-text blocks are skipped; a message
- * with no text at all is not counted. Over `RECENT_USER_MAX_CHARS` characters
+ * with no text at all is not counted, and neither is the gate's own
+ * injection (`isGateInjection`). Over `RECENT_USER_MAX_CHARS` characters
  * the text is cut and says so — the transcript keeps the rest.
  */
 export function lastUserMessages(entries: readonly unknown[], n: number): string[] {
@@ -338,7 +356,7 @@ export function lastUserMessages(entries: readonly unknown[], n: number): string
           .map((b) => b.text)
           .join("\n")
         : "";
-    if (text.trim()) texts.push(text);
+    if (text.trim() && !isGateInjection(text)) texts.push(text);
   }
   return texts.slice(Math.max(0, texts.length - n)).map((text) => {
     const chars = [...text];
