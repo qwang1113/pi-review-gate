@@ -19,13 +19,9 @@ import assert from "node:assert/strict";
 import { existsSync, rmSync } from "node:fs";
 
 import {
-  buildJudgePaneCommand,
-  buildJudgeRecoverCommand,
-  buildSessionEnv,
   closeSessionPane,
   closeSessionWindow,
   decorateSessionPane,
-  judgePaneDecor,
   openSessionWindow,
   paintPaneTitle,
   paneRecoverability,
@@ -42,6 +38,8 @@ import type { TmuxScope, TmuxScopeRecord } from "../lib/session-tmux-scope.ts";
 import { deriveSessionName } from "../lib/session-tmux-scope.ts";
 import { SESSION_PINNED_OPTION } from "../lib/tmux-session-argv.ts";
 import * as sessionFactory from "../lib/session-factory.ts";
+import { buildSessionEnv } from "../lib/session-env.ts";
+import { buildJudgePaneCommand, buildJudgeRecoverCommand, judgePaneDecor } from "../lib/session-launch-specs.ts";
 
 const SESSION_ID = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
 // Derived by the production function, never hardcoded: the test asserts the

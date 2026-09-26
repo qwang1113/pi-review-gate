@@ -623,7 +623,7 @@ test("the registry drops a malformed entry instead of guessing a pane", () => {
 
 test("the registry sanitizes the WINDOW pair by SHAPE, like the orchestration sidecar does", () => {
   // Both halves become a tmux target (`<session>:<@window>`), and this file is
-  // on disk — so they are validated exactly as lib/orchestrator-registry.ts
+  // on disk — so they are validated exactly as lib/orchestrator-registry-normalize.ts
   // validates the same fields on the orchestration side (2026-09-25, quality
   // round P2: the two disk boundaries had two answers to one question).
   const good = {

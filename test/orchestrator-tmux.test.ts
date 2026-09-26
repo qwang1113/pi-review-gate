@@ -328,7 +328,7 @@ test("tmux output is parsed strictly", () => {
 test("a window coordinate read back from disk is BOTH halves or nothing", () => {
   // The pair is what a close is addressed by, so a half-record is not a record:
   // the registries leave both off and the entry reads as "predates the window
-  // topology" (lib/orchestrator-registry.ts / lib/worker-pane.ts both use this
+  // topology" (lib/orchestrator-registry-normalize.ts / lib/worker-pane.ts both use this
   // one parser, so their answers cannot drift apart).
   const good = { windowId: "@7", tmuxSession: SESSION };
   assert.deepEqual(parseWindowCoords(good), good);

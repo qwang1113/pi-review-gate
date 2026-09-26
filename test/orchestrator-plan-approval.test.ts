@@ -32,7 +32,7 @@ import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-
 import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
 import { buildPlanConfirmMessage } from "../lib/orchestrator-plan-messages.ts";
 import { effectiveTaskStation } from "../lib/repo-pr-policy.ts";
-import { normalizeRuntime } from "../lib/orchestrator-registry.ts";
+import { normalizeRuntime } from "../lib/orchestrator-registry-normalize.ts";
 
 
 /** The plan shape the round-4 run actually used: one file per task. */
@@ -594,7 +594,7 @@ test("a NEW user approval resets the lineage — a version they moved away from 
 
 test("without a lineage on record there is nothing to restore — the user is asked", async () => {
   // This is the state a MALFORMED lineage leaves behind: normalizeRuntime
-  // drops the whole list (lib/orchestrator-registry.ts), so a forged record
+  // drops the whole list (lib/orchestrator-registry-normalize.ts), so a forged record
   // buys exactly what an absent one does — a dialog.
   const world = makeFakeWorld({ plan: fileGrainPlan(), approvePlan: true });
   world.deps.saveRuntime({

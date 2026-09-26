@@ -8,7 +8,7 @@
  * facts both sides need are lib/worker-channel.ts.
  */
 import { toolFail as fail, toolReply as reply, type ToolReply } from "./tool-host.ts";
-import { workerPaneDecor } from "./session-factory.ts";
+import { workerPaneDecor } from "./session-launch-specs.ts";
 import { appendRecord, channelPathFor, newChannelId } from "./channel-io.ts";
 import { readChannel } from "./channel-projection.ts";
 import {

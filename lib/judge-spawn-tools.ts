@@ -39,14 +39,8 @@ import {
 import { projectChannel, readChannel } from "./channel-projection.ts";
 import type { ChannelRecord } from "./channel-records.ts";
 import { resolveAnswer } from "./orchestrator-answer-rules.ts";
-import {
-  buildJudgePaneCommand,
-  buildJudgeRecoverCommand,
-  closeSessionWindow,
-  judgePaneDecor,
-  openSessionWindow,
-  paneRecoverability,
-} from "./session-factory.ts";
+import { closeSessionWindow, openSessionWindow, paneRecoverability } from "./session-factory.ts";
+import { buildJudgePaneCommand, buildJudgeRecoverCommand, judgePaneDecor } from "./session-launch-specs.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
 import { judgePaneAlive } from "./judge-pane.ts";
 import type { TmuxRunResult } from "./orchestrator-tmux.ts";

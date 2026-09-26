@@ -17,7 +17,7 @@ import {
   reviewScratchWorktrees,
   REVIEW_SCRATCH_DIRNAME,
 } from "../lib/judge-process.ts";
-import { buildSessionEnv } from "../lib/session-factory.ts";
+import { buildSessionEnv } from "../lib/session-env.ts";
 
 test("the scratch dir is per session, under the OS tmpdir", () => {
   const a = judgeScratchDir("rg-reviewer-abc123");
