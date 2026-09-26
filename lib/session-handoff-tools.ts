@@ -282,7 +282,7 @@ export async function runSessionHandoff(deps: SessionHandoffDeps): Promise<ToolR
     retirement?.committed();
     return reply(
       `review-gate: 接任会话已在 pane ${opened.paneId} 启动（session ${successorId}）。\n` +
-      `- 交接文档：\`${docPath}\`（补充段已写）\n` +
+      `- 交接文档：\`${docPath}\`${doc.pendingFill ? "（补充段仍是占位 —— 本 pane 没有 edit/write，继任者只有机械骨架）" : "（补充段已写）"}\n` +
       `- 继任者拿到的第一条消息已经指向这份文档，它会先读它再动手。\n` +
       "**接下来你进入只读静默**：不要再动手。门禁确认它接手后会自动关掉你这个 pane。",
       { paneId: opened.paneId, successorId, docPath, kind },

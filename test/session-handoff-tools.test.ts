@@ -96,6 +96,7 @@ test("a pane that cannot write (worker) is not refused a blank handover it could
   const { deps, events } = fakeDeps({ canFillDoc: () => false });
   const receipt = await runSessionHandoff(deps);
   assert.equal(receipt.isError, undefined, receipt.content[0]!.text);
+  assert.match(receipt.content[0]!.text, /补充段仍是占位/, "the receipt does not claim a paragraph that is not there");
   assert.deepEqual(events, ["open", "committed"]);
 });
 
