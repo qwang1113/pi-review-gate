@@ -11,10 +11,17 @@
  * timers, the retirement flag they all honour, and the continuation budget.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, MessageEndEvent } from "@earendil-works/pi-coding-agent";
 
 import type { ChannelIO } from "./channel-io.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
+import {
+  freshNoticeEvents,
+  noticeText,
+  NOTICE_KIND,
+  type NoticeEvent,
+  type NoticeFacts,
+} from "./orchestration-notice.ts";
 import {
   decideSupervisionEvents,
   reportedDoneIds,
@@ -40,7 +47,7 @@ import type { SessionHost } from "./session-host.ts";
 
 /** What the runtime clocks need from the session beyond the shared host. */
 export interface OrchestratorRuntimeDeps {
-  pi: Pick<ExtensionAPI, "sendUserMessage" | "sendMessage">;
+  pi: Pick<ExtensionAPI, "sendUserMessage" | "sendMessage" | "on">;
   orchestratorDeps: OrchestratorDeps;
   channelIO: ChannelIO;
   currentOrchestrationId(): string;
@@ -169,21 +176,80 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
    * background timer and `orchestrator_wait` share it and neither re-rings
    * what the other has already reported.
    */
-  function drainSupervisionNews(): string[] {
+  function drainSupervisionNews(): NoticeEvent[] {
     if (host.state().taskMode !== "orchestrator") return [];
     try {
       const runtime = orchestratorDeps.runtime();
       const snapshot = superviseNow(runtime, alivePaneIdsForSupervision());
       if (!snapshot) return [];
       lastSupervisionHealth = formatChildHealth(snapshot.health);
-      const decided: { events: { summary: string }[]; memory: SupervisionMemory } =
-        decideSupervisionEvents(snapshot, orchestratorDeps.supervisionMemory(), Date.now());
+      const decided: { events: NoticeEvent[]; memory: SupervisionMemory } =
+        decideSupervisionEvents(snapshot, orchestratorDeps.supervisionMemory(), orchestratorDeps.now());
       orchestratorDeps.saveSupervisionMemory(decided.memory);
-      return decided.events.map((event) => event.summary);
+      return freshNoticeEvents(decided.events, noticeFacts(snapshot));
     } catch {
       return []; // supervision is a convenience for the timer, never a gate
     }
   }
+
+  /** What a notice is checked against: the open children, their questions, the done tasks. */
+  function noticeFacts(snapshot: SupervisionSnapshot | undefined): NoticeFacts {
+    const tasks = orchestratorDeps.readPlan().plan?.tasks ?? [];
+    return {
+      children: (snapshot?.children ?? []).map((c) => ({ childId: c.child.id, taskId: c.child.taskId, state: c.state })),
+      openRequestIds: new Set((snapshot?.requests ?? []).map((r) => r.requestId)),
+      doneTaskIds: new Set(tasks.filter((t) => t.status === "done").map((t) => t.id)),
+    };
+  }
+
+  /**
+   * A notice was steered in and has not reached the context yet. While it is
+   * in flight no second one is queued — the backlog that fed a stale line per
+   * turn (lib/orchestration-notice.ts). Cleared when it is delivered, and at
+   * `agent_end`, so a notice lost to an abort cannot silence supervision.
+   */
+  let noticeInFlight = false;
+
+  /** One supervision tick: announce the news, unless someone else has it covered. */
+  function superviseTick(): void {
+    if (orchestratorDeps.waitActive() || noticeInFlight) return;
+    const events = drainSupervisionNews();
+    if (events.length === 0) return;
+    noticeInFlight = true;
+    try {
+      pi.sendMessage({
+        customType: "review-gate",
+        content: noticeText(events),
+        display: true,
+        details: { kind: NOTICE_KIND, events },
+      }, { triggerTurn: true, deliverAs: "steer" });
+    } catch {
+      noticeInFlight = false;
+    }
+  }
+
+  /**
+   * THE DELIVERY CHECK: the notice is entering the context now — re-read the
+   * channels and rewrite it to what is still true. Returns the replacement,
+   * or `undefined` when the message is not a notice or nothing went stale.
+   */
+  function reviseDeliveredNotice(message: MessageEndEvent["message"]): { message: MessageEndEvent["message"] } | undefined {
+    if (message.role !== "custom") return undefined;
+    const details = message.details as { kind?: string; events?: NoticeEvent[] } | undefined;
+    if (details?.kind !== NOTICE_KIND) return undefined;
+    noticeInFlight = false;
+    const carried = details.events ?? [];
+    let fresh: NoticeEvent[];
+    try {
+      fresh = freshNoticeEvents(carried, noticeFacts(superviseNow(orchestratorDeps.runtime(), alivePaneIdsForSupervision())));
+    } catch {
+      return undefined; // unreadable ⇒ deliver as written; never block delivery
+    }
+    if (fresh.length === carried.length) return undefined;
+    return { message: { ...message, content: noticeText(fresh), details: { kind: NOTICE_KIND, events: fresh } } };
+  }
+  pi.on("message_end", (event: MessageEndEvent) => reviseDeliveredNotice(event.message));
+  pi.on("agent_end", () => { noticeInFlight = false; });
 
   /**
    * ONE supervision read — the snapshot BOTH the background timer and the
@@ -212,7 +278,8 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
       // moment a host binds one, the timer's 「子会话需要你」 injection and the
       // receipt the manager checks it against would read different directories.
       ...(orchestratorDeps.channelHome() === undefined ? {} : { home: orchestratorDeps.channelHome()! }),
-      at: Date.now(),
+      // The wait's clock too — one supervision, one notion of "now".
+      at: orchestratorDeps.now(),
     });
   }
 
@@ -325,9 +392,10 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
    * batch of tool calls finishes and before the next LLM call, so the manager
    * reads it on its very next turn WITHOUT the gate aborting work in flight
    * (user decision: an aborted minute-long plan audit is a worse trade than a
-   * turn of latency). Dedup is unchanged — the event memory is shared with
-   * `orchestrator_wait`, so neither re-rings what the other already reported,
-   * and the 10s→30s→60s backoff still bounds the repeats.
+   * turn of latency). Dedup: the event memory is shared with
+   * `orchestrator_wait` (which, while it blocks, has the news to itself), the
+   * 10s→30s→60s backoff bounds the repeats, and at most ONE notice is in
+   * flight, rewritten on delivery to what is still true (`superviseTick`).
    */
   function startSupervisionTimer(): void {
     if (supervisionTimer || host.state().taskMode !== "orchestrator") return;
@@ -343,18 +411,7 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
         // NO idle requirement (2026-09-14): busy is exactly when a child's
         // question has to reach the manager. `steer` does not abort the tool
         // calls already running, so the interruption costs a turn at most.
-        const news = drainSupervisionNews();
-        if (news.length === 0) return;
-        pi.sendMessage({
-          customType: "review-gate",
-          content:
-            "[ORCHESTRATION] 子会话需要你：\n" +
-            news.map((n) => `- ${n}`).join("\n") +
-            "\n调 `orchestrator_wait({ timeoutMs: 0 })` 拿完整回执（问题正文与选项都在里面），" +
-            "再用 `orchestrator_answer` 回；别让它就这么等着。" +
-            "\n（这条会打断你手上的事：子会话在等回答，优先级高于你正在做的其他事。）",
-          display: true,
-        }, { triggerTurn: true, deliverAs: "steer" });
+        superviseTick();
       } catch { /* supervision is a convenience, never a gate */ }
     }, SUPERVISION_INTERVAL_MS);
     // Never hold the process open for a supervision timer.
@@ -424,7 +481,7 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
       return;
     }
     const problems = sessionExitProblems();
-    const news = drainSupervisionNews();
+    const news = drainSupervisionNews().map((event) => event.summary);
     if (problems.length === 0 && news.length === 0) return;
     const maxRounds = host.state().maxRounds;
     if (orchestratorContinuations >= maxRounds) return;
@@ -475,6 +532,8 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     startRevivalTimer,
     stopRevivalTimer,
     stopSupervisionTimer,
+    /** One background-supervision tick, exposed so a test drives it without the 10s clock. */
+    superviseTick,
     startSessionNamingHeartbeat,
     stopSessionNamingHeartbeat,
     /** Has this session handed its work to a successor? */

@@ -506,6 +506,7 @@ async function doAnswer(
   const matched = resolveAnswer(
     {
       childId: entry.judgeId,
+      taskId: entry.judgeId,
       requestId: first.requestId,
       dialogKind: first.dialogKind,
       topic: first.topic,

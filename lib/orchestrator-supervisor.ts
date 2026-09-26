@@ -68,6 +68,7 @@ import {
 import { paneColorFor } from "./orchestrator-pane-decor.ts";
 
 import type { ChildSession } from "./orchestrator-registry.ts";
+import { childLabel, describePendingRequest, requestLabel } from "./orchestration-notice.ts";
 import { isPaneId } from "./orchestrator-tmux.ts";
 
 /** What survived a child that died — the reason a death is not a disaster. */
@@ -85,6 +86,8 @@ export interface ChildAssets {
 /** One question, exactly as the child asked it. No screen was involved. */
 export interface PendingRequest {
   childId: string;
+  /** The plan task of that child — what a manager recognises it by. */
+  taskId: string;
   requestId: string;
   dialogKind: ChannelRequestRecord["dialogKind"];
   /** Which gate dialog this is; `goal-approval` triggers constraint 8. */
@@ -236,6 +239,7 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
 
       requests.push({
         childId: child.id,
+        taskId: child.taskId,
         requestId: open.requestId,
         dialogKind: open.dialogKind,
         ...(open.topic === undefined ? {} : { topic: open.topic }),
@@ -383,7 +387,7 @@ export function decideSupervisionEvents(
       events.push({
         childId: id,
         state,
-        summary: describeEvent(id, state, request),
+        summary: describeEvent(supervision.child, state, request),
         ...(request === undefined ? {} : { requestId: request.requestId }),
       });
       next[id] = { lastState: state, reportedAt: at, reports: reports + 1 };
@@ -400,11 +404,9 @@ export function decideSupervisionEvents(
 }
 
 /** The one line an event prints. */
-function describeEvent(childId: string, state: ChildState, request?: PendingRequest): string {
-  if (state === "waiting-input" && request) {
-    return `${childId} 在等回答：「${request.title}」（${request.options.length} 个选项，requestId=${request.requestId}）`;
-  }
-  return `${childId}：${describeChildState(state)}`;
+function describeEvent(child: ChildSession, state: ChildState, request?: PendingRequest): string {
+  if (state === "waiting-input" && request) return describePendingRequest(request);
+  return `${childLabel(child.taskId, child.id)}：${describeChildState(state)}`;
 }
 
 /** Render blocks 1–3 of the receipt. Block 4 is the handoff advice. */
@@ -412,7 +414,8 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
   const sections: string[] = [];
 
   sections.push("### 1. 子会话健康快照");
-  sections.push(formatHealthLines(snapshot.health));
+  const taskOf = new Map(snapshot.children.map((c) => [c.child.id, c.child.taskId]));
+  sections.push(formatHealthLines(snapshot.health, taskOf));
 
   sections.push("", "### 2. 待答请求");
   if (snapshot.requests.length === 0) {
@@ -420,7 +423,7 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
   } else {
     for (const request of snapshot.requests) {
       sections.push(
-        `- **${request.childId}** · requestId=\`${request.requestId}\` · ${request.dialogKind} · ${request.askedAt}` +
+        `- **${requestLabel(request.taskId, request.topic)}** · childId=\`${request.childId}\` · requestId=\`${request.requestId}\` · ${request.dialogKind} · ${request.askedAt}` +
           // The interview marker rides on the SAME line as the id, so the
           // manager sees "this is one of five" exactly where it decides what
           // to answer — and sees nothing extra for an ordinary lone question.
@@ -456,7 +459,7 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
     sections.push("（没有 dead / stalled 的子会话）");
   } else {
     for (const troubled of snapshot.troubled) {
-      sections.push(`- **${troubled.child.id}**（任务 ${troubled.child.taskId}）：${describeChildState(troubled.state)}`);
+      sections.push(`- **${childLabel(troubled.child.taskId, troubled.child.id)}**：${describeChildState(troubled.state)}`);
       sections.push(`  未丢失的资产：${formatAssets(troubled.assets)}`);
       sections.push(`  可执行动作：${recoveryAdvice(troubled)}`);
     }
@@ -507,7 +510,7 @@ function recoveryAdvice(troubled: ChildSupervision): string {
   );
 }
 
-function formatHealthLines(health: readonly ChildHealth[]): string {
+function formatHealthLines(health: readonly ChildHealth[], taskOf: ReadonlyMap<string, string>): string {
   if (health.length === 0) return "（本编排目前没有存活的子会话）";
   return health
     .map((h) => {
@@ -526,7 +529,7 @@ function formatHealthLines(health: readonly ChildHealth[]): string {
       // The colour is the same pure function the pane border uses, so the row
       // a supervisor reads and the rectangle a human sees are the same child.
       const color = paneColorFor(h.childId).name;
-      return `- [${color}] ${h.childId}：${described}${quiet}${dialog}${ctx}`;
+      return `- [${color}] ${childLabel(taskOf.get(h.childId) ?? h.childId, h.childId)}：${described}${quiet}${dialog}${ctx}`;
     })
     .join("\n");
 }

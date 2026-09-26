@@ -5795,9 +5795,12 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   // never heard about a child asking a question, so the child waited for an
   // `orchestrator_wait` that might come much later.
   assert.doesNotMatch(start, /isIdle/, "no idle pre-condition may come back");
-  assert.match(start, /deliverAs: "steer"/,
+  assert.match(start, /superviseTick\(\)/, "the timer only drives the one tick");
+  const tick = windowIn(RUNTIME_SRC, "function superviseTick(", "\n  }", "superviseTick");
+  assert.doesNotMatch(tick, /isIdle/, "no idle pre-condition may come back");
+  assert.match(tick, /deliverAs: "steer"/,
     "…and the delivery cuts into the next turn WITHOUT aborting work in flight");
-  assert.match(start, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");
+  assert.match(tick, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");
   // What it reads is the CHANNELS — no pane is captured anywhere in the loop.
   const drain = windowIn(RUNTIME_SRC, "function drainSupervisionNews(", "\n  }", "drainSupervisionNews");
   assert.match(drain, /superviseNow\(/, "the read is the ONE supervision read (B4)");
