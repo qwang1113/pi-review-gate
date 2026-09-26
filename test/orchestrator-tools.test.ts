@@ -1546,12 +1546,31 @@ test("orchestrator_close on a child that has NOT finished is an ABORT: its windo
   assert.ok(world.runtime().children[0]!.closedAt);
 });
 
-test("closeKeepsWindow: only a child that reported done or idle keeps its window", () => {
+test("closeKeepsWindow: only a child CLASSIFIED done or idle keeps its window", () => {
   assert.equal(closeKeepsWindow("done"), true);
   assert.equal(closeKeepsWindow("idle"), true);
-  for (const state of ["working", "waiting-input", "waiting-judge", "mode-changed", undefined]) {
-    assert.equal(closeKeepsWindow(state), false, String(state));
+  for (const state of ["working", "waiting-input", "waiting-judge", "mode-changed", "stalled", "dead"] as const) {
+    assert.equal(closeKeepsWindow(state), false, state);
   }
+});
+
+test("a raw `done` from a PREVIOUS assignment does not keep a re-tasked child alive (reviewer P1)", async () => {
+  // The close reads the supervisor's classification, not the last raw report:
+  // a `done` older than `lastAssignedAt` belongs to the previous task, so the
+  // re-tasked child is still working and closing it is an abort.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  world.childReports(childId, "done");
+  const spawned = world.runtime().children[0]!;
+  world.saveRuntime({
+    ...world.runtime(),
+    children: [{ ...spawned, lastAssignedAt: new Date(Date.parse("2999-01-01T00:00:00Z")).toISOString() }],
+  });
+
+  const reply = await world.call("orchestrator_close", { childId });
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.equal(world.panes.get(spawned.paneId)!.alive, false, "a stale done is not a finish");
+  assert.match(replyText(reply), /关闭即中止/);
 });
 
 // THE HANDOVER TESTS THAT USED TO LIVE HERE went with the tool they tested

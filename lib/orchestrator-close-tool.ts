@@ -27,18 +27,23 @@ import {
   repoRootOfWorktree,
   type WorktreeSettlement,
 } from "./orchestrator-worktree.ts";
-import { childChannelProjection, currentPlan } from "./orchestrator-tool-kit.ts";
+import { alivePanes, currentPlan } from "./orchestrator-tool-kit.ts";
+import { superviseChildren } from "./orchestrator-supervisor.ts";
+import type { ChildState } from "./orchestrator-child-state.ts";
 import { closeSessionWindow, windowAlreadyGone } from "./session-factory.ts";
 
 /**
  * Does closing this child SETTLE it (keep the window) or ABORT it (kill it)?
  *
- * Only a child whose own last report says it stopped — `done` or `idle` — is
- * finished. Anything else (working, waiting on a question or a judge, no
- * report at all) may still be writing, so the close stops it.
+ * It takes the SUPERVISOR's classified state, never the raw last report: a
+ * raw `done` can belong to a previous assignment and a raw `idle` can be a
+ * session between two tool calls — `classifyChildState` already refuses to
+ * believe either, and a second, laxer reading here would keep a running
+ * writer alive and unsupervised. Only `done` / `idle` as classified are
+ * finished; everything else may still be writing, so the close stops it.
  */
-export function closeKeepsWindow(lastReportedState: string | undefined): boolean {
-  return lastReportedState === "done" || lastReportedState === "idle";
+export function closeKeepsWindow(state: ChildState): boolean {
+  return state === "done" || state === "idle";
 }
 import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
@@ -135,7 +140,17 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
   // `<tmuxSession>:<windowId>` from the record so a stale id can only reach a
   // window of the gate's own session. A row with no coordinates (older build)
   // is never killed by a guess.
-  const keep = closeKeepsWindow(childChannelProjection(deps, child.id).lastState?.state);
+  const panes = alivePanes(deps);
+  const home = deps.channelHome();
+  const supervised = superviseChildren({
+    orchestrationId: deps.runtime().orchestrationId,
+    children: [child],
+    livePanes: panes.ok ? new Set(panes.panes) : undefined,
+    io: deps.channelIO(),
+    ...(home === undefined ? {} : { home }),
+    at: deps.now(),
+  }).children[0];
+  const keep = supervised !== undefined && closeKeepsWindow(supervised.state);
   let windowNote: string;
   if (keep) {
     windowNote = `它的 window ${child.windowId ?? "（无记录）"} 保留在屏幕上，由你的 declare_done 统一回收`;
