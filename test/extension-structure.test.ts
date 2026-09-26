@@ -2971,9 +2971,9 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   const spawn = DISPATCH_SRC.slice(spawnAt, spawnAt + 19000);
   assert.match(spawn, /kind: "judge",\s*\n\s*openerId: opener,/, "the pane is told who opened it");
   assert.match(
-    readFileSync(new URL("../lib/session-factory.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("../lib/session-env.ts", import.meta.url), "utf8"),
     /\[JUDGE_OPENER_ENV\]: role\.openerId/,
-    "…and the factory is what writes it into the pane's environment",
+    "…and the session env module is what writes it into the pane's environment",
   );
 });
 
