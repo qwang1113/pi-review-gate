@@ -1909,6 +1909,12 @@ test("startup self-heal reports the roles it merged, from the same handler that 
   // The refusal (heal failures included, asserted in
   // test/agents-startup-copy.test.ts) renders from the check's own result.
   assert.match(handler, /return formatAgentsStartupRefusal\(result\);/, "the refusal is rendered from the check result");
+  // The project file it names is the one the layer was LOADED from — the repo
+  // root (session-lifecycle: loadProjectConfig(primaryRepoRoot)), never cwd:
+  // a session started in a subdirectory would be sent to a file nobody reads.
+  assert.match(handler, /projectConfigPath: projectConfigPath\(cells\.primaryRepoRoot\)/, "the project path is the loaded root's");
+  assert.doesNotMatch(handler, /projectConfigPath\(cells\.cwd\)/);
+  assert.match(SRC, /cells\.projectConfig = loadProjectConfig\(primaryRepoRoot\)/, "…and the loader reads the same root");
   // …and the session's own snapshot follows the file, or every downstream
   // reader keeps the pre-heal state while the check reports a pass.
   assert.match(handler, /cells\.projectConfig = \{ \.\.\.cells\.projectConfig, agentsGlobal: agentsSection \}/,
