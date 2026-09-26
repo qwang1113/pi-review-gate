@@ -32,6 +32,7 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import { parseHierarchySnapshot, type JudgeEntry } from "./hierarchy.ts";
 import type { PendingAudit } from "./audit-round-specs.ts";
 import type { ModelHealth } from "./model-health.ts";
+import { pidAlive as defaultPidAlive } from "./session-registry.ts";
 
 /** One repo's slice of the registry — what the file holds. */
 export interface HierarchySlice {
@@ -93,13 +94,6 @@ export interface LockOptions {
 
 const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_POLL_MS = 20;
-
-function defaultPidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch (error) {
-    // EPERM means the process exists but belongs to someone else — alive.
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
