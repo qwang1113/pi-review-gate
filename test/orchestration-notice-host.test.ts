@@ -93,7 +93,7 @@ async function realHost() {
         label: "block",
         description: "blocks until the test releases it",
         parameters: Type.Object({}),
-        execute: () => new Promise((resolve) => {
+        execute: () => new Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown }>((resolve) => {
           release = () => resolve({ content: [{ type: "text", text: "released" }], details: {} });
           blocked();
         }),
