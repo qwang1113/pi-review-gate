@@ -30,6 +30,7 @@ import {
 import { alivePanes, currentPlan } from "./orchestrator-tool-kit.ts";
 import { superviseChildren } from "./orchestrator-supervisor.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
+import type { ChannelProjection } from "./channel-projection.ts";
 import { closeSessionWindow, windowAlreadyGone } from "./session-factory.ts";
 
 /**
@@ -41,9 +42,23 @@ import { closeSessionWindow, windowAlreadyGone } from "./session-factory.ts";
  * believe either, and a second, laxer reading here would keep a running
  * writer alive and unsupervised. Only `done` / `idle` as classified are
  * finished; everything else may still be writing, so the close stops it.
+ *
+ * AN `idle` IS BOUNDED BY THE ASSIGNMENT TOO (2026-09-27, reviewer P1): the
+ * classifier bounds `done` by `lastAssignedAt` but not `idle`, so a child
+ * re-tasked a moment ago still reads `idle` from its previous run — and the
+ * instruct it has not picked up yet would start an unsupervised writer. A
+ * finished run must START at or after the latest assignment (`lastStateSince`,
+ * the same reading `completionReported` uses), and no instruct may be pending.
  */
-export function closeKeepsWindow(state: ChildState): boolean {
-  return state === "done" || state === "idle";
+export function closeKeepsWindow(
+  s: { state: ChildState; projection: ChannelProjection; lastAssignedAt?: string },
+): boolean {
+  if (s.state !== "done" && s.state !== "idle") return false;
+  if (s.projection.pendingInstructs.length > 0) return false;
+  const assigned = Date.parse(s.lastAssignedAt ?? "");
+  if (!Number.isFinite(assigned)) return true;
+  const since = Date.parse(s.projection.lastStateSince ?? s.projection.lastState?.at ?? "");
+  return !Number.isFinite(since) || since >= assigned;
 }
 import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
@@ -150,7 +165,11 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
     ...(home === undefined ? {} : { home }),
     at: deps.now(),
   }).children[0];
-  const keep = supervised !== undefined && closeKeepsWindow(supervised.state);
+  const keep = supervised !== undefined && closeKeepsWindow({
+    state: supervised.state,
+    projection: supervised.projection,
+    ...(child.lastAssignedAt === undefined ? {} : { lastAssignedAt: child.lastAssignedAt }),
+  });
   let windowNote: string;
   if (keep) {
     windowNote = `它的 window ${child.windowId ?? "（无记录）"} 保留在屏幕上，由你的 declare_done 统一回收`;

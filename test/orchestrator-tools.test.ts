@@ -1547,11 +1547,23 @@ test("orchestrator_close on a child that has NOT finished is an ABORT: its windo
 });
 
 test("closeKeepsWindow: only a child CLASSIFIED done or idle keeps its window", () => {
-  assert.equal(closeKeepsWindow("done"), true);
-  assert.equal(closeKeepsWindow("idle"), true);
+  const projection = { openRequests: [], pendingAnswers: [], pendingInstructs: [], modelEvents: [] };
+  assert.equal(closeKeepsWindow({ state: "done", projection }), true);
+  assert.equal(closeKeepsWindow({ state: "idle", projection }), true);
   for (const state of ["working", "waiting-input", "waiting-judge", "mode-changed", "stalled", "dead"] as const) {
-    assert.equal(closeKeepsWindow(state), false, state);
+    assert.equal(closeKeepsWindow({ state, projection }), false, state);
   }
+});
+
+test("closeKeepsWindow: an idle run that began BEFORE the latest assignment, or a pending instruct, is not a finish (reviewer P1)", () => {
+  const base = { openRequests: [], pendingAnswers: [], pendingInstructs: [], modelEvents: [] };
+  const idleSince = { ...base, lastStateSince: "2026-09-27T10:00:00.000Z" };
+  assert.equal(closeKeepsWindow({ state: "idle", projection: idleSince, lastAssignedAt: "2026-09-27T10:05:00.000Z" }), false,
+    "re-tasked after it went idle: the new instruct is still to come");
+  assert.equal(closeKeepsWindow({ state: "idle", projection: idleSince, lastAssignedAt: "2026-09-27T09:55:00.000Z" }), true,
+    "idle since after the assignment: finished");
+  const pending = { ...base, pendingInstructs: [{ kind: "instruct", from: "orchestrator", at: "x", instructId: "i1", mode: "steer", text: "go" }] } as never;
+  assert.equal(closeKeepsWindow({ state: "idle", projection: pending }), false, "an undelivered instruct would start a writer");
 });
 
 test("a raw `done` from a PREVIOUS assignment does not keep a re-tasked child alive (reviewer P1)", async () => {
