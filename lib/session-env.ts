@@ -63,13 +63,12 @@ export type SessionPaneRole =
       /**
        * Whether this child may run the REAL-ACCEPTANCE round (2026-09-22).
        *
-       * `"on"` for the plan's LAST task — the independent acceptance task
-       * (`acceptanceTaskId`) — and `"off"` for every other child of an
-       * orchestration, whose completion must not spend a top-tier judge on an
-       * acceptance nobody asked for. Absent for a standalone session, which
-       * reads absence as ON (lib/acceptance-round.ts `acceptanceGateOpen`).
+       * `acceptanceGateValue`'s answer for the task (lib/acceptance-round.ts):
+       * `"on"`, or `"off:<ids>"` when the plan switched this task's acceptance
+       * off and names who accepts for it. Absent for a standalone session,
+       * which reads absence as ON (`acceptanceGateOpen`).
        */
-      acceptanceGate?: "on" | "off";
+      acceptanceGate?: string;
     }
   | {
       kind: "worker";

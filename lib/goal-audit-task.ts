@@ -9,6 +9,7 @@
 
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
+import { acceptanceHandoverPhrase } from "./acceptance-round.ts";
 import type { GoalPrereviewRecord } from "./loop-goal.ts";
 
 /**
@@ -89,6 +90,13 @@ export function buildGoalAuditTask(
     prevDraft?: string;
     sessionDir?: string;
     sessionId?: string;
+    /**
+     * Set when the plan switched this session's acceptance OFF (2026-09-27):
+     * the tasks that accept for it. The acceptance-plan rule is then replaced,
+     * because demanding a plan the gate will never run is how an approved plan
+     * ended up silently skipped.
+     */
+    acceptanceDelegatedTo?: readonly string[];
   } = {},
 ): string {
   // ORDER MATTERS (round 5, 2026-09-05). Everything the GATE wrote comes
@@ -103,9 +111,13 @@ export function buildGoalAuditTask(
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
     "审计标准: 退出标准是否可检查(falsifiable)、是否覆盖用户核心诉求、Non-goals 是否明确、有无内部矛盾或与仓库现状冲突的表述。",
-    "真实验收方案(P1): 草稿必须写明「真实验收方案」（正向真实调用 / 反向验证 / 环境前提），" +
-      "或者写明「本轮无真实验收（理由）」并给出理由；缺这一段、方案不可执行（没有真实的调用与观察，只写「跑测试」之类的话），" +
-      "或声明无验收却不给理由是 P1。",
+    opts.acceptanceDelegatedTo
+      ? `真实验收方案: 本会话的验收环节已被 plan 关闭（门禁注入，验收${acceptanceHandoverPhrase(opts.acceptanceDelegatedTo)}）—— ` +
+        "不要求「真实验收方案」，缺这一段或只写「本轮无真实验收（验收移交 …）」都不是 finding；" +
+        "草稿若写了验收方案，给一条 P2 提醒它不会被执行。"
+      : "真实验收方案(P1): 草稿必须写明「真实验收方案」（正向真实调用 / 反向验证 / 环境前提），" +
+        "或者写明「本轮无真实验收（理由）」并给出理由；缺这一段、方案不可执行（没有真实的调用与观察，只写「跑测试」之类的话），" +
+        "或声明无验收却不给理由是 P1。",
     "最小化检查(引用 `docs/coding-standards.md` Section 5——实质条文只在那里，不在此复述): 用户没要的工作(顺手重构、推测性开关、凑数的验收标准)是 P1；真正需要的多条标准不算多——最小指必要，不指条数少。",
     ...(opts.sessionDir && opts.sessionId
       ? [

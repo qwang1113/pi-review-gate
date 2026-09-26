@@ -271,6 +271,8 @@ test("handoffExtraEnvFor: the successor keeps the mode, the address and its own 
   // plan never gave it.
   assert.equal(handoffExtraEnvFor({ kind: "child", acceptanceGate: "off" })[ACCEPTANCE_GATE_ENV], "off");
   assert.equal(handoffExtraEnvFor({ kind: "child", acceptanceGate: "on" })[ACCEPTANCE_GATE_ENV], "on");
+  assert.equal(handoffExtraEnvFor({ kind: "child", acceptanceGate: "off:a1,a2" })[ACCEPTANCE_GATE_ENV], "off:a1,a2",
+    "the handover names travel verbatim — a successor still knows who accepts for it (2026-09-27)");
   assert.ok(!(ACCEPTANCE_GATE_ENV in handoffExtraEnvFor({ kind: "child" })),
     "a standalone session passes none on");
   assert.ok(!(ACCEPTANCE_GATE_ENV in handoffExtraEnvFor({ kind: "child", acceptanceGate: "   " })),

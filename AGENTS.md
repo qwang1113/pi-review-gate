@@ -695,10 +695,20 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    扩权、必须重新问用户，而移除只是收紧。站点上界随 spawn 走环境变量
    `RG_STATION_CAP` 注入子会话（那是提示词写不进去的通道），子会话 goal 协商的站点
    展示与记录都不超过它；**`orchestrator_recover` 重开 pane 与 `session_handoff`
-   接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。验收 gate 走同一条
-   注入通道：`RG_ACCEPTANCE_GATE` 只对 plan 的最后一个任务写 `on`，其余编排子会话
-   一律 `off`，而「谁验收」由 `acceptanceTaskId` 一个判定回答。规则只有一处实现：
-   `lib/repo-pr-policy.ts`（`acceptanceTaskId` / `effectiveTaskStation`）。
+   接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。站点规则只有一处实现：
+   `lib/repo-pr-policy.ts`（`deliveryTaskId` / `effectiveTaskStation`）。
+2c. **验收是每个任务自己的开关，不看位置**（2026-09-27，用户决定）：plan 任务可带
+   `stages: { acceptance: false }`（复用 `lib/loop-stages.ts` 的五环节词表，但只开放
+   `acceptance`；缺省全开）。建议实现与验收分开 —— 实现任务、收尾任务关掉验收，验收放在
+   实现都完成后的专门任务里，粒度由项目经理定。**关掉验收的任务必须被某个开着验收的任务
+   （传递）`dependsOn`**，否则 `parsePlan` 直接拒绝（因此「全部关闭」不可能）。`stages`
+   进 canonical plan 文本（只在关闭时出现，存量 plan 的 hash 不变）；关闭 = 扩权（重批），
+   重新打开 = 收紧（平移）。开关经 `RG_ACCEPTANCE_GATE` 注入子会话（spawn / recover /
+   handoff 同一个值）：开着写 `on`，关了写 `off:<接手任务 id>`；这样的子会话每轮提示写明
+   「本任务不验收，由 X 统一验收」，goal 审计不再要求「真实验收方案」，`declare_done` 回执
+   写明验收移交给谁 —— 不再有「批准过的验收方案被静默跳过」。Copilot 周期与此无关：谁真正
+   push / 开了 PR，谁就跑。判定只有一处：`lib/acceptance-round.ts`（`acceptanceGateValue` /
+   `acceptanceDelegatesOf`）。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
    本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的

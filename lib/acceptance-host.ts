@@ -13,6 +13,7 @@ import { join as pathJoin } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   acceptanceDecision,
+  acceptanceDelegates,
   acceptanceGateOpen,
   acceptanceProblems,
   buildAcceptanceTask,
@@ -288,6 +289,7 @@ export function createAcceptanceHost(
       // USER's stage switch. The internal semantics — DISABLED, the record, the
       // re-dispatch rules — stay lib/acceptance-round.ts's, unchanged.
       gateOpen: acceptanceGateOpen(process.env) && stageIsOn("acceptance", root),
+      delegatedTo: acceptanceDelegates(process.env),
       ...(declared === undefined ? {} : { goalSkipsAcceptance: declared.reason }),
       // NO PLAN ⇒ SKIP, never a dispatch with nothing to work from (quality
       // round P2, 2026-09-22): a judge told to work a checklist it does not
@@ -329,7 +331,9 @@ export function createAcceptanceHost(
       // he left ON, a round WITH code, released anyway (no approved plan, the
       // goal's own exemption, or a dispatcher-marked session). The note carries
       // `skippedReason`, the module's word for THIS skip.
-      if (stageIsOn("acceptance", root) && st.hasCodeChange) {
+      // A PLAN HANDOVER IS ALWAYS SAID (2026-09-27): the child has to be able
+      // to read in its own receipt who accepts for it, code or no code.
+      if (stageIsOn("acceptance", root) && (st.hasCodeChange || decision.status === "DISABLED")) {
         notes.push(skippedReason);
         // THE LINE STAYS GENERIC, THE REASON RIDES THE NOTE (reviewer Nit,
         // 2026-09-22): this branch is reached by THREE skips — no plan, the

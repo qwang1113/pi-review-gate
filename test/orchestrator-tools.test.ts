@@ -337,33 +337,31 @@ test("a single-task repo keeps the plan's station — the ceiling is not a blank
   assert.equal(world.panes.get(child.paneId)!.env[STATION_CAP_ENV], "pr");
 });
 
-test("only the plan's LAST task is spawned with the acceptance gate open (2026-09-22)", async () => {
-  // The gate is an ENTITLEMENT the dispatcher writes: every other child gets
-  // `off`, because a completion that spends a top-tier judge on an acceptance
-  // nobody asked for is exactly what the plan never authorized. The last task
-  // gets `on` — decided by lib/repo-pr-policy.ts's `acceptanceTaskId` and
-  // consumed here, never re-derived.
+test("the acceptance gate a child is spawned with is its task's own `stages` (2026-09-27)", async () => {
+  // The gate is an ENTITLEMENT the dispatcher writes from the task's switch —
+  // not from its position — and a switched-off task is told who accepts for it.
   const parsed = parsePlan({
     title: "两任务",
-    intent: "验收 gate 只给 plan 最后一环",
+    intent: "验收 gate 跟任务的 stages 走",
     deliveryStation: "commit",
     tasks: [
-      { id: "t1", title: "A", repo: "/repo" },
+      { id: "t1", title: "A", repo: "/repo", stages: { acceptance: false } },
       { id: "t2", title: "B", repo: "/repo" },
+      { id: "t3", title: "C", repo: "/repo", dependsOn: ["t1"] },
     ],
   });
   assert.ok(parsed.plan, parsed.problems.join("; "));
   const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true, resolvableRepos: ["/repo"], isolateChild: true });
   await spawnT1(world);
   const first = world.runtime().children.find((c) => c.taskId === "t1")!;
-  assert.equal(world.panes.get(first.paneId)!.env[ACCEPTANCE_GATE_ENV], "off",
-    "an ordinary work task must not owe a real-acceptance round");
+  assert.equal(world.panes.get(first.paneId)!.env[ACCEPTANCE_GATE_ENV], "off:t3",
+    "a switched-off task owes no acceptance round, and names who accepts for it");
 
   const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
   assert.equal(second.isError, undefined, replyText(second));
   const acceptance = world.runtime().children.find((c) => c.taskId === "t2")!;
   assert.equal(world.panes.get(acceptance.paneId)!.env[ACCEPTANCE_GATE_ENV], "on",
-    "the last task IS the acceptance task");
+    "t2 is NOT the last task, yet its acceptance is on — the default");
 });
 
 test("the task book states the branch the child is on — a FACT, not an order to branch (A, 2026-09-18)", async () => {
@@ -1139,8 +1137,8 @@ test("a recovered child is handed its station ceiling again (2026-09-15)", async
     intent: "验证恢复后的站点上界",
     deliveryStation: "pr",
     tasks: [
-      { id: "t1", title: "A", repo: "/repo" },
-      { id: "t2", title: "B", repo: "/repo", execution: "parallel" },
+      { id: "t1", title: "A", repo: "/repo", stages: { acceptance: false } },
+      { id: "t2", title: "B", repo: "/repo", execution: "parallel", dependsOn: ["t1"] },
     ],
   });
   assert.ok(parsed.plan, parsed.problems.join("; "));
@@ -1148,8 +1146,8 @@ test("a recovered child is handed its station ceiling again (2026-09-15)", async
   const childId = await spawnT1(world);
   const before = world.runtime().children[0]!;
   assert.equal(world.panes.get(before.paneId)!.env[STATION_CAP_ENV], "commit");
-  assert.equal(world.panes.get(before.paneId)!.env[ACCEPTANCE_GATE_ENV], "off",
-    "t1 is not the plan's last task");
+  assert.equal(world.panes.get(before.paneId)!.env[ACCEPTANCE_GATE_ENV], "off:t2",
+    "t1's plan switched acceptance off and t2 accepts for it");
 
   world.panes.get(before.paneId)!.alive = false;
   const recovered = await world.call("orchestrator_recover", { childId, reason: "机器睡眠" });
@@ -1158,8 +1156,8 @@ test("a recovered child is handed its station ceiling again (2026-09-15)", async
   assert.notEqual(after.paneId, before.paneId);
   assert.equal(world.panes.get(after.paneId)!.env[STATION_CAP_ENV], "commit",
     "a restart must not widen what the child was allowed to ship");
-  assert.equal(world.panes.get(after.paneId)!.env[ACCEPTANCE_GATE_ENV], "off",
-    "nor may it hand an ordinary task the acceptance entitlement");
+  assert.equal(world.panes.get(after.paneId)!.env[ACCEPTANCE_GATE_ENV], "off:t2",
+    "nor may it hand a switched-off task the acceptance entitlement — or lose who accepts for it");
 });
 
 test("the ceiling is counted with the PLAN's repo key, not the resolved checkout (round-1 P2)", async () => {

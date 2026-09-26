@@ -13,6 +13,7 @@ import {
 } from "./orchestrator-plan-approval.ts";
 import { isPlanHash } from "./orchestrator-plan.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
+import { parsePlanTaskStages } from "./loop-stages.ts";
 import { isPaneId, parseWindowCoords } from "./orchestrator-tmux.ts";
 import type { ChildSession, OrchestratorRuntime } from "./orchestrator-registry.ts";
 
@@ -206,7 +207,12 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     // with a repo as one approved without, and the carryover check would
     // misjudge a later repo change as a widening (fail-closed, but wrong).
     const repo = typeof task.repo === "string" && task.repo.length > 0 ? task.repo : undefined;
-    tasks.push({ id, dependsOn, execution, ...(repo ? { repo } : {}) });
+    // The stages are authorizing too (2026-09-27): a round trip that dropped
+    // one would make a switched-off acceptance read as on. Same parser as the
+    // plan's; an unreadable one drops the snapshot, like any other field here.
+    const stages = parsePlanTaskStages(task.stages, id);
+    if (stages.problems.length > 0) return undefined;
+    tasks.push({ id, dependsOn, execution, ...(repo ? { repo } : {}), ...(stages.stages ? { stages: stages.stages } : {}) });
   }
   return {
     hash: snapshotHash,

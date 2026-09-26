@@ -57,6 +57,8 @@ import {
   type DeliveryStation,
 } from "./delivery-station.ts";
 import { allowsMultiplePrs, effectiveTaskStation, taskRepoOf, type RepoPrPlanInput } from "./repo-pr-policy.ts";
+import { taskAcceptanceOn } from "./acceptance-round.ts";
+import type { PlanTaskStages } from "./loop-stages.ts";
 
 /** The authorization-relevant shape of one task, as the user approved it. */
 export interface ApprovedTaskSnapshot {
@@ -64,6 +66,13 @@ export interface ApprovedTaskSnapshot {
   dependsOn: string[];
   execution: TaskExecution;
   repo?: string;
+  /**
+   * The stages the task switched off (2026-09-27). A snapshot without it reads
+   * as all ON — the stricter side, so switching one off afterwards can only
+   * ever look like the widening it is. Also what a recovered child's
+   * acceptance flag is recomputed from.
+   */
+  stages?: PlanTaskStages;
 }
 
 /**
@@ -121,6 +130,7 @@ export function snapshotApprovedPlan(
       dependsOn: [...task.dependsOn],
       execution: task.execution,
       ...(task.repo ? { repo: task.repo } : {}),
+      ...(task.stages ? { stages: { ...task.stages } } : {}),
     })),
   };
 }
@@ -244,6 +254,15 @@ export function decideApprovalCarry(
     // another must be re-approved).
     if ((before.repo ?? undefined) !== (task.repo ?? undefined)) {
       widenings.push(`任务 "${task.id}" 的工作 repo 从 ${before.repo ?? "(主 repo)"} 改为 ${task.repo ?? "(主 repo)"}`);
+    }
+
+    // SWITCHING A STAGE OFF IS LESS SUPERVISION (2026-09-27): the user signed
+    // that this task's work gets accepted by it, so moving that elsewhere asks
+    // them again; switching it back on only adds a check.
+    if (taskAcceptanceOn(before) && !taskAcceptanceOn(task)) {
+      widenings.push(`任务 "${task.id}" 关闭了验收环节（少了一道检查）`);
+    } else if (!taskAcceptanceOn(before) && taskAcceptanceOn(task)) {
+      amendments.push(`任务 "${task.id}" 重新打开了验收环节`);
     }
 
     // HOW FAR A TASK MAY SHIP IS AUTHORITY TOO, AND THE PLAN'S LAST TASK HAS

@@ -27,8 +27,12 @@ import {
   ACCEPTANCE_GATE_ENV,
   ACCEPTANCE_PLAN_HEADING,
   acceptanceDecision,
+  acceptanceDelegates,
+  acceptanceDelegatesOf,
   acceptanceGateOpen,
   acceptanceGateValue,
+  buildAcceptanceDelegatedDirective,
+  taskAcceptanceOn,
   acceptanceProblems,
   acceptanceStatusLine,
   buildAcceptanceTask,
@@ -62,17 +66,41 @@ test("the gate is OPEN unless the dispatcher wrote exactly 'off'", () => {
   assert.equal(acceptanceGateOpen({ [ACCEPTANCE_GATE_ENV]: "on" }), true);
   assert.equal(acceptanceGateOpen({ [ACCEPTANCE_GATE_ENV]: "ON" }), true);
   assert.equal(acceptanceGateOpen({ [ACCEPTANCE_GATE_ENV]: " off " }), false);
+  assert.equal(acceptanceGateOpen({ [ACCEPTANCE_GATE_ENV]: "off:a1,a2" }), false, "the handover form is off too");
+  assert.deepEqual(acceptanceDelegates({ [ACCEPTANCE_GATE_ENV]: "off:a1, a2" }), ["a1", "a2"]);
+  assert.deepEqual(acceptanceDelegates({ [ACCEPTANCE_GATE_ENV]: "off" }), [], "bare off (an older child) names nobody");
+  assert.deepEqual(acceptanceDelegates({ [ACCEPTANCE_GATE_ENV]: "on" }), [], "an open gate delegates nothing");
 });
 
-test("only the plan's LAST task is handed the acceptance gate", () => {
-  const plan = {
-    deliveryStation: "pr" as const,
-    tasks: [{ id: "t1" }, { id: "t2" }, { id: "t3" }],
-  };
-  assert.equal(acceptanceGateValue(plan, "t3"), "on", "the acceptance task is a POSITION");
-  assert.equal(acceptanceGateValue(plan, "t1"), "off");
-  assert.equal(acceptanceGateValue(plan, "t2"), "off");
-  assert.equal(acceptanceGateValue({ deliveryStation: "pr", tasks: [] }, "t1"), "off", "no plan: nobody accepts");
+test("the gate value is the task's own `stages`, not its position (2026-09-27)", () => {
+  const tasks = [
+    { id: "f1", dependsOn: [], stages: { acceptance: false as const } },
+    { id: "f2", dependsOn: [], stages: { acceptance: false as const } },
+    { id: "w1", dependsOn: ["f1", "f2"], stages: { acceptance: false as const } },
+    { id: "a1", dependsOn: ["w1"] },
+    { id: "a2", dependsOn: ["f2"] },
+    { id: "last", dependsOn: [] },
+  ];
+  assert.equal(acceptanceGateValue(tasks, "a1"), "on");
+  assert.equal(acceptanceGateValue(tasks, "last"), "on", "no stages ⇒ on, wherever it sits");
+  assert.equal(acceptanceGateValue(tasks, "f1"), "off:a1", "a TRANSITIVE dependent accepts for it");
+  assert.equal(acceptanceGateValue(tasks, "f2"), "off:a1,a2", "every accepting dependent is named");
+  assert.equal(acceptanceGateValue(tasks, "w1"), "off:a1");
+  assert.equal(acceptanceGateValue(tasks, "ghost"), "off", "a task the plan does not know: fail-closed");
+  assert.deepEqual(acceptanceDelegatesOf(tasks, "last"), [], "nobody depends on it");
+  assert.equal(taskAcceptanceOn({}), true);
+  assert.equal(taskAcceptanceOn({ stages: { acceptance: false } }), false);
+});
+
+test("a switched-off child is told who accepts — in its prompt and in its declare_done receipt", () => {
+  const directive = buildAcceptanceDelegatedDirective(["a1"]);
+  assert.match(directive, /本任务不做真实验收，由 a1 统一验收/);
+  assert.match(directive, /本轮无真实验收（验收移交 a1）/);
+  assert.match(directive, /不要写验收方案/);
+  const disabled = acceptanceDecision({ hasCodeChange: false, gateOpen: false, delegatedTo: ["a1"], fingerprint: "fp" });
+  assert.equal(disabled.action === "skip" && disabled.status, "DISABLED");
+  assert.match(disabled.reason, /验收移交：由 a1 统一验收/);
+  assert.doesNotMatch(disabled.reason, /最后一个/, "the position rule is gone from the copy too");
 });
 
 /* ──────────────────────────── the decision table ─────────────────────────── */

@@ -526,8 +526,10 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
   `judge_submit` 也不接受这个角色名）；AWAITING ⇒ 等它的报告（pane 没了就重新派，
   不空等）；结论绑定内容 ⇒ 比对当前工作区指纹，一致才放行。
 - **「这次会话不验收」有两个来源，而它们合成同一个开关**：编排 dispatcher 写的
-  `RG_ACCEPTANCE_GATE`（只有 plan 的最后一个任务拿到 `on`，判定出处是
-  `lib/repo-pr-policy.ts` 的 `acceptanceTaskId`），与用户自己的环节开关
+  `RG_ACCEPTANCE_GATE`（按 plan 任务自己的 `stages.acceptance`：开着写 `on`，关了写
+  `off:<接手任务 id>`，判定出处是 `lib/acceptance-round.ts` 的 `acceptanceGateValue`；
+  2026-09-27 起取代「最后一个任务验收」的位置规则。关掉验收的任务必须被开着验收的任务
+  传递依赖，子会话的提示、goal 审计与 `declare_done` 回执都写明由谁验收），与用户自己的环节开关
   （`lib/loop-stages.ts` 的 `stageOpen("acceptance")`）。两者在扩展里 **&&** 成一个
   `gateOpen` 交给同一张判定表 —— 不再有第二份「验收要不要跑」的判定。
 - **绑定的是工作区指纹，不是当时那份 commit 的 tree**：验收要跑起来，跑的就是工作区
