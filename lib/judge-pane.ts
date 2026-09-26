@@ -5,8 +5,8 @@
  * ── WHAT THIS FILE IS, AFTER THE SESSION FACTORY (2026-09-05) ──
  *
  * Opening a judge pane used to live here, in a sequence that was a near-copy of
- * the orchestration spawn's. That whole half moved into lib/session-factory.ts,
- * which is now the only place ANY pi session is given a pane — and the only
+ * the orchestration spawn's. That whole half moved into lib/session-factory.ts
+ * (the judge argv and border since in lib/session-launch-specs.ts), which is now the only place ANY pi session is given a pane — and the only
  * consumer of the tmux argv builders. What stayed is the part that is not about
  * opening anything:
  *
