@@ -551,7 +551,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 
 ---
 
-## 五、`lib/` 全量速查表（241 个模块）
+## 五、`lib/` 全量速查表（243 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -582,6 +582,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `audit-round-settle.ts` | 审计回合引擎的**结论段** `settleAuditRound`（选 report → 裁决 → 记录 → 只推一次游标 → 回收 pane）与它自建的 plan 记录；从 `audit-round.ts` 拆出，因为 code review 只从这一段进入引擎 |
 | `audit-round-report.ts` | 「哪份 report 收本轮」的**唯一判据** `selectRoundReport`、三件事实的推导 `roundBindingFor`、只要 yes/no 的 `roundHasReported` 与未命中文案 `describeRoundMiss`；记录侧（`audit-round-settle.ts`）与探测侧（`judge-wait-criteria.ts`）共用它 |
 | `audit-round-specs.ts` | 审计回合的**措辞半边**：五种 kind 的 spec（goal / plan / review / quality / advice）——judge 角色、report 绑定方式、pane 标题前缀、fail-closed 与拒绝文案 + `specForRound`（role 优先，goal/plan 靠 pending kind 分辨）。**引擎合，措辞不合** —— 合并机械部分是引擎的目的，合并句子则是另一种更糟的重构：plan 审计失败要让人去 `submit`，goal 的要去 `propose_loop_goal`。新增一种 round 只动这个文件 |
+| `audit-wait-watch.ts` | **门禁自等审计时旁边干的事**（2026-09-27，orch-f3eb4277 事故：审计者交卷被拒后提问，opener 正卡在 `submit` 里没人答）：`watchAuditRound` 每 2s 刷新「审计在 tmux `<session>:<window>`、已等 Ns」进度行，把审计者的每个新提问经门禁自己的对话框转给用户、答案写回审计者通道，审计者侧先被答掉时撤框；`classifyAuditWaitFailure` 把没等到裁决的原因分成 进程死了 / 交卷被拒 / 在提问 / 没交卷。接线在 `audit-round-host.ts` 的 `awaitRoundEnd` |
 | `background-wait.ts` | **「有没有未返回的后台 subagent」的唯一判据**（2026-09-09，事件进、按 agent id 的待完成集合出）：开始 = 工具结果含 pi-subagents 的启动措辞（`started in background … Agent ID: <id>`）、非错误、且该调用是后台的（`run_in_background` 非显式 `false`）；结束 = **该 agent 自己的终态信号**，三个来源（2026-09-17 补了第二个）：① **pi 事件总线的 `subagents:completed` / `subagents:failed`**（每一次跑完都发，是唯一不会漏的）、② `subagent-notification` 消息的 `details.id`/`others[]`（pi-subagents 在结果已被消费时会**跳过**它，实测三个 agent 只到一条）、③ `get_subagent_result` 的**状态行**落在终态集 `completed`/`steered`/`aborted`/`stopped`/`error`（状态行锚定而非全文排除 running，正文可能引用任意字样）——**无超时、无「新一轮清空」兜底**（没终态信号就一直算在等，宁可多报 working）。子会话据此在等后台 agent 期间也报 `working`，不再被报成「停下了」；但**已记录的 `declare_done` 优先于这个等待**（2026-09-17），否则一个永远到不了的残留等待会把已完成的子会话永久盖成 `working` |
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交。判的是**磁盘记录的所有权**（不是进程），一切未知 fail-**closed**（时间戳读不出/在未来/写删失败一律保留 marker），回收窗 4 小时（`CONCURRENT_SESSION_WINDOW_MS`，唯一用途就在这里）。**它与 `session-exclusivity.ts`、`judge-pane.ts` 的判活为什么不可收敛成一条口径**：两处文件头各写一半，行为并排钉在 `test/liveness-criteria.test.ts`（2026-09-06 复核；同日按哲学三删掉的 `judge-session.ts` 才是真正的重复实现——它没有生产调用者） |
 | `change-baseline.ts` | 本次改动的**比较基线**（2026-09-15，dashboard 实测的死锁）：一律 `HEAD`，但仓库处于 merge（`.git/MERGE_HEAD` 存在）时把被合并的 parent 一并算作基线 —— 「不在 HEAD 里」与「是本会话新建的」只在 HEAD 是唯一 parent 时才是同一句话；实测 104 个 staged 新增**全部**来自 `main`，file-size 因此硬拦 checkpoint，而 checkpoint 是 review 的唯一入口（用户只能切 normal 绕过）。`changeBaseRefsFromMergeHeads`（纯，垃圾行不进 argv）/ `readChangeBaseRefs` / `firstBaseContaining` / `isNewInWorktree` |
@@ -638,6 +639,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：一个 host，一个工具 |
 | `gate-modes.ts` | 门禁模式注册表（唯一实现）：八种模式各有提示词模板加工具集加流程规则（plan/goal/review 仅内部置入）；`resolveGateMode` 单派发；禁跑工具表与完成纪律的 single source（`judge-side.ts` 只 re-export，各任务 builder 只引用） |
 | `hierarchy.ts` | opener 注册表与唯一的跨级裁判：谁开的 review 谁操作，其他会话一律 fail-closed（纯函数，IO 经 seam）；注册表与**至多一份 pending 审计**按 repo 落盘恢复（`parseHierarchySnapshot` fail-closed 解析；2026-09-05 起是单字段 `audit: PendingAudit`——goal 与 plan 共用一个 judge，两份同时挂着是系统进不去的状态，旧的 `goalAudit`/`planAudit` 双字段不再读），条目带 opener 派发的轮次号 `roundSeq`，以及**轮转簿记**（`objectId` 全量 id / `generation` / `roundsInObject` / judge 自报的 `contextPercent`，全部可选——旧 build 写的条目没有它们，降级成「无对象记录」而不是报错）；`findJudgeLane` 是「这个角色现在跑在哪条 lane 上」的唯一查询（judge id 含 lane，派生不出上一条，所以扫这张表而不是另建第二张）；死 pane 异主条目由触达者丢弃（不再过户——opener 限定的 id 不会碰撞）、活 pane 保持拒绝，重启不死锁 |
+| `judge-hierarchy-store.ts` | **共享登记表文件的并发写**（2026-09-27）：同一 checkout 的多个 opener 共写 `.pi/judge-hierarchy.json`，旧实现按「我内存里的整张表」覆盖、表空就删文件，把别人的 judge 抹掉（交卷被拒「登记表里没有本 review」）。现在是 `<file>.lock`（内容 = 持锁 pid，只在 pid 已不在时打破）下的三方合并 `mergeHierarchySlice(base, mine, disk)`：只写回本进程自上次读写以来改过/删过的条目，其余以盘上为准；拿不到锁**绝不无锁写**，返回失败让调用方决定（新开 judge 的首次登记失败 ⇒ `judge-round-dispatch.ts` 关 pane 并报错） |
 | `judge-lane-host.ts` | 一轮 judge **跑在哪条 lane 上**（t7 从扩展拆出）：`resolveJudgeLane`（读登记表 → 问 `judge-rotation.ts` 的策略 → 交回 `retirePrevious`，替换 lane 登记之后才退役旧 lane）、轮转交接的事实 `rotationCarryoverFacts`、关一个 judge window 的唯一实现 `closeJudgePaneOf`、scratch worktree 回收 `reapReviewScratch` |
 | `judge-round-dispatch.ts` | **派发一轮 judge 的唯一入口** `dispatchJudgeRound`（t7 从扩展拆出）：质量前置、身份与工作目录派生、活 pane 走通道 interrupt（轮号随任务一起送）、死 pane 同 session id 重开并验证启动；`JudgeDispatch`（`delivered` 区分「任务到没到」）与 `hasTranscript` |
 | `judge-round-settle.ts` | **一轮 judge 在哪结束**（t7 从扩展拆出）：`judgeChildByRole` / `findJudgeChild`（只找本会话自己的）、探针与记录器共用的 `roundBindingOf`、`recordJudgeConclusion`（进引擎 + 施加取消矩阵）、settle 扫描 `settleFinishedRounds`（用标准报告唤醒 agent） |

@@ -395,6 +395,49 @@ export function createJudgeRoundDispatch(
       // A judge's channel OUTLIVES its panes, so only a record ABOVE this
       // watermark proves that the pane opened below actually came up.
       const baselineRecords = channelRecordCount(channelIO, judgeChannelPath);
+      // REGISTERED ON FILE BEFORE THE JUDGE STARTS (2026-09-27). The judge
+      // reads its own entry from the shared file when it concludes, and its
+      // task rides in on argv — so an entry that has not reached the file when
+      // the pane opens is a round whose verdict may be refused (measured
+      // 2026-09-26: 「登记表里没有本 review」). The pane coordinates are added
+      // once the window exists; that second write is not critical, the entry
+      // is already on file.
+      const keptFindingCount = judgeHierarchy()[judgeId]?.streamPath === opts.streamPath
+        ? judgeHierarchy()[judgeId]?.lastFindingCount
+        : undefined;
+      const entryFields = {
+        judgeId,
+        openerId: opener,
+        role,
+        repoRoot: root,
+        title,
+        sessionDir,
+        roundSeq: nextJudgeRound(opener, judgeId),
+        ...(tmuxServer === undefined ? {} : { tmuxServer }),
+        ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
+        ...(freshModelEventCount === undefined ? {} : { lastModelEventCount: freshModelEventCount }),
+        // Which model this pane was launched on — the round's receipt says
+        // who actually ran it (the pane may rotate later; that reports
+        // itself through the channel).
+        modelSpec: launch.spec,
+        // Same rule as the reuse path: a re-run over the SAME stream file keeps
+        // its finding cursor, so nothing already shown is shown again.
+        ...(keptFindingCount === undefined ? {} : { lastFindingCount: keptFindingCount }),
+        ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
+        ...laneFields,
+        spawnedAt: new Date().toISOString(),
+      };
+      const pre = registerJudge(judgeHierarchy(), entryFields);
+      if (!pre.ok) return { ok: false, reused: continuesSession, sessionId, sessionDir, error: pre.reason };
+      if (!setHierarchy(pre.table)) {
+        return {
+          ok: false,
+          reused: continuesSession,
+          sessionId,
+          sessionDir,
+          error: `登记表 .pi/judge-hierarchy.json 没写成（另一个进程一直占着它的锁）—— ${role} 没有启动，本轮没有派出；稍后重试`,
+        };
+      }
       const opened = await openSessionWindow(run, {
         scope: tmuxScope,
         cwd: root,
@@ -414,40 +457,15 @@ export function createJudgeRoundDispatch(
           model: files.model,
         }),
         decor: judgePaneDecor(judgeId, role, paneOwnerIdentity()),
-        // ONE write, one table, and it happens inside the open: the entry used
-        // to be built here and mutated a second time, which is exactly how the
-        // two drifted apart.
         register: (coords) => {
           const reg = registerJudge(judgeHierarchy(), {
-            judgeId,
-            openerId: opener,
-            role,
-            repoRoot: root,
-            title,
-            sessionDir,
+            ...entryFields,
             paneId: coords.paneId,
             // The window and its session, recorded with the pane id: they are
             // what closes this judge (`kill-window -t <session>:<@window>`),
             // and the session half is what keeps the kill inside ours.
             ...(coords.windowId === undefined ? {} : { windowId: coords.windowId }),
             ...(coords.sessionName === undefined ? {} : { tmuxSession: coords.sessionName }),
-            roundSeq: nextJudgeRound(opener, judgeId),
-            ...(tmuxServer === undefined ? {} : { tmuxServer }),
-            ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
-            ...(freshModelEventCount === undefined ? {} : { lastModelEventCount: freshModelEventCount }),
-            // Which model this pane was launched on — the round's receipt says
-            // who actually ran it (the pane may rotate later; that reports
-            // itself through the channel).
-            modelSpec: launch.spec,
-            // Same rule as the reuse path: a re-run over the SAME stream file keeps
-            // its finding cursor, so nothing already shown is shown again.
-            ...(judgeHierarchy()[judgeId]?.streamPath === opts.streamPath
-              && judgeHierarchy()[judgeId]?.lastFindingCount !== undefined
-              ? { lastFindingCount: judgeHierarchy()[judgeId]!.lastFindingCount }
-              : {}),
-            ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
-            ...laneFields,
-            spawnedAt: new Date().toISOString(),
           });
           if (reg.ok) setHierarchy(reg.table);
         },
@@ -458,6 +476,8 @@ export function createJudgeRoundDispatch(
           { channelPath: judgeChannelPath, baselineRecordCount: baselineRecords },
         ),
       });
+      // No pane at all: the pre-registration names nothing and goes.
+      if (!opened.ok && opened.deliveryFailed !== true) setHierarchy(removeJudge(judgeHierarchy(), judgeId));
       if (!opened.ok) {
         // A delivery failure KEEPS the pane and the registration (it may only
         // be slow), so the opener can still wait on it; anything else means no

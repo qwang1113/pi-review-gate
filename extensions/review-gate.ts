@@ -1069,6 +1069,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     selfAuditWait,
     forwardWaitUpdates,
     selfSessionDeps: () => selfSessionDeps(),
+    askUser: (spec, signal) => askChoice(asChoiceHost(cells.latestCtx ?? {}), spec, { signal }),
   });
   const { submitForReview, runGoalAudit, runPlanAudit } = createReviewChain(host, {
     callTool,
