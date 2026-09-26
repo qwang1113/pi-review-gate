@@ -15,7 +15,7 @@
  * on — it asks for exactly four facts the session cannot derive here.
  */
 
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 
 import { channelPathFor, judgeChannelTarget, type ChannelIO } from "./channel-io.ts";
@@ -49,7 +49,7 @@ import {
 } from "./model-health.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { readInheritance } from "./session-inheritance.ts";
-import { writeFileAtomic } from "./atomic-write.ts";
+import { writeHierarchySlice, type HierarchySlice } from "./judge-hierarchy-store.ts";
 import type { SessionHost } from "./session-host.ts";
 
 /** File holding one repo's judges + pendings (under `.pi/`, git-ignored like all gate state). */
@@ -121,6 +121,13 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
   const hierarchyLoadedRoots = new Set<string>();
   /** Repos with a hierarchy file on disk (for pruning emptied slices). */
   const hierarchyFileRoots = new Set<string>();
+  /**
+   * What each repo's FILE held when this session last read or wrote it — the
+   * `base` of the three-way merge (lib/judge-hierarchy-store.ts). Only what
+   * this session changed since then is written back; everything else is the
+   * file's, because other processes in the same checkout write it too.
+   */
+  const diskBase = new Map<string, HierarchySlice>();
 
   /**
    * Who THIS session is for opener checks: the orchestration id when this
@@ -290,10 +297,14 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
     }
   }
 
-  /** Assign the opener table and persist it — the single funnel for table writes. */
-  function setHierarchy(next: HierarchyTable): void {
+  /**
+   * Assign the opener table and persist it — the single funnel for table
+   * writes. Returns whether the change reached the file (see
+   * `persistJudgeHierarchy`); the table in memory is updated either way.
+   */
+  function setHierarchy(next: HierarchyTable): boolean {
     judgeHierarchy = next;
-    persistJudgeHierarchy();
+    return persistJudgeHierarchy();
   }
 
   /** Forget this repo's pending audit and persist. */
@@ -306,33 +317,62 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
    * Persist judges + pendings, sliced per repo. Restarting must not strand
    * live panes (unaddressable judges) nor fork a second pi onto one session
    * id — the process era's pid-file takeover, reborn as a file per repo.
+   *
+   * MERGED, NEVER OVERWRITTEN (2026-09-27): the file is shared by every
+   * opener in the checkout, so only what THIS session changed since it last
+   * saw the file is written back (lib/judge-hierarchy-store.ts). Returns false
+   * when some slice could not be written (the lock stayed held by a live
+   * peer): the change stays in memory, is still a diff against the old base,
+   * and goes out with the next persist. Callers for whom a late write is a
+   * failure — a freshly opened judge must be on file before it concludes —
+   * act on the false; the rest may ignore it.
    */
-  function persistJudgeHierarchy(): void {
-    try {
-      const slices = new Map<string, { judges: Record<string, JudgeEntry>; audit?: PendingAudit; modelHealth?: ModelHealth }>();
-      const slice = (root: string) => {
-        let s = slices.get(root);
-        if (!s) { s = { judges: {} }; slices.set(root, s); }
-        return s;
-      };
-      for (const [id, e] of Object.entries(judgeHierarchy)) slice(e.repoRoot).judges[id] = e;
-      for (const [root, v] of pendingAudits) slice(root).audit = v;
-      // Pruned on the way out, so a dead model id can never be immortal in a file.
-      const now = Date.now();
-      for (const [root, health] of modelHealthByRoot) {
-        const live = pruneModelHealth(health, now);
-        if (Object.keys(live).length === 0) modelHealthByRoot.delete(root);
-        else slice(root).modelHealth = live;
+  function persistJudgeHierarchy(): boolean {
+    const slices = new Map<string, HierarchySlice>();
+    const slice = (root: string) => {
+      let s = slices.get(root);
+      if (!s) { s = { judges: {} }; slices.set(root, s); }
+      return s;
+    };
+    for (const [id, e] of Object.entries(judgeHierarchy)) slice(e.repoRoot).judges[id] = e;
+    for (const [root, v] of pendingAudits) slice(root).audit = v;
+    // Pruned on the way out, so a dead model id can never be immortal in a file.
+    const now = Date.now();
+    for (const [root, health] of modelHealthByRoot) {
+      const live = pruneModelHealth(health, now);
+      if (Object.keys(live).length === 0) modelHealthByRoot.delete(root);
+      else slice(root).modelHealth = live;
+    }
+    for (const root of hierarchyFileRoots) slice(root);
+    for (const root of diskBase.keys()) slice(root);
+    let allWritten = true;
+    for (const [root, mine] of slices) {
+      hierarchyFileRoots.add(root);
+      const merged = writeHierarchySlice(pathJoin(root, ".pi", HIERARCHY_FILENAME), diskBase.get(root), mine);
+      if (!merged) {
+        allWritten = false;
+        host.log(`review-gate[judge-registry] ${root}/.pi/${HIERARCHY_FILENAME} 没写成（锁被占用或写盘失败）—— 本次改动留在内存里，下次写盘再合并`);
+        continue;
       }
-      for (const root of hierarchyFileRoots) slice(root);
-      for (const [root, s] of slices) {
-        hierarchyFileRoots.add(root);
-        const file = pathJoin(root, ".pi", HIERARCHY_FILENAME);
-        const empty = Object.keys(s.judges).length === 0 && !s.audit && !s.modelHealth;
-        if (empty) { try { rmSync(file, { force: true }); } catch { /* best effort */ } continue; }
-        writeFileAtomic(file, JSON.stringify({ version: 1, ...s }));
+      // The audit slot is the one value NOT mirrored into memory below, so its
+      // base is what THIS session holds: a peer's audit on file is then "not
+      // changed by me" and survives the next unrelated persist (reviewer P1).
+      diskBase.set(root, {
+        judges: merged.judges,
+        ...(merged.modelHealth === undefined ? {} : { modelHealth: merged.modelHealth }),
+        ...(mine.audit === undefined ? {} : { audit: mine.audit }),
+      });
+      // The table now mirrors the file for this repo: peers' entries arrive,
+      // entries a peer removed leave. The pending audit is NOT adopted — it is
+      // one slot per repo, and a peer's in-flight audit is not this session's.
+      for (const [id, e] of Object.entries(judgeHierarchy)) {
+        if (e.repoRoot === root && !merged.judges[id]) delete judgeHierarchy[id];
       }
-    } catch { /* persistence never breaks the gate */ }
+      Object.assign(judgeHierarchy, merged.judges);
+      if (merged.modelHealth) modelHealthByRoot.set(root, merged.modelHealth);
+      else modelHealthByRoot.delete(root);
+    }
+    return allWritten;
   }
 
   /**
@@ -345,6 +385,11 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
     });
     if (!snap) return;
     hierarchyFileRoots.add(root);
+    diskBase.set(root, {
+      judges: { ...snap.judges },
+      ...(snap.audit === undefined ? {} : { audit: snap.audit }),
+      ...(snap.modelHealth === undefined ? {} : { modelHealth: snap.modelHealth }),
+    });
     for (const [id, e] of Object.entries(snap.judges)) {
       if (!judgeHierarchy[id]) judgeHierarchy[id] = e;
     }
@@ -370,9 +415,18 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
     try {
       const snap = parseHierarchySnapshot(readFileSync(pathJoin(root, ".pi", HIERARCHY_FILENAME), "utf8"));
       if (!snap) return;
+      const base = diskBase.get(root) ?? { judges: {} };
       for (const [id, e] of Object.entries(snap.judges)) {
-        if (!judgeHierarchy[id]) judgeHierarchy[id] = e;
+        if (judgeHierarchy[id]) continue;
+        // On file before AND gone from memory = a removal of ours that has
+        // not reached the file yet (the lock was busy). Re-adopting it would
+        // erase the tombstone and the removal would never be written.
+        if (base.judges[id]) continue;
+        judgeHierarchy[id] = e;
+        // Adopted as-is from the file, so it is not a change of ours.
+        base.judges = { ...base.judges, [id]: e };
       }
+      diskBase.set(root, base);
       hierarchyFileRoots.add(root);
     } catch { /* unreadable ⇒ keep what we have */ }
   }
