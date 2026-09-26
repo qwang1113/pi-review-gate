@@ -25,8 +25,8 @@ test("registration not on file ⇒ the new pane is closed and the dispatch fails
     const channelIO = {
       ensureDir: () => {},
       appendLine: (_p: string, line: string) => { lines.push(line); },
-      // The pane "boots" as soon as it is opened: one state record above the watermark.
-      readText: () => (opened ? `${JSON.stringify({ kind: "state", from: "child", at: new Date().toISOString(), state: "idle" })}\n` : ""),
+      // The pane never reports: an unregistered judge must not be waited on to boot.
+      readText: () => "",
     };
     const runTmux = (argv: readonly string[]) => {
       if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
@@ -63,7 +63,10 @@ test("registration not on file ⇒ the new pane is closed and the dispatch fails
       resolveJudgeLaunch: () => ({ ok: true, sysPromptPath: join(root, "p.md"), spec: "anthropic/x", chain: [], choice: {} as never }),
       sweepStaleJudgeSessionDirs: () => {},
     });
+    const t0 = Date.now();
     const out = await dispatchJudgeRound({ root, role: "goal-auditor", title: "audit", task: "judge this", fresh: true });
+    assert.ok(opened);
+    assert.ok(Date.now() - t0 < 2_000, "closed at once, not after the boot probe");
     assert.equal(out.ok, false);
     assert.match(out.error ?? "", /登记表.*没写成.*已关掉/);
     assert.equal(closed.length, 1, "the pane that was opened is closed");

@@ -117,6 +117,37 @@ test("lock left by a dead process is broken and the write goes through", () => {
   assert.equal(existsSync(`${file}.lock`), false);
 });
 
+test("a peer's pending audit survives this session's unrelated writes", () => {
+  const root = mkdtempSync(join(tmpdir(), "rg-hier-"));
+  const pm = process_(root, "pm");
+  const child = process_(root, "child");
+  pm.reg.pendingAudits.set(root, { kind: "plan", hash: "h", planText: "p", startedAt: "2026-09-27T00:00:00.000Z" });
+  assert.equal(pm.reg.persistJudgeHierarchy(), true);
+  child.add("c1");
+  child.drop("c1"); // a second write after one that saw the audit on file
+  assert.equal(readHierarchySlice(fileOf(root))?.audit?.kind, "plan");
+});
+
+test("two waiters breaking the same dead lock: the second never removes the first one's fresh lock", () => {
+  const root = mkdtempSync(join(tmpdir(), "rg-hier-"));
+  const file = fileOf(root);
+  writeHierarchySlice(file, undefined, { judges: {} });
+  writeFileSync(`${file}.lock`, "999999");
+  let raced = false;
+  const out = writeHierarchySlice(file, undefined, { judges: { x: entry("x", "o", root) } }, {
+    timeoutMs: 60,
+    // Between our read of the dead pid and our break, another waiter broke it
+    // and took the lock itself (a live pid).
+    pidAlive: (pid) => {
+      if (pid === 999999 && !raced) { raced = true; writeFileSync(`${file}.lock`, String(process.pid)); return false; }
+      return pid !== 999999;
+    },
+  });
+  assert.equal(out, undefined, "the live lock was respected, so nothing was written");
+  assert.equal(readFileSync(`${file}.lock`, "utf8"), String(process.pid));
+  assert.equal(existsSync(`${file}.lock.break`), false);
+});
+
 test("registry: a write that cannot take the lock returns false and lands on the next persist", () => {
   const root = mkdtempSync(join(tmpdir(), "rg-hier-"));
   const p = process_(root, "p");
@@ -130,4 +161,19 @@ test("registry: a write that cannot take the lock returns false and lands on the
   writeFileSync(`${fileOf(root)}.lock`, "999999999"); // holder gone
   assert.equal(p.reg.persistJudgeHierarchy(), true);
   assert.deepEqual(idsOnDisk(root), ["first", "second"]);
+});
+
+test("registry: a removal that missed the lock is not undone by a reload", () => {
+  const root = mkdtempSync(join(tmpdir(), "rg-hier-"));
+  const p = process_(root, "p");
+  p.add("x");
+  writeFileSync(`${fileOf(root)}.lock`, "999999999");
+  // A dead holder is broken at once, so hold it with a LIVE pid for the removal.
+  writeFileSync(`${fileOf(root)}.lock`, String(process.pid));
+  assert.equal(p.drop("x"), false);
+  p.reg.reloadJudgeHierarchy(root);
+  assert.equal(p.reg.judgeHierarchy().x, undefined, "the pending removal stays removed");
+  writeFileSync(`${fileOf(root)}.lock`, "999999999");
+  assert.equal(p.reg.persistJudgeHierarchy(), true);
+  assert.deepEqual(idsOnDisk(root), []);
 });

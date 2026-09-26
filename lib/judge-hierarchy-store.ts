@@ -118,11 +118,40 @@ function acquireLock(lock: string, opts: LockOptions): boolean {
     let holder = Number.NaN;
     try { holder = Number.parseInt(readFileSync(lock, "utf8"), 10); } catch { /* vanished: retry now */ continue; }
     if (Number.isInteger(holder) && holder > 0 && !pidAlive(holder)) {
-      try { rmSync(lock, { force: true }); } catch { /* the next attempt decides */ }
+      breakStaleLock(lock, holder, pidAlive);
       continue;
     }
     if (Date.now() >= deadline) return false;
     sleepSync(LOCK_POLL_MS);
+  }
+}
+
+/**
+ * Remove a dead holder's lock — and ONLY that lock. Two waiters can both read
+ * the dead pid; if each simply removed the file, the second would delete the
+ * lock the first had just taken and both would merge at once (reviewer P1).
+ * So breaking is serialized by `<lock>.break`, and the content is re-read
+ * under it: a lock that is no longer the dead holder's is left alone.
+ */
+function breakStaleLock(lock: string, deadHolder: number, pidAlive: (pid: number) => boolean): void {
+  const breaker = `${lock}.break`;
+  try {
+    writeFileSync(breaker, String(process.pid), { flag: "wx" });
+  } catch {
+    // Somebody else is breaking it. A breaker that died mid-break is cleared
+    // so the lock is not wedged forever.
+    // ponytail: this clear has the same two-waiter window, but only after a
+    // crash inside a microsecond-long section; a lock daemon if it ever bites.
+    try {
+      const other = Number.parseInt(readFileSync(breaker, "utf8"), 10);
+      if (Number.isInteger(other) && other > 0 && !pidAlive(other)) rmSync(breaker, { force: true });
+    } catch { /* gone already */ }
+    return;
+  }
+  try {
+    if (Number.parseInt(readFileSync(lock, "utf8"), 10) === deadHolder) rmSync(lock, { force: true });
+  } catch { /* already gone */ } finally {
+    rmSync(breaker, { force: true });
   }
 }
 
