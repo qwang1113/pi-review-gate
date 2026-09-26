@@ -1132,7 +1132,7 @@ test("judge_wait after a FAILED LANE cancelled the reviewer: says cancelled, why
     pi: {} as never,
     registry: {
       judgeHierarchy: () => f.table.current,
-      setHierarchy: (next) => { f.table.current = next; f.children = f.children.filter((x) => next[x.judgeId]); },
+      setHierarchy: (next) => { f.table.current = next; f.children = f.children.filter((x) => next[x.judgeId]); return true; },
       absorbJudgeModelEvents: () => {},
     },
     runTmux: () => ({ ok: true, stdout: "", stderr: "" }),

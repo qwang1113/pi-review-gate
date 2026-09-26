@@ -16,7 +16,9 @@ import { join as pathJoin } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RunAuditRoundDeps } from "./audit-round.ts";
 import type { SettleAuditRoundDeps } from "./audit-round-settle.ts";
-import { channelPathFor, judgeChannelTarget, reportText, type ChannelIO } from "./channel-io.ts";
+import { appendRecord, channelPathFor, judgeChannelTarget, reportText, type ChannelIO } from "./channel-io.ts";
+import { classifyAuditWaitFailure, watchAuditRound } from "./audit-wait-watch.ts";
+import type { ChoiceSpec } from "./choice-dialog.ts";
 import { readChannel, reportConclusion, sanitizeContextPercent, type ReportConclusion } from "./channel-projection.ts";
 import type { ChannelRecord, ChannelReportRecord } from "./channel-records.ts";
 import { recordGoalPrereview, type GoalPrereviewDeps } from "./goal-prereview-tools.ts";
@@ -30,6 +32,15 @@ import { formatPlanAuditRefusal } from "./orchestrator-plan-audit.ts";
 import type { ToolUpdate } from "./progress-stream.ts";
 import { buildStreamDirective } from "./review-stream.ts";
 import type { CallTool, GateToolResult, Ref, SessionHost } from "./session-host.ts";
+
+/** The coordinates a human can find the judge by. */
+function judgePlace(judge: JudgeEntry): { tmuxSession?: string; windowId?: string; paneId?: string } {
+  return {
+    ...(judge.tmuxSession === undefined ? {} : { tmuxSession: judge.tmuxSession }),
+    ...(judge.windowId === undefined ? {} : { windowId: judge.windowId }),
+    ...(judge.paneId === undefined ? {} : { paneId: judge.paneId }),
+  };
+}
 
 type Progress = { step?: (t: string) => void; done?: (t: string) => void; fail?: (t: string) => void; tail?: (t: string) => void };
 
@@ -56,6 +67,8 @@ export function createAuditRoundHost(
     selfAuditWait(root: string, ctx: unknown, onUpdate: ToolUpdate | undefined, signal: AbortSignal | undefined): Promise<GateToolResult>;
     forwardWaitUpdates(progress: { tail?(text: string): void; step?(t: string): void } | undefined): ToolUpdate | undefined;
     selfSessionDeps(): JudgeSessionToolDeps;
+    /** The gate's own dialog — how an auditor's question reaches the user while the gate waits. */
+    askUser(spec: ChoiceSpec, signal: AbortSignal): Promise<string | undefined>;
   },
 ) {
   const { judgeHierarchy, setHierarchy, dropAudits, pendingAudits, persistJudgeHierarchy } = deps.registry;
@@ -63,7 +76,7 @@ export function createAuditRoundHost(
     channelIO, lastUiCtx, callTool, toolText, extractTaskText, goalPrereviewDeps,
     judgeChildByRole, checkpointAtFor, dispatchJudgeRound,
     recordReviewVerdict, recordQualityVerdict, recordAcceptanceVerdict,
-    selfAuditWait, forwardWaitUpdates, selfSessionDeps,
+    selfAuditWait, forwardWaitUpdates, selfSessionDeps, askUser,
   } = deps;
   const { log } = host;
   const stateForRepo = (root: string) => host.stateFor(root);
@@ -319,18 +332,59 @@ export function createAuditRoundHost(
         // check still runs inside `doWait`; only the repo-addressing is
         // bypassed. Waiting semantics are untouched: same round-end rule via
         // `awaitRoundReport` — see `selfAuditWait`.
-        const waited = await selfAuditWait(root, waitCtx, forwardWaitUpdates(progress), signal);
+        //
+        // BESIDE THE WAIT (2026-09-27): the auditor's questions go to the user
+        // and the progress line says where it runs and for how long — see
+        // lib/audit-wait-watch.ts for the incident this answers.
+        const judge = judgeChildByRole(root, "goal-auditor");
+        const since = pendingAudits.get(root)?.startedAt ?? judge?.spawnedAt ?? new Date().toISOString();
+        const target = judge ? judgeChannelTarget(judge.openerId, judge.judgeId) : undefined;
+        const readRecords = () => target
+          ? readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records
+          : [];
+        // The watcher owns the tail; the inner wait's own text rides under it.
+        let innerText = "";
+        let watchLine = "";
+        const publish = () => progress?.tail?.([watchLine, innerText].filter(Boolean).join("\n"));
+        const inner = forwardWaitUpdates(progress?.tail ? { tail: (t) => { innerText = t; publish(); } } : progress);
+        const waiting = selfAuditWait(root, waitCtx, inner, signal);
+        const watching = judge && target
+          ? watchAuditRound({
+              readRecords,
+              ask: (spec, askSignal) => askUser(spec, askSignal),
+              writeAnswer: (requestId, answer) => {
+                appendRecord(channelIO, target, { kind: "answer", from: "orchestrator", at: new Date().toISOString(), requestId, answer });
+              },
+              progress: (line) => {
+                if (progress?.tail) { watchLine = line; publish(); } else progress?.step?.(line.split("\n")[0]!);
+              },
+              now: () => Date.now(),
+              sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+            }, {
+              where: { role: judge.role, ...judgePlace(judge) },
+              since,
+              startedAtMs: Date.now(),
+              stop: waiting,
+            })
+          : Promise.resolve();
+        const waited = await waiting;
+        await watching;
         const details = (waited.details ?? {}) as { done?: unknown; reason?: unknown };
         if (!waited.isError && details.done === true && details.reason === "report") {
           return { ok: true, detail: "" };
         }
-        return {
-          ok: false,
-          detail:
-            details.reason === "pane-dead" ? "pane 已消失"
-            : details.reason === "cancelled" ? "本轮已被门禁终止（没有 pane 可重开，按 findings 修完重送）"
-            : "等待未命中本轮 report",
-        };
+        if (details.reason === "cancelled") {
+          return { ok: false, detail: "本轮已被门禁终止（没有 pane 可重开，按 findings 修完重送）" };
+        }
+        let records: ChannelRecord[] = [];
+        try { records = readRecords(); } catch { /* unreadable ⇒ classified as no report */ }
+        const why = classifyAuditWaitFailure({
+          paneAlive: details.reason === "pane-dead" ? false : undefined,
+          records,
+          since,
+        });
+        const where = judge ? `（${judge.role} 在 ${judgePlace(judge).tmuxSession ?? "?"}:${judgePlace(judge).windowId ?? "?"}）` : "";
+        return { ok: false, detail: `${why.text}${where}` };
       },
       // THE RECLAIM, AND WHAT IT ACHIEVED. The reply used to be awaited and
       // thrown away, which is where a half-done reclaim went to die:

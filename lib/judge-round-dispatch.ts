@@ -395,6 +395,10 @@ export function createJudgeRoundDispatch(
       // A judge's channel OUTLIVES its panes, so only a record ABOVE this
       // watermark proves that the pane opened below actually came up.
       const baselineRecords = channelRecordCount(channelIO, judgeChannelPath);
+      // Did the registration reach the FILE? The judge reads its own entry from
+      // there when it concludes, so an entry that only lives in this process's
+      // memory is a round whose verdict will be refused (2026-09-26, measured).
+      let registrationOnFile = true;
       const opened = await openSessionWindow(run, {
         scope: tmuxScope,
         cwd: root,
@@ -449,7 +453,7 @@ export function createJudgeRoundDispatch(
             ...laneFields,
             spawnedAt: new Date().toISOString(),
           });
-          if (reg.ok) setHierarchy(reg.table);
+          if (reg.ok) registrationOnFile = setHierarchy(reg.table);
         },
         // EARN the receipt for a judge too: a judge that never boots leaves its
         // opener waiting forever, which is the one silence nobody can break.
@@ -458,6 +462,23 @@ export function createJudgeRoundDispatch(
           { channelPath: judgeChannelPath, baselineRecordCount: baselineRecords },
         ),
       });
+      if (!registrationOnFile) {
+        // A CRITICAL WRITE THAT DID NOT LAND ENDS THE DISPATCH: the pane is
+        // closed before its judge can conclude against a missing entry, and the
+        // caller gets a reason instead of a wait that can only end in a refusal.
+        const entry = judgeHierarchy()[judgeId];
+        if (entry) {
+          closeJudgePaneOf(entry, { ownPane, tmuxServer, run });
+          setHierarchy(removeJudge(judgeHierarchy(), judgeId));
+        }
+        return {
+          ok: false,
+          reused: continuesSession,
+          sessionId,
+          sessionDir,
+          error: `登记表 .pi/judge-hierarchy.json 没写成（另一个进程一直占着它的锁）—— 已关掉刚开的 ${role} 窗口，本轮没有派出；稍后重试`,
+        };
+      }
       if (!opened.ok) {
         // A delivery failure KEEPS the pane and the registration (it may only
         // be slow), so the opener can still wait on it; anything else means no
