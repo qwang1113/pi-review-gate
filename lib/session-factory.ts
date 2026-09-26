@@ -81,6 +81,8 @@ import {
 } from "./session-tmux-scope.ts";
 import {
   judgePaneLabel,
+  judgeWindowName,
+  workerWindowName,
   paneIdentity,
   paneStyleFor,
   paneTitleFor,
@@ -240,6 +242,12 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
 export interface SessionPaneDecor {
   /** `t2@pm:title` for a child, `reviewer@t6` for a judge. */
   label: string;
+  /**
+   * The tmux WINDOW name (`reviewer`, `worker-x`, `s1-tmux-sidebar`) — the
+   * owner half is left out because the session name already says it.
+   * Absent ⇒ the label.
+   */
+  windowName?: string;
   /** What the colour hashes on — the child id or the judge id. */
   colorSeed: string;
   state: ChildState;
@@ -574,7 +582,7 @@ export async function openSessionWindow(
         // THE WINDOW NAME IS THE LABEL (user decision, 2026-09-25). `tmux ls`
         // and `prefix w` are the only ways to see a child without attaching to
         // it, and a list of identical `pi` entries tells nobody anything.
-        ...(spec.decor === undefined ? {} : { windowName: spec.decor.label }),
+        ...(spec.decor === undefined ? {} : { windowName: spec.decor.windowName ?? spec.decor.label }),
       });
   if (!coords.ok) {
     // A FAILED OPEN YIELDS NO COORDINATES, and there is nothing to keep
@@ -747,7 +755,7 @@ export function judgePaneDecor(
   owner: string,
   state: ChildState = "working",
 ): SessionPaneDecor {
-  return { label: judgePaneLabel(role, owner), colorSeed: judgeId, state };
+  return { label: judgePaneLabel(role, owner), windowName: judgeWindowName(role), colorSeed: judgeId, state };
 }
 
 /**
@@ -764,5 +772,5 @@ export function workerPaneDecor(
   owner: string,
   state: ChildState = "working",
 ): SessionPaneDecor {
-  return { label: paneIdentity({ what: workerId, owner }), colorSeed: workerId, state };
+  return { label: paneIdentity({ what: workerId, owner }), windowName: workerWindowName(workerId), colorSeed: workerId, state };
 }

@@ -26,6 +26,7 @@ import {
 } from "./session-factory.ts";
 import {
   childPaneLabel,
+  childWindowName,
   paneColorFor,
 } from "./orchestrator-pane-decor.ts";
 
@@ -112,6 +113,7 @@ function schedulingVerdict(
 function childPaneDecor(taskId: string, title: string, childId: string): SessionPaneDecor {
   return {
     label: childPaneLabel(taskId, title),
+    windowName: childWindowName(taskId, title),
     colorSeed: childId,
     state: "working",
     stateForSeconds: 0,

@@ -153,6 +153,7 @@ test("combination 1 — a judge SPAWN: judge env, own colour, border line, verif
 
   const spawn = seen.find((argv) => argv[0] === "new-session")!;
   assert.ok(spawn, "the child created the opener's own session");
+  assert.equal(spawn[spawn.indexOf("-n") + 1], "reviewer", "the WINDOW is named for the role alone (s1)");
   assert.deepEqual(envOf(spawn), {
     RG_JUDGE_OPENER: "session-child-1",
     RG_JUDGE_ID: "rg-reviewer-abc123",

@@ -26,6 +26,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { installTmuxStatusFormat as applyTmuxStatusFormat } from "./tmux-status-format.mjs";
+import { installTmuxSidebarBind as applyTmuxSidebarBind } from "./tmux-sidebar-bind.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -86,6 +87,18 @@ function installTmuxStatusFormat() {
   else if (result.status === "no-format-line") log("  · no window-status-format using #{b:pane_current_path} in ~/.tmux.conf — left as is");
   else if (result.status === "unreadable") log(`  ⚠ could not read ${result.confPath}: ${result.error}`);
   else if (result.status === "failed") log(`  ⚠ could not rewrite ${result.confPath}: ${result.error}`);
+}
+
+/** `prefix + e` → the session sidebar; the rules live in scripts/tmux-sidebar-bind.mjs. */
+function installTmuxSidebarBind() {
+  const result = applyTmuxSidebarBind({ root: ROOT, log });
+  if (result.status === "missing") log("  · ~/.tmux.conf not found — no prefix + e sidebar binding");
+  else if (result.status === "already") log("  · prefix + e already opens the session sidebar — left as is");
+  else if (result.status === "conflict") log("  · ~/.tmux.conf already binds `e` — the sidebar binding was NOT added");
+  else if (result.status === "node-modules") log("  · installed under node_modules (node cannot strip TypeScript there) — no sidebar binding");
+  else if (result.status === "unsafe-path") log("  ⚠ the package path contains a quote — no sidebar binding");
+  else if (result.status === "unreadable") log(`  ⚠ could not read ${result.confPath}: ${result.error}`);
+  else if (result.status === "failed") log(`  ⚠ could not add the sidebar binding to ${result.confPath}: ${result.error}`);
 }
 
 function isGitRepo(dir) {
@@ -409,5 +422,10 @@ try {
   installTmuxStatusFormat();
 } catch (e) {
   log(`  ✗ tmux status line install failed: ${e.message}`);
+}
+try {
+  installTmuxSidebarBind();
+} catch (e) {
+  log(`  ✗ tmux sidebar binding failed: ${e.message}`);
 }
 log("done (extension + skills load natively via the pi package manifest)");
