@@ -1,6 +1,10 @@
 /**
- * The two tools that act on an EXISTING pane judge — `judge_close` and
- * `judge_wait`.
+ * The tool that acts on an EXISTING pane judge — `judge_wait`.
+ *
+ * `judge_close` is GONE (2026-09-27): a judge window outlives its round and
+ * `declare_done`'s cascade (lib/declare-done-tool.ts) is the one reclaim
+ * point, so the gate's audit chains stopped closing their auditor and the
+ * tool was left with no caller (哲学三).
  *
  * A judge is an interactive pi in its own pane (one pane per review),
  * owned by the opener recorded in lib/hierarchy.ts. There is no process to
@@ -15,53 +19,40 @@
  * cross-level call refused fail-closed, with no dialog.
  *
  * THE GATE'S OWN CHAINS BYPASS THE REPO CHECK, NOTHING ELSE (2026-09-08).
- * `doWait` / `doClose` are exported so the gate's self-dispatched audits
+ * `doWait` (lib/judge-wait-tool.ts) is exported so the gate's self-dispatched audits
  * (`propose_loop_goal` / `orchestrator_plan` chains in extensions/review-gate.ts)
- * can wait on and reclaim their own auditor without passing `addressJudge`'s
+ * can wait on their own auditor without passing `addressJudge`'s
  * "has this session edited that repo" gate — the chain already holds the
  * judgeId from its own dispatch, and re-resolving the repo would refuse a
  * legitimate self-audit of a repo the session has not edited yet (measured:
  * five consecutive "等待未命中本轮 report"). The bypass is keyed on an explicit
- * `gateSelf` FUNCTION ARGUMENT on `doWait` / `doClose` (not a field of `params`
+ * `gateSelf` FUNCTION ARGUMENT on `doWait` (not a field of `params`
  * — tools receive `params` from the agent verbatim, so a marker living there
- * would be agent-settable); the opener check (`checkOpener`) still runs inside
- * both functions for both paths. Agent-facing `judge_wait` / `judge_close`
- * always take the full check.
-
+ * would be agent-settable); the opener check still runs on both paths.
+ * Agent-facing `judge_wait` always takes the full check.
  *
- * Shape (unchanged): `registerJudgeSessionTools(host, deps)`, effects
+ * Shape: `registerJudgeWaitTool(host, deps)`, effects
  * through `deps` only. Pure decisions live in lib/hierarchy.ts,
  * lib/channel-*.ts and lib/judge-pane.ts and are imported
  * directly; what IS injected is everything the tools cannot own — identity,
  * the registries, tmux, the channel filesystem and the verdict recorder.
  *
- * WHERE THE PARTS LIVE. This file keeps the deps, the parameter schemas,
- * `judge_close` and the registration. `judge_wait`'s loop is
- * lib/judge-wait-tool.ts, the criteria it polls lib/judge-wait-criteria.ts,
- * and the addressing + opener check both tools pass
- * lib/judge-session-addressing.ts.
+ * WHERE THE PARTS LIVE. This file keeps the deps, the parameter schemas
+ * and the registration. `judge_wait`'s loop is lib/judge-wait-tool.ts, the
+ * criteria it polls lib/judge-wait-criteria.ts, and the addressing + opener
+ * check lib/judge-session-addressing.ts.
  */
 import { Type } from "typebox";
 
-import { toolFail as fail, toolReply as reply, type ToolHost, type ToolReply } from "./tool-host.ts";
-import {
-  removeJudge,
-  windowClosable,
-  type HierarchyTable,
-} from "./hierarchy.ts";
+import type { ToolHost } from "./tool-host.ts";
+import type { HierarchyTable } from "./hierarchy.ts";
 import type { ChannelIO } from "./channel-io.ts";
 import type { ReviewScopeStamp } from "./channel-records.ts";
 import type { TmuxRunResult } from "./orchestrator-tmux.ts";
-import { closeSessionWindow } from "./session-factory.ts";
 import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "./judge-lifecycle.ts";
 import type { RoundBinding } from "./audit-round-report.ts";
 import type { RoundCancellation } from "./round-cancel-ledger.ts";
-import {
-  ADDRESSABLE_JUDGE_ROLES,
-  addressJudge,
-  checkOpener,
-  closeFailDetails,
-} from "./judge-session-addressing.ts";
+import { ADDRESSABLE_JUDGE_ROLES } from "./judge-session-addressing.ts";
 import { doWait } from "./judge-wait-tool.ts";
 
 
@@ -85,15 +76,14 @@ export interface JudgeChildRecord {
    * The WINDOW the judge runs in, and the session that owns it (2026-09-25).
    *
    * Same pair, same reason as lib/hierarchy.ts `JudgeEntry`: a judge is a window
-   * of its opener's own session, `judge_close` addresses it
-   * `<tmuxSession>:<windowId>`, and an entry missing either half is never
-   * closed by a guess.
+   * of its opener's own session, addressed `<tmuxSession>:<windowId>`, and an
+   * entry missing either half is never closed by a guess.
    */
   windowId?: string;
   tmuxSession?: string;
   /**
-   * Which tmux server minted `paneId` — carried so `judge_close` can tell
-   * whether it may kill by it.
+   * Which tmux server minted `paneId` — carried so the wait's repaint (and
+   * `declare_done`'s cascade) can tell whether it may act on it.
    *
    * It matters HERE because the registry is persisted: a record restored after
    * a tmux server restart carries an id that has since been reassigned, and
@@ -129,7 +119,7 @@ export interface JudgeSessionToolDeps {
    * A HANDOVER'S SUCCESSOR owns two (2026-09-14, measured on the loop path):
    * its own identity, and the session it replaced. A judge's channel is keyed
    * by `<openerId>/<judgeId>`, so without this a successor would be refused on
-   * `judge_wait`/`judge_close` for the very reviewer its predecessor had
+   * `judge_wait` for the very reviewer its predecessor had
    * dispatched — the round's verdict would land in a channel nobody reads and
    * the successor would wait forever. Omitted ⇒ just `callerId()`, which is
    * every ordinary session.
@@ -163,8 +153,8 @@ export interface JudgeSessionToolDeps {
    *
    * Reached only through the `gateSelf` function argument (see `addressJudge`):
    * the gate's self-audit chains hold the judgeId from their own dispatch and
-   * must not re-resolve the repo. The opener check still runs in `doWait` /
-   * `doClose` for both paths.
+   * must not re-resolve the repo. The opener check still runs in `doWait` for
+   * both paths.
    */
   findChildById?(judgeId: string): JudgeChildRecord | undefined;
   /**
@@ -249,10 +239,6 @@ export interface JudgeSessionToolDeps {
     scope?: ReviewScopeStamp;
     hasVerdict: boolean;
   }>;
-  /** Cancel the gate-owned hosted-wait watchdog. */
-  cancelWaitTimer(): void;
-  /** Forget the goal draft a closed audit was judging. */
-  dropPendingAudit(root: string): void;
   /**
    * ACT ON the model failures this judge reported (2026-09-10).
    *
@@ -307,103 +293,12 @@ const REPO_PARAM = Type.Optional(Type.String({
 // on its own, message-driven, from the same channel.)
 
 
-// ---------- judge_close ----------
-
-export async function doClose(
-  deps: JudgeSessionToolDeps,
-  params: Record<string, unknown>,
-  /**
-   * GATE-SELF BYPASS (2026-09-08): true only on the gate's own direct calls.
-   * A plain function argument — NOT a field of `params`, so no agent tool call
-   * can ever set it (`params` arrives from the agent verbatim; unknown keys
-   * are stripped nowhere). `addressJudge` skips the edited-repo check only
-   * under it; the opener check still runs for both paths.
-   */
-  gateSelf = false,
-): Promise<ToolReply> {
-  const addressed = addressJudge(deps, params, "judge_close", gateSelf);
-  if (!addressed.ok) return fail(addressed.text, closeFailDetails());
-  const child = deps.findChild(addressed.root, addressed.role, addressed.judgeId);
-  if (!child) {
-    // Idempotent: nothing to close is a SUCCESS, so a task-completion sweep
-    // never has to know whether a round is still on record.
-    return reply(
-      `review-gate: no judge on record for ${addressed.role ?? addressed.judgeId} — nothing to close.`,
-      { closed: true, terminated: false, judgeId: undefined },
-    );
-  }
-  const judgeId = child.judgeId;
-  const allowed = checkOpener(deps, judgeId);
-  if (!allowed.ok) return fail(allowed.text, closeFailDetails());
-  // Cancel the hosted wait so no wake fires for a close we initiated.
-  deps.cancelWaitTimer();
-  let terminated = false;
-  let killNote = "没有登记 window，无需动手";
-  // `windowClosable`, not merely "there is a window id": the registry is
-  // persisted, so a record restored after a tmux server restart carries ids
-  // that server has since handed to somebody else. The target is built as
-  // `<session>:<@window>` from the SAME record, so a wrong id can only reach a
-  // window of the gate's own session — and an entry missing either half is
-  // left alone entirely (reviewer P1, 2026-09-05).
-  if (!windowClosable(child, deps.tmuxServer())) {
-    if (child.windowId) {
-      killNote = `window ${child.windowId} 不能按记录关（是另一个 tmux server 铸造的 id，或记录里缺 session/window 坐标），只清登记`;
-    }
-  } else {
-    // THE LABEL BAR IS NOT TOUCHED HERE (2026-09-17, user decision). It used
-    // to be taken down when the caller judged this the last decorated pane,
-    // and that judgement was wrong across sessions besides resizing every pane
-    // in the window on both edges. Under the window topology the bar belongs to
-    // the CHILD's window and disappears with it.
-    const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
-    terminated = killed.ok;
-    killNote = killed.ok ? `window ${child.windowId} 已关` : `关 window 失败（${killed.error}），登记照样清除`;
-  }
-  deps.saveHierarchy(removeJudge(deps.hierarchy(), judgeId));
-  // A closed audit takes its draft with it — same reason as fresh:true.
-  if (child.role === "goal-auditor") deps.dropPendingAudit(addressed.root);
-  return reply(
-    `review-gate: ${child.role}（${judgeId}）已关闭：${killNote}；transcript 保留，同 id 重开即续接。`,
-    { closed: true, terminated, judgeId },
-  );
-}
-
-
 // ---------- registration ----------
 
 /**
- * Register the judge-session tools on ONE host.
+ * `judge_wait` — the ONE waiting tool.
  *
- * `judge_close` is gate-internal (its only callers are the gate's own audit
- * chains, which close the auditor they opened); `judge_wait` goes on BOTH
- * hosts — the same implementation, registered twice, never a second copy of
- * the waiting logic (2026-09-05, user decision D1).
- */
-export function registerJudgeSessionTools(host: ToolHost, deps: JudgeSessionToolDeps): void {
-  host.registerTool({
-    name: "judge_close",
-    label: "Close Own Judge",
-    description:
-      "Close YOUR OWN judge pane (its transcript stays on disk, so the same id re-opens the same conversation) " +
-      "and drop it from the registry. Use it at task completion (declare_done cascade-closes the rest) or to stop " +
-      "a round that has gone off the rails. Idempotent. Only the opener may close; anyone else is refused.",
-    parameters: Type.Object({
-      role: ROLE_PARAM,
-      sessionId: SESSION_ID_PARAM,
-      repo: REPO_PARAM,
-    }),
-    execute: (_id, params) => doClose(deps, params),
-  });
-
-  registerJudgeWaitTool(host, deps);
-}
-
-/**
- * `judge_wait` on its own — the ONE waiting tool, and the reason it is a
- * separate export.
- *
- * The agent surface needs exactly this tool and nothing else of the family:
- * a session that has genuinely run out of deterministic work must be able to
+ * A session that has genuinely run out of deterministic work must be able to
  * wait for its judge's next message, and the alternative it was left with
  * (a hand-written `sleep` loop inside one bash call) locked a measured nine
  * minutes out of a session — the turn never ended, so nothing ever settled,

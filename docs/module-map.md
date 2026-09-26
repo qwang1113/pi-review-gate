@@ -90,9 +90,8 @@
     `decideCopilotWait`、一次 tick 的判定）与 `copilot_review` 自己跑的阻塞等待 `awaitCopilotNews`
     （2026-09-23 起取代扩展里的后台 watcher：等待不再靠结束 turn + 唤醒）——扩展只把「正在阻塞」
     报进子会话心跳（`waiting-judge`，`waitingFor: copilot`）。
-  - `lib/judge-session-tools.ts`：两个作用在既有 pane judge 上的入口 ——
-    `judge_close`（只在 internalHost，门禁自己的审计链收自己派的 judge）与
-    `judge_wait`（**同一实现注册到 internalHost 与 agent 面**，`registerJudgeWaitTool`；
+  - `lib/judge-session-tools.ts`：作用在既有 pane judge 上的唯一入口 ——
+    `judge_wait`（`judge_close` 已于 2026-09-27 删除：judge window 只由 `declare_done` 级联回收；**同一实现注册到 internalHost 与 agent 面**，`registerJudgeWaitTool`；
     消息驱动：新 channel report / pane 死亡 / judge 提问 / 新 finding 任一到达即返回，
     返回值由 `judge-report.ts` 的标准报告组装）。`judge_read` 已于 2026-09-05 删除
     （零调用死路径）。等待循环在 `lib/judge-wait-tool.ts`、判据在 `lib/judge-wait-criteria.ts`、
@@ -323,8 +322,8 @@ judge 还记不记得上一轮」），pane 何时回收不再有专门模块（
 `agent-directives.ts`**，因为项目经理侧要用同一份措辞、只换工具名），`judge-report.ts`
 只剩 opener 侧标准报告（扒取半边已删），`judge-prompt.ts` 装配系统提示（角色定义 + 共同协议），
 `child-watch.ts` 按 pane 存活 + 通道活跃度分类等待中的子会话；
-`judge-session-tools.ts` 是作用在既有 pane judge 上的两个入口
-（`judge_close` 只在 internalHost；`judge_wait` 同一实现同时注册到 internalHost 与 agent 面），
+`judge-session-tools.ts` 是作用在既有 pane judge 上的唯一入口
+（`judge_wait`，同一实现同时注册到 internalHost 与 agent 面；`judge_close` 已于 2026-09-27 删除），
 
 `judge-spawn-tools.ts` 是开/代答/恢复三个生命周期工具——注意这些工具族都不在
 扩展里，见 §1.2。进程时代的派发与唤醒（`spawnJudgeProcess` / `decideJudgeDispatch` /
@@ -659,10 +658,10 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `judge-prompt.ts` | judge 会话的系统提示装配：角色定义 + 共同协议 |
 | `judge-registry-host.ts` | opener 侧的 **judge 注册表**（t6 从扩展拆出，deps 一次定死：`runTmux` / `channelIO` / `roundBindingOf` / `copilotWaitSince`）：一张表（`judgeHierarchy()` 是访问器，表每次写都会被重新赋值）+ 待记录审计 `pendingAudits` + 按 repo 切片持久化（`.pi/judge-hierarchy.json`，`setHierarchy` 是唯一写入漏斗）、身份（`callerIdentity` / `callerIdentities` / `paneOwnerIdentity`）、自己的与活着的 judge（`ownJudges` / `ownLiveJudges` / `activeJudgeWait`）、模型健康记录与 `absorbJudgeModelEvents`、外来死条目清理、轮号 |
 | `judge-rotation.ts` | judge transcript 复用的**单元 / 释放点 / 上限**（纯函数，2026-09-05 用户口径）：复用单元 = 一个**已批准**的 review 对象（编排会话取 plan hash、其余取 goal hash，都没有则稳定占位 `none`——`none` 同样受两条闸约束，不是无界桶）；释放点 = 对象 id 变了（惰性判定，下次派发时比对，不改 goal/plan 的写入路径）；上限 = judge 自报上下文 ≥ `JUDGE_ROTATION_CONTEXT_PERCENT`（= 统一的 `HANDOFF_PERCENT`，70——它自己那个 60 已于 2026-09-14 删除）或同对象派发满 `JUDGE_ROTATION_MAX_ROUNDS`（8）轮——**轮次在派发时计数**，所以放弃/重开的轮也算，读数缺失则 fail-open（只靠轮次兜底）。`decideJudgeRotation` 给出 lane（`{objectId, generation}`，由 `judge-process.ts` 的 `laneSuffix` 渲染进 session id 与工作目录）与写回注册表的簿记；`rotationHandoffTask` 组装轮转后首轮的压缩交接——交接正文一律由 `review-carryover.ts` 的 `buildReviewCarryover` 渲染，本模块不写第二份。`judgeRemembersPreviousRound`（2026-09-06）把「本轮 judge 还记不记得上一轮」这件**只有这里知道**的事导出给 `review-scope.ts`：`reuse` **且** 该 lane 的 transcript 确实存在才算记得；`first` 也算不记得（登记表没有的 lane，它的历史门禁担保不了），任何未知一律 `false` |
-| `judge-session-addressing.ts` | `judge_close` / `judge_wait` 共用的寻址（`addressJudge`，含 gate-self 旁路）、opener 校验 `checkOpener`、可寻址角色表 `ADDRESSABLE_JUDGE_ROLES` 与两种失败形状 |
+| `judge-session-addressing.ts` | `judge_wait` 的寻址（`addressJudge`，含 gate-self 旁路）、opener 校验 `checkOpener`、可寻址角色表 `ADDRESSABLE_JUDGE_ROLES` 与失败形状 |
 | `judge-wait-criteria.ts` | pane judge 的**等待判据**：`probeJudgeRound`（本轮是否结束，调 `selectRoundReport`；settle 扫描也直接用它）、`probeJudgeWait`（消息驱动：report / 提问 / finding / 模型耗尽）、`paneJudgeStalled`、`recentStreamFindings` |
 | `judge-wait-tool.ts` | `judge_wait` 的实现 `doWait`：等待循环、finding 与模型事件游标、标准报告组装；门禁自己的审计链带 `gateSelf` 直接调它 |
-| `judge-session-tools.ts` | 作用在既有 pane judge 上的两个入口（文件里留 deps、参数 schema、`doClose` 与注册；等待实现/判据/寻址见上三行）：`judge_close`（只在 internalHost，门禁审计链自收）与 `judge_wait`（`registerJudgeWaitTool` 把**同一实现**注册到 internalHost 与 agent 面）；等待是**消息驱动**的 —— 新 channel report / pane 死亡 / judge 提问 / 新 finding / `settled`（本轮已交卷、已记录且已消费，而 pane 空闲 ⇒ **立即**回一个「没有可等的了」，不再阻塞到超时，2026-09-16）任一命中即返回，去重游标是 entry 上的 `lastReportId` + `lastFindingCount` 与会话侧已宣告问题集；opener 校验也在内。**report 落地后它不自己记录**（2026-09-05）：一律交给 `audit-round.ts` 的 `settleAuditRound`，report 游标也由引擎推——它只保留 finding 游标。**「本轮是否结束」也不自己判**（2026-09-05 第二次）：`probeJudgeRound` 调 `selectRoundReport` 用同一份 binding（deps 的 `roundBinding`），不属于本轮的 report 不算结束、原样报成 `notThisRound`——两侧判据不一致时，wait 会宣布一个记录侧随后拒绝的 READY。`judge_read` 已删（2026-09-05） |
+| `judge-session-tools.ts` | 作用在既有 pane judge 上的唯一入口（文件里留 deps、参数 schema 与注册；等待实现/判据/寻址见上三行；`judge_close` 已于 2026-09-27 删除——审计链不再自收，它没有调用方了）：`judge_wait`（`registerJudgeWaitTool` 把**同一实现**注册到 internalHost 与 agent 面）；等待是**消息驱动**的 —— 新 channel report / pane 死亡 / judge 提问 / 新 finding / `settled`（本轮已交卷、已记录且已消费，而 pane 空闲 ⇒ **立即**回一个「没有可等的了」，不再阻塞到超时，2026-09-16）任一命中即返回，去重游标是 entry 上的 `lastReportId` + `lastFindingCount` 与会话侧已宣告问题集；opener 校验也在内。**report 落地后它不自己记录**（2026-09-05）：一律交给 `audit-round.ts` 的 `settleAuditRound`，report 游标也由引擎推——它只保留 finding 游标。**「本轮是否结束」也不自己判**（2026-09-05 第二次）：`probeJudgeRound` 调 `selectRoundReport` 用同一份 binding（deps 的 `roundBinding`），不属于本轮的 report 不算结束、原样报成 `notThisRound`——两侧判据不一致时，wait 会宣布一个记录侧随后拒绝的 READY。`judge_read` 已删（2026-09-05） |
 
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export；「judge 不写主 sidecar」已搬入 `session-exclusivity.ts`（与 worker 的同一答案、与独占判定同源） |
 | `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论**本体**直写 channel report（无 fence 合成、无解析）；**签名按角色收窄**——reviewer / goal-auditor 只有 verdict + findings + cwd（传 notes 显式拒绝且不占额度），adviser 保留 notes（它的产出就是正文）；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度；**零审查的 READY 直接拒**（判据在 `judge-inspection.ts`，拒绝不占额度、并给出申诉出路），观测结果以新增可选字段 `inspection` 盖在 report 上；本轮范围与全量/增量档位以另一个新增可选字段 `scope` 盖上（自述，与门禁登记的那半并排落进 `RoundRecord.scope`，只记录不阻塞） |
@@ -824,7 +823,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `precommit-tool.ts` | **内部实现** `run_precommit`（t8）：precommit PASS 的唯一来源，异步、可中止、按输入缓存；runner 在 `precommit-runner.ts` |
 | `judge-submit-tool.ts` | `judge_submit` 的**注册与工具体**（t8）：角色校验（与枚举同源）、adviser / goal-auditor 任务组装、reviewer 走 `submitForReview` 链、并行两位 judge 的派发与「半轮不起」规则 |
 | `judge-submit-receipt.ts` | `judge_submit` 的**两份回执文案**（t8）：没派任何 judge（环节全关）与逐个列出派出的 judge（每位一条 findings 流） |
-| `judge-tools-wiring.ts` | 面向 agent 的 judge 工具（`judge_wait` / `judge_close` / `judge_spawn` …）的 **deps 装配**（t8）：从会话的注册表、lane 与 settle 路径建出来；读表时先丢死掉的外来条目 |
+| `judge-tools-wiring.ts` | 面向 agent 的 judge 工具（`judge_wait` / `judge_spawn` …）的 **deps 装配**（t8）：从会话的注册表、lane 与 settle 路径建出来；读表时先丢死掉的外来条目 |
 | `review-prepare-wiring.ts` | 三个内部 prepare 步骤的 **deps 装配**（t8）：`prepare_review` 的审查目标登记（登记即退掉上一轮扫下的 READY）与两个 advisory builder |
 | `worker-wiring.ts` | worker 工具族的**会话侧接线**（t8）：哪个面注册哪些工具（派活工具只在 agent 面、`worker_report` 只在 worker 面）与会话的管道 |
 | `declare-done-tool.ts` | `declare_done` 的**注册与工具体**（t8）：逐 repo 复检（编排模式只看 plan）、联关本 opener 的 judge（在飞的验收轮除外）、完成条件层（Copilot / goal / 站点）、真实验收、完成记录与收尾 |

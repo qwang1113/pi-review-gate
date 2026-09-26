@@ -11,9 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  registerJudgeSessionTools,
   registerJudgeWaitTool,
-  doClose,
   type JudgeChildRecord,
   type JudgeSessionToolDeps,
 } from "../lib/judge-session-tools.ts";
@@ -99,7 +97,7 @@ function child(overrides: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
   };
 }
 
-function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = registerJudgeSessionTools): Fake {
+function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = registerJudgeWaitTool): Fake {
   const state = {
     deps: undefined as unknown as JudgeSessionToolDeps,
     tools: new Map(),
@@ -212,8 +210,6 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
         ...(state.scope === undefined ? {} : { scope: state.scope }),
       };
     },
-    dropPendingAudit: (root) => { state.calls.push(`dropPendingAudit(${root})`); },
-    cancelWaitTimer: () => { state.calls.push("cancelWaitTimer"); },
   };
   const host: ToolHost = {
     registerTool: (definition) => {
@@ -316,19 +312,14 @@ function writeQuestion(f: Fake, c: JudgeChildRecord, requestId: string, title: s
   );
 }
 
-test("the module registers exactly the two session tools", () => {
+test("the module registers judge_wait and nothing else — judge_close is gone (2026-09-27)", () => {
   const f = fake();
-  assert.deepEqual(f.order, ["judge_close", "judge_wait"]);
+  assert.deepEqual(f.order, ["judge_wait"]);
 });
 
-test("judge_wait is registerable ALONE — that is how the agent surface gets it", () => {
-  const f = fake(registerJudgeWaitTool);
-  assert.deepEqual(f.order, ["judge_wait"], "the agent host gets the wait and nothing else of the family");
-});
-
-test("every tool takes the same role / sessionId / repo parameters", () => {
+test("judge_wait takes the role / sessionId / repo addressing parameters", () => {
   const f = fake();
-  for (const tool of ["judge_close", "judge_wait"]) {
+  for (const tool of ["judge_wait"]) {
     const schema = f.schemas.get(tool) as { properties?: Record<string, unknown> } | undefined;
     const properties = schema?.properties ?? {};
     assert.deepEqual(
@@ -366,7 +357,7 @@ test("the role enum is declared ONCE in lib/ — the spawn tools import it (2026
 });
 
 test("an unaddressed call is refused before the repo is even resolved", async () => {
-  for (const tool of ["judge_close", "judge_wait"]) {
+  for (const tool of ["judge_wait"]) {
     const f = fake();
     const reply = await call(f, tool, {});
     assert.equal(reply.isError, true);
@@ -376,7 +367,7 @@ test("an unaddressed call is refused before the repo is even resolved", async ()
 });
 
 test("an ambiguous repo is reported, never guessed", async () => {
-  for (const tool of ["judge_close", "judge_wait"]) {
+  for (const tool of ["judge_wait"]) {
     const f = fake();
     f.repo = { ok: false, error: "review-gate: this session has edited more than one repository" };
     const reply = await call(f, tool, { role: "reviewer" });
@@ -389,105 +380,8 @@ test("an ambiguous repo is reported, never guessed", async () => {
 test("the failure details carry every field the success path reports", async () => {
   const f = fake();
   f.repo = { ok: false, error: "nope" };
-  const close = await call(f, "judge_close", { role: "reviewer" });
-  assert.deepEqual(close.details, { closed: false, terminated: false, judgeId: undefined });
   const wait = await call(f, "judge_wait", { role: "reviewer" });
   assert.deepEqual(wait.details, { done: false, reason: undefined, role: undefined, hasVerdict: false });
-});
-
-test("judge_close: closing nothing is a SUCCESS (idempotent sweep)", async () => {
-  const f = fake();
-  const reply = await call(f, "judge_close", { role: "reviewer" });
-  assert.notEqual(reply.isError, true);
-  assert.match(textOf(reply), /nothing to close/);
-  assert.deepEqual(reply.details, { closed: true, terminated: false, judgeId: undefined });
-});
-
-test("judge_close: the opener's WINDOW is killed and the registry entry goes", async () => {
-  const f = fake();
-  seed(f);
-  const reply = await call(f, "judge_close", { role: "reviewer" });
-  assert.equal(reply.isError, undefined, textOf(reply));
-  assert.deepEqual(f.panes, ["%1"], "the judge's window is gone");
-  assert.ok(f.tmuxCalls.some((argv) => argv[0] === "kill-window"
-    && argv[argv.length - 1] === "rg-repo-abcdef1234:@7"),
-    "addressed through the session that owns it, so a stale id cannot reach a window of the user's");
-  assert.deepEqual(f.table.current, {}, "the registry entry goes with it");
-  assert.ok(f.calls.includes("cancelWaitTimer"), "the hosted-wait watchdog is cancelled");
-  assert.match(textOf(reply), /window @7 已关/);
-  assert.deepEqual(reply.details, { closed: true, terminated: true, judgeId: "rg-reviewer-abc" });
-});
-
-test("judge_close: closes the pane and writes NO WINDOW OPTION (2026-09-17)", async () => {
-  // Five tests used to live here — the last judge releases, a child never
-  // does, a manager counts its children, an unreadable pane list keeps the bar
-  // up, a registry row is not a decorated pane — and every one of them pinned
-  // a branch of the label-bar RELEASE. The release is deleted: taking the bar
-  // down writes `pane-border-status`, and that RESIZES EVERY PANE IN THE
-  // WINDOW (measured on a scratch tmux: SIGWINCH, rows 84 ↔ 83, in both
-  // directions; re-setting the same value triggers nothing). So closing a
-  // judge may kill a pane and nothing else, and the "is it the last one"
-  // question has no answer left to get wrong across sessions.
-  const f = fake();
-  seed(f);
-  const reply = await call(f, "judge_close", { role: "reviewer" });
-  assert.equal(reply.isError, undefined, textOf(reply));
-  const flat = f.tmuxCalls.map((a) => a.join(" "));
-  assert.ok(flat.some((s) => s.startsWith("kill-window")), "the window itself is still closed");
-  assert.deepEqual(
-    flat.filter((s) => s.startsWith("setw")),
-    [],
-    "no window option is written on close — the bar stays on (user decision 2026-09-17)",
-  );
-  assert.deepEqual(f.table.current, {}, "and the registry entry goes, as it always did");
-});
-
-test("judge_close: an id from ANOTHER tmux server is never killed", async () => {
-  // The registry is persisted now, so a record can outlive the tmux server
-  // that minted its pane id — and tmux hands ids out from %0 again after a
-  // restart. Reachable from a plain judge_close({role}) in a resumed session,
-  // which would then kill whatever now holds %7 (reviewer P1, 2026-09-05).
-  const f = fake();
-  seed(f, { tmuxServer: "sock,OLD-SERVER" });
-  const reply = await call(f, "judge_close", { role: "reviewer" });
-  assert.equal(reply.isError, undefined, textOf(reply));
-  assert.deepEqual(f.panes, ["%1", "%7"], "the stranger's window is left alone");
-  assert.equal((reply.details as { terminated: boolean }).terminated, false);
-  assert.match(textOf(reply), /另一个 tmux server/, "…and the reply says why it did not");
-  // The registry still has to be cleaned up: the entry is the thing this
-  // session owns, and leaving it would strand the round forever.
-  assert.deepEqual(f.table.current, {}, "the entry goes either way");
-});
-
-test("judge_close: an entry with no recorded server is not killed by its id either", async () => {
-  const f = fake();
-  seed(f, { tmuxServer: undefined });
-  const reply = await call(f, "judge_close", { role: "reviewer" });
-  assert.equal(reply.isError, undefined, textOf(reply));
-  assert.deepEqual(f.panes, ["%1", "%7"], "unverifiable ⇒ do not act");
-  assert.deepEqual(f.table.current, {});
-});
-
-test("judge_close: a stranger cannot close another opener's pane", async () => {
-  const f = fake();
-  seed(f);
-  f.caller = "session-intruder";
-  const reply = await call(f, "judge_close", { role: "reviewer" });
-  assert.equal(reply.isError, true);
-  assert.match(textOf(reply), /跨级/);
-  assert.deepEqual(f.panes, ["%1", "%7"], "the pane survives");
-});
-
-test("judge_close: only a goal-auditor takes its pending draft with it", async () => {
-  const f = fake();
-  seed(f);
-  await call(f, "judge_close", { role: "reviewer" });
-  assert.ok(!f.calls.some((c) => c.startsWith("dropPendingAudit")), "a reviewer close leaves the draft alone");
-
-  const g = fake();
-  seed(g, { role: "goal-auditor", judgeId: "rg-goal-1" });
-  await call(g, "judge_close", { role: "goal-auditor" });
-  assert.ok(g.calls.includes(`dropPendingAudit(${ROOT})`), "a closed audit's draft is forgotten with it");
 });
 
 test("judge_wait: with no child on record it says how to start one", async () => {
@@ -1076,7 +970,7 @@ test("REGRESSION (2026-09-08): the gate's self-audit bypasses the repo check —
   // audit — the chain's judge_wait/judge_close went through addressJudge's
   // "has this session edited that repo" check and were refused, while the
   // auditor's READY sat in the channel. The gate's own chains now call
-  // doWait/doClose directly by judgeId; agent-facing tools keep the check.
+  // doWait directly by judgeId; agent-facing tools keep the check.
   const f = fake();
   f.repo = { ok: false, error: "review-gate: repo X is not one of the repositories this session has edited" };
   const c = seed(f);
@@ -1097,9 +991,6 @@ test("REGRESSION (2026-09-08): the gate's self-audit bypasses the repo check —
   const forged = await doWait(f.deps, { sessionId: c.judgeId, gateSelf: true }, undefined, undefined);
   assert.equal(forged.isError, true, "a gateSelf field inside params must not bypass the repo check");
   assert.match(textOf(forged), /not one of the repositories/);
-  const forgedClose = await doClose(f.deps, { sessionId: c.judgeId, gateSelf: true });
-  assert.equal(forgedClose.isError, true, "same for close");
-  assert.match(textOf(forgedClose), /not one of the repositories/);
 
   // Gate path: same deps, same child, addressed by judgeId + gateSelf marker —
   // the report ends it. (doWait reports success with isError UNSET — only
@@ -1108,13 +999,6 @@ test("REGRESSION (2026-09-08): the gate's self-audit bypasses the repo check —
   assert.notEqual(direct.isError, true, `gate self-wait must bypass the repo check: ${textOf(direct)}`);
   assert.equal(direct.details?.done, true);
   assert.equal(direct.details?.reason, "report");
-
-  // Close path, same split: tool refuses, direct close succeeds.
-  const closeTool = await call(f, "judge_close", { role: "reviewer" });
-  assert.equal(closeTool.isError, true);
-  const closeDirect = await doClose(f.deps, { sessionId: c.judgeId }, true);
-  assert.notEqual(closeDirect.isError, true, `gate self-close must bypass the repo check: ${textOf(closeDirect)}`);
-  assert.equal(closeDirect.details?.closed, true);
 });
 
 test("judge_wait after a FAILED LANE cancelled the reviewer: says cancelled, why, and what next (t3)", async () => {

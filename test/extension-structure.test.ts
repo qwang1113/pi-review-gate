@@ -145,7 +145,7 @@ const SIBLING_VERDICT_SRC = readFileSync(join(ROOT, "lib", "sibling-verdict-host
 const CANCEL_SRC = readFileSync(join(ROOT, "lib", "round-cancel-host.ts"), "utf8");
 /** The acceptance round armed at completion (moved out, t7). */
 const ACCEPTANCE_HOST_SRC = readFileSync(join(ROOT, "lib", "acceptance-host.ts"), "utf8");
-const JUDGE_SESSION_TOOLS = new Set(["judge_close", "judge_wait"]);
+const JUDGE_SESSION_TOOLS = new Set(["judge_wait"]);
 
 /**
  * The other half of the same family: the tools that RELAY to a judge session
@@ -341,7 +341,6 @@ function codeOnly(src: string): string {
  */
 const LIB_TOOL_HANDLERS: Record<string, string> = {
 
-  judge_close: "async function doClose(",
   judge_wait: "async function doWait(",
   prepare_review: "async function doPrepareReview(",
   prepare_adviser: "async function doPrepareAdviser(",
@@ -3043,17 +3042,10 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
   assert.match(childBlock, /if \(!notifyNow\)/, "the throttled hosted wait has a distinct branch");
   assert.match(childBlock, /scheduleChildWaitRecheck\(/, "the throttled branch schedules a self-owned recheck");
   assert.match(childBlock, /return;/, "the throttled branch does not fall through to RESUME");
-  // judge_close still cancels the watchdog — the tool body now says so
-  // through its dep (it lives in lib/judge-session-tools.ts), and the
-  // extension's wiring is what binds that dep to the timer itself. Both
-  // halves are asserted: either one alone would let the cancel silently
-  // become a no-op.
-  const closeBody = toolBodyOf("judge_close");
-  assert.match(closeBody, /deps\.cancelWaitTimer\(\)/, "judge_close cancels the watchdog");
-  assert.match(judgeToolsWiring(), /cancelWaitTimer: \(\) => deps\.cancelChildWaitTimer\(\)/,
-    "…and the wiring binds that dep to the gate's own timer");
-  assert.equal((ENTRY_SRC.match(/cancelChildWaitTimer: \(\) => l2\.cancelChildWaitTimer\(\)/g) ?? []).length, 2,
-    "…which the entry hands both the judge tools and the lifecycle from the L2 continuation");
+  // `judge_close` (which also cancelled the watchdog) is gone since 2026-09-27;
+  // the lifecycle is what still gets the timer from the L2 continuation.
+  assert.equal((ENTRY_SRC.match(/cancelChildWaitTimer: \(\) => l2\.cancelChildWaitTimer\(\)/g) ?? []).length, 1,
+    "…which the entry hands the lifecycle from the L2 continuation");
   const shutdownBody = windowOf(SESSION_SHUTDOWN, "\n  }", "session_shutdown handler");
   assert.match(shutdownBody, /cancelChildWaitTimer\(\)/, "session_shutdown cancels the watchdog");
 });
@@ -3175,7 +3167,7 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
 });
 
-test("judge_close / judge_wait address a judge by ROLE", () => {
+test("judge_wait addresses a judge by ROLE", () => {
   // One role enum, shared by both tools (a third spelling of it is how
 
   // two of them would silently start accepting different roles).
@@ -3195,7 +3187,7 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
     "the parameter enum is built from the list");
   assert.match(JUDGE_TOOLS_SRC, /needs a role \(\$\{Object\.keys\(ADDRESSABLE_JUDGE_ROLES\)\.join\(" \/ "\)\}\)/,
     "the refusal text is built from the same list");
-  for (const tool of ["judge_close", "judge_wait"]) {
+  for (const tool of ["judge_wait"]) {
 
     const body = toolBodyOf(tool);
     assert.match(body, /role: ROLE_PARAM/, `${tool} takes a role`);
@@ -3346,8 +3338,8 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
   assert.match(JUDGE_TOOLS_SRC, /function checkOpener\(/, "the opener check is one shared helper");
   assert.equal(
     (JUDGE_TOOLS_SRC.match(/checkOpener\(deps, /g) ?? []).length,
-    2,
-    "close and wait each pass the opener check before touching the judge",
+    1,
+    "wait passes the opener check before touching the judge",
   );
   // `judge_read` is DELETED (2026-09-05, D4): a zero-caller path, invisible to
   // agents and called by no gate chain, whose only remaining effect was to
@@ -3407,24 +3399,19 @@ test("the TEN advanced entries are not registered anywhere an agent can see", ()
   }
 });
 
-test("judge_close stays gate-internal; judge_wait is ONE implementation on BOTH hosts", () => {
-  // Closing a pane belongs to the gate: its only callers are the audit chains
-  // closing the auditor they opened. WAITING does not — an opener with nothing
-  // left to do must be able to wait for its judge's next message through a
-  // tool, or it writes a `sleep` loop and locks itself out of its own wake-up
-  // (measured 2026-09-05: nine minutes, one unrecorded report).
-  assert.ok(!SRC.includes(`pi.registerTool({\n    name: "judge_close"`),
-    "judge_close must not be registered with pi");
-  assert.ok(JUDGE_TOOLS_SRC.includes(`name: "judge_close"`),
-    "judge_close's implementation must stay (gate chains call it)");
+test("judge_close is gone; judge_wait is ONE implementation on BOTH hosts", () => {
+  // Closing a pane is `declare_done`'s cascade alone since 2026-09-27 — the
+  // audit chains stopped closing their auditor, which left `judge_close` with
+  // no caller. WAITING stays a tool: an opener with nothing left to do must be
+  // able to wait for its judge's next message, or it writes a `sleep` loop and
+  // locks itself out of its own wake-up (measured 2026-09-05: nine minutes).
+  assert.ok(!JUDGE_TOOLS_SRC.includes(`name: "judge_close"`), "judge_close is not registered anywhere");
+  assert.ok(!JUDGE_TOOLS_SRC.includes("function doClose("), "…and its implementation is gone, not orphaned");
   assert.ok(JUDGE_TOOLS_SRC.includes(`name: "judge_wait"`), "judge_wait's implementation stays in lib/");
-  // ONE implementation, TWO hosts (D1): the agent registration must go through
-  // the same registrar, over the same deps object — a second `registerTool`
-  // written inline in the extension would be the second implementation.
-  assert.match(SRC, /registerJudgeSessionTools\(internalHost, judgeSessionDeps\)/,
-    "the family is wired through internalHost, not pi");
-  assert.doesNotMatch(SRC, /registerJudgeSessionTools\(pi,/,
-    "pi must never receive the whole management family");
+  // ONE implementation, TWO hosts (D1): both registrations go through the
+  // same registrar, over the same deps object.
+  assert.match(SRC, /registerJudgeWaitTool\(internalHost, judgeSessionDeps\)/,
+    "the internal host gets the same judge_wait");
   assert.match(SRC, /registerJudgeWaitTool\(pi, judgeSessionDeps\)/,
     "the agent surface gets judge_wait — the SAME implementation, over the SAME deps");
   assert.equal(
@@ -3992,21 +3979,6 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the window i
   assert.match(REGISTRY_SRC.slice(helperAt, helperAt + 600), /judgeChannelTarget\(judge\.openerId, judge\.judgeId\)/,
     "…from THAT judge's own channel file");
 
-  // judge_close: kill the WINDOW, then drop the registry. Idempotent.
-  const close = toolBodyOf("judge_close");
-  assert.match(
-    close,
-    /closeSessionWindow\(deps\.tmux, \{ ownSession: child\.tmuxSession, windowId: child\.windowId \}\)/,
-    "the child's window is closed, not a process",
-  );
-  // …and NOTHING else: the window's label bar used to come down with the last
-  // decorated pane, and that write resizes every pane in the window (measured:
-  // SIGWINCH, rows 84 ↔ 83). The release is deleted (2026-09-17, user decision).
-  assert.doesNotMatch(close, /releasesWindowLabels|hideLabelsVia|setw/,
-    "no window option is touched by a close");
-  assert.match(close, /closed: true/,
-    "closing an already-finished child still reports success (idempotent)");
-  assert.match(close, /transcript 保留/, "the records remain inspectable after close");
 });
 
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {
@@ -6192,12 +6164,10 @@ test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by disp
   assert.doesNotMatch(sweep, /role === "goal-auditor"[^\n]*continue/,
     "no role may be exempted from the terminal sweep");
 
-  // THE OTHER HALF OF THE TOPOLOGY: the agent has no way to close a pane, so
-  // there is nothing for it to get wrong. `judge_close` is registered on the
-  // internal host only.
-  const registration = windowIn(ENTRY_SRC, "// `judge_close` stays INTERNAL", "registerJudgeWaitTool(pi,", "judge tool host split");
-  assert.match(registration, /registerJudgeSessionTools\(internalHost, judgeSessionDeps\);/,
-    "judge_close stays off the agent's tool surface — that IS policy (b)");
+  // THE OTHER HALF OF THE TOPOLOGY: nothing but the sweep can close a judge
+  // pane — `judge_close` is registered on no host at all.
+  assert.ok(!JUDGE_TOOLS_SRC.includes(`name: "judge_close"`) && !SRC.includes(`name: "judge_close"`),
+    "judge_close is on no tool surface — that IS policy (b)");
 });
 
 /**

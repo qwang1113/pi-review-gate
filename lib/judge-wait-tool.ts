@@ -32,7 +32,7 @@ export async function doWait(
   onUpdate: unknown,
   /**
    * GATE-SELF BYPASS (2026-09-08): true only on the gate's own direct calls.
-   * Same shape as `doClose` — a function argument, never a params field.
+   * A function argument, never a params field (params arrive from the agent verbatim).
    */
   gateSelf = false,
 ): Promise<ToolReply> {

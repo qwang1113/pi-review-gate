@@ -97,7 +97,7 @@ export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
    *
    * The pair of writes a record makes (pending forgotten, cursor advanced) is
    * the older evidence, and half of it lives in the JUDGE REGISTRY — which a
-   * close deletes (`judge_close` drops the row even when the kill fails; the
+   * close deletes (the since-deleted `judge_close` dropped the row even when the kill failed; the
    * 2026-09-21 round-end reclaim did exactly that until 2026-09-27). So from 2026-09-21 a round the WAIT recorded came back to this
    * chain looking like a round nobody recorded: three consecutive plan audits
    * PASSed, were written to the gate's state and its audit log, and were each
