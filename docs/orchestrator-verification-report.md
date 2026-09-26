@@ -184,17 +184,18 @@ p1–p5 每个任务拆一个文件；p6 收尾时审核整个 `main..HEAD`，�
 - 两个临时 agent 目录 `/tmp/p7acc/agent-{branch,main}`：除 `settings.json` 以外全部软链到 `~/.pi/agent`；`settings.json` 里 `extensions` 分别只放本分支的 `extensions/review-gate.ts` 和 main（`0189b01`，用 `git archive` 导出到 `/tmp/p7acc/main-src`）的同名文件，`packages` 只留 `npm:pi-anthropic-oauth`。
 - 两个空的临时 git 仓库 `/tmp/p7acc/repo-{branch,main}`，分别在独立 server `tmux -L rg-p7` 的两个 session 里起 `PI_CODING_AGENT_DIR=… pi --thinking low`，启动前 unset 掉本会话所有 `RG_*` / `PI_SESSION_*` / `TMUX*` 变量。
 - 用 `send-keys` 下发同一份指令，工具返回值从两个会话的 transcript 里原样抽取。
+- 共跑两次。第一次（`repo-{branch,main}`）覆盖 plan / 登记 / ask_user / handoff。第一次里两个会话互相去抢对方的名字，因为 P7-1，只有本分支那一侧真正撞了名；第一次的本分支会话也没有调 `orchestrator_wait`。因此补跑了第二次（`r2-{branch,main}`，同一套 agent 目录）：两边都在已经持有名字的前提下，去抢另一个活会话已占用的名字，然后都调 `orchestrator_wait({timeoutMs:0})`。
 
 | 步骤 | 覆盖的拆分模块 | 本分支 | main | 结论 |
 | --- | --- | --- | --- | --- |
 | `set_gate_mode orchestrator` | — | `gate mode set to "orchestrator"` | 相同 | 一致 |
 | `orchestrator_plan write` + `read` | plan / plan-progress / registry / registry-normalize | 写入 `.pi/orchestrator-plan.json`，摘要、站点、「未获批准」均正确；read 读回同一份内容 | 相同；两份 plan JSON 去掉路径和时间戳后逐字节相同 | 一致 |
 | `name_session` 登记 | session-name-tools / session-registry | `p7-probe-branch 已登记`，写入 `rg-sessions/*.json` 与 window title | 相同 | 一致 |
-| `name_session` 撞名 | 同上 | 拒绝并点名占用者（repo / 状态 / 心跳 / pid） | 代码逐字相同（见 P7-1） | 一致 |
+| `name_session` 撞名（第二次） | 同上 | 持有 `p7-r2-branch` 时去抢被 main 会话占用的名字 → 「已被别的活会话占用：repo=…、状态=working、模式=orchestrator、…请另选一个名字。（旧名字 p7-r2-branch 已腾出）」 | 持有 `p7-r2-holder` 时去抢被本分支会话占用的 `p7-r2-b2` → 同一段文案（仅名字与占用者字段不同），同样带「旧名字 p7-r2-holder 已腾出」 | 一致（两边共有 P7-1） |
 | `ask_user` 缺 recommended | ask-user-interview | 「第 1 个问题没有 recommended」，整批拒绝，不弹框 | 逐字相同 | 一致 |
 | `ask_user` 正常对话框 | ask-user-interview / user-interaction-tools | 弹出 `A. alpha（推荐） / B. beta / ✎ 不选，我说明原因`，选 B 后返回 `→ B. beta` | 逐字相同 | 一致 |
 | `session_handoff`（补充段为占位） | session-handoff / session-env / session-factory | 生成骨架文档（标题：接手后第一件事 / 当前契约 / 未完成的工作 / 前任最后的用户消息（原文）/ 前任补充），拒绝交接、不开 pane | 骨架去掉路径、session id 和本轮提示原文后逐行相同 | 一致 |
-| `orchestrator_wait timeoutMs:0` | wait-tool | 五块回执齐全 | 逐字相同（见 P7-3） | 一致 |
+| `orchestrator_wait timeoutMs:0`（第二次） | wait-tool | 五块回执齐全，标题「子会话的 pane 已经消失…」，第 5 块「没有 plan：…先建立 plan」 | 除「上下文已用 N%」外逐字相同 | 一致（两边共有 P7-3） |
 
 结论：拆分覆盖到的真实路径，行为和 main 完全一致；两边唯一的差异是各自的路径和 session id。验收结束后已 `tmux -L rg-p7 kill-server`，名字登记随进程退出自动腾出，没有碰默认 server 与用户的 session 0。
 
