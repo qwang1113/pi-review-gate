@@ -8,7 +8,11 @@ import {
   isContentFreeQualitySkip,
   isSkippedQualityRecord,
   isSourceFile,
+  judgeRuledOutByLane,
+  laneOwnsCurrentRound,
   qualityPrecondition,
+  qualityRecordGuidance,
+  resubmitWhileQualityInFlight,
   qualityRoundSkip,
   qualityStandingFor,
   roundCancelParty,
@@ -16,6 +20,57 @@ import {
   skippedQualityRecord,
 } from "../lib/quality-round.ts";
 import { QUALITY_ROUND_SPEC, REVIEW_ROUND_SPEC } from "../lib/audit-round-specs.ts";
+import { parseReviewScopeKind } from "../lib/judge-inspection.ts";
+import { parkedReadyNote } from "../lib/review-adjudicate.ts";
+
+// ---------- T1 defects (2026-09-27) ----------
+
+test("D15: the quality task carries the FULL scope marker, so its report never says the marker is missing", () => {
+  const task = buildQualityAuditTask({ range: "a..b", files: ["lib/x.ts"], streamPath: "/tmp/q.jsonl", rulesPath: "/r.md" });
+  assert.equal(parseReviewScopeKind(task), "full");
+});
+
+test("D02: a lane speaks for the registered round only when BOTH its round number and its target match", () => {
+  const lane = { round: 2, head: "h2", tree: "t2" };
+  assert.equal(laneOwnsCurrentRound(lane, { round: 2, head: "h2", tree: "t2" }), true);
+  assert.equal(laneOwnsCurrentRound(lane, { round: 3, head: "h2", tree: "t2" }), false, "a later round was sent");
+  assert.equal(laneOwnsCurrentRound(lane, { round: 2, head: "h3", tree: "t3" }), false, "the target moved");
+  assert.equal(laneOwnsCurrentRound(lane, { round: 2, head: "h2", tree: "t9" }), false, "same head, other tree");
+  assert.equal(laneOwnsCurrentRound({ round: 2 }, { round: 2, head: "h2", tree: "t2" }), false, "never bound");
+  // …and the matrix honours it: a late lane FAIL kills nobody.
+  assert.deepEqual(roundCancelPlan({ party: "lane", verdict: "FAIL", current: false }), {
+    cancelQuality: false, cancelReviewer: false, abortLane: false,
+  });
+});
+
+test("D03 (before dispatch): a lane that already failed rules out BOTH judges, never the adviser", () => {
+  assert.equal(judgeRuledOutByLane(QUALITY_ROLE, "precommit FAIL"), true);
+  assert.equal(judgeRuledOutByLane("reviewer", "precommit FAIL"), true);
+  assert.equal(judgeRuledOutByLane(QUALITY_ROLE, undefined), false);
+  assert.equal(judgeRuledOutByLane("adviser", "precommit FAIL"), false);
+});
+
+test("D03 (after dispatch): re-submitting over an in-flight quality round after a lane FAIL is refused unless fresh", () => {
+  const base = { qualityInFlight: true, lastLaneVerdict: "FAIL", fresh: false };
+  assert.equal(resubmitWhileQualityInFlight(base), "refuse");
+  assert.equal(resubmitWhileQualityInFlight({ ...base, fresh: true }), "proceed", "fresh abandons it explicitly");
+  assert.equal(resubmitWhileQualityInFlight({ ...base, qualityInFlight: false }), "proceed");
+  for (const v of ["PASS", "NOT_RUN", undefined]) {
+    assert.equal(resubmitWhileQualityInFlight({ ...base, lastLaneVerdict: v }), "proceed", `${String(v)}: no failed lane`);
+  }
+});
+
+test("D21: the quality recorder never claims the parked READY's fate — it points at parkedReadyNote", () => {
+  const none = qualityRecordGuidance({ verdict: "READY", reviewStageOn: true });
+  assert.doesNotMatch(none, /补记|扣/, "no parked READY ⇒ nothing about one");
+  const parked = qualityRecordGuidance({ verdict: "READY", reviewStageOn: true, parkedRound: 3 });
+  assert.match(parked, /第 3 轮 READY 此刻扣着/);
+  assert.doesNotMatch(parked, /这一步就是补记它的时刻/);
+  assert.match(parkedReadyNote("clear", 3), /已作废（round 3）/);
+  assert.match(parkedReadyNote("hold", 3), /第 3 轮扣下的 READY 仍扣着/);
+  // D13: a BLOCKED quality round no longer promises a stream path in the report.
+  assert.doesNotMatch(qualityRecordGuidance({ verdict: "BLOCKED", reviewStageOn: true }), /报告里有路径/);
+});
 
 test("isSourceFile: unknown = code (fail-closed), only enumerated non-code is skipped", () => {
   // Languages this gate has never been told about are CODE. The gate installs
@@ -211,17 +266,17 @@ test("roundCancelPlan: the FAILED LANE stops only the reviewer — the quality r
   // The asymmetry is the user's requirement: the quality judge reads code, and
   // a failing test suite says nothing about the code's quality. `abortLane` is
   // false because the lane has already landed — there is nothing left to abort.
-  assert.deepEqual(roundCancelPlan({ party: "lane", verdict: "FAIL" }), {
+  assert.deepEqual(roundCancelPlan({ party: "lane", verdict: "FAIL", current: true }), {
     cancelQuality: false, cancelReviewer: true, abortLane: false,
   });
   // A PASSING lane cancels nothing, and ONLY that exact word does — an
   // unreadable verdict is never PASS (the same fail-closed direction the
   // judges' rows take on a missing READY).
-  assert.deepEqual(roundCancelPlan({ party: "lane", verdict: "PASS" }), {
+  assert.deepEqual(roundCancelPlan({ party: "lane", verdict: "PASS", current: true }), {
     cancelQuality: false, cancelReviewer: false, abortLane: false,
   });
   for (const verdict of ["", "no verdict", "ERROR"]) {
-    assert.deepEqual(roundCancelPlan({ party: "lane", verdict }), {
+    assert.deepEqual(roundCancelPlan({ party: "lane", verdict, current: true }), {
       cancelQuality: false, cancelReviewer: true, abortLane: false,
     }, `${verdict}: an unreadable lane verdict is not PASS`);
   }
@@ -249,7 +304,7 @@ test("roundCancelPlan: ONE table covers all three parties — no row is implemen
   const rows = ([
     { party: "quality", verdict: "BLOCKED" },
     { party: "reviewer", verdict: "BLOCKED" },
-    { party: "lane", verdict: "FAIL" },
+    { party: "lane", verdict: "FAIL", current: true },
   ] as const).map((landing) => roundCancelPlan(landing));
   assert.deepEqual(rows.map((r) => r.cancelReviewer), [true, false, true]);
   assert.deepEqual(rows.map((r) => r.cancelQuality), [false, true, false]);

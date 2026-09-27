@@ -1032,7 +1032,7 @@ test("judge_wait after a FAILED LANE cancelled the reviewer: says cancelled, why
     qualityRoundInFlight: () => false,
     recordReviewVerdict: async () => "",
   });
-  const notes = applyCancelPlan(roundCancelPlan({ party: "lane", verdict: "NO_CHECKS_RUN" }), ROOT, "全量 precommit 没过（NO_CHECKS_RUN）");
+  const notes = applyCancelPlan(roundCancelPlan({ party: "lane", verdict: "NO_CHECKS_RUN", current: true }), ROOT, "全量 precommit 没过（NO_CHECKS_RUN）");
   assert.equal(notes.length, 1, "the lane row stops the reviewer");
   assert.equal(f.children.length, 0, "…and drops its row");
 

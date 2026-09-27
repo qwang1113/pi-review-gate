@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+
 /**
  * Streaming findings — the reviewer publishes as it goes, instead of only at
  * the end.
@@ -145,6 +147,16 @@ export function actionableFindings(findings: readonly StreamFinding[]): StreamFi
   return findings.filter(
     (f) => ACTIONABLE_SEVERITIES.includes(f.severity.toUpperCase()) && f.evidence !== "",
   );
+}
+
+/**
+ * The stream path WHEN IT IS WORTH POINTING AT — i.e. the file exists (D13,
+ * 2026-09-27). A judge only writes its stream when it streams a finding mid-
+ * round; a round that concluded without streaming leaves no file, and a
+ * receipt naming it sends the agent to a path that is not there.
+ */
+export function existingStreamPath(path: string | undefined): string | undefined {
+  return path !== undefined && existsSync(path) ? path : undefined;
 }
 
 /**

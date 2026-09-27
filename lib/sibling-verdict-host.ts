@@ -18,6 +18,7 @@ import { isBlockingSeverity } from "./judge-lifecycle.ts";
 import type { LoopStage } from "./loop-stages.ts";
 import type { ToolRepoTarget } from "./repo-resolve.ts";
 import { canonicalPath } from "./repo-facts.ts";
+import { qualityRecordGuidance } from "./quality-round.ts";
 import { adjudicateReviewConclusion, normalizeConcludedVerdict, type ReviewFinding } from "./review-adjudicate.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
 import type { Ref, SessionHost } from "./session-host.ts";
@@ -121,15 +122,13 @@ export function createSiblingVerdictRecorders(
       findingsTotal: parsed.findingsTotal,
     });
     lastGateEventAt.current = Date.now();
+    // The parked READY is mentioned only when one is parked for THIS round's
+    // content — the same tree match `reviewVerdictIsParked` uses.
+    const parked = st.pendingReady !== undefined && st.pendingReady.tree === targetNow?.tree
+      ? st.pendingReady.round
+      : undefined;
     return `review-gate: 质量轮记录 ${parsed.verdict} for ${targetRoot}（findings: ${parsed.findingsTotal}）。` +
-      (parsed.verdict === "BLOCKED"
-        ? " 先把 findings 全部改掉（它们写在 findings 流里，报告里有路径），再 judge_submit 重新送审。" +
-          "本轮功能轮如果还在跑，门禁已把它终止（内容要改，它的裁决没有意义）；如果它已经扣了一份 READY 下来，那份 READY 作废。"
-        : stageIsOn("review", targetRoot)
-        ? " 功能轮本来就在跑（同一个 judge_submit 启动的），你不需要再调一次；" +
-          "若它先交卷的 READY 被扣下，这一步就是补记它的时刻。"
-        : " 功能审查环节已关闭（用户设定的环节开关）—— 没有 reviewer 在跑，也不需要跑；" +
-          "质量结论已记入 sidecar，ship 时按它自己的卡点生效。") +
+      qualityRecordGuidance({ verdict: parsed.verdict, reviewStageOn: stageIsOn("review", targetRoot), parkedRound: parked }) +
       (stale
         ? "\nSTALE TARGET：质量轮判的那个 commit 已经不是 HEAD（prepare 之后又落了新 checkpoint）—— " +
           "结论记成 BLOCKED，按上面的方式重新送一轮即可。"

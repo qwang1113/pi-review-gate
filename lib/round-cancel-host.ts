@@ -28,7 +28,7 @@ import {
   type RoundCancelPlan,
   type RoundLanding,
 } from "./quality-round.ts";
-import { parkedLaneHalf, parkedReadyFate } from "./review-adjudicate.ts";
+import { parkedLaneHalf, parkedReadyFate, parkedReadyNote } from "./review-adjudicate.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
 import type { RoundCancelLedger } from "./round-cancel-ledger.ts";
 import type { SessionHost } from "./session-host.ts";
@@ -178,7 +178,10 @@ export function createRoundCancel(
         qualityRoundInFlight: qualityRoundInFlight(root),
       }),
     });
-    if (fate === "none" || fate === "hold") return [];
+    if (fate === "none") return [];
+    // A HOLD IS SAID TOO (D21): the quality recorder points at this line, so
+    // a round that stays parked must not leave that pointer dangling.
+    if (fate === "hold") return [parkedReadyNote(fate, parked.round)];
     // A LANDING NEEDS A CONTEXT TO WRITE WITH, AND WITHOUT ONE NOTHING MAY
     // CHANGE (quality round P1, 2026-09-16). This used to delete `pendingReady`
     // first and return when no ctx was in reach: the in-memory record was gone,
@@ -195,7 +198,7 @@ export function createRoundCancel(
         `parked READY for ${root} dropped: its two preconditions can no longer both hold ` +
         `(round ${parked.round}, tree ${parked.tree.slice(0, 12)})`,
       );
-      return [`本轮挂起的 READY 已作废（round ${parked.round}）：它的前提已不可能同时成立，重送一轮即可。`];
+      return [parkedReadyNote(fate, parked.round)];
     }
     const recorded = await recordReviewVerdict(parked.conclusion as ReportConclusion, root, liveCtx);
     const note = buildParkedReadyReplayNotice({ round: parked.round, tree: parked.tree, recorded });

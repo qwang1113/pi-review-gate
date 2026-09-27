@@ -25,7 +25,7 @@ import { recordGoalPrereview, type GoalPrereviewDeps } from "./goal-prereview-to
 import { registerJudge, type JudgeEntry } from "./hierarchy.ts";
 import type { JudgeRegistry } from "./judge-registry-host.ts";
 import type { JudgeDispatch } from "./judge-round-dispatch.ts";
-import { goalPrereviewPassed, goalTextHash } from "./loop-goal.ts";
+import { formatGoalAuditRefusal, goalPrereviewPassed, goalTextHash } from "./loop-goal.ts";
 import { formatPlanAuditRefusal } from "./orchestrator-plan-audit.ts";
 import type { ToolUpdate } from "./progress-stream.ts";
 import { buildStreamDirective } from "./review-stream.ts";
@@ -357,11 +357,14 @@ export function createAuditRoundHost(
       // caller its findings instead of a bare "审计记录：FAIL". The plan can:
       // `formatPlanAuditRefusal` is a pure function of the record it just
       // wrote, and the hash check keeps it bound to THIS round's content. The
-      // goal cannot, and does not need to — its spec appends the findings
-      // stream path, which is where a goal round's objections live.
+      // goal does the same (D13): its findings stream only exists when the
+      // auditor streamed, so the record is the one place they always are.
       recordedRefusal: (root, pending) => {
-        if (pending.kind !== "plan") return undefined;
         const st = stateOf(root);
+        if (pending.kind === "goal") {
+          const goal = st.goalPrereview;
+          return goal && goal.hash === goalTextHash(pending.draft) ? formatGoalAuditRefusal(goal) : undefined;
+        }
         const record = st.planAudit;
         if (!record || record.hash !== pending.hash) return undefined;
         return formatPlanAuditRefusal(record);

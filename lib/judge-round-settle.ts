@@ -21,6 +21,7 @@ import type { JudgeRegistry } from "./judge-registry-host.ts";
 import { buildStandardReport } from "./judge-report.ts";
 import { probeJudgeRound } from "./judge-wait-criteria.ts";
 import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import { existingStreamPath } from "./review-stream.ts";
 import type { SessionHost } from "./session-host.ts";
 
 export function createJudgeRoundSettle(
@@ -257,7 +258,7 @@ export function createJudgeRoundSettle(
         verdict: obs.verdict,
         findingsCount: obs.findingsCount,
         conclusionExcerpt: entry.role === "adviser" ? conclusion.text : undefined,
-        streamPath: entry.streamPath,
+        streamPath: existingStreamPath(entry.streamPath),
         recordedNote: conclusion.recorded ? conclusion.text : undefined,
         bindingNote: conclusion.bindingNote,
         // The hand-off reported on ITS own line: folded into the recorded note

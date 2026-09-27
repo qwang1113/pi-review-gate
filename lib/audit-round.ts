@@ -65,6 +65,7 @@
 // merging the sentences would have been a mistake.
 import type { AuditRoundSpec, PendingAudit } from "./audit-round-specs.ts";
 import { settleAuditRound, type SettleAuditRoundDeps } from "./audit-round-settle.ts";
+import { existingStreamPath } from "./review-stream.ts";
 
 /* ─────────────────────────── the synchronous round ───────────────────────── */
 
@@ -245,11 +246,18 @@ export async function runAuditRound(
   // this round's own note if it recorded here, else the refusal rebuilt from
   // the RECORD (which still holds the findings even when the wait did the
   // recording), else the bare verdict label.
-  const refusal = note ?? deps.recordedRefusal(root, input.pending);
+  // A note that does not already carry the record's refusal gets it appended
+  // (D13): the goal recorder's own reply names the verdict, not the findings.
+  const fromRecord = deps.recordedRefusal(root, input.pending);
+  const refusal = note === undefined || !fromRecord || note.includes(fromRecord)
+    ? (note ?? fromRecord)
+    : `${note}\n\n${fromRecord}`;
+  // A stream path is only worth printing when the auditor actually streamed.
+  const streamPath = existingStreamPath(input.streamPath);
   return {
     ok: false,
     text: spec.rejected(refusal || `审计记录：${deps.verdictLabel(root, input.pending)}`, {
-      ...(input.streamPath === undefined ? {} : { streamPath: input.streamPath }),
+      ...(streamPath === undefined ? {} : { streamPath }),
     }),
   };
 }

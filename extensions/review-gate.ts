@@ -1038,6 +1038,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       toolText,
       applyCancelPlan: (plan, root, why) => applyCancelPlan(plan, root, why),
       resumeParkedReady: (root, ctx, landing) => resumeParkedReady(root, ctx, landing),
+      currentTarget: (root) => reviewTargets.get(root),
+      qualityRoundInFlight,
     });
   const { recordReviewVerdict } = createReviewVerdictRecorder(host, {
     reviewTargets,
@@ -1119,7 +1121,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   registerJudgeSubmitTool(pi, cells, {
     resolveToolRepo, stateForRepo, persistRepo, stageIsOn, callTool, toolText, extractTaskText,
     submitForReview, buildGoalAuditRound, dispatchJudgeRound, cancelJudgeRound, noteQualityRoundDispatched,
-    registry, cancelLedger,
+    qualityRoundInFlight, registry, cancelLedger,
   });
 
   // ---------- judge_wait / judge_spawn (lib/judge-tools-wiring.ts) ----------

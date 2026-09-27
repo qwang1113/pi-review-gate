@@ -472,6 +472,14 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
 `PENDING`，而它不是裁决 —— 取消矩阵收到 `held` 这个事实时什么也不做，否则会杀掉这份
 结论正在等的那一轮（判定在 `roundCancelPlan` 的 `held` 分支，不得写成旁路的 `if`）。
 
+第三行只对**本轮**生效（2026-09-27，D02）：lane 在 prepare 之后绑定本轮 review target，
+落地时 `laneOwnsCurrentRound` 要求轮号（`sentReviewRounds`）与 head+tree 都对得上，
+否则一个迟到的 lane FAIL 不杀任何人（`roundCancelPlan` 的 lane 行带 `current`）。
+它也不再让质量轮白跑（D03）：lane 在质量轮派发前就已 FAIL ⇒ 两个 judge 都不派
+（`judgeRuledOutByLane`）；派发后才 FAIL ⇒ 质量轮照旧继续，而质量轮还在审时重送
+`judge_submit` 被拒、先 `judge_wait` 质量轮，`fresh:true` 才放弃它
+（`resubmitWhileQualityInFlight`）。
+
 - **取消是真的终止，不是「忽略结果」**：杀的是那个 pane 的进程（复用既有的
   `closeJudgePaneOf` + 注册表删行路径）。被取消的 judge 不再出现在注册表里，所以
   既不会被 `judge_wait` 等到，也不会被子进程看门狗当成「死掉的 judge」再报一次给

@@ -463,6 +463,26 @@ export function parkedReadyFate(args: {
   return "hold";
 }
 
+/**
+ * WHAT HAPPENED TO A PARKED READY, in ONE sentence per fate (D21, 2026-09-27).
+ *
+ * Two reports of the same moment used to disagree: the reviewer's said the
+ * parked READY was void, the quality recorder's said "this is the moment it
+ * gets recorded" — the latter written unconditionally, before the fate was
+ * even computed. Every surface now names the fate through this function, and
+ * the quality recorder only points at it (`qualityRecordGuidance`).
+ *
+ * `replay` has no line here: its delivery is the replay notice itself
+ * (`buildParkedReadyReplayNotice`), and one cause gets one message.
+ */
+export function parkedReadyNote(fate: "clear" | "hold", round: number): string {
+  if (fate === "clear") {
+    return `本轮挂起的 READY 已作废（round ${round}）：它的前提已不可能同时成立，重送一轮即可。`;
+  }
+  return `第 ${round} 轮扣下的 READY 仍扣着：它还在等另一半前提落地（全量 precommit 或质量轮），` +
+    "落地后门禁自动补记或作废 —— 不要重送。";
+}
+
 export function adjudicateReviewConclusion(
   input: StructuredConclusion,
   exemption?: ScopeExemption,

@@ -141,6 +141,7 @@ export function createReviewChain(
     //    this round ships without it. The fact is recorded on the checkpoint
     //    and repeated to the reviewer.
     let laneField: { laneFailure?: () => string | undefined } = {};
+    let lane: LaneHandle | undefined;
     const precommitOn = stageIsOn("precommit", input.root);
     const bypassActive = stateForRepo(input.root).bypass.active;
     if (!precommitOn) {
@@ -161,7 +162,8 @@ export function createReviewChain(
       // it (round-4 P2 — a joined lane would verify the WRONG content).
       input.progress?.step("precommit (full，与审查并行)");
       await waitForQuietLane(input.root);
-      laneField = { laneFailure: startPrecommitBeside(input.root, input.ctx).failure };
+      lane = startPrecommitBeside(input.root, input.ctx);
+      laneField = { laneFailure: lane.failure };
     }
 
     // 2. Freeze it. The reviewed unit is a commit, and the message says so —
@@ -211,6 +213,10 @@ export function createReviewChain(
       };
     }
     input.progress?.done(typeof prepared.details?.range === "string" ? String(prepared.details.range) : "范围已注册");
+    // THE LANE LEARNS WHICH ROUND IT VERIFIES (D02): prepare just registered
+    // this round's target, and the lane's landing may only act on that round.
+    const registered = reviewTargets.get(input.root);
+    if (registered) lane?.bind({ head: registered.head, tree: registered.tree });
     const taskText = extractTaskText(toolText(prepared));
     // The note is the MAIN SESSION's own words about its round — the very
     // text an injected "just conclude READY" would ride in on. It goes AFTER

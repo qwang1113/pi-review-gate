@@ -36,6 +36,7 @@
  *    — the mechanical fact a recorded READY hangs on.
  */
 
+import { SCOPE_BLOCK_HEADING, SCOPE_MARKER_FULL } from "./review-carryover.ts";
 import { buildStreamDirective } from "./review-stream.ts";
 import { QUALITY_ROUND_SPEC, REVIEW_ROUND_SPEC } from "./audit-round-specs.ts";
 
@@ -348,7 +349,35 @@ export type RoundLanding =
    * but the state the sidecar is left in (`PENDING`).
    */
   | { party: "reviewer"; verdict: string; held?: boolean }
-  | { party: "lane"; verdict: string };
+  /**
+   * `current` — the lane verified THIS round, the one whose reviewer is
+   * registered now (`laneOwnsCurrentRound`). A late lane of an earlier round
+   * must not kill the next round's reviewer (D02, 2026-09-27).
+   */
+  | { party: "lane"; verdict: string; current: boolean };
+
+/** Which round a lane belongs to, and which round is registered now. */
+export interface LaneRoundIdentity {
+  /** The round number (`nextReviewRoundNumber` at lane start / `sentReviewRounds` now). */
+  round: number;
+  /** The checkpoint commit and its tree (the review target). Absent ⇒ not bound yet. */
+  head?: string | undefined;
+  tree?: string | undefined;
+}
+
+/**
+ * DOES THIS LANE'S LANDING SPEAK FOR THE ROUND THAT IS REGISTERED NOW? (D02)
+ *
+ * Both identities must match: the round number (a later submission bumps it)
+ * AND the content (head + tree of the review target the lane was bound to).
+ * An unbound lane — one that landed before its round's checkpoint was
+ * prepared — speaks for no registered reviewer: the dispatch itself asks the
+ * lane before and after starting one (`laneFailure`, t8).
+ */
+export function laneOwnsCurrentRound(lane: LaneRoundIdentity, current: LaneRoundIdentity): boolean {
+  if (!lane.head || !lane.tree) return false;
+  return lane.round === current.round && lane.head === current.head && lane.tree === current.tree;
+}
 
 /**
  * WHICH PARTY OF A ROUND AN AUDIT KIND IS — the bridge between the two
@@ -412,7 +441,9 @@ export interface RoundCancelPlan {
 export function roundCancelPlan(landing: RoundLanding): RoundCancelPlan {
   const nothing = { cancelQuality: false, cancelReviewer: false, abortLane: false };
   if (landing.party === "lane") {
-    return landing.verdict === "PASS" ? nothing : { cancelQuality: false, cancelReviewer: true, abortLane: false };
+    return landing.verdict === "PASS" || !landing.current
+      ? nothing
+      : { cancelQuality: false, cancelReviewer: true, abortLane: false };
   }
   // A PARKED CONCLUSION IS NOT A VERDICT (quality round P0, 2026-09-16).
   // `recordReviewVerdict` returns BEFORE writing `st.review` when it holds a
@@ -425,6 +456,65 @@ export function roundCancelPlan(landing: RoundLanding): RoundCancelPlan {
   return landing.party === "quality"
     ? { cancelQuality: false, cancelReviewer: true, abortLane: true }
     : { cancelQuality: true, cancelReviewer: false, abortLane: true };
+}
+
+/**
+ * WHAT THE QUALITY RECORDER TELLS THE AGENT NEXT (D13/D21, 2026-09-27).
+ *
+ * `parkedRound` is the round of a functional READY parked for THIS round's
+ * content, when there is one. Only then does the reply mention it — and it
+ * only POINTS at the fate line (`parkedReadyNote`, lib/review-adjudicate.ts)
+ * instead of predicting it: the old unconditional "这一步就是补记它的时刻"
+ * contradicted the reviewer's report whenever the parked READY had already
+ * been voided.
+ */
+export function qualityRecordGuidance(input: {
+  verdict: string;
+  reviewStageOn: boolean;
+  parkedRound?: number | undefined;
+}): string {
+  if (input.verdict === "BLOCKED") {
+    return " 先把 findings 全部改掉（它们在本轮质量报告的结论里），再 judge_submit 重新送审。" +
+      "本轮功能轮如果还在跑，门禁已把它终止（内容要改，它的裁决没有意义）；如果它已经扣了一份 READY 下来，那份 READY 作废。";
+  }
+  if (!input.reviewStageOn) {
+    return " 功能审查环节已关闭（用户设定的环节开关）—— 没有 reviewer 在跑，也不需要跑；" +
+      "质量结论已记入 sidecar，ship 时按它自己的卡点生效。";
+  }
+  const parked = input.parkedRound === undefined
+    ? ""
+    : `功能轮先交卷的第 ${input.parkedRound} 轮 READY 此刻扣着 —— 它的去向（补记 / 继续扣着 / 作废）由门禁紧接着单独说明，以那条为准。`;
+  return " 功能轮本来就在跑（同一个 judge_submit 启动的），你不需要再调一次。" + parked;
+}
+
+/**
+ * D03 (2026-09-27) — TWO LANE FAILs IN A ROW USED TO COST TWO QUALITY ROUNDS.
+ * The lane row keeps the quality round running (it reads code), but the agent
+ * then re-submits, and the re-submission interrupts it before it concludes.
+ * Two rules cut that cost, one per timing:
+ *
+ *  - BEFORE its dispatch: the lane already failed ⇒ the round cannot ship and
+ *    must be re-submitted, which would interrupt a quality judge started now —
+ *    so neither judge is started (`judgeRuledOutByLane`);
+ *  - AFTER its dispatch: a re-submission while the previous lane failed and
+ *    that round's quality judge is still judging is REFUSED unless the agent
+ *    says `fresh` — collect its findings first and fix both at once
+ *    (`resubmitWhileQualityInFlight`).
+ */
+export function judgeRuledOutByLane(role: string, laneWhy: string | undefined): boolean {
+  return laneWhy !== undefined && (role === "reviewer" || role === QUALITY_ROLE);
+}
+
+export function resubmitWhileQualityInFlight(input: {
+  /** `qualityRoundInFlight` for the round registered now. */
+  qualityInFlight: boolean;
+  /** The last full lane's verdict (`st.precommit.verdict` when `mode` is full). */
+  lastLaneVerdict: string | undefined;
+  fresh: boolean;
+}): "proceed" | "refuse" {
+  if (input.fresh || !input.qualityInFlight) return "proceed";
+  const v = input.lastLaneVerdict;
+  return v === undefined || v === "PASS" || v === "NOT_RUN" ? "proceed" : "refuse";
 }
 
 /** What a functional verdict does with the quality round still owed. */
@@ -517,6 +607,12 @@ export function buildQualityAuditTask(input: {
 }): string {
   const lines = [
     `You are the quality auditor of this round. You judge the CODE ITSELF, on the commit range ${input.range} — immutable git history, and the only code this round judges. Read it with \`git show\` / \`git diff ${input.range}\`.`,
+    "",
+    // THE SCOPE MARKER (D15): the pane reads its round's scope kind back out of
+    // this text (`parseReviewScopeKind`); without it every quality report said
+    // 「范围标记缺失」. The quality round has no carryover — it is always full.
+    SCOPE_BLOCK_HEADING,
+    `${SCOPE_MARKER_FULL} The quality round always judges the whole range ${input.range}.`,
     "",
     `YOUR CHECKLIST: \`${input.rulesPath}\` — read it FIRST (it is short). It has two layers: L1 (philosophy, architecture, correctness, security, performance) and L2 (simplicity, readability, maintainability). Only L1/L2 P0/P1 findings BLOCK the round; language-specific best practice and formatting are explicitly NOT yours (the repo's own linters own those).`,
     "",

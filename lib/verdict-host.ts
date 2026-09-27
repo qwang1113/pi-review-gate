@@ -304,6 +304,9 @@ export function createReviewVerdictRecorder(
       // No target ⇒ the stale check above already fired and this is a refusal,
       // not a hold: a parked conclusion with nothing to bind to could never be
       // replayed into a real verdict.
+      // The round this reviewer was SENT as (D01): counted at its dispatch, so
+      // a cancelled round in between does not renumber it.
+      const parkedRound = st.sentReviewRounds ?? 0;
       if (parkedTarget) {
         st.pendingReady = {
           conclusion: {
@@ -319,7 +322,7 @@ export function createReviewVerdictRecorder(
           },
           tree: parkedTarget.tree,
           head: parkedTarget.head,
-          round: st.rounds.length + 1,
+          round: parkedRound,
           at: new Date().toISOString(),
         };
         persistRepo(ctx as unknown as ExtensionContext, targetRoot);
@@ -329,7 +332,7 @@ export function createReviewVerdictRecorder(
         // would wait on a box nobody had told it about.
         if (qualityHold === "hold") {
           return `review-gate: this round's READY is being HELD, not refused — for ${targetRoot} ` +
-            `(round ${st.rounds.length + 1}, tree ${parkedTarget.tree.slice(0, 12)}).\n` +
+            `(round ${parkedRound}, tree ${parkedTarget.tree.slice(0, 12)}).\n` +
             "这一轮的内容**没有问题**：质量轮（`quality-auditor`）还在审同一段 commit range。" +
             "门禁把功能轮结论**原样扣下**了，`review` 仍是 PENDING ——\n" +
             "  - 质量轮落 READY ⇒ 门禁**自动补记 READY** 并唤醒你，可以继续收尾；\n" +
@@ -339,7 +342,7 @@ export function createReviewVerdictRecorder(
             "若质量轮在问你问题（`judge_wait` / `judge_answer` 会显示），先把它答掉。";
         }
         return `review-gate: this round's READY is being HELD, not refused — for ${targetRoot} ` +
-          `(round ${st.rounds.length + 1}, tree ${parkedTarget.tree.slice(0, 12)}).\n` +
+          `(round ${parkedRound}, tree ${parkedTarget.tree.slice(0, 12)}).\n` +
           "这一轮的内容**没有任何问题**：只是全量 precommit 还没跑完（B1 让它与审查并行跑，" +
           "所以 reviewer 可以先交卷）。门禁把结论**原样扣下**了，`review` 仍是 PENDING ——\n" +
           "  - lane 落 PASS 且 tree 相同 ⇒ 门禁**自动补记 READY** 并唤醒你，可以继续收尾；\n" +

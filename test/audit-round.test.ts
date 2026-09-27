@@ -37,6 +37,9 @@ import {
 import type { ChannelRecord, ChannelReportRecord } from "../lib/channel-records.ts";
 import type { ReportConclusion } from "../lib/channel-projection.ts";
 import type { PlanAuditRecord } from "../lib/orchestrator-plan-audit.ts";
+import { formatGoalAuditRefusal } from "../lib/loop-goal.ts";
+import { existingStreamPath } from "../lib/review-stream.ts";
+import { nextReviewRoundNumber } from "../lib/gate-state-transitions.ts";
 
 const NOW = "2026-09-05T12:00:00.000Z";
 /** The checkpoint this round reviews — an hour BEFORE the reports above. */
@@ -1267,5 +1270,44 @@ test("settle: recording a round leaves the judge's row (and window) for the next
   assert.equal(state.entry?.judgeId, "j-1");
   assert.equal("reclaimJudgePane" in deps, false, "the conclusion half has no reclaim seam");
   assert.deepEqual(state.auditLog.filter((l) => l.includes("回收")), [], "nothing was reclaimed");
+});
+
+// ---------- D13 / D01 (2026-09-27) ----------
+
+test("D13: a goal FAIL carries its findings verbatim and never names a stream file that does not exist", async () => {
+  const refusal = formatGoalAuditRefusal({
+    hash: "h", verdict: "FAIL", at: NOW,
+    findings: [{ severity: "P1", issue: "D02 misses the tree binding" }],
+  });
+  const { deps } = makeRunDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "BLOCKED" })],
+    passed: false,
+    // The goal recorder's own reply names the verdict, not the findings.
+    recordResult: "review-gate: goal audit FAIL. 记录：FAIL（verdict BLOCKED）。",
+    recordedRefusal: refusal,
+  });
+  const outcome = await runAuditRound(deps, {
+    spec: GOAL_AUDIT_SPEC,
+    root: ROOT,
+    task: "审计这份草稿",
+    streamPath: "/nonexistent/goal-deadbeef.jsonl",
+    pending: { kind: "goal", draft: "# 目标草稿", startedAt: NOW },
+  });
+  const text = outcome.ok === false ? outcome.text : "";
+  assert.match(text, /P1: D02 misses the tree binding/, "the findings are inline");
+  assert.match(text, /记录：FAIL（verdict BLOCKED）/, "the recorder's own note is kept");
+  assert.doesNotMatch(text, /goal-deadbeef\.jsonl/, "a stream the auditor never wrote is not pointed at");
+  assert.equal(existingStreamPath("/nonexistent/x.jsonl"), undefined);
+  assert.equal(existingStreamPath(undefined), undefined);
+  assert.equal(existingStreamPath(import.meta.filename), import.meta.filename);
+  assert.match(formatGoalAuditRefusal({ hash: "h", verdict: "FAIL", at: NOW }), /没有给出可解析的 findings/);
+});
+
+test("D01: the next round's number counts rounds SENT, not rounds that recorded a verdict", () => {
+  // Round 1 was cancelled by the lane (no verdict ⇒ `rounds` stays empty), so
+  // `rounds.length + 1` labelled round 2's lane 「第 1 轮」.
+  assert.equal(nextReviewRoundNumber({ sentReviewRounds: 1 }), 2);
+  assert.equal(nextReviewRoundNumber({}), 1, "an older sidecar has sent none");
 });
 
