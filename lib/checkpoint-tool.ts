@@ -10,7 +10,7 @@ import { resolve as pathResolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "./change-baseline.ts";
-import { checkpointCommitPaths, planCheckpointSweep } from "./checkpoint-sweep.ts";
+import { pendingCheckpoint } from "./checkpoint-sweep.ts";
 import { COMMIT_MSG_FORBIDDEN, isSensitiveFile } from "./constants.ts";
 import {
   dependencyJustificationVerdict,
@@ -224,32 +224,10 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
         // tracked changes plus the untracked paths this session wrote. A
         // foreign untracked file (D20) is never committed, so it must not make
         // the worktree read as dirty — that sent the commit into git's own
-        // "nothing added to commit" failure.
-        const status = gitRaw(root, ["status", "--porcelain", "--untracked-files=no"]);
-        // The untracked list comes from `ls-files -z`, NOT from porcelain: git
-        // QUOTES unusual names in `status`, and handing that form back as a
-        // pathspec matches nothing (drill F3).
-        const untracked = gitRaw(root, ["ls-files", "--others", "--exclude-standard", "-z"])
-          .split("\0").filter((p) => p.length > 0);
-        const sweep = planCheckpointSweep({ untracked, own: st.sessionEditedFiles ?? [] });
-        const leftOut = sweep.leftOut;
+        // "nothing added to commit" failure. The empty-range review round
+        // reads the same function, so the two cannot disagree.
         // Round-4 P2: refuse sensitive paths and report what is swept in.
-        // Round-5 P2: porcelain has rename (`R  old -> new`) and quoted
-        // non-ASCII (`A  "\344\270…"`) forms — take the DESTINATION side of
-        // a rename and strip surrounding quotes before matching.
-        // Round-6 P2 (measured): NEVER trim the whole status before slicing —
-        // porcelain v1 lines carry a leading space in the X (index) column,
-        // and `" M path".trim()` → `"M path"` shifts the path left, so
-        // slice(3) eats the first character of the path.
-        const trackedLines = status.split("\n").filter((l) => l.trim().length > 0);
-        const pathOf = (l: string): string => {
-          let p = l.slice(3).trim();
-          const arrow = p.indexOf(" -> ");
-          if (arrow !== -1) p = p.slice(arrow + 4);
-          if (p.startsWith("\"") && p.endsWith("\"")) p = p.slice(1, -1);
-          return p;
-        };
-        const paths = checkpointCommitPaths(trackedLines.map(pathOf), sweep);
+        const { paths, leftOut } = pendingCheckpoint(root, st.sessionEditedFiles ?? []);
         if (paths.length === 0) {
           return {
             content: [{ type: "text", text: "review-gate: review_checkpoint — nothing to commit (worktree is clean" +
