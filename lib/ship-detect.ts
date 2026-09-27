@@ -362,7 +362,38 @@ function rawSegments(command: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * D37 — drop the BODY of a heredoc that can only ever be data.
+ *
+ * Deliberately narrow, because skipping a heredoc body is a bypass in every
+ * other shape: only `cat` with an output redirection to a file (`cat > f
+ * <<'EOF'`, `cat <<'EOF' >> f`) and a QUOTED delimiter qualify. The quotes
+ * turn off expansion, so a `$(gh pr create)` in the body is text; `cat` into a
+ * file executes nothing. An unquoted delimiter, a shell reading the heredoc
+ * (`bash <<'EOF'`), a pipe, two heredocs on one line, or a body with no
+ * terminator all leave the command UNTOUCHED (fail-closed).
+ */
+export function stripInertHeredocBodies(command: string): string {
+  const lines = command.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    out.push(line);
+    // The redirect target excludes `(`/`)`: `cat >(bash) <<'EOF'` is a
+    // process substitution that EXECUTES the body.
+    const m = /^\s*cat\b[^|;&<>()]*(?:>>?\s*[^\s|;&<>()]+\s*)?<<(-?)\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*(?:>>?\s*[^\s|;&<>()]+)?\s*$/.exec(line);
+    if (!m || !/>/.test(line.replace(/<<-?\s*(['"])[A-Za-z_][A-Za-z0-9_]*\1/, ""))) continue;
+    const [, dash, , delim] = m;
+    const end = lines.findIndex((l, j) => j > i && (dash ? l.replace(/^\t+/, "") : l) === delim);
+    if (end < 0) return command;
+    out.push(lines[end]!);
+    i = end;
+  }
+  return out.join("\n");
+}
+
 export function detectShipCommands(command: string): ShipDetection[] {
+  command = stripInertHeredocBodies(command);
   const results: ShipDetection[] = [];
   for (const seg of segments(command)) {
     const tokens = normalizedTokens(seg);
@@ -403,8 +434,9 @@ export function detectShipCommands(command: string): ShipDetection[] {
  *     assumed).
  *
  * So the evidence recorder asks this first and records nothing when a heredoc
- * is in play. It deliberately does NOT teach {@link detectShipCommands} about
- * heredocs: a detector that skipped heredoc bodies would be a real ship-gate
+ * is in play. The detector itself skips only the one heredoc shape that can
+ * never execute ({@link stripInertHeredocBodies}: quoted delimiter, `cat`
+ * into a file); skipping any other heredoc body would be a real ship-gate
  * bypass, and that direction must never be relaxed. A false NEGATIVE here only
  * means "no arrival evidence from this command" — the round proves it with a
  * plain `gh pr create` instead.

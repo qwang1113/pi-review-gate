@@ -76,6 +76,8 @@ function makeDeps(over: Partial<ShipGateHookDeps> & { taskMode?: () => TaskMode 
     hasStagedChanges: () => false,
     unreviewedTreesSince: () => undefined,
     loopGoalConfirmed: () => true,
+    precommitLaneRunning: () => false,
+    waitForQuietLane: async () => {},
     // No delivery contract by default: every test written before stations
     // existed must keep measuring exactly what it measured then.
     deliveryStation: () => undefined,
@@ -571,6 +573,82 @@ test("a message-only `--amend` is exempt from the station, in a REAL repo", asyn
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// D08: a precommit lane still running is WAITED for, not reported as "has not
+// run".
+
+function laneDeps(landsAs: "PASS" | "FAIL") {
+  const st = shippableState();
+  st.precommit = { verdict: "NOT_RUN", fingerprint: null, at: "2026-09-27T00:00:00.000Z", mode: "full" };
+  let running = true;
+  let waited = 0;
+  const base = defaultProjectConfig();
+  const r = makeDeps({
+    enforcementStateFor: () => st,
+    stateForRepo: () => st,
+    precommitLaneRunning: () => running,
+    waitForQuietLane: async () => {
+      waited += 1;
+      running = false;
+      st.precommit = landsAs === "PASS"
+        ? { verdict: "PASS", fingerprint: "t", at: "2026-09-27T00:00:01.000Z", testScope: "full", mode: "full" }
+        : { verdict: "FAIL", fingerprint: "t", at: "2026-09-27T00:00:01.000Z", mode: "full" };
+    },
+    projectConfig: () => ({ ...base, llmGuards: { ...base.llmGuards, aiAttribution: false, englishCheck: false, shipDetect: false } }),
+  });
+  return { r, waited: () => waited };
+}
+
+test("D08: a ship while the lane runs waits for it, then passes on its PASS", async () => {
+  const { r, waited } = laneDeps("PASS");
+  const out = await evaluateToolCall(r.deps, bashCall(`${PUSH_CMD} && ${PR_CMD}`), {});
+  assert.equal(out, undefined, "the landed PASS is what the command is judged by");
+  assert.equal(waited(), 1);
+});
+
+test("D08: a lane that lands FAIL blocks with FAILED, never 'has not run'", async () => {
+  const { r, waited } = laneDeps("FAIL");
+  const out = await evaluateToolCall(r.deps, bashCall(PUSH_CMD), {});
+  assert.equal(out?.block, true, "a FAIL is still a real block");
+  assert.match(out!.reason, /precommit FAILED/);
+  assert.doesNotMatch(out!.reason, /has not run/);
+  assert.equal(waited(), 1);
+});
+
+// ---------------------------------------------------------------------------
+// D17: a scratch repo the command itself builds is not the session's repo.
+
+test("D17: a local commit in a repo this command just created passes, a push from it does not", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rg-d17-"));
+  try {
+    const base = defaultProjectConfig();
+    // The session repo has unreviewed work: anything checked against it blocks.
+    const dirty = () => makeDeps({
+      enforcementStateFor: () => ({ ...emptyState("s1", DEFAULT_MAX_ROUNDS), hasCodeChange: true }),
+      projectConfig: () => ({ ...base, llmGuards: { ...base.llmGuards, aiAttribution: false, englishCheck: false, shipDetect: false } }),
+    });
+    const fresh = join(tmp, "scratch");
+    const scratch = `mkdir -p ${fresh} && cd ${fresh} && git init -q && git commit -q --allow-empty -m "chore: init"`;
+    assert.equal(await evaluateToolCall(dirty().deps, bashCall(scratch), {}), undefined,
+      "a commit into a repo that did not exist before this command publishes nothing");
+    // An existing non-repo dir that the command `git init`s qualifies too.
+    assert.equal(await evaluateToolCall(dirty().deps,
+      bashCall(`cd ${tmp} && git init -q && git commit -q --allow-empty -m "chore: init"`), {}), undefined);
+
+    for (const command of [
+      `mkdir -p ${fresh} && cd ${fresh} && git init -q && git commit -q -m "chore: x" && git push origin main`,
+      `mkdir -p ${fresh} && cd ${fresh} && git init -q && ${PR_CMD}`,
+      `cd ${join(tmp, "never-created")} && git commit -q -m "chore: x"`,
+      `export GIT_DIR=/repo/.git; mkdir -p ${fresh} && cd ${fresh} && git init -q && git commit -q -m "chore: x"`,
+    ]) {
+      const out = await evaluateToolCall(dirty().deps, bashCall(command), {});
+      assert.equal(out?.block, true, `must still be checked against the session repo: ${command}`);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 test("no tracked change ⇒ no station check either (the gate has nothing of this round to hold back)", async () => {
   const r = makeDeps({

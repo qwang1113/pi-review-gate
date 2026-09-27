@@ -923,6 +923,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     hasStagedChanges,
     unreviewedTreesSince,
     loopGoalConfirmed: () => goalStageSatisfied(),
+    precommitLaneRunning: (root) => precommitLaneRunning(root),
+    waitForQuietLane: (root) => waitForQuietLane(root),
     deliveryStation: (root) => deliveryStationFor(root),
     crossRepoVerdictHint,
     classifier,

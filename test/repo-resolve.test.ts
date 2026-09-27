@@ -57,6 +57,31 @@ test("gitRootOfDir returns null outside a repository", () => {
   }
 });
 
+// ---- resolveShipRepos: D17 scratch repos built by the command ---------------
+
+test("D17: a commit in a dir this command mkdirs + git inits is fresh, not ambiguous", () => {
+  const d = join(multiParent, "scratch-d17");
+  const r = resolveShipRepos(`mkdir -p ${d} && cd ${d} && git init -q && git commit -m x`, repoA);
+  assert.deepEqual(r, { repos: [], ambiguous: false, fresh: [d] });
+  const viaInitArg = resolveShipRepos(`git init ${d} && git -C ${d} commit -m x`, repoA);
+  assert.deepEqual(viaInitArg.fresh, [d]);
+  assert.equal(viaInitArg.ambiguous, false);
+});
+
+test("D17: push / pr from the scratch dir, an uncreated dir, or a GIT_DIR relocation stay ambiguous", () => {
+  const d = join(multiParent, "scratch-d17");
+  for (const cmd of [
+    `mkdir -p ${d} && cd ${d} && git init -q && git push`,
+    `mkdir -p ${d} && cd ${d} && git init -q && gh pr create --title x`,
+    `cd ${join(multiParent, "never-made")} && git commit -m x`,
+    `export GIT_DIR=${repoA}/.git; mkdir -p ${d} && cd ${d} && git init && git commit -m x`,
+  ]) {
+    const r = resolveShipRepos(cmd, repoA);
+    assert.equal(r.ambiguous, true, cmd);
+    assert.deepEqual(r.fresh, [], cmd);
+  }
+});
+
 // ---- resolveShipRepos: cd chains -------------------------------------------
 
 test("cd into a repo then git commit resolves that repo", () => {

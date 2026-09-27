@@ -102,10 +102,9 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
       message: Type.Optional(Type.String({
         description:
           "reviewer only: the checkpoint commit message (English, Conventional Commits — the gate " +
-          "makes it a legal one if it is not). Omit it and the gate derives the message from your " +
-          "task text — but only the parts of it that are ENGLISH: L5 accepts no non-Latin letter " +
-          "in a commit message, so a Chinese round note yields the default subject and no body. " +
-          "Write this field whenever you want the history to say something — that is the normal " +
+          "makes it a legal one if it is not). Omit it and the checkpoint gets the fixed default " +
+          "subject `chore: record this round for review` — the task text is never sliced into a " +
+          "commit message. L5 accepts no non-Latin letter here either. Write this field whenever you want the history to say something — that is the normal " +
           "case in this project.",
       })),
       reason: Type.Optional(Type.String({

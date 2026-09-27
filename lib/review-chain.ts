@@ -199,7 +199,7 @@ export function createReviewChain(
     //    a single refused prepare into a permanent dead end — the commit was
     //    already in, so every retry died at this step. Only a REFUSAL
     //    (isError) stops the chain.
-    const message = buildCheckpointMessage(input.message ?? input.note);
+    const message = buildCheckpointMessage(input.message);
     input.progress?.step("checkpoint 提交");
     const commit = await callTool("review_checkpoint", { message, note: input.note, repo: input.root }, input.ctx);
     if (commit.isError) {

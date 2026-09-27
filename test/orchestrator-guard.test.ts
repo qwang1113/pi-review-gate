@@ -35,6 +35,12 @@ test("every ALWAYS-FORBIDDEN subcommand is refused, in both modes", () => {
       assert.match(hit.reason, /已授权/, "the authorized message must not read as a refusal");
       assert.match(hit.reason, /orchestrator_spawn/, "neither message drops the tool redirect");
       assert.doesNotMatch(hit.refusal, /只是提示/, "the gate does not say 'hint' about a block");
+      // D26: children live in the opener's own tmux session since 2026-09-25;
+      // the old "split only inside the agreed window" wording is stale.
+      for (const text of [hit.reason, hit.refusal]) {
+        assert.doesNotMatch(text, /那一个 window 内 split/);
+        assert.match(text, /专属 tmux session/);
+      }
     }
   }
 });

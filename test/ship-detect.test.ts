@@ -341,6 +341,30 @@ test("a heredoc body IS detected as a ship command — the over-match this exist
   assert.equal(firstKind("cat > doc.md <<EOF\ngh pr create --title x\nEOF"), "pr-create");
 });
 
+test("D37: a quoted-delimiter heredoc that `cat` writes to a file is data, not a ship", () => {
+  for (const cmd of [
+    "cat > notes.md <<'EOF'\nsteps:\ngh pr create --title x\nEOF",
+    'cat <<"EOF" >> notes.md\ngit push\nEOF',
+    "cat <<-'EOF' > n.md\n\tgh pr create\n\tEOF",
+  ]) {
+    assert.equal(detectShipCommands(cmd).length, 0, cmd);
+  }
+});
+
+test("D37: every other heredoc shape still exposes its ship lines", () => {
+  for (const cmd of [
+    "cat > notes.md <<EOF\ngh pr create --title x\nEOF",          // unquoted: $(…) would expand
+    "bash <<'EOF'\ngh pr create\nEOF",                            // a shell runs the body
+    "cat > a.md <<'EOF'\nx\nEOF\ngh pr create --title y",          // a real ship after the heredoc
+    "cat > a.md <<'EOF'\ngh pr create --title y",                  // no terminator: fail-closed
+    "cat <<'EOF'\ngh pr create\nEOF",                              // not redirected to a file
+    "cat >(bash) <<'EOF'\ngh pr create\nEOF",                      // process substitution executes it
+    "cat > f <<'EOF' | bash\ngh pr create\nEOF",                   // piped on
+  ]) {
+    assert.ok(detectShipCommands(cmd).length > 0, cmd);
+  }
+});
+
 test("containsHeredoc recognises the forms a shell actually accepts", () => {
   for (const cmd of [
     "cat > a.md <<EOF\nx\nEOF",
