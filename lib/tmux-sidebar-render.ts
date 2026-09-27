@@ -27,10 +27,14 @@ const STATE_WORD: Readonly<Record<ChildState, string>> = {
   "mode-changed": "mode",
 };
 
-/** Display width: CJK and full-width forms take two columns. */
+const WIDE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]|\p{Emoji_Presentation}/u;
+/** Joiners, variation selectors and combining marks draw nothing of their own. */
+const ZERO = /[\u200b-\u200d\ufe00-\ufe0f]|\p{Mn}/u;
+
+/** Display width: CJK, full-width forms and emoji take two columns. */
 export function displayWidth(text: string): number {
   let width = 0;
-  for (const ch of text) width += /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1;
+  for (const ch of text) width += ZERO.test(ch) ? 0 : WIDE.test(ch) ? 2 : 1;
   return width;
 }
 

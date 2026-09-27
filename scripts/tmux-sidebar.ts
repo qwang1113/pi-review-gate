@@ -175,7 +175,7 @@ function run(): number {
   /** Every way out goes through here: the locked panes get their input back first. */
   const quit = (code = 0): never => {
     if (self) restore(self);
-    out.write("\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l");
+    out.write("\x1b[?7h\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l");
     process.exit(code);
   };
   const jumpAndClose = (target: JumpTarget): never => {
@@ -191,7 +191,9 @@ function run(): number {
     quit(1);
   });
 
-  out.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h");
+  // Autowrap off: a row whose width we misjudge is clipped by the terminal
+  // instead of wrapping and shifting every row (and click) below it.
+  out.write("\x1b[?1049h\x1b[?7l\x1b[?25l\x1b[?1000h\x1b[?1006h");
   process.stdin.setRawMode?.(true);
   process.stdin.resume();
   process.stdin.setEncoding("utf8");

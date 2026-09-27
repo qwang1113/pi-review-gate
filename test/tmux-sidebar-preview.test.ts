@@ -33,6 +33,14 @@ test("preview cuts CJK by display width and strips control characters", () => {
   assert.deepEqual(previewLines("a\x1b[2Jb\x07c", 20, 1), ["a [2Jb c"]);
 });
 
+test("emoji count two columns, joiners and variation selectors none", () => {
+  assert.equal(displayWidth("🚀✅"), 4);
+  assert.equal(displayWidth("❤️"), 1);
+  assert.equal(displayWidth("👨‍💻"), 4);
+  const [row] = previewLines("🚀🚀🚀🚀🚀🚀", 7, 1);
+  assert.ok(displayWidth(row) <= 7, row);
+});
+
 test("joinColumns pads a short list and always yields `height` rows", () => {
   const rows = joinColumns(["L1        "], ["p1", "p2"], 10, 3);
   assert.equal(rows.length, 3);
