@@ -88,6 +88,7 @@ interface Harness {
   tick(): void;
   deliver(index?: number): { message: { content: string } } | undefined;
   agentEnd(): void;
+  renderer(type: string): ((message: unknown) => unknown) | undefined;
   childId: string;
 }
 
@@ -102,7 +103,9 @@ async function harness(): Promise<Harness> {
     sendMessage: (message: never, options: unknown) => { sent.push({ message, options }); },
     sendUserMessage: () => {},
     on: (name: string, handler: (event: unknown) => unknown) => { handlers.set(name, handler); },
+    registerMessageRenderer: (type: string, renderer: (message: unknown) => unknown) => { renderers.set(type, renderer); },
   };
+  const renderers = new Map<string, (message: unknown) => unknown>();
   const host = {
     state: () => ({ taskMode: "orchestrator" }),
     repos: () => ({ primary: "/repo", cwd: "/repo", all: ["/repo"] }),
@@ -122,6 +125,7 @@ async function harness(): Promise<Harness> {
     deliver: (index = sent.length - 1) =>
       handlers.get("message_end")!({ message: { role: "custom", customType: "review-gate", ...sent[index]!.message } }) as never,
     agentEnd: () => { handlers.get("agent_end")!({}); },
+    renderer: (type: string) => renderers.get(type),
   };
 }
 
@@ -200,4 +204,54 @@ test("a notice lost to an abort does not silence supervision: agent_end frees th
   h.world.advance(60_000);
   h.tick();
   assert.equal(h.sent.length, 2);
+});
+
+// ---- D43: the answered-but-unsettled window, and the screen half ----
+
+test("D43: a notice for a question the manager ANSWERED, before the child settled it, is dropped on delivery", async () => {
+  // Measured (a1, 2026-09-26 23:32:19): answer .260, notice entered the
+  // context .270, request-settled .416 — the check read "open" as "not settled".
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { appendRecord, nodeChannelIO } = await import("../lib/channel-io.ts");
+  const { superviseChildren } = await import("../lib/orchestrator-supervisor.ts");
+  const { noticeFactsFrom } = await import("../lib/orchestration-notice.ts");
+  const home = mkdtempSync(join(tmpdir(), "notice-d43-"));
+  const io = nodeChannelIO();
+  const at = Date.parse("2026-09-26T23:32:19.270Z");
+  const binding = { orchestrationId: "orch-d43", childId: "t-acc-x", home };
+  const write = (record: Record<string, unknown>) => appendRecord(io, binding, record as never);
+  write({ kind: "state", from: "child", at: "2026-09-26T23:31:54.000Z", state: "waiting-input" });
+  write({ kind: "request", from: "child", at: "2026-09-26T23:31:54.604Z", requestId: "req-d43", dialogKind: "select", topic: "restatement", title: "理解对了吗？", options: ["A", "B"] });
+  const children = [{ id: "t-acc-x", taskId: "t-acc", paneId: "%7", cwd: home }] as never;
+  const read = () => superviseChildren({ orchestrationId: "orch-d43", children, livePanes: new Set(["%7"]), io, home, at });
+  const carried: NoticeEvent = { childId: "t-acc-x", state: "waiting-input", requestId: "req-d43", summary: "t-acc 在等回答" };
+
+  assert.equal(freshNoticeEvents([carried], noticeFactsFrom(read(), [])).length, 1, "still unanswered ⇒ delivered");
+  write({ kind: "answer", from: "orchestrator", at: "2026-09-26T23:32:19.260Z", requestId: "req-d43", answer: "A" });
+  assert.deepEqual(freshNoticeEvents([carried], noticeFactsFrom(read(), [])), [], "answered, not yet settled ⇒ stale");
+});
+
+test("D43: the notice on SCREEN re-reads the message, so the delivery rewrite reaches the pixels", async () => {
+  const { liveNoticeComponent } = await import("../lib/orchestration-notice.ts");
+  const message = { content: "[ORCHESTRATION] 子会话需要你：\n- 旧" };
+  let builds = 0;
+  const view = liveNoticeComponent(message, (text) => { builds += 1; return { render: () => text.split("\n"), invalidate() {} }; });
+  assert.deepEqual(view.render(80), ["[ORCHESTRATION] 子会话需要你：", "- 旧"]);
+  view.render(80);
+  assert.equal(builds, 1, "unchanged content is not rebuilt every frame");
+  // pi's `_replaceMessageInPlace`: same object, new content.
+  message.content = [{ type: "text", text: noticeText([]) }] as never;
+  assert.deepEqual(view.render(80), [noticeText([])]);
+  assert.equal(builds, 2);
+});
+
+test("D43: the host renders ONLY notices live; every other review-gate message keeps pi's default look", async () => {
+  const h = await harness();
+  const render = h.renderer("review-gate");
+  assert.ok(render, "a renderer is registered for the notice's customType");
+  assert.equal(render!({ role: "custom", customType: "review-gate", content: "x", details: { kind: "other" } }), undefined);
+  const view = render!({ role: "custom", customType: "review-gate", content: "x", details: { kind: NOTICE_KIND, events: [] } });
+  assert.equal(typeof (view as { render?: unknown }).render, "function");
 });

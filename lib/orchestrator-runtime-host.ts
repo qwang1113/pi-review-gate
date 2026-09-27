@@ -11,12 +11,15 @@
  * timers, the retirement flag they all honour, and the continuation budget.
  */
 
-import type { ExtensionAPI, ExtensionContext, MessageEndEvent } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type MessageEndEvent } from "@earendil-works/pi-coding-agent";
+import { Box, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 
 import type { ChannelIO } from "./channel-io.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
 import {
   freshNoticeEvents,
+  liveNoticeComponent,
+  noticeFactsFrom,
   noticeText,
   NOTICE_KIND,
   type NoticeEvent,
@@ -197,12 +200,7 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
 
   /** What a notice is checked against: the open children, their questions, the done tasks. */
   function noticeFacts(snapshot: SupervisionSnapshot | undefined): NoticeFacts {
-    const tasks = orchestratorDeps.readPlan().plan?.tasks ?? [];
-    return {
-      children: (snapshot?.children ?? []).map((c) => ({ childId: c.child.id, taskId: c.child.taskId, state: c.state })),
-      openRequestIds: new Set((snapshot?.requests ?? []).map((r) => r.requestId)),
-      doneTaskIds: new Set(tasks.filter((t) => t.status === "done").map((t) => t.id)),
-    };
+    return noticeFactsFrom(snapshot, orchestratorDeps.readPlan().plan?.tasks ?? []);
   }
 
   /**
@@ -252,6 +250,18 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     return { message: { ...message, content: noticeText(fresh), details: { kind: NOTICE_KIND, events: fresh } } };
   }
   pi.on("message_end", (event: MessageEndEvent) => reviseDeliveredNotice(event.message));
+  // …and the SCREEN follows the rewrite (D43): other review-gate messages fall
+  // through to pi's default rendering (`undefined`).
+  pi.registerMessageRenderer("review-gate", (message, _options, theme) => {
+    if ((message.details as { kind?: string } | undefined)?.kind !== NOTICE_KIND) return undefined;
+    return liveNoticeComponent(message, (text) => {
+      const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+      box.addChild(new Text(theme.fg("customMessageLabel", "\x1b[1m[review-gate]\x1b[22m"), 0, 0));
+      box.addChild(new Spacer(1));
+      box.addChild(new Markdown(text, 0, 0, getMarkdownTheme(), { color: (t) => theme.fg("customMessageText", t) }));
+      return box;
+    });
+  });
   pi.on("agent_end", () => { noticeInFlight = false; });
 
   /**

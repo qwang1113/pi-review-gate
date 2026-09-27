@@ -665,3 +665,18 @@ test("stages: switched OFF is approved content, and needs an accepting task that
   }, NOW);
   assert.equal(allOff.ok, false, "a plan in which nobody accepts is refused");
 });
+
+test("D30: `isolated` parses as a boolean, is stored only when true, and hashes only when true", () => {
+  const plain = planOf();
+  const off = planOf({ tasks: [{ id: "a", title: "抽 plan 模块", isolated: false }, { id: "b", title: "抽 tmux 模块" }] });
+  const on = planOf({ tasks: [{ id: "a", title: "抽 plan 模块", isolated: true }, { id: "b", title: "抽 tmux 模块" }] });
+  assert.equal(off.tasks[0]!.isolated, undefined, "false is the default and is not stored");
+  assert.equal(canonicalPlanText(off), canonicalPlanText(plain), "an existing plan's hash does not move");
+  assert.equal(on.tasks[0]!.isolated, true);
+  assert.notEqual(canonicalPlanText(on), canonicalPlanText(plain), "switching it on is approved content");
+  assert.match(formatPlanSummary(on), /独立 checkout：门禁为它建 worktree 并播种/);
+
+  const bad = parsePlan({ title: "t", intent: "i", tasks: [{ id: "a", title: "x", isolated: "yes" }] }, NOW);
+  assert.equal(bad.ok, false);
+  assert.ok(bad.problems.some((p) => /isolated/.test(p)), bad.problems.join("; "));
+});

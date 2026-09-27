@@ -44,6 +44,9 @@ import {
   type UserNotifyOutcome,
 } from "./user-notify.ts";
 
+/** Where a click should land: pane, its window, and the server's socket. */
+type TmuxAddress = { paneId: string; windowId?: string; socket?: string };
+
 /**
  * How long a synchronous `lsappinfo` call may take.
  *
@@ -146,15 +149,18 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
    * inside it. Looked up lazily — the caller passes this as a thunk to the
    * policy, so a session that will never send never pays for it.
    */
-  function ownTmuxAddress(): { paneId: string; windowId?: string } | undefined {
+  function ownTmuxAddress(): TmuxAddress | undefined {
     const paneId = (env().TMUX_PANE ?? "").trim();
     if (!isPaneId(paneId)) return undefined;
+    // `$TMUX` = `<socket>,<server pid>,<session>` — the click must reach THIS server (D42).
+    const socket = (env().TMUX ?? "").split(",")[0] || undefined;
+    const base = { paneId, ...(socket ? { socket } : {}) };
     try {
       const out = deps.runTmux(["display-message", "-p", "-t", paneId, "#{window_id}"]);
       const windowId = out.ok ? out.stdout.trim() : "";
-      return { paneId, ...(/^@\d+$/.test(windowId) ? { windowId } : {}) };
+      return { ...base, ...(/^@\d+$/.test(windowId) ? { windowId } : {}) };
     } catch {
-      return { paneId };
+      return base;
     }
   }
 
@@ -295,8 +301,8 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
       // cache would make every later click jump to a window this pane has left.
       // Within one banner the address cannot change, so the two readers share it.
       let addressResolved = false;
-      let address: { paneId: string; windowId?: string } | undefined;
-      const ownAddress = (): { paneId: string; windowId?: string } | undefined => {
+      let address: TmuxAddress | undefined;
+      const ownAddress = (): TmuxAddress | undefined => {
         if (!addressResolved) {
           addressResolved = true;
           address = ownTmuxAddress();

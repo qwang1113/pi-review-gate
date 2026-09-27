@@ -382,6 +382,27 @@ test("…and it RUNS BESIDE the first one when the gate CAN isolate it", async (
   assert.match(replyText(second), /独立 checkout/);
 });
 
+test("D30: a task that declares `isolated` gets the gate's own checkout with NO sibling — and one that does not, shares", async () => {
+  const isolatedPlan = { ...twoTaskPlan(), tasks: twoTaskPlan().tasks.map((t) => (t.id === "t1" ? { ...t, isolated: true as const } : t)) };
+  const world = makeFakeWorld({ plan: isolatedPlan, approvePlan: true, isolateChild: true });
+  const first = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  assert.equal(first.isError, undefined, replyText(first));
+  const child = world.runtime().children[0]!;
+  assert.ok(child.worktree, "the first and only child still got an isolated checkout");
+  assert.equal(child.cwd, child.worktree!.path);
+
+  const shared = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, isolateChild: true });
+  await shared.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  assert.equal(shared.runtime().children[0]!.worktree, undefined, "undeclared + no sibling ⇒ the shared checkout, as before");
+
+  // Declared but the gate cannot build it ⇒ refused, no pane.
+  const broken = makeFakeWorld({ plan: isolatedPlan, approvePlan: true });
+  const refused = await broken.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  assert.equal(refused.isError, true);
+  assert.match(replyText(refused), /独立 checkout 里工作（isolated）/);
+  assert.equal(broken.runtime().children.length, 0);
+});
+
 // ---------------------------------------------------------------------------
 // THE SETTLEMENT ACTION (round-8 P1). Only the pure plan was covered; the
 // DECISION — which settlement a manager asked for, and which calls must be

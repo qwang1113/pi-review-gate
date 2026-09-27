@@ -198,6 +198,19 @@ test("a focus target that is not a tmux id is dropped rather than pasted in", ()
   assert.equal(buildFocusCommand({ paneId: "", windowId: "@3" }), undefined);
 });
 
+test("D42: the click talks to THIS session's tmux server, not the default one", () => {
+  assert.equal(
+    buildFocusCommand({ paneId: "%7", windowId: "@3", socket: "/private/tmp/tmux-501/rgacc" }),
+    "tmux -S '/private/tmp/tmux-501/rgacc' select-window -t @3; tmux -S '/private/tmp/tmux-501/rgacc' select-pane -t %7",
+  );
+  assert.equal(buildFocusCommand({ paneId: "%7", windowId: undefined, socket: undefined }),
+    "tmux select-window -t %7; tmux select-pane -t %7", "no socket known ⇒ bare tmux, as before");
+  for (const bad of ["/tmp/a'b", "/tmp/a\nb", "relative/sock", "/tmp/$(id)", "/tmp/a b"]) {
+    assert.equal(buildFocusCommand({ paneId: "%7", windowId: "@3", socket: bad }),
+      "tmux select-window -t @3; tmux select-pane -t %7", `an unsafe socket is dropped, never pasted: ${JSON.stringify(bad)}`);
+  }
+});
+
 test("agent-written text lands in its own argv element, never in the click command", () => {
   const p = plan({ detail: '"; rm -rf / #\n新的一行 $(whoami) `id`' });
   assert.equal(p.status, "send");

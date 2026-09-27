@@ -239,7 +239,12 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     // plan's; an unreadable one drops the snapshot, like any other field here.
     const stages = parsePlanTaskStages(task.stages, id);
     if (stages.problems.length > 0) return undefined;
-    tasks.push({ id, dependsOn, execution, ...(repo ? { repo } : {}), ...(stages.stages ? { stages: stages.stages } : {}) });
+    tasks.push({
+      id, dependsOn, execution,
+      ...(repo ? { repo } : {}),
+      ...(stages.stages ? { stages: stages.stages } : {}),
+      ...(task.isolated === true ? { isolated: true as const } : {}),
+    });
   }
   return {
     hash: snapshotHash,

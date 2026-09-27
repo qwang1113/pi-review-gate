@@ -136,6 +136,14 @@ test("a banner goes out with this session's own pane as the click target", () =>
   assert.equal(h.blocking.length, 0, "a live session never blocks on the notifier");
 });
 
+test("D42: the click carries the socket from `$TMUX`, so a `-L` server is the one that jumps", () => {
+  const h = harness({ taskMode: "loop", env: { TMUX: "/private/tmp/tmux-501/rgacc,4242,0" } });
+  assert.equal(h.notify({ kind: "finished", detail: "x" }).status, "sent");
+  const argv = h.sent[0]!;
+  assert.equal(argv[argv.indexOf("-execute") + 1],
+    "tmux -S '/private/tmp/tmux-501/rgacc' select-window -t @3; tmux -S '/private/tmp/tmux-501/rgacc' select-pane -t %7");
+});
+
 test("a host app that cannot be named sends no `-activate` (reviewer Nit, 2026-09-17)", () => {
   const h = harness({ taskMode: "loop", env: { __CFBundleIdentifier: "" } });
   assert.equal(h.notify({ kind: "finished", detail: "x" }).status, "sent");
