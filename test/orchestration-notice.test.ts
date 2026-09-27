@@ -258,10 +258,18 @@ test("D43: the host renders ONLY notices live; every other review-gate message k
 
 test("D43: the live notice draws pi's box itself — every row exactly the viewport wide, CJK wrapped by cells", async () => {
   const { noticeBoxLines } = await import("../lib/orchestration-notice.ts");
-  const { displayWidth } = await import("../lib/tmux-sidebar-render.ts");
+  const { cellWidth } = await import("../lib/multi-choice-dialog.ts");
   const plain = { bg: (s: string) => s, label: (s: string) => s, text: (s: string) => s };
   const lines = noticeBoxLines("[ORCHESTRATION] 子会话需要你：\n- h1 的 tmux 授权请求在等回答", 20, plain);
-  assert.ok(lines.every((l) => displayWidth(l) === 20), JSON.stringify(lines));
+  assert.ok(lines.every((l) => cellWidth(l) === 20), JSON.stringify(lines));
   assert.equal(lines[1]!.trim(), "[review-gate]");
   assert.ok(lines.some((l) => l.includes("话需要你")), `the body is on screen, wrapped: ${JSON.stringify(lines)}`);
+
+  // pi throws on a row wider than the viewport: emoji count as two cells, and a
+  // viewport narrower than the label cuts it instead of overflowing.
+  for (const width of [3, 4, 8, 12]) {
+    const rows = noticeBoxLines("🚀🚀🚀 ✅子会话", width, plain);
+    assert.ok(rows.every((l) => cellWidth(l) <= width), `${width}: ${JSON.stringify(rows)}`);
+  }
+  assert.deepEqual(noticeBoxLines("x", 2, plain), [], "no room for a box ⇒ nothing, never an overflow");
 });

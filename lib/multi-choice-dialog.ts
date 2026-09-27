@@ -545,6 +545,13 @@ export function truncateToWidth(text: string, width: number): string {
   return `${out}…`;
 }
 
+/** Terminal cells of plain (ANSI-free) text, by the same table {@link truncateToWidth} uses. */
+export function cellWidth(text: string): number {
+  let cells = 0;
+  for (const ch of text) cells += isWideCodePoint(ch.codePointAt(0)!) ? 2 : 1;
+  return cells;
+}
+
 /** Rough East-Asian-width table: the ranges a dialog in Chinese actually hits. */
 function isWideCodePoint(code: number): boolean {
   return (
@@ -556,7 +563,11 @@ function isWideCodePoint(code: number): boolean {
     (code >= 0xfe30 && code <= 0xfe6f) ||
     (code >= 0xff00 && code <= 0xff60) ||
     (code >= 0xffe0 && code <= 0xffe6) ||
-    (code >= 0x1f300 && code <= 0x1f64f) ||
+    // Emoji and symbol blocks: some members render narrow, but counting them
+    // wide only ever over-estimates — the safe side of pi's width contract.
+    (code >= 0x2600 && code <= 0x27bf) ||
+    (code >= 0x2b00 && code <= 0x2bff) ||
+    (code >= 0x1f000 && code <= 0x1faff) ||
     (code >= 0x20000 && code <= 0x3fffd)
   );
 }
