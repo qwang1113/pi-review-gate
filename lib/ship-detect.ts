@@ -372,6 +372,12 @@ function rawSegments(command: string): string[] {
  * file executes nothing. An unquoted delimiter, a shell reading the heredoc
  * (`bash <<'EOF'`), a pipe, two heredocs on one line, or a body with no
  * terminator all leave the command UNTOUCHED (fail-closed).
+ *
+ * AND THE COMMAND MUST BE NOTHING BUT THOSE WRITES (t4 review P1): the file a
+ * `cat` wrote is not inert once the same command runs it — `cat > x.sh <<'EOF'`
+ * … `EOF` then `bash x.sh` (or `source`, `./x.sh`, `chmod +x` + run, a pipe to
+ * a shell) executes the body. Telling a harmless follow-up from one that runs
+ * the file is a guess, so ANY other non-blank line keeps every body in view.
  */
 export function stripInertHeredocBodies(command: string): string {
   const lines = command.split("\n");
@@ -390,7 +396,7 @@ export function stripInertHeredocBodies(command: string): string {
     // outer `bash <<EOF` body can contain a fake `cat > f <<'X'` whose "body"
     // the outer shell expands (`$(gh pr create)`). Strip nothing then.
     if (!inert) {
-      if (/<</.test(line)) return command;
+      if (line.trim() !== "") return command;
       continue;
     }
     const [, dash, , delim] = m!;

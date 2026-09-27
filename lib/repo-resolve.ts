@@ -298,6 +298,21 @@ export function resolveCommandRepos(command: string, cwd: string): { repos: stri
  * (the ship gate's check set). Segments without a ship operation contribute
  * nothing; the fallback cwd is always present.
  */
+/**
+ * Does every step of this command run only if the one before it SUCCEEDED?
+ *
+ * The scratch-repo exemption reads "init X, then commit in X" off the TEXT, and
+ * the text is only the truth when a failed init or `cd` stops everything after
+ * it (t4 review P1: `false && git init X; cd X; git commit` commits in the
+ * ORIGINAL repo once `cd` fails). So: `&&` is the only operator, and nothing
+ * that inverts or regroups a status (`!`, subshells, braces, substitutions,
+ * backgrounding) appears anywhere — a quoted `;` in a message costs the
+ * exemption, never the gate (fail-closed).
+ */
+function isPlainAndChain(command: string): boolean {
+  return !/[;|&\n!(){}`]|\$\(/.test(command.replace(/&&/g, " "));
+}
+
 export function resolveShipRepos(command: string, cwd: string): ShipRepoResolution {
   const { segs, ambiguous: baseAmbiguous } = resolveSegments(command, cwd);
   const repos: string[] = [];
@@ -306,10 +321,11 @@ export function resolveShipRepos(command: string, cwd: string): ShipRepoResoluti
   // A git env relocation anywhere (`export GIT_DIR=…` in its own segment is
   // not tracked per segment) could point the "scratch" commit at a real repo.
   const gitEnv = /\bGIT_(DIR|WORK_TREE|INDEX_FILE)\b/.test(command);
+  const chained = isPlainAndChain(command);
   for (const s of segs) {
     if (!s.ship) continue;
     const root = gitRootOfDir(s.dir);
-    if (!root && !gitEnv && s.initedEarlier && s.kinds.every((k) => k === "commit") && outsideAnyRepo(s.dir)) {
+    if (!root && !gitEnv && chained && s.initedEarlier && s.kinds.every((k) => k === "commit") && outsideAnyRepo(s.dir)) {
       if (!fresh.includes(s.dir)) fresh.push(s.dir);
       continue;
     }

@@ -362,6 +362,12 @@ test("D37: every other heredoc shape still exposes its ship lines", () => {
     "cat > f <<'EOF' | bash\ngh pr create\nEOF",                   // piped on
     "sh -s \\\ncat > f <<'EOF'\ngh pr create\nEOF",                 // continued line: cat is sh's argument
     "bash <<OUT\ncat > f <<'X'\n$(gh pr create)\nX\nOUT",           // inside an outer unquoted heredoc
+    // The written file RUN by the same command is not data (t4 review P1):
+    "cat > run.sh <<'EOF'\ngit push\nEOF\nbash run.sh",
+    "cat > x.sh <<'EOF'\ngh pr create --title y\nEOF\n&& bash x.sh",
+    "cat > x.sh <<'EOF'\ngh pr create\nEOF\nchmod +x x.sh\n./x.sh",
+    "cat > x.sh <<'EOF'\ngit commit -m y\nEOF\nsource x.sh",
+    "cat > x.sh <<'EOF'\ngit push\nEOF\ncat x.sh | sh",
   ]) {
     assert.ok(detectShipCommands(cmd).length > 0, cmd);
   }

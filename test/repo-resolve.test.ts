@@ -82,6 +82,12 @@ test("D17: push / pr from the scratch dir, an uncreated dir, or a GIT_DIR reloca
     `mkdir -p ${d} && cd ${d} && git commit -am x`,
     `git init --separate-git-dir ${repoA}/.git ${d} && git -C ${d} commit -m x`,
     `git init ${d} --separate-git-dir ${repoA}/.git && git -C ${d} commit -m x`,
+    // t4 review P1: the init / cd may not have RUN — a failed cd commits in the original repo
+    `false && git init ${d}; cd ${d}; git commit -am x`,
+    `git init ${d} || true; cd ${d}; git commit -am x`,
+    `git init ${d} && ! cd ${d} && git commit -am x`,
+    `git init ${d}\ncd ${d}\ngit commit -am x`,
+    `(git init ${d}) && cd ${d} && git commit -am x`,
   ]) {
     const r = resolveShipRepos(cmd, repoA);
     assert.equal(r.ambiguous, true, cmd);
