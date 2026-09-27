@@ -65,7 +65,7 @@ test("D03: a lane that fails DURING the wait still refuses the re-submission —
   assert.deepEqual(calls, [], "neither the new lane nor review_checkpoint ran");
 });
 
-test("D03: fresh abandons the in-flight quality round and the chain proceeds", async () => {
+test("D03: fresh abandons the in-flight quality round and the chain proceeds to the lane and the checkpoint", async () => {
   const { run, calls } = makeChain({ laneFailsDuringWait: true, fresh: true, refuse: "checkpoint" });
   await run();
   assert.deepEqual(calls.slice(0, 3), ["dry", "lane", "checkpoint"]);

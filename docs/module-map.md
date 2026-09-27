@@ -747,7 +747,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
 | `review-adjudicate.ts` | reviewer 裁决（纯）：在 judge 交上来的结构化结论上判 READY 携带未解决 P0/P1 → BLOCKED、findings 计数、跨轮 coarse fingerprint；另有 verdict 规范化与两个投影（per-file 给 polish gate、severity+issue 给 goal/plan 审计） |
 | `review-prepare-tools.ts` | **内部实现**（不注册给 pi）：算不可变的 `baseline..HEAD`（起点是**最后一个产生过结论的 commit** —— READY 或 BLOCKED 都算；这个分支从未有过结论时用**分支基点**，绝不回退到「最新 checkpoint 的 parent」—— 那条回退会让一段没有结论的内容永久出局，2026-09-16 实测）、polish gate、findings 流，并登记裁决要绑定的 review target；由 `judge_submit` 调用。**一次 `git diff --numstat` 同时回答「哪些文件动了」与「动了多少」**（失败才回落到 `--name-only`），结果渲染成 reviewer 任务文本里的 CHANGE INDEX（`parallel-review.ts`） |
-| `review-chain.ts` | **送审链**（t7 从扩展拆出）：`submitForReview`（precommit lane → checkpoint → prepare → 路由：跳质量轮 / 已有 PASS / 两轮一起派，环节开关在这里读一次）与两个阻塞审计 `runGoalAudit` / `runPlanAudit`（都走 `audit-round.ts` 的 `runAuditRound`）；每一步都调工具自己的实现（`callTool`），不复制 |
+| `review-chain.ts` | **送审链**（t7 从扩展拆出）：`submitForReview`（checkpoint dry-run 预检 → precommit lane → checkpoint → prepare → 路由：跳质量轮 / 已有 PASS / 两轮一起派，环节开关在这里读一次）与两个阻塞审计 `runGoalAudit` / `runPlanAudit`（都走 `audit-round.ts` 的 `runAuditRound`）；每一步都调工具自己的实现（`callTool`），不复制 |
 | `review-carryover.ts` | **增量审查契约的唯一权威出处**：把「上轮裁决 → 未关闭 findings → 机械算出的 delta → 一致性扫描与可重开条款」渲染成任务书里的 `Review scope for this round` 块；构建器收显式入参（裁决/findings/delta/全量-增量决策），没有 `ReviewScopeDecision` 也能调；两行判定标记同时是 judge 侧读回全量/增量的线格式 |
 | `review-scope.ts` | 增量审查定档（只决策、不出文案）：**两类前置** —— 关于增量的（多大就升级成整轮深审、是否触及未审过的文件），以及关于**读者**的（2026-09-06）：只有 transcript 确实续用的 judge 才配拿增量任务书，判定由 `judge-rotation.ts` 的 `judgeRemembersPreviousRound` 给，本模块只消费。缺任何一项即 `full`，增量从不靠推断 |
 | `review-stream.ts` | findings 流：reviewer 边审边发，主会话边修 |
