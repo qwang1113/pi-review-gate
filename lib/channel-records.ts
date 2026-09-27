@@ -259,8 +259,12 @@ export interface ChannelSettledRecord extends ChannelRecordBase {
   kind: "request-settled";
   from: "child";
   requestId: string;
-  /** `human` = answered in the pane, `orchestrator` = answered via the channel. */
-  by: "human" | "orchestrator" | "dismissed" | "interrupted";
+  /**
+   * `human` = answered in the pane, `arbiter` = the thirty-minute stand-in
+   * answered in the pane for an absent user (N6), `orchestrator` = answered
+   * via the channel.
+   */
+  by: "human" | "arbiter" | "orchestrator" | "dismissed" | "interrupted";
   answer?: string;
 }
 

@@ -146,7 +146,7 @@ export interface FakeWorld {
     batch?: { id: string; index: number; total: number };
 
   }) => void;
-  childSettles: (childId: string, requestId: string, by: "human" | "orchestrator" | "dismissed") => void;
+  childSettles: (childId: string, requestId: string, by: "human" | "arbiter" | "orchestrator" | "dismissed") => void;
   childAcks: (
     childId: string,
     instructId: string,

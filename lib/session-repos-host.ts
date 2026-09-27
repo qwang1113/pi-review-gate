@@ -43,6 +43,31 @@ export interface SessionReposDeps {
   resolveJudgeLane: ReturnType<typeof createJudgeLanes>["resolveJudgeLane"];
 }
 
+/**
+ * Does THIS session own `root`'s gate state — the primary repo, a repo it
+ * edited, or one whose sidecar is its own or its relay predecessor's (e.g. a
+ * repo whose goal it negotiated through the `repo` parameter)? The sidecar's
+ * EXISTENCE proves nothing: every session without a state variant writes the
+ * same file name, so ownership is read from its `sessionId` by the same rule
+ * `enforcementStateFor` uses.
+ *
+ * N4 (2026-09-27): the bash-result handler OBSERVES ship evidence, Copilot
+ * arming and checkout re-arming for whatever repo a command ran in — a scratch
+ * repo under /tmp, another session's checkout — and used to persist this
+ * session's state variant into that repo's `.pi/`, where its owner's
+ * checkpoint then listed it as a stranger. A repo this answers `false` for is
+ * read-only to that observer. (Not a `persistRepo` guard: a user-confirmed
+ * restatement or goal for a new repo is exactly how a repo BECOMES owned.)
+ */
+export function isSessionOwnedRepo(
+  cells: Pick<SessionCells, "primaryRepoRoot" | "sessionRepos" | "state">,
+  root: string,
+): boolean {
+  if (root === cells.primaryRepoRoot || cells.sessionRepos.has(root)) return true;
+  const onDisk = loadSidecar(sessionSidecarPath(root));
+  return onDisk !== undefined && stateOwnership(process.env, cells.state.sessionId, onDisk.sessionId) !== "foreign";
+}
+
 export function createSessionRepos(cells: SessionCells, deps: SessionReposDeps) {
   /** State for a repo. The primary repo IS `state`; every other repo gets a
    *  lazily loaded/cached independent state. A sidecar left over from a

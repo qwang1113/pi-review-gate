@@ -650,12 +650,17 @@ test("D17: a local commit in a repo this command just created passes, a push fro
   }
 });
 
-test("no tracked change ⇒ no station check either (the gate has nothing of this round to hold back)", async () => {
+test("N5: no tracked change still runs the station check (an unchanged worktree is no licence to travel further)", async () => {
   const r = makeDeps({
     enforcementStateFor: () => emptyState("s1", DEFAULT_MAX_ROUNDS),
     deliveryStation: () => "precommit",
   });
-  assert.equal(await evaluateToolCall(r.deps, bashCall(COMMIT_CMD), {}), undefined);
+  const out = await evaluateToolCall(r.deps, bashCall(COMMIT_CMD), {});
+  assert.equal(out?.block, true);
+  assert.match(out!.reason, /超出本轮的交付站点/);
+  // …and with no station contract the clean worktree still passes as before.
+  const free = makeDeps({ enforcementStateFor: () => emptyState("s1", DEFAULT_MAX_ROUNDS) });
+  assert.equal(await evaluateToolCall(free.deps, bashCall(COMMIT_CMD), {}), undefined);
 });
 
 test("buildShipBlockReason keeps the station and the quality halves distinguishable", () => {

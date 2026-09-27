@@ -10,7 +10,7 @@ import { resolve as pathResolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "./change-baseline.ts";
-import { planCheckpointSweep } from "./checkpoint-sweep.ts";
+import { pendingCheckpoint } from "./checkpoint-sweep.ts";
 import { COMMIT_MSG_FORBIDDEN, isSensitiveFile } from "./constants.ts";
 import {
   dependencyJustificationVerdict,
@@ -33,7 +33,7 @@ export interface CheckpointToolDeps {
   resolveToolRepo: SessionRepos["resolveToolRepo"];
   stateForRepo(root: string): GateState;
   persistRepo(ctx: ExtensionContext, root: string): void;
-  refuseText(kind: AppealKind, text: string, reason: string, ctx: unknown): string | undefined;
+  refuseText(kind: AppealKind, text: string, reason: string, ctx: unknown, opts?: { peek?: boolean }): string | undefined;
   stageIsOn(stage: LoopStage, root?: string): boolean;
   precommitLaneRunning(root: string): boolean;
 }
@@ -58,6 +58,9 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
       })),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
+      })),
+      dryRun: Type.Optional(Type.Boolean({
+        description: "Run every refusal check without committing and without requiring the precommit PASS — the submission chain asks this BEFORE it starts the lane, so a checkpoint that would be refused never starts one (N1).",
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -119,10 +122,15 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
       }
       // P2 (round-4): REVIEW_GATE_BYPASS=1 also silences hooks/commit-msg —
       // the AI-attribution guard — so this tool must replicate it.
+      // A DRY RUN (N1) JUDGES THE TEXT BUT ONLY PEEKS at an appeal pass: the
+      // real checkpoint judges the same message moments later and is the one
+      // that must spend it.
+      const dryRun = params.dryRun === true;
+      const textCheck = { peek: dryRun };
       const attribution = COMMIT_MSG_FORBIDDEN.some((re) => re.test(message));
       if (attribution) {
         const reason = deps.refuseText("ai-attribution", message,
-          "review_checkpoint rejected — commit message contains AI attribution. Rewrite without it.", ctx);
+          "review_checkpoint rejected — commit message contains AI attribution. Rewrite without it.", ctx, textCheck);
         if (reason) {
           return { content: [{ type: "text", text: reason }], details: { committed: false }, isError: true };
         }
@@ -133,7 +141,7 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
       if (nonEn) {
         const kind: AppealKind = nonEn.part === "subject" ? "commit-subject" : "commit-body";
         const reason = deps.refuseText(kind, nonEn.text,
-          `review_checkpoint rejected — ${l5BlockReason({ kind, text: nonEn.text })} 用英文重写。`, ctx);
+          `review_checkpoint rejected — ${l5BlockReason({ kind, text: nonEn.text })} 用英文重写。`, ctx, textCheck);
         if (reason) {
           return { content: [{ type: "text", text: reason }], details: { committed: false }, isError: true };
         }
@@ -162,6 +170,9 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
       // bypass above exists for, so it is released the same way (and said out
       // loud on the receipt below, where the bypass is named too).
       const precommitStageOn = deps.stageIsOn("precommit", root);
+      // A DRY RUN IS ASKED BEFORE THE LANE EXISTS (N1, 2026-09-27): the lane is
+      // what satisfies the precommit prerequisite below, so a preflight that
+      // demanded it could never pass. It commits nothing, so it grants nothing.
       // B1 (2026-09-10): a checkpoint MAY land while its verification is IN
       // FLIGHT — that is the whole point of running the long lane beside the
       // chain instead of in front of it. The receipt is the live promise, not
@@ -169,11 +180,11 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
       // verification is refused exactly as before (fail-closed). A FAIL that
       // arrives afterwards withdraws the round's READY (see
       // `recordReviewVerdict`) and wakes the agent with the reason.
-      const verifyingNow =
+      const verifyingNow = dryRun || (
         precommitStageOn &&
         !precommitBypassed &&
         deps.precommitLaneRunning(root) &&
-        st.precommit.verdict === "NOT_RUN";
+        st.precommit.verdict === "NOT_RUN");
 
       if (precommitStageOn && !precommitBypassed && !verifyingNow && st.precommit.verdict !== "PASS") {
         return {
@@ -208,30 +219,22 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
         // + AI-attribution above — the checks the hooks perform — so
         // REVIEW_GATE_BYPASS=1 for the hook layer is the mechanism, not a
         // loophole.
-        const status = gitRaw(root, ["status", "--porcelain"]);
-        if (status.trim() === "") {
+        //
+        // WHAT "CLEAN" MEANS IS THE FINGERPRINT'S ANSWER (N1, 2026-09-27): the
+        // tracked changes plus the untracked paths this session wrote. A
+        // foreign untracked file (D20) is never committed, so it must not make
+        // the worktree read as dirty — that sent the commit into git's own
+        // "nothing added to commit" failure. The empty-range review round
+        // reads the same function, so the two cannot disagree.
+        // Round-4 P2: refuse sensitive paths and report what is swept in.
+        const { paths, leftOut } = pendingCheckpoint(root, st.sessionEditedFiles ?? []);
+        if (paths.length === 0) {
           return {
-            content: [{ type: "text", text: "review-gate: review_checkpoint — nothing to commit (worktree is clean)." }],
-            details: { committed: false },
+            content: [{ type: "text", text: "review-gate: review_checkpoint — nothing to commit (worktree is clean" +
+              (leftOut.length > 0 ? `; ${leftOut.length} untracked path(s) this session did not write are left alone` : "") + ")." }],
+            details: { committed: false, ...(dryRun ? { dryRun: true } : {}) },
           };
         }
-        // Round-4 P2: refuse sensitive paths and report what is swept in.
-        // Round-5 P2: porcelain has rename (`R  old -> new`) and quoted
-        // non-ASCII (`A  "\344\270…"`) forms — take the DESTINATION side of
-        // a rename and strip surrounding quotes before matching.
-        // Round-6 P2 (measured): NEVER trim the whole status before slicing —
-        // porcelain v1 lines carry a leading space in the X (index) column,
-        // and `" M path".trim()` → `"M path"` shifts the path left, so
-        // slice(3) eats the first character of the path.
-        const changedLines = status.split("\n").filter((l) => l.trim().length > 0);
-        const pathOf = (l: string): string => {
-          let p = l.slice(3).trim();
-          const arrow = p.indexOf(" -> ");
-          if (arrow !== -1) p = p.slice(arrow + 4);
-          if (p.startsWith("\"") && p.endsWith("\"")) p = p.slice(1, -1);
-          return p;
-        };
-        const paths = changedLines.map(pathOf);
         const sensitive = paths.filter((p) => isSensitiveFile(pathResolve(root, p)));
         if (sensitive.length > 0) {
           return {
@@ -326,6 +329,13 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
           };
         }
 
+        if (dryRun) {
+          return {
+            content: [{ type: "text", text: `review-gate: checkpoint dry run — ${paths.length} path(s) would be committed; nothing was.` }],
+            details: { committed: false, dryRun: true },
+          };
+        }
+
         // WHAT THIS COMMIT TAKES — AND WHAT IT LEAVES (drill F3, 2026-09-20).
         //
         // `git add -A` took EVERYTHING, including files this session never
@@ -333,14 +343,7 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
         // `node_modules` symlink went into the history). So the sweep keeps
         // every TRACKED change and the untracked paths THIS SESSION wrote
         // through edit/write (`st.sessionEditedFiles`), and leaves every other
-        // untracked-and-unignored path where it is.
-        //
-        // The leftover list comes from `ls-files -z`, NOT from the porcelain
-        // lines above: git QUOTES and escapes unusual names in `status`, and
-        // handing that form back as a pathspec matches nothing.
-        const untracked = gitRaw(root, ["ls-files", "--others", "--exclude-standard", "-z"])
-          .split("\0").filter((p) => p.length > 0);
-        const leftOut = planCheckpointSweep({ untracked, own: st.sessionEditedFiles ?? [] }).leftOut;
+        // untracked-and-unignored path where it is (`leftOut`, read above).
         gitText(root, ["add", "-A"], { timeout: 0 });
         if (leftOut.length > 0) {
           // Unstage, do not skip: `add -A` is still the right primitive for

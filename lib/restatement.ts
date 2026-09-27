@@ -65,7 +65,7 @@ import {
 } from "./delivery-station.ts";
 import { capStationAt, stationCapNotice } from "./repo-pr-policy.ts";
 import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
-import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
+import type { ChannelDialogOutcome, ChannelDialogRequest, DialogRenderer } from "./orchestrator-child-channel.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { buildRejection } from "./rejection-copy.ts";
 import type { TaskMode } from "./task-mode.ts";
@@ -418,7 +418,7 @@ export interface RestatementToolDeps {
   askEitherSide(
     request: Omit<ChannelDialogRequest, "hasUI">,
     hasUI: boolean,
-    render: (signal: AbortSignal) => Promise<string | undefined>,
+    render: DialogRenderer,
   ): Promise<ChannelDialogOutcome>;
   /** Injected for tests; production passes lib/repo-resolve.ts's gitRootOfDir. */
   gitRoot?(dir: string): string | null;
@@ -551,9 +551,9 @@ export async function doProposeRestatement(
 
       },
       uiCtx.hasUI === true,
-      async (renderSignal) => deps.askChoice(uiCtx, spec, {
+      async (dialog) => deps.askChoice(uiCtx, spec, {
+        ...dialog,
         body: buildRestatementConfirmMessage(station) + (capNote ? "\n" + capNote : ""),
-        signal: renderSignal,
         // THE REPO THE RESTATEMENT BINDS TO (review round 4 P1): same reason as
         // the goal approval next door — this may be a secondary repo that never
         // became the active one. `resolveRestatementRepo` answers with a result

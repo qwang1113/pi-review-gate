@@ -643,6 +643,20 @@ test("a question the USER already answered is reported as settled, not answered 
   const reply = await world.call("orchestrator_answer", { childId, answer: "A" });
   assert.equal(reply.isError, true);
   assert.match(replyText(reply), /没有待答的问题/);
+  assert.match(replyText(reply), /用户在子会话里当场作答/, "the receipt names who settled it");
+  assert.doesNotMatch(replyText(reply), /arbiter/);
+});
+
+test("N6: a question the ARBITER stood in for is reported as the arbiter's, not the user's", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  world.childAsks(childId, { requestId: "req-1", title: "选一个", options: ["A", "B"] });
+  world.childSettles(childId, "req-1", "arbiter");
+
+  const reply = await world.call("orchestrator_answer", { childId, answer: "A", requestId: "req-1" });
+  assert.equal(reply.isError, true);
+  assert.match(replyText(reply), /req-1 已结算：arbiter 代答/);
+  assert.doesNotMatch(replyText(reply), /用户在子会话里当场作答/);
 });
 
 test("two open questions require the requestId — the gate never picks one for you", async () => {

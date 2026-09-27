@@ -40,6 +40,20 @@ import type { Ref, SessionHost } from "./session-host.ts";
 import { reviewCoverageFiles } from "./worktree-changes.ts";
 
 /**
+ * The "Next:" line of a recorded verdict (N3). A READY is only ever RECORDED
+ * on content whose full precommit already passed or is waived for this round
+ * (`readyLacksVerification` turns anything else into BLOCKED), so telling the
+ * agent to "run precommit" after one sent it re-running a PASS.
+ */
+export function nextStepAfterVerdict(verdict: string, precommit: "passed" | "waived"): string {
+  if (verdict === "BLOCKED") return " Next: fix ALL findings and re-review.";
+  if (verdict !== "READY") return "";
+  return precommit === "passed"
+    ? " The full precommit already PASSed on this content — Next: declare_done (ship first if your delivery station is commit or pr)."
+    : " The full precommit is waived for this round (bypass, or the precommit stage is off) — Next: declare_done (ship first if your delivery station is commit or pr).";
+}
+
+/**
  * The user's scope exemption, in the shape the adjudicator takes — or
  * `undefined` when no scope limit is in force, which is the ordinary case
  * and must stay byte-for-byte the old behaviour.
@@ -582,7 +596,9 @@ export function createReviewVerdictRecorder(
       // delivered, so this READY was refused rather than held — and the agent
       // must not read it as a finding against its code.
       (qualityRefusal === undefined ? "" : `\nQUALITY PRECONDITION: ${qualityRefusal}`) +
-      (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : "");
+      // Same composition `readyLacksVerification` was fed above: a READY that
+      // got here either had its lane pass or had verification waived.
+      nextStepAfterVerdict(parsed.verdict, laneVerificationWaived(targetRoot, st) ? "waived" : "passed");
   }
 
   return { recordReviewVerdict };

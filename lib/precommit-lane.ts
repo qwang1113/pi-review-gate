@@ -29,6 +29,12 @@ export interface LaneHandle {
    * (D02): the landing only speaks for the round whose target this is.
    */
   bind(target: { head: string; tree: string }): void;
+  /**
+   * Stop THIS lane because its round never came to be (N1): the chain was
+   * refused after the lane started, so there is no round for it to verify.
+   * An aborted lane reports nothing and records nothing.
+   */
+  abort(why: string): void;
 }
 
 export function createPrecommitLane(
@@ -295,19 +301,16 @@ export function createPrecommitLane(
         });
       }
     })();
-    inFlightPrecommit = {
-      root,
-      settled,
-      abort: (why: string) => {
-        if (controller.signal.aborted) return;
-        log(`precommit lane for ${root} aborting: ${why}`);
-        controller.abort();
-      },
+    const abort = (why: string) => {
+      if (controller.signal.aborted) return;
+      log(`precommit lane for ${root} aborting: ${why}`);
+      controller.abort();
     };
+    inFlightPrecommit = { root, settled, abort };
     void settled.finally(() => {
       if (inFlightPrecommit?.settled === settled) inFlightPrecommit = undefined;
     });
-    return { settled, failure: () => failedWhy, bind: (target) => { bound = { head: target.head, tree: target.tree }; } };
+    return { settled, failure: () => failedWhy, bind: (target) => { bound = { head: target.head, tree: target.tree }; }, abort };
   }
 
   /**

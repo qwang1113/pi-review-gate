@@ -138,7 +138,7 @@ function fake(over: Partial<Fake> = {}): Fake {
       // there: `askChoice` calls `onUndecided` and answers `undefined`, which is
       // what a dismissed box looks like too — and telling them apart is the
       // whole point of that flag.
-      if (f.proxyFailed) return { answer: await thunk(new AbortController().signal), by: "dismissed", requestId: "r1" };
+      if (f.proxyFailed) return { answer: await thunk({ signal: new AbortController().signal, onProxyAnswer: () => {} }), by: "dismissed", requestId: "r1" };
       const answer = f.answers.length > 0
         ? f.answers.shift()!
         : request.topic === "scope-limit" || request.topic === "sensitive-edit" || request.topic === "tmux-access"
@@ -233,7 +233,7 @@ test("request_tmux_access: the recommendation is the NARROW grant", async () => 
   // decided by the spec, and the fake's channel path would answer before ever
   // looking at it.
   f.deps.askEitherSide = async (_request, _hasUI, render) => {
-    const answer = await render(new AbortController().signal);
+    const answer = await render({ signal: new AbortController().signal, onProxyAnswer: () => {} });
     return { answer, by: "human", requestId: "r1" };
   };
   await call(f, "request_tmux_access", { reason: "x" });
@@ -358,7 +358,7 @@ test("ask_user: the dialog title is a bare progress label, the question rides in
   // The default fake answers without raising a box; this one goes all the way
   // through the renderer, which is where the title and the body are decided.
   f.deps.askEitherSide = async (_request, _hasUI, render) => {
-    const answer = await render(new AbortController().signal);
+    const answer = await render({ signal: new AbortController().signal, onProxyAnswer: () => {} });
     return { answer, by: "human", requestId: "r1" };
   };
   await call(f, "ask_user", {
@@ -378,7 +378,7 @@ test("ask_user: a box the user CLOSED is not 'this environment has no dialogs'",
   // reached the screen — not that nobody answered.
   const f = fake({ confirmAnswer: false });
   f.deps.askEitherSide = async (_request, _hasUI, render) => {
-    const answer = await render(new AbortController().signal);
+    const answer = await render({ signal: new AbortController().signal, onProxyAnswer: () => {} });
     return { answer, by: "human", requestId: "r1" };
   };
   const reply = await call(f, "ask_user", {
@@ -574,7 +574,7 @@ test("ask_user: a grantScope question with no options is refused — free text c
 /** The pane is where walking back happens: drive the dialogs from `dialogRows`. */
 function inPane(f: Fake): void {
   f.deps.askEitherSide = async (_request, _hasUI, render) => {
-    const answer = await render(new AbortController().signal);
+    const answer = await render({ signal: new AbortController().signal, onProxyAnswer: () => {} });
     return { answer, by: "human", requestId: "r1" };
   };
 }
@@ -665,7 +665,7 @@ test("ask_user: the way back is NOT offered over the channel — it is a human r
   const f = fake({ dialogRows: ["A. 甲（推荐）", "A. 丙（推荐）"] });
   f.deps.askEitherSide = async (request, _hasUI, render) => {
     seen.push(request.options);
-    const answer = await render(new AbortController().signal);
+    const answer = await render({ signal: new AbortController().signal, onProxyAnswer: () => {} });
     return { answer, by: "human", requestId: "r1" };
   };
   await call(f, "ask_user", { questions: WALK.slice(0, 2) });

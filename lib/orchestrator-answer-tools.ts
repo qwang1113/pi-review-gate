@@ -44,11 +44,14 @@ import {
 } from "./delivery-station.ts";
 import { effectiveTaskStation } from "./repo-pr-policy.ts";
 
-import { appendRecord } from "./channel-io.ts";
+import { appendRecord, channelPathFor } from "./channel-io.ts";
+import { readChannel } from "./channel-projection.ts";
+import type { ChannelSettledRecord } from "./channel-records.ts";
 import { looksLikeDeclineRow, parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import {
   CROSSCHECK_TOPICS,
   buildCrosscheckRefusal,
+  describeSettlement,
   buildStationWideningRefusal,
   checkProxyCrosscheck,
   isDecliningProxyAnswer,
@@ -99,6 +102,20 @@ function pendingFor(deps: OrchestratorDeps, childId: string): PendingRequest[] {
   return snapshot.requests;
 }
 
+/**
+ * How a request that is no longer pending was settled — the newest settle
+ * record for `requestId`, or the newest of all when none is named (N6). Empty
+ * when the channel holds none, so callers append it unconditionally.
+ */
+function settlementNote(deps: OrchestratorDeps, childId: string, requestId?: string): string {
+  const path = channelPathFor(deps.runtime().orchestrationId, childId, deps.channelHome());
+  const settled = readChannel(deps.channelIO(), path).records.filter(
+    (r): r is ChannelSettledRecord => r.kind === "request-settled" && (!requestId || r.requestId === requestId),
+  );
+  const last = settled.at(-1);
+  return last === undefined ? "" : `\n最近一次结算：${describeSettlement(last)}。`;
+}
+
 /** What one item did. */
 type AnswerOutcome =
   | { ok: true; requestId: string; title: string; answer: string; reason?: string }
@@ -119,6 +136,7 @@ function pickRequest(
   requests: PendingRequest[],
   wantedId: string,
   answered: ReadonlySet<string>,
+  settledNote: (requestId: string) => string,
 ): { ok: true; request: PendingRequest } | { ok: false; refusal: ToolReply } {
   if (wantedId && answered.has(wantedId)) {
     return {
@@ -139,7 +157,7 @@ function pickRequest(
       refusal: fail(
         wantedId
           ? `review-gate: 子会话 ${childId} 没有 requestId=${wantedId} 这个待答请求（可能已经被答掉了）。` +
-            `现在待答的是：${open.map((r) => r.requestId).join("、")}`
+            `现在待答的是：${open.map((r) => r.requestId).join("、")}` + settledNote(wantedId)
           : `review-gate: 子会话 ${childId} 同时有 ${open.length} 个待答请求，必须指明 requestId：` +
             open.map((r) => `${r.requestId}（${r.title}）`).join("；"),
         { childId, answered: false, pending: open.length },
@@ -248,7 +266,8 @@ async function answerOneRequest(
             `review-gate: 子会话 ${childId} 的这条请求在你等用户授权期间已被结算（打断 / 当场作答 / 关框），` +
             "答案**没有**写进通道、也没有送达。" +
             (remembered ? `用户刚才授予的「${what}代答权」已记下，它下次再申请时可以直接代答。` : "") +
-            " `orchestrator_wait({ timeoutMs: 0 })` 看它现在在等什么。",
+            " `orchestrator_wait({ timeoutMs: 0 })` 看它现在在等什么。" +
+            settlementNote(deps, childId, request.requestId),
             { childId, answered: false, settled: true },
           ),
         };
@@ -318,7 +337,8 @@ async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>)
   if (requests.length === 0) {
     return fail(
       `review-gate: 子会话 ${childId} 现在没有待答的问题（通道里没有未销账的 request）。\n` +
-      "它可能已经被用户当场答掉了 —— `orchestrator_wait({ timeoutMs: 0 })` 看一眼现状。",
+      "`orchestrator_wait({ timeoutMs: 0 })` 看一眼现状。" +
+      settlementNote(deps, childId, items[0]?.requestId),
       { childId, answered: false },
     );
   }
@@ -326,7 +346,8 @@ async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>)
   const answeredIds = new Set<string>();
   const outcomes: AnswerOutcome[] = [];
   for (const item of items) {
-    const picked = pickRequest(childId, requests, item.requestId ?? "", answeredIds);
+    const picked = pickRequest(childId, requests, item.requestId ?? "", answeredIds,
+      (id) => settlementNote(deps, childId, id));
     if (!picked.ok) {
       outcomes.push({ ok: false, refusal: picked.refusal });
       continue;

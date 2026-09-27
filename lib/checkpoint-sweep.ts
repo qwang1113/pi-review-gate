@@ -20,8 +20,13 @@
  * TRACKED changes are not part of this decision: they are the round itself
  * (`M`/`D`/`R`), and the caller sweeps them with `git add -A` as before.
  *
- * Pure: two lists in, one plan out. The git calls stay at the call site.
+ * The two decisions are pure (two lists in, one plan out); `pendingCheckpoint`
+ * is the ONE place that reads git for them, so the checkpoint and the
+ * empty-range review round cannot disagree about what "clean" means (N1
+ * residual, 2026-09-27: prepare_review kept a bare `git status --porcelain`).
  */
+
+import { gitRaw } from "./git-exec.ts";
 
 export interface CheckpointSweep {
   /** Untracked paths this session wrote — the caller stages these. */
@@ -61,4 +66,47 @@ export function planCheckpointSweep(input: {
     else result.leftOut.push(path);
   }
   return result;
+}
+
+/**
+ * Every path the checkpoint will commit: the tracked changes (index or
+ * worktree) plus the untracked paths this session wrote. EMPTY means there is
+ * nothing to commit — the SAME answer the fingerprint gives (D20), so a
+ * worktree holding only foreign untracked files reads as clean here too (N1,
+ * 2026-09-27: `git status --porcelain` counted them, the commit then died on
+ * git's own "nothing added to commit"). It is also the only set the sensitive
+ * and file-size checks may judge: a path left out is never committed.
+ */
+export function checkpointCommitPaths(tracked: readonly string[], sweep: CheckpointSweep): string[] {
+  return [...new Set([...tracked, ...sweep.own])];
+}
+
+/**
+ * Read the repo and answer "what would a checkpoint commit now?". `paths`
+ * EMPTY is the worktree being CLEAN — for the checkpoint and for the
+ * empty-range exit-goal round alike. Throws on a git failure: callers fail
+ * closed.
+ */
+export function pendingCheckpoint(root: string, own: readonly string[]): { paths: string[]; leftOut: string[] } {
+  const status = gitRaw(root, ["status", "--porcelain", "--untracked-files=no"]);
+  // The untracked list comes from `ls-files -z`, NOT from porcelain: git
+  // QUOTES unusual names in `status`, and handing that form back as a
+  // pathspec matches nothing (drill F3).
+  const untracked = gitRaw(root, ["ls-files", "--others", "--exclude-standard", "-z"])
+    .split("\0").filter((p) => p.length > 0);
+  const sweep = planCheckpointSweep({ untracked, own });
+  // Round-5 P2: porcelain has rename (`R  old -> new`) and quoted non-ASCII
+  // (`A  "\344\270…"`) forms — take the DESTINATION side of a rename and strip
+  // surrounding quotes. Round-6 P2 (measured): NEVER trim the whole status
+  // before slicing — porcelain v1 lines carry a leading space in the X column,
+  // and `" M path".trim()` shifts the path left, so slice(3) eats a character.
+  const pathOf = (l: string): string => {
+    let p = l.slice(3).trim();
+    const arrow = p.indexOf(" -> ");
+    if (arrow !== -1) p = p.slice(arrow + 4);
+    if (p.startsWith("\"") && p.endsWith("\"")) p = p.slice(1, -1);
+    return p;
+  };
+  const tracked = status.split("\n").filter((l) => l.trim().length > 0).map(pathOf);
+  return { paths: checkpointCommitPaths(tracked, sweep), leftOut: sweep.leftOut };
 }

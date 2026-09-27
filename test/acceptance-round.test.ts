@@ -274,6 +274,16 @@ test("the no-acceptance clause is an exemption only WITH a reason", () => {
     parseNoAcceptanceDeclaration("本轮无真实验收：这一轮只动 .md，没有服务可起。"),
     { reason: "这一轮只动 .md，没有服务可起。" },
   );
+  // N2: the wrapper followed by the sentence's full stop left 「）」 on the
+  // reason shown in the goal approval box.
+  assert.deepEqual(
+    parseNoAcceptanceDeclaration("本轮无真实验收（用户关闭了验收环节）。"),
+    { reason: "用户关闭了验收环节" },
+  );
+  assert.deepEqual(
+    parseNoAcceptanceDeclaration("本轮无真实验收（验收移交 a1-acceptance）."),
+    { reason: "验收移交 a1-acceptance" },
+  );
   assert.equal(parseNoAcceptanceDeclaration("# t\n本轮无真实验收\n"), undefined, "a bare clause is NOT an exemption");
   assert.equal(parseNoAcceptanceDeclaration("# t\n本轮无真实验收（）\n"), undefined, "empty parens are not a reason");
   assert.equal(parseNoAcceptanceDeclaration("# t\n本轮无真实验收（无）\n"), undefined, "a one-character placeholder is not a reason");

@@ -167,7 +167,7 @@ test("the replay notice names the round and the tree, and says nothing was wrong
   const notice = buildParkedReadyReplayNotice({
     round: 4,
     tree: TREE_A,
-    recorded: "review-gate: recorded verdict READY for /repo (round 4/15, findings: 1). Next: run precommit for this same repo.",
+    recorded: "review-gate: recorded verdict READY for /repo (round 4/15, findings: 1). The full precommit already PASSed on this content — Next: declare_done (ship first if your delivery station is commit or pr).",
   });
   assert.match(notice, /第 4 轮 READY 现在已重新记录/);
   // The tree identifies WHICH content was replayed, short-prefixed exactly like

@@ -351,7 +351,7 @@ test("the ORCHESTRATOR answering first resolves the question AND aborts the huma
 
   // The dialog never resolves on its own; it only reacts to the abort — which
   // is exactly how `ui.select(..., { signal })` behaves.
-  const render = (signal: AbortSignal) => new Promise<string | undefined>((resolve) => {
+  const render = ({ signal }: { signal: AbortSignal }) => new Promise<string | undefined>((resolve) => {
     signal.addEventListener("abort", () => { dialogAborted = true; resolve(undefined); }, { once: true });
   });
 
@@ -390,6 +390,18 @@ test("the HUMAN answering first wins, and the settle record releases the orchest
   const projected = projectChannel(readChannel(io, channelPathFor(ORCH, "c1", HOME)).records);
   assert.equal(projected.openRequests.length, 0,
     "the orchestrator's own wait ends instead of hanging on a question nobody will answer again");
+});
+
+test("N6: an ARBITER stand-in answer settles as `arbiter`, never as the user's own", async () => {
+  const io = memoryIO(() => T0);
+  const outcome = await askThroughChannel(binding(io), {
+    dialogKind: "select", title: "选一个", options: ["A", "B"], hasUI: true,
+  }, async ({ onProxyAnswer }) => { onProxyAnswer(); return "B"; });
+
+  assert.equal(outcome.answer, "B");
+  assert.equal(outcome.by, "arbiter");
+  const settled = readChannel(io, channelPathFor(ORCH, "c1", HOME)).records.find((r) => r.kind === "request-settled");
+  assert.equal((settled as { by: string }).by, "arbiter", "the audit record names the stand-in");
 });
 
 test("a DISMISSED dialog settles the question rather than stranding the orchestrator", async () => {
@@ -627,7 +639,7 @@ test("an instruct interrupt dismisses an open dialog as INTERRUPTED, not as a hu
   const bind = binding(io);
   const interrupt = new AbortController();
   let dialogAborted = false;
-  const render = (signal: AbortSignal) => new Promise<string | undefined>((resolve) => {
+  const render = ({ signal }: { signal: AbortSignal }) => new Promise<string | undefined>((resolve) => {
     signal.addEventListener("abort", () => { dialogAborted = true; resolve(undefined); }, { once: true });
   });
 
@@ -662,7 +674,7 @@ test("an interrupt that lands with an answer already on the channel settles WITH
     sleep: (_ms, signal) => new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })),
   });
   const interrupt = new AbortController();
-  const render = (signal: AbortSignal) => new Promise<string | undefined>((resolve) => {
+  const render = ({ signal }: { signal: AbortSignal }) => new Promise<string | undefined>((resolve) => {
     signal.addEventListener("abort", () => resolve(undefined), { once: true });
   });
   const asking = askThroughChannel(bind, {

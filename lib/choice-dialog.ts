@@ -108,6 +108,13 @@ export interface AskChoiceOpts {
    * authorization question). Default: the proxy may answer.
    */
   proxy?: boolean;
+  /**
+   * Called when the ARBITER, not the user, produced the returned answer (N6).
+   * The answer is a plain string either way, so this is how a caller that
+   * records WHO answered — the orchestration channel's `request-settled` —
+   * learns it was a stand-in.
+   */
+  onProxyAnswer?: () => void;
 }
 
 export interface ChoiceSpec {

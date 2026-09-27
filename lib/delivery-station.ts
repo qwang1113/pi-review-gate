@@ -127,6 +127,43 @@ export function shipKindAllowedAtStation(station: DeliveryStation, kind: ShipCom
 }
 
 /**
+ * The STRICTEST station among the repos one command ships from: a compound
+ * command reaching two repos must satisfy both contracts, and a repo with no
+ * contract (`undefined`: explore, or a repo never negotiated) contributes
+ * nothing rather than the default.
+ */
+export function strictestStation(stations: Iterable<DeliveryStation | undefined>): DeliveryStation | undefined {
+  let strictest: DeliveryStation | undefined;
+  for (const here of stations) {
+    if (here === undefined) continue;
+    if (strictest === undefined || deliveryStationRank(here) < deliveryStationRank(strictest)) strictest = here;
+  }
+  return strictest;
+}
+
+/**
+ * The station refusals for one command — one line per distinct ship kind the
+ * station does not reach. It depends on NOTHING about the worktree (N5,
+ * 2026-09-27): whether a round may travel this far is a contract question, and
+ * a clean worktree after a READY is exactly when an over-reaching
+ * `git commit --allow-empty` / `git push` / `gh pr create` gets tried.
+ */
+export function stationShipProblems(
+  station: DeliveryStation | undefined,
+  kinds: Iterable<ShipCommandKind>,
+): string[] {
+  if (station === undefined) return [];
+  const seen = new Set<ShipCommandKind>();
+  const problems: string[] = [];
+  for (const kind of kinds) {
+    if (seen.has(kind) || shipKindAllowedAtStation(station, kind)) continue;
+    seen.add(kind);
+    problems.push(stationShipProblem(station, kind));
+  }
+  return problems;
+}
+
+/**
  * WHO IS READING IT. The station sentence names an actor ("…, and YOU commit"),
  * and the two surfaces that print it have opposite actors: the approval dialog
  * is read by the USER, a tool refusal is read by the AGENT. Rendering the

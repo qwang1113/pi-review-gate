@@ -54,6 +54,7 @@ import { projectChannel, readChannel } from "./channel-projection.ts";
 import type {
   ChannelInstructRecord,
   ChannelRequestRecord,
+  ChannelSettledRecord,
   ChildReportedState,
   InstructAckStage,
 } from "./channel-records.ts";
@@ -268,14 +269,26 @@ export interface ChannelDialogRequest {
 /** Who ended a question, and with what. */
 export interface ChannelDialogOutcome {
   answer: string | undefined;
-  by: "human" | "orchestrator" | "dismissed" | "interrupted";
+  by: ChannelSettledRecord["by"];
   requestId: string;
   /** The orchestrator's decline reason (goal rejection), when one was given. */
   reason?: string;
 }
 
-/** Raise the dialog. Must honour `signal` by resolving `undefined` when aborted. */
-export type DialogRenderer = (signal: AbortSignal) => Promise<string | undefined>;
+/**
+ * What the channel hands the dialog: its abort `signal`, and `onProxyAnswer`,
+ * to be called when the answer is the arbiter's thirty-minute stand-in rather
+ * than the user's own (N6). The field names ARE `askChoice`'s option names, so
+ * a renderer spreads the whole object into them (`{ ...dialog, body }`) and the
+ * arbiter mark cannot be forgotten at one call site.
+ */
+export interface ChannelDialog {
+  signal: AbortSignal;
+  onProxyAnswer: () => void;
+}
+
+/** Raise the dialog. Must honour `dialog.signal` by resolving `undefined` when aborted. */
+export type DialogRenderer = (dialog: ChannelDialog) => Promise<string | undefined>;
 
 const defaultSleep = (ms: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
@@ -342,14 +355,15 @@ export async function askThroughChannel(
     finish(got.answer, "orchestrator", got.reason);
   });
 
+  let byArbiter = false;
   const humanSide = (request.hasUI
-    ? render(dialogAbort.signal).catch(() => undefined)
+    ? render({ signal: dialogAbort.signal, onProxyAnswer: () => { byArbiter = true; } }).catch(() => undefined)
     : Promise.resolve<string | undefined>(undefined)
   ).then((answer) => {
     if (decided) return;
     if (answer !== undefined) {
       pollAbort.abort();
-      finish(answer, "human");
+      finish(answer, byArbiter ? "arbiter" : "human");
       return;
     }
     // No UI at all is NOT a person dismissing anything — let the channel run.

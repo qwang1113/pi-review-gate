@@ -347,7 +347,16 @@ spawn（无 shell）；门禁自己的执行路径也过同一份禁止清单，
 改成**与链条并行**（`startPrecommitBeside`）。理由：reviewer 判的是**不可变的
 commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而 precommit
 中位数 33s（旧数据 92s）全是 agent 被阻塞的时间。现在链条是：
-**启动 full lane（不 await）→ checkpoint → prepare → dispatch（立即返回）**。
+**checkpoint 预检（dryRun）→ 启动 full lane（不 await）→ checkpoint → prepare → dispatch（立即返回）**。
+
+**预检先于 lane（N1，2026-09-27）**：`review_checkpoint({dryRun:true})` 跑真实 checkpoint 的
+全部拒绝判定（保护分支、提交信息、敏感路径、文件大小、依赖论证、有没有可提交内容），
+不提交、不要求 precommit PASS（那份 PASS 正是接下来这条 lane 要产出的）；提交信息的
+申诉通行只**看**不**花**（`refuseText` 的 `peek`），真实 checkpoint 才花。预检被拒 ⇒
+lane 根本不起；之后真实 checkpoint 或 prepare 仍被拒（竞态兜底）⇒ 中止已起的 lane
+（`LaneHandle.abort`，中止的 lane 不报告、不记录）。「干净」按指纹同一判据（D20）：
+tracked 改动 ∪ 本会话写过的 untracked，外来 untracked 不算 —— 只剩外来文件时是
+「nothing to commit」，不是 git 的原始报错。
 
 这带来两个必须机械成立的事：
 

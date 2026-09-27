@@ -1065,7 +1065,7 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the ONE prompt every surface renders interpolates the notice");
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
-  assert.match(ASK_USER_SRC, /await askWithBacks\(index, signal\)/,
+  assert.match(ASK_USER_SRC, /await askWithBacks\(index, dialog\)/,
     "the pane dialog renders the template through the ONE renderer — and reads its result, so a box no host could draw is not counted as shown");
   assert.match(ASK_USER_SRC, /const picked = q\.multiple[\s\S]{0,140}?await deps\.askMultiChoice\(uiCtx,[\s\S]{0,140}?await deps\.askChoice\(uiCtx,/,
     "…both shapes dispatched from the walk-back loop, which is where `← 返回上一题` is handled (2026-09-19): " +
@@ -1153,7 +1153,7 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
     "…and the next turn starts only after this one settled");
   // A question already settled by the project manager, or one the interview
   // will never show, must not put a dead box on the user's screen.
-  assert.match(toolBody, /if \(signal\.aborted \|\| stopped\) return undefined;/,
+  assert.match(toolBody, /if \(dialog\.signal\.aborted \|\| stopped\) return undefined;/,
     "a settled or abandoned question renders nothing");
 
   // A dismissed dialog or a broken UI is NOT consent: it becomes an
@@ -2333,7 +2333,10 @@ test("a message-only rewrite is not a content change, at L1 and in the branch ru
   );
   assert.match(callBody, /hasAmendFlag\(s\.segment\)/, "the exemption is scoped to an amend");
   assert.match(callBody, /isMessageOnlyRewrite\(\{/, "…and decided by the pure tree comparison");
-  const exemptionAt = callBody.indexOf("isMessageOnlyRewrite({");
+  // The exemption is DECIDED early (N5, 2026-09-27: the station, which it also
+  // exempts, is judged before the "nothing changed" short-circuit), but it is
+  // only APPLIED — the content gates skipped — after L5 has judged the message.
+  const exemptionAt = callBody.indexOf("if (messageOnlyRewrite) {");
   const l5At = callBody.indexOf("nonEnglishCommitMessage(whole)");
   assert.ok(l5At > 0 && l5At < exemptionAt,
     "L5 must judge the NEW message BEFORE the rewrite is let through");
@@ -3607,7 +3610,9 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // judge_submit 的 adviser 分支 callTool("prepare_adviser", …) 接线。
     "judge-submit-tool.ts": 1,
     // callTool("review_checkpoint" / "prepare_review") + the refusal texts naming them.
-    "review-chain.ts": 3,
+    // +1 (N1, 2026-09-27): the checkpoint's dry run before the lane starts —
+    // an internal `callTool`, not an instruction.
+    "review-chain.ts": 4,
     // callTool("run_precommit", …) — the lane's own run.
     "precommit-lane.ts": 1,
     // callTool("prepare_goal_audit", …) — the goal-auditor's task builder.
@@ -7269,10 +7274,15 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
 
 test("F3: the checkpoint commits this session's own files, and NAMES what it leaves", () => {
   const body = windowOf('name: "review_checkpoint"', "\n  });", "review_checkpoint tool");
-  assert.match(body, /"ls-files", "--others", "--exclude-standard", "-z"/,
+  assert.match(body, /pendingCheckpoint\(root, st\.sessionEditedFiles \?\? \[\]\)/,
+    "the checkpoint reads what it commits through lib/checkpoint-sweep.ts (N1 residual: one implementation)");
+  const sweepSrc = readFileSync(join(ROOT, "lib", "checkpoint-sweep.ts"), "utf8");
+  assert.match(sweepSrc, /"ls-files", "--others", "--exclude-standard", "-z"/,
     "the untracked set comes from git in its RAW path form");
-  assert.match(body, /planCheckpointSweep\(\{ untracked, own: st\.sessionEditedFiles \?\? \[\] \}\)/,
+  assert.match(sweepSrc, /planCheckpointSweep\(\{ untracked, own \}\)/,
     "…and the split is the pure rule in lib/checkpoint-sweep.ts");
+  assert.match(PREPARE_WIRING_SRC, /worktreeClean: \(root\) =>\s+pendingCheckpoint\(/,
+    "the empty-range round's clean is the checkpoint's clean");
   assert.match(body, /"reset", "-q", "--", \.\.\.leftOut/,
     "`add -A` still sweeps the tracked half; the leftovers are UNSTAGED again");
   assert.doesNotMatch(body, /\["add", "-A"\] \}?, \{ cwd: root, encoding: "utf8" \}\);\n\s+execFileSync\("git", \["commit"/,

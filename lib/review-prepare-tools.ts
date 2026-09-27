@@ -136,8 +136,9 @@ export interface ReviewPrepareGit {
    * clean miss, which sends the caller to the branch base.
    */
   squashPointBaseline(root: string, reviewedTree: string, startSha: string): string | undefined;
-  /** Is the worktree CLEAN (no staged/unstaged/untracked changes)? The
-   *  empty-range exit-goal round REQUIRES it — a READY must never bless
+  /** Is the worktree CLEAN — nothing a checkpoint would commit (tracked
+   *  changes, or untracked paths THIS session wrote; lib/checkpoint-sweep.ts's
+   *  `pendingCheckpoint`)? The empty-range exit-goal round REQUIRES it — a READY must never bless
    *  content no reviewer saw (round-2 P2). */
   worktreeClean(root: string): boolean;
 }

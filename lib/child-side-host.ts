@@ -28,6 +28,7 @@ import {
   type ChannelDialogOutcome,
   type ChannelDialogRequest,
   type ChildChannelBinding,
+  type DialogRenderer,
 } from "./orchestrator-child-channel.ts";
 import { supervisionTarget } from "./orchestration-id.ts";
 import { isOwnedChildPane } from "./orchestrator-delivery.ts";
@@ -570,12 +571,13 @@ export function createChildSide(host: SessionHost, deps: ChildSideDeps) {
   async function askEitherSide(
     request: Omit<ChannelDialogRequest, "hasUI">,
     hasUI: boolean,
-    render: (signal: AbortSignal) => Promise<string | undefined>,
+    render: DialogRenderer,
   ): Promise<ChannelDialogOutcome> {
     const binding = childBinding();
     if (!binding) {
-      const answer = hasUI ? await render(new AbortController().signal) : undefined;
-      return { answer, by: "human", requestId: "" };
+      let byArbiter = false;
+      const answer = hasUI ? await render({ signal: new AbortController().signal, onProxyAnswer: () => { byArbiter = true; } }) : undefined;
+      return { answer, by: answer !== undefined && byArbiter ? "arbiter" : "human", requestId: "" };
     }
     // The dialog listens to the gate's interrupt source as well as its own
     // abort: an instruct fired while it is open dismisses it as INTERRUPTED

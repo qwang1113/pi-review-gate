@@ -11,6 +11,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AdvisoryPrepareToolDeps } from "./advisory-prepare-tools.ts";
+import { pendingCheckpoint } from "./checkpoint-sweep.ts";
 import type { GateState } from "./gate-state.ts";
 import { gitOrNull, gitText } from "./git-exec.ts";
 import { headCommitTree } from "./repo-facts.ts";
@@ -105,8 +106,10 @@ export function buildReviewPrepareDeps(cells: SessionCells, deps: PrepareWiringD
       branchBaseBaseline: (root) => branchBaseBaseline(root),
       squashPointBaseline: (root, reviewedTree, startSha) =>
         squashPointBaseline(root, reviewedTree, startSha),
+      // THE CHECKPOINT'S ANSWER (N1 residual): a foreign untracked file is
+      // never committed, so it does not make the empty-range round dirty.
       worktreeClean: (root) =>
-        gitText(root, ["status", "--porcelain"]) === "",
+        pendingCheckpoint(root, repos.stateForRepo(root).sessionEditedFiles ?? []).paths.length === 0,
     },
     readText,
   };

@@ -47,12 +47,7 @@ import { computeFingerprint, type Fingerprint } from "./fingerprint.ts";
 import { changedFiles } from "./worktree-changes.ts";
 import { isProtectedBranch } from "./workspace-branch.ts";
 import { unmetRequirements } from "./gate-state-requirements.ts";
-import {
-  deliveryStationRank,
-  shipKindAllowedAtStation,
-  stationShipProblem,
-  type DeliveryStation,
-} from "./delivery-station.ts";
+import { stationShipProblems, strictestStation } from "./delivery-station.ts";
 
 import { LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK } from "./loop-goal.ts";
 import { parseArbitrableAction, tokenAuthorizes } from "./arbitration.ts";
@@ -184,6 +179,14 @@ export async function evaluateShipCommand(
     }
   }
 
+  // THE STATION IS READ BEFORE ANY "NOTHING CHANGED" SHORT-CIRCUIT (N5,
+  // 2026-09-27). Whether a round may travel this far does not depend on the
+  // worktree: a clean tree after a READY is exactly when an over-reaching
+  // `git commit --allow-empty` / `git push` / `gh pr create` is tried, and
+  // the old order let every one of them through.
+  const station = strictestStation([...checkRoots].map((root) => deps.deliveryStation(root)));
+  const stationLimitsShips = station !== undefined && station !== "pr";
+
   if (ships.length === 0) {
     // Guard #4 additional layer (tighten-only): the static parser saw no ship
     // op, but the command mentions git/gh with dynamic shell constructs the
@@ -192,7 +195,7 @@ export async function evaluateShipCommand(
     // or a failed call changes nothing (the command was passing anyway).
     if (
       projectConfig.llmGuards.shipDetect &&
-      anyChange &&
+      (anyChange || stationLimitsShips) &&
       isSuspiciousShipCandidate(command)
     ) {
       const kind = await withSlowNotice(
@@ -207,11 +210,63 @@ export async function evaluateShipCommand(
     if (ships.length === 0) return undefined;
   }
 
-  // Short-circuit: if no changes tracked in any touched repo, no gate to
-  // enforce. (A sidecar-less repo with uncommitted work still fails closed
-  // in the per-repo check below — it has no state here, so it never
-  // short-circuits; the block loop treats it as "state missing".)
-  if (!anyChange) return undefined;
+  // MESSAGE-ONLY REWRITE (lib/git-rewrite.ts). A `git commit --amend` that
+  // publishes the tree it replaces adds no content, so the CONTENT gates
+  // have nothing to judge — and refusing it is what left a non-English
+  // commit message unfixable (the only exit was a human running
+  // /gate-bypass).
+  //
+  // IT EXEMPTS THE CONTENT GATES AND THE STATION, NOTHING ELSE (round-3 P1).
+  // The branch rule, the fail-closed sidecar checks and the loop-goal gate
+  // below still run: WHERE a commit lands is not a content question, and this
+  // round's own rebase-aware `currentBranch` is exactly what lets that rule
+  // keep applying during a reword instead of deadlocking on a detached HEAD.
+  //
+  // The message is judged by L5 and the AI-attribution guard below whenever
+  // the worktree carries changes, so a rewrite cannot smuggle in a bad one.
+  //
+  // Two measurements, because `--amend` publishes the INDEX while the
+  // fingerprint is a worktree tree: the worktree must equal HEAD's tree AND
+  // the index must hold no staged change. Either alone is bypassable (stage
+  // a change, then restore the worktree).
+  const messageOnlyRewrite =
+    !resolution.ambiguous &&
+    ships.every((s) => s.kind === "commit" && hasAmendFlag(s.segment)) &&
+    // EVERY repo this command touches must qualify: a compound
+    // `git -C A commit --amend && git -C B commit --amend` must not be
+    // exempted by repo A alone.
+    [...checkRoots].every((root) => isMessageOnlyRewrite({
+      amend: true,
+      newTree: deps.worktreeTree(root),
+      replacedTree: deps.headCommitTree(root) || undefined,
+      stagedChanges: deps.hasStagedChanges(root),
+    }));
+
+  // THE DELIVERY STATION (2026-09-06) — a separate list from `problems`.
+  //
+  // It answers a different question from the quality gates: those ask "is
+  // this work good enough to ship?", this asks "does this round travel that
+  // far at all?". Keeping it on its own list is what keeps the two apart in
+  // the refusal text — a session that reads "review is PENDING" and a session
+  // that reads "your round stops at precommit" have to do completely
+  // different things next.
+  //
+  // It NEVER relaxes anything: a station that allows a command is not an
+  // authorization to run it (the quality gates still say no on their own
+  // terms). A MESSAGE-ONLY REWRITE is exempt, for the same reason the content
+  // gates exempt it: it travels no further than the commit that already
+  // exists, and blocking it would leave a bad message unfixable at
+  // `precommit` — the deadlock lib/git-rewrite.ts exists to prevent.
+  const stationProblems = messageOnlyRewrite ? [] : stationShipProblems(station, ships.map((s) => s.kind));
+
+  // Nothing changed in any touched repo ⇒ no QUALITY gate to enforce. (A
+  // sidecar-less repo with uncommitted work still fails closed in the per-repo
+  // check below — it counts as a change above.) The STATION still applies
+  // (N5): an unchanged worktree is not a licence to travel further.
+  if (!anyChange) {
+    if (stationProblems.length === 0) return undefined;
+    return refuseShip(deps, { command, ships, problems: [], stationProblems, blockedUnreviewed: [] });
+  }
 
   // AI attribution (HARD) + English-language (L5, HARD) checks on commit
   // messages and PR title/description. Both are A-CLASS: heuristics the gate
@@ -300,37 +355,6 @@ export async function evaluateShipCommand(
     }
   }
 
-  // MESSAGE-ONLY REWRITE (lib/git-rewrite.ts). A `git commit --amend` that
-  // publishes the tree it replaces adds no content, so the CONTENT gates
-  // have nothing to judge — and refusing it is what left a non-English
-  // commit message unfixable (the only exit was a human running
-  // /gate-bypass).
-  //
-  // IT EXEMPTS THE CONTENT GATES AND NOTHING ELSE (round-3 P1). The branch
-  // rule, the fail-closed sidecar checks and the loop-goal gate below still
-  // run: WHERE a commit lands is not a content question, and this round's
-  // own rebase-aware `currentBranch` is exactly what lets that rule keep
-  // applying during a reword instead of deadlocking on a detached HEAD.
-  //
-  // The message was already judged: L5 and the AI-attribution guard run
-  // ABOVE this, so a rewrite cannot smuggle in a bad message.
-  //
-  // Two measurements, because `--amend` publishes the INDEX while the
-  // fingerprint is a worktree tree: the worktree must equal HEAD's tree AND
-  // the index must hold no staged change. Either alone is bypassable (stage
-  // a change, then restore the worktree).
-  const messageOnlyRewrite =
-    !resolution.ambiguous &&
-    ships.every((s) => s.kind === "commit" && hasAmendFlag(s.segment)) &&
-    // EVERY repo this command touches must qualify: a compound
-    // `git -C A commit --amend && git -C B commit --amend` must not be
-    // exempted by repo A alone.
-    [...checkRoots].every((root) => isMessageOnlyRewrite({
-      amend: true,
-      newTree: deps.worktreeTree(root),
-      replacedTree: deps.headCommitTree(root) || undefined,
-      stagedChanges: deps.hasStagedChanges(root),
-    }));
   if (messageOnlyRewrite) {
     deps.appendLesson(`message-only rewrite: content gates skipped (tree unchanged): ${command.slice(0, 160)}`);
   }
@@ -433,55 +457,6 @@ export async function evaluateShipCommand(
     problems.push(multiRepo ? `[${deps.repoLabel(primaryRepoRoot)}] ${LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK}` : LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
   }
 
-  // THE DELIVERY STATION (2026-09-06) — the LAST check, and deliberately a
-  // separate list from `problems`.
-  //
-  // It answers a different question from everything above: those ask "is this
-  // work good enough to ship?", this asks "does this round travel that far at
-  // all?". Running it last, on its own list, is what keeps the two apart in
-  // the refusal text — a session that reads "review is PENDING" and a session
-  // that reads "your round stops at precommit" have to do completely
-  // different things next, and one message that blurred them would send both
-  // to the wrong one.
-  //
-  // It NEVER relaxes anything: `problems` is already complete at this point
-  // and is carried into the block untouched, so a station that allows a
-  // command is not an authorization to run it (the quality gates still say
-  // no on their own terms).
-  //
-  // A MESSAGE-ONLY REWRITE is exempt, for the same reason the content gates
-  // exempt it: it publishes the tree it replaces, so it travels no further
-  // than the commit that already exists. Blocking it would leave a bad commit
-  // message unfixable at `precommit`, which is the deadlock lib/git-rewrite.ts
-  // exists to prevent.
-  const stationProblems: string[] = [];
-  if (!messageOnlyRewrite) {
-    // The STRICTEST station among the repos this command ships from: a
-    // compound command that reaches two repos must satisfy both contracts,
-    // and a repo with no contract (explore, or a repo this session never
-    // negotiated a goal for) contributes nothing rather than the default.
-    let station: DeliveryStation | undefined;
-    for (const root of checkRoots) {
-      const here = deps.deliveryStation(root);
-      if (here === undefined) continue;
-      if (station === undefined || deliveryStationRank(here) < deliveryStationRank(station)) {
-        station = here;
-      }
-    }
-    if (station !== undefined) {
-      const seen = new Set<ShipCommandKind>();
-      // `ships` is ShipDetection[], whose `kind` IS the gate's vocabulary —
-      // no cast, so a future widening of that union fails here instead of
-      // being silently accepted by the station table.
-      for (const { kind } of ships) {
-        if (seen.has(kind) || shipKindAllowedAtStation(station, kind)) continue;
-        seen.add(kind);
-        stationProblems.push(stationShipProblem(station, kind));
-
-      }
-    }
-  }
-
   if (problems.length === 0 && stationProblems.length === 0) return undefined;
 
   // Single-use arbiter bypass token (lib/arbitration.ts). Only a lone,
@@ -513,12 +488,29 @@ export async function evaluateShipCommand(
     }
   }
 
-  // Record this block so request_arbitration can only contest a REAL block.
-  // The cross-repo hint is part of the RECORDED text — the flat one the
-  // arbiter and the sidecar read. That is no longer the same STRING the agent
-  // read (`shown` is the three-part rendering), but it carries the same facts,
-  // and "your READY is on another repo" is the single most relevant of them
-  // when a multi-repo block is being contested.
+  return refuseShip(deps, { command, ships, problems, stationProblems, blockedUnreviewed });
+}
+
+/**
+ * Build, record and return a ship refusal.
+ *
+ * Record this block so request_arbitration can only contest a REAL block.
+ * The cross-repo hint is part of the RECORDED text — the flat one the
+ * arbiter and the sidecar read. That is no longer the same STRING the agent
+ * read (`shown` is the three-part rendering), but it carries the same facts,
+ * and "your READY is on another repo" is the single most relevant of them
+ * when a multi-repo block is being contested.
+ */
+function refuseShip(
+  deps: ShipGateBashDeps,
+  { command, ships, problems, stationProblems, blockedUnreviewed }: {
+    command: string;
+    ships: ShipDetection[];
+    problems: string[];
+    stationProblems: string[];
+    blockedUnreviewed: string[];
+  },
+): ToolCallBlock {
   const { recorded, shown } = buildShipBlockReason({
     command,
     ships,
@@ -532,9 +524,6 @@ export async function evaluateShipCommand(
     blockReason: recorded,
     at: Date.now(),
     ...(stationProblems.length > 0 ? { stationBlocked: true } : {}),
-
   });
-
-
   return { block: true, reason: shown };
 }

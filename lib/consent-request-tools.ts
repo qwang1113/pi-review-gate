@@ -192,9 +192,9 @@ async function askConsent(
         ...(opts.reason ? { payload: `AI 给出的理由（未经核实）: ${opts.reason.slice(0, 300)}` } : {}),
       },
       uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, {
+      (dialog) => deps.askChoice(uiCtx, spec, {
+        ...dialog,
         body: opts.consentBody,
-        signal,
         onUndecided: () => { undecided = true; },
         // THE SESSION'S OWN REPO (review round 4 P1), passed rather than left to
         // the `activeRepoRoot` fallback: a consent question is about the gate

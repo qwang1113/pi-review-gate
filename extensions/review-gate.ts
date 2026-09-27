@@ -1283,9 +1283,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           payload: `推荐答案：${spec.recommended}`,
         },
         ui.hasUI === true,
-        (signal) => askChoice(ui, spec, {
+        (dialog) => askChoice(ui, spec, {
           ...(opts.body === undefined ? {} : { body: opts.body }),
-          signal,
+          ...dialog,
         }),
       );
       return outcome.answer;
