@@ -215,7 +215,9 @@ export function createToolResultHook(cells: SessionCells, deps: ToolResultHookDe
           const st = stateOf(root);
           const before = st.shippedKinds ?? [];
           const merged = [...new Set([...before, ...shipped])];
-          const newMerge = prMerged && st.prMergeObserved !== true;
+          // Merge evidence binds to the ONE repo the command ran in — never
+          // spread over every session repo on an ambiguous cwd.
+          const newMerge = prMerged && !cmdRepos.ambiguous && st.prMergeObserved !== true;
           if (merged.length !== before.length || newMerge) {
             if (merged.length !== before.length) st.shippedKinds = merged;
             if (newMerge) st.prMergeObserved = true;

@@ -513,12 +513,29 @@ export function observedShipKinds(command: string): ShipCommandKind[] {
  * head)? Delivery-station evidence for a task whose job is merging a PR it did
  * not open (D33) — the same evidence rules as {@link observedShipKinds}. It is
  * not a ship kind: the ship gate does not block it, only the arrival reads it.
+ *
+ * STRICTER than the ship kinds, because the evidence is bound to the repo the
+ * command ran in (review round 1, two P1s):
+ *   - the command must be THAT ONE segment. In `true || gh pr merge 1` or
+ *     `gh pr merge 1 || true` the shell's exit 0 says nothing about the merge;
+ *   - nothing may aim it at another repository: no `-R`/`--repo` (a global or
+ *     a subcommand flag), no PR URL, no `GH_REPO` (inline or inherited).
+ * A false negative only means proving the delivery another way.
  */
-export function observedPrMerge(command: string): boolean {
-  return observedCommandHeads(command).some((head) => {
-    const at = ghSubcommandIndex(head);
-    return at !== undefined && head[at] === "pr" && head[at + 1] === "merge";
-  });
+export function observedPrMerge(
+  command: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  // A backgrounded merge (`… &`) exits 0 before it has done anything.
+  if ((env.GH_REPO ?? "") !== "" || containsHeredoc(command) || /&\s*$/.test(command)) return false;
+  const segments = lexSegmentTokens(command);
+  if (segments.length !== 1) return false;
+  const tokens = segments[0]!;
+  const at = ghSubcommandIndex(tokens);
+  if (at === undefined || tokens[at] !== "pr" || tokens[at + 1] !== "merge") return false;
+  return !tokens.some((t) =>
+    t === "-R" || t === "--repo" || t.startsWith("-R") || t.startsWith("--repo=") ||
+    t.includes("://") || t.includes("github.com"));
 }
 
 /** The command heads the evidence path trusts — see {@link observedShipKinds}. */
