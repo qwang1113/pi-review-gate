@@ -8,16 +8,18 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 import { computeFingerprint, sessionOwnedPaths, worktreeTreeOid } from "../lib/fingerprint.ts";
 
 neutraliseHostGitConfig();
+neutraliseGateEnv();
 const cjs = createRequire(import.meta.url)(
   join(resolve(import.meta.dirname ?? "."), "..", "scripts", "compute-fingerprint.cjs"),
 );
 
 const dirs: string[] = [];
 after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
-// The test process may itself run inside a gate session with a variant.
+// Tests below set a variant themselves; start each from none.
 beforeEach(() => { delete process.env.RG_STATE_VARIANT; });
 
 function repo(): string {
