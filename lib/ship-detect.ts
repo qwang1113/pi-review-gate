@@ -387,7 +387,10 @@ export function stripInertHeredocBodies(command: string): string {
     out.push(line);
     // The redirect target excludes `(`/`)`: `cat >(bash) <<'EOF'` is a
     // process substitution that EXECUTES the body.
-    const m = /^\s*cat\b[^|;&<>()]*(?:>>?\s*[^\s|;&<>()]+\s*)?<<(-?)\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*(?:>>?\s*[^\s|;&<>()]+)?\s*$/.exec(line);
+    // No quote, backtick, `$` or backslash outside the delimiter's own quotes:
+    // `cat " > f <<'EOF'` OPENS A STRING in the shell (there is no heredoc),
+    // so its "body" lines are live commands (quality round P0).
+    const m = /^\s*cat\b[^|;&<>()"'`$\\]*(?:>>?\s*[^\s|;&<>()"'`$\\]+\s*)?<<(-?)\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*(?:>>?\s*[^\s|;&<>()"'`$\\]+)?\s*$/.exec(line);
     // A backslash-continued previous line makes `cat` an ARGUMENT of that
     // command (`sh -s \` + newline + `cat > f <<'Q'` runs the body).
     const inert = m && !(i > 0 && lines[i - 1]!.endsWith("\\"))

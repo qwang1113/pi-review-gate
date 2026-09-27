@@ -368,6 +368,10 @@ test("D37: every other heredoc shape still exposes its ship lines", () => {
     "cat > x.sh <<'EOF'\ngh pr create\nEOF\nchmod +x x.sh\n./x.sh",
     "cat > x.sh <<'EOF'\ngit commit -m y\nEOF\nsource x.sh",
     "cat > x.sh <<'EOF'\ngit push\nEOF\ncat x.sh | sh",
+    // A quote on the cat line opens a STRING, not a heredoc (quality round P0):
+    "cat \" > /tmp/f <<'EOF'\n$(gh pr create --title x)\nEOF\ncat \" > /tmp/g <<'Y'\nY",
+    "cat ' > /tmp/f <<'EOF'\n$(git push)\nEOF\ncat ' > /tmp/g <<'Y'\nY",
+    "cat $X > /tmp/f <<'EOF'\ngit push\nEOF",
   ]) {
     assert.ok(detectShipCommands(cmd).length > 0, cmd);
   }
