@@ -73,7 +73,9 @@ import {
 import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import { createPaneStateReporter } from "../lib/tmux-pane-state.ts";
 import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
+import { claimGateInstance } from "../lib/session-launch-specs.ts";
 import { readJudgeSideEnv } from "../lib/judge-side.ts";
+import { readWorkerSideEnv } from "../lib/worker-side.ts";
 import { createOrchestratorDeps, runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
 import type { UserNotifyKind } from "../lib/user-notify.ts";
@@ -145,7 +147,6 @@ import {
 } from "../lib/repo-facts.ts";
 import type { ToolUpdate } from "../lib/progress-stream.ts";
 import { readJsonIfExists } from "../lib/json-file.ts";
-import { sessionDirForCwd } from "../lib/session-dir.ts";
 import { createLlmClassifier, type LlmClassifier } from "../lib/llm-classify.ts";
 import { loopGoalRelPath } from "../lib/loop-goal.ts";
 import { choiceRows, type ChoiceUi } from "../lib/choice-dialog.ts";
@@ -240,6 +241,8 @@ process.on("exit", () => {
 let paneStateAtExit: { clear(): void } | undefined;
 
 export default function reviewGate(pi: ExtensionAPI) {
+  // D11: a second copy of the gate (settings) beside the `-e` one stands down.
+  if (!claimGateInstance()) return;
   /**
    * Every tool's own `execute`, captured as it is registered.
    *
@@ -582,12 +585,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // ROUND-4 P1 — `orchestrator_wait`'s fourth block is computed from this.
     contextPercent: () => contextPercentOf(cells.latestCtx as unknown as { getContextUsage?: () => unknown }),
     auditPlan: (plan, onUpdate, signal) => runPlanAudit(plan, onUpdate as { step?: (t: string) => void; done?: (t: string) => void } | undefined, signal),
-    sessionTranscriptPath: () => {
-      try {
-        const dir = sessionDirForCwd(cells.cwd);
-        return cells.state.sessionId ? `${dir}/${cells.state.sessionId}.jsonl` : undefined;
-      } catch { return undefined; }
-    },
+    // One lookup for the transcript file (D06) — the handoff host owns it.
+    sessionTranscriptPath: () => handoff.ownTranscriptPath(),
     // Handed to a successor as its takeover proof (lib/orchestrator-relay.ts).
     ownSessionId: () => cells.state.sessionId ?? undefined,
     // WHERE THE CHILD WORKS (2026-09-18, A): the session's own rebase-aware read.
@@ -802,6 +801,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     const outcome = closeOwnSessionOnExit((argv) => runTmux(argv), tmuxScope, {
       handedOff: handedOff(),
       children: cells.state.orchestrator?.children ?? [],
+      judgeOrWorker: readJudgeSideEnv(process.env) !== undefined || readWorkerSideEnv(process.env) !== undefined,
     });
     log(`review-gate[session-scope] 退出时：${outcome.note}`);
   };
@@ -923,6 +923,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     hasStagedChanges,
     unreviewedTreesSince,
     loopGoalConfirmed: () => goalStageSatisfied(),
+    precommitLaneRunning: (root) => precommitLaneRunning(root),
+    waitForQuietLane: (root) => waitForQuietLane(root),
     deliveryStation: (root) => deliveryStationFor(root),
     crossRepoVerdictHint,
     classifier,
@@ -1038,6 +1040,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       toolText,
       applyCancelPlan: (plan, root, why) => applyCancelPlan(plan, root, why),
       resumeParkedReady: (root, ctx, landing) => resumeParkedReady(root, ctx, landing),
+      currentTarget: (root) => reviewTargets.get(root),
+      qualityRoundInFlight,
     });
   const { recordReviewVerdict } = createReviewVerdictRecorder(host, {
     reviewTargets,
@@ -1100,6 +1104,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     reviewTargets,
     waitForQuietLane,
     startPrecommitBeside,
+    qualityRoundInFlight,
     buildGoalAuditRound,
     auditRunDeps,
   });
@@ -1119,7 +1124,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   registerJudgeSubmitTool(pi, cells, {
     resolveToolRepo, stateForRepo, persistRepo, stageIsOn, callTool, toolText, extractTaskText,
     submitForReview, buildGoalAuditRound, dispatchJudgeRound, cancelJudgeRound, noteQualityRoundDispatched,
-    registry, cancelLedger,
+    qualityRoundInFlight, registry, cancelLedger,
   });
 
   // ---------- judge_wait / judge_spawn (lib/judge-tools-wiring.ts) ----------

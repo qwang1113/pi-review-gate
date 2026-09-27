@@ -1,5 +1,6 @@
 /**
- * THE CHECKPOINT COMMIT MESSAGE — a pure function of the agent's round note.
+ * THE CHECKPOINT COMMIT MESSAGE — a pure function of the agent's explicit
+ * `message` (never the round note: D32, 2026-09-27).
  *
  * THE MARKER IS GONE (user decision, 2026-09-16). A checkpoint used to be
  * identifiable AS a checkpoint in the history: first by a bare `checkpoint: `
@@ -54,12 +55,17 @@ export function ensureConventionalSubject(subject: string): string {
  * conventional-commit fallback and the non-English fallback are unit-testable
  * without a repository.
  */
-export function buildCheckpointMessage(raw: string): string {
-  const lines = raw.trim().split("\n");
+export function buildCheckpointMessage(raw: string | undefined): string {
+  // D32: only the agent's explicit `message` is message text. The round NOTE
+  // is a description for the reviewer ("Round 3 fixes both round-2 P1s:"),
+  // and slicing a subject out of it produced illegible history — no message
+  // means the fixed default subject.
+  const text = raw ?? "";
+  const lines = text.trim().split("\n");
   const firstLine = (lines[0] ?? "").trim().slice(0, 100);
   const usableSubject = firstLine.length > 0 && !containsNonLatinLetter(firstLine);
   const subject = usableSubject ? firstLine : "record this round for review";
-  const rest = (usableSubject ? lines.slice(1).join("\n") : raw).trim();
+  const rest = (usableSubject ? lines.slice(1).join("\n") : text).trim();
   const body = containsNonLatinLetter(rest) ? "" : rest;
   const legal = ensureConventionalSubject(subject);
   return body ? `${legal}\n\n${body}` : legal;

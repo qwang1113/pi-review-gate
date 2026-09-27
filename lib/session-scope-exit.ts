@@ -28,11 +28,16 @@ export interface ExitFacts {
   handedOff: boolean;
   /** The orchestration children this session registered (settled ones carry `closedAt`). */
   children: readonly { closedAt?: string | undefined }[];
+  /**
+   * A judge or worker pane (D35). It shares the repo's sidecar with the
+   * manager that opened it, so `children` are the MANAGER's — never its own.
+   */
+  judgeOrWorker?: boolean;
 }
 
 export function closeOwnSessionOnExit(run: TmuxRunner, scope: TmuxScope, facts: ExitFacts): { closed: boolean; note: string } {
   if (facts.handedOff) return { closed: false, note: "已交接给后继会话 —— 专属 session 留给后继接管" };
-  const openChildren = facts.children.filter((child) => !child.closedAt).length;
+  const openChildren = facts.judgeOrWorker ? 0 : facts.children.filter((child) => !child.closedAt).length;
   if (openChildren > 0) {
     return { closed: false, note: `还有 ${openChildren} 个未关闭的编排子会话 —— 专属 session 留给 orchestrator_attach 接管` };
   }

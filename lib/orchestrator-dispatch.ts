@@ -60,6 +60,7 @@ import {
   appendRecord,
   newChannelId,
 } from "./channel-io.ts";
+import { unansweredRequests } from "./channel-projection.ts";
 import {
   alivePanes,
   childChannelProjection,
@@ -307,16 +308,22 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // the child anyway would put two writers in one checkout — the exact damage
   // the isolation exists to prevent — and "we could not isolate you" is a
   // reason to wait, never a reason to share.
+  //
+  // A task that DECLARED `isolated` (D30) gets the same checkout with no
+  // sibling at all — the gate builds and seeds it, never the manager by hand.
   const sibling = deps.runtime().children.find((c) => !c.closedAt && c.cwd === cwd);
   let worktree: { path: string; branch: string; note?: string } | undefined;
-  if (sibling) {
+  if (sibling || task.isolated) {
     const isolated = deps.createWorktree?.(cwd, childId);
     if (!isolated || !isolated.ok) {
-      return fail(
-        `review-gate: 任务 "${taskId}" 不能启动 —— 它和 "${sibling.taskId}" 在同一个 repo（${cwd}），` +
-        `而门禁无法为它开出隔离的 worktree：${isolated ? isolated.reason : "这个会话没有接上 git 能力"}。\n` +
-        "同一个 checkout 里两个写者会互相覆盖，所以这里拒绝启动而不是共用工作区。" +
-        "修好 git（或先 close 掉那个 child）之后再 spawn。",
+      const why = isolated ? isolated.reason : "这个会话没有接上 git 能力";
+      return fail(sibling
+        ? `review-gate: 任务 "${taskId}" 不能启动 —— 它和 "${sibling.taskId}" 在同一个 repo（${cwd}），` +
+          `而门禁无法为它开出隔离的 worktree：${why}。\n` +
+          "同一个 checkout 里两个写者会互相覆盖，所以这里拒绝启动而不是共用工作区。" +
+          "修好 git（或先 close 掉那个 child）之后再 spawn。"
+        : `review-gate: 任务 "${taskId}" 不能启动 —— plan 要求它在独立 checkout 里工作（isolated），` +
+          `而门禁无法在 ${cwd} 开出 worktree：${why}。一个 pane 都没开；修好 git 之后再 spawn。`,
       );
     }
     worktree = {
@@ -663,7 +670,8 @@ export async function dispatchInstruct(
   // a question, a consent — and that answering is the other tool's job. Both
   // remaining modes stop the child (`interrupt` aborts the turn, `steer` cuts
   // into it), so the notice applies to every delivery this tool makes.
-  const open = childChannelProjection(deps, childId).openRequests[0];
+  // An ANSWERED request the child has not settled yet was not cancelled (D34).
+  const open = unansweredRequests(childChannelProjection(deps, childId))[0];
   const cancelledLine = open
     ? `\n本次打断同时取消了子会话的待答请求「${open.title}」—— 它不再等这个回答了；若你的本意是回答它，请用 orchestrator_answer。`
     : "";

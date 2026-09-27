@@ -228,9 +228,10 @@ function matchGitConfigAlias(headTokens: string[], rawSegment: string): ShipComm
   return undefined;
 }
 
-function matchGh(tokens: string[]): ShipCommandKind | undefined {
+/** Index of the gh subcommand past gh's global flags; `undefined` when `tokens` is not gh. */
+function ghSubcommandIndex(tokens: string[]): number | undefined {
   if (tokens.length < 2) return undefined;
-  const head = tokens[0];
+  const head = tokens[0]!;
   if (head !== "gh" && !head.endsWith("/gh")) return undefined;
   // Skip gh global flags before `pr create`. Handle both the space form
   // (`-R repo` / `--repo repo`) and the attached form (`--repo=repo` / `-R=repo`),
@@ -246,6 +247,12 @@ function matchGh(tokens: string[]): ShipCommandKind | undefined {
     if (t.startsWith("-")) { i += 1; continue; }                    // any other no-value gh global flag
     break;
   }
+  return i;
+}
+
+function matchGh(tokens: string[]): ShipCommandKind | undefined {
+  const i = ghSubcommandIndex(tokens);
+  if (i === undefined) return undefined;
   if (tokens[i] === "pr" && tokens[i + 1] === "create") return "pr-create";
   if (tokens[i] === "pr" && tokens[i + 1] === "edit") return "pr-edit";
   // Fail-closed for an UNKNOWN separate-value gh global option (not in
@@ -362,7 +369,58 @@ function rawSegments(command: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * D37 — drop the BODY of a heredoc that can only ever be data.
+ *
+ * Deliberately narrow, because skipping a heredoc body is a bypass in every
+ * other shape: only `cat` with an output redirection to a file (`cat > f
+ * <<'EOF'`, `cat <<'EOF' >> f`) and a QUOTED delimiter qualify. The quotes
+ * turn off expansion, so a `$(gh pr create)` in the body is text; `cat` into a
+ * file executes nothing. An unquoted delimiter, a shell reading the heredoc
+ * (`bash <<'EOF'`), a pipe, two heredocs on one line, or a body with no
+ * terminator all leave the command UNTOUCHED (fail-closed).
+ *
+ * AND THE COMMAND MUST BE NOTHING BUT THOSE WRITES (t4 review P1): the file a
+ * `cat` wrote is not inert once the same command runs it — `cat > x.sh <<'EOF'`
+ * … `EOF` then `bash x.sh` (or `source`, `./x.sh`, `chmod +x` + run, a pipe to
+ * a shell) executes the body. Telling a harmless follow-up from one that runs
+ * the file is a guess, so ANY other non-blank line keeps every body in view.
+ */
+export function stripInertHeredocBodies(command: string): string {
+  const lines = command.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    out.push(line);
+    // The redirect target excludes `(`/`)`: `cat >(bash) <<'EOF'` is a
+    // process substitution that EXECUTES the body.
+    // An ALLOWLIST of plain path/flag characters, never a denylist (quality
+    // round P0 ×2): a quote on the line OPENS A STRING and a `#` starts a
+    // comment — either way there is no heredoc and the "body" lines run.
+    // The command word is exactly `cat`: `cat/../bin/bash` also starts with it.
+    const m = /^\s*cat\s[\w./@%+=,:\s-]*?(?:>>?\s*[\w./@%+=,:-]+\s*)?<<(-?)\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*(?:>>?\s*[\w./@%+=,:-]+)?\s*$/.exec(line);
+    // A backslash-continued previous line makes `cat` an ARGUMENT of that
+    // command (`sh -s \` + newline + `cat > f <<'Q'` runs the body).
+    const inert = m && !(i > 0 && lines[i - 1]!.endsWith("\\"))
+      && />/.test(line.replace(/<<-?\s*(['"])[A-Za-z_][A-Za-z0-9_]*\1/, ""));
+    // Any OTHER heredoc means we no longer know which lines are commands: an
+    // outer `bash <<EOF` body can contain a fake `cat > f <<'X'` whose "body"
+    // the outer shell expands (`$(gh pr create)`). Strip nothing then.
+    if (!inert) {
+      if (line.trim() !== "") return command;
+      continue;
+    }
+    const [, dash, , delim] = m!;
+    const end = lines.findIndex((l, j) => j > i && (dash ? l.replace(/^\t+/, "") : l) === delim);
+    if (end < 0) return command;
+    out.push(lines[end]!);
+    i = end;
+  }
+  return out.join("\n");
+}
+
 export function detectShipCommands(command: string): ShipDetection[] {
+  command = stripInertHeredocBodies(command);
   const results: ShipDetection[] = [];
   for (const seg of segments(command)) {
     const tokens = normalizedTokens(seg);
@@ -403,8 +461,9 @@ export function detectShipCommands(command: string): ShipDetection[] {
  *     assumed).
  *
  * So the evidence recorder asks this first and records nothing when a heredoc
- * is in play. It deliberately does NOT teach {@link detectShipCommands} about
- * heredocs: a detector that skipped heredoc bodies would be a real ship-gate
+ * is in play. The detector itself skips only the one heredoc shape that can
+ * never execute ({@link stripInertHeredocBodies}: quoted delimiter, `cat`
+ * into a file); skipping any other heredoc body would be a real ship-gate
  * bypass, and that direction must never be relaxed. A false NEGATIVE here only
  * means "no arrival evidence from this command" — the round proves it with a
  * plain `gh pr create` instead.
@@ -441,8 +500,68 @@ export function containsHeredoc(command: string): boolean {
  * strict as it was — relaxing it would be a real ship-gate bypass.
  */
 export function observedShipKinds(command: string): ShipCommandKind[] {
-  if (containsHeredoc(command)) return [];
   const kinds = new Set<ShipCommandKind>();
+  for (const head of observedCommandHeads(command)) {
+    const kind = matchGit(head) ?? matchGh(head);
+    if (kind) kinds.add(kind);
+  }
+  return [...kinds];
+}
+
+/**
+ * Did this command MERGE a pull request (`gh pr merge` at a real command
+ * head)? Delivery-station evidence for a task whose job is merging a PR it did
+ * not open (D33) — the same evidence rules as {@link observedShipKinds}. It is
+ * not a ship kind: the ship gate does not block it, only the arrival reads it.
+ *
+ * It returns the PR SELECTOR the merge named (`""` = the current branch's PR),
+ * or `undefined` when the command proves nothing. It is only a CANDIDATE: an
+ * exit 0 does not mean merged (a merge queue only enqueues, review round 2),
+ * so `declare_done` asks GitHub whether that selector's PR is MERGED
+ * (lib/station-pr-evidence.ts `probeMergedPr`).
+ *
+ * STRICTER than the ship kinds, because the evidence is bound to the repo the
+ * command ran in (review rounds 1–2):
+ *   - the command must be THAT ONE segment, with no `&` anywhere: in
+ *     `true || gh pr merge 1`, `gh pr merge 1 || true` or `gh pr merge 1 &`
+ *     the shell's exit 0 says nothing about the merge;
+ *   - nothing may aim it at another repository: no `-R`/`--repo`, no PR URL,
+ *     no `GH_REPO` (inline or inherited);
+ *   - every flag must be a KNOWN synchronous one — `--auto`,
+ *     `--disable-auto`, `--help` and anything unrecognised prove nothing.
+ * A false negative only means proving the delivery another way.
+ */
+export function observedPrMerge(
+  command: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string | undefined {
+  if ((env.GH_REPO ?? "") !== "" || containsHeredoc(command) || command.includes("&")) return undefined;
+  const segments = lexSegmentTokens(command);
+  if (segments.length !== 1) return undefined;
+  const tokens = segments[0]!;
+  const at = ghSubcommandIndex(tokens);
+  // No gh global flag either: `-R` is the one that matters, and none is needed.
+  if (at !== 1 || tokens[1] !== "pr" || tokens[2] !== "merge") return undefined;
+  let selector: string | undefined;
+  for (let i = 3; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (MERGE_BOOLEAN_FLAGS.has(t)) continue;
+    if (MERGE_VALUE_FLAGS.has(t)) { i += 1; continue; }
+    if (t.startsWith("--") && t.includes("=") && MERGE_VALUE_FLAGS.has(t.split("=")[0]!)) continue; // `--subject=x`
+    if (t.startsWith("-")) return undefined;
+    if (selector !== undefined || t.includes("://") || t.includes("github.com")) return undefined;
+    selector = t;
+  }
+  return selector ?? "";
+}
+
+const MERGE_BOOLEAN_FLAGS = new Set(["--squash", "-s", "--merge", "-m", "--rebase", "-r", "--delete-branch", "-d", "--admin"]);
+const MERGE_VALUE_FLAGS = new Set(["--subject", "-t", "--body", "-b", "--body-file", "-F", "--author-email", "-A", "--match-head-commit"]);
+
+/** The command heads the evidence path trusts — see {@link observedShipKinds}. */
+function observedCommandHeads(command: string): string[][] {
+  if (containsHeredoc(command)) return [];
+  const heads: string[][] = [];
   for (const tokens of lexSegmentTokens(command)) {
     // The HEAD of this segment, and nothing but the head. Only two things are
     // stepped over — an env assignment and a redirection with its target —
@@ -466,12 +585,9 @@ export function observedShipKinds(command: string): ShipCommandKind[] {
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) { i += 1; continue; } // `FOO=bar`
       break;
     }
-    const head = tokens.slice(i);
-    const kind = matchGit(head) ?? matchGh(head);
-    if (kind) kinds.add(kind);
-
+    heads.push(tokens.slice(i));
   }
-  return [...kinds];
+  return heads;
 }
 
 

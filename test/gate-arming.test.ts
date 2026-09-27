@@ -12,7 +12,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { armingFromFacts, couldReconcile, reconcileArming } from "../lib/gate-arming.ts";
+import {
+  armingCommitsAhead, armingFromFacts, couldReconcile, nothingOwnUnderScopeLimit, reconcileArming,
+} from "../lib/gate-arming.ts";
 
 test("branch commits arm the code flag on their own — a clean worktree is not a clean branch", () => {
   assert.deepEqual(
@@ -117,4 +119,29 @@ test("couldReconcile: skip the git call when nothing COULD be cleared", () => {
   );
   assert.equal(couldReconcile({ hasCodeChange: true, hasDocChange: false }, ["README.md"]), true, "code flag, no code file");
   assert.equal(couldReconcile({ hasCodeChange: false, hasDocChange: true }, []), true, "an empty worktree may clear everything");
+});
+
+// D36 (2026-09-27): a scope limit suspends branch-commit arming only while the
+// session has no work of its own — its own checkpointed edits keep it armed.
+test("D36: under a scope limit, the session's own checkpointed work keeps the branch counted", () => {
+  let spawned = 0;
+  const count = () => { spawned++; return 2; };
+  assert.equal(armingCommitsAhead({ sessionFiles: [] }, count), 0);
+  assert.equal(spawned, 0, "no git call when the answer is not used");
+  assert.equal(armingCommitsAhead({ sessionFiles: ["lib/x.ts"] }, count), 2);
+  assert.equal(armingCommitsAhead(undefined, count), 2);
+  // The checkpoint left the worktree clean: the flag survives the reconcile.
+  const next = reconcileArming(
+    { hasCodeChange: true, hasDocChange: false },
+    { files: [], commitsAhead: armingCommitsAhead({ sessionFiles: ["lib/x.ts"] }, count) },
+  );
+  assert.equal(next.hasCodeChange, true);
+});
+
+test("D36: judge_submit's zero-edit refusal needs an empty sessionFiles too", () => {
+  const clean = { hasCodeChange: false, hasDocChange: false };
+  assert.equal(nothingOwnUnderScopeLimit({ ...clean, scopeLimit: { sessionFiles: [] } }), true);
+  assert.equal(nothingOwnUnderScopeLimit({ ...clean, scopeLimit: { sessionFiles: ["lib/x.ts"] } }), false);
+  assert.equal(nothingOwnUnderScopeLimit({ ...clean }), false, "no scope limit ⇒ never this refusal");
+  assert.equal(nothingOwnUnderScopeLimit({ hasCodeChange: true, hasDocChange: false, scopeLimit: { sessionFiles: [] } }), false);
 });

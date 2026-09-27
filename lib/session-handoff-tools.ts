@@ -89,6 +89,8 @@ export interface SessionHandoffDeps {
    * never satisfy.
    */
   canFillDoc(): boolean;
+  /** Why THIS pane may not hand over at all (a worker: it has no successor path). Absent ⇒ it may. */
+  refusal?(): string | undefined;
   writeText(path: string, text: string): void;
   readText(path: string): string | undefined;
   openSuccessor(spec: SuccessorPaneSpec): Promise<{ ok: true; paneId: string } | { ok: false; error: string }>;
@@ -185,6 +187,8 @@ export function ensureHandoffDoc(deps: SessionHandoffDeps, sessionId: string, do
  * guessing about.
  */
 export async function runSessionHandoff(deps: SessionHandoffDeps): Promise<ToolReply> {
+  const refused = deps.refusal?.();
+  if (refused) return fail(refused);
   const kind = deps.kind();
   const sessionId = deps.sessionId();
   if (!sessionId) {

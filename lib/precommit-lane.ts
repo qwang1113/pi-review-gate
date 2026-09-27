@@ -15,8 +15,8 @@ import {
   type AsyncPrecommitPass,
   type AsyncPrecommitReport,
 } from "./async-precommit-report.ts";
-import { nextFullPassTree } from "./gate-state-transitions.ts";
-import { roundCancelPlan, type RoundCancelPlan } from "./quality-round.ts";
+import { nextFullPassTree, nextReviewRoundNumber } from "./gate-state-transitions.ts";
+import { laneOwnsCurrentRound, roundCancelPlan, type RoundCancelPlan } from "./quality-round.ts";
 import { worktreeTree } from "./repo-facts.ts";
 import type { CallTool, GateToolResult, SessionHost } from "./session-host.ts";
 
@@ -24,6 +24,11 @@ import type { CallTool, GateToolResult, SessionHost } from "./session-host.ts";
 export interface LaneHandle {
   settled: Promise<void>;
   failure(): string | undefined;
+  /**
+   * Bind the lane to its round's review target once prepare registered it
+   * (D02): the landing only speaks for the round whose target this is.
+   */
+  bind(target: { head: string; tree: string }): void;
 }
 
 export function createPrecommitLane(
@@ -40,9 +45,13 @@ export function createPrecommitLane(
       ctx?: unknown,
       landing?: { laneVerdict: string; coveredTree: string | undefined },
     ): Promise<string[]>;
+    /** The review target registered now (lib/review-target-host.ts). */
+    currentTarget(root: string): { head: string; tree: string } | undefined;
+    /** Is this round's quality judge still judging? (lib/review-target-host.ts) */
+    qualityRoundInFlight(root: string): boolean;
   },
 ) {
-  const { pi, callTool, toolText, applyCancelPlan, resumeParkedReady } = deps;
+  const { pi, callTool, toolText, applyCancelPlan, resumeParkedReady, currentTarget, qualityRoundInFlight } = deps;
   const { log } = host;
   const stateForRepo = (root: string) => host.stateFor(root);
   const persistRepo = (ctx: ExtensionContext, root: string) => host.persistRepo(ctx, root);
@@ -169,7 +178,8 @@ export function createPrecommitLane(
     // AFTER the runner (lint:fix may have edited files) — i.e. it can already be
     // the NEXT round's content. This one is the frozen content this lane was
     // launched against, and it is what the notice names.
-    const round = stateForRepo(root).rounds.length + 1;
+    const round = nextReviewRoundNumber(stateForRepo(root));
+    let bound: { head: string; tree: string } | undefined;
     const settled = (async () => {
       let verdict = "no verdict";
       let detail = "";
@@ -249,7 +259,12 @@ export function createPrecommitLane(
       // notice below IS this row's delivery.
       const laneWhy = `全量 precommit 没过（${verdict}）—— 这份内容 ship 不了，功能轮不必再审`;
       if (verdict !== "PASS") failedWhy = laneWhy;
-      const laneCancelNotes = applyCancelPlan(roundCancelPlan({ party: "lane", verdict }), root, laneWhy);
+      const now = currentTarget(root);
+      const current = laneOwnsCurrentRound(
+        { round, head: bound?.head, tree: bound?.tree },
+        { round: stateForRepo(root).sentReviewRounds ?? 0, head: now?.head, tree: now?.tree },
+      );
+      const laneCancelNotes = applyCancelPlan(roundCancelPlan({ party: "lane", verdict, current }), root, laneWhy);
       // THEN the parked conclusion, re-asked from BOTH halves (`resumeParkedReady`
       // consults the trees, what THIS landing measured and the quality standing):
       // a non-PASS lane retires the parked round, a PASS on exactly that tree
@@ -263,13 +278,15 @@ export function createPrecommitLane(
       // had (measured: 6m47s, notification session 2026-09-15). FAIL keeps its
       // loud form; PASS gets the short one — there is nothing to do about it.
       if (verdict === "PASS") {
-        reportAsyncPrecommitPass({ round, verified, current: worktreeTree(root) ?? "" });
+        reportAsyncPrecommitPass({ round, commit: bound?.head ?? "", verified, current: worktreeTree(root) ?? "" });
       } else {
         // TELL THE AGENT (B1). The content the reviewer approved did not pass
         // its verification, so this round cannot produce a shippable READY —
         // and the failure channel names THAT reason, not "findings".
         reportAsyncPrecommit({
           round,
+          commit: bound?.head ?? "",
+          qualityInFlight: current && qualityRoundInFlight(root),
           verified,
           current: worktreeTree(root) ?? "",
           verdict,
@@ -290,7 +307,7 @@ export function createPrecommitLane(
     void settled.finally(() => {
       if (inFlightPrecommit?.settled === settled) inFlightPrecommit = undefined;
     });
-    return { settled, failure: () => failedWhy };
+    return { settled, failure: () => failedWhy, bind: (target) => { bound = { head: target.head, tree: target.tree }; } };
   }
 
   /**

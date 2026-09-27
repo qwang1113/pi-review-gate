@@ -14,24 +14,35 @@ const ROOT = "/tmp/fake-repo";
 const WHY = "全量 precommit 没过（FAIL）—— 这份内容 ship 不了，功能轮不必再审";
 
 /** `failWhen` = the dispatch of this role during which the lane lands FAIL. */
-async function run(failWhen: "quality-auditor" | "reviewer") {
-  let failed: string | undefined;
+async function run(
+  failWhen: "quality-auditor" | "reviewer" | "before",
+  opts: { qualityInFlight?: boolean; lastLane?: string; fresh?: boolean } = {},
+) {
+  let failed: string | undefined = failWhen === "before" ? WHY : undefined;
+  let chainRan = false;
   const dispatched: string[] = [];
   const cancelled: string[] = [];
   const ledger = createRoundCancelLedger();
+  const st: { precommit: { verdict: string; mode: string }; sentReviewRounds?: number } = {
+    precommit: { verdict: opts.lastLane ?? "NOT_RUN", mode: "full" },
+  };
   let execute: ((...a: unknown[]) => Promise<{ content: { text: string }[]; details: Record<string, unknown> }>) | undefined;
   const deps = {
     resolveToolRepo: () => ({ ok: true, root: ROOT }),
-    stateForRepo: () => ({}),
+    stateForRepo: () => st,
+    qualityRoundInFlight: () => opts.qualityInFlight === true,
     persistRepo: () => {},
     stageIsOn: () => true,
-    submitForReview: async () => ({
-      ok: true,
-      role: "quality-auditor",
-      taskText: "quality task",
-      parallelReviewer: { taskText: "reviewer task" },
-      laneFailure: () => failed,
-    }),
+    submitForReview: async () => {
+      chainRan = true;
+      return {
+        ok: true,
+        role: "quality-auditor",
+        taskText: "quality task",
+        parallelReviewer: { taskText: "reviewer task" },
+        laneFailure: () => failed,
+      };
+    },
     dispatchJudgeRound: async ({ role }: { role: string }) => {
       dispatched.push(role);
       if (role === failWhen) failed = WHY; // the lane lands while this pane opens
@@ -51,9 +62,27 @@ async function run(failWhen: "quality-auditor" | "reviewer") {
     { sessionInGit: true } as SessionCells,
     deps,
   );
-  const reply = await execute!("id", { role: "reviewer", task: "change" }, undefined, undefined, {});
-  return { reply, dispatched, cancelled, ledger };
+  const reply = await execute!("id", { role: "reviewer", task: "change", ...(opts.fresh ? { fresh: true } : {}) }, undefined, undefined, {});
+  return { reply, dispatched, cancelled, ledger, chainRan, st };
 }
+
+test("D03: lane FAIL lands before the QUALITY dispatch ⇒ neither judge is started, and the receipt says why", async () => {
+  const { reply, dispatched, ledger } = await run("before");
+  assert.deepEqual(dispatched, [], "a quality round started now would only be interrupted by the re-submission");
+  assert.equal(ledger.read(ROOT, "quality-auditor", undefined)?.why, WHY);
+  assert.match(reply.content[0]!.text, /质量轮也没派/);
+});
+
+test("D03: re-submitting while the failed round's quality judge still judges is refused — fresh overrides", async () => {
+  const refused = await run("reviewer", { qualityInFlight: true, lastLane: "FAIL" });
+  assert.equal(refused.chainRan, false, "nothing ran: no checkpoint, no lane");
+  assert.deepEqual(refused.dispatched, []);
+  assert.match(refused.reply.content[0]!.text, /judge_wait\(\{role:"quality-auditor"\}\)/);
+  const forced = await run("reviewer", { qualityInFlight: true, lastLane: "FAIL", fresh: true });
+  assert.equal(forced.chainRan, true);
+  const passed = await run("reviewer", { qualityInFlight: true, lastLane: "PASS" });
+  assert.equal(passed.chainRan, true, "a passing lane never holds a re-submission");
+});
 
 test("lane FAIL lands before the reviewer's dispatch ⇒ the reviewer is never started", async () => {
   const { reply, dispatched, cancelled, ledger } = await run("quality-auditor");
@@ -66,9 +95,10 @@ test("lane FAIL lands before the reviewer's dispatch ⇒ the reviewer is never s
 });
 
 test("lane FAIL lands while the reviewer's pane opens ⇒ cancelled the moment it comes up", async () => {
-  const { reply, dispatched, cancelled, ledger } = await run("reviewer");
+  const { reply, dispatched, cancelled, ledger, st } = await run("reviewer");
   assert.deepEqual(dispatched, ["quality-auditor", "reviewer"]);
   assert.deepEqual(cancelled, ["reviewer"]);
+  assert.equal(st.sentReviewRounds, 1, "D01: a reviewer that reached its pane took its round number, cancelled or not");
   assert.equal(ledger.read(ROOT, "reviewer", undefined)?.why, WHY);
   assert.match(reply.content[0]!.text, /reviewer 未派（或派出即取消）/);
 });

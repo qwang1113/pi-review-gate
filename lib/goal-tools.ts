@@ -66,7 +66,7 @@ import {
   parseDeliveryStation,
   type DeliveryStation,
 } from "./delivery-station.ts";
-import { capStationAt } from "./repo-pr-policy.ts";
+import { capStationAt, stationCapNotice } from "./repo-pr-policy.ts";
 
 /** Just enough of pi's tool context for a dialog and a transcript notice. */
 export interface GoalUiContext {
@@ -330,20 +330,13 @@ export async function doProposeLoopGoal(
   // user a fact that was not true about their own contract. `station` is the
   // post-clamp value, so it differs from the request exactly when the gate
   // actually moved it.
-  const capNote = stationCap !== undefined && station !== requestedStation
-    ? `⚠️ 交付站点上界 ${stationCap}（不是 ${requestedStation}）：本编排的 plan 收窄了该 repo —— ` +
-      "同一 repo 的一个需求只出一个 PR，子会话提交完就停：由 plan 的收尾任务（倒数第二个）汇合后走一次整体审核并 commit，" +
-      "由独立验收任务（最后一个）push 并开一个 PR。" +
-      "要分多个 PR，需要在 plan 里声明 allowMultiplePrs 并重新批准。"
-    : undefined;
+  const capNotice = stationCapNotice(requestedStation, stationCap);
+  const capNote = capNotice?.full;
   // THE DIALOG GETS THE SHORT FORM (measured, and it survived the end of the
-  // row budget): the first version of this notice ended with
-  // "declare allowMultiplePrs" — the one fact the reader can act on — and that
-  // is precisely what got cut. The transcript block above carries the full
-  // sentence; the box carries the decision.
-  const capNoteShort = stationCap !== undefined && station !== requestedStation
-    ? `⚠️ 要分多个 PR 就在 plan 里写 allowMultiplePrs；否则本 repo 站点上界 ${stationCap}（非 ${requestedStation}）`
-    : undefined;
+  // row budget): a long notice's actionable tail is precisely what got cut.
+  // The transcript block above carries the full sentence; the box carries the
+  // decision and where the reason is written (D41: never a guessed reason).
+  const capNoteShort = capNotice?.short;
   // TWO RENDERINGS OF ONE DEFINITION: the dialog and the transcript block are
   // read by the USER ("由你自己 commit"), the tool reply by the AGENT, which
   // must not read itself as the committer (round-2 P2).

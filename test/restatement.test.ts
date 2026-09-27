@@ -246,7 +246,8 @@ test("propose: the plan's ceiling clamps the station HERE, where it is first nam
   assert.equal(out.details?.station, "commit", "what gets recorded is the clamped value");
   assert.equal(f.st.restatement?.station, "commit");
   assert.match(shown[0] ?? "", /上界/, "and the user is told, where they read it");
-  assert.match(shown[0] ?? "", /allowMultiplePrs/, "the way to lift it is named");
+  assert.match(shown[0] ?? "", /上界原因/, "where the reason is written is named");
+  assert.doesNotMatch(shown[0] ?? "", /收窄了该 repo/, "D41: the cap may be the plan's own station");
 
   // Asking for LESS than the ceiling is not a narrowing and must not be
   // reported as one (the same false warning the goal dialog had).

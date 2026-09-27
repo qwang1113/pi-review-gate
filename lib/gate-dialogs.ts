@@ -60,9 +60,10 @@ export interface AskOpts {
    * MAY THE ARBITER STAND IN FOR THE USER on this question?
    *
    * Default true — every dialog carries the thirty-minute hand-off
-   * (lib/user-proxy.ts, user decision 2026-09-19). `false` is for the one
-   * question a machine has no business answering: the stage checklist,
-   * where a partial stand-in answer would switch gates OFF. The window
+   * (lib/user-proxy.ts, user decision 2026-09-19). `false` is for a question
+   * a machine has no business answering: the stage checklist, where a partial
+   * stand-in answer would switch gates OFF, and an ask_user authorization
+   * question, where the stand-in would mint the grant (D39). The window
    * still runs; its expiry is the ordinary “nobody decided” landing.
    */
   proxy?: boolean;
@@ -468,10 +469,10 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
       // 2026-09-22). An empty option list IS how lib/user-proxy.ts turns the
       // arbiter off: the window still runs and its expiry still settles as
       // “nobody answered”, so an unattended session unblocks exactly as before —
-      // it just does not get a machine-made decision. The one caller that asks
-      // for this is the stage checklist (`choose_loop_stages`): a stand-in that
-      // ticks a SUBSET of its rows would silently switch OFF the unticked
-      // gates, which is the opposite of what that dialog is for.
+      // it just does not get a machine-made decision. Two callers ask for this:
+      // the stage checklist (`choose_loop_stages`), where a stand-in that ticks
+      // a SUBSET of its rows would silently switch OFF the unticked gates, and
+      // an ask_user authorization question, where it would mint the grant (D39).
       options: opts.proxy === false ? [] : spec.options,
       ...(spec.defaultChecked === undefined ? {} : { multiple: true }),
       startProxy: () => deps.proxy.answerFor(spec, opts.body, dialogRoot),
@@ -514,7 +515,7 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
   async function askChoice(
     uiCtx: UiCtx,
     spec: ChoiceSpec,
-    opts: Omit<AskOpts, "proxy"> = {},
+    opts: AskOpts = {},
   ): Promise<string | undefined> {
     return askDialog(uiCtx, spec, opts, false);
   }

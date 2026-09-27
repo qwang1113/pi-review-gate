@@ -220,6 +220,23 @@ export function isLoopGoalConfirmed(
  * no TTL: the binding is to content, so an old PASS for the identical text is
  * still a PASS for that text, and any edit invalidates it by hash.
  */
+/**
+ * WHAT A FAILED GOAL AUDIT TELLS THE CALLER — its findings, verbatim (D13,
+ * 2026-09-27). The refusal used to be 「审计记录：FAIL」 plus a findings-stream
+ * path that a round which never streamed does not have, so the objections
+ * were only readable in the state sidecar. The plan's twin is
+ * `formatPlanAuditRefusal`; the record already holds everything needed.
+ */
+export function formatGoalAuditRefusal(record: GoalPrereviewRecord): string {
+  const findings = record.findings ?? [];
+  return [
+    `审计记录：${record.verdict}（findings ${findings.length} 条）`,
+    ...(findings.length
+      ? findings.map((f) => `  - ${f.severity}: ${f.issue}`)
+      : ["  （审计器没有给出可解析的 findings）"]),
+  ].join("\n");
+}
+
 export function goalPrereviewPassed(
   record: GoalPrereviewRecord | undefined,
   goalText: string,

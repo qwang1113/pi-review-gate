@@ -15,7 +15,32 @@ import { isPlanHash } from "./orchestrator-plan.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
 import { parsePlanTaskStages } from "./loop-stages.ts";
 import { isPaneId, parseWindowCoords } from "./orchestrator-tmux.ts";
-import type { ChildSession, OrchestratorRuntime } from "./orchestrator-registry.ts";
+import { isGrantableScope } from "./ask-user.ts";
+import type { ChildSession, OrchestrationGrant, OrchestratorRuntime } from "./orchestrator-registry.ts";
+
+const GRANT_DOORS: ReadonlySet<string> = new Set(["ask-user", "gate-grant", "first-answer"]);
+
+/**
+ * The proxy authorities read back (D38). They used to be dropped here outright,
+ * so no session — not even the one that was granted them — kept them past a
+ * reload, and a handoff successor had nothing to inherit. They ARE authority,
+ * so the rule is the approval's: any entry the gate could not have written
+ * (an unknown scope, an unknown door, no timestamp) drops the WHOLE list.
+ */
+function normalizeGrants(raw: unknown): OrchestrationGrant[] {
+  if (!Array.isArray(raw)) return [];
+  const out: OrchestrationGrant[] = [];
+  for (const entry of raw) {
+    const g = entry as Record<string, unknown> | null;
+    if (typeof g !== "object" || g === null) return [];
+    const { scope, grantedAt, via } = g;
+    if (typeof scope !== "string" || !isGrantableScope(scope)) return [];
+    if (typeof grantedAt !== "string" || grantedAt === "") return [];
+    if (typeof via !== "string" || !GRANT_DOORS.has(via)) return [];
+    out.push({ scope, grantedAt, via: via as OrchestrationGrant["via"] });
+  }
+  return out;
+}
 
 /**
  * Sanitize a runtime read back from the gate sidecar.
@@ -121,6 +146,8 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   // The owner is an identity, not a path: non-empty and nothing else. It is
   // never inferred, and never defaulted to anything.
   const ownerSessionId = str(obj.ownerSessionId);
+  // Same doubt as the approval: a blob we could not fully read grants nothing.
+  const grants = dropped ? [] : normalizeGrants(obj.grants);
   return {
     orchestrationId,
     children,
@@ -131,7 +158,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     ...(approvedPlan ? { approvedPlan } : {}),
     ...(approvalAmendments.length > 0 ? { approvalAmendments } : {}),
     ...(approvedPlanHistory.length > 0 ? { approvedPlanHistory } : {}),
-
+    ...(grants.length > 0 ? { grants } : {}),
 
     ...(relayHandoff && relayAt
       ? {
@@ -212,7 +239,12 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     // plan's; an unreadable one drops the snapshot, like any other field here.
     const stages = parsePlanTaskStages(task.stages, id);
     if (stages.problems.length > 0) return undefined;
-    tasks.push({ id, dependsOn, execution, ...(repo ? { repo } : {}), ...(stages.stages ? { stages: stages.stages } : {}) });
+    tasks.push({
+      id, dependsOn, execution,
+      ...(repo ? { repo } : {}),
+      ...(stages.stages ? { stages: stages.stages } : {}),
+      ...(task.isolated === true ? { isolated: true as const } : {}),
+    });
   }
   return {
     hash: snapshotHash,

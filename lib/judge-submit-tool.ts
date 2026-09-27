@@ -15,12 +15,14 @@ import { Type } from "typebox";
 import { ROUND_NOTE_HINT } from "./agent-directives.ts";
 import type { createAuditRoundHost } from "./audit-round-host.ts";
 import type { GateState } from "./gate-state.ts";
+import { nothingOwnUnderScopeLimit } from "./gate-arming.ts";
 import { SUBMITTABLE_JUDGE_ROLES } from "./judge-prompt.ts";
 import type { JudgeRegistry } from "./judge-registry-host.ts";
 import type { createJudgeRoundDispatch } from "./judge-round-dispatch.ts";
 import type { LoopStage } from "./loop-stages.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
-import { QUALITY_ROLE } from "./quality-round.ts";
+import { QUALITY_IN_FLIGHT_HINT } from "./async-precommit-report.ts";
+import { judgeRuledOutByLane, QUALITY_ROLE, resubmitWhileQualityInFlight } from "./quality-round.ts";
 import { buildRejection } from "./rejection-copy.ts";
 import type { createReviewChain } from "./review-chain.ts";
 import type { createReviewTargets } from "./review-target-host.ts";
@@ -54,6 +56,7 @@ export interface JudgeSubmitToolDeps {
   /** The tombstone a never-dispatched reviewer leaves for `judge_wait` (t8). */
   cancelLedger: Pick<RoundCancelLedger, "note">;
   noteQualityRoundDispatched: ReturnType<typeof createReviewTargets>["noteQualityRoundDispatched"];
+  qualityRoundInFlight: ReturnType<typeof createReviewTargets>["qualityRoundInFlight"];
   registry: Pick<JudgeRegistry, "pendingAudits" | "persistJudgeHierarchy">;
 }
 
@@ -61,6 +64,10 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
   host.registerTool({
     name: "judge_submit",
     label: "Submit To Judge",
+    // D16: a batch holding this tool runs in source order (pi: one sequential
+    // tool serializes the whole batch), so an edit written before it in the
+    // same message lands BEFORE the checkpoint, never after it.
+    executionMode: "sequential",
     description:
       "Submit one round of work to a judge role — the ONE entry point for reviewer / adviser / " +
       "goal-auditor. A reviewer submission runs the chain itself, and for a round that carries " +
@@ -95,10 +102,9 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
       message: Type.Optional(Type.String({
         description:
           "reviewer only: the checkpoint commit message (English, Conventional Commits — the gate " +
-          "makes it a legal one if it is not). Omit it and the gate derives the message from your " +
-          "task text — but only the parts of it that are ENGLISH: L5 accepts no non-Latin letter " +
-          "in a commit message, so a Chinese round note yields the default subject and no body. " +
-          "Write this field whenever you want the history to say something — that is the normal " +
+          "makes it a legal one if it is not). Omit it and the checkpoint gets the fixed default " +
+          "subject `chore: record this round for review` — the task text is never sliced into a " +
+          "commit message. L5 accepts no non-Latin letter here either. Write this field whenever you want the history to say something — that is the normal " +
           "case in this project.",
       })),
       reason: Type.Optional(Type.String({
@@ -127,8 +133,7 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
       // BLOCKED on the branch's pre-existing content. Measured in prime's
       // t3-report-update: minutes per round, then a deadlock on `declare_done`.
       if (params.role === "reviewer") {
-        const scoped = deps.stateForRepo(root);
-        if (scoped.scopeLimit !== undefined && !scoped.hasCodeChange && !scoped.hasDocChange) {
+        if (nothingOwnUnderScopeLimit(deps.stateForRepo(root))) {
           return {
             content: [{
               type: "text",
@@ -242,6 +247,8 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
       let laneFailure: (() => string | undefined) | undefined;
       /** Set when that lane ruled the reviewer out — before or right after its dispatch. */
       let reviewerLaneCancelled: string | undefined;
+      /** Set when that lane ruled the QUALITY judge out before its dispatch (D03). */
+      let qualityLaneSkipped: string | undefined;
       // Live progress for the whole submission: precommit → checkpoint →
       // prepare → dispatch, so a round that stalls shows WHERE it stalled.
       const progress = createProgressReporter({
@@ -249,6 +256,20 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
         onUpdate: onUpdate as ToolUpdate | undefined,
       });
       if (role === "reviewer") {
+        // D03, AFTER-DISPATCH HALF: re-submitting now would interrupt a quality
+        // round that is still judging the content whose lane failed.
+        const pre = deps.stateForRepo(root).precommit;
+        if (resubmitWhileQualityInFlight({
+          qualityInFlight: deps.qualityRoundInFlight(root),
+          lastLaneVerdict: pre.mode === "full" ? pre.verdict : undefined,
+          fresh: params.fresh === true,
+        }) === "refuse") {
+          return {
+            content: [{ type: "text", text: `review-gate: 本轮未送审（没跑 checkpoint，什么都没动）—— ${QUALITY_IN_FLIGHT_HINT}` }],
+            details: { submitted: false, busy: true, qualityInFlight: true },
+            isError: true,
+          };
+        }
         const chain = await deps.submitForReview({
           root,
           note: task,
@@ -256,6 +277,7 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
           reason: params.reason ? String(params.reason) : undefined,
           ctx,
           progress,
+          fresh: params.fresh === true,
         });
         if (!chain.ok) {
           return {
@@ -337,10 +359,13 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
         // row finds no reviewer to kill — measured: the reviewer then ran ~40s
         // on content the gate already refuses. So it is not started at all,
         // and the tombstone tells `judge_wait` what the lane row would have.
-        const laneWhy = judge.role === "reviewer" ? laneFailure?.() : undefined;
-        if (laneWhy !== undefined) {
-          deps.cancelLedger.note(root, { role: "reviewer", judgeId: "(未派发)", why: laneWhy });
-          reviewerLaneCancelled = laneWhy;
+        // D03: the same holds for the QUALITY judge — a round whose lane already
+        // failed must be re-submitted, and that would interrupt it unconcluded.
+        const laneWhy = laneFailure?.();
+        if (laneWhy !== undefined && judgeRuledOutByLane(judge.role, laneWhy)) {
+          deps.cancelLedger.note(root, { role: judge.role, judgeId: "(未派发)", why: laneWhy });
+          if (judge.role === "reviewer") reviewerLaneCancelled = laneWhy;
+          else qualityLaneSkipped = laneWhy;
           continue;
         }
         // The title is a DISPLAY label the gate derives itself (B5: it must not
@@ -385,6 +410,17 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
             isError: true,
           };
         }
+        // ONE ROUND SENT OUT (2026-09-17, user decision): the strip's `轮 N`,
+        // counted where a reviewer dispatch reached the judge (a REFUSED
+        // dispatch returned above), and persisted HERE so the strip moves the
+        // moment the round is submitted. BEFORE the late-lane cancel below: a
+        // round that reached the judge and was then cancelled still took its
+        // number, or the next round would reuse it (D01).
+        if (judge.role === "reviewer") {
+          const sent = deps.stateForRepo(root);
+          sent.sentReviewRounds = (sent.sentReviewRounds ?? 0) + 1;
+          deps.persistRepo(ctx as unknown as ExtensionContext, root);
+        }
         // …AND IT CAN LAND WHILE THE REVIEWER'S PANE WAS OPENING, before the row
         // existed: nothing was there to kill then, so it is killed now.
         const lateWhy = judge.role === "reviewer" ? laneFailure?.() : undefined;
@@ -397,15 +433,6 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
         // THE ROUND REMEMBERS ITS OWN QUALITY JUDGE, on the target it prepared
         // — what `qualityRoundInFlight` reads.
         if (judge.role === QUALITY_ROLE && d.judgeId) deps.noteQualityRoundDispatched(root, d.judgeId);
-        // ONE ROUND SENT OUT (2026-09-17, user decision): the strip's `轮 N`,
-        // counted where a reviewer dispatch reached the judge (a REFUSED
-        // dispatch returned above), and persisted HERE so the strip moves the
-        // moment the round is submitted.
-        if (judge.role === "reviewer") {
-          const sent = deps.stateForRepo(root);
-          sent.sentReviewRounds = (sent.sentReviewRounds ?? 0) + 1;
-          deps.persistRepo(ctx as unknown as ExtensionContext, root);
-        }
         accepted.push({
           role: judge.role,
           judgeId: d.judgeId ?? "(pending)",
@@ -423,13 +450,17 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
         deps.registry.pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
         deps.registry.persistJudgeHierarchy();
       }
-      if (accepted.length === 0 && reviewerLaneCancelled !== undefined) {
-        // The reviewer was the round's only judge, and the lane ruled it out.
+      const laneRuledOut = reviewerLaneCancelled ?? qualityLaneSkipped;
+      if (accepted.length === 0 && laneRuledOut !== undefined) {
+        // Every judge of the round was ruled out by the lane that landed first.
         return {
           content: [{
             type: "text",
             text: "review-gate: 本轮没有 judge 在跑 —— checkpoint 已冻结，但全量 precommit 先落地没过。\n" +
-              laneCancelledReviewerLine(reviewerLaneCancelled),
+              (qualityLaneSkipped === undefined
+                ? ""
+                : "质量轮也没派：这份内容反正要改完重送，现在派出去只会被重送打断、白烧一轮；修好重送时两个 judge 照常一起起。\n") +
+              laneCancelledReviewerLine(laneRuledOut),
           }],
           details: { submitted: true, judges: [], laneFailed: true },
         };

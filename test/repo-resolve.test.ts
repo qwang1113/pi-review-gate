@@ -57,6 +57,51 @@ test("gitRootOfDir returns null outside a repository", () => {
   }
 });
 
+// ---- resolveShipRepos: D17 scratch repos built by the command ---------------
+
+test("D17: a commit in a dir this command mkdirs + git inits is fresh, not ambiguous", () => {
+  const d = join(multiParent, "scratch-d17");
+  const r = resolveShipRepos(`mkdir -p ${d} && cd ${d} && git init -q && git commit -m x`, repoA);
+  assert.deepEqual(r, { repos: [], ambiguous: false, fresh: [d] });
+  const viaInitArg = resolveShipRepos(`git init ${d} && git -C ${d} commit -m x`, repoA);
+  assert.deepEqual(viaInitArg.fresh, [d]);
+  assert.equal(viaInitArg.ambiguous, false);
+});
+
+test("D17: push / pr from the scratch dir, an uncreated dir, or a GIT_DIR relocation stay ambiguous", () => {
+  const d = join(multiParent, "scratch-d17");
+  for (const cmd of [
+    `mkdir -p ${d} && cd ${d} && git init -q && git push`,
+    `mkdir -p ${d} && cd ${d} && git init -q && gh pr create --title x`,
+    `cd ${join(multiParent, "never-made")} && git commit -m x`,
+    `export GIT_DIR=${repoA}/.git; mkdir -p ${d} && cd ${d} && git init && git commit -m x`,
+    // quality P0: a NEW subdir of a real repo — git would commit the parent repo
+    `mkdir -p ${repoA}/newsub && cd ${repoA}/newsub && git commit -am x`,
+    `mkdir -p ${repoA}/newsub && cd ${repoA}/newsub && git init -q && git commit -am x`,
+    // mkdir without git init is not a scratch repo
+    `mkdir -p ${d} && cd ${d} && git commit -am x`,
+    `git init --separate-git-dir ${repoA}/.git ${d} && git -C ${d} commit -m x`,
+    `git init ${d} --separate-git-dir ${repoA}/.git && git -C ${d} commit -m x`,
+    // t4 review P1: the init / cd may not have RUN — a failed cd commits in the original repo
+    `false && git init ${d}; cd ${d}; git commit -am x`,
+    `git init ${d} || true; cd ${d}; git commit -am x`,
+    `git init ${d} && ! cd ${d} && git commit -am x`,
+    `git init ${d}\ncd ${d}\ngit commit -am x`,
+    `(git init ${d}) && cd ${d} && git commit -am x`,
+    // quality P1 d17-fresh-redirect: any other step can retarget the inited dir
+    `ln -s ${repoA} ${d} && git init -q ${d} && cd ${d} && git commit -m x`,
+    `git init -q ${d} && rm -rf ${d}/.git && ln -s ${repoA}/.git ${d}/.git && cd ${d} && git commit -m x`,
+    `git -C ${repoA} worktree add ${d} && git init -q ${d} && cd ${d} && git commit -m x`,
+    `git init -q ${d} && echo gitdir:${repoA}/.git > ${d}/.git && cd ${d} && git commit -m x`,
+    `git init -q ${d} && git -C ${d} config core.worktree ${repoA} && cd ${d} && git commit -am x`,
+    `git init --template=/tmp/tpl ${d} && cd ${d} && git commit -m x`,
+  ]) {
+    const r = resolveShipRepos(cmd, repoA);
+    assert.equal(r.ambiguous, true, cmd);
+    assert.deepEqual(r.fresh, [], cmd);
+  }
+});
+
 // ---- resolveShipRepos: cd chains -------------------------------------------
 
 test("cd into a repo then git commit resolves that repo", () => {

@@ -490,6 +490,15 @@ test("waiting with NOTHING to wait for is refused, not reported as a dead child"
   assert.equal(reply.details?.reason, "no-children");
 });
 
+test("D24: a zero-child SNAPSHOT says there are no children, never that a pane vanished", async () => {
+  const world = makeFakeWorld();
+  const reply = await world.call("orchestrator_wait", { timeoutMs: 0 });
+  const text = replyText(reply);
+  assert.doesNotMatch(text, /pane 已经消失/);
+  assert.match(text, /还没有子会话/);
+  assert.notEqual(reply.details?.reason, "pane-gone");
+});
+
 test("timeoutMs:0 is the snapshot that replaced orchestrator_status — same four blocks", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, contextPercent: 12 });
   const childId = await spawnT1(world);
@@ -898,6 +907,29 @@ test("sensitive-edit proxy answer: NO grant → the user's three-choice door in 
   const r3 = await w3.call("orchestrator_answer", { childId: c3, answer: "同意一次性修改" });
   assert.equal(r3.isError, undefined, replyText(r3));
   assert.equal(hasGrant(w3.runtime(), "sensitive-edit"), false, "no grant persisted");
+});
+
+test("D40: a request settled while the grant door was open is NOT answered — the grant the user gave is kept", async () => {
+  for (const [pick, keepsGrant] of [["允许并记住（本 orchestration 内都代答）", true], ["仅允许这一次", false]] as const) {
+    const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+    const childId = await spawnT1(world);
+    world.childAsks(childId, {
+      requestId: "req-late",
+      title: "子会话申请 tmux 授权",
+      options: ["允许", "拒绝"],
+      topic: "tmux-access",
+    });
+    world.options.selectAnswers = [pick];
+    // An instruct interrupt settles the request while the user is still deciding.
+    world.options.duringGrantDialog = () => world.childSettles(childId, "req-late", "dismissed");
+    const reply = await world.call("orchestrator_answer", { childId, answer: "允许" });
+    assert.equal(reply.isError, true, "a settled request is never reported as answered");
+    assert.match(replyText(reply), /已被结算/);
+    assert.match(replyText(reply), /没有\*\*写进通道/);
+    assert.equal(world.channelOf(childId).filter((r) => r.kind === "answer").length, 0, "nothing written");
+    assert.equal(hasGrant(world.runtime(), "tmux-access"), keepsGrant);
+    if (keepsGrant) assert.match(replyText(reply), /代答权」已记下/);
+  }
 });
 
 test("sensitive-edit proxy answer: WITH a grant, no dialog — the answer just goes through", async () => {

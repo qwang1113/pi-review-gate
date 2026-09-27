@@ -552,7 +552,10 @@ test("the plan's ceiling CLAMPS the station — and the user is shown the clampe
   assert.equal(f.st.loopGoal?.station, "commit", "the parameter asks for pr; the plan already ruled it out");
   for (const surface of [shown[0] ?? "", dialogs[0] ?? ""]) {
     assert.match(surface, /本轮交付站点：commit/, "what is recorded is what was read");
-    assert.match(surface, /allowMultiplePrs/, "the way to lift the ceiling is named where the user reads it");
+    assert.match(surface, /上界原因/, "where the reason is written is named where the user reads it");
+    // D41: the ceiling may be the plan's own station — the child cannot know,
+    // so it must not claim a narrowing.
+    assert.doesNotMatch(surface, /收窄了该 repo/);
   }
 });
 

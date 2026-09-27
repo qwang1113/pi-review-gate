@@ -15,7 +15,7 @@
 
 const { execFileSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
-const { copyFileSync, mkdtempSync, rmSync, statSync, utimesSync } = require("node:fs");
+const { copyFileSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync } = require("node:fs");
 const { join } = require("node:path");
 const { tmpdir } = require("node:os");
 
@@ -28,7 +28,7 @@ const REPO_ROOT_PATHSPEC = ":/";
 // so the hook can compare the sidecar's binding version against the algorithm
 // that is ACTUALLY running here, instead of hardcoding a number that could
 // drift away from the implementation. A parity test keeps the two in sync.
-const FINGERPRINT_VERSION = 2;
+const FINGERPRINT_VERSION = 3;
 
 const UNAVAILABLE = {
   digest: "__UNAVAILABLE__", head: "__UNAVAILABLE__", unavailable: true, version: FINGERPRINT_VERSION,
@@ -158,6 +158,52 @@ function submoduleDigest(cwd, depth, opts) {
 // Chunk size for update-index argv (a huge repo would blow the argv limit).
 const UPDATE_INDEX_CHUNK = 500;
 
+// Mirror of lib/gate-state-io.ts stateVariantFrom() + sidecarPath() (and of
+// hooks/pre-commit's STATE_FILE rule): the sidecar this session writes.
+function sidecarFile(root) {
+  const raw = (process.env.RG_STATE_VARIANT || "").trim();
+  const safe = raw.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 64);
+  return join(root, ".pi", safe ? `review-gate-state.${safe}.json` : "review-gate-state.json");
+}
+
+// Mirror of lib/fingerprint.ts sessionOwnedPaths(): undefined = no readable
+// sidecar = exclude nothing.
+function sessionOwnedPaths(root) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(sidecarFile(root), "utf8"));
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  const files = parsed.sessionEditedFiles;
+  if (files === undefined) return [];
+  if (!Array.isArray(files) || !files.every((f) => typeof f === "string")) return undefined;
+  return files;
+}
+
+// Mirror of lib/fingerprint.ts foreignUntrackedPaths() (D20): untracked,
+// unignored, unstaged files this session never wrote are left out of the tree
+// — the same rule the checkpoint commits by (lib/checkpoint-sweep.ts).
+const GATE_EXCLUDE_DIRS = GATE_EXCLUDE_PATHSPECS.map((s) => s.replace(/^:\//, ""));
+function foreignUntrackedPaths(cwd, env) {
+  const own = sessionOwnedPaths(git(cwd, ["rev-parse", "--show-toplevel"]));
+  if (own === undefined) return [];
+  if (git(cwd, ["rev-parse", "--show-superproject-working-tree"]) !== "") return [];
+  const ownSet = new Set(own);
+  const seen = new Set();
+  const foreign = [];
+  const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--full-name", "--", REPO_ROOT_PATHSPEC], env)
+    .split("\0")
+    .map((p) => p.replace(/\/$/, ""));
+  for (const p of untracked) {
+    if (p === "" || seen.has(p) || GATE_EXCLUDE_DIRS.some((d) => p === d || p.startsWith(d + "/"))) continue;
+    seen.add(p);
+    if (!ownSet.has(p)) foreign.push(p);
+  }
+  return foreign;
+}
+
 // Materialize the worktree as a git tree and return its BARE OID (no submodule
 // mixing), so a caller can both inspect entries with `ls-tree` and hand it to
 // worktreeDigest() without paying for a second materialization.
@@ -194,6 +240,8 @@ function worktreeTreeOid(cwd) {
     }
 
     const env = { ...gitBaseEnv(), GIT_INDEX_FILE: shadowIndex };
+    // Read BEFORE `add -A`: afterwards every untracked file is in the index.
+    const foreign = foreignUntrackedPaths(cwd, env);
 
     // add-then-remove (never `git add` with an exclude pathspec): with a
     // gitignored .pi, that form exits 1 on a mere advisory, which is
@@ -230,6 +278,10 @@ function worktreeTreeOid(cwd) {
     // extension already recorded READY, moving the deadlock instead of fixing
     // it. `--cached` keeps it inside the throwaway shadow index.
     git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
+    for (let i = 0; i < foreign.length; i += UPDATE_INDEX_CHUNK) {
+      const chunk = foreign.slice(i, i + UPDATE_INDEX_CHUNK).map((p) => `:(top,literal)${p}`);
+      git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...chunk], env);
+    }
 
     const tree = git(cwd, ["write-tree"], env);
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) {

@@ -102,6 +102,12 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
               "acceptance task (one that dependsOn them) accepts. Switching it off revokes the " +
               "approval; switching it back on does not.",
           })),
+          isolated: Type.Optional(Type.Boolean({
+            description:
+              "true ⇒ the gate creates and seeds a separate git worktree for this task even when no " +
+              "sibling runs in the repo (e.g. a task that ships its own PR). Never hand-make one. " +
+              "Switching it on revokes the approval; switching it off does not.",
+          })),
           status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("running"), Type.Literal("done"), Type.Literal("blocked")])),
           // THE TASK BOOK (user ask, 2026-09-17): this is the field the plan
           // audit reads (「任务书完整度」) and the only place a task's
@@ -132,7 +138,7 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
         description:
           "For action=\"write\": { title, intent, maxParallel?, tasks: [{ id, title, " +
           "repo: \"/abs/path/to/repo\", dependsOn?: [], execution?: \"serial\"|\"parallel\", " +
-          "stages?: { acceptance: false } }], " +
+          "stages?: { acceptance: false }, isolated?: true }], " +
           "allowMultiplePrs?: [\"/abs/repo\"] (only repos the USER agreed may split into " +
           "several PRs) }. " +
           "Do NOT send `status`: existing tasks keep the status execution gave them (use " +

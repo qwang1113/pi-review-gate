@@ -7,10 +7,12 @@ import {
   buildAsyncPrecommitPass,
   buildAsyncPrecommitReport,
   buildParkedReadyReplayNotice,
+  QUALITY_IN_FLIGHT_HINT,
 } from "../lib/async-precommit-report.ts";
 
 const TREE_A = "d6d29d5a16e1aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TREE_B = "704dcd01e4d37e57db80fe51979564a582beaf54";
+const COMMIT = "c0ffee123456789abcdef0123456789abcdef012";
 const DETAIL = 'review-gate: precommit for /repo: FAIL [lane full, tests: full] (1/4 checks failed). Failed: test.';
 
 test("a PASS says it LANDED — the one event a session waiting on this lane has", () => {
@@ -18,8 +20,8 @@ test("a PASS says it LANDED — the one event a session waiting on this lane has
   // 「正在等 precommit lane 落地（HELD）」 had nothing to wake on: `judge_wait`'s
   // event sources are the JUDGE's, and this was not one of them (measured:
   // 6m47s, notification session 2026-09-15).
-  const same = buildAsyncPrecommitPass({ round: 2, verified: TREE_A, current: TREE_A });
-  assert.match(same, /第 2 轮的后台 full precommit \*\*PASS\*\*/);
+  const same = buildAsyncPrecommitPass({ round: 2, commit: COMMIT, verified: TREE_A, current: TREE_A });
+  assert.match(same, /第 2 轮（commit c0ffee123456）的后台 full precommit \*\*PASS\*\*/);
   assert.match(same, /不用再等它/, "the whole reason this notice exists");
   assert.match(same, /d6d29d5a16e1/, "identity of the content it verified");
   // It is NOT a failure notice: no verdict to act on, no run output to read.
@@ -27,18 +29,44 @@ test("a PASS says it LANDED — the one event a session waiting on this lane has
 
   // The content moved ⇒ the same downgrade the failure notice does, because
   // claiming this PASS covers what is on disk now would be the same lie.
-  const stale = buildAsyncPrecommitPass({ round: 2, verified: TREE_A, current: TREE_B });
-  assert.match(stale, /第 2 轮启动时\*\*那份内容（d6d29d5a16e1）/);
+  const stale = buildAsyncPrecommitPass({ round: 2, commit: COMMIT, verified: TREE_A, current: TREE_B });
+  assert.match(stale, /第 2 轮（commit c0ffee123456）启动时\*\*那份内容（d6d29d5a16e1）/);
   assert.match(stale, /投递这一刻工作区是（704dcd01e4d3）/);
   assert.match(stale, /不用为它做任何事/);
   assert.doesNotMatch(stale, /这份内容（d6d29d5a16e1）通过了|本轮已经通过/);
 });
 
+test("D02: the notice names the checkpoint COMMIT, and says so when the lane landed before one existed", () => {
+  // l1 (2026-09-27): a FAIL that named only a tree could not be matched to a
+  // submission — the agent read round 1's late FAIL as a verdict on round 2.
+  const named = buildAsyncPrecommitReport({
+    round: 2, commit: COMMIT, verified: TREE_A, current: TREE_A, verdict: "FAIL", detail: DETAIL,
+  });
+  assert.match(named, /第 2 轮（commit c0ffee123456）/);
+  const unbound = buildAsyncPrecommitReport({
+    round: 2, commit: "", verified: TREE_A, current: TREE_A, verdict: "FAIL", detail: DETAIL,
+  });
+  assert.match(unbound, /commit 未知：lane 在 checkpoint 之前就落地了/);
+});
+
+test("D03: a FAIL while this round's quality judge is still judging says to collect it before re-submitting", () => {
+  const busy = buildAsyncPrecommitReport({
+    round: 2, commit: COMMIT, qualityInFlight: true, verified: TREE_A, current: TREE_A, verdict: "FAIL", detail: DETAIL,
+  });
+  assert.ok(busy.includes(QUALITY_IN_FLIGHT_HINT));
+  assert.match(busy, /judge_wait\(\{role:"quality-auditor"\}\)/);
+  assert.match(busy, /fresh:true/);
+  const idle = buildAsyncPrecommitReport({
+    round: 2, commit: COMMIT, verified: TREE_A, current: TREE_A, verdict: "FAIL", detail: DETAIL,
+  });
+  assert.ok(!idle.includes(QUALITY_IN_FLIGHT_HINT), "no quality round in flight ⇒ nothing to wait for");
+});
+
 test("the content on disk unchanged: the notice stays loud and names the round", () => {
   const text = buildAsyncPrecommitReport({
-    round: 3, verified: TREE_A, current: TREE_A, verdict: "FAIL", detail: DETAIL,
+    round: 3, commit: COMMIT, verified: TREE_A, current: TREE_A, verdict: "FAIL", detail: DETAIL,
   });
-  assert.match(text, /第 3 轮的后台 full precommit \*\*没过\*\*（FAIL）/);
+  assert.match(text, /第 3 轮（commit c0ffee123456）的后台 full precommit \*\*没过\*\*（FAIL）/);
   assert.match(text, /本轮不会产生可 ship 的 READY/);
   assert.match(text, /重新 `judge_submit\(\{role:"reviewer"\}\)`/);
   assert.match(text, /d6d29d5a16e1/); // identity, truncated
@@ -47,10 +75,10 @@ test("the content on disk unchanged: the notice stays loud and names the round",
 
 test("the content moved: downgraded — no current-round verdict, but still actionable", () => {
   const text = buildAsyncPrecommitReport({
-    round: 19, verified: TREE_A, current: TREE_B, verdict: "FAIL", detail: DETAIL,
+    round: 19, commit: COMMIT, verified: TREE_A, current: TREE_B, verdict: "FAIL", detail: DETAIL,
   });
   assert.match(text, /第 19 轮/);
-  assert.match(text, /那次验证的是 \*\*第 19 轮启动时\*\*那份内容（d6d29d5a16e1）/);
+  assert.match(text, /那次验证的是 \*\*第 19 轮（commit c0ffee123456）启动时\*\*那份内容（d6d29d5a16e1）/);
   assert.match(text, /投递这一刻工作区是（704dcd01e4d3），两者不同/);
   // The claim that turned a stale notice into a contradiction is gone…
   assert.doesNotMatch(text, /重新 `judge_submit/);
@@ -66,7 +94,7 @@ test("the content moved: downgraded — no current-round verdict, but still acti
   // renders the label "本轮", so a sentence that used the label here would BE
   // the forbidden current-round claim (round-2 P2).
   const unnamed = buildAsyncPrecommitReport({
-    round: 0, verified: TREE_A, current: TREE_B, verdict: "FAIL", detail: DETAIL,
+    round: 0, commit: "", verified: TREE_A, current: TREE_B, verdict: "FAIL", detail: DETAIL,
   });
   assert.match(unnamed, /那次验证所属的那一轮不会产生可 ship 的 READY/);
   assert.doesNotMatch(unnamed, /本轮不会产生可 ship 的 READY/);
@@ -79,13 +107,13 @@ test("the content moved: downgraded — no current-round verdict, but still acti
 test("an unreadable fingerprint on either side never softens the notice", () => {
   for (const [verified, current] of [["", TREE_B], [TREE_A, ""], ["", ""]]) {
     assert.equal(asyncPrecommitReportIsStale({ verified, current }), false);
-    const text = buildAsyncPrecommitReport({ round: 0, verified, current, verdict: "ERROR", detail: "" });
-    assert.match(text, /本轮的后台 full precommit \*\*没过\*\*（ERROR）/);
+    const text = buildAsyncPrecommitReport({ round: 0, commit: "", verified, current, verdict: "ERROR", detail: "" });
+    assert.match(text, /本轮（commit 未知[^）]*）的后台 full precommit \*\*没过\*\*（ERROR）/);
     assert.match(text, /本轮不会产生可 ship 的 READY/);
   }
   // An unreadable VERIFIED side is said out loud rather than left blank, and
   // the loud form says WHY it is loud without claiming a match nobody measured.
-  const unknown = buildAsyncPrecommitReport({ round: 0, verified: "", current: "", verdict: "ERROR", detail: "" });
+  const unknown = buildAsyncPrecommitReport({ round: 0, commit: "", verified: "", current: "", verdict: "ERROR", detail: "" });
   assert.match(unknown, /（未知）/);
   assert.match(unknown, /无法判断它是不是已被后续改动取代/);
   assert.doesNotMatch(unknown, /工作区仍是这次验证的那份内容/);
@@ -93,7 +121,7 @@ test("an unreadable fingerprint on either side never softens the notice", () => 
 
 test("a non-FAIL verdict is reported by name, and a missing detail does not leave a dangling separator", () => {
   const text = buildAsyncPrecommitReport({
-    round: 1, verified: TREE_A, current: TREE_A, verdict: "NO_CHECKS_RUN", detail: "",
+    round: 1, commit: COMMIT, verified: TREE_A, current: TREE_A, verdict: "NO_CHECKS_RUN", detail: "",
   });
   assert.match(text, /（NO_CHECKS_RUN）/);
   assert.doesNotMatch(text, /\n\n$/);
@@ -101,7 +129,7 @@ test("a non-FAIL verdict is reported by name, and a missing detail does not leav
 
 test("the appended run output is bounded", () => {
   const text = buildAsyncPrecommitReport({
-    round: 1, verified: TREE_A, current: TREE_B, verdict: "FAIL", detail: "x".repeat(9000),
+    round: 1, commit: COMMIT, verified: TREE_A, current: TREE_B, verdict: "FAIL", detail: "x".repeat(9000),
   });
   assert.ok(text.endsWith("x".repeat(ASYNC_PRECOMMIT_DETAIL_MAX)));
   assert.ok(text.length < 9000);
@@ -117,6 +145,7 @@ test("the matrix's lane notes travel WITH the notice — the lane row has no sib
   // the agent saw only "precommit failed".
   const text = buildAsyncPrecommitReport({
     round: 2,
+    commit: COMMIT,
     verified: "f".repeat(40),
     current: "f".repeat(40),
     verdict: "FAIL",
@@ -129,7 +158,7 @@ test("the matrix's lane notes travel WITH the notice — the lane row has no sib
   assert.ok(!text.includes("\n  \n"), "blank notes are dropped, not printed as a dangling line");
 
   const without = buildAsyncPrecommitReport({
-    round: 2, verified: "f".repeat(40), current: "f".repeat(40), verdict: "FAIL", detail: "x",
+    round: 2, commit: COMMIT, verified: "f".repeat(40), current: "f".repeat(40), verdict: "FAIL", detail: "x",
   });
   assert.ok(!without.includes("已终止"), "absent notes change nothing");
 });

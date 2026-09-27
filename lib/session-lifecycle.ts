@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, SessionShutdownEvent } from "@earendil-works/pi-coding-agent";
 import { computeFingerprint } from "./fingerprint.ts";
 import { showToUser } from "./gate-dialogs.ts";
-import { armingFromFacts } from "./gate-arming.ts";
+import { armingCommitsAhead, armingFromFacts } from "./gate-arming.ts";
 import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 import { FINGERPRINT_MIGRATION_NOTICE } from "./gate-state-load.ts";
 import { unmetRequirements } from "./gate-state-requirements.ts";
@@ -227,7 +227,7 @@ export function createSessionLifecycle(cells: SessionCells, deps: SessionLifecyc
       // question of the same facts.
       const armed = armingFromFacts({
         files: files ?? [],
-        commitsAhead: st.scopeLimit ? 0 : commitsAheadOfBase(cwd),
+        commitsAhead: armingCommitsAhead(st.scopeLimit, () => commitsAheadOfBase(cwd)),
       });
       if (armed.hasCodeChange || armed.hasDocChange) {
         if (armed.hasCodeChange) st.hasCodeChange = true;

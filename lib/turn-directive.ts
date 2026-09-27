@@ -16,7 +16,7 @@ import { formatAgentsStartupRefusal } from "./agents-startup-copy.ts";
 import { LANGUAGE_DIRECTIVE } from "./constants.ts";
 import { EDIT_DISCIPLINE_DIRECTIVE } from "./edit-discipline.ts";
 import { computeFingerprint, type Fingerprint } from "./fingerprint.ts";
-import { couldReconcile, reconcileArming } from "./gate-arming.ts";
+import { armingCommitsAhead, couldReconcile, reconcileArming } from "./gate-arming.ts";
 import { MODE_REGISTRY, resolveGateMode } from "./gate-modes.ts";
 import type { GateState } from "./gate-state.ts";
 import { unmetRequirements } from "./gate-state-requirements.ts";
@@ -365,7 +365,7 @@ export function createTurnEndHook(
     if (allFiles === undefined) return;
     // User-granted scope limit: files still in the exempt snapshot never count
     // toward the armed/clean reconciliation, and branch-commit arming stays
-    // suspended while the grant stands.
+    // suspended while the grant stands and the session has no work of its own.
     const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
     const files = state.scopeLimit ? allFiles.filter((f) => !exempt.has(f)) : allFiles;
     // ASK THE SAME QUESTION ARMING ASKS (drill F1, 2026-09-19) — and it is the
@@ -375,7 +375,7 @@ export function createTurnEndHook(
     if (!couldReconcile(current, files)) return;
     const next = reconcileArming(current, {
       files,
-      commitsAhead: state.scopeLimit ? 0 : commitsAheadOfBase(cells.cwd),
+      commitsAhead: armingCommitsAhead(state.scopeLimit, () => commitsAheadOfBase(cells.cwd)),
     });
     if (!next.changed) return;
     state.hasCodeChange = next.hasCodeChange;

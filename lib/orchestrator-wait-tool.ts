@@ -204,6 +204,12 @@ export async function doWait(
     // the health block of the same receipt shows its successor working.
     const current = deps.runtime();
     if (!childId) {
+      // NO CHILDREN IS NOT A DEATH (D24): only a snapshot gets here with none
+      // (a blocking wait is refused above), and "no live pane" would read as
+      // `pane-gone` — a child died that was never opened.
+      if (!current.children.some((c) => !c.closedAt)) {
+        return { paneAlive: true, note: "还没有子会话（没派过活，或都已结算）" };
+      }
       const live = current.children.filter((c) => !c.closedAt && panes.panes.includes(c.paneId));
       return {
         paneAlive: live.length > 0,

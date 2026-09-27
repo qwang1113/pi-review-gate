@@ -1331,12 +1331,9 @@ test("judge_submit refuses a round when the session has no edits of its own unde
   assert.ok(at > 0, "the refusal must exist");
   const guard = SRC.slice(Math.max(0, at - 1400), at);
   assert.match(guard, /params\.role === "reviewer"/, "it applies to the review round only, never to advisers or goal audits");
-  assert.match(guard, /scoped\.scopeLimit !== undefined/, "…and only when the user actually granted a scope limit");
-  assert.match(
-    guard,
-    /!scoped\.hasCodeChange && !scoped\.hasDocChange/,
-    "…and only when this session has changed nothing at all",
-  );
+  // The predicate itself (scope limit granted, no flag, no own sessionFiles)
+  // is unit-tested in test/gate-arming.test.ts.
+  assert.match(guard, /nothingOwnUnderScopeLimit\(/, "…and only when this session has nothing of its own to review");
 });
 
 test("declare_done prints the proxy's decisions itself, and the audit wait has its own budget", () => {
@@ -2434,7 +2431,8 @@ test("the checkpoint message is delegated to the pure, unit-tested lib module", 
     "the chain imports the pure builder");
   assert.doesNotMatch(SRC + CHAIN_SRC, /function checkpointMessage\(/,
     "no wrapper: the call site calls the pure builder directly");
-  assert.match(CHAIN_SRC, /const message = buildCheckpointMessage\(input\.message \?\? input\.note\);/,
+  // D32: the explicit `message` only — the round note is never sliced into a subject.
+  assert.match(CHAIN_SRC, /const message = buildCheckpointMessage\(input\.message\);/,
     "the checkpoint delegates, it does not re-implement the rule");
 });
 
@@ -4325,7 +4323,7 @@ test("P1: turn_end reads commitsAheadOfBase as a number, never an un-awaited pro
   // The ONE implementation is synchronous now (lib/repo-facts.ts), so the
   // turn_end site reads the count itself — there is no promise left to forget.
   assert.match(REPO_FACTS_SRC, /export function commitsAheadOfBase\(cwd: string\): number \{/);
-  assert.match(SRC, /commitsAhead: state\.scopeLimit \? 0 : commitsAheadOfBase\(cells\.cwd\)/);
+  assert.match(SRC, /commitsAhead: armingCommitsAhead\(state\.scopeLimit, \(\) => commitsAheadOfBase\(cells\.cwd\)\)/);
 });
 
 test("R6/R9/R10: project config, git memory, strategic reset wired in", () => {
@@ -6664,7 +6662,7 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
   // test failed for a reason that has nothing to do with the rule it pins —
   // exactly the failure mode `windowIn`'s own docblock describes.
   const submit = windowIn(CHAIN_SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
-  assert.match(submit, /laneField = \{ laneFailure: startPrecommitBeside\(input\.root, input\.ctx\)\.failure \}/,
+  assert.match(submit, /lane = startPrecommitBeside\(input\.root, input\.ctx\);\s*laneField = \{ laneFailure: lane\.failure \}/,
     "the long lane starts and the chain runs beside it — awaiting here is exactly the 33s the agent used to lose");
   assert.doesNotMatch(submit, /await callTool\(\s*"run_precommit"/,
     "the serial shape is GONE, not merely bypassed (philosophy three)");
@@ -6739,7 +6737,10 @@ test("a parked READY is replayed by the lane that lands on its tree, and retired
   assert.match(CANCEL_SRC, /quality: qualityPrecondition\(\{/, "…and so is the quality round's");
   const resumeAt = CANCEL_SRC.indexOf("async function resumeParkedReady(");
   const resume = CANCEL_SRC.slice(resumeAt, CANCEL_SRC.indexOf("async function applyRoundCancel(", resumeAt));
-  assert.match(resume, /if \(fate === "none" \|\| fate === "hold"\) return \[\];/, "a hold leaves the record where it is");
+  assert.match(resume, /if \(fate === "none"\) return \[\];/, "nothing parked, nothing to say");
+  // D21: a hold is SAID (the quality recorder points at this line), and it
+  // returns before the record is touched.
+  assert.match(resume, /if \(fate === "hold"\) return \[parkedReadyNote\(fate, parked\.round\)\];/, "a hold leaves the record where it is");
   // THE CTX GUARD COMES FIRST (quality round P1, 2026-09-16): deleting the
   // pending record without a context to persist the delete loses a READY the
   // agent has already been told not to re-submit. The record must be left
@@ -6783,7 +6784,7 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   assert.doesNotMatch(lane, /lastFullPassTree\s*=\s*outcome\.fingerprint/,
     "the post-run fingerprint must never become the record");
   // The rule itself is pure and lives in one place.
-  assert.match(LANE_SRC, /^import \{ nextFullPassTree \} from "\.\/gate-state-transitions\.ts";/m,
+  assert.match(LANE_SRC, /^import \{ nextFullPassTree, nextReviewRoundNumber \} from "\.\/gate-state-transitions\.ts";/m,
     "one imported rule, not a second copy of the branches here");
   // AND THE THIRD INPUT: what the lane COVERED has to reach the rule.
   // The first attempt read it off the tool's reply (`pre.details?.testScope`)
@@ -6831,7 +6832,7 @@ test("the async FAIL notice never waits for the agent to stop, and names what it
   const runAt = beside.indexOf('callTool("run_precommit"');
   assert.ok(verifiedAt > 0 && runAt > verifiedAt,
     "the verified content is captured before the lane runs, not read off its outcome");
-  assert.match(beside, /const round = stateForRepo\(root\)\.rounds\.length \+ 1/,
+  assert.match(beside, /const round = nextReviewRoundNumber\(stateForRepo\(root\)\)/,
     "and the notice names the round it belongs to, so a late one can be matched");
   assert.match(beside, /current: worktreeTree\(root\) \?\? ""/,
     "the delivery-time content is measured too — that comparison is what downgrades a superseded notice");
@@ -6851,7 +6852,7 @@ test("ONE full lane per repo: a second round waits for a quiet lane, and NEVER j
   // function does rather than at a byte count that rots.
   const submit = windowIn(CHAIN_SRC, "async function submitForReview(", /\n  (?:async )?function /, "the review chain");
   const waitAt = submit.indexOf("await waitForQuietLane(input.root)");
-  const startLaneAt = submit.indexOf("startPrecommitBeside(input.root, input.ctx).failure");
+  const startLaneAt = submit.indexOf("lane = startPrecommitBeside(input.root, input.ctx)");
   assert.ok(waitAt > 0 && startLaneAt > waitAt,
     "the round waits for the older lane to finish BEFORE starting its own");
   const besideAt = LANE_SRC.indexOf("function startPrecommitBeside(");
@@ -7070,7 +7071,7 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // PASS case, which the table answers with "nothing" (quality round P1,
   // 2026-09-16: a hand-written `if (verdict !== "PASS")` at the landing was
   // the lane's row implemented a second time).
-  assert.match(LANE_SRC, /applyCancelPlan\(roundCancelPlan\(\{ party: "lane", verdict \}\), root, laneWhy\)/,
+  assert.match(LANE_SRC, /applyCancelPlan\(roundCancelPlan\(\{ party: "lane", verdict, current \}\), root, laneWhy\)/,
     "the lane's row is the table's, not a branch beside it");
   const applierAt = CANCEL_SRC.indexOf("function applyCancelPlan(");
   const applier = CANCEL_SRC.slice(applierAt, CANCEL_SRC.indexOf("async function applyRoundCancel(", applierAt));
@@ -7200,7 +7201,7 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
   // each imports the rule from its one home.
   assert.match(SRC, /import \{ armingFromFacts \} from "\.\/gate-arming\.ts"/,
     "the rule lives in lib/gate-arming.ts and the arming sites import it — 哲学三: no second copy");
-  assert.match(SRC, /import \{ couldReconcile, reconcileArming \} from "\.\/gate-arming\.ts"/,
+  assert.match(SRC, /import \{ armingCommitsAhead, couldReconcile, reconcileArming \} from "\.\/gate-arming\.ts"/,
     "…and so does the reconciliation");
 
   const armAt = SRC.indexOf("const armed = armingFromFacts({");
@@ -7211,7 +7212,7 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
     "three arming sites (session_start, the git re-arm, a secondary repo) — one rule, one implementation",
   );
   assert.equal(
-    SRC.match(/commitsAhead: (?:st|state)\.scopeLimit \? 0 : commitsAheadOfBase\((?:cells\.)?cwd\)/g)?.length,
+    SRC.match(/commitsAhead: armingCommitsAhead\((?:st|state)\.scopeLimit, \(\) => commitsAheadOfBase\((?:cells\.)?cwd\)\)/g)?.length,
     2,
     "…and the branch-commit fact is read at the two sites that can see it: arm and reconcile",
   );
@@ -7220,7 +7221,7 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
   assert.match(turnEnd, /reconcileArming\(current, \{/, "the reconciliation asks the same rule");
   assert.match(
     turnEnd,
-    /commitsAhead: state\.scopeLimit \? 0 : commitsAheadOfBase\(cells\.cwd\)/,
+    /commitsAhead: armingCommitsAhead\(state\.scopeLimit, \(\) => commitsAheadOfBase\(cells\.cwd\)\)/,
     "…and pays for the git call the old kind-only clearing never made",
   );
   assert.match(turnEnd, /couldReconcile\(current, files\)/, "…skipped when nothing could be cleared");

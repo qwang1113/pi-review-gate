@@ -6,10 +6,13 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 
 // ~90 fixture git calls live in this file, so neutralise the host config once
 // for the whole process instead of threading `env:` through each of them.
 neutraliseHostGitConfig();
+// The digest reads the session's sidecar (D20): RG_STATE_VARIANT must not leak in.
+neutraliseGateEnv();
 
 const requireCjs = createRequire(import.meta.url);
 
@@ -232,6 +235,9 @@ test("P0: gate-owned .pi files do NOT affect the fingerprint (sidecar self-deadl
   const dir = makeRepo();
   disableGlobalExcludes(dir);
   writeFileSync(join(dir, "code.ts"), "// change\n"); // some real change
+  // Staged: once a sidecar exists an UNOWNED untracked file is foreign and
+  // out of the digest (D20) — that is not what this test is about.
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
   const before = computeFingerprint(dir);
   // Simulate persist(): create + rewrite the sidecar, lessons, arbitration log.
   mkdirSync(join(dir, ".pi"), { recursive: true });
@@ -273,7 +279,8 @@ test("real project files still change the fingerprint after the exclusion", () =
   const dir = makeRepo();
   disableGlobalExcludes(dir);
   mkdirSync(join(dir, ".pi"), { recursive: true });
-  writeFileSync(join(dir, ".pi", "review-gate-state.json"), "{}");
+  // new.ts is this session's own file (D20: an unowned one is foreign).
+  writeFileSync(join(dir, ".pi", "review-gate-state.json"), JSON.stringify({ sessionEditedFiles: ["new.ts"] }));
   const a = computeFingerprint(dir);
   writeFileSync(join(dir, "new.ts"), "// real change");
   assert.notEqual(computeFingerprint(dir).digest, a.digest);

@@ -37,7 +37,7 @@
  * of its own.
  */
 
-import { isStalled, type ChannelProjection, HEARTBEAT_STALE_MS } from "./channel-projection.ts";
+import { isStalled, unansweredRequests, type ChannelProjection, HEARTBEAT_STALE_MS } from "./channel-projection.ts";
 import type { ChannelStateRecord } from "./channel-records.ts";
 
 /** The states a registered child can be in — enumerated in {@link CHILD_STATES}. */
@@ -188,7 +188,7 @@ export function classifyChildState(observation: ChildObservation): ChildState {
   if (observation.paneAlive === false) return "dead";
 
   const { projection } = observation;
-  if (projection.openRequests.length > 0) return "waiting-input";
+  if (unansweredRequests(projection).length > 0) return "waiting-input";
 
   const last = projection.lastState;
   if (completionReported(observation)) return "done";
@@ -395,7 +395,7 @@ export function childHealth(observation: ChildObservation): ChildHealth {
   const { projection } = observation;
   const lastActivityAt = projection.lastActivityAt;
   const parsed = lastActivityAt ? Date.parse(lastActivityAt) : Number.NaN;
-  const open = projection.openRequests[0];
+  const open = unansweredRequests(projection)[0];
   // A question's clock starts when it was ASKED, not when the child last
   // reported: the heartbeat keeps re-reporting `waiting-input`, and the number
   // a supervisor needs is how long the human (or it) has left it hanging.

@@ -149,6 +149,13 @@ export interface AskAnswer {
    * `answer` back apart.
    */
   options?: string[];
+  /**
+   * UNANSWERED BECAUSE THE THIRTY-MINUTE WINDOW RAN OUT and nobody (no proxy
+   * either) decided — not because the user closed the box (D39: the two used to
+   * read the same, so an unattended authorization question was reported as
+   * one the user dismissed).
+   */
+  timedOut?: true;
 }
 
 /**
@@ -561,7 +568,9 @@ export function formatAnswers(answers: AskAnswer[]): string {
         ? `→ ${a.answer}`
         : a.kind === "deferred-to-chat"
           ? "→ 用户选择在聊天里详细回答（等他的下一条消息）"
-          : "→ 没有得到回答（用户关掉了对话框，或环境没有对话框）";
+          : a.timedOut
+            ? "→ 30 分钟无人作答，门禁没有替用户决定（用户不在，不是他关掉了对话框）"
+            : "→ 没有得到回答（用户关掉了对话框，或环境没有对话框）";
       return `${head}\n${body}`;
     })
     .join("\n");
@@ -601,7 +610,9 @@ export function formatTranscriptSummary(answers: AskAnswer[]): string {
       ? short(a.answer ?? "", TRANSCRIPT_ANSWER_CHARS)
       : a.kind === "deferred-to-chat"
         ? "（转聊天回答）"
-        : "（未作答）";
+        : a.timedOut
+          ? "（30 分钟无人作答）"
+          : "（未作答）";
     return `${progressLabel(i, answers.length)} ${short(a.question, TRANSCRIPT_QUESTION_CHARS)} → ${outcome}`;
   });
   return [head, ...lines].join("\n");

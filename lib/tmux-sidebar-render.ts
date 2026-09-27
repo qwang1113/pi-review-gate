@@ -27,21 +27,38 @@ const STATE_WORD: Readonly<Record<ChildState, string>> = {
   "mode-changed": "mode",
 };
 
-/** Display width: CJK and full-width forms take two columns. */
+const WIDE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]|\p{Emoji_Presentation}/u;
+/** An emoji-presentation selector (❤️) or a ZWJ sequence (👨‍💻) draws one wide glyph. */
+const EMOJI_SEQUENCE = /\p{Extended_Pictographic}.*[\ufe0f\u200d]|[\ufe0f\u200d].*\p{Extended_Pictographic}/u;
+/** A cluster of nothing but joiners, selectors and combining marks draws nothing. */
+const ZERO = /^(?:[\u200b-\u200d\ufe00-\ufe0f]|\p{Mn})+$/u;
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** Columns one grapheme cluster (what the terminal draws as one glyph) takes. */
+function clusterWidth(cluster: string): number {
+  if (ZERO.test(cluster)) return 0;
+  return WIDE.test(cluster) || EMOJI_SEQUENCE.test(cluster) ? 2 : 1;
+}
+
+/** Display width, per grapheme cluster: CJK, full-width forms and emoji take two columns. */
 export function displayWidth(text: string): number {
   let width = 0;
-  for (const ch of text) width += /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1;
+  for (const { segment } of graphemes.segment(text)) width += clusterWidth(segment);
   return width;
 }
 
-/** Cut to `width` columns, marking the cut with `…`. */
+/** Cut to `width` columns, marking the cut with `…`; a cluster is never split. */
 export function fitWidth(text: string, width: number): string {
   if (width <= 0) return "";
   if (displayWidth(text) <= width) return text;
   let out = "";
-  for (const ch of text) {
-    if (displayWidth(out + ch) > width - 1) break;
-    out += ch;
+  let used = 0;
+  for (const { segment } of graphemes.segment(text)) {
+    const w = clusterWidth(segment);
+    if (used + w > width - 1) break;
+    out += segment;
+    used += w;
   }
   return `${out}…`;
 }

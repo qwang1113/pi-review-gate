@@ -25,10 +25,11 @@
  *     already treats as fail-closed.
  */
 
-import { join as pathJoin } from "node:path";
+import { dirname, join as pathJoin, resolve as pathResolve } from "node:path";
 import { existsSync } from "node:fs";
 import { gitOrNull } from "./git-exec.ts";
 import { detectShipCommands, segments, normalizedTokens } from "./ship-detect.ts";
+import { lexSegmentTokens } from "./shell-lex.ts";
 
 export interface ShipRepoResolution {
   /**
@@ -43,6 +44,16 @@ export interface ShipRepoResolution {
    * Callers MUST then also check every repo the session has edited.
    */
   ambiguous: boolean;
+  /**
+   * D17: ship targets that are NOT inside any repository yet (nor is their
+   * nearest existing ancestor) and that an EARLIER segment of this same
+   * command `git init`s, holding nothing but LOCAL commits — a scratch repo
+   * this command builds from nothing. They are left out of `repos` (and do
+   * not trigger the cwd fallback): a commit there publishes nothing. A push
+   * or PR from the same dir is never fresh; neither is a new subdir of a real
+   * repo (without the init actually running, git would find the parent).
+   */
+  fresh: string[];
 }
 
 /** Resolve the git repository root containing `dir` (sanitized env; the same
@@ -58,6 +69,37 @@ interface ResolvedSegment {
   dir: string;
   /** True when this segment contains a ship operation. */
   ship: boolean;
+  /** Ship kinds detected in this segment (empty when `ship` is false). */
+  kinds: string[];
+  /** `dir` was `git init`ed by an EARLIER segment of the command. */
+  initedEarlier: boolean;
+}
+
+/** `git init` options that take a SEPARATE value. */
+const INIT_VALUE_OPTS = new Set(["-b", "--initial-branch", "--template", "--object-format", "--ref-format"]);
+
+/** The directory a `git … init …` segment initializes (options after
+ *  `startIdx`), or undefined when it cannot be named statically — an
+ *  expanding operand, or `--separate-git-dir` (the git dir lands elsewhere). */
+function initTarget(tokens: string[], startIdx: number, dir: string): string | undefined {
+  const args = tokens.slice(startIdx);
+  // Git accepts options AFTER the directory too, so check every argument.
+  if (args.some((t) => t.startsWith("--separate-git-dir") || /[$`~*?]/.test(t))) return undefined;
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i]!;
+    if (INIT_VALUE_OPTS.has(t)) { i++; continue; }
+    if (t.startsWith("-")) continue;
+    return pathResolve(dir, t);
+  }
+  return pathResolve(dir);
+}
+
+/** Is `dir` — or, when it does not exist yet, its nearest existing
+ *  ancestor — outside every git repository? */
+function outsideAnyRepo(dir: string): boolean {
+  let d = pathResolve(dir);
+  while (!existsSync(d) && dirname(d) !== d) d = dirname(d);
+  return gitRootOfDir(d) === null;
 }
 
 /**
@@ -71,6 +113,8 @@ function resolveSegments(command: string, cwd: string): { segs: ResolvedSegment[
   const segsOut: ResolvedSegment[] = [];
   let dir = cwd;
   let ambiguous = false;
+  // D17: directories an earlier segment `git init`ed.
+  const inited = new Set<string>();
   // Command-level: a `cd` target containing $(…) / `…` has its substitution
   // stripped by segments() BEFORE the per-segment pass — detect it on the RAW
   // command so `cd /tmp$(mktemp -u -d) && git commit` stays ambiguous.
@@ -144,6 +188,8 @@ function resolveSegments(command: string, cwd: string): { segs: ResolvedSegment[
     // -C / --git-dir.
     const gitIdx = tokens.findIndex((t) => t === "git" || t.endsWith("/git"));
     let gitDir: string | null = null;
+    // Index of git's SUBCOMMAND (first non-option token after the head).
+    let subIdx = -1;
     if (gitIdx >= 0) {
       // Options that take a SEPARATE value must be consumed, or the scanner
       // breaks on their VALUE and misses a later -C (git -c user.name=x -C
@@ -180,6 +226,7 @@ function resolveSegments(command: string, cwd: string): { segs: ResolvedSegment[
         } else if (t.startsWith("-")) {
           continue;
         } else {
+          subIdx = i;
           break;
         }
       }
@@ -210,7 +257,18 @@ function resolveSegments(command: string, cwd: string): { segs: ResolvedSegment[
         segDir = gitDir.startsWith("/") ? gitDir : pathJoin(dir, gitDir);
       }
     }
-    segsOut.push({ dir: pushDir(segDir), ship: detectShipCommands(seg).length > 0 });
+    const kinds = detectShipCommands(seg).map((d) => d.kind);
+    const finalDir = pushDir(segDir);
+    segsOut.push({
+      dir: finalDir,
+      ship: kinds.length > 0,
+      kinds,
+      initedEarlier: inited.has(pathResolve(finalDir)),
+    });
+    if (subIdx >= 0 && tokens[subIdx] === "init") {
+      const target = initTarget(tokens, subIdx + 1, segDir);
+      if (target) inited.add(target);
+    }
   }
 
   return { segs: segsOut, ambiguous };
@@ -237,6 +295,57 @@ export function resolveCommandRepos(command: string, cwd: string): { repos: stri
 }
 
 /**
+ * Does every step of this command run only if the one before it SUCCEEDED?
+ *
+ * The scratch-repo exemption reads "init X, then commit in X" off the TEXT, and
+ * the text is only the truth when a failed init or `cd` stops everything after
+ * it (t4 review P1: `false && git init X; cd X; git commit` commits in the
+ * ORIGINAL repo once `cd` fails). So: `&&` is the only operator, and nothing
+ * that inverts or regroups a status (`!`, subshells, braces, substitutions,
+ * backgrounding) appears anywhere — a quoted `;` in a message costs the
+ * exemption, never the gate (fail-closed).
+ */
+function isPlainAndChain(command: string): boolean {
+  return !/[;|&\n!(){}`]|\$\(/.test(command.replace(/&&/g, " "));
+}
+
+/**
+ * Is every step of the command one that can only BUILD a scratch repo?
+ *
+ * The exemption believes "init X, then commit in X" from the text, so any other
+ * step is a way to make X something else by the time the commit runs —
+ * `ln -s <repo> X`, `rm -rf X/.git && ln -s <repo>/.git X/.git`,
+ * `git worktree add X`, `echo 'gitdir: …' > X/.git` (quality P1
+ * d17-fresh-redirect). So it is a whitelist, and anything it does not know
+ * costs the exemption, never the gate: `cd <dir>`, `mkdir [-p] <dir>…`, and
+ * `git [-C <dir>] init|add|commit` — with no redirection anywhere, and an init
+ * that takes only `-q`/`--quiet`/`-b <name>`/`--initial-branch=<name>` (a
+ * `--template` or `--separate-git-dir` can plant a config that points
+ * elsewhere).
+ */
+function onlyScratchSteps(command: string): boolean {
+  return lexSegmentTokens(command).every((tokens) => {
+    if (tokens.some((t) => /^\d*(>>?|<|>&|&>)/.test(t))) return false;
+    const [head, ...args] = tokens;
+    if (head === "cd") return args.length === 1;
+    if (head === "mkdir") return args.length > 0 && args.every((a) => a === "-p" || !a.startsWith("-"));
+    if (head !== "git") return false;
+    const at = args[0] === "-C" ? 2 : 0;
+    const sub = args[at];
+    if (sub === "add" || sub === "commit") return true;
+    if (sub !== "init") return false;
+    const rest = args.slice(at + 1);
+    for (let i = 0; i < rest.length; i++) {
+      const a = rest[i]!;
+      if (a === "-b") { i += 1; continue; }
+      if (a === "-q" || a === "--quiet" || a.startsWith("--initial-branch=") || !a.startsWith("-")) continue;
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
  * Resolve every SHIP segment's operating directory into repository roots
  * (the ship gate's check set). Segments without a ship operation contribute
  * nothing; the fallback cwd is always present.
@@ -244,17 +353,27 @@ export function resolveCommandRepos(command: string, cwd: string): { repos: stri
 export function resolveShipRepos(command: string, cwd: string): ShipRepoResolution {
   const { segs, ambiguous: baseAmbiguous } = resolveSegments(command, cwd);
   const repos: string[] = [];
+  const fresh: string[] = [];
   let ambiguous = baseAmbiguous;
+  // A git env relocation anywhere (`export GIT_DIR=…` in its own segment is
+  // not tracked per segment) could point the "scratch" commit at a real repo.
+  const gitEnv = /\bGIT_(DIR|WORK_TREE|INDEX_FILE)\b/.test(command) ||
+    ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"].some((k) => (process.env[k] ?? "") !== "");
+  const chained = isPlainAndChain(command) && onlyScratchSteps(command);
   for (const s of segs) {
     if (!s.ship) continue;
     const root = gitRootOfDir(s.dir);
+    if (!root && !gitEnv && chained && s.initedEarlier && s.kinds.every((k) => k === "commit") && outsideAnyRepo(s.dir)) {
+      if (!fresh.includes(s.dir)) fresh.push(s.dir);
+      continue;
+    }
     // Same non-existent-dir fail-closed as resolveCommandRepos.
     if (!root && !existsSync(s.dir)) ambiguous = true;
     const target = root ?? s.dir;
     if (!repos.includes(target)) repos.push(target);
   }
-  if (repos.length === 0) repos.push(cwd);
-  return { repos, ambiguous };
+  if (repos.length === 0 && fresh.length === 0) repos.push(cwd);
+  return { repos, ambiguous, fresh };
 }
 
 /**

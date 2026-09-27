@@ -22,6 +22,7 @@ import {
   type PaneJudgeWaitObservation,
 } from "./judge-wait-criteria.ts";
 import type { JudgeSessionToolDeps } from "./judge-session-tools.ts";
+import { existingStreamPath } from "./review-stream.ts";
 
 // ---------- judge_wait ----------
 
@@ -130,9 +131,7 @@ export async function doWait(
   // receipt named `review-mu8hnft7-review.jsonl` for exactly such a round).
   // "The gate lost the evidence" and "this round produced none" are different
   // facts and only one of them is worth a pointer.
-  const liveStreamPath = child.streamPath !== undefined && deps.readText(child.streamPath) !== undefined
-    ? child.streamPath
-    : undefined;
+  const liveStreamPath = existingStreamPath(child.streamPath, (p) => deps.readText(p) !== undefined);
   const base = {
     role: child.role,
     judgeId: child.judgeId,

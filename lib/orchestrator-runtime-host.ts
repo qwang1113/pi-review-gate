@@ -17,6 +17,8 @@ import type { ChannelIO } from "./channel-io.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
 import {
   freshNoticeEvents,
+  liveNoticeComponent,
+  noticeFactsFrom,
   noticeText,
   NOTICE_KIND,
   type NoticeEvent,
@@ -30,7 +32,7 @@ import {
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
 import { formatChildHealth } from "./orchestrator-child-state.ts";
-import { orchestratorDoneProblems } from "./orchestrator-gate.ts";
+import { orchestratorDoneProblems, orchestratorResumeDue, spawnAuthorization } from "./orchestrator-gate.ts";
 import { buildOrchestratorResume } from "./orchestrator-directives.ts";
 import { readPlanFile } from "./orchestrator-wiring.ts";
 import { alivePanes } from "./orchestrator-tool-kit.ts";
@@ -48,7 +50,7 @@ import type { SessionHost } from "./session-host.ts";
 
 /** What the runtime clocks need from the session beyond the shared host. */
 export interface OrchestratorRuntimeDeps {
-  pi: Pick<ExtensionAPI, "sendUserMessage" | "sendMessage" | "on">;
+  pi: Pick<ExtensionAPI, "sendUserMessage" | "sendMessage" | "on" | "registerMessageRenderer">;
   orchestratorDeps: OrchestratorDeps;
   channelIO: ChannelIO;
   currentOrchestrationId(): string;
@@ -197,12 +199,7 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
 
   /** What a notice is checked against: the open children, their questions, the done tasks. */
   function noticeFacts(snapshot: SupervisionSnapshot | undefined): NoticeFacts {
-    const tasks = orchestratorDeps.readPlan().plan?.tasks ?? [];
-    return {
-      children: (snapshot?.children ?? []).map((c) => ({ childId: c.child.id, taskId: c.child.taskId, state: c.state })),
-      openRequestIds: new Set((snapshot?.requests ?? []).map((r) => r.requestId)),
-      doneTaskIds: new Set(tasks.filter((t) => t.status === "done").map((t) => t.id)),
-    };
+    return noticeFactsFrom(snapshot, orchestratorDeps.readPlan().plan?.tasks ?? []);
   }
 
   /**
@@ -252,6 +249,29 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     return { message: { ...message, content: noticeText(fresh), details: { kind: NOTICE_KIND, events: fresh } } };
   }
   pi.on("message_end", (event: MessageEndEvent) => reviseDeliveredNotice(event.message));
+  // …and the SCREEN follows the rewrite (D43): other review-gate messages fall
+  // through to pi's default rendering (`undefined`).
+  //
+  // pi's OWN components draw it (Box + Markdown, exactly the default look and
+  // pi's own width rules — a hand-rolled width table overflowed on emoji, and
+  // pi throws on an over-wide line). Loaded LAZILY: a static value import of a
+  // pi package makes lib/ unloadable where it is installed without one; until
+  // (or unless) it loads, the notice renders the default way.
+  let tui: { pi: typeof import("@earendil-works/pi-tui"); agent: typeof import("@earendil-works/pi-coding-agent") } | undefined;
+  Promise.all([import("@earendil-works/pi-tui"), import("@earendil-works/pi-coding-agent")])
+    .then(([piTui, agent]) => { tui = { pi: piTui, agent }; }, () => {});
+  pi.registerMessageRenderer("review-gate", (message, _options, theme) => {
+    if (!tui || (message.details as { kind?: string } | undefined)?.kind !== NOTICE_KIND) return undefined;
+    const { Box, Markdown, Spacer, Text } = tui.pi;
+    const markdownTheme = tui.agent.getMarkdownTheme();
+    return liveNoticeComponent(message, (text) => {
+      const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+      box.addChild(new Text(theme.fg("customMessageLabel", "\x1b[1m[review-gate]\x1b[22m"), 0, 0));
+      box.addChild(new Spacer(1));
+      box.addChild(new Markdown(text, 0, 0, markdownTheme, { color: (t) => theme.fg("customMessageText", t) }));
+      return box;
+    });
+  });
   pi.on("agent_end", () => { noticeInFlight = false; });
 
   /**
@@ -485,7 +505,13 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     }
     const problems = sessionExitProblems();
     const news = drainSupervisionNews().map((event) => event.summary);
-    if (problems.length === 0 && news.length === 0) return;
+    const runtime = host.state().orchestrator ?? emptyRuntime(currentOrchestrationId());
+    if (!orchestratorResumeDue({
+      problems,
+      news,
+      openChildren: runtime.children.filter((c) => !c.closedAt).length,
+      authorization: spawnAuthorization(runtime, readPlanFile(host.repos().primary).plan),
+    })) return;
     const maxRounds = host.state().maxRounds;
     if (orchestratorContinuations >= maxRounds) return;
     orchestratorContinuations += 1;

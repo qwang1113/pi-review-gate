@@ -327,6 +327,13 @@ export interface StationArrivalFacts {
    */
   observedPrCreate?: boolean;
   /**
+   * Did the gate WATCH a `gh pr merge` succeed in this repo (D33)? A task
+   * whose job is merging a PR it did not open delivers by that merge; the PR
+   * is no longer open, so neither the create nor the open-PR query can see it.
+   * Same kind of observation as {@link observedPrCreate}.
+   */
+  observedPrMerge?: boolean;
+  /**
    * The PR number the Copilot cycle resolved (`state.copilot.pr`), when there
    * is one — a SECOND, independent way to prove the same fact, for a PR that
    * was opened outside this session (in the browser, or by an earlier one).
@@ -381,7 +388,7 @@ export interface StationArrivalFacts {
  */
 export type PrEvidenceFacts = Pick<
   StationArrivalFacts,
-  "observedPrCreate" | "recordedPr" | "openPr" | "unpushed"
+  "observedPrCreate" | "observedPrMerge" | "recordedPr" | "openPr" | "unpushed"
 >;
 
 /**
@@ -397,6 +404,7 @@ export type PrEvidenceFacts = Pick<
  */
 export function prEvidencePresent(facts: PrEvidenceFacts): boolean {
   return facts.observedPrCreate === true ||
+    facts.observedPrMerge === true ||
     (facts.recordedPr ?? null) !== null ||
     (facts.openPr ?? null) !== null;
 }
@@ -428,6 +436,7 @@ const PR_ARRIVAL_NO_EVIDENCE =
   "本轮交付站点是 pr,但门禁没有看到 PR —— 它自己查过当前分支,上面没有开着的 PR。\n" +
   "  - 还没开 PR:`git push` 之后跑 `gh pr create`,再收尾。\n" +
   "  - 推分支还不算开 PR(push 之后还要 `gh pr create`)。\n" +
+  "  - 本任务的交付是合并一个 PR:在本仓库里单独跑一条同步的 `gh pr merge`(不带 --auto/-R,不包 sudo/timeout,不接 &&/||),GitHub 显示该 PR 已 MERGED 门禁就认。\n" +
   "  - PR 早就开着(网页开的、上一轮会话开的)却仍然看到这条:那是**查询**没跑通 ——" +
   "先确认 `gh auth status` 能过;门禁查到就会认,不需要在本会话里重开一个。\n" +
   "  - 确实开不出来时,请用户把本轮站点改回 `commit`(站点是契约,只有用户能改)。";

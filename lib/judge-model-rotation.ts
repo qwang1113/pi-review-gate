@@ -64,11 +64,18 @@ export interface ModelRotation {
   attempted: () => readonly string[];
 }
 
+/**
+ * The tag both notes open with. The resume note is injected as a USER message,
+ * so without the gate's tag it reads as the user speaking — a handover then
+ * quoted it as one of the predecessor's last user messages (D10).
+ */
+export const MODEL_FALLBACK_TAG = "[REVIEW_GATE_MODEL_FALLBACK]";
+
 /** The nudge the pane sends ITSELF after a successful switch. */
 export function buildRotationResumeNote(from: string, to: string, error?: string): string {
   const why = error ? `（${error}）` : "";
   return [
-    "（门禁自愈 · 模型 fallback）",
+    `${MODEL_FALLBACK_TAG} （门禁自愈 · 模型 fallback）`,
     `你刚才的模型 ${from} 失败${why}，门禁已把本会话切到链上的下一个模型 ${to}，并保留了你已有的上下文。`,
     "请从被打断的地方继续本轮任务：不要重做已经完成的部分，也不必在结论里解释这次切换。",
   ].join("");
@@ -83,7 +90,7 @@ export function buildChainExhaustedNote(from: string, error?: string, tried: rea
   const chain = tried.length === 0
     ? ""
     : "\n" + tried.map((t) => `  · ${t.spec}：${t.reason}`).join("\n");
-  return `门禁：链上的模型都试过了，最后一个 ${from} 也失败${why}。本轮已上报为失败，等 opener 处理，不要自己下结论。${chain}`;
+  return `${MODEL_FALLBACK_TAG} 门禁：链上的模型都试过了，最后一个 ${from} 也失败${why}。本轮已上报为失败，等 opener 处理，不要自己下结论。${chain}`;
 }
 
 export function createModelRotation(deps: ModelRotationDeps): ModelRotation {

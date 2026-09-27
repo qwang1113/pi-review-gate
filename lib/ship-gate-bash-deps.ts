@@ -79,6 +79,10 @@ export interface ShipGateBashDeps {
   unreviewedTreesSince(root: string, review: GateState["review"]): string[] | undefined;
   /** Has the USER approved this session's loop goal (primary repo)? */
   loopGoalConfirmed(): boolean;
+  /** D08: is a full precommit lane running for this repo right now? */
+  precommitLaneRunning(root: string): boolean;
+  /** D08: resolve once no lane is running for this repo (it has landed). */
+  waitForQuietLane(root: string): Promise<void>;
   /**
    * WHERE THIS ROUND STOPS, for one repo — or `undefined` when no delivery
    * contract applies to this session at all.

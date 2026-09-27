@@ -23,8 +23,10 @@
  * with those and keeps the handles after them for the tool calls.
  */
 
+import type { Component } from "@earendil-works/pi-tui";
 import type { ChannelRequestRecord } from "./channel-records.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
+import type { SupervisionSnapshot } from "./orchestrator-supervisor.ts";
 
 /** `details.kind` of an injected notice — how `message_end` recognises one. */
 export const NOTICE_KIND = "orchestration-notice";
@@ -95,6 +97,55 @@ export function freshNoticeEvents(events: readonly NoticeEvent[], facts: NoticeF
     if (!child || facts.doneTaskIds.has(child.taskId) || child.state !== event.state) return false;
     return event.requestId === undefined || facts.openRequestIds.has(event.requestId);
   });
+}
+
+/** What a notice is checked against: the open children, their questions, the done tasks. */
+export function noticeFactsFrom(
+  snapshot: SupervisionSnapshot | undefined,
+  tasks: ReadonlyArray<{ id: string; status: string }>,
+): NoticeFacts {
+  return {
+    children: (snapshot?.children ?? []).map((c) => ({ childId: c.child.id, taskId: c.child.taskId, state: c.state })),
+    openRequestIds: new Set((snapshot?.requests ?? []).map((r) => r.requestId)),
+    doneTaskIds: new Set(tasks.filter((t) => t.status === "done").map((t) => t.id)),
+  };
+}
+
+/**
+ * THE SCREEN HALF OF THE DELIVERY CHECK (D43, 2026-09-27). pi draws a custom
+ * message at `message_start`, from the text it was QUEUED with; the
+ * `message_end` rewrite then replaces the message object in place, which fixes
+ * the context but not the pixels — the manager's pane kept showing the stale
+ * 「子会话需要你」. So the notice renders through this: every frame re-reads
+ * the message's CURRENT content and rebuilds the inner view when it changed.
+ */
+export function liveNoticeComponent(
+  message: { content: unknown },
+  build: (text: string) => Component,
+): Component {
+  let shown: string | undefined;
+  let inner: Component | undefined;
+  const current = (): Component => {
+    const text = messageText(message.content);
+    if (inner === undefined || text !== shown) {
+      shown = text;
+      inner = build(text);
+    }
+    return inner;
+  };
+  return {
+    render: (width) => current().render(width),
+    invalidate: () => { inner = undefined; },
+  };
+}
+
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((c): c is { type: "text"; text: string } => c?.type === "text" && typeof c.text === "string")
+    .map((c) => c.text)
+    .join("\n");
 }
 
 /** The notice body. With nothing left it says so in one line instead. */

@@ -10,6 +10,16 @@ import type { PrecommitMode } from "./gate-state-records.ts";
 import type { TestScope } from "./precommit-receipt.ts";
 
 /**
+ * THE ROUND NUMBER A SUBMISSION STARTING NOW WILL CARRY (D01, 2026-09-27) —
+ * the strip's 「轮 N」 plus one. `rounds.length + 1` counted only rounds that
+ * RECORDED a verdict, so a round the cancel matrix ended left the next one
+ * labelled with the previous number.
+ */
+export function nextReviewRoundNumber(st: Pick<GateState, "sentReviewRounds">): number {
+  return (st.sentReviewRounds ?? 0) + 1;
+}
+
+/**
  * WHAT A HANDOFF SUCCESSOR CARRIES OVER from its predecessor's session state.
  *
  * A successor runs as a NEW session id, so the restore path starts it from

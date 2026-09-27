@@ -310,6 +310,8 @@ export interface FakeWorldOptions {
   taskRepoAliases?: Record<string, string>;
   /** Answers the PM-pane `select` (grant door 3) gives, in order. */
   selectAnswers?: string[];
+  /** Runs while the grant door is on screen — what happens meanwhile (D40). */
+  duringGrantDialog?: () => void;
   /**
    * The branch a checkout is on, as `deps.currentBranch` answers it
    * (2026-09-18, A).
@@ -484,6 +486,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     // `selectAnswers` as before.
     askChoice: async (spec) => {
       if (spec.options.some((option) => option.includes("允许并记住"))) {
+        options.duringGrantDialog?.();
         return options.selectAnswers?.shift();
       }
       return (confirmAnswers.shift() ?? false) ? spec.options[0] : undefined;

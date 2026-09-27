@@ -301,9 +301,31 @@ test("SECURITY: a new session inherits the child REGISTRY and nothing that grant
   assert.ok(!("approvedPlanHistory" in inherited), "and it is gone, not present-but-undefined");
 
   assert.deepEqual(inherited.children.map((c) => c.id), ["a-1"], "the live panes are facts about the world");
-  assert.deepEqual(inherited.grants?.map((g) => g.scope), ["sensitive-edit"], "so are the user's own grants");
+  assert.ok(!("grants" in inherited), "D38: a takeover re-asks the user for the proxy authorities too");
   assert.equal(inherited.relay?.handoffPath, "docs/h.md");
   assert.equal(inherited.ownPane, "%9");
+});
+
+test("D38: the proxy grants travel to the handoff successor, and survive the sidecar round trip", () => {
+  const grants = [
+    { scope: "tmux-access", grantedAt: NOW, via: "ask-user" as const },
+    { scope: "sensitive-edit", grantedAt: NOW, via: "first-answer" as const },
+  ];
+  const runtime: OrchestratorRuntime = { ...runtimeWith(child()), grants };
+  assert.deepEqual(successorRuntime(runtime, true).grants, grants, "the successor keeps what the user granted");
+
+  const read = normalizeRuntime(JSON.parse(JSON.stringify(runtime)), "orch-abc-1");
+  assert.deepEqual(read?.grants, grants, "read back, not dropped");
+
+  for (const forged of [
+    { scope: "kill-server", grantedAt: NOW, via: "ask-user" },
+    { scope: "tmux-access", grantedAt: NOW, via: "chat" },
+    { scope: "tmux-access", via: "ask-user" },
+    "tmux-access",
+  ]) {
+    const cleaned = normalizeRuntime({ ...JSON.parse(JSON.stringify(runtime)), grants: [...grants, forged] }, "orch-abc-1");
+    assert.equal(cleaned?.grants, undefined, `one entry the gate could not have written drops them all: ${JSON.stringify(forged)}`);
+  }
 });
 
 test("a RELAY successor keeps the approval — same work, same worktree, minutes later", () => {

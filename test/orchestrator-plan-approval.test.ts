@@ -339,6 +339,18 @@ test("a spawn is still authorized after an amendable edit — the whole point", 
   assert.equal(spawn.isError, undefined, replyText(spawn));
 });
 
+test("D29: set-status echoes the changed row and a tally, never the whole plan or a task book", async () => {
+  const parsed = parsePlan({
+    title: "测试计划", intent: "i",
+    tasks: [{ id: "t1", title: "任务一", note: "任务书正文-ONE" }, { id: "t2", title: "任务二", note: "任务书正文-TWO" }],
+  });
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true });
+  const text = replyText(await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "running" }));
+  assert.match(text, /- \[running\] t1：任务一/);
+  assert.match(text, /running 1 \/ pending 1|pending 1 \/ running 1/);
+  assert.doesNotMatch(text, /任务书正文|任务二/);
+});
+
 test("`write` PRESERVES task status — a rewrite is not an execution reset", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "running" });
@@ -831,4 +843,30 @@ test("the switch SURVIVES the runtime round trip — a recovered child recompute
   }, "orch-deadbeef-abc");
   assert.ok(runtime);
   assert.deepEqual(runtime.approvedPlan?.tasks.find((t) => t.id === "t1")?.stages, { acceptance: false });
+});
+
+// ---------------------------------------------------------------------------
+// D30: an isolated checkout is a new write directory — on widens, off narrows
+// ---------------------------------------------------------------------------
+
+test("D30: switching `isolated` ON revokes the approval; OFF carries; the flag survives the round trip", () => {
+  const plan = fileGrainPlan();
+  const on = withTask(plan, "t1", { isolated: true });
+  const revoked = decideApprovalCarry(approved(plan), on, REPO);
+  assert.equal(revoked.carries, false);
+  assert.match(revoked.widenings.join("\n"), /"t1" 改为在门禁新建的独立 checkout 里工作/);
+
+  const back = decideApprovalCarry(approved(on), plan, REPO);
+  assert.equal(back.carries, true, back.widenings.join("\n"));
+  assert.match(back.amendments.join("\n"), /"t1" 不再要求独立 checkout/);
+
+  const runtime = normalizeRuntime({
+    orchestrationId: "orch-deadbeef-abc",
+    children: [],
+    notify: { sentAt: [], lastByKey: {} },
+    approvedPlanHash: planHash(on),
+    approvedPlanAt: "2026-09-27T10:00:00.000Z",
+    approvedPlan: snapshotApprovedPlan(on, planHash(on), "2026-09-27T10:00:00.000Z"),
+  }, "orch-deadbeef-abc");
+  assert.equal(runtime?.approvedPlan?.tasks.find((t) => t.id === "t1")?.isolated, true);
 });

@@ -648,7 +648,8 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    漏写导致子会话被开在项目经理仓库、goal 绑错、编辑被 L8 拦的死锁，写 plan 时
    强制），同一 repo 的任务由门禁
    **各自开一个隔离 checkout**（`git worktree`，由 `orchestrator_spawn` 在发现
-   同 repo 已有在跑的 child 时自动创建；建不出来就**拒绝启动**，不会让两个写者
+   同 repo 已有在跑的 child 时自动创建；任务声明 `isolated: true` 时即使没有兄弟也建，
+   给要自己出 PR 的任务用，2026-09-27 D30；建不出来就**拒绝启动**，不会让两个写者
    共用一个工作区），不同 repo 的任务本来就并行。
 
    **建出来的 checkout 由门禁自己播种**（`lib/worktree-seed.ts`，2026-09-15，
@@ -719,8 +720,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    的「接力的不断档保证」。
 4. **接力继承的是记录，不是权力**（2026-09-16）：继任者（`lib/session-inheritance.ts`
    的 `isHandoffSuccessorOf` —— 有交接标记**且** sidecar 里记的 sessionId 就是那个前任，
-   两者缺一不可）保留用户已经确认过的两份记录：plan 批准五件套，与会话的 `restatement`
-   / `loopGoal` / 轮次预算（`rounds` / `turnsWithoutGoal`）。每一条仍绑着它当初绑的
+   两者缺一不可）保留用户已经确认过的三份记录：plan 批准五件套、项目经理的代答授权
+   （runtime 的 `grants`：`tmux-access` / `sensitive-edit`，2026-09-27 用户决定），与会话的
+   `restatement` / `loopGoal` / 轮次预算（`rounds` / `turnsWithoutGoal`）。每一条仍绑着它当初绑的
    **内容**（canonical plan / goal 文本 / 反述 text+hash），内容一变既有校验立刻失效；
    `bypass`、scope limit、`taskMode` 一律不继承。`orchestrator_attach` 接管没有交接标记
    ⇒ 任何东西都不继承（2026-09-06 的「批准不随会话转移」只收窄、没被推翻）。规则落在

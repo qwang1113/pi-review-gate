@@ -336,6 +336,19 @@ export async function evaluateShipCommand(
   }
 
 
+  // D08: a full precommit lane still running for a repo has no verdict YET —
+  // judging now reads NOT_RUN and blocks with "precommit has not run", which
+  // is false. The gate waits for it to land here (philosophy one: the agent
+  // is not asked to retry) and then judges the verdict it actually wrote.
+  for (const root of checkRoots) {
+    if (!deps.precommitLaneRunning(root)) continue;
+    await withSlowNotice(
+      shipNotice,
+      "review-gate: 全量 precommit 正在跑，等它落盘后再判定这条 ship 命令…",
+      () => deps.waitForQuietLane(root),
+    );
+  }
+
   // P-multi: check every repo this command ships FROM (checkRoots was
   // already resolved above, before the short-circuits). Each ship segment's
   // repo is checked with ITS OWN sidecar + fingerprint.

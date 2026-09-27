@@ -8,9 +8,80 @@
  * env contract and pane-liveness probing.)
  */
 
+import { realpathSync } from "node:fs";
+import { basename, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { judgePaneLabel, judgeWindowName, paneIdentity, workerWindowName } from "./orchestrator-pane-decor.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import type { SessionPaneDecor } from "./session-factory.ts";
+
+/**
+ * The gate extension file THIS process loaded — its sibling `extensions/`, since
+ * this module is only ever reached through that extension's own imports.
+ */
+export const OWN_GATE_EXTENSION = fileURLToPath(new URL("../extensions/review-gate.ts", import.meta.url));
+
+/**
+ * Every pane the gate opens runs THE SAME GATE CODE as its opener (D11).
+ *
+ * A bare `pi` loads whatever the settings register — the main checkout — so a
+ * session started on a worktree's gate (`pi -e <worktree>/extensions/…`) used
+ * to open judges, workers, children and successors that enforced different
+ * rules than itself. `-e` names the file actually loaded here; when that is
+ * the settings package's own file, pi dedupes the two by canonical path and
+ * nothing changes; when it is not, pi loads both and `claimGateInstance` makes
+ * the settings copy stand down. A `--no-extensions` on this process travels too, so the
+ * pane loads exactly what its opener did. Only a `pi` argv is touched.
+ *
+ * ONLY when this process was itself started with `-e <this gate>` (user
+ * decision): a plain session takes its gate from the settings and its panes do
+ * the same, exactly as before. Known boundary: an OLDER settings copy without
+ * `claimGateInstance` still registers beside the `-e` one — in the pane just as
+ * in its opener, so the pane is never worse off than the process that opened it.
+ */
+export function withGateExtension(
+  command: readonly string[],
+  extensionPath: string = OWN_GATE_EXTENSION,
+  hostArgv: readonly string[] = process.argv,
+): string[] {
+  const [bin, ...rest] = command;
+  if (bin === undefined || basename(bin) !== "pi") return [...command];
+  if (!startedWithGateFlag(hostArgv, extensionPath)) return [...command];
+  const noExtensions = hostArgv.includes("--no-extensions") || hostArgv.includes("-ne");
+  return [bin, ...(noExtensions ? ["--no-extensions"] : []), "-e", extensionPath, ...rest];
+}
+
+function canonical(path: string): string {
+  try { return realpathSync(path); } catch { return resolve(path); }
+}
+
+/** Did THIS process get `-e` / `--extension` naming this very gate file? */
+function startedWithGateFlag(hostArgv: readonly string[], extensionPath: string): boolean {
+  const own = canonical(extensionPath);
+  return hostArgv.some((arg, i) =>
+    (arg === "-e" || arg === "--extension") && hostArgv[i + 1] !== undefined && canonical(hostArgv[i + 1]!) === own);
+}
+
+const GATE_INSTANCE = Symbol.for("pi-review-gate.instance");
+
+/**
+ * May THIS copy of the gate register itself in this process? (D11)
+ *
+ * `-e` alone is not enough: without `--no-extensions` pi also loads the copy
+ * the settings register, dedupes only by canonical path, and runs BOTH copies'
+ * handlers. pi loads CLI extensions first, so the first copy to ask is the one
+ * the pane was opened with; every other path stands down. Keyed by path, not
+ * by a bare flag, so a `/reload` of the same copy in the same process passes.
+ */
+export function claimGateInstance(
+  path: string = OWN_GATE_EXTENSION,
+  store: Record<symbol, unknown> = globalThis as unknown as Record<symbol, unknown>,
+): boolean {
+  const winner = store[GATE_INSTANCE];
+  if (typeof winner === "string" && winner !== path) return false;
+  store[GATE_INSTANCE] = path;
+  return true;
+}
 
 /** Flags every judge pane carries: the read-only review contract. */
 export interface JudgePaneCommandOpts {

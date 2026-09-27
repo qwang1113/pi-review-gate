@@ -41,6 +41,7 @@ import { isAbsolute } from "node:path";
 import { sha256 } from "./hash.ts";
 import {
   deliveryStationLine,
+  describeDeliveryStation,
   parseDeliveryStation,
   type DeliveryStation,
   type StationAudience,
@@ -83,6 +84,13 @@ export interface PlanTask {
    * Approved content: switching a stage off is a widening.
    */
   stages?: PlanTaskStages;
+  /**
+   * Work in the gate's OWN isolated checkout even with no sibling in the repo
+   * (D30, 2026-09-27): a task meant to ship its own PR must not share the
+   * manager's checkout, and seeding one by hand was the manager's job. Only
+   * `true` is stored. Approved content: switching it on is a widening.
+   */
+  isolated?: true;
   status: TaskStatus;
   /**
    * THE TASK BOOK — the assignment this task's child session is handed.
@@ -283,6 +291,9 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
 
     const parsedStages = parsePlanTaskStages(t.stages, label);
     problems.push(...parsedStages.problems);
+    if (t.isolated !== undefined && typeof t.isolated !== "boolean") {
+      problems.push(`${label}.isolated "${String(t.isolated)}" 非法（只能是 true / false）`);
+    }
 
     tasks.push({
       id,
@@ -291,6 +302,7 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
       dependsOn: asStringArray(t.dependsOn).map((d) => d.trim()).filter(Boolean),
       execution,
       ...(parsedStages.stages ? { stages: parsedStages.stages } : {}),
+      ...(t.isolated === true ? { isolated: true as const } : {}),
       status,
       note: asString(t.note) || undefined,
     });
@@ -436,6 +448,7 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
       // Only when something is OFF, so a plan that never wrote the field
       // hashes exactly as it did before the field existed.
       ...(t.stages ? { stages: t.stages } : {}),
+      ...(t.isolated ? { isolated: true } : {}),
     })),
   });
 }
@@ -491,11 +504,14 @@ export function formatPlanSummary(
   //
   // "按约定", not an assessment: whether that last task really delivers
   // is the plan AUDIT's judgement (its 10th check).
-  const delivery = deliveryTaskId(plan);
+  // A ONE-TASK plan has no tail to point at (D25), and the mark's action is
+  // the plan's own station — a `precommit` plan was told "push → 开 PR".
+  const delivery = plan.tasks.length >= 2 ? deliveryTaskId(plan) : undefined;
   for (const t of plan.tasks) {
     const deps = t.dependsOn.length ? ` ← ${t.dependsOn.join(", ")}` : "";
     const deliveryMark = t.id === delivery
-      ? "　← 按约定：plan 的最后一环 = 交付任务（通常就是独立验收任务；站点不受同 repo 收窄；push → 开 PR；汇合 / 整体审核 / commit 是倒数第二个收尾任务的事）"
+      ? "　← 按约定：plan 的最后一环 = 交付任务（通常就是独立验收任务；站点不受同 repo 收窄：" +
+        `${describeDeliveryStation(plan.deliveryStation, audience)}；汇合 / 整体审核 / commit 是它前面收尾任务的事）`
       : "";
     // THE ACCEPTANCE SWITCH IS SAID PER TASK (2026-09-27): it is approved
     // content, so the user reads who accepts before signing.
@@ -505,7 +521,8 @@ export function formatPlanSummary(
     lines.push(
       `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}${deliveryMark}` +
       `\n    ${acceptLine}` +
-      (t.repo ? `\n    repo：${t.repo}` : ""),
+      (t.repo ? `\n    repo：${t.repo}` : "") +
+      (t.isolated ? "\n    独立 checkout：门禁为它建 worktree 并播种" : ""),
     );
     // THE TASK BOOK IS RENDERED (2026-09-21). Two facts make this line load-
     // bearing rather than decorative, and both were measured as failures:

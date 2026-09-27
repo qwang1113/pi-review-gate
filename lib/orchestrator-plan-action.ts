@@ -508,7 +508,16 @@ export async function handlePlanAction(
     if (!moved.ok) return fail("review-gate: " + moved.reason);
     deps.savePlan(moved.plan);
     if (reason) deps.log(`orchestrator task ${taskId} → ${status}: ${reason}`);
-    return reply(`review-gate: 任务 ${taskId} → ${status}。\n` + formatPlanSummary(moved.plan));
+    // ONLY THE CHANGED ROW (D29): echoing the whole summary re-printed every
+    // task book into the manager's context on each status move.
+    const counts = new Map<string, number>();
+    for (const t of moved.plan.tasks) counts.set(t.status, (counts.get(t.status) ?? 0) + 1);
+    const task = moved.plan.tasks.find((t) => t.id === taskId);
+    return reply(
+      `review-gate: 任务 ${taskId} → ${status}。\n` +
+      `- [${status}] ${taskId}：${task?.title ?? ""}\n` +
+      `全部任务：${[...counts].map(([s, n]) => `${s} ${n}`).join(" / ")}`,
+    );
   }
 
   if (action === PLAN_ACTIONS["add-decision"]) {

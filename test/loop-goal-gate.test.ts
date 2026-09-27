@@ -143,6 +143,7 @@ function makeMockPi(cwd: string) {
     sendUserMessage: () => {},
     registerMarkdownTransformer: () => {},
     registerCommand: () => {},
+    registerMessageRenderer: () => {},
   };
   return {
     ...pi,
@@ -515,10 +516,16 @@ test("L8b BOOTSTRAP: session start heals a MISSING goal-auditor into the agents 
   dirs.push(fakeHome);
   const realHome = process.env.HOME;
   process.env.HOME = fakeHome;
+  const gateClaims = globalThis as unknown as Record<symbol, unknown>;
+  const GATE_CLAIM = Symbol.for("pi-review-gate.instance");
+  const firstClaim = gateClaims[GATE_CLAIM];
   try {
     const { default: gateWithAgents } = await import(join(INSTALL_WITH_AGENTS, "extensions", "review-gate.ts"));
     const repo = makeRepo();
     const pi = makeMockPi(repo);
+    // A second INSTALL in the same process: forget the first copy's D11 claim
+    // (lib/session-launch-specs.ts claimGateInstance), as a fresh pi would.
+    delete gateClaims[GATE_CLAIM];
     gateWithAgents(pi as never);
     const agentsDir = join(fakeHome, ".pi", "agent", "agents");
     assert.equal(existsSync(join(agentsDir, "goal-auditor.md")), false, "precondition: the role is missing");
@@ -537,6 +544,7 @@ test("L8b BOOTSTRAP: session start heals a MISSING goal-auditor into the agents 
       "the heal fills gaps; it must never overwrite an existing file",
     );
   } finally {
+    gateClaims[GATE_CLAIM] = firstClaim;
     if (realHome === undefined) delete process.env.HOME;
     else process.env.HOME = realHome;
   }

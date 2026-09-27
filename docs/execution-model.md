@@ -101,6 +101,8 @@ opener 凭它记录结论；
   自报上下文 70%（= 统一交接阈值 `HANDOFF_PERCENT`）或同对象派满 8 轮，任一命中门禁自己开新 transcript（lane 代次 +1）
   并只带压缩交接。上下文读数缺失时不因它轮转（fail-open），轮次在**派发时**计数所以
   放弃的轮也算。旧 lane 的 pane 当场回收、目录原地保留走既有 TTL；agent 侧无感、无开关。
+  所以「窗口保留、下轮复用」只在**同一审计对象内**成立：例如 plan 审计 READY、用户批准后
+  plan hash 变了，下一次审计就是新对象、新一代 session 与窗口 —— 这是设计，不是缺陷（D45）。
 - **重启接管**：opener 注册表落盘（`<repo>/.pi/judge-hierarchy.json`，按 repo 分片），
   新会话启动与每次触达时懒合并；死 pane 的异主条目由触达者过户，活 pane 保持拒绝。
   绝不为同一 session id 再开第二个 pi。
@@ -471,6 +473,14 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
 表中第二行的「非 READY」**不包含「扣下」**：一份被 park 的 READY 在 sidecar 里正是
 `PENDING`，而它不是裁决 —— 取消矩阵收到 `held` 这个事实时什么也不做，否则会杀掉这份
 结论正在等的那一轮（判定在 `roundCancelPlan` 的 `held` 分支，不得写成旁路的 `if`）。
+
+第三行只对**本轮**生效（2026-09-27，D02）：lane 在 prepare 之后绑定本轮 review target，
+落地时 `laneOwnsCurrentRound` 要求轮号（`sentReviewRounds`）与 head+tree 都对得上，
+否则一个迟到的 lane FAIL 不杀任何人（`roundCancelPlan` 的 lane 行带 `current`）。
+它也不再让质量轮白跑（D03）：lane 在质量轮派发前就已 FAIL ⇒ 两个 judge 都不派
+（`judgeRuledOutByLane`）；派发后才 FAIL ⇒ 质量轮照旧继续，而质量轮还在审时重送
+`judge_submit` 被拒、先 `judge_wait` 质量轮，`fresh:true` 才放弃它
+（`resubmitWhileQualityInFlight`）。
 
 - **取消是真的终止，不是「忽略结果」**：杀的是那个 pane 的进程（复用既有的
   `closeJudgePaneOf` + 注册表删行路径）。被取消的 judge 不再出现在注册表里，所以

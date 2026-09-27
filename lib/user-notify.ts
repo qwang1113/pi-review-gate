@@ -216,18 +216,26 @@ export function buildUserNotifyMessage(opts: {
 export function buildFocusCommand(opts: {
   paneId: string;
   windowId: string | undefined;
+  /**
+   * The server's socket (first field of `$TMUX`). A bare `tmux` in the click
+   * talks to the DEFAULT server, so a session on `-L`/`-S` jumped nowhere (D42).
+   * Whitelisted, not escaped: anything outside it falls back to bare `tmux`.
+   */
+  socket?: string | undefined;
 }): string | undefined {
   const pane = opts.paneId.trim();
   if (!isPaneId(pane)) return undefined;
+  const socket = opts.socket ?? "";
+  const tmux = /^\/[A-Za-z0-9._/-]+$/.test(socket) ? `tmux -S '${socket}'` : "tmux";
   const window = (opts.windowId ?? "").trim();
   if (/^@\d+$/.test(window)) {
-    return `tmux select-window -t ${window}; tmux select-pane -t ${pane}`;
+    return `${tmux} select-window -t ${window}; ${tmux} select-pane -t ${pane}`;
   }
   // No window id (the lookup failed): select the pane where it lives. tmux
   // accepts a pane id for `select-window` too — MEASURED on 3.7c: with the
   // client on window 0, `select-window -t %1` (a pane in window 1) moved it to
   // window 1 — so both halves still run and the click lands the same way.
-  return `tmux select-window -t ${pane}; tmux select-pane -t ${pane}`;
+  return `${tmux} select-window -t ${pane}; ${tmux} select-pane -t ${pane}`;
 }
 
 /** `terminal-notifier`'s own argv — the binary first, like exec accepts. */
@@ -487,7 +495,7 @@ export function planUserNotify(opts: {
    * that can never raise a banner. The policy calls this only on the branch
    * that actually sends.
    */
-  tmux?: (() => { paneId: string; windowId?: string | undefined } | undefined) | undefined;
+  tmux?: (() => { paneId: string; windowId?: string | undefined; socket?: string | undefined } | undefined) | undefined;
   /**
    * Is the human ALREADY LOOKING at this session ({@link isWatchingPane})?
    *
@@ -548,7 +556,7 @@ export function planUserNotify(opts: {
 
   const address = opts.tmux?.();
   const focusCommand = address
-    ? buildFocusCommand({ paneId: address.paneId, windowId: address.windowId })
+    ? buildFocusCommand({ paneId: address.paneId, windowId: address.windowId, socket: address.socket })
     : undefined;
   return {
     status: "send",

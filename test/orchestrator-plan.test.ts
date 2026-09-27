@@ -538,6 +538,20 @@ test("the summary marks WHICH task delivers — and only that one; acceptance is
   assert.equal(lines.filter((l) => l.trim() === "验收：开").length, 3);
 });
 
+test("D25: a one-task plan marks no delivery task, and the mark follows the plan's station", () => {
+  const single = formatPlanSummary(planOf({ deliveryStation: "precommit", tasks: [{ id: "a", title: "A", repo: "/repo" }] }), "/repo");
+  assert.doesNotMatch(single, /交付任务|push → 开 PR/);
+
+  const tasks = [{ id: "w", title: "W", repo: "/repo" }, { id: "a", title: "A", repo: "/repo" }];
+  const precommit = formatPlanSummary(planOf({ deliveryStation: "precommit", tasks }), "/repo");
+  const mark = precommit.split("\n").find((l) => l.startsWith("- [pending] a"))!;
+  assert.match(mark, /交付任务/);
+  assert.match(mark, /precommit/);
+  assert.doesNotMatch(mark, /开 PR；|push →/, "a precommit plan does not push");
+  const pr = formatPlanSummary(planOf({ deliveryStation: "pr", tasks }), "/repo");
+  assert.match(pr.split("\n").find((l) => l.startsWith("- [pending] a"))!, /PR 开出来/);
+});
+
 test("the canonical text is order-independent for sets", () => {
   const a = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["x", "y"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });
   const b = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["y", "x"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });
@@ -650,4 +664,19 @@ test("stages: switched OFF is approved content, and needs an accepting task that
     ],
   }, NOW);
   assert.equal(allOff.ok, false, "a plan in which nobody accepts is refused");
+});
+
+test("D30: `isolated` parses as a boolean, is stored only when true, and hashes only when true", () => {
+  const plain = planOf();
+  const off = planOf({ tasks: [{ id: "a", title: "抽 plan 模块", isolated: false }, { id: "b", title: "抽 tmux 模块" }] });
+  const on = planOf({ tasks: [{ id: "a", title: "抽 plan 模块", isolated: true }, { id: "b", title: "抽 tmux 模块" }] });
+  assert.equal(off.tasks[0]!.isolated, undefined, "false is the default and is not stored");
+  assert.equal(canonicalPlanText(off), canonicalPlanText(plain), "an existing plan's hash does not move");
+  assert.equal(on.tasks[0]!.isolated, true);
+  assert.notEqual(canonicalPlanText(on), canonicalPlanText(plain), "switching it on is approved content");
+  assert.match(formatPlanSummary(on), /独立 checkout：门禁为它建 worktree 并播种/);
+
+  const bad = parsePlan({ title: "t", intent: "i", tasks: [{ id: "a", title: "x", isolated: "yes" }] }, NOW);
+  assert.equal(bad.ok, false);
+  assert.ok(bad.problems.some((p) => /isolated/.test(p)), bad.problems.join("; "));
 });

@@ -66,6 +66,17 @@ export interface AsyncPrecommitReport {
    */
   round: number;
   /**
+   * The checkpoint commit of the round this lane verified (D02) — the id a
+   * reader matches against `git log`. "" when the lane landed before its
+   * round's checkpoint was prepared.
+   */
+  commit: string;
+  /**
+   * This round's quality judge is still judging (D03): re-submitting now would
+   * interrupt it, so the notice says to collect its findings first.
+   */
+  qualityInFlight?: boolean;
+  /**
    * Fingerprint (worktree tree OID) the lane was launched against, captured
    * BEFORE the runner starts. "" means it could not be read.
    */
@@ -107,6 +118,8 @@ export function asyncPrecommitReportIsStale(
 export interface AsyncPrecommitPass {
   /** Same meaning as {@link AsyncPrecommitReport.round}. */
   round: number;
+  /** Same meaning as {@link AsyncPrecommitReport.commit}. */
+  commit: string;
   /** The tree the lane ran against, read before it started. */
   verified: string;
   /** The tree at delivery time. */
@@ -130,7 +143,7 @@ export interface AsyncPrecommitPass {
  * reason it says it at all is that something has to.
  */
 export function buildAsyncPrecommitPass(input: AsyncPrecommitPass): string {
-  const label = input.round > 0 ? `第 ${input.round} 轮` : "本轮";
+  const label = roundLabel(input);
   const verified = shortTree(input.verified);
   if (asyncPrecommitReportIsStale(input)) {
     return `review-gate: ${label}的后台 full precommit **PASS** —— 那是 **${label}启动时**那份内容（${verified}），` +
@@ -145,12 +158,29 @@ function shortTree(tree: string): string {
   return tree ? tree.slice(0, TREE_PREFIX) : "未知";
 }
 
+/** 「第 N 轮（commit abc…）」 — the round AND the commit, so a late notice names its submission. */
+function roundLabel(input: { round: number; commit: string }): string {
+  const round = input.round > 0 ? `第 ${input.round} 轮` : "本轮";
+  return `${round}（commit ${input.commit ? input.commit.slice(0, TREE_PREFIX) : "未知：lane 在 checkpoint 之前就落地了"}）`;
+}
+
+/**
+ * THE QUALITY ROUND IS STILL JUDGING (D03): re-submitting interrupts it, and
+ * two lane FAILs in a row used to cost two quality rounds that never
+ * concluded. `judge_submit` refuses that re-submission without `fresh`
+ * (`resubmitWhileQualityInFlight`, lib/quality-round.ts); this is the same
+ * sentence, said first.
+ */
+export const QUALITY_IN_FLIGHT_HINT =
+  "本轮质量轮还在审这份内容 —— 现在重送会把它腰斩。先 `judge_wait({role:\"quality-auditor\"})` 拿到它的 findings，" +
+  "把 precommit 的问题和它的 findings 一并修完再重送；确实要放弃它就 `judge_submit({..., fresh:true})`。";
+
 /**
  * Build the notice. Chinese, like every other gate-to-agent line; the round
  * label and the tree ids are the parts that survive a late delivery.
  */
 export function buildAsyncPrecommitReport(input: AsyncPrecommitReport): string {
-  const label = input.round > 0 ? `第 ${input.round} 轮` : "本轮";
+  const label = roundLabel(input);
   const verified = shortTree(input.verified);
   const stale = asyncPrecommitReportIsStale(input);
 
@@ -188,7 +218,7 @@ export function buildAsyncPrecommitReport(input: AsyncPrecommitReport): string {
     loudWhy,
   ].join("\n");
 
-  const lead = stale ? staleLead : loudLead;
+  const lead = (stale ? staleLead : loudLead) + (input.qualityInFlight ? `\n${QUALITY_IN_FLIGHT_HINT}` : "");
   // WHAT THE MATRIX DID travels with the notice that delivers it: the row's
   // notes are the only place those actions are ever spoken (see `laneNotes`).
   const cancelNotes = (input.laneNotes ?? []).filter((note) => note.trim().length > 0);

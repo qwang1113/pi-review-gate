@@ -290,6 +290,11 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         parsed.shippedKinds = [...new Set(known)];
       }
     }
+    // A selector becomes a `gh` argv value: anything but a plain non-flag string is dropped.
+    if (parsed.prMergeSelector !== undefined &&
+      (typeof parsed.prMergeSelector !== "string" || parsed.prMergeSelector.startsWith("-"))) {
+      delete parsed.prMergeSelector;
+    }
 
     // L7: a malformed Copilot cycle is repaired, never trusted verbatim and
     // never fatal — sanitizeCopilotState downgrades an unrecognized status to

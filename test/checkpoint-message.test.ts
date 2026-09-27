@@ -48,6 +48,11 @@ test("buildCheckpointMessage — a legal CC stays exactly as written", () => {
   assert.doesNotMatch(msg, /^checkpoint:/);
 });
 
+test("D32: no message ⇒ the fixed default subject, never a slice of the round note", () => {
+  assert.equal(buildCheckpointMessage(undefined), "chore: record this round for review");
+  assert.equal(buildCheckpointMessage(""), "chore: record this round for review");
+});
+
 test("buildCheckpointMessage — an English body is kept under the subject", () => {
   const msg = buildCheckpointMessage("docs: repair tables\n\nthe pipe broke the render");
   assert.equal(msg, "docs: repair tables\n\nthe pipe broke the render");

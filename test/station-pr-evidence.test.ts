@@ -26,6 +26,7 @@ import { join } from "node:path";
 import {
   existingPrNotice,
   hasUnpushedCommits,
+  probeMergedPr,
   probeOpenPr,
   type OpenPrLookup,
 } from "../lib/station-pr-evidence.ts";
@@ -80,6 +81,18 @@ test("hasUnpushedCommits: fail-CLOSED — an unreadable answer reads as unpushed
   // no upstream at all, and the directory is not a repository.
   assert.equal(hasUnpushedCommits(freshRepo()), true, "no upstream: the branch was never pushed");
   assert.equal(hasUnpushedCommits(scratch("rg-not-a-repo-")), true, "not a repository");
+});
+
+test("D33 probeMergedPr: only a MERGED state counts; the selector is its own argv value", async () => {
+  const seen: string[][] = [];
+  const reply = (stdout: string, ok = true) => async (argv: string[]) => { seen.push(argv); return { ok, stdout, stderr: "" }; };
+  assert.equal(await probeMergedPr("/r", "12", { run: reply('{"number":12,"state":"MERGED"}') }), 12);
+  assert.deepEqual(seen[0], ["gh", "pr", "view", "12", "--json", "number,state"]);
+  assert.equal(await probeMergedPr("/r", "", { run: reply('{"number":3,"state":"MERGED"}') }), 3);
+  assert.deepEqual(seen[1], ["gh", "pr", "view", "--json", "number,state"], "no selector = current branch");
+  assert.equal(await probeMergedPr("/r", "12", { run: reply('{"number":12,"state":"OPEN"}') }), null, "queued / auto: not merged yet");
+  assert.equal(await probeMergedPr("/r", "12", { run: reply("", false) }), null);
+  assert.equal(await probeMergedPr("/r", "12", { run: reply("not json") }), null);
 });
 
 test("probeOpenPr: only an OPEN state grants arrival", async () => {

@@ -550,7 +550,18 @@ approved. That forced a redundant full review round on every staging operation
 and pushed users toward `REVIEW_GATE_BYPASS=1`, which disarms the gate far more
 thoroughly than the false mismatch it worked around. A tree hash makes staging
 and committing invisible while any real edit — including a new untracked
-file — still changes the digest and correctly invalidates the pass.
+file this session wrote — still changes the digest and correctly invalidates
+the pass.
+
+Untracked files are counted by **ownership** (D20, fingerprint v3): an
+untracked, unignored file that is not in the index and that this session never
+wrote through edit/write (`sessionEditedFiles` in the sidecar the hook also
+reads) is left out of the digest — a PM's note or an installer's `yarn.lock`
+no longer voids a READY. It is the same rule the gate's checkpoint commits by,
+so the reviewed tree and the digest can always meet again. Such a file counts
+the moment it is `git add`ed (it is shippable then), and with no readable
+sidecar nothing is left out. Both implementations (`lib/fingerprint.ts` and
+the hook's `scripts/compute-fingerprint.cjs`) apply it; a parity test pins it.
 
 > Implementation note: the shadow index is seeded from the real index and its
 > mtime is **backdated to `min(indexMtime, now) - 5s`**. `copyFileSync` stamps a
@@ -902,6 +913,26 @@ throwaway worktree, an orchestration child, a temporary snapshot — would point
 the whole repository's hooks at a directory that disappears with it, and every
 later commit would fail until someone reinstalled from the real checkout. The
 installer refuses (naming the main worktree) instead of doing that.
+
+### tmux sidebar (`prefix + e`)
+
+The postinstall appends one `bind e` line to `~/.tmux.conf` (backed up first;
+a `bind e` of your own wins). `prefix + e` opens a sidebar on the left of the
+current window — 60% of its width: the pi sessions grouped by repo on the left
+30 columns, and on the right a live plain-text preview of the selected row's
+pane (refreshed every second and on every selection change). `j`/`k` or the
+arrows select, `Enter` or a click jumps there and closes the sidebar, `q`
+closes it.
+
+While it is open, every other pane of that window has its input switched off
+(`select-pane -d`), so nothing you type lands in a session by accident; a pane
+split while it is open is locked within a second. The panes it switched off are
+recorded on the window (`@rg_sidebar_locked`) and given back on every way out —
+`q`, `Ctrl-C`, a jump, a second `prefix + e`, `SIGHUP`/`SIGTERM`, a crash. A
+pane that was already switched off before stays off. If the sidebar was killed
+hard, the next `prefix + e` in that window only unlocks. Logic:
+`lib/tmux-sidebar-{collect,tree,render,lock,preview}.ts`; the loop:
+`scripts/tmux-sidebar.ts`.
 
 ### Legacy global installer (deprecated)
 

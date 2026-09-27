@@ -342,7 +342,7 @@ export function detectForbiddenTmux(
     const rendered = tokens.join(" ");
 
     if (ALWAYS_FORBIDDEN.includes(subcommand)) {
-      const danger = "它会破坏或越出用户的 tmux 环境（编排只允许在用户与你约定的那一个 window 内 split）。";
+      const danger = "它会破坏或越出用户的 tmux 环境（子会话、judge、worker 都住在门禁为 opener 懒建的专属 tmux session 里，门禁自己开关它们，不碰用户的 window）。";
       return {
         subcommand,
         tier: "forbidden",

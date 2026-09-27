@@ -47,6 +47,7 @@ import {
   readChannel,
   sanitizeDeliveryStation,
   sanitizeBatchStamp,
+  unansweredRequests,
   type ChannelProjection,
 } from "./channel-projection.ts";
 import type { ChannelRequestRecord } from "./channel-records.ts";
@@ -229,7 +230,7 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
     }
     children.push(supervision);
 
-    for (const open of projection.openRequests) {
+    for (const open of unansweredRequests(projection)) {
       const payload = safePayload(input.io, open);
       const station = sanitizeDeliveryStation(open.station);
       // Same boundary, same rule: the three batch scalars are the child's

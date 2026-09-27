@@ -219,11 +219,11 @@ async function answerOneRequest(
         recommended: "拒绝",
       };
       const picked = parseChoice(await deps.askChoice(grantSpec), grantSpec);
-      if (picked.kind === "chose" && picked.option === grantSpec.options[0]) {
+      const remembered = picked.kind === "chose" && picked.option === grantSpec.options[0];
+      const once = picked.kind === "chose" && picked.option === grantSpec.options[1];
+      if (remembered) {
         deps.saveRuntime(addGrant(deps.runtime(), { scope: proxyScope, grantedAt: new Date(deps.now()).toISOString(), via: "first-answer" }));
-      } else if (picked.kind === "chose" && picked.option === "仅允许这一次") {
-        // fall through — this answer passes once, no grant recorded
-      } else {
+      } else if (!once) {
         return {
           ok: false,
           requestId: request.requestId,
@@ -233,6 +233,23 @@ async function answerOneRequest(
             ` —— 子会话 ${childId} 的请求未代答。` +
             `（用户可之后用 /gate-grant ${proxyScope} 或 ask_user 授予。）`,
             { childId, answered: false, needGrant: proxyScope },
+          ),
+        };
+      }
+      // THE REQUEST MAY HAVE BEEN SETTLED WHILE THE USER WAS DECIDING (D40): an
+      // instruct interrupt, the child's own user, a closed box. Writing the
+      // answer anyway reported "answered" for a request nobody would ever read
+      // again — the authorization silently went nowhere.
+      if (!pendingFor(deps, childId).some((r) => r.requestId === request.requestId)) {
+        return {
+          ok: false,
+          requestId: request.requestId,
+          refusal: fail(
+            `review-gate: 子会话 ${childId} 的这条请求在你等用户授权期间已被结算（打断 / 当场作答 / 关框），` +
+            "答案**没有**写进通道、也没有送达。" +
+            (remembered ? `用户刚才授予的「${what}代答权」已记下，它下次再申请时可以直接代答。` : "") +
+            " `orchestrator_wait({ timeoutMs: 0 })` 看它现在在等什么。",
+            { childId, answered: false, settled: true },
           ),
         };
       }

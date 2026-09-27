@@ -355,6 +355,21 @@ export function channelOwnerId(records: readonly ChannelRecord[]): string | unde
   return undefined;
 }
 
+/**
+ * The open requests still WAITING FOR THE ORCHESTRATOR — open, and with no
+ * answer written for them yet (D34, 2026-09-27).
+ *
+ * `openRequests` stays "not settled" on purpose (the child side must keep an
+ * answer it has not consumed). But between the orchestrator's answer and the
+ * child's settle record there is a window — measured 44ms, and a wait called
+ * in the SAME message as the answer lands in it — where a supervisor reading
+ * `openRequests` announces the question it just answered as still waiting.
+ */
+export function unansweredRequests(projection: Pick<ChannelProjection, "openRequests" | "pendingAnswers">): ChannelRequestRecord[] {
+  const answered = new Set((projection.pendingAnswers ?? []).map((a) => a.requestId));
+  return (projection.openRequests ?? []).filter((r) => !answered.has(r.requestId));
+}
+
 function projectOwnedRecords(records: readonly ChannelRecord[]): ChannelProjection {
   const settled = new Set<string>();
   const injected = new Set<string>();

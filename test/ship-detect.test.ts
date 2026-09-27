@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { containsHeredoc, detectShipCommands, extractCommitMessages, extractPrTextFields, observedShipKinds } = await import(
+const { containsHeredoc, detectShipCommands, extractCommitMessages, extractPrTextFields, observedPrMerge, observedShipKinds } = await import(
 
 
   new URL("../lib/ship-detect.ts", import.meta.url).pathname
@@ -341,6 +341,49 @@ test("a heredoc body IS detected as a ship command — the over-match this exist
   assert.equal(firstKind("cat > doc.md <<EOF\ngh pr create --title x\nEOF"), "pr-create");
 });
 
+test("D37: a quoted-delimiter heredoc that `cat` writes to a file is data, not a ship", () => {
+  for (const cmd of [
+    "cat > notes.md <<'EOF'\nsteps:\ngh pr create --title x\nEOF",
+    'cat <<"EOF" >> notes.md\ngit push\nEOF',
+    "cat <<-'EOF' > n.md\n\tgh pr create\n\tEOF",
+  ]) {
+    assert.equal(detectShipCommands(cmd).length, 0, cmd);
+  }
+});
+
+test("D37: every other heredoc shape still exposes its ship lines", () => {
+  for (const cmd of [
+    "cat > notes.md <<EOF\ngh pr create --title x\nEOF",          // unquoted: $(…) would expand
+    "bash <<'EOF'\ngh pr create\nEOF",                            // a shell runs the body
+    "cat > a.md <<'EOF'\nx\nEOF\ngh pr create --title y",          // a real ship after the heredoc
+    "cat > a.md <<'EOF'\ngh pr create --title y",                  // no terminator: fail-closed
+    "cat <<'EOF'\ngh pr create\nEOF",                              // not redirected to a file
+    "cat >(bash) <<'EOF'\ngh pr create\nEOF",                      // process substitution executes it
+    "cat > f <<'EOF' | bash\ngh pr create\nEOF",                   // piped on
+    "sh -s \\\ncat > f <<'EOF'\ngh pr create\nEOF",                 // continued line: cat is sh's argument
+    "bash <<OUT\ncat > f <<'X'\n$(gh pr create)\nX\nOUT",           // inside an outer unquoted heredoc
+    // The written file RUN by the same command is not data (t4 review P1):
+    "cat > run.sh <<'EOF'\ngit push\nEOF\nbash run.sh",
+    "cat > x.sh <<'EOF'\ngh pr create --title y\nEOF\n&& bash x.sh",
+    "cat > x.sh <<'EOF'\ngh pr create\nEOF\nchmod +x x.sh\n./x.sh",
+    "cat > x.sh <<'EOF'\ngit commit -m y\nEOF\nsource x.sh",
+    "cat > x.sh <<'EOF'\ngit push\nEOF\ncat x.sh | sh",
+    // A quote on the cat line opens a STRING, not a heredoc (quality round P0):
+    "cat \" > /tmp/f <<'EOF'\n$(gh pr create --title x)\nEOF\ncat \" > /tmp/g <<'Y'\nY",
+    "cat ' > /tmp/f <<'EOF'\n$(git push)\nEOF\ncat ' > /tmp/g <<'Y'\nY",
+    "cat $X > /tmp/f <<'EOF'\ngit push\nEOF",
+    "cat /dev/null # > /tmp/f <<'EOF'\ngh pr create --title x\nEOF", // a comment: no heredoc
+    "cat ~/x > /tmp/f <<'EOF'\ngit push\nEOF",                         // outside the allowlist
+    "cat/../../../bin/bash > /dev/null <<'EOF'\ngit push\nEOF",          // a command word that only STARTS with cat
+    "cat.sh > /tmp/f <<'EOF'\ngit push\nEOF",
+  ]) {
+    assert.ok(detectShipCommands(cmd).length > 0, cmd);
+  }
+  // Not just the `bash` head: the expanded substitution itself is seen.
+  const outer = detectShipCommands("python3 - <<OUT\ncat > f <<'X'\n$(gh pr create)\nX\nOUT");
+  assert.ok(outer.some((d: { kind: string }) => d.kind === "pr-create"));
+});
+
 test("containsHeredoc recognises the forms a shell actually accepts", () => {
   for (const cmd of [
     "cat > a.md <<EOF\nx\nEOF",
@@ -402,6 +445,33 @@ test("evidence rejects every measured over-match vector", () => {
       `${label}: the DETECTOR is expected to (over-)match — that is the premise`);
     assert.deepEqual(observedShipKinds(cmd), [], `${label} must prove nothing`);
   }
+});
+
+test("D33: a lone synchronous `gh pr merge` yields its PR selector; everything else proves nothing", () => {
+  const env = {};
+  assert.equal(observedPrMerge("gh pr merge 12 --squash", env), "12");
+  assert.equal(observedPrMerge("gh pr merge --squash --subject 'x y' 12 -d", env), "12", "a value flag's value is not the selector");
+  assert.equal(observedPrMerge("gh pr merge --body=done feat/x", env), "feat/x", "a branch selector stays in this repo");
+  assert.equal(observedPrMerge("gh pr merge", env), "", "no selector = the current branch's PR");
+  // Rounds 1–2: an exit 0 that says nothing about the merge proves nothing.
+  for (const masked of ["true || gh pr merge 12", "gh pr merge 12 || true", "git fetch && gh pr merge 12", "gh pr merge 1; echo",
+    "gh pr merge 1 | cat", "gh pr merge 1 &", "gh pr merge 12 & # queued"]) {
+    assert.equal(observedPrMerge(masked, env), undefined, masked);
+  }
+  // Round 2: flags that do not merge now (or at all), and unknown flags.
+  for (const deferred of ["gh pr merge 12 --auto", "gh pr merge 12 --disable-auto", "gh pr merge 12 --help", "gh pr merge -h", "gh pr merge 12 --bogus"]) {
+    assert.equal(observedPrMerge(deferred, env), undefined, deferred);
+  }
+  // Round 1: a merge aimed at ANOTHER repository is not this repo's evidence.
+  for (const elsewhere of ["gh -R o/r pr merge 12", "gh pr merge 12 --repo o/r", "gh pr merge 12 -Ro/r",
+    "gh pr merge https://github.com/o/r/pull/12", "GH_REPO=o/r gh pr merge 12", "gh pr merge 1 2"]) {
+    assert.equal(observedPrMerge(elsewhere, env), undefined, elsewhere);
+  }
+  assert.equal(observedPrMerge("gh pr merge 12", { GH_REPO: "o/r" }), undefined, "an inherited GH_REPO retargets it too");
+  for (const other of ["timeout 60 gh pr merge 12", "sudo gh pr merge 12", 'echo "gh pr merge 12"', "cat > x <<EOF\ngh pr merge 1\nEOF", "gh pr view 12"]) {
+    assert.equal(observedPrMerge(other, env), undefined, other);
+  }
+  assert.deepEqual(observedShipKinds("gh pr merge 12"), [], "not a ship kind");
 });
 
 test("evidence still recognises the real thing, including a multi-line PR body", () => {

@@ -33,7 +33,7 @@
 
 import { gitText } from "./git-exec.ts";
 
-import { resolveOpenPr } from "./copilot-gh.ts";
+import { resolveOpenPr, runGh, type GhResult } from "./copilot-gh.ts";
 import type { PrSummary } from "./copilot-probe-parse.ts";
 
 /**
@@ -116,6 +116,32 @@ export function hasUnpushedCommits(dir: string): boolean {
     return !Number.isFinite(ahead) || ahead > 0;
   } catch {
     return true;
+  }
+}
+
+/**
+ * Is the PR a watched `gh pr merge` named really MERGED? (D33, review round 2)
+ *
+ * The merge command's exit 0 is only a candidate: behind a merge queue it
+ * enqueues, and GitHub alone knows whether the PR landed. `selector` is what
+ * the command named (`""` = the current branch's PR); it travels as its own
+ * argv value, never interpolated. The PR number when MERGED, else `null` —
+ * every unreadable answer included.
+ */
+export async function probeMergedPr(
+  dir: string,
+  selector: string,
+  deps: { run?: (argv: string[], dir: string, signal: AbortSignal) => Promise<GhResult>; signal?: AbortSignal } = {},
+): Promise<number | null> {
+  const run = deps.run ?? ((argv, d, signal) => runGh(argv, d, { signal }));
+  const argv = ["gh", "pr", "view", ...(selector ? [selector] : []), "--json", "number,state"];
+  const res = await run(argv, dir, deps.signal ?? AbortSignal.timeout(PR_PROBE_TIMEOUT_MS));
+  if (!res.ok) return null;
+  try {
+    const view = JSON.parse(res.stdout) as { number?: unknown; state?: unknown };
+    return view.state === "MERGED" && Number.isInteger(view.number) ? view.number as number : null;
+  } catch {
+    return null;
   }
 }
 

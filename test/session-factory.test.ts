@@ -39,7 +39,14 @@ import { deriveSessionName } from "../lib/session-tmux-scope.ts";
 import { SESSION_PINNED_OPTION } from "../lib/tmux-session-argv.ts";
 import * as sessionFactory from "../lib/session-factory.ts";
 import { buildSessionEnv } from "../lib/session-env.ts";
-import { buildJudgePaneCommand, buildJudgeRecoverCommand, judgePaneDecor } from "../lib/session-launch-specs.ts";
+import {
+  buildJudgePaneCommand,
+  buildJudgeRecoverCommand,
+  claimGateInstance,
+  judgePaneDecor,
+  OWN_GATE_EXTENSION,
+  withGateExtension,
+} from "../lib/session-launch-specs.ts";
 
 const SESSION_ID = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
 // Derived by the production function, never hardcoded: the test asserts the
@@ -584,6 +591,58 @@ test("opening a judge window CREATES the scratch TMPDIR it hands the judge (revi
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+test("D11: when settings load a second gate copy beside the `-e` one, only the first copy registers", () => {
+  const store: Record<symbol, unknown> = {};
+  assert.equal(claimGateInstance("/wt/extensions/review-gate.ts", store), true, "the CLI copy loads first and wins");
+  assert.equal(claimGateInstance("/main/extensions/review-gate.ts", store), false, "the settings copy stands down");
+  assert.equal(claimGateInstance("/wt/extensions/review-gate.ts", store), true, "a /reload of the winner still loads");
+});
+
+test("D11: every pane the gate opens loads the gate file THIS process loaded", async () => {
+  assert.match(OWN_GATE_EXTENSION, /\/extensions\/review-gate\.ts$/);
+  assert.deepEqual(withGateExtension(["pi", "--session-id", "s"], "/wt/extensions/review-gate.ts", ["node", "pi", "-e", "/wt/extensions/review-gate.ts"]),
+    ["pi", "-e", "/wt/extensions/review-gate.ts", "--session-id", "s"]);
+  assert.deepEqual(withGateExtension(["pi", "--session-id", "s"], "/wt/extensions/review-gate.ts", ["node", "pi", "--extension", "/wt/extensions/review-gate.ts"]),
+    ["pi", "-e", "/wt/extensions/review-gate.ts", "--session-id", "s"], "the long flag counts too");
+  assert.deepEqual(withGateExtension(["pi", "--session-id", "s"], "/wt/extensions/review-gate.ts", ["node", "pi"]),
+    ["pi", "--session-id", "s"], "a session whose gate came from the settings injects nothing");
+  assert.deepEqual(withGateExtension(["pi", "@t.md"], "/wt/x.ts", ["node", "pi", "-e", "/other/ext.ts"]),
+    ["pi", "@t.md"], "an -e naming some OTHER extension is not this gate");
+  assert.deepEqual(withGateExtension(["pi", "@t.md"], "/wt/x.ts", ["node", "pi", "--no-extensions", "-e", "/wt/x.ts"]),
+    ["pi", "--no-extensions", "-e", "/wt/x.ts", "@t.md"], "an opener that loaded nothing else passes that on");
+  assert.deepEqual(withGateExtension(["bash", "-c", "x"], "/wt/x.ts", []), ["bash", "-c", "x"], "only a pi argv is touched");
+
+  const seen: string[][] = [];
+  await openSessionWindow(happyRunner(seen), {
+    scope: fakeScope(),
+    cwd: "/repo",
+    layout: "own-session-window",
+    role: { kind: "orchestration-child", orchestrationId: "orch-abc-1", stateVariant: "t1-xyz" },
+    command: ["pi", "@.pi/tasks/t1.md"],
+  });
+  const plain = seen.find((argv) => argv[0] === "new-session")!;
+  assert.equal(plain.includes(OWN_GATE_EXTENSION), false, "this test process has no `-e <gate>`: nothing injected");
+
+  // The same open, from a process that WAS started with `-e <gate>`.
+  const savedArgv = process.argv;
+  process.argv = [...savedArgv, "-e", OWN_GATE_EXTENSION];
+  try {
+    seen.length = 0;
+    await openSessionWindow(happyRunner(seen), {
+      scope: fakeScope(),
+      cwd: "/repo",
+      layout: "own-session-window",
+      role: { kind: "orchestration-child", orchestrationId: "orch-abc-1", stateVariant: "t1-xyz" },
+      command: ["pi", "@.pi/tasks/t1.md"],
+    });
+  } finally {
+    process.argv = savedArgv;
+  }
+  const spawn = seen.find((argv) => argv[0] === "new-session")!;
+  const at = spawn.indexOf("-e", spawn.indexOf("pi"));
+  assert.equal(spawn[at + 1], OWN_GATE_EXTENSION, "the opened pane's own argv carries it");
 });
 
 test("the judge argv carries the read-only contract and the resume keys", () => {

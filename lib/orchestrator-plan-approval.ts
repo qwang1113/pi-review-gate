@@ -73,6 +73,8 @@ export interface ApprovedTaskSnapshot {
    * acceptance flag is recomputed from.
    */
   stages?: PlanTaskStages;
+  /** An isolated checkout was approved (D30). Absent reads as shared. */
+  isolated?: true;
 }
 
 /**
@@ -131,6 +133,7 @@ export function snapshotApprovedPlan(
       execution: task.execution,
       ...(task.repo ? { repo: task.repo } : {}),
       ...(task.stages ? { stages: { ...task.stages } } : {}),
+      ...(task.isolated ? { isolated: true as const } : {}),
     })),
   };
 }
@@ -254,6 +257,14 @@ export function decideApprovalCarry(
     // another must be re-approved).
     if ((before.repo ?? undefined) !== (task.repo ?? undefined)) {
       widenings.push(`任务 "${task.id}" 的工作 repo 从 ${before.repo ?? "(主 repo)"} 改为 ${task.repo ?? "(主 repo)"}`);
+    }
+
+    // AN ISOLATED CHECKOUT IS A NEW WRITE DIRECTORY (D30, user decision):
+    // same class as a repo change on the way in; back to shared only narrows.
+    if (!before.isolated && task.isolated) {
+      widenings.push(`任务 "${task.id}" 改为在门禁新建的独立 checkout 里工作（新的写入目录）`);
+    } else if (before.isolated && !task.isolated) {
+      amendments.push(`任务 "${task.id}" 不再要求独立 checkout`);
     }
 
     // SWITCHING A STAGE OFF IS LESS SUPERVISION (2026-09-27): the user signed
