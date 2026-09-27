@@ -567,6 +567,18 @@ test("the round probe: a new report ends it, a dead pane fails it, silence pends
   assert.deepEqual(probeJudgeRound(f.deps, dead, "rep-9", f.binding), { done: true, reason: "pane-dead", openQuestions: [] });
 });
 
+test("D34: a question the opener ANSWERED, before the judge settled it, is no longer listed as open", () => {
+  const f = fake();
+  const c = seed(f);
+  writeQuestion(f, c, "q1", "选一个", ["甲", "乙"]);
+  writeQuestion(f, c, "q2", "再选一个", ["丙", "丁"]);
+  appendRecord(channelWriter(f), channelOf(c), {
+    kind: "answer", from: "orchestrator", at: new Date(1_700_000_001_000).toISOString(), requestId: "q1", answer: "甲",
+  });
+  const open = probeJudgeRound(f.deps, c, undefined, f.binding).openQuestions ?? [];
+  assert.deepEqual(open.map((q) => q.requestId), ["q2"]);
+});
+
 test("judge_wait: a round the gate CANCELLED is not announced as a dead pane to recover", async () => {
   // Quality round P1, 2026-09-16. `cancelJudgeRound` kills the pane AND drops
   // the registry row, and this wait captures its child record at its own top —

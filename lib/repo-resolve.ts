@@ -295,11 +295,6 @@ export function resolveCommandRepos(command: string, cwd: string): { repos: stri
 }
 
 /**
- * Resolve every SHIP segment's operating directory into repository roots
- * (the ship gate's check set). Segments without a ship operation contribute
- * nothing; the fallback cwd is always present.
- */
-/**
  * Does every step of this command run only if the one before it SUCCEEDED?
  *
  * The scratch-repo exemption reads "init X, then commit in X" off the TEXT, and
@@ -350,6 +345,11 @@ function onlyScratchSteps(command: string): boolean {
   });
 }
 
+/**
+ * Resolve every SHIP segment's operating directory into repository roots
+ * (the ship gate's check set). Segments without a ship operation contribute
+ * nothing; the fallback cwd is always present.
+ */
 export function resolveShipRepos(command: string, cwd: string): ShipRepoResolution {
   const { segs, ambiguous: baseAmbiguous } = resolveSegments(command, cwd);
   const repos: string[] = [];

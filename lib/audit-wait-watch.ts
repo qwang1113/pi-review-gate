@@ -22,7 +22,7 @@
  */
 
 import type { ChannelRecord, ChannelRequestRecord } from "./channel-records.ts";
-import { projectChannel } from "./channel-projection.ts";
+import { projectChannel, unansweredRequests } from "./channel-projection.ts";
 import { looksLikeDeclineRow, RECOMMEND_MARKER, type ChoiceSpec } from "./choice-dialog.ts";
 import { resolveAnswer } from "./orchestrator-answer-rules.ts";
 
@@ -109,7 +109,7 @@ export function classifyAuditWaitFailure(input: {
     kinds.push("conclude-refused");
     parts.push("审计者调过 judge_conclude，但没有落下 report —— 交卷被门禁拒了");
   }
-  const open = projectChannel(mine).openRequests;
+  const open = unansweredRequests(projectChannel(mine));
   if (open.length > 0) {
     kinds.push("question");
     parts.push(`审计者在提问、没人作答：${open.map((r) => `「${r.title.split("\n").pop()}」`).join("；")}`);

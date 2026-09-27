@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { hermeticGitEnv } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
+import { FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
 
 // Same reason as loop-goal-gate.test.ts: the extension runs for real here, so
 // the surrounding gate session's own variables must not reach it.
@@ -301,7 +302,7 @@ test("P-multi: sidecar from ANOTHER session is not trusted (stale PENDING stays 
   mkdirSync(staleDir, { recursive: true });
   writeFileSync(join(staleDir, "review-gate-state.json"), JSON.stringify({
     schema: 1,
-    fingerprintVersion: 2,
+    fingerprintVersion: FINGERPRINT_VERSION,
     sessionId: "some-other-session",
     hasCodeChange: true,
     hasDocChange: false,
@@ -485,7 +486,7 @@ test("P-multi: /gate-status reports each repo, and a clean stateless repo blocks
   mkdirSync(join(repoA, ".pi"), { recursive: true });
   writeFileSync(join(repoA, ".pi", "review-gate-state.json"), JSON.stringify({
     schema: 1,
-    fingerprintVersion: 2,
+    fingerprintVersion: FINGERPRINT_VERSION,
     sessionId: "test-session-1",
     hasCodeChange: false,
     hasDocChange: false,
@@ -500,7 +501,7 @@ test("P-multi: /gate-status reports each repo, and a clean stateless repo blocks
   mkdirSync(join(repoB, ".pi"), { recursive: true });
   writeFileSync(join(repoB, ".pi", "review-gate-state.json"), JSON.stringify({
     schema: 1,
-    fingerprintVersion: 2,
+    fingerprintVersion: FINGERPRINT_VERSION,
     sessionId: "a-different-session",
     hasCodeChange: true,
     hasDocChange: false,
@@ -540,7 +541,7 @@ test("P-multi: /gate-status prints a SECONDARY repo's acceptance record too (qua
   const repoB = makeRepo(parent, "repoB");
   const sidecar = (extra: Record<string, unknown>) => ({
     schema: 1,
-    fingerprintVersion: 2,
+    fingerprintVersion: FINGERPRINT_VERSION,
     sessionId: "test-session-1",
     hasCodeChange: true,
     hasDocChange: false,
@@ -604,7 +605,7 @@ test("P-multi: an INHERITED repo is reported with the successor's standings, nev
 
   const emptySidecar = {
     schema: 1,
-    fingerprintVersion: 2,
+    fingerprintVersion: FINGERPRINT_VERSION,
     hasCodeChange: false,
     hasDocChange: false,
     review: { verdict: "PENDING", fingerprint: null, at: null },

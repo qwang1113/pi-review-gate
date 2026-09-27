@@ -60,6 +60,7 @@ import {
   appendRecord,
   newChannelId,
 } from "./channel-io.ts";
+import { unansweredRequests } from "./channel-projection.ts";
 import {
   alivePanes,
   childChannelProjection,
@@ -669,7 +670,8 @@ export async function dispatchInstruct(
   // a question, a consent — and that answering is the other tool's job. Both
   // remaining modes stop the child (`interrupt` aborts the turn, `steer` cuts
   // into it), so the notice applies to every delivery this tool makes.
-  const open = childChannelProjection(deps, childId).openRequests[0];
+  // An ANSWERED request the child has not settled yet was not cancelled (D34).
+  const open = unansweredRequests(childChannelProjection(deps, childId))[0];
   const cancelledLine = open
     ? `\n本次打断同时取消了子会话的待答请求「${open.title}」—— 它不再等这个回答了；若你的本意是回答它，请用 orchestrator_answer。`
     : "";

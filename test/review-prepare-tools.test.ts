@@ -187,13 +187,15 @@ test("a blank reason does not satisfy the polish gate", async () => {
 test("a supplied reason is trimmed, persisted BEFORE the task, and rides to the reviewer", async () => {
   const f = fake();
   f.st.rounds = [round("READY", 1), round("READY", 2)];
+  // D01: a third round was SENT and cancelled (no verdict) — this one is round 4.
+  f.st.sentReviewRounds = 3;
   const reply = await call(f, { reason: "  the user asked for a follow-up  " });
   assert.notEqual(reply.isError, true);
   assert.equal(reply.details?.prepared, true);
   assert.deepEqual(f.st.lastPolishReason, {
     reason: "the user asked for a follow-up",
     at: f.st.lastPolishReason!.at,
-    round: 3,
+    round: 4,
   });
   assert.deepEqual(f.persisted, [f.root], "the reason is persisted for the next reviewer");
   cleanup(f);

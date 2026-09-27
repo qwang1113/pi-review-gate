@@ -155,8 +155,11 @@ export function actionableFindings(findings: readonly StreamFinding[]): StreamFi
  * round; a round that concluded without streaming leaves no file, and a
  * receipt naming it sends the agent to a path that is not there.
  */
-export function existingStreamPath(path: string | undefined): string | undefined {
-  return path !== undefined && existsSync(path) ? path : undefined;
+export function existingStreamPath(
+  path: string | undefined,
+  exists: (p: string) => boolean = existsSync,
+): string | undefined {
+  return path !== undefined && exists(path) ? path : undefined;
 }
 
 /**

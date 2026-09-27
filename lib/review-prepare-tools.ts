@@ -50,6 +50,7 @@ import { polishReasonRequired } from "./polish-gate.ts";
 import { buildQualityAuditTask, QUALITY_RULES_RELPATH } from "./quality-round.ts";
 import { buildReviewPrompt, changeRowsLargestFirst, extractPrecommitBaseline, formatChangeIndex, type ChangeIndexRow } from "./parallel-review.ts";
 import { computeFingerprint } from "./fingerprint.ts";
+import { nextReviewRoundNumber } from "./gate-state-transitions.ts";
 import { TASK_TEXT_MARKER } from "./constants.ts";
 
 /**
@@ -447,7 +448,7 @@ async function doPrepareReview(
     st.lastPolishReason = {
       reason: (reason ?? "").trim(),
       at: new Date().toISOString(),
-      round: st.rounds.length + 1,
+      round: nextReviewRoundNumber(st),
     };
     deps.persist(ctx, root);
   }

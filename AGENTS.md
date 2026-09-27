@@ -648,7 +648,8 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    漏写导致子会话被开在项目经理仓库、goal 绑错、编辑被 L8 拦的死锁，写 plan 时
    强制），同一 repo 的任务由门禁
    **各自开一个隔离 checkout**（`git worktree`，由 `orchestrator_spawn` 在发现
-   同 repo 已有在跑的 child 时自动创建；建不出来就**拒绝启动**，不会让两个写者
+   同 repo 已有在跑的 child 时自动创建；任务声明 `isolated: true` 时即使没有兄弟也建，
+   给要自己出 PR 的任务用，2026-09-27 D30；建不出来就**拒绝启动**，不会让两个写者
    共用一个工作区），不同 repo 的任务本来就并行。
 
    **建出来的 checkout 由门禁自己播种**（`lib/worktree-seed.ts`，2026-09-15，

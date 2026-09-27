@@ -105,7 +105,7 @@ export function createHandoffHost(
    * Which of the FOUR kinds of session is running here, for the handover.
    *
    * A worker pane is not one of them — it is handed work by its opener and never
-   * hands over — so it reads as the ordinary loop, exactly as the separate
+   * hands over (`session_handoff` refuses it, D07) — so it reads as the ordinary loop, exactly as the separate
    * reading it replaced did. Nothing else is invented: `normal` / `explore` are
    * loop sessions too, and the handover document says so.
    */
@@ -301,6 +301,11 @@ export function createHandoffHost(
       } catch { return undefined; }
     },
     canFillDoc: () => !readJudgeSideEnv(process.env) && !readWorkerSideEnv(process.env),
+    // D07: a worker's successor would open as a LOOP session (handoffKind) —
+    // a writer nobody asked for. Its opener continues it under the same workerId.
+    refusal: () => readWorkerSideEnv(process.env)
+      ? "review-gate: worker pane 不交接 —— 它交卷即停；上下文不够时直接交卷，由 opener 用同一个 workerId 续派（同一 session 继续）。"
+      : undefined,
     writeText: (path, text) => {
       mkdirSync(pathJoin(path, ".."), { recursive: true });
       writeFileSync(path, text, "utf8");

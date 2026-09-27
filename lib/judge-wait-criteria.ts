@@ -14,7 +14,7 @@ import {
   paneIdUsable,
 } from "./hierarchy.ts";
 import { channelPathFor, judgeChannelTarget } from "./channel-io.ts";
-import { isStalled, projectChannel, readChannel, HEARTBEAT_STALE_MS } from "./channel-projection.ts";
+import { isStalled, projectChannel, readChannel, unansweredRequests, HEARTBEAT_STALE_MS } from "./channel-projection.ts";
 import type { ChannelRecord } from "./channel-records.ts";
 import { judgePaneAlive } from "./judge-pane.ts";
 import { refreshSessionPaneTitle } from "./session-factory.ts";
@@ -189,7 +189,8 @@ export function probeJudgeRound(
       now: deps.now(),
     });
   };
-  const openQuestions: OpenQuestionBrief[] = (projection.openRequests ?? []).map((q) => ({
+  // Answered-but-not-yet-settled is not waiting for the opener (D34).
+  const openQuestions: OpenQuestionBrief[] = unansweredRequests(projection).map((q) => ({
     title: q.title,
     options: q.options,
     requestId: q.requestId,
