@@ -42,6 +42,7 @@ import { buildSessionEnv } from "../lib/session-env.ts";
 import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
+  claimGateInstance,
   judgePaneDecor,
   OWN_GATE_EXTENSION,
   withGateExtension,
@@ -590,6 +591,13 @@ test("opening a judge window CREATES the scratch TMPDIR it hands the judge (revi
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+test("D11: when settings load a second gate copy beside the `-e` one, only the first copy registers", () => {
+  const store: Record<symbol, unknown> = {};
+  assert.equal(claimGateInstance("/wt/extensions/review-gate.ts", store), true, "the CLI copy loads first and wins");
+  assert.equal(claimGateInstance("/main/extensions/review-gate.ts", store), false, "the settings copy stands down");
+  assert.equal(claimGateInstance("/wt/extensions/review-gate.ts", store), true, "a /reload of the winner still loads");
 });
 
 test("D11: every pane the gate opens loads the gate file THIS process loaded", async () => {

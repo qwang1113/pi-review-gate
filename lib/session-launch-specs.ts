@@ -28,7 +28,8 @@ export const OWN_GATE_EXTENSION = fileURLToPath(new URL("../extensions/review-ga
  * to open judges, workers, children and successors that enforced different
  * rules than itself. `-e` names the file actually loaded here; when that is
  * the settings package's own file, pi dedupes the two by canonical path and
- * nothing changes. A `--no-extensions` on this process travels too, so the
+ * nothing changes; when it is not, pi loads both and `claimGateInstance` makes
+ * the settings copy stand down. A `--no-extensions` on this process travels too, so the
  * pane loads exactly what its opener did. Only a `pi` argv is touched.
  */
 export function withGateExtension(
@@ -40,6 +41,27 @@ export function withGateExtension(
   if (bin === undefined || basename(bin) !== "pi") return [...command];
   const noExtensions = hostArgv.includes("--no-extensions") || hostArgv.includes("-ne");
   return [bin, ...(noExtensions ? ["--no-extensions"] : []), "-e", extensionPath, ...rest];
+}
+
+const GATE_INSTANCE = Symbol.for("pi-review-gate.instance");
+
+/**
+ * May THIS copy of the gate register itself in this process? (D11)
+ *
+ * `-e` alone is not enough: without `--no-extensions` pi also loads the copy
+ * the settings register, dedupes only by canonical path, and runs BOTH copies'
+ * handlers. pi loads CLI extensions first, so the first copy to ask is the one
+ * the pane was opened with; every other path stands down. Keyed by path, not
+ * by a bare flag, so a `/reload` of the same copy in the same process passes.
+ */
+export function claimGateInstance(
+  path: string = OWN_GATE_EXTENSION,
+  store: Record<symbol, unknown> = globalThis as unknown as Record<symbol, unknown>,
+): boolean {
+  const winner = store[GATE_INSTANCE];
+  if (typeof winner === "string" && winner !== path) return false;
+  store[GATE_INSTANCE] = path;
+  return true;
 }
 
 /** Flags every judge pane carries: the read-only review contract. */

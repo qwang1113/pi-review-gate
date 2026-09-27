@@ -23,10 +23,13 @@ async function run(
   const dispatched: string[] = [];
   const cancelled: string[] = [];
   const ledger = createRoundCancelLedger();
+  const st: { precommit: { verdict: string; mode: string }; sentReviewRounds?: number } = {
+    precommit: { verdict: opts.lastLane ?? "NOT_RUN", mode: "full" },
+  };
   let execute: ((...a: unknown[]) => Promise<{ content: { text: string }[]; details: Record<string, unknown> }>) | undefined;
   const deps = {
     resolveToolRepo: () => ({ ok: true, root: ROOT }),
-    stateForRepo: () => ({ precommit: { verdict: opts.lastLane ?? "NOT_RUN", mode: "full" } }),
+    stateForRepo: () => st,
     qualityRoundInFlight: () => opts.qualityInFlight === true,
     persistRepo: () => {},
     stageIsOn: () => true,
@@ -60,7 +63,7 @@ async function run(
     deps,
   );
   const reply = await execute!("id", { role: "reviewer", task: "change", ...(opts.fresh ? { fresh: true } : {}) }, undefined, undefined, {});
-  return { reply, dispatched, cancelled, ledger, chainRan };
+  return { reply, dispatched, cancelled, ledger, chainRan, st };
 }
 
 test("D03: lane FAIL lands before the QUALITY dispatch ⇒ neither judge is started, and the receipt says why", async () => {
@@ -92,9 +95,10 @@ test("lane FAIL lands before the reviewer's dispatch ⇒ the reviewer is never s
 });
 
 test("lane FAIL lands while the reviewer's pane opens ⇒ cancelled the moment it comes up", async () => {
-  const { reply, dispatched, cancelled, ledger } = await run("reviewer");
+  const { reply, dispatched, cancelled, ledger, st } = await run("reviewer");
   assert.deepEqual(dispatched, ["quality-auditor", "reviewer"]);
   assert.deepEqual(cancelled, ["reviewer"]);
+  assert.equal(st.sentReviewRounds, 1, "D01: a reviewer that reached its pane took its round number, cancelled or not");
   assert.equal(ledger.read(ROOT, "reviewer", undefined)?.why, WHY);
   assert.match(reply.content[0]!.text, /reviewer 未派（或派出即取消）/);
 });

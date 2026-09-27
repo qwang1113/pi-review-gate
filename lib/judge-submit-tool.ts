@@ -410,6 +410,17 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
             isError: true,
           };
         }
+        // ONE ROUND SENT OUT (2026-09-17, user decision): the strip's `轮 N`,
+        // counted where a reviewer dispatch reached the judge (a REFUSED
+        // dispatch returned above), and persisted HERE so the strip moves the
+        // moment the round is submitted. BEFORE the late-lane cancel below: a
+        // round that reached the judge and was then cancelled still took its
+        // number, or the next round would reuse it (D01).
+        if (judge.role === "reviewer") {
+          const sent = deps.stateForRepo(root);
+          sent.sentReviewRounds = (sent.sentReviewRounds ?? 0) + 1;
+          deps.persistRepo(ctx as unknown as ExtensionContext, root);
+        }
         // …AND IT CAN LAND WHILE THE REVIEWER'S PANE WAS OPENING, before the row
         // existed: nothing was there to kill then, so it is killed now.
         const lateWhy = judge.role === "reviewer" ? laneFailure?.() : undefined;
@@ -422,15 +433,6 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
         // THE ROUND REMEMBERS ITS OWN QUALITY JUDGE, on the target it prepared
         // — what `qualityRoundInFlight` reads.
         if (judge.role === QUALITY_ROLE && d.judgeId) deps.noteQualityRoundDispatched(root, d.judgeId);
-        // ONE ROUND SENT OUT (2026-09-17, user decision): the strip's `轮 N`,
-        // counted where a reviewer dispatch reached the judge (a REFUSED
-        // dispatch returned above), and persisted HERE so the strip moves the
-        // moment the round is submitted.
-        if (judge.role === "reviewer") {
-          const sent = deps.stateForRepo(root);
-          sent.sentReviewRounds = (sent.sentReviewRounds ?? 0) + 1;
-          deps.persistRepo(ctx as unknown as ExtensionContext, root);
-        }
         accepted.push({
           role: judge.role,
           judgeId: d.judgeId ?? "(pending)",

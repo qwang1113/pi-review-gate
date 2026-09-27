@@ -73,6 +73,7 @@ import {
 import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import { createPaneStateReporter } from "../lib/tmux-pane-state.ts";
 import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
+import { claimGateInstance } from "../lib/session-launch-specs.ts";
 import { readJudgeSideEnv } from "../lib/judge-side.ts";
 import { readWorkerSideEnv } from "../lib/worker-side.ts";
 import { createOrchestratorDeps, runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
@@ -240,6 +241,8 @@ process.on("exit", () => {
 let paneStateAtExit: { clear(): void } | undefined;
 
 export default function reviewGate(pi: ExtensionAPI) {
+  // D11: a second copy of the gate (settings) beside the `-e` one stands down.
+  if (!claimGateInstance()) return;
   /**
    * Every tool's own `execute`, captured as it is registered.
    *
