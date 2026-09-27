@@ -133,6 +133,7 @@ function makeMockPi(cwd: string): MockPi {
     sendUserMessage: () => {},
     registerMarkdownTransformer: () => {},
     registerCommand: (name: string, def: unknown) => commands.set(name, def),
+    registerMessageRenderer: () => {},
   };
   return {
     // Spread the pi API onto the returned object so tests can pass it

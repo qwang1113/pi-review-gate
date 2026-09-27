@@ -79,6 +79,7 @@ function makeMockPi(cwd: string) {
     sendUserMessage: () => {},
     registerMarkdownTransformer: () => {},
     registerCommand: () => {},
+    registerMessageRenderer: () => {},
   };
   return {
     ...pi,

@@ -89,6 +89,7 @@ function makeMockPi(cwd: string): Harness & Record<string, unknown> {
     sendUserMessage: () => {},
     registerMarkdownTransformer: () => {},
     registerCommand: () => {},
+    registerMessageRenderer: () => {},
   };
   return {
     ...pi,

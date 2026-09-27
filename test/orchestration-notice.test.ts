@@ -255,3 +255,13 @@ test("D43: the host renders ONLY notices live; every other review-gate message k
   const view = render!({ role: "custom", customType: "review-gate", content: "x", details: { kind: NOTICE_KIND, events: [] } });
   assert.equal(typeof (view as { render?: unknown }).render, "function");
 });
+
+test("D43: the live notice draws pi's box itself — every row exactly the viewport wide, CJK wrapped by cells", async () => {
+  const { noticeBoxLines } = await import("../lib/orchestration-notice.ts");
+  const { displayWidth } = await import("../lib/tmux-sidebar-render.ts");
+  const plain = { bg: (s: string) => s, label: (s: string) => s, text: (s: string) => s };
+  const lines = noticeBoxLines("[ORCHESTRATION] 子会话需要你：\n- h1 的 tmux 授权请求在等回答", 20, plain);
+  assert.ok(lines.every((l) => displayWidth(l) === 20), JSON.stringify(lines));
+  assert.equal(lines[1]!.trim(), "[review-gate]");
+  assert.ok(lines.some((l) => l.includes("话需要你")), `the body is on screen, wrapped: ${JSON.stringify(lines)}`);
+});

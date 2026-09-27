@@ -27,6 +27,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import type { ChannelRequestRecord } from "./channel-records.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import type { SupervisionSnapshot } from "./orchestrator-supervisor.ts";
+import { displayWidth } from "./tmux-sidebar-render.ts";
 
 /** `details.kind` of an injected notice — how `message_end` recognises one. */
 export const NOTICE_KIND = "orchestration-notice";
@@ -137,6 +138,39 @@ export function liveNoticeComponent(
     render: (width) => current().render(width),
     invalidate: () => { inner = undefined; },
   };
+}
+
+/**
+ * pi's default custom-message look (padded box, bold label, blank line, text)
+ * drawn without pi-tui: a VALUE import of a pi package makes this module
+ * unloadable where lib/ is installed without them (the install-copy tests).
+ * Plain text, wrapped by display width — the notice carries no markdown.
+ */
+export function noticeBoxLines(
+  text: string,
+  width: number,
+  paint: { bg(s: string): string; label(s: string): string; text(s: string): string },
+): string[] {
+  const inner = Math.max(1, width - 2);
+  const row = (s: string, styled: string) => paint.bg(` ${styled}${" ".repeat(Math.max(0, inner - displayWidth(s)))} `);
+  const wrapped: string[] = [];
+  for (const line of text.split("\n")) {
+    let cur = "";
+    for (const ch of line) {
+      if (displayWidth(cur + ch) > inner) { wrapped.push(cur); cur = ""; }
+      cur += ch;
+    }
+    wrapped.push(cur);
+  }
+  const label = "[review-gate]";
+  // No leading blank: pi's CustomMessageComponent adds that spacer itself.
+  return [
+    row("", ""),
+    row(label, paint.label(label)),
+    row("", ""),
+    ...wrapped.map((l) => row(l, paint.text(l))),
+    row("", ""),
+  ];
 }
 
 function messageText(content: unknown): string {

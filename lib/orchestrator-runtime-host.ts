@@ -11,14 +11,14 @@
  * timers, the retirement flag they all honour, and the continuation budget.
  */
 
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type MessageEndEvent } from "@earendil-works/pi-coding-agent";
-import { Box, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, MessageEndEvent } from "@earendil-works/pi-coding-agent";
 
 import type { ChannelIO } from "./channel-io.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
 import {
   freshNoticeEvents,
   liveNoticeComponent,
+  noticeBoxLines,
   noticeFactsFrom,
   noticeText,
   NOTICE_KIND,
@@ -254,13 +254,15 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
   // through to pi's default rendering (`undefined`).
   pi.registerMessageRenderer("review-gate", (message, _options, theme) => {
     if ((message.details as { kind?: string } | undefined)?.kind !== NOTICE_KIND) return undefined;
-    return liveNoticeComponent(message, (text) => {
-      const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
-      box.addChild(new Text(theme.fg("customMessageLabel", "\x1b[1m[review-gate]\x1b[22m"), 0, 0));
-      box.addChild(new Spacer(1));
-      box.addChild(new Markdown(text, 0, 0, getMarkdownTheme(), { color: (t) => theme.fg("customMessageText", t) }));
-      return box;
-    });
+    const paint = {
+      bg: (s: string) => theme.bg("customMessageBg", s),
+      label: (s: string) => theme.fg("customMessageLabel", `\x1b[1m${s}\x1b[22m`),
+      text: (s: string) => theme.fg("customMessageText", s),
+    };
+    return liveNoticeComponent(message, (text) => ({
+      render: (width) => noticeBoxLines(text, width, paint),
+      invalidate() {},
+    }));
   });
   pi.on("agent_end", () => { noticeInFlight = false; });
 
