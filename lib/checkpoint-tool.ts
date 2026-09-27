@@ -122,7 +122,12 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
       }
       // P2 (round-4): REVIEW_GATE_BYPASS=1 also silences hooks/commit-msg —
       // the AI-attribution guard — so this tool must replicate it.
-      const attribution = COMMIT_MSG_FORBIDDEN.some((re) => re.test(message));
+      // A DRY RUN (N1) SKIPS THE TWO TEXT CHECKS: `refuseText` CONSUMES a
+      // single-use appeal pass on a match, so a preflight judging the same
+      // message first would spend the pass the real checkpoint needs. The real
+      // checkpoint still runs both, and the chain aborts its lane on a refusal.
+      const dryRun = params.dryRun === true;
+      const attribution = !dryRun && COMMIT_MSG_FORBIDDEN.some((re) => re.test(message));
       if (attribution) {
         const reason = deps.refuseText("ai-attribution", message,
           "review_checkpoint rejected — commit message contains AI attribution. Rewrite without it.", ctx);
@@ -132,7 +137,7 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
       }
       // L5 (HARD): the same single rule as the bash commit path, through the
       // same function — no non-Latin letter in subject or body.
-      const nonEn = nonEnglishCommitMessage(message);
+      const nonEn = dryRun ? undefined : nonEnglishCommitMessage(message);
       if (nonEn) {
         const kind: AppealKind = nonEn.part === "subject" ? "commit-subject" : "commit-body";
         const reason = deps.refuseText(kind, nonEn.text,
@@ -168,7 +173,6 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
       // A DRY RUN IS ASKED BEFORE THE LANE EXISTS (N1, 2026-09-27): the lane is
       // what satisfies the precommit prerequisite below, so a preflight that
       // demanded it could never pass. It commits nothing, so it grants nothing.
-      const dryRun = params.dryRun === true;
       // B1 (2026-09-10): a checkpoint MAY land while its verification is IN
       // FLIGHT — that is the whole point of running the long lane beside the
       // chain instead of in front of it. The receipt is the live promise, not

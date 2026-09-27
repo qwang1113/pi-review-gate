@@ -28,6 +28,7 @@ import { parsePrecommitOutput } from "./precommit-parse.ts";
 import { evaluateReadonlyStall, readonlyStallNudgeFor } from "./readonly-stall.ts";
 import { resolveCommandRepos } from "./repo-resolve.ts";
 import { armLoop, clearBypassToken, type SessionCells } from "./session-cells.ts";
+import { isSessionOwnedRepo } from "./session-repos-host.ts";
 import { detectShipCommands, observedPrMerge, observedShipKinds } from "./ship-detect.ts";
 import { existingPrNotice, probeOpenPr } from "./station-pr-evidence.ts";
 import { FULL_LANE_NUDGE, looksLikeFullLaneRun } from "./test-run-discipline.ts";
@@ -148,6 +149,9 @@ export function createToolResultHook(cells: SessionCells, deps: ToolResultHookDe
     const cwd = cells.cwd;
     const primaryRepoRoot = cells.primaryRepoRoot;
     const stateOf = (root: string) => (root === primaryRepoRoot ? state : deps.stateForRepo(root));
+    // N4: every observation below is about the repo a command RAN in; one this
+    // session does not own is read-only — no state touched, nothing persisted.
+    const owned = (roots: Iterable<string>) => [...roots].filter((root) => isSessionOwnedRepo(cells, root));
     const text = contentText(event.content);
     const cmd = (event.input as Record<string, unknown>)?.command as string | undefined;
 
@@ -178,7 +182,7 @@ export function createToolResultHook(cells: SessionCells, deps: ToolResultHookDe
       if (cmdRepos.ambiguous) {
         for (const r of cells.sessionRepos) rearmRoots.add(r);
       }
-      for (const root of rearmRoots) {
+      for (const root of owned(rearmRoots)) {
         const files = changedFiles(root);
         if (!files || files.length === 0) continue;
         const st = stateOf(root);
@@ -211,7 +215,7 @@ export function createToolResultHook(cells: SessionCells, deps: ToolResultHookDe
       if (shipped.length > 0 || mergeSelector !== undefined) {
         const cmdRepos = resolveCommandRepos(cmd, cwd);
         const roots = cmdRepos.ambiguous ? new Set(cells.sessionRepos) : new Set(cmdRepos.repos);
-        for (const root of roots) {
+        for (const root of owned(roots)) {
           const st = stateOf(root);
           const before = st.shippedKinds ?? [];
           const merged = [...new Set([...before, ...shipped])];
@@ -236,7 +240,7 @@ export function createToolResultHook(cells: SessionCells, deps: ToolResultHookDe
         const cmdRepos = resolveCommandRepos(cmd, cwd);
         const armRoots = cmdRepos.ambiguous ? new Set(cells.sessionRepos) : new Set(cmdRepos.repos);
         const nowIso = new Date().toISOString();
-        for (const root of armRoots) {
+        for (const root of owned(armRoots)) {
           const st = stateOf(root);
           st.copilot = armCopilotReview(st.copilot, nowIso);
           deps.persistRepo(ctx, root);

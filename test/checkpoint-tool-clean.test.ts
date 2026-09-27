@@ -23,7 +23,7 @@ neutraliseHostGitConfig();
 
 type Result = { content: { text: string }[]; details: Record<string, unknown>; isError?: boolean };
 
-function setup(opts: { own?: string[]; precommit?: "PASS" | "NOT_RUN" } = {}) {
+function setup(opts: { own?: string[]; precommit?: "PASS" | "NOT_RUN"; refused?: string[] } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rg-n1-"));
   git(root, ["init", "-q", "-b", "feat/demo"]);
   // The product's git strips GIT_CONFIG_*: identity and signing live in the repo.
@@ -48,7 +48,7 @@ function setup(opts: { own?: string[]; precommit?: "PASS" | "NOT_RUN" } = {}) {
       resolveToolRepo: () => ({ ok: true, root }),
       stateForRepo: () => st,
       persistRepo: () => {},
-      refuseText: (_k, _t, reason) => reason,
+      refuseText: (_k, text, reason) => { opts.refused?.push(text); return reason; },
       stageIsOn: () => true,
       precommitLaneRunning: () => false,
     } as CheckpointToolDeps,
@@ -90,6 +90,21 @@ test("N1: a foreign file beside real work stays out; the refusal checks judge co
     assert.notEqual(head(), before);
     const committed = git(root, ["diff-tree", "-r", "--no-commit-id", "--name-only", "HEAD"]).split("\n");
     assert.deepEqual(committed.sort(), ["a.ts", "new.ts"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("N1: the dry run never judges the message — refuseText would spend a single-use appeal pass", async () => {
+  const refused: string[] = [];
+  const { root, call } = setup({ refused });
+  try {
+    writeFileSync(join(root, "a.ts"), "export const a = 4;\n");
+    const dry = await call({ dryRun: true, message: "feat: 中文主题" });
+    assert.notEqual(dry.isError, true, dry.content[0]?.text);
+    assert.deepEqual(refused, [], "no text check ran, so no appeal pass could be consumed");
+    assert.equal((await call({ message: "feat: 中文主题" })).isError, true, "the real checkpoint still refuses it");
+    assert.equal(refused.length, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
