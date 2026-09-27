@@ -1065,7 +1065,7 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
     "the ONE prompt every surface renders interpolates the notice");
   assert.match(ASK_USER_SRC, /title: prompt,/,
     "the CHANNEL title is that prompt");
-  assert.match(ASK_USER_SRC, /await askWithBacks\(index, signal, markArbiter\)/,
+  assert.match(ASK_USER_SRC, /await askWithBacks\(index, dialog\)/,
     "the pane dialog renders the template through the ONE renderer — and reads its result, so a box no host could draw is not counted as shown");
   assert.match(ASK_USER_SRC, /const picked = q\.multiple[\s\S]{0,140}?await deps\.askMultiChoice\(uiCtx,[\s\S]{0,140}?await deps\.askChoice\(uiCtx,/,
     "…both shapes dispatched from the walk-back loop, which is where `← 返回上一题` is handled (2026-09-19): " +
@@ -1153,7 +1153,7 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
     "…and the next turn starts only after this one settled");
   // A question already settled by the project manager, or one the interview
   // will never show, must not put a dead box on the user's screen.
-  assert.match(toolBody, /if \(signal\.aborted \|\| stopped\) return undefined;/,
+  assert.match(toolBody, /if \(dialog\.signal\.aborted \|\| stopped\) return undefined;/,
     "a settled or abandoned question renders nothing");
 
   // A dismissed dialog or a broken UI is NOT consent: it becomes an

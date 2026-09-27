@@ -396,14 +396,13 @@ export async function doProposeLoopGoal(
 
       },
       uiCtx.hasUI === true,
-      async (signal, markArbiter) => deps.askChoice(uiCtx, spec, {
-        onProxyAnswer: markArbiter,
+      async (dialog) => deps.askChoice(uiCtx, spec, {
+        ...dialog,
         body: buildGoalConfirmMessage(
           goalText,
           "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine +
             (capNoteShort ? "\n" + capNoteShort : ""),
         ),
-        signal,
         // THE REPO THIS GOAL BINDS TO (review round 4 P1): a multi-repo session
         // approves a goal per repo, and the one being approved here need not be
         // the one currently active. The proxy's context and the recorded

@@ -265,7 +265,7 @@ export async function evaluateShipCommand(
   // (N5): an unchanged worktree is not a licence to travel further.
   if (!anyChange) {
     if (stationProblems.length === 0) return undefined;
-    return refuseShip(deps, command, ships, [], stationProblems, []);
+    return refuseShip(deps, { command, ships, problems: [], stationProblems, blockedUnreviewed: [] });
   }
 
   // AI attribution (HARD) + English-language (L5, HARD) checks on commit
@@ -488,7 +488,7 @@ export async function evaluateShipCommand(
     }
   }
 
-  return refuseShip(deps, command, ships, problems, stationProblems, blockedUnreviewed);
+  return refuseShip(deps, { command, ships, problems, stationProblems, blockedUnreviewed });
 }
 
 /**
@@ -503,11 +503,13 @@ export async function evaluateShipCommand(
  */
 function refuseShip(
   deps: ShipGateBashDeps,
-  command: string,
-  ships: ShipDetection[],
-  problems: string[],
-  stationProblems: string[],
-  blockedUnreviewed: string[],
+  { command, ships, problems, stationProblems, blockedUnreviewed }: {
+    command: string;
+    ships: ShipDetection[];
+    problems: string[];
+    stationProblems: string[];
+    blockedUnreviewed: string[];
+  },
 ): ToolCallBlock {
   const { recorded, shown } = buildShipBlockReason({
     command,

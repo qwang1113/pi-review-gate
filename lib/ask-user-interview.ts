@@ -21,7 +21,7 @@
  */
 
 import type { ToolReply } from "./tool-host.ts";
-import type { ChannelDialogOutcome } from "./orchestrator-child-channel.ts";
+import type { ChannelDialog, ChannelDialogOutcome } from "./orchestrator-child-channel.ts";
 import { buildRejection } from "./rejection-copy.ts";
 import type { UiContext, UserInteractionToolDeps } from "./user-interaction-tools.ts";
 import {
@@ -321,7 +321,7 @@ export async function doAskUser(
    * inventing a second "corrected answer" record would give one dialog two
    * histories with no rule for which one wins.
    */
-  async function askWithBacks(anchor: number, signal: AbortSignal, markArbiter: () => void): Promise<string | undefined> {
+  async function askWithBacks(anchor: number, { signal, onProxyAnswer }: ChannelDialog): Promise<string | undefined> {
     let cursor = anchor;
     for (;;) {
       const q = questions[cursor]!;
@@ -337,7 +337,7 @@ export async function doAskUser(
         onUndecided: () => { undecided.add(anchor); },
         // Only the anchored question's answer settles its channel request; a
         // stand-in answer to a walked-back question is not that settlement.
-        ...(cursor === anchor ? { onProxyAnswer: markArbiter } : {}),
+        ...(cursor === anchor ? { onProxyAnswer } : {}),
         // AN AUTHORIZATION IS NOT A MACHINE'S TO GIVE (D39): the arbiter picking
         // the recommended row would mint the proxy grant the notice asks the
         // USER for. The window still runs; its expiry is "nobody decided".
@@ -389,12 +389,12 @@ export async function doAskUser(
           : { batch: { id: batchId, index, total: questions.length } }),
       },
       uiCtx.hasUI === true,
-      async (signal, markArbiter) => {
+      async (dialog) => {
         await gates[offset]!.opened;
         // Already settled (the project manager answered it through the
         // channel), or the interview stopped: never put a dead box on screen.
-        if (signal.aborted || stopped) return undefined;
-        const answered = await askWithBacks(index, signal, markArbiter);
+        if (dialog.signal.aborted || stopped) return undefined;
+        const answered = await askWithBacks(index, dialog);
         // NOTHING WAS SHOWN STAYS HERE: the renderer answers with the same
         // `undefined` a closed box gives (so the channel settles it as
         // dismissed, never as an answer nobody gave), and the FACT that no host

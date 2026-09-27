@@ -551,10 +551,9 @@ export async function doProposeRestatement(
 
       },
       uiCtx.hasUI === true,
-      async (renderSignal, markArbiter) => deps.askChoice(uiCtx, spec, {
-        onProxyAnswer: markArbiter,
+      async (dialog) => deps.askChoice(uiCtx, spec, {
+        ...dialog,
         body: buildRestatementConfirmMessage(station) + (capNote ? "\n" + capNote : ""),
-        signal: renderSignal,
         // THE REPO THE RESTATEMENT BINDS TO (review round 4 P1): same reason as
         // the goal approval next door — this may be a secondary repo that never
         // became the active one. `resolveRestatementRepo` answers with a result

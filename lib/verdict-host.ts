@@ -596,12 +596,9 @@ export function createReviewVerdictRecorder(
       // delivered, so this READY was refused rather than held — and the agent
       // must not read it as a finding against its code.
       (qualityRefusal === undefined ? "" : `\nQUALITY PRECONDITION: ${qualityRefusal}`) +
-      nextStepAfterVerdict(
-        parsed.verdict,
-        st.precommit.verdict === "PASS" || (bindTree !== null && st.precommit.lastFullPassTree === bindTree)
-          ? "passed"
-          : "waived",
-      );
+      // Same composition `readyLacksVerification` was fed above: a READY that
+      // got here either had its lane pass or had verification waived.
+      nextStepAfterVerdict(parsed.verdict, laneVerificationWaived(targetRoot, st) ? "waived" : "passed");
   }
 
   return { recordReviewVerdict };

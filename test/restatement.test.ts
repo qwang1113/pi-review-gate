@@ -200,7 +200,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     askChoice: async (_uiCtx, spec) => { f.surfaces.push("confirm"); return f.confirm ? spec.options[0] : undefined; },
     askEitherSide: async (_request, _hasUI, render) => {
       if (f.outcome) return { ...f.outcome, requestId: "r1" };
-      const answer = await render(new AbortController().signal, () => {});
+      const answer = await render({ signal: new AbortController().signal, onProxyAnswer: () => {} });
       return { answer, by: "human", requestId: "r1" };
     },
     gitRoot: (dir) => (dir === "/other" ? "/other" : null),

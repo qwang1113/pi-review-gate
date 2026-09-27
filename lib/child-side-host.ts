@@ -576,7 +576,7 @@ export function createChildSide(host: SessionHost, deps: ChildSideDeps) {
     const binding = childBinding();
     if (!binding) {
       let byArbiter = false;
-      const answer = hasUI ? await render(new AbortController().signal, () => { byArbiter = true; }) : undefined;
+      const answer = hasUI ? await render({ signal: new AbortController().signal, onProxyAnswer: () => { byArbiter = true; } }) : undefined;
       return { answer, by: answer !== undefined && byArbiter ? "arbiter" : "human", requestId: "" };
     }
     // The dialog listens to the gate's interrupt source as well as its own
