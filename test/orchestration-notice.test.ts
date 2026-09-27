@@ -251,25 +251,24 @@ test("D43: the host renders ONLY notices live; every other review-gate message k
   const h = await harness();
   const render = h.renderer("review-gate");
   assert.ok(render, "a renderer is registered for the notice's customType");
-  assert.equal(render!({ role: "custom", customType: "review-gate", content: "x", details: { kind: "other" } }), undefined);
-  const view = render!({ role: "custom", customType: "review-gate", content: "x", details: { kind: NOTICE_KIND, events: [] } });
-  assert.equal(typeof (view as { render?: unknown }).render, "function");
-});
+  const notice = { role: "custom", customType: "review-gate", content: "x", details: { kind: NOTICE_KIND, events: [] } };
+  const theme = { bg: (_k: string, t: string) => t, fg: (_k: string, t: string) => t };
+  const renderer = render as (m: unknown, o: unknown, t: unknown) => unknown;
+  // pi's components load lazily; wait for them.
+  for (let i = 0; i < 100 && renderer(notice, {}, theme) === undefined; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(renderer({ ...notice, details: { kind: "other" } }, {}, theme), undefined, "non-notices keep the default look");
 
-test("D43: the live notice draws pi's box itself — every row exactly the viewport wide, CJK wrapped by cells", async () => {
-  const { noticeBoxLines } = await import("../lib/orchestration-notice.ts");
-  const { cellWidth } = await import("../lib/multi-choice-dialog.ts");
-  const plain = { bg: (s: string) => s, label: (s: string) => s, text: (s: string) => s };
-  const lines = noticeBoxLines("[ORCHESTRATION] 子会话需要你：\n- h1 的 tmux 授权请求在等回答", 20, plain);
-  assert.ok(lines.every((l) => cellWidth(l) === 20), JSON.stringify(lines));
-  assert.equal(lines[1]!.trim(), "[review-gate]");
-  assert.ok(lines.some((l) => l.includes("话需要你")), `the body is on screen, wrapped: ${JSON.stringify(lines)}`);
-
-  // pi throws on a row wider than the viewport: emoji count as two cells, and a
-  // viewport narrower than the label cuts it instead of overflowing.
-  for (const width of [3, 4, 8, 12]) {
-    const rows = noticeBoxLines("🚀🚀🚀 ✅子会话", width, plain);
-    assert.ok(rows.every((l) => cellWidth(l) <= width), `${width}: ${JSON.stringify(rows)}`);
+  // pi's OWN width rules: every row fits, emoji included (⏳ ⌚ ⏰ overflowed a hand-rolled table).
+  const { initTheme } = await import("@earendil-works/pi-coding-agent");
+  const { visibleWidth } = await import("@earendil-works/pi-tui");
+  initTheme();
+  const message = { ...notice, content: "[ORCHESTRATION] 子会话需要你：⏳⌚⏰🚀✅ h1 的 tmux 授权请求在等回答" };
+  const view = renderer(message, {}, theme) as { render(w: number): string[] };
+  for (const width of [8, 20, 60]) {
+    const rows = view.render(width);
+    assert.ok(rows.every((l) => visibleWidth(l) <= width), `${width}: ${JSON.stringify(rows)}`);
   }
-  assert.deepEqual(noticeBoxLines("x", 2, plain), [], "no room for a box ⇒ nothing, never an overflow");
+  assert.ok(view.render(60).join("\n").includes("子会话需要你"));
+  message.content = "已全部过期";
+  assert.ok(view.render(60).join("\n").includes("已全部过期"), "the screen follows the in-place rewrite");
 });

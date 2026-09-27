@@ -27,7 +27,6 @@ import type { Component } from "@earendil-works/pi-tui";
 import type { ChannelRequestRecord } from "./channel-records.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import type { SupervisionSnapshot } from "./orchestrator-supervisor.ts";
-import { cellWidth, truncateToWidth } from "./multi-choice-dialog.ts";
 
 /** `details.kind` of an injected notice — how `message_end` recognises one. */
 export const NOTICE_KIND = "orchestration-notice";
@@ -138,45 +137,6 @@ export function liveNoticeComponent(
     render: (width) => current().render(width),
     invalidate: () => { inner = undefined; },
   };
-}
-
-/**
- * pi's default custom-message look (padded box, bold label, blank line, text)
- * drawn without pi-tui: a VALUE import of a pi package makes this module
- * unloadable where lib/ is installed without them (the install-copy tests).
- * Plain text, wrapped by terminal cells — the notice carries no markdown.
- * pi throws on a line wider than the viewport, so every row is fitted: a
- * too-narrow viewport cuts rather than overflows.
- */
-export function noticeBoxLines(
-  text: string,
-  width: number,
-  paint: { bg(s: string): string; label(s: string): string; text(s: string): string },
-): string[] {
-  if (width < 3) return [];
-  const inner = width - 2;
-  const row = (s: string, style: (s: string) => string = (x) => x) => {
-    const fitted = truncateToWidth(s, inner);
-    return paint.bg(` ${style(fitted)}${" ".repeat(inner - cellWidth(fitted))} `);
-  };
-  const wrapped: string[] = [];
-  for (const line of text.split("\n")) {
-    let cur = "";
-    for (const ch of line) {
-      if (cur !== "" && cellWidth(cur + ch) > inner) { wrapped.push(cur); cur = ""; }
-      cur += ch;
-    }
-    wrapped.push(cur);
-  }
-  const label = "[review-gate]";
-  // No leading blank: pi's CustomMessageComponent adds that spacer itself.
-  return [
-    row(""),
-    row(label, paint.label),
-    row(""),
-    ...wrapped.map((l) => row(l, paint.text)),
-    row(""),
-  ];
 }
 
 function messageText(content: unknown): string {
