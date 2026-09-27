@@ -11,8 +11,8 @@
  * everything it knows comes from pane options the gate's sessions write about
  * themselves (lib/tmux-pane-state.ts). While it is open, every other pane of
  * its window has its input switched off, and the selected row's pane is shown
- * on the right. It writes: the `@rg_sidebar` marker and the lock record on its
- * own pane, the input flag of the panes it locked (given back on every way
+ * on the right. It writes: the `@rg_sidebar` marker on its own pane, the lock
+ * record on its window (so it outlives a pane killed hard), the input flag of the panes it locked (given back on every way
  * out), and the client's current session/window/pane when the user jumps —
  * a jump closes the sidebar. Never `-g`.
  *
