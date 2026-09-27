@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildCaptureArgv, joinColumns, LIST_WIDTH, previewLines, splitColumns } from "../lib/tmux-sidebar-preview.ts";
-import { displayWidth } from "../lib/tmux-sidebar-render.ts";
+import { displayWidth, fitWidth } from "../lib/tmux-sidebar-render.ts";
 
 test("capture is plain text of the target pane", () => {
   assert.deepEqual(buildCaptureArgv("%4"), ["capture-pane", "-p", "-t", "%4"]);
@@ -33,10 +33,16 @@ test("preview cuts CJK by display width and strips control characters", () => {
   assert.deepEqual(previewLines("a\x1b[2Jb\x07c", 20, 1), ["a [2Jb c"]);
 });
 
-test("emoji count two columns, joiners and variation selectors none", () => {
+test("emoji are measured per grapheme cluster: one glyph, two columns", () => {
   assert.equal(displayWidth("🚀✅"), 4);
-  assert.equal(displayWidth("❤️"), 1);
-  assert.equal(displayWidth("👨‍💻"), 4);
+  assert.equal(displayWidth("❤️"), 2);
+  assert.equal(displayWidth("❤"), 1);
+  assert.equal(displayWidth("👨‍💻"), 2);
+  assert.equal(displayWidth("👍🏽"), 2);
+  assert.equal(displayWidth("e\u0301"), 1);
+  // A cut never splits a cluster.
+  assert.equal(fitWidth("ab👨‍💻cd", 4), "ab…");
+  assert.equal(fitWidth("👨‍💻👨‍💻👨‍💻", 5), "👨‍💻👨‍💻…");
   const [row] = previewLines("🚀🚀🚀🚀🚀🚀", 7, 1);
   assert.ok(displayWidth(row) <= 7, row);
 });
