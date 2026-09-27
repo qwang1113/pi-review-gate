@@ -7274,10 +7274,15 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
 
 test("F3: the checkpoint commits this session's own files, and NAMES what it leaves", () => {
   const body = windowOf('name: "review_checkpoint"', "\n  });", "review_checkpoint tool");
-  assert.match(body, /"ls-files", "--others", "--exclude-standard", "-z"/,
+  assert.match(body, /pendingCheckpoint\(root, st\.sessionEditedFiles \?\? \[\]\)/,
+    "the checkpoint reads what it commits through lib/checkpoint-sweep.ts (N1 residual: one implementation)");
+  const sweepSrc = readFileSync(join(ROOT, "lib", "checkpoint-sweep.ts"), "utf8");
+  assert.match(sweepSrc, /"ls-files", "--others", "--exclude-standard", "-z"/,
     "the untracked set comes from git in its RAW path form");
-  assert.match(body, /planCheckpointSweep\(\{ untracked, own: st\.sessionEditedFiles \?\? \[\] \}\)/,
+  assert.match(sweepSrc, /planCheckpointSweep\(\{ untracked, own \}\)/,
     "…and the split is the pure rule in lib/checkpoint-sweep.ts");
+  assert.match(PREPARE_WIRING_SRC, /worktreeClean: \(root\) =>\s+pendingCheckpoint\(/,
+    "the empty-range round's clean is the checkpoint's clean");
   assert.match(body, /"reset", "-q", "--", \.\.\.leftOut/,
     "`add -A` still sweeps the tracked half; the leftovers are UNSTAGED again");
   assert.doesNotMatch(body, /\["add", "-A"\] \}?, \{ cwd: root, encoding: "utf8" \}\);\n\s+execFileSync\("git", \["commit"/,
