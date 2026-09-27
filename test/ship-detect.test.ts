@@ -447,24 +447,30 @@ test("evidence rejects every measured over-match vector", () => {
   }
 });
 
-test("D33: a `gh pr merge` at a command head is merge evidence; wrapped or quoted forms are not", () => {
+test("D33: a lone synchronous `gh pr merge` yields its PR selector; everything else proves nothing", () => {
   const env = {};
-  assert.equal(observedPrMerge("gh pr merge 12 --squash", env), true);
-  assert.equal(observedPrMerge("gh pr merge feat/x", env), true, "a branch selector stays in this repo");
-  // Round-1 P1: an exit 0 that says nothing about the merge proves nothing.
-  for (const masked of ["true || gh pr merge 12", "gh pr merge 12 || true", "git fetch && gh pr merge 12", "gh pr merge 1; echo", "gh pr merge 1 | cat", "gh pr merge 1 &"]) {
-    assert.equal(observedPrMerge(masked, env), false, masked);
+  assert.equal(observedPrMerge("gh pr merge 12 --squash", env), "12");
+  assert.equal(observedPrMerge("gh pr merge --squash --subject 'x y' 12 -d", env), "12", "a value flag's value is not the selector");
+  assert.equal(observedPrMerge("gh pr merge --body=done feat/x", env), "feat/x", "a branch selector stays in this repo");
+  assert.equal(observedPrMerge("gh pr merge", env), "", "no selector = the current branch's PR");
+  // Rounds 1–2: an exit 0 that says nothing about the merge proves nothing.
+  for (const masked of ["true || gh pr merge 12", "gh pr merge 12 || true", "git fetch && gh pr merge 12", "gh pr merge 1; echo",
+    "gh pr merge 1 | cat", "gh pr merge 1 &", "gh pr merge 12 & # queued"]) {
+    assert.equal(observedPrMerge(masked, env), undefined, masked);
   }
-  // Round-1 P1: a merge aimed at ANOTHER repository is not this repo's evidence.
-  for (const elsewhere of ["gh -R o/r pr merge 12", "gh pr merge 12 --repo o/r", "gh pr merge 12 -Ro/r", "gh pr merge https://github.com/o/r/pull/12", "GH_REPO=o/r gh pr merge 12"]) {
-    assert.equal(observedPrMerge(elsewhere, env), false, elsewhere);
+  // Round 2: flags that do not merge now (or at all), and unknown flags.
+  for (const deferred of ["gh pr merge 12 --auto", "gh pr merge 12 --disable-auto", "gh pr merge 12 --help", "gh pr merge -h", "gh pr merge 12 --bogus"]) {
+    assert.equal(observedPrMerge(deferred, env), undefined, deferred);
   }
-  assert.equal(observedPrMerge("gh pr merge 12", { GH_REPO: "o/r" }), false, "an inherited GH_REPO retargets it too");
-  assert.equal(observedPrMerge("timeout 60 gh pr merge 12"), false);
-  assert.equal(observedPrMerge("sudo gh pr merge 12"), false);
-  assert.equal(observedPrMerge('echo "gh pr merge 12"'), false);
-  assert.equal(observedPrMerge("cat > x <<EOF\ngh pr merge 1\nEOF"), false);
-  assert.equal(observedPrMerge("gh pr view 12"), false);
+  // Round 1: a merge aimed at ANOTHER repository is not this repo's evidence.
+  for (const elsewhere of ["gh -R o/r pr merge 12", "gh pr merge 12 --repo o/r", "gh pr merge 12 -Ro/r",
+    "gh pr merge https://github.com/o/r/pull/12", "GH_REPO=o/r gh pr merge 12", "gh pr merge 1 2"]) {
+    assert.equal(observedPrMerge(elsewhere, env), undefined, elsewhere);
+  }
+  assert.equal(observedPrMerge("gh pr merge 12", { GH_REPO: "o/r" }), undefined, "an inherited GH_REPO retargets it too");
+  for (const other of ["timeout 60 gh pr merge 12", "sudo gh pr merge 12", 'echo "gh pr merge 12"', "cat > x <<EOF\ngh pr merge 1\nEOF", "gh pr view 12"]) {
+    assert.equal(observedPrMerge(other, env), undefined, other);
+  }
   assert.deepEqual(observedShipKinds("gh pr merge 12"), [], "not a ship kind");
 });
 

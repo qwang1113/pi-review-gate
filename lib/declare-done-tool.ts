@@ -27,7 +27,7 @@ import { readInheritance } from "./session-inheritance.ts";
 import { successorDoneRefusal } from "./session-handoff.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { closeOwnSession, type TmuxScope } from "./session-tmux-scope.ts";
-import { hasUnpushedCommits, probeOpenPr, type OpenPrArrival } from "./station-pr-evidence.ts";
+import { hasUnpushedCommits, probeMergedPr, probeOpenPr, type OpenPrArrival } from "./station-pr-evidence.ts";
 import { isEnforcedMode } from "./task-mode.ts";
 import type { ToolHost } from "./tool-host.ts";
 import { describeNotifyOutcome, type UserNotifyKind, type UserNotifyOutcome } from "./user-notify.ts";
@@ -222,16 +222,20 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
             // is not evidence that the work was committed.
             const files = changedFiles(root);
             const observedPrCreate = st.shippedKinds?.includes("pr-create") === true;
-            const observedPrMerge = st.prMergeObserved === true;
+            let observedPrMerge = false;
             const recordedPr = typeof st.copilot?.pr === "number" ? st.copilot.pr : null;
             let probe: OpenPrArrival | null = null;
             let unpushed = false;
             if (station === "pr") {
               // ASK GITHUB ONLY WHEN THE FREE EVIDENCE IS SILENT (round-1 quality P1).
-              if (!prEvidencePresent({ observedPrCreate, observedPrMerge, recordedPr })) {
+              if (!prEvidencePresent({ observedPrCreate, recordedPr })) {
                 // Named in the progress line: this one can take seconds.
                 progress.step(`查询 PR 状态（${deps.repoLabel(root)}）`);
                 probe = await probeOpenPr(deps.repoDirFor(root));
+                // D33: a watched merge counts only once GitHub says MERGED.
+                if (probe.number === null && st.prMergeSelector !== undefined) {
+                  observedPrMerge = await probeMergedPr(deps.repoDirFor(root), st.prMergeSelector) !== null;
+                }
               }
               // …but HAVING a PR is not arriving: work still sitting locally
               // has not been delivered. Pure local git, no network.
@@ -334,14 +338,14 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
         st.strategicResetFired = false;
         // The delivery-station EVIDENCE is per TASK too (round-2 reviewer P2).
         st.shippedKinds = undefined;
-        st.prMergeObserved = undefined;
+        st.prMergeSelector = undefined;
         if (root !== primaryRepoRoot) deps.persistRepo(ctx as unknown as ExtensionContext, root);
       }
       state.rounds = [];
       state.lastPolishReason = undefined;
       state.strategicResetFired = false;
       state.shippedKinds = undefined;
-      state.prMergeObserved = undefined;
+      state.prMergeSelector = undefined;
 
       // P1 fix: the L2 auto-continuation budget must reset with the task too —
       // task B in the same session would otherwise get ZERO continuations.

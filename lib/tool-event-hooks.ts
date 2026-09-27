@@ -207,8 +207,8 @@ export function createToolResultHook(cells: SessionCells, deps: ToolResultHookDe
     // the over-matching `detectShipCommands` (round-2/3 reviewer P2).
     if (cmd && event.isError !== true && state.taskMode !== "normal") {
       const shipped = observedShipKinds(cmd);
-      const prMerged = observedPrMerge(cmd);
-      if (shipped.length > 0 || prMerged) {
+      const mergeSelector = observedPrMerge(cmd);
+      if (shipped.length > 0 || mergeSelector !== undefined) {
         const cmdRepos = resolveCommandRepos(cmd, cwd);
         const roots = cmdRepos.ambiguous ? new Set(cells.sessionRepos) : new Set(cmdRepos.repos);
         for (const root of roots) {
@@ -217,10 +217,10 @@ export function createToolResultHook(cells: SessionCells, deps: ToolResultHookDe
           const merged = [...new Set([...before, ...shipped])];
           // Merge evidence binds to the ONE repo the command ran in — never
           // spread over every session repo on an ambiguous cwd.
-          const newMerge = prMerged && !cmdRepos.ambiguous && st.prMergeObserved !== true;
+          const newMerge = mergeSelector !== undefined && !cmdRepos.ambiguous && st.prMergeSelector !== mergeSelector;
           if (merged.length !== before.length || newMerge) {
             if (merged.length !== before.length) st.shippedKinds = merged;
-            if (newMerge) st.prMergeObserved = true;
+            if (newMerge) st.prMergeSelector = mergeSelector;
             deps.persistRepo(ctx, root);
           }
         }

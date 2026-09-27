@@ -515,12 +515,13 @@ export interface GateState {
    */
   shippedKinds?: ShipCommandKind[];
   /**
-   * The gate WATCHED a `gh pr merge` succeed in this repo (D33) — the same
-   * kind of evidence as `shippedKinds`, for a `pr` task whose delivery is
-   * merging a PR it did not open. Not a ship kind (nothing blocks the merge);
-   * cleared with `shippedKinds` when a task completes.
+   * The PR selector of the last `gh pr merge` the gate WATCHED exit 0 in this
+   * repo (D33; `""` = the current branch's PR) — a candidate for a `pr` task
+   * whose delivery is merging a PR it did not open. `declare_done` asks GitHub
+   * whether it is MERGED before it counts. Not a ship kind (nothing blocks the
+   * merge); cleared with `shippedKinds` when a task completes.
    */
-  prMergeObserved?: boolean;
+  prMergeSelector?: string;
 
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of

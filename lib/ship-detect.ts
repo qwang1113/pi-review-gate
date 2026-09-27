@@ -514,29 +514,49 @@ export function observedShipKinds(command: string): ShipCommandKind[] {
  * not open (D33) — the same evidence rules as {@link observedShipKinds}. It is
  * not a ship kind: the ship gate does not block it, only the arrival reads it.
  *
+ * It returns the PR SELECTOR the merge named (`""` = the current branch's PR),
+ * or `undefined` when the command proves nothing. It is only a CANDIDATE: an
+ * exit 0 does not mean merged (a merge queue only enqueues, review round 2),
+ * so `declare_done` asks GitHub whether that selector's PR is MERGED
+ * (lib/station-pr-evidence.ts `probeMergedPr`).
+ *
  * STRICTER than the ship kinds, because the evidence is bound to the repo the
- * command ran in (review round 1, two P1s):
- *   - the command must be THAT ONE segment. In `true || gh pr merge 1` or
- *     `gh pr merge 1 || true` the shell's exit 0 says nothing about the merge;
- *   - nothing may aim it at another repository: no `-R`/`--repo` (a global or
- *     a subcommand flag), no PR URL, no `GH_REPO` (inline or inherited).
+ * command ran in (review rounds 1–2):
+ *   - the command must be THAT ONE segment, with no `&` anywhere: in
+ *     `true || gh pr merge 1`, `gh pr merge 1 || true` or `gh pr merge 1 &`
+ *     the shell's exit 0 says nothing about the merge;
+ *   - nothing may aim it at another repository: no `-R`/`--repo`, no PR URL,
+ *     no `GH_REPO` (inline or inherited);
+ *   - every flag must be a KNOWN synchronous one — `--auto`,
+ *     `--disable-auto`, `--help` and anything unrecognised prove nothing.
  * A false negative only means proving the delivery another way.
  */
 export function observedPrMerge(
   command: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  // A backgrounded merge (`… &`) exits 0 before it has done anything.
-  if ((env.GH_REPO ?? "") !== "" || containsHeredoc(command) || /&\s*$/.test(command)) return false;
+): string | undefined {
+  if ((env.GH_REPO ?? "") !== "" || containsHeredoc(command) || command.includes("&")) return undefined;
   const segments = lexSegmentTokens(command);
-  if (segments.length !== 1) return false;
+  if (segments.length !== 1) return undefined;
   const tokens = segments[0]!;
   const at = ghSubcommandIndex(tokens);
-  if (at === undefined || tokens[at] !== "pr" || tokens[at + 1] !== "merge") return false;
-  return !tokens.some((t) =>
-    t === "-R" || t === "--repo" || t.startsWith("-R") || t.startsWith("--repo=") ||
-    t.includes("://") || t.includes("github.com"));
+  // No gh global flag either: `-R` is the one that matters, and none is needed.
+  if (at !== 1 || tokens[1] !== "pr" || tokens[2] !== "merge") return undefined;
+  let selector: string | undefined;
+  for (let i = 3; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (MERGE_BOOLEAN_FLAGS.has(t)) continue;
+    if (MERGE_VALUE_FLAGS.has(t)) { i += 1; continue; }
+    if (t.startsWith("--") && t.includes("=") && MERGE_VALUE_FLAGS.has(t.split("=")[0]!)) continue; // `--subject=x`
+    if (t.startsWith("-")) return undefined;
+    if (selector !== undefined || t.includes("://") || t.includes("github.com")) return undefined;
+    selector = t;
+  }
+  return selector ?? "";
 }
+
+const MERGE_BOOLEAN_FLAGS = new Set(["--squash", "-s", "--merge", "-m", "--rebase", "-r", "--delete-branch", "-d", "--admin"]);
+const MERGE_VALUE_FLAGS = new Set(["--subject", "-t", "--body", "-b", "--body-file", "-F", "--author-email", "-A", "--match-head-commit"]);
 
 /** The command heads the evidence path trusts — see {@link observedShipKinds}. */
 function observedCommandHeads(command: string): string[][] {
