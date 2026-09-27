@@ -2431,7 +2431,8 @@ test("the checkpoint message is delegated to the pure, unit-tested lib module", 
     "the chain imports the pure builder");
   assert.doesNotMatch(SRC + CHAIN_SRC, /function checkpointMessage\(/,
     "no wrapper: the call site calls the pure builder directly");
-  assert.match(CHAIN_SRC, /const message = buildCheckpointMessage\(input\.message \?\? input\.note\);/,
+  // D32: the explicit `message` only — the round note is never sliced into a subject.
+  assert.match(CHAIN_SRC, /const message = buildCheckpointMessage\(input\.message\);/,
     "the checkpoint delegates, it does not re-implement the rule");
 });
 

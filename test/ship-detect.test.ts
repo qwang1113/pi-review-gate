@@ -360,6 +360,7 @@ test("D37: every other heredoc shape still exposes its ship lines", () => {
     "cat <<'EOF'\ngh pr create\nEOF",                              // not redirected to a file
     "cat >(bash) <<'EOF'\ngh pr create\nEOF",                      // process substitution executes it
     "cat > f <<'EOF' | bash\ngh pr create\nEOF",                   // piped on
+    "sh -s \\\ncat > f <<'EOF'\ngh pr create\nEOF",                 // continued line: cat is sh's argument
   ]) {
     assert.ok(detectShipCommands(cmd).length > 0, cmd);
   }

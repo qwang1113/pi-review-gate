@@ -75,6 +75,12 @@ test("D17: push / pr from the scratch dir, an uncreated dir, or a GIT_DIR reloca
     `mkdir -p ${d} && cd ${d} && git init -q && gh pr create --title x`,
     `cd ${join(multiParent, "never-made")} && git commit -m x`,
     `export GIT_DIR=${repoA}/.git; mkdir -p ${d} && cd ${d} && git init && git commit -m x`,
+    // quality P0: a NEW subdir of a real repo — git would commit the parent repo
+    `mkdir -p ${repoA}/newsub && cd ${repoA}/newsub && git commit -am x`,
+    `mkdir -p ${repoA}/newsub && cd ${repoA}/newsub && git init -q && git commit -am x`,
+    // mkdir without git init is not a scratch repo
+    `mkdir -p ${d} && cd ${d} && git commit -am x`,
+    `git init --separate-git-dir ${repoA}/.git ${d} && git -C ${d} commit -m x`,
   ]) {
     const r = resolveShipRepos(cmd, repoA);
     assert.equal(r.ambiguous, true, cmd);

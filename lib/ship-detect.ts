@@ -382,7 +382,9 @@ export function stripInertHeredocBodies(command: string): string {
     // The redirect target excludes `(`/`)`: `cat >(bash) <<'EOF'` is a
     // process substitution that EXECUTES the body.
     const m = /^\s*cat\b[^|;&<>()]*(?:>>?\s*[^\s|;&<>()]+\s*)?<<(-?)\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*(?:>>?\s*[^\s|;&<>()]+)?\s*$/.exec(line);
-    if (!m || !/>/.test(line.replace(/<<-?\s*(['"])[A-Za-z_][A-Za-z0-9_]*\1/, ""))) continue;
+    // A backslash-continued previous line makes `cat` an ARGUMENT of that
+    // command (`sh -s \` + newline + `cat > f <<'Q'` runs the body).
+    if (!m || (i > 0 && lines[i - 1]!.endsWith("\\")) || !/>/.test(line.replace(/<<-?\s*(['"])[A-Za-z_][A-Za-z0-9_]*\1/, ""))) continue;
     const [, dash, , delim] = m;
     const end = lines.findIndex((l, j) => j > i && (dash ? l.replace(/^\t+/, "") : l) === delim);
     if (end < 0) return command;

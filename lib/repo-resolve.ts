@@ -25,7 +25,7 @@
  *     already treats as fail-closed.
  */
 
-import { join as pathJoin, resolve as pathResolve } from "node:path";
+import { dirname, join as pathJoin, resolve as pathResolve } from "node:path";
 import { existsSync } from "node:fs";
 import { gitOrNull } from "./git-exec.ts";
 import { detectShipCommands, segments, normalizedTokens } from "./ship-detect.ts";
@@ -44,12 +44,13 @@ export interface ShipRepoResolution {
    */
   ambiguous: boolean;
   /**
-   * D17: ship targets that are NOT a repository yet and that an EARLIER
-   * segment of this same command creates (`mkdir`) or initializes (`git
-   * init`), holding nothing but LOCAL commits — a scratch repo this command
-   * builds from nothing. They are left out of `repos` (and do not trigger the
-   * cwd fallback): a commit there publishes nothing. A push or PR from the
-   * same dir is never fresh.
+   * D17: ship targets that are NOT inside any repository yet (nor is their
+   * nearest existing ancestor) and that an EARLIER segment of this same
+   * command `git init`s, holding nothing but LOCAL commits — a scratch repo
+   * this command builds from nothing. They are left out of `repos` (and do
+   * not trigger the cwd fallback): a commit there publishes nothing. A push
+   * or PR from the same dir is never fresh; neither is a new subdir of a real
+   * repo (without the init actually running, git would find the parent).
    */
   fresh: string[];
 }
@@ -69,27 +70,33 @@ interface ResolvedSegment {
   ship: boolean;
   /** Ship kinds detected in this segment (empty when `ship` is false). */
   kinds: string[];
-  /** `dir` was created / `git init`ed by an EARLIER segment of the command. */
-  createdEarlier: boolean;
+  /** `dir` was `git init`ed by an EARLIER segment of the command. */
+  initedEarlier: boolean;
 }
 
-/** Options of `git init` / `mkdir` that take a SEPARATE value. */
-const VALUE_OPTS = new Set(["-b", "--initial-branch", "--template", "--separate-git-dir",
-  "--object-format", "--ref-format", "-m", "--mode"]);
+/** `git init` options that take a SEPARATE value. */
+const INIT_VALUE_OPTS = new Set(["-b", "--initial-branch", "--template", "--object-format", "--ref-format"]);
 
-/** The path operands of `mkdir …` / `git … init …` (after `startIdx`),
- *  resolved against `dir`. Expanding operands are dropped: they are not a
- *  directory this command provably created. */
-function createdOperands(tokens: string[], startIdx: number, dir: string): string[] {
-  const out: string[] = [];
+/** The directory a `git … init …` segment initializes (options after
+ *  `startIdx`), or undefined when it cannot be named statically — an
+ *  expanding operand, or `--separate-git-dir` (the git dir lands elsewhere). */
+function initTarget(tokens: string[], startIdx: number, dir: string): string | undefined {
   for (let i = startIdx; i < tokens.length; i++) {
     const t = tokens[i]!;
-    if (VALUE_OPTS.has(t)) { i++; continue; }
+    if (t.startsWith("--separate-git-dir") || /[$`~*?]/.test(t)) return undefined;
+    if (INIT_VALUE_OPTS.has(t)) { i++; continue; }
     if (t.startsWith("-")) continue;
-    if (/[$`~*?]/.test(t)) continue;
-    out.push(pathResolve(dir, t));
+    return pathResolve(dir, t);
   }
-  return out;
+  return pathResolve(dir);
+}
+
+/** Is `dir` — or, when it does not exist yet, its nearest existing
+ *  ancestor — outside every git repository? */
+function outsideAnyRepo(dir: string): boolean {
+  let d = pathResolve(dir);
+  while (!existsSync(d) && dirname(d) !== d) d = dirname(d);
+  return gitRootOfDir(d) === null;
 }
 
 /**
@@ -103,8 +110,8 @@ function resolveSegments(command: string, cwd: string): { segs: ResolvedSegment[
   const segsOut: ResolvedSegment[] = [];
   let dir = cwd;
   let ambiguous = false;
-  // D17: directories an earlier segment created (`mkdir`) or `git init`ed.
-  const created = new Set<string>();
+  // D17: directories an earlier segment `git init`ed.
+  const inited = new Set<string>();
   // Command-level: a `cd` target containing $(…) / `…` has its substitution
   // stripped by segments() BEFORE the per-segment pass — detect it on the RAW
   // command so `cd /tmp$(mktemp -u -d) && git commit` stays ambiguous.
@@ -180,9 +187,6 @@ function resolveSegments(command: string, cwd: string): { segs: ResolvedSegment[
     let gitDir: string | null = null;
     // Index of git's SUBCOMMAND (first non-option token after the head).
     let subIdx = -1;
-    if (tokens[0] === "mkdir") {
-      for (const p of createdOperands(tokens, 1, dir)) created.add(p);
-    }
     if (gitIdx >= 0) {
       // Options that take a SEPARATE value must be consumed, or the scanner
       // breaks on their VALUE and misses a later -C (git -c user.name=x -C
@@ -256,11 +260,11 @@ function resolveSegments(command: string, cwd: string): { segs: ResolvedSegment[
       dir: finalDir,
       ship: kinds.length > 0,
       kinds,
-      createdEarlier: created.has(pathResolve(finalDir)),
+      initedEarlier: inited.has(pathResolve(finalDir)),
     });
     if (subIdx >= 0 && tokens[subIdx] === "init") {
-      const targets = createdOperands(tokens, subIdx + 1, segDir);
-      for (const p of targets.length > 0 ? targets.slice(0, 1) : [pathResolve(segDir)]) created.add(p);
+      const target = initTarget(tokens, subIdx + 1, segDir);
+      if (target) inited.add(target);
     }
   }
 
@@ -303,7 +307,7 @@ export function resolveShipRepos(command: string, cwd: string): ShipRepoResoluti
   for (const s of segs) {
     if (!s.ship) continue;
     const root = gitRootOfDir(s.dir);
-    if (!root && !gitEnv && s.createdEarlier && s.kinds.every((k) => k === "commit")) {
+    if (!root && !gitEnv && s.initedEarlier && s.kinds.every((k) => k === "commit") && outsideAnyRepo(s.dir)) {
       if (!fresh.includes(s.dir)) fresh.push(s.dir);
       continue;
     }
