@@ -372,6 +372,8 @@ test("D37: every other heredoc shape still exposes its ship lines", () => {
     "cat \" > /tmp/f <<'EOF'\n$(gh pr create --title x)\nEOF\ncat \" > /tmp/g <<'Y'\nY",
     "cat ' > /tmp/f <<'EOF'\n$(git push)\nEOF\ncat ' > /tmp/g <<'Y'\nY",
     "cat $X > /tmp/f <<'EOF'\ngit push\nEOF",
+    "cat /dev/null # > /tmp/f <<'EOF'\ngh pr create --title x\nEOF", // a comment: no heredoc
+    "cat ~/x > /tmp/f <<'EOF'\ngit push\nEOF",                         // outside the allowlist
   ]) {
     assert.ok(detectShipCommands(cmd).length > 0, cmd);
   }
