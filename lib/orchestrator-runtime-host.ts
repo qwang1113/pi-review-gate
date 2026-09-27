@@ -51,7 +51,7 @@ import type { SessionHost } from "./session-host.ts";
 
 /** What the runtime clocks need from the session beyond the shared host. */
 export interface OrchestratorRuntimeDeps {
-  pi: Pick<ExtensionAPI, "sendUserMessage" | "sendMessage" | "on">;
+  pi: Pick<ExtensionAPI, "sendUserMessage" | "sendMessage" | "on" | "registerMessageRenderer">;
   orchestratorDeps: OrchestratorDeps;
   channelIO: ChannelIO;
   currentOrchestrationId(): string;
