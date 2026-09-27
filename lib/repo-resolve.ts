@@ -29,6 +29,7 @@ import { dirname, join as pathJoin, resolve as pathResolve } from "node:path";
 import { existsSync } from "node:fs";
 import { gitOrNull } from "./git-exec.ts";
 import { detectShipCommands, segments, normalizedTokens } from "./ship-detect.ts";
+import { lexSegmentTokens } from "./shell-lex.ts";
 
 export interface ShipRepoResolution {
   /**
@@ -313,6 +314,42 @@ function isPlainAndChain(command: string): boolean {
   return !/[;|&\n!(){}`]|\$\(/.test(command.replace(/&&/g, " "));
 }
 
+/**
+ * Is every step of the command one that can only BUILD a scratch repo?
+ *
+ * The exemption believes "init X, then commit in X" from the text, so any other
+ * step is a way to make X something else by the time the commit runs —
+ * `ln -s <repo> X`, `rm -rf X/.git && ln -s <repo>/.git X/.git`,
+ * `git worktree add X`, `echo 'gitdir: …' > X/.git` (quality P1
+ * d17-fresh-redirect). So it is a whitelist, and anything it does not know
+ * costs the exemption, never the gate: `cd <dir>`, `mkdir [-p] <dir>…`, and
+ * `git [-C <dir>] init|add|commit` — with no redirection anywhere, and an init
+ * that takes only `-q`/`--quiet`/`-b <name>`/`--initial-branch=<name>` (a
+ * `--template` or `--separate-git-dir` can plant a config that points
+ * elsewhere).
+ */
+function onlyScratchSteps(command: string): boolean {
+  return lexSegmentTokens(command).every((tokens) => {
+    if (tokens.some((t) => /^\d*(>>?|<|>&|&>)/.test(t))) return false;
+    const [head, ...args] = tokens;
+    if (head === "cd") return args.length === 1;
+    if (head === "mkdir") return args.length > 0 && args.every((a) => a === "-p" || !a.startsWith("-"));
+    if (head !== "git") return false;
+    const at = args[0] === "-C" ? 2 : 0;
+    const sub = args[at];
+    if (sub === "add" || sub === "commit") return true;
+    if (sub !== "init") return false;
+    const rest = args.slice(at + 1);
+    for (let i = 0; i < rest.length; i++) {
+      const a = rest[i]!;
+      if (a === "-b") { i += 1; continue; }
+      if (a === "-q" || a === "--quiet" || a.startsWith("--initial-branch=") || !a.startsWith("-")) continue;
+      return false;
+    }
+    return true;
+  });
+}
+
 export function resolveShipRepos(command: string, cwd: string): ShipRepoResolution {
   const { segs, ambiguous: baseAmbiguous } = resolveSegments(command, cwd);
   const repos: string[] = [];
@@ -320,8 +357,9 @@ export function resolveShipRepos(command: string, cwd: string): ShipRepoResoluti
   let ambiguous = baseAmbiguous;
   // A git env relocation anywhere (`export GIT_DIR=…` in its own segment is
   // not tracked per segment) could point the "scratch" commit at a real repo.
-  const gitEnv = /\bGIT_(DIR|WORK_TREE|INDEX_FILE)\b/.test(command);
-  const chained = isPlainAndChain(command);
+  const gitEnv = /\bGIT_(DIR|WORK_TREE|INDEX_FILE)\b/.test(command) ||
+    ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"].some((k) => (process.env[k] ?? "") !== "");
+  const chained = isPlainAndChain(command) && onlyScratchSteps(command);
   for (const s of segs) {
     if (!s.ship) continue;
     const root = gitRootOfDir(s.dir);

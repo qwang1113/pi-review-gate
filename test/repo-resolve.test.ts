@@ -88,6 +88,13 @@ test("D17: push / pr from the scratch dir, an uncreated dir, or a GIT_DIR reloca
     `git init ${d} && ! cd ${d} && git commit -am x`,
     `git init ${d}\ncd ${d}\ngit commit -am x`,
     `(git init ${d}) && cd ${d} && git commit -am x`,
+    // quality P1 d17-fresh-redirect: any other step can retarget the inited dir
+    `ln -s ${repoA} ${d} && git init -q ${d} && cd ${d} && git commit -m x`,
+    `git init -q ${d} && rm -rf ${d}/.git && ln -s ${repoA}/.git ${d}/.git && cd ${d} && git commit -m x`,
+    `git -C ${repoA} worktree add ${d} && git init -q ${d} && cd ${d} && git commit -m x`,
+    `git init -q ${d} && echo gitdir:${repoA}/.git > ${d}/.git && cd ${d} && git commit -m x`,
+    `git init -q ${d} && git -C ${d} config core.worktree ${repoA} && cd ${d} && git commit -am x`,
+    `git init --template=/tmp/tpl ${d} && cd ${d} && git commit -m x`,
   ]) {
     const r = resolveShipRepos(cmd, repoA);
     assert.equal(r.ambiguous, true, cmd);
