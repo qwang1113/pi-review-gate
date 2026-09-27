@@ -51,10 +51,15 @@ export function createAppealLedger(
   /**
    * Refuse one A-class text — unless an appeal already passed this EXACT
    * content, in which case the pass is consumed and the text goes through.
+   *
+   * `peek` answers the same question WITHOUT spending the pass — for a
+   * preflight (the checkpoint's dry run, N1) that judges the very text the
+   * real call will judge moments later.
    */
-  function refuseText(kind: AppealKind, text: string, reason: string, ctx: unknown): string | undefined {
+  function refuseText(kind: AppealKind, text: string, reason: string, ctx: unknown, opts?: { peek?: boolean }): string | undefined {
     const digest = appealDigest(kind, text);
     if (appealPassAuthorizes(cells.state.appeals, digest)) {
+      if (opts?.peek) return undefined;
       // Single-use: spend it here, at the one place that can prove the
       // content is the content the arbiter judged.
       cells.state.appeals = consumeAppealPass(cells.state.appeals);

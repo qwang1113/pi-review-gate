@@ -10,7 +10,6 @@
  * repo's is loaded lazily into `cells.repoStateCache`.
  */
 
-import { existsSync } from "node:fs";
 import { join as pathJoin, resolve as pathResolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { acceptanceStatusLine } from "./acceptance-round.ts";
@@ -46,8 +45,11 @@ export interface SessionReposDeps {
 
 /**
  * Does THIS session own `root`'s gate state — the primary repo, a repo it
- * edited, or one it already keeps its own sidecar in (e.g. a repo whose goal
- * it negotiated through the `repo` parameter)?
+ * edited, or one whose sidecar is its own or its relay predecessor's (e.g. a
+ * repo whose goal it negotiated through the `repo` parameter)? The sidecar's
+ * EXISTENCE proves nothing: every session without a state variant writes the
+ * same file name, so ownership is read from its `sessionId` by the same rule
+ * `enforcementStateFor` uses.
  *
  * N4 (2026-09-27): the bash-result handler OBSERVES ship evidence, Copilot
  * arming and checkout re-arming for whatever repo a command ran in — a scratch
@@ -58,10 +60,12 @@ export interface SessionReposDeps {
  * restatement or goal for a new repo is exactly how a repo BECOMES owned.)
  */
 export function isSessionOwnedRepo(
-  cells: Pick<SessionCells, "primaryRepoRoot" | "sessionRepos">,
+  cells: Pick<SessionCells, "primaryRepoRoot" | "sessionRepos" | "state">,
   root: string,
 ): boolean {
-  return root === cells.primaryRepoRoot || cells.sessionRepos.has(root) || existsSync(sessionSidecarPath(root));
+  if (root === cells.primaryRepoRoot || cells.sessionRepos.has(root)) return true;
+  const onDisk = loadSidecar(sessionSidecarPath(root));
+  return onDisk !== undefined && stateOwnership(process.env, cells.state.sessionId, onDisk.sessionId) !== "foreign";
 }
 
 export function createSessionRepos(cells: SessionCells, deps: SessionReposDeps) {

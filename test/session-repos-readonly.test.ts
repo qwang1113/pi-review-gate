@@ -9,9 +9,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+
+import { DEFAULT_MAX_ROUNDS } from "../lib/constants.ts";
+import { emptyState } from "../lib/gate-state.ts";
+import { sessionSidecarPath } from "../lib/loop-goal-host.ts";
 
 import { createSessionCells } from "../lib/session-cells.ts";
 import { createSessionRepos, isSessionOwnedRepo } from "../lib/session-repos-host.ts";
@@ -71,5 +75,22 @@ test("N4: a ship observed in an external repo writes nothing into its .pi/; this
     assert.equal(isSessionOwnedRepo(cells, own), true);
   } finally {
     for (const d of [primary, external, own]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("N4: a sidecar's existence is not ownership — its sessionId is", () => {
+  const primary = repo("rg-n4-p2-");
+  const other = repo("rg-n4-other-");
+  try {
+    const cells = createSessionCells(primary);
+    cells.state.sessionId = "s-mine";
+    const path = sessionSidecarPath(other);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(emptyState("s-someone-else", DEFAULT_MAX_ROUNDS)));
+    assert.equal(isSessionOwnedRepo(cells, other), false, "another session's sidecar under the same name");
+    writeFileSync(path, JSON.stringify(emptyState("s-mine", DEFAULT_MAX_ROUNDS)));
+    assert.equal(isSessionOwnedRepo(cells, other), true, "a repo whose goal this session negotiated");
+  } finally {
+    for (const d of [primary, other]) rmSync(d, { recursive: true, force: true });
   }
 });

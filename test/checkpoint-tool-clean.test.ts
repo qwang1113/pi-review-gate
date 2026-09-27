@@ -23,7 +23,7 @@ neutraliseHostGitConfig();
 
 type Result = { content: { text: string }[]; details: Record<string, unknown>; isError?: boolean };
 
-function setup(opts: { own?: string[]; precommit?: "PASS" | "NOT_RUN"; refused?: string[] } = {}) {
+function setup(opts: { own?: string[]; precommit?: "PASS" | "NOT_RUN"; peeks?: boolean[]; appealPass?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rg-n1-"));
   git(root, ["init", "-q", "-b", "feat/demo"]);
   // The product's git strips GIT_CONFIG_*: identity and signing live in the repo.
@@ -48,7 +48,13 @@ function setup(opts: { own?: string[]; precommit?: "PASS" | "NOT_RUN"; refused?:
       resolveToolRepo: () => ({ ok: true, root }),
       stateForRepo: () => st,
       persistRepo: () => {},
-      refuseText: (_k, text, reason) => { opts.refused?.push(text); return reason; },
+      // A pass (when granted) authorizes the text; only a non-peek spends it.
+      refuseText: (_k, _t, reason, _ctx, o) => {
+        opts.peeks?.push(o?.peek === true);
+        if (!opts.appealPass) return reason;
+        if (!o?.peek) opts.appealPass = false;
+        return undefined;
+      },
       stageIsOn: () => true,
       precommitLaneRunning: () => false,
     } as CheckpointToolDeps,
@@ -95,16 +101,29 @@ test("N1: a foreign file beside real work stays out; the refusal checks judge co
   }
 });
 
-test("N1: the dry run never judges the message — refuseText would spend a single-use appeal pass", async () => {
-  const refused: string[] = [];
-  const { root, call } = setup({ refused });
+test("N1: the dry run refuses a bad message, and only PEEKS at an appeal pass the real checkpoint spends", async () => {
+  const bad = "feat: 中文主题";
+  const refusing = setup();
   try {
-    writeFileSync(join(root, "a.ts"), "export const a = 4;\n");
-    const dry = await call({ dryRun: true, message: "feat: 中文主题" });
-    assert.notEqual(dry.isError, true, dry.content[0]?.text);
-    assert.deepEqual(refused, [], "no text check ran, so no appeal pass could be consumed");
-    assert.equal((await call({ message: "feat: 中文主题" })).isError, true, "the real checkpoint still refuses it");
-    assert.equal(refused.length, 1);
+    writeFileSync(join(refusing.root, "a.ts"), "export const a = 4;\n");
+    assert.equal((await refusing.call({ dryRun: true, message: bad })).isError, true,
+      "a message the real checkpoint refuses is refused before any lane starts");
+  } finally {
+    rmSync(refusing.root, { recursive: true, force: true });
+  }
+  const peeks: boolean[] = [];
+  const opts = { peeks, appealPass: true };
+  const { root, call, head } = setup(opts);
+  try {
+    writeFileSync(join(root, "a.ts"), "export const a = 5;\n");
+    const before = head();
+    assert.notEqual((await call({ dryRun: true, message: bad })).isError, true);
+    assert.equal(opts.appealPass, true, "the dry run left the pass unspent");
+    const real = await call({ message: bad });
+    assert.notEqual(real.isError, true, real.content[0]?.text);
+    assert.notEqual(head(), before, "the appealed message landed through the real checkpoint");
+    assert.equal(opts.appealPass, false);
+    assert.deepEqual(peeks, [true, false]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -33,7 +33,7 @@ export interface CheckpointToolDeps {
   resolveToolRepo: SessionRepos["resolveToolRepo"];
   stateForRepo(root: string): GateState;
   persistRepo(ctx: ExtensionContext, root: string): void;
-  refuseText(kind: AppealKind, text: string, reason: string, ctx: unknown): string | undefined;
+  refuseText(kind: AppealKind, text: string, reason: string, ctx: unknown, opts?: { peek?: boolean }): string | undefined;
   stageIsOn(stage: LoopStage, root?: string): boolean;
   precommitLaneRunning(root: string): boolean;
 }
@@ -122,26 +122,26 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
       }
       // P2 (round-4): REVIEW_GATE_BYPASS=1 also silences hooks/commit-msg —
       // the AI-attribution guard — so this tool must replicate it.
-      // A DRY RUN (N1) SKIPS THE TWO TEXT CHECKS: `refuseText` CONSUMES a
-      // single-use appeal pass on a match, so a preflight judging the same
-      // message first would spend the pass the real checkpoint needs. The real
-      // checkpoint still runs both, and the chain aborts its lane on a refusal.
+      // A DRY RUN (N1) JUDGES THE TEXT BUT ONLY PEEKS at an appeal pass: the
+      // real checkpoint judges the same message moments later and is the one
+      // that must spend it.
       const dryRun = params.dryRun === true;
-      const attribution = !dryRun && COMMIT_MSG_FORBIDDEN.some((re) => re.test(message));
+      const textCheck = { peek: dryRun };
+      const attribution = COMMIT_MSG_FORBIDDEN.some((re) => re.test(message));
       if (attribution) {
         const reason = deps.refuseText("ai-attribution", message,
-          "review_checkpoint rejected — commit message contains AI attribution. Rewrite without it.", ctx);
+          "review_checkpoint rejected — commit message contains AI attribution. Rewrite without it.", ctx, textCheck);
         if (reason) {
           return { content: [{ type: "text", text: reason }], details: { committed: false }, isError: true };
         }
       }
       // L5 (HARD): the same single rule as the bash commit path, through the
       // same function — no non-Latin letter in subject or body.
-      const nonEn = dryRun ? undefined : nonEnglishCommitMessage(message);
+      const nonEn = nonEnglishCommitMessage(message);
       if (nonEn) {
         const kind: AppealKind = nonEn.part === "subject" ? "commit-subject" : "commit-body";
         const reason = deps.refuseText(kind, nonEn.text,
-          `review_checkpoint rejected — ${l5BlockReason({ kind, text: nonEn.text })} 用英文重写。`, ctx);
+          `review_checkpoint rejected — ${l5BlockReason({ kind, text: nonEn.text })} 用英文重写。`, ctx, textCheck);
         if (reason) {
           return { content: [{ type: "text", text: reason }], details: { committed: false }, isError: true };
         }
