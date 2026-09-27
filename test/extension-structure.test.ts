@@ -2050,7 +2050,7 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   // (round-1 quality P1, 2026-09-16): the extension used to re-derive "no local
   // evidence" in the OPPOSITE polarity, which is the kind of duplicate that
   // goes wrong silently when only one side is fixed.
-  assert.match(body, /prEvidencePresent\(\{ observedPrCreate, recordedPr \}\)/,
+  assert.match(body, /prEvidencePresent\(\{ observedPrCreate, observedPrMerge, recordedPr \}\)/,
     "…and the decision to ask GitHub is taken by the module's own predicate");
   assert.doesNotMatch(codeOnly(body), /station === "pr" && !observedPrCreate && recordedPr === null/,
     "the opposite-polarity copy of that rule must not come back");

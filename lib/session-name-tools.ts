@@ -243,24 +243,27 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
       return fail("review-gate: 本会话没有 session id（pi 没给出），无法登记名字。");
     }
     const notes: string[] = [];
-    // RENAMING FREES THE OLD NAME FIRST (user decision, 2026-09-25): a session
-    // must never hold two names, and a name must never have two holders. If the
-    // old one cannot be given back, the rename is REFUSED instead of leaving two
-    // registrations for one session behind (the leftover would look "live" to
-    // the sweep forever, because its pid is this very process).
+    const registeredAt = held !== undefined && held.name === name ? held.registeredAt : new Date(now()).toISOString();
+    const entry = entryFor(name, registeredAt);
+    // A RENAME CLAIMS THE NEW NAME FIRST (D22, 2026-09-27). Releasing the old
+    // one first left a session with NO name whenever the new one turned out to
+    // be taken. A session must still never hold two names (user decision,
+    // 2026-09-25), so the moment the new claim succeeds the old one is given
+    // back — and when that fails, the NEW claim is undone and the rename
+    // refused: a leftover registration would look "live" to the sweep forever,
+    // because its pid is this very process.
+    const claimed = claimName(registry, entry);
+    if (!claimed.ok) {
+      const kept = held !== undefined && held.name !== name ? `\n（本会话仍叫 ${held.name}）` : "";
+      return fail(`review-gate: ${claimed.error}${kept}`);
+    }
     if (held !== undefined && held.name !== name) {
       const oldName = held.name;
       if (!releaseInternal().ok) {
-        return fail(`review-gate: 改名失败 —— 旧名字 ${oldName} 腾不出来（见上面的日志），本会话仍叫 ${oldName}`);
+        releaseName(registry, name, sessionId);
+        return fail(`review-gate: 改名失败 —— 旧名字 ${oldName} 腾不出来（见上面的日志），新名字 ${name} 已退回，本会话仍叫 ${oldName}`);
       }
       notes.push(`旧名字 ${oldName} 已腾出`);
-    }
-    const registeredAt = held !== undefined && held.name === name ? held.registeredAt : new Date(now()).toISOString();
-    const entry = entryFor(name, registeredAt);
-    const claimed = claimName(registry, entry);
-    if (!claimed.ok) {
-      const tail = notes.length === 0 ? "" : `\n（${notes.join("；")}）`;
-      return fail(`review-gate: ${claimed.error}${tail}`);
     }
     const pane = deps.ownPane();
     const before = readOwn();

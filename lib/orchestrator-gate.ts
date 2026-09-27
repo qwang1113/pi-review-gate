@@ -88,6 +88,25 @@ export function spawnAuthorization(
   return { ok: true };
 }
 
+/**
+ * Is an `[ORCHESTRATION_RESUME]` push worth sending? (D23)
+ *
+ * Its next steps are spawn / handle a child / wait. With no approved plan, no
+ * open child and no news, none of them can be done — what is missing is the
+ * USER's approval, and pushing ten times does not bring it (measured: ten
+ * consecutive pushes the manager could only answer with "I'm waiting").
+ */
+export function orchestratorResumeDue(input: {
+  problems: readonly string[];
+  news: readonly string[];
+  openChildren: number;
+  authorization: Authorization;
+}): boolean {
+  if (input.news.length > 0) return true;
+  if (input.problems.length === 0) return false;
+  return input.openChildren > 0 || input.authorization.ok;
+}
+
 // ---------------------------------------------------------------------------
 // Constraint 2 — the orchestrator does not write code
 // ---------------------------------------------------------------------------

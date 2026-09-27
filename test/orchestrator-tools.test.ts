@@ -490,6 +490,15 @@ test("waiting with NOTHING to wait for is refused, not reported as a dead child"
   assert.equal(reply.details?.reason, "no-children");
 });
 
+test("D24: a zero-child SNAPSHOT says there are no children, never that a pane vanished", async () => {
+  const world = makeFakeWorld();
+  const reply = await world.call("orchestrator_wait", { timeoutMs: 0 });
+  const text = replyText(reply);
+  assert.doesNotMatch(text, /pane 已经消失/);
+  assert.match(text, /还没有子会话/);
+  assert.notEqual(reply.details?.reason, "pane-gone");
+});
+
 test("timeoutMs:0 is the snapshot that replaced orchestrator_status — same four blocks", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, contextPercent: 12 });
   const childId = await spawnT1(world);

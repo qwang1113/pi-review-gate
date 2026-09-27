@@ -55,6 +55,13 @@ test("a handed-off session and a manager with open children keep the session", (
   assert.equal(tmux.kills, 0);
 });
 
+test("D35: a judge / worker ignores the manager's children it reads from the shared sidecar", () => {
+  const tmux = server();
+  const out = closeOwnSessionOnExit(tmux.run, scope(), { handedOff: false, children: [{}], judgeOrWorker: true });
+  assert.equal(out.closed, true);
+  assert.doesNotMatch(out.note, /编排子会话/);
+});
+
 test("a manager whose children are all SETTLED closes the session — and their kept windows with it (2026-09-27)", () => {
   // `orchestrator_close` no longer kills a child's window; it only stamps
   // `closedAt`. Exit is where those kept windows go, with the session.

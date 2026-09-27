@@ -487,6 +487,30 @@ test("a supervisor reads every channel once and classifies every child", () => {
   assert.equal(snapshot.requests[0]!.childId, "c2");
 });
 
+test("D34: an ANSWERED request the child has not settled yet is not 'waiting for you'", () => {
+  // The measured shape (orch-f3eb4277, t2, 01:54): answer at .976, settle at
+  // 18.020 — a wait called beside the answer probed in between.
+  const io = memoryIO(() => T0);
+  const where = { orchestrationId: ORCH, childId: "c1", home: HOME };
+  appendRecord(io, where, { kind: "state", from: "child", at: "2026-09-27T01:53:57.000Z", state: "working" });
+  appendRecord(io, where, {
+    kind: "request", from: "child", at: "2026-09-27T01:53:57.704Z", requestId: "req-muj60hc8-7f4squ",
+    dialogKind: "select", topic: "goal-approval", title: "goal?", options: ["A. 认可", "B. 不认可"],
+  });
+  appendRecord(io, where, { kind: "request", from: "child", at: "2026-09-27T01:53:58.000Z", requestId: "r-other", dialogKind: "select", title: "q2", options: ["A"] });
+  appendRecord(io, where, { kind: "answer", from: "orchestrator", at: "2026-09-27T01:54:17.976Z", requestId: "req-muj60hc8-7f4squ", answer: "A. 认可" });
+  const read = () => superviseChildren({ orchestrationId: ORCH, children: [child("c1")], livePanes: new Set(["%2"]), io, home: HOME, at: T0 });
+
+  const between = read();
+  assert.deepEqual(between.requests.map((r) => r.requestId), ["r-other"], "only the unanswered one is waiting");
+  assert.equal(projectChannel(readChannel(io, channelPathFor(ORCH, "c1", HOME)).records).pendingAnswers.length, 1,
+    "the child's inbox still holds the answer");
+
+  appendRecord(io, where, { kind: "answer", from: "orchestrator", at: "2026-09-27T01:54:19.000Z", requestId: "r-other", answer: "A" });
+  assert.equal(read().requests.length, 0);
+  assert.notEqual(read().health[0]!.state, "waiting-input", "an answered child is not waiting on input");
+});
+
 test("a state CHANGE is always news; an unchanged question re-rings on the backoff", () => {
   const io = memoryIO(() => T0);
   appendRecord(io, { orchestrationId: ORCH, childId: "c1", home: HOME }, {

@@ -339,6 +339,18 @@ test("a spawn is still authorized after an amendable edit — the whole point", 
   assert.equal(spawn.isError, undefined, replyText(spawn));
 });
 
+test("D29: set-status echoes the changed row and a tally, never the whole plan or a task book", async () => {
+  const parsed = parsePlan({
+    title: "测试计划", intent: "i",
+    tasks: [{ id: "t1", title: "任务一", note: "任务书正文-ONE" }, { id: "t2", title: "任务二", note: "任务书正文-TWO" }],
+  });
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true });
+  const text = replyText(await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "running" }));
+  assert.match(text, /- \[running\] t1：任务一/);
+  assert.match(text, /running 1 \/ pending 1|pending 1 \/ running 1/);
+  assert.doesNotMatch(text, /任务书正文|任务二/);
+});
+
 test("`write` PRESERVES task status — a rewrite is not an execution reset", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "running" });

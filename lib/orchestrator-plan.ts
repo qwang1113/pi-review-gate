@@ -41,6 +41,7 @@ import { isAbsolute } from "node:path";
 import { sha256 } from "./hash.ts";
 import {
   deliveryStationLine,
+  describeDeliveryStation,
   parseDeliveryStation,
   type DeliveryStation,
   type StationAudience,
@@ -491,11 +492,14 @@ export function formatPlanSummary(
   //
   // "按约定", not an assessment: whether that last task really delivers
   // is the plan AUDIT's judgement (its 10th check).
-  const delivery = deliveryTaskId(plan);
+  // A ONE-TASK plan has no tail to point at (D25), and the mark's action is
+  // the plan's own station — a `precommit` plan was told "push → 开 PR".
+  const delivery = plan.tasks.length >= 2 ? deliveryTaskId(plan) : undefined;
   for (const t of plan.tasks) {
     const deps = t.dependsOn.length ? ` ← ${t.dependsOn.join(", ")}` : "";
     const deliveryMark = t.id === delivery
-      ? "　← 按约定：plan 的最后一环 = 交付任务（通常就是独立验收任务；站点不受同 repo 收窄；push → 开 PR；汇合 / 整体审核 / commit 是倒数第二个收尾任务的事）"
+      ? "　← 按约定：plan 的最后一环 = 交付任务（通常就是独立验收任务；站点不受同 repo 收窄：" +
+        `${describeDeliveryStation(plan.deliveryStation, audience)}；汇合 / 整体审核 / commit 是它前面收尾任务的事）`
       : "";
     // THE ACCEPTANCE SWITCH IS SAID PER TASK (2026-09-27): it is approved
     // content, so the user reads who accepts before signing.

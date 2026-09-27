@@ -101,6 +101,8 @@ opener 凭它记录结论；
   自报上下文 70%（= 统一交接阈值 `HANDOFF_PERCENT`）或同对象派满 8 轮，任一命中门禁自己开新 transcript（lane 代次 +1）
   并只带压缩交接。上下文读数缺失时不因它轮转（fail-open），轮次在**派发时**计数所以
   放弃的轮也算。旧 lane 的 pane 当场回收、目录原地保留走既有 TTL；agent 侧无感、无开关。
+  所以「窗口保留、下轮复用」只在**同一审计对象内**成立：例如 plan 审计 READY、用户批准后
+  plan hash 变了，下一次审计就是新对象、新一代 session 与窗口 —— 这是设计，不是缺陷（D45）。
 - **重启接管**：opener 注册表落盘（`<repo>/.pi/judge-hierarchy.json`，按 repo 分片），
   新会话启动与每次触达时懒合并；死 pane 的异主条目由触达者过户，活 pane 保持拒绝。
   绝不为同一 session id 再开第二个 pi。

@@ -222,12 +222,13 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
             // is not evidence that the work was committed.
             const files = changedFiles(root);
             const observedPrCreate = st.shippedKinds?.includes("pr-create") === true;
+            const observedPrMerge = st.prMergeObserved === true;
             const recordedPr = typeof st.copilot?.pr === "number" ? st.copilot.pr : null;
             let probe: OpenPrArrival | null = null;
             let unpushed = false;
             if (station === "pr") {
               // ASK GITHUB ONLY WHEN THE FREE EVIDENCE IS SILENT (round-1 quality P1).
-              if (!prEvidencePresent({ observedPrCreate, recordedPr })) {
+              if (!prEvidencePresent({ observedPrCreate, observedPrMerge, recordedPr })) {
                 // Named in the progress line: this one can take seconds.
                 progress.step(`查询 PR 状态（${deps.repoLabel(root)}）`);
                 probe = await probeOpenPr(deps.repoDirFor(root));
@@ -239,6 +240,7 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
             const arrival = stationArrivalProblems(station, {
               dirty: files === undefined || files.length > 0,
               observedPrCreate,
+              observedPrMerge,
               recordedPr,
               openPr: probe?.number ?? null,
               unpushed,
@@ -332,12 +334,14 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
         st.strategicResetFired = false;
         // The delivery-station EVIDENCE is per TASK too (round-2 reviewer P2).
         st.shippedKinds = undefined;
+        st.prMergeObserved = undefined;
         if (root !== primaryRepoRoot) deps.persistRepo(ctx as unknown as ExtensionContext, root);
       }
       state.rounds = [];
       state.lastPolishReason = undefined;
       state.strategicResetFired = false;
       state.shippedKinds = undefined;
+      state.prMergeObserved = undefined;
 
       // P1 fix: the L2 auto-continuation budget must reset with the task too —
       // task B in the same session would otherwise get ZERO continuations.

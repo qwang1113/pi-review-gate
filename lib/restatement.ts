@@ -63,7 +63,7 @@ import {
   parseDeliveryStation,
   type DeliveryStation,
 } from "./delivery-station.ts";
-import { capStationAt } from "./repo-pr-policy.ts";
+import { capStationAt, stationCapNotice } from "./repo-pr-policy.ts";
 import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
@@ -502,12 +502,7 @@ export async function doProposeRestatement(
   // over the channel and recorded is the clamped value.
   const stationCap = deps.stationCap?.();
   const station = capStationAt(requestedStation, stationCap);
-  const capNote = stationCap !== undefined && station !== requestedStation
-    ? `⚠️ 交付站点上界 ${stationCap}（不是 ${requestedStation}）：本编排的 plan 收窄了该 repo —— ` +
-      "同一 repo 的一个需求只出一个 PR，子会话提交完就停：由 plan 的收尾任务（倒数第二个）汇合后走一次整体审核并 commit，" +
-      "由独立验收任务（最后一个）push 并开 PR。" +
-      "要分多个 PR，需要在 plan 里声明 allowMultiplePrs 并重新批准。"
-    : undefined;
+  const capNote = stationCapNotice(requestedStation, stationCap)?.full;
   const text = checked.text;
 
   const uiCtx = ctx as RestatementUiContext;

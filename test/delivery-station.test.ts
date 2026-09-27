@@ -316,6 +316,8 @@ test("`prEvidencePresent` says 'known to have a PR', and `prArrivalProven` adds 
   );
   for (const evidence of [
     { observedPrCreate: true },
+    // D33: a `pr` task whose delivery is merging a PR it did not open.
+    { observedPrMerge: true },
     { recordedPr: 42 },
     { openPr: 167 },
   ] as const) {

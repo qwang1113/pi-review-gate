@@ -538,6 +538,20 @@ test("the summary marks WHICH task delivers — and only that one; acceptance is
   assert.equal(lines.filter((l) => l.trim() === "验收：开").length, 3);
 });
 
+test("D25: a one-task plan marks no delivery task, and the mark follows the plan's station", () => {
+  const single = formatPlanSummary(planOf({ deliveryStation: "precommit", tasks: [{ id: "a", title: "A", repo: "/repo" }] }), "/repo");
+  assert.doesNotMatch(single, /交付任务|push → 开 PR/);
+
+  const tasks = [{ id: "w", title: "W", repo: "/repo" }, { id: "a", title: "A", repo: "/repo" }];
+  const precommit = formatPlanSummary(planOf({ deliveryStation: "precommit", tasks }), "/repo");
+  const mark = precommit.split("\n").find((l) => l.startsWith("- [pending] a"))!;
+  assert.match(mark, /交付任务/);
+  assert.match(mark, /precommit/);
+  assert.doesNotMatch(mark, /开 PR；|push →/, "a precommit plan does not push");
+  const pr = formatPlanSummary(planOf({ deliveryStation: "pr", tasks }), "/repo");
+  assert.match(pr.split("\n").find((l) => l.startsWith("- [pending] a"))!, /PR 开出来/);
+});
+
 test("the canonical text is order-independent for sets", () => {
   const a = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["x", "y"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });
   const b = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["y", "x"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });

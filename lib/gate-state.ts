@@ -514,6 +514,13 @@ export interface GateState {
    * safe direction).
    */
   shippedKinds?: ShipCommandKind[];
+  /**
+   * The gate WATCHED a `gh pr merge` succeed in this repo (D33) — the same
+   * kind of evidence as `shippedKinds`, for a `pr` task whose delivery is
+   * merging a PR it did not open. Not a ship kind (nothing blocks the merge);
+   * cleared with `shippedKinds` when a task completes.
+   */
+  prMergeObserved?: boolean;
 
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of

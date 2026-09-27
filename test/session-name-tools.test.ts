@@ -199,7 +199,35 @@ test("a live holder is refused by name, and the holder's own registration is not
   assert.equal(naming.currentName(), undefined);
 });
 
-test("a rename gives the old name back before the new one is claimed, and the window keeps ONE name", async () => {
+test("D22: a rename onto a LIVE holder's name keeps the old name — the session is never left nameless", async () => {
+  const taken = JSON.stringify({ ...entryForTest("t2-renamed", THEIRS, NOW), tmux: { session: "0", window: "@9", pane: "%99" } });
+  const files = new Map([[sessionEntryPath(ROOT, "t2-renamed"), taken]]);
+  const { tmux, run, naming } = makeNaming({ files });
+  await run("t2-registry");
+  const reply = await run("t2-renamed");
+  assert.equal(reply.isError, true);
+  assert.match(textOf(reply), /本会话仍叫 t2-registry/);
+  assert.equal(naming.currentName(), "t2-registry");
+  assert.equal(parseEntryText(files.get(sessionEntryPath(ROOT, "t2-registry")))?.sessionId, MINE, "the old entry is still ours");
+  assert.equal(files.get(sessionEntryPath(ROOT, "t2-renamed")), taken);
+  assert.equal(tmux.state.windowName, "t2-registry");
+});
+
+test("D22: when the old name cannot be given back, the freshly claimed new one is returned", async () => {
+  const { files, run, naming } = makeNaming();
+  await run("t2-registry");
+  files.set(sessionEntryPath(ROOT, "t2-registry"), JSON.stringify({
+    ...JSON.parse(String(files.get(sessionEntryPath(ROOT, "t2-registry")))),
+    sessionId: THEIRS,
+  }));
+  const reply = await run("t2-renamed");
+  assert.equal(reply.isError, true);
+  assert.match(textOf(reply), /新名字 t2-renamed 已退回/);
+  assert.equal(files.has(sessionEntryPath(ROOT, "t2-renamed")), false, "never two names for one session");
+  assert.equal(naming.currentName(), "t2-registry");
+});
+
+test("a rename gives the old name back once the new one is claimed, and the window keeps ONE name", async () => {
   const { files, tmux, run } = makeNaming();
   await run("t2-registry");
   await run("t2-renamed");

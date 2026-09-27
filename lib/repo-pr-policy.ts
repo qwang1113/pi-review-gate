@@ -247,6 +247,29 @@ export function capStationAt(
   return deliveryStationRank(requested) > deliveryStationRank(cap) ? cap : requested;
 }
 
+/**
+ * The notice a child's restatement / goal dialog prints when its ceiling
+ * CLAMPED the requested station — `undefined` when nothing moved.
+ *
+ * It states the ceiling and nothing it cannot know (D41): the child reads only
+ * the cap from `RG_STATION_CAP`, and the cap is either the plan's own
+ * `deliveryStation` or the same-repo narrowing. Which one is written in its
+ * task book's 「上界原因」 line, rendered by {@link narrowingReasonFor} at
+ * dispatch — the one place that does know.
+ */
+export function stationCapNotice(
+  requested: DeliveryStation,
+  cap: DeliveryStation | undefined,
+): { full: string; short: string } | undefined {
+  if (cap === undefined || capStationAt(requested, cap) === requested) return undefined;
+  return {
+    full: `⚠️ 交付站点上界 ${cap}（不是 ${requested}）：这是编排 plan 给本任务定的上界。` +
+      "原因见任务书里的「上界原因」一行（同一 repo 有多个任务时只出一个 PR）；" +
+      "没有那一行，上界就是 plan 自己的 deliveryStation。要更宽的站点只能改 plan 并重新批准。",
+    short: `⚠️ 本任务站点上界 ${cap}（非 ${requested}），由编排 plan 定；原因见任务书「上界原因」`,
+  };
+}
+
 /** One line per narrowed repo, for the approval dialog and the plan summary. */
 export function narrowedRepoLines(
   plan: RepoPrPlanInput,

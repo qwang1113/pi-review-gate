@@ -228,9 +228,10 @@ function matchGitConfigAlias(headTokens: string[], rawSegment: string): ShipComm
   return undefined;
 }
 
-function matchGh(tokens: string[]): ShipCommandKind | undefined {
+/** Index of the gh subcommand past gh's global flags; `undefined` when `tokens` is not gh. */
+function ghSubcommandIndex(tokens: string[]): number | undefined {
   if (tokens.length < 2) return undefined;
-  const head = tokens[0];
+  const head = tokens[0]!;
   if (head !== "gh" && !head.endsWith("/gh")) return undefined;
   // Skip gh global flags before `pr create`. Handle both the space form
   // (`-R repo` / `--repo repo`) and the attached form (`--repo=repo` / `-R=repo`),
@@ -246,6 +247,12 @@ function matchGh(tokens: string[]): ShipCommandKind | undefined {
     if (t.startsWith("-")) { i += 1; continue; }                    // any other no-value gh global flag
     break;
   }
+  return i;
+}
+
+function matchGh(tokens: string[]): ShipCommandKind | undefined {
+  const i = ghSubcommandIndex(tokens);
+  if (i === undefined) return undefined;
   if (tokens[i] === "pr" && tokens[i + 1] === "create") return "pr-create";
   if (tokens[i] === "pr" && tokens[i + 1] === "edit") return "pr-edit";
   // Fail-closed for an UNKNOWN separate-value gh global option (not in
@@ -493,8 +500,31 @@ export function containsHeredoc(command: string): boolean {
  * strict as it was — relaxing it would be a real ship-gate bypass.
  */
 export function observedShipKinds(command: string): ShipCommandKind[] {
-  if (containsHeredoc(command)) return [];
   const kinds = new Set<ShipCommandKind>();
+  for (const head of observedCommandHeads(command)) {
+    const kind = matchGit(head) ?? matchGh(head);
+    if (kind) kinds.add(kind);
+  }
+  return [...kinds];
+}
+
+/**
+ * Did this command MERGE a pull request (`gh pr merge` at a real command
+ * head)? Delivery-station evidence for a task whose job is merging a PR it did
+ * not open (D33) — the same evidence rules as {@link observedShipKinds}. It is
+ * not a ship kind: the ship gate does not block it, only the arrival reads it.
+ */
+export function observedPrMerge(command: string): boolean {
+  return observedCommandHeads(command).some((head) => {
+    const at = ghSubcommandIndex(head);
+    return at !== undefined && head[at] === "pr" && head[at + 1] === "merge";
+  });
+}
+
+/** The command heads the evidence path trusts — see {@link observedShipKinds}. */
+function observedCommandHeads(command: string): string[][] {
+  if (containsHeredoc(command)) return [];
+  const heads: string[][] = [];
   for (const tokens of lexSegmentTokens(command)) {
     // The HEAD of this segment, and nothing but the head. Only two things are
     // stepped over — an env assignment and a redirection with its target —
@@ -518,12 +548,9 @@ export function observedShipKinds(command: string): ShipCommandKind[] {
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) { i += 1; continue; } // `FOO=bar`
       break;
     }
-    const head = tokens.slice(i);
-    const kind = matchGit(head) ?? matchGh(head);
-    if (kind) kinds.add(kind);
-
+    heads.push(tokens.slice(i));
   }
-  return [...kinds];
+  return heads;
 }
 
 

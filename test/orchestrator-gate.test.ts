@@ -9,6 +9,7 @@ import {
   formatOrchestrationStatus,
   orchestratorDoneProblems,
   orchestratorWriteBlock,
+  orchestratorResumeDue,
   proxyApprovalProblems,
   spawnAuthorization,
   type OrchestratorDoneFacts,
@@ -56,6 +57,18 @@ test("CONSTRAINT 1: no plan, or an unapproved one, means no spawning", () => {
   if (!unapproved.ok) assert.match(unapproved.reason, /自己写 plan 文件不算数/);
 
   assert.deepEqual(spawnAuthorization(approved(plan), plan), { ok: true });
+});
+
+test("D23: no approved plan, no open child, no news ⇒ no RESUME push; every other case still pushes", () => {
+  const plan = planOf();
+  const unapproved = spawnAuthorization(emptyRuntime("orch-abc-1"), plan);
+  const ok = spawnAuthorization(approved(plan), plan);
+  const problems = ["任务 a 还没做完"];
+  assert.equal(orchestratorResumeDue({ problems, news: [], openChildren: 0, authorization: unapproved }), false);
+  assert.equal(orchestratorResumeDue({ problems, news: [], openChildren: 0, authorization: ok }), true, "approved: spawn is possible");
+  assert.equal(orchestratorResumeDue({ problems, news: [], openChildren: 1, authorization: unapproved }), true, "a child to handle");
+  assert.equal(orchestratorResumeDue({ problems: [], news: ["c1 在等回答"], openChildren: 0, authorization: unapproved }), true, "news always pushes");
+  assert.equal(orchestratorResumeDue({ problems: [], news: [], openChildren: 1, authorization: ok }), false, "nothing left");
 });
 
 test("CONSTRAINT 1: editing the plan after approval revokes it", () => {

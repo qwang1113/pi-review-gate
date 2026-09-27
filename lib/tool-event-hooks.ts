@@ -28,7 +28,7 @@ import { parsePrecommitOutput } from "./precommit-parse.ts";
 import { evaluateReadonlyStall, readonlyStallNudgeFor } from "./readonly-stall.ts";
 import { resolveCommandRepos } from "./repo-resolve.ts";
 import { armLoop, clearBypassToken, type SessionCells } from "./session-cells.ts";
-import { detectShipCommands, observedShipKinds } from "./ship-detect.ts";
+import { detectShipCommands, observedPrMerge, observedShipKinds } from "./ship-detect.ts";
 import { existingPrNotice, probeOpenPr } from "./station-pr-evidence.ts";
 import { FULL_LANE_NUDGE, looksLikeFullLaneRun } from "./test-run-discipline.ts";
 import { changedFiles } from "./worktree-changes.ts";
@@ -207,15 +207,18 @@ export function createToolResultHook(cells: SessionCells, deps: ToolResultHookDe
     // the over-matching `detectShipCommands` (round-2/3 reviewer P2).
     if (cmd && event.isError !== true && state.taskMode !== "normal") {
       const shipped = observedShipKinds(cmd);
-      if (shipped.length > 0) {
+      const prMerged = observedPrMerge(cmd);
+      if (shipped.length > 0 || prMerged) {
         const cmdRepos = resolveCommandRepos(cmd, cwd);
         const roots = cmdRepos.ambiguous ? new Set(cells.sessionRepos) : new Set(cmdRepos.repos);
         for (const root of roots) {
           const st = stateOf(root);
           const before = st.shippedKinds ?? [];
           const merged = [...new Set([...before, ...shipped])];
-          if (merged.length !== before.length) {
-            st.shippedKinds = merged;
+          const newMerge = prMerged && st.prMergeObserved !== true;
+          if (merged.length !== before.length || newMerge) {
+            if (merged.length !== before.length) st.shippedKinds = merged;
+            if (newMerge) st.prMergeObserved = true;
             deps.persistRepo(ctx, root);
           }
         }

@@ -74,6 +74,7 @@ import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import { createPaneStateReporter } from "../lib/tmux-pane-state.ts";
 import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
 import { readJudgeSideEnv } from "../lib/judge-side.ts";
+import { readWorkerSideEnv } from "../lib/worker-side.ts";
 import { createOrchestratorDeps, runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
 import type { UserNotifyKind } from "../lib/user-notify.ts";
@@ -797,6 +798,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     const outcome = closeOwnSessionOnExit((argv) => runTmux(argv), tmuxScope, {
       handedOff: handedOff(),
       children: cells.state.orchestrator?.children ?? [],
+      judgeOrWorker: readJudgeSideEnv(process.env) !== undefined || readWorkerSideEnv(process.env) !== undefined,
     });
     log(`review-gate[session-scope] 退出时：${outcome.note}`);
   };

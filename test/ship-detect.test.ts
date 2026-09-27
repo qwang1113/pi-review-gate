@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { containsHeredoc, detectShipCommands, extractCommitMessages, extractPrTextFields, observedShipKinds } = await import(
+const { containsHeredoc, detectShipCommands, extractCommitMessages, extractPrTextFields, observedPrMerge, observedShipKinds } = await import(
 
 
   new URL("../lib/ship-detect.ts", import.meta.url).pathname
@@ -445,6 +445,18 @@ test("evidence rejects every measured over-match vector", () => {
       `${label}: the DETECTOR is expected to (over-)match — that is the premise`);
     assert.deepEqual(observedShipKinds(cmd), [], `${label} must prove nothing`);
   }
+});
+
+test("D33: a `gh pr merge` at a command head is merge evidence; wrapped or quoted forms are not", () => {
+  assert.equal(observedPrMerge("gh pr merge 12 --squash"), true);
+  assert.equal(observedPrMerge("gh -R o/r pr merge 12"), true);
+  assert.equal(observedPrMerge("git fetch && gh pr merge 12 --merge"), true);
+  assert.equal(observedPrMerge("timeout 60 gh pr merge 12"), false);
+  assert.equal(observedPrMerge("sudo gh pr merge 12"), false);
+  assert.equal(observedPrMerge('echo "gh pr merge 12"'), false);
+  assert.equal(observedPrMerge("cat > x <<EOF\ngh pr merge 1\nEOF"), false);
+  assert.equal(observedPrMerge("gh pr view 12"), false);
+  assert.deepEqual(observedShipKinds("gh pr merge 12"), [], "not a ship kind");
 });
 
 test("evidence still recognises the real thing, including a multi-line PR body", () => {

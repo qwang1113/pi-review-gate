@@ -290,6 +290,7 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         parsed.shippedKinds = [...new Set(known)];
       }
     }
+    if (parsed.prMergeObserved !== undefined && parsed.prMergeObserved !== true) delete parsed.prMergeObserved;
 
     // L7: a malformed Copilot cycle is repaired, never trusted verbatim and
     // never fatal — sanitizeCopilotState downgrades an unrecognized status to

@@ -30,7 +30,7 @@ import {
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
 import { formatChildHealth } from "./orchestrator-child-state.ts";
-import { orchestratorDoneProblems } from "./orchestrator-gate.ts";
+import { orchestratorDoneProblems, orchestratorResumeDue, spawnAuthorization } from "./orchestrator-gate.ts";
 import { buildOrchestratorResume } from "./orchestrator-directives.ts";
 import { readPlanFile } from "./orchestrator-wiring.ts";
 import { alivePanes } from "./orchestrator-tool-kit.ts";
@@ -485,7 +485,13 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     }
     const problems = sessionExitProblems();
     const news = drainSupervisionNews().map((event) => event.summary);
-    if (problems.length === 0 && news.length === 0) return;
+    const runtime = host.state().orchestrator ?? emptyRuntime(currentOrchestrationId());
+    if (!orchestratorResumeDue({
+      problems,
+      news,
+      openChildren: runtime.children.filter((c) => !c.closedAt).length,
+      authorization: spawnAuthorization(runtime, readPlanFile(host.repos().primary).plan),
+    })) return;
     const maxRounds = host.state().maxRounds;
     if (orchestratorContinuations >= maxRounds) return;
     orchestratorContinuations += 1;
