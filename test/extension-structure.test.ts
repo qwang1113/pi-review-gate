@@ -2333,7 +2333,10 @@ test("a message-only rewrite is not a content change, at L1 and in the branch ru
   );
   assert.match(callBody, /hasAmendFlag\(s\.segment\)/, "the exemption is scoped to an amend");
   assert.match(callBody, /isMessageOnlyRewrite\(\{/, "…and decided by the pure tree comparison");
-  const exemptionAt = callBody.indexOf("isMessageOnlyRewrite({");
+  // The exemption is DECIDED early (N5, 2026-09-27: the station, which it also
+  // exempts, is judged before the "nothing changed" short-circuit), but it is
+  // only APPLIED — the content gates skipped — after L5 has judged the message.
+  const exemptionAt = callBody.indexOf("if (messageOnlyRewrite) {");
   const l5At = callBody.indexOf("nonEnglishCommitMessage(whole)");
   assert.ok(l5At > 0 && l5At < exemptionAt,
     "L5 must judge the NEW message BEFORE the rewrite is let through");
@@ -3607,7 +3610,9 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // judge_submit 的 adviser 分支 callTool("prepare_adviser", …) 接线。
     "judge-submit-tool.ts": 1,
     // callTool("review_checkpoint" / "prepare_review") + the refusal texts naming them.
-    "review-chain.ts": 3,
+    // +1 (N1, 2026-09-27): the checkpoint's dry run before the lane starts —
+    // an internal `callTool`, not an instruction.
+    "review-chain.ts": 4,
     // callTool("run_precommit", …) — the lane's own run.
     "precommit-lane.ts": 1,
     // callTool("prepare_goal_audit", …) — the goal-auditor's task builder.

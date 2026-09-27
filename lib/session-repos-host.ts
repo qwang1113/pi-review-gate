@@ -103,6 +103,14 @@ export function createSessionRepos(cells: SessionCells, deps: SessionReposDeps) 
     // The primary repo goes through persist() — which arms the L7 watcher for
     // it (as it does for every other persist).
     if (root === cells.primaryRepoRoot) { deps.persist(ctx); return; }
+    // A REPO THIS SESSION DOES NOT OWN IS READ-ONLY (N4, 2026-09-27). The bash
+    // result handler observes ship evidence, Copilot arming and checkout
+    // re-arming for WHATEVER repo a command ran in — a scratch repo under
+    // /tmp, another session's checkout — and this write used to leave this
+    // session's state variant in that repo's `.pi/`, where its owner's
+    // checkpoint then listed it as a stranger. The ONE write boundary, so
+    // every caller is covered: only the repos this session is accountable for.
+    if (!knownRepoRoots().includes(root)) return;
     // The SECOND repo's sidecar is gate state too — a judge is barred from it
     // for exactly the same reason, and this path does not go through persist().
     if (deps.noteGateStatePersistSkip(ctx)) return;

@@ -151,6 +151,7 @@ export function createReviewChain(
     //    and the whole point of the bypass is that the user already decided
     //    this round ships without it. The fact is recorded on the checkpoint
     //    and repeated to the reviewer.
+    const message = buildCheckpointMessage(input.message);
     let laneField: { laneFailure?: () => string | undefined } = {};
     let lane: LaneHandle | undefined;
     const precommitOn = stageIsOn("precommit", input.root);
@@ -186,6 +187,16 @@ export function createReviewChain(
         input.progress?.fail("质量轮仍在审");
         return { ok: false, text: `review-gate: 本轮未送审（没跑 checkpoint）—— ${QUALITY_IN_FLIGHT_HINT}` };
       }
+      // ASK THE CHECKPOINT FIRST (N1, 2026-09-27): a lane started for a round
+      // whose checkpoint is then refused verifies content nobody froze, and
+      // lands as 「commit 未知」. The dry run runs every refusal check the real
+      // checkpoint runs, commits nothing, and does not ask for the PASS this
+      // lane is about to produce.
+      const preflight = await callTool("review_checkpoint", { message, note: input.note, repo: input.root, dryRun: true }, input.ctx);
+      if (preflight.isError) {
+        input.progress?.fail("checkpoint 预检被拒");
+        return { ok: false, text: "review-gate: 本轮未送审（lane 未启动）— checkpoint 预检被拒。\n" + toolText(preflight) };
+      }
       lane = startPrecommitBeside(input.root, input.ctx);
       laneField = { laneFailure: lane.failure };
     }
@@ -199,10 +210,10 @@ export function createReviewChain(
     //    a single refused prepare into a permanent dead end — the commit was
     //    already in, so every retry died at this step. Only a REFUSAL
     //    (isError) stops the chain.
-    const message = buildCheckpointMessage(input.message);
     input.progress?.step("checkpoint 提交");
     const commit = await callTool("review_checkpoint", { message, note: input.note, repo: input.root }, input.ctx);
     if (commit.isError) {
+      lane?.abort("checkpoint 被拒，这一轮没有成立");
       input.progress?.fail("被拒");
       return {
         ok: false,
@@ -230,6 +241,7 @@ export function createReviewChain(
       input.ctx,
     );
     if (prepared.details?.prepared === false || prepared.isError) {
+      lane?.abort("prepare 被拒，这一轮没有成立");
       input.progress?.fail("被拒");
       return {
         ok: false,

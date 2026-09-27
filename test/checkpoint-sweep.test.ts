@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { planCheckpointSweep } from "../lib/checkpoint-sweep.ts";
+import { checkpointCommitPaths, planCheckpointSweep } from "../lib/checkpoint-sweep.ts";
 
 test("a seeded symlink nobody wrote is LEFT OUT — the measured case", () => {
   const plan = planCheckpointSweep({ untracked: ["node_modules", ".env"], own: [] });
@@ -42,4 +42,12 @@ test("matching is EXACT — no glob, no prefix, no case folding", () => {
 test("the same path listed twice is one path", () => {
   const plan = planCheckpointSweep({ untracked: ["node_modules", "node_modules", ""], own: [] });
   assert.deepEqual(plan.leftOut, ["node_modules"], "a rerun or a raced reader must not double-report");
+});
+
+test("N1: only foreign untracked paths left ⇒ nothing to commit (the fingerprint's answer)", () => {
+  const sweep = planCheckpointSweep({ untracked: [".pi/notes.md"], own: [] });
+  assert.deepEqual(checkpointCommitPaths([], sweep), [], "a foreign file alone is no work to commit");
+  const mixed = planCheckpointSweep({ untracked: ["lib/new.ts", ".pi/notes.md"], own: ["lib/new.ts"] });
+  assert.deepEqual(checkpointCommitPaths(["lib/a.ts", "lib/new.ts"], mixed), ["lib/a.ts", "lib/new.ts"],
+    "tracked changes plus the session's own untracked, each once, never the stranger");
 });

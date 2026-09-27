@@ -62,3 +62,16 @@ export function planCheckpointSweep(input: {
   }
   return result;
 }
+
+/**
+ * Every path the checkpoint will commit: the tracked changes (index or
+ * worktree) plus the untracked paths this session wrote. EMPTY means there is
+ * nothing to commit — the SAME answer the fingerprint gives (D20), so a
+ * worktree holding only foreign untracked files reads as clean here too (N1,
+ * 2026-09-27: `git status --porcelain` counted them, the commit then died on
+ * git's own "nothing added to commit"). It is also the only set the sensitive
+ * and file-size checks may judge: a path left out is never committed.
+ */
+export function checkpointCommitPaths(tracked: readonly string[], sweep: CheckpointSweep): string[] {
+  return [...new Set([...tracked, ...sweep.own])];
+}
