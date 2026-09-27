@@ -182,6 +182,8 @@ export async function doAskUser(
    * receipt, which is the one place an answer could still have come from.
    */
   const unrenderable = new Set<number>();
+  /** Questions whose thirty-minute window ran out with nobody deciding (D39). */
+  const undecided = new Set<number>();
 
   // ── THE WHOLE INTERVIEW GOES UP FIRST (2026-09-06) ──
   //
@@ -233,9 +235,12 @@ export async function doAskUser(
     // reason — nobody decided anything, and the rest of the batch must still be
     // asked. Reading it as a dismissed box instead took every question behind
     // it down on a host that could have drawn them.
-    const resolution = opts.unavailable
+    const resolved = opts.unavailable
       ? { answer: { question: q.text, kind: "unanswered" as const } }
       : resolveQuestion(q, picked, opts);
+    const resolution = resolved.answer.kind === "unanswered" && undecided.has(index)
+      ? { ...resolved, answer: { ...resolved.answer, timedOut: true as const } }
+      : resolved;
     answers[index] = resolution.answer;
     applyGrant(q, resolution.answer);
     // Persisted after EVERY question: an interview that dies here resumes at
@@ -324,7 +329,17 @@ export async function doAskUser(
       // the queue, the banner and the proxy race are all behind these two
       // seams, and only the RENDERING differs (radio list vs checklist).
       const spec = { ...choiceSpecOf(q), title: questionDialogTitle(q, cursor, questions.length) };
-      const opts = { body: q.text, signal, back: cursor > 0 };
+      const opts = {
+        body: q.text,
+        signal,
+        back: cursor > 0,
+        // The anchor is the question this wait settles, even mid walk-back.
+        onUndecided: () => { undecided.add(anchor); },
+        // AN AUTHORIZATION IS NOT A MACHINE'S TO GIVE (D39): the arbiter picking
+        // the recommended row would mint the proxy grant the notice asks the
+        // USER for. The window still runs; its expiry is "nobody decided".
+        ...(q.grantScope ? { proxy: false } : {}),
+      };
       const picked = q.multiple
         ? await deps.askMultiChoice(uiCtx, spec, opts)
         : await deps.askChoice(uiCtx, spec, opts);

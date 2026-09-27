@@ -30,7 +30,7 @@ import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import { readPlanFile } from "./orchestrator-wiring.ts";
 import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
 import type { SessionCells } from "./session-cells.ts";
-import { sessionDirForCwd } from "./session-dir.ts";
+import { findTranscriptPath, sessionDirFromContext } from "./session-dir.ts";
 import { closeSessionPane, openSessionWindow } from "./session-factory.ts";
 import { claimsMainSidecar } from "./session-exclusivity.ts";
 import {
@@ -114,11 +114,12 @@ export function createHandoffHost(
     return kind === "orchestrator" || kind === "child" || kind === "judge" ? kind : "loop";
   }
 
-  /** This session's transcript — the raw record a successor may dig through. */
+  /** This session's transcript — the raw record a successor may dig through. Absent when the file cannot be found. */
   function ownTranscriptPath(): string | undefined {
+    const sessionId = cells.state.sessionId;
+    if (!sessionId) return undefined;
     try {
-      const dir = sessionDirForCwd(cells.cwd);
-      return cells.state.sessionId ? `${dir}/${cells.state.sessionId}.jsonl` : undefined;
+      return findTranscriptPath(sessionDirFromContext(cells.latestCtx, cells.cwd), sessionId);
     } catch { return undefined; }
   }
 
@@ -373,6 +374,10 @@ export function createHandoffHost(
   function handoffReminderBlock(): string {
     const sessionId = cells.state.sessionId;
     if (deps.runtimeClocks().handedOff() || !sessionId) return "";
+    // A WORKER NEVER HANDS OVER (D07): it has no successor path — its opener
+    // re-submits under the same workerId instead — so a reminder to call
+    // `session_handoff` would only open a plain loop session in its place.
+    if (readWorkerSideEnv(process.env)) return "";
     let due: { due: boolean; percent?: number };
     try {
       due = handoffDue(cells.latestCtx?.getContextUsage?.());
@@ -388,6 +393,7 @@ export function createHandoffHost(
       percent: due.percent,
       docPath,
       pendingFill,
+      canFillDoc: handoffDeps.canFillDoc(),
     });
   }
 

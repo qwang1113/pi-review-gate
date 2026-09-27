@@ -7,10 +7,26 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { sessionDirForCwd } from "../lib/session-dir.ts";
+import { findTranscriptPath, sessionDirForCwd } from "../lib/session-dir.ts";
+
+test("D06: the transcript is the `<timestamp>_<id>.jsonl` file that exists, or nothing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-transcripts-"));
+  try {
+    writeFileSync(join(dir, "2026-09-26T10-00-00-000Z_abc.jsonl"), "");
+    writeFileSync(join(dir, "2026-09-27T10-00-00-000Z_abc.jsonl"), "");
+    writeFileSync(join(dir, "2026-09-27T11-00-00-000Z_abc-h1.jsonl"), "");
+    assert.equal(findTranscriptPath(dir, "abc"), join(dir, "2026-09-27T10-00-00-000Z_abc.jsonl"),
+      "the newest file of THIS id — not its -h1 successor's");
+    assert.equal(findTranscriptPath(dir, "abc-h1"), join(dir, "2026-09-27T11-00-00-000Z_abc-h1.jsonl"));
+    assert.equal(findTranscriptPath(dir, "missing"), undefined, "no file ⇒ no pointer to a path that does not exist");
+    assert.equal(findTranscriptPath(join(dir, "nope"), "abc"), undefined, "an unreadable dir is not a crash");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 const HOME = join(tmpdir(), "rg-session-home-");
 const tracks: string[] = [];

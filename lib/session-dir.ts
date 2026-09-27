@@ -15,6 +15,23 @@
  */
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { readdirSync } from "node:fs";
+
+/**
+ * The transcript FILE a session id names inside `dir`, or undefined.
+ *
+ * pi names it `<timestamp>_<id>.jsonl`, so `<dir>/<id>.jsonl` — what the gate
+ * used to hand a successor — does not exist (D06). The bare name is still
+ * accepted in case a host writes it that way. Several matches ⇒ the newest
+ * timestamp, which sorts last.
+ */
+export function findTranscriptPath(dir: string, sessionId: string): string | undefined {
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return undefined; }
+  const hits = names.filter((n) => n === `${sessionId}.jsonl` || n.endsWith(`_${sessionId}.jsonl`)).sort();
+  const hit = hits[hits.length - 1];
+  return hit === undefined ? undefined : join(dir, hit);
+}
 
 /**
  * Pi's normalizePath semantics, reduced to what the session-dir encoding

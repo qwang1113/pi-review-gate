@@ -43,6 +43,7 @@ import type { SensitiveGrant } from "./sensitive-grant.ts";
 import type { AskChoiceOpts, ChoiceSpec } from "./choice-dialog.ts";
 import { registerConsentRequestTools } from "./consent-request-tools.ts";
 import { doAskUser } from "./ask-user-interview.ts";
+import { GRANTABLE_SCOPES } from "./ask-user.ts";
 import { MAX_CHOICE_OPTIONS } from "./choice-dialog.ts";
 import type { MULTI_UNAVAILABLE } from "./multi-choice-dialog.ts";
 
@@ -247,6 +248,9 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
           })),
           defaultChecked: Type.Optional(Type.Array(Type.String(), {
             description: "REQUIRED when `multiple` is true: the options the checklist opens TICKED — the group you recommend, and what a plain Enter submits. `[]` recommends none of them.",
+          })),
+          grantScope: Type.Optional(Type.Union(GRANTABLE_SCOPES.map((scope) => Type.Literal(scope)), {
+            description: "Project manager only: make this an AUTHORIZATION question. Picking the `recommended` option grants the project manager that proxy scope for this orchestration (any other answer revokes it); the dialog tells the user so, and it is never answered by the thirty-minute stand-in. Radio questions only.",
           })),
         }),
         { description: "The questions, asked in order" },

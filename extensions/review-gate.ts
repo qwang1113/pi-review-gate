@@ -145,7 +145,6 @@ import {
 } from "../lib/repo-facts.ts";
 import type { ToolUpdate } from "../lib/progress-stream.ts";
 import { readJsonIfExists } from "../lib/json-file.ts";
-import { sessionDirForCwd } from "../lib/session-dir.ts";
 import { createLlmClassifier, type LlmClassifier } from "../lib/llm-classify.ts";
 import { loopGoalRelPath } from "../lib/loop-goal.ts";
 import { choiceRows, type ChoiceUi } from "../lib/choice-dialog.ts";
@@ -582,12 +581,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // ROUND-4 P1 — `orchestrator_wait`'s fourth block is computed from this.
     contextPercent: () => contextPercentOf(cells.latestCtx as unknown as { getContextUsage?: () => unknown }),
     auditPlan: (plan, onUpdate, signal) => runPlanAudit(plan, onUpdate as { step?: (t: string) => void; done?: (t: string) => void } | undefined, signal),
-    sessionTranscriptPath: () => {
-      try {
-        const dir = sessionDirForCwd(cells.cwd);
-        return cells.state.sessionId ? `${dir}/${cells.state.sessionId}.jsonl` : undefined;
-      } catch { return undefined; }
-    },
+    // One lookup for the transcript file (D06) — the handoff host owns it.
+    sessionTranscriptPath: () => handoff.ownTranscriptPath(),
     // Handed to a successor as its takeover proof (lib/orchestrator-relay.ts).
     ownSessionId: () => cells.state.sessionId ?? undefined,
     // WHERE THE CHILD WORKS (2026-09-18, A): the session's own rebase-aware read.

@@ -79,6 +79,7 @@ import {
 import type { ChildState } from "./orchestrator-child-state.ts";
 import { buildSessionEnv, type SessionPaneRole } from "./session-env.ts";
 import { mkdirSync } from "node:fs";
+import { withGateExtension } from "./session-launch-specs.ts";
 
 
 // ---------------------------------------------------------------------------
@@ -425,7 +426,7 @@ export async function openSessionWindow(
         ...(spec.role.kind === "orchestration-child" ? { pin: "orchestration-child" } : {}),
         cwd: spec.cwd,
         env,
-        command: spec.command,
+        command: withGateExtension(spec.command),
         // THE WINDOW NAME IS THE LABEL (user decision, 2026-09-25). `tmux ls`
         // and `prefix w` are the only ways to see a child without attaching to
         // it, and a list of identical `pi` entries tells nobody anything.
@@ -485,7 +486,7 @@ function openRelayPane(
   }
   let spawned: TmuxRunResult;
   try {
-    spawned = run(buildHandoffPaneArgv({ orchestratorPane: ownPane, cwd: spec.cwd, env, command: spec.command }));
+    spawned = run(buildHandoffPaneArgv({ orchestratorPane: ownPane, cwd: spec.cwd, env, command: withGateExtension(spec.command) }));
   } catch (error) {
     return { ok: false, error: (error as Error).message };
   }

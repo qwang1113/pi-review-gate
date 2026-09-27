@@ -626,7 +626,7 @@ plan，把每一处差异归入两类之一：
 它的安全边有三条：**用户每次新的显式批准会重置世系**（新决定覆盖旧决定，堵死
 「先平移变宽 → 用户后来收窄 → 再写回宽版本」）；世系从 sidecar 读回时按
 `approvedPlanHash` 的同等强度校验，**一条不合形状就整份丢弃**；换了新会话时它跟
-批准一起被 `successorRuntime(runtime, false)` 剥离（登记表与 grants 留下，许可一样不留）——
+批准一起被 `successorRuntime(runtime, false)` 剥离（登记表留下，许可与代答授权 grants 一样不留；grants 随批准只交给交棒继任者，2026-09-27）——
 `fromHandoff: true` 只给前任自己交棒的继任者（2026-09-16，见
 `docs/execution-model.md` 的「接力继承什么」）。
 它的信任边界与 `approvedPlanHash` **完全相同、防线同一** —— 都在门禁不可授权编辑

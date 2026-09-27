@@ -32,6 +32,7 @@ import {
   RECENT_USER_MAX_CHARS,
 } from "../lib/session-handoff.ts";
 import { THINKING_LOOP_INJECTION } from "../lib/thinking-loop-controller.ts";
+import { buildChainExhaustedNote, buildRotationResumeNote } from "../lib/judge-model-rotation.ts";
 
 test("the reading prefers pi's percent, and falls back to tokens / window", () => {
   assert.equal(contextPercentFromUsage({ tokens: 700_000, contextWindow: 1_000_000, percent: 68 }), 68);
@@ -209,6 +210,24 @@ test("lastUserMessages: the gate's own injections never displace the user's word
   assert.deepEqual(lastUserMessages(entries, 3), ["用户甲", "用户乙", "用户丙"]);
   assert.deepEqual(lastUserMessages([userMsg("[bug] 用户自己写的标签")], 3), ["[bug] 用户自己写的标签"],
     "only the gate's own tag families are skipped");
+});
+
+test("D10: the judge's model-fallback notes are the gate's own injections, not the user's words", () => {
+  const entries = [
+    userMsg("用户甲"),
+    userMsg(buildRotationResumeNote("m1", "m2", "429")),
+    userMsg(buildChainExhaustedNote("m2", "429")),
+  ];
+  assert.deepEqual(lastUserMessages(entries, 3), ["用户甲"]);
+});
+
+test("D07: a pane without edit/write is never asked for the paragraph", () => {
+  const judge = handoffReminder({ kind: "judge", percent: 75, docPath: ".pi/handoff/j.md", pendingFill: true, canFillDoc: false });
+  assert.doesNotMatch(judge, /先把你自己的那一段/);
+  assert.match(judge, /补充段不用写/);
+  assert.match(judge, /session_handoff\(\)/);
+  const loop = handoffReminder({ kind: "loop", percent: 75, docPath: ".pi/handoff/l.md", pendingFill: true, canFillDoc: true });
+  assert.match(loop, /先把你自己的那一段/, "a writer is still asked first");
 });
 
 test("lastUserMessages: exactly the limit is kept whole, one more is cut and says so", () => {

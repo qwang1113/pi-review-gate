@@ -719,8 +719,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    的「接力的不断档保证」。
 4. **接力继承的是记录，不是权力**（2026-09-16）：继任者（`lib/session-inheritance.ts`
    的 `isHandoffSuccessorOf` —— 有交接标记**且** sidecar 里记的 sessionId 就是那个前任，
-   两者缺一不可）保留用户已经确认过的两份记录：plan 批准五件套，与会话的 `restatement`
-   / `loopGoal` / 轮次预算（`rounds` / `turnsWithoutGoal`）。每一条仍绑着它当初绑的
+   两者缺一不可）保留用户已经确认过的三份记录：plan 批准五件套、项目经理的代答授权
+   （runtime 的 `grants`：`tmux-access` / `sensitive-edit`，2026-09-27 用户决定），与会话的
+   `restatement` / `loopGoal` / 轮次预算（`rounds` / `turnsWithoutGoal`）。每一条仍绑着它当初绑的
    **内容**（canonical plan / goal 文本 / 反述 text+hash），内容一变既有校验立刻失效；
    `bypass`、scope limit、`taskMode` 一律不继承。`orchestrator_attach` 接管没有交接标记
    ⇒ 任何东西都不继承（2026-09-06 的「批准不随会话转移」只收窄、没被推翻）。规则落在

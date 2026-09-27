@@ -8,9 +8,39 @@
  * env contract and pane-liveness probing.)
  */
 
+import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import { judgePaneLabel, judgeWindowName, paneIdentity, workerWindowName } from "./orchestrator-pane-decor.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import type { SessionPaneDecor } from "./session-factory.ts";
+
+/**
+ * The gate extension file THIS process loaded — its sibling `extensions/`, since
+ * this module is only ever reached through that extension's own imports.
+ */
+export const OWN_GATE_EXTENSION = fileURLToPath(new URL("../extensions/review-gate.ts", import.meta.url));
+
+/**
+ * Every pane the gate opens runs THE SAME GATE CODE as its opener (D11).
+ *
+ * A bare `pi` loads whatever the settings register — the main checkout — so a
+ * session started on a worktree's gate (`pi -e <worktree>/extensions/…`) used
+ * to open judges, workers, children and successors that enforced different
+ * rules than itself. `-e` names the file actually loaded here; when that is
+ * the settings package's own file, pi dedupes the two by canonical path and
+ * nothing changes. A `--no-extensions` on this process travels too, so the
+ * pane loads exactly what its opener did. Only a `pi` argv is touched.
+ */
+export function withGateExtension(
+  command: readonly string[],
+  extensionPath: string = OWN_GATE_EXTENSION,
+  hostArgv: readonly string[] = process.argv,
+): string[] {
+  const [bin, ...rest] = command;
+  if (bin === undefined || basename(bin) !== "pi") return [...command];
+  const noExtensions = hostArgv.includes("--no-extensions") || hostArgv.includes("-ne");
+  return [bin, ...(noExtensions ? ["--no-extensions"] : []), "-e", extensionPath, ...rest];
+}
 
 /** Flags every judge pane carries: the read-only review contract. */
 export interface JudgePaneCommandOpts {

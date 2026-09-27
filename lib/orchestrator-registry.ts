@@ -203,8 +203,9 @@ export interface OrchestratorRuntime {
    * minted by the gate itself (never by the PM writing a file) through one
    * of three doors: an `ask_user` answer with a grant scope, the
    * `/gate-grant` command, or the PM's first proxy answer when the user
-   * picks "allow and remember". Persisted with the runtime, so a relay
-   * successor inherits them.
+   * picks "allow and remember". Persisted with the runtime; a `session_handoff`
+   * successor inherits them, an `orchestrator_attach` takeover does not
+   * (`successorRuntime`).
    */
   grants?: OrchestrationGrant[];
 
@@ -300,6 +301,9 @@ export function successorRuntime(
     approvedPlan: _snapshot,
     approvalAmendments: _amendments,
     approvedPlanHistory: _lineage,
+    // THE PROXY AUTHORITIES FOLLOW THE APPROVAL (D38, user decision 2026-09-27):
+    // a handoff successor keeps them, a takeover re-asks the user.
+    grants: _grants,
     ...carried
   } = runtime;
   return carried;

@@ -102,6 +102,12 @@ export interface AskChoiceOpts {
    * DECLINE locks a request for the session, and a timeout is not a decline.
    */
   onUndecided?: () => void;
+  /**
+   * `false` keeps the arbiter from standing in after thirty minutes — for a
+   * question a machine must not answer (the stage checklist, an ask_user
+   * authorization question). Default: the proxy may answer.
+   */
+  proxy?: boolean;
 }
 
 export interface ChoiceSpec {

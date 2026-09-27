@@ -480,16 +480,25 @@ export function handoffReminder(input: {
   percent: number;
   docPath: string;
   pendingFill: boolean;
+  /**
+   * Can this pane write the paragraph at all? A judge runs without edit/write
+   * (D07): asking it to fill the section is an instruction it can never follow,
+   * and `session_handoff` does not require it of such a pane anyway.
+   */
+  canFillDoc?: boolean;
 }): string {
   const who = KIND_LABEL[input.kind];
+  const fillLines = input.canFillDoc === false
+    ? ["", "本 pane 没有 edit/write，补充段不用写：到了合适的停顿点直接调 `session_handoff()`，继任者拿到的是门禁的机械骨架。"]
+    : input.pendingFill
+      ? ["", `先把你自己的那一段写进 \`${HANDOFF_FILL_HEADING}\`（为什么这么做、踩过哪些坑、下一步），再调 \`session_handoff()\`。`]
+      : ["", "你已经补过交接段落了，随时可以调 `session_handoff()`。"];
   return [
     `## 会话交接（门禁提醒 · ${who}）`,
     "",
     `本会话上下文已用 ${input.percent}%（阈值 ${HANDOFF_PERCENT}%）。`,
     "门禁已经把交接文档的机械骨架写在 `" + input.docPath + "` 了：契约与未完成项是真值，不需要你复述。",
-    ...(input.pendingFill
-      ? ["", `先把你自己的那一段写进 \`${HANDOFF_FILL_HEADING}\`（为什么这么做、踩过哪些坑、下一步），再调 \`session_handoff()\`。`]
-      : ["", "你已经补过交接段落了，随时可以调 `session_handoff()`。"]),
+    ...fillLines,
     "",
     "调用之后门禁会自己完成剩下的一切：开新 pane、给继任者第一条消息、确认它接手后关掉本会话。" +
       "**不要**自己开 pane、不要自己关会话、不要手写整份文档。",
