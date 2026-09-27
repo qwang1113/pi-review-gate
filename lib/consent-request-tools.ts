@@ -192,7 +192,8 @@ async function askConsent(
         ...(opts.reason ? { payload: `AI 给出的理由（未经核实）: ${opts.reason.slice(0, 300)}` } : {}),
       },
       uiCtx.hasUI === true,
-      (signal) => deps.askChoice(uiCtx, spec, {
+      (signal, markArbiter) => deps.askChoice(uiCtx, spec, {
+        onProxyAnswer: markArbiter,
         body: opts.consentBody,
         signal,
         onUndecided: () => { undecided = true; },

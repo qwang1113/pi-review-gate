@@ -54,6 +54,7 @@ import { projectChannel, readChannel } from "./channel-projection.ts";
 import type {
   ChannelInstructRecord,
   ChannelRequestRecord,
+  ChannelSettledRecord,
   ChildReportedState,
   InstructAckStage,
 } from "./channel-records.ts";
@@ -268,14 +269,19 @@ export interface ChannelDialogRequest {
 /** Who ended a question, and with what. */
 export interface ChannelDialogOutcome {
   answer: string | undefined;
-  by: "human" | "orchestrator" | "dismissed" | "interrupted";
+  by: ChannelSettledRecord["by"];
   requestId: string;
   /** The orchestrator's decline reason (goal rejection), when one was given. */
   reason?: string;
 }
 
-/** Raise the dialog. Must honour `signal` by resolving `undefined` when aborted. */
-export type DialogRenderer = (signal: AbortSignal) => Promise<string | undefined>;
+/**
+ * Raise the dialog. Must honour `signal` by resolving `undefined` when aborted.
+ * `markArbiter` is called when the answer it resolves with was the arbiter's
+ * thirty-minute stand-in rather than the user's own (N6) — forward it as the
+ * dialog's `onProxyAnswer`.
+ */
+export type DialogRenderer = (signal: AbortSignal, markArbiter: () => void) => Promise<string | undefined>;
 
 const defaultSleep = (ms: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
@@ -342,14 +348,15 @@ export async function askThroughChannel(
     finish(got.answer, "orchestrator", got.reason);
   });
 
+  let byArbiter = false;
   const humanSide = (request.hasUI
-    ? render(dialogAbort.signal).catch(() => undefined)
+    ? render(dialogAbort.signal, () => { byArbiter = true; }).catch(() => undefined)
     : Promise.resolve<string | undefined>(undefined)
   ).then((answer) => {
     if (decided) return;
     if (answer !== undefined) {
       pollAbort.abort();
-      finish(answer, "human");
+      finish(answer, byArbiter ? "arbiter" : "human");
       return;
     }
     // No UI at all is NOT a person dismissing anything — let the channel run.

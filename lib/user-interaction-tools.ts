@@ -38,7 +38,7 @@ import { Type } from "typebox";
 
 import type { ToolHost } from "./tool-host.ts";
 import type { GateState } from "./gate-state.ts";
-import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
+import type { ChannelDialogOutcome, ChannelDialogRequest, DialogRenderer } from "./orchestrator-child-channel.ts";
 import type { SensitiveGrant } from "./sensitive-grant.ts";
 import type { AskChoiceOpts, ChoiceSpec } from "./choice-dialog.ts";
 import { registerConsentRequestTools } from "./consent-request-tools.ts";
@@ -119,7 +119,7 @@ export interface UserInteractionToolDeps {
   askEitherSide(
     request: Omit<ChannelDialogRequest, "hasUI">,
     hasUI: boolean,
-    render: (signal: AbortSignal) => Promise<string | undefined>,
+    render: DialogRenderer,
   ): Promise<ChannelDialogOutcome>;
   /**
    * Can THIS session route consent dialogs through an orchestration channel

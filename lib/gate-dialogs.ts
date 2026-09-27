@@ -27,6 +27,7 @@ import {
   dialogNotifyDetail,
   dialogSignal,
   renderChoice,
+  type AskChoiceOpts,
   type ChoiceSpec,
   type ChoiceUi,
 } from "./choice-dialog.ts";
@@ -49,25 +50,8 @@ import type { Ref, SessionHost } from "./session-host.ts";
 /** pi's editor component CLASS, as a type — see `loadEditorComponent`. */
 type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["ExtensionEditorComponent"];
 
-/** The options every dialog call site may pass. */
-export interface AskOpts {
-  body?: string;
-  signal?: AbortSignal;
-  back?: boolean;
-  repo?: string;
-  onUndecided?: () => void;
-  /**
-   * MAY THE ARBITER STAND IN FOR THE USER on this question?
-   *
-   * Default true — every dialog carries the thirty-minute hand-off
-   * (lib/user-proxy.ts, user decision 2026-09-19). `false` is for a question
-   * a machine has no business answering: the stage checklist, where a partial
-   * stand-in answer would switch gates OFF, and an ask_user authorization
-   * question, where the stand-in would mint the grant (D39). The window
-   * still runs; its expiry is the ordinary “nobody decided” landing.
-   */
-  proxy?: boolean;
-}
+/** The options every dialog call site may pass — the one shared shape. */
+export type AskOpts = AskChoiceOpts;
 
 type UiCtx = { ui?: ChoiceUi; signal?: AbortSignal };
 
@@ -481,6 +465,7 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
     settledBy.abort();
     if (decided.byProxy !== undefined && decided.answer !== undefined) {
       deps.proxy.record(spec, decided.answer, decided.byProxy, dialogRoot);
+      try { opts.onProxyAnswer?.(); } catch { /* the caller's own bookkeeping */ }
     } else if (decided.proxyFailed === true) {
       // NOBODY DECIDED, AND THE USER IS NOT HERE. Say so: a dialog that times
       // out silently is indistinguishable, to the user, from one that was

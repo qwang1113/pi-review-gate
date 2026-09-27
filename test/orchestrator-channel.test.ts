@@ -392,6 +392,18 @@ test("the HUMAN answering first wins, and the settle record releases the orchest
     "the orchestrator's own wait ends instead of hanging on a question nobody will answer again");
 });
 
+test("N6: an ARBITER stand-in answer settles as `arbiter`, never as the user's own", async () => {
+  const io = memoryIO(() => T0);
+  const outcome = await askThroughChannel(binding(io), {
+    dialogKind: "select", title: "选一个", options: ["A", "B"], hasUI: true,
+  }, async (_signal, markArbiter) => { markArbiter(); return "B"; });
+
+  assert.equal(outcome.answer, "B");
+  assert.equal(outcome.by, "arbiter");
+  const settled = readChannel(io, channelPathFor(ORCH, "c1", HOME)).records.find((r) => r.kind === "request-settled");
+  assert.equal((settled as { by: string }).by, "arbiter", "the audit record names the stand-in");
+});
+
 test("a DISMISSED dialog settles the question rather than stranding the orchestrator", async () => {
   const io = memoryIO(() => T0);
   const outcome = await askThroughChannel(binding(io), {

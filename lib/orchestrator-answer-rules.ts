@@ -16,6 +16,25 @@ import { looksLikeDeclineRow, rowIndexOf } from "./choice-dialog.ts";
 // so a second literal here is a second dialect waiting to drift.
 import { MULTI_ANSWER_SEPARATOR } from "./multi-choice-dialog.ts";
 import type { PendingRequest } from "./orchestrator-supervisor.ts";
+import type { ChannelSettledRecord } from "./channel-records.ts";
+
+const SETTLED_BY_LABEL: Record<ChannelSettledRecord["by"], string> = {
+  human: "用户在子会话里当场作答",
+  arbiter: "arbiter 代答（对话框 30 分钟无人作答，不是用户本人的决定）",
+  orchestrator: "项目经理经通道作答",
+  dismissed: "用户关掉了对话框（没有答案）",
+  interrupted: "被指令打断（没有答案）",
+};
+
+/**
+ * WHO ENDED A REQUEST, in the words the project manager reads (N6). The
+ * channel's `request-settled` record is the audit; this is its receipt — an
+ * arbiter stand-in must never read as the user's own answer.
+ */
+export function describeSettlement(record: Pick<ChannelSettledRecord, "requestId" | "by" | "answer">): string {
+  const who = SETTLED_BY_LABEL[record.by] ?? `未知来源（${String(record.by)}）`;
+  return `${record.requestId} 已结算：${who}` + (record.answer === undefined ? "" : `，答案：${record.answer}`);
+}
 
 /**
  * ONE item of an answering round: which question, and what to say to it.

@@ -321,7 +321,7 @@ export async function doAskUser(
    * inventing a second "corrected answer" record would give one dialog two
    * histories with no rule for which one wins.
    */
-  async function askWithBacks(anchor: number, signal: AbortSignal): Promise<string | undefined> {
+  async function askWithBacks(anchor: number, signal: AbortSignal, markArbiter: () => void): Promise<string | undefined> {
     let cursor = anchor;
     for (;;) {
       const q = questions[cursor]!;
@@ -335,6 +335,9 @@ export async function doAskUser(
         back: cursor > 0,
         // The anchor is the question this wait settles, even mid walk-back.
         onUndecided: () => { undecided.add(anchor); },
+        // Only the anchored question's answer settles its channel request; a
+        // stand-in answer to a walked-back question is not that settlement.
+        ...(cursor === anchor ? { onProxyAnswer: markArbiter } : {}),
         // AN AUTHORIZATION IS NOT A MACHINE'S TO GIVE (D39): the arbiter picking
         // the recommended row would mint the proxy grant the notice asks the
         // USER for. The window still runs; its expiry is "nobody decided".
@@ -386,12 +389,12 @@ export async function doAskUser(
           : { batch: { id: batchId, index, total: questions.length } }),
       },
       uiCtx.hasUI === true,
-      async (signal) => {
+      async (signal, markArbiter) => {
         await gates[offset]!.opened;
         // Already settled (the project manager answered it through the
         // channel), or the interview stopped: never put a dead box on screen.
         if (signal.aborted || stopped) return undefined;
-        const answered = await askWithBacks(index, signal);
+        const answered = await askWithBacks(index, signal, markArbiter);
         // NOTHING WAS SHOWN STAYS HERE: the renderer answers with the same
         // `undefined` a closed box gives (so the channel settles it as
         // dismissed, never as an answer nobody gave), and the FACT that no host

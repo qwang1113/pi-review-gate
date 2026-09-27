@@ -495,3 +495,23 @@ test("a batch with one unrenderable checklist still asks the rest — and says w
   assert.match(reply, /画不出复选清单/, "…and the agent is told why the other one has no answer");
   assert.deepEqual(h.state.askUser?.answers.map((a) => a.kind), ["unanswered", "answered"]);
 });
+
+// ---------------------------------------------------------------------------
+// N6: an arbiter stand-in answer is recorded as the arbiter's
+// ---------------------------------------------------------------------------
+
+test("N6: the question the arbiter stood in for settles as `arbiter`, the others as `human`", async () => {
+  const h = harness(rowA);
+  const human = h.deps.askChoice;
+  // The dialog's thirty-minute hand-off, minus the thirty minutes: the real
+  // askChoice calls `onProxyAnswer` when the answer it returns is the arbiter's.
+  h.deps.askChoice = async (uiCtx, spec, opts) => {
+    const answer = await human(uiCtx, spec, opts);
+    if (opts?.body?.includes("第二题")) opts.onProxyAnswer?.();
+    return answer;
+  };
+
+  await h.run(THREE);
+
+  assert.deepEqual(settlesOn(h.io).map((r) => r.by), ["human", "arbiter", "human"]);
+});

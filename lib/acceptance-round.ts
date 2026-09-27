@@ -544,7 +544,11 @@ export function parseNoAcceptanceDeclaration(goalText: string): { reason: string
     // the approval box and recorded in the SKIPPED note.
     tail = tail
       .replace(/^[（(【\[「]?\s*(?:理由\s*)?[）)】\]」]?\s*[:：]?\s*/, "")
-      .replace(/[）)】\]」]\s*$/, "")
+      // The closing wrapper may be followed by the sentence's own full stop —
+      // 「（用户关闭了验收环节）。」 left 「）」 on the reason shown in the approval
+      // box (N2). Wrapper and stop come off together; a stop with no wrapper
+      // in front of it is the reason's own punctuation and stays.
+      .replace(/[）)】\]」]\s*[。.]?\s*$/, "")
       .trim();
     // 两个字符以下不构成理由（「无」「-」这类占位）；「理由」/「reason」与
     // 骨架里的 `<…>` 空白也是占位，不是理由。

@@ -200,7 +200,7 @@ function fake(over: Partial<RecordFake> = {}): RecordFake {
       return f.rejectReason ? `${decline}：${f.rejectReason}` : undefined;
     },
     askEitherSide: async (_request, _hasUI, render) => {
-      const answer = await render(new AbortController().signal);
+      const answer = await render(new AbortController().signal, () => {});
       return { answer, by: answer === undefined ? "dismissed" : "human", requestId: "r1", ...(f.rejectReason ? { reason: f.rejectReason } : {}) };
     },
     loopGoalPath: (root) => `${root}/.pi/loop-goal.md`,

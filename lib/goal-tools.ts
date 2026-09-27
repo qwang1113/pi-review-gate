@@ -45,7 +45,7 @@ import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import { stageOpen } from "./loop-stages.ts";
 import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
-import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
+import type { ChannelDialogOutcome, ChannelDialogRequest, DialogRenderer } from "./orchestrator-child-channel.ts";
 import { LOOP_GOAL_SKELETON, buildGoalPrereviewRefusal, goalPrereviewPassed, goalTextHash } from "./loop-goal.ts";
 import { GOAL_CONFIRM_TITLE, buildGoalConfirmMessage, buildGoalTranscriptMessage } from "./goal-confirm-copy.ts";
 import { resolvePackageAgentsDir } from "./model-config.ts";
@@ -113,7 +113,7 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
   askEitherSide(
     request: Omit<ChannelDialogRequest, "hasUI">,
     hasUI: boolean,
-    render: (signal: AbortSignal) => Promise<string | undefined>,
+    render: DialogRenderer,
   ): Promise<ChannelDialogOutcome>;
   /** Absolute path of THIS session's loop-goal file in one repo. */
   loopGoalPath(root: string): string;
@@ -396,7 +396,8 @@ export async function doProposeLoopGoal(
 
       },
       uiCtx.hasUI === true,
-      async (signal) => deps.askChoice(uiCtx, spec, {
+      async (signal, markArbiter) => deps.askChoice(uiCtx, spec, {
+        onProxyAnswer: markArbiter,
         body: buildGoalConfirmMessage(
           goalText,
           "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine +
