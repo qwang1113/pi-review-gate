@@ -914,6 +914,26 @@ the whole repository's hooks at a directory that disappears with it, and every
 later commit would fail until someone reinstalled from the real checkout. The
 installer refuses (naming the main worktree) instead of doing that.
 
+### tmux sidebar (`prefix + e`)
+
+The postinstall appends one `bind e` line to `~/.tmux.conf` (backed up first;
+a `bind e` of your own wins). `prefix + e` opens a sidebar on the left of the
+current window — 60% of its width: the pi sessions grouped by repo on the left
+30 columns, and on the right a live plain-text preview of the selected row's
+pane (refreshed every second and on every selection change). `j`/`k` or the
+arrows select, `Enter` or a click jumps there and closes the sidebar, `q`
+closes it.
+
+While it is open, every other pane of that window has its input switched off
+(`select-pane -d`), so nothing you type lands in a session by accident; a pane
+split while it is open is locked within a second. The panes it switched off are
+recorded on the window (`@rg_sidebar_locked`) and given back on every way out —
+`q`, `Ctrl-C`, a jump, a second `prefix + e`, `SIGHUP`/`SIGTERM`, a crash. A
+pane that was already switched off before stays off. If the sidebar was killed
+hard, the next `prefix + e` in that window only unlocks. Logic:
+`lib/tmux-sidebar-{collect,tree,render,lock,preview}.ts`; the loop:
+`scripts/tmux-sidebar.ts`.
+
 ### Legacy global installer (deprecated)
 
 `scripts/install-global.sh` was retired when the repo became a pi package;
