@@ -622,9 +622,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    本来就被门禁串行调度，文件边界防不住任何冲突，只让每次新开一个目录都得重新审计 + 重批。
    这个 plan 审计者是
    门禁的**内部实现**：项目经理从没派过它、也在任何 `orchestrator_wait` 回执里见不到
-   它，所以裁决记完门禁**自己把它收掉**（谁派谁负责，第五轮 O-6）——`declare_done`
-   不再被一个它从未被告知的 judge child 拦住。`propose_loop_goal` 内部的 goal 审计者
-   同理，也是门禁自收。
+   它。它的窗口在裁决记完后**留着**（2026-09-27 起，让用户还能读到；下一轮同角色审计经通道
+   复用它），由 `declare_done` 的级联统一回收 —— 它不进子会话清单，所以不会拦住 `declare_done`。
+   `propose_loop_goal` 内部的 goal 审计者同理。
 
    提交 plan 之前还要有一份用户确认过的**需求反述**（`propose_restatement`），
    否则 submit 同样直接被拒、不弹框；同一次确认里定下的交付站点就是 plan 的
@@ -695,10 +695,20 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    扩权、必须重新问用户，而移除只是收紧。站点上界随 spawn 走环境变量
    `RG_STATION_CAP` 注入子会话（那是提示词写不进去的通道），子会话 goal 协商的站点
    展示与记录都不超过它；**`orchestrator_recover` 重开 pane 与 `session_handoff`
-   接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。验收 gate 走同一条
-   注入通道：`RG_ACCEPTANCE_GATE` 只对 plan 的最后一个任务写 `on`，其余编排子会话
-   一律 `off`，而「谁验收」由 `acceptanceTaskId` 一个判定回答。规则只有一处实现：
-   `lib/repo-pr-policy.ts`（`acceptanceTaskId` / `effectiveTaskStation`）。
+   接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。站点规则只有一处实现：
+   `lib/repo-pr-policy.ts`（`deliveryTaskId` / `effectiveTaskStation`）。
+2c. **验收是每个任务自己的开关，不看位置**（2026-09-27，用户决定）：plan 任务可带
+   `stages: { acceptance: false }`（复用 `lib/loop-stages.ts` 的五环节词表，但只开放
+   `acceptance`；缺省全开）。建议实现与验收分开 —— 实现任务、收尾任务关掉验收，验收放在
+   实现都完成后的专门任务里，粒度由项目经理定。**关掉验收的任务必须被某个开着验收的任务
+   （传递）`dependsOn`**，否则 `parsePlan` 直接拒绝（因此「全部关闭」不可能）。`stages`
+   进 canonical plan 文本（只在关闭时出现，存量 plan 的 hash 不变）；关闭 = 扩权（重批），
+   重新打开 = 收紧（平移）。开关经 `RG_ACCEPTANCE_GATE` 注入子会话（spawn / recover /
+   handoff 同一个值）：开着写 `on`，关了写 `off:<接手任务 id>`；这样的子会话每轮提示写明
+   「本任务不验收，由 X 统一验收」，goal 审计不再要求「真实验收方案」，`declare_done` 回执
+   写明验收移交给谁 —— 不再有「批准过的验收方案被静默跳过」。Copilot 周期与此无关：谁真正
+   push / 开了 PR，谁就跑。判定只有一处：`lib/acceptance-round.ts`（`acceptanceGateValue` /
+   `acceptanceDelegatesOf`）。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
    本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的
@@ -791,10 +801,22 @@ its own `prompt`); a preset that is not configured FAILS the dispatch rather
 than running on some default model, and a `model` argument overrides the first
 slot for one dispatch.
 
-**Judges and workers both free their pane at round end** (2026-09-21): a
-recorded verdict is the deliverable, a pane is screen space. The next dispatch
-of the same role re-opens the SAME session id, so nothing is lost when one
-goes away.
+**Finished windows stay until `declare_done`** (2026-09-27, user decision —
+replaces 2026-09-21's "free the pane at round end"): a judge window (reviewer,
+quality-auditor, goal-auditor incl. the gate's own goal/plan audits,
+acceptance, adviser) and a worker window stay open after they report, idle,
+so the user can still read them — a plan audit that lived 26 seconds was
+never seen. The next round of the same role REUSES that window through its
+channel (same session id, an interrupt carrying the new round number); the
+gate's own audits no longer dispatch `fresh`. `orchestrator_close` SETTLES a
+child (`closedAt`, worktree keep/merge/discard) and keeps its window when the
+child reported `done`/`idle`; an unfinished child is still a writer, so closing
+it is an abort and its window is killed. A settled child is neither supervised
+nor counted as a live child. Everything
+is reclaimed in one place: `declare_done`'s judge cascade plus
+`closeOwnSession` (and the same session close on process exit). The cancel
+matrix still kills a CANCELLED sibling's pane — that is an abort, not a
+finish.
 
 ### Wave daily — removed
 

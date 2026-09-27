@@ -173,23 +173,15 @@ function stationCapForRecoveredChild(
  * The twin of {@link stationCapForRecoveredChild}, for the same reason and
  * with the same rule about facts: the flag lived only in the dead pane's
  * environment, and a recovered child that came back without it would read
- * ABSENCE AS ON — so a plan's ordinary work task would suddenly owe a
- * top-tier acceptance round on its own completion. RECOMPUTED from the
- * approved snapshot through the plan rule, never stored. No snapshot, or a
+ * ABSENCE AS ON — so a task whose plan switched acceptance off would suddenly
+ * owe a top-tier acceptance round on its own completion. RECOMPUTED from the
+ * approved snapshot (its tasks carry their `stages`), never stored. No snapshot, or a
  * task the snapshot does not know ⇒ `off`, the strict direction for this flag
  * (it removes an entitlement, it never hands one out).
  */
-function acceptanceGateForRecoveredChild(deps: OrchestratorDeps, taskId: string): "on" | "off" {
+function acceptanceGateForRecoveredChild(deps: OrchestratorDeps, taskId: string): string {
   const approved = deps.runtime().approvedPlan;
-  if (!approved) return "off";
-  return acceptanceGateValue(
-    {
-      deliveryStation: approved.deliveryStation ?? DEFAULT_DELIVERY_STATION,
-      ...(approved.allowMultiplePrs === undefined ? {} : { allowMultiplePrs: approved.allowMultiplePrs }),
-      tasks: approved.tasks,
-    },
-    taskId,
-  );
+  return approved ? acceptanceGateValue(approved.tasks, taskId) : "off";
 }
 
 async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {

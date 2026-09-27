@@ -50,6 +50,7 @@ import {
 import { goalTextHash, normalizeGoalText } from "./loop-goal.ts";
 import { buildGoalAuditTask, formatGoalPrereviewCarryover } from "./goal-audit-task.ts";
 import { TASK_TEXT_MARKER } from "./constants.ts";
+import { acceptanceDelegates, acceptanceGateOpen } from "./acceptance-round.ts";
 
 /**
  * Resolve the repo a GOAL audit targets — deliberately NOT `resolveToolRepo`.
@@ -262,6 +263,8 @@ async function doPrepareGoalAudit(
     ...(prev?.draft ? { prevDraft: prev.draft } : {}),
     sessionDir: deps.sessionDir(ctx),
     sessionId: st.sessionId ?? "unknown",
+    // A plan-closed acceptance owes no acceptance plan (2026-09-27).
+    ...(acceptanceGateOpen(process.env) ? {} : { acceptanceDelegatedTo: acceptanceDelegates(process.env) }),
   });
   const auditTitle = `goal-audit-${newHash.slice(0, 6)}`;
   return {

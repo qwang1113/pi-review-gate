@@ -1,5 +1,5 @@
 /**
- * THE DEPS OF THE AGENT-FACING JUDGE TOOLS — `judge_wait` / `judge_close`
+ * THE DEPS OF THE AGENT-FACING JUDGE TOOLS — `judge_wait`
  * (lib/judge-session-tools.ts) and `judge_spawn` & co. (lib/judge-spawn-tools.ts).
  * Built from the session's registry, lanes and settle path; moved out of
  * `extensions/review-gate.ts` (t8, 2026-09-26, wave 4 of the split). Every rule these
@@ -46,13 +46,12 @@ export interface JudgeToolsWiringDeps {
   cancelLedger: RoundCancelLedger;
   resolveJudgeLane: ReturnType<typeof createJudgeLanes>["resolveJudgeLane"];
   resolveJudgeLaunch: ReturnType<typeof createJudgeLaunch>["resolveJudgeLaunch"];
-  cancelChildWaitTimer(): void;
 }
 
 /**
  * THE GATE'S OWN DEPS HANDLE (2026-09-08) — the object the agent-facing
- * `judge_wait` / `judge_close` registrations close over; the gate's
- * self-audit chains call the SAME `doWait` / `doClose` implementations
+ * `judge_wait` registrations close over; the gate's
+ * self-audit chains call the SAME `doWait` implementation
  * through it, so the repo-addressing check inside `addressJudge` is bypassed
  * for the gate's own auditor only. One object, not a copy (哲学三).
  */
@@ -161,8 +160,6 @@ export function buildJudgeSessionDeps(cells: SessionCells, deps: JudgeToolsWirin
           return { hasVerdict: false };
       }
     },
-    dropPendingAudit: (root) => registry.dropAudits(root),
-    cancelWaitTimer: () => deps.cancelChildWaitTimer(),
     // The wait's side of the model events: the opener acts on them BEFORE its
     // cursor moves past them, so nothing the pane reported is ever dropped.
     absorbModelEvents: (root, judgeId) => registry.absorbJudgeModelEvents(root, judgeId),

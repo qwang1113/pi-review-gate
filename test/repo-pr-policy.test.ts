@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 
 import {
   MULTI_TASK_REPO_STATION,
-  acceptanceTaskId,
+  deliveryTaskId,
   allowsMultiplePrs,
   capStationAt,
   effectiveTaskStation,
@@ -109,8 +109,8 @@ test("the ceiling only ever clamps — a request inside it passes through", () =
 
 test("a one-task plan's acceptance task is that task — position, not a search", () => {
   const p = plan({ tasks: [T1] });
-  assert.equal(acceptanceTaskId(p), "t1-ingest");
-  assert.equal(acceptanceTaskId({ ...p, tasks: [] }), undefined, "no tasks ⇒ nothing to accept");
+  assert.equal(deliveryTaskId(p), "t1-ingest");
+  assert.equal(deliveryTaskId({ ...p, tasks: [] }), undefined, "no tasks ⇒ nothing to deliver");
   assert.equal(effectiveTaskStation(p, T1, REPO), "pr", "a single task is never narrowed");
 });
 
@@ -120,7 +120,7 @@ test("a one-task plan's acceptance task is that task — position, not a search"
 
 test("the plan's LAST task is the acceptance task, and it is NEVER narrowed", () => {
   const p = plan({ tasks: [T1, T2, WRAP, ACCEPT] });
-  assert.equal(acceptanceTaskId(p), "accept", "the acceptance task is a POSITION in the plan, not a new field");
+  assert.equal(deliveryTaskId(p), "accept", "the delivery task is a POSITION in the plan, not a new field");
   assert.equal(effectiveTaskStation(p, ACCEPT, REPO), "pr",
     "the acceptance task keeps the plan's station — capping it leaves nobody who may publish");
   assert.equal(narrowingReasonFor(p, ACCEPT, REPO), undefined,

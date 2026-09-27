@@ -655,6 +655,17 @@ test("the five checkpoints read the ONE query, not a second rule", () => {
     "the fallback is wired into the L1 hook for the first edit / restatement");
 });
 
+test("a plan handover reaches the child: its prompt, its goal audit and its declare_done receipt (2026-09-27)", () => {
+  assert.match(ACCEPTANCE_HOST_SRC, /delegatedTo: acceptanceDelegates\(process\.env\)/,
+    "the DISABLED reason names who accepts");
+  assert.match(ACCEPTANCE_HOST_SRC, /st\.hasCodeChange \|\| decision\.status === "DISABLED"/,
+    "and the receipt carries it even without a code change");
+  assert.match(TURN_SRC, /if \(!acceptanceGateOpen\(process\.env\)\) \{\s*systemPrompt \+= "\\n\\n" \+ buildAcceptanceDelegatedDirective\(acceptanceDelegates\(process\.env\)\)/,
+    "an orchestration child with acceptance off reads the handover every turn");
+  assert.match(libSrc("advisory-prepare-tools.ts"), /acceptanceGateOpen\(process\.env\) \? \{\} : \{ acceptanceDelegatedTo: acceptanceDelegates\(process\.env\) \}/,
+    "the goal audit is told the acceptance plan is not owed");
+});
+
 test("precommit off owes no lane: the verification binding never withholds that READY (quality round P1, 2026-09-22)", () => {
   // The combination's deadlock: with the stage off the chain starts no lane at
   // all, so `lastFullPassTree` can never catch up with the content — and the

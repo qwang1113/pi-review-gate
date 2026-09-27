@@ -365,7 +365,17 @@ export async function askThroughChannel(
     ? Promise.resolve<string | undefined>(undefined)
     : new Promise<string | undefined>((resolve) => {
         if (interruptSignal.aborted) { resolve(undefined); return; }
-        const onAbort = () => { dialogAbort.abort(); finish(undefined, "interrupted"); resolve(undefined); };
+        // AN ANSWER ALREADY ON THE CHANNEL WINS OVER THE INTERRUPT (2026-09-27,
+        // measured: the manager wrote "允许" and a steer in the same
+        // millisecond; the poll had not picked the answer up yet, the box
+        // settled as interrupted, and the consent tool locked the request).
+        const onAbort = () => {
+          dialogAbort.abort();
+          const got = readAnswerNow(binding, requestId);
+          if (got) finish(got.answer, "orchestrator", got.reason);
+          else finish(undefined, "interrupted");
+          resolve(undefined);
+        };
         interruptSignal.addEventListener("abort", onAbort, { once: true });
         // Whatever settles the dialog first (human / orchestrator / interrupt),
         // the interrupt side resolves — a dangling promise would hang the
@@ -393,6 +403,21 @@ export async function askThroughChannel(
     ...(outcome.answer === undefined ? {} : { answer: outcome.answer }),
   });
   return outcome;
+}
+
+/** The answer already written for `requestId`, if any — one read, no wait. */
+function readAnswerNow(
+  binding: ChildChannelBinding,
+  requestId: string,
+): { answer: string; reason?: string } | undefined {
+  try {
+    const record = readChannel(binding.io, bindingPath(binding)).records
+      .find((r) => r.kind === "answer" && r.requestId === requestId);
+    if (record?.kind === "answer") {
+      return { answer: record.answer, ...(record.reason === undefined ? {} : { reason: record.reason }) };
+    }
+  } catch { /* unreadable channel ⇒ no answer seen */ }
+  return undefined;
 }
 
 /**

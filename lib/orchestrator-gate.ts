@@ -320,7 +320,7 @@ export function orchestratorDoneProblems(facts: OrchestratorDoneFacts): string[]
     problems.push(
       `还有 ${stillWorking.length} 个子会话活着：` +
       stillWorking.map((c) => `${c.id}@${c.paneId}`).join(", ") +
-      " —— 先等它们结束（orchestrator_wait）或关掉（orchestrator_close），再退出（约束 4）",
+      " —— 先等它们结束（orchestrator_wait）或结算（orchestrator_close），再退出（约束 4）",
     );
   }
   if (finished.length > 0) {

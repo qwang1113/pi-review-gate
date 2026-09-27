@@ -1,7 +1,9 @@
 /**
  * THE CONCLUSION HALF of the audit-round engine (lib/audit-round.ts) —
  * `settleAuditRound`: pick this round's report, adjudicate it, record it,
- * advance the cursor once, and free the pane.
+ * advance the cursor once. The pane is left alone: it stays for the user to
+ * read and for the next round of the role to reuse (`declare_done` reclaims
+ * it, 2026-09-27).
  *
  * Every path that concludes a judge round goes through here: the synchronous
  * goal / plan audits (`runAuditRound`), `judge_wait` when it observes a
@@ -20,7 +22,6 @@ import {
 } from "./orchestrator-plan-audit.ts";
 import { normalizeConcludedVerdict, severityFindingsFrom } from "./review-adjudicate.ts";
 import { specForRound, type AuditKind, type PendingAudit } from "./audit-round-specs.ts";
-import type { JudgePaneReclaimOutcome } from "./judge-pane-policy.ts";
 import {
   describeRoundMiss,
   roundBindingFor,
@@ -84,20 +85,6 @@ export interface SettleAuditRoundDeps {
    * (reviewer P1 + user decision, 2026-09-05).
    */
   checkpointAt(root: string): string | undefined;
-  /**
-   * Free the pane of the judge whose round JUST closed (2026-09-21).
-   *
-   * CALLED ONLY AFTER A VERDICT IS ON RECORD — that ordering is the whole
-   * safety argument: the conclusion is already the opener's, so the pane is
-   * screen space and nothing else. Freeing it does not cost the conversation
-   * either: the next dispatch of the same role re-opens the SAME session id
-   * (`judge_submit` falls through to a fresh open when the registered pane is
-   * dead, and the transcript continues by session id).
-   *
-   * Optional so the conclusion half stays drivable without tmux — absent ⇒
-   * nothing is reclaimed.
-   */
-  reclaimJudgePane?(root: string, judgeId: string, role: string): Promise<JudgePaneReclaimOutcome>;
   /** Persist one repo's plan-audit record (the extension owns gate state). */
   savePlanAudit(root: string, record: PlanAuditRecord): void;
   /**
@@ -306,28 +293,6 @@ export async function settleAuditRound(
   // `forgetPending` turns two rounds into one that silently drops state).
   if (spec.kind === "goal" || spec.kind === "plan") deps.forgetPending(input.root);
   deps.advanceCursor(entry.judgeId, report.reportId);
-  // ── AND NOW THE PANE GOES (2026-09-21, user decision) ──
-  //
-  // AFTER the verdict is on record, never before: that ordering is the whole
-  // safety argument. The conclusion is the opener's now, so the pane is screen
-  // space — and freeing it costs no context, because the next dispatch of this
-  // role re-opens the SAME session id (`judge_submit` falls through to a fresh
-  // open when the registered pane is dead; the transcript continues by session
-  // id, so the review never starts from zero).
-  //
-  // Best effort, and LOUD when it is not enough: a throw here must not replace
-  // the round's verdict with an exception raised by its cleanup, so it is
-  // caught into the same audit line a failed close produces.
-  if (deps.reclaimJudgePane) {
-    try {
-      await deps.reclaimJudgePane(input.root, entry.judgeId, entry.role);
-    } catch {
-      // A throw from cleanup must never replace the round's verdict with an
-      // exception — the verdict is already recorded, and the CALLER's own
-      // `reclaimJudgePane` is where a half-done reclaim becomes a log line
-      // (`reclaimAuditLine`), because that side knows which log it belongs in.
-    }
-  }
   return {
     status: "recorded",
     kind: spec.kind,

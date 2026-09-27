@@ -119,7 +119,7 @@ test("only a REGISTERED, open child is closable — the user's panes are unaddre
 
   const closed = closableChild(markChildClosed(runtime, "a-1", NOW), "a-1");
   assert.equal(closed.ok, false);
-  if (!closed.ok) assert.match(closed.reason, /已经关闭/, "an already-closed child is a no-op, not an error to retry");
+  if (!closed.ok) assert.match(closed.reason, /已经结算/, "an already-settled child is a no-op, not an error to retry");
 });
 
 

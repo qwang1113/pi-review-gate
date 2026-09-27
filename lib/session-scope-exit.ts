@@ -12,7 +12,9 @@
  *     live in the PREDECESSOR's session (see `addressableSessions`);
  *   - A PROJECT MANAGER WITH OPEN CHILDREN: `orchestrator_attach` takes those
  *     children over unchanged ("no child notices"), so killing their windows
- *     would destroy exactly what a takeover exists to inherit.
+ *     would destroy exactly what a takeover exists to inherit. A child that
+ *     `orchestrator_close` SETTLED is not open (2026-09-27): its window was
+ *     only kept for the user to read, and it goes with the session.
  *
  * Everything else — the ownership marker, the fail-closed reads, idempotency —
  * is `closeOwnSession`'s, not repeated here.
@@ -24,14 +26,15 @@ import type { TmuxRunner } from "./orchestrator-tmux.ts";
 export interface ExitFacts {
   /** This session handed its seat to a successor (`session_handoff` / relay). */
   handedOff: boolean;
-  /** Orchestration children registered and not closed. */
-  openChildren: number;
+  /** The orchestration children this session registered (settled ones carry `closedAt`). */
+  children: readonly { closedAt?: string | undefined }[];
 }
 
 export function closeOwnSessionOnExit(run: TmuxRunner, scope: TmuxScope, facts: ExitFacts): { closed: boolean; note: string } {
   if (facts.handedOff) return { closed: false, note: "已交接给后继会话 —— 专属 session 留给后继接管" };
-  if (facts.openChildren > 0) {
-    return { closed: false, note: `还有 ${facts.openChildren} 个未关闭的编排子会话 —— 专属 session 留给 orchestrator_attach 接管` };
+  const openChildren = facts.children.filter((child) => !child.closedAt).length;
+  if (openChildren > 0) {
+    return { closed: false, note: `还有 ${openChildren} 个未关闭的编排子会话 —— 专属 session 留给 orchestrator_attach 接管` };
   }
   try {
     const result = closeOwnSession(run, scope);

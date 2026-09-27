@@ -6,7 +6,7 @@
 > 以模式注册表（`lib/gate-modes.ts`）与实现为准。
 >
 > **2026-09-05 再更新（以实现为准）**：`judge_read` 已**删除**（零调用死路径）；
-> `judge_close` 仍只在门禁内部；`judge_wait` 则**重新回到 agent 面**——同一实现
+> `judge_close` 仍只在门禁内部（2026-09-27 起已删除：judge window 只由 `declare_done` 级联回收）；`judge_wait` 则**重新回到 agent 面**——同一实现
 > 同时注册在 internalHost 与 agent 面，并改为**消息驱动**：新 channel report /
 > pane 死亡 / judge 提问 / 新 finding 任一到达即返回。原因是「禁止结束 turn 等唤醒」
 > 与「agent 面没有等待工具」互相矛盾，实测让一个会话把自己锁在 280s 的 bash sleep 里

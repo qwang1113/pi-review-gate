@@ -213,9 +213,13 @@ test("the audit task carries the 10th check: the plan ENDS with an independent a
   // The implementation is NAMED, so a renamed helper or a moved rule has to
   // come back and update this line instead of leaving the auditor guessing.
   assert.match(task, /lib\/repo-pr-policy\.ts/);
-  assert.match(task, /acceptanceTaskId/);
+  assert.match(task, /deliveryTaskId/);
   assert.match(task, /effectiveTaskStation/);
-  assert.doesNotMatch(task, /finishTaskId/, "the old name is gone, not living beside the new one");
+  assert.doesNotMatch(task, /finishTaskId|acceptanceTaskId/, "the old names are gone, not living beside the new one");
+  // WHO ACCEPTS is the per-task switch (2026-09-27), and the auditor is told
+  // the coverage is already mechanical — so it judges the division of labour.
+  assert.match(task, /stages\.acceptance/);
+  assert.match(task, /机械保证/);
   // A POSITION, not a new plan field — the check must not become a demand for
   // one (same discipline as the 9th check's file lists).
   assert.match(task, /位置约定/);

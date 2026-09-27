@@ -42,8 +42,10 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "anything; it refuses while a registered child pane is still alive and points you at " +
       "`orchestrator_attach` instead). WHAT `write` DOES TO THE APPROVAL: it keeps it for " +
       "edits that grant nothing new — a dropped task, an added dependency, " +
-      "parallel→serial, a lower maxParallel, a lowered deliveryStation — and records why. " +
+      "parallel→serial, a lower maxParallel, a lowered deliveryStation, a task's acceptance " +
+      "switched back ON — and records why. " +
       "It REVOKES it for a new task, a change of a task's repo, a removed dependency, " +
+      "a task's acceptance switched OFF, " +
       "serial→parallel, a higher maxParallel, a raised deliveryStation, a repo ADDED to " +
       "`allowMultiplePrs`, or a task whose OWN station got wider — the plan's LAST task is " +
       "exempt from the same-repo narrowing (it is the one that delivers), so reordering the " +
@@ -60,6 +62,10 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "siblings' branches, takes the whole through one review and commits — it is capped like any " +
       "other task — and the LAST one (the independent acceptance task) runs the real acceptance, " +
       "pushes and opens that PR; only that task is never capped. " +
+      "ACCEPTANCE IS A PER-TASK SWITCH: every task runs the real-acceptance round unless its " +
+      "`stages` says `{ acceptance: false }` (the only stage a plan may switch off); a task that " +
+      "switches it off must be (transitively) depended on by a task that keeps it on — the gate " +
+      "refuses the plan otherwise and tells the child who accepts for it. " +
       "`allowMultiplePrs` names the repos the USER allowed to split; it is the " +
       "ONLY way out of that rule, so never fill it in on your own initiative. " +
       // The manager reads THIS description while writing tasks, so the task
@@ -87,6 +93,15 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
           repo: Type.String({ description: "ABSOLUTE path of the repo this task works in (the child's cwd) — REQUIRED since 2026-09-02; a missing repo silently lands the child in the orchestrator's own repo" }),
           dependsOn: Type.Optional(Type.Array(Type.String())),
           execution: Type.Optional(Type.Union([Type.Literal("serial"), Type.Literal("parallel")])),
+          stages: Type.Optional(Type.Object({
+            acceptance: Type.Optional(Type.Boolean()),
+          }, {
+            description:
+              "Stages this task switches OFF — only `acceptance` (default on). " +
+              "`{ acceptance: false }` for implementation / wrap-up tasks whose work a later " +
+              "acceptance task (one that dependsOn them) accepts. Switching it off revokes the " +
+              "approval; switching it back on does not.",
+          })),
           status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("running"), Type.Literal("done"), Type.Literal("blocked")])),
           // THE TASK BOOK (user ask, 2026-09-17): this is the field the plan
           // audit reads (「任务书完整度」) and the only place a task's
@@ -116,7 +131,8 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       }, {
         description:
           "For action=\"write\": { title, intent, maxParallel?, tasks: [{ id, title, " +
-          "repo: \"/abs/path/to/repo\", dependsOn?: [], execution?: \"serial\"|\"parallel\" }], " +
+          "repo: \"/abs/path/to/repo\", dependsOn?: [], execution?: \"serial\"|\"parallel\", " +
+          "stages?: { acceptance: false } }], " +
           "allowMultiplePrs?: [\"/abs/repo\"] (only repos the USER agreed may split into " +
           "several PRs) }. " +
           "Do NOT send `status`: existing tasks keep the status execution gave them (use " +

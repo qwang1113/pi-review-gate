@@ -167,7 +167,7 @@ export function registerJudge(
 
 /**
  * May this caller operate this judge? The single gate every one of
- * `judge_wait` / `judge_answer` / `judge_close` / `judge_recover` passes
+ * `judge_wait` / `judge_answer` / `judge_recover` passes
  * before doing anything else.
  *
  * Fail-closed in all three unknown directions: no caller identity, no such

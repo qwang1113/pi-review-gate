@@ -1,6 +1,15 @@
 /**
- * `orchestrator_close` — the tool body that closes a child's window and
- * settles the isolated checkout it may have left behind.
+ * `orchestrator_close` — the tool body that SETTLES a child: it records the
+ * child as closed (no longer supervised, no longer blocking `declare_done`)
+ * and settles the isolated checkout it may have left behind.
+ *
+ * A FINISHED child's window is kept (2026-09-27, user decision): it stays on
+ * screen for the user to read, and the orchestrator's own `declare_done` (or
+ * process exit) reclaims it with the rest of its tmux session
+ * (`closeOwnSession`). A child that has NOT finished is still a writer, so
+ * closing it is an ABORT and its window is killed as before — un-supervising
+ * a running writer and leaving it alive would be worse than either.
+ * {@link closeKeepsWindow} is that one decision.
  *
  * Split from lib/orchestrator-session-tools.ts, which keeps the registration
  * of every orchestration session tool; the git half of a settlement lives in
@@ -13,13 +22,44 @@ import {
   markChildClosed,
   type OrchestratorRuntime,
 } from "./orchestrator-registry.ts";
-import { closeSessionWindow, windowAlreadyGone } from "./session-factory.ts";
 import {
   WORKTREE_SETTLEMENTS,
   repoRootOfWorktree,
   type WorktreeSettlement,
 } from "./orchestrator-worktree.ts";
-import { currentPlan } from "./orchestrator-tool-kit.ts";
+import { alivePanes, currentPlan } from "./orchestrator-tool-kit.ts";
+import { superviseChildren } from "./orchestrator-supervisor.ts";
+import type { ChildState } from "./orchestrator-child-state.ts";
+import type { ChannelProjection } from "./channel-projection.ts";
+import { closeSessionWindow, windowAlreadyGone } from "./session-factory.ts";
+
+/**
+ * Does closing this child SETTLE it (keep the window) or ABORT it (kill it)?
+ *
+ * It takes the SUPERVISOR's classified state, never the raw last report: a
+ * raw `done` can belong to a previous assignment and a raw `idle` can be a
+ * session between two tool calls — `classifyChildState` already refuses to
+ * believe either, and a second, laxer reading here would keep a running
+ * writer alive and unsupervised. Only `done` / `idle` as classified are
+ * finished; everything else may still be writing, so the close stops it.
+ *
+ * AN `idle` IS BOUNDED BY THE ASSIGNMENT TOO (2026-09-27, reviewer P1): the
+ * classifier bounds `done` by `lastAssignedAt` but not `idle`, so a child
+ * re-tasked a moment ago still reads `idle` from its previous run — and the
+ * instruct it has not picked up yet would start an unsupervised writer. A
+ * finished run must START at or after the latest assignment (`lastStateSince`,
+ * the same reading `completionReported` uses), and no instruct may be pending.
+ */
+export function closeKeepsWindow(
+  s: { state: ChildState; projection: ChannelProjection; lastAssignedAt?: string },
+): boolean {
+  if (s.state !== "done" && s.state !== "idle") return false;
+  if (s.projection.pendingInstructs.length > 0) return false;
+  const assigned = Date.parse(s.lastAssignedAt ?? "");
+  if (!Number.isFinite(assigned)) return true;
+  const since = Date.parse(s.projection.lastStateSince ?? s.projection.lastState?.at ?? "");
+  return !Number.isFinite(since) || since >= assigned;
+}
 import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 /**
@@ -104,41 +144,44 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
     }
   }
   if (settlementOnly) {
-    // Nothing else is owed: the pane is already gone and the registry already
+    // Nothing else is owed: the child was already settled and the registry already
     // says so. The caller gets the settlement and no close narrative.
-    return reply(`review-gate: 子会话 ${child.id} 早已关闭 —— 本次只结算它的 worktree。` + settlementNote, { childId: child.id });
+    return reply(`review-gate: 子会话 ${child.id} 早已结算 —— 本次只结算它的 worktree。` + settlementNote, { childId: child.id });
   }
-  // THE LABEL BAR IS NOT TOUCHED HERE ANY MORE (2026-09-17, user decision).
-  // This used to be the fourth of five close paths asking one shared
-  // question ("is this the last decorated pane I can see"), and every answer
-  // it could give toggled `pane-border-status` — which resizes EVERY pane in
-  // the window (measured: SIGWINCH, rows 84 ↔ 83) and was measured to be
-  // wrong across sessions besides. Under the window topology a child's bar
-  // belongs to the child's own window and disappears with it.
-  //
-  // A child is closed by WINDOW, not by pane (2026-09-25), and only when the
-  // registry can prove the window is one the gate owns: the target is written
-  // `<tmuxSession>:<windowId>` from the SAME record, so a stale id can only
-  // reach a window of the gate's own session.
-  //
-  // A RECORD WITH NO COORDINATES IS NOT A DEAD END (2026-09-25, quality round
-  // P2). A row written by an older build has neither half — it cannot be
-  // addressed at all — and the first version of this code FAILED the whole
-  // close there, leaving the child `running` forever and contradicting the
-  // sentence above it. It takes the same direction as the judge path: the
-  // window is LEFT ALONE (nothing is killed by a guess), the registration is
-  // cleared, and the reply says which of the two happened.
-  let killNote: string | undefined;
-  if (child.windowId && child.tmuxSession) {
+  // `closedAt` is what every "is this child still open" reading keys on —
+  // supervision, the `declare_done` live-children check, the exit-time
+  // `openChildren` count. A FINISHED child's window is left for `declare_done`
+  // (2026-09-27); an unfinished one is aborted by killing it, addressed as
+  // `<tmuxSession>:<windowId>` from the record so a stale id can only reach a
+  // window of the gate's own session. A row with no coordinates (older build)
+  // is never killed by a guess.
+  const panes = alivePanes(deps);
+  const home = deps.channelHome();
+  const supervised = superviseChildren({
+    orchestrationId: deps.runtime().orchestrationId,
+    children: [child],
+    livePanes: panes.ok ? new Set(panes.panes) : undefined,
+    io: deps.channelIO(),
+    ...(home === undefined ? {} : { home }),
+    at: deps.now(),
+  }).children[0];
+  const keep = supervised !== undefined && closeKeepsWindow({
+    state: supervised.state,
+    projection: supervised.projection,
+    ...(child.lastAssignedAt === undefined ? {} : { lastAssignedAt: child.lastAssignedAt }),
+  });
+  let windowNote: string;
+  if (keep) {
+    windowNote = `它的 window ${child.windowId ?? "（无记录）"} 保留在屏幕上，由你的 declare_done 统一回收`;
+  } else if (child.windowId && child.tmuxSession) {
     const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
     if (!killed.ok && !windowAlreadyGone(killed.error)) {
-      return fail(`review-gate: 关闭 window 失败 —— ${killed.error}`);
+      return fail(`review-gate: 子会话还没报完成，关闭就是中止它 —— 但关 window 失败：${killed.error}`);
     }
-    if (!killed.ok) killNote = "（它的 window 已经不在了）";
+    windowNote = `它还没报完成，关闭即中止：window ${child.windowId} ${killed.ok ? "已关掉" : "已经不在了"}`;
   } else {
-    killNote = "（登记里没有 window/session 坐标 —— 旧版登记，只清登记，没去关窗）";
+    windowNote = "登记里没有 window/session 坐标（旧版登记）—— 没去关窗";
   }
-
   deps.saveRuntime(markChildClosed(deps.runtime(), child.id, new Date(deps.now()).toISOString()));
   // O-2 — only remind about the task status when it still NEEDS moving. The
   // orchestrator usually sets the task `done` before closing; repeating the
@@ -153,7 +196,8 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
     ? "。别忘了把它的任务状态置为 done 或 pending（`orchestrator_plan`）。"
     : `。任务 ${child.taskId} 当前是 ${closedTask.status}，无需再动。`;
   return reply(
-    `review-gate: 子会话 ${child.id}（window ${child.windowId ?? "（无记录）"}）已关闭${killNote ?? ""}` + statusNudge + settlementNote,
+    `review-gate: 子会话 ${child.id} 已结算（不再监督、不再阻挡 declare_done）；` + windowNote +
+      statusNudge + settlementNote,
     { childId: child.id },
   );
 

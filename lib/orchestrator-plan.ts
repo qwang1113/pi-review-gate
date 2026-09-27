@@ -45,7 +45,9 @@ import {
   type DeliveryStation,
   type StationAudience,
 } from "./delivery-station.ts";
-import { acceptanceTaskId, narrowedRepoLines, normalizeRepoPath } from "./repo-pr-policy.ts";
+import { deliveryTaskId, narrowedRepoLines, normalizeRepoPath } from "./repo-pr-policy.ts";
+import { parsePlanTaskStages, type PlanTaskStages } from "./loop-stages.ts";
+import { acceptanceDelegatesOf, acceptanceHandoverPhrase, taskAcceptanceOn } from "./acceptance-round.ts";
 import { openDecisions } from "./orchestrator-plan-progress.ts";
 
 /** Repo-root-relative location of the plan (gate-excluded via `.pi/`). */
@@ -75,6 +77,12 @@ export interface PlanTask {
   dependsOn: string[];
   /** What the plan ASKED for; the scheduler may downgrade it (constraint 6). */
   execution: TaskExecution;
+  /**
+   * The stages this task switches OFF (2026-09-27) — only `acceptance` is
+   * open (lib/loop-stages.ts `PLAN_TASK_STAGES_OPEN`). Absent ⇒ all on.
+   * Approved content: switching a stage off is a widening.
+   */
+  stages?: PlanTaskStages;
   status: TaskStatus;
   /**
    * THE TASK BOOK — the assignment this task's child session is handed.
@@ -273,12 +281,16 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
       problems.push(`${label}.execution "${String(t.execution)}" 非法（serial/parallel）`);
     }
 
+    const parsedStages = parsePlanTaskStages(t.stages, label);
+    problems.push(...parsedStages.problems);
+
     tasks.push({
       id,
       title: taskTitle,
       ...(asString(t.repo) ? { repo: asString(t.repo)! } : {}),
       dependsOn: asStringArray(t.dependsOn).map((d) => d.trim()).filter(Boolean),
       execution,
+      ...(parsedStages.stages ? { stages: parsedStages.stages } : {}),
       status,
       note: asString(t.note) || undefined,
     });
@@ -294,6 +306,17 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
   }
   const cycle = findDependencyCycle(tasks);
   if (cycle) problems.push(`任务依赖成环：${cycle.join(" → ")}`);
+
+  // NOBODY'S WORK GOES UNACCEPTED (2026-09-27): a task that switches its own
+  // acceptance off hands it to a task that accepts AND runs after it — so the
+  // handover can be named to the child, and "all switched off" is refused.
+  for (const task of tasks) {
+    if (taskAcceptanceOn(task) || acceptanceDelegatesOf(tasks, task.id).length > 0) continue;
+    problems.push(
+      `任务 "${task.id}" 关闭了验收，但没有任何开着验收、且（传递）dependsOn 它的任务来接手 —— ` +
+      "加一个依赖它的验收任务，或者把它的验收打开",
+    );
+  }
 
   const decisions: PlanDecision[] = [];
   const rawDecisions = Array.isArray(obj.decisions) ? obj.decisions : [];
@@ -410,6 +433,9 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
       ...(t.repo ? { repo: t.repo } : {}),
       dependsOn: [...t.dependsOn].sort(),
       execution: t.execution,
+      // Only when something is OFF, so a plan that never wrote the field
+      // hashes exactly as it did before the field existed.
+      ...(t.stages ? { stages: t.stages } : {}),
     })),
   });
 }
@@ -455,28 +481,30 @@ export function formatPlanSummary(
   // every child stop short by a rule nobody showed them. The lines come from
   // the ONE implementation of the rule (lib/repo-pr-policy.ts), never a copy.
   lines.push(...narrowedRepoLines(plan, repoRoot));
-  // WHICH TASK ACCEPTS AND DELIVERS (2026-09-22). The plan's LAST task is the
-  // independent acceptance task by convention (lib/repo-pr-policy.ts), and it
+  // WHICH TASK DELIVERS (2026-09-22). The plan's LAST task is the delivery
+  // task by convention (lib/repo-pr-policy.ts), and it
   // is the only one whose station is the plan's own — saying so is what makes
   // the two lines above read as one contract instead of two. The rule has ONE
   // home; this is a marker, not a second copy of it. (The SECOND-to-last task
   // is the wrap-up: merge → one review → commit — and it is capped like any
   // other task, which is why only the last one is marked here.)
   //
-  // "按约定", not an assessment: whether that last task really IS an
-  // independent acceptance task is the plan AUDIT's judgement (its 10th
-  // check). Stating the convention is what lets both readers — the auditor
-  // above all — check it against the task's own title, and a marker that
-  // quietly asserted "this one accepts" would be the gate telling them the
-  // answer it is supposed to be examining.
-  const acceptance = acceptanceTaskId(plan);
+  // "按约定", not an assessment: whether that last task really delivers
+  // is the plan AUDIT's judgement (its 10th check).
+  const delivery = deliveryTaskId(plan);
   for (const t of plan.tasks) {
     const deps = t.dependsOn.length ? ` ← ${t.dependsOn.join(", ")}` : "";
-    const acceptMark = t.id === acceptance
-      ? "　← 按约定：plan 的最后一环 = 独立验收任务（真实验收 → push → 开 PR；汇合 / 整体审核 / commit 是倒数第二个收尾任务的事）"
+    const deliveryMark = t.id === delivery
+      ? "　← 按约定：plan 的最后一环 = 交付任务（通常就是独立验收任务；站点不受同 repo 收窄；push → 开 PR；汇合 / 整体审核 / commit 是倒数第二个收尾任务的事）"
       : "";
+    // THE ACCEPTANCE SWITCH IS SAID PER TASK (2026-09-27): it is approved
+    // content, so the user reads who accepts before signing.
+    const acceptLine = taskAcceptanceOn(t)
+      ? "验收：开"
+      : `验收：关（${acceptanceHandoverPhrase(acceptanceDelegatesOf(plan.tasks, t.id))}）`;
     lines.push(
-      `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}${acceptMark}` +
+      `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}${deliveryMark}` +
+      `\n    ${acceptLine}` +
       (t.repo ? `\n    repo：${t.repo}` : ""),
     );
     // THE TASK BOOK IS RENDERED (2026-09-21). Two facts make this line load-

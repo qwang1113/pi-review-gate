@@ -519,7 +519,7 @@ test("the summary names the repo whose tasks are held at commit — and stays qu
 // the wrap-up (merge → one review → commit), the last is the INDEPENDENT
 // acceptance task (real acceptance → push → PR) — and only the latter keeps the
 // plan's own station.
-test("the summary marks WHICH task accepts and delivers — and only that one", () => {
+test("the summary marks WHICH task delivers — and only that one; acceptance is per task", () => {
   const tasks = [
     { id: "work", title: "做事", repo: "/repo" },
     { id: "wrap", title: "收尾", repo: "/repo" },
@@ -530,11 +530,12 @@ test("the summary marks WHICH task accepts and delivers — and only that one", 
   const wrap = lines.find((l) => l.startsWith("- [pending] wrap"));
   const work = lines.find((l) => l.startsWith("- [pending] work"));
   assert.ok(accept && wrap && work, "every task is listed with its status");
-  assert.match(accept!, /独立验收任务/, "the user approves the station — they must see who carries it out");
-  assert.match(accept!, /真实验收/, "…and that the last link runs the real acceptance");
-  assert.doesNotMatch(wrap!, /独立验收任务/,
-    "the wrap-up merges and commits — it does not accept, and it is not the exempt one");
-  assert.doesNotMatch(work!, /独立验收任务/);
+  assert.match(accept!, /交付任务/, "the user approves the station — they must see who carries it out");
+  assert.doesNotMatch(wrap!, /交付任务/, "the wrap-up merges and commits — it is not the exempt one");
+  assert.doesNotMatch(work!, /交付任务/);
+  // WHO ACCEPTS is no longer the position (2026-09-27): no `stages` ⇒ every
+  // task's line says acceptance is on.
+  assert.equal(lines.filter((l) => l.trim() === "验收：开").length, 3);
 });
 
 test("the canonical text is order-independent for sets", () => {
@@ -581,4 +582,72 @@ test("the summary renders the TASK BOOK — the plan the auditor and the user ac
   assert.equal(planHash(planOf({ tasks })), planHash(withoutNotes),
     "the note is rendered, never authorized — the approval must not see it");
   assert.doesNotMatch(canonicalPlanText(planOf({ tasks })), /代码落点/);
+});
+
+// ---------------------------------------------------------------------------
+// tasks[].stages — the per-task acceptance switch (2026-09-27)
+// ---------------------------------------------------------------------------
+
+test("stages: only `acceptance` may be set, and only as a boolean", () => {
+  const bad = parsePlan({
+    title: "t", intent: "i",
+    tasks: [
+      { id: "a", title: "A", stages: { goal: false } },
+      { id: "b", title: "B", stages: { acceptance: "no" } },
+      { id: "c", title: "C", stages: [false] },
+    ],
+  }, NOW);
+  assert.equal(bad.ok, false);
+  const text = bad.problems.join("\n");
+  assert.match(text, /tasks\[0\]\.stages\.goal 不可设置 —— plan 任务只开放 acceptance/);
+  assert.match(text, /tasks\[1\]\.stages\.acceptance 必须是布尔值/);
+  assert.match(text, /tasks\[2\]\.stages 必须是对象/);
+});
+
+test("stages: absent and `{acceptance:true}` are the SAME plan — and hash as before the field existed", () => {
+  const plain = planOf();
+  const explicit = planOf({
+    tasks: [
+      { id: "a", title: "抽 plan 模块", stages: { acceptance: true } },
+      { id: "b", title: "抽 tmux 模块" },
+    ],
+  });
+  assert.equal(explicit.tasks[0]!.stages, undefined, "an all-on switch is not stored");
+  assert.equal(planHash(explicit), planHash(plain));
+  assert.doesNotMatch(canonicalPlanText(plain), /stages/, "a plan that never wrote it carries no new term");
+});
+
+test("stages: switched OFF is approved content, and needs an accepting task that runs after it", () => {
+  const ok = planOf({
+    tasks: [
+      { id: "a", title: "实现", stages: { acceptance: false } },
+      { id: "w", title: "收尾", dependsOn: ["a"], stages: { acceptance: false } },
+      { id: "acc", title: "验收", dependsOn: ["w"] },
+    ],
+  });
+  assert.deepEqual(ok.tasks[0]!.stages, { acceptance: false });
+  assert.match(canonicalPlanText(ok), /"stages":\{"acceptance":false\}/);
+  assert.notEqual(planHash(ok), planHash({ ...ok, tasks: ok.tasks.map((t) => ({ ...t, stages: undefined })) }));
+  const summary = formatPlanSummary(ok);
+  assert.match(summary, /验收：关（由 acc 统一验收）/, "the approval text says who accepts");
+  assert.match(summary, /验收：开/);
+
+  const orphan = parsePlan({
+    title: "t", intent: "i",
+    tasks: [
+      { id: "a", title: "实现", stages: { acceptance: false } },
+      { id: "acc", title: "验收（但不依赖 a）" },
+    ],
+  }, NOW);
+  assert.equal(orphan.ok, false);
+  assert.match(orphan.problems.join("\n"), /任务 "a" 关闭了验收，但没有任何开着验收、且（传递）dependsOn 它的任务来接手/);
+
+  const allOff = parsePlan({
+    title: "t", intent: "i",
+    tasks: [
+      { id: "a", title: "A", stages: { acceptance: false } },
+      { id: "b", title: "B", dependsOn: ["a"], stages: { acceptance: false } },
+    ],
+  }, NOW);
+  assert.equal(allOff.ok, false, "a plan in which nobody accepts is refused");
 });

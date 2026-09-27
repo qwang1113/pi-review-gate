@@ -199,6 +199,47 @@ export function buildStagesDirective(record: LoopStagesRecord | undefined): stri
   ].join("\n");
 }
 
+/**
+ * THE STAGES A PLAN TASK MAY SWITCH OFF (2026-09-27, user decision).
+ *
+ * The project manager sets stages per task, from the SAME vocabulary — but
+ * only `acceptance` is open: the other four are the child's own supervision,
+ * and a manager that could switch off a child's review would be deciding how
+ * much of its own plan nobody checks. Widening this list is a user decision.
+ */
+export const PLAN_TASK_STAGES_OPEN: readonly LoopStage[] = ["acceptance"];
+
+/** A plan task's stage switches — only the ones that are OFF are kept. */
+export type PlanTaskStages = Partial<Record<LoopStage, false>>;
+
+/**
+ * Read `tasks[].stages` from untrusted plan input.
+ *
+ * `{acceptance: true}` and an absent field are the SAME plan (everything on),
+ * so both normalize to no field at all — which is what keeps a plan that never
+ * wrote it hashing exactly as it did before the field existed.
+ */
+export function parsePlanTaskStages(raw: unknown, label: string): { stages?: PlanTaskStages; problems: string[] } {
+  if (raw === undefined) return { problems: [] };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { problems: [`${label}.stages 必须是对象（如 { "acceptance": false }）`] };
+  }
+  const problems: string[] = [];
+  const stages: PlanTaskStages = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(PLAN_TASK_STAGES_OPEN as readonly string[]).includes(key)) {
+      problems.push(`${label}.stages.${key} 不可设置 —— plan 任务只开放 ${PLAN_TASK_STAGES_OPEN.join("、")}，其余环节对编排子会话一律全开`);
+      continue;
+    }
+    if (typeof value !== "boolean") {
+      problems.push(`${label}.stages.${key} 必须是布尔值（false = 关闭）`);
+      continue;
+    }
+    if (value === false) stages[key as LoopStage] = false;
+  }
+  return { ...(Object.keys(stages).length > 0 ? { stages } : {}), problems };
+}
+
 /** The stages the user switched OFF, in dialog order. */
 export function stagesOff(record: LoopStagesRecord | undefined): LoopStage[] {
   return LOOP_STAGES.filter((stage) => !stageOpen(record, stage));

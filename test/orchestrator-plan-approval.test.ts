@@ -796,3 +796,39 @@ test("dropping a sibling can widen the survivor — the count is what capped it"
   assert.match(decision.amendments.join("\n"), /已从 plan 中删除/, "the dropped task is still an amendment");
 });
 
+
+// ---------------------------------------------------------------------------
+// THE PER-TASK ACCEPTANCE SWITCH (2026-09-27): off is less supervision
+// ---------------------------------------------------------------------------
+
+test("switching a task's acceptance OFF revokes the approval; switching it back ON carries", () => {
+  const plan = fileGrainPlan();
+  // t2 depends on t1, so t1 may hand its acceptance to it.
+  const off = withTask(plan, "t1", { stages: { acceptance: false } });
+  const revoked = decideApprovalCarry(approved(plan), off, REPO);
+  assert.equal(revoked.carries, false);
+  assert.match(revoked.widenings.join("\n"), /"t1" 关闭了验收环节/);
+
+  const back = decideApprovalCarry(approved(off), plan, REPO);
+  assert.equal(back.carries, true, back.widenings.join("\n"));
+  assert.match(back.amendments.join("\n"), /"t1" 重新打开了验收环节/);
+
+  // A snapshot that predates the field reads as all ON — the strict side.
+  const legacy = approved(plan);
+  for (const t of legacy.tasks) delete (t as { stages?: unknown }).stages;
+  assert.equal(decideApprovalCarry(legacy, off, REPO).carries, false);
+});
+
+test("the switch SURVIVES the runtime round trip — a recovered child recomputes from it", () => {
+  const plan = withTask(fileGrainPlan(), "t1", { stages: { acceptance: false } });
+  const runtime = normalizeRuntime({
+    orchestrationId: "orch-deadbeef-abc",
+    children: [],
+    notify: { sentAt: [], lastByKey: {} },
+    approvedPlanHash: planHash(plan),
+    approvedPlanAt: "2026-09-27T10:00:00.000Z",
+    approvedPlan: snapshotApprovedPlan(plan, planHash(plan), "2026-09-27T10:00:00.000Z"),
+  }, "orch-deadbeef-abc");
+  assert.ok(runtime);
+  assert.deepEqual(runtime.approvedPlan?.tasks.find((t) => t.id === "t1")?.stages, { acceptance: false });
+});

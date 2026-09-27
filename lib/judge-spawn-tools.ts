@@ -442,7 +442,7 @@ async function doSpawn(
     return fail(
       `review-gate: review pane 开出来了（${paneId}，judge ${judgeId}），但它一直没在自己的通道上报状态 —— ${opened.error}\n` +
       "pane 与登记都**保留**着（不误杀一个可能只是起得慢的 review）：先 `judge_wait({role})` 看它有没有动静；" +
-      "确认它真的没起来，再 `judge_close` 后重开。",
+      "确认它真的没起来、那个 pane 已经不在了，再 `judge_recover` 重开。",
     );
   }
   return reply(

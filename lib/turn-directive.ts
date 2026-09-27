@@ -27,6 +27,7 @@ import {
   goalNegotiationOverdue,
 } from "./loop-goal-directives.ts";
 import { buildStagesDirective, type LoopStage, type LoopStagesRecord } from "./loop-stages.ts";
+import { acceptanceDelegates, acceptanceGateOpen, buildAcceptanceDelegatedDirective } from "./acceptance-round.ts";
 import { resolvePackageAgentsDir } from "./model-config.ts";
 import { loadRegistry } from "./model-spec.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
@@ -222,6 +223,12 @@ export function createTurnDirective(cells: SessionCells, deps: TurnDirectiveDeps
     }
     if (deps.isOrchestrationChild()) {
       systemPrompt += "\n\n" + CHILD_OF_ORCHESTRATOR_DIRECTIVE;
+      // The plan switched this task's acceptance off: say so and name who
+      // accepts, every turn — otherwise the goal skeleton asks for a plan the
+      // gate will never run (2026-09-27).
+      if (!acceptanceGateOpen(process.env)) {
+        systemPrompt += "\n\n" + buildAcceptanceDelegatedDirective(acceptanceDelegates(process.env));
+      }
     }
 
     // LOOP-MODE EVERY-TURN INJECTION (2026-08-30): the situation→tool

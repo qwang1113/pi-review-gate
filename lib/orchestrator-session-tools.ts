@@ -164,10 +164,11 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     name: "orchestrator_close",
     label: "Close A Child Session",
     description:
-      "Close a registered child's pane (`childId`). Nothing else is addressable: the user's own " +
-      "panes and other orchestrations' panes are refused, and a handover's predecessor pane is " +
-      "closed by the GATE (`session_handoff`), never by a session. " +
-      "A child's pane is killed; its transcript and gate state survive on disk.",
+      "Settle a registered child (`childId`): it stops being supervised and stops blocking your " +
+      "`declare_done`, and its isolated checkout is settled (see `worktree`). A child that reported done/idle " +
+      "KEEPS its window so the user can still read it (your own `declare_done` reclaims it); one that has " +
+      "not finished is ABORTED — its window is killed. " +
+      "Nothing else is addressable: the user's own panes and other orchestrations' panes are refused.",
     parameters: Type.Object({
       childId: Type.Optional(Type.String()),
       worktree: Type.Optional(Type.Enum({

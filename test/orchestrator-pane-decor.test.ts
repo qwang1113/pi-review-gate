@@ -215,18 +215,19 @@ test("a tmux that refuses cosmetics does NOT fail the spawn", async () => {
   assert.equal(world.runtime().children.length, 1, "the child is registered either way");
 });
 
-test("close kills its WINDOW and writes NO WINDOW OPTION (2026-09-17)", async () => {
+test("close KEEPS its window and writes NO WINDOW OPTION (2026-09-27 / 2026-09-17)", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   const child = world.runtime().children[0]!;
+  world.childReports(child.id, "done");
 
   await world.call("orchestrator_close", { childId: child.id });
 
   const log = tmuxLog(world);
-  assert.ok(
-    log.some((line) => line.startsWith(`kill-window -t ${child.tmuxSession}:${child.windowId}`)),
-    `the child's window is closed, addressed through the session that owns it: ${log.join(" | ")}`,
-  );
+  // 2026-09-27: settling a FINISHED child does not kill its window — the orchestrator's
+  // declare_done reclaims it with the rest of its tmux session.
+  assert.equal(log.some((line) => line.startsWith("kill-window") || line.startsWith("kill-pane")), false,
+    `nothing is killed on close: ${log.join(" | ")}`);
   // THE RELEASE IS DELETED, AND THIS IS WHERE IT WOULD COME BACK. Taking the
   // bar down writes `pane-border-status`, and that RESIZES EVERY PANE IN THE
   // WINDOW — measured on a scratch tmux as SIGWINCH with `rows 84 → 83`, in
@@ -241,14 +242,10 @@ test("close kills its WINDOW and writes NO WINDOW OPTION (2026-09-17)", async ()
   );
 });
 
-test("a child recorded before the window topology is closed by clearing its registration, not by a guess", async () => {
-  // A sidecar row from an older build has no window coordinates at all, so the
-  // window cannot be addressed. The first version of this code FAILED the whole
-  // close there ("记录里没有 window/session 坐标"), which left the child `running`
-  // forever and contradicted its own comment; the judge path takes the opposite
-  // direction — leave the pane alone, clear the registration, say which
-  // happened. Same rule now, and this is the test that holds it (2026-09-25,
-  // quality round P2).
+test("a child recorded before the window topology is settled like any other", async () => {
+  // A sidecar row from an older build has no window coordinates at all. Close
+  // never addresses a window any more (2026-09-27), so such a row settles the
+  // same way — and must not fail the close (2026-09-25, quality round P2).
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   const spawned = world.runtime().children[0]!;
@@ -259,8 +256,7 @@ test("a child recorded before the window topology is closed by clearing its regi
 
   const reply = await world.call("orchestrator_close", { childId: spawned.id });
   assert.equal(reply.isError, undefined, replyText(reply));
-  assert.ok(world.runtime().children[0]!.closedAt !== undefined, "the registration is cleared either way");
-  assert.match(replyText(reply), /没有 window\/session 坐标/, "…and the reply says the window was left alone");
+  assert.ok(world.runtime().children[0]!.closedAt !== undefined, "the registration is settled");
   assert.equal(tmuxLog(world).some((line) => line.startsWith("kill-window")), false,
     "nothing was addressed by an id the record does not have");
 });
@@ -471,7 +467,7 @@ test("a CLOSED child's checkout can still be settled — the advice the merge re
 
   const late = await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
   assert.equal(late.isError, undefined, replyText(late));
-  assert.match(replyText(late), /早已关闭/, "the reply says what this call actually did");
+  assert.match(replyText(late), /早已结算/, "the reply says what this call actually did");
   assert.deepEqual(world.settlements, [
     { childId: child.id, settlement: "keep" },
     { childId: child.id, settlement: "discard" },

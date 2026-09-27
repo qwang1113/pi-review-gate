@@ -93,7 +93,6 @@ import {
 import { readInheritance } from "../lib/session-inheritance.ts";
 import { addGrant, emptyRuntime, hasGrant, removeGrant, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import {
-  registerJudgeSessionTools,
   registerJudgeWaitTool,
   type JudgeSessionToolDeps,
 } from "../lib/judge-session-tools.ts";
@@ -802,7 +801,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   const closeScopeOnExit = (): void => {
     const outcome = closeOwnSessionOnExit((argv) => runTmux(argv), tmuxScope, {
       handedOff: handedOff(),
-      openChildren: (cells.state.orchestrator?.children ?? []).filter((child) => !child.closedAt).length,
+      children: cells.state.orchestrator?.children ?? [],
     });
     log(`review-gate[session-scope] 退出时：${outcome.note}`);
   };
@@ -1091,7 +1090,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     recordAcceptanceVerdict,
     selfAuditWait,
     forwardWaitUpdates,
-    selfSessionDeps: () => selfSessionDeps(),
     askUser: (spec, signal) => askChoice(asChoiceHost(cells.latestCtx ?? {}), spec, { signal }),
   });
   const { submitForReview, runGoalAudit, runPlanAudit } = createReviewChain(host, {
@@ -1124,7 +1122,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     registry, cancelLedger,
   });
 
-  // ---------- judge_wait / judge_close / judge_spawn (lib/judge-tools-wiring.ts) ----------
+  // ---------- judge_wait / judge_spawn (lib/judge-tools-wiring.ts) ----------
   const judgeToolsWiring = {
     registry,
     settle,
@@ -1138,20 +1136,19 @@ export default function reviewGate(pi: ExtensionAPI) {
     cancelLedger,
     resolveJudgeLane,
     resolveJudgeLaunch,
-    cancelChildWaitTimer: () => l2.cancelChildWaitTimer(),
   };
   /**
    * THE GATE'S OWN DEPS HANDLE (2026-09-08): the gate's self-audit chains call
-   * the SAME `doWait` / `doClose` through this accessor — one object, not a
+   * the SAME `doWait` through this accessor — one object, not a
    * copy (哲学三).
    */
   function selfSessionDeps(): JudgeSessionToolDeps {
     return judgeSessionDeps;
   }
   const judgeSessionDeps = buildJudgeSessionDeps(cells, judgeToolsWiring);
-  // `judge_close` stays INTERNAL (the gate's own audit chains); `judge_wait` is
-  // on BOTH hosts — the same implementation (2026-09-05, user decision D1).
-  registerJudgeSessionTools(internalHost, judgeSessionDeps);
+  // `judge_wait` is on BOTH hosts — the same implementation (2026-09-05, user
+  // decision D1).
+  registerJudgeWaitTool(internalHost, judgeSessionDeps);
   registerJudgeWaitTool(pi, judgeSessionDeps);
 
   // ---------- worker panes (lib/worker-wiring.ts) ----------

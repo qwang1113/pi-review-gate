@@ -119,7 +119,7 @@ export function createJudgeLanes(
     // the policy has nothing to compare and says "first" while the derived id
     // still grows a lane suffix. Gating on `rotated` there left the old row in
     // place, and `judgeChildByRole` returns the FIRST match — so `judge_wait`
-    // / `judge_close` would address the stale judge instead of the round just
+    // would address the stale judge instead of the round just
     // dispatched (reviewer P1, 2026-09-05).
     const nextId = judgeSessionIdFor(role, shortRepoHash(root), opener, decision.lane);
     let retired = false;
@@ -179,7 +179,7 @@ export function createJudgeLanes(
    * A WINDOW since 2026-09-25, addressed `<tmuxSession>:<windowId>` from the
    * entry itself, and only when `windowClosable` accepts both halves — a judge
    * from an older build (no window recorded) is not closed by a guess, which
-   * is the same fail-closed rule its own `judge_close` applies.
+   * is the same fail-closed rule `declare_done`'s cascade applies.
    */
   function closeJudgePaneOf(entry: JudgeEntry, ctx: JudgeCloseCtx): void {
     if (!windowClosable(entry, ctx.tmuxServer)) return;

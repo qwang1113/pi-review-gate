@@ -1,11 +1,7 @@
 /**
  * WHO a judge-session tool call addresses, and whether the caller may touch
- * it — the two refusals `judge_close` (lib/judge-session-tools.ts) and
- * `judge_wait` (lib/judge-wait-tool.ts) share, plus the failure shapes each
- * of them reports.
- *
- * Its own module so both tools import ONE resolver and ONE opener check
- * instead of each keeping a copy. The gate-self bypass these functions honour
+ * it — the two refusals `judge_wait` (lib/judge-wait-tool.ts) passes, plus
+ * the failure shape it reports. The gate-self bypass these functions honour
  * is explained in lib/judge-session-tools.ts's module docblock.
  */
 import { checkCaller } from "./hierarchy.ts";
@@ -31,10 +27,6 @@ export const ADDRESSABLE_JUDGE_ROLES: Readonly<Record<string, string>> = Object.
  * neutral value: an agent (or a test) reading `details.hasVerdict` must never
  * find the key simply missing because the call failed early.
  */
-
-export function closeFailDetails(): Record<string, unknown> {
-  return { closed: false, terminated: false, judgeId: undefined };
-}
 
 export function waitFailDetails(): Record<string, unknown> {
   return { done: false, reason: undefined, role: undefined, hasVerdict: false };
@@ -67,7 +59,7 @@ export function addressJudge(
   }
   // Gate-self path (2026-09-08): ONLY when the direct caller passes
   // `gateSelf === true` as a FUNCTION ARGUMENT — i.e. the gate's own audit
-  // chains (`selfAuditWait` / `auditRunDeps.closeJudge`), which hold the
+  // chains (`selfAuditWait`), which hold the
   // judgeId from their own dispatch. It is keyed on the CALLER, never on the
   // parameter bag: `params` comes from the agent verbatim (unknown keys are
   // stripped nowhere), so a marker living in it would be settable by

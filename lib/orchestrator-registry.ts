@@ -11,9 +11,9 @@
  *    The bash guard stops the agent typing `split-window`; this record is the
  *    other half, because a pane nobody registered is a pane the tools refuse
  *    to address.
- *  - "never break the user's tmux" — `orchestrator_close` can only kill a pane
- *    that is IN here. The user's own panes, and panes belonging to another
- *    orchestration, are simply not addressable.
+ *  - "never break the user's tmux" — `orchestrator_close` can only settle a
+ *    child that is IN here (it kills nothing since 2026-09-27). The user's own
+ *    panes, and panes belonging to another orchestration, are not addressable.
  *
  * LIVENESS IS OBSERVED, NEVER ASSUMED. A pane can disappear because the child
  * exited, because the user closed it, or because the machine slept and tmux
@@ -117,7 +117,11 @@ export interface ChildSession {
    * once, by lib/orchestrator-supervisor.ts — and everything that needs it
    * takes it from that ONE snapshot.
    */
-  /** ISO time the gate closed its pane. */
+  /**
+   * ISO time `orchestrator_close` settled it. A settled child is no longer
+   * supervised and no longer counts as open; its window stays until the
+   * orchestrator's `declare_done` closes its tmux session (2026-09-27).
+   */
   closedAt?: string;
 }
 
@@ -443,7 +447,7 @@ export function markChildAssigned(
   return patchChild(runtime, id, { lastAssignedAt: at });
 }
 
-/** Record that the gate closed a child's pane. */
+/** Record that the orchestrator SETTLED a child (`orchestrator_close`; its window is kept). */
 export function markChildClosed(
   runtime: OrchestratorRuntime,
   id: string,
@@ -480,7 +484,7 @@ export function noteWorktreeBranch(
 }
 
 /**
- * May this pane be closed by `orchestrator_close`?
+ * May this child be settled by `orchestrator_close`?
  *
  * The refusal message names the reason, because the two failure modes need
  * different answers: an unknown pane means "that is not yours" (the user's
@@ -500,7 +504,7 @@ export function closableChild(
         "用户自己的 pane 与别的编排的 pane 都不在可寻址范围内。",
     };
   }
-  if (child.closedAt) return { ok: false, reason: `子会话 "${id}" 已经关闭（${child.closedAt}）` };
+  if (child.closedAt) return { ok: false, reason: `子会话 "${id}" 已经结算（${child.closedAt}）` };
   return { ok: true, child };
 }
 

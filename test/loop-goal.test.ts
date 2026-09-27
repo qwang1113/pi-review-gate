@@ -683,6 +683,15 @@ test("the threshold constant is the user's chosen 60 turns", () => {
   assert.equal(GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD, 60);
 });
 
+test("buildGoalAuditTask: a plan-closed acceptance owes no acceptance plan (2026-09-27)", () => {
+  const open = buildGoalAuditTask("# 目标");
+  assert.match(open, /真实验收方案\(P1\)/, "an ordinary session still owes the section");
+  const closed = buildGoalAuditTask("# 目标", { acceptanceDelegatedTo: ["a1"] });
+  assert.doesNotMatch(closed, /真实验收方案\(P1\)/, "the P1 rule is replaced, not added to");
+  assert.match(closed, /由 a1 统一验收/);
+  assert.match(closed, /不是 finding/);
+});
+
 test("buildGoalAuditTask: the audit task carries the minimalism check (cite §5, P1 for out-of-scope work)", () => {
   const task = buildGoalAuditTask("# 目标\n\n标准一。");
   assert.ok(task.includes("docs/coding-standards.md") && task.includes("Section 5"), "it cites the standards section");
