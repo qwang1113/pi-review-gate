@@ -274,6 +274,7 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
           reason: params.reason ? String(params.reason) : undefined,
           ctx,
           progress,
+          fresh: params.fresh === true,
         });
         if (!chain.ok) {
           return {

@@ -21,7 +21,14 @@ import type { LaneHandle } from "./precommit-lane.ts";
 import { formatPlanSummary, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { buildPlanAuditTask, formatPlanAuditCarryover, planAuditHash } from "./orchestrator-plan-audit.ts";
 import type { ProgressReporter } from "./progress-stream.ts";
-import { QUALITY_ROLE, qualityRoundSkip, qualityStandingFor, skippedQualityRecord } from "./quality-round.ts";
+import { QUALITY_IN_FLIGHT_HINT } from "./async-precommit-report.ts";
+import {
+  QUALITY_ROLE,
+  qualityRoundSkip,
+  qualityStandingFor,
+  resubmitWhileQualityInFlight,
+  skippedQualityRecord,
+} from "./quality-round.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
 import { sessionDirForCwd } from "./session-dir.ts";
 import type { CallTool, GateToolResult, SessionHost } from "./session-host.ts";
@@ -38,6 +45,8 @@ export function createReviewChain(
     /** The lane (lib/precommit-lane.ts). */
     waitForQuietLane(root: string): Promise<void>;
     startPrecommitBeside(root: string, ctx: unknown): LaneHandle;
+    /** Is the registered round's quality judge still judging? (lib/review-target-host.ts) */
+    qualityRoundInFlight(root: string): boolean;
     /** The goal-auditor's task for one draft (lib/audit-round-host.ts). */
     buildGoalAuditRound(draft: string, root: string, ctx: unknown):
       Promise<{ ok: true; task: string; streamPath: string } | { ok: false; error: string }>;
@@ -51,7 +60,7 @@ export function createReviewChain(
 ) {
   const {
     callTool, toolText, extractTaskText, stageIsOn, reviewTargets,
-    waitForQuietLane, startPrecommitBeside, buildGoalAuditRound, auditRunDeps,
+    waitForQuietLane, startPrecommitBeside, qualityRoundInFlight, buildGoalAuditRound, auditRunDeps,
   } = deps;
   const stateForRepo = (root: string) => host.stateFor(root);
   const persistRepo = (ctx: ExtensionContext, root: string) => host.persistRepo(ctx, root);
@@ -76,6 +85,8 @@ export function createReviewChain(
     ctx: unknown;
     /** Progress sink for the chain (each step publishes as it starts/ends). */
     progress?: ProgressReporter;
+    /** The agent abandons an in-flight quality round explicitly (D03). */
+    fresh?: boolean;
   }): Promise<
     | {
         ok: true;
@@ -162,6 +173,19 @@ export function createReviewChain(
       // it (round-4 P2 — a joined lane would verify the WRONG content).
       input.progress?.step("precommit (full，与审查并行)");
       await waitForQuietLane(input.root);
+      // D03, ASKED AGAIN AFTER THE WAIT: the older lane may have FAILED while
+      // this submission waited for it, and its quality round is still judging.
+      // Starting now would checkpoint over it and interrupt it unconcluded.
+      // (Read before the new lane resets `st.precommit`.)
+      const pre = stateForRepo(input.root).precommit;
+      if (resubmitWhileQualityInFlight({
+        qualityInFlight: qualityRoundInFlight(input.root),
+        lastLaneVerdict: pre.mode === "full" ? pre.verdict : undefined,
+        fresh: input.fresh === true,
+      }) === "refuse") {
+        input.progress?.fail("质量轮仍在审");
+        return { ok: false, text: `review-gate: 本轮未送审（没跑 checkpoint）—— ${QUALITY_IN_FLIGHT_HINT}` };
+      }
       lane = startPrecommitBeside(input.root, input.ctx);
       laneField = { laneFailure: lane.failure };
     }

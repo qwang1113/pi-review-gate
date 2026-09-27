@@ -1102,6 +1102,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     reviewTargets,
     waitForQuietLane,
     startPrecommitBeside,
+    qualityRoundInFlight,
     buildGoalAuditRound,
     auditRunDeps,
   });
