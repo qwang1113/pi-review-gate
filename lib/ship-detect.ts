@@ -384,8 +384,16 @@ export function stripInertHeredocBodies(command: string): string {
     const m = /^\s*cat\b[^|;&<>()]*(?:>>?\s*[^\s|;&<>()]+\s*)?<<(-?)\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*(?:>>?\s*[^\s|;&<>()]+)?\s*$/.exec(line);
     // A backslash-continued previous line makes `cat` an ARGUMENT of that
     // command (`sh -s \` + newline + `cat > f <<'Q'` runs the body).
-    if (!m || (i > 0 && lines[i - 1]!.endsWith("\\")) || !/>/.test(line.replace(/<<-?\s*(['"])[A-Za-z_][A-Za-z0-9_]*\1/, ""))) continue;
-    const [, dash, , delim] = m;
+    const inert = m && !(i > 0 && lines[i - 1]!.endsWith("\\"))
+      && />/.test(line.replace(/<<-?\s*(['"])[A-Za-z_][A-Za-z0-9_]*\1/, ""));
+    // Any OTHER heredoc means we no longer know which lines are commands: an
+    // outer `bash <<EOF` body can contain a fake `cat > f <<'X'` whose "body"
+    // the outer shell expands (`$(gh pr create)`). Strip nothing then.
+    if (!inert) {
+      if (/<</.test(line)) return command;
+      continue;
+    }
+    const [, dash, , delim] = m!;
     const end = lines.findIndex((l, j) => j > i && (dash ? l.replace(/^\t+/, "") : l) === delim);
     if (end < 0) return command;
     out.push(lines[end]!);

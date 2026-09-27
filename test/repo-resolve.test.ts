@@ -81,6 +81,7 @@ test("D17: push / pr from the scratch dir, an uncreated dir, or a GIT_DIR reloca
     // mkdir without git init is not a scratch repo
     `mkdir -p ${d} && cd ${d} && git commit -am x`,
     `git init --separate-git-dir ${repoA}/.git ${d} && git -C ${d} commit -m x`,
+    `git init ${d} --separate-git-dir ${repoA}/.git && git -C ${d} commit -m x`,
   ]) {
     const r = resolveShipRepos(cmd, repoA);
     assert.equal(r.ambiguous, true, cmd);

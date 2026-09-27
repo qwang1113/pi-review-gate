@@ -81,9 +81,11 @@ const INIT_VALUE_OPTS = new Set(["-b", "--initial-branch", "--template", "--obje
  *  `startIdx`), or undefined when it cannot be named statically — an
  *  expanding operand, or `--separate-git-dir` (the git dir lands elsewhere). */
 function initTarget(tokens: string[], startIdx: number, dir: string): string | undefined {
-  for (let i = startIdx; i < tokens.length; i++) {
-    const t = tokens[i]!;
-    if (t.startsWith("--separate-git-dir") || /[$`~*?]/.test(t)) return undefined;
+  const args = tokens.slice(startIdx);
+  // Git accepts options AFTER the directory too, so check every argument.
+  if (args.some((t) => t.startsWith("--separate-git-dir") || /[$`~*?]/.test(t))) return undefined;
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i]!;
     if (INIT_VALUE_OPTS.has(t)) { i++; continue; }
     if (t.startsWith("-")) continue;
     return pathResolve(dir, t);

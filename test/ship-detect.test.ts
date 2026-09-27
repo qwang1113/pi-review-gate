@@ -361,9 +361,13 @@ test("D37: every other heredoc shape still exposes its ship lines", () => {
     "cat >(bash) <<'EOF'\ngh pr create\nEOF",                      // process substitution executes it
     "cat > f <<'EOF' | bash\ngh pr create\nEOF",                   // piped on
     "sh -s \\\ncat > f <<'EOF'\ngh pr create\nEOF",                 // continued line: cat is sh's argument
+    "bash <<OUT\ncat > f <<'X'\n$(gh pr create)\nX\nOUT",           // inside an outer unquoted heredoc
   ]) {
     assert.ok(detectShipCommands(cmd).length > 0, cmd);
   }
+  // Not just the `bash` head: the expanded substitution itself is seen.
+  const outer = detectShipCommands("python3 - <<OUT\ncat > f <<'X'\n$(gh pr create)\nX\nOUT");
+  assert.ok(outer.some((d: { kind: string }) => d.kind === "pr-create"));
 });
 
 test("containsHeredoc recognises the forms a shell actually accepts", () => {
