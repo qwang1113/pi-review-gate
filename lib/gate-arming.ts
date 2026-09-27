@@ -109,6 +109,36 @@ export function reconcileArming(current: ArmingFlags, facts: ArmingFacts): Armin
   };
 }
 
+/** The part of `GateState.scopeLimit` these rules read. */
+interface ScopeLimitFacts {
+  sessionFiles: readonly string[];
+}
+
+/**
+ * `commitsAhead` for the PRIMARY repo, where a scope limit may suspend it.
+ *
+ * D36 (2026-09-27): the suspension used to be unconditional, so once the
+ * gate's own checkpoint committed this session's edits the worktree was clean,
+ * the branch was "not ahead", `turn_end` cleared both flags and the next
+ * `judge_submit` was refused as "zero edits". A scope limit exempts the
+ * PRE-EXISTING work; commits are suspended only while the session has no
+ * work of its own (`scopeLimit.sessionFiles` empty). `count` is only called
+ * when its answer is used — it is a git spawn.
+ */
+export function armingCommitsAhead(scopeLimit: ScopeLimitFacts | undefined, count: () => number): number {
+  return scopeLimit !== undefined && scopeLimit.sessionFiles.length === 0 ? 0 : count();
+}
+
+/**
+ * Under a scope limit, is there NOTHING of this session's own to review? Only
+ * then may `judge_submit` refuse the reviewer round (D36: a flag cleared after
+ * the checkpoint is not "zero edits" — `sessionFiles` still names them).
+ */
+export function nothingOwnUnderScopeLimit(state: ArmingFlags & { scopeLimit?: ScopeLimitFacts }): boolean {
+  return state.scopeLimit !== undefined && !state.hasCodeChange && !state.hasDocChange &&
+    state.scopeLimit.sessionFiles.length === 0;
+}
+
 /**
  * CAN THIS RECONCILIATION CLEAR ANYTHING? — asked before paying for the git
  * call that answers "is the branch ahead".

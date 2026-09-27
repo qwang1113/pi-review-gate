@@ -2,7 +2,10 @@
  * Worktree fingerprint — a stable hash of "what the code looks like right now".
  *
  * A gate pass is only valid for the exact worktree CONTENT it reviewed. Any
- * subsequent content change (tracked or untracked) invalidates the pass.
+ * subsequent content change invalidates the pass: every tracked or staged file,
+ * and every untracked file THIS SESSION wrote. An untracked, unstaged file the
+ * session never wrote (a PM's note, an installer's `yarn.lock`) is left out —
+ * see `foreignUntrackedPaths()` (D20).
  *
  * CONTENT-ADDRESSED, STAGING-INVARIANT (P0 fix)
  * ---------------------------------------------
@@ -29,13 +32,15 @@
  *
  * A git tree hash fixes this at the root: staging and committing are pure
  * bookkeeping moves that leave the tree bit-identical, so a binding survives
- * them, while any real edit (including creating an untracked file) changes the
- * tree and still correctly invalidates the pass.
+ * them, while any real edit (including this session creating an untracked
+ * file) changes the tree and still correctly invalidates the pass.
  */
 
-import { gitBaseEnv, gitText as git, gitOrNull } from "./git-exec.ts";
+import { gitBaseEnv, gitText as git, gitOrNull, type GitOptions } from "./git-exec.ts";
 import { sha256 } from "./hash.ts";
-import { copyFileSync, mkdtempSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
+import { planCheckpointSweep } from "./checkpoint-sweep.ts";
+import { sidecarPath, stateVariantFrom } from "./gate-state-io.ts";
+import { copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -168,8 +173,10 @@ export const REPO_ROOT_PATHSPEC = ":/";
  *   1 — pre-versioning implementations (recorded as "absent").
  *   2 — content-addressed tree hash: staging-invariant, repo-root-relative
  *       submodule paths, sanitized git environment.
+ *   3 — foreign untracked files (not staged, not written by this session)
+ *       are left out of the tree (D20).
  */
-export const FINGERPRINT_VERSION = 2;
+export const FINGERPRINT_VERSION = 3;
 
 export interface Fingerprint {
   digest: string;
@@ -305,6 +312,57 @@ function submoduleDigest(cwd: string, depth: number, opts?: WorktreeDigestOption
 const UPDATE_INDEX_CHUNK = 500;
 
 /**
+ * The paths this session wrote, read from the gate sidecar at `root` (the
+ * same file, variant included, the git hook checks) — or `undefined` when there
+ * is no readable sidecar, which means "no ownership facts: exclude nothing".
+ *
+ * Read from DISK, not handed in by the caller, on purpose: a dozen call sites
+ * compute this digest and the hook computes it too; an ownership list passed
+ * by some of them and forgotten by one would make two digests of the same
+ * worktree disagree — a mismatch that no re-review could clear.
+ */
+export function sessionOwnedPaths(root: string, env: NodeJS.ProcessEnv = process.env): string[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(sidecarPath(root, ".pi", stateVariantFrom(env)), "utf8"));
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  const files = (parsed as { sessionEditedFiles?: unknown }).sessionEditedFiles;
+  if (files === undefined) return [];
+  if (!Array.isArray(files) || !files.every((f) => typeof f === "string")) return undefined;
+  return files;
+}
+
+/**
+ * D20 — untracked files that are NOT this round's business, so the digest
+ * leaves them out: untracked and unignored, absent from the index (a staged
+ * file is shippable and always counts), not under a gate-owned dir (removed
+ * anyway), and not written by this session.
+ *
+ * THE SAME RULE THE CHECKPOINT COMMITS BY (`planCheckpointSweep`): the
+ * checkpoint never commits a foreign file, so a digest that counted one could
+ * never again equal the reviewed tree — measured: a PM's note in the repo root
+ * voided a READY and every re-review, a deadlock.
+ *
+ * Excludes NOTHING when there is no readable sidecar, and nothing inside a
+ * submodule (its content is bound in full, as before). `env` must be the
+ * shadow-index env: the index read is the one the tree is built from.
+ */
+function foreignUntrackedPaths(cwd: string, env: GitOptions): string[] {
+  const own = sessionOwnedPaths(git(cwd, ["rev-parse", "--show-toplevel"]));
+  if (own === undefined) return [];
+  if (git(cwd, ["rev-parse", "--show-superproject-working-tree"]) !== "") return [];
+  const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--full-name", "--", REPO_ROOT_PATHSPEC], env)
+    .split("\0")
+    // An embedded repository is listed as `dir/`; its gitlink entry is `dir`.
+    .map((p) => p.replace(/\/$/, ""))
+    .filter((p) => p !== "" && !GATE_EXCLUDE_DIRS.some((d) => p === d || p.startsWith(d + "/")));
+  return planCheckpointSweep({ untracked, own }).leftOut;
+}
+
+/**
  * Materialize the worktree as a git tree and return its OID.
  *
  * Returns the BARE tree (no submodule mixing) so callers that must inspect
@@ -394,6 +452,8 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     // gitBaseEnv() first: an inherited GIT_DIR/GIT_WORK_TREE would otherwise
     // build this tree from a DIFFERENT repository than the caller asked about.
     const shadow = { env: { ...gitBaseEnv(), GIT_INDEX_FILE: shadowIndex } };
+    // Read BEFORE `add -A`: afterwards every untracked file is in the index.
+    const foreign = foreignUntrackedPaths(cwd, shadow);
 
     // Stage the whole worktree, THEN drop the gate-owned paths. Removing them
     // afterwards — rather than passing `:(exclude)` pathspecs to `git add` —
@@ -469,6 +529,10 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     // `--cached` keeps this inside the throwaway shadow index: no working-tree
     // file is ever removed.
     git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS, ...extraExcludePathspecs], shadow);
+    for (let i = 0; i < foreign.length; i += UPDATE_INDEX_CHUNK) {
+      const chunk = foreign.slice(i, i + UPDATE_INDEX_CHUNK).map((p) => `:(top,literal)${p}`);
+      git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...chunk], shadow);
+    }
 
     const tree = git(cwd, ["write-tree"], shadow);
     // Guard against a future git printing warnings on stdout: only a bare

@@ -1331,12 +1331,9 @@ test("judge_submit refuses a round when the session has no edits of its own unde
   assert.ok(at > 0, "the refusal must exist");
   const guard = SRC.slice(Math.max(0, at - 1400), at);
   assert.match(guard, /params\.role === "reviewer"/, "it applies to the review round only, never to advisers or goal audits");
-  assert.match(guard, /scoped\.scopeLimit !== undefined/, "…and only when the user actually granted a scope limit");
-  assert.match(
-    guard,
-    /!scoped\.hasCodeChange && !scoped\.hasDocChange/,
-    "…and only when this session has changed nothing at all",
-  );
+  // The predicate itself (scope limit granted, no flag, no own sessionFiles)
+  // is unit-tested in test/gate-arming.test.ts.
+  assert.match(guard, /nothingOwnUnderScopeLimit\(/, "…and only when this session has nothing of its own to review");
 });
 
 test("declare_done prints the proxy's decisions itself, and the audit wait has its own budget", () => {
@@ -4325,7 +4322,7 @@ test("P1: turn_end reads commitsAheadOfBase as a number, never an un-awaited pro
   // The ONE implementation is synchronous now (lib/repo-facts.ts), so the
   // turn_end site reads the count itself — there is no promise left to forget.
   assert.match(REPO_FACTS_SRC, /export function commitsAheadOfBase\(cwd: string\): number \{/);
-  assert.match(SRC, /commitsAhead: state\.scopeLimit \? 0 : commitsAheadOfBase\(cells\.cwd\)/);
+  assert.match(SRC, /commitsAhead: armingCommitsAhead\(state\.scopeLimit, \(\) => commitsAheadOfBase\(cells\.cwd\)\)/);
 });
 
 test("R6/R9/R10: project config, git memory, strategic reset wired in", () => {
@@ -7203,7 +7200,7 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
   // each imports the rule from its one home.
   assert.match(SRC, /import \{ armingFromFacts \} from "\.\/gate-arming\.ts"/,
     "the rule lives in lib/gate-arming.ts and the arming sites import it — 哲学三: no second copy");
-  assert.match(SRC, /import \{ couldReconcile, reconcileArming \} from "\.\/gate-arming\.ts"/,
+  assert.match(SRC, /import \{ armingCommitsAhead, couldReconcile, reconcileArming \} from "\.\/gate-arming\.ts"/,
     "…and so does the reconciliation");
 
   const armAt = SRC.indexOf("const armed = armingFromFacts({");
@@ -7214,7 +7211,7 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
     "three arming sites (session_start, the git re-arm, a secondary repo) — one rule, one implementation",
   );
   assert.equal(
-    SRC.match(/commitsAhead: (?:st|state)\.scopeLimit \? 0 : commitsAheadOfBase\((?:cells\.)?cwd\)/g)?.length,
+    SRC.match(/commitsAhead: armingCommitsAhead\((?:st|state)\.scopeLimit, \(\) => commitsAheadOfBase\((?:cells\.)?cwd\)\)/g)?.length,
     2,
     "…and the branch-commit fact is read at the two sites that can see it: arm and reconcile",
   );
@@ -7223,7 +7220,7 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
   assert.match(turnEnd, /reconcileArming\(current, \{/, "the reconciliation asks the same rule");
   assert.match(
     turnEnd,
-    /commitsAhead: state\.scopeLimit \? 0 : commitsAheadOfBase\(cells\.cwd\)/,
+    /commitsAhead: armingCommitsAhead\(state\.scopeLimit, \(\) => commitsAheadOfBase\(cells\.cwd\)\)/,
     "…and pays for the git call the old kind-only clearing never made",
   );
   assert.match(turnEnd, /couldReconcile\(current, files\)/, "…skipped when nothing could be cleared");

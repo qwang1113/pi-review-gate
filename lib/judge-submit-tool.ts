@@ -15,6 +15,7 @@ import { Type } from "typebox";
 import { ROUND_NOTE_HINT } from "./agent-directives.ts";
 import type { createAuditRoundHost } from "./audit-round-host.ts";
 import type { GateState } from "./gate-state.ts";
+import { nothingOwnUnderScopeLimit } from "./gate-arming.ts";
 import { SUBMITTABLE_JUDGE_ROLES } from "./judge-prompt.ts";
 import type { JudgeRegistry } from "./judge-registry-host.ts";
 import type { createJudgeRoundDispatch } from "./judge-round-dispatch.ts";
@@ -63,6 +64,10 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
   host.registerTool({
     name: "judge_submit",
     label: "Submit To Judge",
+    // D16: a batch holding this tool runs in source order (pi: one sequential
+    // tool serializes the whole batch), so an edit written before it in the
+    // same message lands BEFORE the checkpoint, never after it.
+    executionMode: "sequential",
     description:
       "Submit one round of work to a judge role — the ONE entry point for reviewer / adviser / " +
       "goal-auditor. A reviewer submission runs the chain itself, and for a round that carries " +
@@ -129,8 +134,7 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
       // BLOCKED on the branch's pre-existing content. Measured in prime's
       // t3-report-update: minutes per round, then a deadlock on `declare_done`.
       if (params.role === "reviewer") {
-        const scoped = deps.stateForRepo(root);
-        if (scoped.scopeLimit !== undefined && !scoped.hasCodeChange && !scoped.hasDocChange) {
+        if (nothingOwnUnderScopeLimit(deps.stateForRepo(root))) {
           return {
             content: [{
               type: "text",

@@ -29,7 +29,7 @@ after(cleanupTempDirs);
 // reject exactly that, without over-blocking the safe cases.
 
 /** Repo with a READY sidecar bound to its CURRENT fingerprint. */
-function repoBoundToCurrentFingerprint(mutate: (dir: string) => void): string {
+function repoBoundToCurrentFingerprint(mutate: (dir: string) => void, extraState: object = {}): string {
   const dir = makeGitRepo();
   execFileSync("git", ["config", "core.excludesFile", "/dev/null"], { cwd: dir, stdio: "ignore" });
   writeFileSync(join(dir, "x.ts"), "BASE\n");
@@ -46,9 +46,15 @@ function repoBoundToCurrentFingerprint(mutate: (dir: string) => void): string {
     ...readyState(dir),
     review: { verdict: "READY", fingerprint: fp.digest, at: "t", docSync: "NOT_NEEDED" },
     precommit: { verdict: "PASS", fingerprint: fp.digest, at: "t" },
+    ...extraState,
   }));
   return dir;
 }
+
+// The recreated path below is the SESSION's own file: a foreign untracked file
+// is outside the digest (D20, lib/fingerprint.ts foreignUntrackedPaths), so
+// only an owned one is a divergence between the reviewed worktree and a commit.
+const OWNS_X = { sessionEditedFiles: ["x.ts"] };
 
 test("pre-commit blocks a path staged with content differing from the reviewed worktree", () => {
   const dir = repoBoundToCurrentFingerprint((d) => {
@@ -96,7 +102,7 @@ test("pre-commit blocks a staged delete whose path was recreated in the worktree
   const dir = repoBoundToCurrentFingerprint((d) => {
     execFileSync("git", ["rm", "x.ts"], { cwd: d, stdio: "ignore" });
     writeFileSync(join(d, "x.ts"), "WORKTREE-REVIEWED\n"); // recreated, untracked
-  });
+  }, OWNS_X);
   const res = runPreCommit(dir);
   assert.equal(res.status, 1, "staged delete + worktree recreate must block");
   assert.match(res.stderr, /staged with content that differs/);
@@ -107,10 +113,24 @@ test("pre-commit blocks a staged rename whose source path was recreated", () => 
   const dir = repoBoundToCurrentFingerprint((d) => {
     execFileSync("git", ["mv", "x.ts", "y.ts"], { cwd: d, stdio: "ignore" });
     writeFileSync(join(d, "x.ts"), "recreated source\n");
-  });
+  }, OWNS_X);
   const res = runPreCommit(dir);
   assert.equal(res.status, 1, "staged rename + recreated source must block");
   assert.match(res.stderr, /x\.ts/);
+});
+
+test("D20: a foreign untracked file appearing after READY does not block the commit", () => {
+  const dir = repoBoundToCurrentFingerprint((d) => {
+    writeFileSync(join(d, "x.ts"), "REVIEWED\n");
+    execFileSync("git", ["add", "x.ts"], { cwd: d, stdio: "ignore" });
+  }, { sessionEditedFiles: [] });
+  writeFileSync(join(dir, "notes.md"), "a PM's note\n");
+  writeFileSync(join(dir, "yarn.lock"), "# generated\n");
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 0, res.stderr);
+  // …but the same file STAGED is shippable content again.
+  execFileSync("git", ["add", "notes.md"], { cwd: dir, stdio: "ignore" });
+  assert.equal(runPreCommit(dir).status, 1);
 });
 
 test("pre-commit allows a staged delete when the file really is gone", () => {

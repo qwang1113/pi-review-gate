@@ -34,6 +34,9 @@ export interface GateModeToolDeps {
 export function registerGateModeTool(host: ToolHost, cells: SessionCells, deps: GateModeToolDeps): void {
   host.registerTool({
     name: "set_gate_mode",
+    // D44: the mode must be switched before a sibling call in the same batch
+    // (propose_restatement's stage box) reads it — run the batch in order.
+    executionMode: "sequential",
     label: "Set Gate Mode",
     description:
       "Decide or change this session's gate mode: \"loop\" (full enforced review loop), " +

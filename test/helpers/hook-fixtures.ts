@@ -76,7 +76,7 @@ export function runPreCommit(dir: string, env: Record<string, string> = {}) {
 
 /** Must track lib/fingerprint.ts FINGERPRINT_VERSION; a stale value here would
  *  make every fixture take the migration path instead of the gate logic. */
-export const FP_VERSION = 2;
+export const FP_VERSION = 3;
 
 export function runPrePush(dir: string, env: Record<string, string> = {}) {
   return spawnSync("bash", [join(ROOT, "hooks", "pre-push")], {

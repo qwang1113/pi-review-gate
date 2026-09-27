@@ -550,7 +550,18 @@ approved. That forced a redundant full review round on every staging operation
 and pushed users toward `REVIEW_GATE_BYPASS=1`, which disarms the gate far more
 thoroughly than the false mismatch it worked around. A tree hash makes staging
 and committing invisible while any real edit — including a new untracked
-file — still changes the digest and correctly invalidates the pass.
+file this session wrote — still changes the digest and correctly invalidates
+the pass.
+
+Untracked files are counted by **ownership** (D20, fingerprint v3): an
+untracked, unignored file that is not in the index and that this session never
+wrote through edit/write (`sessionEditedFiles` in the sidecar the hook also
+reads) is left out of the digest — a PM's note or an installer's `yarn.lock`
+no longer voids a READY. It is the same rule the gate's checkpoint commits by,
+so the reviewed tree and the digest can always meet again. Such a file counts
+the moment it is `git add`ed (it is shippable then), and with no readable
+sidecar nothing is left out. Both implementations (`lib/fingerprint.ts` and
+the hook's `scripts/compute-fingerprint.cjs`) apply it; a parity test pins it.
 
 > Implementation note: the shadow index is seeded from the real index and its
 > mtime is **backdated to `min(indexMtime, now) - 5s`**. `copyFileSync` stamps a

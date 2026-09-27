@@ -648,6 +648,9 @@ export async function doProposeRestatement(
 export function registerRestatementTools(host: ToolHost, deps: RestatementToolDeps): void {
   host.registerTool({
     name: "propose_restatement",
+    // D44: it may open the loop-stages box, which reads the gate mode — never
+    // race a set_gate_mode in the same batch.
+    executionMode: "sequential",
     label: "Propose Restatement",
     description:
       "Say the requirement BACK to the user and get it confirmed — the mandatory step before " +

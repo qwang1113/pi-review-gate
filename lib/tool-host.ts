@@ -58,6 +58,8 @@ export interface ToolHost {
     label: string;
     description: string;
     parameters: TSchema;
+    /** pi's per-tool flag: `sequential` makes the WHOLE batch it is in run in source order. */
+    executionMode?: "sequential" | "parallel";
     execute: (
       id: string,
       params: Record<string, unknown>,

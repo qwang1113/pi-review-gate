@@ -9,6 +9,7 @@ import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { hermeticGitEnv } from "./helpers/git.ts";
+import { FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 
 // Same reason as multi-repo-gate.test.ts: the extension runs for real here, so
@@ -95,7 +96,7 @@ function forgeReviewedSidecar(root: string): void {
   mkdirSync(join(root, ".pi"), { recursive: true });
   writeFileSync(join(root, ".pi", "review-gate-state.json"), JSON.stringify({
     schema: 1,
-    fingerprintVersion: 2,
+    fingerprintVersion: FINGERPRINT_VERSION,
     sessionId: SESSION_ID,
     taskMode: "loop",
     hasCodeChange: true,
