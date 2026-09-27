@@ -390,7 +390,8 @@ export function stripInertHeredocBodies(command: string): string {
     // An ALLOWLIST of plain path/flag characters, never a denylist (quality
     // round P0 ×2): a quote on the line OPENS A STRING and a `#` starts a
     // comment — either way there is no heredoc and the "body" lines run.
-    const m = /^\s*cat\b[\w./@%+=,:\s-]*?(?:>>?\s*[\w./@%+=,:-]+\s*)?<<(-?)\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*(?:>>?\s*[\w./@%+=,:-]+)?\s*$/.exec(line);
+    // The command word is exactly `cat`: `cat/../bin/bash` also starts with it.
+    const m = /^\s*cat\s[\w./@%+=,:\s-]*?(?:>>?\s*[\w./@%+=,:-]+\s*)?<<(-?)\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*(?:>>?\s*[\w./@%+=,:-]+)?\s*$/.exec(line);
     // A backslash-continued previous line makes `cat` an ARGUMENT of that
     // command (`sh -s \` + newline + `cat > f <<'Q'` runs the body).
     const inert = m && !(i > 0 && lines[i - 1]!.endsWith("\\"))
