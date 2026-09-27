@@ -8,7 +8,8 @@
  * env contract and pane-liveness probing.)
  */
 
-import { basename } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { judgePaneLabel, judgeWindowName, paneIdentity, workerWindowName } from "./orchestrator-pane-decor.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
@@ -31,6 +32,12 @@ export const OWN_GATE_EXTENSION = fileURLToPath(new URL("../extensions/review-ga
  * nothing changes; when it is not, pi loads both and `claimGateInstance` makes
  * the settings copy stand down. A `--no-extensions` on this process travels too, so the
  * pane loads exactly what its opener did. Only a `pi` argv is touched.
+ *
+ * ONLY when this process was itself started with `-e <this gate>` (user
+ * decision): a plain session takes its gate from the settings and its panes do
+ * the same, exactly as before. Known boundary: an OLDER settings copy without
+ * `claimGateInstance` still registers beside the `-e` one — in the pane just as
+ * in its opener, so the pane is never worse off than the process that opened it.
  */
 export function withGateExtension(
   command: readonly string[],
@@ -39,8 +46,20 @@ export function withGateExtension(
 ): string[] {
   const [bin, ...rest] = command;
   if (bin === undefined || basename(bin) !== "pi") return [...command];
+  if (!startedWithGateFlag(hostArgv, extensionPath)) return [...command];
   const noExtensions = hostArgv.includes("--no-extensions") || hostArgv.includes("-ne");
   return [bin, ...(noExtensions ? ["--no-extensions"] : []), "-e", extensionPath, ...rest];
+}
+
+function canonical(path: string): string {
+  try { return realpathSync(path); } catch { return resolve(path); }
+}
+
+/** Did THIS process get `-e` / `--extension` naming this very gate file? */
+function startedWithGateFlag(hostArgv: readonly string[], extensionPath: string): boolean {
+  const own = canonical(extensionPath);
+  return hostArgv.some((arg, i) =>
+    (arg === "-e" || arg === "--extension") && hostArgv[i + 1] !== undefined && canonical(hostArgv[i + 1]!) === own);
 }
 
 const GATE_INSTANCE = Symbol.for("pi-review-gate.instance");

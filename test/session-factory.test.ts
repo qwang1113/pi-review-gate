@@ -602,8 +602,14 @@ test("D11: when settings load a second gate copy beside the `-e` one, only the f
 
 test("D11: every pane the gate opens loads the gate file THIS process loaded", async () => {
   assert.match(OWN_GATE_EXTENSION, /\/extensions\/review-gate\.ts$/);
-  assert.deepEqual(withGateExtension(["pi", "--session-id", "s"], "/wt/extensions/review-gate.ts", ["node", "pi"]),
+  assert.deepEqual(withGateExtension(["pi", "--session-id", "s"], "/wt/extensions/review-gate.ts", ["node", "pi", "-e", "/wt/extensions/review-gate.ts"]),
     ["pi", "-e", "/wt/extensions/review-gate.ts", "--session-id", "s"]);
+  assert.deepEqual(withGateExtension(["pi", "--session-id", "s"], "/wt/extensions/review-gate.ts", ["node", "pi", "--extension", "/wt/extensions/review-gate.ts"]),
+    ["pi", "-e", "/wt/extensions/review-gate.ts", "--session-id", "s"], "the long flag counts too");
+  assert.deepEqual(withGateExtension(["pi", "--session-id", "s"], "/wt/extensions/review-gate.ts", ["node", "pi"]),
+    ["pi", "--session-id", "s"], "a session whose gate came from the settings injects nothing");
+  assert.deepEqual(withGateExtension(["pi", "@t.md"], "/wt/x.ts", ["node", "pi", "-e", "/other/ext.ts"]),
+    ["pi", "@t.md"], "an -e naming some OTHER extension is not this gate");
   assert.deepEqual(withGateExtension(["pi", "@t.md"], "/wt/x.ts", ["node", "pi", "--no-extensions", "-e", "/wt/x.ts"]),
     ["pi", "--no-extensions", "-e", "/wt/x.ts", "@t.md"], "an opener that loaded nothing else passes that on");
   assert.deepEqual(withGateExtension(["bash", "-c", "x"], "/wt/x.ts", []), ["bash", "-c", "x"], "only a pi argv is touched");
@@ -616,6 +622,24 @@ test("D11: every pane the gate opens loads the gate file THIS process loaded", a
     role: { kind: "orchestration-child", orchestrationId: "orch-abc-1", stateVariant: "t1-xyz" },
     command: ["pi", "@.pi/tasks/t1.md"],
   });
+  const plain = seen.find((argv) => argv[0] === "new-session")!;
+  assert.equal(plain.includes(OWN_GATE_EXTENSION), false, "this test process has no `-e <gate>`: nothing injected");
+
+  // The same open, from a process that WAS started with `-e <gate>`.
+  const savedArgv = process.argv;
+  process.argv = [...savedArgv, "-e", OWN_GATE_EXTENSION];
+  try {
+    seen.length = 0;
+    await openSessionWindow(happyRunner(seen), {
+      scope: fakeScope(),
+      cwd: "/repo",
+      layout: "own-session-window",
+      role: { kind: "orchestration-child", orchestrationId: "orch-abc-1", stateVariant: "t1-xyz" },
+      command: ["pi", "@.pi/tasks/t1.md"],
+    });
+  } finally {
+    process.argv = savedArgv;
+  }
   const spawn = seen.find((argv) => argv[0] === "new-session")!;
   const at = spawn.indexOf("-e", spawn.indexOf("pi"));
   assert.equal(spawn[at + 1], OWN_GATE_EXTENSION, "the opened pane's own argv carries it");
