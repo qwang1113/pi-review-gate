@@ -342,22 +342,21 @@ function keepOutOfScope(
 }
 
 /**
- * The settlements newer than the last receipt that listed any, each named once
- * with WHO settled it — then the cursor moves past them (round 4).
+ * The settlements no receipt has named yet, each with WHO settled it (round 4).
+ * Keyed by child + request, so two records in one millisecond both count.
  */
 function settledSinceLastReceipt(deps: OrchestratorDeps, snapshot: SupervisionSnapshot | undefined): string[] {
-  const cursor = deps.settlementCursor();
-  let newest = cursor;
+  const since = deps.settlementsSince();
+  const reported = deps.reportedSettlements();
   const lines: string[] = [];
   for (const child of snapshot?.children ?? []) {
     for (const record of child.projection.settlements ?? []) {
-      const at = Date.parse(record.at);
-      if (!(at > cursor)) continue;
-      newest = Math.max(newest, at);
+      const key = `${child.child.id}\u0000${record.requestId}`;
+      if (reported.has(key) || !(Date.parse(record.at) >= since)) continue;
+      reported.add(key);
       lines.push(`${child.child.id}（${child.child.taskId}）：${describeSettlement(record)}`);
     }
   }
-  if (newest > cursor) deps.saveSettlementCursor(newest);
   return lines;
 }
 

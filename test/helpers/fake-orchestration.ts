@@ -413,7 +413,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   let memory: SupervisionMemory = {};
   let activeWaits = 0;
   let announced: readonly AnnouncedRequest[] = [];
-  let settlementCursor = 0;
+  const reportedSettlements = new Set<string>();
   const paneDecor = new Map<string, { title: string; at: number }>();
 
   const env: Record<string, string> = { TMUX_PANE: "%0", ...(options.env ?? {}) };
@@ -518,8 +518,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     },
     announcedRequests: () => announced,
     saveAnnouncedRequests: (next) => { announced = next; },
-    settlementCursor: () => settlementCursor,
-    saveSettlementCursor: (at) => { settlementCursor = at; },
+    settlementsSince: () => 0,
+    reportedSettlements: () => reportedSettlements,
     paneDecorMemory: () => paneDecor,
 
     contextPercent: () => options.contextPercent,

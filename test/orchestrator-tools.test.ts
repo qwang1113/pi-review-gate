@@ -671,6 +671,15 @@ test("round 4: the wait receipt names WHO settled a question, exactly once", asy
   assert.match(first, /req-1 已结算：arbiter 代答/);
   const second = replyText(await world.call("orchestrator_wait", { timeoutMs: 0 }));
   assert.doesNotMatch(second, /req-1 已结算/, "a settlement is named once");
+
+  // Two settlements between two receipts (possibly the same millisecond): both named.
+  world.childAsks(childId, { requestId: "req-2", title: "二", options: ["A"] });
+  world.childAsks(childId, { requestId: "req-3", title: "三", options: ["A"] });
+  world.childSettles(childId, "req-2", "human");
+  world.childSettles(childId, "req-3", "dismissed");
+  const third = replyText(await world.call("orchestrator_wait", { timeoutMs: 0 }));
+  assert.match(third, /req-2 已结算：用户在子会话里当场作答/);
+  assert.match(third, /req-3 已结算：用户关掉了对话框/);
 });
 
 test("two open questions require the requestId — the gate never picks one for you", async () => {
