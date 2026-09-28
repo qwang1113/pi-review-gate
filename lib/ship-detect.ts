@@ -47,12 +47,15 @@ export function segments(command: string): string[] {
  * commit. Quoted text stays in its segment; the segment's head decides.
  *
  * FAIL-CLOSED FALLBACK to the old split whenever quotes cannot be trusted to
- * mean what they say: an unbalanced quote, or any heredoc — a body line like
- * `it's` would open a "quote" that swallows the real commands after it.
+ * mean what they say: an unbalanced quote, any heredoc — a body line like
+ * `it's` would open a "quote" that swallows the real commands after it — or
+ * ANSI-C `$'…'` quoting, whose `\'` escape this scanner does not model. An
+ * unquoted word-start `#` is a comment to the end of the line (its `'` is not
+ * a quote), exactly as lib/shell-lex.ts reads it.
  */
 function splitOnOperators(command: string): string[] {
   const naive = () => command.split(/(?:\|\||&&|;|\||\n)/g).map((s) => s.trim()).filter(Boolean);
-  if (/<<(?!<)/.test(command)) return naive();
+  if (/<<(?!<)/.test(command) || command.includes("$'")) return naive();
   const out: string[] = [];
   let cur = "";
   let quote: '"' | "'" | null = null;
@@ -66,6 +69,10 @@ function splitOnOperators(command: string): string[] {
     }
     if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
     if (ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; continue; }
+    if (ch === "#" && (cur === "" || /\s$/.test(cur))) {
+      while (i + 1 < command.length && command[i + 1] !== "\n") i++;
+      continue;
+    }
     if (ch === ";" || ch === "\n" || ch === "|" || (ch === "&" && command[i + 1] === "&")) {
       if ((ch === "|" || ch === "&") && command[i + 1] === ch) i++;
       out.push(cur);
