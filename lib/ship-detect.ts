@@ -69,7 +69,9 @@ function splitOnOperators(command: string): string[] {
     }
     if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
     if (ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; continue; }
-    if (ch === "#" && (cur === "" || /\s$/.test(cur))) {
+    // A word starts after whitespace AND after bash's other metacharacters —
+    // `(# it's` and `sleep 1 &# it's` are comments too.
+    if (ch === "#" && (cur === "" || /[\s()&<>]$/.test(cur))) {
       while (i + 1 < command.length && command[i + 1] !== "\n") i++;
       continue;
     }

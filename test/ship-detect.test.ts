@@ -519,6 +519,9 @@ test("round 4: quote-aware splitting still sees every real ship", () => {
   // A comment's apostrophe is not a quote; ANSI-C quoting falls back to the old split.
   assert.equal(firstKind("echo hi # it's\ngit commit -am x # it's"), "commit");
   assert.equal(firstKind("echo $'a\\'b' ; git commit -am x #'"), "commit");
+  assert.equal(firstKind("(# it's\ngit commit -am x # it's\n)"), "commit");
+  assert.equal(firstKind("sleep 1 &# it's\ngit commit -am x # it's"), "commit");
+  assert.equal(firstKind("echo >#x it's\ngit commit -am x # it's"), "commit");
   assert.equal(firstKind("echo a#'b ; git commit -am x '"), undefined, "a mid-word # is not a comment: the quote is real");
   // Any heredoc: an apostrophe in a body must not swallow what follows.
   assert.equal(firstKind("cat > f <<EOF\nit's\nEOF\ngit commit -am x\necho isn't"), "commit");
