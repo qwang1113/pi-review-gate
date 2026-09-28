@@ -56,7 +56,12 @@ export interface DeclareDoneToolDeps {
   releaseSessionName(): { released: boolean; error?: string };
   /** A relocated session's last gate + its /tmp worktree's removal (lib/session-worktree-host.ts). */
   sessionWorktree: {
-    finishOwn(facts: { reviewVerdict?: string; reviewTree?: string | null; acceptanceStatus?: string }): { refusal: string } | undefined;
+    finishOwn(facts: {
+      reviewVerdict?: string;
+      reviewTree?: string | null;
+      acceptanceStatus?: string;
+      sessionEditedFiles?: readonly string[];
+    }): { refusal: string } | undefined;
     removeOwn(): string | undefined;
   };
   proxyDecisions(): ReturnType<ReturnType<typeof createDialogProxy>["all"]>;
@@ -328,6 +333,7 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
         reviewVerdict: state.review.verdict,
         // The reviewed commit's tree (lib/verdict-host.ts `bindTree`).
         reviewTree: state.review.fingerprint,
+        sessionEditedFiles: state.sessionEditedFiles ?? [],
         ...(state.acceptance?.status ? { acceptanceStatus: state.acceptance.status } : {}),
       });
       if (finished) {

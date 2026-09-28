@@ -46,6 +46,7 @@ import {
   type VerifiedBranchRecord,
 } from "./session-worktree.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
+import { pendingCheckpoint } from "./checkpoint-sweep.ts";
 import { ensureGateWorktreeRoot } from "./worktree-root.ts";
 import { seedWorktree } from "./worktree-seed.ts";
 
@@ -197,14 +198,25 @@ export function createSessionWorktree(deps: SessionWorktreeHostDeps) {
    * unreviewed checkout; otherwise writes the verified-branch record into the
    * MAIN repo. Returns a refusal, or undefined (not relocated, or recorded).
    */
-  function finishOwn(facts: { reviewVerdict?: string; reviewTree?: string | null; acceptanceStatus?: string }): { refusal: string } | undefined {
+  function finishOwn(facts: {
+    reviewVerdict?: string;
+    reviewTree?: string | null;
+    acceptanceStatus?: string;
+    /** Untracked paths this session wrote (`GateState.sessionEditedFiles`). */
+    sessionEditedFiles?: readonly string[];
+  }): { refusal: string } | undefined {
     const owner = ownWorktree();
     if (!owner || !existsSync(owner.path)) return undefined;
-    const status = git(owner.path, ["-C", owner.path, "status", "--porcelain"]);
+    // "Clean" means what the CHECKPOINT means (lib/checkpoint-sweep.ts): a
+    // foreign untracked file is never committed, so it must not block here —
+    // the refusal's advice (commit it through the review loop) could never
+    // clear it.
+    let clean = false;
+    try { clean = pendingCheckpoint(owner.path, facts.sessionEditedFiles ?? []).paths.length === 0; } catch { clean = false; }
     const head = git(owner.path, ["-C", owner.path, "rev-parse", "HEAD", "HEAD^{tree}"]);
     const [commit, headTree] = head.ok ? head.output.split("\n").map((s) => s.trim()) : [];
     const refusal = finishRefusal({
-      clean: status.ok && status.output.trim() === "",
+      clean,
       headTree,
       reviewVerdict: facts.reviewVerdict,
       reviewTree: facts.reviewTree,

@@ -284,11 +284,18 @@ test("finishOwn on a real repo: refuses dirty, records clean+reviewed, pre-push 
       askChoice: async () => undefined, log: () => {},
     });
     writeFileSync(join(path, "b.txt"), "b");
-    const dirty = host.finishOwn({ reviewVerdict: "READY", reviewTree: "x", acceptanceStatus: "READY" });
-    assert.match(dirty!.refusal, /未提交/);
+    const dirty = host.finishOwn({ reviewVerdict: "READY", reviewTree: "x", acceptanceStatus: "READY", sessionEditedFiles: ["b.txt"] });
+    assert.match(dirty!.refusal, /未提交/, "an untracked file THIS session wrote is uncommitted work");
+    writeFileSync(join(path, "a.txt"), "a2");
+    assert.match(host.finishOwn({ reviewVerdict: "READY", reviewTree: "x", acceptanceStatus: "READY" })!.refusal, /未提交/,
+      "a tracked modification is uncommitted work");
+    g(path, "checkout", "--", "a.txt");
     assert.equal(existsSync(join(repo, VERIFIED_BRANCHES_RELPATH)), false, "a refusal writes nothing");
 
     g(path, "add", "-A"); g(path, "commit", "-qm", "work");
+    // A FOREIGN untracked file (the session never wrote it) is never committed
+    // by the checkpoint, so it must not block (lib/checkpoint-sweep.ts).
+    writeFileSync(join(path, "foreign.log"), "x");
     const tree = g(path, "rev-parse", "HEAD^{tree}");
     const commit = g(path, "rev-parse", "HEAD");
     // A READY binds to the REVIEWED COMMIT'S TREE (lib/verdict-host.ts bindTree).
