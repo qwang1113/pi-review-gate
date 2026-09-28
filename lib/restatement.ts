@@ -64,6 +64,7 @@ import {
   type DeliveryStation,
 } from "./delivery-station.ts";
 import { capStationAt, stationCapNotice } from "./repo-pr-policy.ts";
+import { raiseStationToFloor, stationFloorNotice } from "./session-worktree.ts";
 import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest, DialogRenderer } from "./orchestrator-child-channel.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
@@ -437,6 +438,8 @@ export interface RestatementToolDeps {
    * sent over the channel and recorded.
    */
   stationCap?(): DeliveryStation | undefined;
+  /** The FLOOR for a relocated second session (lib/session-worktree.ts), applied after the cap. */
+  stationFloor?(): DeliveryStation | undefined;
   /** An orchestration child has no restatement step (lib/child-goal-flow.ts). */
   isOrchestrationChild?(): boolean;
 }
@@ -513,8 +516,11 @@ export async function doProposeRestatement(
   // gate asking about one contract and writing another. What is SHOWN, sent
   // over the channel and recorded is the clamped value.
   const stationCap = deps.stationCap?.();
-  const station = capStationAt(requestedStation, stationCap);
-  const capNote = stationCapNotice(requestedStation, stationCap)?.full;
+  const capped = capStationAt(requestedStation, stationCap);
+  const stationFloor = deps.stationFloor?.();
+  const station = raiseStationToFloor(capped, stationFloor);
+  const capNote = [stationCapNotice(requestedStation, stationCap)?.full, stationFloorNotice(capped, stationFloor)]
+    .filter(Boolean).join("\n") || undefined;
   const text = checked.text;
 
   const uiCtx = ctx as RestatementUiContext;

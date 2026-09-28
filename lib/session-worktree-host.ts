@@ -1,7 +1,8 @@
 /**
  * A SECOND SESSION IN A HELD REPO GETS ITS OWN CHECKOUT — the IO half
  * (2026-09-28). Every name, argv and decision is lib/session-worktree.ts's;
- * this module asks, creates, switches and reclaims.
+ * this module asks, creates, switches, records the finished branch in the main
+ * repo and removes the checkout. It never commits on the session's behalf.
  *
  * THE SWITCH. pi fixes a session's cwd when the runtime is built, and the only
  * way to rebuild it on another cwd is `switchSession(<file>)` — a COMMAND ctx
@@ -22,24 +23,29 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sessionDirForCwd } from "./session-dir.ts";
 
 import { parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
-import { gitBaseEnv, gitFailureText, gitText } from "./git-exec.ts";
+import { gitFailureText, gitText } from "./git-exec.ts";
 import { listedWorktreeBranch } from "./repo-facts.ts";
 import {
   RELOCATE_COMMAND,
   RELOCATE_YES,
   createSessionWorktreeArgv,
   isSessionWorktreePath,
+  VERIFIED_BRANCHES_RELPATH,
+  finishRefusal,
   ownerRecordPath,
   ownsSessionWorktree,
   parseOwner,
-  reclaimSessionWorktreeArgv,
+  parseVerifiedBranches,
   relocateChoice,
+  removeSessionWorktreeArgv,
   sessionWorktreeBranch,
   sessionWorktreePath,
   shouldAdopt,
   shouldOfferRelocation,
   type SessionWorktreeOwner,
+  type VerifiedBranchRecord,
 } from "./session-worktree.ts";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { ensureGateWorktreeRoot } from "./worktree-root.ts";
 import { seedWorktree } from "./worktree-seed.ts";
 
@@ -74,14 +80,8 @@ function writeOwner(owner: SessionWorktreeOwner): void {
 
 /** `gitFailureText` keeps STDOUT, where git says "nothing to commit". */
 function runGit(cwd: string, argv: readonly string[]): { ok: boolean; output: string } {
-  // THE LEFTOVERS COMMIT IS THE GATE'S OWN, like the checkpoint
-  // (lib/checkpoint-tool.ts): it SAVES work onto a private branch, it ships
-  // nothing — the pre-push hook and the ship gate still guard publishing. The
-  // session's own pre-commit hook would refuse it whenever its review is
-  // pending (acceptance P1, 2026-09-28), stranding the checkout at exit.
-  const env = argv[2] === "commit" ? { ...gitBaseEnv(), REVIEW_GATE_BYPASS: "1" } : undefined;
   try {
-    return { ok: true, output: gitText(cwd, argv, { timeout: 0, ...(env ? { env } : {}) }) };
+    return { ok: true, output: gitText(cwd, argv, { timeout: 0 }) };
   } catch (error) {
     return { ok: false, output: gitFailureText(error).trim() };
   }
@@ -162,7 +162,8 @@ export function createSessionWorktree(deps: SessionWorktreeHostDeps) {
           withSession: async (next) => {
             next.ui.notify(
               `review-gate: 本会话已切到独立 worktree ${cwd}（分支 ${branch}），与另一个会话互不打扰。` +
-                "declare_done 被接受或退出时，未提交的改动会 commit 到这条分支，目录随即回收。",
+                "改动过门禁 commit 到这条分支、验收通过后 declare_done，门禁把「已验」写回主仓库并回收目录；" +
+                "没做完就退出，未提交的改动会被丢弃。",
               "info",
             );
           },
@@ -182,31 +183,72 @@ export function createSessionWorktree(deps: SessionWorktreeHostDeps) {
     }
   }
 
-  /**
-   * Reclaim THIS session's worktree: leftovers onto its branch, then the
-   * directory. Returns a line for the receipt, or undefined when this session
-   * is not in a worktree it owns.
-   */
-  function reclaimOwn(): string | undefined {
+  /** The owner record of the worktree THIS session runs in, if it owns one. */
+  function ownWorktree(): SessionWorktreeOwner | undefined {
     const cwd = deps.cwd();
     if (!isSessionWorktreePath(cwd)) return undefined;
     const owner = readOwner(cwd);
-    if (!ownsSessionWorktree(owner, deps.sessionId())) return undefined;
-    if (!existsSync(cwd)) {
-      try { rmSync(ownerRecordPath(cwd), { force: true }); } catch { /* best effort */ }
-      return undefined;
-    }
-    const branch = listedWorktreeBranch(owner!.repo, cwd) ?? owner!.branch;
-    for (const step of reclaimSessionWorktreeArgv(owner!, branch)) {
-      const result = git(owner!.repo, step);
-      if (result.ok) continue;
-      if (step[2] === "commit" && /nothing to commit|no changes added/i.test(result.output)) continue;
-      return `⚠️ 独立 worktree ${cwd} 没有回收（git ${step[2]} 失败：${result.output.slice(0, 300)}）—— ` +
-        `改动还在那个目录里，分支 \`${branch}\`。`;
-    }
-    try { rmSync(ownerRecordPath(cwd), { force: true }); } catch { /* the record is harmless without its checkout */ }
-    return `独立 worktree ${cwd} 已回收；本会话的成果在分支 \`${branch}\`（仓库 ${owner!.repo}）。`;
+    return ownsSessionWorktree(owner, deps.sessionId()) ? owner : undefined;
   }
 
-  return { register, offerAfterRefusal, adoptOnStart, reclaimOwn };
+  /**
+   * The LAST gate of `declare_done` in a relocated session — called only after
+   * every other gate, acceptance included, has passed. Refuses a dirty or
+   * unreviewed checkout; otherwise writes the verified-branch record into the
+   * MAIN repo. Returns a refusal, or undefined (not relocated, or recorded).
+   */
+  function finishOwn(facts: { reviewVerdict?: string; reviewTree?: string | null; acceptanceStatus?: string }): { refusal: string } | undefined {
+    const owner = ownWorktree();
+    if (!owner || !existsSync(owner.path)) return undefined;
+    const status = git(owner.path, ["-C", owner.path, "status", "--porcelain"]);
+    const head = git(owner.path, ["-C", owner.path, "rev-parse", "HEAD", "HEAD^{tree}"]);
+    const [commit, headTree] = head.ok ? head.output.split("\n").map((s) => s.trim()) : [];
+    const refusal = finishRefusal({
+      clean: status.ok && status.output.trim() === "",
+      headTree,
+      reviewVerdict: facts.reviewVerdict,
+      reviewTree: facts.reviewTree,
+      acceptanceStatus: facts.acceptanceStatus,
+    });
+    if (refusal) return { refusal };
+    const branch = listedWorktreeBranch(owner.repo, owner.path) ?? owner.branch;
+    const file = join(owner.repo, VERIFIED_BRANCHES_RELPATH);
+    let existing: string | undefined;
+    try { existing = readFileSync(file, "utf8"); } catch { existing = undefined; }
+    const records = parseVerifiedBranches(existing).filter((r) => r.branch !== branch);
+    const record: VerifiedBranchRecord = {
+      branch, commit: commit!, tree: headTree!, review: "READY", acceptance: facts.acceptanceStatus!,
+      sessionId: owner.sessionId, at: new Date().toISOString(),
+    };
+    try {
+      writeFileAtomic(file, JSON.stringify([...records, record], null, 2) + "\n");
+    } catch (error) {
+      return { refusal: `没能把验证记录写回主仓库（${file}）：${(error as Error).message}` };
+    }
+    return undefined;
+  }
+
+  /**
+   * Remove THIS session's worktree directory as it stands — never a commit.
+   * The branch stays. Returns a line for the receipt, or undefined when this
+   * session is not in a worktree it owns.
+   */
+  function removeOwn(): string | undefined {
+    const owner = ownWorktree();
+    if (!owner) return undefined;
+    const branch = listedWorktreeBranch(owner.repo, owner.path) ?? owner.branch;
+    if (existsSync(owner.path)) {
+      const removed = git(owner.repo, removeSessionWorktreeArgv(owner));
+      if (!removed.ok) return `⚠️ 独立 worktree ${owner.path} 没能删掉：${removed.output.slice(0, 300)}`;
+    }
+    try { rmSync(ownerRecordPath(owner.path), { force: true }); } catch { /* harmless without its checkout */ }
+    return `独立 worktree ${owner.path} 已回收；分支 \`${branch}\` 留在主仓库 ${owner.repo}。`;
+  }
+
+  /** Is this session working in its own relocated worktree? */
+  function inOwnWorktree(): boolean {
+    return ownWorktree() !== undefined;
+  }
+
+  return { register, offerAfterRefusal, adoptOnStart, finishOwn, removeOwn, inOwnWorktree };
 }

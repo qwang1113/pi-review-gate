@@ -9,7 +9,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { isGateIntegrityPath } from "../lib/sensitive-grant.ts";
+import { isSensitiveFile } from "../lib/constants.ts";
 
 import {
   RELOCATE_COMMAND,
@@ -19,8 +23,16 @@ import {
   ownerRecordPath,
   ownsSessionWorktree,
   parseOwner,
-  reclaimSessionWorktreeArgv,
+  RELOCATED_STATION_FLOOR,
+  VERIFIED_BRANCHES_RELPATH,
+  finishRefusal,
+  formatVerifiedBranches,
+  isVerifiedTree,
+  parseVerifiedBranches,
+  raiseStationToFloor,
   relocateChoice,
+  removeSessionWorktreeArgv,
+  stationFloorNotice,
   sessionWorktreeBranch,
   sessionWorktreePath,
   shouldAdopt,
@@ -30,7 +42,6 @@ import { createSessionWorktree } from "../lib/session-worktree-host.ts";
 import { ensureGateWorktreeRoot, gateWorktreeRoot } from "../lib/worktree-root.ts";
 
 const REPO = "/Users/dev/workspace/pi-review-gate";
-const CONVENTIONAL_ASCII = /^[a-z]+\([a-z-]+\): [\x20-\x7e]+$/;
 
 test("the session checkout lives under the gate's /tmp root, on an rg-session branch", () => {
   assert.equal(gateWorktreeRoot(), join(realpathSync("/tmp"), "rg-worktrees"));
@@ -49,16 +60,9 @@ test("ensureGateWorktreeRoot creates the root on first use", () => {
   assert.equal(existsSync(root), true);
 });
 
-test("reclamation commits the leftovers, THEN removes the directory — never the branch", () => {
+test("removal is the directory only — never a commit, never the branch", () => {
   const owner = { sessionId: "s1", pid: 1, repo: REPO, branch: "rg-session-x", path: sessionWorktreePath(REPO, "x") };
-  const steps = reclaimSessionWorktreeArgv(owner, "feat/renamed").map((s) => [...s]);
-  assert.deepEqual(steps, [
-    ["-C", owner.path, "add", "-A"],
-    ["-C", owner.path, "commit", "-m", "chore(session): save leftovers of feat/renamed"],
-    ["-C", REPO, "worktree", "remove", "--force", owner.path],
-  ]);
-  assert.match(steps[1]![4]!, CONVENTIONAL_ASCII, "the gate's own commit subject is English Conventional Commits");
-  assert.ok(!steps.some((s) => s.includes("-D")), "the branch is the only copy — never deleted");
+  assert.deepEqual([...removeSessionWorktreeArgv(owner)], ["-C", REPO, "worktree", "remove", "--force", owner.path]);
 });
 
 test("ownership: only the named session reclaims; a /new in the same process adopts", () => {
@@ -176,14 +180,17 @@ test("yes ⇒ cut under /tmp, a session file that starts THERE, and the switch t
     await w.command!(file!, ctx);
     assert.deepEqual(switched, [file]);
 
-    // After the switch: the NEW session reclaims — leftovers first, then the dir.
+    // After the switch: the NEW session is the one in its own worktree.
     w.session = { id: owner.sessionId, cwd: path };
-    const note = w.host.reclaimOwn()!;
-    assert.match(note, /已回收/);
-    assert.equal(existsSync(path), false, "the directory is gone");
+    assert.equal(w.host.inOwnWorktree(), true);
+    // Leaving without declare_done: the directory goes as it stands — no commit.
+    writeFileSync(join(path, "unsaved.txt"), "dropped");
+    const before = w.gitCalls.length;
+    assert.match(w.host.removeOwn()!, /已回收/);
+    assert.equal(existsSync(path), false, "the directory is gone, uncommitted work with it");
     assert.equal(existsSync(ownerRecordPath(path)), false, "…and so is its record");
-    const tail = w.gitCalls.slice(-3).map((a) => a.slice(2, 4).join(" "));
-    assert.deepEqual(tail, ["add -A", "commit -m", "worktree remove"]);
+    assert.deepEqual(w.gitCalls.slice(before).map((a) => a.slice(2, 4).join(" ")), ["worktree remove"],
+      "nothing is ever committed on the session's behalf");
   } finally {
     process.chdir(prevCwd);
     if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
@@ -192,31 +199,125 @@ test("yes ⇒ cut under /tmp, a session file that starts THERE, and the switch t
   }
 });
 
-test("a refused commit KEEPS the directory; nothing-to-commit does not; a stranger's checkout is left alone", () => {
+test("a stranger's checkout is left alone", () => {
   const path = sessionWorktreePath(REPO, `t${Date.now().toString(36)}`);
-  const setup = () => {
+  try {
     mkdirSync(path, { recursive: true });
     writeFileSync(ownerRecordPath(path), JSON.stringify({ sessionId: "me", pid: 1, repo: REPO, branch: "rg-session-t", path }));
-  };
-  try {
-    setup();
-    const refused = world({ refused: false, commitFails: "[review-gate] hook refused", repo: REPO });
-    refused.session = { id: "me", cwd: path };
-    assert.match(refused.host.reclaimOwn()!, /没有回收/);
-    assert.equal(existsSync(path), true, "the work is only in that directory — it stays");
-    assert.ok(!refused.gitCalls.some((a) => a[3] === "remove"), "the removal never ran");
-
     const stranger = world({ refused: false, repo: REPO });
     stranger.session = { id: "somebody-else", cwd: path };
-    assert.equal(stranger.host.reclaimOwn(), undefined);
+    assert.equal(stranger.host.inOwnWorktree(), false);
+    assert.equal(stranger.host.removeOwn(), undefined);
+    assert.equal(stranger.host.finishOwn({ reviewVerdict: "READY", reviewTree: "t", acceptanceStatus: "READY" }), undefined);
     assert.deepEqual(stranger.gitCalls, []);
-
-    const clean = world({ refused: false, commitFails: "nothing to commit, working tree clean", repo: REPO });
-    clean.session = { id: "me", cwd: path };
-    assert.match(clean.host.reclaimOwn()!, /已回收/);
-    assert.equal(existsSync(path), false);
+    assert.equal(existsSync(path), true);
   } finally {
     rmSync(path, { recursive: true, force: true });
     rmSync(ownerRecordPath(path), { force: true });
+  }
+});
+
+test("finishRefusal: dirty, unreviewed HEAD, or unfinished acceptance all refuse", () => {
+  const ok = { clean: true, headTree: "t1", reviewVerdict: "READY", reviewTree: "t1", acceptanceStatus: "READY" };
+  assert.equal(finishRefusal(ok), undefined);
+  assert.equal(finishRefusal({ ...ok, acceptanceStatus: "SKIPPED" }), undefined, "a recorded skip finishes");
+  assert.equal(finishRefusal({ ...ok, acceptanceStatus: "DISABLED" }), undefined);
+  assert.match(finishRefusal({ ...ok, clean: false })!, /未提交/);
+  assert.match(finishRefusal({ ...ok, reviewTree: "t0" })!, /审查 READY/);
+  assert.match(finishRefusal({ ...ok, reviewVerdict: "PENDING" })!, /审查 READY/);
+  for (const a of ["BLOCKED", "AWAITING", undefined]) {
+    assert.match(finishRefusal({ ...ok, acceptanceStatus: a })!, /验收/);
+  }
+});
+
+test("the relocated session's station floor is commit; others are untouched", () => {
+  assert.equal(raiseStationToFloor("precommit", RELOCATED_STATION_FLOOR), "commit");
+  assert.equal(raiseStationToFloor("pr", RELOCATED_STATION_FLOOR), "pr");
+  assert.equal(raiseStationToFloor("precommit", undefined), "precommit");
+  assert.match(stationFloorNotice("precommit", RELOCATED_STATION_FLOOR)!, /最低 commit/);
+  assert.equal(stationFloorNotice("pr", RELOCATED_STATION_FLOOR), undefined);
+  assert.equal(stationFloorNotice("precommit", undefined), undefined);
+});
+
+test("the verified-branch record is gate-owned: an agent edit is blocked and ungrantable", () => {
+  assert.equal(isGateIntegrityPath(`/r/${VERIFIED_BRANCHES_RELPATH}`), true);
+  assert.equal(isSensitiveFile(`/r/${VERIFIED_BRANCHES_RELPATH}`), true);
+  assert.deepEqual(parseVerifiedBranches("{"), [], "corrupt ⇒ no record");
+  assert.deepEqual(parseVerifiedBranches(JSON.stringify([{ branch: "b", tree: "t" }])), [], "half a record is none");
+});
+
+test("declare_done runs finishOwn LAST — after every gate and the acceptance round — and removes the dir only after it", () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "declare-done-tool.ts"), "utf8");
+  const problems = src.indexOf("details: { accepted: false, problems },");
+  const acceptance = src.indexOf("if (acceptance) return acceptance;");
+  const finish = src.indexOf("deps.sessionWorktree.finishOwn(");
+  const done = src.indexOf('progress.done("全部满足");');
+  const remove = src.indexOf("deps.sessionWorktree.removeOwn()");
+  assert.ok(problems > 0 && acceptance > problems, "the ship-gate refusal and the acceptance round come first");
+  assert.ok(finish > acceptance && finish < done, "finishOwn is the last gate, so an earlier refusal never reaches it");
+  assert.ok(remove > done, "the directory goes only once the round is accepted");
+});
+
+// ── real git: finishOwn writes the record, the pre-push script honours it ──
+
+function g(cwd: string, ...args: string[]): string {
+  return execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, encoding: "utf8" }).trim();
+}
+
+test("finishOwn on a real repo: refuses dirty, records clean+reviewed, pre-push releases only that tree", () => {
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "rg-sw-real-")));
+  const token = `r${Date.now().toString(36)}`;
+  const path = sessionWorktreePath(repo, token);
+  const branch = sessionWorktreeBranch(token);
+  try {
+    g(repo, "init", "-q");
+    writeFileSync(join(repo, "a.txt"), "a");
+    g(repo, "add", "-A"); g(repo, "commit", "-qm", "init");
+    ensureGateWorktreeRoot();
+    g(repo, "worktree", "add", "-q", "-b", branch, path, "HEAD");
+    writeFileSync(ownerRecordPath(path), JSON.stringify({ sessionId: "me", pid: 1, repo, branch, path }));
+    const host = createSessionWorktree({
+      pi: { registerCommand: () => {}, sendUserMessage: () => {} },
+      cwd: () => path, sessionId: () => "me", refused: () => false,
+      askChoice: async () => undefined, log: () => {},
+    });
+    writeFileSync(join(path, "b.txt"), "b");
+    const dirty = host.finishOwn({ reviewVerdict: "READY", reviewTree: "x", acceptanceStatus: "READY" });
+    assert.match(dirty!.refusal, /未提交/);
+    assert.equal(existsSync(join(repo, VERIFIED_BRANCHES_RELPATH)), false, "a refusal writes nothing");
+
+    g(path, "add", "-A"); g(path, "commit", "-qm", "work");
+    const tree = g(path, "rev-parse", "HEAD^{tree}");
+    const commit = g(path, "rev-parse", "HEAD");
+    assert.match(host.finishOwn({ reviewVerdict: "READY", reviewTree: tree, acceptanceStatus: "BLOCKED" })!.refusal, /验收/);
+    assert.equal(host.finishOwn({ reviewVerdict: "READY", reviewTree: tree, acceptanceStatus: "READY" }), undefined);
+    const records = parseVerifiedBranches(readFileSync(join(repo, VERIFIED_BRANCHES_RELPATH), "utf8"));
+    assert.deepEqual(records.map((r) => [r.branch, r.commit, r.tree, r.acceptance]), [[branch, commit, tree, "READY"]]);
+    assert.equal(isVerifiedTree(records, tree), true);
+    assert.match(formatVerifiedBranches(records).join("\n"), new RegExp(`已验分支[\\s\\S]*${branch}`), "/gate-status lists it");
+    assert.deepEqual(formatVerifiedBranches([]), []);
+
+    assert.match(host.removeOwn()!, /已回收/);
+    assert.equal(existsSync(path), false);
+    assert.equal(g(repo, "rev-parse", branch), commit, "the branch stays in the main repo");
+
+    const zero = "0".repeat(40);
+    const script = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "pre-push-verified.cjs");
+    const push = (stdin: string) => spawnSync(process.execPath, [script], { cwd: repo, input: stdin }).status;
+    assert.equal(push(`refs/heads/${branch} ${commit} refs/heads/${branch} ${zero}\n`), 0, "the recorded tree is released");
+    const head = g(repo, "rev-parse", "HEAD");
+    assert.equal(push(`refs/heads/main ${head} refs/heads/main ${zero}\n`), 1, "an unrecorded tree falls back");
+    assert.equal(push(`refs/heads/${branch} ${commit} refs/heads/${branch} ${zero}\nrefs/heads/main ${head} refs/heads/main ${zero}\n`), 1,
+      "one unrecorded ref is enough to fall back");
+    assert.equal(push(`(delete) ${zero} refs/heads/old ${commit}\nrefs/heads/${branch} ${commit} refs/heads/${branch} ${zero}\n`), 0,
+      "a delete does not count against the push");
+    assert.equal(push(""), 1, "nothing pushed ⇒ not released");
+    writeFileSync(join(repo, VERIFIED_BRANCHES_RELPATH), "{broken");
+    assert.equal(push(`refs/heads/${branch} ${commit} refs/heads/${branch} ${zero}\n`), 1, "a corrupt record releases nothing");
+  } finally {
+    try { g(repo, "worktree", "remove", "--force", path); } catch { /* already gone */ }
+    rmSync(path, { recursive: true, force: true });
+    rmSync(ownerRecordPath(path), { force: true });
+    rmSync(repo, { recursive: true, force: true });
   }
 });

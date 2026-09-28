@@ -54,8 +54,11 @@ export interface DeclareDoneToolDeps {
   tmuxScope: TmuxScope;
   raiseBanner(opts: { kind: UserNotifyKind; detail: string; blocking?: boolean }): UserNotifyOutcome;
   releaseSessionName(): { released: boolean; error?: string };
-  /** Reclaim this session's own /tmp worktree, if it runs in one (lib/session-worktree-host.ts). */
-  reclaimSessionWorktree(): string | undefined;
+  /** A relocated session's last gate + its /tmp worktree's removal (lib/session-worktree-host.ts). */
+  sessionWorktree: {
+    finishOwn(facts: { reviewVerdict?: string; reviewTree?: string | null; acceptanceStatus?: string }): { refusal: string } | undefined;
+    removeOwn(): string | undefined;
+  };
   proxyDecisions(): ReturnType<ReturnType<typeof createDialogProxy>["all"]>;
 }
 
@@ -317,6 +320,30 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
         const acceptance = await deps.armAcceptanceRound(ctx, progress, acceptanceNotes);
         if (acceptance) return acceptance;
       }
+      // ── A RELOCATED SESSION'S LAST GATE (2026-09-28, user decision) ── after
+      // EVERY other gate, acceptance included: the work must be committed and
+      // reviewed, and only then is it recorded as verified in the MAIN repo.
+      // A refusal here leaves the checkout and writes nothing.
+      const finished = deps.sessionWorktree.finishOwn({
+        reviewVerdict: state.review.verdict,
+        reviewTree: state.review.fingerprint,
+        ...(state.acceptance?.status ? { acceptanceStatus: state.acceptance.status } : {}),
+      });
+      if (finished) {
+        return {
+          content: [{
+            type: "text",
+            text: buildRejection({
+              what: "declare_done 暂不能完成 —— 独立 worktree 里的成果还不能记为已验",
+              why: finished.refusal,
+              by: "agent",
+              next: "按原因处理后再调一次 `declare_done`。",
+            }),
+          }],
+          details: { accepted: false, problems: [finished.refusal] },
+          isError: true,
+        };
+      }
       progress.done("全部满足");
       cells.loopArmed = false;
       // R3-5 — RECORD THE COMPLETION, in this session's own sidecar. This one
@@ -365,8 +392,8 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
       // blocking; lib/session-registry.ts's sweep is the backstop.
       const namingRelease = deps.releaseSessionName();
       // ── AND ITS OWN /tmp CHECKOUT (2026-09-28) ── used up the moment the
-      // round is done: leftovers onto its branch, then the directory.
-      const worktreeNote = deps.reclaimSessionWorktree();
+      // round is done; the verified branch stays in the main repo.
+      const worktreeNote = deps.sessionWorktree.removeOwn();
       return {
         content: [{
           type: "text",

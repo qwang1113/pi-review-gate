@@ -103,6 +103,22 @@ MARKER="# pi-review-gate:installed"
 # recorded verbatim in a marker comment and read back with a single sed.
 ORIG_MARKER="# pi-review-gate:original="
 
+# The chained pair: ours, then the original. PRE-PUSH READS ITS REF LIST FROM
+# STDIN, and ours now consumes it (hooks/pre-push, verified branches) — so the
+# pair shares one buffered copy, or an original such as git-lfs would see none.
+# Only pre-push: git leaves the other hooks' stdin unredirected, and a `cat`
+# there would wait on the terminal.
+chain_body() {
+  local hook="$1" ours="$2" theirs="$3"
+  if [[ "$hook" == "pre-push" ]]; then
+    printf '%s\n' '__rg_refs="$(cat)"'
+    printf 'printf "%%s\\n" "$__rg_refs" | "%s" "$@"\n' "$ours"
+    printf 'printf "%%s\\n" "$__rg_refs" | "%s" "$@"\n' "$theirs"
+  else
+    printf '"%s" "$@"\n"%s" "$@"\n' "$ours" "$theirs"
+  fi
+}
+
 for hook in pre-commit pre-push commit-msg; do
   src="$HOOKS_SRC/$hook"
   dst="$HOOKS_DST/$hook"
@@ -122,8 +138,7 @@ for hook in pre-commit pre-push commit-msg; do
 $MARKER
 ${ORIG_MARKER}${original}
 set -e
-"$src" "\$@"
-"$original" "\$@"
+$(chain_body "$hook" "$src" "$original")
 EOF
     else
       cat > "$dst" <<EOF
@@ -145,8 +160,7 @@ EOF
 $MARKER
 ${ORIG_MARKER}$dst.pre-pi-review-gate
 set -e
-"$src" "\$@"
-"$dst.pre-pi-review-gate" "\$@"
+$(chain_body "$hook" "$src" "$dst.pre-pi-review-gate")
 EOF
     chmod +x "$dst"
     echo "installed (chained): $dst"

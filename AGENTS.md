@@ -693,8 +693,14 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    弹一次统一模板问是否切换；选是 ⇒ 门禁从 HEAD 在根目录下开 `rg-session-<token>`、按
    `worktree-seed.ts` 播种，写一份 header `cwd` 指向它的新会话文件，经内部命令
    `/gate-relocate` 拿 command ctx 调 pi 的 `switchSession` 原地切过去（pi 对新目录会弹它自己的
-   项目信任框）。该会话 `declare_done` 被接受或 pi 进程结束时，遗留改动 commit 到它的分支、目录
-   回收；commit 被拒就保留目录并如实报告。归属记录在 checkout 旁边的 `.owner.json`。规则在
+   项目信任框）。**「完成」= 成果以验收通过的状态回到主仓库**（同日第二轮，用户决定）：它的交付
+   站点最低 `commit`（反述 / goal 里请求 precommit 会被抬到 commit 并写明）；`declare_done` 在
+   **所有门禁与验收轮都通过之后**最后检查 worktree 干净、HEAD tree 就是审查 READY 的 tree、验收
+   已放行，然后把一条记录（分支 / commit / tree / 验收结论）写进**主仓库** `.pi/verified-branches.json`
+   （门禁自有文件，agent 编辑被拦且不可授权），再删目录、分支留下。主 checkout 推这条分支时
+   `hooks/pre-push` 经 `scripts/pre-push-verified.cjs` 按被推 tip 的 tree 查这份记录，全部命中就
+   放行，否则照旧走原检查；`/gate-status` 列出已验分支。**门禁从不替它 commit、从不跳钩子**；没
+   declare_done 就退出，目录照删、未提交改动丢弃。归属记录在 checkout 旁边的 `.owner.json`。规则在
    `lib/session-worktree.ts`，IO 在 `lib/session-worktree-host.ts`。
 
 2b. **同一个 repo 的一个需求只出一个 PR**（2026-09-15，用户决定）：plan 里同一

@@ -196,6 +196,7 @@ import { registerDeclareDoneTool } from "../lib/declare-done-tool.ts";
 import { registerGateModeTool } from "../lib/gate-mode-tool.ts";
 import { createSessionLifecycle } from "../lib/session-lifecycle.ts";
 import { createSessionWorktree } from "../lib/session-worktree-host.ts";
+import { RELOCATED_STATION_FLOOR } from "../lib/session-worktree.ts";
 import { createTurnDirective, createTurnEndHook, registerThinkingLoopGuard } from "../lib/turn-directive.ts";
 
 /**
@@ -1208,7 +1209,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     log,
   });
   sessionWorktree.register();
-  sessionWorktreeAtExit = () => sessionWorktree.reclaimOwn();
+  // Not done ⇒ the directory goes as it stands; uncommitted work is dropped.
+  sessionWorktreeAtExit = () => sessionWorktree.removeOwn();
 
   // ---------- declare_done (lib/declare-done-tool.ts) ----------
   registerDeclareDoneTool(pi, cells, {
@@ -1230,7 +1232,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     tmuxScope,
     raiseBanner,
     releaseSessionName: () => sessionNaming.release(),
-    reclaimSessionWorktree: () => sessionWorktree.reclaimOwn(),
+    sessionWorktree,
     proxyDecisions: () => dialogProxy.all(),
   });
 
@@ -1247,6 +1249,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // HOW FAR THIS SESSION MAY SHIP (2026-09-15): read from the environment the
     // DISPATCHER wrote, never from anything this session's prompt could say.
     stationCap: stationCapFromEnv,
+    stationFloor: () => (sessionWorktree.inOwnWorktree() ? RELOCATED_STATION_FLOOR : undefined),
     isOrchestrationChild,
     writeGoalFile: (path, text) => {
       // A session another one holds this worktree against must not overwrite
@@ -1267,8 +1270,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
     askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
-    // THE SAME CEILING the goal dialog reads (2026-09-15).
+    // THE SAME CEILING the goal dialog reads (2026-09-15), and the same floor.
     stationCap: stationCapFromEnv,
+    stationFloor: () => (sessionWorktree.inOwnWorktree() ? RELOCATED_STATION_FLOOR : undefined),
     isOrchestrationChild,
   });
   // `choose_loop_stages` — the SAME deps back the tool_call fallback.
