@@ -10,7 +10,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { git, neutraliseHostGitConfig } from "./helpers/git.ts";
 import { fileURLToPath } from "node:url";
 import { isGateIntegrityPath } from "../lib/sensitive-grant.ts";
 import { isSensitiveFile } from "../lib/constants.ts";
@@ -260,9 +261,10 @@ test("declare_done runs finishOwn LAST — after every gate and the acceptance r
 
 // ── real git: finishOwn writes the record, the pre-push script honours it ──
 
-function g(cwd: string, ...args: string[]): string {
-  return execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, encoding: "utf8" }).trim();
-}
+// The host under test spawns git itself, so the host's global config is
+// neutralised for the whole process, not only for the fixture calls.
+neutraliseHostGitConfig();
+const g = (cwd: string, ...args: string[]): string => git(cwd, ["-c", "user.email=t@t", "-c", "user.name=t", ...args]);
 
 test("finishOwn on a real repo: refuses dirty, records clean+reviewed, pre-push releases only that tree", () => {
   const repo = realpathSync(mkdtempSync(join(tmpdir(), "rg-sw-real-")));
@@ -289,6 +291,8 @@ test("finishOwn on a real repo: refuses dirty, records clean+reviewed, pre-push 
     g(path, "add", "-A"); g(path, "commit", "-qm", "work");
     const tree = g(path, "rev-parse", "HEAD^{tree}");
     const commit = g(path, "rev-parse", "HEAD");
+    // A READY binds to the REVIEWED COMMIT'S TREE (lib/verdict-host.ts bindTree).
+    assert.match(host.finishOwn({ reviewVerdict: "READY", reviewTree: "stale", acceptanceStatus: "READY" })!.refusal, /审查 READY/);
     assert.match(host.finishOwn({ reviewVerdict: "READY", reviewTree: tree, acceptanceStatus: "BLOCKED" })!.refusal, /验收/);
     assert.equal(host.finishOwn({ reviewVerdict: "READY", reviewTree: tree, acceptanceStatus: "READY" }), undefined);
     const records = parseVerifiedBranches(readFileSync(join(repo, VERIFIED_BRANCHES_RELPATH), "utf8"));

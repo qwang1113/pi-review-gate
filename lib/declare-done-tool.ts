@@ -326,6 +326,7 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
       // A refusal here leaves the checkout and writes nothing.
       const finished = deps.sessionWorktree.finishOwn({
         reviewVerdict: state.review.verdict,
+        // The reviewed commit's tree (lib/verdict-host.ts `bindTree`).
         reviewTree: state.review.fingerprint,
         ...(state.acceptance?.status ? { acceptanceStatus: state.acceptance.status } : {}),
       });

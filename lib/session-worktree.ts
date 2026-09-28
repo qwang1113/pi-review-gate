@@ -166,6 +166,12 @@ const FINISHED_ACCEPTANCE: ReadonlySet<string> = new Set(["READY", "SKIPPED", "D
  * May this relocated session finish? `undefined` = yes; otherwise the reason.
  * Called only after every other gate passed, so it judges what is left: the
  * checkout is clean, HEAD is the reviewed content, and acceptance concluded.
+ *
+ * `reviewTree` is `state.review.fingerprint`, which a READY binds to the
+ * REVIEWED COMMIT'S TREE (lib/verdict-host.ts `bindTree`) — the same value
+ * `declare_done` already checks against `headCommitTree` (`HEAD^{tree}`,
+ * lib/repo-facts.ts). So HEAD's tree is the right thing to compare, and the
+ * same tree goes into the record the pre-push hook matches.
  */
 export function finishRefusal(f: {
   clean: boolean;
