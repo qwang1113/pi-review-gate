@@ -232,9 +232,9 @@ function findProjectAgentText(projectAgentsDir: string, name: string): string | 
  */
 /** Same shape, same reason: the CURRENT session's own tmux session (t4, lib/session-scope-exit.ts). */
 let sessionScopeAtExit: (() => void) | undefined;
-let sessionNamingAtExit: { release(): unknown } | undefined;
 /** Same shape, same reason: the CURRENT session's own /tmp checkout (lib/session-worktree-host.ts). */
 let sessionWorktreeAtExit: (() => unknown) | undefined;
+let sessionNamingAtExit: { release(): unknown } | undefined;
 process.on("exit", () => {
   try { sessionNamingAtExit?.release(); } catch { /* the process is already going */ }
   try { sessionScopeAtExit?.(); } catch { /* the process is already going */ }

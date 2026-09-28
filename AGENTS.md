@@ -693,7 +693,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    弹一次统一模板问是否切换；选是 ⇒ 门禁从 HEAD 在根目录下开 `rg-session-<token>`、按
    `worktree-seed.ts` 播种，写一份 header `cwd` 指向它的新会话文件，经内部命令
    `/gate-relocate` 拿 command ctx 调 pi 的 `switchSession` 原地切过去（pi 对新目录会弹它自己的
-   项目信任框）。该会话 `declare_done` 被接受或进程退出时，遗留改动 commit 到它的分支、目录
+   项目信任框）。该会话 `declare_done` 被接受或 pi 进程结束时，遗留改动 commit 到它的分支、目录
    回收；commit 被拒就保留目录并如实报告。归属记录在 checkout 旁边的 `.owner.json`。规则在
    `lib/session-worktree.ts`，IO 在 `lib/session-worktree-host.ts`。
 
