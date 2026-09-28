@@ -22,7 +22,7 @@ import { CURRENT_SESSION_VERSION, SessionManager } from "@earendil-works/pi-codi
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
-import { gitText } from "./git-exec.ts";
+import { gitFailureText, gitText } from "./git-exec.ts";
 import { listedWorktreeBranch } from "./repo-facts.ts";
 import {
   RELOCATE_COMMAND,
@@ -72,14 +72,12 @@ function writeOwner(owner: SessionWorktreeOwner): void {
   writeFileSync(ownerRecordPath(owner.path), JSON.stringify(owner, null, 2) + "\n");
 }
 
-/** Both streams: git writes "nothing to commit" to STDOUT and exits non-zero. */
+/** `gitFailureText` keeps STDOUT, where git says "nothing to commit". */
 function runGit(cwd: string, argv: readonly string[]): { ok: boolean; output: string } {
   try {
     return { ok: true, output: gitText(cwd, argv, { timeout: 0 }) };
   } catch (error) {
-    const e = error as { stdout?: Buffer | string; stderr?: Buffer | string };
-    const out = [e.stdout, e.stderr].map((v) => (v === undefined ? "" : String(v))).join("");
-    return { ok: false, output: out.trim() || (error as Error).message };
+    return { ok: false, output: gitFailureText(error).trim() };
   }
 }
 

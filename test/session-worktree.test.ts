@@ -95,7 +95,7 @@ interface World {
 }
 
 function world(opts: { refused: boolean; answer?: string; commitFails?: string; repo: string }): World {
-  const w: World = { asked: 0, sent: [], gitCalls: [], session: { id: "old-session", cwd: opts.repo } } as World;
+  const w: World = { asked: 0, sent: [], gitCalls: [], session: { id: "old-session", cwd: opts.repo } } as unknown as World;
   w.host = createSessionWorktree({
     pi: {
       registerCommand: (name, o) => { if (name === RELOCATE_COMMAND) w.command = o.handler as World["command"]; },
