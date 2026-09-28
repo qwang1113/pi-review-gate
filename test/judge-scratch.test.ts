@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { tmpdir } from "node:os";
+import { gateWorktreeRoot } from "../lib/worktree-root.ts";
 
 import {
   judgeScratchDir,
@@ -19,10 +19,10 @@ import {
 } from "../lib/judge-process.ts";
 import { buildSessionEnv } from "../lib/session-env.ts";
 
-test("the scratch dir is per session, under the OS tmpdir", () => {
+test("the scratch dir is per session, under the gate's /tmp worktree root", () => {
   const a = judgeScratchDir("rg-reviewer-abc123");
   const b = judgeScratchDir("rg-reviewer-def456");
-  assert.ok(a.startsWith(tmpdir()), "lives under the OS tmpdir");
+  assert.ok(a.startsWith(gateWorktreeRoot() + "/"), "lives under /tmp/rg-worktrees, not os.tmpdir()");
   assert.match(a, new RegExp(`${REVIEW_SCRATCH_DIRNAME}/rg-reviewer-abc123$`));
   assert.notEqual(a, b, "two judge sessions never share a scratch — no cross-lane deletion");
 });
@@ -39,7 +39,7 @@ test("the judge pane's TMPDIR IS the directory the reaper looks in (2026-09-14)"
   const env = buildSessionEnv({ kind: "judge", openerId: "o", judgeId, role: "reviewer" });
   const scratch = judgeScratchDir(judgeId);
   assert.equal(env.TMPDIR, scratch, "the judge must build its worktrees where the gate reclaims them");
-  assert.ok(scratch.startsWith(tmpdir()), "and that place is under the OS tmpdir");
+  assert.ok(scratch.startsWith(gateWorktreeRoot() + "/"), "and that place is under the gate's /tmp root");
   // The worktrees a reviewer leaves there stay reclaimable BECAUSE the env and
   // the reaper agree — this is the pair, not one side of it.
   assert.deepEqual(

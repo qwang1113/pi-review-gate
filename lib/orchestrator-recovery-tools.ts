@@ -498,7 +498,7 @@ async function doAttach(deps: OrchestratorDeps, params: Record<string, unknown>)
       lines.push(
         `- ${w.childId}（任务 ${w.taskId}）：${w.path}，分支 \`${w.branch}\`。` +
         "里面可能是唯一的副本，所以门禁不会自行回收 —— 看过之后用 " +
-        `\`orchestrator_close({childId:"${w.childId}", worktree:"merge"|"discard"})\` 决定它的去向。`,
+        `\`orchestrator_close({childId:"${w.childId}", worktree:"reclaim"|"merge"|"discard"})\` 决定它的去向。`,
       );
     }
   }

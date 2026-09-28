@@ -24,7 +24,6 @@ import {
 } from "./orchestrator-registry.ts";
 import {
   WORKTREE_SETTLEMENTS,
-  repoRootOfWorktree,
   type WorktreeSettlement,
 } from "./orchestrator-worktree.ts";
 import { alivePanes, currentPlan } from "./orchestrator-tool-kit.ts";
@@ -104,22 +103,62 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
     known.worktree !== undefined && params.worktree !== undefined;
   if (!closable.ok && !settlementOnly) return fail("review-gate: " + closable.reason);
   const child = closable.ok ? closable.child : known!;
+  // `closedAt` is what every "is this child still open" reading keys on —
+  // supervision, the `declare_done` live-children check, the exit-time
+  // `openChildren` count. A FINISHED child's window is left for `declare_done`
+  // (2026-09-27); an unfinished one is aborted by killing it, addressed as
+  // `<tmuxSession>:<windowId>` from the record so a stale id can only reach a
+  // window of the gate's own session. A row with no coordinates (older build)
+  // is never killed by a guess.
+  //
+  // THE ABORT COMES BEFORE THE SETTLEMENT (2026-09-28): every settlement now
+  // removes the checkout, and removing it under a child that is still writing
+  // would pull its cwd out from under it mid-edit.
+  let windowNote = "";
+  if (!settlementOnly) {
+    const panes = alivePanes(deps);
+    const home = deps.channelHome();
+    const supervised = superviseChildren({
+      orchestrationId: deps.runtime().orchestrationId,
+      children: [child],
+      livePanes: panes.ok ? new Set(panes.panes) : undefined,
+      io: deps.channelIO(),
+      ...(home === undefined ? {} : { home }),
+      at: deps.now(),
+    }).children[0];
+    const keep = supervised !== undefined && closeKeepsWindow({
+      state: supervised.state,
+      projection: supervised.projection,
+      ...(child.lastAssignedAt === undefined ? {} : { lastAssignedAt: child.lastAssignedAt }),
+    });
+    if (keep) {
+      windowNote = `它的 window ${child.windowId ?? "（无记录）"} 保留在屏幕上，由你的 declare_done 统一回收`;
+    } else if (child.windowId && child.tmuxSession) {
+      const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
+      if (!killed.ok && !windowAlreadyGone(killed.error)) {
+        return fail(`review-gate: 子会话还没报完成，关闭就是中止它 —— 但关 window 失败：${killed.error}`);
+      }
+      windowNote = `它还没报完成，关闭即中止：window ${child.windowId} ${killed.ok ? "已关掉" : "已经不在了"}`;
+    } else {
+      windowNote = "登记里没有 window/session 坐标（旧版登记）—— 没去关窗";
+    }
+  }
   // THE WORKTREE'S FATE IS THE MANAGER'S CALL, AND IT IS MADE HERE (2026-09-10).
   // A child that ran in its own checkout leaves that checkout behind, and a
   // manager who has to hand-write the merge is a manager the gate failed
-  // (philosophy one). `keep` is the DEFAULT because the work in a worktree is
-  // often the only copy, and a default that deletes is a default that
-  // eventually deletes something wanted.
-  const rawSettlement = String(params.worktree ?? "keep").trim();
+  // (philosophy one). EVERY settlement reclaims the directory (2026-09-28,
+  // user decision): the DEFAULT `reclaim` commits the leftovers onto the
+  // child's branch first, so the work survives there and only the disk goes.
+  const rawSettlement = String(params.worktree ?? "reclaim").trim();
   let settlementNote = "";
   if (child.worktree) {
     if (!(WORKTREE_SETTLEMENTS as readonly string[]).includes(rawSettlement)) {
       return fail(`review-gate: worktree 参数不认识："${rawSettlement}"（可选 ${WORKTREE_SETTLEMENTS.join(" / ")}）。`);
     }
-    const worktreeRepo = repoRootOfWorktree(child.worktree.path, child.id);
+    const worktreeRepo = child.worktree.repo;
     if (!worktreeRepo) {
       return fail(
-        `review-gate: 推不出这个 worktree 属于哪个 repo（${child.worktree.path}）—— 门禁不动它，避免把某人的成果合进错的 checkout。` +
+        `review-gate: 登记里没有这个 worktree 属于哪个 repo（${child.worktree.path}，旧版登记）—— 门禁不动它，避免把某人的成果合进错的 checkout。` +
         "请人工处理后再 close。",
       );
     }
@@ -133,12 +172,12 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
     if (!settled) return fail("review-gate: 这个会话没有接上 git 能力，无法结算它的 worktree —— 门禁拒绝在没看清现状时关掉它。");
     if (!settled.ok) return fail("review-gate: " + settled.text);
     settlementNote = "\n" + settled.text;
-    // …and it is FORGOTTEN only when the checkout is actually GONE (round-8
-    // Nit, tightened in round 9). `keep` leaves it by definition and `merge`
-    // leaves it on purpose, so clearing the record there would STRAND it: no
-    // later close could see a worktree to settle. And a discard whose removal
-    // FAILED (`reclaimed: false` — the directory is still there) must keep the
-    // record too, or the retry this failure deserves becomes impossible.
+    // …and it is FORGOTTEN only when NOTHING is left to settle (round-8 Nit,
+    // tightened in round 9). `reclaim` and `merge` leave the BRANCH on purpose,
+    // so clearing the record there would STRAND it: no later `discard` could
+    // find it. And a discard whose removal FAILED (`reclaimed: false` — the
+    // directory is still there) must keep the record too, or the retry this
+    // failure deserves becomes impossible.
     if (rawSettlement === "discard" && settled.reclaimed !== false) {
       deps.saveRuntime(forgetWorktree(deps.runtime(), child.id));
     }
@@ -147,40 +186,6 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
     // Nothing else is owed: the child was already settled and the registry already
     // says so. The caller gets the settlement and no close narrative.
     return reply(`review-gate: 子会话 ${child.id} 早已结算 —— 本次只结算它的 worktree。` + settlementNote, { childId: child.id });
-  }
-  // `closedAt` is what every "is this child still open" reading keys on —
-  // supervision, the `declare_done` live-children check, the exit-time
-  // `openChildren` count. A FINISHED child's window is left for `declare_done`
-  // (2026-09-27); an unfinished one is aborted by killing it, addressed as
-  // `<tmuxSession>:<windowId>` from the record so a stale id can only reach a
-  // window of the gate's own session. A row with no coordinates (older build)
-  // is never killed by a guess.
-  const panes = alivePanes(deps);
-  const home = deps.channelHome();
-  const supervised = superviseChildren({
-    orchestrationId: deps.runtime().orchestrationId,
-    children: [child],
-    livePanes: panes.ok ? new Set(panes.panes) : undefined,
-    io: deps.channelIO(),
-    ...(home === undefined ? {} : { home }),
-    at: deps.now(),
-  }).children[0];
-  const keep = supervised !== undefined && closeKeepsWindow({
-    state: supervised.state,
-    projection: supervised.projection,
-    ...(child.lastAssignedAt === undefined ? {} : { lastAssignedAt: child.lastAssignedAt }),
-  });
-  let windowNote: string;
-  if (keep) {
-    windowNote = `它的 window ${child.windowId ?? "（无记录）"} 保留在屏幕上，由你的 declare_done 统一回收`;
-  } else if (child.windowId && child.tmuxSession) {
-    const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
-    if (!killed.ok && !windowAlreadyGone(killed.error)) {
-      return fail(`review-gate: 子会话还没报完成，关闭就是中止它 —— 但关 window 失败：${killed.error}`);
-    }
-    windowNote = `它还没报完成，关闭即中止：window ${child.windowId} ${killed.ok ? "已关掉" : "已经不在了"}`;
-  } else {
-    windowNote = "登记里没有 window/session 坐标（旧版登记）—— 没去关窗";
   }
   deps.saveRuntime(markChildClosed(deps.runtime(), child.id, new Date(deps.now()).toISOString()));
   // O-2 — only remind about the task status when it still NEEDS moving. The

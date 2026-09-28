@@ -5,7 +5,8 @@
  * Split out of lib/gate-state.ts; reading lives in lib/gate-state-load.ts.
  */
 
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
 import type { GoalPrereviewRecord } from "./loop-goal.ts";
@@ -69,6 +70,12 @@ export function saveSidecar(path: string, state: GateState): void {
   // to reach this function at all (its persist is skipped upstream) — this is
   // the second line of defence, where the bytes are actually produced.
   const { exclusivityRefusal: _refusal, ...persisted } = state;
+  // A RECLAIMED CHECKOUT STAYS RECLAIMED (2026-09-28). Every gate worktree is
+  // removed as soon as it is used up, while a finished child's window may
+  // still be open and persisting — and `writeFileAtomic` creates missing
+  // directories, which would resurrect `<gone>/.pi/` as a non-repository
+  // under /tmp. No checkout, no state to keep.
+  if (!existsSync(dirname(dirname(path)))) return;
   // Atomic write: temp + rename, so a crashed write can't leave a truncated
   // JSON that a fail-open parser might half-read (lib/atomic-write.ts).
   writeFileAtomic(path, JSON.stringify(persisted, null, 2) + "\n");

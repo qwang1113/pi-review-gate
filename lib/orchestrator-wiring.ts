@@ -355,7 +355,7 @@ export interface OrchestratorHostBindings {
     taskId: string;
     repoRoot: string;
     worktreePath: string;
-    settlement: "keep" | "merge" | "discard";
+    settlement: import("./orchestrator-worktree.ts").WorktreeSettlement;
   }): { ok: boolean; text: string; reclaimed?: boolean };
   /** This session's OWN pi session id, handed to a successor as its takeover proof. */
   ownSessionId?(): string | undefined;

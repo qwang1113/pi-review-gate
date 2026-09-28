@@ -139,8 +139,11 @@ test("the refusal names the holder and gives two concrete ways out", () => {
   assert.match(v.reason, /session-incumbent/);
   assert.match(v.reason, /4242/);
   assert.match(v.reason, /laptop\.local/);
-  // Way out 1: a real command, with the real repo path in it.
-  assert.match(v.reason, /git -C \/Users\/dev\/workspace\/pi-review-gate worktree add \.\.\/pi-review-gate-2/);
+  // Way out 1: the gate cuts the worktree itself (2026-09-28) — no hand-typed
+  // `git worktree add` beside the repo any more.
+  assert.match(v.reason, /切到独立 worktree 工作/);
+  assert.match(v.reason, /\/tmp\/rg-worktrees\//);
+  assert.doesNotMatch(v.reason, /worktree add \.\.\//);
   // Way out 2: closing the other session is enough — no file to delete by hand.
   assert.match(v.reason, /不需要手工删任何文件/);
   assert.match(v.reason, /60 秒/, "…and it says how long that takes");

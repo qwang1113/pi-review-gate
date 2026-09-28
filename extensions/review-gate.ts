@@ -195,6 +195,7 @@ import { registerWorkerSurface } from "../lib/worker-wiring.ts";
 import { registerDeclareDoneTool } from "../lib/declare-done-tool.ts";
 import { registerGateModeTool } from "../lib/gate-mode-tool.ts";
 import { createSessionLifecycle } from "../lib/session-lifecycle.ts";
+import { createSessionWorktree } from "../lib/session-worktree-host.ts";
 import { createTurnDirective, createTurnEndHook, registerThinkingLoopGuard } from "../lib/turn-directive.ts";
 
 /**
@@ -232,10 +233,14 @@ function findProjectAgentText(projectAgentsDir: string, name: string): string | 
 /** Same shape, same reason: the CURRENT session's own tmux session (t4, lib/session-scope-exit.ts). */
 let sessionScopeAtExit: (() => void) | undefined;
 let sessionNamingAtExit: { release(): unknown } | undefined;
+/** Same shape, same reason: the CURRENT session's own /tmp checkout (lib/session-worktree-host.ts). */
+let sessionWorktreeAtExit: (() => unknown) | undefined;
 process.on("exit", () => {
   try { sessionNamingAtExit?.release(); } catch { /* the process is already going */ }
   try { sessionScopeAtExit?.(); } catch { /* the process is already going */ }
   try { paneStateAtExit?.clear(); } catch { /* the process is already going */ }
+  // LAST: everything above may still log into the session's cwd.
+  try { sessionWorktreeAtExit?.(); } catch { /* the process is already going */ }
 });
 /** Same shape, same reason: the CURRENT session's pane options (s1, lib/tmux-pane-state.ts). */
 let paneStateAtExit: { clear(): void } | undefined;
@@ -1193,6 +1198,18 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- run_precommit (internal; lib/precommit-tool.ts) ----------
   registerPrecommitTool(internalHost, cells, { resolveToolRepo, stateForRepo, persistRepo, repoLabel });
 
+  // ---------- a refused second session's own checkout (lib/session-worktree-host.ts) ----------
+  const sessionWorktree = createSessionWorktree({
+    pi,
+    cwd: () => cells.cwd,
+    sessionId: () => cells.state.sessionId ?? undefined,
+    refused: () => cells.state.exclusivityRefusal !== undefined,
+    askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
+    log,
+  });
+  sessionWorktree.register();
+  sessionWorktreeAtExit = () => sessionWorktree.reclaimOwn();
+
   // ---------- declare_done (lib/declare-done-tool.ts) ----------
   registerDeclareDoneTool(pi, cells, {
     enforcementStateFor,
@@ -1213,6 +1230,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     tmuxScope,
     raiseBanner,
     releaseSessionName: () => sessionNaming.release(),
+    reclaimSessionWorktree: () => sessionWorktree.reclaimOwn(),
     proxyDecisions: () => dialogProxy.all(),
   });
 
@@ -1369,6 +1387,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     applySessionExclusivity,
     releaseWorktree,
     stopExclusivityRecheck,
+    sessionWorktree,
     runtime: () => ({ stopSupervisionTimer, stopRevivalTimer, startSessionNamingHeartbeat, stopSessionNamingHeartbeat, startPaneState }),
     cancelChildWaitTimer: () => l2.cancelChildWaitTimer(),
     notify: notifyRuntime,

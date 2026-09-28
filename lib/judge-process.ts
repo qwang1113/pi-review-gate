@@ -9,10 +9,10 @@
  * helpers (a reviewer verifies by doing, and its throwaway worktrees still
  * land where the gate can reclaim them).
  *
- * Pure, except `judgeScratchDir` (tmpdir query) — no spawning, no processes.
+ * Pure, except `judgeScratchDir` (worktree-root query) — no spawning, no processes.
  */
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { gateWorktreeRoot } from "./worktree-root.ts";
 
 /** Prefix of every gate-owned session id, so orphans are identifiable. */
 export const JUDGE_SESSION_PREFIX = "rg-";
@@ -109,9 +109,15 @@ export const REVIEW_SCRATCH_DIRNAME = "rg-review-scratch";
  * deterministic instead of a name-guessing sweep that could delete a
  * concurrent lane's live review worktree. Keyed by session id, so the reaping
  * side computes the same path without storing it.
+ *
+ * Under the gate's ONE worktree root (lib/worktree-root.ts, 2026-09-28), not
+ * `os.tmpdir()`: macOS answers `/var/folders/…` there, and git lists the
+ * resolved `/private/var/…` spelling — the root is realpath'd, so the reaper's
+ * prefix match sees the same string git reports. The window opener
+ * (lib/session-factory.ts) creates it with `recursive`, which creates the root.
  */
 export function judgeScratchDir(sessionId: string): string {
-  return join(tmpdir(), REVIEW_SCRATCH_DIRNAME, safeSessionFilePart(sessionId));
+  return join(gateWorktreeRoot(), REVIEW_SCRATCH_DIRNAME, safeSessionFilePart(sessionId));
 }
 
 /**

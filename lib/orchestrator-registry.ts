@@ -62,8 +62,13 @@ export interface ChildSession {
    * above is then that worktree's path — this field is what lets the manager
    * find the branch to merge or discard when the child is done
    * (lib/orchestrator-worktree.ts owns every derivation).
+   *
+   * `repo` is the repository it was cut from — the checkout a merge lands in.
+   * Recorded, never derived: the path lives under the gate's /tmp root
+   * (lib/worktree-root.ts) and says nothing about where the repo is. A record
+   * without it (written before 2026-09-28) cannot be settled by the gate.
    */
-  worktree?: { path: string; branch: string };
+  worktree?: { path: string; branch: string; repo?: string };
   /**
    * The sidecar variant this child was started with (`RG_STATE_VARIANT`, F4).
    *

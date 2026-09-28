@@ -54,6 +54,8 @@ export interface DeclareDoneToolDeps {
   tmuxScope: TmuxScope;
   raiseBanner(opts: { kind: UserNotifyKind; detail: string; blocking?: boolean }): UserNotifyOutcome;
   releaseSessionName(): { released: boolean; error?: string };
+  /** Reclaim this session's own /tmp worktree, if it runs in one (lib/session-worktree-host.ts). */
+  reclaimSessionWorktree(): string | undefined;
   proxyDecisions(): ReturnType<ReturnType<typeof createDialogProxy>["all"]>;
 }
 
@@ -362,6 +364,9 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
       // ── AND THE NAME GOES BACK WITH IT (t2, 2026-09-25) ── reported, never
       // blocking; lib/session-registry.ts's sweep is the backstop.
       const namingRelease = deps.releaseSessionName();
+      // ── AND ITS OWN /tmp CHECKOUT (2026-09-28) ── used up the moment the
+      // round is done: leftovers onto its branch, then the directory.
+      const worktreeNote = deps.reclaimSessionWorktree();
       return {
         content: [{
           type: "text",
@@ -378,6 +383,7 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
             (notified.status === "sent" ? "" : `\n（通知：${describeNotifyOutcome(notified)}）`) +
             (sessionClose.ok ? "" : `\n（专属 tmux session 未清干净：${sessionClose.error}）`) +
             (namingRelease.released ? "" : `\n（会话名字未腾出：${namingRelease.error ?? "未知原因"}）`) +
+            (worktreeNote ? `\n${worktreeNote}` : "") +
             // WHO DECIDED WHAT (2026-09-19), printed by the GATE from the state
             // record — only THIS session's (and its handoff predecessor's).
             formatProxyDecisionReport(

@@ -290,7 +290,8 @@ function refusalText(holder: PresenceRecord, repoRoot: string): string {
     by: "user",
     next:
       "出路二选一：\n" +
-      `  1. 各自一个 worktree：git -C ${repoRoot} worktree add ../${name}-2 -b <新分支名>，然后在 ../${name}-2 里开这个会话；\n` +
+      `  1. 各自一个 worktree：在门禁弹出的框里选「切到独立 worktree 工作」—— 门禁会在 /tmp/rg-worktrees/ 下从 ${name} 的 HEAD 开一条新分支，` +
+      "把本会话原地切进去（已经选了「不切换」的话，重新开一次本会话就会再问）；\n" +
       `  2. 关掉占用的那个会话（上面那个 session），本会话在它的心跳超过 ${Math.round(PRESENCE_FRESH_MS / 1000)} 秒未更新后即可正常启动 —— 不需要手工删任何文件。`,
   });
 }

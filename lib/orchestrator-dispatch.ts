@@ -312,7 +312,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // A task that DECLARED `isolated` (D30) gets the same checkout with no
   // sibling at all — the gate builds and seeds it, never the manager by hand.
   const sibling = deps.runtime().children.find((c) => !c.closedAt && c.cwd === cwd);
-  let worktree: { path: string; branch: string; note?: string } | undefined;
+  let worktree: { path: string; branch: string; repo: string; note?: string } | undefined;
   if (sibling || task.isolated) {
     const isolated = deps.createWorktree?.(cwd, childId);
     if (!isolated || !isolated.ok) {
@@ -329,6 +329,9 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     worktree = {
       path: isolated.path,
       branch: isolated.branch,
+      // Recorded, never derived: the path under /tmp does not say which repo
+      // a merge must land in (lib/orchestrator-registry.ts).
+      repo: cwd,
       ...(isolated.note ? { note: isolated.note } : {}),
     };
     cwd = isolated.path;

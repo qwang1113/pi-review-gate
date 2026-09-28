@@ -172,19 +172,19 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     parameters: Type.Object({
       childId: Type.Optional(Type.String()),
       worktree: Type.Optional(Type.Enum({
-        keep: "keep",
+        reclaim: "reclaim",
         merge: "merge",
         discard: "discard",
       }, {
         description:
-          "What happens to a child's ISOLATED CHECKOUT, when it had one (it gets one whenever " +
-          "another child was already working in the same repo). `keep` (default) leaves it and says " +
-          "so — the work in it is often the only copy. `merge` commits whatever the child left " +
-          "uncommitted and merges its branch into YOUR checkout, STAGED and uncommitted (use `git " +
-          "merge --abort` to undo it); the child's worktree and branch are then LEFT IN PLACE, " +
-          "because a staged merge is not a committed one — reclaim them with `discard` once you have " +
-          "committed. A conflict aborts and leaves your checkout exactly as it was, with the child's " +
-          "work still in its own worktree. `discard` removes the checkout and its branch.",
+          "What happens to a child's ISOLATED CHECKOUT (under /tmp/rg-worktrees), when it had one. " +
+          "Every choice removes the directory. `reclaim` (default) commits whatever the child left " +
+          "uncommitted onto its branch and removes the checkout; the branch stays as the only copy. " +
+          "`merge` does the same and also merges that branch into YOUR checkout, STAGED and " +
+          "uncommitted (use `git merge --abort` to undo it); the branch is kept as the anchor of that " +
+          "staged merge — reclaim it with `discard` once you have committed. A conflict aborts and " +
+          "leaves your checkout exactly as it was, with the child's checkout untouched. `discard` " +
+          "removes the checkout and its branch.",
       })),
     }),
     execute: guarded((params) => doClose(deps, params)),

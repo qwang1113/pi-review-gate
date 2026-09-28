@@ -23,30 +23,26 @@ import {
   planSettlement,
   reclaimWorktreeArgv,
   removeWorktreeArgv,
-  repoRootOfWorktree,
 } from "../lib/orchestrator-worktree.ts";
+import { gateWorktreeRoot } from "../lib/worktree-root.ts";
+import { realpathSync } from "node:fs";
+
+/** Every commit subject the gate writes itself: English Conventional Commits, ASCII only (L5). */
+const CONVENTIONAL_ASCII = /^[a-z]+\([a-z-]+\): [\x20-\x7e]+$/;
 
 const REPO = "/Users/dev/workspace/dashboard";
 const CHILD = "t13-uiux-dash-mtv8nd57";
 
-test("the checkout lives BESIDE the repo — never inside the tree it isolates from", () => {
+test("the checkout lives under the gate's /tmp root — never inside or beside the repo", () => {
   const path = childWorktreePath(REPO, CHILD);
-  assert.equal(path, "/Users/dev/workspace/dashboard-rg-t13-uiux-dash-mtv8nd57");
+  assert.equal(gateWorktreeRoot(), `${realpathSync("/tmp")}/rg-worktrees`,
+    "realpath'd, so it matches the spelling `git worktree list` reports");
+  assert.equal(path, `${gateWorktreeRoot()}/dashboard-rg-t13-uiux-dash-mtv8nd57`);
   // Inside the repo would appear as untracked content in the MAIN checkout —
   // the very tree the fingerprint, the precommit cache and the ship gate read.
   assert.ok(!path.startsWith(`${REPO}/`), "an inner worktree would poison every fingerprint");
+  assert.notEqual(childWorktreePath(REPO, "some-other-child"), path, "two children never collide");
   assert.equal(childWorktreeBranch(CHILD), `rg-child-${CHILD}`);
-});
-
-test("the repo a worktree came from is recoverable — and a foreign path is REFUSED, not guessed", () => {
-  assert.equal(repoRootOfWorktree(childWorktreePath(REPO, CHILD), CHILD), REPO,
-    "settlement has to know which checkout to merge INTO");
-  // The alternative to "I cannot tell where this belongs" is merging somebody's
-  // work into the wrong repository, so it must be undefined rather than a
-  // best-effort prefix.
-  assert.equal(repoRootOfWorktree("/tmp/hand-made", CHILD), undefined);
-  assert.equal(repoRootOfWorktree(childWorktreePath(REPO, "some-other-child"), CHILD), undefined,
-    "a worktree cut for a DIFFERENT child is not this child's to settle");
 });
 
 test("creation pins the child to HEAD on a branch of its own", () => {
@@ -58,10 +54,17 @@ test("creation pins the child to HEAD on a branch of its own", () => {
     "HEAD, not a branch name — the child must not silently follow a branch that moves under it");
 });
 
-test("keep touches nothing, and says where the work is", () => {
-  const plan = planSettlement("keep", REPO, CHILD, "t13", childWorktreeBranch(CHILD));
-  assert.deepEqual(plan.steps, [], "keep is the default BECAUSE it is the one that cannot lose work");
-  assert.equal(WORKTREE_SETTLEMENTS.includes("keep"), true);
+test("reclaim (the default) saves the leftovers onto the branch, then removes ONLY the directory", () => {
+  const plan = planSettlement("reclaim", REPO, CHILD, "t13", childWorktreeBranch(CHILD));
+  assert.deepEqual(plan.steps.map((a) => [...a]), [
+    ["-C", childWorktreePath(REPO, CHILD), "add", "-A"],
+    ["-C", childWorktreePath(REPO, CHILD), "commit", "-m", "chore(child): save leftovers of t13"],
+    [...reclaimWorktreeArgv(REPO, CHILD)],
+  ], "commit first: a failed commit stops the sequence before the removal");
+  assert.ok(!plan.steps.some((s) => s.includes("-D")), "the branch is the only copy left — never deleted here");
+  // `keep` is gone (2026-09-28, user decision): every settlement reclaims the directory.
+  assert.deepEqual([...WORKTREE_SETTLEMENTS], ["reclaim", "merge", "discard"]);
+  assert.match(String(plan.steps[1]![4]), CONVENTIONAL_ASCII);
 });
 
 test("merge covers ALL the leftovers, merges without committing, and RECLAIMS the checkout last", () => {
@@ -70,7 +73,7 @@ test("merge covers ALL the leftovers, merges without committing, and RECLAIMS th
   // MODIFIED/DELETED tracked files, so every file the child CREATED would have
   // been left behind while the receipt said its changes were merged.
   assert.deepEqual([...plan.steps[0]!], ["-C", childWorktreePath(REPO, CHILD), "add", "-A"]);
-  assert.deepEqual([...plan.steps[1]!], ["-C", childWorktreePath(REPO, CHILD), "commit", "-m", "chore(child): t13 的产出"]);
+  assert.deepEqual([...plan.steps[1]!], ["-C", childWorktreePath(REPO, CHILD), "commit", "-m", "chore(child): save leftovers of t13"]);
   // `--no-commit --no-ff`, NOT `--squash` (round-5 P1): a squash never writes
   // MERGE_HEAD, so `git merge --abort` cannot undo one — the promised rollback
   // was impossible. This form can be aborted, and the result is still STAGED.

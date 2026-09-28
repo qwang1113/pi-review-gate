@@ -9,7 +9,7 @@
  * What is here is only the I/O those rules cannot own.
  */
 
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname as pathDirname, join as pathJoin } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -63,6 +63,9 @@ type AppealReply = { content: { type: "text"; text: string }[]; details: Record<
  * it would move the digest under a recorded READY.
  */
 export function appendAuditLog(repoRoot: string, sessionId: string | null | undefined, text: string): void {
+  // A reclaimed checkout stays reclaimed (2026-09-28): logging into it would
+  // resurrect `<gone>/.pi/` under /tmp.
+  if (!existsSync(repoRoot)) return;
   try {
     const logPath = pathJoin(repoRoot, ".pi", "review-gate-audit.log");
     mkdirSync(pathDirname(logPath), { recursive: true });
