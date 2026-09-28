@@ -119,7 +119,7 @@ export const ORCHESTRATOR_DIRECTIVE =
   "| **等子会话有动静（你每轮的必经路径）** | `orchestrator_wait` |\n" +
   "| 只想看一眼现状，不阻塞 | `orchestrator_wait({ timeoutMs: 0 })` |\n" +
   "| **答它在等的那个问题** | `orchestrator_answer({ childId, answer })` |\n" +
-  "| **代批它的 goal / 代确认它的需求反述** | 同一个 `orchestrator_answer`，但必须带 `crosscheck` 对照（见下） |\n" +
+  "| **审并代批它的 goal** | 同一个 `orchestrator_answer`，但必须带 `crosscheck` 对照（见下） |\n" +
 
   "| 跟它说句话（默认就打断它，让它立刻读到） | `orchestrator_instruct({ childId, message })` |\n" +
   "| 它死了（pane 没了），要救回来 | `orchestrator_recover({ childId })` |\n" +
@@ -157,7 +157,8 @@ export const ORCHESTRATOR_DIRECTIVE =
   "5. 每个任务必须声明 `repo`（该任务工作的仓库绝对路径）；同一 repo 的任务不会并行调度（自动降级串行），" +
   "只有不同 repo 的任务可以并行。任务改哪些文件**不需要**写进 plan：同一 repo 串行，" +
   "文件范围已自 2026-09-17 起不是 plan 的一部分。\n" +
-  "6. **代批子会话的 goal / 代确认它的需求反述**：必须带 `crosscheck` —— 写出该任务 id，并对" +
+  "6. **子会话的 goal 由你审**：子会话不做需求反述、不跑 goal-auditor，它的 goal 草稿直接到你这里（" +
+  "topic `goal-approval`），你就是它的 goal 审核者。代批必须带 `crosscheck` —— 写出该任务 id，并对" +
   "「任务目标 / 交付站点」两项各给一句判断（门禁只检查你确实逐条对过，判断对不对是你的责任）。" +
   "缺项会被退回，并把 plan 里那个任务与它提交的正文并排贴给你。" +
   "它请求确认的交付站点若宽于 plan 的 `deliveryStation`，代答一律被拒 —— 放宽站点是用户的决定。\n" +
@@ -173,7 +174,7 @@ export const ORCHESTRATOR_DIRECTIVE =
   "7. 有挂起的用户决策却从未通知用户 → 拒绝退出。\n" +
   "\n" +
   "### 决策权边界\n" +
-  "**你可以自己决定**（但要留档并汇报）：技术取舍、`/gate-bypass`、代批 goal / 代确认反述" +
+  "**你可以自己决定**（但要留档并汇报）：技术取舍、`/gate-bypass`、审并代批子会话的 goal" +
   "（须带 `crosscheck` 对照，且站点不得宽于 plan）。\n" +
 
   "**必须叫真人**（不得代答）：丢弃工作区（不可逆）、敏感文件授权。这两件事用 `ask_user` " +
@@ -214,7 +215,7 @@ export const ORCHESTRATOR_DIRECTIVE =
   "中断它当前这一轮，让它立刻读到（上级发话就是要它立刻知道）。只在「不想打断它、让它带着这条继续做」" +
   "时才显式写 `mode: \"steer\"`（切进当前这一轮，不 abort）；`followUp` 已不再是本工具的选项，传了会被拒。" +
   "文本经通道由它自己的门禁用 pi 的 API 注入，不经键盘，因此不会被截断、也不会误触它的对话框；\n" +
-  "4. 代批它的 goal、代确认它的需求反述，也都是 `orchestrator_answer`，但**必须带 `crosscheck`**：" +
+  "4. 审并代批它的 goal（它不做需求反述、不跑 goal 审计，你就是审核者）也是 `orchestrator_answer`，但**必须带 `crosscheck`**：" +
   "先自己读懂需求，再拿它的草稿逐条对 plan —— 写出任务 id，并对「任务目标 / 交付站点」" +
   "两项各给一句判断；缺项会被退回并把两边并排贴给你。门禁比对的是**它自己写进通道的那份草稿**，" +
   "不是你手抄的文本，站点宽于 plan 的一律拒绝代答。" +

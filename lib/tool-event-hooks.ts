@@ -23,6 +23,8 @@ import { invalidateBindings } from "./gate-state-transitions.ts";
 import { observeInspection } from "./judge-inspection.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
 import { goalReminderDue } from "./loop-goal-directives.ts";
+import { CHILD_GOAL_REMINDER_TEXT } from "./child-goal-flow.ts";
+import { isOrchestrationChildEnv } from "./session-inheritance.ts";
 import { notifyUserInput } from "./poll-wait.ts";
 import { parsePrecommitOutput } from "./precommit-parse.ts";
 import { evaluateReadonlyStall, readonlyStallNudgeFor } from "./readonly-stall.ts";
@@ -138,7 +140,7 @@ export function createToolResultHook(cells: SessionCells, deps: ToolResultHookDe
     if (canRemind) {
       cells.lastGoalReminderAt = nowMs;
       cells.goalReminderCount += 1;
-      return withNudge(event, GOAL_REMINDER_TEXT, event.isError === true);
+      return withNudge(event, isOrchestrationChildEnv() ? CHILD_GOAL_REMINDER_TEXT : GOAL_REMINDER_TEXT, event.isError === true);
     }
     return readonlyNudge(event);
   }

@@ -69,6 +69,11 @@ export interface SessionLifecycleDeps {
 
 export function createSessionLifecycle(cells: SessionCells, deps: SessionLifecycleDeps) {
   async function onSessionStart(ctx: ExtensionContext): Promise<void> {
+    // THE CONTEXT FROM THE FIRST MOMENT (round 4). It used to be noted only by
+    // `tool_call`, so a judge pane whose first model failed before any tool
+    // ran had none: every fallback slot answered 「没有可用的 ctx」 and was
+    // never tried. Every later hook still overwrites it with a fresher one.
+    cells.latestCtx = ctx;
     cells.cwd = ctx.cwd ?? process.cwd();
     const cwd = cells.cwd;
     // P-multi: re-derive the primary repo and reset per-repo tracking for the

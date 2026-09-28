@@ -257,6 +257,45 @@ export function removeGrant(runtime: OrchestratorRuntime, scope: string): Orches
 }
 
 /**
+ * THE ONE DOOR to the project manager's proxy authorities (round 4).
+ *
+ * `orchestrator_answer` reads the grants through `deps.runtime()`; the two
+ * user-side doors (ask_user `grantScope`, `/gate-grant`) used to read and write
+ * the session's raw `state.orchestrator` instead — two sources for one fact.
+ * Measured cost: a grant given before the plan's first approval had no raw
+ * runtime to land on and was dropped while the dialog said 「已授予」, and a
+ * grant on a raw runtime of ANOTHER orchestration id was invisible to the
+ * answer path, then overwritten by the next save. Every door now goes through
+ * the same runtime the answer path reads.
+ *
+ * `applies()` is false outside the orchestrator role, and while the sidecar
+ * holds a different orchestration (`runtimeConflict`): writing there would
+ * overwrite the record `orchestrator_attach` needs to take it over.
+ */
+export function proxyGrantStore(deps: {
+  isOrchestrator(): boolean;
+  runtime(): OrchestratorRuntime;
+  saveRuntime(runtime: OrchestratorRuntime): void;
+  runtimeConflict?(): string | undefined;
+  now(): number;
+}) {
+  const applies = () => deps.isOrchestrator() && deps.runtimeConflict?.() === undefined;
+  return {
+    applies,
+    has: (scope: string) => applies() && hasGrant(deps.runtime(), scope),
+    /** False when nothing could be recorded — the caller must not claim a grant. */
+    grant: (scope: string, via: OrchestrationGrant["via"]): boolean => {
+      if (!applies()) return false;
+      deps.saveRuntime(addGrant(deps.runtime(), { scope, grantedAt: new Date(deps.now()).toISOString(), via }));
+      return true;
+    },
+    revoke: (scope: string): void => {
+      if (applies()) deps.saveRuntime(removeGrant(deps.runtime(), scope));
+    },
+  };
+}
+
+/**
  * The runtime a DIFFERENT session inherits: the facts about the world, and —
  * only for a genuine handoff successor — the user's approval with them.
  *

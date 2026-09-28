@@ -42,7 +42,7 @@
  * checks the filesystem and opens the pane.
  */
 
-import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
+import { ORCHESTRATION_ID_ENV, orchestrationIdFromEnv } from "./orchestration-id.ts";
 
 /** Pane id of the session being replaced (injected into the successor). */
 export const PREDECESSOR_PANE_ENV = "RG_HANDOFF_PREDECESSOR_PANE";
@@ -138,6 +138,20 @@ export function isHandoffSuccessorOf(
   const predecessor = readInheritance(env).predecessorSession;
   const owner = (sidecarSessionId ?? "").trim();
   return predecessor !== undefined && owner.length > 0 && predecessor === owner;
+}
+
+/**
+ * Was THIS process started by a project manager to work one plan task — or
+ * does it continue one that was (a `child` handoff)? A relay successor of the
+ * MANAGER carries the same orchestration id and is not a child.
+ *
+ * The one definition every child-only rule reads (the prompt, the gate-mode
+ * refusal, and since round 4 the goal flow without restatement or audit).
+ */
+export function isOrchestrationChildEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (orchestrationIdFromEnv(env) === undefined) return false;
+  const inherited = readInheritance(env);
+  return inherited.predecessorPane === undefined || inherited.kind === "child";
 }
 
 /**

@@ -17,6 +17,7 @@ import type {
   ChannelRecord,
   ChannelReportRecord,
   ChannelRequestRecord,
+  ChannelSettledRecord,
   ChannelStateRecord,
   ReportFinding,
   ReviewScopeStamp,
@@ -296,6 +297,12 @@ export interface ChannelProjection {
    * per event, and two failures in one round are two different broken models.
    */
   modelEvents: ModelEvent[];
+  /**
+   * Every `request-settled` record, oldest first — WHO ended each question
+   * (round 4). The wait receipt names them, so a question that vanished from
+   * the pending list is never left to guess who answered it.
+   */
+  settlements?: ChannelSettledRecord[];
 }
 
 /**
@@ -372,9 +379,13 @@ export function unansweredRequests(projection: Pick<ChannelProjection, "openRequ
 
 function projectOwnedRecords(records: readonly ChannelRecord[]): ChannelProjection {
   const settled = new Set<string>();
+  const settlements: ChannelSettledRecord[] = [];
   const injected = new Set<string>();
   for (const record of records) {
-    if (record.kind === "request-settled") settled.add(record.requestId);
+    if (record.kind === "request-settled") {
+      settled.add(record.requestId);
+      settlements.push(record);
+    }
     // Only an INJECTED acknowledgement takes an instruction out of the child's
     // inbox. A `received` ack proves the gate has it — which is what the
     // orchestrator's receipt is allowed to rely on — but the child still has
@@ -429,6 +440,7 @@ function projectOwnedRecords(records: readonly ChannelRecord[]): ChannelProjecti
     lastActivityAt,
     ...(lastReport === undefined ? {} : { lastReport }),
     modelEvents,
+    ...(settlements.length === 0 ? {} : { settlements }),
   };
 
 }

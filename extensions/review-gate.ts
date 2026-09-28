@@ -92,8 +92,8 @@ import {
   registerOrchestratorSessionTools,
   type OrchestratorSessionDeps,
 } from "../lib/orchestrator-session-tools.ts";
-import { readInheritance } from "../lib/session-inheritance.ts";
-import { addGrant, emptyRuntime, hasGrant, removeGrant, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { isOrchestrationChildEnv } from "../lib/session-inheritance.ts";
+import { proxyGrantStore, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import {
   registerJudgeWaitTool,
   type JudgeSessionToolDeps,
@@ -533,7 +533,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
   /** Started BY an orchestrator as a worker (not as its relay successor). */
   function isOrchestrationChild(): boolean {
-    return orchestrationIdFromEnv() !== undefined && readInheritance().predecessorPane === undefined;
+    return isOrchestrationChildEnv(process.env);
   }
   function persistOrchestration(runtime: OrchestratorRuntime): void {
     // THE OWNER RIDES WITH THE RECORD (a runtime inherited but never claimed
@@ -600,6 +600,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     onToolCall: () => { armLoop(cells); },
     // RETIRE — the two-phase handover retirement (lib/handoff-host.ts).
     onHandoff: () => handoff.handoffRetirement(),
+  });
+  // The PM's proxy authorities: every door reads and writes the runtime
+  // `orchestrator_answer` reads (round 4, `proxyGrantStore`).
+  const proxyGrants = proxyGrantStore({
+    isOrchestrator: () => cells.state.taskMode === "orchestrator",
+    runtime: () => orchestratorDeps.runtime(),
+    saveRuntime: (runtime) => orchestratorDeps.saveRuntime(runtime),
+    runtimeConflict: () => orchestratorDeps.runtimeConflict?.(),
+    now: () => Date.now(),
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
   // The session tools take the orchestration deps as they are, through an
@@ -1220,6 +1229,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // HOW FAR THIS SESSION MAY SHIP (2026-09-15): read from the environment the
     // DISPATCHER wrote, never from anything this session's prompt could say.
     stationCap: stationCapFromEnv,
+    isOrchestrationChild,
     writeGoalFile: (path, text) => {
       // A session another one holds this worktree against must not overwrite
       // `.pi/loop-goal.md` (reviewer P1, 2026-09-05).
@@ -1241,6 +1251,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
     // THE SAME CEILING the goal dialog reads (2026-09-15).
     stationCap: stationCapFromEnv,
+    isOrchestrationChild,
   });
   // `choose_loop_stages` — the SAME deps back the tool_call fallback.
   registerLoopStageTools(pi, loopGoal.loopStageDeps);
@@ -1308,15 +1319,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     askMultiChoice: (uiCtx, spec, opts) => askMultiChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
     canChannelDialogs: () => childBinding() !== undefined,
-    grantProxyScope: (scope, via) => {
-      if (!cells.state.orchestrator) return; // not an orchestration — nothing to grant
-      persistOrchestration(addGrant(cells.state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
-    },
+    grantProxyScope: (scope, via) => { proxyGrants.grant(scope, via); },
     // The same doorway, closing (lib/ask-user-interview.ts `applyGrant`).
-    revokeProxyScope: (scope) => {
-      if (!cells.state.orchestrator) return; // not an orchestration — nothing to revoke
-      persistOrchestration(removeGrant(cells.state.orchestrator, scope));
-    },
+    revokeProxyScope: (scope) => proxyGrants.revoke(scope),
     cwd: cells.cwd,
     sessionEditedPaths: () => [...cells.sessionEditedPaths],
     commitsAheadOfBase: async () => commitsAheadOfBase(cells.cwd),
@@ -1405,11 +1410,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     loopGoalConfirmed: () => loopGoalConfirmed(),
     loopGoalPresent: () => readSessionLoopGoal(cells.primaryRepoRoot).present,
     contract: () => contractReadout(),
-    hasProxyGrant: (scope) => hasGrant(cells.state.orchestrator ?? emptyRuntime("none"), scope),
-    grantProxyScope: (scope, via) => {
-      if (!cells.state.orchestrator) return;
-      persistOrchestration(addGrant(cells.state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
-    },
+    proxyGrants,
     askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     setLoopArmed: (armed) => { cells.loopArmed = armed; },
     setTaskMode: (mode, source, ctx) => setTaskMode(mode, source, ctx as ExtensionContext),

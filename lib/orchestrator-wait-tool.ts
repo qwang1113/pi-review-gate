@@ -30,7 +30,8 @@ import {
   type SupervisionMemory,
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
-import { alivePanes, childAssets, currentPlan, refreshPaneLabels } from "./orchestrator-tool-kit.ts";
+import { describeSettlement } from "./orchestrator-answer-rules.ts";
+import { alivePanes, childAssets, childChannelProjection, currentPlan, refreshPaneLabels } from "./orchestrator-tool-kit.ts";
 import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 /**
@@ -246,9 +247,11 @@ export async function doWait(
   const decision: ChildWaitDecision = observation
     ? evaluateChildWait(observation)
     : { done: false, reason: "pending", summary: "本次预算内一次探针都没跑完" };
+  const settled = settledSinceLastReceipt(deps, snapshot);
   const receipt = buildWaitReceipt({
     snapshot: snapshot ?? emptySnapshot(),
     decision,
+    ...(settled.length > 0 ? { settled } : {}),
     ...(deps.contextPercent() === undefined ? {} : { contextPercent: deps.contextPercent()! }),
     exitBlockers: exitBlockers(deps, snapshot, panesRead),
     ...(inheritanceBrief(deps) === undefined ? {} : { inheritance: inheritanceBrief(deps)! }),
@@ -337,6 +340,33 @@ function keepOutOfScope(
   else delete next[childId];
   return next;
 }
+
+/**
+ * The settlements no receipt has named yet, each with WHO settled it (round 4).
+ * Keyed by child + request, so two records in one millisecond both count.
+ *
+ * EVERY registered child, closed ones included: a child closed between its
+ * settlement and the next wait is not in the supervision snapshot, and its
+ * last question must not vanish unnamed with it. Their channels are read here.
+ */
+function settledSinceLastReceipt(deps: OrchestratorDeps, snapshot: SupervisionSnapshot | undefined): string[] {
+  const since = deps.settlementsSince();
+  const reported = deps.reportedSettlements();
+  const supervised = new Map((snapshot?.children ?? []).map((c) => [c.child.id, c.projection]));
+  const runtime = deps.runtime();
+  const lines: string[] = [];
+  for (const child of runtime.children) {
+    const projection = supervised.get(child.id) ?? childChannelProjection(deps, child.id);
+    for (const record of projection.settlements ?? []) {
+      const key = `${child.id}\u0000${record.requestId}`;
+      if (reported.has(key) || !(Date.parse(record.at) >= since)) continue;
+      reported.add(key);
+      lines.push(`${child.id}（${child.taskId}）：${describeSettlement(record)}`);
+    }
+  }
+  return lines;
+}
+
 
 /** The receipt still renders when supervision never ran (an empty snapshot). */
 function emptySnapshot(): SupervisionSnapshot {

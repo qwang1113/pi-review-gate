@@ -274,6 +274,14 @@ export interface OrchestratorDeps {
    */
   announcedRequests(): readonly AnnouncedRequest[];
   saveAnnouncedRequests(next: readonly AnnouncedRequest[]): void;
+  /**
+   * Settlements a receipt already named (round 4), keyed by child + request:
+   * each one settled at or after `settlementsSince()` — the moment this
+   * orchestration's deps were built — is named exactly once. A set, not a
+   * time cursor: two records in the same millisecond must both be named.
+   */
+  settlementsSince(): number;
+  reportedSettlements(): Set<string>;
 
   /**
    * What each child's pane border currently says — the repaint throttle.

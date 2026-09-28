@@ -68,6 +68,7 @@ import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpe
 import type { ChannelDialogOutcome, ChannelDialogRequest, DialogRenderer } from "./orchestrator-child-channel.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { buildRejection } from "./rejection-copy.ts";
+import { childRestatementRefusal } from "./child-goal-flow.ts";
 import type { TaskMode } from "./task-mode.ts";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import { stageOpen, type LoopStagesRecord } from "./loop-stages.ts";
@@ -436,6 +437,8 @@ export interface RestatementToolDeps {
    * sent over the channel and recorded.
    */
   stationCap?(): DeliveryStation | undefined;
+  /** An orchestration child has no restatement step (lib/child-goal-flow.ts). */
+  isOrchestrationChild?(): boolean;
 }
 
 /** Just enough of pi's tool context for a dialog. */
@@ -467,6 +470,15 @@ export async function doProposeRestatement(
   params: Record<string, unknown>,
   ctx: unknown,
 ): Promise<ToolReply> {
+  // AN ORCHESTRATION CHILD HAS NO RESTATEMENT STEP (round 4): refused, no
+  // dialog, and pointed at the one call it does make.
+  if (deps.isOrchestrationChild?.() === true) {
+    return {
+      content: [{ type: "text", text: childRestatementRefusal() }],
+      details: { confirmed: false, orchestrationChild: true },
+      isError: true,
+    };
+  }
   // THE GOAL STAGE, READ FIRST (2026-09-22, lib/loop-stages.ts). When the user
   // switched the goal stage off, the whole requirement — the restatement
   // included — is waived: there is no contract to protect and no question to
@@ -658,8 +670,8 @@ export function registerRestatementTools(host: ToolHost, deps: RestatementToolDe
       DELIVERY_STATION_CHOICES_EN + " — ask the user rather than choosing for them; an " +
       "unreadable value is recorded as the strictest, `precommit`. `repo` binds the restatement to " +
       "one repo (default: this session's), same meaning as propose_loop_goal's. The extension " +
-      "shows the text to the user and records the confirmation itself; an orchestrator may answer " +
-      "on the user's behalf (whoever answers first wins). Call it again whenever the requirement " +
+      "shows the text to the user and records the confirmation itself. An ORCHESTRATION CHILD does " +
+      "not restate (it is refused): it goes straight to `propose_loop_goal`. Call it again whenever the requirement " +
       "changes — the newest confirmation is the one that counts.",
     parameters: Type.Object({
       restatement: Type.String({

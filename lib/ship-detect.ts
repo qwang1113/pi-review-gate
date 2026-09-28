@@ -37,11 +37,60 @@ export function segments(command: string): string[] {
   expanded = expanded.replace(/\$\(([^)]+)\)/g, (_m, inner) => { subs.push(inner); return ""; });
   // backtick form
   expanded = expanded.replace(/`([^`]+)`/g, (_m, inner) => { subs.push(inner); return ""; });
-  const main = expanded
-    .split(/(?:\|\||&&|;|\||\n)/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return [...main, ...subs];
+  return [...splitOnOperators(expanded), ...subs];
+}
+
+/**
+ * Split on the shell's control operators (`||` `&&` `;` `|` newline) — but
+ * only the UNQUOTED ones (round 4). A plain regex split read the `\|` inside
+ * `grep "foo\|git commit -am"` as a pipe and refused a read-only grep as a
+ * commit. Quoted text stays in its segment; the segment's head decides.
+ *
+ * FAIL-CLOSED FALLBACK to the old split whenever quotes cannot be trusted to
+ * mean what they say: an unbalanced quote, any heredoc — a body line like
+ * `it's` would open a "quote" that swallows the real commands after it — or
+ * ANSI-C `$'…'` quoting, whose `\'` escape this scanner does not model. An
+ * unquoted word-start `#` is a comment to the end of the line (its `'` is not
+ * a quote), exactly as lib/shell-lex.ts reads it.
+ */
+function splitOnOperators(command: string): string[] {
+  const naive = () => command.split(/(?:\|\||&&|;|\||\n)/g).map((s) => s.trim()).filter(Boolean);
+  if (/<<(?!<)/.test(command) || command.includes("$'")) return naive();
+  const out: string[] = [];
+  let cur = "";
+  let quote: '"' | "'" | null = null;
+  // Is the next character the first of a WORD? True at the start and after an
+  // UNQUOTED, UNESCAPED blank or metacharacter — the only place bash reads `#`
+  // as a comment. Tracked as state, never re-derived from `cur`'s last char:
+  // an escaped `\ ` or `\(` ends in the same character and starts nothing.
+  let wordStart = true;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (quote === '"' && ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; continue; }
+      cur += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; cur += ch; wordStart = false; continue; }
+    if (ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; wordStart = false; continue; }
+    if (ch === "#" && wordStart) {
+      while (i + 1 < command.length && command[i + 1] !== "\n") i++;
+      continue;
+    }
+    if (ch === ";" || ch === "\n" || ch === "|" || (ch === "&" && command[i + 1] === "&")) {
+      if ((ch === "|" || ch === "&") && command[i + 1] === ch) i++;
+      out.push(cur);
+      cur = "";
+      wordStart = true;
+      continue;
+    }
+    wordStart = /[\s()&<>]/.test(ch);
+    cur += ch;
+  }
+  if (quote) return naive();
+  out.push(cur);
+  return out.map((s) => s.trim()).filter(Boolean);
 }
 
 /**
@@ -362,11 +411,7 @@ function matchDynamicHead(rawSegment: string): ShipCommandKind | undefined {
 
 /** Split on operators WITHOUT stripping substitutions — for raw-head scanning. */
 function rawSegments(command: string): string[] {
-  return command
-    .replace(/\\\r?\n/g, "")
-    .split(/(?:\|\||&&|;|\||\n)/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return splitOnOperators(command.replace(/\\\r?\n/g, ""));
 }
 
 /**

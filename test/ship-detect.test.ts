@@ -440,8 +440,13 @@ test("evidence rejects every measured over-match vector", () => {
     ["the documented sudo ambiguity", "sudo echo gh pr create"],
 
   ];
+  // Round 4: a newline INSIDE quotes no longer splits a segment, so the
+  // quoted-script vectors stopped over-matching the detector too.
+  const detectorNoLongerMatches = new Set([
+    "a quoted echo", "node -e string", "python3 -c string", "timeout + node -e", "env + python3 -c",
+  ]);
   for (const [label, cmd] of cases) {
-    assert.ok(detectShipCommands(cmd).length > 0 || label === "a quoted echo",
+    assert.ok(detectShipCommands(cmd).length > 0 || detectorNoLongerMatches.has(label),
       `${label}: the DETECTOR is expected to (over-)match — that is the premise`);
     assert.deepEqual(observedShipKinds(cmd), [], `${label} must prove nothing`);
   }
@@ -491,5 +496,39 @@ test("evidence still recognises the real thing, including a multi-line PR body",
     observedShipKinds("git push origin work && gh pr create --title x").sort(),
     ["pr-create", "push"],
   );
+});
+
+test("round 4: a ship verb INSIDE a quoted argument is not a command", () => {
+  for (const cmd of [
+    `grep -rn "foo\\|git commit -am" lib`,
+    `rg 'a; git push' .`,
+    `echo "x && gh pr create"`,
+    `grep -rn "git commit -am" lib test | head -5`,
+  ]) assert.deepEqual(detectShipCommands(cmd), [], cmd);
+});
+
+test("round 4: quote-aware splitting still sees every real ship", () => {
+  assert.equal(firstKind(`bash -c "git commit -m x"`), "commit");
+  assert.equal(firstKind(`cd x && git push`), "push");
+  assert.equal(firstKind(`echo "a|b" | cat; git commit -m 'x; y'`), "commit");
+  assert.equal(firstKind(`g"i"t commit -m x`), "commit");
+  assert.equal(firstKind("git${IFS}commit -m x"), "commit");
+  assert.equal(firstKind(`grep "x" f && git push origin w`), "push");
+  // Unbalanced quote: quotes cannot be trusted, the old split applies.
+  assert.equal(firstKind(`echo it's; git commit -m x`), "commit");
+  // A comment's apostrophe is not a quote; ANSI-C quoting falls back to the old split.
+  assert.equal(firstKind("echo hi # it's\ngit commit -am x # it's"), "commit");
+  assert.equal(firstKind("echo $'a\\'b' ; git commit -am x #'"), "commit");
+  assert.equal(firstKind("(# it's\ngit commit -am x # it's\n)"), "commit");
+  assert.equal(firstKind("sleep 1 &# it's\ngit commit -am x # it's"), "commit");
+  assert.equal(firstKind("echo >#x it's\ngit commit -am x # it's"), "commit");
+  // An ESCAPED blank or metacharacter starts no word: that `#` is text, not a
+  // comment that would swallow the real `git commit` after the quoted part.
+  for (const esc of ["\\ ", "\\(", "\\&"]) {
+    assert.equal(firstKind(`echo a${esc}#'x ; b' ; git commit -am y`), "commit", esc);
+  }
+  assert.equal(firstKind("echo a#'b ; git commit -am x '"), undefined, "a mid-word # is not a comment: the quote is real");
+  // Any heredoc: an apostrophe in a body must not swallow what follows.
+  assert.equal(firstKind("cat > f <<EOF\nit's\nEOF\ngit commit -am x\necho isn't"), "commit");
 });
 

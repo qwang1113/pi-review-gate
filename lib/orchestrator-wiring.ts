@@ -432,6 +432,8 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
   // from the memory above because that one is drained by the background timer
   // too (see `announcedRequests` in lib/orchestrator-deps.ts).
   let announced: readonly AnnouncedRequest[] = [];
+  const settlementsSince = (host.now ?? (() => Date.now()))();
+  const reportedSettlements = new Set<string>();
   let activeWaits = 0;
   // Same ownership rule as the supervision memory: one per orchestration, so
   // the border-repaint throttle cannot leak between orchestrations (or, in a
@@ -554,6 +556,8 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     },
     announcedRequests: () => announced,
     saveAnnouncedRequests: (next) => { announced = next; },
+    settlementsSince: () => settlementsSince,
+    reportedSettlements: () => reportedSettlements,
     paneDecorMemory: () => paneDecor,
 
     contextPercent: () => host.contextPercent?.(),
