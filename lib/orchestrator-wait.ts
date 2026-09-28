@@ -272,7 +272,13 @@ export interface WaitReceiptInput {
   inheritance?: string;
   /** How long the call actually blocked, in ms. */
   waitedMs: number;
-
+  /**
+   * Questions settled since the previous receipt, one line each naming WHO
+   * settled it (round 4, `describeSettlement`). Without it a question simply
+   * vanished from block 2, and "the user answered" could not be told from
+   * "the arbiter stood in" or "the box was closed".
+   */
+  settled?: readonly string[];
 }
 
 /**
@@ -328,6 +334,9 @@ export function buildWaitReceipt(input: WaitReceiptInput): WaitReceipt {
     lead,
     "",
     formatSupervisionReceipt(input.snapshot),
+    ...((input.settled ?? []).length > 0
+      ? ["", "### 自上一份回执以来已结算的请求", ...input.settled!.map((line) => `- ${line}`)]
+      : []),
     "",
     "### 4. 你自己的上下文与接力时机",
     advice.line,

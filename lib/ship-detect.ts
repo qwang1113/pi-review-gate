@@ -37,11 +37,46 @@ export function segments(command: string): string[] {
   expanded = expanded.replace(/\$\(([^)]+)\)/g, (_m, inner) => { subs.push(inner); return ""; });
   // backtick form
   expanded = expanded.replace(/`([^`]+)`/g, (_m, inner) => { subs.push(inner); return ""; });
-  const main = expanded
-    .split(/(?:\|\||&&|;|\||\n)/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return [...main, ...subs];
+  return [...splitOnOperators(expanded), ...subs];
+}
+
+/**
+ * Split on the shell's control operators (`||` `&&` `;` `|` newline) — but
+ * only the UNQUOTED ones (round 4). A plain regex split read the `\|` inside
+ * `grep "foo\|git commit -am"` as a pipe and refused a read-only grep as a
+ * commit. Quoted text stays in its segment; the segment's head decides.
+ *
+ * FAIL-CLOSED FALLBACK to the old split whenever quotes cannot be trusted to
+ * mean what they say: an unbalanced quote, or any heredoc — a body line like
+ * `it's` would open a "quote" that swallows the real commands after it.
+ */
+function splitOnOperators(command: string): string[] {
+  const naive = () => command.split(/(?:\|\||&&|;|\||\n)/g).map((s) => s.trim()).filter(Boolean);
+  if (/<<(?!<)/.test(command)) return naive();
+  const out: string[] = [];
+  let cur = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (quote === '"' && ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; continue; }
+      cur += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
+    if (ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; continue; }
+    if (ch === ";" || ch === "\n" || ch === "|" || (ch === "&" && command[i + 1] === "&")) {
+      if ((ch === "|" || ch === "&") && command[i + 1] === ch) i++;
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  if (quote) return naive();
+  out.push(cur);
+  return out.map((s) => s.trim()).filter(Boolean);
 }
 
 /**
@@ -362,11 +397,7 @@ function matchDynamicHead(rawSegment: string): ShipCommandKind | undefined {
 
 /** Split on operators WITHOUT stripping substitutions — for raw-head scanning. */
 function rawSegments(command: string): string[] {
-  return command
-    .replace(/\\\r?\n/g, "")
-    .split(/(?:\|\||&&|;|\||\n)/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return splitOnOperators(command.replace(/\\\r?\n/g, ""));
 }
 
 /**

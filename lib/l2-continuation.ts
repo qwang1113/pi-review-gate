@@ -19,6 +19,8 @@ import type { createJudgeRoundSettle } from "./judge-round-settle.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
 import { LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK } from "./loop-goal.ts";
 import { buildGoalForceNegotiateDirective, goalNegotiationOverdue } from "./loop-goal-directives.ts";
+import { CHILD_GOAL_FLOW } from "./child-goal-flow.ts";
+import { isOrchestrationChildEnv } from "./session-inheritance.ts";
 import {
   buildStallNotice,
   classifyStallCause,
@@ -387,7 +389,9 @@ export function createL2Continuation(cells: SessionCells, deps: L2ContinuationDe
             "Continue: fix → judge_submit({role:\"reviewer\"}) → declare_done. " +
             SETTLED_TOOL_REMINDER + " Do not summarize; execute."
           : `\n(completion continuation ${cells.completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
-            (goalOnly
+            (goalOnly && isOrchestrationChildEnv()
+              ? "The only open item is the unapproved loop goal. " + CHILD_GOAL_FLOW + " Do not summarize; execute."
+              : goalOnly
               ? "The only open item is the unapproved loop goal. Interview the user with ask_user " +
                 "(the gate runs the interview and pauses for their answers), draft the goal in " +
                 "Simplified Chinese, get it through the `goal-auditor` audit, then call " +

@@ -134,6 +134,12 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
    * testable, and a test should not have to set process-wide state to ask.
    */
   stationCap?(): DeliveryStation | undefined;
+  /**
+   * THIS SESSION IS AN ORCHESTRATION CHILD (round 4, lib/child-goal-flow.ts):
+   * no restatement, no goal audit — the project manager reviews the draft in
+   * the approval box itself. Injected for the same reason as `stationCap`.
+   */
+  isOrchestrationChild?(): boolean;
 }
 
 // ---------- the goal audit recorder (L8b — NOT a tool) ----------
@@ -201,8 +207,12 @@ export async function doProposeLoopGoal(
   // read from the SESSION's own repo state — a goal may bind to a second
   // repo, but the gate mode is a property of the session, not of the repo it
   // is writing into.
+  //
+  // A CHILD skips this step and the audit below (lib/child-goal-flow.ts): the
+  // plan settled the requirement, and the manager reviews the draft itself.
+  const child = deps.isOrchestrationChild?.() === true;
   const sessionMode = deps.stateFor(deps.primaryRepoRoot()).taskMode;
-  if (restatementRequiredInMode(sessionMode) && !restatementConfirmed(goalSt.restatement)) {
+  if (!child && restatementRequiredInMode(sessionMode) && !restatementConfirmed(goalSt.restatement)) {
     return {
       content: [{ type: "text", text: buildRestatementMissingRefusal("propose_loop_goal") }],
       details: { approved: false, restated: false },
@@ -220,7 +230,7 @@ export async function doProposeLoopGoal(
   // A PASS already on record for this exact text skips the audit: the
   // record binds to the sha256 of the draft, so re-auditing identical
   // text would burn minutes to reach the same verdict.
-  if (!goalPrereviewPassed(goalSt.goalPrereview, goalText)) {
+  if (!child && !goalPrereviewPassed(goalSt.goalPrereview, goalText)) {
     // The auditor has to be installed for any of this to work. Checked
     // FIRST, because a missing agent is a setup problem with a concrete
     // fix, not an audit that failed. Dispatchability is what matters, not
@@ -304,7 +314,9 @@ export async function doProposeLoopGoal(
   // The record is guaranteed to exist here: goalPrereviewPassed() above
   // already required a PASS bound to this text, so this reads it directly
   // rather than advertising a fallback state that cannot occur.
-  const prereviewLine = "goal-auditor 预审: PASS @ " + goalSt.goalPrereview!.at;
+  const prereviewLine = child
+    ? "goal 审核：由项目经理审核（编排子会话不跑 goal-auditor）"
+    : "goal-auditor 预审: PASS @ " + goalSt.goalPrereview!.at;
   // WHERE THIS ROUND STOPS (2026-09-06). Three sources, most specific first:
   // an explicit `station` parameter, then the station the user already agreed
   // to when they confirmed the restatement, then the strictest value. The
@@ -312,7 +324,7 @@ export async function doProposeLoopGoal(
   // term nobody agreed to — and it is recorded beside the approval.
   const requestedStation: DeliveryStation = isDeliveryStation(String(params.station ?? "").trim().toLowerCase())
     ? parseDeliveryStation(params.station)
-    : (goalSt.restatement?.station ?? parseDeliveryStation(undefined));
+    : (goalSt.restatement?.station ?? (child ? deps.stationCap?.() : undefined) ?? parseDeliveryStation(undefined));
   // AND ONE CEILING OVER ALL OF THEM (2026-09-15, user decision). An
   // orchestration child's round stops where its TASK stops, and the plan may
   // have narrowed this repo to one PR (lib/repo-pr-policy.ts). The ceiling is
@@ -576,6 +588,9 @@ export function registerGoalTools(host: ToolHost, deps: GoalToolDeps): void {
       "waits for it, adjudicates (only P0/P1 block) and records the verdict. A failed audit comes " +
       "back with the objections and NO dialog is shown; fix them and call this again. That makes " +
       "it a MINUTES-LONG call. " +
+      "EXCEPTION — an ORCHESTRATION CHILD needs neither the restatement nor the audit: it calls this " +
+      "directly, and the approval box goes to its project manager (who reviews the draft) and to " +
+      "its own pane, first answer wins; the station defaults to the plan's ceiling for the task. " +
       "Once it passes, the extension shows the text in a confirmation " +
       "dialog and, if the user approves, writes .pi/loop-goal.md itself and records the approval. " +
       "Writing that file yourself grants nothing: in loop mode an unapproved goal blocks " +

@@ -688,8 +688,9 @@ PM 的 transcript 里 ask_user/grillme 的 Q&A 段验证澄清结论真的落进
 （`precommit` / `commit` / `pr`），它同时是 plan 的 `deliveryStation` 字段（缺省 `precommit`，
 进 canonical 文本因此进批准 hash）。
 
-**代批不是橡皮图章（2026-09-06，用户要求）**：代用户批准子会话的 goal、或代确认它的
-需求反述，`orchestrator_answer` 必须带 `crosscheck` —— 写出该 plan 任务 id，并对
+**代批不是橡皮图章（2026-09-06，用户要求）**：代用户批准子会话的 goal
+（2026-09-28 起子会话不做需求反述、不跑 goal-auditor，项目经理就是它 goal 的审核者），
+`orchestrator_answer` 必须带 `crosscheck` —— 写出该 plan 任务 id，并对
 「任务目标 / 交付站点」两项各给一句判断（词表与判定在
 `lib/orchestrator-answer-rules.ts`，接受的写法逐条列在 `PROXY_CROSSCHECK_TOKENS`；
 “文件边界”那一项已随文件边界一起删除，2026-09-17）。
@@ -829,12 +830,11 @@ report（新 review 对象不该被上一个对象的结论终结）。原来的
 `buildTaskDocument` 生成的任务书，在项目经理的 brief **之后**由门禁追加一段
 **硬指示**（`TASK_GOAL_DIRECTIVE`，2026-09-01）：
 
-> 本会话的退出条约是你自己的 loop goal。任务书只是 plan 交给你的那份工作，不是你的 goal；
-> plan 批准 ≠ goal 批准。顺序是两步，不能跳：**先**用 `propose_restatement` 把你对需求的
-> 理解反述给用户确认（上下文、例子、改之前 → 改之后、哪几步会变得不同，外加本轮交付站点
-> precommit / commit / pr），**再**用 `propose_loop_goal` 协商并获批你自己的 goal
-> （goal-auditor 审计 + 用户批准）。没有已确认的反述，`propose_loop_goal` 会直接被拒、
-> 一个框都不弹；未批准 goal 前，L8 edit gate 会拦下所有 edit/write。
+> 本会话的退出条约是你自己的 loop goal。任务书只是 plan 的任务边界，不是你的 goal；
+> plan 批准 ≠ goal 批准。编排子会话的 goal 流程只有一步：**不做**需求反述（`propose_restatement`
+> 会被拒），也**不跑** goal-auditor 审计 —— 直接写好自己的 loop goal 调 `propose_loop_goal`，
+> 批准框同时经通道交给项目经理审核，谁先答算谁的；…（全文见 `lib/child-goal-flow.ts` 的
+> `CHILD_GOAL_FLOW`）
 
 （这段引文与 `lib/orchestrator-delivery.ts` 的 `TASK_GOAL_DIRECTIVE` 是同一份文本的摘录，
 改那个常量时同轮改这里——两处说法不一致时，以常量为准。）

@@ -631,7 +631,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    `deliveryStation`（提高它属于扩权，要重批）。
 
 1b. **项目经理代批不是橡皮图章**（2026-09-06，用户要求）：代用户批准子会话的
-   goal、或代确认它的需求反述，都必须给 `orchestrator_answer` 带上 `crosscheck`
+   goal 必须给 `orchestrator_answer` 带上 `crosscheck`
    —— 写出该 plan 任务 id，并对「任务目标 / 交付站点」两项各给一句
    判断；缺任一项即退回，并把 plan 里那个任务与子会话提交的正文**并排**贴回。
    拒绝不需要对照（说不永远是自由的）。子会话请求确认的站点若**宽于**已批准
@@ -642,7 +642,12 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
    只被多注入「有项目经理在管这轮任务」一句 + 任务书末尾门禁追加的
    `TASK_GOAL_DIRECTIVE`（plan 批准 ≠ goal 批准，必须先协商自己的 loop goal，
-   2026-09-01）。plan、调度细节一律不注入 —— 知道
+   2026-09-01）。**它的 goal 流程只有一步**（2026-09-28，用户决定）：不做需求反述
+   （`propose_restatement` 对子会话直接拒绝）、不跑 goal-auditor，直接 `propose_loop_goal`；
+   批准框照旧同时发给项目经理（它就是审核者，代批要 `crosscheck`）与子会话 pane，先答者
+   生效；站点缺省取 `RG_STATION_CAP`。子会话的判定是 `isOrchestrationChildEnv`
+   （`lib/session-inheritance.ts`），它看到的每一处文案都来自 `lib/child-goal-flow.ts`。
+   plan、调度细节一律不注入 —— 知道
    plan 会让它为 plan 而不是为自己的任务做优化。它在**任务声明的 repo** 里工作
    （plan 任务**必须**声明 `repo` 字段——子会话 cwd 就落在那里；2026-09-01 实测
    漏写导致子会话被开在项目经理仓库、goal 绑错、编辑被 L8 拦的死锁，写 plan 时

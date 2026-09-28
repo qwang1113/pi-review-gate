@@ -274,6 +274,13 @@ export interface OrchestratorDeps {
    */
   announcedRequests(): readonly AnnouncedRequest[];
   saveAnnouncedRequests(next: readonly AnnouncedRequest[]): void;
+  /**
+   * Epoch ms of the last receipt that listed settled questions — every
+   * settlement newer than this is named ONCE in the next receipt (round 4).
+   * Starts at the moment this orchestration's deps were built.
+   */
+  settlementCursor(): number;
+  saveSettlementCursor(at: number): void;
 
   /**
    * What each child's pane border currently says — the repaint throttle.

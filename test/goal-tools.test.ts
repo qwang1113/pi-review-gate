@@ -454,6 +454,40 @@ test("L8a: in LOOP mode, no confirmed restatement ⇒ refused with NO dialog and
 
 });
 
+test("round 4: an ORCHESTRATION CHILD needs no restatement and no audit — straight to the approval box, station = the plan's cap", async () => {
+  const f = fake();
+  f.st.taskMode = "loop";
+  f.deps.isOrchestrationChild = () => true;
+  f.deps.stationCap = () => "commit";
+  const requests: Array<{ topic?: string; payload?: string }> = [];
+  const askEitherSide = f.deps.askEitherSide;
+  f.deps.askEitherSide = async (request, hasUI, render) => {
+    requests.push(request);
+    return askEitherSide(request, hasUI, render);
+  };
+  const out = await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.equal(out.details?.approved, true, out.content[0]!.text);
+  assert.equal(f.auditRuns, 0, "no goal-auditor for a child");
+  assert.deepEqual(f.surfaces, ["showToUser", "confirm"]);
+  assert.equal(requests[0]?.topic, "goal-approval", "the box goes over the channel to the manager");
+  assert.equal(requests[0]?.payload, GOAL);
+  assert.equal(f.st.loopGoal?.station, "commit", "no restatement to carry a station: the plan's cap is the default");
+});
+
+test("round 4: a STANDALONE loop session is unchanged — no restatement is refused, and the audit still runs", async () => {
+  const refused = fake();
+  refused.st.taskMode = "loop";
+  refused.deps.isOrchestrationChild = () => false;
+  assert.equal((await doProposeLoopGoal(refused.deps, { goal: GOAL }, uiCtx(refused), undefined)).details?.restated, false);
+
+  const audited = fake({ audit: { ok: false, text: "FAIL" } });
+  audited.st.taskMode = "loop";
+  audited.st.restatement = confirmedRestatement();
+  audited.deps.isOrchestrationChild = () => false;
+  await doProposeLoopGoal(audited.deps, { goal: GOAL }, uiCtx(audited), undefined);
+  assert.equal(audited.auditRuns, 1);
+});
+
 test("L8a: a broken restatement record (hash ≠ text) is treated as none at all", async () => {
   const f = fake();
   f.st.taskMode = "loop";

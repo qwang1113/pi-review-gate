@@ -29,6 +29,8 @@ import {
   type LoopGoal,
 } from "./loop-goal.ts";
 import { buildGoalStageOffDirective, buildLoopGoalDirective } from "./loop-goal-directives.ts";
+import { CHILD_GOAL_MISSING_DIRECTIVE, childGoalEditBlock } from "./child-goal-flow.ts";
+import { isOrchestrationChildEnv } from "./session-inheritance.ts";
 import {
   ensureLoopStages,
   stageOpen,
@@ -221,7 +223,10 @@ export function createLoopGoalHost(
    */
   function loopGoalDirectiveText(): string {
     if (!stageIsOn("goal")) return buildGoalStageOffDirective();
-    return buildLoopGoalDirective(readSessionLoopGoal(cells.primaryRepoRoot), goalStageSatisfied());
+    const confirmed = goalStageSatisfied();
+    // A child's Step 0 has no restatement and no audit (lib/child-goal-flow.ts).
+    if (!confirmed && isOrchestrationChildEnv()) return CHILD_GOAL_MISSING_DIRECTIVE;
+    return buildLoopGoalDirective(readSessionLoopGoal(cells.primaryRepoRoot), confirmed);
   }
 
   /**
@@ -366,7 +371,11 @@ export function createLoopGoalHost(
       // blocked forever — the propose_loop_goal `repo` parameter is what
       // binds a goal to a specific repo. The hint goes in through the builder,
       // which puts it on the 现象 line where it is read.
-      return { block: true, reason: loopGoalUnconfirmedEditBlock(goalRoot === primaryRepoRoot ? undefined : goalRoot) };
+      const named = goalRoot === primaryRepoRoot ? undefined : goalRoot;
+      return {
+        block: true,
+        reason: isOrchestrationChildEnv() ? childGoalEditBlock(named) : loopGoalUnconfirmedEditBlock(named),
+      };
     }
     return undefined;
   }

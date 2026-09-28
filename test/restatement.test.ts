@@ -225,6 +225,17 @@ test("propose: a confirmed restatement is recorded with its hash, time and stati
   assert.match(out.content[0]!.text, /propose_loop_goal/, "the reply says what the next step is");
 });
 
+test("round 4: an ORCHESTRATION CHILD is refused with no dialog, and pointed at propose_loop_goal", async () => {
+  const f = fake();
+  f.deps.isOrchestrationChild = () => true;
+  const out = await doProposeRestatement(f.deps, { restatement: GOOD, station: "commit" }, UI);
+  assert.equal(out.isError, true);
+  assert.deepEqual(f.surfaces, [], "no transcript echo, no dialog");
+  assert.equal(f.st.restatement, undefined);
+  assert.match(out.content[0]!.text, /propose_loop_goal/);
+  assert.match(out.content[0]!.text, /项目经理/);
+});
+
 test("propose: a refused draft never reaches the user", async () => {
   const f = fake();
   const out = await doProposeRestatement(f.deps, { restatement: "太短了", station: "pr" }, UI);

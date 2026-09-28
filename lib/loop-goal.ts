@@ -373,7 +373,9 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
   "tokens stay English), then call `propose_loop_goal` — it runs the `goal-auditor` audit itself " +
   "(dispatch, adjudicate, record) and only then asks the USER to approve it " +
 
-  "in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
+  "in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count. (An ORCHESTRATION " +
+  "CHILD skips the restatement and the audit: it calls `propose_loop_goal` directly and its " +
+  "project manager reviews the draft.)";
 
 /**
  * Edit-block copy for loop mode without a confirmed goal (L8 tool_call gate).

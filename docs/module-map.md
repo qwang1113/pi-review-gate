@@ -556,7 +556,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 
 ---
 
-## 五、`lib/` 全量速查表（256 个模块）
+## 五、`lib/` 全量速查表（257 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -688,6 +688,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `readonly-stall.ts` | 只读钻探止损（2026-09-18；阈值 30 → **100**，2026-09-14 用户决定 —— 30 次在「工作本身就是读」的任务里是常态，提醒常常在调查仍有效时到达，而它只是 nudge、晚到不付代价）：工具调用层计数器，连续 `READONLY_STALL_LIMIT` 次成功的只读调用（read 家族 + bash）无 edit 落地时注入 NUDGE（只提示不拦截）。补 loop-stall 的 turn 边界盲区与进展维度「任何调用都算推进」的盲区；状态纯内存，不落盘。**谁听得见由 `readonlyStallNudgeFor(mode)` 决定**（2026-09-17）：`normal` 与 `orchestrator` 静默 —— 项目经理按约束 2 根本不写代码，这条提醒对它恒为误报；计数本身仍与模式无关 |
 | `orchestration-id.ts` | 编排 id：编排的稳定地址（不是 session id），接力换人后子会话无感。启动时持哪个 id 的判定也在这里（`startupOrchestrationId`，2026-09-17）：env 继承 → **本会话自己的 runtime（`storedRuntimeIsMine`，按 runtime 自己的 `ownerSessionId` 判，不是按 sidecar 的 sessionId）** → 否则新铸；**别人的 runtime 一律不隐式接管**，那是 `orchestrator_attach` 的事 |
 | `out-of-repo-paths.ts` | 仓库外路径判定：`isOutsideRepoPath`（sidecar 里表现为绝对路径就是仓库外）+ **敏感路径**判定（复用 `isSensitiveFile` + `OUT_OF_REPO_SENSITIVE_SEGMENTS` 按目录段匹配，与家目录展开无关）+ `sensitiveOutOfRepoEdits`（代批时真正算违规的那一批）。仓库内的写入**不参与判定**：同一 repo 的任务本来就被串行调度，文件边界已于 2026-09-17 从 plan 中移除（原 `orchestrator-boundaries.ts` 的边界代数一并删除）。它不替代 `ship-gate-edit-guard.ts` 的编辑期敏感文件防线 |
+| `child-goal-flow.ts` | **编排子会话的 goal 流程**（2026-09-28，用户决定）：子会话不做需求反述、不跑 goal-auditor，直接 `propose_loop_goal`，由项目经理审。给子会话看的每一处文案（`CHILD_GOAL_FLOW`、Step 0、强制协商、阅读提醒、L8 编辑拦截、`propose_restatement` 的拒绝）都在这里；谁是子会话由 `session-inheritance.ts` 的 `isOrchestrationChildEnv` 判 |
 | `child-side-host.ts` | 监督通道的**子会话一侧**（t6 从扩展拆出）：`childBinding`（编排子会话 / worker / judge pane 三种绑定）、`reportChildState`（节流的状态上报，带进展戳与 settled 证据）、10s 心跳定时器 + 自己通道文件的 watcher、指令 drain（两段回执、stop-first、重入守卫）、`askEitherSide`（人与上级谁先答谁生效）；规则在 `orchestrator-child-channel.ts` |
 | `channel-records.ts` | 点对点通道的**记录 schema**（state / request / request-settled / answer / instruct / instruct-ack / report），只有类型 |
 | `channel-io.ts` | 通道的**磁盘侧**：注入式 `ChannelIO`（可选 `readFrom` 按字节偏移读，假 IO 不实现就回退 `readText`）、`nodeChannelIO`、路径、`appendRecord` 与大 payload 溢出到旁文件、payload 解析 |

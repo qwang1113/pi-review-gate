@@ -136,10 +136,16 @@ export interface GateCommandDeps extends GateDiagnosisDeps {
   otherRepoStatus(): { lines: string[]; blocked: boolean };
   /** Is the loop goal on disk the one the USER approved? */
   loopGoalConfirmed(): boolean;
-  /** True when the user granted the PM proxy scope `scope` (orchestrator only). */
-  hasProxyGrant(scope: string): boolean;
-  /** Mint a proxy grant for `scope` — /gate-grant's door (2026-09-16). */
-  grantProxyScope(scope: string, via: "ask-user" | "gate-grant" | "first-answer"): void;
+  /**
+   * The PM's proxy authorities (`proxyGrantStore`, lib/orchestrator-registry.ts):
+   * whether this session can hold them at all, which it holds, and the door
+   * /gate-grant opens (2026-09-16). `grant` is false when nothing was recorded.
+   */
+  proxyGrants: {
+    applies(): boolean;
+    has(scope: string): boolean;
+    grant(scope: string, via: "gate-grant"): boolean;
+  };
   loopGoalPresent(): boolean;
   /**
    * This session's CONTRACT for `/gate-contract`: the lines to print, and —
@@ -482,7 +488,17 @@ function registerGateGrant(host: CommandHost, deps: GateCommandDeps): void {
         ctx.ui.notify(`review-gate: 未知授权范围 "${scope}" —— 可授：${GRANTABLE_SCOPES.join(", ")}`, "error");
         return;
       }
-      if (deps.hasProxyGrant(scope)) {
+      // Round 4: this used to answer 「已授予」 in any session, recording nothing
+      // outside an orchestration that had a runtime to write to.
+      if (!deps.proxyGrants.applies()) {
+        ctx.ui.notify(
+          "review-gate: /gate-grant 不适用 —— 代答权只能授给项目经理会话" +
+            "（orchestrator 模式，且本仓库记录的编排就是它自己的；记录的是别的编排时先 orchestrator_attach）。",
+          "warning",
+        );
+        return;
+      }
+      if (deps.proxyGrants.has(scope)) {
         ctx.ui.notify(`review-gate: 项目经理已有 ${scope} 代答权（无需重复授予）`, "info");
         return;
       }
@@ -505,7 +521,10 @@ function registerGateGrant(host: CommandHost, deps: GateCommandDeps): void {
         ok = true;
       }
       if (!ok) return;
-      deps.grantProxyScope(scope, "gate-grant");
+      if (!deps.proxyGrants.grant(scope, "gate-grant")) {
+        ctx.ui.notify(`review-gate: ${scope} 代答权没有记录上（本会话已不是项目经理）。`, "error");
+        return;
+      }
       ctx.ui.notify(`review-gate: 已授予项目经理 ${scope} 代答权（via /gate-grant）`, "info");
     },
   });

@@ -30,6 +30,7 @@ import {
   type SupervisionMemory,
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
+import { describeSettlement } from "./orchestrator-answer-rules.ts";
 import { alivePanes, childAssets, currentPlan, refreshPaneLabels } from "./orchestrator-tool-kit.ts";
 import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
@@ -246,9 +247,11 @@ export async function doWait(
   const decision: ChildWaitDecision = observation
     ? evaluateChildWait(observation)
     : { done: false, reason: "pending", summary: "本次预算内一次探针都没跑完" };
+  const settled = settledSinceLastReceipt(deps, snapshot);
   const receipt = buildWaitReceipt({
     snapshot: snapshot ?? emptySnapshot(),
     decision,
+    ...(settled.length > 0 ? { settled } : {}),
     ...(deps.contextPercent() === undefined ? {} : { contextPercent: deps.contextPercent()! }),
     exitBlockers: exitBlockers(deps, snapshot, panesRead),
     ...(inheritanceBrief(deps) === undefined ? {} : { inheritance: inheritanceBrief(deps)! }),
@@ -336,6 +339,26 @@ function keepOutOfScope(
   if (advanced[childId] !== undefined) next[childId] = advanced[childId]!;
   else delete next[childId];
   return next;
+}
+
+/**
+ * The settlements newer than the last receipt that listed any, each named once
+ * with WHO settled it — then the cursor moves past them (round 4).
+ */
+function settledSinceLastReceipt(deps: OrchestratorDeps, snapshot: SupervisionSnapshot | undefined): string[] {
+  const cursor = deps.settlementCursor();
+  let newest = cursor;
+  const lines: string[] = [];
+  for (const child of snapshot?.children ?? []) {
+    for (const record of child.projection.settlements ?? []) {
+      const at = Date.parse(record.at);
+      if (!(at > cursor)) continue;
+      newest = Math.max(newest, at);
+      lines.push(`${child.child.id}（${child.child.taskId}）：${describeSettlement(record)}`);
+    }
+  }
+  if (newest > cursor) deps.saveSettlementCursor(newest);
+  return lines;
 }
 
 /** The receipt still renders when supervision never ran (an empty snapshot). */

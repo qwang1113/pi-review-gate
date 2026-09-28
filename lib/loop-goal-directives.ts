@@ -11,6 +11,8 @@
 import { randomBytes } from "node:crypto";
 import { DELIVERY_STATION_CHOICES_EN } from "./delivery-station.ts";
 import { LOOP_GOAL_RELPATH, type LoopGoal } from "./loop-goal.ts";
+import { buildChildGoalForceNegotiateDirective } from "./child-goal-flow.ts";
+import { isOrchestrationChildEnv } from "./session-inheritance.ts";
 
 // ---------------------------------------------------------------------------
 // The exit-criteria section, read for DISPLAY (2026-09-18)
@@ -300,10 +302,13 @@ export function goalNegotiationOverdue(turns: number | undefined, threshold: num
 export function buildGoalForceNegotiateDirective(
   turns: number | undefined,
   threshold: number = GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
+  child: boolean = isOrchestrationChildEnv(),
 ): string {
   const shown = goalNegotiationOverdue(turns, threshold)
     ? `已达 ${turns ?? 0} 轮（阈值 ${threshold}）`
     : `已 ${turns ?? 0}/${threshold} 轮`;
+  // A CHILD has no restatement and no audit to be sent to (lib/child-goal-flow.ts).
+  if (child) return buildChildGoalForceNegotiateDirective(shown);
   return (
     "## 强制协商 loop goal（门禁，2026-09-17）\n" +
     `你已 ${shown} 未获批 loop goal。` +

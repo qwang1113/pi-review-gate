@@ -183,7 +183,7 @@ export function registerJudgeSide(
  * reason. The terminal condition is "pi gave up", which is exactly what
  * `agent_settled` with a failed last message means.
  */
-function installJudgeModelRotation(
+export function installJudgeModelRotation(
   pi: ExtensionAPI,
   cells: SessionCells,
   role: string,

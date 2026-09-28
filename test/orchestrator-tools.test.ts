@@ -30,7 +30,7 @@ import {
 } from "./helpers/fake-orchestration.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
 import { decideNotify, emptyNotifyHistory, notifyKey, recordNotify } from "../lib/user-notify.ts";
-import { addGrant, hasGrant, liveChildren } from "../lib/orchestrator-registry.ts";
+import { addGrant, hasGrant, liveChildren, proxyGrantStore } from "../lib/orchestrator-registry.ts";
 import { orchestratorDoneProblems } from "../lib/orchestrator-gate.ts";
 import { closeKeepsWindow } from "../lib/orchestrator-close-tool.ts";
 import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
@@ -659,6 +659,20 @@ test("N6: a question the ARBITER stood in for is reported as the arbiter's, not 
   assert.doesNotMatch(replyText(reply), /用户在子会话里当场作答/);
 });
 
+test("round 4: the wait receipt names WHO settled a question, exactly once", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  world.childAsks(childId, { requestId: "req-1", title: "选一个", options: ["A", "B"] });
+  assert.match(replyText(await world.call("orchestrator_wait", { timeoutMs: 0 })), /选一个/);
+  world.childSettles(childId, "req-1", "arbiter");
+
+  const first = replyText(await world.call("orchestrator_wait", { timeoutMs: 0 }));
+  assert.match(first, /自上一份回执以来已结算的请求/);
+  assert.match(first, /req-1 已结算：arbiter 代答/);
+  const second = replyText(await world.call("orchestrator_wait", { timeoutMs: 0 }));
+  assert.doesNotMatch(second, /req-1 已结算/, "a settlement is named once");
+});
+
 test("two open questions require the requestId — the gate never picks one for you", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);
@@ -960,6 +974,61 @@ test("sensitive-edit proxy answer: WITH a grant, no dialog — the answer just g
   assert.equal(reply.isError, undefined, replyText(reply));
   assert.equal(world.channelOf(childId).filter((r) => r.kind === "answer").length, 1);
   assert.equal(world.options.selectAnswers?.length ?? 0, 0, "no PM-pane dialog was opened");
+});
+
+test("round 4: a grant given BEFORE the first plan approval is recorded, survives revoke + re-approval, and the answer path sees it", async () => {
+  const world = makeFakeWorld();
+  const store = proxyGrantStore({
+    isOrchestrator: () => true,
+    runtime: () => world.deps.runtime(),
+    saveRuntime: (r) => world.deps.saveRuntime(r),
+    runtimeConflict: () => world.deps.runtimeConflict?.(),
+    now: () => world.deps.now(),
+  });
+  assert.equal(store.grant("sensitive-edit", "gate-grant"), true);
+  assert.equal(store.has("sensitive-edit"), true, "no approved plan yet, and the grant still landed");
+
+  const plan = { ...twoTaskPlan(), tasks: twoTaskPlan().tasks.map((t) => ({ ...t, repo: "/repo" })) };
+  await world.call("orchestrator_plan", { action: "write", plan });
+  world.confirmAnswers.push(true);
+  assert.equal((await world.call("orchestrator_plan", { action: "submit" })).isError, undefined);
+  // A widening revokes the approval; the next submit re-approves.
+  const wider = { ...plan, tasks: [...plan.tasks, { id: "t3", title: "任务三", repo: "/repo", dependsOn: ["t2"] }] };
+  await world.call("orchestrator_plan", { action: "write", plan: wider });
+  assert.equal(world.runtime().approvedPlanHash, undefined, "the widening revoked the approval");
+  assert.equal(store.has("sensitive-edit"), true, "…but not the grant");
+  world.confirmAnswers.push(true);
+  assert.equal((await world.call("orchestrator_plan", { action: "submit" })).isError, undefined);
+  assert.equal(store.has("sensitive-edit"), true, "re-approval keeps it");
+
+  const childId = await spawnT1(world);
+  world.childAsks(childId, {
+    requestId: "req-g0",
+    title: "AI 请求一次性修改敏感文件",
+    options: ["同意一次性修改", "拒绝（保持拦截）"],
+    topic: "sensitive-edit",
+  });
+  const reply = await world.call("orchestrator_answer", { childId, answer: "同意一次性修改" });
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.equal(world.options.selectAnswers?.length ?? 0, 0, "no three-way dialog: the answer path saw the grant");
+});
+
+test("round 4: outside the role, or against another orchestration's record, a grant is refused and nothing is written", () => {
+  for (const [isOrchestrator, conflict] of [[false, undefined], [true, "orch-other"]] as const) {
+    const world = makeFakeWorld();
+    const before = world.runtime();
+    const store = proxyGrantStore({
+      isOrchestrator: () => isOrchestrator,
+      runtime: () => world.deps.runtime(),
+      saveRuntime: (r) => world.deps.saveRuntime(r),
+      runtimeConflict: () => conflict,
+      now: () => world.deps.now(),
+    });
+    assert.equal(store.applies(), false);
+    assert.equal(store.grant("tmux-access", "gate-grant"), false);
+    assert.equal(store.has("tmux-access"), false);
+    assert.equal(world.runtime(), before, "nothing saved");
+  }
 });
 
 // ---------------------------------------------------------------------------
