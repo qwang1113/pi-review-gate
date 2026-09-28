@@ -22,7 +22,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sessionDirForCwd } from "./session-dir.ts";
 
 import { parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
-import { gitFailureText, gitText } from "./git-exec.ts";
+import { gitBaseEnv, gitFailureText, gitText } from "./git-exec.ts";
 import { listedWorktreeBranch } from "./repo-facts.ts";
 import {
   RELOCATE_COMMAND,
@@ -74,8 +74,14 @@ function writeOwner(owner: SessionWorktreeOwner): void {
 
 /** `gitFailureText` keeps STDOUT, where git says "nothing to commit". */
 function runGit(cwd: string, argv: readonly string[]): { ok: boolean; output: string } {
+  // THE LEFTOVERS COMMIT IS THE GATE'S OWN, like the checkpoint
+  // (lib/checkpoint-tool.ts): it SAVES work onto a private branch, it ships
+  // nothing — the pre-push hook and the ship gate still guard publishing. The
+  // session's own pre-commit hook would refuse it whenever its review is
+  // pending (acceptance P1, 2026-09-28), stranding the checkout at exit.
+  const env = argv[2] === "commit" ? { ...gitBaseEnv(), REVIEW_GATE_BYPASS: "1" } : undefined;
   try {
-    return { ok: true, output: gitText(cwd, argv, { timeout: 0 }) };
+    return { ok: true, output: gitText(cwd, argv, { timeout: 0, ...(env ? { env } : {}) }) };
   } catch (error) {
     return { ok: false, output: gitFailureText(error).trim() };
   }
