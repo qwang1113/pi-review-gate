@@ -15,11 +15,11 @@
  * used after it — reclamation is keyed on the NEW session's own id and cwd.
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import { CURRENT_SESSION_VERSION, SessionManager } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { sessionDirForCwd } from "./session-dir.ts";
 
 import { parseChoice, type ChoiceSpec } from "./choice-dialog.ts";
 import { gitFailureText, gitText } from "./git-exec.ts";
@@ -96,14 +96,18 @@ export function createSessionWorktree(deps: SessionWorktreeHostDeps) {
     const seeded = seedWorktree(repoRoot, path);
     if (seeded.length > 0) deps.log(`review-gate[session-worktree] 播种：\n${seeded.join("\n")}`);
     // A session file whose HEADER names the worktree as cwd: that header is
-    // what `switchSession` builds the new runtime's cwd from.
-    const sm = SessionManager.create(path);
-    const file = sm.getSessionFile();
-    const header = sm.getHeader();
-    if (!file || !header) return { ok: false, reason: "pi 没给出新会话文件" };
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, JSON.stringify({ ...header, version: CURRENT_SESSION_VERSION, parentSession: undefined }) + "\n");
-    writeOwner({ sessionId: sm.getSessionId(), pid: process.pid, repo: repoRoot, branch, path });
+    // what `switchSession` builds the new runtime's cwd from. Written by hand,
+    // not through pi's SessionManager: the gate imports only TYPES from pi
+    // (installed copies run without pi's node_modules beside them).
+    // ponytail: header version pinned at 3 (pi's CURRENT_SESSION_VERSION today);
+    // pi migrates older headers, so this only needs bumping if pi drops that.
+    const id = randomUUID();
+    const timestamp = new Date().toISOString();
+    const dir = sessionDirForCwd(path);
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
+    writeFileSync(file, JSON.stringify({ type: "session", version: 3, id, timestamp, cwd: path }) + "\n");
+    writeOwner({ sessionId: id, pid: process.pid, repo: repoRoot, branch, path });
     deps.log(`review-gate[session-worktree] 为 ${previousSessionId} 开出 ${path}（${branch}）`);
     return { ok: true, file, path, branch };
   }
