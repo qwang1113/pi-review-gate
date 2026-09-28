@@ -31,9 +31,7 @@ import {
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
 import { describeSettlement } from "./orchestrator-answer-rules.ts";
-import { channelPathFor } from "./channel-io.ts";
-import { projectChannel, readChannel, type ChannelProjection } from "./channel-projection.ts";
-import { alivePanes, childAssets, currentPlan, refreshPaneLabels } from "./orchestrator-tool-kit.ts";
+import { alivePanes, childAssets, childChannelProjection, currentPlan, refreshPaneLabels } from "./orchestrator-tool-kit.ts";
 import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
 /**
@@ -358,8 +356,8 @@ function settledSinceLastReceipt(deps: OrchestratorDeps, snapshot: SupervisionSn
   const runtime = deps.runtime();
   const lines: string[] = [];
   for (const child of runtime.children) {
-    const projection = supervised.get(child.id) ?? readProjection(deps, runtime.orchestrationId, child.id);
-    for (const record of projection?.settlements ?? []) {
+    const projection = supervised.get(child.id) ?? childChannelProjection(deps, child.id);
+    for (const record of projection.settlements ?? []) {
       const key = `${child.id}\u0000${record.requestId}`;
       if (reported.has(key) || !(Date.parse(record.at) >= since)) continue;
       reported.add(key);
@@ -369,15 +367,6 @@ function settledSinceLastReceipt(deps: OrchestratorDeps, snapshot: SupervisionSn
   return lines;
 }
 
-/** One channel's projection, read directly; undefined when it cannot be read. */
-function readProjection(deps: OrchestratorDeps, orchestrationId: string, childId: string): ChannelProjection | undefined {
-  try {
-    const path = channelPathFor(orchestrationId, childId, deps.channelHome());
-    return projectChannel(readChannel(deps.channelIO(), path).records);
-  } catch {
-    return undefined;
-  }
-}
 
 /** The receipt still renders when supervision never ran (an empty snapshot). */
 function emptySnapshot(): SupervisionSnapshot {
