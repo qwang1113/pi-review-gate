@@ -31,6 +31,8 @@ import {
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
 import { describeSettlement } from "./orchestrator-answer-rules.ts";
+import { channelPathFor } from "./channel-io.ts";
+import { projectChannel, readChannel, type ChannelProjection } from "./channel-projection.ts";
 import { alivePanes, childAssets, currentPlan, refreshPaneLabels } from "./orchestrator-tool-kit.ts";
 import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
@@ -344,20 +346,37 @@ function keepOutOfScope(
 /**
  * The settlements no receipt has named yet, each with WHO settled it (round 4).
  * Keyed by child + request, so two records in one millisecond both count.
+ *
+ * EVERY registered child, closed ones included: a child closed between its
+ * settlement and the next wait is not in the supervision snapshot, and its
+ * last question must not vanish unnamed with it. Their channels are read here.
  */
 function settledSinceLastReceipt(deps: OrchestratorDeps, snapshot: SupervisionSnapshot | undefined): string[] {
   const since = deps.settlementsSince();
   const reported = deps.reportedSettlements();
+  const supervised = new Map((snapshot?.children ?? []).map((c) => [c.child.id, c.projection]));
+  const runtime = deps.runtime();
   const lines: string[] = [];
-  for (const child of snapshot?.children ?? []) {
-    for (const record of child.projection.settlements ?? []) {
-      const key = `${child.child.id}\u0000${record.requestId}`;
+  for (const child of runtime.children) {
+    const projection = supervised.get(child.id) ?? readProjection(deps, runtime.orchestrationId, child.id);
+    for (const record of projection?.settlements ?? []) {
+      const key = `${child.id}\u0000${record.requestId}`;
       if (reported.has(key) || !(Date.parse(record.at) >= since)) continue;
       reported.add(key);
-      lines.push(`${child.child.id}（${child.child.taskId}）：${describeSettlement(record)}`);
+      lines.push(`${child.id}（${child.taskId}）：${describeSettlement(record)}`);
     }
   }
   return lines;
+}
+
+/** One channel's projection, read directly; undefined when it cannot be read. */
+function readProjection(deps: OrchestratorDeps, orchestrationId: string, childId: string): ChannelProjection | undefined {
+  try {
+    const path = channelPathFor(orchestrationId, childId, deps.channelHome());
+    return projectChannel(readChannel(deps.channelIO(), path).records);
+  } catch {
+    return undefined;
+  }
 }
 
 /** The receipt still renders when supervision never ran (an empty snapshot). */
