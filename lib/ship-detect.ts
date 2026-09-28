@@ -59,6 +59,11 @@ function splitOnOperators(command: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quote: '"' | "'" | null = null;
+  // Is the next character the first of a WORD? True at the start and after an
+  // UNQUOTED, UNESCAPED blank or metacharacter — the only place bash reads `#`
+  // as a comment. Tracked as state, never re-derived from `cur`'s last char:
+  // an escaped `\ ` or `\(` ends in the same character and starts nothing.
+  let wordStart = true;
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
     if (quote) {
@@ -67,11 +72,9 @@ function splitOnOperators(command: string): string[] {
       cur += ch;
       continue;
     }
-    if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
-    if (ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; continue; }
-    // A word starts after whitespace AND after bash's other metacharacters —
-    // `(# it's` and `sleep 1 &# it's` are comments too.
-    if (ch === "#" && (cur === "" || /[\s()&<>]$/.test(cur))) {
+    if (ch === '"' || ch === "'") { quote = ch; cur += ch; wordStart = false; continue; }
+    if (ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; wordStart = false; continue; }
+    if (ch === "#" && wordStart) {
       while (i + 1 < command.length && command[i + 1] !== "\n") i++;
       continue;
     }
@@ -79,8 +82,10 @@ function splitOnOperators(command: string): string[] {
       if ((ch === "|" || ch === "&") && command[i + 1] === ch) i++;
       out.push(cur);
       cur = "";
+      wordStart = true;
       continue;
     }
+    wordStart = /[\s()&<>]/.test(ch);
     cur += ch;
   }
   if (quote) return naive();

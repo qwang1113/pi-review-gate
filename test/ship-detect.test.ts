@@ -522,6 +522,11 @@ test("round 4: quote-aware splitting still sees every real ship", () => {
   assert.equal(firstKind("(# it's\ngit commit -am x # it's\n)"), "commit");
   assert.equal(firstKind("sleep 1 &# it's\ngit commit -am x # it's"), "commit");
   assert.equal(firstKind("echo >#x it's\ngit commit -am x # it's"), "commit");
+  // An ESCAPED blank or metacharacter starts no word: that `#` is text, not a
+  // comment that would swallow the real `git commit` after the quoted part.
+  for (const esc of ["\\ ", "\\(", "\\&"]) {
+    assert.equal(firstKind(`echo a${esc}#'x ; b' ; git commit -am y`), "commit", esc);
+  }
   assert.equal(firstKind("echo a#'b ; git commit -am x '"), undefined, "a mid-word # is not a comment: the quote is real");
   // Any heredoc: an apostrophe in a body must not swallow what follows.
   assert.equal(firstKind("cat > f <<EOF\nit's\nEOF\ngit commit -am x\necho isn't"), "commit");
