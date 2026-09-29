@@ -8,13 +8,38 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { runVerdictRound } from "../lib/audit-round.ts";
+import { oneAtATime, runVerdictRound } from "../lib/audit-round.ts";
 import { settleAuditRound, type AuditRoundEntry, type SettleAuditRoundDeps } from "../lib/audit-round-settle.ts";
 import { ARBITER_ROUND_SPEC, specForRound, type PendingAudit } from "../lib/audit-round-specs.ts";
 import type { ChannelRecord, ChannelReportRecord } from "../lib/channel-records.ts";
 import { recordModelFailure, selectHealthySlot } from "../lib/model-health.ts";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+
+test("arbiter rounds run one at a time — a second caller never interrupts the first (quality P1)", async () => {
+  const log: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const run = oneAtATime(async (name: string) => {
+    log.push(`start ${name}`);
+    if (name === "a") await gate;
+    if (name === "b") throw new Error("b failed");
+    log.push(`end ${name}`);
+    return name;
+  });
+  const a = run("a");
+  const b = run("b");
+  const c = run("c");
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(log, ["start a"], "b waits for a");
+  release();
+  assert.equal(await a, "a");
+  await assert.rejects(b, /b failed/);
+  assert.equal(await c, "c", "a failed call does not stall the queue");
+  assert.deepEqual(log, ["start a", "end a", "start b", "start c", "end c"]);
+  const src = readFileSync(join(import.meta.dirname, "..", "lib", "audit-round-host.ts"), "utf8");
+  assert.match(src, /const runArbiterRound = oneAtATime\(/, "the shared arbiter entry is queued");
+});
 
 test("a judge / worker window runs no routine arbiter rounds — but its appeals still reach the arbiter", () => {
   const src = readFileSync(join(import.meta.dirname, "..", "extensions", "review-gate.ts"), "utf8");

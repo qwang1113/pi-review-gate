@@ -29,7 +29,7 @@ import { formatGoalAuditRefusal, goalPrereviewPassed, goalTextHash } from "./loo
 import { formatPlanAuditRefusal } from "./orchestrator-plan-audit.ts";
 import type { ToolUpdate } from "./progress-stream.ts";
 import { buildStreamDirective } from "./review-stream.ts";
-import { runVerdictRound, type VerdictRoundOutcome } from "./audit-round.ts";
+import { oneAtATime, runVerdictRound, type VerdictRoundOutcome } from "./audit-round.ts";
 import { ARBITER_ROUND_SPEC } from "./audit-round-specs.ts";
 import { AUDIT_SELF_WAIT_BUDGET_MS } from "./judge-lifecycle.ts";
 import type { CallTool, GateToolResult, Ref, SessionHost } from "./session-host.ts";
@@ -324,20 +324,26 @@ export function createAuditRoundHost(
    * decision outside the review loop uses — appeals, the user proxy, the L5
    * semantic guards. Same dispatch, same wait, same selector as a goal audit;
    * the conclusion goes back to the caller instead of into gate state.
+   *
+   * ONE ROUND IN FLIGHT (quality round P1, 2026-09-29): every caller shares
+   * ONE arbiter window, and a second dispatch interrupts the first while both
+   * then settle against the registry's LATEST roundSeq — so a guard's READY
+   * ("no violation") could be read as an appeal's AGENT_WINS. Queued on one
+   * chain, each caller's report is its own.
    */
-  async function runArbiterRound(
+  const runArbiterRound = oneAtATime((
     root: string,
     task: string,
     budgetMs: number,
     ctx?: unknown,
     signal?: AbortSignal,
-  ): Promise<VerdictRoundOutcome> {
+  ): Promise<VerdictRoundOutcome> => {
     const run = auditRunDeps(ctx, undefined, signal);
     return runVerdictRound({
       ...run,
       awaitRoundEnd: (r, role, budget) => awaitJudgeRoundEnd(r, role, budget, ctx ?? host.ctx(), undefined, signal),
     }, { spec: ARBITER_ROUND_SPEC, root, task, budgetMs });
-  }
+  });
 
   /**
    * Wait for the END of one judge round (a report), through the SAME

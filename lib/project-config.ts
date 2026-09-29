@@ -18,7 +18,7 @@
  *       "shipDetect": true      // guard #4 — extra ship-command layer on suspicious bash
  *     },
  *     "userProxy": {            // a dialog nobody answers: how long before the arbiter stands in
- *       "waitMinutes": 30
+ *       "waitMinutes": 5
  *     },
  *     "copilotReview": {        // L7 — post-PR Copilot code-review loop
  *       "enabled": true,

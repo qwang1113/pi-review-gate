@@ -128,7 +128,7 @@ reviewer over the WHOLE change:
   READY，环境确实跑不起来时如实报 BLOCKED 而不是自我豁免。取消矩阵里没有它 ——
   矩阵裁的是同一时刻并行的三方，验收轮是完成时刻单独的一轮。
   **它只看「上次验收 READY 之后」这一段**（2026-09-29，用户决定）：这一段只有文档 / 测试 ⇒
-  不派（有 READY 就沿用），有运行时代码 ⇒ 增量重验受影响的方案项；它的窗口里 tmux 不再要授权
+  不派（有 READY 就沿用），有其他文件 ⇒ 增量重验受影响的方案项；它的窗口里 tmux 不再要授权
   （`lib/acceptance-scope.ts`、`lib/judge-side.ts` 的 `judgeMayRunTmux`）。
 
 - **五个环节是用户的开关，默认全开（2026-09-22）.** goal 协商（含需求反述）、功能

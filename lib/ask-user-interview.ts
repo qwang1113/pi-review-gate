@@ -182,7 +182,6 @@ export async function doAskUser(
    * receipt, which is the one place an answer could still have come from.
    */
   const unrenderable = new Set<number>();
-  /** Questions whose thirty-minute window ran out with nobody deciding (D39). */
   /** Question index → why the stand-in did not decide it (empty when it was not asked). */
   const undecided = new Map<number, string>();
 

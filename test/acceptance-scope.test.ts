@@ -10,18 +10,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { acceptanceDecision, buildAcceptanceTask, sanitizeAcceptanceRecord, type AcceptanceRecord } from "../lib/acceptance-round.ts";
-import { filesSince, isRuntimeCodeFile } from "../lib/acceptance-scope.ts";
+import { filesSince, needsAcceptance } from "../lib/acceptance-scope.ts";
 import { git } from "./helpers/git.ts";
 
 const AT = "2026-09-29T00:00:00.000Z";
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 
-test("tests and docs are not runtime code", () => {
-  for (const p of ["lib/a.ts", "src/x.py", "scripts/run.sh", "lib/testing.ts", "lib/contest/a.ts"]) {
-    assert.equal(isRuntimeCodeFile(p), true, p);
+test("only a positive doc or test is exempt from acceptance", () => {
+  for (const p of ["lib/a.ts", "src/x.py", "scripts/run.sh", "lib/testing.ts", "lib/contest/a.ts", "package.json", "db/m.sql", "hooks/pre-push"]) {
+    assert.equal(needsAcceptance(p), true, p);
   }
-  for (const p of ["test/a.test.ts", "tests/x.py", "src/__tests__/a.ts", "lib/a.test.ts", "web/b.spec.tsx", "README.md", "package.json"]) {
-    assert.equal(isRuntimeCodeFile(p), false, p);
+  for (const p of ["test/a.test.ts", "tests/x.py", "src/__tests__/a.ts", "lib/a.test.ts", "web/b.spec.tsx", "README.md", "docs/x.mdx"]) {
+    assert.equal(needsAcceptance(p), false, p);
   }
 });
 

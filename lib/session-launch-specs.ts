@@ -101,7 +101,7 @@ export interface JudgePaneCommandOpts {
 
 /**
  * WHAT A JUDGE ROLE MAY TOUCH. Every judge is read-only (`edit`/`write` out).
- * The arbiter is narrower (2026-09-29): it answers appeals, the thirty-minute
+ * The arbiter is narrower (2026-09-29): it answers appeals, the timed-out
  * user proxy and the semantic guards from UNTRUSTED text, so it gets the
  * read-only file tools and its conclusion tool, and nothing else — no bash to
  * act on an injected instruction, and no `ask_user` (it stands in for the user;

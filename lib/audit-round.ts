@@ -112,6 +112,19 @@ export async function runVerdictRound(
   return { ok: true, concluded: settled.concluded, notes: settled.notes };
 }
 
+/**
+ * Run `fn` one call at a time: a call starts only after every earlier one has
+ * settled (a rejection does not stall the queue).
+ */
+export function oneAtATime<A extends unknown[], R>(fn: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
+  let chain: Promise<unknown> = Promise.resolve();
+  return (...args: A) => {
+    const turn = chain.then(() => fn(...args));
+    chain = turn.catch(() => undefined);
+    return turn;
+  };
+}
+
 /** The dispatch half's seams — only the goal and plan audits use them. */
 export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
   /**

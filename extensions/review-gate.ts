@@ -855,7 +855,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       : arbiterRound(task, budgetMs);
   // LLM semantic guard layer (lib/llm-classify.ts). Tighten-only + fail-back.
   const llmClassifier: LlmClassifier = createLlmClassifier(guardRound);
-  const classifier = (): LlmClassifier => llmClassifier;
+  const classifier = (): LlmClassifier => llmClassifier; // the deps seams take a getter
 
   // THE BANNER CHANNEL (user decision, 2026-09-17) — POLICY in
   // lib/user-notify.ts, RUNTIME in lib/user-notify-runtime.ts; this file only
@@ -906,7 +906,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- L6 (edit time) + the arbitration I/O they share a quota with ----------
   const { editedTestContent, checkTestLabels, llmNotice } = createEditTimeChecks(host, {
     projectConfig: () => cells.projectConfig,
-    classifier: () => classifier(),
+    classifier,
     refuseText,
   });
   const arbitration = createArbitrationHost(host, {

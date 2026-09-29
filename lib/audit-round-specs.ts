@@ -287,7 +287,7 @@ export const ADVICE_ROUND_SPEC: AuditRoundSpec = {
 
 /**
  * THE ARBITER'S ROUND (2026-09-29, user decision: every place a model decides
- * runs as a window + pi session). Appeals, the thirty-minute user proxy and the
+ * runs as a window + pi session). Appeals, the timed-out user proxy and the
  * L5 semantic guards all dispatch this one spec; they differ only in the task
  * and in how the CALLER reads the conclusion. Its report is CONSUMED by the
  * synchronous caller (`runVerdictRound`), so the settle paths record nothing

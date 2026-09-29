@@ -43,7 +43,7 @@
  * owns the rules — which is what makes every branch below a unit test.
  */
 
-import { isRuntimeCodeFile } from "./acceptance-scope.ts";
+import { needsAcceptance } from "./acceptance-scope.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 import type { PlanTaskStages } from "./loop-stages.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
@@ -306,7 +306,7 @@ export interface AcceptanceDecisionInput {
   hasCodeChange: boolean;
   /**
    * The files in the acceptance scope (lib/acceptance-scope.ts `filesSince`:
-   * last accepted HEAD, else branch base, to the worktree). None of them runs
+   * last accepted HEAD, else branch base, to the worktree). All docs / tests
    * ⇒ nothing to accept: a READY is carried over, otherwise SKIPPED.
    * `undefined` = git could not say ⇒ this rule does not apply (stricter side).
    */
@@ -388,14 +388,14 @@ export function acceptanceDecision(input: AcceptanceDecisionInput): AcceptanceDe
       reason: "本轮没有代码改动 —— 没有可真实验收的东西，跳过验收轮。",
     };
   }
-  if (input.scopeFiles !== undefined && !input.scopeFiles.some(isRuntimeCodeFile)) {
+  if (input.scopeFiles !== undefined && !input.scopeFiles.some(needsAcceptance)) {
     if (input.record?.status === "READY" && input.record.head !== undefined) {
       return { action: "pass", reason: "上次验收 READY 之后只改了文档 / 测试 —— 沿用那份结论。" };
     }
     return {
       action: "skip",
       status: "SKIPPED",
-      reason: "本轮改动只有文档 / 测试（没有运行时代码）—— 没有可真实验收的东西，跳过验收轮。",
+      reason: "本轮改动只有文档 / 测试 —— 没有可真实验收的东西，跳过验收轮。",
     };
   }
   // NO USABLE FINGERPRINT ⇒ NEVER DISPATCH (2026-09-22).

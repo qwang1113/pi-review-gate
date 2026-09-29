@@ -260,7 +260,7 @@ export interface ChannelSettledRecord extends ChannelRecordBase {
   from: "child";
   requestId: string;
   /**
-   * `human` = answered in the pane, `arbiter` = the thirty-minute stand-in
+   * `human` = answered in the pane, `arbiter` = the stand-in after `userProxy.waitMinutes`
    * answered in the pane for an absent user (N6), `orchestrator` = answered
    * via the channel.
    */

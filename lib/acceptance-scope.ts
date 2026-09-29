@@ -16,7 +16,7 @@
  * any of them run".
  */
 
-import { isCodeFile } from "./constants.ts";
+import { isDocFile } from "./constants.ts";
 import { gitRawOrNull } from "./git-exec.ts";
 import { branchBaseBaseline } from "./review-baseline.ts";
 import { changedFiles } from "./worktree-changes.ts";
@@ -24,9 +24,12 @@ import { changedFiles } from "./worktree-changes.ts";
 const TEST_DIR = /(^|\/)(test|tests|__tests__)\//;
 const TEST_NAME = /\.(test|spec)\.[^./]+$/;
 
-/** Code that RUNS in the product — a test file is code, but nothing to accept for real. */
-export function isRuntimeCodeFile(path: string): boolean {
-  return isCodeFile(path) && !TEST_DIR.test(path) && !TEST_NAME.test(path);
+/**
+ * Does this file need a real acceptance? Only a file that is POSITIVELY a doc
+ * or a test is exempt — config, SQL, templates and extension-less hooks all run.
+ */
+export function needsAcceptance(path: string): boolean {
+  return !(isDocFile(path) || TEST_DIR.test(path) || TEST_NAME.test(path));
 }
 
 /** Where the scope starts: the last accepted HEAD, else the branch base. */
