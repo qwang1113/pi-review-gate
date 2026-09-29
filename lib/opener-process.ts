@@ -122,6 +122,11 @@ export function readOpenerRebind(key: string, home?: string): ProcessIdentity | 
  * process's identity under the keys they were opened with. Only a project
  * manager's successor claims the orchestration id — a CHILD's successor
  * carries the same orchestration id and must never become its siblings' opener.
+ *
+ * One hop by design: a successor adopts its PREDECESSOR's panes, exactly the
+ * set the judge registry lets it own (`callerIdentities` = own id +
+ * predecessor). A pane opened two handovers ago is nobody's any more, so it
+ * dies with the process that last adopted it.
  */
 export function recordSuccessorOpener(
   inheritance: { kind?: string; predecessorSession?: string },

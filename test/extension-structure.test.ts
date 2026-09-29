@@ -5755,6 +5755,14 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   // every idle-time wake goes through the governor (2026-09-29).
   assert.match(tick, /isIdle\?\.\(\) === true\) \{[\s\S]*?deps\.wakes\.wake\(/,
     "an idle manager is woken only through the wake governor");
+  // …and a REFUSED notice spends no ring: two refusals must not deliver a
+  // completion zero times (quality round 1 P1).
+  assert.match(tick, /if \(!noticeInFlight\) orchestratorDeps\.saveSupervisionMemory\(memoryBefore\)/,
+    "the supervision memory is restored when the governor refuses");
+  // A judge's report is progress in every mode, or a session whose wakes were
+  // used up would never settle the verdict that just landed (quality P1).
+  const key = windowIn(RUNTIME_SRC, "function wakeProgressKey(", "\n  }", "wakeProgressKey");
+  assert.match(key, /deps\.judgeProgress\(\)/, "a judge report re-opens wakes");
   assert.match(tick, /deliverAs: "steer"/,
     "…and the delivery cuts into the next turn WITHOUT aborting work in flight");
   assert.match(tick, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");

@@ -814,6 +814,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     paneState,
     wakes,
     lastUserInteractionAt: () => cells.lastUserInteractionAt.current,
+    judgeProgress: () => JSON.stringify(registry.ownJudges().map((j) => [j.judgeId, registry.judgeRoundReported(j)])),
   });
   // THE NAME GOES BACK WHEN THE PROCESS DIES, however it dies (t2).
   sessionNamingAtExit = sessionNaming;

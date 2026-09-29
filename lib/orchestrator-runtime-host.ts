@@ -73,6 +73,8 @@ export interface OrchestratorRuntimeDeps {
   wakes: WakeGovernor;
   /** The user's last message or dialog answer (ISO) — progress by definition. */
   lastUserInteractionAt(): string | undefined;
+  /** Which of this session's judges have reported their round — a new report is progress. */
+  judgeProgress(): string;
 }
 
 export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorRuntimeDeps) {
@@ -217,6 +219,7 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
   /** One supervision tick: announce the news, unless someone else has it covered. */
   function superviseTick(): void {
     if (orchestratorDeps.waitActive() || noticeInFlight) return;
+    const memoryBefore = orchestratorDeps.supervisionMemory();
     const events = drainSupervisionNews();
     if (events.length === 0) return;
     const message = {
@@ -227,15 +230,17 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     };
     try {
       // IDLE ⇒ this notice would START a turn, so it is an idle-time wake and
-      // goes through the governor. A news event is a child-state change, which
-      // changes the progress key, and a completion rings twice 60s apart — so
-      // the governor's 60s floor can delay a fresh event, never swallow both.
+      // goes through the governor. A refused notice was NOT delivered, so it
+      // must not spend a ring either: the memory goes back to what it was and
+      // the next tick decides the same events again (otherwise a completion's
+      // two rings could both be eaten by refusals — delivered zero times).
       if (host.ctx()?.isIdle?.() === true) {
         noticeInFlight = deps.wakes.wake({
           source: "orchestration-notice",
           progressKey: wakeProgressKey(),
           delivery: { kind: "custom", message },
         }).admit;
+        if (!noticeInFlight) orchestratorDeps.saveSupervisionMemory(memoryBefore);
         return;
       }
       // BUSY ⇒ the steer rides the turn already running: no extra LLM call.
@@ -253,7 +258,10 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
    */
   function wakeProgressKey(): string {
     const state = host.state();
-    const parts: string[] = [deps.lastUserInteractionAt() ?? ""];
+    // A judge handing in its round is progress in EVERY mode: its report only
+    // reaches the session through a settle, so it must be able to re-open wakes
+    // a silent fact had used up.
+    const parts: string[] = [deps.lastUserInteractionAt() ?? "", deps.judgeProgress()];
     if (state.taskMode === "orchestrator") {
       const plan = readPlanFile(host.repos().primary).plan;
       parts.push(JSON.stringify((plan?.tasks ?? []).map((t) => [t.id, t.status])));
