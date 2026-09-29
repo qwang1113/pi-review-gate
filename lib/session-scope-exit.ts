@@ -10,9 +10,10 @@
  * Two exits keep the session on purpose:
  *   - HANDED OFF: the successor adopts the predecessor's judge windows, which
  *     live in the PREDECESSOR's session (see `addressableSessions`);
- *   - A PROJECT MANAGER WITH OPEN CHILDREN: `orchestrator_attach` takes those
- *     children over unchanged ("no child notices"), so killing their windows
- *     would destroy exactly what a takeover exists to inherit. A child that
+ *   - A PROJECT MANAGER WITH OPEN CHILDREN: the children shut themselves down
+ *     with the manager's process (lib/opener-process.ts), but their windows
+ *     and transcripts are what `orchestrator_attach` + `orchestrator_recover`
+ *     resume from, so the gate does not kill them on top of that. A child that
  *     `orchestrator_close` SETTLED is not open (2026-09-27): its window was
  *     only kept for the user to read, and it goes with the session.
  *

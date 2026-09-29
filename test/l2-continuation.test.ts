@@ -16,7 +16,7 @@ import { createSessionCells } from "../lib/session-cells.ts";
 import { createWakeGovernor } from "../lib/wake-governor.ts";
 import type { JudgeEntry } from "../lib/hierarchy.ts";
 
-function harness(opts: { reported: boolean }) {
+function harness(opts: { reported: boolean; lastActivity?: string }) {
   const cells = createSessionCells(mkdtempSync(join(tmpdir(), "l2-")));
   cells.state.taskMode = "loop";
   cells.state.hasCodeChange = true; // review PENDING ⇒ the gate is unmet
@@ -39,7 +39,7 @@ function harness(opts: { reported: boolean }) {
       judgeRoundReported: () => opts.reported,
       listServerPanesForThisSession: () => ["%5"],
       // The heartbeat keeps it fresh — exactly what defeated the silence bound.
-      channelLastActivity: () => new Date().toISOString(),
+      channelLastActivity: () => opts.lastActivity ?? new Date().toISOString(),
     },
     settleFinishedRounds: async () => false,
     runtime: () => ({
@@ -64,6 +64,16 @@ test("a judge that already reported is not hosted: no HOST_WAIT, no WATCHDOG arm
   await l2.onAgentSettled(ctx);
   assert.equal(sent.some((t) => t.includes("REVIEW_GATE_CHILD_HOST_WAIT")), false, sent.join("\n---\n"));
   assert.equal(cells.childWaitTimer, undefined, "no watchdog is left to re-wake the session");
+  l2.cancelChildWaitTimer();
+});
+
+test("an ALIVE judge silent past the bound is announced through the governor, not on every settle", async () => {
+  // Its last progress is an hour old (one long tool call, or a question
+  // waiting on a human) while its pane lives: the announcement must not
+  // repeat on every settle over the same fact.
+  const { sent, l2, ctx } = harness({ reported: false, lastActivity: new Date(Date.now() - 3_600_000).toISOString() });
+  for (let i = 0; i < 5; i++) await l2.onAgentSettled(ctx);
+  assert.equal(sent.filter((t) => t.includes("REVIEW_GATE_CHILD_ENDED")).length, 1, sent.join("\n---\n"));
   l2.cancelChildWaitTimer();
 });
 

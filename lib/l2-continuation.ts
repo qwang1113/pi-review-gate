@@ -300,15 +300,31 @@ export function createL2Continuation(cells: SessionCells, deps: L2ContinuationDe
       const childVerdict = classifyChildren(childSnapshots, Date.now());
       const childNotice = buildChildWaitNotice(childVerdict, sessionIdsBySession);
       if (childNotice && childVerdict.terminated.length > 0) {
-        // A judge that ENDED is a new fact, announced ONCE (recorded where the
-        // announcement actually goes out) — not an idle re-announcement.
-        cancelChildWaitTimer();
-        for (const t of childVerdict.terminated) cells.announcedTerminated.add(t.child.sessionId);
-        deps.pi.sendUserMessage(
+        const text =
           `[REVIEW_GATE_CHILD_ENDED] ${childNotice}\n\n` +
-          "Continue: read the child's output and drive the loop forward. Do not summarize; execute.",
-          { deliverAs: "followUp" },
-        );
+          "Continue: read the child's output and drive the loop forward. Do not summarize; execute.";
+        // A pane that is GONE is a new fact, announced once (recorded where the
+        // announcement actually goes out). A judge merely SILENT is still alive,
+        // and `announcedTerminated` forgets a live judge on every settle — so
+        // re-announcing it is an idle-time wake over an unchanged fact, and it
+        // goes through the governor like any other (round 2 P1).
+        if (childVerdict.terminated.some((t) => t.reason === "session-ended")) {
+          cancelChildWaitTimer();
+          for (const t of childVerdict.terminated) cells.announcedTerminated.add(t.child.sessionId);
+          deps.pi.sendUserMessage(text, { deliverAs: "followUp" });
+          return;
+        }
+        const decision = deps.wakes.wake({
+          source: "child-silent",
+          progressKey: runtime.wakeProgressKey(),
+          delivery: { kind: "user", text },
+        });
+        if (decision.admit) {
+          cancelChildWaitTimer();
+          for (const t of childVerdict.terminated) cells.announcedTerminated.add(t.child.sessionId);
+        } else if (decision.nextDelayMs !== undefined) {
+          scheduleChildWaitRecheck(decision.nextDelayMs);
+        }
         return;
       }
       if (childNotice) {

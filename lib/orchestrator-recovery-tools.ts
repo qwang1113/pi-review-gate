@@ -67,6 +67,14 @@ import {
 } from "./orchestrator-tool-kit.ts";
 import { toolFail as fail, toolReply as reply } from "./tool-host.ts";
 
+/**
+ * What a takeover finds (2026-09-29): the channels are files and survive, but a
+ * child whose manager PROCESS died shut itself down with it (lib/opener-process.ts).
+ */
+const ATTACH_CHILDREN_NOTE =
+  "通道是文件路径、记录都在；但前任进程已死时，它的子会话已随之自行停下 —— " +
+  "它们会出现在下面的孤儿里，用 `orchestrator_recover` 按同一 session id 续接。";
+
 /** A task the plan believes is running while nothing is. */
 export interface OrphanTask {
   taskId: string;
@@ -440,8 +448,8 @@ async function doAttach(deps: OrchestratorDeps, params: Record<string, unknown>)
   const lines = [
     adopted
       ? `review-gate: 已接管编排 ${runtime.orchestrationId}（本会话原先持有的是另一个身份，现已改为它）。` +
-        "子会话完全无感 —— 通道是文件路径，不属于任何进程。"
-      : `review-gate: 已接管编排 ${runtime.orchestrationId}。子会话完全无感 —— 通道是文件路径，不属于任何进程。`,
+        ATTACH_CHILDREN_NOTE
+      : `review-gate: 已接管编排 ${runtime.orchestrationId}。${ATTACH_CHILDREN_NOTE}`,
     "",
     "### 0. plan",
     plan
@@ -546,8 +554,10 @@ export function registerOrchestratorRecoveryTools(host: ToolHost, deps: Orchestr
       "its task states, every child with its state / branch / progress, the questions still " +
       "waiting for an answer in the channels, and the ORPHANS — tasks the plan calls `running` " +
       "with no live pane behind them, which is the one inconsistency a crash or a reboot leaves " +
-      "and the one an orchestrator would otherwise wait on forever. Nothing is restarted and no " +
-      "child notices: the channels are file paths, not processes. It ADOPTS the id: a session " +
+      "and the one an orchestrator would otherwise wait on forever. Nothing is restarted, but a " +
+      "child whose manager PROCESS died shut itself down with it (lib/opener-process.ts), so its " +
+      "task shows up as an orphan: bring it back with `orchestrator_recover` (same session id, " +
+      "transcript continues). The channels are file paths, so no record is lost. It ADOPTS the id: a session " +
       "that never inherited one (the usual case after the previous manager died) becomes the " +
       "holder, provided the id belongs to THIS repo and is discoverable on disk — in the gate " +
       "sidecar or among the channel directories — and provided this session has not registered " +

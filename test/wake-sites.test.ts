@@ -21,7 +21,7 @@ const ALLOWED: Record<string, { count: number; why: string }> = {
   "lib/wake-governor.ts": { count: 2, why: "the governor itself — the one place a governed wake is sent" },
   "lib/l2-continuation.ts": {
     count: 2,
-    why: "CHILD_ENDED is announced once per judge (a new fact); RESUME answers the turn that just ended and is bounded by maxRounds + the loop-stall breaker",
+    why: "CHILD_ENDED for a judge whose pane is GONE is announced once (a new fact; a merely silent one goes through the governor); RESUME answers the turn that just ended and is bounded by maxRounds + the loop-stall breaker",
   },
   "lib/orchestrator-runtime-host.ts": {
     count: 2,
