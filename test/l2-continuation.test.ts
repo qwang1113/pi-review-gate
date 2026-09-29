@@ -16,6 +16,14 @@ import { createSessionCells } from "../lib/session-cells.ts";
 import { createWakeGovernor } from "../lib/wake-governor.ts";
 import type { JudgeEntry } from "../lib/hierarchy.ts";
 
+// The gate reads its OWN role off the environment (a judge pane skips the
+// loop entirely), and these tests may run inside a judge or acceptance pane:
+// run them as a plain session, whatever launched the suite.
+const gateEnv = Object.keys(process.env).filter((k) => k.startsWith("RG_"));
+const savedEnv = Object.fromEntries(gateEnv.map((k) => [k, process.env[k]]));
+test.before(() => { for (const k of gateEnv) delete process.env[k]; });
+test.after(() => { Object.assign(process.env, savedEnv); });
+
 function harness(opts: { reported: boolean; lastActivity?: string }) {
   const cells = createSessionCells(mkdtempSync(join(tmpdir(), "l2-")));
   cells.state.taskMode = "loop";
