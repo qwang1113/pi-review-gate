@@ -15,7 +15,7 @@ import {
   type AsyncPrecommitPass,
   type AsyncPrecommitReport,
 } from "./async-precommit-report.ts";
-import { nextFullPassTree, nextReviewRoundNumber } from "./gate-state-transitions.ts";
+import { nextFullPassTree, nextReviewRoundNumber, testsRan } from "./gate-state-transitions.ts";
 import type { PrecommitMode } from "./gate-state-records.ts";
 import { laneOwnsCurrentRound, roundCancelPlan, type RoundCancelPlan } from "./quality-round.ts";
 import { worktreeTree } from "./repo-facts.ts";
@@ -204,9 +204,18 @@ export function createPrecommitLane(
       let detail = "";
       const verified = worktreeTree(root) ?? "";
       try {
-        const pre = await callTool("run_precommit", {
+        let pre = await callTool("run_precommit", {
           mode, repo: root, ...(mode === "fast" && sinceTree ? { sinceTree } : {}),
         }, ctx, undefined, controller.signal);
+        // A FAST LANE THAT RAN NO TESTS ESCALATES (reviewer P1, 2026-09-29): a
+        // project the fast lane cannot narrow (a configured `fast: null`, a
+        // compound script, an unknown runner) reports `skipped`, and a READY
+        // needs tests that ran — so the same lane runs the full suite rather
+        // than leave the round unrecordable.
+        if (mode === "fast" && String(pre.details?.verdict) === "PASS" && !controller.signal.aborted &&
+            !testsRan(stateForRepo(root).precommit.testScope)) {
+          pre = await callTool("run_precommit", { mode: "full", repo: root }, ctx, undefined, controller.signal);
+        }
         verdict = String(pre.details?.verdict ?? "no verdict");
         detail = toolText(pre);
       } catch (error) {

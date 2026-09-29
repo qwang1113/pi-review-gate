@@ -157,7 +157,10 @@ reviewer over the WHOLE change:
   `node --test`); a READY needs that lane's PASS with tests actually run. The
   FULL suite runs once, by the gate, when a push / `gh pr create` or
   `declare_done` finds it is the only thing missing
-  (`lib/precommit-lane.ts` `runFullLane`) — **never manually re-run the full
+  (`lib/precommit-lane.ts` `runFullLane`); a fast lane that could not narrow
+  (ran no tests) escalates to full on its own. A push from a plain terminal
+  meets `hooks/pre-push`, which still needs a full PASS on the sidecar — push
+  from the session (or let `declare_done` run it) — **never manually re-run the full
   suite or `tsc`** (the runner caches by input: unchanged content reuses the
   recorded PASS in seconds). Develop with targeted tests only.
   The reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range

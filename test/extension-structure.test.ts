@@ -3620,8 +3620,9 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // +1 (N1, 2026-09-27): the checkpoint's dry run before the lane starts —
     // an internal `callTool`, not an instruction.
     "review-chain.ts": 4,
-    // callTool("run_precommit", …) — the lane's own run.
-    "precommit-lane.ts": 1,
+    // callTool("run_precommit", …) — the lane's own run, and its escalation to
+    // full when the fast run ran no tests (2026-09-29): internal calls.
+    "precommit-lane.ts": 2,
     // callTool("prepare_goal_audit", …) — the goal-auditor's task builder.
     "audit-round-host.ts": 1,
     // The STALE TARGET note names the step after which the checkpoint landed.
@@ -6708,6 +6709,8 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
 
 test("a review round runs the FAST lane; the full suite runs at ship time and at declare_done (2026-09-29)", () => {
   assert.match(LANE_SRC, /mode: PrecommitMode = "fast",/, "startPrecommitBeside defaults to the fast lane");
+  assert.match(LANE_SRC, /if \(mode === "fast" && String\(pre\.details\?\.verdict\) === "PASS" && !controller\.signal\.aborted &&\s*!testsRan\(stateForRepo\(root\)\.precommit\.testScope\)\) \{\s*pre = await callTool\("run_precommit", \{ mode: "full"/,
+    "a fast lane that ran no tests escalates to full — otherwise an unnarrowable project could never record a READY");
   assert.match(LANE_SRC, /async function runFullLane\([^)]*\)[^{]*\{\s*await waitForQuietLane\(root\);\s*await startPrecommitBeside\(root, ctx, "full"\)\.settled;/,
     "the full run reuses the one lane slot");
   const done = readFileSync(join(ROOT, "lib", "declare-done-tool.ts"), "utf8");
@@ -6818,7 +6821,7 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   assert.doesNotMatch(lane, /lastFullPassTree\s*=\s*outcome\.fingerprint/,
     "the post-run fingerprint must never become the record");
   // The rule itself is pure and lives in one place.
-  assert.match(LANE_SRC, /^import \{ nextFullPassTree, nextReviewRoundNumber \} from "\.\/gate-state-transitions\.ts";/m,
+  assert.match(LANE_SRC, /^import \{ nextFullPassTree, nextReviewRoundNumber, testsRan \} from "\.\/gate-state-transitions\.ts";/m,
     "one imported rule, not a second copy of the branches here");
   // AND THE THIRD INPUT: what the lane COVERED has to reach the rule.
   // The first attempt read it off the tool's reply (`pre.details?.testScope`)
