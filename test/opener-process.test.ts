@@ -19,6 +19,19 @@ import {
   type ProcessProbe,
 } from "../lib/opener-process.ts";
 
+test("a failed ps probe is not cached — the next pane asks again; a success is", async () => {
+  // A fresh process: the identity cache is module state.
+  const { spawnSync } = await import("node:child_process");
+  const mod = join(import.meta.dirname, "..", "lib", "opener-process.ts");
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    const { ownProcessIdentity } = await import(${JSON.stringify(mod)});
+    const out = [ownProcessIdentity(() => undefined), ownProcessIdentity(() => "T1"), ownProcessIdentity(() => undefined)];
+    console.log(JSON.stringify(out.map((x) => x?.started ?? null)));
+  `], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), [null, "T1", "T1"]);
+});
+
 const OPENER: ProcessIdentity = { pid: 4242, started: "Mon Sep 28 10:00:00 2026" };
 const SUCCESSOR: ProcessIdentity = { pid: 5151, started: "Tue Sep 29 09:00:00 2026" };
 

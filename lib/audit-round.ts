@@ -66,6 +66,7 @@
 import type { AuditRoundSpec, PendingAudit } from "./audit-round-specs.ts";
 import { settleAuditRound, type SettleAuditRoundDeps } from "./audit-round-settle.ts";
 import { existingStreamPath } from "./review-stream.ts";
+import { raceAbort } from "./abort-race.ts";
 import type { ReportConclusion } from "./channel-projection.ts";
 
 /* ─────────────────────────── the synchronous round ───────────────────────── */
@@ -122,6 +123,28 @@ export function oneAtATime<A extends unknown[], R>(fn: (...args: A) => Promise<R
     const turn = chain.then(() => fn(...args));
     chain = turn.catch(() => undefined);
     return turn;
+  };
+}
+
+/**
+ * THE ARBITER QUEUE (2026-09-29): one round at a time (`oneAtATime`), and a
+ * caller's budget and abort signal count from the moment it JOINS the queue —
+ * a caller that gave up (ESC, the user answered the box) leaves at once and is
+ * never dispatched, and one that waited out its budget in line is not either.
+ */
+export function arbiterQueue<A extends unknown[]>(
+  run: (budgetMs: number, signal: AbortSignal | undefined, ...args: A) => Promise<VerdictRoundOutcome>,
+  now: () => number = Date.now,
+): (budgetMs: number, signal: AbortSignal | undefined, ...args: A) => Promise<VerdictRoundOutcome> {
+  const queued = oneAtATime((deadline: number, signal: AbortSignal | undefined, ...args: A) => {
+    if (signal?.aborted) return Promise.resolve<VerdictRoundOutcome>({ ok: false, text: "排队时已被取消，没有派出" });
+    const left = deadline - now();
+    if (left <= 0) return Promise.resolve<VerdictRoundOutcome>({ ok: false, text: "排队等满了预算，没有派出" });
+    return run(left, signal, ...args);
+  });
+  return (budgetMs, signal, ...args) => {
+    const turn = queued(now() + budgetMs, signal, ...args);
+    return signal === undefined ? turn : raceAbort(turn, signal, { ok: false, text: "已取消" });
   };
 }
 

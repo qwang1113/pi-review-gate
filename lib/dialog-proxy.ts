@@ -27,7 +27,7 @@ export interface DialogProxyDeps {
   /** Where this session's own transcript lives, when it can be found. */
   ownTranscriptPath(): string | undefined;
   /** One arbiter round in its own window (lib/audit-round-host.ts `runArbiterRound`). */
-  runArbiterRound(root: string, task: string, budgetMs: number): Promise<VerdictRoundOutcome>;
+  runArbiterRound(root: string, task: string, budgetMs: number, signal?: AbortSignal): Promise<VerdictRoundOutcome>;
   /**
    * Is THIS session a judge or worker window? Those are windows the gate
    * opened for somebody else; they do not open an arbiter window of their own
@@ -37,7 +37,8 @@ export interface DialogProxyDeps {
 }
 
 export interface DialogProxy {
-  answerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyAttempt>;
+  /** `signal` fires when the user answers first — the round is abandoned. */
+  answerFor(spec: ChoiceSpec, body: string | undefined, root: string, signal?: AbortSignal): Promise<ProxyAttempt>;
   record(spec: ChoiceSpec, choice: string, byProxy: { rationale: string; at: string }, root: string): void;
   /** Every proxy decision of this session, across every repo it touched. */
   all(): NonNullable<GateState["proxyDecisions"]>;
@@ -57,7 +58,7 @@ export function createDialogProxy(host: SessionHost, deps: DialogProxyDeps): Dia
    * loaded. The prompt carries a TRANSCRIPT POINTER, not the transcript — the
    * choice `lib/adviser-brief.ts` makes too (a session log dwarfs the question).
    */
-  async function proxyAnswerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyAttempt> {
+  async function proxyAnswerFor(spec: ChoiceSpec, body: string | undefined, root: string, signal?: AbortSignal): Promise<ProxyAttempt> {
     if (deps.isDispatchedWindow()) {
       return { failure: "这是门禁派出的 judge / worker 窗口 —— 它不再嵌套派 arbiter 代答" };
     }
@@ -86,6 +87,7 @@ export function createDialogProxy(host: SessionHost, deps: DialogProxyDeps): Dia
         root,
         arbiterTask(PROXY_SYSTEM_PROMPT, prompt, PROXY_CONCLUDE),
         ARBITER_BUDGETS.proxyMs,
+        signal,
       ));
     } catch (err) {
       return { failure: String(err).slice(0, 200) };

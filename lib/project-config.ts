@@ -53,7 +53,7 @@ export const MAX_MAX_ROUNDS = 50;
 export interface LlmGuardsConfig {
   /** Guard #2: commit-message AI-attribution semantic check. */
   aiAttribution: boolean;
-  /** L5/L6 blind spot: romanized non-English detection in commit/PR text. */
+  /** L5 blind spot: romanized non-English detection in commit/PR text. */
   englishCheck: boolean;
   /** Guard #4: additional ship-command layer for suspicious bash commands. */
   shipDetect: boolean;

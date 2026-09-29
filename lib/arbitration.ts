@@ -168,7 +168,7 @@ export function arbiterTask(instructions: string, question: string, howToConclud
     question,
     "",
     "== HOW TO ANSWER IN THIS WINDOW (overrides any reply format above) ==",
-    "Do not answer in chat. Call `judge_conclude` exactly once, with `cwd` set to what `pwd` prints:",
+    "Do not answer in chat. Call `judge_conclude` exactly once, with `cwd` set to the path your system prompt names:",
     howToConclude,
   ].join("\n");
 }

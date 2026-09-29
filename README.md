@@ -76,10 +76,10 @@ The `arbiter` role (its model chain is `agents.arbiter`) gives **three guards** 
 |---|---|---|
 | Gate-mode classification (session start) | the rule engine (`lib/task-mode.ts`) alone | **nothing — deliberately.** The mode is the agent's own `set_gate_mode` pick; the engine's tighten-only asymmetry bounds it (a first `normal` still needs the user's dialog, `source: "auto"` keeps the git hooks enforced). Temp dirs are not clamped: a `/tmp` session with trivial work is only nudged toward `normal`. |
 | AI attribution (`llmGuards.aiAttribution`) | `COMMIT_MSG_FORBIDDEN` regexes | Paraphrases: “pair-programmed with an assistant”, “drafted by a language model” |
-| English check L5/L6 (`llmGuards.englishCheck`) | Unicode non-Latin-script detection | The romanization blind spot: pure-Latin pinyin/romaji commit messages, PR text, and test labels |
+| English check L5 (`llmGuards.englishCheck`) | Unicode non-Latin-script detection | The romanization blind spot: pure-Latin pinyin/romaji commit messages and PR text (test labels are deterministic only since 2026-09-29) |
 | Ship detect (`llmGuards.shipDetect`) | ~static shell parser (`lib/ship-detect.ts`) | Suspicious git/gh commands with dynamic constructs (base64-piped shells, inline-defined aliases) the static parser cannot resolve — a positive answer *adds* a detection; “none” changes nothing |
 
-The L6 test-label check also moves **left**: the same lexer the git hook uses now runs at *edit time* in the extension (immediate feedback + the semantic layer), while the zero-dependency hook remains the deterministic backstop at commit time — hooks never call an LLM, so offline commits behave exactly as before. Edit-time scanning works on the **full projected post-edit file** (`lib/edit-projection.ts`): the current file content with every `oldText→newText` applied — so an edit that replaces only a label *string* still exposes the surrounding `it(...)` call to the lexer, and a fragment that cannot be applied is still appended and scanned rather than skipped.
+The L6 test-label check also moves **left**: the same lexer the git hook uses now runs at *edit time* in the extension (immediate feedback, no model call), while the zero-dependency hook remains the deterministic backstop at commit time — hooks never call an LLM, so offline commits behave exactly as before. Edit-time scanning works on the **full projected post-edit file** (`lib/edit-projection.ts`): the current file content with every `oldText→newText` applied — so an edit that replaces only a label *string* still exposes the surrounding `it(...)` call to the lexer, and a fragment that cannot be applied is still appended and scanned rather than skipped.
 
 **Every model decision in the gate opens the same way** (2026-09-29): as a judge window with a deterministic session id, its answer returned as a structured `judge_conclude` report, its model picked from the role's slots with the judges' own fallback. The classifier is one arbiter round: READY = clear, BLOCKED + a finding = violation; the arbiter window has read-only file tools and its conclusion tool only (no shell, no edits, no `ask_user`), so a prompt-injected classification can at worst flip one answer. The same round serves the appeals of `request_arbitration` and the stand-in for a dialog nobody answered (its wait is `userProxy.waitMinutes`, default 5, and every box takes part — authorization questions and the stage checklist included). The old one-shot `pi -p --no-extensions` side process is gone: it dropped the provider's auth extension and tried a single model.
 
@@ -1931,10 +1931,12 @@ Test descriptions must be **English** too. Enforced at the `pre-commit` hook
 (L3) layer by `scripts/scan-test-labels.cjs`, which scans the **staged** content
 of test files (`*.test.*`, `*.spec.*`, or under `__tests__/`, JS/TS only) for
 `it(…)` / `test(…)` / `describe(…)` (incl. `.only`/`.skip` chains) whose
-string-literal description contains **any non-Latin letter**. Same hard rule as
-L5 (`lib/lang-detect.ts`, mirrored in the CJS scanner because a git hook runs
-that file with plain node), so diacritics, emoji and digits pass while any
-CJK/Kana/Hangul/Cyrillic letter is blocked.
+string-literal description is **more than 80% non-Latin letters** (2026-09-29;
+L5's commit/PR rule stays "any non-Latin letter"). Only labels the change **adds
+or modifies** count: the hook compares against `HEAD`, the edit-time check
+against the file before the edit, so existing labels are never re-litigated.
+Diacritics, emoji and digits are not counted. A misjudged label is appealed
+with `request_arbitration`.
 
 When a test description legitimately must be non-English, exempt it with a
 bypass marker — recognized **only in `//` line comments**:
@@ -2055,7 +2057,7 @@ second line of defence.
 | Layer | Cost | Notes |
 |---|---|---|
 | Per-turn prompt fingerprint | ~65 ms (56 files) / ~575 ms (9k files) | Skipped entirely when the session tracks no change; otherwise memoized behind `advisoryChangeToken()` (~10 ms / ~47 ms) |
-| Edit-time L6 label check | ~45 ms + one ~2 s model call | The model call is memoized per label set |
+| Edit-time L6 label check | ~45 ms | Deterministic; no model call |
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
 | `run_precommit --mode full` (this repo) | ~30 s | Suite is process-spawn bound: ~2万 fork/exec per full run; the race regressions are 4 parallel files (~8s each). Wall sits at the machine's spawn throughput (concurrency 13/24 both ~30s) — a spawn-cut would need test-infrastructure work |

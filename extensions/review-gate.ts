@@ -841,7 +841,9 @@ export default function reviewGate(pi: ExtensionAPI) {
   // EVERY MODEL DECISION OUTSIDE THE REVIEW LOOP IS AN ARBITER ROUND in its own
   // window (2026-09-29, user decision): appeals, the user proxy, the L5 guards.
   // Bound late — the audit-round host is created further down.
-  const arbiterRound = (task: string, budgetMs: number) => runArbiterRound(host.repos().primary, task, budgetMs);
+  // The agent's own abort signal rides along: ESC ends a queued or running round.
+  const arbiterRound = (task: string, budgetMs: number) =>
+    runArbiterRound(host.repos().primary, task, budgetMs, undefined, (host.ctx() as { signal?: AbortSignal } | undefined)?.signal);
   // A judge / worker window is somebody else's dispatch. The ROUTINE model
   // calls — an L5 guard on every bash, a dialog stand-in — never open a nested
   // arbiter window from it (its guards fall back to the deterministic checks).
@@ -893,7 +895,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   const dialogProxy = createDialogProxy(host, {
     resolveArbiterModel: () => resolveArbiterModel(),
     ownTranscriptPath: () => handoff.ownTranscriptPath(),
-    runArbiterRound: (root, task, budgetMs) => runArbiterRound(root, task, budgetMs),
+    runArbiterRound: (root, task, budgetMs, signal) => runArbiterRound(root, task, budgetMs, undefined, signal),
     isDispatchedWindow,
   });
   const { askChoice, askMultiChoice, dialogsOnScreen } = createGateDialogs(host, {
@@ -904,11 +906,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   // ---------- L6 (edit time) + the arbitration I/O they share a quota with ----------
-  const { editedTestContent, checkTestLabels, llmNotice } = createEditTimeChecks(host, {
-    projectConfig: () => cells.projectConfig,
-    classifier,
-    refuseText,
-  });
+  const { editedTestContent, checkTestLabels, llmNotice } = createEditTimeChecks(host, { refuseText });
   const arbitration = createArbitrationHost(host, {
     projectConfig: () => cells.projectConfig,
     appealsUsed,
@@ -941,12 +939,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     sensitiveDeclined: (absPath) => cells.sensitiveDeclinedPaths.has(absPath),
     nearestExistingDir,
     loopGoalEditBlockFor,
-    checkTestLabels: (path, input, ctx) => checkTestLabels(
-      path,
-      editedTestContent(input, path),
-      ctx,
-      llmNotice(ctx),
-    ),
+    checkTestLabels: (path, input, ctx) => checkTestLabels(path, editedTestContent(input, path), ctx),
     markSessionEdited: () => { cells.sessionEdited = true; },
     bypassActive: () => cells.state.bypass.active,
     projectConfig: () => cells.projectConfig,

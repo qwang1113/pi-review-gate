@@ -5,12 +5,13 @@
  * Enforces: the description string of a JS/TS test (`it(...)`, `test(...)`,
  * `describe(...)`, incl. `.only`/`.skip` chains) must be English, unless an
  * explicit bypass marker exempts it. Run by hooks/pre-commit over STAGED
- * content so it checks exactly what is about to be committed.
+ * content so it checks exactly what is about to be committed — and only the
+ * labels that are NEW or CHANGED against HEAD.
  *
- * Non-English detection mirrors lib/lang-detect.ts — keep them in sync: a
- * label is flagged when it contains ANY non-Latin letter (CJK/Kana/Hangul/
- * Cyrillic/…). Latin-with-diacritics (café), digits, punctuation, URLs and
- * emoji all pass.
+ * A label is flagged when more than 80% of its letters are non-Latin
+ * (CJK/Kana/Hangul/Cyrillic/…); see `isNonEnglishText`. Latin-with-diacritics
+ * (café), digits, punctuation, URLs and emoji are not letters that count
+ * against it.
  *
  * We do NOT regex raw source (that false-positives on comments, embedded
  * strings, `foo . it(...)`, and `it(` inside a regex literal). Instead a tiny
@@ -74,12 +75,23 @@ function isTestFile(p) {
 // This file is CJS with no Pi dependency (the git hook runs it with plain
 // node), so the rule is duplicated here rather than imported — keep the two
 // in sync.
+//
+// THE LABEL RULE IS A RATIO (2026-09-29, user decision): a label is
+// non-English when MORE THAN 80% of its letters are non-Latin. A label that
+// names one CJK identifier inside English prose passes; a misjudged one is
+// appealed through `request_arbitration`. (Commit/PR text keeps
+// lib/lang-detect.ts's any-non-Latin-letter rule.)
+const NON_ENGLISH_RATIO = 0.8;
 function isNonEnglishText(text) {
   if (!text) return false;
+  let letters = 0;
+  let nonLatin = 0;
   for (const ch of text.normalize("NFC")) {
-    if (/\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch)) return true;
+    if (!/\p{L}/u.test(ch)) continue;
+    letters++;
+    if (!/\p{Script=Latin}/u.test(ch)) nonLatin++;
   }
-  return false;
+  return letters > 0 && nonLatin / letters > NON_ENGLISH_RATIO;
 }
 
 // ---- bypass markers ----------------------------------------------------------
@@ -469,17 +481,35 @@ function firstArgString(src, tokens, tokenByStart, from) {
   return tok && tok.kind === "string" ? tok : null;
 }
 
+/** Every static test label in `src`, exempt or not — the "already there" set. */
+function labelsOf(src) {
+  const labels = new Set();
+  const tokens = lex(src);
+  const mask = maskOf(src, tokens);
+  const tokenByStart = new Map();
+  for (const t of tokens) tokenByStart.set(t.start, t);
+  const headRe = buildTestHeadRegex(src);
+  let m;
+  headRe.lastIndex = 0;
+  while ((m = headRe.exec(src)) !== null) {
+    if (mask[m.index] || isMemberAccess(src, m.index)) continue;
+    const arg = firstArgString(src, tokens, tokenByStart, m.index + m[0].length);
+    if (arg && !arg.dynamic) labels.add(arg.value);
+  }
+  return labels;
+}
+
 /**
- * Full analysis of one file: deterministic violations (non-Latin labels, for
- * the pre-commit hook) AND the non-exempt static labels that PASSED the
- * Unicode check (`latinLabels`) — the extension feeds those to the LLM
- * english-check layer, which catches romanized non-English (pinyin/romaji)
- * that Unicode script detection cannot see. Exempt markers apply to both.
+ * Deterministic violations of one file. With `baseSrc` (the file before this
+ * edit / at HEAD) only labels that are NEW or CHANGED count — what was already
+ * in the file is not this change's business (2026-09-29, user decision).
+ * ponytail: matched by label text, so copying an existing label verbatim
+ * passes; track call identity if that ever matters.
  */
-function analyzeFile(path, src) {
+function analyzeFile(path, src, baseSrc) {
   const violations = [];
-  const latinLabels = [];
-  const result = { violations, latinLabels };
+  const result = { violations };
+  const existing = baseSrc === undefined ? new Set() : labelsOf(baseSrc);
   const tokens = lex(src);
   const mask = maskOf(src, tokens);
   const starts = lineStarts(src);
@@ -542,16 +572,15 @@ function analyzeFile(path, src) {
   }
 
   for (const c of calls) {
-    if (c.exempt) continue;
-    if (c.violation) violations.push({ path, line: c.line, label: c.label });
-    else if (c.label) latinLabels.push({ path, line: c.line, label: c.label });
+    if (c.exempt || !c.violation || existing.has(c.label)) continue;
+    violations.push({ path, line: c.line, label: c.label });
   }
   return result;
 }
 
-/** Hook-facing wrapper — exact historical behavior (violations only). */
-function scanFile(path, src) {
-  return analyzeFile(path, src).violations;
+/** Hook-facing wrapper (violations only). */
+function scanFile(path, src, baseSrc) {
+  return analyzeFile(path, src, baseSrc).violations;
 }
 
 // ---- staged I/O --------------------------------------------------------------
@@ -564,6 +593,17 @@ function gitShowStaged(path, repo) {
     cwd: repo, encoding: "utf8", timeout: 10_000,
     maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"],
   });
+}
+/** The file at HEAD, or undefined (new file, rename source unknown, no HEAD yet). */
+function gitShowHead(path, repo) {
+  try {
+    return execFileSync("git", ["show", `HEAD:${path}`], {
+      cwd: repo, encoding: "utf8", timeout: 10_000,
+      maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return undefined;
+  }
 }
 function stagedTestFiles(repo) {
   // `-z` gives NUL-separated, UNQUOTED paths (default output C-quotes non-ASCII
@@ -611,7 +651,7 @@ function main(repo = REPO) {
       console.error(`[review-gate] cannot read staged content of ${f} — failing closed.`);
       process.exit(1);
     }
-    all.push(...scanFile(f, src));
+    all.push(...scanFile(f, src, gitShowHead(f, repo)));
   }
 
   if (all.length === 0) process.exit(0);
@@ -632,4 +672,4 @@ function main(repo = REPO) {
 // the analysis functions AND the entry — zero behavior change for the hook.
 if (require.main === module) main();
 
-module.exports = { scanFile, analyzeFile, isTestFile, isNonEnglishText, testImportAliases, main };
+module.exports = { scanFile, analyzeFile, labelsOf, isTestFile, isNonEnglishText, testImportAliases, main };

@@ -158,14 +158,17 @@ test("the human wins even while the proxy is running — its answer is discarded
     direct: human.promise,
     options: ROWS,
     schedule: clock.schedule,
-    startProxy: () => proxy.promise,
+    startProxy: (signal) => { proxySignal = signal; return proxy.promise; },
   });
+  let proxySignal: AbortSignal | undefined;
 
   clock.fire();                       // the proxy starts…
+  assert.equal(proxySignal?.aborted, false);
   human.resolve(ROWS[1]!);            // …and the user answers anyway
   const outcome = await raced;
   assert.equal(outcome.answer, ROWS[1]);
   assert.equal(outcome.byProxy, undefined, "the user's word outranks a stand-in");
+  assert.equal(proxySignal?.aborted, true, "the abandoned stand-in round is told to stop");
 
   proxy.resolve(picks(ROWS[0]!, "late"));   // must not throw, must not win
   await new Promise((r) => setImmediate(r));

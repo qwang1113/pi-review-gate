@@ -3896,13 +3896,13 @@ test("STREAMING: the LLM guards announce themselves only when slow, on the statu
   // A `tool_call` hook has no onUpdate at all (that is a tool's channel), so
   // the six guard calls use the status line — and only past the threshold,
   // or a 200ms round-trip would narrate itself.
-  // Four of the five guards live in the L1 bash arm now; the L6 label one is
-  // still the extension's (checkTestLabels).
+  // All four live in the L1 bash arm (the L6 label check runs no model since
+  // 2026-09-29).
   const guardSrc = SRC + "\n" + SHIP_BASH_SRC + "\n" + EDIT_CHECKS_SRC;
   const guarded = guardSrc.match(/await withSlowNotice\(/g) ?? [];
-  assert.ok(guarded.length >= 5, `every LLM guard call must be wrapped (found ${guarded.length})`);
+  assert.ok(guarded.length >= 4, `every LLM guard call must be wrapped (found ${guarded.length})`);
+  assert.doesNotMatch(EDIT_CHECKS_SRC, /classifyNonEnglish|deps\.classifier/, "the edit-time label check calls no model");
   for (const call of [
-    /classifyNonEnglish\(deps\.classifier\(\), labels\)/,
     /classifyShipCommand\(deps\.classifier\(\), command\)/,
     /classifyAiAttribution\(deps\.classifier\(\), msgs\)/,
     /classifyNonEnglish\(deps\.classifier\(\), msgs\)/,
@@ -4419,12 +4419,9 @@ test("LLM guards: deterministic checks precede every LLM call (tighten-only orde
   const semanticPr = SHIP_BASH_SRC.indexOf("classifyNonEnglish(deps.classifier(), prTexts)");
   assert.ok(unicodePr > 0 && semanticPr > unicodePr,
     "Unicode script check must precede classifyNonEnglish in the PR branch");
-  // L6: the deterministic violations check must precede the semantic layer
-  // inside checkTestLabels.
-  const l6Deterministic = EDIT_CHECKS_SRC.indexOf("res.violations.length > 0");
-  const l6Semantic = EDIT_CHECKS_SRC.indexOf("classifyNonEnglish(deps.classifier(), labels)");
-  assert.ok(l6Deterministic > 0 && l6Semantic > l6Deterministic,
-    "deterministic L6 violations must precede the semantic label check");
+  // L6 has no semantic layer since 2026-09-29: it judges only the labels an
+  // edit adds or changes, against the file as it was before the edit.
+  assert.match(EDIT_CHECKS_SRC, /analyze\(path, content, currentContent\(path\)\)/);
 
   // Guard #4: the ship LLM layer only runs inside the ships.length === 0
   // branch (it can only ADD detections, never lift one).
@@ -4438,12 +4435,11 @@ test("LLM guards: deterministic checks precede every LLM call (tighten-only orde
 });
 
 test("LLM guards: every call site is gated on its llmGuards config flag", () => {
-  // The three ship-path guards read the config in the L1 bash arm; the L6
-  // label guard reads it in the extension's checkTestLabels.
+  // The three ship-path guards read the config in the L1 bash arm.
   assert.match(SHIP_BASH_SRC, /projectConfig\.llmGuards\.aiAttribution/);
   assert.match(SHIP_BASH_SRC, /projectConfig\.llmGuards\.englishCheck/);
   assert.match(SHIP_BASH_SRC, /projectConfig\.llmGuards\.shipDetect/);
-  assert.match(EDIT_CHECKS_SRC, /projectConfig\(\)\.llmGuards\.englishCheck/);
+
 });
 
 test("L6 edit-time check scans the FULL projected file, not newText fragments", () => {

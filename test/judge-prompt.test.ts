@@ -97,6 +97,22 @@ test("buildJudgeSystemPrompt = role body + shared protocol", () => {
   }
 });
 
+test("the arbiter gets its own protocol — no shell steps it cannot run, and its cwd named", () => {
+  const dir = sandbox();
+  try {
+    const repo = join(dir, "repo");
+    mkdirSync(join(repo, "agents"), { recursive: true });
+    writeRole(join(repo, "agents"), "arbiter", "ARBITER_BODY");
+    const prompt = buildJudgeSystemPrompt(repo, "arbiter", join(dir, "home"));
+    assert.ok(prompt.startsWith("ARBITER_BODY"));
+    assert.ok(!prompt.includes(JUDGE_COMMON_PROTOCOL), "the shared judge protocol (git show, pwd, >>) is not handed to it");
+    assert.ok(prompt.includes(`\`cwd\` 填 \`${repo}\``));
+    assert.doesNotMatch(prompt, /pwd/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("F5 pin: embedded protocol keeps every rule of docs/judge-protocol.md", () => {
   const doc = readFileSync(join(process.cwd(), "docs", "judge-protocol.md"), "utf8");
   // Bullet-BLOCK comparison — the round-1 divergence was a dropped BULLET,

@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { oneAtATime, runVerdictRound } from "../lib/audit-round.ts";
+import { arbiterQueue, oneAtATime, runVerdictRound } from "../lib/audit-round.ts";
 import { settleAuditRound, type AuditRoundEntry, type SettleAuditRoundDeps } from "../lib/audit-round-settle.ts";
 import { ARBITER_ROUND_SPEC, specForRound, type PendingAudit } from "../lib/audit-round-specs.ts";
 import type { ChannelRecord, ChannelReportRecord } from "../lib/channel-records.ts";
@@ -38,7 +38,32 @@ test("arbiter rounds run one at a time — a second caller never interrupts the 
   assert.equal(await c, "c", "a failed call does not stall the queue");
   assert.deepEqual(log, ["start a", "end a", "start b", "start c", "end c"]);
   const src = readFileSync(join(import.meta.dirname, "..", "lib", "audit-round-host.ts"), "utf8");
-  assert.match(src, /const runArbiterRound = oneAtATime\(/, "the shared arbiter entry is queued");
+  assert.match(src, /const arbiterRounds = arbiterQueue\(/, "the shared arbiter entry is queued");
+});
+
+test("a queued arbiter caller that gave up leaves at once, and its budget counts from joining the line", async () => {
+  let clock = 0;
+  const dispatched: Array<{ name: string; budget: number }> = [];
+  let release!: () => void;
+  const first = new Promise<void>((r) => { release = r; });
+  const run = arbiterQueue(async (budgetMs, _signal, name: string) => {
+    dispatched.push({ name, budget: budgetMs });
+    if (name === "slow") { await first; clock += 90_000; }
+    return { ok: true as const, concluded: { verdict: "READY" } as never, notes: name };
+  }, () => clock);
+  const slow = run(120_000, undefined, "slow");
+  const esc = new AbortController();
+  const cancelled = run(120_000, esc.signal, "cancelled");
+  const late = run(60_000, undefined, "late");
+  const fits = run(120_000, undefined, "fits");
+  esc.abort();
+  assert.deepEqual(await cancelled, { ok: false, text: "已取消" }, "ESC ends the wait immediately");
+  release();
+  await slow;
+  assert.equal((await late).ok, false, "60s budget spent waiting 90s in line ⇒ never dispatched");
+  assert.equal((await fits).ok, true);
+  assert.deepEqual(dispatched, [{ name: "slow", budget: 120_000 }, { name: "fits", budget: 30_000 }],
+    "the cancelled caller is never dispatched; the next gets only what is left of its budget");
 });
 
 test("a judge / worker window runs no routine arbiter rounds — but its appeals still reach the arbiter", () => {

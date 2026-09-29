@@ -456,7 +456,7 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
       // out, and an unattended session then sat on them for good.
       options: spec.options,
       ...(spec.defaultChecked === undefined ? {} : { multiple: true }),
-      startProxy: () => deps.proxy.answerFor(spec, opts.body, dialogRoot),
+      startProxy: (signal) => deps.proxy.answerFor(spec, opts.body, dialogRoot, signal),
       timeoutMs: deps.proxyWaitMs(),
     });
     // Whatever settled it, the box is done — see `settledBy` above.

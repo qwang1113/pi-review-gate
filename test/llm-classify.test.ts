@@ -5,7 +5,6 @@ import {
   classifyAiAttribution,
   classifyNonEnglish,
   classifyShipCommand,
-  createVerdictMemo,
   guardAnswerOf,
   isSuspiciousShipCandidate,
 } from "../lib/llm-classify.ts";
@@ -186,49 +185,3 @@ test("SECURITY: no gate-mode classifier is exported from the guard layer", async
   }
 });
 
-// ---------------------------------------------------------------------------
-// createVerdictMemo — caches the edit-time L6 label verdict.
-
-test("verdict memo returns the same answer for an identical label set", () => {
-  const memo = createVerdictMemo();
-  const key = memo.key(["counts widgets", "rejects empty input"]);
-  assert.equal(memo.get(key), undefined, "cold cache must miss");
-  memo.remember(key, false);
-  assert.equal(memo.get(key), false);
-  assert.equal(memo.get(memo.key(["counts widgets", "rejects empty input"])), false);
-});
-
-test("any change to the label set misses the memo (added, edited, reordered)", () => {
-  const memo = createVerdictMemo();
-  const base = ["counts widgets", "rejects empty input"];
-  memo.remember(memo.key(base), false);
-  for (const variant of [
-    [...base, "zhengque de jieguo"],
-    ["counts widgets", "rejects empty inputs"],
-    [base[1], base[0]],
-    ["counts widgets"],
-  ]) {
-    assert.equal(memo.get(memo.key(variant)), undefined, variant.join("|"));
-  }
-});
-
-test("a FAILED classification (undefined) is never remembered", () => {
-  const memo = createVerdictMemo();
-  const key = memo.key(["zhengque de jieguo"]);
-  memo.remember(key, undefined);
-  assert.equal(memo.size, 0);
-  assert.equal(memo.get(key), undefined);
-  memo.remember(key, true);
-  assert.equal(memo.get(key), true);
-});
-
-test("memo is bounded — it cannot grow without limit in a long session", () => {
-  const memo = createVerdictMemo(4);
-  for (let i = 0; i < 20; i++) memo.remember(memo.key([`label ${i}`]), false);
-  assert.ok(memo.size <= 4, `size ${memo.size} must stay within the bound`);
-});
-
-test("labels containing the join separator cannot forge another key", () => {
-  const memo = createVerdictMemo();
-  assert.notEqual(memo.key(["a", "b"]), memo.key(["a\u0000b"]));
-});

@@ -66,14 +66,18 @@ export const probeProcessStart: ProcessProbe = (pid) => {
   }
 };
 
-let ownIdentity: ProcessIdentity | null | undefined;
-/** This process's identity, measured once; `undefined` when `ps` cannot say. */
+let ownIdentity: ProcessIdentity | undefined;
+/**
+ * This process's identity; `undefined` when `ps` cannot say. Only a SUCCESS is
+ * cached: one transient `ps` failure must not leave every later pane unbound
+ * (quality P2, 2026-09-29) — the next pane asks again.
+ */
 export function ownProcessIdentity(probe: ProcessProbe = probeProcessStart): ProcessIdentity | undefined {
   if (ownIdentity === undefined) {
     const started = probe(process.pid);
-    ownIdentity = started ? { pid: process.pid, started } : null;
+    if (started) ownIdentity = { pid: process.pid, started };
   }
-  return ownIdentity ?? undefined;
+  return ownIdentity;
 }
 
 /** The env a pane is opened with so it can watch THIS process. Empty when the identity is unknown. */

@@ -29,7 +29,7 @@ import { formatGoalAuditRefusal, goalPrereviewPassed, goalTextHash } from "./loo
 import { formatPlanAuditRefusal } from "./orchestrator-plan-audit.ts";
 import type { ToolUpdate } from "./progress-stream.ts";
 import { buildStreamDirective } from "./review-stream.ts";
-import { oneAtATime, runVerdictRound, type VerdictRoundOutcome } from "./audit-round.ts";
+import { arbiterQueue, runVerdictRound, type VerdictRoundOutcome } from "./audit-round.ts";
 import { ARBITER_ROUND_SPEC } from "./audit-round-specs.ts";
 import { AUDIT_SELF_WAIT_BUDGET_MS } from "./judge-lifecycle.ts";
 import type { CallTool, GateToolResult, Ref, SessionHost } from "./session-host.ts";
@@ -329,14 +329,15 @@ export function createAuditRoundHost(
    * ONE arbiter window, and a second dispatch interrupts the first while both
    * then settle against the registry's LATEST roundSeq — so a guard's READY
    * ("no violation") could be read as an appeal's AGENT_WINS. Queued on one
-   * chain, each caller's report is its own.
+   * chain (`arbiterQueue`), each caller's report is its own, and a caller that
+   * gives up leaves the line.
    */
-  const runArbiterRound = oneAtATime((
+  const arbiterRounds = arbiterQueue((
+    budgetMs: number,
+    signal: AbortSignal | undefined,
     root: string,
     task: string,
-    budgetMs: number,
-    ctx?: unknown,
-    signal?: AbortSignal,
+    ctx: unknown,
   ): Promise<VerdictRoundOutcome> => {
     const run = auditRunDeps(ctx, undefined, signal);
     return runVerdictRound({
@@ -344,6 +345,13 @@ export function createAuditRoundHost(
       awaitRoundEnd: (r, role, budget) => awaitJudgeRoundEnd(r, role, budget, ctx ?? host.ctx(), undefined, signal),
     }, { spec: ARBITER_ROUND_SPEC, root, task, budgetMs });
   });
+  const runArbiterRound = (
+    root: string,
+    task: string,
+    budgetMs: number,
+    ctx?: unknown,
+    signal?: AbortSignal,
+  ): Promise<VerdictRoundOutcome> => arbiterRounds(budgetMs, signal, root, task, ctx);
 
   /**
    * Wait for the END of one judge round (a report), through the SAME

@@ -135,8 +135,12 @@ export async function raceWithUserProxy<T>(input: {
    * queue in front of it wants.
    */
   displayed?: Promise<void>;
-  /** Start the proxy's attempt. Called AT MOST ONCE, and only after the window. */
-  startProxy: () => Promise<ProxyAttempt>;
+  /**
+   * Start the proxy's attempt. Called AT MOST ONCE, and only after the window.
+   * The signal fires when the race is settled some other way (the user
+   * answered first), so the stand-in's round stops holding the arbiter queue.
+   */
+  startProxy: (signal: AbortSignal) => Promise<ProxyAttempt>;
   /** The rows the answer must be one of, verbatim. Empty ⇒ the proxy is not asked. */
   options: readonly string[];
   /**
@@ -162,10 +166,12 @@ export async function raceWithUserProxy<T>(input: {
   return new Promise<ProxyRaceOutcome<T>>((resolve) => {
     let settled = false;
     let timer: { cancel: () => void } | undefined;
+    const proxyStop = new AbortController();
     const finish = (outcome: ProxyRaceOutcome<T>): void => {
       if (settled) return;
       settled = true;
       timer?.cancel();
+      proxyStop.abort();
       resolve(outcome);
     };
 
@@ -192,7 +198,7 @@ export async function raceWithUserProxy<T>(input: {
           finish({ answer: undefined, proxyFailed: true });
           return;
         }
-        void input.startProxy().then(
+        void input.startProxy(proxyStop.signal).then(
           (attempt) => {
             if ("failure" in attempt) {
               finish({ answer: undefined, proxyFailed: true, proxyFailure: attempt.failure });
