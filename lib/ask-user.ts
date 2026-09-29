@@ -156,6 +156,8 @@ export interface AskAnswer {
    * one the user dismissed).
    */
   timedOut?: true;
+  /** Why the arbiter did not stand in for this one, when it was asked. */
+  proxyFailure?: string;
 }
 
 /**
@@ -569,7 +571,8 @@ export function formatAnswers(answers: AskAnswer[]): string {
         : a.kind === "deferred-to-chat"
           ? "→ 用户选择在聊天里详细回答（等他的下一条消息）"
           : a.timedOut
-            ? "→ 30 分钟无人作答，门禁没有替用户决定（用户不在，不是他关掉了对话框）"
+            ? "→ 等满设定时长无人作答，也没有代答（用户不在，不是他关掉了对话框）" +
+              (a.proxyFailure ? `。arbiter 没能代答：${a.proxyFailure}` : "")
             : "→ 没有得到回答（用户关掉了对话框，或环境没有对话框）";
       return `${head}\n${body}`;
     })
@@ -611,7 +614,7 @@ export function formatTranscriptSummary(answers: AskAnswer[]): string {
       : a.kind === "deferred-to-chat"
         ? "（转聊天回答）"
         : a.timedOut
-          ? "（30 分钟无人作答）"
+          ? "（等满设定时长无人作答）"
           : "（未作答）";
     return `${progressLabel(i, answers.length)} ${short(a.question, TRANSCRIPT_QUESTION_CHARS)} → ${outcome}`;
   });

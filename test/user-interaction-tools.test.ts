@@ -548,7 +548,7 @@ test("D39: a question nobody answered in thirty minutes is NOT reported as a clo
   const timedOut = fake({ proxyFailed: true });
   inPane(timedOut);
   const late = textOf(await call(timedOut, "ask_user", { questions: [q] }));
-  assert.match(late, /30 分钟无人作答/);
+  assert.match(late, /等满设定时长无人作答/);
   assert.doesNotMatch(late, /用户关掉了对话框，或/, "the user did not close anything");
   assert.deepEqual(timedOut.grantsMinted, [], "nobody decided, nothing is granted");
 
@@ -556,7 +556,7 @@ test("D39: a question nobody answered in thirty minutes is NOT reported as a clo
   inPane(closed);
   const dismissed = textOf(await call(closed, "ask_user", { questions: [q] }));
   assert.match(dismissed, /用户关掉了对话框/);
-  assert.doesNotMatch(dismissed, /30 分钟无人作答/);
+  assert.doesNotMatch(dismissed, /等满设定时长无人作答/);
 });
 
 test("ask_user: a grantScope question with no options is refused — free text cannot even be asked", async () => {

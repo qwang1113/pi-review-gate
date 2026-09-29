@@ -27,7 +27,7 @@
  * report closes it?" — and answering that question in a second place is
  * exactly the duplication the engine removes. It records nothing.
  */
-export type AuditKind = "goal" | "plan" | "review" | "quality" | "advice" | "acceptance";
+export type AuditKind = "goal" | "plan" | "review" | "quality" | "advice" | "acceptance" | "arbiter";
 
 /**
  * The audit a repo has DISPATCHED and not yet recorded.
@@ -286,6 +286,38 @@ export const ADVICE_ROUND_SPEC: AuditRoundSpec = {
 };
 
 /**
+ * THE ARBITER'S ROUND (2026-09-29, user decision: every place a model decides
+ * runs as a window + pi session). Appeals, the thirty-minute user proxy and the
+ * L5 semantic guards all dispatch this one spec; they differ only in the task
+ * and in how the CALLER reads the conclusion. Its report is CONSUMED by the
+ * synchronous caller (`runVerdictRound`), so the settle paths record nothing
+ * and announce nothing for it. Round-bound: the window is reused across
+ * rounds, and a late report from the previous question must never answer this one.
+ */
+/**
+ * How long a caller blocks on one arbiter round — the one place these live.
+ * An appeal and the user proxy decide one thing on max thinking; a semantic
+ * guard answers a one-word classification, and its caller falls back to the
+ * deterministic check when the round does not answer in time.
+ */
+export const ARBITER_BUDGETS = Object.freeze({
+  appealMs: 5 * 60_000,
+  proxyMs: 5 * 60_000,
+  guardMs: 2 * 60_000,
+});
+
+export const ARBITER_ROUND_SPEC: AuditRoundSpec = {
+  kind: "arbiter",
+  role: "arbiter",
+  binding: "round-bound",
+  titlePrefix: "arbiter",
+  unfinished: (detail) => `arbiter 本轮没有给出结论 —— ${detail}`,
+  notDispatched: (reason) => `arbiter 窗口没能开出来 —— ${reason}`,
+  unaddressable: () => "arbiter 已启动，但登记表里找不到它（门禁自身的缺陷）",
+  rejected: (note) => note ?? "arbiter 的 report 为空",
+};
+
+/**
  * WHICH SPEC THIS ROUND RUNS UNDER — role first, then the pending kind.
  *
  * Goal and plan audits share the `goal-auditor` role and one judge id per
@@ -299,6 +331,7 @@ export function specForRound(role: string, pendingKind?: AuditKind): AuditRoundS
   if (role === "quality-auditor") return QUALITY_ROUND_SPEC;
   if (role === "adviser") return ADVICE_ROUND_SPEC;
   if (role === "acceptance") return ACCEPTANCE_ROUND_SPEC;
+  if (role === "arbiter") return ARBITER_ROUND_SPEC;
   if (role !== "goal-auditor") return undefined;
   if (pendingKind === "goal") return GOAL_AUDIT_SPEC;
   if (pendingKind === "plan") return PLAN_AUDIT_SPEC;

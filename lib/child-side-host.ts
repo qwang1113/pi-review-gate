@@ -358,7 +358,7 @@ export function createChildSide(host: SessionHost, deps: ChildSideDeps) {
     const openerWatch = createOpenerWatch();
     childHeartbeatTimer = setInterval(() => {
       const live = host.ctx() ?? ctx;
-      if (enforceOpenerBinding(openerWatch, { stop: stopChildHeartbeat, shutdown: () => live.shutdown() })) return;
+      if (enforceOpenerBinding(openerWatch, { stop: stopChildHeartbeat, abort: () => live.abort(), shutdown: () => live.shutdown() })) return;
       try {
         reportChildState(live);
       } catch { /* a heartbeat must never break the session it reports on */ }

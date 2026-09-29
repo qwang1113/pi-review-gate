@@ -191,15 +191,20 @@ export function createOpenerWatch(
 }
 
 /**
- * One heartbeat's enforcement: opener gone ⇒ stop every clock this side owns
- * and shut pi down. True when it did.
+ * One heartbeat's enforcement: opener gone ⇒ stop every clock this side owns,
+ * ABORT the turn in flight, and shut pi down. True when it did.
+ *
+ * The abort comes first because `shutdown()` is graceful: it waits for the
+ * running turn, and a judge mid-round kept going ~75s after its opener was
+ * killed (measured, 2026-09-29) — still writing to its channel.
  */
 export function enforceOpenerBinding(
   watch: { check(): OpenerStatus | "unbound" },
-  act: { stop(): void; shutdown(): void },
+  act: { stop(): void; abort(): void; shutdown(): void },
 ): boolean {
   if (watch.check() !== "gone") return false;
   act.stop();
+  try { act.abort(); } catch { /* nothing was running */ }
   try { act.shutdown(); } catch { /* the session is already going */ }
   return true;
 }

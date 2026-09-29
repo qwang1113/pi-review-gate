@@ -11,15 +11,21 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  PROXY_ANSWER_TIMEOUT_MS,
   PROXY_SYSTEM_PROMPT,
   buildProxyPrompt,
   formatProxyDecisionReport,
-  parseProxyDecision,
+  proxyAttemptOf,
   raceWithUserProxy,
   sessionProxyDecisions,
   type ProxyScheduler,
 } from "../lib/user-proxy.ts";
+import { DEFAULT_USER_PROXY_WAIT_MS, loadProjectConfig } from "../lib/project-config.ts";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+/** A stand-in that picks `choice`. */
+const picks = (choice: string, rationale = "x") => ({ choice: { choice, rationale } });
 
 test("the completion report claims only this session's decisions and its handoff predecessor's", () => {
   const row = (at: string, sessionId?: string) => ({
@@ -78,8 +84,27 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: 
 
 const ROWS = ["A. grant it", "B. decline"];
 
-test("the window is thirty minutes", () => {
-  assert.equal(PROXY_ANSWER_TIMEOUT_MS, 30 * 60 * 1000);
+test("the window is thirty minutes unless the user set userProxy.waitMinutes", () => {
+  assert.equal(DEFAULT_USER_PROXY_WAIT_MS, 30 * 60 * 1000);
+  const root = mkdtempSync(join(tmpdir(), "rg-proxy-cfg-"));
+  mkdirSync(join(root, ".pi"), { recursive: true });
+  const home = mkdtempSync(join(tmpdir(), "rg-proxy-home-"));
+  assert.equal(loadProjectConfig(root, home).userProxyWaitMs, DEFAULT_USER_PROXY_WAIT_MS, "absent ⇒ the default");
+  writeFileSync(join(root, ".pi", "review-gate.json"), JSON.stringify({ userProxy: { waitMinutes: 5 } }));
+  assert.equal(loadProjectConfig(root, home).userProxyWaitMs, 5 * 60_000, "the user's own number");
+  writeFileSync(join(root, ".pi", "review-gate.json"), JSON.stringify({ userProxy: { waitMinutes: 0.1 } }));
+  assert.equal(loadProjectConfig(root, home).userProxyWaitMs, DEFAULT_USER_PROXY_WAIT_MS,
+    "under a minute a person could not read the box before the stand-in took it");
+});
+
+test("the stand-in's round: READY + the row on the first line of notes; anything else is a stated failure", () => {
+  const ok = (verdict: string, notes: string) => ({ ok: true as const, concluded: { verdict }, notes });
+  assert.deepEqual(proxyAttemptOf(ok("READY", "A. grant it\nthe transcript asks for it")),
+    { choice: { choice: "A. grant it", rationale: "the transcript asks for it" } });
+  assert.match(String((proxyAttemptOf(ok("NEEDS_HUMAN", "not enough context")) as { failure: string }).failure), /信息不足.*not enough context/);
+  assert.ok("failure" in proxyAttemptOf(ok("READY", "")), "READY with no row is no decision");
+  // The window's own failure (a 400, a dead pane) is carried through verbatim.
+  assert.deepEqual(proxyAttemptOf({ ok: false, text: "slot 1: 400 out of extra usage" }), { failure: "slot 1: 400 out of extra usage" });
 });
 
 test("a human answer inside the window never starts the proxy", async () => {
@@ -90,7 +115,7 @@ test("a human answer inside the window never starts the proxy", async () => {
     direct: human.promise,
     options: ROWS,
     schedule: clock.schedule,
-    startProxy: async () => { proxyCalls += 1; return { choice: ROWS[0]!, rationale: "should never run" }; },
+    startProxy: async () => { proxyCalls += 1; return picks(ROWS[0]!, "should never run"); },
   });
 
   human.resolve(ROWS[1]!);
@@ -114,10 +139,10 @@ test("the window elapsing hands the question to the proxy, whose answer is MARKE
     options: ROWS,
     schedule: clock.schedule,
     now: () => Date.parse("2026-09-19T12:00:00.000Z"),
-    startProxy: async () => ({ choice: ROWS[0]!, rationale: "the transcript shows the user asked for exactly this" }),
+    startProxy: async () => picks(ROWS[0]!, "the transcript shows the user asked for exactly this"),
   });
 
-  assert.equal(clock.windows[0]?.ms, PROXY_ANSWER_TIMEOUT_MS, "the dialog waits the whole window before asking anyone else");
+  assert.equal(clock.windows[0]?.ms, DEFAULT_USER_PROXY_WAIT_MS, "the dialog waits the whole window before asking anyone else");
   clock.fire();
   const outcome = await raced;
   assert.equal(outcome.answer, ROWS[0]);
@@ -128,7 +153,7 @@ test("the window elapsing hands the question to the proxy, whose answer is MARKE
 test("the human wins even while the proxy is running — its answer is discarded", async () => {
   const clock = manualClock();
   const human = deferred<string | undefined>();
-  const proxy = deferred<{ choice: string; rationale: string } | undefined>();
+  const proxy = deferred<ReturnType<typeof picks>>();
   const raced = raceWithUserProxy<string>({
     direct: human.promise,
     options: ROWS,
@@ -142,7 +167,7 @@ test("the human wins even while the proxy is running — its answer is discarded
   assert.equal(outcome.answer, ROWS[1]);
   assert.equal(outcome.byProxy, undefined, "the user's word outranks a stand-in");
 
-  proxy.resolve({ choice: ROWS[0]!, rationale: "late" });   // must not throw, must not win
+  proxy.resolve(picks(ROWS[0]!, "late"));   // must not throw, must not win
   await new Promise((r) => setImmediate(r));
   assert.equal(outcome.answer, ROWS[1]);
 });
@@ -155,7 +180,7 @@ test("a proxy answer that is not one of the offered rows is NO answer", async ()
       direct: human.promise,
       options: ROWS,
       schedule: clock.schedule,
-      startProxy: async () => ({ choice: choice as string, rationale: "x" }),
+      startProxy: async () => picks(choice as string),
     });
     clock.fire();
     const outcome = await raced;
@@ -174,7 +199,7 @@ test("a CHECKBOX question may be answered with SEVERAL rows — and only a check
       options: CHECKBOX,
       ...(multiple ? { multiple: true } : {}),
       schedule: clock.schedule,
-      startProxy: async () => ({ choice, rationale: "上下文里两次提到这两个环节" }),
+      startProxy: async () => picks(choice, "上下文里两次提到这两个环节"),
     });
     clock.fire();
     return raced;
@@ -203,17 +228,17 @@ test("the proxy's task text says so when the question is a CHECKBOX", () => {
   // rendered as `1. 预检`, so an example written with the DIALOG's letters
   // (`A. 甲 / C. 丙`) asked for a string `isAcceptedProxyChoice` then refuses.
   assert.doesNotMatch(checkbox, /A\. 甲 \/ C\. 丙/);
-  assert.match(checkbox, /不要写进 choice/);
+  assert.match(checkbox, /不要写进去/);
   const radio = buildProxyPrompt({ title: "选一个", options: ["是", "否"] });
   assert.doesNotMatch(radio, /多选题/);
-  assert.match(radio, /必须是其中某一条的正文/);
+  assert.match(radio, /必须写其中某一条的正文/);
 });
 
-test("a proxy that fails, throws, or declines settles as NO answer — and REPORTS that nobody decided", async () => {
-  for (const startProxy of [
-    async () => undefined,
-    async () => { throw new Error("arbiter died"); },
-  ]) {
+test("a proxy that fails, throws, or declines settles as NO answer — and REPORTS that nobody decided, and why", async () => {
+  for (const [startProxy, why] of [
+    [async () => ({ failure: "opus: 400 out of extra usage" }), /400 out of extra usage/],
+    [async () => { throw new Error("arbiter died"); }, /arbiter died/],
+  ] as const) {
     const clock = manualClock();
     const human = deferred<string | undefined>();
     const raced = raceWithUserProxy<string>({
@@ -230,6 +255,7 @@ test("a proxy that fails, throws, or declines settles as NO answer — and REPOR
     // is also what a CLOSED box returns, and those two moments owe the user
     // different things — one is answered, one still has a decision outstanding.
     assert.equal(outcome.proxyFailed, true, "a decision is still owed, and the gate must be able to say so");
+    assert.match(outcome.proxyFailure ?? "", why, "…with the reason, not a bare 'nobody decided' (2026-09-29)");
   }
 });
 
@@ -241,7 +267,7 @@ test("a dialog with no rows never asks the proxy — the window settles as unans
     direct: human.promise,
     options: [],
     schedule: clock.schedule,
-    startProxy: async () => { proxyCalls += 1; return { choice: "whatever", rationale: "x" }; },
+    startProxy: async () => { proxyCalls += 1; return picks("whatever"); },
   });
   clock.fire();
   const outcome = await raced;
@@ -286,7 +312,7 @@ test("a race that ended before the box appeared never arms a window", async () =
     displayed: shown.promise,
     options: ROWS,
     schedule: clock.schedule,
-    startProxy: async () => { proxyCalls += 1; return { choice: ROWS[0]!, rationale: "x" }; },
+    startProxy: async () => { proxyCalls += 1; return picks(ROWS[0]!); },
   });
 
   human.resolve(ROWS[1]!);
@@ -316,7 +342,7 @@ test("the window is armed when the box APPEARS, not when it was queued", async (
     displayed: shown.promise,
     options: ROWS,
     schedule: clock.schedule,
-    startProxy: async () => { proxyCalls += 1; return { choice: ROWS[0]!, rationale: "x" }; },
+    startProxy: async () => { proxyCalls += 1; return picks(ROWS[0]!); },
   });
 
   assert.equal(clock.windows.length, 0, "a queued question has no window yet");
@@ -360,18 +386,4 @@ test("the completion report names every proxy decision — and is EMPTY when the
   ]), /「q」→ c/);
 });
 
-test("parseProxyDecision takes the documented shape and nothing else", () => {
-  assert.deepEqual(parseProxyDecision('{"choice":"A. grant it","rationale":"because"}'), {
-    choice: "A. grant it",
-    rationale: "because",
-  });
-  // A fenced answer is still an answer.
-  assert.deepEqual(parseProxyDecision('```json\n{"choice":"B. decline","rationale":"no"}\n```'), {
-    choice: "B. decline",
-    rationale: "no",
-  });
-  // …and every unusable shape is a clean miss (never a guess).
-  for (const raw of [undefined, "", "   ", "null", "{}", '{"choice":""}', '{"choice":42}', "not json", "[1,2]", "42"]) {
-    assert.equal(parseProxyDecision(raw), undefined, JSON.stringify(raw));
-  }
-});
+

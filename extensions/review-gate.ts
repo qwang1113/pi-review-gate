@@ -100,7 +100,7 @@ import {
 } from "../lib/judge-session-tools.ts";
 import { doWait } from "../lib/judge-wait-tool.ts";
 import { registerJudgeSpawnTools } from "../lib/judge-spawn-tools.ts";
-import { AUDIT_SELF_WAIT_BUDGET_MS, awaitRoundReport } from "../lib/judge-lifecycle.ts";
+import { awaitRoundReport } from "../lib/judge-lifecycle.ts";
 // THE TEN ADVANCED ENTRIES ARE GONE (2026-08-30, philosophy three). FIVE of
 // them are still IMPLEMENTATIONS, registered into `internalHost` instead of
 // into `pi`: the chain calls them so the mechanical checks live in exactly one
@@ -365,10 +365,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     ctx: unknown,
     onUpdate: ToolUpdate | undefined,
     signal: AbortSignal | undefined,
+    role: string,
+    budgetMs: number,
   ) {
     return awaitRoundReport({
       wait: (timeoutMs) => {
-        const judgeId = judgeChildByRole(root, "goal-auditor")?.judgeId;
+        const judgeId = judgeChildByRole(root, role)?.judgeId;
         if (judgeId === undefined) {
           return Promise.resolve({
             content: [{ type: "text", text: "review-gate: no judge on record — submit a round first (judge_submit)." }],
@@ -389,8 +391,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       now: () => Date.now(),
       aborted: () => signal?.aborted === true,
       // THE GATE OWNS ITS OWN BUDGET (2026-09-19): an audit is not an agent
-      // wait — see `AUDIT_SELF_WAIT_BUDGET_MS`.
-      budgetMs: AUDIT_SELF_WAIT_BUDGET_MS,
+      // wait — see `AUDIT_SELF_WAIT_BUDGET_MS`; an arbiter round passes its own.
+      budgetMs,
     }) as ReturnType<typeof callTool>;
   }
 
@@ -836,18 +838,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   sessionNaming.register(pi);
   sessionMessaging.register(pi);
 
-  // LLM semantic guard layer (lib/llm-classify.ts), lazily (re)created so it
-  // always reflects the loaded projectConfig model. Tighten-only + fail-back.
-  let llmClassifier: LlmClassifier | null = null;
-  let llmClassifierModel = "";
-  function classifier(): LlmClassifier {
-    const model = cells.projectConfig.llmGuards.model;
-    if (!llmClassifier || llmClassifierModel !== model) {
-      llmClassifier = createLlmClassifier(model);
-      llmClassifierModel = model;
-    }
-    return llmClassifier;
-  }
+  // EVERY MODEL DECISION OUTSIDE THE REVIEW LOOP IS AN ARBITER ROUND in its own
+  // window (2026-09-29, user decision): appeals, the user proxy, the L5 guards.
+  // Bound late — the audit-round host is created further down.
+  const arbiterRound = (task: string, budgetMs: number) =>
+    runArbiterRound(host.repos().primary, task, budgetMs);
+  // LLM semantic guard layer (lib/llm-classify.ts). Tighten-only + fail-back.
+  const llmClassifier: LlmClassifier = createLlmClassifier(arbiterRound);
+  const classifier = (): LlmClassifier => llmClassifier;
 
   // THE BANNER CHANNEL (user decision, 2026-09-17) — POLICY in
   // lib/user-notify.ts, RUNTIME in lib/user-notify-runtime.ts; this file only
@@ -885,11 +883,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   const dialogProxy = createDialogProxy(host, {
     resolveArbiterModel: () => resolveArbiterModel(),
     ownTranscriptPath: () => handoff.ownTranscriptPath(),
+    runArbiterRound: (root, task, budgetMs) => runArbiterRound(root, task, budgetMs),
+    isDispatchedWindow: () => readJudgeSideEnv(process.env) !== undefined || readWorkerSideEnv(process.env) !== undefined,
   });
   const { askChoice, askMultiChoice, dialogsOnScreen } = createGateDialogs(host, {
     proxy: dialogProxy,
     raiseBanner: (opts) => raiseBanner(opts),
     lastUserInteractionAt: cells.lastUserInteractionAt,
+    proxyWaitMs: () => cells.projectConfig.userProxyWaitMs,
   });
 
   // ---------- L6 (edit time) + the arbitration I/O they share a quota with ----------
@@ -904,6 +905,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     spendArbitration,
     arbitrationDecisions: cells.arbitrationDecisions,
     grantInspectionPass: (pass) => { cells.inspectionPass = pass; },
+    runArbiterRound: arbiterRound,
   });
   const { computeTokenBindings, resolveArbiterModel, appendLesson } = arbitration;
 
@@ -1104,7 +1106,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     qualityRoundInFlight,
     recordReviewVerdict,
   });
-  const { auditRoundDeps, auditRunDeps, buildGoalAuditRound } = createAuditRoundHost(host, {
+  const { auditRoundDeps, auditRunDeps, buildGoalAuditRound, runArbiterRound } = createAuditRoundHost(host, {
     registry: { judgeHierarchy, setHierarchy, dropAudits, pendingAudits, persistJudgeHierarchy },
     channelIO,
     lastUiCtx: cells.lastUiCtx,

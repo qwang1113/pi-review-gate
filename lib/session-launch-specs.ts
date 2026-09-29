@@ -94,7 +94,23 @@ export interface JudgePaneCommandOpts {
   sysPromptPath: string;
   /** Resolved model spec. */
   model: string;
+  /** The judge role — it decides the tool surface (`judgeToolFlags`). */
+  role: string;
   piBin?: string;
+}
+
+/**
+ * WHAT A JUDGE ROLE MAY TOUCH. Every judge is read-only (`edit`/`write` out).
+ * The arbiter is narrower (2026-09-29): it answers appeals, the thirty-minute
+ * user proxy and the semantic guards from UNTRUSTED text, so it gets the
+ * read-only file tools and its conclusion tool, and nothing else — no bash to
+ * act on an injected instruction, and no `ask_user` (it stands in for the user;
+ * it may not ask them).
+ */
+export function judgeToolFlags(role: string): string[] {
+  return role === "arbiter"
+    ? ["--tools", "read,grep,find,ls,judge_conclude"]
+    : ["--exclude-tools", "edit,write"];
 }
 
 /** The argv a judge pane runs: interactive pi, resumed by session id. */
@@ -103,7 +119,7 @@ export function buildJudgePaneCommand(opts: JudgePaneCommandOpts): string[] {
   return [
     piBin,
     "--no-skills",
-    "--exclude-tools", "edit,write",
+    ...judgeToolFlags(opts.role),
     "--system-prompt", opts.sysPromptPath,
     "--model", opts.model,
     "--session-dir", opts.sessionDir,
@@ -118,8 +134,8 @@ export function buildJudgePaneCommand(opts: JudgePaneCommandOpts): string[] {
  * No task file: the transcript already holds every round. The opener re-drives
  * the round through its own wait/submit once the pane is back.
  */
-export function buildJudgeRecoverCommand(sessionId: string, piBin = "pi"): string[] {
-  return [piBin, "--exclude-tools", "edit,write", "--session-id", sessionId];
+export function buildJudgeRecoverCommand(sessionId: string, role: string, piBin = "pi"): string[] {
+  return [piBin, ...judgeToolFlags(role), "--session-id", sessionId];
 }
 
 /**

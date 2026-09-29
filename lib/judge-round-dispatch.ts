@@ -456,6 +456,7 @@ export function createJudgeRoundDispatch(
           sessionDir,
           sysPromptPath: files.sysPromptPath,
           model: files.model,
+          role,
         }),
         decor: judgePaneDecor(judgeId, role, paneOwnerIdentity()),
         register: (coords) => {

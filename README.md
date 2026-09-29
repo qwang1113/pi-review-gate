@@ -66,10 +66,10 @@ Handing over is **not** one of the orchestration tools: `session_handoff()` belo
 
 ### LLM semantic guard layer (DeepSeek V4 Flash)
 
-A fast, cheap model (`deepseek/deepseek-v4-flash`, configurable via `llmGuards.model`) gives **three guards** an additional **semantic layer**. It is deliberately **not** used to classify the gate mode — that decision belongs to the agent, bounded by the rule engine (see Gate modes). Design invariants, enforced by construction in `lib/llm-classify.ts`:
+The `arbiter` role (its model chain is `agents.arbiter`) gives **three guards** an additional **semantic layer**. It is deliberately **not** used to classify the gate mode — that decision belongs to the agent, bounded by the rule engine (see Gate modes). Design invariants, enforced by construction in `lib/llm-classify.ts`:
 
 1. **Tighten-only** — an LLM verdict can only *add* a block or pick the safer side of an ambiguous case. Deterministic checks run first and short-circuit; the LLM is never asked to *approve* something a deterministic check blocked.
-2. **Fail-back** — timeout (8s), spawn failure, or unparseable output degrade each guard to its exact pre-LLM deterministic behavior. No network ⇒ no regression.
+2. **Fail-back** — no answer within the guard budget (2 minutes), a window that could not open, or a conclusion other than READY / BLOCKED degrade each guard to its exact pre-LLM deterministic behavior. No network ⇒ no regression.
 3. **Injection-resistant** — classified text is wrapped in `<data>` tags as untrusted data; a hostile prompt can at worst flip one classification, which by (1)+(2) cannot open the gate.
 
 | Guard | Deterministic base | What the LLM layer adds |
@@ -81,7 +81,7 @@ A fast, cheap model (`deepseek/deepseek-v4-flash`, configurable via `llmGuards.m
 
 The L6 test-label check also moves **left**: the same lexer the git hook uses now runs at *edit time* in the extension (immediate feedback + the semantic layer), while the zero-dependency hook remains the deterministic backstop at commit time — hooks never call an LLM, so offline commits behave exactly as before. Edit-time scanning works on the **full projected post-edit file** (`lib/edit-projection.ts`): the current file content with every `oldText→newText` applied — so an edit that replaces only a label *string* still exposes the surrounding `it(...)` call to the lexer, and a fragment that cannot be applied is still appended and scanned rather than skipped.
 
-The classifier child process is **fully isolated**: `pi -p --no-session --no-extensions --no-skills --no-tools --no-context-files --no-prompt-templates`, argv-array spawn (never a shell string), stdin closed immediately, 8s timeout. No extensions means the child cannot recursively load review-gate; no tools means a prompt-injected classifier can at worst emit wrong JSON — and the verdict parse is strict (the entire stdout must be exactly the one-key JSON object; echoed data or chatty prefixes ⇒ fail-back to deterministic behavior).
+**Every model decision in the gate opens the same way** (2026-09-29): as a judge window with a deterministic session id, its answer returned as a structured `judge_conclude` report, its model picked from the role's slots with the judges' own fallback. The classifier is one arbiter round: READY = clear, BLOCKED + a finding = violation; the arbiter window has read-only file tools and its conclusion tool only (no shell, no edits, no `ask_user`), so a prompt-injected classification can at worst flip one answer. The same round serves the appeals of `request_arbitration` and the stand-in for a dialog nobody answered (its wait is `userProxy.waitMinutes`, default 30). The old one-shot `pi -p --no-extensions` side process is gone: it dropped the provider's auth extension and tried a single model.
 
 ## Architecture — the enforcement layers
 
@@ -781,8 +781,8 @@ Per-project config lives in `.pi/review-gate.json`:
   "agents": {
     "reviewer": { "auto": false, "slots": ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] }
   },
-  "llmGuards": {       // LLM semantic guard layer (all tighten-only + fail-back)
-    "model": "deepseek/deepseek-v4-flash",
+  "userProxy": { "waitMinutes": 30 },  // a dialog nobody answers: when the arbiter stands in
+  "llmGuards": {       // LLM semantic guard layer (all tighten-only + fail-back; model = agents.arbiter)
     "aiAttribution": true,
     "englishCheck": true,
     "shipDetect": true

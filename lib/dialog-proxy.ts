@@ -9,12 +9,14 @@
 import type { ChoiceSpec } from "./choice-dialog.ts";
 import {
   buildProxyPrompt,
-  parseProxyDecision,
-  PROXY_ARBITER_TIMEOUT_MS,
+  PROXY_CONCLUDE,
   PROXY_SYSTEM_PROMPT,
-  type ProxyChoice,
+  proxyAttemptOf,
+  type ProxyAttempt,
 } from "./user-proxy.ts";
-import { PROXY_ISOLATION_FLAGS, runArbiterProcess } from "./arbitration.ts";
+import { arbiterTask } from "./arbitration.ts";
+import type { VerdictRoundOutcome } from "./audit-round.ts";
+import { ARBITER_BUDGETS } from "./audit-round-specs.ts";
 import { mergeProxyDecisions } from "./gate-state-io.ts";
 import type { GateState } from "./gate-state.ts";
 import type { SessionHost } from "./session-host.ts";
@@ -24,10 +26,18 @@ export interface DialogProxyDeps {
   resolveArbiterModel(): string | undefined;
   /** Where this session's own transcript lives, when it can be found. */
   ownTranscriptPath(): string | undefined;
+  /** One arbiter round in its own window (lib/audit-round-host.ts `runArbiterRound`). */
+  runArbiterRound(root: string, task: string, budgetMs: number): Promise<VerdictRoundOutcome>;
+  /**
+   * Is THIS session a judge or worker window? Those are windows the gate
+   * opened for somebody else; they do not open an arbiter window of their own
+   * to stand in for a user who is not theirs.
+   */
+  isDispatchedWindow(): boolean;
 }
 
 export interface DialogProxy {
-  answerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyChoice | undefined>;
+  answerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyAttempt>;
   record(spec: ChoiceSpec, choice: string, byProxy: { rationale: string; at: string }, root: string): void;
   /** Every proxy decision of this session, across every repo it touched. */
   all(): NonNullable<GateState["proxyDecisions"]>;
@@ -39,18 +49,21 @@ export function createDialogProxy(host: SessionHost, deps: DialogProxyDeps): Dia
    * minutes with nobody at the terminal.
    *
    * NO ARBITER, NO PROXY: an unconfigured arbiter resolves to no model, and
-   * this returns `undefined` — which the dialog reads exactly as it reads a
-   * closed box, so a gate with no arbiter still cannot grant anything by
-   * omission. Same fail-closed shape the arbitration paths use.
+   * this returns a failure — which the dialog reads as "nobody decided", so a
+   * gate with no arbiter still cannot grant anything by omission.
    *
-   * The prompt carries a TRANSCRIPT POINTER, not the transcript: the proxy is a
-   * one-shot process (lib/arbitration.ts) and is told where to read the
-   * conversation rather than handed it — the choice `lib/adviser-brief.ts` makes
-   * too, for the same reason (a session log dwarfs the question).
+   * It runs as an arbiter WINDOW like every other model decision (2026-09-29):
+   * same slots fallback, same channel report, and the provider's own extensions
+   * loaded. The prompt carries a TRANSCRIPT POINTER, not the transcript — the
+   * choice `lib/adviser-brief.ts` makes too (a session log dwarfs the question).
    */
-  async function proxyAnswerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyChoice | undefined> {
-    const model = deps.resolveArbiterModel();
-    if (!model) return undefined;
+  async function proxyAnswerFor(spec: ChoiceSpec, body: string | undefined, root: string): Promise<ProxyAttempt> {
+    if (deps.isDispatchedWindow()) {
+      return { failure: "这是门禁派出的 judge / worker 窗口 —— 它不再嵌套派 arbiter 代答" };
+    }
+    if (!deps.resolveArbiterModel()) {
+      return { failure: "arbiter 未配置模型链（agents.arbiter.slots）" };
+    }
     const transcript = deps.ownTranscriptPath();
     const prompt = buildProxyPrompt({
       title: spec.title,
@@ -68,15 +81,15 @@ export function createDialogProxy(host: SessionHost, deps: DialogProxyDeps): Dia
       // and the sidecar disagree.
       repoRoot: root,
     });
-    const raw = await runArbiterProcess(
-      model, prompt, undefined, PROXY_ARBITER_TIMEOUT_MS, PROXY_SYSTEM_PROMPT,
-      // THE READ-ONLY SET, NOT `--no-tools` (review round 2 P1). The appeal
-      // arbiter's isolation is text-in/JSON-out; this one is asked to READ the
-      // session, and a prompt carrying a transcript pointer is worthless to a
-      // process that cannot open a file.
-      PROXY_ISOLATION_FLAGS,
-    );
-    return parseProxyDecision(raw);
+    try {
+      return proxyAttemptOf(await deps.runArbiterRound(
+        root,
+        arbiterTask(PROXY_SYSTEM_PROMPT, prompt, PROXY_CONCLUDE),
+        ARBITER_BUDGETS.proxyMs,
+      ));
+    } catch (err) {
+      return { failure: String(err).slice(0, 200) };
+    }
   }
 
   /**
@@ -121,7 +134,7 @@ export function createDialogProxy(host: SessionHost, deps: DialogProxyDeps): Dia
     if (latestCtx) host.persistRepo(latestCtx, root);
     try {
       latestCtx?.ui.notify(
-        `review-gate: 对话框等了 30 分钟无人作答，已由 arbiter 代为决定 —— 「${spec.title}」→ ${choice}` +
+        `review-gate: 对话框等满设定时长无人作答，已由 arbiter 代为决定 —— 「${spec.title}」→ ${choice}` +
           (byProxy.rationale ? `\n依据：${byProxy.rationale}` : "") +
           "\n这条会记入 declare_done 的完成报告；你回来可以推翻它（重新走一遍对应的步骤即可）。",
         "warning",

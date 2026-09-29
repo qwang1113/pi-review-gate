@@ -1356,8 +1356,11 @@ test("declare_done prints the proxy's decisions itself, and the audit wait has i
   //     「等待未命中本轮 report」 because the borrowed budget ran out, and the
   //     agent had to re-run the audit to collect a verdict already on disk.
   const waitFn = windowOf("async function selfAuditWait", "\n  }", "selfAuditWait");
-  assert.match(waitFn, /budgetMs: AUDIT_SELF_WAIT_BUDGET_MS/, "the gate's own wait carries its own budget");
+  assert.match(waitFn, /\n      budgetMs,\n/, "the gate's own wait carries the budget its caller passes");
   assert.doesNotMatch(waitFn, /JUDGE_WAIT_MAX_TIMEOUT_MS/, "…and not the agent-facing one");
+  const auditHost = readFileSync(join(ROOT, "lib", "audit-round-host.ts"), "utf8");
+  assert.match(auditHost, /awaitJudgeRoundEnd\(root, "goal-auditor", AUDIT_SELF_WAIT_BUDGET_MS,/,
+    "…which for a goal / plan audit is the audit's own budget");
 });
 
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
@@ -5465,9 +5468,14 @@ test("a judge's PROSE never reaches the opener's context, except from the advise
   // advice one — and the extension never reads it while recording at all.
   const settleFn = windowIn(AUDIT_ROUND_SRC, "export async function settleAuditRound(", "\n}", "settleAuditRound");
   assert.match(settleFn, /if \(spec\.kind === "advice"\) \{[\s\S]*?deps\.proseOf\(report\)/,
-    "the report's own text is read ONLY on the advice branch");
+    "the report's own text is read on the advice branch");
+  // …and on the arbiter's (2026-09-29): its prose IS its answer (a stand-in's
+  // row, an appeal's reason), handed to the tool call blocked on it — never to
+  // a wake-up, and never recorded.
+  assert.match(settleFn, /if \(spec\.kind === "arbiter"\) \{[\s\S]*?deps\.proseOf\(report\)/,
+    "the arbiter's answer goes to its caller");
   const proseReads = [...settleFn.matchAll(/deps\.proseOf\(/g)];
-  assert.equal(proseReads.length, 1, "…and exactly once");
+  assert.equal(proseReads.length, 2, "…and nowhere else");
 });
 
 

@@ -267,6 +267,8 @@ export interface GateDialogDeps {
   raiseBanner(opts: { kind: UserNotifyKind; detail: string; blocking?: boolean }): unknown;
   /** WHEN THE GATE LAST GOT AN ANSWER OUT OF THE USER — the stall breaker reads it. */
   lastUserInteractionAt: Ref<string | undefined>;
+  /** How long a box waits for the user before the stand-in (`userProxy.waitMinutes`). */
+  proxyWaitMs(): number;
 }
 
 export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
@@ -460,6 +462,7 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
       options: opts.proxy === false ? [] : spec.options,
       ...(spec.defaultChecked === undefined ? {} : { multiple: true }),
       startProxy: () => deps.proxy.answerFor(spec, opts.body, dialogRoot),
+      timeoutMs: deps.proxyWaitMs(),
     });
     // Whatever settled it, the box is done — see `settledBy` above.
     settledBy.abort();
@@ -484,14 +487,16 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
         // 不可解析）” would tell the user their machine is broken.
         host.ctx()?.ui.notify(
           opts.proxy === false
-            ? `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答 —— 这一题**不问 arbiter 代答**` +
+            ? `review-gate: 对话框「${spec.title}」等满设定时长无人作答 —— 这一题**不问 arbiter 代答**` +
               "（机器不替用户决定这一类问题），所以还没有任何决定，等你回来处理。"
-            : `review-gate: 对话框「${spec.title}」等了 30 分钟无人作答，且 arbiter 无法代答` +
-              "（未配置 / 失败 / 输出不可解析）—— 这一项**还没有任何决定**，等你回来处理。",
+            : `review-gate: 对话框「${spec.title}」等满设定时长无人作答，arbiter 也没能代答` +
+              `（${decided.proxyFailure ?? "原因未知"}）—— 这一项**还没有任何决定**，等你回来处理。`,
           "warning",
         );
       } catch { /* headless */ }
-      try { opts.onUndecided?.(); } catch { /* the caller's own bookkeeping */ }
+      // The caller hears WHY too: the agent's reply must not read as "the gate
+      // would not decide" when a model was out of quota (2026-09-29).
+      try { opts.onUndecided?.(opts.proxy === false ? undefined : decided.proxyFailure); } catch { /* the caller's own bookkeeping */ }
     }
     return decided.answer;
   }

@@ -124,6 +124,7 @@ const JUDGE_COMMAND = buildJudgePaneCommand({
   taskPath: "/repo/.pi/judge-sessions/task-1.md",
   sessionDir: "/repo/.pi/judge-sessions/sessions",
   sysPromptPath: "/repo/.pi/judge-sessions/sp.md",
+  role: "reviewer",
   model: "anthropic/claude-fable-5:max",
 });
 
@@ -192,7 +193,7 @@ test("combination 2 — a judge RECOVER: same three keys, resume argv, no task f
     cwd: "/repo",
     layout: "own-session-window",
     role: { kind: "judge", openerId: "session-child-1", judgeId: "rg-reviewer-abc123", role: "reviewer" },
-    command: buildJudgeRecoverCommand("rg-reviewer-abc123"),
+    command: buildJudgeRecoverCommand("rg-reviewer-abc123", "reviewer"),
     decor: judgePaneDecor("rg-reviewer-abc123", "reviewer", "pm"),
   });
   assert.equal(outcome.ok, true);
@@ -667,11 +668,20 @@ test("D11: every pane the gate opens loads the gate file THIS process loaded", a
 test("the judge argv carries the read-only contract and the resume keys", () => {
   assert.deepEqual(buildJudgePaneCommand({
     sessionId: "rg-reviewer-x", taskPath: "/r/task-1.md", sessionDir: "/r/sessions",
-    sysPromptPath: "/r/sp.md", model: "m",
+    sysPromptPath: "/r/sp.md", model: "m", role: "reviewer",
   }),
   ["pi", "--no-skills", "--exclude-tools", "edit,write",
     "--system-prompt", "/r/sp.md", "--model", "m",
     "--session-dir", "/r/sessions", "--session-id", "rg-reviewer-x", "@/r/task-1.md"]);
-  assert.deepEqual(buildJudgeRecoverCommand("rg-reviewer-x"),
+  assert.deepEqual(buildJudgeRecoverCommand("rg-reviewer-x", "reviewer"),
     ["pi", "--exclude-tools", "edit,write", "--session-id", "rg-reviewer-x"]);
+  // THE ARBITER'S WINDOW IS NARROWER (2026-09-29): read-only file tools and its
+  // conclusion tool — on the first launch AND on a recover.
+  const arbiter = buildJudgePaneCommand({
+    sessionId: "rg-arbiter-x", taskPath: "/r/t.md", sessionDir: "/r/s", sysPromptPath: "/r/sp.md", model: "m", role: "arbiter",
+  });
+  assert.deepEqual(arbiter.slice(0, 4), ["pi", "--no-skills", "--tools", "read,grep,find,ls,judge_conclude"]);
+  assert.ok(!arbiter.includes("--exclude-tools"));
+  assert.deepEqual(buildJudgeRecoverCommand("rg-arbiter-x", "arbiter"),
+    ["pi", "--tools", "read,grep,find,ls,judge_conclude", "--session-id", "rg-arbiter-x"]);
 });

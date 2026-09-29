@@ -29,6 +29,9 @@ import { formatGoalAuditRefusal, goalPrereviewPassed, goalTextHash } from "./loo
 import { formatPlanAuditRefusal } from "./orchestrator-plan-audit.ts";
 import type { ToolUpdate } from "./progress-stream.ts";
 import { buildStreamDirective } from "./review-stream.ts";
+import { runVerdictRound, type VerdictRoundOutcome } from "./audit-round.ts";
+import { ARBITER_ROUND_SPEC } from "./audit-round-specs.ts";
+import { AUDIT_SELF_WAIT_BUDGET_MS } from "./judge-lifecycle.ts";
 import type { CallTool, GateToolResult, Ref, SessionHost } from "./session-host.ts";
 
 /** The coordinates a human can find the judge by. */
@@ -62,7 +65,10 @@ export function createAuditRoundHost(
     recordQualityVerdict(concluded: ReportConclusion, repo: string, ctx: unknown): Promise<string | undefined>;
     recordAcceptanceVerdict(concluded: ReportConclusion, repo: string, ctx: unknown): Promise<string | undefined>;
     /** The gate's own wait (the extension's judge-session wiring). */
-    selfAuditWait(root: string, ctx: unknown, onUpdate: ToolUpdate | undefined, signal: AbortSignal | undefined): Promise<GateToolResult>;
+    selfAuditWait(
+      root: string, ctx: unknown, onUpdate: ToolUpdate | undefined, signal: AbortSignal | undefined,
+      role: string, budgetMs: number,
+    ): Promise<GateToolResult>;
     forwardWaitUpdates(progress: { tail?(text: string): void; step?(t: string): void } | undefined): ToolUpdate | undefined;
     /** The gate's own dialog — how an auditor's question reaches the user while the gate waits. */
     askUser(spec: ChoiceSpec, signal: AbortSignal): Promise<string | undefined>;
@@ -268,70 +274,7 @@ export function createAuditRoundHost(
       // auditor produces before it concludes — must not read as an unfinished
       // audit. Wait motion is forwarded into the chain's own progress, else a
       // minutes-long audit shows no motion at all.
-      awaitRoundEnd: async (root) => {
-        // THE GATE WAITS ON ITSELF (2026-09-08): this chain dispatched the
-        // auditor itself and holds its judgeId, so it waits through `doWait`
-        // DIRECTLY — routing through `callTool("judge_wait", { repo: root })`
-        // would re-run `addressJudge`'s "has this session edited that repo"
-        // check and refuse a legitimate self-audit of an unedited repo
-        // (measured: five consecutive "等待未命中本轮 report"). The opener
-        // check still runs inside `doWait`; only the repo-addressing is
-        // bypassed. Waiting semantics are untouched: same round-end rule via
-        // `awaitRoundReport` — see `selfAuditWait`.
-        //
-        // BESIDE THE WAIT (2026-09-27): the auditor's questions go to the user
-        // and the progress line says where it runs and for how long — see
-        // lib/audit-wait-watch.ts for the incident this answers.
-        const judge = judgeChildByRole(root, "goal-auditor");
-        const since = pendingAudits.get(root)?.startedAt ?? judge?.spawnedAt ?? new Date().toISOString();
-        const target = judge ? judgeChannelTarget(judge.openerId, judge.judgeId) : undefined;
-        const readRecords = () => target
-          ? readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records
-          : [];
-        // The watcher owns the tail; the inner wait's own text rides under it.
-        let innerText = "";
-        let watchLine = "";
-        const publish = () => progress?.tail?.([watchLine, innerText].filter(Boolean).join("\n"));
-        const inner = forwardWaitUpdates(progress?.tail ? { tail: (t) => { innerText = t; publish(); } } : progress);
-        const waiting = selfAuditWait(root, waitCtx, inner, signal);
-        const watching = judge && target
-          ? watchAuditRound({
-              readRecords,
-              ask: (spec, askSignal) => askUser(spec, askSignal),
-              writeAnswer: (requestId, answer) => {
-                appendRecord(channelIO, target, { kind: "answer", from: "orchestrator", at: new Date().toISOString(), requestId, answer });
-              },
-              progress: (line) => {
-                if (progress?.tail) { watchLine = line; publish(); } else progress?.step?.(line.split("\n")[0]!);
-              },
-              now: () => Date.now(),
-              sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-            }, {
-              where: { role: judge.role, ...judgePlace(judge) },
-              since,
-              startedAtMs: Date.now(),
-              stop: waiting,
-            })
-          : Promise.resolve();
-        const waited = await waiting;
-        await watching;
-        const details = (waited.details ?? {}) as { done?: unknown; reason?: unknown };
-        if (!waited.isError && details.done === true && details.reason === "report") {
-          return { ok: true, detail: "" };
-        }
-        if (details.reason === "cancelled") {
-          return { ok: false, detail: "本轮已被门禁终止（没有 pane 可重开，按 findings 修完重送）" };
-        }
-        let records: ChannelRecord[] = [];
-        try { records = readRecords(); } catch { /* unreadable ⇒ classified as no report */ }
-        const why = classifyAuditWaitFailure({
-          paneAlive: details.reason === "pane-dead" ? false : undefined,
-          records,
-          since,
-        });
-        const where = judge ? `（${judge.role} 在 ${judgePlace(judge).tmuxSession ?? "?"}:${judgePlace(judge).windowId ?? "?"}）` : "";
-        return { ok: false, detail: `${why.text}${where}` };
-      },
+      awaitRoundEnd: (root) => awaitJudgeRoundEnd(root, "goal-auditor", AUDIT_SELF_WAIT_BUDGET_MS, waitCtx, progress, signal),
       auditPassed: (root, pending) => {
         const st = stateOf(root);
         if (pending.kind === "goal") return goalPrereviewPassed(st.goalPrereview, pending.draft);
@@ -376,5 +319,103 @@ export function createAuditRoundHost(
     };
   }
 
-  return { auditRoundDeps, auditRunDeps, buildGoalAuditRound };
+  /**
+   * AN ARBITER ROUND, SYNCHRONOUS (2026-09-29): the one entry every model
+   * decision outside the review loop uses — appeals, the user proxy, the L5
+   * semantic guards. Same dispatch, same wait, same selector as a goal audit;
+   * the conclusion goes back to the caller instead of into gate state.
+   */
+  async function runArbiterRound(
+    root: string,
+    task: string,
+    budgetMs: number,
+    ctx?: unknown,
+    signal?: AbortSignal,
+  ): Promise<VerdictRoundOutcome> {
+    const run = auditRunDeps(ctx, undefined, signal);
+    return runVerdictRound({
+      ...run,
+      awaitRoundEnd: (r, role, budget) => awaitJudgeRoundEnd(r, role, budget, ctx ?? host.ctx(), undefined, signal),
+    }, { spec: ARBITER_ROUND_SPEC, root, task, budgetMs });
+  }
+
+  /**
+   * Wait for the END of one judge round (a report), through the SAME
+   * implementation `judge_wait` uses — shared by the goal/plan audits and the
+   * arbiter's rounds, which differ only in the role and the budget.
+   */
+  async function awaitJudgeRoundEnd(
+    root: string,
+    role: string,
+    budgetMs: number,
+    waitCtx: unknown,
+    progress: Progress | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<{ ok: boolean; detail: string }> {
+        // THE GATE WAITS ON ITSELF (2026-09-08): this chain dispatched the
+        // auditor itself and holds its judgeId, so it waits through `doWait`
+        // DIRECTLY — routing through `callTool("judge_wait", { repo: root })`
+        // would re-run `addressJudge`'s "has this session edited that repo"
+        // check and refuse a legitimate self-audit of an unedited repo
+        // (measured: five consecutive "等待未命中本轮 report"). The opener
+        // check still runs inside `doWait`; only the repo-addressing is
+        // bypassed. Waiting semantics are untouched: same round-end rule via
+        // `awaitRoundReport` — see `selfAuditWait`.
+        //
+        // BESIDE THE WAIT (2026-09-27): the auditor's questions go to the user
+        // and the progress line says where it runs and for how long — see
+        // lib/audit-wait-watch.ts for the incident this answers.
+        const judge = judgeChildByRole(root, role);
+        const since = (role === "goal-auditor" ? pendingAudits.get(root)?.startedAt : undefined) ??
+          judge?.spawnedAt ?? new Date().toISOString();
+        const target = judge ? judgeChannelTarget(judge.openerId, judge.judgeId) : undefined;
+        const readRecords = () => target
+          ? readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records
+          : [];
+        // The watcher owns the tail; the inner wait's own text rides under it.
+        let innerText = "";
+        let watchLine = "";
+        const publish = () => progress?.tail?.([watchLine, innerText].filter(Boolean).join("\n"));
+        const inner = forwardWaitUpdates(progress?.tail ? { tail: (t) => { innerText = t; publish(); } } : progress);
+        const waiting = selfAuditWait(root, waitCtx, inner, signal, role, budgetMs);
+        const watching = judge && target
+          ? watchAuditRound({
+              readRecords,
+              ask: (spec, askSignal) => askUser(spec, askSignal),
+              writeAnswer: (requestId, answer) => {
+                appendRecord(channelIO, target, { kind: "answer", from: "orchestrator", at: new Date().toISOString(), requestId, answer });
+              },
+              progress: (line) => {
+                if (progress?.tail) { watchLine = line; publish(); } else progress?.step?.(line.split("\n")[0]!);
+              },
+              now: () => Date.now(),
+              sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+            }, {
+              where: { role: judge.role, ...judgePlace(judge) },
+              since,
+              startedAtMs: Date.now(),
+              stop: waiting,
+            })
+          : Promise.resolve();
+        const waited = await waiting;
+        await watching;
+        const details = (waited.details ?? {}) as { done?: unknown; reason?: unknown };
+        if (!waited.isError && details.done === true && details.reason === "report") {
+          return { ok: true, detail: "" };
+        }
+        if (details.reason === "cancelled") {
+          return { ok: false, detail: "本轮已被门禁终止（没有 pane 可重开，按 findings 修完重送）" };
+        }
+        let records: ChannelRecord[] = [];
+        try { records = readRecords(); } catch { /* unreadable ⇒ classified as no report */ }
+        const why = classifyAuditWaitFailure({
+          paneAlive: details.reason === "pane-dead" ? false : undefined,
+          records,
+          since,
+        });
+        const where = judge ? `（${judge.role} 在 ${judgePlace(judge).tmuxSession ?? "?"}:${judgePlace(judge).windowId ?? "?"}）` : "";
+        return { ok: false, detail: `${why.text}${where}` };
+  }
+
+  return { auditRoundDeps, auditRunDeps, buildGoalAuditRound, runArbiterRound };
 }

@@ -64,13 +64,15 @@ test("the watch keeps the re-bound identity, and a pane without one is never jud
 
 test("gone ⇒ every clock stops and pi is shut down; anything else ⇒ nothing happens", () => {
   const calls: string[] = [];
-  const act = { stop: () => calls.push("stop"), shutdown: () => calls.push("shutdown") };
+  const act = { stop: () => calls.push("stop"), abort: () => calls.push("abort"), shutdown: () => calls.push("shutdown") };
   for (const status of ["alive", "unknown", "unbound"] as const) {
     assert.equal(enforceOpenerBinding({ check: () => status }, act), false);
   }
   assert.deepEqual(calls, []);
   assert.equal(enforceOpenerBinding({ check: () => "gone" }, act), true);
-  assert.deepEqual(calls, ["stop", "shutdown"]);
+  // The turn in flight is ABORTED before the graceful shutdown, or a judge
+  // mid-round keeps working ~75s after its opener died.
+  assert.deepEqual(calls, ["stop", "abort", "shutdown"]);
 });
 
 test("env round-trip, and a relay forwards the SAME opener", () => {

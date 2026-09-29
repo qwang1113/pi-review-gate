@@ -185,7 +185,7 @@ export function registerArbitrationTool(host: ToolHost, cells: SessionCells, dep
         agentArgument: params.argument,
       });
 
-      const verdict = await runArbiter(arb.resolveArbiterModel() ?? "", prompt);
+      const verdict = await runArbiter(arb.runArbiterRound, prompt);
       // Fail-closed: any spawn/parse failure → GATE_WINS.
       const decision = verdict?.decision ?? "GATE_WINS";
       cells.arbitrationDecisions.set(decisionKey, decision);

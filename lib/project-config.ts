@@ -12,11 +12,13 @@
  *     "thinkHarder": true,    // R10 — one-shot strategic-reset checklist near cap
  *     "gitMemory": true,      // R9 — inject filtered git context after compaction
  *     "docSync": true,        // default on — code changes require a reviewer code↔doc attestation
- *     "llmGuards": {            // LLM (DeepSeek V4 Flash) semantic guard layer
- *       "model": "deepseek/deepseek-v4-flash",
+ *     "llmGuards": {            // LLM semantic guard layer (runs as the `arbiter` window; model = agents.arbiter)
  *       "aiAttribution": true,  // guard #2 — commit-msg AI attribution (regex fallback stays)
  *       "englishCheck": true,   // L5 blind spot — romanized non-English in commit/PR text
  *       "shipDetect": true      // guard #4 — extra ship-command layer on suspicious bash
+ *     },
+ *     "userProxy": {            // a dialog nobody answers: how long before the arbiter stands in
+ *       "waitMinutes": 30
  *     },
  *     "copilotReview": {        // L7 — post-PR Copilot code-review loop
  *       "enabled": true,
@@ -35,6 +37,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_MAX_ROUNDS } from "./constants.ts";
 
+/** A dialog nobody answers waits this long before the arbiter stands in (user-configurable). */
+export const DEFAULT_USER_PROXY_WAIT_MS = 30 * 60_000;
+
 /** sd0x-dev-flow documents the same range: "Range: 3-50". */
 export const MIN_MAX_ROUNDS = 3;
 export const MAX_MAX_ROUNDS = 50;
@@ -46,8 +51,6 @@ export const MAX_MAX_ROUNDS = 50;
  * deterministic gate.
  */
 export interface LlmGuardsConfig {
-  /** "provider/model" id. Fixed default: DeepSeek V4 Flash. */
-  model: string;
   /** Guard #2: commit-message AI-attribution semantic check. */
   aiAttribution: boolean;
   /** L5/L6 blind spot: romanized non-English detection in commit/PR text. */
@@ -58,7 +61,6 @@ export interface LlmGuardsConfig {
 
 export function defaultLlmGuardsConfig(): LlmGuardsConfig {
   return {
-    model: "deepseek/deepseek-v4-flash",
     // All ON by default: each check is tighten-only and fail-back, so the
     // worst case of an unreachable model is exactly the pre-LLM behavior.
     aiAttribution: true,
@@ -238,8 +240,10 @@ export interface ProjectConfig {
    * .pi/review-gate.json to disable for a project.
    */
   docSync: boolean;
-  /** LLM semantic guard layer (DeepSeek V4 Flash) — see LlmGuardsConfig. */
+  /** LLM semantic guard layer — see LlmGuardsConfig. */
   llmGuards: LlmGuardsConfig;
+  /** How long a gate dialog waits for the user before the arbiter stands in (ms). */
+  userProxyWaitMs: number;
   /** Arbiter capability-exception config — see ArbiterConfig. */
   arbiter: ArbiterConfig;
   /** L7 post-PR Copilot review loop — see CopilotReviewConfig. */
@@ -271,6 +275,7 @@ export function defaultProjectConfig(): ProjectConfig {
     gitMemory: true,
     docSync: true,
     llmGuards: defaultLlmGuardsConfig(),
+    userProxyWaitMs: DEFAULT_USER_PROXY_WAIT_MS,
     arbiter: defaultArbiterConfig(),
     copilotReview: defaultCopilotReviewConfig(),
     precommit: null,
@@ -337,15 +342,21 @@ function applyConfigFields(cfg: ProjectConfig, obj: Record<string, unknown>): vo
   if (typeof obj.llmGuards === "object" && obj.llmGuards !== null && !Array.isArray(obj.llmGuards)) {
     const lg = obj.llmGuards as Record<string, unknown>;
     // Field-independent validation, same fail-safe style as the other knobs.
-    // model must be "provider/id" — anything else keeps the fixed default.
-    if (typeof lg.model === "string" && /^[^\/\s]+\/[^\s]+$/.test(lg.model)) {
-      cfg.llmGuards.model = lg.model;
-    }
+    // (`model` is no longer read: the guards run as the `arbiter` window, on
+    // agents.arbiter's slots — one model chain, one way to open a model.)
     // (An old config's "taskMode" key is simply ignored — the task-mode
     // decision moved in-session; see lib/task-mode.ts.)
     if (typeof lg.aiAttribution === "boolean") cfg.llmGuards.aiAttribution = lg.aiAttribution;
     if (typeof lg.englishCheck === "boolean") cfg.llmGuards.englishCheck = lg.englishCheck;
     if (typeof lg.shipDetect === "boolean") cfg.llmGuards.shipDetect = lg.shipDetect;
+  }
+  if (typeof obj.userProxy === "object" && obj.userProxy !== null && !Array.isArray(obj.userProxy)) {
+    const minutes = (obj.userProxy as Record<string, unknown>).waitMinutes;
+    // At least one minute: a shorter window would hand a question to the
+    // stand-in before a person could read it.
+    if (typeof minutes === "number" && Number.isFinite(minutes) && minutes >= 1) {
+      cfg.userProxyWaitMs = Math.round(minutes * 60_000);
+    }
   }
   if (typeof obj.arbiter === "object" && obj.arbiter !== null && !Array.isArray(obj.arbiter)) {
     const ab = obj.arbiter as Record<string, unknown>;

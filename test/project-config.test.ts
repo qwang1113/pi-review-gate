@@ -79,7 +79,6 @@ test("global config (~/.pi/review-gate.json) fills unset fields; project wins fi
   assert.deepEqual(cfg.copilotReview.owners, ["acme"]);
   // …and untouched fields keep the defaults.
   assert.equal(cfg.thinkHarder, true);
-  assert.equal(cfg.llmGuards.model, "deepseek/deepseek-v4-flash");
 });
 
 test("global config alone (no project file) applies; corrupt global keeps defaults", () => {
@@ -348,10 +347,9 @@ test("docSync defaults ON; explicit false disables; non-boolean keeps default", 
 // ---------------------------------------------------------------------------
 // llmGuards (LLM semantic guard layer — DeepSeek V4 Flash)
 
-test("llmGuards defaults: all guards on, fixed flash model", () => {
+test("llmGuards defaults: all guards on", () => {
   const d = makeTemp();
   assert.deepEqual(loadCfg(d).llmGuards, {
-    model: "deepseek/deepseek-v4-flash",
     aiAttribution: true,
     englishCheck: true,
     shipDetect: true,
@@ -374,19 +372,12 @@ test("llmGuards fields load independently; invalid fields keep defaults", () => 
   assert.equal(lg.shipDetect, false);
   assert.equal(lg.aiAttribution, true);  // invalid type → default
   assert.equal(lg.englishCheck, true);   // absent → default
-  assert.equal(lg.model, "deepseek/deepseek-v4-flash"); // invalid type → default
 });
 
-test("llmGuards model accepts provider/id and rejects malformed ids", () => {
-  const good = makeTemp();
-  writeConfig(good, JSON.stringify({ llmGuards: { model: "onekey/deepseek-v4-flash" } }));
-  assert.equal(loadCfg(good).llmGuards.model, "onekey/deepseek-v4-flash");
-
-  for (const bad of ["no-slash", "/x", "x/", "a b/c"]) {
-    const d = makeTemp();
-    writeConfig(d, JSON.stringify({ llmGuards: { model: bad } }));
-    assert.equal(loadCfg(d).llmGuards.model, "deepseek/deepseek-v4-flash", bad);
-  }
+test("llmGuards.model is no longer read: the guards run on agents.arbiter (2026-09-29)", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({ llmGuards: { model: "onekey/deepseek-v4-flash" } }));
+  assert.equal((loadCfg(d).llmGuards as unknown as Record<string, unknown>).model, undefined);
 });
 
 test("llmGuards non-object (null/array/string) keeps all defaults", () => {

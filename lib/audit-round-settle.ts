@@ -159,6 +159,12 @@ export type SettleAuditRoundOutcome =
 
     }
   | { status: "advice"; reportId: string; text: string }
+  /**
+   * An arbiter round: the conclusion is handed to the tool call blocked on it
+   * (`runVerdictRound`), which also owns the cursor. Nothing is recorded, and
+   * the wait and the settle sweep announce nothing for it.
+   */
+  | { status: "arbiter"; reportId: string; concluded: ReportConclusion; notes: string }
   | { status: "miss"; reason: RoundReportMiss; text?: string }
   | { status: "unrecorded"; reportId: string; hasVerdict: boolean; verdict: string }
   /** Nothing addressable: no registry entry, an unknown role, or no pending audit. */
@@ -243,6 +249,16 @@ export async function settleAuditRound(
     return { status: "miss", reason: selected.reason, text: spec.unfinished(describeRoundMiss(selected)) };
   }
   const report = selected.report;
+  // The arbiter's verdict belongs to the tool call blocked on it — not to the
+  // gate's record, and not to a wake-up. The cursor is that caller's to move.
+  if (spec.kind === "arbiter") {
+    return {
+      status: "arbiter",
+      reportId: report.reportId,
+      concluded: deps.conclusionOf(report),
+      notes: (deps.proseOf(report) ?? "").trim(),
+    };
+  }
   if (spec.kind === "advice") {
     const advice = (deps.proseOf(report) ?? "").trim();
     deps.advanceCursor(entry.judgeId, report.reportId);

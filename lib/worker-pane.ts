@@ -186,9 +186,9 @@ export function withWorker(registry: WorkerRegistry, entry: WorkerEntry): Worker
  * `git log`, `rg`, or a single test — so every question that needed evidence
  * rather than reading came back as "you should run this yourself", which is
  * the opposite of spending someone else's context. A judge has had `bash` all
- * along for exactly that reason (verify, don't guess); the arbitration proxy
- * is the one role that really must run nothing, and it keeps `bash` on its own
- * deny list (`PROXY_ISOLATION_FLAGS`, lib/arbitration.ts).
+ * along for exactly that reason (verify, don't guess); the arbiter is the one
+ * role that really must run nothing, and its window gets a read-only
+ * allowlist instead (`judgeToolFlags`, lib/session-launch-specs.ts).
  *
  * SO WHAT HOLDS THE WORKTREE NOW, stated honestly: `bash` can write (`echo >
  * f`, `sed -i`), so "never writes" is no longer a property of the tool

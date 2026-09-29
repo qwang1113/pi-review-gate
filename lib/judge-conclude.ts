@@ -92,7 +92,9 @@ export type ConcludeFinding = ReviewFinding;
  * rule is about what the output IS, not about who happens to exist today.
  */
 export function roleAcceptsNotes(role: string): boolean {
-  return role.trim().toLowerCase() === "adviser";
+  const r = role.trim().toLowerCase();
+  // The arbiter's answer (a stand-in's chosen row, an appeal's reason) is prose.
+  return r === "adviser" || r === "arbiter";
 }
 
 /** The refusal a reviewer / goal-auditor gets when it still passes `notes`. */

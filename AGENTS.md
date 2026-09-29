@@ -64,6 +64,18 @@ Alt+Enter 排队的 followUp 消息需要 turn 边界才能进来。judge / work
   主动唤醒共用一个会话级限流器，同一事实最多 5 次。新增任何能起 turn 的调用都会被
   `test/wake-sites.test.ts` 拦下，直到它走限流器或登记理由。
 
+### 总则 · 所有需要模型介入的地方，只有一种打开方式（2026-09-29，用户决定）
+
+门禁里任何要模型做判断的地方（judge、worker、arbiter 申诉、对话框无人作答时的代答、L5 的 LLM
+语义守卫，以及以后新增的任何一处）都只走**同一种模式**：在 opener 自己的 tmux session 里开一个
+窗口，跑带确定性 `--session-id` 的交互式 pi 会话；结论经 channel report 回来；模型按
+`review-gate.json` 的 `agents.*` slots 链选择并降级（`lib/model-health.ts` 的冷却记忆 + pane 内换槽，
+降级就是为这种模式设计的）；进程绑定 opener（`lib/opener-process.ts`）；窗口由 `declare_done` 统一回收。
+
+**不得**再用 `pi -p` + `execFile` 之类的一次性子进程旁路（哲学三）。实测的反例：旁路带
+`--no-extensions` 启动，把 `pi-anthropic-oauth` 认证扩展也关掉了，请求按 extra usage 计费被 400；
+而且它只试 `slots[0]`，没有降级 —— 代答因此静默失败，agent 只看到「门禁没有替用户决定」。
+
 ### Single-review loop (the only execution path, agent-initiated)
 
 **Judge roles run in their own windows** — the review is the only parallel
