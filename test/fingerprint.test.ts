@@ -36,12 +36,9 @@ const {
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "worktree-changes.ts")
 );
 
-// The stat-cache race regressions (racily-clean 4×75-round groups, clock-skew,
-// ancient-mtime, tracked-but-gitignored) moved to test/fingerprint-race*.test.ts
-// and the submodule graph suites to test/fingerprint-submodule.test.ts
-// (2026-09-08) so node --test parallelizes them against this file. They keep
-// their full rationale — including the rejected-optimization note and the
-// mutation evidence — at their new home.
+// The stat-cache race regressions (clock-skew, ancient-mtime,
+// tracked-but-gitignored) live in test/fingerprint-race*.test.ts and the
+// submodule graph suites in test/fingerprint-submodule.test.ts.
 const tempDirs: string[] = [];
 function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "rg-fp-"));
@@ -114,10 +111,6 @@ test("committing already-reviewed content does NOT change the fingerprint", () =
   assert.equal(beforeCommit.digest, afterCommit.digest, "commit must be fingerprint-invisible");
   assert.notEqual(beforeCommit.head, afterCommit.head, "HEAD did move (digest just must not depend on it)");
 });
-
-// NOTE ON A REJECTED TEST (kept as a warning, not as code) — moved with the
-// race loops to test/fingerprint-race.test.ts, which is where the loops it
-// warns about now live.
 
 // SUBMODULES: the submodule fingerprint regressions (edit inside a checkout,
 // malformed .gitmodules, deinit'd state) moved to test/fingerprint-submodule.test.ts

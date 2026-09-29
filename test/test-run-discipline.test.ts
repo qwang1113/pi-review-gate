@@ -33,6 +33,7 @@ test("full-suite runs are recognised", () => {
     "pnpm test",
     "npm test 2>&1 | tail -15",
     "node --test $(find test -name '*.test.ts')",
+    "node --test --test-concurrency=6 \"test/**/*.test.ts\" \"test/**/*.test.mjs\"",
     "node --test",
     "npm run test 2>&1 | tail",
   ]) {

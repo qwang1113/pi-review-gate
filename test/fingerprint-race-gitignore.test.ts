@@ -17,8 +17,9 @@ import { makeRepo, cleanupRaceDirs } from "./helpers/fingerprint-race.ts";
 //      case 1.
 // Net effect was a ~50% fail-open on shippable content.
 //
-// Split into its own file (2026-09-08) so its 25 repo-building rounds run in
-// parallel with the racily-clean groups instead of serially after them.
+// Bug 1 is deterministic (one round catches it); bug 2 reproduced in ~57% of
+// runs, so 5 rounds miss it ~1.5% of the time (25 → 5 on 2026-09-29, user
+// decision: each round builds a repo).
 neutraliseHostGitConfig();
 
 const {
@@ -30,7 +31,7 @@ const {
 after(cleanupRaceDirs);
 
 test("edits to a TRACKED but gitignored file still change the fingerprint", () => {
-  const ITERATIONS = 25; // was ~50% fail-open; any regression shows up fast
+  const ITERATIONS = 5;
   for (let i = 0; i < ITERATIONS; i++) {
     const dir = makeRepo();
     // Neutralize any ambient global ignore file on the developer's machine.

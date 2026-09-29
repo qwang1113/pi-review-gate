@@ -2014,43 +2014,35 @@ the pi package keeps `lib/` at the package root next to `extensions/`. rootDirs
 makes tsc resolve the same specifiers the runtime does, with no build step or
 symlink.
 
-### Why the suite is slow, and how the race regressions are shaped
+### How the fingerprint race regressions are covered
 
-Two fingerprint regressions are reproduced by TIMING, not by construction. Two
-attempts to make them cheaper were tried and withdrawn — documented below so
-they are not re-attempted naively — and two sound optimizations were then
-adopted (2026-09-08, each mutation-verified before landing):
+The racily-clean fail-open has two safeguards: the shadow index is backdated
+(clamped to now) and `git add --renormalize` re-reads content. Both are covered
+by DETERMINISTIC tests in `test/fingerprint-race.test.ts` — a future index
+mtime (the clamp) and an ancient preserved file mtime (`--renormalize`).
 
-1. **Round-cost cut (adopted):** the racily-clean loop used to pay a real
-   `git commit` plus TWO fingerprints per round; the window is opened by `git
-   add` recording the stat, so the commit was incidental. Rounds are now
-   rewrite → fingerprint → add (62s → 29s for 300 rounds, same load).
-2. **Window sampling across repos (adopted):** the loop ran 300 rounds in ONE
-   repo — but the window (index/file mtime in the same bucket) is a
-   repo/timing-level event that a run may never see (2 of 12 mutation runs
-   had no window at all). The 300 rounds now run as **4 parallel groups × 75
-   rounds, each in its own repo** (`test/fingerprint-race*.test.ts`), sampling
-   four windows instead of waiting for one: mutation runs in the full-suite
-   form were caught by every group in every run, and the groups run in
-   parallel (~8s vs 29s). Same 300 rounds, same per-round semantics.
-3. **A rejected env knob (`RG_RACE_ITERS=25`).** Justified by a measurement —
+The 4 × 75-round timing loop that used to sit beside them was deleted on
+2026-09-29 (user decision, ~78 CPU-seconds per full run, 18% of the suite): it
+failed only when BOTH safeguards were gone, and that state already fails the
+ancient-mtime test. The tracked-but-gitignored loop runs 5 rounds (its bug 1 is
+deterministic; bug 2 reproduced in ~57% of runs, so 5 rounds miss it ~1.5% of
+the time). Two things NOT to re-attempt:
+
+1. **An env knob (`RG_RACE_ITERS=25`).** Justified by a measurement —
    a mutated implementation (shadow-index backdate **and** `--renormalize`
    removed) missed the edit in 83/100 rounds. An independent reviewer re-ran
    the experiment and the mutated implementation **passed 3 of 5 runs** at 25
    rounds: the rounds share pacing and are not independent trials, so a
    per-round rate cannot be exponentiated into a guarantee. The knob was
    removed rather than kept with a vaguer claim.
-4. **A rejected "deterministic" replacement** — restore the cached stat after
+2. **A "deterministic" racily-clean test** — restore the cached stat after
    a same-size rewrite. It does not fool git: ctime cannot be forged from user
    space and sub-second mtime still moves. The test passed against a fully
    mutated implementation, i.e. it asserted nothing.
 
-Coverage boundary, stated explicitly: these loops fail only when **both**
-safeguards are gone. Removing just `--renormalize` is caught deterministically
-by `an edit to a file with an ancient preserved mtime is not invisible`;
-removing just the backdate is caught by neither, because `--renormalize`
-re-reads content unconditionally — the backdate is a deliberate redundant
-second line of defence.
+Coverage boundary, stated explicitly: removing just the backdate is caught by
+no test, because `--renormalize` re-reads content unconditionally — the
+backdate is a deliberate redundant second line of defence.
 
 ### Latency: where the gate actually costs you time
 
