@@ -16,14 +16,17 @@ import { recordModelFailure, selectHealthySlot } from "../lib/model-health.ts";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-test("a judge / worker window never opens a nested arbiter window — one gate for every caller", () => {
+test("a judge / worker window runs no routine arbiter rounds — but its appeals still reach the arbiter", () => {
   const src = readFileSync(join(import.meta.dirname, "..", "extensions", "review-gate.ts"), "utf8");
-  // The one runner appeals and the L5 guards share refuses in a dispatched
-  // window (its guards fall back to the deterministic checks)…
-  assert.match(src, /const arbiterRound = async \(task: string, budgetMs: number\) =>\s*isDispatchedWindow\(\)\s*\? \{ ok: false as const/);
-  assert.match(src, /createLlmClassifier\(arbiterRound\)/);
-  // …and the dialog proxy is told the same fact.
+  // The L5 guards fire on every bash: in a dispatched window they fall back
+  // to the deterministic checks instead of opening a nested window…
+  assert.match(src, /const guardRound = async \(task: string, budgetMs: number\) =>\s*isDispatchedWindow\(\)\s*\? \{ ok: false as const/);
+  assert.match(src, /createLlmClassifier\(guardRound\)/);
+  // …the dialog proxy is told the same fact…
   assert.match(src, /isDispatchedWindow,\n/);
+  // …and the appeals keep the unrestricted runner: the inspection appeal can
+  // ONLY be raised from a judge window (reviewer round-7 P1).
+  assert.match(src, /grantInspectionPass: [^\n]*\n\s*runArbiterRound: arbiterRound,/);
 });
 
 test("ONE WAY TO OPEN A MODEL: no one-shot `pi -p` subprocess anywhere in the gate (AGENTS.md)", () => {

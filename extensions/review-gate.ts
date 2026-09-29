@@ -841,17 +841,20 @@ export default function reviewGate(pi: ExtensionAPI) {
   // EVERY MODEL DECISION OUTSIDE THE REVIEW LOOP IS AN ARBITER ROUND in its own
   // window (2026-09-29, user decision): appeals, the user proxy, the L5 guards.
   // Bound late — the audit-round host is created further down.
-  // A judge / worker window is somebody else's dispatch: it never opens an
-  // arbiter window of its own (no nested windows from a reporting shell) — its
-  // guards fall back to the deterministic checks, its dialogs are not proxied.
+  const arbiterRound = (task: string, budgetMs: number) => runArbiterRound(host.repos().primary, task, budgetMs);
+  // A judge / worker window is somebody else's dispatch. The ROUTINE model
+  // calls — an L5 guard on every bash, a dialog stand-in — never open a nested
+  // arbiter window from it (its guards fall back to the deterministic checks).
+  // An APPEAL still does: the inspection appeal can only be raised from a judge
+  // window, and it is a deliberate, quota-bounded act.
   const isDispatchedWindow = (): boolean =>
     readJudgeSideEnv(process.env) !== undefined || readWorkerSideEnv(process.env) !== undefined;
-  const arbiterRound = async (task: string, budgetMs: number) =>
+  const guardRound = async (task: string, budgetMs: number) =>
     isDispatchedWindow()
-      ? { ok: false as const, text: "门禁派出的 judge / worker 窗口不再嵌套派 arbiter" }
-      : runArbiterRound(host.repos().primary, task, budgetMs);
+      ? { ok: false as const, text: "门禁派出的 judge / worker 窗口里不跑语义守卫（退回确定性检查）" }
+      : arbiterRound(task, budgetMs);
   // LLM semantic guard layer (lib/llm-classify.ts). Tighten-only + fail-back.
-  const llmClassifier: LlmClassifier = createLlmClassifier(arbiterRound);
+  const llmClassifier: LlmClassifier = createLlmClassifier(guardRound);
   const classifier = (): LlmClassifier => llmClassifier;
 
   // THE BANNER CHANNEL (user decision, 2026-09-17) — POLICY in
