@@ -524,7 +524,7 @@ source layer.
 
 | # | PR #7 finding | How pi-review-gate handles it |
 |---|---------------|-------------------------------|
-| 1 | `test/**/*.test.js` under `/bin/sh` doesn't recurse — 538 tests silently skipped | precommit runner emits a loud `[glob-trap]` warning for `node --test **` scripts; our own `npm test` uses `$(find ...)`; a meta-test reproduces npm's `/bin/sh` expansion and asserts full coverage |
+| 1 | `test/**/*.test.js` under `/bin/sh` doesn't recurse — 538 tests silently skipped | precommit runner emits a loud `[glob-trap]` warning for an UNQUOTED `node --test **` pattern; our own `npm test` passes QUOTED patterns that node expands itself; a meta-test checks the patterns reach node unexpanded and cover every test file on disk |
 | 2 | First-fence-only verdict parsing (fail-open) | There is no verdict text to parse: a judge concludes through `judge_conclude` and its structured `verdict`/`findings` travel on the channel report. `adjudicateReviewConclusion` (`lib/review-adjudicate.ts`) applies the one rule that survived the parser — READY carrying an unresolved P0/P1 is downgraded to BLOCKED |
 | 3 | All-steps-skipped precommit showed PASS | Three distinct verdicts: `✅ PASS` / `❌ FAIL` / `⚠️ NO CHECKS RUN`. NO_CHECKS_RUN blocks the ship gate — configure real checks or explicitly `/gate-bypass` |
 | 4 | NotebookEdit / `.ipynb` bypassed every gate | `ipynb` is in the single CODE_EXTENSIONS list; `coalesceToolPath` reads `path`/`file_path`/`notebook_path`/every spelling; NotebookEdit is in the edit-tool set |
@@ -2052,7 +2052,7 @@ backdate is a deliberate redundant second line of defence.
 | Edit-time L6 label check | ~45 ms | Deterministic; no model call |
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
-| `run_precommit --mode full` (this repo) | ~30 s | Suite is process-spawn bound: ~2万 fork/exec per full run; the race regressions are 4 parallel files (~8s each). Wall sits at the machine's spawn throughput (concurrency 13/24 both ~30s) — a spawn-cut would need test-infrastructure work |
+| `run_precommit --mode full` (this repo) | ~50 s wall | Suite is process-spawn bound (~1.2万 child processes per full run, mostly git). `npm test` pins `--test-concurrency=6`, trading some wall time for a responsive machine |
 | **A review round (any diff size)** | **~3 min reviewer, precommit first** | ONE reviewer, one commit range, no engine — precommit runs BEFORE the review (see the loop protocol); see `docs/execution-model.md` |
 
 **Parallel-stability verification (2026-08-10, historical)**: when the suite
@@ -2060,9 +2060,9 @@ was dominated by the two single-file timing loops, `run_precommit --mode
 full` ran six consecutive times on this repo (typecheck concurrent with `npm
 test`) — all six PASS; wall clock 138–157 s, on par with the serial baseline
 (`npm test` ~137 s + typecheck ~2 s). The parallel win lands on multi-step
-repos. The suite has since been restructured (2026-09-08: race loop split into
-four parallel groups, hook/fingerprint files re-split) — the current full-run
-wall is the ~30 s in the table above.
+repos. The suite has since been restructured (2026-09-29: the racily-clean timing
+loop was removed, the slowest suites stopped spawning per-case repos and CLIs) —
+the current full-run wall is in the table above.
 The practical consequence: batching edits into fewer, larger review rounds
 saves far more wall time than any micro-optimization here, because the loop is
 billed per round.

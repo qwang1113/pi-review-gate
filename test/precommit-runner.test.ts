@@ -172,6 +172,16 @@ test("node --test with ** glob → loud glob-trap warning on stderr", () => {
   assert.match(out, /does NOT recurse/i);
 });
 
+test("node --test with a QUOTED ** glob → no glob-trap warning (node expands it)", () => {
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    scripts: { test: `node --test "test/**/*.test.js" || true` },
+  });
+  const { out } = run(dir);
+  assert.doesNotMatch(out, /\[glob-trap\]/);
+});
+
 test("node --test with $(find ...) → no glob-trap warning", () => {
   const dir = makeDir({
     name: "t",

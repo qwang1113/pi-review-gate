@@ -334,7 +334,7 @@ export function hasRelatableSources(files) {
  *   `listCommand` non-null ⇒ the caller must run it to enumerate related tests
  *   and then build the final command with {@link runTestsByPathCommand}.
  */
-export function planFastTests({ parsed, changedFiles, fullCommand, resolveBin, tokens }) {
+export function planFastTests({ parsed, changedFiles, fullCommand, resolveBin, tokens, relatedNodeTests }) {
   const skip = (reason) => ({ testScope: "skipped", command: null, listCommand: null, positionals: [], reason });
 
   if (!parsed) return skip("test script is not a single simple command");
@@ -348,6 +348,21 @@ export function planFastTests({ parsed, changedFiles, fullCommand, resolveBin, t
   }
   if (!Array.isArray(changedFiles)) return skip("changed files unavailable");
   if (changedFiles.length === 0) return skip("no changed files to relate tests to");
+
+  // `node --test` (2026-09-29): the related set comes from
+  // scripts/precommit-related.mjs, injected. It may answer FULL — a change it
+  // cannot trace runs the whole command, never a guessed subset.
+  if (parsed.runner === "node-test" && typeof relatedNodeTests === "function") {
+    const r = relatedNodeTests(changedFiles, parsed.positionals);
+    if ("full" in r) {
+      return { testScope: "full", command: fullCommand, listCommand: null, positionals: parsed.positionals, reason: r.full };
+    }
+    const pre = parsed.env.length ? `${parsed.env.join(" ")} ` : "";
+    const command = r.files.length === 0
+      ? null
+      : `${pre}${parsed.bin} ${parsed.flags.join(" ")} ${r.files.map(shellQuote).join(" ")}`.replace(/\s+/g, " ").trim();
+    return { testScope: "related", command, listCommand: null, positionals: parsed.positionals, reason: r.reason };
+  }
 
   const sources = changedFiles.filter((f) => SOURCE_EXT_RE.test(f));
   if (sources.length === 0) return skip("no JS/TS sources among the changed files");

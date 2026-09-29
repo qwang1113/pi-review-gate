@@ -46,6 +46,7 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { StringDecoder } from "node:string_decoder";
 import { readPrecommitConfig } from "./precommit-config.mjs";
+import { relatedNodeTests } from "./precommit-related.mjs";
 import {
   detectsMdConsumingBuild,
   intersectWithScriptPaths,
@@ -513,12 +514,14 @@ function collectStep(stepName, scriptNames) {
   }
 
   // PR #7 lesson 1: warn on `node --test <glob with **>` — /bin/sh won't recurse.
+  // A QUOTED pattern reaches node unexpanded and node's own glob recurses, so
+  // only a bare `**` token is the trap.
   const body = scripts[found];
-  if (/node\s+--test\s+[^&|;]*\*\*/.test(body)) {
+  if (/node\s+--test\b/.test(body) && body.split(/\s+/).some((t) => t.includes("**") && !/^["']/.test(t))) {
     console.error(
       `⚠️  [glob-trap] script "${found}" passes a ** glob to node --test — ` +
         `npm runs scripts via /bin/sh where ** does NOT recurse. ` +
-        `Nested tests may be silently skipped. Use $(find ...) instead.`,
+        `Nested tests may be silently skipped. Quote the pattern (node expands it) or use $(find ...).`,
     );
   }
 
@@ -621,10 +624,32 @@ function changedFiles() {
         files.push(path);
       }
     }
-    return files.map((f) => join(repoRoot, f));
+    // PLUS WHAT THE BRANCH ALREADY COMMITTED (2026-09-29): judge_submit commits
+    // the checkpoint BEFORE its lane runs, so the worktree alone is clean and a
+    // fast lane would relate nothing. The branch base is a superset of "since
+    // the last passing lane", which only ever runs MORE tests.
+    const base = branchBase();
+    if (base !== null) {
+      const committed = execFileSync("git", ["diff", "--name-only", "-z", base, "HEAD"], {
+        cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024,
+      });
+      files.push(...committed.split("\0").filter((f) => f && !f.startsWith(".pi/") && !f.startsWith(".pi-subagents/")));
+    }
+    return [...new Set(files)].map((f) => join(repoRoot, f));
   } catch {
     return null;
   }
+}
+
+/** merge-base with the default branch, or null (same candidates as lib/review-baseline.ts). */
+function branchBase() {
+  for (const ref of ["origin/HEAD", "main", "origin/main", "master", "origin/master"]) {
+    try {
+      const mb = execFileSync("git", ["merge-base", ref, "HEAD"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      if (mb) return mb;
+    } catch { /* next candidate */ }
+  }
+  return null;
 }
 
 /**
@@ -667,8 +692,12 @@ function narrowTestStep(entry) {
     changedFiles: files,
     fullCommand: entry.command,
     resolveBin: resolveRunnerBin,
+    relatedNodeTests: (changed, testGlobs) => relatedNodeTests({ repoRoot, cwd, changedFiles: changed, testGlobs }),
   });
 
+  if (fast.testScope === "full") {
+    return { testScope: "full", note: `fast lane ran the full suite: ${fast.reason}` };
+  }
   if (fast.testScope !== "related") {
     entry.command = null;
     entry.reason = `fast lane: ${fast.reason}`;
@@ -832,7 +861,7 @@ function collectTestConfigured() {
   // as "not a single simple command" (silent under-run).
   entry.body = body;
   const parsed = parseTestScript(body);
-  const narrowable = parsed !== null && (parsed.runner === "jest" || parsed.runner === "vitest") &&
+  const narrowable = parsed !== null && (parsed.runner === "jest" || parsed.runner === "vitest" || parsed.runner === "node-test") &&
     resolveRunnerBin(parsed.runner) !== null;
   if (!narrowable) {
     testScope = "full";
