@@ -1,6 +1,7 @@
 /**
- * The L5 language gate: commit messages, PR text and test labels must be
- * ENGLISH.
+ * The L5 language gate: commit messages and PR text must be ENGLISH. (Test
+ * labels, L6, are judged by scripts/scan-test-labels.cjs with a ratio rule
+ * since 2026-09-29; only their block sentence lives here.)
  *
  * ONE RULE, ONE IMPLEMENTATION (2026-08-29). Every L5 decision in this project
  * is {@link judgeEnglish}: **any non-Latin letter rejects**. The call sites
