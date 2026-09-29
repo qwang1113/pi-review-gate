@@ -37,6 +37,9 @@ import type { createDialogProxy } from "./dialog-proxy.ts";
 
 export interface DeclareDoneToolDeps {
   enforcementStateFor(root: string): GateState | undefined;
+  /** lib/precommit-lane.ts — wait for a running lane; run the full one in the foreground. */
+  waitForQuietLane(root: string): Promise<void>;
+  runFullLane(root: string, ctx: unknown): Promise<void>;
   stateForRepo(root: string): GateState;
   persistRepo(ctx: ExtensionContext, root: string): void;
   persist(ctx?: ExtensionContext): void;
@@ -144,6 +147,19 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
         for (const root of cells.sessionRepos) {
           const st = deps.enforcementStateFor(root);
           if (st) {
+            // THE FULL SUITE, RUN HERE WHEN IT IS ALL THAT IS MISSING (2026-09-29):
+            // review rounds only ran the related tests. Same rule as the ship
+            // gate: never for content another requirement refuses anyway.
+            const unmetWith = (full: boolean) => unmetRequirements(st, headCommitTree(root), false, {
+              requireDocSync: cells.projectConfig.docSync,
+              requireFullTests: full,
+              unreviewedCommits: unreviewedTreesSince(root, st.review),
+            });
+            await deps.waitForQuietLane(root);
+            if (unmetWith(false).length === 0 && unmetWith(true).length > 0) {
+              progress.step("全量 precommit（送审轮只跑了相关测试）");
+              await deps.runFullLane(root, ctx);
+            }
             // `requireFullTests`: declaring the task done means the work is
             // about to be published, and the fast lane never proved the suite
             // passes — the agent cannot finish on a narrowed check.

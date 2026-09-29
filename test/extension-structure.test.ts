@@ -5398,7 +5398,7 @@ test("judge_submit runs the whole submission chain, and cannot dead-end on it", 
   // below.
   assert.match(body, /startPrecommitBeside\(input\.root, input\.ctx\)/);
   // …and each step reports itself, so a stalled round shows WHERE it stalled.
-  for (const step of [/step\("precommit \(full/, /step\("checkpoint 提交"\)/, /step\("prepare/]) {
+  for (const step of [/step\("precommit（相关测试/, /step\("checkpoint 提交"\)/, /step\("prepare/]) {
     assert.match(body, step, "every chain step publishes progress");
   }
   // 2026-09-08: the round NOTE travels to the checkpoint alongside the message —
@@ -6702,8 +6702,17 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
   );
   assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && st\.precommit\.verdict !== "PASS"\)/,
     "no live verification ⇒ the old rule, unchanged (fail-closed) — plus the one release the USER owns: a stage switched off");
-  assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && st\.precommit\.testScope !== "full"\)/,
-    "…and the lane requirement with it");
+  assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && !testsRan\(st\.precommit\.testScope\)\)/,
+    "…and a PASS whose tests never ran is not one (the review lane is the fast one since 2026-09-29)");
+});
+
+test("a review round runs the FAST lane; the full suite runs at ship time and at declare_done (2026-09-29)", () => {
+  assert.match(LANE_SRC, /mode: PrecommitMode = "fast",/, "startPrecommitBeside defaults to the fast lane");
+  assert.match(LANE_SRC, /async function runFullLane\([^)]*\)[^{]*\{\s*await waitForQuietLane\(root\);\s*await startPrecommitBeside\(root, ctx, "full"\)\.settled;/,
+    "the full run reuses the one lane slot");
+  const done = readFileSync(join(ROOT, "lib", "declare-done-tool.ts"), "utf8");
+  assert.match(done, /await deps\.waitForQuietLane\(root\);\s*if \(unmetWith\(false\)\.length === 0 && unmetWith\(true\)\.length > 0\) \{[\s\S]{0,120}await deps\.runFullLane\(root, ctx\);/,
+    "declare_done runs the full suite only when it is the one thing missing");
 });
 
 test("a FAIL that arrives after dispatch is reported, and it withholds the READY", () => {

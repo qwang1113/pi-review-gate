@@ -10,10 +10,10 @@
  *      the second is how hooks load scripts and how structural tests read
  *      source text instead of importing it;
  *   2. the test files that are IN that closure (a changed test file is);
- *   3. plus every TREE-SCANNING test — one that lists a repo directory
- *      (`readdirSync(join(ROOT, "lib"))`, a test dir): it counts modules or
- *      greps every source, so any source change can move it, and no single
- *      file names it (quality P2, 2026-09-29).
+ *   3. plus every test that LISTS A DIRECTORY (`readdirSync` / `globSync`):
+ *      such a test may count modules or grep every source, so any change can
+ *      move it and no single file names it (quality + reviewer P2,
+ *      2026-09-29). Listing a temp dir is included too — more tests, never fewer.
  *   `import type` is not an edge: it has no runtime effect, and typecheck (which
  *   the fast lane always runs) covers what it does affect.
  *   A basename shared by several files links to all of them — more tests, never fewer.
@@ -24,7 +24,7 @@
  * answered with FULL, never with a guess.
  */
 
-import { existsSync, globSync, readFileSync } from "node:fs";
+import { existsSync, globSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -34,7 +34,7 @@ const SPEC_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)[
 // `import type` / `export type … from`: no runtime edge (typecheck owns types).
 const TYPE_ONLY_RE = /^\s*(?:import|export)\s+type\b[^;]*?from\s*["'][^"']+["'];?/gm;
 const QUOTED_NAME_RE = /["'`]([\w.-]+\.[cm]?[jt]sx?)["'`]/g;
-const TREE_SCAN_RE = /\b(?:readdirSync|globSync)\(\s*(?:join\(\s*)?(?:ROOT|root|REPO|LIB|lib|TEST_DIR|AGENTS)\b/;
+const TREE_SCAN_RE = /\b(?:readdirSync|globSync|readdir)\(/;
 const RESOLVE_SUFFIXES = ["", ".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", ".cjs", "/index.ts", "/index.js"];
 
 /** Every tracked + untracked (not ignored) source file, absolute. */
@@ -88,7 +88,13 @@ export function reverseImportGraph(files, read = (f) => readFileSync(f, "utf8"))
  * @returns {{ full: string } | { files: string[], reason: string }}
  *          `files` are cwd-relative; `full` says why only the full suite will do.
  */
-export function relatedNodeTests({ repoRoot, cwd, changedFiles, testGlobs }) {
+export function relatedNodeTests({ repoRoot: rawRoot, cwd: rawCwd, changedFiles: rawChanged, testGlobs }) {
+  // ONE SPELLING for every path (reviewer P2): a symlinked cwd or root
+  // (/tmp → /private/tmp) would otherwise match no test at all. Changed files
+  // are rebased rather than realpath'd — a deleted one has no realpath.
+  const repoRoot = realpathSync(rawRoot);
+  const cwd = realpathSync(rawCwd);
+  const changedFiles = rawChanged.map((f) => resolve(repoRoot, relative(rawRoot, f)));
   if (testGlobs.length === 0) return { full: "the test script names no test files to narrow" };
   const unknown = changedFiles.find((f) => !SOURCE_RE.test(f) && !DOC_RE.test(f));
   if (unknown !== undefined) {

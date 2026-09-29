@@ -208,6 +208,7 @@ export function createReviewVerdictRecorder(
         !staleTarget &&
         readyLacksVerification({
           precommitVerdict: st.precommit.verdict,
+          precommitTestScope: st.precommit.testScope,
           // The round's own tree, registered by prepare against the checkpoint
           // it dispatched, and the tree a full lane passed if one is on
           // record: either answers "this content was verified" without

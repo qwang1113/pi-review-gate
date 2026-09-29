@@ -172,7 +172,7 @@ export function createReviewChain(
       //
       // …EXCEPT when an older lane is still running: then this round waits for
       // it (round-4 P2 — a joined lane would verify the WRONG content).
-      input.progress?.step("precommit (full，与审查并行)");
+      input.progress?.step("precommit（相关测试，与审查并行）");
       await waitForQuietLane(input.root);
       // D03, ASKED AGAIN AFTER THE WAIT: the older lane may have FAILED while
       // this submission waited for it, and its quality round is still judging.
@@ -181,7 +181,7 @@ export function createReviewChain(
       const pre = stateForRepo(input.root).precommit;
       if (resubmitWhileQualityInFlight({
         qualityInFlight: qualityRoundInFlight(input.root),
-        lastLaneVerdict: pre.mode === "full" ? pre.verdict : undefined,
+        lastLaneVerdict: pre.mode === undefined ? undefined : pre.verdict,
         fresh: input.fresh === true,
       }) === "refuse") {
         input.progress?.fail("质量轮仍在审");

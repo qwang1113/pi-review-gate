@@ -265,9 +265,15 @@ test("severityFindingsFrom keeps the objections verbatim, defaulting a missing s
 // THIS is what refuses a READY on content that never passed it.
 // ---------------------------------------------------------------------------
 
-test("a READY without a full-lane PASS is withheld — and a bypass is the user's call, not the rule's", () => {
-  assert.equal(readyLacksVerification({ precommitVerdict: "PASS", bypassActive: false }), false,
-    "the ordinary path: verified, so nothing is withheld");
+test("a READY without a lane PASS that ran tests is withheld — and a bypass is the user's call, not the rule's", () => {
+  for (const precommitTestScope of ["related", "full"] as const) {
+    assert.equal(readyLacksVerification({ precommitVerdict: "PASS", precommitTestScope, bypassActive: false }), false,
+      `the ordinary path (${precommitTestScope}): verified, so nothing is withheld`);
+  }
+  for (const precommitTestScope of ["skipped", undefined] as const) {
+    assert.equal(readyLacksVerification({ precommitVerdict: "PASS", precommitTestScope, bypassActive: false }), true,
+      `a PASS whose tests did not run (${String(precommitTestScope)}) verified nothing`);
+  }
   for (const verdict of ["NOT_RUN", "FAIL", "PENDING", ""]) {
     assert.equal(readyLacksVerification({ precommitVerdict: verdict, bypassActive: false }), true,
       `"${verdict}" is not a PASS — nothing on that content is shippable, and a recorded READY would look verified while it is not`);
@@ -312,7 +318,7 @@ test("the round's OWN tree counts as evidence, because the live binding is desig
   }
   // The live PASS still wins on its own, with no tree involved.
   assert.equal(
-    readyLacksVerification({ precommitVerdict: "PASS", lastFullPassTree: undefined, reviewedTree: undefined, bypassActive: false }),
+    readyLacksVerification({ precommitVerdict: "PASS", precommitTestScope: "related", lastFullPassTree: undefined, reviewedTree: undefined, bypassActive: false }),
     false,
   );
   // And an old caller (neither field) behaves exactly as before.

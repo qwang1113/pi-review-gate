@@ -325,7 +325,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * EFFECT: starting a lane RESETS the recorded `precommit` entry to `NOT_RUN`.
    */
   (pi as unknown as { __reviewGateTestSeams?: Record<string, unknown> }).__reviewGateTestSeams = {
-    startFullLane: (root: string, ctx: unknown) => startPrecommitBeside(root, ctx).settled,
+    startFullLane: (root: string, ctx: unknown) => startPrecommitBeside(root, ctx, "full").settled,
   };
 
   /** Call another gate tool internally; a missing tool is a programming error. */
@@ -956,6 +956,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     loopGoalConfirmed: () => goalStageSatisfied(),
     precommitLaneRunning: (root) => precommitLaneRunning(root),
     waitForQuietLane: (root) => waitForQuietLane(root),
+    runFullLane: (root, ctx) => runFullLane(root, ctx),
     deliveryStation: (root) => deliveryStationFor(root),
     crossRepoVerdictHint,
     classifier,
@@ -1066,7 +1067,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     resumeParkedReady: (root, ctx) => resumeParkedReady(root, ctx),
   });
   const { judgeChildByRole, checkpointAtFor, roundBindingOf, settleFinishedRounds } = settle;
-  const { precommitLaneRunning, abortPrecommitLane, waitForQuietLane, startPrecommitBeside } =
+  const { precommitLaneRunning, abortPrecommitLane, waitForQuietLane, startPrecommitBeside, runFullLane } =
     createPrecommitLane(host, {
       pi,
       callTool,
@@ -1233,6 +1234,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- declare_done (lib/declare-done-tool.ts) ----------
   registerDeclareDoneTool(pi, cells, {
     enforcementStateFor,
+    waitForQuietLane,
+    runFullLane,
     stateForRepo,
     persistRepo,
     persist,

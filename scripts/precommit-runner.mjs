@@ -87,6 +87,9 @@ function argOf(flag, dflt) {
 // authorize a publish — so a typo costs a narrowed run, never a wider claim.
 const mode = argOf("--mode", "fast") === "full" ? "full" : "fast";
 const cwd = argOf("--cwd", process.cwd());
+// The tree the previous lane PASSED on — the fast lane relates only what
+// changed since (see changedFiles).
+const sinceTree = argOf("--since", null);
 const asJson = args.includes("--json");
 // Receipt mode: when the extension spawns this runner directly it passes a
 // private receipt path + nonce (never exposed to the model). The runner writes
@@ -624,11 +627,13 @@ function changedFiles() {
         files.push(path);
       }
     }
-    // PLUS WHAT THE BRANCH ALREADY COMMITTED (2026-09-29): judge_submit commits
-    // the checkpoint BEFORE its lane runs, so the worktree alone is clean and a
-    // fast lane would relate nothing. The branch base is a superset of "since
-    // the last passing lane", which only ever runs MORE tests.
-    const base = branchBase();
+    // PLUS WHAT WAS COMMITTED SINCE THE LAST VERIFIED TREE (2026-09-29):
+    // judge_submit commits the checkpoint BEFORE its lane runs, so the worktree
+    // alone is clean and a fast lane would relate nothing. `--since` is the
+    // tree the previous lane passed on (the gate's own record); without it the
+    // branch base, a superset — only ever MORE tests. A since-tree git cannot
+    // read falls back to the branch base too.
+    const base = sinceTreeReadable() ? sinceTree : branchBase();
     if (base !== null) {
       const committed = execFileSync("git", ["diff", "--name-only", "-z", base, "HEAD"], {
         cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024,
@@ -638,6 +643,16 @@ function changedFiles() {
     return [...new Set(files)].map((f) => join(repoRoot, f));
   } catch {
     return null;
+  }
+}
+
+function sinceTreeReadable() {
+  if (!sinceTree || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sinceTree)) return false;
+  try {
+    execFileSync("git", ["cat-file", "-e", `${sinceTree}^{tree}`], { cwd, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
   }
 }
 

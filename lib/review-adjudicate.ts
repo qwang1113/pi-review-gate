@@ -31,6 +31,8 @@
 import type { DocSyncAttestation, GateVerdict } from "./gate-state-records.ts";
 import { DOC_SYNC_ATTESTATIONS } from "./gate-state-records.ts";
 import { isBlockingSeverity } from "./judge-lifecycle.ts";
+import { testsRan } from "./gate-state-transitions.ts";
+import type { TestScope } from "./precommit-receipt.ts";
 
 /** One finding exactly as the judge concluded it — never a serialized string. */
 export interface ReviewFinding {
@@ -188,6 +190,12 @@ export function findingFingerprint(finding: ReviewFinding): string | undefined {
  */
 export function readyLacksVerification(args: {
   precommitVerdict: string;
+  /**
+   * The live binding's test scope: a PASS whose tests were `skipped` verified
+   * nothing a reviewer should lean on (2026-09-29 — review rounds run the
+   * fast lane now).
+   */
+  precommitTestScope?: TestScope | undefined;
   /** `precommit.lastFullPassTree` — the tree a full lane passed, if one is on record. */
   lastFullPassTree?: string | undefined;
   /** The tree this round judged (the prepared review target's tree). */
@@ -197,7 +205,7 @@ export function readyLacksVerification(args: {
   // The live binding still decides when there is one (`precommit: PASS` is the
   // pre-tree-record behaviour, kept as the fallback); everything else is the
   // shared rule below — never a second reading of bypass or of the trees.
-  if (args.precommitVerdict === "PASS") return false;
+  if (args.precommitVerdict === "PASS" && testsRan(args.precommitTestScope)) return false;
   return !laneVerifiesTree({
     tree: args.reviewedTree,
     coveredTree: args.lastFullPassTree,

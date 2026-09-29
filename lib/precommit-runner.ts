@@ -172,6 +172,8 @@ export async function runTrustedPrecommit(
   abortSignal?: AbortSignal,
   /** Live-output sink: the tool's `onUpdate`, when the caller wants streaming. */
   onUpdate?: (partial: { content: { type: "text"; text: string }[]; details: undefined }) => void,
+  /** The tree the previous lane passed on: the fast lane relates what changed since. */
+  sinceTree?: string,
 ): Promise<PrecommitOutcome> {
   // `logPath` is filled in as soon as the run log has been kept, so every
   // failure path below still tells the agent where to look.
@@ -203,7 +205,7 @@ export async function runTrustedPrecommit(
       try { logFd = openSync(tmpLog, "a"); } catch { logFd = undefined; }
       const child = spawn(
         process.execPath,
-        [runner, "--mode", mode, "--cwd", cwd, "--receipt", receipt, "--nonce", nonce],
+        [runner, "--mode", mode, "--cwd", cwd, "--receipt", receipt, "--nonce", nonce, ...(sinceTree ? ["--since", sinceTree] : [])],
         { cwd, shell: false, detached: true,
           stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
           // The nonce travels ONLY via the runner's argv (not env), so the

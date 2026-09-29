@@ -152,9 +152,13 @@ reviewer over the WHOLE change:
   (`lib/async-precommit-report.ts`). The message names its round and the
   content it verified; a lane whose content has already been replaced reports
   itself as that OLD round, not as the current one. The
-  full precommit ALREADY ran typecheck + build + the complete suite on that
-  exact content — **never manually re-run the full suite or `tsc`** before
-  submitting (the runner caches by input: unchanged content reuses the
+  round's lane is the FAST one (2026-09-29, user decision): typecheck + the
+  tests RELATED to the change (`scripts/precommit-related.mjs` for
+  `node --test`); a READY needs that lane's PASS with tests actually run. The
+  FULL suite runs once, by the gate, when a push / `gh pr create` or
+  `declare_done` finds it is the only thing missing
+  (`lib/precommit-lane.ts` `runFullLane`) — **never manually re-run the full
+  suite or `tsc`** (the runner caches by input: unchanged content reuses the
   recorded PASS in seconds). Develop with targeted tests only.
   The reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
   starts at the last commit a round **concluded** about (READY or BLOCKED),

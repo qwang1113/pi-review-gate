@@ -1,7 +1,8 @@
 /**
  * `run_precommit` — the ONLY path to a precommit PASS. INTERNAL, not
- * registered with pi: precommit is the first step of `judge_submit`, which
- * always runs the FULL lane before it freezes anything. Moved out of
+ * registered with pi: `judge_submit` runs the fast lane (related tests) beside
+ * each review round, and the full lane runs before a push / PR and at
+ * `declare_done` (lib/precommit-lane.ts `runFullLane`). Moved out of
  * `extensions/review-gate.ts` (t8, 2026-09-26, wave 4 of the split).
  */
 
@@ -35,6 +36,7 @@ export function registerPrecommitTool(host: ToolHost, cells: SessionCells, deps:
       "The extension spawns the bundled runner itself and verifies a private nonce receipt.",
     parameters: Type.Object({
       mode: Type.Optional(Type.String({ description: "'fast' (default) or 'full'" })),
+      sinceTree: Type.Optional(Type.String({ description: "Internal: the tree the previous lane passed on (fast lane relates what changed since)." })),
       repo: Type.Optional(Type.String({
         description:
           "Absolute path of the repository to run the checks in. REQUIRED once the session has edited " +
@@ -91,7 +93,7 @@ export function registerPrecommitTool(host: ToolHost, cells: SessionCells, deps:
       progress.step(mode === "full" ? "lint + typecheck + build + 全量测试" : "lint + typecheck + build + 相关测试");
       const outcome = await runTrustedPrecommit(targetDir, targetRoot, mode, signal, (partial) => {
         progress.tail(partial.content.map((c) => c.text).join("\n"));
-      });
+      }, typeof params.sinceTree === "string" ? params.sinceTree : undefined);
       progress.done(outcome.verdict);
 
       if (outcome.verdict === "PASS") {

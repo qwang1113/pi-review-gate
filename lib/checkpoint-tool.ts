@@ -19,6 +19,7 @@ import {
 } from "./dependency-justification.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "./file-size-gate.ts";
 import type { GateState } from "./gate-state.ts";
+import { testsRan } from "./gate-state-transitions.ts";
 import { gitBaseEnv, gitFailureText, gitOrNull, gitRaw, gitText } from "./git-exec.ts";
 import { l5BlockReason, nonEnglishCommitMessage } from "./lang-detect.ts";
 import type { LoopStage } from "./loop-stages.ts";
@@ -191,7 +192,7 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
           content: [{
             type: "text",
             text: `review-gate: checkpoint rejected — precommit is ${st.precommit.verdict} (a checkpoint bypasses READY only, never precommit). ` +
-              "`judge_submit({role:\"reviewer\"})` runs the full lane before this step, so fix what it reported and submit the round again. " +
+              "`judge_submit({role:\"reviewer\"})` runs its own lane before this step, so fix what it reported and submit the round again. " +
               "如果 precommit 是因为与本次改动无关的环境问题失败的，那是用户的决定：让用户 `/gate-bypass <理由>`，" +
               "bypass 会连这条前置一起覆盖，并把「本轮 precommit 被 bypass」写进记录。",
           }],
@@ -199,14 +200,14 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
           isError: true,
         };
       }
-      // Round-4 P2: dev-flow requires the FULL suite (lint + typecheck +
-      // build + test) before a checkpoint and 送审 — a fast-lane PASS would
-      // otherwise let a round go to review with the suite never run.
-      if (precommitStageOn && !precommitBypassed && !verifyingNow && st.precommit.testScope !== "full") {
+      // A PASS whose tests were SKIPPED verified nothing a reviewer should lean
+      // on. Since 2026-09-29 a review round runs the fast lane (the tests
+      // related to the change); the full suite runs before shipping.
+      if (precommitStageOn && !precommitBypassed && !verifyingNow && !testsRan(st.precommit.testScope)) {
         return {
           content: [{
             type: "text",
-            text: `review-gate: checkpoint rejected — the precommit PASS covers ${st.precommit.testScope ?? "unknown"}, not the full suite (dev-flow: 全量通过才允许送审). \`judge_submit({role:"reviewer"})\` always runs the FULL lane, so re-submit the round rather than reusing this narrowed PASS.`,
+            text: `review-gate: checkpoint rejected — the precommit PASS ran no tests (scope ${st.precommit.testScope ?? "unknown"}). \`judge_submit({role:"reviewer"})\` runs its own lane, so re-submit the round rather than reusing this PASS.`,
           }],
           details: { committed: false },
           isError: true,
