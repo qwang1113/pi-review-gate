@@ -35,7 +35,10 @@ after(() => {
   for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
 });
 
-function runInstaller(home: string, cwd = ROOT) {
+// Default cwd is a scratch NON-git dir: with this repo as cwd the installer
+// rewrote this checkout's own .git/hooks on every call (tests that exercise hook
+// installation pass their own repo).
+function runInstaller(home: string, cwd = makeHome()) {
   return spawnSync("node", [INSTALLER], {
     encoding: "utf8",
     cwd,

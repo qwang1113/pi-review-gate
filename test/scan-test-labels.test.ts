@@ -4,6 +4,7 @@ import { spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
 
@@ -18,8 +19,22 @@ after(() => {
   for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
 });
 
-/** Fresh git repo with the given files, all staged. Returns the repo dir. */
-function repoWith(files: Record<string, string>): string {
+const scanner = createRequire(import.meta.url)(SCANNER) as {
+  isTestFile(p: string): boolean;
+  scanFile(p: string, src: string): Array<{ path: string; line: number; label: string }>;
+};
+
+/**
+ * The files a LEXER case scans — no repository. Those cases (everything up to
+ * the git-behaviour block) exercise label extraction, which `scanFile` does
+ * in-process; building a repo and spawning the CLI per case cost ~130ms each.
+ */
+function repoWith(files: Record<string, string>): Record<string, string> {
+  return files;
+}
+
+/** Fresh git repo with the given files, all staged — for the git-behaviour cases. */
+function gitRepoWith(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "rg-label-"));
   tempDirs.push(dir);
   execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
@@ -32,8 +47,13 @@ function repoWith(files: Record<string, string>): string {
   return dir;
 }
 
-function scan(dir: string) {
-  return spawnSync("node", [SCANNER, dir], { cwd: dir, encoding: "utf8" });
+/** A repo dir runs the real CLI; a file table is scanned in-process, same exit/stderr shape. */
+function scan(target: string | Record<string, string>): { status: number | null; stderr: string } {
+  if (typeof target === "string") return spawnSync("node", [SCANNER, target], { cwd: target, encoding: "utf8" });
+  const found = Object.entries(target)
+    .filter(([path]) => scanner.isTestFile(path))
+    .flatMap(([path, src]) => scanner.scanFile(path, src));
+  return { status: found.length > 0 ? 1 : 0, stderr: found.map((v) => `  ${v.path}:${v.line}: ${v.label.slice(0, 60)}`).join("\n") };
 }
 
 test("English labels pass", () => {
@@ -398,7 +418,7 @@ test("Latin-with-diacritics and emoji labels pass (not flagged as non-English)",
 });
 
 test("scans STAGED content, not the working tree", () => {
-  const dir = repoWith({ "y.test.ts": "it('english staged', () => {});\n" });
+  const dir = gitRepoWith({ "y.test.ts": "it('english staged', () => {});\n" });
   // Dirty the working tree with a Chinese label WITHOUT staging it.
   writeFileSync(join(dir, "y.test.ts"), "it('未暂存的中文', () => {});\n");
   const r = scan(dir);
@@ -415,7 +435,7 @@ test("nothing staged → exit 0", () => {
 test("a staged test file with a NON-ASCII name is still scanned (git path quoting)", () => {
   // Default `git diff --name-only` C-quotes non-ASCII paths; the scanner must
   // use -z so `中文.test.ts` is recognized rather than silently skipped.
-  const dir = repoWith({ "中文.test.ts": "it('中文标签', () => {});\n" });
+  const dir = gitRepoWith({ "中文.test.ts": "it('中文标签', () => {});\n" });
   const r = scan(dir);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /中文标签/);
@@ -446,7 +466,7 @@ test("a staged path with leading/trailing/dir whitespace is read verbatim (no tr
   // legitimately space-padded paths (leading space, a trailing-space directory
   // segment) with ENGLISH labels pass cleanly (a trimming bug would mangle the
   // path and fail-close the commit).
-  const dir = repoWith({
+  const dir = gitRepoWith({
     " lead.test.ts": 'it("plain english ok", () => {});\n',
     "dir /trail.test.ts": 'it("another english label", () => {});\n',
   });
@@ -532,7 +552,7 @@ test("analyzeFile with a base reports only NEW or CHANGED labels", () => {
 });
 
 test("the hook judges only labels the commit adds or changes against HEAD", () => {
-  const dir = repoWith({ "h.test.ts": "it('历史用例', () => {});\n" });
+  const dir = gitRepoWith({ "h.test.ts": "it('历史用例', () => {});\n" });
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "init"], { cwd: dir, stdio: "ignore" });
   writeFileSync(join(dir, "h.test.ts"), "it('历史用例', () => {});\nit('adds an english case', () => {});\n");
   execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
@@ -546,7 +566,7 @@ test("the hook judges only labels the commit adds or changes against HEAD", () =
 });
 
 test("hook behavior unchanged: scanFile still returns violations only", () => {
-  const dir = repoWith({ "c.test.ts": "it('ceshi yonghu denglu', () => {});\n" });
+  const dir = gitRepoWith({ "c.test.ts": "it('ceshi yonghu denglu', () => {});\n" });
   // pinyin is Latin script: no deterministic check can see it.
   const r = scan(dir);
   assert.equal(r.status, 0, r.stderr);
