@@ -1230,7 +1230,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     cwd: () => cells.cwd,
     sessionId: () => cells.state.sessionId ?? undefined,
     refused: () => cells.state.exclusivityRefusal !== undefined,
-    askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
+    askChoice: (uiCtx, spec) => askChoice(uiCtx as { ui?: ChoiceUi }, spec),
     log,
   });
   sessionWorktree.register();
