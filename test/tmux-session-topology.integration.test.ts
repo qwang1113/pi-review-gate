@@ -55,8 +55,10 @@ const SOCKET = `rg-scope-lab-${process.pid}`;
 const SESSION_ID = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
 const OWN_SESSION = deriveSessionName("/tmp/pi-review-gate-lab", SESSION_ID)!;
 
+// `-f /dev/null`: a lab server must not source the user's ~/.tmux.conf (its
+// plugins were measured starting on every server start).
 function tmux(args: readonly string[]): string {
-  return execFileSync("tmux", ["-L", SOCKET, ...args], {
+  return execFileSync("tmux", ["-f", "/dev/null", "-L", SOCKET, ...args], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
@@ -115,7 +117,7 @@ function labScope(): LabScope {
  */
 function startLab(serverEnv: NodeJS.ProcessEnv = {}): void {
   try { tmux(["kill-server"]); } catch { /* no server yet */ }
-  execFileSync("tmux", ["-L", SOCKET, "new-session", "-d", "-x", "200", "-y", "50", "-s", "lab", "-c", "/tmp", "sleep", "600"], {
+  execFileSync("tmux", ["-f", "/dev/null", "-L", SOCKET, "new-session", "-d", "-x", "200", "-y", "50", "-s", "lab", "-c", "/tmp", "sleep", "600"], {
     stdio: "ignore",
     env: { ...process.env, ...serverEnv },
   });

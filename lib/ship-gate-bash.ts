@@ -391,6 +391,27 @@ export async function evaluateShipCommand(
   // run whose tests were not narrowed. A compound command is judged by its
   // strictest segment — `git commit && git push` must satisfy the push rule.
   const requireFullTests = ships.some((s) => requiresFullPrecommit(s.kind as ShipCommandKind));
+  // THE FULL SUITE, RUN BY THE GATE (2026-09-29, user decision): review rounds
+  // run only the related tests, so a push / PR usually finds no full PASS yet.
+  // When that is the ONLY thing missing for a repo, the gate runs it here
+  // (philosophy one) — never for a ship that another gate refuses anyway.
+  if (requireFullTests && !messageOnlyRewrite) {
+    for (const root of checkRoots) {
+      const st = deps.enforcementStateFor(root);
+      if (!st) continue;
+      const unmetWith = (full: boolean) => unmetRequirements(st, deps.headCommitTree(root), false, {
+        requireDocSync: projectConfig.docSync,
+        unreviewedCommits: deps.unreviewedTreesSince(root, st.review),
+        requireFullTests: full,
+      });
+      if (unmetWith(false).length > 0 || unmetWith(true).length === 0) continue;
+      await withSlowNotice(
+        shipNotice,
+        "review-gate: 这条 ship 命令需要全量 precommit，门禁正在跑全量测试…",
+        () => deps.runFullLane(root, ctx),
+      );
+    }
+  }
   for (const root of checkRoots) {
     const st = deps.enforcementStateFor(root);
     const fp = computeFingerprint(root);

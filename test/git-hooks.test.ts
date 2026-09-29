@@ -69,21 +69,6 @@ test("inside a review snapshot worktree → BLOCKED even without a sidecar (shar
   assert.equal(runPreCommit(plain).status, 0, "a plain subdir without a sidecar still allows");
 });
 
-test("gates met → allow", () => {
-  const dir = makeGitRepo();
-  // Need a dirty file so fingerprint doesn't match clean state.
-  // Use withChangedFile so state's fingerprint matches the current worktree.
-  writeState(dir, readyState(dir), /*withChangedFile=*/ true);
-  // READY review + PASS precommit with fingerprint "x" won't match
-  // current worktree fingerprint → blocked by fingerprint mismatch.
-  // We need the fingerprint in state to match. Let's set it to a dummy
-  // and test with hasCodeChange=false (pre-existing clean work).
-  const res = runPreCommit(dir);
-  // fingerprint mismatch blocks
-  assert.equal(res.status, 1);
-  assert.match(res.stderr, /fingerprint mismatch/);
-});
-
 test("gates met + matching fingerprints → allow", () => {
   const dir = makeGitRepo();
   // Clean repo, no changes → fingerprint is stable.
@@ -188,8 +173,10 @@ test("SECURITY: auto-classified explore must NOT make the hook advisory", () => 
   }
 });
 
+// A shape violation exits BEFORE any git call (scripts/pre-commit-check.cjs's
+// shape check), so the fail-closed cases below use a plain dir, not a repo.
 test("SECURITY: forged taskModeSource values fail closed", () => {
-  const dir = makeGitRepo();
+  const dir = makeDir();
   writeState(dir, {
     ...readyState(dir),
     taskMode: "explore",
@@ -204,7 +191,7 @@ test("SECURITY: forged taskModeSource values fail closed", () => {
 
 test("SECURITY: unknown taskMode values fail closed (whitelist, incl. retired 'readonly')", () => {
   for (const taskMode of ["free", "readonly"]) {
-    const dir = makeGitRepo();
+    const dir = makeDir();
     writeState(dir, {
       ...readyState(dir),
       taskMode,
@@ -244,7 +231,7 @@ test("pausedQuestion: gates unmet stay blocked even while paused (no fail-open)"
 
 test("SECURITY: malformed pausedQuestion shapes fail closed (tampered sidecar)", () => {
   for (const bad of ["str", 42, { question: 1, at: "t" }, { question: "q" }, { at: "t" }]) {
-    const dir = makeGitRepo();
+    const dir = makeDir();
     writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false, pausedQuestion: bad });
     const res = runPreCommit(dir);
     assert.equal(res.status, 1, JSON.stringify(bad));
@@ -290,7 +277,7 @@ test("sessionEditedFiles: valid shape accepted; malformed shapes fail closed", (
   assert.equal(runPreCommit(ok).status, 0);
 
   for (const bad of ["str", 42, [1], ["ok", null]]) {
-    const dir = makeGitRepo();
+    const dir = makeDir();
     writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false, sessionEditedFiles: bad });
     const res = runPreCommit(dir);
     assert.equal(res.status, 1, JSON.stringify(bad));
@@ -308,7 +295,7 @@ test("SECURITY: malformed scopeLimit shapes fail closed (tampered sidecar)", () 
     { preexistingFiles: [], sessionFiles: [] },
     { sessionFiles: [], at: "t" },
   ]) {
-    const dir = makeGitRepo();
+    const dir = makeDir();
     writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false, scopeLimit: bad });
     const res = runPreCommit(dir);
     assert.equal(res.status, 1, JSON.stringify(bad));

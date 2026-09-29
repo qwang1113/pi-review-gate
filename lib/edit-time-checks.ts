@@ -4,21 +4,20 @@
  *
  * The git-hook scanner (scripts/scan-test-labels.cjs) stays the deterministic,
  * zero-dependency backstop at commit time; here the SAME lexer runs at edit
- * time for immediate feedback, plus the flash semantic layer for the Unicode
- * blind spot (romanized non-English labels). Both are tighten-only; scanner
- * load/parse failure → pass (hook still enforces).
+ * time for immediate feedback, judging only the labels this edit adds or
+ * changes. No model call (2026-09-29, user decision: an arbiter window per
+ * test edit blocked the editor for minutes); a misjudgement is appealed with
+ * `request_arbitration`. Scanner load/parse failure → pass (hook still enforces).
  */
 
 import { readFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 
 import { projectEditedContent } from "./edit-projection.ts";
-import { classifyNonEnglish, createVerdictMemo, type LlmClassifier } from "./llm-classify.ts";
-import { statusNotice, withSlowNotice, type SlowNoticeSink } from "./progress-stream.ts";
+import { statusNotice, type SlowNoticeSink } from "./progress-stream.ts";
 import { l5BlockReason } from "./lang-detect.ts";
 import { normalizeSensitivePath } from "./sensitive-grant.ts";
 import type { AppealKind } from "./text-appeal.ts";
-import type { ProjectConfig } from "./project-config.ts";
 import type { SessionHost } from "./session-host.ts";
 
 /** Status-bar line the gate owns for its LLM-guard notices. */
@@ -26,8 +25,6 @@ const LLM_STATUS_KEY = "review-gate-llm";
 
 /** What the edit-time checks need from the session beyond the shared host. */
 export interface EditTimeCheckDeps {
-  projectConfig(): ProjectConfig;
-  classifier(): LlmClassifier;
   /** The A-class refusal (appealable; a granted pass for this exact text lets it through). */
   refuseText(kind: AppealKind, text: string, reason: string, ctx: unknown): string | undefined;
 }
@@ -40,18 +37,17 @@ export function createEditTimeChecks(host: SessionHost, deps: EditTimeCheckDeps)
    * `'ceshi denglu'`) still yields a file where the lexer sees the
    * surrounding `it(...)` call.
    */
-  function editedTestContent(input: Record<string, unknown>, path: string): string {
-    return projectEditedContent(input, () => {
-      // P2 fix: resolve relative tool paths against the SESSION cwd, not the
-      // extension host's process.cwd() (they can differ under pi --cwd).
-      const abs = path.startsWith("/") ? path : pathJoin(host.repos().cwd, path);
-      try { return readFileSync(abs, "utf8"); } catch { return undefined; }
-    });
+  /** The file as it is on disk BEFORE this edit (a tool_call hook runs first). */
+  function currentContent(path: string): string | undefined {
+    // P2 fix: resolve relative tool paths against the SESSION cwd, not the
+    // extension host's process.cwd() (they can differ under pi --cwd).
+    const abs = path.startsWith("/") ? path : pathJoin(host.repos().cwd, path);
+    try { return readFileSync(abs, "utf8"); } catch { return undefined; }
   }
 
-  /** Cache of romanized-non-English verdicts, keyed by the exact label set
-   *  (lib/llm-classify.ts documents why a failed call is never remembered). */
-  const labelCheckMemo = createVerdictMemo();
+  function editedTestContent(input: Record<string, unknown>, path: string): string {
+    return projectEditedContent(input, () => currentContent(path));
+  }
 
   /**
    * The status bar of a HOOK's context, as a slow-notice sink.
@@ -69,13 +65,11 @@ export function createEditTimeChecks(host: SessionHost, deps: EditTimeCheckDeps)
   async function checkTestLabels(
     path: string,
     content: string,
-    /** The hook's context: status-bar notices, and persisting a spent appeal pass. */
+    /** The hook's context: persisting a spent appeal pass. */
     ctx: unknown,
-    /** Status-bar sink: an L6 classification slower than ~3s says so. */
-    notice?: SlowNoticeSink,
   ): Promise<string | undefined> {
     if (!content) return undefined;
-    let analyze: ((p: string, src: string) => { violations: Array<{ line: number; label: string }>; latinLabels: Array<{ line: number; label: string }> }) | undefined;
+    let analyze: ((p: string, src: string, baseSrc?: string) => { violations: Array<{ line: number; label: string }> }) | undefined;
     let isTest: ((p: string) => boolean) | undefined;
     try {
       const { createRequire } = await import("node:module");
@@ -104,36 +98,13 @@ export function createEditTimeChecks(host: SessionHost, deps: EditTimeCheckDeps)
     // what the agent typed and can act on.
     if (!analyze || !isTest || !isTest(normalizeSensitivePath(path, host.repos().cwd))) return undefined;
     let res: ReturnType<typeof analyze>;
-    try { res = analyze(path, content); } catch { return undefined; }
-    if (res.violations.length > 0) {
-      const v = res.violations[0];
-      return deps.refuseText("test-label", v.label,
-        `${l5BlockReason({ kind: "test-label", text: v.label })} 位置 ${path}:${v.line}。` +
-        "测试描述必须是英文；确属特例时在上一行加 `// review-gate: allow-non-english`。", ctx);
-    }
-    // Unicode check passed — flash semantic layer for romanized non-English.
-    if (deps.projectConfig().llmGuards.englishCheck && res.latinLabels.length > 0) {
-      const labels = res.latinLabels.map((l) => l.label);
-      // Memoized on the exact label SET: an agent editing the same test file
-      // repeatedly re-sent an identical label list and blocked each edit on a
-      // ~2s model round-trip for an answer that cannot have changed.
-      const key = labelCheckMemo.key(labels);
-      let verdict = labelCheckMemo.get(key);
-      if (verdict === undefined) {
-        verdict = await withSlowNotice(
-          notice,
-          "review-gate: 正在做 L6 测试标签分类（语义判定）…",
-          () => classifyNonEnglish(deps.classifier(), labels),
-        );
-        labelCheckMemo.remember(key, verdict);
-      }
-      if (verdict === true) {
-        return deps.refuseText("test-label", labels.join("\n"),
-          `test label reads as romanized non-English (L6, semantic check) in ${path}. ` +
-          "测试描述必须是英文；确属特例时用 `// review-gate: allow-non-english` 豁免。", ctx);
-      }
-    }
-    return undefined;
+    try { res = analyze(path, content, currentContent(path)); } catch { return undefined; }
+    const v = res.violations[0];
+    if (v === undefined) return undefined;
+    return deps.refuseText("test-label", v.label,
+      `${l5BlockReason({ kind: "test-label", text: v.label })} 位置 ${path}:${v.line}。` +
+      "测试描述必须是英文；确属特例时在上一行加 `// review-gate: allow-non-english`，" +
+      "误判就用 `request_arbitration` 申诉。", ctx);
   }
 
   return { editedTestContent, checkTestLabels, llmNotice };

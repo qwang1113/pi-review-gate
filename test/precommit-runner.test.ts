@@ -1,7 +1,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, globSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -172,6 +172,16 @@ test("node --test with ** glob → loud glob-trap warning on stderr", () => {
   assert.match(out, /does NOT recurse/i);
 });
 
+test("node --test with a QUOTED ** glob → no glob-trap warning (node expands it)", () => {
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    scripts: { test: `node --test "test/**/*.test.js" || true` },
+  });
+  const { out } = run(dir);
+  assert.doesNotMatch(out, /\[glob-trap\]/);
+});
+
 test("node --test with $(find ...) → no glob-trap warning", () => {
   const dir = makeDir({
     name: "t",
@@ -194,14 +204,14 @@ test("own package.json test script expands to every test file under /bin/sh", ()
   );
   const script: string = pkg.scripts.test;
   assert.ok(script.startsWith("node --test "), `unexpected script shape: ${script}`);
-  const args = script.slice("node --test ".length);
-  const expanded = execFileSync("/bin/sh", ["-c", `printf '%s\\n' ${args}`], {
+  // What node receives after /bin/sh: the patterns must arrive QUOTED (sh's
+  // `**` is not recursive), and node's own glob then expands them.
+  const args = execFileSync("/bin/sh", ["-c", `printf '%s\\n' ${script.slice("node --test ".length)}`], {
     cwd: ROOT,
     encoding: "utf8",
-  })
-    .split("\n")
-    .filter(Boolean)
-    .sort();
+  }).split("\n").filter((a) => a !== "" && !a.startsWith("-"));
+  assert.ok(args.every((a) => a.includes("**")), `the patterns must reach node unexpanded: ${args.join(" ")}`);
+  const expanded = [...new Set(args.flatMap((p) => globSync(p, { cwd: ROOT })))].sort();
 
   const onDisk = execFileSync(
     "find",

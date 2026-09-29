@@ -50,11 +50,15 @@ const NODE_TEST = /(?:^|\s)node\s+--test(?:\s|$)/;
  * 2026-09-08). */
 const FIND_EXPANDED = /node\s+--test[^;&|\n]*\$\(find\b/;
 
+/** A recursive glob (`node --test "test/**\/*.test.ts"`) — this repo's own full
+ * run since 2026-09-29. Its `.ts` would otherwise read as a file target. */
+const GLOB_TREE = /node\s+--test[^;&|\n]*\*\*\//;
+
 /** True when the command runs the FULL test suite (no target file). */
 export function looksLikeFullSuiteRun(command: string): boolean {
   if (!command) return false;
   for (const seg of segments(command)) {
-    if (FIND_EXPANDED.test(seg)) return true;
+    if (FIND_EXPANDED.test(seg) || GLOB_TREE.test(seg)) return true;
     if (NODE_TEST.test(seg) && !hasFileToken(seg)) return true;
     if (PM_TEST.test(seg) && !hasFileToken(seg)) return true;
   }

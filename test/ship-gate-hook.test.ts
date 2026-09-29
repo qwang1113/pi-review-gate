@@ -78,6 +78,7 @@ function makeDeps(over: Partial<ShipGateHookDeps> & { taskMode?: () => TaskMode 
     loopGoalConfirmed: () => true,
     precommitLaneRunning: () => false,
     waitForQuietLane: async () => {},
+    runFullLane: async () => {},
     // No delivery contract by default: every test written before stations
     // existed must keep measuring exactly what it measured then.
     deliveryStation: () => undefined,
@@ -614,6 +615,50 @@ test("D08: a lane that lands FAIL blocks with FAILED, never 'has not run'", asyn
   assert.match(out!.reason, /precommit FAILED/);
   assert.doesNotMatch(out!.reason, /has not run/);
   assert.equal(waited(), 1);
+});
+
+// The full suite, run by the gate (2026-09-29): a push whose ONLY gap is a
+// full run gets one; a push another gate refuses anyway never pays for it.
+function fullRunDeps(state: GateState, landsAs: "PASS" | "FAIL") {
+  const base = defaultProjectConfig();
+  let ran = 0;
+  const r = makeDeps({
+    enforcementStateFor: () => state,
+    stateForRepo: () => state,
+    runFullLane: async () => {
+      ran += 1;
+      state.precommit = landsAs === "PASS"
+        ? { verdict: "PASS", fingerprint: "t", at: "2026-09-29T00:00:01.000Z", testScope: "full", mode: "full" }
+        : { verdict: "FAIL", fingerprint: "t", at: "2026-09-29T00:00:01.000Z", mode: "full" };
+    },
+    projectConfig: () => ({ ...base, llmGuards: { ...base.llmGuards, aiAttribution: false, englishCheck: false, shipDetect: false } }),
+  });
+  return { r, ran: () => ran };
+}
+
+test("a push with only a related-tests PASS gets a full run from the gate, then ships on its PASS", async () => {
+  const st = shippableState();
+  st.precommit = { verdict: "PASS", fingerprint: "t", at: "2026-09-29T00:00:00.000Z", testScope: "related", mode: "fast" };
+  const { r, ran } = fullRunDeps(st, "PASS");
+  assert.equal(await evaluateToolCall(r.deps, bashCall(PUSH_CMD), {}), undefined);
+  assert.equal(ran(), 1);
+  const commitOnly = fullRunDeps({ ...shippableState(), precommit: { ...st.precommit, testScope: "related" } }, "PASS");
+  assert.equal(await evaluateToolCall(commitOnly.r.deps, bashCall(COMMIT_CMD), {}), undefined);
+  assert.equal(commitOnly.ran(), 0, "a commit accepts the related-tests PASS — no full run");
+});
+
+test("a full run that FAILS blocks the push; a push refused for another reason never starts one", async () => {
+  const st = shippableState();
+  st.precommit = { verdict: "PASS", fingerprint: "t", at: "2026-09-29T00:00:00.000Z", testScope: "related", mode: "fast" };
+  const failing = fullRunDeps(st, "FAIL");
+  const out = await evaluateToolCall(failing.r.deps, bashCall(PUSH_CMD), {});
+  assert.equal(out?.block, true);
+  assert.match(out!.reason, /precommit FAILED/);
+  const unreviewed = { ...shippableState(), review: { verdict: "PENDING" as const, fingerprint: null, at: null } };
+  unreviewed.precommit = { ...st.precommit };
+  const refused = fullRunDeps(unreviewed, "PASS");
+  assert.equal((await evaluateToolCall(refused.r.deps, bashCall(PUSH_CMD), {}))?.block, true);
+  assert.equal(refused.ran(), 0, "no 60-second suite for a push the review gate refuses anyway");
 });
 
 // ---------------------------------------------------------------------------

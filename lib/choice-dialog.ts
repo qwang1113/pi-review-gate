@@ -101,13 +101,7 @@ export interface AskChoiceOpts {
    * `undefined`, and `lib/consent-request-tools.ts` must tell them apart — a
    * DECLINE locks a request for the session, and a timeout is not a decline.
    */
-  onUndecided?: () => void;
-  /**
-   * `false` keeps the arbiter from standing in after thirty minutes — for a
-   * question a machine must not answer (the stage checklist, an ask_user
-   * authorization question). Default: the proxy may answer.
-   */
-  proxy?: boolean;
+  onUndecided?: (proxyFailure?: string) => void;
   /**
    * Called when the ARBITER, not the user, produced the returned answer (N6).
    * The answer is a plain string either way, so this is how a caller that

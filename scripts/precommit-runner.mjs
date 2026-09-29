@@ -46,6 +46,7 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { StringDecoder } from "node:string_decoder";
 import { readPrecommitConfig } from "./precommit-config.mjs";
+import { relatedNodeTests } from "./precommit-related.mjs";
 import {
   detectsMdConsumingBuild,
   intersectWithScriptPaths,
@@ -86,6 +87,9 @@ function argOf(flag, dflt) {
 // authorize a publish — so a typo costs a narrowed run, never a wider claim.
 const mode = argOf("--mode", "fast") === "full" ? "full" : "fast";
 const cwd = argOf("--cwd", process.cwd());
+// The tree the previous lane PASSED on — the fast lane relates only what
+// changed since (see changedFiles).
+const sinceTree = argOf("--since", null);
 const asJson = args.includes("--json");
 // Receipt mode: when the extension spawns this runner directly it passes a
 // private receipt path + nonce (never exposed to the model). The runner writes
@@ -513,12 +517,14 @@ function collectStep(stepName, scriptNames) {
   }
 
   // PR #7 lesson 1: warn on `node --test <glob with **>` — /bin/sh won't recurse.
+  // A QUOTED pattern reaches node unexpanded and node's own glob recurses, so
+  // only a bare `**` token is the trap.
   const body = scripts[found];
-  if (/node\s+--test\s+[^&|;]*\*\*/.test(body)) {
+  if (/node\s+--test\b/.test(body) && body.split(/\s+/).some((t) => t.includes("**") && !/^["']/.test(t))) {
     console.error(
       `⚠️  [glob-trap] script "${found}" passes a ** glob to node --test — ` +
         `npm runs scripts via /bin/sh where ** does NOT recurse. ` +
-        `Nested tests may be silently skipped. Use $(find ...) instead.`,
+        `Nested tests may be silently skipped. Quote the pattern (node expands it) or use $(find ...).`,
     );
   }
 
@@ -621,10 +627,44 @@ function changedFiles() {
         files.push(path);
       }
     }
-    return files.map((f) => join(repoRoot, f));
+    // PLUS WHAT WAS COMMITTED SINCE THE LAST VERIFIED TREE (2026-09-29):
+    // judge_submit commits the checkpoint BEFORE its lane runs, so the worktree
+    // alone is clean and a fast lane would relate nothing. `--since` is the
+    // tree the previous lane passed on (the gate's own record); without it the
+    // branch base, a superset — only ever MORE tests. A since-tree git cannot
+    // read falls back to the branch base too.
+    const base = sinceTreeReadable() ? sinceTree : branchBase();
+    if (base !== null) {
+      const committed = execFileSync("git", ["diff", "--name-only", "-z", base, "HEAD"], {
+        cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024,
+      });
+      files.push(...committed.split("\0").filter((f) => f && !f.startsWith(".pi/") && !f.startsWith(".pi-subagents/")));
+    }
+    return [...new Set(files)].map((f) => join(repoRoot, f));
   } catch {
     return null;
   }
+}
+
+function sinceTreeReadable() {
+  if (!sinceTree || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sinceTree)) return false;
+  try {
+    execFileSync("git", ["cat-file", "-e", `${sinceTree}^{tree}`], { cwd, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** merge-base with the default branch, or null (same candidates as lib/review-baseline.ts). */
+function branchBase() {
+  for (const ref of ["origin/HEAD", "main", "origin/main", "master", "origin/master"]) {
+    try {
+      const mb = execFileSync("git", ["merge-base", ref, "HEAD"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      if (mb) return mb;
+    } catch { /* next candidate */ }
+  }
+  return null;
 }
 
 /**
@@ -667,8 +707,12 @@ function narrowTestStep(entry) {
     changedFiles: files,
     fullCommand: entry.command,
     resolveBin: resolveRunnerBin,
+    relatedNodeTests: (changed, testGlobs) => relatedNodeTests({ repoRoot, cwd, changedFiles: changed, testGlobs }),
   });
 
+  if (fast.testScope === "full") {
+    return { testScope: "full", note: `fast lane ran the full suite: ${fast.reason}` };
+  }
   if (fast.testScope !== "related") {
     entry.command = null;
     entry.reason = `fast lane: ${fast.reason}`;
@@ -832,7 +876,7 @@ function collectTestConfigured() {
   // as "not a single simple command" (silent under-run).
   entry.body = body;
   const parsed = parseTestScript(body);
-  const narrowable = parsed !== null && (parsed.runner === "jest" || parsed.runner === "vitest") &&
+  const narrowable = parsed !== null && (parsed.runner === "jest" || parsed.runner === "vitest" || parsed.runner === "node-test") &&
     resolveRunnerBin(parsed.runner) !== null;
   if (!narrowable) {
     testScope = "full";

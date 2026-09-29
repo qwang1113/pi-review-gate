@@ -14,6 +14,8 @@ import { mergeHierarchySlice, readHierarchySlice, writeHierarchySlice } from "..
 import { createJudgeRegistry, HIERARCHY_FILENAME } from "../lib/judge-registry-host.ts";
 import { registerJudge, removeJudge, type JudgeEntry } from "../lib/hierarchy.ts";
 import type { SessionHost } from "../lib/session-host.ts";
+import { appendRecord, judgeChannelTarget } from "../lib/channel-io.ts";
+import { memoryChannelIO } from "./helpers/fake-orchestration.ts";
 
 function entry(judgeId: string, openerId: string, repoRoot: string, over: Partial<JudgeEntry> = {}): JudgeEntry {
   return { judgeId, openerId, role: "goal-auditor", repoRoot, title: "t", sessionDir: "/tmp/s", spawnedAt: "2026-09-27T00:00:00.000Z", ...over };
@@ -187,4 +189,34 @@ test("registry: a removal that missed the lock is not undone by a reload", () =>
   writeFileSync(`${fileOf(root)}.lock`, "999999999");
   assert.equal(p.reg.persistJudgeHierarchy(), true);
   assert.deepEqual(idsOnDisk(root), []);
+});
+
+test("a heartbeat is not activity: a judge's silence is measured from its last PROGRESS (2026-09-29)", () => {
+  const io = memoryChannelIO(() => Date.now());
+  const host = {
+    state: () => ({ sessionId: "op" }),
+    repos: () => ({ cwd: "/r", primary: "/r" }),
+    log: () => {},
+    ctx: () => undefined,
+  } as unknown as SessionHost;
+  const reg = createJudgeRegistry(host, {
+    runTmux: () => ({ ok: true, stdout: "", stderr: "" }),
+    channelIO: io, // in memory: the default-home path below never touches disk
+    roundBindingOf: () => ({ kind: "cursor-only" }) as never,
+    copilotWaitSince: () => undefined,
+  });
+  const judge = entry("rg-goal-auditor-hb", "op-hb-test", "/r");
+  const target = judgeChannelTarget(judge.openerId, judge.judgeId);
+  const progress = "2026-09-27T10:19:00.000Z";
+  // The measured shape: concluded at 10:19, then an `idle` heartbeat every minute.
+  for (const at of ["2026-09-27T10:20:00.000Z", "2026-09-29T10:00:00.000Z"]) {
+    appendRecord(io, target, { kind: "state", from: "child", at, state: "idle", lastProgressAt: progress });
+  }
+  assert.equal(reg.channelLastActivity(judge), progress, "two days of heartbeats do not move it");
+  // No progress stamp at all ⇒ any record's time, as before.
+  const bare = entry("rg-goal-auditor-bare", "op-hb-test", "/r");
+  appendRecord(io, judgeChannelTarget(bare.openerId, bare.judgeId), {
+    kind: "state", from: "child", at: "2026-09-29T10:00:00.000Z", state: "working",
+  });
+  assert.equal(reg.channelLastActivity(bare), "2026-09-29T10:00:00.000Z");
 });

@@ -83,6 +83,8 @@ export interface ShipGateBashDeps {
   precommitLaneRunning(root: string): boolean;
   /** D08: resolve once no lane is running for this repo (it has landed). */
   waitForQuietLane(root: string): Promise<void>;
+  /** Run the FULL lane in the foreground and resolve when it has landed (lib/precommit-lane.ts). */
+  runFullLane(root: string, ctx: unknown): Promise<void>;
   /**
    * WHERE THIS ROUND STOPS, for one repo — or `undefined` when no delivery
    * contract applies to this session at all.

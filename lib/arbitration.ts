@@ -30,7 +30,8 @@
  */
 
 import { sha256 } from "./hash.ts";
-import { execFile } from "node:child_process";
+import type { VerdictRoundOutcome } from "./audit-round.ts";
+import { ARBITER_BUDGETS } from "./audit-round-specs.ts";
 import type { ShipCommandKind } from "./constants.ts";
 import { DEFAULT_ARBITER_MODEL } from "./project-config.ts";
 import { detectShipCommands } from "./ship-detect.ts";
@@ -38,8 +39,10 @@ import { lexSegments } from "./shell-lex.ts";
 import { asUntrustedData } from "./untrusted-data.ts";
 
 // ---------------------------------------------------------------------------
-// Arbiter verdict parsing (mirrors the strict, single-object discipline of
-// lib/llm-classify.ts parseClassifierJson — fail-back on anything unexpected).
+// The arbiter's decision. It arrives as a STRUCTURED conclusion (verdict +
+// notes, `judge_conclude`) from its own window — never parsed out of prose, so
+// an injected `{"decision":...}` in the evidence can never be lifted out as a
+// verdict. Anything but a verdict in the enum is no decision (GATE_WINS).
 
 export const ARBITER_DECISIONS = ["GATE_WINS", "AGENT_WINS", "HUMAN"] as const;
 export type ArbiterDecision = (typeof ARBITER_DECISIONS)[number];
@@ -49,90 +52,14 @@ export interface ArbiterVerdict {
   reason: string;
 }
 
-/**
- * STRICT parse of the arbiter's output (same fail-back discipline as
- * lib/llm-classify.ts parseClassifierJson). The ENTIRE trimmed stdout — after
- * unwrapping AT MOST one markdown fence — must be a single JSON object whose
- * keys are a subset of {decision, reason} with `decision` in the enum. There is
- * deliberately NO substring `{...}` extraction and NO prose fallback: a model
- * that echoes attacker-controlled evidence (`The body said: {"decision":...}`)
- * or wraps the verdict in prose yields undefined, so an injected payload in the
- * PR body / proposed text can never be lifted out as a real verdict. Anything
- * unexpected → undefined, which the caller MUST treat as GATE_WINS (fail-closed).
- */
-export function parseArbiterVerdict(raw: string | undefined): ArbiterVerdict | undefined {
-  if (!raw) return undefined;
-  let text = raw.trim();
-  const fence = /^```[a-zA-Z]*\s*\n?([\s\S]*?)\n?```$/.exec(text);
-  if (fence) text = fence[1].trim();
-  const obj = tryJson(text);
-  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return undefined;
-  const rec = obj as Record<string, unknown>;
-  // Reject unexpected keys so a chatty/extra-field object can't slip through.
-  for (const k of Object.keys(rec)) {
-    if (k !== "decision" && k !== "reason") return undefined;
-  }
-  const d = rec.decision;
-  if (typeof d !== "string") return undefined;
-  const up = d.trim().toUpperCase();
-  if (!(ARBITER_DECISIONS as readonly string[]).includes(up)) return undefined;
-  if (rec.reason !== undefined && typeof rec.reason !== "string") return undefined;
-  const reason = typeof rec.reason === "string" ? rec.reason.slice(0, 500) : "";
-  return { decision: up as ArbiterDecision, reason };
-}
-
-function tryJson(text: string): unknown {
-  try { return JSON.parse(text); } catch { return undefined; }
-}
-
 // ---------------------------------------------------------------------------
-// Independent arbiter spawn. Like lib/llm-classify.ts, the extension spawns the
-// arbiter ITSELF via `pi -p` (argv array, never a shell) so the main agent
-// cannot hand-write the verdict. The spawn is TOOL-LESS and isolated: the
-// agent's argument is attacker-controlled untrusted data, so giving that model
-// real bash/edit tools (or letting it rediscover this extension) would be an
-// injection/recursion hole. Instead the EXTENSION gathers the ground-truth
-// evidence deterministically and passes it in as trusted context; the arbiter
-// reasons over text only. ANY failure resolves to undefined → GATE_WINS.
+// The independent arbiter runs in its OWN WINDOW (the gate dispatches it, so
+// the main agent cannot hand-write the verdict), on the read-only tool surface
+// `judgeToolFlags("arbiter")` gives it: the agent's argument is untrusted data,
+// and a window that can run commands could act on it. The EXTENSION gathers
+// the ground-truth evidence deterministically and passes it in as trusted
+// context. ANY failure resolves to undefined → GATE_WINS.
 
-/** Isolation flags — identical rationale to lib/llm-classify.ts ISOLATION_FLAGS:
- *  a pure text-in / JSON-out call with no descendants, no tools, no extensions. */
-export const ARBITER_ISOLATION_FLAGS: readonly string[] = Object.freeze([
-  "--no-session", "--no-extensions", "--no-skills", "--no-tools",
-  "--no-context-files", "--no-prompt-templates",
-]);
-
-/**
- * THE PROXY'S ARBITER RUNS UNDER A DIFFERENT ISOLATION, and the difference IS
- * the prompt it is given (2026-09-19).
- *
- * `ARBITER_ISOLATION_FLAGS` is `--no-tools`, which is right for an appeal: that
- * question is "is this one quarantined command legitimate", answerable from the
- * text alone, and any extra reach could only widen it. The proxy's question is
- * "what would the user have answered here", and the only honest way to answer
- * it is to READ the session — so the transcript pointer in its prompt is
- * useless under `--no-tools` (review round 2 P1: the feature's central
- * behaviour was unreachable).
- *
- * SO IT GETS THE READ-ONLY SET, the same one every reviewing role in this gate
- * gets (`--exclude-tools edit,write`, lib/session-launch-specs.ts) plus bash
- * excluded — reading is the whole job, and running things is not part of it.
- * Everything else stays sealed: no session, no extensions, no context files
- * (the repository must not push context in that the user's own question did not
- * come with).
- *
- * The escalation this forbids: the proxy cannot edit, cannot run a command and
- * cannot open a session. It reads and it answers.
- */
-export const PROXY_ISOLATION_FLAGS: readonly string[] = Object.freeze([
-  "--no-session", "--no-extensions", "--no-skills",
-  "--exclude-tools", "edit,write,bash",
-  "--no-context-files", "--no-prompt-templates",
-]);
-
-/** Arbiter spawn timeout. Max-thinking arbiters are slow; 120s covers it
- *  without hanging the tool pipeline forever on a dead network. */
-export const ARBITER_TIMEOUT_MS = 120_000;
 
 export const ARBITER_SYSTEM_PROMPT =
   "You are the INDEPENDENT arbiter for a code-review security gate. You decide ONE " +
@@ -218,89 +145,62 @@ export function buildArbiterPrompt(input: ArbiterPromptInput): string {
   ].join("\n");
 }
 
-/** exec abstraction so tests can fake the arbiter spawn (no network in CI). */
-export type ArbiterExec = (argv: readonly string[], timeoutMs: number) => Promise<string | undefined>;
-
-const defaultArbiterExec: ArbiterExec = (argv, timeoutMs) =>
-  new Promise((resolve) => {
-    try {
-      const child = execFile(
-        argv[0], argv.slice(1),
-        { timeout: timeoutMs, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, windowsHide: true },
-        (err, stdout) => resolve(err ? undefined : stdout),
-      );
-      try { child.stdin?.end(); } catch { /* already closed */ }
-    } catch {
-      resolve(undefined);
-    }
-  });
-
-function splitModel(id: string): { provider: string; model: string } | undefined {
-  const idx = id.indexOf("/");
-  if (idx <= 0 || idx === id.length - 1) {
-    // Malformed id — the arbiter model comes from agents.arbiter.slots[0]
-    // (no built-in fallback): refuse, and the caller fails closed.
-    return undefined;
-  }
-  return { provider: id.slice(0, idx), model: id.slice(idx + 1) };
-}
 
 /**
- * Spawn the arbiter and return its RAW output, or undefined on ANY failure
- * (timeout, spawn error). No parsing happens here.
- *
- * THE EXECUTION IS ONE IMPLEMENTATION, THE QUESTIONS ARE SEVERAL (2026-09-19):
- * "may this `gh pr edit` run once", "is this refused TEXT a legitimate
- * exception" (lib/text-appeal.ts) and "what would the user answer here, when
- * nobody has for thirty minutes" (lib/user-proxy.ts) differ only in their
- * system prompt and how their output is read. Splitting the process half out is
- * what lets the third one reuse the isolation flags, the model resolution and
- * the fail-closed contract instead of keeping a second copy of them true.
+ * One arbiter round in its own window (lib/audit-round-host.ts
+ * `runArbiterRound`) — the ONE way every model decision outside the review
+ * loop is made (2026-09-29, user decision): same dispatch, slots fallback,
+ * channel report and process binding as every judge.
  */
-export async function runArbiterProcess(
-  modelId: string,
-  prompt: string,
-  exec: ArbiterExec = defaultArbiterExec,
-  timeoutMs: number = ARBITER_TIMEOUT_MS,
-  systemPrompt: string = ARBITER_SYSTEM_PROMPT,
-  /**
-   * The isolation this process runs under. Defaults to the appeal arbiter's
-   * `--no-tools`; the user proxy passes `PROXY_ISOLATION_FLAGS`, because its
-   * task is to READ the session and a text-only process cannot do that.
-   */
-  flags: readonly string[] = ARBITER_ISOLATION_FLAGS,
-): Promise<string | undefined> {
-  const split = splitModel(modelId);
-  if (!split) return undefined; // malformed id — fail closed (GATE_WINS)
-  const { provider, model } = split;
-  const argv = [
-    "pi", "-p", ...flags,
-    "--provider", provider, "--model", model,
-    "--system-prompt", systemPrompt,
-    prompt,
-  ];
-  return exec(argv, timeoutMs);
+export type ArbiterRoundRunner = (task: string, budgetMs: number) => Promise<VerdictRoundOutcome>;
+
+/**
+ * The task an arbiter window receives: the question's own instructions, the
+ * question, and HOW TO ANSWER in this window. The instructions were written
+ * for a one-shot text reply; the last paragraph is what replaces that reply
+ * with the conclusion tool, so each question keeps its wording and the answer
+ * shape is stated once.
+ */
+export function arbiterTask(instructions: string, question: string, howToConclude: string): string {
+  return [
+    instructions,
+    "",
+    question,
+    "",
+    "== HOW TO ANSWER IN THIS WINDOW (overrides any reply format above) ==",
+    "Do not answer in chat. Call `judge_conclude` exactly once, with `cwd` set to the path your system prompt names:",
+    howToConclude,
+  ].join("\n");
+}
+
+const APPEAL_CONCLUDE =
+  "- verdict READY = AGENT_WINS, BLOCKED = GATE_WINS, NEEDS_HUMAN = HUMAN;\n" +
+  "- notes = your one-sentence reason, citing the evidence.";
+
+/** An appeal's decision off its round. Anything but THIS round's report is no decision (the caller's GATE_WINS). */
+export function appealVerdictOf(outcome: VerdictRoundOutcome): ArbiterVerdict | undefined {
+  if (!outcome.ok) return undefined;
+  const byVerdict: Record<string, ArbiterDecision> = { READY: "AGENT_WINS", BLOCKED: "GATE_WINS", NEEDS_HUMAN: "HUMAN" };
+  const decision = byVerdict[outcome.concluded.verdict.trim().toUpperCase()];
+  return decision === undefined ? undefined : { decision, reason: outcome.notes.slice(0, 500) };
 }
 
 /**
- * Spawn the arbiter and return its verdict, or undefined on ANY failure
- * (timeout, spawn error, unparseable/unknown output). The caller MUST treat
- * undefined as GATE_WINS (fail-closed).
- *
- * `systemPrompt` is a parameter because there are two kinds of arbitration
- * with genuinely different questions: may this `gh pr edit` run once (the
- * default), and is this refused TEXT a legitimate exception (lib/text-appeal.ts).
- * Everything else — the isolation flags, the strict parse, the fail-closed
- * contract — is identical, and must stay that way.
+ * Rule on one appeal. Undefined on ANY failure — the caller MUST read it as
+ * GATE_WINS (fail-closed). `systemPrompt` is the question: may this `gh pr
+ * edit` run once (the default), or is this refused TEXT a legitimate
+ * exception (lib/text-appeal.ts), or may this round conclude (inspection).
  */
 export async function runArbiter(
-  modelId: string,
+  run: ArbiterRoundRunner,
   prompt: string,
-  exec: ArbiterExec = defaultArbiterExec,
-  timeoutMs: number = ARBITER_TIMEOUT_MS,
   systemPrompt: string = ARBITER_SYSTEM_PROMPT,
 ): Promise<ArbiterVerdict | undefined> {
-  return parseArbiterVerdict(await runArbiterProcess(modelId, prompt, exec, timeoutMs, systemPrompt));
+  try {
+    return appealVerdictOf(await run(arbiterTask(systemPrompt, prompt, APPEAL_CONCLUDE), ARBITER_BUDGETS.appealMs));
+  } catch {
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------

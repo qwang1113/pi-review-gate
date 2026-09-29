@@ -349,6 +349,9 @@ export function createInputHook(cells: SessionCells, deps: { persist(ctx?: Exten
     // A real user message resumes an ESC-abort pause ("extension" is how the
     // gate injects its own follow-ups — those never count).
     if (event.source !== "extension") cells.lastRunAborted = false;
+    // A user message is PROGRESS for the wake governor (lib/wake-governor.ts):
+    // it re-opens wake-ups a silent fact had used up.
+    if (event.source !== "extension") cells.lastUserInteractionAt.current = new Date().toISOString();
     // …and it ENDS a long block. `orchestrator_wait` / `judge_wait` are minutes
     // of blocking inside ONE turn, and a message typed during them used to sit
     // in the host's steer queue until the budget ran out (B5). This event fires

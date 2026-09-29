@@ -546,7 +546,7 @@ test("a state CHANGE is always news; an unchanged question re-rings on the backo
   assert.equal(later.events.length, 1, "but an unanswered question must ring again — 10s is the first step");
 });
 
-test("a completion keeps ringing until it stops being true — widening, never going silent", () => {
+test("a completion rings twice, 60s apart, then stays quiet", () => {
   const io = memoryIO(() => T0);
   appendRecord(io, { orchestrationId: ORCH, childId: "c1", home: HOME },
     { kind: "state", from: "child", at: new Date(T0).toISOString(), state: "done" });
@@ -555,12 +555,9 @@ test("a completion keeps ringing until it stops being true — widening, never g
     staleMs: 10 * 60_000,
   });
 
-  // The state is terminal for the CHILD, which is what the old two-ring cap
-  // was argued from — but not for the SUPERVISOR, who still owes it a
-  // verification, a status and a close. MEASURED: two rings were shared
-  // memory, so a receipt that consumed one (a background tick, or a
-  // `wait({childId})` filtered to another child) left one more chance, after
-  // which a manager sat out its full 300s budget beside a finished child.
+  // MEASURED 2026-09-29: ringing a completion for as long as it was true woke
+  // a project manager every ten minutes for two days over ONE finished task
+  // (250 notices). An unchanged completion is not news.
   let memory: SupervisionMemory = {};
   const ringsAt = (offset: number): number => {
     const decided = decideSupervisionEvents(snapshot(T0 + offset), memory, T0 + offset);
@@ -569,16 +566,13 @@ test("a completion keeps ringing until it stops being true — widening, never g
   };
   assert.equal(ringsAt(0), 1, "the transition itself is immediate news");
   assert.equal(ringsAt(30_000), 0, "and it does not repeat inside the first gap");
-  assert.equal(ringsAt(61_000), 1, "first reminder at 60s");
-  assert.equal(ringsAt(122_000), 0, "the next gap is 120s, not another 60");
-  assert.equal(ringsAt(181_000), 1);
-  // …and it NEVER stops: a completion nobody acted on is still news ten
-  // minutes later, at the capped cadence. Closing the child is what ends it,
-  // which is precisely the act the reminder asks for.
-  let last = 0;
-  for (let t = 300_000; t <= 3_600_000; t += 60_000) last += ringsAt(t);
-  assert.ok(last > 0, "a forgotten completion must not go silent for good");
-  assert.ok(last <= 8, `and it must not drown the supervisor either (rang ${last} times in an hour)`);
+  assert.equal(ringsAt(61_000), 1, "the one reminder, at 60s");
+  // …and then NOTHING for the rest of the hour: the health snapshot still
+  // shows it, the plan's exit contract still lists it.
+  let later = 0;
+  for (let t = 120_000; t <= 3_600_000; t += 10_000) later += ringsAt(t);
+  assert.equal(later, 0, `a completion must not keep waking the manager (rang ${later} more times)`);
+  assert.equal(snapshot(T0 + 3_600_000).health[0]!.state, "done", "still visible in the snapshot");
 });
 
 test("`working` is the ONE state nobody has to be woken for", () => {

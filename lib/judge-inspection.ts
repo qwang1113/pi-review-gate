@@ -440,13 +440,17 @@ export function parseReviewScopeKind(
 }
 
 /**
- * Does this role's conclusion carry a VERDICT the gate records? Hard-coded, by
- * user decision: `adviser` is the one role whose output is prose nobody
- * records, and every other role — including one this build has never heard of
- * — is held to the evidence rule (fail-closed).
+ * Must this role have READ something before it may conclude READY? Hard-coded,
+ * by user decision: `adviser` is exempt (its output is prose nobody records),
+ * and so is `arbiter` (2026-09-29) — it rules on evidence the GATE gathered and
+ * put in its task, often a one-word classification with nothing to open, and
+ * its READY is an input to one blocked tool call, never a recorded review.
+ * Every other role — including one this build has never heard of — is held to
+ * the evidence rule (fail-closed).
  */
 export function requiresInspectionEvidence(role: string): boolean {
-  return role.trim().toLowerCase() !== "adviser";
+  const r = role.trim().toLowerCase();
+  return r !== "adviser" && r !== "arbiter";
 }
 
 /** The refusal's own escape hatch — named in the text the judge reads. */

@@ -16,6 +16,9 @@ import { unmetRequirements } from "./gate-state-requirements.ts";
 import { buildGitMemory } from "./git-memory.ts";
 import { blockedMarkerPath, reconcileBlockedMarker } from "./blocked-marker.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
+import { recordSuccessorOpener } from "./opener-process.ts";
+import { orchestrationIdFromEnv } from "./orchestration-id.ts";
+import { readInheritance } from "./session-inheritance.ts";
 import { sessionSidecarPath } from "./loop-goal-host.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { commitsAheadOfBase, currentBranch } from "./repo-facts.ts";
@@ -139,6 +142,9 @@ export function createSessionLifecycle(cells: SessionCells, deps: SessionLifecyc
     // that has an orchestration address, independent of the agent.
     deps.startChildHeartbeat(ctx);
     deps.reportChildState(ctx, undefined, { force: true });
+    // A HANDOVER SUCCESSOR ADOPTS ITS PREDECESSOR'S PANES: they re-bind to this
+    // process once the predecessor's is gone (lib/opener-process.ts).
+    recordSuccessorOpener(readInheritance(), orchestrationIdFromEnv());
     // THE TMUX SIDEBAR'S PANE STATE (s1): every pi session, git or not — so it
     // starts BEFORE the non-git short-circuit below.
     deps.runtime().startPaneState();

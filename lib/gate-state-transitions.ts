@@ -6,7 +6,6 @@
  */
 
 import type { GateState } from "./gate-state.ts";
-import type { PrecommitMode } from "./gate-state-records.ts";
 import type { TestScope } from "./precommit-receipt.ts";
 
 /**
@@ -147,6 +146,11 @@ export function invalidateBindings(st: GateState): void {
   // the binding cannot un-pass it. See the field's own comment.
 }
 
+/** Did a lane with this scope actually run tests (a `skipped` one did not)? */
+export function testsRan(scope: TestScope | undefined): boolean {
+  return scope === "related" || scope === "full";
+}
+
 /**
  * The one rule that maintains `precommit.lastFullPassTree`.
  *
@@ -157,23 +161,25 @@ export function invalidateBindings(st: GateState): void {
  * recomputed after `lint:fix` may have edited files and can already describe
  * the NEXT round's content.
  *
- *  - a FULL lane PASSED on `startedTree` ⇒ record it;
+ *  - a lane PASSED on `startedTree` with its tests actually run (scope
+ *    `related` or `full`) ⇒ record it. Since 2026-09-29 a review round's lane
+ *    is the FAST one, and its related tests are what verify a round for
+ *    review; the name is historical. SHIPPING still needs `testScope: full`
+ *    on the live binding (lib/gate-state-requirements.ts), not this record;
  *  - a FAIL on the SAME tree ⇒ revoke (the content was disproven);
- *  - anything else (fast lane, a narrowed test scope, no tree, a FAIL of some
- *    other tree, ERROR) ⇒ the previous value stands.
+ *  - anything else (tests skipped, no tree, a FAIL of some other tree,
+ *    ERROR) ⇒ the previous value stands.
  */
 export function nextFullPassTree(args: {
   /** The value already on the state. */
   current: string | undefined;
   verdict: string;
-  mode: PrecommitMode | undefined;
   testScope: TestScope | undefined;
   /** Tree captured before the lane started; "" when it could not be read. */
   startedTree: string;
 }): string | undefined {
   if (!args.startedTree) return args.current;
-  if (args.mode !== "full") return args.current;
-  if (args.verdict === "PASS" && args.testScope === "full") return args.startedTree;
+  if (args.verdict === "PASS" && testsRan(args.testScope)) return args.startedTree;
   if (args.verdict === "FAIL" && args.current === args.startedTree) return undefined;
   return args.current;
 }

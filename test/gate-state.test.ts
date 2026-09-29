@@ -1483,15 +1483,16 @@ test("invalidateBindings keeps the pass-COVERAGE record: an edit cannot un-pass 
 // nextFullPassTree — the ONE rule that maintains the coverage record
 // ---------------------------------------------------------------------------
 
-test("a full-lane PASS records the tree the lane STARTED on", () => {
+test("a lane PASS that ran tests records the tree the lane STARTED on", () => {
   const started = "b".repeat(40);
   assert.equal(
-    nextFullPassTree({ current: undefined, verdict: "PASS", mode: "full", testScope: "full", startedTree: started }),
+    nextFullPassTree({ current: undefined, verdict: "PASS", testScope: "full", startedTree: started }),
     started,
   );
-  // …and a later full PASS replaces an older tree.
+  // …a later PASS replaces an older tree, and the fast lane's RELATED tests
+  // count (2026-09-29: a review round's lane is the fast one).
   assert.equal(
-    nextFullPassTree({ current: "a".repeat(40), verdict: "PASS", mode: "full", testScope: "full", startedTree: started }),
+    nextFullPassTree({ current: "a".repeat(40), verdict: "PASS", testScope: "related", startedTree: started }),
     started,
   );
 });
@@ -1499,12 +1500,12 @@ test("a full-lane PASS records the tree the lane STARTED on", () => {
 test("a FAIL of that SAME tree revokes the record; a FAIL of another tree does not", () => {
   const recorded = "a".repeat(40);
   assert.equal(
-    nextFullPassTree({ current: recorded, verdict: "FAIL", mode: "full", testScope: "full", startedTree: recorded }),
+    nextFullPassTree({ current: recorded, verdict: "FAIL", testScope: "full", startedTree: recorded }),
     undefined,
     "the claim is about the content, and this content has now been disproven",
   );
   assert.equal(
-    nextFullPassTree({ current: recorded, verdict: "FAIL", mode: "full", testScope: "full", startedTree: "b".repeat(40) }),
+    nextFullPassTree({ current: recorded, verdict: "FAIL", testScope: "full", startedTree: "b".repeat(40) }),
     recorded,
     "a different tree failing says nothing about the one that passed",
   );
@@ -1513,17 +1514,15 @@ test("a FAIL of that SAME tree revokes the record; a FAIL of another tree does n
 test("nothing else may write or clear the record", () => {
   const recorded = "a".repeat(40);
   const base = { current: recorded, startedTree: "c".repeat(40) };
-  // A fast lane is not evidence a full suite ever ran.
-  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", mode: "fast", testScope: "full" }), recorded);
-  // …nor is a full lane whose tests were narrowed.
-  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", mode: "full", testScope: "related" }), recorded);
-  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", mode: "full", testScope: undefined }), recorded);
+  // A lane whose tests were skipped verified nothing.
+  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", testScope: "skipped" }), recorded);
+  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", testScope: undefined }), recorded);
   // ERROR / NO_CHECKS_RUN are not verdicts about the content.
-  assert.equal(nextFullPassTree({ ...base, verdict: "ERROR", mode: "full", testScope: "full" }), recorded);
-  assert.equal(nextFullPassTree({ ...base, verdict: "NO_CHECKS_RUN", mode: "full", testScope: "full" }), recorded);
+  assert.equal(nextFullPassTree({ ...base, verdict: "ERROR", testScope: "full" }), recorded);
+  assert.equal(nextFullPassTree({ ...base, verdict: "NO_CHECKS_RUN", testScope: "full" }), recorded);
   // A tree nobody could read cannot become a record (and cannot revoke one).
-  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", mode: "full", testScope: "full", startedTree: "" }), recorded);
-  assert.equal(nextFullPassTree({ current: undefined, verdict: "PASS", mode: "full", testScope: "full", startedTree: "" }), undefined);
+  assert.equal(nextFullPassTree({ ...base, verdict: "PASS", testScope: "full", startedTree: "" }), recorded);
+  assert.equal(nextFullPassTree({ current: undefined, verdict: "PASS", testScope: "full", startedTree: "" }), undefined);
 });
 
 test("shippedKinds survives a round trip, and unreadable evidence is dropped", () => {

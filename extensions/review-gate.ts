@@ -74,7 +74,7 @@ import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import { createPaneStateReporter } from "../lib/tmux-pane-state.ts";
 import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
 import { claimGateInstance } from "../lib/session-launch-specs.ts";
-import { readJudgeSideEnv } from "../lib/judge-side.ts";
+import { judgeMayRunTmux, readJudgeSideEnv } from "../lib/judge-side.ts";
 import { readWorkerSideEnv } from "../lib/worker-side.ts";
 import { createOrchestratorDeps, runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
@@ -100,7 +100,7 @@ import {
 } from "../lib/judge-session-tools.ts";
 import { doWait } from "../lib/judge-wait-tool.ts";
 import { registerJudgeSpawnTools } from "../lib/judge-spawn-tools.ts";
-import { AUDIT_SELF_WAIT_BUDGET_MS, awaitRoundReport } from "../lib/judge-lifecycle.ts";
+import { awaitRoundReport } from "../lib/judge-lifecycle.ts";
 // THE TEN ADVANCED ENTRIES ARE GONE (2026-08-30, philosophy three). FIVE of
 // them are still IMPLEMENTATIONS, registered into `internalHost` instead of
 // into `pi`: the chain calls them so the mechanical checks live in exactly one
@@ -178,6 +178,7 @@ import { createHandoffHost } from "../lib/handoff-host.ts";
 import { createWorktreeSettlement } from "../lib/orchestrator-worktree-host.ts";
 import { createAppealLedger, registerArbitrationTool } from "../lib/arbitration-tool.ts";
 import { createL2Continuation } from "../lib/l2-continuation.ts";
+import { createWakeGovernor } from "../lib/wake-governor.ts";
 import { createEditTracking } from "../lib/edit-tracking-hook.ts";
 import {
   appendPendingHints,
@@ -324,7 +325,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * EFFECT: starting a lane RESETS the recorded `precommit` entry to `NOT_RUN`.
    */
   (pi as unknown as { __reviewGateTestSeams?: Record<string, unknown> }).__reviewGateTestSeams = {
-    startFullLane: (root: string, ctx: unknown) => startPrecommitBeside(root, ctx).settled,
+    startFullLane: (root: string, ctx: unknown) => startPrecommitBeside(root, ctx, "full").settled,
   };
 
   /** Call another gate tool internally; a missing tool is a programming error. */
@@ -364,10 +365,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     ctx: unknown,
     onUpdate: ToolUpdate | undefined,
     signal: AbortSignal | undefined,
+    role: string,
+    budgetMs: number,
   ) {
     return awaitRoundReport({
       wait: (timeoutMs) => {
-        const judgeId = judgeChildByRole(root, "goal-auditor")?.judgeId;
+        const judgeId = judgeChildByRole(root, role)?.judgeId;
         if (judgeId === undefined) {
           return Promise.resolve({
             content: [{ type: "text", text: "review-gate: no judge on record — submit a round first (judge_submit)." }],
@@ -388,8 +391,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       now: () => Date.now(),
       aborted: () => signal?.aborted === true,
       // THE GATE OWNS ITS OWN BUDGET (2026-09-19): an audit is not an agent
-      // wait — see `AUDIT_SELF_WAIT_BUDGET_MS`.
-      budgetMs: AUDIT_SELF_WAIT_BUDGET_MS,
+      // wait — see `AUDIT_SELF_WAIT_BUDGET_MS`; an arbiter round passes its own.
+      budgetMs,
     }) as ReturnType<typeof callTool>;
   }
 
@@ -785,11 +788,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     }),
   });
 
+  /** THE ONE THROTTLE EVERY IDLE-TIME WAKE-UP PASSES (lib/wake-governor.ts). */
+  const wakes = createWakeGovernor({
+    pi,
+    notify: (text) => { try { cells.latestCtx?.ui?.notify?.(text, "warning"); } catch { /* headless */ } },
+  });
+
   /** THE SESSION'S RUNTIME CLOCKS (lib/orchestrator-runtime-host.ts). */
   const {
     orchestrationDoneProblems, orchestratorSettled, startRevivalTimer, stopRevivalTimer, stopSupervisionTimer,
     startSessionNamingHeartbeat, stopSessionNamingHeartbeat, startPaneState, handedOff, markHandedOff,
-    resetOrchestratorContinuations,
+    resetOrchestratorContinuations, wakeProgressKey,
   } = createOrchestratorRuntime(host, {
     pi,
     orchestratorDeps,
@@ -805,6 +814,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     sessionNaming,
     sessionMessaging,
     paneState,
+    wakes,
+    lastUserInteractionAt: () => cells.lastUserInteractionAt.current,
+    judgeProgress: () => JSON.stringify(registry.ownJudges().map((j) => [j.judgeId, registry.judgeRoundReported(j)])),
   });
   // THE NAME GOES BACK WHEN THE PROCESS DIES, however it dies (t2).
   sessionNamingAtExit = sessionNaming;
@@ -826,18 +838,26 @@ export default function reviewGate(pi: ExtensionAPI) {
   sessionNaming.register(pi);
   sessionMessaging.register(pi);
 
-  // LLM semantic guard layer (lib/llm-classify.ts), lazily (re)created so it
-  // always reflects the loaded projectConfig model. Tighten-only + fail-back.
-  let llmClassifier: LlmClassifier | null = null;
-  let llmClassifierModel = "";
-  function classifier(): LlmClassifier {
-    const model = cells.projectConfig.llmGuards.model;
-    if (!llmClassifier || llmClassifierModel !== model) {
-      llmClassifier = createLlmClassifier(model);
-      llmClassifierModel = model;
-    }
-    return llmClassifier;
-  }
+  // EVERY MODEL DECISION OUTSIDE THE REVIEW LOOP IS AN ARBITER ROUND in its own
+  // window (2026-09-29, user decision): appeals, the user proxy, the L5 guards.
+  // Bound late — the audit-round host is created further down.
+  // The agent's own abort signal rides along: ESC ends a queued or running round.
+  const arbiterRound = (task: string, budgetMs: number) =>
+    runArbiterRound(host.repos().primary, task, budgetMs, undefined, (host.ctx() as { signal?: AbortSignal } | undefined)?.signal);
+  // A judge / worker window is somebody else's dispatch. The ROUTINE model
+  // calls — an L5 guard on every bash, a dialog stand-in — never open a nested
+  // arbiter window from it (its guards fall back to the deterministic checks).
+  // An APPEAL still does: the inspection appeal can only be raised from a judge
+  // window, and it is a deliberate, quota-bounded act.
+  const isDispatchedWindow = (): boolean =>
+    readJudgeSideEnv(process.env) !== undefined || readWorkerSideEnv(process.env) !== undefined;
+  const guardRound = async (task: string, budgetMs: number) =>
+    isDispatchedWindow()
+      ? { ok: false as const, text: "门禁派出的 judge / worker 窗口里不跑语义守卫（退回确定性检查）" }
+      : arbiterRound(task, budgetMs);
+  // LLM semantic guard layer (lib/llm-classify.ts). Tighten-only + fail-back.
+  const llmClassifier: LlmClassifier = createLlmClassifier(guardRound);
+  const classifier = (): LlmClassifier => llmClassifier; // the deps seams take a getter
 
   // THE BANNER CHANNEL (user decision, 2026-09-17) — POLICY in
   // lib/user-notify.ts, RUNTIME in lib/user-notify-runtime.ts; this file only
@@ -863,7 +883,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     childSide,
     registry,
     settleFinishedRounds: (ctx) => settleFinishedRounds(ctx),
-    runtime: () => ({ handedOff, orchestratorSettled, startRevivalTimer }),
+    runtime: () => ({ handedOff, orchestratorSettled, startRevivalTimer, wakeProgressKey }),
+    wakes,
     goalStageSatisfied: () => goalStageSatisfied(),
     copilotProblemsAcrossRepos: repos.copilotProblemsAcrossRepos,
     updateWidget: (ctx) => updateWidget(ctx),
@@ -874,25 +895,25 @@ export default function reviewGate(pi: ExtensionAPI) {
   const dialogProxy = createDialogProxy(host, {
     resolveArbiterModel: () => resolveArbiterModel(),
     ownTranscriptPath: () => handoff.ownTranscriptPath(),
+    runArbiterRound: (root, task, budgetMs, signal) => runArbiterRound(root, task, budgetMs, undefined, signal),
+    isDispatchedWindow,
   });
   const { askChoice, askMultiChoice, dialogsOnScreen } = createGateDialogs(host, {
     proxy: dialogProxy,
     raiseBanner: (opts) => raiseBanner(opts),
     lastUserInteractionAt: cells.lastUserInteractionAt,
+    proxyWaitMs: () => cells.projectConfig.userProxy.waitMs,
   });
 
   // ---------- L6 (edit time) + the arbitration I/O they share a quota with ----------
-  const { editedTestContent, checkTestLabels, llmNotice } = createEditTimeChecks(host, {
-    projectConfig: () => cells.projectConfig,
-    classifier: () => classifier(),
-    refuseText,
-  });
+  const { editedTestContent, checkTestLabels, llmNotice } = createEditTimeChecks(host, { refuseText });
   const arbitration = createArbitrationHost(host, {
     projectConfig: () => cells.projectConfig,
     appealsUsed,
     spendArbitration,
     arbitrationDecisions: cells.arbitrationDecisions,
     grantInspectionPass: (pass) => { cells.inspectionPass = pass; },
+    runArbiterRound: arbiterRound,
   });
   const { computeTokenBindings, resolveArbiterModel, appendLesson } = arbitration;
 
@@ -918,12 +939,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     sensitiveDeclined: (absPath) => cells.sensitiveDeclinedPaths.has(absPath),
     nearestExistingDir,
     loopGoalEditBlockFor,
-    checkTestLabels: (path, input, ctx) => checkTestLabels(
-      path,
-      editedTestContent(input, path),
-      ctx,
-      llmNotice(ctx),
-    ),
+    checkTestLabels: (path, input, ctx) => checkTestLabels(path, editedTestContent(input, path), ctx),
     markSessionEdited: () => { cells.sessionEdited = true; },
     bypassActive: () => cells.state.bypass.active,
     projectConfig: () => cells.projectConfig,
@@ -940,6 +956,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     loopGoalConfirmed: () => goalStageSatisfied(),
     precommitLaneRunning: (root) => precommitLaneRunning(root),
     waitForQuietLane: (root) => waitForQuietLane(root),
+    runFullLane: (root, ctx) => runFullLane(root, ctx),
     deliveryStation: (root) => deliveryStationFor(root),
     crossRepoVerdictHint,
     classifier,
@@ -949,7 +966,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     bypassToken: () => cells.bypassToken,
     setBypassToken: (token) => { cells.bypassToken = token; },
     // The tmux permission is read LIVE off the state (minted mid-session).
-    tmuxAccess: () => cells.state.tmuxAccess,
+    tmuxAccess: () => judgeMayRunTmux(process.env)
+      ? { at: "acceptance-window", scope: "session" as const }
+      : cells.state.tmuxAccess,
     consumeTmuxAccess: () => {
       // One use, and only a ONE-SHOT is consumed.
       if (cells.state.tmuxAccess?.scope !== "once") return;
@@ -1048,7 +1067,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     resumeParkedReady: (root, ctx) => resumeParkedReady(root, ctx),
   });
   const { judgeChildByRole, checkpointAtFor, roundBindingOf, settleFinishedRounds } = settle;
-  const { precommitLaneRunning, abortPrecommitLane, waitForQuietLane, startPrecommitBeside } =
+  const { precommitLaneRunning, abortPrecommitLane, waitForQuietLane, startPrecommitBeside, runFullLane } =
     createPrecommitLane(host, {
       pi,
       callTool,
@@ -1093,7 +1112,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     qualityRoundInFlight,
     recordReviewVerdict,
   });
-  const { auditRoundDeps, auditRunDeps, buildGoalAuditRound } = createAuditRoundHost(host, {
+  const { auditRoundDeps, auditRunDeps, buildGoalAuditRound, runArbiterRound } = createAuditRoundHost(host, {
     registry: { judgeHierarchy, setHierarchy, dropAudits, pendingAudits, persistJudgeHierarchy },
     channelIO,
     lastUiCtx: cells.lastUiCtx,
@@ -1205,7 +1224,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     cwd: () => cells.cwd,
     sessionId: () => cells.state.sessionId ?? undefined,
     refused: () => cells.state.exclusivityRefusal !== undefined,
-    askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
+    askChoice: (uiCtx, spec) => askChoice(uiCtx as { ui?: ChoiceUi }, spec),
     log,
   });
   sessionWorktree.register();
@@ -1215,6 +1234,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- declare_done (lib/declare-done-tool.ts) ----------
   registerDeclareDoneTool(pi, cells, {
     enforcementStateFor,
+    waitForQuietLane,
+    runFullLane,
     stateForRepo,
     persistRepo,
     persist,

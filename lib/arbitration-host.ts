@@ -14,7 +14,7 @@ import { dirname as pathDirname, join as pathJoin } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { runArbiter, type ArbitrableAction, type TokenBindings } from "./arbitration.ts";
+import { runArbiter, type ArbiterRoundRunner, type ArbitrableAction, type TokenBindings } from "./arbitration.ts";
 import { effectiveAgentsConfig } from "./agents-config.ts";
 import {
   admitAppeal,
@@ -84,6 +84,8 @@ export interface ArbitrationHostDeps {
   arbitrationDecisions: Map<string, "GATE_WINS" | "AGENT_WINS" | "HUMAN">;
   /** Park the single-use pass an AGENT_WINS inspection appeal issues. */
   grantInspectionPass(pass: InspectionPass): void;
+  /** One arbiter round in its own window (lib/audit-round-host.ts). */
+  runArbiterRound: ArbiterRoundRunner;
 }
 
 export function createArbitrationHost(host: SessionHost, deps: ArbitrationHostDeps) {
@@ -104,12 +106,10 @@ export function createArbitrationHost(host: SessionHost, deps: ArbitrationHostDe
 
 
   /**
-   * The arbiter model, resolved from the agents config layer (arbiter role).
-   *
-   * The arbiter USED to be a hard-coded constant (project-config's
-   * DEFAULT_ARBITER_MODEL). Per the all-roles-through-config requirement it
-   * now comes from agents.arbiter.slots[0]. Absent/unconfigured → undefined,
-   * which callers treat as fail-closed (no arbiter, GATE_WINS).
+   * Is an arbiter configured at all? The head of agents.arbiter's chain, or
+   * undefined — which callers treat as fail-closed (no arbiter, GATE_WINS).
+   * Which slot a round actually RUNS on is the judge dispatch's choice
+   * (lib/judge-launch-host.ts, cooling slots skipped), not this function's.
    */
   function resolveArbiterModel(): string | undefined {
     try {
@@ -147,13 +147,7 @@ export function createArbitrationHost(host: SessionHost, deps: ArbitrationHostDe
     const admission = admitAppeal(state.appeals, digest, deps.projectConfig().arbiter.maxPerSession);
     if (!admission.ok) return deny(`review-gate: ${admission.reason}`);
 
-    const verdict = await runArbiter(
-      resolveArbiterModel() ?? "",
-      buildTextAppealPrompt(block, argument),
-      undefined,
-      undefined,
-      TEXT_APPEAL_SYSTEM_PROMPT,
-    );
+    const verdict = await runArbiter(deps.runArbiterRound, buildTextAppealPrompt(block, argument), TEXT_APPEAL_SYSTEM_PROMPT);
     // Fail-closed: a spawn failure, a timeout or an unparseable answer is a
     // GATE_WINS — and it still SPENDS the quota, so a broken arbiter cannot be
     // retried into a grant.
@@ -212,13 +206,7 @@ export function createArbitrationHost(host: SessionHost, deps: ArbitrationHostDe
     // The quota is SHARED with the two other classes, and it is spent BEFORE
     // the arbiter runs: a spawn that dies must not be retried into a grant.
     deps.spendArbitration(ctx);
-    const verdict = await runArbiter(
-      resolveArbiterModel() ?? "",
-      buildInspectionAppealPrompt(block, argument),
-      undefined,
-      undefined,
-      INSPECTION_APPEAL_SYSTEM_PROMPT,
-    );
+    const verdict = await runArbiter(deps.runArbiterRound, buildInspectionAppealPrompt(block, argument), INSPECTION_APPEAL_SYSTEM_PROMPT);
     // Fail-closed, and the quota is spent either way: a broken arbiter cannot
     // be retried into a grant.
     const decision = verdict?.decision ?? "GATE_WINS";
@@ -306,6 +294,7 @@ export function createArbitrationHost(host: SessionHost, deps: ArbitrationHostDe
   return {
     computeTokenBindings,
     resolveArbiterModel,
+    runArbiterRound: deps.runArbiterRound,
     arbitrateText,
     arbitrateInspection,
     bodyFileDigest,

@@ -15,7 +15,8 @@ import {
   type AsyncPrecommitPass,
   type AsyncPrecommitReport,
 } from "./async-precommit-report.ts";
-import { nextFullPassTree, nextReviewRoundNumber } from "./gate-state-transitions.ts";
+import { nextFullPassTree, nextReviewRoundNumber, testsRan } from "./gate-state-transitions.ts";
+import type { PrecommitMode } from "./gate-state-records.ts";
 import { laneOwnsCurrentRound, roundCancelPlan, type RoundCancelPlan } from "./quality-round.ts";
 import { worktreeTree } from "./repo-facts.ts";
 import type { CallTool, GateToolResult, SessionHost } from "./session-host.ts";
@@ -156,7 +157,16 @@ export function createPrecommitLane(
    * pane is still booting — so the dispatch asks before (and right after)
    * starting the reviewer. Bound to this lane, so no earlier round leaks in.
    */
-  function startPrecommitBeside(root: string, ctx: unknown): LaneHandle {
+  function startPrecommitBeside(
+    root: string,
+    ctx: unknown,
+    /**
+     * FAST BY DEFAULT (2026-09-29, user decision): a review round runs the
+     * tests related to its change; the FULL suite runs once, when the content
+     * is about to ship or the task is declared done (`runFullLane`).
+     */
+    mode: PrecommitMode = "fast",
+  ): LaneHandle {
     let failedWhy: string | undefined;
     // The lane's kill switch (see `abortPrecommitLane`). ONE controller per
     // lane, held with the promise so a blocking quality verdict can reach it.
@@ -173,11 +183,14 @@ export function createPrecommitLane(
     //
     // (A previous round's PASS is discarded by this reset. That is the
     // fail-closed direction: the only thing it can cost is a re-run.)
+    // The tree it verified is read FIRST: a fast lane relates only what
+    // changed since then.
+    const sinceTree = stateForRepo(root).precommit.lastFullPassTree;
     stateForRepo(root).precommit = {
       verdict: "NOT_RUN",
       fingerprint: null,
       at: new Date().toISOString(),
-      mode: "full",
+      mode,
     };
     // WHAT THIS LANE IS VERIFYING, READ BEFORE IT STARTS. Read here and not off
     // the run's own outcome, because the outcome's fingerprint is recomputed
@@ -191,7 +204,18 @@ export function createPrecommitLane(
       let detail = "";
       const verified = worktreeTree(root) ?? "";
       try {
-        const pre = await callTool("run_precommit", { mode: "full", repo: root }, ctx, undefined, controller.signal);
+        let pre = await callTool("run_precommit", {
+          mode, repo: root, ...(mode === "fast" && sinceTree ? { sinceTree } : {}),
+        }, ctx, undefined, controller.signal);
+        // A FAST LANE THAT RAN NO TESTS ESCALATES (reviewer P1, 2026-09-29): a
+        // project the fast lane cannot narrow (a configured `fast: null`, a
+        // compound script, an unknown runner) reports `skipped`, and a READY
+        // needs tests that ran — so the same lane runs the full suite rather
+        // than leave the round unrecordable.
+        if (mode === "fast" && String(pre.details?.verdict) === "PASS" && !controller.signal.aborted &&
+            !testsRan(stateForRepo(root).precommit.testScope)) {
+          pre = await callTool("run_precommit", { mode: "full", repo: root }, ctx, undefined, controller.signal);
+        }
         verdict = String(pre.details?.verdict ?? "no verdict");
         detail = toolText(pre);
       } catch (error) {
@@ -210,7 +234,7 @@ export function createPrecommitLane(
         // st.precommit.lastFullPassTree` right after this — dead code against
         // the object it had just built, and it made the revocation look like
         // the delete's doing. reviewer Nit, 2026-09-15.)
-        st.precommit = { verdict: "NOT_RUN", fingerprint: null, at: new Date().toISOString(), mode: "full" };
+        st.precommit = { verdict: "NOT_RUN", fingerprint: null, at: new Date().toISOString(), mode };
         persistRepo(ctx as unknown as ExtensionContext, root);
         log(`precommit lane for ${root} aborted — nothing recorded for the content it was verifying`);
         return;
@@ -236,7 +260,6 @@ export function createPrecommitLane(
       const coveredTree = nextFullPassTree({
         current: laneState.precommit.lastFullPassTree,
         verdict,
-        mode: "full",
         testScope: laneState.precommit.testScope,
         startedTree: verified,
       });
@@ -263,7 +286,7 @@ export function createPrecommitLane(
       // judge 判了非 READY，正在跑的全量 precommit 已终止」 reached nobody, and
       // the agent only saw "precommit failed" with no trace of why. The FAIL
       // notice below IS this row's delivery.
-      const laneWhy = `全量 precommit 没过（${verdict}）—— 这份内容 ship 不了，功能轮不必再审`;
+      const laneWhy = `precommit（${mode}）没过（${verdict}）—— 这份内容 ship 不了，功能轮不必再审`;
       if (verdict !== "PASS") failedWhy = laneWhy;
       const now = currentTarget(root);
       const current = laneOwnsCurrentRound(
@@ -361,5 +384,15 @@ export function createPrecommitLane(
     }
   }
 
-  return { precommitLaneRunning, abortPrecommitLane, waitForQuietLane, startPrecommitBeside };
+  /**
+   * THE FULL SUITE, ON DEMAND (2026-09-29): what a push / PR and `declare_done`
+   * need when the review rounds only ran the related tests. The same lane —
+   * one in flight per repo, the same recording — run in the foreground.
+   */
+  async function runFullLane(root: string, ctx: unknown): Promise<void> {
+    await waitForQuietLane(root);
+    await startPrecommitBeside(root, ctx, "full").settled;
+  }
+
+  return { precommitLaneRunning, abortPrecommitLane, waitForQuietLane, startPrecommitBeside, runFullLane };
 }

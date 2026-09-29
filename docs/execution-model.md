@@ -347,7 +347,12 @@ spawn（无 shell）；门禁自己的执行路径也过同一份禁止清单，
 改成**与链条并行**（`startPrecommitBeside`）。理由：reviewer 判的是**不可变的
 commit range**，所以真正必须在 dispatch 之前的只有 checkpoint；而 precommit
 中位数 33s（旧数据 92s）全是 agent 被阻塞的时间。现在链条是：
-**checkpoint 预检（dryRun）→ 启动 full lane（不 await）→ checkpoint → prepare → dispatch（立即返回）**。
+**checkpoint 预检（dryRun）→ 启动 lane（不 await）→ checkpoint → prepare → dispatch（立即返回）**。
+
+**送审轮的 lane 是 fast（2026-09-29，用户决定）**：typecheck + 与改动相关的测试（`node --test` 的
+相关集合由 `scripts/precommit-related.mjs` 算，追不到的改动直接跑全量）；READY 要求这条 lane
+的 PASS 且测试确实跑过（`testsRan`）。全量只跑一次：push / `gh pr create` 或 `declare_done`
+发现「只差全量」时，门禁在同一条 lane 槽位里跑（`runFullLane`），别的门禁没过就不跑。
 
 **预检先于 lane（N1，2026-09-27）**：`review_checkpoint({dryRun:true})` 跑真实 checkpoint 的
 全部拒绝判定（保护分支、提交信息、敏感路径、文件大小、依赖论证、有没有可提交内容），

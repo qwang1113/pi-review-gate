@@ -12,7 +12,7 @@
  *
  * WHAT IT IS NOT: a timeout. There is no clock here and no default — this
  * module races an abort and nothing else. The GATE does have a dialog timeout
- * since 2026-09-19 (thirty minutes, then `lib/user-proxy.ts` hands the question
+ * since 2026-09-19 (`userProxy.waitMinutes`, default five, then `lib/user-proxy.ts` hands the question
  * to the arbiter), but that window lives in that one module and reaches this one
  * as a plain signal; `AbortSignal.timeout` remains the standard way to supply
  * one.

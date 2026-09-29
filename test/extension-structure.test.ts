@@ -1356,8 +1356,11 @@ test("declare_done prints the proxy's decisions itself, and the audit wait has i
   //     「等待未命中本轮 report」 because the borrowed budget ran out, and the
   //     agent had to re-run the audit to collect a verdict already on disk.
   const waitFn = windowOf("async function selfAuditWait", "\n  }", "selfAuditWait");
-  assert.match(waitFn, /budgetMs: AUDIT_SELF_WAIT_BUDGET_MS/, "the gate's own wait carries its own budget");
+  assert.match(waitFn, /\n      budgetMs,\n/, "the gate's own wait carries the budget its caller passes");
   assert.doesNotMatch(waitFn, /JUDGE_WAIT_MAX_TIMEOUT_MS/, "…and not the agent-facing one");
+  const auditHost = readFileSync(join(ROOT, "lib", "audit-round-host.ts"), "utf8");
+  assert.match(auditHost, /awaitJudgeRoundEnd\(root, "goal-auditor", AUDIT_SELF_WAIT_BUDGET_MS,/,
+    "…which for a goal / plan audit is the audit's own budget");
 });
 
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
@@ -2913,7 +2916,10 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // silent for minutes and a healthy child was reported `stalled`.
   const heartbeatAt = CHILD_SIDE_SRC.indexOf("function startChildHeartbeat(");
   assert.ok(heartbeatAt > 0, "the child heartbeat must be its own timer");
-  const heartbeat = CHILD_SIDE_SRC.slice(heartbeatAt, heartbeatAt + 600);
+  const heartbeat = CHILD_SIDE_SRC.slice(heartbeatAt, heartbeatAt + 1200);
+  // 2026-09-29: every tick first asks the PROCESS TABLE whether the opener is
+  // still there (lib/opener-process.ts), never a heartbeat's age.
+  assert.match(heartbeat, /enforceOpenerBinding\(openerWatch,/, "a pane dies with the pi that opened it");
   assert.match(heartbeat, /setInterval\(/, "it ticks on its own, independently of the agent");
   assert.match(heartbeat, /reportChildState\(live\)/, "each tick reports liveness");
   assert.match(heartbeat, /drainChildInstructions\(live\)/,
@@ -3036,11 +3042,13 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
   // The recheck itself is what this protects; the registry it reads is now the
   // merged table, scoped to this opener (the `childSessions` Map is deleted).
   assert.match(schedule, /ownJudges\(\)\.length === 0/, "watchdog rechecks that children still exist");
-  assert.match(schedule, /deliverAs: "followUp"/, "watchdog resumes through the normal follow-up queue");
+  assert.match(schedule, /deps\.wakes\.wake\(\{\s*source: "child-watchdog"/, "watchdog wakes ONLY through the session's wake governor");
   assert.doesNotMatch(schedule, /\.unref\(\)/, "the hosted-wait timer keeps the main session alive");
   const childAt = SRC.indexOf("const childSnapshots");
   const childBlock = SRC.slice(childAt, SRC.indexOf("// L2 circuit breaker", childAt));
-  assert.match(childBlock, /if \(!notifyNow\)/, "the throttled hosted wait has a distinct branch");
+  assert.match(childBlock, /source: "child-host-wait"/, "the hosted wait is throttled by the wake governor, not its own clock");
+  assert.match(childBlock, /if \(registry\.judgeRoundReported\(c\)\) continue;/,
+    "a judge that already reported is not in flight (2026-09-29, the 40-hour hosted wait)");
   assert.match(childBlock, /scheduleChildWaitRecheck\(/, "the throttled branch schedules a self-owned recheck");
   assert.match(childBlock, /return;/, "the throttled branch does not fall through to RESUME");
   // `judge_close` (which also cancelled the watchdog) is gone since 2026-09-27;
@@ -3066,8 +3074,7 @@ test("round-18: agent_settled HOSTS the judge-child wait — never returns to id
   // The child classification drives the injection: dead/silent children end
   // the wait (recovery), live ones get the hosted-wait discipline.
   assert.match(settled, /classifyChildren\(childSnapshots, Date\.now\(\)\)/, "children are classified by the pure module");
-  assert.match(settled, /REVIEW_GATE_CHILD_\$\{/, "the child injection marker is built by template");
-  assert.match(settled, /"ENDED" : "HOST_WAIT"|terminated\.length > 0 \? "ENDED"/, "a dead/silent child produces the ENDED marker");
+  assert.match(settled, /REVIEW_GATE_CHILD_ENDED/, "a dead/silent child produces the ENDED marker");
   assert.match(settled, /HOST_WAIT/, "an in-flight child produces the HOST_WAIT marker");
   assert.match(settled, /Never end the turn and leave the wake-up to the child/, "the discipline text is explicit");
   // The stall path stays reachable for children that are NOT involved.
@@ -3613,8 +3620,9 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // +1 (N1, 2026-09-27): the checkpoint's dry run before the lane starts —
     // an internal `callTool`, not an instruction.
     "review-chain.ts": 4,
-    // callTool("run_precommit", …) — the lane's own run.
-    "precommit-lane.ts": 1,
+    // callTool("run_precommit", …) — the lane's own run, and its escalation to
+    // full when the fast run ran no tests (2026-09-29): internal calls.
+    "precommit-lane.ts": 2,
     // callTool("prepare_goal_audit", …) — the goal-auditor's task builder.
     "audit-round-host.ts": 1,
     // The STALE TARGET note names the step after which the checkpoint landed.
@@ -3889,13 +3897,13 @@ test("STREAMING: the LLM guards announce themselves only when slow, on the statu
   // A `tool_call` hook has no onUpdate at all (that is a tool's channel), so
   // the six guard calls use the status line — and only past the threshold,
   // or a 200ms round-trip would narrate itself.
-  // Four of the five guards live in the L1 bash arm now; the L6 label one is
-  // still the extension's (checkTestLabels).
+  // All four live in the L1 bash arm (the L6 label check runs no model since
+  // 2026-09-29).
   const guardSrc = SRC + "\n" + SHIP_BASH_SRC + "\n" + EDIT_CHECKS_SRC;
   const guarded = guardSrc.match(/await withSlowNotice\(/g) ?? [];
-  assert.ok(guarded.length >= 5, `every LLM guard call must be wrapped (found ${guarded.length})`);
+  assert.ok(guarded.length >= 4, `every LLM guard call must be wrapped (found ${guarded.length})`);
+  assert.doesNotMatch(EDIT_CHECKS_SRC, /classifyNonEnglish|deps\.classifier/, "the edit-time label check calls no model");
   for (const call of [
-    /classifyNonEnglish\(deps\.classifier\(\), labels\)/,
     /classifyShipCommand\(deps\.classifier\(\), command\)/,
     /classifyAiAttribution\(deps\.classifier\(\), msgs\)/,
     /classifyNonEnglish\(deps\.classifier\(\), msgs\)/,
@@ -4412,12 +4420,9 @@ test("LLM guards: deterministic checks precede every LLM call (tighten-only orde
   const semanticPr = SHIP_BASH_SRC.indexOf("classifyNonEnglish(deps.classifier(), prTexts)");
   assert.ok(unicodePr > 0 && semanticPr > unicodePr,
     "Unicode script check must precede classifyNonEnglish in the PR branch");
-  // L6: the deterministic violations check must precede the semantic layer
-  // inside checkTestLabels.
-  const l6Deterministic = EDIT_CHECKS_SRC.indexOf("res.violations.length > 0");
-  const l6Semantic = EDIT_CHECKS_SRC.indexOf("classifyNonEnglish(deps.classifier(), labels)");
-  assert.ok(l6Deterministic > 0 && l6Semantic > l6Deterministic,
-    "deterministic L6 violations must precede the semantic label check");
+  // L6 has no semantic layer since 2026-09-29: it judges only the labels an
+  // edit adds or changes, against the file as it was before the edit.
+  assert.match(EDIT_CHECKS_SRC, /analyze\(path, content, currentContent\(path\)\)/);
 
   // Guard #4: the ship LLM layer only runs inside the ships.length === 0
   // branch (it can only ADD detections, never lift one).
@@ -4431,12 +4436,11 @@ test("LLM guards: deterministic checks precede every LLM call (tighten-only orde
 });
 
 test("LLM guards: every call site is gated on its llmGuards config flag", () => {
-  // The three ship-path guards read the config in the L1 bash arm; the L6
-  // label guard reads it in the extension's checkTestLabels.
+  // The three ship-path guards read the config in the L1 bash arm.
   assert.match(SHIP_BASH_SRC, /projectConfig\.llmGuards\.aiAttribution/);
   assert.match(SHIP_BASH_SRC, /projectConfig\.llmGuards\.englishCheck/);
   assert.match(SHIP_BASH_SRC, /projectConfig\.llmGuards\.shipDetect/);
-  assert.match(EDIT_CHECKS_SRC, /projectConfig\(\)\.llmGuards\.englishCheck/);
+
 });
 
 test("L6 edit-time check scans the FULL projected file, not newText fragments", () => {
@@ -5395,7 +5399,7 @@ test("judge_submit runs the whole submission chain, and cannot dead-end on it", 
   // below.
   assert.match(body, /startPrecommitBeside\(input\.root, input\.ctx\)/);
   // …and each step reports itself, so a stalled round shows WHERE it stalled.
-  for (const step of [/step\("precommit \(full/, /step\("checkpoint 提交"\)/, /step\("prepare/]) {
+  for (const step of [/step\("precommit（相关测试/, /step\("checkpoint 提交"\)/, /step\("prepare/]) {
     assert.match(body, step, "every chain step publishes progress");
   }
   // 2026-09-08: the round NOTE travels to the checkpoint alongside the message —
@@ -5461,9 +5465,14 @@ test("a judge's PROSE never reaches the opener's context, except from the advise
   // advice one — and the extension never reads it while recording at all.
   const settleFn = windowIn(AUDIT_ROUND_SRC, "export async function settleAuditRound(", "\n}", "settleAuditRound");
   assert.match(settleFn, /if \(spec\.kind === "advice"\) \{[\s\S]*?deps\.proseOf\(report\)/,
-    "the report's own text is read ONLY on the advice branch");
+    "the report's own text is read on the advice branch");
+  // …and on the arbiter's (2026-09-29): its prose IS its answer (a stand-in's
+  // row, an appeal's reason), handed to the tool call blocked on it — never to
+  // a wake-up, and never recorded.
+  assert.match(settleFn, /if \(spec\.kind === "arbiter"\) \{[\s\S]*?deps\.proseOf\(report\)/,
+    "the arbiter's answer goes to its caller");
   const proseReads = [...settleFn.matchAll(/deps\.proseOf\(/g)];
-  assert.equal(proseReads.length, 1, "…and exactly once");
+  assert.equal(proseReads.length, 2, "…and nowhere else");
 });
 
 
@@ -5746,7 +5755,19 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   assert.doesNotMatch(start, /isIdle/, "no idle pre-condition may come back");
   assert.match(start, /superviseTick\(\)/, "the timer only drives the one tick");
   const tick = windowIn(RUNTIME_SRC, "function superviseTick(", "\n  }", "superviseTick");
-  assert.doesNotMatch(tick, /isIdle/, "no idle pre-condition may come back");
+  // Idleness is not a PRE-CONDITION (a busy manager still hears every event);
+  // it only decides the route: an idle manager would be woken for it, and
+  // every idle-time wake goes through the governor (2026-09-29).
+  assert.match(tick, /isIdle\?\.\(\) === true\) \{[\s\S]*?deps\.wakes\.wake\(/,
+    "an idle manager is woken only through the wake governor");
+  // …and a REFUSED notice spends no ring: two refusals must not deliver a
+  // completion zero times (quality round 1 P1).
+  assert.match(tick, /if \(!noticeInFlight\) orchestratorDeps\.saveSupervisionMemory\(memoryBefore\)/,
+    "the supervision memory is restored when the governor refuses");
+  // A judge's report is progress in every mode, or a session whose wakes were
+  // used up would never settle the verdict that just landed (quality P1).
+  const key = windowIn(RUNTIME_SRC, "function wakeProgressKey(", "\n  }", "wakeProgressKey");
+  assert.match(key, /deps\.judgeProgress\(\)/, "a judge report re-opens wakes");
   assert.match(tick, /deliverAs: "steer"/,
     "…and the delivery cuts into the next turn WITHOUT aborting work in flight");
   assert.match(tick, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");
@@ -6682,8 +6703,19 @@ test("the full lane is started WITHOUT being awaited, and the checkpoint accepts
   );
   assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && st\.precommit\.verdict !== "PASS"\)/,
     "no live verification ⇒ the old rule, unchanged (fail-closed) — plus the one release the USER owns: a stage switched off");
-  assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && st\.precommit\.testScope !== "full"\)/,
-    "…and the lane requirement with it");
+  assert.match(gate, /if \(precommitStageOn && !precommitBypassed && !verifyingNow && !testsRan\(st\.precommit\.testScope\)\)/,
+    "…and a PASS whose tests never ran is not one (the review lane is the fast one since 2026-09-29)");
+});
+
+test("a review round runs the FAST lane; the full suite runs at ship time and at declare_done (2026-09-29)", () => {
+  assert.match(LANE_SRC, /mode: PrecommitMode = "fast",/, "startPrecommitBeside defaults to the fast lane");
+  assert.match(LANE_SRC, /if \(mode === "fast" && String\(pre\.details\?\.verdict\) === "PASS" && !controller\.signal\.aborted &&\s*!testsRan\(stateForRepo\(root\)\.precommit\.testScope\)\) \{\s*pre = await callTool\("run_precommit", \{ mode: "full"/,
+    "a fast lane that ran no tests escalates to full — otherwise an unnarrowable project could never record a READY");
+  assert.match(LANE_SRC, /async function runFullLane\([^)]*\)[^{]*\{\s*await waitForQuietLane\(root\);\s*await startPrecommitBeside\(root, ctx, "full"\)\.settled;/,
+    "the full run reuses the one lane slot");
+  const done = readFileSync(join(ROOT, "lib", "declare-done-tool.ts"), "utf8");
+  assert.match(done, /await deps\.waitForQuietLane\(root\);\s*if \(unmetWith\(false\)\.length === 0 && unmetWith\(true\)\.length > 0\) \{[\s\S]{0,120}await deps\.runFullLane\(root, ctx\);/,
+    "declare_done runs the full suite only when it is the one thing missing");
 });
 
 test("a FAIL that arrives after dispatch is reported, and it withholds the READY", () => {
@@ -6789,7 +6821,7 @@ test("the pass-coverage record cites the tree the lane STARTED on, never the pos
   assert.doesNotMatch(lane, /lastFullPassTree\s*=\s*outcome\.fingerprint/,
     "the post-run fingerprint must never become the record");
   // The rule itself is pure and lives in one place.
-  assert.match(LANE_SRC, /^import \{ nextFullPassTree, nextReviewRoundNumber \} from "\.\/gate-state-transitions\.ts";/m,
+  assert.match(LANE_SRC, /^import \{ nextFullPassTree, nextReviewRoundNumber, testsRan \} from "\.\/gate-state-transitions\.ts";/m,
     "one imported rule, not a second copy of the branches here");
   // AND THE THIRD INPUT: what the lane COVERED has to reach the rule.
   // The first attempt read it off the tool's reply (`pre.details?.testScope`)
@@ -7465,7 +7497,7 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   assert.match(arm, /const judgeId = results\.find/, "one refusal carries every repo's outcome");
   const step = windowIn(ACCEPTANCE_HOST_SRC, "async function acceptanceStepForRepo", "\n  return { armAcceptanceRound };", "acceptanceStepForRepo");
   assert.match(step, /acceptanceProblems\(decision\)/, "what blocks is the module's projection, not a second reading");
-  assert.match(step, /dispatchAcceptanceRound\(ctx, root, fingerprint, goalText \?\? ""\)/,
+  assert.match(step, /dispatchAcceptanceRound\(\s*ctx, root, fingerprint, goalText \?\? "",/,
     "the goal text is handed to the dispatch (one read for both halves, 2026-09-22) — dispatched in ITS repo");
   assert.match(step, /const st = stateForRepo\(root\)/, "each repo's OWN state, never the primary's");
   assert.doesNotMatch(step, /primaryRepoRoot/,

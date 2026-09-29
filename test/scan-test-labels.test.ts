@@ -4,6 +4,7 @@ import { spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
 
@@ -18,8 +19,22 @@ after(() => {
   for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
 });
 
-/** Fresh git repo with the given files, all staged. Returns the repo dir. */
-function repoWith(files: Record<string, string>): string {
+const scanner = createRequire(import.meta.url)(SCANNER) as {
+  isTestFile(p: string): boolean;
+  scanFile(p: string, src: string): Array<{ path: string; line: number; label: string }>;
+};
+
+/**
+ * The files a LEXER case scans — no repository. Those cases (everything up to
+ * the git-behaviour block) exercise label extraction, which `scanFile` does
+ * in-process; building a repo and spawning the CLI per case cost ~130ms each.
+ */
+function repoWith(files: Record<string, string>): Record<string, string> {
+  return files;
+}
+
+/** Fresh git repo with the given files, all staged — for the git-behaviour cases. */
+function gitRepoWith(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "rg-label-"));
   tempDirs.push(dir);
   execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
@@ -32,8 +47,13 @@ function repoWith(files: Record<string, string>): string {
   return dir;
 }
 
-function scan(dir: string) {
-  return spawnSync("node", [SCANNER, dir], { cwd: dir, encoding: "utf8" });
+/** A repo dir runs the real CLI; a file table is scanned in-process, same exit/stderr shape. */
+function scan(target: string | Record<string, string>): { status: number | null; stderr: string } {
+  if (typeof target === "string") return spawnSync("node", [SCANNER, target], { cwd: target, encoding: "utf8" });
+  const found = Object.entries(target)
+    .filter(([path]) => scanner.isTestFile(path))
+    .flatMap(([path, src]) => scanner.scanFile(path, src));
+  return { status: found.length > 0 ? 1 : 0, stderr: found.map((v) => `  ${v.path}:${v.line}: ${v.label.slice(0, 60)}`).join("\n") };
 }
 
 test("English labels pass", () => {
@@ -178,14 +198,14 @@ test("a keyword used as a property name or identifier does NOT trigger regex mas
   // a following `/` is division, so the real test calls must still be found.
   const dir = repoWith({
     "kw.test.ts":
-      "const a = of / it('of后中文', () => {}) / 2;\n" +
+      "const a = of / it('标识符之后的中文', () => {}) / 2;\n" +
       "const b = obj.return / test('属性关键字之后的中文', () => {}) / 2;\n" +
       "const c = obj.await / describe('属性等待之后的中文', () => {}) / 2;\n" +
       "const d = obj.if(ok) / it('方法名之后的中文用例', () => {}) / 2;\n",
   });
   const r = scan(dir);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /of后中文/);
+  assert.match(r.stderr, /标识符之后的中文/);
   assert.match(r.stderr, /属性关键字之后的中文/);
   assert.match(r.stderr, /属性等待之后的中文/);
   assert.match(r.stderr, /方法名之后的中文用例/);
@@ -238,9 +258,10 @@ test("invalid/boundary escapes are fail-safe: a real non-Latin char is not swall
   // backslash) must not crash and must not hide the trailing real Chinese char.
   const dir = repoWith({
     "esc3.test.ts":
-      "it('\\u12中文', () => {});\n" +      // short \u then 中文
-      "it('\\u{110000}中文', () => {});\n" +  // out-of-range code point then 中文
-      "it('\\x中文', () => {});\n",           // short \x then 中文
+      // (enough CJK that any stray escape letters stay under the 20% Latin share)
+      "it('\\u12中文用例描述内容', () => {});\n" +      // short \u then 中文
+      "it('\\u{110000}中文用例描述内容', () => {});\n" +  // out-of-range code point then 中文
+      "it('\\x中文用例描述内容', () => {});\n",           // short \x then 中文
   });
   const r = scan(dir);
   assert.equal(r.status, 1);
@@ -397,7 +418,7 @@ test("Latin-with-diacritics and emoji labels pass (not flagged as non-English)",
 });
 
 test("scans STAGED content, not the working tree", () => {
-  const dir = repoWith({ "y.test.ts": "it('english staged', () => {});\n" });
+  const dir = gitRepoWith({ "y.test.ts": "it('english staged', () => {});\n" });
   // Dirty the working tree with a Chinese label WITHOUT staging it.
   writeFileSync(join(dir, "y.test.ts"), "it('未暂存的中文', () => {});\n");
   const r = scan(dir);
@@ -414,7 +435,7 @@ test("nothing staged → exit 0", () => {
 test("a staged test file with a NON-ASCII name is still scanned (git path quoting)", () => {
   // Default `git diff --name-only` C-quotes non-ASCII paths; the scanner must
   // use -z so `中文.test.ts` is recognized rather than silently skipped.
-  const dir = repoWith({ "中文.test.ts": "it('中文标签', () => {});\n" });
+  const dir = gitRepoWith({ "中文.test.ts": "it('中文标签', () => {});\n" });
   const r = scan(dir);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /中文标签/);
@@ -445,7 +466,7 @@ test("a staged path with leading/trailing/dir whitespace is read verbatim (no tr
   // legitimately space-padded paths (leading space, a trailing-space directory
   // segment) with ENGLISH labels pass cleanly (a trimming bug would mangle the
   // path and fail-close the commit).
-  const dir = repoWith({
+  const dir = gitRepoWith({
     " lead.test.ts": 'it("plain english ok", () => {});\n',
     "dir /trail.test.ts": 'it("another english label", () => {});\n',
   });
@@ -498,45 +519,55 @@ test("module export: require() does NOT run main (no argv side effects)", () => 
   assert.equal(r.status, 0, r.stderr);
 });
 
-test("analyzeFile separates violations from latin labels honoring exemptions", () => {
+test("a label is non-English only when more than 80% of its letters are non-Latin", () => {
   const r = spawnSync("node", ["-e", `
-    const { analyzeFile } = require(${JSON.stringify(SCANNER)});
-    const src = [
-      "it('computes the sum', () => {});",
-      "// review-gate: allow-non-english",
-      "it('返佣金额', () => {});",
-      "it('另一个中文', () => {});",
-      "it('ceshi yonghu denglu', () => {});",
-    ].join("\\n");
-    const res = analyzeFile("x.test.ts", src);
-    console.log(JSON.stringify(res));
+    const { isNonEnglishText } = require(${JSON.stringify(SCANNER)});
+    console.log(JSON.stringify([
+      "返佣金额", "返佣金额计算 ok", "computes 返佣 amount", "of后中文", "computes the sum", "123 !?", "",
+    ].map(isNonEnglishText)));
   `], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  const res = JSON.parse(r.stdout);
-  // exempted 返佣金额 is neither a violation nor a latin label
-  assert.equal(res.violations.length, 1);
-  assert.match(res.violations[0].label, /另一个中文/);
-  // both pure-Latin labels (English + pinyin) surface for the LLM layer
-  assert.deepEqual(res.latinLabels.map((l: { label: string }) => l.label),
-    ["computes the sum", "ceshi yonghu denglu"]);
+  // 6 CJK / 8 letters = 75% passes; 4/6 passes; 2/16 passes.
+  assert.deepEqual(JSON.parse(r.stdout), [true, false, false, false, false, false, false]);
 });
 
-test("analyzeFile: file-level marker exempts latin labels from the LLM layer too", () => {
+test("analyzeFile with a base reports only NEW or CHANGED labels", () => {
   const r = spawnSync("node", ["-e", `
     const { analyzeFile } = require(${JSON.stringify(SCANNER)});
-    const src = "// review-gate: allow-non-english-file\\nit('ceshi denglu', () => {});\\nit('中文', () => {});";
-    console.log(JSON.stringify(analyzeFile("x.test.ts", src)));
+    const base = "it('历史用例', () => {});\\nit('要改的用例', () => {});";
+    const src = "it('历史用例', () => {});\\nit('改过的用例', () => {});\\nit('新增用例', () => {});";
+    console.log(JSON.stringify([analyzeFile("x.test.ts", src, base), analyzeFile("x.test.ts", src)]));
   `], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  const res = JSON.parse(r.stdout);
-  assert.equal(res.violations.length, 0);
-  assert.equal(res.latinLabels.length, 0);
+  const [withBase, whole] = JSON.parse(r.stdout);
+  assert.deepEqual(withBase.violations.map((v: { label: string }) => v.label), ["改过的用例", "新增用例"],
+    "the label already in the file is left alone");
+  assert.equal(whole.violations.length, 3, "no base (a new file) ⇒ every label counts");
+  const dup = spawnSync("node", ["-e", `
+    const { analyzeFile } = require(${JSON.stringify(SCANNER)});
+    const base = "it('历史用例', () => {});";
+    console.log(JSON.stringify(analyzeFile("x.test.ts", base + "\\n" + base, base).violations.length));
+  `], { encoding: "utf8" });
+  assert.equal(dup.stdout.trim(), "1", "one more copy of an existing label is new");
+});
+
+test("the hook judges only labels the commit adds or changes against HEAD", () => {
+  const dir = gitRepoWith({ "h.test.ts": "it('历史用例', () => {});\n" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "init"], { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, "h.test.ts"), "it('历史用例', () => {});\nit('adds an english case', () => {});\n");
+  execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
+  assert.equal(scan(dir).status, 0, "the old label is not this commit's business");
+  writeFileSync(join(dir, "h.test.ts"), "it('历史用例', () => {});\nit('新增的中文用例', () => {});\n");
+  execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
+  const r = scan(dir);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /新增的中文用例/);
+  assert.doesNotMatch(r.stderr, /历史用例/);
 });
 
 test("hook behavior unchanged: scanFile still returns violations only", () => {
-  const dir = repoWith({ "c.test.ts": "it('ceshi yonghu denglu', () => {});\n" });
-  // pinyin passes the deterministic hook (Unicode check) — LLM layer is
-  // extension-side only, so the zero-dependency hook stays permissive here.
+  const dir = gitRepoWith({ "c.test.ts": "it('ceshi yonghu denglu', () => {});\n" });
+  // pinyin is Latin script: no deterministic check can see it.
   const r = scan(dir);
   assert.equal(r.status, 0, r.stderr);
 });

@@ -66,22 +66,22 @@ Handing over is **not** one of the orchestration tools: `session_handoff()` belo
 
 ### LLM semantic guard layer (DeepSeek V4 Flash)
 
-A fast, cheap model (`deepseek/deepseek-v4-flash`, configurable via `llmGuards.model`) gives **three guards** an additional **semantic layer**. It is deliberately **not** used to classify the gate mode — that decision belongs to the agent, bounded by the rule engine (see Gate modes). Design invariants, enforced by construction in `lib/llm-classify.ts`:
+The `arbiter` role (its model chain is `agents.arbiter`) gives **three guards** an additional **semantic layer**. It is deliberately **not** used to classify the gate mode — that decision belongs to the agent, bounded by the rule engine (see Gate modes). Design invariants, enforced by construction in `lib/llm-classify.ts`:
 
 1. **Tighten-only** — an LLM verdict can only *add* a block or pick the safer side of an ambiguous case. Deterministic checks run first and short-circuit; the LLM is never asked to *approve* something a deterministic check blocked.
-2. **Fail-back** — timeout (8s), spawn failure, or unparseable output degrade each guard to its exact pre-LLM deterministic behavior. No network ⇒ no regression.
+2. **Fail-back** — no answer within the guard budget (2 minutes), a window that could not open, or a conclusion other than READY / BLOCKED degrade each guard to its exact pre-LLM deterministic behavior. No network ⇒ no regression.
 3. **Injection-resistant** — classified text is wrapped in `<data>` tags as untrusted data; a hostile prompt can at worst flip one classification, which by (1)+(2) cannot open the gate.
 
 | Guard | Deterministic base | What the LLM layer adds |
 |---|---|---|
 | Gate-mode classification (session start) | the rule engine (`lib/task-mode.ts`) alone | **nothing — deliberately.** The mode is the agent's own `set_gate_mode` pick; the engine's tighten-only asymmetry bounds it (a first `normal` still needs the user's dialog, `source: "auto"` keeps the git hooks enforced). Temp dirs are not clamped: a `/tmp` session with trivial work is only nudged toward `normal`. |
 | AI attribution (`llmGuards.aiAttribution`) | `COMMIT_MSG_FORBIDDEN` regexes | Paraphrases: “pair-programmed with an assistant”, “drafted by a language model” |
-| English check L5/L6 (`llmGuards.englishCheck`) | Unicode non-Latin-script detection | The romanization blind spot: pure-Latin pinyin/romaji commit messages, PR text, and test labels |
+| English check L5 (`llmGuards.englishCheck`) | Unicode non-Latin-script detection | The romanization blind spot: pure-Latin pinyin/romaji commit messages and PR text (test labels are deterministic only since 2026-09-29) |
 | Ship detect (`llmGuards.shipDetect`) | ~static shell parser (`lib/ship-detect.ts`) | Suspicious git/gh commands with dynamic constructs (base64-piped shells, inline-defined aliases) the static parser cannot resolve — a positive answer *adds* a detection; “none” changes nothing |
 
-The L6 test-label check also moves **left**: the same lexer the git hook uses now runs at *edit time* in the extension (immediate feedback + the semantic layer), while the zero-dependency hook remains the deterministic backstop at commit time — hooks never call an LLM, so offline commits behave exactly as before. Edit-time scanning works on the **full projected post-edit file** (`lib/edit-projection.ts`): the current file content with every `oldText→newText` applied — so an edit that replaces only a label *string* still exposes the surrounding `it(...)` call to the lexer, and a fragment that cannot be applied is still appended and scanned rather than skipped.
+The L6 test-label check also moves **left**: the same lexer the git hook uses now runs at *edit time* in the extension (immediate feedback, no model call), while the zero-dependency hook remains the deterministic backstop at commit time — hooks never call an LLM, so offline commits behave exactly as before. Edit-time scanning works on the **full projected post-edit file** (`lib/edit-projection.ts`): the current file content with every `oldText→newText` applied — so an edit that replaces only a label *string* still exposes the surrounding `it(...)` call to the lexer, and a fragment that cannot be applied is still appended and scanned rather than skipped.
 
-The classifier child process is **fully isolated**: `pi -p --no-session --no-extensions --no-skills --no-tools --no-context-files --no-prompt-templates`, argv-array spawn (never a shell string), stdin closed immediately, 8s timeout. No extensions means the child cannot recursively load review-gate; no tools means a prompt-injected classifier can at worst emit wrong JSON — and the verdict parse is strict (the entire stdout must be exactly the one-key JSON object; echoed data or chatty prefixes ⇒ fail-back to deterministic behavior).
+**Every model decision in the gate opens the same way** (2026-09-29): as a judge window with a deterministic session id, its answer returned as a structured `judge_conclude` report, its model picked from the role's slots with the judges' own fallback. The classifier is one arbiter round: READY = clear, BLOCKED + a finding = violation; the arbiter window has read-only file tools and its conclusion tool only (no shell, no edits, no `ask_user`), so a prompt-injected classification can at worst flip one answer. The same round serves the appeals of `request_arbitration` and the stand-in for a dialog nobody answered (its wait is `userProxy.waitMinutes`, default 5, and every box takes part — authorization questions and the stage checklist included). The old one-shot `pi -p --no-extensions` side process is gone: it dropped the provider's auth extension and tried a single model.
 
 ## Architecture — the enforcement layers
 
@@ -524,7 +524,7 @@ source layer.
 
 | # | PR #7 finding | How pi-review-gate handles it |
 |---|---------------|-------------------------------|
-| 1 | `test/**/*.test.js` under `/bin/sh` doesn't recurse — 538 tests silently skipped | precommit runner emits a loud `[glob-trap]` warning for `node --test **` scripts; our own `npm test` uses `$(find ...)`; a meta-test reproduces npm's `/bin/sh` expansion and asserts full coverage |
+| 1 | `test/**/*.test.js` under `/bin/sh` doesn't recurse — 538 tests silently skipped | precommit runner emits a loud `[glob-trap]` warning for an UNQUOTED `node --test **` pattern; our own `npm test` passes QUOTED patterns that node expands itself; a meta-test checks the patterns reach node unexpanded and cover every test file on disk |
 | 2 | First-fence-only verdict parsing (fail-open) | There is no verdict text to parse: a judge concludes through `judge_conclude` and its structured `verdict`/`findings` travel on the channel report. `adjudicateReviewConclusion` (`lib/review-adjudicate.ts`) applies the one rule that survived the parser — READY carrying an unresolved P0/P1 is downgraded to BLOCKED |
 | 3 | All-steps-skipped precommit showed PASS | Three distinct verdicts: `✅ PASS` / `❌ FAIL` / `⚠️ NO CHECKS RUN`. NO_CHECKS_RUN blocks the ship gate — configure real checks or explicitly `/gate-bypass` |
 | 4 | NotebookEdit / `.ipynb` bypassed every gate | `ipynb` is in the single CODE_EXTENSIONS list; `coalesceToolPath` reads `path`/`file_path`/`notebook_path`/every spelling; NotebookEdit is in the edit-tool set |
@@ -781,8 +781,8 @@ Per-project config lives in `.pi/review-gate.json`:
   "agents": {
     "reviewer": { "auto": false, "slots": ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] }
   },
-  "llmGuards": {       // LLM semantic guard layer (all tighten-only + fail-back)
-    "model": "deepseek/deepseek-v4-flash",
+  "userProxy": { "waitMinutes": 5 },  // a dialog nobody answers: when the arbiter stands in
+  "llmGuards": {       // LLM semantic guard layer (all tighten-only + fail-back; model = agents.arbiter)
     "aiAttribution": true,
     "englishCheck": true,
     "shipDetect": true
@@ -1883,10 +1883,10 @@ Complementary to L4: while L4 makes user-facing *chat* Simplified Chinese, L5
 requires **commit messages and PR title/description in English**, and it is a
 **hard block**.
 
-**One rule, one implementation** (`judgeEnglish` in `lib/lang-detect.ts`,
-mirrored in the CJS scanner for L6): a text containing **any non-Latin letter**
-(CJK, Kana, Hangul, Cyrillic, …) is refused. The four call sites — the
-`git commit` tool_call guard, `review_checkpoint`, PR title/body, test labels —
+**One rule, one implementation** (`judgeEnglish` in `lib/lang-detect.ts`): a
+text containing **any non-Latin letter** (CJK, Kana, Hangul, Cyrillic, …) is
+refused. (Test labels, L6, use their own ratio rule — see below.) The call
+sites — the `git commit` tool_call guard, `review_checkpoint`, PR title/body —
 differ only in the `kind` they pass, which decides the wording of the block.
 The whole text is scanned, markup included, so wrapping a body in a code fence
 is not a bypass. ASCII, identifiers, digits, punctuation, URLs, emoji and
@@ -1931,10 +1931,12 @@ Test descriptions must be **English** too. Enforced at the `pre-commit` hook
 (L3) layer by `scripts/scan-test-labels.cjs`, which scans the **staged** content
 of test files (`*.test.*`, `*.spec.*`, or under `__tests__/`, JS/TS only) for
 `it(…)` / `test(…)` / `describe(…)` (incl. `.only`/`.skip` chains) whose
-string-literal description contains **any non-Latin letter**. Same hard rule as
-L5 (`lib/lang-detect.ts`, mirrored in the CJS scanner because a git hook runs
-that file with plain node), so diacritics, emoji and digits pass while any
-CJK/Kana/Hangul/Cyrillic letter is blocked.
+string-literal description is **more than 80% non-Latin letters** (2026-09-29;
+L5's commit/PR rule stays "any non-Latin letter"). Only labels the change **adds
+or modifies** count: the hook compares against `HEAD`, the edit-time check
+against the file before the edit, so existing labels are never re-litigated.
+Diacritics, emoji and digits are not counted. A misjudged label is appealed
+with `request_arbitration`.
 
 When a test description legitimately must be non-English, exempt it with a
 bypass marker — recognized **only in `//` line comments**:
@@ -2012,53 +2014,45 @@ the pi package keeps `lib/` at the package root next to `extensions/`. rootDirs
 makes tsc resolve the same specifiers the runtime does, with no build step or
 symlink.
 
-### Why the suite is slow, and how the race regressions are shaped
+### How the fingerprint race regressions are covered
 
-Two fingerprint regressions are reproduced by TIMING, not by construction. Two
-attempts to make them cheaper were tried and withdrawn — documented below so
-they are not re-attempted naively — and two sound optimizations were then
-adopted (2026-09-08, each mutation-verified before landing):
+The racily-clean fail-open has two safeguards: the shadow index is backdated
+(clamped to now) and `git add --renormalize` re-reads content. Both are covered
+by DETERMINISTIC tests in `test/fingerprint-race.test.ts` — a future index
+mtime (the clamp) and an ancient preserved file mtime (`--renormalize`).
 
-1. **Round-cost cut (adopted):** the racily-clean loop used to pay a real
-   `git commit` plus TWO fingerprints per round; the window is opened by `git
-   add` recording the stat, so the commit was incidental. Rounds are now
-   rewrite → fingerprint → add (62s → 29s for 300 rounds, same load).
-2. **Window sampling across repos (adopted):** the loop ran 300 rounds in ONE
-   repo — but the window (index/file mtime in the same bucket) is a
-   repo/timing-level event that a run may never see (2 of 12 mutation runs
-   had no window at all). The 300 rounds now run as **4 parallel groups × 75
-   rounds, each in its own repo** (`test/fingerprint-race*.test.ts`), sampling
-   four windows instead of waiting for one: mutation runs in the full-suite
-   form were caught by every group in every run, and the groups run in
-   parallel (~8s vs 29s). Same 300 rounds, same per-round semantics.
-3. **A rejected env knob (`RG_RACE_ITERS=25`).** Justified by a measurement —
+The 4 × 75-round timing loop that used to sit beside them was deleted on
+2026-09-29 (user decision, ~78 CPU-seconds per full run, 18% of the suite): it
+failed only when BOTH safeguards were gone, and that state already fails the
+ancient-mtime test. The tracked-but-gitignored loop runs 5 rounds (its bug 1 is
+deterministic; bug 2 reproduced in ~57% of runs, so 5 rounds miss it ~1.5% of
+the time). Two things NOT to re-attempt:
+
+1. **An env knob (`RG_RACE_ITERS=25`).** Justified by a measurement —
    a mutated implementation (shadow-index backdate **and** `--renormalize`
    removed) missed the edit in 83/100 rounds. An independent reviewer re-ran
    the experiment and the mutated implementation **passed 3 of 5 runs** at 25
    rounds: the rounds share pacing and are not independent trials, so a
    per-round rate cannot be exponentiated into a guarantee. The knob was
    removed rather than kept with a vaguer claim.
-4. **A rejected "deterministic" replacement** — restore the cached stat after
+2. **A "deterministic" racily-clean test** — restore the cached stat after
    a same-size rewrite. It does not fool git: ctime cannot be forged from user
    space and sub-second mtime still moves. The test passed against a fully
    mutated implementation, i.e. it asserted nothing.
 
-Coverage boundary, stated explicitly: these loops fail only when **both**
-safeguards are gone. Removing just `--renormalize` is caught deterministically
-by `an edit to a file with an ancient preserved mtime is not invisible`;
-removing just the backdate is caught by neither, because `--renormalize`
-re-reads content unconditionally — the backdate is a deliberate redundant
-second line of defence.
+Coverage boundary, stated explicitly: removing just the backdate is caught by
+no test, because `--renormalize` re-reads content unconditionally — the
+backdate is a deliberate redundant second line of defence.
 
 ### Latency: where the gate actually costs you time
 
 | Layer | Cost | Notes |
 |---|---|---|
 | Per-turn prompt fingerprint | ~65 ms (56 files) / ~575 ms (9k files) | Skipped entirely when the session tracks no change; otherwise memoized behind `advisoryChangeToken()` (~10 ms / ~47 ms) |
-| Edit-time L6 label check | ~45 ms + one ~2 s model call | The model call is memoized per label set |
+| Edit-time L6 label check | ~45 ms | Deterministic; no model call |
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
-| `run_precommit --mode full` (this repo) | ~30 s | Suite is process-spawn bound: ~2万 fork/exec per full run; the race regressions are 4 parallel files (~8s each). Wall sits at the machine's spawn throughput (concurrency 13/24 both ~30s) — a spawn-cut would need test-infrastructure work |
+| `run_precommit --mode full` (this repo) | ~50 s wall | Suite is process-spawn bound (~1.2万 child processes per full run, mostly git). `npm test` pins `--test-concurrency=6`, trading some wall time for a responsive machine |
 | **A review round (any diff size)** | **~3 min reviewer, precommit first** | ONE reviewer, one commit range, no engine — precommit runs BEFORE the review (see the loop protocol); see `docs/execution-model.md` |
 
 **Parallel-stability verification (2026-08-10, historical)**: when the suite
@@ -2066,9 +2060,9 @@ was dominated by the two single-file timing loops, `run_precommit --mode
 full` ran six consecutive times on this repo (typecheck concurrent with `npm
 test`) — all six PASS; wall clock 138–157 s, on par with the serial baseline
 (`npm test` ~137 s + typecheck ~2 s). The parallel win lands on multi-step
-repos. The suite has since been restructured (2026-09-08: race loop split into
-four parallel groups, hook/fingerprint files re-split) — the current full-run
-wall is the ~30 s in the table above.
+repos. The suite has since been restructured (2026-09-29: the racily-clean timing
+loop was removed, the slowest suites stopped spawning per-case repos and CLIs) —
+the current full-run wall is in the table above.
 The practical consequence: batching edits into fewer, larger review rounds
 saves far more wall time than any micro-optimization here, because the loop is
 billed per round.

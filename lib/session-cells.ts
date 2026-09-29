@@ -72,8 +72,6 @@ export interface SessionCells {
   stallNoticeShown: boolean;
   /** ISO of the previous stall observation — what `stallInMotion` compares against. */
   lastStallObservedAt: string | undefined;
-  /** Hosted judge-child wait notices are throttled, not budgeted. */
-  lastChildNoticeAt: number;
   /** The referenced hosted-wait watchdog (never unref'd). */
   childWaitTimer: ReturnType<typeof setTimeout> | undefined;
   /** The run's last assistant message ended "aborted" (ESC = pause). */
@@ -160,7 +158,6 @@ export function createSessionCells(cwd: string = process.cwd()): SessionCells {
     loopStall: undefined,
     stallNoticeShown: false,
     lastStallObservedAt: undefined,
-    lastChildNoticeAt: 0,
     childWaitTimer: undefined,
     lastRunAborted: false,
     sessionEdited: false,

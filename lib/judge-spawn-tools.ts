@@ -353,6 +353,7 @@ async function doSpawn(
       sessionDir: launch.sessionDir,
       sysPromptPath: launch.sysPromptPath,
       model: launch.model,
+      role,
     }),
     decor: judgePaneDecor(judgeId, role, deps.paneOwner()),
     // A COMPLETE entry from the first write, and it happens INSIDE the open:
@@ -581,7 +582,7 @@ async function doRecover(
       judgeId: entry.judgeId,
       role: entry.role,
     },
-    command: buildJudgeRecoverCommand(entry.judgeId),
+    command: buildJudgeRecoverCommand(entry.judgeId, entry.role),
     decor: judgePaneDecor(entry.judgeId, entry.role, deps.paneOwner()),
     // The recovered judge is a NEW window from THIS server — recording the
     // window, the session and the server with it is what keeps the entry

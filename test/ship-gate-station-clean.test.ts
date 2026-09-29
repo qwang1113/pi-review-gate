@@ -57,6 +57,7 @@ function deps(root: string, station: DeliveryStation | undefined): ShipGateBashD
     loopGoalConfirmed: () => true,
     precommitLaneRunning: () => false,
     waitForQuietLane: async () => {},
+    runFullLane: async () => {},
     deliveryStation: () => station,
     crossRepoVerdictHint: () => "",
     classifier: () => { throw new Error("no classifier"); },

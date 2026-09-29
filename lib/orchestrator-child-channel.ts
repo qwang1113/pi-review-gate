@@ -277,7 +277,7 @@ export interface ChannelDialogOutcome {
 
 /**
  * What the channel hands the dialog: its abort `signal`, and `onProxyAnswer`,
- * to be called when the answer is the arbiter's thirty-minute stand-in rather
+ * to be called when the answer is the arbiter's timed-out stand-in rather
  * than the user's own (N6). The field names ARE `askChoice`'s option names, so
  * a renderer spreads the whole object into them (`{ ...dialog, body }`) and the
  * arbiter mark cannot be forgotten at one call site.

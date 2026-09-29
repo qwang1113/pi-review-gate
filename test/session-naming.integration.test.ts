@@ -59,7 +59,8 @@ function tmuxInstalled(): boolean {
 }
 
 function tmux(args: readonly string[]): string {
-  return execFileSync("tmux", ["-L", SOCKET, ...args], {
+  // `-f /dev/null`: a lab server must not source the user's ~/.tmux.conf.
+  return execFileSync("tmux", ["-f", "/dev/null", "-L", SOCKET, ...args], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
@@ -77,7 +78,7 @@ function tmuxOk(args: readonly string[]): boolean {
 /** The runner the modules get: every argv executed on the throwaway server. */
 function runner(argv: readonly string[]): TmuxRunResult {
   try {
-    const stdout = execFileSync("tmux", ["-L", SOCKET, ...argv], {
+    const stdout = execFileSync("tmux", ["-f", "/dev/null", "-L", SOCKET, ...argv], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });

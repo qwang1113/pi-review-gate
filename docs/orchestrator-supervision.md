@@ -76,7 +76,7 @@
 | --- | --- | --- |
 | `state` | 子 → 编排 | 我现在是 working / waiting-input / idle / done；带上下文用量、session id、所在 pane（`paneId`） |
 | `request` | 子 → 编排 | 我弹了一个框：标题、**全部选项（原文、按序）**、正文 payload、topic |
-| `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / **arbiter**（对话框 30 分钟无人作答时的代答，不是用户本人的决定）/ orchestrator / dismissed / **interrupted**（instruct 打断时解除的框，不是拒绝） |
+| `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / **arbiter**（对话框等满 `userProxy.waitMinutes`（缺省 5 分钟）无人作答时的代答，不是用户本人的决定）/ orchestrator / dismissed / **interrupted**（instruct 打断时解除的框，不是拒绝） |
 | `answer` | 编排 → 子 | 这个请求的答案 |
 | `instruct` | 编排 → 子 | 打断你并立即投递（`interrupt`，缺省）或切进你当前这一轮（`steer`）；`followUp` 已无生产调用者（judge 次轮派发 2026-09-16 起改用 `interrupt`），枚举值与子会话侧的读取路径保留，只为让旧门禁构建写下的通道记录仍读得懂 |
 | `instruct-ack` | 子 → 编排 | 我注入了（或没能注入，附原因） |

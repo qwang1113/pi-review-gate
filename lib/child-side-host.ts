@@ -44,6 +44,7 @@ import { readWorkerSideEnv } from "./worker-side.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
 import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 import { contextPercentOf } from "./session-handoff.ts";
+import { createOpenerWatch, enforceOpenerBinding } from "./opener-process.ts";
 import type { SessionHost } from "./session-host.ts";
 
 /** What the child side needs from the session beyond the shared host. */
@@ -351,8 +352,13 @@ export function createChildSide(host: SessionHost, deps: ChildSideDeps) {
    */
   function startChildHeartbeat(ctx: ExtensionContext): void {
     if (childHeartbeatTimer || !childBinding()) return;
+    // THE OPENER'S PROCESS, read off the process table on every tick
+    // (lib/opener-process.ts): the one fact that ends this pane when the pi
+    // that opened it is gone, however it went.
+    const openerWatch = createOpenerWatch();
     childHeartbeatTimer = setInterval(() => {
       const live = host.ctx() ?? ctx;
+      if (enforceOpenerBinding(openerWatch, { stop: stopChildHeartbeat, abort: () => live.abort(), shutdown: () => live.shutdown() })) return;
       try {
         reportChildState(live);
       } catch { /* a heartbeat must never break the session it reports on */ }

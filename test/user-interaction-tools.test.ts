@@ -62,7 +62,7 @@ interface Fake {
    */
   dialogRows: Array<string | undefined>;
   /** Every `askChoice` call's spec and options, in order. */
-  dialogCalls: Array<{ spec: ChoiceSpec; back?: boolean; body?: string; proxy?: boolean }>;
+  dialogCalls: Array<{ spec: ChoiceSpec; back?: boolean; body?: string }>;
   asked: string[];
   /** The last ChoiceSpec rendered — the ORDER and the recommendation live there. */
   lastSpec?: ChoiceSpec;
@@ -116,7 +116,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     showToUser: (_uiCtx, lead, body) => { f.notices.push({ lead, body }); return true; },
     askChoice: async (_uiCtx, spec, opts) => {
       f.lastSpec = spec;
-      f.dialogCalls.push({ spec, back: opts?.back, body: opts?.body, proxy: opts?.proxy });
+      f.dialogCalls.push({ spec, back: opts?.back, body: opts?.body });
       f.confirms.push(`${spec.title}\n${opts?.body ?? ""}`);
       if (f.proxyFailed) { opts?.onUndecided?.(); return undefined; }
       if (f.dialogRows.length > 0) return f.dialogRows.shift()!;
@@ -520,19 +520,6 @@ test("ask_user: a grantScope is VISIBLE in the dialog title and the transcript (
   assert.deepEqual(f.grantsMinted, [{ scope: "sensitive-edit", via: "ask-user" }], "and the grant was minted");
 });
 
-test("D39: an authorization question is never answered by the thirty-minute stand-in", async () => {
-  const f = fake({ dialogRows: ["A. 授予（推荐）", "A. 甲（推荐）"] });
-  inPane(f);
-  await call(f, "ask_user", {
-    questions: [
-      { text: "是否授予我 tmux 代答权？", options: ["授予", "不授予"], recommended: "授予", grantScope: "tmux-access" },
-      { text: "普通问题", options: ["甲", "乙"], recommended: "甲" },
-    ],
-  });
-  assert.deepEqual(f.dialogCalls.map((c) => c.proxy), [false, undefined],
-    "the grant question switches the proxy off; an ordinary one keeps it");
-});
-
 test("D39: grantScope is part of ask_user's schema — an agent learns it from the tool, not the source", () => {
   let schema: unknown;
   registerUserInteractionTools({
@@ -548,7 +535,7 @@ test("D39: a question nobody answered in thirty minutes is NOT reported as a clo
   const timedOut = fake({ proxyFailed: true });
   inPane(timedOut);
   const late = textOf(await call(timedOut, "ask_user", { questions: [q] }));
-  assert.match(late, /30 分钟无人作答/);
+  assert.match(late, /等满设定时长无人作答/);
   assert.doesNotMatch(late, /用户关掉了对话框，或/, "the user did not close anything");
   assert.deepEqual(timedOut.grantsMinted, [], "nobody decided, nothing is granted");
 
@@ -556,7 +543,7 @@ test("D39: a question nobody answered in thirty minutes is NOT reported as a clo
   inPane(closed);
   const dismissed = textOf(await call(closed, "ask_user", { questions: [q] }));
   assert.match(dismissed, /用户关掉了对话框/);
-  assert.doesNotMatch(dismissed, /30 分钟无人作答/);
+  assert.doesNotMatch(dismissed, /等满设定时长无人作答/);
 });
 
 test("ask_user: a grantScope question with no options is refused — free text cannot even be asked", async () => {

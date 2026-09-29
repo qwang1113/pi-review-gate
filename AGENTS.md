@@ -52,6 +52,30 @@ Alt+Enter 排队的 followUp 消息需要 turn 边界才能进来。judge / work
 `declare_done`，不在此列（它们「交卷即停」）。
 
 
+### 总则 · 门禁不得靠自述活着、不得为旧事实反复叫醒（2026-09-29，用户决定）
+
+实测事故：三个沙箱会话被门禁每 ~45s 叫醒一次、持续 40 小时（约 15.6 亿输入 token）；
+主会话被 `kill -9` 后，它派出的 judge pane 仍永远写心跳。两条不变量由此而来，各自只有一处实现：
+
+- **门禁的存在以 pi 进程为准**（`lib/opener-process.ts`）：opener 进程没了，它派出的 judge /
+  worker / 编排子会话自己 shutdown。判定只看进程表（pid + 启动时间），永不看门禁自己写的心跳、
+  channel 或状态文件的新旧。
+- **门禁主动唤醒必须有新事实，同一事实的唤醒次数有上界**（`lib/wake-governor.ts`）：所有空闲时的
+  主动唤醒共用一个会话级限流器，同一事实最多 5 次。新增任何能起 turn 的调用都会被
+  `test/wake-sites.test.ts` 拦下，直到它走限流器或登记理由。
+
+### 总则 · 所有需要模型介入的地方，只有一种打开方式（2026-09-29，用户决定）
+
+门禁里任何要模型做判断的地方（judge、worker、arbiter 申诉、对话框无人作答时的代答、L5 的 LLM
+语义守卫，以及以后新增的任何一处）都只走**同一种模式**：在 opener 自己的 tmux session 里开一个
+窗口，跑带确定性 `--session-id` 的交互式 pi 会话；结论经 channel report 回来；模型按
+`review-gate.json` 的 `agents.*` slots 链选择并降级（`lib/model-health.ts` 的冷却记忆 + pane 内换槽，
+降级就是为这种模式设计的）；进程绑定 opener（`lib/opener-process.ts`）；窗口由 `declare_done` 统一回收。
+
+**不得**再用 `pi -p` + `execFile` 之类的一次性子进程旁路（哲学三）。实测的反例：旁路带
+`--no-extensions` 启动，把 `pi-anthropic-oauth` 认证扩展也关掉了，请求按 extra usage 计费被 400；
+而且它只试 `slots[0]`，没有降级 —— 代答因此静默失败，agent 只看到「门禁没有替用户决定」。
+
 ### Single-review loop (the only execution path, agent-initiated)
 
 **Judge roles run in their own windows** — the review is the only parallel
@@ -103,6 +127,9 @@ reviewer over the WHOLE change:
   「真实验收方案」段：真起、真调、比返回数据、再验邻居路径；没有真实执行证据不得
   READY，环境确实跑不起来时如实报 BLOCKED 而不是自我豁免。取消矩阵里没有它 ——
   矩阵裁的是同一时刻并行的三方，验收轮是完成时刻单独的一轮。
+  **它只看「上次验收 READY 之后」这一段**（2026-09-29，用户决定）：这一段只有文档 / 测试 ⇒
+  不派（有 READY 就沿用），有其他文件 ⇒ 增量重验受影响的方案项；它的窗口里 tmux 不再要授权
+  （`lib/acceptance-scope.ts`、`lib/judge-side.ts` 的 `judgeMayRunTmux`）。
 
 - **五个环节是用户的开关，默认全开（2026-09-22）.** goal 协商（含需求反述）、功能
   审查、质量审查、真实验收、全量 precommit —— 用户自己在门禁的固定五勾清单里选
@@ -125,9 +152,16 @@ reviewer over the WHOLE change:
   (`lib/async-precommit-report.ts`). The message names its round and the
   content it verified; a lane whose content has already been replaced reports
   itself as that OLD round, not as the current one. The
-  full precommit ALREADY ran typecheck + build + the complete suite on that
-  exact content — **never manually re-run the full suite or `tsc`** before
-  submitting (the runner caches by input: unchanged content reuses the
+  round's lane is the FAST one (2026-09-29, user decision): typecheck + the
+  tests RELATED to the change (`scripts/precommit-related.mjs` for
+  `node --test`); a READY needs that lane's PASS with tests actually run. The
+  FULL suite runs once, by the gate, when a push / `gh pr create` or
+  `declare_done` finds it is the only thing missing
+  (`lib/precommit-lane.ts` `runFullLane`); a fast lane that could not narrow
+  (ran no tests) escalates to full on its own. A push from a plain terminal
+  meets `hooks/pre-push`, which still needs a full PASS on the sidecar — push
+  from the session (or let `declare_done` run it) — **never manually re-run the full
+  suite or `tsc`** (the runner caches by input: unchanged content reuses the
   recorded PASS in seconds). Develop with targeted tests only.
   The reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
   starts at the last commit a round **concluded** about (READY or BLOCKED),

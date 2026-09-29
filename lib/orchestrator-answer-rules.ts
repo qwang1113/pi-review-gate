@@ -20,7 +20,7 @@ import type { ChannelSettledRecord } from "./channel-records.ts";
 
 const SETTLED_BY_LABEL: Record<ChannelSettledRecord["by"], string> = {
   human: "用户在子会话里当场作答",
-  arbiter: "arbiter 代答（对话框 30 分钟无人作答，不是用户本人的决定）",
+  arbiter: "arbiter 代答（对话框等满设定时长无人作答，不是用户本人的决定）",
   orchestrator: "项目经理经通道作答",
   dismissed: "用户关掉了对话框（没有答案）",
   interrupted: "被指令打断（没有答案）",

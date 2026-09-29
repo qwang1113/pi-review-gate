@@ -19,7 +19,7 @@
   "scripts": {
     "postinstall": "node scripts/install-package.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test $(find test -name '*.test.ts' -o -name '*.test.mjs')"
+    "test": "node --test --test-concurrency=6 \"test/**/*.test.ts\" \"test/**/*.test.mjs\""
   },
   "jest": {
     "testPathIgnorePatterns": [

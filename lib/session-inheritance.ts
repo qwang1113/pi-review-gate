@@ -43,6 +43,7 @@
  */
 
 import { ORCHESTRATION_ID_ENV, orchestrationIdFromEnv } from "./orchestration-id.ts";
+import { forwardOpenerEnv } from "./opener-process.ts";
 
 /** Pane id of the session being replaced (injected into the successor). */
 export const PREDECESSOR_PANE_ENV = "RG_HANDOFF_PREDECESSOR_PANE";
@@ -76,6 +77,8 @@ export function successorEnv(opts: {
     ...(opts.predecessorTranscript ? { [PREDECESSOR_TRANSCRIPT_ENV]: opts.predecessorTranscript } : {}),
     ...(opts.predecessorSessionId ? { [PREDECESSOR_SESSION_ENV]: opts.predecessorSessionId } : {}),
     ...(opts.orchestrationId ? { [ORCHESTRATION_ID_ENV]: opts.orchestrationId } : {}),
+    // A relayed judge / worker / child keeps the SAME opener process to watch.
+    ...forwardOpenerEnv(),
     ...(opts.extra ?? {}),
   };
 }

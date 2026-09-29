@@ -66,8 +66,90 @@
 import type { AuditRoundSpec, PendingAudit } from "./audit-round-specs.ts";
 import { settleAuditRound, type SettleAuditRoundDeps } from "./audit-round-settle.ts";
 import { existingStreamPath } from "./review-stream.ts";
+import { raceAbort } from "./abort-race.ts";
+import type { ReportConclusion } from "./channel-projection.ts";
 
 /* ─────────────────────────── the synchronous round ───────────────────────── */
+
+/** What `runVerdictRound` hands back: the report the judge concluded THIS round with. */
+export type VerdictRoundOutcome =
+  | { ok: true; concluded: ReportConclusion; notes: string }
+  | { ok: false; text: string };
+
+/**
+ * ONE SYNCHRONOUS ROUND WHOSE CONCLUSION BELONGS TO THE CALLER (2026-09-29).
+ *
+ * The arbiter's questions (an appeal, a stand-in answer, a semantic guard) are
+ * the same round as a goal audit — dispatch, wait for THIS round's report —
+ * minus the record: the verdict is an input to the tool call blocked on it, not
+ * a fact of the gate's state. So it rides the same dispatch, the same wait and
+ * the same conclusion half (`settleAuditRound`, the one place a report is
+ * selected), and moves the cursor itself once it has the answer. Fail-closed:
+ * any outcome without THIS round's report is `ok: false` with the reason.
+ */
+export async function runVerdictRound(
+  deps: SettleAuditRoundDeps & Pick<RunAuditRoundDeps, "dispatch" | "judgeIdOf"> & {
+    awaitRoundEnd(root: string, role: string, budgetMs: number): Promise<{ ok: boolean; detail: string }>;
+  },
+  input: { spec: AuditRoundSpec; root: string; task: string; budgetMs: number },
+): Promise<VerdictRoundOutcome> {
+  const { spec, root } = input;
+  const dispatched = await deps.dispatch({
+    root,
+    role: spec.role,
+    title: `${spec.titlePrefix}-${deps.nowIso().slice(11, 19).replace(/:/g, "")}`,
+    task: input.task,
+  });
+  if (!dispatched.ok) return { ok: false, text: spec.notDispatched(dispatched.error ?? "pane 未能开出来") };
+  const judgeId = deps.judgeIdOf(root, spec.role);
+  if (!judgeId) return { ok: false, text: spec.unaddressable() };
+  const waited = await deps.awaitRoundEnd(root, spec.role, input.budgetMs);
+  if (!waited.ok) return { ok: false, text: spec.unfinished(waited.detail) };
+  const settled = await settleAuditRound(deps, { judgeId, root });
+  if (settled.status !== "arbiter") {
+    return { ok: false, text: settled.status === "miss" && settled.text ? settled.text : spec.unfinished("没有本轮的 report") };
+  }
+  deps.advanceCursor(judgeId, settled.reportId);
+  return { ok: true, concluded: settled.concluded, notes: settled.notes };
+}
+
+/**
+ * Run `fn` one call at a time: a call starts only after every earlier one has
+ * settled (a rejection does not stall the queue).
+ */
+export function oneAtATime<A extends unknown[], R>(fn: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
+  let chain: Promise<unknown> = Promise.resolve();
+  return (...args: A) => {
+    const turn = chain.then(() => fn(...args));
+    chain = turn.catch(() => undefined);
+    return turn;
+  };
+}
+
+/**
+ * THE ARBITER QUEUE (2026-09-29): one round at a time (`oneAtATime`), and a
+ * caller's budget and abort signal count from the moment it JOINS the queue —
+ * a caller that gave up (ESC, the user answered the box) leaves at once and is
+ * never dispatched, and one that waited out its budget in line is not either.
+ */
+export function arbiterQueue<A extends unknown[]>(
+  run: (budgetMs: number, signal: AbortSignal | undefined, ...args: A) => Promise<VerdictRoundOutcome>,
+  now: () => number = Date.now,
+): (budgetMs: number, signal: AbortSignal | undefined, ...args: A) => Promise<VerdictRoundOutcome> {
+  const queued = oneAtATime((deadline: number, signal: AbortSignal | undefined, ...args: A) => {
+    if (signal?.aborted) return Promise.resolve<VerdictRoundOutcome>({ ok: false, text: "排队时已被取消，没有派出" });
+    const left = deadline - now();
+    if (left <= 0) return Promise.resolve<VerdictRoundOutcome>({ ok: false, text: "排队等满了预算，没有派出" });
+    return run(left, signal, ...args);
+  });
+  return (budgetMs, signal, ...args) => {
+    // A thrown round keeps its own reason; only a real abort reads “已取消”.
+    const turn = queued(now() + budgetMs, signal, ...args).catch(
+      (err: unknown): VerdictRoundOutcome => ({ ok: false, text: String(err).slice(0, 200) }),
+    );
+    return signal === undefined ? turn : raceAbort(turn, signal, { ok: false, text: "已取消" });
+  };
+}
 
 /** The dispatch half's seams — only the goal and plan audits use them. */
 export interface RunAuditRoundDeps extends SettleAuditRoundDeps {

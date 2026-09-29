@@ -65,7 +65,7 @@ export interface SessionWorktreeHostDeps {
   sessionId(): string | undefined;
   /** Is this session currently refused by the exclusivity guard? */
   refused(): boolean;
-  askChoice(ctx: unknown, spec: ChoiceSpec, opts?: { proxy?: boolean }): Promise<string | undefined>;
+  askChoice(ctx: unknown, spec: ChoiceSpec): Promise<string | undefined>;
   log(text: string): void;
   /** The git runner (tests inject one); defaults to the real git. */
   git?(cwd: string, argv: readonly string[]): { ok: boolean; output: string };
@@ -129,7 +129,7 @@ export function createSessionWorktree(deps: SessionWorktreeHostDeps) {
       const spec = relocateChoice(repoRoot);
       // The dialog returns the ROW it showed (`A. …（推荐）`); the template's own
       // parser maps it back to the option text.
-      const pick = parseChoice(await deps.askChoice(ctx, spec, { proxy: false }), spec);
+      const pick = parseChoice(await deps.askChoice(ctx, spec), spec);
       if (pick.kind !== "chose" || pick.option !== RELOCATE_YES) return;
       const prepared = prepare(repoRoot, deps.sessionId() ?? "?");
       if (!prepared.ok) {

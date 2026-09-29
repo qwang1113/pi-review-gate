@@ -17,7 +17,7 @@
  *
  * WHAT THIS MODULE IS: the policy. Timing, the race, the prompt, the parse, and
  * the fail-closed fallback — all pure or injectable, so the rules are pinned by
- * tests instead of by waiting thirty minutes. It spawns nothing and writes
+ * tests instead of by waiting out the window. It spawns nothing and writes
  * nothing: the caller owns the arbiter process and the record.
  *
  * FAIL CLOSED, ALWAYS — AND THE FALLBACK IS THE SAME FOR EVERY DIALOG.
@@ -45,17 +45,11 @@
 // for a proxied answer to stop parsing as rows and silently degrade into one
 // free-text answer, and this module is already one of that wire's consumers.
 import { MULTI_ANSWER_SEPARATOR } from "./multi-choice-dialog.ts";
+import { DEFAULT_USER_PROXY_WAIT_MS } from "./project-config.ts";
 
-/** How long a dialog waits for a human before the proxy takes over. */
-export const PROXY_ANSWER_TIMEOUT_MS = 30 * 60 * 1000;
-
-/**
- * How long the PROXY ITSELF may take — longer than an ordinary arbitration's
- * two minutes, because it is asked to READ the session's context before it
- * answers. It is bounded all the same: a dialog that has already waited thirty
- * minutes must not wait on a stalled arbiter forever.
- */
-export const PROXY_ARBITER_TIMEOUT_MS = 5 * 60 * 1000;
+// How long a dialog waits for a human is the user's setting
+// (`userProxy.waitMinutes` in review-gate.json, lib/project-config.ts); how
+// long the stand-in itself may take is `ARBITER_BUDGETS.proxyMs`.
 
 /**
  * The pane's own clock, injected so tests never sleep.
@@ -73,6 +67,14 @@ export interface ProxyChoice {
   /** Why, in the proxy's own words. Shown to the user, so it must be readable. */
   rationale: string;
 }
+
+/**
+ * One stand-in attempt: its choice, or WHY there is none — a model out of
+ * quota, a window that never answered, a row nobody offered. The reason is
+ * what the user and the agent are told; "nobody decided" alone read as "the
+ * gate would not decide" (2026-09-29).
+ */
+export type ProxyAttempt = { choice: ProxyChoice } | { failure: string };
 
 /** What one raced dialog produced. */
 export interface ProxyRaceOutcome<T> {
@@ -96,6 +98,8 @@ export interface ProxyRaceOutcome<T> {
    * the user, from one that was answered).
    */
   proxyFailed?: true;
+  /** Why the stand-in did not decide, when it was asked (see `ProxyAttempt`). */
+  proxyFailure?: string;
 }
 
 /**
@@ -119,7 +123,7 @@ export async function raceWithUserProxy<T>(input: {
   /**
    * RESOLVES WHEN THE QUESTION IS ACTUALLY ON SCREEN (2026-09-19).
    *
-   * The window answers "did the user have this question for thirty minutes?",
+   * The window answers "did the user have this question for the whole window?",
    * and a dialog can sit in a QUEUE behind another one for long stretches — the
    * dialog queue shows one box at a time, so a second `askChoice` in the same
    * assistant message waits its turn. Starting the clock when the caller queued
@@ -131,8 +135,12 @@ export async function raceWithUserProxy<T>(input: {
    * queue in front of it wants.
    */
   displayed?: Promise<void>;
-  /** Start the proxy's attempt. Called AT MOST ONCE, and only after the window. */
-  startProxy: () => Promise<ProxyChoice | undefined>;
+  /**
+   * Start the proxy's attempt. Called AT MOST ONCE, and only after the window.
+   * The signal fires when the race is settled some other way (the user
+   * answered first), so the stand-in's round stops holding the arbiter queue.
+   */
+  startProxy: (signal: AbortSignal) => Promise<ProxyAttempt>;
   /** The rows the answer must be one of, verbatim. Empty ⇒ the proxy is not asked. */
   options: readonly string[];
   /**
@@ -143,11 +151,12 @@ export async function raceWithUserProxy<T>(input: {
    * answered”.
    */
   multiple?: boolean;
+  /** How long the human has, from the moment the box is on screen (the user's `userProxy.waitMinutes`). */
   timeoutMs?: number;
   schedule?: ProxyScheduler;
   now?: () => number;
 }): Promise<ProxyRaceOutcome<T>> {
-  const timeoutMs = input.timeoutMs ?? PROXY_ANSWER_TIMEOUT_MS;
+  const timeoutMs = input.timeoutMs ?? DEFAULT_USER_PROXY_WAIT_MS;
   const now = input.now ?? (() => Date.now());
   const schedule: ProxyScheduler = input.schedule ?? ((fn, ms) => {
     const handle = setTimeout(fn, ms);
@@ -157,10 +166,12 @@ export async function raceWithUserProxy<T>(input: {
   return new Promise<ProxyRaceOutcome<T>>((resolve) => {
     let settled = false;
     let timer: { cancel: () => void } | undefined;
+    const proxyStop = new AbortController();
     const finish = (outcome: ProxyRaceOutcome<T>): void => {
       if (settled) return;
       settled = true;
       timer?.cancel();
+      proxyStop.abort();
       resolve(outcome);
     };
 
@@ -187,24 +198,30 @@ export async function raceWithUserProxy<T>(input: {
           finish({ answer: undefined, proxyFailed: true });
           return;
         }
-        void input.startProxy().then(
-          (decision) => {
-            // THE ROW CHECK IS HERE, NOT IN THE PARSER: it is the rule that
-            // makes a proxied answer indistinguishable from a human one
-            // downstream, so it is enforced on the single path every proxy
-            // answer travels.
-            const choice = decision?.choice;
-            if (decision === undefined || typeof choice !== "string" ||
-              !isAcceptedProxyChoice(choice, input.options, input.multiple === true)) {
-              finish({ answer: undefined, proxyFailed: true });
+        void input.startProxy(proxyStop.signal).then(
+          (attempt) => {
+            if ("failure" in attempt) {
+              finish({ answer: undefined, proxyFailed: true, proxyFailure: attempt.failure });
+              return;
+            }
+            // THE ROW CHECK IS HERE: it is the rule that makes a proxied answer
+            // indistinguishable from a human one downstream, so it is enforced
+            // on the single path every proxy answer travels.
+            const { choice, rationale } = attempt.choice;
+            if (typeof choice !== "string" || !isAcceptedProxyChoice(choice, input.options, input.multiple === true)) {
+              finish({
+                answer: undefined,
+                proxyFailed: true,
+                proxyFailure: `arbiter 给出的「${String(choice).slice(0, 80)}」不是任何一个选项`,
+              });
               return;
             }
             finish({
               answer: choice as unknown as T,
-              byProxy: { rationale: decision.rationale, at: new Date(now()).toISOString() },
+              byProxy: { rationale, at: new Date(now()).toISOString() },
             });
           },
-          () => finish({ answer: undefined, proxyFailed: true }),
+          (err) => finish({ answer: undefined, proxyFailed: true, proxyFailure: String(err).slice(0, 200) }),
         );
       }, timeoutMs);
     };
@@ -249,20 +266,15 @@ export function isAcceptedProxyChoice(
  * from the row labels alone.
  */
 export const PROXY_SYSTEM_PROMPT = [
-  "你是这台机器上的**用户代理**：门禁弹出的一个对话框已经等了 30 分钟没有任何人作答，现在由你代替用户做这个决定。",
+  "你是这台机器上的**用户代理**：门禁弹出的一个对话框已经等满用户设定的时长、没有任何人作答，现在由你代替用户做这个决定。",
   "",
   "- 你会先拿到问题的完整文本、全部选项、每个选项的后果，以及这个会话的上下文（transcript 文件路径）。",
   "- **先去读上下文**：这个会话在做什么、进行到哪一步、有没有更重要的约束。不要只看选项的字面意思就选。",
-  "- 从给定的选项里选一个，`choice` 必须与某个选项**逐字完全相同**（不要改写、不要加标点、不要只写序号）。",
-  "- 题目说明它**是多选题**时，`choice` 可以是多个选项用 `\" / \"` 连接：每一段必须与选项列表里某一条的**正文**逐字完全相同（不要带列表前面的 `1. ` `2. ` 序号），至少一段。",
+  "- 从给定的选项里选一个，写出的选项必须与某个选项**逐字完全相同**（不要改写、不要加标点、不要只写序号）。",
+  "- 题目说明它**是多选题**时，可以写多个选项用 `\" / \"` 连接：每一段必须与选项列表里某一条的**正文**逐字完全相同（不要带列表前面的 `1. ` `2. ` 序号），至少一段。",
   "- 你的决定会被标注「由 arbiter 代为决定」并记下来，用户回来可以推翻。所以要选你**真的**认为合理的那个，不要为了保守而敷衍。",
   "- 选项之外的东西一律不产生效果：候选之外的字符串会被丢弃，等同于没有人回答。",
-  "- 信息实在不足以判断时，输出 `null`。",
-  "",
-  "只输出 JSON，不要任何其他文字：",
-  '{"choice": "<选项原文>", "rationale": "<一到三句，为什么这样选>"}',
-  "或",
-  "null",
+  "- 信息实在不足以判断时，就说不足，不要硬选。",
 ].join("\n");
 
 /** Everything the proxy is allowed to see about the question. */
@@ -288,15 +300,15 @@ export interface ProxyPromptInput {
  */
 export function buildProxyPrompt(input: ProxyPromptInput): string {
   const lines = [
-    "门禁的对话框等待超时，请你代替用户回答下面这个问题。",
+    "门禁的对话框等待超时，请你代替用户回答下面这个问题（下文说的「选项正文」写在结论 notes 的第一行）。",
     "",
     `<question>`,
     input.title.trim(),
     `</question>`,
     "",
     input.multiple
-      ? "选项（多选题：`choice` 可以是其中若干条的**正文**，用 \" / \" 连接；下面每行前面的 `1. ` 只是序号，不要写进 choice）："
-      : "选项（`choice` 必须是其中某一条的正文，不要带前面的序号）：",
+      ? "选项（多选题：可以写其中若干条的**正文**，用 \" / \" 连接；下面每行前面的 `1. ` 只是序号，不要写进去）："
+      : "选项（必须写其中某一条的正文，不要带前面的序号）：",
     ...input.options.map((o, i) => `  ${i + 1}. ${o}`),
   ];
   if (input.body && input.body.trim() !== "") {
@@ -319,9 +331,9 @@ export function buildProxyPrompt(input: ProxyPromptInput): string {
   lines.push(
     "",
     (input.multiple
-      ? "先读上下文，再从上面的选项里逐字选出你要的那几条（多条用 \" / \" 连接正文）。路径读不到、或读完仍判断不了时，就输出 null ——"
-      : "先读上下文，再从上面的选项里逐字选一个（只写正文）。路径读不到、或读完仍判断不了时，就输出 null ——") +
-      "门禁把 null 当作「没有人回答」，这是安全的方向；猜一个没有依据的答案则不是。",
+      ? "先读上下文，再从上面的选项里逐字选出你要的那几条（多条用 \" / \" 连接正文）。路径读不到、或读完仍判断不了时，就判信息不足 ——"
+      : "先读上下文，再从上面的选项里逐字选一个（只写正文）。路径读不到、或读完仍判断不了时，就判信息不足 ——") +
+      "门禁把它当作「没有人回答」，这是安全的方向；猜一个没有依据的答案则不是。",
   );
   return lines.join("\n");
 }
@@ -354,7 +366,7 @@ export function formatProxyDecisionReport(
     return `  ${i + 1}. [${d.at}] 「${d.question}」→ ${d.choice}${why}${rows}`;
   });
   return (
-    `\n\n**本轮有 ${decisions.length} 个决定是 arbiter 代你做的**（对话框等了 30 分钟无人作答）：\n` +
+    `\n\n**本轮有 ${decisions.length} 个决定是 arbiter 代你做的**（对话框等满设定时长无人作答）：\n` +
     lines.join("\n") +
     "\n这些决定不是你本人做的 —— 推翻其中任何一条只需重新走一遍对应步骤" +
     "（例如对同一个 goal 重新 `propose_loop_goal`）。"
@@ -376,33 +388,26 @@ export function sessionProxyDecisions<T extends { sessionId?: string }>(
   return decisions.filter((d) => d.sessionId !== undefined && mine.has(d.sessionId));
 }
 
+/** How the stand-in answers in its window — the reply format its instructions describe is replaced by this. */
+export const PROXY_CONCLUDE =
+  "- verdict READY = you decided: the FIRST line of `notes` is the chosen option's text, verbatim " +
+  "(several rows of a multiple-choice question joined by \" / \"), the following lines are your one-to-three-sentence reason;\n" +
+  "- verdict NEEDS_HUMAN = the context is not enough to decide; say why in `notes`.";
+
 /**
- * Read the proxy's answer out of its output, or `undefined` for every shape
- * that is not a usable decision.
- *
- * `undefined` is the ONLY failure value, deliberately: every caller reads it as
- * "no answer", which is the same thing it reads when the user closes the box.
- * The row check is NOT here — it needs the option list and lives in
- * `raceWithUserProxy`, on the single path every answer travels.
+ * Read the stand-in's round. The row check is NOT here — it needs the option
+ * list and lives in `raceWithUserProxy`, on the single path every answer travels.
  */
-export function parseProxyDecision(raw: string | undefined): ProxyChoice | undefined {
-  const text = (raw ?? "").trim();
-  if (text === "" || text === "null") return undefined;
-  // A fenced answer is still an answer: what has to be strict is the JSON shape
-  // and the row check downstream, not the absence of a markdown fence.
-  const body = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    // Not JSON: unusable, and guessing at prose here would be the one place a
-    // stand-in answer could drift away from the rows the user was shown.
-    return undefined;
+export function proxyAttemptOf(
+  outcome: { ok: true; concluded: { verdict: string }; notes: string } | { ok: false; text: string },
+): ProxyAttempt {
+  if (!outcome.ok) return { failure: outcome.text };
+  const verdict = outcome.concluded.verdict.trim().toUpperCase();
+  const [first = "", ...rest] = outcome.notes.split("\n");
+  if (verdict !== "READY") {
+    return { failure: `arbiter 判定信息不足（${verdict}）${outcome.notes ? `：${outcome.notes.slice(0, 200)}` : ""}` };
   }
-  if (parsed === null || typeof parsed !== "object") return undefined;
-  const record = parsed as { choice?: unknown; rationale?: unknown };
-  const choice = typeof record.choice === "string" ? record.choice.trim() : "";
-  if (choice === "") return undefined;
-  const rationale = typeof record.rationale === "string" ? record.rationale.trim().slice(0, 600) : "";
-  return { choice, rationale };
+  const choice = first.trim();
+  if (choice === "") return { failure: "arbiter 结论是 READY 但没有写出选项" };
+  return { choice: { choice, rationale: rest.join("\n").trim().slice(0, 600) } };
 }

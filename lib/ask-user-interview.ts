@@ -182,8 +182,8 @@ export async function doAskUser(
    * receipt, which is the one place an answer could still have come from.
    */
   const unrenderable = new Set<number>();
-  /** Questions whose thirty-minute window ran out with nobody deciding (D39). */
-  const undecided = new Set<number>();
+  /** Question index → why the stand-in did not decide it (empty when it was not asked). */
+  const undecided = new Map<number, string>();
 
   // ── THE WHOLE INTERVIEW GOES UP FIRST (2026-09-06) ──
   //
@@ -238,8 +238,9 @@ export async function doAskUser(
     const resolved = opts.unavailable
       ? { answer: { question: q.text, kind: "unanswered" as const } }
       : resolveQuestion(q, picked, opts);
+    const failure = undecided.get(index);
     const resolution = resolved.answer.kind === "unanswered" && undecided.has(index)
-      ? { ...resolved, answer: { ...resolved.answer, timedOut: true as const } }
+      ? { ...resolved, answer: { ...resolved.answer, timedOut: true as const, ...(failure ? { proxyFailure: failure } : {}) } }
       : resolved;
     answers[index] = resolution.answer;
     applyGrant(q, resolution.answer);
@@ -334,14 +335,10 @@ export async function doAskUser(
         signal,
         back: cursor > 0,
         // The anchor is the question this wait settles, even mid walk-back.
-        onUndecided: () => { undecided.add(anchor); },
+        onUndecided: (why?: string) => { undecided.set(anchor, why ?? ""); },
         // Only the anchored question's answer settles its channel request; a
         // stand-in answer to a walked-back question is not that settlement.
         ...(cursor === anchor ? { onProxyAnswer } : {}),
-        // AN AUTHORIZATION IS NOT A MACHINE'S TO GIVE (D39): the arbiter picking
-        // the recommended row would mint the proxy grant the notice asks the
-        // USER for. The window still runs; its expiry is "nobody decided".
-        ...(q.grantScope ? { proxy: false } : {}),
       };
       const picked = q.multiple
         ? await deps.askMultiChoice(uiCtx, spec, opts)

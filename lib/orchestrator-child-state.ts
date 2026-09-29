@@ -478,34 +478,19 @@ export function nextRewakeDelayMs(alreadyReported: number): number {
 }
 
 /**
- * A completion reminder's FIRST gap, and the ceiling it widens to.
+ * A completion rings TWICE, 60s apart, then stays quiet (2026-09-29, user
+ * decision — reversing 2026-09-10's "ring as long as it is true").
  *
- * WHY THERE IS NO LONGER A REPORT LIMIT (2026-09-10). A completion used to
- * ring at most twice and then go permanently quiet. The state is terminal for
- * the CHILD, which is what the limit was argued from — but it is not terminal
- * for the SUPERVISOR, who still owes it a verification, a task status and a
- * `close`. And the two rings were shared memory: a receipt that consumed one
- * (a background tick, or a `wait({childId})` filtered to another child) left
- * exactly one more chance, after which the only trace was the health block —
- * measured as a manager waiting out its full 300s budget beside a child it
- * had already been told was finished.
- *
- * So it rings as long as it is true, WIDENING instead of repeating: 60s, then
- * 2×, 4×, … capped at ten minutes. A busy supervisor is interrupted at a
- * rate it can live with; a forgotten completion cannot go silent for good.
- * It stops on its own the moment the state changes — closing the child (or
- * the pane dying) is what ends it, which is exactly the act the reminder asks
- * for.
+ * An unchanged completion is not a new fact. Ringing it for as long as it was
+ * true woke a project manager every ten minutes for two days over one
+ * finished task (250 notices in the sandbox), each one a full LLM call. The
+ * state stays visible in every `orchestrator_wait` snapshot and the plan's
+ * exit contract still lists the task — the reminder is an accelerator, not the
+ * only trace.
  */
 export const DONE_REWAKE_MS = 60_000;
-/** The widest a completion reminder may become. */
-export const DONE_REWAKE_MAX_MS = 10 * 60_000;
-
-/** Gap before the next reminder about a completion already reported N times. */
-export function nextDoneRewakeDelayMs(alreadyReported: number): number {
-  const step = Math.max(0, alreadyReported - 1);
-  return Math.min(DONE_REWAKE_MAX_MS, DONE_REWAKE_MS * 2 ** step);
-}
+/** How many times one completion is announced. */
+export const DONE_RING_LIMIT = 2;
 
 /** Human-readable name of a state, for the receipt. */
 export function describeChildState(state: ChildState): string {

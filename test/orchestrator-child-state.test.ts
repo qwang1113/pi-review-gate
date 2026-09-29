@@ -20,8 +20,8 @@ import {
   isNewsworthy,
   nextRewakeDelayMs,
   REWAKE_BACKOFF_MS,
-  DONE_REWAKE_MAX_MS,
-  nextDoneRewakeDelayMs,
+  DONE_REWAKE_MS,
+  DONE_RING_LIMIT,
   IDLE_PROGRESS_GRACE_MS,
   type ChildObservation,
 } from "../lib/orchestrator-child-state.ts";
@@ -381,23 +381,13 @@ test("the rendered snapshot names the state in words, and says so when there is 
   }
 });
 
-test("an unanswered thing rings again on a backoff, and a completion WIDENS instead of going quiet", () => {
+test("an unanswered thing rings again on a backoff; a completion rings twice, 60s apart", () => {
   assert.deepEqual([...REWAKE_BACKOFF_MS], [10_000, 30_000, 60_000]);
   assert.equal(nextRewakeDelayMs(0), 10_000);
   assert.equal(nextRewakeDelayMs(2), 60_000);
   assert.equal(nextRewakeDelayMs(99), 60_000, "the backoff plateaus rather than growing forever");
-  // A completion used to stop after two rings, on the argument that it is a
-  // terminal state. It is terminal for the CHILD — not for the SUPERVISOR,
-  // who still owes it a verification, a status and a close. MEASURED: a
-  // receipt that consumed one of the two rings left exactly one more chance,
-  // after which a manager sat out its whole 300s budget beside a child it had
-  // already been told was finished. So it rings as long as it is TRUE, on a
-  // widening gap, and stops when the state stops being `done` (closing the
-  // child is precisely the act the reminder asks for).
-  assert.equal(nextDoneRewakeDelayMs(1), 60_000, "the first reminder keeps the old cadence");
-  assert.equal(nextDoneRewakeDelayMs(2), 120_000);
-  assert.equal(nextDoneRewakeDelayMs(3), 240_000);
-  assert.equal(nextDoneRewakeDelayMs(9), DONE_REWAKE_MAX_MS, "capped, so a busy manager is not drowned");
-  assert.equal(nextDoneRewakeDelayMs(99), DONE_REWAKE_MAX_MS, "and it stays capped");
-  assert.ok(DONE_REWAKE_MAX_MS <= 10 * 60_000, "the ceiling is minutes, not seconds");
+  // 2026-09-29: an unchanged completion is not news — ringing it while it was
+  // true woke a manager every ten minutes for two days.
+  assert.equal(DONE_REWAKE_MS, 60_000);
+  assert.equal(DONE_RING_LIMIT, 2);
 });

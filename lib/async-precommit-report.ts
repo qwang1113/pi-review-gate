@@ -146,11 +146,11 @@ export function buildAsyncPrecommitPass(input: AsyncPrecommitPass): string {
   const label = roundLabel(input);
   const verified = shortTree(input.verified);
   if (asyncPrecommitReportIsStale(input)) {
-    return `review-gate: ${label}的后台 full precommit **PASS** —— 那是 **${label}启动时**那份内容（${verified}），` +
+    return `review-gate: ${label}的后台 precommit **PASS** —— 那是 **${label}启动时**那份内容（${verified}），` +
       `投递这一刻工作区是（${shortTree(input.current)}）。**不用为它做任何事**，` +
-      "你手上的内容由它自己那一轮的 full precommit 判；这条只是告诉你那次验证已经落地。";
+      "你手上的内容由它自己那一轮的 precommit 判；这条只是告诉你那次验证已经落地。";
   }
-  return `review-gate: ${label}的后台 full precommit **PASS**（内容 ${verified}）—— ` +
+  return `review-gate: ${label}的后台 precommit **PASS**（内容 ${verified}）—— ` +
     "已经落地，没有失败项，**不用再等它**。";
 }
 
@@ -190,11 +190,11 @@ export function buildAsyncPrecommitReport(input: AsyncPrecommitReport): string {
   // two causes and the tree cannot tell an agent's edit from the lane's own
   // `lint:fix` rewrite, so the finding stays actionable in both readings.
   const staleLead = [
-    `review-gate: ${label}的后台 full precommit **没过**（${input.verdict}）—— 那次验证的是 **${label}启动时**那份内容（${verified}），`,
+    `review-gate: ${label}的后台 precommit **没过**（${input.verdict}）—— 那次验证的是 **${label}启动时**那份内容（${verified}），`,
     `投递这一刻工作区是（${shortTree(input.current)}），两者不同。`,
     // "那一轮", never the label: with round 0 the label reads 本轮, and the exact
     // sentence this form exists to avoid is "本轮不会产生可 ship 的 READY".
-    "那次验证所属的那一轮不会产生可 ship 的 READY 已是既成事实，你手上的内容会由它自己那一轮的 full precommit 重新判。",
+    "那次验证所属的那一轮不会产生可 ship 的 READY 已是既成事实，你手上的内容会由它自己那一轮的 precommit 重新判。",
     "但**别把它当成与己无关**：两份不同可能是你在这条 lane 跑的时候改的，也可能是 lane 自己的 lint:fix 改写的 ——" +
       "下面那段原始输出说明这次检查报了什么，值得看一眼它在你现在这份内容上还在不在。",
     "（它指的 .pi/precommit-last.log 每次运行都覆盖，直接点进去可能是别的运行。）",
@@ -211,7 +211,7 @@ export function buildAsyncPrecommitReport(input: AsyncPrecommitReport): string {
   // The LOUD form, i.e. still about the content on disk: identity added, the
   // instruction to re-submit kept (it is true here).
   const loudLead = [
-    `review-gate: ${label}的后台 full precommit **没过**（${input.verdict}）—— 这份内容（${verified}）没通过验证，`,
+    `review-gate: ${label}的后台 precommit **没过**（${input.verdict}）—— 这份内容（${verified}）没通过验证，`,
     "本轮不会产生可 ship 的 READY。",
     '修好后重新 `judge_submit({role:"reviewer"})`；无需手动再跑 precommit。',
     "如果它是因为**与本次改动无关的环境问题**失败的，那是用户的决定：让用户 `/gate-bypass <理由>`。",
@@ -254,8 +254,8 @@ export function buildParkedReadyReplayNotice(input: {
 }): string {
   return (
     `review-gate: 之前被扣下的第 ${input.round} 轮 READY 现在已重新记录 —— ` +
-    `全量 precommit 落 PASS，tree ${input.tree.slice(0, TREE_PREFIX)}，与那一轮审的内容一致。\n` +
-    "那次扣下只是因为验证还没跑完（B1 让全量与审查并行跑），**不是内容问题**。\n" +
+    `precommit 落 PASS，tree ${input.tree.slice(0, TREE_PREFIX)}，与那一轮审的内容一致。\n` +
+    "那次扣下只是因为验证还没跑完（B1 让 precommit 与审查并行跑），**不是内容问题**。\n" +
     input.recorded
   );
 }

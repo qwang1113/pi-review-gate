@@ -21,7 +21,7 @@ test("a PASS says it LANDED — the one event a session waiting on this lane has
   // event sources are the JUDGE's, and this was not one of them (measured:
   // 6m47s, notification session 2026-09-15).
   const same = buildAsyncPrecommitPass({ round: 2, commit: COMMIT, verified: TREE_A, current: TREE_A });
-  assert.match(same, /第 2 轮（commit c0ffee123456）的后台 full precommit \*\*PASS\*\*/);
+  assert.match(same, /第 2 轮（commit c0ffee123456）的后台 precommit \*\*PASS\*\*/);
   assert.match(same, /不用再等它/, "the whole reason this notice exists");
   assert.match(same, /d6d29d5a16e1/, "identity of the content it verified");
   // It is NOT a failure notice: no verdict to act on, no run output to read.
@@ -66,7 +66,7 @@ test("the content on disk unchanged: the notice stays loud and names the round",
   const text = buildAsyncPrecommitReport({
     round: 3, commit: COMMIT, verified: TREE_A, current: TREE_A, verdict: "FAIL", detail: DETAIL,
   });
-  assert.match(text, /第 3 轮（commit c0ffee123456）的后台 full precommit \*\*没过\*\*（FAIL）/);
+  assert.match(text, /第 3 轮（commit c0ffee123456）的后台 precommit \*\*没过\*\*（FAIL）/);
   assert.match(text, /本轮不会产生可 ship 的 READY/);
   assert.match(text, /重新 `judge_submit\(\{role:"reviewer"\}\)`/);
   assert.match(text, /d6d29d5a16e1/); // identity, truncated
@@ -108,7 +108,7 @@ test("an unreadable fingerprint on either side never softens the notice", () => 
   for (const [verified, current] of [["", TREE_B], [TREE_A, ""], ["", ""]]) {
     assert.equal(asyncPrecommitReportIsStale({ verified, current }), false);
     const text = buildAsyncPrecommitReport({ round: 0, commit: "", verified, current, verdict: "ERROR", detail: "" });
-    assert.match(text, /本轮（commit 未知[^）]*）的后台 full precommit \*\*没过\*\*（ERROR）/);
+    assert.match(text, /本轮（commit 未知[^）]*）的后台 precommit \*\*没过\*\*（ERROR）/);
     assert.match(text, /本轮不会产生可 ship 的 READY/);
   }
   // An unreadable VERIFIED side is said out loud rather than left blank, and

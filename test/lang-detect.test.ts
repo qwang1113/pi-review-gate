@@ -164,6 +164,12 @@ test("l5BlockReason names the surface and quotes a bounded prefix", () => {
   assert.ok(!text.includes("确".repeat(L5_QUOTE_LENGTH + 1)));
 });
 
+test("a test label's refusal states the L6 ratio rule, not L5's any-letter rule", () => {
+  const text = l5BlockReason({ kind: "test-label", text: "中文用例" });
+  assert.match(text, /more than 80% non-Latin/);
+  assert.doesNotMatch(text, /no non-Latin letters at all/);
+});
+
 test("every kind has its own sentence", () => {
   const seen = new Set(KINDS.map((kind) => l5BlockReason({ kind, text: "x" })));
   assert.equal(seen.size, KINDS.length, "no two surfaces share a reason");
