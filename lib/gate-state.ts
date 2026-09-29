@@ -193,7 +193,7 @@ export interface GateState {
    *
    * The user leaves, and the gate's dialogs used to wait forever — a session
    * parked on a plan decision, another on a goal approval, with the machine
-   * idle. Now a dialog that goes unanswered for `PROXY_ANSWER_TIMEOUT_MS` is
+   * idle. Now a dialog that goes unanswered for `userProxy.waitMinutes` (default 30) is
    * handed to `arbiter`, which reads the session's own context and takes the
    * user's place (lib/user-proxy.ts).
    *

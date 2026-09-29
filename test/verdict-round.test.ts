@@ -16,6 +16,16 @@ import { recordModelFailure, selectHealthySlot } from "../lib/model-health.ts";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+test("a judge / worker window never opens a nested arbiter window — one gate for every caller", () => {
+  const src = readFileSync(join(import.meta.dirname, "..", "extensions", "review-gate.ts"), "utf8");
+  // The one runner appeals and the L5 guards share refuses in a dispatched
+  // window (its guards fall back to the deterministic checks)…
+  assert.match(src, /const arbiterRound = async \(task: string, budgetMs: number\) =>\s*isDispatchedWindow\(\)\s*\? \{ ok: false as const/);
+  assert.match(src, /createLlmClassifier\(arbiterRound\)/);
+  // …and the dialog proxy is told the same fact.
+  assert.match(src, /isDispatchedWindow,\n/);
+});
+
 test("ONE WAY TO OPEN A MODEL: no one-shot `pi -p` subprocess anywhere in the gate (AGENTS.md)", () => {
   const root = join(import.meta.dirname, "..");
   const offenders: string[] = [];
