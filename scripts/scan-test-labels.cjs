@@ -61,20 +61,12 @@ function isTestFile(p) {
   return /\.(test|spec)\./.test(base) || /(^|\/)__tests__\//.test(p);
 }
 
-// ---- non-English detection (mirror of lib/lang-detect.ts) --------------------
-// ONE HARD RULE, kept in sync with judgeEnglish() in lib/lang-detect.ts: a
-// label with ANY non-Latin letter is refused. The whole label is scanned —
-// code spans, URLs and markup included — because wrapping a label in backticks
-// must not turn it into a bypass. Latin-with-diacritics (café), digits,
-// punctuation, emoji and fullwidth punctuation carry no non-Latin LETTER and
-// therefore pass. The majority-ratio policy this file used to mirror was
-// retired on 2026-08-29 (see lib/lang-detect.ts for why); the sanctioned
-// exceptions are the `// review-gate: allow-non-english` markers below and,
-// inside a Pi session, an arbitrated appeal.
-//
-// This file is CJS with no Pi dependency (the git hook runs it with plain
-// node), so the rule is duplicated here rather than imported — keep the two
-// in sync.
+// ---- non-English detection ---------------------------------------------------
+// The whole label is scanned — code spans, URLs and markup included — because
+// wrapping a label in backticks must not turn it into a bypass. Digits,
+// punctuation, emoji and fullwidth punctuation are not letters. Exceptions:
+// the `// review-gate: allow-non-english` markers below and, inside a Pi
+// session, an arbitrated appeal.
 //
 // THE LABEL RULE IS A RATIO (2026-09-29, user decision): a label is
 // non-English when MORE THAN 80% of its letters are non-Latin. A label that
@@ -481,9 +473,9 @@ function firstArgString(src, tokens, tokenByStart, from) {
   return tok && tok.kind === "string" ? tok : null;
 }
 
-/** Every static test label in `src`, exempt or not — the "already there" set. */
+/** How many times each static test label occurs in `src` — the "already there" multiset. */
 function labelsOf(src) {
-  const labels = new Set();
+  const labels = new Map();
   const tokens = lex(src);
   const mask = maskOf(src, tokens);
   const tokenByStart = new Map();
@@ -494,7 +486,7 @@ function labelsOf(src) {
   while ((m = headRe.exec(src)) !== null) {
     if (mask[m.index] || isMemberAccess(src, m.index)) continue;
     const arg = firstArgString(src, tokens, tokenByStart, m.index + m[0].length);
-    if (arg && !arg.dynamic) labels.add(arg.value);
+    if (arg && !arg.dynamic) labels.set(arg.value, (labels.get(arg.value) ?? 0) + 1);
   }
   return labels;
 }
@@ -503,13 +495,12 @@ function labelsOf(src) {
  * Deterministic violations of one file. With `baseSrc` (the file before this
  * edit / at HEAD) only labels that are NEW or CHANGED count — what was already
  * in the file is not this change's business (2026-09-29, user decision).
- * ponytail: matched by label text, so copying an existing label verbatim
- * passes; track call identity if that ever matters.
+ * Matched by label text AND count: one more copy of an existing label is new.
  */
 function analyzeFile(path, src, baseSrc) {
   const violations = [];
   const result = { violations };
-  const existing = baseSrc === undefined ? new Set() : labelsOf(baseSrc);
+  const existing = baseSrc === undefined ? new Map() : labelsOf(baseSrc);
   const tokens = lex(src);
   const mask = maskOf(src, tokens);
   const starts = lineStarts(src);
@@ -572,7 +563,9 @@ function analyzeFile(path, src, baseSrc) {
   }
 
   for (const c of calls) {
-    if (c.exempt || !c.violation || existing.has(c.label)) continue;
+    if (c.exempt || !c.violation) continue;
+    const left = existing.get(c.label) ?? 0;
+    if (left > 0) { existing.set(c.label, left - 1); continue; }
     violations.push({ path, line: c.line, label: c.label });
   }
   return result;

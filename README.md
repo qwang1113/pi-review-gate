@@ -1883,10 +1883,10 @@ Complementary to L4: while L4 makes user-facing *chat* Simplified Chinese, L5
 requires **commit messages and PR title/description in English**, and it is a
 **hard block**.
 
-**One rule, one implementation** (`judgeEnglish` in `lib/lang-detect.ts`,
-mirrored in the CJS scanner for L6): a text containing **any non-Latin letter**
-(CJK, Kana, Hangul, Cyrillic, …) is refused. The four call sites — the
-`git commit` tool_call guard, `review_checkpoint`, PR title/body, test labels —
+**One rule, one implementation** (`judgeEnglish` in `lib/lang-detect.ts`): a
+text containing **any non-Latin letter** (CJK, Kana, Hangul, Cyrillic, …) is
+refused. (Test labels, L6, use their own ratio rule — see below.) The call
+sites — the `git commit` tool_call guard, `review_checkpoint`, PR title/body —
 differ only in the `kind` they pass, which decides the wording of the block.
 The whole text is scanned, markup included, so wrapping a body in a code fence
 is not a bypass. ASCII, identifiers, digits, punctuation, URLs, emoji and

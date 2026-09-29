@@ -523,6 +523,12 @@ test("analyzeFile with a base reports only NEW or CHANGED labels", () => {
   assert.deepEqual(withBase.violations.map((v: { label: string }) => v.label), ["改过的用例", "新增用例"],
     "the label already in the file is left alone");
   assert.equal(whole.violations.length, 3, "no base (a new file) ⇒ every label counts");
+  const dup = spawnSync("node", ["-e", `
+    const { analyzeFile } = require(${JSON.stringify(SCANNER)});
+    const base = "it('历史用例', () => {});";
+    console.log(JSON.stringify(analyzeFile("x.test.ts", base + "\\n" + base, base).violations.length));
+  `], { encoding: "utf8" });
+  assert.equal(dup.stdout.trim(), "1", "one more copy of an existing label is new");
 });
 
 test("the hook judges only labels the commit adds or changes against HEAD", () => {

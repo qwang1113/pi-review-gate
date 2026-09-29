@@ -144,5 +144,7 @@ const KIND_LABEL: Record<L5Kind, string> = {
  */
 export function l5BlockReason(hit: L5Rejection): string {
   return `${KIND_LABEL[hit.kind]} is not English: "${hit.text.slice(0, L5_QUOTE_LENGTH)}". ` +
-    "L5 accepts no non-Latin letters at all.";
+    (hit.kind === "test-label"
+      ? "L6 refuses a new or changed label whose letters are more than 80% non-Latin."
+      : "L5 accepts no non-Latin letters at all.");
 }

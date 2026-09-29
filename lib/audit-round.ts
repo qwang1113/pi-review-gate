@@ -143,7 +143,10 @@ export function arbiterQueue<A extends unknown[]>(
     return run(left, signal, ...args);
   });
   return (budgetMs, signal, ...args) => {
-    const turn = queued(now() + budgetMs, signal, ...args);
+    // A thrown round keeps its own reason; only a real abort reads “已取消”.
+    const turn = queued(now() + budgetMs, signal, ...args).catch(
+      (err: unknown): VerdictRoundOutcome => ({ ok: false, text: String(err).slice(0, 200) }),
+    );
     return signal === undefined ? turn : raceAbort(turn, signal, { ok: false, text: "已取消" });
   };
 }
