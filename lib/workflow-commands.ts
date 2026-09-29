@@ -188,14 +188,14 @@ export const WORKFLOW_COMMANDS = {
       "NEVER write an all-auto agents section: an explicit auto: true renders a default-chain overlay in the PROJECT layer " +
       "that silently shadows the user's GLOBAL per-agent slots (~/.pi/review-gate.json) in this project — omit the agents " +
       "section entirely unless the user names roles to customize; " +
-      "(3) scalar fields — ONLY fields the user explicitly names (from maxRounds, thinkHarder, gitMemory, docSync, llmGuards, arbiter, copilotReview, the defaults live in defaultProjectConfig() at <package-root>/lib/project-config.ts); " +
+      "(3) scalar fields — ONLY fields the user explicitly names (from maxRounds, thinkHarder, gitMemory, docSync, llmGuards, userProxy, arbiter, copilotReview, the defaults live in defaultProjectConfig() at <package-root>/lib/project-config.ts); " +
       "never write defaults for unnamed fields: a project-layer default silently shadows the user's GLOBAL " +
       "~/.pi/review-gate.json value for that project (the same shadowing the agents section avoids); " +
       "(resolve <package-root>: a local-path pi install points at the repo itself; a global/npm install puts it at ~/.pi/agent/npm/pi-review-gate/). " +
       "Merge the baseline over the defaults, then PRESENT THE WHOLE JSON TO THE USER AT ONCE and let them reply with ALL their overrides in ONE message: " +
       "precommit steps accept a package.json script name, a raw shell command, or an explicit skip (when the fast test uses a script, also confirm the narrow flag); " +
       "agents accept naming the roles to customize with { \"auto\": false, \"slots\": [...] } (slot 0 = main model, slots 1.. = fallback chain, max 4 slots, each slot may carry a :thinking suffix); " +
-      "scalar fields accept direct value overrides (note: llmGuards, arbiter and copilotReview are NESTED objects — override them with a complete object, since a wrong shape is silently ignored by the field-by-field merge). " +
+      "scalar fields accept direct value overrides (note: llmGuards, userProxy (written as { \"waitMinutes\": <minutes, at least 1> }), arbiter and copilotReview are NESTED objects — override them with a complete object, since a wrong shape is silently ignored by the field-by-field merge). " +
       "Do not re-ask step by step — wait for the single reply, apply the overrides onto the merged JSON, then VALIDATE before writing: " +
       "every model spec with validateSpec/validateSlots from <package-root>/lib/model-config.ts (the ModelRegistry comes from loadRegistry() at the same module — it reads ~/.pi/agent/models{,-store}.json; an unresolvable spec or an unsupported thinking level is refused — report the exact failures and ask the user to fix them, never write an invalid spec), " +
       "and every precommit script against the project's package.json. " +

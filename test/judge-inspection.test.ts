@@ -230,6 +230,10 @@ test("a round that inspected concludes; adviser and non-READY verdicts are never
   // Hard-coded exemption: an adviser's conclusion reaches no recorder.
   assert.equal(requiresInspectionEvidence("adviser"), false);
   assert.equal(requiresInspectionEvidence("Adviser "), false);
+  // …and the arbiter (2026-09-29): it rules on evidence the gate put in its
+  // task — a one-word guard classification has nothing to open.
+  assert.equal(requiresInspectionEvidence("arbiter"), false);
+  assert.equal(decideInspection({ role: "arbiter", verdict: "READY", evidence: emptyInspection() }).ok, true);
   assert.deepEqual(
     decideInspection({ role: "adviser", verdict: "READY", evidence: emptyInspection() }),
     { ok: true, usedPass: false },

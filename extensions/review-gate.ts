@@ -890,7 +890,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     proxy: dialogProxy,
     raiseBanner: (opts) => raiseBanner(opts),
     lastUserInteractionAt: cells.lastUserInteractionAt,
-    proxyWaitMs: () => cells.projectConfig.userProxyWaitMs,
+    proxyWaitMs: () => cells.projectConfig.userProxy.waitMs,
   });
 
   // ---------- L6 (edit time) + the arbitration I/O they share a quota with ----------

@@ -89,11 +89,11 @@ test("the window is thirty minutes unless the user set userProxy.waitMinutes", (
   const root = mkdtempSync(join(tmpdir(), "rg-proxy-cfg-"));
   mkdirSync(join(root, ".pi"), { recursive: true });
   const home = mkdtempSync(join(tmpdir(), "rg-proxy-home-"));
-  assert.equal(loadProjectConfig(root, home).userProxyWaitMs, DEFAULT_USER_PROXY_WAIT_MS, "absent ⇒ the default");
+  assert.equal(loadProjectConfig(root, home).userProxy.waitMs, DEFAULT_USER_PROXY_WAIT_MS, "absent ⇒ the default");
   writeFileSync(join(root, ".pi", "review-gate.json"), JSON.stringify({ userProxy: { waitMinutes: 5 } }));
-  assert.equal(loadProjectConfig(root, home).userProxyWaitMs, 5 * 60_000, "the user's own number");
+  assert.equal(loadProjectConfig(root, home).userProxy.waitMs, 5 * 60_000, "the user's own number");
   writeFileSync(join(root, ".pi", "review-gate.json"), JSON.stringify({ userProxy: { waitMinutes: 0.1 } }));
-  assert.equal(loadProjectConfig(root, home).userProxyWaitMs, DEFAULT_USER_PROXY_WAIT_MS,
+  assert.equal(loadProjectConfig(root, home).userProxy.waitMs, DEFAULT_USER_PROXY_WAIT_MS,
     "under a minute a person could not read the box before the stand-in took it");
 });
 

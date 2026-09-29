@@ -242,8 +242,8 @@ export interface ProjectConfig {
   docSync: boolean;
   /** LLM semantic guard layer — see LlmGuardsConfig. */
   llmGuards: LlmGuardsConfig;
-  /** How long a gate dialog waits for the user before the arbiter stands in (ms). */
-  userProxyWaitMs: number;
+  /** A gate dialog nobody answers: how long (ms) before the arbiter stands in — JSON `userProxy.waitMinutes`. */
+  userProxy: { waitMs: number };
   /** Arbiter capability-exception config — see ArbiterConfig. */
   arbiter: ArbiterConfig;
   /** L7 post-PR Copilot review loop — see CopilotReviewConfig. */
@@ -275,7 +275,7 @@ export function defaultProjectConfig(): ProjectConfig {
     gitMemory: true,
     docSync: true,
     llmGuards: defaultLlmGuardsConfig(),
-    userProxyWaitMs: DEFAULT_USER_PROXY_WAIT_MS,
+    userProxy: { waitMs: DEFAULT_USER_PROXY_WAIT_MS },
     arbiter: defaultArbiterConfig(),
     copilotReview: defaultCopilotReviewConfig(),
     precommit: null,
@@ -355,7 +355,7 @@ function applyConfigFields(cfg: ProjectConfig, obj: Record<string, unknown>): vo
     // At least one minute: a shorter window would hand a question to the
     // stand-in before a person could read it.
     if (typeof minutes === "number" && Number.isFinite(minutes) && minutes >= 1) {
-      cfg.userProxyWaitMs = Math.round(minutes * 60_000);
+      cfg.userProxy = { waitMs: Math.round(minutes * 60_000) };
     }
   }
   if (typeof obj.arbiter === "object" && obj.arbiter !== null && !Array.isArray(obj.arbiter)) {
