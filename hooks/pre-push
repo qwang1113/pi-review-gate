@@ -11,4 +11,15 @@
 set -euo pipefail
 [[ "${REVIEW_GATE_BYPASS:-}" == "1" ]] && exit 0
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REVIEW_GATE_REQUIRE_FULL=1 exec "$HOOK_DIR/pre-commit"
+# VERIFIED BRANCHES (2026-09-28): a branch a relocated session finished is
+# recorded in the main repo by the tree it was reviewed and accepted at; when
+# every pushed tip is such a tree, this checkout's own gate state (another
+# session's verdict) is not the question. Anything else falls through.
+PUSHED_REFS="$(cat)"
+VERIFIED_SCRIPT="${HOOK_DIR}/../scripts/pre-push-verified.cjs"
+if [[ -f "$VERIFIED_SCRIPT" ]] && command -v node >/dev/null 2>&1 &&
+   printf '%s\n' "$PUSHED_REFS" | node "$VERIFIED_SCRIPT"; then
+  echo "[review-gate] push: every pushed branch is a recorded verified tree (.pi/verified-branches.json)." >&2
+  exit 0
+fi
+REVIEW_GATE_REQUIRE_FULL=1 exec "$HOOK_DIR/pre-commit" </dev/null

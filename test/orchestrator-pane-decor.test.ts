@@ -421,7 +421,13 @@ test("close settles the checkout the manager asked about, and refuses a value it
   const bogus = await world.call("orchestrator_close", { childId: child.id, worktree: "nuke" });
   assert.equal(bogus.isError, true);
   assert.match(replyText(bogus), /worktree 参数不认识/);
+  // `keep` is GONE (2026-09-28, user decision): refused like any other unknown value.
+  const kept = await world.call("orchestrator_close", { childId: child.id, worktree: "keep" });
+  assert.equal(kept.isError, true);
+  assert.match(replyText(kept), /reclaim \/ merge \/ discard/, "the refusal lists what IS legal");
   assert.deepEqual(world.settlements, [], "…and nothing was settled");
+  assert.equal(child.worktree.repo, world.runtime().children[0]!.cwd,
+    "the repo a merge lands in is RECORDED at spawn — the /tmp path cannot say it");
 
   const merged = await world.call("orchestrator_close", { childId: child.id, worktree: "merge" });
   assert.equal(merged.isError, undefined, replyText(merged));
@@ -483,16 +489,16 @@ test("a CLOSED child's checkout can still be settled — the advice the merge re
   await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
   const child = world.runtime().children[1]!;
   assert.equal((await world.call("orchestrator_close", { childId: child.id })).isError, undefined,
-    "close it first — the default `keep` leaves the checkout");
+    "close it first — the default `reclaim` removes the directory, the branch stays on record");
   assert.ok(world.runtime().children[1]!.closedAt, "…and it is on record as closed");
 
   const late = await world.call("orchestrator_close", { childId: child.id, worktree: "discard" });
   assert.equal(late.isError, undefined, replyText(late));
   assert.match(replyText(late), /早已结算/, "the reply says what this call actually did");
   assert.deepEqual(world.settlements, [
-    { childId: child.id, settlement: "keep" },
+    { childId: child.id, settlement: "reclaim" },
     { childId: child.id, settlement: "discard" },
-  ], "the first close kept the checkout (the default), the late one discarded it");
+  ], "the first close reclaimed the directory (the default), the late one discarded the branch");
   assert.equal(world.runtime().children[1]!.worktree, undefined,
     "…and only a settlement that REMOVED the checkout is forgotten");
 });

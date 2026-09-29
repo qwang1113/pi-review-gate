@@ -381,7 +381,7 @@ export interface OrchestratorDeps {
   /**
    * Settle a finished child's isolated checkout (2026-09-10).
    *
-   * The project manager says WHAT (keep / merge / discard) and never runs git
+   * The project manager says WHAT (reclaim / merge / discard) and never runs git
    * itself (philosophy one). The merge half is the one that can genuinely
    * fail: a squash-merge of a branch that touched the same lines CONFLICTS,
    * and the answer is to abort, leave the manager's checkout exactly as it
@@ -393,7 +393,7 @@ export interface OrchestratorDeps {
     taskId: string;
     repoRoot: string;
     worktreePath: string;
-    settlement: "keep" | "merge" | "discard";
+    settlement: import("./orchestrator-worktree.ts").WorktreeSettlement;
   }): {
     ok: boolean;
     text: string;

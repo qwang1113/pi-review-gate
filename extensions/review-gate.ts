@@ -195,6 +195,8 @@ import { registerWorkerSurface } from "../lib/worker-wiring.ts";
 import { registerDeclareDoneTool } from "../lib/declare-done-tool.ts";
 import { registerGateModeTool } from "../lib/gate-mode-tool.ts";
 import { createSessionLifecycle } from "../lib/session-lifecycle.ts";
+import { createSessionWorktree } from "../lib/session-worktree-host.ts";
+import { RELOCATED_STATION_FLOOR } from "../lib/session-worktree.ts";
 import { createTurnDirective, createTurnEndHook, registerThinkingLoopGuard } from "../lib/turn-directive.ts";
 
 /**
@@ -231,11 +233,15 @@ function findProjectAgentText(projectAgentsDir: string, name: string): string | 
  */
 /** Same shape, same reason: the CURRENT session's own tmux session (t4, lib/session-scope-exit.ts). */
 let sessionScopeAtExit: (() => void) | undefined;
+/** Same shape, same reason: the CURRENT session's own /tmp checkout (lib/session-worktree-host.ts). */
+let sessionWorktreeAtExit: (() => unknown) | undefined;
 let sessionNamingAtExit: { release(): unknown } | undefined;
 process.on("exit", () => {
   try { sessionNamingAtExit?.release(); } catch { /* the process is already going */ }
   try { sessionScopeAtExit?.(); } catch { /* the process is already going */ }
   try { paneStateAtExit?.clear(); } catch { /* the process is already going */ }
+  // LAST: everything above may still log into the session's cwd.
+  try { sessionWorktreeAtExit?.(); } catch { /* the process is already going */ }
 });
 /** Same shape, same reason: the CURRENT session's pane options (s1, lib/tmux-pane-state.ts). */
 let paneStateAtExit: { clear(): void } | undefined;
@@ -1193,6 +1199,19 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- run_precommit (internal; lib/precommit-tool.ts) ----------
   registerPrecommitTool(internalHost, cells, { resolveToolRepo, stateForRepo, persistRepo, repoLabel });
 
+  // ---------- a refused second session's own checkout (lib/session-worktree-host.ts) ----------
+  const sessionWorktree = createSessionWorktree({
+    pi,
+    cwd: () => cells.cwd,
+    sessionId: () => cells.state.sessionId ?? undefined,
+    refused: () => cells.state.exclusivityRefusal !== undefined,
+    askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
+    log,
+  });
+  sessionWorktree.register();
+  // Not done ⇒ the directory goes as it stands; uncommitted work is dropped.
+  sessionWorktreeAtExit = () => sessionWorktree.removeOwn();
+
   // ---------- declare_done (lib/declare-done-tool.ts) ----------
   registerDeclareDoneTool(pi, cells, {
     enforcementStateFor,
@@ -1213,6 +1232,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     tmuxScope,
     raiseBanner,
     releaseSessionName: () => sessionNaming.release(),
+    sessionWorktree,
     proxyDecisions: () => dialogProxy.all(),
   });
 
@@ -1229,6 +1249,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // HOW FAR THIS SESSION MAY SHIP (2026-09-15): read from the environment the
     // DISPATCHER wrote, never from anything this session's prompt could say.
     stationCap: stationCapFromEnv,
+    stationFloor: () => (sessionWorktree.inOwnWorktree() ? RELOCATED_STATION_FLOOR : undefined),
     isOrchestrationChild,
     writeGoalFile: (path, text) => {
       // A session another one holds this worktree against must not overwrite
@@ -1249,8 +1270,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
     askChoice: (uiCtx, spec, opts) => askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
-    // THE SAME CEILING the goal dialog reads (2026-09-15).
+    // THE SAME CEILING the goal dialog reads (2026-09-15), and the same floor.
     stationCap: stationCapFromEnv,
+    stationFloor: () => (sessionWorktree.inOwnWorktree() ? RELOCATED_STATION_FLOOR : undefined),
     isOrchestrationChild,
   });
   // `choose_loop_stages` — the SAME deps back the tool_call fallback.
@@ -1369,6 +1391,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     applySessionExclusivity,
     releaseWorktree,
     stopExclusivityRecheck,
+    sessionWorktree,
     runtime: () => ({ stopSupervisionTimer, stopRevivalTimer, startSessionNamingHeartbeat, stopSessionNamingHeartbeat, startPaneState }),
     cancelChildWaitTimer: () => l2.cancelChildWaitTimer(),
     notify: notifyRuntime,

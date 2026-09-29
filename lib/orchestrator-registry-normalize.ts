@@ -103,7 +103,10 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     // settled, and a branch without its path cannot be removed.
     const worktreePath = str((c.worktree as Record<string, unknown> | undefined)?.path);
     const worktreeBranch = str((c.worktree as Record<string, unknown> | undefined)?.branch);
-    const worktree = worktreePath && worktreeBranch ? { path: worktreePath, branch: worktreeBranch } : undefined;
+    const worktreeRepo = str((c.worktree as Record<string, unknown> | undefined)?.repo);
+    const worktree = worktreePath && worktreeBranch
+      ? { path: worktreePath, branch: worktreeBranch, ...(worktreeRepo ? { repo: worktreeRepo } : {}) }
+      : undefined;
     children.push({
       id, taskId, cwd, createdAt,
       paneId: c.paneId,

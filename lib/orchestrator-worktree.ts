@@ -18,12 +18,16 @@
  * calls themselves are injected at the call site (lib/orchestrator-dispatch.ts).
  *
  * WHO CLEARS IT (哲学-adjacent, and the same rule the review worktrees follow):
- * whoever creates it. A child's worktree is removed when the project manager
- * settles it — merged, or discarded — and an orphan (a manager that died before
- * deciding) is REPORTED rather than silently reaped: the work in it may be the
- * only copy, and deleting somebody's last copy to save disk is not a trade this
- * gate makes.
+ * whoever creates it, and AS SOON AS IT IS USED UP (2026-09-28, user decision).
+ * Every settlement removes the DIRECTORY; the work survives on the child's
+ * BRANCH (leftovers are committed onto it first), which costs no disk and is
+ * visible in `git branch`. An orphan (a manager that died before deciding) is
+ * REPORTED rather than silently reaped: its uncommitted work may be the only
+ * copy.
  */
+
+import { basename, join } from "node:path";
+import { gateWorktreeRoot } from "./worktree-root.ts";
 
 /** The branch a child's isolated checkout is on. */
 export function childWorktreeBranch(childId: string): string {
@@ -31,33 +35,19 @@ export function childWorktreeBranch(childId: string): string {
 }
 
 /**
- * Where that checkout lives: BESIDE the repo, never inside it.
+ * Where that checkout lives: under the gate's worktree root
+ * (lib/worktree-root.ts), never inside the repo and never beside it.
  *
  * A worktree inside the repository would appear as untracked content in the
  * main checkout, which is the very thing the isolation exists to prevent —
  * the fingerprint, the precommit cache and the ship gate all read that tree.
- * The name is derived from the child id, so the path is stable across a
- * recovery and two children can never collide on it.
+ * The name is derived from the repo name and the child id, so the path is
+ * stable across a recovery and two children can never collide on it. The
+ * repo it belongs to is NOT recoverable from the path — the registry records
+ * it beside the path (`worktree.repo`).
  */
 export function childWorktreePath(repoRoot: string, childId: string): string {
-  const idx = repoRoot.lastIndexOf("/");
-  const parent = idx > 0 ? repoRoot.slice(0, idx) : repoRoot;
-  const name = idx > 0 ? repoRoot.slice(idx + 1) : repoRoot;
-  return `${parent}/${name}-rg-${childId}`;
-}
-
-/**
- * The repo a child's worktree was cut from — the inverse of
- * {@link childWorktreePath}, and the path a merge lands in.
- *
- * Returns undefined for a path this module could not have produced (a
- * hand-made worktree, a renamed directory). That is a REFUSAL, not a guess:
- * the alternative to "I cannot tell which repo this belongs to" is merging
- * somebody's work into the wrong checkout.
- */
-export function repoRootOfWorktree(worktreePath: string, childId: string): string | undefined {
-  const suffix = `-rg-${childId}`;
-  return worktreePath.endsWith(suffix) ? worktreePath.slice(0, -suffix.length) : undefined;
+  return join(gateWorktreeRoot(), `${basename(repoRoot) || "repo"}-rg-${childId}`);
 }
 
 /**
@@ -87,11 +77,12 @@ export function createWorktreeArgv(repoRoot: string, childId: string): WorktreeA
 }
 
 /**
- * How the manager settles a finished child's checkout.
+ * How the manager settles a finished child's checkout. EVERY one of them
+ * removes the directory (2026-09-28, user decision: `keep` is gone).
  *
- *  - `keep`    — leave it, and say so in the receipt. The default, because the
- *                work in it is often the only copy and a default that deletes
- *                is a default that eventually deletes something wanted.
+ *  - `reclaim` — the default: commit the child's leftovers onto its branch and
+ *                remove the checkout. The branch is the only copy left, and it
+ *                is enough.
  *  - `merge`   — commit the child's leftovers, merge its branch into the
  *                manager's checkout UNCOMMITTED (staged, so the manager sees
  *                exactly what arrived; `--no-commit --no-ff` is what makes the
@@ -99,7 +90,7 @@ export function createWorktreeArgv(repoRoot: string, childId: string): WorktreeA
  *                directory (the branch stays — see `reclaimWorktreeArgv`).
  *  - `discard` — remove the checkout and its branch.
  */
-export const WORKTREE_SETTLEMENTS = Object.freeze(["keep", "merge", "discard"] as const);
+export const WORKTREE_SETTLEMENTS = Object.freeze(["reclaim", "merge", "discard"] as const);
 export type WorktreeSettlement = (typeof WORKTREE_SETTLEMENTS)[number];
 
 /**
@@ -120,13 +111,14 @@ export type WorktreeSettlement = (typeof WORKTREE_SETTLEMENTS)[number];
  * failure, which is exactly the semantics needed here.
  *
  * The message is generated, not asked for: the manager settles the checkout,
- * it does not author the child's history, and the subject names the child so
- * `git log` on the result still says where the work came from.
+ * it does not author the child's history, and the subject names the task so
+ * `git log` on the result still says where the work came from. English
+ * Conventional Commits, like every commit this repo ships (L5).
  */
 export function commitLeftoversArgv(worktreePath: string, taskId: string): WorktreeArgv[] {
   return [
     ["-C", worktreePath, "add", "-A"],
-    ["-C", worktreePath, "commit", "-m", `chore(child): ${taskId} 的产出`],
+    ["-C", worktreePath, "commit", "-m", `chore(child): save leftovers of ${taskId}`],
   ];
 }
 
@@ -307,8 +299,10 @@ export function planSettlement(
 ): SettlementPlan {
   const worktreePath = childWorktreePath(repoRoot, childId);
   switch (settlement) {
-    case "keep":
-      return { steps: [] };
+    case "reclaim":
+      // Leftovers onto the branch FIRST: a failure stops the sequence, so a
+      // commit that did not land never reaches the removal below.
+      return { steps: [...commitLeftoversArgv(worktreePath, taskId), reclaimWorktreeArgv(repoRoot, childId)] };
     case "merge":
       return {
         steps: [

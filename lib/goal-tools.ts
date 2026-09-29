@@ -67,6 +67,7 @@ import {
   type DeliveryStation,
 } from "./delivery-station.ts";
 import { capStationAt, stationCapNotice } from "./repo-pr-policy.ts";
+import { raiseStationToFloor, stationFloorNotice } from "./session-worktree.ts";
 
 /** Just enough of pi's tool context for a dialog and a transcript notice. */
 export interface GoalUiContext {
@@ -134,6 +135,8 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
    * testable, and a test should not have to set process-wide state to ask.
    */
   stationCap?(): DeliveryStation | undefined;
+  /** The FLOOR for a relocated second session (lib/session-worktree.ts), applied after the cap. */
+  stationFloor?(): DeliveryStation | undefined;
   /**
    * THIS SESSION IS AN ORCHESTRATION CHILD (round 4, lib/child-goal-flow.ts):
    * no restatement, no goal audit — the project manager reviews the draft in
@@ -334,7 +337,12 @@ export async function doProposeLoopGoal(
   // dialog asking about `pr` while the gate silently writes `commit` would be
   // the gate lying to the person it is asking.
   const stationCap = deps.stationCap?.();
-  const station: DeliveryStation = capStationAt(requestedStation, stationCap);
+  const capped: DeliveryStation = capStationAt(requestedStation, stationCap);
+  // THE FLOOR, after the cap (2026-09-28): a relocated second session cannot
+  // stop below `commit` — its checkout is removed at declare_done.
+  const stationFloor = deps.stationFloor?.();
+  const station: DeliveryStation = raiseStationToFloor(capped, stationFloor);
+  const floorNote = stationFloorNotice(capped, stationFloor);
   // CLAMPED, NOT MERELY CAPPED (round-1 P1, 2026-09-15). The notice used to
   // fire whenever `stationCap !== requestedStation` — including the case where
   // the request was STRICTER than the ceiling (a restatement at `precommit`
@@ -343,12 +351,12 @@ export async function doProposeLoopGoal(
   // post-clamp value, so it differs from the request exactly when the gate
   // actually moved it.
   const capNotice = stationCapNotice(requestedStation, stationCap);
-  const capNote = capNotice?.full;
+  const capNote = [capNotice?.full, floorNote].filter(Boolean).join("\n") || undefined;
   // THE DIALOG GETS THE SHORT FORM (measured, and it survived the end of the
   // row budget): a long notice's actionable tail is precisely what got cut.
   // The transcript block above carries the full sentence; the box carries the
   // decision and where the reason is written (D41: never a guessed reason).
-  const capNoteShort = capNotice?.short;
+  const capNoteShort = [capNotice?.short, floorNote].filter(Boolean).join("\n") || undefined;
   // TWO RENDERINGS OF ONE DEFINITION: the dialog and the transcript block are
   // read by the USER ("由你自己 commit"), the tool reply by the AGENT, which
   // must not read itself as the committer (round-2 P2).

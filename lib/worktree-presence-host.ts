@@ -8,7 +8,7 @@
  * fresh, and the re-check timer a refused session watches the holder with.
  */
 
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { join as pathJoin } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -60,6 +60,9 @@ export function createWorktreePresence(
     const write = () => {
       const sessionId = host.state().sessionId;
       if (!sessionId) return;
+      // A reclaimed /tmp checkout stays reclaimed (2026-09-28): the atomic
+      // write would mkdir `<gone>/.pi` back into existence.
+      if (!existsSync(host.repos().cwd)) return;
       try {
         writeFileAtomic(presencePath(host.repos().cwd), JSON.stringify(presenceFor(sessionId, process.pid, hostname(), Date.now())));
       } catch { /* best effort: a missed heartbeat lapses, it never blocks work */ }

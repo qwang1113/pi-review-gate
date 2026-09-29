@@ -101,7 +101,7 @@ export const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = Object.freeze([
   // thing that is checking it. The extension and the runner write these with
   // plain fs calls, which this guard does not touch; a human can still edit
   // them by hand.
-  /(^|\/)\.pi\/(review-gate-state\.json(\.blocked)?|precommit-cache\.json)$/i,
+  /(^|\/)\.pi\/(review-gate-state\.json(\.blocked)?|precommit-cache\.json|verified-branches\.json)$/i,
 ]);
 
 export function isSensitiveFile(filePath: string): boolean {

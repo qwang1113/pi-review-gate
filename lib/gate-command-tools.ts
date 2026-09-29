@@ -49,6 +49,13 @@ import { unmetRequirements } from "./gate-state-requirements.ts";
 import { stageOpen, stagesSummary } from "./loop-stages.ts";
 // The acceptance round's own readout line (the record is the module's).
 import { acceptanceStatusLine } from "./acceptance-round.ts";
+import { VERIFIED_BRANCHES_RELPATH, formatVerifiedBranches, parseVerifiedBranches } from "./session-worktree.ts";
+
+function verifiedBranchLines(repoRoot: string): string[] {
+  let raw: string | undefined;
+  try { raw = readFileSync(pathJoin(repoRoot, VERIFIED_BRANCHES_RELPATH), "utf8"); } catch { raw = undefined; }
+  return formatVerifiedBranches(parseVerifiedBranches(raw));
+}
 import { formatPrecommitSummary, lastPrecommitTiming } from "./gate-timings.ts";
 import { isEnforcedMode, normalizeTaskMode, type TaskMode } from "./task-mode.ts";
 import { ORCHESTRATOR_NEEDS_TMUX } from "./orchestrator-directives.ts";
@@ -274,6 +281,9 @@ function registerGateStatus(host: CommandHost, deps: GateCommandDeps): void {
         // nobody can audit.
         ...(acceptanceStatusLine(state.acceptance) === undefined ? [] : [acceptanceStatusLine(state.acceptance)!]),
         ...formatPrecommitSummary(lastPrecommitTiming(primaryRepoRoot)),
+        // Branches a relocated second session finished (lib/session-worktree.ts):
+        // the pre-push hook releases exactly these trees.
+        ...verifiedBranchLines(primaryRepoRoot),
         "── 工作区 ──",
         `changes:   code=${state.hasCodeChange} docs=${state.hasDocChange}`,
         `docSync:   ${projectConfig.docSync ? `ENFORCED (attested: ${state.review.docSync ?? "none"})` : "off"}`,

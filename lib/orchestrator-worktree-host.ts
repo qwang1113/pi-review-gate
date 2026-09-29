@@ -15,13 +15,13 @@ import {
   looksLikeAlreadyGone,
   looksLikeMergeConflict,
   planSettlement,
+  type WorktreeSettlement,
 } from "./orchestrator-worktree.ts";
+import { ensureGateWorktreeRoot } from "./worktree-root.ts";
 import { findChild, noteWorktreeBranch, type OrchestratorRuntime } from "./orchestrator-registry.ts";
 import { listedWorktreeBranch } from "./repo-facts.ts";
 import type { SessionCells } from "./session-cells.ts";
 import { seedWorktree } from "./worktree-seed.ts";
-
-type Settlement = "keep" | "merge" | "discard";
 
 export function createWorktreeSettlement(
   cells: SessionCells,
@@ -31,6 +31,7 @@ export function createWorktreeSettlement(
     const path = childWorktreePath(repoRoot, childId);
     const branch = childWorktreeBranch(childId);
     try {
+      ensureGateWorktreeRoot();
       gitText(repoRoot, createWorktreeArgv(repoRoot, childId), { timeout: 0 });
     } catch (error) {
       const detail = (error as { stderr?: Buffer | string }).stderr;
@@ -64,7 +65,7 @@ export function createWorktreeSettlement(
     childId: string;
     taskId: string;
     repoRoot: string;
-    settlement: Settlement;
+    settlement: WorktreeSettlement;
   }) {
     const worktreePath = childWorktreePath(repoRoot, childId);
     // THE BRANCH THE CHECKOUT IS ACTUALLY ON (2026-09-18, reviewer P2). The
@@ -87,9 +88,6 @@ export function createWorktreeSettlement(
     const registered = state.orchestrator ? findChild(state.orchestrator, childId)?.worktree?.branch : undefined;
     const branch = listedWorktreeBranch(repoRoot, worktreePath) ?? registered ?? childWorktreeBranch(childId);
     const plan = planSettlement(settlement, repoRoot, childId, taskId, branch);
-    if (plan.steps.length === 0) {
-      return { ok: true, text: `worktree 保留在 ${worktreePath}（分支 ${branch}）—— 没有动它` };
-    }
     // IDEMPOTENT ON AN ALREADY-RECLAIMED CHECKOUT (2026-09-15). A `merge`
     // reclaims the directory, so a SECOND settlement — or the `discard` a
     // manager issues afterwards to take the branch away too — contains steps
@@ -155,12 +153,11 @@ export function createWorktreeSettlement(
     const runtime = cells.state.orchestrator;
     const noted = runtime === undefined ? undefined : noteWorktreeBranch(runtime, childId, branch);
     if (runtime !== undefined && noted !== undefined && noted !== runtime) deps.persistOrchestration(noted);
-    // BOTH SETTLEMENTS THAT REMOVE SOMETHING RUN RECLAMATION — `discard`
-    // (checkout + branch) and `merge` (checkout only, 2026-09-15) — so both
-    // can report a failed one. `keep` plans no steps at all and returns
-    // above. A merge that CONFLICTED never got here: the sequence stopped at
-    // the merge step, and its abort leaves the child's checkout exactly
-    // where the human now needs it.
+    // EVERY SETTLEMENT RUNS RECLAMATION — `reclaim` and `merge` (checkout
+    // only) and `discard` (checkout + branch) — so each can report a failed
+    // one. A merge that CONFLICTED never got here: the sequence stopped at the
+    // merge step, and its abort leaves the child's checkout exactly where the
+    // human now needs it.
     return {
       ok: true,
       // The RECLAMATION outcome rides back with the settlement, because the
@@ -177,6 +174,13 @@ export function createWorktreeSettlement(
           `万一你要 \`git merge --abort\` / reset，它就是那份工作的锚（删了它就只剩 reflog）。提交后用 ` +
           `\`orchestrator_close({childId:"${childId}", worktree:"discard"})\` 连分支一起收回 —— ` +
           `那个调用对已关闭的子会话**同样有效**（它只结算 checkout，不再开门）。`
+        : settlement === "reclaim"
+          ? (reclamation.length === 0
+            ? `已回收 ${childId} 的隔离 checkout（${worktreePath}）—— 未提交的改动先 commit 到了分支 \`${branch}\`，` +
+              `成果只在那条分支上。要合并就 \`orchestrator_close({childId:"${childId}", worktree:"merge"})\`，` +
+              `不要了就 \`worktree:"discard"\` 连分支收回。`
+            : `⚠️ 改动已 commit 到分支 \`${branch}\`，但隔离 checkout 没能回收：${reclamation.join(" / ")}\n` +
+              `路径 ${worktreePath}。再调一次 \`orchestrator_close({childId:"${childId}", worktree:"reclaim"})\` 会重试。`)
         : reclamation.length > 0
           ? `⚠️ ${childId} 的 worktree **没能回收**（工作区或分支还留着）：${reclamation.join(" / ")}\n` +
             `路径 ${childWorktreePath(repoRoot, childId)}，分支 \`${branch}\`。\n` +

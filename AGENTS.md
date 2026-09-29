@@ -677,13 +677,31 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    读不到分支时，才给 kebab-case 命名规范（如 `feat/aum-blacklist-purge`）—— 实测
    三个 PR 的 head 分支都是 `rg-child-<sessionId>`，所以那个 handle 永不作为 PR head。
 
-   完工后由 `orchestrator_close({ worktree:"keep"|"merge"|"discard" })` 决定那个
-   checkout 的去向（默认 `keep`，因为里面的成果常常是唯一副本）；**`merge` 在合并
-   成功后自动回收那个目录**（2026-09-15，用户决定：结算过的子会话会把
-   `<repo>-rg-<child>` 越堆越多，而它们对 `git branch` 不可见），只留分支 ——
-   分支是 `git merge --abort` 的唯一回退锚且不占磁盘，确认提交后再用 `discard`
-   连分支一起收回（对已回收的目录幂等）。孤儿 checkout 在 `orchestrator_attach`
-   的回执里列出、**不自行回收**。
+   **门禁开的每一个 worktree 都只在 `/tmp/rg-worktrees/` 下、用完即回收**（2026-09-28，
+   用户决定；根目录唯一出处 `lib/worktree-root.ts`，realpath 过，与 `git worktree list`
+   同一写法）：编排子会话的隔离 checkout、judge 的 `$TMPDIR`、同项目第二个会话的
+   checkout 三类全在这里，不再开在仓库旁边或 `os.tmpdir()`。子会话完工后由
+   `orchestrator_close({ worktree:"reclaim"|"merge"|"discard" })` 结算，**每一种都删目录**：
+   `reclaim`（缺省）先把遗留改动 commit 到子分支再删目录、分支保留作唯一副本；
+   `merge` 同样回收并把分支 staged 合进 PM 工作区（分支是 `git merge --abort` 的锚）；
+   `discard` 连分支一起收回（对已回收的目录幂等）。旧的 `keep` 已删除。子会话还没报完成就
+   close 时先杀窗再结算，不在写者脚下抽走目录；登记里的 `worktree.repo` 记下它从哪个
+   repo 切出来（/tmp 路径推不出来）。孤儿 checkout 在 `orchestrator_attach` 的回执里
+   列出、**不自行回收**。
+
+   **同项目的第二个会话自己开 worktree**（2026-09-28）：被独占拒绝的会话（有对话框时）
+   弹一次统一模板问是否切换；选是 ⇒ 门禁从 HEAD 在根目录下开 `rg-session-<token>`、按
+   `worktree-seed.ts` 播种，写一份 header `cwd` 指向它的新会话文件，经内部命令
+   `/gate-relocate` 拿 command ctx 调 pi 的 `switchSession` 原地切过去（pi 对新目录会弹它自己的
+   项目信任框）。**「完成」= 成果以验收通过的状态回到主仓库**（同日第二轮，用户决定）：它的交付
+   站点最低 `commit`（反述 / goal 里请求 precommit 会被抬到 commit 并写明）；`declare_done` 在
+   **所有门禁与验收轮都通过之后**最后检查 worktree 干净、HEAD tree 就是审查 READY 的 tree、验收
+   已放行，然后把一条记录（分支 / commit / tree / 验收结论）写进**主仓库** `.pi/verified-branches.json`
+   （门禁自有文件，agent 编辑被拦且不可授权），再删目录、分支留下。主 checkout 推这条分支时
+   `hooks/pre-push` 经 `scripts/pre-push-verified.cjs` 按被推 tip 的 tree 查这份记录，全部命中就
+   放行，否则照旧走原检查；`/gate-status` 列出已验分支。**门禁从不替它 commit、从不跳钩子**；没
+   declare_done 就退出，目录照删、未提交改动丢弃。归属记录在 checkout 旁边的 `.owner.json`。规则在
+   `lib/session-worktree.ts`，IO 在 `lib/session-worktree-host.ts`。
 
 2b. **同一个 repo 的一个需求只出一个 PR**（2026-09-15，用户决定）：plan 里同一
    repo 有 ≥2 个任务、且该 repo 没有被写进 `allowMultiplePrs` ⇒ **该 repo 的交付

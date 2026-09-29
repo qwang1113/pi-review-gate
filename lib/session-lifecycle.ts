@@ -48,6 +48,8 @@ export interface SessionLifecycleDeps {
   applySessionExclusivity(ctx: ExtensionContext): void;
   releaseWorktree(): void;
   stopExclusivityRecheck(): void;
+  /** A refused second session may move into its own checkout (lib/session-worktree-host.ts). */
+  sessionWorktree: { offerAfterRefusal(ctx: ExtensionContext): void; adoptOnStart(): void };
   /** The runtime clocks, read at call time (created after this module). */
   runtime(): {
     stopSupervisionTimer(): void;
@@ -261,6 +263,9 @@ export function createSessionLifecycle(cells: SessionCells, deps: SessionLifecyc
     // ONE gate session per worktree: refuse, or take the claim — decided from
     // a heartbeat, not guessed (哲学三).
     deps.applySessionExclusivity(ctx);
+    // …and a REFUSED one is offered its own checkout instead (2026-09-28).
+    deps.sessionWorktree.adoptOnStart();
+    deps.sessionWorktree.offerAfterRefusal(ctx);
 
     deps.persist(ctx);
 
