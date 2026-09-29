@@ -9,7 +9,11 @@
  *      (`join(DIR, "scan-test-labels.cjs")`, `readFileSync(join("lib", "x.ts"))`):
  *      the second is how hooks load scripts and how structural tests read
  *      source text instead of importing it;
- *   2. the test files that are IN that closure (a changed test file is).
+ *   2. the test files that are IN that closure (a changed test file is);
+ *   3. plus every TREE-SCANNING test — one that lists a repo directory
+ *      (`readdirSync(join(ROOT, "lib"))`, a test dir): it counts modules or
+ *      greps every source, so any source change can move it, and no single
+ *      file names it (quality P2, 2026-09-29).
  *   `import type` is not an edge: it has no runtime effect, and typecheck (which
  *   the fast lane always runs) covers what it does affect.
  *   A basename shared by several files links to all of them — more tests, never fewer.
@@ -30,6 +34,7 @@ const SPEC_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)[
 // `import type` / `export type … from`: no runtime edge (typecheck owns types).
 const TYPE_ONLY_RE = /^\s*(?:import|export)\s+type\b[^;]*?from\s*["'][^"']+["'];?/gm;
 const QUOTED_NAME_RE = /["'`]([\w.-]+\.[cm]?[jt]sx?)["'`]/g;
+const TREE_SCAN_RE = /\b(?:readdirSync|globSync)\(\s*(?:join\(\s*)?(?:ROOT|root|REPO|LIB|lib|TEST_DIR|AGENTS)\b/;
 const RESOLVE_SUFFIXES = ["", ".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", ".cjs", "/index.ts", "/index.js"];
 
 /** Every tracked + untracked (not ignored) source file, absolute. */
@@ -100,7 +105,8 @@ export function relatedNodeTests({ repoRoot, cwd, changedFiles, testGlobs }) {
       if (!closure.has(from)) { closure.add(from); queue.push(from); }
     }
   }
-  const related = [...tests].filter((t) => closure.has(t));
+  const scansTree = (t) => { try { return TREE_SCAN_RE.test(readFileSync(t, "utf8")); } catch { return false; } };
+  const related = [...tests].filter((t) => closure.has(t) || scansTree(t));
   return {
     files: related.map((f) => relative(cwd, f)).sort(),
     reason: `${related.length} related test file(s) over ${changedSources.length} changed source(s)`,

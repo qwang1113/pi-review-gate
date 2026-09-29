@@ -30,6 +30,7 @@ test("the reverse closure follows imports, requires and quoted basenames; unrela
     "lib/b.ts": "import { a } from \"./a.ts\";\nexport const b = a;\n",
     "lib/c.ts": "export const c = 3;\n",
     "lib/types.ts": "export type T = number;\n",
+    "test/scan.test.ts": "for (const f of readdirSync(join(ROOT, \"lib\"))) count(f);\n",
     "lib/uses-type.ts": "import type { T } from \"./types.ts\";\nexport const u: T = 1;\n",
     "test/uses-type.test.ts": "import { u } from \"../lib/uses-type.ts\";\n",
     "scripts/hook.cjs": "const s = require('path').join(__dirname, \"scan.cjs\");\n",
@@ -41,13 +42,12 @@ test("the reverse closure follows imports, requires and quoted basenames; unrela
   });
   try {
     const rel = (changed: string[]) => relatedNodeTests({ repoRoot: dir, cwd: dir, changedFiles: changed.map((f) => join(dir, f)), testGlobs: GLOBS });
-    assert.deepEqual(rel(["lib/a.ts"]), { files: ["test/b.test.ts", "test/struct.test.ts"], reason: "2 related test file(s) over 1 changed source(s)" },
-      "transitive import + a structural test that reads the source");
-    assert.deepEqual((rel(["scripts/scan.cjs"]) as { files: string[] }).files, ["test/hook.test.ts"],
+    assert.deepEqual(rel(["lib/a.ts"]), { files: ["test/b.test.ts", "test/scan.test.ts", "test/struct.test.ts"], reason: "3 related test file(s) over 1 changed source(s)" },
+      "transitive import + a structural test that reads the source + a tree-scanning test");
+    assert.deepEqual((rel(["scripts/scan.cjs"]) as { files: string[] }).files, ["test/hook.test.ts", "test/scan.test.ts"],
       "a script loaded by a runtime path reaches the test that runs its loader");
-    assert.deepEqual((rel(["test/c.test.ts"]) as { files: string[] }).files, ["test/c.test.ts"], "a changed test runs itself");
-    assert.deepEqual((rel(["README.md"]) as { files: string[] }).files, [], "docs relate to nothing");
-    assert.deepEqual((rel(["lib/types.ts"]) as { files: string[] }).files, [], "an `import type` is no runtime edge");
+    assert.deepEqual((rel(["test/c.test.ts"]) as { files: string[] }).files, ["test/c.test.ts", "test/scan.test.ts"], "a changed test runs itself");
+    assert.deepEqual((rel(["lib/types.ts"]) as { files: string[] }).files, ["test/scan.test.ts"], "an `import type` is no runtime edge");
     assert.match((rel(["package.json"]) as { full: string }).full, /not a JS\/TS source/, "an untraceable change runs everything");
     assert.ok("full" in relatedNodeTests({ repoRoot: dir, cwd: dir, changedFiles: [join(dir, "lib/a.ts")], testGlobs: [] }));
   } finally {

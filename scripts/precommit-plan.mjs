@@ -329,6 +329,8 @@ export function hasRelatableSources(files) {
  * @param {(bin: string) => string|null} o.resolveBin  locate a runner binary
  * @param {string[]} [o.tokens]          raw `splitTokens(body)`, so an explicit
  *                                      jest config selection can be detected
+ * @param {(changed: string[], testGlobs: string[]) => ({files: string[], reason: string} | {full: string})} [o.relatedNodeTests]
+ *                                      node --test related set (scripts/precommit-related.mjs)
  * @returns {{testScope: string, command: string|null, listCommand: string|null,
  *            positionals: string[], reason: string}}
  *   `listCommand` non-null ⇒ the caller must run it to enumerate related tests
