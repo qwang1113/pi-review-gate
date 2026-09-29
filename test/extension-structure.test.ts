@@ -7489,7 +7489,7 @@ test("the acceptance round is armed from declare_done, on the EXISTING engine, a
   assert.match(arm, /const judgeId = results\.find/, "one refusal carries every repo's outcome");
   const step = windowIn(ACCEPTANCE_HOST_SRC, "async function acceptanceStepForRepo", "\n  return { armAcceptanceRound };", "acceptanceStepForRepo");
   assert.match(step, /acceptanceProblems\(decision\)/, "what blocks is the module's projection, not a second reading");
-  assert.match(step, /dispatchAcceptanceRound\(ctx, root, fingerprint, goalText \?\? ""\)/,
+  assert.match(step, /dispatchAcceptanceRound\(\s*ctx, root, fingerprint, goalText \?\? "",/,
     "the goal text is handed to the dispatch (one read for both halves, 2026-09-22) — dispatched in ITS repo");
   assert.match(step, /const st = stateForRepo\(root\)/, "each repo's OWN state, never the primary's");
   assert.doesNotMatch(step, /primaryRepoRoot/,
