@@ -702,33 +702,19 @@ test("precommit off owes no lane: the verification binding never withholds that 
   );
 });
 
-test("a proxy may not answer the stage checklist (quality round P1, 2026-09-22)", () => {
-  // The checkbox travels through the gate's own dialog, which races every
-  // question against the thirty-minute arbiter hand-off. A stand-in naming only
-  // SOME rows would record the unnamed ones as OFF — a machine switching gates
-  // off in the user's name. The one place that can express “not this question”
-  // is the dialog's `proxy` option, and it must be wired false HERE.
+test("every box, the stage checklist included, goes to the arbiter stand-in (2026-09-29)", () => {
+  // The user's call: an unattended session must not sit on ANY box. The
+  // per-call `proxy: false` opt-out is gone, so nothing can wire it back.
   const start = SRC.indexOf("const loopStageDeps: LoopStagesDeps = {");
   assert.ok(start > 0, "the stage deps exist");
   const wiring = SRC.slice(start, SRC.indexOf("\n  };", start));
-  assert.match(wiring, /proxy: false/, "the stage checklist must not be handed to the arbiter proxy");
-  // The dialog body lives in lib/gate-dialogs.ts since the t5 split.
+  assert.doesNotMatch(wiring, /proxy/, "the stage checklist carries no proxy opt-out");
   const DIALOGS_SRC = readFileSync(
     join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "lib", "gate-dialogs.ts"),
     "utf8",
   );
-  assert.match(DIALOGS_SRC, /options: opts\.proxy === false \? \[\] : spec\.options/,
-    "…and the dialog turns that request into the race's own no-proxy signal");
-  // AND IT MUST NOT BLAME THE ARBITER (quality round P2): the timeout notice
-  // is the user's only clue that a decision is still owed, and “arbiter 无法代答”
-  // would read as a broken machine rather than a deliberate policy. Both copies
-  // live in the same dialog body, which is where the branch is read from.
-  const raceAt = DIALOGS_SRC.indexOf("options: opts.proxy === false ? [] : spec.options");
-  assert.ok(raceAt > 0, "the dialog knows the no-proxy request");
-  const notice = DIALOGS_SRC.slice(raceAt, raceAt + 2500);
-  assert.match(notice, /opts\.proxy === false/, "the timeout notice branches on it");
-  assert.match(notice, /不问 arbiter 代答/, "…and does not report a deliberate policy as a broken arbiter");
-  assert.match(notice, /arbiter 无法代答/, "the other dialogs' wording is left alone");
+  assert.match(DIALOGS_SRC, /options: spec\.options,/, "the race always gets the real options");
+  assert.doesNotMatch(DIALOGS_SRC, /opts\.proxy/, "no dialog option switches the stand-in off");
 });
 
 test("a skipped quality round carries the tree the ship gate verifies (quality round P1)", () => {

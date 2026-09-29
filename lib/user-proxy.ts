@@ -17,7 +17,7 @@
  *
  * WHAT THIS MODULE IS: the policy. Timing, the race, the prompt, the parse, and
  * the fail-closed fallback — all pure or injectable, so the rules are pinned by
- * tests instead of by waiting thirty minutes. It spawns nothing and writes
+ * tests instead of by waiting out the window. It spawns nothing and writes
  * nothing: the caller owns the arbiter process and the record.
  *
  * FAIL CLOSED, ALWAYS — AND THE FALLBACK IS THE SAME FOR EVERY DIALOG.
@@ -123,7 +123,7 @@ export async function raceWithUserProxy<T>(input: {
   /**
    * RESOLVES WHEN THE QUESTION IS ACTUALLY ON SCREEN (2026-09-19).
    *
-   * The window answers "did the user have this question for thirty minutes?",
+   * The window answers "did the user have this question for the whole window?",
    * and a dialog can sit in a QUEUE behind another one for long stretches — the
    * dialog queue shows one box at a time, so a second `askChoice` in the same
    * assistant message waits its turn. Starting the clock when the caller queued

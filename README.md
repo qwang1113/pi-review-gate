@@ -81,7 +81,7 @@ The `arbiter` role (its model chain is `agents.arbiter`) gives **three guards** 
 
 The L6 test-label check also moves **left**: the same lexer the git hook uses now runs at *edit time* in the extension (immediate feedback + the semantic layer), while the zero-dependency hook remains the deterministic backstop at commit time — hooks never call an LLM, so offline commits behave exactly as before. Edit-time scanning works on the **full projected post-edit file** (`lib/edit-projection.ts`): the current file content with every `oldText→newText` applied — so an edit that replaces only a label *string* still exposes the surrounding `it(...)` call to the lexer, and a fragment that cannot be applied is still appended and scanned rather than skipped.
 
-**Every model decision in the gate opens the same way** (2026-09-29): as a judge window with a deterministic session id, its answer returned as a structured `judge_conclude` report, its model picked from the role's slots with the judges' own fallback. The classifier is one arbiter round: READY = clear, BLOCKED + a finding = violation; the arbiter window has read-only file tools and its conclusion tool only (no shell, no edits, no `ask_user`), so a prompt-injected classification can at worst flip one answer. The same round serves the appeals of `request_arbitration` and the stand-in for a dialog nobody answered (its wait is `userProxy.waitMinutes`, default 30). The old one-shot `pi -p --no-extensions` side process is gone: it dropped the provider's auth extension and tried a single model.
+**Every model decision in the gate opens the same way** (2026-09-29): as a judge window with a deterministic session id, its answer returned as a structured `judge_conclude` report, its model picked from the role's slots with the judges' own fallback. The classifier is one arbiter round: READY = clear, BLOCKED + a finding = violation; the arbiter window has read-only file tools and its conclusion tool only (no shell, no edits, no `ask_user`), so a prompt-injected classification can at worst flip one answer. The same round serves the appeals of `request_arbitration` and the stand-in for a dialog nobody answered (its wait is `userProxy.waitMinutes`, default 5, and every box takes part — authorization questions and the stage checklist included). The old one-shot `pi -p --no-extensions` side process is gone: it dropped the provider's auth extension and tried a single model.
 
 ## Architecture — the enforcement layers
 
@@ -781,7 +781,7 @@ Per-project config lives in `.pi/review-gate.json`:
   "agents": {
     "reviewer": { "auto": false, "slots": ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] }
   },
-  "userProxy": { "waitMinutes": 30 },  // a dialog nobody answers: when the arbiter stands in
+  "userProxy": { "waitMinutes": 5 },  // a dialog nobody answers: when the arbiter stands in
   "llmGuards": {       // LLM semantic guard layer (all tighten-only + fail-back; model = agents.arbiter)
     "aiAttribution": true,
     "englishCheck": true,

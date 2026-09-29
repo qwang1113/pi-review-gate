@@ -43,6 +43,7 @@
  * owns the rules — which is what makes every branch below a unit test.
  */
 
+import { isRuntimeCodeFile } from "./acceptance-scope.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 import type { PlanTaskStages } from "./loop-stages.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
@@ -201,6 +202,11 @@ export interface AcceptanceRecord {
   findingsTotal?: number;
   /** Why it was skipped / why it blocks, in the words the agent reads. */
   reason?: string;
+  /**
+   * The HEAD commit the round was dispatched on. A READY carrying it is where
+   * the next round's scope starts (lib/acceptance-scope.ts).
+   */
+  head?: string;
 }
 
 /**
@@ -230,6 +236,7 @@ export function sanitizeAcceptanceRecord(raw: unknown): AcceptanceRecord | undef
   const verdict = text(r.verdict);
   const judgeId = text(r.judgeId);
   const reason = text(r.reason);
+  const head = typeof r.head === "string" && /^[0-9a-f]{7,64}$/.test(r.head) ? r.head : undefined;
   return {
     status,
     at: r.at,
@@ -238,6 +245,7 @@ export function sanitizeAcceptanceRecord(raw: unknown): AcceptanceRecord | undef
     ...(judgeId === undefined ? {} : { judgeId }),
     ...(reason === undefined ? {} : { reason }),
     ...(findingsTotal === undefined ? {} : { findingsTotal }),
+    ...(head === undefined ? {} : { head }),
   };
 }
 
@@ -296,6 +304,13 @@ export interface AcceptanceDecisionInput {
    * top-tier model on a question with no execution behind it.
    */
   hasCodeChange: boolean;
+  /**
+   * The files in the acceptance scope (lib/acceptance-scope.ts `filesSince`:
+   * last accepted HEAD, else branch base, to the worktree). None of them runs
+   * ⇒ nothing to accept: a READY is carried over, otherwise SKIPPED.
+   * `undefined` = git could not say ⇒ this rule does not apply (stricter side).
+   */
+  scopeFiles?: readonly string[];
   /** `acceptanceGateOpen(process.env)` — the environment the dispatcher wrote. */
   gateOpen: boolean;
   /** `acceptanceDelegates(process.env)` — who accepts when the gate is closed. */
@@ -371,6 +386,16 @@ export function acceptanceDecision(input: AcceptanceDecisionInput): AcceptanceDe
       action: "skip",
       status: "SKIPPED",
       reason: "本轮没有代码改动 —— 没有可真实验收的东西，跳过验收轮。",
+    };
+  }
+  if (input.scopeFiles !== undefined && !input.scopeFiles.some(isRuntimeCodeFile)) {
+    if (input.record?.status === "READY" && input.record.head !== undefined) {
+      return { action: "pass", reason: "上次验收 READY 之后只改了文档 / 测试 —— 沿用那份结论。" };
+    }
+    return {
+      action: "skip",
+      status: "SKIPPED",
+      reason: "本轮改动只有文档 / 测试（没有运行时代码）—— 没有可真实验收的东西，跳过验收轮。",
     };
   }
   // NO USABLE FINGERPRINT ⇒ NEVER DISPATCH (2026-09-22).
@@ -631,6 +656,11 @@ export interface AcceptanceTaskInput {
   range?: string;
   /** The files the round changed, when the gate knows them. */
   files?: readonly string[];
+  /**
+   * An earlier round already passed on `head`: only re-verify the plan items
+   * these files can affect (2026-09-29).
+   */
+  sinceAccepted?: { head: string; files: readonly string[] };
 }
 
 /**
@@ -646,6 +676,7 @@ export function buildAcceptanceTask(input: AcceptanceTaskInput): string {
   const plan = extractAcceptancePlan(input.goalText);
   const range = input.range?.trim();
   const files = (input.files ?? []).filter((f) => f.trim() !== "");
+  const since = input.sinceAccepted;
   const instructions = [
     "You are acceptance — the gate dispatched this round at task COMPLETION, and your job is defined in your role file:",
     "verify the work on the REAL system. The plan in the data block below is the loop goal's own acceptance plan — work it.",
@@ -655,6 +686,13 @@ export function buildAcceptanceTask(input: AcceptanceTaskInput): string {
     "No real execution evidence ⇒ you may NOT conclude READY. If real acceptance is impossible in this environment,",
     "report that as the finding and conclude BLOCKED — never exempt yourself.",
     `You run in ${input.repoRoot} — work in that checkout, and report your own \`pwd\` as \`cwd\` (required field).`,
+    ...(since === undefined
+      ? []
+      : [
+          `INCREMENTAL ROUND: an earlier acceptance round concluded READY on ${since.head.slice(0, 12)}. Re-run ONLY the`,
+          "plan items the files in the `since_accepted` block can affect; for every other item say in one line why it",
+          "is unaffected and carries over. A shared module those files touch counts as affecting everything that uses it.",
+        ]),
     JUDGE_COMPLETION_DISCIPLINE,
   ].join("\n");
   return composeWithUntrustedData(instructions, [
@@ -675,5 +713,12 @@ export function buildAcceptanceTask(input: AcceptanceTaskInput): string {
             text: `${range}${files.length ? `\n改动文件：\n${files.map((f) => `- ${f}`).join("\n")}` : ""}`,
           },
         ]),
+    ...(since === undefined
+      ? []
+      : [{
+          tag: "since_accepted",
+          label: `===== 上次验收 READY（${since.head.slice(0, 12)}）之后改动的文件 =====`,
+          text: since.files.map((f) => `- ${f}`).join("\n"),
+        }]),
   ]);
 }

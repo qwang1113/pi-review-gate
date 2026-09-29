@@ -176,6 +176,7 @@ export function createSiblingVerdictRecorders(
     }, scopeExemptionOf(st));
     const dispatchedFingerprint = st.acceptance?.fingerprint;
     const dispatchedJudgeId = st.acceptance?.judgeId;
+    const dispatchedHead = st.acceptance?.head;
     const fp = computeFingerprint(targetRoot);
     const currentFingerprint = fp.unavailable ? "" : fp.digest;
     // NO DISPATCH RECORD IS NOT A PASS: without the fingerprint the round was
@@ -214,6 +215,7 @@ export function createSiblingVerdictRecorders(
         : { fingerprint: currentFingerprint }),
       at,
       ...(dispatchedJudgeId === undefined ? {} : { judgeId: dispatchedJudgeId }),
+      ...(dispatchedHead === undefined ? {} : { head: dispatchedHead }),
       findingsTotal: parsed.findingsTotal,
       ...(parsed.verdict === "READY"
         ? {}

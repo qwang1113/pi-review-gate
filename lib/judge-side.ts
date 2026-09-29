@@ -55,6 +55,16 @@ export function readJudgeSideEnv(env: NodeJS.ProcessEnv): JudgeSideConfig | unde
 }
 
 /**
+ * THE ACCEPTANCE WINDOW RUNS TMUX WITHOUT ASKING (2026-09-29, user decision):
+ * standing up the changed system for real means nested sessions on their own
+ * tmux socket, and a permission box there only parked the round (22 minutes,
+ * measured). Every other judge, worker and session keeps the tmux gate.
+ */
+export function judgeMayRunTmux(env: NodeJS.ProcessEnv): boolean {
+  return readJudgeSideEnv(env)?.role === "acceptance";
+}
+
+/**
  * "A judge writes NO gate state" lives in lib/session-exclusivity.ts
  * (`gateStateWriteSkip`), together with the same answer for a worker pane and
  * with the exclusivity question it is derived from — one subject, one home.

@@ -74,7 +74,7 @@ import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import { createPaneStateReporter } from "../lib/tmux-pane-state.ts";
 import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
 import { claimGateInstance } from "../lib/session-launch-specs.ts";
-import { readJudgeSideEnv } from "../lib/judge-side.ts";
+import { judgeMayRunTmux, readJudgeSideEnv } from "../lib/judge-side.ts";
 import { readWorkerSideEnv } from "../lib/worker-side.ts";
 import { createOrchestratorDeps, runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
@@ -972,7 +972,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     bypassToken: () => cells.bypassToken,
     setBypassToken: (token) => { cells.bypassToken = token; },
     // The tmux permission is read LIVE off the state (minted mid-session).
-    tmuxAccess: () => cells.state.tmuxAccess,
+    tmuxAccess: () => judgeMayRunTmux(process.env)
+      ? { at: "acceptance-window", scope: "session" as const }
+      : cells.state.tmuxAccess,
     consumeTmuxAccess: () => {
       // One use, and only a ONE-SHOT is consumed.
       if (cells.state.tmuxAccess?.scope !== "once") return;

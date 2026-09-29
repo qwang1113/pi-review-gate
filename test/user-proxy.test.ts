@@ -84,8 +84,8 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: 
 
 const ROWS = ["A. grant it", "B. decline"];
 
-test("the window is thirty minutes unless the user set userProxy.waitMinutes", () => {
-  assert.equal(DEFAULT_USER_PROXY_WAIT_MS, 30 * 60 * 1000);
+test("the window is five minutes unless the user set userProxy.waitMinutes", () => {
+  assert.equal(DEFAULT_USER_PROXY_WAIT_MS, 5 * 60 * 1000);
   const root = mkdtempSync(join(tmpdir(), "rg-proxy-cfg-"));
   mkdirSync(join(root, ".pi"), { recursive: true });
   const home = mkdtempSync(join(tmpdir(), "rg-proxy-home-"));

@@ -250,7 +250,7 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
             description: "REQUIRED when `multiple` is true: the options the checklist opens TICKED — the group you recommend, and what a plain Enter submits. `[]` recommends none of them.",
           })),
           grantScope: Type.Optional(Type.Union(GRANTABLE_SCOPES.map((scope) => Type.Literal(scope)), {
-            description: "Project manager only: make this an AUTHORIZATION question. Picking the `recommended` option grants the project manager that proxy scope for this orchestration (any other answer revokes it); the dialog tells the user so, and it is never answered by the thirty-minute stand-in. Radio questions only.",
+            description: "Project manager only: make this an AUTHORIZATION question. Picking the `recommended` option grants the project manager that proxy scope for this orchestration (any other answer revokes it); the dialog tells the user so. Like every box, an unanswered one goes to the arbiter stand-in after `userProxy.waitMinutes` (default 5). Radio questions only.",
           })),
         }),
         { description: "The questions, asked in order" },

@@ -261,7 +261,7 @@ function multiChoiceKeyReader(keybindings: unknown): MultiChoiceKeyReader {
 
 /** What the dialog renderer needs from the session beyond the shared host. */
 export interface GateDialogDeps {
-  /** The thirty-minute stand-in (lib/dialog-proxy.ts). */
+  /** The timed-out stand-in (lib/dialog-proxy.ts). */
   proxy: DialogProxy;
   /** The banner that tells an absent user a box is waiting (lib/user-notify.ts). */
   raiseBanner(opts: { kind: UserNotifyKind; detail: string; blocking?: boolean }): unknown;
@@ -325,7 +325,7 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
     opts: AskOpts = {},
     /**
      * WHICH OF THE TWO SHAPES IS DRAWN (2026-09-22). Everything else about a
-     * dialog is shape-free — the queue, the banner, the thirty-minute proxy
+     * dialog is shape-free — the queue, the banner, the timed-out proxy
      * race and the record all belong to the WORDS being asked, not to how the
      * rows are drawn — so the shape travels as this one flag rather than as a
      * second copy of a five-hundred-line function.
@@ -349,7 +349,7 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
     // something nobody is asking any more is the same mistake.
     // THE WINDOW STARTS WHEN THE BOX DOES (2026-09-19). `askChoice` may be one
     // of several calls in a single assistant message, and the dialog queue shows
-    // ONE box at a time — so a queued question could reach its thirty minutes
+    // ONE box at a time — so a queued question could reach its window's end
     // before the user ever saw it (review round 1). `displayed` resolves inside
     // the queue work below, which is the moment this dialog owns the screen.
     let markDisplayed: (() => void) | undefined;
@@ -357,7 +357,7 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
     // WHICH REPO, BOUND WHEN THE BOX APPEARS (review round 3 P1). The answer
     // belongs to the work this session was doing when the user would have SEEN
     // the question — and the active repo follows the edits, so a dialog
-    // queued behind another one, or a thirty-minute wait, can move it. Bound on
+    // queued behind another one, or a proxy wait, can move it. Bound on
     // the queue's own turn and never re-read: fixing the sidecar's repo while
     // the proxy reads a different one is the same defect from the other end.
     //
@@ -437,29 +437,24 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
       return answer;
     }, signal);
 
-    // THE THIRTY-MINUTE HAND-OFF (2026-09-19, user decision). The box above is
-    // unchanged — not closed, not shortened, and a user who answers at minute 29
-    // wins outright. What is new is that minute 30 no longer means "nobody will
-    // ever answer": `arbiter` reads this session's own context and takes the
+    // THE HAND-OFF (2026-09-19, user decision; five minutes since 2026-09-29).
+    // The box above is unchanged — not closed, and a user who answers first
+    // wins outright. The end of `userProxy.waitMinutes` no longer means "nobody
+    // will ever answer": `arbiter` reads this session's own context and takes the
     // user's place, and what it answers is recorded as a proxy decision (see
     // lib/dialog-proxy.ts) so the user can find it afterwards.
     //
     // THE RACE IS NOT WRITTEN HERE. Timing, the row check and the
     // human-always-wins rule live in lib/user-proxy.ts, the only arrangement
-    // that makes them testable without waiting half an hour — this function is
+    // that makes them testable without waiting out the window — this function is
     // the single render point for all twelve dialogs and stays wiring.
     const decided = await raceWithUserProxy<string>({
       direct: asked,
       displayed,
-      // NO PROXY FOR A QUESTION A MACHINE MUST NOT ANSWER (quality round P1,
-      // 2026-09-22). An empty option list IS how lib/user-proxy.ts turns the
-      // arbiter off: the window still runs and its expiry still settles as
-      // “nobody answered”, so an unattended session unblocks exactly as before —
-      // it just does not get a machine-made decision. Two callers ask for this:
-      // the stage checklist (`choose_loop_stages`), where a stand-in that ticks
-      // a SUBSET of its rows would silently switch OFF the unticked gates, and
-      // an ask_user authorization question, where it would mint the grant (D39).
-      options: opts.proxy === false ? [] : spec.options,
+      // EVERY BOX, NO EXCEPTIONS (2026-09-29, user decision): the stage
+      // checklist, authorization questions and the relocation offer used to opt
+      // out, and an unattended session then sat on them for good.
+      options: spec.options,
       ...(spec.defaultChecked === undefined ? {} : { multiple: true }),
       startProxy: () => deps.proxy.answerFor(spec, opts.body, dialogRoot),
       timeoutMs: deps.proxyWaitMs(),
@@ -481,22 +476,15 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
       // two must not have the same consequence — a decline LOCKS the request
       // for the session, and a timeout is not a decline.
       try {
-        // THE NOTICE MUST NOT BLAME THE ARBITER FOR A CHOICE WE MADE (quality
-        // round P2, 2026-09-22): with `proxy: false` the stand-in was switched
-        // off on purpose, and the generic “arbiter 无法代答（未配置 / 失败 / 输出
-        // 不可解析）” would tell the user their machine is broken.
         host.ctx()?.ui.notify(
-          opts.proxy === false
-            ? `review-gate: 对话框「${spec.title}」等满设定时长无人作答 —— 这一题**不问 arbiter 代答**` +
-              "（机器不替用户决定这一类问题），所以还没有任何决定，等你回来处理。"
-            : `review-gate: 对话框「${spec.title}」等满设定时长无人作答，arbiter 也没能代答` +
-              `（${decided.proxyFailure ?? "原因未知"}）—— 这一项**还没有任何决定**，等你回来处理。`,
+          `review-gate: 对话框「${spec.title}」等满设定时长无人作答，arbiter 也没能代答` +
+            `（${decided.proxyFailure ?? "原因未知"}）—— 这一项**还没有任何决定**，等你回来处理。`,
           "warning",
         );
       } catch { /* headless */ }
       // The caller hears WHY too: the agent's reply must not read as "the gate
       // would not decide" when a model was out of quota (2026-09-29).
-      try { opts.onUndecided?.(opts.proxy === false ? undefined : decided.proxyFailure); } catch { /* the caller's own bookkeeping */ }
+      try { opts.onUndecided?.(decided.proxyFailure); } catch { /* the caller's own bookkeeping */ }
     }
     return decided.answer;
   }

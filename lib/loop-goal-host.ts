@@ -257,12 +257,7 @@ export function createLoopGoalHost(
   const loopStageDeps: LoopStagesDeps = {
     state: () => cells.state,
     refusal: stagesRefusal,
-    askMulti: (uiCtx, spec, opts) => deps.askMultiChoice(uiCtx as { ui?: ChoiceUi }, spec, {
-      ...opts,
-      // A MACHINE MUST NOT TURN THE GATES OFF (quality round P1, 2026-09-22):
-      // see `askDialog`'s `proxy` option.
-      proxy: false,
-    }),
+    askMulti: (uiCtx, spec, opts) => deps.askMultiChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
     persist: (record, ctx) => applyStages(record, ctx),
     log: (message) => deps.log(`[stages] ${message}`),
   };

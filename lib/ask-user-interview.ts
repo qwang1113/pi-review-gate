@@ -340,10 +340,6 @@ export async function doAskUser(
         // Only the anchored question's answer settles its channel request; a
         // stand-in answer to a walked-back question is not that settlement.
         ...(cursor === anchor ? { onProxyAnswer } : {}),
-        // AN AUTHORIZATION IS NOT A MACHINE'S TO GIVE (D39): the arbiter picking
-        // the recommended row would mint the proxy grant the notice asks the
-        // USER for. The window still runs; its expiry is "nobody decided".
-        ...(q.grantScope ? { proxy: false } : {}),
       };
       const picked = q.multiple
         ? await deps.askMultiChoice(uiCtx, spec, opts)

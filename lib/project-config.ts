@@ -38,7 +38,7 @@ import { join } from "node:path";
 import { DEFAULT_MAX_ROUNDS } from "./constants.ts";
 
 /** A dialog nobody answers waits this long before the arbiter stands in (user-configurable). */
-export const DEFAULT_USER_PROXY_WAIT_MS = 30 * 60_000;
+export const DEFAULT_USER_PROXY_WAIT_MS = 5 * 60_000;
 
 /** sd0x-dev-flow documents the same range: "Range: 3-50". */
 export const MIN_MAX_ROUNDS = 3;

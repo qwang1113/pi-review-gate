@@ -45,8 +45,8 @@ export interface DialogProxy {
 
 export function createDialogProxy(host: SessionHost, deps: DialogProxyDeps): DialogProxy {
   /**
-   * ASK THE PROXY (2026-09-19) — what happens when a dialog waits thirty
-   * minutes with nobody at the terminal.
+   * ASK THE PROXY (2026-09-19) — what happens when a dialog waits out
+   * `userProxy.waitMinutes` with nobody at the terminal.
    *
    * NO ARBITER, NO PROXY: an unconfigured arbiter resolves to no model, and
    * this returns a failure — which the dialog reads as "nobody decided", so a

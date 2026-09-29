@@ -21,7 +21,9 @@ import {
   parseNoAcceptanceDeclaration,
   type AcceptanceDecision,
 } from "./acceptance-round.ts";
+import { acceptanceBase, filesSince } from "./acceptance-scope.ts";
 import { computeFingerprint } from "./fingerprint.ts";
+import { gitOrNull } from "./git-exec.ts";
 import type { GateState } from "./gate-state.ts";
 import { paneIdUsable, tmuxServerFrom, type JudgeEntry } from "./hierarchy.ts";
 import { judgePaneAlive } from "./judge-pane.ts";
@@ -122,7 +124,9 @@ export function createAcceptanceHost(
     root: string,
     fingerprint: string,
     goalText: string,
+    sinceAccepted?: { head: string; files: readonly string[] },
   ): Promise<{ ok: true; judgeId: string } | { ok: false; error: string }> {
+    const head = gitOrNull(root, ["rev-parse", "HEAD"])?.trim() || undefined;
     const target = reviewTargets.get(root);
     const stamp = fingerprint !== "" ? fingerprint.slice(0, 12) : String(Date.now());
     const streamPath = pathJoin(root, ".pi", "review-stream", `acceptance-${stamp}.jsonl`);
@@ -134,6 +138,7 @@ export function createAcceptanceHost(
         ? {}
         : { range: `${target.baseline.slice(0, 12)}..${target.head.slice(0, 12)}` }),
       ...(target?.files === undefined ? {} : { files: target.files }),
+      ...(sinceAccepted === undefined ? {} : { sinceAccepted }),
     })}\n\n${buildStreamDirective(streamPath)}`;
     const d = await dispatchJudgeRound({
       root,
@@ -153,6 +158,7 @@ export function createAcceptanceHost(
       at: new Date().toISOString(),
       judgeId,
       ...(fingerprint === "" ? {} : { fingerprint }),
+      ...(head === undefined ? {} : { head }),
       reason: "验收轮已派出",
     };
     persistRepo(ctx as unknown as ExtensionContext, root);
@@ -281,8 +287,12 @@ export function createAcceptanceHost(
     const plan = goalText === undefined ? undefined : extractAcceptancePlan(goalText);
     const fp = computeFingerprint(root);
     const fingerprint = fp.unavailable ? "" : fp.digest;
+    // THE SCOPE: since the last accepted HEAD, else since the branch base.
+    const acceptedHead = st.acceptance?.status === "READY" ? st.acceptance.head : undefined;
+    const scopeFiles = filesSince(root, acceptanceBase(root, acceptedHead));
     const decision: AcceptanceDecision = acceptanceDecision({
       hasCodeChange: st.hasCodeChange,
+      ...(scopeFiles === undefined ? {} : { scopeFiles }),
       // TWO WAYS THIS ROUND CAN BE OFF, composed into the ONE `gateOpen` the
       // t2 module owns (2026-09-22): the dispatcher's environment value (an
       // orchestration child that is not the plan's acceptance task) and the
@@ -353,7 +363,10 @@ export function createAcceptanceHost(
     // instead (see `acceptanceDecision`'s no-fingerprint rule, lib/acceptance-round.ts),
     // so this call is only reachable with one. A second judgement here would be
     // the drift that rule exists to prevent.
-    const dispatched = await dispatchAcceptanceRound(ctx, root, fingerprint, goalText ?? "");
+    const dispatched = await dispatchAcceptanceRound(
+      ctx, root, fingerprint, goalText ?? "",
+      acceptedHead !== undefined && scopeFiles !== undefined ? { head: acceptedHead, files: scopeFiles } : undefined,
+    );
     if (!dispatched.ok) {
       return {
         problems: [`${label}验收轮派不出去（${dispatched.error}）—— 门禁不会静默跳过它；修好之后再 declare_done。`],
