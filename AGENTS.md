@@ -52,6 +52,18 @@ Alt+Enter 排队的 followUp 消息需要 turn 边界才能进来。judge / work
 `declare_done`，不在此列（它们「交卷即停」）。
 
 
+### 总则 · 门禁不得靠自述活着、不得为旧事实反复叫醒（2026-09-29，用户决定）
+
+实测事故：三个沙箱会话被门禁每 ~45s 叫醒一次、持续 40 小时（约 15.6 亿输入 token）；
+主会话被 `kill -9` 后，它派出的 judge pane 仍永远写心跳。两条不变量由此而来，各自只有一处实现：
+
+- **门禁的存在以 pi 进程为准**（`lib/opener-process.ts`）：opener 进程没了，它派出的 judge /
+  worker / 编排子会话自己 shutdown。判定只看进程表（pid + 启动时间），永不看门禁自己写的心跳、
+  channel 或状态文件的新旧。
+- **门禁主动唤醒必须有新事实，同一事实的唤醒次数有上界**（`lib/wake-governor.ts`）：所有空闲时的
+  主动唤醒共用一个会话级限流器，同一事实最多 5 次。新增任何能起 turn 的调用都会被
+  `test/wake-sites.test.ts` 拦下，直到它走限流器或登记理由。
+
 ### Single-review loop (the only execution path, agent-initiated)
 
 **Judge roles run in their own windows** — the review is the only parallel

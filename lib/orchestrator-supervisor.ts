@@ -62,7 +62,7 @@ import {
   isNewsworthy,
   nextRewakeDelayMs,
   DONE_REWAKE_MS,
-  nextDoneRewakeDelayMs,
+  DONE_RING_LIMIT,
   type ChildHealth,
   type ChildState,
 } from "./orchestrator-child-state.ts";
@@ -348,10 +348,9 @@ export interface SupervisionEventDecision {
  *     supervisor — a transition nobody is told about is invisible);
  *  2. an unchanged newsworthy state re-rings on the backoff, so an unanswered
  *     question is not asked once and then forgotten;
- *  3. a completion rings for as long as it is true, on a WIDENING gap
- *     (60s, 2×, 4×, … capped at ten minutes) rather than a fixed number of
- *     times — see `nextDoneRewakeDelayMs` for the measured reason a two-ring
- *     cap lost a completion entirely.
+ *  3. a completion rings twice, 60s apart, and then stays quiet — an
+ *     unchanged completion is not news (see `DONE_RING_LIMIT`); the health
+ *     snapshot keeps showing it.
  */
 export function decideSupervisionEvents(
   snapshot: SupervisionSnapshot,
@@ -372,6 +371,10 @@ export function decideSupervisionEvents(
       next[id] = { lastState: state, reports: 0 };
       continue;
     }
+    if (state === "done" && reports >= DONE_RING_LIMIT) {
+      next[id] = previous!;
+      continue;
+    }
 
     // `reports` counts what has ALREADY gone out, so the delay before the
     // next one is indexed from `reports - 1`: after the first report the wait
@@ -381,7 +384,7 @@ export function decideSupervisionEvents(
     const dueAt = changed
       ? at
       : (previous?.reportedAt ?? 0) +
-        (state === "done" ? nextDoneRewakeDelayMs(reports) : nextRewakeDelayMs(reports - 1));
+        (state === "done" ? DONE_REWAKE_MS : nextRewakeDelayMs(reports - 1));
 
     if (at >= dueAt) {
       const request = snapshot.requests.find((r) => r.childId === id);

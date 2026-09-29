@@ -19,15 +19,16 @@
  * So the invariant cannot ride on agent events at all. It needs a clock, and
  * a decision that is INDEPENDENT of everything the agent did this turn.
  *
- * WHAT THIS MODULE DELIBERATELY CANNOT SEE (this is the design, not an
- * omission): the continuation budget (`maxRounds`) and the `loop-stall`
- * circuit breaker are not parameters here. They exist to stop the gate from
- * TALKING TO ITSELF — burning quota telling an agent to retry something that
- * cannot move — and they are right about that, for the injection path they
- * guard. They are the wrong answer to "the session stopped with its contract
- * unmet", because a stopped session costs nothing per minute and a silently
- * abandoned task costs the whole run. Keeping them out of this signature is
- * what makes it impossible for a future edit to quietly re-couple them.
+ * WHAT BOUNDS IT (2026-09-29). This path used to argue that "a stopped
+ * session costs nothing per minute" and therefore needed no bound. That was
+ * false: every revival IS a full LLM call over the whole context, and a
+ * session whose contract could not move was revived every minute for two
+ * days (~1.56 billion input tokens across three sandboxes). The decision here
+ * stays about WHETHER a revival is warranted; HOW OFTEN is the session's wake
+ * governor's (lib/wake-governor.ts) — the one throttle every idle-time wake
+ * shares, which falls silent after five wakes on an unchanged fact. The
+ * turn-driven budget (`maxRounds`) and the `loop-stall` breaker stay out of
+ * this signature: they guard a different path.
  *
  * WHAT IT DOES RESPECT: a human saying stop. Every human stop outranks the
  * invariant, because the invariant exists to beat MACHINE failure modes
@@ -79,6 +80,12 @@ export interface HumanStop {
   bypassed: boolean;
   /** An arbiter ruling the human resolved as "pause and wait". */
   arbitrationPaused: boolean;
+  /**
+   * The review concluded NEEDS_HUMAN: the next move is a person's, and
+   * nudging the agent to "fix → judge_submit" only buys another round of the
+   * same question (measured: it re-submitted one at 02:14 in the sandbox).
+   */
+  needsHuman: boolean;
 }
 
 /** Everything a revival decision needs. */
@@ -114,11 +121,6 @@ export interface RevivalInputs {
    * not stalled. The extension reads it off `state.completion`.
    */
   completed: boolean;
-  /** When this session last injected a revival (ms epoch; undefined = never). */
-  lastRevivalAt?: number;
-  now: number;
-  /** Minimum gap between two revivals. */
-  intervalMs: number;
 }
 
 export interface RevivalDecision {
@@ -140,7 +142,7 @@ export function isRevivableMode(mode: string): boolean {
  * `completed` or by `handedOff`) → consent (did a human stop this) → timing
  * (is it idle, is it due) → need (is anything actually unmet). The cheap
  * guards run before the expensive problem thunk, so a session that is
- * paused, working or throttled never pays for the fingerprint scan. Human
+ * paused or working never pays for the fingerprint scan. Human
  * stops are checked BEFORE the problem list so that a paused session is
  * never described as "revived".
  */
@@ -176,16 +178,6 @@ export function decideRevival(inputs: RevivalInputs): RevivalDecision {
     return { revive: false, reason: "退出契约已满足 —— 会话有权停下" };
   }
 
-  const waited = inputs.lastRevivalAt === undefined
-    ? Number.POSITIVE_INFINITY
-    : inputs.now - inputs.lastRevivalAt;
-  if (waited < inputs.intervalMs) {
-    return {
-      revive: false,
-      reason: `节流窗口内（距上次唤醒 ${Math.max(0, Math.round(waited / 1000))}s < ${Math.round(inputs.intervalMs / 1000)}s）`,
-    };
-  }
-
   return {
     revive: true,
     reason: `退出契约还差 ${problems.length} 项，且会话已停下 —— 唤醒`,
@@ -198,6 +190,7 @@ function firstHumanStop(stop: HumanStop): string | undefined {
   if (stop.awaitingAnswer) return "正在等用户回答 ask_user —— 不打扰";
   if (stop.bypassed) return "/gate-bypass 生效中 —— 人已要求门禁让路";
   if (stop.arbitrationPaused) return "仲裁裁决为 pause —— 等人的进一步指示";
+  if (stop.needsHuman) return "review 结论为 NEEDS_HUMAN —— 下一步是人的，不催 agent";
   return undefined;
 }
 

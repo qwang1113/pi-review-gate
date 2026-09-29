@@ -29,6 +29,7 @@ import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
 import { ACCEPTANCE_GATE_ENV } from "./acceptance-round.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
+import { openerEnv } from "./opener-process.ts";
 
 /**
  * The kinds of session the gate opens. They differ in what the far side
@@ -110,6 +111,8 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
       // deleted with the round. The two sides must name the same directory;
       // test/judge-scratch.test.ts pins exactly that.
       TMPDIR: judgeScratchDir(role.judgeId),
+      // WHICH PROCESS it lives and dies with (lib/opener-process.ts).
+      ...openerEnv(role.openerId),
     };
   }
   if (role.kind === "worker") {
@@ -128,6 +131,7 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
       // `explore` is the mode that already means "investigation, ship still
       // blocked", which is exactly a worker's contract.
       [GATE_MODE_ENV]: "explore",
+      ...openerEnv(role.openerId),
     };
   }
   if (role.kind === "orchestration-child") {
@@ -149,6 +153,8 @@ export function buildSessionEnv(role: SessionPaneRole): Record<string, string> {
       // ceiling above: an environment fact written by the dispatcher, which is
       // the one channel a child's own prompt cannot forge.
       ...(role.acceptanceGate === undefined ? {} : { [ACCEPTANCE_GATE_ENV]: role.acceptanceGate }),
+      // Keyed by the ORCHESTRATION, so a project manager's successor can adopt it.
+      ...openerEnv(role.orchestrationId),
     };
   }
   return { ...role.env };

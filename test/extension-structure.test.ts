@@ -2913,7 +2913,10 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // silent for minutes and a healthy child was reported `stalled`.
   const heartbeatAt = CHILD_SIDE_SRC.indexOf("function startChildHeartbeat(");
   assert.ok(heartbeatAt > 0, "the child heartbeat must be its own timer");
-  const heartbeat = CHILD_SIDE_SRC.slice(heartbeatAt, heartbeatAt + 600);
+  const heartbeat = CHILD_SIDE_SRC.slice(heartbeatAt, heartbeatAt + 1200);
+  // 2026-09-29: every tick first asks the PROCESS TABLE whether the opener is
+  // still there (lib/opener-process.ts), never a heartbeat's age.
+  assert.match(heartbeat, /enforceOpenerBinding\(openerWatch,/, "a pane dies with the pi that opened it");
   assert.match(heartbeat, /setInterval\(/, "it ticks on its own, independently of the agent");
   assert.match(heartbeat, /reportChildState\(live\)/, "each tick reports liveness");
   assert.match(heartbeat, /drainChildInstructions\(live\)/,
@@ -3036,11 +3039,13 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
   // The recheck itself is what this protects; the registry it reads is now the
   // merged table, scoped to this opener (the `childSessions` Map is deleted).
   assert.match(schedule, /ownJudges\(\)\.length === 0/, "watchdog rechecks that children still exist");
-  assert.match(schedule, /deliverAs: "followUp"/, "watchdog resumes through the normal follow-up queue");
+  assert.match(schedule, /deps\.wakes\.wake\(\{\s*source: "child-watchdog"/, "watchdog wakes ONLY through the session's wake governor");
   assert.doesNotMatch(schedule, /\.unref\(\)/, "the hosted-wait timer keeps the main session alive");
   const childAt = SRC.indexOf("const childSnapshots");
   const childBlock = SRC.slice(childAt, SRC.indexOf("// L2 circuit breaker", childAt));
-  assert.match(childBlock, /if \(!notifyNow\)/, "the throttled hosted wait has a distinct branch");
+  assert.match(childBlock, /source: "child-host-wait"/, "the hosted wait is throttled by the wake governor, not its own clock");
+  assert.match(childBlock, /if \(registry\.judgeRoundReported\(c\)\) continue;/,
+    "a judge that already reported is not in flight (2026-09-29, the 40-hour hosted wait)");
   assert.match(childBlock, /scheduleChildWaitRecheck\(/, "the throttled branch schedules a self-owned recheck");
   assert.match(childBlock, /return;/, "the throttled branch does not fall through to RESUME");
   // `judge_close` (which also cancelled the watchdog) is gone since 2026-09-27;
@@ -3066,8 +3071,7 @@ test("round-18: agent_settled HOSTS the judge-child wait — never returns to id
   // The child classification drives the injection: dead/silent children end
   // the wait (recovery), live ones get the hosted-wait discipline.
   assert.match(settled, /classifyChildren\(childSnapshots, Date\.now\(\)\)/, "children are classified by the pure module");
-  assert.match(settled, /REVIEW_GATE_CHILD_\$\{/, "the child injection marker is built by template");
-  assert.match(settled, /"ENDED" : "HOST_WAIT"|terminated\.length > 0 \? "ENDED"/, "a dead/silent child produces the ENDED marker");
+  assert.match(settled, /REVIEW_GATE_CHILD_ENDED/, "a dead/silent child produces the ENDED marker");
   assert.match(settled, /HOST_WAIT/, "an in-flight child produces the HOST_WAIT marker");
   assert.match(settled, /Never end the turn and leave the wake-up to the child/, "the discipline text is explicit");
   // The stall path stays reachable for children that are NOT involved.
@@ -5746,7 +5750,11 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   assert.doesNotMatch(start, /isIdle/, "no idle pre-condition may come back");
   assert.match(start, /superviseTick\(\)/, "the timer only drives the one tick");
   const tick = windowIn(RUNTIME_SRC, "function superviseTick(", "\n  }", "superviseTick");
-  assert.doesNotMatch(tick, /isIdle/, "no idle pre-condition may come back");
+  // Idleness is not a PRE-CONDITION (a busy manager still hears every event);
+  // it only decides the route: an idle manager would be woken for it, and
+  // every idle-time wake goes through the governor (2026-09-29).
+  assert.match(tick, /isIdle\?\.\(\) === true\) \{[\s\S]*?deps\.wakes\.wake\(/,
+    "an idle manager is woken only through the wake governor");
   assert.match(tick, /deliverAs: "steer"/,
     "…and the delivery cuts into the next turn WITHOUT aborting work in flight");
   assert.match(tick, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");

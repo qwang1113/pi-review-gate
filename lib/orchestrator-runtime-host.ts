@@ -38,6 +38,8 @@ import { readPlanFile } from "./orchestrator-wiring.ts";
 import { alivePanes } from "./orchestrator-tool-kit.ts";
 import type { OrchestratorDeps } from "./orchestrator-deps.ts";
 import { decideRevival, buildRevivalMessage, REVIVAL_INTERVAL_MS } from "./session-revival.ts";
+import type { WakeGovernor } from "./wake-governor.ts";
+import { negotiationFingerprint, progressSignature } from "./loop-stall.ts";
 import { computeFingerprint } from "./fingerprint.ts";
 import { unmetRequirements } from "./gate-state-requirements.ts";
 import { LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK } from "./loop-goal.ts";
@@ -67,6 +69,10 @@ export interface OrchestratorRuntimeDeps {
   sessionMessaging: SessionMessaging;
   /** The pane options the tmux sidebar reads (lib/tmux-pane-state.ts). */
   paneState: PaneStateReporter;
+  /** The session's one idle-wake throttle (lib/wake-governor.ts). */
+  wakes: WakeGovernor;
+  /** The user's last message or dialog answer (ISO) — progress by definition. */
+  lastUserInteractionAt(): string | undefined;
 }
 
 export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorRuntimeDeps) {
@@ -153,8 +159,6 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
   // no code (constraint 2) and cannot. So the gate keeps its own minute-
   // level clock, independent of everything the agent did.
   let revivalTimer: ReturnType<typeof setInterval> | undefined;
-  /** When this session last injected a revival (ms epoch). */
-  let lastRevivalAt: number | undefined;
   /**
    * A session that HANDED OFF must not be revived, supervised or reported on
    * again — its successor owns all of that now.
@@ -215,17 +219,64 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
     if (orchestratorDeps.waitActive() || noticeInFlight) return;
     const events = drainSupervisionNews();
     if (events.length === 0) return;
-    noticeInFlight = true;
+    const message = {
+      customType: "review-gate",
+      content: noticeText(events),
+      display: true,
+      details: { kind: NOTICE_KIND, events },
+    };
     try {
-      pi.sendMessage({
-        customType: "review-gate",
-        content: noticeText(events),
-        display: true,
-        details: { kind: NOTICE_KIND, events },
-      }, { triggerTurn: true, deliverAs: "steer" });
+      // IDLE ⇒ this notice would START a turn, so it is an idle-time wake and
+      // goes through the governor. A news event is a child-state change, which
+      // changes the progress key, and a completion rings twice 60s apart — so
+      // the governor's 60s floor can delay a fresh event, never swallow both.
+      if (host.ctx()?.isIdle?.() === true) {
+        noticeInFlight = deps.wakes.wake({
+          source: "orchestration-notice",
+          progressKey: wakeProgressKey(),
+          delivery: { kind: "custom", message },
+        }).admit;
+        return;
+      }
+      // BUSY ⇒ the steer rides the turn already running: no extra LLM call.
+      noticeInFlight = true;
+      pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
     } catch {
       noticeInFlight = false;
     }
+  }
+
+  /**
+   * Every fact whose change counts as PROGRESS for the wake governor: the
+   * user's last interaction, and — per mode — the plan and its children, or the
+   * worktree, verdicts, rounds and negotiated contract.
+   */
+  function wakeProgressKey(): string {
+    const state = host.state();
+    const parts: string[] = [deps.lastUserInteractionAt() ?? ""];
+    if (state.taskMode === "orchestrator") {
+      const plan = readPlanFile(host.repos().primary).plan;
+      parts.push(JSON.stringify((plan?.tasks ?? []).map((t) => [t.id, t.status])));
+      parts.push(JSON.stringify((plan?.decisions ?? []).map((d) => [d.id, d.resolvedAt ?? ""])));
+      const runtime = state.orchestrator ?? emptyRuntime(currentOrchestrationId());
+      const snapshot = superviseNow(runtime, alivePaneIdsForSupervision());
+      parts.push(JSON.stringify((snapshot?.health ?? []).map((h) => [h.childId, h.state])));
+    } else {
+      const fp = computeFingerprint(host.repos().cwd);
+      parts.push(progressSignature({
+        fingerprint: fp.unavailable ? "" : fp.digest,
+        reviewVerdict: state.review.verdict,
+        precommitVerdict: state.precommit.verdict,
+        rounds: state.rounds.length,
+        problems: [],
+        contract: negotiationFingerprint({
+          restatementHash: state.restatement?.hash,
+          goalDraftHash: state.goalPrereview?.hash,
+          goalApprovalHash: state.loopGoal?.hash,
+        }),
+      }));
+    }
+    return parts.join("\u0000");
   }
 
   /**
@@ -336,12 +387,11 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
    * contract unmet (provider error, agent that decided it was done early).
    *
    * Deliberately independent of the event chain: it does not consume the
-   * continuation budget (`maxRounds`) and ignores the `loop-stall` circuit
-   * breaker — both are right for the INJECTION path they guard, and both
-   * are wrong here, where a stopped session costs nothing per minute and a
-   * silently abandoned task costs the whole run. Human stops (ESC, ask_user,
-   * bypass, arbitration pause) DO stop it — the invariant never overrides a
-   * person.
+   * continuation budget (`maxRounds`) — but it is NOT unbounded: every revival
+   * is a full LLM call, so it goes through the session's wake governor
+   * (lib/wake-governor.ts), which stops after five wakes on an unchanged fact.
+   * Human stops (ESC, ask_user, bypass, arbitration pause, a NEEDS_HUMAN
+   * review) DO stop it — the invariant never overrides a person.
    */
   function startRevivalTimer(ctx: ExtensionContext): void {
     if (revivalTimer) return;
@@ -371,6 +421,7 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
             awaitingAnswer: !!state.pausedQuestion,
             bypassed: state.bypass.active,
             arbitrationPaused: deps.arbitrationPaused(),
+            needsHuman: state.review.verdict === "NEEDS_HUMAN",
           },
           handedOff: handedOffSession,
           // DONE by its own account: `declare_done` recorded the completion
@@ -380,13 +431,13 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
           // and the human's own merge / pull / checkout in this worktree must
           // not re-open a contract this session already met.
           completed: !!state.completion,
-          lastRevivalAt,
-          now: Date.now(),
-          intervalMs: REVIVAL_INTERVAL_MS,
         });
         if (!decision.revive) return;
-        lastRevivalAt = Date.now();
-        pi.sendUserMessage(buildRevivalMessage(mode, problemsCache ?? []), { deliverAs: "followUp" });
+        deps.wakes.wake({
+          source: "revive",
+          progressKey: wakeProgressKey(),
+          delivery: { kind: "user", text: buildRevivalMessage(mode, problemsCache ?? []) },
+        });
       } catch { /* a revival must never break the session it revives */ }
     }, REVIVAL_INTERVAL_MS);
     (revivalTimer as unknown as { unref?: () => void }).unref?.();
@@ -573,6 +624,7 @@ export function createOrchestratorRuntime(host: SessionHost, deps: OrchestratorR
   return {
     orchestrationDoneProblems,
     sessionExitProblems,
+    wakeProgressKey,
     orchestratorSettled,
     startRevivalTimer,
     stopRevivalTimer,

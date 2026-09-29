@@ -32,11 +32,10 @@ import {
   STALL_REPEAT_LIMIT,
 } from "./loop-stall.ts";
 import type { SessionCells } from "./session-cells.ts";
+import type { WakeGovernor } from "./wake-governor.ts";
 
 /** L7/L8 completion-only continuations have their own, smaller budget. */
 const COMPLETION_CONTINUATION_CAP = 12;
-/** Hosted judge-child wait notices: one per minute per state at most. */
-const CHILD_NOTICE_MIN_MS = 60_000;
 
 export interface L2ContinuationDeps {
   pi: Pick<ExtensionAPI, "sendUserMessage">;
@@ -51,7 +50,10 @@ export interface L2ContinuationDeps {
     handedOff(): boolean;
     orchestratorSettled(ctx: ExtensionContext): void;
     startRevivalTimer(ctx: ExtensionContext): void;
+    wakeProgressKey(): string;
   };
+  /** The session's one idle-wake throttle (lib/wake-governor.ts). */
+  wakes: WakeGovernor;
   goalStageSatisfied(): boolean;
   copilotProblemsAcrossRepos(): string[];
   updateWidget(ctx: ExtensionContext): void;
@@ -82,12 +84,18 @@ export function createL2Continuation(cells: SessionCells, deps: L2ContinuationDe
           state.pausedQuestion || cells.lastRunAborted || !cells.loopArmed || state.bypass.active) return;
       if (deps.registry.ownJudges().length === 0) return;
       try {
-        deps.pi.sendUserMessage(
-          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的通道 report、有无 pane 死亡与静默上限；" +
-          `新消息会以标准报告送达并继续。\n${WAIT_DISCIPLINE_HINT}`,
-
-          { deliverAs: "followUp" },
-        );
+        const decision = deps.wakes.wake({
+          source: "child-watchdog",
+          progressKey: deps.runtime().wakeProgressKey(),
+          delivery: {
+            kind: "user",
+            text:
+              "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的通道 report、有无 pane 死亡与静默上限；" +
+              `新消息会以标准报告送达并继续。\n${WAIT_DISCIPLINE_HINT}`,
+          },
+        });
+        // Not yet ⇒ come back when the governor would say yes; used up ⇒ stay quiet.
+        if (!decision.admit && decision.nextDelayMs !== undefined) scheduleChildWaitRecheck(decision.nextDelayMs);
       } catch { /* session was replaced or shut down */ }
     }, Math.max(1_000, delayMs));
     // Deliberately keep this timer referenced: it is the main-session liveness
@@ -261,6 +269,12 @@ export function createL2Continuation(cells: SessionCells, deps: L2ContinuationDe
     const childSnapshots: ChildSnapshot[] = [];
     const sessionIdsBySession = new Map<string, string>();
     for (const c of registry.ownJudges()) {
+      // A judge that already HANDED IN its round is not in flight, however
+      // alive its pane and however fresh its heartbeat (2026-09-29, measured:
+      // a READY goal-auditor kept the opener in a hosted wait for 40 hours).
+      // Its report reached the opener through the settle path; nothing is
+      // left to wait for. Same predicate `judgeChildInMotion` uses.
+      if (registry.judgeRoundReported(c)) continue;
       // A judge whose death was ALREADY announced is not news a second time
       // (reviewer P2, 2026-09-05) — unless it is ALIVE again, in which case
       // its next death is news again.
@@ -285,28 +299,35 @@ export function createL2Continuation(cells: SessionCells, deps: L2ContinuationDe
     if (childSnapshots.length > 0) {
       const childVerdict = classifyChildren(childSnapshots, Date.now());
       const childNotice = buildChildWaitNotice(childVerdict, sessionIdsBySession);
-      const notifyNow = childVerdict.terminated.length > 0 || Date.now() - cells.lastChildNoticeAt >= CHILD_NOTICE_MIN_MS;
-      if (childNotice) {
-        if (!notifyNow) {
-          // Do not fall through to the generic RESUME injection: that would
-          // burn review budget while the child is still legitimately in flight.
-          scheduleChildWaitRecheck(CHILD_NOTICE_MIN_MS - (Date.now() - cells.lastChildNoticeAt));
-          return;
-        }
+      if (childNotice && childVerdict.terminated.length > 0) {
+        // A judge that ENDED is a new fact, announced ONCE (recorded where the
+        // announcement actually goes out) — not an idle re-announcement.
         cancelChildWaitTimer();
-        // A terminal child is never throttled; only a genuinely in-flight
-        // child is rate-limited.
-        if (childVerdict.terminated.length === 0) cells.lastChildNoticeAt = Date.now();
-        // …but each dead judge is announced ONCE, recorded where the
-        // announcement actually goes out.
         for (const t of childVerdict.terminated) cells.announcedTerminated.add(t.child.sessionId);
         deps.pi.sendUserMessage(
-          `[REVIEW_GATE_CHILD_${childVerdict.terminated.length > 0 ? "ENDED" : "HOST_WAIT"}] ${childNotice}\n\n` +
-          (childVerdict.terminated.length > 0
-            ? "Continue: read the child's output and drive the loop forward. Do not summarize; execute."
-            : "Waiting discipline: do all deterministic work first; only when nothing is left, block in ONE bash call watching the three criteria. Never end the turn and leave the wake-up to the child."),
+          `[REVIEW_GATE_CHILD_ENDED] ${childNotice}\n\n` +
+          "Continue: read the child's output and drive the loop forward. Do not summarize; execute.",
           { deliverAs: "followUp" },
         );
+        return;
+      }
+      if (childNotice) {
+        // A judge still IN FLIGHT: re-announcing it is an idle-time wake, so
+        // it goes through the governor. Whatever it says, do not fall through
+        // to the generic RESUME injection — that would burn review budget while
+        // the child is still legitimately working.
+        const decision = deps.wakes.wake({
+          source: "child-host-wait",
+          progressKey: runtime.wakeProgressKey(),
+          delivery: {
+            kind: "user",
+            text:
+              `[REVIEW_GATE_CHILD_HOST_WAIT] ${childNotice}\n\n` +
+              "Waiting discipline: do all deterministic work first; only when nothing is left, block in ONE bash call watching the three criteria. Never end the turn and leave the wake-up to the child.",
+          },
+        });
+        if (decision.admit) cancelChildWaitTimer();
+        else if (decision.nextDelayMs !== undefined) scheduleChildWaitRecheck(decision.nextDelayMs);
         return;
       }
     }

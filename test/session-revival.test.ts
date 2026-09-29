@@ -3,22 +3,17 @@ import assert from "node:assert/strict";
 import {
   decideRevival,
   buildRevivalMessage,
-  REVIVAL_INTERVAL_MS,
   type RevivalInputs,
 } from "../lib/session-revival.ts";
-
-const now = 1_000_000_000_000;
 
 function inputs(over: Partial<RevivalInputs> = {}): RevivalInputs {
   return {
     mode: "loop",
     exitProblems: () => ["code review gate is PENDING"],
     idle: true,
-    humanStop: { aborted: false, awaitingAnswer: false, bypassed: false, arbitrationPaused: false },
+    humanStop: { aborted: false, awaitingAnswer: false, bypassed: false, arbitrationPaused: false, needsHuman: false },
     handedOff: false,
     completed: false,
-    now,
-    intervalMs: REVIVAL_INTERVAL_MS,
     ...over,
   };
 }
@@ -96,19 +91,10 @@ describe("decideRevival — need and timing", () => {
     assert.match(d.reason, /工作中/);
   });
 
-  it("does not revive inside the throttle window", () => {
-    const d = decideRevival(inputs({ lastRevivalAt: now - 10_000 }));
+  it("treats a NEEDS_HUMAN review as a human stop — the next move is a person's", () => {
+    const d = decideRevival(inputs({ humanStop: { ...inputs().humanStop, needsHuman: true } }));
     assert.equal(d.revive, false);
-    assert.match(d.reason, /节流/);
-  });
-
-  it("revives once the throttle window has elapsed", () => {
-    const d = decideRevival(inputs({ lastRevivalAt: now - REVIVAL_INTERVAL_MS - 1 }));
-    assert.equal(d.revive, true);
-  });
-
-  it("revives immediately when it has never been revived before", () => {
-    assert.equal(decideRevival(inputs({ lastRevivalAt: undefined })).revive, true);
+    assert.match(d.reason, /NEEDS_HUMAN/);
   });
 
   it("is lazy — the expensive problems thunk is not called when a cheap guard stops it", () => {

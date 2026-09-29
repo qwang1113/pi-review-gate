@@ -39,6 +39,7 @@ import { deriveSessionName } from "../lib/session-tmux-scope.ts";
 import { SESSION_PINNED_OPTION } from "../lib/tmux-session-argv.ts";
 import * as sessionFactory from "../lib/session-factory.ts";
 import { buildSessionEnv } from "../lib/session-env.ts";
+import { OPENER_KEY_ENV, OPENER_PID_ENV, OPENER_STARTED_ENV, openerEnv } from "../lib/opener-process.ts";
 import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
@@ -167,6 +168,8 @@ test("combination 1 — a judge SPAWN: judge env, own colour, border line, verif
     RG_JUDGE_STREAM: "/repo/.pi/review-stream/r.jsonl",
     // Plus the scratch root the reaper reads back (test/judge-scratch.test.ts).
     TMPDIR: judgeScratchDir("rg-reviewer-abc123"),
+    // …and the opener PROCESS it lives and dies with (lib/opener-process.ts).
+    ...openerEnv("session-child-1"),
   }, "exactly the judge variables — the judge side reads these by name");
   assert.equal(seen.some((argv) => argv[0] === "split-window"), false,
     "the user's window is untouched: the child is a window of the opener's own session");
@@ -199,6 +202,7 @@ test("combination 2 — a judge RECOVER: same three keys, resume argv, no task f
     RG_JUDGE_ID: "rg-reviewer-abc123",
     RG_JUDGE_ROLE: "reviewer",
     TMPDIR: judgeScratchDir("rg-reviewer-abc123"),
+    ...openerEnv("session-child-1"),
   }, "no task and no stream on a recover — the transcript already holds the round");
   assert.ok(spawn.includes("--session-id"), "the transcript continues by id");
   assert.ok(!spawn.some((a) => a.startsWith("@")), "no argv message: nothing to re-deliver");
@@ -221,6 +225,7 @@ test("combination 3 — an orchestration SPAWN: orchestration env, a window WITH
     RG_ORCHESTRATION_ID: "orch-abc-1",
     RG_GATE_MODE: "loop",
     RG_STATE_VARIANT: "t1-xyz",
+    ...openerEnv("orch-abc-1"),
   }, "the child's own sidecar variant is ALSO its exclusivity-guard exemption");
   assert.deepEqual(spawn.slice(0, 4), ["new-session", "-d", "-s", OWN_SESSION],
     "the child creates the opener's own session when it is the first one");
@@ -555,10 +560,24 @@ test("the env builder is the only assembly point, and it omits what it was not g
     // worktrees must go, so the gate can reclaim them (see the test in
     // test/judge-scratch.test.ts for why the two sides must agree).
     TMPDIR: judgeScratchDir("j"),
+    ...openerEnv("o"),
   });
   assert.deepEqual(buildSessionEnv({ kind: "orchestration-child", orchestrationId: "orch-1", stateVariant: "t2" }), {
     RG_ORCHESTRATION_ID: "orch-1", RG_GATE_MODE: "loop", RG_STATE_VARIANT: "t2",
+    ...openerEnv("orch-1"),
   });
+  // EVERY pane the gate opens carries the process it must die with (2026-09-29),
+  // keyed by what a handover successor re-binds under.
+  const bound = [
+    [buildSessionEnv({ kind: "judge", openerId: "o", judgeId: "j", role: "reviewer" }), "o"],
+    [buildSessionEnv({ kind: "worker", openerId: "w-opener", workerId: "w1", role: "worker" }), "w-opener"],
+    [buildSessionEnv({ kind: "orchestration-child", orchestrationId: "orch-1", stateVariant: "t2" }), "orch-1"],
+  ] as const;
+  for (const [env, key] of bound) {
+    assert.equal(env[OPENER_PID_ENV], String(process.pid));
+    assert.ok(env[OPENER_STARTED_ENV], "the start time is what tells a recycled pid apart");
+    assert.equal(env[OPENER_KEY_ENV], key);
+  }
   const relay = { RG_ORCHESTRATION_ID: "orch-1", RG_GATE_MODE: "orchestrator" };
   const built = buildSessionEnv({ kind: "successor", env: relay });
   assert.deepEqual(built, relay);

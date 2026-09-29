@@ -286,12 +286,19 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
     }
   }
 
-  /** Newest channel activity for one judge, or undefined when unreadable. */
+  /**
+   * A judge's newest sign of WORK, or undefined when unreadable: its own
+   * `lastProgressAt` (a tool call or a turn boundary) when it reported one —
+   * a heartbeat re-reporting the same state is the process being alive, not
+   * the judge doing anything, and counting it kept a finished judge's silence
+   * bound from ever firing (2026-09-29). Any record's time otherwise.
+   */
   function channelLastActivity(judge: JudgeEntry): string | undefined {
     try {
       const target = judgeChannelTarget(judge.openerId, judge.judgeId);
       const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-      return projectChannel(read.records).lastActivityAt;
+      const projected = projectChannel(read.records);
+      return projected.lastState?.lastProgressAt ?? projected.lastActivityAt;
     } catch {
       return undefined;
     }

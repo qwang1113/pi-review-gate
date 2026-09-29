@@ -178,6 +178,7 @@ import { createHandoffHost } from "../lib/handoff-host.ts";
 import { createWorktreeSettlement } from "../lib/orchestrator-worktree-host.ts";
 import { createAppealLedger, registerArbitrationTool } from "../lib/arbitration-tool.ts";
 import { createL2Continuation } from "../lib/l2-continuation.ts";
+import { createWakeGovernor } from "../lib/wake-governor.ts";
 import { createEditTracking } from "../lib/edit-tracking-hook.ts";
 import {
   appendPendingHints,
@@ -785,11 +786,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     }),
   });
 
+  /** THE ONE THROTTLE EVERY IDLE-TIME WAKE-UP PASSES (lib/wake-governor.ts). */
+  const wakes = createWakeGovernor({
+    pi,
+    notify: (text) => { try { cells.latestCtx?.ui?.notify?.(text, "warning"); } catch { /* headless */ } },
+  });
+
   /** THE SESSION'S RUNTIME CLOCKS (lib/orchestrator-runtime-host.ts). */
   const {
     orchestrationDoneProblems, orchestratorSettled, startRevivalTimer, stopRevivalTimer, stopSupervisionTimer,
     startSessionNamingHeartbeat, stopSessionNamingHeartbeat, startPaneState, handedOff, markHandedOff,
-    resetOrchestratorContinuations,
+    resetOrchestratorContinuations, wakeProgressKey,
   } = createOrchestratorRuntime(host, {
     pi,
     orchestratorDeps,
@@ -805,6 +812,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     sessionNaming,
     sessionMessaging,
     paneState,
+    wakes,
+    lastUserInteractionAt: () => cells.lastUserInteractionAt.current,
   });
   // THE NAME GOES BACK WHEN THE PROCESS DIES, however it dies (t2).
   sessionNamingAtExit = sessionNaming;
@@ -863,7 +872,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     childSide,
     registry,
     settleFinishedRounds: (ctx) => settleFinishedRounds(ctx),
-    runtime: () => ({ handedOff, orchestratorSettled, startRevivalTimer }),
+    runtime: () => ({ handedOff, orchestratorSettled, startRevivalTimer, wakeProgressKey }),
+    wakes,
     goalStageSatisfied: () => goalStageSatisfied(),
     copilotProblemsAcrossRepos: repos.copilotProblemsAcrossRepos,
     updateWidget: (ctx) => updateWidget(ctx),
