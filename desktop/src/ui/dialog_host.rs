@@ -78,8 +78,9 @@ impl Shell {
         let draft = self.dialog_uis.get(key).map(|u| u.draft.clone()).unwrap_or_default();
         // pi's `input` brings its own placeholder; the gate's reason box uses ours.
         let placeholder = match self.active_native(key) {
-            Some(UiRequest::Input { placeholder: Some(p), .. }) => p,
-            _ => "写下原因（可留空）".to_string(),
+            Some(UiRequest::Input { placeholder, .. }) => placeholder.unwrap_or_default(),
+            Some(_) => String::new(),
+            None => "写下原因（可留空）".to_string(),
         };
         let e = cx.new(|cx| {
             let mut s = TextareaState::new(window, cx).auto_grow(3, 8).placeholder(placeholder);
