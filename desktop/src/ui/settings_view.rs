@@ -6,7 +6,7 @@
 use super::anim;
 use super::assets::icon;
 use super::chat::{chevron, mono, text_font};
-use super::controls::{Btn, badge, button, icon_button};
+use super::controls::{Btn, button, icon_button, letter, rec_badge};
 use super::settings::{PromptKind, SaveUi, SettingsPage};
 use super::settings_model::{Control, Field, GENERAL, View, sections};
 use super::theme::Th;
@@ -393,8 +393,8 @@ impl SettingsPage {
                     .border_color(th.c(if on { "border.focus" } else { "border.subtle" }))
                     .bg(th.c(if on { "accent.subtle" } else { "bg.surface" }))
                     .cursor_pointer()
-                    .child(format!("{}. {o}", (b'A' + i as u8) as char))
-                    .when(i == 0, |d| d.child(badge(th, "badge.rec", "（推荐）")))
+                    .child(format!("{}. {o}", letter(i)))
+                    .when(i == 0, |d| d.child(rec_badge(th)))
                     .on_click(cx.listener(move |this, _, window, cx| this.answer(i, window, cx))),
             );
         }

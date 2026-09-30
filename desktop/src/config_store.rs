@@ -110,8 +110,12 @@ impl Validator {
         }
         let mut child = cmd.spawn().map_err(|e| format!("无法启动校验器（{} {}）：{e}", self.node, self.script.display()))?;
         // The checker reads stdin to EOF before it prints anything, so a plain write-then-wait cannot deadlock.
-        child.stdin.take().expect("piped").write_all(text.as_bytes()).map_err(|e| format!("校验器输入失败：{e}"))?;
+        let wrote = child.stdin.take().expect("piped").write_all(text.as_bytes());
+        // Reap it either way: a checker that died early explains why on stderr.
         let out = child.wait_with_output().map_err(|e| format!("校验器异常退出：{e}"))?;
+        if let Err(e) = wrote {
+            return Err(format!("校验器输入失败：{e}；{}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
         if !out.status.success() {
             return Err(format!("校验器失败（{}）：{}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
         }
@@ -180,7 +184,12 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     }
     let tmp = path.with_file_name(format!(".{}.tmp-{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("config"), std::process::id()));
     std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| drop(std::fs::remove_file(&tmp)))
+    // The new file keeps the old one's mode: a 0600 models.json must not come back 0644.
+    let kept = match std::fs::metadata(path) {
+        Ok(m) => std::fs::set_permissions(&tmp, m.permissions()),
+        Err(_) => Ok(()),
+    };
+    kept.and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| drop(std::fs::remove_file(&tmp)))
 }
 
 /// Local time as `YYYYMMDD-HHMMSS` for backup names.
@@ -248,6 +257,17 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), GOOD);
         assert_eq!(std::fs::read_dir(tmp.0.join(".pi")).unwrap().count(), 2, "no backup, no temp file");
+    }
+
+    #[test]
+    fn saving_keeps_the_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, v) = setup("mode");
+        let path = tmp.0.join(".pi/review-gate.json");
+        std::fs::write(&path, "{}\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        save(&path, GOOD, Kind::Gate, load(&path).unwrap().mtime, false, &v, "x").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]

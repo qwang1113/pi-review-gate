@@ -150,6 +150,8 @@ pub struct SettingsPage {
     pub copied: Option<Instant>,
     pub focus: FocusHandle,
     validator: Validator,
+    /// A leave asked for while a save was in flight: carried on when it lands.
+    pending_leave: Option<Leave>,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsPage {}
@@ -180,6 +182,7 @@ impl SettingsPage {
             copied: None,
             focus: cx.focus_handle(),
             validator,
+            pending_leave: None,
         };
         p.ensure_loaded(0);
         p
@@ -378,6 +381,10 @@ impl SettingsPage {
                 st.mtime = l.mtime;
                 self.save_ui = SaveUi::Idle;
                 self.rebuild_inputs();
+                // A conflict met on the way out: this file is settled, the rest of the leave goes on.
+                if p.then.is_some() {
+                    self.save(false, p.then, window, cx);
+                }
             }
             _ => {}
         }
@@ -387,6 +394,10 @@ impl SettingsPage {
     /// Save the current file off the UI thread (the checker is a node process).
     /// `then`: leave afterwards — after every other unsaved file is saved too.
     pub fn save(&mut self, force: bool, then: Option<Leave>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.save_ui == SaveUi::Saving {
+            self.pending_leave = then.or(self.pending_leave.take());
+            return;
+        }
         if !self.state().draft.dirty() {
             if let Some(next) = self.states.iter().find(|(_, s)| s.draft.dirty()).map(|(i, _)| *i) {
                 self.open_file(next, cx);
@@ -396,9 +407,6 @@ impl SettingsPage {
                 }
                 return;
             }
-        }
-        if self.save_ui == SaveUi::Saving {
-            return;
         }
         if self.state().draft.error_count() > 0 {
             self.bar_shake += 1;
@@ -412,24 +420,28 @@ impl SettingsPage {
         let idx = self.current;
         self.save_ui = SaveUi::Saving;
         cx.spawn_in(window, async move |this, cx| {
+            let sent = text.clone();
             let r = cx.background_executor().spawn(async move { config_store::save(&file.path, &text, file.kind, seen, force, &v, &config_store::stamp_now()) }).await;
-            let _ = this.update_in(cx, |p, window, cx| p.saved(idx, r, then, window, cx));
+            let _ = this.update_in(cx, |p, window, cx| p.saved(idx, r, sent, then, window, cx));
         })
         .detach();
         cx.notify();
     }
 
-    fn saved(&mut self, idx: usize, r: Result<config_store::Saved, SaveError>, then: Option<Leave>, window: &mut Window, cx: &mut Context<Self>) {
+    /// A save landed. `sent` is the text it wrote: edits made while it ran are kept as a draft on top.
+    fn saved(&mut self, idx: usize, r: Result<config_store::Saved, SaveError>, sent: String, then: Option<Leave>, window: &mut Window, cx: &mut Context<Self>) {
         if idx != self.current {
             self.open_file(idx, cx);
         }
+        let then = then.or(self.pending_leave.take());
         match r {
             Ok(s) => {
                 let st = self.state_mut();
-                st.draft.reset(s.loaded.text);
                 st.mtime = s.loaded.mtime;
+                if st.draft.saved(&sent, s.loaded.text) {
+                    self.rebuild_inputs();
+                }
                 self.save_ui = SaveUi::Saved(Instant::now());
-                self.rebuild_inputs();
                 let body = match s.backup {
                     Some(b) => format!("原文件备份在 {}", b.display()),
                     None => "新建了这个文件".into(),
@@ -466,9 +478,10 @@ impl SettingsPage {
         self.discard(cx);
         let sync_save = |p: &mut Self, force: bool, window: &mut Window, cx: &mut Context<Self>| {
             let f = p.files[p.current].clone();
-            let r = config_store::save(&f.path, &p.state().draft.save_text(), f.kind, p.state().mtime, force, &p.validator, &config_store::stamp_now());
+            let sent = p.state().draft.save_text();
+            let r = config_store::save(&f.path, &sent, f.kind, p.state().mtime, force, &p.validator, &config_store::stamp_now());
             let idx = p.current;
-            p.saved(idx, r, None, window, cx);
+            p.saved(idx, r, sent, None, window, cx);
         };
         match state {
             DemoState::Form => self.open_file(gate_global, cx),

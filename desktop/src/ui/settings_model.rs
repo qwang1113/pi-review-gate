@@ -195,6 +195,18 @@ impl Draft {
         self.view = view;
     }
 
+    /// A save of `sent` landed and the file now reads `disk`. A draft still equal to `sent`
+    /// reloads (true); one edited while the save ran keeps those edits on top of the new disk text.
+    pub fn saved(&mut self, sent: &str, disk: Option<String>) -> bool {
+        if self.save_text() == sent {
+            self.reset(disk);
+            true
+        } else {
+            self.disk = disk;
+            false
+        }
+    }
+
     pub fn get(&self, path: &str) -> Option<&Value> {
         path.split('.').try_fold(&self.value, |v, seg| match v {
             Value::Object(m) => m.get(seg),
@@ -339,6 +351,19 @@ mod tests {
         let d = Draft::load(Some("{oops".into()));
         assert_eq!(d.view, View::Json);
         assert_eq!(d.text, "{oops");
+    }
+
+    #[test]
+    fn edits_made_while_a_save_ran_survive_it() {
+        let mut d = Draft::load(Some("{\"a\":1}".into()));
+        d.set("a", json!(2));
+        let sent = d.save_text();
+        d.set("a", json!(3));
+        assert!(!d.saved(&sent, Some(sent.clone())));
+        assert_eq!((d.get("a"), d.dirty()), (Some(&json!(3)), true));
+        let sent = d.save_text();
+        assert!(d.saved(&sent, Some(sent.clone())));
+        assert!(!d.dirty());
     }
 
     #[test]

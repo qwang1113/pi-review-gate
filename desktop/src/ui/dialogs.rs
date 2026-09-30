@@ -6,7 +6,7 @@
 use super::anim;
 use super::assets::icon;
 use super::chat::{markdown_style, text_font};
-use super::controls::{Btn, badge, button, ring};
+use super::controls::{Btn, REC_LABEL, badge, button, letter, rec_badge, ring};
 use super::dialog_state::{DialogUi, DocKind, Key, Kind, Row, doc_kind, progress_of, question_of};
 use super::theme::Th;
 use crate::app::{ActiveDialog, Shell};
@@ -17,7 +17,6 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::time::Instant;
 
-const LETTERS: [&str; 16] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"];
 
 /// The drawer's regions for one dialog (§6.1 structure, top to bottom).
 pub struct Parts {
@@ -166,10 +165,10 @@ fn option_row(c: &Ctx, i: usize, letters: bool, cx: &mut Context<Shell>) -> AnyE
         .when(focused, |d| d.shadow(vec![ring(th)]))
         .child(mark(c, i, multi, on, focused))
         .when(letters, |d| {
-            d.child(text_font(th, div(), "body_strong").w(px(20.)).flex_none().text_color(th.c(if on { "accent.primary" } else { "text.secondary" })).child(format!("{}.", LETTERS.get(i).unwrap_or(&"?"))))
+            d.child(text_font(th, div(), "body_strong").w(px(20.)).flex_none().text_color(th.c(if on { "accent.primary" } else { "text.secondary" })).child(format!("{}.", letter(i))))
         })
         .child(text_font(th, div(), "body").flex_1().text_color(th.c(if ui.answered { "text.disabled" } else { "text.primary" })).child(ui.options[i].clone()))
-        .when(ui.recommended() == Some(i), |d| d.child(badge(th, "badge.rec", "（推荐）")))
+        .when(ui.recommended() == Some(i), |d| d.child(rec_badge(th)))
         .on_hover(cx.listener(move |this, h: &bool, _, cx| this.set_hovered(&hover_id, *h, cx)))
         .on_click(cx.listener(move |this, _, window, cx| {
             if multi {
@@ -427,7 +426,7 @@ fn long_confirm(c: &Ctx, title: &str, doc: &str, cx: &mut Context<Shell>) -> Par
         for i in order {
             let k = c.key.to_string();
             let kind = if ui.recommended() == Some(i) { Btn::Primary } else { Btn::Secondary };
-            let label = format!("{}. {}{}", LETTERS.get(i).unwrap_or(&"?"), ui.options[i], if kind == Btn::Primary { "（推荐）" } else { "" });
+            let label = format!("{}. {}{}", letter(i), ui.options[i], if kind == Btn::Primary { REC_LABEL } else { "" });
             let focused = c.focused && ui.focus == Row::Option(i);
             f = f.child(button(th, format!("{}-btn-{i}", c.key), kind, focused, label, c.reduce).on_click(cx.listener(move |this, _, window, cx| this.dialog_activate(&k, Row::Option(i), window, cx))));
         }

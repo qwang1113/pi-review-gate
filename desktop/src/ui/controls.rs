@@ -63,6 +63,19 @@ pub fn ring(th: Th) -> BoxShadow {
     BoxShadow { offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.), color: th.c("focus.ring"), inset: false }
 }
 
+/// The template's option letter (§6.2): `A`, `B`, … — shared by every choice list in the client.
+pub fn letter(i: usize) -> &'static str {
+    const LETTERS: [&str; 16] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"];
+    LETTERS.get(i).copied().unwrap_or("?")
+}
+
+pub const REC_LABEL: &str = "（推荐）";
+
+/// The 「（推荐）」 badge on the recommended option.
+pub fn rec_badge(th: Th) -> Div {
+    badge(th, "badge.rec", REC_LABEL)
+}
+
 /// A small bordered badge: `（推荐）` or a document type (§6.2, §6.5).
 pub fn badge(th: Th, base: &str, label: impl Into<SharedString>) -> Div {
     text_font(th, div(), "caption")
