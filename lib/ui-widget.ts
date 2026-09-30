@@ -89,12 +89,27 @@ export function showsRoundReading(f: { mode?: string; judge?: boolean }): boolea
  * the unmet count when any (0 stays hidden).
  * Pure: everything comes from the facts object.
  */
-export function buildGateWidget(f: GateWidgetFacts): string[] {
+export function buildGateWidget(f: GateWidgetFacts, opts: { details?: boolean } = {}): string[] {
+  const strip = buildStripLine(f);
+  // THE DETAIL ROWS (2026-09-30): a count alone tells the reader nothing to
+  // act on. Only a host that renders a widget as a list (the desktop client)
+  // gets them — the terminal strip stays ONE line, as its design says.
+  if (!opts.details || f.nonGit) return [strip];
+  return [strip, ...f.unmet.map((u) => `· ${shortUnmet(u)}`)];
+}
+
+/** One short line per unmet item: its lead clause, clipped. */
+function shortUnmet(text: string): string {
+  const lead = text.split("\n")[0]!.split(" — ")[0]!.trim();
+  return lead.length > 80 ? `${lead.slice(0, 79)}…` : lead;
+}
+
+function buildStripLine(f: GateWidgetFacts): string {
   // NON-GIT (2026-09-02): outside a repository the strip leads with
   // 非 git 目录 — mode/branch are both meaningless there (reviewer P2).
   // The round reading is meaningless there too (no repo ⇒ no review), so
   // this branch stays exactly as it was.
-  if (f.nonGit) return [`门禁 · 非 git 目录 · ${f.edited ? "已编辑" : "未编辑"}`];
+  if (f.nonGit) return `门禁 · 非 git 目录 · ${f.edited ? "已编辑" : "未编辑"}`;
   const wsBits: string[] = [`mode ${f.mode ?? "未初始化"}`];
   if (f.branch) wsBits.push(f.branch);
   wsBits.push(f.edited ? "已编辑" : "未编辑");
@@ -107,7 +122,7 @@ export function buildGateWidget(f: GateWidgetFacts): string[] {
   }
   if (f.stages) wsBits.push(f.stages);
   if (f.unmet.length > 0) wsBits.push(`${f.unmet.length} 项未满足`);
-  return [`门禁 · ${wsBits.join(" · ")}`];
+  return `门禁 · ${wsBits.join(" · ")}`;
 }
 
 // ---------------------------------------------------------------------------

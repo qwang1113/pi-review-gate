@@ -800,7 +800,7 @@ test("WIDGET: the model-config block is gone from the belowEditor strip", () => 
   assert.doesNotMatch(SRC, /buildModelConfigWidget/, "the model-config widget builder must be gone");
   assert.doesNotMatch(STRIP_SRC, /modelConfigWidgetLines|buildModelConfigWidget/, "…nor in the strip's own module");
   const body = windowIn(STRIP_SRC, "function updateWidget(", "\n  }", "updateWidget");
-  assert.match(body, /buildGateWidget\(gateWidgetFacts\(\)\)/, "the strip comes from the single gate facts");
+  assert.match(body, /buildGateWidget\(gateWidgetFacts\(\), \{ details: deps\.desktopHost\(\) \}\)/, "the strip comes from the single gate facts");
   assert.match(body, /ctx\.ui\.setWidget\("review-gate-agents"/, "the strip still renders through setWidget");
 });
 
@@ -5349,7 +5349,7 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
     "and names it in the text too");
   // The audited draft is remembered only after the dispatch is ACCEPTED: a
   // refused submission must not overwrite what a running audit is judging.
-  const acceptedAt = body.indexOf("if (!d.ok)");
+  const acceptedAt = body.indexOf("if (!d.ok && bootUnverified === undefined)");
   const setAt = body.indexOf("pendingAudits.set(root");
   assert.ok(acceptedAt > 0 && setAt > acceptedAt, "the draft is recorded after the dispatch is accepted");
   // …and the recording side closes the loop with that same draft, through the
@@ -7002,7 +7002,7 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // A round never starts HALF: if the quality spawn fails, its error returns
   // before the reviewer is dispatched (a reviewer whose quality half never
   // started could only ever be refused at recording time).
-  const failAt = judges.indexOf("if (!d.ok) {");
+  const failAt = judges.indexOf("if (!d.ok && bootUnverified === undefined) {");
   const qualityNoteAt = judges.indexOf("deps.noteQualityRoundDispatched(root, d.judgeId)");
   assert.ok(failAt > 0 && qualityNoteAt > failAt, "a failed spawn returns before the next judge is started");
   assert.match(judges, /deps\.noteQualityRoundDispatched\(root, d\.judgeId\)/,
@@ -7013,7 +7013,11 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // (quality round P2, same day): both failure paths keep a pane, but a
   // boot-check timeout delivered the task on the argv while a failed channel
   // write into a REUSED pane delivered nothing.
-  assert.match(judges, /if \(d\.delivered !== true\) \{\s*for \(const already of accepted\) \{\s*deps\.cancelJudgeRound\(root, already\.role,/,
+  // (2026-09-30) A delivered-but-unverified judge is ACCEPTED, so the failure
+  // branch is reached only when nothing was delivered.
+  assert.match(judges, /const bootUnverified = !d\.ok && d\.delivered === true/,
+    "a boot-check timeout is a delivered round, accepted beside its sibling");
+  assert.match(judges, /if \(!d\.ok && bootUnverified === undefined\) \{[\s\S]*?for \(const already of accepted\) \{\s*deps\.cancelJudgeRound\(root, already\.role,/,
     "only a round whose task was NOT delivered abandons its siblings");
   assert.doesNotMatch(judges, /if \(!d\.paneId\) \{/, "a kept pane is not the test — the two failures mean opposite things");
   // …and the fact is set by each failure site, never inferred by the caller.
@@ -7023,7 +7027,12 @@ test("2026-09-16: the quality round runs BESIDE the reviewer — routing, cancel
   // `paneId` was still the test one line below the comment explaining why it
   // cannot be — an audited draft would go on record for a task the auditor
   // never received.
-  assert.match(SRC, /if \(d\.delivered === true && role === "goal-auditor"\)/, "an undelivered audit draft is never recorded as pending");
+  // (2026-09-30) A delivered round is now ACCEPTED, so its draft is recorded
+  // on the one accepted path; an undelivered one returned before it.
+  assert.ok(
+    judgesAt + failAt < SRC.indexOf("pendingAudits.set(root", judgesAt),
+    "an undelivered audit draft is never recorded as pending",
+  );
   assert.doesNotMatch(SRC, /if \(d\.paneId && role === "goal-auditor"\)/, "…and paneId never returns as that test");
 
   // ── 3. THE PRECONDITION: dispatch keeps it, RECORDING enforces it ───────
@@ -7346,7 +7355,7 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
     /EVERY PATH THIS SESSION WROTE IS RECORDED, code\/doc or not/,
     "the rule says what it is for",
   );
-  const at = SRC.indexOf("const rel = deps.repoRelative(path);\n    cells.sessionEditedPaths.add(rel);");
+  const at = SRC.indexOf("const rel = deps.repoRelative(absEditPath);\n    cells.sessionEditedPaths.add(rel);");
   assert.ok(at > 0, "recording happens for every edit, before the code/doc branch");
   const before = SRC.slice(Math.max(0, at - 900), at);
   assert.match(before, /if \(isCodeFile\(path\) && !state\.hasCodeChange\)/, "…after the ARMED flags, which stay code/doc-only");

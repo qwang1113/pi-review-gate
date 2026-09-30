@@ -32,6 +32,8 @@ export interface AcceptedJudge {
   sessionDir: string;
   reused: boolean;
   streamPath?: string;
+  /** The pane is up with its task on argv, but its boot record did not land in time. */
+  bootUnverified?: string;
 }
 
 /**
@@ -104,7 +106,10 @@ export function acceptedReceipt(facts: {
   const routed = accepted.find((a) => a.role === dispatchRole) ?? accepted[accepted.length - 1];
   const lines = [
     `review-gate: 已受理本轮任务 — ${accepted.map((a) => `${a.role}（judge ${a.judgeId}）`).join(" + ")}。`,
-    ...accepted.map((a) => `- ${a.role}: pane ${a.paneId} · transcript ${a.sessionDir}`),
+    ...accepted.map((a) => `- ${a.role}: pane ${a.paneId} · transcript ${a.sessionDir}` +
+      (a.bootUnverified === undefined
+        ? ""
+        : `（启动未确认：任务已随启动参数送达，它只是还没在通道上报到 —— 用 judge_wait({role:"${a.role}"}) 等它，别 fresh 重派；${a.bootUnverified}）`)),
     // EVERY JUDGE'S STREAM, MATCHED BY ROLE (B1, 2026-09-18). The text used
     // to name only the ROUTED judge's stream, so the functional reviewer's
     // path — the one the agent fixes findings from while both judges are

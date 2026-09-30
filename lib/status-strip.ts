@@ -262,7 +262,7 @@ export function createStatusStrip(host: SessionHost, deps: StatusStripDeps): Sta
     // belowEditor — the gate status strip. Content-compared so pi only
     // re-renders when something actually changed.
     try {
-      const lines = buildGateWidget(gateWidgetFacts());
+      const lines = buildGateWidget(gateWidgetFacts(), { details: deps.desktopHost() });
       const key = lines.join("\n");
       // THE RENDERER PROBE — invisible, and removed the moment it has
       // answered. The `setWidget` FACTORY form is the only place the host hands

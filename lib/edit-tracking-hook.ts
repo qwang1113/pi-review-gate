@@ -6,12 +6,12 @@
  * The dispatch that calls it is lib/tool-event-hooks.ts.
  */
 
-import { dirname as pathDirname, join as pathJoin } from "node:path";
+import { basename as pathBasename, dirname as pathDirname, join as pathJoin } from "node:path";
 import type { ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { coalesceToolPath, isCodeFile, isDocFile, isSensitiveFile } from "./constants.ts";
 import { EDIT_FAILURE_NUDGE } from "./edit-discipline.ts";
 import { classifyEditRepoScope } from "./edit-repo-scope.ts";
-import { isGateOwnedPath } from "./fingerprint.ts";
+import { isGateOwnedPath, realDir } from "./fingerprint.ts";
 import type { GateState } from "./gate-state.ts";
 import { invalidateBindings } from "./gate-state-transitions.ts";
 import { nearestExistingDir } from "./loop-goal-host.ts";
@@ -87,7 +87,14 @@ export function createEditTracking(cells: SessionCells, deps: EditTrackingDeps) 
     // ANY file's repo joins the set (review round 2 P1, drill F3): since the
     // checkpoint commits this session's OWN new files, a repo holding one of
     // them is a repo the session worked in.
-    const absEditPath = path.startsWith("/") ? path : pathJoin(cwd, path);
+    // PHYSICAL path, resolved ONCE here for every branch below (F1,
+    // 2026-09-30): git reports roots by realpath (`/private/tmp/...` on
+    // macOS), so an edit written as `/tmp/...` was recorded under a prefix no
+    // root matched, and the checkpoint never saw the session's own new file.
+    // Only the DIRECTORY is resolved — the file may not exist yet, and a
+    // tracked symlink file must keep its own name, not its target's.
+    const rawAbs = path.startsWith("/") ? path : pathJoin(cwd, path);
+    const absEditPath = pathJoin(realDir(pathDirname(rawAbs)), pathBasename(rawAbs));
     // Attribution climbs to the nearest EXISTING ancestor first: `git
     // rev-parse` fails on a directory that does not exist (round-2 reviewer
     // P1). It is also the resolution the L8 goal gate uses, so the two agree.
@@ -144,7 +151,7 @@ export function createEditTracking(cells: SessionCells, deps: EditTrackingDeps) 
     // 2026-09-20): the checkpoint commits this session's OWN new files and
     // nothing else, and this list is how it knows which are its own. The
     // ARMING below stays code/doc-only.
-    const rel = deps.repoRelative(path);
+    const rel = deps.repoRelative(absEditPath);
     cells.sessionEditedPaths.add(rel);
     if (!state.sessionEditedFiles) state.sessionEditedFiles = [];
     if (!state.sessionEditedFiles.includes(rel)) { state.sessionEditedFiles.push(rel); dirty = true; }

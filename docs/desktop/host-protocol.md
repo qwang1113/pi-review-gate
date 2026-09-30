@@ -238,6 +238,9 @@ prg 收到结果后先过 `checkDialogOutcome`：选项不在 `options` 里、�
 下被忽略，所以桌面宿主下渲染器探测 `review-gate-renderer-probe` 不发（没有 TUI 可探；
 `StatusStripDeps.desktopHost`），状态条只发字符串数组形式。
 
+桌面宿主下 `review-gate-agents` 这个 widget 的数组**首行**是状态条本身，其后每一行是一项未满足项的
+短文案（以 `· ` 开头，`lib/ui-widget.ts` 的 `buildGateWidget({details})`）；终端 TUI 下只有首行。
+
 prg 侧的对话框呈现在 `lib/gate-host-desktop-dialogs.ts`（`dialog.open` 走连接上的异步通道
 `DesktopClient.dialog`，不阻塞主线程）。
 
@@ -352,4 +355,4 @@ Rust 端的回归建议：用同一个 schema 校验自己产出的每种响应�
 | 长文本确认（反述 / goal / plan 全文） | `body` 整段拼进标题 | `body` 字段整段传、不截断 |
 | 先答者生效撤框 | `AbortSignal` → 框卸载 | `dialog.close` → 结果 `aborted` |
 | 画不出来 | `MULTI_UNAVAILABLE` | 结果 `unavailable` |
-| 状态条 | `setWidget`（单行） | pi RPC `setWidget` / `setStatus`，不进本协议 |
+| 状态条 | `setWidget`（首行状态条 + 未满足项明细行） | pi RPC `setWidget` / `setStatus`，不进本协议 |

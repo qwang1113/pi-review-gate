@@ -477,7 +477,7 @@ spec 非法即停会话；任一层**声明了**的 `agents.worker*` 预设也�
 **空链**（派发 fail-closed）。`model-diagnose.ts`
 回答「我的审查实际跑在哪个模型上」（`/gate-status` 只列六个 judge 角色 + 配置里的 worker 预设，
 agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-doctor` 的只读
-体检，`ui-widget.ts` 构造 editor 下方那条**单行**状态条（详情在 `/gate-status`）。
+体检，`ui-widget.ts` 构造 editor 下方那条**单行**状态条（详情在 `/gate-status`；桌面宿主下另附未满足项明细行）。
 
 > **落点**：除 `model-config.ts` 会把配置渲染进 `agents/*.md` 之外，这一域
 > 全是**诊断**：它们永远不产生门禁裁决。想让某个诊断「顺手拦一下」时，请把

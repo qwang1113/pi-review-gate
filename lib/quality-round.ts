@@ -36,6 +36,7 @@
  *    — the mechanical fact a recorded READY hangs on.
  */
 
+import { fileURLToPath } from "node:url";
 import { SCOPE_BLOCK_HEADING, SCOPE_MARKER_FULL } from "./review-carryover.ts";
 import { buildStreamDirective } from "./review-stream.ts";
 import { QUALITY_ROUND_SPEC, REVIEW_ROUND_SPEC } from "./audit-round-specs.ts";
@@ -326,11 +327,13 @@ export function skippedQualityRecord(input: {
 export const QUALITY_ROLE = "quality-auditor";
 
 /**
- * THE CHECKLIST's path, repo-relative — one constant, because three surfaces
- * name it (the dispatch task, the role body, the module map) and a typo in any
- * of them is a judge reading nothing while reporting confidently.
+ * THE CHECKLIST's path — ABSOLUTE, inside THIS package's own install (F2,
+ * 2026-09-30). It used to be joined onto the REVIEWED repo, where it exists
+ * only when that repo is pi-review-gate itself; anywhere else the judge went
+ * hunting with `find /` for minutes. The file ships with the package
+ * (package.json `files`).
  */
-export const QUALITY_RULES_RELPATH = "docs/code-quality-rules.md";
+export const QUALITY_RULES_PATH = fileURLToPath(new URL("../docs/code-quality-rules.md", import.meta.url));
 
 /**
  * WHAT JUST LANDED — the input of the cancel matrix.

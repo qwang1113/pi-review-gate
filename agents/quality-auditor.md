@@ -7,7 +7,6 @@ thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
-defaultReads: docs/code-quality-rules.md
 defaultContext: fresh
 tools: read, grep, find, ls, bash
 ---
@@ -24,7 +23,9 @@ judges billing the same finding is noise, not thoroughness.
 
 ## Your checklist
 
-**`docs/code-quality-rules.md` is your checklist — read it first.** It is
+**`code-quality-rules.md` is your checklist — read it first, at the ABSOLUTE
+path your round's task gives** (it ships with the gate package, not with the
+repository under review — never go searching for it). It is
 language-neutral and has exactly two layers: L1 (philosophy, architecture,
 correctness, security, performance) and L2 (simplicity, readability,
 maintainability). Every finding you report cites its rule id (`L1-C3`, `L2-2`, …).

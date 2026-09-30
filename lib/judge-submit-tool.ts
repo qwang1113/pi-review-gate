@@ -384,26 +384,22 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
           // the standing is now checked at RECORD time instead.
           ...(judge.role === "reviewer" && judges.length > 1 ? { qualityRoundDispatched: true } : {}),
         });
-        if (!d.ok) {
-          // A KEPT PANE IS A DISPATCHED ROUND (2026-09-05) — but only when the
-          // task actually reached it (`delivered`): a boot-check timeout rode in
-          // on the argv, a failed channel write into a REUSED pane delivered
-          // nothing (quality round P2, 2026-09-16).
-          if (d.delivered === true && role === "goal-auditor") {
-            deps.registry.pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
-            deps.registry.persistJudgeHierarchy();
-          }
+        // A KEPT PANE IS A DISPATCHED ROUND (2026-09-05): a boot-check timeout
+        // means the task rode in on the argv and the judge is merely slow. It
+        // is ACCEPTED like any other — returning here instead (2026-09-30, t4)
+        // left the round half-started: the quality pane ran while the reviewer
+        // was never dispatched, the failure text read as the REVIEWER's, and
+        // `judge_wait({role:"reviewer"})` answered "no judge on record".
+        const bootUnverified = !d.ok && d.delivered === true ? (d.error ?? "启动未确认") : undefined;
+        if (!d.ok && bootUnverified === undefined) {
           progress.fail("spawn 失败");
           // A ROUND NEVER STARTS HALF, IN EITHER DIRECTION (functional round P2,
-          // 2026-09-16) — EXCEPT WHEN THE TASK ACTUALLY REACHED THE JUDGE
-          // (functional round P1 / quality P2): cancelling the judges already
-          // accepted would kill a healthy quality round while this pane runs on.
-          if (d.delivered !== true) {
-            for (const already of accepted) {
-              deps.cancelJudgeRound(root, already.role, "本轮另一个 judge 的这一个轮次没投递出去 —— 这一轮整体作废");
-            }
+          // 2026-09-16): the task reached no judge here, so the ones already
+          // accepted are cancelled with it.
+          for (const already of accepted) {
+            deps.cancelJudgeRound(root, already.role, "本轮另一个 judge 的这一个轮次没投递出去 —— 这一轮整体作废");
           }
-          const lead = "review-gate: judge_submit 失败 — ";
+          const lead = `review-gate: judge_submit 失败（${judge.role} 没派出去）— `;
           return {
             content: [{ type: "text", text: `${lead}${d.error ?? "review pane 未能开出来"}` }],
             details: { submitted: false, busy: false },
@@ -439,6 +435,7 @@ export function registerJudgeSubmitTool(host: ToolHost, cells: SessionCells, dep
           paneId: d.paneId ?? "(pending)",
           sessionDir: d.sessionDir ?? "(pending)",
           reused: d.reused,
+          ...(bootUnverified === undefined ? {} : { bootUnverified }),
           ...(judge.streamPath === undefined ? {} : { streamPath: judge.streamPath }),
         });
         progress.done(d.reused ? "已受理（续接同一会话）" : "已受理（新会话）");

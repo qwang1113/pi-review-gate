@@ -47,7 +47,7 @@ import type { ReviewScopeDecision } from "./review-scope.ts";
 // The contract's wording (and the SettledConclusion it carries) has ONE home.
 import { formatReviewScopeDirective, formatScopeExemptionBlock, type SettledConclusion } from "./review-carryover.ts";
 import { polishReasonRequired } from "./polish-gate.ts";
-import { buildQualityAuditTask, QUALITY_RULES_RELPATH } from "./quality-round.ts";
+import { buildQualityAuditTask, QUALITY_RULES_PATH } from "./quality-round.ts";
 import { buildReviewPrompt, changeRowsLargestFirst, extractPrecommitBaseline, formatChangeIndex, type ChangeIndexRow } from "./parallel-review.ts";
 import { computeFingerprint } from "./fingerprint.ts";
 import { nextReviewRoundNumber } from "./gate-state-transitions.ts";
@@ -491,7 +491,7 @@ async function doPrepareReview(
     files,
     streamPath: qualityStreamPath,
     ...(changeIndex === undefined ? {} : { changeIndex }),
-    rulesPath: pathJoin(root, QUALITY_RULES_RELPATH),
+    rulesPath: QUALITY_RULES_PATH,
     session: { dir: deps.sessionDir(ctx), id: st.sessionId ?? "unknown" },
     ...(exemptionNote === "" ? {} : { exemptionNote }),
   });

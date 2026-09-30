@@ -20,6 +20,16 @@ test("buildGateWidget renders a single-line strip: mode · branch · edited + un
   assert.match(lines[0]!, /^门禁 · mode loop · feat\/x · 已编辑 · 2 项未满足$/);
 });
 
+test("buildGateWidget with details adds one short line per unmet item (desktop host)", () => {
+  const lines = buildGateWidget({
+    mode: "loop",
+    edited: true,
+    unmet: ["loop goal not confirmed by the user — interview them first", "precommit has not run"],
+  }, { details: true });
+  assert.deepEqual(lines.slice(1), ["· loop goal not confirmed by the user", "· precommit has not run"]);
+  assert.match(lines[0]!, /2 项未满足$/);
+});
+
 test("buildGateWidget hides the unmet count when zero", () => {
   const lines = buildGateWidget({
     mode: "explore",

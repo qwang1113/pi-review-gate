@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 
 import {
   QUALITY_ROLE,
+  QUALITY_RULES_PATH,
   buildQualityAuditTask,
   decideQualityHold,
   isContentFreeQualitySkip,
@@ -22,6 +25,13 @@ import {
 import { QUALITY_ROUND_SPEC, REVIEW_ROUND_SPEC } from "../lib/audit-round-specs.ts";
 import { parseReviewScopeKind } from "../lib/judge-inspection.ts";
 import { parkedReadyNote } from "../lib/review-adjudicate.ts";
+
+test("F2: the checklist path is absolute, inside the package, and shipped with it", () => {
+  assert.ok(isAbsolute(QUALITY_RULES_PATH), QUALITY_RULES_PATH);
+  assert.ok(existsSync(QUALITY_RULES_PATH), QUALITY_RULES_PATH);
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { files: string[] };
+  assert.ok(pkg.files.includes("docs/code-quality-rules.md"), "package.json files ships the checklist");
+});
 
 // ---------- T1 defects (2026-09-27) ----------
 
