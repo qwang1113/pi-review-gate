@@ -67,7 +67,9 @@ import { sanitizeScopeRecord, type TmuxScope } from "../lib/session-tmux-scope.t
 import { createGateHost } from "../lib/gate-host.ts";
 import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 import { createDesktopHost } from "../lib/gate-host-desktop.ts";
-import { createDesktopClient, helloFor } from "../lib/desktop-host-client.ts";
+import { createDesktopClient, helloFor, type DesktopClient } from "../lib/desktop-host-client.ts";
+import { createDesktopDialogs } from "../lib/gate-host-desktop-dialogs.ts";
+import { resolveHostEnv } from "../lib/desktop-host-protocol.ts";
 import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import { createPaneStateReporter } from "../lib/tmux-pane-state.ts";
 import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
@@ -475,6 +477,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     loopGoalPresent: (root) => readSessionLoopGoal(root).present,
     loopGoalPath: (root) => loopGoalPathIn(root),
     lastUiCtx: cells.lastUiCtx,
+    desktopHost: () => resolveHostEnv(process.env).kind === "desktop",
   });
   const { freshProjectConfig, ensureModelLayersRendered } = createModelLayers(cells, { log });
   const { appealsUsed, spendArbitration, refuseText } = createAppealLedger(cells, {
@@ -576,6 +579,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * address (its own, the lineage's judges, its children, its workers); the
    * registries it reads are declared further down, read at call time.
    */
+  let desktopClient: DesktopClient | undefined;
   const gateHost = createGateHost({
     env: process.env,
     tmux: () => createTmuxHost({
@@ -586,14 +590,14 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...workerRegistrySessions(),
       ],
     }),
-    desktop: ({ socketPath, hostSessionId }) => createDesktopHost({
-      socketPath,
-      hostSessionId,
-      client: createDesktopClient({
+    desktop: ({ socketPath, hostSessionId }) => {
+      // ONE connection per process (host-protocol §4.3): the dialogs share it.
+      desktopClient = createDesktopClient({
         socketPath,
         hello: () => helloFor({ hostSessionId, cwd: cells.cwd, piSessionId: cells.state.sessionId ?? undefined }),
-      }),
-    }),
+      });
+      return createDesktopHost({ socketPath, hostSessionId, client: desktopClient });
+    },
   });
   const worktrees = createWorktreeSettlement(cells, { persistOrchestration });
 
@@ -893,6 +897,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     raiseBanner: (opts) => raiseBanner(opts),
     lastUserInteractionAt: cells.lastUserInteractionAt,
     proxyWaitMs: () => cells.projectConfig.userProxy.waitMs,
+    ...(desktopClient ? { desktopDialogs: createDesktopDialogs({ client: desktopClient }) } : {}),
   });
 
   // ---------- L6 (edit time) + the arbitration I/O they share a quota with ----------

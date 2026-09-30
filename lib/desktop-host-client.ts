@@ -13,8 +13,9 @@
  * no queue, no retry loop. Everything that goes wrong comes back as a
  * {@link ProtocolError}; nothing here throws and nothing falls back.
  *
- * `dialog.open` is refused: it waits for a human, and a blocked main thread
- * would freeze the session for as long as the human takes.
+ * `dialog.open` is refused by `request`: it waits for a human, and a blocked
+ * main thread would freeze the session for as long as the human takes. It has
+ * its own ASYNC lane on the same connection instead: `dialog` (t3b).
  */
 
 import { Worker } from "node:worker_threads";
@@ -38,6 +39,12 @@ export interface DesktopClient {
   /** Connect and shake hands now, if not already connected. */
   connect(): { ok: true } | { ok: false; error: ProtocolError };
   request<M extends Method>(method: M, params: Params<M>): DesktopReply<M>;
+  /**
+   * `dialog.open`, without blocking: resolves when the client answers or the
+   * connection is lost (`disconnected`). No timeout — it waits for a human;
+   * taking the box down is the caller's `dialog.close`.
+   */
+  dialog(params: Params<"dialog.open">): Promise<DesktopReply<"dialog.open">>;
   close(): void;
 }
 
@@ -54,6 +61,14 @@ const KIND_LINE = 0;
 const KIND_OK = 1;
 /** The worker had no connection, so the frame never left this process. */
 const KIND_NOT_SENT = 3;
+
+/** What the worker posts back for an async-lane request. */
+interface AsyncReply {
+  ok: boolean;
+  text: string;
+  /** The frame never left this process (no connection). */
+  notSent?: boolean;
+}
 
 export function helloFor(opts: { hostSessionId: string; cwd: string; piSessionId?: string | undefined }): Params<"hello"> {
   return {
@@ -73,21 +88,38 @@ export function createDesktopClient(opts: DesktopClientOptions): DesktopClient {
   let seq = 0;
   let requestId = 0;
   let connected = false;
+  /** Async-lane requests waiting for their line (or for the connection to go). */
+  const inflight = new Map<string, (message: AsyncReply) => void>();
+  const dropInflight = (why: string): void => {
+    for (const [id, settle] of [...inflight]) {
+      inflight.delete(id);
+      settle({ ok: false, text: why });
+    }
+  };
 
   function thread(): Worker {
     if (!worker) {
       worker = new Worker(new URL("./desktop-host-worker.mjs", import.meta.url), {
         workerData: { socketPath: opts.socketPath, shared },
       });
-      // The socket thread never keeps a finished session alive.
-      worker.unref();
       // A thread that died is reported by the next request's timeout; an
       // unhandled `error` event would take the whole extension host down.
       const dead = worker;
       dead.on("error", () => {
         if (worker === dead) worker = undefined;
         connected = false;
+        dropInflight("套接字线程崩了");
       });
+      dead.on("message", (message: { op?: string; id?: string } & AsyncReply) => {
+        if (message?.op !== "async-reply" || typeof message.id !== "string") return;
+        const settle = inflight.get(message.id);
+        if (!settle) return;
+        inflight.delete(message.id);
+        settle(message);
+      });
+      // The socket thread never keeps a finished session alive. AFTER the
+      // listeners: a `message` listener re-refs the worker's port.
+      dead.unref();
     }
     return worker;
   }
@@ -143,6 +175,24 @@ export function createDesktopClient(opts: DesktopClientOptions): DesktopClient {
     return { ok: true };
   }
 
+  async function sendAsync(params: Params<"dialog.open">): Promise<DesktopReply<"dialog.open"> & { notSent?: true }> {
+    requestId += 1;
+    const id = `r-${requestId}`;
+    const encoded = encodeRequest(id, "dialog.open", params);
+    if (!encoded.ok) return encoded;
+    const answer = await new Promise<AsyncReply>((resolve) => {
+      inflight.set(id, resolve);
+      thread().postMessage({ op: "send-async", id, frame: encoded.frame });
+    });
+    if (!answer.ok) {
+      connected = false;
+      return { ok: false, error: { code: "disconnected", message: answer.text }, ...(answer.notSent ? { notSent: true as const } : {}) };
+    }
+    const decoded = decodeResponse(answer.text, (got) => (got === id ? "dialog.open" : undefined));
+    if (!decoded.ok) return { ok: false, error: decoded.error };
+    return { ok: true, result: decoded.result as Result<"dialog.open"> };
+  }
+
   return {
     connect,
     request(method, params) {
@@ -160,8 +210,18 @@ export function createDesktopClient(opts: DesktopClientOptions): DesktopClient {
       const again = connect();
       return again.ok ? send(method, params) : again;
     },
+    async dialog(params) {
+      const up = connect();
+      if (!up.ok) return up;
+      // The same one reconnect the sync lane allows, for the same reason.
+      const first = await sendAsync(params);
+      if (first.ok || first.notSent !== true) return first;
+      const again = connect();
+      return again.ok ? sendAsync(params) : again;
+    },
     close() {
       connected = false;
+      dropInflight("本进程关闭了连接");
       if (worker) {
         void worker.terminate();
         worker = undefined;

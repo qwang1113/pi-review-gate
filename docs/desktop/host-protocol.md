@@ -223,7 +223,11 @@ prg 收到结果后先过 `checkDialogOutcome`：选项不在 `options` 里、�
 
 状态条（`lib/status-strip.ts` 的单行 widget）与进度提示走 **pi RPC 的 `setWidget` / `setStatus`**
 （fire-and-forget，本来就是结构化字符串数组），**不进本协议**。`setWidget` 的组件工厂形式在 RPC
-下被忽略（渲染器探测 `review-gate-renderer-probe` 因此拿不到读数），由 t3b 处理。
+下被忽略，所以桌面宿主下渲染器探测 `review-gate-renderer-probe` 不发（没有 TUI 可探；
+`StatusStripDeps.desktopHost`），状态条只发字符串数组形式。
+
+prg 侧的对话框呈现在 `lib/gate-host-desktop-dialogs.ts`（`dialog.open` 走连接上的异步通道
+`DesktopClient.dialog`，不阻塞主线程）。
 
 ## 8. 错误语义与 fail-closed
 

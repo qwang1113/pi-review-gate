@@ -45,6 +45,7 @@ import { editorTextOf, hostEditorFallback, hostReasonEditor, REASON_EDITOR_BACK,
 import { raceWithUserProxy } from "./user-proxy.ts";
 import type { UserNotifyKind } from "./user-notify.ts";
 import type { DialogProxy } from "./dialog-proxy.ts";
+import type { DesktopDialogRender } from "./gate-host-desktop-dialogs.ts";
 import type { Ref, SessionHost } from "./session-host.ts";
 
 /** pi's editor component CLASS, as a type — see `loadEditorComponent`. */
@@ -269,6 +270,12 @@ export interface GateDialogDeps {
   lastUserInteractionAt: Ref<string | undefined>;
   /** How long a box waits for the user before the stand-in (`userProxy.waitMinutes`). */
   proxyWaitMs(): number;
+  /**
+   * THE DESKTOP HOST'S PRESENTATION (lib/gate-host-desktop-dialogs.ts), present
+   * iff the session runs under it. It replaces only the drawing below; the
+   * queue, the banner, the proxy race and the record stay this function's.
+   */
+  desktopDialogs?: DesktopDialogRender;
 }
 
 export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
@@ -405,19 +412,19 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
       // `ExtensionContext.signal`, which is what an ESC aborts. Passing only the
       // caller's own signal left a box on screen after the user cancelled the
       // run, and the tool waiting on it never came back.
-      const answerBox = await reasonBoxUi(uiCtx.ui);
+      const drawOpts = {
+        ...(opts.body === undefined ? {} : { body: opts.body }),
+        ...(opts.back ? { back: true } : {}),
+        ...(signal ? { signal } : {}),
+      };
+      const desktop = deps.desktopDialogs;
+      const answerBox = desktop ? undefined : await reasonBoxUi(uiCtx.ui);
       dialogsOnScreen += 1;
-      const answer = await (checkbox
-        ? renderMultiChoice(answerBox, spec, {
-          ...(opts.body === undefined ? {} : { body: opts.body }),
-          ...(opts.back ? { back: true } : {}),
-          ...(signal ? { signal } : {}),
-        })
-        : renderChoice(answerBox, spec, {
-          ...(opts.body === undefined ? {} : { body: opts.body }),
-          ...(opts.back ? { back: true } : {}),
-          ...(signal ? { signal } : {}),
-        })).finally(() => { dialogsOnScreen -= 1; });
+      const answer = await (desktop
+        ? desktop(spec, { ...drawOpts, checkbox })
+        : checkbox
+        ? renderMultiChoice(answerBox, spec, drawOpts)
+        : renderChoice(answerBox, spec, drawOpts)).finally(() => { dialogsOnScreen -= 1; });
       // THE ONE PLACE A GATE↔USER EXCHANGE IS RECORDED (2026-09-16). Every
       // dialog the gate shows — ask_user's interview, the restatement / goal /
       // plan approvals, the consent boxes for sensitive edits and scope limits —

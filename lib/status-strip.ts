@@ -44,6 +44,13 @@ export interface StatusStripDeps {
   loopGoalPath(root: string): string;
   /** The last UI context a render reached — the refresh timer's target. */
   lastUiCtx: Ref<ExtensionContext | undefined>;
+  /**
+   * Does this session run under the DESKTOP host (pi `--mode rpc`)? There is
+   * no TUI renderer to probe: RPC drops the factory form and would only echo
+   * the probe's removal to the client on every strip change. The strip itself
+   * is the string[] form, which RPC forwards as `setWidget` (host-protocol §7.4).
+   */
+  desktopHost(): boolean;
 }
 
 export interface StatusStrip {
@@ -281,11 +288,13 @@ export function createStatusStrip(host: SessionHost, deps: StatusStripDeps): Sta
       // once-per-session (`rendererModeNoticeShown`).
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
-        ctx.ui.setWidget("review-gate-renderer-probe", (tui) => {
-          noteRendererMode(tui.mode, ctx);
-          return { render: () => [], invalidate: () => {} };
-        }, { placement: "belowEditor" });
-        ctx.ui.setWidget("review-gate-renderer-probe", undefined);
+        if (!deps.desktopHost()) {
+          ctx.ui.setWidget("review-gate-renderer-probe", (tui) => {
+            noteRendererMode(tui.mode, ctx);
+            return { render: () => [], invalidate: () => {} };
+          }, { placement: "belowEditor" });
+          ctx.ui.setWidget("review-gate-renderer-probe", undefined);
+        }
         ctx.ui.setWidget("review-gate-agents", lines, { placement: "belowEditor" });
       }
     } catch { /* display-only */ }
