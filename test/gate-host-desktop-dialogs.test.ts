@@ -201,7 +201,7 @@ test("askChoice routes through the desktop presentation; the TUI ui is never tou
 
 test("status strip on the desktop host: string[] only, no renderer probe", () => {
   const calls: Array<{ key: string; content: unknown }> = [];
-  const state = emptyState();
+  const state = emptyState("sess-1", 10);
   const host = {
     state: () => state,
     repos: () => ({ primary: "/repo", active: "/repo", all: new Set(["/repo"]), cwd: "/repo", inGit: false }),

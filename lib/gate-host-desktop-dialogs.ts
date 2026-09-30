@@ -96,7 +96,9 @@ export function createDesktopDialogs(deps: { client: Pick<DesktopClient, "dialog
     const { signal } = opts;
     if (signal?.aborted) return undefined;
     seq += 1;
-    const params = dialogParamsOf(`dlg-${seq}`, spec, opts);
+    // Unique across every gate process the one client serves: `dialog.close`
+    // names a card by this id alone.
+    const params = dialogParamsOf(`dlg-${process.pid}-${seq}`, spec, opts);
     let onAbort: (() => void) | undefined;
     const aborted = new Promise<"aborted">((resolve) => {
       onAbort = () => resolve("aborted");
