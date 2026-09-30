@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pi-review-gate/desktop-host-protocol",
+  "title": "pi-review-gate desktop host protocol (generated from lib/desktop-host-protocol.ts)",
+  "x-protocolVersion": 1,
+  "x-maxFrameBytes": 1048576,
+  "x-requestTimeoutMs": 5000,
+  "x-env": { "host": "RG_HOST", "socket": "RG_HOST_SOCKET", "hostSession": "RG_HOST_SESSION" },
+  "x-wireErrorCodes": ["bad-request", "unknown-method", "version-mismatch", "not-found", "forbidden", "unavailable", "internal"],
+  "x-methods": ["hello", "session.open", "session.list", "session.pin", "session.close", "session.decorate", "focus", "focus.state", "notify", "dialog.open", "dialog.close"],
+  "x-request": {
+    "type": "object",
+    "properties": {
+      "v": { "const": 1 },
+      "type": { "const": "request" },
+      "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+      "method": { "enum": ["hello", "session.open", "session.list", "session.pin", "session.close", "session.decorate", "focus", "focus.state", "notify", "dialog.open", "dialog.close"] },
+      "params": { "description": "$defs[<method>.params]" }
+    },
+    "required": ["v", "type", "id", "method", "params"],
+    "additionalProperties": false
+  },
+  "x-response": {
+    "oneOf": [
+      {
+        "type": "object",
+        "properties": {
+          "v": { "const": 1 },
+          "type": { "const": "response" },
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+          "ok": { "const": true },
+          "result": { "description": "$defs[<method>.result]" }
+        },
+        "required": ["v", "type", "id", "ok", "result"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "v": { "const": 1 },
+          "type": { "const": "response" },
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+          "ok": { "const": false },
+          "error": { "$ref": "#/$defs/error" }
+        },
+        "required": ["v", "type", "id", "ok", "error"],
+        "additionalProperties": false
+      }
+    ]
+  },
+  "$defs": {
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": { "enum": ["bad-request", "unknown-method", "version-mismatch", "not-found", "forbidden", "unavailable", "internal"] },
+        "message": { "type": "string", "maxLength": 2000 }
+      },
+      "required": ["code", "message"],
+      "additionalProperties": false
+    },
+    "hello.params": {
+      "type": "object",
+      "properties": {
+        "protocol": { "type": "integer", "minimum": 1 },
+        "pid": { "type": "integer", "minimum": 1 },
+        "hostSessionId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+        "piSessionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/" }
+      },
+      "required": ["protocol", "pid", "hostSessionId", "cwd"],
+      "additionalProperties": false
+    },
+    "hello.result": {
+      "type": "object",
+      "properties": {
+        "protocol": { "type": "integer", "minimum": 1 },
+        "client": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          "required": ["name", "version"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["protocol", "client"],
+      "additionalProperties": false
+    },
+    "session.open.params": {
+      "type": "object",
+      "properties": {
+        "argv": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 65536 }, "minItems": 1, "maxItems": 512 },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/" },
+        "env": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "additionalProperties": { "type": "string", "maxLength": 65536 },
+          "maxProperties": 256
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "role": { "enum": ["judge", "worker", "orchestration-child", "successor"] },
+        "placement": { "enum": ["own-group", "beside-opener"] }
+      },
+      "required": ["argv", "cwd", "env", "title", "role", "placement"],
+      "additionalProperties": false
+    },
+    "session.open.result": {
+      "type": "object",
+      "properties": {
+        "hostSessionId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+        "pid": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["hostSessionId"],
+      "additionalProperties": false
+    },
+    "session.list.params": { "type": "object", "properties": {}, "required": [], "additionalProperties": false },
+    "session.list.result": {
+      "type": "object",
+      "properties": {
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "hostSessionId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+              "parent": { "anyOf": [{ "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" }, { "type": "null" }] },
+              "role": { "enum": ["root", "judge", "worker", "orchestration-child", "successor"] },
+              "title": { "type": "string", "maxLength": 200 },
+              "pid": { "type": "integer", "minimum": 1 },
+              "groupPin": { "anyOf": [{ "type": "string", "minLength": 1, "maxLength": 200 }, { "type": "null" }] }
+            },
+            "required": ["hostSessionId", "parent", "role", "title", "groupPin"],
+            "additionalProperties": false
+          },
+          "maxItems": 4096
+        }
+      },
+      "required": ["sessions"],
+      "additionalProperties": false
+    },
+    "session.pin.params": {
+      "type": "object",
+      "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 200 } },
+      "required": ["reason"],
+      "additionalProperties": false
+    },
+    "session.pin.result": { "type": "object", "properties": {}, "required": [], "additionalProperties": false },
+    "session.close.params": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "target": { "const": "session" },
+            "hostSessionId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" }
+          },
+          "required": ["target", "hostSessionId"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "target": { "const": "children" } },
+          "required": ["target"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "session.close.result": {
+      "type": "object",
+      "properties": {
+        "closed": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" }, "maxItems": 4096 }
+      },
+      "required": ["closed"],
+      "additionalProperties": false
+    },
+    "session.decorate.params": {
+      "type": "object",
+      "properties": {
+        "hostSessionId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+        "label": { "type": "string", "maxLength": 200 },
+        "colorSeed": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "state": { "enum": ["working", "waiting-input", "waiting-judge", "done", "idle", "mode-changed", "dead", "stalled"] },
+        "stateAt": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "repo": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/" },
+        "piSessionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sessionName": { "anyOf": [{ "type": "string", "minLength": 2, "maxLength": 32 }, { "type": "null" }] }
+      },
+      "required": ["hostSessionId"],
+      "additionalProperties": false
+    },
+    "session.decorate.result": { "type": "object", "properties": {}, "required": [], "additionalProperties": false },
+    "focus.params": {
+      "type": "object",
+      "properties": { "hostSessionId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" } },
+      "required": ["hostSessionId"],
+      "additionalProperties": false
+    },
+    "focus.result": { "type": "object", "properties": {}, "required": [], "additionalProperties": false },
+    "focus.state.params": { "type": "object", "properties": {}, "required": [], "additionalProperties": false },
+    "focus.state.result": {
+      "type": "object",
+      "properties": {
+        "focusedHostSessionId": { "anyOf": [{ "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" }, { "type": "null" }] },
+        "appFrontmost": { "type": "boolean" }
+      },
+      "required": ["focusedHostSessionId", "appFrontmost"],
+      "additionalProperties": false
+    },
+    "notify.params": {
+      "type": "object",
+      "properties": {
+        "kind": { "enum": ["finished", "failed", "needs-user"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "body": { "type": "string", "maxLength": 300 },
+        "group": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "focusHostSessionId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" }
+      },
+      "required": ["kind", "title", "body"],
+      "additionalProperties": false
+    },
+    "notify.result": {
+      "type": "object",
+      "properties": { "shown": { "type": "boolean" } },
+      "required": ["shown"],
+      "additionalProperties": false
+    },
+    "dialog.open.params": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "shape": { "const": "choice" },
+            "dialogId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 65536 },
+            "body": { "type": "string", "maxLength": 262144 },
+            "options": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "minItems": 2, "maxItems": 4 },
+            "declineRow": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "back": { "type": "boolean" },
+            "recommended": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          },
+          "required": ["shape", "dialogId", "title", "options", "declineRow", "back"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "shape": { "const": "multi" },
+            "dialogId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 65536 },
+            "body": { "type": "string", "maxLength": 262144 },
+            "options": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "minItems": 2, "maxItems": 4 },
+            "declineRow": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "back": { "type": "boolean" },
+            "defaultChecked": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "maxItems": 4 }
+          },
+          "required": ["shape", "dialogId", "title", "options", "declineRow", "back", "defaultChecked"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "dialog.open.result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "picked" }, "option": { "type": "string", "minLength": 1, "maxLength": 4096 } },
+          "required": ["kind", "option"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "checked" },
+            "options": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "maxItems": 4 }
+          },
+          "required": ["kind", "options"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "decline" }, "reason": { "type": "string", "maxLength": 262144 } },
+          "required": ["kind", "reason"],
+          "additionalProperties": false
+        },
+        { "type": "object", "properties": { "kind": { "const": "back" } }, "required": ["kind"], "additionalProperties": false },
+        { "type": "object", "properties": { "kind": { "const": "dismissed" } }, "required": ["kind"], "additionalProperties": false },
+        { "type": "object", "properties": { "kind": { "const": "aborted" } }, "required": ["kind"], "additionalProperties": false },
+        { "type": "object", "properties": { "kind": { "const": "unavailable" } }, "required": ["kind"], "additionalProperties": false }
+      ]
+    },
+    "dialog.close.params": {
+      "type": "object",
+      "properties": { "dialogId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" } },
+      "required": ["dialogId"],
+      "additionalProperties": false
+    },
+    "dialog.close.result": { "type": "object", "properties": {}, "required": [], "additionalProperties": false }
+  }
+}
