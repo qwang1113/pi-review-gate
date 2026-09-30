@@ -199,6 +199,8 @@ impl SettingsPage {
                 let mut d = Draft::load(None);
                 d.to_json_view();
                 d.text = format!("// 读取失败：{e}\n");
+                // Nothing was edited: the text is the "disk" as far as dirtiness goes (it cannot be saved anyway).
+                d.disk = Some(d.text.clone());
                 FileState { draft: d, mtime: None }
             }
         };
@@ -351,6 +353,10 @@ impl SettingsPage {
     }
 
     pub fn discard(&mut self, cx: &mut Context<Self>) {
+        // The disk is about to change under a save in flight: reloading now would read the old text.
+        if self.save_ui == SaveUi::Saving {
+            return;
+        }
         for (i, st) in self.states.iter_mut() {
             if st.draft.dirty() {
                 let l = config_store::load(&self.files[*i].path).unwrap_or(config_store::Loaded { text: None, mtime: None });
@@ -438,10 +444,13 @@ impl SettingsPage {
             Ok(s) => {
                 let st = self.state_mut();
                 st.mtime = s.loaded.mtime;
-                if st.draft.saved(&sent, s.loaded.text) {
+                // Edits made meanwhile are still unsaved: the bar keeps saying so instead of 「已保存」.
+                self.save_ui = if st.draft.saved(&sent, s.loaded.text) {
                     self.rebuild_inputs();
-                }
-                self.save_ui = SaveUi::Saved(Instant::now());
+                    SaveUi::Saved(Instant::now())
+                } else {
+                    SaveUi::Idle
+                };
                 let body = match s.backup {
                     Some(b) => format!("原文件备份在 {}", b.display()),
                     None => "新建了这个文件".into(),
@@ -547,7 +556,9 @@ impl SettingsPage {
                     let f = p.focus;
                     self.answer(f, window, cx);
                 }
-                _ => return false,
+                // Every other key is swallowed: the text boxes under the scrim must not change
+                // the draft that 「保存并离开」 is about to write.
+                _ => {}
             }
             cx.notify();
             return true;

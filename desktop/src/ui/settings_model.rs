@@ -167,17 +167,18 @@ impl Draft {
         }
     }
 
-    /// The draft means something different from the disk (whitespace does not count).
+    /// The draft would save something different from the disk: whitespace does not count,
+    /// key order does (the saved text keeps it; `Value` equality would not).
     pub fn dirty(&self) -> bool {
-        let disk = self.disk.as_deref().map(parse);
         let now = match self.view {
             View::Form => Ok(self.value.clone()),
             View::Json => parse(&self.text),
         };
+        let disk = self.disk.as_deref().map(parse);
         match (disk, now) {
             (_, Err(_)) => true,
             (None, Ok(v)) => v != Value::Object(Map::new()),
-            (Some(Ok(d)), Ok(v)) => d != v || !self.field_errors.is_empty(),
+            (Some(Ok(d)), Ok(v)) => to_text(&d) != to_text(&v) || !self.field_errors.is_empty(),
             (Some(Err(_)), Ok(_)) => true,
         }
     }
@@ -364,6 +365,16 @@ mod tests {
         let sent = d.save_text();
         assert!(d.saved(&sent, Some(sent.clone())));
         assert!(!d.dirty());
+    }
+
+    #[test]
+    fn reordering_keys_is_a_change() {
+        let mut d = Draft::load(Some("{\"a\":1,\"b\":2}".into()));
+        d.to_json_view();
+        d.text = "{ \"a\": 1, \"b\": 2 }".into();
+        assert!(!d.dirty(), "whitespace only");
+        d.text = "{\"b\":2,\"a\":1}".into();
+        assert!(d.dirty());
     }
 
     #[test]

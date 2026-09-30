@@ -362,7 +362,7 @@ impl SettingsPage {
             .border_t_1()
             .border_color(th.c("border.subtle"))
             .child(text_font(th, div(), "small").flex_1().min_w_0().truncate().text_color(th.c(if danger { "semantic.danger" } else { "text.secondary" })).child(text))
-            .when(!saved, |d| d.child(button(th, "cfg-discard", Btn::Secondary, false, "放弃修改", self.reduce).on_click(cx.listener(|this, _, _, cx| this.discard(cx)))))
+            .when(!saved && self.save_ui != SaveUi::Saving, |d| d.child(button(th, "cfg-discard", Btn::Secondary, false, "放弃修改", self.reduce).on_click(cx.listener(|this, _, _, cx| this.discard(cx)))))
             .child(save);
         let up = self.bar.value(now);
         let bar = shake(bar, format!("bar-shake-{}", self.bar_shake), th, self.reduce);
@@ -415,8 +415,11 @@ impl SettingsPage {
             .child(text_font(th, div(), "small").text_color(th.c("text.muted")).child(esc));
         Some(
             div()
+                .id("cfg-prompt")
                 .absolute()
                 .inset_0()
+                // Clicks do not reach the form under the scrim.
+                .occlude()
                 .child(anim::appear(div().absolute().inset_0().bg(th.c("bg.scrim_drawer")), "cfg-scrim", th.ms("scrim_enter"), th.ease("smooth"), 0., 0.))
                 .child(div().absolute().top_0().bottom_0().right_0().w(th.px("drawer.choice_width")).child(anim::appear(panel, format!("cfg-prompt-{:?}", p.kind), th.ms("drawer_enter"), th.ease("smooth"), shift, 0.)))
                 .into_any_element(),

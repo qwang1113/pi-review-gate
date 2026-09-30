@@ -1,22 +1,25 @@
 #!/usr/bin/env node
 /**
- * `node scripts/validate-config.ts <kind>` — the desktop config page's validator.
+ * `node scripts/validate-config.ts` — the desktop config page's validator.
  *
- * Reads a config file's full text on stdin, validates it as `<kind>`
- * (pi-settings | pi-models | gate) with prg's own rules (lib/config-validate.ts)
- * against the model registry under $HOME, and prints the verdict as one JSON
- * line: `{"ok":bool,"issues":[{"path","message"}]}`. Exit 0 whenever a verdict
- * was printed; 2 on a usage error.
+ * stdin: `{"kind": "pi-settings" | "pi-models" | "gate", "text": <the file's full text>}`.
+ * stdout: one JSON line `{"ok": bool, "errors": [{"path", "message"}]}`, judged with
+ * prg's own rules (lib/config-validate.ts) against the model registry under $HOME.
+ * Exit 0 whenever a verdict was printed; 2 on a malformed request.
  */
 
 import { readFileSync } from "node:fs";
 import { CONFIG_KINDS, validateConfigText, type ConfigKind } from "../lib/config-validate.ts";
 import { loadRegistry } from "../lib/model-spec.ts";
 
-const kind = process.argv[2];
-if (!CONFIG_KINDS.includes(kind as ConfigKind)) {
-  process.stderr.write(`用法：validate-config.ts <${CONFIG_KINDS.join("|")}>  (文件内容走 stdin)\n`);
+let req: { kind?: unknown; text?: unknown } = {};
+try {
+  req = JSON.parse(readFileSync(0, "utf8"));
+} catch {
+  // falls through to the usage error below
+}
+if (!CONFIG_KINDS.includes(req?.kind as ConfigKind) || typeof req?.text !== "string") {
+  process.stderr.write(`用法：stdin 写 {"kind": "${CONFIG_KINDS.join("|")}", "text": "<文件全文>"}\n`);
   process.exit(2);
 }
-const text = readFileSync(0, "utf8");
-process.stdout.write(JSON.stringify(validateConfigText(kind as ConfigKind, text, loadRegistry(process.env.HOME))) + "\n");
+process.stdout.write(JSON.stringify(validateConfigText(req.kind as ConfigKind, req.text, loadRegistry(process.env.HOME))) + "\n");

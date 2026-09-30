@@ -101,16 +101,17 @@ impl Validator {
     pub fn check(&self, kind: Kind, text: &str) -> Result<Vec<Issue>, String> {
         #[derive(Deserialize)]
         struct Verdict {
-            issues: Vec<Issue>,
+            errors: Vec<Issue>,
         }
         let mut cmd = Command::new(&self.node);
-        cmd.arg(&self.script).arg(kind.arg()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.arg(&self.script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(h) = &self.home {
             cmd.env("HOME", h);
         }
         let mut child = cmd.spawn().map_err(|e| format!("无法启动校验器（{} {}）：{e}", self.node, self.script.display()))?;
         // The checker reads stdin to EOF before it prints anything, so a plain write-then-wait cannot deadlock.
-        let wrote = child.stdin.take().expect("piped").write_all(text.as_bytes());
+        let req = serde_json::json!({ "kind": kind.arg(), "text": text }).to_string();
+        let wrote = child.stdin.take().expect("piped").write_all(req.as_bytes());
         // Reap it either way: a checker that died early explains why on stderr.
         let out = child.wait_with_output().map_err(|e| format!("校验器异常退出：{e}"))?;
         if let Err(e) = wrote {
@@ -119,7 +120,7 @@ impl Validator {
         if !out.status.success() {
             return Err(format!("校验器失败（{}）：{}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
         }
-        serde_json::from_slice::<Verdict>(&out.stdout).map(|v| v.issues).map_err(|e| format!("校验器输出无法解析：{e}"))
+        serde_json::from_slice::<Verdict>(&out.stdout).map(|v| v.errors).map_err(|e| format!("校验器输出无法解析：{e}"))
     }
 }
 
@@ -183,13 +184,15 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_file_name(format!(".{}.tmp-{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("config"), std::process::id()));
-    std::fs::write(&tmp, text)?;
-    // The new file keeps the old one's mode: a 0600 models.json must not come back 0644.
-    let kept = match std::fs::metadata(path) {
-        Ok(m) => std::fs::set_permissions(&tmp, m.permissions()),
-        Err(_) => Ok(()),
+    let write = || {
+        std::fs::write(&tmp, text)?;
+        // The new file keeps the old one's mode: a 0600 models.json must not come back 0644.
+        if let Ok(m) = std::fs::metadata(path) {
+            std::fs::set_permissions(&tmp, m.permissions())?;
+        }
+        std::fs::rename(&tmp, path)
     };
-    kept.and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| drop(std::fs::remove_file(&tmp)))
+    write().inspect_err(|_| drop(std::fs::remove_file(&tmp)))
 }
 
 /// Local time as `YYYYMMDD-HHMMSS` for backup names.

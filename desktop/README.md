@@ -15,7 +15,9 @@ scripts/bundle.sh                   # .app wrapper: needed for native notificati
 `PI_DESKTOP_PI` overrides the pi executable (default `pi` on `PATH`);
 `PI_DESKTOP_APPEARANCE=light|dark` pins the theme (default: follow macOS).
 The config page (⌘,) validates through prg: `PI_DESKTOP_NODE` (default `node`)
-and `PI_DESKTOP_PRG` (default: the checkout this binary was built from).
+and `PI_DESKTOP_PRG` (default: the checkout this binary was built from). The
+checker runs prg's TypeScript directly, so that node must strip types without a flag
+(Node ≥ 23.6) — an older one refuses every save with its error.
 
 The UI follows `docs/desktop/ui-design.md`; every colour, size, duration and
 easing comes from `design/tokens.json` (embedded at compile time, see

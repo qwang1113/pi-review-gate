@@ -22,7 +22,7 @@ import { parsePrecommitStep } from "./project-config.ts";
 export const CONFIG_KINDS = ["pi-settings", "pi-models", "gate"] as const;
 export type ConfigKind = (typeof CONFIG_KINDS)[number];
 
-/** One problem, addressed by a dotted JSON path (`agents.reviewer`); `""` = the whole file. */
+/** One problem, addressed by a dotted JSON path (`agents.reviewer`); `""` = the whole file (a syntax error names its line/column in the message). */
 export interface ConfigIssue {
   path: string;
   message: string;
@@ -30,7 +30,7 @@ export interface ConfigIssue {
 
 export interface ConfigVerdict {
   ok: boolean;
-  issues: ConfigIssue[];
+  errors: ConfigIssue[];
 }
 
 type Obj = Record<string, unknown>;
@@ -42,7 +42,9 @@ export function validateConfigText(kind: ConfigKind, text: string, registry: Mod
   try {
     root = JSON.parse(text);
   } catch (e) {
-    return verdict([{ path: "", message: `JSON 语法错误：${e instanceof Error ? e.message : String(e)}` }]);
+    const at = syntaxErrorAt(text);
+    const where = at ? `（第 ${at.line} 行第 ${at.column} 列）` : "";
+    return verdict([{ path: "", message: `JSON 语法错误${where}：${e instanceof Error ? e.message : String(e)}` }]);
   }
   if (!isObj(root)) return verdict([{ path: "", message: "顶层必须是一个 JSON 对象" }]);
   switch (kind) {
@@ -55,8 +57,39 @@ export function validateConfigText(kind: ConfigKind, text: string, registry: Mod
   }
 }
 
-function verdict(issues: ConfigIssue[]): ConfigVerdict {
-  return { ok: issues.length === 0, issues };
+function verdict(errors: ConfigIssue[]): ConfigVerdict {
+  return { ok: errors.length === 0, errors };
+}
+
+/** Parse failure of `s`, as "where it failed": the offset V8 names, or (it names none) the last char. */
+function failureAt(s: string): number | null {
+  try {
+    JSON.parse(s);
+    return null;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/end of JSON input/.test(msg)) return s.length;
+    const pos = /at position (\d+)/.exec(msg);
+    return pos ? Number(pos[1]) : s.length - 1;
+  }
+}
+
+/**
+ * 1-based line/column of the first syntax error. V8 gives a position for most
+ * errors but not for "Unexpected token", so the text is grown one char at a time
+ * until a prefix fails BEFORE its own end (a failure at the end is just "not finished yet").
+ */
+// ponytail: O(n²) prefix scan — fine for hand-edited config files of a few KB; a real tokenizer if that ever changes.
+function syntaxErrorAt(text: string): { line: number; column: number } | null {
+  let offset: number | null = null;
+  for (let i = 1; i <= text.length && offset === null; i++) {
+    const at = failureAt(text.slice(0, i));
+    if (at !== null && at < i) offset = at;
+  }
+  offset ??= failureAt(text);
+  if (offset === null) return null;
+  const before = text.slice(0, offset).split("\n");
+  return { line: before.length, column: before[before.length - 1].length + 1 };
 }
 
 /** Every role THIS file declares must resolve on its own — the same check a session start runs. */
