@@ -1,4 +1,6 @@
-# prg ↔ 桌面客户端 宿主协议（v1）
+# prg ↔ 桌面客户端 宿主协议（v2）
+
+> v2（2026-09-30）：`session.open` 增加 `initialMessage`（见 §6）。
 
 > 日期：2026-09-30 · 任务 t2-host-protocol。
 > 机器半边（唯一事实来源）：`lib/desktop-host-protocol.ts` 的 `METHODS` 字段表 ——
@@ -55,19 +57,19 @@ socket 不是绝对路径或超长、缺 session id）**fail-closed**：prg 拒�
 请求（prg → 客户端）：
 
 ```json
-{"v":1,"type":"request","id":"r-17","method":"session.list","params":{}}
+{"v":2,"type":"request","id":"r-17","method":"session.list","params":{}}
 ```
 
 响应（客户端 → prg），成功 / 失败二选一：
 
 ```json
-{"v":1,"type":"response","id":"r-17","ok":true,"result":{"sessions":[]}}
-{"v":1,"type":"response","id":"r-17","ok":false,"error":{"code":"forbidden","message":"not yours"}}
+{"v":2,"type":"response","id":"r-17","ok":true,"result":{"sessions":[]}}
+{"v":2,"type":"response","id":"r-17","ok":false,"error":{"code":"forbidden","message":"not yours"}}
 ```
 
 - `id` 由 prg 生成，每条连接内唯一；客户端原样带回。响应可乱序（`dialog.open` 可能挂几十分钟，
   其间其他请求照常往返）。
-- v1 **没有**客户端主动推送的事件：一切都是 prg 发起的请求 + 对应响应。存活靠 `session.list`
+- 协议**没有**客户端主动推送的事件：一切都是 prg 发起的请求 + 对应响应。存活靠 `session.list`
   按需读（与 tmux 的 `list-panes -a` 同一读法），不靠推送。
 
 ## 4. 连接生命周期
@@ -113,7 +115,7 @@ socket 不是绝对路径或超长、缺 session id）**fail-closed**：prg 拒�
 | 方法 | params | result | 对应的 tmux 职责 |
 | --- | --- | --- | --- |
 | `hello` | `protocol, pid, hostSessionId, piSessionId?, cwd` | `protocol, client{name, version}` | （握手，无对应） |
-| `session.open` | `argv[], cwd, env{}, title, role, placement` | `hostSessionId, pid?` | new-session / new-window / split-window |
+| `session.open` | `argv[], cwd, env{}, title, role, placement, initialMessage?` | `hostSessionId, pid?` | new-session / new-window / split-window |
 | `session.list` | `{}` | `sessions[{hostSessionId, parent, role, title, pid?, groupPin}]` | list-panes -a / list-sessions / 读归属标记 |
 | `session.pin` | `reason` | `{}` | `@rg_scope_pinned` |
 | `session.close` | `{target:"session", hostSessionId}` 或 `{target:"children"}` | `closed[]` | kill-window / kill-session / kill-pane |
@@ -132,6 +134,14 @@ socket 不是绝对路径或超长、缺 session id）**fail-closed**：prg 拒�
   `own-group`（放进请求者的子会话组，所有常规子会话）/ `beside-opener`（接力后继者：放在请求者
   当前所在的位置旁边，用户正看着的地方——对应 `buildHandoffPaneArgv`）。`title` 是窗口/标签名
   （tmux 的 window name）。返回的 `hostSessionId` 就是以后寻址它的唯一句柄。
+  **`initialMessage`（v2）**：子会话的第一条消息。pi 在 `--mode rpc` 下遇到 `@file` 直接退出、
+  位置参数消息被静默丢弃，所以门禁启动命令里的初始消息（judge / worker / 编排子会话的 `@<任务文件>`、
+  接力后继者的位置消息）**不进 argv**：prg 在桌面宿主的共同 `open` 路径里把它摘出来
+  （`lib/gate-host-desktop.ts` `splitInitialMessage`，按 pi 交互模式展开 `@file`：
+  `<file name="<绝对路径>">\n内容\n</file>\n`，去 BOM、空文件跳过，再接第一条位置消息），
+  放进这个字段；遇到它不认识的选项 ⇒ 拒绝开窗，不猜。客户端起进程后立即把它作为 pi RPC
+  `prompt` 写进子进程 stdin（pi 进入 RPC 模式后才读，管道替它排队）；写不进去 ⇒ 关掉该会话、
+  `session.open` 回 `unavailable`。tmux 路径不经过这里，argv 逐字节不变。
 - **`session.list`**：列出**当前活着**的全部会话。某个 id 不在一份**成功的**列表里 = 已死；
   列表请求失败 = **未知**，绝不等于已死（`livenessOf`，与 `paneRecoverability` 的
   `unknown-liveness` 同一规则）。`groupPin` 是它父会话给子会话组下的铉住理由（没有为 `null`），

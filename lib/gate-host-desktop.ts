@@ -15,6 +15,9 @@
  * after THIS session, which is who the client records as its parent.
  */
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { CHILD_STATES, type ChildState } from "./orchestrator-child-state.ts";
 import { paneTitleFor } from "./orchestrator-pane-decor.ts";
 import {
@@ -47,6 +50,66 @@ export const DESKTOP_NOTIFIER = "desktop-client";
 
 const clip = (text: string, max: number): string => (text.length > max ? text.slice(0, max) : text);
 
+/** pi 0.87.1 `parseArgs`: options that take the next argv item as their value. */
+const PI_VALUE_FLAGS = new Set([
+  "--session-id", "--session-dir", "--session", "--fork", "--system-prompt", "--append-system-prompt",
+  "--model", "--models", "--provider", "--thinking", "--tools", "-t", "--exclude-tools", "-xt",
+  "--extension", "-e", "--skill", "--prompt-template", "--theme", "--name", "-n", "--mode",
+]);
+/** …and the ones that take none. Anything in neither set is refused, never guessed. */
+const PI_BOOL_FLAGS = new Set([
+  "--no-skills", "-ns", "--no-extensions", "-ne", "--no-session", "--no-tools", "-nt", "--no-builtin-tools",
+  "-nbt", "--no-prompt-templates", "-np", "--no-themes", "--no-context-files", "-nc", "--verbose",
+  "--offline", "--approve", "-a", "--no-approve", "-na", "--continue", "-c", "--resume", "-r",
+]);
+
+/**
+ * THE INITIAL MESSAGE LEAVES THE ARGV (2026-09-30, t7 P0). The client runs every
+ * child as `pi --mode rpc`, where pi exits on an `@file` argument and silently
+ * drops a positional message — so every gate child (judge, worker, orchestration
+ * child, relay successor) came up with no task, or not at all. Here the message
+ * is taken out and expanded the way interactive pi does (`processFileArguments`
+ * + `buildInitialMessage`: each file as `<file name="<abs>">\n…\n</file>\n`, BOM
+ * stripped, empty files skipped, then the first positional message); the client
+ * sends it as the RPC `prompt` once the process is up. The rest of the argv is
+ * passed through untouched.
+ */
+export function splitInitialMessage(argv: readonly string[], cwd: string):
+  { ok: true; argv: string[]; initialMessage?: string } | { ok: false; error: string } {
+  const [bin, ...rest] = argv;
+  if (bin === undefined) return { ok: false, error: "空的启动命令" };
+  const kept = [bin];
+  const files: string[] = [];
+  const messages: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i]!;
+    if (arg === "--") {
+      for (const tail of rest.slice(i + 1)) (tail.startsWith("@") ? files.push(tail.slice(1)) : messages.push(tail));
+      break;
+    }
+    if (arg.startsWith("@")) files.push(arg.slice(1));
+    else if (!arg.startsWith("-")) messages.push(arg);
+    else if (PI_VALUE_FLAGS.has(arg) && i + 1 < rest.length) kept.push(arg, rest[++i]!);
+    else if (PI_BOOL_FLAGS.has(arg) || (arg.startsWith("--") && arg.includes("="))) kept.push(arg);
+    else return { ok: false, error: `桌面宿主不认识启动参数 ${JSON.stringify(arg)}，无法把初始消息摘出来 —— 拒绝开窗` };
+  }
+  if (messages.length > 1) return { ok: false, error: `启动命令带了 ${messages.length} 条位置消息，桌面宿主只能送出一条` };
+  let text = "";
+  for (const file of files) {
+    const path = resolve(cwd, file);
+    let content: string;
+    try {
+      content = readFileSync(path, "utf8");
+    } catch (error) {
+      return { ok: false, error: `读不到初始消息文件 ${path}：${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (content.length === 0) continue;
+    text += `<file name="${path}">\n${content.replace(/^\uFEFF/, "")}\n</file>\n`;
+  }
+  text += messages[0] ?? "";
+  return text ? { ok: true, argv: kept, initialMessage: text } : { ok: true, argv: kept };
+}
+
 export function createDesktopHost(opts: DesktopHostOptions): GateHost {
   const { client } = opts;
   const own = opts.hostSessionId;
@@ -71,8 +134,11 @@ export function createDesktopHost(opts: DesktopHostOptions): GateHost {
     title: string;
     placement: Params<"session.open">["placement"];
   }): { ok: true; id: string } | { ok: false; error: string } {
+    const split = splitInitialMessage(spec.command, spec.cwd);
+    if (!split.ok) return split;
     const opened = ask("session.open", {
-      argv: [...spec.command],
+      argv: split.argv,
+      ...(split.initialMessage === undefined ? {} : { initialMessage: split.initialMessage }),
       cwd: spec.cwd,
       env: { ...spec.env },
       title: clip(spec.title, 200) || spec.role.kind,

@@ -1,4 +1,4 @@
-//! Host protocol v1 wire types (`docs/desktop/host-protocol.md`).
+//! Host protocol v2 wire types (`docs/desktop/host-protocol.md`).
 //!
 //! The field table lives in `lib/desktop-host-protocol.ts`; its generated form is
 //! `desktop/protocol/host-protocol.schema.json`, and `tests` below read that file so a
@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u64 = 1;
+pub const PROTOCOL_VERSION: u64 = 2;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const ENV_HOST: &str = "RG_HOST";
 pub const ENV_SOCKET: &str = "RG_HOST_SOCKET";
@@ -124,6 +124,9 @@ pub struct OpenParams {
     pub title: String,
     pub role: Role,
     pub placement: Placement,
+    /// Sent as pi's RPC `prompt` once the process is up (`--mode rpc` takes no `@file`).
+    #[serde(default)]
+    pub initial_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -466,6 +469,7 @@ fn validate(req: &Request) -> Result<(), WireError> {
             p.argv.iter().try_for_each(|a| check_len("argv[]", a, 1, 65536))?;
             check_abs("cwd", &p.cwd)?;
             check_len("title", &p.title, 1, 200)?;
+            check_opt("initialMessage", &p.initial_message, 1, 262144)?;
             if p.role == Role::Root {
                 return Err(WireError::bad("`role` root is the user's own session; prg cannot open one"));
             }

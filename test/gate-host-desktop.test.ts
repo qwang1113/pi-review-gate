@@ -10,11 +10,17 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDesktopClient, helloFor } from "../lib/desktop-host-client.ts";
-import { createDesktopHost } from "../lib/gate-host-desktop.ts";
+import { createDesktopHost, splitInitialMessage } from "../lib/gate-host-desktop.ts";
+import { PROTOCOL_VERSION } from "../lib/desktop-host-protocol.ts";
+import { buildJudgePaneCommand, buildJudgeRecoverCommand, withGateExtension } from "../lib/session-launch-specs.ts";
+import { buildWorkerPaneCommand } from "../lib/worker-pane.ts";
+import { buildChildCommand, buildRecoverCommand, childSessionId } from "../lib/orchestrator-delivery.ts";
+import { successorOpeningMessage } from "../lib/session-handoff-tools.ts";
 import {
   createGateHost,
   desktopHandle,
@@ -156,7 +162,7 @@ test("handshake, open, live, decorate and close — each one protocol request", 
   const hello = fake.requests()[0]!;
   assert.equal(hello.method, "hello");
   assert.equal(hello.params.hostSessionId, SELF);
-  assert.equal(hello.params.protocol, 1);
+  assert.equal(hello.params.protocol, PROTOCOL_VERSION);
 
   const registered: unknown[] = [];
   const opened = await openSessionWindow(host, { ...judgeSpec, register: (coords) => registered.push(coords) });
@@ -333,4 +339,63 @@ test("handles: disjoint from tmux ids by shape, read back fail-closed", () => {
   assert.equal(hostIsInteractive({}, false), false);
   assert.equal(hostIsInteractive({}, true), true);
   assert.equal(hostIsInteractive({ RG_HOST: "bogus" }, false), false);
+});
+
+test("every gate launch command's initial message leaves the argv and becomes initialMessage", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-initmsg-"));
+  dirs.push(dir);
+  mkdirSync(join(dir, ".pi", "tasks"), { recursive: true });
+  const task = join(dir, "task.md");
+  writeFileSync(task, "\uFEFFreview this");
+  writeFileSync(join(dir, ".pi", "tasks", "t1.md"), "do t1");
+  writeFileSync(join(dir, "empty.md"), "");
+  const wrap = (path: string, body: string) => `<file name="${path}">\n${body}\n</file>\n`;
+
+  const judge = buildJudgePaneCommand({ sessionId: "sid", taskPath: task, sessionDir: "/d", sysPromptPath: "/p", model: "m:max", role: "reviewer" });
+  assert.deepEqual(splitInitialMessage(withGateExtension(judge, "/ext.ts", ["pi", "-e", "/ext.ts"]), dir), {
+    ok: true,
+    argv: ["pi", "-e", "/ext.ts", "--no-skills", "--exclude-tools", "edit,write", "--system-prompt", "/p", "--model", "m:max", "--session-dir", "/d", "--session-id", "sid"],
+    initialMessage: wrap(task, "review this"),
+  }, "judge: the absolute @file is expanded like interactive pi (BOM stripped), the rest untouched");
+  const arbiter = splitInitialMessage(buildJudgePaneCommand({ sessionId: "a", taskPath: task, sessionDir: "/d", sysPromptPath: "/p", model: "m", role: "arbiter" }), dir);
+  assert.ok(arbiter.ok && arbiter.argv.includes("read,grep,find,ls,judge_conclude") && arbiter.initialMessage === wrap(task, "review this"));
+  const worker = splitInitialMessage(buildWorkerPaneCommand({ sessionId: "w", taskPath: task, sessionDir: "/d", sysPromptPath: "/p", model: "m" }), dir);
+  assert.ok(worker.ok && worker.argv.at(-1) === "w" && worker.initialMessage === wrap(task, "review this"), "worker");
+  assert.deepEqual(splitInitialMessage(buildChildCommand(".pi/tasks/t1.md", "c1"), dir),
+    { ok: true, argv: ["pi", "--session-id", childSessionId("c1")], initialMessage: wrap(join(dir, ".pi/tasks/t1.md"), "do t1") },
+    "an orchestration child's repo-relative @ref resolves against the child's cwd");
+  const recovered = splitInitialMessage(buildRecoverCommand("sid", ".pi/tasks/t1.md"), dir);
+  assert.ok(recovered.ok && recovered.initialMessage === wrap(join(dir, ".pi/tasks/t1.md"), "do t1"), "child recovery note");
+  assert.deepEqual(splitInitialMessage(buildJudgeRecoverCommand("sid", "reviewer"), dir),
+    { ok: true, argv: ["pi", "--exclude-tools", "edit,write", "--session-id", "sid"] }, "a resumed judge has no message: the session id is a flag value");
+  const opening = successorOpeningMessage("/repo/.pi/handoff/x.md", "loop");
+  assert.deepEqual(splitInitialMessage(["pi", "--session-id", "succ", opening], dir),
+    { ok: true, argv: ["pi", "--session-id", "succ"], initialMessage: opening }, "a relay successor's positional message");
+  assert.deepEqual(splitInitialMessage(["pi", `@${join(dir, "empty.md")}`, "--", "@task.md", "go"], dir),
+    { ok: true, argv: ["pi"], initialMessage: `${wrap(task, "review this")}go` }, "empty files skipped; after `--` everything is a message");
+
+  for (const [argv, why] of [
+    [["pi", "--brand-new-flag", "x", `@${task}`], "an option it cannot place is refused, never guessed"],
+    [["pi", "-z"], "an unknown short option"],
+    [["pi", "one", "two"], "two positional messages"],
+    [["pi", "@missing.md"], "a missing file"],
+  ] as const) {
+    assert.equal(splitInitialMessage(argv, dir).ok, false, why);
+  }
+});
+
+test("the open carries the task as initialMessage; a refused split never reaches the client", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-initmsg-"));
+  dirs.push(dir);
+  writeFileSync(join(dir, "t.md"), "task");
+  const fake = await fakeClient();
+  const host = hostOn(fake.socketPath);
+  const opened = await openSessionWindow(host, { ...judgeSpec, cwd: dir, command: ["pi", "--session-id", "rg-reviewer-x", "@t.md"] });
+  assert.equal(opened.ok, true);
+  const open = fake.requests().find((r) => r.method === "session.open")!;
+  assert.deepEqual(open.params.argv, ["pi", "--session-id", "rg-reviewer-x"]);
+  assert.equal(open.params.initialMessage, `<file name="${join(dir, "t.md")}">\ntask\n</file>\n`);
+  const refused = await openSessionWindow(host, { ...judgeSpec, cwd: dir, command: ["pi", "@nope.md"] });
+  assert.equal(refused.ok, false);
+  assert.equal(fake.requests().filter((r) => r.method === "session.open").length, 1);
 });

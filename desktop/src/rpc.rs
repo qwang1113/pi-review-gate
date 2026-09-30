@@ -366,6 +366,46 @@ mod tests {
         assert!(p.wait_exit(Duration::from_secs(10)), "pi exits on stdin EOF");
     }
 
+    /// The gate's judge shape under the desktop host: no `@file` in argv (pi exits on
+    /// one in RPC mode), the expanded task sent as the first `prompt` instead.
+    /// Needs a real `pi` on PATH: `cargo test -- --ignored real_pi`.
+    #[test]
+    #[ignore]
+    fn real_pi_judge_session_receives_its_initial_message() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let env: BTreeMap<String, String> = std::env::vars().collect();
+        let dir = std::env::temp_dir().join(format!("rpc-judge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let argv: Vec<String> = ["pi", "--no-skills", "--exclude-tools", "edit,write", "--session-dir", dir.to_str().unwrap(), "--session-id", "rpc-judge-t8"]
+            .map(String::from)
+            .to_vec();
+        let p = Process::spawn(&rpc_argv(&argv), "/tmp", &env, move |o| drop(tx.send(o))).unwrap();
+        let task = "<file name=\"/tmp/t8-task.md\">\nReply with the single word OK.\n</file>\n";
+        p.send(&RpcCommand::Prompt { id: "first".into(), message: task.into(), streaming_behavior: Some("followUp") }).unwrap();
+        let end = Instant::now() + Duration::from_secs(60);
+        let (mut accepted, mut seen) = (false, false);
+        while !(accepted && seen) {
+            match rx.recv_timeout(end.saturating_duration_since(Instant::now())).expect("pi to take the prompt") {
+                Output::Record(Record::Response { id, success, error, .. }) if id.as_deref() == Some("first") => {
+                    assert!(success, "prompt refused: {error:?}");
+                    accepted = true;
+                }
+                Output::Record(Record::Event { kind, raw }) if kind == "message_start" && raw["message"]["role"] == "user" => {
+                    let content = &raw["message"]["content"];
+                    let text = content.as_str().map(str::to_string).unwrap_or_else(|| content[0]["text"].as_str().unwrap_or_default().to_string());
+                    assert_eq!(text, task);
+                    seen = true;
+                }
+                Output::Exited(code) => panic!("pi exited ({code:?}) before taking the prompt"),
+                _ => {}
+            }
+        }
+        p.send(&RpcCommand::Abort { id: "stop".into() }).unwrap();
+        p.shutdown(Duration::from_secs(5));
+        assert!(p.wait_exit(Duration::from_secs(10)), "pi exits on stdin EOF");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn process_exit_is_observed_and_stdin_eof_ends_it() {
         let (tx, rx) = std::sync::mpsc::channel();

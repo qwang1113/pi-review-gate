@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pi-review-gate/desktop-host-protocol",
   "title": "pi-review-gate desktop host protocol (generated from lib/desktop-host-protocol.ts)",
-  "x-protocolVersion": 1,
+  "x-protocolVersion": 2,
   "x-maxFrameBytes": 1048576,
   "x-requestTimeoutMs": 5000,
   "x-env": { "host": "RG_HOST", "socket": "RG_HOST_SOCKET", "hostSession": "RG_HOST_SESSION" },
@@ -12,7 +12,7 @@
   "x-request": {
     "type": "object",
     "properties": {
-      "v": { "const": 1 },
+      "v": { "const": 2 },
       "type": { "const": "request" },
       "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
       "method": { "enum": ["hello", "session.open", "session.list", "session.pin", "session.close", "session.decorate", "focus", "focus.state", "notify", "dialog.open", "dialog.close"] },
@@ -26,7 +26,7 @@
       {
         "type": "object",
         "properties": {
-          "v": { "const": 1 },
+          "v": { "const": 2 },
           "type": { "const": "response" },
           "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
           "ok": { "const": true },
@@ -38,7 +38,7 @@
       {
         "type": "object",
         "properties": {
-          "v": { "const": 1 },
+          "v": { "const": 2 },
           "type": { "const": "response" },
           "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
           "ok": { "const": false },
@@ -101,7 +101,8 @@
         },
         "title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "role": { "enum": ["judge", "worker", "orchestration-child", "successor"] },
-        "placement": { "enum": ["own-group", "beside-opener"] }
+        "placement": { "enum": ["own-group", "beside-opener"] },
+        "initialMessage": { "type": "string", "minLength": 1, "maxLength": 262144 }
       },
       "required": ["argv", "cwd", "env", "title", "role", "placement"],
       "additionalProperties": false

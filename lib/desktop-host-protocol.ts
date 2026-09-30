@@ -26,7 +26,8 @@ import { INHERITED_GATE_ENV_NAMES } from "./orchestrator-tmux.ts";
 import type { SessionPaneRole } from "./session-env.ts";
 import { NOTIFY_BODY_MAX, NOTIFY_TITLE_MAX, type UserNotifyKind } from "./user-notify.ts";
 
-export const PROTOCOL_VERSION = 1;
+/** v2 (2026-09-30): `session.open.initialMessage`. */
+export const PROTOCOL_VERSION = 2;
 /** One frame = one JSON object + `\n`, at most this many UTF-8 bytes (newline excluded). */
 export const MAX_FRAME_BYTES = 1024 * 1024;
 /** Every request but `dialog.open` (which waits for a human) times out after this. */
@@ -153,6 +154,8 @@ export const METHODS = {
       title: str({ minLength: 1, maxLength: 200 }),
       role: enm(OPENABLE_ROLES),
       placement: enm(["own-group", "beside-opener"] as const),
+      /** The child's first message, sent as pi's RPC `prompt` once it is up (`@file` already expanded). */
+      initialMessage: opt(str({ minLength: 1, maxLength: 262144 })),
     }),
     result: obj({ hostSessionId: id, pid: opt(int({ minimum: 1 })) }),
   },

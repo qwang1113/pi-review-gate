@@ -35,7 +35,7 @@ fn samples() -> Vec<(&'static str, Value)> {
         (
             "session.open",
             json!({"argv": ["pi", "--session-id", "x"], "cwd": "/tmp", "env": {"FOO": "1"}, "title": "judge",
-                   "role": "judge", "placement": "own-group"}),
+                   "role": "judge", "placement": "own-group", "initialMessage": "review"}),
         ),
         ("session.list", json!({})),
         ("session.pin", json!({"reason": "orchestration-child"})),
@@ -143,6 +143,10 @@ fn bounds_the_schema_states_are_enforced() {
             "session.open",
             json!({"argv": ["pi"], "cwd": "/", "env": {}, "title": "t", "role": "root", "placement": "own-group"}),
         ),
+        (
+            "session.open",
+            json!({"argv": ["pi"], "cwd": "/", "env": {}, "title": "t", "role": "judge", "placement": "own-group", "initialMessage": ""}),
+        ),
         ("session.decorate", json!({"hostSessionId": "s", "sessionName": "x"})),
         ("session.decorate", json!({"hostSessionId": "s", "state": "sleeping"})),
         ("notify", json!({"kind": "finished", "title": "", "body": ""})),
@@ -223,13 +227,13 @@ fn response_envelopes_match_the_schema() {
         assert!(frame.ends_with('\n') && !frame[..frame.len() - 1].contains('\n'));
         assert_envelope("x-response", &frame);
     }
-    assert_envelope("x-request", r#"{"v":1,"type":"request","id":"r-1","method":"focus","params":{}}"#);
+    assert_envelope("x-request", r#"{"v":2,"type":"request","id":"r-1","method":"focus","params":{}}"#);
 }
 
 #[test]
 fn bad_frames_and_frames_without_an_id_are_rejected() {
-    let wrong_v = br#"{"v":2,"type":"request","id":"r-9","method":"session.list","params":{}}"#;
-    for line in [&b"not json"[..], b"[1]", br#"{"v":1}"#, br#"{"v":1,"id":"bad id"}"#, wrong_v] {
+    let wrong_v = br#"{"v":1,"type":"request","id":"r-9","method":"session.list","params":{}}"#;
+    for line in [&b"not json"[..], b"[1]", br#"{"v":2}"#, br#"{"v":2,"id":"bad id"}"#, wrong_v] {
         assert!(matches!(decode_request(line), Decoded::Reject(_)), "{}", String::from_utf8_lossy(line));
     }
 }
@@ -243,13 +247,13 @@ fn envelope_errors_carry_the_id_back() {
         }
         Decoded::Reject(r) => panic!("rejected {r}"),
     };
-    assert_eq!(code(r#"{"v":1,"type":"request","id":"r-9","method":"session.list","params":{}}"#), None);
-    assert_eq!(code(r#"{"v":1,"type":"response","id":"r-9","method":"session.list","params":{}}"#), Some(ErrorCode::BadRequest));
+    assert_eq!(code(r#"{"v":2,"type":"request","id":"r-9","method":"session.list","params":{}}"#), None);
+    assert_eq!(code(r#"{"v":2,"type":"response","id":"r-9","method":"session.list","params":{}}"#), Some(ErrorCode::BadRequest));
     assert_eq!(
-        code(r#"{"v":1,"type":"request","id":"r-9","method":"session.list","params":{},"x":1}"#),
+        code(r#"{"v":2,"type":"request","id":"r-9","method":"session.list","params":{},"x":1}"#),
         Some(ErrorCode::BadRequest)
     );
-    assert_eq!(code(r#"{"v":1,"type":"request","id":"r-9","method":"session.nuke","params":{}}"#), Some(ErrorCode::UnknownMethod));
+    assert_eq!(code(r#"{"v":2,"type":"request","id":"r-9","method":"session.nuke","params":{}}"#), Some(ErrorCode::UnknownMethod));
 }
 
 #[test]

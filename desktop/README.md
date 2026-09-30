@@ -25,7 +25,7 @@ screen-recording permission.
 
 | File | Owns |
 | --- | --- |
-| `src/protocol.rs` | host protocol v1 wire types, decoding + bounds, response encoding, child env rule (§2) |
+| `src/protocol.rs` | host protocol v2 wire types, decoding + bounds, response encoding, child env rule (§2) |
 | `src/sessions.rs` | session tree: parents, liveness, group pins, write authorization (pure) |
 | `src/rpc.rs` | pi RPC: stdout record parsing, stdin commands, the child process (own process group) |
 | `src/hub.rs` | shared state the socket and the window act through: processes, logs, dialogs, focus |

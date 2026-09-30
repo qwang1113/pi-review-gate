@@ -99,7 +99,15 @@ impl Hub {
 
     pub fn open_child(&self, requester: &str, p: &OpenParams) -> Result<(String, u32), WireError> {
         let argv = rpc::rpc_argv(&p.argv);
-        self.spawn(Some(requester), p.role, Some(p.placement), &p.title, &argv, &p.cwd, &p.env)
+        let (id, pid) = self.spawn(Some(requester), p.role, Some(p.placement), &p.title, &argv, &p.cwd, &p.env)?;
+        // pi reads stdin once RPC mode is up, so the prompt waits in the pipe until then.
+        if let Some(message) = &p.initial_message
+            && let Err(e) = self.prompt(&id, message)
+        {
+            self.close(requester, &CloseParams::Session { host_session_id: id.clone() })?;
+            return Err(WireError::new(ErrorCode::Unavailable, format!("started `{id}` but could not send its first message: {e}")));
+        }
+        Ok((id, pid))
     }
 
     #[allow(clippy::too_many_arguments)]

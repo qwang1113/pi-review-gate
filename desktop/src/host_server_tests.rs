@@ -31,7 +31,7 @@ fn fixture() -> Fixture {
     fs::create_dir_all(&dir).unwrap();
     fs::set_permissions(&dir, Permissions::from_mode(0o700)).unwrap();
     let script = dir.join("fake-pi");
-    fs::write(&script, "#!/bin/sh\nenv > \"$(dirname \"$0\")/$RG_HOST_SESSION.env\"\nexec cat >/dev/null\n").unwrap();
+    fs::write(&script, "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nenv > \"$d/$RG_HOST_SESSION.env\"\nexec cat > \"$d/$RG_HOST_SESSION.stdin\"\n").unwrap();
     fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
     let socket = dir.join("s").join("host.sock");
     let notified = Arc::new(Mutex::new(vec![]));
@@ -63,7 +63,7 @@ impl Client {
     fn send(&mut self, method: &str, params: Value) -> String {
         self.n += 1;
         let id = format!("r-{}", self.n);
-        let frame = json!({"v": 1, "type": "request", "id": id, "method": method, "params": params});
+        let frame = json!({"v": PROTOCOL_VERSION, "type": "request", "id": id, "method": method, "params": params});
         self.w.write_all(format!("{frame}\n").as_bytes()).unwrap();
         id
     }
@@ -90,7 +90,7 @@ impl Client {
     fn hello(f: &Fixture, id: &str) -> Client {
         let pid = f.hub.lock().tree.get(id).unwrap().pid.unwrap();
         let mut c = Client::connect(f);
-        c.ok("hello", json!({"protocol": 1, "pid": pid, "hostSessionId": id, "cwd": "/"}));
+        c.ok("hello", json!({"protocol": PROTOCOL_VERSION, "pid": pid, "hostSessionId": id, "cwd": "/"}));
         c
     }
 }
@@ -123,12 +123,12 @@ fn handshake_is_required_and_bound_to_the_spawned_pid() {
 
     let mut c = Client::connect(&f);
     assert_eq!(c.err("session.list", json!({})), "forbidden");
-    assert_eq!(c.err("hello", json!({"protocol": 2, "pid": pid, "hostSessionId": root, "cwd": "/"})), "version-mismatch");
-    assert_eq!(c.err("hello", json!({"protocol": 1, "pid": pid + 1, "hostSessionId": root, "cwd": "/"})), "forbidden");
+    assert_eq!(c.err("hello", json!({"protocol": 1, "pid": pid, "hostSessionId": root, "cwd": "/"})), "version-mismatch");
+    assert_eq!(c.err("hello", json!({"protocol": PROTOCOL_VERSION, "pid": pid + 1, "hostSessionId": root, "cwd": "/"})), "forbidden");
     assert!(c.read().is_none(), "an impostor is disconnected");
 
     let mut c = Client::hello(&f, &root);
-    assert_eq!(c.err("hello", json!({"protocol": 1, "pid": pid, "hostSessionId": root, "cwd": "/"})), "bad-request");
+    assert_eq!(c.err("hello", json!({"protocol": PROTOCOL_VERSION, "pid": pid, "hostSessionId": root, "cwd": "/"})), "bad-request");
     assert_eq!(c.err("session.explode", json!({})), "unknown-method");
     assert_eq!(c.err("session.list", json!({"x": 1})), "bad-request");
     assert!(ids(&c.ok("session.list", json!({}))).contains(&root));
@@ -195,6 +195,31 @@ fn open_list_pin_decorate_close_lifecycle() {
     let exited = |c: &crate::ui::chat_model::Chat| c.items.iter().any(|i| matches!(i, crate::ui::chat_model::Item::Notice { text, .. } if text.contains("exit")));
     wait_for("the child process to exit", || f.hub.lock().chats.get(&child).is_some_and(exited));
     assert_ne!(unsafe { libc::kill(pid as i32, 0) }, 0);
+}
+
+#[test]
+fn an_initial_message_is_sent_as_the_first_rpc_prompt() {
+    let f = fixture();
+    let root = f.hub.open_root("/").unwrap();
+    let mut c = Client::hello(&f, &root);
+    let task = "<file name=\"/r/t.md\">\nreview — 审查\n</file>\n";
+    let opened = c.ok(
+        "session.open",
+        json!({"argv": [f.dir.join("fake-pi")], "cwd": "/", "env": {}, "title": "t", "role": "judge", "placement": "own-group", "initialMessage": task}),
+    );
+    let child = opened["hostSessionId"].as_str().unwrap().to_string();
+    let stdin = f.dir.join(format!("{child}.stdin"));
+    wait_for("the prompt on the child's stdin", || fs::read_to_string(&stdin).is_ok_and(|s| s.ends_with('\n')));
+    let line = fs::read_to_string(&stdin).unwrap();
+    let sent: Value = serde_json::from_str(line.trim_end()).unwrap();
+    assert_eq!((&sent["type"], &sent["message"]), (&json!("prompt"), &json!(task)));
+    assert_eq!(line.lines().count(), 1, "exactly one command");
+
+    let plain = c.ok("session.open", json!({"argv": [f.dir.join("fake-pi")], "cwd": "/", "env": {}, "title": "t", "role": "judge", "placement": "own-group"}));
+    let plain = plain["hostSessionId"].as_str().unwrap().to_string();
+    wait_for("the plain child to start", || f.dir.join(format!("{plain}.stdin")).exists());
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(fs::read_to_string(f.dir.join(format!("{plain}.stdin"))).unwrap(), "", "no message, nothing sent");
 }
 
 #[test]

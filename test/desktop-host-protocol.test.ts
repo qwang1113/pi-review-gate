@@ -13,6 +13,7 @@ import {
   MAX_FRAME_BYTES,
   METHOD_NAMES,
   METHODS,
+  PROTOCOL_VERSION as v,
   requestTimeoutMs,
   resolveHostEnv,
   type Method,
@@ -36,6 +37,7 @@ const SAMPLES: { [M in Method]: { params: Params<M>; result: Result<M> } } = {
       title: "reviewer@self",
       role: "judge",
       placement: "own-group",
+      initialMessage: "<file name=\"/repo/.pi/tasks/t.md\">\nreview\n</file>\n",
     },
     result: { hostSessionId: "hs-2", pid: 99 },
   },
@@ -149,13 +151,13 @@ test("decodeRequest names the failure: bad frame, unknown method, bad params", (
   };
   assert.equal(codeOf("not json"), "bad-frame");
   assert.equal(codeOf("[1]"), "bad-frame");
-  assert.equal(codeOf(JSON.stringify({ v: 2, type: "request", id: "r", method: "focus", params: {} })), "bad-frame");
-  assert.equal(codeOf(JSON.stringify({ v: 1, type: "request", id: "r", method: "kill-server", params: {} })), "unknown-method");
-  assert.equal(codeOf(JSON.stringify({ v: 1, type: "request", id: "r", method: "focus", params: {} })), "bad-request");
-  assert.equal(codeOf(JSON.stringify({ v: 1, type: "request", method: "focus", params: {} })), "bad-request");
+  assert.equal(codeOf(JSON.stringify({ v: v + 1, type: "request", id: "r", method: "focus", params: {} })), "bad-frame");
+  assert.equal(codeOf(JSON.stringify({ v, type: "request", id: "r", method: "kill-server", params: {} })), "unknown-method");
+  assert.equal(codeOf(JSON.stringify({ v, type: "request", id: "r", method: "focus", params: {} })), "bad-request");
+  assert.equal(codeOf(JSON.stringify({ v, type: "request", method: "focus", params: {} })), "bad-request");
   const leak = { ...SAMPLES["session.open"].params, env: { RG_HOST: "desktop" } };
-  assert.equal(codeOf(JSON.stringify({ v: 1, type: "request", id: "r", method: "session.open", params: leak })), "bad-request");
-  assert.equal(codeOf(`{"v":1,"pad":"${"x".repeat(MAX_FRAME_BYTES)}"}`), "bad-frame");
+  assert.equal(codeOf(JSON.stringify({ v, type: "request", id: "r", method: "session.open", params: leak })), "bad-request");
+  assert.equal(codeOf(`{"v":${v},"pad":"${"x".repeat(MAX_FRAME_BYTES)}"}`), "bad-frame");
 });
 
 test("decodeResponse fails closed: unknown id, malformed result, bad error code, oversized", () => {
@@ -165,12 +167,12 @@ test("decodeResponse fails closed: unknown id, malformed result, bad error code,
   assert.equal(nobody.ok, false);
   if (!nobody.ok) assert.deepEqual([nobody.error.code, nobody.id], ["bad-response", "r1"]);
 
-  const malformed = JSON.stringify({ v: 1, type: "response", id: "r1", ok: true, result: { sessions: [{ hostSessionId: "hs" }] } });
+  const malformed = JSON.stringify({ v, type: "response", id: "r1", ok: true, result: { sessions: [{ hostSessionId: "hs" }] } });
   const m = decodeResponse(malformed, () => "session.list");
   assert.equal(m.ok, false);
   if (!m.ok) assert.equal(m.error.code, "bad-response");
 
-  const localCode = JSON.stringify({ v: 1, type: "response", id: "r1", ok: false, error: { code: "timeout", message: "x" } });
+  const localCode = JSON.stringify({ v, type: "response", id: "r1", ok: false, error: { code: "timeout", message: "x" } });
   const l = decodeResponse(localCode, () => "focus");
   assert.equal(l.ok, false);
   if (!l.ok) assert.equal(l.error.code, "bad-response");
@@ -181,9 +183,9 @@ test("decodeResponse fails closed: unknown id, malformed result, bad error code,
   assert.equal(w.ok, false);
   if (!w.ok) assert.deepEqual([w.id, w.error], ["r1", { code: "forbidden", message: "not yours" }]);
 
-  const stray = JSON.stringify({ v: 1, type: "response", id: "r1", ok: true, result: {}, extra: 1 });
+  const stray = JSON.stringify({ v, type: "response", id: "r1", ok: true, result: {}, extra: 1 });
   assert.equal(decodeResponse(stray, () => "focus").ok, false);
-  assert.equal(decodeResponse(JSON.stringify({ v: 1, type: "response", id: "r1", ok: "yes" }), () => "focus").ok, false);
+  assert.equal(decodeResponse(JSON.stringify({ v, type: "response", id: "r1", ok: "yes" }), () => "focus").ok, false);
 
   const huge = encodeResponse("r1", "dialog.open", { ok: true, result: { kind: "decline", reason: "x".repeat(262144) } });
   assert.ok(huge.ok, "the largest allowed reason still fits a frame");
