@@ -103,11 +103,21 @@ npx --yes @electron/asar extract /Applications/Qoder.app/Contents/Resources/app.
 | 字号集中在 13 / 12 / 11 / 10，行高 18 / 22 为主 | JS 类名计数 |
 | 字体：系统无衬线为主，打包 Inter、Instrument Sans | CSS `--font-sans`、`@font-face` |
 
+## 8. 图标
+
+| 事实 | 出处 |
+|:---|:---|
+| 自有图标包 `@ali/qoder-icon`，组件名 `Qoder<名字>Line` / `Qoder<名字>Fill` 成对（线性约 1767 处引用、实心约 750 处）：默认用线性，状态/强调用实心（如成功 `QoderCheckboxCircleFill`、警告 `QoderAlertFill`） | `package.json` 依赖；JS 组件名计数 |
+| 图标尺寸集中在 14（`size-3.5`）与 16（`size-4`），其次 20、12；按钮内图标统一 `[&_svg]:size-3.5` | JS 类名计数 |
+| 线性图标描边 2 为主；颜色跟随文字色（`text-text-tertiary` 等），hover 时随文字一起变深 | JS `strokeWidth:2` 计数；折叠箭头 `QoderArrowRightSLine` 等处 |
+| 折叠箭头用右向箭头旋转 90° 表示展开；关闭用 `QoderCloseLine`；抽屉收起按钮用双右箭头 | JS 对应组件 |
+
 ---
 
 ## 采用与不采用（本仓的取舍，详见 `ui-design.md`）
 
 - **采用**：侧栏完全收起（宽度 + 内容联动淡出横移）；右侧抽屉承载所有提问；页面进场 opacity + y 8；流式按词淡入；
   折叠块 height auto + 箭头旋转；按下缩放；设置页左导航 + 分组卡片 + 虚线分隔行；写配置前可审阅；减少动态效果一律降到 0 或纯淡入。
+- 图标：本仓继续用 Lucide（线性、描边 1.5、尺寸 12/14/16，`ui-design.md` §3），与 Qoder「线性为主、14/16 为主」的做法一致，不引入它的专有图标包。
 - **不采用**：品牌墨绿（本仓保留 Indigo，已有状态色语义）；`blur` 背景模糊（GPUI 不支持，见 `ui-design.md` §2.4）；
   squircle（GPUI 无 `corner-shape`，用普通圆角）；多主题；桌宠、贴纸、全息卡片等装饰性动效。
