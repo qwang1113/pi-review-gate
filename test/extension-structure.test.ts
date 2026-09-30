@@ -2519,14 +2519,19 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   // the blocking spawn itself lives in the runtime module, and the two things
   // the extension owns are the registration and the clean-shutdown flag.
   const runtimeSrc = readFileSync(join(ROOT, "lib", "user-notify-runtime.ts"), "utf8");
-  const syncSpawns = [...runtimeSrc.matchAll(/\bspawnSync\s*\(/g)];
+  // The spawn itself is the TMUX HOST's banner (lib/gate-host-tmux-notify.ts,
+  // 2026-09-30); the runtime asks for it with `blocking` from the exit handler.
+  const notifierSrc = readFileSync(join(ROOT, "lib", "gate-host-tmux-notify.ts"), "utf8");
+  assert.doesNotMatch(runtimeSrc, /\bspawnSync\s*\(/, "the runtime spawns nothing itself");
+  const syncSpawns = [...notifierSrc.matchAll(/\bspawnSync\s*\(/g)];
   assert.equal(syncSpawns.length, 1,
-    "exactly one synchronous spawn in the runtime — the exit banner, and nothing else");
+    "exactly one synchronous spawn in the notifier — the exit banner, and nothing else");
+  assert.match(runtimeSrc, /blocking: true,/, "…and the exit handler is what asks for it");
   assert.match(runtimeSrc, /process\.on\("exit"/, "the exit handler lives with it");
   assert.match(runtimeSrc.slice(runtimeSrc.indexOf('process.on("exit"')),
     /exitNotifyKind\(\{ cleanShutdown \}\)/,
     "the handler must consult the rule in lib/user-notify.ts, not re-implement it");
-  assert.match(runtimeSrc, /spawnSync\(bin!, args, \{ stdio: "ignore", timeout: 10_000 \}\)/,
+  assert.match(notifierSrc, /spawnSync\(bin!, args, \{ stdio: "ignore", timeout: 10_000 \}\)/,
     "bounded — a stuck notifier must not hold the process open");
   assert.match(SRC, /notifyRuntime\.armExitHandler\(\)/, "the extension registers it once, for the process");
   const shutdownAt = SRC.indexOf(SESSION_SHUTDOWN);
@@ -3156,20 +3161,20 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   // session id continues the transcript that is already on disk.
   assert.match(body, /hasTranscript\(sessionDir\)/,
     "reuse is decided by the transcript, not by a live pane");
-  assert.match(body, /await openSessionWindow\(run, \{/,
+  assert.match(body, /await openSessionWindow\(gateHost, \{/,
     "a real child open still exists for the no-reuse case — through the ONE factory");
   // fresh:true kills the living pane FIRST (singleton per role+repo+opener),
   // and since 2026-09-05 it goes through ONE helper rather than carrying its
   // own copy of the close. That helper used to ask the shared label-bar
   // question too; the release is deleted (2026-09-17, user decision), so all
   // that is left of it is the close itself.
-  assert.match(body, /closeJudgePaneOf\(existing, \{ ownPane, tmuxServer, run \}\)/,
+  assert.match(body, /closeJudgePaneOf\(existing, \{ ownPane, tmuxServer \}\)/,
     "fresh kills the pane through the shared close helper");
   assert.doesNotMatch(body, /releasesWindowLabels\(\{/,
     "…and does not re-inline the label-bar rule");
   const closeHelper = windowIn(JUDGE_LANES_SRC, "function closeJudgePaneOf(", "\n  /**\n   * Retire a lane the gate has stopped using",
     "closeJudgePaneOf body");
-  assert.match(closeHelper, /closeSessionWindow\(ctx\.run, \{ ownSession: entry\.tmuxSession, windowId: entry\.windowId \}\)/, "the helper is what closes the window");
+  assert.match(closeHelper, /gateHost\.closeWindow\(\{ ownSession: entry\.tmuxSession, windowId: entry\.windowId \}\)/, "the helper is what closes the window");
   assert.doesNotMatch(closeHelper, /setw|-u |hideLabelsVia/,
     "…and writes no window option: the bar is never released (user decision 2026-09-17)");
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
@@ -3230,25 +3235,31 @@ test("judge_wait addresses a judge by ROLE", () => {
   assert.match(wiring, /judgeChildRecordOf\(c, root\)/,
     "…including the by-role lookup, which supplies the repo it resolved");
   // AND THE RUNNER CARRIES THE DECLARATION (2026-09-25). `runTmux` refuses the
-  // four session commands unless its caller declares the session it owns, so the
-  // extension must never call the RAW runner: one guarded wrapper, used by every
-  // tmux seam in the file, is what makes "only my own session" true at the
-  // executor as well as in the builders. A second `runTmux` definition (or a
-  // direct `rawTmux` call) would be a path with no declaration at all.
-  assert.match(SRC, /import \{ (?:createOrchestratorDeps, )?runTmux as rawTmux \} from "\.\.\/lib\/orchestrator-wiring\.ts"/,
-    "the raw runner is imported under a name nothing can call by accident");
-  assert.equal((SRC.match(/const runTmux = /g) ?? []).length, 1,
-    "exactly ONE wrapper defines this session's runTmux");
-  assert.match(SRC, /const runTmux = \(argv: readonly string\[\], env\?: NodeJS\.ProcessEnv, extraSessions\?: readonly string\[\]\) =>[\s\S]{0,200}rawTmux\(argv, env \?\? process\.env, \{[\s\S]{0,400}ownSessions: addressableSessions\(\s*tmuxScope,[\s\S]{0,400}sessionOwnership,/, "…and it attaches the sessions lib/session-tmux-scope.ts derived for this process");
+  // four session commands unless its caller declares the session it owns, so
+  // nothing may call the RAW runner: one guarded wrapper is what makes "only my
+  // own session" true at the executor as well as in the builders. Since the host
+  // factory (2026-09-30) that wrapper is the TMUX HOST's own
+  // (lib/gate-host-tmux.ts), and the extension holds no runner at all — it
+  // hands the host the sessions its registries name, read at call time.
+  const TMUX_HOST_SRC = readFileSync(join(ROOT, "lib", "gate-host-tmux.ts"), "utf8");
+  assert.doesNotMatch(SRC, /\brunTmux\b|\brawTmux\b/, "the extension and its wiring modules hold no tmux runner");
+  assert.match(ENTRY_SRC, /createTmuxHost\(\{\s*scope: tmuxScope,\s*held: \(\) => \[/,
+    "the extension hands the tmux host the sessions its registries name");
+  assert.equal((TMUX_HOST_SRC.match(/runTmux\(argv, env \?\? opts\.env\?\.\(\) \?\? process\.env, \{/g) ?? []).length, 1,
+    "exactly ONE wrapper declares this session's sessions");
+  assert.match(TMUX_HOST_SRC, /ownSessions: addressableSessions\(opts\.scope, opts\.held\(\), probe, extraSessions\)/,
+    "…and it attaches the sessions lib/session-tmux-scope.ts derived for this process");
+  assert.match(TMUX_HOST_SRC, /const run = opts\.run \?\? createDeclaringTmuxRunner\(/,
+    "…and the host acts through it unless a test injects its own");
   // AND EVERY ONE OF THEM IS EARNED, NOT READ (2026-09-25, t4 whole-branch
   // review P1). A registry row is only a CANDIDATE: `createOwnershipProbe`
   // reads each candidate's `@rg_scope_owner` marker and declares it only when
   // the name is the one THAT owner derives. Without it the declaration was a
   // shape test, so any writable registry naming an `rg-…` string widened it and
   // a `kill-window` could be aimed at another session's window.
-  assert.equal((SRC.match(/createOwnershipProbe\(/g) ?? []).length, 1,
-    "one ownership probe per process");
-  assert.match(SRC, /const sessionOwnership = createOwnershipProbe\(tmuxScope, \(argv\) => rawTmux\(argv\)\)/,
+  assert.equal((TMUX_HOST_SRC.match(/createOwnershipProbe\(/g) ?? []).length, 1,
+    "one ownership probe per runner");
+  assert.match(TMUX_HOST_SRC, /const probe = createOwnershipProbe\(opts\.scope, \(argv\) => runTmux\(argv\)\)/,
     "…reading markers through the RAW runner, so it cannot recurse into the wrapper it feeds");
   // THE FOURTH PARAMETER IS THE ONLY WIDENING, AND IT ARRIVES ALREADY PROVEN
   // (2026-09-25, t2): the orphan sweep kills the dedicated session of a session
@@ -3258,7 +3269,7 @@ test("judge_wait addresses a judge by ROLE", () => {
   // and it is passed as PROVEN rather than as a candidate (t4 review P1), so
   // the widening is one verified name at a time and never a caller-supplied
   // session.
-  assert.match(SRC, /sessionNaming = createSessionNaming\(\{\s*runTmux,/, "the naming module's runner is the same guarded wrapper");
+  assert.match(SRC, /sessionNaming = createSessionNaming\(\{\s*gateHost,/, "the naming module acts through the session's one host");
   // THE FOUR MOMENTS THE SESSION'S NAME LIVES IN (2026-09-25, t2). All the
   // judgement is in lib/session-registry.ts + lib/session-name-tools.ts; the
   // extension only connects the lifecycle, and a connection that is DROPPED is
@@ -3331,8 +3342,8 @@ test("judge_wait addresses a judge by ROLE", () => {
   // reads `show-options` — never one of the four session subcommands the guard
   // gates — and it must NOT go through the wrapper, which would recurse into
   // the very declaration the probe is building.
-  assert.equal((SRC.match(/rawTmux\(/g) ?? []).length, 2, "only the wrapper and the ownership probe call the raw runner");
-  assert.match(SRC, /createOwnershipProbe\(tmuxScope, \(argv\) => rawTmux\(argv\)\)/,
+  assert.equal((TMUX_HOST_SRC.match(/(?<!function )\brunTmux\(/g) ?? []).length, 2, "only the wrapper and the ownership probe call the raw runner");
+  assert.match(TMUX_HOST_SRC, /createOwnershipProbe\(opts\.scope, \(argv\) => runTmux\(argv\)\)/,
     "…and the probe's call is the marker read, through the raw runner on purpose");
   // AND THE OTHER DIRECTION: an entry that is RE-registered (a new round queued
   // into a live pane, a rotated lane) must carry the whole pane forward. Copying
@@ -3801,7 +3812,7 @@ test("judge_wait applies the MESSAGE-DRIVEN criteria and returns the standard re
     "the report criterion is the shared selector, applied to this round's binding");
   assert.doesNotMatch(probe, /projection\.lastReport/,
     "…and the probe may not pick a report on its own again");
-  assert.match(probe, /judgePaneAlive\(deps\.tmux/, "pane death is probed from tmux, not inferred");
+  assert.match(probe, /judgePaneAlive\(deps\.gateHost/, "pane death is probed from the host, not inferred");
   // The two NEW criteria read what the gate ALREADY writes (P0: the judge-side
   // record format is untouched) — the round's stream file and the channel's
   // own open requests, never a new record kind.
@@ -3972,7 +3983,7 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the window i
     "the announced-question cursor is the SESSION's, so a wait and a settle never double-announce");
   assert.match(ENTRY_SRC, /announcedRequestIds: \(\) => cells\.announcedRequestIds/,
     "…the same cell the settle path announces into");
-  assert.match(JUDGE_TOOLS_SRC, /judgePaneAlive\(deps\.tmux/, "pane death is probed from tmux, not inferred");
+  assert.match(JUDGE_TOOLS_SRC, /judgePaneAlive\(deps\.gateHost/, "pane death is probed from the host, not inferred");
   assert.match(wait, /probeJudgeWait\(deps, child, cursors\)/, "the wait polls the message-driven criteria");
 
 

@@ -26,12 +26,12 @@ import { ACCEPTANCE_GATE_ENV } from "./acceptance-round.ts";
 import { readSessionLoopGoal } from "./loop-goal-host.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import { readPlanFile } from "./orchestrator-wiring.ts";
 import { STATION_CAP_ENV } from "./repo-pr-policy.ts";
 import type { SessionCells } from "./session-cells.ts";
 import { findTranscriptPath, sessionDirFromContext } from "./session-dir.ts";
-import { closeSessionPane, openSessionWindow } from "./session-factory.ts";
+import { openSessionWindow } from "./session-factory.ts";
 import { claimsMainSidecar } from "./session-exclusivity.ts";
 import {
   handoffAccepted,
@@ -51,14 +51,12 @@ import {
   type SessionHandoffDeps,
 } from "./session-handoff-tools.ts";
 import { handoffGeneration, readInheritance, successorEnv, successorSessionId } from "./session-inheritance.ts";
-import type { TmuxScope } from "./session-tmux-scope.ts";
 import type { ToolHost } from "./tool-host.ts";
 import { changedFiles } from "./worktree-changes.ts";
 import { readWorkerSideEnv } from "./worker-side.ts";
 
 export interface HandoffHostDeps {
-  runTmux: TmuxRunner;
-  tmuxScope: TmuxScope;
+  gateHost: GateHost;
   judgeTaskText(): string | undefined;
   releaseWorktree(): void;
   holdWorktree(): void;
@@ -237,7 +235,7 @@ export function createHandoffHost(
   ): Promise<{ ok: true; detail: string } | { ok: false; reason: string }> {
     const side = readJudgeSideEnv(process.env);
     if (!side) return { ok: false, reason: "本会话不是 judge" };
-    const ownPane = (process.env.TMUX_PANE ?? "").trim();
+    const ownPane = deps.gateHost.ownPane();
     if (!ownPane) return { ok: false, reason: "judge pane 不在 tmux 里，无法开新一代会话" };
     const registry = deps.registry();
     // THE TABLE HAS TO BE LOADED FIRST (2026-09-14, measured in the lab): a
@@ -248,8 +246,7 @@ export function createHandoffHost(
     registry.ensureHierarchyLoaded(cells.cwd);
     const entry = registry.judgeHierarchy()[side.judgeId];
     const successorId = successorSessionId(side.judgeId, handoffGeneration(side.judgeId) + 1);
-    const opened = await openSessionWindow(deps.runTmux, {
-      scope: deps.tmuxScope,
+    const opened = await openSessionWindow(deps.gateHost, {
       ownPane,
       cwd: cells.cwd,
       layout: "beside-opener",
@@ -289,7 +286,7 @@ export function createHandoffHost(
   const handoffDeps: SessionHandoffDeps = {
     kind: handoffKind,
     sessionId: () => cells.state.sessionId ?? undefined,
-    ownPane: () => (process.env.TMUX_PANE ?? "").trim() || undefined,
+    ownPane: () => deps.gateHost.ownPane(),
     repoRoot: () => cells.cwd,
     transcriptPath: ownTranscriptPath,
     docPath: (sessionId) => handoffDocPath(cells.cwd, sessionId),
@@ -314,13 +311,12 @@ export function createHandoffHost(
       try { return existsSync(path) ? readFileSync(path, "utf8") : undefined; } catch { return undefined; }
     },
     openSuccessor: async (spec) => {
-      const ownPane = (process.env.TMUX_PANE ?? "").trim();
+      const ownPane = deps.gateHost.ownPane();
       if (!ownPane) return { ok: false, error: "本会话不在 tmux pane 里" };
       // THE ONE LAYOUT THAT STILL SPLITS (user decision, 2026-09-25): a relay is
       // the human's own seat changing hands, so the successor lands in their
       // window rather than in a tmux session of its own.
-      const opened = await openSessionWindow(deps.runTmux, {
-        scope: deps.tmuxScope,
+      const opened = await openSessionWindow(deps.gateHost, {
         ownPane,
         cwd: cells.cwd,
         layout: "beside-opener",
@@ -438,7 +434,7 @@ export function createHandoffHost(
     });
     if (!accepted) return;
     successionClosed = true;
-    const closed = closeSessionPane(deps.runTmux, inherited.predecessorPane);
+    const closed = deps.gateHost.closePane(inherited.predecessorPane);
     try {
       (cells.latestCtx as ExtensionContext | undefined)?.ui?.notify(
         closed.ok

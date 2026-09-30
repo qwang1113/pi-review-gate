@@ -8,13 +8,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  judgePaneAlive,
-  listServerPanes,
+  judgePaneAlive as judgePaneAliveOnHost,
   JUDGE_ID_ENV,
   JUDGE_OPENER_ENV,
   JUDGE_ROLE_ENV,
 } from "../lib/judge-pane.ts";
+import { createTmuxHost, listServerPanes } from "../lib/gate-host-tmux.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
+
+/** Liveness through the TMUX HOST, with the fake tmux as its runner. */
+const judgePaneAlive = (run: TmuxRunner, paneId: string) => judgePaneAliveOnHost(createTmuxHost({ run }), paneId);
 
 /** Fake tmux: list shows %1 and %7, everything ok. */
 function happyRunner(seen: string[][] = []): TmuxRunner {

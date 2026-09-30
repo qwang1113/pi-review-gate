@@ -17,7 +17,9 @@
  *
  *   1. classify (lib/session-registry.ts) — `live` and `unknown` are left
  *      alone, with the reason recorded;
- *   2. if the entry names a dedicated tmux session, read that session's
+ *   2. if the entry names a dedicated session, ask the HOST to reclaim it
+ *      (lib/gate-host.ts `reclaimScope`; under tmux lib/gate-host-tmux-sweep.ts):
+ *      read that session's
  *      `@rg_scope_owner` marker and compare it with the DEAD session's id: only
  *      a match authorizes the kill (a name that looks like ours is not ours).
  *      THE MARKER IS READ THROUGH THE SAME NAME RESOLUTION THE KILL USES:
@@ -57,17 +59,6 @@
  */
 
 import {
-  buildKillSessionArgv,
-  buildReadSessionOwnerArgv,
-  SESSION_OWNER_PANE_OPTION,
-  SESSION_OWNER_PID_OPTION,
-  SESSION_PINNED_OPTION,
-  type SessionOwnerOption,
-} from "./tmux-session-argv.ts";
-import { isOwnSessionName, isPaneId } from "./orchestrator-tmux.ts";
-import { listServerPanes } from "./judge-pane.ts";
-import { readSessionNames, scopeNameOwnedBy, writeOwnerFacts } from "./session-tmux-scope.ts";
-import {
   classifyEntry,
   listEntries,
   parseEntryText,
@@ -81,7 +72,7 @@ export interface SweepReport {
   reaped: { name: string; sessionId: string; sessionKilled: boolean }[];
   kept: { name: string; reason: string }[];
   notes: string[];
-  /** The UNNAMED sessions' dedicated tmux sessions ({@link sweepUnnamedScopes}). */
+  /** The UNNAMED sessions' dedicated sessions (the host's `sweepUnnamedScopes`). */
   scopes: { reaped: { session: string; owner: string }[]; kept: { session: string; reason: string }[] };
 }
 
@@ -123,41 +114,14 @@ export function sweepOrphans(deps: RegistryDeps, self?: SweepSelf): SweepReport 
     let sessionKilled = false;
     const scopeSession = entry.scopeSession;
     if (scopeSession !== undefined) {
-      const markerRead = (() => {
-        try {
-          return deps.runTmux(buildReadSessionOwnerArgv(scopeSession));
-        } catch (error) {
-          return { ok: false, stdout: "", stderr: (error as Error).message };
-        }
-      })();
-      if (!markerRead.ok) {
-        // A FAILED READ HAS TWO CAUSES, and they are not the same fact: the
-        // session may be GONE (nothing left to kill — the cleanup below still
-        // has a registration and an inbox to reclaim) or tmux may be
-        // unreadable. The server-wide NAME LIST separates them without parsing
-        // tmux's stderr, which this repository refuses to do. Absent from a
-        // readable list ⇒ gone; anything else ⇒ unknown, and unknown does not
-        // touch the registration.
-        const names = readSessionNames(deps.runTmux);
-        if (names === undefined || names.includes(scopeSession)) {
-          report.kept.push({ name: entry.name, reason: `专属 session ${scopeSession} 的归属标记读不到 —— 不杀` });
-          continue;
-        }
-      } else if (markerRead.stdout.trim() !== entry.sessionId) {
-        const marker = markerRead.stdout.trim();
-        report.kept.push({
-          name: entry.name,
-          reason: `专属 session ${scopeSession} 的归属标记是 ${marker || "(空)"}，不是 ${entry.sessionId} —— 不杀`,
-        });
+      // Unreadable ⇒ kept: only a proven owner's group is ever killed, and
+      // only a proven-gone one lets the registration go without a kill.
+      const reclaimed = deps.gateHost.reclaimScope(scopeSession, entry.sessionId);
+      if (reclaimed.outcome === "kept") {
+        report.kept.push({ name: entry.name, reason: reclaimed.reason });
         continue;
-      } else {
-        const killed = deps.runTmux(buildKillSessionArgv(scopeSession), undefined, [scopeSession]);
-        if (!killed.ok) {
-          report.kept.push({ name: entry.name, reason: `回收 ${scopeSession} 失败：${killed.stderr || "tmux 拒绝"}` });
-          continue;
-        }
-        sessionKilled = true;
       }
+      sessionKilled = reclaimed.outcome === "killed";
     }
     // REMOVE BY MOVING: a registration that changed hands between the
     // classification and this moment is put straight back.
@@ -204,100 +168,8 @@ export function sweepOrphans(deps: RegistryDeps, self?: SweepSelf): SweepReport 
     owners: new Set(listed.entries.map((entry) => entry.sessionId)),
     sessions: new Set(listed.entries.flatMap((entry) => (entry.scopeSession === undefined ? [] : [entry.scopeSession]))),
   };
-  sweepUnnamedScopes(deps, self ?? {}, named, report);
+  // The groups no registration points at are judged by the host from the facts
+  // on the groups themselves (tmux: lib/gate-host-tmux-sweep.ts).
+  deps.gateHost.sweepUnnamedScopes(self ?? {}, named, report, (pid) => deps.alive(pid));
   return report;
-}
-
-/**
- * THE DEDICATED SESSIONS NOBODY REGISTERED (2026-09-27).
- *
- * A session that never took a name has no registration, so the pass above
- * never sees the `rg-…` session it created — and one that died by `kill -9`
- * never ran its own exit cleanup. The session itself carries what is needed:
- * the `@rg_scope_owner` marker (who built it) and the owner's pid and pane
- * (lib/session-tmux-scope.ts writeOwnerFacts). It is killed only when ALL of
- * these hold:
- *
- *   - its name is exactly what its marker's owner derives (scopeNameOwnedBy) —
- *     a name that merely looks like ours is not ours;
- *   - the owner is neither this session nor a named one;
- *   - the session is not PINNED (`@rg_scope_pinned`: a handed-off seat or an
- *     orchestration manager's — somebody inherits it, so a dead owner is
- *     expected there);
- *   - the recorded pid is not a running process AND the recorded pane is not on
- *     this server's pane list.
- *
- * Every missing or unreadable fact keeps the session (an old build wrote no
- * pid/pane, so its sessions stay until their owner closes them). The owner
- * pane needs no server comparison: the session lives on this server, and its
- * owner opened it from a pane of the same server.
- *
- * THIS SESSION'S OWN dedicated session, left by an earlier process under the
- * same id, is refreshed with this process's pid/pane instead — otherwise it
- * would read as dead to every other sweeper until the next spawn refreshes it.
- */
-export function sweepUnnamedScopes(
-  deps: Pick<RegistryDeps, "runTmux" | "alive">,
-  self: SweepSelf,
-  named: { owners: ReadonlySet<string>; sessions: ReadonlySet<string> },
-  report: SweepReport,
-): void {
-  const run = deps.runTmux;
-  const read = (session: string, option?: SessionOwnerOption): string | undefined => {
-    try {
-      const result = run(buildReadSessionOwnerArgv(session, option));
-      return result.ok ? result.stdout.trim() : undefined;
-    } catch {
-      return undefined;
-    }
-  };
-  const names = readSessionNames(run);
-  if (names === undefined) {
-    report.notes.push("读不到 tmux session 列表 —— 未命名会话的专属 session 本次不回收");
-    return;
-  }
-  let panes: string[] | undefined | null = null;
-  const keep = (session: string, reason: string) => report.scopes.kept.push({ session, reason });
-  for (const session of names) {
-    if (!isOwnSessionName(session) || named.sessions.has(session)) continue;
-    const owner = read(session);
-    if (owner === undefined) { keep(session, "归属标记读不到"); continue; }
-    // No marker, or one that did not mint this name: not a gate session we can
-    // speak for — somebody else's, or a leftover no marker ever landed on.
-    if (!scopeNameOwnedBy(session, owner)) { keep(session, `归属标记 ${owner || "(空)"} 推不出这个名字`); continue; }
-    if (owner === self.sessionId) {
-      if (self.pid !== undefined) {
-        const failed = writeOwnerFacts(run, session, { pid: self.pid, pane: self.pane }, [session]);
-        if (failed !== undefined) report.notes.push(`本会话的专属 session 存活事实刷新失败：${failed}`);
-      }
-      keep(session, "是本会话自己的专属 session");
-      continue;
-    }
-    if (named.owners.has(owner)) continue;
-    // PINNED ⇒ somebody inherits it (a handed-off seat's judges, a manager's
-    // children): its owner being dead is expected. Unreadable ⇒ unknown ⇒ kept.
-    const pinned = read(session, SESSION_PINNED_OPTION);
-    if (pinned === undefined || pinned.length > 0) { keep(session, pinned ? `已铉住（${pinned}），由继承者收尾` : "铉住标记读不到"); continue; }
-    const pidText = read(session, SESSION_OWNER_PID_OPTION);
-    const pane = read(session, SESSION_OWNER_PANE_OPTION);
-    if (pidText === undefined || pane === undefined) { keep(session, "存活事实读不到"); continue; }
-    const pid = /^[1-9]\d*$/.test(pidText) ? Number(pidText) : undefined;
-    if (pid === undefined || !isPaneId(pane)) { keep(session, "没有可用的 owner pid/pane（旧版本建的？）"); continue; }
-    let alive: boolean;
-    try { alive = deps.alive(pid); } catch { keep(session, `判不出 pid ${pid} 是否还在`); continue; }
-    if (alive) { keep(session, `owner pid ${pid} 还在`); continue; }
-    if (panes === null) panes = listServerPanes(run);
-    if (panes === undefined) { keep(session, "读不到 pane 列表"); continue; }
-    if (panes.includes(pane)) { keep(session, `owner pane ${pane} 还在`); continue; }
-    const killed = ((): { ok: boolean; stderr: string } => {
-      try {
-        return run(buildKillSessionArgv(session), undefined, [session]);
-      } catch (error) {
-        return { ok: false, stderr: (error as Error).message };
-      }
-    })();
-    if (!killed.ok) { keep(session, `回收失败：${killed.stderr || "tmux 拒绝"}`); continue; }
-    report.scopes.reaped.push({ session, owner });
-    report.notes.push(`已回收未命名会话 ${owner} 遗留的专属 session ${session}（owner pid ${pid} 与 pane ${pane} 都已不在）`);
-  }
 }

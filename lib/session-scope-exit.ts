@@ -18,11 +18,10 @@
  *     only kept for the user to read, and it goes with the session.
  *
  * Everything else — the ownership marker, the fail-closed reads, idempotency —
- * is `closeOwnSession`'s, not repeated here.
+ * is the host's `closeChildren` (tmux: `closeOwnSession`), not repeated here.
  */
 
-import { closeOwnSession, type TmuxScope } from "./session-tmux-scope.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 
 export interface ExitFacts {
   /** This session handed its seat to a successor (`session_handoff` / relay). */
@@ -36,14 +35,14 @@ export interface ExitFacts {
   judgeOrWorker?: boolean;
 }
 
-export function closeOwnSessionOnExit(run: TmuxRunner, scope: TmuxScope, facts: ExitFacts): { closed: boolean; note: string } {
+export function closeOwnSessionOnExit(host: Pick<GateHost, "closeChildren">, facts: ExitFacts): { closed: boolean; note: string } {
   if (facts.handedOff) return { closed: false, note: "已交接给后继会话 —— 专属 session 留给后继接管" };
   const openChildren = facts.judgeOrWorker ? 0 : facts.children.filter((child) => !child.closedAt).length;
   if (openChildren > 0) {
     return { closed: false, note: `还有 ${openChildren} 个未关闭的编排子会话 —— 专属 session 留给 orchestrator_attach 接管` };
   }
   try {
-    const result = closeOwnSession(run, scope);
+    const result = host.closeChildren();
     return result.ok ? { closed: result.killed, note: result.note } : { closed: false, note: result.error };
   } catch (error) {
     return { closed: false, note: (error as Error).message };

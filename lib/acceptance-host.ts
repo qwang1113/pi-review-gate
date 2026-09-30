@@ -25,12 +25,12 @@ import { acceptanceBase, filesSince } from "./acceptance-scope.ts";
 import { computeFingerprint } from "./fingerprint.ts";
 import { gitOrNull } from "./git-exec.ts";
 import type { GateState } from "./gate-state.ts";
-import { paneIdUsable, tmuxServerFrom, type JudgeEntry } from "./hierarchy.ts";
+import { paneIdUsable, type JudgeEntry } from "./hierarchy.ts";
+import type { GateHost } from "./gate-host.ts";
 import { judgePaneAlive } from "./judge-pane.ts";
 import type { JudgeDispatch } from "./judge-round-dispatch.ts";
 import type { LoopGoal } from "./loop-goal.ts";
 import type { LoopStage } from "./loop-stages.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import { buildRejection } from "./rejection-copy.ts";
 import { buildStreamDirective } from "./review-stream.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
@@ -40,7 +40,7 @@ export function createAcceptanceHost(
   host: SessionHost,
   deps: {
     reviewTargets: Map<string, ReviewTarget>;
-    runTmux: TmuxRunner;
+    gateHost: GateHost;
     stageIsOn(stage: LoopStage, root?: string): boolean;
     repoLabel(root: string): string;
     loopGoalConfirmed(root: string, st: GateState): boolean;
@@ -53,7 +53,7 @@ export function createAcceptanceHost(
   },
 ) {
   const {
-    reviewTargets, runTmux, stageIsOn, repoLabel, loopGoalConfirmed, readSessionLoopGoal,
+    reviewTargets, gateHost, stageIsOn, repoLabel, loopGoalConfirmed, readSessionLoopGoal,
     loopGoalPathIn, judgeChildByRole, dispatchJudgeRound,
   } = deps;
   const stateForRepo = (root: string) => host.stateFor(root);
@@ -102,9 +102,8 @@ export function createAcceptanceHost(
   function acceptanceRoundAlive(root: string): boolean | undefined {
     const entry = judgeChildByRole(root, "acceptance");
     if (!entry) return false;
-    const tmuxServer = tmuxServerFrom(process.env);
-    if (!entry.paneId || !paneIdUsable(entry, tmuxServer)) return undefined;
-    return judgePaneAlive((argv) => runTmux(argv), entry.paneId) === true;
+    if (!entry.paneId || !paneIdUsable(entry, gateHost.server())) return undefined;
+    return judgePaneAlive(gateHost, entry.paneId) === true;
   }
 
   /**

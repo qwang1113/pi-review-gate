@@ -20,6 +20,7 @@ import {
   SESSION_PINNED_OPTION,
 } from "../lib/tmux-session-argv.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 
 const ROOT = "/home/agent/.pi/agent/rg-sessions";
 const NOW = Date.parse("2026-09-27T10:00:00.000Z");
@@ -77,7 +78,7 @@ function deps(tmux: ReturnType<typeof fakeTmux>, opts: { alive?: (pid: number) =
   return {
     root: ROOT,
     io: io(opts.files, opts.listable ?? true),
-    runTmux: tmux.run,
+    gateHost: createTmuxHost({ run: tmux.run }),
     alive: opts.alive ?? (() => false),
     now: () => NOW,
   };

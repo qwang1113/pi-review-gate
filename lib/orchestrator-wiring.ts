@@ -13,14 +13,10 @@
  * here keeps the extension's share of the orchestration layer down to a
  * registration call and a handful of accessors.
  *
- * SAFETY NOTE. `runTmux` spawns tmux WITHOUT a shell (execFileSync with an
- * argv array) and re-validates the argv through {@link assertSafeTmuxArgv}
- * first: the gate's own execution path is bound by the same forbidden list
- * the bash guard enforces against the agent, so "the gate is exempt from the
- * guard" can never mean "the gate may do the forbidden thing".
+ * Opening, watching and closing children is the HOST's (lib/gate-host.ts,
+ * 2026-09-30): this module hands the extension's host through untouched.
  */
 
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync } from "node:fs";
 
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -32,13 +28,11 @@ import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { gitOrNull } from "./git-exec.ts";
 import { readJsonIfExists } from "./json-file.ts";
-import { assertSafeTmuxArgv, type SafeTmuxOptions, type TmuxRunResult } from "./orchestrator-tmux.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state-io.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
-import type { TmuxScope } from "./session-tmux-scope.ts";
-import { addressableSessions, createOwnershipProbe } from "./session-tmux-scope.ts";
+import { hostOwnPane, type GateHost } from "./gate-host.ts";
 
 
 
@@ -47,39 +41,6 @@ import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.
 import type { HandoffRetirement, OrchestratorDeps, PlanRead } from "./orchestrator-deps.ts";
 import type { TaskMode } from "./task-mode.ts";
 import type { RestatementRecord } from "./restatement.ts";
-
-/**
- * Run one tmux command with no shell in between.
- *
- * `guard` is the DECLARATION that makes "only sessions of mine" true on this side
- * of the seam too (2026-09-25): every caller passes the sessions it may address
- * (`lib/session-tmux-scope.ts addressableSessions`), so `new-session` /
- * `new-window` / `kill-window` / `kill-session` are refused here unless their
- * target IS one of them. `kill-server` is refused regardless.
- */
-export function runTmux(
-  argv: readonly string[],
-  env: NodeJS.ProcessEnv = process.env,
-  guard: SafeTmuxOptions = {},
-): TmuxRunResult {
-  try {
-    assertSafeTmuxArgv(argv, guard);
-  } catch (error) {
-    return { ok: false, stdout: "", stderr: (error as Error).message };
-  }
-  try {
-    const stdout = execFileSync("tmux", [...argv], {
-      encoding: "utf8",
-      env,
-      timeout: 10_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { ok: true, stdout: String(stdout ?? ""), stderr: "" };
-  } catch (error) {
-    const err = error as { stderr?: Buffer | string; message?: string };
-    return { ok: false, stdout: "", stderr: String(err.stderr ?? err.message ?? "tmux failed") };
-  }
-}
 
 /** Read + validate `.pi/orchestrator-plan.json`. Absent ⇒ no plan, no problems. */
 export function readPlanFile(repoRoot: string): PlanRead {
@@ -333,13 +294,11 @@ export interface OrchestratorHostBindings {
   /** The orchestration id this session holds (inherited or freshly minted). */
   orchestrationId(): string;
   /**
-   * THIS session's own tmux session (lib/session-tmux-scope.ts): every child
-   * this manager spawns is a window of it, so the manager's window never gains
-   * a pane (user decision, 2026-09-25). Handed over as a seam rather than
-   * rebuilt here — the record lives in the gate sidecar, which the extension
-   * owns.
+   * THIS session's host (lib/gate-host.ts): every child this manager spawns is
+   * a window of its own group, so the manager's window never gains a pane
+   * (user decision, 2026-09-25). One host per process, owned by the extension.
    */
-  scope: TmuxScope;
+  gateHost: GateHost;
   /** The gate's one question template, rendered in this pane (see OrchestratorDeps). */
   askChoice(spec: ChoiceSpec, opts?: { body?: string; signal?: AbortSignal }): Promise<string | undefined>;
   /** Print text into the user's transcript (the plan's full text, O-1). */
@@ -439,11 +398,6 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
   // the border-repaint throttle cannot leak between orchestrations (or, in a
   // test process, between worlds).
   const paneDecor = new Map<string, { title: string; at: number }>();
-  // ONE ownership probe per orchestration: it remembers one `@rg_scope_owner`
-  // read per session name for the life of this process, so the declaration on
-  // every tmux call stays a map lookup instead of a subprocess
-  // (lib/session-tmux-scope.ts `createOwnershipProbe`).
-  const ownershipProbe = createOwnershipProbe(host.scope, (argv) => runTmux(argv));
 
 
   const deps: OrchestratorDeps = {
@@ -499,19 +453,8 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     },
     readPlan: () => readPlanFile(host.repoRoot),
     savePlan: (plan) => writePlanFile(host.repoRoot, plan),
-    tmux: (argv) =>
-      runTmux(argv, env(), {
-        ownSessions: addressableSessions(
-          host.scope,
-          deps.runtime().children.map((c) => c.tmuxSession),
-          ownershipProbe,
-        ),
-      }),
-    scope: host.scope,
-    ownPane: () => {
-      const pane = env().TMUX_PANE?.trim();
-      return pane && pane.length > 0 ? pane : undefined;
-    },
+    gateHost: host.gateHost,
+    ownPane: () => hostOwnPane(env()),
     askChoice: host.askChoice,
     showToUser: host.showToUser,
     writeTaskFile: (name, content, repoRoot) => writeTaskFile(repoRoot ?? host.repoRoot, name, content),

@@ -35,6 +35,7 @@ import {
   type RegistryDeps,
 } from "../lib/session-registry.ts";
 import { sweepOrphans } from "../lib/session-orphan-sweep.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 import { assertSafeTmuxArgv, type TmuxRunner, type TmuxRunResult } from "../lib/orchestrator-tmux.ts";
 import { SESSION_OWNER_OPTION } from "../lib/tmux-session-argv.ts";
 import { installTmuxStatusFormat, TMUX_STATUS_CONDITIONAL } from "../scripts/tmux-status-format.mjs";
@@ -112,7 +113,7 @@ function sweepDeps(root: string): RegistryDeps {
   // `rg-my-own-session-00000000` stands in for the SWEEPING session's own
   // dedicated session: the marker read needs no declaration, and the kill of the
   // dead one carries its own name through the sweep's second argument.
-  return { root, io: nodeRegistryIO(root), runTmux: guardedRunner(["rg-my-own-session-00000000"]), alive: () => false, now: () => Date.now() };
+  return { root, io: nodeRegistryIO(root), gateHost: createTmuxHost({ run: guardedRunner(["rg-my-own-session-00000000"]) }), alive: () => false, now: () => Date.now() };
 }
 
 /** The tool the runtime registered, so the test calls what an agent calls. */
@@ -135,7 +136,7 @@ test("naming a session really renames its window and writes the option the statu
     const naming = createSessionNaming({
       root,
       io: nodeRegistryIO(root),
-      runTmux: runner,
+      gateHost: createTmuxHost({ run: runner }),
       sessionId: () => MINE,
       ownPane: () => pane,
       repoRoot: () => "/repo/pi-review-gate",

@@ -13,7 +13,8 @@ import { STRATEGIC_RESET_CHECKLIST, STRATEGIC_RESET_OFFSET } from "./constants.t
 import { computeFingerprint } from "./fingerprint.ts";
 import type { GateState } from "./gate-state.ts";
 import { shouldStrategicReset, unmetRequirements } from "./gate-state-requirements.ts";
-import { judgeLive, tmuxServerFrom } from "./hierarchy.ts";
+import { judgeLive } from "./hierarchy.ts";
+import { hostServer } from "./gate-host.ts";
 import type { JudgeRegistry } from "./judge-registry-host.ts";
 import type { createJudgeRoundSettle } from "./judge-round-settle.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
@@ -265,7 +266,7 @@ export function createL2Continuation(cells: SessionCells, deps: L2ContinuationDe
     // Dead/silent children end their wait NOW, live fresh ones are HOSTED.
     const { registry } = deps;
     const paneList = registry.listServerPanesForThisSession();
-    const tmuxServer = tmuxServerFrom(process.env);
+    const tmuxServer = hostServer(process.env);
     const childSnapshots: ChildSnapshot[] = [];
     const sessionIdsBySession = new Map<string, string>();
     for (const c of registry.ownJudges()) {

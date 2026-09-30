@@ -19,16 +19,20 @@ import assert from "node:assert/strict";
 import { existsSync, rmSync } from "node:fs";
 
 import {
-  closeSessionPane,
-  closeSessionWindow,
-  decorateSessionPane,
-  openSessionWindow,
-  paintPaneTitle,
+  openSessionWindow as openOnHost,
   paneRecoverability,
-  refreshSessionPaneTitle,
+  refreshSessionPaneTitle as refreshOnHost,
   PANE_REPAINT_MIN_MS,
   type PaneTitleMemory,
+  type SessionPaneSpec,
 } from "../lib/session-factory.ts";
+import {
+  closeSessionPane,
+  closeSessionWindow,
+  createTmuxHost,
+  decorateSessionPane,
+  paintPaneTitle,
+} from "../lib/gate-host-tmux.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 // The label grammar's ONE home — imported from there, not re-exported by the
 // pane plumbing that writes what it renders (2026-09-18).
@@ -48,6 +52,17 @@ import {
   OWN_GATE_EXTENSION,
   withGateExtension,
 } from "../lib/session-launch-specs.ts";
+
+/**
+ * The factory driven through the TMUX HOST (lib/gate-host-tmux.ts), with the
+ * fake tmux as its runner — every argv below is what the host sends.
+ */
+function openSessionWindow(run: TmuxRunner, { scope, ...spec }: SessionPaneSpec & { scope: TmuxScope }) {
+  return openOnHost(createTmuxHost({ run, scope }), spec);
+}
+function refreshSessionPaneTitle(run: TmuxRunner, opts: Parameters<typeof refreshOnHost>[1]) {
+  return refreshOnHost(createTmuxHost({ run }), opts);
+}
 
 const SESSION_ID = "019fbb1d-9e78-7ebf-88bf-d104b8a270ed";
 // Derived by the production function, never hardcoded: the test asserts the

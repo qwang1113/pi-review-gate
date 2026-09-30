@@ -31,10 +31,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  closeSessionWindow,
-  openSessionWindow,
-} from "../lib/session-factory.ts";
+import { openSessionWindow as openOnHost, type SessionPaneSpec } from "../lib/session-factory.ts";
+import { closeSessionWindow, createTmuxHost } from "../lib/gate-host-tmux.ts";
 import {
   closeOwnSession,
   deriveSessionName,
@@ -44,8 +42,14 @@ import {
 } from "../lib/session-tmux-scope.ts";
 import { isOwnSessionName, type TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import { SESSION_OWNER_OPTION } from "../lib/tmux-session-argv.ts";
-import { judgePaneAlive } from "../lib/judge-pane.ts";
+import { judgePaneAlive as judgePaneAliveOnHost } from "../lib/judge-pane.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
+
+/** The factory and the liveness probe through the TMUX HOST, over the lab runner. */
+function openSessionWindow(run: TmuxRunner, { scope, ...spec }: SessionPaneSpec & { scope: TmuxScope }) {
+  return openOnHost(createTmuxHost({ run, scope }), spec);
+}
+const judgePaneAlive = (run: TmuxRunner, paneId: string) => judgePaneAliveOnHost(createTmuxHost({ run }), paneId);
 
 // A real tmux server inherits this process's env: an RG_* the host session
 // carries (RG_WORKER_ID in a worker pane) would otherwise reach the fixture.

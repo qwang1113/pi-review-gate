@@ -7,9 +7,15 @@ import assert from "node:assert/strict";
 
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import { deriveSessionName, type TmuxScope } from "../lib/session-tmux-scope.ts";
-import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
+import { closeOwnSessionOnExit as closeOnHost, type ExitFacts } from "../lib/session-scope-exit.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 import { createSessionLifecycle, type SessionLifecycleDeps } from "../lib/session-lifecycle.ts";
 import type { SessionCells } from "../lib/session-cells.ts";
+
+/** The exit close through the TMUX HOST, with the fake tmux as its runner. */
+function closeOwnSessionOnExit(run: TmuxRunner, scope: TmuxScope, facts: ExitFacts) {
+  return closeOnHost(createTmuxHost({ run, scope }), facts);
+}
 
 const ID = "01a0da79-71e5-7311-9987-4a423c94525a";
 const NAME = deriveSessionName("/tmp/t10-accept", ID)!;

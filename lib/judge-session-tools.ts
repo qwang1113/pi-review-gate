@@ -48,7 +48,7 @@ import type { ToolHost } from "./tool-host.ts";
 import type { HierarchyTable } from "./hierarchy.ts";
 import type { ChannelIO } from "./channel-io.ts";
 import type { ReviewScopeStamp } from "./channel-records.ts";
-import type { TmuxRunResult } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "./judge-lifecycle.ts";
 import type { RoundBinding } from "./audit-round-report.ts";
 import type { RoundCancellation } from "./round-cancel-ledger.ts";
@@ -166,8 +166,8 @@ export interface JudgeSessionToolDeps {
   /** Channel filesystem seam and its home override. */
   channelIO(): ChannelIO;
   channelHome(): string | undefined;
-  /** One tmux invocation (argv, never a shell string). */
-  tmux(argv: readonly string[]): TmuxRunResult;
+  /** The session's host (lib/gate-host.ts): pane liveness and the label repaint. */
+  gateHost: GateHost;
   /**
    * WHO THIS SESSION IS on a border — the `@<owner>` half of every judge pane
    * it opens (lib/orchestrator-pane-decor.ts `selfPaneOwner`). Derived from the

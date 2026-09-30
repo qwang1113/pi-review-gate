@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import { createSessionNaming, liveSessionNames, type SessionNamingDeps } from "../lib/session-name-tools.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 import {
   parseEntryText,
   sessionEntryPath,
@@ -102,7 +103,7 @@ function makeNaming(opts: {
   const deps: SessionNamingDeps = {
     root: ROOT,
     io: fakeIO(files),
-    runTmux: tmux.run,
+    gateHost: createTmuxHost({ run: tmux.run }),
     sessionId: () => ("sessionId" in opts ? opts.sessionId : MINE),
     ownPane: () => ("pane" in opts ? opts.pane : PANE),
     repoRoot: () => "/repo/pi-review-gate",
@@ -376,12 +377,12 @@ test("listing the addressable names reports WHO IS ALIVE and never drops the one
     [sessionEntryPath(ROOT, "alive-one"), JSON.stringify(entryForTest("alive-one", MINE, NOW))],
     [sessionEntryPath(ROOT, "dead-one"), JSON.stringify(entryForTest("dead-one", THEIRS, Date.parse(stale)))],
   ]);
-  const live = liveSessionNames({ root: ROOT, io: fakeIO(files), runTmux: fakeTmux({ panes: [] }).run, now: () => NOW, alive: () => false });
+  const live = liveSessionNames({ root: ROOT, io: fakeIO(files), gateHost: createTmuxHost({ run: fakeTmux({ panes: [] }).run }), now: () => NOW, alive: () => false });
   assert.deepEqual(live.live.map((e) => e.name), ["alive-one"]);
   assert.deepEqual(live.unknown, [], "a provably dead holder is not \"unknown\"");
   // An unreadable tmux is missing information: the stale one is reported as
   // unknown rather than silently dropped from the list a caller picks from.
-  const blind = liveSessionNames({ root: ROOT, io: fakeIO(files), runTmux: fakeTmux({ blind: true }).run, now: () => NOW, alive: () => false });  assert.deepEqual(blind.live.map((e) => e.name), ["alive-one"]);
+  const blind = liveSessionNames({ root: ROOT, io: fakeIO(files), gateHost: createTmuxHost({ run: fakeTmux({ blind: true }).run }), now: () => NOW, alive: () => false });  assert.deepEqual(blind.live.map((e) => e.name), ["alive-one"]);
   assert.deepEqual(blind.unknown.map((e) => e.name), ["dead-one"]);
 });
 
@@ -398,20 +399,20 @@ test("a recorded pane id from ANOTHER tmux server does not make a holder live (t
   };
   const files = new Map([[sessionEntryPath(ROOT, "mine"), JSON.stringify(stamped)]]);
   const base = { root: ROOT, io: fakeIO(files), now: () => NOW, alive: () => false };
-  const panes = () => fakeTmux({ panes: [PANE] }).run;
+  const panes = () => createTmuxHost({ run: fakeTmux({ panes: [PANE] }).run });
 
   assert.deepEqual(
-    liveSessionNames({ ...base, runTmux: panes(), tmuxServer: () => "sock,999" }).live,
+    liveSessionNames({ ...base, gateHost: panes(), tmuxServer: () => "sock,999" }).live,
     [],
     "another server's pane id is not this holder",
   );
   assert.deepEqual(
-    liveSessionNames({ ...base, runTmux: panes(), tmuxServer: () => "sock,111" }).live.map((e) => e.name),
+    liveSessionNames({ ...base, gateHost: panes(), tmuxServer: () => "sock,111" }).live.map((e) => e.name),
     ["mine"],
     "the same pane id on the server that minted it still is",
   );
   assert.deepEqual(
-    liveSessionNames({ ...base, runTmux: panes() }).live.map((e) => e.name),
+    liveSessionNames({ ...base, gateHost: panes() }).live.map((e) => e.name),
     ["mine"],
     "and a caller that does not say which server it is on keeps the older reading",
   );

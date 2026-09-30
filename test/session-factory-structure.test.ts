@@ -86,9 +86,11 @@ test("(b) the argv builders have exactly the consumers their job allows — and 
     [openingBuilders, ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts"]],
     // The name list has ONE reader (`readSessionNames`), which the sweep calls.
     [["buildListSessionsArgv"], ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts"]],
-    [readOrKillBuilders, ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts", "lib/session-orphan-sweep.ts"]],
-    [["buildKillWindowArgv"], ["lib/tmux-session-argv.ts", "lib/session-factory.ts"]],
-    [factoryPaneBuilders, ["lib/orchestrator-tmux.ts", "lib/session-factory.ts"]],
+    // The sweep's tmux half and the factory's tmux acts are the TMUX HOST's
+    // since the host factory (2026-09-30): lib/gate-host-tmux*.ts.
+    [readOrKillBuilders, ["lib/tmux-session-argv.ts", "lib/session-tmux-scope.ts", "lib/gate-host-tmux-sweep.ts"]],
+    [["buildKillWindowArgv"], ["lib/tmux-session-argv.ts", "lib/gate-host-tmux.ts"]],
+    [factoryPaneBuilders, ["lib/orchestrator-tmux.ts", "lib/gate-host-tmux.ts"]],
   ];
   for (const [builders, consumers] of claims) {
     for (const builder of builders) {
@@ -104,9 +106,13 @@ test("(b) the argv builders have exactly the consumers their job allows — and 
   // builders: the session is the scope module's, and only the scope module's.
   const factoryText = sourceFiles().find((f) => f.rel === "lib/session-factory.ts")!.text;
   const sweepText = sourceFiles().find((f) => f.rel === "lib/session-orphan-sweep.ts")!.text;
+  const hostSweepText = sourceFiles().find((f) => f.rel === "lib/gate-host-tmux-sweep.ts")!.text;
+  const hostText = sourceFiles().find((f) => f.rel === "lib/gate-host-tmux.ts")!.text;
   for (const builder of openingBuilders) {
     assert.ok(!factoryText.includes(builder), `the factory must not call ${builder} itself`);
+    assert.ok(!hostText.includes(builder), `the tmux host opens through the scope module, never ${builder} itself`);
     assert.ok(!sweepText.includes(builder), `the sweep reclaims, it never opens: ${builder} is not its business`);
+    assert.ok(!hostSweepText.includes(builder), `…nor does its tmux half: ${builder} is not its business`);
   }
 });
 
@@ -169,7 +175,7 @@ test("the judge probe repaints the border from the channel projection (C2)", () 
   const at = text.indexOf("export function probeJudgeRound(");
   assert.ok(at > 0, "the probe must exist");
   const body = text.slice(at, text.indexOf("\n}", at));
-  assert.match(body, /refreshSessionPaneTitle\(deps\.tmux/,
+  assert.match(body, /refreshSessionPaneTitle\(deps\.gateHost/,
     "the judge's title is repainted by the SAME function the orchestration side uses");
   assert.match(body, /paintTitle\(projection\.lastState\?\.state/,
     "…from the channel projection, never from the screen");

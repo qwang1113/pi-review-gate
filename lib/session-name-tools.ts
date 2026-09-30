@@ -44,21 +44,16 @@
  *     put the window back the way it was;
  *   - `nameSession` — the tool.
  *
- * Pure-ish: tmux, the registry, the clock and the pid check all arrive through
- * {@link SessionNamingDeps}, so the whole protocol runs in a test with fakes.
+ * Pure-ish: the host (lib/gate-host.ts — where the name is SHOWN and which
+ * panes are alive), the registry, the clock and the pid check all arrive
+ * through {@link SessionNamingDeps}, so the whole protocol runs in a test with
+ * fakes.
  */
 
 import { Type } from "typebox";
 
 import type { ToolHost, ToolReply } from "./tool-host.ts";
-import {
-  buildReadOwnCoordsArgv,
-  buildRenameWindowArgv,
-  buildSetSessionNameOptionArgv,
-  buildUnsetSessionNameOptionArgv,
-  parseOwnCoords,
-} from "./tmux-session-argv.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import {
   claimName,
   classifyEntry,
@@ -83,10 +78,8 @@ export interface SessionNamingDeps {
   root?: string;
   /** File IO; defaults to the real one. */
   io?: RegistryIO;
-  /** Runs one tmux argv through the extension's own declared runner. The second
-   * argument declares gate sessions the caller has just PROVEN are gate
-   * sessions (a dead session's own), which the runner's own list cannot know. */
-  runTmux: TmuxRunner;
+  /** The session's host: where the name is shown, and the registry's liveness reads. */
+  gateHost: GateHost;
   /** THIS session's pi session id. */
   sessionId(): string | undefined;
   /** THIS session's own tmux pane (`$TMUX_PANE`), when it runs inside tmux. */
@@ -143,24 +136,18 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
   const registry = {
     root,
     io,
-    runTmux: deps.runTmux,
+    gateHost: deps.gateHost,
     alive,
     now,
     ...(deps.tmuxServer === undefined ? {} : { currentServer: deps.tmuxServer }),
   };
   let held: HeldName | undefined;
 
-  /** My own tmux coordinates, read from tmux — never derived from the topology. */
+  /** My own coordinates, read from the host — never derived from the topology. */
   function readOwn(): { session: string; window: string; windowName: string; option: string } | undefined {
     const pane = deps.ownPane();
     if (pane === undefined || pane.length === 0) return undefined;
-    try {
-      const result = deps.runTmux(buildReadOwnCoordsArgv(pane));
-      if (!result.ok) return undefined;
-      return parseOwnCoords(result.stdout);
-    } catch {
-      return undefined;
-    }
+    return deps.gateHost.paneCoords(pane);
   }
 
   /** The entry as it must be stored right now. */
@@ -190,39 +177,14 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
     };
   }
 
-  /** Write the display half: the window title and the option the status line reads. */
+  /** Write the display half (tmux: the window title and the option the status line reads). */
   function writeDisplay(name: string, pane: string): string[] {
-    const notes: string[] = [];
-    try {
-      const renamed = deps.runTmux(buildRenameWindowArgv(pane, name));
-      if (!renamed.ok) notes.push(`window title 没写成：${renamed.stderr || "tmux 拒绝"}`);
-      const option = deps.runTmux(buildSetSessionNameOptionArgv(pane, name));
-      if (!option.ok) notes.push(`@rg_session_name 没写成：${option.stderr || "tmux 拒绝"}`);
-    } catch (error) {
-      notes.push(`展示写入失败：${(error as Error).message}`);
-    }
-    return notes;
+    return deps.gateHost.showSessionName(pane, name);
   }
 
-  /** Take both halves back, and only where they still say OUR name. */
+  /** Take the display back, and only where it still says OUR name (the host decides "still"). */
   function clearDisplay(name: string, pane: string, originalWindowName?: string): string[] {
-    const notes: string[] = [];
-    const current = readOwn();
-    try {
-      if (current?.option === name) {
-        const unset = deps.runTmux(buildUnsetSessionNameOptionArgv(pane));
-        if (!unset.ok) notes.push(`@rg_session_name 没清掉：${unset.stderr || "tmux 拒绝"}`);
-      }
-      // The title is put back only when it is still OURS: a window somebody
-      // renamed in the meantime is not this session's to rename again.
-      if (current?.windowName === name && originalWindowName !== undefined && originalWindowName.length > 0) {
-        const restored = deps.runTmux(buildRenameWindowArgv(pane, originalWindowName));
-        if (!restored.ok) notes.push(`window title 没还原：${restored.stderr || "tmux 拒绝"}`);
-      }
-    } catch (error) {
-      notes.push(`展示还原失败：${(error as Error).message}`);
-    }
-    return notes;
+    return deps.gateHost.clearSessionName(pane, readOwn(), name, originalWindowName);
   }
 
   function ok(text: string, details: Record<string, unknown> = {}): ToolReply {
@@ -409,13 +371,13 @@ export function createSessionNaming(deps: SessionNamingDeps): SessionNaming {
  * dangerous direction, calling a dead holder live and sending it mail.
  */
 export function liveSessionNames(
-  deps: Pick<SessionNamingDeps, "runTmux" | "now" | "alive" | "root" | "io" | "tmuxServer">,
+  deps: Pick<SessionNamingDeps, "gateHost" | "now" | "alive" | "root" | "io" | "tmuxServer">,
 ): { live: SessionRegistryEntry[]; unknown: SessionRegistryEntry[] } {
   const root = deps.root ?? sessionRegistryRoot();
   const registry = {
     root,
     io: deps.io ?? nodeRegistryIO(root),
-    runTmux: deps.runTmux,
+    gateHost: deps.gateHost,
     alive: deps.alive ?? pidAlive,
     now: deps.now ?? (() => Date.now()),
     ...(deps.tmuxServer === undefined ? {} : { currentServer: deps.tmuxServer }),

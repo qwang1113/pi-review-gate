@@ -70,7 +70,7 @@ import { paneColorFor } from "./orchestrator-pane-decor.ts";
 
 import type { ChildSession } from "./orchestrator-registry.ts";
 import { childLabel, describePendingRequest, requestLabel } from "./orchestration-notice.ts";
-import { isPaneId } from "./orchestrator-tmux.ts";
+import { isSessionHandle } from "./gate-host.ts";
 
 /** What survived a child that died — the reason a death is not a disaster. */
 export interface ChildAssets {
@@ -284,7 +284,7 @@ export function relayedPane(
   reported: string | undefined,
   livePanes: ReadonlySet<string> | undefined,
 ): string | undefined {
-  if (livePanes === undefined || !isPaneId(reported) || reported === registered) return undefined;
+  if (livePanes === undefined || !isSessionHandle(reported) || reported === registered) return undefined;
   return !livePanes.has(registered) && livePanes.has(reported) ? reported : undefined;
 }
 

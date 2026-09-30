@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { createJudgeRoundDispatch } from "../lib/judge-round-dispatch.ts";
 import { emptyHierarchy, type HierarchyTable } from "../lib/hierarchy.ts";
 import type { SessionHost } from "../lib/session-host.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 
 async function dispatchWith(writeLands: boolean) {
   const root = mkdtempSync(join(tmpdir(), "rg-dispatch-"));
@@ -54,10 +55,12 @@ async function dispatchWith(writeLands: boolean) {
     },
     reviewTargets: new Map(),
     stageIsOn: () => true,
-    runTmux,
+    gateHost: createTmuxHost({
+      run: runTmux,
+      scope: { sessionId: () => "sess-1234567890", repoRoot: () => root, read: () => undefined, write: () => {}, now: () => "t" },
+    }),
     // The pane "boots" as soon as it is opened: one record above the watermark.
     channelIO: { ensureDir: () => {}, appendLine: () => {}, readText: () => (opened ? state : "") } as never,
-    tmuxScope: { sessionId: () => "sess-1234567890", repoRoot: () => root, read: () => undefined, write: () => {}, now: () => "t" },
     cancelLedger: { forget: () => {} } as never,
     resolveJudgeLaunch: () => ({ ok: true, sysPromptPath: join(root, "p.md"), spec: "anthropic/x", chain: [], choice: {} as never }),
     sweepStaleJudgeSessionDirs: () => {},

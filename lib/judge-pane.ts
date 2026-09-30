@@ -20,21 +20,16 @@
  *     accidentally rename one.
  *  2. PANE LIVENESS. "Is that pane still there" is a question every lifecycle
  *     tool asks (wait, close, recover) and no spawner asks; an unreadable list
- *     is missing INFORMATION, never evidence of death. `listServerPanes` is the
- *     ONE reading of that list (2026-09-25, quality round P2): the judge probe,
- *     the orchestrator's "nothing is provably alive" check and the session
- *     registry's holder classification all ask tmux the same question, and a
- *     second copy of the argv plus its fail-closed catch is a second answer to
- *     it.
+ *     is missing INFORMATION, never evidence of death. The host's `livePanes`
+ *     is the ONE reading of that list (2026-09-25, quality round P2; tmux:
+ *     lib/gate-host-tmux.ts `listServerPanes`): the judge probe, the
+ *     orchestrator's "nothing is provably alive" check and the session
+ *     registry's holder classification all ask the same question.
  *
- * Pure-ish: tmux enters through the injected {@link TmuxRunner}, so every
+ * Pure-ish: the host enters through an injected {@link GateHost}, so every
  * branch runs with a fake instead of a terminal.
  */
-import {
-  buildListServerPanesArgv,
-  parsePaneIds,
-  type TmuxRunner,
-} from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 
 /** Who opened this judge — read by the judge-side gate from its own env. */
 export const JUDGE_OPENER_ENV = "RG_JUDGE_OPENER";
@@ -43,33 +38,12 @@ export const JUDGE_ID_ENV = "RG_JUDGE_ID";
 /** reviewer | adviser | goal-auditor. */
 export const JUDGE_ROLE_ENV = "RG_JUDGE_ROLE";
 
-/**
- * Which panes exist right now — ON THE WHOLE SERVER. `undefined` means the
- * list itself is unreadable — missing information, never evidence of death.
- *
- * IT IS NO LONGER SCOPED TO THE OPENER'S WINDOW (2026-09-25). It used to be
- * `list-panes -t <opener's pane>`, which was the same thing as "my children"
- * only while children were split into that window; now they are windows of
- * other tmux sessions, so the window-scoped reading would have reported every
- * live child as DEAD — and an opener told its judge is gone goes and re-does
- * the round.
- */
-export function listServerPanes(run: TmuxRunner): string[] | undefined {
-  try {
-    const result = run(buildListServerPanesArgv());
-    if (!result.ok) return undefined;
-    return parsePaneIds(result.stdout);
-  } catch {
-    return undefined;
-  }
-}
-
 /** Is this pane still alive? Unreadable list ⇒ undefined (never "dead"). */
 export function judgePaneAlive(
-  run: TmuxRunner,
+  host: Pick<GateHost, "livePanes">,
   paneId: string,
 ): boolean | undefined {
-  const panes = listServerPanes(run);
+  const panes = host.livePanes();
   if (panes === undefined) return undefined;
   return panes.includes(paneId);
 }

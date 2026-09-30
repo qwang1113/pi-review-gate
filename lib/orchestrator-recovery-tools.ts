@@ -280,8 +280,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   // which always answers, the strictest station when nothing is on record).
   const stationCap = stationCapForRecoveredChild(deps, child.taskId);
   const acceptanceGate = acceptanceGateForRecoveredChild(deps, child.taskId);
-  const opened = await openSessionWindow(deps.tmux, {
-    scope: deps.scope,
+  const opened = await openSessionWindow(deps.gateHost, {
     cwd: child.cwd,
     layout: "own-session-window",
     // Same env as the original spawn — including the sidecar variant, which is

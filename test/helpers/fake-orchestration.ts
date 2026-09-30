@@ -52,6 +52,7 @@ import type { AnnouncedRequest } from "../../lib/orchestrator-wait.ts";
 import type { TaskMode } from "../../lib/task-mode.ts";
 import { STATE_VARIANT_ENV } from "../../lib/gate-state-io.ts";
 import { PREDECESSOR_PANE_ENV } from "../../lib/session-inheritance.ts";
+import { createTmuxHost } from "../../lib/gate-host-tmux.ts";
 
 /** Fixed clock so ids and timestamps are reproducible. */
 export const NOW = 1_700_000_000_000;
@@ -477,9 +478,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     log: (message) => { auditLog.push(message); },
     readPlan: () => (plan ? { plan, problems: [] } : { problems: [] }),
     savePlan: (next) => { plan = next; },
-    tmux: (argv) => runFakeTmux(argv),
+    gateHost: createTmuxHost({ run: (argv) => runFakeTmux(argv), scope }),
     ownPane: () => env.TMUX_PANE,
-    scope,
     // ONE dialog stub for the whole template (2026-09-08): every approval and
     // consent dialog is an askChoice now, so a test says which ROW it wants.
     // `confirmAnswers` keeps its old meaning (true ⇒ the first option); the

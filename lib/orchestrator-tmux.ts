@@ -132,6 +132,20 @@ function canonicalSubcommand(sub: string): string {
   return SUBCOMMAND_ALIASES[sub] ?? sub;
 }
 
+/**
+ * The tmux server this process talks to, as `<socket>,<server pid>`.
+ *
+ * `$TMUX` is `<socket path>,<server pid>,<session index>`; the first two
+ * fields identify the SERVER, and the third (which session of it we are in)
+ * is irrelevant to whether a pane id is comparable. `undefined` outside tmux.
+ */
+export function tmuxServerFrom(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = (env.TMUX ?? "").trim();
+  if (!raw) return undefined;
+  const [socket, pid] = raw.split(",");
+  return socket && pid ? `${socket},${pid}` : undefined;
+}
+
 /** True for a syntactically valid pane id. Fail-closed: anything else is refused. */
 export function isPaneId(value: unknown): value is string {
   return typeof value === "string" && PANE_ID.test(value);

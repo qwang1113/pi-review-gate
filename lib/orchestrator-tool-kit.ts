@@ -14,9 +14,8 @@
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
 import { basename } from "node:path";
-import { listServerPanes } from "./judge-pane.ts";
 import { childPaneLabel, pmPaneLabel } from "./orchestrator-pane-decor.ts";
-import { paintPaneTitle, refreshSessionPaneTitle, type PaneTitleMemory } from "./session-factory.ts";
+import { refreshSessionPaneTitle, type PaneTitleMemory } from "./session-factory.ts";
 import { channelPathFor, type ChannelIO } from "./channel-io.ts";
 import { projectChannel, readChannel } from "./channel-projection.ts";
 import type { ChildAssets, SupervisionSnapshot } from "./orchestrator-supervisor.ts";
@@ -72,11 +71,11 @@ export function requireOrchestratorMode(deps: OrchestratorDeps): ToolReply | und
  * every healthy child would read as gone.
  */
 export function alivePanes(deps: OrchestratorDeps): { panes: string[]; ok: boolean } {
-  // ONE reading of the server's pane list (lib/judge-pane.ts `listServerPanes`,
-  // 2026-09-25 quality round P2): the judge probe, this check and the session
-  // registry all ask the same question, and an unreadable list is the same
-  // missing information in all three.
-  const panes = listServerPanes((argv) => deps.tmux(argv));
+  // ONE reading of the server's pane list (the host's `livePanes`, 2026-09-25
+  // quality round P2): the judge probe, this check and the session registry
+  // all ask the same question, and an unreadable list is the same missing
+  // information in all three.
+  const panes = deps.gateHost.livePanes();
   return panes === undefined ? { panes: [], ok: false } : { panes, ok: true };
 }
 
@@ -528,7 +527,7 @@ export function refreshPaneLabels(
 
     legend.push({ childId: child.id, label });
     if (supervision.state === "dead") continue;
-    refreshSessionPaneTitle(deps.tmux, {
+    refreshSessionPaneTitle(deps.gateHost, {
       paneId: child.paneId,
       label,
       state: supervision.health.state,
@@ -557,7 +556,7 @@ export function refreshPaneLabels(
 export function paintOwnPaneLabel(deps: OrchestratorDeps): void {
   const ownPane = deps.ownPane();
   if (!ownPane) return;
-  paintPaneTitle(deps.tmux, ownPane, pmPaneLabel(basename(deps.repoRoot)));
+  deps.gateHost.paintLabel(ownPane, pmPaneLabel(basename(deps.repoRoot)));
 }
 
 /** The legend `refreshPaneLabels` returns: the labels it just painted. */

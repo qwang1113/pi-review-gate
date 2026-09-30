@@ -36,8 +36,12 @@ import {
   checkSessionExclusivity,
   parsePresence,
 } from "../lib/session-exclusivity.ts";
-import { judgePaneAlive } from "../lib/judge-pane.ts";
+import { judgePaneAlive as judgePaneAliveOnHost } from "../lib/judge-pane.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
+
+/** Liveness through the TMUX HOST, with the fake tmux as its runner. */
+const judgePaneAlive = (run: TmuxRunner, paneId: string) => judgePaneAliveOnHost(createTmuxHost({ run }), paneId);
 
 const NOW = 1_700_000_000_000;
 

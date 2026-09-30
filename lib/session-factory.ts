@@ -36,46 +36,29 @@
  * time a child is needed. The user's window is left exactly as it was: the
  * three-column layout planning, the geometry probe and the equaliser that used
  * to squeeze panes into it are DELETED, not bypassed. The one exception is the
- * RELAY ({@link buildHandoffPaneArgv}): a successor orchestrator splits off the
+ * RELAY (the host's `openBeside`): a successor orchestrator splits off the
  * opener's own pane, because that is the spot the human is already watching.
+ * Under the desktop host the same two placements are `own-group` and
+ * `beside-opener` (docs/desktop/host-protocol.md §6).
  *
  * ── WHAT IS NOT HERE ──
  *
- * tmux argv construction stays in lib/orchestrator-tmux.ts (this module and
- * lib/session-tmux-scope.ts are its only consumers — one for a child's window,
- * one for the session itself), the colour/label/title STRINGS stay in
+ * HOW a window is opened, labelled and closed is the HOST's (lib/gate-host.ts:
+ * tmux windows in lib/gate-host-tmux.ts, desktop sessions in
+ * lib/gate-host-desktop.ts, 2026-09-30) — the ORDER is this module's, and it
+ * is the same for both. The colour/label/title STRINGS stay in
  * lib/orchestrator-pane-decor.ts, and the role prompt/tool policy stays in
  * lib/gate-modes.ts. The pane's identity and environment (a cross-process
  * contract) live in lib/session-env.ts, and the judge argv plus the judge /
  * worker border in lib/session-launch-specs.ts. This module sequences them; it
  * invents nothing.
  *
- * Pure-ish: tmux enters through the injected {@link TmuxRunner} and delivery
+ * Pure-ish: the host enters as an injected {@link GateHost} and delivery
  * evidence through an injected probe, so every branch runs with fakes.
  */
 
-import {
-  buildHandoffPaneArgv,
-  buildKillPaneArgv,
-  buildPaneLabelArgv,
-  buildPaneStyleArgv,
-  buildShowPaneLabelsArgv,
-  parseSpawnedPaneId,
-  type TmuxRunner,
-  type TmuxRunResult,
-} from "./orchestrator-tmux.ts";
-import { buildKillWindowArgv } from "./tmux-session-argv.ts";
-import {
-  openScopeWindow,
-  pinOwnSession,
-  type TmuxScope,
-} from "./session-tmux-scope.ts";
-import {
-  paneStyleFor,
-  paneTitleFor,
-  PANE_BORDER_FORMAT,
-  PANE_BORDER_STATUS,
-} from "./orchestrator-pane-decor.ts";
+import { paneTitleFor } from "./orchestrator-pane-decor.ts";
+import type { GateHost } from "./gate-host.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import { buildSessionEnv, type SessionPaneRole } from "./session-env.ts";
 import { mkdirSync } from "node:fs";
@@ -100,50 +83,6 @@ export interface SessionPaneDecor {
   colorSeed: string;
   state: ChildState;
   stateForSeconds?: number;
-}
-
-/**
- * Colour, title, AND the window option that renders the border line.
- *
- * THE THIRD STEP IS THE FIX FOR C1. Turning `pane-border-status` on used to be
- * the orchestration spawn's private business, so a judge pane opened by an
- * ordinary loop session had a colour nobody could see. It is a window-level
- * option shared by every pane in the window, which is exactly why it must be
- * set by whoever opens a decorated pane rather than by one privileged caller.
- *
- * Failure is ALWAYS cosmetic: a session that works is worth more than a
- * coloured border, so this returns a warning and never an error.
- */
-export function decorateSessionPane(
-  run: TmuxRunner,
-  paneId: string,
-  decor: SessionPaneDecor,
-): string | undefined {
-  const failures: string[] = [];
-  const attempt = (argv: readonly string[]): void => {
-    try {
-      const result = run(argv);
-      if (!result.ok) failures.push(result.stderr || argv.join(" "));
-    } catch (error) {
-      failures.push((error as Error).message);
-    }
-  };
-  attempt(buildPaneStyleArgv(paneId, paneStyleFor(decor.colorSeed)));
-  attempt(buildPaneLabelArgv(paneId, paneTitleFor({
-    label: decor.label,
-    state: decor.state,
-    ...(decor.stateForSeconds === undefined ? {} : { stateForSeconds: decor.stateForSeconds }),
-  })));
-  for (const argv of buildShowPaneLabelsArgv(paneId, PANE_BORDER_STATUS, PANE_BORDER_FORMAT)) {
-    attempt(argv);
-  }
-  // The WORDING matters as much as the fact: a bare tmux stderr in a receipt
-  // reads like the session failed. Every caller pastes this straight into its
-  // reply, so the "display only" framing belongs here rather than in each of
-  // them (the retired openJudgePane wrapped it; nothing else did).
-  return failures.length === 0
-    ? undefined
-    : `pane 装饰失败（仅显示降级）：${failures[0]}`;
 }
 
 /** What a repaint remembers, so an unchanged title is not re-painted. */
@@ -176,10 +115,10 @@ const DEFAULT_TITLE_MEMORY: PaneTitleMemory = new Map<string, { title: string; a
  * by judges and children alike.
  *
  * The state comes from the CHANNEL projection at the call site — never from a
- * screen. Returns whether tmux was actually asked to paint.
+ * screen. Returns whether the host was actually asked to paint.
  */
 export function refreshSessionPaneTitle(
-  run: TmuxRunner,
+  host: Pick<GateHost, "paintLabel">,
   opts: {
     paneId: string;
     label: string;
@@ -200,60 +139,8 @@ export function refreshSessionPaneTitle(
   if (painted && painted.title === title) return false;
   if (painted && opts.now - painted.at < PANE_REPAINT_MIN_MS) return false;
   memory.set(opts.paneId, { title, at: opts.now });
-  paintPaneTitle(run, opts.paneId, title);
+  host.paintLabel(opts.paneId, title);
   return true;
-}
-
-/**
- * Write one pane's title, once, with NO memory and NO throttle — the only
- * place a title reaches tmux.
- *
- * It exists for the ONE pane whose label cannot be deduplicated: the project
- * manager's OWN pane (`pm:<dir>`), which carries no state and therefore no
- * changing string to diff against. The caller repaints it unconditionally,
- * which costs one tmux call per probe for one pane; the reason it HAD to be
- * unconditional (pi rewriting `pane_title` at boot and on every extension
- * rebind, dist/modes/interactive/interactive-mode.js `updateTerminalTitle`) is
- * gone now that the label is a pane option pi never writes, so this could be
- * memoised the day that one call matters. Failures are swallowed the same way:
- * this is a cosmetic layer, and a pane that works is worth more than a border
- * that is right.
- */
-export function paintPaneTitle(run: TmuxRunner, paneId: string, title: string): void {
-  try {
-    run(buildPaneLabelArgv(paneId, title));
-  } catch {
-    /* cosmetic only — never allowed to affect supervision */
-  }
-}
-
-/**
- * Close ONE WINDOW the gate itself opened (谁创建谁回收) — the normal path since
- * 2026-09-25, when a child session became a window of the opener's own session.
- *
- * `kill-window` rather than `kill-pane`, and nothing else: panes are not
- * created, split or equalised here any more. There is no label bar to take down
- * either, for the reason it is turned on in the first place — a child's bar is
- * an option of the CHILD'S window, which stops existing with the child.
- *
- * The window id alone is not enough to address it: the target is built as
- * `<ownSession>:<@id>` from the coordinates the registry recorded at spawn, so a
- * stale id can only ever reach a window of the gate's own session
- * (lib/orchestrator-tmux.ts `buildKillWindowArgv`).
- */
-export function closeSessionWindow(
-  run: TmuxRunner,
-  coords: { ownSession: string; windowId: string },
-): { ok: true } | { ok: false; error: string } {
-  try {
-    const result = run(buildKillWindowArgv(coords.ownSession, coords.windowId));
-    if (!result.ok) {
-      return { ok: false, error: result.stderr || "tmux kill-window 失败" };
-    }
-  } catch (error) {
-    return { ok: false, error: (error as Error).message };
-  }
-  return { ok: true };
 }
 
 /**
@@ -264,45 +151,12 @@ export function closeSessionWindow(
  * all, so the same fact was reported two different ways — and the worker path's
  * version told a caller a window might still be on screen when it had simply
  * been closed already, while leaving the coordinates in the registry forever.
- * The distinction belongs beside the close it describes.
+ * The distinction belongs beside the close it describes. (The desktop host's
+ * close is idempotent: a session already gone is simply `ok`.)
  */
 export function windowAlreadyGone(error: string | undefined): boolean {
   return /can't find window|no such window|no server running/i.test(error ?? "");
 }
-
-/**
- * Close ONE PANE — the RELAY path, and after 2026-09-25 the only one.
- *
- * The predecessor's own pane is not a session window: it is the rectangle in
- * the USER'S window where the retiring session sits, and the successor was
- * split off it. It is closed by the session that occupies it, once the
- * successor has demonstrably taken over; a `kill-window` there would take the
- * successor with it.
- */
-export function closeSessionPane(
-  run: TmuxRunner,
-  paneId: string,
-): { ok: true } | { ok: false; error: string } {
-  try {
-    const result = run(buildKillPaneArgv(paneId));
-    if (!result.ok) {
-      return { ok: false, error: result.stderr || "tmux kill-pane 失败" };
-    }
-  } catch (error) {
-    return { ok: false, error: (error as Error).message };
-  }
-  return { ok: true };
-}
-
-/**
- * How many of these decorated panes are still ON SCREEN.
- *
- * DELETED WITH ITS ONLY CALLER (2026-09-17, user decision). It answered that
- * question for the label-bar release, and the release is gone: the bar is
- * turned on by whoever opens a decorated pane and is never turned off, because
- * toggling `pane-border-status` resizes every pane in the window (measured:
- * SIGWINCH, rows 84 ↔ 83).
- */
 
 // ---------------------------------------------------------------------------
 // Opening a pane
@@ -315,7 +169,7 @@ export function closeSessionPane(
  * (2026-09-25): a relay successor keeps the old behaviour — beside its
  * predecessor, in the user's own window — because a handover is the human's
  * seat changing hands, not another child session. Everything else is a window
- * of the opener's own tmux session.
+ * of the opener's own session.
  */
 export type SessionPaneLayout =
   /** A window of the opener's own session (lib/session-tmux-scope.ts). */
@@ -336,8 +190,7 @@ export interface DeliveryProof {
  * `windowId` is what closes it and `sessionName` is the session that owns it
  * (the pair is what keeps a kill inside the gate's own session). Both are
  * ABSENT for the relay layout, whose pane lives in the user's window and is
- * closed by nobody but its own occupant (lib/orchestrator-tmux.ts
- * `buildKillPaneArgv`).
+ * closed by nobody but its own occupant (the host's `closePane`).
  */
 export interface SessionPaneCoords {
   paneId: string;
@@ -346,8 +199,6 @@ export interface SessionPaneCoords {
 }
 
 export interface SessionPaneSpec {
-  /** The opener's OWN tmux session — created lazily by the first child. */
-  scope: TmuxScope;
   cwd: string;
   layout: SessionPaneLayout;
   role: SessionPaneRole;
@@ -390,11 +241,12 @@ export type SessionPaneOutcome =
  * about to look at is already labelled while the gate is still waiting on
  * evidence.
  *
- * Coordinates come back from tmux itself (`-P -F '#{window_id} #{pane_id}'`),
- * never from listing-and-diffing.
+ * Coordinates come back from the host itself (tmux: `-P -F '#{window_id}
+ * #{pane_id}'`; desktop: the `session.open` result), never from
+ * listing-and-diffing.
  */
 export async function openSessionWindow(
-  run: TmuxRunner,
+  host: GateHost,
   spec: SessionPaneSpec,
 ): Promise<SessionPaneOutcome> {
   const env = buildSessionEnv(spec.role);
@@ -417,31 +269,36 @@ export async function openSessionWindow(
   // adopts a dead manager's children — in both cases the owner's death is
   // expected, and the crash sweep must not read it as a crash.
   if (spec.role.kind === "successor") {
-    const pinned = pinOwnSession(run, spec.scope, "handed-off");
+    const pinned = host.pinChildren("handed-off");
     if (!pinned.ok) return { ok: false, error: `交接前未能铉住专属 session：${pinned.error}` };
   }
-  const coords = spec.layout === "beside-opener"
-    ? openRelayPane(run, spec, env)
-    : openScopeWindow(run, spec.scope, {
-        ...(spec.role.kind === "orchestration-child" ? { pin: "orchestration-child" } : {}),
-        cwd: spec.cwd,
-        env,
-        command: withGateExtension(spec.command),
-        // THE WINDOW NAME IS THE LABEL (user decision, 2026-09-25). `tmux ls`
-        // and `prefix w` are the only ways to see a child without attaching to
-        // it, and a list of identical `pi` entries tells nobody anything.
-        ...(spec.decor === undefined ? {} : { windowName: spec.decor.windowName ?? spec.decor.label }),
-      });
+  const command = withGateExtension(spec.command);
+  let coords;
+  if (spec.layout === "beside-opener") {
+    coords = spec.ownPane
+      ? host.openBeside({ ownPane: spec.ownPane, cwd: spec.cwd, env, command, role: spec.role })
+      : { ok: false as const, error: "接力后继者需要 opener 自己的 pane 作落点（ownPane 缺失）" };
+  } else {
+    coords = host.openWindow({
+      ...(spec.role.kind === "orchestration-child" ? { pin: "orchestration-child" } : {}),
+      cwd: spec.cwd,
+      env,
+      command,
+      role: spec.role,
+      // THE WINDOW NAME IS THE LABEL (user decision, 2026-09-25). `tmux ls`
+      // and `prefix w` are the only ways to see a child without attaching to
+      // it, and a list of identical `pi` entries tells nobody anything.
+      ...(spec.decor === undefined ? {} : { windowName: spec.decor.windowName ?? spec.decor.label }),
+    });
+  }
   if (!coords.ok) {
     // A FAILED OPEN YIELDS NO COORDINATES, and there is nothing to keep
-    // (2026-09-25, quality round P2): both openers return `{ok:false; error}`
-    // and nothing else, so the `"paneId" in coords` carry-forward that used to
-    // sit here could only ever produce `{}`. The case it LOOKED like it handled
-    // — opened, but the delivery check failed — is the `deliveryFailed` branch
+    // (2026-09-25, quality round P2). The case it LOOKED like it handled —
+    // opened, but the delivery check failed — is the `deliveryFailed` branch
     // below, which has real coordinates to keep.
     return { ok: false, error: coords.error };
   }
-  // EXPLICIT FIELDS, never a spread of the scope's own result (2026-09-25):
+  // EXPLICIT FIELDS, never a spread of the host's own result (2026-09-25):
   // that result carries an `ok` of its own, and spreading it here silently
   // overwrote the outcome of a FAILED delivery check with `ok: true` — caught
   // by the failure-path test, which is why the coordinates are copied by hand.
@@ -451,7 +308,7 @@ export async function openSessionWindow(
     ...(coords.sessionName === undefined ? {} : { sessionName: coords.sessionName }),
   };
   spec.register?.(place);
-  const decorWarning = spec.decor ? decorateSessionPane(run, place.paneId, spec.decor) : undefined;
+  const decorWarning = spec.decor ? host.decorate(place.paneId, spec.decor) : undefined;
   if (spec.verify) {
     const proof = await spec.verify(place.paneId);
     if (!proof.ok) {
@@ -465,39 +322,6 @@ export async function openSessionWindow(
     };
   }
   return { ok: true, ...place, ...(decorWarning === undefined ? {} : { decorWarning }) };
-}
-
-/**
- * Split the opener's OWN pane for a relay successor — the one path that still
- * touches the user's window (user decision, 2026-09-25).
- *
- * No window id comes back, and that is correct rather than an omission: this
- * child lives in the user's window, is never closed by `kill-window`, and is
- * replaced by its own successor when it retires.
- */
-function openRelayPane(
-  run: TmuxRunner,
-  spec: SessionPaneSpec,
-  env: Readonly<Record<string, string>>,
-): ({ ok: true } & SessionPaneCoords) | { ok: false; error: string } {
-  const ownPane = spec.ownPane;
-  if (!ownPane) {
-    return { ok: false, error: "接力后继者需要 opener 自己的 pane 作落点（ownPane 缺失）" };
-  }
-  let spawned: TmuxRunResult;
-  try {
-    spawned = run(buildHandoffPaneArgv({ orchestratorPane: ownPane, cwd: spec.cwd, env, command: withGateExtension(spec.command) }));
-  } catch (error) {
-    return { ok: false, error: (error as Error).message };
-  }
-  if (!spawned.ok) {
-    return { ok: false, error: spawned.stderr || "tmux split-window 失败" };
-  }
-  const paneId = parseSpawnedPaneId(spawned.stdout);
-  if (!paneId) {
-    return { ok: false, error: "tmux 没有返回新 pane id" };
-  }
-  return { ok: true, paneId };
 }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +338,7 @@ export type RecoverabilityCode =
   | "no-pane"
   /** The pane is alive — re-opening would put two processes in one worktree. */
   | "alive"
-  /** tmux is unreadable: missing information is never evidence of death. */
+  /** The host is unreadable: missing information is never evidence of death. */
   | "unknown-liveness"
   /** Dead pane, live record: re-open it under the same session id. */
   | "recoverable";
@@ -536,7 +360,7 @@ export function paneRecoverability(input: {
   closedAt?: string | undefined;
   /** The recorded pane id, when one was ever recorded. */
   paneId?: string | undefined;
-  /** true / false / undefined = tmux unreadable. */
+  /** true / false / undefined = the host unreadable. */
   paneAlive?: boolean | undefined;
 }): RecoverabilityCode {
   if (!input.registered) return "unknown";

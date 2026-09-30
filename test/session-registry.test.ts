@@ -43,6 +43,7 @@ import {
 // OTHER sessions' leftovers and its act is destructive, while the registry only
 // ever reads one name.
 import { sweepOrphans } from "../lib/session-orphan-sweep.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 import { SESSION_OWNER_OPTION } from "../lib/tmux-session-argv.ts";
 
 const ROOT = "/home/agent/.pi/agent/rg-sessions";
@@ -121,7 +122,7 @@ function deps(opts: {
     root: ROOT,
     io,
     tmux,
-    runTmux: tmux.run,
+    gateHost: createTmuxHost({ run: tmux.run }),
     alive: opts.alive ?? (() => false),
     now: () => NOW,
     ...(opts.currentServer === undefined ? {} : { currentServer: opts.currentServer }),
@@ -300,7 +301,7 @@ test("a provably dead holder loses the name — and only that: the takeover is o
 test("when another claimant won the takeover, this one is refused instead of overwriting the winner", () => {
   const io = fakeIO(new Map([[sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry())]]));
   io.rename = () => false; // somebody else's rename landed first
-  const d: RegistryDeps = { root: ROOT, io, runTmux: fakeTmux({ panes: [] }).run, alive: () => false, now: () => NOW };
+  const d: RegistryDeps = { root: ROOT, io, gateHost: createTmuxHost({ run: fakeTmux({ panes: [] }).run }), alive: () => false, now: () => NOW };
   const result = claimName(d, entry({ sessionId: MINE }));
   assert.equal(result.ok, false);
   assert.match(result.ok ? "" : result.error, /另一个进程接管/);
@@ -538,7 +539,7 @@ test("the REAL io creates the registry directory on the first claim — an absen
   const base = mkdtempSync(join(tmpdir(), "rg-registry-real-"));
   try {
     const root = join(base, "nested", "rg-sessions");
-    const d = { root, io: nodeRegistryIO(root), runTmux: fakeTmux().run, alive: () => false, now: () => NOW };
+    const d = { root, io: nodeRegistryIO(root), gateHost: createTmuxHost({ run: fakeTmux().run }), alive: () => false, now: () => NOW };
     const claim = claimName(d, entry({ sessionId: MINE }));
     assert.equal(claim.ok, true, claim.ok ? "" : claim.error);
     assert.equal(claim.ok && claim.outcome, "claimed");
@@ -571,7 +572,7 @@ test("losing the exclusive-create race RE-READS the winner instead of answering 
   };
 
   const live = raceIO();
-  const refused = claimName({ root: ROOT, io: live.io, runTmux: fakeTmux({ panes: [] }).run, alive: () => false, now: () => NOW }, entry({ sessionId: MINE }));
+  const refused = claimName({ root: ROOT, io: live.io, gateHost: createTmuxHost({ run: fakeTmux({ panes: [] }).run }), alive: () => false, now: () => NOW }, entry({ sessionId: MINE }));
   assert.equal(refused.ok, false);
   assert.match(refused.ok ? "" : refused.error, /已被别的活会话占用/, "the WINNER is what the claim is decided against");
   assert.doesNotMatch(refused.ok ? "" : refused.error, /读不出来/);
@@ -581,14 +582,14 @@ test("losing the exclusive-create race RE-READS the winner instead of answering 
   const mine = raceIO();
   mine.files.set(sessionEntryPath(ROOT, "t2-registry"), JSON.stringify(entry({ sessionId: MINE })));
   mine.io.createExclusive = () => false;
-  const renewed = claimName({ root: ROOT, io: mine.io, runTmux: fakeTmux().run, alive: () => false, now: () => NOW }, entry({ sessionId: MINE }));
+  const renewed = claimName({ root: ROOT, io: mine.io, gateHost: createTmuxHost({ run: fakeTmux().run }), alive: () => false, now: () => NOW }, entry({ sessionId: MINE }));
   assert.equal(renewed.ok && renewed.outcome, "renewed", "losing to ourselves is a renewal, not a refusal");
 
   // And when the re-read really cannot read anything, the refusal says so.
   const blind = fakeIO(new Map());
   blind.readText = () => undefined;
   blind.createExclusive = () => false;
-  const unreachable = claimName({ root: ROOT, io: blind, runTmux: fakeTmux().run, alive: () => false, now: () => NOW }, entry({ sessionId: MINE }));
+  const unreachable = claimName({ root: ROOT, io: blind, gateHost: createTmuxHost({ run: fakeTmux().run }), alive: () => false, now: () => NOW }, entry({ sessionId: MINE }));
   assert.equal(unreachable.ok, false);
   assert.match(unreachable.ok ? "" : unreachable.error, /占不下来：登记文件读不出来/);
 });

@@ -106,7 +106,7 @@ type InferFields<Fs> =
 // The shapes
 // ---------------------------------------------------------------------------
 
-const ID_PATTERN = "^[A-Za-z0-9._-]{1,64}$";
+export const ID_PATTERN = "^[A-Za-z0-9._-]{1,64}$";
 const id = str({ pattern: ID_PATTERN });
 const absPath = str({ minLength: 1, maxLength: 4096, pattern: "^/" });
 const EMPTY = obj({});

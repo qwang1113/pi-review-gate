@@ -141,7 +141,7 @@ export interface JudgeWaitCursors {
  * the other caller.
  */
 export function probeJudgeRound(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "now" | "tmuxServer" | "paneOwner">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "gateHost" | "now" | "tmuxServer" | "paneOwner">,
   child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "windowId" | "tmuxSession" | "role" | "tmuxServer">,
   consumedReportId: string | undefined,
   binding: RoundBinding,
@@ -181,7 +181,7 @@ export function probeJudgeRound(
     // has no window coordinates while its pane is perfectly painted-able.
     if (!paneIdUsable(child, deps.tmuxServer())) return;
     const seconds = since ? Math.max(0, (deps.now() - Date.parse(since)) / 1000) : undefined;
-    refreshSessionPaneTitle(deps.tmux, {
+    refreshSessionPaneTitle(deps.gateHost, {
       paneId: child.paneId,
       label: judgePaneLabel(child.role, deps.paneOwner()),
       state,
@@ -243,7 +243,7 @@ export function probeJudgeRound(
           ...(selected.at === undefined ? {} : { at: selected.at }),
           detail: describeRoundMiss(selected),
         };
-  const paneAlive = child.paneId ? judgePaneAlive(deps.tmux, child.paneId) : undefined;
+  const paneAlive = child.paneId ? judgePaneAlive(deps.gateHost, child.paneId) : undefined;
   const withEvents = withModelEvents;
   if (paneAlive === false) {
     return { done: true, reason: "pane-dead", openQuestions, ...withEvents, ...(notThisRound === undefined ? {} : { notThisRound }) };
@@ -305,7 +305,7 @@ export function probeJudgeRound(
  * still reports to an opener running the oldest.
  */
 export function probeJudgeWait(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "now" | "tmuxServer" | "readText" | "roundBinding" | "paneOwner">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "gateHost" | "now" | "tmuxServer" | "readText" | "roundBinding" | "paneOwner">,
   child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath" | "role" | "repoRoot" | "tmuxServer" | "modelSpec">,
   cursors: JudgeWaitCursors,
 ): PaneJudgeWaitObservation {
@@ -364,7 +364,7 @@ export function paneJudgeStalled(
   const target = judgeChannelTarget(child.openerId, child.judgeId, home);
   const read = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home));
   const projection = projectChannel(read.records);
-  const paneAlive = child.paneId ? judgePaneAlive(deps.tmux, child.paneId) : undefined;
+  const paneAlive = child.paneId ? judgePaneAlive(deps.gateHost, child.paneId) : undefined;
   return isStalled(projection, paneAlive, deps.now(), HEARTBEAT_STALE_MS);
 }
 

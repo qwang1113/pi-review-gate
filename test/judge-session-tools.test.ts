@@ -31,6 +31,7 @@ import { createRoundCancel } from "../lib/round-cancel-host.ts";
 import { createRoundCancelLedger } from "../lib/round-cancel-ledger.ts";
 import { roundCancelPlan } from "../lib/quality-round.ts";
 import type { SessionHost } from "../lib/session-host.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 
 const ROOT = "/repo";
 const HOME = "/home/test";
@@ -157,7 +158,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     },
     channelIO: () => io,
     channelHome: () => HOME,
-    tmux: (argv) => {
+    gateHost: createTmuxHost({ run: (argv) => {
       state.tmuxCalls.push([...argv]);
       if (argv[0] === "list-panes") {
         // A tmux that cannot answer is a real state, and the gate treats it as
@@ -174,7 +175,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
         return { ok: true, stdout: "", stderr: "" };
       }
       return { ok: true, stdout: "", stderr: "" };
-    },
+    } }),
     // Faithful to the real wiring: the seeded records below are minted by this
     // same server, so the ordinary paths behave exactly as they did.
     tmuxServer: () => state.tmuxServer,
@@ -1031,7 +1032,7 @@ test("judge_wait after a FAILED LANE cancelled the reviewer: says cancelled, why
       setHierarchy: (next) => { f.table.current = next; f.children = f.children.filter((x) => next[x.judgeId]); return true; },
       absorbJudgeModelEvents: () => {},
     },
-    runTmux: () => ({ ok: true, stdout: "", stderr: "" }),
+    gateHost: createTmuxHost({ run: () => ({ ok: true, stdout: "", stderr: "" }) }),
     cancelLedger: ledger,
     reviewTargets: new Map(),
     stageIsOn: () => true,

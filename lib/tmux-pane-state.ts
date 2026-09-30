@@ -25,7 +25,8 @@
 
 import { decideReportedChildState } from "./orchestrator-child-channel.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
-import { assertSafeTmuxArgv, requirePane, type TmuxRunner } from "./orchestrator-tmux.ts";
+import { assertSafeTmuxArgv, requirePane } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 
 export const PANE_SID_OPTION = "@rg_sid";
 export const PANE_REPO_OPTION = "@rg_repo";
@@ -38,7 +39,7 @@ export const PANE_STATE_REFRESH_MS = 30_000;
 /** Three missed refreshes: the pane is still there, the reporter is not. */
 export const PANE_STATE_STALE_S = 90;
 
-type PaneOption =
+export type PaneOption =
   | typeof PANE_SID_OPTION
   | typeof PANE_REPO_OPTION
   | typeof PANE_KIND_OPTION
@@ -87,8 +88,9 @@ export function buildUnsetPaneOptionArgv(pane: string, option: PaneOption): read
 }
 
 export interface PaneStateDeps {
-  run: TmuxRunner;
-  /** `$TMUX_PANE`, or undefined outside tmux (then nothing is written). */
+  /** Where the facts are written (tmux: these pane options; desktop: `session.decorate`). */
+  gateHost: Pick<GateHost, "setPaneFact" | "unsetPaneFact">;
+  /** This session's own handle, or undefined outside any host (then nothing is written). */
   pane(): string | undefined;
   identity(): { sessionId: string | undefined; repo: string; kind: string };
   facts(): PaneStateFacts;
@@ -107,7 +109,7 @@ export function createPaneStateReporter(deps: PaneStateDeps): PaneStateReporter 
 
   const set = (pane: string, option: PaneOption, value: string): boolean => {
     try {
-      return deps.run(buildSetPaneOptionArgv(pane, option, value)).ok;
+      return deps.gateHost.setPaneFact(pane, option, value);
     } catch {
       return false;
     }
@@ -142,7 +144,7 @@ export function createPaneStateReporter(deps: PaneStateDeps): PaneStateReporter 
       written = undefined;
       if (pane === undefined) return;
       for (const option of [PANE_STATE_OPTION, PANE_STATE_AT_OPTION, PANE_SID_OPTION, PANE_REPO_OPTION, PANE_KIND_OPTION] as const) {
-        try { deps.run(buildUnsetPaneOptionArgv(pane, option)); } catch { /* best effort at exit */ }
+        try { deps.gateHost.unsetPaneFact(pane, option); } catch { /* best effort at exit */ }
       }
     },
   };

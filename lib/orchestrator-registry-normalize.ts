@@ -14,7 +14,7 @@ import {
 import { isPlanHash } from "./orchestrator-plan.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
 import { parsePlanTaskStages } from "./loop-stages.ts";
-import { isPaneId, parseWindowCoords } from "./orchestrator-tmux.ts";
+import { isSessionHandle, parseSessionCoords } from "./gate-host.ts";
 import { isGrantableScope } from "./ask-user.ts";
 import type { ChildSession, OrchestrationGrant, OrchestratorRuntime } from "./orchestrator-registry.ts";
 
@@ -79,7 +79,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     const taskId = str(c.taskId);
     const cwd = str(c.cwd);
     const createdAt = str(c.createdAt);
-    if (!id || !taskId || !cwd || !createdAt || !isPaneId(c.paneId)) { dropped = true; continue; }
+    if (!id || !taskId || !cwd || !createdAt || !isSessionHandle(c.paneId)) { dropped = true; continue; }
     // Conditional spreads, not `field: str(...)`: writing an explicit
     // `undefined` would add a KEY that the original object never had, so a
     // sanitized runtime would no longer deep-equal the one the gate wrote.
@@ -96,7 +96,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     // sidecar is untrusted input. Either half being wrong drops BOTH — the entry
     // then reads as "predates the window topology", which is the fail-closed
     // direction (it simply cannot be closed by id).
-    const coords = parseWindowCoords({ windowId: c.windowId, tmuxSession: c.tmuxSession });
+    const coords = parseSessionCoords({ windowId: c.windowId, tmuxSession: c.tmuxSession });
     // The isolated checkout, sanitized like everything else that becomes a
     // PATH: the sidecar is untrusted input, and this one is handed to git.
     // Both halves must be present — a path without its branch cannot be
@@ -129,7 +129,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   const relayHandoff = rawRelay ? str(rawRelay.handoffPath) : undefined;
   const relayAt = rawRelay ? str(rawRelay.at) : undefined;
 
-  const ownPane = isPaneId(obj.ownPane) ? obj.ownPane : undefined;
+  const ownPane = isSessionHandle(obj.ownPane) ? obj.ownPane : undefined;
   const approvedPlanAt = approvalIntact ? str(obj.approvedPlanAt) : undefined;
   // The SNAPSHOT carries the same authority as the hash — it is what decides
   // whether a later edit needs a new dialog — so it is validated as hard and
@@ -145,7 +145,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   // not the one the gate wrote, so nothing authorizing in it is trusted.
   const approvedPlanHistory = dropped ? [] : normalizeApprovalLineage(obj.approvedPlanHistory);
 
-  const successorPane = isPaneId(rawRelay?.successorPane) ? rawRelay.successorPane : undefined;
+  const successorPane = isSessionHandle(rawRelay?.successorPane) ? rawRelay.successorPane : undefined;
   // The owner is an identity, not a path: non-empty and nothing else. It is
   // never inferred, and never defaulted to anything.
   const ownerSessionId = str(obj.ownerSessionId);

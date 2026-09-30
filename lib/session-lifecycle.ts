@@ -63,6 +63,8 @@ export interface SessionLifecycleDeps {
   };
   cancelChildWaitTimer(): void;
   notify: { startHint(): string; markCleanShutdown(): void };
+  /** Reach the host now (lib/gate-host.ts `ready`): a desktop host that cannot be reached says so at once. */
+  hostReady(): { ok: true } | { ok: false; error: string };
   naming: {
     onSessionStart(): { adopted?: string; sweep: { reaped: Array<{ name: string; sessionId: string; sessionKilled?: boolean }> } };
     release(): unknown;
@@ -181,6 +183,14 @@ export function createSessionLifecycle(cells: SessionCells, deps: SessionLifecyc
     // USER REQUIREMENT — a session that cannot show a dialog runs in normal
     // mode, period: every enforced mode depends on dialogs.
     if (!ctx.hasUI) deps.setTaskMode("normal", "auto", ctx);
+
+    // THE HOST FAILS EARLY, not at the first child (docs/desktop/host-protocol.md
+    // §4.1): an unreachable desktop client is named now, and nothing falls back.
+    const host = deps.hostReady();
+    if (!host.ok) {
+      deps.log(`review-gate[host] ${host.error}`);
+      try { ctx.ui?.notify?.(`review-gate: ${host.error}`, "warning"); } catch { /* headless */ }
+    }
 
     // SAY IT ONCE WHEN THE BANNER CHANNEL IS DEAD (user decision, 2026-09-17),
     // only for a session that WOULD be allowed to raise one.

@@ -27,12 +27,10 @@ import {
   listByOpener,
   loadHierarchySliceOnce,
   parseHierarchySnapshot,
-  tmuxServerFrom,
   type HierarchyTable,
   type JudgeEntry,
 } from "./hierarchy.ts";
-import { listServerPanes } from "./judge-pane.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import { selfPaneOwner } from "./orchestrator-pane-decor.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
 import { nextRoundSeq } from "./judge-conclude.ts";
@@ -60,8 +58,8 @@ const FOREIGN_SPAWN_GRACE_MS = 10 * 60 * 1000;
 
 /** What the registry needs from the session beyond the shared host — fixed. */
 export interface JudgeRegistryDeps {
-  /** The session's (declaration-carrying) tmux runner — pane liveness only. */
-  runTmux: TmuxRunner;
+  /** The session's host — pane liveness only. */
+  gateHost: GateHost;
   /** The channel file I/O the whole session shares. */
   channelIO: ChannelIO;
   /** THIS round's report binding for one judge (the settlement's own rule). */
@@ -74,7 +72,7 @@ export type JudgeRegistry = ReturnType<typeof createJudgeRegistry>;
 
 export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) {
   const { channelIO, roundBindingOf } = deps;
-  const runTmux = (argv: readonly string[]) => deps.runTmux(argv);
+  const { gateHost } = deps;
 
   /**
    * THE registry of pane judges — one table, `judgeHierarchy` (lib/hierarchy.ts).
@@ -213,7 +211,7 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
    * as the question it no longer asks (quality round P2).
    */
   function listServerPanesForThisSession(): string[] | undefined {
-    try { return listServerPanes((argv) => runTmux(argv)); }
+    try { return gateHost.livePanes(); }
     catch { return undefined; }
   }
 
@@ -227,7 +225,7 @@ export function createJudgeRegistry(host: SessionHost, deps: JudgeRegistryDeps) 
    */
   function ownLiveJudges(): JudgeEntry[] {
     const panes = listServerPanesForThisSession();
-    const server = tmuxServerFrom(process.env);
+    const server = gateHost.server();
     return ownJudges().filter((e) => judgeLive(e, panes, server));
   }
 

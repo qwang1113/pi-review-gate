@@ -19,7 +19,7 @@
  * written to.
  */
 
-import { parseWindowCoords } from "./orchestrator-tmux.ts";
+import { parseSessionCoords } from "./gate-host.ts";
 
 /** Repo-root-relative location of the worker registry (gate-excluded via `.pi/`). */
 export const WORKER_REGISTRY_RELPATH = ".pi/worker-sessions.json";
@@ -143,7 +143,7 @@ export function parseWorkerRegistry(raw: unknown): WorkerRegistry {
     // wrong drops BOTH: a half-record that "looks recorded" is worse than no
     // record at all (2026-09-25, quality round P2 — the same rule as the
     // orchestration sidecar, one implementation).
-    const coords = parseWindowCoords({ windowId: e.windowId, tmuxSession: e.tmuxSession });
+    const coords = parseSessionCoords({ windowId: e.windowId, tmuxSession: e.tmuxSession });
     const reportedAt = str(e.reportedAt);
     const tmuxServer = str(e.tmuxServer);
     out[id] = {

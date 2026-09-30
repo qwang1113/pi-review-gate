@@ -39,11 +39,10 @@ import {
 import { projectChannel, readChannel } from "./channel-projection.ts";
 import type { ChannelRecord } from "./channel-records.ts";
 import { resolveAnswer } from "./orchestrator-answer-rules.ts";
-import { closeSessionWindow, openSessionWindow, paneRecoverability } from "./session-factory.ts";
+import { openSessionWindow, paneRecoverability } from "./session-factory.ts";
 import { buildJudgePaneCommand, buildJudgeRecoverCommand, judgePaneDecor } from "./session-launch-specs.ts";
-import type { TmuxScope } from "./session-tmux-scope.ts";
 import { judgePaneAlive } from "./judge-pane.ts";
-import type { TmuxRunResult } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import { verifyJudgeBoot, channelRecordCount } from "./orchestrator-tool-kit.ts";
 import { judgeSessionIdFor, shortRepoHash, type JudgeLane } from "./judge-process.ts";
 
@@ -73,17 +72,14 @@ export interface JudgeSpawnToolDeps {
   /** Channel filesystem seam and its home override (tests point elsewhere). */
   channelIO(): ChannelIO;
   channelHome(): string | undefined;
-  /** One tmux invocation (argv, never a shell string). */
-  tmux(argv: readonly string[]): TmuxRunResult;
-  /** This session's own pane — proves we are IN tmux before anything is opened. */
-  ownPane(): string | undefined;
   /**
-   * The opener's OWN tmux session (lib/session-tmux-scope.ts): created on the
-   * first judge, reused by every later one, and recorded in this session's
-   * sidecar. Every judge is a WINDOW of it, so the user's window never gains a
-   * pane (user decision, 2026-09-25).
+   * The session's host (lib/gate-host.ts). Every judge is a WINDOW of the
+   * opener's OWN group (tmux: its dedicated session, created on the first
+   * judge), so the user's window never gains a pane (user decision, 2026-09-25).
    */
-  scope: TmuxScope;
+  gateHost: GateHost;
+  /** This session's own pane — proves we are IN a host before anything is opened. */
+  ownPane(): string | undefined;
   /** WHO THIS SESSION IS on a border — the `@<owner>` half of the judge pane
    * this call opens (lib/orchestrator-pane-decor.ts `selfPaneOwner`). */
   paneOwner(): string;
@@ -231,7 +227,7 @@ async function doSpawn(
   // SECOND pane for the same role beside the live one.
   const incumbent = findJudgeLane(deps.hierarchy(), { role, repoRoot: root, openerId: caller });
   if (incumbent?.paneId) {
-    const alive = judgePaneAlive(deps.tmux, incumbent.paneId);
+    const alive = judgePaneAlive(deps.gateHost, incumbent.paneId);
     if (alive === true) {
       return fail(`review-gate: review ${incumbent.judgeId} 的 pane（${incumbent.paneId}）还开着——新一轮走 judge_submit（pane 复用），不要重开。`);
     }
@@ -335,8 +331,7 @@ async function doSpawn(
   // appended — so "there is a record" proves nothing about the pane opened
   // below. Only a record ABOVE this watermark does.
   const baseline = channelRecordCount(deps.channelIO(), judgeChannelPath);
-  const opened = await openSessionWindow(deps.tmux, {
-    scope: deps.scope,
+  const opened = await openSessionWindow(deps.gateHost, {
     cwd: root,
     layout: "own-session-window",
     role: {
@@ -421,7 +416,7 @@ async function doSpawn(
       // (lib/orchestrator-tmux.ts `buildShowPaneLabelsArgv`).
       if (opened.windowId && opened.sessionName) {
         try {
-          closeSessionWindow(deps.tmux, { ownSession: opened.sessionName, windowId: opened.windowId });
+          deps.gateHost.closeWindow({ ownSession: opened.sessionName, windowId: opened.windowId });
         } catch { /* best effort */ }
       }
       rollback();
@@ -561,7 +556,7 @@ async function doRecover(
   const verdict = paneRecoverability({
     registered: true,
     ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
-    paneAlive: entry.paneId ? judgePaneAlive(deps.tmux, entry.paneId) : undefined,
+    paneAlive: entry.paneId ? judgePaneAlive(deps.gateHost, entry.paneId) : undefined,
   });
   if (verdict === "no-pane") {
     return fail(`review-gate: review ${entry.judgeId} 没有登记 pane——它可能从未成功开出来，用 judge_spawn 重开。`);
@@ -572,8 +567,7 @@ async function doRecover(
   if (verdict !== "recoverable") {
     return fail("review-gate: tmux 读不出来，无法确认它到底死没死——信息缺失时不重开。");
   }
-  const opened = await openSessionWindow(deps.tmux, {
-    scope: deps.scope,
+  const opened = await openSessionWindow(deps.gateHost, {
     cwd: entry.repoRoot,
     layout: "own-session-window",
     role: {

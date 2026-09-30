@@ -11,7 +11,7 @@ import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 import { appendRecord, channelPathFor, judgeChannelTarget, newChannelId, type ChannelIO } from "./channel-io.ts";
 import { projectChannel, readChannel } from "./channel-projection.ts";
-import { paneCoordsOf, paneIdUsable, registerJudge, removeJudge, tmuxServerFrom } from "./hierarchy.ts";
+import { paneCoordsOf, paneIdUsable, registerJudge, removeJudge } from "./hierarchy.ts";
 import type { JudgeLaunch } from "./judge-launch-host.ts";
 import type { createJudgeLanes } from "./judge-lane-host.ts";
 import { judgeWorkDirFor } from "./judge-lifecycle.ts";
@@ -21,14 +21,13 @@ import type { JudgeRegistry } from "./judge-registry-host.ts";
 import { rotationHandoffTask } from "./judge-rotation.ts";
 import type { LoopStage } from "./loop-stages.ts";
 import { channelRecordCount, verifyJudgeBoot } from "./orchestrator-tool-kit.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import { qualityStandingFor } from "./quality-round.ts";
 import type { ReviewTarget } from "./review-target-host.ts";
 import { dispatchFailureDetail, type RoundCancelLedger } from "./round-cancel-ledger.ts";
 import { openSessionWindow } from "./session-factory.ts";
 import { buildJudgePaneCommand, judgePaneDecor } from "./session-launch-specs.ts";
 import type { SessionHost } from "./session-host.ts";
-import type { TmuxScope } from "./session-tmux-scope.ts";
 
 /** What one dispatch of a judge round produced (or why it could not). */
 export interface JudgeDispatch {
@@ -87,9 +86,8 @@ export function createJudgeRoundDispatch(
     lanes: Pick<JudgeLanes, "resolveJudgeLane" | "rotationCarryoverFacts" | "closeJudgePaneOf" | "reapReviewScratch">;
     reviewTargets: Map<string, ReviewTarget>;
     stageIsOn(stage: LoopStage, root?: string): boolean;
-    runTmux: TmuxRunner;
+    gateHost: GateHost;
     channelIO: ChannelIO;
-    tmuxScope: TmuxScope;
     cancelLedger: RoundCancelLedger;
     resolveJudgeLaunch(root: string, role: string, workDir: string, title: string, judgeId: string): JudgeLaunch;
     sweepStaleJudgeSessionDirs(root: string): void;
@@ -101,7 +99,7 @@ export function createJudgeRoundDispatch(
   } = deps.registry;
   const { resolveJudgeLane, rotationCarryoverFacts, closeJudgePaneOf, reapReviewScratch } = deps.lanes;
   const {
-    reviewTargets, stageIsOn, runTmux, channelIO, tmuxScope, cancelLedger, resolveJudgeLaunch, sweepStaleJudgeSessionDirs,
+    reviewTargets, stageIsOn, gateHost, channelIO, cancelLedger, resolveJudgeLaunch, sweepStaleJudgeSessionDirs,
   } = deps;
   const stateForRepo = (root: string) => host.stateFor(root);
 
@@ -194,13 +192,12 @@ export function createJudgeRoundDispatch(
     const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener, lane));
     const sessionDir = pathJoin(workDir, "sessions");
     const continuesSession = hasTranscript(sessionDir);
-    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
-    const run = (argv: readonly string[]) => runTmux(argv);
+    const ownPane = gateHost.ownPane();
     // Stamped on every entry that records a pane, and checked before any use
     // of a recorded one (lib/hierarchy.ts `windowClosable` for a close,
     // `paneIdUsable` for a repaint — the two ask slightly different questions
     // on purpose).
-    const tmuxServer = tmuxServerFrom(process.env);
+    const tmuxServer = gateHost.server();
 
 
     // The task text a rotated round is sent with: the history is gone, so the
@@ -252,7 +249,7 @@ export function createJudgeRoundDispatch(
     // pane from before the window topology look dead, and the dispatch opened a
     // SECOND window for the same judge id (2026-09-25, quality round P2).
     const paneUsable = existing !== undefined && paneIdUsable(existing, tmuxServer);
-    const paneAlive = paneUsable && existing?.paneId ? judgePaneAlive(run, existing.paneId) : undefined;
+    const paneAlive = paneUsable && existing?.paneId ? judgePaneAlive(gateHost, existing.paneId) : undefined;
     // A living pane takes the round through its channel: the pane is the
     // CARRIER, the round is the task. No busy refusal exists anymore — a pane judge
     // reads every round via its drain; only a one-shot process read once.
@@ -350,7 +347,7 @@ export function createJudgeRoundDispatch(
         // to hand that failure to a label-bar judgement so the bar would not
         // be stranded; there is nothing to strand any more (2026-09-17: the
         // bar is turned on and left on).
-        closeJudgePaneOf(existing, { ownPane, tmuxServer, run });
+        closeJudgePaneOf(existing, { ownPane, tmuxServer });
       }
       if (paneAlive === false) reapReviewScratch(sessionId);
       // One removal, one table.
@@ -439,8 +436,7 @@ export function createJudgeRoundDispatch(
           error: `登记表 .pi/judge-hierarchy.json 没写成（另一个进程一直占着它的锁）—— ${role} 没有启动，本轮没有派出；稍后重试`,
         };
       }
-      const opened = await openSessionWindow(run, {
-        scope: tmuxScope,
+      const opened = await openSessionWindow(gateHost, {
         cwd: root,
         layout: "own-session-window",
         role: {

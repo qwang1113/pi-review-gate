@@ -67,10 +67,13 @@ Alt+Enter 排队的 followUp 消息需要 turn 边界才能进来。judge / work
 ### 总则 · 所有需要模型介入的地方，只有一种打开方式（2026-09-29，用户决定）
 
 门禁里任何要模型做判断的地方（judge、worker、arbiter 申诉、对话框无人作答时的代答、L5 的 LLM
-语义守卫，以及以后新增的任何一处）都只走**同一种模式**：在 opener 自己的 tmux session 里开一个
-窗口，跑带确定性 `--session-id` 的交互式 pi 会话；结论经 channel report 回来；模型按
+语义守卫，以及以后新增的任何一处）都只走**同一种模式**：**经宿主工厂开一个带确定性
+`--session-id` 的交互式 pi 会话**（`lib/gate-host.ts`，2026-09-30：tmux 宿主下是 opener 自己的
+ tmux session 里的一个窗口，桌面宿主下是客户端的一个会话；宿主不可用时 fail-closed、绝不回退 tmux；
+门禁里没有第二条直接调 tmux 的路径，`TmuxRunner` 只在 tmux 实现内部）；结论经 channel report 回来；模型按
 `review-gate.json` 的 `agents.*` slots 链选择并降级（`lib/model-health.ts` 的冷却记忆 + pane 内换槽，
-降级就是为这种模式设计的）；进程绑定 opener（`lib/opener-process.ts`）；窗口由 `declare_done` 统一回收。
+降级就是为这种模式设计的）；进程绑定 opener（`lib/opener-process.ts`，只看 pid + 启动时间，对两个宿主同样成立）；
+窗口由 `declare_done` 统一回收。
 
 **不得**再用 `pi -p` + `execFile` 之类的一次性子进程旁路（哲学三）。实测的反例：旁路带
 `--no-extensions` 启动，把 `pi-anthropic-oauth` 认证扩展也关掉了，请求按 extra usage 计费被 400；
@@ -568,7 +571,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   子会话 2026-09-25 起不再跟 opener 在同一个 window 里）、**开关一个 window**
   （opener 懒建的专属 session，见下一段）与**给 pane 上色与标题**
   （纯展示，`select-pane -P` + pane 用户选项 `set -p @rg_label`（pi 会覆盖 `pane_title`，
-  这个命名空间它不碰）+ window 级 `setw pane-border-*`，一律不带 `-g`）。
+  这个命名空间它不碰）+ window 级 `setw pane-border-*`，一律不带 `-g`）。这三件事（连同关窗、状态上报、会话名、
+  系统通知）都是**宿主**的原语（2026-09-30，`lib/gate-host.ts`）：终端下是上面这些 tmux 命令，
+  `RG_HOST=desktop` 时改为经 unix socket 请求桌面客户端（`docs/desktop/host-protocol.md`），业务逻辑不变。
 - **子会话住哪**（2026-09-25 用户决定）：opener 第一次要开子会话时懒建一个自己的
   tmux session（`rg-<repo>-<session id 尾>`，`lib/session-tmux-scope.ts`），每个子会话
   一个 window；opener 自己的窗口**一个 pane 都不多**。`declare_done` 关掉自己那一个

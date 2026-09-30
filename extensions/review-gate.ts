@@ -63,20 +63,18 @@ import { registerGateCommands } from "../lib/gate-command-tools.ts";
 import { nodeChannelIO, type ChannelIO } from "../lib/channel-io.ts";
 import type { ReportConclusion } from "../lib/channel-projection.ts";
 import { describeToolActivity } from "../lib/orchestrator-child-channel.ts";
-import { tmuxServerFrom } from "../lib/hierarchy.ts";
-import {
-  addressableSessions,
-  createOwnershipProbe,
-  sanitizeScopeRecord,
-  type TmuxScope,
-} from "../lib/session-tmux-scope.ts";
+import { sanitizeScopeRecord, type TmuxScope } from "../lib/session-tmux-scope.ts";
+import { createGateHost } from "../lib/gate-host.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
+import { createDesktopHost } from "../lib/gate-host-desktop.ts";
+import { createDesktopClient, helloFor } from "../lib/desktop-host-client.ts";
 import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import { createPaneStateReporter } from "../lib/tmux-pane-state.ts";
 import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
 import { claimGateInstance } from "../lib/session-launch-specs.ts";
 import { judgeMayRunTmux, readJudgeSideEnv } from "../lib/judge-side.ts";
 import { readWorkerSideEnv } from "../lib/worker-side.ts";
-import { createOrchestratorDeps, runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
+import { createOrchestratorDeps } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
 import type { UserNotifyKind } from "../lib/user-notify.ts";
 import { createUserNotifyRuntime } from "../lib/user-notify-runtime.ts";
@@ -571,11 +569,37 @@ export default function reviewGate(pi: ExtensionAPI) {
     now: () => new Date().toISOString(),
     ownerProcess: () => ({ pid: process.pid, pane: process.env.TMUX_PANE?.trim() || undefined }),
   };
+  /**
+   * THE HOST (lib/gate-host.ts) — chosen ONCE from `RG_HOST`: tmux windows +
+   * terminal-notifier, or the desktop client over its socket; an invalid env
+   * refuses every act. The tmux runner DECLARES the sessions this process may
+   * address (its own, the lineage's judges, its children, its workers); the
+   * registries it reads are declared further down, read at call time.
+   */
+  const gateHost = createGateHost({
+    env: process.env,
+    tmux: () => createTmuxHost({
+      scope: tmuxScope,
+      held: () => [
+        ...ownJudges().map((entry) => entry.tmuxSession),
+        ...(cells.state.orchestrator?.children ?? []).map((child) => child.tmuxSession),
+        ...workerRegistrySessions(),
+      ],
+    }),
+    desktop: ({ socketPath, hostSessionId }) => createDesktopHost({
+      socketPath,
+      hostSessionId,
+      client: createDesktopClient({
+        socketPath,
+        hello: () => helloFor({ hostSessionId, cwd: cells.cwd, piSessionId: cells.state.sessionId ?? undefined }),
+      }),
+    }),
+  });
   const worktrees = createWorktreeSettlement(cells, { persistOrchestration });
 
   const orchestratorDeps = createOrchestratorDeps({
     repoRoot: cells.primaryRepoRoot,
-    scope: tmuxScope,
+    gateHost,
     taskMode: () => cells.state.taskMode,
     // THE one banner channel: `add-decision` announces a decision the moment
     // it registers one (constraint 11).
@@ -627,8 +651,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- THE ONE HANDOVER (lib/handoff-host.ts) ----------
   const handoff = createHandoffHost(pi, cells, {
-    runTmux: (argv, env) => runTmux(argv, env),
-    tmuxScope,
+    gateHost,
     judgeTaskText: judgeSelf.judgeTaskText,
     releaseWorktree,
     holdWorktree,
@@ -645,7 +668,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * (lib/judge-launch-host.ts). `judgeHierarchy()` is an ACCESSOR.
    */
   const registry = createJudgeRegistry(host, {
-    runTmux: (argv) => runTmux(argv),
+    gateHost,
     channelIO,
     roundBindingOf: (judge) => roundBindingOf(judge),
     copilotWaitSince: () => cells.copilotWaitSince,
@@ -688,49 +711,16 @@ export default function reviewGate(pi: ExtensionAPI) {
   };
 
   /**
-   * THE OWNERSHIP PROBE — the marker read that turns a name some registry
-   * mentions into a session this process may actually DECLARE. It rides the
-   * raw runner, so it cannot recurse into the declaration it is building.
-   */
-  const sessionOwnership = createOwnershipProbe(tmuxScope, (argv) => rawTmux(argv));
-
-  /**
-   * THE RUNNER, and the only one this file uses (2026-09-25). It carries THIS
-   * session's declaration on every call, so the four session commands are
-   * refused unless their target is one of the sessions this process holds
-   * coordinates for (its own, the lineage's judges, its children, its
-   * workers). The raw runner is imported under a different name so that
-   * forgetting the declaration is not expressible. Declared AFTER the
-   * registries it closes over (a `let` read before its declaration is a TDZ
-   * error).
-   */
-  const runTmux = (argv: readonly string[], env?: NodeJS.ProcessEnv, extraSessions?: readonly string[]) =>
-    rawTmux(argv, env ?? process.env, {
-      ownSessions: addressableSessions(
-        tmuxScope,
-        [
-          ...ownJudges().map((entry) => entry.tmuxSession),
-          ...(cells.state.orchestrator?.children ?? []).map((child) => child.tmuxSession),
-          ...workerRegistrySessions(),
-        ],
-        sessionOwnership,
-        // SESSIONS THIS CALL PROVED ARE GATE SESSIONS ANYWAY (the orphan
-        // sweep's marker-verified dead sessions, t2/t4 review P1).
-        extraSessions,
-      ),
-    });
-
-  /**
    * THE SESSION'S OWN NAME (2026-09-25, t2) — a REGISTRY RATHER THAN GATE
    * STATE: the name is global, renewed by a timer, and read by processes that
    * never share this session's state (lib/session-registry.ts).
    */
   const sessionNaming = createSessionNaming({
-    runTmux,
+    gateHost,
     sessionId: () => cells.state.sessionId?.trim() || undefined,
-    ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
+    ownPane: () => gateHost.ownPane(),
     // THE SERVER HALF OF THE COORDINATES (t4 review P1).
-    tmuxServer: () => tmuxServerFrom(process.env),
+    tmuxServer: () => gateHost.server(),
     repoRoot: () => cells.primaryRepoRoot,
     cwd: () => cells.cwd,
     mode: () => handoff.ownSessionKind(),
@@ -759,10 +749,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     liveSessions: () => liveSessionNames({
       root: sessionRegistryRootDir,
       io: sessionRegistryFiles,
-      runTmux: (argv) => runTmux(argv, undefined),
+      gateHost,
       alive: pidAlive,
       // WHICH SERVER THIS PROCESS IS ON (t4 review P1).
-      tmuxServer: () => tmuxServerFrom(process.env),
+      tmuxServer: () => gateHost.server(),
     }),
     self: () => ({
       name: sessionNaming.currentName(),
@@ -775,10 +765,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     log: (message) => log(`review-gate[session-message] ${message}`),
   });
 
-  /** WHAT THIS PANE IS DOING, for the tmux sidebar (lib/tmux-pane-state.ts). */
+  /** WHAT THIS PANE IS DOING, for the sidebar (lib/tmux-pane-state.ts). */
   const paneState = createPaneStateReporter({
-    run: (argv) => runTmux(argv),
-    pane: () => process.env.TMUX_PANE?.trim() || undefined,
+    gateHost,
+    pane: () => gateHost.ownPane(),
     identity: () => ({ sessionId: cells.state.sessionId?.trim() || undefined, repo: cells.primaryRepoRoot, kind: handoff.ownSessionKind() }),
     facts: () => ({
       dialogOpen: dialogsOnScreen() > 0,
@@ -825,7 +815,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   // AND THE SESSION'S OWN TMUX SESSION WITH IT (t4) — idempotent, so a /quit
   // that already closed it in session_shutdown finds nothing here.
   const closeScopeOnExit = (): void => {
-    const outcome = closeOwnSessionOnExit((argv) => runTmux(argv), tmuxScope, {
+    const outcome = closeOwnSessionOnExit(gateHost, {
       handedOff: handedOff(),
       children: cells.state.orchestrator?.children ?? [],
       judgeOrWorker: readJudgeSideEnv(process.env) !== undefined || readWorkerSideEnv(process.env) !== undefined,
@@ -869,7 +859,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     taskMode: () => cells.state.taskMode,
     env: () => process.env,
     interactive: () => sideEffectsEnabled(process.env, process.stdout.isTTY === true),
-    runTmux: (argv) => runTmux(argv),
+    notifier: gateHost.notifier,
   });
   // KIND TWO of three is registered once, for the whole process.
   notifyRuntime.armExitHandler();
@@ -1030,7 +1020,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   const judgeLanes = createJudgeLanes(host, {
     registry: { judgeHierarchy, setHierarchy, dropAudits },
-    runTmux: (argv) => runTmux(argv),
+    gateHost,
     loopGoalConfirmed,
     reviewScopeFor,
     settledConclusion,
@@ -1047,9 +1037,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     lanes: judgeLanes,
     reviewTargets,
     stageIsOn,
-    runTmux: (argv) => runTmux(argv),
+    gateHost,
     channelIO,
-    tmuxScope,
     resolveJudgeLaunch,
     sweepStaleJudgeSessionDirs,
   });
@@ -1060,7 +1049,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       reloadJudgeHierarchy, callerIdentities, paneOwnerIdentity,
     },
     channelIO,
-    runTmux: (argv) => runTmux(argv),
+    gateHost,
     announcedRequestIds: () => cells.announcedRequestIds,
     auditRoundDeps: (ctx) => auditRoundDeps(ctx),
     applyRoundCancel: (kind, root, ctx) => applyRoundCancel(kind, root, ctx),
@@ -1100,7 +1089,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     pi,
     cancelLedger,
     registry: { judgeHierarchy, setHierarchy, absorbJudgeModelEvents },
-    runTmux: (argv) => runTmux(argv),
+    gateHost,
     reviewTargets,
     stageIsOn,
     laneVerificationWaived,
@@ -1144,7 +1133,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
   const { armAcceptanceRound } = createAcceptanceHost(host, {
     reviewTargets,
-    runTmux: (argv) => runTmux(argv),
+    gateHost,
     stageIsOn,
     repoLabel,
     loopGoalConfirmed,
@@ -1166,8 +1155,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     registry,
     settle,
     channelIO,
-    runTmux: (argv: readonly string[]) => runTmux(argv),
-    tmuxScope,
+    gateHost,
     resolveToolRepo,
     auditRoundDeps,
     buildGoalAuditRound,
@@ -1192,8 +1180,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- worker panes (lib/worker-wiring.ts) ----------
   registerWorkerSurface(pi, cells, {
-    runTmux: (argv) => runTmux(argv),
-    tmuxScope,
+    gateHost,
     channelIO,
     paneOwnerIdentity,
     freshProjectConfig,
@@ -1249,8 +1236,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     registry,
     reapReviewScratch,
     armAcceptanceRound,
-    runTmux: (argv) => runTmux(argv),
-    tmuxScope,
+    gateHost,
     raiseBanner,
     releaseSessionName: () => sessionNaming.release(),
     sessionWorktree,
@@ -1416,6 +1402,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     runtime: () => ({ stopSupervisionTimer, stopRevivalTimer, startSessionNamingHeartbeat, stopSessionNamingHeartbeat, startPaneState }),
     cancelChildWaitTimer: () => l2.cancelChildWaitTimer(),
     notify: notifyRuntime,
+    hostReady: () => gateHost.ready(),
     naming: sessionNaming,
     closeScopeOnExit,
     log,

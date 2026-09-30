@@ -14,19 +14,17 @@ import type { createAcceptanceHost } from "./acceptance-host.ts";
 import { prEvidencePresent, stationArrivalProblems, type DeliveryStation } from "./delivery-station.ts";
 import type { GateState } from "./gate-state.ts";
 import { unmetRequirements } from "./gate-state-requirements.ts";
-import { removeJudge, tmuxServerFrom, windowClosable } from "./hierarchy.ts";
+import { removeJudge, windowClosable } from "./hierarchy.ts";
+import type { GateHost } from "./gate-host.ts";
 import type { JudgeRegistry } from "./judge-registry-host.ts";
 import { LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK } from "./loop-goal.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import { buildRejection } from "./rejection-copy.ts";
 import { headCommitTree, unreviewedTreesSince } from "./repo-facts.ts";
 import { resetLoopBudget, type SessionCells } from "./session-cells.ts";
-import { closeSessionWindow } from "./session-factory.ts";
 import { readInheritance } from "./session-inheritance.ts";
 import { successorDoneRefusal } from "./session-handoff.ts";
 import { existsSync, readFileSync } from "node:fs";
-import { closeOwnSession, type TmuxScope } from "./session-tmux-scope.ts";
 import { hasUnpushedCommits, probeMergedPr, probeOpenPr, type OpenPrArrival } from "./station-pr-evidence.ts";
 import { isEnforcedMode } from "./task-mode.ts";
 import type { ToolHost } from "./tool-host.ts";
@@ -53,8 +51,7 @@ export interface DeclareDoneToolDeps {
   registry: Pick<JudgeRegistry, "ownJudges" | "judgeHierarchy" | "setHierarchy" | "dropAudits">;
   reapReviewScratch(judgeId: string): void;
   armAcceptanceRound: ReturnType<typeof createAcceptanceHost>["armAcceptanceRound"];
-  runTmux: TmuxRunner;
-  tmuxScope: TmuxScope;
+  gateHost: GateHost;
   raiseBanner(opts: { kind: UserNotifyKind; detail: string; blocking?: boolean }): UserNotifyOutcome;
   releaseSessionName(): { released: boolean; error?: string };
   /** A relocated session's last gate + its /tmp worktree's removal (lib/session-worktree-host.ts). */
@@ -197,9 +194,8 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
         !(child.role === "acceptance" && acceptanceRoundInFlight(deps.stateForRepo(child.repoRoot).acceptance)),
       );
       if (ownedJudges.length > 0 && isEnforcedMode(state.taskMode)) {
-        const run = (argv: readonly string[]) => deps.runTmux(argv);
         const closed: string[] = [];
-        const tmuxServer = tmuxServerFrom(process.env);
+        const tmuxServer = deps.gateHost.server();
         for (const child of ownedJudges) {
           // `windowClosable`, not just "has a window id": a persisted id from a
           // tmux server that has since restarted names whatever now holds that
@@ -209,7 +205,7 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
               // The target is `<session>:<@window>` from the entry itself, so a
               // leftover id can only reach a window of THIS session's own tmux
               // session — never one the user owns.
-              if (closeSessionWindow(run, { ownSession: child.tmuxSession, windowId: child.windowId }).ok) {
+              if (deps.gateHost.closeWindow({ ownSession: child.tmuxSession, windowId: child.windowId }).ok) {
                 closed.push(child.windowId);
               }
             } catch { /* best effort */ }
@@ -410,7 +406,7 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
       // ── CLOSE MY OWN TMUX SESSION (2026-09-25) ── gated on the ownership
       // marker; a failure is REPORTED, never blocking. ENFORCED MODES ONLY
       // (explore/normal returned above and leave their children running).
-      const sessionClose = closeOwnSession((argv) => deps.runTmux(argv), deps.tmuxScope);
+      const sessionClose = deps.gateHost.closeChildren();
       // ── AND THE NAME GOES BACK WITH IT (t2, 2026-09-25) ── reported, never
       // blocking; lib/session-registry.ts's sweep is the backstop.
       const namingRelease = deps.releaseSessionName();

@@ -16,7 +16,6 @@ import {
   judgeIdsByOpener,
   parseHierarchySnapshot,
   loadHierarchySliceOnce,
-  tmuxServerFrom,
   judgeLive,
   windowClosable,
   judgeChildRecordOf,
@@ -24,6 +23,7 @@ import {
   paneIdUsable,
   type JudgeEntry,
 } from "../lib/hierarchy.ts";
+import { tmuxServerFrom } from "../lib/orchestrator-tmux.ts";
 
 function entry(over: Partial<JudgeEntry> = {}): JudgeEntry {
   return {

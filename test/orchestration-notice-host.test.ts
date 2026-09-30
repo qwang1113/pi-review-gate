@@ -36,6 +36,7 @@ import { createOrchestratorRuntime, type OrchestratorRuntimeDeps } from "../lib/
 import type { ChildSession, OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import type { SessionHost } from "../lib/session-host.ts";
 import type { SupervisionMemory } from "../lib/orchestrator-supervisor.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 
 const ORCH = "orch-notice-host";
 const CHILD_ID = "h1-muih4hsa";
@@ -61,7 +62,7 @@ async function realHost() {
     saveSupervisionMemory: (next: SupervisionMemory) => { memory = next; },
     channelHome: () => home,
     now: () => clock,
-    tmux: () => ({ ok: true, stdout: "%1\n", stderr: "" }),
+    gateHost: createTmuxHost({ run: () => ({ ok: true, stdout: "%1\n", stderr: "" }) }),
     waitActive: () => false,
     beginWait: () => () => {},
   };

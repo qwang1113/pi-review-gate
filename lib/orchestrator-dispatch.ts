@@ -368,8 +368,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
 
   const decor = childPaneDecor(taskId, task.title, childId);
   let evidence: DeliveryEvidence | undefined;
-  const opened = await openSessionWindow(deps.tmux, {
-    scope: deps.scope,
+  const opened = await openSessionWindow(deps.gateHost, {
     cwd,
     layout: "own-session-window",
     // The environment is assembled by the factory — one place for a contract

@@ -16,11 +16,11 @@ import { settleAuditRound, type SettleAuditRoundDeps } from "./audit-round-settl
 import { channelPathFor, judgeChannelTarget, type ChannelIO } from "./channel-io.ts";
 import { projectChannel, readChannel } from "./channel-projection.ts";
 import type { ScopeStampRecord } from "./gate-state-records.ts";
-import { judgeChildRecordOf, tmuxServerFrom, type JudgeEntry } from "./hierarchy.ts";
+import { judgeChildRecordOf, type JudgeEntry } from "./hierarchy.ts";
 import type { JudgeRegistry } from "./judge-registry-host.ts";
 import { buildStandardReport } from "./judge-report.ts";
 import { probeJudgeRound } from "./judge-wait-criteria.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import { existingStreamPath } from "./review-stream.ts";
 import type { SessionHost } from "./session-host.ts";
 
@@ -39,7 +39,7 @@ export function createJudgeRoundSettle(
       | "paneOwnerIdentity"
     >;
     channelIO: ChannelIO;
-    runTmux: TmuxRunner;
+    gateHost: GateHost;
     /** The questions a settle already announced (never re-announced). */
     announcedRequestIds(): Set<string>;
     /** lib/audit-round-host.ts */
@@ -53,7 +53,7 @@ export function createJudgeRoundSettle(
     judgeHierarchy, pendingAudits, ownJudges, absorbJudgeModelEvents,
     reloadJudgeHierarchy, callerIdentities, paneOwnerIdentity,
   } = deps.registry;
-  const { pi, channelIO, runTmux, auditRoundDeps, applyRoundCancel, resumeParkedReady } = deps;
+  const { pi, channelIO, gateHost, auditRoundDeps, applyRoundCancel, resumeParkedReady } = deps;
   const announcedQuestions = deps.announcedRequestIds;
 
   /** The judge of one role in one repo THIS session owns, if the registry still holds it. */
@@ -212,9 +212,9 @@ export function createJudgeRoundSettle(
     const deps = {
       channelIO: () => channelIO,
       channelHome: () => undefined,
-      tmux: (argv: readonly string[]) => runTmux(argv),
+      gateHost,
       now: () => Date.now(),
-      tmuxServer: () => tmuxServerFrom(process.env),
+      tmuxServer: () => gateHost.server(),
       paneOwner: () => paneOwnerIdentity(),
     };
     const notices: string[] = [];

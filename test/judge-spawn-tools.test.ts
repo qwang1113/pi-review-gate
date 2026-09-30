@@ -18,6 +18,7 @@ import {
   type ChannelIO,
 } from "../lib/channel-io.ts";
 import type { TmuxRunResult } from "../lib/orchestrator-tmux.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 
 type Exec = (params: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
 
@@ -146,7 +147,17 @@ function setup(over: Partial<{
     // the same wrapper, so a pane that OPENED always boots and reports (see
     // `reportBooted`). A test that wants a pane which never comes up says so by
     // failing the split, not by staying silent afterwards.
-    tmux: (argv) => {
+    gateHost: createTmuxHost({
+    // Every judge is a window of the opener's own tmux session (2026-09-25);
+    // the fake scope answers from this session's own identity.
+    scope: {
+      sessionId: () => "019fbb1d-9e78-7ebf-88bf-d104b8a270ed",
+      repoRoot: () => "/repo",
+      read: () => over.scopeRecord,
+      write: () => { /* the test reads what it needs off the hierarchy */ },
+      now: () => "2026-09-25T00:00:00.000Z",
+    },
+    run: (argv) => {
       const base = over.tmux ?? ((inner: readonly string[]) => {
         seen.push([...inner]);
         if (inner[0] === "list-sessions") return { ok: true, stdout: over.existingSessions?.join("\n") ?? "", stderr: "" };
@@ -163,16 +174,8 @@ function setup(over: Partial<{
       }
       return result;
     },
+    }),
     ownPane: () => (over.ownPane === undefined ? "%1" : over.ownPane ?? undefined),
-    // Every judge is a window of the opener's own tmux session (2026-09-25);
-    // the fake scope answers from this session's own identity.
-    scope: {
-      sessionId: () => "019fbb1d-9e78-7ebf-88bf-d104b8a270ed",
-      repoRoot: () => "/repo",
-      read: () => over.scopeRecord,
-      write: () => { /* the test reads what it needs off the hierarchy */ },
-      now: () => "2026-09-25T00:00:00.000Z",
-    },
     // Faithful to the real wiring: a session in tmux always has a server, and
     // every pane it opens is minted by that one.
     tmuxServer: () => (over.tmuxServer === undefined ? "sock,1" : over.tmuxServer ?? undefined),

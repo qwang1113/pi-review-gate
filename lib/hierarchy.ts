@@ -20,7 +20,7 @@
 
 import type { PendingAudit } from "./audit-round-specs.ts";
 import type { ModelHealth } from "./model-health.ts";
-import { isOwnSessionName, isWindowId } from "./orchestrator-tmux.ts";
+import { parseSessionCoords } from "./gate-host.ts";
 
  /** One judge pane the gate knows about. */
 export interface JudgeEntry {
@@ -240,19 +240,6 @@ export function findJudgeLane(
   return best;
 }
 
-/**
- * The tmux server this process talks to, as `<socket>,<server pid>`.
- *
- * `$TMUX` is `<socket path>,<server pid>,<session index>`; the first two
- * fields identify the SERVER, and the third (which session of it we are in)
- * is irrelevant to whether a pane id is comparable. `undefined` outside tmux.
- */
-export function tmuxServerFrom(env: NodeJS.ProcessEnv): string | undefined {
-  const raw = (env.TMUX ?? "").trim();
-  if (!raw) return undefined;
-  const [socket, pid] = raw.split(",");
-  return socket && pid ? `${socket},${pid}` : undefined;
-}
 
 /**
  * Is this judge's pane still running? — for "am I waiting on somebody?".
@@ -291,8 +278,9 @@ export function windowClosable(
   entry: Pick<JudgeEntry, "paneId" | "windowId" | "tmuxSession" | "tmuxServer">,
   currentServer: string | undefined,
 ): entry is Pick<JudgeEntry, "windowId" | "tmuxSession"> & { windowId: string; tmuxSession: string } {
-  if (!entry.windowId || !isWindowId(entry.windowId)) return false;
-  if (!entry.tmuxSession || !isOwnSessionName(entry.tmuxSession)) return false;
+  // A tmux pair or a desktop pair, by shape (lib/gate-host.ts): each host's
+  // close refuses the other's handles, so a mix is never closable.
+  if (parseSessionCoords({ windowId: entry.windowId, tmuxSession: entry.tmuxSession }) === undefined) return false;
   if (entry.tmuxServer === undefined || currentServer === undefined) return false;
   return entry.tmuxServer === currentServer;
 }

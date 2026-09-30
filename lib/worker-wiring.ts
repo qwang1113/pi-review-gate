@@ -17,16 +17,14 @@ import { dirname as pathDirname, join as pathJoin } from "node:path";
 import { effectiveAgentsConfig } from "./agents-config.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import type { ChannelIO } from "./channel-io.ts";
-import { tmuxServerFrom } from "./hierarchy.ts";
+import type { GateHost } from "./gate-host.ts";
 import { readJsonIfExists } from "./json-file.ts";
 import { judgePaneAlive } from "./judge-pane.ts";
 import { readJudgeSideEnv } from "./judge-side.ts";
 import { loadRegistry, validateSpec } from "./model-spec.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
 import type { ProjectConfig } from "./project-config.ts";
 import type { SessionCells } from "./session-cells.ts";
-import { closeSessionWindow, openSessionWindow } from "./session-factory.ts";
-import type { TmuxScope } from "./session-tmux-scope.ts";
+import { openSessionWindow } from "./session-factory.ts";
 import type { ToolHost } from "./tool-host.ts";
 import {
   parseWorkerRegistry,
@@ -42,8 +40,7 @@ export function registerWorkerSurface(
   host: ToolHost,
   cells: SessionCells,
   deps: {
-    runTmux: TmuxRunner;
-    tmuxScope: TmuxScope;
+    gateHost: GateHost;
     channelIO: ChannelIO;
     paneOwnerIdentity(): string;
     freshProjectConfig(root: string): ProjectConfig;
@@ -54,10 +51,10 @@ export function registerWorkerSurface(
     const repo = () => cells.activeRepoRoot.current;
     const workerRegistryPath = () => pathJoin(repo(), WORKER_REGISTRY_RELPATH);
     registerWorkerTools(host, {
-      ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
+      ownPane: () => deps.gateHost.ownPane(),
       paneAlive: (paneId) => {
         try {
-          return judgePaneAlive(deps.runTmux, paneId) === true;
+          return judgePaneAlive(deps.gateHost, paneId) === true;
         } catch {
           // Unreadable tmux is missing INFORMATION: a worker whose liveness
           // cannot be read is treated as gone, and `worker_submit` opens the
@@ -67,8 +64,7 @@ export function registerWorkerSurface(
         }
       },
       openPane: async (spec) => {
-        const opened = await openSessionWindow(deps.runTmux, {
-          scope: deps.tmuxScope,
+        const opened = await openSessionWindow(deps.gateHost, {
           cwd: spec.cwd,
           layout: "own-session-window",
           role: spec.role,
@@ -85,7 +81,7 @@ export function registerWorkerSurface(
           // session. The ERROR travels with the failure (2026-09-25, quality
           // round P2): `worker_close` has to tell “it is already gone” from
           // “tmux refused”, and a boolean cannot carry that.
-          const closed = closeSessionWindow(deps.runTmux, coords);
+          const closed = deps.gateHost.closeWindow(coords);
           return closed.ok ? { ok: true } : { ok: false, error: closed.error };
         } catch (error) {
           return { ok: false, error: (error as Error).message };
@@ -137,7 +133,7 @@ export function registerWorkerSurface(
         const verdict = validateSpec(loadRegistry(), spec);
         return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason };
       },
-      tmuxServer: () => tmuxServerFrom(process.env),
+      tmuxServer: () => deps.gateHost.server(),
       now: () => Date.now(),
       log: deps.log,
     });

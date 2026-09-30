@@ -30,7 +30,7 @@ import { alivePanes, currentPlan } from "./orchestrator-tool-kit.ts";
 import { superviseChildren } from "./orchestrator-supervisor.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import type { ChannelProjection } from "./channel-projection.ts";
-import { closeSessionWindow, windowAlreadyGone } from "./session-factory.ts";
+import { windowAlreadyGone } from "./session-factory.ts";
 
 /**
  * Does closing this child SETTLE it (keep the window) or ABORT it (kill it)?
@@ -134,7 +134,7 @@ export async function doClose(deps: OrchestratorDeps, params: Record<string, unk
     if (keep) {
       windowNote = `它的 window ${child.windowId ?? "（无记录）"} 保留在屏幕上，由你的 declare_done 统一回收`;
     } else if (child.windowId && child.tmuxSession) {
-      const killed = closeSessionWindow(deps.tmux, { ownSession: child.tmuxSession, windowId: child.windowId });
+      const killed = deps.gateHost.closeWindow({ ownSession: child.tmuxSession, windowId: child.windowId });
       if (!killed.ok && !windowAlreadyGone(killed.error)) {
         return fail(`review-gate: 子会话还没报完成，关闭就是中止它 —— 但关 window 失败：${killed.error}`);
       }

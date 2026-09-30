@@ -17,7 +17,8 @@ import { tmpdir } from "node:os";
 
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
-import { childJudgeRunning, hooksDirFor, runTmux } from "../lib/orchestrator-wiring.ts";
+import { childJudgeRunning, hooksDirFor } from "../lib/orchestrator-wiring.ts";
+import { runTmux } from "../lib/gate-host-tmux.ts";
 
 neutraliseHostGitConfig();
 neutraliseGateEnv();

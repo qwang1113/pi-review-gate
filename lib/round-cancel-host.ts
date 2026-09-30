@@ -13,12 +13,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { buildParkedReadyReplayNotice } from "./async-precommit-report.ts";
 import type { ReportConclusion } from "./channel-projection.ts";
 import type { GateState } from "./gate-state.ts";
-import { paneIdUsable, removeJudge, tmuxServerFrom, type JudgeEntry } from "./hierarchy.ts";
+import { paneIdUsable, removeJudge, type JudgeEntry } from "./hierarchy.ts";
 import type { JudgeCloseCtx } from "./judge-lane-host.ts";
 import { judgePaneAlive } from "./judge-pane.ts";
 import type { JudgeRegistry } from "./judge-registry-host.ts";
 import type { LoopStage } from "./loop-stages.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import {
   QUALITY_ROLE,
   qualityPrecondition,
@@ -38,7 +38,7 @@ export function createRoundCancel(
   deps: {
     pi: ExtensionAPI;
     registry: Pick<JudgeRegistry, "judgeHierarchy" | "setHierarchy" | "absorbJudgeModelEvents">;
-    runTmux: TmuxRunner;
+    gateHost: GateHost;
     /** lib/round-cancel-ledger.ts — what judge_submit / judge_wait read once the row is gone. */
     cancelLedger: RoundCancelLedger;
     reviewTargets: Map<string, ReviewTarget>;
@@ -60,7 +60,7 @@ export function createRoundCancel(
 ) {
   const { judgeHierarchy, setHierarchy, absorbJudgeModelEvents } = deps.registry;
   const {
-    pi, runTmux, cancelLedger, reviewTargets, stageIsOn, laneVerificationWaived, judgeChildByRole,
+    pi, gateHost, cancelLedger, reviewTargets, stageIsOn, laneVerificationWaived, judgeChildByRole,
     closeJudgePaneOf, reapReviewScratch, precommitLaneRunning, abortPrecommitLane,
     qualityRoundInFlight, recordReviewVerdict,
   } = deps;
@@ -102,13 +102,12 @@ export function createRoundCancel(
     // skipped by the next dispatch — lib/judge-model-rotation.ts), and the
     // absorb reads its cursor off the entry that is about to be removed.
     absorbJudgeModelEvents(root, entry.judgeId);
-    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
-    const tmuxServer = tmuxServerFrom(process.env);
-    const run = (argv: readonly string[]) => runTmux(argv);
+    const ownPane = gateHost.ownPane();
+    const tmuxServer = gateHost.server();
     const alive = entry.paneId && paneIdUsable(entry, tmuxServer)
-      ? judgePaneAlive(run, entry.paneId)
+      ? judgePaneAlive(gateHost, entry.paneId)
       : undefined;
-    if (alive === true) closeJudgePaneOf(entry, { ownPane, tmuxServer, run });
+    if (alive === true) closeJudgePaneOf(entry, { ownPane, tmuxServer });
     setHierarchy(removeJudge(judgeHierarchy(), entry.judgeId));
     cancelLedger.note(root, { role, judgeId: entry.judgeId, why });
     reapReviewScratch(entry.judgeId);

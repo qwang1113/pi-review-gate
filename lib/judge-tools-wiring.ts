@@ -13,7 +13,7 @@ import { join as pathJoin } from "node:path";
 import { settleAuditRound } from "./audit-round-settle.ts";
 import type { createAuditRoundHost } from "./audit-round-host.ts";
 import type { ChannelIO } from "./channel-io.ts";
-import { judgeChildRecordOf, tmuxServerFrom } from "./hierarchy.ts";
+import { judgeChildRecordOf } from "./hierarchy.ts";
 import type { createJudgeLanes } from "./judge-lane-host.ts";
 import type { createJudgeLaunch } from "./judge-launch-host.ts";
 import { judgeWorkDirFor } from "./judge-lifecycle.ts";
@@ -24,21 +24,19 @@ import type { JudgeSessionToolDeps } from "./judge-session-tools.ts";
 import type { JudgeSpawnToolDeps } from "./judge-spawn-tools.ts";
 import { buildPlanAuditTask, formatPlanAuditCarryover, planAuditHash } from "./orchestrator-plan-audit.ts";
 import { formatPlanSummary } from "./orchestrator-plan.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import { readPlanFile } from "./orchestrator-wiring.ts";
 import type { createRoundCancel } from "./round-cancel-host.ts";
 import type { RoundCancelLedger } from "./round-cancel-ledger.ts";
 import type { SessionCells } from "./session-cells.ts";
 import { sessionDirForCwd } from "./session-dir.ts";
 import type { SessionRepos } from "./session-repos-host.ts";
-import type { TmuxScope } from "./session-tmux-scope.ts";
 
 export interface JudgeToolsWiringDeps {
   registry: JudgeRegistry;
   settle: ReturnType<typeof createJudgeRoundSettle>;
   channelIO: ChannelIO;
-  runTmux: TmuxRunner;
-  tmuxScope: TmuxScope;
+  gateHost: GateHost;
   resolveToolRepo: SessionRepos["resolveToolRepo"];
   auditRoundDeps: ReturnType<typeof createAuditRoundHost>["auditRoundDeps"];
   buildGoalAuditRound: ReturnType<typeof createAuditRoundHost>["buildGoalAuditRound"];
@@ -114,8 +112,8 @@ export function buildJudgeSessionDeps(cells: SessionCells, deps: JudgeToolsWirin
       const ms = Date.parse(at);
       return Number.isFinite(ms) ? ms : undefined;
     },
-    tmux: (argv) => deps.runTmux(argv),
-    tmuxServer: () => tmuxServerFrom(process.env),
+    gateHost: deps.gateHost,
+    tmuxServer: () => deps.gateHost.server(),
     now: () => Date.now(),
     readText: (path) => {
       try {
@@ -176,12 +174,11 @@ export function buildJudgeSpawnDeps(cells: SessionCells, deps: JudgeToolsWiringD
     saveHierarchy: (next) => registry.setHierarchy(next),
     channelIO: () => deps.channelIO,
     channelHome: () => undefined,
-    tmux: (argv) => deps.runTmux(argv),
-    ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
-    // Every judge this session opens is a window of THIS session's own tmux
-    // session — never a pane taken from the user's window.
-    scope: deps.tmuxScope,
-    tmuxServer: () => tmuxServerFrom(process.env),
+    // Every judge this session opens is a window of THIS session's own group
+    // — never a pane taken from the user's window.
+    gateHost: deps.gateHost,
+    ownPane: () => deps.gateHost.ownPane(),
+    tmuxServer: () => deps.gateHost.server(),
     now: () => Date.now(),
     sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
     resolveRepo: (requested) => {

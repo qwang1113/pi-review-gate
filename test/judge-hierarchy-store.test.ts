@@ -14,6 +14,7 @@ import { mergeHierarchySlice, readHierarchySlice, writeHierarchySlice } from "..
 import { createJudgeRegistry, HIERARCHY_FILENAME } from "../lib/judge-registry-host.ts";
 import { registerJudge, removeJudge, type JudgeEntry } from "../lib/hierarchy.ts";
 import type { SessionHost } from "../lib/session-host.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 import { appendRecord, judgeChannelTarget } from "../lib/channel-io.ts";
 import { memoryChannelIO } from "./helpers/fake-orchestration.ts";
 
@@ -31,7 +32,7 @@ function process_(root: string, sessionId: string) {
     ctx: () => undefined,
   } as unknown as SessionHost;
   const reg = createJudgeRegistry(host, {
-    runTmux: () => ({ ok: true, stdout: "", stderr: "" }),
+    gateHost: createTmuxHost({ run: () => ({ ok: true, stdout: "", stderr: "" }) }),
     channelIO: {} as never,
     roundBindingOf: () => ({ kind: "cursor-only" }) as never,
     copilotWaitSince: () => undefined,
@@ -200,7 +201,7 @@ test("a heartbeat is not activity: a judge's silence is measured from its last P
     ctx: () => undefined,
   } as unknown as SessionHost;
   const reg = createJudgeRegistry(host, {
-    runTmux: () => ({ ok: true, stdout: "", stderr: "" }),
+    gateHost: createTmuxHost({ run: () => ({ ok: true, stdout: "", stderr: "" }) }),
     channelIO: io, // in memory: the default-home path below never touches disk
     roundBindingOf: () => ({ kind: "cursor-only" }) as never,
     copilotWaitSince: () => undefined,

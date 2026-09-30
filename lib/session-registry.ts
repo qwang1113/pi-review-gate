@@ -58,8 +58,8 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { isOwnSessionName, type TmuxRunner } from "./orchestrator-tmux.ts";
-import { listServerPanes } from "./judge-pane.ts";
+import { isOwnSessionName } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import { paneIdUsable } from "./hierarchy.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 
@@ -306,10 +306,8 @@ export interface RegistryDeps {
   /** `sessionRegistryRoot()` in production. */
   root: string;
   io: RegistryIO;
-  /** Runs one tmux argv (the extension's own declared runner). `ownSessions`
-   * carries session names the CALLER has just proven are gate sessions — a dead
-   * session's own dedicated session, which no live process can declare. */
-  runTmux: TmuxRunner;
+  /** The session's host (lib/gate-host.ts): the live-pane list and the orphan reclaim. */
+  gateHost: Pick<GateHost, "livePanes" | "reclaimScope" | "sweepUnnamedScopes">;
   /**
    * WHICH tmux server this process talks to (`<socket>,<server pid>` from
    * `$TMUX`), or undefined when it runs outside tmux or cannot read it.
@@ -399,10 +397,10 @@ export function classifyEntry(deps: RegistryDeps, entry: SessionRegistryEntry): 
   if (age === undefined) return "unknown";
   if (age < SESSION_STALE_MS) return "live";
   // Stale — now ask the two questions that separate "blocked" from "gone".
-  // The pane list comes from the ONE reader of it (lib/judge-pane.ts), so this
-  // classification and the judge probe cannot disagree about what an
+  // The pane list comes from the ONE reader of it (the host's `livePanes`), so
+  // this classification and the judge probe cannot disagree about what an
   // unreadable list means (2026-09-25, quality round P2).
-  const panes = listServerPanes((argv) => deps.runTmux(argv));
+  const panes = deps.gateHost.livePanes();
   if (panes === undefined) return "unknown";
   // A heartbeat that stopped while the pane lives is a session that is stuck or
   // suspended, not one that exited: it keeps its name.

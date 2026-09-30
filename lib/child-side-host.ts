@@ -46,6 +46,7 @@ import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 import { contextPercentOf } from "./session-handoff.ts";
 import { createOpenerWatch, enforceOpenerBinding } from "./opener-process.ts";
 import type { SessionHost } from "./session-host.ts";
+import { hostOwnPane } from "./gate-host.ts";
 
 /** What the child side needs from the session beyond the shared host. */
 export interface ChildSideDeps {
@@ -79,7 +80,7 @@ export function createChildSide(host: SessionHost, deps: ChildSideDeps) {
       if (!isOwnedChildPane(childId, state.sessionId)) {
         return undefined;
       }
-      const paneId = process.env.TMUX_PANE?.trim();
+      const paneId = hostOwnPane(process.env);
       return {
         io: channelIO,
         target: { orchestrationId, childId },

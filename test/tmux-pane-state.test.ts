@@ -6,6 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
+import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 import {
   createPaneStateReporter,
   decidePaneState,
@@ -32,7 +33,7 @@ function harness(opts: { pane?: string; fail?: boolean } = {}) {
     return { ok: !opts.fail, stdout: "", stderr: "" };
   };
   const reporter = createPaneStateReporter({
-    run,
+    gateHost: createTmuxHost({ run }),
     pane: () => ("pane" in opts ? opts.pane : "%5"),
     identity: () => ({ sessionId: "sid-1", repo: "/w/repo", kind: "loop" }),
     facts: () => facts,

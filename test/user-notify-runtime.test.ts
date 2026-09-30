@@ -12,6 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createUserNotifyRuntime } from "../lib/user-notify-runtime.ts";
+import { createTmuxNotifier } from "../lib/gate-host-tmux-notify.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { NOTIFY_DEDUP_MS } from "../lib/user-notify.ts";
 
@@ -60,15 +61,20 @@ function harness(over: {
     return (realOn as unknown as (e: string, f: () => void) => unknown)(event, fn) as unknown;
   };
   let runtime: ReturnType<typeof createUserNotifyRuntime>;
+  const env = () => ({ TMUX_PANE: "%7", __CFBundleIdentifier: "com.mitchellh.ghostty", ...(over.env ?? {}) } as NodeJS.ProcessEnv);
   try {
     runtime = createUserNotifyRuntime({
       state: () => state,
       persist: () => { persists += 1; },
       repoName: () => "pi-review-gate",
       taskMode: () => state.taskMode,
-      env: () => ({ TMUX_PANE: "%7", __CFBundleIdentifier: "com.mitchellh.ghostty", ...(over.env ?? {}) } as NodeJS.ProcessEnv),
+      env,
       interactive: () => over.interactive ?? true,
-      runTmux: (argv) => {
+      now: () => T0,
+      // THE TMUX HOST'S BANNER (lib/gate-host-tmux-notify.ts), every host call faked.
+      notifier: createTmuxNotifier({
+      env,
+      run: (argv) => {
         tmuxCalls.push([...argv]);
         if (over.tmuxThrows) throw new Error("tmux exploded");
         // THE THREE QUESTIONS THE RUNTIME ASKS tmux: where is this session's
@@ -90,10 +96,10 @@ function harness(over: {
         if (typeof over.frontBundleId === "function") return over.frontBundleId();
         return "frontBundleId" in over ? over.frontBundleId : "com.other.app";
       },
-      now: () => T0,
       spawnDetached: (argv) => { sent.push([...argv]); },
       spawnBlocking: (argv) => { blocking.push([...argv]); },
       resolveNotifier: () => ("notifier" in over ? over.notifier : "/opt/homebrew/bin/terminal-notifier"),
+      }),
     });
     runtime.armExitHandler();
   } finally {

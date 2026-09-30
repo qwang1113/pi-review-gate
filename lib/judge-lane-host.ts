@@ -15,7 +15,6 @@ import {
   findJudgeLane,
   paneIdUsable,
   removeJudge,
-  tmuxServerFrom,
   windowClosable,
   type JudgeEntry,
 } from "./hierarchy.ts";
@@ -23,10 +22,9 @@ import { judgePaneAlive } from "./judge-pane.ts";
 import { judgeScratchDir, judgeSessionIdFor, reviewScratchWorktrees, shortRepoHash } from "./judge-process.ts";
 import type { JudgeRegistry } from "./judge-registry-host.ts";
 import { decideJudgeRotation, judgeObjectId, type JudgeRotationDecision } from "./judge-rotation.ts";
-import type { TmuxRunner } from "./orchestrator-tmux.ts";
+import type { GateHost } from "./gate-host.ts";
 import type { SettledConclusion } from "./review-carryover.ts";
 import type { ReviewScopeDecision } from "./review-scope.ts";
-import { closeSessionWindow } from "./session-factory.ts";
 import type { SessionHost } from "./session-host.ts";
 
 /**
@@ -35,19 +33,19 @@ import type { SessionHost } from "./session-host.ts";
  * `opener` used to be here too — the label-bar release compared it against
  * each entry's opener to count "my" panes. That judgement is deleted
  * (2026-09-17, user decision), and with it the parameter: what remains is
- * the pane id to close and the runner that closes it.
+ * the pane id to close and the server its ids belong to; the host that closes
+ * it is the lanes' own (`deps.gateHost`).
  */
 export interface JudgeCloseCtx {
   ownPane: string | undefined;
   tmuxServer: string | undefined;
-  run: TmuxRunner;
 }
 
 export function createJudgeLanes(
   host: SessionHost,
   deps: {
     registry: Pick<JudgeRegistry, "judgeHierarchy" | "setHierarchy" | "dropAudits">;
-    runTmux: TmuxRunner;
+    gateHost: GateHost;
     loopGoalConfirmed(root: string, st: GateState): boolean;
     reviewScopeFor(root: string, st: GateState): ReviewScopeDecision;
     settledConclusion(st: GateState): SettledConclusion | undefined;
@@ -55,7 +53,7 @@ export function createJudgeLanes(
   },
 ) {
   const { judgeHierarchy, setHierarchy, dropAudits } = deps.registry;
-  const { runTmux, loopGoalConfirmed, reviewScopeFor, settledConclusion, previousRoundFindings } = deps;
+  const { gateHost, loopGoalConfirmed, reviewScopeFor, settledConclusion, previousRoundFindings } = deps;
   const stateForRepo = (root: string) => host.stateFor(root);
 
   /**
@@ -128,9 +126,8 @@ export function createJudgeLanes(
       retired = true;
       retireJudgeLane(previous, {
         root,
-        ownPane: process.env.TMUX_PANE?.trim() || undefined,
-        tmuxServer: tmuxServerFrom(process.env),
-        run: (argv: readonly string[]) => runTmux(argv),
+        ownPane: gateHost.ownPane(),
+        tmuxServer: gateHost.server(),
       });
     };
     return { decision, ...(previous === undefined ? {} : { previous }), retirePrevious };
@@ -184,7 +181,7 @@ export function createJudgeLanes(
   function closeJudgePaneOf(entry: JudgeEntry, ctx: JudgeCloseCtx): void {
     if (!windowClosable(entry, ctx.tmuxServer)) return;
     try {
-      closeSessionWindow(ctx.run, { ownSession: entry.tmuxSession, windowId: entry.windowId });
+      gateHost.closeWindow({ ownSession: entry.tmuxSession, windowId: entry.windowId });
     } catch { /* best effort */ }
   }
 
@@ -210,7 +207,7 @@ export function createJudgeLanes(
   ): void {
     const usable = paneIdUsable(entry, ctx.tmuxServer);
     const alive = usable && entry.paneId
-      ? judgePaneAlive(ctx.run, entry.paneId)
+      ? judgePaneAlive(gateHost, entry.paneId)
       : undefined;
     if (alive === true) closeJudgePaneOf(entry, ctx);
     // The retired lane's scratch worktrees can never be used again — whether
