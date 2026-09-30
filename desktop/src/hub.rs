@@ -223,7 +223,7 @@ impl Hub {
         let targets = match p {
             CloseParams::Children {} => st.tree.group_of(requester),
             CloseParams::Session { host_session_id: id } if !st.tree.is_alive(id) => vec![],
-            CloseParams::Session { host_session_id: id } if st.tree.may_write(requester, id) => vec![id.clone()],
+            CloseParams::Session { host_session_id: id } if st.tree.may_close(requester, id) => vec![id.clone()],
             CloseParams::Session { host_session_id: id } => {
                 return Err(WireError::new(ErrorCode::Forbidden, format!("`{id}` is not yours to close")));
             }

@@ -64,7 +64,7 @@ import { nodeChannelIO, type ChannelIO } from "../lib/channel-io.ts";
 import type { ReportConclusion } from "../lib/channel-projection.ts";
 import { describeToolActivity } from "../lib/orchestrator-child-channel.ts";
 import { sanitizeScopeRecord, type TmuxScope } from "../lib/session-tmux-scope.ts";
-import { createGateHost } from "../lib/gate-host.ts";
+import { createGateHost, hostIsInteractive } from "../lib/gate-host.ts";
 import { createTmuxHost } from "../lib/gate-host-tmux.ts";
 import { createDesktopHost } from "../lib/gate-host-desktop.ts";
 import { createDesktopClient, helloFor, type DesktopClient } from "../lib/desktop-host-client.ts";
@@ -862,7 +862,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     repoName: () => pathBasename(cells.primaryRepoRoot),
     taskMode: () => cells.state.taskMode,
     env: () => process.env,
-    interactive: () => sideEffectsEnabled(process.env, process.stdout.isTTY === true),
+    interactive: () => sideEffectsEnabled(process.env, hostIsInteractive(process.env, process.stdout.isTTY === true)),
     notifier: gateHost.notifier,
   });
   // KIND TWO of three is registered once, for the whole process.

@@ -188,6 +188,15 @@ export function hostServer(env: NodeJS.ProcessEnv): string | undefined {
   return tmuxServerFrom(env);
 }
 
+/**
+ * Is a human watching this process? Under the desktop host pi runs `--mode rpc`
+ * with piped stdout, so the TTY reading is always false there — the client's
+ * window IS the interactive surface. Tmux / invalid: the TTY decides.
+ */
+export function hostIsInteractive(env: NodeJS.ProcessEnv, isTTY: boolean): boolean {
+  return isTTY || resolveHostEnv(env).kind === "desktop";
+}
+
 // ---------------------------------------------------------------------------
 // The unavailable host
 // ---------------------------------------------------------------------------

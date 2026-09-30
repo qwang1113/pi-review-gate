@@ -102,7 +102,9 @@ socket 不是绝对路径或超长、缺 session id）**fail-closed**：prg 拒�
 - **客户端从不自己杀会话**（客户端退出除外）：生命周期归 prg——孩子因 opener 进程消失而自行退出，
   残留由 prg 的孤儿清扫用 `session.close` 回收。
 - **授权**（客户端强制，prg 自己的归属校验照旧）：写操作 `session.close` / `session.decorate`
-  只许作用于 **请求者自己、它的后代、或父会话已不在的孤儿**，否则 `forbidden`；`session.pin` 只作用于
+  只许作用于 **请求者自己、它的后代、或父会话已不在的孤儿**，否则 `forbidden`；
+  `session.close` 另有一条：`role:"successor"` 的会话可以关掉**打开它的那个会话**（接力前任；
+  门禁的后继者证明接手后由它关前任，`lib/handoff-host.ts`）；`session.pin` 只作用于
   请求者自己的组。`focus` 与 `session.list` 对任何会话开放（通知点击要跳到别的会话；接手的项目经理
   要看见前任的孩子）。
 
@@ -137,7 +139,7 @@ socket 不是绝对路径或超长、缺 session id）**fail-closed**：prg 拒�
 - **`session.pin`**：给请求者自己的子会话组下铉住（交接前 `pinOwnSession`、开编排子会话时的
   `pin: "orchestration-child"`）。tmux 下写失败会拒绝开窗；桌面下 prg 先 `session.pin`、成功后
   再 `session.open`，pin 失败同样拒绝开窗。
-- **`session.close`**：`session` 关一个会话（也可以是请求者自己：接力前任关自己）；`children`
+- **`session.close`**：`session` 关一个会话（也可以是请求者自己，或接力后继者关它的前任）；`children`
   关请求者的整个子会话组（`closeOwnSession`，`declare_done` 收尾）。**幂等**：目标已不在 ⇒
   `ok` 且 `closed` 不含它（对应 `windowAlreadyGone`）。关 = 客户端结束该进程（先关 stdin 让 pi
   正常退出，宽限期后强杀，宽限期由 t4 定）。
@@ -294,7 +296,7 @@ Rust 端的回归建议：用同一个 schema 校验自己产出的每种响应�
 | 5 | `kill-session -t rg-…` | `buildKillSessionArgv` ← `closeOwnSession`（`declare_done`、进程退出） | 关掉本会话的整个专属 session | `session.close {target:"children"}` |
 | 5b | `kill-session`（建后回滚） | `openScopeWindow` 写归属标记失败时 | 回收刚建却没法标记的 session | N/A：桌面下归属由连接身份当场记录，没有「建了但没标记」的中间态 |
 | 5c | `kill-session`（孤儿清扫） | `session-orphan-sweep.ts` | 回收已死会话留下的专属 session | `session.list` 找父会话已不在、`groupPin` 为 `null` 的孤儿 → `session.close {target:"session"}`（孤儿授权） |
-| 6 | `kill-pane -t %id` | `buildKillPaneArgv` ← `closeSessionPane` | 接力前任关掉自己那个 pane | `session.close {target:"session", hostSessionId:<自己>}` |
+| 6 | `kill-pane -t %id` | `buildKillPaneArgv` ← `closeSessionPane` | 接力后继者证明接手后关掉前任那个 pane | `session.close {target:"session", hostSessionId:<前任>}`（后继者→父会话授权） |
 | 7 | `list-panes -a -F '#{pane_id}'` | `buildListServerPanesArgv` ← `judge-pane.ts` `listServerPanes` / `judgePaneAlive`、`paneRecoverability` | 判存活（失败 = 未知） | `session.list` + `livenessOf` |
 | 8 | `list-panes -a -F <多字段>` | `tmux-sidebar-collect.ts` `buildListAllPanesArgv`（侧栏） | 侧栏读每个 pane 的 `@rg_*` 状态 | N/A：侧栏是客户端原生界面；它自己持有 `session.decorate` 写入的全部状态 |
 | 9 | `list-panes -t <window>` | `tmux-sidebar-lock.ts` `buildWindowPanesArgv` | 侧栏锁输入前列同窗 pane | N/A：客户端原生（各会话输入框是客户端控件） |

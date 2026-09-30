@@ -121,6 +121,13 @@ impl SessionTree {
         target == requester || self.is_descendant(requester, target) || self.is_orphan(target)
     }
 
+    /// `session.close`: `may_write`, plus a relay successor closing the predecessor that
+    /// opened it — the gate's successor proves its takeover, then closes that one (§5).
+    pub fn may_close(&self, requester: &str, target: &str) -> bool {
+        self.may_write(requester, target)
+            || self.get(requester).is_some_and(|s| s.role == Role::Successor && s.parent.as_deref() == Some(target))
+    }
+
     /// `session.list`: live sessions only; `groupPin` is the pin the parent put on its group.
     pub fn list(&self) -> Vec<ListEntry> {
         self.sessions
@@ -226,6 +233,16 @@ mod tests {
         assert!(t.is_orphan(&judge));
         assert!(t.may_write(&other, &judge), "orphans are writable by anyone");
         assert!(!t.is_orphan(&other), "roots are never orphans");
+    }
+
+    #[test]
+    fn a_successor_may_close_its_predecessor_only() {
+        let (mut t, root, judge, _) = tree();
+        let next = t.insert(Some(&root), Role::Successor, Some(Placement::BesideOpener), "next", "/r");
+        assert!(t.may_close(&next, &root), "the relay successor closes the predecessor");
+        assert!(!t.may_write(&next, &root), "but may not decorate it");
+        assert!(!t.may_close(&next, &judge), "nor close a sibling");
+        assert!(!t.may_close(&judge, &root), "a judge may not close its parent");
     }
 
     #[test]

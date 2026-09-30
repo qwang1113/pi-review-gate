@@ -19,6 +19,7 @@ import {
   createGateHost,
   desktopHandle,
   desktopIdOf,
+  hostIsInteractive,
   hostOwnPane,
   hostServer,
   isSessionHandle,
@@ -328,4 +329,8 @@ test("handles: disjoint from tmux ids by shape, read back fail-closed", () => {
   assert.equal(hostOwnPane({ TMUX_PANE: "%9" }), "%9");
   assert.equal(hostServer({ TMUX: "/s,1,0" }), "/s,1");
   assert.equal(hostOwnPane({ RG_HOST: "bogus", TMUX_PANE: "%9" }), undefined, "an invalid env has no pane at all");
+  assert.equal(hostIsInteractive(desktopEnv, false), true, "pi runs --mode rpc under the desktop client: no TTY, still a human");
+  assert.equal(hostIsInteractive({}, false), false);
+  assert.equal(hostIsInteractive({}, true), true);
+  assert.equal(hostIsInteractive({ RG_HOST: "bogus" }, false), false);
 });
