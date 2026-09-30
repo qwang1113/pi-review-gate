@@ -17,6 +17,8 @@ pub const ENV_SESSION: &str = "RG_HOST_SESSION";
 /// `x-inheritedGateEnv`: `RG_` keys that survive the child-env scrub (§2).
 pub const INHERITED_GATE_ENV: &[&str] = &["RG_NO_SIDE_EFFECTS"];
 pub const MAX_SOCKET_PATH_BYTES: usize = 103;
+/// `dialog.open` options / defaultChecked / `checked` size guard (TS `DIALOG_MAX_OPTIONS`).
+pub const MAX_DIALOG_OPTIONS: usize = 16;
 
 #[cfg(test)]
 pub const METHODS: &[&str] = &[
@@ -435,8 +437,8 @@ fn check_opt(field: &str, s: &Option<String>, min: usize, max: usize) -> Result<
 }
 
 fn check_options(field: &str, items: &[String], min: usize) -> Result<(), WireError> {
-    if !(min..=16).contains(&items.len()) {
-        return Err(WireError::bad(format!("`{field}` must hold {min}..=16 items")));
+    if !(min..=MAX_DIALOG_OPTIONS).contains(&items.len()) {
+        return Err(WireError::bad(format!("`{field}` must hold {min}..={MAX_DIALOG_OPTIONS} items")));
     }
     items.iter().try_for_each(|o| check_len(field, o, 1, 4096))
 }

@@ -76,6 +76,19 @@ fn constants_match_the_schema() {
     assert_eq!(s["x-methods"], json!(METHODS));
     let codes: Vec<&str> = ErrorCode::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(s["x-wireErrorCodes"], json!(codes));
+    for shape in s["$defs"]["dialog.open.params"]["oneOf"].as_array().unwrap() {
+        assert_eq!(shape["properties"]["options"]["maxItems"], json!(MAX_DIALOG_OPTIONS));
+    }
+}
+
+#[test]
+fn dialog_option_bound_is_the_schema_bound() {
+    let with = |n: usize| {
+        let options: Vec<String> = (0..n).map(|i| format!("o{i}")).collect();
+        json!({"shape": "choice", "dialogId": "d", "title": "t", "options": options, "declineRow": "x", "back": false})
+    };
+    assert!(decode_params("dialog.open", with(MAX_DIALOG_OPTIONS)).is_ok());
+    assert!(decode_params("dialog.open", with(MAX_DIALOG_OPTIONS + 1)).is_err());
 }
 
 #[test]

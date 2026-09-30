@@ -25,7 +25,8 @@ impl Drop for Fixture {
 
 fn fixture() -> Fixture {
     let n = DIRS.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("pdt-{}-{n}", std::process::id()));
+    // Not `temp_dir()`: a long $TMPDIR would push the socket past sun_path's limit.
+    let dir = PathBuf::from(format!("/tmp/pdt-{}-{n}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let script = dir.join("fake-pi");
     fs::write(&script, "#!/bin/sh\nenv > \"$(dirname \"$0\")/$RG_HOST_SESSION.env\"\nexec cat >/dev/null\n").unwrap();
