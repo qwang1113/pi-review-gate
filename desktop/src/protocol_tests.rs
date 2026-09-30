@@ -81,6 +81,24 @@ fn constants_match_the_schema() {
     }
 }
 
+/// A value the TS side adds to one of these vocabularies (e.g. a new `CHILD_STATES` entry)
+/// regenerates the schema; this makes the Rust decoder fail here instead of on the wire.
+#[test]
+fn enum_vocabularies_decode_every_schema_value() {
+    fn check<T: serde::de::DeserializeOwned>(path: &str) {
+        let values = schema().pointer(path).and_then(Value::as_array).cloned().unwrap_or_else(|| panic!("no enum at {path}"));
+        for v in values {
+            assert!(serde_json::from_value::<T>(v.clone()).is_ok(), "{path}: {v} is not decodable");
+        }
+        assert!(serde_json::from_value::<T>(json!("zz-unknown")).is_err(), "{path} accepts anything");
+    }
+    check::<Role>("/$defs/session.open.params/properties/role/enum");
+    check::<Role>("/$defs/session.list.result/properties/sessions/items/properties/role/enum");
+    check::<Placement>("/$defs/session.open.params/properties/placement/enum");
+    check::<PaneState>("/$defs/session.decorate.params/properties/state/enum");
+    check::<NotifyKind>("/$defs/notify.params/properties/kind/enum");
+}
+
 #[test]
 fn dialog_option_bound_is_the_schema_bound() {
     let with = |n: usize| {
