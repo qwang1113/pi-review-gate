@@ -142,6 +142,8 @@ impl Draft {
         if self.view == View::Form {
             self.text = to_text(&self.value);
             self.view = View::Json;
+            // The JSON shows each field's last good value; a box's unparsable input is left behind with its error.
+            self.field_errors.clear();
         }
     }
 
@@ -336,6 +338,10 @@ mod tests {
         assert_eq!((d.error_count(), d.get("maxRounds")), (1, Some(&json!(8))));
         d.edit_number("maxRounds", "12");
         assert_eq!((d.error_count(), d.get("maxRounds")), (0, Some(&json!(12))));
+        d.edit_number("maxRounds", "8x");
+        d.to_json_view();
+        assert_eq!(d.error_count(), 0, "the JSON view carries the last good value, not the stale error");
+        assert!(d.text.contains("\"maxRounds\": 12"));
     }
 
     #[test]
