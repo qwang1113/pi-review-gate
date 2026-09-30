@@ -72,6 +72,10 @@ pub struct Shell {
     pub(crate) reduce_motion: bool,
     /// Last clock phase painted (cursor blink half-period / whole seconds of a running tool).
     clock_phase: u64,
+    /// The selection the view last prepared for (a host `focus` can change it behind our back).
+    seen_selected: Option<String>,
+    /// The selected session showed a dialog on the last tick.
+    had_dialog: bool,
     pub(crate) error: Option<String>,
     seen: u64,
     _subs: Vec<Subscription>,
@@ -151,6 +155,8 @@ impl Shell {
             scroll_anim: None,
             reduce_motion: false,
             clock_phase: 0,
+            seen_selected: None,
+            had_dialog: false,
             error: None,
             seen: u64::MAX,
             _subs: subs,
@@ -189,11 +195,21 @@ impl Shell {
                 cx.notify();
             }
         }
-        // A closed drawer hands the keys back to the composer (§6.1).
-        let has_dialog = self.selected().is_some_and(|s| self.active_dialog(&s).is_some());
-        if !has_dialog && self.dialog_focus.is_focused(window) {
+        // A host `focus` request or a notification click selected a session directly.
+        let selected = self.selected();
+        if selected != self.seen_selected {
+            self.seed_selection(selected.as_deref());
+            self.focus_dialog_if_any(window, cx);
+            cx.notify();
+        }
+        // A closed drawer hands the keys back to the composer (§6.1) — also when
+        // the reason editor that held them was dropped and focus fell nowhere.
+        let has_dialog = selected.is_some_and(|s| self.active_dialog(&s).is_some());
+        let orphaned = self.had_dialog && window.focused(cx).is_none();
+        if !has_dialog && (orphaned || self.dialog_focus.is_focused(window)) {
             self.composer.update(cx, |c, cx| c.focus(window, cx));
         }
+        self.had_dialog = has_dialog;
         // The streaming cursor and running-tool timers are clock-driven: repaint on
         // each blink half-period instead of every frame.
         let ticking = self.selected().is_some_and(|s| {
@@ -237,19 +253,26 @@ impl Shell {
         if id == self.selected() {
             return;
         }
-        if let Some(s) = &id {
+        self.hub.set_focused(id.clone());
+        self.seed_selection(id.as_deref());
+        self.focus_dialog_if_any(window, cx);
+        cx.notify();
+    }
+
+    /// Prepare the view for a newly selected session, however it got selected:
+    /// only items after this point play their entrance, and text already
+    /// streamed never replays its fade (§5.1).
+    fn seed_selection(&mut self, id: Option<&str>) {
+        self.seen_selected = id.map(str::to_string);
+        if let Some(s) = id {
             let n = self.hub.lock().chats.get(s).map_or(0, |c| c.items.len());
-            self.enter_from.insert(s.clone(), n);
-            // Text already streamed before the switch never replays its fade (§5.1).
+            self.enter_from.insert(s.to_string(), n);
             self.fades.retain(|k, _| !k.starts_with(&format!("{s}/")));
         }
-        self.hub.set_focused(id);
         self.switch_seq += 1;
         self.follow = true;
         self.scroll_anim = None;
         self.chat_scroll.scroll_to_bottom();
-        self.focus_dialog_if_any(window, cx);
-        cx.notify();
     }
 
     pub(crate) fn focus_dialog_if_any(&mut self, window: &mut Window, cx: &mut Context<Self>) {

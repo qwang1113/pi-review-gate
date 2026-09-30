@@ -76,5 +76,6 @@ builds on those instead of hand-rolling editors.
 
 ## Gaps for the project manager
 
+- UI spec items not built yet (`docs/desktop/ui-design.md`): the filter box of a pi `select` with more than 8 options (§6.6); the header's N/M number cross-fade on a question switch (§6.2); the height collapse of popover rows that disappear and of the long box's reason area on Esc (§9.2, §6.5 — they vanish, the entrances do play); the composer height tween (§5.5, the text area snaps); the unread dot's shrink when cleared and a fold animation for an error tool card's auto-expand (§4.3, §5.3); 「减少动态效果」 is re-read every second rather than on the system notification (§11.3). A gate dialog that vanishes unanswered always toasts 「这道题已由另一方作答」, also when prg's connection dropped — the hub does not say why it settled.
 - `hello` checks the pid the client spawned. A launcher that forks instead of exec'ing (e.g. `npx pi`) reports a different pid and is refused; prg's `session.open` argv must exec pi directly.
 - Notifications need the `.app` bundle (`scripts/bundle.sh`); a bare `cargo run` answers `notify` with `shown:false`.
