@@ -1,0 +1,30 @@
+[package]
+name = "pi-desktop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "macOS desktop host for pi sessions (GPUI): pi RPC client + prg host socket server"
+
+[dependencies]
+# gpui-kit pins the matching GPUI release (gpui-pre =0.3.7) and re-exports it
+# together with gpui-component, whose Input/List/Scroll widgets t5 builds on.
+gpui-kit = "=0.7.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+# Only for `--shots`: the same image crate GPUI already builds (png is on there).
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[features]
+# `pi-desktop --demo --shots <dir>` renders every demo state to PNG through GPUI's
+# own offscreen renderer (no screen-recording permission needed).
+shots = ["gpui-kit/test-support", "dep:image"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSDictionary", "NSBundle", "NSError", "NSSet", "NSValue", "block2"] }
+objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "block2"] }
+block2 = "0.6"
+
+[dev-dependencies]
+jsonschema = { version = "0.33", default-features = false }
