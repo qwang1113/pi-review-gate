@@ -87,8 +87,9 @@ opener 凭它记录结论；
   门禁自派审计不再 `fresh`。唯一回收点是 `declare_done` 的级联 + `closeOwnSession`（进程退出走同一
   个 session 关闭）。取消矩阵杀被取消的兄弟 pane 不变——那是中止，不是完成。worker 同理
   （只在 `worker_close` 或 `declare_done` 时关）。
-- **存活由 pane 名单判定**：opener 的运行期检查一次拉取本 window 的 pane 列表
-  （`listJudgePanes`），记录在但名单里没有 ⇒ pane 死亡；名单读不出 ⇒ 按活着处理
+- **存活由会话名单判定**：opener 的运行期检查一次读宿主的会话名单
+  （`judgePaneAlive` → 宿主的 `livePanes`，`lib/gate-host.ts`：tmux 宿主是 `list-panes -a`，
+  桌面宿主是协议的 `session.list`），记录在但名单里没有 ⇒ pane 死亡；名单读不出 ⇒ 按活着处理
   （缺信息永不结束等待，fail-closed）。心跳（channel state 记录）是第二信号。
 - **一轮一 pane**：同 judge 仍有活 pane ⇒ 新一轮走复用/排队语义，由门禁在派发时
   决定（`dispatchJudgeRound`），opener 不手选。
@@ -321,6 +322,10 @@ scope limit 不随接力走，`taskMode` 走它自己的 env 通道。
 **孤儿任务**（plan 说 running、却没有存活 pane 在做）—— 那是崩溃或重启唯一会留下的
 不一致，也是项目经理唯一会永远等下去的东西，所以由门禁主动报出来而不是等它自己发现。
 子会话对这一切完全无感：通道是文件路径、不属于任何进程，换人只是换了个打开它们的人。
+
+**开/关/判存活是宿主的原语**（2026-09-30，`lib/gate-host.ts`）：业务模块只认 `GateHost` 接口，
+`RG_HOST=desktop` 时同一批原语经 unix socket 请求桌面客户端（`docs/desktop/host-protocol.md`，
+宿主不可用即 fail-closed、绝不回退 tmux）；下面说的是 **tmux 宿主**（`lib/gate-host-tmux.ts`）的实现。
 
 **tmux 只剩「开/关一个会话位置」的活**：`lib/orchestrator-tmux.ts` 里现在只有几个构造器 ——
 `list-panes -a`（判 pane 存活，`dead` 的唯一来源）、`list-sessions`（自己的专属 session 在不在）、
