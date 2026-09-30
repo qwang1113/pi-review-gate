@@ -74,8 +74,8 @@ pub struct Shell {
     clock_phase: u64,
     /// The selection the view last prepared for (a host `focus` can change it behind our back).
     seen_selected: Option<String>,
-    /// The selected session showed a dialog on the last tick.
-    had_dialog: bool,
+    /// The dialog the selected session showed on the last tick.
+    had_dialog: Option<String>,
     pub(crate) error: Option<String>,
     seen: u64,
     _subs: Vec<Subscription>,
@@ -156,7 +156,7 @@ impl Shell {
             reduce_motion: false,
             clock_phase: 0,
             seen_selected: None,
-            had_dialog: false,
+            had_dialog: None,
             error: None,
             seen: u64::MAX,
             _subs: subs,
@@ -202,14 +202,16 @@ impl Shell {
             self.focus_dialog_if_any(window, cx);
             cx.notify();
         }
-        // A closed drawer hands the keys back to the composer (§6.1) — also when
-        // the reason editor that held them was dropped and focus fell nowhere.
-        let has_dialog = selected.is_some_and(|s| self.active_dialog(&s).is_some());
-        let orphaned = self.had_dialog && window.focused(cx).is_none();
-        if !has_dialog && (orphaned || self.dialog_focus.is_focused(window)) {
+        // A closed drawer hands the keys back to the composer (§6.1): on the tick
+        // its request goes, while its reason / pi text box still exists (it stays
+        // alive through the exit and is dropped later, which would leave focus nowhere).
+        let shown = selected.and_then(|s| self.active_dialog(&s)).map(|(k, _)| k);
+        let left = self.had_dialog.as_deref().filter(|k| shown.as_deref() != Some(*k));
+        let in_drawer = self.dialog_focus.is_focused(window) || left.is_some_and(|k| self.reason_focused(k, window, cx));
+        if shown.is_none() && in_drawer {
             self.composer.update(cx, |c, cx| c.focus(window, cx));
         }
-        self.had_dialog = has_dialog;
+        self.had_dialog = shown;
         // The streaming cursor and running-tool timers are clock-driven: repaint on
         // each blink half-period instead of every frame.
         let ticking = self.selected().is_some_and(|s| {
