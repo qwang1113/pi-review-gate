@@ -22,7 +22,8 @@ fn native_ui(req: &UiRequest) -> DialogUi {
     match req {
         UiRequest::Select { options, .. } => DialogUi::plain(options.clone()),
         UiRequest::Confirm { .. } => DialogUi::plain(vec!["确认".into(), "取消".into()]),
-        // input / editor: only the text box.
+        // input / editor: only the text box, starting from the text pi handed over.
+        UiRequest::Editor { prefill, .. } => DialogUi { reason_open: true, draft: prefill.clone().unwrap_or_default(), ..DialogUi::plain(vec![]) },
         _ => DialogUi { reason_open: true, ..DialogUi::plain(vec![]) },
     }
 }
@@ -75,13 +76,24 @@ impl Shell {
             return e.clone();
         }
         let draft = self.dialog_uis.get(key).map(|u| u.draft.clone()).unwrap_or_default();
+        // pi's `input` brings its own placeholder; the gate's reason box uses ours.
+        let placeholder = match self.active_native(key) {
+            Some(UiRequest::Input { placeholder: Some(p), .. }) => p,
+            _ => "写下原因（可留空）".to_string(),
+        };
         let e = cx.new(|cx| {
-            let mut s = TextareaState::new(window, cx).auto_grow(3, 8).placeholder("写下原因（可留空）");
+            let mut s = TextareaState::new(window, cx).auto_grow(3, 8).placeholder(placeholder);
             s.set_value(draft, window, cx);
             s
         });
         self.reason_editors.insert(key.to_string(), e.clone());
         e
+    }
+
+    fn active_native(&self, key: &str) -> Option<UiRequest> {
+        let rest = key.strip_prefix("u|")?;
+        let (owner, id) = rest.split_once('|')?;
+        self.hub.lock().ui_requests.iter().find(|u| u.session == owner && u.id == id).map(|u| u.request.clone())
     }
 
     pub fn reason_focused(&self, key: &str, window: &Window, cx: &App) -> bool {
