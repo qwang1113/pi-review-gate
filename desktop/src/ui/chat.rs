@@ -1,16 +1,19 @@
 //! The streaming chat column (§5): user bubbles, assistant markdown with the
 //! streaming cursor, thinking blocks, tool cards and diffs. Paints a `Chat`
-//! (`chat_model`); folding state lives in `Shell::toggled`.
+//! (`chat_model`); folding state lives in `Shell::toggled`. New messages rise
+//! in, streamed words fade in (§5.1), folds animate their height (§5.2).
 
+use super::anim;
 use super::assets::icon;
 use super::chat_model::{Block, Chat, Item, ToolCall, ToolStatus};
 use super::diff::{self, DiffFile, Kind};
+use super::motion;
 use super::theme::Th;
 use crate::app::Shell;
-use gpui_kit::component::text::{TextView, TextViewStyle};
+use gpui_kit::component::text::TextViewStyle;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::time::Duration;
+use std::time::Instant;
 
 const DIFF_PREVIEW_LINES: usize = 20;
 
@@ -49,7 +52,7 @@ pub fn chevron(th: Th, key: SharedString, open: bool, size: Pixels, color: Hsla)
     let from = if open { 0.0 } else { 1.0 };
     icon("chevron-right", size, color).with_animation(
         ElementId::Name(format!("{key}-chev-{open}").into()),
-        Animation::new(th.ms("collapse")).with_easing(th.ease("emphasized")),
+        Animation::new(th.ms("collapse")).with_easing(th.ease("smooth")),
         move |svg, t| {
             let turn = if open { from + t } else { from - t };
             svg.with_transformation(Transformation::rotate(radians(turn * std::f32::consts::FRAC_PI_2)))
@@ -57,13 +60,29 @@ pub fn chevron(th: Th, key: SharedString, open: bool, size: Pixels, color: Hsla)
     )
 }
 
-/// Content that fades in when a block opens (height snaps; see the report's gap list).
-pub fn reveal(th: Th, key: SharedString, el: impl IntoElement + 'static) -> AnimationElement<Div> {
-    div().child(el).with_animation(
-        ElementId::Name(format!("{key}-reveal").into()),
-        Animation::new(th.ms("collapse")).with_easing(th.ease("emphasized")),
-        |d, t| d.opacity(t),
-    )
+/// A fold's body (§5.2, §5.3): while the fold animates, its height is clipped
+/// between 0 and `est` px and its opacity follows; it stays rendered while it
+/// closes. None when closed and settled.
+pub fn fold_body(shell: &Shell, key: &str, open: bool, est: f32, el: impl IntoElement, window: &mut Window) -> Option<AnyElement> {
+    let th = shell.th;
+    let stamp = format!("fold-{key}");
+    let dur = if shell.reduce_motion { std::time::Duration::ZERO } else { th.ms("collapse") };
+    let running = shell.stamps.running(&stamp, dur);
+    if !open && !running {
+        return None;
+    }
+    if !running {
+        return Some(div().child(el).into_any_element());
+    }
+    window.request_animation_frame();
+    let p = shell.stamps.progress(&stamp, dur, th.curve("smooth"));
+    let f = if open { p } else { 1. - p };
+    Some(div().overflow_hidden().max_h(px(est * f)).opacity(f).child(el).into_any_element())
+}
+
+/// A rough rendered height for a block of text (the fold's clip target).
+fn text_height(text: &str, line_h: f32, chars_per_line: f32) -> f32 {
+    text.lines().map(|l| (l.chars().count() as f32 / chars_per_line).ceil().max(1.)).sum::<f32>() * line_h
 }
 
 pub fn render_chat(shell: &Shell, sid: &str, window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
@@ -82,21 +101,36 @@ pub fn render_chat(shell: &Shell, sid: &str, window: &mut Window, cx: &mut Conte
         .pb(th.px("chat.padding_bottom"))
         .gap(th.px("chat.message_gap"));
     let last = chat.items.len().saturating_sub(1);
+    // Only items that arrived after the session was selected play their entrance (§5.1).
+    let fresh_from = shell.enter_from.get(sid).copied().unwrap_or(usize::MAX);
+    let reduce = cx.reduce_motion();
     for (i, item) in chat.items.iter().enumerate() {
         let key = format!("{sid}/{i}");
         if matches!(item, Item::Assistant { blocks, .. } if blocks.is_empty() && i != last) {
             continue;
         }
-        col = col.child(match item {
+        let el = match item {
             Item::User { text, ts_ms } => user_bubble(th, text, *ts_ms).into_any_element(),
             Item::Assistant { blocks, ts_ms, streaming } => {
                 let cursor = *streaming && i == last;
                 assistant(shell, th, &key, blocks, &chat, *ts_ms, cursor && blink_on, cursor, now, window, cx).into_any_element()
             }
             Item::Notice { text, error } => notice(th, text, *error).into_any_element(),
+        };
+        col = col.child(if i >= fresh_from {
+            anim::appear(div().child(el), format!("msg-{key}"), th.ms("message_enter"), th.ease("smooth"), 0., if reduce { 0. } else { th.n("message.enter_shift") }).into_any_element()
+        } else {
+            el
         });
     }
     let at_bottom = shell.follow;
+    let arrow = icon("arrow-down", px(12.), th.c("text.primary"));
+    // While the session still generates, the arrow breathes (`pulse_working`).
+    let arrow = if chat.running {
+        arrow.with_animation("jump-breathe", Animation::new(th.ms("pulse_working")).repeat().with_max_fps(super::LOOP_FPS).with_easing(th.ease("pulse")), |a, t| a.opacity(0.5 + 0.5 * motion::triangle(t))).into_any_element()
+    } else {
+        arrow.into_any_element()
+    };
     div()
         .relative()
         .size_full()
@@ -107,37 +141,37 @@ pub fn render_chat(shell: &Shell, sid: &str, window: &mut Window, cx: &mut Conte
                 .overflow_y_scroll()
                 .track_scroll(&shell.chat_scroll)
                 .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                    this.stop_programmatic_scroll();
                     this.follow = this.chat_at_bottom();
                     cx.notify();
                 }))
                 .child(col),
         )
+        .children(anim::scroll_fades(th, &shell.chat_scroll, th.c("bg.app")))
         .when(!at_bottom, |d| {
-            d.child(
-                div()
-                    .id("jump-latest")
-                    .absolute()
-                    .bottom(th.sp(4))
-                    .right(th.sp(6))
-                    .h(px(28.))
-                    .px(th.sp(3))
-                    .flex()
-                    .items_center()
-                    .gap(th.sp(1))
-                    .rounded(th.r("full"))
-                    .bg(th.c("bg.overlay"))
-                    .border_1()
-                    .border_color(th.c("border.default"))
-                    .shadow(th.shadow("low"))
-                    .text_color(th.c("text.primary"))
-                    .cursor_pointer()
-                    .child(text_font(th, div(), "small").child("↓ 回到最新"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.follow = true;
-                        this.chat_scroll.scroll_to_bottom();
-                        cx.notify();
-                    })),
-            )
+            let pill = div()
+                .id("jump-latest")
+                .h(px(28.))
+                .px(th.sp(3))
+                .flex()
+                .items_center()
+                .gap(th.sp(1))
+                .rounded(th.r("full"))
+                .bg(th.c("bg.overlay"))
+                .border_1()
+                .border_color(th.c("border.default"))
+                .shadow(th.shadow("low"))
+                .text_color(th.c("text.primary"))
+                .cursor_pointer()
+                .child(arrow)
+                .child(text_font(th, div(), "small").child("回到最新"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.follow = true;
+                    let h = this.chat_scroll.clone();
+                    this.scroll_to(h, None, cx);
+                }));
+            let pill = anim::press(pill, th, Some("bg.elevated"), reduce);
+            d.child(div().absolute().bottom(th.sp(4)).right(th.sp(6)).child(anim::appear(pill, "jump-in", th.ms("popover_enter"), th.ease("smooth"), 0., th.n("popover.offset"))))
         })
         .into_any_element()
 }
@@ -221,14 +255,11 @@ fn assistant(
         }
         body = body.child(match b {
             Block::Text { text, .. } => {
-                let mut src = text.clone();
                 // The cursor rides on the last text block; toggling a trailing glyph keeps it inline.
-                if streaming && Some(j) == last_text && cursor_visible {
-                    src.push('▍');
-                }
-                TextView::markdown(ElementId::Name(bkey.into()), src).style(markdown_style(th)).selectable(true).text_color(th.c("text.primary")).into_any_element()
+                let cursor = streaming && Some(j) == last_text && cursor_visible;
+                super::stream_text::render(th, &bkey, text, shell.fades.get(&bkey).filter(|_| streaming), cursor, cx.reduce_motion(), window)
             }
-            Block::Thinking { text, streaming, secs, .. } => thinking(shell, th, bkey, text, *streaming, *secs, cx).into_any_element(),
+            Block::Thinking { text, streaming, secs, .. } => thinking(shell, th, bkey, text, *streaming, *secs, window, cx).into_any_element(),
             Block::Tool(id) => tool_card(shell, th, &chat.tools[id], now, window, cx).into_any_element(),
         });
     }
@@ -238,13 +269,21 @@ fn assistant(
     div().flex().flex_col().child(header).child(body)
 }
 
-fn thinking(shell: &Shell, th: Th, key: String, text: &str, streaming: bool, secs: Option<u64>, cx: &mut Context<Shell>) -> Div {
+#[allow(clippy::too_many_arguments)]
+fn thinking(shell: &Shell, th: Th, key: String, text: &str, streaming: bool, secs: Option<u64>, window: &mut Window, cx: &mut Context<Shell>) -> Div {
     let open = shell.is_open(&key, false);
     let label = match (streaming, secs) {
         (true, _) | (false, None) => "思考中…".to_string(),
         (false, Some(s)) => format!("已思考 {s}s"),
     };
     let k = key.clone();
+    let brain = icon("brain", px(14.), th.c("text.muted"));
+    // Generating: the brain breathes (opacity only); the label cross-fades when it changes.
+    let brain = if streaming {
+        brain.with_animation(ElementId::Name(format!("{key}-brain").into()), Animation::new(th.ms("pulse_working")).repeat().with_max_fps(super::LOOP_FPS).with_easing(th.ease("pulse")), |b, t| b.opacity(0.5 + 0.5 * motion::triangle(t))).into_any_element()
+    } else {
+        brain.into_any_element()
+    };
     let bar = div()
         .id(SharedString::from(format!("{key}-head")))
         .h(th.px("thinking.collapsed_height"))
@@ -253,10 +292,11 @@ fn thinking(shell: &Shell, th: Th, key: String, text: &str, streaming: bool, sec
         .items_center()
         .gap(th.sp(2))
         .cursor_pointer()
-        .child(icon("brain", px(14.), th.c("text.muted")))
-        .child(text_font(th, div(), "small").flex_1().text_color(th.c("text.muted")).child(label))
+        .child(brain)
+        .child(anim::appear(text_font(th, div(), "small").flex_1().text_color(th.c("text.muted")).child(label.clone()), format!("{key}-label-{label}"), th.ms("hover"), th.ease("standard"), 0., 0.))
         .child(chevron(th, key.clone().into(), open, px(12.), th.c("text.muted")))
         .on_click(cx.listener(move |this, _, _, cx| this.toggle(&k, cx)));
+    let bar = anim::press(bar, th, None, cx.reduce_motion());
     let el = div()
         .flex()
         .flex_col()
@@ -266,25 +306,24 @@ fn thinking(shell: &Shell, th: Th, key: String, text: &str, streaming: bool, sec
         .rounded_br(th.r("md"))
         .bg(th.c(if open { "thinking.bg.expanded" } else { "thinking.bg.collapsed" }))
         .child(bar);
-    el.when(open, |d| {
-        d.child(reveal(
-            th,
-            key.clone().into(),
-            text_font(th, div(), "code")
-                .font_weight(FontWeight(400.))
-                .pt(th.sp(1))
-                .pb(th.sp(2))
-                .pl(px(14.))
-                .pr(th.sp(3))
-                .text_color(th.c("thinking.text"))
-                .whitespace_normal()
-                .child(text.to_string()),
-        ))
-    })
+    let body = text_font(th, div(), "code")
+        .font_weight(FontWeight(400.))
+        .pt(th.sp(1))
+        .pb(th.sp(2))
+        .pl(px(14.))
+        .pr(th.sp(3))
+        .text_color(th.c("thinking.text"))
+        .whitespace_normal()
+        .child(super::stream_text::plain(th, text, shell.fades.get(&key).filter(|_| streaming), th.c("thinking.text"), cx.reduce_motion(), window));
+    let est = text_height(text, th.font("code").line_height, 90.) + th.n("space.3");
+    el.children(fold_body(shell, &key, open, est, body, window))
 }
 
 fn status_icon(th: Th, id: &str, s: ToolStatus, reduce: bool) -> AnyElement {
     match s {
+        // Finishing: the icon lands with a snappy 10 → 14 (§5.3), once per card on screen.
+        ToolStatus::Ok if !reduce => anim::pop_size(icon("circle-check", px(10.), th.c("status.done")), format!("done-{id}"), th, 10., 14.).into_any_element(),
+        ToolStatus::Error if !reduce => anim::pop_size(icon("circle-alert", px(10.), th.c("status.dead")), format!("err-{id}"), th, 10., 14.).into_any_element(),
         ToolStatus::Ok => icon("circle-check", px(14.), th.c("status.done")).into_any_element(),
         ToolStatus::Error => icon("circle-alert", px(14.), th.c("status.dead")).into_any_element(),
         ToolStatus::Pending | ToolStatus::Running if reduce => icon("loader-circle", px(14.), th.c("status.working")).into_any_element(),
@@ -326,6 +365,7 @@ fn tool_card(shell: &Shell, th: Th, t: &ToolCall, now: u64, window: &mut Window,
         .child(status_icon(th, &t.id, t.status, cx.reduce_motion()))
         .child(chevron(th, key.clone().into(), open, px(12.), muted))
         .on_click(cx.listener(move |this, _, _, cx| this.toggle(&k, cx)));
+    let header = anim::press(header, th, None, cx.reduce_motion()).hover(move |s| s.bg(th.c("border.subtle")));
     let mut card = div()
         .flex()
         .flex_col()
@@ -335,24 +375,20 @@ fn tool_card(shell: &Shell, th: Th, t: &ToolCall, now: u64, window: &mut Window,
         .rounded(th.r("lg"))
         .bg(th.c("bg.elevated"))
         .child(header);
-    if open {
-        let result = if t.result.is_empty() && t.status == ToolStatus::Running { "…".to_string() } else { t.result.clone() };
-        card = card.child(reveal(
-            th,
-            key.clone().into(),
-            mono(th, div(), "code_small", cx)
-                .id(SharedString::from(format!("{key}-result")))
-                .max_h(th.px("tool.result_max_height"))
-                .overflow_y_scroll()
-                .px(th.sp(3))
-                .py(px(10.))
-                .bg(th.c("tool.result.bg"))
-                .border_t_1()
-                .border_color(th.c("border.subtle"))
-                .text_color(th.c(if error { "tool.error.text" } else { "text.secondary" }))
-                .child(result),
-        ));
-    }
+    let result = if t.result.is_empty() && t.status == ToolStatus::Running { "…".to_string() } else { t.result.clone() };
+    let est = (text_height(&result, th.font("code_small").line_height, 110.) + 20.).min(th.n("tool.result_max_height"));
+    let body = mono(th, div(), "code_small", cx)
+        .id(SharedString::from(format!("{key}-result")))
+        .max_h(th.px("tool.result_max_height"))
+        .overflow_y_scroll()
+        .px(th.sp(3))
+        .py(px(10.))
+        .bg(th.c("tool.result.bg"))
+        .border_t_1()
+        .border_color(th.c("border.subtle"))
+        .text_color(th.c(if error { "tool.error.text" } else { "text.secondary" }))
+        .child(result);
+    card = card.children(fold_body(shell, &key, open, est, body, window));
     let diff = t.patch.as_deref().and_then(diff::parse);
     let mut out = div().flex().flex_col().gap(th.sp(2)).child(card);
     if let Some(d) = diff {
@@ -457,7 +493,7 @@ pub fn diff_block(shell: &Shell, th: Th, key: &str, d: &DiffFile, _window: &mut 
 }
 
 pub fn copy_button(shell: &Shell, th: Th, key: &str, text: String, cx: &mut Context<Shell>) -> Stateful<Div> {
-    let done = shell.copied.as_ref().is_some_and(|(k, at)| k == key && at.elapsed() < Duration::from_secs(2));
+    let done = shell.copied.as_ref().is_some_and(|(k, at)| k == key && at.elapsed() < th.ms("copy_hold"));
     let k = key.to_string();
     div()
         .id(SharedString::from(format!("copy-{key}")))
@@ -467,11 +503,22 @@ pub fn copy_button(shell: &Shell, th: Th, key: &str, text: String, cx: &mut Cont
         .justify_center()
         .rounded(th.r("sm"))
         .cursor_pointer()
-        .hover(|s| s.bg(th.c("bg.elevated")))
-        .child(icon(if done { "check" } else { "copy" }, px(12.), th.c(if done { "semantic.success" } else { "text.muted" })))
+        .hover(move |s| s.bg(th.c("bg.elevated")))
+        // copy → check pops in (snappy 10 → 14), holds `copy_hold`, then copy fades back (§8).
+        .child(if done {
+            anim::pop_size(icon("check", px(10.), th.c("semantic.success")), format!("copied-{key}"), th, 10., 14.).into_any_element()
+        } else {
+            anim::appear(icon("copy", px(12.), th.c("text.muted")), format!("copy-back-{key}-{}", shell.copied.is_some()), th.ms("hover"), th.ease("standard"), 0., 0.).into_any_element()
+        })
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            this.copied = Some((k.clone(), std::time::Instant::now()));
+            this.copied = Some((k.clone(), Instant::now()));
+            let hold = this.th.ms("copy_hold");
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(hold).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
             cx.notify();
         }))
 }

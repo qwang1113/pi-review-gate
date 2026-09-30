@@ -3,6 +3,7 @@
 //! is embedded at compile time and parsed once; components ask by token name
 //! and never write a literal colour or size.
 
+use super::motion::{Curve, Spring};
 use gpui_kit::{BoxShadow, Hsla, Pixels, Rgba, point, px};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -26,6 +27,7 @@ pub struct Tokens {
     fonts: HashMap<String, FontTok>,
     durations: HashMap<String, u64>,
     easings: HashMap<String, [f32; 4]>,
+    springs: HashMap<String, Spring>,
     pub ui_families: Vec<String>,
     pub mono_families: Vec<String>,
 }
@@ -109,6 +111,15 @@ impl Tokens {
                 Some((k.clone(), <[f32; 4]>::try_from(a).ok()?))
             })
             .collect();
+        let springs = v["motion"]["spring"]
+            .as_object()
+            .ok_or("motion.spring missing")?
+            .iter()
+            .map(|(k, s)| {
+                let n = |key: &str| s[key].as_f64().unwrap_or(0.0) as f32;
+                (k.clone(), Spring { stiffness: n("stiffness"), damping: n("damping"), mass: n("mass"), settle_ms: n("settle") as u64 })
+            })
+            .collect();
         let families = |k: &str| -> Vec<String> {
             v["font"]["family"][k].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect()
         };
@@ -119,6 +130,7 @@ impl Tokens {
             fonts,
             durations,
             easings,
+            springs,
             ui_families: families("ui"),
             mono_families: families("mono"),
         })
@@ -181,7 +193,7 @@ impl Th {
     }
 
     /// Any numeric token by its full name below the group: `n("sidebar.width_default")`,
-    /// `n("space.4")`, `n("radius.lg")`, `n("ratio.confirm.width")`, `n("limit.diff.collapse_lines")`.
+    /// `n("space.4")`, `n("radius.lg")`, `n("ratio.chat.user_max_width")`, `n("limit.diff.collapse_lines")`.
     pub fn n(self, name: &str) -> f32 {
         match TOKENS.sizes.get(name) {
             Some(v) => *v,
@@ -209,12 +221,29 @@ impl Th {
     }
 
     pub fn ms(self, name: &str) -> Duration {
+        debug_assert!(TOKENS.durations.contains_key(name), "unknown duration token {name}");
         Duration::from_millis(TOKENS.durations.get(name).copied().unwrap_or(0))
     }
 
     pub fn ease(self, name: &str) -> impl Fn(f32) -> f32 + 'static {
         let p = TOKENS.easings.get(name).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
         move |t| cubic_bezier(p, t)
+    }
+
+    /// `motion.spring.<name>`.
+    pub fn spring(self, name: &str) -> Spring {
+        match TOKENS.springs.get(name) {
+            Some(s) => *s,
+            None => {
+                debug_assert!(false, "unknown spring token {name}");
+                Spring { stiffness: 500.0, damping: 30.0, mass: 1.0, settle_ms: 300 }
+            }
+        }
+    }
+
+    /// A bezier easing as a tween curve.
+    pub fn curve(self, name: &str) -> Curve {
+        Curve::Bezier(TOKENS.easings.get(name).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]))
     }
 
     pub fn shadow(self, name: &str) -> Vec<BoxShadow> {
@@ -250,11 +279,13 @@ mod tests {
         assert_eq!(Th { dark: true }.n("sidebar.width_default"), 260.0);
         assert_eq!(Th { dark: true }.n("space.4"), 16.0);
         assert_eq!(Th { dark: true }.n("radius.xl"), 12.0);
-        assert_eq!(Th { dark: true }.n("ratio.confirm.width"), 0.75);
+        assert_eq!(Th { dark: true }.n("ratio.chat.user_max_width"), 0.8);
         assert_eq!(Th { dark: true }.n("limit.diff.collapse_lines"), 200.0);
         assert_eq!(Th { dark: false }.font("body_strong"), FontTok { size: 13.0, line_height: 20.0, weight: 600.0 });
         assert_eq!(Th { dark: false }.ms("cursor_blink"), Duration::from_millis(800));
         assert_eq!(t.mono_families.first().map(String::as_str), Some("JetBrains Mono"));
+        assert_eq!(Th { dark: true }.spring("gentle").settle_ms, 260);
+        assert_eq!(t.springs.len(), 3);
     }
 
     #[test]
@@ -293,14 +324,17 @@ mod tests {
         let mut checked = 0;
         for entry in std::fs::read_dir(dir).unwrap() {
             let src = std::fs::read_to_string(entry.unwrap().path()).unwrap();
-            for (call, colour) in [(".c(\"", true), (".ca(\"", true), (".n(\"", false), (".px(\"", false)] {
+            let known = |call: &str, name: &str| match call {
+                ".c(\"" | ".ca(\"" => TOKENS.colors[0].contains_key(name),
+                ".n(\"" | ".px(\"" => TOKENS.sizes.contains_key(name),
+                ".ms(\"" => TOKENS.durations.contains_key(name),
+                ".ease(\"" | ".curve(\"" => TOKENS.easings.contains_key(name),
+                _ => TOKENS.springs.contains_key(name),
+            };
+            for call in [".c(\"", ".ca(\"", ".n(\"", ".px(\"", ".ms(\"", ".ease(\"", ".curve(\"", ".spring(\""] {
                 for piece in src.split(call).skip(1) {
                     let name = piece.split('"').next().unwrap();
-                    if colour {
-                        assert!(TOKENS.colors[0].contains_key(name), "unknown colour token {name}");
-                    } else {
-                        assert!(TOKENS.sizes.contains_key(name), "unknown size token {name}");
-                    }
+                    assert!(known(call, name), "unknown token {call}{name}");
                     checked += 1;
                 }
             }

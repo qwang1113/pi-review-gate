@@ -1,15 +1,100 @@
 //! The session list (§4): grouped rows with role icons, animated status dots,
-//! unread marks and the dead/idle distinction; the 52 px icon rail below the
-//! breakpoint or after ⌘B; the drag handle.
+//! unread marks and the dead/idle distinction, the sliding selection, the drag
+//! handle; fully collapsible (§4.4) — pushing in wide windows, an overlay
+//! drawer below the breakpoint.
 
+use super::anim;
 use super::assets::icon;
 use super::chat::text_font;
-use super::sidebar_model::{Group, GroupRows, Row, Status};
+use super::motion::{Curve, Tween, sidebar_content};
+use super::sidebar_model::{Group, GroupRows, Row, RowSlot, Status};
+use super::sidebar_state::{Timing, state_file};
 use super::theme::{Th, heartbeat_scale};
 use crate::app::Shell;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::time::Instant;
+
+impl Shell {
+    pub(crate) fn sidebar_timing(&self) -> Timing {
+        let th = self.th;
+        Timing {
+            toggle: th.ms("sidebar_toggle"),
+            enter: th.ms("drawer_enter"),
+            exit: th.ms("drawer_exit"),
+            smooth: th.curve("smooth"),
+            exit_curve: th.curve("exit"),
+            reduce: self.reduce_motion,
+            fade: th.ms("reduced_motion_fade"),
+        }
+    }
+
+    /// The collapsed choice and the width survive a restart (§4.4); the demo never writes.
+    pub(crate) fn save_sidebar(&self) {
+        if self.demo {
+            return;
+        }
+        if let Some(p) = state_file() {
+            let _ = p.parent().map(std::fs::create_dir_all);
+            let _ = std::fs::write(p, self.sidebar.to_json());
+        }
+    }
+
+    pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        let t = self.sidebar_timing();
+        self.sidebar.toggle(Instant::now(), &t);
+        self.save_sidebar();
+        cx.notify();
+    }
+
+    pub fn close_sidebar_overlay(&mut self, cx: &mut Context<Self>) {
+        let t = self.sidebar_timing();
+        self.sidebar.close_overlay(Instant::now(), &t);
+        cx.notify();
+    }
+}
+
+/// The selection highlight, one block that slides between rows (§4.3).
+#[derive(Default)]
+pub struct SelSlide {
+    pub id: Option<String>,
+    pub group: Option<Group>,
+    pub y: Option<Tween>,
+    pub x: Option<Tween>,
+    /// Bumped when the block jumps instead of sliding (it fades in).
+    pub seq: u64,
+}
+
+impl SelSlide {
+    /// Follow the selected row: slide within a group, jump (and fade) across.
+    pub fn follow(&mut self, slot: Option<&RowSlot>, indent: f32, th: Th, reduce: bool) {
+        let Some(slot) = slot else {
+            self.id = None;
+            return;
+        };
+        if self.id.as_deref() == Some(slot.id.as_str()) {
+            return;
+        }
+        let now = Instant::now();
+        let x = indent * slot.depth as f32;
+        let slide = !reduce && self.id.is_some() && self.group == Some(slot.group);
+        match (&mut self.y, &mut self.x, slide) {
+            (Some(y), Some(xt), true) => {
+                let s = th.spring("gentle");
+                y.retarget(slot.y, now, s.duration(), Curve::Spring(s));
+                xt.retarget(x, now, s.duration(), Curve::Spring(s));
+            }
+            _ => {
+                self.y = Some(Tween::at_rest(slot.y));
+                self.x = Some(Tween::at_rest(x));
+                self.seq += 1;
+            }
+        }
+        self.id = Some(slot.id.clone());
+        self.group = Some(slot.group);
+    }
+}
 
 const DOT_SLOT: f32 = 12.0;
 
@@ -44,7 +129,9 @@ pub fn status_dot(th: Th, id: &str, s: Status, reduce: bool) -> AnyElement {
                 move |el, t| el.size(px(d * heartbeat_scale(t))),
             ))
             .into_any_element(),
-        _ => slot().child(dot(d, 1.0)).into_any_element(),
+        // Settling into done: the colour fades in and the dot pops 6 → 8 (§11.1).
+        Status::Done => slot().child(anim::pop_size(dot(6.0, 1.0), format!("dot-{id}-done"), th, 6.0, d)).into_any_element(),
+        _ => slot().child(anim::appear(dot(d, 1.0), format!("dot-{id}-{}", s.label()), th.ms("dot_color"), th.ease("standard"), 0., 0.)).into_any_element(),
     }
 }
 
@@ -67,11 +154,13 @@ fn row_el(shell: &Shell, th: Th, row: &Row, visual_depth: usize, selected: bool,
     let reduce = cx.reduce_motion();
     let dead = row.status == Status::Dead;
     let bold = row.status == Status::WaitingInput;
-    let name_color = if dead { th.c("text.secondary") } else if selected { th.c("text.primary") } else { th.c("text.secondary") };
+    let hover_id = format!("row-{}", row.id);
+    let hovered = !selected && shell.hovered.as_deref() == Some(hover_id.as_str());
+    let name_color = if dead { th.c("text.secondary") } else if selected || hovered { th.c("text.primary") } else { th.c("text.secondary") };
     let id = row.id.clone();
     let note = waiting_note(row);
-    let mut el = div()
-        .id(SharedString::from(format!("row-{}", row.id)))
+    let el = div()
+        .id(SharedString::from(hover_id.clone()))
         .relative()
         .h(th.px("sidebar.item_height"))
         .ml(px(th.n("sidebar.child_indent") * visual_depth as f32))
@@ -82,9 +171,7 @@ fn row_el(shell: &Shell, th: Th, row: &Row, visual_depth: usize, selected: bool,
         .rounded(th.r("md"))
         .cursor_pointer()
         .text_color(name_color)
-        .when(!selected, |d| d.hover(|s| s.bg(th.c("bg.elevated")).text_color(th.c("text.primary"))))
-        .active(|s| s.bg(th.c("border.subtle")))
-        .when(selected, |d| d.bg(th.c("accent.subtle")))
+        .on_hover(cx.listener(move |this, h: &bool, _, cx| this.set_hovered(&hover_id, *h, cx)))
         .child(role_icon(th, row, th.c("text.secondary"), reduce))
         .child(
             text_font(th, div(), if bold { "body_strong" } else { "body" })
@@ -94,7 +181,10 @@ fn row_el(shell: &Shell, th: Th, row: &Row, visual_depth: usize, selected: bool,
                 .when(dead, |d| d.text_color(th.c("text.secondary")))
                 .child(row.name.clone()),
         )
-        .when(row.unread && !selected, |d| d.child(div().size(th.px("unread_dot")).rounded(th.r("full")).bg(th.c("accent.primary")).flex_none()))
+        .when(row.unread && !selected, |d| {
+            let dot = div().size(th.px("unread_dot")).rounded(th.r("full")).bg(th.c("accent.primary")).flex_none();
+            d.child(anim::pop_size(dot, format!("unread-{}", row.id), th, 0.0, th.n("unread_dot")))
+        })
         .when(dead, |d| {
             d.child(
                 text_font(th, div(), "caption")
@@ -106,18 +196,11 @@ fn row_el(shell: &Shell, th: Th, row: &Row, visual_depth: usize, selected: bool,
             )
         })
         .on_click(cx.listener(move |this, _, window, cx| this.select(Some(id.clone()), window, cx)));
-    if selected {
-        el = el.child(
-            div().absolute().left_0().top_0().bottom_0().flex().items_center().child(div().w(px(3.)).h_full().rounded(th.r("xs")).bg(th.c("accent.primary")).with_animation(
-                ElementId::Name(format!("sel-{}-{}", row.id, shell.switch_seq).into()),
-                Animation::new(th.ms("sidebar_select")).with_easing(th.ease("standard")),
-                |d, t| d.h(relative(t)),
-            )),
-        );
-    }
-    if let Some(note) = note {
-        el = el.tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx));
-    }
+    let el = anim::press(el, th, Some("border.subtle"), reduce).when_some(note, |el, note| el.tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx)));
+    // Hover in and out cross-fade (`hover` / `standard`); the selected row is painted by the slide block.
+    let hover_key = format!("row-{}", row.id);
+    let recent = shell.stamps.running(&format!("hover-{hover_key}"), th.ms("hover"));
+    let el = if selected { el.into_any_element() } else { anim::state_bg(el, &hover_key, th, hovered, th.c("bg.elevated"), th.ca("bg.elevated", 0.), recent, "hover") };
     // Guide line for nested rows (§4.1).
     if visual_depth > 0 {
         return div()
@@ -126,7 +209,7 @@ fn row_el(shell: &Shell, th: Th, row: &Row, visual_depth: usize, selected: bool,
             .child(el)
             .into_any_element();
     }
-    el.into_any_element()
+    el
 }
 
 fn group_header(th: Th, g: &GroupRows, collapsed: bool, cx: &mut Context<Shell>) -> Stateful<Div> {
@@ -154,80 +237,140 @@ fn group_header(th: Th, g: &GroupRows, collapsed: bool, cx: &mut Context<Shell>)
         }))
 }
 
-fn rail(th: Th, groups: &[GroupRows], selected: Option<&str>, cx: &mut Context<Shell>) -> Div {
-    let reduce = cx.reduce_motion();
-    let mut col = div().flex().flex_col().items_center().gap(th.sp(1)).pt(th.sp(2));
-    for row in groups.iter().flat_map(|g| &g.rows) {
-        let id = row.id.clone();
-        let is_sel = selected == Some(row.id.as_str());
-        let card = format!("{} · {}{}", row.name, row.status.label(), if row.unread { " · 未读" } else { "" });
-        col = col.child(
-            div()
-                .id(SharedString::from(format!("rail-{}", row.id)))
-                .size(px(36.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(th.r("md"))
-                .cursor_pointer()
-                .when(is_sel, |d| d.bg(th.c("accent.subtle")))
-                .when(!is_sel, |d| d.hover(|s| s.bg(th.c("bg.elevated"))))
-                .child(role_icon(th, row, th.c(if is_sel { "text.primary" } else { "text.secondary" }), reduce))
-                .tooltip(move |window, cx| Tooltip::new(card.clone()).build(window, cx))
-                .on_click(cx.listener(move |this, _, window, cx| this.select(Some(id.clone()), window, cx))),
-        );
+/// The selection block under the selected row (§4.3): accent fill + 3 px bar.
+fn selection(shell: &Shell, th: Th, window: &mut Window) -> Option<AnyElement> {
+    let sel = &shell.sel;
+    sel.id.as_ref()?;
+    let now = Instant::now();
+    let (y, x) = (sel.y?, sel.x?);
+    if y.running(now) || x.running(now) {
+        window.request_animation_frame();
+    }
+    let block = div()
+        .absolute()
+        .top(px(y.value(now)))
+        .left(th.sp(2) + px(x.value(now)))
+        .right(th.sp(2))
+        .h(th.px("sidebar.item_height"))
+        .rounded(th.r("md"))
+        .bg(th.c("accent.subtle"))
+        .child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).rounded(th.r("xs")).bg(th.c("accent.primary")));
+    Some(anim::appear(block, format!("sel-{}", sel.seq), th.ms("sidebar_select"), th.ease("standard"), 0., 0.).into_any_element())
+}
+
+/// The list itself, laid out at the sidebar's full width (it never reflows
+/// while the sidebar animates — the container clips it).
+fn list(shell: &Shell, th: Th, groups: &[GroupRows], window: &mut Window, cx: &mut Context<Shell>) -> Div {
+    let selected = shell.hub.lock().focused.clone();
+    let mut col = div().relative().flex().flex_col().px(th.sp(2)).pb(th.sp(2)).children(selection(shell, th, window));
+    for g in groups {
+        let collapsed = shell.collapsed_groups.contains(&g.group);
+        col = col.child(group_header(th, g, collapsed, cx));
+        if collapsed {
+            continue;
+        }
+        let extra = usize::from(g.group != Group::Sessions);
+        for row in &g.rows {
+            col = col.child(row_el(shell, th, row, row.depth + extra, selected.as_deref() == Some(row.id.as_str()), cx));
+        }
     }
     col
 }
 
-pub fn render_sidebar(shell: &Shell, groups: &[GroupRows], is_rail: bool, cx: &mut Context<Shell>) -> AnyElement {
-    let th = shell.th;
-    let selected = shell.hub.lock().focused.clone();
-    let body = if is_rail {
-        rail(th, groups, selected.as_deref(), cx).into_any_element()
-    } else {
-        let mut col = div().flex().flex_col().px(th.sp(2)).pb(th.sp(2));
-        for g in groups {
-            let collapsed = shell.collapsed_groups.contains(&g.group);
-            col = col.child(group_header(th, g, collapsed, cx));
-            if collapsed {
-                continue;
-            }
-            let extra = usize::from(g.group != Group::Sessions);
-            for row in &g.rows {
-                col = col.child(row_el(shell, th, row, row.depth + extra, selected.as_deref() == Some(row.id.as_str()), cx));
-            }
-        }
-        col.into_any_element()
-    };
-    let width = if is_rail { th.px("sidebar.rail_width") } else { px(shell.sidebar_w) };
+/// The list's content at animated width `w` (§4.4): faded and slid left as it narrows.
+fn content(shell: &Shell, th: Th, groups: &[GroupRows], full: f32, w: f32, window: &mut Window, cx: &mut Context<Shell>) -> Div {
+    let (opacity, x) = sidebar_content(w, th.n("sidebar.fade_span"), th.n("sidebar.slide_span"), th.n("sidebar.slide_offset"));
+    let x = if cx.reduce_motion() { 0. } else { x };
     div()
-        .relative()
-        .w(width)
+        .w(px(full))
         .h_full()
         .flex_none()
+        .relative()
+        .left(px(x))
+        .opacity(opacity)
+        .child(div().id("sidebar-scroll").size_full().overflow_y_scroll().child(list(shell, th, groups, window, cx)))
+}
+
+/// The pushing sidebar in a wide window (0 px wide when collapsed).
+pub fn render_sidebar(shell: &Shell, groups: &[GroupRows], window: &mut Window, cx: &mut Context<Shell>) -> Option<AnyElement> {
+    let th = shell.th;
+    let now = Instant::now();
+    let w = shell.sidebar.push.value(now).max(0.);
+    if shell.sidebar.push.running(now) {
+        window.request_animation_frame();
+    }
+    if w <= 0. {
+        return None;
+    }
+    let settled = !shell.sidebar.push.running(now) && shell.sidebar.push.to > 0.;
+    Some(
+        div()
+            .relative()
+            .w(px(w))
+            .h_full()
+            .flex_none()
+            .bg(th.c("bg.surface"))
+            .border_r_1()
+            .border_color(th.c("border.subtle"))
+            .child(div().size_full().overflow_hidden().child(content(shell, th, groups, shell.sidebar.width, w, window, cx)))
+            .when(settled, |d| {
+                d.child(
+                    div()
+                        .id("sidebar-resize")
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right(px(-th.n("sidebar.resize_hit") / 2.))
+                        .w(th.px("sidebar.resize_hit"))
+                        .flex()
+                        .justify_center()
+                        .cursor_col_resize()
+                        .child(div().w(th.px("sidebar.resize_handle")).h_full().when(shell.dragging, |d| d.bg(th.c("border.focus"))))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.dragging = true;
+                            cx.notify();
+                        })),
+                )
+            })
+            .into_any_element(),
+    )
+}
+
+/// The overlay drawer in a narrow window (§4.4): slides in over a scrim;
+/// a click on the scrim closes it.
+pub fn render_overlay(shell: &Shell, groups: &[GroupRows], window: &mut Window, cx: &mut Context<Shell>) -> Option<AnyElement> {
+    let th = shell.th;
+    let now = Instant::now();
+    let f = shell.sidebar.slide.value(now).clamp(0., 1.);
+    if shell.sidebar.slide.running(now) {
+        window.request_animation_frame();
+    }
+    if f <= 0. || !shell.sidebar.narrow {
+        return None;
+    }
+    let reduce = cx.reduce_motion();
+    let w = th.n("sidebar.width_default");
+    let left = if reduce { 0. } else { -w * (1. - f) };
+    let panel = div()
+        .id("sidebar-overlay")
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(left))
+        .w(px(w))
         .bg(th.c("bg.surface"))
-        .border_r_1()
-        .border_color(th.c("border.subtle"))
-        .child(div().id("sidebar-scroll").size_full().overflow_y_scroll().child(body))
-        .when(!is_rail, |d| {
-            d.child(
-                div()
-                    .id("sidebar-resize")
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .right(px(-th.n("sidebar.resize_hit") / 2.))
-                    .w(th.px("sidebar.resize_hit"))
-                    .flex()
-                    .justify_center()
-                    .cursor_col_resize()
-                    .child(div().w(th.px("sidebar.resize_handle")).h_full().when(shell.dragging, |d| d.bg(th.c("border.focus"))))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.dragging = true;
-                        cx.notify();
-                    })),
-            )
-        })
-        .into_any_element()
+        .shadow(th.shadow("high"))
+        .when(reduce, |d| d.opacity(f))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(content(shell, th, groups, w, if reduce { w } else { w * f }, window, cx));
+    let scrim = div()
+        .id("sidebar-scrim")
+        .absolute()
+        .inset_0()
+        .bg(th.c("bg.scrim"))
+        .opacity(f)
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.close_sidebar_overlay(cx);
+        }));
+    Some(div().absolute().inset_0().child(scrim).child(panel).into_any_element())
 }

@@ -31,20 +31,30 @@ screen-recording permission.
 | `src/hub.rs` | shared state the socket and the window act through: processes, logs, dialogs, focus |
 | `src/host_server.rs` | 0600 unix socket, peer-uid check, `hello` binding, per-method dispatch |
 | `src/notify.rs` | `UNUserNotificationCenter`; click ⇒ `focus` |
-| `src/app.rs` | the window shell: assembles the regions, global keys, composer, banner, clock ticks |
+| `src/app.rs` | the window shell: assembles the regions, global keys, clock ticks, view state |
 | `src/demo.rs` | `--demo` states and the `--shots` walker |
-| `src/ui/theme.rs` | tokens.json → colours / sizes / fonts / shadows / durations / cubic-bezier easing |
+| `src/ui/theme.rs` | tokens.json → colours / sizes / fonts / shadows / durations / easings / springs |
+| `src/ui/motion.rs` | springs, retargetable tweens, sidebar width → content mapping, streamed-word timing — pure |
+| `src/ui/anim.rs` | GPUI side of motion: entrances, press sink, spring pops, state fades, scroll-edge fades, stamp clock |
+| `src/ui/ansi.rs` | ANSI SGR → styled spans for status texts (§9.3) — pure |
+| `src/ui/controls.rs` | buttons, icon buttons, badges, focus ring |
+| `src/ui/chrome.rs` | title bar with the sidebar toggle and waiting badge; stacked in-app toasts |
+| `src/ui/composer.rs` | the composer and its send / abort button |
+| `src/ui/scroll.rs` | spring-driven programmatic scrolling |
+| `src/ui/stream_text.rs` | streamed words fading in (markdown for settled lines, runs for the arriving one) |
 | `src/ui/assets.rs` | bundled Lucide icons + Inter / JetBrains Mono (licences in `assets/licenses/`) |
 | `src/ui/chat_model.rs` | pi event stream → conversation (text, thinking, tool calls, results) — pure |
 | `src/ui/chat.rs` | chat column: bubbles, markdown, thinking, tool cards, streaming cursor |
 | `src/ui/diff.rs` | unified-diff parsing with word-level spans — pure |
 | `src/ui/dialog_state.rs` | gate dialog interaction model (focus, keys, reason draft, outcome) — pure |
-| `src/ui/dialog_host.rs` | dialog view state per pending dialog, answers back to the hub |
-| `src/ui/dialogs.rs` | choice / checklist / long-text confirm / pi-native boxes, buttons |
-| `src/ui/sidebar_model.rs` | session grouping, nesting, status, keyboard order — pure |
-| `src/ui/sidebar.rs` | session list, status dots and their motion, icon rail, resize |
-| `src/ui/status_model.rs` | prg's `review-gate-agents` widget line → strip facts — pure |
-| `src/ui/status.rs` | the bottom status strip |
+| `src/ui/dialog_host.rs` | dialog view state per pending dialog, drawer reconciliation, answers back to the hub |
+| `src/ui/drawer.rs` | the right drawer shell: width, entrance / exit, question switch, scrim |
+| `src/ui/dialogs.rs` | what goes in the drawer: choice / reason / checklist / long confirm / pi-native select, input, confirm, editor |
+| `src/ui/sidebar_model.rs` | session grouping, nesting, status, keyboard order, row slots — pure |
+| `src/ui/sidebar_state.rs` | expanded / collapsed / overlay sidebar state and its persistence — pure |
+| `src/ui/sidebar.rs` | session list, status dots and their motion, sliding selection, collapse, overlay, resize |
+| `src/ui/status_model.rs` | prg's `review-gate-agents` widget → strip facts and unmet items — pure |
+| `src/ui/status.rs` | the bottom status strip (ANSI colour), the unmet popover |
 
 ## GPUI dependency
 
@@ -67,5 +77,4 @@ builds on those instead of hand-rolling editors.
 ## Gaps for the project manager
 
 - `hello` checks the pid the client spawned. A launcher that forks instead of exec'ing (e.g. `npx pi`) reports a different pid and is refused; prg's `session.open` argv must exec pi directly.
-- The status strip's unmet segment has only a count: prg's widget line carries no item list, so the click shows a pointer to `/gate-status` instead of the spec's per-item flyout (§9).
 - Notifications need the `.app` bundle (`scripts/bundle.sh`); a bare `cargo run` answers `notify` with `shown:false`.

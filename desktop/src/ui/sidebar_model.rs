@@ -204,6 +204,34 @@ pub fn visible_ids(groups: &[GroupRows], collapsed: &HashSet<Group>) -> Vec<Stri
     groups.iter().filter(|g| !collapsed.contains(&g.group)).flat_map(|g| g.rows.iter().map(|r| r.id.clone())).collect()
 }
 
+/// Where a visible row sits in the list (§4.3's sliding highlight): its top
+/// edge, its visual nesting and its group. Headers are `header_gap + header_h`
+/// tall, rows `row_h`; collapsed groups show only their header.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowSlot {
+    pub id: String,
+    pub y: f32,
+    pub depth: usize,
+    pub group: Group,
+}
+
+pub fn row_slots(groups: &[GroupRows], collapsed: &HashSet<Group>, header_gap: f32, header_h: f32, row_h: f32) -> Vec<RowSlot> {
+    let mut y = 0.0;
+    let mut out = vec![];
+    for g in groups {
+        y += header_gap + header_h;
+        if collapsed.contains(&g.group) {
+            continue;
+        }
+        let extra = usize::from(g.group != Group::Sessions);
+        for r in &g.rows {
+            out.push(RowSlot { id: r.id.clone(), y, depth: r.depth + extra, group: g.group });
+            y += row_h;
+        }
+    }
+    out
+}
+
 /// ⌘⇧A: the next waiting-input session after `current`, wrapping.
 pub fn next_waiting(groups: &[GroupRows], current: Option<&str>) -> Option<String> {
     let rows: Vec<&Row> = groups.iter().flat_map(|g| &g.rows).collect();
@@ -262,5 +290,21 @@ mod tests {
         assert_eq!(next_waiting(&g, Some("s3-worker")).as_deref(), Some("s3-worker"), "wraps to itself when alone");
         let collapsed: HashSet<Group> = [Group::Judges].into();
         assert_eq!(visible_ids(&g, &collapsed), vec!["s1-root", "s3-worker", "s4-child", "s5-judge", "s6-child"]);
+    }
+
+    #[test]
+    fn row_slots_stack_headers_and_rows_and_skip_collapsed_groups() {
+        let t = tree();
+        let none = HashSet::new();
+        let g = build(&Inputs { sessions: t.all(), unread: &none, running: &|_| false, asking: &|_| false });
+        let collapsed: HashSet<Group> = [Group::Judges].into();
+        let s = row_slots(&g, &collapsed, 8.0, 24.0, 30.0);
+        let ys: Vec<(&str, f32, usize)> = s.iter().map(|r| (r.id.as_str(), r.y, r.depth)).collect();
+        // 会话 header 32 → root; JUDGES header only; WORKERS header → worker; 子任务 header → 3 rows.
+        assert_eq!(ys[0], ("s1-root", 32.0, 0));
+        assert_eq!(ys[1], ("s3-worker", 32.0 + 30.0 + 32.0 + 32.0, 1));
+        assert_eq!(ys[2].1, ys[1].1 + 30.0 + 32.0);
+        assert_eq!(ys[3], ("s5-judge", ys[2].1 + 30.0, 2), "nested under its child task");
+        assert_eq!(s.len(), 5);
     }
 }

@@ -66,6 +66,8 @@ pub struct DialogUi {
     pub selected: Option<usize>,
     pub checked: Vec<bool>,
     pub reason_open: bool,
+    /// Bumped each time the reason editor opens or closes (replays its transition, §6.3).
+    pub reason_flips: u32,
     /// The reason editor's text, kept across Esc (§6.1).
     pub draft: String,
     /// Answer sent, waiting for the card to go (rows render disabled).
@@ -117,6 +119,7 @@ impl DialogUi {
                     selected: None,
                     checked: vec![],
                     reason_open: false,
+                    reason_flips: 0,
                     draft: String::new(),
                     answered: false,
                 }
@@ -131,6 +134,7 @@ impl DialogUi {
                 focus: Row::Option(0),
                 selected: None,
                 reason_open: false,
+                reason_flips: 0,
                 draft: String::new(),
                 answered: false,
             },
@@ -149,6 +153,7 @@ impl DialogUi {
             selected: None,
             checked: vec![],
             reason_open: false,
+            reason_flips: 0,
             draft: String::new(),
             answered: false,
         }
@@ -198,6 +203,7 @@ impl DialogUi {
         match (row, &self.kind) {
             (Row::Decline, _) => {
                 self.reason_open = true;
+                self.reason_flips += 1;
                 Effect::OpenReason
             }
             (Row::Back, _) => self.submit(DialogOutcome::Back),
@@ -228,6 +234,7 @@ impl DialogUi {
             // Only Esc reaches the machine from the editor; ⌘Enter goes through `submit_reason`.
             if key == Key::Esc {
                 self.reason_open = false;
+                self.reason_flips += 1;
                 return Effect::CloseReason;
             }
             return Effect::None;

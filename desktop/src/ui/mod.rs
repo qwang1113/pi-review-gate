@@ -1,17 +1,27 @@
 //! The window's views (`docs/desktop/ui-design.md`), one module per region.
 //! `*_model` modules are pure and unit-tested; the others paint them.
 
+pub mod anim;
+pub mod ansi;
 pub mod assets;
 pub mod chat;
 pub mod chat_model;
+pub mod chrome;
+pub mod composer;
+pub mod controls;
 pub mod dialog_host;
 pub mod dialog_state;
 pub mod dialogs;
 pub mod diff;
+pub mod drawer;
+pub mod motion;
+pub mod scroll;
 pub mod sidebar;
 pub mod sidebar_model;
+pub mod sidebar_state;
 pub mod status;
 pub mod status_model;
+pub mod stream_text;
 pub mod theme;
 
 use gpui_kit::component::theme::{Theme, ThemeMode};

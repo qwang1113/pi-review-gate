@@ -3,6 +3,8 @@
 //! by `lib/ui-widget.ts` `buildGateWidget` —
 //! `门禁 · mode <mode> · <branch> · <已编辑|未编辑>[ · 轮 N][ · <stages>][ · N 项未满足]`
 //! — plus any `setStatus` texts. A line this parser cannot read is shown raw.
+//! On the desktop host every widget row after the first is one unmet item,
+//! `· <short text>` (`buildGateWidget({details})`, `host-protocol.md`).
 
 pub const GATE_WIDGET_KEY: &str = "review-gate-agents";
 
@@ -49,6 +51,12 @@ pub fn parse(line: &str) -> Parsed {
     Parsed::Gate(s)
 }
 
+/// The unmet items the widget carries after its strip row (§9.2). A widget
+/// that sends only the strip yields none — the popover then shows the count.
+pub fn unmet_items(lines: &[String]) -> Vec<String> {
+    lines.iter().skip(1).filter_map(|l| l.strip_prefix("· ").or_else(|| l.strip_prefix('·'))).map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
+}
+
 /// The mode badge's colour tokens (§9); an unknown mode reads as `normal`.
 pub fn mode_tokens(mode: &str) -> (&'static str, &'static str) {
     match mode {
@@ -80,6 +88,17 @@ mod tests {
         assert_eq!((s.round, s.unmet, s.branch.as_deref()), (None, 0, Some("main")));
         let Parsed::Gate(s) = parse("门禁 · mode 未初始化 · 未编辑") else { panic!() };
         assert_eq!((s.mode.as_str(), s.branch), ("未初始化", None));
+    }
+
+    #[test]
+    fn unmet_rows_follow_the_strip() {
+        let lines: Vec<String> = ["门禁 · mode loop · b · 已编辑 · 2 项未满足", "· code review gate is PENDING (need READY)", "· precommit has not run"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(unmet_items(&lines), vec!["code review gate is PENDING (need READY)", "precommit has not run"]);
+        assert!(unmet_items(&lines[..1]).is_empty(), "a terminal-style single row has no detail");
+        assert!(unmet_items(&["· looks like a row".to_string()]).is_empty(), "the first row is the strip, never an item");
+        assert!(unmet_items(&["x".into(), "·  ".into(), "other".into()]).is_empty());
     }
 
     #[test]

@@ -1,104 +1,150 @@
-//! The gate dialog (§6), its long-text confirm variant (§7) and pi's own
-//! `extension_ui_request` boxes, painted from `DialogUi` (`dialog_state`).
-//! The overlay covers the chat stream only; the composer and the status strip
-//! stay usable (§5.5).
+//! What goes inside the right drawer (§6.2–6.7): the gate's single choice,
+//! reason editor, checklist and long-text confirm, and pi's own select /
+//! input / confirm / editor. Each builder returns `Parts`; `drawer.rs` puts
+//! them in the shell (width, entrance, header, body scroll, footer).
 
+use super::anim;
 use super::assets::icon;
 use super::chat::{markdown_style, text_font};
-use super::dialog_state::{DialogUi, DocKind, Kind, Row, doc_kind, progress_of, question_of};
+use super::controls::{Btn, badge, button, ring};
+use super::dialog_state::{DialogUi, DocKind, Key, Kind, Row, doc_kind, progress_of, question_of};
 use super::theme::Th;
 use crate::app::{ActiveDialog, Shell};
+use crate::rpc::UiRequest;
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::text::TextView;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::time::Instant;
 
 const LETTERS: [&str; 16] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Btn {
-    Primary,
-    Secondary,
-    Ghost,
+/// The drawer's regions for one dialog (§6.1 structure, top to bottom).
+pub struct Parts {
+    pub header: AnyElement,
+    /// At the drawer's top edge: the N/M segments or a timeout countdown.
+    pub top_bar: Option<AnyElement>,
+    /// Under the header: the long box's reading progress.
+    pub under_header: Option<AnyElement>,
+    pub body: AnyElement,
+    /// The body is an editor that fills the height (no scroll wrapper).
+    pub body_fills: bool,
+    /// Absolute over the body's bottom edge (the unread pill).
+    pub overlay: Option<AnyElement>,
+    /// Between body and footer, not scrolling (the long box's reason area).
+    pub pinned: Option<AnyElement>,
+    pub footer: AnyElement,
 }
 
-/// §8 button: primary / secondary / ghost, 32 high.
-pub fn button(th: Th, id: impl Into<SharedString>, kind: Btn, focused: bool, label: impl Into<SharedString>) -> Stateful<Div> {
-    let (bg, fg, hover, pressed) = match kind {
-        Btn::Primary => ("accent.primary", "text.on_accent", "accent.hover", "accent.pressed"),
-        Btn::Secondary => ("bg.elevated", "text.primary", "border.subtle", "border.default"),
-        Btn::Ghost => ("", "text.secondary", "bg.elevated", "border.subtle"),
-    };
-    text_font(th, div(), "body")
-        .id(id.into())
-        .h(th.px("button.height"))
-        .px(th.px("button.padding_x"))
-        .flex()
-        .items_center()
-        .gap(th.sp(1))
-        .rounded(th.r("md"))
-        .font_weight(FontWeight(500.))
-        .cursor_pointer()
-        .text_color(th.c(fg))
-        .when(!bg.is_empty(), |d| d.bg(th.c(bg)))
-        .when(kind == Btn::Secondary, |d| d.border_1().border_color(th.c(if focused { "border.focus" } else { "border.default" })))
-        .when(focused, |d| d.shadow(vec![ring(th)]))
-        .hover(move |s| s.bg(th.c(hover)))
-        .active(move |s| s.bg(th.c(pressed)))
-        .child(label.into())
+/// Everything a builder needs besides the dialog itself.
+pub struct Ctx<'a> {
+    pub shell: &'a Shell,
+    pub th: Th,
+    pub key: &'a str,
+    pub who: &'a str,
+    pub ui: &'a DialogUi,
+    pub focused: bool,
+    pub reduce: bool,
+    pub opened_at: Instant,
 }
 
-/// The 2 px `focus.ring` glow as a spread-only shadow.
-pub fn ring(th: Th) -> BoxShadow {
-    BoxShadow { offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.), color: th.c("focus.ring"), inset: false }
-}
-
-fn rec_badge(th: Th) -> Div {
-    text_font(th, div(), "caption")
-        .h(px(20.))
-        .px(px(6.))
-        .flex()
-        .items_center()
-        .flex_none()
-        .rounded(th.r("sm"))
-        .border_1()
-        .border_color(th.c("badge.rec.border"))
-        .bg(th.c("badge.rec.bg"))
-        .text_color(th.c("badge.rec.text"))
-        .child("（推荐）")
-}
-
-fn progress(th: Th, n: usize, m: usize, h: Pixels) -> Div {
-    div().flex().gap(th.px("dialog.progress_gap")).w_full().h(h).children((1..=m).map(|i| div().flex_1().h_full().bg(th.c(if i <= n { "accent.primary" } else { "border.subtle" }))))
-}
-
-/// Opacity + an 8 px rise over `dialog_enter` (GPUI cannot scale a div; the report lists it).
-fn enter(th: Th, key: &str, el: Div) -> AnimationElement<Div> {
-    el.with_animation(
-        ElementId::Name(format!("enter-{key}").into()),
-        Animation::new(th.ms("dialog_enter")).with_easing(th.ease("emphasized")),
-        |d, t| d.opacity(t).mt(px(8. * (1. - t))),
-    )
-}
-
-fn option_row(th: Th, key: &str, ui: &DialogUi, i: usize, focused_panel: bool, cx: &mut Context<Shell>) -> Stateful<Div> {
-    let focused = ui.focus == Row::Option(i) && focused_panel;
-    let multi = ui.kind == Kind::Multi;
-    let selected = if multi { ui.checked.get(i).copied().unwrap_or(false) } else { ui.selected == Some(i) };
-    let letter_color = th.c(if selected { "accent.primary" } else { "text.secondary" });
-    let mark: AnyElement = if multi {
-        let boxed = div().size(th.px("checkbox")).flex_none().rounded(th.r("sm")).flex().items_center().justify_center();
-        if selected {
-            boxed.bg(th.c("accent.primary")).child(icon("check", px(12.), th.c("text.on_accent"))).into_any_element()
-        } else {
-            boxed.border(px(1.5)).border_color(th.c(if focused { "text.primary" } else { "border.strong" })).into_any_element()
+pub fn build(c: &Ctx, active: &ActiveDialog, cx: &mut Context<Shell>) -> Parts {
+    match active {
+        ActiveDialog::Gate(p) => {
+            let body = match p {
+                crate::protocol::DialogParams::Choice { body, .. } | crate::protocol::DialogParams::Multi { body, .. } => body.as_deref(),
+            };
+            match body.filter(|_| c.ui.long) {
+                Some(doc) => long_confirm(c, p.title(), doc, cx),
+                None => choice(c, p.title(), body, cx),
+            }
         }
-    } else {
-        icon(if selected { "circle-dot" } else { "circle" }, px(16.), letter_color).into_any_element()
-    };
-    let k = key.to_string();
-    div()
-        .id(SharedString::from(format!("{key}-opt-{i}")))
+        ActiveDialog::Native(req) => native(c, req, cx),
+    }
+}
+
+/// Whether this dialog takes the wide drawer (§6.1).
+pub fn is_wide(active: &ActiveDialog, ui: Option<&DialogUi>) -> bool {
+    match active {
+        ActiveDialog::Gate(_) => ui.is_some_and(|u| u.long),
+        ActiveDialog::Native(r) => matches!(r, UiRequest::Editor { .. }),
+    }
+}
+
+fn segments(th: Th, n: usize, m: usize) -> AnyElement {
+    let bar = |i: usize| div().flex_1().h_full().bg(th.c(if i <= n { "accent.primary" } else { "border.subtle" }));
+    let el = div().flex().gap(th.px("dialog.progress_gap")).w_full().h(th.px("dialog.progress_height")).children((1..=m).map(|i| {
+        // The segment that just turned on eases in over `question_in`.
+        if i == n {
+            anim::fade_bg(bar(i), format!("seg-{n}-{m}"), th, th.c("border.subtle"), th.c("accent.primary"), "question_in").into_any_element()
+        } else {
+            bar(i).into_any_element()
+        }
+    }));
+    el.into_any_element()
+}
+
+fn header(th: Th, glyph: &'static str, title: String, prog: Option<(usize, usize)>) -> AnyElement {
+    text_font(th, div(), "base")
+        .size_full()
+        .flex()
+        .items_center()
+        .gap(th.sp(2))
+        .font_weight(FontWeight(600.))
+        .text_color(th.c("text.primary"))
+        .child(icon(glyph, px(18.), th.c("accent.primary")))
+        .child(div().flex_1().min_w_0().truncate().child(title))
+        .when_some(prog, |d, (n, m)| d.child(text_font(th, div(), "small").flex_none().text_color(th.c("text.muted")).child(format!("第 {n} / {m} 题"))))
+        .into_any_element()
+}
+
+fn hint(th: Th, text: &str) -> AnyElement {
+    text_font(th, div(), "small").w_full().text_right().text_color(th.c("text.muted")).child(text.to_string()).into_any_element()
+}
+
+fn mark(c: &Ctx, i: usize, multi: bool, on: bool, row_focused: bool) -> AnyElement {
+    let th = c.th;
+    if !multi {
+        let color = th.c(if on { "accent.primary" } else { "text.secondary" });
+        return icon(if on { "circle-dot" } else { "circle" }, px(16.), color).into_any_element();
+    }
+    let boxed = || div().size(th.px("checkbox")).flex_none().rounded(th.r("sm")).flex().items_center().justify_center();
+    let stamp = format!("chk-{}-{i}", c.key);
+    let recent = !c.reduce && c.shell.stamps.running(&stamp, th.spring("snappy").duration());
+    let check = |size: AnyElement| boxed().bg(th.c("accent.primary")).child(size);
+    match (on, recent) {
+        (true, true) => check(anim::pop_size(icon("check", px(0.), th.c("text.on_accent")), format!("{stamp}-on-{}", c.ui.reason_flips), th, 0.0, 12.0).into_any_element()).into_any_element(),
+        (true, false) => check(icon("check", px(12.), th.c("text.on_accent")).into_any_element()).into_any_element(),
+        (false, true) => {
+            // Unchecking: the tick shrinks away while the fill fades back.
+            let t = c.shell.stamps.progress(&stamp, th.spring("snappy").duration(), super::motion::Curve::Spring(th.spring("snappy")));
+            boxed()
+                .bg(anim::mix(th.c("accent.primary"), th.c("bg.surface"), t))
+                .border(px(1.5))
+                .border_color(th.c("border.strong"))
+                .child(icon("check", px(12. * (1. - t).max(0.)), th.c("text.on_accent")))
+                .into_any_element()
+        }
+        (false, false) => boxed().border(px(1.5)).border_color(th.c(if row_focused { "text.primary" } else { "border.strong" })).into_any_element(),
+    }
+}
+
+/// One option row (§6.2, §6.7). `letters` is off for pi's own select.
+fn option_row(c: &Ctx, i: usize, letters: bool, cx: &mut Context<Shell>) -> AnyElement {
+    let th = c.th;
+    let ui = c.ui;
+    let focused = ui.focus == Row::Option(i) && c.focused;
+    let multi = ui.kind == Kind::Multi;
+    let on = if multi { ui.checked.get(i).copied().unwrap_or(false) } else { ui.selected == Some(i) };
+    let picked = on && !multi;
+    let id = format!("{}-opt-{i}", c.key);
+    let hovered = c.shell.hovered.as_deref() == Some(id.as_str()) && !ui.answered;
+    let hot = focused || hovered;
+    let recent = [format!("hover-{id}"), format!("focus-{}", c.key)].iter().any(|s| c.shell.stamps.running(s, th.ms("choice_hover")));
+    let k = c.key.to_string();
+    let hover_id = id.clone();
+    let row = div()
+        .id(SharedString::from(id.clone()))
         .min_h(th.px("choice.row_min_height"))
         .px(th.sp(3))
         .py(px(10.))
@@ -107,41 +153,48 @@ fn option_row(th: Th, key: &str, ui: &DialogUi, i: usize, focused_panel: bool, c
         .gap(th.sp(2))
         .rounded(th.r("lg"))
         .cursor_pointer()
-        .bg(th.c(if selected && !multi { "accent.subtle" } else if focused { "bg.elevated" } else { "bg.surface" }))
-        .border(px(if focused || (selected && !multi) { 1.5 } else { 1. }))
-        .border_color(th.c(if selected && !multi {
+        .border(px(if focused || picked { 1.5 } else { 1. }))
+        .border_color(th.c(if picked {
             "accent.primary"
         } else if focused {
             "border.focus"
+        } else if hovered {
+            "border.default"
         } else {
             "border.subtle"
         }))
         .when(focused, |d| d.shadow(vec![ring(th)]))
-        .when(ui.answered, |d| d.text_color(th.c("text.disabled")))
-        .when(!ui.answered, |d| d.hover(move |s| s.bg(th.c("bg.elevated")).border_color(th.c("border.default"))))
-        .active(move |s| s.bg(th.c("border.subtle")))
-        .child(mark)
-        .child(text_font(th, div(), "body_strong").w(px(20.)).flex_none().text_color(letter_color).child(format!("{}.", LETTERS.get(i).unwrap_or(&"?"))))
+        .child(mark(c, i, multi, on, focused))
+        .when(letters, |d| {
+            d.child(text_font(th, div(), "body_strong").w(px(20.)).flex_none().text_color(th.c(if on { "accent.primary" } else { "text.secondary" })).child(format!("{}.", LETTERS.get(i).unwrap_or(&"?"))))
+        })
         .child(text_font(th, div(), "body").flex_1().text_color(th.c(if ui.answered { "text.disabled" } else { "text.primary" })).child(ui.options[i].clone()))
-        .when(ui.recommended() == Some(i), |d| d.child(rec_badge(th)))
+        .when(ui.recommended() == Some(i), |d| d.child(badge(th, "badge.rec", "（推荐）")))
+        .on_hover(cx.listener(move |this, h: &bool, _, cx| this.set_hovered(&hover_id, *h, cx)))
         .on_click(cx.listener(move |this, _, window, cx| {
             if multi {
                 this.dialog_toggle(&k, i, cx);
             } else {
                 this.dialog_activate(&k, Row::Option(i), window, cx);
             }
-        }))
+        }));
+    let row = anim::press(row, th, Some("border.subtle"), c.reduce);
+    if picked {
+        return row.bg(th.c("accent.subtle")).into_any_element();
+    }
+    anim::state_bg(row, &id, th, hot, th.c("bg.elevated"), th.c("bg.surface"), recent, "choice_hover")
 }
 
-fn extra_row(th: Th, key: &str, ui: &DialogUi, row: Row, focused_panel: bool, cx: &mut Context<Shell>) -> Stateful<Div> {
-    let focused = ui.focus == row && focused_panel;
+fn extra_row(c: &Ctx, row: Row, cx: &mut Context<Shell>) -> AnyElement {
+    let th = c.th;
+    let focused = c.ui.focus == row && c.focused;
     let (glyph, label, dashed) = match row {
-        Row::Decline => ("pencil", ui.decline.clone().unwrap_or_default(), true),
-        _ => ("arrow-left", "← 返回上一题".to_string(), false),
+        Row::Decline => ("pencil", c.ui.decline.clone().unwrap_or_default(), true),
+        _ => ("arrow-left", "返回上一题".to_string(), false),
     };
-    let k = key.to_string();
-    div()
-        .id(SharedString::from(format!("{key}-{}", if dashed { "decline" } else { "back" })))
+    let k = c.key.to_string();
+    let el = div()
+        .id(SharedString::from(format!("{}-{}", c.key, if dashed { "decline" } else { "back" })))
         .min_h(th.px("choice.row_min_height"))
         .px(th.sp(3))
         .flex()
@@ -155,370 +208,284 @@ fn extra_row(th: Th, key: &str, ui: &DialogUi, row: Row, focused_panel: bool, cx
         .hover(move |s| s.bg(th.c("bg.elevated")).text_color(th.c("text.primary")))
         .child(icon(glyph, px(16.), th.c("text.secondary")))
         .child(text_font(th, div(), "body").child(label.trim_start_matches(['✎', '←', ' ']).to_string()))
-        .on_click(cx.listener(move |this, _, window, cx| this.dialog_activate(&k, row, window, cx)))
+        .on_click(cx.listener(move |this, _, window, cx| this.dialog_activate(&k, row, window, cx)));
+    anim::press(el, th, Some("border.subtle"), c.reduce).into_any_element()
 }
 
-fn reason_editor(shell: &Shell, th: Th, key: &str, drawer: bool) -> Div {
-    let editor = shell.reason_editors.get(key).cloned();
-    div()
-        .flex()
-        .flex_col()
-        .gap(th.sp(2))
-        .child(
-            text_font(th, div(), "body")
-                .min_h(th.px(if drawer { "reason_editor.min_height" } else { "reason_editor.min_height" }))
-                .max_h(th.px("reason_editor.max_height"))
-                .p(px(10.))
-                .rounded(th.r("md"))
-                .bg(th.c("bg.app"))
-                .border(px(1.5))
-                .border_color(th.c("border.focus"))
-                .shadow(vec![ring(th)])
-                .when_some(editor, |d, e| d.child(Textarea::new(&e).appearance(false).h_full())),
-        )
-        .child(text_font(th, div(), "small").text_right().text_color(th.c("text.muted")).child("⌘Enter 提交 · Esc 返回选项（保留已输入）"))
-}
-
-fn choice_panel(shell: &Shell, th: Th, key: &str, who: &str, title: &str, body: Option<&str>, ui: &DialogUi, panel_focused: bool, width: Pixels, cx: &mut Context<Shell>) -> Div {
-    let prog = progress_of(title);
-    let question = question_of(title).to_string();
-    let multi = ui.kind == Kind::Multi;
-    let mut panel = div()
-        .w(width)
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .rounded(th.r("xl"))
-        .bg(th.c("bg.overlay"))
-        .shadow(th.shadow("mid"))
-        .border(px(if panel_focused { 1.5 } else { 1. }))
-        .border_color(th.c(if panel_focused { "border.focus" } else { "border.default" }));
-    if let Some((n, m)) = prog.filter(|(_, m)| *m > 1) {
-        panel = panel.child(progress(th, n, m, th.px("dialog.progress_height")));
+fn rows(c: &Ctx, letters: bool, cx: &mut Context<Shell>) -> Div {
+    let mut col = div().flex().flex_col().gap(th_gap(c.th));
+    for i in 0..c.ui.options.len() {
+        col = col.child(option_row(c, i, letters, cx));
     }
-    let mut inner = div().flex().flex_col().p(th.sp(5)).gap(th.sp(3));
-    inner = inner.child(
-        text_font(th, div(), "base")
-            .h(th.px("dialog.title_height"))
-            .flex()
-            .items_center()
-            .gap(th.sp(2))
-            .font_weight(FontWeight(600.))
-            .text_color(th.c("text.primary"))
-            .child(icon("message-circle-question-mark", px(18.), th.c("accent.primary")))
-            .child(div().flex_1().truncate().child(format!("等你回答 · {who}")))
-            .when_some(prog.filter(|(_, m)| *m > 1), |d, (n, m)| {
-                d.child(text_font(th, div(), "small").font_weight(FontWeight(400.)).text_color(th.c("text.muted")).child(format!("第 {n} / {m} 题")))
-            }),
-    );
+    for extra in c.ui.rows().into_iter().filter(|r| !matches!(r, Row::Option(_))) {
+        col = col.child(extra_row(c, extra, cx));
+    }
+    col
+}
+
+fn th_gap(th: Th) -> Pixels {
+    th.px("choice.row_gap")
+}
+
+fn editor_box(c: &Ctx, min: &str, fills: bool) -> Div {
+    let th = c.th;
+    let editor = c.shell.reason_editors.get(c.key).cloned();
+    text_font(th, div(), "body")
+        .when(!fills, |d| d.min_h(th.px(min)).max_h(th.px("reason_editor.max_height")))
+        .when(fills, |d| d.flex_1().min_h_0())
+        .p(px(10.))
+        .rounded(th.r("md"))
+        .bg(th.c("bg.app"))
+        .border(px(1.5))
+        .border_color(th.c("border.focus"))
+        .shadow(vec![ring(th)])
+        .when_some(editor, |d, e| d.child(Textarea::new(&e).appearance(false).h_full()))
+}
+
+/// pi `input`: one line, `button.height` tall (§6.6).
+fn line_box(c: &Ctx) -> Div {
+    let th = c.th;
+    let editor = c.shell.reason_editors.get(c.key).cloned();
+    text_font(th, div(), "body")
+        .h(th.px("button.height"))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .rounded(th.r("md"))
+        .bg(th.c("bg.app"))
+        .border(px(1.5))
+        .border_color(th.c("border.focus"))
+        .shadow(vec![ring(th)])
+        .when_some(editor, |d, e| d.child(div().flex_1().child(Textarea::new(&e).appearance(false))))
+}
+
+/// The list ↔ editor swap (§6.3): the incoming side rises / drops `reason_shift`.
+fn swap_in(c: &Ctx, el: Div, down: bool) -> AnyElement {
+    let th = c.th;
+    let dy = th.n("drawer.reason_shift") * if down { 1. } else { -1. };
+    anim::appear(el, format!("{}-swap-{}", c.key, c.ui.reason_flips), th.ms("reason_in"), th.ease("smooth"), 0., dy).into_any_element()
+}
+
+fn choice(c: &Ctx, title: &str, body: Option<&str>, cx: &mut Context<Shell>) -> Parts {
+    let th = c.th;
+    let prog = progress_of(title).filter(|(_, m)| *m > 1);
+    let question = question_of(title).to_string();
+    let multi = c.ui.kind == Kind::Multi;
     let text = match body {
         Some(b) if !b.trim().is_empty() => format!("{question}\n\n{b}"),
-        _ => question,
+        _ => question.clone(),
     };
-    inner = inner.child(
-        div()
-            .id(SharedString::from(format!("{key}-q")))
-            .max_h(th.px(if body.is_some() { "reason_editor.max_height" } else { "dialog.question_max_height" }))
-            .overflow_y_scroll()
-            .child(TextView::markdown(ElementId::Name(format!("{key}-md").into()), text).style(markdown_style(th)).text_color(th.c("text.primary"))),
-    );
-    if ui.reason_open {
-        inner = inner.child(reason_editor(shell, th, key, false));
+    let (body_el, footer) = if c.ui.reason_open {
+        let el = div()
+            .flex()
+            .flex_col()
+            .gap(th.sp(3))
+            .child(text_font(th, div(), "body").text_color(th.c("text.secondary")).child(question))
+            .child(editor_box(c, "reason_editor.min_height", false));
+        (swap_in(c, el, true), hint(th, "⌘Enter 提交 · Esc 返回选项（保留已输入）"))
     } else {
-        let mut rows = div().flex().flex_col().gap(th.px("choice.row_gap"));
-        for i in 0..ui.options.len() {
-            rows = rows.child(option_row(th, key, ui, i, panel_focused, cx));
-        }
-        for extra in ui.rows().into_iter().filter(|r| !matches!(r, Row::Option(_))) {
-            rows = rows.child(extra_row(th, key, ui, extra, panel_focused, cx));
-        }
-        inner = inner.child(rows);
-        if !multi {
-            let hint = if ui.back { "↑↓ 选择 · A–D 直选 · Enter 确认 · ⌘← 上一题 · Esc 关闭" } else { "↑↓ 选择 · A–D 直选 · Enter 确认 · Esc 关闭" };
-            inner = inner.child(text_font(th, div(), "small").text_right().text_color(th.c("text.muted")).child(hint));
-        }
-    }
-    panel = panel.child(inner);
-    if multi && !ui.reason_open {
-        let k = key.to_string();
-        let n = ui.checked.iter().filter(|c| **c).count();
-        panel = panel.child(
+        let el = div()
+            .flex()
+            .flex_col()
+            .gap(th.sp(4))
+            .child(TextView::markdown(ElementId::Name(format!("{}-md", c.key).into()), text).style(markdown_style(th)).text_color(th.c("text.primary")))
+            .child(rows(c, true, cx));
+        let el = if c.ui.reason_flips > 0 { swap_in(c, el, false) } else { el.into_any_element() };
+        let footer = if multi {
+            let n = c.ui.checked.iter().filter(|x| **x).count();
+            let k = c.key.to_string();
             div()
-                .h(th.px("dialog.multi_footer_height"))
-                .px(th.sp(5))
+                .w_full()
                 .flex()
                 .items_center()
-                .border_t_1()
-                .border_color(th.c("border.subtle"))
-                .child(text_font(th, div(), "small").flex_1().text_color(th.c("text.secondary")).child(format!("已勾选 {n} / {} 项", ui.options.len())))
-                .child(button(th, format!("{key}-submit"), Btn::Primary, false, "提交（Enter）").on_click(cx.listener(move |this, _, window, cx| {
-                    this.dialog_activate(&k, Row::Option(0), window, cx)
-                }))),
-        );
+                .child(anim::appear(text_font(th, div(), "small").text_color(th.c("text.secondary")).child(format!("已勾选 {n} / {} 项", c.ui.options.len())), format!("{}-n-{n}", c.key), th.ms("hover"), th.ease("standard"), 0., 0.))
+                .child(div().flex_1())
+                .child(button(th, format!("{}-submit", c.key), Btn::Primary, false, "提交（Enter）", c.reduce).on_click(cx.listener(move |this, _, window, cx| this.dialog_activate(&k, Row::Option(0), window, cx))))
+                .into_any_element()
+        } else if c.ui.back {
+            hint(th, "↑↓ 选择 · 字母直选 · Enter 确认 · ⌘← 上一题 · Esc 关闭")
+        } else {
+            hint(th, "↑↓ 选择 · 字母直选 · Enter 确认 · Esc 关闭")
+        };
+        (el, footer)
+    };
+    Parts {
+        header: header(th, "message-circle-question-mark", format!("等你回答 · {}", c.who), prog),
+        top_bar: prog.map(|(n, m)| segments(th, n, m)),
+        under_header: None,
+        body: body_el,
+        body_fills: false,
+        overlay: None,
+        pinned: None,
+        footer,
     }
-    panel
 }
 
-fn doc_badge(th: Th, kind: DocKind) -> Div {
-    let (label, base) = match kind {
+fn long_confirm(c: &Ctx, title: &str, doc: &str, cx: &mut Context<Shell>) -> Parts {
+    let th = c.th;
+    let ui = c.ui;
+    let prog = progress_of(title).filter(|(_, m)| *m > 1);
+    let scroll = c.shell.doc_scrolls.get(c.key).cloned().unwrap_or_default();
+    let (off, max) = (-scroll.offset().y, scroll.max_offset().y);
+    let read = if max > px(0.) { (off / max).clamp(0., 1.) } else { 1. };
+    let left_px = f32::from(max - off);
+    let unread = (left_px / th.font("body").line_height).ceil() as usize;
+    let (label, base) = match doc_kind(title) {
         DocKind::Restatement => ("需求反述", "doc.restatement"),
         DocKind::Goal => ("goal", "doc.goal"),
         DocKind::Plan => ("plan", "doc.plan"),
         DocKind::Other => ("全文", "doc.restatement"),
     };
-    text_font(th, div(), "caption")
-        .h(px(20.))
-        .px(th.sp(2))
-        .flex()
-        .items_center()
-        .flex_none()
-        .rounded(th.r("sm"))
-        .border_1()
-        .border_color(th.c(&format!("{base}.border")))
-        .bg(th.c(&format!("{base}.bg")))
-        .text_color(th.c(&format!("{base}.text")))
-        .child(label)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn long_panel(shell: &Shell, th: Th, key: &str, title: &str, body: &str, ui: &DialogUi, panel_focused: bool, win: Size<Pixels>, cx: &mut Context<Shell>) -> Div {
-    let w = (win.width * th.n("ratio.confirm.width")).min(th.px("confirm.width_max"));
-    let h = (win.height * th.n("ratio.confirm.height")).min(th.px("confirm.height_max"));
-    let prog = progress_of(title);
-    let scroll = shell.doc_scrolls.get(key).cloned().unwrap_or_default();
-    let scroll = &scroll;
-    let (off, max) = (-scroll.offset().y, scroll.max_offset().y);
-    let read = if max > px(0.) { (off / max).clamp(0., 1.) } else { 1. };
-    let left_px = max - off;
-    let unread_lines = (f32::from(left_px) / th.font("body").line_height).ceil() as usize;
-    let header = div()
-        .h(th.px("confirm.header_height"))
-        .px(th.sp(5))
+    let head = div()
+        .size_full()
         .flex()
         .items_center()
         .gap(th.sp(3))
-        .border_b_1()
-        .border_color(th.c("border.subtle"))
-        .child(doc_badge(th, doc_kind(title)))
-        .child(text_font(th, div(), "h2").flex_1().truncate().text_color(th.c("text.primary")).child(question_of(title).to_string()))
-        .when_some(prog.filter(|(_, m)| *m > 1), |d, (n, m)| d.child(text_font(th, div(), "small").text_color(th.c("text.muted")).child(format!("第 {n} / {m} 题"))));
-    let doc = div()
-        .relative()
-        .flex_1()
-        .min_h_0()
-        .child(
-            div()
-                .id(SharedString::from(format!("{key}-doc")))
-                .size_full()
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .px(th.sp(6))
-                .py(th.sp(4))
-                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-                .child(TextView::markdown(ElementId::Name(format!("{key}-body").into()), body.to_string()).style(markdown_style(th)).selectable(true).text_color(th.c("text.primary"))),
-        )
-        .when(f32::from(left_px) > th.n("limit.confirm.unread_hint_px"), |d| {
-            d.child(
-                div().absolute().bottom(th.sp(3)).left_0().right_0().flex().justify_center().child(
-                    text_font(th, div(), "small")
-                        .id(SharedString::from(format!("{key}-unread")))
-                        .h(px(26.))
-                        .px(th.sp(3))
-                        .flex()
-                        .items_center()
-                        .rounded(th.r("full"))
-                        .bg(th.c("bg.elevated"))
-                        .border_1()
-                        .border_color(th.c("border.default"))
-                        .shadow(th.shadow("low"))
-                        .text_color(th.c("text.primary"))
-                        .cursor_pointer()
-                        .child(format!("↓ 还有 {unread_lines} 行未读"))
-                        .on_click({
-                            let k = key.to_string();
-                            cx.listener(move |this, _, _, cx| {
-                                if let Some(s) = this.doc_scrolls.get(&k) {
-                                    s.scroll_to_bottom();
-                                }
-                                cx.notify();
-                            })
-                        }),
-                ),
-            )
-        });
-    let mut footer = div()
-        .h(th.px("confirm.footer_height"))
-        .px(th.sp(5))
+        .child(badge(th, base, label).px(th.sp(2)))
+        .child(text_font(th, div(), "h2").flex_1().min_w_0().truncate().text_color(th.c("text.primary")).child(question_of(title).to_string()))
+        .when_some(prog, |d, (n, m)| d.child(text_font(th, div(), "small").flex_none().text_color(th.c("text.muted")).child(format!("第 {n} / {m} 题"))));
+    let many = ui.options.len() > 3;
+    let body = div()
         .flex()
-        .items_center()
-        .gap(th.sp(2))
-        .bg(th.c("bg.overlay"))
-        .border_t_1()
-        .border_color(th.c("border.subtle"));
-    let k = key.to_string();
-    if ui.decline.is_some() {
-        footer = footer.child(
-            button(th, format!("{key}-decline"), Btn::Ghost, panel_focused && ui.focus == Row::Decline, ui.decline.clone().unwrap_or_default())
-                .on_click(cx.listener(move |this, _, window, cx| this.dialog_activate(&k, Row::Decline, window, cx))),
-        );
-    }
-    footer = footer.child(div().flex_1());
-    // Buttons right-aligned, the recommendation last (rightmost) as the primary.
-    let mut order: Vec<usize> = (0..ui.options.len()).rev().collect();
-    if let Some(r) = ui.recommended() {
-        order.retain(|i| *i != r);
-        order.push(r);
-    }
-    for i in order {
-        let k = key.to_string();
-        let kind = if ui.recommended() == Some(i) { Btn::Primary } else { Btn::Secondary };
-        let label = format!("{}. {}{}", LETTERS.get(i).unwrap_or(&"?"), ui.options[i], if kind == Btn::Primary { "（推荐）" } else { "" });
-        let focused = panel_focused && ui.focus == Row::Option(i);
-        footer = footer.child(button(th, format!("{key}-btn-{i}"), kind, focused, label).on_click(cx.listener(move |this, _, window, cx| this.dialog_activate(&k, Row::Option(i), window, cx))));
-    }
-    let drawer = ui.reason_open.then(|| {
-        let (k1, k2) = (key.to_string(), key.to_string());
+        .flex_col()
+        .gap(th.sp(4))
+        .child(TextView::markdown(ElementId::Name(format!("{}-body", c.key).into()), doc.to_string()).style(markdown_style(th)).selectable(true).text_color(th.c("text.primary")))
+        .when(many && !ui.reason_open, |d| d.child(rows(c, true, cx)));
+    let overlay = (left_px > th.n("limit.confirm.unread_hint_px")).then(|| {
+        let k = c.key.to_string();
+        let pill = text_font(th, div(), "small")
+            .id(SharedString::from(format!("{}-unread", c.key)))
+            .h(px(26.))
+            .px(th.sp(3))
+            .flex()
+            .items_center()
+            .gap(th.sp(1))
+            .rounded(th.r("full"))
+            .bg(th.c("bg.elevated"))
+            .border_1()
+            .border_color(th.c("border.default"))
+            .shadow(th.shadow("low"))
+            .text_color(th.c("text.primary"))
+            .cursor_pointer()
+            .child(icon("arrow-down", px(12.), th.c("text.primary")))
+            .child(format!("还有 {unread} 行未读"))
+            .on_click(cx.listener(move |this, _, _, cx| this.scroll_doc_to_end(&k, cx)));
         div()
-            .h(th.px("confirm.reject_drawer_height"))
-            .px(th.sp(5))
+            .absolute()
+            .bottom(th.sp(3))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(anim::appear(pill, format!("{}-unread-in", c.key), th.ms("popover_enter"), th.ease("smooth"), 0., th.n("popover.offset")))
+            .into_any_element()
+    });
+    let pinned = ui.reason_open.then(|| {
+        let (k1, k2) = (c.key.to_string(), c.key.to_string());
+        let h = th.px("confirm.reject_drawer_height");
+        div()
+            .h(h)
+            .flex_none()
+            .overflow_hidden()
+            .px(th.px("drawer.padding"))
             .py(th.sp(2))
             .flex()
             .gap(th.sp(3))
-            .items_start()
             .border_t_1()
             .border_color(th.c("border.subtle"))
-            .child(div().flex_1().h_full().child(reason_editor(shell, th, key, true)))
+            .child(div().flex_1().h_full().flex().flex_col().child(editor_box(c, "reason_editor.min_height", true)))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(th.sp(2))
-                    .child(button(th, format!("{key}-rsubmit"), Btn::Primary, false, "提交（⌘Enter）").on_click(cx.listener(move |this, _, window, cx| this.submit_reason(&k1, window, cx))))
-                    .child(button(th, format!("{key}-rback"), Btn::Secondary, false, "返回（Esc）").on_click(cx.listener(move |this, _, window, cx| {
-                        this.dialog_key(&k2, super::dialog_state::Key::Esc, window, cx)
-                    }))),
+                    .child(button(th, format!("{}-rsubmit", c.key), Btn::Primary, false, "提交（⌘Enter）", c.reduce).on_click(cx.listener(move |this, _, window, cx| this.submit_reason(&k1, window, cx))))
+                    .child(button(th, format!("{}-rback", c.key), Btn::Secondary, false, "返回（Esc）", c.reduce).on_click(cx.listener(move |this, _, window, cx| this.dialog_key(&k2, Key::Esc, window, cx)))),
             )
-            .with_animation(ElementId::Name(format!("drawer-{key}").into()), Animation::new(th.ms("drawer")).with_easing(th.ease("emphasized")), move |d, t| {
-                d.h(th.px("confirm.reject_drawer_height") * t).opacity(t)
-            })
+            .with_animation(ElementId::Name(format!("{}-rexpand-{}", c.key, ui.reason_flips).into()), Animation::new(th.ms("reason_expand")).with_easing(th.ease("smooth")), move |d, t| d.h(h * t).opacity(t))
+            .into_any_element()
     });
-    div()
-        .w(w)
-        .h(h)
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .rounded(th.r("xl"))
-        .bg(th.c("bg.overlay"))
-        .shadow(th.shadow("high"))
-        .border(px(if panel_focused { 1.5 } else { 1. }))
-        .border_color(th.c(if panel_focused { "border.focus" } else { "border.default" }))
-        .child(div().h(th.px("confirm.progress_height")).w(relative(read)).bg(th.c("accent.primary")))
-        .child(header)
-        .child(doc)
-        .children(drawer)
-        .child(footer)
-}
-
-/// A pi `input` / `editor` request: a text box and two buttons.
-fn text_panel(shell: &Shell, th: Th, key: &str, title: &str, cx: &mut Context<Shell>) -> Div {
-    let (k1, k2) = (key.to_string(), key.to_string());
-    let editor = shell.reason_editors.get(key).cloned();
-    div()
-        .w(th.px("dialog.choice_width"))
-        .p(th.sp(5))
-        .flex()
-        .flex_col()
-        .gap(th.sp(3))
-        .rounded(th.r("xl"))
-        .bg(th.c("bg.overlay"))
-        .shadow(th.shadow("mid"))
-        .border(px(1.5))
-        .border_color(th.c("border.focus"))
-        .child(text_font(th, div(), "base").font_weight(FontWeight(600.)).text_color(th.c("text.primary")).child(title.to_string()))
-        .child(
-            text_font(th, div(), "body")
-                .min_h(th.px("reason_editor.min_height"))
-                .max_h(th.px("reason_editor.max_height"))
-                .p(px(10.))
-                .rounded(th.r("md"))
-                .bg(th.c("bg.app"))
-                .border(px(1.5))
-                .border_color(th.c("border.focus"))
-                .when_some(editor, |d, e| d.child(Textarea::new(&e).appearance(false).h_full())),
-        )
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap(th.sp(2))
-                .child(button(th, format!("{key}-cancel"), Btn::Secondary, false, "取消（Esc）").on_click(cx.listener(move |this, _, window, cx| {
-                    this.dialog_key(&k1, super::dialog_state::Key::Esc, window, cx)
-                })))
-                .child(button(th, format!("{key}-ok"), Btn::Primary, false, "提交（⌘Enter）").on_click(cx.listener(move |this, _, window, cx| this.submit_reason(&k2, window, cx)))),
-        )
-}
-
-pub fn render_overlay(shell: &Shell, sid: &str, who: &str, window: &mut Window, cx: &mut Context<Shell>) -> Option<AnyElement> {
-    let th = shell.th;
-    let (key, active) = shell.active_dialog(sid)?;
-    let ui = shell.dialog_uis.get(&key)?;
-    let focused = shell.dialog_focus.contains_focused(window, cx) || shell.reason_focused(&key, window, cx);
-    let win = window.viewport_size();
-    let chat_w = shell.chat_width(win.width);
-    let choice_w = th.px("dialog.choice_width").min(chat_w - px(64.));
-    let panel = match &active {
-        ActiveDialog::Gate(p) => {
-            let body = match p {
-                crate::protocol::DialogParams::Choice { body, .. } | crate::protocol::DialogParams::Multi { body, .. } => body.as_deref(),
-            };
-            match (ui.long, body) {
-                (true, Some(b)) => long_panel(shell, th, &key, p.title(), b, ui, focused, win, cx),
-                _ => choice_panel(shell, th, &key, who, p.title(), body, ui, focused, choice_w, cx),
-            }
+    let footer = if many {
+        hint(th, "↑↓ 滚动 · Tab 切换 · 字母直选 · Enter 确认 · Esc 关闭")
+    } else {
+        let mut f = div().w_full().flex().items_center().gap(th.sp(2));
+        if ui.decline.is_some() {
+            let k = c.key.to_string();
+            f = f.child(button(th, format!("{}-decline", c.key), Btn::Ghost, c.focused && ui.focus == Row::Decline, "✎ 不选，我说明原因", c.reduce).on_click(cx.listener(move |this, _, window, cx| this.dialog_activate(&k, Row::Decline, window, cx))));
         }
-        ActiveDialog::Native(req) => match req {
-            crate::rpc::UiRequest::Input { title, .. } | crate::rpc::UiRequest::Editor { title, .. } => text_panel(shell, th, &key, title, cx),
-            crate::rpc::UiRequest::Confirm { title, message, .. } => choice_panel(shell, th, &key, who, title, Some(message), ui, focused, choice_w, cx),
-            crate::rpc::UiRequest::Select { title, .. } => choice_panel(shell, th, &key, who, title, None, ui, focused, choice_w, cx),
-            _ => return None,
-        },
+        if ui.back {
+            let k = c.key.to_string();
+            f = f.child(button(th, format!("{}-back", c.key), Btn::Ghost, c.focused && ui.focus == Row::Back, "← 返回上一题", c.reduce).on_click(cx.listener(move |this, _, window, cx| this.dialog_activate(&k, Row::Back, window, cx))));
+        }
+        f = f.child(div().flex_1());
+        // The recommendation last (rightmost) as the primary.
+        let mut order: Vec<usize> = (0..ui.options.len()).rev().collect();
+        if let Some(r) = ui.recommended() {
+            order.retain(|i| *i != r);
+            order.push(r);
+        }
+        for i in order {
+            let k = c.key.to_string();
+            let kind = if ui.recommended() == Some(i) { Btn::Primary } else { Btn::Secondary };
+            let label = format!("{}. {}{}", LETTERS.get(i).unwrap_or(&"?"), ui.options[i], if kind == Btn::Primary { "（推荐）" } else { "" });
+            let focused = c.focused && ui.focus == Row::Option(i);
+            f = f.child(button(th, format!("{}-btn-{i}", c.key), kind, focused, label, c.reduce).on_click(cx.listener(move |this, _, window, cx| this.dialog_activate(&k, Row::Option(i), window, cx))));
+        }
+        f.into_any_element()
     };
-    let scrim = div().absolute().inset_0().bg(th.c("bg.scrim")).with_animation(
-        ElementId::Name(format!("scrim-{key}").into()),
-        Animation::new(th.ms("scrim_enter")).with_easing(th.ease("emphasized")),
-        |d, t| d.opacity(t),
-    );
-    let k = key.clone();
-    Some(
+    Parts {
+        header: head.into_any_element(),
+        top_bar: prog.map(|(n, m)| segments(th, n, m)),
+        under_header: Some(div().h(th.px("confirm.progress_height")).w(relative(read)).bg(th.c("accent.primary")).into_any_element()),
+        body: body.into_any_element(),
+        body_fills: false,
+        overlay,
+        pinned,
+        footer,
+    }
+}
+
+fn countdown(c: &Ctx, timeout_ms: Option<u64>) -> Option<AnyElement> {
+    let total = timeout_ms.filter(|t| *t > 0)? as f32;
+    let left = (1.0 - c.opened_at.elapsed().as_millis() as f32 / total).clamp(0.0, 1.0);
+    Some(div().h(c.th.px("confirm.progress_height")).w(relative(left)).bg(c.th.c("semantic.warning")).into_any_element())
+}
+
+fn native(c: &Ctx, req: &UiRequest, cx: &mut Context<Shell>) -> Parts {
+    let th = c.th;
+    let head = |title: &str| header(th, "message-circle-question-mark", format!("等你回答 · {title}"), None);
+    let two_buttons = |ok: &str, cx: &mut Context<Shell>| {
+        let (k1, k2) = (c.key.to_string(), c.key.to_string());
+        let ok_focused = c.focused && c.ui.focus == Row::Option(0);
+        let cancel_focused = c.focused && c.ui.focus == Row::Option(1);
+        let is_text = c.ui.options.is_empty();
         div()
-            .id("dialog-layer")
-            .absolute()
-            .inset_0()
-            .child(scrim)
-            .child(
-                div()
-                    .id(SharedString::from(format!("{key}-focus")))
-                    .track_focus(&shell.dialog_focus)
-                    .key_context("GateDialog")
-                    .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| this.dialog_keystroke(&k, ev, window, cx)))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                        if !this.dialog_focus.contains_focused(window, cx) {
-                            window.focus(&this.dialog_focus, cx);
-                        }
-                    }))
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .justify_center()
-                    .items_center()
-                    .p(th.sp(4))
-                    // Vertical centre raised by 10 % (§6.1): push from below. The long box
-                    // is sized off the window, so it only gets the margin.
-                    .when(!ui.long, |d| d.pb(win.height * 0.1))
-                    // Never taller than the chat area: the panel shrinks and scrolls inside.
-                    .child(enter(th, &key, div().max_h_full().flex().flex_col().child(panel.flex_shrink(1.).min_h_0()))),
-            )
-            .into_any_element(),
-    )
+            .w_full()
+            .flex()
+            .justify_end()
+            .gap(th.sp(2))
+            .child(button(th, format!("{}-cancel", c.key), Btn::Secondary, cancel_focused, "取消", c.reduce).on_click(cx.listener(move |this, _, window, cx| this.dialog_key(&k1, Key::Esc, window, cx))))
+            .child(button(th, format!("{}-ok", c.key), Btn::Primary, ok_focused, ok.to_string(), c.reduce).on_click(cx.listener(move |this, _, window, cx| {
+                if is_text {
+                    this.submit_reason(&k2, window, cx)
+                } else {
+                    this.dialog_activate(&k2, Row::Option(0), window, cx)
+                }
+            })))
+            .into_any_element()
+    };
+    let (header, top, body, fills, footer) = match req {
+        UiRequest::Select { title, timeout, .. } => (head(title), countdown(c, *timeout), rows(c, false, cx).into_any_element(), false, hint(th, "↑↓ 移动 · Enter 选中 · Esc 取消")),
+        UiRequest::Confirm { title, message, timeout } => (
+            head(title),
+            countdown(c, *timeout),
+            TextView::markdown(ElementId::Name(format!("{}-msg", c.key).into()), message.clone()).style(markdown_style(th)).text_color(th.c("text.primary")).into_any_element(),
+            false,
+            two_buttons("确定", cx),
+        ),
+        UiRequest::Input { title, .. } => (head(title), None, line_box(c).into_any_element(), false, two_buttons("确定（Enter）", cx)),
+        UiRequest::Editor { title, .. } => (head(title), None, div().size_full().flex().flex_col().child(editor_box(c, "reason_editor.min_height", true)).into_any_element(), true, hint(th, "⌘Enter 提交 · Esc 取消")),
+        _ => (head(""), None, div().into_any_element(), false, div().into_any_element()),
+    };
+    Parts { header, top_bar: top, under_header: None, body, body_fills: fills, overlay: None, pinned: None, footer }
 }

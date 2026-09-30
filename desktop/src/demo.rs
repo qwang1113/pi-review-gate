@@ -16,8 +16,28 @@ fn ui(hub: &Hub, id: &str, ui_id: &str, request: UiRequest) {
     hub.on_output(id, Output::Record(Record::UiRequest { id: ui_id.into(), request }));
 }
 
-fn widget(hub: &Hub, id: &str, line: &str) {
-    ui(hub, id, "w", UiRequest::SetWidget { key: "review-gate-agents".into(), lines: Some(vec![line.into()]), placement: "belowEditor".into() });
+fn widget(hub: &Hub, id: &str, lines: &[&str]) {
+    ui(hub, id, "w", UiRequest::SetWidget { key: "review-gate-agents".into(), lines: Some(lines.iter().map(|l| l.to_string()).collect()), placement: "belowEditor".into() });
+}
+
+fn status(hub: &Hub, id: &str, key: &str, text: &str) {
+    ui(hub, id, "s", UiRequest::SetStatus { key: key.into(), text: Some(text.into()) });
+}
+
+/// One `--shots` state.
+#[cfg(feature = "shots")]
+pub struct Shot {
+    pub name: &'static str,
+    pub dark: bool,
+    pub collapsed: bool,
+    /// Narrow window with the overlay sidebar open.
+    pub overlay: bool,
+    pub select: String,
+    pub open: Vec<String>,
+    pub reason: Option<&'static str>,
+    pub popover: bool,
+    /// A gate dialog another party answers first (`dialog.close`) right before the shot.
+    pub abort: Option<(String, &'static str)>,
 }
 
 fn decorate(hub: &Hub, id: &str, state: PaneState, kind: Option<&str>) {
@@ -56,31 +76,50 @@ pub fn shoot(shell: gpui_kit::Entity<crate::app::Shell>, window: gpui_kit::AnyWi
     let all = ids(&hub);
     let id = move |title: &str| all.iter().find(|(t, _)| t == title).map(|(_, i)| i.clone()).unwrap_or_default();
     let (root, rev, t1, t3, worker) = (id("main"), id("reviewer"), id("t1-ui-design"), id("t3-host-factory"), id("worker-1"));
+    let (qa, acc, goal, adv) = (id("quality-auditor"), id("acceptance"), id("goal-auditor"), id("adviser"));
     let think = format!("{root}/1/0");
-    #[rustfmt::skip]
-    let steps: Vec<(&str, bool, bool, String, Vec<String>, Option<&str>)> = vec![
-        ("01-chat-dark", true, false, root.clone(), vec![], None),
-        ("02-chat-expanded-dark", true, false, root.clone(), vec![think.clone(), "tool/c1".into()], None),
-        ("03-choice-dark", true, false, rev.clone(), vec![], None),
-        ("04-reason-editor-dark", true, false, rev.clone(), vec![], Some("状态条的明细应该由 prg 在 widget 里带上。\n客户端不该自己去跑 /gate-status。")),
-        ("05-multi-dark", true, false, t1.clone(), vec![], None),
-        ("06-long-confirm-dark", true, false, t3.clone(), vec![], None),
-        ("07-pi-select-dark", true, false, worker.clone(), vec![], None),
-        ("08-rail-dark", true, true, root.clone(), vec![], None),
-        ("09-chat-light", false, false, root.clone(), vec![think, "tool/c1".into()], None),
-        ("10-choice-light", false, false, rev, vec![], None),
-        ("11-multi-light", false, false, t1, vec![], None),
-        ("12-long-confirm-light", false, false, t3, vec![], None),
-        ("13-rail-light", false, true, worker, vec![], None),
+    let shot = |name: &'static str, dark: bool, select: &str| Shot { name, dark, collapsed: false, overlay: false, select: select.to_string(), open: vec![], reason: None, popover: false, abort: None };
+    let reason = "状态条的明细应该由 prg 在 widget 里带上。\n客户端不该自己去跑 /gate-status。";
+    let steps: Vec<Shot> = vec![
+        shot("01-chat-dark", true, &root),
+        Shot { open: vec![think.clone(), "tool/c1".into()], ..shot("02-chat-expanded-dark", true, &root) },
+        shot("03-drawer-choice-dark", true, &rev),
+        Shot { reason: Some(reason), ..shot("04-drawer-reason-dark", true, &rev) },
+        shot("05-drawer-multi-dark", true, &t1),
+        shot("06-drawer-long-confirm-dark", true, &t3),
+        Shot { reason: Some("还差一条：退役 token 要同轮删掉。"), ..shot("07-drawer-long-reason-dark", true, &t3) },
+        shot("08-drawer-pi-select-dark", true, &worker),
+        shot("09-drawer-pi-input-dark", true, &qa),
+        shot("10-drawer-pi-confirm-dark", true, &acc),
+        shot("11-drawer-pi-editor-dark", true, &goal),
+        Shot { collapsed: true, ..shot("12-sidebar-collapsed-dark", true, &root) },
+        Shot { collapsed: true, ..shot("13-sidebar-collapsed-waiting-badge-dark", true, &rev) },
+        Shot { overlay: true, ..shot("14-sidebar-overlay-narrow-dark", true, &root) },
+        Shot { popover: true, ..shot("15-status-unmet-popover-dark", true, &root) },
+        shot("16-status-ansi-dark", true, &adv),
+        Shot { abort: Some((adv.clone(), "demo-abort")), ..shot("17-drawer-aborted-toast-dark", true, &adv) },
+        Shot { open: vec![think, "tool/c1".into()], ..shot("18-chat-light", false, &root) },
+        shot("19-drawer-choice-light", false, &rev),
+        shot("20-drawer-multi-light", false, &t1),
+        shot("21-drawer-long-confirm-light", false, &t3),
+        Shot { collapsed: true, popover: true, ..shot("22-collapsed-popover-light", false, &root) },
+        shot("23-status-ansi-light", false, &adv),
     ];
     std::fs::create_dir_all(&dir).expect("shots dir");
     cx.spawn(async move |cx| {
         let exec = cx.background_executor().clone();
         let wait = |ms| exec.timer(std::time::Duration::from_millis(ms));
         wait(1500).await;
-        for (name, dark, rail, sel, open, reason) in steps {
-            let open: Vec<&str> = open.iter().map(String::as_str).collect();
-            let _ = window.update(cx, |_, w, cx| shell.update(cx, |s, cx| s.demo_state(dark, rail, &sel, &open, reason, w, cx)));
+        let wide = gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(800.));
+        let narrow = gpui_kit::size(gpui_kit::px(880.), gpui_kit::px(800.));
+        for s in steps {
+            let name = s.name;
+            if let Some((owner, id)) = &s.abort {
+                hub.dialog_close(owner, id);
+            }
+            let _ = window.update(cx, |_, w, _| w.resize(if s.overlay { narrow } else { wide }));
+            wait(300).await;
+            let _ = window.update(cx, |_, w, cx| shell.update(cx, |sh, cx| sh.demo_state(&s, w, cx)));
             wait(900).await;
             // The window may be occluded (no display-link frames): draw frames ourselves,
             // a few, so enter/reveal animations that start on the first one have finished
@@ -154,7 +193,14 @@ pub fn populate(hub: &Hub, cwd: &str) {
     ev(hub, &root, json!({"type": "tool_execution_start", "toolCallId": "c4", "toolName": "bash", "args": {"command": "cargo test"}}));
     ev(hub, &root, json!({"type": "message_start", "message": {"role": "assistant", "content": []}}));
     ev(hub, &root, delta("text_delta", 0, "测试还在跑，我先把**状态条**接上：它读的是 prg 的 `review-gate-agents` widget"));
-    widget(hub, &root, "门禁 · mode orchestrator · feat/desktop-host · 已编辑 · 2 项未满足");
+    widget(hub, &root, &[
+        "门禁 · mode orchestrator · feat/desktop-host · 已编辑 · 3 项未满足",
+        "· code review gate is PENDING (need READY)",
+        "· precommit has not run",
+        "· \x1b[33mcopilot review\x1b[0m has not landed on the current head",
+    ]);
+    // pi extensions paint their `setStatus` texts with ANSI escapes (§9.3).
+    status(hub, &root, "ponytail", "\x1b[38;2;138;190;183mponytail\x1b[0m full");
 
     // Every other session gets a one-line history and its own strip.
     for (id, line) in [
@@ -162,10 +208,23 @@ pub fn populate(hub: &Hub, cwd: &str) {
         (&worker, "门禁 · mode explore · feat/desktop-host · 未编辑"),
         (&t1, "门禁 · mode loop · rg-child-t1 · 已编辑 · 轮 2 · 已关闭 acceptance · 1 项未满足"),
         (&t3, "门禁 · mode loop · rg-child-t3 · 已编辑 · 轮 4"),
+        (&judge_ids[4], "门禁 · mode loop · feat/desktop-host · 未编辑 · 0 项未满足"),
     ] {
         ev(hub, id, json!({"type": "message_start", "message": {"role": "user", "content": "开始吧"}}));
-        widget(hub, id, line);
+        widget(hub, id, &[line]);
     }
+    for (key, text) in [
+        ("mcp", "\x1b[1;32m●\x1b[22;39m mcp \x1b[2m11 servers\x1b[0m"),
+        ("ponytail", "\x1b[38;2;138;190;183mponytail\x1b[0m full"),
+        ("model", "\x1b[38;5;208mclaude-fable-5\x1b[0m \x1b[4mmax\x1b[24m"),
+        ("ctx", "\x1b[7m 42% \x1b[27m ctx"),
+    ] {
+        status(hub, &judge_ids[4], key, text);
+    }
+    // pi's own boxes, one per session (§6.6).
+    ui(hub, &judge_ids[1], "native-input", UiRequest::Input { title: "pi 扩展：给这个会话起个名字".into(), placeholder: Some("kebab-case，如 r3-desktop-ui".into()) });
+    ui(hub, &judge_ids[2], "native-confirm", UiRequest::Confirm { title: "pi 扩展：确认删除".into(), message: "要删除 `.pi/tmp` 下的 **3 个**缓存文件吗？".into(), timeout: Some(600_000) });
+    ui(hub, &judge_ids[3], "native-editor", UiRequest::Editor { title: "pi 扩展：编辑提交说明".into(), prefill: Some("feat(desktop): rebuild the client UI\n\n- drawers replace dialogs\n- sidebar collapses fully".into()) });
     hub.lock().unread.insert(worker.clone());
 
     // Dialogs, each on its own session so the root chat stays uncovered: single
@@ -198,5 +257,15 @@ pub fn populate(hub: &Hub, cwd: &str) {
         recommended: Some("对，就是这样".into()),
     });
     ui(hub, &worker, "native-1", UiRequest::Select { title: "pi 扩展：选择一个模型".into(), options: vec!["claude-fable-5".into(), "claude-opus-5".into()], timeout: None });
+    // Answered first by the project manager in shot 17 (`dialog.close` ⇒ aborted, §6.1).
+    dialog(hub, &judge_ids[4], DialogParams::Choice {
+        dialog_id: "demo-abort".into(),
+        title: "要不要把退役 token 同轮删掉？".into(),
+        body: None,
+        options: vec!["要".into(), "不要".into()],
+        decline_row: "✎ 不选，我说明原因".into(),
+        back: false,
+        recommended: Some("要".into()),
+    });
     hub.set_focused(Some(root));
 }
