@@ -40,7 +40,7 @@ builds on those instead of hand-rolling editors.
 - `session.close` on an id this client never issued is treated like "already gone": `ok`, `closed: []`.
 - `dialog.open` with a `dialogId` already pending for the same session ⇒ `bad-request`.
 - `focus.state.focusedHostSessionId` is the session selected in the window, reported even when the app is in the background (prg combines it with `appFrontmost`).
-- A frame without a usable `id` (not JSON, not an object, bad id) or over 1 MiB drops the connection — there is nothing to answer.
+- A bad frame (not JSON, not an object, `v` ≠ 1, over 1 MiB) or one without a usable `id` drops the connection — there is nothing to answer in this protocol version.
 
 ## Gaps for the project manager
 

@@ -227,8 +227,9 @@ fn response_envelopes_match_the_schema() {
 }
 
 #[test]
-fn frames_that_cannot_carry_an_id_are_rejected() {
-    for line in [&b"not json"[..], b"[1]", br#"{"v":1}"#, br#"{"id":"bad id"}"#] {
+fn bad_frames_and_frames_without_an_id_are_rejected() {
+    let wrong_v = br#"{"v":2,"type":"request","id":"r-9","method":"session.list","params":{}}"#;
+    for line in [&b"not json"[..], b"[1]", br#"{"v":1}"#, br#"{"v":1,"id":"bad id"}"#, wrong_v] {
         assert!(matches!(decode_request(line), Decoded::Reject(_)), "{}", String::from_utf8_lossy(line));
     }
 }
@@ -243,7 +244,6 @@ fn envelope_errors_carry_the_id_back() {
         Decoded::Reject(r) => panic!("rejected {r}"),
     };
     assert_eq!(code(r#"{"v":1,"type":"request","id":"r-9","method":"session.list","params":{}}"#), None);
-    assert_eq!(code(r#"{"v":2,"type":"request","id":"r-9","method":"session.list","params":{}}"#), Some(ErrorCode::BadRequest));
     assert_eq!(code(r#"{"v":1,"type":"response","id":"r-9","method":"session.list","params":{}}"#), Some(ErrorCode::BadRequest));
     assert_eq!(
         code(r#"{"v":1,"type":"request","id":"r-9","method":"session.list","params":{},"x":1}"#),

@@ -327,8 +327,8 @@ pub fn dialog_result(outcome: &DialogOutcome) -> Value {
 
 // ---------------------------------------------------------------- frames
 
-/// What a request line decodes to. `Reject` is a line whose envelope is too
-/// broken to carry an id back — the connection is dropped (no response is possible).
+/// What a request line decodes to. `Reject` is a bad frame in §3's sense (not JSON,
+/// not an object, wrong `v`) or one without an id to answer — the connection is dropped.
 #[derive(Debug)]
 pub enum Decoded {
     Request { id: String, request: Result<Request, WireError> },
@@ -343,6 +343,10 @@ pub fn decode_request(line: &[u8]) -> Decoded {
     let Value::Object(mut obj) = value else {
         return Decoded::Reject("frame is not an object".into());
     };
+    if obj.get("v") != Some(&json!(PROTOCOL_VERSION)) {
+        // A peer on another version cannot be answered in ours.
+        return Decoded::Reject("frame v is not the protocol version".into());
+    }
     let id = match obj.get("id").and_then(Value::as_str) {
         Some(id) if is_id(id) => id.to_string(),
         _ => return Decoded::Reject("frame has no valid id".into()),
@@ -354,9 +358,6 @@ pub fn decode_request(line: &[u8]) -> Decoded {
 fn decode_envelope(obj: &mut Map<String, Value>) -> Result<Request, WireError> {
     if let Some(k) = obj.keys().find(|k| !["v", "type", "id", "method", "params"].contains(&k.as_str())) {
         return Err(WireError::bad(format!("unknown envelope field `{k}`")));
-    }
-    if obj.get("v") != Some(&json!(PROTOCOL_VERSION)) {
-        return Err(WireError::bad("envelope v must be 1"));
     }
     if obj.get("type") != Some(&json!("request")) {
         return Err(WireError::bad("envelope type must be `request`"));
