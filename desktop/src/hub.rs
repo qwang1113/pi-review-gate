@@ -100,12 +100,18 @@ impl Hub {
     pub fn open_child(&self, requester: &str, p: &OpenParams) -> Result<(String, u32), WireError> {
         let argv = rpc::rpc_argv(&p.argv);
         let (id, pid) = self.spawn(Some(requester), p.role, Some(p.placement), &p.title, &argv, &p.cwd, &p.env)?;
-        // pi reads stdin once RPC mode is up, so the prompt waits in the pipe until then.
-        if let Some(message) = &p.initial_message
-            && let Err(e) = self.prompt(&id, message)
-        {
-            self.close(requester, &CloseParams::Session { host_session_id: id.clone() })?;
-            return Err(WireError::new(ErrorCode::Unavailable, format!("started `{id}` but could not send its first message: {e}")));
+        // pi reads stdin only once RPC mode is up, and a message past the pipe's
+        // capacity blocks the write until then — so it is written off the connection
+        // thread (the open must answer within prg's timeout). A child that cannot take
+        // its task is useless: it is closed, and prg's liveness read sees it gone.
+        if let Some(message) = p.initial_message.clone() {
+            let (me, requester, sid) = (self.me.clone(), requester.to_string(), id.clone());
+            std::thread::spawn(move || {
+                let Some(hub) = me.upgrade() else { return };
+                if hub.prompt(&sid, &message).is_err() {
+                    let _ = hub.close(&requester, &CloseParams::Session { host_session_id: sid });
+                }
+            });
         }
         Ok((id, pid))
     }

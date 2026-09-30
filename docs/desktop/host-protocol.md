@@ -140,8 +140,8 @@ socket 不是绝对路径或超长、缺 session id）**fail-closed**：prg 拒�
   （`lib/gate-host-desktop.ts` `splitInitialMessage`，按 pi 交互模式展开 `@file`：
   `<file name="<绝对路径>">\n内容\n</file>\n`，去 BOM、空文件跳过，再接第一条位置消息），
   放进这个字段；遇到它不认识的选项 ⇒ 拒绝开窗，不猜。客户端起进程后立即把它作为 pi RPC
-  `prompt` 写进子进程 stdin（pi 进入 RPC 模式后才读，管道替它排队）；写不进去 ⇒ 关掉该会话、
-  `session.open` 回 `unavailable`。tmux 路径不经过这里，argv 逐字节不变。
+  `prompt` 写进子进程 stdin（pi 进入 RPC 模式后才读，管道替它排队；写在连接线程之外，超过管道容量的
+  消息不会拖住 `session.open` 的应答）；写不进去 ⇒ 客户端关掉该会话，prg 的存活读取随即看到它已不在。tmux 路径不经过这里，argv 逐字节不变。
 - **`session.list`**：列出**当前活着**的全部会话。某个 id 不在一份**成功的**列表里 = 已死；
   列表请求失败 = **未知**，绝不等于已死（`livenessOf`，与 `paneRecoverability` 的
   `unknown-liveness` 同一规则）。`groupPin` 是它父会话给子会话组下的铉住理由（没有为 `null`），

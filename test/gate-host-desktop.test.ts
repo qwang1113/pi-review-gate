@@ -372,7 +372,7 @@ test("every gate launch command's initial message leaves the argv and becomes in
   assert.deepEqual(splitInitialMessage(["pi", "--session-id", "succ", opening], dir),
     { ok: true, argv: ["pi", "--session-id", "succ"], initialMessage: opening }, "a relay successor's positional message");
   assert.deepEqual(splitInitialMessage(["pi", `@${join(dir, "empty.md")}`, "--", "@task.md", "go"], dir),
-    { ok: true, argv: ["pi"], initialMessage: `${wrap(task, "review this")}go` }, "empty files skipped; after `--` everything is a message");
+    { ok: true, argv: ["pi"], initialMessage: `${wrap(task, "review this")}go` }, "empty files skipped; after `--` no option is parsed, but `@` is still a file (pi's rule)");
 
   for (const [argv, why] of [
     [["pi", "--brand-new-flag", "x", `@${task}`], "an option it cannot place is refused, never guessed"],

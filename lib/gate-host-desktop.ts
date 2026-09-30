@@ -50,7 +50,12 @@ export const DESKTOP_NOTIFIER = "desktop-client";
 
 const clip = (text: string, max: number): string => (text.length > max ? text.slice(0, max) : text);
 
-/** pi 0.87.1 `parseArgs`: options that take the next argv item as their value. */
+/**
+ * A SUBSET of pi 0.87.1 `parseArgs` — the options a gate launch command can carry
+ * (and their neighbours) that take the next argv item as their value. Anything
+ * missing from both sets (e.g. `--print`, `--export`) is refused below: drift
+ * fails closed, it never misplaces the message.
+ */
 const PI_VALUE_FLAGS = new Set([
   "--session-id", "--session-dir", "--session", "--fork", "--system-prompt", "--append-system-prompt",
   "--model", "--models", "--provider", "--thinking", "--tools", "-t", "--exclude-tools", "-xt",
