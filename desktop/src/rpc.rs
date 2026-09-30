@@ -202,9 +202,14 @@ impl Process {
         stdin.flush()
     }
 
-    /// Orderly shutdown request (`rpc.md` §Shutdown): EOF on stdin.
+    /// Orderly shutdown request (`rpc.md` §Shutdown): EOF on stdin. Never waits: a
+    /// write still in flight (a large first prompt pi has not started reading) holds
+    /// the pipe, and a close must not hang behind it — the caller's grace-period kill
+    /// ends that write with EPIPE instead.
     pub fn close_stdin(&self) {
-        self.stdin.lock().unwrap().take();
+        if let Ok(mut stdin) = self.stdin.try_lock() {
+            stdin.take();
+        }
     }
 
     pub fn kill_group(&self, signal: i32) {
