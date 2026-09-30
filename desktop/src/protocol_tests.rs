@@ -1,8 +1,8 @@
 use super::*;
 
 fn schema() -> Value {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/protocol/host-protocol.schema.json");
-    let mut s: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    // Compiled in, so a schema change rebuilds the tests and no absolute path is baked.
+    let mut s: Value = serde_json::from_str(include_str!("../protocol/host-protocol.schema.json")).unwrap();
     s.as_object_mut().unwrap().remove("$id");
     s
 }

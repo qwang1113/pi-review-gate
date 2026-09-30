@@ -28,7 +28,8 @@ fn fixture() -> Fixture {
     // Not `temp_dir()`: a long $TMPDIR would push the socket past sun_path's limit.
     let dir = PathBuf::from(format!("/tmp/pdt-{}-{n}", std::process::id()));
     // Private: the fake pi dumps the test process's whole env in here.
-    DirBuilder::new().mode(0o700).create(&dir).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, Permissions::from_mode(0o700)).unwrap();
     let script = dir.join("fake-pi");
     fs::write(&script, "#!/bin/sh\nenv > \"$(dirname \"$0\")/$RG_HOST_SESSION.env\"\nexec cat >/dev/null\n").unwrap();
     fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
