@@ -170,6 +170,10 @@ impl Draft {
     /// The draft would save something different from the disk: whitespace does not count,
     /// key order does (the saved text keeps it; `Value` equality would not).
     pub fn dirty(&self) -> bool {
+        // The text is the disk's byte for byte (an unreadable file's placeholder included): untouched.
+        if self.view == View::Json && self.disk.as_deref() == Some(self.text.as_str()) {
+            return false;
+        }
         let now = match self.view {
             View::Form => Ok(self.value.clone()),
             View::Json => parse(&self.text),
@@ -349,9 +353,12 @@ mod tests {
     fn missing_and_unparsable_files() {
         let d = Draft::load(None);
         assert_eq!((d.view, d.dirty()), (View::Form, false));
-        let d = Draft::load(Some("{oops".into()));
+        let mut d = Draft::load(Some("{oops".into()));
         assert_eq!(d.view, View::Json);
         assert_eq!(d.text, "{oops");
+        assert!(!d.dirty(), "an untouched unparsable file is not an edit");
+        d.text.push('}');
+        assert!(d.dirty());
     }
 
     #[test]

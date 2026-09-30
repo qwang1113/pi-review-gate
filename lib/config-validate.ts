@@ -76,15 +76,22 @@ function failureAt(s: string): number | null {
 
 /**
  * 1-based line/column of the first syntax error. V8 gives a position for most
- * errors but not for "Unexpected token", so the text is grown one char at a time
- * until a prefix fails BEFORE its own end (a failure at the end is just "not finished yet").
+ * errors but not for "Unexpected token", so the error is located as the shortest
+ * prefix that fails BEFORE its own end (a failure at the end is just "not finished
+ * yet"). That property only grows with the prefix, so a binary search finds it.
  */
-// ponytail: O(n²) prefix scan — fine for hand-edited config files of a few KB; a real tokenizer if that ever changes.
 function syntaxErrorAt(text: string): { line: number; column: number } | null {
-  let offset: number | null = null;
-  for (let i = 1; i <= text.length && offset === null; i++) {
+  const brokenAt = (i: number): number | null => {
     const at = failureAt(text.slice(0, i));
-    if (at !== null && at < i) offset = at;
+    return at !== null && at < i ? at : null;
+  };
+  let offset: number | null = null;
+  let [lo, hi] = [1, text.length];
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const at = brokenAt(mid);
+    if (at === null) lo = mid + 1;
+    else [offset, hi] = [at, mid - 1];
   }
   offset ??= failureAt(text);
   if (offset === null) return null;

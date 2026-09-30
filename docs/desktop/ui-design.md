@@ -775,7 +775,7 @@ pi RPC 的 `extension_ui_request` 对话框没有「（推荐）」、decline �
   = 不保存（fail-closed），原因写在保存栏。改动任一字段即清掉旧 finding（它说的是上一份文本）。保存成功的横幅写
   「已保存 · 已通过 prg 校验」。可换 `PI_DESKTOP_NODE` / `PI_DESKTOP_PRG` 指定 node 与 prg 目录。
 - JSON 视图语法错误：每次输入后即时判定，出 §7.3 的错误横条（写明行列，点横条把光标放到出错处），保存按钮计入错误数。
-  编辑器组件不提供逐行底色，所以不做出错行底色 / 行号变色。
+  编辑器组件不提供逐行底色，所以不做出错行底色 / 行号变色；它的诊断波浪线可以标出错范围，暂未接入。
 - 表单字段错误（数字框写了非数字等）：控件边框 `semantic.danger`，行下方展开一行说明（`font.small`、`semantic.danger`、
   `alert-circle`），高度 0→行高（`motion.duration.field_error` / `smooth`）把下面的行平滑推开。
 - **保存栏**：草稿 ≠ 磁盘内容时从底部升起（高 `settings.save_bar_height`，translateY 满高→0，`motion.duration.save_bar` /

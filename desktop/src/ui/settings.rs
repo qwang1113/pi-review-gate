@@ -414,8 +414,14 @@ impl SettingsPage {
                 return;
             }
         }
-        if self.state().draft.error_count() > 0 {
+        let errors = self.state().draft.error_count();
+        if errors > 0 {
             self.bar_shake += 1;
+            // On the way out the choice is not lost: ask again, pointing at 「放弃修改并离开」.
+            if then.is_some() {
+                self.save_ui = SaveUi::Failed(format!("还有 {errors} 处错误，保存不了 —— 改好再存，或放弃修改并离开"));
+                self.prompt = Some(Prompt { kind: PromptKind::Leave, then, focus: 1 });
+            }
             cx.notify();
             return;
         }
