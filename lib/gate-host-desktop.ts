@@ -185,9 +185,17 @@ export function createDesktopHost(opts: DesktopHostOptions): GateHost {
       return [];
     },
     // A dead holder's children are orphans of the client's parent record; the
-    // unnamed pass below reclaims every orphan, named holder or not, so the
-    // registration may go.
-    reclaimScope: () => ({ outcome: "gone" }),
+    // unnamed pass reclaims every orphan, named holder or not. So the
+    // registration may go — but only once the client has ANSWERED, and never for
+    // a group this host cannot address (a tmux `rg-…` left by an earlier
+    // terminal session is the tmux host's to reclaim, not a fact to guess).
+    reclaimScope: (scopeSession) => {
+      if (desktopIdOf(scopeSession) === undefined) {
+        return { outcome: "kept", reason: `${scopeSession} 不是桌面宿主的子会话组 —— 留给它自己的宿主回收` };
+      }
+      const listed = listing();
+      return listed.ok ? { outcome: "gone" } : { outcome: "kept", reason: `读不到桌面客户端的会话列表（${why(listed)}）` };
+    },
     sweepUnnamedScopes: (_self, _named, report) => {
       const listed = listing();
       if (!listed.ok) {

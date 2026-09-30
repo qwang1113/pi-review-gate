@@ -28,7 +28,7 @@ import type { PaneOption } from "./tmux-pane-state.ts";
 import type { SweepReport, SweepSelf } from "./session-orphan-sweep.ts";
 import type { UserNotifyKind } from "./user-notify.ts";
 import { ID_PATTERN, resolveHostEnv } from "./desktop-host-protocol.ts";
-import { isOwnSessionName, isPaneId, isWindowId, tmuxServerFrom } from "./orchestrator-tmux.ts";
+import { isPaneId, parseWindowCoords, tmuxServerFrom } from "./orchestrator-tmux.ts";
 
 export type HostKind = "tmux" | "desktop" | "unavailable";
 export type HostResult = { ok: true } | { ok: false; error: string };
@@ -159,8 +159,9 @@ export function isSessionHandle(value: unknown): value is string {
 export function parseSessionCoords(
   raw: { windowId?: unknown; tmuxSession?: unknown },
 ): { windowId: string; tmuxSession: string } | undefined {
+  const tmux = parseWindowCoords(raw ?? {});
+  if (tmux !== undefined) return tmux;
   const { windowId, tmuxSession } = raw ?? {};
-  if (isWindowId(windowId) && isOwnSessionName(tmuxSession)) return { windowId, tmuxSession };
   if (desktopIdOf(windowId) !== undefined && desktopIdOf(tmuxSession) !== undefined) {
     return { windowId: windowId as string, tmuxSession: tmuxSession as string };
   }

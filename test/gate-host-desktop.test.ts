@@ -11,7 +11,6 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDesktopClient, helloFor } from "../lib/desktop-host-client.ts";
@@ -48,10 +47,12 @@ const { appendFileSync } = await import("node:fs");
 const { decodeRequest, encodeResponse } = await import(protocolUrl);
 const sessions = [{ hostSessionId: ${JSON.stringify(SELF)}, parent: null, role: "root", title: "root", groupPin: null }];
 let seq = 0;
+let connections = 0;
 const server = createServer((socket) => {
   socket.setEncoding("utf8");
   let buffer = "";
   let me;
+  const nth = ++connections;
   socket.on("data", (chunk) => {
     buffer += chunk;
     let at;
@@ -69,6 +70,8 @@ const server = createServer((socket) => {
         if (params.hostSessionId !== config.expect) { err("forbidden", "not the id I minted"); socket.end(); continue; }
         me = params.hostSessionId;
         ok({ protocol: 1, client: { name: "fake", version: "0" } });
+        // An idle drop: the first connection goes away right after the handshake.
+        if (config.dropFirst && nth === 1) setTimeout(() => socket.destroy(), 20);
       } else if (!me) err("forbidden", "no hello");
       else if (method === "session.open") {
         const hostSessionId = "s-" + (++seq);
@@ -98,8 +101,18 @@ interface Fake {
   kill(): void;
 }
 
-async function fakeClient(config: { expect?: string; failList?: boolean; shown?: boolean; focused?: string; frontmost?: boolean } = {}): Promise<Fake> {
-  const dir = mkdtempSync(join(tmpdir(), "rg-dh-"));
+/**
+ * A socket directory short enough for `sun_path` (103 bytes) whatever TMPDIR
+ * is — a judge pane's TMPDIR is a long per-session path.
+ */
+function socketDir(): string {
+  const dir = mkdtempSync("/tmp/rg-dh-");
+  dirs.push(dir);
+  return dir;
+}
+
+async function fakeClient(config: { expect?: string; failList?: boolean; shown?: boolean; focused?: string; frontmost?: boolean; dropFirst?: boolean } = {}): Promise<Fake> {
+  const dir = socketDir();
   dirs.push(dir);
   const socketPath = join(dir, "s.sock");
   const logPath = join(dir, "log.jsonl");
@@ -247,10 +260,27 @@ test("a client that goes away fails every act with `disconnected` — no fallbac
   assert.match(ready.ok ? "" : ready.error, /disconnected/);
 });
 
+test("a connection that dropped while idle is re-established by the NEXT request, once", async () => {
+  const fake = await fakeClient({ dropFirst: true });
+  const host = hostOn(fake.socketPath);
+  assert.equal(host.ready().ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(host.livePanes(), [`desktop:${SELF}`], "reconnect + hello, then the request itself");
+  assert.equal(fake.requests().filter((r) => r.method === "hello").length, 2);
+  assert.equal(fake.requests().filter((r) => r.method === "session.list").length, 1, "the request is sent once, never twice");
+});
+
+test("the orphan sweep lets a registration go only after the client answered, and only for its own groups", async () => {
+  const fake = await fakeClient();
+  const host = hostOn(fake.socketPath);
+  assert.deepEqual(host.reclaimScope("desktop:gone-1", "sid"), { outcome: "gone" });
+  assert.equal(host.reclaimScope("rg-repo-abcdef1234", "sid").outcome, "kept", "a tmux group is the tmux host's");
+  const blind = hostOn((await fakeClient({ failList: true })).socketPath);
+  assert.equal(blind.reclaimScope("desktop:gone-1", "sid").outcome, "kept", "unreadable is not gone");
+});
+
 test("a socket nobody listens on, and a refused handshake, are named errors", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rg-dh-"));
-  dirs.push(dir);
-  const nowhere = hostOn(join(dir, "none.sock"));
+  const nowhere = hostOn(join(socketDir(), "none.sock"));
   const ready = nowhere.ready();
   assert.equal(ready.ok, false);
   assert.match(ready.ok ? "" : ready.error, /连不上/);

@@ -52,6 +52,8 @@ export interface DesktopClientOptions {
 /** Kinds the worker writes into the shared header. */
 const KIND_LINE = 0;
 const KIND_OK = 1;
+/** The worker had no connection, so the frame never left this process. */
+const KIND_NOT_SENT = 3;
 
 export function helloFor(opts: { hostSessionId: string; cwd: string; piSessionId?: string | undefined }): Params<"hello"> {
   return {
@@ -110,7 +112,7 @@ export function createDesktopClient(opts: DesktopClientOptions): DesktopClient {
 
   const bound = (method: Method) => opts.timeoutMs ?? requestTimeoutMs(method) ?? REQUEST_TIMEOUT_MS;
 
-  function send<M extends Method>(method: M, params: Params<M>): DesktopReply<M> {
+  function send<M extends Method>(method: M, params: Params<M>): DesktopReply<M> & { notSent?: true } {
     requestId += 1;
     const id = `r-${requestId}`;
     const encoded = encodeRequest(id, method, params);
@@ -119,7 +121,7 @@ export function createDesktopClient(opts: DesktopClientOptions): DesktopClient {
     if (answer === undefined) return { ok: false, error: { code: "timeout", message: `${method} ${bound(method)}ms 内没有响应` } };
     if (answer.kind !== KIND_LINE) {
       connected = false;
-      return { ok: false, error: { code: "disconnected", message: answer.text } };
+      return { ok: false, error: { code: "disconnected", message: answer.text }, ...(answer.kind === KIND_NOT_SENT ? { notSent: true as const } : {}) };
     }
     const decoded = decodeResponse(answer.text, (got) => (got === id ? method : undefined));
     if (!decoded.ok) return { ok: false, error: decoded.error };
@@ -149,7 +151,14 @@ export function createDesktopClient(opts: DesktopClientOptions): DesktopClient {
       }
       const up = connect();
       if (!up.ok) return up;
-      return send(method, params);
+      const first = send(method, params);
+      // A connection that dropped while idle is only noticed here: this side
+      // still thought it was up. The frame was never written, so this is the
+      // ONE reconnect + hello the protocol allows (§4.5) — never a resend of a
+      // request that may already have acted.
+      if (first.ok || first.notSent !== true) return first;
+      const again = connect();
+      return again.ok ? send(method, params) : again;
     },
     close() {
       connected = false;
