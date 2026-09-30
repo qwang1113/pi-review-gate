@@ -345,6 +345,11 @@ export const GATE_ENV_NAMES: readonly string[] = Object.freeze([
   "RG_HANDOFF_PREDECESSOR_PANE",
   "RG_HANDOFF_PREDECESSOR_SESSION",
   "RG_HANDOFF_PREDECESSOR_TRANSCRIPT",
+  // The desktop host's identity (lib/desktop-host-protocol.ts): a tmux-launched
+  // child must never believe it runs under a desktop client.
+  "RG_HOST",
+  "RG_HOST_SESSION",
+  "RG_HOST_SOCKET",
   "RG_JUDGE_ID",
   "RG_JUDGE_OPENER",
   "RG_JUDGE_ROLE",

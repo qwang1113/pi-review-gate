@@ -6,6 +6,7 @@
   "x-maxFrameBytes": 1048576,
   "x-requestTimeoutMs": 5000,
   "x-env": { "host": "RG_HOST", "socket": "RG_HOST_SOCKET", "hostSession": "RG_HOST_SESSION" },
+  "x-inheritedGateEnv": ["RG_NO_SIDE_EFFECTS"],
   "x-wireErrorCodes": ["bad-request", "unknown-method", "version-mismatch", "not-found", "forbidden", "unavailable", "internal"],
   "x-methods": ["hello", "session.open", "session.list", "session.pin", "session.close", "session.decorate", "focus", "focus.state", "notify", "dialog.open", "dialog.close"],
   "x-request": {
@@ -234,7 +235,7 @@
             "dialogId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
             "title": { "type": "string", "minLength": 1, "maxLength": 65536 },
             "body": { "type": "string", "maxLength": 262144 },
-            "options": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "minItems": 2, "maxItems": 4 },
+            "options": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "minItems": 2, "maxItems": 16 },
             "declineRow": { "type": "string", "minLength": 1, "maxLength": 200 },
             "back": { "type": "boolean" },
             "recommended": { "type": "string", "minLength": 1, "maxLength": 4096 }
@@ -249,10 +250,10 @@
             "dialogId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
             "title": { "type": "string", "minLength": 1, "maxLength": 65536 },
             "body": { "type": "string", "maxLength": 262144 },
-            "options": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "minItems": 2, "maxItems": 4 },
+            "options": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "minItems": 2, "maxItems": 16 },
             "declineRow": { "type": "string", "minLength": 1, "maxLength": 200 },
             "back": { "type": "boolean" },
-            "defaultChecked": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "maxItems": 4 }
+            "defaultChecked": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "maxItems": 16 }
           },
           "required": ["shape", "dialogId", "title", "options", "declineRow", "back", "defaultChecked"],
           "additionalProperties": false
@@ -271,7 +272,7 @@
           "type": "object",
           "properties": {
             "kind": { "const": "checked" },
-            "options": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "maxItems": 4 }
+            "options": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 4096 }, "maxItems": 16 }
           },
           "required": ["kind", "options"],
           "additionalProperties": false

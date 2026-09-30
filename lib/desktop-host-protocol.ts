@@ -21,7 +21,9 @@
  */
 
 import { CHILD_STATES } from "./orchestrator-child-state.ts";
-import { MAX_CHOICE_OPTIONS, MIN_CHOICE_OPTIONS } from "./choice-dialog.ts";
+import { MIN_CHOICE_OPTIONS } from "./choice-dialog.ts";
+import { INHERITED_GATE_ENV_NAMES } from "./orchestrator-tmux.ts";
+import type { SessionPaneRole } from "./session-env.ts";
 import { NOTIFY_BODY_MAX, NOTIFY_TITLE_MAX, type UserNotifyKind } from "./user-notify.ts";
 
 export const PROTOCOL_VERSION = 1;
@@ -112,15 +114,26 @@ const EMPTY = obj({});
 /** What kind of process a session is — the client groups and labels by it. */
 export const SESSION_ROLES = ["root", "judge", "worker", "orchestration-child", "successor"] as const;
 /** The session kinds prg itself may OPEN (`root` is the one the user opened). */
-const OPENABLE_ROLES = ["judge", "worker", "orchestration-child", "successor"] as const;
+const OPENABLE_ROLES = ["judge", "worker", "orchestration-child", "successor"] as const satisfies readonly SessionPaneRole["kind"][];
+/** `never` when OPENABLE_ROLES covers every kind — a kind added to SessionPaneRole stops this compiling. */
+type OpenableRoleGap = Exclude<SessionPaneRole["kind"], (typeof OPENABLE_ROLES)[number]>;
+const OPENABLE_ROLES_COMPLETE: [OpenableRoleGap] extends [never] ? true : never = true;
+void OPENABLE_ROLES_COMPLETE;
 export const NOTIFY_KINDS = ["finished", "failed", "needs-user"] as const satisfies readonly UserNotifyKind[];
+
+/**
+ * NOT `MAX_CHOICE_OPTIONS` (4): that caps questions an AGENT submits, while
+ * the gate's own boxes may carry more (the five-stage checklist has 5). The
+ * wire bound is only a size guard.
+ */
+export const DIALOG_MAX_OPTIONS = 16;
 
 const dialogCommon = {
   dialogId: id,
   /** The question. Long text is carried whole — the client scrolls, never truncates. */
   title: str({ minLength: 1, maxLength: 65536 }),
   body: opt(str({ maxLength: 262144 })),
-  options: arr(str({ minLength: 1, maxLength: 4096 }), { minItems: MIN_CHOICE_OPTIONS, maxItems: MAX_CHOICE_OPTIONS }),
+  options: arr(str({ minLength: 1, maxLength: 4096 }), { minItems: MIN_CHOICE_OPTIONS, maxItems: DIALOG_MAX_OPTIONS }),
   /** The ✎ row's text; picking it opens the client's multi-line reason editor. */
   declineRow: str({ minLength: 1, maxLength: 200 }),
   /** Draw `← 返回上一题` (multi-question interviews only). */
@@ -195,11 +208,11 @@ export const METHODS = {
   "dialog.open": {
     params: union("shape", {
       choice: { ...dialogCommon, recommended: opt(str({ minLength: 1, maxLength: 4096 })) },
-      multi: { ...dialogCommon, defaultChecked: arr(str({ minLength: 1, maxLength: 4096 }), { maxItems: MAX_CHOICE_OPTIONS }) },
+      multi: { ...dialogCommon, defaultChecked: arr(str({ minLength: 1, maxLength: 4096 }), { maxItems: DIALOG_MAX_OPTIONS }) },
     }),
     result: union("kind", {
       picked: { option: str({ minLength: 1, maxLength: 4096 }) },
-      checked: { options: arr(str({ minLength: 1, maxLength: 4096 }), { maxItems: MAX_CHOICE_OPTIONS }) },
+      checked: { options: arr(str({ minLength: 1, maxLength: 4096 }), { maxItems: DIALOG_MAX_OPTIONS }) },
       decline: { reason: str({ maxLength: 262144 }) },
       back: {},
       dismissed: {},
@@ -550,6 +563,8 @@ export function buildJsonSchema(): Json {
     "x-maxFrameBytes": MAX_FRAME_BYTES,
     "x-requestTimeoutMs": REQUEST_TIMEOUT_MS,
     "x-env": { host: HOST_ENV, socket: HOST_SOCKET_ENV, hostSession: HOST_SESSION_ENV },
+    /** `RG_*` keys the client KEEPS from its own env when it strips the rest (§2). */
+    "x-inheritedGateEnv": [...INHERITED_GATE_ENV_NAMES],
     "x-wireErrorCodes": [...WIRE_ERROR_CODES],
     "x-methods": [...METHOD_NAMES],
     "x-request": {

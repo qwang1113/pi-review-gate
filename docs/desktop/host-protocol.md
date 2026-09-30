@@ -36,10 +36,13 @@ socket 不是绝对路径或超长、缺 session id）**fail-closed**：prg 拒�
 这三个变量只由客户端写：`session.open` 的 `env` 里出现其中任何一个，编码端与解码端都拒绝
 （`bad-request`）——子会话的 hostSessionId 必须由客户端现发，prg 传过去就是把别人的身份交给子会话。
 
-客户端给子进程拼 env 的规则：客户端自己的进程 env **去掉所有 `RG_` 开头的键** → 叠加
+客户端给子进程拼 env 的规则：客户端自己的进程 env **去掉所有 `RG_` 开头的键，但保留
+`x-inheritedGateEnv` 列出的**（即 `INHERITED_GATE_ENV_NAMES`，目前只有 `RG_NO_SIDE_EFFECTS`：它说明一个
+进程整棵树被静音，剥掉就会 fail OPEN，让被静音的门禁开出的子会话重新产生副作用）→ 叠加
 `session.open.params.env` → 最后写上它自己的三个 `RG_HOST*`。（tmux 下同一件事由
 `envCommand` 剥离 + `healSessionEnv` 清 session env 保证；桌面下每个进程的 env 都是客户端
-当场拼的，没有「session 级 env」可被污染。）
+当场拼的，没有「session 级 env」可被污染。）反方向同样成立：三个 `RG_HOST*` 已列入
+`orchestrator-tmux.ts` 的 `GATE_ENV_NAMES`，tmux 下开出的子会话会被剥掉它们，绝不会误以为自己在桌面宿主下。
 
 ## 3. 传输与帧
 
@@ -175,7 +178,7 @@ params 以 `shape` 区分：
 | `dialogId` | ✓ | ✓ | prg 生成；`dialog.close` 用它 |
 | `title` | ✓ | ✓ | 问题（采访时为 `问题 n / m` + 题面） |
 | `body` | 可选 | 可选 | 长正文（反述、goal、plan 全文）——**整段传，客户端滚动显示，永不截断** |
-| `options` | 2–4 | 2–4 | 选项原文，**不带** `A.` 编号——编号、「（推荐）」标记由客户端画 |
+| `options` | 2–16 | 2–16 | 选项原文，**不带** `A.` 编号——编号、「（推荐）」标记由客户端画。上限不是 agent 提问的 4 项：门禁自己的框可以更多（五环节清单有 5 项），16 只是尺寸护栏 |
 | `recommended` | 可选 | — | 推荐项（必须是 `options` 之一，prg 侧 `validateChoice` 已保证） |
 | `defaultChecked` | — | ✓ | 清单打开时勾好的一组（`[]` = 一项不勾） |
 | `declineRow` | ✓ | ✓ | 「✎ 不选，我说明原因」这一行的文案（可能被调用方换掉，所以随请求走） |

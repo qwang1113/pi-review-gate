@@ -133,7 +133,10 @@ test("requests that break the table are refused before they reach the wire", () 
   bad("session.decorate", { hostSessionId: "hs", state: "sleeping" });
   bad("notify", { ...SAMPLES.notify.params, title: "x".repeat(81) });
   bad("dialog.open", { ...SAMPLES["dialog.open"].params, options: ["only-one"] });
-  bad("dialog.open", { ...SAMPLES["dialog.open"].params, options: ["a", "b", "c", "d", "e"] });
+  bad("dialog.open", { ...SAMPLES["dialog.open"].params, options: Array.from({ length: 17 }, (_, i) => `o${i}`) });
+  // The gate's own five-stage checklist has 5 rows — more than an agent question's 4.
+  const five = ["goal", "review", "quality", "acceptance", "precommit"];
+  assert.ok(encodeRequest("r5", "dialog.open", { shape: "multi", dialogId: "d5", title: "t", options: five, defaultChecked: five, declineRow: "✎", back: false }).ok);
   bad("hello", { ...SAMPLES.hello.params, pid: 1.5 });
   bad("focus", { hostSessionId: "has space" });
   assert.equal(encodeRequest("bad id!", "focus", { hostSessionId: "hs" }).ok, false);
